@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CLAUDE_CLI, __test__ } from '../src/reviewer.mjs';
@@ -30,6 +30,17 @@ const {
   spawnGeminiReview,
   reviewWithGemini,
   dispatchReviewerModel,
+  LOCAL_REVIEW_SHADOW_LABEL,
+  LOCAL_REVIEW_SHADOW_MODEL_ENV,
+  hasLocalReviewShadowLabel,
+  resolveBuilderFamily,
+  resolveLocalShadowModelFamily,
+  buildLocalReviewShadowRequest,
+  persistLocalReviewShadowRequestBeforeHostedPost,
+  markLocalReviewShadowHostedPosted,
+  runLocalReviewShadowRequest,
+  reconcileLocalReviewShadow,
+  localReviewShadowArtifactPath,
 } = __test__;
 
 function withEnv(overrides, fn) {
@@ -127,6 +138,256 @@ test('follow-up handoff refuses to queue when baseBranch is unknown', () => {
       },
     });
   }, /baseBranch is required/);
+});
+
+test('run-local-review-shadow label records a durable local shadow request without changing hosted reviewer selection', () => {
+  const root = mkdtempSync(join(tmpdir(), 'adversarial-review-shadow-'));
+  try {
+    const hostedReviewerModel = 'gemini';
+    const result = persistLocalReviewShadowRequestBeforeHostedPost({
+      rootDir: root,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 42,
+      headSha: 'abc123',
+      builderTag: '[codex]',
+      hostedReviewerModel,
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      env: { [LOCAL_REVIEW_SHADOW_MODEL_ENV]: 'ollama/qwen2.5-coder' },
+    });
+
+    assert.equal(hostedReviewerModel, 'gemini');
+    assert.equal(result.request.hostedReview.reviewerModel, 'gemini');
+    assert.equal(result.request.status, 'pending-hosted-review');
+    assert.equal(existsSync(result.requestPath), true);
+    const persisted = JSON.parse(readFileSync(result.requestPath, 'utf8'));
+    assert.equal(persisted.localReview.model, 'ollama/qwen2.5-coder');
+    assert.equal(persisted.localReview.family, 'qwen');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('config-scope fixture keeps local shadow model out of shared CFG keys', () => {
+  const cfgContract = readFileSync(join(process.cwd(), 'projects/cfg/LOADER-CONTRACT.md'), 'utf8');
+  const checkedInConfig = readFileSync(join(process.cwd(), 'config.yaml'), 'utf8');
+  assert.equal(cfgContract.includes('reviewer.local_reviewer_model'), false);
+  assert.equal(checkedInConfig.includes('local_reviewer_model'), false);
+});
+
+test('durable local shadow request is written before hosted completion marker', () => {
+  const root = mkdtempSync(join(tmpdir(), 'adversarial-review-shadow-order-'));
+  try {
+    const events = [];
+    const shadow = persistLocalReviewShadowRequestBeforeHostedPost({
+      rootDir: root,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 43,
+      headSha: 'def456',
+      builderTag: '[codex]',
+      hostedReviewerModel: 'gemini',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      env: { [LOCAL_REVIEW_SHADOW_MODEL_ENV]: 'ollama/qwen2.5-coder' },
+    });
+    events.push(existsSync(shadow.requestPath) ? 'shadow-request-written' : 'missing');
+    markLocalReviewShadowHostedPosted({ rootDir: root, request: shadow.request });
+    events.push('hosted-completion-marker');
+    assert.deepEqual(events, ['shadow-request-written', 'hosted-completion-marker']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('local shadow family guard fails closed for missing and same-family metadata across supported builders', () => {
+  assert.equal(resolveBuilderFamily('[codex]'), 'codex');
+  assert.equal(resolveBuilderFamily('[claude-code]'), 'claude');
+  assert.equal(resolveBuilderFamily('[clio-agent]'), 'codex');
+  assert.equal(resolveLocalShadowModelFamily('unknown-local-model'), null);
+
+  const fixtures = [
+    { builderTag: '[codex]', model: 'unknown-local-model', hostedReviewerModel: 'claude', reason: 'local-shadow-family-unproven' },
+    { builderTag: '[codex]', model: 'local/codex', hostedReviewerModel: 'claude', reason: 'local-shadow-family-not-distinct' },
+    { builderTag: '[claude-code]', model: 'local/claude', hostedReviewerModel: 'codex', reason: 'local-shadow-family-not-distinct' },
+    { builderTag: '[clio-agent]', model: 'local/codex', hostedReviewerModel: 'claude', reason: 'local-shadow-family-not-distinct' },
+  ];
+
+  for (const fixture of fixtures) {
+    const request = buildLocalReviewShadowRequest({
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 44,
+      headSha: fixture.builderTag,
+      builderTag: fixture.builderTag,
+      hostedReviewerModel: fixture.hostedReviewerModel,
+      env: { [LOCAL_REVIEW_SHADOW_MODEL_ENV]: fixture.model },
+    });
+    assert.equal(request.status, 'hosted-only', fixture.builderTag);
+    assert.equal(request.skipReason, fixture.reason, fixture.builderTag);
+  }
+});
+
+test('local shadow execution is sequenced after hosted post marker', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'adversarial-review-shadow-sequence-'));
+  try {
+    const events = [];
+    const shadow = persistLocalReviewShadowRequestBeforeHostedPost({
+      rootDir: root,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 45,
+      headSha: 'seq',
+      builderTag: '[codex]',
+      hostedReviewerModel: 'gemini',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      env: { [LOCAL_REVIEW_SHADOW_MODEL_ENV]: 'ollama/qwen2.5-coder' },
+    });
+    events.push('request');
+    const marked = markLocalReviewShadowHostedPosted({ rootDir: root, request: shadow.request });
+    events.push('hosted-posted');
+    await runLocalReviewShadowRequest({
+      rootDir: root,
+      request: marked.request,
+      diff: 'diff --git a/file b/file',
+      hostedReviewText: 'hosted review',
+      env: { [LOCAL_REVIEW_SHADOW_MODEL_ENV]: 'ollama/qwen2.5-coder' },
+      execFileImpl: async () => {
+        events.push('litellm-started');
+        return { stdout: 'local review text', stderr: '' };
+      },
+    });
+    assert.deepEqual(events, ['request', 'hosted-posted', 'litellm-started']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('crash recovery reconciles hosted-posted missing shadow artifact idempotently', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'adversarial-review-shadow-reconcile-'));
+  try {
+    let calls = 0;
+    const first = await reconcileLocalReviewShadow({
+      rootDir: root,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 46,
+      headSha: 'recover',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      hostedReviewerModel: 'gemini',
+      hostedReviewPosted: true,
+      diff: 'diff --git a/file b/file',
+      hostedReviewText: 'hosted review',
+      env: { [LOCAL_REVIEW_SHADOW_MODEL_ENV]: 'ollama/qwen2.5-coder' },
+      execFileImpl: async () => {
+        calls += 1;
+        return { stdout: 'recovered local review', stderr: '' };
+      },
+    });
+    assert.equal(first.status, 'completed');
+    assert.equal(calls, 1);
+
+    const second = await reconcileLocalReviewShadow({
+      rootDir: root,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 46,
+      headSha: 'recover',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      hostedReviewerModel: 'gemini',
+      hostedReviewPosted: true,
+      diff: 'diff --git a/file b/file',
+      hostedReviewText: 'hosted review',
+      env: { [LOCAL_REVIEW_SHADOW_MODEL_ENV]: 'ollama/qwen2.5-coder' },
+      execFileImpl: async () => {
+        calls += 1;
+        return { stdout: 'should not run again', stderr: '' };
+      },
+    });
+    assert.equal(second.reason, 'artifact-already-exists');
+    assert.equal(calls, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('PR without run-local-review-shadow label leaves shadow behavior unchanged', () => {
+  assert.equal(hasLocalReviewShadowLabel(['bug', 'enhancement']), false);
+  const result = persistLocalReviewShadowRequestBeforeHostedPost({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 47,
+    headSha: 'nolabel',
+    builderTag: '[codex]',
+    hostedReviewerModel: 'gemini',
+    labels: ['bug'],
+    env: { [LOCAL_REVIEW_SHADOW_MODEL_ENV]: 'ollama/qwen2.5-coder' },
+  });
+  assert.equal(result, null);
+});
+
+test('local shadow timeout or LiteLLM failure records warning state without throwing', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'adversarial-review-shadow-failure-'));
+  try {
+    const shadow = persistLocalReviewShadowRequestBeforeHostedPost({
+      rootDir: root,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 48,
+      headSha: 'fail',
+      builderTag: '[codex]',
+      hostedReviewerModel: 'gemini',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      env: {
+        [LOCAL_REVIEW_SHADOW_MODEL_ENV]: 'ollama/qwen2.5-coder',
+        ADVERSARIAL_REVIEW_LOCAL_SHADOW_TIMEOUT_MS: '1',
+      },
+    });
+    const marked = markLocalReviewShadowHostedPosted({ rootDir: root, request: shadow.request });
+    const warnings = [];
+    const result = await runLocalReviewShadowRequest({
+      rootDir: root,
+      request: marked.request,
+      diff: 'diff --git a/file b/file',
+      hostedReviewText: 'hosted review',
+      execFileImpl: async () => {
+        throw Object.assign(new Error('model unavailable'), { code: 'ENOENT' });
+      },
+      log: { warn: (message) => warnings.push(message) },
+    });
+    assert.equal(result.reason, 'retryable-warning');
+    assert.match(warnings[0], /WARNING local-review-shadow/);
+    const persisted = JSON.parse(readFileSync(shadow.requestPath, 'utf8'));
+    assert.equal(persisted.status, 'retryable-warning');
+    assert.equal(existsSync(localReviewShadowArtifactPath(root, shadow.request.requestKey)), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('local shadow artifact provenance is explicitly local and non-gating', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'adversarial-review-shadow-provenance-'));
+  try {
+    const shadow = persistLocalReviewShadowRequestBeforeHostedPost({
+      rootDir: root,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 49,
+      headSha: 'prov',
+      builderTag: '[codex]',
+      hostedReviewerModel: 'gemini',
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      env: { [LOCAL_REVIEW_SHADOW_MODEL_ENV]: 'ollama/qwen2.5-coder' },
+    });
+    const marked = markLocalReviewShadowHostedPosted({ rootDir: root, request: shadow.request });
+    const result = await runLocalReviewShadowRequest({
+      rootDir: root,
+      request: marked.request,
+      diff: 'diff --git a/file b/file',
+      hostedReviewText: 'hosted review',
+      env: { [LOCAL_REVIEW_SHADOW_MODEL_ENV]: 'ollama/qwen2.5-coder' },
+      execFileImpl: async () => ({ stdout: 'A local-only observation.', stderr: '' }),
+    });
+    const artifact = readFileSync(result.artifactPath, 'utf8');
+    assert.match(artifact, /Local OSS Model Shadow Review \(Non-Gating\)/);
+    assert.match(artifact, /generated by local OSS model `ollama\/qwen2\.5-coder` through LiteLLM/);
+    assert.match(artifact, /does not alter the hosted adversarial review verdict or merge gate/);
+    assert.doesNotMatch(artifact, /^## Adversarial Review/m);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('new follow-up jobs preserve an elevated prior cap to avoid truncating an active PR cycle', () => {

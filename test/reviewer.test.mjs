@@ -40,6 +40,7 @@ const {
   startLocalReviewShadowCompletion,
   reconcileLocalReviewShadow,
   formatLocalReviewShadowArtifact,
+  readJsonFileIfExists,
 } = __test__;
 
 const LOCAL_SHADOW_TEST_ENV = {
@@ -258,6 +259,90 @@ test('shadow request persistence fails open when existing state is corrupt', () 
     assert.equal(result.reason, 'request-persist-failed');
     assert.equal(warnings.length, 1);
     assert.match(warnings[0], /request-persist-failed/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('shadow request persistence fails open when request directory is not writable', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-unwritable-request-'));
+  try {
+    const eligibility = evaluateLocalReviewShadowEligibility({
+      labels: [LOCAL_REVIEW_SHADOW_LABEL],
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      env: LOCAL_SHADOW_TEST_ENV,
+    });
+    const warnings = [];
+    const result = persistLocalReviewShadowRequestFailOpen({
+      log: { warn: (message) => warnings.push(message) },
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 131,
+      headSha: 'unwritable-request',
+      builderTag: '[codex]',
+      reviewerModel: 'claude',
+      eligibility,
+      ensureWritableImpl: () => {
+        const err = new Error('EACCES: permission denied, access shadow requests');
+        err.code = 'EACCES';
+        throw err;
+      },
+    });
+
+    assert.equal(result.persisted, false);
+    assert.equal(result.reason, 'request-persist-failed');
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /request-persist-failed/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('shadow completion skips before local model work when artifact directory is not writable', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-unwritable-artifact-'));
+  try {
+    let calledLocalModel = false;
+    const warnings = [];
+    const result = await completeLocalReviewShadowRequest({
+      rootDir,
+      request: {
+        repo: 'laceyenterprises/adversarial-review',
+        prNumber: 132,
+        headSha: 'unwritable-artifact',
+        reviewerModel: 'claude',
+        localModel: LOCAL_SHADOW_TEST_ENV.ADVERSARIAL_REVIEW_LOCAL_SHADOW_MODEL,
+        localFamily: 'qwen',
+      },
+      diff: 'diff --git a/a b/a',
+      hostedReviewText: 'hosted review',
+      log: { warn: (message) => warnings.push(message) },
+      ensureWritableImpl: () => {
+        const err = new Error('EACCES: permission denied, access shadow artifacts');
+        err.code = 'EACCES';
+        throw err;
+      },
+      callLiteLLMImpl: async () => {
+        calledLocalModel = true;
+        return 'should not run';
+      },
+    });
+
+    assert.equal(result.skipped, true);
+    assert.equal(result.retryable, true);
+    assert.equal(result.reason, 'shadow-storage-unwritable');
+    assert.equal(calledLocalModel, false);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /shadow-storage-unwritable/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('readJsonFileIfExists treats a missing file as absent without a separate existence check', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'local-review-shadow-read-missing-'));
+  try {
+    assert.equal(readJsonFileIfExists(join(rootDir, 'missing.json')), null);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

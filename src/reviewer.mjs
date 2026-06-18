@@ -20,7 +20,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -623,8 +623,20 @@ function localReviewShadowPaths(rootDir, request) {
 }
 
 function readJsonFileIfExists(path) {
-  if (!existsSync(path)) return null;
-  return JSON.parse(readFileSync(path, 'utf8'));
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    if (err?.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+function ensureLocalReviewShadowWritable(paths, targets = ['requestPath', 'artifactPath', 'statePath']) {
+  for (const key of targets) {
+    const dir = dirname(paths[key]);
+    mkdirSync(dir, { recursive: true });
+    accessSync(dir, constants.W_OK);
+  }
 }
 
 function persistLocalReviewShadowRequest({
@@ -638,6 +650,7 @@ function persistLocalReviewShadowRequest({
   eligibility,
   requestedAt = new Date().toISOString(),
   writeFileAtomicImpl = writeFileAtomic,
+  ensureWritableImpl = ensureLocalReviewShadowWritable,
 } = {}) {
   if (!eligibility?.eligible) {
     return { persisted: false, reason: eligibility?.reason || 'not-eligible' };
@@ -661,6 +674,7 @@ function persistLocalReviewShadowRequest({
     hostedPostedAt: null,
   };
   const paths = localReviewShadowPaths(rootDir, request);
+  ensureWritableImpl(paths, ['requestPath']);
   const existing = readJsonFileIfExists(paths.requestPath);
   const next = existing
     ? {
@@ -679,9 +693,11 @@ function markLocalReviewShadowHostedPosted({
   request,
   hostedPostedAt = new Date().toISOString(),
   writeFileAtomicImpl = writeFileAtomic,
+  ensureWritableImpl = ensureLocalReviewShadowWritable,
 } = {}) {
   if (!request) return { marked: false, reason: 'missing-request' };
   const paths = localReviewShadowPaths(rootDir, request);
+  ensureWritableImpl(paths, ['requestPath']);
   const current = readJsonFileIfExists(paths.requestPath) || request;
   const next = {
     ...current,
@@ -790,12 +806,27 @@ async function completeLocalReviewShadowRequest({
   env = process.env,
   log = console,
   writeFileAtomicImpl = writeFileAtomic,
+  ensureWritableImpl = ensureLocalReviewShadowWritable,
   callLiteLLMImpl = callLiteLLMLocalReviewShadow,
 } = {}) {
   if (!request) return { completed: false, reason: 'missing-request' };
   const paths = localReviewShadowPaths(rootDir, request);
   if (existsSync(paths.artifactPath)) {
     return { completed: true, idempotent: true, artifactPath: paths.artifactPath };
+  }
+
+  try {
+    ensureWritableImpl(paths, ['artifactPath', 'statePath']);
+  } catch (err) {
+    const reason = 'shadow-storage-unwritable';
+    log.warn?.(`[local-review-shadow] WARNING: ${request.repo}#${request.prNumber} skipped: ${reason}: ${err?.message || String(err)}`);
+    return {
+      completed: false,
+      skipped: true,
+      retryable: true,
+      reason,
+      error: err?.message || String(err),
+    };
   }
 
   try {
@@ -958,6 +989,7 @@ async function reconcileLocalReviewShadow({
   log = console,
   writeFileAtomicImpl = writeFileAtomic,
   callLiteLLMImpl = callLiteLLMLocalReviewShadow,
+  ensureWritableImpl = ensureLocalReviewShadowWritable,
 } = {}) {
   const eligibility = evaluateLocalReviewShadowEligibility({ labels, builderTag, reviewerModel, env });
   if (!eligibility.eligible) {
@@ -972,6 +1004,7 @@ async function reconcileLocalReviewShadow({
     reviewerModel,
     eligibility,
     writeFileAtomicImpl,
+    ensureWritableImpl,
   });
   if (!hostedReviewPosted) {
     return { reconciled: false, reason: 'hosted-review-not-posted', requestPath: persisted.requestPath };
@@ -980,6 +1013,7 @@ async function reconcileLocalReviewShadow({
     rootDir,
     request: persisted.request,
     writeFileAtomicImpl,
+    ensureWritableImpl,
   });
   const completed = await completeLocalReviewShadowRequest({
     rootDir,
@@ -992,6 +1026,7 @@ async function reconcileLocalReviewShadow({
     log,
     writeFileAtomicImpl,
     callLiteLLMImpl,
+    ensureWritableImpl,
   });
   return { reconciled: true, requestPath: marked.requestPath, ...completed };
 }
@@ -2683,6 +2718,8 @@ const __test__ = {
   reconcileLocalReviewShadow,
   formatLocalReviewShadowArtifact,
   localReviewShadowPaths,
+  readJsonFileIfExists,
+  ensureLocalReviewShadowWritable,
 };
 
 export {

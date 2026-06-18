@@ -745,6 +745,98 @@ function formatLocalReviewShadowArtifact({ request, reviewText, status = 'comple
   return `${provenance}${String(reviewText || '').trim()}\n`;
 }
 
+class LocalReviewShadowFailure extends Error {
+  constructor(message, {
+    retryable = true,
+    skipReason = null,
+    statusCode = null,
+    category = null,
+  } = {}) {
+    super(message);
+    this.name = 'LocalReviewShadowFailure';
+    this.retryable = retryable;
+    this.skipReason = skipReason || message;
+    this.statusCode = statusCode;
+    this.category = category;
+  }
+}
+
+function classifyLocalReviewShadowHttpFailure(status) {
+  const code = Number(status);
+  if (code === 401 || code === 403) {
+    return { retryable: false, reason: 'local-shadow-auth-failed', category: 'auth' };
+  }
+  if (code === 408 || code === 425 || code === 429 || code >= 500) {
+    return { retryable: true, reason: 'local-shadow-transient-http', category: 'transient-http' };
+  }
+  if (code >= 400 && code < 500) {
+    return { retryable: false, reason: 'local-shadow-client-or-config-error', category: 'client-or-config' };
+  }
+  return { retryable: true, reason: 'local-shadow-http-error', category: 'http' };
+}
+
+function classifyLocalReviewShadowFailure(err) {
+  if (err instanceof LocalReviewShadowFailure) {
+    return {
+      retryable: Boolean(err.retryable),
+      reason: err.message,
+      skipReason: err.skipReason || err.message,
+      statusCode: err.statusCode || null,
+      category: err.category || null,
+    };
+  }
+  if (err?.name === 'AbortError') {
+    return {
+      retryable: true,
+      reason: 'local-review-shadow-timeout',
+      skipReason: 'local-shadow-timeout',
+      statusCode: null,
+      category: 'timeout',
+    };
+  }
+  return {
+    retryable: true,
+    reason: err?.message || String(err),
+    skipReason: err?.message || String(err),
+    statusCode: null,
+    category: 'transport-or-runtime',
+  };
+}
+
+function normalizeLocalReviewShadowHostname(hostname) {
+  return String(hostname || '').trim().toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
+}
+
+function isLoopbackLocalReviewShadowHostname(hostname) {
+  const normalized = normalizeLocalReviewShadowHostname(hostname);
+  return normalized === 'localhost'
+    || normalized === '127.0.0.1'
+    || normalized === '::1'
+    || normalized === '0:0:0:0:0:0:0:1';
+}
+
+function resolveAllowedLocalReviewShadowBaseUrl(env = process.env) {
+  const rawBaseUrl = String(
+    env.ADVERSARIAL_REVIEW_LOCAL_SHADOW_BASE_URL || LOCAL_REVIEW_SHADOW_DEFAULT_BASE_URL
+  ).trim();
+  let parsed;
+  try {
+    parsed = new URL(rawBaseUrl);
+  } catch {
+    throw new LocalReviewShadowFailure(
+      'local shadow LiteLLM URL is invalid',
+      { retryable: false, skipReason: 'local-shadow-url-invalid', category: 'config' }
+    );
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || !isLoopbackLocalReviewShadowHostname(parsed.hostname)) {
+    throw new LocalReviewShadowFailure(
+      'local shadow LiteLLM URL must use HTTP(S) loopback',
+      { retryable: false, skipReason: 'local-shadow-url-not-loopback', category: 'config' }
+    );
+  }
+  return parsed.toString().replace(/\/+$/, '');
+}
+
 async function callLiteLLMLocalReviewShadow({
   request,
   diff,
@@ -757,7 +849,7 @@ async function callLiteLLMLocalReviewShadow({
   if (typeof fetchImpl !== 'function') {
     throw new Error('fetch unavailable for LiteLLM local review shadow');
   }
-  const baseUrl = String(env.ADVERSARIAL_REVIEW_LOCAL_SHADOW_BASE_URL || LOCAL_REVIEW_SHADOW_DEFAULT_BASE_URL).replace(/\/+$/, '');
+  const baseUrl = resolveAllowedLocalReviewShadowBaseUrl(env);
   const token = env.ADVERSARIAL_REVIEW_LOCAL_SHADOW_API_KEY || env.LITELLM_API_KEY || '';
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error('local-review-shadow-timeout')), timeoutMs);
@@ -782,13 +874,40 @@ async function callLiteLLMLocalReviewShadow({
       }),
     });
     if (!response?.ok) {
-      const detail = typeof response?.text === 'function' ? await response.text().catch(() => '') : '';
-      throw new Error(`LiteLLM local review shadow failed: HTTP ${response?.status || 'unknown'} ${detail.slice(0, 300)}`.trim());
+      const classification = classifyLocalReviewShadowHttpFailure(response?.status);
+      throw new LocalReviewShadowFailure(
+        `LiteLLM local review shadow failed: HTTP ${response?.status || 'unknown'} (${classification.reason})`,
+        {
+          retryable: classification.retryable,
+          skipReason: classification.reason,
+          statusCode: response?.status || null,
+          category: classification.category,
+        }
+      );
     }
-    const parsed = await response.json();
+    let parsed;
+    try {
+      parsed = await response.json();
+    } catch (err) {
+      throw new LocalReviewShadowFailure(
+        `LiteLLM local review shadow returned invalid JSON: ${err?.message || String(err)}`,
+        {
+          retryable: false,
+          skipReason: 'local-shadow-invalid-response',
+          category: 'invalid-response',
+        }
+      );
+    }
     const text = parsed?.choices?.[0]?.message?.content;
     if (!String(text || '').trim()) {
-      throw new Error('LiteLLM local review shadow returned empty output');
+      throw new LocalReviewShadowFailure(
+        'LiteLLM local review shadow returned empty output',
+        {
+          retryable: false,
+          skipReason: 'local-shadow-empty-response',
+          category: 'invalid-response',
+        }
+      );
     }
     return String(text).trim();
   } finally {
@@ -817,8 +936,14 @@ async function completeLocalReviewShadowRequest({
   } catch (err) {
     log.warn?.(`[local-review-shadow] WARNING: ${request.repo}#${request.prNumber} ignored unreadable shadow state before retry: ${err?.message || String(err)}`);
   }
-  if (existingState?.status === 'completed' && existsSync(paths.artifactPath)) {
-    return { completed: true, idempotent: true, artifactPath: paths.artifactPath };
+  if (['completed', 'skipped'].includes(existingState?.status) && existsSync(paths.artifactPath)) {
+    return {
+      completed: true,
+      skipped: existingState.status === 'skipped',
+      idempotent: true,
+      reason: existingState.reason || null,
+      artifactPath: paths.artifactPath,
+    };
   }
 
   try {
@@ -867,23 +992,31 @@ async function completeLocalReviewShadowRequest({
     }, null, 2)}\n`);
     return { completed: true, artifactPath: paths.artifactPath };
   } catch (err) {
+    const failure = classifyLocalReviewShadowFailure(err);
     const skippedAt = new Date().toISOString();
-    const reason = err?.name === 'AbortError'
-      ? 'timeout'
-      : (err?.message || 'local-review-shadow-failed');
+    const reason = failure.reason || 'local-review-shadow-failed';
+    const retryable = Boolean(failure.retryable);
+    const status = retryable ? 'warn-skip' : 'skipped';
+    const artifactStatus = retryable ? 'warn-skip' : 'skipped';
+    const skipReason = retryable ? reason : (failure.skipReason || reason);
     const artifact = formatLocalReviewShadowArtifact({
       request,
-      reviewText: `WARNING: local OSS shadow review skipped or retryable after hosted review posted.\n\nReason: ${reason}`,
-      status: 'warn-skip',
-      reason,
+      reviewText: retryable
+        ? `WARNING: local OSS shadow review skipped or retryable after hosted review posted.\n\nReason: ${reason}`
+        : `Local OSS shadow review skipped after hosted review posted.\n\nReason: ${skipReason}`,
+      status: artifactStatus,
+      reason: skipReason,
     });
     writeFileAtomicImpl(paths.artifactPath, artifact);
     writeFileAtomicImpl(paths.statePath, `${JSON.stringify({
       schemaVersion: 1,
       kind: 'local-review-shadow-state',
-      status: 'warn-skip',
-      reason,
-      retryable: true,
+      status,
+      reason: skipReason,
+      lastError: reason,
+      retryable,
+      category: failure.category || null,
+      statusCode: failure.statusCode || null,
       repo: request.repo,
       prNumber: request.prNumber,
       headSha: request.headSha || null,
@@ -894,7 +1027,13 @@ async function completeLocalReviewShadowRequest({
       localFamily: request.localFamily,
     }, null, 2)}\n`);
     log.warn?.(`[local-review-shadow] WARNING: ${request.repo}#${request.prNumber} skipped: ${reason}`);
-    return { completed: false, skipped: true, retryable: true, reason, artifactPath: paths.artifactPath };
+    return {
+      completed: !retryable,
+      skipped: true,
+      retryable,
+      reason,
+      artifactPath: paths.artifactPath,
+    };
   }
 }
 

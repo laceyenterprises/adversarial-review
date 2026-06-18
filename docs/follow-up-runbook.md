@@ -81,6 +81,44 @@ Leave `ADVERSARIAL_REVIEW_DEFAULT_REVIEWER` unset for the normal reviewer routin
 
 Leave `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` unset for the cross-model adversarial default (per-PR mapping: `[codex]`→claude-code, `[claude-code]`→codex, `[clio-agent]`→claude-code; missing `builderTag` falls through to codex). Set it to `codex`, `claude-code`, or `gemini` to pin every PR's remediator globally — useful during a codex weekly-budget squeeze or when one model is temporarily unavailable. `gemini` (GMW-03) runs remediation on the native gemini CLI headless (`gemini --approval-mode yolo --skip-trust -m <best-model>`, prompt via stdin, scrubbed OAuth env), giving the fleet a third remediator when both the codex and claude lanes are capped; its commits carry the `gemini-remediation` provenance trailer. Unknown non-empty values fail closed instead of silently falling back to an expensive or unintended agent. The follow-up daemon validates this knob at startup before consuming work, and the claimed-job failure path also traps invalid values so a direct helper call cannot strand a job in `in-progress/`; because this is a global config error rather than a job-specific worker failure, the claimed job is restored to `pending/` with `lastConfigValidationFailure.code=config-validation-failure` so it can run after the env is corrected.
 
+## Orchestration mode flip and rollback
+
+`roles.adversarial.orchestration_mode` is the pipeline-wide selector for
+reviewer and remediation dispatch. `native` keeps first-pass reviews on the
+domain-selected reviewer runtime and remediation on the bare follow-up spawner.
+`agentos` forces first-pass reviews through the `agent-os-hq` reviewer runtime
+and sends newly claimed remediation jobs through `hq dispatch` with
+`branch-push`.
+
+To flip modes, edit `config.local.yaml` in the deployed Agent OS checkout:
+
+```yaml
+roles:
+  adversarial:
+    orchestration_mode: agentos
+```
+
+Then bounce both daemons so each process reloads config and environment:
+
+```bash
+launchctl bootout gui/$UID/ai.laceyenterprises.adversarial-watcher
+launchctl bootout gui/$UID/ai.laceyenterprises.adversarial-follow-up
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-watcher.plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.laceyenterprises.adversarial-follow-up.plist
+launchctl kickstart gui/$UID/ai.laceyenterprises.adversarial-watcher
+launchctl kickstart gui/$UID/ai.laceyenterprises.adversarial-follow-up
+```
+
+Verify with config doctor and the daemon logs. A first-pass review should log
+`orchestration_mode = agentos` and `reviewer_runtime = agent-os-hq`; a
+remediation claim should log `orchestration_mode = agentos` and
+`remediation_path = hq-dispatch`.
+
+Rollback is the same operation with the value set back to `native`, followed by
+the same watcher and follow-up daemon bounce. Jobs already in progress drain on
+the path recorded when they were claimed; the rollback affects newly claimed
+reviewer/remediation passes.
+
 `ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS` pins the worker class used for merge-orchestration dispatch. Allowlist: `merge-agent` (default), `codex`, `claude-code`. The default `merge-agent` routes through the stub adapter; pinning to a real model worker class substitutes that class for the duration of the env binding — useful when validating merge-agent surface against live models or when the merge-agent path is being debugged. The watcher validates this knob at startup alongside `ADVERSARIAL_REVIEW_DEFAULT_REVIEWER`, and an unknown value crashes the watcher with a `FATAL config: ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS...` banner the same way a bad reviewer pin does — config errors fail at boot, not at first merge-agent dispatch hours later.
 
 Workspace root:

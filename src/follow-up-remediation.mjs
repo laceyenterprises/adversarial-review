@@ -500,12 +500,42 @@ function resolveRemediationDispatchPathForJob(job, env = process.env) {
   return shouldDispatchRemediationViaHq(env) ? 'hq' : 'bare';
 }
 
-function persistRemediationDispatchPath({ job, jobPath, dispatchPath } = {}) {
+function formatRemediationModeStatusLines({
+  repo,
+  prNumber,
+  round,
+  maxRounds,
+  orchestrationMode = 'native',
+  remediationPath = 'bare',
+} = {}) {
+  const roundLabel = Number.isFinite(Number(round)) && Number.isFinite(Number(maxRounds))
+    ? ` round ${Number(round)}/${Number(maxRounds)}`
+    : '';
+  const pathLabel = remediationPath === 'hq' ? 'hq-dispatch' : 'bare-spawn';
+  const pathSuffix = remediationPath === 'hq' ? '   (completion-shape=branch-push)' : '';
+  return [
+    `[adversarial-follow-up] PR #${prNumber} remediation${roundLabel}${repo ? ` (${repo})` : ''}`,
+    `    orchestration_mode = ${orchestrationMode || 'native'}`,
+    `    remediation_path    = ${pathLabel}${pathSuffix}`,
+  ];
+}
+
+function logRemediationModeStatus(log = console, options = {}) {
+  for (const line of formatRemediationModeStatusLines(options)) {
+    log.log?.(line);
+  }
+}
+
+function persistRemediationDispatchPath({ job, jobPath, dispatchPath, orchestrationMode = null } = {}) {
   const normalized = String(dispatchPath || '').trim();
   if (normalized !== 'hq' && normalized !== 'bare') {
     throw new Error(`unknown remediation dispatch path: ${JSON.stringify(dispatchPath)}`);
   }
-  if (job?.remediationPlan?.dispatchPath === normalized) {
+  const normalizedMode = orchestrationMode ? String(orchestrationMode).trim() : null;
+  if (
+    job?.remediationPlan?.dispatchPath === normalized &&
+    (!normalizedMode || job?.remediationPlan?.orchestrationMode === normalizedMode)
+  ) {
     return job;
   }
   const updated = {
@@ -513,6 +543,7 @@ function persistRemediationDispatchPath({ job, jobPath, dispatchPath } = {}) {
     remediationPlan: {
       ...(job?.remediationPlan || {}),
       dispatchPath: normalized,
+      ...(normalizedMode ? { orchestrationMode: normalizedMode } : {}),
     },
   };
   writeFollowUpJob(jobPath, updated);
@@ -4991,11 +5022,22 @@ async function consumeNextFollowUpJob({
 
   try {
     workerClass = pickRemediationWorkerClass(claimed.job);
+    const remediationOrchestrationMode = resolveRemediationOrchestrationMode(process.env);
     const remediationDispatchPath = resolveRemediationDispatchPathForJob(claimed.job, process.env);
     claimed.job = persistRemediationDispatchPath({
       job: claimed.job,
       jobPath: claimed.jobPath,
       dispatchPath: remediationDispatchPath,
+      orchestrationMode: remediationOrchestrationMode,
+    });
+    const displayRound = Number(claimed.job?.remediationPlan?.currentRound || 0) + 1;
+    logRemediationModeStatus(log, {
+      repo: claimed.job?.repo,
+      prNumber: claimed.job?.prNumber,
+      round: displayRound,
+      maxRounds: Number(claimed.job?.remediationPlan?.maxRounds || 0),
+      orchestrationMode: remediationOrchestrationMode,
+      remediationPath: remediationDispatchPath,
     });
     const hqDispatchEnabled = remediationDispatchPath === 'hq';
     const branchReadyJob = await ensureJobBranchMetadata({
@@ -5555,6 +5597,7 @@ export {
   buildInheritedPath,
   consumeFollowUpJobsUntilCapacity,
   consumeNextFollowUpJob,
+  formatRemediationModeStatusLines,
   inspectWorkspaceState,
   digestWorkerFinalMessage,
   isWorkerProcessRunning,

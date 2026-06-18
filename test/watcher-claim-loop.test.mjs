@@ -384,6 +384,7 @@ import path from 'node:path';
 
 const {
   cancelReviewerRuntimeSession,
+  formatReviewerModeStatusLines,
   refreshReviewerRuntimeAdapter,
   reviewerRuntimeAdapterForRunRecord,
 } = await import(${JSON.stringify(watcherUrl)});
@@ -519,6 +520,26 @@ const sixth = refreshReviewerRuntimeAdapter({
 });
 assert.notEqual(sixth, fifth);
 assert.deepEqual(calls, ['native', 'agentos', 'agentos', 'agentos', 'agentos', 'agentos', 'agentos']);
+
+const nativeModeLines = formatReviewerModeStatusLines({
+  repo: 'laceyenterprises/agent-os',
+  prNumber: 1761,
+  passKind: 'first-pass',
+  orchestrationMode: 'native',
+  reviewerRuntime: 'cli-direct',
+});
+assert.match(nativeModeLines.join('\\n'), /orchestration_mode = native/);
+assert.match(nativeModeLines.join('\\n'), /reviewer_runtime    = cli-direct/);
+
+const agentosModeLines = formatReviewerModeStatusLines({
+  repo: 'laceyenterprises/agent-os',
+  prNumber: 1761,
+  passKind: 'first-pass',
+  orchestrationMode: 'agentos',
+  reviewerRuntime: 'agent-os-hq',
+});
+assert.match(agentosModeLines.join('\\n'), /orchestration_mode = agentos/);
+assert.match(agentosModeLines.join('\\n'), /reviewer_runtime    = agent-os-hq/);
 
 const cancelled = [];
 const cancelLogs = [];

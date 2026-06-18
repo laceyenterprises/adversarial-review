@@ -267,6 +267,32 @@ function reviewerRuntimeAdapterId(adapter = reviewerRuntimeAdapter) {
   }
 }
 
+function formatReviewerModeStatusLines({
+  repo,
+  prNumber,
+  passKind = 'first-pass',
+  orchestrationMode = activeReviewerRuntimeOrchestrationMode,
+  reviewerRuntime = reviewerRuntimeAdapterId(),
+  nativeDefaultRuntime = 'cli-direct',
+} = {}) {
+  const normalizedPassKind = String(passKind || 'first-pass');
+  const passLabel = normalizedPassKind === 'first-pass' ? 'first-pass review' : `${normalizedPassKind} review`;
+  const nativeDefaultSuffix = nativeDefaultRuntime
+    ? `   (native default for this domain: ${nativeDefaultRuntime})`
+    : '';
+  return [
+    `[adversarial-watcher] PR #${prNumber} ${passLabel}${repo ? ` (${repo})` : ''}`,
+    `    orchestration_mode = ${orchestrationMode || 'native'}`,
+    `    reviewer_runtime    = ${reviewerRuntime || 'unknown'}${nativeDefaultSuffix}`,
+  ];
+}
+
+function logReviewerModeStatus(log = console, options = {}) {
+  for (const line of formatReviewerModeStatusLines(options)) {
+    log.log?.(line);
+  }
+}
+
 function signalReviewerRuntimeDomainConfigFailure({
   rootDir = ROOT,
   domainId = 'code-pr',
@@ -2563,6 +2589,15 @@ async function spawnReviewer({
   const roundLabel = Number.isFinite(reviewAttemptNumber)
     ? ` attempt=${reviewAttemptNumber}/${1 + Number(maxRemediationRounds || 0)}${finalRound ? ' [FINAL — lenient threshold]' : ''}`
     : '';
+  const orchestrationMode = activeReviewerRuntimeOrchestrationMode || 'native';
+  const resolvedReviewerRuntime = reviewerRuntimeAdapterId() || 'unknown';
+  logReviewerModeStatus(console, {
+    repo,
+    prNumber,
+    passKind,
+    orchestrationMode,
+    reviewerRuntime: resolvedReviewerRuntime,
+  });
   console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})${roundLabel}`);
 
   const reviewerSpawnToken = randomUUID();
@@ -2595,6 +2630,8 @@ async function spawnReviewer({
         reviewerModel,
         reviewAttemptNumber,
         maxRemediationRounds,
+        orchestrationMode,
+        reviewerRuntime: resolvedReviewerRuntime,
       },
     });
 
@@ -2659,6 +2696,8 @@ async function spawnReviewer({
           reviewerSessionUuid,
           reattachToken: result.reattachToken || null,
           failureClass: result.failureClass || null,
+          orchestrationMode,
+          reviewerRuntime: resolvedReviewerRuntime,
         },
       });
     } catch (err) {
@@ -2680,6 +2719,8 @@ async function spawnReviewer({
         metadata: {
           reviewerSessionUuid,
           reviewerModel,
+          orchestrationMode,
+          reviewerRuntime: resolvedReviewerRuntime,
           error: err?.message || String(err),
         },
       });
@@ -6238,6 +6279,7 @@ export {
   attemptDagAutowalkOnMerge,
   cancelReviewerRuntimeSession,
   fireDagAutowalkOnMerge,
+  formatReviewerModeStatusLines,
   DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS,
   probeRoutingTierReadiness,
   evaluateRoundBudgetForReview,

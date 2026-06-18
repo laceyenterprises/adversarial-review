@@ -22,6 +22,7 @@ import {
   consumeNextFollowUpJob,
   countPendingFollowUpJobsByRetryWindow,
   digestWorkerFinalMessage,
+  formatRemediationModeStatusLines,
   installWorkerProvenanceHook,
   auditWorkspaceForContamination,
   isDrainQueueIdle,
@@ -1664,6 +1665,31 @@ test('pickRemediationWorkerClass routes builderTag=unknown to codex (unknown tag
 
 test('pickRemediationWorkerClass routes empty jobs to codex (no usable builderTag → fallback)', () => {
   assert.equal(pickRemediationWorkerClass({}), 'codex');
+});
+
+test('formatRemediationModeStatusLines renders orchestration mode and remediation path for native and agentos', () => {
+  const nativeLines = formatRemediationModeStatusLines({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 1761,
+    round: 1,
+    maxRounds: 2,
+    orchestrationMode: 'native',
+    remediationPath: 'bare',
+  }).join('\n');
+  assert.match(nativeLines, /orchestration_mode = native/);
+  assert.match(nativeLines, /remediation_path    = bare-spawn/);
+
+  const agentosLines = formatRemediationModeStatusLines({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 1761,
+    round: 1,
+    maxRounds: 2,
+    orchestrationMode: 'agentos',
+    remediationPath: 'hq',
+  }).join('\n');
+  assert.match(agentosLines, /orchestration_mode = agentos/);
+  assert.match(agentosLines, /remediation_path    = hq-dispatch/);
+  assert.match(agentosLines, /completion-shape=branch-push/);
 });
 
 test('pickRemediationWorkerClass routes null jobs to codex (no usable builderTag → fallback)', () => {
@@ -4851,6 +4877,7 @@ test('consumeNextFollowUpJob routes agentos remediation through HQ branch-push d
       assert.equal(result.consumed, true);
       assert.equal(spawnCalls, 0);
       assert.equal(result.job.remediationPlan.dispatchPath, 'hq');
+      assert.equal(result.job.remediationPlan.orchestrationMode, 'agentos');
       assert.equal(result.job.remediationWorker.dispatchMode, 'hq');
       assert.equal(result.job.remediationWorker.completionShape, 'branch-push');
       assert.ok(dispatchCommand, 'expected hq dispatch command');
@@ -4911,6 +4938,7 @@ test('consumeNextFollowUpJob keeps native remediation on the bare spawner withou
       assert.equal(result.consumed, true);
       assert.equal(spawnCalls, 1);
       assert.equal(result.job.remediationPlan.dispatchPath, 'bare');
+      assert.equal(result.job.remediationPlan.orchestrationMode, 'native');
       assert.equal(result.job.remediationWorker.dispatchMode, undefined);
       assert.equal(commands.some((entry) => entry[0] === 'hq' && entry[1] === 'dispatch'), false);
     });

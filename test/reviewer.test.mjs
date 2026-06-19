@@ -122,6 +122,13 @@ test('VirtualPaul PR with advisory-only override label is advisory-only and skip
       labels: [{ name: ADVISORY_ONLY_REVIEW_LABEL }],
       author: { login: 'VirtualPaul' },
     }),
+    fetchLatestLabelEventImpl: async () => ({
+      id: 'evt-advisory-only',
+      nodeId: 'LE_advisory_only',
+      actor: 'placey',
+      createdAt: '2026-06-19T08:00:00.000Z',
+      headSha: 'head-a',
+    }),
   });
   const { result, created } = queueWithFakes('## Summary\nVisible finding.\n\n## Verdict\nRequest changes', {
     verdictMode: resolved.verdictMode,
@@ -133,7 +140,7 @@ test('VirtualPaul PR with advisory-only override label is advisory-only and skip
   assert.equal(created.length, 0);
 });
 
-test('clio-airlock PR with advisory-only override label is advisory-only independent of author identity', async () => {
+test('advisory-only override label applied by PR author stays enforce mode', async () => {
   const resolved = await fetchCurrentHeadVerdictMode({
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 58,
@@ -143,9 +150,17 @@ test('clio-airlock PR with advisory-only override label is advisory-only indepen
       labels: [{ name: ADVISORY_ONLY_REVIEW_LABEL }],
       author: { login: 'clio-airlock' },
     }),
+    fetchLatestLabelEventImpl: async () => ({
+      id: 'evt-self-advisory-only',
+      nodeId: 'LE_self_advisory_only',
+      actor: 'clio-airlock',
+      createdAt: '2026-06-19T08:00:00.000Z',
+      headSha: 'head-b',
+    }),
+    log: { warn() {} },
   });
 
-  assert.equal(resolved.verdictMode, VERDICT_MODE_ADVISORY_ONLY);
+  assert.equal(resolved.verdictMode, VERDICT_MODE_ENFORCE);
 });
 
 test('advisory-only override label is current-head scoped and head advance restores enforce', () => {
@@ -154,6 +169,12 @@ test('advisory-only override label is current-head scoped and head advance resto
       labels: [{ name: ADVISORY_ONLY_REVIEW_LABEL }],
       currentHeadSha: 'new-head',
       reviewerHeadSha: 'old-head',
+      advisoryLabelEvent: {
+        id: 'evt-old-head',
+        actor: 'placey',
+        createdAt: '2026-06-19T08:00:00.000Z',
+        headSha: 'new-head',
+      },
     }),
     VERDICT_MODE_ENFORCE,
   );
@@ -165,6 +186,23 @@ test('advisory-only override label is current-head scoped and head advance resto
     }),
     VERDICT_MODE_ENFORCE,
   );
+});
+
+test('advisory-only override label without resolvable label event stays enforce mode', async () => {
+  const resolved = await fetchCurrentHeadVerdictMode({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 59,
+    reviewerHeadSha: 'head-c',
+    fetchPullRequestHeadAndStateImpl: async () => ({
+      headRefOid: 'head-c',
+      labels: [{ name: ADVISORY_ONLY_REVIEW_LABEL }],
+      author: { login: 'VirtualPaul' },
+    }),
+    fetchLatestLabelEventImpl: async () => null,
+    log: { warn() {} },
+  });
+
+  assert.equal(resolved.verdictMode, VERDICT_MODE_ENFORCE);
 });
 
 test('advisory-only review header is explicit while findings body remains separate', () => {

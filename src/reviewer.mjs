@@ -59,6 +59,7 @@ import {
   fetchPullRequestHeadAndState,
   fetchPullRequestReviewContext,
 } from './github-api.mjs';
+import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -525,13 +526,30 @@ function resolveVerdictModeForHead({
   labels = [],
   currentHeadSha = null,
   reviewerHeadSha = null,
+  advisoryLabelEvent = null,
+  prAuthor = null,
 } = {}) {
   const sameHead = (
     reviewerHeadSha &&
     currentHeadSha &&
     String(reviewerHeadSha) === String(currentHeadSha)
   );
-  if (sameHead && hasLabel(labels, ADVISORY_ONLY_REVIEW_LABEL)) {
+  const actor = String(advisoryLabelEvent?.actor || '').trim();
+  const author = String(prAuthor || '').trim();
+  const hasEventId = Boolean(advisoryLabelEvent?.id || advisoryLabelEvent?.nodeId);
+  const labelHeadMatches = String(advisoryLabelEvent?.headSha || '') === String(currentHeadSha || '');
+  const nonAuthorActor = Boolean(actor) &&
+    actor.toLowerCase() !== 'unknown' &&
+    (!author || actor.toLowerCase() !== author.toLowerCase());
+
+  if (
+    sameHead &&
+    hasLabel(labels, ADVISORY_ONLY_REVIEW_LABEL) &&
+    labelHeadMatches &&
+    nonAuthorActor &&
+    hasEventId &&
+    advisoryLabelEvent?.createdAt
+  ) {
     return VERDICT_MODE_ADVISORY_ONLY;
   }
   return VERDICT_MODE_ENFORCE;
@@ -542,6 +560,7 @@ async function fetchCurrentHeadVerdictMode({
   prNumber,
   reviewerHeadSha = null,
   fetchPullRequestHeadAndStateImpl = fetchPullRequestHeadAndState,
+  fetchLatestLabelEventImpl = fetchLatestLabelEvent,
   execFileImpl = execFileAsync,
   recordApiCallImpl = recordApiCall,
   log = console,
@@ -552,14 +571,35 @@ async function fetchCurrentHeadVerdictMode({
       recordApiCallImpl,
       withLabels: true,
     });
+    const labels = current?.labels || [];
+    const currentHeadSha = current?.headRefOid || null;
+    const prAuthor = current?.author?.login || current?.author || null;
+    const needsAdvisoryEvent = (
+      reviewerHeadSha &&
+      currentHeadSha &&
+      String(reviewerHeadSha) === String(currentHeadSha) &&
+      hasLabel(labels, ADVISORY_ONLY_REVIEW_LABEL)
+    );
+    const advisoryLabelEvent = needsAdvisoryEvent && typeof fetchLatestLabelEventImpl === 'function'
+      ? await fetchLatestLabelEventImpl(repo, prNumber, ADVISORY_ONLY_REVIEW_LABEL, { execFileImpl })
+      : null;
+    const verdictMode = resolveVerdictModeForHead({
+      labels,
+      currentHeadSha,
+      reviewerHeadSha,
+      advisoryLabelEvent,
+      prAuthor,
+    });
+    if (needsAdvisoryEvent && verdictMode !== VERDICT_MODE_ADVISORY_ONLY) {
+      log.warn?.(
+        `[reviewer] WARN: advisory-only label for ${repo}#${prNumber}@${currentHeadSha || '<unknown-head>'} was ignored; missing current-head non-author label event audit fields`
+      );
+    }
     return {
-      verdictMode: resolveVerdictModeForHead({
-        labels: current?.labels || [],
-        currentHeadSha: current?.headRefOid || null,
-        reviewerHeadSha,
-      }),
-      currentHeadSha: current?.headRefOid || null,
-      labels: current?.labels || [],
+      verdictMode,
+      currentHeadSha,
+      labels,
+      advisoryLabelEvent,
       source: 'current-pr-head',
     };
   } catch (err) {

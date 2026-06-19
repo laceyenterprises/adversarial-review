@@ -1630,7 +1630,7 @@ function buildFollowUpJob({
   linearTicketId = null,
   reviewBody,
   reviewPostedAt,
-  verdictMode = 'enforce',
+  verdictMode: _verdictMode = 'enforce',
   critical,
   maxRemediationRounds = DEFAULT_MAX_REMEDIATION_ROUNDS,
   // Number of remediation rounds this PR has already completed across
@@ -1692,7 +1692,10 @@ function buildFollowUpJob({
     critical: Boolean(critical),
     reviewSummary: extractReviewSummary(reviewBody),
     reviewBody,
-    verdict_mode: String(verdictMode || '').trim() === 'advisory-only' ? 'advisory-only' : 'enforce',
+    // Advisory-only reviews short-circuit before job creation; persisted jobs
+    // are always enforcement carriers. Keep the field explicit for consumers
+    // that read historical schemas, but do not imply advisory jobs exist.
+    verdict_mode: 'enforce',
     recommendedFollowUpAction: {
       ...buildRecommendedFollowUpAction({ critical }),
       maxRounds: remediationPlan.maxRounds,

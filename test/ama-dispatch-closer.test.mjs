@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   amaCloserDispatchFilePath,
   composeCloserPrompt,
+  isHammerRemediableEligibilityMiss,
   isInterruptedInFlightAmaCloserDispatch,
   maybeDispatchAmaCloser,
   substituteTemplate,
@@ -1348,3 +1349,29 @@ test('terminal AMA audit releases a stale lease so the same head can be retried'
   //   });
   //   writeFileSync('test/fixtures/ama-closer-prompt.golden.md', prompt);
 */
+
+// --- Auto-hammer eligibility-miss gate (2026-06-19) ---
+
+test('isHammerRemediableEligibilityMiss fires ONLY for the strict-mode non-blocking case', () => {
+  // Remediable: standing non-blocking findings (optionally + the strict
+  // verdict-not-settled-success that accompanies them).
+  assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present']), true);
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'verdict-not-settled-success']),
+    true,
+  );
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['verdict-not-settled-success', 'non-blocking-findings-present']),
+    true,
+  );
+
+  // NOT remediable by a terminal non-blocking pass — must stay await-operator:
+  assert.equal(isHammerRemediableEligibilityMiss([]), false);
+  assert.equal(isHammerRemediableEligibilityMiss(undefined), false);
+  assert.equal(isHammerRemediableEligibilityMiss(['verdict-not-settled-success']), false, 'verdict-only (no findings) is not auto-hammer');
+  assert.equal(isHammerRemediableEligibilityMiss(['blocking-findings-present']), false);
+  assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'blocking-findings-present']), false, 'any blocking finding disqualifies');
+  assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'pr-not-mergeable']), false, 'hard-stop disqualifies');
+  assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'ci-not-green']), false);
+  assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'stale-review-head']), false);
+});

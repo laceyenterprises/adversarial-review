@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   amaCloserDispatchFilePath,
+  amaClosureNeedsTerminalRemediation,
   composeCloserPrompt,
   isHammerRemediableEligibilityMiss,
   isInterruptedInFlightAmaCloserDispatch,
@@ -531,12 +532,78 @@ test('cfg.workerClass=gemini routes the closer to gemini with gemini-closer prov
   assert.ok(write.captured.body.includes('Closed-By: gemini-closer (adversarial-pipe-mode)'));
 });
 
-test('cfg.workerClass=hammer selects the terminal HAM mandate prompt', async (t) => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-'));
+// HAM-04 §1.1.1 — the hammer worker class is now the DEFAULT closer class.
+// Terminal-remediation prompt selection must NOT key off `workerClass ===
+// 'hammer'` alone: a clean, finding-free closure has nothing for HAM to
+// remediate. Routing it through `hammer-prompt.md` (a non-empty HAM
+// provenance commit + `Remediated-Findings` audit comment mandate) either
+// stalls the merge (HAM evidence cannot exist) or pushes the closer to invent
+// an unreviewed post-review source change. A clean hammer closure must use the
+// plain `ama-closer-prompt.md`.
+test('cfg.workerClass=hammer on a clean (finding-free) closure uses the plain closer prompt', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-clean-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const readPaths = [];
   const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
     cfg: { workerClass: 'hammer' },
+    // Default fixture is a clean settled-success review: zero blocking and
+    // zero non-blocking findings, no review-cycle exhaustion.
+    dispatchContext: { rootDir, templatePath: null },
+  });
+  const exec = buildExecMock();
+  const write = buildWriteMock();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: (path) => {
+      readPaths.push(path);
+      return readFileSync(path, 'utf8');
+    },
+  });
+  assert.equal(result.dispatched, true);
+  // The worker class itself stays `hammer` — only the prompt/mandate changes.
+  assert.equal(result.workerClass, 'hammer');
+  const args = exec.calls[0].args;
+  assert.equal(args[args.indexOf('--worker-class') + 1], 'hammer');
+  assert.deepEqual(readPaths, [TEMPLATE_PATH]);
+  // The hammer terminal-remediation mandate text must be absent on a clean
+  // close (these phrases are unique to `hammer-prompt.md`).
+  assert.doesNotMatch(write.captured.body, /remediate, commit, comment, validate, merge/i);
+  assert.doesNotMatch(write.captured.body, /Do not request another adversarial review round/);
+});
+
+// The terminal-remediation prompt is still selected for a hammer closure that
+// genuinely needs remediation. With standing findings the verdict gate is only
+// cleared by a findings-waiving mode (here: final-hammer review-cycle
+// exhaustion plus a current-head operator-approved override), so this models an
+// eligible-but-dirty closure that legitimately carries the HAM mandate.
+test('cfg.workerClass=hammer selects the terminal HAM mandate prompt when findings need remediation', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const headSha = 'abc12345abc12345abc12345abc12345abc12345';
+  const readPaths = [];
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: { workerClass: 'hammer' },
+    reviewState: {
+      verdict: 'request-changes',
+      reviewCycleExhausted: true,
+      blockingFindingState: 'known',
+      blockingFindingCount: 1,
+      operatorApprovedEvidence: {
+        applied: true,
+        actor: 'operator-human',
+        eventId: 'evt-operator-approved-1',
+        observedAt: '2026-06-18T22:00:00Z',
+        observedRevisionRef: headSha,
+      },
+    },
+    prMetadata: {
+      labels: [{ name: 'operator-approved' }],
+    },
     dispatchContext: { rootDir, templatePath: null },
   });
   const exec = buildExecMock();
@@ -568,6 +635,40 @@ test('cfg.workerClass=hammer selects the terminal HAM mandate prompt', async (t)
   assert.match(write.captured.body, /HAM_UPDATE_BRANCH_RETRY_CAP="\$\{HAM_UPDATE_BRANCH_RETRY_CAP:-3\}"/);
   assert.match(write.captured.body, /HAM_UPDATE_BRANCH_EXIT=\$\?/);
   assert.match(write.captured.body, /Rebase-Attempts: \${HAM_REBASE_ATTEMPTS:-0}/);
+});
+
+// Unit coverage for the prompt-selection predicate itself (HAM-04, SPEC §1.1.1).
+test('amaClosureNeedsTerminalRemediation gates the hammer mandate on real findings', () => {
+  const clean = {
+    trace: {
+      verdict: {
+        blockingFindings: { known: true, count: 0 },
+        nonBlockingFindings: { known: true, count: 0 },
+      },
+      hamTerminalRemediation: { active: false },
+      finalHammer: { active: false },
+    },
+  };
+  assert.equal(amaClosureNeedsTerminalRemediation(clean), false);
+
+  const withBlocking = structuredClone(clean);
+  withBlocking.trace.verdict.blockingFindings = { known: true, count: 1 };
+  assert.equal(amaClosureNeedsTerminalRemediation(withBlocking), true);
+
+  const withNonBlocking = structuredClone(clean);
+  withNonBlocking.trace.verdict.nonBlockingFindings = { known: true, count: 2 };
+  assert.equal(amaClosureNeedsTerminalRemediation(withNonBlocking), true);
+
+  const finalHammerActive = structuredClone(clean);
+  finalHammerActive.trace.finalHammer = { active: true };
+  assert.equal(amaClosureNeedsTerminalRemediation(finalHammerActive), true);
+
+  const hamEvidenceActive = structuredClone(clean);
+  hamEvidenceActive.trace.hamTerminalRemediation = { active: true };
+  assert.equal(amaClosureNeedsTerminalRemediation(hamEvidenceActive), true);
+
+  // Conservative fallback: a missing trace must not silently downgrade.
+  assert.equal(amaClosureNeedsTerminalRemediation({}), true);
 });
 
 test('eligible dispatch refuses watcher audit writes when runtime user is not the HQ owner', async (t) => {

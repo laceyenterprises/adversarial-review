@@ -735,7 +735,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const nonBlockingFindings = classifyNonBlockingFindings(reviewState);
   const remediationStateKnown = typeof reviewState?.remediationPending === 'boolean';
   const remediationPending = reviewState?.remediationPending === true;
-  const strictNonBlockingRemediation = cfg?.strictNonBlockingRemediation !== false;
+  const strictNonBlockingRemediation = cfg?.strictNonBlockingRemediation === true;
 
   // SPEC §4.2 #1 — settled-success verdict OR operator-approved override.
   const verdictNormalized = String(reviewState?.verdict || '').toLowerCase();

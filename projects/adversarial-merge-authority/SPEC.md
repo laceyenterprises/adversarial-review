@@ -40,12 +40,32 @@ Only after those checks pass may the predicate record
 `ham_terminal_remediation_validated`. That marker may waive
 `stale-review-head`, `verdict-not-settled-success`, `remediation-pending`,
 `remediation-state-unknown`, `blocking-findings-present`, and
-`blocking-findings-unknown`. It must not waive AMA disabled state, PR lifecycle
-or mergeability, CI, branch protection, hard-stop labels, unsupported
-fast-merge state, or risk-class policy. When final-hammer cycle exhaustion is
-also active, HAM and final-hammer waivers compose by filtering the remaining
-reason set in sequence; one waiver path must not discard the other path's
-accepted waivers.
+`blocking-findings-unknown`, and `non-blocking-findings-present`. It must not
+waive AMA disabled state, PR lifecycle or mergeability, CI, branch protection,
+hard-stop labels, unsupported fast-merge state, or risk-class policy. When
+final-hammer cycle exhaustion is also active, HAM and final-hammer waivers
+compose by filtering the remaining reason set in sequence; one waiver path must
+not discard the other path's accepted waivers.
+
+## 4.2 Closure eligibility verdict predicate
+
+A review is a direct settled-success input to AMA closure only when all review
+state predicates below are true:
+
+- the latest authoritative verdict is `approved` or `comment-only`;
+- remediation state is known and no remediation round is pending;
+- blocking-finding state is known and the blocking-finding count is zero; and
+- when `strict_non_blocking_remediation` is explicitly enabled, non-blocking
+  finding state is known and the non-blocking-finding count is zero.
+
+When the strict non-blocking gate is enabled and the latest settled-success
+review still has non-blocking findings, AMA records the eligibility reason
+`non-blocking-findings-present` and the review is not a direct settled-success
+closure candidate. The gate is opt-in until the settled-success follow-up path
+has an automatic remediation producer for non-blocking findings; operators can
+enable it per host with
+`roles.adversarial.merge_authority.strict_non_blocking_remediation: true` or the
+matching env alias, and can roll back by setting that value to `false`.
 
 ## 4.7 CFG-01 schema
 
@@ -64,6 +84,12 @@ roles:
       # AMA requires one canonical landed closing commit for provenance
       # and audit reconciliation; GitHub's rebase path does not produce one.
       merge_method: squash  # enum: squash | merge
+      # Opt-in strict gate for settled-success reviews with non-blocking
+      # findings. Default false preserves the existing auto-close path until
+      # settled-success non-blocking findings have an automatic remediation
+      # producer. When true, AMA emits `non-blocking-findings-present` and
+      # requires an allowed waiver/remediation path before closure.
+      strict_non_blocking_remediation: false
       eligibility:
         # Risk classes that may close without operator intervention.
         risk_classes: ["low"]

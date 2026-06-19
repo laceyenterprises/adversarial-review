@@ -806,7 +806,7 @@ function schemaV1() {
                   },
                   strict_non_blocking_remediation: {
                     __type: TYPE_BOOL,
-                    __default: true,
+                    __default: false,
                   },
                   eligibility: {
                     __type: TYPE_DICT,
@@ -2444,7 +2444,7 @@ export class AgentOSConfig {
       ),
       strictNonBlockingRemediation: this.get(
         'roles.adversarial.merge_authority.strict_non_blocking_remediation',
-        true,
+        false,
       ),
       eligibility: {
         riskClasses: [...this.get(

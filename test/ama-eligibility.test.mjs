@@ -974,6 +974,7 @@ test('not eligible: comment-only review with non-blocking findings is not direct
       nonBlockingFindingCount: 1,
       nonBlockingFindingState: 'known',
     },
+    cfg: { strictNonBlockingRemediation: true },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
   assert.equal(result.eligible, false);
@@ -1003,12 +1004,27 @@ test('not eligible: unknown non-blocking state fails closed in strict mode', () 
       nonBlockingFindingCount: 0,
       nonBlockingFindingState: 'unknown',
     },
+    cfg: { strictNonBlockingRemediation: true },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
   assert.equal(result.eligible, false);
   assert.ok(result.reasons.includes('non-blocking-findings-present'));
   assert.ok(result.reasons.includes('verdict-not-settled-success'));
   assert.equal(result.trace.verdict.nonBlockingFindings.known, false);
+});
+
+test('eligible: strict_non_blocking_remediation default preserves prior direct close behavior', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      nonBlockingFindingCount: 1,
+      nonBlockingFindingState: 'known',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.verdict.settledSuccess, true);
+  assert.equal(result.trace.verdict.strictNonBlockingRemediation, false);
 });
 
 test('eligible: strict_non_blocking_remediation=false restores prior direct close behavior', () => {
@@ -1041,6 +1057,7 @@ test('eligible: current-head operator-approved waives strict non-blocking findin
         observedAt: '2026-06-10T20:00:00Z',
       },
     },
+    cfg: { strictNonBlockingRemediation: true },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
@@ -1542,6 +1559,7 @@ test('ham terminal remediation: HAM-authored live head over reviewed parent is e
       blockingFindingState: 'known',
     },
     prMetadata: { headSha: 'def67890' },
+    cfg: { strictNonBlockingRemediation: true },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
@@ -1577,6 +1595,7 @@ test('ham terminal remediation: validated non-blocking finding remediation waive
       nonBlockingFindingState: 'known',
     },
     prMetadata: { headSha: 'def67890' },
+    cfg: { strictNonBlockingRemediation: true },
   });
   const evidence = {
     active: true,

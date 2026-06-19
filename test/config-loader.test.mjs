@@ -2892,6 +2892,14 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
       ).at(-1).source,
       'env:AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_STRICT_NON_BLOCKING_REMEDIATION',
     );
+    const strictTrueEnvCfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_STRICT_NON_BLOCKING_REMEDIATION: '1' },
+    });
+    assert.equal(
+      strictTrueEnvCfg.get('roles.adversarial.merge_authority.strict_non_blocking_remediation'),
+      true,
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -3050,7 +3058,7 @@ test('AMA merge_authority high_risk_requires_two_key defaults to true', () => {
   }
 });
 
-test('AMA merge_authority strict_non_blocking_remediation defaults to true', () => {
+test('AMA merge_authority strict_non_blocking_remediation defaults to false', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -3064,9 +3072,9 @@ test('AMA merge_authority strict_non_blocking_remediation defaults to true', () 
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(
       cfg.get('roles.adversarial.merge_authority.strict_non_blocking_remediation'),
-      true,
+      false,
     );
-    assert.equal(cfg.getMergeAuthorityConfig().strictNonBlockingRemediation, true);
+    assert.equal(cfg.getMergeAuthorityConfig().strictNonBlockingRemediation, false);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

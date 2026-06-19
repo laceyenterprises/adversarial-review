@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -11,10 +10,6 @@ import {
   detectVocabularyFatigue,
   resolveVocabularyFatigueConfig,
 } from '../src/vocabulary-fatigue.mjs';
-
-function tmpDir() {
-  return mkdtempSync(join(tmpdir(), 'vocab-fatigue-'));
-}
 
 function findingFor(subjects, options) {
   return detectVocabularyFatigue(subjects.map((message) => ({ commit: { message } })), options);
@@ -62,31 +57,18 @@ test('vocabulary fatigue strips only ing and ed suffixes', () => {
   assert.equal(finding.count, 3);
 });
 
-test('vocabulary fatigue resolves window and min repeats from CFG', () => {
-  const dir = tmpDir();
-  try {
-    const topPath = join(dir, 'config.yaml');
-    writeFileSync(topPath, [
-      'version: 1',
-      'agent_control:',
-      '  codex_runaway_guardrails:',
-      '    vocabulary_fatigue_window_commits: 4',
-      '    vocabulary_fatigue_min_repeats: 2',
-      '',
-    ].join('\n'));
-    const cfg = loadConfig({ topPath, env: {} });
-    const resolved = resolveVocabularyFatigueConfig(cfg);
+test('vocabulary fatigue uses defaults when CFG has no vocabulary leaves', () => {
+  const cfg = loadConfig({ topPath: join(tmpdir(), 'missing-vocabulary-fatigue-config.yaml'), env: {} });
+  const resolved = resolveVocabularyFatigueConfig(cfg);
 
-    assert.deepEqual(resolved, { windowCommits: 4, minRepeats: 2 });
-    assert.equal(findingFor([
-      '[codex] Add',
-      '[codex] Harden',
-      '[codex] Hardened',
-      '[codex] Close',
-    ], resolved).stem, 'harden');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  assert.deepEqual(resolved, { windowCommits: 5, minRepeats: 3 });
+  assert.equal(findingFor([
+    '[codex] Add',
+    '[codex] Harden',
+    '[codex] Hardened',
+    '[codex] Harden',
+    '[codex] Close',
+  ], resolved).stem, 'harden');
 });
 
 test('vocabulary fatigue defaults and insufficient history are non-emitting', () => {

@@ -270,19 +270,59 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          // Mirrors the Python authority at
+          // platform/agent-os-config/src/agent_os_config/__init__.py. Most
+          // leaves are consumed outside this package, but strict CFG parity
+          // requires the adversarial-review Node loader to accept the full
+          // shared guardrail block when it appears in checked-in config.yaml.
           codex_runaway_guardrails: {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
-              vocabulary_fatigue_window_commits: {
-                __type: TYPE_INT,
-                __default: 5,
-                __min: 1,
+              observed_repos: {
+                __type: TYPE_LIST,
+                __item: { __type: TYPE_STRING },
+                __default: [
+                  'laceyenterprises/agent-os',
+                  'laceyenterprises/adversarial-review',
+                ],
               },
-              vocabulary_fatigue_min_repeats: {
+              convergence_stall_commit_window_seconds: {
+                __type: TYPE_INT,
+                __default: 3600,
+              },
+              convergence_stall_min_commits: {
                 __type: TYPE_INT,
                 __default: 3,
-                __min: 1,
+              },
+              convergence_stall_file_fetch_budget_per_cycle: {
+                __type: TYPE_INT,
+                __default: 20,
+              },
+              convergence_stall_finding_dedupe_seconds: {
+                __type: TYPE_INT,
+                __default: 900,
+              },
+              convergence_stall_repo_backoff_seconds: {
+                __type: TYPE_INT,
+                __default: 60,
+              },
+              convergence_stall_observed_worker_classes: {
+                __type: TYPE_LIST,
+                __item: { __type: TYPE_STRING },
+                __default: ['codex', 'claude-code', 'clio-agent'],
+              },
+              compaction_rate_alarm_per_hour: {
+                __type: TYPE_INT,
+                __default: 3,
+              },
+              compaction_rate_alarm_finding_dedupe_seconds: {
+                __type: TYPE_INT,
+                __default: 86400,
+              },
+              token_budget_per_session: {
+                __type: TYPE_INT,
+                __default: 50000000,
               },
             },
           },
@@ -1507,6 +1547,10 @@ export const ENV_ALIASES = {
   'codex.acp_state_home': {
     // OSR-04a: parse-only here; runtime shell/Python consumers use it.
     canonical: 'AGENT_OS_CODEX_ACP_STATE_HOME',
+    aliases: [],
+  },
+  'agent_control.codex_runaway_guardrails.token_budget_per_session': {
+    canonical: 'AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_TOKEN_BUDGET_PER_SESSION',
     aliases: [],
   },
   // Per-task-kind dispatch default worker class env aliases. One canonical

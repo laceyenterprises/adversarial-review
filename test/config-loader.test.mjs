@@ -8,7 +8,7 @@
 
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1396,6 +1396,101 @@ test('OSR-04 host-local roots load through strict Node schema and env aliases', 
   }
 });
 
+test('agent_control.codex_runaway_guardrails mirrors Python authority keys', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      agent_control:
+        codex_runaway_guardrails:
+          observed_repos:
+            - laceyenterprises/agent-os
+            - laceyenterprises/adversarial-review
+          convergence_stall_commit_window_seconds: 7200
+          convergence_stall_min_commits: 4
+          convergence_stall_file_fetch_budget_per_cycle: 25
+          convergence_stall_finding_dedupe_seconds: 1200
+          convergence_stall_repo_backoff_seconds: 90
+          convergence_stall_observed_worker_classes:
+            - codex
+            - claude-code
+          compaction_rate_alarm_per_hour: 5
+          compaction_rate_alarm_finding_dedupe_seconds: 43200
+          token_budget_per_session: 60000000
+    `);
+
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.get('agent_control.codex_runaway_guardrails.observed_repos'), [
+      'laceyenterprises/agent-os',
+      'laceyenterprises/adversarial-review',
+    ]);
+    assert.equal(
+      cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_commit_window_seconds'),
+      7200,
+    );
+    assert.equal(
+      cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_min_commits'),
+      4,
+    );
+    assert.equal(
+      cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_file_fetch_budget_per_cycle'),
+      25,
+    );
+    assert.equal(
+      cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_finding_dedupe_seconds'),
+      1200,
+    );
+    assert.equal(
+      cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_repo_backoff_seconds'),
+      90,
+    );
+    assert.deepEqual(
+      cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_observed_worker_classes'),
+      ['codex', 'claude-code'],
+    );
+    assert.equal(
+      cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_per_hour'),
+      5,
+    );
+    assert.equal(
+      cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_finding_dedupe_seconds'),
+      43200,
+    );
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.token_budget_per_session'), 60000000);
+
+    const envCfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_TOKEN_BUDGET_PER_SESSION: '70000000',
+      },
+    });
+    assert.equal(
+      envCfg.get('agent_control.codex_runaway_guardrails.token_budget_per_session'),
+      70000000,
+    );
+
+    const bad = join(tmp, 'bad-guardrails.yaml');
+    writeFile(bad, `
+      version: 1
+      agent_control:
+        codex_runaway_guardrails:
+          vocabulary_fatigue_window_commits: 5
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: bad, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits');
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // ─── dispatch.default_worker_class_by_task_kind parity ──────────────────
 // Pairs with the Python sibling tests at
 // `platform/agent-os-config/src/agent_os_config/tests/test_dispatch_default_worker_class.py`.
@@ -2448,8 +2543,12 @@ test('getConfig invalidates cache when top YAML mtime changes', () => {
   const tmp = freshTmp();
   const top = join(tmp, 'config.yaml');
   const originalEnv = process.env.AGENT_OS_CONFIG_PATH;
+  const originalReviewerEnv = process.env.AGENT_OS_ROLES_REVIEWER;
+  const originalLegacyReviewerEnv = process.env.ADVERSARIAL_REVIEW_DEFAULT_REVIEWER;
   try {
     process.env.AGENT_OS_CONFIG_PATH = top;
+    delete process.env.AGENT_OS_ROLES_REVIEWER;
+    delete process.env.ADVERSARIAL_REVIEW_DEFAULT_REVIEWER;
     resetConfigCache();
     writeFile(top, `
       version: 1
@@ -2458,19 +2557,21 @@ test('getConfig invalidates cache when top YAML mtime changes', () => {
     `);
     assert.equal(getConfig('roles.reviewer'), 'codex');
 
-    // Sleep enough to guarantee a fresh mtime even on coarse filesystems.
-    // Using a busy-wait to keep the test synchronous.
-    const start = Date.now();
-    while (Date.now() - start < 50) { /* spin */ }
     writeFile(top, `
       version: 1
       roles:
         reviewer: adversarial
     `);
+    const future = new Date(Date.now() + 1000);
+    utimesSync(top, future, future);
     assert.equal(getConfig('roles.reviewer'), 'adversarial');
   } finally {
     if (originalEnv === undefined) delete process.env.AGENT_OS_CONFIG_PATH;
     else process.env.AGENT_OS_CONFIG_PATH = originalEnv;
+    if (originalReviewerEnv === undefined) delete process.env.AGENT_OS_ROLES_REVIEWER;
+    else process.env.AGENT_OS_ROLES_REVIEWER = originalReviewerEnv;
+    if (originalLegacyReviewerEnv === undefined) delete process.env.ADVERSARIAL_REVIEW_DEFAULT_REVIEWER;
+    else process.env.ADVERSARIAL_REVIEW_DEFAULT_REVIEWER = originalLegacyReviewerEnv;
     resetConfigCache();
     rmSync(tmp, { recursive: true, force: true });
   }

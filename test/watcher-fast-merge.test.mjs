@@ -171,6 +171,9 @@ export async function load(url, context, nextLoad) {
       export async function fetchReviewBodiesForHead() {
         return [];
       }
+      export async function fetchPullRequestCommitSubjects() {
+        return scenario.commitSubjects || [];
+      }
     `)},
   };
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {

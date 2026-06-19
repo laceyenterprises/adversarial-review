@@ -121,6 +121,8 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('linear.team_name'), 'Laceyenterprises');
     assert.equal(cfg.get('linear.issue_prefix'), 'LAC');
     assert.equal(cfg.get('update.channel'), 'rolling');
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits'), 5);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats'), 3);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -161,6 +163,35 @@ test('update channel loads through strict Node schema and env override', () => {
         return true;
       },
     );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('codex runaway guardrail vocabulary fatigue config resolves through strict schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      agent_control:
+        codex_runaway_guardrails:
+          vocabulary_fatigue_window_commits: 7
+          vocabulary_fatigue_min_repeats: 4
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits'), 7);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats'), 4);
+
+    const envCfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_VOCABULARY_FATIGUE_WINDOW_COMMITS: '8',
+        AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_VOCABULARY_FATIGUE_MIN_REPEATS: '5',
+      },
+    });
+    assert.equal(envCfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits'), 8);
+    assert.equal(envCfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats'), 5);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

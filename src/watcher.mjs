@@ -160,6 +160,7 @@ import {
 import { sweepEtagCache } from './etag-cache.mjs';
 import { refreshReviewerBrokerTokens, refreshWatcherGithubToken } from './reviewer-broker-refresh.mjs';
 import {
+  fetchPullRequestCommitSubjects,
   fetchPullRequestHeadAndState,
   fetchPullRequestRollup,
   fetchReviewBodiesForHead,
@@ -2533,6 +2534,96 @@ function persistReviewerPgid({
   }
 }
 
+const VOCABULARY_FATIGUE_DETAIL =
+  "This often signals that the agent has reached the bottom of its vocabulary for change descriptors — a soft churn indicator. See docs/POSTMORTEM-codex-tui-remediation-runaway-2026-06-03.md §6 and §7.";
+
+function normalizeVocabularyFatigueStem(subject) {
+  const withoutPrefix = String(subject || '').replace(/^\[[^\]]*\]\s+/, '').trim();
+  const firstWord = withoutPrefix.split(/\s+/, 1)[0]?.trim();
+  if (!firstWord) return null;
+  return firstWord
+    .toLowerCase()
+    .replace(/ing$/, '')
+    .replace(/ed$/, '');
+}
+
+function detectCommitVocabularyFatigue(subjects, {
+  windowCommits = 5,
+  minRepeats = 3,
+} = {}) {
+  const window = Number(windowCommits);
+  const threshold = Number(minRepeats);
+  if (!Number.isInteger(window) || window <= 0) return null;
+  if (!Number.isInteger(threshold) || threshold <= 0) return null;
+  if (!Array.isArray(subjects) || subjects.length < window) return null;
+
+  const stems = subjects
+    .slice(-window)
+    .map(normalizeVocabularyFatigueStem)
+    .filter(Boolean);
+  if (stems.length < window) return null;
+
+  const counts = new Map();
+  for (const stem of stems) {
+    counts.set(stem, (counts.get(stem) || 0) + 1);
+  }
+  for (const [stem, count] of counts.entries()) {
+    if (count >= threshold) {
+      return {
+        kind: 'remediation-vocabulary-fatigue',
+        severity: 'info',
+        blocking: false,
+        stem,
+        count,
+        window,
+        detail: `The verb '${stem}' appears in ${count} of the last ${window} commit messages. ${VOCABULARY_FATIGUE_DETAIL}`,
+      };
+    }
+  }
+  return null;
+}
+
+function resolveVocabularyFatigueConfig({ cfg = null, env = process.env, logger = console } = {}) {
+  let loaded = cfg;
+  if (!loaded) {
+    try {
+      loaded = loadConfigCached({ env });
+    } catch (err) {
+      logger?.warn?.(
+        `[watcher] vocabulary fatigue config load failed; using defaults: ${err?.message || err}`
+      );
+    }
+  }
+  return {
+    windowCommits: Number(
+      loaded?.get?.('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits', 5) ?? 5
+    ),
+    minRepeats: Number(
+      loaded?.get?.('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats', 3) ?? 3
+    ),
+  };
+}
+
+async function computeVocabularyFatigueFindingForPR({
+  repoPath,
+  prNumber,
+  fetchCommitSubjectsImpl = fetchPullRequestCommitSubjects,
+  logger = console,
+} = {}) {
+  const cfg = resolveVocabularyFatigueConfig({ logger });
+  try {
+    const subjects = await fetchCommitSubjectsImpl(repoPath, prNumber, {
+      execFileImpl: execFileAsync,
+    });
+    return detectCommitVocabularyFatigue(subjects, cfg);
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] vocabulary fatigue commit scan failed for ${repoPath}#${prNumber}: ${err?.message || err}`
+    );
+    return null;
+  }
+}
+
 // ── Reviewer spawning ────────────────────────────────────────────────────────
 
 async function spawnReviewer({
@@ -2553,6 +2644,7 @@ async function spawnReviewer({
   workspacePath = null,
   crossModelReviewWaived = false,
   crossModelReviewWaiverReason = null,
+  vocabularyFatigueFinding = null,
   onReviewerPgid = () => {},
 }) {
   const finalRound = (
@@ -2595,6 +2687,7 @@ async function spawnReviewer({
         reviewerModel,
         reviewAttemptNumber,
         maxRemediationRounds,
+        ...(vocabularyFatigueFinding ? { vocabularyFatigueFinding } : {}),
       },
     });
 
@@ -2623,6 +2716,7 @@ async function spawnReviewer({
         reviewerSpawnToken,
         crossModelReviewWaived,
         crossModelReviewWaiverReason,
+        ...(vocabularyFatigueFinding ? { vocabularyFatigueFinding } : {}),
       },
       timeoutMs: reviewerTimeoutMs,
       sessionUuid: reviewerSessionUuid,
@@ -2659,6 +2753,7 @@ async function spawnReviewer({
           reviewerSessionUuid,
           reattachToken: result.reattachToken || null,
           failureClass: result.failureClass || null,
+          ...(vocabularyFatigueFinding ? { vocabularyFatigueFinding } : {}),
         },
       });
     } catch (err) {
@@ -5913,6 +6008,10 @@ async function pollOnce(
             const passKind = reviewAttemptNumber > 1 || current?.rereview_requested_at
               ? 'rereview'
               : 'first-pass';
+            const vocabularyFatigueFinding = await computeVocabularyFatigueFindingForPR({
+              repoPath,
+              prNumber,
+            });
 
             // Pre-spawn routing-tier readiness probe. Successful probes are
             // cached for the rest of the tick; failed probes get bounded
@@ -5958,6 +6057,7 @@ async function pollOnce(
               maxRemediationRounds,
               reviewerSessionUuid,
               reviewerTimeoutMs,
+              vocabularyFatigueFinding,
               workspacePath: null,
               onReviewerPgid: ({ pgid, spawnedAt }) => {
                 persistReviewerPgid({
@@ -6245,6 +6345,8 @@ export {
   fastMergeDecisionFromLabels,
   fetchLivePRHeadSha,
   fetchLivePRLabels,
+  computeVocabularyFatigueFindingForPR,
+  detectCommitVocabularyFatigue,
   getStalePostedReviewAutoRereviewSuppression,
   handlePostedReviewRow,
   maybeDispatchReviewerTimeoutExhaustedMergeAgent,
@@ -6261,6 +6363,7 @@ export {
   reconcileOrphanedReviewing,
   recoverFastMergeVetoes,
   resolvePendingDraftRespawnAgeSeconds,
+  resolveVocabularyFatigueConfig,
   resolveReviewerIdentity,
   resolveStuckDispatchAlertDebounceMs,
   resolveWatcherDrainMaxMs,

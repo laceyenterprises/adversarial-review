@@ -81,7 +81,7 @@ test('CDM re-derivation guard permits allowlisted site and records it in JSON ar
   const root = makeTempRoot();
   try {
     writeSource(root, 'src/allowlisted-gate.mjs', `
-      // cdm-allowlist: legacy gate decision report until AMA export moves to canonical snapshot
+      // cdm-allowlist: temporary audited exception CDM-123
       export function legacyGateDecision(row, pr) {
         const verdict = row.last_verdict || row.reviewBody;
         const reviewedHead = row.reviewer_head_sha;
@@ -94,12 +94,13 @@ test('CDM re-derivation guard permits allowlisted site and records it in JSON ar
     assert.equal(report.summary.total, 1);
     assert.equal(report.summary.allowlisted, 1);
     assert.equal(report.summary.non_allowlisted, 0);
+    assert.equal(report.findings[0].line, 3);
     assert.equal(report.findings[0].allowlist_marker_present, true);
     assert.equal(
       report.findings[0].allowlist_reason,
-      'legacy gate decision report until AMA export moves to canonical snapshot',
+      'temporary audited exception CDM-123',
     );
-    assert.match(JSON.stringify(report), /legacy gate decision report/);
+    assert.match(JSON.stringify(report), /temporary audited exception CDM-123/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

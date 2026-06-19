@@ -7,8 +7,8 @@
  * it looks for a local block that reads all three raw fact families and also
  * contains review-gate decision language. Single-field plumbing is allowed.
  *
- * Attached allowlist marker, on the finding line or the immediately preceding
- * non-blank line:
+ * Attached allowlist marker, on the finding line, inside the matched
+ * fact/decision span, or immediately before the enclosing function/block:
  *   // cdm-allowlist: <reason>
  *
  * Allowlisted findings are still emitted in the JSON artifact so exceptions are
@@ -71,6 +71,8 @@ const DECISION_PATTERNS = [
   /\bdispatch\b/i,
   /\bmerge\b/i,
 ];
+
+const BLOCK_START_RE = /(?:^|\b)(?:export\s+)?(?:async\s+)?(?:function|class|if|for|while|switch|try|catch|else|do)\b|=>\s*\{/;
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = path.resolve(SCRIPT_DIR, '..');
@@ -212,11 +214,45 @@ function markerForLine(line) {
   return match ? match[1].trim() : null;
 }
 
-function attachedAllowlistReason(lines, lineNumber) {
+function attachedAllowlistReason(lines, lineNumber, matchedLines = []) {
   for (const candidateLine of [lineNumber, previousNonBlankLine(lines, lineNumber)]) {
     if (!candidateLine) continue;
     const reason = markerForLine(lines[candidateLine - 1]);
     if (reason) return reason;
+  }
+  const spanReason = allowlistReasonInSpan(lines, matchedLines);
+  if (spanReason) return spanReason;
+
+  const blockStartLine = enclosingBlockStartLine(lines, lineNumber);
+  if (blockStartLine) {
+    const blockReason = allowlistReasonBeforeLine(lines, blockStartLine);
+    if (blockReason) return blockReason;
+  }
+  return null;
+}
+
+function allowlistReasonInSpan(lines, matchedLines) {
+  if (!matchedLines.length) return null;
+  const startLine = Math.min(...matchedLines);
+  const endLine = Math.max(...matchedLines);
+  for (let lineNumber = startLine; lineNumber <= endLine; lineNumber += 1) {
+    const reason = markerForLine(lines[lineNumber - 1]);
+    if (reason) return reason;
+  }
+  return null;
+}
+
+function allowlistReasonBeforeLine(lines, lineNumber) {
+  const previousLine = previousNonBlankLine(lines, lineNumber);
+  return previousLine ? markerForLine(lines[previousLine - 1]) : null;
+}
+
+function enclosingBlockStartLine(lines, lineNumber) {
+  for (let index = lineNumber - 1; index >= 0; index -= 1) {
+    const line = lines[index].trim();
+    if (!line) continue;
+    if (line.includes('{') && BLOCK_START_RE.test(line)) return index + 1;
+    if (line.includes('}')) return null;
   }
   return null;
 }
@@ -287,6 +323,12 @@ function scanFile(filePath, root) {
       ...factLines.mergeability,
       ...decisionLines,
     );
+    const matchedLines = [
+      ...factLines.reviewerHead,
+      ...factLines.reviewVerdict,
+      ...factLines.mergeability,
+      ...decisionLines,
+    ];
     const key = `${rel}:${findingLine}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -294,7 +336,7 @@ function scanFile(filePath, root) {
       .slice(Math.max(0, findingLine - 3), Math.min(lines.length, findingLine + 2))
       .map((line) => line.trim())
       .filter(Boolean);
-    const allowlistReason = attachedAllowlistReason(lines, findingLine);
+    const allowlistReason = attachedAllowlistReason(lines, findingLine, matchedLines);
     findings.push({
       category: 'review-verdict',
       severity: 'high',

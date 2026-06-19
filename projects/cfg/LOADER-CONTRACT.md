@@ -73,7 +73,8 @@ entry. For example, `AGENT_OS_APPS_FOO_MODE=standalone` resolves
 `contract_version: "1.0"`. Defaults that are backfilled only because the app was
 materialized by env expose provenance source
 `code-default (env-registered app)`; file-declared app default provenance remains
-`code-default`.
+`code-default`, even when env aliases later override or fill sibling leaves on
+that file-declared app entry.
 
 Loaders must not re-parse keyed-map ids as dotted paths while applying these
 defaults. They must mutate the already-resolved map entry, or use path helpers

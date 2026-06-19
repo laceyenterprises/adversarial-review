@@ -3438,6 +3438,36 @@ test('AGENT_OS_APPS_<id>_SUBSCRIBES coerces to a list', () => {
   }
 });
 
+test('AGENT_OS_APPS_<id> preserves file-declared app default provenance', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      apps:
+        foo:
+          mode: standalone
+    `);
+    const cfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_APPS_FOO_SUBSCRIBES: 'a' },
+    });
+
+    assert.deepEqual(cfg.get('apps.foo'), {
+      mode: 'standalone',
+      subscribes: ['a'],
+      contract_version: '1.0',
+    });
+    assert.equal(cfg.sources['apps.foo.contract_version'], 'code-default');
+    assert.equal(
+      cfg.sources['apps.foo.subscribes'],
+      'env:AGENT_OS_APPS_FOO_SUBSCRIBES',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('env-only apps.<id> converges on the same defaulted shape as a YAML entry', () => {
   const tmp = freshTmp();
   try {
@@ -3459,6 +3489,10 @@ test('env-only apps.<id> converges on the same defaulted shape as a YAML entry',
       contract_version: '1.0',
     });
     assert.deepEqual(cfg.get('apps.foo.subscribes'), []);
+    assert.equal(
+      cfg.sources['apps.foo.contract_version'],
+      'code-default (env-registered app)',
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

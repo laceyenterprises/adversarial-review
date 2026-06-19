@@ -1937,7 +1937,10 @@ function validateDictPresentKeysOnly(
             null,
             tolerateUnknown,
           );
-          out[childKey] = { ...buildDefaultsDict(extraSchema), ...validatedExtra };
+          // Keyed-map defaults are backfilled after all layers merge so default
+          // provenance can distinguish file-declared entries from env-created
+          // entries without treating app ids as dotted paths.
+          out[childKey] = validatedExtra;
         } else {
           out[childKey] = checkLeaf(raw, extraSchema, full, childSource);
         }
@@ -2417,15 +2420,20 @@ function dynamicAppEnvAliases(env) {
   return out;
 }
 
-// App ids introduced purely through `AGENT_OS_APPS_*` env aliases (no file
-// layer declared them). Used to tag backfilled defaults with a distinct
-// trace source so an env-materialized app is auditable.
+// App ids mentioned by `AGENT_OS_APPS_*` env aliases. The caller compares this
+// set against the already-merged file/local app ids to find entries materialized
+// purely by env and tag their backfilled defaults distinctly.
 function dynamicAppEnvIds(env) {
   const ids = new Set();
   for (const [, info] of dynamicAppEnvAliases(env)) {
     if (info.appId) ids.add(info.appId);
   }
   return ids;
+}
+
+function ownMapEntryIds(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return new Set();
+  return new Set(Object.keys(value));
 }
 
 // Yields [parentPath, extraSchema] for every non-strict dict that declares an
@@ -2792,6 +2800,7 @@ export function loadConfig({
   }
 
   // --- Layer 5: env vars ---
+  const appIdsBeforeEnv = ownMapEntryIds(getLeaf(merged, 'apps'));
   const dynamicAppIds = dynamicAppEnvIds(envView);
   const envAliasEntries = [
     ...Object.entries(ENV_ALIASES),
@@ -2846,9 +2855,13 @@ export function loadConfig({
     }
   }
 
+  const envMaterializedAppIds = new Set(
+    [...dynamicAppIds].filter((appId) => !appIdsBeforeEnv.has(appId)),
+  );
+
   // Backfill defaults into keyed-map entries (e.g. env-only `apps.<id>`) so
   // env- and YAML-declared entries converge on the same defaulted shape.
-  backfillExtraKeyEntryDefaults(merged, schema, dynamicAppIds, trace);
+  backfillExtraKeyEntryDefaults(merged, schema, envMaterializedAppIds, trace);
 
   const sources = {};
   for (const [key, entries] of Object.entries(trace)) {

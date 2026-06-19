@@ -50,6 +50,31 @@ test('commit vocabulary fatigue strips ing and ed suffixes only', () => {
   assert.equal(finding?.count, 3);
 });
 
+test('commit vocabulary fatigue strips conventional-commit punctuation', () => {
+  const finding = detectCommitVocabularyFatigue([
+    '[codex] fix: watcher prompt context',
+    '[codex] Fix reviewer prompt context',
+    '[codex] fix, reviewer tests',
+    '[codex] Close',
+    '[codex] Tighten',
+  ], { windowCommits: 5, minRepeats: 3 });
+
+  assert.equal(finding?.stem, 'fix');
+  assert.equal(finding?.count, 3);
+});
+
+test('commit vocabulary fatigue does not collapse short ed/ing verbs', () => {
+  const finding = detectCommitVocabularyFatigue([
+    '[codex] Speed reviewer path',
+    '[codex] Embed prompt evidence',
+    '[codex] Bring docs along',
+    '[codex] Fix tests',
+    '[codex] Add guardrail',
+  ], { windowCommits: 5, minRepeats: 3 });
+
+  assert.equal(finding, null);
+});
+
 test('commit vocabulary fatigue waits for full window', () => {
   const finding = detectCommitVocabularyFatigue([
     '[codex] Harden',

@@ -281,6 +281,35 @@ Invalid non-empty override values are configuration errors. The runtime must
 not silently fall back from an invalid value because that can route work to an
 expensive, unavailable, or intentionally locked-out agent.
 
+## Codex Runaway Guardrails
+
+Before spawning a GitHub-PR reviewer, the watcher evaluates the Codex runaway
+guardrail block at `agent_control.codex_runaway_guardrails`. The vocabulary
+fatigue guardrail reads recent PR commit subjects with
+`fetchPullRequestCommitSubjects(repo, prNumber)`, normalizes the first
+non-builder-tag word of each subject, and emits an informational
+`remediation-vocabulary-fatigue` finding when one verb stem dominates the
+configured recent window.
+
+The finding is reviewer-facing context, not a merge gate. The watcher threads
+the finding into reviewer spawn metadata and `src/reviewer.mjs` renders it into
+the reviewer prompt as a non-blocking soft churn signal. Reviewers may use that
+context when judging whether the diff shows runaway remediation churn or
+repeated superficial edits, but the finding is not itself a blocking issue and
+must not make the merge-agent blocker count non-zero.
+
+The strict CFG knobs are:
+
+- `agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits`
+  (default `5`, minimum `1`): how many most-recent commit subjects are inspected.
+- `agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats`
+  (default `3`, minimum `1`): how many occurrences of one normalized stem are
+  required before the finding is emitted.
+
+Commit-subject lookup is fail-open. If config loading or GitHub commit-subject
+fetching fails, the watcher logs the degraded scan and continues the reviewer
+spawn without the informational finding.
+
 ## Launcher Secret Resolution
 
 The airlock watcher and follow-up LaunchAgents set

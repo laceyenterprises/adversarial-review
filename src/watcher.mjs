@@ -2541,8 +2541,11 @@ function normalizeVocabularyFatigueStem(subject) {
   const withoutPrefix = String(subject || '').replace(/^\[[^\]]*\]\s+/, '').trim();
   const firstWord = withoutPrefix.split(/\s+/, 1)[0]?.trim();
   if (!firstWord) return null;
-  return firstWord
+  const normalized = firstWord
     .toLowerCase()
+    .replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
+  if (normalized.length <= 5) return normalized || null;
+  return normalized
     .replace(/ing$/, '')
     .replace(/ed$/, '');
 }

@@ -29,6 +29,8 @@ function eligibleFixture(overrides = {}) {
     remediationPending: false,
     blockingFindingState: 'known',
     blockingFindingCount: 0,
+    nonBlockingFindingState: 'known',
+    nonBlockingFindingCount: 0,
     operatorApprovedEvidence: null,
     prAuthor: 'codex-worker-bot',
     reviewerFamily: 'claude',

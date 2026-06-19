@@ -2830,6 +2830,7 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
             enabled: false
             worker_class: codex
             merge_method: squash
+            strict_non_blocking_remediation: false
             eligibility:
               risk_classes: ["low"]
               fast_merge_labels:
@@ -2844,6 +2845,8 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
     assert.equal(cfg.get('roles.adversarial.merge_authority.enabled'), false);
     assert.equal(cfg.get('roles.adversarial.merge_authority.worker_class'), 'codex');
     assert.equal(cfg.get('roles.adversarial.merge_authority.merge_method'), 'squash');
+    assert.equal(cfg.get('roles.adversarial.merge_authority.strict_non_blocking_remediation'), false);
+    assert.equal(cfg.getMergeAuthorityConfig().strictNonBlockingRemediation, false);
     assert.deepEqual(cfg.get('roles.adversarial.merge_authority.eligibility.risk_classes'), ['low']);
     assert.deepEqual(
       cfg.get('roles.adversarial.merge_authority.eligibility.fast_merge_labels'),

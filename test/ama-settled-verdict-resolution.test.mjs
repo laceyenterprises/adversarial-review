@@ -446,6 +446,8 @@ function eligibilityFor(settledReview, { riskClass = 'low' } = {}) {
     operatorApprovedEvidence: null,
     blockingFindingCount: settledReview.blockingFindingCount,
     blockingFindingState: settledReview.blockingFindingState,
+    nonBlockingFindingCount: settledReview.nonBlockingFindingCount,
+    nonBlockingFindingState: settledReview.nonBlockingFindingState,
     prAuthor: 'codex-worker-bot',
   };
   const prMetadata = {

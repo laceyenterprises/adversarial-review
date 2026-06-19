@@ -48,7 +48,11 @@ import {
 } from './role-config.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE, loadConfigCached } from './config-loader.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
-import { isNoneFindingsSentinelOnly, parseBlockingFindingsSection } from './kernel/remediation-reply.mjs';
+import {
+  isNoneFindingsSentinelOnly,
+  parseBlockingFindingsSection,
+  parseNonBlockingFindingsSection,
+} from './kernel/remediation-reply.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 import {
   readLatestWorkerRunStatusFromLedger,
@@ -5035,6 +5039,52 @@ function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
     : { count: 1, state: 'known' };
 }
 
+// NOTE on the count strategy (review finding 2026-06-19, intentional divergence
+// from classifyBlockingFindings): classifyBlockingFindings falls back to a BINARY
+// (0/1) "is anything present" count because the gate only needs to know whether a
+// blocker exists. Non-blocking is deliberately counted more granularly here —
+// every top-level `- **...**` bullet — because the count is surfaced to operators
+// in trace.verdict.nonBlockingFindings.count as the honest "how many polish items
+// remain" signal. The canonical parseNonBlockingFindingsSection counts only
+// File-tagged STRUCTURED findings (a subset), so using it as the primary count
+// would UNDER-report (e.g. 1 vs 2 for two bullets where only one carries a File:
+// line). The strict gate consumes only `count > 0`, so the exact value never
+// changes a direct-close decision; HAM terminal-remediation reconciles against the
+// audit comment's own declared findings (validateHamFindingMap), not this number.
+// Keeping the granular bullet count is therefore both more accurate for the
+// operator-facing trace and decision-neutral for the gate.
+function classifyNonBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
+  const text = String(reviewBody ?? '');
+  if (!text.trim()) return { count: 0, state: 'unknown' };
+
+  const match = text.match(/##\s+Non[-\s]+blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
+  const normalizedVerdict = normalizeReviewVerdict(lastVerdict);
+  const verdictKey = normalizedVerdict === 'unknown'
+    ? String(lastVerdict || '').trim().toLowerCase()
+    : normalizedVerdict;
+  if (!match) {
+    return verdictKey === 'approved' || verdictKey === 'comment-only'
+      ? { count: 0, state: 'known' }
+      : { count: 0, state: 'unknown' };
+  }
+
+  const section = match[1].trim();
+  if (!section) return { count: 0, state: 'known' };
+  if (isNoneFindingsSentinelOnly(section)) return { count: 0, state: 'known' };
+
+  const topLevelFindingBullets = section
+    .split(/\n/)
+    .filter((line) => /^-\s+\*\*.+?\*\*/.test(line));
+  if (topLevelFindingBullets.length > 0) {
+    return { count: topLevelFindingBullets.length, state: 'known' };
+  }
+  const parsed = parseNonBlockingFindingsSection(reviewBody);
+  return {
+    count: parsed && parsed.length > 0 ? parsed.length : 1,
+    state: 'known',
+  };
+}
+
 function readMergeAgentReviewFailureState(rootDir, { repo, prNumber, headSha = null } = {}) {
   return readMergeAgentReviewFailureStateWithDb(rootDir, null, { repo, prNumber, headSha });
 }
@@ -5152,6 +5202,7 @@ export {
   buildScopedOperatorApproval,
   buildScopedMergeAgentRequest,
   classifyBlockingFindings,
+  classifyNonBlockingFindings,
   describeStaleDispatch,
   scanStuckMergeAgentDispatches,
   isTerminalMergeAgentCancelDetail,

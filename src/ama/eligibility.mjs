@@ -105,6 +105,8 @@ export const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @property {OperatorApprovalEvidence?} operatorApprovedEvidence Latest current-head, attributable operator-approved label evidence.
  * @property {number=}                   blockingFindingCount     Structured blocking-finding count from the latest current-head review.
  * @property {string=}                   blockingFindingState     `'known'` when the count is trustworthy; `'unknown'` or missing fail closed.
+ * @property {number=}                   nonBlockingFindingCount  Structured non-blocking-finding count from the latest current-head review.
+ * @property {string=}                   nonBlockingFindingState  `'known'` when the count is trustworthy; `'unknown'` or missing fail closed in strict mode.
  * @property {string=}                   prAuthor                 PR author login — audit-only in the current single-operator contract.
  * @property {string=}                   reviewerFamily           'codex' | 'claude' — audit-only field.
  */
@@ -136,6 +138,7 @@ export const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @property {boolean} enabled
  * @property {string}  workerClass
  * @property {string}  mergeMethod
+ * @property {boolean=} strictNonBlockingRemediation
  * @property {Object}  eligibility
  * @property {string[]} eligibility.riskClasses
  * @property {string[]} eligibility.fastMergeLabels
@@ -366,6 +369,18 @@ function classifyBlockingFindings(reviewState) {
     return { count: 0, known: false, state: 'unknown' };
   }
   const rawCount = Number(reviewState?.blockingFindingCount);
+  if (!Number.isFinite(rawCount) || rawCount < 0) {
+    return { count: 0, known: false, state: 'unknown' };
+  }
+  return { count: rawCount, known: true, state };
+}
+
+function classifyNonBlockingFindings(reviewState) {
+  const state = String(reviewState?.nonBlockingFindingState || '').trim().toLowerCase();
+  if (state !== 'known') {
+    return { count: 0, known: false, state: 'unknown' };
+  }
+  const rawCount = Number(reviewState?.nonBlockingFindingCount);
   if (!Number.isFinite(rawCount) || rawCount < 0) {
     return { count: 0, known: false, state: 'unknown' };
   }
@@ -718,8 +733,10 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   if (!headMatchOk) reasons.push('stale-review-head');
 
   const blockingFindings = classifyBlockingFindings(reviewState);
+  const nonBlockingFindings = classifyNonBlockingFindings(reviewState);
   const remediationStateKnown = typeof reviewState?.remediationPending === 'boolean';
   const remediationPending = reviewState?.remediationPending === true;
+  const strictNonBlockingRemediation = cfg?.strictNonBlockingRemediation !== false;
 
   // SPEC §4.2 #1 — settled-success verdict OR operator-approved override.
   const verdictNormalized = String(reviewState?.verdict || '').toLowerCase();
@@ -727,7 +744,11 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     SETTLED_SUCCESS_VERDICTS.has(verdictNormalized) &&
     remediationPending === false &&
     blockingFindings.known &&
-    blockingFindings.count === 0;
+    blockingFindings.count === 0 &&
+    (
+      !strictNonBlockingRemediation ||
+      (nonBlockingFindings.known && nonBlockingFindings.count === 0)
+    );
   if (!settledSuccess && !operatorOverride) {
     reasons.push('verdict-not-settled-success');
   }
@@ -743,6 +764,29 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     reasons.push('blocking-findings-unknown');
   } else if (!operatorOverride && blockingFindings.count > 0) {
     reasons.push('blocking-findings-present');
+  }
+  if (
+    strictNonBlockingRemediation &&
+    !operatorOverride &&
+    SETTLED_SUCCESS_VERDICTS.has(verdictNormalized) &&
+    remediationPending === false &&
+    blockingFindings.known &&
+    blockingFindings.count === 0 &&
+    !nonBlockingFindings.known
+  ) {
+    reasons.push('non-blocking-findings-unknown');
+  }
+  if (
+    strictNonBlockingRemediation &&
+    !operatorOverride &&
+    SETTLED_SUCCESS_VERDICTS.has(verdictNormalized) &&
+    remediationPending === false &&
+    blockingFindings.known &&
+    blockingFindings.count === 0 &&
+    nonBlockingFindings.known &&
+    nonBlockingFindings.count > 0
+  ) {
+    reasons.push('non-blocking-findings-present');
   }
 
   // SPEC §4.2 #3 — risk-class allowlist OR adversarial-merge-requested
@@ -867,6 +911,8 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     'verdict-not-settled-success',
     'blocking-findings-present',
     'blocking-findings-unknown',
+    'non-blocking-findings-unknown',
+    'non-blocking-findings-present',
   ]);
   const finalHammerVerdictWaiverAllowed =
     operatorOverride === true;
@@ -880,6 +926,8 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     'remediation-state-unknown',
     'blocking-findings-present',
     'blocking-findings-unknown',
+    'non-blocking-findings-unknown',
+    'non-blocking-findings-present',
   ]);
   if (hamTerminalRemediation.active && hamTerminalRemediation.ok) {
     const inputReasons = effectiveReasons;
@@ -917,6 +965,8 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       remediationPending,
       remediationStateKnown,
       blockingFindings,
+      nonBlockingFindings,
+      strictNonBlockingRemediation,
     },
     finalHammer: {
       active: reviewCycleExhausted,
@@ -979,6 +1029,7 @@ export const __testables__ = {
   presentHardStopLabels,
   classifyCiGreen,
   classifyBlockingFindings,
+  classifyNonBlockingFindings,
   classifyFastMergeState,
   branchProtectionRequiresGate,
   resolveRequiredGateContext,

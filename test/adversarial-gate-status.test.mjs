@@ -906,13 +906,13 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
       remediation_pending: 0,
       reviewer: 'claude',
       reviewer_login: 'claude-reviewer-lacey',
-      // The closer resolves blocking-findings from the SAME authoritative
+      // The closer resolves blocking/non-blocking findings from the SAME authoritative
       // current-head body it resolves the verdict from
       // (`resolveSettledReviewVerdict`), NOT from an injected
       // `dispatchJob.blockingFindingState`. A settled `Comment only` body whose
-      // `## Blocking Issues` section is `- None.` is `known: 0`.
+      // finding sections are `- None.` is `known: 0`.
       reviewer_head_sha: 'abc123',
-      review_body: '## Summary\nLooks fine.\n\n## Verdict\nComment only\n\n## Blocking Issues\n\n- None.',
+      review_body: '## Summary\nLooks fine.\n\n## Verdict\nComment only\n\n## Blocking Issues\n\n- None.\n\n## Non-blocking Issues\n\n- None.',
     }),
     // dispatchJob blocker fields are intentionally stale here: they are no
     // longer the source of truth for the closer's blocking-findings axis.
@@ -947,7 +947,7 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
     // return the same settled comment-only body on the head so the authoritative
     // path resolves `known: 0`.
     fetchLatestHeadReviewBodiesImpl: async () => [
-      '## Summary\nLooks fine.\n\n## Verdict\nComment only\n\n## Blocking Issues\n\n- None.',
+      '## Summary\nLooks fine.\n\n## Verdict\nComment only\n\n## Blocking Issues\n\n- None.\n\n## Non-blocking Issues\n\n- None.',
     ],
     loadConfigImpl: () => ({
       getMergeAuthorityConfig() {
@@ -963,6 +963,8 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
   assert.equal(result.dispatched, false);
   assert.equal(observed.reviewState.blockingFindingCount, 0);
   assert.equal(observed.reviewState.blockingFindingState, 'known');
+  assert.equal(observed.reviewState.nonBlockingFindingCount, 0);
+  assert.equal(observed.reviewState.nonBlockingFindingState, 'known');
   // A mergeable PR (mergeable=MERGEABLE, mergeStateStatus=CLEAN) must resolve to
   // 'MERGEABLE' so the eligibility gate (which compares against 'MERGEABLE')
   // passes. The prior mapping yielded 'CLEAN' here, which !== 'MERGEABLE' and

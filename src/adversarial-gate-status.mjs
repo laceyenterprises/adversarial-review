@@ -8,6 +8,7 @@ import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import {
   buildScopedOperatorApproval,
   classifyBlockingFindings,
+  classifyNonBlockingFindings,
   extractReviewVerdict,
   findLatestFollowUpJobForPR,
   normalizeFollowUpJobStatus,
@@ -163,7 +164,12 @@ function extractReviewBodyFromRow(reviewRow) {
 // classify (non-posted row, stale head, remediation-pending, live-lookup
 // failure). The AMA gate fails closed on `unknown`; never synthesize `known:0`
 // out of nothing.
-const UNKNOWN_BLOCKERS = { blockingFindingState: 'unknown', blockingFindingCount: 0 };
+const UNKNOWN_BLOCKERS = {
+  blockingFindingState: 'unknown',
+  blockingFindingCount: 0,
+  nonBlockingFindingState: 'unknown',
+  nonBlockingFindingCount: 0,
+};
 
 /**
  * Classify standing blocking findings from the SAME authoritative body the
@@ -175,8 +181,14 @@ const UNKNOWN_BLOCKERS = { blockingFindingState: 'unknown', blockingFindingCount
  */
 function classifyBlockersFromBody(body, verdict) {
   if (!String(body ?? '').trim()) return { ...UNKNOWN_BLOCKERS };
-  const { count, state } = classifyBlockingFindings(body, { lastVerdict: verdict || null });
-  return { blockingFindingState: state, blockingFindingCount: count };
+  const blocking = classifyBlockingFindings(body, { lastVerdict: verdict || null });
+  const nonBlocking = classifyNonBlockingFindings(body, { lastVerdict: verdict || null });
+  return {
+    blockingFindingState: blocking.state,
+    blockingFindingCount: blocking.count,
+    nonBlockingFindingState: nonBlocking.state,
+    nonBlockingFindingCount: nonBlocking.count,
+  };
 }
 
 function resolveSettledReviewVerdict(

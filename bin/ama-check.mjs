@@ -28,7 +28,10 @@ import {
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from '../src/follow-up-jobs.mjs';
-import { classifyBlockingFindings } from '../src/follow-up-merge-agent.mjs';
+import {
+  classifyBlockingFindings,
+  classifyNonBlockingFindings,
+} from '../src/follow-up-merge-agent.mjs';
 import { normalizeGithubMergeability } from '../src/github-mergeability.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from '../src/ama/reviewer-authority.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from '../src/kernel/verdict.mjs';
@@ -40,6 +43,8 @@ import { extractReviewVerdict, normalizeReviewVerdict } from '../src/kernel/verd
 const UNKNOWN_BLOCKERS = Object.freeze({
   blockingFindingState: 'unknown',
   blockingFindingCount: 0,
+  nonBlockingFindingState: 'unknown',
+  nonBlockingFindingCount: 0,
 });
 
 const SUBMITTED_REVIEW_STATES = new Set(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']);
@@ -100,10 +105,18 @@ function classifyBlockersFromReviewBody(body, verdict) {
   const text = String(body ?? '');
   if (!text.trim()) return { ...UNKNOWN_BLOCKERS };
   if (!BLOCKING_SECTION_HEADING_RE.test(text)) return { ...UNKNOWN_BLOCKERS };
-  const { count, state } = classifyBlockingFindings(text, {
+  const blocking = classifyBlockingFindings(text, {
     lastVerdict: verdict || null,
   });
-  return { blockingFindingState: state, blockingFindingCount: count };
+  const nonBlocking = classifyNonBlockingFindings(text, {
+    lastVerdict: verdict || null,
+  });
+  return {
+    blockingFindingState: blocking.state,
+    blockingFindingCount: blocking.count,
+    nonBlockingFindingState: nonBlocking.state,
+    nonBlockingFindingCount: nonBlocking.count,
+  };
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -276,7 +289,12 @@ function buildReviewState({
   // `verdict-not-settled-success` and deferring every settled-success closure
   // (the watcher's eligibility pass set these from the durable job, so it
   // passed while this pre-merge re-verification always failed closed).
-  const { blockingFindingState, blockingFindingCount } = authoritativeReview
+  const {
+    blockingFindingState,
+    blockingFindingCount,
+    nonBlockingFindingState,
+    nonBlockingFindingCount,
+  } = authoritativeReview
     ? (verdict
       ? classifyBlockersFromReviewBody(authoritativeReview.review.body, verdict)
       : { ...UNKNOWN_BLOCKERS })
@@ -314,6 +332,8 @@ function buildReviewState({
     // `blockingFindingState === 'known'` AND `blockingFindingCount === 0`.
     blockingFindingState,
     blockingFindingCount,
+    nonBlockingFindingState,
+    nonBlockingFindingCount,
     operatorApprovedEvidence: opApprovedEvent?.commit_id
       ? {
           applied: true,

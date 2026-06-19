@@ -4469,8 +4469,19 @@ async function maybeDispatchAmaClosureFor({
     riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || ledgerRiskClass || 'unknown').toLowerCase(),
     remediationPending: gateSnapshot.settledReview?.remediationPending,
     reviewCycleExhausted,
+    // Blocking/non-blocking findings classification MUST come from the same
+    // authoritative current-head body that `gateSnapshot.settledReview` resolved
+    // the verdict from (live head body when reconciled, else the stored job/row
+    // body). Reading the dispatchJob body instead defaults to 'unknown' for a
+    // clean `comment-only` review with no remediation job and makes the closer
+    // fail `blocking-findings-unknown` and never merge (live on agent-os#1856).
+    // `gateSnapshot.settledReview` always carries these keys; fall back to
+    // 'unknown' only if absent (fail-closed). The non-blocking pair is the
+    // HAM-STRICT strict-remediation gate input (read from the same source).
     blockingFindingCount: Number(gateSnapshot.settledReview?.blockingFindingCount ?? 0),
     blockingFindingState: String(gateSnapshot.settledReview?.blockingFindingState || 'unknown').trim().toLowerCase(),
+    nonBlockingFindingCount: Number(gateSnapshot.settledReview?.nonBlockingFindingCount ?? 0),
+    nonBlockingFindingState: String(gateSnapshot.settledReview?.nonBlockingFindingState || 'unknown').trim().toLowerCase(),
     operatorApprovedEvidence: operatorApprovalEvent
       ? {
           applied: true,

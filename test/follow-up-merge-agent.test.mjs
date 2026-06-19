@@ -29,6 +29,7 @@ import {
   TERMINAL_WORKER_RUN_STATUSES,
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
+  classifyNonBlockingFindings,
   detectAgentOsPresence,
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
@@ -62,6 +63,72 @@ import './helpers/role-config-cache-reset.mjs';
 // stub. New OSS-skip behavior is exercised by its own dedicated tests.
 const AGENT_OS_PRESENT_STUB = () => ({ present: true, source: 'test' });
 const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
+
+test('classifyNonBlockingFindings counts top-level non-blocking issue bullets', () => {
+  const body = [
+    '## Summary',
+    'Looks close.',
+    '',
+    '## Blocking Issues',
+    '- None.',
+    '',
+    '## Non-blocking issues',
+    '- **Docs note is stale.** Refresh the docs.',
+    '  - File: README.md',
+    '- **Cleanup can be tighter.** Remove the dead helper.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+  assert.deepEqual(
+    classifyNonBlockingFindings(body, { lastVerdict: 'comment-only' }),
+    { count: 2, state: 'known' },
+  );
+});
+
+test('classifyNonBlockingFindings treats None and omitted settled sections as known zero', () => {
+  const noneBody = [
+    '## Summary',
+    'Clean.',
+    '',
+    '## Non-blocking Issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Approved',
+  ].join('\n');
+  const omittedBody = [
+    '## Summary',
+    'Clean.',
+    '',
+    '## Blocking Issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Approved',
+  ].join('\n');
+  assert.deepEqual(
+    classifyNonBlockingFindings(noneBody, { lastVerdict: 'approved' }),
+    { count: 0, state: 'known' },
+  );
+  assert.deepEqual(
+    classifyNonBlockingFindings(omittedBody, { lastVerdict: 'approved' }),
+    { count: 0, state: 'known' },
+  );
+});
+
+test('classifyNonBlockingFindings fails closed on blank or non-settled sectionless bodies', () => {
+  assert.deepEqual(
+    classifyNonBlockingFindings('', { lastVerdict: 'comment-only' }),
+    { count: 0, state: 'unknown' },
+  );
+  assert.deepEqual(
+    classifyNonBlockingFindings('## Summary\nNeeds work.\n## Verdict\nRequest changes', {
+      lastVerdict: 'request-changes',
+    }),
+    { count: 0, state: 'unknown' },
+  );
+});
 
 function createWorkerRunsLedgerDb(dbPath, rows = []) {
   mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -1948,6 +2015,26 @@ test('buildMergeAgentDispatchJob counts standing blocking findings from the late
   assert.equal(dispatchJob.blockingFindingState, 'known');
 });
 
+test('classifyNonBlockingFindings counts only top-level bold finding bullets', () => {
+  const result = classifyNonBlockingFindings([
+    '## Summary',
+    'Looks good with follow-up.',
+    '## Blocking Issues',
+    '- None.',
+    '## Non-blocking Issues',
+    '- **Drift in stale doc**',
+    '  - **File:** README.md',
+    '  - **Lines:** 10-12',
+    '  - **Problem:** The note is stale.',
+    '  - **Why it matters:** Audit readers see the wrong behavior.',
+    '  - **Recommended fix:** Update the paragraph.',
+    '## Verdict',
+    'Comment only',
+  ].join('\n'), { lastVerdict: 'Comment only' });
+
+  assert.deepEqual(result, { count: 1, state: 'known' });
+});
+
 test('buildMergeAgentDispatchJob fails safe to >=1 for a non-None blocking section the parser cannot itemize', () => {
   // Defense-in-depth: if the reviewer writes a malformed/incomplete blocking
   // card the structured parser cannot itemize, we must NOT treat the section as
@@ -2300,6 +2387,7 @@ test('dispatchMergeAgentForPR records only successful launches and parses traili
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqCalls = [];
   const env = {
+    ...HERMETIC_CONFIG_ENV,
     MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
     MERGE_AGENT_HQ_PROJECT: 'merge-project',
   };
@@ -2353,6 +2441,7 @@ test('dispatchMergeAgentForPR is mode-invariant for merge-class dispatch', async
       orchestrationMode,
       logger,
       env: {
+        ...HERMETIC_CONFIG_ENV,
         MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
         MERGE_AGENT_HQ_PROJECT: 'merge-project',
       },
@@ -2391,6 +2480,7 @@ test('dispatchMergeAgentForPR uses the critical lane only for merge-agent-reques
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqCalls = [];
   const env = {
+    ...HERMETIC_CONFIG_ENV,
     MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
     MERGE_AGENT_HQ_PROJECT: 'merge-project',
   };
@@ -2547,7 +2637,7 @@ test('dispatchMergeAgentForPR tears down terminal original worker before merge-a
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
     rootDir,
     ...makeJob({ branch }),
-    env: { HQ_ROOT: hqRoot, USER: 'airlock' },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: hqRoot, USER: 'airlock' },
     prepareOriginalWorkerImpl: (opts) => prepareOriginalWorkerForMergeAgent({
       ...opts,
       lookupRunStatusImpl: async () => ({
@@ -2604,7 +2694,7 @@ test('dispatchMergeAgentForPR tears down failed original workers because they ar
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
     rootDir,
     ...makeJob({ branch }),
-    env: { HQ_ROOT: hqRoot, USER: 'airlock' },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: hqRoot, USER: 'airlock' },
     prepareOriginalWorkerImpl: (opts) => prepareOriginalWorkerForMergeAgent({
       ...opts,
       lookupRunStatusImpl: async () => ({
@@ -2654,7 +2744,7 @@ test('dispatchMergeAgentForPR defers merge-agent dispatch while original worker 
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
     rootDir,
     ...makeJob({ branch }),
-    env: { HQ_ROOT: hqRoot },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: hqRoot },
     prepareOriginalWorkerImpl: (opts) => prepareOriginalWorkerForMergeAgent({
       ...opts,
       lookupRunStatusImpl: async () => ({
@@ -2794,7 +2884,7 @@ test('dispatchMergeAgentForPR is idempotent when original worker is already torn
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
     rootDir,
     ...makeJob({ branch: `${originalWorkerId}/LAC-662-already-torn-down` }),
-    env: { HQ_ROOT: hqRoot },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: hqRoot },
     execFileImpl: async (cmd, args) => {
       hqCalls.push({ cmd, args: [...args] });
       return { stdout: '{"dispatchId":"disp_idempotent","lrq":"lrq_idempotent"}\n' };
@@ -2851,7 +2941,7 @@ test('dispatchMergeAgentForPR skips original-worker teardown when HQ_ROOT is uns
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
     rootDir,
     ...makeJob({ branch: 'codex-lac-663/LAC-663-no-hq-root' }),
-    env: { HQ_ROOT: '' },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: '' },
     logger: { info: (line) => logs.push(JSON.parse(line)) },
     execFileImpl: async (cmd, args) => {
       hqCalls.push({ cmd, args: [...args] });
@@ -2975,7 +3065,7 @@ test('prepareOriginalWorkerForMergeAgent fails closed when runtime user cannot b
   const result = await prepareOriginalWorkerForMergeAgent({
     job: makeJob({ branch }),
     hqPath: 'hq',
-    env: { HQ_ROOT: hqRoot },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: hqRoot },
     logger: { info: (line) => logs.push(JSON.parse(line)) },
     runtimeUserImpl: () => null,
     lookupRunStatusImpl: async () => ({
@@ -5482,7 +5572,7 @@ test('dispatchMergeAgentForPR defers override-triggered dispatch when orphan-wor
       remediationCurrentRound: 0,
       remediationMaxRounds: 0,
     }),
-    env: { HQ_ROOT: hqRoot },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: hqRoot },
     prepareOriginalWorkerImpl: (opts) => prepareOriginalWorkerForMergeAgent({
       ...opts,
       lookupRunStatusImpl: async () => ({

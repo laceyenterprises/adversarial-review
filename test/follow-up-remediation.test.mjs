@@ -4294,6 +4294,8 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
       assert.equal(result.job.remediationWorker.launchRequestId, `lrq_${result.job.jobId}`);
       assert.equal(result.job.remediationWorker.dispatchId, `dispatch_${result.job.jobId}`);
       assert.equal(result.job.remediationWorker.requestId, result.job.jobId);
+      assert.equal(result.job.remediationWorker.watchUrl, `agent-os://watch/lrq_${result.job.jobId}`);
+      assert.equal(result.job.remediationWorker.auditRef, `agent-os://audit/${result.job.jobId}`);
       assert.equal(result.job.remediationWorker.completionShape, 'branch-push');
       assert.equal(result.job.branch, 'codex/fix-pr-71');
       assert.equal(commands.some((entry) => entry[0] === 'hq' && entry[1] === 'dispatch' && entry[2] !== 'status'), false);
@@ -5116,8 +5118,13 @@ test('consumeNextFollowUpJob lets legacy HQ flag override native orchestration m
       assert.equal(result.job.remediationPlan.dispatchPath, 'hq');
       assert.equal(result.job.remediationWorker.dispatchMode, 'hq');
       assert.equal(result.job.remediationWorker.completionShape, 'branch-push');
-      assert.equal(dispatchCommand, undefined);
-      assert.match(result.job.remediationWorker.launchRequestId, /^standalone-/);
+      assert.ok(dispatchCommand, 'expected legacy native override to call hq dispatch');
+      assert.ok(dispatchCommand.includes('--completion-shape'));
+      assert.equal(dispatchCommand[dispatchCommand.indexOf('--completion-shape') + 1], 'branch-push');
+      assert.ok(dispatchCommand.includes('--branch'));
+      assert.equal(dispatchCommand[dispatchCommand.indexOf('--branch') + 1], 'codex/fix-pr-78');
+      assert.equal(result.job.remediationWorker.launchRequestId, 'lrq_aom03_override');
+      assert.equal(result.job.remediationWorker.dispatchId, 'dispatch_aom03_override');
       assert.equal(result.job.remediationWorker.requestId, result.job.jobId);
     });
   });

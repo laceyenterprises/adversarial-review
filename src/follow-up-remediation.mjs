@@ -482,6 +482,34 @@ function resolveAdversarialReviewAppMode(env = process.env) {
   return resolveRemediationOrchestrationMode(env) === 'agentos' ? 'agent-os' : 'standalone';
 }
 
+function buildLegacyHqRemediationDispatchArgs({
+  ticketRef,
+  workerClass,
+  repo,
+  prNumber,
+  branch,
+  promptPath,
+  parentSession,
+  project,
+  hqRoot,
+}) {
+  const args = [
+    'dispatch',
+    '--ticket', ticketRef,
+    '--worker-class', workerClass,
+    '--prompt', promptPath,
+    '--completion-shape', 'branch-push',
+    '--parent-session', parentSession,
+    '--project', project,
+    '--task-kind', 'coding',
+    '--repo', repo,
+    '--pr', String(prNumber),
+  ];
+  if (branch) args.push('--branch', branch);
+  args.push('--root', hqRoot);
+  return args;
+}
+
 function resolveRemediationDispatchPathForJob(job, env = process.env) {
   const persisted = String(job?.remediationPlan?.dispatchPath || '').trim();
   if (persisted === 'hq' || persisted === 'bare') {
@@ -1818,25 +1846,43 @@ async function dispatchRemediationViaHq({
   );
   const ticketRef = String(jobId || launchRequestId || `PR-${prNumber}`).trim();
   const requestId = String(jobId || launchRequestId || ticketRef).trim();
-  const os = await connectAppContract({
-    app_id: 'adversarial-review',
-    mode: resolveAdversarialReviewAppMode(env),
-    hqRoot,
-  });
-  const ticket = await os.dispatch({
-    request_id: requestId,
-    ticket_ref: ticketRef,
-    prompt: promptPath,
-    worker_class: workerClass,
-    task_kind: 'coding',
-    completion_shape: 'branch-push',
-    repo,
-    pr_number: prNumber,
-    branch,
-    hq_root: hqRoot,
-    parent_session: parentSession,
-    project,
-  });
+  const appMode = resolveAdversarialReviewAppMode(env);
+  const ticket = appMode === 'agent-os'
+    ? await (async () => {
+        const os = await connectAppContract({
+          app_id: 'adversarial-review',
+          mode: appMode,
+          hqRoot,
+        });
+        return os.dispatch({
+          request_id: requestId,
+          ticket_ref: ticketRef,
+          prompt: promptPath,
+          worker_class: workerClass,
+          task_kind: 'coding',
+          completion_shape: 'branch-push',
+          repo,
+          pr_number: prNumber,
+          branch,
+          hq_root: hqRoot,
+          parent_session: parentSession,
+          project,
+        });
+      })()
+    : parseHqJsonObject(
+        (await execFileImpl(resolveHqBin(env), buildLegacyHqRemediationDispatchArgs({
+          ticketRef,
+          workerClass,
+          repo,
+          prNumber,
+          branch,
+          promptPath,
+          parentSession,
+          project,
+          hqRoot,
+        }), { env })).stdout,
+        'hq dispatch'
+      );
   const launchRequestIdValue = String(ticket?.launch_request_id || ticket?.launchRequestId || ticket?.lrq || '').trim();
   const dispatchId = String(ticket?.dispatch_id || ticket?.dispatchId || launchRequestIdValue).trim();
   if (!launchRequestIdValue) {
@@ -1872,6 +1918,8 @@ async function dispatchRemediationViaHq({
     hqParentSession: parentSession,
     hqProject: project,
     ticketRef,
+    watchUrl: typeof ticket?.watch_url === 'string' ? ticket.watch_url : ticket?.watchUrl,
+    auditRef: typeof ticket?.audit_ref === 'string' ? ticket.audit_ref : ticket?.auditRef,
   };
 }
 

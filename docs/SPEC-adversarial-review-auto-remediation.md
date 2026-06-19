@@ -883,15 +883,27 @@ permission drift is diagnosable without reading a raw stack trace.
 
 ### HQ Branch-Push Remediation Lane
 
-When `ADV_WITH_HQ_INTEGRATION=1`, follow-up remediation dispatches through
-`hq dispatch --completion-shape branch-push` instead of the legacy detached
-local CLI spawn. The durable worker record must still preserve the same
-reconciliation invariants as the local lane:
+When `ADV_WITH_HQ_INTEGRATION=1` or
+`roles.adversarial.orchestration_mode=agentos`, follow-up remediation uses the
+HQ branch-push lane instead of the detached local CLI spawn. In `agentos` mode
+the daemon registers with the App Contract endpoint and dispatches through
+`/v1/dispatch` using a stable `request_id` derived from the follow-up job id.
+That `request_id` is the idempotency key for retrying a claimed remediation
+dispatch after daemon or endpoint failure. In native mode, the legacy
+`ADV_WITH_HQ_INTEGRATION=1` override must remain a real `hq dispatch
+--completion-shape branch-push` subprocess; it must not route into an
+in-memory standalone App Contract session because the worker record would look
+dispatched without a backing worker. The durable worker record must still
+preserve the same reconciliation invariants as the local lane:
 
 - The worker record persists both `launchRequestId` and `dispatchId` from the
   HQ dispatch ticket. `launchRequestId` remains the reply-storage and audit key;
   `dispatchId` is the authoritative handle for `hq dispatch status` and
   `hq dispatch cancel`.
+- App Contract dispatch tickets may also include `watch_url` and `audit_ref`;
+  the daemon persists these as `watchUrl` and `auditRef` on
+  `remediationWorker` so operators retain a structured trace now that the
+  worker record no longer stores a raw `command` array for the HTTP path.
 - HQ branch-push remediation dispatches must pass the PR head ref with
   `--branch <headRefName>`. The daemon resolves and persists that ref from
   GitHub PR metadata before dispatch so the worker attaches to the live PR head

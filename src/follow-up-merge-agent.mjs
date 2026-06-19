@@ -48,7 +48,11 @@ import {
 } from './role-config.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE, loadConfigCached } from './config-loader.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
-import { isNoneFindingsSentinelOnly, parseBlockingFindingsSection } from './kernel/remediation-reply.mjs';
+import {
+  isNoneFindingsSentinelOnly,
+  parseBlockingFindingsSection,
+  parseNonBlockingFindingsSection,
+} from './kernel/remediation-reply.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 import {
   readLatestWorkerRunStatusFromLedger,
@@ -5035,6 +5039,38 @@ function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
     : { count: 1, state: 'known' };
 }
 
+function classifyNonBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
+  const text = String(reviewBody ?? '');
+  if (!text.trim()) return { count: 0, state: 'unknown' };
+
+  const match = text.match(/##\s+Non[-\s]+blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
+  const normalizedVerdict = normalizeReviewVerdict(lastVerdict);
+  const verdictKey = normalizedVerdict === 'unknown'
+    ? String(lastVerdict || '').trim().toLowerCase()
+    : normalizedVerdict;
+  if (!match) {
+    return verdictKey === 'approved' || verdictKey === 'comment-only'
+      ? { count: 0, state: 'known' }
+      : { count: 0, state: 'unknown' };
+  }
+
+  const section = match[1].trim();
+  if (!section) return { count: 0, state: 'known' };
+  if (isNoneFindingsSentinelOnly(section)) return { count: 0, state: 'known' };
+
+  const topLevelFindingBullets = section
+    .split(/\n/)
+    .filter((line) => /^-\s+\*\*.+?\*\*/.test(line.trim()));
+  if (topLevelFindingBullets.length > 0) {
+    return { count: topLevelFindingBullets.length, state: 'known' };
+  }
+  const parsed = parseNonBlockingFindingsSection(reviewBody);
+  return {
+    count: parsed && parsed.length > 0 ? parsed.length : 1,
+    state: 'known',
+  };
+}
+
 function readMergeAgentReviewFailureState(rootDir, { repo, prNumber, headSha = null } = {}) {
   return readMergeAgentReviewFailureStateWithDb(rootDir, null, { repo, prNumber, headSha });
 }
@@ -5152,6 +5188,7 @@ export {
   buildScopedOperatorApproval,
   buildScopedMergeAgentRequest,
   classifyBlockingFindings,
+  classifyNonBlockingFindings,
   describeStaleDispatch,
   scanStuckMergeAgentDispatches,
   isTerminalMergeAgentCancelDetail,

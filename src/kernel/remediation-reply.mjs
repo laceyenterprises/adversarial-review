@@ -919,6 +919,7 @@ export {
   detectPublicReplyNoiseSignal,
   isNoneFindingsSentinelOnly,
   parseBlockingFindingsSection,
+  parseNonBlockingFindingsSection,
   parseRemediationReply,
   validateRemediationReply,
 };

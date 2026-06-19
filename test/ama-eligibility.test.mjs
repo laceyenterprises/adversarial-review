@@ -22,6 +22,8 @@ function eligibleFixture(overrides = {}) {
     operatorApprovedEvidence: null,
     blockingFindingCount: 0,
     blockingFindingState: 'known',
+    nonBlockingFindingCount: 0,
+    nonBlockingFindingState: 'known',
     prAuthor: 'codex-worker-bot',
     reviewerFamily: 'claude',
     ...overrides.reviewState,
@@ -79,6 +81,87 @@ test('eligible: Comment-only (clean) settled-success is eligible', () => {
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+});
+
+test('not eligible: Comment-only with open non-blocking findings requires remediation in strict mode', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      nonBlockingFindingCount: 1,
+      nonBlockingFindingState: 'known',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('non-blocking-findings-present'));
+  assert.equal(result.trace.verdict.settledSuccess, false);
+  assert.equal(result.trace.verdict.nonBlockingFindings.count, 1);
+});
+
+test('eligible: Comment-only with explicit None non-blocking section remains a direct close', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      nonBlockingFindingCount: 0,
+      nonBlockingFindingState: 'known',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.verdict.settledSuccess, true);
+  assert.deepEqual(result.reasons, []);
+});
+
+test('not eligible: settled-success with unknown non-blocking state fails closed in strict mode', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      nonBlockingFindingCount: 0,
+      nonBlockingFindingState: 'unknown',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.equal(result.trace.verdict.nonBlockingFindings.known, false);
+  assert.equal(result.trace.verdict.settledSuccess, false);
+});
+
+test('eligible: strict_non_blocking_remediation=false ignores non-blocking findings like prior behavior', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      nonBlockingFindingCount: 2,
+      nonBlockingFindingState: 'known',
+    },
+    cfg: { strictNonBlockingRemediation: false },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.verdict.strictNonBlockingRemediation, false);
+  assert.equal(result.trace.verdict.settledSuccess, true);
+});
+
+test('eligible: current-head operator-approved waives strict non-blocking finding gate', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
+    reviewState: {
+      verdict: 'comment-only',
+      nonBlockingFindingCount: 1,
+      nonBlockingFindingState: 'known',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_operator',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.verdict.operatorOverride, true);
+  assert.ok(!result.reasons.includes('non-blocking-findings-present'));
 });
 
 test('eligible: canonical rebase coverage clears stale-review-head', () => {
@@ -1391,7 +1474,18 @@ test('final hammer: waives risk-class for medium not in allowlist with adversari
 // with provenance, audit-comment mapping, live-head checks, and non-waived gates.
 // ---------------------------------------------------------------------------
 
-function hamEvidence({ headSha = 'def67890', parentSha = 'abc12345', audit = true, workerClass = 'hammer' } = {}) {
+function hamEvidence({
+  headSha = 'def67890',
+  parentSha = 'abc12345',
+  audit = true,
+  workerClass = 'hammer',
+  remediatedFindings = '2 addressed (1 blocking, 1 non-blocking)',
+  auditBody = 'HAM audit: addressed Auth path in src/auth.js and docs note in README.md',
+  findings = [
+    { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
+    { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
+  ],
+} = {}) {
   return {
     active: true,
     ticket: 'HAM-02',
@@ -1402,16 +1496,13 @@ function hamEvidence({ headSha = 'def67890', parentSha = 'abc12345', audit = tru
         'Worker-Class': workerClass,
         'Worker-Ticket': 'HAM-02',
         'Closed-By': 'hammer (adversarial-pipe-mode)',
-        'Remediated-Findings': '2 addressed (1 blocking, 1 non-blocking)',
+        'Remediated-Findings': remediatedFindings,
       },
     },
     auditComment: audit
       ? {
-          body: 'HAM audit: addressed Auth path in src/auth.js and docs note in README.md',
-          findings: [
-            { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
-            { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
-          ],
+          body: auditBody,
+          findings,
         }
       : null,
   };
@@ -1426,6 +1517,7 @@ function hamGroundTruth({
   remediatedFindings = '2 addressed (1 blocking, 1 non-blocking)',
   auditAuthor = 'hammer-worker',
   changedFiles = ['src/auth.js'],
+  auditBody = 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
 } = {}) {
   return {
     commit: {
@@ -1442,7 +1534,7 @@ function hamGroundTruth({
     },
     auditComment: audit
       ? {
-          body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+          body: auditBody,
           author: auditAuthor,
           createdAt: '2026-06-13T12:30:00Z',
           id: 'IC_ham_audit',
@@ -1482,6 +1574,38 @@ test('ham terminal remediation: HAM-authored live head over reviewed parent is e
     result.trace.hamTerminalRemediation.waived.sort(),
     ['blocking-findings-present', 'stale-review-head', 'verdict-not-settled-success'].sort(),
   );
+});
+
+test('ham terminal remediation: valid evidence waives strict non-blocking finding gate', () => {
+  const finding = { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true };
+  const auditBody = 'HAM audit: addressed README note is stale in README.md';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+      nonBlockingFindingCount: 1,
+      nonBlockingFindingState: 'known',
+    },
+    prMetadata: { headSha: 'def67890' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({
+      remediatedFindings: '1 addressed (0 blocking, 1 non-blocking)',
+      auditBody,
+      findings: [finding],
+    }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      remediatedFindings: '1 addressed (0 blocking, 1 non-blocking)',
+      auditBody,
+      changedFiles: ['README.md'],
+    }),
+  });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
+  assert.ok(result.trace.hamTerminalRemediation.waived.includes('non-blocking-findings-present'));
+  assert.equal(result.trace.hamTerminalRemediation.addressedFindings.nonBlocking, 1);
 });
 
 test('ham terminal remediation: later non-HAM live head is rejected', () => {

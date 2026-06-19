@@ -776,6 +776,10 @@ function schemaV1() {
                     __default: 'squash',
                     __enum: ['squash', 'merge'],
                   },
+                  strict_non_blocking_remediation: {
+                    __type: TYPE_BOOL,
+                    __default: true,
+                  },
                   eligibility: {
                     __type: TYPE_DICT,
                     __strict: true,
@@ -2401,6 +2405,10 @@ export class AgentOSConfig {
       mergeMethod: this.get(
         'roles.adversarial.merge_authority.merge_method',
         'squash',
+      ),
+      strictNonBlockingRemediation: this.get(
+        'roles.adversarial.merge_authority.strict_non_blocking_remediation',
+        true,
       ),
       eligibility: {
         riskClasses: [...this.get(

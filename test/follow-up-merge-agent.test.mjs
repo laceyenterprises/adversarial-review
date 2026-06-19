@@ -29,6 +29,7 @@ import {
   TERMINAL_WORKER_RUN_STATUSES,
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
+  classifyNonBlockingFindings,
   detectAgentOsPresence,
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
@@ -62,6 +63,72 @@ import './helpers/role-config-cache-reset.mjs';
 // stub. New OSS-skip behavior is exercised by its own dedicated tests.
 const AGENT_OS_PRESENT_STUB = () => ({ present: true, source: 'test' });
 const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
+
+test('classifyNonBlockingFindings counts top-level non-blocking issue bullets', () => {
+  const body = [
+    '## Summary',
+    'Looks close.',
+    '',
+    '## Blocking Issues',
+    '- None.',
+    '',
+    '## Non-blocking issues',
+    '- **Docs note is stale.** Refresh the docs.',
+    '  - File: README.md',
+    '- **Cleanup can be tighter.** Remove the dead helper.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+  assert.deepEqual(
+    classifyNonBlockingFindings(body, { lastVerdict: 'comment-only' }),
+    { count: 2, state: 'known' },
+  );
+});
+
+test('classifyNonBlockingFindings treats None and omitted settled sections as known zero', () => {
+  const noneBody = [
+    '## Summary',
+    'Clean.',
+    '',
+    '## Non-blocking Issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Approved',
+  ].join('\n');
+  const omittedBody = [
+    '## Summary',
+    'Clean.',
+    '',
+    '## Blocking Issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Approved',
+  ].join('\n');
+  assert.deepEqual(
+    classifyNonBlockingFindings(noneBody, { lastVerdict: 'approved' }),
+    { count: 0, state: 'known' },
+  );
+  assert.deepEqual(
+    classifyNonBlockingFindings(omittedBody, { lastVerdict: 'approved' }),
+    { count: 0, state: 'known' },
+  );
+});
+
+test('classifyNonBlockingFindings fails closed on blank or non-settled sectionless bodies', () => {
+  assert.deepEqual(
+    classifyNonBlockingFindings('', { lastVerdict: 'comment-only' }),
+    { count: 0, state: 'unknown' },
+  );
+  assert.deepEqual(
+    classifyNonBlockingFindings('## Summary\nNeeds work.\n## Verdict\nRequest changes', {
+      lastVerdict: 'request-changes',
+    }),
+    { count: 0, state: 'unknown' },
+  );
+});
 
 function createWorkerRunsLedgerDb(dbPath, rows = []) {
   mkdirSync(path.dirname(dbPath), { recursive: true });

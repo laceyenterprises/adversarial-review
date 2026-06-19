@@ -31,7 +31,7 @@ const SETTLED_COMMENT_BODY = [
   '- None.',
   '',
   '## Non-blocking Issues',
-  '- Consider a follow-up.',
+  '- None.',
   '',
   '## Verdict',
   'Comment only',
@@ -174,7 +174,7 @@ function hamCommitFixture({
   };
 }
 
-function writeConfig(tmp, { branchProtectionRequired }) {
+function writeConfig(tmp, { branchProtectionRequired, strictNonBlockingRemediation = true }) {
   const configPath = join(tmp, 'config.yaml');
   writeFileSync(configPath, `\
 version: 1
@@ -182,6 +182,7 @@ roles:
   adversarial:
     merge_authority:
       enabled: true
+      strict_non_blocking_remediation: ${strictNonBlockingRemediation ? 'true' : 'false'}
       eligibility:
         risk_classes: ["low"]
       branch_protection:
@@ -246,11 +247,12 @@ function runAmaCheck(tmp, {
   reviews,
   reviewer = 'codex',
   riskClass = 'low',
+  strictNonBlockingRemediation = true,
   hamTerminalRemediation = null,
   rebaseAssessment = null,
 }) {
   const paths = writeFixtureFiles(tmp, { protectionBody, prPatch, reviews });
-  const configPath = writeConfig(tmp, { branchProtectionRequired });
+  const configPath = writeConfig(tmp, { branchProtectionRequired, strictNonBlockingRemediation });
   const extraArgs = [];
   if (hamTerminalRemediation) {
     paths.hamTerminalRemediation = join(tmp, 'ham-terminal-remediation.json');
@@ -1000,6 +1002,152 @@ test('ama-check classifies a settled comment-only on-head review as eligible (bl
     assert.equal(verdict.trace.verdict.settledSuccess, true);
     assert.ok(!verdict.reasons.includes('blocking-findings-unknown'));
     assert.ok(!verdict.reasons.includes('verdict-not-settled-success'));
+    assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check blocks direct close for settled comment-only with open non-blocking findings', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-nonblocking-present-'));
+  try {
+    const body = [
+      '## Summary',
+      'Looks good with follow-up.',
+      '',
+      '## Blocking Issues',
+      '- None.',
+      '',
+      '## Non-blocking Issues',
+      '- **README note is stale.** Refresh the note.',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n');
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: { labels: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviews: [
+        {
+          state: 'COMMENTED',
+          body,
+          author: AUTHORITATIVE_REVIEWER,
+          submittedAt: '2026-06-15T12:00:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+      ],
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.trace.verdict.nonBlockingFindings.known, true, JSON.stringify(verdict, null, 2));
+    assert.equal(verdict.trace.verdict.nonBlockingFindings.count, 1);
+    assert.ok(verdict.reasons.includes('non-blocking-findings-present'));
+    assert.equal(verdict.eligible, false, JSON.stringify(verdict, null, 2));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check allows Approved settled-success when non-blocking section is omitted', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-approved-no-nonblocking-'));
+  try {
+    const body = [
+      '## Summary',
+      'Clean.',
+      '',
+      '## Blocking Issues',
+      '- None.',
+      '',
+      '## Verdict',
+      'Approved',
+    ].join('\n');
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: { labels: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviews: [
+        {
+          state: 'APPROVED',
+          body,
+          author: AUTHORITATIVE_REVIEWER,
+          submittedAt: '2026-06-15T12:00:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+      ],
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.trace.verdict.nonBlockingFindings.known, true, JSON.stringify(verdict, null, 2));
+    assert.equal(verdict.trace.verdict.nonBlockingFindings.count, 0);
+    assert.equal(verdict.trace.verdict.settledSuccess, true);
+    assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check fails closed when authoritative settled body is blank', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-blank-body-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      prPatch: { labels: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviews: [
+        {
+          state: 'COMMENTED',
+          body: '',
+          author: AUTHORITATIVE_REVIEWER,
+          submittedAt: '2026-06-15T12:00:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+      ],
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.trace.verdict.nonBlockingFindings.known, false, JSON.stringify(verdict, null, 2));
+    assert.equal(verdict.eligible, false, JSON.stringify(verdict, null, 2));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check strict_non_blocking_remediation=false restores prior direct-close behavior', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-nonblocking-strict-off-'));
+  try {
+    const body = [
+      '## Summary',
+      'Looks good with follow-up.',
+      '',
+      '## Blocking Issues',
+      '- None.',
+      '',
+      '## Non-blocking Issues',
+      '- **README note is stale.** Refresh the note.',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n');
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: false,
+      protectionBody: '{ "branchProtectionUnavailable": true, "reason": "github_plan" }\n',
+      strictNonBlockingRemediation: false,
+      prPatch: { labels: [], mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviews: [
+        {
+          state: 'COMMENTED',
+          body,
+          author: AUTHORITATIVE_REVIEWER,
+          submittedAt: '2026-06-15T12:00:00Z',
+          commit: { oid: HEAD_SHA },
+        },
+      ],
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.trace.verdict.strictNonBlockingRemediation, false);
+    assert.equal(verdict.trace.verdict.settledSuccess, true);
     assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
   } finally {
     rmSync(tmp, { recursive: true, force: true });

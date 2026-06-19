@@ -55,6 +55,8 @@ function eligibleFixture(overrides = {}) {
     // a clean settled-success row.
     blockingFindingState: 'known',
     blockingFindingCount: 0,
+    nonBlockingFindingState: 'known',
+    nonBlockingFindingCount: 0,
     operatorApprovedEvidence: null,
     prAuthor: 'codex-worker-bot',
     reviewerFamily: 'claude',

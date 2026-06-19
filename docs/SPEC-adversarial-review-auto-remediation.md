@@ -1373,7 +1373,7 @@ The operator can also force-disable merge-agent on a host that DOES have agent-o
 ### Trigger labels
 
 - `operator-approved` — scoped operator override for the current head SHA. It bypasses review/remediation-state gates, including an active remediation job, but does NOT bypass open-PR, hard-skip, mergeability, or green-check requirements. Consumed (removed from the PR) after a successful dispatch, or after an acknowledged `skip-no-agent-os` when agent-os is missing or merge-agent dispatch is force-disabled.
-- `operator-approved: advisory-only-review` — scoped reviewer-posting override for the current head SHA. When the reviewer-generated head still matches the live PR head and the latest GitHub `LabeledEvent` for this label is attributable to a non-author actor, carries an event id/node id, and is scoped to that head, the reviewer posts an advisory header and does not enqueue a follow-up remediation job. Missing label-event evidence, an `unknown` actor, author self-application, stale head scope, or a reviewer/live-head mismatch all fail closed to normal enforcement mode. Advisory-only still writes the posted review row, so a `Request changes` advisory review remains visible to the adversarial gate; the intended convergence path is operator/manual action or label removal followed by a normal re-review.
+- `operator-approved: advisory-only-review` — scoped reviewer-posting override for the current head SHA. When the reviewer-generated head still matches the live PR head and the latest GitHub `LabeledEvent` for this label is attributable to a non-author actor, carries an event id/node id, and is scoped to that head, the reviewer posts an advisory-only review header and does not enqueue a follow-up remediation job. Missing label-event evidence, an `unknown` actor, author self-application, stale head scope, or a reviewer/live-head mismatch all fail closed to normal enforcement mode. Advisory-only still writes the posted review row, so a `Request changes` advisory review remains visible to the adversarial gate; the intended convergence path is operator/manual action or label removal followed by a normal re-review.
 - `pr-class: additive-only` — PR classification label for diffs that should remain within the additive-only allowlist (`projects/*`, worker-pool post-merge action packs, and audit/postmortem docs). Raw label presence enables enforcement across all PR commits. The reviewer may backfill the label when the initial commit is entirely allowlisted; later out-of-allowlist files produce a structured `scope-violation` finding and suppress automated remediation/merge-agent dispatch.
 - `operator-approved: scope-expand` — scoped additive-only override for the current head SHA. It is accepted only from the latest attributable non-author `LabeledEvent` after the latest observed head-changing timeline event, and the latest observed head SHA must match the live PR head when the event carries a SHA. Author self-application, unknown actors, unknown PR author, stale label order, and head mismatch fail closed. This exact label does not count as the generic `operator-approved` merge override.
 - `adversarial-merge-blocked` — AMA-only hard stop for the current head. It overrides AMA closure even when review, risk, and `operator-approved` would otherwise pass; authors may apply it to block their own PR, and AMA never removes it automatically.
@@ -1383,6 +1383,28 @@ The operator can also force-disable merge-agent on a host that DOES have agent-o
 - `merge-agent-skip`, `do-not-merge`, `no-merge-hold` — hard skips that even an operator-approved or merge-agent-requested label does not bypass. `merge-agent-stuck` is a hard skip by default, but a scoped current-head `merge-agent-requested` label may bypass it for explicit operator recovery.
 
 The `final-pass-on-budget-exhausted` trigger is **not** a label — it is selected automatically by the dispatch decision tree when the env flag is set and the round budget is consumed. There is no GitHub-visible label for it; the audit trail is the dispatch record (`data/follow-up-jobs/merge-agent-dispatches/<repo>-pr-<n>-<headSha>.json`, `trigger`, `priority`, and `priorityFlagSupported` fields) plus the `MERGE_AGENT_DISPATCH_TRIGGER` env var passed to the worker.
+
+Advisory-only review posts use this exact public header shape:
+
+```text
+## Adversarial Review (advisory-only) — <displayName> (<reviewerIdentity>)
+
+**Advisory-only review** — findings below are informational; no automated remediation will run.
+```
+
+Normal enforce-mode review posts continue to use:
+
+```text
+## Adversarial Review — <displayName> (<reviewerIdentity>)
+```
+
+Consumers that locate adversarial-review posts must treat both headers as
+adversarial reviews because both begin with the canonical `## Adversarial
+Review` marker. Consumers that need to distinguish advisory-only from enforce
+mode must classify the first line exactly: the parenthetical
+`(advisory-only)` after `Adversarial Review` is the advisory marker; its
+absence is enforce mode. The bold advisory disclaimer is human-facing context
+only and is not the primary machine classifier.
 
 Advisory-only mode is intentionally not represented as an advisory durable job. `queueFollowUpForPostedReview` short-circuits before job creation, so persisted follow-up records keep `verdict_mode: "enforce"` as an enforcement-carrier compatibility field. Code that needs to know whether a review was advisory should use the reviewer post/header path and the `queueFollowUpForPostedReview` return reason `advisory-only-review`, not infer it from pending job records.
 

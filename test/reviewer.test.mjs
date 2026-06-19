@@ -22,6 +22,7 @@ const {
   VERDICT_MODE_ADVISORY_ONLY,
   VERDICT_MODE_ENFORCE,
   buildReviewCommentHeader,
+  classifyReviewCommentHeader,
   fetchCurrentHeadVerdictMode,
   resolveVerdictModeForHead,
   spawnCodexReview,
@@ -270,10 +271,38 @@ test('advisory-only review header keeps the canonical marker heading while stayi
     '## Adversarial Review (advisory-only) — Codex (codex-reviewer-lacey)\n\n' +
       '**Advisory-only review** — findings below are informational; no automated remediation will run.\n\n',
   );
-  // The `## Adversarial Review` marker heading and displayName must survive into
-  // advisory mode so the same heuristic that locates enforce reviews also finds these.
-  assert.ok(header.startsWith('## Adversarial Review'));
-  assert.ok(header.includes('Codex'));
+  assert.deepEqual(classifyReviewCommentHeader(`${header}## Verdict\nRequest changes\n`), {
+    isAdversarialReview: true,
+    verdictMode: VERDICT_MODE_ADVISORY_ONLY,
+    advisoryOnly: true,
+  });
+});
+
+test('review header classifier locates enforce and advisory reviews while distinguishing mode', () => {
+  const enforceHeader = buildReviewCommentHeader({
+    reviewerMetadata: { displayName: 'Codex', reviewerIdentity: 'codex-reviewer-lacey' },
+    verdictMode: VERDICT_MODE_ENFORCE,
+  });
+  const advisoryHeader = buildReviewCommentHeader({
+    reviewerMetadata: { displayName: 'Codex', reviewerIdentity: 'codex-reviewer-lacey' },
+    verdictMode: VERDICT_MODE_ADVISORY_ONLY,
+  });
+
+  assert.deepEqual(classifyReviewCommentHeader(`${enforceHeader}## Verdict\nComment only\n`), {
+    isAdversarialReview: true,
+    verdictMode: VERDICT_MODE_ENFORCE,
+    advisoryOnly: false,
+  });
+  assert.deepEqual(classifyReviewCommentHeader(`${advisoryHeader}## Verdict\nRequest changes\n`), {
+    isAdversarialReview: true,
+    verdictMode: VERDICT_MODE_ADVISORY_ONLY,
+    advisoryOnly: true,
+  });
+  assert.deepEqual(classifyReviewCommentHeader('**Advisory-only review** (Codex)\n\n## Verdict\nRequest changes\n'), {
+    isAdversarialReview: false,
+    verdictMode: null,
+    advisoryOnly: false,
+  });
 });
 
 test('clean comment-only reviews still queue a durable follow-up verdict carrier through the production queue helper', () => {

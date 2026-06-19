@@ -324,6 +324,16 @@ function schemaV1() {
                 __type: TYPE_INT,
                 __default: 50000000,
               },
+              pr_class_additive_only_allowlist: {
+                __type: TYPE_LIST,
+                __item: { __type: TYPE_STRING },
+                __default: [
+                  'projects/*',
+                  'modules/worker-pool/post-merge-actions/*',
+                  'docs/POSTMORTEM-*.md',
+                  'docs/AUDIT-*.md',
+                ],
+              },
             },
           },
         },

@@ -1101,6 +1101,14 @@ Clean review verdicts still create follow-up jobs for auditability and gate proj
 
 Within the review body's `## Verdict` section, the authoritative verdict is the last recognized verdict line. If the section contains both a blocking `Request changes` verdict line, including clause forms such as `Request changes: ...` or `Request changes -- ... must be fixed`, and a permissive `Comment only` or `Approved` line, the parser resolves conservatively to `Request changes`; explanatory prior-round resolution prose only avoids this override when the request-changes clause is explicitly in a resolved state, such as `Request changes ... are now resolved` or `Request changes ... have been addressed`. Any negated, current, or future blocking phrase on the same line (`not fixed`, `still`, `remains`, `must be fixed`, `needs to be addressed`, etc.) keeps the line classified as blocking even if it quotes or mentions resolved-state language. If no line is recognized, the verdict remains malformed and the gate fails closed.
 
+The watcher may append a `remediation-vocabulary-fatigue` item to the posted
+review body's `## Non-blocking issues` section before delivery. This item is an
+info-severity, non-blocking churn signal derived from repeated verb stems in
+the latest PR commit subjects. It must set `blocking: false`, must not add to
+the structured blocking-finding count, and must never change merge-agent
+dispatch eligibility by itself. Commit-subject lookup errors fail open and
+leave the review body unchanged.
+
 The watcher must project the gate on terminal early-exit paths, including already-posted review rows. A settled PR must not stay frozen at an earlier `pending` projection after the durable review verdict is available.
 
 ## Operator Retrigger Contracts

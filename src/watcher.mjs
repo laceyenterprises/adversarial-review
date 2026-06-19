@@ -206,7 +206,6 @@ import {
 } from './routing-tier-readiness.mjs';
 import {
   detectVocabularyFatigue,
-  resolveVocabularyFatigueConfig,
 } from './vocabulary-fatigue.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -5976,15 +5975,13 @@ async function pollOnce(
               return;
             }
 
-            const vocabularyFatigueConfig = resolveVocabularyFatigueConfig(loadConfigCached());
             const vocabularyFatigueFinding = detectVocabularyFatigue(
               await fetchPullRequestCommitSubjects(octokit, {
                 owner,
                 repo,
                 prNumber,
-                perPage: Math.max(100, vocabularyFatigueConfig.windowCommits),
+                perPage: 100,
               }),
-              vocabularyFatigueConfig,
             );
             if (vocabularyFatigueFinding) {
               console.log(

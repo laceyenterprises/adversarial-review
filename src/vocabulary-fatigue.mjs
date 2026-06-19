@@ -8,19 +8,6 @@ function normalizePositiveInt(value, fallback) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function resolveVocabularyFatigueConfig(cfg) {
-  return {
-    windowCommits: normalizePositiveInt(
-      cfg?.get?.('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits'),
-      DEFAULT_WINDOW_COMMITS,
-    ),
-    minRepeats: normalizePositiveInt(
-      cfg?.get?.('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats'),
-      DEFAULT_MIN_REPEATS,
-    ),
-  };
-}
-
 function commitSubjectFromEntry(entry) {
   if (typeof entry === 'string') return entry.split('\n')[0] || '';
   return String(entry?.commit?.message || entry?.message || entry?.subject || '').split('\n')[0] || '';
@@ -99,7 +86,7 @@ function appendVocabularyFatigueFindingToReviewBody(reviewBody, finding) {
     return `${body.slice(0, insertAt)}${item}\n${body.slice(insertAt)}`;
   }
   const verdictMatch = body.match(/\n##\s+Verdict\b/i);
-  const section = `\n\n## Non-blocking Issues\n${item}\n`;
+  const section = `\n\n## Non-blocking issues\n${item}\n`;
   if (verdictMatch) {
     return `${body.slice(0, verdictMatch.index)}${section}${body.slice(verdictMatch.index)}`;
   }
@@ -112,6 +99,5 @@ export {
   FINDING_KIND,
   appendVocabularyFatigueFindingToReviewBody,
   detectVocabularyFatigue,
-  resolveVocabularyFatigueConfig,
   stemFromCommitSubject,
 };

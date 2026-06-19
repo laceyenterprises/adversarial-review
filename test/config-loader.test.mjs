@@ -1399,6 +1399,19 @@ test('OSR-04 host-local roots load through strict Node schema and env aliases', 
 test('agent_control.codex_runaway_guardrails mirrors Python authority keys', () => {
   const tmp = freshTmp();
   try {
+    const pythonAuthorityKeys = [
+      'observed_repos',
+      'convergence_stall_commit_window_seconds',
+      'convergence_stall_min_commits',
+      'convergence_stall_file_fetch_budget_per_cycle',
+      'convergence_stall_finding_dedupe_seconds',
+      'convergence_stall_repo_backoff_seconds',
+      'convergence_stall_observed_worker_classes',
+      'compaction_rate_alarm_per_hour',
+      'compaction_rate_alarm_finding_dedupe_seconds',
+      'token_budget_per_session',
+      'pr_class_additive_only_allowlist',
+    ];
     const top = join(tmp, 'config.yaml');
     writeFile(top, `
       version: 1
@@ -1418,9 +1431,21 @@ test('agent_control.codex_runaway_guardrails mirrors Python authority keys', () 
           compaction_rate_alarm_per_hour: 5
           compaction_rate_alarm_finding_dedupe_seconds: 43200
           token_budget_per_session: 60000000
+          pr_class_additive_only_allowlist:
+            - projects/*
+            - modules/worker-pool/post-merge-actions/*
+            - docs/POSTMORTEM-*.md
+            - docs/AUDIT-*.md
     `);
 
     const cfg = loadConfig({ topPath: top, env: {} });
+    for (const key of pythonAuthorityKeys) {
+      assert.notEqual(
+        cfg.get(`agent_control.codex_runaway_guardrails.${key}`),
+        undefined,
+        `missing Python authority mirror key ${key}`,
+      );
+    }
     assert.deepEqual(cfg.get('agent_control.codex_runaway_guardrails.observed_repos'), [
       'laceyenterprises/agent-os',
       'laceyenterprises/adversarial-review',
@@ -1458,6 +1483,26 @@ test('agent_control.codex_runaway_guardrails mirrors Python authority keys', () 
       43200,
     );
     assert.equal(cfg.get('agent_control.codex_runaway_guardrails.token_budget_per_session'), 60000000);
+    assert.deepEqual(
+      cfg.get('agent_control.codex_runaway_guardrails.pr_class_additive_only_allowlist'),
+      [
+        'projects/*',
+        'modules/worker-pool/post-merge-actions/*',
+        'docs/POSTMORTEM-*.md',
+        'docs/AUDIT-*.md',
+      ],
+    );
+
+    const defaults = loadConfig({ topPath: join(tmp, 'missing-guardrails.yaml'), env: {} });
+    assert.deepEqual(
+      defaults.get('agent_control.codex_runaway_guardrails.pr_class_additive_only_allowlist'),
+      [
+        'projects/*',
+        'modules/worker-pool/post-merge-actions/*',
+        'docs/POSTMORTEM-*.md',
+        'docs/AUDIT-*.md',
+      ],
+    );
 
     const envCfg = loadConfig({
       topPath: top,

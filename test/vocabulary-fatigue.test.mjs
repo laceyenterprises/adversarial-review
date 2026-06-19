@@ -1,14 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-
-import { loadConfig } from '../src/config-loader.mjs';
 import { classifyBlockingFindings, pickMergeAgentDispatch } from '../src/follow-up-merge-agent.mjs';
 import {
   appendVocabularyFatigueFindingToReviewBody,
   detectVocabularyFatigue,
-  resolveVocabularyFatigueConfig,
 } from '../src/vocabulary-fatigue.mjs';
 
 function findingFor(subjects, options) {
@@ -57,23 +52,17 @@ test('vocabulary fatigue strips only ing and ed suffixes', () => {
   assert.equal(finding.count, 3);
 });
 
-test('vocabulary fatigue uses defaults when CFG has no vocabulary leaves', () => {
-  const cfg = loadConfig({ topPath: join(tmpdir(), 'missing-vocabulary-fatigue-config.yaml'), env: {} });
-  const resolved = resolveVocabularyFatigueConfig(cfg);
-
-  assert.deepEqual(resolved, { windowCommits: 5, minRepeats: 3 });
+test('vocabulary fatigue defaults are module constants, not CFG leaves', () => {
   assert.equal(findingFor([
     '[codex] Add',
     '[codex] Harden',
     '[codex] Hardened',
     '[codex] Harden',
     '[codex] Close',
-  ], resolved).stem, 'harden');
+  ]).stem, 'harden');
 });
 
 test('vocabulary fatigue defaults and insufficient history are non-emitting', () => {
-  const cfg = loadConfig({ topPath: join(tmpdir(), 'missing-vocabulary-fatigue-config.yaml'), env: {} });
-  assert.deepEqual(resolveVocabularyFatigueConfig(cfg), { windowCommits: 5, minRepeats: 3 });
   assert.equal(findingFor(['[codex] Harden', '[codex] Harden', '[codex] Harden']), null);
 });
 
@@ -94,7 +83,7 @@ test('vocabulary fatigue finding is appended as non-blocking and does not gate m
     '',
   ].join('\n'), finding);
 
-  assert.match(reviewBody, /## Non-blocking Issues/);
+  assert.match(reviewBody, /## Non-blocking issues/);
   assert.match(reviewBody, /blocking: false/);
   assert.equal(classifyBlockingFindings(reviewBody, { lastVerdict: 'Comment only' }).count, 0);
   assert.equal(classifyBlockingFindings(reviewBody, { lastVerdict: 'Comment only' }).state, 'known');
@@ -114,7 +103,7 @@ test('vocabulary fatigue finding is appended as non-blocking and does not gate m
     '## Summary',
     'Clean.',
     '',
-    '## Non-blocking Issues',
+    '## Non-blocking issues',
     '- None.',
     '',
     '## Verdict',

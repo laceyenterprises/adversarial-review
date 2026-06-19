@@ -2462,6 +2462,11 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
           repo,
           prNumber,
           token,
+          // The reviewer bot tokens are GitHub App tokens — `GET /user` returns
+          // 403 ("Resource not accessible by integration"), so pass the known
+          // reviewer identity to skip the self-login probe. (PAT path still
+          // falls back to /user when no identity is supplied.)
+          selfLogin: refreshIdentity,
           fetchImpl: opts.fetchImpl,
           log: preWriteLog.log,
         });

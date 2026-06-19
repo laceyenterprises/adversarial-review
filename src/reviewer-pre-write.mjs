@@ -16,18 +16,29 @@ function splitRepo(repo) {
   };
 }
 
+// Resolve the login whose pending reviews we own. Reviewer + merge-agent bot
+// tokens are GitHub APP tokens — `GET /user` returns 403 ("Resource not
+// accessible by integration") for those, so when the caller knows its identity
+// (it always does for app tokens) we use it directly and skip the probe. The
+// `/user` path remains the fallback for plain PATs.
 async function probeSelfLogin({
   token,
+  selfLogin = null,
   fetchImpl = globalThis.fetch,
   log = console,
 } = {}) {
+  const known = String(selfLogin || '').trim();
+  if (known) return known;
   if (!token) return null;
   try {
     const userRes = await fetchImpl(`${GITHUB_API_ROOT}/user`, {
       headers: buildHeaders(token),
     });
     if (!userRes.ok) {
-      log.warn?.(`[reviewer-pre-write] self-login probe returned HTTP ${userRes.status}`);
+      log.warn?.(
+        `[reviewer-pre-write] self-login probe returned HTTP ${userRes.status}` +
+          ' (expected for a bot/app token — pass selfLogin to skip the /user probe)',
+      );
       return null;
     }
     const userJson = await userRes.json();
@@ -36,6 +47,17 @@ async function probeSelfLogin({
     log.warn?.(`[reviewer-pre-write] self-login probe failed: ${err?.message || err}`);
     return null;
   }
+}
+
+// App-token review authors carry a `[bot]` suffix (e.g. `codex-reviewer-lacey[bot]`)
+// while the configured identity usually doesn't. Match either form so pending-review
+// ownership works whether the token is a PAT or an app token.
+function loginMatchesSelf(login, selfLogin) {
+  const a = String(login || '').trim().toLowerCase();
+  const b = String(selfLogin || '').trim().toLowerCase();
+  if (!a || !b) return false;
+  const stripBot = (s) => s.replace(/\[bot\]$/, '');
+  return stripBot(a) === stripBot(b);
 }
 
 async function listPullRequestReviews({
@@ -97,7 +119,7 @@ async function deletePendingReview({
 function pendingReviewsOwnedBy(reviews, selfLogin) {
   return (Array.isArray(reviews) ? reviews : []).filter((review) => (
     review?.state === 'PENDING' &&
-    String(review?.user?.login || '').trim() === selfLogin
+    loginMatchesSelf(review?.user?.login, selfLogin)
   ));
 }
 
@@ -105,6 +127,7 @@ async function clearPendingReviewsForSelf({
   repo,
   prNumber,
   token,
+  selfLogin: knownSelfLogin = null,
   fetchImpl = globalThis.fetch,
   log = console,
 } = {}) {
@@ -112,7 +135,7 @@ async function clearPendingReviewsForSelf({
   const { owner, repoName } = splitRepo(repo);
   if (!owner || !repoName) return { cleared: 0, listed: 0 };
 
-  const selfLogin = await probeSelfLogin({ token, fetchImpl, log });
+  const selfLogin = await probeSelfLogin({ token, selfLogin: knownSelfLogin, fetchImpl, log });
   if (!selfLogin) return { cleared: 0, listed: 0 };
 
   const reviews = await listPullRequestReviews({ repo, prNumber, token, fetchImpl, log });
@@ -139,6 +162,7 @@ async function reconcilePendingReviewsForSelf({
   token,
   currentHeadSha,
   respawnAgeSeconds,
+  selfLogin: knownSelfLogin = null,
   now = new Date(),
   fetchImpl = globalThis.fetch,
   log = console,
@@ -171,7 +195,7 @@ async function reconcilePendingReviewsForSelf({
     };
   }
 
-  const selfLogin = await probeSelfLogin({ token, fetchImpl, log });
+  const selfLogin = await probeSelfLogin({ token, selfLogin: knownSelfLogin, fetchImpl, log });
   if (!selfLogin) {
     return {
       listed: 0,

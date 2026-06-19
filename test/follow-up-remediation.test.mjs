@@ -5009,6 +5009,49 @@ test('dispatchRemediationViaHq reuses the stable job request_id through the SDK'
   });
 });
 
+test('dispatchRemediationViaHq omits branch from the agent-os payload when falsy', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  mkdirSync(hqRoot, { recursive: true });
+  const promptPath = path.join(rootDir, 'prompt.md');
+  const replyPath = path.join(rootDir, 'reply.json');
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+
+  await withAppContractDispatchServer(async ({ requests }) => {
+    const env = {
+      ...process.env,
+      AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+      HQ_ROOT: hqRoot,
+      HQ_PARENT_SESSION: 'sess_parent_123',
+      HQ_PROJECT: 'adversarial-review',
+    };
+
+    await dispatchRemediationViaHq({
+      hqRoot,
+      workerClass: 'codex',
+      repo: 'laceyenterprises/clio',
+      prNumber: 81,
+      branch: null,
+      promptPath,
+      replyPath,
+      launchRequestId: 'laceyenterprises__clio-pr-81-headabc123',
+      jobId: 'laceyenterprises__clio-pr-81-headabc123',
+      execFileImpl: async () => {
+        throw new Error('agent-os dispatch must not shell out for workspace resolution');
+      },
+      env,
+    });
+
+    const dispatchRequest = requests.find((entry) => entry.url === '/v1/dispatch');
+    assert.ok(dispatchRequest);
+    // Native lane only appends `--branch` when truthy; the agent-os lane must
+    // not serialize `branch: null` for branchless dispatches (the two lanes
+    // must send the same shape for the same input).
+    assert.equal('branch' in dispatchRequest.body, false);
+    assert.equal(dispatchRequest.body.pr_number, 81);
+  });
+});
+
 test('dispatchRemediationViaHq rejects App Contract tickets without dispatch_id', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = path.join(rootDir, 'agent-os-hq');

@@ -78,15 +78,21 @@
         <!--
           BUILD-PACK-DEFAULT-FLIP / 2026-05-29 → 2026-05-30 → reverted
           2026-05-30 (PT) when codex OAuth came back online. Per the
-          operator directive: remediator pins to `codex`; reviewer
-          pins to `codex` as an explicit launchd override. The module
-          config.yaml keeps its default for non-launchd/dev runs.
+          operator directive: remediator pins to `codex` as an explicit
+          launchd override. The module config.yaml keeps its default for
+          non-launchd/dev runs.
+
+          2026-06-18: reviewer env pin REMOVED (operator: "now that Claude
+          is back online, flip the default reviewer back to adversarial").
+          The reviewer role now resolves from config — roles.reviewer:
+          adversarial in config.local.yaml — restoring the cross-model
+          claude<->codex builder-never-reviews routing. This env pin (Layer 5)
+          was overriding the yaml (Layer 4), so it had to be removed for the
+          flip to take effect. The remediator pin stays `codex` (unchanged).
 
           See LAC-893 + the role-pin env knobs documented in
           `docs/follow-up-runbook.md`.
         -->
-        <key>ADVERSARIAL_REVIEW_DEFAULT_REVIEWER</key>
-        <string>codex</string>
         <key>ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR</key>
         <string>codex</string>
         <!--

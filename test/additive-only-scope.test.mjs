@@ -22,6 +22,7 @@ function evaluate(overrides = {}) {
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 57,
     prCreatedAt: '2026-06-19T10:00:00.000Z',
+    prAuthor: 'codex-worker',
     currentHeadSha: 'later',
     labels: [],
     commits: [
@@ -51,7 +52,7 @@ test('labeled additive-only PR with later outside-allowlist commit emits high sc
   assert.match(result.finding?.detail, /commit later/);
 });
 
-test('backdated later commit is still scanned using server timeline ordering', () => {
+test('backdated later commit is still scanned using PR commit order', () => {
   const result = evaluate({
     labels: [{ name: ADDITIVE_ONLY_LABEL }],
     commits: [
@@ -71,6 +72,23 @@ test('backdated later commit is still scanned using server timeline ordering', (
   assert.equal(result.finding?.kind, 'scope-violation');
   assert.deepEqual(result.finding?.violating_files, ['src/evil.mjs']);
   assert.match(result.finding?.detail, /commit backdated-later/);
+});
+
+test('labeled additive-only PR scans initial commit violations too', () => {
+  const result = evaluate({
+    labels: [{ name: ADDITIVE_ONLY_LABEL }],
+    commits: [
+      commit('initial', '2026-06-19T09:55:00.000Z'),
+      commit('later', '2026-06-19T10:10:00.000Z'),
+    ],
+    filesByCommit: {
+      initial: [{ filename: 'src/initial-escape.mjs' }],
+      later: [{ filename: 'docs/AUDIT-2026-06-19.md' }],
+    },
+  });
+
+  assert.equal(result.finding?.kind, 'scope-violation');
+  assert.deepEqual(result.finding?.violating_files, ['src/initial-escape.mjs']);
 });
 
 test('unlabeled PR derives additive-only from initial diff and requests label backfill', () => {
@@ -130,12 +148,66 @@ test('current-head scope-expand label suppresses additive-only scope violation',
     labels: [{ name: ADDITIVE_ONLY_LABEL }, { name: SCOPE_EXPAND_LABEL }],
     timeline: [
       committedTimelineEvent('later', '2026-06-19T10:10:00.000Z'),
-      { event: 'labeled', created_at: '2026-06-19T10:11:00.000Z', label: { name: SCOPE_EXPAND_LABEL } },
+      {
+        event: 'labeled',
+        created_at: '2026-06-19T10:11:00.000Z',
+        label: { name: SCOPE_EXPAND_LABEL },
+        actor: { login: 'operator' },
+      },
     ],
   });
 
   assert.equal(result.overrideActive, true);
   assert.equal(result.finding, null);
+});
+
+test('author-applied scope-expand label does not suppress additive-only scope violation', () => {
+  const result = evaluate({
+    labels: [{ name: ADDITIVE_ONLY_LABEL }, { name: SCOPE_EXPAND_LABEL }],
+    timeline: [
+      committedTimelineEvent('later', '2026-06-19T10:10:00.000Z'),
+      {
+        event: 'labeled',
+        created_at: '2026-06-19T10:11:00.000Z',
+        label: { name: SCOPE_EXPAND_LABEL },
+        actor: { login: 'codex-worker' },
+      },
+    ],
+  });
+
+  assert.equal(result.overrideActive, undefined);
+  assert.equal(result.finding?.kind, 'scope-violation');
+});
+
+test('unattributed scope-expand label fails closed', () => {
+  const result = evaluate({
+    labels: [{ name: ADDITIVE_ONLY_LABEL }, { name: SCOPE_EXPAND_LABEL }],
+    timeline: [
+      committedTimelineEvent('later', '2026-06-19T10:10:00.000Z'),
+      { event: 'labeled', created_at: '2026-06-19T10:11:00.000Z', label: { name: SCOPE_EXPAND_LABEL } },
+    ],
+  });
+
+  assert.equal(result.overrideActive, undefined);
+  assert.equal(result.finding?.kind, 'scope-violation');
+});
+
+test('scope-expand label fails closed when latest observed head differs from current head', () => {
+  const result = evaluate({
+    labels: [{ name: ADDITIVE_ONLY_LABEL }, { name: SCOPE_EXPAND_LABEL }],
+    timeline: [
+      committedTimelineEvent('different-head', '2026-06-19T10:10:00.000Z'),
+      {
+        event: 'labeled',
+        created_at: '2026-06-19T10:11:00.000Z',
+        label: { name: SCOPE_EXPAND_LABEL },
+        actor: { login: 'operator' },
+      },
+    ],
+  });
+
+  assert.equal(result.overrideActive, undefined);
+  assert.equal(result.finding?.kind, 'scope-violation');
 });
 
 test('stale scope-expand label does not bless later violating commits', () => {
@@ -149,6 +221,21 @@ test('stale scope-expand label does not bless later violating commits', () => {
 
   assert.equal(result.overrideActive, undefined);
   assert.equal(result.finding?.kind, 'scope-violation');
+});
+
+test('truncated commit file coverage fails closed as an inconclusive scope violation', () => {
+  const result = evaluate({
+    labels: [{ name: ADDITIVE_ONLY_LABEL }],
+    filesByCommit: {
+      initial: [{ filename: 'projects/codex-runaway-guardrails/plan.json' }],
+      later: { files: [{ filename: 'docs/AUDIT-2026-06-19.md' }], truncated: true },
+    },
+  });
+
+  assert.equal(result.finding?.kind, 'scope-violation');
+  assert.equal(result.finding?.file_list_truncated, true);
+  assert.deepEqual(result.finding?.violating_files, []);
+  assert.match(result.finding?.detail, /inconclusive/i);
 });
 
 test('unlabeled PR whose initial diff was mixed is ignored regardless of later paths', () => {
@@ -171,4 +258,14 @@ test('scope finding appender produces detectable structured JSON block', () => {
   assert.equal(reviewBodyHasScopeViolationFinding(body), true);
   assert.match(body, /"kind": "scope-violation"/);
   assert.match(body, /"violating_files": \[/);
+});
+
+test('scope finding detector ignores unstructured discussion of scope-violation', () => {
+  const body = [
+    '## Non-blocking issues',
+    '- This review mentions `"kind": "scope-violation"` as prose.',
+    '- It also mentions kind: scope-violation without the emitted JSON block.',
+  ].join('\n');
+
+  assert.equal(reviewBodyHasScopeViolationFinding(body), false);
 });

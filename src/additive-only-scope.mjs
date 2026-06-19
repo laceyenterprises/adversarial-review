@@ -7,7 +7,8 @@ const ADDITIVE_ONLY_LABEL = 'pr-class: additive-only';
 const SCOPE_EXPAND_LABEL = 'operator-approved: scope-expand';
 const SCOPE_VIOLATION_KIND = 'scope-violation';
 const MAX_REST_PAGES = 10;
-const MAX_COMMIT_FILE_PAGES = 5;
+const MAX_COMMIT_FILE_PAGES = 10;
+const MAX_CONCURRENT_COMMIT_FILE_FETCHES = 4;
 
 const ADDITIVE_ONLY_ALLOWLIST = Object.freeze([
   /^projects\/[^/]+(?:\/.*)?$/,
@@ -37,6 +38,10 @@ function normalizeSha(value) {
   return sha || null;
 }
 
+function normalizeLogin(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
 function normalizeChangedPath(file) {
   return String(file?.filename || file?.path || '').trim();
 }
@@ -55,43 +60,7 @@ function uniqueSorted(values) {
   return [...new Set(values.filter(Boolean))].sort();
 }
 
-function normalizeEventTime(value) {
-  const time = Date.parse(String(value || ''));
-  return Number.isFinite(time) ? time : null;
-}
-
-function timelineEventTimestamp(event) {
-  const eventName = String(event?.event || event?.type || '').trim().toLowerCase();
-  return event?.created_at
-    || event?.createdAt
-    || (
-      eventName === 'committed'
-        ? event?.committer?.date
-          || event?.author?.date
-          || event?.commit?.committer?.date
-          || event?.commit?.author?.date
-        : null
-    );
-}
-
-function commitShaFromTimelineEvent(event) {
-  return normalizeSha(event?.sha || event?.commit_id || event?.commit?.sha || event?.commit?.id);
-}
-
-function serverCommittedAtBySha(events = []) {
-  const bySha = new Map();
-  for (const event of events) {
-    const eventName = String(event?.event || event?.type || '').toLowerCase();
-    if (eventName !== 'committed') continue;
-    const sha = commitShaFromTimelineEvent(event);
-    const createdAt = normalizeEventTime(timelineEventTimestamp(event));
-    if (!sha || createdAt === null) continue;
-    bySha.set(sha, Math.min(bySha.get(sha) ?? createdAt, createdAt));
-  }
-  return bySha;
-}
-
-function initialCommitWindow(commits = [], prCreatedAt = null, timeline = []) {
+function initialCommitWindow(commits = []) {
   const normalized = commits
     .map((commit, index) => ({
       ...commit,
@@ -101,69 +70,108 @@ function initialCommitWindow(commits = [], prCreatedAt = null, timeline = []) {
     .filter((commit) => commit.sha);
   if (normalized.length === 0) return { initialCommits: [], laterCommits: [], initialHeadSha: null };
 
-  const createdAtMs = normalizeEventTime(prCreatedAt);
-  if (createdAtMs === null) {
-    return {
-      initialCommits: [normalized[0]],
-      laterCommits: normalized.slice(1),
-      initialHeadSha: normalized[0].sha,
-    };
-  }
-
-  const committedAtBySha = serverCommittedAtBySha(timeline);
-  const initialCommits = normalized.filter((commit) => {
-    const committedAtMs = committedAtBySha.get(commit.sha);
-    return committedAtMs !== undefined && committedAtMs <= createdAtMs;
-  });
-  const window = initialCommits.length > 0 ? initialCommits : [normalized[0]];
-  const initialHeadIndex = Math.max(...window.map((commit) => commit.index));
   return {
-    initialCommits: window,
-    laterCommits: normalized.filter((commit) => commit.index > initialHeadIndex),
-    initialHeadSha: normalized[initialHeadIndex]?.sha || window.at(-1)?.sha || null,
+    initialCommits: [normalized[0]],
+    laterCommits: normalized.slice(1),
+    initialHeadSha: normalized[0].sha,
   };
 }
 
-function currentHeadLabelAuthorized({ events = [], labelName, currentHeadSha }) {
-  if (!labelName || !currentHeadSha) return false;
-  const labelEvents = events
-    .filter((event) => (
-      (event.event === 'labeled' || event.type === 'LabeledEvent') &&
-      String(event?.label?.name || event?.label || '').trim() === labelName
-    ))
-    .sort((a, b) => Date.parse(a.created_at || a.createdAt || '') - Date.parse(b.created_at || b.createdAt || ''));
-  if (labelEvents.length === 0) return false;
+function eventName(event) {
+  return String(event?.event || event?.type || '').trim().toLowerCase();
+}
 
-  const latestLabelAt = Date.parse(labelEvents.at(-1)?.created_at || labelEvents.at(-1)?.createdAt || '');
-  if (!Number.isFinite(latestLabelAt)) return false;
-  const laterHeadEvents = events.some((event) => {
-    const eventName = String(event.event || event.type || '').toLowerCase();
-    if (!['committed', 'head_ref_force_pushed', 'headref forcepushed event', 'head_ref_restored'].includes(eventName)) {
-      return false;
+function eventLabelName(event) {
+  return String(event?.label?.name || event?.label || '').trim();
+}
+
+function eventActorLogin(event) {
+  if (typeof event?.actor === 'string') return event.actor;
+  return event?.actor?.login || event?.user?.login || event?.sender?.login || null;
+}
+
+function eventHeadSha(event) {
+  return normalizeSha(event?.sha || event?.commit_id || event?.commit?.sha || event?.commit?.id);
+}
+
+function isHeadChangingEvent(event) {
+  return [
+    'committed',
+    'head_ref_force_pushed',
+    'headrefforcepushedevent',
+    'head_ref_restored',
+    'headrefrestoredevent',
+  ].includes(eventName(event));
+}
+
+function currentHeadLabelAuthorized({ events = [], labelName, currentHeadSha, prAuthor = null }) {
+  if (!labelName || !currentHeadSha) return false;
+  const normalizedHead = normalizeSha(currentHeadSha);
+  const normalizedAuthor = normalizeLogin(prAuthor);
+  if (!normalizedHead || !normalizedAuthor) return false;
+
+  let latestLabelEvent = null;
+  let latestHeadEvent = null;
+  events.forEach((event, index) => {
+    if ((eventName(event) === 'labeled' || eventName(event) === 'labeledevent') && eventLabelName(event) === labelName) {
+      latestLabelEvent = { event, index };
     }
-    const eventAt = normalizeEventTime(timelineEventTimestamp(event));
-    return Number.isFinite(eventAt) && eventAt > latestLabelAt;
+    if (isHeadChangingEvent(event)) {
+      latestHeadEvent = { event, index, sha: eventHeadSha(event) };
+    }
   });
-  return !laterHeadEvents;
+  if (!latestLabelEvent) return false;
+
+  const actor = normalizeLogin(eventActorLogin(latestLabelEvent.event));
+  if (!actor || actor === normalizedAuthor) return false;
+  if (latestHeadEvent && latestHeadEvent.index > latestLabelEvent.index) return false;
+  if (latestHeadEvent?.sha && latestHeadEvent.sha !== normalizedHead) return false;
+  return true;
+}
+
+function commitFileEntry(filesByCommit = {}, commit = {}) {
+  const sha = normalizeSha(commit?.sha);
+  const entry = sha ? filesByCommit[sha] : null;
+  if (Array.isArray(entry)) return { files: entry, truncated: false };
+  if (entry && typeof entry === 'object') {
+    return {
+      files: Array.isArray(entry.files) ? entry.files : [],
+      truncated: Boolean(entry.truncated),
+    };
+  }
+  return { files: Array.isArray(commit.files) ? commit.files : [], truncated: false };
 }
 
 function collectFilesForCommits(commits = [], filesByCommit = {}) {
   const files = [];
   for (const commit of commits) {
-    const sha = normalizeSha(commit?.sha);
-    if (!sha) continue;
-    files.push(...(filesByCommit[sha] || commit.files || []));
+    files.push(...commitFileEntry(filesByCommit, commit).files);
   }
   return files;
 }
 
-function buildScopeViolationFinding({ repo, prNumber, commitSha, violatingFiles }) {
+function commitsHaveTruncatedFileCoverage(commits = [], filesByCommit = {}) {
+  return commits.some((commit) => commitFileEntry(filesByCommit, commit).truncated);
+}
+
+function buildScopeViolationFinding({
+  repo,
+  prNumber,
+  commitSha,
+  violatingFiles = [],
+  fileListTruncated = false,
+} = {}) {
+  const normalizedViolatingFiles = uniqueSorted(violatingFiles);
+  const detail = fileListTruncated && normalizedViolatingFiles.length === 0
+    ? `PR is labeled ${ADDITIVE_ONLY_LABEL}, but commit ${commitSha} touched more files than the additive-only guard could verify. Treating truncated scope input as inconclusive; to override, add label '${SCOPE_EXPAND_LABEL}' on the current head from a non-author actor.`
+    : `PR is labeled ${ADDITIVE_ONLY_LABEL} but commit ${commitSha} added files outside the additive-only allowlist. To override, add label '${SCOPE_EXPAND_LABEL}' on the current head from a non-author actor.`;
   return {
     kind: SCOPE_VIOLATION_KIND,
     severity: 'high',
     pr_url: `https://github.com/${repo}/pull/${prNumber}`,
-    violating_files: uniqueSorted(violatingFiles),
-    detail: `PR is labeled ${ADDITIVE_ONLY_LABEL} but commit ${commitSha} added files outside the additive-only allowlist. To override, add label '${SCOPE_EXPAND_LABEL}' on the current head.`,
+    violating_files: normalizedViolatingFiles,
+    file_list_truncated: Boolean(fileListTruncated),
+    detail,
   };
 }
 
@@ -181,8 +189,18 @@ function appendScopeViolationFinding(reviewBody, finding) {
 }
 
 function reviewBodyHasScopeViolationFinding(reviewBody) {
-  return /"kind"\s*:\s*"scope-violation"/.test(String(reviewBody || '')) ||
-    String(reviewBody || '').includes(`kind: ${SCOPE_VIOLATION_KIND}`);
+  const body = String(reviewBody || '');
+  const blockPattern = /^## Scope Violation Finding\s*\r?\n```(?:json)?\s*\r?\n([\s\S]*?)\r?\n```/gim;
+  let match;
+  while ((match = blockPattern.exec(body))) {
+    try {
+      const parsed = JSON.parse(match[1]);
+      if (parsed?.kind === SCOPE_VIOLATION_KIND) return true;
+    } catch {
+      // Ignore malformed quoted examples; only the structured block suppresses automation.
+    }
+  }
+  return false;
 }
 
 async function ghJson(path, { execFileImpl = execFileAsync } = {}) {
@@ -202,7 +220,45 @@ async function fetchPagedGh(repo, path, { execFileImpl = execFileAsync, maxPages
   return out;
 }
 
-async function fetchAdditiveOnlyScopeSnapshot({ repo, prNumber, execFileImpl = execFileAsync } = {}) {
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+async function fetchCommitFiles({ owner, repoName, sha, execFileImpl, logger = console } = {}) {
+  const files = [];
+  for (let page = 1; page <= MAX_COMMIT_FILE_PAGES; page += 1) {
+    const commitDetail = await ghJson(
+      `repos/${owner}/${repoName}/commits/${sha}?per_page=100&page=${page}`,
+      { execFileImpl }
+    );
+    const pageFiles = Array.isArray(commitDetail?.files) ? commitDetail.files : [];
+    files.push(...pageFiles);
+    if (pageFiles.length < 100) {
+      return { files, truncated: false };
+    }
+  }
+  logger?.warn?.(
+    `[additive-only-scope] commit ${sha} reached ${MAX_COMMIT_FILE_PAGES * 100} fetched files; treating scope coverage as inconclusive`
+  );
+  return { files, truncated: true };
+}
+
+async function fetchAdditiveOnlyScopeSnapshot({
+  repo,
+  prNumber,
+  execFileImpl = execFileAsync,
+  logger = console,
+} = {}) {
   const { owner, repoName } = splitRepo(repo);
   const prPath = `repos/${owner}/${repoName}/pulls/${prNumber}`;
   const [pr, labels, commits, timeline] = await Promise.all([
@@ -213,19 +269,17 @@ async function fetchAdditiveOnlyScopeSnapshot({ repo, prNumber, execFileImpl = e
   ]);
 
   const filesByCommit = {};
-  await Promise.all(commits.map(async (commit) => {
+  await mapWithConcurrency(commits, MAX_CONCURRENT_COMMIT_FILE_FETCHES, async (commit) => {
     const sha = normalizeSha(commit?.sha);
     if (!sha) return;
-    const commitDetail = await ghJson(`repos/${owner}/${repoName}/commits/${sha}?per_page=100`, { execFileImpl });
-    filesByCommit[sha] = Array.isArray(commitDetail?.files)
-      ? commitDetail.files.slice(0, MAX_COMMIT_FILE_PAGES * 100)
-      : [];
-  }));
+    filesByCommit[sha] = await fetchCommitFiles({ owner, repoName, sha, execFileImpl, logger });
+  });
 
   return {
     repo,
     prNumber,
     prCreatedAt: pr?.created_at || null,
+    prAuthor: pr?.user?.login || pr?.author?.login || null,
     currentHeadSha: pr?.head?.sha || null,
     labels,
     commits,
@@ -258,7 +312,7 @@ function evaluateAdditiveOnlyScope({
   repo,
   prNumber,
   labels = [],
-  prCreatedAt = null,
+  prAuthor = null,
   currentHeadSha = null,
   commits = [],
   filesByCommit = {},
@@ -266,11 +320,17 @@ function evaluateAdditiveOnlyScope({
 } = {}) {
   const labeledAdditiveOnly = hasLabel(labels, ADDITIVE_ONLY_LABEL);
   const overrideActive = hasLabel(labels, SCOPE_EXPAND_LABEL) &&
-    currentHeadLabelAuthorized({ events: timeline, labelName: SCOPE_EXPAND_LABEL, currentHeadSha });
+    currentHeadLabelAuthorized({
+      events: timeline,
+      labelName: SCOPE_EXPAND_LABEL,
+      currentHeadSha,
+      prAuthor,
+    });
 
-  const { initialCommits, laterCommits, initialHeadSha } = initialCommitWindow(commits, prCreatedAt, timeline);
+  const { initialCommits, laterCommits, initialHeadSha } = initialCommitWindow(commits);
+  const initialCoverageTruncated = commitsHaveTruncatedFileCoverage(initialCommits, filesByCommit);
   const initialFiles = collectFilesForCommits(initialCommits, filesByCommit);
-  const derivedAdditiveOnly = changedFilesWithinAdditiveOnlyAllowlist(initialFiles);
+  const derivedAdditiveOnly = !initialCoverageTruncated && changedFilesWithinAdditiveOnlyAllowlist(initialFiles);
   const additiveOnly = labeledAdditiveOnly || derivedAdditiveOnly;
 
   if (!additiveOnly) {
@@ -296,11 +356,13 @@ function evaluateAdditiveOnlyScope({
     };
   }
 
-  for (const commit of laterCommits) {
+  const commitsToScan = labeledAdditiveOnly ? commits : laterCommits;
+  for (const commit of commitsToScan) {
     const sha = normalizeSha(commit?.sha);
-    const files = (filesByCommit[sha] || commit.files || []).map(normalizeChangedPath).filter(Boolean);
+    const fileEntry = commitFileEntry(filesByCommit, commit);
+    const files = fileEntry.files.map(normalizeChangedPath).filter(Boolean);
     const violatingFiles = files.filter((file) => !additiveOnlyPathAllowed(file));
-    if (violatingFiles.length > 0) {
+    if (violatingFiles.length > 0 || fileEntry.truncated) {
       return {
         additiveOnly: true,
         derivedAdditiveOnly,
@@ -308,7 +370,13 @@ function evaluateAdditiveOnlyScope({
         initialHeadSha,
         violatingCommitSha: sha,
         violatingFiles: uniqueSorted(violatingFiles),
-        finding: buildScopeViolationFinding({ repo, prNumber, commitSha: sha, violatingFiles }),
+        finding: buildScopeViolationFinding({
+          repo,
+          prNumber,
+          commitSha: sha,
+          violatingFiles,
+          fileListTruncated: fileEntry.truncated,
+        }),
         backfillNeeded: derivedAdditiveOnly && !labeledAdditiveOnly,
       };
     }

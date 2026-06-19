@@ -261,9 +261,13 @@ async function withRemediationRouteEnv(workDir, envOverrides, run) {
   }
 }
 
-async function withAppContractDispatchServer(run) {
+async function withAppContractDispatchServer(run, {
+  omitDispatchId = false,
+  failDispatchAttempts = 0,
+} = {}) {
   const requests = [];
   const dispatches = new Map();
+  let failedDispatches = 0;
   const server = createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -278,6 +282,12 @@ async function withAppContractDispatchServer(run) {
     }
 
     if (req.method === 'POST' && req.url === '/v1/dispatch') {
+      if (failedDispatches < failDispatchAttempts) {
+        failedDispatches += 1;
+        res.writeHead(503, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 'endpoint_restarting', message: 'endpoint restarting' } }));
+        return;
+      }
       const existing = dispatches.get(body.request_id);
       if (existing) {
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -287,10 +297,12 @@ async function withAppContractDispatchServer(run) {
       const accepted = {
         request_id: body.request_id,
         launch_request_id: `lrq_${body.request_id}`,
-        dispatch_id: `dispatch_${body.request_id}`,
         watch_url: `agent-os://watch/lrq_${body.request_id}`,
         audit_ref: `agent-os://audit/${body.request_id}`,
       };
+      if (!omitDispatchId) {
+        accepted.dispatch_id = `dispatch_${body.request_id}`;
+      }
       dispatches.set(body.request_id, accepted);
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(accepted));
@@ -4298,6 +4310,7 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
       assert.equal(result.job.remediationWorker.auditRef, `agent-os://audit/${result.job.jobId}`);
       assert.equal(result.job.remediationWorker.completionShape, 'branch-push');
       assert.equal(result.job.branch, 'codex/fix-pr-71');
+      assert.equal(commands.some((entry) => entry[0] === 'hq'), false);
       assert.equal(commands.some((entry) => entry[0] === 'hq' && entry[1] === 'dispatch' && entry[2] !== 'status'), false);
       const dispatchRequest = requests.find((entry) => entry.url === '/v1/dispatch');
       assert.ok(dispatchRequest);
@@ -4306,7 +4319,7 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
       assert.equal(dispatchRequest.body.worker_class, result.job.remediationWorker.model);
       assert.equal(dispatchRequest.body.task_kind, 'coding');
       assert.equal(dispatchRequest.body.completion_shape, 'branch-push');
-      assert.equal(dispatchRequest.body.repo, 'laceyenterprises/clio');
+      assert.equal(dispatchRequest.body.repo, 'clio');
       assert.equal(dispatchRequest.body.pr_number, 71);
       assert.equal(dispatchRequest.body.prompt, path.join(rootDir, result.job.remediationWorker.promptPath));
       assert.equal(dispatchRequest.body.hq_root, hqRoot);
@@ -4992,8 +5005,84 @@ test('dispatchRemediationViaHq reuses the stable job request_id through the SDK'
     assert.equal(second.dispatchId, first.dispatchId);
     assert.equal(dispatches.size, 1);
     assert.equal(requests.filter((entry) => entry.url === '/v1/dispatch').length, 2);
-    assert.equal(commands.some((entry) => entry[0] === 'hq' && entry[1] === 'dispatch' && entry[2] !== 'status'), false);
+    assert.equal(commands.some((entry) => entry[0] === 'hq'), false);
   });
+});
+
+test('dispatchRemediationViaHq rejects App Contract tickets without dispatch_id', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  mkdirSync(hqRoot, { recursive: true });
+  const promptPath = path.join(rootDir, 'prompt.md');
+  const replyPath = path.join(rootDir, 'reply.json');
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+
+  await withAppContractDispatchServer(async () => {
+    const env = {
+      ...process.env,
+      AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+      HQ_ROOT: hqRoot,
+      HQ_PARENT_SESSION: 'sess_parent_123',
+      HQ_PROJECT: 'adversarial-review',
+    };
+
+    await assert.rejects(
+      () => dispatchRemediationViaHq({
+        hqRoot,
+        workerClass: 'codex',
+        repo: 'laceyenterprises/clio',
+        prNumber: 79,
+        branch: 'codex/fix-pr-79',
+        promptPath,
+        replyPath,
+        launchRequestId: 'laceyenterprises__clio-pr-79-headabc123',
+        jobId: 'laceyenterprises__clio-pr-79-headabc123',
+        execFileImpl: async () => {
+          throw new Error('agent-os dispatch must not shell out for workspace resolution');
+        },
+        env,
+      }),
+      /missing dispatch_id/
+    );
+  }, { omitDispatchId: true });
+});
+
+test('dispatchRemediationViaHq retries transient App Contract dispatch failures', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  mkdirSync(hqRoot, { recursive: true });
+  const promptPath = path.join(rootDir, 'prompt.md');
+  const replyPath = path.join(rootDir, 'reply.json');
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+
+  await withAppContractDispatchServer(async ({ requests }) => {
+    const env = {
+      ...process.env,
+      AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+      HQ_ROOT: hqRoot,
+      HQ_PARENT_SESSION: 'sess_parent_123',
+      HQ_PROJECT: 'adversarial-review',
+    };
+
+    const result = await dispatchRemediationViaHq({
+      hqRoot,
+      workerClass: 'codex',
+      repo: 'laceyenterprises/clio',
+      prNumber: 80,
+      branch: 'codex/fix-pr-80',
+      promptPath,
+      replyPath,
+      launchRequestId: 'laceyenterprises__clio-pr-80-headabc123',
+      jobId: 'laceyenterprises__clio-pr-80-headabc123',
+      execFileImpl: async () => {
+        throw new Error('agent-os dispatch must not shell out for workspace resolution');
+      },
+      env,
+    });
+
+    assert.equal(result.dispatchId, 'dispatch_laceyenterprises__clio-pr-80-headabc123');
+    assert.equal(requests.filter((entry) => entry.url === '/v1/dispatch').length, 2);
+  }, { failDispatchAttempts: 1 });
 });
 
 test('consumeNextFollowUpJob keeps native remediation on the bare spawner without legacy flag', async () => {
@@ -5128,6 +5217,7 @@ test('consumeNextFollowUpJob lets legacy HQ flag override native orchestration m
       assert.equal(result.job.remediationWorker.launchRequestId, 'lrq_aom03_override');
       assert.equal(result.job.remediationWorker.dispatchId, 'dispatch_aom03_override');
       assert.equal(result.job.remediationWorker.requestId, result.job.jobId);
+      assert.deepEqual(result.job.remediationWorker.command, dispatchCommand);
     });
   });
 });

@@ -25,6 +25,7 @@ export async function connectAppContract(options = {}) {
       subscribes: config.subscribes,
     },
     timeoutMs: config.request_timeout_ms,
+    maxAttempts: config.request_retry_attempts,
   });
   if (!response.session_token) {
     throw new Error('register response did not include session_token');
@@ -59,6 +60,9 @@ function normalizeConnectOptions(options) {
     request_timeout_ms: options.request_timeout_ms
       ?? options.requestTimeoutMs
       ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    request_retry_attempts: options.request_retry_attempts
+      ?? options.requestRetryAttempts
+      ?? 3,
   };
 }
 
@@ -97,6 +101,7 @@ class AppContractSession {
     this.endpoint_url = config.endpoint_url;
     this.sessionToken = sessionToken;
     this.requestTimeoutMs = config.request_timeout_ms;
+    this.requestRetryAttempts = config.request_retry_attempts;
   }
 
   async dispatch(payload) {
@@ -107,6 +112,7 @@ class AppContractSession {
       token: this.sessionToken,
       body,
       timeoutMs: this.requestTimeoutMs,
+      maxAttempts: this.requestRetryAttempts,
     });
   }
 
@@ -116,6 +122,7 @@ class AppContractSession {
       token: this.sessionToken,
       body: { request_id: requestId },
       timeoutMs: this.requestTimeoutMs,
+      maxAttempts: this.requestRetryAttempts,
     });
   }
 }
@@ -154,7 +161,31 @@ class StandaloneSession {
   }
 }
 
-async function requestJson(url, { method, token, body, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS }) {
+async function requestJson(url, {
+  method,
+  token,
+  body,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  maxAttempts = 3,
+}) {
+  const numericAttempts = Number(maxAttempts);
+  const attempts = Number.isInteger(numericAttempts) && numericAttempts > 0 ? numericAttempts : 1;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await requestJsonOnce(url, { method, token, body, timeoutMs });
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts || !isRetryableAppContractError(error)) {
+        throw error;
+      }
+      await delay(Math.min(250, 50 * attempt));
+    }
+  }
+  throw lastError;
+}
+
+async function requestJsonOnce(url, { method, token, body, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response;
@@ -170,7 +201,12 @@ async function requestJson(url, { method, token, body, timeoutMs = DEFAULT_REQUE
     });
   } catch (error) {
     if (error?.name === 'AbortError') {
-      throw new Error(`app-contract request timed out after ${timeoutMs}ms`);
+      const timeoutError = new Error(`app-contract request timed out after ${timeoutMs}ms`);
+      timeoutError.retryable = true;
+      throw timeoutError;
+    }
+    if (isTransientFetchError(error)) {
+      error.retryable = true;
     }
     throw error;
   } finally {
@@ -181,9 +217,27 @@ async function requestJson(url, { method, token, body, timeoutMs = DEFAULT_REQUE
   if (!response.ok) {
     const code = data?.error?.code ?? response.status;
     const message = data?.error?.message ?? response.statusText;
-    throw new Error(`app-contract ${code}: ${message}`);
+    const error = new Error(`app-contract ${code}: ${message}`);
+    error.status = response.status;
+    error.retryable = response.status === 429 || response.status >= 500;
+    throw error;
   }
   return data;
+}
+
+function isRetryableAppContractError(error) {
+  return Boolean(error?.retryable || isTransientFetchError(error));
+}
+
+function isTransientFetchError(error) {
+  const code = String(error?.cause?.code || error?.code || '').toUpperCase();
+  const message = String(error?.message || '');
+  return ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH'].includes(code)
+    || /fetch failed|network|connection (?:refused|reset|timed out)|timeout/i.test(message);
+}
+
+function delay(ms) {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 
 function parseJsonResponse(text, status) {

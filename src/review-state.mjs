@@ -6,13 +6,21 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { CODE_PR_DOMAIN_ID, makeCodePrSubjectExternalId } from './identity-shapes.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
+import { ensureReviewCycleCapSchema } from './review-cycle-cap.mjs';
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
-const REVIEW_STATE_SCHEMA_VERSION = 8;
+const REVIEW_STATE_SCHEMA_VERSION = 9;
 const REVIEW_STATE_MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 const execFileAsyncDefault = promisify(execFile);
-const REVIEW_STATE_TABLE_NAMES = new Set(['reviewed_prs', 'comment_deliveries', 'reviewer_passes', 'pr_merge_closeouts']);
+const REVIEW_STATE_TABLE_NAMES = new Set([
+  'reviewed_prs',
+  'comment_deliveries',
+  'reviewer_passes',
+  'pr_merge_closeouts',
+  'review_cycle_verdicts',
+  'review_cycle_counters',
+]);
 
 const REVIEWED_PRS_HEAD_SHA_COLUMNS = Object.freeze([
   'head_sha',
@@ -99,6 +107,7 @@ function ensureReviewStateSchema(db) {
   backfillReviewedPRSubjectIdentity(db);
 
   runReviewStateMigrations(db);
+  ensureReviewCycleCapSchema(db);
   // Handles DBs that briefly saw the inline reviewer_passes schema before the
   // migration runner became the canonical path.
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN reviewer_model TEXT`);

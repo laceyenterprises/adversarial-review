@@ -140,6 +140,18 @@ import {
   retryPendingRetriggerReviewAckComments,
   tryRetriggerReviewFromLabel,
 } from './follow-up-retrigger-review-label.mjs';
+import {
+  PAUSED_FOR_REDESIGN_LABEL,
+  REVIEWER_CYCLE_CAP_REACHED_LABEL,
+  REVIEW_CYCLE_OVERRIDE_LABELS,
+  buildReviewCycleCapEscalationComment,
+  markReviewCycleEscalated,
+  recentReviewCycleVerdicts,
+  recordReviewCycleVerdict,
+  resetReviewCycleCounter,
+  resolveReviewCycleCapConfig,
+  shouldEscalateReviewCycle,
+} from './review-cycle-cap.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { reconcileReviewerSessions } from './reviewer-reattach.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
@@ -165,6 +177,10 @@ import {
   fetchPullRequestRollup,
   fetchReviewBodiesForHead,
 } from './github-api.mjs';
+import {
+  isNoneFindingsSentinelOnly,
+  parseBlockingFindingsSection,
+} from './kernel/remediation-reply.mjs';
 import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   appendFenceAuditEvent,
@@ -2381,6 +2397,9 @@ const stmtMarkCascadeFailed = db.prepare(
 const stmtMarkPendingUpstream = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
 );
+const stmtMarkReviewCycleCapPaused = db.prepare(
+  "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
+);
 const stmtGetOpenPRs = db.prepare(
   "SELECT repo, pr_number, linear_ticket, labels_json FROM reviewed_prs WHERE pr_state = 'open'"
 );
@@ -2829,7 +2848,31 @@ function settleReviewerAttempt({
   log = console,
 }) {
   if (result.ok) {
-    statements.markPosted.run(new Date().toISOString(), repoPath, prNumber);
+    const postedAt = new Date().toISOString();
+    statements.markPosted.run(postedAt, repoPath, prNumber);
+    try {
+      const currentRow = typeof statements.getReviewRow?.get === 'function'
+        ? statements.getReviewRow.get(repoPath, prNumber)
+        : null;
+      const { windowHours } = resolveReviewCycleCapConfig({
+        loadConfigImpl: loadConfigCached,
+        logger: log,
+      });
+      recordSuccessfulReviewCycleVerdict({
+        db,
+        repoPath,
+        prNumber,
+        headSha: currentRow?.reviewer_head_sha || null,
+        postedAt,
+        result,
+        windowHours,
+        logger: log,
+      });
+    } catch (err) {
+      log?.warn?.(
+        `[watcher] review-cycle-count bookkeeping skipped for ${repoPath}#${prNumber}: ${err?.message || err}`
+      );
+    }
     clearCascadeState(rootDir, { repo: repoPath, prNumber });
     return;
   }
@@ -3025,6 +3068,180 @@ function normalizeLabelNames(labels = []) {
     .map((label) => (typeof label === 'string' ? label : label?.name))
     .map((label) => String(label || '').trim())
     .filter(Boolean);
+}
+
+async function addLabelToPR(octokit, { repoPath, prNumber, label }) {
+  const [owner, repo] = String(repoPath || '').split('/');
+  if (!owner || !repo || !label) return;
+  await octokit.rest.issues.addLabels({
+    owner,
+    repo,
+    issue_number: Number(prNumber),
+    labels: [label],
+  });
+}
+
+async function removeLabelFromPR(octokit, { repoPath, prNumber, label, logger = console }) {
+  const [owner, repo] = String(repoPath || '').split('/');
+  if (!owner || !repo || !label) return;
+  try {
+    await octokit.rest.issues.removeLabel({
+      owner,
+      repo,
+      issue_number: Number(prNumber),
+      name: label,
+    });
+  } catch (err) {
+    const status = err?.status || err?.response?.status;
+    if (status !== 404) {
+      logger?.warn?.(
+        `[watcher] failed to remove label ${label} from ${repoPath}#${prNumber}: ${err?.message || err}`
+      );
+    }
+  }
+}
+
+async function postReviewCycleCapEscalation(octokit, {
+  repoPath,
+  prNumber,
+  body,
+}) {
+  const [owner, repo] = String(repoPath || '').split('/');
+  if (!owner || !repo) throw new Error(`Invalid repo slug: ${repoPath}`);
+  await octokit.rest.issues.createComment({
+    owner,
+    repo,
+    issue_number: Number(prNumber),
+    body,
+  });
+  await addLabelToPR(octokit, {
+    repoPath,
+    prNumber,
+    label: REVIEWER_CYCLE_CAP_REACHED_LABEL,
+  });
+}
+
+async function clearReviewCycleCapForOverride({
+  db,
+  octokit,
+  repoPath,
+  prNumber,
+  headSha,
+  labelNames = [],
+  logger = console,
+} = {}) {
+  const labels = new Set(normalizeLabelNames(labelNames));
+  const overrideLabel = REVIEW_CYCLE_OVERRIDE_LABELS.find((label) => labels.has(label));
+  if (!overrideLabel) return { cleared: false, reason: 'no-override-label' };
+
+  resetReviewCycleCounter(db, { repo: repoPath, prNumber });
+  const overrideAt = new Date().toISOString();
+  if (overrideLabel === PAUSED_FOR_REDESIGN_LABEL) {
+    db.prepare(
+      `UPDATE reviewed_prs
+          SET review_status = 'failed',
+              failed_at = ?,
+              failure_message = ?,
+              reviewer_lease_expires_at = NULL
+        WHERE repo = ?
+          AND pr_number = ?`
+    ).run(
+      overrideAt,
+      `[review-cycle-cap] operator selected ${PAUSED_FOR_REDESIGN_LABEL}; automatic review remains paused for redesign`,
+      repoPath,
+      prNumber,
+    );
+  } else {
+    db.prepare(
+      `UPDATE reviewed_prs
+          SET review_status = 'posted',
+              failed_at = NULL,
+              failure_message = NULL,
+              reviewer_lease_expires_at = NULL
+        WHERE repo = ?
+          AND pr_number = ?`
+    ).run(repoPath, prNumber);
+  }
+  if (labels.has(REVIEWER_CYCLE_CAP_REACHED_LABEL)) {
+    await removeLabelFromPR(octokit, {
+      repoPath,
+      prNumber,
+      label: REVIEWER_CYCLE_CAP_REACHED_LABEL,
+      logger,
+    });
+  }
+  logger?.log?.(
+    `[watcher] review-cycle-cap override for ${repoPath}#${prNumber}: ` +
+      `${overrideLabel}; cleared ${REVIEWER_CYCLE_CAP_REACHED_LABEL}, reset counter, and set review status`
+  );
+  return { cleared: true, overrideLabel };
+}
+
+function reviewBodyHasStandingBlockingFindings(reviewBody) {
+  const parsed = parseBlockingFindingsSection(reviewBody);
+  if (parsed && parsed.length > 0) return true;
+  const match = String(reviewBody ?? '').match(/##\s+Blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
+  if (!match) return false;
+  const lines = match[1].trim().split(/\n/);
+  if (lines.length === 0) return false;
+  return !isNoneFindingsSentinelOnly(lines);
+}
+
+function latestCapturedReviewerPassForPR(db, { repo, prNumber } = {}) {
+  return db.prepare(
+    `SELECT *
+       FROM reviewer_passes
+      WHERE repo = ?
+        AND pr_number = ?
+        AND pass_kind IN ('first-pass', 'rereview')
+        AND status = 'completed'
+      ORDER BY ended_at DESC, pass_id DESC
+      LIMIT 1`
+  ).get(repo, prNumber) || null;
+}
+
+function recordSuccessfulReviewCycleVerdict({
+  db,
+  repoPath,
+  prNumber,
+  headSha,
+  postedAt,
+  result,
+  windowHours,
+  logger = console,
+} = {}) {
+  try {
+    const latestPass = latestCapturedReviewerPassForPR(db, { repo: repoPath, prNumber });
+    const body = result?.reviewBody || latestPass?.body_md || '';
+    if (!reviewBodyHasStandingBlockingFindings(body)) {
+      logger?.log?.(
+        `[watcher] review-cycle-count skipped for ${repoPath}#${prNumber}@${String(headSha || '').slice(0, 12)} ` +
+          'because the posted verdict has no standing blocking findings'
+      );
+      return { recorded: false, reason: 'no-standing-blocking-findings' };
+    }
+    const verdictAt = latestPass?.body_captured_at || latestPass?.ended_at || postedAt || new Date().toISOString();
+    const recorded = recordReviewCycleVerdict(db, {
+      repo: repoPath,
+      prNumber,
+      headSha,
+      verdictAt,
+      verdictSummary: body,
+      windowHours,
+    });
+    if (recorded.recorded) {
+      logger?.log?.(
+        `[watcher] review-cycle-count ${repoPath}#${prNumber}@${String(headSha || '').slice(0, 12)} ` +
+          `count=${recorded.count}`
+      );
+    }
+    return recorded;
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] review-cycle-count record failed for ${repoPath}#${prNumber}: ${err?.message || err}`
+    );
+    return { recorded: false, error: err };
+  }
 }
 
 // ── Org repo discovery ───────────────────────────────────────────────────────
@@ -5321,6 +5538,32 @@ async function pollOnce(
         }
       }
 
+      if (
+        prLabelNames.includes(REVIEWER_CYCLE_CAP_REACHED_LABEL) &&
+        REVIEW_CYCLE_OVERRIDE_LABELS.some((label) => prLabelNames.includes(label))
+      ) {
+        try {
+          await clearReviewCycleCapForOverride({
+            db,
+            octokit,
+            repoPath,
+            prNumber,
+            headSha: subject.headSha || subject.ref?.revisionRef || null,
+            labelNames: prLabelNames,
+            logger: console,
+          });
+          prLabelNames.splice(0, prLabelNames.length, ...prLabelNames.filter(
+            (label) => label !== REVIEWER_CYCLE_CAP_REACHED_LABEL
+          ));
+          existing = stmtGetReviewRow.get(repoPath, prNumber);
+        } catch (err) {
+          console.error(
+            `[watcher] review-cycle-cap override cleanup failed for ${repoPath}#${prNumber}:`,
+            err?.message || err
+          );
+        }
+      }
+
       // Auto-refresh stale posted reviews when the PR HEAD has moved.
       //
       // Without this, a `posted` review row sits forever even when the
@@ -5834,6 +6077,73 @@ async function pollOnce(
         reviewAttempts: existing?.review_attempts || 0,
       });
       if (roundBudgetDecision.skip) {
+        continue;
+      }
+
+      const cycleCapConfig = resolveReviewCycleCapConfig({
+        loadConfigImpl: loadConfigCached,
+        logger: console,
+      });
+      const cycleCapDecision = shouldEscalateReviewCycle(db, {
+        repo: repoPath,
+        prNumber,
+        headSha: subject.headSha || null,
+        cap: cycleCapConfig.cap,
+        windowHours: cycleCapConfig.windowHours,
+        now: new Date().toISOString(),
+      });
+      if (cycleCapDecision.escalate) {
+        const escalatedAt = new Date().toISOString();
+        const recentVerdicts = recentReviewCycleVerdicts(db, {
+          repo: repoPath,
+          prNumber,
+          limit: cycleCapConfig.cap,
+        });
+        const body = buildReviewCycleCapEscalationComment({
+          cap: cycleCapConfig.cap,
+          recentVerdicts,
+        });
+        if (!cycleCapDecision.alreadyEscalated) {
+          try {
+            await postReviewCycleCapEscalation(octokit, {
+              repoPath,
+              prNumber,
+              body,
+            });
+            markReviewCycleEscalated(db, {
+              repo: repoPath,
+              prNumber,
+              headSha: subject.headSha || null,
+              escalatedAt,
+            });
+            console.warn(
+              `[watcher] review-cycle-cap reached for ${repoPath}#${prNumber}: ` +
+                `next_count=${cycleCapDecision.count} cap=${cycleCapConfig.cap}; ` +
+                `posted escalation and added ${REVIEWER_CYCLE_CAP_REACHED_LABEL}`
+            );
+          } catch (err) {
+            console.error(
+              `[watcher] review-cycle-cap escalation failed for ${repoPath}#${prNumber}:`,
+              err?.message || err
+            );
+            continue;
+          }
+        } else {
+          console.log(
+            `[watcher] review-cycle-cap already escalated for ${repoPath}#${prNumber}; ` +
+              `automatic review remains paused`
+          );
+        }
+        const alreadyCapPaused = current?.review_status === 'failed'
+          && String(current?.failure_message || '').startsWith('[review-cycle-cap]');
+        if (!alreadyCapPaused) {
+          stmtMarkReviewCycleCapPaused.run(
+            escalatedAt,
+            `[review-cycle-cap] automatic review paused after ${cycleCapConfig.cap} successive review/remediation cycles; awaiting operator-approved, merge-agent-requested, or ${PAUSED_FOR_REDESIGN_LABEL}`,
+            repoPath,
+            prNumber,
+          );
+        }
         continue;
       }
 
@@ -6355,6 +6665,7 @@ export {
   createWatcherOctokit,
   attemptDagAutowalkOnMerge,
   cancelReviewerRuntimeSession,
+  clearReviewCycleCapForOverride,
   fireDagAutowalkOnMerge,
   DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS,
   probeRoutingTierReadiness,
@@ -6383,6 +6694,8 @@ export {
   resolvePendingDraftRespawnAgeSeconds,
   resolveVocabularyFatigueConfig,
   resolveReviewerIdentity,
+  postReviewCycleCapEscalation,
+  recordSuccessfulReviewCycleVerdict,
   resolveStuckDispatchAlertDebounceMs,
   resolveWatcherDrainMaxMs,
   resolveFirstPassReviewerPoolConfig,

@@ -19,6 +19,7 @@ import {
 } from '../src/reviewer-cascade.mjs';
 import {
   probeRoutingTierReadiness,
+  recordSuccessfulReviewCycleVerdict,
   resolveReviewerIdentity,
   selectReviewerRouteForAttempt,
   settleReviewerAttempt,
@@ -775,6 +776,121 @@ test('settleReviewerAttempt preserves pending-upstream audit fields and clears c
     assert.equal(row.review_attempts, 1);
     assert.equal(row.failure_message, null);
     assert.equal(readCascadeState(rootDir, { repo, prNumber }), null);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('settleReviewerAttempt marks success posted before optional cycle-cap bookkeeping', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    db.prepare(
+      "UPDATE reviewed_prs SET review_status = 'reviewing', reviewer_head_sha = ? WHERE repo = ? AND pr_number = ?"
+    ).run('head-success', repo, prNumber);
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      result: { ok: true },
+      statements: {
+        markPosted: db.prepare(
+          "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+        ),
+        markFailed: stmtMarkBugFailed(db),
+        releaseReviewLease: db.prepare(
+          "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+        ),
+        markCascadeFailed: stmtMarkCascadeFailed(db),
+        markPendingUpstream: stmtMarkPendingUpstream(db),
+      },
+      log: { warn() {}, log() {} },
+    });
+
+    const row = db.prepare(
+      'SELECT review_status, review_attempts, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber);
+    assert.equal(row.review_status, 'posted');
+    assert.equal(row.review_attempts, 1);
+    assert.equal(row.failure_message, null);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('recordSuccessfulReviewCycleVerdict skips settled reviews with no standing blockers', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const result = recordSuccessfulReviewCycleVerdict({
+      db,
+      repoPath: 'laceyenterprises/adversarial-review',
+      prNumber: 195,
+      headSha: 'clean-head',
+      postedAt: '2026-06-04T01:00:00.000Z',
+      result: {
+        ok: true,
+        reviewBody: [
+          '## Summary',
+          'Clean verdict.',
+          '',
+          '## Blocking issues',
+          '- None.',
+          '',
+          '## Verdict',
+          'Comment only',
+        ].join('\n'),
+      },
+      windowHours: 24,
+      logger: { warn() {}, log() {} },
+    });
+
+    assert.equal(result.recorded, false);
+    assert.equal(result.reason, 'no-standing-blocking-findings');
+    const count = db.prepare('SELECT COUNT(*) AS n FROM review_cycle_verdicts').get().n;
+    assert.equal(count, 0);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('recordSuccessfulReviewCycleVerdict counts reviews with standing blockers', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const result = recordSuccessfulReviewCycleVerdict({
+      db,
+      repoPath: 'laceyenterprises/adversarial-review',
+      prNumber: 195,
+      headSha: 'blocking-head',
+      postedAt: '2026-06-04T01:00:00.000Z',
+      result: {
+        ok: true,
+        reviewBody: [
+          '## Summary',
+          'Blocking verdict.',
+          '',
+          '## Blocking issues',
+          '- **Persisted blocker**',
+          '  - **File:** src/watcher.mjs',
+          '  - **Lines:** 1-2',
+          '  - **Problem:** The watcher is still unsafe.',
+          '',
+          '## Verdict',
+          'Request changes',
+        ].join('\n'),
+      },
+      windowHours: 24,
+      logger: { warn() {}, log() {} },
+    });
+
+    assert.equal(result.recorded, true);
+    assert.equal(result.count, 1);
+    const count = db.prepare('SELECT COUNT(*) AS n FROM review_cycle_verdicts').get().n;
+    assert.equal(count, 1);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

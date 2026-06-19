@@ -700,6 +700,38 @@ when they move the row back to `pending`. This gives later, unrelated
 infrastructure incidents a fresh bounded budget while still capping persistent
 failure loops.
 
+## Review Cycle Cap
+
+The watcher also tracks successive successful adversarial review verdicts that
+still carry standing structured blocking findings for a PR in
+`review_cycle_verdicts` / `review_cycle_counters`. Settled `Comment only` or
+`Approved` verdicts with `## Blocking issues` set to `- None.` do not accrue
+cycle-cap budget. The operator-facing config keys are `review_cycle_cap`
+(default `5`) and `review_cycle_window_hours` (default `24`). A new counted
+verdict on the same head keeps the current count; a counted verdict on a
+distinct head increments the count when it lands within the configured window
+of the prior counted verdict; a larger gap resets the sequence to `1`.
+
+When the next review attempt would exceed `review_cycle_cap`, the watcher posts
+one escalation comment for the PR, applies `reviewer-cycle-cap-reached`, marks
+the review row `failed`, and skips automatic reviewer dispatch. The escalation
+dedupe is PR-scoped, not head-scoped: once any head for that PR has escalated,
+later pushes while the cap pause remains active must not post another cap
+comment. A cap bookkeeping failure on the success path must never prevent the
+canonical `review_status='posted'` write for a successfully posted review.
+
+The cap pause is cleared only by an override label:
+
+- `operator-approved` removes `reviewer-cycle-cap-reached`, resets the cycle
+  counter, and restores the review row to `posted` so the existing current-head
+  operator-approved merge-agent path can evaluate the PR.
+- `merge-agent-requested` removes `reviewer-cycle-cap-reached`, resets the
+  cycle counter, and restores the review row to `posted` so the existing scoped
+  merge-agent-requested escape hatch can evaluate the PR.
+- `paused-for-redesign` removes `reviewer-cycle-cap-reached`, resets the cycle
+  counter, and leaves the row `failed` with a redesign-specific failure message;
+  this is an intentional operator pause, not a resume signal.
+
 ## GitHub API Rollup
 
 `src/github-api.mjs` is the watcher/reviewer rollup helper for GitHub PR
@@ -1331,6 +1363,7 @@ The operator can also force-disable merge-agent on a host that DOES have agent-o
 - `adversarial-merge-blocked` — AMA-only hard stop for the current head. It overrides AMA closure even when review, risk, and `operator-approved` would otherwise pass; authors may apply it to block their own PR, and AMA never removes it automatically.
 - `adversarial-merge-requested` — AMA-only scoped request to evaluate closure on an otherwise risk-class-blocked PR. It is accepted only from an attributable non-author current-head label event, bypasses only the AMA risk-class gate, and is not a merge-agent fallback trigger.
 - `merge-agent-requested` — explicit scoped request to fire a merge-agent pass for the current head SHA even when the standard verdict gate would skip. It still respects open-PR, hard-skip, active-remediation, and duplicate-dispatch guards, but it can bypass mergeability, checks, verdict parsing, and remediation-round exhaustion. Consumed after a successful dispatch, or after an acknowledged `skip-no-agent-os` when agent-os is missing or merge-agent dispatch is force-disabled.
+- `reviewer-cycle-cap-reached` — watcher-owned pause label applied when the review-cycle cap is exceeded. Operators clear that pause by applying exactly one of `operator-approved`, `merge-agent-requested`, or `paused-for-redesign`; the first two restore the row to `posted` for the existing merge-agent override lanes, while `paused-for-redesign` leaves review paused.
 - `merge-agent-skip`, `do-not-merge`, `no-merge-hold` — hard skips that even an operator-approved or merge-agent-requested label does not bypass. `merge-agent-stuck` is a hard skip by default, but a scoped current-head `merge-agent-requested` label may bypass it for explicit operator recovery.
 
 The `final-pass-on-budget-exhausted` trigger is **not** a label — it is selected automatically by the dispatch decision tree when the env flag is set and the round budget is consumed. There is no GitHub-visible label for it; the audit trail is the dispatch record (`data/follow-up-jobs/merge-agent-dispatches/<repo>-pr-<n>-<headSha>.json`, `trigger`, `priority`, and `priorityFlagSupported` fields) plus the `MERGE_AGENT_DISPATCH_TRIGGER` env var passed to the worker.

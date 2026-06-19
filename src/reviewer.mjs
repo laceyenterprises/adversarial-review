@@ -55,11 +55,17 @@ import { extractReviewVerdict, looksLikeRuntimeJunk, normalizeReviewVerdict, nor
 import { loadStagePrompt, pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
-import { fetchPullRequestReviewContext } from './github-api.mjs';
+import {
+  fetchPullRequestHeadAndState,
+  fetchPullRequestReviewContext,
+} from './github-api.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 
 const execFileAsync = promisify(execFile);
 const REVIEW_POST_RETRY_DELAYS_MS = [0];
+const ADVISORY_ONLY_REVIEW_LABEL = 'operator-approved: advisory-only-review';
+const VERDICT_MODE_ENFORCE = 'enforce';
+const VERDICT_MODE_ADVISORY_ONLY = 'advisory-only';
 
 const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
@@ -499,9 +505,83 @@ function normalizeLabelName(label) {
   return String(label?.name || '').trim().toLowerCase();
 }
 
+function hasLabel(labels, labelName) {
+  const expected = String(labelName || '').trim().toLowerCase();
+  return Boolean(expected) && Array.isArray(labels)
+    && labels.some((label) => normalizeLabelName(label) === expected);
+}
+
 function hasLocalReviewShadowLabel(labels) {
-  return Array.isArray(labels)
-    && labels.some((label) => normalizeLabelName(label) === LOCAL_REVIEW_SHADOW_LABEL);
+  return hasLabel(labels, LOCAL_REVIEW_SHADOW_LABEL);
+}
+
+function normalizeVerdictMode(mode) {
+  return String(mode || '').trim() === VERDICT_MODE_ADVISORY_ONLY
+    ? VERDICT_MODE_ADVISORY_ONLY
+    : VERDICT_MODE_ENFORCE;
+}
+
+function resolveVerdictModeForHead({
+  labels = [],
+  currentHeadSha = null,
+  reviewerHeadSha = null,
+} = {}) {
+  const sameHead = (
+    reviewerHeadSha &&
+    currentHeadSha &&
+    String(reviewerHeadSha) === String(currentHeadSha)
+  );
+  if (sameHead && hasLabel(labels, ADVISORY_ONLY_REVIEW_LABEL)) {
+    return VERDICT_MODE_ADVISORY_ONLY;
+  }
+  return VERDICT_MODE_ENFORCE;
+}
+
+async function fetchCurrentHeadVerdictMode({
+  repo,
+  prNumber,
+  reviewerHeadSha = null,
+  fetchPullRequestHeadAndStateImpl = fetchPullRequestHeadAndState,
+  execFileImpl = execFileAsync,
+  recordApiCallImpl = recordApiCall,
+  log = console,
+} = {}) {
+  try {
+    const current = await fetchPullRequestHeadAndStateImpl(repo, prNumber, {
+      execFileImpl,
+      recordApiCallImpl,
+      withLabels: true,
+    });
+    return {
+      verdictMode: resolveVerdictModeForHead({
+        labels: current?.labels || [],
+        currentHeadSha: current?.headRefOid || null,
+        reviewerHeadSha,
+      }),
+      currentHeadSha: current?.headRefOid || null,
+      labels: current?.labels || [],
+      source: 'current-pr-head',
+    };
+  } catch (err) {
+    log.warn?.(
+      `[reviewer] WARN: failed to resolve advisory-only label for ${repo}#${prNumber}; using enforce mode: ${err?.message || err}`
+    );
+    return {
+      verdictMode: VERDICT_MODE_ENFORCE,
+      currentHeadSha: null,
+      labels: [],
+      source: 'fallback-enforce',
+      error: err?.message || String(err),
+    };
+  }
+}
+
+function buildReviewCommentHeader({ reviewerMetadata, verdictMode }) {
+  const mode = normalizeVerdictMode(verdictMode);
+  if (mode === VERDICT_MODE_ADVISORY_ONLY) {
+    return '**Advisory-only review** — findings below are informational; no automated remediation will run.\n\n';
+  }
+  return `## Adversarial Review — ${reviewerMetadata.displayName} (${reviewerMetadata.reviewerIdentity})\n\n`;
 }
 
 function normalizeBuilderTag(builderTag) {
@@ -1451,11 +1531,20 @@ function queueFollowUpForPostedReview({
   reviewText,
   reviewPostedAt = new Date().toISOString(),
   critical = false,
+  verdictMode = VERDICT_MODE_ENFORCE,
   summarizePRRemediationLedgerImpl = summarizePRRemediationLedger,
   createFollowUpJobImpl = createFollowUpJob,
 }) {
+  const normalizedVerdictMode = normalizeVerdictMode(verdictMode);
+  if (normalizedVerdictMode === VERDICT_MODE_ADVISORY_ONLY) {
+    return {
+      queued: false,
+      reason: 'advisory-only-review',
+      verdictMode: normalizedVerdictMode,
+    };
+  }
   if (!shouldQueueFollowUpForReview(reviewText)) {
-    return { queued: false, reason: 'empty-review-body' };
+    return { queued: false, reason: 'empty-review-body', verdictMode: normalizedVerdictMode };
   }
   if (typeof baseBranch !== 'string' || baseBranch.trim() === '') {
     throw new Error('baseBranch is required to queue a follow-up handoff');
@@ -1483,11 +1572,12 @@ function queueFollowUpForPostedReview({
     reviewBody: reviewText,
     reviewPostedAt,
     critical,
+    verdictMode: normalizedVerdictMode,
     riskClass: tierResolution.riskClass,
     priorCompletedRounds: priorLedger.completedRoundsForPR,
     ...(elevatedPriorCap ? { maxRemediationRounds: elevatedPriorCap } : {}),
   });
-  return { queued: true, jobPath };
+  return { queued: true, jobPath, verdictMode: normalizedVerdictMode };
 }
 
 // ── PR diff fetch ────────────────────────────────────────────────────────────
@@ -2652,7 +2742,17 @@ async function main() {
 
   // 3. Post to GitHub
   const reviewerMetadata = resolveReviewerMetadata(effectiveModel);
-  const header = `## Adversarial Review — ${reviewerMetadata.displayName} (${reviewerMetadata.reviewerIdentity})\n\n`;
+  const verdictModeResolution = await fetchCurrentHeadVerdictMode({
+    repo,
+    prNumber,
+    reviewerHeadSha,
+  });
+  const verdictMode = verdictModeResolution.verdictMode;
+  console.log(
+    `[reviewer] Verdict mode for ${repo}#${prNumber}@${reviewerHeadSha || '<unknown-head>'}: ${verdictMode}` +
+      (verdictModeResolution.currentHeadSha ? ` (current head ${verdictModeResolution.currentHeadSha})` : '')
+  );
+  const header = buildReviewCommentHeader({ reviewerMetadata, verdictMode });
   const waiverAuditBlock = crossModelReviewWaived
     ? `> Cross-model review waiver: ${String(crossModelReviewWaiverReason || 'operator override selected the same reviewer family as the builder for this pass.')}\n\n`
     : '';
@@ -2764,6 +2864,7 @@ async function main() {
       reviewText,
       reviewPostedAt,
       critical,
+      verdictMode,
     });
     if (queued.queued) {
       console.log(`[reviewer] Follow-up handoff queued at ${queued.jobPath}`);
@@ -2823,6 +2924,13 @@ const __test__ = {
   spawnClaude,
   shouldQueueFollowUpForReview,
   queueFollowUpForPostedReview,
+  ADVISORY_ONLY_REVIEW_LABEL,
+  VERDICT_MODE_ADVISORY_ONLY,
+  VERDICT_MODE_ENFORCE,
+  buildReviewCommentHeader,
+  fetchCurrentHeadVerdictMode,
+  normalizeVerdictMode,
+  resolveVerdictModeForHead,
   isLaunchctlSessionFailure,
   isClaudeLoggedOutStatus,
   resolveClaudeAuthProbeTimeoutMs,

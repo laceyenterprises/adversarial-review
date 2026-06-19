@@ -1630,6 +1630,7 @@ function buildFollowUpJob({
   linearTicketId = null,
   reviewBody,
   reviewPostedAt,
+  verdictMode = 'enforce',
   critical,
   maxRemediationRounds = DEFAULT_MAX_REMEDIATION_ROUNDS,
   // Number of remediation rounds this PR has already completed across
@@ -1691,6 +1692,7 @@ function buildFollowUpJob({
     critical: Boolean(critical),
     reviewSummary: extractReviewSummary(reviewBody),
     reviewBody,
+    verdict_mode: String(verdictMode || '').trim() === 'advisory-only' ? 'advisory-only' : 'enforce',
     recommendedFollowUpAction: {
       ...buildRecommendedFollowUpAction({ critical }),
       maxRounds: remediationPlan.maxRounds,

@@ -1881,14 +1881,18 @@ async function dispatchRemediationViaHq({
           completion_shape: 'branch-push',
           repo: normalizeHqDispatchRepo(repo),
           pr_number: prNumber,
-          branch,
+          // Omit `branch` when falsy so the agent-os wire payload matches the
+          // native lane, which only appends `--branch` when truthy. `stripUndefined`
+          // in the SDK client drops `undefined` but not `null`, so passing a falsy
+          // branch through would serialize `branch: null` and diverge the two lanes.
+          ...(branch ? { branch } : {}),
           hq_root: hqRoot,
           parent_session: parentSession,
           project,
         });
       })()
     : parseHqJsonObject(
-        (await execFileImpl(hqBin, legacyHqArgs, { env })).stdout,
+        (await execFileImpl(hqBin, legacyHqArgs, { env, maxBuffer: 5 * 1024 * 1024 })).stdout,
         'hq dispatch'
       );
   const launchRequestIdValue = String(ticket?.launch_request_id || ticket?.launchRequestId || ticket?.lrq || '').trim();
@@ -1900,6 +1904,10 @@ async function dispatchRemediationViaHq({
     throw new Error('app-sdk dispatch ticket missing dispatch_id');
   }
   const ticketWorkspaceDir = normalizeHqWorkspaceDir(ticket?.workspace_dir || ticket?.workspaceDir);
+  // In agent-os mode the workspace is intentionally left unresolved at dispatch
+  // (the App Contract ticket carries no workspace_dir) and is re-resolved later
+  // at reconcile via `hq dispatch status <dispatchId>`. This non-obvious
+  // dependency is load-bearing for branch-contamination audits.
   const workspaceDir = appMode === 'agent-os'
     ? ticketWorkspaceDir
     : await resolveHqWorkerWorkspace({

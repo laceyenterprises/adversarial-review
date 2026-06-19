@@ -902,7 +902,7 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-reviewer-pool': "export function compareReviewerDispatchCandidates() { return 0; } export function createReviewerMemoryAdmissionSampler() { return { sample: async () => ({ admit: true }) }; } export function reserveReviewerMemoryAdmission() { return () => {}; } export function resolveFirstPassReviewerPoolConfig() { return { enabled: false }; } export async function runBoundedReviewerDispatchQueue() { return { dispatched: 0, skipped: 0 }; } export function sortReviewerDispatchCandidates(items) { return items; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
     'fixture:atomic-write': "export function writeFileAtomic() {}",
-    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { globalThis.__githubApiWatcherRollupCalls = (globalThis.__githubApiWatcherRollupCalls || 0) + 1; return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1; return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid, labels: [...scenario.rollup.labels] }; } export async function fetchReviewBodiesForHead() { return []; }",
+    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { globalThis.__githubApiWatcherRollupCalls = (globalThis.__githubApiWatcherRollupCalls || 0) + 1; return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1; return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid, labels: [...scenario.rollup.labels] }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchPullRequestCommitSubjects() { return []; }",
   };
 
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {
@@ -1009,6 +1009,46 @@ test('GraphQL response shape matches the REST union contract', async () => {
   assert.equal(Array.isArray(result.reviews), true);
   assert.equal(Array.isArray(result.checks), true);
   assert.deepEqual(telemetry.events.map((entry) => entry.category), ['graphql_pr_rollup']);
+});
+
+test('fetchPullRequestCommitSubjects reads only the requested commit tail via GraphQL', async () => {
+  const mod = await importGithubApiFresh();
+  const telemetry = makeTelemetrySink();
+  const calls = [];
+
+  const result = await mod.fetchPullRequestCommitSubjects(FIXTURE_REPO, FIXTURE_PR, {
+    limit: 5,
+    recordApiCallImpl: telemetry.recordApiCallImpl,
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      assert.equal(command, 'gh');
+      const vars = parseGhArgs(args);
+      assert.match(String(vars.query || ''), /query PullRequestCommitSubjects/);
+      assert.equal(vars.commitLast, '5');
+      assert.doesNotMatch(args.join(' '), /pulls\/\d+\/commits/);
+      return {
+        stdout: JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                commits: {
+                  nodes: [
+                    { commit: { messageHeadline: 'Harden watcher path', message: 'ignored body' } },
+                    { commit: { message: 'Tighten reviewer prompt\n\nBody' } },
+                    { commit: { messageHeadline: '' } },
+                  ],
+                },
+              },
+            },
+          },
+        }),
+      };
+    },
+  });
+
+  assert.deepEqual(result, ['Harden watcher path', 'Tighten reviewer prompt']);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(telemetry.events.map((entry) => entry.category), ['pr_commits']);
 });
 
 test('feature flag fallback runs the legacy cluster path and preserves shape', async () => {

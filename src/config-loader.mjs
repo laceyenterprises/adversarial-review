@@ -353,6 +353,20 @@ function schemaV1() {
           },
         },
       },
+      agent_control: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          codex_runaway_guardrails: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              vocabulary_fatigue_window_commits: { __type: TYPE_INT, __default: 5, __min: 1 },
+              vocabulary_fatigue_min_repeats: { __type: TYPE_INT, __default: 3, __min: 1 },
+            },
+          },
+        },
+      },
       apps: {
         __type: TYPE_DICT,
         __strict: false,
@@ -1312,6 +1326,14 @@ export const ENV_ALIASES = {
   },
   'policy.dedup.uncommitted_line_threshold': {
     canonical: 'AGENT_OS_POLICY_DEDUP_UNCOMMITTED_LINE_THRESHOLD',
+    aliases: [],
+  },
+  'agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits': {
+    canonical: 'AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_VOCABULARY_FATIGUE_WINDOW_COMMITS',
+    aliases: [],
+  },
+  'agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats': {
+    canonical: 'AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_VOCABULARY_FATIGUE_MIN_REPEATS',
     aliases: [],
   },
   'sentinel.spec_drift.cycle_interval_seconds': {

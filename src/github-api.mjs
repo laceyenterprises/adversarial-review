@@ -211,6 +211,28 @@ query PullRequestRollupComments(
 }
 `;
 
+const GRAPHQL_PR_COMMIT_SUBJECTS_QUERY = `
+query PullRequestCommitSubjects(
+  $owner: String!
+  $repo: String!
+  $prNumber: Int!
+  $commitLast: Int!
+) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $prNumber) {
+      commits(last: $commitLast) {
+        nodes {
+          commit {
+            messageHeadline
+            message
+          }
+        }
+      }
+    }
+  }
+}
+`;
+
 const GRAPHQL_REVIEWS_ONLY_QUERY = `
 query PullRequestRollupReviews(
   $owner: String!
@@ -368,6 +390,18 @@ query PullRequestReviewContext(
   }
 }
 `;
+
+function normalizeCommitSubject(commit) {
+  const message = String(
+    commit?.commit?.messageHeadline
+    || commit?.messageHeadline
+    || commit?.commit?.message
+    || commit?.message
+    || ''
+  );
+  const subject = message.split(/\r?\n/, 1)[0].trim();
+  return subject || null;
+}
 
 function splitRepo(repo) {
   const match = /^([^/]+)\/([^/]+)$/.exec(String(repo || '').trim());
@@ -1462,6 +1496,37 @@ async function fetchPullRequestReviewContext(repo, prNumber, {
   return fetchGraphqlReviewContext(repo, normalizedPrNumber, { execFileImpl, recordApiCallImpl });
 }
 
+async function fetchPullRequestCommitSubjects(repo, prNumber, {
+  execFileImpl = execFileAsync,
+  recordApiCallImpl = recordApiCall,
+  limit = 5,
+} = {}) {
+  const normalizedPrNumber = normalizePrNumber(prNumber);
+  const normalizedLimit = Number(limit);
+  const commitLast = Number.isInteger(normalizedLimit) && normalizedLimit > 0
+    ? Math.min(normalizedLimit, PAGE_SIZE)
+    : 5;
+  const { owner, repo: repoName } = splitRepo(repo);
+  try {
+    const payload = await runGraphqlWithTelemetry(execFileImpl, GRAPHQL_PR_COMMIT_SUBJECTS_QUERY, {
+      owner,
+      repo: repoName,
+      prNumber: normalizedPrNumber,
+      commitLast,
+    }, {
+      category: 'pr_commits',
+      repo,
+      prNumber: normalizedPrNumber,
+      recordApiCallImpl,
+    });
+    const pr = extractGraphqlPr(payload);
+    const nodes = pr?.commits?.nodes || [];
+    return Array.isArray(nodes) ? nodes.map(normalizeCommitSubject).filter(Boolean) : [];
+  } catch (err) {
+    throw err;
+  }
+}
+
 const __test__ = {
   buildGhEnv,
   extractChecksConnection,
@@ -1480,6 +1545,7 @@ const __test__ = {
   fetchReviewBodiesForHead,
   normalizeCheck,
   normalizeComment,
+  normalizeCommitSubject,
   normalizePrNumber,
   normalizeReview,
   normalizeRollup,
@@ -1493,6 +1559,7 @@ const __test__ = {
 
 export {
   __test__,
+  fetchPullRequestCommitSubjects,
   fetchPullRequestHeadAndState,
   fetchPullRequestReviewContext,
   fetchPullRequestRollup,

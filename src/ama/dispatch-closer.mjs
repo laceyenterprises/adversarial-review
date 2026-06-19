@@ -59,6 +59,27 @@ const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const AGENT_OS_TOOLING_REPO = 'agent-os';
 const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
+
+// Auto-hammer (2026-06-19): the eligibility-miss reasons that a hammer TERMINAL
+// remediation pass can clear on its own — i.e. the strict-mode "settled review
+// has standing non-blocking findings" case. The hammer-prompt remediates the
+// non-blocking findings, then re-validates the gate with ham-terminal-remediation
+// evidence (fail-closed), so auto-dispatching it here is safe for this exact
+// shape only. Deliberately NARROW: any other reason (blocking findings,
+// pr-not-mergeable, ci-not-green, stale head, risk-class, branch-protection,
+// remediation-pending, hard-stop labels) means NOT auto-hammer — those are not
+// fixable by a terminal non-blocking remediation and stay await-operator.
+const HAMMER_AUTO_REMEDIABLE_MISS_REASONS = new Set([
+  'non-blocking-findings-present',
+  'verdict-not-settled-success', // strict mode emits this alongside the above
+]);
+
+export function isHammerRemediableEligibilityMiss(reasons) {
+  if (!Array.isArray(reasons) || reasons.length === 0) return false;
+  // Must actually be the non-blocking case, and EVERY reason must be remediable.
+  if (!reasons.includes('non-blocking-findings-present')) return false;
+  return reasons.every((reason) => HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason));
+}
 const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;
 const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
 const AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS = 90_000;
@@ -579,15 +600,38 @@ export async function maybeDispatchAmaCloser({
     return { dispatched: false, reason: 'ama-disabled' };
   }
 
-  // The eligibility predicate is the second gate. There is no
-  // fallthrough path that overrides it.
+  // The eligibility predicate is the second gate.
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, options);
   if (!verdict.eligible) {
-    return {
-      dispatched: false,
-      reason: 'not-eligible',
-      reasons: verdict.reasons,
-    };
+    // Auto-hammer fall-through (gated by
+    // roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss): when the
+    // ONLY reason the PR is ineligible is standing non-blocking findings under
+    // strict mode, dispatch the hammer closer in remediation mode instead of
+    // parking await-operator. The hammer-prompt remediates the non-blocking
+    // findings, commits, writes the audit comment, then re-runs the eligibility
+    // predicate with --ham-terminal-remediation evidence — which is validated
+    // strictly and fails CLOSED if the findings were not actually addressed. So
+    // this never merges anything the gate wouldn't otherwise accept; it only
+    // automates the remediation step that the operator would have triggered with
+    // a label. Only valid when the configured closer worker IS the hammer.
+    const workerClassForMiss = String(cfg.workerClass || 'hammer');
+    const autoHammer =
+      cfg?.autoHammerOnEligibilityMiss === true
+      && workerClassForMiss === 'hammer'
+      && isHammerRemediableEligibilityMiss(verdict.reasons);
+    if (!autoHammer) {
+      return {
+        dispatched: false,
+        reason: 'not-eligible',
+        reasons: verdict.reasons,
+      };
+    }
+    logger.log?.(
+      `[ama-closer] auto-hammer: dispatching terminal remediation for ineligible ` +
+      `PR (reasons: ${(verdict.reasons || []).join(',')}) — hammer will remediate ` +
+      `non-blocking findings then re-validate the gate fail-closed`
+    );
+    // fall through to the dispatch below (hammer template, remediation mode)
   }
 
   // Compose the prompt body. Template loaded from disk via DI so

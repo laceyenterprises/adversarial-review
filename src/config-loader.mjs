@@ -808,6 +808,10 @@ function schemaV1() {
                     __type: TYPE_BOOL,
                     __default: true,
                   },
+                  auto_hammer_on_eligibility_miss: {
+                    __type: TYPE_BOOL,
+                    __default: false,
+                  },
                   eligibility: {
                     __type: TYPE_DICT,
                     __strict: true,
@@ -2451,6 +2455,10 @@ export class AgentOSConfig {
       strictNonBlockingRemediation: this.get(
         'roles.adversarial.merge_authority.strict_non_blocking_remediation',
         true,
+      ),
+      autoHammerOnEligibilityMiss: this.get(
+        'roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss',
+        false,
       ),
       eligibility: {
         riskClasses: [...this.get(

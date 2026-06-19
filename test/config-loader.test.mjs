@@ -197,6 +197,51 @@ test('codex runaway guardrail vocabulary fatigue config resolves through strict 
   }
 });
 
+test('codex runaway guardrail strict schema accepts Python-owned keys', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      agent_control:
+        codex_runaway_guardrails:
+          observed_repos:
+            - laceyenterprises/agent-os
+            - laceyenterprises/adversarial-review
+          convergence_stall_commit_window_seconds: 1800
+          convergence_stall_min_commits: 4
+          convergence_stall_file_fetch_budget_per_cycle: 12
+          convergence_stall_finding_dedupe_seconds: 600
+          convergence_stall_repo_backoff_seconds: 30
+          convergence_stall_observed_worker_classes:
+            - codex
+            - claude-code
+          token_budget_per_session: 200000
+          vocabulary_fatigue_window_commits: 7
+          vocabulary_fatigue_min_repeats: 4
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.get('agent_control.codex_runaway_guardrails.observed_repos'), [
+      'laceyenterprises/agent-os',
+      'laceyenterprises/adversarial-review',
+    ]);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_commit_window_seconds'), 1800);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_min_commits'), 4);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_file_fetch_budget_per_cycle'), 12);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_finding_dedupe_seconds'), 600);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_repo_backoff_seconds'), 30);
+    assert.deepEqual(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_observed_worker_classes'), [
+      'codex',
+      'claude-code',
+    ]);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.token_budget_per_session'), 200000);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits'), 7);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats'), 4);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('linear and session ledger env overrides resolve through cfg loader', () => {
   const tmp = freshTmp();
   try {

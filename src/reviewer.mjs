@@ -727,6 +727,23 @@ function buildLocalReviewShadowPrompt({ hostedReviewText, diff, extraContext = '
   ].filter(Boolean).join('\n');
 }
 
+function formatAdvisoryFindingsContext(advisoryFindings = []) {
+  const findings = (Array.isArray(advisoryFindings) ? advisoryFindings : [])
+    .filter((finding) => finding && typeof finding === 'object');
+  if (findings.length === 0) return '';
+  return [
+    '',
+    '## Watcher Advisory Findings',
+    '',
+    'These findings are informational context from the watcher. Do not place them in `## Blocking Issues`, and do not change the verdict solely because of them.',
+    '',
+    '```json',
+    JSON.stringify(findings, null, 2),
+    '```',
+    '',
+  ].join('\n');
+}
+
 function formatLocalReviewShadowArtifact({ request, reviewText, status = 'completed', reason = null }) {
   const provenance = [
     '# Local OSS Model Shadow Review (Non-Gating)',
@@ -2504,6 +2521,7 @@ async function main() {
     reviewerSpawnToken,
     labels = [],
     ticketPipelinePaused = false,
+    advisoryFindings = [],
     crossModelReviewWaived = false,
     crossModelReviewWaiverReason = null,
     vocabularyFatigueFinding = null,
@@ -2603,6 +2621,10 @@ async function main() {
     }
   } catch (err) {
     console.error(`[reviewer] WARN: failed to fetch linked PR context: ${err.message}`);
+  }
+  const advisoryContext = formatAdvisoryFindingsContext(advisoryFindings);
+  if (advisoryContext) {
+    extraContext = `${extraContext}${advisoryContext}`;
   }
 
   extraContext = appendVocabularyFatigueReviewContext(extraContext, vocabularyFatigueFinding);

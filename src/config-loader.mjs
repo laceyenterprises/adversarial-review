@@ -266,6 +266,36 @@ function schemaV1() {
           acp_state_home: { __type: TYPE_STRING, __default: null, __nullable: true },
         },
       },
+      agent_control: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          codex_runaway_guardrails: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              observed_repos: {
+                __type: TYPE_LIST,
+                __item: { __type: TYPE_STRING },
+                __default: ['laceyenterprises/agent-os', 'laceyenterprises/adversarial-review'],
+              },
+              convergence_stall_commit_window_seconds: { __type: TYPE_INT, __default: 3600, __min: 1 },
+              convergence_stall_min_commits: { __type: TYPE_INT, __default: 3, __min: 1 },
+              convergence_stall_file_fetch_budget_per_cycle: { __type: TYPE_INT, __default: 20, __min: 1 },
+              convergence_stall_finding_dedupe_seconds: { __type: TYPE_INT, __default: 900, __min: 1 },
+              convergence_stall_repo_backoff_seconds: { __type: TYPE_INT, __default: 60, __min: 1 },
+              convergence_stall_observed_worker_classes: {
+                __type: TYPE_LIST,
+                __item: { __type: TYPE_STRING },
+                __default: ['codex', 'claude-code', 'clio-agent'],
+              },
+              token_budget_per_session: { __type: TYPE_INT, __default: 0, __min: 0 },
+              vocabulary_fatigue_window_commits: { __type: TYPE_INT, __default: 5, __min: 1 },
+              vocabulary_fatigue_min_repeats: { __type: TYPE_INT, __default: 3, __min: 1 },
+            },
+          },
+        },
+      },
       // OAuth broker watchdog tuning. Mirrors the Python authority
       // (`oauth_broker.watchdog` in
       // platform/agent-os-config/src/agent_os_config/__init__.py). The Node
@@ -350,20 +380,6 @@ function schemaV1() {
           emergency_stop_path: {
             __type: TYPE_STRING,
             __default: '~/.agent-os/governance/emergency-stop',
-          },
-        },
-      },
-      agent_control: {
-        __type: TYPE_DICT,
-        __strict: true,
-        __keys: {
-          codex_runaway_guardrails: {
-            __type: TYPE_DICT,
-            __strict: true,
-            __keys: {
-              vocabulary_fatigue_window_commits: { __type: TYPE_INT, __default: 5, __min: 1 },
-              vocabulary_fatigue_min_repeats: { __type: TYPE_INT, __default: 3, __min: 1 },
-            },
           },
         },
       },

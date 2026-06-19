@@ -31,7 +31,7 @@ const SETTLED_COMMENT_BODY = [
   '- None.',
   '',
   '## Non-blocking Issues',
-  '- Consider a follow-up.',
+  '- None.',
   '',
   '## Verdict',
   'Comment only',

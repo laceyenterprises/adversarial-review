@@ -28,7 +28,10 @@ import {
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from '../src/follow-up-jobs.mjs';
-import { classifyBlockingFindings } from '../src/follow-up-merge-agent.mjs';
+import {
+  classifyBlockingFindings,
+  classifyNonBlockingFindings,
+} from '../src/follow-up-merge-agent.mjs';
 import { normalizeGithubMergeability } from '../src/github-mergeability.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from '../src/ama/reviewer-authority.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from '../src/kernel/verdict.mjs';
@@ -40,6 +43,14 @@ import { extractReviewVerdict, normalizeReviewVerdict } from '../src/kernel/verd
 const UNKNOWN_BLOCKERS = Object.freeze({
   blockingFindingState: 'unknown',
   blockingFindingCount: 0,
+});
+const UNKNOWN_NON_BLOCKERS = Object.freeze({
+  nonBlockingFindingState: 'unknown',
+  nonBlockingFindingCount: 0,
+});
+const UNKNOWN_FINDINGS = Object.freeze({
+  ...UNKNOWN_BLOCKERS,
+  ...UNKNOWN_NON_BLOCKERS,
 });
 
 const SUBMITTED_REVIEW_STATES = new Set(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']);
@@ -98,12 +109,20 @@ const BLOCKING_SECTION_HEADING_RE = /^[ \t]*#{1,6}[ \t]+Blocking[ \t]+Issues?[ \
 // closed to `unknown` and the closer parks at `blocking-findings-unknown`.
 function classifyBlockersFromReviewBody(body, verdict) {
   const text = String(body ?? '');
-  if (!text.trim()) return { ...UNKNOWN_BLOCKERS };
-  if (!BLOCKING_SECTION_HEADING_RE.test(text)) return { ...UNKNOWN_BLOCKERS };
+  if (!text.trim()) return { ...UNKNOWN_FINDINGS };
+  if (!BLOCKING_SECTION_HEADING_RE.test(text)) return { ...UNKNOWN_FINDINGS };
   const { count, state } = classifyBlockingFindings(text, {
     lastVerdict: verdict || null,
   });
-  return { blockingFindingState: state, blockingFindingCount: count };
+  const nonBlocking = classifyNonBlockingFindings(text, {
+    lastVerdict: verdict || null,
+  });
+  return {
+    blockingFindingState: state,
+    blockingFindingCount: count,
+    nonBlockingFindingState: nonBlocking.state,
+    nonBlockingFindingCount: nonBlocking.count,
+  };
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -276,11 +295,16 @@ function buildReviewState({
   // `verdict-not-settled-success` and deferring every settled-success closure
   // (the watcher's eligibility pass set these from the durable job, so it
   // passed while this pre-merge re-verification always failed closed).
-  const { blockingFindingState, blockingFindingCount } = authoritativeReview
+  const {
+    blockingFindingState,
+    blockingFindingCount,
+    nonBlockingFindingState,
+    nonBlockingFindingCount,
+  } = authoritativeReview
     ? (verdict
       ? classifyBlockersFromReviewBody(authoritativeReview.review.body, verdict)
-      : { ...UNKNOWN_BLOCKERS })
-    : { ...UNKNOWN_BLOCKERS };
+      : { ...UNKNOWN_FINDINGS })
+    : { ...UNKNOWN_FINDINGS };
 
   // Walk the timeline for the latest current-head `operator-approved`
   // labeled event. The eligibility predicate applies the head-scope +
@@ -314,6 +338,8 @@ function buildReviewState({
     // `blockingFindingState === 'known'` AND `blockingFindingCount === 0`.
     blockingFindingState,
     blockingFindingCount,
+    nonBlockingFindingState,
+    nonBlockingFindingCount,
     operatorApprovedEvidence: opApprovedEvent?.commit_id
       ? {
           applied: true,

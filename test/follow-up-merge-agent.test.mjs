@@ -29,6 +29,7 @@ import {
   TERMINAL_WORKER_RUN_STATUSES,
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
+  classifyNonBlockingFindings,
   detectAgentOsPresence,
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
@@ -386,6 +387,52 @@ test('ARP-06/#157: non-None Blocking issues refuses auto-merge even with a settl
 
   assert.equal(detail.decision, 'skip-blockers-present');
   assert.equal(detail.trigger, null);
+});
+
+test('classifyNonBlockingFindings counts top-level non-blocking finding cards', () => {
+  const result = classifyNonBlockingFindings([
+    '## Summary',
+    'Clean except polish.',
+    '',
+    '## Non-blocking Issues',
+    '- **Tighten audit copy.**',
+    '  - **File:** docs/RUNBOOK.md',
+    '  - **Lines:** 12',
+    '  - **Problem:** The wording is stale.',
+    '- **Remove unused helper.**',
+    '  - **File:** src/example.mjs',
+    '  - **Lines:** 9',
+    '  - **Problem:** Dead code remains.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n'), { lastVerdict: 'Comment only' });
+
+  assert.deepEqual(result, { count: 2, state: 'known' });
+});
+
+test('classifyNonBlockingFindings handles none sentinel, omitted settled section, and blank body', () => {
+  assert.deepEqual(
+    classifyNonBlockingFindings([
+      '## Summary',
+      'Clean.',
+      '',
+      '## Non-blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      'Approved',
+    ].join('\n'), { lastVerdict: 'Approved' }),
+    { count: 0, state: 'known' },
+  );
+  assert.deepEqual(
+    classifyNonBlockingFindings('## Summary\nClean.\n\n## Verdict\nApproved', { lastVerdict: 'Approved' }),
+    { count: 0, state: 'known' },
+  );
+  assert.deepEqual(
+    classifyNonBlockingFindings('', { lastVerdict: 'Approved' }),
+    { count: 0, state: 'unknown' },
+  );
 });
 
 test('ROOT-CAUSE GATE: final-pass fails closed when Request changes blocker state is unknown', () => {

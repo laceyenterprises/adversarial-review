@@ -22,6 +22,8 @@ function eligibleFixture(overrides = {}) {
     operatorApprovedEvidence: null,
     blockingFindingCount: 0,
     blockingFindingState: 'known',
+    nonBlockingFindingCount: 0,
+    nonBlockingFindingState: 'known',
     prAuthor: 'codex-worker-bot',
     reviewerFamily: 'claude',
     ...overrides.reviewState,
@@ -965,6 +967,87 @@ test('not eligible: malformed blocker count fails closed as unknown blocker stat
   assert.ok(result.reasons.includes('verdict-not-settled-success'));
 });
 
+test('not eligible: comment-only review with non-blocking findings is not direct settled success in strict mode', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      nonBlockingFindingCount: 1,
+      nonBlockingFindingState: 'known',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('non-blocking-findings-present'));
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.equal(result.trace.verdict.nonBlockingFindings.count, 1);
+  assert.equal(result.trace.verdict.strictNonBlockingRemediation, true);
+});
+
+test('eligible: comment-only review with explicit no non-blocking findings remains direct settled success', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      nonBlockingFindingCount: 0,
+      nonBlockingFindingState: 'known',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.verdict.settledSuccess, true);
+});
+
+test('not eligible: unknown non-blocking state fails closed in strict mode', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      nonBlockingFindingCount: 0,
+      nonBlockingFindingState: 'unknown',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('non-blocking-findings-present'));
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.equal(result.trace.verdict.nonBlockingFindings.known, false);
+});
+
+test('eligible: strict_non_blocking_remediation=false restores prior direct close behavior', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      nonBlockingFindingCount: 1,
+      nonBlockingFindingState: 'known',
+    },
+    cfg: { strictNonBlockingRemediation: false },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.verdict.settledSuccess, true);
+  assert.equal(result.trace.verdict.strictNonBlockingRemediation, false);
+});
+
+test('eligible: current-head operator-approved waives strict non-blocking findings gate', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: { labels: ['operator-approved'] },
+    reviewState: {
+      verdict: 'comment-only',
+      nonBlockingFindingCount: 1,
+      nonBlockingFindingState: 'known',
+      operatorApprovedEvidence: {
+        applied: true,
+        observedRevisionRef: 'abc12345',
+        actor: 'paul-the-operator',
+        eventId: 'LE_nonblocking_override',
+        observedAt: '2026-06-10T20:00:00Z',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.verdict.operatorOverride, true);
+  assert.ok(!result.reasons.includes('non-blocking-findings-present'));
+});
+
 // ---------------------------------------------------------------------------
 // Cross-cutting: multiple gates failing simultaneously
 // ---------------------------------------------------------------------------
@@ -1482,6 +1565,63 @@ test('ham terminal remediation: HAM-authored live head over reviewed parent is e
     result.trace.hamTerminalRemediation.waived.sort(),
     ['blocking-findings-present', 'stale-review-head', 'verdict-not-settled-success'].sort(),
   );
+});
+
+test('ham terminal remediation: validated non-blocking finding remediation waives strict direct-close blocker', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+      nonBlockingFindingCount: 1,
+      nonBlockingFindingState: 'known',
+    },
+    prMetadata: { headSha: 'def67890' },
+  });
+  const evidence = {
+    active: true,
+    ticket: 'HAM-03',
+    commit: {
+      sha: 'def67890',
+      parentSha: 'abc12345',
+      trailers: {
+        'Worker-Class': 'hammer',
+        'Worker-Ticket': 'HAM-03',
+        'Closed-By': 'hammer (adversarial-pipe-mode)',
+        'Remediated-Findings': '1 addressed (0 blocking, 1 non-blocking)',
+      },
+    },
+    auditComment: {
+      body: 'HAM audit: addressed README note is stale in README.md',
+      findings: [
+        { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
+      ],
+    },
+  };
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: evidence,
+    hamTerminalRemediationGroundTruth: {
+      commit: {
+        sha: 'def67890',
+        parentSha: 'abc12345',
+        author: 'hammer-worker',
+        changedFiles: ['README.md'],
+        trailers: evidence.commit.trailers,
+      },
+      auditComment: {
+        body: evidence.auditComment.body,
+        author: 'hammer-worker',
+        createdAt: '2026-06-13T12:30:00Z',
+        id: 'IC_ham_nonblocking_audit',
+      },
+    },
+  });
+
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
+  assert.equal(result.trace.hamTerminalRemediation.addressedFindings.nonBlocking, 1);
+  assert.ok(result.trace.hamTerminalRemediation.waived.includes('non-blocking-findings-present'));
 });
 
 test('ham terminal remediation: later non-HAM live head is rejected', () => {

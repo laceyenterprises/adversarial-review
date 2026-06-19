@@ -2830,6 +2830,7 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
             enabled: false
             worker_class: codex
             merge_method: squash
+            strict_non_blocking_remediation: false
             eligibility:
               risk_classes: ["low"]
               fast_merge_labels:
@@ -2844,6 +2845,8 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
     assert.equal(cfg.get('roles.adversarial.merge_authority.enabled'), false);
     assert.equal(cfg.get('roles.adversarial.merge_authority.worker_class'), 'codex');
     assert.equal(cfg.get('roles.adversarial.merge_authority.merge_method'), 'squash');
+    assert.equal(cfg.get('roles.adversarial.merge_authority.strict_non_blocking_remediation'), false);
+    assert.equal(cfg.getMergeAuthorityConfig().strictNonBlockingRemediation, false);
     assert.deepEqual(cfg.get('roles.adversarial.merge_authority.eligibility.risk_classes'), ['low']);
     assert.deepEqual(
       cfg.get('roles.adversarial.merge_authority.eligibility.fast_merge_labels'),
@@ -2874,6 +2877,20 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
     assert.equal(
       canonicalFalseEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
       'env:AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
+    );
+    const strictFalseEnvCfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_STRICT_NON_BLOCKING_REMEDIATION: '0' },
+    });
+    assert.equal(
+      strictFalseEnvCfg.get('roles.adversarial.merge_authority.strict_non_blocking_remediation'),
+      false,
+    );
+    assert.equal(
+      strictFalseEnvCfg.resolutionTrace(
+        'roles.adversarial.merge_authority.strict_non_blocking_remediation',
+      ).at(-1).source,
+      'env:AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_STRICT_NON_BLOCKING_REMEDIATION',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -3028,6 +3045,28 @@ test('AMA merge_authority high_risk_requires_two_key defaults to true', () => {
       true,
     );
     assert.equal(cfg.getMergeAuthorityConfig().eligibility.highRiskRequiresTwoKey, true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('AMA merge_authority strict_non_blocking_remediation defaults to true', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        adversarial:
+          merge_authority:
+            enabled: true
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(
+      cfg.get('roles.adversarial.merge_authority.strict_non_blocking_remediation'),
+      true,
+    );
+    assert.equal(cfg.getMergeAuthorityConfig().strictNonBlockingRemediation, true);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

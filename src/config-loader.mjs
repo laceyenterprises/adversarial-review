@@ -804,6 +804,10 @@ function schemaV1() {
                     __default: 'squash',
                     __enum: ['squash', 'merge'],
                   },
+                  strict_non_blocking_remediation: {
+                    __type: TYPE_BOOL,
+                    __default: true,
+                  },
                   eligibility: {
                     __type: TYPE_DICT,
                     __strict: true,
@@ -1339,6 +1343,10 @@ export const ENV_ALIASES = {
   },
   'roles.adversarial.merge_authority.enabled': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
+    aliases: [],
+  },
+  'roles.adversarial.merge_authority.strict_non_blocking_remediation': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_STRICT_NON_BLOCKING_REMEDIATION',
     aliases: [],
   },
   'roles.adversarial.orchestration_mode': {
@@ -2433,6 +2441,10 @@ export class AgentOSConfig {
       mergeMethod: this.get(
         'roles.adversarial.merge_authority.merge_method',
         'squash',
+      ),
+      strictNonBlockingRemediation: this.get(
+        'roles.adversarial.merge_authority.strict_non_blocking_remediation',
+        true,
       ),
       eligibility: {
         riskClasses: [...this.get(

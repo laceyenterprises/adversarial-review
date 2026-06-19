@@ -8,6 +8,7 @@ import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 import {
   buildScopedOperatorApproval,
   classifyBlockingFindings,
+  classifyNonBlockingFindings,
   extractReviewVerdict,
   findLatestFollowUpJobForPR,
   normalizeFollowUpJobStatus,
@@ -163,6 +164,8 @@ function extractReviewBodyFromRow(reviewRow) {
 // failure). The AMA gate fails closed on `unknown`; never synthesize `known:0`
 // out of nothing.
 const UNKNOWN_BLOCKERS = { blockingFindingState: 'unknown', blockingFindingCount: 0 };
+const UNKNOWN_NON_BLOCKERS = { nonBlockingFindingState: 'unknown', nonBlockingFindingCount: 0 };
+const UNKNOWN_FINDINGS = { ...UNKNOWN_BLOCKERS, ...UNKNOWN_NON_BLOCKERS };
 
 /**
  * Classify standing blocking findings from the SAME authoritative body the
@@ -173,9 +176,15 @@ const UNKNOWN_BLOCKERS = { blockingFindingState: 'unknown', blockingFindingCount
  * `unknown`. A missing/blank body fails closed to `unknown`.
  */
 function classifyBlockersFromBody(body, verdict) {
-  if (!String(body ?? '').trim()) return { ...UNKNOWN_BLOCKERS };
+  if (!String(body ?? '').trim()) return { ...UNKNOWN_FINDINGS };
   const { count, state } = classifyBlockingFindings(body, { lastVerdict: verdict || null });
-  return { blockingFindingState: state, blockingFindingCount: count };
+  const nonBlocking = classifyNonBlockingFindings(body, { lastVerdict: verdict || null });
+  return {
+    blockingFindingState: state,
+    blockingFindingCount: count,
+    nonBlockingFindingState: nonBlocking.state,
+    nonBlockingFindingCount: nonBlocking.count,
+  };
 }
 
 function resolveSettledReviewVerdict(
@@ -192,10 +201,10 @@ function resolveSettledReviewVerdict(
   const reviewedHeadSha = reviewRow?.reviewer_head_sha || null;
   const reviewStatus = normalizeReviewStatus(reviewRow?.review_status);
   if (reviewStatus !== 'posted') {
-    return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+    return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_FINDINGS };
   }
   if (currentHeadSha && reviewedHeadSha && String(reviewedHeadSha) !== String(currentHeadSha)) {
-    return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+    return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_FINDINGS };
   }
 
   const latestJobQuery = { repo, prNumber };
@@ -203,10 +212,10 @@ function resolveSettledReviewVerdict(
   const latestJob = latestJobFinder(rootDir, latestJobQuery);
   const latestJobStatus = normalizeFollowUpJobStatus(latestJob?.status);
   if (latestJobStatus === 'pending' || latestJobStatus === 'in-progress') {
-    return { verdict: '', remediationPending: true, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+    return { verdict: '', remediationPending: true, reviewedHeadSha, ...UNKNOWN_FINDINGS };
   }
   if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {
-    return { verdict: '', remediationPending: true, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+    return { verdict: '', remediationPending: true, reviewedHeadSha, ...UNKNOWN_FINDINGS };
   }
 
   // Live-review reconciliation: when supplied, the live latest review on the
@@ -216,7 +225,7 @@ function resolveSettledReviewVerdict(
   // verdict came from so the two can never disagree.
   if (liveHeadReview !== undefined) {
     if (!liveHeadReview || liveHeadReview.resolved !== true || !Array.isArray(liveHeadReview.bodies)) {
-      return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_BLOCKERS };
+      return { verdict: '', remediationPending: false, reviewedHeadSha, ...UNKNOWN_FINDINGS };
     }
     let liveVerdict = '';
     let liveBodyForBlockers = '';

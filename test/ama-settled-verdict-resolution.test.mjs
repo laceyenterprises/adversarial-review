@@ -340,6 +340,44 @@ test('comment-only with NO Blocking Issues section resolves to known: 0 (live he
   assert.equal(res.blockingFindingCount, 0);
 });
 
+test('comment-only with open Non-blocking Issues resolves non-blocking count from live body', () => {
+  const body = [
+    REVIEW_BODY('Comment only', '- None.'),
+    '## Non-blocking Issues',
+    '- **Tighten docs note.**',
+    '  - **File:** README.md',
+    '  - **Lines:** 4',
+    '  - **Problem:** The note is stale.',
+  ].join('\n\n');
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1857,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder({ status: 'completed', reviewBody: body }),
+    liveHeadReview: { resolved: true, bodies: [body] },
+  });
+  assert.equal(res.verdict, 'comment-only');
+  assert.equal(res.blockingFindingState, 'known');
+  assert.equal(res.blockingFindingCount, 0);
+  assert.equal(res.nonBlockingFindingState, 'known');
+  assert.equal(res.nonBlockingFindingCount, 1);
+});
+
+test('approved with no Non-blocking Issues section resolves non-blocking known: 0', () => {
+  const res = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 1857,
+    currentHeadSha: HEAD,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD },
+    latestJobFinder: finder({ status: 'completed', reviewBody: REVIEW_BODY('Approved', '- None.') }),
+    liveHeadReview: { resolved: true, bodies: [REVIEW_BODY('Approved', '- None.')] },
+  });
+  assert.equal(res.verdict, 'approved');
+  assert.equal(res.nonBlockingFindingState, 'known');
+  assert.equal(res.nonBlockingFindingCount, 0);
+});
+
 test('comment-only with a REAL blocking finding resolves to count >= 1 (still ineligible)', () => {
   const res = resolveSettledReviewVerdict('/root', {
     repo: 'acme/agent-os',
@@ -369,6 +407,8 @@ test('live-review lookup failure fails CLOSED on blocking-findings (unknown)', (
   assert.equal(res.verdict, '');
   assert.equal(res.blockingFindingState, 'unknown');
   assert.equal(res.blockingFindingCount, 0);
+  assert.equal(res.nonBlockingFindingState, 'unknown');
+  assert.equal(res.nonBlockingFindingCount, 0);
 });
 
 test('no verdict-bearing live body fails CLOSED on blocking-findings (unknown)', () => {
@@ -446,6 +486,8 @@ function eligibilityFor(settledReview, { riskClass = 'low' } = {}) {
     operatorApprovedEvidence: null,
     blockingFindingCount: settledReview.blockingFindingCount,
     blockingFindingState: settledReview.blockingFindingState,
+    nonBlockingFindingCount: settledReview.nonBlockingFindingCount,
+    nonBlockingFindingState: settledReview.nonBlockingFindingState,
     prAuthor: 'codex-worker-bot',
   };
   const prMetadata = {

@@ -48,7 +48,11 @@ import {
 } from './role-config.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE, loadConfigCached } from './config-loader.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
-import { isNoneFindingsSentinelOnly, parseBlockingFindingsSection } from './kernel/remediation-reply.mjs';
+import {
+  isNoneFindingsSentinelOnly,
+  parseBlockingFindingsSection,
+  parseNonBlockingFindingsSection,
+} from './kernel/remediation-reply.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 import {
   readLatestWorkerRunStatusFromLedger,
@@ -64,6 +68,7 @@ const HQ_WORKER_TEAR_DOWN_TIMEOUT_MS = 60_000;
 const HQ_DISPATCH_TIMEOUT_MS = 90_000;
 const HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
 const MERGE_CLASS_ORCHESTRATION_MODES = new Set(ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE);
+const NON_BLOCKING_SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
 const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const WORKER_ID_CLASS_PREFIXES = [
   'claude-code',
@@ -5022,11 +5027,38 @@ function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
     return { count: parsed.length, state: 'known' };
   }
   const match = String(reviewBody ?? '').match(/##\s+Blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
-  const normalizedVerdict = normalizeReviewVerdict(lastVerdict);
+  const parsedVerdict = normalizeReviewVerdict(lastVerdict);
+  const normalizedVerdict = String(parsedVerdict && parsedVerdict !== 'unknown' ? parsedVerdict : lastVerdict || '')
+    .trim()
+    .toLowerCase();
   if (!match) {
     return normalizedVerdict === 'request-changes'
       ? { count: 0, state: 'unknown' }
       : { count: 0, state: 'known' };
+  }
+  const section = match[1].trim();
+  if (!section) return { count: 0, state: 'known' };
+  return isNoneFindingsSentinelOnly(section)
+    ? { count: 0, state: 'known' }
+    : { count: 1, state: 'known' };
+}
+
+function classifyNonBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
+  const text = String(reviewBody ?? '');
+  if (!text.trim()) return { count: 0, state: 'unknown' };
+  const parsed = parseNonBlockingFindingsSection(text);
+  if (parsed && parsed.length > 0) {
+    return { count: parsed.length, state: 'known' };
+  }
+  const match = text.match(/##\s+Non[-\s]+blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
+  const parsedVerdict = normalizeReviewVerdict(lastVerdict);
+  const normalizedVerdict = String(parsedVerdict && parsedVerdict !== 'unknown' ? parsedVerdict : lastVerdict || '')
+    .trim()
+    .toLowerCase();
+  if (!match) {
+    return NON_BLOCKING_SETTLED_SUCCESS_VERDICTS.has(normalizedVerdict)
+      ? { count: 0, state: 'known' }
+      : { count: 0, state: 'unknown' };
   }
   const section = match[1].trim();
   if (!section) return { count: 0, state: 'known' };
@@ -5152,6 +5184,7 @@ export {
   buildScopedOperatorApproval,
   buildScopedMergeAgentRequest,
   classifyBlockingFindings,
+  classifyNonBlockingFindings,
   describeStaleDispatch,
   scanStuckMergeAgentDispatches,
   isTerminalMergeAgentCancelDetail,

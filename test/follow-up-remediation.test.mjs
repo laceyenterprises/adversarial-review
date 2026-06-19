@@ -2,6 +2,7 @@ import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -22,6 +23,7 @@ import {
   consumeNextFollowUpJob,
   countPendingFollowUpJobsByRetryWindow,
   digestWorkerFinalMessage,
+  dispatchRemediationViaHq,
   installWorkerProvenanceHook,
   auditWorkspaceForContamination,
   isDrainQueueIdle,
@@ -199,12 +201,17 @@ async function withHqDispatchEnv(workDir, run) {
   }), 'utf8');
 
   const previous = {
+    AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: process.env.AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE,
     ADV_WITH_HQ_INTEGRATION: process.env.ADV_WITH_HQ_INTEGRATION,
     HQ_ROOT: process.env.HQ_ROOT,
     HQ_PARENT_SESSION: process.env.HQ_PARENT_SESSION,
     HQ_PROJECT: process.env.HQ_PROJECT,
+    APP_CONTRACT_BOOTSTRAP_TOKEN: process.env.APP_CONTRACT_BOOTSTRAP_TOKEN,
+    APP_CONTRACT_BOOTSTRAP_TOKEN_FILE: process.env.APP_CONTRACT_BOOTSTRAP_TOKEN_FILE,
+    APP_CONTRACT_ENDPOINT_URL: process.env.APP_CONTRACT_ENDPOINT_URL,
   };
 
+  process.env.AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = 'agentos';
   process.env.ADV_WITH_HQ_INTEGRATION = '1';
   process.env.HQ_ROOT = hqRoot;
   process.env.HQ_PARENT_SESSION = 'sess_parent_123';
@@ -230,6 +237,9 @@ async function withRemediationRouteEnv(workDir, envOverrides, run) {
     'HQ_ROOT',
     'HQ_PARENT_SESSION',
     'HQ_PROJECT',
+    'APP_CONTRACT_BOOTSTRAP_TOKEN',
+    'APP_CONTRACT_BOOTSTRAP_TOKEN_FILE',
+    'APP_CONTRACT_ENDPOINT_URL',
   ];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
 
@@ -248,6 +258,83 @@ async function withRemediationRouteEnv(workDir, envOverrides, run) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+  }
+}
+
+async function withAppContractDispatchServer(run, {
+  omitDispatchId = false,
+  failDispatchAttempts = 0,
+} = {}) {
+  const requests = [];
+  const dispatches = new Map();
+  let failedDispatches = 0;
+  const server = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const bodyText = Buffer.concat(chunks).toString('utf8');
+    const body = bodyText ? JSON.parse(bodyText) : {};
+    requests.push({ method: req.method, url: req.url, body });
+
+    if (req.method === 'POST' && req.url === '/v1/register') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ session_token: 'sess_test_app_contract' }));
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/v1/dispatch') {
+      if (failedDispatches < failDispatchAttempts) {
+        failedDispatches += 1;
+        res.writeHead(503, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { code: 'endpoint_restarting', message: 'endpoint restarting' } }));
+        return;
+      }
+      const existing = dispatches.get(body.request_id);
+      if (existing) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(existing));
+        return;
+      }
+      const accepted = {
+        request_id: body.request_id,
+        launch_request_id: `lrq_${body.request_id}`,
+        watch_url: `agent-os://watch/lrq_${body.request_id}`,
+        audit_ref: `agent-os://audit/${body.request_id}`,
+      };
+      if (!omitDispatchId) {
+        accepted.dispatch_id = `dispatch_${body.request_id}`;
+      }
+      dispatches.set(body.request_id, accepted);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(accepted));
+      return;
+    }
+
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'not_found' }));
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const { port } = server.address();
+  const previous = {
+    APP_CONTRACT_BOOTSTRAP_TOKEN: process.env.APP_CONTRACT_BOOTSTRAP_TOKEN,
+    APP_CONTRACT_BOOTSTRAP_TOKEN_FILE: process.env.APP_CONTRACT_BOOTSTRAP_TOKEN_FILE,
+    APP_CONTRACT_ENDPOINT_URL: process.env.APP_CONTRACT_ENDPOINT_URL,
+  };
+  process.env.APP_CONTRACT_BOOTSTRAP_TOKEN = 'bootstrap-test-token';
+  delete process.env.APP_CONTRACT_BOOTSTRAP_TOKEN_FILE;
+  process.env.APP_CONTRACT_ENDPOINT_URL = `http://127.0.0.1:${port}`;
+
+  try {
+    return await run({ requests, dispatches });
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await new Promise((resolve) => server.close(resolve));
   }
 }
 
@@ -4161,7 +4248,7 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
   process.env.CODEX_CLI_PATH = 'codex';
 
   try {
-    await withHqDispatchEnv(rootDir, async (hqRoot) => {
+    await withAppContractDispatchServer(async ({ requests }) => withHqDispatchEnv(rootDir, async (hqRoot) => {
       createFollowUpJob({
         rootDir,
         repo: 'laceyenterprises/clio',
@@ -4216,34 +4303,32 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
 
       assert.equal(result.consumed, true);
       assert.equal(result.job.remediationWorker.dispatchMode, 'hq');
-      assert.equal(result.job.remediationWorker.launchRequestId, 'lrq_arp04_dispatch');
-      assert.equal(result.job.remediationWorker.dispatchId, 'dispatch_arp04_dispatch');
+      assert.equal(result.job.remediationWorker.launchRequestId, `lrq_${result.job.jobId}`);
+      assert.equal(result.job.remediationWorker.dispatchId, `dispatch_${result.job.jobId}`);
+      assert.equal(result.job.remediationWorker.requestId, result.job.jobId);
+      assert.equal(result.job.remediationWorker.watchUrl, `agent-os://watch/lrq_${result.job.jobId}`);
+      assert.equal(result.job.remediationWorker.auditRef, `agent-os://audit/${result.job.jobId}`);
       assert.equal(result.job.remediationWorker.completionShape, 'branch-push');
       assert.equal(result.job.branch, 'codex/fix-pr-71');
-      const dispatchCall = commands.find((entry) => entry[0] === 'hq' && entry[1] === 'dispatch');
-      assert.ok(dispatchCall);
-      assert.deepEqual(dispatchCall.slice(0, 14), [
-        'hq', 'dispatch',
-        '--ticket', result.job.jobId,
-        '--worker-class', result.job.remediationWorker.model,
-        '--task-kind', 'coding',
-        '--repo', 'clio',
-        '--pr', '71',
-        '--prompt', path.join(rootDir, result.job.remediationWorker.promptPath),
-      ]);
-      assert.ok(dispatchCall.includes('--completion-shape'));
-      assert.ok(dispatchCall.includes('branch-push'));
-      assert.ok(dispatchCall.includes('--parent-session'));
-      assert.ok(dispatchCall.includes('sess_parent_123'));
-      assert.ok(dispatchCall.includes('--project'));
-      assert.ok(dispatchCall.includes('adversarial-review'));
-      assert.ok(dispatchCall.includes('--root'));
-      assert.ok(dispatchCall.includes(hqRoot));
-      assert.ok(dispatchCall.includes('--branch'));
-      assert.ok(dispatchCall.includes('codex/fix-pr-71'));
+      assert.equal(commands.some((entry) => entry[0] === 'hq'), false);
+      assert.equal(commands.some((entry) => entry[0] === 'hq' && entry[1] === 'dispatch' && entry[2] !== 'status'), false);
+      const dispatchRequest = requests.find((entry) => entry.url === '/v1/dispatch');
+      assert.ok(dispatchRequest);
+      assert.equal(dispatchRequest.body.request_id, result.job.jobId);
+      assert.equal(dispatchRequest.body.ticket_ref, result.job.jobId);
+      assert.equal(dispatchRequest.body.worker_class, result.job.remediationWorker.model);
+      assert.equal(dispatchRequest.body.task_kind, 'coding');
+      assert.equal(dispatchRequest.body.completion_shape, 'branch-push');
+      assert.equal(dispatchRequest.body.repo, 'clio');
+      assert.equal(dispatchRequest.body.pr_number, 71);
+      assert.equal(dispatchRequest.body.prompt, path.join(rootDir, result.job.remediationWorker.promptPath));
+      assert.equal(dispatchRequest.body.hq_root, hqRoot);
+      assert.equal(dispatchRequest.body.parent_session, 'sess_parent_123');
+      assert.equal(dispatchRequest.body.project, 'adversarial-review');
+      assert.equal(dispatchRequest.body.branch, 'codex/fix-pr-71');
       const prompt = readFileSync(path.join(rootDir, result.job.remediationWorker.promptPath), 'utf8');
       assert.match(prompt, /WORKER_CLASS=codex-remediation/);
-    });
+    }));
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
@@ -4271,7 +4356,7 @@ test('consumeNextFollowUpJob dispatches gemini through broker-backed hq without 
   process.env.AGENT_OS_CONFIG_PATH = '/dev/null';
 
   try {
-    await withHqDispatchEnv(rootDir, async (hqRoot) => {
+    await withAppContractDispatchServer(async ({ requests }) => withHqDispatchEnv(rootDir, async (hqRoot) => {
       createFollowUpJob({
         rootDir,
         repo: 'laceyenterprises/clio',
@@ -4327,17 +4412,21 @@ test('consumeNextFollowUpJob dispatches gemini through broker-backed hq without 
 
       assert.equal(result.consumed, true);
       assert.equal(result.job.remediationWorker.dispatchMode, 'hq');
-      const dispatchCall = commands.find((entry) => entry[0] === 'hq' && entry[1] === 'dispatch' && entry[2] !== 'status');
-      assert.ok(dispatchCall);
+      assert.equal(commands.some((entry) => entry[0] === 'hq' && entry[1] === 'dispatch' && entry[2] !== 'status'), false);
+      const dispatchRequest = requests.find((entry) => entry.url === '/v1/dispatch');
+      assert.ok(dispatchRequest);
       // hq-dispatch accepts gemini as the worker class (already allowlisted in
       // HQ_WORKER_CLASSES).
-      assert.equal(dispatchCall[dispatchCall.indexOf('--worker-class') + 1], 'gemini');
+      assert.equal(dispatchRequest.body.worker_class, 'gemini');
+      assert.equal(dispatchRequest.body.request_id, result.job.jobId);
+      assert.equal(dispatchRequest.body.completion_shape, 'branch-push');
+      assert.equal(dispatchRequest.body.hq_root, hqRoot);
       // The prompt carries the gemini provenance trailer so the worker-pool
       // worker stamps gemini-remediation, not codex-remediation.
       const prompt = readFileSync(path.join(rootDir, result.job.remediationWorker.promptPath), 'utf8');
       assert.match(prompt, /WORKER_CLASS=gemini-remediation/);
       assert.doesNotMatch(prompt, /WORKER_CLASS=codex-remediation/);
-    });
+    }));
   } finally {
     resetOAuthPreflightCache('gemini');
     for (const [key, value] of Object.entries(previous)) {
@@ -4800,7 +4889,7 @@ test('consumeNextFollowUpJob routes agentos remediation through HQ branch-push d
       critical: false,
     });
 
-    await withRemediationRouteEnv(rootDir, {
+    await withAppContractDispatchServer(async ({ requests }) => withRemediationRouteEnv(rootDir, {
       AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
       ADV_WITH_HQ_INTEGRATION: undefined,
     }, async () => {
@@ -4853,11 +4942,147 @@ test('consumeNextFollowUpJob routes agentos remediation through HQ branch-push d
       assert.equal(result.job.remediationPlan.dispatchPath, 'hq');
       assert.equal(result.job.remediationWorker.dispatchMode, 'hq');
       assert.equal(result.job.remediationWorker.completionShape, 'branch-push');
-      assert.ok(dispatchCommand, 'expected hq dispatch command');
-      assert.equal(dispatchCommand.includes('--completion-shape'), true);
-      assert.equal(dispatchCommand[dispatchCommand.indexOf('--completion-shape') + 1], 'branch-push');
-    });
+      assert.equal(dispatchCommand, undefined);
+      const dispatchRequest = requests.find((entry) => entry.url === '/v1/dispatch');
+      assert.ok(dispatchRequest, 'expected app-sdk dispatch request');
+      assert.equal(dispatchRequest.body.request_id, result.job.jobId);
+      assert.equal(dispatchRequest.body.completion_shape, 'branch-push');
+    }));
   });
+});
+
+test('dispatchRemediationViaHq reuses the stable job request_id through the SDK', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  mkdirSync(hqRoot, { recursive: true });
+  const promptPath = path.join(rootDir, 'prompt.md');
+  const replyPath = path.join(rootDir, 'reply.json');
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+
+  await withAppContractDispatchServer(async ({ requests, dispatches }) => {
+    const env = {
+      ...process.env,
+      AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+      HQ_ROOT: hqRoot,
+      HQ_PARENT_SESSION: 'sess_parent_123',
+      HQ_PROJECT: 'adversarial-review',
+    };
+    const commands = [];
+    const execFileImpl = async (command, args) => {
+      commands.push([command, ...args]);
+      if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+        return {
+          stdout: JSON.stringify({
+            status: 'queued',
+            workspacePath: path.join(hqRoot, 'workers', args[2]),
+          }),
+          stderr: '',
+        };
+      }
+      throw new Error(`unexpected command: ${command} ${args.join(' ')}`);
+    };
+
+    const dispatchArgs = {
+      hqRoot,
+      workerClass: 'codex',
+      repo: 'laceyenterprises/clio',
+      prNumber: 79,
+      branch: 'codex/fix-pr-79',
+      promptPath,
+      replyPath,
+      launchRequestId: 'laceyenterprises__clio-pr-79-headabc123',
+      jobId: 'laceyenterprises__clio-pr-79-headabc123',
+      execFileImpl,
+      env,
+      now: () => '2026-04-21T10:00:00.000Z',
+    };
+    const first = await dispatchRemediationViaHq(dispatchArgs);
+    const second = await dispatchRemediationViaHq(dispatchArgs);
+
+    assert.equal(first.requestId, dispatchArgs.jobId);
+    assert.equal(second.requestId, dispatchArgs.jobId);
+    assert.equal(second.launchRequestId, first.launchRequestId);
+    assert.equal(second.dispatchId, first.dispatchId);
+    assert.equal(dispatches.size, 1);
+    assert.equal(requests.filter((entry) => entry.url === '/v1/dispatch').length, 2);
+    assert.equal(commands.some((entry) => entry[0] === 'hq'), false);
+  });
+});
+
+test('dispatchRemediationViaHq rejects App Contract tickets without dispatch_id', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  mkdirSync(hqRoot, { recursive: true });
+  const promptPath = path.join(rootDir, 'prompt.md');
+  const replyPath = path.join(rootDir, 'reply.json');
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+
+  await withAppContractDispatchServer(async () => {
+    const env = {
+      ...process.env,
+      AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+      HQ_ROOT: hqRoot,
+      HQ_PARENT_SESSION: 'sess_parent_123',
+      HQ_PROJECT: 'adversarial-review',
+    };
+
+    await assert.rejects(
+      () => dispatchRemediationViaHq({
+        hqRoot,
+        workerClass: 'codex',
+        repo: 'laceyenterprises/clio',
+        prNumber: 79,
+        branch: 'codex/fix-pr-79',
+        promptPath,
+        replyPath,
+        launchRequestId: 'laceyenterprises__clio-pr-79-headabc123',
+        jobId: 'laceyenterprises__clio-pr-79-headabc123',
+        execFileImpl: async () => {
+          throw new Error('agent-os dispatch must not shell out for workspace resolution');
+        },
+        env,
+      }),
+      /missing dispatch_id/
+    );
+  }, { omitDispatchId: true });
+});
+
+test('dispatchRemediationViaHq retries transient App Contract dispatch failures', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  mkdirSync(hqRoot, { recursive: true });
+  const promptPath = path.join(rootDir, 'prompt.md');
+  const replyPath = path.join(rootDir, 'reply.json');
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+
+  await withAppContractDispatchServer(async ({ requests }) => {
+    const env = {
+      ...process.env,
+      AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+      HQ_ROOT: hqRoot,
+      HQ_PARENT_SESSION: 'sess_parent_123',
+      HQ_PROJECT: 'adversarial-review',
+    };
+
+    const result = await dispatchRemediationViaHq({
+      hqRoot,
+      workerClass: 'codex',
+      repo: 'laceyenterprises/clio',
+      prNumber: 80,
+      branch: 'codex/fix-pr-80',
+      promptPath,
+      replyPath,
+      launchRequestId: 'laceyenterprises__clio-pr-80-headabc123',
+      jobId: 'laceyenterprises__clio-pr-80-headabc123',
+      execFileImpl: async () => {
+        throw new Error('agent-os dispatch must not shell out for workspace resolution');
+      },
+      env,
+    });
+
+    assert.equal(result.dispatchId, 'dispatch_laceyenterprises__clio-pr-80-headabc123');
+    assert.equal(requests.filter((entry) => entry.url === '/v1/dispatch').length, 2);
+  }, { failDispatchAttempts: 1 });
 });
 
 test('consumeNextFollowUpJob keeps native remediation on the bare spawner without legacy flag', async () => {
@@ -4982,8 +5207,17 @@ test('consumeNextFollowUpJob lets legacy HQ flag override native orchestration m
       assert.equal(result.job.remediationPlan.dispatchPath, 'hq');
       assert.equal(result.job.remediationWorker.dispatchMode, 'hq');
       assert.equal(result.job.remediationWorker.completionShape, 'branch-push');
-      assert.ok(dispatchCommand, 'expected hq dispatch command');
+      assert.ok(dispatchCommand, 'expected legacy native override to call hq dispatch');
+      assert.ok(dispatchCommand.includes('--completion-shape'));
       assert.equal(dispatchCommand[dispatchCommand.indexOf('--completion-shape') + 1], 'branch-push');
+      assert.ok(dispatchCommand.includes('--repo'));
+      assert.equal(dispatchCommand[dispatchCommand.indexOf('--repo') + 1], 'clio');
+      assert.ok(dispatchCommand.includes('--branch'));
+      assert.equal(dispatchCommand[dispatchCommand.indexOf('--branch') + 1], 'codex/fix-pr-78');
+      assert.equal(result.job.remediationWorker.launchRequestId, 'lrq_aom03_override');
+      assert.equal(result.job.remediationWorker.dispatchId, 'dispatch_aom03_override');
+      assert.equal(result.job.remediationWorker.requestId, result.job.jobId);
+      assert.deepEqual(result.job.remediationWorker.command, dispatchCommand);
     });
   });
 });
@@ -5143,7 +5377,7 @@ test('mixed-mode cutover keeps legacy in-progress ownership and dispatches newly
       critical: false,
     });
 
-    await withHqDispatchEnv(rootDir, async () => {
+    await withAppContractDispatchServer(async () => withHqDispatchEnv(rootDir, async () => {
       const result = await consumeFollowUpJobsUntilCapacity({
         rootDir,
         maxConcurrent: 2,
@@ -5190,7 +5424,7 @@ test('mixed-mode cutover keeps legacy in-progress ownership and dispatches newly
       assert.equal(result.results[0].job.remediationWorker.dispatchMode, 'hq');
       const samePrPendingPath = path.join(getFollowUpJobDir(rootDir, 'pending'), path.basename(samePrPending.jobPath));
       assert.equal(existsSync(samePrPendingPath), true);
-    });
+    }));
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];

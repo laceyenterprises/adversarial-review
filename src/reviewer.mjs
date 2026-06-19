@@ -57,6 +57,7 @@ import { createLinearTriageAdapter } from './adapters/operator/linear-triage/ind
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import { fetchPullRequestReviewContext } from './github-api.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { appendVocabularyFatigueFindingToReviewBody } from './vocabulary-fatigue.mjs';
 
 const execFileAsync = promisify(execFile);
 const REVIEW_POST_RETRY_DELAYS_MS = [0];
@@ -2481,6 +2482,7 @@ async function main() {
     ticketPipelinePaused = false,
     crossModelReviewWaived = false,
     crossModelReviewWaiverReason = null,
+    vocabularyFatigueFinding = null,
   } = args;
 
   if (!repo || !prNumber || !reviewerModel || !botTokenEnv) {
@@ -2656,7 +2658,11 @@ async function main() {
   const waiverAuditBlock = crossModelReviewWaived
     ? `> Cross-model review waiver: ${String(crossModelReviewWaiverReason || 'operator override selected the same reviewer family as the builder for this pass.')}\n\n`
     : '';
-  const fullComment = header + waiverAuditBlock + reviewText;
+  const reviewTextWithSignals = appendVocabularyFatigueFindingToReviewBody(
+    reviewText,
+    vocabularyFatigueFinding,
+  );
+  const fullComment = header + waiverAuditBlock + reviewTextWithSignals;
   const localShadowEligibility = evaluateLocalReviewShadowEligibility({
     labels,
     builderTag,

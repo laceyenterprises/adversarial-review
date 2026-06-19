@@ -266,6 +266,28 @@ function schemaV1() {
           acp_state_home: { __type: TYPE_STRING, __default: null, __nullable: true },
         },
       },
+      agent_control: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          codex_runaway_guardrails: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              vocabulary_fatigue_window_commits: {
+                __type: TYPE_INT,
+                __default: 5,
+                __min: 1,
+              },
+              vocabulary_fatigue_min_repeats: {
+                __type: TYPE_INT,
+                __default: 3,
+                __min: 1,
+              },
+            },
+          },
+        },
+      },
       // OAuth broker watchdog tuning. Mirrors the Python authority
       // (`oauth_broker.watchdog` in
       // platform/agent-os-config/src/agent_os_config/__init__.py). The Node

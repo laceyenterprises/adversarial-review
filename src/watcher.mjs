@@ -204,6 +204,10 @@ import {
   createRoutingTierReadinessProbeCache,
   probeRoutingTierReadiness,
 } from './routing-tier-readiness.mjs';
+import {
+  detectVocabularyFatigue,
+  resolveVocabularyFatigueConfig,
+} from './vocabulary-fatigue.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -762,6 +766,35 @@ async function fetchLivePRLabels(octokit, { owner, repo, prNumber, logger = cons
       `[watcher] fast-merge label fetch failed for ${owner}/${repo}#${prNumber}; using normal review path: ${err?.message || err}`
     );
     return null;
+  }
+}
+
+async function fetchPullRequestCommitSubjects(octokit, { owner, repo, prNumber, perPage = 100, logger = console } = {}) {
+  try {
+    if (typeof octokit?.paginate === 'function' && typeof octokit?.rest?.pulls?.listCommits === 'function') {
+      const commits = await octokit.paginate(octokit.rest.pulls.listCommits, {
+        owner,
+        repo,
+        pull_number: prNumber,
+        per_page: perPage,
+      });
+      return (Array.isArray(commits) ? commits : []).map((commit) => commit?.commit?.message || '');
+    }
+    if (typeof octokit?.rest?.pulls?.listCommits !== 'function') {
+      throw new Error('octokit.rest.pulls.listCommits unavailable');
+    }
+    const { data } = await octokit.rest.pulls.listCommits({
+      owner,
+      repo,
+      pull_number: prNumber,
+      per_page: perPage,
+    });
+    return (Array.isArray(data) ? data : []).map((commit) => commit?.commit?.message || '');
+  } catch (err) {
+    logger.warn?.(
+      `[watcher] commit vocabulary fatigue check failed for ${owner}/${repo}#${prNumber}; continuing review: ${err?.message || err}`
+    );
+    return [];
   }
 }
 
@@ -2553,6 +2586,7 @@ async function spawnReviewer({
   workspacePath = null,
   crossModelReviewWaived = false,
   crossModelReviewWaiverReason = null,
+  vocabularyFatigueFinding = null,
   onReviewerPgid = () => {},
 }) {
   const finalRound = (
@@ -2623,6 +2657,7 @@ async function spawnReviewer({
         reviewerSpawnToken,
         crossModelReviewWaived,
         crossModelReviewWaiverReason,
+        vocabularyFatigueFinding,
       },
       timeoutMs: reviewerTimeoutMs,
       sessionUuid: reviewerSessionUuid,
@@ -5941,6 +5976,25 @@ async function pollOnce(
               return;
             }
 
+            const vocabularyFatigueConfig = resolveVocabularyFatigueConfig(loadConfigCached());
+            const vocabularyFatigueFinding = detectVocabularyFatigue(
+              await fetchPullRequestCommitSubjects(octokit, {
+                owner,
+                repo,
+                prNumber,
+                perPage: Math.max(100, vocabularyFatigueConfig.windowCommits),
+              }),
+              vocabularyFatigueConfig,
+            );
+            if (vocabularyFatigueFinding) {
+              console.log(
+                `[watcher] vocabulary-fatigue ${repoPath}#${prNumber}: ` +
+                  `stem=${vocabularyFatigueFinding.stem} ` +
+                  `count=${vocabularyFatigueFinding.count}/${vocabularyFatigueFinding.window} ` +
+                  'blocking=false'
+              );
+            }
+
             const result = await spawnReviewer({
               repo: repoPath,
               prNumber,
@@ -5969,6 +6023,7 @@ async function pollOnce(
                   reviewerTimeoutMs,
                 });
               },
+              vocabularyFatigueFinding,
             });
             if (result.ok) {
               healthProbe?.recordSpawn?.(healthTick, { at: attemptAt });
@@ -6245,6 +6300,7 @@ export {
   fastMergeDecisionFromLabels,
   fetchLivePRHeadSha,
   fetchLivePRLabels,
+  fetchPullRequestCommitSubjects,
   getStalePostedReviewAutoRereviewSuppression,
   handlePostedReviewRow,
   maybeDispatchReviewerTimeoutExhaustedMergeAgent,

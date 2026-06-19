@@ -222,6 +222,7 @@ function buildReviewerProcessArgs(subjectContext = {}) {
     reviewerSpawnToken: subjectContext.reviewerSpawnToken || null,
     crossModelReviewWaived: subjectContext.crossModelReviewWaived,
     crossModelReviewWaiverReason: subjectContext.crossModelReviewWaiverReason,
+    vocabularyFatigueFinding: subjectContext.vocabularyFatigueFinding || null,
   };
 }
 

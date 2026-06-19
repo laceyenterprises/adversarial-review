@@ -5039,6 +5039,20 @@ function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
     : { count: 1, state: 'known' };
 }
 
+// NOTE on the count strategy (review finding 2026-06-19, intentional divergence
+// from classifyBlockingFindings): classifyBlockingFindings falls back to a BINARY
+// (0/1) "is anything present" count because the gate only needs to know whether a
+// blocker exists. Non-blocking is deliberately counted more granularly here —
+// every top-level `- **...**` bullet — because the count is surfaced to operators
+// in trace.verdict.nonBlockingFindings.count as the honest "how many polish items
+// remain" signal. The canonical parseNonBlockingFindingsSection counts only
+// File-tagged STRUCTURED findings (a subset), so using it as the primary count
+// would UNDER-report (e.g. 1 vs 2 for two bullets where only one carries a File:
+// line). The strict gate consumes only `count > 0`, so the exact value never
+// changes a direct-close decision; HAM terminal-remediation reconciles against the
+// audit comment's own declared findings (validateHamFindingMap), not this number.
+// Keeping the granular bullet count is therefore both more accurate for the
+// operator-facing trace and decision-neutral for the gate.
 function classifyNonBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
   const text = String(reviewBody ?? '');
   if (!text.trim()) return { count: 0, state: 'unknown' };

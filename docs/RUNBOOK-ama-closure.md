@@ -354,7 +354,8 @@ reasons:
 
 | Reason | Meaning |
 |---|---|
-| `verdict-not-settled-success` | Latest review is `Request changes` (and no current-head `operator-approved`). |
+| `verdict-not-settled-success` | The settled review is not eligible for direct close (and no current-head `operator-approved`). This fires when the latest review is `Request changes` **OR** — when `roles.adversarial.merge_authority.strict_non_blocking_remediation` is on (default) — when a `Comment only`/`Approved` review still carries standing or unknown-state non-blocking findings. In the strict-mode case it is emitted alongside `non-blocking-findings-present` (see that row); a `Comment only` PR refused with *both* reasons was NOT downgraded to `Request changes`. |
+| `non-blocking-findings-present` | Strict mode (`strict_non_blocking_remediation`, default on): the settled review has standing non-blocking findings that have not been remediated, so the PR is not eligible for *direct* close. It still closes via HAM terminal remediation (the hammer addresses the non-blocking findings) or a current-head `operator-approved`. A `known` count of `>0` triggers this; an `unknown` non-blocking state also fails closed in strict mode. |
 | `blocking-findings-unknown` | Latest review does not expose a known structured blocking-finding count. |
 | `blocking-findings-present` | Latest review has standing structured blocking findings. |
 | `non-blocking-findings-unknown` | Strict non-blocking remediation is enabled and the settled review does not expose a known structured non-blocking-finding count. |
@@ -367,6 +368,29 @@ reasons:
 | `stale-review-head` | The reviewed head doesn't match the PR's current head. |
 | `pr-not-mergeable` | GitHub's `mergeableState` is not `MERGEABLE` — usually a conflict. |
 | `remediation-pending` | Adversarial-review remediation work is owed before AMA can close. |
+
+### Strict non-blocking remediation — throughput note
+
+`roles.adversarial.merge_authority.strict_non_blocking_remediation` is **on by
+default**. Because adversarial reviewers almost always emit at least one
+non-blocking polish suggestion, this means the common `Comment only` /
+`Approved`-with-polish PR is **not eligible for direct AMA close** — it surfaces
+`non-blocking-findings-present` (+ `verdict-not-settled-success`) and closes via
+one of:
+
+1. **HAM terminal remediation** (preferred) — the hammer worker addresses the
+   non-blocking findings on the PR branch and the closer waives the gate against
+   the validated remediation evidence. This is the intended steady-state path and
+   makes the codex HAM worker load-bearing for most closes.
+2. **Current-head `operator-approved`** — the operator accepts the standing
+   non-blocking findings as-is.
+
+This is deliberate (the operator directive is "remediate non-blocking findings
+before close, not just blocking"). The cost is lower *direct*-close throughput
+and a hard dependency on the HAM remediation path being healthy. Operators who
+want the prior behavior (direct-close on `Comment only` regardless of
+non-blocking findings) can set `strict_non_blocking_remediation: false` in
+`config.local.yaml`; the gate then reverts to blocking-only.
 
 ### `lease-held` skip
 

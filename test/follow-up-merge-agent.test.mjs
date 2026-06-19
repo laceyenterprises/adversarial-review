@@ -2387,6 +2387,7 @@ test('dispatchMergeAgentForPR records only successful launches and parses traili
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqCalls = [];
   const env = {
+    ...HERMETIC_CONFIG_ENV,
     MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
     MERGE_AGENT_HQ_PROJECT: 'merge-project',
   };
@@ -2440,6 +2441,7 @@ test('dispatchMergeAgentForPR is mode-invariant for merge-class dispatch', async
       orchestrationMode,
       logger,
       env: {
+        ...HERMETIC_CONFIG_ENV,
         MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
         MERGE_AGENT_HQ_PROJECT: 'merge-project',
       },
@@ -2478,6 +2480,7 @@ test('dispatchMergeAgentForPR uses the critical lane only for merge-agent-reques
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqCalls = [];
   const env = {
+    ...HERMETIC_CONFIG_ENV,
     MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
     MERGE_AGENT_HQ_PROJECT: 'merge-project',
   };
@@ -2634,7 +2637,7 @@ test('dispatchMergeAgentForPR tears down terminal original worker before merge-a
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
     rootDir,
     ...makeJob({ branch }),
-    env: { HQ_ROOT: hqRoot, USER: 'airlock' },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: hqRoot, USER: 'airlock' },
     prepareOriginalWorkerImpl: (opts) => prepareOriginalWorkerForMergeAgent({
       ...opts,
       lookupRunStatusImpl: async () => ({
@@ -2691,7 +2694,7 @@ test('dispatchMergeAgentForPR tears down failed original workers because they ar
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
     rootDir,
     ...makeJob({ branch }),
-    env: { HQ_ROOT: hqRoot, USER: 'airlock' },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: hqRoot, USER: 'airlock' },
     prepareOriginalWorkerImpl: (opts) => prepareOriginalWorkerForMergeAgent({
       ...opts,
       lookupRunStatusImpl: async () => ({
@@ -2741,7 +2744,7 @@ test('dispatchMergeAgentForPR defers merge-agent dispatch while original worker 
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
     rootDir,
     ...makeJob({ branch }),
-    env: { HQ_ROOT: hqRoot },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: hqRoot },
     prepareOriginalWorkerImpl: (opts) => prepareOriginalWorkerForMergeAgent({
       ...opts,
       lookupRunStatusImpl: async () => ({
@@ -2881,7 +2884,7 @@ test('dispatchMergeAgentForPR is idempotent when original worker is already torn
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
     rootDir,
     ...makeJob({ branch: `${originalWorkerId}/LAC-662-already-torn-down` }),
-    env: { HQ_ROOT: hqRoot },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: hqRoot },
     execFileImpl: async (cmd, args) => {
       hqCalls.push({ cmd, args: [...args] });
       return { stdout: '{"dispatchId":"disp_idempotent","lrq":"lrq_idempotent"}\n' };
@@ -2938,7 +2941,7 @@ test('dispatchMergeAgentForPR skips original-worker teardown when HQ_ROOT is uns
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
     rootDir,
     ...makeJob({ branch: 'codex-lac-663/LAC-663-no-hq-root' }),
-    env: { HQ_ROOT: '' },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: '' },
     logger: { info: (line) => logs.push(JSON.parse(line)) },
     execFileImpl: async (cmd, args) => {
       hqCalls.push({ cmd, args: [...args] });
@@ -3062,7 +3065,7 @@ test('prepareOriginalWorkerForMergeAgent fails closed when runtime user cannot b
   const result = await prepareOriginalWorkerForMergeAgent({
     job: makeJob({ branch }),
     hqPath: 'hq',
-    env: { HQ_ROOT: hqRoot },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: hqRoot },
     logger: { info: (line) => logs.push(JSON.parse(line)) },
     runtimeUserImpl: () => null,
     lookupRunStatusImpl: async () => ({
@@ -5569,7 +5572,7 @@ test('dispatchMergeAgentForPR defers override-triggered dispatch when orphan-wor
       remediationCurrentRound: 0,
       remediationMaxRounds: 0,
     }),
-    env: { HQ_ROOT: hqRoot },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: hqRoot },
     prepareOriginalWorkerImpl: (opts) => prepareOriginalWorkerForMergeAgent({
       ...opts,
       lookupRunStatusImpl: async () => ({

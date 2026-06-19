@@ -2344,7 +2344,7 @@ function schemaLeaf(schema, key) {
   for (const part of parts) {
     if (cursor.__type !== TYPE_DICT) return null;
     const keys = cursor.__keys || {};
-    if (part in keys) {
+    if (Object.prototype.hasOwnProperty.call(keys, part)) {
       cursor = keys[part];
       continue;
     }
@@ -2400,9 +2400,15 @@ function dynamicAppEnvAliases(env) {
       const marker = `_${suffix}`;
       if (tail.endsWith(marker) && tail.slice(0, -marker.length)) {
         const appId = appIdFromEnvSegment(tail.slice(0, -marker.length));
+        const key = `apps.${appId}.${leaf}`;
         out.push([
-          `apps.${appId}.${leaf}`,
-          { canonical: envName, aliases: [] },
+          key,
+          {
+            canonical: envName,
+            aliases: [],
+            appId,
+            writePath: ['apps', appId, leaf],
+          },
         ]);
         break;
       }
@@ -2416,9 +2422,8 @@ function dynamicAppEnvAliases(env) {
 // trace source so an env-materialized app is auditable.
 function dynamicAppEnvIds(env) {
   const ids = new Set();
-  for (const [key] of dynamicAppEnvAliases(env)) {
-    const parts = key.split('.');
-    if (parts.length === 3 && parts[0] === 'apps') ids.add(parts[1]);
+  for (const [, info] of dynamicAppEnvAliases(env)) {
+    if (info.appId) ids.add(info.appId);
   }
   return ids;
 }
@@ -2524,7 +2529,7 @@ function isValidSchemaPath(schema, key) {
     if (!cursor || cursor.__type !== TYPE_DICT) return false;
     const keys = cursor.__keys || {};
     const part = parts[i];
-    if (!(part in keys)) {
+    if (!Object.prototype.hasOwnProperty.call(keys, part)) {
       if (cursor.__strict === false && cursor.__extra_keys_schema) {
         cursor = cursor.__extra_keys_schema;
         continue;
@@ -2809,7 +2814,11 @@ export function loadConfig({
       value = rawValue;
     }
     value = checkLeaf(value, leaf, key, `env:${winning}`);
-    setLeaf(merged, key, value);
+    if (info.writePath) {
+      setLeafPath(merged, info.writePath, value, { dottedKey: key });
+    } else {
+      setLeaf(merged, key, value);
+    }
     (trace[key] = trace[key] || []).push({
       source: `env:${winning}`,
       value,

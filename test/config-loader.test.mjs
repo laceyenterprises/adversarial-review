@@ -3464,6 +3464,37 @@ test('env-only apps.<id> converges on the same defaulted shape as a YAML entry',
   }
 });
 
+test('env-only apps.<id> supports prototype-bearing keyed-map ids', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      apps: {}
+    `);
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_APPS_CONSTRUCTOR_MODE: 'standalone',
+        AGENT_OS_APPS_PROTOTYPE_MODE: 'standalone',
+      },
+    });
+
+    for (const appId of ['constructor', 'prototype']) {
+      assert.equal(Object.prototype.hasOwnProperty.call(cfg.values.apps, appId), true);
+      assert.deepEqual(cfg.values.apps[appId], {
+        mode: 'standalone',
+        subscribes: [],
+        contract_version: '1.0',
+      });
+    }
+    assert.equal(Object.prototype.subscribes, undefined);
+    assert.equal(Object.prototype.contract_version, undefined);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('apps.<id> env value change busts the config cache', () => {
   const tmp = freshTmp();
   const top = join(tmp, 'config.yaml');

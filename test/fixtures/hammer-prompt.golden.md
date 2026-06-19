@@ -156,8 +156,21 @@ while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-pr-after.json)" = "BEHIND" ]
   ham_update_branch_with_retries
   HAM_UPDATE_BRANCH_EXIT=$?
   if [ "$HAM_UPDATE_BRANCH_EXIT" -eq 2 ]; then
-    echo "HAM-03 hard-blocker: unresolvable rebase/update-branch conflict" >&2
-    exit 0
+    # The hammer OWNS merge-conflict resolution — DO NOT hard-block here. gh's
+    # server-side rebase cannot resolve conflicts, so resolve them LOCALLY now
+    # (see "## Resolving merge conflicts" below): rebase the head branch onto the
+    # latest base, resolve each conflicted file using your judgment (preserve
+    # both sides' intent), `git rebase --continue` until clean, then
+    # `git push --force-with-lease`. After resolving, re-fetch PR state and let
+    # the loop re-check. The HAM_REBASE_ATTEMPT_CAP above bounds this; only emit
+    # a hard-blocker if a conflict is genuinely UNSAFE to resolve (a semantic
+    # conflict you cannot correctly settle).
+    echo "HAM-03 conflict: hammer resolving locally (see 'Resolving merge conflicts')" >&2
+    # >>> Perform the local rebase + conflict resolution from the
+    #     "## Resolving merge conflicts" section below, then fall through. <<<
+    gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-pr-after.json
+    POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-pr-after.json)
+    continue
   fi
   if [ "$HAM_UPDATE_BRANCH_EXIT" -ne 0 ]; then
     cat /tmp/ham-update-branch.stderr >&2
@@ -173,7 +186,38 @@ done
 # required checks red must be fixed (and re-committed, which moves the head and
 # re-enters this validation), never merged. Do not proceed past this point with a
 # red suite, a red required check, or a still-BEHIND mergeStateStatus.
+```
 
+## Resolving merge conflicts
+
+The hammer OWNS merge-conflict resolution. A conflicting (`mergeable=CONFLICTING`)
+or behind PR must NOT be left for the operator — resolve it locally, then merge.
+When the rebase loop above hits a conflict, this is the procedure to run:
+
+```bash
+BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-pr-after.json)
+HEAD_BRANCH=$(gh pr view https://github.com/acme/myrepo/pull/1234 --json headRefName --jq '.headRefName')
+git fetch origin "$BASE_BRANCH" "$HEAD_BRANCH"
+git checkout "$HEAD_BRANCH"
+if ! git rebase "origin/$BASE_BRANCH"; then
+  # For EACH conflicted file: open it, resolve the conflict markers using your
+  # judgment so BOTH sides' intent is preserved (never blindly take one side or
+  # delete the other's changes), then stage it.
+  #   git status --porcelain | grep '^UU'   # list conflicted files
+  #   <edit each file to resolve <<<<<<< / ======= / >>>>>>> markers>
+  #   git add <resolved files> && git rebase --continue
+  # Repeat until `git rebase` reports it is complete. If a conflict is genuinely
+  # unsafe to resolve (a semantic conflict you cannot correctly settle), run
+  # `git rebase --abort`, emit ONE hard-blocker report, and stop.
+  :
+fi
+git push --force-with-lease
+```
+
+After resolving, the head has moved — re-run the FULL test suite (mandate 2b) and
+required checks on the new head before merging, exactly as for any rebase.
+
+```bash
 gh pr view https://github.com/acme/myrepo/pull/1234 --json reviews > /tmp/ham-reviews.json
 
 base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ham-pr-after.json)" | jq -sRr @uri)
@@ -301,6 +345,10 @@ EOF
   this branch or pre-existing on `main`. Keeping `main` clean is the bar.
 - No merging a branch that is `BEHIND` / not rebased onto the latest `main`; the
   rebase must be re-validated (full suite + checks green) before merge.
+- No abandoning a merge conflict to the operator. The hammer resolves conflicts
+  locally (rebase onto base, resolve markers preserving both sides, force-push
+  with lease), then re-validates. Hard-block ONLY a conflict that is genuinely
+  unsafe to resolve (a semantic conflict you cannot correctly settle).
 - No skipping the post-merge closing comment on a successful merge.
 - No treating a rebased HAM head as valid without `ham_terminal_remediation_validated`.
 

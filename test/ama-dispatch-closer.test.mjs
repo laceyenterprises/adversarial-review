@@ -1352,7 +1352,7 @@ test('terminal AMA audit releases a stale lease so the same head can be retried'
 
 // --- Auto-hammer eligibility-miss gate (2026-06-19) ---
 
-test('isHammerRemediableEligibilityMiss fires ONLY for the strict-mode non-blocking case', () => {
+test('isHammerRemediableEligibilityMiss fires for the strict-mode non-blocking case and for not-mergeable (conflict/behind)', () => {
   // Remediable: standing non-blocking findings (optionally + the strict
   // verdict-not-settled-success that accompanies them).
   assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present']), true);
@@ -1365,13 +1365,23 @@ test('isHammerRemediableEligibilityMiss fires ONLY for the strict-mode non-block
     true,
   );
 
-  // NOT remediable by a terminal non-blocking pass — must stay await-operator:
+  // Remediable: the hammer owns merge-conflict / behind-base resolution, so a
+  // not-mergeable PR routes to the hammer instead of parking await-operator —
+  // alone, or alongside other hammer-remediable reasons.
+  assert.equal(isHammerRemediableEligibilityMiss(['pr-not-mergeable']), true, 'pure conflict/behind → hammer');
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['pr-not-mergeable', 'verdict-not-settled-success', 'non-blocking-findings-present']),
+    true,
+  );
+  assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'pr-not-mergeable']), true);
+
+  // NOT remediable — must stay await-operator:
   assert.equal(isHammerRemediableEligibilityMiss([]), false);
   assert.equal(isHammerRemediableEligibilityMiss(undefined), false);
-  assert.equal(isHammerRemediableEligibilityMiss(['verdict-not-settled-success']), false, 'verdict-only (no findings) is not auto-hammer');
+  assert.equal(isHammerRemediableEligibilityMiss(['verdict-not-settled-success']), false, 'verdict-only (no actionable) is not auto-hammer');
   assert.equal(isHammerRemediableEligibilityMiss(['blocking-findings-present']), false);
   assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'blocking-findings-present']), false, 'any blocking finding disqualifies');
-  assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'pr-not-mergeable']), false, 'hard-stop disqualifies');
+  assert.equal(isHammerRemediableEligibilityMiss(['pr-not-mergeable', 'blocking-findings-present']), false, 'blocking finding still disqualifies even with a conflict');
   assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'ci-not-green']), false);
   assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'stale-review-head']), false);
 });

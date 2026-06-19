@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
+import { normalizeGithubMergeability, resolveMergeabilityWithSampling } from './github-mergeability.mjs';
 import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
 import {
   defaultReviewerRouteFromEnv,
@@ -438,6 +439,17 @@ const DEFAULT_DAG_AUTOWALK_ON_MERGE_TIMEOUT_MS = 2 * 60 * 1000;
 const AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS = [250, 1_000];
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_RETRY_MS = 60 * 1000;
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_PER_POLL = 5;
+// Transient mergeability sampling window (GitHub returns mergeable=UNKNOWN right
+// after a push / base move while it recomputes). Re-sample so we don't park an
+// otherwise-eligible PR as `pr-not-mergeable`. Env-overridable.
+const MERGEABILITY_SAMPLE_ATTEMPTS = Math.max(
+  1,
+  Number.parseInt(process.env.ADVERSARIAL_MERGEABILITY_SAMPLE_ATTEMPTS || '', 10) || 3,
+);
+const MERGEABILITY_SAMPLE_DELAY_MS = Math.max(
+  0,
+  Number.parseInt(process.env.ADVERSARIAL_MERGEABILITY_SAMPLE_DELAY_MS || '', 10) || 2500,
+);
 const REVIEWER_LEASE_RECOVERY_ENABLED = resolveReviewerLeaseRecoveryEnabled({ watcherConfig: config });
 const DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS = 900;
 const PENDING_DRAFT_RESPAWN_AGE_MIN_SECONDS_FENCE_ON = 60;
@@ -4422,12 +4434,44 @@ async function maybeDispatchAmaClosureFor({
   }
 
   const settledReviewHeadSha = candidate?.headSha || currentRevisionRef || null;
+  // GitHub returns mergeable=UNKNOWN transiently right after a push or when the
+  // base branch moves (a steady merge stream keeps `main` moving), and the
+  // eligibility predicate maps a non-MERGEABLE state to `pr-not-mergeable`. Only
+  // when the first read is NOT already terminal (MERGEABLE/CONFLICTING) do we
+  // re-sample over a bounded window so we don't wrongly park an eligible PR.
+  let mergeabilityForGate = candidate;
+  const initialMergeability = normalizeGithubMergeability(candidate || {});
+  if (initialMergeability !== 'MERGEABLE' && initialMergeability !== 'CONFLICTING') {
+    const sampled = await resolveMergeabilityWithSampling(
+      candidate || {},
+      async () => {
+        const { stdout } = await execFileAsync('gh', [
+          'pr', 'view', String(prNumber),
+          '--repo', repoPath,
+          '--json', 'mergeable,mergeStateStatus',
+        ]);
+        return JSON.parse(stdout);
+      },
+      { attempts: MERGEABILITY_SAMPLE_ATTEMPTS, delayMs: MERGEABILITY_SAMPLE_DELAY_MS },
+    );
+    mergeabilityForGate = {
+      ...(candidate || {}),
+      mergeable: sampled.mergeable,
+      mergeStateStatus: sampled.mergeStateStatus,
+    };
+    if (!sampled.resolved) {
+      console.warn(
+        `[watcher] mergeability still UNKNOWN for ${repoPath}#${prNumber} after ` +
+          `${sampled.samples} sample(s); treating as not-yet-mergeable this tick`,
+      );
+    }
+  }
   let gateSnapshot = await buildAdversarialGateSnapshot(rootDir, {
     repo: repoPath,
     prNumber,
     reviewRow: reviewStateRow,
     headSha: settledReviewHeadSha,
-    mergeability: candidate,
+    mergeability: mergeabilityForGate,
     labels: labelNames,
     prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
     prAuthor: candidate?.prAuthor || null,
@@ -4491,7 +4535,7 @@ async function maybeDispatchAmaClosureFor({
       prNumber,
       reviewRow: reviewStateRow,
       headSha: settledReviewHeadSha,
-      mergeability: candidate,
+      mergeability: mergeabilityForGate,
       labels: labelNames,
       prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
       prAuthor: candidate?.prAuthor || null,

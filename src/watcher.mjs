@@ -168,6 +168,7 @@ import {
   createWatcherOctokit,
   fetchConditionalRestPage,
 } from './conditional-request.mjs';
+import { reviewBodyHasScopeViolationFinding } from './additive-only-scope.mjs';
 import { sweepEtagCache } from './etag-cache.mjs';
 import { refreshReviewerBrokerTokens, refreshWatcherGithubToken } from './reviewer-broker-refresh.mjs';
 import {
@@ -4600,12 +4601,22 @@ async function handlePostedReviewRow({
   buildMergeAgentDispatchJobImpl = buildMergeAgentDispatchJob,
   dispatchMergeAgentForPRImpl = dispatchMergeAgentForPR,
   resolveMergeAgentCoexistenceForWatcherImpl = resolveMergeAgentCoexistenceForWatcher,
+  latestFollowUpJobFinder = findLatestFollowUpJob,
+  reviewBodyHasScopeViolationFindingImpl = reviewBodyHasScopeViolationFinding,
   operatorSurface = null,
   logger = console,
 } = {}) {
   await projectGateStatusSafe(existing);
 
   try {
+    const latestFollowUp = latestFollowUpJobFinder(rootDir, { repo: repoPath, prNumber });
+    if (reviewBodyHasScopeViolationFindingImpl(latestFollowUp?.job?.reviewBody)) {
+      logger.log(
+        `[watcher] automated dispatch suppressed for ${repoPath}#${prNumber}: scope-violation finding present`
+      );
+      return;
+    }
+
     let operatorApprovalEvent;
     let mergeAgentRequestEvent;
     let adversarialMergeRequestedEvent;

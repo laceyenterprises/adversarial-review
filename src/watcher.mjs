@@ -177,6 +177,10 @@ import {
   fetchPullRequestRollup,
   fetchReviewBodiesForHead,
 } from './github-api.mjs';
+import {
+  isNoneFindingsSentinelOnly,
+  parseBlockingFindingsSection,
+} from './kernel/remediation-reply.mjs';
 import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   appendFenceAuditEvent,
@@ -3173,6 +3177,16 @@ async function clearReviewCycleCapForOverride({
   return { cleared: true, overrideLabel };
 }
 
+function reviewBodyHasStandingBlockingFindings(reviewBody) {
+  const parsed = parseBlockingFindingsSection(reviewBody);
+  if (parsed && parsed.length > 0) return true;
+  const match = String(reviewBody ?? '').match(/##\s+Blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
+  if (!match) return false;
+  const lines = match[1].trim().split(/\n/);
+  if (lines.length === 0) return false;
+  return !isNoneFindingsSentinelOnly(lines);
+}
+
 function latestCapturedReviewerPassForPR(db, { repo, prNumber } = {}) {
   return db.prepare(
     `SELECT *
@@ -3199,6 +3213,13 @@ function recordSuccessfulReviewCycleVerdict({
   try {
     const latestPass = latestCapturedReviewerPassForPR(db, { repo: repoPath, prNumber });
     const body = result?.reviewBody || latestPass?.body_md || '';
+    if (!reviewBodyHasStandingBlockingFindings(body)) {
+      logger?.log?.(
+        `[watcher] review-cycle-count skipped for ${repoPath}#${prNumber}@${String(headSha || '').slice(0, 12)} ` +
+          'because the posted verdict has no standing blocking findings'
+      );
+      return { recorded: false, reason: 'no-standing-blocking-findings' };
+    }
     const verdictAt = latestPass?.body_captured_at || latestPass?.ended_at || postedAt || new Date().toISOString();
     const recorded = recordReviewCycleVerdict(db, {
       repo: repoPath,
@@ -5534,6 +5555,7 @@ async function pollOnce(
           prLabelNames.splice(0, prLabelNames.length, ...prLabelNames.filter(
             (label) => label !== REVIEWER_CYCLE_CAP_REACHED_LABEL
           ));
+          existing = stmtGetReviewRow.get(repoPath, prNumber);
         } catch (err) {
           console.error(
             `[watcher] review-cycle-cap override cleanup failed for ${repoPath}#${prNumber}:`,
@@ -6112,12 +6134,16 @@ async function pollOnce(
               `automatic review remains paused`
           );
         }
-        stmtMarkReviewCycleCapPaused.run(
-          escalatedAt,
-          `[review-cycle-cap] automatic review paused after ${cycleCapConfig.cap} successive review/remediation cycles; awaiting operator-approved, merge-agent-requested, or ${PAUSED_FOR_REDESIGN_LABEL}`,
-          repoPath,
-          prNumber,
-        );
+        const alreadyCapPaused = current?.review_status === 'failed'
+          && String(current?.failure_message || '').startsWith('[review-cycle-cap]');
+        if (!alreadyCapPaused) {
+          stmtMarkReviewCycleCapPaused.run(
+            escalatedAt,
+            `[review-cycle-cap] automatic review paused after ${cycleCapConfig.cap} successive review/remediation cycles; awaiting operator-approved, merge-agent-requested, or ${PAUSED_FOR_REDESIGN_LABEL}`,
+            repoPath,
+            prNumber,
+          );
+        }
         continue;
       }
 

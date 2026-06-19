@@ -92,7 +92,6 @@ export function ensureReviewCycleCapSchema(db) {
 }
 
 function latestReviewCycleVerdict(db, prUrl) {
-  ensureReviewCycleCapSchema(db);
   return db.prepare(
     `SELECT *
        FROM review_cycle_verdicts
@@ -154,13 +153,13 @@ export function recordReviewCycleVerdict(db, {
 } = {}) {
   if (!headSha) return { recorded: false, reason: 'missing-head-sha' };
   const prUrl = reviewCyclePrUrl({ repo, prNumber });
+  ensureReviewCycleCapSchema(db);
   const previous = latestReviewCycleVerdict(db, prUrl);
   const count = nextCountFromPrevious(previous, {
     headSha,
     verdictAt,
     windowHours,
   });
-  ensureReviewCycleCapSchema(db);
   db.prepare(
     `INSERT OR IGNORE INTO review_cycle_verdicts (
        pr_url, head_sha, verdict_count, verdict_at, verdict_summary
@@ -183,7 +182,6 @@ export function recentReviewCycleVerdicts(db, {
   limit = DEFAULT_REVIEW_CYCLE_CAP,
 } = {}) {
   const prUrl = reviewCyclePrUrl({ repo, prNumber });
-  ensureReviewCycleCapSchema(db);
   return db.prepare(
     `SELECT verdict_at, verdict_summary, head_sha, verdict_count
        FROM review_cycle_verdicts
@@ -249,7 +247,6 @@ export function markReviewCycleEscalated(db, {
 
 export function hasReviewCycleEscalated(db, { repo, prNumber } = {}) {
   const prUrl = reviewCyclePrUrl({ repo, prNumber });
-  ensureReviewCycleCapSchema(db);
   const row = db.prepare(
     'SELECT escalated_at FROM review_cycle_counters WHERE pr_url = ? AND escalated_at IS NOT NULL LIMIT 1'
   ).get(prUrl);

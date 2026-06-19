@@ -702,13 +702,15 @@ failure loops.
 
 ## Review Cycle Cap
 
-The watcher also tracks successive successful adversarial review verdicts for a
-PR in `review_cycle_verdicts` / `review_cycle_counters`. The operator-facing
-config keys are `review_cycle_cap` (default `5`) and
-`review_cycle_window_hours` (default `24`). A new verdict on the same head keeps
-the current count; a verdict on a distinct head increments the count when it
-lands within the configured window of the prior verdict; a larger gap resets
-the sequence to `1`.
+The watcher also tracks successive successful adversarial review verdicts that
+still carry standing structured blocking findings for a PR in
+`review_cycle_verdicts` / `review_cycle_counters`. Settled `Comment only` or
+`Approved` verdicts with `## Blocking issues` set to `- None.` do not accrue
+cycle-cap budget. The operator-facing config keys are `review_cycle_cap`
+(default `5`) and `review_cycle_window_hours` (default `24`). A new counted
+verdict on the same head keeps the current count; a counted verdict on a
+distinct head increments the count when it lands within the configured window
+of the prior counted verdict; a larger gap resets the sequence to `1`.
 
 When the next review attempt would exceed `review_cycle_cap`, the watcher posts
 one escalation comment for the PR, applies `reviewer-cycle-cap-reached`, marks

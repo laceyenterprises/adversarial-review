@@ -19,6 +19,7 @@ import {
 } from '../src/reviewer-cascade.mjs';
 import {
   probeRoutingTierReadiness,
+  recordSuccessfulReviewCycleVerdict,
   resolveReviewerIdentity,
   selectReviewerRouteForAttempt,
   settleReviewerAttempt,
@@ -815,6 +816,81 @@ test('settleReviewerAttempt marks success posted before optional cycle-cap bookk
     assert.equal(row.review_status, 'posted');
     assert.equal(row.review_attempts, 1);
     assert.equal(row.failure_message, null);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('recordSuccessfulReviewCycleVerdict skips settled reviews with no standing blockers', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const result = recordSuccessfulReviewCycleVerdict({
+      db,
+      repoPath: 'laceyenterprises/adversarial-review',
+      prNumber: 195,
+      headSha: 'clean-head',
+      postedAt: '2026-06-04T01:00:00.000Z',
+      result: {
+        ok: true,
+        reviewBody: [
+          '## Summary',
+          'Clean verdict.',
+          '',
+          '## Blocking issues',
+          '- None.',
+          '',
+          '## Verdict',
+          'Comment only',
+        ].join('\n'),
+      },
+      windowHours: 24,
+      logger: { warn() {}, log() {} },
+    });
+
+    assert.equal(result.recorded, false);
+    assert.equal(result.reason, 'no-standing-blocking-findings');
+    const count = db.prepare('SELECT COUNT(*) AS n FROM review_cycle_verdicts').get().n;
+    assert.equal(count, 0);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('recordSuccessfulReviewCycleVerdict counts reviews with standing blockers', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const result = recordSuccessfulReviewCycleVerdict({
+      db,
+      repoPath: 'laceyenterprises/adversarial-review',
+      prNumber: 195,
+      headSha: 'blocking-head',
+      postedAt: '2026-06-04T01:00:00.000Z',
+      result: {
+        ok: true,
+        reviewBody: [
+          '## Summary',
+          'Blocking verdict.',
+          '',
+          '## Blocking issues',
+          '- **Persisted blocker**',
+          '  - **File:** src/watcher.mjs',
+          '  - **Lines:** 1-2',
+          '  - **Problem:** The watcher is still unsafe.',
+          '',
+          '## Verdict',
+          'Request changes',
+        ].join('\n'),
+      },
+      windowHours: 24,
+      logger: { warn() {}, log() {} },
+    });
+
+    assert.equal(result.recorded, true);
+    assert.equal(result.count, 1);
+    const count = db.prepare('SELECT COUNT(*) AS n FROM review_cycle_verdicts').get().n;
+    assert.equal(count, 1);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

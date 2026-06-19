@@ -21,6 +21,7 @@ import {
   openReviewStateDb,
 } from './review-state.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
+import { normalizeGithubMergeability } from './github-mergeability.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -248,6 +249,15 @@ function resolveSettledReviewVerdict(
   };
 }
 
+/**
+ * Return only the head SHA proven by the settled review source. Falling back to
+ * the live/current PR head when this is absent would defeat the stale-review
+ * guard and let AMA close a commit that was never proven reviewed.
+ */
+function resolveProvenReviewedHead(settledReview) {
+  return settledReview?.reviewedHeadSha || null;
+}
+
 function truncateDescription(description) {
   const text = String(description ?? '').trim().replace(/\s+/g, ' ');
   if (text.length <= DESCRIPTION_MAX_CHARS) return text;
@@ -466,16 +476,29 @@ async function buildAdversarialGateSnapshot(rootDir, {
   repo,
   prNumber,
   headSha,
+  mergeability = null,
   labels = [],
   prUpdatedAt = null,
   prAuthor = null,
   reviewRow = null,
+  includeSettledReview = false,
+  liveHeadReview = undefined,
   execFileImpl = execFileAsync,
   fetchLatestLabelEventImpl,
   operatorApprovalEvent = undefined,
 } = {}) {
   const resolvedRow = reviewRow || await readReviewRowForGate(rootDir, { repo, prNumber });
   const latestJob = findLatestFollowUpJobForPR(rootDir, { repo, prNumber });
+  const settledReview = includeSettledReview
+    ? resolveSettledReviewVerdict(rootDir, {
+      repo,
+      prNumber,
+      reviewRow: resolvedRow,
+      currentHeadSha: headSha,
+      liveHeadReview,
+    })
+    : null;
+  const reviewedHeadSha = resolveProvenReviewedHead(settledReview);
 
   let operatorApproval = null;
   const hasOperatorApprovedLabel = normalizeLabelNames(labels).includes(OPERATOR_APPROVED_LABEL);
@@ -502,6 +525,9 @@ async function buildAdversarialGateSnapshot(rootDir, {
     operatorApproval,
     labels,
     headSha,
+    settledReview,
+    reviewedHeadSha,
+    mergeableState: includeSettledReview ? normalizeGithubMergeability(mergeability || {}) : '',
   };
 }
 
@@ -626,6 +652,7 @@ async function projectAdversarialGateStatus(rootDir, {
     prUpdatedAt,
     prAuthor,
     reviewRow,
+    includeSettledReview: false,
     execFileImpl,
     fetchLatestLabelEventImpl,
     operatorApprovalEvent,
@@ -649,5 +676,6 @@ export {
   projectAdversarialGateStatus,
   pruneGateRecordsForPR,
   publishAdversarialGateStatus,
+  resolveProvenReviewedHead,
   resolveSettledReviewVerdict,
 };

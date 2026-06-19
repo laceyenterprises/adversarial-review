@@ -106,13 +106,12 @@ import {
 } from './follow-up-merge-agent.mjs';
 import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
 import {
+  buildAdversarialGateSnapshot,
   deleteGateRecordsForPR,
   projectAdversarialGateStatus,
-  resolveSettledReviewVerdict,
 } from './adversarial-gate-status.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
-import { normalizeGithubMergeability } from './github-mergeability.mjs';
 // AMA-03 — the closer dispatch path. Default-off behind cfg.enabled
 // (AMA-01 defaults to false). When the operator opts in AND the
 // canonical eligibility predicate from SPEC §4.2 returns
@@ -4348,19 +4347,18 @@ async function maybeDispatchAmaClosureFor({
     );
   }
 
-  // Resolve verdict + remediation-pending from the SAME canonical source the
-  // adversarial gate uses (the posted review body via the latest follow-up
-  // job, else the stored review row). reviewed_prs has NO `last_verdict` /
-  // `remediation_pending` columns, so the previous reads were always
-  // `undefined` -> verdict '' -> never settled-success -> AMA closed 0 PRs
-  // ever. This is the verdict/remediation twin of the `risk_class` phantom-
-  // column fix above (the riskClass path was repaired; this one was missed).
   const settledReviewHeadSha = candidate?.headSha || currentRevisionRef || null;
-  let settledReview = resolveSettledReviewVerdict(rootDir, {
+  let gateSnapshot = await buildAdversarialGateSnapshot(rootDir, {
     repo: repoPath,
     prNumber,
     reviewRow: reviewStateRow,
-    currentHeadSha: settledReviewHeadSha,
+    headSha: settledReviewHeadSha,
+    mergeability: candidate,
+    labels: labelNames,
+    prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
+    prAuthor: candidate?.prAuthor || null,
+    operatorApprovalEvent,
+    includeSettledReview: true,
   });
   // FAIL-OPEN GUARD (#1824 / #1816): the stored follow-up-job / review-row body
   // resolved above can be STALE relative to a fresh review on the SAME head — a
@@ -4373,8 +4371,8 @@ async function maybeDispatchAmaClosureFor({
   // `Request changes` then wins, and a lookup failure fails closed.
   if (
     settledReviewHeadSha &&
-    settledReview.remediationPending === false &&
-    SETTLED_SUCCESS_VERDICTS.has(settledReview.verdict)
+    gateSnapshot.settledReview?.remediationPending === false &&
+    SETTLED_SUCCESS_VERDICTS.has(gateSnapshot.settledReview?.verdict)
   ) {
     let liveHeadReview;
     // Resolve the authoritative reviewer login(s) from the REAL `reviewer` model
@@ -4414,39 +4412,28 @@ async function maybeDispatchAmaClosureFor({
       );
       liveHeadReview = { resolved: false };
     }
-    settledReview = resolveSettledReviewVerdict(rootDir, {
+    gateSnapshot = await buildAdversarialGateSnapshot(rootDir, {
       repo: repoPath,
       prNumber,
       reviewRow: reviewStateRow,
-      currentHeadSha: settledReviewHeadSha,
+      headSha: settledReviewHeadSha,
+      mergeability: candidate,
+      labels: labelNames,
+      prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
+      prAuthor: candidate?.prAuthor || null,
+      operatorApprovalEvent,
+      includeSettledReview: true,
       liveHeadReview,
     });
   }
-  // Proven reviewed head ONLY — do NOT fall back to the current PR head. AMA's
-  // eligibility compares reviewState.headSha (reviewed head) against
-  // prMetadata.headSha (current head); synthesizing the reviewed head from the
-  // current head would always match and silently defeat the stale-review-head
-  // guard, letting AMA close a commit never proven to be the reviewed one. Null
-  // when unprovable -> AMA fails `stale-review-head` unless a current-head
-  // operator override is present.
-  const reviewAuthorityHead = settledReview.reviewedHeadSha || null;
   const reviewState = {
-    verdict: settledReview.verdict,
-    headSha: reviewAuthorityHead,
+    verdict: gateSnapshot.settledReview?.verdict || '',
+    headSha: gateSnapshot.reviewedHeadSha,
     riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || ledgerRiskClass || 'unknown').toLowerCase(),
-    remediationPending: settledReview.remediationPending,
+    remediationPending: gateSnapshot.settledReview?.remediationPending,
     reviewCycleExhausted,
-    // Blocking-findings classification MUST come from the same authoritative
-    // current-head body `settledReview` resolved the verdict from (live head
-    // body when reconciled, else the stored job/row body). The `dispatchJob`
-    // here is `buildMergeAgentDispatchJob`'s output, whose `classifyBlockingFindings`
-    // reads the latest *follow-up-job* body — which is stale/missing for a clean
-    // `comment-only` review with no remediation job, so it defaulted to
-    // 'unknown' and made the closer fail `blocking-findings-unknown` and never
-    // merge (live on agent-os#1856). `settledReview` always carries these keys;
-    // fall back to 'unknown' only if absent (fail-closed).
-    blockingFindingCount: Number(settledReview.blockingFindingCount ?? 0),
-    blockingFindingState: String(settledReview.blockingFindingState || 'unknown').trim().toLowerCase(),
+    blockingFindingCount: Number(gateSnapshot.settledReview?.blockingFindingCount ?? 0),
+    blockingFindingState: String(gateSnapshot.settledReview?.blockingFindingState || 'unknown').trim().toLowerCase(),
     operatorApprovedEvidence: operatorApprovalEvent
       ? {
           applied: true,
@@ -4458,16 +4445,12 @@ async function maybeDispatchAmaClosureFor({
       : null,
     prAuthor: candidate?.prAuthor || null,
   };
-  // AMA's eligibility gate (SPEC §4.2 #7) compares `mergeableState` against
-  // 'MERGEABLE' — the vocabulary of GitHub's `mergeable` field. Use
-  // mergeStateStatus=CLEAN only as the UNKNOWN/empty fallback GitHub exposes
-  // while recomputing mergeability; never let it override CONFLICTING.
   const prMetadata = {
     prNumber,
     headSha: candidate?.headSha || currentRevisionRef || null,
     isOpen: String(candidate?.prState || 'open').toLowerCase() === 'open',
     isDraft: Boolean(candidate?.isDraft),
-    mergeableState: normalizeGithubMergeability(candidate),
+    mergeableState: gateSnapshot.mergeableState,
     labels: Array.isArray(labelNames) ? labelNames : [],
     statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },

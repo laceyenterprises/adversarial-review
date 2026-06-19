@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  fetchLatestLabelEvent,
   latestMatchingLabelEvent,
   latestMatchingScopedTimelineLabelEvent,
 } from '../src/github-label-events.mjs';
@@ -94,4 +95,48 @@ test('latestMatchingScopedTimelineLabelEvent only scopes labels applied after th
     codeScopeEventId: 'commit-current',
     codeScopeEventKind: 'pull-request-commit',
   });
+});
+
+test('fetchLatestLabelEvent scopes timeline labels with caller-provided current head', async () => {
+  const event = await fetchLatestLabelEvent(
+    'laceyenterprises/adversarial-review',
+    340,
+    'operator-approved',
+    {
+      currentHeadSha: 'reviewed-head',
+      execFileImpl: async () => ({
+        stdout: JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                headRefOid: 'newer-live-head',
+                timelineItems: {
+                  nodes: [
+                    {
+                      __typename: 'PullRequestCommit',
+                      id: 'commit-reviewed',
+                      commit: {
+                        oid: 'reviewed-head',
+                        committedDate: '2026-06-19T08:00:00.000Z',
+                      },
+                    },
+                    {
+                      __typename: 'LabeledEvent',
+                      id: 'LE_reviewed',
+                      label: { name: 'operator-approved' },
+                      actor: { login: 'placey' },
+                      createdAt: '2026-06-19T08:01:00.000Z',
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        }),
+      }),
+    }
+  );
+
+  assert.equal(event.headSha, 'reviewed-head');
+  assert.equal(event.id, 'LE_reviewed');
 });

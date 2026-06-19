@@ -122,13 +122,16 @@ test('VirtualPaul PR with advisory-only override label is advisory-only and skip
       labels: [{ name: ADVISORY_ONLY_REVIEW_LABEL }],
       author: { login: 'VirtualPaul' },
     }),
-    fetchLatestLabelEventImpl: async () => ({
-      id: 'evt-advisory-only',
-      nodeId: 'LE_advisory_only',
-      actor: 'placey',
-      createdAt: '2026-06-19T08:00:00.000Z',
-      headSha: 'head-a',
-    }),
+    fetchLatestLabelEventImpl: async (_repo, _prNumber, _labelName, options) => {
+      assert.equal(options.currentHeadSha, 'head-a');
+      return {
+        id: 'evt-advisory-only',
+        nodeId: 'LE_advisory_only',
+        actor: 'placey',
+        createdAt: '2026-06-19T08:00:00.000Z',
+        headSha: 'head-a',
+      };
+    },
   });
   const { result, created } = queueWithFakes('## Summary\nVisible finding.\n\n## Verdict\nRequest changes', {
     verdictMode: resolved.verdictMode,
@@ -235,7 +238,7 @@ test('advisory-only review header is explicit while findings body remains separa
 
   assert.equal(
     header,
-    '**Advisory-only review** — findings below are informational; no automated remediation will run.\n\n',
+    '**Advisory-only review** (codex-reviewer-lacey) — findings below are informational; no automated remediation will run.\n\n',
   );
 });
 

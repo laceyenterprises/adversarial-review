@@ -582,7 +582,10 @@ async function fetchCurrentHeadVerdictMode({
       hasLabel(labels, ADVISORY_ONLY_REVIEW_LABEL)
     );
     const advisoryLabelEvent = needsAdvisoryEvent && typeof fetchLatestLabelEventImpl === 'function'
-      ? await fetchLatestLabelEventImpl(repo, prNumber, ADVISORY_ONLY_REVIEW_LABEL, { execFileImpl })
+      ? await fetchLatestLabelEventImpl(repo, prNumber, ADVISORY_ONLY_REVIEW_LABEL, {
+          execFileImpl,
+          currentHeadSha,
+        })
       : null;
     const verdictMode = resolveVerdictModeForHead({
       labels,
@@ -620,7 +623,7 @@ async function fetchCurrentHeadVerdictMode({
 function buildReviewCommentHeader({ reviewerMetadata, verdictMode }) {
   const mode = normalizeVerdictMode(verdictMode);
   if (mode === VERDICT_MODE_ADVISORY_ONLY) {
-    return '**Advisory-only review** — findings below are informational; no automated remediation will run.\n\n';
+    return `**Advisory-only review** (${reviewerMetadata.reviewerIdentity}) — findings below are informational; no automated remediation will run.\n\n`;
   }
   return `## Adversarial Review — ${reviewerMetadata.displayName} (${reviewerMetadata.reviewerIdentity})\n\n`;
 }

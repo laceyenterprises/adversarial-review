@@ -89,6 +89,7 @@ import {
   addMergeAgentDispatchedLabel,
   buildMergeAgentDispatchJob,
   cancelMergeAgentDispatchOnMerge,
+  classifyBlockingFindings,
   clearMergeAgentLifecycleCleanup,
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
@@ -152,6 +153,7 @@ import {
   resolveReviewCycleCapConfig,
   shouldEscalateReviewCycle,
 } from './review-cycle-cap.mjs';
+import { extractReviewVerdict } from './review-verdict.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { reconcileReviewerSessions } from './reviewer-reattach.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
@@ -178,10 +180,6 @@ import {
   fetchPullRequestRollup,
   fetchReviewBodiesForHead,
 } from './github-api.mjs';
-import {
-  isNoneFindingsSentinelOnly,
-  parseBlockingFindingsSection,
-} from './kernel/remediation-reply.mjs';
 import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   appendFenceAuditEvent,
@@ -3168,6 +3166,19 @@ async function addLabelToPR(octokit, { repoPath, prNumber, label }) {
   });
 }
 
+// Best-effort label add: swallows transient GitHub errors so a failed
+// label add never unwinds a dedupe marker that has already been persisted.
+// Mirrors removeLabelFromPR's non-fatal posture.
+async function addLabelToPRBestEffort(octokit, { repoPath, prNumber, label, logger = console }) {
+  try {
+    await addLabelToPR(octokit, { repoPath, prNumber, label });
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] failed to add label ${label} to ${repoPath}#${prNumber}: ${err?.message || err}`
+    );
+  }
+}
+
 async function removeLabelFromPR(octokit, { repoPath, prNumber, label, logger = console }) {
   const [owner, repo] = String(repoPath || '').split('/');
   if (!owner || !repo || !label) return;
@@ -3188,6 +3199,10 @@ async function removeLabelFromPR(octokit, { repoPath, prNumber, label, logger = 
   }
 }
 
+// Posts the escalation comment only. The caller must persist the
+// escalation dedupe marker (markReviewCycleEscalated) immediately after
+// this resolves and before the best-effort label add, so a transient
+// label-add failure cannot cause the comment to be re-posted next tick.
 async function postReviewCycleCapEscalation(octokit, {
   repoPath,
   prNumber,
@@ -3200,11 +3215,6 @@ async function postReviewCycleCapEscalation(octokit, {
     repo,
     issue_number: Number(prNumber),
     body,
-  });
-  await addLabelToPR(octokit, {
-    repoPath,
-    prNumber,
-    label: REVIEWER_CYCLE_CAP_REACHED_LABEL,
   });
 }
 
@@ -3265,13 +3275,19 @@ async function clearReviewCycleCapForOverride({
 }
 
 function reviewBodyHasStandingBlockingFindings(reviewBody) {
-  const parsed = parseBlockingFindingsSection(reviewBody);
-  if (parsed && parsed.length > 0) return true;
-  const match = String(reviewBody ?? '').match(/##\s+Blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
-  if (!match) return false;
-  const lines = match[1].trim().split(/\n/);
-  if (lines.length === 0) return false;
-  return !isNoneFindingsSentinelOnly(lines);
+  // Reuse the canonical three-state classifier (follow-up-merge-agent.mjs)
+  // instead of maintaining a second drifting regex. The verdict is derived
+  // from the body itself so a legacy unstructured `Request changes` review
+  // with no `## Blocking issues` section classifies as `unknown` rather than
+  // silently counting as "no standing blockers" (which would let a runaway
+  // loop on legacy-format reviews evade the cap).
+  const lastVerdict = extractReviewVerdict(reviewBody);
+  const { count, state } = classifyBlockingFindings(reviewBody, { lastVerdict });
+  if (count > 0) return true;
+  // Fail safe toward counting: an unknowable blocking state on an unresolved
+  // (request-changes) review still accrues cap budget so the loop can't evade
+  // the cap by emitting malformed/legacy review bodies.
+  return state === 'unknown';
 }
 
 function latestCapturedReviewerPassForPR(db, { repo, prNumber } = {}) {
@@ -3307,7 +3323,12 @@ function recordSuccessfulReviewCycleVerdict({
       );
       return { recorded: false, reason: 'no-standing-blocking-findings' };
     }
-    const verdictAt = latestPass?.body_captured_at || latestPass?.ended_at || postedAt || new Date().toISOString();
+    // Window measurement (shouldEscalateReviewCycle) compares against the
+    // real-time `now`, so anchor `verdict_at` on the actual post time of this
+    // verdict rather than the older reviewer-pass capture timestamps; those
+    // predate the post and would shorten the effective window, resetting the
+    // sequence marginally earlier than the configured window.
+    const verdictAt = postedAt || latestPass?.body_captured_at || latestPass?.ended_at || new Date().toISOString();
     const recorded = recordReviewCycleVerdict(db, {
       repo: repoPath,
       prNumber,
@@ -3320,6 +3341,13 @@ function recordSuccessfulReviewCycleVerdict({
       logger?.log?.(
         `[watcher] review-cycle-count ${repoPath}#${prNumber}@${String(headSha || '').slice(0, 12)} ` +
           `count=${recorded.count}`
+      );
+    } else if (recorded.reason === 'missing-head-sha') {
+      // Loud so the silent no-op is observable: with no head SHA the cap
+      // cannot count this cycle, so a runaway loop could evade it here.
+      logger?.warn?.(
+        `[watcher] review-cycle-count NOT recorded for ${repoPath}#${prNumber}: ` +
+          'missing head SHA (cap cannot count this cycle)'
       );
     }
     return recorded;
@@ -6241,11 +6269,29 @@ async function pollOnce(
               prNumber,
               body,
             });
-            markReviewCycleEscalated(db, {
+            // Persist the dedupe marker the instant the comment posts,
+            // before the label add, so a transient label-add failure cannot
+            // re-post the escalation comment on the next tick.
+            const escalationMark = markReviewCycleEscalated(db, {
               repo: repoPath,
               prNumber,
               headSha: subject.headSha || null,
               escalatedAt,
+            });
+            if (!escalationMark?.marked && escalationMark?.reason === 'missing-head-sha') {
+              // Loud so the silent no-op is observable: with no head SHA the
+              // escalation dedupe never engages, so the comment can re-post
+              // every tick.
+              console.warn(
+                `[watcher] review-cycle-cap escalation marker NOT persisted for ${repoPath}#${prNumber}: ` +
+                  'missing head SHA (escalation dedupe disabled; comment may re-post)'
+              );
+            }
+            await addLabelToPRBestEffort(octokit, {
+              repoPath,
+              prNumber,
+              label: REVIEWER_CYCLE_CAP_REACHED_LABEL,
+              logger: console,
             });
             console.warn(
               `[watcher] review-cycle-cap reached for ${repoPath}#${prNumber}: ` +
@@ -6835,6 +6881,8 @@ export {
   resolveVocabularyFatigueConfig,
   resolveReviewerIdentity,
   postReviewCycleCapEscalation,
+  addLabelToPRBestEffort,
+  reviewBodyHasStandingBlockingFindings,
   recordSuccessfulReviewCycleVerdict,
   resolveStuckDispatchAlertDebounceMs,
   resolveWatcherDrainMaxMs,

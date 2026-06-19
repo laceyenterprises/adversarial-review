@@ -12,7 +12,12 @@ import {
   recordReviewCycleVerdict,
   shouldEscalateReviewCycle,
 } from '../src/review-cycle-cap.mjs';
-import { clearReviewCycleCapForOverride } from '../src/watcher.mjs';
+import {
+  clearReviewCycleCapForOverride,
+  postReviewCycleCapEscalation,
+  addLabelToPRBestEffort,
+  reviewBodyHasStandingBlockingFindings,
+} from '../src/watcher.mjs';
 
 const REPO = 'laceyenterprises/adversarial-review';
 const PR = 123;
@@ -258,3 +263,94 @@ for (const overrideLabel of ['operator-approved', 'merge-agent-requested', PAUSE
     }
   });
 }
+
+test('postReviewCycleCapEscalation posts only the comment (no label add) so the dedupe marker is not gated on label success', async () => {
+  const calls = [];
+  const octokit = {
+    rest: {
+      issues: {
+        createComment: async (params) => {
+          calls.push(['createComment', params]);
+        },
+        addLabels: async (params) => {
+          calls.push(['addLabels', params]);
+        },
+      },
+    },
+  };
+
+  await postReviewCycleCapEscalation(octokit, {
+    repoPath: REPO,
+    prNumber: PR,
+    body: 'escalation body',
+  });
+
+  // The comment must post, and the label add must NOT happen inside this
+  // function — the caller persists the escalation dedupe marker between the
+  // two, then adds the label best-effort. This guarantees a transient
+  // label-add failure can never unwind the marker and re-post the comment.
+  assert.deepEqual(calls.map(([name]) => name), ['createComment']);
+});
+
+test('reviewBodyHasStandingBlockingFindings counts structured blockers and a None-only section', () => {
+  const withBlocker = [
+    '## Summary',
+    'Found one issue.',
+    '## Blocking issues',
+    '- **A real blocker**',
+    '  - File: src/x.mjs',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+  assert.equal(reviewBodyHasStandingBlockingFindings(withBlocker), true);
+
+  const noneOnly = [
+    '## Summary',
+    'All good.',
+    '## Blocking issues',
+    '- None.',
+    '## Verdict',
+    'Approved',
+  ].join('\n');
+  assert.equal(reviewBodyHasStandingBlockingFindings(noneOnly), false);
+});
+
+test('reviewBodyHasStandingBlockingFindings counts a legacy Request-changes review with no Blocking section (unknown fails safe)', () => {
+  // Legacy unstructured review: Request changes verdict but no `## Blocking
+  // issues` section. The canonical classifier returns state:'unknown' here.
+  // The old local boolean returned false (under-counting → cap-evasion). It
+  // must now accrue cap budget.
+  const legacy = [
+    '## Summary',
+    'This still needs work before merge.',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+  assert.equal(reviewBodyHasStandingBlockingFindings(legacy), true);
+});
+
+test('addLabelToPRBestEffort swallows transient label-add errors so the dedupe marker survives', async () => {
+  const warnings = [];
+  const octokit = {
+    rest: {
+      issues: {
+        addLabels: async () => {
+          const err = new Error('rate limited');
+          err.status = 403;
+          throw err;
+        },
+      },
+    },
+  };
+
+  // Must not throw even though addLabels rejects.
+  await addLabelToPRBestEffort(octokit, {
+    repoPath: REPO,
+    prNumber: PR,
+    label: REVIEWER_CYCLE_CAP_REACHED_LABEL,
+    logger: { warn: (msg) => warnings.push(msg) },
+  });
+
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /failed to add label/);
+});

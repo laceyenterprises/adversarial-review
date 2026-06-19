@@ -733,6 +733,16 @@ The cap pause is cleared only by an override label:
   counter, and leaves the row `failed` with a redesign-specific failure message;
   this is an intentional operator pause, not a resume signal.
 
+Cap-clear keys on the bare presence of an override label in the PR's current
+label set; unlike the AMA / merge-agent **merge** lanes it does not require a
+non-author, current-head, attributable `labeled` event. This is intentional:
+clearing the cap only lifts the review pause and resets the cycle counter — it
+grants no merge. The downstream merge gate independently re-validates
+attribution (non-author, current-head), so a self-applied `operator-approved` /
+`merge-agent-requested` cannot merge the PR; its only effect is to re-open the
+review/remediate loop, bounding the impact to review-resource churn rather than
+an unauthorized merge.
+
 ## GitHub API Rollup
 
 `src/github-api.mjs` is the watcher/reviewer rollup helper for GitHub PR

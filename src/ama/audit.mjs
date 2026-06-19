@@ -502,6 +502,7 @@ export function appendAmaAuditAttempt({
  * @param {string} args.riskClass         resolved risk class
  * @param {string} args.eligibilityReason short human summary, one line
  * @param {string} args.auditRef          logical audit trace reference
+ * @param {string} [args.closedBy]        explicit Closed-By actor override
  * @returns {string} trailer block; lines joined by `\n`, no trailing newline.
  */
 export function composeAmaTrailers({
@@ -510,6 +511,7 @@ export function composeAmaTrailers({
   riskClass,
   eligibilityReason,
   auditRef,
+  closedBy,
 }) {
   const sanitize = (value, label) => {
     const str = String(value ?? '');
@@ -532,11 +534,15 @@ export function composeAmaTrailers({
     );
   }
   const sanitizedWorkerClass = sanitize(workerClass, 'workerClass');
-  const closedBy = sanitizedWorkerClass === 'hammer'
-    ? 'hammer'
-    : `${sanitizedWorkerClass}-closer`;
+  const closedByActor = closedBy === undefined
+    ? (
+      sanitizedWorkerClass === 'hammer'
+        ? 'hammer'
+        : `${sanitizedWorkerClass}-closer`
+    )
+    : sanitize(closedBy, 'closedBy');
   const lines = [
-    `Closed-By: ${closedBy} (adversarial-pipe-mode)`,
+    `Closed-By: ${closedByActor} (adversarial-pipe-mode)`,
     `Reviewed-By: ${sanitize(reviewerFamily, 'reviewerFamily')}`,
     `Risk-Class: ${sanitize(riskClass, 'riskClass')}`,
     `Eligibility-Reason: ${sanitize(eligibilityReason, 'eligibilityReason')}`,

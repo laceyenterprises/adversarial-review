@@ -291,7 +291,7 @@ test('cfg.enabled=true + eligible dispatches with workerClass=hammer by default'
   assert.ok(write.captured.body.includes(reviewState.headSha));
   assert.ok(write.captured.body.includes('--squash'));
   assert.ok(write.captured.body.includes('--body-file "$TRAILERS_FILE"'));
-  assert.ok(write.captured.body.includes('Closed-By: hammer (adversarial-pipe-mode)'));
+  assert.ok(write.captured.body.includes('Closed-By: hammer-closer (adversarial-pipe-mode)'));
   assert.ok(write.captured.body.includes('Reviewed-By: claude-reviewer-lacey'));
   assert.ok(write.captured.body.includes('--reviewer claude'));
   assert.ok(write.captured.body.includes('Risk-Class: low'));
@@ -572,6 +572,8 @@ test('cfg.workerClass=hammer on a clean exhausted closure uses the plain closer 
   const args = exec.calls[0].args;
   assert.equal(args[args.indexOf('--worker-class') + 1], 'hammer');
   assert.deepEqual(readPaths, [TEMPLATE_PATH]);
+  assert.ok(write.captured.body.includes('Closed-By: hammer-closer (adversarial-pipe-mode)'));
+  assert.equal(write.captured.body.includes('Closed-By: hammer (adversarial-pipe-mode)'), false);
   // The hammer terminal-remediation mandate text must be absent on a clean
   // close (these phrases are unique to `hammer-prompt.md`).
   assert.doesNotMatch(write.captured.body, /remediate, commit, comment, validate, merge/i);
@@ -627,6 +629,8 @@ test('cfg.workerClass=hammer selects the terminal HAM mandate prompt when findin
   const args = exec.calls[0].args;
   assert.equal(args[args.indexOf('--worker-class') + 1], 'hammer');
   assert.deepEqual(readPaths, [HAMMER_TEMPLATE_PATH]);
+  assert.ok(write.captured.body.includes('Closed-By: hammer (adversarial-pipe-mode)'));
+  assert.equal(write.captured.body.includes('Closed-By: hammer-closer (adversarial-pipe-mode)'), false);
   assert.match(write.captured.body, /remediate, commit, comment, validate, merge/i);
   assert.match(write.captured.body, /Do not request another adversarial review round/);
   assert.match(write.captured.body, /Do not defer the review findings into follow-up PRs/);

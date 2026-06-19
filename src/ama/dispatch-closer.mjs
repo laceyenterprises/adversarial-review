@@ -766,6 +766,9 @@ export async function maybeDispatchAmaCloser({
     riskClass: dispatchContext.riskClass,
     eligibilityReason: summarizeEligibilityReason(bootstrapEligibilityReasons),
     auditRef,
+    closedBy: workerClass === 'hammer' && !useHammerTerminalRemediationPrompt
+      ? 'hammer-closer'
+      : undefined,
   });
   const prompt = composeCloserPrompt({
     prUrl: dispatchContext.prUrl,

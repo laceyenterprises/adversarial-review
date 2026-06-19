@@ -61,6 +61,24 @@ jobs:
         # silently drifting.
         run: npm ci
 
+      - name: Run CDM review-gate re-derivation guard
+        # CDM-07AR: verdict/head/mergeability gate facts must come from
+        # `src/adversarial-gate-status.mjs`, not be re-derived by consumers.
+        # Allowlisted exceptions stay visible in the uploaded JSON artifact.
+        run: |
+          node scripts/audit-cdm-rederivation.mjs \
+            --strict \
+            --format json \
+            --out /tmp/cdm-rederivation-audit.json
+
+      - name: Upload CDM re-derivation audit artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: cdm-rederivation-audit-${{ matrix.node }}-${{ github.sha }}
+          path: /tmp/cdm-rederivation-audit.json
+          if-no-files-found: warn
+
       - name: Run kernel + adapter test suite
         # `npm test` invokes `node --test test/*.test.mjs test/adapters/*.test.mjs`.
         # The suite includes byte-equivalence assertions on JSONL transcripts,

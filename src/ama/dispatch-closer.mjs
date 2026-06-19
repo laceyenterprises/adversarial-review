@@ -65,19 +65,28 @@ const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md
 // has standing non-blocking findings" case. The hammer-prompt remediates the
 // non-blocking findings, then re-validates the gate with ham-terminal-remediation
 // evidence (fail-closed), so auto-dispatching it here is safe for this exact
-// shape only. Deliberately NARROW: any other reason (blocking findings,
-// pr-not-mergeable, ci-not-green, stale head, risk-class, branch-protection,
-// remediation-pending, hard-stop labels) means NOT auto-hammer — those are not
-// fixable by a terminal non-blocking remediation and stay await-operator.
+// shape only. The hammer ALSO owns merge-conflict / behind-base resolution
+// (rebase onto main, resolve conflicts locally, re-validate), so
+// `pr-not-mergeable` is hammer-remediable too — a conflicting/behind PR routes
+// to the hammer instead of parking await-operator. Still NARROW: blocking
+// findings (these go through remediation rounds first), ci-not-green, stale head,
+// risk-class, branch-protection, remediation-pending, and hard-stop labels are
+// NOT auto-hammer and stay await-operator.
 const HAMMER_AUTO_REMEDIABLE_MISS_REASONS = new Set([
   'non-blocking-findings-present',
   'verdict-not-settled-success', // strict mode emits this alongside the above
+  'pr-not-mergeable', // hammer rebases onto main / resolves the conflict, then merges
 ]);
 
 export function isHammerRemediableEligibilityMiss(reasons) {
   if (!Array.isArray(reasons) || reasons.length === 0) return false;
-  // Must actually be the non-blocking case, and EVERY reason must be remediable.
-  if (!reasons.includes('non-blocking-findings-present')) return false;
+  // The hammer must have something it can actually act on: non-blocking findings
+  // to remediate, or a not-mergeable state (conflict / behind) to rebase+resolve.
+  const hasActionable =
+    reasons.includes('non-blocking-findings-present') || reasons.includes('pr-not-mergeable');
+  if (!hasActionable) return false;
+  // And EVERY reason must be hammer-remediable — a co-occurring blocking finding,
+  // red CI, stale head, etc. means NOT auto-hammer.
   return reasons.every((reason) => HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason));
 }
 const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;

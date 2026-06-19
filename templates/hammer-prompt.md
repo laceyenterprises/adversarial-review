@@ -24,9 +24,19 @@ not replace the machine gate.
 
 1. Read the FINAL adversarial review on `<<REVIEWED_SHA>>`. These are the
    freshest findings.
-2. Remediate ALL final comments, blocking and non-blocking. Make real fixes
-   scoped only to the findings the review raised; do not add net-new feature
-   scope.
+2. Remediate ALL final comments, blocking and non-blocking. Make real fixes for
+   the findings the review raised. Do not add net-new FEATURE scope.
+2b. **Get the full test suite green — this is the bar for keeping `main` clean.**
+   Run the repository's complete test suite against your post-remediation head
+   and fix EVERY failing test, *including tests that are unrelated to this PR's
+   findings or that pre-date this branch*. A merge that leaves `main` red is not
+   acceptable. Fixing tests (and the minimal production change a legitimately
+   failing test proves is needed) is the one sanctioned exception to "scope only
+   to the findings" — it is always in scope; net-new feature scope is not. If a
+   failing test genuinely cannot be fixed inside this remediation (it needs a
+   separate infra change, an external dependency, or a credential you do not
+   have), emit ONE hard-blocker report naming the exact failing test(s) and stop.
+   Do NOT merge past a red test, related or not.
 3. Commit the remediation. The commit must have provenance trailers including:
 
    ```text
@@ -42,11 +52,17 @@ not replace the machine gate.
    non-blocking findings. The predicate accepts only a matched timeline comment
    whose author is the verified HAM commit author or an allowlisted hammer bot.
 5. Validate the exact post-remediation PR head. Refresh the PR head SHA after
-   your commit. If the PR is stale or `mergeStateStatus=BEHIND`, update/rebase
-   it onto the current base with a small bounded cap (default 3 attempts), then
-   run or verify the required checks for that exact SHA and re-run the closer
-   eligibility predicate in SPEC §1.1.1 HAM
-   terminal-remediation mode for that same live head. The predicate must prove
+   your commit. **Always rebase the PR onto the latest base (`main`) before
+   merging — do not merge a branch that is behind — and CONFIRM THE REBASE
+   HOLDS.** Run `gh pr update-branch --rebase` (bounded cap, default 3 attempts)
+   until `mergeStateStatus` is no longer `BEHIND`; if `gh` reports the branch is
+   already up to date that confirms it is on the latest `main`. After the rebase,
+   re-establish the bar on the *rebased* head: re-run the FULL test suite
+   (mandate step 2b) and the required checks for that exact rebased SHA, fix any
+   test the rebase newly broke, and re-run the closer eligibility predicate in
+   SPEC §1.1.1 HAM terminal-remediation mode for that same live head. Only a
+   rebased-onto-latest-main head whose full suite and required checks are green
+   may proceed to merge. The predicate must prove
    the HAM-authored remediation commit, provenance trailers, PR audit comment,
    reviewed-parent coverage, non-empty verified diff, successful live-head
    checks, and non-waived gates. It must record
@@ -55,6 +71,14 @@ not replace the machine gate.
    correctness.
 6. Merge only after the exact-head HAM predicate passes, using
    `gh pr merge --match-head-commit <validated-post-remediation-sha>`.
+7. **Post a CLOSING comment after the merge confirms.** Once you have re-read
+   GitHub and confirmed the PR is merged at the validated head, post one final
+   comment on PR <<PR_URL>> that states: the merged SHA, the merge method, the
+   counts of findings remediated (blocking / non-blocking), the failing tests you
+   fixed to keep `main` green (or "suite already green"), and the
+   `Closed-By: hammer (adversarial-pipe-mode)` provenance. This closing comment is
+   the human-visible audit trail that an autonomous close happened — always post
+   it on a successful merge.
 
 ## Required workflow
 
@@ -143,6 +167,13 @@ while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-pr-after.json)" = "BEHIND" ]
   POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-pr-after.json)
 done
 
+# CONFIRM THE REBASE HOLDS: the head is now rebased onto the latest main. Re-run
+# the FULL test suite (mandate step 2b) against THIS rebased $POST_REMEDIATION_SHA
+# and fix anything the rebase newly broke. A rebase that turns the suite or the
+# required checks red must be fixed (and re-committed, which moves the head and
+# re-enters this validation), never merged. Do not proceed past this point with a
+# red suite, a red required check, or a still-BEHIND mergeStateStatus.
+
 gh pr view <<PR_URL>> --json reviews > /tmp/ham-reviews.json
 
 base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ham-pr-after.json)" | jq -sRr @uri)
@@ -203,6 +234,10 @@ Do not merge unless all of these are true:
 - `/tmp/ham-verdict.json` has `eligible: true`.
 - The trace contains `ham_terminal_remediation_validated`.
 - `POST_REMEDIATION_SHA` still equals the PR head.
+- The branch is rebased onto the latest `main` — `mergeStateStatus` is NOT
+  `BEHIND` for `POST_REMEDIATION_SHA`.
+- The FULL test suite is green for `POST_REMEDIATION_SHA` — no failing tests,
+  including ones unrelated to this branch or pre-existing on `main`.
 - Required checks are successful for `POST_REMEDIATION_SHA`.
 - No failed, missing, stale, or unchecked required check exists.
 - No non-waived gate remains.
@@ -232,6 +267,23 @@ missing, the predicate fails for the exact live SHA, the PR is closed/draft, or
 there is an unresolvable conflict, emit exactly one hard-blocker report and do
 not call `gh pr merge`.
 
+Post the CLOSING comment (mandate step 7) once the merge is confirmed:
+
+```bash
+# Only after re-reading GitHub confirms the PR is merged at $POST_REMEDIATION_SHA.
+gh pr comment <<PR_URL>> --body "$(cat <<EOF
+✅ Closed by **Hammer** (adversarial-pipe-mode).
+
+- Merged: \`$POST_REMEDIATION_SHA\` via <<MERGE_METHOD>> (rebased onto latest \`main\`)
+- Findings remediated: <n> (<b> blocking, <nb> non-blocking)
+- Failing tests fixed to keep \`main\` green: <list, or "suite already green">
+- Rebase attempts: ${HAM_REBASE_ATTEMPTS:-0}
+
+Closed-By: hammer (adversarial-pipe-mode)
+EOF
+)"
+```
+
 ## Hard prohibitions
 
 - No "please re-review", no "request another review", no re-review label.
@@ -242,6 +294,11 @@ not call `gh pr merge`.
 - No `gh pr merge` without `--match-head-commit "$POST_REMEDIATION_SHA"`.
 - No merge when the live post-remediation head has failed, missing, stale, or
   unchecked required checks.
+- No merging while ANY test in the suite fails — including tests unrelated to
+  this branch or pre-existing on `main`. Keeping `main` clean is the bar.
+- No merging a branch that is `BEHIND` / not rebased onto the latest `main`; the
+  rebase must be re-validated (full suite + checks green) before merge.
+- No skipping the post-merge closing comment on a successful merge.
 - No treating a rebased HAM head as valid without `ham_terminal_remediation_validated`.
 
 <!-- hq:closeout:pr -->

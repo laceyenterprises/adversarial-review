@@ -189,6 +189,34 @@ test('advisory-only override label fails closed when PR author is absent', async
   assert.equal(resolved.verdictMode, VERDICT_MODE_ENFORCE);
 });
 
+test('advisory-only override label fails closed when PR author object has no login', async () => {
+  // GitHub can return an author object with no `login` (e.g. `{}`). The old
+  // fallback (`author?.login || author`) yielded the truthy object, which then
+  // stringified to "[object Object]" and never matched the real actor login,
+  // letting the non-author gate pass without confirming the labeler is not the
+  // author. A loginless/non-string author must resolve to null and fail closed.
+  const resolved = await fetchCurrentHeadVerdictMode({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 60,
+    reviewerHeadSha: 'head-d',
+    fetchPullRequestHeadAndStateImpl: async () => ({
+      headRefOid: 'head-d',
+      labels: [{ name: ADVISORY_ONLY_REVIEW_LABEL }],
+      author: {},
+    }),
+    fetchLatestLabelEventImpl: async () => ({
+      id: 'evt-loginless-author-advisory-only',
+      nodeId: 'LE_loginless_author_advisory_only',
+      actor: 'placey',
+      createdAt: '2026-06-19T08:00:00.000Z',
+      headSha: 'head-d',
+    }),
+    log: { warn() {} },
+  });
+
+  assert.equal(resolved.verdictMode, VERDICT_MODE_ENFORCE);
+});
+
 test('advisory-only override label is current-head scoped and head advance restores enforce', () => {
   assert.equal(
     resolveVerdictModeForHead({
@@ -231,7 +259,7 @@ test('advisory-only override label without resolvable label event stays enforce 
   assert.equal(resolved.verdictMode, VERDICT_MODE_ENFORCE);
 });
 
-test('advisory-only review header is explicit while findings body remains separate', () => {
+test('advisory-only review header keeps the canonical marker heading while staying explicit', () => {
   const header = buildReviewCommentHeader({
     reviewerMetadata: { displayName: 'Codex', reviewerIdentity: 'codex-reviewer-lacey' },
     verdictMode: VERDICT_MODE_ADVISORY_ONLY,
@@ -239,8 +267,13 @@ test('advisory-only review header is explicit while findings body remains separa
 
   assert.equal(
     header,
-    '**Advisory-only review** (codex-reviewer-lacey) — findings below are informational; no automated remediation will run.\n\n',
+    '## Adversarial Review (advisory-only) — Codex (codex-reviewer-lacey)\n\n' +
+      '**Advisory-only review** — findings below are informational; no automated remediation will run.\n\n',
   );
+  // The `## Adversarial Review` marker heading and displayName must survive into
+  // advisory mode so the same heuristic that locates enforce reviews also finds these.
+  assert.ok(header.startsWith('## Adversarial Review'));
+  assert.ok(header.includes('Codex'));
 });
 
 test('clean comment-only reviews still queue a durable follow-up verdict carrier through the production queue helper', () => {

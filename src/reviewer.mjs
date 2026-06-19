@@ -579,7 +579,16 @@ async function fetchCurrentHeadVerdictMode({
     });
     const labels = current?.labels || [];
     const currentHeadSha = current?.headRefOid || null;
-    const prAuthor = current?.author?.login || current?.author || null;
+    // Normalize defensively: only a non-empty string author login is a confirmed
+    // author. A malformed/loginless author object (e.g. `{}`) must resolve to null
+    // so the non-author gate fails closed to enforce instead of comparing against
+    // the stringified object `"[object Object]"`.
+    const authorLogin = typeof current?.author === 'string'
+      ? current.author
+      : current?.author?.login;
+    const prAuthor = (typeof authorLogin === 'string' && authorLogin.trim())
+      ? authorLogin
+      : null;
     const needsAdvisoryEvent = (
       reviewerHeadSha &&
       currentHeadSha &&
@@ -628,7 +637,11 @@ async function fetchCurrentHeadVerdictMode({
 function buildReviewCommentHeader({ reviewerMetadata, verdictMode }) {
   const mode = normalizeVerdictMode(verdictMode);
   if (mode === VERDICT_MODE_ADVISORY_ONLY) {
-    return `**Advisory-only review** (${reviewerMetadata.reviewerIdentity}) — findings below are informational; no automated remediation will run.\n\n`;
+    // Keep the canonical `## Adversarial Review` marker heading and displayName in
+    // advisory mode so the same heuristic used to locate enforce reviews still finds
+    // advisory-only reviews; append the advisory disclaimer beneath it.
+    return `## Adversarial Review (advisory-only) — ${reviewerMetadata.displayName} (${reviewerMetadata.reviewerIdentity})\n\n` +
+      `**Advisory-only review** — findings below are informational; no automated remediation will run.\n\n`;
   }
   return `## Adversarial Review — ${reviewerMetadata.displayName} (${reviewerMetadata.reviewerIdentity})\n\n`;
 }

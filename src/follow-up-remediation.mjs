@@ -502,7 +502,7 @@ function buildLegacyHqRemediationDispatchArgs({
     '--parent-session', parentSession,
     '--project', project,
     '--task-kind', 'coding',
-    '--repo', repo,
+    '--repo', String(repo).split('/')[1] || String(repo),
     '--pr', String(prNumber),
   ];
   if (branch) args.push('--branch', branch);

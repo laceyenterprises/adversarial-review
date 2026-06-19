@@ -5121,6 +5121,8 @@ test('consumeNextFollowUpJob lets legacy HQ flag override native orchestration m
       assert.ok(dispatchCommand, 'expected legacy native override to call hq dispatch');
       assert.ok(dispatchCommand.includes('--completion-shape'));
       assert.equal(dispatchCommand[dispatchCommand.indexOf('--completion-shape') + 1], 'branch-push');
+      assert.ok(dispatchCommand.includes('--repo'));
+      assert.equal(dispatchCommand[dispatchCommand.indexOf('--repo') + 1], 'clio');
       assert.ok(dispatchCommand.includes('--branch'));
       assert.equal(dispatchCommand[dispatchCommand.indexOf('--branch') + 1], 'codex/fix-pr-78');
       assert.equal(result.job.remediationWorker.launchRequestId, 'lrq_aom03_override');

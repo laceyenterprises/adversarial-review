@@ -47,6 +47,28 @@ test('labeled additive-only PR with later outside-allowlist commit emits high sc
   assert.match(result.finding?.detail, /commit later/);
 });
 
+test('backdated later commit is still scanned using server timeline ordering', () => {
+  const result = evaluate({
+    labels: [{ name: ADDITIVE_ONLY_LABEL }],
+    commits: [
+      commit('initial', '2026-06-19T09:55:00.000Z'),
+      commit('backdated-later', '2026-06-19T09:50:00.000Z'),
+    ],
+    filesByCommit: {
+      initial: [{ filename: 'projects/codex-runaway-guardrails/plan.json' }],
+      'backdated-later': [{ filename: 'src/evil.mjs' }],
+    },
+    timeline: [
+      { event: 'committed', sha: 'initial', created_at: '2026-06-19T09:55:00.000Z' },
+      { event: 'committed', sha: 'backdated-later', created_at: '2026-06-19T10:10:00.000Z' },
+    ],
+  });
+
+  assert.equal(result.finding?.kind, 'scope-violation');
+  assert.deepEqual(result.finding?.violating_files, ['src/evil.mjs']);
+  assert.match(result.finding?.detail, /commit backdated-later/);
+});
+
 test('unlabeled PR derives additive-only from initial diff and requests label backfill', () => {
   const result = evaluate();
 

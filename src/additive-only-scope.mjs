@@ -55,19 +55,40 @@ function uniqueSorted(values) {
   return [...new Set(values.filter(Boolean))].sort();
 }
 
-function initialCommitWindow(commits = [], prCreatedAt = null) {
+function normalizeEventTime(value) {
+  const time = Date.parse(String(value || ''));
+  return Number.isFinite(time) ? time : null;
+}
+
+function commitShaFromTimelineEvent(event) {
+  return normalizeSha(event?.sha || event?.commit_id || event?.commit?.sha || event?.commit?.id);
+}
+
+function serverCommittedAtBySha(events = []) {
+  const bySha = new Map();
+  for (const event of events) {
+    const eventName = String(event?.event || event?.type || '').toLowerCase();
+    if (eventName !== 'committed') continue;
+    const sha = commitShaFromTimelineEvent(event);
+    const createdAt = normalizeEventTime(event?.created_at || event?.createdAt);
+    if (!sha || createdAt === null) continue;
+    bySha.set(sha, Math.min(bySha.get(sha) ?? createdAt, createdAt));
+  }
+  return bySha;
+}
+
+function initialCommitWindow(commits = [], prCreatedAt = null, timeline = []) {
   const normalized = commits
     .map((commit, index) => ({
       ...commit,
       sha: normalizeSha(commit?.sha),
       index,
-      committedAt: commit?.committedAt || commit?.commit?.committer?.date || commit?.commit?.author?.date || null,
     }))
     .filter((commit) => commit.sha);
   if (normalized.length === 0) return { initialCommits: [], laterCommits: [], initialHeadSha: null };
 
-  const createdAtMs = Date.parse(String(prCreatedAt || ''));
-  if (!Number.isFinite(createdAtMs)) {
+  const createdAtMs = normalizeEventTime(prCreatedAt);
+  if (createdAtMs === null) {
     return {
       initialCommits: [normalized[0]],
       laterCommits: normalized.slice(1),
@@ -75,9 +96,10 @@ function initialCommitWindow(commits = [], prCreatedAt = null) {
     };
   }
 
+  const committedAtBySha = serverCommittedAtBySha(timeline);
   const initialCommits = normalized.filter((commit) => {
-    const committedAtMs = Date.parse(String(commit.committedAt || ''));
-    return Number.isFinite(committedAtMs) && committedAtMs <= createdAtMs;
+    const committedAtMs = committedAtBySha.get(commit.sha);
+    return committedAtMs !== undefined && committedAtMs <= createdAtMs;
   });
   const window = initialCommits.length > 0 ? initialCommits : [normalized[0]];
   const initialHeadIndex = Math.max(...window.map((commit) => commit.index));
@@ -232,7 +254,7 @@ function evaluateAdditiveOnlyScope({
   const overrideActive = hasLabel(labels, SCOPE_EXPAND_LABEL) &&
     currentHeadLabelAuthorized({ events: timeline, labelName: SCOPE_EXPAND_LABEL, currentHeadSha });
 
-  const { initialCommits, laterCommits, initialHeadSha } = initialCommitWindow(commits, prCreatedAt);
+  const { initialCommits, laterCommits, initialHeadSha } = initialCommitWindow(commits, prCreatedAt, timeline);
   const initialFiles = collectFilesForCommits(initialCommits, filesByCommit);
   const derivedAdditiveOnly = changedFilesWithinAdditiveOnlyAllowlist(initialFiles);
   const additiveOnly = labeledAdditiveOnly || derivedAdditiveOnly;

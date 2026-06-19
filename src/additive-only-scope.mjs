@@ -60,6 +60,20 @@ function normalizeEventTime(value) {
   return Number.isFinite(time) ? time : null;
 }
 
+function timelineEventTimestamp(event) {
+  const eventName = String(event?.event || event?.type || '').trim().toLowerCase();
+  return event?.created_at
+    || event?.createdAt
+    || (
+      eventName === 'committed'
+        ? event?.committer?.date
+          || event?.author?.date
+          || event?.commit?.committer?.date
+          || event?.commit?.author?.date
+        : null
+    );
+}
+
 function commitShaFromTimelineEvent(event) {
   return normalizeSha(event?.sha || event?.commit_id || event?.commit?.sha || event?.commit?.id);
 }
@@ -70,7 +84,7 @@ function serverCommittedAtBySha(events = []) {
     const eventName = String(event?.event || event?.type || '').toLowerCase();
     if (eventName !== 'committed') continue;
     const sha = commitShaFromTimelineEvent(event);
-    const createdAt = normalizeEventTime(event?.created_at || event?.createdAt);
+    const createdAt = normalizeEventTime(timelineEventTimestamp(event));
     if (!sha || createdAt === null) continue;
     bySha.set(sha, Math.min(bySha.get(sha) ?? createdAt, createdAt));
   }
@@ -127,7 +141,7 @@ function currentHeadLabelAuthorized({ events = [], labelName, currentHeadSha }) 
     if (!['committed', 'head_ref_force_pushed', 'headref forcepushed event', 'head_ref_restored'].includes(eventName)) {
       return false;
     }
-    const eventAt = Date.parse(event.created_at || event.createdAt || '');
+    const eventAt = normalizeEventTime(timelineEventTimestamp(event));
     return Number.isFinite(eventAt) && eventAt > latestLabelAt;
   });
   return !laterHeadEvents;

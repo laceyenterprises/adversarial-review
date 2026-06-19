@@ -13,6 +13,10 @@ function commit(sha, committedAt) {
   return { sha, commit: { author: { date: committedAt }, committer: { date: committedAt } } };
 }
 
+function committedTimelineEvent(sha, committedAt) {
+  return { event: 'committed', sha, committer: { date: committedAt } };
+}
+
 function evaluate(overrides = {}) {
   return evaluateAdditiveOnlyScope({
     repo: 'laceyenterprises/adversarial-review',
@@ -29,7 +33,7 @@ function evaluate(overrides = {}) {
       later: [{ filename: 'modules/sentinel/lib/scope.mjs' }],
     },
     timeline: [
-      { event: 'committed', created_at: '2026-06-19T10:10:00.000Z' },
+      committedTimelineEvent('later', '2026-06-19T10:10:00.000Z'),
     ],
     ...overrides,
   });
@@ -59,8 +63,8 @@ test('backdated later commit is still scanned using server timeline ordering', (
       'backdated-later': [{ filename: 'src/evil.mjs' }],
     },
     timeline: [
-      { event: 'committed', sha: 'initial', created_at: '2026-06-19T09:55:00.000Z' },
-      { event: 'committed', sha: 'backdated-later', created_at: '2026-06-19T10:10:00.000Z' },
+      committedTimelineEvent('initial', '2026-06-19T09:55:00.000Z'),
+      committedTimelineEvent('backdated-later', '2026-06-19T10:10:00.000Z'),
     ],
   });
 
@@ -125,7 +129,7 @@ test('current-head scope-expand label suppresses additive-only scope violation',
   const result = evaluate({
     labels: [{ name: ADDITIVE_ONLY_LABEL }, { name: SCOPE_EXPAND_LABEL }],
     timeline: [
-      { event: 'committed', created_at: '2026-06-19T10:10:00.000Z' },
+      committedTimelineEvent('later', '2026-06-19T10:10:00.000Z'),
       { event: 'labeled', created_at: '2026-06-19T10:11:00.000Z', label: { name: SCOPE_EXPAND_LABEL } },
     ],
   });
@@ -139,7 +143,7 @@ test('stale scope-expand label does not bless later violating commits', () => {
     labels: [{ name: ADDITIVE_ONLY_LABEL }, { name: SCOPE_EXPAND_LABEL }],
     timeline: [
       { event: 'labeled', created_at: '2026-06-19T10:05:00.000Z', label: { name: SCOPE_EXPAND_LABEL } },
-      { event: 'committed', created_at: '2026-06-19T10:10:00.000Z' },
+      committedTimelineEvent('later', '2026-06-19T10:10:00.000Z'),
     ],
   });
 

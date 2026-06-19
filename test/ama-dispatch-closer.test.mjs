@@ -688,7 +688,11 @@ test('amaClosureNeedsTerminalRemediation gates the hammer mandate on real findin
     active: true,
     waived: ['verdict-not-settled-success'],
   };
-  assert.equal(amaClosureNeedsTerminalRemediation(finalHammerWaivedVerdictGate), true);
+  assert.equal(amaClosureNeedsTerminalRemediation(finalHammerWaivedVerdictGate), false);
+
+  const finalHammerWaivedVerdictGateWithFindings = structuredClone(finalHammerWaivedVerdictGate);
+  finalHammerWaivedVerdictGateWithFindings.trace.verdict.nonBlockingFindings = { known: true, count: 1 };
+  assert.equal(amaClosureNeedsTerminalRemediation(finalHammerWaivedVerdictGateWithFindings), true);
 
   const hamEvidenceActive = structuredClone(clean);
   hamEvidenceActive.trace.hamTerminalRemediation = { active: true };

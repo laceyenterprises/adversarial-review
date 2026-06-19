@@ -64,7 +64,6 @@ const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
   'non-blocking-findings-present',
   'blocking-findings-unknown',
   'non-blocking-findings-unknown',
-  'verdict-not-settled-success',
 ]);
 
 // Auto-hammer (2026-06-19): the eligibility-miss reasons that a hammer TERMINAL
@@ -122,8 +121,8 @@ export function isHammerRemediableEligibilityMiss(reasons) {
  *
  * Terminal remediation is warranted when the eligibility trace shows standing
  * findings (blocking or non-blocking) OR when a closure path explicitly waived
- * a finding/verdict gate (validated HAM terminal-remediation evidence, or
- * final-hammer review-cycle exhaustion with a relevant waived reason).
+ * a findings gate (validated HAM terminal-remediation evidence, or
+ * final-hammer review-cycle exhaustion with a relevant waived findings reason).
  * Otherwise this is an ordinary clean closure and the plain
  * `ama-closer-prompt.md` mandate is the correct one.
  *

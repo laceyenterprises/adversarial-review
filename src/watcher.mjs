@@ -694,6 +694,145 @@ function normalizeLabelName(label) {
   return String(typeof label === 'string' ? label : label?.name || '').trim();
 }
 
+function normalizeVocabularyFatigueStem(subject) {
+  const withoutPrefix = String(subject || '').replace(/^\[[^\]]*\]\s+/, '').trim();
+  const firstWord = withoutPrefix.split(/\s+/)[0] || '';
+  const lower = firstWord.toLowerCase();
+  if (lower.endsWith('ing') && lower.length > 3) return lower.slice(0, -3);
+  if (lower.endsWith('ed') && lower.length > 2) return lower.slice(0, -2);
+  return lower;
+}
+
+function buildVocabularyFatigueFinding(commitSubjects, {
+  window = 5,
+  minRepeats = 3,
+} = {}) {
+  const resolvedWindow = Number.isInteger(window) && window > 0 ? window : 5;
+  const resolvedMinRepeats = Number.isInteger(minRepeats) && minRepeats > 0 ? minRepeats : 3;
+  const subjects = Array.isArray(commitSubjects) ? commitSubjects : [];
+  if (subjects.length < resolvedWindow) return null;
+
+  const stems = subjects
+    .slice(-resolvedWindow)
+    .map(normalizeVocabularyFatigueStem)
+    .filter(Boolean);
+  if (stems.length < resolvedWindow) return null;
+
+  const counts = new Map();
+  for (const stem of stems) counts.set(stem, (counts.get(stem) || 0) + 1);
+
+  let matchedStem = null;
+  let matchedCount = 0;
+  for (const [stem, count] of counts.entries()) {
+    if (count >= resolvedMinRepeats && count > matchedCount) {
+      matchedStem = stem;
+      matchedCount = count;
+    }
+  }
+  if (!matchedStem) return null;
+  return {
+    kind: 'remediation-vocabulary-fatigue',
+    severity: 'info',
+    blocking: false,
+    stem: matchedStem,
+    count: matchedCount,
+    window: resolvedWindow,
+    detail:
+      `The verb '${matchedStem}' appears in ${matchedCount} of the last ${resolvedWindow} commit messages. ` +
+      'This often signals that the agent has reached the bottom of its vocabulary for change descriptors ' +
+      '— a soft churn indicator. See docs/POSTMORTEM-codex-tui-remediation-runaway-2026-06-03.md §6 and §7.',
+  };
+}
+
+function resolveVocabularyFatigueConfig({
+  loadConfigImpl = loadConfigCached,
+  logger = console,
+} = {}) {
+  try {
+    const cfg = loadConfigImpl();
+    return {
+      window: cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits', 5),
+      minRepeats: cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats', 3),
+    };
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] vocabulary-fatigue cfg load failed; using defaults: ${err?.message || err}`
+    );
+    return { window: 5, minRepeats: 3 };
+  }
+}
+
+async function fetchPullRequestCommitSubjects(octokit, {
+  owner,
+  repo,
+  prNumber,
+  logger = console,
+} = {}) {
+  if (typeof octokit?.rest?.pulls?.listCommits !== 'function') {
+    throw new Error('octokit.rest.pulls.listCommits unavailable');
+  }
+  const subjects = [];
+  const params = {
+    owner,
+    repo,
+    pull_number: prNumber,
+    per_page: 100,
+  };
+  for (let page = 1; ; page += 1) {
+    const response = await fetchConditionalRestPage({
+      category: 'other',
+      endpoint: 'pulls.commits',
+      repo: `${owner}/${repo}`,
+      prNumber,
+      rootDir: ROOT,
+      logger,
+      params: { page, per_page: params.per_page },
+      request: (requestParams) => octokit.rest.pulls.listCommits({
+        ...params,
+        ...requestParams,
+        page,
+      }),
+    });
+    const commits = Array.isArray(response?.data) ? response.data : [];
+    for (const item of commits) {
+      const message = String(item?.commit?.message || '');
+      const subject = message.split(/\r?\n/)[0].trim();
+      if (subject) subjects.push(subject);
+    }
+    if (commits.length < params.per_page) break;
+  }
+  return subjects;
+}
+
+async function emitVocabularyFatigueFindingForPR({
+  octokit,
+  repoPath,
+  prNumber,
+  logger = console,
+  loadConfigImpl = loadConfigCached,
+  fetchCommitSubjectsImpl = null,
+} = {}) {
+  const [owner, repo] = String(repoPath || '').split('/');
+  if (!owner || !repo || !prNumber) return null;
+  const { window, minRepeats } = resolveVocabularyFatigueConfig({ loadConfigImpl, logger });
+  let subjects;
+  try {
+    subjects = fetchCommitSubjectsImpl
+      ? await fetchCommitSubjectsImpl({ repoPath, prNumber, owner, repo, window, minRepeats })
+      : await fetchPullRequestCommitSubjects(octokit, { owner, repo, prNumber, logger });
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] vocabulary-fatigue commit fetch failed for ${repoPath}#${prNumber}; ` +
+      `continuing without informational finding: ${err?.message || err}`
+    );
+    return null;
+  }
+  const finding = buildVocabularyFatigueFinding(subjects, { window, minRepeats });
+  if (!finding) return null;
+  logger?.info?.(JSON.stringify(finding));
+  return finding;
+}
+
 function fastMergeDecisionFromLabels(labels) {
   const labelNames = (Array.isArray(labels) ? labels : [])
     .map(normalizeLabelName)
@@ -4273,6 +4412,7 @@ async function resolveMergeAgentCoexistenceForWatcher({
 
 async function handlePostedReviewRow({
   rootDir = ROOT,
+  octokit = null,
   repoPath,
   prNumber,
   existing,
@@ -4285,12 +4425,20 @@ async function handlePostedReviewRow({
   buildMergeAgentDispatchJobImpl = buildMergeAgentDispatchJob,
   dispatchMergeAgentForPRImpl = dispatchMergeAgentForPR,
   resolveMergeAgentCoexistenceForWatcherImpl = resolveMergeAgentCoexistenceForWatcher,
+  emitVocabularyFatigueFindingForPRImpl = emitVocabularyFatigueFindingForPR,
   operatorSurface = null,
   logger = console,
 } = {}) {
   await projectGateStatusSafe(existing);
 
   try {
+    await emitVocabularyFatigueFindingForPRImpl({
+      octokit,
+      repoPath,
+      prNumber,
+      logger,
+    });
+
     let operatorApprovalEvent;
     let mergeAgentRequestEvent;
     let adversarialMergeRequestedEvent;
@@ -5292,6 +5440,7 @@ async function pollOnce(
           repoPath,
           prNumber,
           existing,
+          octokit,
           subjectRef: subject.ref,
           currentRevisionRef: subject.ref.revisionRef,
           labelNames: prLabelNames,
@@ -6243,8 +6392,11 @@ export {
   evaluateRoundBudgetForReview,
   fetchConditionalRestPage,
   fastMergeDecisionFromLabels,
+  buildVocabularyFatigueFinding,
+  emitVocabularyFatigueFindingForPR,
   fetchLivePRHeadSha,
   fetchLivePRLabels,
+  fetchPullRequestCommitSubjects,
   getStalePostedReviewAutoRereviewSuppression,
   handlePostedReviewRow,
   maybeDispatchReviewerTimeoutExhaustedMergeAgent,
@@ -6261,6 +6413,7 @@ export {
   reconcileOrphanedReviewing,
   recoverFastMergeVetoes,
   resolvePendingDraftRespawnAgeSeconds,
+  resolveVocabularyFatigueConfig,
   resolveReviewerIdentity,
   resolveStuckDispatchAlertDebounceMs,
   resolveWatcherDrainMaxMs,

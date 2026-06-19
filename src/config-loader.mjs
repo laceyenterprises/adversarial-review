@@ -884,6 +884,20 @@ function schemaV1() {
           },
         },
       },
+      agent_control: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          codex_runaway_guardrails: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              vocabulary_fatigue_window_commits: { __type: TYPE_INT, __default: 5, __min: 1 },
+              vocabulary_fatigue_min_repeats: { __type: TYPE_INT, __default: 3, __min: 1 },
+            },
+          },
+        },
+      },
       sentinel: {
         __type: TYPE_DICT,
         __strict: true,
@@ -1333,6 +1347,14 @@ export const ENV_ALIASES = {
   'sentinel.deploy_checkout.worker_identity_emails': {
     canonical: 'AGENT_OS_SENTINEL_DEPLOY_CHECKOUT_WORKER_IDENTITY_EMAILS',
     aliases: [['HQ_SENTINEL_DEPLOY_CHECKOUT_WORKER_IDENTITY_EMAILS', identity]],
+  },
+  'agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits': {
+    canonical: 'AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_VOCABULARY_FATIGUE_WINDOW_COMMITS',
+    aliases: [],
+  },
+  'agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats': {
+    canonical: 'AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_VOCABULARY_FATIGUE_MIN_REPEATS',
+    aliases: [],
   },
   'sentinel.codex_compaction.rate_alarm_per_hour': {
     canonical: 'AGENT_OS_SENTINEL_CODEX_COMPACTION_RATE_ALARM_PER_HOUR',

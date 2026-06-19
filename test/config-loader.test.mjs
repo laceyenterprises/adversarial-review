@@ -117,10 +117,41 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('launchd.label_prefix'), 'ai.laceyenterprises');
     assert.equal(cfg.get('session_ledger.database_name'), 'agent_os_ledger');
     assert.equal(cfg.get('operator.email'), 'virtualpaul@gmail.com');
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits'), 5);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats'), 3);
     assert.equal(cfg.get('operator.full_name'), 'Paul Lacey');
     assert.equal(cfg.get('linear.team_name'), 'Laceyenterprises');
     assert.equal(cfg.get('linear.issue_prefix'), 'LAC');
     assert.equal(cfg.get('update.channel'), 'rolling');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('agent_control codex runaway guardrails vocabulary fatigue config loads from YAML and env', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      agent_control:
+        codex_runaway_guardrails:
+          vocabulary_fatigue_window_commits: 7
+          vocabulary_fatigue_min_repeats: 4
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits'), 7);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats'), 4);
+
+    const envCfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_VOCABULARY_FATIGUE_WINDOW_COMMITS: '9',
+        AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_VOCABULARY_FATIGUE_MIN_REPEATS: '5',
+      },
+    });
+    assert.equal(envCfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits'), 9);
+    assert.equal(envCfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats'), 5);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

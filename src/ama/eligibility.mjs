@@ -31,6 +31,11 @@ const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set([
   'hammer-worker',
   'lacey-hammer-worker',
   'lacey-hammer-reviewer',
+  // The hammer now operates under the merge-agent app identity, so its audit /
+  // closing comment is authored by the merge-agent bot. Accept it even if the
+  // commit-author login resolution lags. (worker-pool: hq_resolve_worker_identity
+  // hammer -> merge-agent-lacey.)
+  'merge-agent-lacey',
   'github-actions',
 ]);
 

@@ -323,6 +323,29 @@ the cap. `gh pr update-branch --rebase` is retried only for clearly transient
 transport/service failures; stderr that looks like a rebase conflict is the
 only path classified as `unresolvable-rebase-conflict`.
 
+### Hammer closing discipline (2026-06-19)
+
+The hammer terminal-remediation prompt (`templates/hammer-prompt.md`) enforces
+four operator-mandated rules before and after an autonomous close. They are
+prompt-driven worker behavior, not predicate gates — the audit comment and the
+`Closed-By` trailer remain the evidence:
+
+1. **Green `main` is the bar.** The hammer runs the repo's FULL test suite on the
+   post-remediation head and fixes EVERY failing test before merge — including
+   tests unrelated to the PR's findings or pre-existing on `main`. Test fixes are
+   the one sanctioned exception to "scope only to the findings"; net-new feature
+   scope stays out. A test it genuinely cannot fix becomes one hard-blocker
+   report, never a merge past red.
+2. **Rebase onto latest `main` and confirm it holds.** The hammer always rebases
+   the branch to the current base (not merely on `BEHIND`) and re-validates the
+   rebased head — full suite + required checks green — before merging.
+3. **Post a closing comment.** On a confirmed merge the hammer posts a
+   `✅ Closed by Hammer` comment with the merged SHA, merge method, remediated
+   finding counts, the failing tests it fixed, and the rebase-attempt count.
+4. **Merge-agent identity.** The hammer commits/comments/merges under the
+   merge-agent app identity (see the worker-pool hammer identity + token wiring),
+   so the close is attributable to the merge-agent bot, not a generic worker.
+
 To find recent audit records for a PR:
 
 ```bash

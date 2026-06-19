@@ -540,7 +540,8 @@ function resolveVerdictModeForHead({
   const labelHeadMatches = String(advisoryLabelEvent?.headSha || '') === String(currentHeadSha || '');
   const nonAuthorActor = Boolean(actor) &&
     actor.toLowerCase() !== 'unknown' &&
-    (!author || actor.toLowerCase() !== author.toLowerCase());
+    Boolean(author) &&
+    actor.toLowerCase() !== author.toLowerCase();
 
   if (
     sameHead &&

@@ -163,6 +163,28 @@ test('advisory-only override label applied by PR author stays enforce mode', asy
   assert.equal(resolved.verdictMode, VERDICT_MODE_ENFORCE);
 });
 
+test('advisory-only override label fails closed when PR author is absent', async () => {
+  const resolved = await fetchCurrentHeadVerdictMode({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 59,
+    reviewerHeadSha: 'head-c',
+    fetchPullRequestHeadAndStateImpl: async () => ({
+      headRefOid: 'head-c',
+      labels: [{ name: ADVISORY_ONLY_REVIEW_LABEL }],
+    }),
+    fetchLatestLabelEventImpl: async () => ({
+      id: 'evt-missing-author-advisory-only',
+      nodeId: 'LE_missing_author_advisory_only',
+      actor: 'placey',
+      createdAt: '2026-06-19T08:00:00.000Z',
+      headSha: 'head-c',
+    }),
+    log: { warn() {} },
+  });
+
+  assert.equal(resolved.verdictMode, VERDICT_MODE_ENFORCE);
+});
+
 test('advisory-only override label is current-head scoped and head advance restores enforce', () => {
   assert.equal(
     resolveVerdictModeForHead({

@@ -1739,6 +1739,7 @@ test('head/state helper honors the GraphQL kill-switch with REST fallback', asyn
               merged_at: expected.mergedAt,
               closed_at: expected.closedAt,
               head: { sha: expected.headRefOid },
+              user: expected.author,
             })}`,
           };
         }
@@ -1754,6 +1755,7 @@ test('head/state helper honors the GraphQL kill-switch with REST fallback', asyn
       mergedAt: expected.mergedAt,
       closedAt: expected.closedAt,
       headRefOid: expected.headRefOid,
+      author: expected.author,
       labels: expected.labels,
     });
   });
@@ -1778,10 +1780,12 @@ test('head/state helper uses the lightweight GraphQL query and telemetry categor
     mergedAt: expected.mergedAt,
     closedAt: expected.closedAt,
     headRefOid: expected.headRefOid,
+    author: expected.author,
     labels: expected.labels,
   });
   const vars = parseGhArgs(calls[0].args);
   assert.match(String(vars.query || ''), /query PullRequestHeadState/);
+  assert.match(String(vars.query || ''), /author\s*{\s*login\s*}/);
   assert.deepEqual(telemetry.events.map((entry) => entry.category), ['pr_head_state']);
 });
 
@@ -1799,6 +1803,7 @@ test('head/state helper skips labels for fast head probes', async () => {
       const vars = parseGhArgs(args);
       const query = String(vars.query || '');
       assert.match(query, /query PullRequestHeadOnly/);
+      assert.match(query, /author\s*{\s*login\s*}/);
       assert.doesNotMatch(query, /\blabels\(/);
       return { stdout: JSON.stringify(buildGraphqlResponse(expected)) };
     },
@@ -1809,6 +1814,7 @@ test('head/state helper skips labels for fast head probes', async () => {
     mergedAt: expected.mergedAt,
     closedAt: expected.closedAt,
     headRefOid: expected.headRefOid,
+    author: expected.author,
     labels: [],
   });
   assert.equal(calls.length, 1);

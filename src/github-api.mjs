@@ -292,6 +292,9 @@ query PullRequestHeadState(
       mergedAt
       closedAt
       headRefOid
+      author {
+        login
+      }
       labels(first: 100) {
         nodes {
           name
@@ -318,6 +321,9 @@ query PullRequestHeadOnly(
       mergedAt
       closedAt
       headRefOid
+      author {
+        login
+      }
     }
   }
 }
@@ -840,6 +846,7 @@ async function fetchLegacyHeadAndState(execFileImpl, repo, prNumber, { withLabel
     mergedAt: pr?.merged_at || null,
     closedAt: pr?.closed_at || null,
     headRefOid: pr?.head?.sha || null,
+    author: normalizeAuthor(pr?.user),
     labels,
   };
 }
@@ -1415,6 +1422,7 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
     mergedAt: pr?.mergedAt || null,
     closedAt: pr?.closedAt || null,
     headRefOid: pr?.headRefOid || null,
+    author: normalizeAuthor(pr?.author),
     labels,
     ...(labels.graphqlTruncated ? { truncated: true, truncatedConnections: labels.graphqlTruncatedConnections } : {}),
   };

@@ -180,6 +180,22 @@ test('buildFollowUpJob creates a pending durable handoff record', () => {
   assert.match(job.jobId, /^laceyenterprises__clio-pr-42-/);
 });
 
+test('buildFollowUpJob rejects advisory-only verdict mode', () => {
+  assert.throws(
+    () => buildFollowUpJob({
+      repo: 'laceyenterprises/clio',
+      prNumber: 42,
+      revisionRef: 'review-head-sha',
+      reviewerModel: 'codex',
+      reviewBody: '## Summary\nInformational finding.\n\n## Verdict\nRequest changes',
+      reviewPostedAt: '2026-04-21T07:46:00.000Z',
+      verdictMode: 'advisory-only',
+      critical: false,
+    }),
+    /advisory-only reviews must not create follow-up remediation jobs/,
+  );
+});
+
 test('createFollowUpJob writes the pending job JSON under data/follow-up-jobs/pending', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   writePlanMappingFixture(rootDir, { linearTicketId: 'LAC-207', riskClass: 'high' });

@@ -2345,6 +2345,85 @@ function dynamicAppEnvAliases(env) {
   return out;
 }
 
+// App ids introduced purely through `AGENT_OS_APPS_*` env aliases (no file
+// layer declared them). Used to tag backfilled defaults with a distinct
+// trace source so an env-materialized app is auditable.
+function dynamicAppEnvIds(env) {
+  const ids = new Set();
+  for (const [key] of dynamicAppEnvAliases(env)) {
+    const parts = key.split('.');
+    if (parts.length === 3 && parts[0] === 'apps') ids.add(parts[1]);
+  }
+  return ids;
+}
+
+// Yields [parentPath, extraSchema] for every non-strict dict that declares an
+// `__extra_keys_schema` (the keyed-map extension points, e.g. `apps.<id>`).
+// Mirrors the Python `_iter_extra_key_dict_schemas`.
+function* iterExtraKeyDictSchemas(schema, prefix = '') {
+  if (!schema || schema.__type !== TYPE_DICT) return;
+  const extraSchema = schema.__extra_keys_schema;
+  if (
+    schema.__strict === false &&
+    extraSchema &&
+    extraSchema.__type === TYPE_DICT
+  ) {
+    yield [prefix, extraSchema];
+  }
+  for (const [key, child] of Object.entries(schema.__keys || {})) {
+    if (!child || child.__type !== TYPE_DICT) continue;
+    const childPrefix = prefix ? `${prefix}.${key}` : key;
+    yield* iterExtraKeyDictSchemas(child, childPrefix);
+  }
+}
+
+const ENV_REGISTERED_APP_DEFAULT_SOURCE = 'code-default (env-registered app)';
+
+// Backfill schema defaults into keyed-map entries that were materialized
+// without going through `validateDictPresentKeysOnly` — chiefly entries
+// introduced purely via env aliases (e.g. `AGENT_OS_APPS_FOO_MODE`), which
+// `setLeaf` writes as `{ mode }` with no defaults for the sibling fields.
+// Without this, an env-only app and a YAML-declared app with the same intent
+// produce structurally different records (the env one missing `subscribes`/
+// `contract_version`), crashing consumers that iterate `apps.<id>.subscribes`.
+// Mirrors the Python loader's `_backfill_extra_key_entry_defaults`.
+function backfillExtraKeyEntryDefaults(merged, schema, dynamicAppIds, trace) {
+  for (const [parentPath, extraSchema] of iterExtraKeyDictSchemas(schema)) {
+    const parentValue = getLeaf(merged, parentPath);
+    if (
+      parentValue === MISSING ||
+      !parentValue ||
+      typeof parentValue !== 'object' ||
+      Array.isArray(parentValue)
+    ) {
+      continue;
+    }
+    const entryDefaults = flatten(buildDefaultsDict(extraSchema));
+    if (Object.keys(entryDefaults).length === 0) continue;
+    for (const entryId of Object.keys(parentValue).sort()) {
+      const entryValue = parentValue[entryId];
+      if (
+        !entryValue ||
+        typeof entryValue !== 'object' ||
+        Array.isArray(entryValue)
+      ) {
+        continue;
+      }
+      for (const [leaf, defaultValue] of Object.entries(entryDefaults)) {
+        const dotted = `${parentPath}.${entryId}.${leaf}`;
+        if (getLeaf(merged, dotted) !== MISSING) continue;
+        const value = structuredClone(defaultValue);
+        setLeaf(merged, dotted, value);
+        const source =
+          parentPath === 'apps' && dynamicAppIds.has(entryId)
+            ? ENV_REGISTERED_APP_DEFAULT_SOURCE
+            : 'code-default';
+        (trace[dotted] = trace[dotted] || []).push({ source, value, path: null });
+      }
+    }
+  }
+}
+
 // True iff `key` is a path the schema accepts. Walks like schemaLeaf, but
 // also accepts paths that descend into a non-strict dict (extension point,
 // e.g. `submodules.X.Y`) where no further leaf is declared. Used by
@@ -2620,6 +2699,7 @@ export function loadConfig({
   }
 
   // --- Layer 5: env vars ---
+  const dynamicAppIds = dynamicAppEnvIds(envView);
   const envAliasEntries = [
     ...Object.entries(ENV_ALIASES),
     ...dynamicAppEnvAliases(envView),
@@ -2668,6 +2748,10 @@ export function loadConfig({
       });
     }
   }
+
+  // Backfill defaults into keyed-map entries (e.g. env-only `apps.<id>`) so
+  // env- and YAML-declared entries converge on the same defaulted shape.
+  backfillExtraKeyEntryDefaults(merged, schema, dynamicAppIds, trace);
 
   const sources = {};
   for (const [key, entries] of Object.entries(trace)) {

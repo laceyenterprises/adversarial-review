@@ -120,6 +120,47 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('operator.full_name'), 'Paul Lacey');
     assert.equal(cfg.get('linear.team_name'), 'Laceyenterprises');
     assert.equal(cfg.get('linear.issue_prefix'), 'LAC');
+    assert.equal(cfg.get('update.channel'), 'rolling');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('update channel loads through strict Node schema and env override', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      update:
+        channel: stable
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('update.channel'), 'stable');
+
+    const envCfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_UPDATE_CHANNEL: 'pinned',
+      },
+    });
+    assert.equal(envCfg.get('update.channel'), 'pinned');
+
+    const bad = join(tmp, 'bad-update-channel.yaml');
+    writeFile(bad, `
+      version: 1
+      update:
+        channel: canary
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: bad, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'update.channel');
+        assert.match(err.message, /not in allowlist/);
+        return true;
+      },
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

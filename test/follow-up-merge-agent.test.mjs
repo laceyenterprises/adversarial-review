@@ -2015,6 +2015,26 @@ test('buildMergeAgentDispatchJob counts standing blocking findings from the late
   assert.equal(dispatchJob.blockingFindingState, 'known');
 });
 
+test('classifyNonBlockingFindings counts only top-level bold finding bullets', () => {
+  const result = classifyNonBlockingFindings([
+    '## Summary',
+    'Looks good with follow-up.',
+    '## Blocking Issues',
+    '- None.',
+    '## Non-blocking Issues',
+    '- **Drift in stale doc**',
+    '  - **File:** README.md',
+    '  - **Lines:** 10-12',
+    '  - **Problem:** The note is stale.',
+    '  - **Why it matters:** Audit readers see the wrong behavior.',
+    '  - **Recommended fix:** Update the paragraph.',
+    '## Verdict',
+    'Comment only',
+  ].join('\n'), { lastVerdict: 'Comment only' });
+
+  assert.deepEqual(result, { count: 1, state: 'known' });
+});
+
 test('buildMergeAgentDispatchJob fails safe to >=1 for a non-None blocking section the parser cannot itemize', () => {
   // Defense-in-depth: if the reviewer writes a malformed/incomplete blocking
   // card the structured parser cannot itemize, we must NOT treat the section as

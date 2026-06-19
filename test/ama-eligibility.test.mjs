@@ -123,6 +123,7 @@ test('not eligible: settled-success with unknown non-blocking state fails closed
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
   assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
   assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.ok(result.reasons.includes('non-blocking-findings-unknown'));
   assert.equal(result.trace.verdict.nonBlockingFindings.known, false);
   assert.equal(result.trace.verdict.settledSuccess, false);
 });

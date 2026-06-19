@@ -772,6 +772,17 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     remediationPending === false &&
     blockingFindings.known &&
     blockingFindings.count === 0 &&
+    !nonBlockingFindings.known
+  ) {
+    reasons.push('non-blocking-findings-unknown');
+  }
+  if (
+    strictNonBlockingRemediation &&
+    !operatorOverride &&
+    SETTLED_SUCCESS_VERDICTS.has(verdictNormalized) &&
+    remediationPending === false &&
+    blockingFindings.known &&
+    blockingFindings.count === 0 &&
     nonBlockingFindings.known &&
     nonBlockingFindings.count > 0
   ) {
@@ -886,7 +897,6 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     'remediation-state-unknown',
     'blocking-findings-present',
     'blocking-findings-unknown',
-    'non-blocking-findings-present',
     'branch-protection-missing-gate',
   ]);
   // FAIL-OPEN FIX (2026-06-15): budget exhaustion ALONE must NOT auto-waive the
@@ -901,6 +911,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     'verdict-not-settled-success',
     'blocking-findings-present',
     'blocking-findings-unknown',
+    'non-blocking-findings-unknown',
     'non-blocking-findings-present',
   ]);
   const finalHammerVerdictWaiverAllowed =
@@ -915,6 +926,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     'remediation-state-unknown',
     'blocking-findings-present',
     'blocking-findings-unknown',
+    'non-blocking-findings-unknown',
     'non-blocking-findings-present',
   ]);
   if (hamTerminalRemediation.active && hamTerminalRemediation.ok) {

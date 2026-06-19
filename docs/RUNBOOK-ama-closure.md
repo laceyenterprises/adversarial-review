@@ -90,6 +90,7 @@ dispatcher debugging), see
          enabled: true
          worker_class: hammer    # default; operators may pin codex, claude-code, or gemini
          merge_method: squash    # or merge — never rebase (SPEC §4.4)
+         strict_non_blocking_remediation: true  # default; require known-zero non-blocking findings for direct close
          eligibility:
            risk_classes: [low]   # widen later; start conservative
            high_risk_requires_two_key: true  # default; set false only after allowlisting high/critical intentionally
@@ -176,7 +177,8 @@ configured, NOT a hardcoded `codex`):
 2. Adversarial-watcher posts the cross-class reviewer review
    (`claude-reviewer-lacey` for `[codex]` builders,
    `codex-reviewer-lacey` for `[claude-code]` builders — settled-
-   success: `Approved` or clean `Comment only`).
+   success: `Approved` or clean `Comment only` with known-zero blocking
+   findings and, in default strict mode, known-zero non-blocking findings).
 3. **AMA closer dispatches within 1 watcher tick** instead of
    merge-agent. Verify via `hq dispatch status <lrq>` — `workerClass`
    matches `<configured-worker-class>`, `task-kind` is `merge`,
@@ -353,6 +355,10 @@ reasons:
 | Reason | Meaning |
 |---|---|
 | `verdict-not-settled-success` | Latest review is `Request changes` (and no current-head `operator-approved`). |
+| `blocking-findings-unknown` | Latest review does not expose a known structured blocking-finding count. |
+| `blocking-findings-present` | Latest review has standing structured blocking findings. |
+| `non-blocking-findings-unknown` | Strict non-blocking remediation is enabled and the settled review does not expose a known structured non-blocking-finding count. |
+| `non-blocking-findings-present` | Strict non-blocking remediation is enabled and the settled review has standing structured non-blocking findings. |
 | `risk-class-not-permitted` | PR's risk class is outside `cfg.eligibility.risk_classes` (and no current-head `adversarial-merge-requested`), or high/critical/unknown still require the two-key path. |
 | `ci-not-green` | At least one external CI check is FAILURE / pending. |
 | `branch-protection-missing-gate` | Target branch protection doesn't require the configured adversarial-gate context. Re-check §1 prerequisite. |

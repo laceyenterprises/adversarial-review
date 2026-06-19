@@ -4445,6 +4445,8 @@ async function maybeDispatchAmaClosureFor({
     // fall back to 'unknown' only if absent (fail-closed).
     blockingFindingCount: Number(settledReview.blockingFindingCount ?? 0),
     blockingFindingState: String(settledReview.blockingFindingState || 'unknown').trim().toLowerCase(),
+    nonBlockingFindingCount: Number(settledReview.nonBlockingFindingCount ?? 0),
+    nonBlockingFindingState: String(settledReview.nonBlockingFindingState || 'unknown').trim().toLowerCase(),
     operatorApprovedEvidence: operatorApprovalEvent
       ? {
           applied: true,

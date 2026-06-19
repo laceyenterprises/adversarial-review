@@ -40,12 +40,33 @@ Only after those checks pass may the predicate record
 `ham_terminal_remediation_validated`. That marker may waive
 `stale-review-head`, `verdict-not-settled-success`, `remediation-pending`,
 `remediation-state-unknown`, `blocking-findings-present`, and
-`blocking-findings-unknown`. It must not waive AMA disabled state, PR lifecycle
+`blocking-findings-unknown`, `non-blocking-findings-present`, and
+`non-blocking-findings-unknown`. It must not waive AMA disabled state, PR lifecycle
 or mergeability, CI, branch protection, hard-stop labels, unsupported
 fast-merge state, or risk-class policy. When final-hammer cycle exhaustion is
 also active, HAM and final-hammer waivers compose by filtering the remaining
 reason set in sequence; one waiver path must not discard the other path's
 accepted waivers.
+
+## 4.2 Eligibility predicate
+
+Direct AMA closure requires a current-head settled-success review (`Approved`
+or `Comment only`), no pending remediation, known-zero structured blocking
+findings, and, by default, known-zero structured non-blocking findings.
+`roles.adversarial.merge_authority.strict_non_blocking_remediation` defaults to
+`true`; setting it to `false` restores the legacy direct-close behavior where
+non-blocking findings do not affect settled-success eligibility.
+
+When strict non-blocking remediation is enabled, a settled-success review with
+standing structured non-blocking findings is refused with
+`non-blocking-findings-present`. A settled-success review whose non-blocking
+classification is unavailable is refused with
+`non-blocking-findings-unknown`. Current-head `operator-approved` evidence still
+bypasses the verdict/finding gate, and validated HAM terminal remediation may
+waive the non-blocking reasons after it verifies the HAM commit and audit
+comment. Final-hammer review-cycle exhaustion may waive non-blocking reasons
+only with current-head operator override, matching the existing verdict and
+blocking-finding gate semantics.
 
 ## 4.7 CFG-01 schema
 
@@ -64,6 +85,10 @@ roles:
       # AMA requires one canonical landed closing commit for provenance
       # and audit reconciliation; GitHub's rebase path does not produce one.
       merge_method: squash  # enum: squash | merge
+      # Default true. Direct AMA close requires the authoritative settled review
+      # to report known-zero non-blocking findings. Set false only to restore
+      # legacy direct-close behavior.
+      strict_non_blocking_remediation: true
       eligibility:
         # Risk classes that may close without operator intervention.
         risk_classes: ["low"]

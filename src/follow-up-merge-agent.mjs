@@ -5060,7 +5060,7 @@ function classifyNonBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
 
   const topLevelFindingBullets = section
     .split(/\n/)
-    .filter((line) => /^-\s+\*\*.+?\*\*/.test(line.trim()));
+    .filter((line) => /^-\s+\*\*.+?\*\*/.test(line));
   if (topLevelFindingBullets.length > 0) {
     return { count: topLevelFindingBullets.length, state: 'known' };
   }

@@ -6,6 +6,7 @@ import {
   PAUSED_FOR_REDESIGN_LABEL,
   REVIEWER_CYCLE_CAP_REACHED_LABEL,
   buildReviewCycleCapEscalationComment,
+  hasReviewCycleEscalated,
   markReviewCycleEscalated,
   recentReviewCycleVerdicts,
   recordReviewCycleVerdict,
@@ -110,6 +111,40 @@ test('same-head re-review does not increment the counter', () => {
   }
 });
 
+test('escalation dedupe is PR-scoped across later pushed heads', () => {
+  const db = setupDb();
+  try {
+    for (let i = 1; i <= 5; i += 1) {
+      record(db, i);
+    }
+
+    markReviewCycleEscalated(db, {
+      repo: REPO,
+      prNumber: PR,
+      headSha: 'sha-6',
+      escalatedAt: '2026-06-04T06:00:00.000Z',
+    });
+
+    assert.equal(hasReviewCycleEscalated(db, {
+      repo: REPO,
+      prNumber: PR,
+      headSha: 'sha-7',
+    }), true);
+    const laterHeadDecision = shouldEscalateReviewCycle(db, {
+      repo: REPO,
+      prNumber: PR,
+      headSha: 'sha-7',
+      cap: 5,
+      windowHours: 24,
+      now: '2026-06-04T07:00:00.000Z',
+    });
+    assert.equal(laterHeadDecision.escalate, true);
+    assert.equal(laterHeadDecision.alreadyEscalated, true);
+  } finally {
+    db.close();
+  }
+});
+
 test('verdicts outside the review cycle window reset the counter', () => {
   const db = setupDb();
   try {
@@ -137,7 +172,7 @@ test('verdicts outside the review cycle window reset the counter', () => {
 });
 
 for (const overrideLabel of ['operator-approved', 'merge-agent-requested', PAUSED_FOR_REDESIGN_LABEL]) {
-  test(`${overrideLabel} clears cycle-cap label and resets the counter`, async () => {
+  test(`${overrideLabel} clears cycle-cap label, resets the counter, and sets resume status`, async () => {
     const db = setupDb();
     const removed = [];
     const octokit = {
@@ -151,6 +186,22 @@ for (const overrideLabel of ['operator-approved', 'merge-agent-requested', PAUSE
     };
 
     try {
+      db.prepare(
+        `INSERT INTO reviewed_prs (
+           repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+           failed_at, failure_message, labels_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        REPO,
+        PR,
+        '2026-06-04T01:00:00.000Z',
+        'claude',
+        'open',
+        'failed',
+        '2026-06-04T02:00:00.000Z',
+        '[review-cycle-cap] automatic review paused',
+        JSON.stringify([REVIEWER_CYCLE_CAP_REACHED_LABEL, overrideLabel]),
+      );
       record(db, 1);
       markReviewCycleEscalated(db, {
         repo: REPO,
@@ -158,13 +209,21 @@ for (const overrideLabel of ['operator-approved', 'merge-agent-requested', PAUSE
         headSha: 'sha-1',
         escalatedAt: '2026-06-04T02:00:00.000Z',
       });
+      recordReviewCycleVerdict(db, {
+        repo: REPO,
+        prNumber: PR,
+        headSha: 'sha-2',
+        verdictAt: '2026-06-04T02:30:00.000Z',
+        verdictSummary: 'New head after escalation.',
+        windowHours: 24,
+      });
 
       const result = await clearReviewCycleCapForOverride({
         db,
         octokit,
         repoPath: REPO,
         prNumber: PR,
-        headSha: 'sha-1',
+        headSha: 'sha-2',
         labelNames: [REVIEWER_CYCLE_CAP_REACHED_LABEL, overrideLabel],
         logger: { log() {}, warn() {} },
       });
@@ -183,9 +242,19 @@ for (const overrideLabel of ['operator-approved', 'merge-agent-requested', PAUSE
       });
       assert.equal(decision.count, 1);
       assert.equal(decision.escalate, false);
+      const row = db.prepare(
+        'SELECT review_status, failed_at, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+      ).get(REPO, PR);
+      if (overrideLabel === PAUSED_FOR_REDESIGN_LABEL) {
+        assert.equal(row.review_status, 'failed');
+        assert.match(row.failure_message, /operator selected paused-for-redesign/);
+      } else {
+        assert.equal(row.review_status, 'posted');
+        assert.equal(row.failed_at, null);
+        assert.equal(row.failure_message, null);
+      }
     } finally {
       db.close();
     }
   });
 }
-

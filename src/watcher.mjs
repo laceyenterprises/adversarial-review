@@ -2845,22 +2845,30 @@ function settleReviewerAttempt({
 }) {
   if (result.ok) {
     const postedAt = new Date().toISOString();
-    const currentRow = statements.getReviewRow.get(repoPath, prNumber);
-    const { windowHours } = resolveReviewCycleCapConfig({
-      loadConfigImpl: loadConfigCached,
-      logger: log,
-    });
     statements.markPosted.run(postedAt, repoPath, prNumber);
-    recordSuccessfulReviewCycleVerdict({
-      db,
-      repoPath,
-      prNumber,
-      headSha: currentRow?.reviewer_head_sha || null,
-      postedAt,
-      result,
-      windowHours,
-      logger: log,
-    });
+    try {
+      const currentRow = typeof statements.getReviewRow?.get === 'function'
+        ? statements.getReviewRow.get(repoPath, prNumber)
+        : null;
+      const { windowHours } = resolveReviewCycleCapConfig({
+        loadConfigImpl: loadConfigCached,
+        logger: log,
+      });
+      recordSuccessfulReviewCycleVerdict({
+        db,
+        repoPath,
+        prNumber,
+        headSha: currentRow?.reviewer_head_sha || null,
+        postedAt,
+        result,
+        windowHours,
+        logger: log,
+      });
+    } catch (err) {
+      log?.warn?.(
+        `[watcher] review-cycle-count bookkeeping skipped for ${repoPath}#${prNumber}: ${err?.message || err}`
+      );
+    }
     clearCascadeState(rootDir, { repo: repoPath, prNumber });
     return;
   }
@@ -3122,7 +3130,34 @@ async function clearReviewCycleCapForOverride({
   const overrideLabel = REVIEW_CYCLE_OVERRIDE_LABELS.find((label) => labels.has(label));
   if (!overrideLabel) return { cleared: false, reason: 'no-override-label' };
 
-  resetReviewCycleCounter(db, { repo: repoPath, prNumber, headSha: headSha || null });
+  resetReviewCycleCounter(db, { repo: repoPath, prNumber });
+  const overrideAt = new Date().toISOString();
+  if (overrideLabel === PAUSED_FOR_REDESIGN_LABEL) {
+    db.prepare(
+      `UPDATE reviewed_prs
+          SET review_status = 'failed',
+              failed_at = ?,
+              failure_message = ?,
+              reviewer_lease_expires_at = NULL
+        WHERE repo = ?
+          AND pr_number = ?`
+    ).run(
+      overrideAt,
+      `[review-cycle-cap] operator selected ${PAUSED_FOR_REDESIGN_LABEL}; automatic review remains paused for redesign`,
+      repoPath,
+      prNumber,
+    );
+  } else {
+    db.prepare(
+      `UPDATE reviewed_prs
+          SET review_status = 'posted',
+              failed_at = NULL,
+              failure_message = NULL,
+              reviewer_lease_expires_at = NULL
+        WHERE repo = ?
+          AND pr_number = ?`
+    ).run(repoPath, prNumber);
+  }
   if (labels.has(REVIEWER_CYCLE_CAP_REACHED_LABEL)) {
     await removeLabelFromPR(octokit, {
       repoPath,
@@ -3133,7 +3168,7 @@ async function clearReviewCycleCapForOverride({
   }
   logger?.log?.(
     `[watcher] review-cycle-cap override for ${repoPath}#${prNumber}: ` +
-      `${overrideLabel}; cleared ${REVIEWER_CYCLE_CAP_REACHED_LABEL} and reset counter`
+      `${overrideLabel}; cleared ${REVIEWER_CYCLE_CAP_REACHED_LABEL}, reset counter, and set review status`
   );
   return { cleared: true, overrideLabel };
 }

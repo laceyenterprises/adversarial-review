@@ -229,8 +229,8 @@ export function markReviewCycleEscalated(db, {
   const prUrl = reviewCyclePrUrl({ repo, prNumber });
   ensureReviewCycleCapSchema(db);
   const existing = db.prepare(
-    'SELECT * FROM review_cycle_counters WHERE pr_url = ? AND head_sha = ?'
-  ).get(prUrl, String(headSha));
+    'SELECT * FROM review_cycle_counters WHERE pr_url = ? ORDER BY escalated_at IS NULL, escalated_at DESC LIMIT 1'
+  ).get(prUrl);
   if (!existing) {
     db.prepare(
       `INSERT INTO review_cycle_counters (
@@ -241,20 +241,18 @@ export function markReviewCycleEscalated(db, {
     db.prepare(
       `UPDATE review_cycle_counters
           SET escalated_at = COALESCE(escalated_at, ?)
-        WHERE pr_url = ?
-          AND head_sha = ?`
-    ).run(escalatedAt, prUrl, String(headSha));
+        WHERE pr_url = ?`
+    ).run(escalatedAt, prUrl);
   }
   return { marked: true, prUrl };
 }
 
-export function hasReviewCycleEscalated(db, { repo, prNumber, headSha } = {}) {
-  if (!headSha) return false;
+export function hasReviewCycleEscalated(db, { repo, prNumber } = {}) {
   const prUrl = reviewCyclePrUrl({ repo, prNumber });
   ensureReviewCycleCapSchema(db);
   const row = db.prepare(
-    'SELECT escalated_at FROM review_cycle_counters WHERE pr_url = ? AND head_sha = ?'
-  ).get(prUrl, String(headSha));
+    'SELECT escalated_at FROM review_cycle_counters WHERE pr_url = ? AND escalated_at IS NOT NULL LIMIT 1'
+  ).get(prUrl);
   return Boolean(row?.escalated_at);
 }
 
@@ -296,4 +294,3 @@ export function shouldEscalateReviewCycle(db, {
     alreadyEscalated: hasReviewCycleEscalated(db, { repo, prNumber, headSha }),
   };
 }
-

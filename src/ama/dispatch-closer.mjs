@@ -59,6 +59,12 @@ const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const AGENT_OS_TOOLING_REPO = 'agent-os';
 const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
+const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
+  'blocking-findings-present',
+  'non-blocking-findings-present',
+  'blocking-findings-unknown',
+  'non-blocking-findings-unknown',
+]);
 
 // Auto-hammer (2026-06-19): the eligibility-miss reasons that a hammer TERMINAL
 // remediation pass can clear on its own — i.e. the strict-mode "settled review
@@ -94,6 +100,75 @@ export function isHammerRemediableEligibilityMiss(reasons) {
   // stale head, etc. means NOT auto-hammer (those go through rounds / operator).
   return reasons.every((reason) => HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason));
 }
+
+/**
+ * Decide whether the HAM terminal-remediation prompt (`hammer-prompt.md`) is
+ * warranted for this closure, given the eligibility verdict.
+ *
+ * Per AMA SPEC §1.1.1, HAM terminal remediation "may be used only after the
+ * final adversarial review for a PR has blocking or non-blocking findings that
+ * the HAM worker remediates directly on top of the reviewed head." The
+ * terminal-remediation mandate (a non-empty HAM provenance commit plus a
+ * `Remediated-Findings` audit comment) is therefore only meaningful when there
+ * is actually something to remediate.
+ *
+ * Selecting `hammer-prompt.md` purely off `workerClass === 'hammer'` — which is
+ * now the default — would hand the terminal-remediation mandate to *every*
+ * unpinned AMA closure, including clean, finding-free PRs. For those there is
+ * nothing to remediate, so the closer would either stall (HAM evidence cannot
+ * exist) or be pushed to invent an unreviewed post-review source change just to
+ * satisfy the non-empty-diff contract.
+ *
+ * Terminal remediation is warranted when the eligibility trace shows standing
+ * findings (blocking or non-blocking) OR when a closure path explicitly waived
+ * a findings gate (validated HAM terminal-remediation evidence, or
+ * final-hammer review-cycle exhaustion with a relevant waived findings reason).
+ * Otherwise this is an ordinary clean closure and the plain
+ * `ama-closer-prompt.md` mandate is the correct one.
+ *
+ * @param {{ trace?: object }} verdict — result of `isEligibleForAmaClosure`.
+ * @returns {boolean}
+ */
+export function amaClosureNeedsTerminalRemediation(verdict) {
+  const trace = verdict?.trace;
+  if (!trace) {
+    // Conservative fallback: with no trace we cannot prove the closure is
+    // clean, so preserve the prior (workerClass-only) behavior and allow the
+    // hammer mandate rather than silently downgrading a possibly-dirty close.
+    return true;
+  }
+
+  const blocking = trace.verdict?.blockingFindings;
+  const nonBlocking = trace.verdict?.nonBlockingFindings;
+  const blockingPresent = blocking?.known === true && Number(blocking.count) > 0;
+  const nonBlockingPresent = nonBlocking?.known === true && Number(nonBlocking.count) > 0;
+  if (blockingPresent || nonBlockingPresent) {
+    return true;
+  }
+
+  // HAM terminal-remediation evidence means a worker already remediated
+  // findings, so the HAM mandate remains appropriate even if the live counts
+  // now read clean.
+  const hamActive = trace.hamTerminalRemediation?.active === true;
+  if (hamActive) {
+    return true;
+  }
+
+  // `finalHammer.active` only means the review cycle is exhausted. A clean
+  // exhausted final round must not inherit the HAM remediation mandate unless
+  // final-hammer actually waived a finding or unsettled-verdict gate.
+  const finalHammerWaivedTerminalGate = trace.finalHammer?.active === true
+    && Array.isArray(trace.finalHammer?.waived)
+    && trace.finalHammer.waived.some((reason) => (
+      FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS.has(reason)
+    ));
+  if (finalHammerWaivedTerminalGate) {
+    return true;
+  }
+
+  return false;
+}
+
 const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;
 const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
 const AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS = 90_000;
@@ -651,8 +726,16 @@ export async function maybeDispatchAmaCloser({
   // Compose the prompt body. Template loaded from disk via DI so
   // tests can pass a literal.
   const workerClass = String(cfg.workerClass || 'hammer');
+  // SPEC §1.1.1: the HAM terminal-remediation prompt is reserved for closures
+  // that actually have findings to remediate. With `hammer` now the default
+  // worker class, gating purely on `workerClass === 'hammer'` would route every
+  // clean closure through the terminal-remediation mandate. Require both the
+  // hammer worker class AND a closure that genuinely needs terminal remediation;
+  // otherwise a hammer worker performs an ordinary clean close.
+  const useHammerTerminalRemediationPrompt =
+    workerClass === 'hammer' && amaClosureNeedsTerminalRemediation(verdict);
   const templatePath = dispatchContext.templatePath || (
-    workerClass === 'hammer' ? HAMMER_TEMPLATE_PATH : TEMPLATE_PATH
+    useHammerTerminalRemediationPrompt ? HAMMER_TEMPLATE_PATH : TEMPLATE_PATH
   );
   const templateBody = readTemplateImpl
     ? readTemplateImpl(templatePath)
@@ -682,6 +765,9 @@ export async function maybeDispatchAmaCloser({
     riskClass: dispatchContext.riskClass,
     eligibilityReason: summarizeEligibilityReason(bootstrapEligibilityReasons),
     auditRef,
+    closedBy: workerClass === 'hammer' && !useHammerTerminalRemediationPrompt
+      ? 'hammer-closer'
+      : undefined,
   });
   const prompt = composeCloserPrompt({
     prUrl: dispatchContext.prUrl,

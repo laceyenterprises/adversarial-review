@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
+  buildAdversarialGateSnapshot,
   pickAdversarialGateStatus,
   projectAdversarialGateStatus,
   pruneGateRecordsForPR,
@@ -1174,6 +1175,216 @@ test('maybeDispatchAmaClosureFor carries stale reviewed head into AMA instead of
   );
   assert.ok(eligibility.reasons.includes('stale-review-head'));
   assert.ok(eligibility.reasons.includes('verdict-not-settled-success'));
+});
+
+async function observeAmaSnapshotProjection({
+  rootDir,
+  reviewRow,
+  candidate,
+  repoPath = 'laceyenterprises/adversarial-review',
+  prNumber = 265,
+  labelNames = [],
+  fetchLatestHeadReviewBodiesImpl = async () => [reviewRow.review_body || reviewRow.reviewBody || ''],
+} = {}) {
+  let observed = null;
+  await maybeDispatchAmaClosureFor({
+    rootDir,
+    reviewStateRow: reviewRow,
+    dispatchJob: {
+      blockingFindingCount: 99,
+      blockingFindingState: 'unknown',
+    },
+    candidate,
+    labelNames,
+    operatorApprovalEvent: null,
+    adversarialMergeRequestedEvent: null,
+    repoPath,
+    prNumber,
+    currentRevisionRef: candidate?.headSha || null,
+    logger: { warn() {} },
+    fetchLatestHeadReviewBodiesImpl,
+    loadConfigImpl: () => ({
+      getMergeAuthorityConfig() {
+        return {
+          enabled: true,
+          eligibility: {
+            riskClasses: ['low', 'medium', 'high', 'critical'],
+            highRiskRequiresTwoKey: false,
+          },
+          branchProtection: { required: false },
+        };
+      },
+      getOrchestrationMode() {
+        return 'native';
+      },
+    }),
+    maybeDispatchAmaCloserImpl: async (payload) => {
+      observed = payload;
+      return { dispatched: false, reason: 'fixture' };
+    },
+  });
+
+  const snapshot = await buildAdversarialGateSnapshot(rootDir, {
+    repo: repoPath,
+    prNumber,
+    headSha: candidate?.headSha || null,
+    mergeability: candidate,
+    labels: labelNames,
+    reviewRow,
+  });
+  return { observed, snapshot, decision: pickAdversarialGateStatus(snapshot) };
+}
+
+test('maybeDispatchAmaClosureFor consumes the canonical gate snapshot verdict/head/mergeable matrix', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'ama-gate-snapshot-matrix-'));
+  try {
+    const fixtures = [
+      {
+        name: 'phantom-verdict-column',
+        reviewRow: makeReviewRow({
+          reviewer: 'codex',
+          reviewer_head_sha: 'head-clean',
+          review_body: '## Summary\nClean.\n\n## Verdict\nComment only\n\n## Blocking Issues\n\n- None.',
+          last_verdict: undefined,
+          remediation_pending: undefined,
+        }),
+        candidate: {
+          headSha: 'head-clean',
+          riskClass: 'low',
+          prAuthor: 'codex-worker-bot',
+          prState: 'open',
+          mergeable: 'MERGEABLE',
+          mergeStateStatus: 'CLEAN',
+          statusCheckRollup: [],
+          branchProtection: { requiredContexts: [] },
+          isDraft: false,
+        },
+        expectedDecision: 'review-settled',
+      },
+      {
+        name: 'stale-reviewed-head',
+        reviewRow: makeReviewRow({
+          reviewer: 'codex',
+          reviewer_head_sha: 'head-reviewed',
+          review_body: '## Summary\nClean on the old head.\n\n## Verdict\nComment only',
+        }),
+        candidate: {
+          headSha: 'head-live',
+          riskClass: 'low',
+          prAuthor: 'codex-worker-bot',
+          prState: 'open',
+          mergeable: 'MERGEABLE',
+          mergeStateStatus: 'CLEAN',
+          statusCheckRollup: [],
+          branchProtection: { requiredContexts: [] },
+          isDraft: false,
+        },
+        expectedDecision: 'stale-review-head',
+      },
+      {
+        name: 'mergeable-clean-empty-field',
+        reviewRow: makeReviewRow({
+          reviewer: 'codex',
+          reviewer_head_sha: 'head-clean-status',
+          review_body: '## Summary\nClean.\n\n## Verdict\nComment only\n\n## Blocking Issues\n\n- None.',
+        }),
+        candidate: {
+          headSha: 'head-clean-status',
+          riskClass: 'low',
+          prAuthor: 'codex-worker-bot',
+          prState: 'open',
+          mergeable: '',
+          mergeStateStatus: 'CLEAN',
+          statusCheckRollup: [],
+          branchProtection: { requiredContexts: [] },
+          isDraft: false,
+        },
+        expectedDecision: 'review-settled',
+      },
+      {
+        name: 'conflicting',
+        reviewRow: makeReviewRow({
+          reviewer: 'codex',
+          reviewer_head_sha: 'head-conflict',
+          review_body: '## Summary\nClean.\n\n## Verdict\nComment only\n\n## Blocking Issues\n\n- None.',
+        }),
+        candidate: {
+          headSha: 'head-conflict',
+          riskClass: 'low',
+          prAuthor: 'codex-worker-bot',
+          prState: 'open',
+          mergeable: 'CONFLICTING',
+          mergeStateStatus: 'CLEAN',
+          statusCheckRollup: [],
+          branchProtection: { requiredContexts: [] },
+          isDraft: false,
+        },
+        expectedDecision: 'review-settled',
+      },
+    ];
+
+    for (const fixture of fixtures) {
+      const { observed, snapshot, decision } = await observeAmaSnapshotProjection({
+        rootDir,
+        reviewRow: fixture.reviewRow,
+        candidate: fixture.candidate,
+      });
+
+      assert.ok(observed, fixture.name);
+      assert.equal(decision.reason, fixture.expectedDecision, fixture.name);
+      assert.equal(observed.reviewState.verdict, snapshot.settledReview.verdict, fixture.name);
+      assert.equal(observed.reviewState.headSha, snapshot.reviewedHeadSha, fixture.name);
+      assert.equal(observed.reviewState.remediationPending, snapshot.settledReview.remediationPending, fixture.name);
+      assert.equal(observed.reviewState.blockingFindingState, snapshot.settledReview.blockingFindingState, fixture.name);
+      assert.equal(observed.reviewState.blockingFindingCount, snapshot.settledReview.blockingFindingCount, fixture.name);
+      assert.equal(observed.prMetadata.mergeableState, snapshot.mergeableState, fixture.name);
+    }
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('maybeDispatchAmaClosureFor mergeability matrix passes MERGEABLE and CLEAN fallback and blocks CONFLICTING', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'ama-gate-mergeability-matrix-'));
+  try {
+    const baseReviewRow = makeReviewRow({
+      reviewer: 'codex',
+      reviewer_head_sha: 'head-mergeable',
+      review_body: '## Summary\nClean.\n\n## Verdict\nComment only\n\n## Blocking Issues\n\n- None.',
+    });
+    const baseCandidate = {
+      headSha: 'head-mergeable',
+      riskClass: 'low',
+      prAuthor: 'codex-worker-bot',
+      prState: 'open',
+      statusCheckRollup: [],
+      branchProtection: { requiredContexts: [] },
+      isDraft: false,
+    };
+
+    const cases = [
+      ['MERGEABLE', { mergeable: 'MERGEABLE', mergeStateStatus: 'DIRTY' }, false],
+      ['CLEAN fallback', { mergeable: '', mergeStateStatus: 'CLEAN' }, false],
+      ['CONFLICTING', { mergeable: 'CONFLICTING', mergeStateStatus: 'CLEAN' }, true],
+    ];
+
+    for (const [name, mergeability, shouldBlock] of cases) {
+      const { observed } = await observeAmaSnapshotProjection({
+        rootDir,
+        reviewRow: baseReviewRow,
+        candidate: { ...baseCandidate, ...mergeability },
+      });
+      const eligibility = isEligibleForAmaClosure(
+        observed.reviewState,
+        observed.prMetadata,
+        observed.cfg,
+        observed.options,
+      );
+      assert.equal(eligibility.reasons.includes('pr-not-mergeable'), shouldBlock, name);
+    }
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('resolveMergeAgentCoexistenceForWatcher recovers AMA dispatch failures via merge-agent on the normal posted-review path', async () => {

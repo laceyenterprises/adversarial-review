@@ -21,6 +21,7 @@ import {
   openReviewStateDb,
 } from './review-state.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
+import { normalizeGithubMergeability } from './github-mergeability.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -248,6 +249,10 @@ function resolveSettledReviewVerdict(
   };
 }
 
+function resolveProvenReviewedHead(settledReview) {
+  return settledReview?.reviewedHeadSha || null;
+}
+
 function truncateDescription(description) {
   const text = String(description ?? '').trim().replace(/\s+/g, ' ');
   if (text.length <= DESCRIPTION_MAX_CHARS) return text;
@@ -466,16 +471,26 @@ async function buildAdversarialGateSnapshot(rootDir, {
   repo,
   prNumber,
   headSha,
+  mergeability = null,
   labels = [],
   prUpdatedAt = null,
   prAuthor = null,
   reviewRow = null,
+  liveHeadReview = undefined,
   execFileImpl = execFileAsync,
   fetchLatestLabelEventImpl,
   operatorApprovalEvent = undefined,
 } = {}) {
   const resolvedRow = reviewRow || await readReviewRowForGate(rootDir, { repo, prNumber });
   const latestJob = findLatestFollowUpJobForPR(rootDir, { repo, prNumber });
+  const settledReview = resolveSettledReviewVerdict(rootDir, {
+    repo,
+    prNumber,
+    reviewRow: resolvedRow,
+    currentHeadSha: headSha,
+    liveHeadReview,
+  });
+  const reviewedHeadSha = resolveProvenReviewedHead(settledReview);
 
   let operatorApproval = null;
   const hasOperatorApprovedLabel = normalizeLabelNames(labels).includes(OPERATOR_APPROVED_LABEL);
@@ -502,6 +517,9 @@ async function buildAdversarialGateSnapshot(rootDir, {
     operatorApproval,
     labels,
     headSha,
+    settledReview,
+    reviewedHeadSha,
+    mergeableState: normalizeGithubMergeability(mergeability || {}),
   };
 }
 
@@ -649,5 +667,6 @@ export {
   projectAdversarialGateStatus,
   pruneGateRecordsForPR,
   publishAdversarialGateStatus,
+  resolveProvenReviewedHead,
   resolveSettledReviewVerdict,
 };

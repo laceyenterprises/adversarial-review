@@ -59,6 +59,13 @@ const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const AGENT_OS_TOOLING_REPO = 'agent-os';
 const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
+const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
+  'blocking-findings-present',
+  'non-blocking-findings-present',
+  'blocking-findings-unknown',
+  'non-blocking-findings-unknown',
+  'verdict-not-settled-success',
+]);
 
 // Auto-hammer (2026-06-19): the eligibility-miss reasons that a hammer TERMINAL
 // remediation pass can clear on its own — i.e. the strict-mode "settled review
@@ -114,10 +121,11 @@ export function isHammerRemediableEligibilityMiss(reasons) {
  * satisfy the non-empty-diff contract.
  *
  * Terminal remediation is warranted when the eligibility trace shows standing
- * findings (blocking or non-blocking) OR when a closure path that explicitly
- * waives findings is active (validated HAM terminal-remediation evidence, or
- * final-hammer review-cycle exhaustion). Otherwise this is an ordinary clean
- * closure and the plain `ama-closer-prompt.md` mandate is the correct one.
+ * findings (blocking or non-blocking) OR when a closure path explicitly waived
+ * a finding/verdict gate (validated HAM terminal-remediation evidence, or
+ * final-hammer review-cycle exhaustion with a relevant waived reason).
+ * Otherwise this is an ordinary clean closure and the plain
+ * `ama-closer-prompt.md` mandate is the correct one.
  *
  * @param {{ trace?: object }} verdict — result of `isEligibleForAmaClosure`.
  * @returns {boolean}
@@ -139,11 +147,23 @@ export function amaClosureNeedsTerminalRemediation(verdict) {
     return true;
   }
 
-  // Findings-waiving closure modes still legitimately route through the hammer
-  // mandate even when the live finding counts read clean.
+  // HAM terminal-remediation evidence means a worker already remediated
+  // findings, so the HAM mandate remains appropriate even if the live counts
+  // now read clean.
   const hamActive = trace.hamTerminalRemediation?.active === true;
-  const finalHammerActive = trace.finalHammer?.active === true;
-  if (hamActive || finalHammerActive) {
+  if (hamActive) {
+    return true;
+  }
+
+  // `finalHammer.active` only means the review cycle is exhausted. A clean
+  // exhausted final round must not inherit the HAM remediation mandate unless
+  // final-hammer actually waived a finding or unsettled-verdict gate.
+  const finalHammerWaivedTerminalGate = trace.finalHammer?.active === true
+    && Array.isArray(trace.finalHammer?.waived)
+    && trace.finalHammer.waived.some((reason) => (
+      FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS.has(reason)
+    ));
+  if (finalHammerWaivedTerminalGate) {
     return true;
   }
 

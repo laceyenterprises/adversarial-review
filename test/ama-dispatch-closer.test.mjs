@@ -540,14 +540,16 @@ test('cfg.workerClass=gemini routes the closer to gemini with gemini-closer prov
 // stalls the merge (HAM evidence cannot exist) or pushes the closer to invent
 // an unreviewed post-review source change. A clean hammer closure must use the
 // plain `ama-closer-prompt.md`.
-test('cfg.workerClass=hammer on a clean (finding-free) closure uses the plain closer prompt', async (t) => {
+test('cfg.workerClass=hammer on a clean exhausted closure uses the plain closer prompt', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-clean-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const readPaths = [];
   const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
     cfg: { workerClass: 'hammer' },
-    // Default fixture is a clean settled-success review: zero blocking and
-    // zero non-blocking findings, no review-cycle exhaustion.
+    // Clean settled-success review: zero blocking and zero non-blocking
+    // findings. Even when the final round is exhausted, that alone must not
+    // trigger the terminal-remediation prompt.
+    reviewState: { reviewCycleExhausted: true },
     dispatchContext: { rootDir, templatePath: null },
   });
   const exec = buildExecMock();
@@ -659,9 +661,30 @@ test('amaClosureNeedsTerminalRemediation gates the hammer mandate on real findin
   withNonBlocking.trace.verdict.nonBlockingFindings = { known: true, count: 2 };
   assert.equal(amaClosureNeedsTerminalRemediation(withNonBlocking), true);
 
-  const finalHammerActive = structuredClone(clean);
-  finalHammerActive.trace.finalHammer = { active: true };
-  assert.equal(amaClosureNeedsTerminalRemediation(finalHammerActive), true);
+  const finalHammerActiveClean = structuredClone(clean);
+  finalHammerActiveClean.trace.finalHammer = { active: true, waived: [] };
+  assert.equal(amaClosureNeedsTerminalRemediation(finalHammerActiveClean), false);
+
+  const finalHammerOnlyWaivedBranchProtection = structuredClone(clean);
+  finalHammerOnlyWaivedBranchProtection.trace.finalHammer = {
+    active: true,
+    waived: ['branch-protection-missing-gate'],
+  };
+  assert.equal(amaClosureNeedsTerminalRemediation(finalHammerOnlyWaivedBranchProtection), false);
+
+  const finalHammerWaivedFindingsGate = structuredClone(clean);
+  finalHammerWaivedFindingsGate.trace.finalHammer = {
+    active: true,
+    waived: ['blocking-findings-unknown'],
+  };
+  assert.equal(amaClosureNeedsTerminalRemediation(finalHammerWaivedFindingsGate), true);
+
+  const finalHammerWaivedVerdictGate = structuredClone(clean);
+  finalHammerWaivedVerdictGate.trace.finalHammer = {
+    active: true,
+    waived: ['verdict-not-settled-success'],
+  };
+  assert.equal(amaClosureNeedsTerminalRemediation(finalHammerWaivedVerdictGate), true);
 
   const hamEvidenceActive = structuredClone(clean);
   hamEvidenceActive.trace.hamTerminalRemediation = { active: true };

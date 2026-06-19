@@ -106,13 +106,12 @@ import {
 } from './follow-up-merge-agent.mjs';
 import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
 import {
+  buildAdversarialGateSnapshot,
   deleteGateRecordsForPR,
   projectAdversarialGateStatus,
-  resolveSettledReviewVerdict,
 } from './adversarial-gate-status.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
-import { normalizeGithubMergeability } from './github-mergeability.mjs';
 // AMA-03 — the closer dispatch path. Default-off behind cfg.enabled
 // (AMA-01 defaults to false). When the operator opts in AND the
 // canonical eligibility predicate from SPEC §4.2 returns
@@ -169,6 +168,7 @@ import {
   createWatcherOctokit,
   fetchConditionalRestPage,
 } from './conditional-request.mjs';
+import { reviewBodyHasScopeViolationFinding } from './additive-only-scope.mjs';
 import { sweepEtagCache } from './etag-cache.mjs';
 import { refreshReviewerBrokerTokens, refreshWatcherGithubToken } from './reviewer-broker-refresh.mjs';
 import {
@@ -2210,6 +2210,16 @@ process.on('SIGINT', () => {
 const stmtGetReviewRow = db.prepare(
   'SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
 );
+const stmtGetLatestPostedReviewBody = db.prepare(
+  `SELECT body_md
+     FROM reviewer_passes
+    WHERE repo = ?
+      AND pr_number = ?
+      AND pass_kind IN ('first-pass', 'rereview')
+      AND body_md IS NOT NULL
+    ORDER BY attempt_number DESC, pass_id DESC
+    LIMIT 1`
+);
 const stmtCreateReviewRow = db.prepare(
   'INSERT OR IGNORE INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, linear_ticket, review_status, review_attempts, labels_json) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)'
 );
@@ -2676,14 +2686,16 @@ async function spawnReviewer({
   reviewDbAttemptNumber,
   passKind = 'first-pass',
   maxRemediationRounds,
+  advisoryFindings = [],
   reviewerSessionUuid,
   reviewerTimeoutMs = resolveReviewerTimeoutMs(),
   workspacePath = null,
   crossModelReviewWaived = false,
   crossModelReviewWaiverReason = null,
-  vocabularyFatigueFinding = null,
   onReviewerPgid = () => {},
 }) {
+  const vocabularyFatigueFinding = (Array.isArray(advisoryFindings) ? advisoryFindings : [])
+    .find((finding) => finding?.kind === 'remediation-vocabulary-fatigue') || null;
   const finalRound = (
     Number.isFinite(reviewAttemptNumber) &&
     Number.isFinite(maxRemediationRounds) &&
@@ -2749,11 +2761,11 @@ async function spawnReviewer({
         reviewAttemptNumber,
         reviewDbAttemptNumber,
         maxRemediationRounds,
+        advisoryFindings,
         reviewerSessionUuid,
         reviewerSpawnToken,
         crossModelReviewWaived,
         crossModelReviewWaiverReason,
-        ...(vocabularyFatigueFinding ? { vocabularyFatigueFinding } : {}),
       },
       timeoutMs: reviewerTimeoutMs,
       sessionUuid: reviewerSessionUuid,
@@ -3034,6 +3046,32 @@ function shouldDeferReviewForActiveFollowUp({
     jobPath: latest.jobPath || null,
     jobId: latest.job.jobId || null,
   };
+}
+
+function extractReviewBodyFromRow(reviewRow) {
+  return reviewRow?.reviewBody ?? reviewRow?.review_body ?? reviewRow?.review_text ?? null;
+}
+
+function findLatestPostedReviewBody(rootDir = ROOT, { repo, prNumber } = {}) {
+  if (rootDir === ROOT) {
+    return stmtGetLatestPostedReviewBody.get(repo, prNumber)?.body_md || null;
+  }
+  const localDb = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(localDb);
+    return localDb.prepare(
+      `SELECT body_md
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pass_kind IN ('first-pass', 'rereview')
+          AND body_md IS NOT NULL
+        ORDER BY attempt_number DESC, pass_id DESC
+        LIMIT 1`
+    ).get(repo, prNumber)?.body_md || null;
+  } finally {
+    localDb.close();
+  }
 }
 
 // ── Operator surface ─────────────────────────────────────────────────────────
@@ -4346,19 +4384,18 @@ async function maybeDispatchAmaClosureFor({
     );
   }
 
-  // Resolve verdict + remediation-pending from the SAME canonical source the
-  // adversarial gate uses (the posted review body via the latest follow-up
-  // job, else the stored review row). reviewed_prs has NO `last_verdict` /
-  // `remediation_pending` columns, so the previous reads were always
-  // `undefined` -> verdict '' -> never settled-success -> AMA closed 0 PRs
-  // ever. This is the verdict/remediation twin of the `risk_class` phantom-
-  // column fix above (the riskClass path was repaired; this one was missed).
   const settledReviewHeadSha = candidate?.headSha || currentRevisionRef || null;
-  let settledReview = resolveSettledReviewVerdict(rootDir, {
+  let gateSnapshot = await buildAdversarialGateSnapshot(rootDir, {
     repo: repoPath,
     prNumber,
     reviewRow: reviewStateRow,
-    currentHeadSha: settledReviewHeadSha,
+    headSha: settledReviewHeadSha,
+    mergeability: candidate,
+    labels: labelNames,
+    prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
+    prAuthor: candidate?.prAuthor || null,
+    operatorApprovalEvent,
+    includeSettledReview: true,
   });
   // FAIL-OPEN GUARD (#1824 / #1816): the stored follow-up-job / review-row body
   // resolved above can be STALE relative to a fresh review on the SAME head — a
@@ -4371,8 +4408,8 @@ async function maybeDispatchAmaClosureFor({
   // `Request changes` then wins, and a lookup failure fails closed.
   if (
     settledReviewHeadSha &&
-    settledReview.remediationPending === false &&
-    SETTLED_SUCCESS_VERDICTS.has(settledReview.verdict)
+    gateSnapshot.settledReview?.remediationPending === false &&
+    SETTLED_SUCCESS_VERDICTS.has(gateSnapshot.settledReview?.verdict)
   ) {
     let liveHeadReview;
     // Resolve the authoritative reviewer login(s) from the REAL `reviewer` model
@@ -4412,41 +4449,39 @@ async function maybeDispatchAmaClosureFor({
       );
       liveHeadReview = { resolved: false };
     }
-    settledReview = resolveSettledReviewVerdict(rootDir, {
+    gateSnapshot = await buildAdversarialGateSnapshot(rootDir, {
       repo: repoPath,
       prNumber,
       reviewRow: reviewStateRow,
-      currentHeadSha: settledReviewHeadSha,
+      headSha: settledReviewHeadSha,
+      mergeability: candidate,
+      labels: labelNames,
+      prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
+      prAuthor: candidate?.prAuthor || null,
+      operatorApprovalEvent,
+      includeSettledReview: true,
       liveHeadReview,
     });
   }
-  // Proven reviewed head ONLY — do NOT fall back to the current PR head. AMA's
-  // eligibility compares reviewState.headSha (reviewed head) against
-  // prMetadata.headSha (current head); synthesizing the reviewed head from the
-  // current head would always match and silently defeat the stale-review-head
-  // guard, letting AMA close a commit never proven to be the reviewed one. Null
-  // when unprovable -> AMA fails `stale-review-head` unless a current-head
-  // operator override is present.
-  const reviewAuthorityHead = settledReview.reviewedHeadSha || null;
   const reviewState = {
-    verdict: settledReview.verdict,
-    headSha: reviewAuthorityHead,
+    verdict: gateSnapshot.settledReview?.verdict || '',
+    headSha: gateSnapshot.reviewedHeadSha,
     riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || ledgerRiskClass || 'unknown').toLowerCase(),
-    remediationPending: settledReview.remediationPending,
+    remediationPending: gateSnapshot.settledReview?.remediationPending,
     reviewCycleExhausted,
-    // Blocking-findings classification MUST come from the same authoritative
-    // current-head body `settledReview` resolved the verdict from (live head
-    // body when reconciled, else the stored job/row body). The `dispatchJob`
-    // here is `buildMergeAgentDispatchJob`'s output, whose `classifyBlockingFindings`
-    // reads the latest *follow-up-job* body — which is stale/missing for a clean
-    // `comment-only` review with no remediation job, so it defaulted to
-    // 'unknown' and made the closer fail `blocking-findings-unknown` and never
-    // merge (live on agent-os#1856). `settledReview` always carries these keys;
-    // fall back to 'unknown' only if absent (fail-closed).
-    blockingFindingCount: Number(settledReview.blockingFindingCount ?? 0),
-    blockingFindingState: String(settledReview.blockingFindingState || 'unknown').trim().toLowerCase(),
-    nonBlockingFindingCount: Number(settledReview.nonBlockingFindingCount ?? 0),
-    nonBlockingFindingState: String(settledReview.nonBlockingFindingState || 'unknown').trim().toLowerCase(),
+    // Blocking/non-blocking findings classification MUST come from the same
+    // authoritative current-head body that `gateSnapshot.settledReview` resolved
+    // the verdict from (live head body when reconciled, else the stored job/row
+    // body). Reading the dispatchJob body instead defaults to 'unknown' for a
+    // clean `comment-only` review with no remediation job and makes the closer
+    // fail `blocking-findings-unknown` and never merge (live on agent-os#1856).
+    // `gateSnapshot.settledReview` always carries these keys; fall back to
+    // 'unknown' only if absent (fail-closed). The non-blocking pair is the
+    // HAM-STRICT strict-remediation gate input (read from the same source).
+    blockingFindingCount: Number(gateSnapshot.settledReview?.blockingFindingCount ?? 0),
+    blockingFindingState: String(gateSnapshot.settledReview?.blockingFindingState || 'unknown').trim().toLowerCase(),
+    nonBlockingFindingCount: Number(gateSnapshot.settledReview?.nonBlockingFindingCount ?? 0),
+    nonBlockingFindingState: String(gateSnapshot.settledReview?.nonBlockingFindingState || 'unknown').trim().toLowerCase(),
     operatorApprovedEvidence: operatorApprovalEvent
       ? {
           applied: true,
@@ -4458,16 +4493,12 @@ async function maybeDispatchAmaClosureFor({
       : null,
     prAuthor: candidate?.prAuthor || null,
   };
-  // AMA's eligibility gate (SPEC §4.2 #7) compares `mergeableState` against
-  // 'MERGEABLE' — the vocabulary of GitHub's `mergeable` field. Use
-  // mergeStateStatus=CLEAN only as the UNKNOWN/empty fallback GitHub exposes
-  // while recomputing mergeability; never let it override CONFLICTING.
   const prMetadata = {
     prNumber,
     headSha: candidate?.headSha || currentRevisionRef || null,
     isOpen: String(candidate?.prState || 'open').toLowerCase() === 'open',
     isDraft: Boolean(candidate?.isDraft),
-    mergeableState: normalizeGithubMergeability(candidate),
+    mergeableState: gateSnapshot.mergeableState,
     labels: Array.isArray(labelNames) ? labelNames : [],
     statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
@@ -4617,12 +4648,29 @@ async function handlePostedReviewRow({
   buildMergeAgentDispatchJobImpl = buildMergeAgentDispatchJob,
   dispatchMergeAgentForPRImpl = dispatchMergeAgentForPR,
   resolveMergeAgentCoexistenceForWatcherImpl = resolveMergeAgentCoexistenceForWatcher,
+  latestFollowUpJobFinder = findLatestFollowUpJob,
+  latestPostedReviewBodyFinder = findLatestPostedReviewBody,
+  reviewBodyHasScopeViolationFindingImpl = reviewBodyHasScopeViolationFinding,
   operatorSurface = null,
   logger = console,
 } = {}) {
   await projectGateStatusSafe(existing);
 
   try {
+    const latestPostedReviewBody = latestPostedReviewBodyFinder(rootDir, { repo: repoPath, prNumber });
+    const latestFollowUp = latestFollowUpJobFinder(rootDir, { repo: repoPath, prNumber });
+    const reviewBodiesToCheck = [
+      latestPostedReviewBody,
+      extractReviewBodyFromRow(existing),
+      latestFollowUp?.job?.reviewBody,
+    ];
+    if (reviewBodiesToCheck.some((body) => reviewBodyHasScopeViolationFindingImpl(body))) {
+      logger.log(
+        `[watcher] automated dispatch suppressed for ${repoPath}#${prNumber}: scope-violation finding present`
+      );
+      return;
+    }
+
     let operatorApprovalEvent;
     let mergeAgentRequestEvent;
     let adversarialMergeRequestedEvent;
@@ -6338,10 +6386,19 @@ async function pollOnce(
             const passKind = reviewAttemptNumber > 1 || current?.rereview_requested_at
               ? 'rereview'
               : 'first-pass';
-            const vocabularyFatigueFinding = await computeVocabularyFatigueFindingForPR({
-              repoPath,
-              prNumber,
-            });
+            const vocabularyFatigueFinding = passKind === 'rereview'
+              ? await computeVocabularyFatigueFindingForPR({
+                repoPath,
+                prNumber,
+              })
+              : null;
+            if (vocabularyFatigueFinding) {
+              console.log(
+                `[watcher] vocabulary fatigue ${repoPath}#${prNumber}: ` +
+                  `stem=${vocabularyFatigueFinding.stem} ` +
+                  `count=${vocabularyFatigueFinding.count}/${vocabularyFatigueFinding.window}`
+              );
+            }
 
             // Pre-spawn routing-tier readiness probe. Successful probes are
             // cached for the rest of the tick; failed probes get bounded
@@ -6385,9 +6442,9 @@ async function pollOnce(
               reviewDbAttemptNumber,
               passKind,
               maxRemediationRounds,
+              advisoryFindings: vocabularyFatigueFinding ? [vocabularyFatigueFinding] : [],
               reviewerSessionUuid,
               reviewerTimeoutMs,
-              vocabularyFatigueFinding,
               workspacePath: null,
               onReviewerPgid: ({ pgid, spawnedAt }) => {
                 persistReviewerPgid({

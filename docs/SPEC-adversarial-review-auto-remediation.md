@@ -283,13 +283,14 @@ expensive, unavailable, or intentionally locked-out agent.
 
 ## Codex Runaway Guardrails
 
-Before spawning a GitHub-PR reviewer, the watcher evaluates the Codex runaway
+Before spawning a GitHub-PR rereview, the watcher evaluates the Codex runaway
 guardrail block at `agent_control.codex_runaway_guardrails`. The vocabulary
-fatigue guardrail reads recent PR commit subjects with
-`fetchPullRequestCommitSubjects(repo, prNumber)`, normalizes the first
-non-builder-tag word of each subject, and emits an informational
-`remediation-vocabulary-fatigue` finding when one verb stem dominates the
-configured recent window.
+fatigue guardrail reads only the configured tail window of recent PR commit
+subjects with `fetchPullRequestCommitSubjects(repo, prNumber, { limit })`,
+normalizes the first non-builder-tag word of each subject, and emits an
+informational `remediation-vocabulary-fatigue` finding when one verb stem
+dominates the configured recent window. First-pass reviews skip this guardrail
+because no remediation round has occurred yet.
 
 The finding is reviewer-facing context, not a merge gate. The watcher threads
 the finding into reviewer spawn metadata and `src/reviewer.mjs` renders it into
@@ -1373,6 +1374,8 @@ The operator can also force-disable merge-agent on a host that DOES have agent-o
 
 - `operator-approved` — scoped operator override for the current head SHA. It bypasses review/remediation-state gates, including an active remediation job, but does NOT bypass open-PR, hard-skip, mergeability, or green-check requirements. Consumed (removed from the PR) after a successful dispatch, or after an acknowledged `skip-no-agent-os` when agent-os is missing or merge-agent dispatch is force-disabled.
 - `operator-approved: advisory-only-review` — scoped reviewer-posting override for the current head SHA. When the reviewer-generated head still matches the live PR head and the latest GitHub `LabeledEvent` for this label is attributable to a non-author actor, carries an event id/node id, and is scoped to that head, the reviewer posts an advisory header and does not enqueue a follow-up remediation job. Missing label-event evidence, an `unknown` actor, author self-application, stale head scope, or a reviewer/live-head mismatch all fail closed to normal enforcement mode. Advisory-only still writes the posted review row, so a `Request changes` advisory review remains visible to the adversarial gate; the intended convergence path is operator/manual action or label removal followed by a normal re-review.
+- `pr-class: additive-only` — PR classification label for diffs that should remain within the additive-only allowlist (`projects/*`, worker-pool post-merge action packs, and audit/postmortem docs). Raw label presence enables enforcement across all PR commits. The reviewer may backfill the label when the initial commit is entirely allowlisted; later out-of-allowlist files produce a structured `scope-violation` finding and suppress automated remediation/merge-agent dispatch.
+- `operator-approved: scope-expand` — scoped additive-only override for the current head SHA. It is accepted only from the latest attributable non-author `LabeledEvent` after the latest observed head-changing timeline event, and the latest observed head SHA must match the live PR head when the event carries a SHA. Author self-application, unknown actors, unknown PR author, stale label order, and head mismatch fail closed. This exact label does not count as the generic `operator-approved` merge override.
 - `adversarial-merge-blocked` — AMA-only hard stop for the current head. It overrides AMA closure even when review, risk, and `operator-approved` would otherwise pass; authors may apply it to block their own PR, and AMA never removes it automatically.
 - `adversarial-merge-requested` — AMA-only scoped request to evaluate closure on an otherwise risk-class-blocked PR. It is accepted only from an attributable non-author current-head label event, bypasses only the AMA risk-class gate, and is not a merge-agent fallback trigger.
 - `merge-agent-requested` — explicit scoped request to fire a merge-agent pass for the current head SHA even when the standard verdict gate would skip. It still respects open-PR, hard-skip, active-remediation, and duplicate-dispatch guards, but it can bypass mergeability, checks, verdict parsing, and remediation-round exhaustion. Consumed after a successful dispatch, or after an acknowledged `skip-no-agent-os` when agent-os is missing or merge-agent dispatch is force-disabled.

@@ -61,6 +61,11 @@ import {
 } from './github-api.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import {
+  appendScopeViolationFinding,
+  resolveAdditiveOnlyScopeReview,
+  reviewBodyHasScopeViolationFinding,
+} from './additive-only-scope.mjs';
 
 const execFileAsync = promisify(execFile);
 const REVIEW_POST_RETRY_DELAYS_MS = [0];
@@ -851,6 +856,23 @@ function buildLocalReviewShadowPrompt({ hostedReviewText, diff, extraContext = '
   ].filter(Boolean).join('\n');
 }
 
+function formatAdvisoryFindingsContext(advisoryFindings = []) {
+  const findings = (Array.isArray(advisoryFindings) ? advisoryFindings : [])
+    .filter((finding) => finding && typeof finding === 'object');
+  if (findings.length === 0) return '';
+  return [
+    '',
+    '## Watcher Advisory Findings',
+    '',
+    'These findings are informational context from the watcher. Do not place them in `## Blocking Issues`, and do not change the verdict solely because of them.',
+    '',
+    '```json',
+    JSON.stringify(findings, null, 2),
+    '```',
+    '',
+  ].join('\n');
+}
+
 function formatLocalReviewShadowArtifact({ request, reviewText, status = 'completed', reason = null }) {
   const provenance = [
     '# Local OSS Model Shadow Review (Non-Gating)',
@@ -1578,6 +1600,7 @@ function queueFollowUpForPostedReview({
   verdictMode = VERDICT_MODE_ENFORCE,
   summarizePRRemediationLedgerImpl = summarizePRRemediationLedger,
   createFollowUpJobImpl = createFollowUpJob,
+  scopeViolationFinding = null,
 }) {
   const normalizedVerdictMode = normalizeVerdictMode(verdictMode);
   if (normalizedVerdictMode === VERDICT_MODE_ADVISORY_ONLY) {
@@ -1589,6 +1612,9 @@ function queueFollowUpForPostedReview({
   }
   if (!shouldQueueFollowUpForReview(reviewText)) {
     return { queued: false, reason: 'empty-review-body', verdictMode: normalizedVerdictMode };
+  }
+  if (scopeViolationFinding || reviewBodyHasScopeViolationFinding(reviewText)) {
+    return { queued: false, reason: 'scope-violation' };
   }
   if (typeof baseBranch !== 'string' || baseBranch.trim() === '') {
     throw new Error('baseBranch is required to queue a follow-up handoff');
@@ -2235,31 +2261,6 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
   };
 }
 
-function formatVocabularyFatigueReviewContext(finding) {
-  if (!finding || finding.kind !== 'remediation-vocabulary-fatigue') return '';
-  const stem = String(finding.stem || '').trim();
-  const count = Number(finding.count);
-  const window = Number(finding.window);
-  const detail = String(finding.detail || '').trim();
-  if (!stem || !Number.isFinite(count) || !Number.isFinite(window)) return '';
-  return [
-    '## Informational Guardrail Signal: Remediation Vocabulary Fatigue',
-    '',
-    `The watcher observed that the verb stem '${stem}' appears in ${count} of the last ${window} commit messages.`,
-    detail || 'Treat this as a non-blocking soft churn signal while reviewing the PR.',
-    '',
-    'This signal is informational and non-blocking by itself. Use it only as context when deciding whether the diff shows runaway remediation churn or repeated superficial edits.',
-    '',
-  ].join('\n');
-}
-
-function appendVocabularyFatigueReviewContext(extraContext, finding) {
-  const rendered = formatVocabularyFatigueReviewContext(finding);
-  if (!rendered) return extraContext;
-  const base = String(extraContext || '').trimEnd();
-  return base ? `${base}\n\n${rendered}` : rendered;
-}
-
 // ── GitHub review posting ────────────────────────────────────────────────────
 
 class ReviewerPostAuthRefreshRetryableError extends Error {
@@ -2638,9 +2639,9 @@ async function main() {
     reviewerSpawnToken,
     labels = [],
     ticketPipelinePaused = false,
+    advisoryFindings = [],
     crossModelReviewWaived = false,
     crossModelReviewWaiverReason = null,
-    vocabularyFatigueFinding = null,
   } = args;
 
   if (!repo || !prNumber || !reviewerModel || !botTokenEnv) {
@@ -2738,8 +2739,10 @@ async function main() {
   } catch (err) {
     console.error(`[reviewer] WARN: failed to fetch linked PR context: ${err.message}`);
   }
-
-  extraContext = appendVocabularyFatigueReviewContext(extraContext, vocabularyFatigueFinding);
+  const advisoryContext = formatAdvisoryFindingsContext(advisoryFindings);
+  if (advisoryContext) {
+    extraContext = `${extraContext}${advisoryContext}`;
+  }
 
   // 2. Run adversarial review (OAuth only — no API key fallback)
   const effectiveModel = reviewerModel;
@@ -2828,7 +2831,29 @@ async function main() {
   const waiverAuditBlock = crossModelReviewWaived
     ? `> Cross-model review waiver: ${String(crossModelReviewWaiverReason || 'operator override selected the same reviewer family as the builder for this pass.')}\n\n`
     : '';
-  const fullComment = header + waiverAuditBlock + reviewText;
+  let scopeViolationFinding = null;
+  try {
+    const scopeReview = await resolveAdditiveOnlyScopeReview({
+      repo,
+      prNumber,
+      logger: console,
+    });
+    scopeViolationFinding = scopeReview.finding || null;
+    if (scopeViolationFinding) {
+      console.error(
+        `[reviewer] additive-only scope violation detected for ${repo}#${prNumber}: ` +
+          `${scopeViolationFinding.violating_files.join(', ')}`
+      );
+    }
+  } catch (err) {
+    console.error(
+      `[reviewer] WARN: additive-only scope check failed for ${repo}#${prNumber}; continuing normal review: ${err?.message || err}`
+    );
+  }
+  const reviewTextForPost = scopeViolationFinding
+    ? appendScopeViolationFinding(reviewText, scopeViolationFinding)
+    : reviewText;
+  const fullComment = header + waiverAuditBlock + reviewTextForPost;
   const localShadowEligibility = evaluateLocalReviewShadowEligibility({
     labels,
     builderTag,
@@ -2933,10 +2958,11 @@ async function main() {
       reviewerModel: effectiveModel,
       builderTag,
       linearTicketId,
-      reviewText,
+      reviewText: fullComment,
       reviewPostedAt,
       critical,
       verdictMode,
+      scopeViolationFinding,
     });
     if (queued.queued) {
       console.log(`[reviewer] Follow-up handoff queued at ${queued.jobPath}`);
@@ -3027,8 +3053,7 @@ const __test__ = {
   spawnGeminiReview,
   reviewWithGemini,
   dispatchReviewerModel,
-  formatVocabularyFatigueReviewContext,
-  appendVocabularyFatigueReviewContext,
+  formatAdvisoryFindingsContext,
   postGitHubReviewWithCapture,
   isRetryableGhTransportError,
   isReviewerPostAuthFailure,

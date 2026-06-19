@@ -5,7 +5,7 @@ import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { connect } from '@agent-os/app-sdk';
+import { connectAppContract } from './app-contract-dispatch.mjs';
 import {
   buildRemediationReply,
   claimNextFollowUpJob,
@@ -1818,7 +1818,7 @@ async function dispatchRemediationViaHq({
   );
   const ticketRef = String(jobId || launchRequestId || `PR-${prNumber}`).trim();
   const requestId = String(jobId || launchRequestId || ticketRef).trim();
-  const os = await connect({
+  const os = await connectAppContract({
     app_id: 'adversarial-review',
     mode: resolveAdversarialReviewAppMode(env),
     hqRoot,

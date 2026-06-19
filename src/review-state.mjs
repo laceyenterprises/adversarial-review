@@ -9,10 +9,17 @@ import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
-const REVIEW_STATE_SCHEMA_VERSION = 8;
+const REVIEW_STATE_SCHEMA_VERSION = 9;
 const REVIEW_STATE_MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 const execFileAsyncDefault = promisify(execFile);
-const REVIEW_STATE_TABLE_NAMES = new Set(['reviewed_prs', 'comment_deliveries', 'reviewer_passes', 'pr_merge_closeouts']);
+const REVIEW_STATE_TABLE_NAMES = new Set([
+  'reviewed_prs',
+  'comment_deliveries',
+  'reviewer_passes',
+  'pr_merge_closeouts',
+  'review_cycle_verdicts',
+  'review_cycle_counters',
+]);
 
 const REVIEWED_PRS_HEAD_SHA_COLUMNS = Object.freeze([
   'head_sha',
@@ -99,6 +106,30 @@ function ensureReviewStateSchema(db) {
   backfillReviewedPRSubjectIdentity(db);
 
   runReviewStateMigrations(db);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS review_cycle_verdicts (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      pr_url          TEXT NOT NULL,
+      head_sha        TEXT NOT NULL,
+      verdict_count   INTEGER NOT NULL,
+      verdict_at      TEXT NOT NULL,
+      verdict_summary TEXT NOT NULL DEFAULT '',
+      created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(pr_url, head_sha, verdict_at)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_review_cycle_verdicts_pr_time
+      ON review_cycle_verdicts(pr_url, verdict_at DESC, id DESC);
+
+    CREATE TABLE IF NOT EXISTS review_cycle_counters (
+      pr_url          TEXT NOT NULL,
+      head_sha        TEXT NOT NULL,
+      verdict_count   INTEGER NOT NULL,
+      last_verdict_at TEXT NOT NULL,
+      escalated_at    TEXT,
+      PRIMARY KEY (pr_url, head_sha)
+    );
+  `);
   // Handles DBs that briefly saw the inline reviewer_passes schema before the
   // migration runner became the canonical path.
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN reviewer_model TEXT`);

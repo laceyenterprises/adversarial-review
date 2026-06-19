@@ -278,6 +278,40 @@ test('request-changes and malformed verdicts still queue durable follow-up hando
   assert.equal(malformed.created.length, 1);
 });
 
+test('scope-violation finding suppresses automated remediation handoff', () => {
+  const created = [];
+  const result = queueFollowUpForPostedReview({
+    rootDir: '/tmp/adversarial-review-test',
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 57,
+    baseBranch: 'main',
+    reviewerModel: 'claude',
+    reviewText: [
+      '## Summary',
+      'Scope expanded after additive-only classification.',
+      '',
+      '## Verdict',
+      'Request changes',
+      '',
+      '## Scope Violation Finding',
+      '```json',
+      '{"kind":"scope-violation","severity":"high"}',
+      '```',
+    ].join('\n'),
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 0,
+      latestMaxRounds: 2,
+    }),
+    createFollowUpJobImpl: (jobInput) => {
+      created.push(jobInput);
+      return { jobPath: '/tmp/adversarial-review-test/data/follow-up-jobs/pending/job.json' };
+    },
+  });
+
+  assert.deepEqual(result, { queued: false, reason: 'scope-violation' });
+  assert.equal(created.length, 0);
+});
+
 test('follow-up handoff refuses to queue when baseBranch is unknown', () => {
   assert.throws(() => {
     queueFollowUpForPostedReview({

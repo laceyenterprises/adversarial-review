@@ -168,6 +168,7 @@ import {
   createWatcherOctokit,
   fetchConditionalRestPage,
 } from './conditional-request.mjs';
+import { reviewBodyHasScopeViolationFinding } from './additive-only-scope.mjs';
 import { sweepEtagCache } from './etag-cache.mjs';
 import { refreshReviewerBrokerTokens, refreshWatcherGithubToken } from './reviewer-broker-refresh.mjs';
 import {
@@ -2209,6 +2210,16 @@ process.on('SIGINT', () => {
 const stmtGetReviewRow = db.prepare(
   'SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
 );
+const stmtGetLatestPostedReviewBody = db.prepare(
+  `SELECT body_md
+     FROM reviewer_passes
+    WHERE repo = ?
+      AND pr_number = ?
+      AND pass_kind IN ('first-pass', 'rereview')
+      AND body_md IS NOT NULL
+    ORDER BY attempt_number DESC, pass_id DESC
+    LIMIT 1`
+);
 const stmtCreateReviewRow = db.prepare(
   'INSERT OR IGNORE INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, linear_ticket, review_status, review_attempts, labels_json) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)'
 );
@@ -3035,6 +3046,32 @@ function shouldDeferReviewForActiveFollowUp({
     jobPath: latest.jobPath || null,
     jobId: latest.job.jobId || null,
   };
+}
+
+function extractReviewBodyFromRow(reviewRow) {
+  return reviewRow?.reviewBody ?? reviewRow?.review_body ?? reviewRow?.review_text ?? null;
+}
+
+function findLatestPostedReviewBody(rootDir = ROOT, { repo, prNumber } = {}) {
+  if (rootDir === ROOT) {
+    return stmtGetLatestPostedReviewBody.get(repo, prNumber)?.body_md || null;
+  }
+  const localDb = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(localDb);
+    return localDb.prepare(
+      `SELECT body_md
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pass_kind IN ('first-pass', 'rereview')
+          AND body_md IS NOT NULL
+        ORDER BY attempt_number DESC, pass_id DESC
+        LIMIT 1`
+    ).get(repo, prNumber)?.body_md || null;
+  } finally {
+    localDb.close();
+  }
 }
 
 // ── Operator surface ─────────────────────────────────────────────────────────
@@ -4600,12 +4637,29 @@ async function handlePostedReviewRow({
   buildMergeAgentDispatchJobImpl = buildMergeAgentDispatchJob,
   dispatchMergeAgentForPRImpl = dispatchMergeAgentForPR,
   resolveMergeAgentCoexistenceForWatcherImpl = resolveMergeAgentCoexistenceForWatcher,
+  latestFollowUpJobFinder = findLatestFollowUpJob,
+  latestPostedReviewBodyFinder = findLatestPostedReviewBody,
+  reviewBodyHasScopeViolationFindingImpl = reviewBodyHasScopeViolationFinding,
   operatorSurface = null,
   logger = console,
 } = {}) {
   await projectGateStatusSafe(existing);
 
   try {
+    const latestPostedReviewBody = latestPostedReviewBodyFinder(rootDir, { repo: repoPath, prNumber });
+    const latestFollowUp = latestFollowUpJobFinder(rootDir, { repo: repoPath, prNumber });
+    const reviewBodiesToCheck = [
+      latestPostedReviewBody,
+      extractReviewBodyFromRow(existing),
+      latestFollowUp?.job?.reviewBody,
+    ];
+    if (reviewBodiesToCheck.some((body) => reviewBodyHasScopeViolationFindingImpl(body))) {
+      logger.log(
+        `[watcher] automated dispatch suppressed for ${repoPath}#${prNumber}: scope-violation finding present`
+      );
+      return;
+    }
+
     let operatorApprovalEvent;
     let mergeAgentRequestEvent;
     let adversarialMergeRequestedEvent;

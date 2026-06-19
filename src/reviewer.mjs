@@ -61,6 +61,11 @@ import {
 } from './github-api.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
+import {
+  appendScopeViolationFinding,
+  resolveAdditiveOnlyScopeReview,
+  reviewBodyHasScopeViolationFinding,
+} from './additive-only-scope.mjs';
 
 const execFileAsync = promisify(execFile);
 const REVIEW_POST_RETRY_DELAYS_MS = [0];
@@ -1595,6 +1600,7 @@ function queueFollowUpForPostedReview({
   verdictMode = VERDICT_MODE_ENFORCE,
   summarizePRRemediationLedgerImpl = summarizePRRemediationLedger,
   createFollowUpJobImpl = createFollowUpJob,
+  scopeViolationFinding = null,
 }) {
   const normalizedVerdictMode = normalizeVerdictMode(verdictMode);
   if (normalizedVerdictMode === VERDICT_MODE_ADVISORY_ONLY) {
@@ -1606,6 +1612,9 @@ function queueFollowUpForPostedReview({
   }
   if (!shouldQueueFollowUpForReview(reviewText)) {
     return { queued: false, reason: 'empty-review-body', verdictMode: normalizedVerdictMode };
+  }
+  if (scopeViolationFinding || reviewBodyHasScopeViolationFinding(reviewText)) {
+    return { queued: false, reason: 'scope-violation' };
   }
   if (typeof baseBranch !== 'string' || baseBranch.trim() === '') {
     throw new Error('baseBranch is required to queue a follow-up handoff');
@@ -2822,7 +2831,29 @@ async function main() {
   const waiverAuditBlock = crossModelReviewWaived
     ? `> Cross-model review waiver: ${String(crossModelReviewWaiverReason || 'operator override selected the same reviewer family as the builder for this pass.')}\n\n`
     : '';
-  const fullComment = header + waiverAuditBlock + reviewText;
+  let scopeViolationFinding = null;
+  try {
+    const scopeReview = await resolveAdditiveOnlyScopeReview({
+      repo,
+      prNumber,
+      logger: console,
+    });
+    scopeViolationFinding = scopeReview.finding || null;
+    if (scopeViolationFinding) {
+      console.error(
+        `[reviewer] additive-only scope violation detected for ${repo}#${prNumber}: ` +
+          `${scopeViolationFinding.violating_files.join(', ')}`
+      );
+    }
+  } catch (err) {
+    console.error(
+      `[reviewer] WARN: additive-only scope check failed for ${repo}#${prNumber}; continuing normal review: ${err?.message || err}`
+    );
+  }
+  const reviewTextForPost = scopeViolationFinding
+    ? appendScopeViolationFinding(reviewText, scopeViolationFinding)
+    : reviewText;
+  const fullComment = header + waiverAuditBlock + reviewTextForPost;
   const localShadowEligibility = evaluateLocalReviewShadowEligibility({
     labels,
     builderTag,
@@ -2927,10 +2958,11 @@ async function main() {
       reviewerModel: effectiveModel,
       builderTag,
       linearTicketId,
-      reviewText,
+      reviewText: fullComment,
       reviewPostedAt,
       critical,
       verdictMode,
+      scopeViolationFinding,
     });
     if (queued.queued) {
       console.log(`[reviewer] Follow-up handoff queued at ${queued.jobPath}`);

@@ -3172,10 +3172,12 @@ async function addLabelToPR(octokit, { repoPath, prNumber, label }) {
 async function addLabelToPRBestEffort(octokit, { repoPath, prNumber, label, logger = console }) {
   try {
     await addLabelToPR(octokit, { repoPath, prNumber, label });
+    return { added: true };
   } catch (err) {
     logger?.warn?.(
       `[watcher] failed to add label ${label} to ${repoPath}#${prNumber}: ${err?.message || err}`
     );
+    return { added: false, error: err };
   }
 }
 
@@ -3197,6 +3199,30 @@ async function removeLabelFromPR(octokit, { repoPath, prNumber, label, logger = 
       );
     }
   }
+}
+
+function isReviewCycleCapFailedRow(reviewRow) {
+  return reviewRow?.review_status === 'failed'
+    && String(reviewRow?.failure_message || '').startsWith('[review-cycle-cap]');
+}
+
+function isOperatorSelectedRedesignPause(reviewRow) {
+  return isReviewCycleCapFailedRow(reviewRow)
+    && String(reviewRow?.failure_message || '').includes(`operator selected ${PAUSED_FOR_REDESIGN_LABEL}`);
+}
+
+function isAutomaticReviewCycleCapPause(reviewRow) {
+  return isReviewCycleCapFailedRow(reviewRow) && !isOperatorSelectedRedesignPause(reviewRow);
+}
+
+function shouldClearReviewCycleCapForOverride({ reviewRow, labelNames = [] } = {}) {
+  const labels = new Set(normalizeLabelNames(labelNames));
+  const overrideLabel = REVIEW_CYCLE_OVERRIDE_LABELS.find((label) => labels.has(label));
+  if (!overrideLabel) return false;
+  if (labels.has(REVIEWER_CYCLE_CAP_REACHED_LABEL)) return true;
+  if (isAutomaticReviewCycleCapPause(reviewRow)) return true;
+  return isOperatorSelectedRedesignPause(reviewRow)
+    && (labels.has('operator-approved') || labels.has('merge-agent-requested'));
 }
 
 // Posts the escalation comment only. The caller must persist the
@@ -5698,9 +5724,21 @@ async function pollOnce(
       }
 
       if (
-        prLabelNames.includes(REVIEWER_CYCLE_CAP_REACHED_LABEL) &&
-        REVIEW_CYCLE_OVERRIDE_LABELS.some((label) => prLabelNames.includes(label))
+        isAutomaticReviewCycleCapPause(existing) &&
+        !prLabelNames.includes(REVIEWER_CYCLE_CAP_REACHED_LABEL)
       ) {
+        const labelAdd = await addLabelToPRBestEffort(octokit, {
+          repoPath,
+          prNumber,
+          label: REVIEWER_CYCLE_CAP_REACHED_LABEL,
+          logger: console,
+        });
+        if (labelAdd.added) {
+          prLabelNames.push(REVIEWER_CYCLE_CAP_REACHED_LABEL);
+        }
+      }
+
+      if (shouldClearReviewCycleCapForOverride({ reviewRow: existing, labelNames: prLabelNames })) {
         try {
           await clearReviewCycleCapForOverride({
             db,
@@ -6311,8 +6349,7 @@ async function pollOnce(
               `automatic review remains paused`
           );
         }
-        const alreadyCapPaused = current?.review_status === 'failed'
-          && String(current?.failure_message || '').startsWith('[review-cycle-cap]');
+        const alreadyCapPaused = isReviewCycleCapFailedRow(current);
         if (!alreadyCapPaused) {
           stmtMarkReviewCycleCapPaused.run(
             escalatedAt,
@@ -6880,8 +6917,10 @@ export {
   resolvePendingDraftRespawnAgeSeconds,
   resolveVocabularyFatigueConfig,
   resolveReviewerIdentity,
+  isAutomaticReviewCycleCapPause,
   postReviewCycleCapEscalation,
   addLabelToPRBestEffort,
+  shouldClearReviewCycleCapForOverride,
   reviewBodyHasStandingBlockingFindings,
   recordSuccessfulReviewCycleVerdict,
   resolveStuckDispatchAlertDebounceMs,

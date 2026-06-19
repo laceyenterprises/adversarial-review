@@ -16,6 +16,8 @@ import {
   clearReviewCycleCapForOverride,
   postReviewCycleCapEscalation,
   addLabelToPRBestEffort,
+  isAutomaticReviewCycleCapPause,
+  shouldClearReviewCycleCapForOverride,
   reviewBodyHasStandingBlockingFindings,
 } from '../src/watcher.mjs';
 
@@ -292,6 +294,95 @@ test('postReviewCycleCapEscalation posts only the comment (no label add) so the 
   assert.deepEqual(calls.map(([name]) => name), ['createComment']);
 });
 
+test('operator-approved clears a persisted cap pause even when the cap label add failed', async () => {
+  const db = setupDb();
+  const removed = [];
+  const octokit = {
+    rest: {
+      issues: {
+        removeLabel: async (params) => {
+          removed.push(params);
+        },
+      },
+    },
+  };
+
+  try {
+    db.prepare(
+      `INSERT INTO reviewed_prs (
+         repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+         failed_at, failure_message, labels_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      REPO,
+      PR,
+      '2026-06-04T01:00:00.000Z',
+      'claude',
+      'open',
+      'failed',
+      '2026-06-04T02:00:00.000Z',
+      '[review-cycle-cap] automatic review paused',
+      JSON.stringify(['operator-approved']),
+    );
+    record(db, 1);
+    markReviewCycleEscalated(db, {
+      repo: REPO,
+      prNumber: PR,
+      headSha: 'sha-1',
+      escalatedAt: '2026-06-04T02:00:00.000Z',
+    });
+
+    const rowBefore = db.prepare(
+      'SELECT review_status, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(REPO, PR);
+
+    assert.equal(isAutomaticReviewCycleCapPause(rowBefore), true);
+    assert.equal(shouldClearReviewCycleCapForOverride({
+      reviewRow: rowBefore,
+      labelNames: ['operator-approved'],
+    }), true);
+
+    const result = await clearReviewCycleCapForOverride({
+      db,
+      octokit,
+      repoPath: REPO,
+      prNumber: PR,
+      headSha: 'sha-1',
+      labelNames: ['operator-approved'],
+      logger: { log() {}, warn() {} },
+    });
+
+    assert.equal(result.cleared, true);
+    assert.equal(result.overrideLabel, 'operator-approved');
+    assert.equal(removed.length, 0);
+    const rowAfter = db.prepare(
+      'SELECT review_status, failed_at, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(REPO, PR);
+    assert.equal(rowAfter.review_status, 'posted');
+    assert.equal(rowAfter.failed_at, null);
+    assert.equal(rowAfter.failure_message, null);
+  } finally {
+    db.close();
+  }
+});
+
+test('paused-for-redesign does not re-trigger cap cleanup unless a resume override appears', () => {
+  const row = {
+    review_status: 'failed',
+    failure_message: '[review-cycle-cap] operator selected paused-for-redesign; automatic review remains paused for redesign',
+  };
+
+  assert.equal(isAutomaticReviewCycleCapPause(row), false);
+  assert.equal(shouldClearReviewCycleCapForOverride({
+    reviewRow: row,
+    labelNames: [PAUSED_FOR_REDESIGN_LABEL],
+  }), false);
+  assert.equal(shouldClearReviewCycleCapForOverride({
+    reviewRow: row,
+    labelNames: [PAUSED_FOR_REDESIGN_LABEL, 'operator-approved'],
+  }), true);
+});
+
 test('reviewBodyHasStandingBlockingFindings counts structured blockers and a None-only section', () => {
   const withBlocker = [
     '## Summary',
@@ -344,13 +435,14 @@ test('addLabelToPRBestEffort swallows transient label-add errors so the dedupe m
   };
 
   // Must not throw even though addLabels rejects.
-  await addLabelToPRBestEffort(octokit, {
+  const result = await addLabelToPRBestEffort(octokit, {
     repoPath: REPO,
     prNumber: PR,
     label: REVIEWER_CYCLE_CAP_REACHED_LABEL,
     logger: { warn: (msg) => warnings.push(msg) },
   });
 
+  assert.equal(result.added, false);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /failed to add label/);
 });

@@ -2676,14 +2676,16 @@ async function spawnReviewer({
   reviewDbAttemptNumber,
   passKind = 'first-pass',
   maxRemediationRounds,
+  advisoryFindings = [],
   reviewerSessionUuid,
   reviewerTimeoutMs = resolveReviewerTimeoutMs(),
   workspacePath = null,
   crossModelReviewWaived = false,
   crossModelReviewWaiverReason = null,
-  vocabularyFatigueFinding = null,
   onReviewerPgid = () => {},
 }) {
+  const vocabularyFatigueFinding = (Array.isArray(advisoryFindings) ? advisoryFindings : [])
+    .find((finding) => finding?.kind === 'remediation-vocabulary-fatigue') || null;
   const finalRound = (
     Number.isFinite(reviewAttemptNumber) &&
     Number.isFinite(maxRemediationRounds) &&
@@ -2749,11 +2751,11 @@ async function spawnReviewer({
         reviewAttemptNumber,
         reviewDbAttemptNumber,
         maxRemediationRounds,
+        advisoryFindings,
         reviewerSessionUuid,
         reviewerSpawnToken,
         crossModelReviewWaived,
         crossModelReviewWaiverReason,
-        ...(vocabularyFatigueFinding ? { vocabularyFatigueFinding } : {}),
       },
       timeoutMs: reviewerTimeoutMs,
       sessionUuid: reviewerSessionUuid,
@@ -6336,10 +6338,19 @@ async function pollOnce(
             const passKind = reviewAttemptNumber > 1 || current?.rereview_requested_at
               ? 'rereview'
               : 'first-pass';
-            const vocabularyFatigueFinding = await computeVocabularyFatigueFindingForPR({
-              repoPath,
-              prNumber,
-            });
+            const vocabularyFatigueFinding = passKind === 'rereview'
+              ? await computeVocabularyFatigueFindingForPR({
+                repoPath,
+                prNumber,
+              })
+              : null;
+            if (vocabularyFatigueFinding) {
+              console.log(
+                `[watcher] vocabulary fatigue ${repoPath}#${prNumber}: ` +
+                  `stem=${vocabularyFatigueFinding.stem} ` +
+                  `count=${vocabularyFatigueFinding.count}/${vocabularyFatigueFinding.window}`
+              );
+            }
 
             // Pre-spawn routing-tier readiness probe. Successful probes are
             // cached for the rest of the tick; failed probes get bounded
@@ -6383,9 +6394,9 @@ async function pollOnce(
               reviewDbAttemptNumber,
               passKind,
               maxRemediationRounds,
+              advisoryFindings: vocabularyFatigueFinding ? [vocabularyFatigueFinding] : [],
               reviewerSessionUuid,
               reviewerTimeoutMs,
-              vocabularyFatigueFinding,
               workspacePath: null,
               onReviewerPgid: ({ pgid, spawnedAt }) => {
                 persistReviewerPgid({

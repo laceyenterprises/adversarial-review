@@ -283,13 +283,14 @@ expensive, unavailable, or intentionally locked-out agent.
 
 ## Codex Runaway Guardrails
 
-Before spawning a GitHub-PR reviewer, the watcher evaluates the Codex runaway
+Before spawning a GitHub-PR rereview, the watcher evaluates the Codex runaway
 guardrail block at `agent_control.codex_runaway_guardrails`. The vocabulary
-fatigue guardrail reads recent PR commit subjects with
-`fetchPullRequestCommitSubjects(repo, prNumber)`, normalizes the first
-non-builder-tag word of each subject, and emits an informational
-`remediation-vocabulary-fatigue` finding when one verb stem dominates the
-configured recent window.
+fatigue guardrail reads only the configured tail window of recent PR commit
+subjects with `fetchPullRequestCommitSubjects(repo, prNumber, { limit })`,
+normalizes the first non-builder-tag word of each subject, and emits an
+informational `remediation-vocabulary-fatigue` finding when one verb stem
+dominates the configured recent window. First-pass reviews skip this guardrail
+because no remediation round has occurred yet.
 
 The finding is reviewer-facing context, not a merge gate. The watcher threads
 the finding into reviewer spawn metadata and `src/reviewer.mjs` renders it into

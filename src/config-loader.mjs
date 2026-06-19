@@ -289,7 +289,19 @@ function schemaV1() {
                 __item: { __type: TYPE_STRING },
                 __default: ['codex', 'claude-code', 'clio-agent'],
               },
-              token_budget_per_session: { __type: TYPE_INT, __default: 0, __min: 0 },
+              compaction_rate_alarm_per_hour: { __type: TYPE_INT, __default: 3, __min: 1 },
+              compaction_rate_alarm_finding_dedupe_seconds: { __type: TYPE_INT, __default: 86400, __min: 1 },
+              token_budget_per_session: { __type: TYPE_INT, __default: 50000000, __min: 0 },
+              pr_class_additive_only_allowlist: {
+                __type: TYPE_LIST,
+                __item: { __type: TYPE_STRING },
+                __default: [
+                  'projects/*',
+                  'modules/worker-pool/post-merge-actions/*',
+                  'docs/POSTMORTEM-*.md',
+                  'docs/AUDIT-*.md',
+                ],
+              },
               vocabulary_fatigue_window_commits: { __type: TYPE_INT, __default: 5, __min: 1 },
               vocabulary_fatigue_min_repeats: { __type: TYPE_INT, __default: 3, __min: 1 },
             },
@@ -1342,6 +1354,10 @@ export const ENV_ALIASES = {
   },
   'policy.dedup.uncommitted_line_threshold': {
     canonical: 'AGENT_OS_POLICY_DEDUP_UNCOMMITTED_LINE_THRESHOLD',
+    aliases: [],
+  },
+  'agent_control.codex_runaway_guardrails.token_budget_per_session': {
+    canonical: 'AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_TOKEN_BUDGET_PER_SESSION',
     aliases: [],
   },
   'agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits': {

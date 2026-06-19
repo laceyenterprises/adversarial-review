@@ -2663,9 +2663,10 @@ async function spawnReviewer({
   workspacePath = null,
   crossModelReviewWaived = false,
   crossModelReviewWaiverReason = null,
-  vocabularyFatigueFinding = null,
   onReviewerPgid = () => {},
 }) {
+  const vocabularyFatigueFinding = (Array.isArray(advisoryFindings) ? advisoryFindings : [])
+    .find((finding) => finding?.kind === 'remediation-vocabulary-fatigue') || null;
   const finalRound = (
     Number.isFinite(reviewAttemptNumber) &&
     Number.isFinite(maxRemediationRounds) &&
@@ -2736,7 +2737,6 @@ async function spawnReviewer({
         reviewerSpawnToken,
         crossModelReviewWaived,
         crossModelReviewWaiverReason,
-        ...(vocabularyFatigueFinding ? { vocabularyFatigueFinding } : {}),
       },
       timeoutMs: reviewerTimeoutMs,
       sessionUuid: reviewerSessionUuid,
@@ -6087,7 +6087,6 @@ async function pollOnce(
               advisoryFindings: vocabularyFatigueFinding ? [vocabularyFatigueFinding] : [],
               reviewerSessionUuid,
               reviewerTimeoutMs,
-              vocabularyFatigueFinding,
               workspacePath: null,
               onReviewerPgid: ({ pgid, spawnedAt }) => {
                 persistReviewerPgid({

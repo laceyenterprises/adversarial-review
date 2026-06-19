@@ -2118,31 +2118,6 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
   };
 }
 
-function formatVocabularyFatigueReviewContext(finding) {
-  if (!finding || finding.kind !== 'remediation-vocabulary-fatigue') return '';
-  const stem = String(finding.stem || '').trim();
-  const count = Number(finding.count);
-  const window = Number(finding.window);
-  const detail = String(finding.detail || '').trim();
-  if (!stem || !Number.isFinite(count) || !Number.isFinite(window)) return '';
-  return [
-    '## Informational Guardrail Signal: Remediation Vocabulary Fatigue',
-    '',
-    `The watcher observed that the verb stem '${stem}' appears in ${count} of the last ${window} commit messages.`,
-    detail || 'Treat this as a non-blocking soft churn signal while reviewing the PR.',
-    '',
-    'This signal is informational and non-blocking by itself. Use it only as context when deciding whether the diff shows runaway remediation churn or repeated superficial edits.',
-    '',
-  ].join('\n');
-}
-
-function appendVocabularyFatigueReviewContext(extraContext, finding) {
-  const rendered = formatVocabularyFatigueReviewContext(finding);
-  if (!rendered) return extraContext;
-  const base = String(extraContext || '').trimEnd();
-  return base ? `${base}\n\n${rendered}` : rendered;
-}
-
 // ── GitHub review posting ────────────────────────────────────────────────────
 
 class ReviewerPostAuthRefreshRetryableError extends Error {
@@ -2524,7 +2499,6 @@ async function main() {
     advisoryFindings = [],
     crossModelReviewWaived = false,
     crossModelReviewWaiverReason = null,
-    vocabularyFatigueFinding = null,
   } = args;
 
   if (!repo || !prNumber || !reviewerModel || !botTokenEnv) {
@@ -2626,8 +2600,6 @@ async function main() {
   if (advisoryContext) {
     extraContext = `${extraContext}${advisoryContext}`;
   }
-
-  extraContext = appendVocabularyFatigueReviewContext(extraContext, vocabularyFatigueFinding);
 
   // 2. Run adversarial review (OAuth only — no API key fallback)
   const effectiveModel = reviewerModel;
@@ -2897,8 +2869,7 @@ const __test__ = {
   spawnGeminiReview,
   reviewWithGemini,
   dispatchReviewerModel,
-  formatVocabularyFatigueReviewContext,
-  appendVocabularyFatigueReviewContext,
+  formatAdvisoryFindingsContext,
   postGitHubReviewWithCapture,
   isRetryableGhTransportError,
   isReviewerPostAuthFailure,

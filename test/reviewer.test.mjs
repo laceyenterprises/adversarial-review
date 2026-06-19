@@ -30,7 +30,7 @@ const {
   spawnGeminiReview,
   reviewWithGemini,
   dispatchReviewerModel,
-  appendVocabularyFatigueReviewContext,
+  formatAdvisoryFindingsContext,
   LOCAL_REVIEW_SHADOW_LABEL,
   hasLocalReviewShadowLabel,
   evaluateLocalReviewShadowEligibility,
@@ -1489,9 +1489,9 @@ test('reviewer selection still routes codex (needsSanitize) and claude correctly
   assert.equal(claudeDispatch.needsSanitize, false);
 });
 
-test('vocabulary fatigue finding is rendered into reviewer prompt context', async () => {
+test('vocabulary fatigue finding is rendered through advisory prompt context', async () => {
   const contexts = [];
-  const extraContext = appendVocabularyFatigueReviewContext('BASE CONTEXT', {
+  const extraContext = `BASE CONTEXT${formatAdvisoryFindingsContext([{
     kind: 'remediation-vocabulary-fatigue',
     severity: 'info',
     blocking: false,
@@ -1499,7 +1499,7 @@ test('vocabulary fatigue finding is rendered into reviewer prompt context', asyn
     count: 4,
     window: 5,
     detail: 'The verb stem is dominating the recent commit window.',
-  });
+  }])}`;
 
   await dispatchReviewerModel('claude', '+diff\n', extraContext, {
     reviewWithClaudeImpl: async (_diff, context) => {
@@ -1510,9 +1510,10 @@ test('vocabulary fatigue finding is rendered into reviewer prompt context', asyn
 
   assert.equal(contexts.length, 1);
   assert.match(contexts[0], /BASE CONTEXT/);
-  assert.match(contexts[0], /Informational Guardrail Signal: Remediation Vocabulary Fatigue/);
-  assert.match(contexts[0], /verb stem 'harden' appears in 4 of the last 5 commit messages/);
-  assert.match(contexts[0], /informational and non-blocking by itself/);
+  assert.match(contexts[0], /Watcher Advisory Findings/);
+  assert.match(contexts[0], /remediation-vocabulary-fatigue/);
+  assert.match(contexts[0], /"stem": "harden"/);
+  assert.match(contexts[0], /Do not place them in `## Blocking Issues`/);
 });
 
 test('assertGeminiOAuth accepts a valid creds file and rejects a missing/invalid one', async () => {

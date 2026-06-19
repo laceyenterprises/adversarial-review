@@ -121,6 +121,15 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('linear.team_name'), 'Laceyenterprises');
     assert.equal(cfg.get('linear.issue_prefix'), 'LAC');
     assert.equal(cfg.get('update.channel'), 'rolling');
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_per_hour'), 3);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_finding_dedupe_seconds'), 86400);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.token_budget_per_session'), 50000000);
+    assert.deepEqual(cfg.get('agent_control.codex_runaway_guardrails.pr_class_additive_only_allowlist'), [
+      'projects/*',
+      'modules/worker-pool/post-merge-actions/*',
+      'docs/POSTMORTEM-*.md',
+      'docs/AUDIT-*.md',
+    ]);
     assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits'), 5);
     assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats'), 3);
   } finally {
@@ -186,10 +195,12 @@ test('codex runaway guardrail vocabulary fatigue config resolves through strict 
     const envCfg = loadConfig({
       topPath: top,
       env: {
+        AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_TOKEN_BUDGET_PER_SESSION: '123456',
         AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_VOCABULARY_FATIGUE_WINDOW_COMMITS: '8',
         AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_VOCABULARY_FATIGUE_MIN_REPEATS: '5',
       },
     });
+    assert.equal(envCfg.get('agent_control.codex_runaway_guardrails.token_budget_per_session'), 123456);
     assert.equal(envCfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits'), 8);
     assert.equal(envCfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats'), 5);
   } finally {
@@ -216,7 +227,12 @@ test('codex runaway guardrail strict schema accepts Python-owned keys', () => {
           convergence_stall_observed_worker_classes:
             - codex
             - claude-code
+          compaction_rate_alarm_per_hour: 7
+          compaction_rate_alarm_finding_dedupe_seconds: 120
           token_budget_per_session: 200000
+          pr_class_additive_only_allowlist:
+            - projects/*
+            - docs/AUDIT-*.md
           vocabulary_fatigue_window_commits: 7
           vocabulary_fatigue_min_repeats: 4
     `);
@@ -234,7 +250,13 @@ test('codex runaway guardrail strict schema accepts Python-owned keys', () => {
       'codex',
       'claude-code',
     ]);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_per_hour'), 7);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_finding_dedupe_seconds'), 120);
     assert.equal(cfg.get('agent_control.codex_runaway_guardrails.token_budget_per_session'), 200000);
+    assert.deepEqual(cfg.get('agent_control.codex_runaway_guardrails.pr_class_additive_only_allowlist'), [
+      'projects/*',
+      'docs/AUDIT-*.md',
+    ]);
     assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits'), 7);
     assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats'), 4);
   } finally {

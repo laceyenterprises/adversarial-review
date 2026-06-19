@@ -291,19 +291,17 @@ function scanFile(filePath, root) {
     }
   }
 
+  const scopes = scopeBuckets(lines, interesting);
   const findings = [];
   const seen = new Set();
-  for (const anchor of interesting.filter((item) => item.facts.length || item.decision)) {
-    const start = Math.max(0, anchor.index - WINDOW_RADIUS);
-    const end = Math.min(lines.length - 1, anchor.index + WINDOW_RADIUS);
-    const windowItems = interesting.filter((item) => item.index >= start && item.index <= end);
+  for (const scope of scopes) {
     const factLines = {
       reviewerHead: [],
       reviewVerdict: [],
       mergeability: [],
     };
     const decisionLines = [];
-    for (const item of windowItems) {
+    for (const item of scope.items) {
       for (const fact of item.facts) {
         factLines[fact].push(item.line);
       }
@@ -329,7 +327,7 @@ function scanFile(filePath, root) {
       ...factLines.mergeability,
       ...decisionLines,
     ];
-    const key = `${rel}:${findingLine}`;
+    const key = `${rel}:${scope.key}:${findingLine}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const contextLines = lines
@@ -349,6 +347,8 @@ function scanFile(filePath, root) {
         reviewVerdictLines: uniqueSorted(factLines.reviewVerdict),
         mergeabilityLines: uniqueSorted(factLines.mergeability),
         decisionLines: uniqueSorted(decisionLines),
+        scopeStartLine: scope.startLine,
+        scopeEndLine: scope.endLine,
       },
       suggested_owner: OWNER_MODULE,
       suggested_remediation: 'Consume buildAdversarialGateSnapshot()/pickAdversarialGateStatus() instead of combining raw review-gate facts.',
@@ -357,6 +357,83 @@ function scanFile(filePath, root) {
     });
   }
   return findings;
+}
+
+function scopeBuckets(lines, interesting) {
+  const ranges = collectScopeRanges(lines);
+  const buckets = new Map();
+  for (const item of interesting.filter((candidate) => candidate.facts.length || candidate.decision)) {
+    const range = nearestScopeRange(ranges, item.line) || { key: 'top-level', startLine: 1, endLine: lines.length };
+    if (!buckets.has(range.key)) {
+      buckets.set(range.key, { ...range, items: [] });
+    }
+    buckets.get(range.key).items.push(item);
+  }
+  return [...buckets.values()].sort((a, b) => (
+    a.startLine - b.startLine ||
+    (a.endLine - a.startLine) - (b.endLine - b.startLine) ||
+    a.key.localeCompare(b.key)
+  ));
+}
+
+function nearestScopeRange(ranges, lineNumber) {
+  const containing = ranges.filter((range) => range.startLine <= lineNumber && lineNumber <= range.endLine);
+  if (!containing.length) return null;
+  return containing.sort((a, b) => (
+    (a.endLine - a.startLine) - (b.endLine - b.startLine) ||
+    b.startLine - a.startLine
+  ))[0];
+}
+
+function collectScopeRanges(lines) {
+  const ranges = [];
+  const stack = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const opens = countChar(line, '{');
+    const closes = countChar(line, '}');
+    for (let open = 0; open < opens; open += 1) {
+      stack.push({
+        startLine: index + 1,
+        tracked: isTrackedScopeStart(lines, index),
+      });
+    }
+    for (let close = 0; close < closes; close += 1) {
+      const scope = stack.pop();
+      if (scope?.tracked) {
+        const endLine = index + 1;
+        ranges.push({
+          key: `${scope.startLine}-${endLine}`,
+          startLine: scope.startLine,
+          endLine,
+        });
+      }
+    }
+  }
+  for (const scope of stack) {
+    if (scope.tracked) {
+      ranges.push({
+        key: `${scope.startLine}-${lines.length}`,
+        startLine: scope.startLine,
+        endLine: lines.length,
+      });
+    }
+  }
+  return ranges;
+}
+
+function isTrackedScopeStart(lines, index) {
+  const current = lines[index].trim();
+  const previous = lines.slice(Math.max(0, index - 2), index).join(' ').trim();
+  return BLOCK_START_RE.test(current) || BLOCK_START_RE.test(`${previous} ${current}`);
+}
+
+function countChar(line, char) {
+  let count = 0;
+  for (const candidate of line) {
+    if (candidate === char) count += 1;
+  }
+  return count;
 }
 
 function uniqueSorted(values) {

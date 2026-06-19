@@ -59,6 +59,37 @@ test('CDM re-derivation guard flags planted raw verdict/head/mergeability gate d
   }
 });
 
+test('CDM re-derivation guard catches facts spread beyond the fixed window in one scope', () => {
+  const root = makeTempRoot();
+  const filler = Array.from({ length: 45 }, (_, index) => `        const spacer${index} = ${index};`).join('\n');
+  try {
+    writeSource(root, 'src/spread-out-gate.mjs', `
+      export function canMergeFromSpreadOutFacts(row, pr) {
+        const reviewedHead = row.reviewer_head_sha;
+${filler}
+        const verdict = row.last_verdict || row.review_body;
+${filler}
+        const mergeability = pr.mergeStateStatus || pr.mergeable;
+${filler}
+        return (
+          reviewedHead === pr.headSha &&
+          (verdict === 'approved' || verdict === 'comment-only') &&
+          mergeability === 'MERGEABLE'
+        );
+      }
+    `);
+
+    const report = runAudit({ root, scans: ['src'] });
+    assert.equal(report.summary.total, 1);
+    assert.equal(report.summary.non_allowlisted, 1);
+    assert.equal(report.findings[0].file, 'src/spread-out-gate.mjs');
+    assert.deepEqual(report.findings[0].facts.reviewerHeadLines, [2]);
+    assert.equal(report.findings[0].facts.scopeStartLine, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('CDM re-derivation guard passes clean on migrated adversarial-review tree', () => {
   const repoRoot = path.resolve(new URL('..', import.meta.url).pathname);
   const report = runAudit({ root: repoRoot, scans: ['src', 'scripts', 'bin'] });

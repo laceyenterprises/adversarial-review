@@ -147,6 +147,7 @@ const ENUM_DISPATCH_DEFAULT_WORKER_CLASS = ['codex', 'claude-code', 'merge-agent
 const ENUM_SESSION_LEDGER_BACKEND = ['sqlite', 'postgres'];
 const ENUM_SESSION_LEDGER_DUAL_WRITE_MODE = [null, 'postgres', 'sqlite', 'off'];
 const ENUM_SESSION_LEDGER_SERVICE_LOG_LEVEL = ['CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'];
+const ENUM_APP_MODE = ['agent-os', 'standalone'];
 const PATTERN_LINEAR_ISSUE_PREFIX = '^[A-Z][A-Z0-9]{1,9}$';
 const PATTERN_LINEAR_ISSUE_PREFIX_DESCRIPTION = 'Linear issue prefix /^[A-Z][A-Z0-9]{1,9}$/';
 const PATTERN_SQL_IDENTIFIER = '^[A-Za-z_][A-Za-z0-9_]{0,62}$';
@@ -337,6 +338,32 @@ function schemaV1() {
           emergency_stop_path: {
             __type: TYPE_STRING,
             __default: '~/.agent-os/governance/emergency-stop',
+          },
+        },
+      },
+      apps: {
+        __type: TYPE_DICT,
+        __strict: false,
+        __default: {},
+        __keys: {},
+        __extra_keys_schema: {
+          __type: TYPE_DICT,
+          __strict: true,
+          __keys: {
+            mode: {
+              __type: TYPE_STRING,
+              __default: 'agent-os',
+              __enum: ENUM_APP_MODE,
+            },
+            subscribes: {
+              __type: TYPE_LIST,
+              __item: { __type: TYPE_STRING },
+              __default: [],
+            },
+            contract_version: {
+              __type: TYPE_STRING,
+              __default: '1.0',
+            },
           },
         },
       },
@@ -1758,6 +1785,7 @@ function validateDictPresentKeysOnly(
     );
   }
   const allowed = schema.__keys || {};
+  const extraSchema = schema.__extra_keys_schema || null;
   const strict = schema.__strict !== false;
 
   if (strict) {
@@ -1800,11 +1828,29 @@ function validateDictPresentKeysOnly(
   for (const [childKey, raw] of Object.entries(doc)) {
     if (childKey.startsWith('__')) continue;
     if (!(childKey in allowed)) {
-      // Non-strict dict (e.g. `submodules`) is an extension point:
-      // pass arbitrary subtrees through verbatim instead of silently
-      // dropping them. Strict dicts would have thrown above (or, under
-      // tolerateUnknown, been dropped above).
-      if (!strict) out[childKey] = raw;
+      // Non-strict dicts are extension points. If they provide an
+      // __extra_keys_schema, arbitrary child keys are validated against it
+      // (keyed maps such as apps.<app-id>); otherwise pass subtrees through
+      // verbatim (e.g. submodules).
+      if (!strict && extraSchema) {
+        const full = keyPath ? `${keyPath}.${childKey}` : childKey;
+        const childSource = annotateLine(source, lineMap, childKey);
+        if (extraSchema.__type === TYPE_DICT) {
+          const validatedExtra = validateDictPresentKeysOnly(
+            raw,
+            extraSchema,
+            full,
+            childSource,
+            null,
+            tolerateUnknown,
+          );
+          out[childKey] = { ...buildDefaultsDict(extraSchema), ...validatedExtra };
+        } else {
+          out[childKey] = checkLeaf(raw, extraSchema, full, childSource);
+        }
+      } else if (!strict) {
+        out[childKey] = raw;
+      }
       continue;
     }
     const childSchema = allowed[childKey];
@@ -2162,10 +2208,48 @@ function schemaLeaf(schema, key) {
   for (const part of parts) {
     if (cursor.__type !== TYPE_DICT) return null;
     const keys = cursor.__keys || {};
-    if (!(part in keys)) return null;
-    cursor = keys[part];
+    if (part in keys) {
+      cursor = keys[part];
+      continue;
+    }
+    if (cursor.__strict === false && cursor.__extra_keys_schema) {
+      cursor = cursor.__extra_keys_schema;
+      continue;
+    }
+    return null;
   }
   return cursor;
+}
+
+const APP_ENV_SUFFIXES = {
+  MODE: 'mode',
+  SUBSCRIBES: 'subscribes',
+  CONTRACT_VERSION: 'contract_version',
+};
+
+function appIdFromEnvSegment(segment) {
+  return segment.toLowerCase().replaceAll('_', '-');
+}
+
+function dynamicAppEnvAliases(env) {
+  const out = [];
+  const prefix = 'AGENT_OS_APPS_';
+  for (const envName of Object.keys(env).sort()) {
+    if (!envName.startsWith(prefix)) continue;
+    const tail = envName.slice(prefix.length);
+    for (const [suffix, leaf] of Object.entries(APP_ENV_SUFFIXES)) {
+      const marker = `_${suffix}`;
+      if (tail.endsWith(marker) && tail.slice(0, -marker.length)) {
+        const appId = appIdFromEnvSegment(tail.slice(0, -marker.length));
+        out.push([
+          `apps.${appId}.${leaf}`,
+          { canonical: envName, aliases: [] },
+        ]);
+        break;
+      }
+    }
+  }
+  return out;
 }
 
 // True iff `key` is a path the schema accepts. Walks like schemaLeaf, but
@@ -2180,7 +2264,13 @@ function isValidSchemaPath(schema, key) {
     if (!cursor || cursor.__type !== TYPE_DICT) return false;
     const keys = cursor.__keys || {};
     const part = parts[i];
-    if (!(part in keys)) return cursor.__strict === false;
+    if (!(part in keys)) {
+      if (cursor.__strict === false && cursor.__extra_keys_schema) {
+        cursor = cursor.__extra_keys_schema;
+        continue;
+      }
+      return cursor.__strict === false;
+    }
     cursor = keys[part];
   }
   return cursor !== null && cursor !== undefined;
@@ -2429,7 +2519,11 @@ export function loadConfig({
   }
 
   // --- Layer 5: env vars ---
-  for (const [key, info] of Object.entries(ENV_ALIASES)) {
+  const envAliasEntries = [
+    ...Object.entries(ENV_ALIASES),
+    ...dynamicAppEnvAliases(envView),
+  ];
+  for (const [key, info] of envAliasEntries) {
     const leaf = schemaLeaf(schema, key);
     if (leaf === null) continue;
     const [winning, rawValue] = checkEnvOverlap(
@@ -2566,7 +2660,11 @@ function _cacheKeyFor({ topPath, modulePaths, env }) {
   const envView = env || process.env;
   const resolvedTop = topPath || envView.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
   const envAliases = [];
-  for (const info of Object.values(ENV_ALIASES)) {
+  const envAliasInfos = [
+    ...Object.values(ENV_ALIASES),
+    ...dynamicAppEnvAliases(envView).map(([, info]) => info),
+  ];
+  for (const info of envAliasInfos) {
     const names = [info.canonical, ...(info.aliases || []).map(([name]) => name)];
     for (const name of names) {
       if (Object.prototype.hasOwnProperty.call(envView, name)) {

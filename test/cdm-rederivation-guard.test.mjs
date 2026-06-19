@@ -67,15 +67,25 @@ test('CDM re-derivation guard passes clean on migrated adversarial-review tree',
   assert.deepEqual(report.findings, []);
 });
 
+test('CDM re-derivation guard does not report its own implementation in default scan targets', () => {
+  const repoRoot = path.resolve(new URL('..', import.meta.url).pathname);
+  const report = runAudit({ root: repoRoot });
+
+  assert.equal(
+    report.findings.some((finding) => finding.file === 'scripts/audit-cdm-rederivation.mjs'),
+    false,
+  );
+});
+
 test('CDM re-derivation guard permits allowlisted site and records it in JSON artifact', () => {
   const root = makeTempRoot();
   try {
     writeSource(root, 'src/allowlisted-gate.mjs', `
+      // cdm-allowlist: legacy gate decision report until AMA export moves to canonical snapshot
       export function legacyGateDecision(row, pr) {
         const verdict = row.last_verdict || row.reviewBody;
         const reviewedHead = row.reviewer_head_sha;
         const mergeable = pr.mergeable || pr.mergeStateStatus;
-        // cdm-allowlist: legacy gate decision report until AMA export moves to canonical snapshot
         return verdict && reviewedHead === pr.headSha && mergeable === 'MERGEABLE';
       }
     `);
@@ -90,6 +100,46 @@ test('CDM re-derivation guard permits allowlisted site and records it in JSON ar
       'legacy gate decision report until AMA export moves to canonical snapshot',
     );
     assert.match(JSON.stringify(report), /legacy gate decision report/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('CDM re-derivation guard does not let a nearby allowlist suppress an unrelated finding', () => {
+  const root = makeTempRoot();
+  try {
+    writeSource(root, 'src/allowlisted-gate.mjs', `
+      // cdm-allowlist: legacy gate decision report until AMA export moves to canonical snapshot
+      export function legacyGateDecision(row, pr) {
+        const verdict = row.last_verdict || row.reviewBody;
+        const reviewedHead = row.reviewer_head_sha;
+        const mergeable = pr.mergeable || pr.mergeStateStatus;
+        return verdict && reviewedHead === pr.headSha && mergeable === 'MERGEABLE';
+      }
+    `);
+    writeSource(root, 'src/unallowlisted-gate.mjs', `
+      export function newGateDecision(row, pr) {
+        const verdict = row.last_verdict || row.reviewBody;
+        const reviewedHead = row.reviewer_head_sha;
+        const mergeable = pr.mergeable || pr.mergeStateStatus;
+        return verdict && reviewedHead === pr.headSha && mergeable === 'MERGEABLE';
+      }
+    `);
+
+    const report = runAudit({ root, scans: ['src'] });
+    assert.equal(report.summary.total, 2);
+    assert.equal(report.summary.allowlisted, 1);
+    assert.equal(report.summary.non_allowlisted, 1);
+    assert.deepEqual(
+      report.findings.map((finding) => ({
+        file: finding.file,
+        allowlisted: finding.allowlist_marker_present,
+      })),
+      [
+        { file: 'src/allowlisted-gate.mjs', allowlisted: true },
+        { file: 'src/unallowlisted-gate.mjs', allowlisted: false },
+      ],
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

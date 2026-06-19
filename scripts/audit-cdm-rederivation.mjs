@@ -7,7 +7,8 @@
  * it looks for a local block that reads all three raw fact families and also
  * contains review-gate decision language. Single-field plumbing is allowed.
  *
- * Inline allowlist marker:
+ * Attached allowlist marker, on the finding line or the immediately preceding
+ * non-blank line:
  *   // cdm-allowlist: <reason>
  *
  * Allowlisted findings are still emitted in the JSON artifact so exceptions are
@@ -20,6 +21,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 const OWNER_MODULE = 'src/adversarial-gate-status.mjs';
+const SELF_MODULE = 'scripts/audit-cdm-rederivation.mjs';
 const DEFAULT_SCAN_TARGETS = ['src', 'scripts', 'bin'];
 const DEFAULT_INCLUDE_EXTENSIONS = new Set(['.mjs', '.js', '.cjs', '.ts', '.sh']);
 const EXCLUDE_DIRS = new Set([
@@ -158,6 +160,7 @@ function resolveScanPaths(root, scans) {
 function shouldScanFile(filePath, root) {
   const rel = normalizeRel(filePath, root);
   if (rel === OWNER_MODULE) return false;
+  if (rel === SELF_MODULE) return false;
   const ext = path.extname(filePath);
   return DEFAULT_INCLUDE_EXTENSIONS.has(ext);
 }
@@ -209,6 +212,22 @@ function markerForLine(line) {
   return match ? match[1].trim() : null;
 }
 
+function attachedAllowlistReason(lines, lineNumber) {
+  for (const candidateLine of [lineNumber, previousNonBlankLine(lines, lineNumber)]) {
+    if (!candidateLine) continue;
+    const reason = markerForLine(lines[candidateLine - 1]);
+    if (reason) return reason;
+  }
+  return null;
+}
+
+function previousNonBlankLine(lines, lineNumber) {
+  for (let index = lineNumber - 2; index >= 0; index -= 1) {
+    if (lines[index].trim()) return index + 1;
+  }
+  return null;
+}
+
 function scanFile(filePath, root) {
   const rel = normalizeRel(filePath, root);
   let text;
@@ -248,13 +267,11 @@ function scanFile(filePath, root) {
       mergeability: [],
     };
     const decisionLines = [];
-    const allowlistReasons = [];
     for (const item of windowItems) {
       for (const fact of item.facts) {
         factLines[fact].push(item.line);
       }
       if (item.decision) decisionLines.push(item.line);
-      if (item.allowlistReason) allowlistReasons.push(item.allowlistReason);
     }
     if (
       !factLines.reviewerHead.length ||
@@ -277,6 +294,7 @@ function scanFile(filePath, root) {
       .slice(Math.max(0, findingLine - 3), Math.min(lines.length, findingLine + 2))
       .map((line) => line.trim())
       .filter(Boolean);
+    const allowlistReason = attachedAllowlistReason(lines, findingLine);
     findings.push({
       category: 'review-verdict',
       severity: 'high',
@@ -292,8 +310,8 @@ function scanFile(filePath, root) {
       },
       suggested_owner: OWNER_MODULE,
       suggested_remediation: 'Consume buildAdversarialGateSnapshot()/pickAdversarialGateStatus() instead of combining raw review-gate facts.',
-      allowlist_marker_present: allowlistReasons.length > 0,
-      ...(allowlistReasons.length ? { allowlist_reason: allowlistReasons[0] } : {}),
+      allowlist_marker_present: allowlistReason !== null,
+      ...(allowlistReason ? { allowlist_reason: allowlistReason } : {}),
     });
   }
   return findings;

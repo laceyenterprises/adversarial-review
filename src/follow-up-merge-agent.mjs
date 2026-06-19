@@ -1987,6 +1987,35 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       );
     }
     lines.push('');
+    lines.push('## Full rescue mandate (hammer parity)');
+    lines.push('');
+    lines.push(
+      'This is the end-of-budget rescue — handle EVERYTHING an interactive codex'
+      + ' rescue session would before merging, not just the review findings:'
+    );
+    lines.push(
+      '- Green `main` is the bar: run the full test suite and fix EVERY failing'
+      + ' test AND every red required check / CI job (lint, build, type-check),'
+      + ' INCLUDING failures unrelated to this PR or pre-existing on `main`.'
+      + ' Never merge past red. Fixing tests/CI (and the minimal production change'
+      + ' a legitimately failing check proves is needed) is in scope; net-new'
+      + ' FEATURE scope is not.'
+    );
+    lines.push(
+      '- Rebase onto the latest `main` and confirm it holds (re-validate the full'
+      + ' suite + required checks on the rebased head). If the rebase hits a merge'
+      + ' conflict, RESOLVE it locally (fix the conflict markers preserving both'
+      + ' sides, continue the rebase, force-push with lease) — do not abandon a'
+      + ' conflict to the operator. Hard-block only a genuinely unsafe semantic'
+      + ' conflict you cannot correctly settle.'
+    );
+    lines.push('- Leave the working tree clean; never merge a dirty head.');
+    lines.push(
+      '- On a successful merge, post a closing comment summarizing what was done'
+      + ' (findings remediated, failing tests / CI fixed, rebase / conflict'
+      + ' handling). This is the human-visible audit trail of an autonomous close.'
+    );
+    lines.push('');
     lines.push('Required behavior:');
     lines.push(
       '1. Run `comment_only_followups.py` (your existing sub-worker triage'

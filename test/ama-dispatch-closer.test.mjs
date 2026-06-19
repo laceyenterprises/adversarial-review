@@ -1375,6 +1375,12 @@ test('isHammerRemediableEligibilityMiss fires for the strict-mode non-blocking c
   );
   assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'pr-not-mergeable']), true);
 
+  // Remediable: red CI routes to the hammer rescue (it fixes the failing
+  // required checks / tests, then merges) — alone or with other remediable reasons.
+  assert.equal(isHammerRemediableEligibilityMiss(['ci-not-green']), true, 'red CI → hammer rescue');
+  assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'ci-not-green']), true);
+  assert.equal(isHammerRemediableEligibilityMiss(['ci-not-green', 'pr-not-mergeable']), true);
+
   // NOT remediable — must stay await-operator:
   assert.equal(isHammerRemediableEligibilityMiss([]), false);
   assert.equal(isHammerRemediableEligibilityMiss(undefined), false);
@@ -1382,6 +1388,6 @@ test('isHammerRemediableEligibilityMiss fires for the strict-mode non-blocking c
   assert.equal(isHammerRemediableEligibilityMiss(['blocking-findings-present']), false);
   assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'blocking-findings-present']), false, 'any blocking finding disqualifies');
   assert.equal(isHammerRemediableEligibilityMiss(['pr-not-mergeable', 'blocking-findings-present']), false, 'blocking finding still disqualifies even with a conflict');
-  assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'ci-not-green']), false);
+  assert.equal(isHammerRemediableEligibilityMiss(['ci-not-green', 'blocking-findings-present']), false, 'blocking finding still disqualifies even with red CI');
   assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'stale-review-head']), false);
 });

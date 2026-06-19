@@ -26,17 +26,20 @@ not replace the machine gate.
    freshest findings.
 2. Remediate ALL final comments, blocking and non-blocking. Make real fixes for
    the findings the review raised. Do not add net-new FEATURE scope.
-2b. **Get the full test suite green — this is the bar for keeping `main` clean.**
-   Run the repository's complete test suite against your post-remediation head
-   and fix EVERY failing test, *including tests that are unrelated to this PR's
-   findings or that pre-date this branch*. A merge that leaves `main` red is not
-   acceptable. Fixing tests (and the minimal production change a legitimately
-   failing test proves is needed) is the one sanctioned exception to "scope only
-   to the findings" — it is always in scope; net-new feature scope is not. If a
-   failing test genuinely cannot be fixed inside this remediation (it needs a
+2b. **Get the full test suite AND all CI green — this is the bar for keeping
+   `main` clean.** Run the repository's complete test suite against your
+   post-remediation head and fix EVERY failing test AND every red required check
+   / CI job (lint, build, type-check, etc.), *including failures that are
+   unrelated to this PR's findings or that pre-date this branch*. A merge that
+   leaves `main` red is not acceptable. Fixing tests/CI (and the minimal
+   production change a legitimately failing check proves is needed) is the one
+   sanctioned exception to "scope only to the findings" — it is always in scope;
+   net-new feature scope is not. Also leave the working tree clean: commit or
+   discard any stray/dirty changes so the head is not left in a dirty state. If a
+   failing check genuinely cannot be fixed inside this remediation (it needs a
    separate infra change, an external dependency, or a credential you do not
-   have), emit ONE hard-blocker report naming the exact failing test(s) and stop.
-   Do NOT merge past a red test, related or not.
+   have), emit ONE hard-blocker report naming the exact failing check(s) and stop.
+   Do NOT merge past a red test or a red required check, related or not.
 3. Commit the remediation. The commit must have provenance trailers including:
 
    ```text

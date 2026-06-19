@@ -69,24 +69,29 @@ const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md
 // (rebase onto main, resolve conflicts locally, re-validate), so
 // `pr-not-mergeable` is hammer-remediable too — a conflicting/behind PR routes
 // to the hammer instead of parking await-operator. Still NARROW: blocking
-// findings (these go through remediation rounds first), ci-not-green, stale head,
-// risk-class, branch-protection, remediation-pending, and hard-stop labels are
-// NOT auto-hammer and stay await-operator.
+// findings (these go through remediation rounds first), stale head, risk-class,
+// branch-protection, remediation-pending, and hard-stop labels are NOT
+// auto-hammer and stay await-operator. Blocking findings are handled by the
+// budget-exhausted final-pass rescue, not the immediate auto-hammer.
 const HAMMER_AUTO_REMEDIABLE_MISS_REASONS = new Set([
   'non-blocking-findings-present',
   'verdict-not-settled-success', // strict mode emits this alongside the above
   'pr-not-mergeable', // hammer rebases onto main / resolves the conflict, then merges
+  'ci-not-green', // hammer fixes the failing required checks (green-main bar), then merges
 ]);
 
 export function isHammerRemediableEligibilityMiss(reasons) {
   if (!Array.isArray(reasons) || reasons.length === 0) return false;
   // The hammer must have something it can actually act on: non-blocking findings
-  // to remediate, or a not-mergeable state (conflict / behind) to rebase+resolve.
+  // to remediate, a not-mergeable state (conflict / behind) to rebase+resolve, or
+  // red CI to fix.
   const hasActionable =
-    reasons.includes('non-blocking-findings-present') || reasons.includes('pr-not-mergeable');
+    reasons.includes('non-blocking-findings-present') ||
+    reasons.includes('pr-not-mergeable') ||
+    reasons.includes('ci-not-green');
   if (!hasActionable) return false;
   // And EVERY reason must be hammer-remediable — a co-occurring blocking finding,
-  // red CI, stale head, etc. means NOT auto-hammer.
+  // stale head, etc. means NOT auto-hammer (those go through rounds / operator).
   return reasons.every((reason) => HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason));
 }
 const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;

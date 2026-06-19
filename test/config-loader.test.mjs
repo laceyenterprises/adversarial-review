@@ -20,6 +20,7 @@ import {
   validateSchema,
   SCHEMA_VERSION,
   getConfig,
+  loadConfigCached,
   resetConfigCache,
 } from '../src/config-loader.mjs';
 
@@ -3320,6 +3321,238 @@ test('resume_context_envelope mirrors default and env override', () => {
     });
     assert.equal(cfg.get('feature_flags.resume_context_envelope'), false);
   } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// -------- APC-01: apps.<id> keyed-map surface --------------------------------
+
+test('apps.<id> YAML entry resolves with full schema defaults', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      apps:
+        bar:
+          mode: standalone
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.get('apps.bar'), {
+      mode: 'standalone',
+      subscribes: [],
+      contract_version: '1.0',
+    });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('apps.<id> YAML entry with dots is defaulted as one keyed-map entry', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      apps:
+        "foo.bar":
+          mode: standalone
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.values.apps['foo.bar'], {
+      mode: 'standalone',
+      subscribes: [],
+      contract_version: '1.0',
+    });
+    assert.equal(Object.prototype.hasOwnProperty.call(cfg.values.apps, 'foo'), false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('apps.<id> YAML entry with prototype-like segment cannot pollute prototypes', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      apps:
+        "foo.__proto__":
+          mode: standalone
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.values.apps['foo.__proto__'], {
+      mode: 'standalone',
+      subscribes: [],
+      contract_version: '1.0',
+    });
+    assert.equal(Object.prototype.hasOwnProperty.call(cfg.values.apps, 'foo'), false);
+    assert.equal(Object.prototype.subscribes, undefined);
+    assert.equal(Object.prototype.contract_version, undefined);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('apps.<id> rejects an unknown key via the strict child schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      apps:
+        bar:
+          mode: standalone
+          bogus: 1
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /bogus/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('AGENT_OS_APPS_<id>_SUBSCRIBES coerces to a list', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      apps:
+        bar:
+          mode: standalone
+    `);
+    const cfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_APPS_BAR_SUBSCRIBES: 'a,b' },
+    });
+    assert.deepEqual(cfg.get('apps.bar.subscribes'), ['a', 'b']);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('AGENT_OS_APPS_<id> preserves file-declared app default provenance', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      apps:
+        foo:
+          mode: standalone
+    `);
+    const cfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_APPS_FOO_SUBSCRIBES: 'a' },
+    });
+
+    assert.deepEqual(cfg.get('apps.foo'), {
+      mode: 'standalone',
+      subscribes: ['a'],
+      contract_version: '1.0',
+    });
+    assert.equal(cfg.sources['apps.foo.contract_version'], 'code-default');
+    assert.equal(
+      cfg.sources['apps.foo.subscribes'],
+      'env:AGENT_OS_APPS_FOO_SUBSCRIBES',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('env-only apps.<id> converges on the same defaulted shape as a YAML entry', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      apps: {}
+    `);
+    const cfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_APPS_FOO_MODE: 'standalone' },
+    });
+    // Regression: an env-only app previously yielded { mode } with
+    // `subscribes`/`contract_version` undefined, crashing consumers that
+    // iterate `apps.<id>.subscribes`. It must now match a YAML-declared app.
+    assert.deepEqual(cfg.get('apps.foo'), {
+      mode: 'standalone',
+      subscribes: [],
+      contract_version: '1.0',
+    });
+    assert.deepEqual(cfg.get('apps.foo.subscribes'), []);
+    assert.equal(
+      cfg.sources['apps.foo.contract_version'],
+      'code-default (env-registered app)',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('env-only apps.<id> supports prototype-bearing keyed-map ids', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      apps: {}
+    `);
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_APPS_CONSTRUCTOR_MODE: 'standalone',
+        AGENT_OS_APPS_PROTOTYPE_MODE: 'standalone',
+      },
+    });
+
+    for (const appId of ['constructor', 'prototype']) {
+      assert.equal(Object.prototype.hasOwnProperty.call(cfg.values.apps, appId), true);
+      assert.deepEqual(cfg.values.apps[appId], {
+        mode: 'standalone',
+        subscribes: [],
+        contract_version: '1.0',
+      });
+    }
+    assert.equal(Object.prototype.subscribes, undefined);
+    assert.equal(Object.prototype.contract_version, undefined);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('apps.<id> env value change busts the config cache', () => {
+  const tmp = freshTmp();
+  const top = join(tmp, 'config.yaml');
+  try {
+    writeFile(top, `
+      version: 1
+      apps:
+        bar:
+          mode: standalone
+    `);
+    resetConfigCache();
+    let cfg = loadConfigCached({
+      topPath: top,
+      env: { AGENT_OS_APPS_BAR_CONTRACT_VERSION: '1.0' },
+    });
+    assert.equal(cfg.get('apps.bar.contract_version'), '1.0');
+
+    cfg = loadConfigCached({
+      topPath: top,
+      env: { AGENT_OS_APPS_BAR_CONTRACT_VERSION: '2.0' },
+    });
+    assert.equal(cfg.get('apps.bar.contract_version'), '2.0');
+  } finally {
+    resetConfigCache();
     rmSync(tmp, { recursive: true, force: true });
   }
 });

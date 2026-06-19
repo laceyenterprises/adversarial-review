@@ -56,6 +56,31 @@ This exception does not apply to checked-in `config.yaml`, checked-in module
 files, direct standalone validator calls, module-local direct loads,
 unallowlisted root keys, or nested keys.
 
+## Env-materialized app entries
+
+`apps` is a keyed map. The key after `apps.` is an app id, not dotted path
+syntax; quoted YAML ids such as `"foo.bar"` and `"foo.__proto__"` must remain a
+single app id when loaders validate, default, and expose the resolved map.
+
+Environment variables in the `AGENT_OS_APPS_<id>_<leaf>` family may materialize
+an app entry even when no file layer declared that app id. The supported leaf
+suffixes are `MODE`, `SUBSCRIBES`, and `CONTRACT_VERSION`; the app id segment is
+lowercased and `_` is normalized to `-` before it is inserted under `apps`.
+
+An env-materialized app entry receives the same schema defaults as a YAML
+entry. For example, `AGENT_OS_APPS_FOO_MODE=standalone` resolves
+`apps.foo` with `mode: standalone`, `subscribes: []`, and
+`contract_version: "1.0"`. Defaults that are backfilled only because the app was
+materialized by env expose provenance source
+`code-default (env-registered app)`; file-declared app default provenance remains
+`code-default`, even when env aliases later override or fill sibling leaves on
+that file-declared app entry.
+
+Loaders must not re-parse keyed-map ids as dotted paths while applying these
+defaults. They must mutate the already-resolved map entry, or use path helpers
+that treat the app id as one segment, and path helpers must not traverse
+prototype-bearing segments such as `__proto__`, `prototype`, or `constructor`.
+
 ## Conformance expectations
 
 Python, Node, and shell CFG loaders must agree on this surface:
@@ -66,6 +91,11 @@ Python, Node, and shell CFG loaders must agree on this surface:
 - Layer-4 local siblings may drop nested unknown keys under owned roots
 - Layer-4 local siblings still reject arbitrary unknown top-level typo roots
 - tolerated unknown keys are omitted from resolved values and provenance
+- env-materialized `apps.<id>` entries receive the same schema defaults as
+  file-declared app entries, with env-registered default provenance as described
+  above
+- keyed-map ids are not split on dots or allowed to traverse object prototypes
+  during default backfill
 
 Any loader that infers nested-key tolerance from filename alone is out of
 contract; the tolerance must be scoped to the actual local-sibling layer or an

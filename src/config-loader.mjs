@@ -1937,7 +1937,10 @@ function validateDictPresentKeysOnly(
             null,
             tolerateUnknown,
           );
-          out[childKey] = { ...buildDefaultsDict(extraSchema), ...validatedExtra };
+          // Keyed-map defaults are backfilled after all layers merge so default
+          // provenance can distinguish file-declared entries from env-created
+          // entries without treating app ids as dotted paths.
+          out[childKey] = validatedExtra;
         } else {
           out[childKey] = checkLeaf(raw, extraSchema, full, childSource);
         }
@@ -2064,25 +2067,68 @@ function flatten(doc, prefix = '') {
   return out;
 }
 
+const UNSAFE_PATH_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor']);
+
+function assertSafePathSegment(segment, dottedKey) {
+  if (UNSAFE_PATH_SEGMENTS.has(segment)) {
+    throw new AgentOSConfigError(
+      `config path ${JSON.stringify(dottedKey)} contains unsafe segment ${JSON.stringify(segment)}`,
+      { key: dottedKey, expected: 'safe dotted path', got: segment },
+    );
+  }
+}
+
 function setLeaf(target, dottedKey, value) {
   const parts = dottedKey.split('.');
+  setLeafPath(target, parts, value, { dottedKey, rejectUnsafeSegments: true });
+}
+
+function setLeafPath(
+  target,
+  parts,
+  value,
+  { dottedKey = parts.join('.'), rejectUnsafeSegments = false } = {},
+) {
   let cursor = target;
   for (let i = 0; i < parts.length - 1; i++) {
     const part = parts[i];
-    const existing = cursor[part];
+    if (rejectUnsafeSegments) assertSafePathSegment(part, dottedKey);
+    let existing = Object.prototype.hasOwnProperty.call(cursor, part)
+      ? cursor[part]
+      : undefined;
     if (!existing || typeof existing !== 'object' || Array.isArray(existing)) {
-      cursor[part] = {};
+      existing = {};
+      Object.defineProperty(cursor, part, {
+        value: existing,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
     }
-    cursor = cursor[part];
+    cursor = existing;
   }
-  cursor[parts[parts.length - 1]] = value;
+  const leaf = parts[parts.length - 1];
+  if (rejectUnsafeSegments) assertSafePathSegment(leaf, dottedKey);
+  Object.defineProperty(cursor, leaf, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
 }
 
 function getLeaf(source, dottedKey) {
   const parts = dottedKey.split('.');
   let cursor = source;
   for (const part of parts) {
-    if (!cursor || typeof cursor !== 'object' || !(part in cursor)) return MISSING;
+    if (UNSAFE_PATH_SEGMENTS.has(part)) return MISSING;
+    if (
+      !cursor ||
+      typeof cursor !== 'object' ||
+      !Object.prototype.hasOwnProperty.call(cursor, part)
+    ) {
+      return MISSING;
+    }
     cursor = cursor[part];
   }
   return cursor;
@@ -2301,7 +2347,7 @@ function schemaLeaf(schema, key) {
   for (const part of parts) {
     if (cursor.__type !== TYPE_DICT) return null;
     const keys = cursor.__keys || {};
-    if (part in keys) {
+    if (Object.prototype.hasOwnProperty.call(keys, part)) {
       cursor = keys[part];
       continue;
     }
@@ -2312,6 +2358,29 @@ function schemaLeaf(schema, key) {
     return null;
   }
   return cursor;
+}
+
+function* flattenSchemaLeaves(doc, schema, path = []) {
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+    yield { dotted: path.join('.'), path, value: doc };
+    return;
+  }
+  if (!schema || schema.__type !== TYPE_DICT) {
+    yield { dotted: path.join('.'), path, value: doc };
+    return;
+  }
+  if (schema.__strict === false && schema.__extra_keys_schema) {
+    for (const [key, value] of Object.entries(doc)) {
+      if (key.startsWith('__')) continue;
+      yield* flattenSchemaLeaves(value, schema.__extra_keys_schema, [...path, key]);
+    }
+    return;
+  }
+  const keys = schema.__keys || {};
+  for (const [key, value] of Object.entries(doc)) {
+    if (key.startsWith('__')) continue;
+    yield* flattenSchemaLeaves(value, keys[key], [...path, key]);
+  }
 }
 
 const APP_ENV_SUFFIXES = {
@@ -2334,15 +2403,126 @@ function dynamicAppEnvAliases(env) {
       const marker = `_${suffix}`;
       if (tail.endsWith(marker) && tail.slice(0, -marker.length)) {
         const appId = appIdFromEnvSegment(tail.slice(0, -marker.length));
+        const key = `apps.${appId}.${leaf}`;
         out.push([
-          `apps.${appId}.${leaf}`,
-          { canonical: envName, aliases: [] },
+          key,
+          {
+            canonical: envName,
+            aliases: [],
+            appId,
+            writePath: ['apps', appId, leaf],
+          },
         ]);
         break;
       }
     }
   }
   return out;
+}
+
+// App ids mentioned by `AGENT_OS_APPS_*` env aliases. The caller compares this
+// set against the already-merged file/local app ids to find entries materialized
+// purely by env and tag their backfilled defaults distinctly.
+function dynamicAppEnvIds(env) {
+  const ids = new Set();
+  for (const [, info] of dynamicAppEnvAliases(env)) {
+    if (info.appId) ids.add(info.appId);
+  }
+  return ids;
+}
+
+function ownMapEntryIds(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return new Set();
+  return new Set(Object.keys(value));
+}
+
+// Yields [parentPath, extraSchema] for every non-strict dict that declares an
+// `__extra_keys_schema` (the keyed-map extension points, e.g. `apps.<id>`).
+// Mirrors the Python `_iter_extra_key_dict_schemas`.
+function* iterExtraKeyDictSchemas(schema, prefix = '') {
+  if (!schema || schema.__type !== TYPE_DICT) return;
+  const extraSchema = schema.__extra_keys_schema;
+  if (
+    schema.__strict === false &&
+    extraSchema &&
+    extraSchema.__type === TYPE_DICT
+  ) {
+    yield [prefix, extraSchema];
+  }
+  for (const [key, child] of Object.entries(schema.__keys || {})) {
+    if (!child || child.__type !== TYPE_DICT) continue;
+    const childPrefix = prefix ? `${prefix}.${key}` : key;
+    yield* iterExtraKeyDictSchemas(child, childPrefix);
+  }
+}
+
+const ENV_REGISTERED_APP_DEFAULT_SOURCE = 'code-default (env-registered app)';
+
+function setEntryDefault(entryValue, leaf, value) {
+  const parts = leaf.split('.');
+  setLeafPath(entryValue, parts, value, { dottedKey: leaf, rejectUnsafeSegments: true });
+}
+
+function entryHasLeaf(entryValue, leaf) {
+  const parts = leaf.split('.');
+  let cursor = entryValue;
+  for (const part of parts) {
+    if (UNSAFE_PATH_SEGMENTS.has(part)) return false;
+    if (
+      !cursor ||
+      typeof cursor !== 'object' ||
+      !Object.prototype.hasOwnProperty.call(cursor, part)
+    ) {
+      return false;
+    }
+    cursor = cursor[part];
+  }
+  return true;
+}
+
+// Backfill schema defaults into keyed-map entries that were materialized
+// without going through `validateDictPresentKeysOnly` — chiefly entries
+// introduced purely via env aliases (e.g. `AGENT_OS_APPS_FOO_MODE`), which
+// `setLeaf` writes as `{ mode }` with no defaults for the sibling fields.
+// Without this, an env-only app and a YAML-declared app with the same intent
+// produce structurally different records (the env one missing `subscribes`/
+// `contract_version`), crashing consumers that iterate `apps.<id>.subscribes`.
+// Mirrors the Python loader's `_backfill_extra_key_entry_defaults`.
+function backfillExtraKeyEntryDefaults(merged, schema, dynamicAppIds, trace) {
+  for (const [parentPath, extraSchema] of iterExtraKeyDictSchemas(schema)) {
+    const parentValue = getLeaf(merged, parentPath);
+    if (
+      parentValue === MISSING ||
+      !parentValue ||
+      typeof parentValue !== 'object' ||
+      Array.isArray(parentValue)
+    ) {
+      continue;
+    }
+    const entryDefaults = flatten(buildDefaultsDict(extraSchema));
+    if (Object.keys(entryDefaults).length === 0) continue;
+    for (const entryId of Object.keys(parentValue).sort()) {
+      const entryValue = parentValue[entryId];
+      if (
+        !entryValue ||
+        typeof entryValue !== 'object' ||
+        Array.isArray(entryValue)
+      ) {
+        continue;
+      }
+      for (const [leaf, defaultValue] of Object.entries(entryDefaults)) {
+        if (entryHasLeaf(entryValue, leaf)) continue;
+        const value = structuredClone(defaultValue);
+        setEntryDefault(entryValue, leaf, value);
+        const source =
+          parentPath === 'apps' && dynamicAppIds.has(entryId)
+            ? ENV_REGISTERED_APP_DEFAULT_SOURCE
+            : 'code-default';
+        const dotted = `${parentPath}.${entryId}.${leaf}`;
+        (trace[dotted] = trace[dotted] || []).push({ source, value, path: null });
+      }
+    }
+  }
 }
 
 // True iff `key` is a path the schema accepts. Walks like schemaLeaf, but
@@ -2357,7 +2537,7 @@ function isValidSchemaPath(schema, key) {
     if (!cursor || cursor.__type !== TYPE_DICT) return false;
     const keys = cursor.__keys || {};
     const part = parts[i];
-    if (!(part in keys)) {
+    if (!Object.prototype.hasOwnProperty.call(keys, part)) {
       if (cursor.__strict === false && cursor.__extra_keys_schema) {
         cursor = cursor.__extra_keys_schema;
         continue;
@@ -2543,8 +2723,8 @@ export function loadConfig({
       }
       moduleAliases[moduleKey] = canonicalKey;
     }
-    for (const [dotted, value] of Object.entries(flatten(validated))) {
-      setLeaf(merged, dotted, value);
+    for (const { dotted, path, value } of flattenSchemaLeaves(validated, schema)) {
+      setLeafPath(merged, path, value);
       (trace[dotted] = trace[dotted] || []).push({
         source: `module:${rawPath}`,
         value,
@@ -2559,9 +2739,9 @@ export function loadConfig({
   const { doc: topDoc, rawText: topRaw } = loadLayerFile(topPathResolved);
   if (topDoc !== null && topDoc !== undefined && !isEmptyDoc(topDoc)) {
     const validated = validateSchema(topDoc, { source: topPathResolved, rawText: topRaw });
-    for (const [dotted, value] of Object.entries(flatten(validated))) {
+    for (const { dotted, path, value } of flattenSchemaLeaves(validated, schema)) {
       if (dotted === 'version') continue;
-      setLeaf(merged, dotted, value);
+      setLeafPath(merged, path, value);
       (trace[dotted] = trace[dotted] || []).push({
         source: 'top',
         value,
@@ -2608,9 +2788,9 @@ export function loadConfig({
         if (!(moduleKey in moduleAliases)) moduleAliases[moduleKey] = canonicalKey;
       }
     }
-    for (const [dotted, value] of Object.entries(flatten(validatedLocal))) {
+    for (const { dotted, path, value } of flattenSchemaLeaves(validatedLocal, schema)) {
       if (dotted === 'version') continue;
-      setLeaf(merged, dotted, value);
+      setLeafPath(merged, path, value);
       (trace[dotted] = trace[dotted] || []).push({
         source: `local:${local}`,
         value,
@@ -2620,6 +2800,8 @@ export function loadConfig({
   }
 
   // --- Layer 5: env vars ---
+  const appIdsBeforeEnv = ownMapEntryIds(getLeaf(merged, 'apps'));
+  const dynamicAppIds = dynamicAppEnvIds(envView);
   const envAliasEntries = [
     ...Object.entries(ENV_ALIASES),
     ...dynamicAppEnvAliases(envView),
@@ -2641,7 +2823,11 @@ export function loadConfig({
       value = rawValue;
     }
     value = checkLeaf(value, leaf, key, `env:${winning}`);
-    setLeaf(merged, key, value);
+    if (info.writePath) {
+      setLeafPath(merged, info.writePath, value, { dottedKey: key });
+    } else {
+      setLeaf(merged, key, value);
+    }
     (trace[key] = trace[key] || []).push({
       source: `env:${winning}`,
       value,
@@ -2668,6 +2854,14 @@ export function loadConfig({
       });
     }
   }
+
+  const envMaterializedAppIds = new Set(
+    [...dynamicAppIds].filter((appId) => !appIdsBeforeEnv.has(appId)),
+  );
+
+  // Backfill defaults into keyed-map entries (e.g. env-only `apps.<id>`) so
+  // env- and YAML-declared entries converge on the same defaulted shape.
+  backfillExtraKeyEntryDefaults(merged, schema, envMaterializedAppIds, trace);
 
   const sources = {};
   for (const [key, entries] of Object.entries(trace)) {

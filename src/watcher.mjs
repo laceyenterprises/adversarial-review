@@ -205,6 +205,7 @@ import {
   probeRoutingTierReadiness,
 } from './routing-tier-readiness.mjs';
 import {
+  DEFAULT_WINDOW_COMMITS,
   detectVocabularyFatigue,
 } from './vocabulary-fatigue.mjs';
 
@@ -768,7 +769,13 @@ async function fetchLivePRLabels(octokit, { owner, repo, prNumber, logger = cons
   }
 }
 
-async function fetchPullRequestCommitSubjects(octokit, { owner, repo, prNumber, perPage = 100, logger = console } = {}) {
+async function fetchPullRequestCommitSubjects(octokit, {
+  owner,
+  repo,
+  prNumber,
+  perPage = DEFAULT_WINDOW_COMMITS,
+  logger = console,
+} = {}) {
   try {
     if (typeof octokit?.paginate === 'function' && typeof octokit?.rest?.pulls?.listCommits === 'function') {
       const commits = await octokit.paginate(octokit.rest.pulls.listCommits, {
@@ -5980,7 +5987,7 @@ async function pollOnce(
                 owner,
                 repo,
                 prNumber,
-                perPage: 100,
+                perPage: DEFAULT_WINDOW_COMMITS,
               }),
             );
             if (vocabularyFatigueFinding) {

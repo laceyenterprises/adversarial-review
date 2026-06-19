@@ -39,7 +39,7 @@ test('vocabulary fatigue does not emit when no stem repeats enough', () => {
   assert.equal(finding, null);
 });
 
-test('vocabulary fatigue strips only ing and ed suffixes', () => {
+test('vocabulary fatigue collapses common commit verb suffixes', () => {
   const finding = findingFor([
     '[codex] Hardening',
     '[codex] Hardened',
@@ -50,6 +50,25 @@ test('vocabulary fatigue strips only ing and ed suffixes', () => {
 
   assert.equal(finding.stem, 'harden');
   assert.equal(finding.count, 3);
+
+  const thirdPerson = findingFor([
+    '[codex] Fixes',
+    '[codex] Fixed',
+    '[codex] Fix',
+    '[codex] Close',
+    '[codex] Tighten',
+  ]);
+
+  assert.equal(thirdPerson.stem, 'fix');
+  assert.equal(thirdPerson.count, 3);
+
+  assert.equal(findingFor([
+    '[codex] Address',
+    '[codex] Addresses',
+    '[codex] Addressed',
+    '[codex] Close',
+    '[codex] Tighten',
+  ]).stem, 'address');
 });
 
 test('vocabulary fatigue defaults are module constants, not CFG leaves', () => {
@@ -84,7 +103,9 @@ test('vocabulary fatigue finding is appended as non-blocking and does not gate m
   ].join('\n'), finding);
 
   assert.match(reviewBody, /## Non-blocking issues/);
-  assert.match(reviewBody, /blocking: false/);
+  assert.match(reviewBody, /- \*\*Remediation vocabulary fatigue advisory\*\*/);
+  assert.match(reviewBody, /\*\*File:\*\* n\/a/);
+  assert.match(reviewBody, /\*\*Recommended fix:\*\* Informational only/);
   assert.equal(classifyBlockingFindings(reviewBody, { lastVerdict: 'Comment only' }).count, 0);
   assert.equal(classifyBlockingFindings(reviewBody, { lastVerdict: 'Comment only' }).state, 'known');
   assert.equal(pickMergeAgentDispatch({

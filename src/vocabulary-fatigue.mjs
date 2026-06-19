@@ -16,10 +16,14 @@ function commitSubjectFromEntry(entry) {
 function stemFromCommitSubject(subject) {
   const withoutPrefix = String(subject || '').replace(/^\[[^\]]*\]\s+/, '').trim();
   const firstWord = withoutPrefix.split(/\s+/)[0] || '';
-  return firstWord
+  const stem = firstWord
     .toLowerCase()
     .replace(/ing$/, '')
     .replace(/ed$/, '');
+  if (/[^s]ies$/.test(stem)) return stem.replace(/ies$/, 'y');
+  if (/(ches|shes|xes|zes|sses)$/.test(stem)) return stem.replace(/es$/, '');
+  if (/s$/.test(stem) && !/ss$/.test(stem)) return stem.slice(0, -1);
+  return stem;
 }
 
 function buildVocabularyFatigueFinding({ stem, count, window }) {
@@ -61,12 +65,12 @@ function detectVocabularyFatigue(commitEntries, {
 function formatVocabularyFatigueFindingMarkdown(finding) {
   if (!finding || finding.kind !== FINDING_KIND) return '';
   return [
-    `- **${finding.kind}** (info, non-blocking)`,
-    `  - stem: \`${finding.stem}\``,
-    `  - count: ${finding.count}`,
-    `  - window: ${finding.window}`,
-    `  - blocking: false`,
-    `  - detail: ${finding.detail}`,
+    '- **Remediation vocabulary fatigue advisory**',
+    '  - **File:** n/a',
+    '  - **Lines:** n/a',
+    `  - **Problem:** ${finding.detail} Kind: \`${finding.kind}\`.`,
+    `  - **Why it matters:** The repeated stem \`${finding.stem}\` appears ${finding.count} times in the last ${finding.window} commits, which can indicate low-signal remediation churn.`,
+    '  - **Recommended fix:** Informational only; no code change is required for this advisory finding.',
   ].join('\n');
 }
 

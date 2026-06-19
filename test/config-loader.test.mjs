@@ -3348,6 +3348,52 @@ test('apps.<id> YAML entry resolves with full schema defaults', () => {
   }
 });
 
+test('apps.<id> YAML entry with dots is defaulted as one keyed-map entry', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      apps:
+        "foo.bar":
+          mode: standalone
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.values.apps['foo.bar'], {
+      mode: 'standalone',
+      subscribes: [],
+      contract_version: '1.0',
+    });
+    assert.equal(Object.prototype.hasOwnProperty.call(cfg.values.apps, 'foo'), false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('apps.<id> YAML entry with prototype-like segment cannot pollute prototypes', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      apps:
+        "foo.__proto__":
+          mode: standalone
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.values.apps['foo.__proto__'], {
+      mode: 'standalone',
+      subscribes: [],
+      contract_version: '1.0',
+    });
+    assert.equal(Object.prototype.hasOwnProperty.call(cfg.values.apps, 'foo'), false);
+    assert.equal(Object.prototype.subscribes, undefined);
+    assert.equal(Object.prototype.contract_version, undefined);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('apps.<id> rejects an unknown key via the strict child schema', () => {
   const tmp = freshTmp();
   try {

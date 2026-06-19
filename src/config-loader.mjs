@@ -2064,25 +2064,68 @@ function flatten(doc, prefix = '') {
   return out;
 }
 
+const UNSAFE_PATH_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor']);
+
+function assertSafePathSegment(segment, dottedKey) {
+  if (UNSAFE_PATH_SEGMENTS.has(segment)) {
+    throw new AgentOSConfigError(
+      `config path ${JSON.stringify(dottedKey)} contains unsafe segment ${JSON.stringify(segment)}`,
+      { key: dottedKey, expected: 'safe dotted path', got: segment },
+    );
+  }
+}
+
 function setLeaf(target, dottedKey, value) {
   const parts = dottedKey.split('.');
+  setLeafPath(target, parts, value, { dottedKey, rejectUnsafeSegments: true });
+}
+
+function setLeafPath(
+  target,
+  parts,
+  value,
+  { dottedKey = parts.join('.'), rejectUnsafeSegments = false } = {},
+) {
   let cursor = target;
   for (let i = 0; i < parts.length - 1; i++) {
     const part = parts[i];
-    const existing = cursor[part];
+    if (rejectUnsafeSegments) assertSafePathSegment(part, dottedKey);
+    let existing = Object.prototype.hasOwnProperty.call(cursor, part)
+      ? cursor[part]
+      : undefined;
     if (!existing || typeof existing !== 'object' || Array.isArray(existing)) {
-      cursor[part] = {};
+      existing = {};
+      Object.defineProperty(cursor, part, {
+        value: existing,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
     }
-    cursor = cursor[part];
+    cursor = existing;
   }
-  cursor[parts[parts.length - 1]] = value;
+  const leaf = parts[parts.length - 1];
+  if (rejectUnsafeSegments) assertSafePathSegment(leaf, dottedKey);
+  Object.defineProperty(cursor, leaf, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
 }
 
 function getLeaf(source, dottedKey) {
   const parts = dottedKey.split('.');
   let cursor = source;
   for (const part of parts) {
-    if (!cursor || typeof cursor !== 'object' || !(part in cursor)) return MISSING;
+    if (UNSAFE_PATH_SEGMENTS.has(part)) return MISSING;
+    if (
+      !cursor ||
+      typeof cursor !== 'object' ||
+      !Object.prototype.hasOwnProperty.call(cursor, part)
+    ) {
+      return MISSING;
+    }
     cursor = cursor[part];
   }
   return cursor;
@@ -2314,6 +2357,29 @@ function schemaLeaf(schema, key) {
   return cursor;
 }
 
+function* flattenSchemaLeaves(doc, schema, path = []) {
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+    yield { dotted: path.join('.'), path, value: doc };
+    return;
+  }
+  if (!schema || schema.__type !== TYPE_DICT) {
+    yield { dotted: path.join('.'), path, value: doc };
+    return;
+  }
+  if (schema.__strict === false && schema.__extra_keys_schema) {
+    for (const [key, value] of Object.entries(doc)) {
+      if (key.startsWith('__')) continue;
+      yield* flattenSchemaLeaves(value, schema.__extra_keys_schema, [...path, key]);
+    }
+    return;
+  }
+  const keys = schema.__keys || {};
+  for (const [key, value] of Object.entries(doc)) {
+    if (key.startsWith('__')) continue;
+    yield* flattenSchemaLeaves(value, keys[key], [...path, key]);
+  }
+}
+
 const APP_ENV_SUFFIXES = {
   MODE: 'mode',
   SUBSCRIBES: 'subscribes',
@@ -2379,6 +2445,28 @@ function* iterExtraKeyDictSchemas(schema, prefix = '') {
 
 const ENV_REGISTERED_APP_DEFAULT_SOURCE = 'code-default (env-registered app)';
 
+function setEntryDefault(entryValue, leaf, value) {
+  const parts = leaf.split('.');
+  setLeafPath(entryValue, parts, value, { dottedKey: leaf, rejectUnsafeSegments: true });
+}
+
+function entryHasLeaf(entryValue, leaf) {
+  const parts = leaf.split('.');
+  let cursor = entryValue;
+  for (const part of parts) {
+    if (UNSAFE_PATH_SEGMENTS.has(part)) return false;
+    if (
+      !cursor ||
+      typeof cursor !== 'object' ||
+      !Object.prototype.hasOwnProperty.call(cursor, part)
+    ) {
+      return false;
+    }
+    cursor = cursor[part];
+  }
+  return true;
+}
+
 // Backfill schema defaults into keyed-map entries that were materialized
 // without going through `validateDictPresentKeysOnly` — chiefly entries
 // introduced purely via env aliases (e.g. `AGENT_OS_APPS_FOO_MODE`), which
@@ -2410,14 +2498,14 @@ function backfillExtraKeyEntryDefaults(merged, schema, dynamicAppIds, trace) {
         continue;
       }
       for (const [leaf, defaultValue] of Object.entries(entryDefaults)) {
-        const dotted = `${parentPath}.${entryId}.${leaf}`;
-        if (getLeaf(merged, dotted) !== MISSING) continue;
+        if (entryHasLeaf(entryValue, leaf)) continue;
         const value = structuredClone(defaultValue);
-        setLeaf(merged, dotted, value);
+        setEntryDefault(entryValue, leaf, value);
         const source =
           parentPath === 'apps' && dynamicAppIds.has(entryId)
             ? ENV_REGISTERED_APP_DEFAULT_SOURCE
             : 'code-default';
+        const dotted = `${parentPath}.${entryId}.${leaf}`;
         (trace[dotted] = trace[dotted] || []).push({ source, value, path: null });
       }
     }
@@ -2622,8 +2710,8 @@ export function loadConfig({
       }
       moduleAliases[moduleKey] = canonicalKey;
     }
-    for (const [dotted, value] of Object.entries(flatten(validated))) {
-      setLeaf(merged, dotted, value);
+    for (const { dotted, path, value } of flattenSchemaLeaves(validated, schema)) {
+      setLeafPath(merged, path, value);
       (trace[dotted] = trace[dotted] || []).push({
         source: `module:${rawPath}`,
         value,
@@ -2638,9 +2726,9 @@ export function loadConfig({
   const { doc: topDoc, rawText: topRaw } = loadLayerFile(topPathResolved);
   if (topDoc !== null && topDoc !== undefined && !isEmptyDoc(topDoc)) {
     const validated = validateSchema(topDoc, { source: topPathResolved, rawText: topRaw });
-    for (const [dotted, value] of Object.entries(flatten(validated))) {
+    for (const { dotted, path, value } of flattenSchemaLeaves(validated, schema)) {
       if (dotted === 'version') continue;
-      setLeaf(merged, dotted, value);
+      setLeafPath(merged, path, value);
       (trace[dotted] = trace[dotted] || []).push({
         source: 'top',
         value,
@@ -2687,9 +2775,9 @@ export function loadConfig({
         if (!(moduleKey in moduleAliases)) moduleAliases[moduleKey] = canonicalKey;
       }
     }
-    for (const [dotted, value] of Object.entries(flatten(validatedLocal))) {
+    for (const { dotted, path, value } of flattenSchemaLeaves(validatedLocal, schema)) {
       if (dotted === 'version') continue;
-      setLeaf(merged, dotted, value);
+      setLeafPath(merged, path, value);
       (trace[dotted] = trace[dotted] || []).push({
         source: `local:${local}`,
         value,

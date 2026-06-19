@@ -108,7 +108,6 @@ import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
 import {
   buildAdversarialGateSnapshot,
   deleteGateRecordsForPR,
-  pickAdversarialGateStatus,
   projectAdversarialGateStatus,
 } from './adversarial-gate-status.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
@@ -4359,8 +4358,8 @@ async function maybeDispatchAmaClosureFor({
     prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
     prAuthor: candidate?.prAuthor || null,
     operatorApprovalEvent,
+    includeSettledReview: true,
   });
-  let gateDecision = pickAdversarialGateStatus(gateSnapshot);
   // FAIL-OPEN GUARD (#1824 / #1816): the stored follow-up-job / review-row body
   // resolved above can be STALE relative to a fresh review on the SAME head — a
   // completed remediation job's comment-only body is not updated when a later
@@ -4423,9 +4422,9 @@ async function maybeDispatchAmaClosureFor({
       prUpdatedAt: candidate?.prUpdatedAt || dispatchJob?.prUpdatedAt || null,
       prAuthor: candidate?.prAuthor || null,
       operatorApprovalEvent,
+      includeSettledReview: true,
       liveHeadReview,
     });
-    gateDecision = pickAdversarialGateStatus(gateSnapshot);
   }
   const reviewState = {
     verdict: gateSnapshot.settledReview?.verdict || '',
@@ -4465,7 +4464,7 @@ async function maybeDispatchAmaClosureFor({
     prUrl: `https://github.com/${owner}/${name}/pull/${prNumber}`,
     reviewedSha: reviewState.headSha,
     riskClass: reviewState.riskClass,
-    requiredGateContext: gateDecision.context || resolveGateStatusContext(),
+    requiredGateContext: resolveGateStatusContext(),
     reviewedBy: reviewStateRow?.reviewer_login || '',
     reviewer: reviewStateRow?.reviewer || '',
     parentSession: process.env.HQ_PARENT_SESSION || 'session:unknown:airlock+watcher',

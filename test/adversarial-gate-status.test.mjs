@@ -889,6 +889,9 @@ test('projectAdversarialGateStatus posts the env-override context when ADV_GATE_
     assert.equal(result.decision.context, 'galileo/adversarial-gate');
     assert.equal(result.publish.posted, true);
     assert.equal(result.publish.record.context, 'galileo/adversarial-gate');
+    assert.equal(result.snapshot.settledReview, null);
+    assert.equal(result.snapshot.reviewedHeadSha, null);
+    assert.equal(result.snapshot.mergeableState, '');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -1231,6 +1234,7 @@ async function observeAmaSnapshotProjection({
     mergeability: candidate,
     labels: labelNames,
     reviewRow,
+    includeSettledReview: true,
   });
   return { observed, snapshot, decision: pickAdversarialGateStatus(snapshot) };
 }

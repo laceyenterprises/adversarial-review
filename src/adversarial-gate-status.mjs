@@ -249,6 +249,11 @@ function resolveSettledReviewVerdict(
   };
 }
 
+/**
+ * Return only the head SHA proven by the settled review source. Falling back to
+ * the live/current PR head when this is absent would defeat the stale-review
+ * guard and let AMA close a commit that was never proven reviewed.
+ */
 function resolveProvenReviewedHead(settledReview) {
   return settledReview?.reviewedHeadSha || null;
 }
@@ -476,6 +481,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
   prUpdatedAt = null,
   prAuthor = null,
   reviewRow = null,
+  includeSettledReview = false,
   liveHeadReview = undefined,
   execFileImpl = execFileAsync,
   fetchLatestLabelEventImpl,
@@ -483,13 +489,15 @@ async function buildAdversarialGateSnapshot(rootDir, {
 } = {}) {
   const resolvedRow = reviewRow || await readReviewRowForGate(rootDir, { repo, prNumber });
   const latestJob = findLatestFollowUpJobForPR(rootDir, { repo, prNumber });
-  const settledReview = resolveSettledReviewVerdict(rootDir, {
-    repo,
-    prNumber,
-    reviewRow: resolvedRow,
-    currentHeadSha: headSha,
-    liveHeadReview,
-  });
+  const settledReview = includeSettledReview
+    ? resolveSettledReviewVerdict(rootDir, {
+      repo,
+      prNumber,
+      reviewRow: resolvedRow,
+      currentHeadSha: headSha,
+      liveHeadReview,
+    })
+    : null;
   const reviewedHeadSha = resolveProvenReviewedHead(settledReview);
 
   let operatorApproval = null;
@@ -519,7 +527,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
     headSha,
     settledReview,
     reviewedHeadSha,
-    mergeableState: normalizeGithubMergeability(mergeability || {}),
+    mergeableState: includeSettledReview ? normalizeGithubMergeability(mergeability || {}) : '',
   };
 }
 
@@ -644,6 +652,7 @@ async function projectAdversarialGateStatus(rootDir, {
     prUpdatedAt,
     prAuthor,
     reviewRow,
+    includeSettledReview: false,
     execFileImpl,
     fetchLatestLabelEventImpl,
     operatorApprovalEvent,

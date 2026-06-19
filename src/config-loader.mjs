@@ -932,6 +932,16 @@ function schemaV1() {
           },
         },
       },
+      // Sentinel detector knobs. The Python sibling at
+      // `platform/agent-os-config/src/agent_os_config/__init__.py` is the
+      // canonical schema and remains the owner of these `sentinel.*` keys —
+      // `projects/sentinel-argus-knobs/SPEC.md` keeps them Python-owned and
+      // Node-foreign-ignored (no cfg-parity gate). This Node mirror exists
+      // only so the adversarial-watcher doesn't crash-loop the moment an
+      // operator writes the checked-in top-level `sentinel:` keys into the
+      // shared config.yaml (CFG-01 strict-schema parity rule). It mirrors the
+      // checked-in top-level keys needed at adversarial-review startup, not
+      // every future Sentinel knob; Python stays canonical for the rest.
       sentinel: {
         __type: TYPE_DICT,
         __strict: true,

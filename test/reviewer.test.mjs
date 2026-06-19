@@ -18,6 +18,12 @@ const {
   resolveCodexAuthPath,
   resolveCodexExecOverrides,
   resolveReviewerTimeoutMs,
+  ADVISORY_ONLY_REVIEW_LABEL,
+  VERDICT_MODE_ADVISORY_ONLY,
+  VERDICT_MODE_ENFORCE,
+  buildReviewCommentHeader,
+  fetchCurrentHeadVerdictMode,
+  resolveVerdictModeForHead,
   spawnCodexReview,
   spawnClaude,
   resolveGeminiCliPath,
@@ -65,7 +71,7 @@ function withEnv(overrides, fn) {
   }
 }
 
-function queueWithFakes(reviewText) {
+function queueWithFakes(reviewText, overrides = {}) {
   const created = [];
   const result = queueFollowUpForPostedReview({
     rootDir: '/tmp/adversarial-review-test',
@@ -79,6 +85,7 @@ function queueWithFakes(reviewText) {
     reviewText,
     reviewPostedAt: '2026-05-08T14:00:00.000Z',
     critical: false,
+    ...overrides,
     summarizePRRemediationLedgerImpl: () => ({
       completedRoundsForPR: 1,
       latestMaxRounds: 2,
@@ -90,6 +97,151 @@ function queueWithFakes(reviewText) {
   });
   return { result, created };
 }
+
+test('VirtualPaul PR without advisory-only override label stays enforce mode', async () => {
+  const resolved = await fetchCurrentHeadVerdictMode({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 57,
+    reviewerHeadSha: 'head-a',
+    fetchPullRequestHeadAndStateImpl: async () => ({
+      headRefOid: 'head-a',
+      labels: [{ name: 'unrelated' }],
+      author: { login: 'VirtualPaul' },
+    }),
+  });
+
+  assert.equal(resolved.verdictMode, VERDICT_MODE_ENFORCE);
+});
+
+test('VirtualPaul PR with advisory-only override label is advisory-only and skips remediation queue', async () => {
+  const resolved = await fetchCurrentHeadVerdictMode({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 57,
+    reviewerHeadSha: 'head-a',
+    fetchPullRequestHeadAndStateImpl: async () => ({
+      headRefOid: 'head-a',
+      labels: [{ name: ADVISORY_ONLY_REVIEW_LABEL }],
+      author: { login: 'VirtualPaul' },
+    }),
+    fetchLatestLabelEventImpl: async (_repo, _prNumber, _labelName, options) => {
+      assert.equal(options.currentHeadSha, 'head-a');
+      return {
+        id: 'evt-advisory-only',
+        nodeId: 'LE_advisory_only',
+        actor: 'placey',
+        createdAt: '2026-06-19T08:00:00.000Z',
+        headSha: 'head-a',
+      };
+    },
+  });
+  const { result, created } = queueWithFakes('## Summary\nVisible finding.\n\n## Verdict\nRequest changes', {
+    verdictMode: resolved.verdictMode,
+  });
+
+  assert.equal(resolved.verdictMode, VERDICT_MODE_ADVISORY_ONLY);
+  assert.equal(result.queued, false);
+  assert.equal(result.reason, 'advisory-only-review');
+  assert.equal(created.length, 0);
+});
+
+test('advisory-only override label applied by PR author stays enforce mode', async () => {
+  const resolved = await fetchCurrentHeadVerdictMode({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 58,
+    reviewerHeadSha: 'head-b',
+    fetchPullRequestHeadAndStateImpl: async () => ({
+      headRefOid: 'head-b',
+      labels: [{ name: ADVISORY_ONLY_REVIEW_LABEL }],
+      author: { login: 'clio-airlock' },
+    }),
+    fetchLatestLabelEventImpl: async () => ({
+      id: 'evt-self-advisory-only',
+      nodeId: 'LE_self_advisory_only',
+      actor: 'clio-airlock',
+      createdAt: '2026-06-19T08:00:00.000Z',
+      headSha: 'head-b',
+    }),
+    log: { warn() {} },
+  });
+
+  assert.equal(resolved.verdictMode, VERDICT_MODE_ENFORCE);
+});
+
+test('advisory-only override label fails closed when PR author is absent', async () => {
+  const resolved = await fetchCurrentHeadVerdictMode({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 59,
+    reviewerHeadSha: 'head-c',
+    fetchPullRequestHeadAndStateImpl: async () => ({
+      headRefOid: 'head-c',
+      labels: [{ name: ADVISORY_ONLY_REVIEW_LABEL }],
+    }),
+    fetchLatestLabelEventImpl: async () => ({
+      id: 'evt-missing-author-advisory-only',
+      nodeId: 'LE_missing_author_advisory_only',
+      actor: 'placey',
+      createdAt: '2026-06-19T08:00:00.000Z',
+      headSha: 'head-c',
+    }),
+    log: { warn() {} },
+  });
+
+  assert.equal(resolved.verdictMode, VERDICT_MODE_ENFORCE);
+});
+
+test('advisory-only override label is current-head scoped and head advance restores enforce', () => {
+  assert.equal(
+    resolveVerdictModeForHead({
+      labels: [{ name: ADVISORY_ONLY_REVIEW_LABEL }],
+      currentHeadSha: 'new-head',
+      reviewerHeadSha: 'old-head',
+      advisoryLabelEvent: {
+        id: 'evt-old-head',
+        actor: 'placey',
+        createdAt: '2026-06-19T08:00:00.000Z',
+        headSha: 'new-head',
+      },
+    }),
+    VERDICT_MODE_ENFORCE,
+  );
+  assert.equal(
+    resolveVerdictModeForHead({
+      labels: [],
+      currentHeadSha: 'new-head',
+      reviewerHeadSha: 'new-head',
+    }),
+    VERDICT_MODE_ENFORCE,
+  );
+});
+
+test('advisory-only override label without resolvable label event stays enforce mode', async () => {
+  const resolved = await fetchCurrentHeadVerdictMode({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 59,
+    reviewerHeadSha: 'head-c',
+    fetchPullRequestHeadAndStateImpl: async () => ({
+      headRefOid: 'head-c',
+      labels: [{ name: ADVISORY_ONLY_REVIEW_LABEL }],
+      author: { login: 'VirtualPaul' },
+    }),
+    fetchLatestLabelEventImpl: async () => null,
+    log: { warn() {} },
+  });
+
+  assert.equal(resolved.verdictMode, VERDICT_MODE_ENFORCE);
+});
+
+test('advisory-only review header is explicit while findings body remains separate', () => {
+  const header = buildReviewCommentHeader({
+    reviewerMetadata: { displayName: 'Codex', reviewerIdentity: 'codex-reviewer-lacey' },
+    verdictMode: VERDICT_MODE_ADVISORY_ONLY,
+  });
+
+  assert.equal(
+    header,
+    '**Advisory-only review** (codex-reviewer-lacey) — findings below are informational; no automated remediation will run.\n\n',
+  );
+});
 
 test('clean comment-only reviews still queue a durable follow-up verdict carrier through the production queue helper', () => {
   const { result, created } = queueWithFakes([
@@ -111,6 +263,7 @@ test('clean comment-only reviews still queue a durable follow-up verdict carrier
   assert.equal(created[0].reviewBody.includes('Comment only'), true);
   assert.equal(created[0].baseBranch, 'release/2026.05');
   assert.equal(created[0].revisionRef, 'review-head-sha');
+  assert.equal(created[0].verdictMode, VERDICT_MODE_ENFORCE);
   assert.equal(Object.hasOwn(created[0], 'maxRemediationRounds'), false);
   assert.equal(created[0].priorCompletedRounds, 1);
 });

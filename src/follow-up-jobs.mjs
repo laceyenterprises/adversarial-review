@@ -1630,6 +1630,7 @@ function buildFollowUpJob({
   linearTicketId = null,
   reviewBody,
   reviewPostedAt,
+  verdictMode = 'enforce',
   critical,
   maxRemediationRounds = DEFAULT_MAX_REMEDIATION_ROUNDS,
   // Number of remediation rounds this PR has already completed across
@@ -1647,6 +1648,10 @@ function buildFollowUpJob({
   // built without a spec linkage; falls back to DEFAULT_RISK_CLASS.
   riskClass = null,
 }) {
+  if (String(verdictMode || 'enforce') !== 'enforce') {
+    throw new Error('advisory-only reviews must not create follow-up remediation jobs');
+  }
+
   const createdAt = reviewPostedAt || new Date().toISOString();
   const jobId = `${sanitizeRepo(repo)}-pr-${prNumber}-${sanitizeTimestamp(createdAt)}`;
   const subjectIdentity = buildCodePrSubjectIdentity({ repo, prNumber, revisionRef });
@@ -1691,6 +1696,10 @@ function buildFollowUpJob({
     critical: Boolean(critical),
     reviewSummary: extractReviewSummary(reviewBody),
     reviewBody,
+    // Advisory-only reviews short-circuit before job creation; persisted jobs
+    // are always enforcement carriers. Keep the field explicit for consumers
+    // that read historical schemas, but do not imply advisory jobs exist.
+    verdict_mode: 'enforce',
     recommendedFollowUpAction: {
       ...buildRecommendedFollowUpAction({ critical }),
       maxRounds: remediationPlan.maxRounds,

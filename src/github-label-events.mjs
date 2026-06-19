@@ -105,6 +105,7 @@ function latestMatchingScopedTimelineLabelEvent(nodes, labelName, currentHeadSha
 
 async function fetchLatestLabelEvent(repo, prNumber, labelName, {
   execFileImpl,
+  currentHeadSha = null,
 } = {}) {
   if (typeof execFileImpl !== 'function') {
     throw new Error('fetchLatestLabelEvent requires execFileImpl');
@@ -174,7 +175,7 @@ async function fetchLatestLabelEvent(repo, prNumber, labelName, {
   return latestMatchingScopedTimelineLabelEvent(
     pullRequest?.timelineItems?.nodes || [],
     labelName,
-    pullRequest?.headRefOid || null
+    currentHeadSha || pullRequest?.headRefOid || null
   );
 }
 

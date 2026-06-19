@@ -166,6 +166,7 @@ test('buildFollowUpJob creates a pending durable handoff record', () => {
   assert.equal(job.prNumber, 42);
   assert.equal(job.revisionRef, 'review-head-sha');
   assert.equal(job.reviewSummary, 'Tighten null handling.');
+  assert.equal(job.verdict_mode, 'enforce');
   assert.equal(job.sessionHandoff.resumePreferred, true);
   assert.equal(job.sessionHandoff.resumeAvailable, false);
   assert.equal(job.remediationPlan.mode, 'bounded-manual-rounds');
@@ -177,6 +178,22 @@ test('buildFollowUpJob creates a pending durable handoff record', () => {
   assert.equal(job.remediationReply.state, 'awaiting-worker-write');
   assert.equal(job.remediationReply.path, null);
   assert.match(job.jobId, /^laceyenterprises__clio-pr-42-/);
+});
+
+test('buildFollowUpJob rejects advisory-only verdict mode', () => {
+  assert.throws(
+    () => buildFollowUpJob({
+      repo: 'laceyenterprises/clio',
+      prNumber: 42,
+      revisionRef: 'review-head-sha',
+      reviewerModel: 'codex',
+      reviewBody: '## Summary\nInformational finding.\n\n## Verdict\nRequest changes',
+      reviewPostedAt: '2026-04-21T07:46:00.000Z',
+      verdictMode: 'advisory-only',
+      critical: false,
+    }),
+    /advisory-only reviews must not create follow-up remediation jobs/,
+  );
 });
 
 test('createFollowUpJob writes the pending job JSON under data/follow-up-jobs/pending', () => {

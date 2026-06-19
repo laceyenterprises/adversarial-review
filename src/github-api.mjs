@@ -211,6 +211,28 @@ query PullRequestRollupComments(
 }
 `;
 
+const GRAPHQL_PR_COMMIT_SUBJECTS_QUERY = `
+query PullRequestCommitSubjects(
+  $owner: String!
+  $repo: String!
+  $prNumber: Int!
+  $commitLast: Int!
+) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $prNumber) {
+      commits(last: $commitLast) {
+        nodes {
+          commit {
+            messageHeadline
+            message
+          }
+        }
+      }
+    }
+  }
+}
+`;
+
 const GRAPHQL_REVIEWS_ONLY_QUERY = `
 query PullRequestRollupReviews(
   $owner: String!
@@ -370,7 +392,13 @@ query PullRequestReviewContext(
 `;
 
 function normalizeCommitSubject(commit) {
-  const message = String(commit?.commit?.message || commit?.message || '');
+  const message = String(
+    commit?.commit?.messageHeadline
+    || commit?.messageHeadline
+    || commit?.commit?.message
+    || commit?.message
+    || ''
+  );
   const subject = message.split(/\r?\n/, 1)[0].trim();
   return subject || null;
 }
@@ -1471,31 +1499,30 @@ async function fetchPullRequestReviewContext(repo, prNumber, {
 async function fetchPullRequestCommitSubjects(repo, prNumber, {
   execFileImpl = execFileAsync,
   recordApiCallImpl = recordApiCall,
+  limit = 5,
 } = {}) {
   const normalizedPrNumber = normalizePrNumber(prNumber);
-  const startedAt = Date.now();
+  const normalizedLimit = Number(limit);
+  const commitLast = Number.isInteger(normalizedLimit) && normalizedLimit > 0
+    ? Math.min(normalizedLimit, PAGE_SIZE)
+    : 5;
+  const { owner, repo: repoName } = splitRepo(repo);
   try {
-    const commits = await paginateRest(
-      execFileImpl,
-      `repos/${repo}/pulls/${normalizedPrNumber}/commits`,
-      (pageData) => (Array.isArray(pageData) ? pageData.map(normalizeCommitSubject).filter(Boolean) : [])
-    );
-    recordApiCallImpl({
+    const payload = await runGraphqlWithTelemetry(execFileImpl, GRAPHQL_PR_COMMIT_SUBJECTS_QUERY, {
+      owner,
+      repo: repoName,
+      prNumber: normalizedPrNumber,
+      commitLast,
+    }, {
       category: 'pr_commits',
       repo,
       prNumber: normalizedPrNumber,
-      status: 200,
-      durationMs: Date.now() - startedAt,
+      recordApiCallImpl,
     });
-    return commits;
+    const pr = extractGraphqlPr(payload);
+    const nodes = pr?.commits?.nodes || [];
+    return Array.isArray(nodes) ? nodes.map(normalizeCommitSubject).filter(Boolean) : [];
   } catch (err) {
-    recordApiCallImpl({
-      category: 'pr_commits',
-      repo,
-      prNumber: normalizedPrNumber,
-      status: apiStatusFromError(err),
-      durationMs: Date.now() - startedAt,
-    });
     throw err;
   }
 }

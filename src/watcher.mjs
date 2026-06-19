@@ -2544,15 +2544,23 @@ function normalizeVocabularyFatigueStem(subject) {
   const normalized = firstWord
     .toLowerCase()
     .replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
-  if (normalized.length <= 5) return normalized || null;
-  return normalized
-    .replace(/ing$/, '')
-    .replace(/ed$/, '');
+  if (!normalized) return null;
+  if (normalized.length > 5 && normalized.endsWith('ing')) {
+    return normalized.slice(0, -3) || null;
+  }
+  if (normalized.length > 5 && normalized.endsWith('ed')) {
+    return normalized.slice(0, -2) || null;
+  }
+  if (normalized.length > 5 && normalized.endsWith('e')) {
+    return normalized.slice(0, -1) || null;
+  }
+  return normalized;
 }
 
 function detectCommitVocabularyFatigue(subjects, {
   windowCommits = 5,
   minRepeats = 3,
+  logger = null,
 } = {}) {
   const window = Number(windowCommits);
   const threshold = Number(minRepeats);
@@ -2560,11 +2568,17 @@ function detectCommitVocabularyFatigue(subjects, {
   if (!Number.isInteger(threshold) || threshold <= 0) return null;
   if (!Array.isArray(subjects) || subjects.length < window) return null;
 
-  const stems = subjects
-    .slice(-window)
+  const windowSubjects = subjects.slice(-window);
+  const stems = windowSubjects
     .map(normalizeVocabularyFatigueStem)
     .filter(Boolean);
-  if (stems.length < window) return null;
+  if (stems.length < window) {
+    logger?.debug?.(
+      `[watcher] vocabulary fatigue scan skipped: parsed ${stems.length} ` +
+      `of ${window} commit subjects in the configured window`
+    );
+    return null;
+  }
 
   const counts = new Map();
   for (const stem of stems) {
@@ -2617,8 +2631,9 @@ async function computeVocabularyFatigueFindingForPR({
   try {
     const subjects = await fetchCommitSubjectsImpl(repoPath, prNumber, {
       execFileImpl: execFileAsync,
+      limit: cfg.windowCommits,
     });
-    return detectCommitVocabularyFatigue(subjects, cfg);
+    return detectCommitVocabularyFatigue(subjects, { ...cfg, logger });
   } catch (err) {
     logger?.warn?.(
       `[watcher] vocabulary fatigue commit scan failed for ${repoPath}#${prNumber}: ${err?.message || err}`

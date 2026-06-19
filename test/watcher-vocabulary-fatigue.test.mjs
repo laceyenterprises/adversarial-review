@@ -37,7 +37,20 @@ test('commit vocabulary fatigue does not emit when stems are diverse', () => {
   assert.equal(finding, null);
 });
 
-test('commit vocabulary fatigue strips ing and ed suffixes only', () => {
+test('commit vocabulary fatigue groups base and inflected verb forms', () => {
+  const finding = detectCommitVocabularyFatigue([
+    '[codex] Update watcher path',
+    '[codex] Updated reviewer path',
+    '[codex] Updating tests',
+    '[codex] Close',
+    '[codex] Tighten',
+  ], { windowCommits: 5, minRepeats: 3 });
+
+  assert.equal(finding?.stem, 'updat');
+  assert.equal(finding?.count, 3);
+});
+
+test('commit vocabulary fatigue still groups ing and ed suffixes for longer verbs', () => {
   const finding = detectCommitVocabularyFatigue([
     '[codex] Hardening',
     '[codex] Hardened',
@@ -89,6 +102,29 @@ test('commit vocabulary fatigue does not emit for empty commit history', () => {
   const finding = detectCommitVocabularyFatigue([], { windowCommits: 5, minRepeats: 3 });
 
   assert.equal(finding, null);
+});
+
+test('commit vocabulary fatigue logs debug context when subjects cannot be parsed', () => {
+  const messages = [];
+  const finding = detectCommitVocabularyFatigue([
+    '[codex] Harden',
+    '[codex] Harden',
+    '[codex] Harden',
+    '[codex] !!!',
+    '[codex] Tighten',
+  ], {
+    windowCommits: 5,
+    minRepeats: 3,
+    logger: {
+      debug(message) {
+        messages.push(message);
+      },
+    },
+  });
+
+  assert.equal(finding, null);
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /parsed 4 of 5 commit subjects/);
 });
 
 test('commit vocabulary fatigue resolves window and repeat threshold from CFG shape', () => {

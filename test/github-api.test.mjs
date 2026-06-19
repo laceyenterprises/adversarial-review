@@ -1011,6 +1011,46 @@ test('GraphQL response shape matches the REST union contract', async () => {
   assert.deepEqual(telemetry.events.map((entry) => entry.category), ['graphql_pr_rollup']);
 });
 
+test('fetchPullRequestCommitSubjects reads only the requested commit tail via GraphQL', async () => {
+  const mod = await importGithubApiFresh();
+  const telemetry = makeTelemetrySink();
+  const calls = [];
+
+  const result = await mod.fetchPullRequestCommitSubjects(FIXTURE_REPO, FIXTURE_PR, {
+    limit: 5,
+    recordApiCallImpl: telemetry.recordApiCallImpl,
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      assert.equal(command, 'gh');
+      const vars = parseGhArgs(args);
+      assert.match(String(vars.query || ''), /query PullRequestCommitSubjects/);
+      assert.equal(vars.commitLast, '5');
+      assert.doesNotMatch(args.join(' '), /pulls\/\d+\/commits/);
+      return {
+        stdout: JSON.stringify({
+          data: {
+            repository: {
+              pullRequest: {
+                commits: {
+                  nodes: [
+                    { commit: { messageHeadline: 'Harden watcher path', message: 'ignored body' } },
+                    { commit: { message: 'Tighten reviewer prompt\n\nBody' } },
+                    { commit: { messageHeadline: '' } },
+                  ],
+                },
+              },
+            },
+          },
+        }),
+      };
+    },
+  });
+
+  assert.deepEqual(result, ['Harden watcher path', 'Tighten reviewer prompt']);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(telemetry.events.map((entry) => entry.category), ['pr_commits']);
+});
+
 test('feature flag fallback runs the legacy cluster path and preserves shape', async () => {
   const expected = makeExpectedRollup();
   const graphqlMod = await importGithubApiFresh();

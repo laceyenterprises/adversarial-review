@@ -145,6 +145,49 @@ test('linear and session ledger env overrides resolve through cfg loader', () =>
   }
 });
 
+test('update.channel accepts rolling stable and pinned in Node loader', () => {
+  const tmp = freshTmp();
+  try {
+    for (const channel of ['rolling', 'stable', 'pinned']) {
+      const top = join(tmp, `config-${channel}.yaml`);
+      writeFile(top, `
+        version: 1
+        update:
+          channel: ${channel}
+      `);
+
+      const cfg = loadConfig({ topPath: top, env: {} });
+
+      assert.equal(cfg.get('update.channel'), channel);
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('update.channel rejects unknown values in Node loader', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'bad-update-channel.yaml');
+    writeFile(top, `
+      version: 1
+      update:
+        channel: bogus
+    `);
+
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'update.channel');
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('linear issue prefix and session ledger database name reject invalid shapes', () => {
   const tmp = freshTmp();
   try {

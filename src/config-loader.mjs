@@ -148,6 +148,7 @@ const ENUM_SESSION_LEDGER_BACKEND = ['sqlite', 'postgres'];
 const ENUM_SESSION_LEDGER_DUAL_WRITE_MODE = [null, 'postgres', 'sqlite', 'off'];
 const ENUM_SESSION_LEDGER_SERVICE_LOG_LEVEL = ['CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'];
 const ENUM_APP_MODE = ['agent-os', 'standalone'];
+const ENUM_UPDATE_CHANNEL = ['rolling', 'stable', 'pinned'];
 const PATTERN_LINEAR_ISSUE_PREFIX = '^[A-Z][A-Z0-9]{1,9}$';
 const PATTERN_LINEAR_ISSUE_PREFIX_DESCRIPTION = 'Linear issue prefix /^[A-Z][A-Z0-9]{1,9}$/';
 const PATTERN_SQL_IDENTIFIER = '^[A-Za-z_][A-Za-z0-9_]{0,62}$';
@@ -233,6 +234,17 @@ function schemaV1() {
             __nullable: true,
             __pattern: PATTERN_LOCAL_USERNAME,
             __pattern_description: PATTERN_LOCAL_USERNAME_DESCRIPTION,
+          },
+        },
+      },
+      update: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          channel: {
+            __type: TYPE_STRING,
+            __default: 'rolling',
+            __enum: ENUM_UPDATE_CHANNEL,
           },
         },
       },
@@ -1202,6 +1214,10 @@ function postgresRuntimeAlias(value) {
 const identity = (v) => v;
 
 export const ENV_ALIASES = {
+  'update.channel': {
+    canonical: 'AGENT_OS_UPDATE_CHANNEL',
+    aliases: [],
+  },
   'roles.reviewer': {
     canonical: 'AGENT_OS_ROLES_REVIEWER',
     aliases: [['ADVERSARIAL_REVIEW_DEFAULT_REVIEWER', identity]],

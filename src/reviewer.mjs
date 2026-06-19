@@ -72,6 +72,8 @@ const REVIEW_POST_RETRY_DELAYS_MS = [0];
 const ADVISORY_ONLY_REVIEW_LABEL = 'operator-approved: advisory-only-review';
 const VERDICT_MODE_ENFORCE = 'enforce';
 const VERDICT_MODE_ADVISORY_ONLY = 'advisory-only';
+const ENFORCE_REVIEW_HEADER_RE = /^## Adversarial Review — .+ \(.+\)$/;
+const ADVISORY_ONLY_REVIEW_HEADER_RE = /^## Adversarial Review \(advisory-only\) — .+ \(.+\)$/;
 
 const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
@@ -579,7 +581,16 @@ async function fetchCurrentHeadVerdictMode({
     });
     const labels = current?.labels || [];
     const currentHeadSha = current?.headRefOid || null;
-    const prAuthor = current?.author?.login || current?.author || null;
+    // Normalize defensively: only a non-empty string author login is a confirmed
+    // author. A malformed/loginless author object (e.g. `{}`) must resolve to null
+    // so the non-author gate fails closed to enforce instead of comparing against
+    // the stringified object `"[object Object]"`.
+    const authorLogin = typeof current?.author === 'string'
+      ? current.author
+      : current?.author?.login;
+    const prAuthor = (typeof authorLogin === 'string' && authorLogin.trim())
+      ? authorLogin
+      : null;
     const needsAdvisoryEvent = (
       reviewerHeadSha &&
       currentHeadSha &&
@@ -628,9 +639,36 @@ async function fetchCurrentHeadVerdictMode({
 function buildReviewCommentHeader({ reviewerMetadata, verdictMode }) {
   const mode = normalizeVerdictMode(verdictMode);
   if (mode === VERDICT_MODE_ADVISORY_ONLY) {
-    return `**Advisory-only review** (${reviewerMetadata.reviewerIdentity}) — findings below are informational; no automated remediation will run.\n\n`;
+    // Keep the canonical `## Adversarial Review` marker heading and displayName in
+    // advisory mode so the same heuristic used to locate enforce reviews still finds
+    // advisory-only reviews; append the advisory disclaimer beneath it.
+    return `## Adversarial Review (advisory-only) — ${reviewerMetadata.displayName} (${reviewerMetadata.reviewerIdentity})\n\n` +
+      `**Advisory-only review** — findings below are informational; no automated remediation will run.\n\n`;
   }
   return `## Adversarial Review — ${reviewerMetadata.displayName} (${reviewerMetadata.reviewerIdentity})\n\n`;
+}
+
+function classifyReviewCommentHeader(reviewBody) {
+  const [firstLine = ''] = String(reviewBody || '').split(/\r?\n/, 1);
+  if (ADVISORY_ONLY_REVIEW_HEADER_RE.test(firstLine)) {
+    return {
+      isAdversarialReview: true,
+      verdictMode: VERDICT_MODE_ADVISORY_ONLY,
+      advisoryOnly: true,
+    };
+  }
+  if (ENFORCE_REVIEW_HEADER_RE.test(firstLine)) {
+    return {
+      isAdversarialReview: true,
+      verdictMode: VERDICT_MODE_ENFORCE,
+      advisoryOnly: false,
+    };
+  }
+  return {
+    isAdversarialReview: false,
+    verdictMode: null,
+    advisoryOnly: false,
+  };
 }
 
 function normalizeBuilderTag(builderTag) {
@@ -3026,6 +3064,7 @@ const __test__ = {
   VERDICT_MODE_ADVISORY_ONLY,
   VERDICT_MODE_ENFORCE,
   buildReviewCommentHeader,
+  classifyReviewCommentHeader,
   fetchCurrentHeadVerdictMode,
   normalizeVerdictMode,
   resolveVerdictModeForHead,

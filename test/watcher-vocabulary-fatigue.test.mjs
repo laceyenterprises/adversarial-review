@@ -76,7 +76,7 @@ test('commit vocabulary fatigue strips conventional-commit punctuation', () => {
   assert.equal(finding?.count, 3);
 });
 
-test('commit vocabulary fatigue does not collapse short ed/ing verbs', () => {
+test('commit vocabulary fatigue does not emit for diverse short verbs', () => {
   const finding = detectCommitVocabularyFatigue([
     '[codex] Speed reviewer path',
     '[codex] Embed prompt evidence',
@@ -86,6 +86,95 @@ test('commit vocabulary fatigue does not collapse short ed/ing verbs', () => {
   ], { windowCommits: 5, minRepeats: 3 });
 
   assert.equal(finding, null);
+});
+
+test('commit vocabulary fatigue collapses mixed-tense runs regardless of length', () => {
+  // Update(6)->updat, Updated(7)->updat, updating->updat all collapse; the
+  // previous `length > 5` guard left Update->update vs Updated->updat and
+  // under-counted (ported from closed PR #337's uniform stemmer).
+  const finding = detectCommitVocabularyFatigue([
+    '[codex] Update',
+    '[codex] Updated',
+    '[codex] updating',
+    '[codex] Refactor',
+    '[codex] Tidy',
+  ], { windowCommits: 5, minRepeats: 3 });
+
+  assert.equal(finding?.stem, 'updat');
+  assert.equal(finding?.count, 3);
+});
+
+test('commit vocabulary fatigue ignores leading ticket-id prefix on same-ticket iteration', () => {
+  // Five commits on one ticket are the *normal* remediation pattern and must
+  // not masquerade as vocabulary fatigue (ported from closed PR #337's sharpest
+  // finding — the survivor stemmed `CRG-09:` to `crg-09` and fired).
+  const finding = detectCommitVocabularyFatigue([
+    '[codex] CRG-09: add reviewer cycle cap',
+    '[codex] CRG-09: handle rereview gating',
+    '[codex] CRG-09: tidy tests',
+    '[codex] CRG-09: document the cap',
+    '[codex] CRG-09: address review',
+  ], { windowCommits: 5, minRepeats: 3 });
+
+  assert.equal(finding, null);
+});
+
+test('commit vocabulary fatigue still fires with one unparseable subject in the window', () => {
+  // A single subject that normalizes to empty must not suppress the whole scan;
+  // minRepeats is counted against the stems that actually parsed (fix #3).
+  const messages = [];
+  const finding = detectCommitVocabularyFatigue([
+    '[codex] Harden',
+    '[codex] Harden',
+    '[codex] Harden',
+    '[codex] !!!',
+    '[codex] Tighten',
+  ], {
+    windowCommits: 5,
+    minRepeats: 3,
+    logger: {
+      debug(message) {
+        messages.push(message);
+      },
+    },
+  });
+
+  assert.equal(finding?.stem, 'harden');
+  assert.equal(finding?.count, 3);
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /parsed 4 of 5 commit subjects/);
+});
+
+test('commit vocabulary fatigue reports the dominant stem on competing repeats', () => {
+  // When two stems both cross the threshold, report the most-repeated one
+  // (ported from closed PR #342); ties break lexicographically smallest.
+  const finding = detectCommitVocabularyFatigue([
+    '[codex] Add a',
+    '[codex] Add b',
+    '[codex] Add c',
+    '[codex] Add d',
+    '[codex] Fix e',
+    '[codex] Fix f',
+    '[codex] Fix g',
+  ], { windowCommits: 7, minRepeats: 3 });
+
+  assert.equal(finding?.stem, 'add');
+  assert.equal(finding?.count, 4);
+});
+
+test('commit vocabulary fatigue breaks dominant-stem ties lexicographically', () => {
+  const finding = detectCommitVocabularyFatigue([
+    '[codex] Fix a',
+    '[codex] Fix b',
+    '[codex] Fix c',
+    '[codex] Add d',
+    '[codex] Add e',
+    '[codex] Add f',
+  ], { windowCommits: 6, minRepeats: 3 });
+
+  // Both `fix` and `add` appear 3 times; `add` < `fix` lexicographically.
+  assert.equal(finding?.stem, 'add');
+  assert.equal(finding?.count, 3);
 });
 
 test('commit vocabulary fatigue waits for full window', () => {
@@ -104,14 +193,16 @@ test('commit vocabulary fatigue does not emit for empty commit history', () => {
   assert.equal(finding, null);
 });
 
-test('commit vocabulary fatigue logs debug context when subjects cannot be parsed', () => {
+test('commit vocabulary fatigue still logs debug context when a subject cannot be parsed', () => {
+  // The whole window parses to fewer than `window` stems but still none cross
+  // the threshold; the debug line is emitted and the scan returns null.
   const messages = [];
   const finding = detectCommitVocabularyFatigue([
-    '[codex] Harden',
-    '[codex] Harden',
-    '[codex] Harden',
+    '[codex] Add',
+    '[codex] Refactor',
+    '[codex] Test',
     '[codex] !!!',
-    '[codex] Tighten',
+    '[codex] Fix',
   ], {
     windowCommits: 5,
     minRepeats: 3,

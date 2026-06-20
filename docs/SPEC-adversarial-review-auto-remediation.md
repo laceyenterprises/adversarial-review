@@ -197,6 +197,30 @@ boundary, those modules should bind to these interfaces rather than fork new
 shapes. Until then, updates to the declaration file must keep the fixture and
 the runtime-bound JSDoc consumers in sync.
 
+## Optional GitHub Read Adapter
+
+The GitHub-PR domain may prefer a local `github-adapter` read binary for GitHub
+lookups during review and remediation orchestration. The integration is
+rollout-safe: adapter reads are opportunistic, and failures or missing binaries
+must fall back to the existing `gh` or Octokit path for the same lookup.
+
+`src/github-adapter-client.mjs` resolves the binary in this order:
+
+1. `GHA_ADAPTER_BIN`
+2. `AGENT_OS_GITHUB_ADAPTER_BIN`
+3. `<repo-root>/modules/github-adapter/bin/github-adapter`
+4. `<repo-root>/../modules/github-adapter/bin/github-adapter`
+
+If none of those paths resolves, the adapter is treated as absent. When the
+adapter is present it is invoked with the caller's GitHub/OAuth environment
+(`GH_TOKEN`, `GITHUB_TOKEN`, host, proxy, certificate, and basic process env
+needed by the binary); `GITHUB_TOKEN` is copied to `GH_TOKEN` only when
+`GH_TOKEN` is unset. The adapter currently covers pull-request rollups, review
+contexts, head/state reads, review bodies for a head SHA, label events, issue
+comments, open PR discovery, single-PR snapshots, and PR diffs. Each call site
+must preserve the fallback behavior independently, because the adapter is an
+optional preferred read source rather than the authoritative availability gate.
+
 ## Default Agent Routing Overrides
 
 The GitHub-PR adapter first resolves the historical opposite-agent base route

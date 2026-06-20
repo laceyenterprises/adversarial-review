@@ -321,7 +321,13 @@ function createGitHubPRSubjectAdapter({
       const startedAt = monotonicNowMs();
       let stdout;
       try {
-        const adapterDiff = await readAdapterPullRequestDiff(snapshot.repo, snapshot.prNumber, { execFileImpl, rootDir, env });
+        let adapterDiff = null;
+        try {
+          adapterDiff = await readAdapterPullRequestDiff(snapshot.repo, snapshot.prNumber, { execFileImpl, rootDir, env });
+        } catch {
+          // The common adapter is optional during rollout; fall back to gh.
+          adapterDiff = null;
+        }
         if (adapterDiff !== null) {
           stdout = adapterDiff;
         } else {

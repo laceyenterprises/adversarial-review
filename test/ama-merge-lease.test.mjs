@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
@@ -71,6 +71,7 @@ test('concurrent acquire for one repo/base yields exactly one holder', () => {
         holderHead: `head-${i}`,
         holderPid: 5000 + i,
         now: `2026-06-20T18:00:${String(i).padStart(2, '0')}Z`,
+        pidAliveFn: () => true,
       }));
     }
     const winners = results.filter((r) => r.acquired);
@@ -314,6 +315,94 @@ test('reclaimIfStale reclaims dead same-host owner pid holder', () => {
     assert.equal(reclaimed.reclaimed, true);
     assert.equal(reclaimed.reason, 'dead-holder-pid');
     assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).exists, false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reclaimIfStale breaks stale mutation lock before reclaiming holder', () => {
+  const rootDir = freshRoot();
+  try {
+    const acquired = acquire(rootDir, { holderPid: 99999, holderHost: 'test-host' });
+    const lockPath = `${acquired.leasePath}.mutation.lock`;
+    writeFileSync(
+      lockPath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        lockId: 'mll_stale_dead_pid',
+        holderPid: 99998,
+        holderHost: hostname(),
+        acquiredAt: new Date().toISOString(),
+      }, null, 2)}\n`,
+    );
+
+    const reclaimed = reclaimIfStale({
+      rootDir,
+      ...IDENTITY,
+      host: 'test-host',
+      now: '2026-06-20T18:01:00Z',
+      pidAliveFn: () => false,
+    });
+
+    assert.equal(reclaimed.reclaimed, true);
+    assert.equal(reclaimed.reason, 'dead-holder-pid');
+    assert.equal(existsSync(lockPath), false);
+    assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).exists, false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('acquireMergeLease reclaims dead holder before acquiring', () => {
+  const rootDir = freshRoot();
+  try {
+    acquire(rootDir, { holderPid: 99999, holderHost: 'test-host' });
+
+    const acquired = acquire(rootDir, {
+      holderPr: 202,
+      holderHead: 'new-after-reclaim',
+      holderPid: 5202,
+      holderHost: 'test-host',
+      now: '2026-06-20T18:01:00Z',
+      pidAliveFn: () => false,
+    });
+
+    assert.equal(acquired.acquired, true);
+    assert.equal(acquired.reclaim.reclaimed, true);
+    assert.equal(acquired.lease.holderPr, 202);
+    assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).holder.holderHead, 'new-after-reclaim');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reclaimIfStale preserves mutation-lock-busy reason for live lock', () => {
+  const rootDir = freshRoot();
+  try {
+    const acquired = acquire(rootDir, { holderPid: 99999, holderHost: 'test-host' });
+    const lockPath = `${acquired.leasePath}.mutation.lock`;
+    writeFileSync(
+      lockPath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        lockId: 'mll_live',
+        holderPid: process.pid,
+        holderHost: hostname(),
+        acquiredAt: new Date().toISOString(),
+      }, null, 2)}\n`,
+    );
+
+    const result = reclaimIfStale({
+      rootDir,
+      ...IDENTITY,
+      host: 'test-host',
+      now: '2026-06-20T18:01:00Z',
+      pidAliveFn: () => false,
+    });
+
+    assert.equal(result.reclaimed, false);
+    assert.equal(result.reason, 'mutation-lock-busy');
+    assert.equal(existsSync(lockPath), true);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

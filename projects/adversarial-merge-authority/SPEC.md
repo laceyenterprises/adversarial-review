@@ -26,6 +26,13 @@ extends the deadline for legitimate long-running merge work. A stale holder
 release or renewal whose fence no longer matches must not delete or update a
 newer holder.
 
+Release, renewal, and waiter mutations are serialized by a secondary mutation
+lock at `<lease>.mutation.lock`. That lock is recoverable state, not a permanent
+operator-only latch: contenders must break it when the lock's same-host process
+is dead or when the lock has exceeded its short critical-section TTL. A busy live
+mutation lock must be reported as `mutation-lock-busy`, not hidden behind an
+identity-change reason.
+
 Reclaim is allowed only when the holder can no longer be trusted to serialize
 the merge lane:
 
@@ -37,6 +44,11 @@ the merge lane:
 - Cross-host holders may be reclaimed after the deadline because local PID
   liveness is unknowable.
 
+Acquisition must attempt that same reclaim path when it observes an existing
+holder before it returns `acquired:false`. A live holder still refuses acquire,
+but a dead same-host holder or expired cross-host holder should not require an
+out-of-band caller to remember a separate reclaim-then-retry dance.
+
 FIFO waiters are advisory ordering state, not merge authority. Each waiter entry
 records the repo, base, PR number, head SHA, waiter id, owning process id, owning
 host, arrival timestamp, update timestamp, attempt number, and deadline. Before
@@ -44,6 +56,10 @@ the head-of-queue check, acquisition must prune abandoned waiters whose same-hos
 process is dead or whose arrival timestamp is older than its deadline. A dead or
 expired waiter must not permanently block later contenders for that `(repo, base)`
 lane.
+
+Waiter writes are still advisory, but their read-modify-write mutations must run
+under the recoverable mutation lock so concurrent contenders do not silently drop
+or reorder each other's entries through last-writer-wins file replacement.
 
 ## 1.1.1 HAM terminal-remediation mode
 

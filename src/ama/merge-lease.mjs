@@ -25,6 +25,7 @@ const LEASE_SCHEMA_VERSION = 1;
 const DEFAULT_DEADLINE_SECONDS = 900;
 const MUTATION_LOCK_RETRY_ATTEMPTS = 50;
 const MUTATION_LOCK_RETRY_DELAY_MS = 5;
+const MUTATION_LOCK_STALE_MS = 5000;
 
 function sanitizeSegment(value) {
   return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
@@ -82,6 +83,8 @@ function writeJsonFile(filePath, value) {
 }
 
 function sleepSync(ms) {
+  // AMA currently calls this library from short-lived closer processes. Keep
+  // lock waiting bounded and synchronous so release/renew stay fence-linear.
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
@@ -89,13 +92,38 @@ function mutationLockPath(leasePath) {
   return `${leasePath}.mutation.lock`;
 }
 
-function acquireMutationLock(lockPath) {
+function mutationLockIsStale(lock, { nowIso, host, pidAliveFn }) {
+  if (!lock || typeof lock !== 'object') return true;
+  const currentHost = host || hostname();
+  const sameHost = lock.holderHost === currentHost;
+  const pid = Number(lock.holderPid);
+  if (sameHost && Number.isInteger(pid) && pid > 0 && !pidAliveFn(pid)) {
+    return true;
+  }
+  const acquiredMs = Date.parse(lock.acquiredAt);
+  const nowMs = Date.parse(nowIso);
+  if (!Number.isFinite(acquiredMs) || !Number.isFinite(nowMs)) {
+    return true;
+  }
+  return nowMs - acquiredMs >= MUTATION_LOCK_STALE_MS;
+}
+
+function breakStaleMutationLock(lockPath, { nowIso = isoNow(), host, pidAliveFn = pidIsLive } = {}) {
+  const existing = readJsonFile(lockPath, null);
+  if (!mutationLockIsStale(existing, { nowIso, host, pidAliveFn })) {
+    return { broken: false, lock: existing };
+  }
+  rmSync(lockPath, { force: true });
+  return { broken: true, lock: existing };
+}
+
+function acquireMutationLock(lockPath, { nowIso = isoNow(), host, pidAliveFn = pidIsLive } = {}) {
   const lock = {
     schemaVersion: LEASE_SCHEMA_VERSION,
     lockId: `mll_${randomUUID()}`,
     holderPid: process.pid,
-    holderHost: hostname(),
-    acquiredAt: isoNow(),
+    holderHost: host || hostname(),
+    acquiredAt: nowIso,
   };
   for (let attempt = 0; attempt < MUTATION_LOCK_RETRY_ATTEMPTS; attempt += 1) {
     try {
@@ -106,21 +134,32 @@ function acquireMutationLock(lockPath) {
       return { acquired: true, lock };
     } catch (err) {
       if (err?.code !== 'EEXIST') throw err;
+      const stale = breakStaleMutationLock(lockPath, { nowIso, host, pidAliveFn });
+      if (stale.broken) continue;
       sleepSync(MUTATION_LOCK_RETRY_DELAY_MS);
     }
   }
   return { acquired: false, lock };
 }
 
-function withMutationLock(leasePath, fn) {
+function withMutationLock(leasePath, fn, options = {}) {
   const lockPath = mutationLockPath(leasePath);
-  const lock = acquireMutationLock(lockPath);
+  const lock = acquireMutationLock(lockPath, options);
   if (!lock.acquired) return { acquired: false, lockPath };
   try {
     return { acquired: true, lockPath, value: fn() };
   } finally {
     rmSync(lockPath, { force: true });
   }
+}
+
+function withWaiterMutationLock({ rootDir, repo, base }, fn) {
+  const leasePath = mergeLeaseFilePath(rootDir, { repo, base });
+  const locked = withMutationLock(leasePath, fn);
+  if (!locked.acquired) {
+    throw new Error(`merge lease: mutation lock busy while updating waiters for ${repo}::${base}`);
+  }
+  return locked.value;
 }
 
 function validateIdentity({ rootDir, repo, base } = {}) {
@@ -194,26 +233,28 @@ function waiterProcessDead(waiter, host, pidAliveFn) {
 }
 
 function pruneMergeLeaseWaiters({ rootDir, repo, base, now, host, pidAliveFn }) {
-  const waitersPath = mergeLeaseWaitersFilePath(rootDir, { repo, base });
-  const doc = readWaiterDoc(waitersPath);
-  if (doc.waiters.length === 0) return { pruned: [], waiters: [] };
-  const currentHost = host || hostname();
-  const updatedAt = now || isoNow();
-  const waiters = [];
-  const pruned = [];
-  for (const waiter of doc.waiters) {
-    const expired = waiterExpired(waiter, updatedAt);
-    const dead = waiterProcessDead(waiter, currentHost, pidAliveFn);
-    if (expired || dead) {
-      pruned.push({ ...waiter, staleReason: dead ? 'dead-waiter-pid' : 'expired-waiter' });
-    } else {
-      waiters.push(waiter);
+  return withWaiterMutationLock({ rootDir, repo, base }, () => {
+    const waitersPath = mergeLeaseWaitersFilePath(rootDir, { repo, base });
+    const doc = readWaiterDoc(waitersPath);
+    if (doc.waiters.length === 0) return { pruned: [], waiters: [] };
+    const currentHost = host || hostname();
+    const updatedAt = now || isoNow();
+    const waiters = [];
+    const pruned = [];
+    for (const waiter of doc.waiters) {
+      const expired = waiterExpired(waiter, updatedAt);
+      const dead = waiterProcessDead(waiter, currentHost, pidAliveFn);
+      if (expired || dead) {
+        pruned.push({ ...waiter, staleReason: dead ? 'dead-waiter-pid' : 'expired-waiter' });
+      } else {
+        waiters.push(waiter);
+      }
     }
-  }
-  if (pruned.length > 0) {
-    writeJsonFile(waitersPath, waiterFileDoc(waiters, updatedAt));
-  }
-  return { pruned, waiters: sortWaiters(waiters) };
+    if (pruned.length > 0) {
+      writeJsonFile(waitersPath, waiterFileDoc(waiters, updatedAt));
+    }
+    return { pruned, waiters: sortWaiters(waiters) };
+  });
 }
 
 function holderMatches(lease, fence = {}) {
@@ -276,27 +317,29 @@ export function upsertMergeLeaseWaiter({
   attempt = 1,
 } = {}) {
   validateIdentity({ rootDir, repo, base });
-  const waitersPath = mergeLeaseWaitersFilePath(rootDir, { repo, base });
-  const now = updatedAt || arrivedAt || isoNow();
-  const doc = readWaiterDoc(waitersPath);
-  const existing = doc.waiters.find((w) => w.waiterId === waiterId);
-  const nextWaiter = {
-    repo,
-    base,
-    pr: normalizeHolderPr(pr, 'pr'),
-    head: String(head || ''),
-    waiterId,
-    arrivedAt: existing?.arrivedAt || arrivedAt || now,
-    updatedAt: now,
-    attempt: Number.isFinite(Number(attempt)) ? Number(attempt) : 1,
-    holderPid: normalizeHolderPid(holderPid),
-    holderHost: holderHost || hostname(),
-    deadlineSeconds: parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS),
-  };
-  const waiters = doc.waiters.filter((w) => w.waiterId !== waiterId);
-  waiters.push(nextWaiter);
-  writeJsonFile(waitersPath, waiterFileDoc(waiters, now));
-  return { waitersPath, waiter: nextWaiter, waiters: sortWaiters(waiters) };
+  return withWaiterMutationLock({ rootDir, repo, base }, () => {
+    const waitersPath = mergeLeaseWaitersFilePath(rootDir, { repo, base });
+    const now = updatedAt || arrivedAt || isoNow();
+    const doc = readWaiterDoc(waitersPath);
+    const existing = doc.waiters.find((w) => w.waiterId === waiterId);
+    const nextWaiter = {
+      repo,
+      base,
+      pr: normalizeHolderPr(pr, 'pr'),
+      head: String(head || ''),
+      waiterId,
+      arrivedAt: existing?.arrivedAt || arrivedAt || now,
+      updatedAt: now,
+      attempt: Number.isFinite(Number(attempt)) ? Number(attempt) : 1,
+      holderPid: normalizeHolderPid(holderPid),
+      holderHost: holderHost || hostname(),
+      deadlineSeconds: parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS),
+    };
+    const waiters = doc.waiters.filter((w) => w.waiterId !== waiterId);
+    waiters.push(nextWaiter);
+    writeJsonFile(waitersPath, waiterFileDoc(waiters, now));
+    return { waitersPath, waiter: nextWaiter, waiters: sortWaiters(waiters) };
+  });
 }
 
 export function removeMergeLeaseWaiter({
@@ -308,14 +351,16 @@ export function removeMergeLeaseWaiter({
 } = {}) {
   validateIdentity({ rootDir, repo, base });
   if (!waiterId) return { removed: false, waiters: readMergeLeaseWaiters(rootDir, { repo, base }) };
-  const waitersPath = mergeLeaseWaitersFilePath(rootDir, { repo, base });
-  const doc = readWaiterDoc(waitersPath);
-  const waiters = doc.waiters.filter((w) => w.waiterId !== waiterId);
-  const removed = waiters.length !== doc.waiters.length;
-  if (removed || doc.waiters.length > 0) {
-    writeJsonFile(waitersPath, waiterFileDoc(waiters, updatedAt || isoNow()));
-  }
-  return { removed, waitersPath, waiters: sortWaiters(waiters) };
+  return withWaiterMutationLock({ rootDir, repo, base }, () => {
+    const waitersPath = mergeLeaseWaitersFilePath(rootDir, { repo, base });
+    const doc = readWaiterDoc(waitersPath);
+    const waiters = doc.waiters.filter((w) => w.waiterId !== waiterId);
+    const removed = waiters.length !== doc.waiters.length;
+    if (removed || doc.waiters.length > 0) {
+      writeJsonFile(waitersPath, waiterFileDoc(waiters, updatedAt || isoNow()));
+    }
+    return { removed, waitersPath, waiters: sortWaiters(waiters) };
+  });
 }
 
 export function inspectMergeLease({
@@ -375,6 +420,7 @@ export function acquireMergeLease({
   const leasePath = mergeLeaseFilePath(rootDir, { repo, base });
   const acquiredAt = now || isoNow();
   let waiter = null;
+  let reclaim = null;
 
   if (registerWaiter) {
     const registered = upsertMergeLeaseWaiter({
@@ -396,7 +442,17 @@ export function acquireMergeLease({
 
   const existingLease = readJsonFile(leasePath, null);
   if (existingLease) {
-    return { acquired: false, leasePath, lease: existingLease, existingLease, waiter };
+    reclaim = reclaimIfStale({
+      rootDir,
+      repo,
+      base,
+      now: acquiredAt,
+      host: holderHost,
+      pidAliveFn,
+    });
+    if (!reclaim.reclaimed) {
+      return { acquired: false, leasePath, lease: existingLease, existingLease, waiter, reclaim };
+    }
   }
 
   const waiterState = pruneMergeLeaseWaiters({
@@ -448,7 +504,7 @@ export function acquireMergeLease({
   if (waiter?.waiterId) {
     removeMergeLeaseWaiter({ rootDir, repo, base, waiterId: waiter.waiterId, updatedAt: acquiredAt });
   }
-  return { acquired: true, leasePath, lease, waiter, prunedWaiters: waiterState.pruned };
+  return { acquired: true, leasePath, lease, waiter, prunedWaiters: waiterState.pruned, reclaim };
 }
 
 export function releaseMergeLease({
@@ -468,6 +524,7 @@ export function releaseMergeLease({
   if (!matched) {
     return { released: false, leasePath, existingLease: lease };
   }
+  // Test-only race injection hook used to prove the second fence read below.
   if (typeof _afterFenceRead === 'function') _afterFenceRead({ leasePath, lease });
   const locked = withMutationLock(leasePath, () => {
     const currentLease = readJsonFile(leasePath, null);
@@ -507,6 +564,7 @@ export function renewMergeLease({
   if (!matched) {
     return { renewed: false, leasePath, existingLease: lease };
   }
+  // Test-only race injection hook used to prove the second fence read below.
   if (typeof _afterFenceRead === 'function') _afterFenceRead({ leasePath, lease });
   const locked = withMutationLock(leasePath, () => {
     const currentLease = readJsonFile(leasePath, null);
@@ -567,7 +625,7 @@ export function reclaimIfStale({
     acquiredAt: lease.acquiredAt,
   });
   if (!released.released) {
-    return { reclaimed: false, reason: 'identity-changed', inspection, release: released };
+    return { reclaimed: false, reason: released.reason || 'identity-changed', inspection, release: released };
   }
   return {
     reclaimed: true,

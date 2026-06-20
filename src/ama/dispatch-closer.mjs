@@ -180,8 +180,7 @@ const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = (
 const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
-const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
-const AMA_CLOSER_RETRYABLE_STATUSES = new Set(['failed', 'cancelled', 'canceled', 'superseded', 'not-found']);
+const AMA_CLOSER_RETRYABLE_STATUSES = new Set(['failed', 'cancelled', 'canceled', 'superseded', 'not-found', 'succeeded']);
 const MERGE_CLASS_ORCHESTRATION_MODES = new Set(ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE);
 const AMA_CLOSER_AUDIT_TERMINAL_OUTCOMES = new Set([
   'succeeded',
@@ -807,6 +806,17 @@ export async function maybeDispatchAmaCloser({
     && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.PENDING
     && !existingRecordIsReclaimableInterruption;
   let existingDispatchStatus = null;
+  if (auditTerminalOutcome === 'succeeded') {
+    return {
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'ama-already-succeeded',
+      workerClass: existingRecord?.workerClass || workerClass,
+      dispatchId: existingRecord?.dispatchId || existingRecord?.launchRequestId || null,
+      launchRequestId: existingRecord?.launchRequestId || null,
+      promptPath: existingRecord?.promptPath || null,
+    };
+  }
   if (existingRecord?.launchRequestId) {
     const statusProbe = await probeAmaCloserDispatchStatus({
       hqPath,
@@ -817,37 +827,22 @@ export async function maybeDispatchAmaCloser({
     });
     const status = statusProbe?.status || null;
     existingDispatchStatus = status;
-    if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
-      if (auditTerminalOutcome === 'succeeded') {
-        return {
-          dispatched: false,
-          skipMergeAgent: true,
-          reason: 'ama-already-succeeded',
-          workerClass: existingRecord.workerClass || workerClass,
-          dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
-          launchRequestId: existingRecord.launchRequestId || null,
-          promptPath: existingRecord.promptPath || null,
-        };
-      }
-      if (auditTerminalOutcome && auditTerminalOutcome !== 'succeeded') {
-        existingDispatchStatus = null;
-      } else {
-        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
-          ...(current || existingRecord),
-          lastObservedStatus: status,
-          lastObservedAt: dispatchContext.dispatchedAt,
-          lastError: statusProbe?.error || null,
-        }));
-        return {
-          dispatched: false,
-          skipMergeAgent: true,
-          reason: `existing-dispatch-${status}`,
-          workerClass: existingRecord.workerClass || workerClass,
-          dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
-          launchRequestId: existingRecord.launchRequestId || null,
-          promptPath: existingRecord.promptPath || null,
-        };
-      }
+    if (AMA_CLOSER_ACTIVE_STATUSES.has(status)) {
+      updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+        ...(current || existingRecord),
+        lastObservedStatus: status,
+        lastObservedAt: dispatchContext.dispatchedAt,
+        lastError: statusProbe?.error || null,
+      }));
+      return {
+        dispatched: false,
+        skipMergeAgent: true,
+        reason: `existing-dispatch-${status}`,
+        workerClass: existingRecord.workerClass || workerClass,
+        dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+        launchRequestId: existingRecord.launchRequestId || null,
+        promptPath: existingRecord.promptPath || null,
+      };
     }
     if (status === 'unknown') {
       updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({

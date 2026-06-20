@@ -714,6 +714,68 @@ exit 0
   }
 });
 
+test('repo merge settings script enforces squash-only settings for app shorthand', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'repo-merge-settings-'));
+  try {
+    const ghPath = path.join(tmp, 'gh');
+    const logPath = path.join(tmp, 'gh.log');
+    writeFileSync(ghPath, `#!/usr/bin/env bash
+set -euo pipefail
+echo "$*" >> "${logPath}"
+if [[ "$1 $2" == "repo view" ]]; then
+  exit 0
+fi
+if [[ "$1 $2" == "repo edit" ]]; then
+  exit 0
+fi
+exit 1
+`);
+    const chmod = spawnSync('chmod', ['+x', ghPath], { encoding: 'utf8' });
+    assert.equal(chmod.status, 0, chmod.stderr);
+    const result = spawnSync('bash', ['scripts/init-repo-merge-settings.sh', 'foundry'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}` },
+    });
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    const log = readFileSync(logPath, 'utf8');
+    assert.match(log, /^repo view laceyenterprises\/foundry --json nameWithOwner --jq \.nameWithOwner$/m);
+    assert.match(log, /^repo edit laceyenterprises\/foundry --enable-squash-merge --enable-merge-commit=false --enable-rebase-merge=false --delete-branch-on-merge --squash-merge-commit-message pr-title$/m);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('repo merge settings script fails loud when the target repo is missing', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'repo-merge-settings-missing-'));
+  try {
+    const ghPath = path.join(tmp, 'gh');
+    const logPath = path.join(tmp, 'gh.log');
+    writeFileSync(ghPath, `#!/usr/bin/env bash
+set -euo pipefail
+echo "$*" >> "${logPath}"
+if [[ "$1 $2" == "repo view" ]]; then
+  exit 1
+fi
+exit 0
+`);
+    const chmod = spawnSync('chmod', ['+x', ghPath], { encoding: 'utf8' });
+    assert.equal(chmod.status, 0, chmod.stderr);
+    const result = spawnSync('bash', ['scripts/init-repo-merge-settings.sh', 'laceyenterprises/missing-app'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}` },
+    });
+    assert.equal(result.status, 1, `${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, /Repository 'laceyenterprises\/missing-app' was not found/);
+    const log = readFileSync(logPath, 'utf8');
+    assert.match(log, /^repo view laceyenterprises\/missing-app --json nameWithOwner --jq \.nameWithOwner$/m);
+    assert.doesNotMatch(log, /^repo edit /m);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('fast-merge migration adds authorization column and rereview helper requeues skipped rows idempotently', () => {
   const db = new Database(':memory:');
   try {

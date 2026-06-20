@@ -46,14 +46,41 @@ gh label list --repo laceyenterprises/<repo> --json name --jq \
 # expect >= 8
 ```
 
-## 3. Worker-class title prefixes
+## 3. Enforce the canonical merge method (squash-only) — REQUIRED
+
+The fleet treats one PR as one logical ticket, and all automation merges via
+`gh pr merge --squash`. If `allow_merge_commit` / `allow_rebase_merge` stay
+enabled, manual UI/CLI merges create merge-commits (and rebase merges), giving
+the mixed history observed 2026-06-19. Disable them so every merge — automated
+or manual — squashes, keeping history linear and the build-completion ledger's
+PR↔mergeCommit correlation single-shaped.
+
+Run the idempotent settings initializer:
+
+```bash
+# one or more repos (short names resolve against the org):
+tools/adversarial-review/scripts/init-repo-merge-settings.sh foundry podium
+
+# or every non-archived org repo at once:
+tools/adversarial-review/scripts/init-repo-merge-settings.sh --all
+```
+
+Verify:
+
+```bash
+gh api repos/laceyenterprises/<repo> \
+  --jq '{squash: .allow_squash_merge, merge_commit: .allow_merge_commit, rebase: .allow_rebase_merge}'
+# expect squash=true, merge_commit=false, rebase=false
+```
+
+## 4. Worker-class title prefixes
 
 PRs must carry a valid `[codex]` / `[claude-code]` / `[clio-agent]` / `[gemini]`
 title prefix or they are recorded malformed-terminal and never reviewed (see the
 top-level CLAUDE.md "Worker-class title prefixes are non-negotiable"). Nothing to
 configure per-repo; this is a contract on the PR author.
 
-## 4. (Optional) Branch protection
+## 5. (Optional) Branch protection
 
 If the repo's GitHub plan supports branch protection and you want the
 adversarial-gate context required at merge, add it to the target branch's

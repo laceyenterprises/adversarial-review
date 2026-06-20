@@ -1,0 +1,130 @@
+{
+  "planSchemaVersion": 2,
+  "planId": "antigravity-gemini-reviewer-v1",
+  "specRef": "antigravity-gemini-reviewer@3b374aa861e5",
+  "parentTicket": null,
+  "linearTeam": "Laceyenterprises",
+  "tracking": "linear",
+  "defaults": {
+    "workerSpec": {
+      "workerClass": "codex",
+      "tools": [
+        "read",
+        "write",
+        "bash:git-safe"
+      ],
+      "commsAllowance": "none",
+      "budgetEnforcement": "best-effort",
+      "retryPolicy": {
+        "backoffSeconds": 0
+      }
+    }
+  },
+  "linearProject": "Antigravity Gemini Reviewer (AGR)",
+  "postMergeActions": {
+    "planPath": "modules/worker-pool/post-merge-actions/antigravity-gemini-reviewer-official-record-bump.yaml",
+    "dispatchGate": {
+      "kind": "official-record-bump",
+      "completedSpecRef": "antigravity-gemini-reviewer@3b374aa861e5"
+    }
+  },
+  "tickets": [
+    {
+      "id": "AGR-01",
+      "title": "Antigravity OAuth bridge: PKCE login + 0600 refresh-token file store",
+      "scope": "Add a standalone Antigravity OAuth bridge module to the adversarial-review repo at src/auth/antigravity-bridge.mjs (no reviewer wiring in this ticket). It performs the one-time interactive PKCE OAuth login against the Antigravity endpoint via a localhost callback server (e.g. http://localhost:51121), persists per-account credentials {email, refreshToken, projectId?} to a 0600 JSON file under a pinned 0700 directory (default ~/.gemini/antigravity-bridge/<account-id>.json; honor a GEMINI_ANTIGRAVITY_BRIDGE_DIR override), and exposes getAccessToken(accountId) which transparently exchanges the stored refresh token for a short-lived access token and caches it until near expiry. Token-validity assertion MUST be a file read of the stored creds (mirror assertCodexOAuth / assertCodexAuthReadable in src/reviewer.mjs ~L297-339), NOT a CLI or keychain probe — this file-based design is precisely what sidesteps the agy macOS keychain bug (#85). Ship a small CLI entry `agr-auth` with `login` (runs the one-time PKCE flow for one account) and `status` (prints per-account access-token validity + refresh state, no secrets). Model the PKCE flow and credential-file format on the community ports firdyfirdy/antigravity-auth and NoeFabris/opencode-antigravity-auth (PKCE, localhost callback, refresh-token JSON). Never log token values. Tests: PKCE code-verifier/code-challenge construction + auth URL; token-file write asserts mode 0600 and dir 0700; getAccessToken refresh against a mocked token endpoint (success + expired-refresh error shape); missing/corrupt creds-file error shape. Single-repo: adversarial-review only; no agent-os edits.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [],
+      "expectedDurationHours": 8,
+      "taskKind": "coding",
+      "promptPath": "projects/antigravity-gemini-reviewer/prompts/agr-01-prompt.md"
+    },
+    {
+      "id": "AGR-02",
+      "title": "Multi-account registry + quota-aware rotation",
+      "scope": "On top of AGR-01's bridge, add a multi-account registry + quota router (same module dir, e.g. src/auth/antigravity-accounts.mjs). It holds an ordered account list and provides: selectAccount() returning the next eligible account round-robin while skipping any account currently in cooldown; markRateLimited(accountId, retryAfter) which puts an account into cooldown until retryAfter; automatic rotation so a capped account is skipped on the next selection; and allCapped() returning true plus the earliest retryAfter when every account is cooled down. Use an injectable clock (no direct Date.now in the decision path) so cooldown logic is deterministically testable. Pure/in-memory state — no persistence beyond the AGR-01 token files. Handle the single-account degenerate case (selection returns it; allCapped reflects its cooldown). Tests: round-robin selection across N accounts; cooldown skip then re-eligibility after expiry (mock clock); rotate-on-cap; allCapped returns earliest retryAfter; single-account behavior. Single-repo: adversarial-review only.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "AGR-01"
+      ],
+      "expectedDurationHours": 5,
+      "taskKind": "coding",
+      "promptPath": "projects/antigravity-gemini-reviewer/prompts/agr-02-prompt.md"
+    },
+    {
+      "id": "AGR-03",
+      "title": "Wire the Antigravity backend into the reviewer.mjs gemini path",
+      "scope": "Integrate the AGR-01/02 bridge into the gemini review path in adversarial-review src/reviewer.mjs behind a runtime selector. Add an `antigravity` backend chosen when reviewer.gemini.runtime resolves to 'antigravity' (default 'cli' = today's native gemini-cli + ~/.gemini/oauth_creds.json path, which MUST remain byte-identical). When 'antigravity': assertGeminiOAuth (~L387) delegates to the bridge's file-read validity check for the selected account; reviewWithGemini (~L1271) obtains a fresh access token via getAccessToken(selectedAccount) (AGR-02 selection) and injects it for the gemini invocation. The OAuth-first env scrub MUST be preserved unchanged — scrubOAuthFallbackEnv still strips GEMINI_API_KEY/GOOGLE_API_KEY before spawn (src/secret-source/env.mjs); add a test that asserts the scrub still fires on the antigravity path. On a 401/quota response, call markRateLimited and rotate to the next account for exactly one retry; if allCapped, return a clean quotaHoldDecision (HOLD the review with the earliest retryAfter — do NOT post a failed review or burn the PR), consistent with the existing HRR quota-hold semantics. Tests: backend selection by config (cli vs antigravity); OAuth-first scrub asserted under antigravity; 401 -> markRateLimited -> rotate -> retry-once; allCapped -> hold (no failed review); cli path regression (unchanged spawn/args/creds). Single-repo: adversarial-review only.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "AGR-02"
+      ],
+      "expectedDurationHours": 8,
+      "taskKind": "coding",
+      "promptPath": "projects/antigravity-gemini-reviewer/prompts/agr-03-prompt.md"
+    },
+    {
+      "id": "AGR-04",
+      "title": "Config knobs: reviewer.gemini.runtime + antigravity.accounts[]",
+      "scope": "Add the AGR config surface in the adversarial-review repo. SINGLE-REPO: reviewer.* is read only by the JS adversarial loader and is foreign-ignored by the CFG-01 python/shell loader, so there is NO agent-os CFG-01 work (CFG-01 would be dead schema). In src/role-config.mjs and config.yaml under the existing reviewer.gemini block: add reviewer.gemini.runtime (enum cli|antigravity, default cli) resolved through the same file->env cascade as resolveGeminiReviewerMode, and reviewer.gemini.antigravity.accounts[] as an ordered list of {id, tokenFile} entries where tokenFile may be a literal path or an op:// secret-ref (resolved via the existing watcher-op.env / op-run pattern). Validation runs at the adversarial watcher boot validator (NOT CFG-01): an unknown runtime value fails closed at load (AgentOSConfigError-style, caught by the boot validator, not throwing into the per-PR loop); runtime: antigravity with an empty accounts[] fails closed with a clear message. Export resolveGeminiRuntime + resolveAntigravityAccounts for AGR-03 to consume. Document the keys in config.yaml comments and config.local.yaml.example. Tests: runtime parse + enum validation + default cli; empty-accounts-under-antigravity refusal; account-list parse incl. op:// ref shape; cascade precedence (config.yaml < *.local.yaml < env). Single-repo: adversarial-review only.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "AGR-03"
+      ],
+      "expectedDurationHours": 5,
+      "taskKind": "coding",
+      "promptPath": "projects/antigravity-gemini-reviewer/prompts/agr-04-prompt.md"
+    },
+    {
+      "id": "AGR-05",
+      "title": "Implement the antigravity worker runtime branch in acpx-gemini.sh",
+      "scope": "In the agent-os repo, implement the antigravity branch of the GEMINI_RUNTIME seam in modules/worker-pool/lib/adapters/acpx-gemini.sh that GMW-05 left fail-closed (~L606-626). When GEMINI_RUNTIME=antigravity: obtain an Antigravity-backed access token (preferred: via the AGR bridge CLI/module; acceptable interim: via the existing OAuth-broker plumbing the adapter already uses at 127.0.0.1:4099/:4097) and write it into the pinned-HOME ~/.gemini/oauth_creds.json using the EXISTING write_worker_oauth_creds helper (~L284-299) so the native gemini worker reads an Antigravity-backed token with no change to the downstream gemini invocation. Preserve the 0600 file / 0700 dir permissions (already enforced by the helper) and the OAuth-first contract (no API-key fallback). The default runtime (cli) path must be unchanged. Tests (shunit2/bats-style, matching the repo's adapter test conventions): GEMINI_RUNTIME=antigravity no longer exits fail-closed; oauth_creds.json written at mode 0600 under a 0700 dir; cli runtime path byte-unchanged; missing token -> fail-closed (no silent API-key fallback). Single-repo: agent-os only (no adversarial-review edits; reference the bridge's documented token-fetch contract from AGR-01).",
+      "targetRepo": "agent-os",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "AGR-03"
+      ],
+      "expectedDurationHours": 6,
+      "taskKind": "coding",
+      "promptPath": "projects/antigravity-gemini-reviewer/prompts/agr-05-prompt.md"
+    },
+    {
+      "id": "AGR-06",
+      "title": "Re-enable the gemini circuit-breaker + per-account quota observability",
+      "scope": "In the adversarial-review repo, make gemini's circuit-breaker role OPERABLE now that auth is durable, and add quota observability — but do NOT flip the tracked config default. (1) Make reviewer.gemini.mode (off|fallback|always-on) operable with runtime: antigravity — confirm mode resolution + routing select the antigravity backend; fallback injects gemini only when the primary reviewer is quota-capped; always-on injects it as the third reviewer. (2) Emit structured telemetry from the AGR-02 router: agr_account_selected, agr_account_rate_limited (with retryAfter), and agr_all_capped events to the reviewer's existing structured log channel + any metrics surface. (3) On allCapped, raise a single operator page reusing the SAK sentinel.broker-style dedupe/coalesce (one alert per dedupe window with a suppressed-count) so a capped-account storm does not page-spam. Leave reviewer.gemini.mode at its current default (off): activation is an explicit OUT-OF-BAND operator step (SPEC section 7) taken AFTER the paid plan + agr-auth login provision the accounts — flipping mode on before any account can authenticate would re-strand PRs (the exact failure AGR fixes). Tests: mode wiring selects antigravity backend; fallback vs always-on injection; router emits each event on the right transition; allCapped page payload + dedupe/coalesce. Single-repo: adversarial-review only.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "AGR-04",
+        "AGR-05"
+      ],
+      "expectedDurationHours": 6,
+      "taskKind": "coding",
+      "promptPath": "projects/antigravity-gemini-reviewer/prompts/agr-06-prompt.md"
+    },
+    {
+      "id": "AGR-07",
+      "title": "Operator runbook + one-time auth bootstrap doc",
+      "scope": "In the agent-os repo, add docs/RUNBOOK-antigravity-gemini-reviewer.md covering: the one-time, unavoidable interactive `agr-auth login` per account (browser PKCE — the only manual step; must be run as the airlock account so the 0600 token files are owned correctly); the paid Google AI Pro/Ultra plan requirement per account and WHY the free tier is rejected (it is the exact entitlement Google revoked on 2026-06-18 — link the finding/postmortem); how runtime: antigravity + reviewer.gemini.antigravity.accounts[] are configured and how reviewer.gemini.mode re-enables the circuit breaker; rotation + cooldown semantics + the all-capped hold/page behavior; rollback to runtime: cli or mode: off (one config flip + watcher bounce); the #85 keychain-bypass rationale (why a file-token bridge instead of agy); and an explicit reverse-engineering/ToS fragility caveat (Antigravity OAuth is not a published API — endpoint changes are a known risk; cli is the escape hatch). Cross-link the GMW SPEC (this is GMW's deferred antigravity runtime) and the gemini-cli-tier-killed finding. Tests: markdown lint / internal link check only (doc-only ticket). Single-repo: agent-os only.",
+      "targetRepo": "agent-os",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "AGR-06"
+      ],
+      "expectedDurationHours": 3,
+      "taskKind": "coding",
+      "promptPath": "projects/antigravity-gemini-reviewer/prompts/agr-07-prompt.md"
+    }
+  ]
+}

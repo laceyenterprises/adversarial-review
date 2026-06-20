@@ -176,20 +176,37 @@ HAM_REBASE_ATTEMPTS=0
 HAM_REBASE_ATTEMPT_CAP="${HAM_REBASE_ATTEMPT_CAP:-3}"
 HAM_UPDATE_BRANCH_RETRY_CAP="${HAM_UPDATE_BRANCH_RETRY_CAP:-3}"
 HAM_MERGE_LEASE_WAIT_SECONDS="${HAM_MERGE_LEASE_WAIT_SECONDS:-900}"
+HAM_MERGE_LEASE_RELEASE_RETRY_CAP="${HAM_MERGE_LEASE_RELEASE_RETRY_CAP:-3}"
 HAM_MERGE_LEASE_ID=""
 HAM_MERGE_LEASE_HELD=0
 
 ham_release_merge_lease() {
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ] && [ -n "${HAM_MERGE_LEASE_ID:-}" ]; then
-    node /tmp/ama-test-root/bin/merge-lease.mjs release \
-      --repo acme/myrepo \
-      --base "$BASE_BRANCH" \
-      --pr 1234 \
-      --lease-id "$HAM_MERGE_LEASE_ID" \
-      > /tmp/ham-merge-lease-release.json
-    HAM_MERGE_LEASE_HELD=0
-    HAM_MERGE_LEASE_ID=""
-    trap - EXIT
+    ham_release_attempt=1
+    while [ "$ham_release_attempt" -le "$HAM_MERGE_LEASE_RELEASE_RETRY_CAP" ]; do
+      if node /tmp/ama-test-root/bin/merge-lease.mjs release \
+        --repo acme/myrepo \
+        --base "$BASE_BRANCH" \
+        --pr 1234 \
+        --lease-id "$HAM_MERGE_LEASE_ID" \
+        > /tmp/ham-merge-lease-release.json; then
+        HAM_MERGE_LEASE_HELD=0
+        HAM_MERGE_LEASE_ID=""
+        trap - EXIT
+        return 0
+      else
+        HAM_MERGE_LEASE_RELEASE_EXIT=$?
+      fi
+      echo "AMG-04 warning: merge lease release attempt ${ham_release_attempt}/${HAM_MERGE_LEASE_RELEASE_RETRY_CAP} failed for lease ${HAM_MERGE_LEASE_ID} (exit ${HAM_MERGE_LEASE_RELEASE_EXIT}); keeping EXIT trap armed" >&2
+      cat /tmp/ham-merge-lease-release.json >&2 || true
+      if [ "$ham_release_attempt" -ge "$HAM_MERGE_LEASE_RELEASE_RETRY_CAP" ]; then
+        echo "AMG-04 hard-blocker: merge lease release failed after ${HAM_MERGE_LEASE_RELEASE_RETRY_CAP} attempts; do not continue while the lease is unconfirmed" >&2
+        return "$HAM_MERGE_LEASE_RELEASE_EXIT"
+      fi
+      sleep $((ham_release_attempt * 2))
+      ham_release_attempt=$((ham_release_attempt + 1))
+    done
+    return 1
   fi
 }
 
@@ -309,7 +326,10 @@ while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-pr-after.json)" = "BEHIND" ]
     # suite + required checks in the parallel phase, then return here and
     # re-acquire before the next rebase/merge attempt.
     echo "HAM-03 conflict: releasing merge lease before local conflict resolution" >&2
-    ham_release_merge_lease
+    if ! ham_release_merge_lease; then
+      echo "HAM-03 hard-blocker: cannot resolve conflict while merge lease release is unconfirmed" >&2
+      exit 1
+    fi
     # >>> Perform the local rebase + conflict resolution from the
     #     "## Resolving merge conflicts" section below, re-validate, then fall through. <<<
     gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-pr-after.json
@@ -349,14 +369,23 @@ if [ "$HAM_FORCE_REVALIDATION" -eq 1 ]; then
   printf '{"needsRevalidation":true,"reason":"validation-base-unavailable"}\n' > /tmp/ham-merge-lease-revalidation.json
   HAM_NEEDS_REVALIDATION=true
 else
-  node /tmp/ama-test-root/bin/merge-lease.mjs needs-revalidation \
+  if node /tmp/ama-test-root/bin/merge-lease.mjs needs-revalidation \
     --repo-path . \
     --base "$BASE_BRANCH" \
     --validation-base "$HAM_VALIDATION_BASE_SHA" \
     --current-base "$HAM_CURRENT_BASE_SHA" \
     --changed-files-from "$POST_REMEDIATION_SHA" \
-    > /tmp/ham-merge-lease-revalidation.json
-  HAM_NEEDS_REVALIDATION=$(jq -r '.needsRevalidation // true' /tmp/ham-merge-lease-revalidation.json)
+    > /tmp/ham-merge-lease-revalidation.json; then
+    HAM_NEEDS_REVALIDATION=$(jq -er 'if (.needsRevalidation | type) == "boolean" then .needsRevalidation else true end' /tmp/ham-merge-lease-revalidation.json 2> /tmp/ham-merge-lease-revalidation-jq.stderr || true)
+    if [ "$HAM_NEEDS_REVALIDATION" != "true" ] && [ "$HAM_NEEDS_REVALIDATION" != "false" ]; then
+      printf '{"needsRevalidation":true,"reason":"needs-revalidation-output-invalid"}\n' > /tmp/ham-merge-lease-revalidation.json
+      HAM_NEEDS_REVALIDATION=true
+    fi
+  else
+    HAM_NEEDS_REVALIDATION_EXIT=$?
+    printf '{"needsRevalidation":true,"reason":"needs-revalidation-tool-failed","exitCode":%s}\n' "$HAM_NEEDS_REVALIDATION_EXIT" > /tmp/ham-merge-lease-revalidation.json
+    HAM_NEEDS_REVALIDATION=true
+  fi
 fi
 
 # CONFIRM THE REBASE HOLDS: the head is now rebased onto the latest main. If

@@ -859,6 +859,7 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /ham_terminal_remediation_validated/);
   assert.match(prompt, /Do not merge unless all of these are true/);
   assert.match(prompt, /HAM_REBASE_ATTEMPT_CAP="\$\{HAM_REBASE_ATTEMPT_CAP:-3\}"/);
+  assert.match(prompt, /HAM_MERGE_LEASE_RELEASE_RETRY_CAP="\$\{HAM_MERGE_LEASE_RELEASE_RETRY_CAP:-3\}"/);
   assert.match(prompt, /ham_update_branch_conflict/);
   assert.match(prompt, /ham_update_branch_transient/);
   assert.match(prompt, /No unbounded rebase\/update-branch retries/);
@@ -871,10 +872,15 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /ham_is_full_sha "\$HAM_VALIDATION_BASE_SHA"/);
   assert.match(prompt, /"reason":"validation-base-unavailable"/);
   assert.match(prompt, /merge-lease\.mjs needs-revalidation[\s\S]*--current-base "\$HAM_CURRENT_BASE_SHA"/);
+  assert.match(prompt, /needs-revalidation-tool-failed/);
+  assert.match(prompt, /needs-revalidation-output-invalid/);
+  assert.match(prompt, /jq -er 'if \(\.needsRevalidation \| type\) == "boolean" then \.needsRevalidation else true end'/);
   assert.match(prompt, /gh pr merge[\s\S]*--match-head-commit "\$POST_REMEDIATION_SHA"/);
   assert.match(prompt, /merge-lease\.mjs release[\s\S]*--lease-id "\$HAM_MERGE_LEASE_ID"/);
+  assert.match(prompt, /keeping EXIT trap armed/);
+  assert.match(prompt, /do not continue while the lease is unconfirmed/);
   assert.match(prompt, /trap ham_release_merge_lease EXIT/);
-  assert.match(prompt, /HAM_MERGE_LEASE_ID=""\n    trap - EXIT/);
+  assert.match(prompt, /HAM_MERGE_LEASE_ID=""\n\s+trap - EXIT/);
   assert.match(prompt, /HAM-03 conflict: releasing merge lease before local conflict resolution/);
   assert.match(prompt, /re-acquire before the next rebase\/merge attempt/);
   assert.match(prompt, /HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 70/);

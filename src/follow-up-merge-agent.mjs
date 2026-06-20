@@ -2023,12 +2023,16 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       + ' failing check). If the diff changes a module surface or behaviour and'
       + ' that module has a `modules/<name>/<name>-walkthrough.md`, update it too.'
       + ' Touch only the docs the change actually affects; never leave an in-repo'
-      + ' data-model doc or module walkthrough stale.'
+      + ' data-model doc or module walkthrough stale. If this PR is a submodule'
+      + ' change and the owed canonical doc lives only in a superproject, record'
+      + ' the skipped superproject-doc obligation in the audit or closing comment'
+      + ' with the changed files that created the obligation.'
     );
     lines.push(
       '- On a successful merge, post a closing comment summarizing what was done'
       + ' (findings remediated, failing tests / CI fixed, rebase / conflict'
-      + ' handling). This is the human-visible audit trail of an autonomous close.'
+      + ' handling, and doc-currency work or skipped superproject-doc obligations).'
+      + ' This is the human-visible audit trail of an autonomous close.'
     );
     lines.push('');
     lines.push('Required behavior:');

@@ -4307,6 +4307,14 @@ test('buildMergeAgentPrompt rescue mandate requires keeping data-model + module-
     assert.ok(prompt.includes('docs/data-model/catalog.json'), `catalog.json ref missing for trigger=${trigger}`);
     assert.ok(prompt.includes('validate-data-model-catalog.mjs'), `validator ref missing for trigger=${trigger}`);
     assert.ok(prompt.includes('-walkthrough.md'), `module walkthrough ref missing for trigger=${trigger}`);
+    assert.ok(
+      prompt.includes('skipped superproject-doc obligation'),
+      `superproject-doc skip audit missing for trigger=${trigger}`,
+    );
+    assert.ok(
+      prompt.includes('doc-currency work or skipped superproject-doc obligations'),
+      `closing-comment doc-currency audit missing for trigger=${trigger}`,
+    );
   }
 });
 

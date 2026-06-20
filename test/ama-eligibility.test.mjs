@@ -1481,7 +1481,11 @@ function hamEvidence({
   audit = true,
   workerClass = 'hammer',
   remediatedFindings = '2 addressed (1 blocking, 1 non-blocking)',
-  auditBody = 'HAM audit: addressed Auth path in src/auth.js and docs note in README.md',
+  auditBody = 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.',
+  docCurrency = {
+    status: 'not_applicable',
+    changedFiles: ['src/auth.js'],
+  },
   findings = [
     { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
     { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
@@ -1503,6 +1507,7 @@ function hamEvidence({
     auditComment: audit
       ? {
           body: auditBody,
+          docCurrency,
           findings,
         }
       : null,
@@ -1518,7 +1523,7 @@ function hamGroundTruth({
   remediatedFindings = '2 addressed (1 blocking, 1 non-blocking)',
   auditAuthor = 'hammer-worker',
   changedFiles = ['src/auth.js'],
-  auditBody = 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+  auditBody = 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.',
 } = {}) {
   return {
     commit: {
@@ -1558,7 +1563,11 @@ test('ham terminal remediation: HAM-authored live head over reviewed parent is e
     hamTerminalRemediation: {
       ...hamEvidence(),
       auditComment: {
-        body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+        body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.',
+        docCurrency: {
+          status: 'not_applicable',
+          changedFiles: ['src/auth.js'],
+        },
         findings: [
           { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
           { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
@@ -1579,7 +1588,7 @@ test('ham terminal remediation: HAM-authored live head over reviewed parent is e
 
 test('ham terminal remediation: valid evidence waives strict non-blocking finding gate', () => {
   const finding = { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true };
-  const auditBody = 'HAM audit: addressed README note is stale in README.md';
+  const auditBody = 'HAM audit: addressed README note is stale in README.md. Doc-currency: updated README.md for changed files README.md.';
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
       verdict: 'comment-only',
@@ -1595,6 +1604,11 @@ test('ham terminal remediation: valid evidence waives strict non-blocking findin
     hamTerminalRemediation: hamEvidence({
       remediatedFindings: '1 addressed (0 blocking, 1 non-blocking)',
       auditBody,
+      docCurrency: {
+        status: 'updated',
+        changedFiles: ['README.md'],
+        docsUpdated: ['README.md'],
+      },
       findings: [finding],
     }),
     hamTerminalRemediationGroundTruth: hamGroundTruth({
@@ -1669,7 +1683,11 @@ test('ham terminal remediation: failed live-head checks still block merge', () =
     hamTerminalRemediation: {
       ...hamEvidence(),
       auditComment: {
-        body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+        body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.',
+        docCurrency: {
+          status: 'not_applicable',
+          changedFiles: ['src/auth.js'],
+        },
         findings: [
           { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
           { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
@@ -1697,7 +1715,11 @@ test('ham terminal remediation: forged self-attested parent and trailers do not 
     hamTerminalRemediation: {
       ...hamEvidence(),
       auditComment: {
-        body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+        body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.',
+        docCurrency: {
+          status: 'not_applicable',
+          changedFiles: ['src/auth.js'],
+        },
         findings: [
           { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
           { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
@@ -1728,7 +1750,11 @@ test('ham terminal remediation: forged audit author, loose closed-by, bad counts
   const validEvidence = {
     ...hamEvidence(),
     auditComment: {
-      body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+      body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.',
+      docCurrency: {
+        status: 'not_applicable',
+        changedFiles: ['src/auth.js'],
+      },
       findings: [
         { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
         { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
@@ -1787,7 +1813,11 @@ test('ham terminal remediation composes with final-hammer waivers', () => {
     hamTerminalRemediation: {
       ...hamEvidence(),
       auditComment: {
-        body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+        body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.',
+        docCurrency: {
+          status: 'not_applicable',
+          changedFiles: ['src/auth.js'],
+        },
         findings: [
           { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
           { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },

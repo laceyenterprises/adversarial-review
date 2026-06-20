@@ -57,6 +57,11 @@ function hamTerminalEvidence({
   commitAuthor = 'hammer-worker',
   auditAuthor = 'hammer-worker',
   changedFiles = ['src/auth.js'],
+  auditBody = 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.',
+  docCurrency = {
+    status: 'not_applicable',
+    changedFiles: ['src/auth.js'],
+  },
   audit = true,
 } = {}) {
   return {
@@ -76,8 +81,9 @@ function hamTerminalEvidence({
     },
     auditComment: audit
       ? {
-          body: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+          body: auditBody,
           author: auditAuthor,
+          docCurrency,
           findings: [
             { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
             { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
@@ -640,6 +646,29 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
     const mismatchedCountsVerdict = JSON.parse(mismatchedCounts.stdout);
     assert.equal(mismatchedCountsVerdict.eligible, false);
     assert.equal(mismatchedCountsVerdict.trace.hamTerminalRemediation.checks.remediatedFindings, false);
+
+    const missingDocCurrency = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody,
+      prPatch: {
+        headRefOid: HAM_SHA,
+        labels: [],
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' },
+          { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
+        ],
+      },
+      reviews,
+      hamTerminalRemediation: hamTerminalEvidence({
+        changedFiles: ['migrations/001-add-profile.sql'],
+        auditBody: 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md',
+        docCurrency: null,
+      }),
+    });
+    assert.equal(missingDocCurrency.status, 0, missingDocCurrency.stderr);
+    const missingDocCurrencyVerdict = JSON.parse(missingDocCurrency.stdout);
+    assert.equal(missingDocCurrencyVerdict.eligible, false);
+    assert.equal(missingDocCurrencyVerdict.trace.hamTerminalRemediation.checks.docCurrency, false);
 
     const emptyDiff = runAmaCheck(tmp, {
       branchProtectionRequired: true,

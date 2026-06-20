@@ -262,6 +262,44 @@ test('stale release with old lease id and identity does not delete a newer lease
   }
 });
 
+test('release rechecks the holder fence immediately before deleting', () => {
+  const rootDir = freshRoot();
+  try {
+    const first = acquire(rootDir);
+    let newer = null;
+    const stale = releaseMergeLease({
+      rootDir,
+      ...IDENTITY,
+      leaseId: first.lease.leaseId,
+      holderPr: first.lease.holderPr,
+      holderHead: first.lease.holderHead,
+      acquiredAt: first.lease.acquiredAt,
+      _afterFenceRead: () => {
+        releaseMergeLease({
+          rootDir,
+          ...IDENTITY,
+          leaseId: first.lease.leaseId,
+          holderPr: first.lease.holderPr,
+          holderHead: first.lease.holderHead,
+          acquiredAt: first.lease.acquiredAt,
+        });
+        newer = acquire(rootDir, {
+          holderPr: 304,
+          holderHead: 'newer-release-head',
+          holderPid: 6363,
+          now: '2026-06-20T18:02:30Z',
+        });
+      },
+    });
+    assert.equal(newer.acquired, true);
+    assert.equal(stale.released, false);
+    assert.equal(stale.existingLease.leaseId, newer.lease.leaseId);
+    assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).holder.leaseId, newer.lease.leaseId);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('reclaimIfStale reclaims dead same-host owner pid holder', () => {
   const rootDir = freshRoot();
   try {
@@ -384,6 +422,52 @@ test('renewMergeLease extends a holder-fenced deadline', () => {
     assert.equal(result.reclaimed, false);
     assert.equal(result.reason, 'live-within-deadline');
     assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).exists, true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('renew rechecks the holder fence immediately before overwriting', () => {
+  const rootDir = freshRoot();
+  try {
+    const acquired = acquire(rootDir, {
+      holderPid: 99994,
+      holderHost: 'test-host',
+      deadlineSeconds: 10,
+      now: '2026-06-20T18:00:00Z',
+    });
+    let newer = null;
+    const staleRenew = renewMergeLease({
+      rootDir,
+      ...IDENTITY,
+      leaseId: acquired.lease.leaseId,
+      holderPr: acquired.lease.holderPr,
+      holderHead: acquired.lease.holderHead,
+      acquiredAt: acquired.lease.acquiredAt,
+      now: '2026-06-20T18:00:09Z',
+      _afterFenceRead: () => {
+        releaseMergeLease({
+          rootDir,
+          ...IDENTITY,
+          leaseId: acquired.lease.leaseId,
+          holderPr: acquired.lease.holderPr,
+          holderHead: acquired.lease.holderHead,
+          acquiredAt: acquired.lease.acquiredAt,
+        });
+        newer = acquire(rootDir, {
+          holderPr: 505,
+          holderHead: 'newer-renew-head',
+          holderPid: 9505,
+          now: '2026-06-20T18:00:05Z',
+        });
+      },
+    });
+    assert.equal(newer.acquired, true);
+    assert.equal(staleRenew.renewed, false);
+    assert.equal(staleRenew.existingLease.leaseId, newer.lease.leaseId);
+    const inspected = inspectMergeLease({ rootDir, ...IDENTITY });
+    assert.equal(inspected.holder.leaseId, newer.lease.leaseId);
+    assert.equal(inspected.holder.holderPr, 505);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

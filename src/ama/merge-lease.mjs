@@ -23,6 +23,8 @@ const LEASE_DIR_SEGMENTS = ['data', 'merge-leases'];
 const LEASE_FILE_MODE = 0o640;
 const LEASE_SCHEMA_VERSION = 1;
 const DEFAULT_DEADLINE_SECONDS = 900;
+const MUTATION_LOCK_RETRY_ATTEMPTS = 50;
+const MUTATION_LOCK_RETRY_DELAY_MS = 5;
 
 function sanitizeSegment(value) {
   return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
@@ -77,6 +79,48 @@ function writeJsonFile(filePath, value) {
     mode: LEASE_FILE_MODE,
     overwrite: true,
   });
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function mutationLockPath(leasePath) {
+  return `${leasePath}.mutation.lock`;
+}
+
+function acquireMutationLock(lockPath) {
+  const lock = {
+    schemaVersion: LEASE_SCHEMA_VERSION,
+    lockId: `mll_${randomUUID()}`,
+    holderPid: process.pid,
+    holderHost: hostname(),
+    acquiredAt: isoNow(),
+  };
+  for (let attempt = 0; attempt < MUTATION_LOCK_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      writeFileAtomic(lockPath, `${JSON.stringify(lock, null, 2)}\n`, {
+        mode: LEASE_FILE_MODE,
+        overwrite: false,
+      });
+      return { acquired: true, lock };
+    } catch (err) {
+      if (err?.code !== 'EEXIST') throw err;
+      sleepSync(MUTATION_LOCK_RETRY_DELAY_MS);
+    }
+  }
+  return { acquired: false, lock };
+}
+
+function withMutationLock(leasePath, fn) {
+  const lockPath = mutationLockPath(leasePath);
+  const lock = acquireMutationLock(lockPath);
+  if (!lock.acquired) return { acquired: false, lockPath };
+  try {
+    return { acquired: true, lockPath, value: fn() };
+  } finally {
+    rmSync(lockPath, { force: true });
+  }
 }
 
 function validateIdentity({ rootDir, repo, base } = {}) {
@@ -415,6 +459,7 @@ export function releaseMergeLease({
   holderPr,
   holderHead,
   acquiredAt,
+  _afterFenceRead,
 } = {}) {
   validateIdentity({ rootDir, repo, base });
   const leasePath = mergeLeaseFilePath(rootDir, { repo, base });
@@ -423,8 +468,25 @@ export function releaseMergeLease({
   if (!matched) {
     return { released: false, leasePath, existingLease: lease };
   }
-  rmSync(leasePath, { force: true });
-  return { released: true, leasePath, lease };
+  if (typeof _afterFenceRead === 'function') _afterFenceRead({ leasePath, lease });
+  const locked = withMutationLock(leasePath, () => {
+    const currentLease = readJsonFile(leasePath, null);
+    const currentMatched = holderMatches(currentLease, {
+      leaseId: id,
+      holderPr,
+      holderHead,
+      acquiredAt,
+    });
+    if (!currentMatched) {
+      return { released: false, leasePath, existingLease: currentLease };
+    }
+    rmSync(leasePath, { force: true });
+    return { released: true, leasePath, lease: currentLease };
+  });
+  if (!locked.acquired) {
+    return { released: false, leasePath, existingLease: readJsonFile(leasePath, null), reason: 'mutation-lock-busy' };
+  }
+  return locked.value;
 }
 
 export function renewMergeLease({
@@ -436,6 +498,7 @@ export function renewMergeLease({
   holderHead,
   acquiredAt,
   now,
+  _afterFenceRead,
 } = {}) {
   validateIdentity({ rootDir, repo, base });
   const leasePath = mergeLeaseFilePath(rootDir, { repo, base });
@@ -444,15 +507,32 @@ export function renewMergeLease({
   if (!matched) {
     return { renewed: false, leasePath, existingLease: lease };
   }
-  const renewedAt = now || isoNow();
-  const renewed = {
-    ...lease,
-    acquiredAt: renewedAt,
-    updatedAt: renewedAt,
-    previousAcquiredAt: lease.acquiredAt,
-  };
-  writeJsonFile(leasePath, renewed);
-  return { renewed: true, leasePath, lease: renewed, previousLease: lease };
+  if (typeof _afterFenceRead === 'function') _afterFenceRead({ leasePath, lease });
+  const locked = withMutationLock(leasePath, () => {
+    const currentLease = readJsonFile(leasePath, null);
+    const currentMatched = holderMatches(currentLease, {
+      leaseId: id,
+      holderPr,
+      holderHead,
+      acquiredAt,
+    });
+    if (!currentMatched) {
+      return { renewed: false, leasePath, existingLease: currentLease };
+    }
+    const renewedAt = now || isoNow();
+    const renewed = {
+      ...currentLease,
+      acquiredAt: renewedAt,
+      updatedAt: renewedAt,
+      previousAcquiredAt: currentLease.acquiredAt,
+    };
+    writeJsonFile(leasePath, renewed);
+    return { renewed: true, leasePath, lease: renewed, previousLease: currentLease };
+  });
+  if (!locked.acquired) {
+    return { renewed: false, leasePath, existingLease: readJsonFile(leasePath, null), reason: 'mutation-lock-busy' };
+  }
+  return locked.value;
 }
 
 export function reclaimIfStale({

@@ -11,6 +11,7 @@ import {
   mergeLeaseFilePath,
   mergeLeaseWaitersFilePath,
   readMergeLeaseWaiters,
+  reconcileMergeLeases,
   reclaimIfStale,
   releaseMergeLease,
   removeMergeLeaseWaiter,
@@ -475,6 +476,90 @@ test('reclaimIfStale can reclaim a past-deadline cross-host holder', () => {
     assert.equal(result.reclaimed, true);
     assert.equal(result.reason, 'past-deadline');
     assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).exists, false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reconcileMergeLeases releases a dead-owner-pid holder', async () => {
+  const rootDir = freshRoot();
+  try {
+    acquire(rootDir, { holderPid: 99996, holderHost: 'test-host' });
+    const reconciled = await reconcileMergeLeases({
+      rootDir,
+      ...IDENTITY,
+      host: 'test-host',
+      now: '2026-06-20T18:01:00Z',
+      pidAliveFn: () => false,
+      execFileImpl: () => {
+        throw new Error('gh should not be called for stale holder reclaim');
+      },
+    });
+    assert.equal(reconciled.released, true);
+    assert.equal(reconciled.reason, 'dead-holder-pid');
+    assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).exists, false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reconcileMergeLeases releases a holder whose PR is already merged', async () => {
+  const rootDir = freshRoot();
+  try {
+    acquire(rootDir, { holderPid: 99995, holderHost: 'test-host' });
+    const reconciled = await reconcileMergeLeases({
+      rootDir,
+      ...IDENTITY,
+      host: 'test-host',
+      now: '2026-06-20T18:01:00Z',
+      pidAliveFn: () => true,
+      execFileImpl: (file, args, callback) => {
+        assert.equal(file, 'gh');
+        assert.deepEqual(args, ['pr', 'view', '101', '--repo', 'owner/name', '--json', 'state']);
+        callback(null, '{"state":"MERGED"}\n', '');
+      },
+    });
+    assert.equal(reconciled.released, true);
+    assert.equal(reconciled.reason, 'holder-pr-merged');
+    assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).exists, false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reconcileMergeLeases stale identity does not delete a newer holder', async () => {
+  const rootDir = freshRoot();
+  try {
+    const first = acquire(rootDir);
+    let newer = null;
+    const reconciled = await reconcileMergeLeases({
+      rootDir,
+      ...IDENTITY,
+      host: 'test-host',
+      now: '2026-06-20T18:01:00Z',
+      pidAliveFn: () => true,
+      execFileImpl: (file, args, callback) => {
+        releaseMergeLease({
+          rootDir,
+          ...IDENTITY,
+          leaseId: first.lease.leaseId,
+          holderPr: first.lease.holderPr,
+          holderHead: first.lease.holderHead,
+          acquiredAt: first.lease.acquiredAt,
+        });
+        newer = acquire(rootDir, {
+          holderPr: 909,
+          holderHead: 'newer-reconcile-head',
+          holderPid: 9909,
+          now: '2026-06-20T18:01:01Z',
+        });
+        callback(null, '{"state":"MERGED"}\n', '');
+      },
+    });
+    assert.equal(newer.acquired, true);
+    assert.equal(reconciled.released, false);
+    assert.equal(reconciled.reason, 'identity-changed');
+    assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).holder.leaseId, newer.lease.leaseId);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

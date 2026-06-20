@@ -15,8 +15,8 @@
  * @module ama/merge-lease
  */
 
-import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { readFileSync, rmSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
@@ -31,6 +31,7 @@ const LEASE_SCHEMA_VERSION = 1;
 const DEFAULT_DEADLINE_SECONDS = 900;
 const DEFAULT_GIT_TIMEOUT_MS = 30_000;
 const DEFAULT_FETCH_ATTEMPTS = 2;
+const DEFAULT_MAX_GATE_ATTEMPTS = 5;
 const MUTATION_LOCK_RETRY_ATTEMPTS = 50;
 const MUTATION_LOCK_RETRY_DELAY_MS = 5;
 const MUTATION_LOCK_STALE_MS = 5000;
@@ -160,6 +161,11 @@ function writeJsonFile(filePath, value) {
     mode: LEASE_FILE_MODE,
     overwrite: true,
   });
+}
+
+function parseMaxGateAttempts(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MAX_GATE_ATTEMPTS;
 }
 
 function sleepSync(ms) {
@@ -510,9 +516,94 @@ export async function assessMergeLeaseNeedsRevalidation({
   });
 }
 
+export function mergeLeaseAttemptsFilePath(rootDir, identity = {}) {
+  validateIdentity({ rootDir, ...identity });
+  const { fileSlug } = deriveLeaseKey(identity);
+  return join(rootDir, ...LEASE_DIR_SEGMENTS, `${fileSlug}.attempts.json`);
+}
+
 export function readMergeLeaseWaiters(rootDir, identity = {}) {
   const waitersPath = mergeLeaseWaitersFilePath(rootDir, identity);
   return readWaiterDoc(waitersPath).waiters;
+}
+
+function readAttemptDoc(filePath) {
+  const doc = readJsonFile(filePath, null);
+  if (!doc) return { schemaVersion: LEASE_SCHEMA_VERSION, updatedAt: null, attempts: [] };
+  return {
+    schemaVersion: Number(doc.schemaVersion) || LEASE_SCHEMA_VERSION,
+    updatedAt: doc.updatedAt || null,
+    attempts: Array.isArray(doc.attempts) ? doc.attempts : [],
+  };
+}
+
+function normalizeAttemptRecord(record, nowIso) {
+  return {
+    pr: normalizeHolderPr(record.pr, 'pr'),
+    head: String(record.head || ''),
+    attempts: Math.max(0, Math.floor(Number(record.attempts) || 0)),
+    firstAttemptAt: record.firstAttemptAt || nowIso,
+    lastAttemptAt: record.lastAttemptAt || nowIso,
+  };
+}
+
+function sortedAttempts(attempts) {
+  return [...attempts].sort((a, b) => {
+    const pr = Number(a.pr) - Number(b.pr);
+    if (pr !== 0) return pr;
+    return String(a.head || '').localeCompare(String(b.head || ''));
+  });
+}
+
+export function readMergeLeaseAttempts(rootDir, identity = {}) {
+  const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, identity);
+  return sortedAttempts(readAttemptDoc(attemptsPath).attempts);
+}
+
+export function recordMergeLeaseGateAttempt({
+  rootDir,
+  repo,
+  base,
+  pr,
+  head,
+  now,
+  maxAttempts = parseMaxGateAttempts(process.env.AMG_MAX_GATE_ATTEMPTS),
+} = {}) {
+  validateIdentity({ rootDir, repo, base });
+  const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, { repo, base });
+  const updatedAt = now || isoNow();
+  return withWaiterMutationLock({ rootDir, repo, base }, () => {
+    const doc = readAttemptDoc(attemptsPath);
+    const normalizedPr = normalizeHolderPr(pr, 'pr');
+    const normalizedHead = String(head || '');
+    const attempts = doc.attempts
+      .map((record) => normalizeAttemptRecord(record, updatedAt))
+      .filter((record) => !(record.pr === normalizedPr && record.head === normalizedHead));
+    const existing = doc.attempts.find((record) => (
+      Number(record.pr) === normalizedPr && String(record.head || '') === normalizedHead
+    ));
+    const next = normalizeAttemptRecord({
+      pr: normalizedPr,
+      head: normalizedHead,
+      attempts: (Number(existing?.attempts) || 0) + 1,
+      firstAttemptAt: existing?.firstAttemptAt || updatedAt,
+      lastAttemptAt: updatedAt,
+    }, updatedAt);
+    attempts.push(next);
+    const sorted = sortedAttempts(attempts);
+    writeJsonFile(attemptsPath, {
+      schemaVersion: LEASE_SCHEMA_VERSION,
+      updatedAt,
+      attempts: sorted,
+    });
+    return {
+      attemptsPath,
+      attempt: next,
+      attempts: sorted,
+      maxAttempts: parseMaxGateAttempts(maxAttempts),
+      parked: next.attempts > parseMaxGateAttempts(maxAttempts),
+    };
+  });
 }
 
 export function upsertMergeLeaseWaiter({
@@ -591,6 +682,7 @@ export function inspectMergeLease({
   const currentHost = host || hostname();
   const lease = readJsonFile(leasePath, null);
   const waiters = readWaiterDoc(waitersPath).waiters;
+  const attempts = readMergeLeaseAttempts(rootDir, { repo, base });
   const ageSeconds = lease ? ageSecondsFrom(lease.acquiredAt, inspectedAt) : null;
   const deadlineSeconds = lease?.deadlineSeconds ?? defaultDeadlineSeconds();
   const pastDeadline = lease && ageSeconds !== null ? ageSeconds >= deadlineSeconds : false;
@@ -608,6 +700,7 @@ export function inspectMergeLease({
     pastDeadline,
     holderPidLive,
     waiters,
+    attempts,
     inspectedAt,
   };
 }
@@ -854,5 +947,97 @@ export function reclaimIfStale({
   };
 }
 
+function execFileToPromise(execFileImpl, file, args) {
+  return new Promise((resolve, reject) => {
+    const maybePromise = execFileImpl(file, args, (err, stdout, stderr) => {
+      if (err) {
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+    if (maybePromise && typeof maybePromise.then === 'function') {
+      maybePromise.then(resolve, reject);
+    }
+  });
+}
+
+async function ghPrState({ repo, holderPr, execFileImpl }) {
+  const runner = execFileImpl || execFileAsync;
+  const result = runner === execFileAsync
+    ? await runner('gh', ['pr', 'view', String(holderPr), '--repo', repo, '--json', 'state'])
+    : await execFileToPromise(runner, 'gh', ['pr', 'view', String(holderPr), '--repo', repo, '--json', 'state']);
+  const parsed = JSON.parse(String(result.stdout || '{}'));
+  return String(parsed.state || '').toUpperCase();
+}
+
+export async function reconcileMergeLeases({
+  rootDir,
+  repo,
+  base,
+  now,
+  host,
+  pidAliveFn = pidIsLive,
+  execFileImpl,
+} = {}) {
+  const inspection = inspectMergeLease({ rootDir, repo, base, now, host, pidAliveFn });
+  const lease = inspection.lease;
+  if (!lease) {
+    return { reconciled: true, released: false, reason: 'absent', inspection };
+  }
+
+  const stale = reclaimIfStale({ rootDir, repo, base, now, host, pidAliveFn });
+  if (stale.reclaimed) {
+    return {
+      reconciled: true,
+      released: true,
+      reason: stale.reason,
+      inspection,
+      reclaim: stale,
+    };
+  }
+  if (stale.reason === 'identity-changed' || stale.reason === 'mutation-lock-busy') {
+    return {
+      reconciled: false,
+      released: false,
+      reason: stale.reason,
+      inspection,
+      reclaim: stale,
+    };
+  }
+
+  const state = await ghPrState({ repo, holderPr: lease.holderPr, execFileImpl });
+  if (state !== 'MERGED' && state !== 'CLOSED') {
+    return {
+      reconciled: true,
+      released: false,
+      reason: 'holder-pr-open',
+      holderPrState: state,
+      inspection,
+    };
+  }
+
+  const released = releaseMergeLease({
+    rootDir,
+    repo,
+    base,
+    leaseId: lease.leaseId,
+    holderPr: lease.holderPr,
+    holderHead: lease.holderHead,
+    acquiredAt: lease.acquiredAt,
+  });
+  return {
+    reconciled: released.released,
+    released: released.released,
+    reason: released.released ? `holder-pr-${state.toLowerCase()}` : (released.reason || 'identity-changed'),
+    holderPrState: state,
+    inspection,
+    release: released,
+  };
+}
+
 export const MERGE_LEASE_SCHEMA_VERSION = LEASE_SCHEMA_VERSION;
 export const MERGE_LEASE_DEFAULT_DEADLINE_SECONDS = DEFAULT_DEADLINE_SECONDS;
+export const MERGE_LEASE_DEFAULT_MAX_GATE_ATTEMPTS = DEFAULT_MAX_GATE_ATTEMPTS;

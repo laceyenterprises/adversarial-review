@@ -473,6 +473,19 @@ protection and must not be hand-deleted. Once `lrqId` is present, check
 A new head SHA always gets a fresh lease — the file is keyed by
 `headSha` so head-change naturally invalidates the old lease.
 
+### Merge gate lease visibility
+
+The base-branch merge gate uses `data/merge-leases/<repo>__<base>.json` plus
+durable waiter and attempt files. Use
+`node bin/merge-lease.mjs status --repo <owner/name> --base <branch>` to inspect
+the current holder, FIFO waiters, ages, and per-PR attempt counts. If the holder
+PR has already merged/closed, or the holder process is dead/stale, run
+`node bin/merge-lease.mjs reconcile --repo <owner/name> --base <branch>`; this
+only removes the lease file through the holder identity fence and does not kill
+processes or change verdicts. When a PR exceeds `AMG_MAX_GATE_ATTEMPTS`
+(default `5`), `acquire` exits `70` with `{"parked":true}` so the caller should
+park it for operator review instead of re-queueing.
+
 ### Merged PR but DAG step did not advance
 
 When AMA or merge-agent merges a PR through `gh pr merge`, the watcher records

@@ -862,6 +862,18 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /ham_update_branch_conflict/);
   assert.match(prompt, /ham_update_branch_transient/);
   assert.match(prompt, /No unbounded rebase\/update-branch retries/);
+  assert.match(prompt, /merge-lease\.mjs acquire[\s\S]*--owner-pid "\$\$"[\s\S]*--wait "\$HAM_MERGE_LEASE_WAIT_SECONDS"/);
+  assert.match(prompt, /The acquire waits; do not poll/);
+  assert.match(prompt, /HAM_MERGE_LEASE_ID=\$\(jq -r '\.leaseId \/\/ empty'/);
+  assert.match(prompt, /merge-lease\.mjs needs-revalidation[\s\S]*--current-base "\$HAM_CURRENT_BASE_SHA"/);
+  assert.match(prompt, /gh pr merge[\s\S]*--match-head-commit "\$POST_REMEDIATION_SHA"/);
+  assert.match(prompt, /merge-lease\.mjs release[\s\S]*--lease-id "\$HAM_MERGE_LEASE_ID"/);
+  assert.match(prompt, /HAM-03 conflict: releasing merge lease before local conflict resolution/);
+  assert.match(prompt, /re-acquire before the next rebase\/merge attempt/);
+  assert.match(prompt, /HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 70/);
+  assert.match(prompt, /parked PR 1234/);
+  assert.match(prompt, /AMG-04 hard-blocker: no merge without holding the merge lease/);
+  assert.match(prompt, /No merge without holding the merge lease/);
 });
 
 test('composed prompt documents that branch_protection.required=false does not require the GitHub-plan sentinel', () => {

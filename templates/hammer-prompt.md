@@ -94,15 +94,22 @@ not replace the machine gate.
 5. Validate the exact post-remediation PR head. Refresh the PR head SHA after
    your commit. **Always rebase the PR onto the latest base (`main`) before
    merging — do not merge a branch that is behind — and CONFIRM THE REBASE
-   HOLDS.** Run `gh pr update-branch --rebase` (bounded cap, default 3 attempts)
-   until `mergeStateStatus` is no longer `BEHIND`; if `gh` reports the branch is
-   already up to date that confirms it is on the latest `main`. After the rebase,
-   re-establish the bar on the *rebased* head: re-run the FULL test suite
-   (mandate step 2b) and the required checks for that exact rebased SHA, fix any
-   test the rebase newly broke, and re-run the closer eligibility predicate in
-   SPEC §1.1.1 HAM terminal-remediation mode for that same live head. Only a
-   rebased-onto-latest-main head whose full suite and required checks are green
-   may proceed to merge. The predicate must prove
+   HOLDS.** Before entering the final rebase→merge step, acquire the merge lease
+   for `(<<REPO>>, base, PR <<PR_NUMBER>>)` with the blocking
+   `bin/merge-lease.mjs acquire` command below. The acquire waits; do not poll.
+   Save the returned `leaseId`, and every terminal cleanup path while the lease
+   is held must call `release --lease-id "$HAM_MERGE_LEASE_ID"`. Run
+   `gh pr update-branch --rebase` (bounded cap, default 3 attempts) while holding
+   the lease until `mergeStateStatus` is no longer `BEHIND`; if `gh` reports the
+   branch is already up to date that confirms it is on the latest `main`. After
+   the rebase, fetch the base, capture the exact current base SHA, and run
+   `merge-lease.mjs needs-revalidation ... --current-base <sha>`. Re-run the FULL
+   test suite (mandate step 2b) and required checks only when
+   `needsRevalidation` is true; otherwise trust the parallel-phase validation.
+   Fix any test the rebase newly broke, and re-run the closer eligibility
+   predicate in SPEC §1.1.1 HAM terminal-remediation mode for that same live
+   head. Only a rebased-onto-latest-main head whose applicable suite/check bar is
+   green may proceed to merge while still holding the lease. The predicate must prove
    the HAM-authored remediation commit, provenance trailers, PR audit comment,
    reviewed-parent coverage, non-empty verified diff, successful live-head
    checks, and non-waived gates. It must record
@@ -110,7 +117,9 @@ not replace the machine gate.
    attestation; the predicate verifies evidence and counts, not semantic code
    correctness.
 6. Merge only after the exact-head HAM predicate passes, using
-   `gh pr merge --match-head-commit <validated-post-remediation-sha>`.
+   `gh pr merge --match-head-commit <validated-post-remediation-sha>`, and only
+   while holding the merge lease. No merge is allowed without the lease. Release
+   the lease after the merge is confirmed or on any hard-block/terminal outcome.
 7. **Post a CLOSING comment after the merge confirms.** Once you have re-read
    GitHub and confirmed the PR is merged at the validated head, post one final
    comment on PR <<PR_URL>> that states: the merged SHA, the merge method, the
@@ -154,9 +163,59 @@ Refresh and validate the live head:
 ```bash
 gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-pr-after.json
 POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-pr-after.json)
+BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-pr-after.json)
+git fetch origin "$BASE_BRANCH"
+HAM_VALIDATION_BASE_SHA=$(git rev-parse "origin/$BASE_BRANCH")
 HAM_REBASE_ATTEMPTS=0
 HAM_REBASE_ATTEMPT_CAP="${HAM_REBASE_ATTEMPT_CAP:-3}"
 HAM_UPDATE_BRANCH_RETRY_CAP="${HAM_UPDATE_BRANCH_RETRY_CAP:-3}"
+HAM_MERGE_LEASE_WAIT_SECONDS="${HAM_MERGE_LEASE_WAIT_SECONDS:-900}"
+HAM_MERGE_LEASE_ID=""
+HAM_MERGE_LEASE_HELD=0
+
+ham_release_merge_lease() {
+  if [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ] && [ -n "${HAM_MERGE_LEASE_ID:-}" ]; then
+    node <<ROOT_DIR>>/bin/merge-lease.mjs release \
+      --repo <<REPO>> \
+      --base "$BASE_BRANCH" \
+      --pr <<PR_NUMBER>> \
+      --lease-id "$HAM_MERGE_LEASE_ID" \
+      > /tmp/ham-merge-lease-release.json
+    HAM_MERGE_LEASE_HELD=0
+    HAM_MERGE_LEASE_ID=""
+  fi
+}
+
+ham_acquire_merge_lease() {
+  if node <<ROOT_DIR>>/bin/merge-lease.mjs acquire \
+    --repo <<REPO>> \
+    --base "$BASE_BRANCH" \
+    --pr <<PR_NUMBER>> \
+    --head "$POST_REMEDIATION_SHA" \
+    --owner-pid "$$" \
+    --wait "$HAM_MERGE_LEASE_WAIT_SECONDS" \
+    > /tmp/ham-merge-lease-acquire.json; then
+    HAM_MERGE_LEASE_ACQUIRE_EXIT=0
+  else
+    HAM_MERGE_LEASE_ACQUIRE_EXIT=$?
+  fi
+  if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 70 ] \
+    && [ "$(jq -r '.parked // false' /tmp/ham-merge-lease-acquire.json)" = "true" ]; then
+    HAM_PARK_REASON=$(jq -r '.reason // "merge-lease-parked"' /tmp/ham-merge-lease-acquire.json)
+    echo "AMG-04 parked: merge lease acquisition parked PR <<PR_NUMBER>> ($HAM_PARK_REASON)" >&2
+    exit 0
+  fi
+  if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -ne 0 ]; then
+    cat /tmp/ham-merge-lease-acquire.json >&2
+    exit "$HAM_MERGE_LEASE_ACQUIRE_EXIT"
+  fi
+  HAM_MERGE_LEASE_ID=$(jq -r '.leaseId // empty' /tmp/ham-merge-lease-acquire.json)
+  if [ -z "$HAM_MERGE_LEASE_ID" ]; then
+    echo "AMG-04 hard-blocker: merge lease acquired without leaseId" >&2
+    exit 1
+  fi
+  HAM_MERGE_LEASE_HELD=1
+}
 
 ham_update_branch_conflict() {
   grep -Eiq 'conflict|cannot be rebased|resolve conflicts' "$1"
@@ -188,51 +247,79 @@ ham_update_branch_with_retries() {
 }
 
 while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-pr-after.json)" = "BEHIND" ]; do
+  if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
+    ham_acquire_merge_lease
+  fi
   if [ "$HAM_REBASE_ATTEMPTS" -ge "$HAM_REBASE_ATTEMPT_CAP" ]; then
     echo "HAM-03 hard-blocker: rebase attempt cap exceeded ($HAM_REBASE_ATTEMPTS/$HAM_REBASE_ATTEMPT_CAP)" >&2
+    ham_release_merge_lease
     exit 0
   fi
   HAM_REBASE_ATTEMPTS=$((HAM_REBASE_ATTEMPTS + 1))
   ham_update_branch_with_retries
   HAM_UPDATE_BRANCH_EXIT=$?
   if [ "$HAM_UPDATE_BRANCH_EXIT" -eq 2 ]; then
-    # The hammer OWNS merge-conflict resolution — DO NOT hard-block here. gh's
-    # server-side rebase cannot resolve conflicts, so resolve them LOCALLY now
-    # (see "## Resolving merge conflicts" below): rebase the head branch onto the
-    # latest base, resolve each conflicted file using your judgment (preserve
-    # both sides' intent), `git rebase --continue` until clean, then
-    # `git push --force-with-lease`. After resolving, re-fetch PR state and let
-    # the loop re-check. The HAM_REBASE_ATTEMPT_CAP above bounds this; only emit
-    # a hard-blocker if a conflict is genuinely UNSAFE to resolve (a semantic
-    # conflict you cannot correctly settle).
-    echo "HAM-03 conflict: hammer resolving locally (see 'Resolving merge conflicts')" >&2
+    # The hammer OWNS merge-conflict resolution, but NEVER while holding the
+    # merge lease. Release the lease immediately, step out to the conflict
+    # procedure below, resolve locally, force-push with lease, re-run the FULL
+    # suite + required checks in the parallel phase, then return here and
+    # re-acquire before the next rebase/merge attempt.
+    echo "HAM-03 conflict: releasing merge lease before local conflict resolution" >&2
+    ham_release_merge_lease
     # >>> Perform the local rebase + conflict resolution from the
-    #     "## Resolving merge conflicts" section below, then fall through. <<<
+    #     "## Resolving merge conflicts" section below, re-validate, then fall through. <<<
     gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-pr-after.json
     POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-pr-after.json)
+    BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-pr-after.json)
+    git fetch origin "$BASE_BRANCH"
+    HAM_VALIDATION_BASE_SHA=$(git rev-parse "origin/$BASE_BRANCH")
     continue
   fi
   if [ "$HAM_UPDATE_BRANCH_EXIT" -ne 0 ]; then
     cat /tmp/ham-update-branch.stderr >&2
+    ham_release_merge_lease
     exit 1
   fi
   gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-pr-after.json
   POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-pr-after.json)
 done
 
-# CONFIRM THE REBASE HOLDS: the head is now rebased onto the latest main. Re-run
-# the FULL test suite (mandate step 2b) against THIS rebased $POST_REMEDIATION_SHA
-# and fix anything the rebase newly broke. A rebase that turns the suite or the
-# required checks red must be fixed (and re-committed, which moves the head and
-# re-enters this validation), never merged. Do not proceed past this point with a
-# red suite, a red required check, or a still-BEHIND mergeStateStatus.
+if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
+  ham_acquire_merge_lease
+fi
+
+git fetch origin "$BASE_BRANCH"
+HAM_CURRENT_BASE_SHA=$(git rev-parse "origin/$BASE_BRANCH")
+node <<ROOT_DIR>>/bin/merge-lease.mjs needs-revalidation \
+  --repo-path . \
+  --base "$BASE_BRANCH" \
+  --validation-base "$HAM_VALIDATION_BASE_SHA" \
+  --current-base "$HAM_CURRENT_BASE_SHA" \
+  --changed-files-from "$POST_REMEDIATION_SHA" \
+  > /tmp/ham-merge-lease-revalidation.json
+HAM_NEEDS_REVALIDATION=$(jq -r '.needsRevalidation // true' /tmp/ham-merge-lease-revalidation.json)
+
+# CONFIRM THE REBASE HOLDS: the head is now rebased onto the latest main. If
+# HAM_NEEDS_REVALIDATION is true, re-run the FULL test suite (mandate step 2b)
+# and required checks against THIS rebased $POST_REMEDIATION_SHA and fix anything
+# the rebase newly broke. If HAM_NEEDS_REVALIDATION is false, trust the
+# parallel-phase validation already performed for this head/base relationship.
+# A rebase that turns the suite or required checks red must be fixed (and
+# re-committed, which moves the head and re-enters this validation), never
+# merged. Do not proceed past this point with a red applicable suite, a red
+# required check, or a still-BEHIND mergeStateStatus.
 ```
 
 ## Resolving merge conflicts
 
 The hammer OWNS merge-conflict resolution. A conflicting (`mergeable=CONFLICTING`)
-or behind PR must NOT be left for the operator — resolve it locally, then merge.
-When the rebase loop above hits a conflict, this is the procedure to run:
+or behind PR must NOT be left for the operator, but the merge lease must be
+released BEFORE conflict resolution starts. Never hold the lease while opening
+files, resolving markers, running the full suite, or force-pushing the conflict
+resolution. After the conflict is resolved and re-validated in the parallel
+phase, re-enter the merge step and re-acquire the lease before rebasing/merging.
+When the rebase loop above hits a conflict, this is the procedure to run only
+after `ham_release_merge_lease` has completed:
 
 ```bash
 BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-pr-after.json)
@@ -255,7 +342,8 @@ git push --force-with-lease
 ```
 
 After resolving, the head has moved — re-run the FULL test suite (mandate 2b) and
-required checks on the new head before merging, exactly as for any rebase.
+required checks on the new head before re-acquiring the merge lease and merging,
+exactly as for any parallel-phase validation.
 
 ```bash
 gh pr view <<PR_URL>> --json reviews > /tmp/ham-reviews.json
@@ -315,6 +403,7 @@ node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
 
 Do not merge unless all of these are true:
 
+- `HAM_MERGE_LEASE_HELD=1` and `HAM_MERGE_LEASE_ID` is non-empty.
 - `/tmp/ham-verdict.json` has `eligible: true`.
 - The trace contains `ham_terminal_remediation_validated`.
 - `POST_REMEDIATION_SHA` still equals the PR head.
@@ -329,6 +418,11 @@ Do not merge unless all of these are true:
 Merge:
 
 ```bash
+if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ] || [ -z "${HAM_MERGE_LEASE_ID:-}" ]; then
+  echo "AMG-04 hard-blocker: no merge without holding the merge lease" >&2
+  exit 1
+fi
+
 TRAILERS_FILE=$(mktemp)
 cat <<EOF > "$TRAILERS_FILE"
 <<AMA_TRAILERS>>
@@ -348,8 +442,15 @@ Re-read GitHub after `gh pr merge`; the CLI exit code is not authoritative.
 If the PR is merged at `POST_REMEDIATION_SHA`, record success in the AMA audit.
 If the head moved, a required check failed or is unchecked, HAM evidence is
 missing, the predicate fails for the exact live SHA, the PR is closed/draft, or
-there is an unresolvable conflict, emit exactly one hard-blocker report and do
-not call `gh pr merge`.
+there is an unresolvable conflict, release the lease, emit exactly one
+hard-blocker report, and do not call `gh pr merge`. After a confirmed successful
+merge, release the lease with `--lease-id "$HAM_MERGE_LEASE_ID"` before posting
+the closing comment.
+
+```bash
+# Only after re-reading GitHub confirms the terminal merge or hard-block state.
+ham_release_merge_lease
+```
 
 Post the CLOSING comment (mandate step 7) once the merge is confirmed:
 
@@ -382,10 +483,14 @@ EOF
   this branch or pre-existing on `main`. Keeping `main` clean is the bar.
 - No merging a branch that is `BEHIND` / not rebased onto the latest `main`; the
   rebase must be re-validated (full suite + checks green) before merge.
+- No merge without holding the merge lease for `(<<REPO>>, base, PR <<PR_NUMBER>>)`
+  and saving its `leaseId`; no cleanup path may release without
+  `--lease-id "$HAM_MERGE_LEASE_ID"`.
 - No abandoning a merge conflict to the operator. The hammer resolves conflicts
-  locally (rebase onto base, resolve markers preserving both sides, force-push
-  with lease), then re-validates. Hard-block ONLY a conflict that is genuinely
-  unsafe to resolve (a semantic conflict you cannot correctly settle).
+  locally only after releasing the merge lease (rebase onto base, resolve markers
+  preserving both sides, force-push with lease), then re-validates and
+  re-acquires. Hard-block ONLY a conflict that is genuinely unsafe to resolve (a
+  semantic conflict you cannot correctly settle).
 - No skipping the post-merge closing comment on a successful merge.
 - No treating a rebased HAM head as valid without `ham_terminal_remediation_validated`.
 - No landing a schema or module change that leaves an in-repo data-model doc

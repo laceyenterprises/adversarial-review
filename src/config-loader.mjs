@@ -229,25 +229,16 @@ function schemaV1() {
           },
         },
       },
-      // main-catchup daemon knobs are Python-owned (main_catchup/daemon.py reads
-      // them); this reader carries the schema only to accept the canonical
-      // config.yaml section under strict-CFG parity (OSR-04b). Keep in lockstep
-      // with the Python `main_catchup` schema in agent_os_config/__init__.py.
+      // main_catchup is a PARTIAL mirror. Python owns the full main-catchup
+      // daemon schema; this Node reader exposes only the adversarial-review
+      // drain knobs that may appear in checked-in config.yaml. Other
+      // main_catchup.* keys remain Python-owned and must fail loud in
+      // checked-in config, while operator-local config.local.yaml can
+      // tolerate-drop them through nested-local tolerance.
       main_catchup: {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
-          poll_interval_seconds: { __type: TYPE_INT, __default: 300, __min: 1 },
-          drain_timeout: { __type: TYPE_STRING, __default: '5m' },
-          stale_drain_reap_seconds: { __type: TYPE_INT, __default: 600, __min: 0 },
-          submodule_update_timeout_seconds: { __type: TYPE_INT, __default: 120, __min: 1 },
-          recovery_max_attempts: {
-            __type: TYPE_INT,
-            __default: 5,
-            __min: 1,
-            __max: 50,
-          },
-          bounce_throttle_interval_seconds: { __type: TYPE_INT, __default: 300, __min: 0 },
           adversarial_review_drain_timeout_seconds: {
             __type: TYPE_INT,
             __default: 180,

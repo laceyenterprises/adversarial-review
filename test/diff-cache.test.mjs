@@ -99,6 +99,45 @@ test('miss spawns gh, returns its output, and writes a cache entry', async () =>
   }
 });
 
+test('miss retries transient gh diff fetch failures before failing the review', async () => {
+  const rootDir = makeRootDir();
+  const repo = 'laceyenterprises/agent-os';
+  const prNumber = 2271;
+  const headSha = 'a44757e557ea35b5b7b6949eb257d3527a54c05c';
+  const expected = Buffer.from('diff --git a/platform/session-ledger/file b/platform/session-ledger/file\n');
+  const recordedCategories = [];
+  try {
+    let execCalls = 0;
+    const diff = await fetchPRDiff(repo, prNumber, headSha, {
+      execFileImpl: async (command, args, options) => {
+        execCalls += 1;
+        assert.equal(command, 'gh');
+        assert.deepEqual(args, ['pr', 'diff', String(prNumber), '--repo', repo]);
+        assert.equal(options.encoding, 'buffer');
+        if (execCalls === 1) {
+          const err = new Error('Post "https://api.github.com/graphql": net/http: TLS handshake timeout');
+          err.stderr = err.message;
+          throw err;
+        }
+        return { stdout: expected, stderr: Buffer.alloc(0) };
+      },
+      getCachedDiffImpl: (cacheRepo, cachePrNumber, cacheHeadSha) => getCachedDiff(cacheRepo, cachePrNumber, cacheHeadSha, { rootDir }),
+      putCachedDiffImpl: (cacheRepo, cachePrNumber, cacheHeadSha, bytes) => putCachedDiff(cacheRepo, cachePrNumber, cacheHeadSha, bytes, { rootDir }),
+      recordApiCallImpl: ({ category }) => {
+        recordedCategories.push(category);
+        return null;
+      },
+      ghRetrySleepImpl: async () => {},
+    });
+
+    assert.equal(execCalls, 2);
+    assert.deepEqual(diff, expected);
+    assert.deepEqual(recordedCategories, ['diff_fetch', 'diff_fetch']);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('cache paths validate repo and head components before touching disk', () => {
   const rootDir = makeRootDir();
   try {

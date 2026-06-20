@@ -750,7 +750,16 @@ bucket reviewer stderr into the same routing-tier `cascade` class must stay
 scoped to explicit local-routing context such as `127.0.0.1:4000`,
 `localhost:4000`, `LiteLLM`, or equivalent routing-tier markers; generic
 non-local API connectivity failures remain `unknown` unless another more
-specific classifier matches.
+specific classifier matches. Reviewer setup is one such explicit classifier:
+`gh pr diff` / GitHub GraphQL transient failures (`TLS handshake`, temporary
+network failures including refused/reset connections, and HTTP 5xx shapes) are
+retried before the review exits with a diff-specific timeout that is longer than
+the generic GitHub lookup timeout; if the retry budget is exhausted before a
+diff is fetched, the failed row is tagged as `cascade` so it rides the bounded
+infrastructure backoff path instead of consuming the substantive review attempt
+budget. The `gh` environment remains allowlisted but must preserve the normal
+GitHub CLI host/config, proxy, locale, and CA-certificate variables needed for
+deployment hosts that reach GitHub through a proxy or custom trust store.
 
 ## Infrastructure Failed-Row Auto-Recovery
 
@@ -760,14 +769,20 @@ PR, the watcher must not be draining, active follow-up/backoff/handoff gates
 must allow dispatch, memory admission must pass, and the routing-tier readiness
 gate above must report healthy before an infrastructure failed row is claimed.
 
-Eligible infrastructure classes are routing-tier `cascade`,
-`reviewer-timeout`, `launchctl-bootstrap`, reviewer-spawn `oauth-broken`, and
-hard provider usage caps recorded as `quota-exhausted`. `forbidden-fallback`,
+Eligible infrastructure classes are routing-tier `cascade`, exhausted
+GitHub diff-fetch transients tagged as `cascade`, `reviewer-timeout`,
+`launchctl-bootstrap`, reviewer-spawn `oauth-broken`, and hard provider usage
+caps recorded as `quota-exhausted`. `forbidden-fallback`,
 `failed-orphan`, `malformed`, inactive repos, closed or merged PRs,
 undiscovered PRs, drain-skipped rows, and rows blocked by active follow-up jobs
 are not recovered by this path. `oauth-broken` is included only for spawn
 failures recorded in the watcher row, because those failures can represent
 local OAuth/runtime launch breakage before any reviewer verdict exists.
+Exhausted GitHub diff-fetch transients intentionally share the same routing-tier
+readiness gate as other `cascade` rows because recovery immediately dispatches a
+full reviewer after the diff is fetched; if the local model route is still down,
+the recovered row would only trade a GitHub-side failure for another
+infrastructure failure.
 
 `quota-exhausted` is a hold-until-reset recovery class, not a normal immediate
 retry. The reviewer/runtime classifier must preserve the provider's reset hint

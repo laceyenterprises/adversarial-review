@@ -1370,7 +1370,7 @@ Each merge-agent invocation either MERGES the PR or exits with `awaiting-rerevie
 2. If `comment-only` → merge-agent dispatches.
 3. Merge-agent attempts the rebase / response / push flow.
 4. If the merge-agent makes major in-PR refactor changes, it exits `awaiting-rereview` and force-pushes the new head. The watcher's next tick sees a new head SHA, schedules a fresh review pass, and the cycle continues from step 1. Suppress that stale-posted-review auto-refresh only while the merge-agent is provably still converging for the current head: a current-head scoped `merge-agent-requested` label or a live current-head dispatch state. Raw label presence by itself is not authoritative because cleanup lag and stale labels must not wedge the rereview handoff. Light-to-medium edits do not take this path; they are pushed, checked, and merged.
-5. If the merge-agent makes no substantive changes (clean rebase, no follow-up code edits) AND the PR's checks remain green for the rebased SHA, it merges via `gh pr merge --merge`.
+5. If the merge-agent makes no substantive changes (clean rebase, no follow-up code edits) AND the PR's checks remain green for the rebased SHA, it merges via `gh pr merge --squash`.
 
 The cycle terminates when (a) the merge succeeds, (b) the operator applies a skip label, or (c) the merge-agent applies `merge-agent-stuck` after exhausting its retry policy, or the watcher applies `merge-agent-stuck` after a phantom-handoff escalation. The round budget caps the adversarial review side; the merge-agent's own retry policy caps the merge side. Neither bounds the OTHER side, so a worst-case cycle is `rounds × merge-attempts` — operators should keep the budgets aligned.
 

@@ -186,7 +186,9 @@ test('remediator prompts treat data-model and module explainer doc currency as i
     assert.match(prompt, /docs\/data-model\/NN-\*\.md/);
     assert.match(prompt, /Source of truth:/);
     assert.match(prompt, /docs\/data-model\/catalog\.json/);
+    assert.match(prompt, /If\s+`scripts\/validate-data-model-catalog\.mjs`\s+exists/);
     assert.match(prompt, /node scripts\/validate-data-model-catalog\.mjs/);
+    assert.match(prompt, /do not treat that absence as a failing\s+check by itself/);
     assert.match(prompt, /modules\/<name>\/<name>-walkthrough\.md/);
     assert.match(prompt, /skipped superproject-doc obligation/);
   }

@@ -79,6 +79,9 @@ test('governing docs describe reviewer and remediator doc-currency obligations',
     assert.match(doc, /docs\/data-model\/NN-\*\.md/, `${name} must mention data-model domain docs`);
     assert.match(doc, /docs\/data-model\/catalog\.json/, `${name} must mention catalog.json`);
     assert.match(doc, /modules\/<name>\/<name>-walkthrough\.md/, `${name} must mention module walkthroughs`);
+    assert.match(doc, /validator failures as red checks/, `${name} must preserve validator failure behavior`);
+    assert.match(doc, /missing validator script as an operator follow-up/, `${name} must not strand on missing validator script`);
+    assert.match(doc, /operator-approved/, `${name} must document final-round accepted-risk recovery`);
     assert.match(doc, /skipped superproject-doc obligation/, `${name} must mention skipped superproject docs`);
   }
 });

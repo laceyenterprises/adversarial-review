@@ -342,9 +342,15 @@ also flag stale `modules/<name>/<name>-walkthrough.md` files when a diff changes
 that module's public interface, dispatch flow, or operational contract. The
 remediator stages treat those same updates as in-scope remediation when the
 worker's patch changes the corresponding surface, run
-`node scripts/validate-data-model-catalog.mjs` for in-repo data-model edits, and
-record skipped superproject-doc obligations in the machine-readable reply when
-the PR repository is a submodule without the canonical docs.
+`node scripts/validate-data-model-catalog.mjs` for in-repo data-model edits only
+when that script exists, treat validator failures as red checks, record a
+missing validator script as an operator follow-up rather than a red check by
+itself, and record skipped superproject-doc obligations in the machine-readable
+reply when the PR repository is a submodule without the canonical docs. The
+reviewer-last stage deliberately keeps stale data-model or walkthrough docs as
+blocking operator-facing contract drift; at cap exhaustion, accepting that risk
+uses the same scoped `operator-approved` recovery path as other final-round
+accepted findings.
 
 Gemini remediation is a public third-lane remediator. In direct dispatch, the
 daemon spawns the native `gemini` CLI in headless approval mode, requires local

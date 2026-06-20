@@ -648,6 +648,128 @@ function makeTelemetrySink() {
   };
 }
 
+test('adapter-present rollup path returns the normalized PR rollup shape without gh', async () => {
+  const expected = makeExpectedRollup();
+  const mod = await importGithubApiFresh();
+  const calls = [];
+
+  const result = await mod.fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    recordApiCallImpl: () => {},
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      assert.equal(command, '/fixture/github-adapter');
+      assert.deepEqual(args, [
+        'read',
+        '--kind',
+        'pull-request-rollup',
+        '--json',
+        '--repo',
+        FIXTURE_REPO,
+        '--pr-number',
+        String(FIXTURE_PR),
+      ]);
+      return { stdout: JSON.stringify({ rollup: expected }) };
+    },
+  });
+  assert.deepEqual(result, expected);
+
+  assert.equal(calls.length, 1);
+});
+
+test('adapter-missing rollup path uses existing GraphQL implementation', async () => {
+  const expected = makeExpectedRollup();
+  const { fetchPullRequestRollup } = await importGithubApiFresh();
+  const { calls, execFileImpl } = makeGraphqlExecStub(expected);
+
+  const result = await fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    env: {},
+    execFileImpl,
+    recordApiCallImpl: () => {},
+  });
+  assert.deepEqual(result, expected);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, 'gh');
+});
+
+test('malformed adapter rollup output falls back to the legacy implementation', async () => {
+  const expected = makeExpectedRollup();
+  const mod = await importGithubApiFresh();
+  const legacyExec = makeLegacyExecStub(expected);
+  const calls = [];
+
+  await withEnv({ GHO_DISABLE_GRAPHQL_ROLLUP: '1' }, async () => {
+    const result = await mod.fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+      env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+      recordApiCallImpl: () => {},
+      execFileImpl: async (command, args, options) => {
+        calls.push({ command, args: [...args] });
+        if (command === '/fixture/github-adapter') return { stdout: '{not json' };
+        return legacyExec.execFileImpl(command, args, options);
+      },
+    });
+    assert.deepEqual(result, expected);
+  });
+
+  assert.equal(calls[0].command, '/fixture/github-adapter');
+  assert.equal(legacyExec.calls.length > 0, true);
+});
+
+test('adapter-present head/state path preserves existing normalized payload shape', async () => {
+  const expected = makeExpectedRollup();
+  const mod = await importGithubApiFresh();
+
+  const result = await mod.fetchPullRequestHeadAndState(FIXTURE_REPO, FIXTURE_PR, {
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    recordApiCallImpl: () => {},
+    execFileImpl: async (command, args) => {
+      assert.equal(command, '/fixture/github-adapter');
+      assert.equal(args.includes('pull-request-head-state'), true);
+      return {
+        stdout: JSON.stringify({
+          headState: {
+            state: 'OPEN',
+            mergedAt: expected.mergedAt,
+            closedAt: expected.closedAt,
+            headRefOid: expected.headRefOid,
+            author: expected.author,
+            labels: expected.labels,
+          },
+        }),
+      };
+    },
+  });
+  assert.deepEqual(result, {
+    state: expected.state,
+    mergedAt: expected.mergedAt,
+    closedAt: expected.closedAt,
+    headRefOid: expected.headRefOid,
+    author: expected.author,
+    labels: expected.labels,
+  });
+});
+
+test('adapter-present review bodies path preserves fail-closed authoritative body shape', async () => {
+  const mod = await importGithubApiFresh();
+
+  const bodies = await mod.fetchReviewBodiesForHead(
+    async (command, args) => {
+      assert.equal(command, '/fixture/github-adapter');
+      assert.equal(args.includes('pull-request-review-bodies-for-head'), true);
+      return { stdout: JSON.stringify({ bodies: ['## Verdict\nApproved'] }) };
+    },
+    FIXTURE_REPO,
+    FIXTURE_PR,
+    'abc123def456',
+    {
+      authoritativeReviewerLogins: ['codex-reviewer-lacey'],
+      env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    },
+  );
+  assert.deepEqual(bodies, ['## Verdict\nApproved']);
+});
+
 function makeLargeExpectedRollup() {
   const base = makeExpectedRollup();
   return {

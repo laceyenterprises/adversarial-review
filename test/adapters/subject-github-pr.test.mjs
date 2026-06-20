@@ -404,6 +404,57 @@ test('github-pr subject adapter fetches diff content through the subject interfa
   ]);
 });
 
+test('github-pr subject adapter uses optional GitHub adapter when present without Octokit', async () => {
+  const calls = [];
+  const adapter = createGitHubPRSubjectAdapter({
+    repos: [fixture.repo],
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      assert.equal(command, '/fixture/github-adapter');
+      const kind = args[args.indexOf('--kind') + 1];
+      if (kind === 'open-pull-requests') {
+        return {
+          stdout: JSON.stringify({
+            pullRequests: [{
+              number: 484,
+              title: '[codex] LAC-484 carve subject channel adapter',
+              state: 'OPEN',
+              headRefOid: 'adapter-head',
+              labels: [{ name: 'risk:medium' }],
+              createdAt: '2026-05-10T21:00:00.000Z',
+              updatedAt: '2026-05-10T21:20:00.000Z',
+              author: { login: 'codex-worker' },
+            }],
+          }),
+        };
+      }
+      if (kind === 'pull-request-diff') {
+        return { stdout: JSON.stringify({ diff: 'diff --git adapter\n' }) };
+      }
+      throw new Error(`unexpected adapter kind ${kind}`);
+    },
+    now: () => new Date('2026-05-10T21:34:00.000Z'),
+  });
+
+  const [ref] = await adapter.discoverSubjects();
+  assert.deepEqual(ref, {
+    domainId: 'code-pr',
+    subjectExternalId: `${fixture.repo}#484`,
+    revisionRef: 'adapter-head',
+  });
+  const state = await adapter.fetchState(ref);
+  assert.equal(state.headSha, 'adapter-head');
+  assert.deepEqual(state.labels, ['risk:medium']);
+
+  const content = await adapter.fetchContent(ref);
+  assert.equal(content.representation, 'diff --git adapter\n');
+  assert.deepEqual(calls.map((call) => call.args[call.args.indexOf('--kind') + 1]), [
+    'open-pull-requests',
+    'pull-request-diff',
+  ]);
+});
+
 test('github-pr subject adapter prepares remediation workspace shape', async () => {
   const rootDir = '/tmp/subject-github-pr-fixture-root';
   const workspaceDir = path.join(rootDir, 'workspace');

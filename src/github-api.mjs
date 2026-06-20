@@ -2,6 +2,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
+import {
+  readAdapterHeadAndState,
+  readAdapterPrRollup,
+  readAdapterReviewBodiesForHead,
+  readAdapterReviewContext,
+} from './github-adapter-client.mjs';
 import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit } from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -530,6 +536,46 @@ function normalizeRollup(pr, {
   };
 }
 
+function normalizeAdapterRollup(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('GitHub adapter rollup payload must be an object');
+  }
+  const normalized = normalizeRollup(payload, {
+    labels: normalizeLabels(payload.labels),
+    comments: Array.isArray(payload.comments) ? payload.comments.map(normalizeComment) : [],
+    reviews: Array.isArray(payload.reviews) ? payload.reviews.map(normalizeReview) : [],
+    checks: Array.isArray(payload.checks) ? payload.checks.map(normalizeCheck).filter(Boolean) : [],
+  });
+  if (!Number.isInteger(normalized.number)) {
+    throw new Error('GitHub adapter rollup payload missing PR number');
+  }
+  if (!normalized.headRefOid) {
+    throw new Error('GitHub adapter rollup payload missing headRefOid');
+  }
+  return normalized;
+}
+
+function normalizeAdapterHeadAndState(payload, { withLabels = true } = {}) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('GitHub adapter head/state payload must be an object');
+  }
+  const labels = withLabels ? normalizeLabels(payload.labels) : [];
+  const state = typeof payload?.state === 'string' ? payload.state.toLowerCase() : payload?.state || null;
+  const headRefOid = payload?.headRefOid || payload?.head_sha || payload?.headSha || null;
+  if (!headRefOid) {
+    throw new Error('GitHub adapter head/state payload missing headRefOid');
+  }
+  return {
+    state,
+    mergedAt: payload?.mergedAt || payload?.merged_at || null,
+    closedAt: payload?.closedAt || payload?.closed_at || null,
+    headRefOid,
+    author: normalizeAuthor(payload?.author || payload?.user),
+    labels,
+    ...(payload?.truncated ? { truncated: true, truncatedConnections: payload.truncatedConnections || [] } : {}),
+  };
+}
+
 function markGraphqlTruncated(items, connectionName) {
   const existing = Array.isArray(items?.graphqlTruncatedConnections)
     ? items.graphqlTruncatedConnections
@@ -785,6 +831,7 @@ async function fetchLegacyReviews(execFileImpl, repo, prNumber) {
 async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
   authoritativeReviewerLogins = null,
   authoritativeReviewerLogin = null,
+  env = process.env,
 } = {}) {
   if (!headSha) return [];
   // Accept reviews from ANY login in the trusted reviewer-bot set (anti-spoof).
@@ -803,6 +850,13 @@ async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
   const expectedReviewerLoginSet = loginList.length ? new Set(loginList) : null;
   if (reviewerLoginCandidates != null && !expectedReviewerLoginSet) return [];
   const normalizedPrNumber = normalizePrNumber(prNumber);
+  try {
+    const adapterBodies = await readAdapterReviewBodiesForHead(repo, normalizedPrNumber, headSha, { execFileImpl, env });
+    if (adapterBodies) return adapterBodies;
+  } catch {
+    // Optional adapter failed or returned malformed data; preserve the existing
+    // fail-closed legacy read contract by falling through to the old reader.
+  }
   const reviews = await paginateRest(
     execFileImpl,
     `repos/${repo}/pulls/${normalizedPrNumber}/reviews`,
@@ -1404,9 +1458,19 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
   execFileImpl = execFileAsync,
   recordApiCallImpl = recordApiCall,
   withLabels = true,
+  env = process.env,
 } = {}) {
   const { owner, repo: repoName } = splitRepo(repo);
   const normalizedPrNumber = normalizePrNumber(prNumber);
+  try {
+    const adapterResult = await readAdapterHeadAndState(repo, normalizedPrNumber, { execFileImpl, withLabels, env });
+    if (adapterResult) {
+      return normalizeAdapterHeadAndState(adapterResult, { withLabels });
+    }
+  } catch {
+    // Adapter is optional during the migration window; fall back to the current
+    // GraphQL/REST path and keep that path's established safety behavior.
+  }
   if (isGraphqlRollupDisabled()) {
     const startedAt = Date.now();
     try {
@@ -1465,8 +1529,18 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
 async function fetchPullRequestRollup(repo, prNumber, {
   execFileImpl = execFileAsync,
   recordApiCallImpl = recordApiCall,
+  env = process.env,
 } = {}) {
   const normalizedPrNumber = normalizePrNumber(prNumber);
+  try {
+    const adapterResult = await readAdapterPrRollup(repo, normalizedPrNumber, { execFileImpl, env });
+    if (adapterResult) {
+      return normalizeAdapterRollup(adapterResult);
+    }
+  } catch {
+    // Optional adapter failed or returned a non-contract payload. The legacy
+    // implementation remains authoritative until the superproject cutover.
+  }
   if (isGraphqlRollupDisabled()) {
     return fetchLegacyWithTelemetry(repo, normalizedPrNumber, { execFileImpl, recordApiCallImpl });
   }
@@ -1496,8 +1570,22 @@ async function fetchPullRequestRollup(repo, prNumber, {
 async function fetchPullRequestReviewContext(repo, prNumber, {
   execFileImpl = execFileAsync,
   recordApiCallImpl = recordApiCall,
+  env = process.env,
 } = {}) {
   const normalizedPrNumber = normalizePrNumber(prNumber);
+  try {
+    const adapterResult = await readAdapterReviewContext(repo, normalizedPrNumber, { execFileImpl, env });
+    if (adapterResult) {
+      return normalizeAdapterRollup({
+        ...adapterResult,
+        labels: [],
+        reviews: [],
+        checks: [],
+      });
+    }
+  } catch {
+    // Optional adapter failed or returned malformed data; preserve fallback.
+  }
   if (isGraphqlRollupDisabled()) {
     return fetchLegacyReviewContextWithTelemetry(repo, normalizedPrNumber, { execFileImpl, recordApiCallImpl });
   }
@@ -1551,6 +1639,8 @@ const __test__ = {
   fetchLegacyReviewContextWithTelemetry,
   fetchLegacyReviews,
   fetchReviewBodiesForHead,
+  normalizeAdapterHeadAndState,
+  normalizeAdapterRollup,
   normalizeCheck,
   normalizeComment,
   normalizeCommitSubject,

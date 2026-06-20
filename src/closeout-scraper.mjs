@@ -8,6 +8,7 @@ import {
   parseJsonLines,
 } from './gh-cli.mjs';
 
+import { readAdapterIssueComments } from './github-adapter-client.mjs';
 
 import {
   readLatestCompletedReviewerPassEndedAt,
@@ -194,8 +195,23 @@ async function scraperFetchIssueComments({
   repo,
   prNumber,
   execFileImpl = execFileAsync,
+  env = process.env,
   logger = console,
 } = {}) {
+  try {
+    const adapterComments = await readAdapterIssueComments(repo, prNumber, { execFileImpl, env });
+    if (adapterComments) {
+      return adapterComments.map((comment) => ({
+        id: comment?.id ?? comment?.nodeId ?? comment?.node_id ?? null,
+        login: comment?.login ?? comment?.authorLogin ?? comment?.user?.login ?? null,
+        created_at: comment?.created_at ?? comment?.createdAt ?? null,
+        body: String(comment?.body ?? ''),
+      }));
+    }
+  } catch {
+    // The closeout scraper already records debt on hard failures. Treat the
+    // optional adapter as a preferred read source and preserve the gh fallback.
+  }
   const { stdout, stderr } = await execFileImpl(
     'gh',
     [
@@ -504,6 +520,14 @@ async function fetchIssueComments({
   timeoutMs = GH_LOOKUP_TIMEOUT_MS,
   retries,
 } = {}) {
+  try {
+    const adapterComments = await readAdapterIssueComments(repo, prNumber, { execFileImpl, env });
+    if (adapterComments) {
+      return adapterComments.map(normalizeIssueComment);
+    }
+  } catch {
+    // Optional adapter read failed; retain the existing gh lookup behavior.
+  }
   const { stdout } = await execGhWithRetry({
     execFileImpl,
     env,

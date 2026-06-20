@@ -1,3 +1,5 @@
+import { readAdapterLatestLabelEvent } from './github-adapter-client.mjs';
+
 function normalizeGithubLabelName(value) {
   return String(value ?? '').trim().toLowerCase();
 }
@@ -106,9 +108,29 @@ function latestMatchingScopedTimelineLabelEvent(nodes, labelName, currentHeadSha
 async function fetchLatestLabelEvent(repo, prNumber, labelName, {
   execFileImpl,
   currentHeadSha = null,
+  env = process.env,
 } = {}) {
   if (typeof execFileImpl !== 'function') {
     throw new Error('fetchLatestLabelEvent requires execFileImpl');
+  }
+  try {
+    const adapterEvent = await readAdapterLatestLabelEvent(repo, prNumber, labelName, {
+      execFileImpl,
+      currentHeadSha,
+      env,
+    });
+    if (adapterEvent) {
+      const normalized = normalizeGithubLabelEvent(adapterEvent, labelName);
+      return normalized
+        ? {
+          ...normalized,
+          ...(adapterEvent.codeScopeEventId ? { codeScopeEventId: adapterEvent.codeScopeEventId } : {}),
+          ...(adapterEvent.codeScopeEventKind ? { codeScopeEventKind: adapterEvent.codeScopeEventKind } : {}),
+        }
+        : null;
+    }
+  } catch {
+    // Optional adapter is allowed to be absent or malformed during migration.
   }
   const [owner, name] = String(repo || '').split('/');
   if (!owner || !name) {

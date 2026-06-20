@@ -14,6 +14,11 @@ import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import { apiStatusFromError } from '../../../api-telemetry.mjs';
 import { prepareWorkspaceForJob as defaultPrepareWorkspaceForJob } from '../../../follow-up-remediation.mjs';
+import {
+  readAdapterOpenPullRequests,
+  readAdapterPullRequest,
+  readAdapterPullRequestDiff,
+} from '../../../github-adapter-client.mjs';
 import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit } from '../../../rate-limit-throttle.mjs';
 import { builderClassFromTitle } from './title-tagging.mjs';
 
@@ -51,7 +56,9 @@ function splitRepo(repoPath) {
 }
 
 function headShaFromPR(pr) {
-  return pr?.head?.sha ? String(pr.head.sha) : null;
+  return pr?.head?.sha || pr?.headRefOid || pr?.headSha
+    ? String(pr?.head?.sha || pr?.headRefOid || pr?.headSha)
+    : null;
 }
 
 function revisionRefFromPR(pr) {
@@ -82,9 +89,9 @@ function normalizePRSnapshot(repoPath, pr) {
         .filter((label) => typeof label === 'string' && label.trim())
         .map((label) => label.trim())
       : [],
-    createdAt: pr?.created_at ? String(pr.created_at) : undefined,
-    updatedAt: pr?.updated_at ? String(pr.updated_at) : undefined,
-    authorRef: pr?.user?.login ? String(pr.user.login) : undefined,
+    createdAt: pr?.created_at || pr?.createdAt ? String(pr.created_at || pr.createdAt) : undefined,
+    updatedAt: pr?.updated_at || pr?.updatedAt ? String(pr.updated_at || pr.updatedAt) : undefined,
+    authorRef: pr?.user?.login || pr?.author?.login ? String(pr?.user?.login || pr?.author?.login) : undefined,
     builderClass,
   };
 }
@@ -127,6 +134,7 @@ function stateFromSnapshot(snapshot, {
  *   prepareWorkspaceForJobImpl?: Function,
  *   now?: () => Date,
  *   monotonicNowMs?: () => number,
+ *   env?: NodeJS.ProcessEnv,
  * }} options
  * @returns {SubjectChannelAdapter}
  */
@@ -175,6 +183,7 @@ function createGitHubPRSubjectAdapter({
   monotonicNowMs = () => performance.now(),
   cacheTtlMs = resolveSubjectCacheTtlMs(),
   recordApiCall = null,
+  env = process.env,
 } = {}) {
   // Per-adapter-instance scratch cache. Entries carry a monotonic
   // fetch timestamp and are rejected on read once older than
@@ -231,6 +240,16 @@ function createGitHubPRSubjectAdapter({
     const { repo, prNumber } = parseSubjectExternalId(ref.subjectExternalId);
     const cached = getFreshCache(ref.subjectExternalId);
     if (cached) return cached;
+    try {
+      const adapterPr = await readAdapterPullRequest(repo, prNumber, { execFileImpl, rootDir, env });
+      if (adapterPr) {
+        const snapshot = normalizePRSnapshot(repo, adapterPr);
+        setCache(snapshot);
+        return snapshot;
+      }
+    } catch {
+      // The common adapter is optional during rollout; fall back to Octokit.
+    }
     if (!octokit?.rest?.pulls?.get) {
       throw new Error(`No GitHub client available to fetch ${ref.subjectExternalId}`);
     }
@@ -247,13 +266,30 @@ function createGitHubPRSubjectAdapter({
 
   return {
     async discoverSubjects() {
-      if (!octokit?.rest?.pulls?.list) {
-        throw new Error('No GitHub client available to discover GitHub PR subjects');
-      }
-
       const refs = [];
       for (const repoPath of repos) {
         const { owner, repo } = splitRepo(repoPath);
+        let adapterPulls = null;
+        try {
+          adapterPulls = await readAdapterOpenPullRequests(repoPath, { execFileImpl, rootDir, env });
+        } catch {
+          adapterPulls = null;
+        }
+        if (adapterPulls) {
+          for (const pr of adapterPulls) {
+            const snapshot = normalizePRSnapshot(repoPath, pr);
+            setCache(snapshot);
+            refs.push({
+              domainId: snapshot.domainId,
+              subjectExternalId: snapshot.subjectExternalId,
+              revisionRef: snapshot.revisionRef,
+            });
+          }
+          continue;
+        }
+        if (!octokit?.rest?.pulls?.list) {
+          throw new Error('No GitHub client available to discover GitHub PR subjects');
+        }
         const { data } = await withApiTelemetry('pr_view', { repo: repoPath }, () => octokit.rest.pulls.list({
           owner,
           repo,
@@ -285,15 +321,20 @@ function createGitHubPRSubjectAdapter({
       const startedAt = monotonicNowMs();
       let stdout;
       try {
-        ({ stdout } = await execFileImpl('gh', [
-          'pr',
-          'diff',
-          String(snapshot.prNumber),
-          '--repo',
-          snapshot.repo,
-        ], {
-          maxBuffer: 10 * 1024 * 1024,
-        }));
+        const adapterDiff = await readAdapterPullRequestDiff(snapshot.repo, snapshot.prNumber, { execFileImpl, rootDir, env });
+        if (adapterDiff !== null) {
+          stdout = adapterDiff;
+        } else {
+          ({ stdout } = await execFileImpl('gh', [
+            'pr',
+            'diff',
+            String(snapshot.prNumber),
+            '--repo',
+            snapshot.repo,
+          ], {
+            maxBuffer: 10 * 1024 * 1024,
+          }));
+        }
         recordApiCall?.({
           category: 'diff_fetch',
           repo: snapshot.repo,

@@ -79,18 +79,23 @@ filename alone. A direct call with `source: "/tmp/config.local.yaml"` remains
 strict unless it explicitly opts into `tolerateNestedUnknownLocalKeys`; enabling
 foreign top-level tolerance does not make `worker_pool` foreign again.
 
-## `main_catchup` partial Node mirror
+## `main_catchup` Node mirror
 
-The adversarial-review Node loader treats `main_catchup` as a known partial
-schema root, not as a foreign top-level local section. Python remains canonical
-for the main-catchup daemon schema, but the Node loader mirrors the
-main-catchup drain knobs that may appear in the shared checked-in
-`config.yaml`:
+The adversarial-review Node loader treats `main_catchup` as a known schema root,
+not as a foreign top-level local section. Python remains canonical for the
+main-catchup daemon schema, but the Node loader mirrors the checked-in daemon
+control surface that appears in the shared `config.yaml`:
 
-- `main_catchup.adversarial_review_drain_timeout_seconds` (default `1200`,
-  matching Python's 20-minute adversarial-review drain timeout)
-- `main_catchup.adversarial_watcher_drain_bounce_slack_seconds` (default `600`,
-  matching Python's 10-minute watcher bounce slack)
+- `main_catchup.poll_interval_seconds` (default `300`)
+- `main_catchup.drain_timeout` (default `5m`)
+- `main_catchup.stale_drain_reap_seconds` (default `600`)
+- `main_catchup.submodule_update_timeout_seconds` (default `120`)
+- `main_catchup.recovery_max_attempts` (default `5`, range `1..50`)
+- `main_catchup.bounce_throttle_interval_seconds` (default `300`)
+- `main_catchup.adversarial_review_drain_timeout_seconds` (default `180`,
+  matching Python's 3-minute adversarial-review drain timeout)
+- `main_catchup.adversarial_watcher_drain_bounce_slack_seconds` (default `120`,
+  matching Python's 2-minute watcher bounce slack)
 
 Checked-in `config.yaml` accepts only those mirrored `main_catchup` keys. Any
 other checked-in `main_catchup.*` key is an unknown nested key under a known
@@ -100,7 +105,7 @@ Layer-4 `config.local.yaml` siblings may drop other nested `main_catchup.*`
 keys only when nested-local tolerance is enabled by the local-sibling layer or
 by an explicit `tolerateNestedUnknownLocalKeys` validator option. Those
 tolerated unknown nested keys are omitted from resolved values and provenance.
-The mirrored drain keys are validated and exposed normally when present.
+The mirrored daemon keys are validated and exposed normally when present.
 
 Direct `validateSchema` callers do not get this local tolerance from the
 filename alone. A direct call with `source: "/tmp/config.local.yaml"` remains
@@ -140,7 +145,7 @@ Python, Node, and shell CFG loaders must agree on this surface:
 - checked-in `worker_pool` accepts only
   `worker_pool.dag.autowalk.deep_reconcile`; all other checked-in
   `worker_pool.*` keys fail as nested unknown keys
-- checked-in `main_catchup` accepts only the mirrored drain knobs; all other
+- checked-in `main_catchup` accepts only the mirrored daemon keys; all other
   checked-in `main_catchup.*` keys fail as nested unknown keys
 - direct validator calls remain strict even when `source` names a `.local.yaml`
   file
@@ -149,7 +154,7 @@ Python, Node, and shell CFG loaders must agree on this surface:
   through nested-local tolerance, while preserving the mirrored
   `worker_pool.dag.autowalk.deep_reconcile` value
 - Layer-4 local siblings may drop non-mirrored nested `main_catchup.*` keys only
-  through nested-local tolerance, while preserving the mirrored drain knobs
+  through nested-local tolerance, while preserving the mirrored daemon keys
 - Layer-4 local siblings still reject arbitrary unknown top-level typo roots
 - tolerated unknown keys are omitted from resolved values and provenance
 - env-materialized `apps.<id>` entries receive the same schema defaults as

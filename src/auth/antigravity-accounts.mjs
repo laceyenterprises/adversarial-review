@@ -3,9 +3,9 @@ import { listCredentialAccounts } from './antigravity-bridge.mjs';
 class AntigravityAccountRegistryError extends Error {
   constructor(code, message, details = {}) {
     super(message);
+    Object.assign(this, details);
     this.name = 'AntigravityAccountRegistryError';
     this.code = code;
-    Object.assign(this, details);
   }
 }
 
@@ -31,12 +31,14 @@ function normalizeAccountIds(accountIds) {
   return normalized;
 }
 
-function normalizeRetryAfter(retryAfter) {
+function normalizeRetryAfter(retryAfter, nowMs) {
   const retryAfterMs = retryAfter instanceof Date
     ? retryAfter.getTime()
     : typeof retryAfter === 'number'
-      ? retryAfter
-      : Date.parse(String(retryAfter || ''));
+      ? nowMs + (retryAfter * 1000)
+      : /^\d+(?:\.\d+)?$/.test(String(retryAfter || '').trim())
+        ? nowMs + (Number(String(retryAfter).trim()) * 1000)
+        : Date.parse(String(retryAfter || ''));
   if (!Number.isFinite(retryAfterMs)) {
     throw new AntigravityAccountRegistryError('RETRY_AFTER_INVALID', `invalid retryAfter: ${retryAfter}`);
   }
@@ -56,12 +58,15 @@ class AntigravityAccountRegistry {
     this.listAccounts = listAccounts;
     this.clock = clock;
     this.nextIndex = 0;
+    // Cooldowns are intentionally process-local soft backoff state.
     this.cooldowns = new Map();
   }
 
   accounts() {
     const accountIds = this.accountIds || this.listAccounts();
-    return normalizeAccountIds(accountIds);
+    const accounts = normalizeAccountIds(accountIds);
+    this.pruneCooldowns(accounts);
+    return accounts;
   }
 
   nowMs() {
@@ -80,6 +85,15 @@ class AntigravityAccountRegistry {
       return null;
     }
     return cooldown;
+  }
+
+  pruneCooldowns(accounts) {
+    const liveAccounts = new Set(accounts);
+    for (const accountId of this.cooldowns.keys()) {
+      if (!liveAccounts.has(accountId)) {
+        this.cooldowns.delete(accountId);
+      }
+    }
   }
 
   selectAccount() {
@@ -106,11 +120,15 @@ class AntigravityAccountRegistry {
         accountId,
       });
     }
-    const cooldown = normalizeRetryAfter(retryAfter);
-    this.cooldowns.set(accountId, cooldown);
+    const cooldown = normalizeRetryAfter(retryAfter, this.nowMs());
+    const existing = this.cooldowns.get(accountId);
+    if (!existing || cooldown.retryAfterMs > existing.retryAfterMs) {
+      this.cooldowns.set(accountId, cooldown);
+    }
+    const activeCooldown = this.cooldowns.get(accountId);
     return {
       accountId,
-      retryAfter: cooldown.retryAfter,
+      retryAfter: activeCooldown.retryAfter,
     };
   }
 

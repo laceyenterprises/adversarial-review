@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  AntigravityAccountRegistryError,
   createAntigravityAccountRegistry,
 } from '../src/auth/antigravity-accounts.mjs';
 
@@ -100,4 +101,82 @@ test('single-account registry selects the account and reflects its cooldown stat
   clock.set('2026-06-20T10:05:00.000Z');
   assert.equal(registry.selectAccount(), 'acct-solo');
   assert.deepEqual(registry.allCapped(), { allCapped: false, retryAfter: null });
+});
+
+test('markRateLimited keeps the later cooldown when retried with an earlier retryAfter', () => {
+  const clock = mockClock('2026-06-20T10:00:00.000Z');
+  const registry = createAntigravityAccountRegistry({
+    accountIds: ['acct-a'],
+    clock: clock.now,
+  });
+
+  assert.deepEqual(registry.markRateLimited('acct-a', '2026-06-20T11:00:00.000Z'), {
+    accountId: 'acct-a',
+    retryAfter: '2026-06-20T11:00:00.000Z',
+  });
+  assert.deepEqual(registry.markRateLimited('acct-a', '2026-06-20T10:10:00.000Z'), {
+    accountId: 'acct-a',
+    retryAfter: '2026-06-20T11:00:00.000Z',
+  });
+
+  clock.set('2026-06-20T10:10:00.000Z');
+  assert.equal(registry.selectAccount(), null);
+
+  clock.set('2026-06-20T11:00:00.000Z');
+  assert.equal(registry.selectAccount(), 'acct-a');
+});
+
+test('markRateLimited treats numeric retryAfter values as delta seconds', () => {
+  const clock = mockClock('2026-06-20T10:00:00.000Z');
+  const registry = createAntigravityAccountRegistry({
+    accountIds: ['acct-a', 'acct-b'],
+    clock: clock.now,
+  });
+
+  assert.deepEqual(registry.markRateLimited('acct-a', 120), {
+    accountId: 'acct-a',
+    retryAfter: '2026-06-20T10:02:00.000Z',
+  });
+  assert.equal(registry.selectAccount(), 'acct-b');
+
+  assert.deepEqual(registry.markRateLimited('acct-b', '30'), {
+    accountId: 'acct-b',
+    retryAfter: '2026-06-20T10:00:30.000Z',
+  });
+  assert.deepEqual(registry.allCapped(), {
+    allCapped: true,
+    retryAfter: '2026-06-20T10:00:30.000Z',
+  });
+});
+
+test('accounts prunes cooldowns for removed dynamic accounts', () => {
+  const clock = mockClock('2026-06-20T10:00:00.000Z');
+  let accountIds = ['acct-a', 'acct-b'];
+  const registry = createAntigravityAccountRegistry({
+    listAccounts: () => accountIds,
+    clock: clock.now,
+  });
+
+  registry.markRateLimited('acct-a', '2026-06-20T11:00:00.000Z');
+  registry.markRateLimited('acct-b', '2026-06-20T11:00:00.000Z');
+  assert.equal(registry.cooldowns.size, 2);
+
+  accountIds = ['acct-b'];
+  assert.deepEqual(registry.status(), [{
+    accountId: 'acct-b',
+    eligible: false,
+    retryAfter: '2026-06-20T11:00:00.000Z',
+  }]);
+  assert.equal(registry.cooldowns.size, 1);
+  assert.equal(registry.cooldowns.has('acct-a'), false);
+});
+
+test('registry errors preserve canonical name and code over details', () => {
+  const error = new AntigravityAccountRegistryError('ACCOUNT_UNKNOWN', 'bad account', {
+    code: 'OVERRIDE',
+    name: 'OtherError',
+  });
+
+  assert.equal(error.name, 'AntigravityAccountRegistryError');
+  assert.equal(error.code, 'ACCOUNT_UNKNOWN');
 });

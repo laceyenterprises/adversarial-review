@@ -93,6 +93,34 @@ test('sendWorkerSignal refuses recycled process groups when identity is unconfir
   assert.deepEqual(calls, [{ pid: -4321, signal: 0 }]);
 });
 
+test('sendWorkerSignal falls back to live process-group identity when ps is forbidden', async () => {
+  const calls = [];
+  const result = await sendWorkerSignal({
+    processGroupId: 4321,
+    processId: 9876,
+    spawnedAt: '2026-05-24T15:00:00.000Z',
+    signal: 'SIGTERM',
+    processKill: (pid, signal) => {
+      calls.push({ pid, signal });
+      return true;
+    },
+    execFileImpl: async () => {
+      const error = new Error('spawn EPERM');
+      error.code = 'EPERM';
+      throw error;
+    },
+  });
+
+  assert.equal(result.signalled, true);
+  assert.deepEqual(result.target, { kind: 'process-group', id: 4321 });
+  assert.equal(result.identity.degraded, true);
+  assert.match(result.identity.reason, /ps probe unavailable/);
+  assert.deepEqual(calls, [
+    { pid: -4321, signal: 0 },
+    { pid: -4321, signal: 'SIGTERM' },
+  ]);
+});
+
 test('sendWorkerSignal names the self-process guard accurately', async () => {
   const result = await sendWorkerSignal({
     processGroupId: process.pid,

@@ -108,7 +108,10 @@ async function sendWorkerSignal({
   if (!isPgidAlive(targetPgid, processKill)) {
     return { signalled: false, target: { kind: 'process-group', id: targetPgid }, error: 'process-group-not-found' };
   }
-  const identity = await verifyPgidIdentity(targetPgid, spawnedAt, { execFileImpl });
+  const identity = await verifyPgidIdentity(targetPgid, spawnedAt, {
+    execFileImpl,
+    allowForbiddenProbeFallback: true,
+  });
   if (!identity.match) {
     return {
       signalled: false,

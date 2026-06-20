@@ -168,6 +168,9 @@ export async function load(url, context, nextLoad) {
           headRefOid: scenario.heads[String(prNumber)] || 'sha-live-' + key,
         };
       }
+      export async function fetchPullRequestMergeability() {
+        return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' };
+      }
       export async function fetchReviewBodiesForHead() {
         return [];
       }

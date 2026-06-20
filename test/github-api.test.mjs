@@ -902,7 +902,7 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-reviewer-pool': "export function compareReviewerDispatchCandidates() { return 0; } export function createReviewerMemoryAdmissionSampler() { return { sample: async () => ({ admit: true }) }; } export function reserveReviewerMemoryAdmission() { return () => {}; } export function resolveFirstPassReviewerPoolConfig() { return { enabled: false }; } export async function runBoundedReviewerDispatchQueue() { return { dispatched: 0, skipped: 0 }; } export function sortReviewerDispatchCandidates(items) { return items; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
     'fixture:atomic-write': "export function writeFileAtomic() {}",
-    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { globalThis.__githubApiWatcherRollupCalls = (globalThis.__githubApiWatcherRollupCalls || 0) + 1; return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1; return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid, labels: [...scenario.rollup.labels] }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchPullRequestCommitSubjects() { return []; }",
+    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { globalThis.__githubApiWatcherRollupCalls = (globalThis.__githubApiWatcherRollupCalls || 0) + 1; return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1; return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestMergeability() { return { mergeable: scenario.rollup.mergeable, mergeStateStatus: scenario.rollup.mergeStateStatus }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchPullRequestCommitSubjects() { return []; }",
   };
 
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {
@@ -1933,4 +1933,117 @@ test('watcher tick downstream output is unchanged when PR fetches come from the 
   }]);
   assert.equal(summary.headStateCalls, 1);
   assert.equal(summary.rollupCalls, 0);
+});
+
+function makeLegacyRollupExec(expected, calls = []) {
+  return async (command, args) => {
+    calls.push({ command, args: [...args] });
+    assert.equal(command, 'gh');
+    const joined = args.join(' ');
+    if (joined.startsWith('pr view ')) {
+      return { stdout: JSON.stringify(expected) };
+    }
+    if (joined.startsWith(`api -i repos/${FIXTURE_REPO}/issues/${FIXTURE_PR}/comments?`)) {
+      return {
+        stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${JSON.stringify(expected.comments.map((comment) => ({
+          id: comment.id,
+          user: comment.author,
+          body: comment.body,
+          created_at: comment.createdAt,
+        })))}`,
+      };
+    }
+    if (joined.startsWith(`api -i repos/${FIXTURE_REPO}/pulls/${FIXTURE_PR}/reviews?`)) {
+      return {
+        stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${JSON.stringify(expected.reviews.map((review) => ({
+          id: review.id,
+          user: review.author,
+          body: review.body,
+          state: review.state,
+          submitted_at: review.submittedAt,
+        })))}`,
+      };
+    }
+    if (joined.startsWith(`api -i repos/${FIXTURE_REPO}/commits/${expected.headRefOid}/check-runs?`)) {
+      return {
+        stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${JSON.stringify({
+          total_count: expected.checks.length,
+          check_runs: expected.checks.map((check) => ({
+            name: check.name,
+            conclusion: check.conclusion,
+            completed_at: check.completedAt,
+          })),
+        })}`,
+      };
+    }
+    if (joined.startsWith(`api -i repos/${FIXTURE_REPO}/commits/${expected.headRefOid}/status?`)) {
+      return {
+        stdout: 'HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n{"statuses":[]}',
+      };
+    }
+    throw new Error(`unexpected call ${joined}`);
+  };
+}
+
+test('fetchPullRequestRollup prefers adapter payloads and preserves normalized shape', async () => {
+  const expected = makeExpectedRollup();
+  const mod = await importGithubApiFresh();
+  const calls = [];
+
+  const result = await withEnv({ GHA_ADAPTER_BIN: '/tmp/fake-github-adapter' }, () =>
+    mod.fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+      execFileImpl: async (command, args) => {
+        calls.push({ command, args: [...args] });
+        assert.equal(command, '/tmp/fake-github-adapter');
+        assert.deepEqual(args, ['pr-rollup', '--repo', FIXTURE_REPO, '--pr', String(FIXTURE_PR)]);
+        return { stdout: JSON.stringify({ ok: true, data: expected }) };
+      },
+      recordApiCallImpl: () => {},
+    }));
+
+  assert.deepEqual(result, expected);
+  assert.equal(calls.length, 1);
+});
+
+test('fetchPullRequestRollup falls back to legacy implementation when adapter is missing', async () => {
+  const expected = makeExpectedRollup();
+  const mod = await importGithubApiFresh();
+  const calls = [];
+
+  const result = await withEnv({
+    GHA_ADAPTER_BIN: undefined,
+    AGENT_OS_GITHUB_ADAPTER_BIN: undefined,
+    GHO_DISABLE_GRAPHQL_ROLLUP: '1',
+  }, () => mod.fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    execFileImpl: makeLegacyRollupExec(expected, calls),
+    recordApiCallImpl: () => {},
+    canExecute: async () => false,
+  }));
+
+  assert.deepEqual(result, expected);
+  assert.equal(calls[0].command, 'gh');
+});
+
+test('fetchPullRequestRollup falls back when adapter output is malformed', async () => {
+  const expected = makeExpectedRollup();
+  const mod = await importGithubApiFresh();
+  const calls = [];
+
+  const result = await withEnv({
+    GHA_ADAPTER_BIN: '/tmp/fake-github-adapter',
+    GHO_DISABLE_GRAPHQL_ROLLUP: '1',
+  }, () => mod.fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      if (command === '/tmp/fake-github-adapter') {
+        return { stdout: '{"ok":true,"data":null}' };
+      }
+      return makeLegacyRollupExec(expected)(command, args);
+    },
+    recordApiCallImpl: () => {},
+  }));
+
+  assert.deepEqual(result, expected);
+  assert.equal(calls[0].command, '/tmp/fake-github-adapter');
+  assert.equal(calls[1].command, 'gh');
 });

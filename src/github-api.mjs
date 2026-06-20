@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
+import { callGitHubAdapter, normalizeAdapterArray } from './github-adapter-client.mjs';
 import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit } from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -530,6 +531,46 @@ function normalizeRollup(pr, {
   };
 }
 
+function isAdapterUnavailable(result) {
+  return result?.available === false;
+}
+
+async function tryGitHubAdapter(command, params, options) {
+  try {
+    return await callGitHubAdapter(command, params, options);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeAdapterRollupPayload(payload) {
+  const source = payload?.pullRequest || payload?.pr || payload;
+  if (!source || typeof source !== 'object') {
+    throw new Error('GitHub adapter PR rollup payload missing object');
+  }
+  return normalizeRollup(source, {
+    labels: normalizeLabels(source.labels),
+    comments: Array.isArray(source.comments) ? source.comments.map(normalizeComment) : [],
+    reviews: Array.isArray(source.reviews) ? source.reviews.map(normalizeReview) : [],
+    checks: Array.isArray(source.checks) ? source.checks.map(normalizeCheck).filter(Boolean) : [],
+  });
+}
+
+function normalizeAdapterHeadStatePayload(payload, { withLabels = true } = {}) {
+  const source = payload?.pullRequest || payload?.pr || payload;
+  if (!source || typeof source !== 'object') {
+    throw new Error('GitHub adapter PR head-state payload missing object');
+  }
+  return {
+    state: typeof source?.state === 'string' ? source.state.toLowerCase() : source?.state || null,
+    mergedAt: source?.mergedAt || source?.merged_at || null,
+    closedAt: source?.closedAt || source?.closed_at || null,
+    headRefOid: source?.headRefOid || source?.head?.sha || null,
+    author: normalizeAuthor(source?.author || source?.user),
+    labels: withLabels ? normalizeLabels(source?.labels) : [],
+  };
+}
+
 function markGraphqlTruncated(items, connectionName) {
   const existing = Array.isArray(items?.graphqlTruncatedConnections)
     ? items.graphqlTruncatedConnections
@@ -785,8 +826,26 @@ async function fetchLegacyReviews(execFileImpl, repo, prNumber) {
 async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
   authoritativeReviewerLogins = null,
   authoritativeReviewerLogin = null,
+  env = process.env,
+  cwd = process.cwd(),
+  canExecute,
 } = {}) {
   if (!headSha) return [];
+  const adapter = await tryGitHubAdapter('pr-review-bodies', {
+    repo,
+    prNumber,
+    headSha,
+  }, { execFileImpl, env, cwd, canExecute });
+  if (adapter && !isAdapterUnavailable(adapter)) {
+    try {
+      return normalizeAdapterArray(adapter.data, 'bodies')
+        .map((review) => (typeof review === 'string' ? review : review?.body))
+        .map((body) => String(body || ''))
+        .filter((body) => body.trim());
+    } catch {
+      // Fall through to the existing gh implementation below.
+    }
+  }
   // Accept reviews from ANY login in the trusted reviewer-bot set (anti-spoof).
   // The set carries both observed naming forms for the reviewer model. An
   // explicit-but-empty/unresolvable set fails closed. Keep the deprecated
@@ -1404,9 +1463,24 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
   execFileImpl = execFileAsync,
   recordApiCallImpl = recordApiCall,
   withLabels = true,
+  env = process.env,
+  cwd = process.cwd(),
+  canExecute,
 } = {}) {
   const { owner, repo: repoName } = splitRepo(repo);
   const normalizedPrNumber = normalizePrNumber(prNumber);
+  const adapter = await tryGitHubAdapter('pr-head-state', {
+    repo,
+    prNumber: normalizedPrNumber,
+    withLabels,
+  }, { execFileImpl, env, cwd, canExecute });
+  if (adapter && !isAdapterUnavailable(adapter)) {
+    try {
+      return normalizeAdapterHeadStatePayload(adapter.data, { withLabels });
+    } catch {
+      // Fall through to the existing GraphQL/gh implementation below.
+    }
+  }
   if (isGraphqlRollupDisabled()) {
     const startedAt = Date.now();
     try {
@@ -1465,8 +1539,22 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
 async function fetchPullRequestRollup(repo, prNumber, {
   execFileImpl = execFileAsync,
   recordApiCallImpl = recordApiCall,
+  env = process.env,
+  cwd = process.cwd(),
+  canExecute,
 } = {}) {
   const normalizedPrNumber = normalizePrNumber(prNumber);
+  const adapter = await tryGitHubAdapter('pr-rollup', {
+    repo,
+    prNumber: normalizedPrNumber,
+  }, { execFileImpl, env, cwd, canExecute });
+  if (adapter && !isAdapterUnavailable(adapter)) {
+    try {
+      return normalizeAdapterRollupPayload(adapter.data);
+    } catch {
+      // Fall through to the existing GraphQL/gh implementation below.
+    }
+  }
   if (isGraphqlRollupDisabled()) {
     return fetchLegacyWithTelemetry(repo, normalizedPrNumber, { execFileImpl, recordApiCallImpl });
   }
@@ -1496,24 +1584,90 @@ async function fetchPullRequestRollup(repo, prNumber, {
 async function fetchPullRequestReviewContext(repo, prNumber, {
   execFileImpl = execFileAsync,
   recordApiCallImpl = recordApiCall,
+  env = process.env,
+  cwd = process.cwd(),
+  canExecute,
 } = {}) {
   const normalizedPrNumber = normalizePrNumber(prNumber);
+  const adapter = await tryGitHubAdapter('pr-review-context', {
+    repo,
+    prNumber: normalizedPrNumber,
+  }, { execFileImpl, env, cwd, canExecute });
+  if (adapter && !isAdapterUnavailable(adapter)) {
+    try {
+      const rollup = normalizeAdapterRollupPayload(adapter.data);
+      return { ...rollup, labels: [] };
+    } catch {
+      // Fall through to the existing GraphQL/gh implementation below.
+    }
+  }
   if (isGraphqlRollupDisabled()) {
     return fetchLegacyReviewContextWithTelemetry(repo, normalizedPrNumber, { execFileImpl, recordApiCallImpl });
   }
   return fetchGraphqlReviewContext(repo, normalizedPrNumber, { execFileImpl, recordApiCallImpl });
 }
 
+async function fetchPullRequestMergeability(repo, prNumber, {
+  execFileImpl = execFileAsync,
+  env = process.env,
+  cwd = process.cwd(),
+  canExecute,
+} = {}) {
+  const normalizedPrNumber = normalizePrNumber(prNumber);
+  const adapter = await tryGitHubAdapter('pr-mergeability', {
+    repo,
+    prNumber: normalizedPrNumber,
+  }, { execFileImpl, env, cwd, canExecute });
+  if (adapter && !isAdapterUnavailable(adapter)) {
+    try {
+      const source = adapter.data?.pullRequest || adapter.data?.pr || adapter.data;
+      return {
+        mergeable: source?.mergeable ?? null,
+        mergeStateStatus: source?.mergeStateStatus ?? null,
+      };
+    } catch {
+      // Fall through to the existing gh implementation below.
+    }
+  }
+  const { stdout } = await execFileImpl('gh', [
+    'pr', 'view', String(normalizedPrNumber),
+    '--repo', repo,
+    '--json', 'mergeable,mergeStateStatus',
+  ]);
+  const parsed = JSON.parse(String(stdout || '{}'));
+  return {
+    mergeable: parsed?.mergeable ?? null,
+    mergeStateStatus: parsed?.mergeStateStatus ?? null,
+  };
+}
+
 async function fetchPullRequestCommitSubjects(repo, prNumber, {
   execFileImpl = execFileAsync,
   recordApiCallImpl = recordApiCall,
   limit = 5,
+  env = process.env,
+  cwd = process.cwd(),
+  canExecute,
 } = {}) {
   const normalizedPrNumber = normalizePrNumber(prNumber);
   const normalizedLimit = Number(limit);
   const commitLast = Number.isInteger(normalizedLimit) && normalizedLimit > 0
     ? Math.min(normalizedLimit, PAGE_SIZE)
     : 5;
+  const adapter = await tryGitHubAdapter('pr-commit-subjects', {
+    repo,
+    prNumber: normalizedPrNumber,
+    limit: commitLast,
+  }, { execFileImpl, env, cwd, canExecute });
+  if (adapter && !isAdapterUnavailable(adapter)) {
+    try {
+      return normalizeAdapterArray(adapter.data, 'subjects')
+        .map((subject) => String(subject || '').trim())
+        .filter(Boolean);
+    } catch {
+      // Fall through to the existing GraphQL implementation below.
+    }
+  }
   const { owner, repo: repoName } = splitRepo(repo);
   try {
     const payload = await runGraphqlWithTelemetry(execFileImpl, GRAPHQL_PR_COMMIT_SUBJECTS_QUERY, {
@@ -1569,6 +1723,7 @@ export {
   __test__,
   fetchPullRequestCommitSubjects,
   fetchPullRequestHeadAndState,
+  fetchPullRequestMergeability,
   fetchPullRequestReviewContext,
   fetchPullRequestRollup,
   fetchReviewBodiesForHead,

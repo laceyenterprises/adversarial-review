@@ -7,6 +7,7 @@ import {
   parseDate,
   parseJsonLines,
 } from './gh-cli.mjs';
+import { callGitHubAdapter, normalizeAdapterArray } from './github-adapter-client.mjs';
 
 
 import {
@@ -161,7 +162,25 @@ async function fetchPullRequestCreatedAt({
   repo,
   prNumber,
   execFileImpl = execFileAsync,
+  env = process.env,
+  cwd = process.cwd(),
+  canExecute,
 } = {}) {
+  try {
+    const adapter = await callGitHubAdapter('pr-created-at', { repo, prNumber }, {
+      execFileImpl,
+      env,
+      cwd,
+      canExecute,
+    });
+    if (adapter.available !== false) {
+      const createdAt = adapter.data?.createdAt || adapter.data?.created_at || adapter.data;
+      if (createdAt) return String(createdAt);
+      throw new Error('GitHub adapter created-at payload missing timestamp');
+    }
+  } catch {
+    // Fall through to the existing gh implementation below.
+  }
   const { stdout } = await execFileImpl(
     'gh',
     ['api', `repos/${repo}/pulls/${encodeURIComponent(prNumber)}`],
@@ -195,7 +214,28 @@ async function scraperFetchIssueComments({
   prNumber,
   execFileImpl = execFileAsync,
   logger = console,
+  env = process.env,
+  cwd = process.cwd(),
+  canExecute,
 } = {}) {
+  try {
+    const adapter = await callGitHubAdapter('issue-comments', { repo, prNumber }, {
+      execFileImpl,
+      env,
+      cwd,
+      canExecute,
+    });
+    if (adapter.available !== false) {
+      return normalizeAdapterArray(adapter.data, 'comments').map((comment) => ({
+        id: comment?.id ?? comment?.node_id ?? comment?.nodeId ?? null,
+        login: comment?.login ?? comment?.authorLogin ?? comment?.user?.login ?? null,
+        created_at: comment?.created_at ?? comment?.createdAt ?? null,
+        body: String(comment?.body ?? ''),
+      }));
+    }
+  } catch {
+    // Fall through to the existing gh implementation below.
+  }
   const { stdout, stderr } = await execFileImpl(
     'gh',
     [
@@ -503,7 +543,23 @@ async function fetchIssueComments({
   env = process.env,
   timeoutMs = GH_LOOKUP_TIMEOUT_MS,
   retries,
+  cwd = process.cwd(),
+  canExecute,
 } = {}) {
+  try {
+    const adapter = await callGitHubAdapter('issue-comments', { repo, prNumber }, {
+      execFileImpl,
+      env,
+      cwd,
+      canExecute,
+      timeoutMs,
+    });
+    if (adapter.available !== false) {
+      return normalizeAdapterArray(adapter.data, 'comments').map(normalizeIssueComment);
+    }
+  } catch {
+    // Fall through to the existing gh implementation below.
+  }
   const { stdout } = await execGhWithRetry({
     execFileImpl,
     env,

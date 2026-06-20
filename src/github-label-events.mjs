@@ -1,3 +1,5 @@
+import { callGitHubAdapter } from './github-adapter-client.mjs';
+
 function normalizeGithubLabelName(value) {
   return String(value ?? '').trim().toLowerCase();
 }
@@ -106,6 +108,9 @@ function latestMatchingScopedTimelineLabelEvent(nodes, labelName, currentHeadSha
 async function fetchLatestLabelEvent(repo, prNumber, labelName, {
   execFileImpl,
   currentHeadSha = null,
+  env = process.env,
+  cwd = process.cwd(),
+  canExecute,
 } = {}) {
   if (typeof execFileImpl !== 'function') {
     throw new Error('fetchLatestLabelEvent requires execFileImpl');
@@ -113,6 +118,22 @@ async function fetchLatestLabelEvent(repo, prNumber, labelName, {
   const [owner, name] = String(repo || '').split('/');
   if (!owner || !name) {
     throw new Error(`Invalid repo slug: ${repo}`);
+  }
+
+  try {
+    const adapter = await callGitHubAdapter('pr-label-event', {
+      repo,
+      prNumber,
+      labelName,
+      headSha: currentHeadSha,
+    }, { execFileImpl, env, cwd, canExecute });
+    if (adapter.available !== false) {
+      const event = normalizeGithubLabelEvent(adapter.data?.event || adapter.data, labelName);
+      if (event) return event;
+      throw new Error('GitHub adapter label-event payload did not match requested label');
+    }
+  } catch {
+    // Fall through to the existing gh GraphQL implementation below.
   }
 
   const query = `

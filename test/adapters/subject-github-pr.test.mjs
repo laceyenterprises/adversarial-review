@@ -103,6 +103,88 @@ test('github-pr subject adapter discovers GitHub PR subjects with normalized bui
   });
 });
 
+test('github-pr subject adapter prefers optional adapter snapshots when present', async () => {
+  const calls = [];
+  const adapter = createGitHubPRSubjectAdapter({
+    repos: [fixture.repo],
+    env: { GHA_ADAPTER_BIN: '/tmp/fake-github-adapter' },
+    now: () => new Date('2026-05-10T21:30:00.000Z'),
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      assert.equal(command, '/tmp/fake-github-adapter');
+      if (args[0] === 'pr-list') {
+        return {
+          stdout: JSON.stringify({
+            ok: true,
+            data: {
+              pullRequests: [{
+                repo: fixture.repo,
+                prNumber: 484,
+                title: '[codex] LAC-484 carve subject channel adapter',
+                state: 'open',
+                headSha: 'abc123def456',
+                labels: ['risk:medium'],
+                createdAt: '2026-05-10T21:00:00.000Z',
+                updatedAt: '2026-05-10T21:20:00.000Z',
+                authorRef: 'codex-worker',
+              }],
+            },
+          }),
+        };
+      }
+      if (args[0] === 'pr-diff') {
+        return { stdout: JSON.stringify({ ok: true, data: { diff: 'diff --git adapter\n' } }) };
+      }
+      throw new Error(`unexpected adapter command ${args[0]}`);
+    },
+  });
+
+  const [ref] = await adapter.discoverSubjects();
+  assert.deepEqual(ref, {
+    domainId: 'code-pr',
+    subjectExternalId: `${fixture.repo}#484`,
+    revisionRef: 'abc123def456',
+  });
+
+  const state = await adapter.fetchState(ref);
+  assert.equal(state.title, '[codex] LAC-484 carve subject channel adapter');
+  assert.deepEqual(state.labels, ['risk:medium']);
+
+  const content = await adapter.fetchContent(ref);
+  assert.equal(content.representation, 'diff --git adapter\n');
+  assert.deepEqual(calls.map((call) => call.args[0]), ['pr-list', 'pr-diff']);
+});
+
+test('github-pr subject adapter falls back to Octokit when adapter output is malformed', async () => {
+  const calls = [];
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: makeOctokitSnapshot(),
+    repos: [fixture.repo],
+    env: { GHA_ADAPTER_BIN: '/tmp/fake-github-adapter' },
+    now: () => new Date('2026-05-10T21:30:00.000Z'),
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      return { stdout: '{"ok":true,"data":null}' };
+    },
+  });
+
+  const refs = await adapter.discoverSubjects();
+  assert.equal(refs[0].subjectExternalId, `${fixture.repo}#484`);
+  assert.equal(calls[0].command, '/tmp/fake-github-adapter');
+});
+
+test('github-pr subject adapter keeps existing Octokit fallback when adapter is missing', async () => {
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: makeOctokitSnapshot(),
+    repos: [fixture.repo],
+    canExecute: async () => false,
+    now: () => new Date('2026-05-10T21:30:00.000Z'),
+  });
+
+  const refs = await adapter.discoverSubjects();
+  assert.equal(refs[0].subjectExternalId, `${fixture.repo}#484`);
+});
+
 test('github-pr routing can force the default reviewer from env', () => {
   const env = { ...HERMETIC_CONFIG_ENV, ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'codex' };
 

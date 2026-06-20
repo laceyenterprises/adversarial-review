@@ -21,6 +21,7 @@ import {
   getReviewRow,
   openReviewStateDb,
 } from './review-state.mjs';
+import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import { normalizeGithubMergeability } from './github-mergeability.mjs';
 
@@ -496,7 +497,7 @@ async function buildAdversarialGateSnapshot(rootDir, {
   includeSettledReview = false,
   liveHeadReview = undefined,
   execFileImpl = execFileAsync,
-  fetchLatestLabelEventImpl,
+  fetchLatestLabelEventImpl = fetchLatestLabelEvent,
   operatorApprovalEvent = undefined,
 } = {}) {
   const resolvedRow = reviewRow || await readReviewRowForGate(rootDir, { repo, prNumber });
@@ -652,7 +653,7 @@ async function projectAdversarialGateStatus(rootDir, {
   prAuthor = null,
   reviewRow = null,
   execFileImpl = execFileAsync,
-  fetchLatestLabelEventImpl,
+  fetchLatestLabelEventImpl = fetchLatestLabelEvent,
   operatorApprovalEvent = undefined,
   env = process.env,
 } = {}) {

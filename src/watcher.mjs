@@ -177,6 +177,7 @@ import { refreshReviewerBrokerTokens, refreshWatcherGithubToken } from './review
 import {
   fetchPullRequestCommitSubjects,
   fetchPullRequestHeadAndState,
+  fetchPullRequestMergeability,
   fetchPullRequestRollup,
   fetchReviewBodiesForHead,
 } from './github-api.mjs';
@@ -4500,12 +4501,7 @@ async function maybeDispatchAmaClosureFor({
     const sampled = await resolveMergeabilityWithSampling(
       candidate || {},
       async () => {
-        const { stdout } = await execFileAsync('gh', [
-          'pr', 'view', String(prNumber),
-          '--repo', repoPath,
-          '--json', 'mergeable,mergeStateStatus',
-        ]);
-        return JSON.parse(stdout);
+        return fetchPullRequestMergeability(repoPath, prNumber, { execFileImpl: execFileAsync });
       },
       { attempts: MERGEABILITY_SAMPLE_ATTEMPTS, delayMs: MERGEABILITY_SAMPLE_DELAY_MS },
     );

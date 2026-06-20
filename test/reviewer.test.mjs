@@ -37,6 +37,7 @@ const {
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
   isRetryableGeminiSubprocessError,
+  retryAfterFromGeminiFailure,
   formatAntigravityQuotaHoldMessage,
   spawnGeminiReview,
   reviewWithGemini,
@@ -1613,6 +1614,13 @@ test('resolveGeminiRuntime defaults to cli and honors config/env selection', () 
       }),
       /reviewer\.gemini\.runtime.*cli.*antigravity/i,
     );
+
+    const malformedPath = join(tmp, 'malformed.yaml');
+    writeFileSync(malformedPath, 'reviewer:\n  gemini:\n    runtime: [', 'utf8');
+    assert.throws(
+      () => resolveGeminiRuntime({ env: {}, topPath: '/dev/null', modulePaths: [malformedPath] }),
+      (err) => err instanceof AgentOSConfigError && err.key === 'reviewer.gemini.runtime',
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -1727,6 +1735,8 @@ test('reviewWithGemini cli runtime keeps native binary, argv, env scrub, and cre
 
 test('reviewWithGemini antigravity runtime scrubs API-key fallbacks before token injection', async () => {
   const spawnEnvs = [];
+  const credsPaths = [];
+  const credsBodies = [];
   await withEnvAsync({
     GEMINI_API_KEY: 'must-strip',
     GOOGLE_API_KEY: 'must-strip-too',
@@ -1737,6 +1747,8 @@ test('reviewWithGemini antigravity runtime scrubs API-key fallbacks before token
     getAntigravityAccessTokenImpl: async () => 'fresh-access-token',
     spawnGeminiReviewImpl: async ({ env }) => {
       spawnEnvs.push(env);
+      credsPaths.push(env.GEMINI_AUTH_PATH);
+      credsBodies.push(readFileSync(env.GEMINI_AUTH_PATH, 'utf8'));
       return { stdout: 'Antigravity review', stderr: '' };
     },
   }));
@@ -1746,6 +1758,9 @@ test('reviewWithGemini antigravity runtime scrubs API-key fallbacks before token
   assert.equal(spawnEnvs[0].GOOGLE_API_KEY, undefined);
   assert.equal(spawnEnvs[0].GEMINI_OAUTH_ACCESS_TOKEN, 'fresh-access-token');
   assert.equal(spawnEnvs[0].GEMINI_ANTIGRAVITY_ACCOUNT, 'acct-a');
+  assert.match(spawnEnvs[0].GEMINI_AUTH_PATH, /oauth_creds\.json$/);
+  assert.match(credsBodies[0], /fresh-access-token/);
+  assert.equal(existsSync(credsPaths[0]), false, 'temporary antigravity oauth_creds.json should be removed after spawn');
 });
 
 test('reviewWithGemini antigravity 401 marks rate-limited account and retries exactly once on the next account', async () => {
@@ -1780,6 +1795,62 @@ test('reviewWithGemini antigravity 401 marks rate-limited account and retries ex
   assert.equal(marked[0].accountId, 'acct-a');
 });
 
+test('reviewWithGemini antigravity walks to a third live account before failing', async () => {
+  const selected = ['acct-a', 'acct-b', 'acct-c'];
+  const marked = [];
+  const spawns = [];
+  const result = await reviewWithGemini('+diff\n', '', {
+    resolveGeminiRuntimeImpl: () => 'antigravity',
+    assertAntigravityOAuthImpl: async ({ selectAccountImpl }) => selectAccountImpl(),
+    selectAntigravityAccountImpl: () => selected.shift() || null,
+    getAntigravityAccessTokenImpl: async (accountId) => `token-${accountId}`,
+    markAntigravityRateLimitedImpl: (accountId, retryAfter) => marked.push({ accountId, retryAfter }),
+    allAntigravityCappedImpl: () => ({ allCapped: false, retryAfter: null }),
+    spawnGeminiReviewImpl: async ({ env }) => {
+      spawns.push(env.GEMINI_ANTIGRAVITY_ACCOUNT);
+      if (spawns.length < 3) {
+        const err = new Error('Command failed');
+        err.stderr = '401 Unauthorized';
+        throw err;
+      }
+      return { stdout: 'third account review', stderr: '' };
+    },
+  });
+
+  assert.equal(result.reviewText, 'third account review');
+  assert.deepEqual(spawns, ['acct-a', 'acct-b', 'acct-c']);
+  assert.deepEqual(marked.map((item) => item.accountId), ['acct-a', 'acct-b']);
+});
+
+test('reviewWithGemini antigravity retries transient subprocess errors without rotating accounts', async () => {
+  const spawns = [];
+  const marked = [];
+  const result = await reviewWithGemini('+diff\n', '', {
+    resolveGeminiRuntimeImpl: () => 'antigravity',
+    assertAntigravityOAuthImpl: async ({ selectAccountImpl }) => selectAccountImpl(),
+    selectAntigravityAccountImpl: () => 'acct-a',
+    getAntigravityAccessTokenImpl: async () => 'token-acct-a',
+    markAntigravityRateLimitedImpl: (accountId) => marked.push(accountId),
+    allAntigravityCappedImpl: () => ({ allCapped: false, retryAfter: null }),
+    retryDelaysMs: [0],
+    sleepImpl: async () => {},
+    spawnGeminiReviewImpl: async ({ env }) => {
+      spawns.push(env.GEMINI_ANTIGRAVITY_ACCOUNT);
+      if (spawns.length === 1) {
+        const err = new Error('Command failed');
+        err.code = 'ETIMEDOUT';
+        err.stderr = 'TLS handshake timeout';
+        throw err;
+      }
+      return { stdout: 'retried antigravity review', stderr: '' };
+    },
+  });
+
+  assert.equal(result.reviewText, 'retried antigravity review');
+  assert.deepEqual(spawns, ['acct-a', 'acct-a']);
+  assert.deepEqual(marked, []);
+});
+
 test('reviewWithGemini antigravity all-capped returns hold decision without producing review text', async () => {
   const retryAfter = '2026-06-20T21:15:00.000Z';
   const result = await reviewWithGemini('+diff\n', '', {
@@ -1805,6 +1876,41 @@ test('reviewWithGemini antigravity all-capped returns hold decision without prod
 test('Antigravity all-capped hold message is classified as quota-exhausted', () => {
   const msg = formatAntigravityQuotaHoldMessage('2026-06-20T21:15:00.000Z');
   assert.equal(classifyReviewerFailure(msg, 1), QUOTA_EXHAUSTED_FAILURE_CLASS);
+});
+
+test('Antigravity Retry-After parsing accepts HTTP dates and ignores malformed values', () => {
+  const httpDate = new Error('Command failed');
+  httpDate.stderr = '429 RESOURCE_EXHAUSTED\nRetry-After: Wed, 21 Oct 2026 07:28:00 GMT';
+  assert.equal(retryAfterFromGeminiFailure(httpDate), '2026-10-21T07:28:00.000Z');
+
+  const malformed = new Error('Command failed');
+  malformed.stderr = '429 RESOURCE_EXHAUSTED\nRetry-After: definitely-not-a-date';
+  assert.match(retryAfterFromGeminiFailure(malformed), /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test('reviewWithGemini falls back to cli when temporary runtime resolver rejects the AGR-03 key', async () => {
+  const warnings = [];
+  const spawns = [];
+  const result = await reviewWithGemini('+diff\n', '', {
+    resolveGeminiRuntimeImpl: () => {
+      throw new AgentOSConfigError('bad runtime', {
+        key: 'reviewer.gemini.runtime',
+        expected: 'one of ["cli", "antigravity"]',
+        got: 'native',
+      });
+    },
+    assertOAuthImpl: async () => {},
+    log: { warn: (message) => warnings.push(message) },
+    spawnGeminiReviewImpl: async ({ env }) => {
+      spawns.push(env);
+      return { stdout: 'cli fallback review', stderr: '' };
+    },
+  });
+
+  assert.equal(result.reviewText, 'cli fallback review');
+  assert.equal(spawns.length, 1);
+  assert.equal(spawns[0].GEMINI_ANTIGRAVITY_ACCOUNT, undefined);
+  assert.match(warnings[0], /falling back to cli/);
 });
 
 test('reviewWithGemini maps auth-failure spawn output to OAuthError(gemini)', async () => {

@@ -20,7 +20,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -2182,9 +2182,19 @@ function isAntigravityRateLimitOrAuthFailure(err) {
   return /401|unauthorized|oauth|login required|not logged in|429|quota|resource_exhausted|rate limit/i.test(msg);
 }
 
+function normalizeRetryAfterHint(value, nowMs = Date.now()) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) {
+    return new Date(nowMs + Number(raw) * 1000).toISOString();
+  }
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+}
+
 function retryAfterFromGeminiFailure(err) {
   const msg = `${err?.message || ''}\n${err?.stdout || ''}\n${err?.stderr || ''}`;
-  const explicit = msg.match(/\bretry-after[:=]\s*([^\s,;]+)/i)?.[1];
+  const explicit = normalizeRetryAfterHint(msg.match(/\bretry-after[:=]\s*([^\r\n;]+)/i)?.[1]);
   const parsed = parseQuotaResetAt(msg);
   return explicit || parsed || new Date(Date.now() + 15 * 60 * 1000).toISOString();
 }
@@ -2207,6 +2217,7 @@ async function withGeminiSubprocessRetry(operation, {
   retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
   sleepImpl = sleep,
   log = console,
+  isRetryableError = isRetryableGeminiSubprocessError,
 } = {}) {
   let lastErr = null;
   for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
@@ -2214,7 +2225,7 @@ async function withGeminiSubprocessRetry(operation, {
       return await operation();
     } catch (err) {
       lastErr = err;
-      if (!isRetryableGeminiSubprocessError(err) || attempt >= retryDelaysMs.length) {
+      if (!isRetryableError(err) || attempt >= retryDelaysMs.length) {
         throw err;
       }
       log.warn?.(
@@ -2224,6 +2235,41 @@ async function withGeminiSubprocessRetry(operation, {
     }
   }
   throw lastErr;
+}
+
+function resolveGeminiRuntimeForReview(resolveGeminiRuntimeImpl, log = console) {
+  try {
+    return resolveGeminiRuntimeImpl();
+  } catch (err) {
+    if (err?.name === 'AgentOSConfigError' && err?.key === 'reviewer.gemini.runtime') {
+      log.warn?.(`[reviewWithGemini] invalid reviewer.gemini.runtime; falling back to cli until AGR-04 boot validation owns this key: ${err.message}`);
+      return 'cli';
+    }
+    throw err;
+  }
+}
+
+function materializeAntigravityGeminiOAuthEnv({
+  env,
+  accountId,
+  accessToken,
+  tmpRoot = tmpdir(),
+} = {}) {
+  const home = mkdtempSync(join(tmpRoot, 'gemini-antigravity-reviewer-'));
+  const geminiDir = join(home, '.gemini');
+  mkdirSync(geminiDir, { recursive: true, mode: 0o700 });
+  const credsPath = join(geminiDir, 'oauth_creds.json');
+  writeFileSync(credsPath, `${JSON.stringify({ access_token: accessToken }, null, 2)}\n`, { mode: 0o600 });
+  return {
+    env: {
+      ...env,
+      HOME: home,
+      GEMINI_AUTH_PATH: credsPath,
+      GEMINI_OAUTH_ACCESS_TOKEN: accessToken,
+      GEMINI_ANTIGRAVITY_ACCOUNT: accountId,
+    },
+    cleanup: () => rmSync(home, { recursive: true, force: true }),
+  };
 }
 
 async function spawnGeminiReview({
@@ -2268,8 +2314,9 @@ async function reviewWithGemini(diff, extraContext = '', {
   allAntigravityCappedImpl = allCapped,
   retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
   sleepImpl = sleep,
+  log = console,
 } = {}) {
-  const runtime = resolveGeminiRuntimeImpl();
+  const runtime = resolveGeminiRuntimeForReview(resolveGeminiRuntimeImpl, log);
   if (runtime !== 'cli' && runtime !== 'antigravity') {
     throw new Error(`Unsupported Gemini runtime: ${runtime}`);
   }
@@ -2313,6 +2360,9 @@ async function reviewWithGemini(diff, extraContext = '', {
         selectAccountImpl: selectAntigravityAccountImpl,
         markRateLimitedImpl: markAntigravityRateLimitedImpl,
         allCappedImpl: allAntigravityCappedImpl,
+        retryDelaysMs,
+        sleepImpl,
+        log,
       })
       : await withGeminiSubprocessRetry(
         () => invoke(env),
@@ -2356,6 +2406,10 @@ async function invokeGeminiWithAntigravity({
   selectAccountImpl,
   markRateLimitedImpl,
   allCappedImpl,
+  retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
+  sleepImpl = sleep,
+  log = console,
+  materializeOAuthEnvImpl = materializeAntigravityGeminiOAuthEnv,
 } = {}) {
   let accountId = assertedAccountId || selectAccountImpl();
   if (!accountId) {
@@ -2366,14 +2420,21 @@ async function invokeGeminiWithAntigravity({
     throw new OAuthError('gemini', 'no Antigravity account is available');
   }
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  const attemptedAccounts = new Set();
+  while (accountId && !attemptedAccounts.has(accountId)) {
+    attemptedAccounts.add(accountId);
     const accessToken = await getAccessTokenImpl(accountId);
+    const materialized = materializeOAuthEnvImpl({ env, accountId, accessToken });
     try {
-      return await invoke({
-        ...env,
-        GEMINI_OAUTH_ACCESS_TOKEN: accessToken,
-        GEMINI_ANTIGRAVITY_ACCOUNT: accountId,
-      });
+      return await withGeminiSubprocessRetry(
+        () => invoke(materialized.env),
+        {
+          retryDelaysMs,
+          sleepImpl,
+          log,
+          isRetryableError: (err) => isRetryableGeminiSubprocessError(err) && !isAntigravityRateLimitOrAuthFailure(err),
+        },
+      );
     } catch (err) {
       if (!isAntigravityRateLimitOrAuthFailure(err)) throw err;
       const retryAfter = retryAfterFromGeminiFailure(err);
@@ -2382,10 +2443,11 @@ async function invokeGeminiWithAntigravity({
       if (capped?.allCapped) {
         return { quotaHoldDecision: antigravityQuotaHoldDecision({ retryAfter: capped.retryAfter }) };
       }
-      if (attempt >= 1) throw err;
       const nextAccountId = selectAccountImpl();
-      if (!nextAccountId || nextAccountId === accountId) throw err;
+      if (!nextAccountId || attemptedAccounts.has(nextAccountId)) throw err;
       accountId = nextAccountId;
+    } finally {
+      materialized.cleanup?.();
     }
   }
   throw new Error('Gemini Antigravity invocation exhausted retry budget');
@@ -3251,6 +3313,9 @@ const __test__ = {
   buildGeminiReviewArgs,
   isRetryableGeminiSubprocessError,
   isAntigravityRateLimitOrAuthFailure,
+  retryAfterFromGeminiFailure,
+  resolveGeminiRuntimeForReview,
+  materializeAntigravityGeminiOAuthEnv,
   antigravityQuotaHoldDecision,
   formatAntigravityQuotaHoldMessage,
   invokeGeminiWithAntigravity,

@@ -327,8 +327,16 @@ function readGeminiRuntimeFromYaml(path) {
   let doc;
   try {
     doc = yaml.load(readFileSync(path, 'utf8'));
-  } catch {
-    return null;
+  } catch (err) {
+    throw new AgentOSConfigError(
+      `reviewer.gemini.runtime config file is not valid YAML: ${err.message}`,
+      {
+        key: 'reviewer.gemini.runtime',
+        expected: 'valid YAML with reviewer.gemini.runtime set to cli or antigravity',
+        got: err.message,
+        source: path,
+      },
+    );
   }
   const value = doc?.reviewer?.gemini?.runtime;
   return typeof value === 'string' && value.trim() ? value.trim() : null;

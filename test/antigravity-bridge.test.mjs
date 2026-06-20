@@ -1,9 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { createServer } from 'node:http';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 import {
   ANTIGRAVITY_REDIRECT_URI,
@@ -14,9 +18,15 @@ import {
   clearAccessTokenCache,
   generatePkcePair,
   getAccessToken,
+  listCredentialAccounts,
   readCredentialFile,
+  resolveCredentialPath,
+  startCallbackServer,
   writeCredentialFile,
 } from '../src/auth/antigravity-bridge.mjs';
+
+const execFileAsync = promisify(execFile);
+const AGR_AUTH_BIN = fileURLToPath(new URL('../bin/agr-auth.mjs', import.meta.url));
 
 function bridgeDir() {
   return mkdtempSync(join(tmpdir(), 'agr-bridge-'));
@@ -118,6 +128,46 @@ test('getAccessToken refreshes with mocked token endpoint and caches until near 
   assert.equal(body.get('refresh_token'), 'fake-refresh-token');
 });
 
+test('concurrent refreshes single-flight and persist rotated refresh token once', async () => {
+  clearAccessTokenCache();
+  const dir = bridgeDir();
+  writeCredentialFile('acct-0', {
+    email: 'user@example.com',
+    refreshToken: 'fake-refresh-token',
+  }, { bridgeDir: dir });
+
+  const requests = [];
+  const fetchImpl = async (url, init) => {
+    requests.push({ url, body: init.body.toString() });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    return jsonResponse({
+      access_token: 'rotated-access-token',
+      refresh_token: 'rotated-refresh-token',
+      expires_in: 3600,
+    });
+  };
+  const options = {
+    bridgeDir: dir,
+    fetchImpl,
+    tokenEndpoint: 'https://mock.example/token',
+    clientId: 'mock-client-id',
+    clientSecret: 'mock-client-secret',
+    now: () => 1_000,
+  };
+
+  const [first, second] = await Promise.all([
+    getAccessToken('acct-0', options),
+    getAccessToken('acct-0', options),
+  ]);
+
+  assert.equal(first, 'rotated-access-token');
+  assert.equal(second, 'rotated-access-token');
+  assert.equal(requests.length, 1);
+  const { creds } = readCredentialFile('acct-0', { bridgeDir: dir });
+  assert.equal(creds.refreshToken, 'rotated-refresh-token');
+  assert.equal(statSync(resolveCredentialPath('acct-0', { bridgeDir: dir })).mode & 0o777, 0o600);
+});
+
 test('getAccessToken reports expired refresh-token error shape', async () => {
   clearAccessTokenCache();
   const dir = bridgeDir();
@@ -149,6 +199,97 @@ test('getAccessToken reports expired refresh-token error shape', async () => {
       return true;
     },
   );
+});
+
+test('credential reads reject loose permissions before parsing secrets', () => {
+  const dir = bridgeDir();
+  const filePath = writeCredentialFile('acct-0', {
+    email: 'user@example.com',
+    refreshToken: 'fake-refresh-token',
+  }, { bridgeDir: dir });
+  chmodSync(filePath, 0o644);
+
+  assert.throws(
+    () => readCredentialFile('acct-0', { bridgeDir: dir }),
+    (err) => {
+      assert.ok(err instanceof AntigravityBridgeError);
+      assert.equal(err.code, 'CREDS_UNSAFE_PERMISSIONS');
+      assert.equal(err.path, filePath);
+      return true;
+    },
+  );
+});
+
+test('credential account listing ignores non-account files', () => {
+  const dir = bridgeDir();
+  writeCredentialFile('acct-0', {
+    email: 'user@example.com',
+    refreshToken: 'fake-refresh-token',
+  }, { bridgeDir: dir });
+  writeCredentialFile('acct-1', {
+    email: 'other@example.com',
+    refreshToken: 'other-refresh-token',
+  }, { bridgeDir: dir });
+  writeFileSync(join(dir, 'not-json.txt'), 'ignored\n');
+  writeFileSync(join(dir, 'bad..acct.json'), '{}\n');
+
+  assert.deepEqual(listCredentialAccounts({ bridgeDir: dir }), ['acct-0', 'acct-1']);
+});
+
+test('agr-auth status is read-only unless --check-token is explicit', async () => {
+  const dir = bridgeDir();
+  writeCredentialFile('acct-0', {
+    email: 'user@example.com',
+    refreshToken: 'fake-refresh-token',
+    projectId: 'project-123',
+  }, { bridgeDir: dir });
+  const env = {
+    ...process.env,
+    GEMINI_ANTIGRAVITY_BRIDGE_DIR: dir,
+    GEMINI_ANTIGRAVITY_CLIENT_ID: '',
+    GEMINI_ANTIGRAVITY_CLIENT_SECRET: '',
+  };
+
+  const status = await execFileAsync(process.execPath, [AGR_AUTH_BIN, 'status', 'acct-0'], { env });
+  assert.match(status.stdout, /not-checked/);
+  assert.equal(status.stderr, '');
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [AGR_AUTH_BIN, 'status', '--check-token'], { env }),
+    (err) => {
+      assert.equal(err.code, 2);
+      assert.match(err.stdout, /refresh-failed/);
+      return true;
+    },
+  );
+});
+
+test('callback server reports busy port before browser launch can race it', async () => {
+  const blocker = createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('busy');
+  });
+  await new Promise((resolve) => blocker.listen(0, '127.0.0.1', resolve));
+  const { port } = blocker.address();
+
+  try {
+    const callback = startCallbackServer({ expectedState: 'state', host: '127.0.0.1', port, timeoutMs: 100 });
+    const callbackFailed = assert.rejects(
+      callback,
+      (err) => {
+        assert.ok(err instanceof AntigravityBridgeError);
+        assert.equal(err.code, 'CALLBACK_SERVER_FAILED');
+        assert.equal(err.causeCode, 'EADDRINUSE');
+        assert.match(err.message, /already in use/);
+        return true;
+      },
+    );
+    const readyFailed = assert.rejects(callback.ready, { code: 'CALLBACK_SERVER_FAILED' });
+    await readyFailed;
+    await callbackFailed;
+  } finally {
+    await new Promise((resolve) => blocker.close(resolve));
+  }
 });
 
 test('missing and corrupt credential files use stable error codes', () => {

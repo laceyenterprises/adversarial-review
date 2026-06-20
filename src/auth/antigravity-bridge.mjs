@@ -1,14 +1,17 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { spawn } from 'node:child_process';
 
 const ANTIGRAVITY_CLIENT_ID_ENV = 'GEMINI_ANTIGRAVITY_CLIENT_ID';
 const ANTIGRAVITY_CLIENT_SECRET_ENV = 'GEMINI_ANTIGRAVITY_CLIENT_SECRET';
-const ANTIGRAVITY_REDIRECT_URI = 'http://localhost:51121/oauth-callback';
+const ANTIGRAVITY_REDIRECT_HOST = 'localhost';
+const ANTIGRAVITY_REDIRECT_PORT = 51121;
+const ANTIGRAVITY_REDIRECT_PATH = '/oauth-callback';
+const ANTIGRAVITY_REDIRECT_URI = `http://${ANTIGRAVITY_REDIRECT_HOST}:${ANTIGRAVITY_REDIRECT_PORT}${ANTIGRAVITY_REDIRECT_PATH}`;
 const ANTIGRAVITY_AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 const ANTIGRAVITY_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
 const GOOGLE_USERINFO_ENDPOINT = 'https://www.googleapis.com/oauth2/v1/userinfo?alt=json';
@@ -21,8 +24,10 @@ const ANTIGRAVITY_SCOPES = Object.freeze([
 ]);
 const ACCESS_TOKEN_EXPIRY_BUFFER_MS = 60_000;
 const CALLBACK_TIMEOUT_MS = 180_000;
+const CREDENTIAL_LOCK_TIMEOUT_MS = 10_000;
 
 const accessTokenCache = new Map();
+const refreshInflight = new Map();
 
 class AntigravityBridgeError extends Error {
   constructor(code, message, details = {}) {
@@ -120,6 +125,48 @@ function ensurePrivateBridgeDir(dir) {
   chmodSync(dir, 0o700);
 }
 
+function assertPrivateMode(path, expectedMode, label) {
+  const mode = statSync(path).mode & 0o777;
+  if (mode !== expectedMode) {
+    throw new AntigravityBridgeError('CREDS_UNSAFE_PERMISSIONS', `${label} must be mode ${expectedMode.toString(8)}: ${path}`, {
+      path,
+      mode,
+      expectedMode,
+    });
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withCredentialLock(filePath, fn, { lockTimeoutMs = CREDENTIAL_LOCK_TIMEOUT_MS } = {}) {
+  const lockPath = `${filePath}.lock`;
+  const deadline = Date.now() + lockTimeoutMs;
+  let fd;
+  for (;;) {
+    try {
+      fd = openSync(lockPath, 'wx', 0o600);
+      break;
+    } catch (err) {
+      if (err?.code !== 'EEXIST' || Date.now() >= deadline) {
+        throw new AntigravityBridgeError('CREDS_LOCK_BUSY', `timed out waiting for Antigravity credential lock: ${lockPath}`, {
+          path: filePath,
+          lockPath,
+        });
+      }
+      await sleep(50);
+    }
+  }
+
+  try {
+    return await fn();
+  } finally {
+    closeSync(fd);
+    rmSync(lockPath, { force: true });
+  }
+}
+
 function writePrivateJsonFile(filePath, value) {
   ensurePrivateBridgeDir(dirname(filePath));
   const tempPath = join(dirname(filePath), `.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
@@ -142,6 +189,10 @@ function readCredentialFile(accountId, { env = process.env, bridgeDir, filePath 
       path: credentialPath,
     });
   }
+  if (existsSync(dirname(credentialPath))) {
+    assertPrivateMode(dirname(credentialPath), 0o700, 'Antigravity credential directory');
+  }
+  assertPrivateMode(credentialPath, 0o600, 'Antigravity credential file');
 
   let raw;
   try {
@@ -286,28 +337,56 @@ async function getAccessToken(accountId, options = {}) {
     return cached.accessToken;
   }
 
-  const { creds } = readCredentialFile(accountId, { ...options, filePath: credentialPath });
-  try {
+  const inflight = refreshInflight.get(cacheKey);
+  if (inflight) return inflight;
+
+  if (!existsSync(credentialPath)) {
+    readCredentialFile(accountId, { ...options, filePath: credentialPath });
+  }
+
+  const refreshPromise = withCredentialLock(credentialPath, async () => {
+    const lockedCached = accessTokenCache.get(cacheKey);
+    if (lockedCached?.accessToken && lockedCached.expiresAt > now() + ACCESS_TOKEN_EXPIRY_BUFFER_MS) {
+      return lockedCached.accessToken;
+    }
+
+    const { creds } = readCredentialFile(accountId, { ...options, filePath: credentialPath });
     const refreshed = await refreshAccessToken(creds.refreshToken, options);
     accessTokenCache.set(cacheKey, {
       accessToken: refreshed.accessToken,
       expiresAt: refreshed.expiresAt,
     });
     if (refreshed.refreshToken !== creds.refreshToken) {
-      writeCredentialFile(accountId, {
-        email: creds.email,
-        refreshToken: refreshed.refreshToken,
-        projectId: creds.projectId,
-      }, options);
+      try {
+        writeCredentialFile(accountId, {
+          email: creds.email,
+          refreshToken: refreshed.refreshToken,
+          projectId: creds.projectId,
+        }, options);
+      } catch (err) {
+        const warning = `Antigravity refresh-token rotation was not persisted for ${accountId}: ${err.message}`;
+        if (typeof options.onCredentialPersistenceError === 'function') {
+          options.onCredentialPersistenceError(err);
+        } else {
+          process.emitWarning(warning, {
+            code: 'ANTIGRAVITY_REFRESH_TOKEN_PERSIST_FAILED',
+          });
+        }
+      }
     }
     return refreshed.accessToken;
-  } catch (err) {
+  }, options).catch((err) => {
     if (err instanceof AntigravityBridgeError) {
       err.accountId = accountId;
       err.path = credentialPath;
     }
     throw err;
-  }
+  }).finally(() => {
+    refreshInflight.delete(cacheKey);
+  });
+
+  refreshInflight.set(cacheKey, refreshPromise);
+  return refreshPromise;
 }
 
 function clearAccessTokenCache() {
@@ -321,12 +400,27 @@ function constantTimeEquals(a, b) {
   return timingSafeEqual(left, right);
 }
 
-function startCallbackServer({ expectedState, port = 51121, timeoutMs = CALLBACK_TIMEOUT_MS } = {}) {
-  return new Promise((resolve, reject) => {
+function startCallbackServer({
+  expectedState,
+  host = ANTIGRAVITY_REDIRECT_HOST,
+  port = ANTIGRAVITY_REDIRECT_PORT,
+  callbackPath = ANTIGRAVITY_REDIRECT_PATH,
+  timeoutMs = CALLBACK_TIMEOUT_MS,
+} = {}) {
+  let readyResolve;
+  let readyReject;
+  const ready = new Promise((resolve, reject) => {
+    readyResolve = resolve;
+    readyReject = reject;
+  });
+  ready.catch(() => {});
+
+  const callbackPromise = new Promise((resolve, reject) => {
     let settled = false;
+    let listening = false;
     const server = createServer((req, res) => {
-      const url = new URL(req.url, `http://${req.headers.host || `localhost:${port}`}`);
-      if (url.pathname !== '/oauth-callback') {
+      const url = new URL(req.url, `http://${req.headers.host || `${host}:${port}`}`);
+      if (url.pathname !== callbackPath) {
         res.writeHead(404, { 'Content-Type': 'text/plain' });
         res.end('Not found');
         return;
@@ -351,21 +445,46 @@ function startCallbackServer({ expectedState, port = 51121, timeoutMs = CALLBACK
       finish(resolve, { code, state });
     });
     const timer = setTimeout(() => {
-      finish(reject, new AntigravityBridgeError('CALLBACK_TIMEOUT', 'timed out waiting for OAuth callback'));
+      const wrapped = new AntigravityBridgeError('CALLBACK_TIMEOUT', 'timed out waiting for OAuth callback');
+      readyReject(wrapped);
+      finish(reject, wrapped);
     }, timeoutMs);
 
     function finish(fn, value) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      server.close(() => fn(value));
+      if (listening) {
+        server.close(() => fn(value));
+      } else {
+        fn(value);
+      }
     }
 
     server.on('error', (err) => {
-      finish(reject, new AntigravityBridgeError('CALLBACK_SERVER_FAILED', `cannot start OAuth callback server: ${err.message}`));
+      const message = err?.code === 'EADDRINUSE'
+        ? `OAuth callback port ${port} is already in use; stop the other agr-auth login or free ${host}:${port}`
+        : `cannot start OAuth callback server on ${host}:${port}: ${err.message}`;
+      const wrapped = new AntigravityBridgeError('CALLBACK_SERVER_FAILED', message, {
+        causeCode: err?.code,
+        port,
+        host,
+      });
+      readyReject(wrapped);
+      finish(reject, wrapped);
     });
-    server.listen(port, '127.0.0.1');
+    server.listen(port, host, () => {
+      listening = true;
+      if (settled) {
+        server.close(() => {});
+        return;
+      }
+      readyResolve();
+    });
   });
+
+  callbackPromise.ready = ready;
+  return callbackPromise;
 }
 
 function openBrowser(url) {
@@ -448,6 +567,8 @@ async function login(accountId, {
   decodeState(state);
   const authorization = buildAuthorizationUrl({ pkce, state, projectId, ...options });
   const callbackPromise = startCallbackServerImpl({ expectedState: authorization.state, ...options });
+  callbackPromise.catch(() => {});
+  if (callbackPromise.ready) await callbackPromise.ready;
   openBrowserImpl(authorization.url);
   const { code } = await callbackPromise;
   const tokens = await exchangeAuthorizationCodeImpl(code, authorization.verifier, options);
@@ -493,6 +614,23 @@ function credentialStatus(accountId, options = {}) {
   }
 }
 
+function listCredentialAccounts({ env = process.env, bridgeDir } = {}) {
+  const dir = bridgeDir || resolveBridgeDir(env);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((entry) => entry.endsWith('.json'))
+    .map((entry) => basename(entry, '.json'))
+    .filter((entry) => {
+      try {
+        validateAccountId(entry);
+        return true;
+      } catch {
+        return false;
+      }
+    })
+    .sort();
+}
+
 async function removeCredentialFile(accountId, options = {}) {
   const credentialPath = resolveCredentialPath(accountId, options);
   await rm(credentialPath, { force: true });
@@ -513,6 +651,9 @@ export {
   ANTIGRAVITY_AUTH_ENDPOINT,
   ANTIGRAVITY_CLIENT_ID_ENV,
   ANTIGRAVITY_CLIENT_SECRET_ENV,
+  ANTIGRAVITY_REDIRECT_HOST,
+  ANTIGRAVITY_REDIRECT_PATH,
+  ANTIGRAVITY_REDIRECT_PORT,
   ANTIGRAVITY_REDIRECT_URI,
   ANTIGRAVITY_SCOPES,
   ANTIGRAVITY_TOKEN_ENDPOINT,
@@ -525,6 +666,7 @@ export {
   exchangeAuthorizationCode,
   generatePkcePair,
   getAccessToken,
+  listCredentialAccounts,
   login,
   readCredentialFile,
   refreshAccessToken,

@@ -12,7 +12,7 @@
     "agr-auth": "bin/agr-auth.mjs"
   },
   "scripts": {
-    "lint": "eslint \"src/**/*.{js,mjs}\"",
+    "lint": "eslint \"src/**/*.{js,mjs}\" \"bin/**/*.mjs\"",
     "start": "node src/watcher.mjs",
     "review": "node src/reviewer.mjs",
     "pr:create:tagged": "node src/pr-create-tagged.mjs",

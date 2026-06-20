@@ -104,10 +104,12 @@ test('base not advanced since validation-base skips revalidation with zero drift
 
 test('stale or unverified current-base fails closed after bounded fetch retry', async () => {
   const staleBase = '3333333333333333333333333333333333333333';
+  const fetchError = new Error('fetch failed');
+  fetchError.stderr = 'fatal: could not read Username\nsecondary line';
   const execFileImpl = makeGitStub({
     [`cat-file -e ${VALIDATION_BASE}^{commit}`]: '',
     [`rev-parse --verify refs/remotes/origin/main^{commit}`]: `${staleBase}\n`,
-    'fetch --no-tags origin main': '',
+    'fetch --no-tags origin main': fetchError,
   });
   const decision = await assessMergeLeaseNeedsRevalidation({
     repoPath: '/repo',
@@ -122,6 +124,7 @@ test('stale or unverified current-base fails closed after bounded fetch retry', 
   assert.equal(decision.reason, 'unverified-current-base');
   assert.equal(decision.currentBase, CURRENT_BASE);
   assert.equal(decision.mainAdvancedBy, null);
+  assert.equal(decision.detail, 'fatal: could not read Username');
   assert.deepEqual(decision.overlappingFiles, []);
   assert.deepEqual(execFileImpl.calls.map((call) => call.args[0]), [
     'cat-file',
@@ -129,6 +132,40 @@ test('stale or unverified current-base fails closed after bounded fetch retry', 
     'fetch',
     'rev-parse',
   ]);
+});
+
+test('malformed current-base returns null instead of leaking raw input', async () => {
+  const execFileImpl = makeGitStub({});
+  const decision = await assessMergeLeaseNeedsRevalidation({
+    repoPath: '/repo',
+    base: 'main',
+    validationBase: VALIDATION_BASE,
+    currentBase: 'origin/main',
+    execFileImpl,
+  });
+
+  assert.equal(decision.needsRevalidation, true);
+  assert.equal(decision.reason, 'malformed-current-base');
+  assert.equal(decision.currentBase, null);
+  assert.deepEqual(decision.overlappingFiles, []);
+  assert.equal(execFileImpl.calls.length, 0);
+});
+
+test('malformed changed-files ref fails closed before git treats it as an option', async () => {
+  const execFileImpl = makeGitStub({});
+  const decision = await assessMergeLeaseNeedsRevalidation({
+    repoPath: '/repo',
+    base: 'main',
+    validationBase: VALIDATION_BASE,
+    currentBase: CURRENT_BASE,
+    changedFilesFrom: '--all',
+    execFileImpl,
+  });
+
+  assert.equal(decision.needsRevalidation, true);
+  assert.equal(decision.reason, 'malformed-changed-files-from');
+  assert.equal(decision.currentBase, CURRENT_BASE);
+  assert.equal(execFileImpl.calls.length, 0);
 });
 
 test('malformed validation-base sha fails closed without git calls', async () => {

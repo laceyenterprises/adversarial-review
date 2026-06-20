@@ -273,6 +273,50 @@ test('merge-lease acquire maps unexpected runtime errors to retryable exit witho
   }
 });
 
+test('merge-lease needs-revalidation emits rendered decisions through the integrated CLI', async () => {
+  const rootDir = freshRoot();
+  try {
+    const { code, io } = await runCli(rootDir, [
+      'needs-revalidation',
+      '--repo-path', '/repo',
+      '--base', BASE,
+      '--validation-base', '1'.repeat(40),
+      '--current-base', '2'.repeat(40),
+      '--changed-files-from', 'HEAD',
+    ], {
+      assessMergeLeaseNeedsRevalidation: async (options) => {
+        assert.deepEqual(options, {
+          repoPath: '/repo',
+          base: BASE,
+          validationBase: '1'.repeat(40),
+          currentBase: '2'.repeat(40),
+          changedFilesFrom: 'HEAD',
+        });
+        return {
+          needsRevalidation: true,
+          reason: 'unverified-current-base',
+          currentBase: '2'.repeat(40),
+          mainAdvancedBy: null,
+          overlappingFiles: [],
+          detail: 'fatal: could not fetch',
+        };
+      },
+    });
+
+    assert.equal(code, 0);
+    assert.deepEqual(jsonOutput(io), {
+      needsRevalidation: true,
+      reason: 'unverified-current-base',
+      currentBase: '2'.repeat(40),
+      mainAdvancedBy: null,
+      overlappingFiles: [],
+      detail: 'fatal: could not fetch',
+    });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('merge-lease acquire blocks in-process then acquires after holder releases', async () => {
   const rootDir = freshRoot();
   try {

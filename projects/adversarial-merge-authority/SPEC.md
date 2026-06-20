@@ -124,6 +124,8 @@ helper must fail closed with `reason:"pr-diff-empty"` because that usually means
 the caller inspected the base branch or another non-PR ref instead of the
 reviewed head. Only a non-empty PR file set with no overlap may return
 `needsRevalidation:false` for `reason:"no-overlapping-files"`.
+`changedFilesFrom` must not start with `-` or contain a backslash; invalid values
+fail closed before they can be interpreted as git options.
 
 The JSON output shape is stable:
 
@@ -138,11 +140,14 @@ The JSON output shape is stable:
 ```
 
 `needsRevalidation` is the boolean decision. `reason` is a stable machine
-reason code. `currentBase` is the normalized current-base SHA when available.
-`mainAdvancedBy` is the number of commits in `<validationBase>..<currentBase>`
-when computable, `0` for `base-not-advanced`, and `null` before the helper can
-compute drift. `overlappingFiles` is a sorted unique list and is empty for
-non-overlap and fail-closed cases that cannot prove overlap.
+reason code. `currentBase` is the normalized current-base SHA when available and
+`null` when the caller supplied no valid current-base SHA. `mainAdvancedBy` is
+the number of commits in `<validationBase>..<currentBase>` when computable, `0`
+for `base-not-advanced`, and `null` before the helper can compute drift.
+`overlappingFiles` is a sorted unique list and is empty for non-overlap and
+fail-closed cases that cannot prove overlap. Fail-closed git failures may add an
+optional `detail` string carrying a short stderr/message diagnostic; consumers
+must branch on `reason`, not `detail`.
 
 Stable reason codes:
 
@@ -156,6 +161,8 @@ Stable reason codes:
 - `malformed-base`: `base` failed branch-name normalization.
 - `malformed-validation-base`: `validationBase` was not a full SHA.
 - `malformed-current-base`: `currentBase` was not a full SHA.
+- `malformed-changed-files-from`: `changedFilesFrom` was unsafe to pass as a git
+  ref argument.
 - `unresolvable-validation-base`: `validationBase` did not resolve to a commit.
 - `unverified-current-base`: bounded fetch/read attempts could not prove
   `refs/remotes/origin/<base>` equals `currentBase`.

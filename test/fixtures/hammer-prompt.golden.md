@@ -40,6 +40,31 @@ not replace the machine gate.
    separate infra change, an external dependency, or a credential you do not
    have), emit ONE hard-blocker report naming the exact failing check(s) and stop.
    Do NOT merge past a red test or a red required check, related or not.
+2c. **Keep the canonical documentation surfaces current — doc-currency for the
+   change you are landing is IN SCOPE, exactly like the test/CI fixes in 2b, and
+   is NOT net-new feature scope.** If the post-remediation diff touches either
+   surface below AND that surface exists in this PR's repository, update the
+   matching docs in your remediation commit so they do not go stale:
+   - **Schema change → data-model docs** (`docs/data-model/`). If the diff adds
+     or alters any persistent store's shape — a
+     `platform/session-ledger/**/migrations/*.sql`, an `_ensure_*` schema
+     backstop, a `CREATE TABLE` / `ALTER TABLE`, or a new/changed table or record
+     type in any other store — update the matching domain doc
+     `docs/data-model/NN-*.md` (find it by matching the changed source path
+     against that doc's `Source of truth:` header line) so its column tables,
+     primary keys, references, and `erDiagram` reflect the new shape, AND update
+     the structured mirror `docs/data-model/catalog.json` to match. Then run
+     `node scripts/validate-data-model-catalog.mjs` from the repo root and ensure
+     it passes — a red validator counts as a failing check under 2b.
+   - **Module surface / behaviour change → module explainer.** If the diff
+     changes a module's public interface, dispatch flow, or operational contract
+     and a `modules/<name>/<name>-walkthrough.md` exists for that module, update
+     it to match.
+   Only touch docs the change actually affects — a pure test/config/docs PR needs
+   none, and a PR in a repo without these surfaces (a submodule) is exempt (note
+   it in your audit comment if a superproject doc is owed). Do NOT land a schema
+   or module change that leaves an in-repo data-model doc or module walkthrough
+   stale.
 3. Commit the remediation. The commit must have provenance trailers including:
 
    ```text
@@ -354,5 +379,8 @@ EOF
   unsafe to resolve (a semantic conflict you cannot correctly settle).
 - No skipping the post-merge closing comment on a successful merge.
 - No treating a rebased HAM head as valid without `ham_terminal_remediation_validated`.
+- No landing a schema or module change that leaves an in-repo data-model doc
+  (`docs/data-model/`, incl. `catalog.json`) or module walkthrough
+  (`modules/<name>/<name>-walkthrough.md`) stale (mandate 2c).
 
 <!-- hq:closeout:pr -->

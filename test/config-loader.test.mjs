@@ -703,6 +703,76 @@ test('unversioned config.local.yaml tolerates unknown nested worker_pool keys', 
   }
 });
 
+test('top-level config.yaml rejects an unknown nested main_catchup key', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      main_catchup:
+        anything: true
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /main_catchup/);
+        assert.match(err.message, /unknown key/);
+        assert.ok(String(err.source).startsWith(top));
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('top-level config.yaml accepts the mirrored main_catchup drain keys', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      main_catchup:
+        adversarial_review_drain_timeout_seconds: 240
+        adversarial_watcher_drain_bounce_slack_seconds: 45
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('main_catchup.adversarial_review_drain_timeout_seconds'), 240);
+    assert.equal(cfg.get('main_catchup.adversarial_watcher_drain_bounce_slack_seconds'), 45);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('config.local.yaml tolerates unknown nested main_catchup keys and reads mirrored ones', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(local, `
+      roots:
+        hq: /from-local
+      main_catchup:
+        anything: true
+        adversarial_review_drain_timeout_seconds: 300
+        adversarial_watcher_drain_bounce_slack_seconds: 60
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roots.hq'), '/from-local');
+    assert.equal(cfg.get('main_catchup.anything'), null);
+    assert.equal(cfg.get('main_catchup.adversarial_review_drain_timeout_seconds'), 300);
+    assert.equal(cfg.get('main_catchup.adversarial_watcher_drain_bounce_slack_seconds'), 60);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('config.local.yaml tolerates a NESTED unknown key under an owned root (no watcher crash)', () => {
   // Mirror of agent-os#1743: a nested unknown key under a root THIS reader owns
   // (here retention.policies.standard_backup, a strict nested dict) must be

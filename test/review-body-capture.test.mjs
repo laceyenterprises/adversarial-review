@@ -127,6 +127,33 @@ test('reviewer happy path captures verdict, body, gh_comment_id, and timestamp',
   assert.equal(calls[1][1], 'api');
 });
 
+test('reviewer capture accepts legacy PAT-backed reviewer login aliases', async () => {
+  const rootDir = makeRootDir();
+  const pass = seedPass(rootDir, { passKind: 'first-pass', reviewerClass: 'codex' });
+  const reviewBody = '## Verdict\n\nComment only\n\nLegacy author body';
+
+  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => postGitHubReviewWithCapture({
+    rootDir,
+    repo: pass.repo,
+    prNumber: pass.prNumber,
+    attemptNumber: pass.attemptNumber,
+    reviewerModel: 'codex',
+    reviewBody,
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    passKind: 'first-pass',
+    postedAt: '2026-05-29T12:01:00.000Z',
+    execFileImpl: async (_command, args) => (
+      args[0] === 'pr'
+        ? { stdout: '', stderr: '' }
+        : { stdout: `${JSON.stringify({ id: 502, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:30.000Z', body: reviewBody })}\n` }
+    ),
+  }));
+
+  const row = readPass(rootDir, pass);
+  assert.equal(row.body_md, reviewBody);
+  assert.equal(row.gh_comment_id, '502');
+});
+
 test('shared pre-write helper runs before the GitHub review mutation', async () => {
   const rootDir = makeRootDir();
   const pass = seedPass(rootDir, { reviewerClass: 'claude' });
@@ -597,6 +624,40 @@ test('remediation reply capture stores body and leaves verdict NULL', async () =
   assert.equal(row.body_md, body);
   assert.equal(row.gh_comment_id, '808');
   assert.ok(row.body_captured_at);
+});
+
+test('remediation reply capture accepts legacy PAT-backed reviewer login aliases', async () => {
+  const rootDir = makeRootDir();
+  const pass = seedPass(rootDir, {
+    attemptNumber: 2,
+    reviewerClass: 'codex',
+    reviewerModel: 'codex',
+    passKind: 'remediation',
+  });
+  const body = '## Remediation Worker (codex)\n\nApplied the fix.';
+
+  await postRemediationCommentWithCapture({
+    rootDir,
+    repo: pass.repo,
+    prNumber: pass.prNumber,
+    attemptNumber: pass.attemptNumber,
+    workerClass: 'codex',
+    body,
+    postedAt: '2026-05-29T12:01:00.000Z',
+    postCommentImpl: async () => ({ posted: true }),
+    captureImpl: async (captureRootDir, args) => captureRemediationBodyAfterPost(captureRootDir, {
+      ...args,
+      execFileImpl: async () => ({
+        stdout: `${JSON.stringify({ id: 809, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:40.000Z', body })}\n`,
+        stderr: '',
+      }),
+      env: { GH_TOKEN: 'token' },
+    }),
+  });
+
+  const row = readPass(rootDir, pass);
+  assert.equal(row.body_md, body);
+  assert.equal(row.gh_comment_id, '809');
 });
 
 test('lookup forces gh api -X GET so per_page does not flip method to POST', async () => {

@@ -100,16 +100,21 @@ The stored `reviewer` value is the reviewer model/family or supported
 builder-tag alias, not a GitHub login. AMA resolves that value through the
 canonical GitHub-PR reviewer routing tables before applying the anti-spoof
 author filter. Known Claude-authority values (`claude`, `claude-code`, and
-`clio-agent`) accept `lacey-claude-reviewer` and `claude-reviewer-lacey`. Known
-Codex-authority values (`codex`, `gemini`, `pi`, `opencode`, and `hermes`) accept
-`lacey-codex-reviewer` and `codex-reviewer-lacey`. For REST PR reviews posted by
-GitHub Apps, AMA normalizes the GitHub-reserved `[bot]` suffix off the review
-author login before checking membership in this bare-slug authoritative set, so
-`lacey-codex-reviewer[bot]` matches `lacey-codex-reviewer` while unrelated App
-bots still fail the anti-spoof check. Unknown or missing reviewer models resolve
-to an empty authoritative set and fail closed rather than trusting any live
-review body. Reviews from operators, unrelated bots, or missing/unknown authors
-are not merge authority even if they contain a structured `## Verdict` section.
+`clio-agent`) accept the canonical GitHub App author
+`lacey-claude-reviewer[bot]` plus the legacy PAT-backed
+`claude-reviewer-lacey` alias. Known Codex-authority values (`codex`, `gemini`,
+`pi`, `opencode`, and `hermes`) accept the canonical GitHub App author
+`lacey-codex-reviewer[bot]` plus the legacy PAT-backed
+`codex-reviewer-lacey` alias. Native Gemini reviewer capture accepts
+`lacey-gemini-reviewer[bot]` plus legacy `gemini-reviewer-lacey`. For REST PR
+reviews posted by GitHub Apps, AMA normalizes the GitHub-reserved `[bot]` suffix
+off the review author login before checking membership in this authoritative
+set, so `lacey-codex-reviewer[bot]` matches `lacey-codex-reviewer` while
+unrelated App bots still fail the anti-spoof check. Unknown or missing reviewer
+models resolve to an empty authoritative set and fail closed rather than
+trusting any live review body. Reviews from operators, unrelated bots, or
+missing/unknown authors are not merge authority even if they contain a
+structured `## Verdict` section.
 
 The precedence is:
 
@@ -247,7 +252,8 @@ accepted in `roles.reviewer`, `roles.merge_agent_worker_class`, or
 `agent_os_config` loader widens the same enums. `[gemini]` is the exception:
 the native Gemini reviewer runtime is operator-selectable through
 `roles.reviewer: gemini` / `ADVERSARIAL_REVIEW_DEFAULT_REVIEWER=gemini`, posts
-as `gemini-reviewer-lacey`, captures reviews against that login, and uses
+as the GitHub App author `lacey-gemini-reviewer[bot]`, captures reviews against
+that canonical login plus the legacy `gemini-reviewer-lacey` alias, and uses
 `GH_GEMINI_REVIEWER_TOKEN`. No same-family waiver is inferred for `[opencode]`
 without a future explicit writer-family config knob.
 

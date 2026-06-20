@@ -121,9 +121,15 @@ const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferra
 const ENUM_REVIEWER_GEMINI_MODE = ['off', 'fallback', 'always-on'];
 const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
   // LOADER-CONTRACT §2 permits each reader to ignore only root sections
-  // explicitly foreign to that reader in top-level config.local.yaml. The
-  // worker-pool CFG reader owns this root; this Node reader does not.
-  'worker_pool',
+  // explicitly foreign to that reader in top-level config.local.yaml.
+  //
+  // `worker_pool` is no longer listed here: as of the deep-reconcile CFG knob
+  // (2026-06-19) this reader carries a PARTIAL `worker_pool` schema (only
+  // `dag.autowalk.deep_reconcile`) so the watcher tolerates that key in the
+  // canonical config.yaml. worker_pool is therefore a known (not foreign) root;
+  // its other keys are still Python-owned and are tolerated-dropped per-key in
+  // config.local.yaml via the nested-unknown drop. Re-add a root here only if a
+  // whole top-level section is genuinely owned by another reader and unmirrored.
 ]);
 // Keep this per-role fallback surface in lockstep with the Python
 // agent_os_config schema. The child dicts are intentionally strict so a
@@ -943,6 +949,34 @@ function schemaV1() {
                 __default: 30,
                 __min: 10,
                 __max: 1000,
+              },
+            },
+          },
+        },
+      },
+      // worker_pool.dag.autowalk.deep_reconcile — Python-owned (canonical schema
+      // at platform/agent-os-config). PARTIAL mirror, same rationale as the
+      // sentinel block below: this Node reader does not consume the value, but
+      // it must not crash-loop if this checked-in key reaches the shared
+      // canonical config.yaml (CFG-01 strict-schema parity). Only deep_reconcile
+      // is mirrored; every other worker_pool.* key stays Python-owned and is
+      // tolerated-dropped in operator-local config.local.yaml (nested-unknown
+      // drop), so worker-pool tuning like dispatch.max_concurrent_in_flight /
+      // memory.pressure.* still lives there untouched. Python stays canonical.
+      worker_pool: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          dag: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              autowalk: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  deep_reconcile: { __type: TYPE_BOOL, __default: false },
+                },
               },
             },
           },

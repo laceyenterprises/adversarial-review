@@ -596,7 +596,11 @@ test('local.yaml overrides top', () => {
   }
 });
 
-test('top-level config.yaml rejects foreign worker_pool section', () => {
+test('top-level config.yaml rejects an unknown nested worker_pool key (worker_pool is now a known partial mirror)', () => {
+  // As of the deep-reconcile CFG knob (2026-06-19) `worker_pool` is a KNOWN
+  // partial root in this reader (mirrors only dag.autowalk.deep_reconcile), no
+  // longer a foreign top-level section. The canonical config.yaml stays strict,
+  // so an unknown nested worker_pool key still fails loud.
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -611,7 +615,9 @@ test('top-level config.yaml rejects foreign worker_pool section', () => {
         assert.ok(err instanceof AgentOSConfigError);
         assert.match(err.message, /worker_pool/);
         assert.match(err.message, /unknown key/);
-        assert.equal(err.source, top);
+        // source is now line-annotated (config.yaml:N) — a nested unknown-key
+        // error rather than a whole-section foreign rejection.
+        assert.ok(String(err.source).startsWith(top));
         return true;
       },
     );
@@ -620,44 +626,62 @@ test('top-level config.yaml rejects foreign worker_pool section', () => {
   }
 });
 
-test('versioned config.local.yaml tolerates allowlisted foreign worker_pool section', () => {
+test('top-level config.yaml accepts the mirrored worker_pool.dag.autowalk.deep_reconcile key', () => {
+  // The point of the partial mirror: this key may be written to the shared
+  // canonical config.yaml without crashing the adversarial watcher.
   const tmp = freshTmp();
-  const originalWarn = console.warn;
   try {
-    const warnings = [];
-    console.warn = (msg) => warnings.push(String(msg));
     const top = join(tmp, 'config.yaml');
-    const local = join(tmp, 'config.local.yaml');
     writeFile(top, `
       version: 1
-      roots:
-        hq: /from-top
-    `);
-    writeFile(local, `
-      version: 1
-      roots:
-        hq: /from-local
       worker_pool:
-        anything: true
+        dag:
+          autowalk:
+            deep_reconcile: true
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('roots.hq'), '/from-local');
-    assert.equal(cfg.get('worker_pool.anything'), null);
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /worker_pool/);
-    assert.match(warnings[0], /config\.local\.yaml/);
+    assert.equal(cfg.get('worker_pool.dag.autowalk.deep_reconcile'), true);
   } finally {
-    console.warn = originalWarn;
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test('unversioned config.local.yaml tolerates allowlisted foreign worker_pool section', () => {
+test('versioned config.local.yaml tolerates unknown nested worker_pool keys and reads the mirrored one', () => {
+  // worker_pool is now a known partial root; in operator-local config.local.yaml
+  // unknown nested worker_pool.* keys (dispatch/memory/etc., owned by the Python
+  // CFG reader) are tolerated-dropped (nested-unknown drop, debug log — NOT a
+  // top-level foreign warn), while the mirrored deep_reconcile key is read.
   const tmp = freshTmp();
-  const originalWarn = console.warn;
   try {
-    const warnings = [];
-    console.warn = (msg) => warnings.push(String(msg));
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(local, `
+      version: 1
+      roots:
+        hq: /from-local
+      worker_pool:
+        anything: true
+        dag:
+          autowalk:
+            deep_reconcile: true
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roots.hq'), '/from-local');
+    assert.equal(cfg.get('worker_pool.anything'), null);
+    assert.equal(cfg.get('worker_pool.dag.autowalk.deep_reconcile'), true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('unversioned config.local.yaml tolerates unknown nested worker_pool keys', () => {
+  const tmp = freshTmp();
+  try {
     const top = join(tmp, 'config.yaml');
     const local = join(tmp, 'config.local.yaml');
     writeFile(top, `
@@ -674,11 +698,7 @@ test('unversioned config.local.yaml tolerates allowlisted foreign worker_pool se
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('roots.hq'), '/from-local');
     assert.equal(cfg.get('worker_pool.anything'), null);
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /worker_pool/);
-    assert.match(warnings[0], /config\.local\.yaml/);
   } finally {
-    console.warn = originalWarn;
     rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -2247,7 +2267,7 @@ test('validateSchema rejects unsupported MHX title tags in shared CFG enums', ()
   );
 });
 
-test('validateSchema rejects allowlisted foreign top-level keys unless local-layer tolerance is explicit', () => {
+test('validateSchema rejects unknown nested worker_pool keys unless nested-local tolerance is explicit', () => {
   assert.throws(
     () => validateSchema(
       { version: 1, worker_pool: { anything: true } },
@@ -2262,7 +2282,7 @@ test('validateSchema rejects allowlisted foreign top-level keys unless local-lay
   );
 });
 
-test('validateSchema keeps foreign top-level tolerance scoped to local YAML sources', () => {
+test('validateSchema foreign top-level tolerance does not make worker_pool foreign', () => {
   assert.throws(
     () => validateSchema(
       { version: 1, worker_pool: { anything: true } },
@@ -2277,25 +2297,26 @@ test('validateSchema keeps foreign top-level tolerance scoped to local YAML sour
   );
 });
 
-test('validateSchema can explicitly tolerate allowlisted foreign top-level keys for local files', () => {
+test('validateSchema tolerates unknown nested worker_pool keys in local files and keeps the mirrored one', () => {
   // config.local.yaml is shared by several loaders (CFG-01 python loader, this
-  // adversarial-review loader, ...). A top-level section owned by a DIFFERENT
-  // reader must be explicitly allowlisted before this loader ignores it.
-  const originalWarn = console.warn;
-  try {
-    const warnings = [];
-    console.warn = (msg) => warnings.push(String(msg));
-    const out = validateSchema(
-      { version: 1, worker_pool: { anything: true } },
-      { source: '/tmp/config.local.yaml', tolerateForeignTopLevelSections: true },
-    );
-    assert.equal(out.worker_pool, undefined, 'foreign top-level section is dropped, not thrown');
-    assert.equal(out.version, 1);
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /worker_pool/);
-  } finally {
-    console.warn = originalWarn;
-  }
+  // adversarial-review loader, ...). worker_pool is now a KNOWN partial root in
+  // this reader; its unknown nested keys (owned by the Python CFG reader) are
+  // tolerated-dropped per-key under tolerateNestedUnknownLocalKeys, while the
+  // mirrored deep_reconcile is validated and kept.
+  const out = validateSchema(
+    {
+      version: 1,
+      worker_pool: { anything: true, dag: { autowalk: { deep_reconcile: true } } },
+    },
+    {
+      source: '/tmp/config.local.yaml',
+      tolerateForeignTopLevelSections: true,
+      tolerateNestedUnknownLocalKeys: true,
+    },
+  );
+  assert.equal(out.version, 1);
+  assert.equal(out.worker_pool?.anything, undefined, 'unknown nested key dropped');
+  assert.equal(out.worker_pool?.dag?.autowalk?.deep_reconcile, true);
 });
 
 test('validateSchema rejects arbitrary unknown top-level keys as typos', () => {

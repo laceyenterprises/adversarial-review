@@ -14,6 +14,7 @@ import {
   reclaimIfStale,
   releaseMergeLease,
   removeMergeLeaseWaiter,
+  renewMergeLease,
   upsertMergeLeaseWaiter,
 } from '../src/ama/merge-lease.mjs';
 
@@ -92,6 +93,8 @@ test('FIFO waiter order is durable, visible, and honored before acquire', () => 
       ...IDENTITY,
       pr: 11,
       head: 'aaa',
+      holderPid: 5011,
+      holderHost: 'test-host',
       waiterId: 'w-later',
       arrivedAt: '2026-06-20T18:00:02Z',
       attempt: 1,
@@ -101,6 +104,8 @@ test('FIFO waiter order is durable, visible, and honored before acquire', () => 
       ...IDENTITY,
       pr: 10,
       head: 'bbb',
+      holderPid: 5010,
+      holderHost: 'test-host',
       waiterId: 'w-earlier',
       arrivedAt: '2026-06-20T18:00:01Z',
       attempt: 2,
@@ -121,6 +126,7 @@ test('FIFO waiter order is durable, visible, and honored before acquire', () => 
       waiterId: 'w-later',
       registerWaiter: true,
       now: '2026-06-20T18:00:03Z',
+      pidAliveFn: () => true,
     });
     assert.equal(blocked.acquired, false);
     assert.equal(blocked.waiters[0].waiterId, 'w-earlier');
@@ -131,6 +137,7 @@ test('FIFO waiter order is durable, visible, and honored before acquire', () => 
       waiterId: 'w-earlier',
       registerWaiter: true,
       now: '2026-06-20T18:00:04Z',
+      pidAliveFn: () => true,
     });
     assert.equal(acquired.acquired, true);
     assert.equal(acquired.lease.holderPr, 10);
@@ -138,6 +145,55 @@ test('FIFO waiter order is durable, visible, and honored before acquire', () => 
       readMergeLeaseWaiters(rootDir, IDENTITY).map((w) => w.waiterId),
       ['w-later'],
     );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('dead or expired FIFO waiters are pruned before head-of-queue acquire', () => {
+  const rootDir = freshRoot();
+  try {
+    upsertMergeLeaseWaiter({
+      rootDir,
+      ...IDENTITY,
+      pr: 20,
+      head: 'dead-head',
+      holderPid: 5020,
+      holderHost: 'test-host',
+      deadlineSeconds: 900,
+      waiterId: 'w-dead',
+      arrivedAt: '2026-06-20T18:00:01Z',
+    });
+    upsertMergeLeaseWaiter({
+      rootDir,
+      ...IDENTITY,
+      pr: 21,
+      head: 'expired-head',
+      holderPid: 5021,
+      holderHost: 'other-host',
+      deadlineSeconds: 10,
+      waiterId: 'w-expired',
+      arrivedAt: '2026-06-20T18:00:02Z',
+    });
+
+    const acquired = acquire(rootDir, {
+      holderPr: 22,
+      holderHead: 'next-head',
+      holderPid: 5022,
+      holderHost: 'test-host',
+      waiterId: 'w-next',
+      registerWaiter: true,
+      deadlineSeconds: 900,
+      now: '2026-06-20T18:01:00Z',
+      pidAliveFn: (pid) => pid !== 5020,
+    });
+
+    assert.equal(acquired.acquired, true);
+    assert.deepEqual(
+      acquired.prunedWaiters.map((w) => w.waiterId),
+      ['w-dead', 'w-expired'],
+    );
+    assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY), []);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -249,7 +305,7 @@ test('reclaimIfStale does not reclaim live within-deadline holder', () => {
   }
 });
 
-test('reclaimIfStale reclaims a past-deadline holder without killing processes', () => {
+test('reclaimIfStale does not reclaim a live same-host past-deadline holder', () => {
   const rootDir = freshRoot();
   try {
     acquire(rootDir, {
@@ -265,9 +321,69 @@ test('reclaimIfStale reclaims a past-deadline holder without killing processes',
       now: '2026-06-20T18:00:11Z',
       pidAliveFn: () => true,
     });
+    assert.equal(result.reclaimed, false);
+    assert.equal(result.reason, 'live-within-deadline');
+    assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).exists, true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reclaimIfStale can reclaim a past-deadline cross-host holder', () => {
+  const rootDir = freshRoot();
+  try {
+    acquire(rootDir, {
+      holderPid: 99996,
+      holderHost: 'other-host',
+      deadlineSeconds: 10,
+      now: '2026-06-20T18:00:00Z',
+    });
+    const result = reclaimIfStale({
+      rootDir,
+      ...IDENTITY,
+      host: 'test-host',
+      now: '2026-06-20T18:00:11Z',
+      pidAliveFn: () => true,
+    });
     assert.equal(result.reclaimed, true);
     assert.equal(result.reason, 'past-deadline');
     assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).exists, false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('renewMergeLease extends a holder-fenced deadline', () => {
+  const rootDir = freshRoot();
+  try {
+    const acquired = acquire(rootDir, {
+      holderPid: 99995,
+      holderHost: 'test-host',
+      deadlineSeconds: 10,
+      now: '2026-06-20T18:00:00Z',
+    });
+    const renewed = renewMergeLease({
+      rootDir,
+      ...IDENTITY,
+      leaseId: acquired.lease.leaseId,
+      holderPr: acquired.lease.holderPr,
+      holderHead: acquired.lease.holderHead,
+      acquiredAt: acquired.lease.acquiredAt,
+      now: '2026-06-20T18:00:09Z',
+    });
+    assert.equal(renewed.renewed, true);
+    assert.equal(renewed.lease.acquiredAt, '2026-06-20T18:00:09Z');
+
+    const result = reclaimIfStale({
+      rootDir,
+      ...IDENTITY,
+      host: 'other-host',
+      now: '2026-06-20T18:00:18Z',
+      pidAliveFn: () => false,
+    });
+    assert.equal(result.reclaimed, false);
+    assert.equal(result.reason, 'live-within-deadline');
+    assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).exists, true);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -289,6 +405,8 @@ test('inspectMergeLease returns stored holder, age, deadline, and waiters', () =
       ...IDENTITY,
       pr: 405,
       head: 'wait-head',
+      holderPid: 7405,
+      holderHost: 'test-host',
       waiterId: 'w-inspect',
       arrivedAt: '2026-06-20T18:00:05Z',
     });
@@ -310,6 +428,18 @@ test('inspectMergeLease returns stored holder, age, deadline, and waiters', () =
     assert.equal(status.waiters[0].waiterId, 'w-inspect');
     removeMergeLeaseWaiter({ rootDir, ...IDENTITY, waiterId: 'w-inspect' });
     assert.deepEqual(readMergeLeaseWaiters(rootDir, IDENTITY), []);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('holder identity validation rejects null empty and non-positive numeric values', () => {
+  const rootDir = freshRoot();
+  try {
+    assert.throws(() => acquire(rootDir, { holderPid: 0 }), /holderPid must be a positive integer/);
+    assert.throws(() => acquire(rootDir, { holderPid: '' }), /holderPid must be a positive integer/);
+    assert.throws(() => acquire(rootDir, { holderPr: null }), /holderPr must be a positive integer/);
+    assert.throws(() => acquire(rootDir, { holderPr: false }), /holderPr must be a positive integer/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

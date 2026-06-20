@@ -86,17 +86,25 @@ function validateIdentity({ rootDir, repo, base } = {}) {
 }
 
 function normalizeHolderPr(value, fieldName = 'holderPr') {
-  if (!Number.isFinite(Number(value))) {
-    throw new Error(`merge lease: ${fieldName} must be numeric`);
+  if (value == null || value === '' || typeof value === 'boolean') {
+    throw new Error(`merge lease: ${fieldName} must be a positive integer`);
   }
-  return Number(value);
+  const n = Number(value);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`merge lease: ${fieldName} must be a positive integer`);
+  }
+  return n;
 }
 
 function normalizeHolderPid(value) {
-  if (!Number.isFinite(Number(value))) {
-    throw new Error('merge lease: holderPid must be numeric');
+  if (value == null || value === '' || typeof value === 'boolean') {
+    throw new Error('merge lease: holderPid must be a positive integer');
   }
-  return Number(value);
+  const n = Number(value);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error('merge lease: holderPid must be a positive integer');
+  }
+  return n;
 }
 
 function sortWaiters(waiters) {
@@ -126,6 +134,42 @@ function readWaiterDoc(filePath) {
     updatedAt: doc.updatedAt || null,
     waiters: sortWaiters(Array.isArray(doc.waiters) ? doc.waiters : []),
   };
+}
+
+function waiterExpired(waiter, nowIso) {
+  const ageSeconds = ageSecondsFrom(waiter.arrivedAt, nowIso);
+  if (ageSeconds === null) return false;
+  const deadlineSeconds = parseDeadlineSeconds(waiter.deadlineSeconds);
+  return ageSeconds >= deadlineSeconds;
+}
+
+function waiterProcessDead(waiter, host, pidAliveFn) {
+  if (!waiter.holderHost || waiter.holderHost !== host) return false;
+  const pid = Number(waiter.holderPid);
+  return Number.isInteger(pid) && pid > 0 && !pidAliveFn(pid);
+}
+
+function pruneMergeLeaseWaiters({ rootDir, repo, base, now, host, pidAliveFn }) {
+  const waitersPath = mergeLeaseWaitersFilePath(rootDir, { repo, base });
+  const doc = readWaiterDoc(waitersPath);
+  if (doc.waiters.length === 0) return { pruned: [], waiters: [] };
+  const currentHost = host || hostname();
+  const updatedAt = now || isoNow();
+  const waiters = [];
+  const pruned = [];
+  for (const waiter of doc.waiters) {
+    const expired = waiterExpired(waiter, updatedAt);
+    const dead = waiterProcessDead(waiter, currentHost, pidAliveFn);
+    if (expired || dead) {
+      pruned.push({ ...waiter, staleReason: dead ? 'dead-waiter-pid' : 'expired-waiter' });
+    } else {
+      waiters.push(waiter);
+    }
+  }
+  if (pruned.length > 0) {
+    writeJsonFile(waitersPath, waiterFileDoc(waiters, updatedAt));
+  }
+  return { pruned, waiters: sortWaiters(waiters) };
 }
 
 function holderMatches(lease, fence = {}) {
@@ -179,6 +223,9 @@ export function upsertMergeLeaseWaiter({
   base,
   pr,
   head,
+  holderPid,
+  holderHost,
+  deadlineSeconds,
   waiterId = `mw_${randomUUID()}`,
   arrivedAt,
   updatedAt,
@@ -198,6 +245,9 @@ export function upsertMergeLeaseWaiter({
     arrivedAt: existing?.arrivedAt || arrivedAt || now,
     updatedAt: now,
     attempt: Number.isFinite(Number(attempt)) ? Number(attempt) : 1,
+    holderPid: normalizeHolderPid(holderPid),
+    holderHost: holderHost || hostname(),
+    deadlineSeconds: parseDeadlineSeconds(deadlineSeconds ?? process.env.AMG_LEASE_DEADLINE_SECONDS),
   };
   const waiters = doc.waiters.filter((w) => w.waiterId !== waiterId);
   waiters.push(nextWaiter);
@@ -275,6 +325,7 @@ export function acquireMergeLease({
   waiterId,
   registerWaiter = false,
   attempt = 1,
+  pidAliveFn = pidIsLive,
 } = {}) {
   validateIdentity({ rootDir, repo, base });
   const leasePath = mergeLeaseFilePath(rootDir, { repo, base });
@@ -292,6 +343,9 @@ export function acquireMergeLease({
       arrivedAt: acquiredAt,
       updatedAt: acquiredAt,
       attempt,
+      holderPid,
+      holderHost,
+      deadlineSeconds,
     });
     waiter = registered.waiter;
   }
@@ -301,13 +355,21 @@ export function acquireMergeLease({
     return { acquired: false, leasePath, lease: existingLease, existingLease, waiter };
   }
 
-  const waiters = readMergeLeaseWaiters(rootDir, { repo, base });
+  const waiterState = pruneMergeLeaseWaiters({
+    rootDir,
+    repo,
+    base,
+    now: acquiredAt,
+    host: holderHost,
+    pidAliveFn,
+  });
+  const waiters = waiterState.waiters;
   if (waiters.length > 0) {
     if (!waiter?.waiterId) {
-      return { acquired: false, leasePath, lease: null, existingLease: null, waiters };
+      return { acquired: false, leasePath, lease: null, existingLease: null, waiters, prunedWaiters: waiterState.pruned };
     }
     if (waiters[0]?.waiterId !== waiter.waiterId) {
-      return { acquired: false, leasePath, lease: null, existingLease: null, waiter, waiters };
+      return { acquired: false, leasePath, lease: null, existingLease: null, waiter, waiters, prunedWaiters: waiterState.pruned };
     }
   }
 
@@ -342,7 +404,7 @@ export function acquireMergeLease({
   if (waiter?.waiterId) {
     removeMergeLeaseWaiter({ rootDir, repo, base, waiterId: waiter.waiterId, updatedAt: acquiredAt });
   }
-  return { acquired: true, leasePath, lease, waiter };
+  return { acquired: true, leasePath, lease, waiter, prunedWaiters: waiterState.pruned };
 }
 
 export function releaseMergeLease({
@@ -365,6 +427,34 @@ export function releaseMergeLease({
   return { released: true, leasePath, lease };
 }
 
+export function renewMergeLease({
+  rootDir,
+  repo,
+  base,
+  leaseId: id,
+  holderPr,
+  holderHead,
+  acquiredAt,
+  now,
+} = {}) {
+  validateIdentity({ rootDir, repo, base });
+  const leasePath = mergeLeaseFilePath(rootDir, { repo, base });
+  const lease = readJsonFile(leasePath, null);
+  const matched = holderMatches(lease, { leaseId: id, holderPr, holderHead, acquiredAt });
+  if (!matched) {
+    return { renewed: false, leasePath, existingLease: lease };
+  }
+  const renewedAt = now || isoNow();
+  const renewed = {
+    ...lease,
+    acquiredAt: renewedAt,
+    updatedAt: renewedAt,
+    previousAcquiredAt: lease.acquiredAt,
+  };
+  writeJsonFile(leasePath, renewed);
+  return { renewed: true, leasePath, lease: renewed, previousLease: lease };
+}
+
 export function reclaimIfStale({
   rootDir,
   repo,
@@ -382,7 +472,8 @@ export function reclaimIfStale({
   const sameHost = lease.holderHost === (host || hostname());
   const deadSameHostPid = sameHost && !pidAliveFn(lease.holderPid);
   const staleByDeadline = inspection.pastDeadline;
-  if (!deadSameHostPid && !staleByDeadline) {
+  const reclaimByDeadline = staleByDeadline && !sameHost;
+  if (!deadSameHostPid && !reclaimByDeadline) {
     return { reclaimed: false, reason: 'live-within-deadline', inspection };
   }
 

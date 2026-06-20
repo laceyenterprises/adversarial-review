@@ -5,6 +5,46 @@ The full project spec lives in the parent Agent OS repository at this same path;
 this local mirror records the config surface that the Node loader, closer
 dispatch, and operator runbooks in this repo must keep aligned.
 
+## AMG-01 merge lease
+
+AMA serializes local merge execution through a durable file lease keyed by
+`(repo, base)`, where the canonical key is `<owner>/<repo>::<base>`. The holder
+file lives under `data/merge-leases/` with a sanitized slug derived from that key,
+and the sibling `.waiters.json` file records FIFO contenders for the same base.
+
+Only one holder may acquire a lease for a key. Acquisition writes the holder file
+with the repo, base, generated `leaseId`, PR number, head SHA, process id, host,
+optional process group, acquisition timestamp, deadline, and update timestamp.
+The write must use the repo's atomic temp-file plus hard-link discipline with
+`overwrite:false`; a contender that loses the link race must observe the existing
+holder and return without merging.
+
+Holder release and renewal are fenced by the stored holder identity:
+`leaseId`, PR number, head SHA, and the current `acquiredAt` timestamp. A holder
+may renew by rewriting `acquiredAt` and `updatedAt` under that fence, which
+extends the deadline for legitimate long-running merge work. A stale holder
+release or renewal whose fence no longer matches must not delete or update a
+newer holder.
+
+Reclaim is allowed only when the holder can no longer be trusted to serialize
+the merge lane:
+
+- Same-host holders may be reclaimed when their stored process id is no longer
+  live.
+- Same-host holders must not be reclaimed solely because the deadline has passed
+  while the stored process id is still live; live long-running merges are
+  expected to renew the lease instead.
+- Cross-host holders may be reclaimed after the deadline because local PID
+  liveness is unknowable.
+
+FIFO waiters are advisory ordering state, not merge authority. Each waiter entry
+records the repo, base, PR number, head SHA, waiter id, owning process id, owning
+host, arrival timestamp, update timestamp, attempt number, and deadline. Before
+the head-of-queue check, acquisition must prune abandoned waiters whose same-host
+process is dead or whose arrival timestamp is older than its deadline. A dead or
+expired waiter must not permanently block later contenders for that `(repo, base)`
+lane.
+
 ## 1.1.1 HAM terminal-remediation mode
 
 HAM terminal remediation is a bounded final-review closer path for the

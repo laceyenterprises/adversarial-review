@@ -442,9 +442,11 @@ test('github-pr subject adapter falls back to gh diff when optional adapter diff
 
 test('github-pr subject adapter uses optional GitHub adapter when present without Octokit', async () => {
   const calls = [];
+  const telemetry = [];
   const adapter = createGitHubPRSubjectAdapter({
     repos: [fixture.repo],
     env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    recordApiCall: (entry) => telemetry.push(entry),
     execFileImpl: async (command, args) => {
       calls.push({ command, args: [...args] });
       assert.equal(command, '/fixture/github-adapter');
@@ -488,6 +490,28 @@ test('github-pr subject adapter uses optional GitHub adapter when present withou
   assert.deepEqual(calls.map((call) => call.args[call.args.indexOf('--kind') + 1]), [
     'open-pull-requests',
     'pull-request-diff',
+  ]);
+  assert.deepEqual(telemetry.map((entry) => ({
+    category: entry.category,
+    repo: entry.repo,
+    prNumber: entry.prNumber ?? null,
+    status: entry.status,
+    transport: entry.extra?.transport,
+  })), [
+    {
+      category: 'pr_view',
+      repo: fixture.repo,
+      prNumber: null,
+      status: 200,
+      transport: 'github-adapter',
+    },
+    {
+      category: 'diff_fetch',
+      repo: fixture.repo,
+      prNumber: 484,
+      status: 200,
+      transport: 'github-adapter',
+    },
   ]);
 });
 

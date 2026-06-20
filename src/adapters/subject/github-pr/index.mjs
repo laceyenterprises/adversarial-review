@@ -169,6 +169,7 @@ function resolveSubjectCacheTtlMs(env = process.env) {
 }
 
 function telemetryStatusFromResult(result) {
+  if (result === null || result === undefined) return 204;
   if (Number.isFinite(Number(result?.status))) return Math.trunc(Number(result.status));
   return 200;
 }
@@ -209,7 +210,7 @@ function createGitHubPRSubjectAdapter({
     return cached;
   }
 
-  async function withApiTelemetry(category, { repo = null, prNumber = null } = {}, action) {
+  async function withApiTelemetry(category, { repo = null, prNumber = null, extra = null } = {}, action) {
     const startedAt = monotonicNowMs();
     try {
       await awaitThrottleIfNeeded();
@@ -221,6 +222,7 @@ function createGitHubPRSubjectAdapter({
         prNumber,
         status: telemetryStatusFromResult(result),
         durationMs: monotonicNowMs() - startedAt,
+        ...(extra ? { extra } : {}),
       });
       return result;
     } catch (err) {
@@ -231,6 +233,7 @@ function createGitHubPRSubjectAdapter({
         prNumber,
         status: apiStatusFromError(err),
         durationMs: monotonicNowMs() - startedAt,
+        ...(extra ? { extra } : {}),
       });
       throw err;
     }
@@ -241,7 +244,11 @@ function createGitHubPRSubjectAdapter({
     const cached = getFreshCache(ref.subjectExternalId);
     if (cached) return cached;
     try {
-      const adapterPr = await readAdapterPullRequest(repo, prNumber, { execFileImpl, rootDir, env });
+      const adapterPr = await withApiTelemetry('pr_view', {
+        repo,
+        prNumber,
+        extra: { transport: 'github-adapter' },
+      }, () => readAdapterPullRequest(repo, prNumber, { execFileImpl, rootDir, env }));
       if (adapterPr) {
         const snapshot = normalizePRSnapshot(repo, adapterPr);
         setCache(snapshot);
@@ -271,7 +278,10 @@ function createGitHubPRSubjectAdapter({
         const { owner, repo } = splitRepo(repoPath);
         let adapterPulls = null;
         try {
-          adapterPulls = await readAdapterOpenPullRequests(repoPath, { execFileImpl, rootDir, env });
+          adapterPulls = await withApiTelemetry('pr_view', {
+            repo: repoPath,
+            extra: { transport: 'github-adapter' },
+          }, () => readAdapterOpenPullRequests(repoPath, { execFileImpl, rootDir, env }));
         } catch {
           adapterPulls = null;
         }
@@ -318,45 +328,33 @@ function createGitHubPRSubjectAdapter({
 
     async fetchContent(ref) {
       const snapshot = await fetchPRSnapshot(ref);
-      const startedAt = monotonicNowMs();
       let stdout;
+      let adapterDiff = null;
       try {
-        let adapterDiff = null;
-        try {
-          adapterDiff = await readAdapterPullRequestDiff(snapshot.repo, snapshot.prNumber, { execFileImpl, rootDir, env });
-        } catch {
-          // The common adapter is optional during rollout; fall back to gh.
-          adapterDiff = null;
-        }
-        if (adapterDiff !== null) {
-          stdout = adapterDiff;
-        } else {
-          ({ stdout } = await execFileImpl('gh', [
-            'pr',
-            'diff',
-            String(snapshot.prNumber),
-            '--repo',
-            snapshot.repo,
-          ], {
-            maxBuffer: 10 * 1024 * 1024,
-          }));
-        }
-        recordApiCall?.({
-          category: 'diff_fetch',
+        adapterDiff = await withApiTelemetry('diff_fetch', {
           repo: snapshot.repo,
           prNumber: snapshot.prNumber,
-          status: 200,
-          durationMs: monotonicNowMs() - startedAt,
-        });
-      } catch (err) {
-        recordApiCall?.({
-          category: 'diff_fetch',
+          extra: { transport: 'github-adapter' },
+        }, () => readAdapterPullRequestDiff(snapshot.repo, snapshot.prNumber, { execFileImpl, rootDir, env }));
+      } catch {
+        // The common adapter is optional during rollout; fall back to gh.
+        adapterDiff = null;
+      }
+      if (adapterDiff !== null) {
+        stdout = adapterDiff;
+      } else {
+        ({ stdout } = await withApiTelemetry('diff_fetch', {
           repo: snapshot.repo,
           prNumber: snapshot.prNumber,
-          status: apiStatusFromError(err),
-          durationMs: monotonicNowMs() - startedAt,
-        });
-        throw err;
+        }, () => execFileImpl('gh', [
+          'pr',
+          'diff',
+          String(snapshot.prNumber),
+          '--repo',
+          snapshot.repo,
+        ], {
+          maxBuffer: 10 * 1024 * 1024,
+        })));
       }
       return {
         ref: {

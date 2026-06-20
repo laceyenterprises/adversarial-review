@@ -1,5 +1,5 @@
-import { existsSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ADAPTER_MAX_BUFFER = 25 * 1024 * 1024;
@@ -36,28 +36,78 @@ function trustedAutoDiscoveryRoots(rootDir = repoRootFromHere()) {
 function isPathWithin(childPath, parentPath) {
   const child = resolve(childPath);
   const parent = resolve(parentPath);
-  return child === parent || child.startsWith(`${parent}/`);
+  const rel = relative(parent, child);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function realpathOrNull(candidate, realpathImpl) {
+  try {
+    return resolve(realpathImpl(candidate));
+  } catch {
+    return null;
+  }
+}
+
+function isTrustedOwner(uid) {
+  const currentUid = typeof process.getuid === 'function' ? process.getuid() : null;
+  return currentUid === null || [currentUid, 0].includes(uid);
+}
+
+function isTrustedDirectoryChain(startDir, trustedRoot, { statImpl }) {
+  const root = resolve(trustedRoot);
+  let current = resolve(startDir);
+  for (;;) {
+    if (!isPathWithin(current, root)) return false;
+    let stats;
+    try {
+      stats = statImpl(current);
+    } catch {
+      return false;
+    }
+    if (!stats?.isDirectory?.()) return false;
+    if ((stats.mode & 0o022) !== 0) return false;
+    if (!isTrustedOwner(stats.uid)) return false;
+    if (current === root) return true;
+    const parent = dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
 }
 
 function isTrustedAutoDiscoveredAdapterBin(candidate, {
   rootDir = repoRootFromHere(),
   statImpl = statSync,
+  lstatImpl = lstatSync,
+  realpathImpl = realpathSync,
 } = {}) {
   const resolved = resolve(candidate);
-  if (!trustedAutoDiscoveryRoots(rootDir).some((root) => isPathWithin(resolved, root))) {
+  let linkStats;
+  try {
+    linkStats = lstatImpl(resolved);
+  } catch {
     return false;
   }
+  if (linkStats?.isSymbolicLink?.()) return false;
+  if (!linkStats?.isFile?.()) return false;
+  const realCandidate = realpathOrNull(resolved, realpathImpl);
+  if (!realCandidate) return false;
+  const trustedRoot = trustedAutoDiscoveryRoots(rootDir)
+    .map((root) => realpathOrNull(root, realpathImpl))
+    .filter(Boolean)
+    .find((root) => isPathWithin(realCandidate, root));
+  if (!trustedRoot) return false;
+  if (!isTrustedDirectoryChain(dirname(realCandidate), trustedRoot, { statImpl })) return false;
+
   let stats;
   try {
-    stats = statImpl(resolved);
+    stats = statImpl(realCandidate);
   } catch {
     return false;
   }
   if (!stats?.isFile?.()) return false;
   if ((stats.mode & 0o111) === 0) return false;
   if ((stats.mode & 0o022) !== 0) return false;
-  const currentUid = typeof process.getuid === 'function' ? process.getuid() : null;
-  if (currentUid !== null && ![currentUid, 0].includes(stats.uid)) return false;
+  if (!isTrustedOwner(stats.uid)) return false;
   return true;
 }
 
@@ -66,11 +116,18 @@ function resolveGitHubAdapterBin({
   rootDir = repoRootFromHere(),
   existsImpl = existsSync,
   statImpl = statSync,
+  lstatImpl = lstatSync,
+  realpathImpl = realpathSync,
 } = {}) {
   const explicit = firstNonEmpty(env.GHA_ADAPTER_BIN, env.AGENT_OS_GITHUB_ADAPTER_BIN);
   if (explicit) return explicit;
   for (const candidate of candidateSuperprojectAdapterPaths(rootDir)) {
-    if (existsImpl(candidate) && isTrustedAutoDiscoveredAdapterBin(candidate, { rootDir, statImpl })) {
+    if (existsImpl(candidate) && isTrustedAutoDiscoveredAdapterBin(candidate, {
+      rootDir,
+      statImpl,
+      lstatImpl,
+      realpathImpl,
+    })) {
       return candidate;
     }
   }

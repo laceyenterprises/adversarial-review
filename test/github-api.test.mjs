@@ -657,10 +657,11 @@ test('adapter-present rollup path returns the normalized PR rollup shape without
   const expected = makeExpectedRollup();
   const mod = await importGithubApiFresh();
   const calls = [];
+  const telemetry = makeTelemetrySink();
 
   const result = await mod.fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
     env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
-    recordApiCallImpl: () => {},
+    recordApiCallImpl: telemetry.recordApiCallImpl,
     execFileImpl: async (command, args) => {
       calls.push({ command, args: [...args] });
       assert.equal(command, '/fixture/github-adapter');
@@ -680,6 +681,10 @@ test('adapter-present rollup path returns the normalized PR rollup shape without
   assert.deepEqual(result, expected);
 
   assert.equal(calls.length, 1);
+  assert.equal(telemetry.events.length, 1);
+  assert.equal(telemetry.events[0].category, 'graphql_pr_rollup');
+  assert.equal(telemetry.events[0].status, 200);
+  assert.deepEqual(telemetry.events[0].extra, { transport: 'github-adapter' });
 });
 
 test('github adapter auto-discovery reaches the superproject path and ignores unsafe binaries', async () => {
@@ -701,15 +706,29 @@ test('github adapter auto-discovery reaches the superproject path and ignores un
 
   const safeStat = {
     isFile: () => true,
+    isDirectory: () => false,
+    isSymbolicLink: () => false,
     mode: 0o755,
     uid: typeof process.getuid === 'function' ? process.getuid() : 0,
   };
+  const safeDirStat = {
+    isFile: () => false,
+    isDirectory: () => true,
+    isSymbolicLink: () => false,
+    mode: 0o755,
+    uid: safeStat.uid,
+  };
+  const safeStatFor = (candidate) => (
+    path.resolve(candidate) === superprojectCandidate ? safeStat : safeDirStat
+  );
   assert.equal(
     __test__.resolveGitHubAdapterBin({
       env: {},
       rootDir,
       existsImpl: (candidate) => candidate === superprojectCandidate,
-      statImpl: () => safeStat,
+      statImpl: safeStatFor,
+      lstatImpl: () => safeStat,
+      realpathImpl: (candidate) => candidate,
     }),
     superprojectCandidate,
   );
@@ -718,14 +737,56 @@ test('github adapter auto-discovery reaches the superproject path and ignores un
       env: {},
       rootDir,
       existsImpl: (candidate) => candidate === superprojectCandidate,
-      statImpl: () => ({ ...safeStat, mode: 0o777 }),
+      statImpl: (candidate) => (
+        path.resolve(candidate) === superprojectCandidate
+          ? { ...safeStat, mode: 0o777 }
+          : safeDirStat
+      ),
+      lstatImpl: () => safeStat,
+      realpathImpl: (candidate) => candidate,
     }),
     null,
   );
   assert.equal(
     __test__.isTrustedAutoDiscoveredAdapterBin('/tmp/github-adapter', {
       rootDir,
-      statImpl: () => safeStat,
+      statImpl: safeStatFor,
+      lstatImpl: () => safeStat,
+      realpathImpl: (candidate) => candidate,
+    }),
+    false,
+  );
+  assert.equal(
+    __test__.isTrustedAutoDiscoveredAdapterBin(superprojectCandidate, {
+      rootDir,
+      statImpl: safeStatFor,
+      lstatImpl: () => ({ ...safeStat, isSymbolicLink: () => true }),
+      realpathImpl: (candidate) => candidate,
+    }),
+    false,
+  );
+  assert.equal(
+    __test__.isTrustedAutoDiscoveredAdapterBin(superprojectCandidate, {
+      rootDir,
+      statImpl: (candidate) => {
+        if (String(candidate).endsWith('/bin')) return { ...safeDirStat, mode: 0o775 };
+        return safeStatFor(candidate);
+      },
+      lstatImpl: () => safeStat,
+      realpathImpl: (candidate) => candidate,
+    }),
+    false,
+  );
+  assert.equal(
+    __test__.isTrustedAutoDiscoveredAdapterBin(superprojectCandidate, {
+      rootDir,
+      statImpl: safeStatFor,
+      lstatImpl: () => safeStat,
+      realpathImpl: (candidate) => (
+        path.resolve(candidate) === superprojectCandidate
+          ? '/tmp/outside/github-adapter'
+          : candidate
+      ),
     }),
     false,
   );
@@ -760,6 +821,39 @@ test('malformed adapter rollup output falls back to the legacy implementation', 
       execFileImpl: async (command, args, options) => {
         calls.push({ command, args: [...args] });
         if (command === '/fixture/github-adapter') return { stdout: '{not json' };
+        return legacyExec.execFileImpl(command, args, options);
+      },
+    });
+    assert.deepEqual(result, expected);
+  });
+
+  assert.equal(calls[0].command, '/fixture/github-adapter');
+  assert.equal(legacyExec.calls.length > 0, true);
+});
+
+test('adapter rollup missing mergeability falls back to the legacy implementation', async () => {
+  const expected = makeExpectedRollup();
+  const mod = await importGithubApiFresh();
+  const legacyExec = makeLegacyExecStub(expected);
+  const calls = [];
+
+  await withEnv({ GHO_DISABLE_GRAPHQL_ROLLUP: '1' }, async () => {
+    const result = await mod.fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+      env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+      recordApiCallImpl: () => {},
+      execFileImpl: async (command, args, options) => {
+        calls.push({ command, args: [...args] });
+        if (command === '/fixture/github-adapter') {
+          return {
+            stdout: JSON.stringify({
+              rollup: {
+                ...expected,
+                mergeable: null,
+                mergeStateStatus: null,
+              },
+            }),
+          };
+        }
         return legacyExec.execFileImpl(command, args, options);
       },
     });
@@ -834,6 +928,7 @@ test('adapter-present review bodies path preserves fail-closed authoritative bod
     {
       authoritativeReviewerLogins: ['codex-reviewer-lacey'],
       env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+      recordApiCallImpl: () => {},
     },
   );
   assert.deepEqual(bodies, ['## Verdict\nApproved']);
@@ -874,6 +969,7 @@ test('adapter-present review bodies path drops spoofed authors with local allowl
     {
       authoritativeReviewerLogins: ['codex-reviewer-lacey'],
       env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+      recordApiCallImpl: () => {},
     },
   );
   assert.deepEqual(bodies, ['## Verdict\nRequest changes']);
@@ -910,6 +1006,7 @@ test('adapter-present review bodies path falls back when allowlisted payload lac
     {
       authoritativeReviewerLogins: ['codex-reviewer-lacey'],
       env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+      recordApiCallImpl: () => {},
     },
   );
 
@@ -954,6 +1051,7 @@ test('adapter-present string review bodies without allowlist fall back to legacy
     headSha,
     {
       env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+      recordApiCallImpl: () => {},
     },
   );
 

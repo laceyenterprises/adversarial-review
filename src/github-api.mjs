@@ -552,6 +552,12 @@ function normalizeAdapterRollup(payload) {
   if (!normalized.headRefOid) {
     throw new Error('GitHub adapter rollup payload missing headRefOid');
   }
+  if (!normalized.mergeable) {
+    throw new Error('GitHub adapter rollup payload missing mergeable');
+  }
+  if (!normalized.mergeStateStatus) {
+    throw new Error('GitHub adapter rollup payload missing mergeStateStatus');
+  }
   return normalized;
 }
 
@@ -762,6 +768,39 @@ async function runGraphqlWithTelemetry(execFileImpl, query, variables, {
   }
 }
 
+async function runAdapterReadWithTelemetry(category, {
+  repo,
+  prNumber,
+  recordApiCallImpl,
+}, action) {
+  const startedAt = Date.now();
+  try {
+    await awaitThrottleIfNeeded('core');
+    const result = await action();
+    if (result !== null && result !== undefined) {
+      recordApiCallImpl?.({
+        category,
+        repo,
+        prNumber,
+        status: 200,
+        durationMs: Date.now() - startedAt,
+        extra: { transport: 'github-adapter' },
+      });
+    }
+    return result;
+  } catch (err) {
+    recordApiCallImpl?.({
+      category,
+      repo,
+      prNumber,
+      status: apiStatusFromError(err),
+      durationMs: Date.now() - startedAt,
+      extra: { transport: 'github-adapter' },
+    });
+    throw err;
+  }
+}
+
 async function paginateRest(execFileImpl, basePath, mapPage) {
   const rows = [];
   for (let page = 1; ; page += 1) {
@@ -853,6 +892,7 @@ async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
   authoritativeReviewerLogins = null,
   authoritativeReviewerLogin = null,
   env = process.env,
+  recordApiCallImpl = recordApiCall,
 } = {}) {
   if (!headSha) return [];
   // Accept reviews from ANY login in the trusted reviewer-bot set (anti-spoof).
@@ -885,11 +925,15 @@ async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
   };
   const sortNewestSubmittedFirst = (a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt));
   try {
-    const adapterReviews = await readAdapterReviewBodiesForHead(repo, normalizedPrNumber, headSha, {
+    const adapterReviews = await runAdapterReadWithTelemetry('reviews_list', {
+      repo,
+      prNumber: normalizedPrNumber,
+      recordApiCallImpl,
+    }, () => readAdapterReviewBodiesForHead(repo, normalizedPrNumber, headSha, {
       execFileImpl,
       env,
       reviewerLogins: loginList,
-    });
+    }));
     if (adapterReviews) {
       const allAdapterReviewsVerifiable = adapterReviews.every((review) => (
         review && typeof review === 'object' && !Array.isArray(review)
@@ -1506,7 +1550,11 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
   const { owner, repo: repoName } = splitRepo(repo);
   const normalizedPrNumber = normalizePrNumber(prNumber);
   try {
-    const adapterResult = await readAdapterHeadAndState(repo, normalizedPrNumber, { execFileImpl, withLabels, env });
+    const adapterResult = await runAdapterReadWithTelemetry('pr_head_state', {
+      repo,
+      prNumber: normalizedPrNumber,
+      recordApiCallImpl,
+    }, () => readAdapterHeadAndState(repo, normalizedPrNumber, { execFileImpl, withLabels, env }));
     if (adapterResult) {
       return normalizeAdapterHeadAndState(adapterResult, { withLabels });
     }
@@ -1576,7 +1624,11 @@ async function fetchPullRequestRollup(repo, prNumber, {
 } = {}) {
   const normalizedPrNumber = normalizePrNumber(prNumber);
   try {
-    const adapterResult = await readAdapterPrRollup(repo, normalizedPrNumber, { execFileImpl, env });
+    const adapterResult = await runAdapterReadWithTelemetry('graphql_pr_rollup', {
+      repo,
+      prNumber: normalizedPrNumber,
+      recordApiCallImpl,
+    }, () => readAdapterPrRollup(repo, normalizedPrNumber, { execFileImpl, env }));
     if (adapterResult) {
       return normalizeAdapterRollup(adapterResult);
     }
@@ -1617,7 +1669,11 @@ async function fetchPullRequestReviewContext(repo, prNumber, {
 } = {}) {
   const normalizedPrNumber = normalizePrNumber(prNumber);
   try {
-    const adapterResult = await readAdapterReviewContext(repo, normalizedPrNumber, { execFileImpl, env });
+    const adapterResult = await runAdapterReadWithTelemetry('pr_review_context', {
+      repo,
+      prNumber: normalizedPrNumber,
+      recordApiCallImpl,
+    }, () => readAdapterReviewContext(repo, normalizedPrNumber, { execFileImpl, env }));
     if (adapterResult) {
       return normalizeAdapterRollup({
         ...adapterResult,
@@ -1691,6 +1747,7 @@ const __test__ = {
   normalizeReview,
   normalizeRollup,
   parseGhApiHttpEnvelope,
+  runAdapterReadWithTelemetry,
   runGraphql,
   splitRepo,
   isGraphqlComplexityError,

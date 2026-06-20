@@ -70,6 +70,18 @@ directly on top of the reviewed head. The mode does not request another review
 round; instead, `ama-check --ham-terminal-remediation <claim.json>` validates
 the post-remediation head immediately before merge.
 
+The HAM remediation scope includes keeping canonical docs current for the
+change it lands. If the remediation diff changes a persistent store shape and
+the repository carries `docs/data-model/`, HAM must update the matching
+`docs/data-model/NN-*.md` domain doc and `docs/data-model/catalog.json`, then
+run `node scripts/validate-data-model-catalog.mjs`; a failing catalog validator
+is treated as a red check. If the diff changes a module's public interface,
+dispatch flow, or operational contract and that module has
+`modules/<name>/<name>-walkthrough.md`, HAM must update that walkthrough. Repos
+without these documentation surfaces, including submodules whose superproject
+owns the docs, are exempt, but the HAM audit comment must record any skipped
+superproject-doc obligation.
+
 The evidence JSON is a claim, not authority. At closer runtime the predicate
 must verify that claim against durable GitHub state:
 
@@ -84,6 +96,9 @@ must verify that claim against durable GitHub state:
   allowlisted hammer bot identity, and the eligibility trace records the
   comment `author`, `createdAt`, and `id`;
 - the audit comment body names each claimed finding title and changed file;
+- the audit comment reports any doc-currency remediation performed, and any
+  skipped superproject-doc obligation when the touched schema/module docs live
+  outside the PR repository;
 - each claimed finding has `addressed: true`; and
 - the claimed blocking-finding count matches the blocking-finding count from
   the authoritative final review state.

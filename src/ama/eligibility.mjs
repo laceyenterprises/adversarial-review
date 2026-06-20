@@ -582,6 +582,76 @@ function hamAuditBodyCoversFindings(body, findings) {
   return true;
 }
 
+function normalizePathList(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+}
+
+function samePathSet(left, right) {
+  const leftSet = new Set(normalizePathList(left));
+  const rightSet = new Set(normalizePathList(right));
+  if (leftSet.size !== rightSet.size) return false;
+  for (const item of leftSet) {
+    if (!rightSet.has(item)) return false;
+  }
+  return true;
+}
+
+function pathSetIncludesAll(haystack, needles) {
+  const haystackSet = new Set(normalizePathList(haystack));
+  const normalizedNeedles = normalizePathList(needles);
+  if (normalizedNeedles.length === 0) return false;
+  return normalizedNeedles.every((path) => haystackSet.has(path));
+}
+
+function bodyMentionsEveryPath(body, paths) {
+  const text = String(body || '').toLowerCase();
+  const normalized = normalizePathList(paths);
+  if (!text || normalized.length === 0) return false;
+  return normalized.every((path) => text.includes(path.toLowerCase()));
+}
+
+function validateHamDocCurrencyEvidence(evidence, verifiedCommit, verifiedAuditBody) {
+  const claim = evidence?.auditComment?.docCurrency || evidence?.docCurrency || null;
+  const changedFiles = normalizePathList(verifiedCommit?.changedFiles);
+  if (!claim || typeof claim !== 'object' || changedFiles.length === 0) {
+    return { ok: false, status: null, changedFiles };
+  }
+  const claimedChangedFiles = normalizePathList(claim.changedFiles);
+  const status = String(claim.status || '').trim().toLowerCase();
+  const docsUpdated = normalizePathList(claim.docsUpdated);
+  const skippedSuperprojectDocs = normalizePathList(claim.skippedSuperprojectDocs);
+  const body = String(verifiedAuditBody || '');
+  const lowerBody = body.toLowerCase();
+  const baseOk =
+    samePathSet(claimedChangedFiles, changedFiles)
+    && lowerBody.includes('doc-currency')
+    && bodyMentionsEveryPath(body, changedFiles);
+  let statusOk = false;
+  const docsUpdatedInCommit = pathSetIncludesAll(changedFiles, docsUpdated);
+  if (status === 'updated') {
+    statusOk = docsUpdatedInCommit && bodyMentionsEveryPath(body, docsUpdated);
+  } else if (status === 'skipped_superproject') {
+    statusOk =
+      skippedSuperprojectDocs.length > 0
+      && lowerBody.includes('skipped superproject-doc obligation')
+      && bodyMentionsEveryPath(body, skippedSuperprojectDocs);
+  } else if (status === 'not_applicable') {
+    statusOk = lowerBody.includes('not applicable');
+  }
+  return {
+    ok: baseOk && statusOk,
+    status: status || null,
+    changedFiles,
+    claimedChangedFiles,
+    docsUpdated,
+    docsUpdatedInCommit,
+    skippedSuperprojectDocs,
+  };
+}
+
 function validateHamTerminalRemediationEvidence(
   evidence,
   {
@@ -602,6 +672,11 @@ function validateHamTerminalRemediationEvidence(
   const verifiedParentSha = String(verifiedCommit?.parentSha || '').trim();
   const claimedAuditBody = String(evidence?.auditComment?.body || '').trim();
   const verifiedAuditBody = String(verifiedAuditComment?.body || '').trim();
+  const docCurrency = validateHamDocCurrencyEvidence(
+    evidence,
+    verifiedCommit,
+    verifiedAuditBody,
+  );
   const ticket = String(verifiedTrailers.ticket || verifiedTrailers['worker-ticket'] || '').trim();
   const closedBy = String(verifiedTrailers['closed-by'] || '').trim();
   const remediatedFindings = String(verifiedTrailers['remediated-findings'] || '').trim();
@@ -640,6 +715,7 @@ function validateHamTerminalRemediationEvidence(
         evidence?.auditComment?.findings || evidence?.addressedFindings,
       ),
     auditCommentAuthor: hamAuditCommentAuthorMatches(verifiedAuditComment, verifiedCommit),
+    docCurrency: docCurrency.ok,
     closedBy: closedBy === 'hammer (adversarial-pipe-mode)',
     remediatedFindings: remediatedFindingCountsMatch && blockingCountMatches,
   };
@@ -652,6 +728,7 @@ function validateHamTerminalRemediationEvidence(
     remediationHead: verifiedCommitSha || commitSha || null,
     addressedFindings: findingMap,
     remediatedFindingCounts,
+    docCurrency,
     verifiedCommit: verifiedCommit
       ? {
           author: verifiedCommit.author || null,

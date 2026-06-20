@@ -4294,6 +4294,30 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(!prompt.includes('## Mode: converge-and-merge'));
 });
 
+test('buildMergeAgentPrompt rescue mandate requires keeping data-model + module-walkthrough docs current', () => {
+  // Every automated-convergence trigger (clean verdict + both final passes)
+  // carries the doc-currency mandate so a closer that lands a schema/module
+  // change keeps docs/data-model/* and the module walkthroughs accurate.
+  for (const trigger of [null, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER, FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER]) {
+    const prompt = buildMergeAgentPrompt(makeJob(), trigger ? { trigger } : {});
+    assert.ok(
+      prompt.includes('Keep the canonical documentation surfaces current'),
+      `doc-currency mandate missing for trigger=${trigger}`,
+    );
+    assert.ok(prompt.includes('docs/data-model/catalog.json'), `catalog.json ref missing for trigger=${trigger}`);
+    assert.ok(prompt.includes('validate-data-model-catalog.mjs'), `validator ref missing for trigger=${trigger}`);
+    assert.ok(prompt.includes('-walkthrough.md'), `module walkthrough ref missing for trigger=${trigger}`);
+    assert.ok(
+      prompt.includes('skipped superproject-doc obligation'),
+      `superproject-doc skip audit missing for trigger=${trigger}`,
+    );
+    assert.ok(
+      prompt.includes('doc-currency work or skipped superproject-doc obligations'),
+      `closing-comment doc-currency audit missing for trigger=${trigger}`,
+    );
+  }
+});
+
 test('buildMergeAgentPrompt requires fresh re-review for final-pass with standing blockers', () => {
   const prompt = buildMergeAgentPrompt(makeJob({
     lastVerdict: 'Request changes',

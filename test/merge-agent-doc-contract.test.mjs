@@ -45,3 +45,23 @@ test('operator docs reject stale inline FPOBE merge guidance', () => {
     'operator docs must not describe merge dispatch as an inline follow-up-jobs.mjs merge path',
   );
 });
+
+test('governing docs describe HAM and merge-agent doc-currency obligations', () => {
+  const amaSpec = readRepoFile('projects', 'adversarial-merge-authority', 'SPEC.md');
+  const amaRunbook = readRepoFile('docs', 'RUNBOOK-ama-closure.md');
+  const mergeAgentSpec = readRepoFile('docs', 'SPEC-adversarial-review-auto-remediation.md');
+
+  for (const [name, doc] of [
+    ['AMA SPEC', amaSpec],
+    ['AMA runbook', amaRunbook],
+    ['merge-agent spec', mergeAgentSpec],
+  ]) {
+    assert.match(doc, /docs\/data-model\/catalog\.json/, `${name} must mention catalog.json doc-currency`);
+    assert.match(doc, /validate-data-model-catalog\.mjs/, `${name} must mention the catalog validator`);
+    assert.match(doc, /modules\/<name>\/<name>-walkthrough\.md/, `${name} must mention module walkthroughs`);
+  }
+
+  assert.match(amaSpec, /skipped superproject-doc obligation/);
+  assert.match(amaRunbook, /skipped superproject-doc obligation/);
+  assert.match(mergeAgentSpec, /submodule change owes documentation in a superproject/);
+});

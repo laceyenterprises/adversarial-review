@@ -98,6 +98,12 @@ function makeAdapterArgs(kind, params = {}) {
   if (params.repo) args.push('--repo', String(params.repo));
   if (params.prNumber !== undefined) args.push('--pr-number', String(normalizePrNumber(params.prNumber)));
   if (params.headSha) args.push('--head-sha', String(params.headSha));
+  if (Array.isArray(params.reviewerLogins)) {
+    for (const login of params.reviewerLogins) {
+      const normalized = String(login || '').trim();
+      if (normalized) args.push('--reviewer-login', normalized);
+    }
+  }
   if (params.labelName) args.push('--label', String(params.labelName));
   if (params.currentHeadSha) args.push('--current-head-sha', String(params.currentHeadSha));
   if (params.withLabels === false) args.push('--no-labels');
@@ -153,14 +159,30 @@ async function readAdapterHeadAndState(repo, prNumber, { withLabels = true, ...o
   return unwrapPayload(payload, 'headState', 'pull-request-head-state');
 }
 
-async function readAdapterReviewBodiesForHead(repo, prNumber, headSha, options) {
-  const payload = await runGitHubAdapter('pull-request-review-bodies-for-head', { repo, prNumber, headSha }, options);
+async function readAdapterReviewBodiesForHead(repo, prNumber, headSha, { reviewerLogins = null, ...options } = {}) {
+  const payload = await runGitHubAdapter('pull-request-review-bodies-for-head', {
+    repo,
+    prNumber,
+    headSha,
+    reviewerLogins,
+  }, options);
   if (!payload) return null;
   const bodies = unwrapPayload(payload, 'bodies', 'pull-request-review-bodies-for-head');
   if (!Array.isArray(bodies)) {
     throw new Error('GitHub adapter review bodies payload must be an array');
   }
-  return bodies.map((body) => String(body || ''));
+  return bodies.map((body) => {
+    if (body && typeof body === 'object' && !Array.isArray(body)) {
+      return {
+        author: body.author ?? body.user ?? null,
+        body: String(body.body || ''),
+        state: body.state ?? null,
+        submittedAt: body.submittedAt ?? body.submitted_at ?? null,
+        commitId: body.commitId ?? body.commit_id ?? null,
+      };
+    }
+    return String(body || '');
+  });
 }
 
 async function readAdapterLatestLabelEvent(repo, prNumber, labelName, { currentHeadSha = null, ...options } = {}) {

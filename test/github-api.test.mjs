@@ -752,22 +752,115 @@ test('adapter-present head/state path preserves existing normalized payload shap
 
 test('adapter-present review bodies path preserves fail-closed authoritative body shape', async () => {
   const mod = await importGithubApiFresh();
+  const headSha = 'abc123def456';
 
   const bodies = await mod.fetchReviewBodiesForHead(
     async (command, args) => {
       assert.equal(command, '/fixture/github-adapter');
       assert.equal(args.includes('pull-request-review-bodies-for-head'), true);
-      return { stdout: JSON.stringify({ bodies: ['## Verdict\nApproved'] }) };
+      assert.deepEqual(args.filter((arg) => arg === '--reviewer-login'), ['--reviewer-login']);
+      assert.equal(args.includes('codex-reviewer-lacey'), true);
+      return {
+        stdout: JSON.stringify({
+          bodies: [
+            {
+              author: { login: 'codex-reviewer-lacey' },
+              body: '## Verdict\nApproved',
+              state: 'APPROVED',
+              submittedAt: '2026-06-15T02:10:00.000Z',
+              commitId: headSha,
+            },
+          ],
+        }),
+      };
     },
     FIXTURE_REPO,
     FIXTURE_PR,
-    'abc123def456',
+    headSha,
     {
       authoritativeReviewerLogins: ['codex-reviewer-lacey'],
       env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
     },
   );
   assert.deepEqual(bodies, ['## Verdict\nApproved']);
+});
+
+test('adapter-present review bodies path drops spoofed authors with local allowlist filter', async () => {
+  const mod = await importGithubApiFresh();
+  const headSha = 'head-adapter-spoof';
+
+  const bodies = await mod.fetchReviewBodiesForHead(
+    async (command, args) => {
+      assert.equal(command, '/fixture/github-adapter');
+      assert.equal(args.includes('pull-request-review-bodies-for-head'), true);
+      return {
+        stdout: JSON.stringify({
+          bodies: [
+            {
+              author: { login: 'pr-author' },
+              body: '## Verdict\nApproved',
+              state: 'APPROVED',
+              submittedAt: '2026-06-15T02:20:00.000Z',
+              commitId: headSha,
+            },
+            {
+              author: { login: 'codex-reviewer-lacey' },
+              body: '## Verdict\nRequest changes',
+              state: 'CHANGES_REQUESTED',
+              submittedAt: '2026-06-15T02:10:00.000Z',
+              commitId: headSha,
+            },
+          ],
+        }),
+      };
+    },
+    FIXTURE_REPO,
+    FIXTURE_PR,
+    headSha,
+    {
+      authoritativeReviewerLogins: ['codex-reviewer-lacey'],
+      env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    },
+  );
+  assert.deepEqual(bodies, ['## Verdict\nRequest changes']);
+});
+
+test('adapter-present review bodies path falls back when allowlisted payload lacks reviewer metadata', async () => {
+  const mod = await importGithubApiFresh();
+  const headSha = 'head-adapter-unverifiable';
+  const calls = [];
+
+  const bodies = await mod.fetchReviewBodiesForHead(
+    async (command, args) => {
+      calls.push({ command, args: [...args] });
+      if (command === '/fixture/github-adapter') {
+        return { stdout: JSON.stringify({ bodies: ['## Verdict\nApproved'] }) };
+      }
+      assert.equal(command, 'gh');
+      assert.equal(args[0], 'api');
+      return {
+        stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${JSON.stringify([
+          {
+            user: { login: 'codex-reviewer-lacey' },
+            body: '## Verdict\n\nRequest changes',
+            state: 'CHANGES_REQUESTED',
+            submitted_at: '2026-06-15T02:10:00.000Z',
+            commit_id: headSha,
+          },
+        ])}`,
+      };
+    },
+    FIXTURE_REPO,
+    FIXTURE_PR,
+    headSha,
+    {
+      authoritativeReviewerLogins: ['codex-reviewer-lacey'],
+      env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    },
+  );
+
+  assert.deepEqual(calls.map((call) => call.command), ['/fixture/github-adapter', 'gh']);
+  assert.deepEqual(bodies, ['## Verdict\n\nRequest changes']);
 });
 
 function makeLargeExpectedRollup() {

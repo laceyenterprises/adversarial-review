@@ -850,9 +850,43 @@ async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
   const expectedReviewerLoginSet = loginList.length ? new Set(loginList) : null;
   if (reviewerLoginCandidates != null && !expectedReviewerLoginSet) return [];
   const normalizedPrNumber = normalizePrNumber(prNumber);
+  const filterSubmittedReviewForHead = (review) => {
+    if (!review.submittedAt || !review.commitId || String(review.commitId) !== String(headSha)) {
+      return false;
+    }
+    if (!SUBMITTED_REVIEW_STATES.has(String(review.state || '').toUpperCase())) {
+      return false;
+    }
+    if (expectedReviewerLoginSet && !expectedReviewerLoginSet.has(normalizeLogin(review.author?.login))) {
+      return false;
+    }
+    return true;
+  };
+  const sortNewestSubmittedFirst = (a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt));
   try {
-    const adapterBodies = await readAdapterReviewBodiesForHead(repo, normalizedPrNumber, headSha, { execFileImpl, env });
-    if (adapterBodies) return adapterBodies;
+    const adapterReviews = await readAdapterReviewBodiesForHead(repo, normalizedPrNumber, headSha, {
+      execFileImpl,
+      env,
+      reviewerLogins: loginList,
+    });
+    if (adapterReviews) {
+      if (!expectedReviewerLoginSet && adapterReviews.every((review) => typeof review === 'string')) {
+        return adapterReviews;
+      }
+      const allAdapterReviewsVerifiable = adapterReviews.every((review) => (
+        review && typeof review === 'object' && !Array.isArray(review)
+      ));
+      if (allAdapterReviewsVerifiable) {
+        return adapterReviews
+          .map((review) => ({
+            ...review,
+            author: normalizeAuthor(review.author),
+          }))
+          .filter(filterSubmittedReviewForHead)
+          .sort(sortNewestSubmittedFirst)
+          .map((review) => review.body);
+      }
+    }
   } catch {
     // Optional adapter failed or returned malformed data; preserve the existing
     // fail-closed legacy read contract by falling through to the old reader.
@@ -869,19 +903,8 @@ async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
     })),
   );
   return reviews
-    .filter((review) => {
-      if (!review.submittedAt || !review.commitId || String(review.commitId) !== String(headSha)) {
-        return false;
-      }
-      if (!SUBMITTED_REVIEW_STATES.has(String(review.state || '').toUpperCase())) {
-        return false;
-      }
-      if (expectedReviewerLoginSet && !expectedReviewerLoginSet.has(normalizeLogin(review.author?.login))) {
-        return false;
-      }
-      return true;
-    })
-    .sort((a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt)))
+    .filter(filterSubmittedReviewForHead)
+    .sort(sortNewestSubmittedFirst)
     .map((review) => review.body);
 }
 

@@ -3,10 +3,13 @@ import assert from 'node:assert/strict';
 
 import { createCompositeOperatorSurface } from '../../src/adapters/operator/index.mjs';
 
+const HERMETIC_CONFIG = { env: {}, topPath: '/dev/null' };
+
 test('composite operator surface forwards controls and triage calls through the right adapters', async () => {
   const labelCalls = [];
   const linearCalls = [];
   const surface = createCompositeOperatorSurface({
+    ...HERMETIC_CONFIG,
     controls: {
       fetchLatestLabelEventImpl: async (repo, prNumber, labelName, { execFileImpl }) => {
         labelCalls.push({ repo, prNumber, labelName, execFileImpl });

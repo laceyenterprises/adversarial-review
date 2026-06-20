@@ -318,7 +318,7 @@ test('GMW-02 reviewer-roster CLI prints the roster and resolved mode', () => {
     env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
     stdout: { write: (s) => { out += s; } },
     stderr: { write: () => {} },
-  });
+  }, HERMETIC);
   assert.equal(rc, 0);
   assert.match(out, /reviewer\.gemini\.mode=/);
   assert.match(out, /gemini\s+-> default: \[codex, claude-code, clio-agent\]; eligible: \[codex, claude-code, clio-agent\]/);
@@ -330,7 +330,7 @@ test('GMW-02 reviewer-roster CLI --json emits structured roster', () => {
     env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
     stdout: { write: (s) => { out += s; } },
     stderr: { write: () => {} },
-  });
+  }, HERMETIC);
   assert.equal(rc, 0);
   const parsed = JSON.parse(out);
   assert.ok(['off', 'fallback', 'always-on'].includes(parsed.mode));

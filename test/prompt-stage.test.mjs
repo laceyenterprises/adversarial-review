@@ -83,6 +83,25 @@ test('reviewer prompts default stale-doc findings to doc updates, not rollbacks'
   }
 });
 
+test('reviewer prompts check data-model and module explainer doc currency', () => {
+  for (const stage of ['first', 'middle', 'last']) {
+    const prompt = loadStagePrompt({
+      rootDir: ROOT,
+      promptSet: 'code-pr',
+      actor: 'reviewer',
+      stage,
+    });
+
+    assert.match(prompt, /Canonical documentation currency check/);
+    assert.match(prompt, /docs\/data-model\/NN-\*\.md/);
+    assert.match(prompt, /Source of truth:/);
+    assert.match(prompt, /docs\/data-model\/catalog\.json/);
+    assert.match(prompt, /modules\/<name>\/<name>-walkthrough\.md/);
+    assert.match(prompt, /stale data-model docs are contract drift, not a nit/);
+    assert.match(prompt, /skipped superproject-doc obligation/);
+  }
+});
+
 test('reviewer partial or invalid context defaults to first unless mid-cycle is proven', () => {
   assert.equal(pickReviewerStage({ maxRemediationRounds: 2 }), 'first');
   assert.equal(pickReviewerStage({ reviewAttemptNumber: 3, maxRemediationRounds: 2 }), 'first');
@@ -151,6 +170,28 @@ test('remediator invalid or partial context falls back to first instead of silen
   assert.equal(pickRemediatorStage({}), 'first');
   assert.equal(pickRemediatorStage({ remediationRound: 0, maxRemediationRounds: 3 }), 'first');
   assert.equal(pickRemediatorStage({ maxRemediationRounds: 3 }), 'first');
+});
+
+test('remediator prompts treat data-model and module explainer doc currency as in-scope', () => {
+  for (const stage of ['first', 'middle', 'last']) {
+    const prompt = loadStagePrompt({
+      rootDir: ROOT,
+      promptSet: 'code-pr',
+      actor: 'remediator',
+      stage,
+    });
+
+    assert.match(prompt, /Canonical doc-currency scope/);
+    assert.match(prompt, /Doc-currency for the change you are landing is in scope/);
+    assert.match(prompt, /docs\/data-model\/NN-\*\.md/);
+    assert.match(prompt, /Source of truth:/);
+    assert.match(prompt, /docs\/data-model\/catalog\.json/);
+    assert.match(prompt, /If\s+`scripts\/validate-data-model-catalog\.mjs`\s+exists/);
+    assert.match(prompt, /node scripts\/validate-data-model-catalog\.mjs/);
+    assert.match(prompt, /do not treat that absence as a failing\s+check by itself/);
+    assert.match(prompt, /modules\/<name>\/<name>-walkthrough\.md/);
+    assert.match(prompt, /skipped superproject-doc obligation/);
+  }
 });
 
 test('loadStagePrompt rejects unsafe prompt path segments', () => {

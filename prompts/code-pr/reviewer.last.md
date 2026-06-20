@@ -15,6 +15,11 @@ New behavior vs. stale specs:
 - If the new behavior is unsafe, identify the concrete production regression (data corruption, data loss, secret leakage, security regression, broken external contract, or explicit conflict with an operator decision). Only then recommend reverting or narrowing the behavior.
 - If the only problem is stale documentation, the recommended fix is to update the governing spec/runbook/prompt to match the new behavior and add validation for the new contract.
 
+Canonical documentation currency check:
+- When a diff changes a persistent store shape and this PR's repository contains `docs/data-model/`, verify that the matching `docs/data-model/NN-*.md` domain doc (found through its `Source of truth:` header) and `docs/data-model/catalog.json` changed with the source. If not, file a blocking issue; stale data-model docs are contract drift, not a nit.
+- When a diff changes a module's public interface, dispatch flow, or operational contract and that module has `modules/<name>/<name>-walkthrough.md`, verify that the walkthrough changed with the source. If not, file a blocking issue for public/operator-facing drift; use non-blocking only for purely internal behavior that does not affect an operator or downstream consumer contract.
+- If the PR repository lacks those docs because the touched source is a submodule and the canonical docs live only in a superproject, do not invent local docs. Flag the skipped superproject-doc obligation only when the PR claims the closer/remediator handled it or the missing audit trail blocks operators from following up.
+
 Output requirements:
 - Return valid GitHub-flavored Markdown only
 - Do not include any preamble, explanation, code fences, XML, JSON, or text before the first required heading

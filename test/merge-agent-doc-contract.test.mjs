@@ -65,3 +65,23 @@ test('governing docs describe HAM and merge-agent doc-currency obligations', () 
   assert.match(amaRunbook, /skipped superproject-doc obligation/);
   assert.match(mergeAgentSpec, /submodule change owes documentation in a superproject/);
 });
+
+test('governing docs describe reviewer and remediator doc-currency obligations', () => {
+  const runbook = readRepoFile('docs', 'follow-up-runbook.md');
+  const spec = readRepoFile('docs', 'SPEC-adversarial-review-auto-remediation.md');
+
+  for (const [name, doc] of [
+    ['follow-up runbook', runbook],
+    ['auto-remediation spec', spec],
+  ]) {
+    assert.match(doc, /reviewer stage/i, `${name} must mention reviewer stage doc-currency`);
+    assert.match(doc, /remediator stage/i, `${name} must mention remediator stage doc-currency`);
+    assert.match(doc, /docs\/data-model\/NN-\*\.md/, `${name} must mention data-model domain docs`);
+    assert.match(doc, /docs\/data-model\/catalog\.json/, `${name} must mention catalog.json`);
+    assert.match(doc, /modules\/<name>\/<name>-walkthrough\.md/, `${name} must mention module walkthroughs`);
+    assert.match(doc, /validator failures as red checks/, `${name} must preserve validator failure behavior`);
+    assert.match(doc, /missing validator script as an operator follow-up/, `${name} must not strand on missing validator script`);
+    assert.match(doc, /operator-approved/, `${name} must document final-round accepted-risk recovery`);
+    assert.match(doc, /skipped superproject-doc obligation/, `${name} must mention skipped superproject docs`);
+  }
+});

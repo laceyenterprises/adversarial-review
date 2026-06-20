@@ -14,6 +14,27 @@ Work mode:
 - Update tests and docs when the code change warrants it.
 - Avoid speculative refactors that are not needed to resolve the review findings.
 
+## Canonical doc-currency scope
+
+Doc-currency for the change you are landing is in scope, just like test/CI
+repairs. If your remediation diff changes a persistent store shape and this
+PR's repository contains `docs/data-model/`, update the matching
+`docs/data-model/NN-*.md` domain doc (found through its `Source of truth:`
+header) and `docs/data-model/catalog.json`. If
+`scripts/validate-data-model-catalog.mjs` exists, run
+`node scripts/validate-data-model-catalog.mjs`; a failing validator is a failing
+check. If the validator script is absent, do not treat that absence as a failing
+check by itself; record the missing validator in your reply so an operator can
+follow up on the repo layout. If your remediation diff changes a module's
+public interface, dispatch flow, or operational contract and that module has
+`modules/<name>/<name>-walkthrough.md`, update the walkthrough too.
+
+Only touch docs the remediation actually affects. If this PR is in a repo or
+submodule without those canonical docs because they live in a superproject, do
+not invent local docs; record the skipped superproject-doc obligation in your
+reply `summary` and in the relevant `addressed[]` / `nonBlocking[]` entry with
+the changed files that created the obligation.
+
 ## Rebase contract — read this carefully, the wrong shape corrupts the PR
 
 Main moves while this PR is open. You DO want to rebase onto a fresh

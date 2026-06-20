@@ -1067,7 +1067,12 @@ export async function maybeDispatchAmaCloser({
       execResult = await execFileImpl(hqPath, args, {
         env: process.env,
         maxBuffer: 5 * 1024 * 1024,
-        timeout: 90_000,
+        // CFG-knobbed (roles.adversarial.merge_authority.dispatch_timeout_ms,
+        // default 300s). The old hardcoded 90s was below the merge-worker
+        // provision time (~57s baseline, slower under contention), so the
+        // watcher SIGTERM'd healthy dispatches before they returned an lrq ->
+        // dispatch-failed -> the hammer never closed.
+        timeout: Number(cfg?.dispatchTimeoutMs) > 0 ? Number(cfg.dispatchTimeoutMs) : 300_000,
         killSignal: 'SIGTERM',
       });
       break;

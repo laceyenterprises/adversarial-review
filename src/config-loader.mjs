@@ -119,6 +119,7 @@ const ENUM_ROLES_FALLBACK_PATH = ['none', 'litellm-vk', 'litellm-vk-then-deferra
 // (`reviewer.gemini.mode`); see the routing layer in
 // adapters/subject/github-pr/routing.mjs.
 const ENUM_REVIEWER_GEMINI_MODE = ['off', 'fallback', 'always-on'];
+const ENUM_REVIEWER_GEMINI_RUNTIME = ['cli', 'antigravity'];
 const FOREIGN_TOP_LEVEL_SECTIONS = new Set([
   // LOADER-CONTRACT §2 permits each reader to ignore only root sections
   // explicitly foreign to that reader in top-level config.local.yaml.
@@ -1278,6 +1279,29 @@ function schemaV1() {
                 __default: 'always-on',
                 __enum: ENUM_REVIEWER_GEMINI_MODE,
               },
+              runtime: {
+                __type: TYPE_STRING,
+                __default: 'cli',
+                __enum: ENUM_REVIEWER_GEMINI_RUNTIME,
+              },
+              antigravity: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  accounts: {
+                    __type: TYPE_LIST,
+                    __default: [],
+                    __item: {
+                      __type: TYPE_DICT,
+                      __strict: true,
+                      __keys: {
+                        id: { __type: TYPE_STRING },
+                        tokenFile: { __type: TYPE_STRING },
+                      },
+                    },
+                  },
+                },
+              },
             },
           },
         },
@@ -1472,6 +1496,14 @@ export const ENV_ALIASES = {
   'reviewer.gemini.mode': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_MODE',
     aliases: [['ADVERSARIAL_REVIEW_GEMINI_REVIEWER_MODE', identity]],
+  },
+  'reviewer.gemini.runtime': {
+    canonical: 'AGENT_OS_REVIEWER_GEMINI_RUNTIME',
+    aliases: [['ADVERSARIAL_REVIEW_GEMINI_RUNTIME', identity]],
+  },
+  'reviewer.gemini.antigravity.accounts': {
+    canonical: 'AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_ACCOUNTS',
+    aliases: [['ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_ACCOUNTS', identity]],
   },
   'watcher.max_drain_wait_ms': {
     canonical: 'AGENT_OS_WATCHER_MAX_DRAIN_WAIT_MS',
@@ -1901,6 +1933,8 @@ function checkLeaf(value, schema, keyPath, source) {
         { key: keyPath, expected: expectedPattern, got: value, source },
       );
     }
+  } else if (expected === TYPE_DICT) {
+    return validateDictPresentKeysOnly(value, schema, keyPath, source, null);
   } else if (expected === TYPE_LIST) {
     if (!Array.isArray(value)) {
       throw new AgentOSConfigError(
@@ -2495,6 +2529,16 @@ function coerceEnvValue(key, value, schemaLeaf, source = null) {
     return n;
   }
   if (expected === TYPE_LIST) {
+    if (key === 'reviewer.gemini.antigravity.accounts') {
+      try {
+        return JSON.parse(value);
+      } catch (err) {
+        throw new AgentOSConfigError(
+          `${key}: env value must be a JSON array of {id, tokenFile} entries: ${err.message}`,
+          { key, expected: 'JSON array', got: value, source },
+        );
+      }
+    }
     return value.split(',').map((part) => part.trim()).filter(Boolean);
   }
   return value;

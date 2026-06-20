@@ -20,6 +20,7 @@ import {
   describeCrossModelReviewWaiver,
   isCrossModelReviewWaived,
   routeSubject,
+  validateDefaultReviewerRouteConfig,
 } from './adapters/subject/github-pr/routing.mjs';
 import {
   loadRoleConfig,
@@ -6845,7 +6846,7 @@ async function main() {
     // so a typo in ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS or in
     // tools/adversarial-review/config.yaml fails loud at boot instead of
     // hours later at first merge-agent dispatch.
-    defaultReviewerRouteFromEnv(process.env);
+    validateDefaultReviewerRouteConfig(process.env);
     validateStartupMergeAgentConfig(process.env);
     resolveWatcherDrainMaxMs(process.env);
     resolvePendingDraftRespawnAgeSeconds(process.env);

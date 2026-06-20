@@ -21,10 +21,16 @@ A repo the watcher is watching but whose labels are missing fails mid-pipeline:
 > 2026-06-19: `foundry#15` merge-agent dispatch errored
 > `'merge-agent-dispatched' not found`, and `podium` had **zero**
 > adversarial-review labels — so closures could not be dispatched there at all.
+> On 2026-06-20, app repos that had only the older adversarial subset were
+> missing `retrigger-review`, so merge-agent could not request a fresh watcher
+> pass after pushing a rebased branch.
 
 Run the idempotent label initializer:
 
 ```bash
+# from the agent-os monorepo:
+scripts/init-pr-control-labels.sh --repo laceyenterprises/<repo>
+
 # one or more repos (short names resolve against the org):
 tools/adversarial-review/scripts/init-adversarial-review-labels.sh foundry podium
 
@@ -32,18 +38,18 @@ tools/adversarial-review/scripts/init-adversarial-review-labels.sh foundry podiu
 tools/adversarial-review/scripts/init-adversarial-review-labels.sh --all
 ```
 
-It ensures the full canonical set: the `merge-agent-*` lifecycle labels, the AMA
-operator controls (`operator-approved`, `adversarial-merge-requested`,
-`adversarial-merge-blocked`, `no-merge-hold`, `ticket-pipeline-paused`,
-`reviewer-cycle-cap-reached`, `paused-for-redesign`), and the `fast-merge:*`
+The agent-os initializer and adversarial-review initializer intentionally seed
+the same full canonical set: `retrigger-review`, `retrigger-remediation`, the
+`merge-agent-*` lifecycle labels, AMA controls, strictness labels, hard-stop
+labels, additive-scope labels, ticket-pipeline pause, and the `fast-merge:*`
 classifiers. Safe to re-run any time.
 
 Verify:
 
 ```bash
 gh label list --repo laceyenterprises/<repo> --json name --jq \
-  '[.[]|select(.name|test("merge-agent|adversarial-merge|operator-approved"))]|length'
-# expect >= 8
+  'map(.name) | contains(["retrigger-review","retrigger-remediation","merge-agent-dispatched","adversarial-merge-requested","fast-merge:docs"])'
+# expect true
 ```
 
 ## 3. Enforce the canonical merge method (squash-only) — REQUIRED

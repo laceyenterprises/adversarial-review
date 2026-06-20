@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CLAUDE_CLI, GEMINI_CLI, __test__ } from '../src/reviewer.mjs';
+import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
+import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
 
@@ -35,6 +37,7 @@ const {
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
   isRetryableGeminiSubprocessError,
+  formatAntigravityQuotaHoldMessage,
   spawnGeminiReview,
   reviewWithGemini,
   dispatchReviewerModel,
@@ -1797,6 +1800,11 @@ test('reviewWithGemini antigravity all-capped returns hold decision without prod
   assert.equal(result.quotaHoldDecision.hold, true);
   assert.equal(result.quotaHoldDecision.retryAfter, retryAfter);
   assert.equal(result.quotaHoldDecision.waitUntilMs, Date.parse(retryAfter));
+});
+
+test('Antigravity all-capped hold message is classified as quota-exhausted', () => {
+  const msg = formatAntigravityQuotaHoldMessage('2026-06-20T21:15:00.000Z');
+  assert.equal(classifyReviewerFailure(msg, 1), QUOTA_EXHAUSTED_FAILURE_CLASS);
 });
 
 test('reviewWithGemini maps auth-failure spawn output to OAuthError(gemini)', async () => {

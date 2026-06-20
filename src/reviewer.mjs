@@ -2199,6 +2199,10 @@ function antigravityQuotaHoldDecision({ retryAfter }) {
   };
 }
 
+function formatAntigravityQuotaHoldMessage(retryAfter) {
+  return `[quota-exhausted] Gemini Antigravity quota exhausted; accounts capped; try again at ${retryAfter}`;
+}
+
 async function withGeminiSubprocessRetry(operation, {
   retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
   sleepImpl = sleep,
@@ -2950,7 +2954,7 @@ async function main() {
         || (Number.isFinite(dispatch.quotaHoldDecision.waitUntilMs)
           ? new Date(dispatch.quotaHoldDecision.waitUntilMs).toISOString()
           : new Date(Date.now() + 15 * 60 * 1000).toISOString());
-      const msg = `[quota-exhausted] Gemini Antigravity accounts capped; try again at ${retryAfter}`;
+      const msg = formatAntigravityQuotaHoldMessage(retryAfter);
       console.error(msg);
       console.log(JSON.stringify({
         type: 'reviewer.quota_hold',
@@ -3248,6 +3252,7 @@ const __test__ = {
   isRetryableGeminiSubprocessError,
   isAntigravityRateLimitOrAuthFailure,
   antigravityQuotaHoldDecision,
+  formatAntigravityQuotaHoldMessage,
   invokeGeminiWithAntigravity,
   spawnGeminiReview,
   reviewWithGemini,

@@ -750,7 +750,12 @@ bucket reviewer stderr into the same routing-tier `cascade` class must stay
 scoped to explicit local-routing context such as `127.0.0.1:4000`,
 `localhost:4000`, `LiteLLM`, or equivalent routing-tier markers; generic
 non-local API connectivity failures remain `unknown` unless another more
-specific classifier matches.
+specific classifier matches. Reviewer setup is one such explicit classifier:
+`gh pr diff` / GitHub GraphQL transient failures (`TLS handshake`, temporary
+network failures, and HTTP 5xx shapes) are retried before the review exits; if
+the retry budget is exhausted before a diff is fetched, the failed row is
+tagged as `cascade` so it rides the bounded infrastructure backoff path instead
+of consuming the substantive review attempt budget.
 
 ## Infrastructure Failed-Row Auto-Recovery
 
@@ -760,9 +765,10 @@ PR, the watcher must not be draining, active follow-up/backoff/handoff gates
 must allow dispatch, memory admission must pass, and the routing-tier readiness
 gate above must report healthy before an infrastructure failed row is claimed.
 
-Eligible infrastructure classes are routing-tier `cascade`,
-`reviewer-timeout`, `launchctl-bootstrap`, reviewer-spawn `oauth-broken`, and
-hard provider usage caps recorded as `quota-exhausted`. `forbidden-fallback`,
+Eligible infrastructure classes are routing-tier `cascade`, exhausted
+GitHub diff-fetch transients tagged as `cascade`, `reviewer-timeout`,
+`launchctl-bootstrap`, reviewer-spawn `oauth-broken`, and hard provider usage
+caps recorded as `quota-exhausted`. `forbidden-fallback`,
 `failed-orphan`, `malformed`, inactive repos, closed or merged PRs,
 undiscovered PRs, drain-skipped rows, and rows blocked by active follow-up jobs
 are not recovered by this path. `oauth-broken` is included only for spawn

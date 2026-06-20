@@ -56,6 +56,13 @@ test('HTTP 502/503/504 require routing-tier context', () => {
   assert.equal(classifyReviewerFailure('response: 504 from LiteLLM upstream', 1), 'cascade');
 });
 
+test('transient GitHub diff-fetch failures classify as cascade', () => {
+  const stderr = `[reviewer] DEBUG: fetching diff for laceyenterprises/agent-os#2271...
+[reviewer] Failed to fetch diff for laceyenterprises/agent-os#2271: Command failed: gh pr diff 2271 --repo laceyenterprises/agent-os
+Post "https://api.github.com/graphql": net/http: TLS handshake timeout`;
+  assert.equal(classifyReviewerFailure(stderr, 1), 'cascade');
+});
+
 test('OAuth-broken still wins over routing-tier patterns when both match', () => {
   // The classifier comment block explicitly notes: OAuth wins over cascade
   // when both match. Confirm the routing-tier patterns don't accidentally

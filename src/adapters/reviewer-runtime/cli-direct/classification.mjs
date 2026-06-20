@@ -78,6 +78,21 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     /\bapi error\b.*\b50[234]\b/.test(lower) ||
     /(http|status|response)[\s/=:]+50[234]\b.*\b(api|gateway|upstream|litellm)\b/.test(lower) ||
     /\b(api|gateway|upstream|litellm)\b.*(http|status|response)[\s/=:]+50[234]\b/.test(lower);
+  const mentionsGithubDiffFetch =
+    /failed to fetch diff/.test(lower) ||
+    /gh pr diff/.test(lower) ||
+    /api\.github\.com\/graphql/.test(lower) ||
+    /\bgithub graphql\b/.test(lower);
+  const mentionsGithubDiffTransient =
+    mentionsGithubDiffFetch &&
+    (
+      /tls handshake/.test(lower) ||
+      /\bnet\/http\b.*\btimeout\b/.test(lower) ||
+      /\betimedout\b|\beconnreset\b|\beai_again\b|\benotfound\b/.test(lower) ||
+      /connection (?:reset|timed out|aborted)/.test(lower) ||
+      /temporary failure|temporarily unavailable|network is unreachable/.test(lower) ||
+      /\bhttp\s*5\d\d\b/.test(lower)
+    );
   // These are bucketed into the existing 'cascade' class so they ride the
   // existing backoff path that does NOT consume the per-attempt budget
   // (`row.review_attempts` stays put — see watcher-cascade-resilience.test.mjs
@@ -92,7 +107,8 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     (/litellm/.test(lower) && /retry|exhaust|timeout|attempts failed|5\d\d\b/.test(lower)) ||
     /timeout.*retries|retries.*timeout/.test(lower) ||
     /(http|status|response)[\s/=:]+5\d\d\b/.test(lower) && /\blitellm\b/.test(lower) ||
-    mentionsRoutingTierUnavailable;
+    mentionsRoutingTierUnavailable ||
+    mentionsGithubDiffTransient;
   const mentionsOauthBroken = lower.split(/\r?\n/).some((line) => (
     /\bnot logged in\b|\blogin required\b/.test(line) ||
     /\boauth token (?:expired|invalid|missing)\b/.test(line) ||

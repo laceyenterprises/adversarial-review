@@ -59,6 +59,7 @@ import {
   fetchPullRequestHeadAndState,
   fetchPullRequestReviewContext,
 } from './github-api.mjs';
+import { execGhWithRetry } from './gh-cli.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import {
@@ -1692,10 +1693,12 @@ function queueFollowUpForPostedReview({
 
 async function fetchPRDiff(repo, prNumber, headSha, {
   execFileImpl = execFileAsync,
+  execGhWithRetryImpl = execGhWithRetry,
   getCachedDiffImpl = getCachedDiff,
   putCachedDiffImpl = putCachedDiff,
   recordApiCallImpl = recordApiCall,
   apiStatusFromErrorImpl = apiStatusFromError,
+  ghRetrySleepImpl = sleep,
   log = console,
 } = {}) {
   const cacheLookupStartedAt = Date.now();
@@ -1713,11 +1716,15 @@ async function fetchPRDiff(repo, prNumber, headSha, {
 
   const startedAt = Date.now();
   try {
-    const { stdout } = await execFileImpl(
-      'gh',
-      ['pr', 'diff', String(prNumber), '--repo', repo],
-      { encoding: 'buffer', maxBuffer: 10 * 1024 * 1024 }
-    );
+    const { stdout } = await execGhWithRetryImpl({
+      execFileImpl: (command, args, options) => execFileImpl(
+        command,
+        args,
+        { ...options, encoding: 'buffer', maxBuffer: 10 * 1024 * 1024 }
+      ),
+      args: ['pr', 'diff', String(prNumber), '--repo', repo],
+      sleep: ghRetrySleepImpl,
+    });
     recordApiCallImpl({
       category: 'diff_fetch',
       repo,

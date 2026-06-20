@@ -6,6 +6,7 @@ const execFileAsync = promisify(execFile);
 // `ps -o lstart` is only second-resolution; allow a small window when
 // comparing it to the persisted ISO timestamp.
 const PGID_IDENTITY_TOLERANCE_MS = 5_000;
+const PROCESS_PROBE_FORBIDDEN_RE = /\b(?:EPERM|operation not permitted)\b/i;
 
 function isPgidAlive(pgid, processKillImpl = process.kill) {
   if (!Number.isInteger(pgid) || pgid <= 0) return false;
@@ -21,6 +22,7 @@ function isPgidAlive(pgid, processKillImpl = process.kill) {
 
 async function verifyPgidIdentity(pgid, expectedSpawnedAt, {
   execFileImpl = execFileAsync,
+  allowForbiddenProbeFallback = false,
 } = {}) {
   if (!Number.isInteger(pgid) || pgid <= 0) {
     return { match: false, reason: 'invalid pgid' };
@@ -33,6 +35,14 @@ async function verifyPgidIdentity(pgid, expectedSpawnedAt, {
     const { stdout } = await execFileImpl('ps', ['-o', 'lstart=', '-p', String(pgid)], { timeout: 5_000 });
     lstart = String(stdout || '').trim();
   } catch (err) {
+    const message = err?.message || String(err);
+    if (allowForbiddenProbeFallback && (err?.code === 'EPERM' || PROCESS_PROBE_FORBIDDEN_RE.test(message))) {
+      return {
+        match: true,
+        degraded: true,
+        reason: `ps probe unavailable: ${message}; matched live process group only`,
+      };
+    }
     return { match: false, reason: `ps probe failed: ${err?.message || err}` };
   }
   if (!lstart) {

@@ -814,10 +814,21 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
   assert.match(prompt, /Rebase-Attempts: \${REBASE_ATTEMPTS:-0}/);
   assert.match(prompt, /ham_terminal_remediation_validated/);
   assert.match(prompt, /AMA_MERGE_LEASE_BIN="\/Users\/airlock\/agent-os\/tools\/adversarial-review\/bin\/merge-lease\.mjs"/);
-  assert.match(prompt, /node "\$AMA_MERGE_LEASE_BIN" acquire[\s\S]*--owner-pid "\$\$"[\s\S]*--owner-pgid "\$MERGE_LEASE_OWNER_PGID"[\s\S]*MERGE_LEASE_ID=\$\(jq -r '\.leaseId'/);
+  assert.match(prompt, /MERGE_LEASE_OWNER_PGID_ARGS=\(\)/);
+  assert.match(prompt, /MERGE_LEASE_OWNER_PGID_ARGS=\(--owner-pgid "\$MERGE_LEASE_OWNER_PGID"\)/);
+  assert.match(prompt, /node "\$AMA_MERGE_LEASE_BIN" acquire[\s\S]*--owner-pid "\$\$"[\s\S]*"\$\{MERGE_LEASE_OWNER_PGID_ARGS\[@\]\}"[\s\S]*MERGE_LEASE_ID=\$\(jq -r '\.leaseId'/);
   assert.match(prompt, /ACQUIRE_EXIT=\$\?/);
+  assert.match(prompt, /\[ "\$ACQUIRE_EXIT" -eq 75 \] && jq -e '\.timedOut == true'/);
+  assert.match(prompt, /append_merge_lease_timeout_deferred_attempt_and_exit/);
+  assert.match(prompt, /preMergeReasons: \["merge-lease-timeout"\], mergeLeaseTimeout: true/);
+  assert.match(prompt, /--outcome deferred/);
   assert.match(prompt, /\[ "\$ACQUIRE_EXIT" -eq 70 \] && jq -e '\.parked == true'/);
   assert.match(prompt, /hardBlockerReason: "merge-lease-parked"/);
+  const mergeLeaseTransientFn = prompt.match(
+    /is_merge_lease_revalidation_transient\(\) \{[\s\S]*?\n\}/,
+  )?.[0] || '';
+  assert.doesNotMatch(mergeLeaseTransientFn, /\(\^\\\|\[\^0-9\]\)\(500\|502\|503\|504\)/);
+  assert.doesNotMatch(mergeLeaseTransientFn, /server error/);
   assert.match(prompt, /trap 'release_merge_lease_if_held \|\| true; rm -rf "\$AMA_TMP_DIR"' EXIT/);
   assert.match(prompt, /MERGE_VALIDATION_BASE=\$\(fetch_current_base_sha\)/);
   assert.match(prompt, /run_revalidation_snapshot_command ama-pr/);

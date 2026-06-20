@@ -167,7 +167,7 @@ release_merge_lease_if_held() {
 }
 
 is_merge_lease_revalidation_transient() {
-  grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|connection aborted|temporary failure|network is unreachable|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP[ /]5[0-9][0-9]|(^|[^0-9])(500|502|503|504)([^0-9]|$)|bad gateway|service unavailable|gateway timeout|server error|unable to access|fatal: unable to access' "$1"
+  grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|connection aborted|temporary failure|network is unreachable|try again|rate limit|secondary rate limit|HTTP[ /]5[0-9][0-9]|bad gateway|service unavailable|gateway timeout|unable to access|fatal: unable to access' "$1"
 }
 
 run_revalidation_snapshot_command() {
@@ -253,23 +253,53 @@ append_merge_lease_parked_attempt_and_exit() {
   exit $APPEND_EXIT
 }
 
+append_merge_lease_timeout_deferred_attempt_and_exit() {
+  echo "AMG merge gate deferred PR <<PR_NUMBER>> while waiting for merge lease" >&2
+  TIMEOUT_ATTEMPT_JSON="$AMA_TMP_DIR/ama-merge-lease-timeout-attempt.json"
+  jq -n \
+    '{ preMergeEligible: false, preMergeReasons: ["merge-lease-timeout"], mergeLeaseTimeout: true }' \
+    > "$TIMEOUT_ATTEMPT_JSON"
+  node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
+    --hq-root <<HQ_ROOT>> \
+    --repo <<REPO>> \
+    --pr <<PR_NUMBER>> \
+    --head "$VALIDATED_HEAD" \
+    --outcome deferred \
+    --attempt-json "$TIMEOUT_ATTEMPT_JSON" \
+    --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  APPEND_EXIT=$?
+  rm -f "$TIMEOUT_ATTEMPT_JSON"
+  if [ $APPEND_EXIT -eq 65 ]; then
+    echo "audit append refused by sticky-succeeded guard after merge-lease timeout; treating as no-op" >&2
+    exit 0
+  fi
+  exit $APPEND_EXIT
+}
+
 acquire_merge_lease() {
   if ! MERGE_VALIDATION_BASE=$(fetch_current_base_sha); then
     exit 1
   fi
   MERGE_LEASE_OWNER_PGID="$(ps -o pgid= -p $$ | tr -d ' ')"
+  MERGE_LEASE_OWNER_PGID_ARGS=()
+  if [ -n "$MERGE_LEASE_OWNER_PGID" ]; then
+    MERGE_LEASE_OWNER_PGID_ARGS=(--owner-pgid "$MERGE_LEASE_OWNER_PGID")
+  fi
   node "$AMA_MERGE_LEASE_BIN" acquire \
     --repo <<REPO>> \
     --base "$BASE_BRANCH" \
     --pr <<PR_NUMBER>> \
     --head "$VALIDATED_HEAD" \
     --owner-pid "$$" \
-    --owner-pgid "$MERGE_LEASE_OWNER_PGID" \
+    "${MERGE_LEASE_OWNER_PGID_ARGS[@]}" \
     --wait "$MERGE_LEASE_WAIT_SECONDS" \
     --root-dir <<ROOT_DIR>> \
     > "$AMA_TMP_DIR/ama-merge-lease-acquire.json" \
     2> "$AMA_TMP_DIR/ama-merge-lease-acquire.stderr"
   ACQUIRE_EXIT=$?
+  if [ "$ACQUIRE_EXIT" -eq 75 ] && jq -e '.timedOut == true' "$AMA_TMP_DIR/ama-merge-lease-acquire.json" >/dev/null; then
+    append_merge_lease_timeout_deferred_attempt_and_exit
+  fi
   if [ "$ACQUIRE_EXIT" -eq 70 ] && jq -e '.parked == true' "$AMA_TMP_DIR/ama-merge-lease-acquire.json" >/dev/null; then
     append_merge_lease_parked_attempt_and_exit
   fi

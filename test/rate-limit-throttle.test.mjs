@@ -389,7 +389,7 @@ test('long throttle waits publish and clear a sidecar status file', async () => 
       } catch {
         return false;
       }
-    });
+    }, { timeoutMs: 1000 });
     assert.equal(sidecar.resource, DEFAULT_RESOURCE);
     assert.equal(sidecar.throttledUntil, '2026-06-06T12:05:00.000Z');
 

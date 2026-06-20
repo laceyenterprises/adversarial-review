@@ -35,11 +35,23 @@ not replace the machine gate.
    production change a legitimately failing check proves is needed) is the one
    sanctioned exception to "scope only to the findings" — it is always in scope;
    net-new feature scope is not. Also leave the working tree clean: commit or
-   discard any stray/dirty changes so the head is not left in a dirty state. If a
-   failing check genuinely cannot be fixed inside this remediation (it needs a
-   separate infra change, an external dependency, or a credential you do not
-   have), emit ONE hard-blocker report naming the exact failing check(s) and stop.
-   Do NOT merge past a red test or a red required check, related or not.
+   discard any stray/dirty changes so the head is not left in a dirty state. **If a
+   check fails on a missing dependency, extension, or tool, resolve it only through
+   a repo-controlled, reproducible dependency path and re-run the check — do not
+   treat missing dependencies as host-local green-bar work.** Prefer an existing
+   repository-pinned install/provisioning script (e.g.
+   `platform/session-ledger/scripts/install-pgvector.sh` for the `vector` Postgres
+   extension). If no pinned path exists, add or update the governing provisioning,
+   setup, CI, or docs in the PR so the dependency contract is reviewable and
+   reproducible before relying on the install. Direct package-manager or `sudo`
+   installs are allowed only when the repo documents an explicit approved
+   allowlist entry and version/provenance requirement for that dependency. For
+   anything outside that path, emit ONE hard-blocker report and stop instead of
+   mutating the host. Also stop if the failing check needs a credential/secret you
+   do not have, an unreachable external service, a destructive/irreversible host
+   change, or net-new feature scope to fix. Name the exact failing check(s) in
+   that report. Do NOT merge past a red test or a red required check, related or
+   not.
 2c. **Keep the canonical documentation surfaces current — doc-currency for the
    change you are landing is IN SCOPE, exactly like the test/CI fixes in 2b, and
    is NOT net-new feature scope.** If the post-remediation diff touches either

@@ -14,19 +14,36 @@ const REVIEW_CAPTURE_LOOKBACK_MS = 2 * 60 * 1000;
 // most of this window is unused on normal latency.
 const REVIEW_CAPTURE_FORWARD_MS = 5 * 60 * 1000;
 const REVIEW_LOOKUP_TIMEOUT_MS = 8_000;
+// The reviewers post via GitHub Apps now (broker provider=github-app-*-reviewer),
+// so the review author login is `lacey-<model>-reviewer[bot]` — NOT the legacy
+// PAT user `<model>-reviewer-lacey`. Using the old login made the post-review
+// id lookup never match → gh_comment_id stayed NULL → the closer saw
+// `blocking-findings-unknown` and parked reviewed/mergeable PRs (2026-06-20).
+// Verified live: PR reviews are authored by `lacey-claude-reviewer[bot]` /
+// `lacey-codex-reviewer[bot]`. (loginsMatch below also strips `[bot]` so this is
+// robust to GitHub returning either form.)
 const REVIEWER_BOT_LOGINS = Object.freeze({
-  claude: 'claude-reviewer-lacey',
-  codex: 'codex-reviewer-lacey',
-  'claude-code': 'claude-reviewer-lacey',
-  gemini: 'gemini-reviewer-lacey',
-  pi: 'codex-reviewer-lacey',
+  claude: 'lacey-claude-reviewer[bot]',
+  codex: 'lacey-codex-reviewer[bot]',
+  'claude-code': 'lacey-claude-reviewer[bot]',
+  gemini: 'lacey-gemini-reviewer[bot]',
+  pi: 'lacey-codex-reviewer[bot]',
   // opencode defaults to Anthropic Claude; keep the reviewer cross-model.
-  opencode: 'codex-reviewer-lacey',
-  hermes: 'codex-reviewer-lacey',
-  GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
-  GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
-  GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer-lacey',
+  opencode: 'lacey-codex-reviewer[bot]',
+  hermes: 'lacey-codex-reviewer[bot]',
+  GH_CLAUDE_REVIEWER_TOKEN: 'lacey-claude-reviewer[bot]',
+  GH_CODEX_REVIEWER_TOKEN: 'lacey-codex-reviewer[bot]',
+  GH_GEMINI_REVIEWER_TOKEN: 'lacey-gemini-reviewer[bot]',
 });
+
+// Match two GitHub logins tolerant of the `[bot]` suffix (app-token authors carry
+// it; some surfaces strip it) and case.
+function loginsMatch(a, b) {
+  const norm = (s) => String(s ?? '').trim().toLowerCase().replace(/\[bot\]$/, '');
+  const na = norm(a);
+  const nb = norm(b);
+  return na !== '' && na === nb;
+}
 const REVIEWER_PASS_KINDS = new Set(['first-pass', 'rereview', 'remediation']);
 
 function normalizeBotLoginKey(value) {
@@ -136,7 +153,7 @@ async function lookupRecentReviewArtifact({
     }
   );
   const candidates = parseJsonLines(stdout)
-    .filter((item) => item?.login === login)
+    .filter((item) => loginsMatch(item?.login, login))
     .filter((item) => withinCaptureWindow(item?.created_at, postedAt));
   return pickBestBodyMatch(candidates, body, 'created_at');
 }

@@ -7,6 +7,7 @@ import path from 'node:path';
 
 import { createEmptySqliteDb, createSessionLedgerDb } from './helpers/session-ledger-fixtures.mjs';
 import {
+  readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPr,
   readLatestWorkerRunStatusFromLedger,
   readReviewerSessionUsageFromLedger,
@@ -441,6 +442,60 @@ test('readBuildCompletionSignalForPr reads the newest merged signal for a PR', (
 
   assert.equal(missingHead.ok, false);
   assert.equal(missingHead.reason, 'missing-build-completion-signal');
+});
+
+test('readBuildCompletionProducerEvidence proves repo-level merged-signal producer presence', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  const db = new Database(ledgerDb);
+  db.exec(`
+    CREATE TABLE build_completions (
+      completion_id TEXT PRIMARY KEY,
+      ticket_id TEXT,
+      launch_request_id TEXT,
+      dagrun_id TEXT,
+      dagrun_step_ticket_id TEXT,
+      repo TEXT,
+      pr_number INTEGER,
+      pr_url TEXT,
+      head_sha TEXT,
+      branch TEXT,
+      worker_class TEXT,
+      signal_kind TEXT NOT NULL,
+      spec_ref TEXT,
+      source TEXT,
+      recorded_at TEXT NOT NULL
+    )
+  `);
+  db.prepare(
+    `INSERT INTO build_completions (
+       completion_id, ticket_id, launch_request_id, dagrun_id, dagrun_step_ticket_id,
+       repo, pr_number, pr_url, head_sha, branch, worker_class, signal_kind,
+       spec_ref, source, recorded_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    'bcmp_repo', 'SSG-06', 'lrq_repo', 'dagrun_1', 'SSG-06',
+    'acme/myrepo', 1200, 'https://github.com/acme/myrepo/pull/1200',
+    'd'.repeat(40), null, 'ama', 'merged', 'spec@repo', 'live',
+    '2026-06-20T09:00:00.000Z',
+  );
+  db.close();
+
+  const present = readBuildCompletionProducerEvidence({
+    repo: 'acme/myrepo',
+    signalKind: 'merged',
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+  });
+  assert.equal(present.ok, true);
+  assert.equal(present.row.completion_id, 'bcmp_repo');
+
+  const absent = readBuildCompletionProducerEvidence({
+    repo: 'acme/otherrepo',
+    signalKind: 'merged',
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+  });
+  assert.equal(absent.ok, false);
+  assert.equal(absent.reason, 'missing-build-completion-producer-evidence');
 });
 
 test('readBuildCompletionSignalForPr uses the canonical postgres reader path', () => {

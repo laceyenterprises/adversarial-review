@@ -813,6 +813,18 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
   );
   assert.match(prompt, /Rebase-Attempts: \${REBASE_ATTEMPTS:-0}/);
   assert.match(prompt, /ham_terminal_remediation_validated/);
+  assert.match(prompt, /AMA_MERGE_LEASE_BIN="\/Users\/airlock\/agent-os\/tools\/adversarial-review\/bin\/merge-lease\.mjs"/);
+  assert.match(prompt, /node "\$AMA_MERGE_LEASE_BIN" acquire[\s\S]*--owner-pid "\$\$"[\s\S]*MERGE_LEASE_ID=\$\(jq -r '\.leaseId'/);
+  assert.match(prompt, /ACQUIRE_EXIT=\$\?/);
+  assert.match(prompt, /\[ "\$ACQUIRE_EXIT" -eq 70 \] && jq -e '\.parked == true'/);
+  assert.match(prompt, /hardBlockerReason: "merge-lease-parked"/);
+  assert.match(prompt, /MERGE_VALIDATION_BASE=\$\(fetch_current_base_sha\)/);
+  assert.match(prompt, /node "\$AMA_MERGE_LEASE_BIN" needs-revalidation[\s\S]*--validation-base "\$MERGE_VALIDATION_BASE"[\s\S]*--current-base "\$CURRENT_BASE_SHA"/);
+  assert.match(prompt, /if jq -e '\.needsRevalidation == true'/);
+  assert.match(prompt, /--match-head-commit "\$VALIDATED_HEAD"/);
+  assert.match(prompt, /node "\$AMA_MERGE_LEASE_BIN" release[\s\S]*--lease-id "\$MERGE_LEASE_ID"/);
+  assert.match(prompt, /UPDATE_BRANCH_EXIT"\s+-eq 2[\s\S]*release_merge_lease_if_held \|\| true[\s\S]*unresolvable-rebase-conflict/);
+  assert.match(prompt, /if \[ "\$OUTCOME" = "succeeded" \]; then[\s\S]*release_merge_lease_if_held \|\| true/);
 });
 
 test('composed hammer prompt body matches the checked-in golden snapshot', () => {

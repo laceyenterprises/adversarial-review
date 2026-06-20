@@ -28,18 +28,22 @@ the required scope. Cutover validation must inspect the launch contract's
 `workspaceRepos` (or equivalent `hq dispatch status` field) for both cases.
 
 AMA closer convergence is authoritative only when the session ledger has a
-current-head `build_completions` row for the PR with `signal_kind='merged'`.
+`build_completions` row for the PR with `signal_kind='merged'`.
 `hq dispatch status=succeeded` and the AMA §4.4 audit JSON's
 `status:"succeeded"` are not enough by themselves: without the merged signal the
 watcher records the existing terminal success as `unverified-terminal-success`,
 releases the old terminal hold, and may re-dispatch the closer within the normal
 bounded retry policy. That release is allowed only after a clean negative ledger
-read (`missing-build-completion-signal`). If the ledger target is missing, the
-`build_completions` surface is unavailable, `psql`/SQLite fails, or any other
-read error occurs, the watcher retains the existing closer hold for that tick
-and does not spawn a replacement closer. The merged-signal lookup is
-current-head scoped to match the closer's `--match-head-commit <reviewedSha>`
-guard.
+read (`missing-build-completion-signal`) plus repo-level evidence that the
+merged-signal producer is active for this repository. If the ledger target is
+missing, the `build_completions` surface is unavailable, the repo has no merged
+producer evidence, `psql`/SQLite fails, or any other read error occurs, the
+watcher retains the existing closer hold for that tick and does not spawn a
+replacement closer. The merged-signal lookup is intentionally scoped to
+`repo`/`pr_number`/`signal_kind`, not to the closer's reviewed head SHA: current
+Agent OS merge capture stores the merge commit in `build_completions.head_sha`,
+while the closer's `--match-head-commit <reviewedSha>` guard uses the PR head.
+The producer SHA is evidence returned to operators, not an equality gate.
 
 The merged-signal producer is outside this repository's write path: watcher
 lifecycle sync records owed
@@ -47,10 +51,9 @@ lifecycle sync records owed
 merge, and Agent OS owns the session-ledger `build_completions` write behind
 that handoff. Deployments where the `build_completions` table itself is not
 readable retain the old terminal hold semantics rather than treating an unknown
-ledger state as proof the PR was not merged. A table that is readable but whose
-merge producer is disabled is a deployment-contract violation: the watcher can
-only observe the clean absence of a row, so operators must roll out the producer
-before relying on clean-negative release semantics.
+ledger state as proof the PR was not merged. A table that is readable but has no
+repo-level merged producer evidence also retains the old hold semantics; this
+keeps a schema-only rollout from looking like a clean negative.
 
 AMA's §4.2 branch-protection gate is enabled by default:
 `roles.adversarial.merge_authority.branch_protection.required` defaults to

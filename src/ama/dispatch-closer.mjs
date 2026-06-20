@@ -33,7 +33,10 @@ import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs';
-import { readBuildCompletionSignalForPr } from '../session-ledger-read-adapter.mjs';
+import {
+  readBuildCompletionProducerEvidence,
+  readBuildCompletionSignalForPr,
+} from '../session-ledger-read-adapter.mjs';
 import {
   amaAuditFilePath,
   amaAuditTraceRef,
@@ -570,18 +573,50 @@ function readMergedBuildCompletionSignal({
   hqRoot,
   rootDir,
   env = process.env,
+  readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
 } = {}) {
   const result = readBuildCompletionSignalForPrImpl({
     repo,
     prNumber,
-    headSha,
     signalKind: 'merged',
     hqRoot,
     rootDir,
     env,
   });
-  return result || { ok: false, reason: 'ledger-read-failed' };
+  if (!result) return { ok: false, reason: 'ledger-read-failed' };
+  if (result.ok) {
+    const producerHeadSha = String(result.row?.head_sha || '').trim() || null;
+    const reviewedHeadSha = String(headSha || '').trim() || null;
+    return {
+      ...result,
+      producerHeadSha,
+      reviewedHeadSha,
+      headShaMatchesReviewed: producerHeadSha && reviewedHeadSha ? producerHeadSha === reviewedHeadSha : null,
+    };
+  }
+  if (isCleanMissingMergedSignal(result)) {
+    const producerEvidence = readBuildCompletionProducerEvidenceImpl({
+      repo,
+      signalKind: 'merged',
+      hqRoot,
+      rootDir,
+      env,
+    });
+    if (producerEvidence?.ok) {
+      return {
+        ...result,
+        producerEvidence: producerEvidence.row,
+        producerEvidenceTarget: producerEvidence.target || null,
+      };
+    }
+    return {
+      ...(producerEvidence || { ok: false, reason: 'missing-build-completion-producer-evidence' }),
+      producerEvidence: producerEvidence || null,
+      prSignal: result,
+    };
+  }
+  return result;
 }
 
 function isCleanMissingMergedSignal(result) {
@@ -730,6 +765,7 @@ export async function maybeDispatchAmaCloser({
   processKillImpl = process.kill,
   readTemplateImpl = null,
   writeFileImpl = null,
+  readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
   logger = console,
 }) {
@@ -855,6 +891,7 @@ export async function maybeDispatchAmaCloser({
     hqRoot,
     rootDir,
     env: process.env,
+    readBuildCompletionProducerEvidenceImpl,
     readBuildCompletionSignalForPrImpl,
   });
   if (mergedSignal?.ok) {
@@ -867,6 +904,8 @@ export async function maybeDispatchAmaCloser({
       launchRequestId: existingRecord?.launchRequestId || null,
       promptPath: existingRecord?.promptPath || null,
       mergedSignal: mergedSignal.row,
+      mergedSignalHeadShaMatchesReviewed: mergedSignal.headShaMatchesReviewed,
+      mergedSignalProducerHeadSha: mergedSignal.producerHeadSha,
     };
   }
   const mergedSignalUnknown = isUnknownMergedSignal(mergedSignal);

@@ -1205,6 +1205,7 @@ test('SSG-06: ledger merged signal resolves closer ownership as done', async (t)
         completion_id: 'bcmp_merged',
         repo: dispatchContext.repo,
         pr_number: prMetadata.prNumber,
+        head_sha: 'f'.repeat(40),
         signal_kind: 'merged',
       },
     }),
@@ -1214,6 +1215,8 @@ test('SSG-06: ledger merged signal resolves closer ownership as done', async (t)
   assert.equal(result.skipMergeAgent, true);
   assert.equal(result.reason, 'merged-signal-present');
   assert.equal(result.mergedSignal.completion_id, 'bcmp_merged');
+  assert.equal(result.mergedSignalProducerHeadSha, 'f'.repeat(40));
+  assert.equal(result.mergedSignalHeadShaMatchesReviewed, false);
   assert.equal(execCalled, false, 'merged signal is authoritative; no dispatch/status probe needed');
 });
 
@@ -1267,6 +1270,10 @@ test('SSG-06: hq succeeded status alone does not retain closer ownership', async
       return { stdout: '{"dispatchId":"dispatch_retry","launchRequestId":"lrq_retry"}', stderr: '' };
     },
     readTemplateImpl: () => 'stubbed',
+    readBuildCompletionProducerEvidenceImpl: () => ({
+      ok: true,
+      row: { completion_id: 'bcmp_prior', repo: dispatchContext.repo, signal_kind: 'merged' },
+    }),
     readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
   });
 
@@ -1276,6 +1283,62 @@ test('SSG-06: hq succeeded status alone does not retain closer ownership', async
     calls.some((args) => args[0] === 'dispatch' && args[1] !== 'status'),
     'unverified terminal success must release ownership and allow re-dispatch',
   );
+});
+
+test('SSG-06: hq succeeded status retains hold when merge producer has no repo evidence', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-ssg06-no-producer-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatched',
+    retryCount: 1,
+    dispatchedAt: '2026-06-20T10:00:00Z',
+    dispatchId: 'dispatch_succeeded',
+    launchRequestId: 'lrq_succeeded',
+    lastObservedStatus: 'starting',
+    lastObservedAt: '2026-06-20T10:00:00Z',
+    lastError: null,
+  });
+
+  const calls = [];
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:05:00Z' },
+    execFileImpl: async (_cmd, args) => {
+      calls.push(args);
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: '{"status":"succeeded"}', stderr: '' };
+      }
+      return { stdout: '{"dispatchId":"dispatch_unexpected","launchRequestId":"lrq_unexpected"}', stderr: '' };
+    },
+    readTemplateImpl: () => 'stubbed',
+    readBuildCompletionProducerEvidenceImpl: () => ({
+      ok: false,
+      reason: 'missing-build-completion-producer-evidence',
+    }),
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(result.reason, 'existing-dispatch-succeeded');
+  assert.equal(
+    calls.filter((args) => args[0] === 'dispatch' && args[1] !== 'status').length,
+    0,
+    'table-present-but-producer-absent must retain the terminal hold',
+  );
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  assert.equal(record.lastError, 'merged-signal-read-missing-build-completion-producer-evidence');
 });
 
 test('SSG-06: transient merged-signal read failure retains terminal closer hold', async (t) => {

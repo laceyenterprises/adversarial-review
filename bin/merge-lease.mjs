@@ -5,9 +5,11 @@
  * Exit codes:
  *   0   acquired/released/status emitted
  *   64  usage or validation error
+ *   70  PR parked after exceeding the gate-attempt cap
  *   75  retryable timeout/contention/runtime failure
  */
 
+import { execFile } from 'node:child_process';
 import { hostname } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -18,7 +20,9 @@ import {
   assessMergeLeaseNeedsRevalidation,
   deriveLeaseKey,
   inspectMergeLease,
+  recordMergeLeaseGateAttempt,
   reclaimIfStale,
+  reconcileMergeLeases,
   readMergeLeaseWaiters,
   releaseMergeLease,
   removeMergeLeaseWaiter,
@@ -28,9 +32,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
 
 const EXIT_USAGE = 64;
+const EXIT_PARKED = 70;
 const EXIT_TIMEOUT = 75;
 const DEFAULT_SLEEP_MS = 250;
 const DEFAULT_RELEASE_RETRY_MS = 1000;
+const DEFAULT_MAX_GATE_ATTEMPTS = 5;
 
 const USAGE = `\
 Usage:
@@ -39,6 +45,7 @@ Usage:
                       [--root-dir <path>]
   merge-lease release --repo <owner/name> --base <branch> --pr <n>
                       --lease-id <id> [--root-dir <path>]
+  merge-lease reconcile --repo <owner/name> --base <branch> [--root-dir <path>]
   merge-lease status  --repo <owner/name> --base <branch> [--root-dir <path>]
   merge-lease list    --repo <owner/name> --base <branch> [--root-dir <path>]
   merge-lease needs-revalidation --repo-path <path> --base <branch>
@@ -52,6 +59,7 @@ Safety:
 Exit codes:
   0   acquired/released/status emitted
   64  usage or validation error
+  70  PR parked after exceeding the gate-attempt cap
   75  retryable timeout/contention/runtime failure
 `;
 
@@ -105,6 +113,11 @@ function parseNonNegativeNumber(value, label) {
     throw usageError(`--${label} must be a non-negative number`);
   }
   return n;
+}
+
+function parseMaxGateAttempts(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MAX_GATE_ATTEMPTS;
 }
 
 function parseCommon(argv, extraOptions = {}) {
@@ -186,6 +199,19 @@ function timeoutJson({ repo, base, waitedSeconds }) {
   };
 }
 
+function parkedJson({ repo, base, pr, head, attempt, maxAttempts, reason }) {
+  return {
+    acquired: false,
+    parked: true,
+    reason,
+    key: deriveLeaseKey({ repo, base }).key,
+    pr,
+    head,
+    attempts: attempt.attempts,
+    maxAttempts,
+  };
+}
+
 function retryableReleaseJson({ repo, base, leaseId, reason, existingLease }) {
   return {
     released: false,
@@ -246,6 +272,10 @@ function statusJson(status) {
       ...waiter,
       ageSeconds: waiterAge(waiter, status.inspectedAt),
     })),
+    attempts: status.attempts.map((attempt) => ({
+      ...attempt,
+      ageSeconds: waiterAge({ arrivedAt: attempt.firstAttemptAt }, status.inspectedAt),
+    })),
     inspectedAt: status.inspectedAt,
   };
 }
@@ -272,6 +302,8 @@ async function runAcquire(argv, deps) {
   const ownerPgid =
     values['owner-pgid'] == null ? null : parsePositiveInteger(values['owner-pgid'], 'owner-pgid');
   const waitSeconds = parseNonNegativeNumber(values.wait, 'wait');
+  const startedMs = deps.nowMs();
+  const deadlineMs = startedMs + (waitSeconds * 1000);
 
   if (ownerPid === deps.selfPid) {
     throw usageError('--owner-pid must identify the caller, not the merge-lease CLI process');
@@ -280,8 +312,43 @@ async function runAcquire(argv, deps) {
     throw usageError('--owner-pid is not live on this host');
   }
 
-  const startedMs = deps.nowMs();
-  const deadlineMs = startedMs + (waitSeconds * 1000);
+  let gateAttempt = null;
+  while (!gateAttempt) {
+    try {
+      gateAttempt = recordMergeLeaseGateAttempt({
+        rootDir,
+        repo,
+        base,
+        pr,
+        head,
+        now: deps.nowIso(),
+        maxAttempts: deps.maxGateAttempts,
+      });
+    } catch (err) {
+      if (!isMutationLockBusyError(err)) throw err;
+      if (deps.nowMs() >= deadlineMs) {
+        jsonLine(deps.stdout, timeoutJson({
+          repo,
+          base,
+          waitedSeconds: Math.max(0, Math.floor((deps.nowMs() - startedMs) / 1000)),
+        }));
+        return EXIT_TIMEOUT;
+      }
+      await deps.sleep(Math.min(DEFAULT_SLEEP_MS, Math.max(1, deadlineMs - deps.nowMs())));
+    }
+  }
+  if (gateAttempt.parked) {
+    jsonLine(deps.stdout, parkedJson({
+      repo,
+      base,
+      pr,
+      head,
+      attempt: gateAttempt.attempt,
+      maxAttempts: gateAttempt.maxAttempts,
+      reason: 'max-gate-attempts',
+    }));
+    return EXIT_PARKED;
+  }
   const existingWaiter = readMergeLeaseWaiters(rootDir, { repo, base }).find((waiter) => (
     Number(waiter.pr) === pr
     && waiter.head === head
@@ -361,6 +428,35 @@ async function runAcquire(argv, deps) {
     attempt += 1;
     await deps.sleep(Math.min(DEFAULT_SLEEP_MS, Math.max(1, deadlineMs - deps.nowMs())));
   }
+}
+
+async function runReconcile(argv, deps) {
+  const { values } = parseCommon(argv);
+  if (values.help) {
+    deps.stdout.write(USAGE);
+    return 0;
+  }
+  const rootDir = values['root-dir'] || DEFAULT_ROOT_DIR;
+  const repo = requireRepoName(values);
+  const base = requireBaseName(values);
+  const result = await reconcileMergeLeases({
+    rootDir,
+    repo,
+    base,
+    now: deps.nowIso(),
+    host: deps.host,
+    pidAliveFn: deps.pidAliveFn,
+    execFileImpl: deps.execFileImpl,
+  });
+  jsonLine(deps.stdout, {
+    reconciled: result.reconciled,
+    released: result.released,
+    key: deriveLeaseKey({ repo, base }).key,
+    reason: result.reason,
+    ...(result.holderPrState ? { holderPrState: result.holderPrState } : {}),
+    existingLease: result.released ? null : result.inspection?.holder,
+  });
+  return result.reconciled ? 0 : EXIT_TIMEOUT;
 }
 
 async function runRelease(argv, deps) {
@@ -486,6 +582,8 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
     host: hostname(),
     acquireMergeLease,
     assessMergeLeaseNeedsRevalidation,
+    execFileImpl: execFile,
+    maxGateAttempts: parseMaxGateAttempts(process.env.AMG_MAX_GATE_ATTEMPTS),
     pidAliveFn: defaultPidAliveFn,
     nowIso,
     nowMs: () => Date.now(),
@@ -505,6 +603,8 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
         return await runAcquire(argv.slice(1), deps);
       case 'release':
         return await runRelease(argv.slice(1), deps);
+      case 'reconcile':
+        return await runReconcile(argv.slice(1), deps);
       case 'status':
       case 'list':
         return runStatus(argv.slice(1), deps);

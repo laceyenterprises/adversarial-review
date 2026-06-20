@@ -10,7 +10,9 @@ dispatch, and operator runbooks in this repo must keep aligned.
 AMA serializes local merge execution through a durable file lease keyed by
 `(repo, base)`, where the canonical key is `<owner>/<repo>::<base>`. The holder
 file lives under `data/merge-leases/` with a sanitized slug derived from that key,
-and the sibling `.waiters.json` file records FIFO contenders for the same base.
+the sibling `.waiters.json` file records FIFO contenders for the same base, and
+the sibling `.attempts.json` file records gate-attempt counts by PR/head for the
+same base.
 
 Only one holder may acquire a lease for a key. Acquisition writes the holder file
 with the repo, base, generated `leaseId`, PR number, head SHA, process id, host,
@@ -33,25 +35,52 @@ is dead or when the lock has exceeded its short critical-section TTL. A busy liv
 mutation lock must be reported as `mutation-lock-busy`, not hidden behind an
 identity-change reason.
 
-The operator-facing `merge-lease` CLI exposes `acquire`, `release`, `status`,
-and `list` subcommands over this lease state. `acquire` is the blocking command:
-callers pass the target repo/base, PR, head SHA, owner PID, optional owner PGID,
-and a wait deadline. Argument and validation failures exit `64`; successful
-acquire/status/release output exits `0`; an unmet acquire deadline, persistent
-release contention, or unexpected runtime/IO failure exits `75` and is
-retryable. Live `mutation-lock-busy` contention during waiter registration,
-pruning, release, or timeout cleanup is transient: the CLI must retry inside the
-caller-visible wait window and, if the deadline expires, return `75` rather
-than reclassifying contention as usage. Runtime errors must not print the usage
-banner; `64` is reserved for bad arguments and validation failures. CLI `repo`
-must be shaped `owner/name`, and CLI `base` must be a safe branch name with no
-absolute path, traversal, backslash, or leading dash component before either
-value is used to derive lease files. PID liveness treats `EPERM` from
-`process.kill(pid, 0)` as "process exists" and only `ESRCH` as dead, so a
-cross-user live holder is not reclaimed as dead.
+The operator-facing `merge-lease` CLI exposes `acquire`, `release`,
+`reconcile`, `status`, `list`, and `needs-revalidation` subcommands over this
+lease state. `acquire` is the blocking command: callers pass the target
+repo/base, PR, head SHA, owner PID, optional owner PGID, and a wait deadline.
+Argument and validation failures exit `64`; successful acquire/status/release
+and reconciled output exits `0`; an unmet acquire deadline, persistent release
+contention, unreconciled live-holder state, or unexpected runtime/IO failure
+exits `75` and is retryable. If a PR/head exceeds the configured gate-attempt
+cap, `acquire` exits `70` with `parked:true` and
+`reason:"max-gate-attempts"`; callers must park that PR/head for operator
+review rather than re-queueing the same gate attempt. Live `mutation-lock-busy`
+contention during attempt recording, waiter registration, pruning, release, or
+timeout cleanup is transient: the CLI must retry inside the caller-visible wait
+window and, if the deadline expires, return `75` rather than reclassifying
+contention as usage. Runtime errors must not print the usage banner; `64` is
+reserved for bad arguments and validation failures. CLI `repo` must be shaped
+`owner/name`, and CLI `base` must be a safe branch name with no absolute path,
+traversal, backslash, or leading dash component before either value is used to
+derive lease files. PID liveness treats `EPERM` from `process.kill(pid, 0)` as
+"process exists" and only `ESRCH` as dead, so a cross-user live holder is not
+reclaimed as dead.
 If the holder file has already been written, post-acquire waiter cleanup is
 best-effort: a busy waiter mutation lock must not make the caller report a
 timeout while it already owns the lease.
+
+Gate-attempt state is durable per `(repo, base)` in
+`data/merge-leases/<repo-slug>__<base>.attempts.json`. Each record is keyed by
+PR number and head SHA and stores the attempt count, first attempt timestamp,
+and last attempt timestamp. `AMG_MAX_GATE_ATTEMPTS` sets the cap and defaults to
+`5`; invalid, empty, or non-positive values fall back to that default. The
+current acquire attempt is recorded before the lease wait loop starts, and the
+park decision uses the strict `attempts > maxAttempts` rule. Attempt records
+must be pruned when the matching PR/head lease is successfully released, and
+records whose last attempt is older than 30 days must be dropped during attempt
+recording so the hottest base-branch attempt file remains bounded.
+
+`reconcile` is an operator recovery command for a stuck current holder. It may
+release the holder when the stored same-host owner PID is dead, when a same-host
+holder is past deadline and its process is no longer live, when a cross-host
+holder is past deadline, or when GitHub reports the holder PR as `MERGED` or
+`CLOSED`. It must release through the same holder identity fence used by normal
+`release`, so an inspect-to-reconcile race cannot delete a newer holder. It must
+not release a holder whose PR is still open and whose owner is still plausibly
+live. The GitHub PR-state probe used by `reconcile` must run with a bounded
+subprocess timeout and output buffer, matching the module's bounded subprocess
+discipline.
 
 Reclaim is allowed only when the holder can no longer be trusted to serialize
 the merge lane:

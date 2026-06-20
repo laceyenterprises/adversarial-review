@@ -16,6 +16,8 @@ import {
   acquireMergeLease,
   inspectMergeLease,
   mergeLeaseFilePath,
+  readMergeLeaseAttempts,
+  recordMergeLeaseGateAttempt,
   readMergeLeaseWaiters,
   releaseMergeLease,
   upsertMergeLeaseWaiter,
@@ -619,6 +621,107 @@ test('merge-lease release reports persistent mutation-lock-busy as retryable', a
   }
 });
 
+test('merge-lease reconcile releases holder whose PR is merged', async () => {
+  const rootDir = freshRoot();
+  try {
+    const held = acquireFixture(rootDir, { holderPr: 305, holderHead: 'merged-head' });
+    const { code, io } = await runCli(rootDir, [
+      'reconcile',
+      '--repo', REPO,
+      '--base', BASE,
+    ], {
+      execFileImpl: (file, args, options, callback) => {
+        assert.equal(file, 'gh');
+        assert.deepEqual(args, ['pr', 'view', '305', '--repo', REPO, '--json', 'state']);
+        assert.equal(options.timeout, 30000);
+        assert.equal(options.maxBuffer, 10 * 1024 * 1024);
+        callback(null, '{"state":"MERGED"}\n', '');
+      },
+    });
+    const out = jsonOutput(io);
+    assert.equal(code, 0);
+    assert.equal(out.reconciled, true);
+    assert.equal(out.released, true);
+    assert.equal(out.reason, 'holder-pr-merged');
+    assert.equal(out.holderPrState, 'MERGED');
+    assert.equal(out.existingLease, null);
+    assert.equal(existsSync(held.leasePath), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('merge-lease reconcile prunes released holder gate attempt', async () => {
+  const rootDir = freshRoot();
+  try {
+    acquireFixture(rootDir, { holderPr: 307, holderHead: 'merged-attempt-head' });
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      repo: REPO,
+      base: BASE,
+      pr: 307,
+      head: 'merged-attempt-head',
+      now: '2026-06-20T18:00:10.000Z',
+      maxAttempts: 5,
+    });
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      repo: REPO,
+      base: BASE,
+      pr: 308,
+      head: 'other-head',
+      now: '2026-06-20T18:00:11.000Z',
+      maxAttempts: 5,
+    });
+    const { code, io } = await runCli(rootDir, [
+      'reconcile',
+      '--repo', REPO,
+      '--base', BASE,
+    ], {
+      execFileImpl: (file, args, options, callback) => {
+        assert.equal(file, 'gh');
+        assert.deepEqual(args, ['pr', 'view', '307', '--repo', REPO, '--json', 'state']);
+        assert.equal(options.timeout, 30000);
+        callback(null, '{"state":"MERGED"}\n', '');
+      },
+    });
+
+    const out = jsonOutput(io);
+    assert.equal(code, 0);
+    assert.equal(out.released, true);
+    assert.deepEqual(
+      readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE }).map((attempt) => `${attempt.pr}:${attempt.head}`),
+      ['308:other-head'],
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('merge-lease reconcile releases dead-owner-pid holder without calling gh', async () => {
+  const rootDir = freshRoot();
+  try {
+    acquireFixture(rootDir, { holderPr: 306, holderPid: 99999, holderHost: HOST });
+    const { code, io } = await runCli(rootDir, [
+      'reconcile',
+      '--repo', REPO,
+      '--base', BASE,
+    ], {
+      pidAliveFn: (pid) => pid !== 99999,
+      execFileImpl: () => {
+        throw new Error('gh should not be called');
+      },
+    });
+    const out = jsonOutput(io);
+    assert.equal(code, 0);
+    assert.equal(out.released, true);
+    assert.equal(out.reason, 'dead-holder-pid');
+    assert.equal(inspectMergeLease({ rootDir, repo: REPO, base: BASE }).exists, false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('merge-lease status reports holder and waiter ages', async () => {
   const rootDir = freshRoot();
   try {
@@ -638,6 +741,24 @@ test('merge-lease status reports holder and waiter ages', async () => {
       waiterId: 'w-status',
       arrivedAt: '2026-06-20T18:00:10.000Z',
     });
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      repo: REPO,
+      base: BASE,
+      pr: 402,
+      head: 'waiter-head',
+      now: '2026-06-20T18:00:15.000Z',
+      maxAttempts: 5,
+    });
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      repo: REPO,
+      base: BASE,
+      pr: 402,
+      head: 'waiter-head',
+      now: '2026-06-20T18:00:30.000Z',
+      maxAttempts: 5,
+    });
     const { code, io } = await runCli(rootDir, [
       'status',
       '--repo', REPO,
@@ -653,6 +774,64 @@ test('merge-lease status reports holder and waiter ages', async () => {
     assert.equal(out.waiters.length, 1);
     assert.equal(out.waiters[0].waiterId, 'w-status');
     assert.equal(out.waiters[0].ageSeconds, 50);
+    assert.equal(out.attempts.length, 1);
+    assert.equal(out.attempts[0].pr, 402);
+    assert.equal(out.attempts[0].attempts, 2);
+    assert.equal(out.attempts[0].ageSeconds, 45);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('merge-lease acquire parks after max gate attempts', async () => {
+  const rootDir = freshRoot();
+  try {
+    acquireFixture(rootDir);
+    const first = await runCli(rootDir, [
+      'acquire',
+      '--repo', REPO,
+      '--base', BASE,
+      '--pr', '601',
+      '--head', 'starved-head',
+      '--owner-pid', '8601',
+      '--wait', '0',
+    ], {
+      maxGateAttempts: 2,
+    });
+    assert.equal(first.code, 75);
+    assert.equal(jsonOutput(first.io).timedOut, true);
+
+    const second = await runCli(rootDir, [
+      'acquire',
+      '--repo', REPO,
+      '--base', BASE,
+      '--pr', '601',
+      '--head', 'starved-head',
+      '--owner-pid', '8601',
+      '--wait', '0',
+    ], {
+      maxGateAttempts: 2,
+    });
+    assert.equal(second.code, 75);
+    assert.equal(jsonOutput(second.io).timedOut, true);
+
+    const parked = await runCli(rootDir, [
+      'acquire',
+      '--repo', REPO,
+      '--base', BASE,
+      '--pr', '601',
+      '--head', 'starved-head',
+      '--owner-pid', '8601',
+      '--wait', '0',
+    ], {
+      maxGateAttempts: 2,
+    });
+    const out = jsonOutput(parked.io);
+    assert.equal(parked.code, 70);
+    assert.equal(out.parked, true);
+    assert.equal(out.reason, 'max-gate-attempts');
+    assert.equal(out.attempts, 3);
+    assert.equal(out.maxAttempts, 2);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

@@ -339,10 +339,22 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
 2. **Rebase onto latest `main` and confirm it holds.** The hammer always rebases
    the branch to the current base (not merely on `BEHIND`) and re-validates the
    rebased head — full suite + required checks green — before merging.
-3. **Post a closing comment.** On a confirmed merge the hammer posts a
+3. **Keep canonical docs current.** Doc-currency is part of the terminal
+   remediation scope, not net-new feature work. When the diff changes an
+   in-repo persistent store shape and `docs/data-model/` exists, the hammer
+   updates the matching `docs/data-model/NN-*.md` file and
+   `docs/data-model/catalog.json`, then runs
+   `node scripts/validate-data-model-catalog.mjs`; a red validator is a red
+   check. When the diff changes a module surface or operational contract and
+   `modules/<name>/<name>-walkthrough.md` exists, the hammer updates that
+   walkthrough. If the PR repository lacks those docs because they belong to a
+   superproject or submodule boundary, the hammer leaves the repo-local surface
+   alone and notes the skipped superproject-doc obligation in its audit comment.
+4. **Post a closing comment.** On a confirmed merge the hammer posts a
    `✅ Closed by Hammer` comment with the merged SHA, merge method, remediated
-   finding counts, the failing tests it fixed, and the rebase-attempt count.
-4. **Merge-agent identity.** The hammer commits/comments/merges under the
+   finding counts, the failing tests it fixed, doc-currency work or skipped
+   superproject-doc obligations, and the rebase-attempt count.
+5. **Merge-agent identity.** The hammer commits/comments/merges under the
    merge-agent app identity (see the worker-pool hammer identity + token wiring),
    so the close is attributable to the merge-agent bot, not a generic worker.
 

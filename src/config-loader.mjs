@@ -367,10 +367,27 @@ function schemaV1() {
                 __min: 0.0,
                 __max: 3600.0,
               },
-              // Port-forward-wedge remediation tier (#1958).
+              // Port-forward-wedge remediation tiers (#1958, PFW-05).
               broker_container_name: {
                 __type: TYPE_STRING,
                 __default: 'litellm-oauth-broker-1',
+              },
+              broker_compose_file: {
+                __type: TYPE_STRING,
+                __default:
+                  '/Users/airlock/agent-os/modules/model-routing-budget-control/runtime/config/docker-compose.yml',
+              },
+              broker_compose_project_name: {
+                __type: TYPE_STRING,
+                __default: 'litellm',
+              },
+              broker_compose_service_name: {
+                __type: TYPE_STRING,
+                __default: 'oauth-broker',
+              },
+              broker_docker_network: {
+                __type: TYPE_STRING,
+                __default: 'litellm_default',
               },
               docker_bin: {
                 __type: TYPE_STRING,
@@ -385,6 +402,55 @@ function schemaV1() {
                 __default: 3,
                 __min: 1,
                 __max: 20,
+              },
+              docker_reset_enabled: {
+                __type: TYPE_BOOL,
+                __default: true,
+              },
+              docker_reset_cooldown_seconds: {
+                __type: TYPE_INT,
+                __default: 3600,
+                __min: 0,
+                __max: 86400,
+              },
+              docker_reset_daily_cap: {
+                __type: TYPE_INT,
+                __default: 3,
+                __min: 0,
+                __max: 20,
+              },
+              docker_reset_lifetime_cap: {
+                __type: TYPE_INT,
+                __default: 20,
+                __min: 0,
+                __max: 1000,
+              },
+              full_restart_break_glass_enabled: {
+                __type: TYPE_BOOL,
+                __default: false,
+              },
+              full_restart_daily_cap: {
+                __type: TYPE_INT,
+                __default: 1,
+                __min: 0,
+                __max: 10,
+              },
+              full_restart_lifetime_cap: {
+                __type: TYPE_INT,
+                __default: 3,
+                __min: 0,
+                __max: 100,
+              },
+              full_restart_docker_daemon_wait_seconds: {
+                __type: TYPE_INT,
+                __default: 180,
+                __min: 1,
+                __max: 1800,
+              },
+              critical_service_patterns: {
+                __type: TYPE_STRING,
+                __default:
+                  'litellm,litellm-db,agent-control,agent_control,lgtm-alloy,lgtm-prometheus,lgtm-loki,lgtm-tempo,lgtm-grafana,session-ledger-postgres-exporter',
               },
             },
           },

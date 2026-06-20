@@ -11,7 +11,7 @@ import {
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { main as mergeLeaseMain } from '../bin/merge-lease.mjs';
+import { defaultPidAliveFn, main as mergeLeaseMain } from '../bin/merge-lease.mjs';
 import {
   acquireMergeLease,
   inspectMergeLease,
@@ -177,6 +177,99 @@ test('merge-lease acquire rejects missing dead and self owner pid before writing
     } finally {
       rmSync(rootDir, { recursive: true, force: true });
     }
+  }
+});
+
+test('merge-lease acquire rejects unsafe repo and base path inputs before deriving files', async () => {
+  const cases = [
+    {
+      name: 'repo traversal',
+      args: ['--repo', '../../elsewhere', '--base', BASE],
+      message: /--repo must be shaped owner\/name/,
+    },
+    {
+      name: 'base traversal',
+      args: ['--repo', REPO, '--base', '../main'],
+      message: /--base must be a safe branch name/,
+    },
+    {
+      name: 'base absolute',
+      args: ['--repo', REPO, '--base', '/main'],
+      message: /--base must be a safe branch name/,
+    },
+  ];
+
+  for (const c of cases) {
+    const rootDir = freshRoot();
+    try {
+      const { code, io } = await runCli(rootDir, [
+        'acquire',
+        ...c.args,
+        '--pr', '123',
+        '--head', 'abc123',
+        '--owner-pid', '8123',
+        '--wait', '0',
+      ]);
+      assert.equal(code, 64, c.name);
+      assert.equal(io.stdoutText, '');
+      assert.match(io.stderrText, c.message);
+      assert.equal(existsSync(join(rootDir, 'data', 'merge-leases')), false);
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('default pid liveness treats EPERM as live and ESRCH as dead', () => {
+  const realKill = process.kill;
+  try {
+    process.kill = (pid, signal) => {
+      assert.equal(signal, 0);
+      if (pid === 8123) {
+        const err = new Error('operation not permitted');
+        err.code = 'EPERM';
+        throw err;
+      }
+      if (pid === 8124) {
+        const err = new Error('no such process');
+        err.code = 'ESRCH';
+        throw err;
+      }
+      return true;
+    };
+
+    assert.equal(defaultPidAliveFn(8123), true);
+    assert.equal(defaultPidAliveFn(8124), false);
+    assert.equal(defaultPidAliveFn(8125), true);
+  } finally {
+    process.kill = realKill;
+  }
+});
+
+test('merge-lease acquire maps unexpected runtime errors to retryable exit without usage text', async () => {
+  const rootDir = freshRoot();
+  try {
+    const { code, io } = await runCli(rootDir, [
+      'acquire',
+      '--repo', REPO,
+      '--base', BASE,
+      '--pr', '123',
+      '--head', 'runtime-error',
+      '--owner-pid', '8123',
+      '--wait', '1',
+    ], {
+      acquireMergeLease: () => {
+        const err = new Error('EIO while writing lease');
+        err.code = 'EIO';
+        throw err;
+      },
+    });
+    assert.equal(code, 75);
+    assert.equal(io.stdoutText, '');
+    assert.match(io.stderrText, /retryable runtime failure: EIO while writing lease/);
+    assert.doesNotMatch(io.stderrText, /Usage:/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
   }
 });
 
@@ -429,21 +522,52 @@ test('merge-lease release with stale lease id does not delete current holder', a
   }
 });
 
-test('merge-lease release reports mutation-lock-busy reason', async () => {
+test('merge-lease release retries mutation-lock-busy before returning success', async () => {
   const rootDir = freshRoot();
   try {
-    const held = acquireFixture(rootDir, { holderPr: 303, holderHead: 'busy-release-head' });
-    writeLiveMutationLock(`${held.leasePath}.mutation.lock`, 'mll_busy_release');
+    const held = acquireFixture(rootDir, { holderPr: 303, holderHead: 'busy-then-release-head' });
+    const lockPath = `${held.leasePath}.mutation.lock`;
+    writeLiveMutationLock(lockPath, 'mll_busy_release_retry');
+    let lockReleased = false;
     const { code, io } = await runCli(rootDir, [
       'release',
       '--repo', REPO,
       '--base', BASE,
       '--pr', '303',
       '--lease-id', held.lease.leaseId,
-    ]);
+    ], {
+      onSleep: () => {
+        if (lockReleased) return;
+        lockReleased = true;
+        unlinkSync(lockPath);
+      },
+    });
     const out = jsonOutput(io);
     assert.equal(code, 0);
+    assert.equal(out.released, true);
+    assert.equal(out.existingLease, null);
+    assert.equal(existsSync(held.leasePath), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('merge-lease release reports persistent mutation-lock-busy as retryable', async () => {
+  const rootDir = freshRoot();
+  try {
+    const held = acquireFixture(rootDir, { holderPr: 304, holderHead: 'busy-release-head' });
+    writeLiveMutationLock(`${held.leasePath}.mutation.lock`, 'mll_busy_release');
+    const { code, io } = await runCli(rootDir, [
+      'release',
+      '--repo', REPO,
+      '--base', BASE,
+      '--pr', '304',
+      '--lease-id', held.lease.leaseId,
+    ]);
+    const out = jsonOutput(io);
+    assert.equal(code, 75);
     assert.equal(out.released, false);
+    assert.equal(out.retryable, true);
     assert.equal(out.reason, 'mutation-lock-busy');
     assert.equal(out.existingLease.leaseId, held.lease.leaseId);
   } finally {

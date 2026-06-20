@@ -61,7 +61,9 @@ function pidIsLive(pid) {
   try {
     process.kill(n, 0);
     return true;
-  } catch {
+  } catch (err) {
+    if (err?.code === 'EPERM') return true;
+    if (err?.code === 'ESRCH') return false;
     return false;
   }
 }

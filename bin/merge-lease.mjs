@@ -5,7 +5,7 @@
  * Exit codes:
  *   0   acquired/released/status emitted
  *   64  usage or validation error
- *   75  acquire wait timeout; retryable
+ *   75  retryable timeout/contention/runtime failure
  */
 
 import { hostname } from 'node:os';
@@ -29,6 +29,7 @@ const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
 const EXIT_USAGE = 64;
 const EXIT_TIMEOUT = 75;
 const DEFAULT_SLEEP_MS = 250;
+const DEFAULT_RELEASE_RETRY_MS = 1000;
 
 const USAGE = `\
 Usage:
@@ -43,18 +44,31 @@ Usage:
 Exit codes:
   0   acquired/released/status emitted
   64  usage or validation error
-  75  acquire wait timeout; retryable
+  75  retryable timeout/contention/runtime failure
 `;
+
+class UsageError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'UsageError';
+  }
+}
+
+function usageError(message) {
+  return new UsageError(message);
+}
 
 function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function defaultPidAliveFn(pid) {
+export function defaultPidAliveFn(pid) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (err) {
+    if (err?.code === 'EPERM') return true;
+    if (err?.code === 'ESRCH') return false;
     return false;
   }
 }
@@ -65,45 +79,72 @@ function nowIso() {
 
 function parsePositiveInteger(value, label) {
   if (value == null || value === '' || typeof value === 'boolean') {
-    throw new Error(`--${label} must be a positive integer`);
+    throw usageError(`--${label} must be a positive integer`);
   }
   const n = Number(value);
   if (!Number.isInteger(n) || n <= 0) {
-    throw new Error(`--${label} must be a positive integer`);
+    throw usageError(`--${label} must be a positive integer`);
   }
   return n;
 }
 
 function parseNonNegativeNumber(value, label) {
   if (value == null || value === '' || typeof value === 'boolean') {
-    throw new Error(`--${label} must be a non-negative number`);
+    throw usageError(`--${label} must be a non-negative number`);
   }
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) {
-    throw new Error(`--${label} must be a non-negative number`);
+    throw usageError(`--${label} must be a non-negative number`);
   }
   return n;
 }
 
 function parseCommon(argv, extraOptions = {}) {
-  return parseArgs({
-    args: argv,
-    allowPositionals: true,
-    strict: true,
-    options: {
-      repo: { type: 'string' },
-      base: { type: 'string' },
-      'root-dir': { type: 'string' },
-      help: { type: 'boolean', short: 'h', default: false },
-      ...extraOptions,
-    },
-  });
+  try {
+    return parseArgs({
+      args: argv,
+      allowPositionals: true,
+      strict: true,
+      options: {
+        repo: { type: 'string' },
+        base: { type: 'string' },
+        'root-dir': { type: 'string' },
+        help: { type: 'boolean', short: 'h', default: false },
+        ...extraOptions,
+      },
+    });
+  } catch (err) {
+    throw usageError(err.message);
+  }
 }
 
 function requireString(values, name) {
   const value = String(values[name] ?? '').trim();
-  if (!value) throw new Error(`--${name} is required`);
+  if (!value) throw usageError(`--${name} is required`);
   return value;
+}
+
+function requireRepoName(values) {
+  const repo = requireString(values, 'repo');
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    throw usageError('--repo must be shaped owner/name without traversal');
+  }
+  return repo;
+}
+
+function requireBaseName(values) {
+  const base = requireString(values, 'base');
+  if (
+    base.startsWith('/') ||
+    base.startsWith('-') ||
+    base.includes('..') ||
+    base.includes('\\') ||
+    base.includes('//') ||
+    !/^[A-Za-z0-9._/-]+$/.test(base)
+  ) {
+    throw usageError('--base must be a safe branch name without traversal');
+  }
+  return base;
 }
 
 function jsonLine(stdout, value) {
@@ -134,6 +175,17 @@ function timeoutJson({ repo, base, waitedSeconds }) {
     timedOut: true,
     key: deriveLeaseKey({ repo, base }).key,
     waited_s: waitedSeconds,
+  };
+}
+
+function retryableReleaseJson({ repo, base, leaseId, reason, existingLease }) {
+  return {
+    released: false,
+    retryable: true,
+    key: deriveLeaseKey({ repo, base }).key,
+    leaseId,
+    reason,
+    existingLease,
   };
 }
 
@@ -193,8 +245,8 @@ async function runAcquire(argv, deps) {
   }
 
   const rootDir = values['root-dir'] || DEFAULT_ROOT_DIR;
-  const repo = requireString(values, 'repo');
-  const base = requireString(values, 'base');
+  const repo = requireRepoName(values);
+  const base = requireBaseName(values);
   const pr = parsePositiveInteger(values.pr, 'pr');
   const head = requireString(values, 'head');
   const ownerPid = parsePositiveInteger(values['owner-pid'], 'owner-pid');
@@ -203,10 +255,10 @@ async function runAcquire(argv, deps) {
   const waitSeconds = parseNonNegativeNumber(values.wait, 'wait');
 
   if (ownerPid === deps.selfPid) {
-    throw new Error('--owner-pid must identify the caller, not the merge-lease CLI process');
+    throw usageError('--owner-pid must identify the caller, not the merge-lease CLI process');
   }
   if (!deps.pidAliveFn(ownerPid)) {
-    throw new Error('--owner-pid is not live on this host');
+    throw usageError('--owner-pid is not live on this host');
   }
 
   const startedMs = deps.nowMs();
@@ -292,7 +344,7 @@ async function runAcquire(argv, deps) {
   }
 }
 
-function runRelease(argv, deps) {
+async function runRelease(argv, deps) {
   const { values } = parseCommon(argv, {
     pr: { type: 'string' },
     'lease-id': { type: 'string' },
@@ -303,46 +355,65 @@ function runRelease(argv, deps) {
   }
 
   const rootDir = values['root-dir'] || DEFAULT_ROOT_DIR;
-  const repo = requireString(values, 'repo');
-  const base = requireString(values, 'base');
+  const repo = requireRepoName(values);
+  const base = requireBaseName(values);
   const pr = parsePositiveInteger(values.pr, 'pr');
   const leaseId = requireString(values, 'lease-id');
-  const status = inspectMergeLease({
-    rootDir,
-    repo,
-    base,
-    now: deps.nowIso(),
-    host: deps.host,
-    pidAliveFn: deps.pidAliveFn,
-  });
-  const current = status.holder;
+  const startedMs = deps.nowMs();
+  const deadlineMs = startedMs + DEFAULT_RELEASE_RETRY_MS;
 
-  if (!current || current.leaseId !== leaseId || Number(current.holderPr) !== pr) {
+  while (true) {
+    const status = inspectMergeLease({
+      rootDir,
+      repo,
+      base,
+      now: deps.nowIso(),
+      host: deps.host,
+      pidAliveFn: deps.pidAliveFn,
+    });
+    const current = status.holder;
+
+    if (!current || current.leaseId !== leaseId || Number(current.holderPr) !== pr) {
+      jsonLine(deps.stdout, {
+        released: false,
+        key: deriveLeaseKey({ repo, base }).key,
+        existingLease: current,
+      });
+      return 0;
+    }
+
+    const result = releaseMergeLease({
+      rootDir,
+      repo,
+      base,
+      leaseId,
+      holderPr: current.holderPr,
+      holderHead: current.holderHead,
+      acquiredAt: current.acquiredAt,
+    });
+    if (!result.released && result.reason === 'mutation-lock-busy') {
+      if (deps.nowMs() >= deadlineMs) {
+        jsonLine(deps.stdout, retryableReleaseJson({
+          repo,
+          base,
+          leaseId,
+          reason: result.reason,
+          existingLease: result.existingLease,
+        }));
+        return EXIT_TIMEOUT;
+      }
+      await deps.sleep(Math.min(DEFAULT_SLEEP_MS, Math.max(1, deadlineMs - deps.nowMs())));
+      continue;
+    }
     jsonLine(deps.stdout, {
-      released: false,
+      released: result.released,
       key: deriveLeaseKey({ repo, base }).key,
-      existingLease: current,
+      leaseId,
+      ...(result.reason ? { reason: result.reason } : {}),
+      existingLease: result.released ? null : result.existingLease,
     });
     return 0;
   }
-
-  const result = releaseMergeLease({
-    rootDir,
-    repo,
-    base,
-    leaseId,
-    holderPr: current.holderPr,
-    holderHead: current.holderHead,
-    acquiredAt: current.acquiredAt,
-  });
-  jsonLine(deps.stdout, {
-    released: result.released,
-    key: deriveLeaseKey({ repo, base }).key,
-    leaseId,
-    ...(result.reason ? { reason: result.reason } : {}),
-    existingLease: result.released ? null : result.existingLease,
-  });
-  return 0;
 }
 
 function runStatus(argv, deps) {
@@ -352,8 +423,8 @@ function runStatus(argv, deps) {
     return 0;
   }
   const rootDir = values['root-dir'] || DEFAULT_ROOT_DIR;
-  const repo = requireString(values, 'repo');
-  const base = requireString(values, 'base');
+  const repo = requireRepoName(values);
+  const base = requireBaseName(values);
   jsonLine(deps.stdout, statusJson(inspectMergeLease({
     rootDir,
     repo,
@@ -390,7 +461,7 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
       case 'acquire':
         return await runAcquire(argv.slice(1), deps);
       case 'release':
-        return runRelease(argv.slice(1), deps);
+        return await runRelease(argv.slice(1), deps);
       case 'status':
       case 'list':
         return runStatus(argv.slice(1), deps);
@@ -399,8 +470,12 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
         return EXIT_USAGE;
     }
   } catch (err) {
-    deps.stderr.write(`error: ${err.message}\n${USAGE}`);
-    return EXIT_USAGE;
+    if (err instanceof UsageError) {
+      deps.stderr.write(`error: ${err.message}\n${USAGE}`);
+      return EXIT_USAGE;
+    }
+    deps.stderr.write(`error: retryable runtime failure: ${err.message}\n`);
+    return EXIT_TIMEOUT;
   }
 }
 

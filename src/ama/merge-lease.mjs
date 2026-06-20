@@ -61,7 +61,9 @@ function pidIsLive(pid) {
   try {
     process.kill(n, 0);
     return true;
-  } catch {
+  } catch (err) {
+    if (err?.code === 'EPERM') return true;
+    if (err?.code === 'ESRCH') return false;
     return false;
   }
 }
@@ -160,6 +162,10 @@ function withWaiterMutationLock({ rootDir, repo, base }, fn) {
     throw new Error(`merge lease: mutation lock busy while updating waiters for ${repo}::${base}`);
   }
   return locked.value;
+}
+
+function isMutationLockBusyError(err) {
+  return /\bmutation lock busy\b/.test(String(err?.message || ''));
 }
 
 function validateIdentity({ rootDir, repo, base } = {}) {
@@ -415,6 +421,7 @@ export function acquireMergeLease({
   registerWaiter = false,
   attempt = 1,
   pidAliveFn = pidIsLive,
+  _afterHolderWrite,
 } = {}) {
   validateIdentity({ rootDir, repo, base });
   const leasePath = mergeLeaseFilePath(rootDir, { repo, base });
@@ -501,8 +508,13 @@ export function acquireMergeLease({
     throw err;
   }
 
+  if (typeof _afterHolderWrite === 'function') _afterHolderWrite({ leasePath, lease });
   if (waiter?.waiterId) {
-    removeMergeLeaseWaiter({ rootDir, repo, base, waiterId: waiter.waiterId, updatedAt: acquiredAt });
+    try {
+      removeMergeLeaseWaiter({ rootDir, repo, base, waiterId: waiter.waiterId, updatedAt: acquiredAt });
+    } catch (err) {
+      if (!isMutationLockBusyError(err)) throw err;
+    }
   }
   return { acquired: true, leasePath, lease, waiter, prunedWaiters: waiterState.pruned, reclaim };
 }

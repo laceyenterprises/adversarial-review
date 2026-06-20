@@ -33,6 +33,26 @@ is dead or when the lock has exceeded its short critical-section TTL. A busy liv
 mutation lock must be reported as `mutation-lock-busy`, not hidden behind an
 identity-change reason.
 
+The operator-facing `merge-lease` CLI exposes `acquire`, `release`, `status`,
+and `list` subcommands over this lease state. `acquire` is the blocking command:
+callers pass the target repo/base, PR, head SHA, owner PID, optional owner PGID,
+and a wait deadline. Argument and validation failures exit `64`; successful
+acquire/status/release output exits `0`; an unmet acquire deadline, persistent
+release contention, or unexpected runtime/IO failure exits `75` and is
+retryable. Live `mutation-lock-busy` contention during waiter registration,
+pruning, release, or timeout cleanup is transient: the CLI must retry inside the
+caller-visible wait window and, if the deadline expires, return `75` rather
+than reclassifying contention as usage. Runtime errors must not print the usage
+banner; `64` is reserved for bad arguments and validation failures. CLI `repo`
+must be shaped `owner/name`, and CLI `base` must be a safe branch name with no
+absolute path, traversal, backslash, or leading dash component before either
+value is used to derive lease files. PID liveness treats `EPERM` from
+`process.kill(pid, 0)` as "process exists" and only `ESRCH` as dead, so a
+cross-user live holder is not reclaimed as dead.
+If the holder file has already been written, post-acquire waiter cleanup is
+best-effort: a busy waiter mutation lock must not make the caller report a
+timeout while it already owns the lease.
+
 Reclaim is allowed only when the holder can no longer be trusted to serialize
 the merge lane:
 

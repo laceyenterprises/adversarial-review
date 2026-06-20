@@ -45,9 +45,12 @@ The merged-signal producer is outside this repository's write path: watcher
 lifecycle sync records owed
 `hq dag autowalk-on-merge --repo <repo> --pr <n>` work when it observes a PR
 merge, and Agent OS owns the session-ledger `build_completions` write behind
-that handoff. Deployments where that readable producer/table is not present
-retain the old terminal hold semantics rather than treating an unknown ledger
-state as proof the PR was not merged.
+that handoff. Deployments where the `build_completions` table itself is not
+readable retain the old terminal hold semantics rather than treating an unknown
+ledger state as proof the PR was not merged. A table that is readable but whose
+merge producer is disabled is a deployment-contract violation: the watcher can
+only observe the clean absence of a row, so operators must roll out the producer
+before relying on clean-negative release semantics.
 
 AMA's §4.2 branch-protection gate is enabled by default:
 `roles.adversarial.merge_authority.branch_protection.required` defaults to

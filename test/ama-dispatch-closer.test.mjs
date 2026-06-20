@@ -20,6 +20,7 @@ import {
   amaAuditTraceRef,
   appendAmaAuditAttempt,
   readAmaAuditEntry,
+  writeAmaAuditEntry,
 } from '../src/ama/audit.mjs';
 import {
   acquireAmaCloserLease,
@@ -1118,6 +1119,65 @@ test('SSG-06: live in-flight closer dispatch is the only retained ownership path
   assert.equal(result.skipMergeAgent, true);
   assert.equal(result.reason, 'existing-dispatch-running');
   assert.equal(launchCalled, false, 'live in-flight dispatch must be retained');
+});
+
+test('SSG-06: active hq status retains ownership despite stale failed audit', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-ssg06-active-audit-race-'));
+  const hqRoot = mkdtempSync(join(tmpdir(), 'ama-dispatch-ssg06-active-audit-hq-'));
+  t.after(() => {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  });
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir, hqRoot },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatched',
+    retryCount: 1,
+    dispatchedAt: '2026-06-20T10:00:00Z',
+    dispatchId: 'dispatch_running',
+    launchRequestId: 'lrq_running',
+    lastObservedStatus: 'starting',
+    lastObservedAt: '2026-06-20T10:00:00Z',
+    lastError: null,
+  });
+  writeAmaAuditEntry({
+    hqRoot,
+    repo: identity.repo,
+    prNumber: identity.prNumber,
+    headSha: identity.headSha,
+    now: '2026-06-20T10:01:00Z',
+    attempt: { outcome: 'failed-without-merge' },
+    metadata: {},
+  });
+
+  let launchCalled = false;
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, hqRoot, dispatchedAt: '2026-06-20T10:05:00Z' },
+    execFileImpl: async (_cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: '{"status":"running"}', stderr: '' };
+      }
+      launchCalled = true;
+      return { stdout: '{"dispatchId":"dispatch_new","launchRequestId":"lrq_new"}', stderr: '' };
+    },
+    readTemplateImpl: () => 'stubbed',
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(result.reason, 'existing-dispatch-running');
+  assert.equal(launchCalled, false, 'stale failed audit must not override active hq status');
 });
 
 test('SSG-06: ledger merged signal resolves closer ownership as done', async (t) => {

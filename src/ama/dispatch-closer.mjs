@@ -912,7 +912,11 @@ export async function maybeDispatchAmaCloser({
         }));
         existingDispatchStatus = 'unverified-terminal-success';
         releaseUnprovenTerminalHold = true;
-      } else if (auditTerminalOutcome && auditTerminalOutcome !== 'succeeded') {
+      } else if (
+        auditTerminalOutcome
+        && auditTerminalOutcome !== 'succeeded'
+        && !AMA_CLOSER_ACTIVE_STATUSES.has(status)
+      ) {
         existingDispatchStatus = 'failed';
         releaseUnprovenTerminalHold = true;
       } else if (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {

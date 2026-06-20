@@ -344,10 +344,12 @@ only path classified as `unresolvable-rebase-conflict`.
 The watcher-side convergence state `unverified-terminal-success` is not a
 closer audit status. It means the existing dispatch/audit surfaces reached a
 terminal-success observation, but the current-head merged
-`build_completions` signal was cleanly absent. Operators should expect one
-bounded re-dispatch attempt unless the next tick reads the merged signal. A
-ledger read failure does not create this state; it preserves the existing
-dispatch hold and should be diagnosed as ledger availability/producer rollout.
+`build_completions` signal was cleanly absent. Operators should expect bounded
+re-dispatch attempts up to `AMA_CLOSER_REDISPATCH_BOUND` while the asynchronous
+merge-signal producer catches up; repeated attempts inside that bound are
+producer-lag noise, not evidence of a second merge attempt. A ledger read
+failure does not create this state; it preserves the existing dispatch hold and
+should be diagnosed as ledger availability/producer rollout.
 
 ### Hammer closing discipline (2026-06-19)
 

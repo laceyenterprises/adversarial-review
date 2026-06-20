@@ -160,8 +160,11 @@ The producer for this predicate is Agent OS merge observation after the PR is
 seen merged: this repository records owed
 `hq dag autowalk-on-merge --repo <repo> --pr <n>` work during watcher lifecycle
 sync, and Agent OS owns the session-ledger `build_completions` write. Hosts
-without that readable producer surface keep the prior hold semantics because the
-watcher cannot prove a clean negative.
+without a readable `build_completions` table keep the prior hold semantics
+because the watcher cannot prove a clean negative. A readable table with the
+merge producer disabled is not distinguishable from a real clean negative inside
+this repository; operators must deploy the producer before trusting
+clean-negative release behavior.
 
 ## 4.7 CFG-01 schema
 

@@ -2267,7 +2267,7 @@ test('validateSchema rejects unsupported MHX title tags in shared CFG enums', ()
   );
 });
 
-test('validateSchema rejects allowlisted foreign top-level keys unless local-layer tolerance is explicit', () => {
+test('validateSchema rejects unknown nested worker_pool keys unless nested-local tolerance is explicit', () => {
   assert.throws(
     () => validateSchema(
       { version: 1, worker_pool: { anything: true } },
@@ -2282,7 +2282,7 @@ test('validateSchema rejects allowlisted foreign top-level keys unless local-lay
   );
 });
 
-test('validateSchema keeps foreign top-level tolerance scoped to local YAML sources', () => {
+test('validateSchema foreign top-level tolerance does not make worker_pool foreign', () => {
   assert.throws(
     () => validateSchema(
       { version: 1, worker_pool: { anything: true } },

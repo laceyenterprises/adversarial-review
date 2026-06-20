@@ -67,6 +67,14 @@ import {
   resolveAdditiveOnlyScopeReview,
   reviewBodyHasScopeViolationFinding,
 } from './additive-only-scope.mjs';
+import { assertAntigravityOAuth, getAccessToken } from './auth/antigravity-bridge.mjs';
+import {
+  allCapped,
+  markRateLimited,
+  selectAccount,
+} from './auth/antigravity-accounts.mjs';
+import { parseQuotaResetAt } from './quota-exhaustion.mjs';
+import { resolveGeminiRuntime } from './role-config.mjs';
 
 const execFileAsync = promisify(execFile);
 const REVIEW_POST_RETRY_DELAYS_MS = [0];
@@ -407,6 +415,22 @@ async function assertGeminiOAuth(env = process.env) {
 
   // Verify oauth_creds.json is readable and carries an access token.
   assertGeminiAuthReadable(env);
+}
+
+async function assertGeminiAntigravityOAuth({
+  selectAccountImpl = selectAccount,
+  assertAntigravityOAuthImpl = assertAntigravityOAuth,
+} = {}) {
+  const accountId = selectAccountImpl();
+  if (!accountId) {
+    throw new OAuthError('gemini', 'no Antigravity account is available');
+  }
+  try {
+    assertAntigravityOAuthImpl(accountId);
+  } catch (err) {
+    throw new OAuthError('gemini', err?.message || String(err));
+  }
+  return accountId;
 }
 
 /**
@@ -2153,6 +2177,28 @@ function isRetryableGeminiSubprocessError(err) {
     || detail.includes('rate limit');
 }
 
+function isAntigravityRateLimitOrAuthFailure(err) {
+  const msg = `${err?.message || ''}\n${err?.stdout || ''}\n${err?.stderr || ''}`;
+  return /401|unauthorized|oauth|login required|not logged in|429|quota|resource_exhausted|rate limit/i.test(msg);
+}
+
+function retryAfterFromGeminiFailure(err) {
+  const msg = `${err?.message || ''}\n${err?.stdout || ''}\n${err?.stderr || ''}`;
+  const explicit = msg.match(/\bretry-after[:=]\s*([^\s,;]+)/i)?.[1];
+  const parsed = parseQuotaResetAt(msg);
+  return explicit || parsed || new Date(Date.now() + 15 * 60 * 1000).toISOString();
+}
+
+function antigravityQuotaHoldDecision({ retryAfter }) {
+  const retryAfterMs = Date.parse(retryAfter);
+  return {
+    hold: true,
+    waitUntilMs: Number.isFinite(retryAfterMs) ? retryAfterMs : null,
+    retryAfter,
+    source: 'antigravity-all-capped',
+  };
+}
+
 async function withGeminiSubprocessRetry(operation, {
   retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
   sleepImpl = sleep,
@@ -2209,12 +2255,24 @@ async function spawnGeminiReview({
 async function reviewWithGemini(diff, extraContext = '', {
   promptStage = 'first',
   assertOAuthImpl = assertGeminiOAuth,
+  assertAntigravityOAuthImpl = assertGeminiAntigravityOAuth,
   spawnGeminiReviewImpl = spawnGeminiReview,
+  resolveGeminiRuntimeImpl = resolveGeminiRuntime,
+  selectAntigravityAccountImpl = selectAccount,
+  getAntigravityAccessTokenImpl = getAccessToken,
+  markAntigravityRateLimitedImpl = markRateLimited,
+  allAntigravityCappedImpl = allCapped,
   retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
   sleepImpl = sleep,
 } = {}) {
+  const runtime = resolveGeminiRuntimeImpl();
+  if (runtime !== 'cli' && runtime !== 'antigravity') {
+    throw new Error(`Unsupported Gemini runtime: ${runtime}`);
+  }
   console.error('[reviewWithGemini] asserting OAuth...');
-  await assertOAuthImpl();
+  const assertedAccountId = runtime === 'antigravity'
+    ? await assertAntigravityOAuthImpl({ selectAccountImpl: selectAntigravityAccountImpl })
+    : await assertOAuthImpl();
   console.error('[reviewWithGemini] OAuth OK');
 
   const promptPrefix = buildReviewerPromptPrefix({ stage: promptStage });
@@ -2232,19 +2290,33 @@ async function reviewWithGemini(diff, extraContext = '', {
   let stdout = '';
   let stderr = '';
   try {
-    console.error(`[reviewWithGemini] invoking native Gemini CLI (model=${model})`);
-    const result = await withGeminiSubprocessRetry(
-      () => spawnGeminiReviewImpl({
-        geminiCli: GEMINI_CLI,
-        prompt,
-        model,
+    console.error(`[reviewWithGemini] invoking native Gemini CLI (model=${model}, runtime=${runtime})`);
+    const invoke = (invokeEnv) => spawnGeminiReviewImpl({
+      geminiCli: GEMINI_CLI,
+      prompt,
+      model,
+      env: invokeEnv,
+      cwd: process.cwd(),
+      timeout: resolveReviewerTimeoutMs(invokeEnv),
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    const result = runtime === 'antigravity'
+      ? await invokeGeminiWithAntigravity({
         env,
-        cwd: process.cwd(),
-        timeout: resolveReviewerTimeoutMs(env),
-        maxBuffer: 10 * 1024 * 1024,
-      }),
-      { retryDelaysMs, sleepImpl },
-    );
+        assertedAccountId,
+        invoke,
+        getAccessTokenImpl: getAntigravityAccessTokenImpl,
+        selectAccountImpl: selectAntigravityAccountImpl,
+        markRateLimitedImpl: markAntigravityRateLimitedImpl,
+        allCappedImpl: allAntigravityCappedImpl,
+      })
+      : await withGeminiSubprocessRetry(
+        () => invoke(env),
+        { retryDelaysMs, sleepImpl },
+      );
+    if (result?.quotaHoldDecision) {
+      return { reviewText: null, tokenUsage: null, quotaHoldDecision: result.quotaHoldDecision };
+    }
     stdout = result.stdout || '';
     stderr = result.stderr || '';
   } catch (err) {
@@ -2272,6 +2344,49 @@ async function reviewWithGemini(diff, extraContext = '', {
   return { reviewText: combined, tokenUsage: null };
 }
 
+async function invokeGeminiWithAntigravity({
+  env,
+  assertedAccountId,
+  invoke,
+  getAccessTokenImpl,
+  selectAccountImpl,
+  markRateLimitedImpl,
+  allCappedImpl,
+} = {}) {
+  let accountId = assertedAccountId || selectAccountImpl();
+  if (!accountId) {
+    const capped = allCappedImpl();
+    if (capped?.allCapped) {
+      return { quotaHoldDecision: antigravityQuotaHoldDecision({ retryAfter: capped.retryAfter }) };
+    }
+    throw new OAuthError('gemini', 'no Antigravity account is available');
+  }
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const accessToken = await getAccessTokenImpl(accountId);
+    try {
+      return await invoke({
+        ...env,
+        GEMINI_OAUTH_ACCESS_TOKEN: accessToken,
+        GEMINI_ANTIGRAVITY_ACCOUNT: accountId,
+      });
+    } catch (err) {
+      if (!isAntigravityRateLimitOrAuthFailure(err)) throw err;
+      const retryAfter = retryAfterFromGeminiFailure(err);
+      markRateLimitedImpl(accountId, retryAfter);
+      const capped = allCappedImpl();
+      if (capped?.allCapped) {
+        return { quotaHoldDecision: antigravityQuotaHoldDecision({ retryAfter: capped.retryAfter }) };
+      }
+      if (attempt >= 1) throw err;
+      const nextAccountId = selectAccountImpl();
+      if (!nextAccountId || nextAccountId === accountId) throw err;
+      accountId = nextAccountId;
+    }
+  }
+  throw new Error('Gemini Antigravity invocation exhausted retry budget');
+}
+
 // ── Reviewer-model selection ──────────────────────────────────────────────────
 
 /**
@@ -2294,6 +2409,15 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
   }
   if (effectiveModel === 'gemini') {
     const result = await reviewWithGeminiImpl(diff, extraContext, { promptStage });
+    if (result.quotaHoldDecision) {
+      return {
+        rawReviewText: null,
+        reviewText: null,
+        tokenUsage: null,
+        needsSanitize: false,
+        quotaHoldDecision: result.quotaHoldDecision,
+      };
+    }
     return {
       rawReviewText: result.reviewText,
       reviewText: result.reviewText,
@@ -2821,6 +2945,21 @@ async function main() {
     const dispatch = await dispatchReviewerModel(effectiveModel, diff, extraContext, {
       promptStage: reviewerPromptStage,
     });
+    if (dispatch.quotaHoldDecision) {
+      const retryAfter = dispatch.quotaHoldDecision.retryAfter
+        || (Number.isFinite(dispatch.quotaHoldDecision.waitUntilMs)
+          ? new Date(dispatch.quotaHoldDecision.waitUntilMs).toISOString()
+          : new Date(Date.now() + 15 * 60 * 1000).toISOString());
+      const msg = `[quota-exhausted] Gemini Antigravity accounts capped; try again at ${retryAfter}`;
+      console.error(msg);
+      console.log(JSON.stringify({
+        type: 'reviewer.quota_hold',
+        reviewerModel: effectiveModel,
+        retryAfter,
+        quotaHoldDecision: dispatch.quotaHoldDecision,
+      }));
+      throw new Error(msg);
+    }
     rawReviewText = dispatch.rawReviewText;
     tokenUsage = dispatch.tokenUsage;
     if (dispatch.needsSanitize) {
@@ -3101,10 +3240,15 @@ const __test__ = {
   resolveGeminiCliPath,
   resolveGeminiOAuthCredsPath,
   assertGeminiOAuth,
+  assertGeminiAntigravityOAuth,
+  resolveGeminiRuntime,
   resolveGeminiReviewerModel,
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
   isRetryableGeminiSubprocessError,
+  isAntigravityRateLimitOrAuthFailure,
+  antigravityQuotaHoldDecision,
+  invokeGeminiWithAntigravity,
   spawnGeminiReview,
   reviewWithGemini,
   dispatchReviewerModel,

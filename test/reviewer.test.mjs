@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CLAUDE_CLI, __test__ } from '../src/reviewer.mjs';
+import { CLAUDE_CLI, GEMINI_CLI, __test__ } from '../src/reviewer.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
 
@@ -30,6 +30,7 @@ const {
   resolveGeminiCliPath,
   resolveGeminiOAuthCredsPath,
   assertGeminiOAuth,
+  resolveGeminiRuntime,
   resolveGeminiReviewerModel,
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
@@ -64,6 +65,23 @@ function withEnv(overrides, fn) {
   }
   try {
     return fn();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+async function withEnvAsync(overrides, fn) {
+  const previous = {};
+  for (const key of Object.keys(overrides)) {
+    previous[key] = process.env[key];
+    if (overrides[key] === undefined) delete process.env[key];
+    else process.env[key] = overrides[key];
+  }
+  try {
+    return await fn();
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
@@ -1568,6 +1586,35 @@ test('resolveGeminiReviewerModel returns the default and honors the override env
   );
 });
 
+test('resolveGeminiRuntime defaults to cli and honors config/env selection', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'gemini-runtime-'));
+  try {
+    assert.equal(resolveGeminiRuntime({ env: {}, topPath: '/dev/null', modulePaths: [join(tmp, 'none.yaml')] }), 'cli');
+
+    const modulePath = join(tmp, 'config.yaml');
+    writeFileSync(modulePath, 'reviewer:\n  gemini:\n    runtime: antigravity\n', 'utf8');
+    assert.equal(resolveGeminiRuntime({ env: {}, topPath: '/dev/null', modulePaths: [modulePath] }), 'antigravity');
+    assert.equal(
+      resolveGeminiRuntime({
+        env: { AGENT_OS_REVIEWER_GEMINI_RUNTIME: 'cli' },
+        topPath: '/dev/null',
+        modulePaths: [modulePath],
+      }),
+      'cli',
+    );
+    assert.throws(
+      () => resolveGeminiRuntime({
+        env: { AGENT_OS_REVIEWER_GEMINI_RUNTIME: 'native' },
+        topPath: '/dev/null',
+        modulePaths: [modulePath],
+      }),
+      /reviewer\.gemini\.runtime.*cli.*antigravity/i,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('buildGeminiReviewArgs enters headless mode without carrying the prompt body', () => {
   const args = buildGeminiReviewArgs({ model: 'gemini-2.5-pro' });
   assert.deepEqual(args, ['-m', 'gemini-2.5-pro', '-o', 'text', '--prompt', '']);
@@ -1644,6 +1691,112 @@ test('reviewWithGemini happy path returns the captured review text', async () =>
   assert.match(captured[0].prompt, /EXTRA CONTEXT/);
   assert.match(captured[0].prompt, /```diff\n\+diff body/);
   assert.equal(captured[0].model, 'gemini-2.5-pro');
+});
+
+test('reviewWithGemini cli runtime keeps native binary, argv, env scrub, and creds assertion unchanged', async () => {
+  const calls = [];
+  const asserted = [];
+  const result = await withEnvAsync({
+    HOME: '/tmp/gemini-home',
+    GEMINI_API_KEY: 'must-strip',
+    GOOGLE_API_KEY: 'must-strip-too',
+  }, () => reviewWithGemini('+diff\n', '', {
+    resolveGeminiRuntimeImpl: () => 'cli',
+    assertOAuthImpl: async (env) => {
+      asserted.push(resolveGeminiOAuthCredsPath(env));
+    },
+    spawnGeminiReviewImpl: async ({ geminiCli, model, env }) => {
+      calls.push({ geminiCli, args: buildGeminiReviewArgs({ model }), env });
+      return { stdout: 'CLI review', stderr: '' };
+    },
+  }));
+
+  assert.equal(result.reviewText, 'CLI review');
+  assert.deepEqual(asserted, [join('/tmp/gemini-home', '.gemini', 'oauth_creds.json')]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].geminiCli, GEMINI_CLI);
+  assert.deepEqual(calls[0].args, ['-m', 'gemini-2.5-pro', '-o', 'text', '--prompt', '']);
+  assert.equal(calls[0].env.HOME, '/tmp/gemini-home');
+  assert.equal(calls[0].env.GEMINI_API_KEY, undefined);
+  assert.equal(calls[0].env.GOOGLE_API_KEY, undefined);
+  assert.equal(calls[0].env.GEMINI_OAUTH_ACCESS_TOKEN, undefined);
+});
+
+test('reviewWithGemini antigravity runtime scrubs API-key fallbacks before token injection', async () => {
+  const spawnEnvs = [];
+  await withEnvAsync({
+    GEMINI_API_KEY: 'must-strip',
+    GOOGLE_API_KEY: 'must-strip-too',
+  }, () => reviewWithGemini('+diff\n', '', {
+    resolveGeminiRuntimeImpl: () => 'antigravity',
+    assertAntigravityOAuthImpl: async ({ selectAccountImpl }) => selectAccountImpl(),
+    selectAntigravityAccountImpl: () => 'acct-a',
+    getAntigravityAccessTokenImpl: async () => 'fresh-access-token',
+    spawnGeminiReviewImpl: async ({ env }) => {
+      spawnEnvs.push(env);
+      return { stdout: 'Antigravity review', stderr: '' };
+    },
+  }));
+
+  assert.equal(spawnEnvs.length, 1);
+  assert.equal(spawnEnvs[0].GEMINI_API_KEY, undefined);
+  assert.equal(spawnEnvs[0].GOOGLE_API_KEY, undefined);
+  assert.equal(spawnEnvs[0].GEMINI_OAUTH_ACCESS_TOKEN, 'fresh-access-token');
+  assert.equal(spawnEnvs[0].GEMINI_ANTIGRAVITY_ACCOUNT, 'acct-a');
+});
+
+test('reviewWithGemini antigravity 401 marks rate-limited account and retries exactly once on the next account', async () => {
+  const selected = ['acct-a', 'acct-b'];
+  const marked = [];
+  const spawns = [];
+  const result = await reviewWithGemini('+diff\n', '', {
+    resolveGeminiRuntimeImpl: () => 'antigravity',
+    assertAntigravityOAuthImpl: async ({ selectAccountImpl }) => selectAccountImpl(),
+    selectAntigravityAccountImpl: () => selected.shift() || null,
+    getAntigravityAccessTokenImpl: async (accountId) => `token-${accountId}`,
+    markAntigravityRateLimitedImpl: (accountId, retryAfter) => marked.push({ accountId, retryAfter }),
+    allAntigravityCappedImpl: () => ({ allCapped: false, retryAfter: null }),
+    spawnGeminiReviewImpl: async ({ env }) => {
+      spawns.push(env);
+      if (spawns.length === 1) {
+        const err = new Error('Command failed');
+        err.stderr = '401 Unauthorized';
+        throw err;
+      }
+      return { stdout: 'rotated review', stderr: '' };
+    },
+  });
+
+  assert.equal(result.reviewText, 'rotated review');
+  assert.equal(spawns.length, 2);
+  assert.equal(spawns[0].GEMINI_ANTIGRAVITY_ACCOUNT, 'acct-a');
+  assert.equal(spawns[0].GEMINI_OAUTH_ACCESS_TOKEN, 'token-acct-a');
+  assert.equal(spawns[1].GEMINI_ANTIGRAVITY_ACCOUNT, 'acct-b');
+  assert.equal(spawns[1].GEMINI_OAUTH_ACCESS_TOKEN, 'token-acct-b');
+  assert.equal(marked.length, 1);
+  assert.equal(marked[0].accountId, 'acct-a');
+});
+
+test('reviewWithGemini antigravity all-capped returns hold decision without producing review text', async () => {
+  const retryAfter = '2026-06-20T21:15:00.000Z';
+  const result = await reviewWithGemini('+diff\n', '', {
+    resolveGeminiRuntimeImpl: () => 'antigravity',
+    assertAntigravityOAuthImpl: async ({ selectAccountImpl }) => selectAccountImpl(),
+    selectAntigravityAccountImpl: () => 'acct-a',
+    getAntigravityAccessTokenImpl: async () => 'token-a',
+    markAntigravityRateLimitedImpl: () => {},
+    allAntigravityCappedImpl: () => ({ allCapped: true, retryAfter }),
+    spawnGeminiReviewImpl: async () => {
+      const err = new Error('Command failed');
+      err.stderr = '429 RESOURCE_EXHAUSTED quota exceeded';
+      throw err;
+    },
+  });
+
+  assert.equal(result.reviewText, null);
+  assert.equal(result.quotaHoldDecision.hold, true);
+  assert.equal(result.quotaHoldDecision.retryAfter, retryAfter);
+  assert.equal(result.quotaHoldDecision.waitUntilMs, Date.parse(retryAfter));
 });
 
 test('reviewWithGemini maps auth-failure spawn output to OAuthError(gemini)', async () => {

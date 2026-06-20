@@ -20,8 +20,10 @@
 // or override `topPath` to make the cascade hermetic against the real
 // `~/agent-os/config.yaml` on the host.
 
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import yaml from 'js-yaml';
 
 import {
   AgentOSConfigError,
@@ -146,6 +148,8 @@ const ROLE_ENV_NAMES_TO_BLANK_PRUNE = new Set([
   'ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS',
   'AGENT_OS_REVIEWER_GEMINI_MODE',
   'ADVERSARIAL_REVIEW_GEMINI_REVIEWER_MODE',
+  'AGENT_OS_REVIEWER_GEMINI_RUNTIME',
+  'ADVERSARIAL_REVIEW_GEMINI_RUNTIME',
 ]);
 
 function pruneBlankRoleEnvVars(env) {
@@ -309,6 +313,77 @@ export function resolveGeminiReviewerMode({
     contextKey: 'reviewer.gemini.mode',
   });
   return cfg.get('reviewer.gemini.mode', 'always-on');
+}
+
+function localSibling(path) {
+  if (!path) return null;
+  if (path.endsWith('.yaml')) return join(dirname(path), `${path.split('/').pop().slice(0, -'.yaml'.length)}.local.yaml`);
+  if (path.endsWith('.yml')) return join(dirname(path), `${path.split('/').pop().slice(0, -'.yml'.length)}.local.yml`);
+  return null;
+}
+
+function readGeminiRuntimeFromYaml(path) {
+  if (!path || !existsSync(path)) return null;
+  let doc;
+  try {
+    doc = yaml.load(readFileSync(path, 'utf8'));
+  } catch {
+    return null;
+  }
+  const value = doc?.reviewer?.gemini?.runtime;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function normalizeGeminiRuntime(value, source = 'config') {
+  const runtime = String(value || '').trim().toLowerCase();
+  if (!runtime) return null;
+  if (runtime === 'cli' || runtime === 'antigravity') return runtime;
+  throw new AgentOSConfigError(
+    `reviewer.gemini.runtime must be one of: cli, antigravity; got ${JSON.stringify(value)}`,
+    {
+      key: 'reviewer.gemini.runtime',
+      expected: 'one of ["cli", "antigravity"]',
+      allowed: ['cli', 'antigravity'],
+      got: value,
+      source,
+    },
+  );
+}
+
+// resolveGeminiRuntime — temporary AGR-03 selector for Gemini backend wiring.
+// AGR-04 will move this into the strict schema. Until then this resolver keeps
+// the same cascade shape without teaching the schema a new key in this ticket.
+export function resolveGeminiRuntime({
+  env = process.env,
+  topPath,
+  modulePaths,
+  loaderImpl,
+} = {}) {
+  if (loaderImpl) {
+    const cfg = loadRoleConfig({
+      env,
+      topPath,
+      modulePaths,
+      loaderImpl,
+      contextKey: 'reviewer.gemini.runtime',
+    });
+    return normalizeGeminiRuntime(cfg.get('reviewer.gemini.runtime', 'cli'), 'loader') || 'cli';
+  }
+
+  const modulePathsResolved = modulePaths || [MODULE_CONFIG_PATH];
+  let resolved = null;
+  for (const path of modulePathsResolved) {
+    resolved = readGeminiRuntimeFromYaml(path) || resolved;
+    resolved = readGeminiRuntimeFromYaml(localSibling(path)) || resolved;
+  }
+  const topPathResolved = topPath || env.AGENT_OS_CONFIG_PATH || null;
+  resolved = readGeminiRuntimeFromYaml(topPathResolved) || resolved;
+  resolved = readGeminiRuntimeFromYaml(localSibling(topPathResolved)) || resolved;
+
+  const envPruned = pruneBlankRoleEnvVars(env);
+  resolved = envPruned.AGENT_OS_REVIEWER_GEMINI_RUNTIME || resolved;
+  resolved = envPruned.ADVERSARIAL_REVIEW_GEMINI_RUNTIME || resolved;
+  return normalizeGeminiRuntime(resolved, 'config') || 'cli';
 }
 
 // resolveDefaultMergeAgentWorkerClass — returns the merge-agent worker

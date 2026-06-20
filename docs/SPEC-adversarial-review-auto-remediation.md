@@ -334,6 +334,18 @@ startup and exits before claiming work if the value is invalid. Consume-time
 worker selection also runs inside the claimed-job failure handler so
 direct/helper callers cannot strand a job in `in-progress/` on a bad override.
 
+Code-PR reviewer and remediator stage prompts share the same canonical
+doc-currency contract. Reviewer stages must flag stale in-repo data-model docs
+when a diff changes persistent-store shape without moving the matching
+`docs/data-model/NN-*.md` file and `docs/data-model/catalog.json`; they must
+also flag stale `modules/<name>/<name>-walkthrough.md` files when a diff changes
+that module's public interface, dispatch flow, or operational contract. The
+remediator stages treat those same updates as in-scope remediation when the
+worker's patch changes the corresponding surface, run
+`node scripts/validate-data-model-catalog.mjs` for in-repo data-model edits, and
+record skipped superproject-doc obligations in the machine-readable reply when
+the PR repository is a submodule without the canonical docs.
+
 Gemini remediation is a public third-lane remediator. In direct dispatch, the
 daemon spawns the native `gemini` CLI in headless approval mode, requires local
 subscription OAuth at `GEMINI_AUTH_PATH` or `${GEMINI_HOME:-$HOME/.gemini}/oauth_creds.json`,

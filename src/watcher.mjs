@@ -430,6 +430,7 @@ const watcherHealthProbe = createWatcherHealthProbe();
 const WATCHER_DRAIN_FILE = join(ROOT, 'data', 'watcher-drain.json');
 const ADVERSARIAL_REVIEW_STATE_DIR = resolveAdversarialReviewStateDir(ROOT, process.env);
 const WATCHER_DRAIN_MAX_MS = 60 * 60 * 1000;
+const REVIEWER_DISPATCH_DRAIN_WARN_MS = 30_000;
 const DEFAULT_DAG_AUTOWALK_ON_MERGE_RETRY_MS = 5 * 60 * 1000;
 const DEFAULT_DAG_AUTOWALK_ON_MERGE_PER_POLL = 2;
 const DEFAULT_DAG_AUTOWALK_ON_MERGE_MAX_ATTEMPTS = 5;
@@ -4839,6 +4840,10 @@ async function handlePostedReviewRow({
         ADVERSARIAL_MERGE_REQUESTED_LABEL,
       );
     }
+    // Lifecycle sync now follows posted-review handling so reviewer adoption can
+    // drain first. This live fetch is therefore the dispatch-time guard: it
+    // re-reads PR state/mergeability/head before AMA or merge-agent selection
+    // instead of trusting the previous tick's lifecycle mirror.
     const candidate = await fetchMergeAgentCandidateImpl(repoPath, prNumber, {
       execFileImpl,
       operatorApprovalEvent,
@@ -5031,6 +5036,87 @@ async function handlePostedReviewRow({
     logger.error(
       `[watcher] merge-agent dispatch check failed for ${repoPath}#${prNumber}:\n${detail}`
     );
+  }
+}
+
+async function runQueuedReviewAdoptionPhase({
+  drainReviewerDispatchCandidates,
+  postedReviewHandlers = [],
+  postReviewMaintenanceHandlers = [],
+  octokit,
+  operatorSurface,
+  retryPendingMergeAgentLifecycleCleanupsImpl = retryPendingMergeAgentLifecycleCleanups,
+  syncPRLifecycleImpl = syncPRLifecycle,
+  retryPendingDagAutowalkOnMergeImpl = retryPendingDagAutowalkOnMerge,
+  retryPendingMergeCloseoutsImpl = retryPendingMergeCloseouts,
+  retryPendingRetriggerAckCommentsImpl = retryPendingRetriggerAckComments,
+  retryPendingRetriggerReviewAckCommentsImpl = retryPendingRetriggerReviewAckComments,
+  rootDir = ROOT,
+  execFileImpl = execFileAsync,
+  logger = console,
+} = {}) {
+  if (typeof drainReviewerDispatchCandidates !== 'function') {
+    throw new TypeError('runQueuedReviewAdoptionPhase requires drainReviewerDispatchCandidates');
+  }
+
+  await drainReviewerDispatchCandidates('posted-review handoffs and watcher maintenance');
+  for (const postedReviewHandler of postedReviewHandlers) {
+    try {
+      await postedReviewHandler.run();
+    } catch (err) {
+      logger.error(
+        `[watcher] posted-review handler failed for ${postedReviewHandler.repoPath}#${postedReviewHandler.prNumber}:`,
+        err?.message || err
+      );
+    }
+  }
+
+  await retryPendingMergeAgentLifecycleCleanupsImpl();
+
+  // Keep review adoption ahead of merge/autowalk maintenance. These tasks may
+  // shell out to HQ, GitHub, or DAG walkers; a slow or wedged child must not
+  // prevent already-queued pending PRs from being claimed into reviewer runs.
+  await syncPRLifecycleImpl(octokit, operatorSurface);
+  await retryPendingDagAutowalkOnMergeImpl();
+  await retryPendingMergeCloseoutsImpl({ octokit });
+
+  try {
+    const ackRetry = await retryPendingRetriggerAckCommentsImpl({
+      rootDir,
+      execFileImpl,
+    });
+    if (ackRetry.attempted > 0) {
+      logger.log(
+        `[watcher] retrigger-remediation ack retry: attempted=${ackRetry.attempted} posted=${ackRetry.posted}`
+      );
+    }
+  } catch (err) {
+    logger.error('[watcher] retrigger-remediation ack retry failed:', err?.message || err);
+  }
+
+  try {
+    const reviewAckRetry = await retryPendingRetriggerReviewAckCommentsImpl({
+      rootDir,
+      execFileImpl,
+    });
+    if (reviewAckRetry.attempted > 0) {
+      logger.log(
+        `[watcher] retrigger-review ack retry: attempted=${reviewAckRetry.attempted} posted=${reviewAckRetry.posted}`
+      );
+    }
+  } catch (err) {
+    logger.error('[watcher] retrigger-review ack retry failed:', err?.message || err);
+  }
+
+  for (const postReviewMaintenanceHandler of postReviewMaintenanceHandlers) {
+    try {
+      await postReviewMaintenanceHandler.run();
+    } catch (err) {
+      logger.error(
+        `[watcher] post-review maintenance failed for ${postReviewMaintenanceHandler.repoPath}:`,
+        err?.message || err
+      );
+    }
   }
 }
 
@@ -5450,43 +5536,12 @@ async function pollOnce(
     logger: console,
   });
 
-  await retryPendingMergeAgentLifecycleCleanups();
-
-  // Check lifecycle of previously-seen PRs first
-  await syncPRLifecycle(octokit, operatorSurface);
-  await retryPendingDagAutowalkOnMerge();
-  await retryPendingMergeCloseouts({ octokit });
+  // Fast-merge recovery is review-adoption work: vetoes or removed fast-merge
+  // labels requeue previously skipped rows into the normal reviewer CAS, and
+  // the established contract expects those rows to be claimed in the same tick.
   retryPendingFastMergeAudits();
   await recoverFastMergeVetoes(octokit);
   await runFastMergeClosePathIsolated();
-
-  try {
-    const ackRetry = await retryPendingRetriggerAckComments({
-      rootDir: ROOT,
-      execFileImpl: execFileAsync,
-    });
-    if (ackRetry.attempted > 0) {
-      console.log(
-        `[watcher] retrigger-remediation ack retry: attempted=${ackRetry.attempted} posted=${ackRetry.posted}`
-      );
-    }
-  } catch (err) {
-    console.error('[watcher] retrigger-remediation ack retry failed:', err?.message || err);
-  }
-
-  try {
-    const reviewAckRetry = await retryPendingRetriggerReviewAckComments({
-      rootDir: ROOT,
-      execFileImpl: execFileAsync,
-    });
-    if (reviewAckRetry.attempted > 0) {
-      console.log(
-        `[watcher] retrigger-review ack retry: attempted=${reviewAckRetry.attempted} posted=${reviewAckRetry.posted}`
-      );
-    }
-  } catch (err) {
-    console.error('[watcher] retrigger-review ack retry failed:', err?.message || err);
-  }
 
   const watcherDrain = readWatcherDrainState();
   if (watcherDrain.active) {
@@ -5500,9 +5555,39 @@ async function pollOnce(
 
   const reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config });
   const reviewerDispatchCandidates = [];
+  const postedReviewHandlers = [];
+  const postReviewMaintenanceHandlers = [];
   const reviewerMemoryReservationState = { reservedMb: 0 };
   const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({ logger: console });
   const getRoutingTierReadinessForTick = createRoutingTierReadinessProbeCache();
+  async function drainReviewerDispatchCandidates(reason) {
+    if (!reviewerPoolConfig.enabled || reviewerDispatchCandidates.length === 0) {
+      return { dispatched: 0, maxObservedConcurrency: 0 };
+    }
+    const candidates = reviewerDispatchCandidates.splice(0, reviewerDispatchCandidates.length);
+    const startedAt = process.hrtime.bigint();
+    console.log(
+      `[watcher] Draining ${candidates.length} reviewer dispatch candidate(s) before ${reason}`
+    );
+    try {
+      // The reviewer runtime contract is fire-and-return: this drain may wait
+      // for admission, token refresh, and child spawn bookkeeping, but reviewer
+      // subprocess execution is detached and bounded by its own timeout. The
+      // outer safePollOnce deadline still bounds pathological drain wedges.
+      return await runBoundedReviewerDispatchQueue(candidates, {
+        maxConcurrent: reviewerPoolConfig.maxConcurrent,
+        logger: console,
+      });
+    } finally {
+      const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+      if (elapsedMs >= REVIEWER_DISPATCH_DRAIN_WARN_MS) {
+        console.warn(
+          `[watcher] reviewer dispatch drain exceeded SLA: ` +
+          `elapsed_ms=${Math.round(elapsedMs)} candidates=${candidates.length} reason="${reason}"`
+        );
+      }
+    }
+  }
 
   for (const repoPath of activeRepos) {
     const [owner, repo] = repoPath.split('/');
@@ -5840,7 +5925,7 @@ async function pollOnce(
       }
 
       if (existing?.review_status === 'posted') {
-        await handlePostedReviewRow({
+        const runPostedReviewHandler = () => handlePostedReviewRow({
           rootDir: ROOT,
           repoPath,
           prNumber,
@@ -5851,6 +5936,11 @@ async function pollOnce(
           projectGateStatusSafe,
           execFileImpl: execFileAsync,
           operatorSurface,
+        });
+        postedReviewHandlers.push({
+          repoPath,
+          prNumber,
+          run: runPostedReviewHandler,
         });
         continue;
       }
@@ -6644,83 +6734,90 @@ async function pollOnce(
       }
     }
 
-    // Proactive stuck-merge-agent scan — independent of PR revisit timing.
-    // Scope only to PRs whose lifecycle is still active in this tick:
-    // current snapshots with `merge-agent-dispatched` plus unresolved
-    // durable cleanup records. Historical dispatches outside that set are
-    // intentionally ignored.
-    try {
-      const stuckReports = scanStuckMergeAgentDispatches({
-        rootDir: ROOT,
-        repo: repoPath,
-        activePRs: activeMergeAgentPRs,
-        hqPath: null,
-      });
-      for (const report of stuckReports) {
-        const dispatched = {
-          decision: 'skip-already-dispatched',
-          stuckDetail: report.stuckDetail,
-          launchRequestId: report.launchRequestId,
-        };
-        console.log(
-          `[watcher] proactive-stuck-scan ${report.repo}#${report.prNumber}: `
-          + `lrq=${report.launchRequestId} `
-          + `stuck=${report.stuckDetail.stuckForMinutes}min `
-          + `refusals=${report.stuckDetail.refusalCount} `
-          + `primary=${report.stuckDetail.primaryReason || 'unknown'}`
-        );
-        if (report.stuckDetail.stuckForMinutes >= 30) {
-          try {
-            await maybeFireMergeAgentStuckAlert({
-              rootDir: ROOT,
-              repoPath: report.repo,
-              prNumber: report.prNumber,
-              dispatched,
-              deliverAlertFn: defaultDeliverAlert,
-              logger: console,
-            });
-          } catch (alertErr) {
-            console.error(
-              `[watcher] proactive-stuck-scan alert delivery failed for `
-              + `${report.repo}#${report.prNumber}: ${alertErr?.message || alertErr}`
-            );
+    postReviewMaintenanceHandlers.push({
+      repoPath,
+      async run() {
+      // Proactive stuck-merge-agent scan — independent of PR revisit timing.
+      // Scope only to PRs whose lifecycle is still active in this tick:
+      // current snapshots with `merge-agent-dispatched` plus unresolved
+      // durable cleanup records. Historical dispatches outside that set are
+      // intentionally ignored.
+      try {
+        const stuckReports = scanStuckMergeAgentDispatches({
+          rootDir: ROOT,
+          repo: repoPath,
+          activePRs: activeMergeAgentPRs,
+          hqPath: null,
+        });
+        for (const report of stuckReports) {
+          const dispatched = {
+            decision: 'skip-already-dispatched',
+            stuckDetail: report.stuckDetail,
+            launchRequestId: report.launchRequestId,
+          };
+          console.log(
+            `[watcher] proactive-stuck-scan ${report.repo}#${report.prNumber}: `
+            + `lrq=${report.launchRequestId} `
+            + `stuck=${report.stuckDetail.stuckForMinutes}min `
+            + `refusals=${report.stuckDetail.refusalCount} `
+            + `primary=${report.stuckDetail.primaryReason || 'unknown'}`
+          );
+          if (report.stuckDetail.stuckForMinutes >= 30) {
+            try {
+              await maybeFireMergeAgentStuckAlert({
+                rootDir: ROOT,
+                repoPath: report.repo,
+                prNumber: report.prNumber,
+                dispatched,
+                deliverAlertFn: defaultDeliverAlert,
+                logger: console,
+              });
+            } catch (alertErr) {
+              console.error(
+                `[watcher] proactive-stuck-scan alert delivery failed for `
+                + `${report.repo}#${report.prNumber}: ${alertErr?.message || alertErr}`
+              );
+            }
           }
         }
-      }
-    } catch (scanErr) {
-      console.error(
-        `[watcher] proactive-stuck-scan raised for ${repoPath}: ${scanErr?.message || scanErr}`
-      );
-    }
-    try {
-      const phantomResult = await reconcileProactivePhantomHandoffs({
-        rootDir: ROOT,
-        repo: repoPath,
-        currentPRs: currentRepoPRs,
-        runtimeEnv: process.env,
-        ghExecFileImpl: execFileAsync,
-        execFileImpl: execFileAsync,
-      });
-      if (phantomResult.inspected > 0) {
-        console.log(
-          `[watcher] proactive-phantom-handoff ${repoPath}: `
-          + `inspected=${phantomResult.inspected} `
-          + `grace_started=${phantomResult.graceStarted} `
-          + `escalated=${phantomResult.escalated}`
+      } catch (scanErr) {
+        console.error(
+          `[watcher] proactive-stuck-scan raised for ${repoPath}: ${scanErr?.message || scanErr}`
         );
       }
-    } catch (scanErr) {
-      console.error(
-        `[watcher] proactive-phantom-handoff raised for ${repoPath}: ${scanErr?.message || scanErr}`
-      );
-    }
-  }
-  if (reviewerPoolConfig.enabled && reviewerDispatchCandidates.length > 0) {
-    await runBoundedReviewerDispatchQueue(reviewerDispatchCandidates, {
-      maxConcurrent: reviewerPoolConfig.maxConcurrent,
-      logger: console,
+      try {
+        const phantomResult = await reconcileProactivePhantomHandoffs({
+          rootDir: ROOT,
+          repo: repoPath,
+          currentPRs: currentRepoPRs,
+          runtimeEnv: process.env,
+          ghExecFileImpl: execFileAsync,
+          execFileImpl: execFileAsync,
+        });
+        if (phantomResult.inspected > 0) {
+          console.log(
+            `[watcher] proactive-phantom-handoff ${repoPath}: `
+            + `inspected=${phantomResult.inspected} `
+            + `grace_started=${phantomResult.graceStarted} `
+            + `escalated=${phantomResult.escalated}`
+          );
+        }
+      } catch (scanErr) {
+        console.error(
+          `[watcher] proactive-phantom-handoff raised for ${repoPath}: ${scanErr?.message || scanErr}`
+        );
+      }
+      },
     });
   }
+
+  await runQueuedReviewAdoptionPhase({
+    drainReviewerDispatchCandidates,
+    postedReviewHandlers,
+    postReviewMaintenanceHandlers,
+    octokit,
+    operatorSurface,
+  });
   } finally {
     try {
       await healthProbe?.finishTick?.(healthTick);
@@ -6914,6 +7011,7 @@ export {
   reconcilePendingDraftsBeforeSpawn,
   reconcileOrphanedReviewing,
   recoverFastMergeVetoes,
+  runQueuedReviewAdoptionPhase,
   resolvePendingDraftRespawnAgeSeconds,
   resolveVocabularyFatigueConfig,
   resolveReviewerIdentity,

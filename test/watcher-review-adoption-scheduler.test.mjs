@@ -1,0 +1,121 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { runQueuedReviewAdoptionPhase } from '../src/watcher.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.join(__dirname, '..');
+
+function watcherSource() {
+  return readFileSync(path.join(ROOT, 'src', 'watcher.mjs'), 'utf8');
+}
+
+test('watcher drains queued reviewer dispatches before merge-side handoffs', () => {
+  const source = watcherSource();
+  const candidateQueue = source.indexOf('const reviewerDispatchCandidates = [];');
+  const postedQueue = source.indexOf('const postedReviewHandlers = [];');
+  const postedEnqueue = source.indexOf('postedReviewHandlers.push({');
+  const phaseHelper = source.indexOf('async function runQueuedReviewAdoptionPhase');
+  const drainBeforeMaintenance = source.indexOf(
+    "await drainReviewerDispatchCandidates('posted-review handoffs and watcher maintenance');",
+  );
+  const postedDrain = source.indexOf('for (const postedReviewHandler of postedReviewHandlers)');
+  const lifecycleCleanup = source.indexOf('await retryPendingMergeAgentLifecycleCleanupsImpl();');
+  const dagAutowalk = source.indexOf('await retryPendingDagAutowalkOnMergeImpl();');
+
+  assert.notEqual(candidateQueue, -1, 'reviewer dispatch candidate queue exists');
+  assert.notEqual(postedQueue, -1, 'posted review handoffs are queued');
+  assert.notEqual(postedEnqueue, -1, 'posted review rows enqueue their handoff');
+  assert.notEqual(phaseHelper, -1, 'post-review phase helper exists');
+  assert.notEqual(drainBeforeMaintenance, -1, 'reviewer dispatch drain exists before maintenance');
+  assert.notEqual(postedDrain, -1, 'queued posted-review handlers drain after reviewers');
+  assert.notEqual(lifecycleCleanup, -1, 'merge-agent cleanup still runs');
+  assert.notEqual(dagAutowalk, -1, 'dag autowalk retry still runs');
+
+  assert.ok(candidateQueue < postedQueue, 'queues are initialized near the reviewer scheduler');
+  assert.ok(postedQueue < postedEnqueue, 'posted handler queue is initialized before use');
+  assert.ok(phaseHelper < drainBeforeMaintenance, 'ordering lives in the executable phase helper');
+  assert.ok(drainBeforeMaintenance < postedDrain, 'reviewers drain before posted-review handoffs');
+  assert.ok(postedDrain < lifecycleCleanup, 'posted-review handoffs run before lifecycle cleanup');
+  assert.ok(lifecycleCleanup < dagAutowalk, 'dag autowalk remains post-review maintenance');
+});
+
+test('watcher post-review phase behavior preserves reviewer-first ordering and isolates maintenance failures', async () => {
+  const events = [];
+  const errors = [];
+  const logs = [];
+
+  await runQueuedReviewAdoptionPhase({
+    drainReviewerDispatchCandidates: async (reason) => {
+      events.push(`drain:${reason}`);
+    },
+    postedReviewHandlers: [
+      {
+        repoPath: 'laceyenterprises/adversarial-review',
+        prNumber: 365,
+        run: async () => {
+          events.push('posted-review-handoff');
+        },
+      },
+    ],
+    retryPendingMergeAgentLifecycleCleanupsImpl: async () => {
+      events.push('lifecycle-cleanup');
+    },
+    syncPRLifecycleImpl: async () => {
+      events.push('lifecycle-sync');
+    },
+    retryPendingDagAutowalkOnMergeImpl: async () => {
+      events.push('dag-autowalk');
+    },
+    retryPendingMergeCloseoutsImpl: async () => {
+      events.push('merge-closeouts');
+    },
+    retryPendingRetriggerAckCommentsImpl: async () => {
+      events.push('remediation-ack');
+      return { attempted: 0, posted: 0 };
+    },
+    retryPendingRetriggerReviewAckCommentsImpl: async () => {
+      events.push('review-ack');
+      return { attempted: 0, posted: 0 };
+    },
+    postReviewMaintenanceHandlers: [
+      {
+        repoPath: 'laceyenterprises/adversarial-review',
+        run: async () => {
+          events.push('maintenance-a');
+          throw new Error('boom');
+        },
+      },
+      {
+        repoPath: 'laceyenterprises/agent-os',
+        run: async () => {
+          events.push('maintenance-b');
+        },
+      },
+    ],
+    logger: {
+      log: (...args) => logs.push(args.join(' ')),
+      error: (...args) => errors.push(args.join(' ')),
+    },
+  });
+
+  assert.deepEqual(events, [
+    'drain:posted-review handoffs and watcher maintenance',
+    'posted-review-handoff',
+    'lifecycle-cleanup',
+    'lifecycle-sync',
+    'dag-autowalk',
+    'merge-closeouts',
+    'remediation-ack',
+    'review-ack',
+    'maintenance-a',
+    'maintenance-b',
+  ]);
+  assert.equal(logs.length, 0);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /post-review maintenance failed for laceyenterprises\/adversarial-review/);
+  assert.match(errors[0], /boom/);
+});

@@ -1456,6 +1456,27 @@ cannot monopolize the watcher:
 record stays in `status: "failed"` with terminal diagnostics for operator
 repair instead of being silently discarded.
 
+### Poll tick review-adoption priority
+
+Within one watcher `pollOnce` tick, first-pass reviewer dispatch candidates must
+drain before posted-review merge handoffs, lifecycle cleanup, DAG autowalk
+retry, merge closeout retry, and proactive stuck/phantom maintenance. This
+ordering is the guardrail from
+`docs/INCIDENT-2026-06-20-review-adoption-starved-by-merge-handoff.md`: slow
+merge-side shell children must not prevent newly discovered PRs from being
+claimed into reviewer runs. The reviewer dispatch drain may wait for admission,
+token refresh, and child-spawn bookkeeping, but reviewer execution itself is a
+detached runtime concern bounded by the reviewer timeout and by the outer
+`safePollOnce` deadline. A drain that exceeds the watcher SLA emits an explicit
+warning so the inverse starvation class is observable.
+
+Posted-review handlers run after reviewer dispatch has drained. Because that
+places them before lifecycle sync, merge-side dispatch decisions must re-fetch
+live PR state, head SHA, and mergeability at dispatch time rather than relying
+on the previous lifecycle mirror. Per-repo post-review maintenance handlers are
+isolated: one repo's stuck/phantom scan failure must not skip later repos in the
+same tick.
+
 ### Dispatch state
 
 Successful dispatches write a record under `data/follow-up-jobs/merge-agent-dispatches/<repo>-pr-<n>-<headSha>.json`. Each record carries the dispatch timestamp, the trigger label (or null for the standard verdict path), the resolved priority selection, whether the host actually supported `--priority`, the resulting `dispatchId` and `launchRequestId` from the hq invocation, and the label-removal attempt result. The same record is also the durable watcher-side handoff ledger: when a terminal-failed dispatch clears `merge-agent-dispatched` without establishing recovery, the watcher stamps `phantomHandoffObservedAt` on the first tick that proves the gap and starts the 60-minute grace from that timestamp, not from the original dispatch creation time. That detection is proactive and keyed to the current PR head, not just the normal merge-agent revisit set, so a label-cleared orphan can still enter the grace/escalation state machine. If the grace expires with no recovery ownership, the watcher first persists pending phantom-handoff comment-delivery state on the dispatch record, then converges the `merge-agent-stuck` label and owed operator comment from that ledger. Later ticks replay whichever side effect is still missing, so a partial failure after the label transition cannot permanently lose the human-facing explanation. Pre-existing dispatches with the same `(repo, prNumber, headSha)` triple normally short-circuit a second dispatch via the `skip-already-dispatched` decision, and the consumed-label removal is retried best-effort each tick until the label is observed gone from the PR.

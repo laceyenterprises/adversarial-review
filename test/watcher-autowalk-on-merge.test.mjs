@@ -226,13 +226,23 @@ test('pollOnce keeps dag autowalk-on-merge retry as a single poll-level pass', (
   );
 
   const pollSource = source.slice(pollStart, source.indexOf('async function main(', pollStart));
-  const syncIndex = pollSource.indexOf('await syncPRLifecycle(octokit, operatorSurface);');
-  const retryIndex = pollSource.indexOf('await retryPendingDagAutowalkOnMerge();');
+  assert.ok(
+    pollSource.includes('await runQueuedReviewAdoptionPhase({'),
+    'pollOnce should delegate the queued post-review phase once per tick'
+  );
+
+  const phaseStart = source.indexOf('async function runQueuedReviewAdoptionPhase(');
+  const phaseSource = source.slice(
+    phaseStart,
+    source.indexOf('async function maybeDispatchReviewerTimeoutExhaustedMergeAgent(', phaseStart),
+  );
+  const syncIndex = phaseSource.indexOf('await syncPRLifecycleImpl(octokit, operatorSurface);');
+  const retryIndex = phaseSource.indexOf('await retryPendingDagAutowalkOnMergeImpl();');
   assert.ok(syncIndex >= 0);
-  assert.ok(retryIndex > syncIndex, 'pollOnce should retry once after lifecycle sync sees new merges');
+  assert.ok(retryIndex > syncIndex, 'pollOnce phase should retry once after lifecycle sync sees new merges');
   assert.equal(
-    pollSource.match(/await retryPendingDagAutowalkOnMerge\(\);/g)?.length,
+    phaseSource.match(/await retryPendingDagAutowalkOnMergeImpl\(\);/g)?.length,
     1,
-    'pollOnce should run the dag autowalk-on-merge retry worker once per tick'
+    'pollOnce phase should run the dag autowalk-on-merge retry worker once per tick'
   );
 });

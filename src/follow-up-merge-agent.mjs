@@ -2100,15 +2100,32 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         lines.push(
           'Merge gate for the rebase-to-merge step only: after remediation is'
           + ' complete and you are ready to rebase for merge, acquire the'
-          + ' blocking merge lease before rebasing. Run the rebase/validation/'
-          + ' merge sequence from one long-lived shell and pass that shell pid'
-          + ' as `--owner-pid "$$"`:'
+          + ' blocking merge lease before rebasing. Run the entire'
+          + ' rebase/validation/merge sequence from this single shell script;'
+          + ' it passes that shell pid as `--owner-pid "$$"` and releases the'
+          + ' lease through the EXIT trap on every path after acquisition:'
         );
         lines.push('');
         lines.push('```bash');
+        lines.push('set -euo pipefail');
+        lines.push('POST_REMEDIATION_SHA=$(git rev-parse HEAD)');
         lines.push('MERGE_LEASE_JSON=$(mktemp)');
-        lines.push(`node bin/merge-lease.mjs acquire --repo ${job.repo} --base ${job.baseBranch} --pr ${job.prNumber} --head "$POST_REMEDIATION_SHA" --owner-pid "$$" --wait 1800 > "$MERGE_LEASE_JSON"`);
+        lines.push('MERGE_REVALIDATION_JSON=$(mktemp)');
+        lines.push('MERGE_LEASE_ID=""');
+        lines.push('cleanup_merge_lease() {');
+        lines.push('  status=$?');
+        lines.push('  if [ -n "${MERGE_LEASE_ID:-}" ]; then');
+        lines.push(`    node bin/merge-lease.mjs release --repo ${job.repo} --base ${job.baseBranch} --pr ${job.prNumber} --lease-id "$MERGE_LEASE_ID" || true`);
+        lines.push('  fi');
+        lines.push('  rm -f "$MERGE_LEASE_JSON" "$MERGE_REVALIDATION_JSON"');
+        lines.push('  exit "$status"');
+        lines.push('}');
+        lines.push('trap cleanup_merge_lease EXIT');
+        lines.push('');
+        lines.push('set +e');
+        lines.push(`node bin/merge-lease.mjs acquire --repo ${job.repo} --base ${job.baseBranch} --pr ${job.prNumber} --head "$POST_REMEDIATION_SHA" --owner-pid "$$" --wait 300 > "$MERGE_LEASE_JSON"`);
         lines.push('MERGE_LEASE_EXIT=$?');
+        lines.push('set -e');
         lines.push('if [ "$MERGE_LEASE_EXIT" -eq 70 ] && jq -e \'.parked == true\' "$MERGE_LEASE_JSON" >/dev/null; then');
         lines.push('  PARK_REASON=$(jq -r \'.reason // "merge-gate-parked"\' "$MERGE_LEASE_JSON")');
         lines.push('  echo "merge gate parked PR: $PARK_REASON" >&2');
@@ -2119,40 +2136,22 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         lines.push('  exit "$MERGE_LEASE_EXIT"');
         lines.push('fi');
         lines.push('MERGE_LEASE_ID=$(jq -r \'.leaseId\' "$MERGE_LEASE_JSON")');
-        lines.push('```');
         lines.push('');
-        lines.push(
-          'Save `MERGE_LEASE_ID` and use it for every release. While holding'
-          + ' the lease, rebase onto the latest base and validate the exact'
-          + ' rebased head. If the rebase reports conflicts, immediately release'
-          + ' the lease with `--lease-id "$MERGE_LEASE_ID"` and step out of the'
-          + ' merge attempt; do not continue to merge under a conflicted rebase.'
-        );
+        lines.push('# While holding the lease, rebase onto the latest base and validate the exact rebased head.');
+        lines.push('# If rebase or validation fails, exit non-zero here; the EXIT trap releases the lease.');
+        lines.push('# Capture the validated base as VALIDATION_BASE and the fetched current base as CURRENT_BASE.');
+        lines.push('POST_REMEDIATION_SHA=$(git rev-parse HEAD)');
         lines.push('');
-        lines.push(
-          'Before `gh pr merge`, conditionally revalidate the base you tested'
-          + ' against. Capture the validated base as `VALIDATION_BASE`, fetch'
-          + ' the current base as `CURRENT_BASE`, then run:'
-        );
-        lines.push('');
-        lines.push('```bash');
+        lines.push('set +e');
         lines.push(`node bin/merge-lease.mjs needs-revalidation --repo-path "$PWD" --base ${job.baseBranch} --validation-base "$VALIDATION_BASE" --current-base "$CURRENT_BASE" > "$MERGE_REVALIDATION_JSON"`);
-        lines.push('if jq -e \'.needsRevalidation == true\' "$MERGE_REVALIDATION_JSON" >/dev/null; then');
-        lines.push(`  node bin/merge-lease.mjs release --repo ${job.repo} --base ${job.baseBranch} --pr ${job.prNumber} --lease-id "$MERGE_LEASE_ID"`);
+        lines.push('MERGE_REVALIDATION_EXIT=$?');
+        lines.push('set -e');
+        lines.push('if [ "$MERGE_REVALIDATION_EXIT" -ne 0 ] || ! jq -e \'.needsRevalidation == false\' "$MERGE_REVALIDATION_JSON" >/dev/null; then');
         lines.push('  # Base moved or could not be verified; restart rebase/validation under a fresh lease.');
         lines.push('  exit 75');
         lines.push('fi');
-        lines.push('```');
         lines.push('');
-        lines.push(
-          'Merge only while the lease is held, using'
-          + ' `gh pr merge --squash --admin --match-head-commit "$POST_REMEDIATION_SHA"`.'
-          + ' Release the lease in a fenced cleanup path after merge confirmation'
-          + ' or any non-merge exit:'
-        );
-        lines.push('');
-        lines.push('```bash');
-        lines.push(`node bin/merge-lease.mjs release --repo ${job.repo} --base ${job.baseBranch} --pr ${job.prNumber} --lease-id "$MERGE_LEASE_ID"`);
+        lines.push('gh pr merge --squash --admin --match-head-commit "$POST_REMEDIATION_SHA"');
         lines.push('```');
       }
     }

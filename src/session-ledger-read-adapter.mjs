@@ -695,6 +695,111 @@ export function readLatestWorkerRunStatusFromLedger({
   return { ok: true, row, target: queried.target };
 }
 
+export function readBuildCompletionSignalForPr({
+  repo,
+  prNumber,
+  signalKind = 'merged',
+  ledgerTarget = null,
+  ledgerDbPath = null,
+  env = process.env,
+  rootDir = process.cwd(),
+  hqRoot = null,
+  spawnSyncImpl = spawnSync,
+} = {}) {
+  const normalizedRepo = normalizeText(repo);
+  const normalizedSignalKind = normalizeText(signalKind);
+  const numericPrNumber = Number(prNumber);
+  if (!normalizedRepo) return { ok: false, reason: 'missing-repo' };
+  if (!Number.isInteger(numericPrNumber) || numericPrNumber <= 0) {
+    return { ok: false, reason: 'missing-pr-number' };
+  }
+  if (!normalizedSignalKind) return { ok: false, reason: 'missing-signal-kind' };
+
+  const resolution = resolveSessionLedgerReadTarget({
+    ledgerTarget,
+    ledgerDbPath,
+    requiredTables: ['build_completions'],
+    env,
+    rootDir,
+    hqRoot,
+  });
+  if (!resolution.ok) return resolution;
+
+  let queried;
+  if (resolution.target.backend === 'sqlite') {
+    queried = querySqliteRows(
+      resolution.target,
+      `SELECT completion_id, ticket_id, launch_request_id, dagrun_id,
+              dagrun_step_ticket_id, repo, pr_number, pr_url, head_sha,
+              branch, worker_class, signal_kind, spec_ref, source, recorded_at
+         FROM build_completions
+        WHERE repo = @repo
+          AND pr_number = @prNumber
+          AND signal_kind = @signalKind
+        ORDER BY COALESCE(recorded_at, '') DESC,
+                 completion_id DESC
+        LIMIT 1`,
+      { repo: normalizedRepo, prNumber: numericPrNumber, signalKind: normalizedSignalKind },
+    );
+  } else if (resolution.target.backend === 'postgres') {
+    queried = queryPostgresRows(
+      resolution.target,
+      `SELECT json_build_object(
+          'completion_id', completion_id,
+          'ticket_id', ticket_id,
+          'launch_request_id', launch_request_id,
+          'dagrun_id', dagrun_id,
+          'dagrun_step_ticket_id', dagrun_step_ticket_id,
+          'repo', repo,
+          'pr_number', pr_number,
+          'pr_url', pr_url,
+          'head_sha', head_sha,
+          'branch', branch,
+          'worker_class', worker_class,
+          'signal_kind', signal_kind,
+          'spec_ref', spec_ref,
+          'source', source,
+          'recorded_at', recorded_at
+        )
+         FROM (
+           SELECT completion_id, ticket_id, launch_request_id, dagrun_id,
+                  dagrun_step_ticket_id, repo, pr_number, pr_url, head_sha,
+                  branch, worker_class, signal_kind, spec_ref, source, recorded_at
+             FROM build_completions
+            WHERE repo = :'repo'
+              AND pr_number = :'pr_number'::integer
+              AND signal_kind = :'signal_kind'
+            ORDER BY COALESCE(recorded_at::text, '') DESC,
+                     completion_id DESC
+            LIMIT 1
+         ) latest_build_completion`,
+      {
+        spawnSyncImpl,
+        psqlVars: [
+          ['repo', normalizedRepo],
+          ['pr_number', String(numericPrNumber)],
+          ['signal_kind', normalizedSignalKind],
+        ],
+      },
+    );
+  } else {
+    return unsupportedBackend(resolution.target);
+  }
+  if (!queried.ok) return queried;
+  const [row] = queried.rows;
+  if (!row) {
+    return {
+      ok: false,
+      reason: 'missing-build-completion-signal',
+      repo: normalizedRepo,
+      prNumber: numericPrNumber,
+      signalKind: normalizedSignalKind,
+      target: queried.target,
+    };
+  }
+  return { ok: true, row, target: queried.target };
+}
+
 export function readWorkerRunUsageFromLedger({
   workerRunId = null,
   launchRequestId = null,

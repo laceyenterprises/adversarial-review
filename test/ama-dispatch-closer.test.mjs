@@ -1015,6 +1015,209 @@ test('existing AMA closer dispatch suppresses a duplicate launch for the same he
   assert.equal(hqStatusProbes.length, 1);
 });
 
+test('SSG-06: failed prior closer dispatch releases ownership and re-dispatches', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-ssg06-failed-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatched',
+    retryCount: 1,
+    dispatchedAt: '2026-06-20T10:00:00Z',
+    dispatchId: 'dispatch_failed',
+    launchRequestId: 'lrq_failed',
+    lastObservedStatus: 'starting',
+    lastObservedAt: '2026-06-20T10:00:00Z',
+    lastError: null,
+  });
+  acquireAmaCloserLease({
+    rootDir,
+    ...identity,
+    watcherPid: 1001,
+    now: '2026-06-20T10:00:00Z',
+  });
+  updateAmaCloserLease({
+    rootDir,
+    ...identity,
+    status: 'dispatched',
+    lrqId: 'lrq_failed',
+    now: '2026-06-20T10:00:01Z',
+  });
+
+  const calls = [];
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:05:00Z' },
+    execFileImpl: async (_cmd, args) => {
+      calls.push(args);
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: '{"status":"failed"}', stderr: '' };
+      }
+      return { stdout: '{"dispatchId":"dispatch_retry","launchRequestId":"lrq_retry"}', stderr: '' };
+    },
+    readTemplateImpl: () => 'stubbed',
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(result.launchRequestId, 'lrq_retry');
+  const dispatchLaunches = calls.filter((args) => args[0] === 'dispatch' && args[1] !== 'status');
+  assert.equal(dispatchLaunches.length, 1, 'failed prior dispatch must not retain ownership');
+});
+
+test('SSG-06: live in-flight closer dispatch is the only retained ownership path', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-ssg06-live-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatched',
+    retryCount: 1,
+    dispatchedAt: '2026-06-20T10:00:00Z',
+    dispatchId: 'dispatch_running',
+    launchRequestId: 'lrq_running',
+    lastObservedStatus: 'starting',
+    lastObservedAt: '2026-06-20T10:00:00Z',
+    lastError: null,
+  });
+
+  let launchCalled = false;
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:05:00Z' },
+    execFileImpl: async (_cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: '{"status":"running"}', stderr: '' };
+      }
+      launchCalled = true;
+      return { stdout: '{"dispatchId":"dispatch_new","launchRequestId":"lrq_new"}', stderr: '' };
+    },
+    readTemplateImpl: () => 'stubbed',
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(result.reason, 'existing-dispatch-running');
+  assert.equal(launchCalled, false, 'live in-flight dispatch must be retained');
+});
+
+test('SSG-06: ledger merged signal resolves closer ownership as done', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-ssg06-merged-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+
+  let execCalled = false;
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:05:00Z' },
+    execFileImpl: async () => {
+      execCalled = true;
+      return { stdout: '{"dispatchId":"dispatch_unexpected","launchRequestId":"lrq_unexpected"}', stderr: '' };
+    },
+    readTemplateImpl: () => 'stubbed',
+    readBuildCompletionSignalForPrImpl: () => ({
+      ok: true,
+      row: {
+        completion_id: 'bcmp_merged',
+        repo: dispatchContext.repo,
+        pr_number: prMetadata.prNumber,
+        signal_kind: 'merged',
+      },
+    }),
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(result.reason, 'merged-signal-present');
+  assert.equal(result.mergedSignal.completion_id, 'bcmp_merged');
+  assert.equal(execCalled, false, 'merged signal is authoritative; no dispatch/status probe needed');
+});
+
+test('SSG-06: hq succeeded status alone does not retain closer ownership', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-ssg06-succeeded-admit-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatched',
+    retryCount: 1,
+    dispatchedAt: '2026-06-20T10:00:00Z',
+    dispatchId: 'dispatch_admitted',
+    launchRequestId: 'lrq_admitted',
+    lastObservedStatus: 'starting',
+    lastObservedAt: '2026-06-20T10:00:00Z',
+    lastError: null,
+  });
+  acquireAmaCloserLease({
+    rootDir,
+    ...identity,
+    watcherPid: 1001,
+    now: '2026-06-20T10:00:00Z',
+  });
+  updateAmaCloserLease({
+    rootDir,
+    ...identity,
+    status: 'dispatched',
+    lrqId: 'lrq_admitted',
+    now: '2026-06-20T10:00:01Z',
+  });
+
+  const calls = [];
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:05:00Z' },
+    execFileImpl: async (_cmd, args) => {
+      calls.push(args);
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: '{"status":"succeeded"}', stderr: '' };
+      }
+      return { stdout: '{"dispatchId":"dispatch_retry","launchRequestId":"lrq_retry"}', stderr: '' };
+    },
+    readTemplateImpl: () => 'stubbed',
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(result.launchRequestId, 'lrq_retry');
+  assert.ok(
+    calls.some((args) => args[0] === 'dispatch' && args[1] !== 'status'),
+    'unverified terminal success must release ownership and allow re-dispatch',
+  );
+});
+
 test('AMA-07 lease blocks regardless of how hq dispatch status would have responded', async (t) => {
   // The AMA-07 lease is independent of hq dispatch status. Even if hq
   // status probing would return malformed output (the old test's

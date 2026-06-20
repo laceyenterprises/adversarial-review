@@ -879,14 +879,8 @@ export function releaseMergeLease({
     if (!currentMatched) {
       return { released: false, leasePath, existingLease: currentLease };
     }
-    const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, { repo, base });
-    const attemptPrune = removeAttemptRecordsUnlocked(attemptsPath, {
-      pr: currentLease.holderPr,
-      head: currentLease.holderHead,
-      now: isoNow(),
-    });
     rmSync(leasePath, { force: true });
-    return { released: true, leasePath, lease: currentLease, attemptPrune };
+    return { released: true, leasePath, lease: currentLease };
   });
   if (!locked.acquired) {
     return { released: false, leasePath, existingLease: readJsonFile(leasePath, null), reason: 'mutation-lock-busy' };
@@ -1075,6 +1069,16 @@ export async function reconcileMergeLeases({
     holderHead: lease.holderHead,
     acquiredAt: lease.acquiredAt,
   });
+  const attemptPrune = released.released
+    ? withWaiterMutationLock({ rootDir, repo, base }, () => removeAttemptRecordsUnlocked(
+      mergeLeaseAttemptsFilePath(rootDir, { repo, base }),
+      {
+        pr: lease.holderPr,
+        head: lease.holderHead,
+        now: now || isoNow(),
+      },
+    ))
+    : null;
   return {
     reconciled: released.released,
     released: released.released,
@@ -1082,6 +1086,7 @@ export async function reconcileMergeLeases({
     holderPrState: state,
     inspection,
     release: released,
+    attemptPrune,
   };
 }
 

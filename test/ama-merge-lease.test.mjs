@@ -232,7 +232,7 @@ test('release with matching lease identity frees it and subsequent acquire succe
   }
 });
 
-test('release with matching lease identity prunes matching gate attempts', () => {
+test('release with matching lease identity preserves gate attempts for retry caps', () => {
   const rootDir = freshRoot();
   try {
     const first = acquire(rootDir, {
@@ -265,10 +265,9 @@ test('release with matching lease identity prunes matching gate attempts', () =>
     });
 
     assert.equal(released.released, true);
-    assert.equal(released.attemptPrune.removed, true);
     assert.deepEqual(
       readMergeLeaseAttempts(rootDir, IDENTITY).map((attempt) => `${attempt.pr}:${attempt.head}`),
-      ['999:other-head'],
+      ['101:attempt-head', '999:other-head'],
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

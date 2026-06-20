@@ -599,6 +599,13 @@ function samePathSet(left, right) {
   return true;
 }
 
+function pathSetIncludesAll(haystack, needles) {
+  const haystackSet = new Set(normalizePathList(haystack));
+  const normalizedNeedles = normalizePathList(needles);
+  if (normalizedNeedles.length === 0) return false;
+  return normalizedNeedles.every((path) => haystackSet.has(path));
+}
+
 function bodyMentionsEveryPath(body, paths) {
   const text = String(body || '').toLowerCase();
   const normalized = normalizePathList(paths);
@@ -623,8 +630,9 @@ function validateHamDocCurrencyEvidence(evidence, verifiedCommit, verifiedAuditB
     && lowerBody.includes('doc-currency')
     && bodyMentionsEveryPath(body, changedFiles);
   let statusOk = false;
+  const docsUpdatedInCommit = pathSetIncludesAll(changedFiles, docsUpdated);
   if (status === 'updated') {
-    statusOk = docsUpdated.length > 0 && bodyMentionsEveryPath(body, docsUpdated);
+    statusOk = docsUpdatedInCommit && bodyMentionsEveryPath(body, docsUpdated);
   } else if (status === 'skipped_superproject') {
     statusOk =
       skippedSuperprojectDocs.length > 0
@@ -639,6 +647,7 @@ function validateHamDocCurrencyEvidence(evidence, verifiedCommit, verifiedAuditB
     changedFiles,
     claimedChangedFiles,
     docsUpdated,
+    docsUpdatedInCommit,
     skippedSuperprojectDocs,
   };
 }

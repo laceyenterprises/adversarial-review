@@ -670,6 +670,40 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
     assert.equal(missingDocCurrencyVerdict.eligible, false);
     assert.equal(missingDocCurrencyVerdict.trace.hamTerminalRemediation.checks.docCurrency, false);
 
+    const selfAttestedDocUpdate = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody,
+      prPatch: {
+        headRefOid: HAM_SHA,
+        labels: [],
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' },
+          { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
+        ],
+      },
+      reviews,
+      hamTerminalRemediation: hamTerminalEvidence({
+        changedFiles: ['migrations/001-add-profile.sql'],
+        auditBody: [
+          'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md.',
+          'Doc-currency: updated docs/data-model/catalog.json for changed files migrations/001-add-profile.sql.',
+        ].join(' '),
+        docCurrency: {
+          status: 'updated',
+          changedFiles: ['migrations/001-add-profile.sql'],
+          docsUpdated: ['docs/data-model/catalog.json'],
+        },
+      }),
+    });
+    assert.equal(selfAttestedDocUpdate.status, 0, selfAttestedDocUpdate.stderr);
+    const selfAttestedDocUpdateVerdict = JSON.parse(selfAttestedDocUpdate.stdout);
+    assert.equal(selfAttestedDocUpdateVerdict.eligible, false);
+    assert.equal(selfAttestedDocUpdateVerdict.trace.hamTerminalRemediation.checks.docCurrency, false);
+    assert.equal(
+      selfAttestedDocUpdateVerdict.trace.hamTerminalRemediation.docCurrency.docsUpdatedInCommit,
+      false,
+    );
+
     const emptyDiff = runAmaCheck(tmp, {
       branchProtectionRequired: true,
       protectionBody,

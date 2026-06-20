@@ -1623,6 +1623,53 @@ test('ham terminal remediation: valid evidence waives strict non-blocking findin
   assert.equal(result.trace.hamTerminalRemediation.addressedFindings.nonBlocking, 1);
 });
 
+test('ham terminal remediation: claimed doc updates must be in the verified diff', () => {
+  const auditBody = [
+    'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md.',
+    'Doc-currency: updated docs/data-model/catalog.json for changed files migrations/001-add-profile.sql.',
+  ].join(' ');
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+    prMetadata: { headSha: 'def67890' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: {
+      ...hamEvidence({
+        auditBody,
+        docCurrency: {
+          status: 'updated',
+          changedFiles: ['migrations/001-add-profile.sql'],
+          docsUpdated: ['docs/data-model/catalog.json'],
+        },
+      }),
+      auditComment: {
+        body: auditBody,
+        docCurrency: {
+          status: 'updated',
+          changedFiles: ['migrations/001-add-profile.sql'],
+          docsUpdated: ['docs/data-model/catalog.json'],
+        },
+        findings: [
+          { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
+          { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
+        ],
+      },
+    },
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      auditBody,
+      changedFiles: ['migrations/001-add-profile.sql'],
+    }),
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.hamTerminalRemediation.checks.docCurrency, false);
+  assert.equal(result.trace.hamTerminalRemediation.docCurrency.docsUpdatedInCommit, false);
+});
+
 test('ham terminal remediation: later non-HAM live head is rejected', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {

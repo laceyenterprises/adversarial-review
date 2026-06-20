@@ -16,13 +16,13 @@ const ALWAYS_ON_ROUTE_OPTIONS = {
 };
 
 test('routePR maps known title prefixes to effective default reviewers', () => {
-  assert.deepEqual(routePR('[codex] LAC-181: tighten watcher', ALWAYS_ON_ROUTE_OPTIONS), {
+  assert.deepEqual(routePR('[codex] LAC-181: tighten watcher', null, ALWAYS_ON_ROUTE_OPTIONS), {
     tag: 'codex',
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
   });
 
-  assert.deepEqual(routePR('[claude-code] LAC-181: tighten watcher', ALWAYS_ON_ROUTE_OPTIONS), {
+  assert.deepEqual(routePR('[claude-code] LAC-181: tighten watcher', null, ALWAYS_ON_ROUTE_OPTIONS), {
     tag: 'claude-code',
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
@@ -32,7 +32,7 @@ test('routePR maps known title prefixes to effective default reviewers', () => {
   // PR is reviewed by claude (the opposite model from the writer). Was
   // previously codex-reviewer, which was same-model and broke the
   // cross-model guarantee for Clio.
-  assert.deepEqual(routePR('[clio-agent] LAC-181: tighten watcher', ALWAYS_ON_ROUTE_OPTIONS), {
+  assert.deepEqual(routePR('[clio-agent] LAC-181: tighten watcher', null, ALWAYS_ON_ROUTE_OPTIONS), {
     tag: 'clio-agent',
     reviewerModel: 'gemini',
     botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
@@ -51,11 +51,11 @@ test('routePR accepts the shared title, subject, options call shape', () => {
 });
 
 test('routePR returns null for malformed titles missing required prefix', () => {
-  assert.equal(routePR('LAC-181: missing reviewer tag', ALWAYS_ON_ROUTE_OPTIONS), null);
-  assert.equal(routePR('[codex LAC-181 malformed prefix', ALWAYS_ON_ROUTE_OPTIONS), null);
-  assert.equal(routePR('[codex]', ALWAYS_ON_ROUTE_OPTIONS), null);
-  assert.equal(routePR('[codex] [claude-code] stacked prefix', ALWAYS_ON_ROUTE_OPTIONS), null);
-  assert.equal(routePR('[other] LAC-181: unknown tag', ALWAYS_ON_ROUTE_OPTIONS), null);
+  assert.equal(routePR('LAC-181: missing reviewer tag', null, ALWAYS_ON_ROUTE_OPTIONS), null);
+  assert.equal(routePR('[codex LAC-181 malformed prefix', null, ALWAYS_ON_ROUTE_OPTIONS), null);
+  assert.equal(routePR('[codex]', null, ALWAYS_ON_ROUTE_OPTIONS), null);
+  assert.equal(routePR('[codex] [claude-code] stacked prefix', null, ALWAYS_ON_ROUTE_OPTIONS), null);
+  assert.equal(routePR('[other] LAC-181: unknown tag', null, ALWAYS_ON_ROUTE_OPTIONS), null);
 });
 
 test('required prefixes are derived from canonical tag prefixes', () => {

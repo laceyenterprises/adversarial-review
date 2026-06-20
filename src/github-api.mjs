@@ -7,6 +7,7 @@ import {
   readAdapterPrRollup,
   readAdapterReviewBodiesForHead,
   readAdapterReviewContext,
+  resolveGitHubAdapterBin,
 } from './github-adapter-client.mjs';
 import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit } from './rate-limit-throttle.mjs';
 
@@ -798,7 +799,10 @@ async function runAdapterReadWithTelemetry(category, {
   repo,
   prNumber,
   recordApiCallImpl,
+  env = process.env,
+  adapterAvailable = Boolean(resolveGitHubAdapterBin({ env })),
 }, action) {
+  if (!adapterAvailable) return null;
   const startedAt = Date.now();
   try {
     await awaitThrottleIfNeeded('core');
@@ -955,12 +959,13 @@ async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
       repo,
       prNumber: normalizedPrNumber,
       recordApiCallImpl,
+      env,
     }, () => readAdapterReviewBodiesForHead(repo, normalizedPrNumber, headSha, {
       execFileImpl,
       env,
       reviewerLogins: loginList,
     }));
-    if (adapterReviews) {
+    if (Array.isArray(adapterReviews) && adapterReviews.length > 0) {
       const allAdapterReviewsVerifiable = adapterReviews.every((review) => (
         review && typeof review === 'object' && !Array.isArray(review)
       ));
@@ -1580,6 +1585,7 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
       repo,
       prNumber: normalizedPrNumber,
       recordApiCallImpl,
+      env,
     }, () => readAdapterHeadAndState(repo, normalizedPrNumber, { execFileImpl, withLabels, env }));
     if (adapterResult) {
       return normalizeAdapterHeadAndState(adapterResult, { withLabels });
@@ -1654,6 +1660,7 @@ async function fetchPullRequestRollup(repo, prNumber, {
       repo,
       prNumber: normalizedPrNumber,
       recordApiCallImpl,
+      env,
     }, () => readAdapterPrRollup(repo, normalizedPrNumber, { execFileImpl, env }));
     if (adapterResult) {
       return normalizeAdapterRollup(adapterResult);
@@ -1699,6 +1706,7 @@ async function fetchPullRequestReviewContext(repo, prNumber, {
       repo,
       prNumber: normalizedPrNumber,
       recordApiCallImpl,
+      env,
     }, () => readAdapterReviewContext(repo, normalizedPrNumber, { execFileImpl, env }));
     if (adapterResult) {
       return normalizeAdapterReviewContext(adapterResult);

@@ -808,6 +808,26 @@ test('adapter-missing rollup path uses existing GraphQL implementation', async (
   assert.equal(calls[0].command, 'gh');
 });
 
+test('adapter telemetry helper skips action and telemetry when adapter is unavailable', async () => {
+  const mod = await importGithubApiFresh();
+  const telemetry = makeTelemetrySink();
+  let actionCalled = false;
+
+  const result = await mod.__test__.runAdapterReadWithTelemetry('graphql_pr_rollup', {
+    repo: FIXTURE_REPO,
+    prNumber: FIXTURE_PR,
+    recordApiCallImpl: telemetry.recordApiCallImpl,
+    adapterAvailable: false,
+  }, async () => {
+    actionCalled = true;
+    return { status: 200 };
+  });
+
+  assert.equal(result, null);
+  assert.equal(actionCalled, false);
+  assert.deepEqual(telemetry.events, []);
+});
+
 test('malformed adapter rollup output falls back to the legacy implementation', async () => {
   const expected = makeExpectedRollup();
   const mod = await importGithubApiFresh();
@@ -1050,6 +1070,45 @@ test('adapter-present string review bodies without allowlist fall back to legacy
     FIXTURE_PR,
     headSha,
     {
+      env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+      recordApiCallImpl: () => {},
+    },
+  );
+
+  assert.deepEqual(calls.map((call) => call.command), ['/fixture/github-adapter', 'gh']);
+  assert.deepEqual(bodies, ['## Verdict\n\nRequest changes']);
+});
+
+test('adapter-present empty review bodies fall back to legacy head filtering', async () => {
+  const mod = await importGithubApiFresh();
+  const headSha = 'head-adapter-empty-fallback';
+  const calls = [];
+
+  const bodies = await mod.fetchReviewBodiesForHead(
+    async (command, args) => {
+      calls.push({ command, args: [...args] });
+      if (command === '/fixture/github-adapter') {
+        return { stdout: JSON.stringify({ bodies: [] }) };
+      }
+      assert.equal(command, 'gh');
+      assert.equal(args[0], 'api');
+      return {
+        stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${JSON.stringify([
+          {
+            user: { login: 'codex-reviewer-lacey' },
+            body: '## Verdict\n\nRequest changes',
+            state: 'CHANGES_REQUESTED',
+            submitted_at: '2026-06-15T02:30:00.000Z',
+            commit_id: headSha,
+          },
+        ])}`,
+      };
+    },
+    FIXTURE_REPO,
+    FIXTURE_PR,
+    headSha,
+    {
+      authoritativeReviewerLogins: ['codex-reviewer-lacey'],
       env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
       recordApiCallImpl: () => {},
     },

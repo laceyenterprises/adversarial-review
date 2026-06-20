@@ -317,12 +317,12 @@ async function readAdapterPullRequest(repo, prNumber, options) {
 async function readAdapterPullRequestDiff(repo, prNumber, options) {
   const payload = await runGitHubAdapter('pull-request-diff', { repo, prNumber }, options);
   if (!payload) return null;
-  if (typeof payload === 'string') return payload;
+  if (typeof payload === 'string') return payload.trim() ? payload : null;
   const diff = payload.diff ?? payload.representation ?? payload.data;
   if (typeof diff !== 'string') {
     throw new Error('GitHub adapter pull-request-diff payload must contain a string diff');
   }
-  return diff;
+  return diff.trim() ? diff : null;
 }
 
 const __test__ = {

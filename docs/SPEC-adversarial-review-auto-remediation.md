@@ -248,7 +248,11 @@ The `pull-request-review-bodies-for-head` read kind must return structured
 review objects carrying body, submitted state, reviewed commit/head SHA, submit
 time, and author metadata. String-only body arrays are not sufficiently
 verifiable; callers must fall back to the legacy GitHub reader so in-process
-head/state filtering remains identical to the non-adapter path.
+head/state filtering remains identical to the non-adapter path. Empty structured
+body arrays are also inconclusive during rollout and must fall back to the
+legacy reader because this read directly feeds verdict detection. PR diff
+adapter payloads must contain a non-empty string diff; empty-string diffs fall
+back to `gh pr diff` rather than reviewing an empty representation.
 
 ## Default Agent Routing Overrides
 
@@ -265,7 +269,13 @@ for every supported title prefix:
   review to Codex and use `GH_CODEX_REVIEWER_TOKEN`.
 
 The exported GitHub-PR route helpers and watcher dispatch path then apply
-`reviewer.gemini.mode` through the same effective-route helper. The default mode is `always-on`, so the public default matrix is:
+`reviewer.gemini.mode` through the same effective-route helper. The default mode is `always-on`.
+
+`routePR` helpers use the shared `(title, subject, options)` call shape; wrappers
+that do not need subject context still pass the subject through so future
+subject-aware routing cannot silently diverge.
+
+The public default matrix is:
 
 - `[codex]`, `[claude-code]`, and `[clio-agent]` PRs route first-pass review to
   Gemini and use `GH_GEMINI_REVIEWER_TOKEN`.

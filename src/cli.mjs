@@ -20,14 +20,14 @@ Usage:
 // matrix alongside reviewer eligibility plus the gemini selection mode,
 // matching the SPEC §1 mockup. Resolves the live `reviewer.gemini.mode` from
 // the config cascade so the gemini-row note reflects the deployed mode.
-function reviewerRosterMain(argv, io = {}) {
+function reviewerRosterMain(argv, io = {}, configOptions = io.config || {}) {
   const stdout = io.stdout || process.stdout;
   const stderr = io.stderr || process.stderr;
-  const env = io.env || process.env;
+  const env = configOptions.env || io.env || process.env;
   const json = argv.includes('--json');
   let mode;
   try {
-    mode = resolveGeminiReviewerMode({ env });
+    mode = resolveGeminiReviewerMode({ ...configOptions, env });
   } catch (err) {
     stderr.write(`error: could not resolve reviewer.gemini.mode: ${err?.message || err}\n`);
     return 1;

@@ -12,8 +12,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeFileAtomic } from '../../../atomic-write.mjs';
 import {
-  extractLinearTicketId,
-  routePR,
+  extractLinearTicketId as extractGitHubPRLinearTicketId,
+  routePR as routeGitHubPR,
 } from '../../subject/github-pr/routing.mjs';
 
 const DEFAULT_CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
@@ -21,6 +21,8 @@ const TICKET_PIPELINE_PAUSED_LABEL = 'ticket-pipeline-paused';
 const TICKET_PIPELINE_PAUSE_ROOT_ENV = 'ADVERSARIAL_TICKET_PIPELINE_ROOT';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = join(__dirname, '..', '..', '..', '..');
+const extractLinearTicketId = extractGitHubPRLinearTicketId;
+const routePR = routeGitHubPR;
 
 function resolveLinearTicketId(subjectRef) {
   return subjectRef?.linearTicketId || null;
@@ -254,6 +256,9 @@ function createLinearTriageAdapter({
   criticalWords = DEFAULT_CRITICAL_WORDS,
   rootDir = DEFAULT_ROOT,
   env = process.env,
+  topPath,
+  modulePaths,
+  loaderImpl,
 } = {}) {
   persistTicketPipelinePauseRootStatus(rootDir, { env, logger });
   const resolvedStateNames = {
@@ -351,12 +356,29 @@ function createLinearTriageAdapter({
     }
   }
 
-  return {
-    routePR: (prTitle, subject = null, options = {}) => routePR(prTitle, subject, {
+  function routePullRequest(prTitle, subject = null, options = {}) {
+    return routeGitHubPR(prTitle, subject, {
       env,
+      topPath,
+      modulePaths,
+      loaderImpl,
       ...options,
-    }),
-    extractLinearTicketId,
+    });
+  }
+
+  function extractPullRequestLinearTicketId(prTitle, options = {}) {
+    return extractGitHubPRLinearTicketId(prTitle, {
+      env,
+      topPath,
+      modulePaths,
+      loaderImpl,
+      ...options,
+    });
+  }
+
+  return {
+    routePR: routePullRequest,
+    extractLinearTicketId: extractPullRequestLinearTicketId,
     syncTriageStatus,
     recordReviewerEngagement,
     recordReviewCompleted,

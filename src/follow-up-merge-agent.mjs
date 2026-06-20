@@ -1902,13 +1902,20 @@ function findLatestFollowUpJobForPR(rootDir, { repo, prNumber, revisionRef = nul
   return latest;
 }
 
+function shellSingleQuote(value) {
+  return `'${String(value ?? '').replaceAll("'", "'\\''")}'`;
+}
+
 function buildMergeAgentPrompt(job, { trigger = null } = {}) {
+  const mergeRepoLiteral = shellSingleQuote(job.repo);
+  const mergeBaseLiteral = shellSingleQuote(job.baseBranch);
+  const mergePrLiteral = shellSingleQuote(job.prNumber);
   const lines = [
     '# Merge-Agent Dispatch',
     '',
     '## Preamble: abort if PR is no longer open',
     '',
-    `Before doing ANY other work, run \`gh pr view ${job.prNumber} --repo ${job.repo} --json state,mergedAt,closedAt\` and inspect the result.`,
+    `Before doing ANY other work, run \`gh pr view ${mergePrLiteral} --repo ${mergeRepoLiteral} --json state,mergedAt,closedAt\` and inspect the result.`,
     '',
     '- If `state` is `"MERGED"` (operator-merged ahead of you) OR `state` is `"CLOSED"` (operator abandoned the PR): **abort this session immediately**. Do not check out the branch, do not run remediation, do not push commits, do not call `hq` adjudicate. Exit cleanly with a short stdout note like `merge-agent abort: PR state=<X> at session start; no work performed`.',
     '- If `state` is `"OPEN"`: proceed normally with the dispatch below.',
@@ -2075,11 +2082,11 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       lines.push(
         '2. Default to MERGE. When triage returns `no-followups-needed`, or'
         + ' returns `addressed` after you make the fixes, rebase, force-push the'
-        + ' updated head, wait only for real external CI on that pushed head,'
-        + ' then MERGE (`gh pr merge --squash --admin`). Do NOT wait on or treat'
-        + ' the adversarial-review gate status (`agent-os/adversarial-gate`) as a'
-        + ' blocking check — it only mirrors the review verdict you already have,'
-        + ' not external CI, and the admin merge lands past it. Do NOT request'
+        + ' updated head, let `gh pr merge --auto` wait for required GitHub checks'
+        + ' and branch protection on that pushed head, then MERGE (`gh pr merge'
+        + ' --squash --auto`). Do NOT use'
+        + ' `--admin` for this standard merge path; GitHub must still enforce'
+        + ' required checks at merge time. Do NOT request'
         + ' another'
         + ' review for light, medium, or even substantial-but-bounded fixes —'
         + ' force-push and merge those directly. Set `reReview.requested = true`'
@@ -2096,6 +2103,83 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         + ' using `awaiting-rereview` or stopping the PR. A non-empty'
         + ' `blockers_observed` result must hard-refuse the merge.'
       );
+      if (isZeroBlockerFinalPass) {
+        lines.push(
+          'Merge gate for the rebase-to-merge step only: after remediation is'
+          + ' complete and you are ready to rebase for merge, acquire the'
+          + ' blocking merge lease before rebasing. Run the entire'
+          + ' rebase/validation/merge sequence from this single shell script;'
+          + ' it passes that shell pid as `--owner-pid "$$"` and releases the'
+          + ' lease through the EXIT trap on every path after acquisition:'
+        );
+        lines.push('');
+        lines.push('```bash');
+        lines.push('set -euo pipefail');
+        lines.push(`MERGE_REPO=${mergeRepoLiteral}`);
+        lines.push(`MERGE_BASE=${mergeBaseLiteral}`);
+        lines.push(`MERGE_PR=${mergePrLiteral}`);
+        lines.push('MERGE_HEAD_REF=$(gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json headRefName --jq \'.headRefName\')');
+        lines.push('POST_REMEDIATION_SHA=$(git rev-parse HEAD)');
+        lines.push('MERGE_GATE_ATTEMPT_HEAD="$POST_REMEDIATION_SHA"');
+        lines.push('MERGE_LEASE_JSON=$(mktemp)');
+        lines.push('MERGE_REVALIDATION_JSON=$(mktemp)');
+        lines.push('MERGE_LEASE_ID=""');
+        lines.push('cleanup_merge_lease() {');
+        lines.push('  status=$?');
+        lines.push('  if [ -n "${MERGE_LEASE_ID:-}" ]; then');
+        lines.push('    node bin/merge-lease.mjs release --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --lease-id "$MERGE_LEASE_ID" || true');
+        lines.push('  fi');
+        lines.push('  rm -f "$MERGE_LEASE_JSON" "$MERGE_REVALIDATION_JSON"');
+        lines.push('  exit "$status"');
+        lines.push('}');
+        lines.push('trap cleanup_merge_lease EXIT');
+        lines.push('');
+        lines.push('set +e');
+        lines.push('node bin/merge-lease.mjs acquire --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --head "$MERGE_GATE_ATTEMPT_HEAD" --owner-pid "$$" --wait 300 > "$MERGE_LEASE_JSON"');
+        lines.push('MERGE_LEASE_EXIT=$?');
+        lines.push('set -e');
+        lines.push('if [ "$MERGE_LEASE_EXIT" -eq 70 ] && jq -e \'.parked == true\' "$MERGE_LEASE_JSON" >/dev/null; then');
+        lines.push('  PARK_REASON=$(jq -r \'.reason // "merge-gate-parked"\' "$MERGE_LEASE_JSON")');
+        lines.push('  echo "merge gate parked PR: $PARK_REASON" >&2');
+        lines.push('  # Stop merge attempts and park/escalate with the emitted reason.');
+        lines.push('  exit 70');
+        lines.push('fi');
+        lines.push('if [ "$MERGE_LEASE_EXIT" -ne 0 ]; then');
+        lines.push('  exit "$MERGE_LEASE_EXIT"');
+        lines.push('fi');
+        lines.push('MERGE_LEASE_ID=$(jq -r \'.leaseId\' "$MERGE_LEASE_JSON")');
+        lines.push('');
+        lines.push('# While holding the lease, rebase onto the latest base and validate the exact rebased head.');
+        lines.push('# If rebase or validation fails, exit non-zero here; the EXIT trap releases the lease.');
+        lines.push('git fetch --prune origin "$MERGE_BASE" "$MERGE_HEAD_REF"');
+        lines.push('VALIDATION_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")');
+        lines.push('git rebase "$VALIDATION_BASE"');
+        lines.push('# Run the project validation required for this PR here, against the rebased head.');
+        lines.push('git fetch --prune origin "$MERGE_BASE"');
+        lines.push('CURRENT_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")');
+        lines.push('POST_REMEDIATION_SHA=$(git rev-parse HEAD)');
+        lines.push('git push --force-with-lease origin "HEAD:$MERGE_HEAD_REF"');
+        lines.push('');
+        lines.push('set +e');
+        lines.push('node bin/merge-lease.mjs needs-revalidation --repo-path "$PWD" --base "$MERGE_BASE" --validation-base "$VALIDATION_BASE" --current-base "$CURRENT_BASE" --changed-files-from "$POST_REMEDIATION_SHA" > "$MERGE_REVALIDATION_JSON"');
+        lines.push('MERGE_REVALIDATION_EXIT=$?');
+        lines.push('set -e');
+        lines.push('if [ "$MERGE_REVALIDATION_EXIT" -ne 0 ]; then');
+        lines.push('  echo "merge revalidation failed; escalate instead of retrying the same invocation" >&2');
+        lines.push('  exit "$MERGE_REVALIDATION_EXIT"');
+        lines.push('fi');
+        lines.push('if ! jq -e \'.needsRevalidation == false\' "$MERGE_REVALIDATION_JSON" >/dev/null; then');
+        lines.push('  if ! jq -e \'.needsRevalidation == true\' "$MERGE_REVALIDATION_JSON" >/dev/null; then');
+        lines.push('    echo "merge revalidation returned an unrecognized decision; escalate" >&2');
+        lines.push('    exit 64');
+        lines.push('  fi');
+        lines.push('  # Base moved with overlapping risk; restart rebase/validation under a fresh lease.');
+        lines.push('  exit 75');
+        lines.push('fi');
+        lines.push('');
+        lines.push('gh pr merge "$MERGE_PR" --repo "$MERGE_REPO" --squash --auto --match-head-commit "$POST_REMEDIATION_SHA"');
+        lines.push('```');
+      }
     }
     if (isBlockerRemediationFinalPass || isZeroBlockerFinalPass) {
       if (finalPassHasStandingBlockingFindings) {

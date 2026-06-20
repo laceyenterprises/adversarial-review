@@ -4245,9 +4245,10 @@ test('buildMergeAgentPrompt emits the converge-and-merge contract (merge-by-defa
   assert.ok(prompt.includes('any test or test-fixture'));
   assert.ok(prompt.includes('is "major enough" to re-review, it probably is not'));
   assert.ok(prompt.includes('file the Linear tickets described above and MERGE this PR'));
-  // Don't wait on / gate the merge on the adversarial-review's own check.
-  assert.ok(prompt.includes('wait only for real external CI'));
-  assert.ok(prompt.includes('agent-os/adversarial-gate'));
+  // Use the standard non-admin merge path so GitHub branch protection remains authoritative.
+  assert.ok(prompt.includes('let `gh pr merge --auto` wait for required GitHub checks'));
+  assert.ok(prompt.includes('Do NOT use'
+    + ' `--admin` for this standard merge path'));
   // The clean-verdict path never carries the final-pass-only step 3 framing.
   assert.ok(!prompt.includes('the operator did not personally vouch for this head'));
 });
@@ -4265,8 +4266,9 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(prompt.includes('blockers_observed'));
   assert.ok(prompt.includes('Default action: MERGE'));
   assert.ok(prompt.includes('Default to MERGE'));
-  assert.ok(prompt.includes('wait only for real external CI'));
-  assert.ok(prompt.includes('agent-os/adversarial-gate'));
+  assert.ok(prompt.includes('let `gh pr merge --auto` wait for required GitHub checks'));
+  assert.ok(prompt.includes('Do NOT use'
+    + ' `--admin` for this standard merge path'));
   assert.ok(prompt.includes('Do NOT request another'
     + ' review for light, medium, or even substantial-but-bounded fixes'));
   assert.ok(prompt.includes('only for major in-PR refactors'));
@@ -4282,6 +4284,48 @@ test('buildMergeAgentPrompt surfaces final-pass mode + triage contract when trig
   assert.ok(prompt.includes('.adversarial-follow-up/followups-reply.json'));
   assert.ok(prompt.includes('never copy'));
   assert.ok(prompt.includes('quoted secrets'));
+  assert.ok(prompt.includes('Merge gate for the rebase-to-merge step only'));
+  assert.ok(prompt.includes('merge-lease.mjs acquire'));
+  assert.ok(prompt.includes('set -euo pipefail'));
+  assert.ok(prompt.includes("MERGE_REPO='laceyenterprises/agent-os'"));
+  assert.ok(prompt.includes("MERGE_BASE='main'"));
+  assert.ok(prompt.includes("MERGE_PR='401'"));
+  assert.ok(prompt.includes('MERGE_HEAD_REF=$(gh pr view "$MERGE_PR" --repo "$MERGE_REPO" --json headRefName --jq \'.headRefName\')'));
+  assert.ok(prompt.includes('POST_REMEDIATION_SHA=$(git rev-parse HEAD)'));
+  assert.ok(prompt.includes('MERGE_GATE_ATTEMPT_HEAD="$POST_REMEDIATION_SHA"'));
+  assert.ok(prompt.includes('MERGE_REVALIDATION_JSON=$(mktemp)'));
+  assert.ok(prompt.includes('trap cleanup_merge_lease EXIT'));
+  assert.ok(prompt.includes('--owner-pid "$$"'));
+  assert.ok(prompt.includes('--wait 300'));
+  assert.ok(prompt.includes('--head "$MERGE_GATE_ATTEMPT_HEAD"'));
+  assert.ok(prompt.includes('MERGE_LEASE_ID=$(jq -r \'.leaseId\' "$MERGE_LEASE_JSON")'));
+  assert.ok(prompt.includes('MERGE_LEASE_EXIT" -eq 70'));
+  assert.ok(prompt.includes('jq -e \'.parked == true\''));
+  assert.ok(prompt.includes('park/escalate with the emitted reason'));
+  assert.ok(prompt.includes('exit 70'));
+  assert.ok(prompt.includes('git fetch --prune origin "$MERGE_BASE" "$MERGE_HEAD_REF"'));
+  assert.ok(prompt.includes('VALIDATION_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")'));
+  assert.ok(prompt.includes('git rebase "$VALIDATION_BASE"'));
+  assert.ok(prompt.includes('Run the project validation required for this PR here'));
+  assert.ok(prompt.includes('CURRENT_BASE=$(git rev-parse --verify "origin/$MERGE_BASE^{commit}")'));
+  assert.ok(prompt.includes('git push --force-with-lease origin "HEAD:$MERGE_HEAD_REF"'));
+  assert.ok(prompt.includes('merge-lease.mjs needs-revalidation'));
+  assert.ok(prompt.includes('--current-base "$CURRENT_BASE"'));
+  assert.ok(prompt.includes('--validation-base "$VALIDATION_BASE"'));
+  assert.ok(prompt.includes('--changed-files-from "$POST_REMEDIATION_SHA"'));
+  assert.ok(prompt.includes('MERGE_REVALIDATION_EXIT=$?'));
+  assert.ok(prompt.includes('merge revalidation failed; escalate instead of retrying'));
+  assert.ok(prompt.includes('jq -e \'.needsRevalidation == false\''));
+  assert.ok(prompt.includes('jq -e \'.needsRevalidation == true\''));
+  assert.ok(prompt.includes('exit 64'));
+  assert.ok(prompt.includes('gh pr merge "$MERGE_PR" --repo "$MERGE_REPO" --squash --auto --match-head-commit "$POST_REMEDIATION_SHA"'));
+  assert.ok(prompt.includes('--match-head-commit "$POST_REMEDIATION_SHA"'));
+  assert.ok(prompt.includes('If rebase or validation fails, exit non-zero here; the EXIT trap releases the lease.'));
+  assert.ok(prompt.includes('release --repo "$MERGE_REPO" --base "$MERGE_BASE" --pr "$MERGE_PR" --lease-id "$MERGE_LEASE_ID"'));
+  assert.ok(!prompt.includes('gh pr merge --squash --admin'));
+  assert.ok(!prompt.includes('MERGE_GATE_ATTEMPT_KEY='));
+  assert.ok(!prompt.includes('gh pr merge --squash --match-head-commit "$POST_REMEDIATION_SHA"'));
+  assert.ok(!prompt.includes('--wait 1800'));
   assert.ok(!prompt.includes('deferred-non-trivial'));
   assert.ok(!prompt.includes('defer non-trivial suggestions'));
   assert.ok(!prompt.includes('If triage returns `addressed`, force-push the updated head and exit `awaiting-rereview`'));
@@ -5857,7 +5901,7 @@ test('buildMergeAgentPrompt includes an abort-if-closed preamble naming the PR +
   };
   const prompt = buildMergeAgentPrompt(job);
   assert.match(prompt, /## Preamble: abort if PR is no longer open/);
-  assert.match(prompt, /gh pr view 661 --repo laceyenterprises\/agent-os --json state,mergedAt,closedAt/);
+  assert.match(prompt, /gh pr view '661' --repo 'laceyenterprises\/agent-os' --json state,mergedAt,closedAt/);
   assert.match(prompt, /MERGED/);
   assert.match(prompt, /CLOSED/);
   assert.match(prompt, /abort this session immediately/);

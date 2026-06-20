@@ -14,19 +14,35 @@ const REVIEW_CAPTURE_LOOKBACK_MS = 2 * 60 * 1000;
 // most of this window is unused on normal latency.
 const REVIEW_CAPTURE_FORWARD_MS = 5 * 60 * 1000;
 const REVIEW_LOOKUP_TIMEOUT_MS = 8_000;
-const REVIEWER_BOT_LOGINS = Object.freeze({
-  claude: 'claude-reviewer-lacey',
-  codex: 'codex-reviewer-lacey',
-  'claude-code': 'claude-reviewer-lacey',
-  gemini: 'gemini-reviewer-lacey',
-  pi: 'codex-reviewer-lacey',
+// The reviewers post via GitHub Apps now (broker provider=github-app-*-reviewer),
+// so the canonical review author login is `lacey-<model>-reviewer[bot]`. Keep
+// the legacy PAT user `<model>-reviewer-lacey` as a lookup alias while mixed
+// deployments and inherited-token fallback paths still exist. Using only the
+// old login made the post-review id lookup never match; using only the new App
+// login would drop legacy artifacts. Both failures leave gh_comment_id NULL and
+// can park reviewed/mergeable PRs behind `blocking-findings-unknown`.
+const REVIEWER_BOT_LOGIN_ALIASES = Object.freeze({
+  claude: ['lacey-claude-reviewer[bot]', 'claude-reviewer-lacey'],
+  codex: ['lacey-codex-reviewer[bot]', 'codex-reviewer-lacey'],
+  'claude-code': ['lacey-claude-reviewer[bot]', 'claude-reviewer-lacey'],
+  gemini: ['lacey-gemini-reviewer[bot]', 'gemini-reviewer-lacey'],
+  pi: ['lacey-codex-reviewer[bot]', 'codex-reviewer-lacey'],
   // opencode defaults to Anthropic Claude; keep the reviewer cross-model.
-  opencode: 'codex-reviewer-lacey',
-  hermes: 'codex-reviewer-lacey',
-  GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
-  GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
-  GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer-lacey',
+  opencode: ['lacey-codex-reviewer[bot]', 'codex-reviewer-lacey'],
+  hermes: ['lacey-codex-reviewer[bot]', 'codex-reviewer-lacey'],
+  GH_CLAUDE_REVIEWER_TOKEN: ['lacey-claude-reviewer[bot]', 'claude-reviewer-lacey'],
+  GH_CODEX_REVIEWER_TOKEN: ['lacey-codex-reviewer[bot]', 'codex-reviewer-lacey'],
+  GH_GEMINI_REVIEWER_TOKEN: ['lacey-gemini-reviewer[bot]', 'gemini-reviewer-lacey'],
 });
+
+// Match two GitHub logins tolerant of the `[bot]` suffix (app-token authors carry
+// it; some surfaces strip it) and case.
+function loginsMatch(a, b) {
+  const norm = (s) => String(s ?? '').trim().toLowerCase().replace(/\[bot\]$/, '');
+  const na = norm(a);
+  const nb = norm(b);
+  return na !== '' && na === nb;
+}
 const REVIEWER_PASS_KINDS = new Set(['first-pass', 'rereview', 'remediation']);
 
 function normalizeBotLoginKey(value) {
@@ -36,7 +52,15 @@ function normalizeBotLoginKey(value) {
 function resolveReviewerBotLogin(value) {
   const key = normalizeBotLoginKey(value);
   if (!key) return null;
-  return REVIEWER_BOT_LOGINS[key] || REVIEWER_BOT_LOGINS[key.toLowerCase()] || null;
+  const aliases = REVIEWER_BOT_LOGIN_ALIASES[key] || REVIEWER_BOT_LOGIN_ALIASES[key.toLowerCase()];
+  return aliases?.[0] || null;
+}
+
+function resolveReviewerBotLoginAliases(value) {
+  const key = normalizeBotLoginKey(value);
+  if (!key) return [];
+  const aliases = REVIEWER_BOT_LOGIN_ALIASES[key] || REVIEWER_BOT_LOGIN_ALIASES[key.toLowerCase()];
+  return aliases ? [...aliases] : [];
 }
 
 function toEpochMs(value) {
@@ -135,8 +159,9 @@ async function lookupRecentReviewArtifact({
       killSignal: 'SIGTERM',
     }
   );
+  const loginAliases = Array.isArray(login) ? login : [login];
   const candidates = parseJsonLines(stdout)
-    .filter((item) => item?.login === login)
+    .filter((item) => loginAliases.some((alias) => loginsMatch(item?.login, alias)))
     .filter((item) => withinCaptureWindow(item?.created_at, postedAt));
   return pickBestBodyMatch(candidates, body, 'created_at');
 }
@@ -238,16 +263,16 @@ async function captureReviewerBodyAfterPost(rootDir, {
   log = console,
 } = {}) {
   try {
-    const login = resolveReviewerBotLogin(botTokenEnv || reviewerModel);
+    const logins = resolveReviewerBotLoginAliases(botTokenEnv || reviewerModel);
     let ghCommentId = null;
-    if (login) {
+    if (logins.length > 0) {
       try {
         const lookupEnv = buildLookupEnv(env, botTokenEnv ? env?.[botTokenEnv] : null);
         const artifact = await lookupRecentReviewArtifact({
           repo,
           prNumber,
           endpoint: `repos/${repo}/pulls/${encodeURIComponent(prNumber)}/reviews`,
-          login,
+          login: logins,
           postedAt,
           body: reviewBody,
           execFileImpl,
@@ -289,16 +314,16 @@ async function captureRemediationBodyAfterPost(rootDir, {
   log = console,
 } = {}) {
   try {
-    const login = resolveReviewerBotLogin(workerClass);
+    const logins = resolveReviewerBotLoginAliases(workerClass);
     let ghCommentId = null;
-    if (login) {
+    if (logins.length > 0) {
       try {
         const lookupEnv = buildLookupEnv(env, null);
         const artifact = await lookupRecentReviewArtifact({
           repo,
           prNumber,
           endpoint: `repos/${repo}/issues/${encodeURIComponent(prNumber)}/comments`,
-          login,
+          login: logins,
           postedAt,
           body,
           execFileImpl,

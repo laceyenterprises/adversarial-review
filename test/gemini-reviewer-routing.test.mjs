@@ -263,10 +263,10 @@ test('GMW-02 config: a bad mode value fails the strict schema', () => {
 
 // ── reviewer-identity maps ─────────────────────────────────────────────────
 
-test('GMW-02 identity: a gemini REVIEW resolves to gemini-reviewer-lacey', () => {
+test('GMW-02 identity: a gemini REVIEW captures against the GitHub App bot login', () => {
   // review-body-capture: reviewer-model key and the reviewer token-env key.
-  assert.equal(resolveReviewerBotLogin('gemini'), 'gemini-reviewer-lacey');
-  assert.equal(resolveReviewerBotLogin('GH_GEMINI_REVIEWER_TOKEN'), 'gemini-reviewer-lacey');
+  assert.equal(resolveReviewerBotLogin('gemini'), 'lacey-gemini-reviewer[bot]');
+  assert.equal(resolveReviewerBotLogin('GH_GEMINI_REVIEWER_TOKEN'), 'lacey-gemini-reviewer[bot]');
   // reviewer-reattach: reviewer-model key.
   assert.equal(reviewerBotLogin('gemini'), 'gemini-reviewer-lacey');
 });
@@ -277,7 +277,7 @@ test('GMW-02 identity: builder-side reviewer of a [gemini] PR stays codex-review
   // "who reviews a gemini-built PR" mapping is preserved.
   const route = baseRouteFor('gemini');
   assert.equal(route.reviewerModel, 'codex');
-  assert.equal(resolveReviewerBotLogin(route.botTokenEnv), 'codex-reviewer-lacey');
+  assert.equal(resolveReviewerBotLogin(route.botTokenEnv), 'lacey-codex-reviewer[bot]');
   assert.equal(reviewerBotLogin('codex'), 'codex-reviewer-lacey');
 });
 

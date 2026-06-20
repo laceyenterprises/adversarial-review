@@ -86,10 +86,10 @@ test('normalizeReviewVerdict handles comment-only and request-changes fixtures',
 });
 
 test('resolveReviewerBotLogin maps MHX-09 reviewer classes onto existing reviewer bots', () => {
-  assert.equal(resolveReviewerBotLogin('gemini'), 'gemini-reviewer-lacey');
-  assert.equal(resolveReviewerBotLogin('pi'), 'codex-reviewer-lacey');
-  assert.equal(resolveReviewerBotLogin('opencode'), 'codex-reviewer-lacey');
-  assert.equal(resolveReviewerBotLogin('hermes'), 'codex-reviewer-lacey');
+  assert.equal(resolveReviewerBotLogin('gemini'), 'lacey-gemini-reviewer[bot]');
+  assert.equal(resolveReviewerBotLogin('pi'), 'lacey-codex-reviewer[bot]');
+  assert.equal(resolveReviewerBotLogin('opencode'), 'lacey-codex-reviewer[bot]');
+  assert.equal(resolveReviewerBotLogin('hermes'), 'lacey-codex-reviewer[bot]');
 });
 
 test('reviewer happy path captures verdict, body, gh_comment_id, and timestamp', async () => {
@@ -112,7 +112,7 @@ test('reviewer happy path captures verdict, body, gh_comment_id, and timestamp',
       calls.push([command, ...args]);
       if (args[0] === 'pr' && args[1] === 'review') return { stdout: '', stderr: '' };
       return {
-        stdout: `${JSON.stringify({ id: 501, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:30.000Z', body: reviewBody })}\n`,
+        stdout: `${JSON.stringify({ id: 501, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:00:30.000Z', body: reviewBody })}\n`,
         stderr: '',
       };
     },
@@ -125,6 +125,33 @@ test('reviewer happy path captures verdict, body, gh_comment_id, and timestamp',
   assert.ok(row.body_captured_at);
   assert.equal(calls[0][1], 'pr');
   assert.equal(calls[1][1], 'api');
+});
+
+test('reviewer capture accepts legacy PAT-backed reviewer login aliases', async () => {
+  const rootDir = makeRootDir();
+  const pass = seedPass(rootDir, { passKind: 'first-pass', reviewerClass: 'codex' });
+  const reviewBody = '## Verdict\n\nComment only\n\nLegacy author body';
+
+  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => postGitHubReviewWithCapture({
+    rootDir,
+    repo: pass.repo,
+    prNumber: pass.prNumber,
+    attemptNumber: pass.attemptNumber,
+    reviewerModel: 'codex',
+    reviewBody,
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    passKind: 'first-pass',
+    postedAt: '2026-05-29T12:01:00.000Z',
+    execFileImpl: async (_command, args) => (
+      args[0] === 'pr'
+        ? { stdout: '', stderr: '' }
+        : { stdout: `${JSON.stringify({ id: 502, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:30.000Z', body: reviewBody })}\n` }
+    ),
+  }));
+
+  const row = readPass(rootDir, pass);
+  assert.equal(row.body_md, reviewBody);
+  assert.equal(row.gh_comment_id, '502');
 });
 
 test('shared pre-write helper runs before the GitHub review mutation', async () => {
@@ -150,7 +177,7 @@ test('shared pre-write helper runs before the GitHub review mutation', async () 
       events.push({ kind: 'exec', args });
       if (args[0] === 'pr' && args[1] === 'review') return { stdout: '', stderr: '' };
       return {
-        stdout: `${JSON.stringify({ id: 911, login: 'claude-reviewer-lacey', created_at: '2026-05-29T12:00:30.000Z', body: '## Verdict\n\nComment only\n\nOrdered write' })}\n`,
+        stdout: `${JSON.stringify({ id: 911, login: 'lacey-claude-reviewer[bot]', created_at: '2026-05-29T12:00:30.000Z', body: '## Verdict\n\nComment only\n\nOrdered write' })}\n`,
         stderr: '',
       };
     },
@@ -220,7 +247,7 @@ test('reviewer capture uses the refreshed token after a 401-triggered post retry
       }
       seen.push({ kind: 'capture-api', token: options.env?.GH_CODEX_REVIEWER_TOKEN });
       return {
-        stdout: `${JSON.stringify({ id: 950, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:30.000Z', body: reviewBody })}\n`,
+        stdout: `${JSON.stringify({ id: 950, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:00:30.000Z', body: reviewBody })}\n`,
         stderr: '',
       };
     },
@@ -256,7 +283,7 @@ test('reviewer recapture is idempotent and preserves the first stored body', asy
       execFileImpl: async (_command, args) => (
         args[0] === 'pr'
           ? { stdout: '', stderr: '' }
-          : { stdout: `${JSON.stringify({ id: 700, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:30.000Z', body: firstBody })}\n` }
+          : { stdout: `${JSON.stringify({ id: 700, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:00:30.000Z', body: firstBody })}\n` }
       ),
     });
 
@@ -273,7 +300,7 @@ test('reviewer recapture is idempotent and preserves the first stored body', asy
       execFileImpl: async (_command, args) => (
         args[0] === 'pr'
           ? { stdout: '', stderr: '' }
-          : { stdout: `${JSON.stringify({ id: 701, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:01:00.000Z', body: secondBody })}\n` }
+          : { stdout: `${JSON.stringify({ id: 701, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:01:00.000Z', body: secondBody })}\n` }
       ),
     });
   });
@@ -320,7 +347,7 @@ test('reviewer lookup paginates through busy PR history and still finds the matc
   const reviewBody = '## Verdict\n\nComment only\n\nBuried review';
   const noise = Array.from({ length: 105 }, (_, index) => JSON.stringify({
     id: index + 1,
-    login: index < 5 ? 'codex-reviewer-lacey' : 'human-reviewer',
+    login: index < 5 ? 'lacey-codex-reviewer[bot]' : 'human-reviewer',
     created_at: `2026-05-29T11:${String(index % 60).padStart(2, '0')}:00.000Z`,
     body: `noise-${index}`,
   })).join('\n');
@@ -338,7 +365,7 @@ test('reviewer lookup paginates through busy PR history and still finds the matc
     execFileImpl: async (_command, args) => (
       args[0] === 'pr'
         ? { stdout: '', stderr: '' }
-        : { stdout: `${noise}\n${JSON.stringify({ id: 999, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:45.000Z', body: reviewBody })}\n` }
+        : { stdout: `${noise}\n${JSON.stringify({ id: 999, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:00:45.000Z', body: reviewBody })}\n` }
     ),
   }));
 
@@ -397,7 +424,7 @@ test('reviewer capture absorbs slow GH propagation past the legacy 15s forward b
     execFileImpl: async (_command, args) => (
       args[0] === 'pr'
         ? { stdout: '', stderr: '' }
-        : { stdout: `${JSON.stringify({ id: 5150, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:02:30.000Z', body: reviewBody })}\n` }
+        : { stdout: `${JSON.stringify({ id: 5150, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:02:30.000Z', body: reviewBody })}\n` }
     ),
   }));
 
@@ -432,7 +459,7 @@ test('reviewer capture does NOT fall back to non-exact body matches', async () =
     execFileImpl: async (_command, args) => (
       args[0] === 'pr'
         ? { stdout: '', stderr: '' }
-        : { stdout: `${JSON.stringify({ id: 7777, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:30.000Z', body: unrelatedBody })}\n` }
+        : { stdout: `${JSON.stringify({ id: 7777, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:00:30.000Z', body: unrelatedBody })}\n` }
     ),
   }));
 
@@ -464,7 +491,7 @@ test('reviewer capture matches bodies after CRLF→LF normalization', async () =
     execFileImpl: async (_command, args) => (
       args[0] === 'pr'
         ? { stdout: '', stderr: '' }
-        : { stdout: `${JSON.stringify({ id: 4242, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:30.000Z', body: ghBody })}\n` }
+        : { stdout: `${JSON.stringify({ id: 4242, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:00:30.000Z', body: ghBody })}\n` }
     ),
   }));
 
@@ -503,7 +530,7 @@ test('reviewer capture routes UPDATE to the actual rereview row (not first-pass)
     execFileImpl: async (_command, args) => (
       args[0] === 'pr'
         ? { stdout: '', stderr: '' }
-        : { stdout: `${JSON.stringify({ id: 9090, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:30.000Z', body: reviewBody })}\n` }
+        : { stdout: `${JSON.stringify({ id: 9090, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:00:30.000Z', body: reviewBody })}\n` }
     ),
   }));
 
@@ -551,7 +578,7 @@ test('remediation lookup omits GH_TOKEN when env has no token (no literal-null)'
       execFileImpl: async (_command, _args, options = {}) => {
         observedEnv = options.env || null;
         return {
-          stdout: `${JSON.stringify({ id: 909, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:40.000Z', body })}\n`,
+          stdout: `${JSON.stringify({ id: 909, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:00:40.000Z', body })}\n`,
           stderr: '',
         };
       },
@@ -585,7 +612,7 @@ test('remediation reply capture stores body and leaves verdict NULL', async () =
     captureImpl: async (captureRootDir, args) => captureRemediationBodyAfterPost(captureRootDir, {
       ...args,
       execFileImpl: async () => ({
-        stdout: `${JSON.stringify({ id: 808, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:40.000Z', body })}\n`,
+        stdout: `${JSON.stringify({ id: 808, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:00:40.000Z', body })}\n`,
         stderr: '',
       }),
       env: { GH_TOKEN: 'token' },
@@ -597,6 +624,40 @@ test('remediation reply capture stores body and leaves verdict NULL', async () =
   assert.equal(row.body_md, body);
   assert.equal(row.gh_comment_id, '808');
   assert.ok(row.body_captured_at);
+});
+
+test('remediation reply capture accepts legacy PAT-backed reviewer login aliases', async () => {
+  const rootDir = makeRootDir();
+  const pass = seedPass(rootDir, {
+    attemptNumber: 2,
+    reviewerClass: 'codex',
+    reviewerModel: 'codex',
+    passKind: 'remediation',
+  });
+  const body = '## Remediation Worker (codex)\n\nApplied the fix.';
+
+  await postRemediationCommentWithCapture({
+    rootDir,
+    repo: pass.repo,
+    prNumber: pass.prNumber,
+    attemptNumber: pass.attemptNumber,
+    workerClass: 'codex',
+    body,
+    postedAt: '2026-05-29T12:01:00.000Z',
+    postCommentImpl: async () => ({ posted: true }),
+    captureImpl: async (captureRootDir, args) => captureRemediationBodyAfterPost(captureRootDir, {
+      ...args,
+      execFileImpl: async () => ({
+        stdout: `${JSON.stringify({ id: 809, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:40.000Z', body })}\n`,
+        stderr: '',
+      }),
+      env: { GH_TOKEN: 'token' },
+    }),
+  });
+
+  const row = readPass(rootDir, pass);
+  assert.equal(row.body_md, body);
+  assert.equal(row.gh_comment_id, '809');
 });
 
 test('lookup forces gh api -X GET so per_page does not flip method to POST', async () => {
@@ -625,7 +686,7 @@ test('lookup forces gh api -X GET so per_page does not flip method to POST', asy
     execFileImpl: async (_command, args) => {
       capturedArgs = args;
       return {
-        stdout: `${JSON.stringify({ id: 909, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:40.000Z', body })}\n`,
+        stdout: `${JSON.stringify({ id: 909, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:00:40.000Z', body })}\n`,
         stderr: '',
       };
     },
@@ -667,7 +728,7 @@ test('reviewer capture with attempt=M leaves a same-passKind row at attempt=N un
     execFileImpl: async (_command, args) => (
       args[0] === 'pr'
         ? { stdout: '', stderr: '' }
-        : { stdout: `${JSON.stringify({ id: 6001, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:30.000Z', body: reviewBody })}\n` }
+        : { stdout: `${JSON.stringify({ id: 6001, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:00:30.000Z', body: reviewBody })}\n` }
     ),
   }));
 
@@ -705,7 +766,7 @@ test('reviewer capture with wrong passKind does not touch a same-attempt row', a
     execFileImpl: async (_command, args) => (
       args[0] === 'pr'
         ? { stdout: '', stderr: '' }
-        : { stdout: `${JSON.stringify({ id: 6002, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:30.000Z', body: reviewBody })}\n` }
+        : { stdout: `${JSON.stringify({ id: 6002, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:00:30.000Z', body: reviewBody })}\n` }
     ),
   }));
 
@@ -740,7 +801,7 @@ test('reviewer capture coerces unknown verdict to NULL so the CHECK does not abo
     execFileImpl: async (_command, args) => (
       args[0] === 'pr'
         ? { stdout: '', stderr: '' }
-        : { stdout: `${JSON.stringify({ id: 6003, login: 'codex-reviewer-lacey', created_at: '2026-05-29T12:00:30.000Z', body: reviewBody })}\n` }
+        : { stdout: `${JSON.stringify({ id: 6003, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:00:30.000Z', body: reviewBody })}\n` }
     ),
   }));
 

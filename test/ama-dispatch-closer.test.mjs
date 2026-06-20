@@ -854,8 +854,12 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /No follow-up PRs\/issues for the final findings/);
   assert.match(prompt, /ham_terminal_remediation_validated/);
   assert.match(prompt, /Do not merge unless all of these are true/);
-  assert.match(prompt, /Failed,\s+missing,\s+stale,\s+or unchecked required checks are hard blockers/);
+  assert.match(prompt, /Failed,\s+missing,\s+stale,\s+or still-unchecked required checks after that settle window are hard\s+blockers/);
+  assert.match(prompt, /HAM_TMP_DIR="\/tmp\/ham-closer-1234-abc12345abc12345abc12345abc12345abc12345"/);
+  assert.match(prompt, /Poll the live PR for a bounded window/);
   assert.match(prompt, /No refactor-and-defer for final findings/);
+  assert.doesNotMatch(prompt, /HAM_TMP_DIR=\$\(mktemp -d -t ham-closer\.XXXXXX\)/);
+  assert.doesNotMatch(prompt, /trap 'rm -rf "\$HAM_TMP_DIR"' EXIT/);
   assert.doesNotMatch(prompt, /HAM_REBASE_ATTEMPT_CAP/);
   assert.doesNotMatch(prompt, /ham_update_branch_conflict/);
 });

@@ -51,8 +51,11 @@ predicate failure.
    current base, treat the resulting SHA as the new post-remediation head and
    repeat this step from the beginning for that exact SHA. Do not merge a stale
    or behind head merely because the old reviewed SHA passed.
-6. Run or verify required checks for that exact post-remediation SHA. Failed,
-   missing, stale, or unchecked required checks are hard blockers.
+6. Run or verify required checks for that exact post-remediation SHA. If checks
+   are queued or in progress immediately after the HAM commit lands, poll the
+   live PR for a bounded settle window before classifying them. Failed, missing,
+   stale, or still-unchecked required checks after that settle window are hard
+   blockers.
 7. Re-run the closer eligibility predicate against that same exact SHA using
    SPEC §1.1.1 HAM terminal-remediation mode. The predicate must prove the
    HAM-authored remediation commit, provenance trailers, PR audit comment,
@@ -67,8 +70,9 @@ predicate failure.
 Fetch the live PR and final review:
 
 ```bash
-HAM_TMP_DIR=$(mktemp -d -t ham-closer.XXXXXX)
-trap 'rm -rf "$HAM_TMP_DIR"' EXIT
+HAM_TMP_DIR="/tmp/ham-closer-<<PR_NUMBER>>-<<REVIEWED_SHA>>"
+mkdir -p "$HAM_TMP_DIR"
+rm -f "$HAM_TMP_DIR"/ham-*.json
 
 gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName,reviews > "$HAM_TMP_DIR/ham-pr-before.json"
 ```
@@ -97,6 +101,9 @@ blocking or non-blocking, and the file paths changed for that finding.
 Refresh the live head and collect exact-head evidence:
 
 ```bash
+HAM_TMP_DIR="/tmp/ham-closer-<<PR_NUMBER>>-<<REVIEWED_SHA>>"
+mkdir -p "$HAM_TMP_DIR"
+
 gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "$HAM_TMP_DIR/ham-pr-after.json"
 POST_REMEDIATION_SHA=$(jq -r '.headRefOid' "$HAM_TMP_DIR/ham-pr-after.json")
 
@@ -107,6 +114,14 @@ gh api "repos/<<REPO>>/branches/$base_enc/protection" > "$HAM_TMP_DIR/ham-protec
 gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > "$HAM_TMP_DIR/ham-timeline.json"
 gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > "$HAM_TMP_DIR/ham-commit.json"
 ```
+
+Wait for required checks on `POST_REMEDIATION_SHA` to settle before evaluating
+the hard-blocker list. Poll the live PR for a bounded window (default 15 minutes,
+15 second cadence is sufficient) and refresh `$HAM_TMP_DIR/ham-pr-after.json` on
+each poll. If the head moves, stop as a hard blocker. If required checks remain
+queued, in progress, pending, missing, stale, or otherwise unchecked at the
+deadline, stop as a hard blocker. Only terminal success states accepted by the
+merge-path check classifier count as successful.
 
 Build `$HAM_TMP_DIR/ham-terminal-remediation.json` as the claim to verify.
 `ama-check` must confirm the commit parent/trailers from
@@ -140,6 +155,8 @@ non-empty `files[]` diff. The JSON claim alone does not satisfy the predicate.
 Run the predicate against the live post-remediation head:
 
 ```bash
+HAM_TMP_DIR="/tmp/ham-closer-<<PR_NUMBER>>-<<REVIEWED_SHA>>"
+
 node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
   --pr "$HAM_TMP_DIR/ham-pr-after.json" \
   --reviews "$HAM_TMP_DIR/ham-reviews.json" \
@@ -167,6 +184,9 @@ Do not merge unless all of these are true:
 Merge:
 
 ```bash
+HAM_TMP_DIR="/tmp/ham-closer-<<PR_NUMBER>>-<<REVIEWED_SHA>>"
+POST_REMEDIATION_SHA=$(jq -r '.headRefOid' "$HAM_TMP_DIR/ham-pr-after.json")
+
 TRAILERS_FILE=$(mktemp)
 cat <<EOF > "$TRAILERS_FILE"
 <<AMA_TRAILERS>>

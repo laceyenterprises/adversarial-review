@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,18 +21,58 @@ function candidateSuperprojectAdapterPaths(rootDir = repoRootFromHere()) {
   return [
     join(rootDir, 'modules', 'github-adapter', 'bin', 'github-adapter'),
     join(rootDir, '..', 'modules', 'github-adapter', 'bin', 'github-adapter'),
+    join(rootDir, '..', '..', 'modules', 'github-adapter', 'bin', 'github-adapter'),
   ];
+}
+
+function trustedAutoDiscoveryRoots(rootDir = repoRootFromHere()) {
+  return [
+    resolve(rootDir, 'modules', 'github-adapter'),
+    resolve(rootDir, '..', 'modules', 'github-adapter'),
+    resolve(rootDir, '..', '..', 'modules', 'github-adapter'),
+  ];
+}
+
+function isPathWithin(childPath, parentPath) {
+  const child = resolve(childPath);
+  const parent = resolve(parentPath);
+  return child === parent || child.startsWith(`${parent}/`);
+}
+
+function isTrustedAutoDiscoveredAdapterBin(candidate, {
+  rootDir = repoRootFromHere(),
+  statImpl = statSync,
+} = {}) {
+  const resolved = resolve(candidate);
+  if (!trustedAutoDiscoveryRoots(rootDir).some((root) => isPathWithin(resolved, root))) {
+    return false;
+  }
+  let stats;
+  try {
+    stats = statImpl(resolved);
+  } catch {
+    return false;
+  }
+  if (!stats?.isFile?.()) return false;
+  if ((stats.mode & 0o111) === 0) return false;
+  if ((stats.mode & 0o022) !== 0) return false;
+  const currentUid = typeof process.getuid === 'function' ? process.getuid() : null;
+  if (currentUid !== null && ![currentUid, 0].includes(stats.uid)) return false;
+  return true;
 }
 
 function resolveGitHubAdapterBin({
   env = process.env,
   rootDir = repoRootFromHere(),
   existsImpl = existsSync,
+  statImpl = statSync,
 } = {}) {
   const explicit = firstNonEmpty(env.GHA_ADAPTER_BIN, env.AGENT_OS_GITHUB_ADAPTER_BIN);
   if (explicit) return explicit;
   for (const candidate of candidateSuperprojectAdapterPaths(rootDir)) {
-    if (existsImpl(candidate)) return candidate;
+    if (existsImpl(candidate) && isTrustedAutoDiscoveredAdapterBin(candidate, { rootDir, statImpl })) {
+      return candidate;
+    }
   }
   return null;
 }
@@ -231,9 +271,11 @@ async function readAdapterPullRequestDiff(repo, prNumber, options) {
 const __test__ = {
   buildAdapterEnv,
   candidateSuperprojectAdapterPaths,
+  isTrustedAutoDiscoveredAdapterBin,
   makeAdapterArgs,
   parseAdapterJson,
   resolveGitHubAdapterBin,
+  trustedAutoDiscoveryRoots,
 };
 
 export {

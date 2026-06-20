@@ -555,25 +555,46 @@ function normalizeAdapterRollup(payload) {
   return normalized;
 }
 
+function normalizeHeadAndStateShape({
+  state,
+  mergedAt = null,
+  closedAt = null,
+  headRefOid = null,
+  author = null,
+  labels = [],
+  truncatedConnections = [],
+} = {}) {
+  return {
+    state: typeof state === 'string' ? state.toLowerCase() : state || null,
+    mergedAt: mergedAt || null,
+    closedAt: closedAt || null,
+    headRefOid: headRefOid || null,
+    author: normalizeAuthor(author),
+    labels,
+    ...(truncatedConnections.length > 0
+      ? { truncated: true, truncatedConnections }
+      : {}),
+  };
+}
+
 function normalizeAdapterHeadAndState(payload, { withLabels = true } = {}) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     throw new Error('GitHub adapter head/state payload must be an object');
   }
   const labels = withLabels ? normalizeLabels(payload.labels) : [];
-  const state = typeof payload?.state === 'string' ? payload.state.toLowerCase() : payload?.state || null;
   const headRefOid = payload?.headRefOid || payload?.head_sha || payload?.headSha || null;
   if (!headRefOid) {
     throw new Error('GitHub adapter head/state payload missing headRefOid');
   }
-  return {
-    state,
-    mergedAt: payload?.mergedAt || payload?.merged_at || null,
-    closedAt: payload?.closedAt || payload?.closed_at || null,
+  return normalizeHeadAndStateShape({
+    state: payload?.state,
+    mergedAt: payload?.mergedAt || payload?.merged_at,
+    closedAt: payload?.closedAt || payload?.closed_at,
     headRefOid,
-    author: normalizeAuthor(payload?.author || payload?.user),
+    author: payload?.author || payload?.user,
     labels,
-    ...(payload?.truncated ? { truncated: true, truncatedConnections: payload.truncatedConnections || [] } : {}),
-  };
+    truncatedConnections: payload?.truncated ? payload.truncatedConnections || [] : [],
+  });
 }
 
 function markGraphqlTruncated(items, connectionName) {
@@ -870,9 +891,6 @@ async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
       reviewerLogins: loginList,
     });
     if (adapterReviews) {
-      if (!expectedReviewerLoginSet && adapterReviews.every((review) => typeof review === 'string')) {
-        return adapterReviews;
-      }
       const allAdapterReviewsVerifiable = adapterReviews.every((review) => (
         review && typeof review === 'object' && !Array.isArray(review)
       ));
@@ -953,12 +971,14 @@ async function fetchLegacyHeadAndState(execFileImpl, repo, prNumber, { withLabel
     )
     : [];
   return {
-    state: typeof pr?.state === 'string' ? pr.state.toLowerCase() : pr?.state || null,
-    mergedAt: pr?.merged_at || null,
-    closedAt: pr?.closed_at || null,
-    headRefOid: pr?.head?.sha || null,
-    author: normalizeAuthor(pr?.user),
-    labels,
+    ...normalizeHeadAndStateShape({
+      state: pr?.state,
+      mergedAt: pr?.merged_at,
+      closedAt: pr?.closed_at,
+      headRefOid: pr?.head?.sha,
+      author: pr?.user,
+      labels,
+    }),
   };
 }
 
@@ -1538,15 +1558,15 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
       telemetryCategory: 'pr_head_state',
     }), 'labels');
   }
-  return {
-    state: typeof pr?.state === 'string' ? pr.state.toLowerCase() : pr?.state || null,
-    mergedAt: pr?.mergedAt || null,
-    closedAt: pr?.closedAt || null,
-    headRefOid: pr?.headRefOid || null,
-    author: normalizeAuthor(pr?.author),
+  return normalizeHeadAndStateShape({
+    state: pr?.state,
+    mergedAt: pr?.mergedAt,
+    closedAt: pr?.closedAt,
+    headRefOid: pr?.headRefOid,
+    author: pr?.author,
     labels,
-    ...(labels.graphqlTruncated ? { truncated: true, truncatedConnections: labels.graphqlTruncatedConnections } : {}),
-  };
+    truncatedConnections: labels.graphqlTruncated ? labels.graphqlTruncatedConnections : [],
+  });
 }
 
 async function fetchPullRequestRollup(repo, prNumber, {

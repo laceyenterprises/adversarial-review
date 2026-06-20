@@ -210,6 +210,13 @@ must fall back to the existing `gh` or Octokit path for the same lookup.
 2. `AGENT_OS_GITHUB_ADAPTER_BIN`
 3. `<repo-root>/modules/github-adapter/bin/github-adapter`
 4. `<repo-root>/../modules/github-adapter/bin/github-adapter`
+5. `<repo-root>/../../modules/github-adapter/bin/github-adapter`
+
+The third through fifth entries are auto-discovery candidates. Auto-discovery
+must only select a binary under one of those trusted `modules/github-adapter`
+roots, and the selected file must be a regular executable that is not
+group/world-writable before the watcher passes GitHub credentials to it.
+Explicit environment overrides are operator-controlled escape hatches.
 
 If none of those paths resolves, the adapter is treated as absent. When the
 adapter is present it is invoked with the caller's GitHub/OAuth environment
@@ -220,6 +227,12 @@ contexts, head/state reads, review bodies for a head SHA, label events, issue
 comments, open PR discovery, single-PR snapshots, and PR diffs. Each call site
 must preserve the fallback behavior independently, because the adapter is an
 optional preferred read source rather than the authoritative availability gate.
+
+The `pull-request-review-bodies-for-head` read kind must return structured
+review objects carrying body, submitted state, reviewed commit/head SHA, submit
+time, and author metadata. String-only body arrays are not sufficiently
+verifiable; callers must fall back to the legacy GitHub reader so in-process
+head/state filtering remains identical to the non-adapter path.
 
 ## Default Agent Routing Overrides
 

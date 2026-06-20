@@ -23,10 +23,11 @@ Usage:
 function reviewerRosterMain(argv, io = {}) {
   const stdout = io.stdout || process.stdout;
   const stderr = io.stderr || process.stderr;
+  const env = io.env || process.env;
   const json = argv.includes('--json');
   let mode;
   try {
-    mode = resolveGeminiReviewerMode({ env: process.env });
+    mode = resolveGeminiReviewerMode({ env });
   } catch (err) {
     stderr.write(`error: could not resolve reviewer.gemini.mode: ${err?.message || err}\n`);
     return 1;

@@ -352,7 +352,10 @@ function createLinearTriageAdapter({
   }
 
   return {
-    routePR,
+    routePR: (prTitle, subject = null, options = {}) => routePR(prTitle, subject, {
+      env,
+      ...options,
+    }),
     extractLinearTicketId,
     syncTriageStatus,
     recordReviewerEngagement,

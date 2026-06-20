@@ -16,6 +16,12 @@ import {
 } from '../../src/adapters/operator/linear-triage/index.mjs';
 import { setRepoTicketPipelinePause } from '../../src/ticket-pipeline-pause.mjs';
 
+const ALWAYS_ON_ROUTE_OPTIONS = {
+  env: {},
+  topPath: '/dev/null',
+  geminiReviewerMode: 'always-on',
+};
+
 function makeLinearFixture({ currentState = 'Todo' } = {}) {
   const updates = [];
   const comments = [];
@@ -52,7 +58,7 @@ function subjectRef() {
 }
 
 test('routePR returns builder class and Linear ticket id for representative titles', () => {
-  assert.deepEqual(routePR('[codex] LAC-181: tighten watcher'), {
+  assert.deepEqual(routePR('[codex] LAC-181: tighten watcher', null, ALWAYS_ON_ROUTE_OPTIONS), {
     builderClass: 'codex',
     tag: 'codex',
     reviewerModel: 'gemini',
@@ -64,7 +70,7 @@ test('routePR returns builder class and Linear ticket id for representative titl
     },
     linearTicketId: 'LAC-181',
   });
-  assert.deepEqual(routePR('[claude-code] lac-486: carve operator adapter'), {
+  assert.deepEqual(routePR('[claude-code] lac-486: carve operator adapter', null, ALWAYS_ON_ROUTE_OPTIONS), {
     builderClass: 'claude-code',
     tag: 'claude-code',
     reviewerModel: 'gemini',
@@ -76,7 +82,7 @@ test('routePR returns builder class and Linear ticket id for representative titl
     },
     linearTicketId: 'LAC-486',
   });
-  assert.equal(routePR('LAC-181: missing builder tag'), null);
+  assert.equal(routePR('LAC-181: missing builder tag', null, ALWAYS_ON_ROUTE_OPTIONS), null);
   assert.equal(extractLinearTicketId('[codex] no ticket'), null);
 });
 

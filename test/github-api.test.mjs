@@ -35,6 +35,11 @@ async function importGithubApiFresh({ disableGraphqlRollup = false } = {}) {
   });
 }
 
+async function importGithubAdapterClientFresh() {
+  const url = new URL(`../src/github-adapter-client.mjs?test=${Date.now()}-${Math.random()}`, import.meta.url);
+  return import(url);
+}
+
 function makeExpectedRollup() {
   return {
     id: 'PR_kwDOA1',
@@ -677,6 +682,55 @@ test('adapter-present rollup path returns the normalized PR rollup shape without
   assert.equal(calls.length, 1);
 });
 
+test('github adapter auto-discovery reaches the superproject path and ignores unsafe binaries', async () => {
+  const { __test__ } = await importGithubAdapterClientFresh();
+  const rootDir = '/Users/airlock/agent-os/tools/adversarial-review';
+  const superprojectCandidate = path.resolve(
+    rootDir,
+    '..',
+    '..',
+    'modules',
+    'github-adapter',
+    'bin',
+    'github-adapter',
+  );
+  assert.equal(
+    __test__.candidateSuperprojectAdapterPaths(rootDir).includes(superprojectCandidate),
+    true,
+  );
+
+  const safeStat = {
+    isFile: () => true,
+    mode: 0o755,
+    uid: typeof process.getuid === 'function' ? process.getuid() : 0,
+  };
+  assert.equal(
+    __test__.resolveGitHubAdapterBin({
+      env: {},
+      rootDir,
+      existsImpl: (candidate) => candidate === superprojectCandidate,
+      statImpl: () => safeStat,
+    }),
+    superprojectCandidate,
+  );
+  assert.equal(
+    __test__.resolveGitHubAdapterBin({
+      env: {},
+      rootDir,
+      existsImpl: (candidate) => candidate === superprojectCandidate,
+      statImpl: () => ({ ...safeStat, mode: 0o777 }),
+    }),
+    null,
+  );
+  assert.equal(
+    __test__.isTrustedAutoDiscoveredAdapterBin('/tmp/github-adapter', {
+      rootDir,
+      statImpl: () => safeStat,
+    }),
+    false,
+  );
+});
+
 test('adapter-missing rollup path uses existing GraphQL implementation', async () => {
   const expected = makeExpectedRollup();
   const { fetchPullRequestRollup } = await importGithubApiFresh();
@@ -855,6 +909,50 @@ test('adapter-present review bodies path falls back when allowlisted payload lac
     headSha,
     {
       authoritativeReviewerLogins: ['codex-reviewer-lacey'],
+      env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    },
+  );
+
+  assert.deepEqual(calls.map((call) => call.command), ['/fixture/github-adapter', 'gh']);
+  assert.deepEqual(bodies, ['## Verdict\n\nRequest changes']);
+});
+
+test('adapter-present string review bodies without allowlist fall back to legacy head filtering', async () => {
+  const mod = await importGithubApiFresh();
+  const headSha = 'head-adapter-string-fallback';
+  const calls = [];
+
+  const bodies = await mod.fetchReviewBodiesForHead(
+    async (command, args) => {
+      calls.push({ command, args: [...args] });
+      if (command === '/fixture/github-adapter') {
+        return { stdout: JSON.stringify({ bodies: ['## Verdict\nApproved'] }) };
+      }
+      assert.equal(command, 'gh');
+      assert.equal(args[0], 'api');
+      return {
+        stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${JSON.stringify([
+          {
+            user: { login: 'any-reviewer' },
+            body: '## Verdict\n\nRequest changes',
+            state: 'CHANGES_REQUESTED',
+            submitted_at: '2026-06-15T02:30:00.000Z',
+            commit_id: headSha,
+          },
+          {
+            user: { login: 'any-reviewer' },
+            body: '## Verdict\n\nApproved stale head',
+            state: 'APPROVED',
+            submitted_at: '2026-06-15T02:40:00.000Z',
+            commit_id: 'stale-head',
+          },
+        ])}`,
+      };
+    },
+    FIXTURE_REPO,
+    FIXTURE_PR,
+    headSha,
+    {
       env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
     },
   );

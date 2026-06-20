@@ -183,6 +183,7 @@ ham_release_merge_lease() {
       > /tmp/ham-merge-lease-release.json
     HAM_MERGE_LEASE_HELD=0
     HAM_MERGE_LEASE_ID=""
+    trap - EXIT
   fi
 }
 
@@ -215,6 +216,7 @@ ham_acquire_merge_lease() {
     exit 1
   fi
   HAM_MERGE_LEASE_HELD=1
+  trap ham_release_merge_lease EXIT
 }
 
 ham_update_branch_conflict() {

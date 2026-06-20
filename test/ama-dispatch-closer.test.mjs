@@ -868,6 +868,8 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /merge-lease\.mjs needs-revalidation[\s\S]*--current-base "\$HAM_CURRENT_BASE_SHA"/);
   assert.match(prompt, /gh pr merge[\s\S]*--match-head-commit "\$POST_REMEDIATION_SHA"/);
   assert.match(prompt, /merge-lease\.mjs release[\s\S]*--lease-id "\$HAM_MERGE_LEASE_ID"/);
+  assert.match(prompt, /trap ham_release_merge_lease EXIT/);
+  assert.match(prompt, /HAM_MERGE_LEASE_ID=""\n    trap - EXIT/);
   assert.match(prompt, /HAM-03 conflict: releasing merge lease before local conflict resolution/);
   assert.match(prompt, /re-acquire before the next rebase\/merge attempt/);
   assert.match(prompt, /HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 70/);

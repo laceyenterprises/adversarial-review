@@ -10,6 +10,7 @@ const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const FIXTURE_REPO = 'laceyenterprises/adversarial-review';
 const FIXTURE_PR = 1388;
 const WATCHER_SUMMARY_MARKER = '@@GITHUB_API_WATCHER_SUMMARY@@';
+const NO_AUTO_ADAPTER_ROOT = '/tmp/github-api-no-auto-adapter-root';
 
 async function withEnv(overrides, fn) {
   const previous = {};
@@ -799,6 +800,7 @@ test('adapter-missing rollup path uses existing GraphQL implementation', async (
 
   const result = await fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
     env: {},
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     execFileImpl,
     recordApiCallImpl: () => {},
   });
@@ -1467,6 +1469,7 @@ test('GraphQL response shape matches the REST union contract', async () => {
   const { execFileImpl } = makeGraphqlExecStub(expected);
 
   const result = await fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     execFileImpl,
     recordApiCallImpl: telemetry.recordApiCallImpl,
   });
@@ -1527,6 +1530,7 @@ test('feature flag fallback runs the legacy cluster path and preserves shape', a
   const graphqlTelemetry = makeTelemetrySink();
   const graphqlExec = makeGraphqlExecStub(expected);
   const graphqlResult = await graphqlMod.fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     execFileImpl: graphqlExec.execFileImpl,
     recordApiCallImpl: graphqlTelemetry.recordApiCallImpl,
   });
@@ -1535,6 +1539,7 @@ test('feature flag fallback runs the legacy cluster path and preserves shape', a
   const legacyTelemetry = makeTelemetrySink();
   const legacyExec = makeLegacyExecStub(expected);
   const legacyResult = await withEnv({ GHO_DISABLE_GRAPHQL_ROLLUP: '1' }, async () => legacyMod.fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     execFileImpl: legacyExec.execFileImpl,
     recordApiCallImpl: legacyTelemetry.recordApiCallImpl,
   }));
@@ -1591,6 +1596,7 @@ test('fetchReviewBodiesForHead ignores newer non-authoritative verdict bodies', 
     // trusted set carries both observed naming forms; the real review author
     // (`lacey-codex-reviewer`) must be accepted while non-reviewers are ignored.
     authoritativeReviewerLogins: ['lacey-codex-reviewer', 'codex-reviewer-lacey'],
+    rootDir: NO_AUTO_ADAPTER_ROOT,
   });
 
   assert.deepEqual(bodies, ['## Verdict\n\nRequest changes']);
@@ -1698,6 +1704,7 @@ test('pagination cursor handling returns all comments, reviews, and checks witho
   const telemetry = makeTelemetrySink();
 
   const result = await fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     execFileImpl,
     recordApiCallImpl: telemetry.recordApiCallImpl,
   });
@@ -1729,6 +1736,7 @@ test('multiplexed pagination does not duplicate exhausted connections while anot
   const { calls, execFileImpl } = makeAsymmetricPaginationExecStub(expected);
 
   const result = await fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     execFileImpl,
     recordApiCallImpl: () => {},
   });
@@ -1757,6 +1765,7 @@ test('complexity fallback switches to metadata plus per-list pagination without 
   const { calls, execFileImpl } = makeComplexityFallbackExecStub(expected);
 
   const result = await fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     execFileImpl,
     recordApiCallImpl: () => {},
   });
@@ -1785,6 +1794,7 @@ test('complexity fallback also triggers on structured GraphQL error types', asyn
   const { calls, execFileImpl } = makeStructuredComplexityFallbackExecStub(expected);
 
   const result = await fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     execFileImpl,
     recordApiCallImpl: () => {},
   });
@@ -1902,6 +1912,7 @@ test('review context helper fetches only PR metadata and comments', async () => 
   const mod = await importGithubApiFresh();
 
   const result = await mod.fetchPullRequestReviewContext(FIXTURE_REPO, FIXTURE_PR, {
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     recordApiCallImpl: telemetry.recordApiCallImpl,
     execFileImpl: async (command, args) => {
       calls.push({ command, args: [...args] });
@@ -2118,6 +2129,7 @@ test('GraphQL rollup paginates labels beyond the first page', async () => {
   const mod = await importGithubApiFresh();
 
   const result = await mod.fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     recordApiCallImpl: () => {},
     execFileImpl: async (command, args) => {
       calls.push({ command, args: [...args] });
@@ -2274,6 +2286,7 @@ test('head/state helper honors the GraphQL kill-switch with REST fallback', asyn
 
   await withEnv({ GHO_DISABLE_GRAPHQL_ROLLUP: '1' }, async () => {
     const result = await mod.fetchPullRequestHeadAndState(FIXTURE_REPO, FIXTURE_PR, {
+      rootDir: NO_AUTO_ADAPTER_ROOT,
       recordApiCallImpl: telemetry.recordApiCallImpl,
       execFileImpl: async (command, args) => {
         calls.push({ command, args: [...args] });
@@ -2319,6 +2332,7 @@ test('head/state helper uses the lightweight GraphQL query and telemetry categor
   const { calls, execFileImpl } = makeGraphqlExecStub(expected);
 
   const result = await mod.fetchPullRequestHeadAndState(FIXTURE_REPO, FIXTURE_PR, {
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     execFileImpl,
     recordApiCallImpl: telemetry.recordApiCallImpl,
   });
@@ -2343,6 +2357,7 @@ test('head/state helper skips labels for fast head probes', async () => {
   const calls = [];
 
   const result = await mod.fetchPullRequestHeadAndState(FIXTURE_REPO, FIXTURE_PR, {
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     withLabels: false,
     recordApiCallImpl: () => {},
     execFileImpl: async (command, args) => {
@@ -2380,6 +2395,7 @@ test('head/state helper paginates labels beyond the first page', async () => {
   const telemetry = makeTelemetrySink();
 
   const result = await mod.fetchPullRequestHeadAndState(FIXTURE_REPO, FIXTURE_PR, {
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     recordApiCallImpl: telemetry.recordApiCallImpl,
     execFileImpl: async (command, args) => {
       calls.push({ command, args: [...args] });

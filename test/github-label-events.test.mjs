@@ -7,6 +7,8 @@ import {
   latestMatchingScopedTimelineLabelEvent,
 } from '../src/github-label-events.mjs';
 
+const NO_AUTO_ADAPTER_ROOT = '/tmp/github-label-events-no-auto-adapter-root';
+
 test('latestMatchingLabelEvent returns the newest matching labeled event with actor', () => {
   const event = latestMatchingLabelEvent([
     {
@@ -104,6 +106,7 @@ test('fetchLatestLabelEvent scopes timeline labels with caller-provided current 
     'operator-approved',
     {
       currentHeadSha: 'reviewed-head',
+      rootDir: NO_AUTO_ADAPTER_ROOT,
       execFileImpl: async () => ({
         stdout: JSON.stringify({
           data: {

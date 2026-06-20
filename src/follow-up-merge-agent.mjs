@@ -4988,6 +4988,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
   execFileImpl = execFileAsync,
   operatorApprovalEvent = undefined,
   mergeAgentRequestEvent = undefined,
+  rootDir = undefined,
 } = {}) {
   const { stdout } = await execFileImpl(
     'gh',
@@ -5009,10 +5010,10 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
   const hasMergeAgentRequested = normalizedLabels.includes(MERGE_AGENT_REQUESTED_LABEL);
   const [resolvedOperatorApprovalEvent, resolvedMergeAgentRequestEvent] = await Promise.all([
     hasOperatorApproved && operatorApprovalEvent === undefined
-      ? fetchLatestLabelEvent(repo, prNumber, OPERATOR_APPROVED_LABEL, { execFileImpl })
+      ? fetchLatestLabelEvent(repo, prNumber, OPERATOR_APPROVED_LABEL, { execFileImpl, rootDir })
       : operatorApprovalEvent ?? null,
     hasMergeAgentRequested && mergeAgentRequestEvent === undefined
-      ? fetchLatestLabelEvent(repo, prNumber, MERGE_AGENT_REQUESTED_LABEL, { execFileImpl })
+      ? fetchLatestLabelEvent(repo, prNumber, MERGE_AGENT_REQUESTED_LABEL, { execFileImpl, rootDir })
       : mergeAgentRequestEvent ?? null,
   ]);
   let branchProtection = { requiredContexts: [] };

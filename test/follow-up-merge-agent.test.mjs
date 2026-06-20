@@ -5420,6 +5420,7 @@ test('fetchMergeAgentCandidate fetches operator label events in parallel', async
   const eventResolvers = [];
   let eventFetchesStarted = 0;
   const candidatePromise = fetchMergeAgentCandidate('laceyenterprises/agent-os', 401, {
+    rootDir: '/tmp/follow-up-merge-agent-no-auto-adapter-root',
     execFileImpl: async (_cmd, args) => {
       if (args[0] === 'pr') {
         return {

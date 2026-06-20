@@ -922,6 +922,7 @@ async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
   authoritativeReviewerLogins = null,
   authoritativeReviewerLogin = null,
   env = process.env,
+  rootDir = undefined,
   recordApiCallImpl = recordApiCall,
 } = {}) {
   if (!headSha) return [];
@@ -963,6 +964,7 @@ async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
     }, () => readAdapterReviewBodiesForHead(repo, normalizedPrNumber, headSha, {
       execFileImpl,
       env,
+      rootDir,
       reviewerLogins: loginList,
     }));
     if (Array.isArray(adapterReviews) && adapterReviews.length > 0) {
@@ -1577,6 +1579,7 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
   recordApiCallImpl = recordApiCall,
   withLabels = true,
   env = process.env,
+  rootDir = undefined,
 } = {}) {
   const { owner, repo: repoName } = splitRepo(repo);
   const normalizedPrNumber = normalizePrNumber(prNumber);
@@ -1586,7 +1589,7 @@ async function fetchPullRequestHeadAndState(repo, prNumber, {
       prNumber: normalizedPrNumber,
       recordApiCallImpl,
       env,
-    }, () => readAdapterHeadAndState(repo, normalizedPrNumber, { execFileImpl, withLabels, env }));
+    }, () => readAdapterHeadAndState(repo, normalizedPrNumber, { execFileImpl, withLabels, env, rootDir }));
     if (adapterResult) {
       return normalizeAdapterHeadAndState(adapterResult, { withLabels });
     }
@@ -1653,6 +1656,7 @@ async function fetchPullRequestRollup(repo, prNumber, {
   execFileImpl = execFileAsync,
   recordApiCallImpl = recordApiCall,
   env = process.env,
+  rootDir = undefined,
 } = {}) {
   const normalizedPrNumber = normalizePrNumber(prNumber);
   try {
@@ -1661,7 +1665,7 @@ async function fetchPullRequestRollup(repo, prNumber, {
       prNumber: normalizedPrNumber,
       recordApiCallImpl,
       env,
-    }, () => readAdapterPrRollup(repo, normalizedPrNumber, { execFileImpl, env }));
+    }, () => readAdapterPrRollup(repo, normalizedPrNumber, { execFileImpl, env, rootDir }));
     if (adapterResult) {
       return normalizeAdapterRollup(adapterResult);
     }
@@ -1699,6 +1703,7 @@ async function fetchPullRequestReviewContext(repo, prNumber, {
   execFileImpl = execFileAsync,
   recordApiCallImpl = recordApiCall,
   env = process.env,
+  rootDir = undefined,
 } = {}) {
   const normalizedPrNumber = normalizePrNumber(prNumber);
   try {
@@ -1707,7 +1712,7 @@ async function fetchPullRequestReviewContext(repo, prNumber, {
       prNumber: normalizedPrNumber,
       recordApiCallImpl,
       env,
-    }, () => readAdapterReviewContext(repo, normalizedPrNumber, { execFileImpl, env }));
+    }, () => readAdapterReviewContext(repo, normalizedPrNumber, { execFileImpl, env, rootDir }));
     if (adapterResult) {
       return normalizeAdapterReviewContext(adapterResult);
     }

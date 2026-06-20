@@ -109,6 +109,7 @@ async function fetchLatestLabelEvent(repo, prNumber, labelName, {
   execFileImpl,
   currentHeadSha = null,
   env = process.env,
+  rootDir = undefined,
 } = {}) {
   if (typeof execFileImpl !== 'function') {
     throw new Error('fetchLatestLabelEvent requires execFileImpl');
@@ -118,6 +119,7 @@ async function fetchLatestLabelEvent(repo, prNumber, labelName, {
       execFileImpl,
       currentHeadSha,
       env,
+      rootDir,
     });
     if (adapterEvent) {
       const normalized = normalizeGithubLabelEvent(adapterEvent, labelName);

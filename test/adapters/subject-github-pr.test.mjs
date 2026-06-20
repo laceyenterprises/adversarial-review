@@ -38,6 +38,7 @@ const fixture = JSON.parse(
 );
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
+const NO_AUTO_ADAPTER_ROOT = '/tmp/subject-github-pr-no-auto-adapter-root';
 
 function makeOctokitSnapshot() {
   return {
@@ -62,6 +63,7 @@ test('github-pr subject adapter discovers GitHub PR subjects with normalized bui
   const adapter = createGitHubPRSubjectAdapter({
     octokit: makeOctokitSnapshot(),
     repos: [fixture.repo],
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     now: () => new Date('2026-05-10T21:30:00.000Z'),
   });
 
@@ -384,6 +386,7 @@ test('github-pr subject adapter fetches diff content through the subject interfa
   const adapter = createGitHubPRSubjectAdapter({
     octokit: makeOctokitSnapshot(),
     repos: [fixture.repo],
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     execFileImpl: async (command, args, options = {}) => {
       calls.push({ command, args, options });
       return { stdout: fixture.diff, stderr: '' };
@@ -520,6 +523,7 @@ test('github-pr subject adapter does not emit adapter telemetry when adapter is 
     octokit: makeOctokitSnapshot(),
     repos: [fixture.repo],
     env: {},
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     recordApiCall: (entry) => telemetry.push(entry),
     execFileImpl: async (command, args) => {
       assert.equal(command, 'gh');
@@ -691,6 +695,7 @@ test('recordRemediationCommit reports commit revision without poisoning cached P
   const adapter = createGitHubPRSubjectAdapter({
     octokit,
     repos: [fixture.repo],
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     now: () => new Date('2026-05-10T21:33:00.000Z'),
   });
   const [ref] = await adapter.discoverSubjects();
@@ -781,6 +786,7 @@ test('fetchState returns cached snapshot for back-to-back calls within TTL (coal
   const adapter = createGitHubPRSubjectAdapter({
     octokit: mut.octokit,
     repos: ['laceyenterprises/agent-os'],
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     now: clock.now,
     monotonicNowMs: clock.monotonicNowMs,
     cacheTtlMs: 30_000,
@@ -807,6 +813,7 @@ test('REGRESSION 2026-05-18: fetchState re-fetches after cache TTL elapses (pick
   const adapter = createGitHubPRSubjectAdapter({
     octokit: mut.octokit,
     repos: ['laceyenterprises/agent-os'],
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     now: clock.now,
     monotonicNowMs: clock.monotonicNowMs,
     cacheTtlMs: 30_000,
@@ -856,6 +863,7 @@ test('TTL=0 disables caching entirely (every fetchState calls pulls.get)', async
   const adapter = createGitHubPRSubjectAdapter({
     octokit: mut.octokit,
     repos: ['laceyenterprises/agent-os'],
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     now: clock.now,
     monotonicNowMs: clock.monotonicNowMs,
     cacheTtlMs: 0,
@@ -878,6 +886,7 @@ test('fetchContent within TTL also reuses the cached snapshot', async () => {
   const adapter = createGitHubPRSubjectAdapter({
     octokit: mut.octokit,
     repos: ['laceyenterprises/agent-os'],
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     now: clock.now,
     monotonicNowMs: clock.monotonicNowMs,
     cacheTtlMs: 30_000,
@@ -896,6 +905,7 @@ test('REGRESSION 2026-05-18: cache TTL still expires after wall-clock rollback',
   const adapter = createGitHubPRSubjectAdapter({
     octokit: mut.octokit,
     repos: ['laceyenterprises/agent-os'],
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     now: clock.now,
     monotonicNowMs: clock.monotonicNowMs,
     cacheTtlMs: 30_000,
@@ -927,6 +937,7 @@ test('REGRESSION 2026-05-18: fresh cache snapshot is reused even when caller kee
   const adapter = createGitHubPRSubjectAdapter({
     octokit: mut.octokit,
     repos: ['laceyenterprises/agent-os'],
+    rootDir: NO_AUTO_ADAPTER_ROOT,
     now: clock.now,
     monotonicNowMs: clock.monotonicNowMs,
     cacheTtlMs: 30_000,

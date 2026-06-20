@@ -5,8 +5,8 @@ const REQUIRED_PREFIXES = Object.values(TAG_PREFIXES);
 
 const MALFORMED_TITLE_COMMENT_HEADER = '## Adversarial Review Trigger Failure';
 
-function routePR(prTitle) {
-  const route = routeSubjectPR(prTitle);
+function routePR(prTitle, subject = null, options = {}) {
+  const route = routeSubjectPR(prTitle, subject, options);
   if (!route) return null;
   return {
     tag: route.tag,

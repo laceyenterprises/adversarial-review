@@ -315,6 +315,7 @@ test('GMW-02 roster formatting + gemini note reflects the mode', () => {
 test('GMW-02 reviewer-roster CLI prints the roster and resolved mode', () => {
   let out = '';
   const rc = reviewerRosterMain([], {
+    env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
     stdout: { write: (s) => { out += s; } },
     stderr: { write: () => {} },
   });
@@ -326,6 +327,7 @@ test('GMW-02 reviewer-roster CLI prints the roster and resolved mode', () => {
 test('GMW-02 reviewer-roster CLI --json emits structured roster', () => {
   let out = '';
   const rc = reviewerRosterMain(['--json'], {
+    env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
     stdout: { write: (s) => { out += s; } },
     stderr: { write: () => {} },
   });

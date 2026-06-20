@@ -140,3 +140,33 @@ test('fetchLatestLabelEvent scopes timeline labels with caller-provided current 
   assert.equal(event.headSha, 'reviewed-head');
   assert.equal(event.id, 'LE_reviewed');
 });
+
+test('fetchLatestLabelEvent prefers optional adapter event payloads', async () => {
+  const event = await fetchLatestLabelEvent(
+    'laceyenterprises/adversarial-review',
+    340,
+    'operator-approved',
+    {
+      currentHeadSha: 'adapter-head',
+      env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+      execFileImpl: async (command, args) => {
+        assert.equal(command, '/fixture/github-adapter');
+        assert.equal(args.includes('latest-label-event'), true);
+        return {
+          stdout: JSON.stringify({
+            event: {
+              id: 'LE_adapter',
+              label: 'operator-approved',
+              actor: 'placey',
+              createdAt: '2026-06-19T08:01:00.000Z',
+              headSha: 'adapter-head',
+              codeScopedAt: '2026-06-19T08:00:00.000Z',
+            },
+          }),
+        };
+      },
+    }
+  );
+  assert.equal(event.id, 'LE_adapter');
+  assert.equal(event.headSha, 'adapter-head');
+});

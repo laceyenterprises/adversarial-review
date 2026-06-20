@@ -8,13 +8,66 @@ import {
   ensureReviewStateSchema,
   listPendingMergeCloseouts,
 } from '../src/review-state.mjs';
-import { scrapeMergeCloseout } from '../src/closeout-scraper.mjs';
+import {
+  fetchIssueComments,
+  scrapeMergeCloseout,
+  scraperFetchIssueComments,
+} from '../src/closeout-scraper.mjs';
 
 function setupDb() {
   const db = new Database(':memory:');
   ensureReviewStateSchema(db);
   return db;
 }
+
+test('closeout comment readers prefer optional adapter payloads', async () => {
+  const env = { GHA_ADAPTER_BIN: '/fixture/github-adapter' };
+  const execFileImpl = async (command, args) => {
+    assert.equal(command, '/fixture/github-adapter');
+    assert.equal(args.includes('issue-comments'), true);
+    return {
+      stdout: JSON.stringify({
+        comments: [{
+          id: 'IC_adapter',
+          nodeId: 'IC_node',
+          authorLogin: 'operator',
+          createdAt: '2026-05-20T20:40:00.000Z',
+          updatedAt: '2026-05-20T20:41:00.000Z',
+          body: '<!-- hq:closeout:pr -->Done',
+          url: 'https://example.test/comment',
+        }],
+      }),
+    };
+  };
+
+  assert.deepEqual(await scraperFetchIssueComments({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 17,
+    env,
+    execFileImpl,
+    logger: { warn() {} },
+  }), [{
+    id: 'IC_adapter',
+    login: 'operator',
+    created_at: '2026-05-20T20:40:00.000Z',
+    body: '<!-- hq:closeout:pr -->Done',
+  }]);
+
+  assert.deepEqual(await fetchIssueComments({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 17,
+    env,
+    execFileImpl,
+  }), [{
+    id: 'IC_adapter',
+    nodeId: 'IC_node',
+    body: '<!-- hq:closeout:pr -->Done',
+    createdAt: '2026-05-20T20:40:00.000Z',
+    updatedAt: '2026-05-20T20:41:00.000Z',
+    authorLogin: 'operator',
+    url: 'https://example.test/comment',
+  }]);
+});
 
 function seedReviewerPass(db, {
   repo = 'laceyenterprises/adversarial-review',

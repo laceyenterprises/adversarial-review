@@ -197,6 +197,63 @@ boundary, those modules should bind to these interfaces rather than fork new
 shapes. Until then, updates to the declaration file must keep the fixture and
 the runtime-bound JSDoc consumers in sync.
 
+## Optional GitHub Read Adapter
+
+The GitHub-PR domain may prefer a local `github-adapter` read binary for GitHub
+lookups during review and remediation orchestration. The integration is
+rollout-safe: adapter reads are opportunistic, and failures or missing binaries
+must fall back to the existing `gh` or Octokit path for the same lookup.
+
+`src/github-adapter-client.mjs` resolves the binary in this order:
+
+1. `GHA_ADAPTER_BIN`
+2. `AGENT_OS_GITHUB_ADAPTER_BIN`
+3. `<repo-root>/modules/github-adapter/bin/github-adapter`
+4. `<repo-root>/../modules/github-adapter/bin/github-adapter`
+5. `<repo-root>/../../modules/github-adapter/bin/github-adapter`
+
+The third through fifth entries are auto-discovery candidates. Auto-discovery
+must only select a binary under one of those trusted `modules/github-adapter`
+roots, and the selected file must be a regular executable that is not
+group/world-writable before the watcher passes GitHub credentials to it.
+Explicit environment overrides are operator-controlled escape hatches.
+
+If none of those paths resolves, the adapter is treated as absent. When the
+adapter is present it is invoked with the caller's GitHub/OAuth environment
+(`GH_TOKEN`, `GITHUB_TOKEN`, host, proxy, certificate, and basic process env
+needed by the binary); `GITHUB_TOKEN` is copied to `GH_TOKEN` only when
+`GH_TOKEN` is unset. The adapter currently covers pull-request rollups, review
+contexts, head/state reads, review bodies for a head SHA, label events, issue
+comments, open PR discovery, single-PR snapshots, and PR diffs. Each call site
+must preserve the fallback behavior independently, because the adapter is an
+optional preferred read source rather than the authoritative availability gate.
+Adapter-absent reads must not emit synthetic adapter telemetry or consume a
+second throttle wait before falling through to the existing GitHub client path.
+
+Open-PR discovery is the highest-blast-radius adapter read because an empty
+result can silence the entire watcher. During rollout, an empty adapter
+`open-pull-requests` result is inconclusive when an Octokit discovery client is
+available; the subject adapter must cross-check Octokit instead of treating the
+empty adapter list as authoritative. Adapter-only deployments may still return
+an empty subject set when no fallback client exists.
+
+The review-context adapter path is intentionally narrower than the full PR
+rollup. It must normalize to the same contract as the GraphQL/legacy review
+context reader: PR metadata plus comments, with `labels`, `reviews`, and
+`checks` empty and `mergeable` / `mergeStateStatus` set to `null`. Missing or
+present mergeability fields must not decide whether the review-context adapter
+path engages.
+
+The `pull-request-review-bodies-for-head` read kind must return structured
+review objects carrying body, submitted state, reviewed commit/head SHA, submit
+time, and author metadata. String-only body arrays are not sufficiently
+verifiable; callers must fall back to the legacy GitHub reader so in-process
+head/state filtering remains identical to the non-adapter path. Empty structured
+body arrays are also inconclusive during rollout and must fall back to the
+legacy reader because this read directly feeds verdict detection. PR diff
+adapter payloads must contain a non-empty string diff; empty-string diffs fall
+back to `gh pr diff` rather than reviewing an empty representation.
+
 ## Default Agent Routing Overrides
 
 The GitHub-PR adapter first resolves the historical opposite-agent base route
@@ -212,7 +269,13 @@ for every supported title prefix:
   review to Codex and use `GH_CODEX_REVIEWER_TOKEN`.
 
 The exported GitHub-PR route helpers and watcher dispatch path then apply
-`reviewer.gemini.mode` through the same effective-route helper. The default mode is `always-on`, so the public default matrix is:
+`reviewer.gemini.mode` through the same effective-route helper. The default mode is `always-on`.
+
+`routePR` helpers use the shared `(title, subject, options)` call shape; wrappers
+that do not need subject context still pass the subject through so future
+subject-aware routing cannot silently diverge.
+
+The public default matrix is:
 
 - `[codex]`, `[claude-code]`, and `[clio-agent]` PRs route first-pass review to
   Gemini and use `GH_GEMINI_REVIEWER_TOKEN`.

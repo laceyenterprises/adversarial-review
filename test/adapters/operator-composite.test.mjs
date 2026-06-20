@@ -42,6 +42,7 @@ test('composite operator surface forwards controls and triage calls through the 
         },
       }),
       logger: {},
+      env: {},
     },
   });
 
@@ -69,7 +70,10 @@ test('composite operator surface forwards controls and triage calls through the 
     linearCalls.find((call) => call.type === 'updateIssue'),
     { type: 'updateIssue', issueId: 'issue-1', payload: { stateId: 'state-done' } }
   );
-  assert.deepEqual(surface.routePR('[codex] LAC-486: tighten watcher'), {
+  assert.deepEqual(surface.routePR('[codex] LAC-486: tighten watcher', null, {
+    topPath: '/dev/null',
+    geminiReviewerMode: 'always-on',
+  }), {
     builderClass: 'codex',
     tag: 'codex',
     reviewerModel: 'gemini',

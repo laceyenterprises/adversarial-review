@@ -404,6 +404,218 @@ test('github-pr subject adapter fetches diff content through the subject interfa
   ]);
 });
 
+test('github-pr subject adapter falls back to gh diff when optional adapter diff is malformed', async () => {
+  const calls = [];
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: makeOctokitSnapshot(),
+    repos: [fixture.repo],
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    execFileImpl: async (command, args, options = {}) => {
+      calls.push({ command, args: [...args], options });
+      if (command === '/fixture/github-adapter') {
+        const kind = args[args.indexOf('--kind') + 1];
+        if (kind === 'pull-request-diff') {
+          return { stdout: JSON.stringify({ diff: { not: 'a string' } }) };
+        }
+        throw new Error(`unexpected adapter kind ${kind}`);
+      }
+      assert.equal(command, 'gh');
+      return { stdout: fixture.diff, stderr: '' };
+    },
+    now: () => new Date('2026-05-10T21:33:00.000Z'),
+  });
+  const [ref] = await adapter.discoverSubjects();
+
+  const content = await adapter.fetchContent(ref);
+
+  assert.equal(content.representation, fixture.diff);
+  assert.deepEqual(calls.map((call) => (
+    call.command === '/fixture/github-adapter'
+      ? [call.command, call.args[call.args.indexOf('--kind') + 1]]
+      : [call.command, ...call.args]
+  )), [
+    ['/fixture/github-adapter', 'open-pull-requests'],
+    ['/fixture/github-adapter', 'pull-request-diff'],
+    ['gh', 'pr', 'diff', '484', '--repo', fixture.repo],
+  ]);
+});
+
+test('github-pr subject adapter falls back to gh diff when optional adapter diff is empty', async () => {
+  const calls = [];
+  const adapter = createGitHubPRSubjectAdapter({
+    repos: [fixture.repo],
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    execFileImpl: async (command, args, options = {}) => {
+      calls.push({ command, args: [...args], options });
+      if (command === '/fixture/github-adapter') {
+        const kind = args[args.indexOf('--kind') + 1];
+        if (kind === 'open-pull-requests') {
+          return { stdout: JSON.stringify({ pullRequests: fixture.pulls }) };
+        }
+        if (kind === 'pull-request-diff') {
+          return { stdout: JSON.stringify({ diff: '' }) };
+        }
+        throw new Error(`unexpected adapter kind ${kind}`);
+      }
+      assert.equal(command, 'gh');
+      return { stdout: fixture.diff, stderr: '' };
+    },
+    now: () => new Date('2026-05-10T21:33:30.000Z'),
+  });
+  const [ref] = await adapter.discoverSubjects();
+
+  const content = await adapter.fetchContent(ref);
+
+  assert.equal(content.representation, fixture.diff);
+  assert.deepEqual(calls.map((call) => (
+    call.command === '/fixture/github-adapter'
+      ? [call.command, call.args[call.args.indexOf('--kind') + 1]]
+      : [call.command, ...call.args]
+  )), [
+    ['/fixture/github-adapter', 'open-pull-requests'],
+    ['/fixture/github-adapter', 'pull-request-diff'],
+    ['gh', 'pr', 'diff', '484', '--repo', fixture.repo],
+  ]);
+});
+
+test('github-pr subject adapter falls back to Octokit when adapter discovery returns empty', async () => {
+  const calls = [];
+  let octokitListCalls = 0;
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: {
+      rest: {
+        pulls: {
+          list: async ({ owner, repo, state }) => {
+            octokitListCalls += 1;
+            assert.equal(`${owner}/${repo}`, fixture.repo);
+            assert.equal(state, 'open');
+            return { data: fixture.pulls };
+          },
+        },
+      },
+    },
+    repos: [fixture.repo],
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      assert.equal(command, '/fixture/github-adapter');
+      const kind = args[args.indexOf('--kind') + 1];
+      assert.equal(kind, 'open-pull-requests');
+      return { stdout: JSON.stringify({ pullRequests: [] }) };
+    },
+  });
+
+  const refs = await adapter.discoverSubjects();
+
+  assert.deepEqual(refs.map((ref) => ref.subjectExternalId), [`${fixture.repo}#484`]);
+  assert.equal(octokitListCalls, 1);
+  assert.deepEqual(calls.map((call) => call.args[call.args.indexOf('--kind') + 1]), [
+    'open-pull-requests',
+  ]);
+});
+
+test('github-pr subject adapter does not emit adapter telemetry when adapter is absent', async () => {
+  const telemetry = [];
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: makeOctokitSnapshot(),
+    repos: [fixture.repo],
+    env: {},
+    recordApiCall: (entry) => telemetry.push(entry),
+    execFileImpl: async (command, args) => {
+      assert.equal(command, 'gh');
+      assert.deepEqual(args, ['pr', 'diff', '484', '--repo', fixture.repo]);
+      return { stdout: fixture.diff, stderr: '' };
+    },
+  });
+
+  const [ref] = await adapter.discoverSubjects();
+  await adapter.fetchContent(ref);
+
+  assert.deepEqual(telemetry.map((entry) => ({
+    category: entry.category,
+    status: entry.status,
+    transport: entry.extra?.transport,
+  })), [
+    { category: 'pr_view', status: 200, transport: undefined },
+    { category: 'diff_fetch', status: 200, transport: undefined },
+  ]);
+});
+
+test('github-pr subject adapter uses optional GitHub adapter when present without Octokit', async () => {
+  const calls = [];
+  const telemetry = [];
+  const adapter = createGitHubPRSubjectAdapter({
+    repos: [fixture.repo],
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    recordApiCall: (entry) => telemetry.push(entry),
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      assert.equal(command, '/fixture/github-adapter');
+      const kind = args[args.indexOf('--kind') + 1];
+      if (kind === 'open-pull-requests') {
+        return {
+          stdout: JSON.stringify({
+            pullRequests: [{
+              number: 484,
+              title: '[codex] LAC-484 carve subject channel adapter',
+              state: 'OPEN',
+              headRefOid: 'adapter-head',
+              labels: [{ name: 'risk:medium' }],
+              createdAt: '2026-05-10T21:00:00.000Z',
+              updatedAt: '2026-05-10T21:20:00.000Z',
+              author: { login: 'codex-worker' },
+            }],
+          }),
+        };
+      }
+      if (kind === 'pull-request-diff') {
+        return { stdout: JSON.stringify({ diff: 'diff --git adapter\n' }) };
+      }
+      throw new Error(`unexpected adapter kind ${kind}`);
+    },
+    now: () => new Date('2026-05-10T21:34:00.000Z'),
+  });
+
+  const [ref] = await adapter.discoverSubjects();
+  assert.deepEqual(ref, {
+    domainId: 'code-pr',
+    subjectExternalId: `${fixture.repo}#484`,
+    revisionRef: 'adapter-head',
+  });
+  const state = await adapter.fetchState(ref);
+  assert.equal(state.headSha, 'adapter-head');
+  assert.deepEqual(state.labels, ['risk:medium']);
+
+  const content = await adapter.fetchContent(ref);
+  assert.equal(content.representation, 'diff --git adapter\n');
+  assert.deepEqual(calls.map((call) => call.args[call.args.indexOf('--kind') + 1]), [
+    'open-pull-requests',
+    'pull-request-diff',
+  ]);
+  assert.deepEqual(telemetry.map((entry) => ({
+    category: entry.category,
+    repo: entry.repo,
+    prNumber: entry.prNumber ?? null,
+    status: entry.status,
+    transport: entry.extra?.transport,
+  })), [
+    {
+      category: 'pr_view',
+      repo: fixture.repo,
+      prNumber: null,
+      status: 200,
+      transport: 'github-adapter',
+    },
+    {
+      category: 'diff_fetch',
+      repo: fixture.repo,
+      prNumber: 484,
+      status: 200,
+      transport: 'github-adapter',
+    },
+  ]);
+});
+
 test('github-pr subject adapter prepares remediation workspace shape', async () => {
   const rootDir = '/tmp/subject-github-pr-fixture-root';
   const workspaceDir = path.join(rootDir, 'workspace');

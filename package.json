@@ -8,7 +8,8 @@
   },
   "main": "src/watcher.mjs",
   "bin": {
-    "adversarial-review": "src/cli.mjs"
+    "adversarial-review": "src/cli.mjs",
+    "agr-auth": "src/agr-auth.mjs"
   },
   "scripts": {
     "lint": "eslint \"src/**/*.{js,mjs}\"",

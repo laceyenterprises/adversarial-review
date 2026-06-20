@@ -637,10 +637,7 @@ test('cfg.workerClass=hammer selects the terminal HAM mandate prompt when findin
   assert.match(write.captured.body, /ham_terminal_remediation_validated/);
   assert.match(write.captured.body, /--match-head-commit "\$POST_REMEDIATION_SHA"/);
   assert.match(write.captured.body, /failed, missing, stale, or\s+unchecked required checks/);
-  assert.match(write.captured.body, /HAM-03 hard-blocker: rebase attempt cap exceeded/);
-  assert.match(write.captured.body, /HAM_UPDATE_BRANCH_RETRY_CAP="\$\{HAM_UPDATE_BRANCH_RETRY_CAP:-3\}"/);
-  assert.match(write.captured.body, /HAM_UPDATE_BRANCH_EXIT=\$\?/);
-  assert.match(write.captured.body, /Rebase-Attempts: \${HAM_REBASE_ATTEMPTS:-0}/);
+  assert.match(write.captured.body, /Do not merge a stale\s+or behind head merely because the old reviewed SHA passed/);
 });
 
 // Unit coverage for the prompt-selection predicate itself (HAM-04, SPEC §1.1.1).
@@ -857,10 +854,10 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /No follow-up PRs\/issues for the final findings/);
   assert.match(prompt, /ham_terminal_remediation_validated/);
   assert.match(prompt, /Do not merge unless all of these are true/);
-  assert.match(prompt, /HAM_REBASE_ATTEMPT_CAP="\$\{HAM_REBASE_ATTEMPT_CAP:-3\}"/);
-  assert.match(prompt, /ham_update_branch_conflict/);
-  assert.match(prompt, /ham_update_branch_transient/);
-  assert.match(prompt, /No unbounded rebase\/update-branch retries/);
+  assert.match(prompt, /Failed,\s+missing,\s+stale,\s+or unchecked required checks are hard blockers/);
+  assert.match(prompt, /No refactor-and-defer for final findings/);
+  assert.doesNotMatch(prompt, /HAM_REBASE_ATTEMPT_CAP/);
+  assert.doesNotMatch(prompt, /ham_update_branch_conflict/);
 });
 
 test('composed prompt documents that branch_protection.required=false does not require the GitHub-plan sentinel', () => {
@@ -1484,7 +1481,7 @@ test('terminal AMA audit releases a stale lease so the same head can be retried'
 
 // --- Auto-hammer eligibility-miss gate (2026-06-19) ---
 
-test('isHammerRemediableEligibilityMiss fires for the strict-mode non-blocking case and for not-mergeable (conflict/behind)', () => {
+test('isHammerRemediableEligibilityMiss fires only for the strict-mode non-blocking case', () => {
   // Remediable: standing non-blocking findings (optionally + the strict
   // verdict-not-settled-success that accompanies them).
   assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present']), true);
@@ -1497,29 +1494,15 @@ test('isHammerRemediableEligibilityMiss fires for the strict-mode non-blocking c
     true,
   );
 
-  // Remediable: the hammer owns merge-conflict / behind-base resolution, so a
-  // not-mergeable PR routes to the hammer instead of parking await-operator —
-  // alone, or alongside other hammer-remediable reasons.
-  assert.equal(isHammerRemediableEligibilityMiss(['pr-not-mergeable']), true, 'pure conflict/behind → hammer');
-  assert.equal(
-    isHammerRemediableEligibilityMiss(['pr-not-mergeable', 'verdict-not-settled-success', 'non-blocking-findings-present']),
-    true,
-  );
-  assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'pr-not-mergeable']), true);
-
-  // Remediable: red CI routes to the hammer rescue (it fixes the failing
-  // required checks / tests, then merges) — alone or with other remediable reasons.
-  assert.equal(isHammerRemediableEligibilityMiss(['ci-not-green']), true, 'red CI → hammer rescue');
-  assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'ci-not-green']), true);
-  assert.equal(isHammerRemediableEligibilityMiss(['ci-not-green', 'pr-not-mergeable']), true);
-
   // NOT remediable — must stay await-operator:
   assert.equal(isHammerRemediableEligibilityMiss([]), false);
   assert.equal(isHammerRemediableEligibilityMiss(undefined), false);
   assert.equal(isHammerRemediableEligibilityMiss(['verdict-not-settled-success']), false, 'verdict-only (no actionable) is not auto-hammer');
   assert.equal(isHammerRemediableEligibilityMiss(['blocking-findings-present']), false);
   assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'blocking-findings-present']), false, 'any blocking finding disqualifies');
-  assert.equal(isHammerRemediableEligibilityMiss(['pr-not-mergeable', 'blocking-findings-present']), false, 'blocking finding still disqualifies even with a conflict');
-  assert.equal(isHammerRemediableEligibilityMiss(['ci-not-green', 'blocking-findings-present']), false, 'blocking finding still disqualifies even with red CI');
+  assert.equal(isHammerRemediableEligibilityMiss(['pr-not-mergeable']), false, 'HAM-03 rebase/conflict work is not HAM-02 auto-hammer');
+  assert.equal(isHammerRemediableEligibilityMiss(['ci-not-green']), false, 'red CI is a hard gate, not HAM-02 auto-hammer');
+  assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'pr-not-mergeable']), false);
+  assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'ci-not-green']), false);
   assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'stale-review-head']), false);
 });

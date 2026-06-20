@@ -137,6 +137,14 @@ function timeoutJson({ repo, base, waitedSeconds }) {
   };
 }
 
+function acquireHolderMatches(holder, { pr, head, ownerPid, host }) {
+  return holder
+    && Number(holder.holderPr) === pr
+    && holder.holderHead === head
+    && Number(holder.holderPid) === ownerPid
+    && holder.holderHost === host;
+}
+
 function removeWaiterForTimeout({ rootDir, repo, base, waiterId, updatedAt }) {
   try {
     removeMergeLeaseWaiter({ rootDir, repo, base, waiterId, updatedAt });
@@ -222,7 +230,7 @@ async function runAcquire(argv, deps) {
         host: deps.host,
         pidAliveFn: deps.pidAliveFn,
       });
-      const result = acquireMergeLease({
+      const result = deps.acquireMergeLease({
         rootDir,
         repo,
         base,
@@ -246,6 +254,21 @@ async function runAcquire(argv, deps) {
       }
     } catch (err) {
       if (!isMutationLockBusyError(err)) throw err;
+      const status = inspectMergeLease({
+        rootDir,
+        repo,
+        base,
+        now: deps.nowIso(),
+        host: deps.host,
+        pidAliveFn: deps.pidAliveFn,
+      });
+      if (acquireHolderMatches(status.holder, { pr, head, ownerPid, host: deps.host })) {
+        jsonLine(deps.stdout, leaseJson({
+          result: { lease: status.holder },
+          waitedSeconds: Math.max(0, Math.floor((deps.nowMs() - startedMs) / 1000)),
+        }));
+        return 0;
+      }
     }
 
     if (deps.nowMs() >= deadlineMs) {
@@ -316,6 +339,7 @@ function runRelease(argv, deps) {
     released: result.released,
     key: deriveLeaseKey({ repo, base }).key,
     leaseId,
+    ...(result.reason ? { reason: result.reason } : {}),
     existingLease: result.released ? null : result.existingLease,
   });
   return 0;
@@ -347,6 +371,7 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
     stderr: process.stderr,
     selfPid: process.pid,
     host: hostname(),
+    acquireMergeLease,
     pidAliveFn: defaultPidAliveFn,
     nowIso,
     nowMs: () => Date.now(),

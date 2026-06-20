@@ -42,6 +42,9 @@ with `acquired:false` and is retryable. Live `mutation-lock-busy` contention
 during waiter registration, pruning, or timeout cleanup is a transient acquire
 condition: the CLI must retry inside the caller's wait window and, if the
 deadline expires, return `75` rather than reclassifying contention as usage.
+If the holder file has already been written, post-acquire waiter cleanup is
+best-effort: a busy waiter mutation lock must not make the caller report a
+timeout while it already owns the lease.
 
 Reclaim is allowed only when the holder can no longer be trusted to serialize
 the merge lane:

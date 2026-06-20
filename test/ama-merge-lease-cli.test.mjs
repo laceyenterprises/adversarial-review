@@ -95,6 +95,19 @@ function acquireFixture(rootDir, overrides = {}) {
   });
 }
 
+function writeLiveMutationLock(lockPath, lockId) {
+  writeFileSync(
+    lockPath,
+    `${JSON.stringify({
+      schemaVersion: 1,
+      lockId,
+      holderPid: process.pid,
+      holderHost: hostname(),
+      acquiredAt: new Date().toISOString(),
+    }, null, 2)}\n`,
+  );
+}
+
 async function runCli(rootDir, args, overrides = {}) {
   const { deps, io } = fakeDeps(overrides);
   const code = await mergeLeaseMain([args[0], '--root-dir', rootDir, ...args.slice(1)], deps);
@@ -286,16 +299,7 @@ test('merge-lease acquire retries mutation-lock contention until the wait deadli
     const leasePath = mergeLeaseFilePath(rootDir, { repo: REPO, base: BASE });
     const lockPath = `${leasePath}.mutation.lock`;
     mkdirSync(join(rootDir, 'data', 'merge-leases'), { recursive: true });
-    writeFileSync(
-      lockPath,
-      `${JSON.stringify({
-        schemaVersion: 1,
-        lockId: 'mll_live_cli',
-        holderPid: process.pid,
-        holderHost: hostname(),
-        acquiredAt: new Date().toISOString(),
-      }, null, 2)}\n`,
-    );
+    writeLiveMutationLock(lockPath, 'mll_live_cli');
 
     let lockReleased = false;
     const { code, io } = await runCli(rootDir, [
@@ -331,16 +335,7 @@ test('merge-lease acquire maps mutation-lock contention at deadline to retryable
     const leasePath = mergeLeaseFilePath(rootDir, { repo: REPO, base: BASE });
     const lockPath = `${leasePath}.mutation.lock`;
     mkdirSync(join(rootDir, 'data', 'merge-leases'), { recursive: true });
-    writeFileSync(
-      lockPath,
-      `${JSON.stringify({
-        schemaVersion: 1,
-        lockId: 'mll_live_cli_timeout',
-        holderPid: process.pid,
-        holderHost: hostname(),
-        acquiredAt: new Date().toISOString(),
-      }, null, 2)}\n`,
-    );
+    writeLiveMutationLock(lockPath, 'mll_live_cli_timeout');
 
     const { code, io } = await runCli(rootDir, [
       'acquire',
@@ -356,6 +351,38 @@ test('merge-lease acquire maps mutation-lock contention at deadline to retryable
     assert.equal(code, 75);
     assert.equal(out.acquired, false);
     assert.equal(out.timedOut, true);
+    assert.equal(io.stderrText, '');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('merge-lease acquire succeeds when waiter cleanup lock is busy after holder write', async () => {
+  const rootDir = freshRoot();
+  try {
+    const { code, io } = await runCli(rootDir, [
+      'acquire',
+      '--repo', REPO,
+      '--base', BASE,
+      '--pr', '128',
+      '--head', 'post-write-lock',
+      '--owner-pid', '8128',
+      '--wait', '1',
+    ], {
+      acquireMergeLease: (options) => acquireMergeLease({
+        ...options,
+        _afterHolderWrite: ({ leasePath }) => {
+          writeLiveMutationLock(`${leasePath}.mutation.lock`, 'mll_post_write_cleanup');
+        },
+      }),
+    });
+
+    const out = jsonOutput(io);
+    assert.equal(code, 0);
+    assert.equal(out.acquired, true);
+    assert.equal(out.holder, 128);
+    assert.equal(out.holderHead, 'post-write-lock');
+    assert.equal(inspectMergeLease({ rootDir, repo: REPO, base: BASE }).holder.holderPid, 8128);
     assert.equal(io.stderrText, '');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -397,6 +424,28 @@ test('merge-lease release with stale lease id does not delete current holder', a
     assert.equal(code, 0);
     assert.equal(out.released, false);
     assert.equal(inspectMergeLease({ rootDir, repo: REPO, base: BASE }).holder.leaseId, held.lease.leaseId);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('merge-lease release reports mutation-lock-busy reason', async () => {
+  const rootDir = freshRoot();
+  try {
+    const held = acquireFixture(rootDir, { holderPr: 303, holderHead: 'busy-release-head' });
+    writeLiveMutationLock(`${held.leasePath}.mutation.lock`, 'mll_busy_release');
+    const { code, io } = await runCli(rootDir, [
+      'release',
+      '--repo', REPO,
+      '--base', BASE,
+      '--pr', '303',
+      '--lease-id', held.lease.leaseId,
+    ]);
+    const out = jsonOutput(io);
+    assert.equal(code, 0);
+    assert.equal(out.released, false);
+    assert.equal(out.reason, 'mutation-lock-busy');
+    assert.equal(out.existingLease.leaseId, held.lease.leaseId);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

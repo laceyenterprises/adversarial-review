@@ -132,7 +132,7 @@ test('miss retries transient gh diff fetch failures before failing the review', 
 
     assert.equal(execCalls, 2);
     assert.deepEqual(diff, expected);
-    assert.deepEqual(recordedCategories, ['diff_fetch']);
+    assert.deepEqual(recordedCategories, ['diff_fetch', 'diff_fetch']);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

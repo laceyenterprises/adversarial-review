@@ -13,6 +13,28 @@ function buildAllowlistedGhEnv(env = process.env) {
     PATH: env.PATH ?? DEFAULT_PATH_FALLBACK,
     HOME: env.HOME ?? '',
   };
+  for (const key of [
+    'USER',
+    'LOGNAME',
+    'TMPDIR',
+    'GH_CONFIG_DIR',
+    'GH_HOST',
+    'GITHUB_HOST',
+    'LANG',
+    'LC_ALL',
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'NO_PROXY',
+    'http_proxy',
+    'https_proxy',
+    'no_proxy',
+    'NODE_EXTRA_CA_CERTS',
+    'SSL_CERT_FILE',
+    'SSL_CERT_DIR',
+    'SSL_CERT_FILE_BUNDLE',
+  ]) {
+    if (env[key] !== undefined) allowlisted[key] = env[key];
+  }
   if (token) allowlisted.GH_TOKEN = token;
   return allowlisted;
 }

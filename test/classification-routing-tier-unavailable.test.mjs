@@ -63,6 +63,12 @@ Post "https://api.github.com/graphql": net/http: TLS handshake timeout`;
   assert.equal(classifyReviewerFailure(stderr, 1), 'cascade');
 });
 
+test('GitHub diff-fetch ECONNREFUSED classifies as cascade after retry exhaustion', () => {
+  const stderr = `[reviewer] Failed to fetch diff for laceyenterprises/agent-os#2271: Command failed: gh pr diff 2271 --repo laceyenterprises/agent-os
+Post "https://api.github.com/graphql": connect ECONNREFUSED api.github.com:443`;
+  assert.equal(classifyReviewerFailure(stderr, 1), 'cascade');
+});
+
 test('OAuth-broken still wins over routing-tier patterns when both match', () => {
   // The classifier comment block explicitly notes: OAuth wins over cascade
   // when both match. Confirm the routing-tier patterns don't accidentally

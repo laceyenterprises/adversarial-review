@@ -752,10 +752,14 @@ scoped to explicit local-routing context such as `127.0.0.1:4000`,
 non-local API connectivity failures remain `unknown` unless another more
 specific classifier matches. Reviewer setup is one such explicit classifier:
 `gh pr diff` / GitHub GraphQL transient failures (`TLS handshake`, temporary
-network failures, and HTTP 5xx shapes) are retried before the review exits; if
-the retry budget is exhausted before a diff is fetched, the failed row is
-tagged as `cascade` so it rides the bounded infrastructure backoff path instead
-of consuming the substantive review attempt budget.
+network failures including refused/reset connections, and HTTP 5xx shapes) are
+retried before the review exits with a diff-specific timeout that is longer than
+the generic GitHub lookup timeout; if the retry budget is exhausted before a
+diff is fetched, the failed row is tagged as `cascade` so it rides the bounded
+infrastructure backoff path instead of consuming the substantive review attempt
+budget. The `gh` environment remains allowlisted but must preserve the normal
+GitHub CLI host/config, proxy, locale, and CA-certificate variables needed for
+deployment hosts that reach GitHub through a proxy or custom trust store.
 
 ## Infrastructure Failed-Row Auto-Recovery
 
@@ -774,6 +778,11 @@ undiscovered PRs, drain-skipped rows, and rows blocked by active follow-up jobs
 are not recovered by this path. `oauth-broken` is included only for spawn
 failures recorded in the watcher row, because those failures can represent
 local OAuth/runtime launch breakage before any reviewer verdict exists.
+Exhausted GitHub diff-fetch transients intentionally share the same routing-tier
+readiness gate as other `cascade` rows because recovery immediately dispatches a
+full reviewer after the diff is fetched; if the local model route is still down,
+the recovered row would only trade a GitHub-side failure for another
+infrastructure failure.
 
 `quota-exhausted` is a hold-until-reset recovery class, not a normal immediate
 retry. The reviewer/runtime classifier must preserve the provider's reset hint

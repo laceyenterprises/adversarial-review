@@ -88,8 +88,8 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     (
       /tls handshake/.test(lower) ||
       /\bnet\/http\b.*\btimeout\b/.test(lower) ||
-      /\betimedout\b|\beconnreset\b|\beai_again\b|\benotfound\b/.test(lower) ||
-      /connection (?:reset|timed out|aborted)/.test(lower) ||
+      /\betimedout\b|\beconnreset\b|\beconnrefused\b|\beai_again\b|\benotfound\b/.test(lower) ||
+      /connection (?:reset|refused|timed out|aborted)/.test(lower) ||
       /temporary failure|temporarily unavailable|network is unreachable/.test(lower) ||
       /\bhttp\s*5\d\d\b/.test(lower)
     );

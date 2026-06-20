@@ -59,7 +59,7 @@ import {
   fetchPullRequestHeadAndState,
   fetchPullRequestReviewContext,
 } from './github-api.mjs';
-import { execGhWithRetry } from './gh-cli.mjs';
+import { GH_LOOKUP_TIMEOUT_MS, execGhWithRetry } from './gh-cli.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import {
@@ -1714,42 +1714,46 @@ async function fetchPRDiff(repo, prNumber, headSha, {
     return cached.bytes;
   }
 
-  const startedAt = Date.now();
-  try {
-    const { stdout } = await execGhWithRetryImpl({
-      execFileImpl: (command, args, options) => execFileImpl(
-        command,
-        args,
-        { ...options, encoding: 'buffer', maxBuffer: 10 * 1024 * 1024 }
-      ),
-      args: ['pr', 'diff', String(prNumber), '--repo', repo],
-      sleep: ghRetrySleepImpl,
-    });
-    recordApiCallImpl({
-      category: 'diff_fetch',
-      repo,
-      prNumber,
-      status: 200,
-      durationMs: Date.now() - startedAt,
-    });
-    if (headSha) {
+  const { stdout } = await execGhWithRetryImpl({
+    execFileImpl: async (command, args, options) => {
+      const attemptStartedAt = Date.now();
       try {
-        putCachedDiffImpl(repo, prNumber, headSha, stdout);
+        const result = await execFileImpl(
+          command,
+          args,
+          { ...options, encoding: 'buffer', maxBuffer: 10 * 1024 * 1024 }
+        );
+        recordApiCallImpl({
+          category: 'diff_fetch',
+          repo,
+          prNumber,
+          status: 200,
+          durationMs: Date.now() - attemptStartedAt,
+        });
+        return result;
       } catch (err) {
-        log.warn?.(`[reviewer] WARN: failed to write diff cache for ${repo}#${prNumber}@${headSha}: ${err?.message || err}`);
+        recordApiCallImpl({
+          category: 'diff_fetch',
+          repo,
+          prNumber,
+          status: apiStatusFromErrorImpl(err),
+          durationMs: Date.now() - attemptStartedAt,
+        });
+        throw err;
       }
+    },
+    args: ['pr', 'diff', String(prNumber), '--repo', repo],
+    timeoutMs: Math.max(GH_LOOKUP_TIMEOUT_MS, 60_000),
+    sleep: ghRetrySleepImpl,
+  });
+  if (headSha) {
+    try {
+      putCachedDiffImpl(repo, prNumber, headSha, stdout);
+    } catch (err) {
+      log.warn?.(`[reviewer] WARN: failed to write diff cache for ${repo}#${prNumber}@${headSha}: ${err?.message || err}`);
     }
-    return stdout;
-  } catch (err) {
-    recordApiCallImpl({
-      category: 'diff_fetch',
-      repo,
-      prNumber,
-      status: apiStatusFromErrorImpl(err),
-      durationMs: Date.now() - startedAt,
-    });
-    throw err;
   }
+  return stdout;
 }
 
 async function fetchPRContext(repo, prNumber) {

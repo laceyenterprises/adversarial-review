@@ -60,6 +60,13 @@ If the holder file has already been written, post-acquire waiter cleanup is
 best-effort: a busy waiter mutation lock must not make the caller report a
 timeout while it already owns the lease.
 
+The hammer terminal closer is a policy consumer of that CLI surface: it proceeds
+only on `0` plus a non-empty `leaseId`, parks and exits zero on either
+`70`/`parked:true` or `75`/`timedOut:true`, and hard-fails other acquire errors.
+This prevents normal lease contention from re-entering the dispatcher as a
+transient closer failure while preserving `75` as the CLI's retryable timeout
+classification for other callers.
+
 Gate-attempt state is durable per `(repo, base)` in
 `data/merge-leases/<repo-slug>__<base>.attempts.json`. Each record is keyed by
 PR number and head SHA and stores the attempt count, first attempt timestamp,

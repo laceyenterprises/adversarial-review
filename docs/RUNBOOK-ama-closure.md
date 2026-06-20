@@ -486,7 +486,12 @@ processes or change verdicts. Releasing a holder also removes that PR/head's
 gate-attempt record, and attempt records older than 30 days are pruned during
 new attempt recording. When a PR exceeds `AMG_MAX_GATE_ATTEMPTS`
 (default `5`), `acquire` exits `70` with `{"parked":true}` so the caller should
-park it for operator review instead of re-queueing.
+park it for operator review instead of re-queueing. The hammer terminal closer
+also treats an acquire wait timeout (`75` with `{"timedOut":true}`) as an
+intentional AMG-04 park and exits successfully after logging the waited seconds,
+so a contended base does not churn through repeated long retry windows. Other
+non-zero acquire exits remain hard failures that should be inspected from the
+CLI JSON payload.
 
 ### Merged PR but DAG step did not advance
 

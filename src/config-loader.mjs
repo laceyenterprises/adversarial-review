@@ -237,6 +237,17 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          poll_interval_seconds: { __type: TYPE_INT, __default: 300, __min: 1 },
+          drain_timeout: { __type: TYPE_STRING, __default: '5m' },
+          stale_drain_reap_seconds: { __type: TYPE_INT, __default: 600, __min: 0 },
+          submodule_update_timeout_seconds: { __type: TYPE_INT, __default: 120, __min: 1 },
+          recovery_max_attempts: {
+            __type: TYPE_INT,
+            __default: 5,
+            __min: 1,
+            __max: 50,
+          },
+          bounce_throttle_interval_seconds: { __type: TYPE_INT, __default: 300, __min: 0 },
           adversarial_review_drain_timeout_seconds: {
             __type: TYPE_INT,
             __default: 180,

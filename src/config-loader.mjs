@@ -241,12 +241,12 @@ function schemaV1() {
         __keys: {
           adversarial_review_drain_timeout_seconds: {
             __type: TYPE_INT,
-            __default: 180,
+            __default: 1200,
             __min: 1,
           },
           adversarial_watcher_drain_bounce_slack_seconds: {
             __type: TYPE_INT,
-            __default: 120,
+            __default: 600,
             __min: 0,
           },
         },

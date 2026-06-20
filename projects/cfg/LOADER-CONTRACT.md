@@ -87,8 +87,10 @@ for the main-catchup daemon schema, but the Node loader mirrors the
 main-catchup drain knobs that may appear in the shared checked-in
 `config.yaml`:
 
-- `main_catchup.adversarial_review_drain_timeout_seconds`
-- `main_catchup.adversarial_watcher_drain_bounce_slack_seconds`
+- `main_catchup.adversarial_review_drain_timeout_seconds` (default `1200`,
+  matching Python's 20-minute adversarial-review drain timeout)
+- `main_catchup.adversarial_watcher_drain_bounce_slack_seconds` (default `600`,
+  matching Python's 10-minute watcher bounce slack)
 
 Checked-in `config.yaml` accepts only those mirrored `main_catchup` keys. Any
 other checked-in `main_catchup.*` key is an unknown nested key under a known

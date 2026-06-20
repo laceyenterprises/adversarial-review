@@ -778,6 +778,21 @@ test('top-level config.yaml accepts the mirrored main_catchup drain keys', () =>
   }
 });
 
+test('main_catchup mirrored drain defaults match the Python daemon constants', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('main_catchup.adversarial_review_drain_timeout_seconds'), 1200);
+    assert.equal(cfg.get('main_catchup.adversarial_watcher_drain_bounce_slack_seconds'), 600);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('config.local.yaml tolerates unknown nested main_catchup keys and reads mirrored ones', () => {
   const tmp = freshTmp();
   try {

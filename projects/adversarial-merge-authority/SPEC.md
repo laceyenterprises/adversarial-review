@@ -139,6 +139,33 @@ comment. Final-hammer review-cycle exhaustion may waive non-blocking reasons
 only with current-head operator override, matching the existing verdict and
 blocking-finding gate semantics.
 
+## 4.4 Closure convergence predicate
+
+The watcher must not treat `hq dispatch status=succeeded` or the AMA §4.4
+audit JSON's `status:"succeeded"` as standalone proof that closure is complete.
+Those surfaces are worker/audit observations. The authoritative completion
+predicate is a readable session-ledger `build_completions` row for the same
+`repo`, `pr_number`, current `head_sha`, and `signal_kind='merged'`.
+
+If an existing closer dispatch reports a terminal-success state, but the
+current-head merged build-completion row is cleanly absent, the watcher records
+`unverified-terminal-success`, releases the prior terminal hold, and may
+re-dispatch the closer within the normal retry bound. If the merged-signal read
+is unknown rather than cleanly absent — for example the ledger target cannot be
+resolved, the `build_completions` surface is unavailable, or the query fails —
+the watcher retains the existing closer hold for that tick. Unknown ledger state
+is a no-op, not authorization to launch another closer.
+
+The producer for this predicate is Agent OS merge observation after the PR is
+seen merged: this repository records owed
+`hq dag autowalk-on-merge --repo <repo> --pr <n>` work during watcher lifecycle
+sync, and Agent OS owns the session-ledger `build_completions` write. Hosts
+without a readable `build_completions` table keep the prior hold semantics
+because the watcher cannot prove a clean negative. A readable table with the
+merge producer disabled is not distinguishable from a real clean negative inside
+this repository; operators must deploy the producer before trusting
+clean-negative release behavior.
+
 ## 4.7 CFG-01 schema
 
 New section under `roles.adversarial.merge_authority`:

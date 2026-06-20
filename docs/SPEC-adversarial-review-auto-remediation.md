@@ -27,6 +27,31 @@ not add a duplicate `agent-os` workspace entry; the primary repo already grants
 the required scope. Cutover validation must inspect the launch contract's
 `workspaceRepos` (or equivalent `hq dispatch status` field) for both cases.
 
+AMA closer convergence is authoritative only when the session ledger has a
+current-head `build_completions` row for the PR with `signal_kind='merged'`.
+`hq dispatch status=succeeded` and the AMA §4.4 audit JSON's
+`status:"succeeded"` are not enough by themselves: without the merged signal the
+watcher records the existing terminal success as `unverified-terminal-success`,
+releases the old terminal hold, and may re-dispatch the closer within the normal
+bounded retry policy. That release is allowed only after a clean negative ledger
+read (`missing-build-completion-signal`). If the ledger target is missing, the
+`build_completions` surface is unavailable, `psql`/SQLite fails, or any other
+read error occurs, the watcher retains the existing closer hold for that tick
+and does not spawn a replacement closer. The merged-signal lookup is
+current-head scoped to match the closer's `--match-head-commit <reviewedSha>`
+guard.
+
+The merged-signal producer is outside this repository's write path: watcher
+lifecycle sync records owed
+`hq dag autowalk-on-merge --repo <repo> --pr <n>` work when it observes a PR
+merge, and Agent OS owns the session-ledger `build_completions` write behind
+that handoff. Deployments where the `build_completions` table itself is not
+readable retain the old terminal hold semantics rather than treating an unknown
+ledger state as proof the PR was not merged. A table that is readable but whose
+merge producer is disabled is a deployment-contract violation: the watcher can
+only observe the clean absence of a row, so operators must roll out the producer
+before relying on clean-negative release semantics.
+
 AMA's §4.2 branch-protection gate is enabled by default:
 `roles.adversarial.merge_authority.branch_protection.required` defaults to
 `true`, and the target branch must require the resolved adversarial-gate

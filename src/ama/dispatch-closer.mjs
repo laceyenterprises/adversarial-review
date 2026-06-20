@@ -33,6 +33,7 @@ import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs';
+import { readBuildCompletionSignalForPr } from '../session-ledger-read-adapter.mjs';
 import {
   amaAuditFilePath,
   amaAuditTraceRef,
@@ -181,7 +182,14 @@ const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
 const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
-const AMA_CLOSER_RETRYABLE_STATUSES = new Set(['failed', 'cancelled', 'canceled', 'superseded', 'not-found']);
+const AMA_CLOSER_RETRYABLE_STATUSES = new Set([
+  'failed',
+  'cancelled',
+  'canceled',
+  'superseded',
+  'not-found',
+  'unverified-terminal-success',
+]);
 const MERGE_CLASS_ORCHESTRATION_MODES = new Set(ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE);
 const AMA_CLOSER_AUDIT_TERMINAL_OUTCOMES = new Set([
   'succeeded',
@@ -555,6 +563,47 @@ function readAmaAuditTerminalOutcome(hqRoot, { repo, prNumber, headSha } = {}) {
   return AMA_CLOSER_AUDIT_TERMINAL_OUTCOMES.has(status) ? status : null;
 }
 
+function readMergedBuildCompletionSignal({
+  repo,
+  prNumber,
+  headSha,
+  hqRoot,
+  rootDir,
+  env = process.env,
+  readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
+} = {}) {
+  const result = readBuildCompletionSignalForPrImpl({
+    repo,
+    prNumber,
+    headSha,
+    signalKind: 'merged',
+    hqRoot,
+    rootDir,
+    env,
+  });
+  return result || { ok: false, reason: 'ledger-read-failed' };
+}
+
+function isCleanMissingMergedSignal(result) {
+  return result?.ok === false && result.reason === 'missing-build-completion-signal';
+}
+
+function isUnknownMergedSignal(result) {
+  return result?.ok === false && !isCleanMissingMergedSignal(result);
+}
+
+function retainExistingAmaCloserDispatch(existingRecord, workerClass, status) {
+  return {
+    dispatched: false,
+    skipMergeAgent: true,
+    reason: `existing-dispatch-${status || 'unknown'}`,
+    workerClass: existingRecord.workerClass || workerClass,
+    dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+    launchRequestId: existingRecord.launchRequestId || null,
+    promptPath: existingRecord.promptPath || null,
+  };
+}
+
 /**
  * Substitute `<<PLACEHOLDER>>` markers in the template body.
  *
@@ -681,6 +730,7 @@ export async function maybeDispatchAmaCloser({
   processKillImpl = process.kill,
   readTemplateImpl = null,
   writeFileImpl = null,
+  readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
   logger = console,
 }) {
   // The master gate. With no operator config, this is `false` per
@@ -798,6 +848,28 @@ export async function maybeDispatchAmaCloser({
   const existingRecord = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
   const existingLeaseBeforeDispatch = readAmaCloserLease(rootDir, leaseIdentity);
   const auditTerminalOutcome = readAmaAuditTerminalOutcome(hqRoot, dispatchIdentity);
+  const mergedSignal = readMergedBuildCompletionSignal({
+    repo,
+    prNumber,
+    headSha: reviewedSha,
+    hqRoot,
+    rootDir,
+    env: process.env,
+    readBuildCompletionSignalForPrImpl,
+  });
+  if (mergedSignal?.ok) {
+    return {
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'merged-signal-present',
+      workerClass: existingRecord?.workerClass || workerClass,
+      dispatchId: existingRecord?.dispatchId || existingRecord?.launchRequestId || null,
+      launchRequestId: existingRecord?.launchRequestId || null,
+      promptPath: existingRecord?.promptPath || null,
+      mergedSignal: mergedSignal.row,
+    };
+  }
+  const mergedSignalUnknown = isUnknownMergedSignal(mergedSignal);
   const existingRecordIsReclaimableInterruption = isInterruptedInFlightAmaCloserDispatch(
     existingRecord,
     existingLeaseBeforeDispatch,
@@ -808,6 +880,7 @@ export async function maybeDispatchAmaCloser({
     && !existingRecordIsReclaimableInterruption;
   let existingDispatchStatus = null;
   if (existingRecord?.launchRequestId) {
+    let releaseUnprovenTerminalHold = false;
     const statusProbe = await probeAmaCloserDispatchStatus({
       hqPath,
       launchRequestId: existingRecord.launchRequestId,
@@ -818,19 +891,43 @@ export async function maybeDispatchAmaCloser({
     const status = statusProbe?.status || null;
     existingDispatchStatus = status;
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
-      if (auditTerminalOutcome === 'succeeded') {
-        return {
-          dispatched: false,
-          skipMergeAgent: true,
-          reason: 'ama-already-succeeded',
-          workerClass: existingRecord.workerClass || workerClass,
-          dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
-          launchRequestId: existingRecord.launchRequestId || null,
-          promptPath: existingRecord.promptPath || null,
-        };
+      if (
+        mergedSignalUnknown
+        && (auditTerminalOutcome === 'succeeded' || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status))
+      ) {
+        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+          ...(current || existingRecord),
+          lastObservedStatus: status,
+          lastObservedAt: dispatchContext.dispatchedAt,
+          lastError: `merged-signal-read-${mergedSignal.reason || 'unknown'}`,
+        }));
+        return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
       }
-      if (auditTerminalOutcome && auditTerminalOutcome !== 'succeeded') {
-        existingDispatchStatus = null;
+      if (auditTerminalOutcome === 'succeeded') {
+        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+          ...(current || existingRecord),
+          lastObservedStatus: status,
+          lastObservedAt: dispatchContext.dispatchedAt,
+          lastError: 'audit-succeeded-without-merged-signal',
+        }));
+        existingDispatchStatus = 'unverified-terminal-success';
+        releaseUnprovenTerminalHold = true;
+      } else if (
+        auditTerminalOutcome
+        && auditTerminalOutcome !== 'succeeded'
+        && !AMA_CLOSER_ACTIVE_STATUSES.has(status)
+      ) {
+        existingDispatchStatus = 'failed';
+        releaseUnprovenTerminalHold = true;
+      } else if (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
+        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+          ...(current || existingRecord),
+          lastObservedStatus: status,
+          lastObservedAt: dispatchContext.dispatchedAt,
+          lastError: 'terminal-success-status-without-audit-or-merged-signal',
+        }));
+        existingDispatchStatus = 'unverified-terminal-success';
+        releaseUnprovenTerminalHold = true;
       } else {
         updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
           ...(current || existingRecord),
@@ -866,7 +963,7 @@ export async function maybeDispatchAmaCloser({
         promptPath: existingRecord.promptPath || null,
       };
     }
-    if (!AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
+    if (!releaseUnprovenTerminalHold && !AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
       return { dispatched: false, reason: `dispatch-status-${status || 'unknown'}` };
     }
   } else if (existingRecordHasLivePendingInterruption) {

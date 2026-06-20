@@ -7,6 +7,7 @@ import path from 'node:path';
 
 import { createEmptySqliteDb, createSessionLedgerDb } from './helpers/session-ledger-fixtures.mjs';
 import {
+  readBuildCompletionSignalForPr,
   readLatestWorkerRunStatusFromLedger,
   readReviewerSessionUsageFromLedger,
   readWorkerRunUsageFromLedger,
@@ -357,6 +358,119 @@ test('readLatestWorkerRunStatusFromLedger returns a timeout failure when psql ex
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'ledger-read-failed');
   assert.match(result.detail, /timed out after 30000ms/);
+});
+
+test('readBuildCompletionSignalForPr reads the newest merged signal for a PR', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  const db = new Database(ledgerDb);
+  db.exec(`
+    CREATE TABLE build_completions (
+      completion_id TEXT PRIMARY KEY,
+      ticket_id TEXT,
+      launch_request_id TEXT,
+      dagrun_id TEXT,
+      dagrun_step_ticket_id TEXT,
+      repo TEXT,
+      pr_number INTEGER,
+      pr_url TEXT,
+      head_sha TEXT,
+      branch TEXT,
+      worker_class TEXT,
+      signal_kind TEXT NOT NULL,
+      spec_ref TEXT,
+      source TEXT,
+      recorded_at TEXT NOT NULL
+    )
+  `);
+  db.prepare(
+    `INSERT INTO build_completions (
+       completion_id, ticket_id, launch_request_id, dagrun_id, dagrun_step_ticket_id,
+       repo, pr_number, pr_url, head_sha, branch, worker_class, signal_kind,
+       spec_ref, source, recorded_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    'bcmp_old', 'SSG-06', 'lrq_old', 'dagrun_1', 'SSG-06',
+    'acme/myrepo', 1234, 'https://github.com/acme/myrepo/pull/1234',
+    'a'.repeat(40), null, 'merge-agent', 'merged', 'spec@old', 'live',
+    '2026-06-20T10:00:00.000Z',
+  );
+  db.prepare(
+    `INSERT INTO build_completions (
+       completion_id, ticket_id, launch_request_id, dagrun_id, dagrun_step_ticket_id,
+       repo, pr_number, pr_url, head_sha, branch, worker_class, signal_kind,
+       spec_ref, source, recorded_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    'bcmp_new', 'SSG-06', 'lrq_new', 'dagrun_2', 'SSG-06',
+    'acme/myrepo', 1234, 'https://github.com/acme/myrepo/pull/1234',
+    'b'.repeat(40), null, 'hammer', 'merged', 'spec@new', 'live',
+    '2026-06-20T11:00:00.000Z',
+  );
+  db.close();
+
+  const result = readBuildCompletionSignalForPr({
+    repo: 'acme/myrepo',
+    prNumber: 1234,
+    signalKind: 'merged',
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.row.completion_id, 'bcmp_new');
+  assert.equal(result.row.signal_kind, 'merged');
+
+  const headScoped = readBuildCompletionSignalForPr({
+    repo: 'acme/myrepo',
+    prNumber: 1234,
+    headSha: 'a'.repeat(40),
+    signalKind: 'merged',
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+  });
+
+  assert.equal(headScoped.ok, true);
+  assert.equal(headScoped.row.completion_id, 'bcmp_old');
+
+  const missingHead = readBuildCompletionSignalForPr({
+    repo: 'acme/myrepo',
+    prNumber: 1234,
+    headSha: 'c'.repeat(40),
+    signalKind: 'merged',
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+  });
+
+  assert.equal(missingHead.ok, false);
+  assert.equal(missingHead.reason, 'missing-build-completion-signal');
+});
+
+test('readBuildCompletionSignalForPr uses the canonical postgres reader path', () => {
+  const result = readBuildCompletionSignalForPr({
+    repo: 'acme/myrepo',
+    prNumber: 1234,
+    signalKind: 'merged',
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
+    spawnSyncImpl: (command, args, options) => {
+      assert.equal(command, 'psql');
+      assert.ok(args.includes('postgres://ledger.example/agent_os_ledger'));
+      const sql = String(options.input);
+      assert.match(sql, /\\set repo 'acme\/myrepo'/);
+      assert.match(sql, /\\set pr_number '1234'/);
+      assert.match(sql, /\\set head_sha ''/);
+      assert.match(sql, /\\set signal_kind 'merged'/);
+      assert.match(sql, /FROM build_completions/);
+      assert.match(sql, /WHERE repo = :'repo'/);
+      assert.match(sql, /AND pr_number = :'pr_number'::integer/);
+      assert.match(sql, /AND \(:'head_sha' = '' OR head_sha = :'head_sha'\)/);
+      return {
+        status: 0,
+        stdout: '{"completion_id":"bcmp_pg","repo":"acme/myrepo","pr_number":1234,"signal_kind":"merged","recorded_at":"2026-06-20T11:00:00.000Z"}\n',
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.row.completion_id, 'bcmp_pg');
 });
 
 test('readReviewerSessionUsageFromLedger keeps runtime_sessions lookups bounded to the newest row', () => {

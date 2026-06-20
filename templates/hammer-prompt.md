@@ -35,11 +35,18 @@ not replace the machine gate.
    production change a legitimately failing check proves is needed) is the one
    sanctioned exception to "scope only to the findings" — it is always in scope;
    net-new feature scope is not. Also leave the working tree clean: commit or
-   discard any stray/dirty changes so the head is not left in a dirty state. If a
-   failing check genuinely cannot be fixed inside this remediation (it needs a
-   separate infra change, an external dependency, or a credential you do not
-   have), emit ONE hard-blocker report naming the exact failing check(s) and stop.
-   Do NOT merge past a red test or a red required check, related or not.
+   discard any stray/dirty changes so the head is not left in a dirty state. **If a
+   check fails on a missing dependency, extension, or tool, INSTALL it and re-run
+   the check — do not treat a missing-but-installable dependency as a hard-blocker.**
+   You run under a sudo-capable account, so: prefer the repository's pinned install
+   script when one exists (e.g. `platform/session-ledger/scripts/install-pgvector.sh`
+   for the `vector` Postgres extension), else the standard package manager, using
+   `sudo` for system-owned paths (e.g. the postgresql@16 extension/lib dirs). Only
+   emit ONE hard-blocker report and stop if a failing check genuinely cannot be
+   resolved — it needs a credential/secret you do not have, an unreachable external
+   service, a destructive/irreversible host change, or net-new feature scope to fix.
+   Naming the exact failing check(s) in that report. Do NOT merge past a red test
+   or a red required check, related or not.
 2c. **Keep the canonical documentation surfaces current — doc-currency for the
    change you are landing is IN SCOPE, exactly like the test/CI fixes in 2b, and
    is NOT net-new feature scope.** If the post-remediation diff touches either

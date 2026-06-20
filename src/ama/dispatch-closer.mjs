@@ -864,6 +864,45 @@ export async function maybeDispatchAmaCloser({
     if (!AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
       return { dispatched: false, reason: `dispatch-status-${status || 'unknown'}` };
     }
+    if (
+      status === 'succeeded'
+      && !auditTerminalOutcome
+      && existingRecord.lastObservedStatus !== 'succeeded'
+    ) {
+      updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+        ...(current || existingRecord),
+        lastObservedStatus: status,
+        lastObservedAt: dispatchContext.dispatchedAt,
+        lastError: statusProbe?.error || null,
+      }));
+      return {
+        dispatched: false,
+        skipMergeAgent: true,
+        reason: 'existing-dispatch-succeeded',
+        workerClass: existingRecord.workerClass || workerClass,
+        dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+        launchRequestId: existingRecord.launchRequestId || null,
+        promptPath: existingRecord.promptPath || null,
+      };
+    }
+    if (
+      Number(existingRecord.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND
+      && !existingRecordIsReclaimableInterruption
+    ) {
+      return { dispatched: false, reason: 'dispatch-retry-exhausted' };
+    }
+    if (
+      auditTerminalOutcome
+      && auditTerminalOutcome !== 'succeeded'
+      && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL
+    ) {
+      return {
+        dispatched: false,
+        skipMergeAgent: true,
+        reason: `ama-terminal-${auditTerminalOutcome}`,
+        existingLease: existingLeaseBeforeDispatch,
+      };
+    }
   } else if (existingRecordHasLivePendingInterruption) {
     return {
       dispatched: false,
@@ -988,15 +1027,9 @@ export async function maybeDispatchAmaCloser({
   });
   if (!leaseResult.acquired) {
     const existingLease = leaseResult.existingLease || readAmaCloserLease(rootDir, leaseIdentity);
-    if (auditTerminalOutcome && auditTerminalOutcome !== 'succeeded') {
-      deleteAmaCloserLease(rootDir, leaseIdentity);
-      leaseResult = acquireAmaCloserLease({
-        rootDir,
-        ...leaseIdentity,
-        watcherPid: typeof process !== 'undefined' ? process.pid : null,
-        now: dispatchContext.dispatchedAt,
-      });
-    } else if (
+    if (
+      !(auditTerminalOutcome && auditTerminalOutcome !== 'succeeded')
+      && (
       AMA_CLOSER_RETRYABLE_STATUSES.has(existingDispatchStatus || '')
       || (
         !existingRecord?.launchRequestId
@@ -1004,6 +1037,7 @@ export async function maybeDispatchAmaCloser({
           now: dispatchContext.dispatchedAt,
           processKillImpl,
         })
+      )
       )
     ) {
       deleteAmaCloserLease(rootDir, leaseIdentity);

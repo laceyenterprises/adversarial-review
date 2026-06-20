@@ -9,6 +9,9 @@
  * { overwrite: false })` links the final path and returns EEXIST to every
  * losing contender.
  *
+ * Base-revalidation decision output is governed by
+ * `projects/adversarial-merge-authority/SPEC.md#amg-03-merge-lease-base-revalidation`.
+ *
  * @module ama/merge-lease
  */
 
@@ -483,6 +486,10 @@ export async function assessMergeLeaseNeedsRevalidation({
       mainAdvancedBy,
       detail: gitErrorDetail(err),
     });
+  }
+
+  if (prChangedFiles.length === 0) {
+    return failClosed('pr-diff-empty', { currentBase: currentSha, mainAdvancedBy });
   }
 
   const prFileSet = new Set(prChangedFiles);

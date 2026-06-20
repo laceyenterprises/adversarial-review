@@ -68,6 +68,19 @@ test('no overlap skips revalidation when base moved unrelated files', async () =
   assert.deepEqual(decision.overlappingFiles, []);
 });
 
+test('empty PR diff fails closed when changed-files ref resolves to the base', async () => {
+  const decision = await decide({
+    [`merge-base ${CURRENT_BASE} HEAD`]: `${CURRENT_BASE}\n`,
+    [`diff --name-only ${CURRENT_BASE}..HEAD`]: '',
+  });
+
+  assert.equal(decision.needsRevalidation, true);
+  assert.equal(decision.reason, 'pr-diff-empty');
+  assert.equal(decision.currentBase, CURRENT_BASE);
+  assert.equal(decision.mainAdvancedBy, 3);
+  assert.deepEqual(decision.overlappingFiles, []);
+});
+
 test('base not advanced since validation-base skips revalidation with zero drift', async () => {
   const execFileImpl = makeGitStub({
     [`cat-file -e ${VALIDATION_BASE}^{commit}`]: '',

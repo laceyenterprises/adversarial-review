@@ -81,6 +81,97 @@ Waiter writes are still advisory, but their read-modify-write mutations must run
 under the recoverable mutation lock so concurrent contenders do not silently drop
 or reorder each other's entries through last-writer-wins file replacement.
 
+## AMG-03 merge-lease base revalidation
+
+The merge-lease library exposes
+`assessMergeLeaseNeedsRevalidation({ repoPath, base, validationBase,
+currentBase, changedFilesFrom })`, and `bin/merge-lease.mjs
+needs-revalidation` exposes the same decision as JSON for shell callers. This
+contract is a decision helper for AMA callers that already hold the `(repo,
+base)` merge lease; the helper may fetch and update `refs/remotes/origin/<base>`
+inside `repoPath`, so callers must not run it as an unlocked shared-checkout
+probe.
+
+Inputs:
+
+- `repoPath`: local git checkout to inspect.
+- `base`: target branch name. It must be a non-empty branch ref segment and must
+  not start with `-`, contain `..`, or contain `\`.
+- `validationBase`: full 40-character SHA that the prior adversarial validation
+  used as its base.
+- `currentBase`: full 40-character SHA the caller believes is the current
+  `origin/<base>` tip.
+- `changedFilesFrom`: PR ref used to compute PR-touched files. It defaults to
+  `HEAD`.
+
+Before comparing files, the helper must verify that `validationBase` resolves
+to a commit, then repeatedly read `refs/remotes/origin/<base>` and run
+`git fetch --no-tags origin <base>` until that remote-tracking ref resolves to
+`currentBase` or the bounded fetch attempts are exhausted. If the helper cannot
+prove the local remote-tracking ref equals `currentBase`, it fails closed.
+
+When `validationBase === currentBase`, the base has not advanced and the helper
+returns `needsRevalidation:false` without inspecting changed files. Otherwise it
+computes:
+
+- base drift files from `git diff --name-only <validationBase>..<currentBase>`;
+- PR files from `git merge-base <currentBase> <changedFilesFrom>` followed by
+  `git diff --name-only <merge-base>..<changedFilesFrom>`.
+
+If those file sets overlap, AMA must treat the prior validation as stale and
+request revalidation. If the PR file set is empty after the base advanced, the
+helper must fail closed with `reason:"pr-diff-empty"` because that usually means
+the caller inspected the base branch or another non-PR ref instead of the
+reviewed head. Only a non-empty PR file set with no overlap may return
+`needsRevalidation:false` for `reason:"no-overlapping-files"`.
+
+The JSON output shape is stable:
+
+```json
+{
+  "needsRevalidation": true,
+  "reason": "overlapping-files",
+  "currentBase": "2222222222222222222222222222222222222222",
+  "mainAdvancedBy": 3,
+  "overlappingFiles": ["src/example.mjs"]
+}
+```
+
+`needsRevalidation` is the boolean decision. `reason` is a stable machine
+reason code. `currentBase` is the normalized current-base SHA when available.
+`mainAdvancedBy` is the number of commits in `<validationBase>..<currentBase>`
+when computable, `0` for `base-not-advanced`, and `null` before the helper can
+compute drift. `overlappingFiles` is a sorted unique list and is empty for
+non-overlap and fail-closed cases that cannot prove overlap.
+
+Stable reason codes:
+
+- `base-not-advanced`: `validationBase` equals `currentBase`; revalidation is
+  not needed.
+- `no-overlapping-files`: base advanced, the PR file set was non-empty, and no
+  base-drift file overlaps a PR file; revalidation is not needed.
+- `overlapping-files`: at least one base-drift file overlaps a PR file;
+  revalidation is required.
+- `repo-path-required`: `repoPath` was missing.
+- `malformed-base`: `base` failed branch-name normalization.
+- `malformed-validation-base`: `validationBase` was not a full SHA.
+- `malformed-current-base`: `currentBase` was not a full SHA.
+- `unresolvable-validation-base`: `validationBase` did not resolve to a commit.
+- `unverified-current-base`: bounded fetch/read attempts could not prove
+  `refs/remotes/origin/<base>` equals `currentBase`.
+- `unresolvable-base-drift`: the helper could not count
+  `<validationBase>..<currentBase>`.
+- `changed-files-unavailable`: git failed while computing base-drift or PR
+  changed files.
+- `pr-diff-empty`: base advanced, but the PR ref produced an empty changed-file
+  set; revalidation is required because the caller may not be inspecting the PR
+  head.
+
+The CLI writes only this decision JSON to stdout on a rendered decision and
+exits zero. Shell callers that want to branch on the decision must parse
+`needsRevalidation`; non-zero exit remains reserved for argument usage failures
+or unexpected process errors.
+
 ## 1.1.1 HAM terminal-remediation mode
 
 HAM terminal remediation is a bounded final-review closer path for the

@@ -243,23 +243,26 @@ configured, NOT a hardcoded `codex`):
 
    Expected output: `true`.
 
-7. The session ledger has the current-head merged completion signal:
+7. The session ledger has the merged completion signal:
 
    ```bash
    # Use the host's normal ledger inspection surface. The row must match
-   # repo, pr_number, current head_sha, and signal_kind='merged'.
+   # repo, pr_number, and signal_kind='merged'.
    ```
 
    The watcher treats this row as the authoritative "closer is done" signal.
+   The row's `head_sha` is producer evidence, not necessarily the PR head:
+   Agent OS currently records the merge commit SHA for merged completions.
    `hq dispatch status=succeeded` and the AMA audit JSON's
    `status: "succeeded"` are observations, not sufficient completion proof on
    their own. If those terminal observations exist but the merged row is
-   cleanly absent, the watcher records `unverified-terminal-success`, releases
-   the stale terminal hold, and can re-dispatch the closer within its retry
-   bound. If the ledger read itself is unknown — missing target/table, SQLite
-   lock, psql/TLS failure, or another read error — the watcher retains the
-   existing hold for that tick and waits for a healthy read instead of launching
-   another closer.
+   cleanly absent, the watcher first requires repo-level merged producer
+   evidence. With that evidence, it records `unverified-terminal-success`,
+   releases the stale terminal hold, and can re-dispatch the closer within its
+   retry bound. If the ledger read itself is unknown — missing target/table, no
+   repo-level merged producer evidence, SQLite lock, psql/TLS failure, or
+   another read error — the watcher retains the existing hold for that tick and
+   waits for a healthy read instead of launching another closer.
 
 If any step fails, drop into §6 (diagnostic playbook).
 
@@ -343,13 +346,14 @@ only path classified as `unresolvable-rebase-conflict`.
 
 The watcher-side convergence state `unverified-terminal-success` is not a
 closer audit status. It means the existing dispatch/audit surfaces reached a
-terminal-success observation, but the current-head merged
-`build_completions` signal was cleanly absent. Operators should expect bounded
-re-dispatch attempts up to `AMA_CLOSER_REDISPATCH_BOUND` while the asynchronous
-merge-signal producer catches up; repeated attempts inside that bound are
-producer-lag noise, not evidence of a second merge attempt. A ledger read
-failure does not create this state; it preserves the existing dispatch hold and
-should be diagnosed as ledger availability/producer rollout.
+terminal-success observation, the repo has merged producer evidence, but this
+PR's merged `build_completions` signal was cleanly absent. Operators should
+expect bounded re-dispatch attempts up to `AMA_CLOSER_REDISPATCH_BOUND` while
+the asynchronous merge-signal producer catches up; repeated attempts inside
+that bound are producer-lag noise, not evidence of a second merge attempt. A
+ledger read failure or missing repo-level producer evidence does not create this
+state; it preserves the existing dispatch hold and should be diagnosed as
+ledger availability/producer rollout.
 
 ### Hammer closing discipline (2026-06-19)
 

@@ -145,26 +145,33 @@ The watcher must not treat `hq dispatch status=succeeded` or the AMA §4.4
 audit JSON's `status:"succeeded"` as standalone proof that closure is complete.
 Those surfaces are worker/audit observations. The authoritative completion
 predicate is a readable session-ledger `build_completions` row for the same
-`repo`, `pr_number`, current `head_sha`, and `signal_kind='merged'`.
+`repo`, `pr_number`, and `signal_kind='merged'`.
 
 If an existing closer dispatch reports a terminal-success state, but the
-current-head merged build-completion row is cleanly absent, the watcher records
+merged build-completion row is cleanly absent, the watcher records
 `unverified-terminal-success`, releases the prior terminal hold, and may
-re-dispatch the closer within the normal retry bound. If the merged-signal read
-is unknown rather than cleanly absent — for example the ledger target cannot be
-resolved, the `build_completions` surface is unavailable, or the query fails —
-the watcher retains the existing closer hold for that tick. Unknown ledger state
-is a no-op, not authorization to launch another closer.
+re-dispatch the closer within the normal retry bound only when repo-level merged
+producer evidence exists. If the merged-signal read is unknown rather than
+cleanly absent — for example the ledger target cannot be resolved, the
+`build_completions` surface is unavailable, the repo has no prior merged
+producer evidence, or the query fails — the watcher retains the existing closer
+hold for that tick. Unknown ledger state is a no-op, not authorization to launch
+another closer.
+
+The lookup is not current-head scoped. Agent OS merge capture currently records
+the merge commit SHA in `build_completions.head_sha`, while AMA's
+`--match-head-commit <reviewedSha>` guard uses the PR head SHA. The stored
+producer SHA is exposed as diagnostic evidence, but equality with the reviewed
+head is not required for the merged row to settle closer ownership.
 
 The producer for this predicate is Agent OS merge observation after the PR is
 seen merged: this repository records owed
 `hq dag autowalk-on-merge --repo <repo> --pr <n>` work during watcher lifecycle
 sync, and Agent OS owns the session-ledger `build_completions` write. Hosts
 without a readable `build_completions` table keep the prior hold semantics
-because the watcher cannot prove a clean negative. A readable table with the
-merge producer disabled is not distinguishable from a real clean negative inside
-this repository; operators must deploy the producer before trusting
-clean-negative release behavior.
+because the watcher cannot prove a clean negative. A readable table without
+repo-level merged producer evidence also keeps the prior hold semantics so a
+schema-only rollout cannot masquerade as a trustworthy clean negative.
 
 ## 4.7 CFG-01 schema
 

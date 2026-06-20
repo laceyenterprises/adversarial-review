@@ -229,6 +229,26 @@ function schemaV1() {
           },
         },
       },
+      // main-catchup daemon knobs are Python-owned (main_catchup/daemon.py reads
+      // them); this reader carries the schema only to accept the canonical
+      // config.yaml section under strict-CFG parity (OSR-04b). Keep in lockstep
+      // with the Python `main_catchup` schema in agent_os_config/__init__.py.
+      main_catchup: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          adversarial_review_drain_timeout_seconds: {
+            __type: TYPE_INT,
+            __default: 180,
+            __min: 1,
+          },
+          adversarial_watcher_drain_bounce_slack_seconds: {
+            __type: TYPE_INT,
+            __default: 120,
+            __min: 0,
+          },
+        },
+      },
       roots: {
         __type: TYPE_DICT,
         __strict: true,

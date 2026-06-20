@@ -3060,6 +3060,23 @@ test('AMA getMergeAuthorityConfig returns the camelCased subtree with defaults i
     assert.equal(ma.eligibility.ciGreenClassifier, 'existingAdversarialMergeClassifier');
     assert.equal(ma.branchProtection.requiredGateContextSource, 'resolveGateStatusContext');
     assert.equal(ma.branchProtection.required, true);
+    assert.equal(ma.autoHammerOnEligibilityMiss, false);
+    assert.equal(ma.dispatchTimeoutMs, 300000);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('AMA dispatch_timeout_ms is operator-overridable', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(
+      top,
+      'version: 1\nroles:\n  adversarial:\n    merge_authority:\n      dispatch_timeout_ms: 240000\n',
+    );
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.getMergeAuthorityConfig().dispatchTimeoutMs, 240000);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

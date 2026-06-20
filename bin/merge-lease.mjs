@@ -15,6 +15,7 @@ import { parseArgs } from 'node:util';
 
 import {
   acquireMergeLease,
+  assessMergeLeaseNeedsRevalidation,
   deriveLeaseKey,
   inspectMergeLease,
   reclaimIfStale,
@@ -40,6 +41,13 @@ Usage:
                       --lease-id <id> [--root-dir <path>]
   merge-lease status  --repo <owner/name> --base <branch> [--root-dir <path>]
   merge-lease list    --repo <owner/name> --base <branch> [--root-dir <path>]
+  merge-lease needs-revalidation --repo-path <path> --base <branch>
+                      --validation-base <sha> --current-base <sha>
+                      [--changed-files-from <ref>]
+
+Safety:
+  needs-revalidation fetches origin/<base> in --repo-path. Run it only while
+  holding the matching (repo, base) merge lease; it is not an unlocked probe.
 
 Exit codes:
   0   acquired/released/status emitted
@@ -186,6 +194,17 @@ function retryableReleaseJson({ repo, base, leaseId, reason, existingLease }) {
     leaseId,
     reason,
     existingLease,
+  };
+}
+
+function revalidationJson(decision) {
+  return {
+    needsRevalidation: decision.needsRevalidation,
+    reason: decision.reason,
+    currentBase: decision.currentBase,
+    mainAdvancedBy: decision.mainAdvancedBy,
+    overlappingFiles: decision.overlappingFiles,
+    ...(decision.detail ? { detail: decision.detail } : {}),
   };
 }
 
@@ -436,6 +455,29 @@ function runStatus(argv, deps) {
   return 0;
 }
 
+async function runNeedsRevalidation(argv, deps) {
+  const { values } = parseCommon(argv, {
+    'repo-path': { type: 'string' },
+    'validation-base': { type: 'string' },
+    'current-base': { type: 'string' },
+    'changed-files-from': { type: 'string' },
+  });
+  if (values.help) {
+    deps.stdout.write(USAGE);
+    return 0;
+  }
+
+  const decision = await deps.assessMergeLeaseNeedsRevalidation({
+    repoPath: requireString(values, 'repo-path'),
+    base: requireBaseName(values),
+    validationBase: requireString(values, 'validation-base'),
+    currentBase: requireString(values, 'current-base'),
+    changedFilesFrom: values['changed-files-from'] || 'HEAD',
+  });
+  jsonLine(deps.stdout, revalidationJson(decision));
+  return 0;
+}
+
 export async function main(argv = process.argv.slice(2), overrides = {}) {
   const deps = {
     stdout: process.stdout,
@@ -443,6 +485,7 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
     selfPid: process.pid,
     host: hostname(),
     acquireMergeLease,
+    assessMergeLeaseNeedsRevalidation,
     pidAliveFn: defaultPidAliveFn,
     nowIso,
     nowMs: () => Date.now(),
@@ -465,6 +508,8 @@ export async function main(argv = process.argv.slice(2), overrides = {}) {
       case 'status':
       case 'list':
         return runStatus(argv.slice(1), deps);
+      case 'needs-revalidation':
+        return await runNeedsRevalidation(argv.slice(1), deps);
       default:
         deps.stderr.write(`error: unknown subcommand '${sub}'\n${USAGE}`);
         return EXIT_USAGE;

@@ -12,20 +12,26 @@
  * @module ama/merge-lease
  */
 
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, rmSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 
+const execFileAsync = promisify(execFile);
 const LEASE_DIR_SEGMENTS = ['data', 'merge-leases'];
 const LEASE_FILE_MODE = 0o640;
 const LEASE_SCHEMA_VERSION = 1;
 const DEFAULT_DEADLINE_SECONDS = 900;
+const DEFAULT_GIT_TIMEOUT_MS = 30_000;
+const DEFAULT_FETCH_ATTEMPTS = 2;
 const MUTATION_LOCK_RETRY_ATTEMPTS = 50;
 const MUTATION_LOCK_RETRY_DELAY_MS = 5;
 const MUTATION_LOCK_STALE_MS = 5000;
+const FULL_SHA_RE = /^[0-9a-f]{40}$/iu;
 
 function sanitizeSegment(value) {
   return String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-');
@@ -42,6 +48,75 @@ function leaseId() {
 function parseDeadlineSeconds(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_DEADLINE_SECONDS;
+}
+
+function normalizeGitRef(value) {
+  return String(value || '').trim();
+}
+
+function normalizeBaseBranch(value) {
+  const base = normalizeGitRef(value);
+  if (!base || base.startsWith('-') || base.includes('..') || base.includes('\\')) return '';
+  return base;
+}
+
+function normalizeFullSha(value) {
+  const sha = normalizeGitRef(value);
+  return FULL_SHA_RE.test(sha) ? sha.toLowerCase() : '';
+}
+
+function splitNameOnly(stdout) {
+  return String(stdout || '')
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function uniqueSorted(values) {
+  return [...new Set(values)].sort();
+}
+
+function gitErrorDetail(err) {
+  const stderr = String(err?.stderr || '').trim();
+  const message = String(err?.message || '').trim();
+  const detail = stderr || message;
+  return detail ? detail.split(/\r?\n/u)[0].slice(0, 500) : null;
+}
+
+function failClosed(reason, { currentBase = null, mainAdvancedBy = null, overlappingFiles = [], detail = null } = {}) {
+  const decision = {
+    needsRevalidation: true,
+    reason,
+    currentBase,
+    mainAdvancedBy,
+    overlappingFiles: uniqueSorted(overlappingFiles),
+  };
+  if (detail) decision.detail = detail;
+  return decision;
+}
+
+function noRevalidation(reason, { currentBase, mainAdvancedBy = 0, overlappingFiles = [] } = {}) {
+  return {
+    needsRevalidation: false,
+    reason,
+    currentBase,
+    mainAdvancedBy,
+    overlappingFiles: uniqueSorted(overlappingFiles),
+  };
+}
+
+async function git(execFileImpl, repoPath, args, { timeoutMs = DEFAULT_GIT_TIMEOUT_MS } = {}) {
+  return execFileImpl('git', args, {
+    cwd: repoPath,
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024,
+    timeout: timeoutMs,
+  });
+}
+
+async function gitStdout(execFileImpl, repoPath, args, options = {}) {
+  const { stdout } = await git(execFileImpl, repoPath, args, options);
+  return String(stdout || '').trim();
 }
 
 function defaultDeadlineSeconds() {
@@ -301,6 +376,131 @@ export function mergeLeaseWaitersFilePath(rootDir, identity = {}) {
   validateIdentity({ rootDir, ...identity });
   const { fileSlug } = deriveLeaseKey(identity);
   return join(rootDir, ...LEASE_DIR_SEGMENTS, `${fileSlug}.waiters.json`);
+}
+
+export async function assessMergeLeaseNeedsRevalidation({
+  repoPath,
+  base,
+  validationBase,
+  currentBase,
+  changedFilesFrom = 'HEAD',
+  execFileImpl = execFileAsync,
+  fetchAttempts = DEFAULT_FETCH_ATTEMPTS,
+  timeoutMs = DEFAULT_GIT_TIMEOUT_MS,
+} = {}) {
+  const baseBranch = normalizeBaseBranch(base);
+  const validationSha = normalizeFullSha(validationBase);
+  const currentSha = normalizeFullSha(currentBase);
+  const prRef = normalizeGitRef(changedFilesFrom) || 'HEAD';
+  if (!repoPath) {
+    return failClosed('repo-path-required', { currentBase: currentSha || null });
+  }
+  if (!baseBranch) {
+    return failClosed('malformed-base', { currentBase: currentSha || null });
+  }
+  if (!validationSha) {
+    return failClosed('malformed-validation-base', { currentBase: currentSha || null });
+  }
+  if (!currentSha) {
+    return failClosed('malformed-current-base', { currentBase: null });
+  }
+  if (prRef.startsWith('-') || prRef.includes('\\')) {
+    return failClosed('malformed-changed-files-from', { currentBase: currentSha });
+  }
+
+  try {
+    await git(execFileImpl, repoPath, ['cat-file', '-e', `${validationSha}^{commit}`], { timeoutMs });
+  } catch (err) {
+    return failClosed('unresolvable-validation-base', { currentBase: currentSha, detail: gitErrorDetail(err) });
+  }
+
+  const remoteRef = `refs/remotes/origin/${baseBranch}`;
+  let resolvedRemote = null;
+  let lastFetchError = null;
+  let lastRevParseError = null;
+  for (let attempt = 0; attempt <= Math.max(0, Number(fetchAttempts) || 0); attempt += 1) {
+    try {
+      resolvedRemote = normalizeFullSha(
+        await gitStdout(execFileImpl, repoPath, ['rev-parse', '--verify', `${remoteRef}^{commit}`], { timeoutMs }),
+      );
+      lastRevParseError = null;
+    } catch (err) {
+      resolvedRemote = null;
+      lastRevParseError = err;
+    }
+    if (resolvedRemote === currentSha) break;
+    if (attempt >= Math.max(0, Number(fetchAttempts) || 0)) break;
+    try {
+      await git(execFileImpl, repoPath, ['fetch', '--no-tags', 'origin', baseBranch], { timeoutMs });
+      lastFetchError = null;
+    } catch (err) {
+      lastFetchError = err;
+      // Keep retrying until attempts are exhausted; unresolved freshness fails closed below.
+    }
+  }
+  if (resolvedRemote !== currentSha) {
+    return failClosed('unverified-current-base', {
+      currentBase: currentSha,
+      detail: gitErrorDetail(lastFetchError || lastRevParseError),
+    });
+  }
+
+  if (validationSha === currentSha) {
+    return noRevalidation('base-not-advanced', {
+      currentBase: currentSha,
+      mainAdvancedBy: 0,
+      overlappingFiles: [],
+    });
+  }
+
+  let mainAdvancedBy = null;
+  try {
+    const countText = await gitStdout(
+      execFileImpl,
+      repoPath,
+      ['rev-list', '--count', `${validationSha}..${currentSha}`],
+      { timeoutMs },
+    );
+    mainAdvancedBy = Number.parseInt(countText, 10);
+    if (!Number.isFinite(mainAdvancedBy)) mainAdvancedBy = null;
+  } catch (err) {
+    return failClosed('unresolvable-base-drift', { currentBase: currentSha, detail: gitErrorDetail(err) });
+  }
+
+  let baseChangedFiles = [];
+  let prChangedFiles = [];
+  try {
+    baseChangedFiles = splitNameOnly(
+      await gitStdout(execFileImpl, repoPath, ['diff', '--name-only', `${validationSha}..${currentSha}`], { timeoutMs }),
+    );
+    const mergeBase = await gitStdout(execFileImpl, repoPath, ['merge-base', currentSha, prRef], { timeoutMs });
+    prChangedFiles = splitNameOnly(
+      await gitStdout(execFileImpl, repoPath, ['diff', '--name-only', `${mergeBase}..${prRef}`], { timeoutMs }),
+    );
+  } catch (err) {
+    return failClosed('changed-files-unavailable', {
+      currentBase: currentSha,
+      mainAdvancedBy,
+      detail: gitErrorDetail(err),
+    });
+  }
+
+  const prFileSet = new Set(prChangedFiles);
+  const overlappingFiles = uniqueSorted(baseChangedFiles.filter((file) => prFileSet.has(file)));
+  if (overlappingFiles.length > 0) {
+    return {
+      needsRevalidation: true,
+      reason: 'overlapping-files',
+      currentBase: currentSha,
+      mainAdvancedBy,
+      overlappingFiles,
+    };
+  }
+  return noRevalidation('no-overlapping-files', {
+    currentBase: currentSha,
+    mainAdvancedBy,
+    overlappingFiles: [],
+  });
 }
 
 export function readMergeLeaseWaiters(rootDir, identity = {}) {

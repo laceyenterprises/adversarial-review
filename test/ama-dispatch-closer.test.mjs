@@ -865,6 +865,11 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /merge-lease\.mjs acquire[\s\S]*--owner-pid "\$\$"[\s\S]*--wait "\$HAM_MERGE_LEASE_WAIT_SECONDS"/);
   assert.match(prompt, /The acquire waits; do not poll/);
   assert.match(prompt, /HAM_MERGE_LEASE_ID=\$\(jq -r '\.leaseId \/\/ empty'/);
+  assert.match(prompt, /HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 75[\s\S]*'\.timedOut \/\/ false'/);
+  assert.match(prompt, /merge lease acquisition timed out for PR 1234/);
+  assert.match(prompt, /ham_fetch_base_with_retries/);
+  assert.match(prompt, /ham_is_full_sha "\$HAM_VALIDATION_BASE_SHA"/);
+  assert.match(prompt, /"reason":"validation-base-unavailable"/);
   assert.match(prompt, /merge-lease\.mjs needs-revalidation[\s\S]*--current-base "\$HAM_CURRENT_BASE_SHA"/);
   assert.match(prompt, /gh pr merge[\s\S]*--match-head-commit "\$POST_REMEDIATION_SHA"/);
   assert.match(prompt, /merge-lease\.mjs release[\s\S]*--lease-id "\$HAM_MERGE_LEASE_ID"/);

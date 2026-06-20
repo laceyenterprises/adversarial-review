@@ -137,22 +137,40 @@ AMA_REBASE_AUTHORITY_BIN="/Users/airlock/agent-os/tools/adversarial-review/bin/a
 AMA_MERGE_LEASE_BIN="/Users/airlock/agent-os/tools/adversarial-review/bin/merge-lease.mjs"
 BASE_BRANCH=$(jq -r '.baseRefName' "$AMA_TMP_DIR/ama-pr.json")
 MERGE_LEASE_ID=""
+MERGE_LEASE_BASE_BRANCH=""
 MERGE_LEASE_WAIT_SECONDS="${MERGE_LEASE_WAIT_SECONDS:-600}"
 MERGE_VALIDATION_BASE=""
 
 fetch_current_base_sha() {
-  if ! git -C "/tmp/ama-test-root" fetch origin "$BASE_BRANCH" >/dev/null; then
-    echo "merge-lease base fetch failed for origin/$BASE_BRANCH" >&2
+  base_branch="${1:-$BASE_BRANCH}"
+  err_path="$AMA_TMP_DIR/ama-merge-lease-base-fetch.stderr"
+  attempt=1
+  max_attempts=3
+  while true; do
+    : > "$err_path"
+    if git -C "/tmp/ama-test-root" fetch origin "$base_branch" >/dev/null 2> "$err_path"; then
+      git -C "/tmp/ama-test-root" rev-parse "origin/$base_branch"
+      rm -f "$err_path"
+      return 0
+    fi
+    if [ "$attempt" -lt "$max_attempts" ] && is_merge_lease_revalidation_transient "$err_path"; then
+      echo "merge-lease base fetch transient failure for origin/$base_branch (attempt $attempt/$max_attempts); retrying" >&2
+      cat "$err_path" >&2
+      sleep "$attempt"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    echo "merge-lease base fetch failed for origin/$base_branch" >&2
+    cat "$err_path" >&2
     return 1
-  fi
-  git -C "/tmp/ama-test-root" rev-parse "origin/$BASE_BRANCH"
+  done
 }
 
 release_merge_lease_if_held() {
   if [ -n "$MERGE_LEASE_ID" ]; then
     node "$AMA_MERGE_LEASE_BIN" release \
       --repo acme/myrepo \
-      --base "$BASE_BRANCH" \
+      --base "${MERGE_LEASE_BASE_BRANCH:-$BASE_BRANCH}" \
       --pr 1234 \
       --lease-id "$MERGE_LEASE_ID" \
       --root-dir /tmp/ama-test-root \
@@ -199,13 +217,17 @@ run_revalidation_snapshot_command() {
   done
 }
 
-append_merge_lease_revalidation_deferred_attempt_and_exit() {
-  defer_reason="$1"
+ensure_ama_audit_owner() {
   if [ "$(id -un)" != "unknown" ]; then
     echo "ama-closer owner mismatch: expected unknown, got $(id -un)" >&2
     exit 1
   fi
-  echo "AMG merge gate deferred PR 1234 during lease revalidation: $defer_reason" >&2
+}
+
+append_merge_lease_revalidation_deferred_attempt_and_exit() {
+  defer_reason="$1"
+  ensure_ama_audit_owner
+  echo "AMG merge gate deferred PR 1234 during merge-lease flow: $defer_reason" >&2
   REVALIDATION_ATTEMPT_JSON="$AMA_TMP_DIR/ama-merge-lease-revalidation-deferred-attempt.json"
   jq -n \
     --arg reason "$defer_reason" \
@@ -229,6 +251,7 @@ append_merge_lease_revalidation_deferred_attempt_and_exit() {
 }
 
 append_merge_lease_parked_attempt_and_exit() {
+  ensure_ama_audit_owner
   parked_reason=$(jq -r '.reason // "merge-lease-parked"' "$AMA_TMP_DIR/ama-merge-lease-acquire.json")
   echo "AMG merge gate parked PR 1234: $parked_reason" >&2
   PARKED_ATTEMPT_JSON="$AMA_TMP_DIR/ama-merge-lease-parked-attempt.json"
@@ -254,6 +277,7 @@ append_merge_lease_parked_attempt_and_exit() {
 }
 
 append_merge_lease_timeout_deferred_attempt_and_exit() {
+  ensure_ama_audit_owner
   echo "AMG merge gate deferred PR 1234 while waiting for merge lease" >&2
   TIMEOUT_ATTEMPT_JSON="$AMA_TMP_DIR/ama-merge-lease-timeout-attempt.json"
   jq -n \
@@ -277,8 +301,9 @@ append_merge_lease_timeout_deferred_attempt_and_exit() {
 }
 
 acquire_merge_lease() {
-  if ! MERGE_VALIDATION_BASE=$(fetch_current_base_sha); then
-    exit 1
+  MERGE_LEASE_BASE_BRANCH="$BASE_BRANCH"
+  if ! MERGE_VALIDATION_BASE=$(fetch_current_base_sha "$MERGE_LEASE_BASE_BRANCH"); then
+    append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-base-fetch-failure
   fi
   MERGE_LEASE_OWNER_PGID="$(ps -o pgid= -p $$ | tr -d ' ')"
   MERGE_LEASE_OWNER_PGID_ARGS=()
@@ -287,7 +312,7 @@ acquire_merge_lease() {
   fi
   node "$AMA_MERGE_LEASE_BIN" acquire \
     --repo acme/myrepo \
-    --base "$BASE_BRANCH" \
+    --base "$MERGE_LEASE_BASE_BRANCH" \
     --pr 1234 \
     --head "$VALIDATED_HEAD" \
     --owner-pid "$$" \
@@ -311,13 +336,23 @@ acquire_merge_lease() {
 }
 
 run_merge_lease_base_revalidation() {
-  if ! CURRENT_BASE_SHA=$(fetch_current_base_sha); then
+  if ! run_revalidation_snapshot_command ama-pr-base-guard "$AMA_TMP_DIR/ama-pr-base-guard.json" \
+    gh pr view https://github.com/acme/myrepo/pull/1234 --json headRefOid,baseRefName; then
+    append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-pr-snapshot-failure
+  fi
+  CURRENT_PR_BASE_BRANCH=$(jq -r '.baseRefName' "$AMA_TMP_DIR/ama-pr-base-guard.json")
+  if [ "$CURRENT_PR_BASE_BRANCH" != "$MERGE_LEASE_BASE_BRANCH" ]; then
+    VALIDATED_HEAD=$(jq -r '.headRefOid' "$AMA_TMP_DIR/ama-pr-base-guard.json")
+    BASE_BRANCH="$CURRENT_PR_BASE_BRANCH"
+    append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-base-retargeted
+  fi
+  if ! CURRENT_BASE_SHA=$(fetch_current_base_sha "$MERGE_LEASE_BASE_BRANCH"); then
     append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-base-fetch-failure
   fi
   if ! run_revalidation_snapshot_command ama-merge-lease-revalidation "$AMA_TMP_DIR/ama-merge-lease-revalidation.json" \
     node "$AMA_MERGE_LEASE_BIN" needs-revalidation \
     --repo-path /tmp/ama-test-root \
-    --base "$BASE_BRANCH" \
+    --base "$MERGE_LEASE_BASE_BRANCH" \
     --validation-base "$MERGE_VALIDATION_BASE" \
     --current-base "$CURRENT_BASE_SHA" \
     --changed-files-from "$VALIDATED_HEAD"; then
@@ -330,6 +365,9 @@ run_merge_lease_base_revalidation() {
     fi
     VALIDATED_HEAD=$(jq -r '.headRefOid' "$AMA_TMP_DIR/ama-pr.json")
     BASE_BRANCH=$(jq -r '.baseRefName' "$AMA_TMP_DIR/ama-pr.json")
+    if [ "$BASE_BRANCH" != "$MERGE_LEASE_BASE_BRANCH" ]; then
+      append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-base-retargeted
+    fi
     if ! run_revalidation_snapshot_command ama-reviews "$AMA_TMP_DIR/ama-reviews.json" \
       gh pr view https://github.com/acme/myrepo/pull/1234 --json reviews; then
       append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-review-snapshot-failure
@@ -440,8 +478,8 @@ write_non_empty_patch_ids() {
   return 0
 }
 
-acquire_merge_lease
 trap 'release_merge_lease_if_held || true; rm -rf "$AMA_TMP_DIR"' EXIT
+acquire_merge_lease
 
 if needs_rebase_recovery; then
   reviewed_base_enc=$(printf '%s' "$(jq -r '.baseRefName' "$AMA_TMP_DIR/ama-pr.json")" | jq -sRr @uri)

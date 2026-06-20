@@ -814,6 +814,12 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
   assert.match(prompt, /Rebase-Attempts: \${REBASE_ATTEMPTS:-0}/);
   assert.match(prompt, /ham_terminal_remediation_validated/);
   assert.match(prompt, /AMA_MERGE_LEASE_BIN="\/Users\/airlock\/agent-os\/tools\/adversarial-review\/bin\/merge-lease\.mjs"/);
+  assert.match(prompt, /MERGE_LEASE_BASE_BRANCH=""/);
+  assert.match(prompt, /fetch_current_base_sha\(\) \{[\s\S]*attempt=1[\s\S]*is_merge_lease_revalidation_transient "\$err_path"[\s\S]*merge-lease base fetch transient failure/);
+  assert.match(prompt, /if ! MERGE_VALIDATION_BASE=\$\(fetch_current_base_sha "\$MERGE_LEASE_BASE_BRANCH"\); then[\s\S]*append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-base-fetch-failure/);
+  assert.match(prompt, /ensure_ama_audit_owner\(\)/);
+  assert.match(prompt, /append_merge_lease_parked_attempt_and_exit\(\) \{[\s\S]*ensure_ama_audit_owner/);
+  assert.match(prompt, /append_merge_lease_timeout_deferred_attempt_and_exit\(\) \{[\s\S]*ensure_ama_audit_owner/);
   assert.match(prompt, /MERGE_LEASE_OWNER_PGID_ARGS=\(\)/);
   assert.match(prompt, /MERGE_LEASE_OWNER_PGID_ARGS=\(--owner-pgid "\$MERGE_LEASE_OWNER_PGID"\)/);
   assert.match(prompt, /node "\$AMA_MERGE_LEASE_BIN" acquire[\s\S]*--owner-pid "\$\$"[\s\S]*"\$\{MERGE_LEASE_OWNER_PGID_ARGS\[@\]\}"[\s\S]*MERGE_LEASE_ID=\$\(jq -r '\.leaseId'/);
@@ -830,7 +836,12 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
   assert.doesNotMatch(mergeLeaseTransientFn, /\(\^\\\|\[\^0-9\]\)\(500\|502\|503\|504\)/);
   assert.doesNotMatch(mergeLeaseTransientFn, /server error/);
   assert.match(prompt, /trap 'release_merge_lease_if_held \|\| true; rm -rf "\$AMA_TMP_DIR"' EXIT/);
-  assert.match(prompt, /MERGE_VALIDATION_BASE=\$\(fetch_current_base_sha\)/);
+  assert.match(prompt, /trap 'release_merge_lease_if_held \|\| true; rm -rf "\$AMA_TMP_DIR"' EXIT\nacquire_merge_lease/);
+  assert.doesNotMatch(prompt, /acquire_merge_lease\ntrap 'release_merge_lease_if_held \|\| true; rm -rf "\$AMA_TMP_DIR"' EXIT/);
+  assert.match(prompt, /MERGE_VALIDATION_BASE=\$\(fetch_current_base_sha "\$MERGE_LEASE_BASE_BRANCH"\)/);
+  assert.match(prompt, /run_revalidation_snapshot_command ama-pr-base-guard/);
+  assert.match(prompt, /CURRENT_PR_BASE_BRANCH=\$\(jq -r '\.baseRefName' "\$AMA_TMP_DIR\/ama-pr-base-guard\.json"\)/);
+  assert.match(prompt, /append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-base-retargeted/);
   assert.match(prompt, /run_revalidation_snapshot_command ama-pr/);
   assert.match(prompt, /append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-ama-check-failure/);
   assert.match(prompt, /node "\$AMA_MERGE_LEASE_BIN" needs-revalidation[\s\S]*--validation-base "\$MERGE_VALIDATION_BASE"[\s\S]*--current-base "\$CURRENT_BASE_SHA"/);

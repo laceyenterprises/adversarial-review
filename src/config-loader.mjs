@@ -229,24 +229,52 @@ function schemaV1() {
           },
         },
       },
-      // main_catchup is a PARTIAL mirror. Python owns the full main-catchup
-      // daemon schema; this Node reader exposes only the adversarial-review
-      // drain knobs that may appear in checked-in config.yaml. Other
-      // main_catchup.* keys remain Python-owned and must fail loud in
-      // checked-in config, while operator-local config.local.yaml can
-      // tolerate-drop them through nested-local tolerance.
+      // Python owns the main-catchup daemon schema; this Node reader mirrors
+      // the checked-in main_catchup surface so strict top-level config.yaml
+      // can be loaded by the adversarial-review watcher during CFG parity.
       main_catchup: {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          poll_interval_seconds: {
+            __type: TYPE_INT,
+            __default: 300,
+            __min: 1,
+          },
+          drain_timeout: {
+            __type: TYPE_STRING,
+            __default: '5m',
+          },
+          stale_drain_reap_seconds: {
+            __type: TYPE_INT,
+            __default: 600,
+            __min: 0,
+          },
+          submodule_update_timeout_seconds: {
+            __type: TYPE_INT,
+            __default: 120,
+            __min: 1,
+          },
+          recovery_max_attempts: {
+            __type: TYPE_INT,
+            __default: 5,
+            __min: 1,
+            __max: 50,
+            __enforceMax: true,
+          },
+          bounce_throttle_interval_seconds: {
+            __type: TYPE_INT,
+            __default: 300,
+            __min: 0,
+          },
           adversarial_review_drain_timeout_seconds: {
             __type: TYPE_INT,
-            __default: 1200,
+            __default: 180,
             __min: 1,
           },
           adversarial_watcher_drain_bounce_slack_seconds: {
             __type: TYPE_INT,
-            __default: 600,
+            __default: 120,
             __min: 0,
           },
         },

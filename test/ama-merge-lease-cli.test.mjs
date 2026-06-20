@@ -95,7 +95,7 @@ function acquireFixture(rootDir, overrides = {}) {
   });
 }
 
-function writeLiveMutationLock(lockPath, lockId) {
+function writeLiveMutationLock(lockPath, lockId, acquiredAt = '2999-01-01T00:00:00.000Z') {
   writeFileSync(
     lockPath,
     `${JSON.stringify({
@@ -103,7 +103,7 @@ function writeLiveMutationLock(lockPath, lockId) {
       lockId,
       holderPid: process.pid,
       holderHost: hostname(),
-      acquiredAt: new Date().toISOString(),
+      acquiredAt,
     }, null, 2)}\n`,
   );
 }

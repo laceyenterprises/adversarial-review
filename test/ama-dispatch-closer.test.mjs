@@ -814,17 +814,21 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
   assert.match(prompt, /Rebase-Attempts: \${REBASE_ATTEMPTS:-0}/);
   assert.match(prompt, /ham_terminal_remediation_validated/);
   assert.match(prompt, /AMA_MERGE_LEASE_BIN="\/Users\/airlock\/agent-os\/tools\/adversarial-review\/bin\/merge-lease\.mjs"/);
-  assert.match(prompt, /node "\$AMA_MERGE_LEASE_BIN" acquire[\s\S]*--owner-pid "\$\$"[\s\S]*MERGE_LEASE_ID=\$\(jq -r '\.leaseId'/);
+  assert.match(prompt, /node "\$AMA_MERGE_LEASE_BIN" acquire[\s\S]*--owner-pid "\$\$"[\s\S]*--owner-pgid "\$MERGE_LEASE_OWNER_PGID"[\s\S]*MERGE_LEASE_ID=\$\(jq -r '\.leaseId'/);
   assert.match(prompt, /ACQUIRE_EXIT=\$\?/);
   assert.match(prompt, /\[ "\$ACQUIRE_EXIT" -eq 70 \] && jq -e '\.parked == true'/);
   assert.match(prompt, /hardBlockerReason: "merge-lease-parked"/);
+  assert.match(prompt, /trap 'release_merge_lease_if_held \|\| true; rm -rf "\$AMA_TMP_DIR"' EXIT/);
   assert.match(prompt, /MERGE_VALIDATION_BASE=\$\(fetch_current_base_sha\)/);
+  assert.match(prompt, /run_revalidation_snapshot_command ama-pr/);
+  assert.match(prompt, /append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-ama-check-failure/);
   assert.match(prompt, /node "\$AMA_MERGE_LEASE_BIN" needs-revalidation[\s\S]*--validation-base "\$MERGE_VALIDATION_BASE"[\s\S]*--current-base "\$CURRENT_BASE_SHA"/);
   assert.match(prompt, /if jq -e '\.needsRevalidation == true'/);
+  assert.match(prompt, /REBASE_ASSESSED_HEAD="\$VALIDATED_HEAD"/);
   assert.match(prompt, /--match-head-commit "\$VALIDATED_HEAD"/);
   assert.match(prompt, /node "\$AMA_MERGE_LEASE_BIN" release[\s\S]*--lease-id "\$MERGE_LEASE_ID"/);
-  assert.match(prompt, /UPDATE_BRANCH_EXIT"\s+-eq 2[\s\S]*release_merge_lease_if_held \|\| true[\s\S]*unresolvable-rebase-conflict/);
-  assert.match(prompt, /if \[ "\$OUTCOME" = "succeeded" \]; then[\s\S]*release_merge_lease_if_held \|\| true/);
+  assert.doesNotMatch(prompt, /UPDATE_BRANCH_EXIT"\s+-eq 2[\s\S]*release_merge_lease_if_held \|\| true[\s\S]*unresolvable-rebase-conflict/);
+  assert.doesNotMatch(prompt, /if \[ "\$OUTCOME" = "succeeded" \]; then[\s\S]*release_merge_lease_if_held \|\| true/);
 });
 
 test('composed hammer prompt body matches the checked-in golden snapshot', () => {
@@ -1885,25 +1889,35 @@ test('terminal AMA audit releases a stale lease so the same head can be retried'
   //
   //   import { readFileSync, writeFileSync } from 'node:fs';
   //   import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
+  //   import { amaAuditTraceRef } from '../src/ama/audit.mjs';
   //   const tpl = readFileSync('templates/ama-closer-prompt.md', 'utf8');
+  //   const repo = 'acme/myrepo';
+  //   const prNumber = 1234;
+  //   const reviewedSha = 'abc12345abc12345abc12345abc12345abc12345';
+  //   const hqRoot = '/tmp/ama-test-hqroot';
+  //   const auditPath = `${hqRoot}/dispatch/audit/adversarial-merge-authority/${repo.replace('/', '-')}-pr-${prNumber}-${reviewedSha}.json`;
+  //   const auditRef = amaAuditTraceRef(repo, prNumber, reviewedSha);
   //   const prompt = composeCloserPrompt({
   //     prUrl: 'https://github.com/acme/myrepo/pull/1234',
-  //     repo: 'acme/myrepo',
-  //     prNumber: 1234,
-  //     reviewedSha: 'abc12345abc12345abc12345abc12345abc12345',
+  //     repo,
+  //     prNumber,
+  //     reviewedSha,
   //     riskClass: 'low',
   //     mergeMethod: 'squash',
   //     requiredGateContext: 'agent-os/adversarial-gate',
-  //     auditPath: '/tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json',
+  //     auditPath,
+  //     hqRoot,
+  //     rootDir: '/tmp/ama-test-root',
   //     hqOwnerUser: 'unknown',
   //     reviewedBy: 'claude-reviewer-lacey',
+  //     reviewer: 'claude',
   //     dispatchedAt: '2026-06-11T20:00:00Z',
   //     amaTrailers: [
   //       'Closed-By: codex-closer (adversarial-pipe-mode)',
   //       'Reviewed-By: claude-reviewer-lacey',
   //       'Risk-Class: low',
   //       'Eligibility-Reason: latest_review_settled_success, reviewer_family_recorded, risk_class_low_permitted, head_sha_matches_review, ci_all_green, no_blocking_labels, configured_gate_context_required',
-  //       'Eligibility-Trace: ama-audit:acme/myrepo:pr-1234:head-abc12345abc12345abc12345abc12345abc12345',
+  //       `Eligibility-Trace: ${auditRef}`,
   //     ].join('\\n'),
   //     templateBody: tpl,
   //   });

@@ -566,6 +566,7 @@ function readAmaAuditTerminalOutcome(hqRoot, { repo, prNumber, headSha } = {}) {
 function readMergedBuildCompletionSignal({
   repo,
   prNumber,
+  headSha,
   hqRoot,
   rootDir,
   env = process.env,
@@ -574,12 +575,33 @@ function readMergedBuildCompletionSignal({
   const result = readBuildCompletionSignalForPrImpl({
     repo,
     prNumber,
+    headSha,
     signalKind: 'merged',
     hqRoot,
     rootDir,
     env,
   });
-  return result?.ok ? result : null;
+  return result || { ok: false, reason: 'ledger-read-failed' };
+}
+
+function isCleanMissingMergedSignal(result) {
+  return result?.ok === false && result.reason === 'missing-build-completion-signal';
+}
+
+function isUnknownMergedSignal(result) {
+  return result?.ok === false && !isCleanMissingMergedSignal(result);
+}
+
+function retainExistingAmaCloserDispatch(existingRecord, workerClass, status) {
+  return {
+    dispatched: false,
+    skipMergeAgent: true,
+    reason: `existing-dispatch-${status || 'unknown'}`,
+    workerClass: existingRecord.workerClass || workerClass,
+    dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+    launchRequestId: existingRecord.launchRequestId || null,
+    promptPath: existingRecord.promptPath || null,
+  };
 }
 
 /**
@@ -829,12 +851,13 @@ export async function maybeDispatchAmaCloser({
   const mergedSignal = readMergedBuildCompletionSignal({
     repo,
     prNumber,
+    headSha: reviewedSha,
     hqRoot,
     rootDir,
     env: process.env,
     readBuildCompletionSignalForPrImpl,
   });
-  if (mergedSignal) {
+  if (mergedSignal?.ok) {
     return {
       dispatched: false,
       skipMergeAgent: true,
@@ -846,6 +869,7 @@ export async function maybeDispatchAmaCloser({
       mergedSignal: mergedSignal.row,
     };
   }
+  const mergedSignalUnknown = isUnknownMergedSignal(mergedSignal);
   const existingRecordIsReclaimableInterruption = isInterruptedInFlightAmaCloserDispatch(
     existingRecord,
     existingLeaseBeforeDispatch,
@@ -867,6 +891,18 @@ export async function maybeDispatchAmaCloser({
     const status = statusProbe?.status || null;
     existingDispatchStatus = status;
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
+      if (
+        mergedSignalUnknown
+        && (auditTerminalOutcome === 'succeeded' || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status))
+      ) {
+        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+          ...(current || existingRecord),
+          lastObservedStatus: status,
+          lastObservedAt: dispatchContext.dispatchedAt,
+          lastError: `merged-signal-read-${mergedSignal.reason || 'unknown'}`,
+        }));
+        return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
+      }
       if (auditTerminalOutcome === 'succeeded') {
         updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
           ...(current || existingRecord),

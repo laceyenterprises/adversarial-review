@@ -419,6 +419,28 @@ test('readBuildCompletionSignalForPr reads the newest merged signal for a PR', (
   assert.equal(result.ok, true);
   assert.equal(result.row.completion_id, 'bcmp_new');
   assert.equal(result.row.signal_kind, 'merged');
+
+  const headScoped = readBuildCompletionSignalForPr({
+    repo: 'acme/myrepo',
+    prNumber: 1234,
+    headSha: 'a'.repeat(40),
+    signalKind: 'merged',
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+  });
+
+  assert.equal(headScoped.ok, true);
+  assert.equal(headScoped.row.completion_id, 'bcmp_old');
+
+  const missingHead = readBuildCompletionSignalForPr({
+    repo: 'acme/myrepo',
+    prNumber: 1234,
+    headSha: 'c'.repeat(40),
+    signalKind: 'merged',
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+  });
+
+  assert.equal(missingHead.ok, false);
+  assert.equal(missingHead.reason, 'missing-build-completion-signal');
 });
 
 test('readBuildCompletionSignalForPr uses the canonical postgres reader path', () => {
@@ -433,10 +455,12 @@ test('readBuildCompletionSignalForPr uses the canonical postgres reader path', (
       const sql = String(options.input);
       assert.match(sql, /\\set repo 'acme\/myrepo'/);
       assert.match(sql, /\\set pr_number '1234'/);
+      assert.match(sql, /\\set head_sha ''/);
       assert.match(sql, /\\set signal_kind 'merged'/);
       assert.match(sql, /FROM build_completions/);
       assert.match(sql, /WHERE repo = :'repo'/);
       assert.match(sql, /AND pr_number = :'pr_number'::integer/);
+      assert.match(sql, /AND \(:'head_sha' = '' OR head_sha = :'head_sha'\)/);
       return {
         status: 0,
         stdout: '{"completion_id":"bcmp_pg","repo":"acme/myrepo","pr_number":1234,"signal_kind":"merged","recorded_at":"2026-06-20T11:00:00.000Z"}\n',

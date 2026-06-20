@@ -1366,7 +1366,7 @@ export async function load(url, context, nextLoad) {
     'fixture:reviewer-reattach': "export async function reconcileReviewerSessions() { return { reconciled: 0, skipped: 0 }; }",
     'fixture:reviewer-timeout': "export function resolveReviewerTimeoutMs() { return 300000; }",
     'fixture:routing-tier-readiness': "export function createRoutingTierReadinessProbeCache() { return { get: () => null, set: () => {} }; } export async function probeRoutingTierReadiness() { return { ready: true }; }",
-    'fixture:session-ledger-read-adapter': "export function readLatestWorkerRunStatusFromLedger() { return null; } export function resolveSessionLedgerReadTarget() { return null; }",
+    'fixture:session-ledger-read-adapter': "export function readBuildCompletionSignalForPr() { return { ok: false, reason: 'missing-build-completion-signal' }; } export function readLatestWorkerRunStatusFromLedger() { return null; } export function resolveSessionLedgerReadTarget() { return null; }",
     'fixture:stale-drift': "export function shouldSkipReviewerForStaleDrift() { return null; }",
     'fixture:watcher-fail-loud': "export async function signalMalformedTitleFailure() { throw new Error('unexpected malformed title'); }",
     'fixture:watcher-reviewer-pool': "export function compareReviewerDispatchCandidates() { return 0; } export function createReviewerMemoryAdmissionSampler() { return { sample: async () => ({ admit: true }) }; } export function reserveReviewerMemoryAdmission() { return () => {}; } export function resolveFirstPassReviewerPoolConfig() { return { enabled: false }; } export async function runBoundedReviewerDispatchQueue() { return { dispatched: 0, skipped: 0 }; } export function sortReviewerDispatchCandidates(items) { return items; }",

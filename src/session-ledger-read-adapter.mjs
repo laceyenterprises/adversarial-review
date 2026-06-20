@@ -698,6 +698,7 @@ export function readLatestWorkerRunStatusFromLedger({
 export function readBuildCompletionSignalForPr({
   repo,
   prNumber,
+  headSha = null,
   signalKind = 'merged',
   ledgerTarget = null,
   ledgerDbPath = null,
@@ -707,6 +708,7 @@ export function readBuildCompletionSignalForPr({
   spawnSyncImpl = spawnSync,
 } = {}) {
   const normalizedRepo = normalizeText(repo);
+  const normalizedHeadSha = normalizeText(headSha);
   const normalizedSignalKind = normalizeText(signalKind);
   const numericPrNumber = Number(prNumber);
   if (!normalizedRepo) return { ok: false, reason: 'missing-repo' };
@@ -735,11 +737,17 @@ export function readBuildCompletionSignalForPr({
          FROM build_completions
         WHERE repo = @repo
           AND pr_number = @prNumber
+          AND (@headSha IS NULL OR head_sha = @headSha)
           AND signal_kind = @signalKind
         ORDER BY COALESCE(recorded_at, '') DESC,
                  completion_id DESC
         LIMIT 1`,
-      { repo: normalizedRepo, prNumber: numericPrNumber, signalKind: normalizedSignalKind },
+      {
+        repo: normalizedRepo,
+        prNumber: numericPrNumber,
+        headSha: normalizedHeadSha,
+        signalKind: normalizedSignalKind,
+      },
     );
   } else if (resolution.target.backend === 'postgres') {
     queried = queryPostgresRows(
@@ -765,9 +773,10 @@ export function readBuildCompletionSignalForPr({
            SELECT completion_id, ticket_id, launch_request_id, dagrun_id,
                   dagrun_step_ticket_id, repo, pr_number, pr_url, head_sha,
                   branch, worker_class, signal_kind, spec_ref, source, recorded_at
-             FROM build_completions
+            FROM build_completions
             WHERE repo = :'repo'
               AND pr_number = :'pr_number'::integer
+              AND (:'head_sha' = '' OR head_sha = :'head_sha')
               AND signal_kind = :'signal_kind'
             ORDER BY COALESCE(recorded_at::text, '') DESC,
                      completion_id DESC
@@ -778,6 +787,7 @@ export function readBuildCompletionSignalForPr({
         psqlVars: [
           ['repo', normalizedRepo],
           ['pr_number', String(numericPrNumber)],
+          ['head_sha', normalizedHeadSha || ''],
           ['signal_kind', normalizedSignalKind],
         ],
       },

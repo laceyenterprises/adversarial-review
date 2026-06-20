@@ -243,6 +243,24 @@ configured, NOT a hardcoded `codex`):
 
    Expected output: `true`.
 
+7. The session ledger has the current-head merged completion signal:
+
+   ```bash
+   # Use the host's normal ledger inspection surface. The row must match
+   # repo, pr_number, current head_sha, and signal_kind='merged'.
+   ```
+
+   The watcher treats this row as the authoritative "closer is done" signal.
+   `hq dispatch status=succeeded` and the AMA audit JSON's
+   `status: "succeeded"` are observations, not sufficient completion proof on
+   their own. If those terminal observations exist but the merged row is
+   cleanly absent, the watcher records `unverified-terminal-success`, releases
+   the stale terminal hold, and can re-dispatch the closer within its retry
+   bound. If the ledger read itself is unknown — missing target/table, SQLite
+   lock, psql/TLS failure, or another read error — the watcher retains the
+   existing hold for that tick and waits for a healthy read instead of launching
+   another closer.
+
 If any step fails, drop into §6 (diagnostic playbook).
 
 ---
@@ -322,6 +340,14 @@ starting from zero on each dispatch, so a watcher retry cannot silently reset
 the cap. `gh pr update-branch --rebase` is retried only for clearly transient
 transport/service failures; stderr that looks like a rebase conflict is the
 only path classified as `unresolvable-rebase-conflict`.
+
+The watcher-side convergence state `unverified-terminal-success` is not a
+closer audit status. It means the existing dispatch/audit surfaces reached a
+terminal-success observation, but the current-head merged
+`build_completions` signal was cleanly absent. Operators should expect one
+bounded re-dispatch attempt unless the next tick reads the merged signal. A
+ledger read failure does not create this state; it preserves the existing
+dispatch hold and should be diagnosed as ledger availability/producer rollout.
 
 ### Hammer closing discipline (2026-06-19)
 

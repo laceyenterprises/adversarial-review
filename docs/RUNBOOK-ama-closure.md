@@ -482,7 +482,9 @@ the current holder, FIFO waiters, ages, and per-PR attempt counts. If the holder
 PR has already merged/closed, or the holder process is dead/stale, run
 `node bin/merge-lease.mjs reconcile --repo <owner/name> --base <branch>`; this
 only removes the lease file through the holder identity fence and does not kill
-processes or change verdicts. When a PR exceeds `AMG_MAX_GATE_ATTEMPTS`
+processes or change verdicts. Releasing a holder also removes that PR/head's
+gate-attempt record, and attempt records older than 30 days are pruned during
+new attempt recording. When a PR exceeds `AMG_MAX_GATE_ATTEMPTS`
 (default `5`), `acquire` exits `70` with `{"parked":true}` so the caller should
 park it for operator review instead of re-queueing.
 

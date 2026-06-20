@@ -66,7 +66,10 @@ PR number and head SHA and stores the attempt count, first attempt timestamp,
 and last attempt timestamp. `AMG_MAX_GATE_ATTEMPTS` sets the cap and defaults to
 `5`; invalid, empty, or non-positive values fall back to that default. The
 current acquire attempt is recorded before the lease wait loop starts, and the
-park decision uses the strict `attempts > maxAttempts` rule.
+park decision uses the strict `attempts > maxAttempts` rule. Attempt records
+must be pruned when the matching PR/head lease is successfully released, and
+records whose last attempt is older than 30 days must be dropped during attempt
+recording so the hottest base-branch attempt file remains bounded.
 
 `reconcile` is an operator recovery command for a stuck current holder. It may
 release the holder when the stored same-host owner PID is dead, when a same-host
@@ -75,7 +78,9 @@ holder is past deadline, or when GitHub reports the holder PR as `MERGED` or
 `CLOSED`. It must release through the same holder identity fence used by normal
 `release`, so an inspect-to-reconcile race cannot delete a newer holder. It must
 not release a holder whose PR is still open and whose owner is still plausibly
-live.
+live. The GitHub PR-state probe used by `reconcile` must run with a bounded
+subprocess timeout and output buffer, matching the module's bounded subprocess
+discipline.
 
 Reclaim is allowed only when the holder can no longer be trusted to serialize
 the merge lane:

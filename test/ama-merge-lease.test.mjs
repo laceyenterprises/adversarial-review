@@ -10,7 +10,9 @@ import {
   inspectMergeLease,
   mergeLeaseFilePath,
   mergeLeaseWaitersFilePath,
+  readMergeLeaseAttempts,
   readMergeLeaseWaiters,
+  recordMergeLeaseGateAttempt,
   reconcileMergeLeases,
   reclaimIfStale,
   releaseMergeLease,
@@ -225,6 +227,89 @@ test('release with matching lease identity frees it and subsequent acquire succe
     });
     assert.equal(second.acquired, true);
     assert.equal(second.lease.holderPr, 202);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('release with matching lease identity prunes matching gate attempts', () => {
+  const rootDir = freshRoot();
+  try {
+    const first = acquire(rootDir, {
+      holderHead: 'attempt-head',
+    });
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      ...IDENTITY,
+      pr: first.lease.holderPr,
+      head: first.lease.holderHead,
+      now: '2026-06-20T18:00:10Z',
+      maxAttempts: 5,
+    });
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      ...IDENTITY,
+      pr: 999,
+      head: 'other-head',
+      now: '2026-06-20T18:00:11Z',
+      maxAttempts: 5,
+    });
+
+    const released = releaseMergeLease({
+      rootDir,
+      ...IDENTITY,
+      leaseId: first.lease.leaseId,
+      holderPr: first.lease.holderPr,
+      holderHead: first.lease.holderHead,
+      acquiredAt: first.lease.acquiredAt,
+    });
+
+    assert.equal(released.released, true);
+    assert.equal(released.attemptPrune.removed, true);
+    assert.deepEqual(
+      readMergeLeaseAttempts(rootDir, IDENTITY).map((attempt) => `${attempt.pr}:${attempt.head}`),
+      ['999:other-head'],
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('recordMergeLeaseGateAttempt prunes expired attempt records before counting', () => {
+  const rootDir = freshRoot();
+  try {
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      ...IDENTITY,
+      pr: 501,
+      head: 'old-head',
+      now: '2026-05-01T18:00:00Z',
+      maxAttempts: 5,
+    });
+    const current = recordMergeLeaseGateAttempt({
+      rootDir,
+      ...IDENTITY,
+      pr: 501,
+      head: 'old-head',
+      now: '2026-06-20T18:00:00Z',
+      maxAttempts: 5,
+    });
+
+    assert.equal(current.attempt.attempts, 1);
+    assert.deepEqual(
+      readMergeLeaseAttempts(rootDir, IDENTITY).map((attempt) => ({
+        pr: attempt.pr,
+        head: attempt.head,
+        attempts: attempt.attempts,
+        firstAttemptAt: attempt.firstAttemptAt,
+      })),
+      [{
+        pr: 501,
+        head: 'old-head',
+        attempts: 1,
+        firstAttemptAt: '2026-06-20T18:00:00Z',
+      }],
+    );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -513,9 +598,11 @@ test('reconcileMergeLeases releases a holder whose PR is already merged', async 
       host: 'test-host',
       now: '2026-06-20T18:01:00Z',
       pidAliveFn: () => true,
-      execFileImpl: (file, args, callback) => {
+      execFileImpl: (file, args, options, callback) => {
         assert.equal(file, 'gh');
         assert.deepEqual(args, ['pr', 'view', '101', '--repo', 'owner/name', '--json', 'state']);
+        assert.equal(options.timeout, 30000);
+        assert.equal(options.maxBuffer, 10 * 1024 * 1024);
         callback(null, '{"state":"MERGED"}\n', '');
       },
     });
@@ -538,7 +625,7 @@ test('reconcileMergeLeases stale identity does not delete a newer holder', async
       host: 'test-host',
       now: '2026-06-20T18:01:00Z',
       pidAliveFn: () => true,
-      execFileImpl: (file, args, callback) => {
+      execFileImpl: (file, args, options, callback) => {
         releaseMergeLease({
           rootDir,
           ...IDENTITY,
@@ -553,6 +640,7 @@ test('reconcileMergeLeases stale identity does not delete a newer holder', async
           holderPid: 9909,
           now: '2026-06-20T18:01:01Z',
         });
+        assert.equal(options.timeout, 30000);
         callback(null, '{"state":"MERGED"}\n', '');
       },
     });

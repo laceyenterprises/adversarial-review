@@ -30,8 +30,11 @@ const LEASE_FILE_MODE = 0o640;
 const LEASE_SCHEMA_VERSION = 1;
 const DEFAULT_DEADLINE_SECONDS = 900;
 const DEFAULT_GIT_TIMEOUT_MS = 30_000;
+const DEFAULT_GH_TIMEOUT_MS = DEFAULT_GIT_TIMEOUT_MS;
+const DEFAULT_GH_MAX_BUFFER_BYTES = 10 * 1024 * 1024;
 const DEFAULT_FETCH_ATTEMPTS = 2;
 const DEFAULT_MAX_GATE_ATTEMPTS = 5;
+const DEFAULT_ATTEMPT_TTL_SECONDS = 30 * 24 * 60 * 60;
 const MUTATION_LOCK_RETRY_ATTEMPTS = 50;
 const MUTATION_LOCK_RETRY_DELAY_MS = 5;
 const MUTATION_LOCK_STALE_MS = 5000;
@@ -555,9 +558,34 @@ function sortedAttempts(attempts) {
   });
 }
 
+function attemptExpired(attempt, nowIso) {
+  const ageSeconds = ageSecondsFrom(attempt.lastAttemptAt, nowIso);
+  if (ageSeconds === null) return false;
+  return ageSeconds >= DEFAULT_ATTEMPT_TTL_SECONDS;
+}
+
 export function readMergeLeaseAttempts(rootDir, identity = {}) {
   const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, identity);
   return sortedAttempts(readAttemptDoc(attemptsPath).attempts);
+}
+
+function removeAttemptRecordsUnlocked(attemptsPath, { pr, head, now }) {
+  const updatedAt = now || isoNow();
+  const normalizedPr = normalizeHolderPr(pr, 'pr');
+  const normalizedHead = String(head || '');
+  const doc = readAttemptDoc(attemptsPath);
+  const attempts = doc.attempts
+    .map((record) => normalizeAttemptRecord(record, updatedAt))
+    .filter((record) => !(record.pr === normalizedPr && record.head === normalizedHead));
+  const removed = attempts.length !== doc.attempts.length;
+  if (removed || doc.attempts.length > 0) {
+    writeJsonFile(attemptsPath, {
+      schemaVersion: LEASE_SCHEMA_VERSION,
+      updatedAt,
+      attempts: sortedAttempts(attempts),
+    });
+  }
+  return { removed, attempts: sortedAttempts(attempts) };
 }
 
 export function recordMergeLeaseGateAttempt({
@@ -576,11 +604,13 @@ export function recordMergeLeaseGateAttempt({
     const doc = readAttemptDoc(attemptsPath);
     const normalizedPr = normalizeHolderPr(pr, 'pr');
     const normalizedHead = String(head || '');
-    const attempts = doc.attempts
+    const activeAttempts = doc.attempts
       .map((record) => normalizeAttemptRecord(record, updatedAt))
+      .filter((record) => !attemptExpired(record, updatedAt));
+    const attempts = activeAttempts
       .filter((record) => !(record.pr === normalizedPr && record.head === normalizedHead));
-    const existing = doc.attempts.find((record) => (
-      Number(record.pr) === normalizedPr && String(record.head || '') === normalizedHead
+    const existing = activeAttempts.find((record) => (
+      record.pr === normalizedPr && record.head === normalizedHead
     ));
     const next = normalizeAttemptRecord({
       pr: normalizedPr,
@@ -849,8 +879,14 @@ export function releaseMergeLease({
     if (!currentMatched) {
       return { released: false, leasePath, existingLease: currentLease };
     }
+    const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, { repo, base });
+    const attemptPrune = removeAttemptRecordsUnlocked(attemptsPath, {
+      pr: currentLease.holderPr,
+      head: currentLease.holderHead,
+      now: isoNow(),
+    });
     rmSync(leasePath, { force: true });
-    return { released: true, leasePath, lease: currentLease };
+    return { released: true, leasePath, lease: currentLease, attemptPrune };
   });
   if (!locked.acquired) {
     return { released: false, leasePath, existingLease: readJsonFile(leasePath, null), reason: 'mutation-lock-busy' };
@@ -947,9 +983,9 @@ export function reclaimIfStale({
   };
 }
 
-function execFileToPromise(execFileImpl, file, args) {
+function execFileToPromise(execFileImpl, file, args, options = {}) {
   return new Promise((resolve, reject) => {
-    const maybePromise = execFileImpl(file, args, (err, stdout, stderr) => {
+    const callback = (err, stdout, stderr) => {
       if (err) {
         err.stdout = stdout;
         err.stderr = stderr;
@@ -957,18 +993,29 @@ function execFileToPromise(execFileImpl, file, args) {
         return;
       }
       resolve({ stdout, stderr });
-    });
+    };
+    const maybePromise = execFileImpl(file, args, options, callback);
     if (maybePromise && typeof maybePromise.then === 'function') {
       maybePromise.then(resolve, reject);
     }
   });
 }
 
-async function ghPrState({ repo, holderPr, execFileImpl }) {
+async function ghPrState({ repo, holderPr, execFileImpl, timeoutMs = DEFAULT_GH_TIMEOUT_MS }) {
   const runner = execFileImpl || execFileAsync;
+  const options = {
+    encoding: 'utf8',
+    maxBuffer: DEFAULT_GH_MAX_BUFFER_BYTES,
+    timeout: timeoutMs,
+  };
   const result = runner === execFileAsync
-    ? await runner('gh', ['pr', 'view', String(holderPr), '--repo', repo, '--json', 'state'])
-    : await execFileToPromise(runner, 'gh', ['pr', 'view', String(holderPr), '--repo', repo, '--json', 'state']);
+    ? await runner('gh', ['pr', 'view', String(holderPr), '--repo', repo, '--json', 'state'], options)
+    : await execFileToPromise(
+      runner,
+      'gh',
+      ['pr', 'view', String(holderPr), '--repo', repo, '--json', 'state'],
+      options,
+    );
   const parsed = JSON.parse(String(result.stdout || '{}'));
   return String(parsed.state || '').toUpperCase();
 }

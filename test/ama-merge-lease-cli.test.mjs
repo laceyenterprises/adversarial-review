@@ -16,6 +16,7 @@ import {
   acquireMergeLease,
   inspectMergeLease,
   mergeLeaseFilePath,
+  readMergeLeaseAttempts,
   recordMergeLeaseGateAttempt,
   readMergeLeaseWaiters,
   releaseMergeLease,
@@ -629,9 +630,11 @@ test('merge-lease reconcile releases holder whose PR is merged', async () => {
       '--repo', REPO,
       '--base', BASE,
     ], {
-      execFileImpl: (file, args, callback) => {
+      execFileImpl: (file, args, options, callback) => {
         assert.equal(file, 'gh');
         assert.deepEqual(args, ['pr', 'view', '305', '--repo', REPO, '--json', 'state']);
+        assert.equal(options.timeout, 30000);
+        assert.equal(options.maxBuffer, 10 * 1024 * 1024);
         callback(null, '{"state":"MERGED"}\n', '');
       },
     });
@@ -643,6 +646,53 @@ test('merge-lease reconcile releases holder whose PR is merged', async () => {
     assert.equal(out.holderPrState, 'MERGED');
     assert.equal(out.existingLease, null);
     assert.equal(existsSync(held.leasePath), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('merge-lease reconcile prunes released holder gate attempt', async () => {
+  const rootDir = freshRoot();
+  try {
+    acquireFixture(rootDir, { holderPr: 307, holderHead: 'merged-attempt-head' });
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      repo: REPO,
+      base: BASE,
+      pr: 307,
+      head: 'merged-attempt-head',
+      now: '2026-06-20T18:00:10.000Z',
+      maxAttempts: 5,
+    });
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      repo: REPO,
+      base: BASE,
+      pr: 308,
+      head: 'other-head',
+      now: '2026-06-20T18:00:11.000Z',
+      maxAttempts: 5,
+    });
+    const { code, io } = await runCli(rootDir, [
+      'reconcile',
+      '--repo', REPO,
+      '--base', BASE,
+    ], {
+      execFileImpl: (file, args, options, callback) => {
+        assert.equal(file, 'gh');
+        assert.deepEqual(args, ['pr', 'view', '307', '--repo', REPO, '--json', 'state']);
+        assert.equal(options.timeout, 30000);
+        callback(null, '{"state":"MERGED"}\n', '');
+      },
+    });
+
+    const out = jsonOutput(io);
+    assert.equal(code, 0);
+    assert.equal(out.released, true);
+    assert.deepEqual(
+      readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE }).map((attempt) => `${attempt.pr}:${attempt.head}`),
+      ['308:other-head'],
+    );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

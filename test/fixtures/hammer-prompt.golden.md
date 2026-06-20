@@ -47,10 +47,10 @@ predicate failure.
    addressed per final finding. For each finding include the blocking/non-
    blocking classification and the file paths changed for that finding.
 5. Validate the exact post-remediation PR head. Refresh the live PR head SHA
-   after your commit. If the branch is updated or rebased as needed to reach the
-   current base, treat the resulting SHA as the new post-remediation head and
-   repeat this step from the beginning for that exact SHA. Do not merge a stale
-   or behind head merely because the old reviewed SHA passed.
+   after your commit. If the branch head moves for any reason after your
+   remediation commit, stop as a hard blocker; HAM terminal remediation does not
+   update or rebase the branch. Do not merge a stale or behind head merely
+   because the old reviewed SHA passed.
 6. Run or verify required checks for that exact post-remediation SHA. If checks
    are queued or in progress immediately after the HAM commit lands, poll the
    live PR for a bounded settle window before classifying them. Failed, missing,
@@ -70,8 +70,18 @@ predicate failure.
 Fetch the live PR and final review:
 
 ```bash
-HAM_TMP_DIR="/tmp/ham-closer-1234-abc12345abc12345abc12345abc12345abc12345"
+HAM_TMP_DIR="${TMPDIR:-/tmp}/ham-closer-$(id -u)-1234-abc12345abc12345abc12345abc12345abc12345"
+if [ -L "$HAM_TMP_DIR" ]; then
+  echo "hard-blocker: HAM_TMP_DIR is a symlink: $HAM_TMP_DIR" >&2
+  exit 1
+fi
 mkdir -p "$HAM_TMP_DIR"
+HAM_TMP_OWNER=$(stat -f '%u' "$HAM_TMP_DIR" 2>/dev/null || stat -c '%u' "$HAM_TMP_DIR")
+if [ "$HAM_TMP_OWNER" != "$(id -u)" ]; then
+  echo "hard-blocker: HAM_TMP_DIR owned by uid $HAM_TMP_OWNER, expected $(id -u)" >&2
+  exit 1
+fi
+chmod 700 "$HAM_TMP_DIR"
 rm -f "$HAM_TMP_DIR"/ham-*.json
 
 gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName,reviews > "$HAM_TMP_DIR/ham-pr-before.json"
@@ -101,8 +111,18 @@ blocking or non-blocking, and the file paths changed for that finding.
 Refresh the live head and collect exact-head evidence:
 
 ```bash
-HAM_TMP_DIR="/tmp/ham-closer-1234-abc12345abc12345abc12345abc12345abc12345"
+HAM_TMP_DIR="${TMPDIR:-/tmp}/ham-closer-$(id -u)-1234-abc12345abc12345abc12345abc12345abc12345"
+if [ -L "$HAM_TMP_DIR" ]; then
+  echo "hard-blocker: HAM_TMP_DIR is a symlink: $HAM_TMP_DIR" >&2
+  exit 1
+fi
 mkdir -p "$HAM_TMP_DIR"
+HAM_TMP_OWNER=$(stat -f '%u' "$HAM_TMP_DIR" 2>/dev/null || stat -c '%u' "$HAM_TMP_DIR")
+if [ "$HAM_TMP_OWNER" != "$(id -u)" ]; then
+  echo "hard-blocker: HAM_TMP_DIR owned by uid $HAM_TMP_OWNER, expected $(id -u)" >&2
+  exit 1
+fi
+chmod 700 "$HAM_TMP_DIR"
 
 gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "$HAM_TMP_DIR/ham-pr-after.json"
 POST_REMEDIATION_SHA=$(jq -r '.headRefOid' "$HAM_TMP_DIR/ham-pr-after.json")
@@ -116,12 +136,37 @@ gh api "repos/acme/myrepo/commits/$POST_REMEDIATION_SHA" > "$HAM_TMP_DIR/ham-com
 ```
 
 Wait for required checks on `POST_REMEDIATION_SHA` to settle before evaluating
-the hard-blocker list. Poll the live PR for a bounded window (default 15 minutes,
-15 second cadence is sufficient) and refresh `$HAM_TMP_DIR/ham-pr-after.json` on
-each poll. If the head moves, stop as a hard blocker. If required checks remain
+the hard-blocker list:
+
+```bash
+HAM_CHECK_SETTLE_SECONDS="${HAM_CHECK_SETTLE_SECONDS:-900}"
+HAM_CHECK_POLL_SECONDS="${HAM_CHECK_POLL_SECONDS:-15}"
+HAM_CHECK_DEADLINE=$((SECONDS + HAM_CHECK_SETTLE_SECONDS))
+
+while true; do
+  gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > "$HAM_TMP_DIR/ham-pr-after.json"
+  LIVE_SHA=$(jq -r '.headRefOid' "$HAM_TMP_DIR/ham-pr-after.json")
+  if [ "$LIVE_SHA" != "$POST_REMEDIATION_SHA" ]; then
+    echo "hard-blocker: PR head moved from $POST_REMEDIATION_SHA to $LIVE_SHA" >&2
+    exit 1
+  fi
+  HAM_UNSETTLED_CHECKS=$(jq '[.statusCheckRollup[]? | select((((.conclusion // .state // .status // .statusCheckRollup.state // "") | ascii_upcase) as $state | (["SUCCESS","NEUTRAL","SKIPPED"] | index($state) | not)))] | length' "$HAM_TMP_DIR/ham-pr-after.json")
+  if [ "$HAM_UNSETTLED_CHECKS" = "0" ]; then
+    break
+  fi
+  if [ "$SECONDS" -ge "$HAM_CHECK_DEADLINE" ]; then
+    echo "hard-blocker: required checks did not settle for $POST_REMEDIATION_SHA" >&2
+    jq '.statusCheckRollup' "$HAM_TMP_DIR/ham-pr-after.json" >&2
+    exit 1
+  fi
+  sleep "$HAM_CHECK_POLL_SECONDS"
+done
+```
+
+Only terminal success states accepted by the merge-path check classifier
+(`SUCCESS`, `NEUTRAL`, `SKIPPED`) count as successful. If required checks remain
 queued, in progress, pending, missing, stale, or otherwise unchecked at the
-deadline, stop as a hard blocker. Only terminal success states accepted by the
-merge-path check classifier count as successful.
+deadline, stop as a hard blocker.
 
 Build `$HAM_TMP_DIR/ham-terminal-remediation.json` as the claim to verify.
 `ama-check` must confirm the commit parent/trailers from
@@ -155,7 +200,18 @@ non-empty `files[]` diff. The JSON claim alone does not satisfy the predicate.
 Run the predicate against the live post-remediation head:
 
 ```bash
-HAM_TMP_DIR="/tmp/ham-closer-1234-abc12345abc12345abc12345abc12345abc12345"
+HAM_TMP_DIR="${TMPDIR:-/tmp}/ham-closer-$(id -u)-1234-abc12345abc12345abc12345abc12345abc12345"
+if [ -L "$HAM_TMP_DIR" ]; then
+  echo "hard-blocker: HAM_TMP_DIR is a symlink: $HAM_TMP_DIR" >&2
+  exit 1
+fi
+mkdir -p "$HAM_TMP_DIR"
+HAM_TMP_OWNER=$(stat -f '%u' "$HAM_TMP_DIR" 2>/dev/null || stat -c '%u' "$HAM_TMP_DIR")
+if [ "$HAM_TMP_OWNER" != "$(id -u)" ]; then
+  echo "hard-blocker: HAM_TMP_DIR owned by uid $HAM_TMP_OWNER, expected $(id -u)" >&2
+  exit 1
+fi
+chmod 700 "$HAM_TMP_DIR"
 
 node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
   --pr "$HAM_TMP_DIR/ham-pr-after.json" \
@@ -184,7 +240,18 @@ Do not merge unless all of these are true:
 Merge:
 
 ```bash
-HAM_TMP_DIR="/tmp/ham-closer-1234-abc12345abc12345abc12345abc12345abc12345"
+HAM_TMP_DIR="${TMPDIR:-/tmp}/ham-closer-$(id -u)-1234-abc12345abc12345abc12345abc12345abc12345"
+if [ -L "$HAM_TMP_DIR" ]; then
+  echo "hard-blocker: HAM_TMP_DIR is a symlink: $HAM_TMP_DIR" >&2
+  exit 1
+fi
+mkdir -p "$HAM_TMP_DIR"
+HAM_TMP_OWNER=$(stat -f '%u' "$HAM_TMP_DIR" 2>/dev/null || stat -c '%u' "$HAM_TMP_DIR")
+if [ "$HAM_TMP_OWNER" != "$(id -u)" ]; then
+  echo "hard-blocker: HAM_TMP_DIR owned by uid $HAM_TMP_OWNER, expected $(id -u)" >&2
+  exit 1
+fi
+chmod 700 "$HAM_TMP_DIR"
 POST_REMEDIATION_SHA=$(jq -r '.headRefOid' "$HAM_TMP_DIR/ham-pr-after.json")
 
 TRAILERS_FILE=$(mktemp)

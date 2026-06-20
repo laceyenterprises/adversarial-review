@@ -637,7 +637,7 @@ test('cfg.workerClass=hammer selects the terminal HAM mandate prompt when findin
   assert.match(write.captured.body, /ham_terminal_remediation_validated/);
   assert.match(write.captured.body, /--match-head-commit "\$POST_REMEDIATION_SHA"/);
   assert.match(write.captured.body, /failed, missing, stale, or\s+unchecked required checks/);
-  assert.match(write.captured.body, /Do not merge a stale\s+or behind head merely because the old reviewed SHA passed/);
+  assert.match(write.captured.body, /Do not merge a stale\s+or behind head merely\s+because the old reviewed SHA passed/);
 });
 
 // Unit coverage for the prompt-selection predicate itself (HAM-04, SPEC §1.1.1).
@@ -855,13 +855,20 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /ham_terminal_remediation_validated/);
   assert.match(prompt, /Do not merge unless all of these are true/);
   assert.match(prompt, /Failed,\s+missing,\s+stale,\s+or still-unchecked required checks after that settle window are hard\s+blockers/);
-  assert.match(prompt, /HAM_TMP_DIR="\/tmp\/ham-closer-1234-abc12345abc12345abc12345abc12345abc12345"/);
-  assert.match(prompt, /Poll the live PR for a bounded window/);
+  assert.match(prompt, /HAM_TMP_DIR="\$\{TMPDIR:-\/tmp\}\/ham-closer-\$\(id -u\)-1234-abc12345abc12345abc12345abc12345abc12345"/);
+  assert.match(prompt, /\[ -L "\$HAM_TMP_DIR" \]/);
+  assert.match(prompt, /chmod 700 "\$HAM_TMP_DIR"/);
+  assert.match(prompt, /HAM_CHECK_SETTLE_SECONDS="\$\{HAM_CHECK_SETTLE_SECONDS:-900\}"/);
+  assert.match(prompt, /HAM_UNSETTLED_CHECKS=\$\(jq/);
+  assert.match(prompt, /\["SUCCESS","NEUTRAL","SKIPPED"\]/);
+  assert.match(prompt, /PR head moved from \$POST_REMEDIATION_SHA to \$LIVE_SHA/);
+  assert.match(prompt, /HAM terminal remediation does not\s+update or rebase the branch/);
   assert.match(prompt, /No refactor-and-defer for final findings/);
   assert.doesNotMatch(prompt, /HAM_TMP_DIR=\$\(mktemp -d -t ham-closer\.XXXXXX\)/);
   assert.doesNotMatch(prompt, /trap 'rm -rf "\$HAM_TMP_DIR"' EXIT/);
   assert.doesNotMatch(prompt, /HAM_REBASE_ATTEMPT_CAP/);
   assert.doesNotMatch(prompt, /ham_update_branch_conflict/);
+  assert.doesNotMatch(prompt, /If the branch is updated or rebased as needed/);
 });
 
 test('composed prompt documents that branch_protection.required=false does not require the GitHub-plan sentinel', () => {

@@ -703,6 +703,124 @@ test('unversioned config.local.yaml tolerates unknown nested worker_pool keys', 
   }
 });
 
+test('top-level config.yaml rejects an unknown nested main_catchup key', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      main_catchup:
+        anything: true
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /main_catchup/);
+        assert.match(err.message, /unknown key/);
+        assert.ok(String(err.source).startsWith(top));
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('top-level config.yaml rejects Python-owned main_catchup daemon keys', () => {
+  const pythonOwnedKeys = [
+    'poll_interval_seconds',
+    'drain_timeout',
+    'stale_drain_reap_seconds',
+    'submodule_update_timeout_seconds',
+    'recovery_max_attempts',
+    'bounce_throttle_interval_seconds',
+  ];
+  for (const key of pythonOwnedKeys) {
+    const tmp = freshTmp();
+    try {
+      const top = join(tmp, 'config.yaml');
+      writeFile(top, `
+        version: 1
+        main_catchup:
+          ${key}: ${key === 'drain_timeout' ? '5m' : 1}
+      `);
+      assert.throws(
+        () => loadConfig({ topPath: top, env: {} }),
+        (err) => {
+          assert.ok(err instanceof AgentOSConfigError);
+          assert.match(err.message, new RegExp(`main_catchup\\.${key}`));
+          assert.match(err.message, /unknown key/);
+          return true;
+        },
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+});
+
+test('top-level config.yaml accepts the mirrored main_catchup drain keys', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      main_catchup:
+        adversarial_review_drain_timeout_seconds: 240
+        adversarial_watcher_drain_bounce_slack_seconds: 45
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('main_catchup.adversarial_review_drain_timeout_seconds'), 240);
+    assert.equal(cfg.get('main_catchup.adversarial_watcher_drain_bounce_slack_seconds'), 45);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('main_catchup mirrored drain defaults match the Python daemon constants', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('main_catchup.adversarial_review_drain_timeout_seconds'), 1200);
+    assert.equal(cfg.get('main_catchup.adversarial_watcher_drain_bounce_slack_seconds'), 600);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('config.local.yaml tolerates unknown nested main_catchup keys and reads mirrored ones', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(local, `
+      roots:
+        hq: /from-local
+      main_catchup:
+        anything: true
+        adversarial_review_drain_timeout_seconds: 300
+        adversarial_watcher_drain_bounce_slack_seconds: 60
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roots.hq'), '/from-local');
+    assert.equal(cfg.get('main_catchup.anything'), null);
+    assert.equal(cfg.get('main_catchup.adversarial_review_drain_timeout_seconds'), 300);
+    assert.equal(cfg.get('main_catchup.adversarial_watcher_drain_bounce_slack_seconds'), 60);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('config.local.yaml tolerates a NESTED unknown key under an owned root (no watcher crash)', () => {
   // Mirror of agent-os#1743: a nested unknown key under a root THIS reader owns
   // (here retention.policies.standard_backup, a strict nested dict) must be
@@ -2317,6 +2435,58 @@ test('validateSchema tolerates unknown nested worker_pool keys in local files an
   assert.equal(out.version, 1);
   assert.equal(out.worker_pool?.anything, undefined, 'unknown nested key dropped');
   assert.equal(out.worker_pool?.dag?.autowalk?.deep_reconcile, true);
+});
+
+test('validateSchema rejects unknown nested main_catchup keys unless nested-local tolerance is explicit', () => {
+  assert.throws(
+    () => validateSchema(
+      { version: 1, main_catchup: { poll_interval_seconds: 300 } },
+      { source: '/tmp/config.local.yaml' },
+    ),
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError);
+      assert.match(err.message, /main_catchup\.poll_interval_seconds/);
+      assert.match(err.message, /unknown key/);
+      return true;
+    },
+  );
+});
+
+test('validateSchema foreign top-level tolerance does not make main_catchup foreign', () => {
+  assert.throws(
+    () => validateSchema(
+      { version: 1, main_catchup: { poll_interval_seconds: 300 } },
+      { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
+    ),
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError);
+      assert.match(err.message, /main_catchup\.poll_interval_seconds/);
+      assert.match(err.message, /unknown key/);
+      return true;
+    },
+  );
+});
+
+test('validateSchema tolerates unknown nested main_catchup keys in local files and keeps mirrored drain keys', () => {
+  const out = validateSchema(
+    {
+      version: 1,
+      main_catchup: {
+        poll_interval_seconds: 300,
+        adversarial_review_drain_timeout_seconds: 240,
+        adversarial_watcher_drain_bounce_slack_seconds: 45,
+      },
+    },
+    {
+      source: '/tmp/config.local.yaml',
+      tolerateForeignTopLevelSections: true,
+      tolerateNestedUnknownLocalKeys: true,
+    },
+  );
+  assert.equal(out.version, 1);
+  assert.equal(out.main_catchup?.poll_interval_seconds, undefined, 'unknown nested key dropped');
+  assert.equal(out.main_catchup?.adversarial_review_drain_timeout_seconds, 240);
+  assert.equal(out.main_catchup?.adversarial_watcher_drain_bounce_slack_seconds, 45);
 });
 
 test('validateSchema rejects arbitrary unknown top-level keys as typos', () => {

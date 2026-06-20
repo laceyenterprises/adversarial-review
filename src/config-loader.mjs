@@ -229,6 +229,28 @@ function schemaV1() {
           },
         },
       },
+      // main_catchup is a PARTIAL mirror. Python owns the full main-catchup
+      // daemon schema; this Node reader exposes only the adversarial-review
+      // drain knobs that may appear in checked-in config.yaml. Other
+      // main_catchup.* keys remain Python-owned and must fail loud in
+      // checked-in config, while operator-local config.local.yaml can
+      // tolerate-drop them through nested-local tolerance.
+      main_catchup: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          adversarial_review_drain_timeout_seconds: {
+            __type: TYPE_INT,
+            __default: 1200,
+            __min: 1,
+          },
+          adversarial_watcher_drain_bounce_slack_seconds: {
+            __type: TYPE_INT,
+            __default: 600,
+            __min: 0,
+          },
+        },
+      },
       roots: {
         __type: TYPE_DICT,
         __strict: true,

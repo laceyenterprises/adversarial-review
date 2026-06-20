@@ -1,7 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { main as mergeLeaseMain } from '../bin/merge-lease.mjs';
@@ -268,6 +275,88 @@ test('merge-lease acquire timeout exits 75 with acquired:false timedOut:true', a
     assert.equal(out.timedOut, true);
     assert.equal(out.waited_s, 1);
     assert.deepEqual(readMergeLeaseWaiters(rootDir, { repo: REPO, base: BASE }), []);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('merge-lease acquire retries mutation-lock contention until the wait deadline', async () => {
+  const rootDir = freshRoot();
+  try {
+    const leasePath = mergeLeaseFilePath(rootDir, { repo: REPO, base: BASE });
+    const lockPath = `${leasePath}.mutation.lock`;
+    mkdirSync(join(rootDir, 'data', 'merge-leases'), { recursive: true });
+    writeFileSync(
+      lockPath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        lockId: 'mll_live_cli',
+        holderPid: process.pid,
+        holderHost: hostname(),
+        acquiredAt: new Date().toISOString(),
+      }, null, 2)}\n`,
+    );
+
+    let lockReleased = false;
+    const { code, io } = await runCli(rootDir, [
+      'acquire',
+      '--repo', REPO,
+      '--base', BASE,
+      '--pr', '126',
+      '--head', 'after-lock',
+      '--owner-pid', '8126',
+      '--wait', '1',
+    ], {
+      onSleep: () => {
+        if (lockReleased) return;
+        lockReleased = true;
+        unlinkSync(lockPath);
+      },
+    });
+
+    const out = jsonOutput(io);
+    assert.equal(code, 0);
+    assert.equal(out.acquired, true);
+    assert.equal(out.holder, 126);
+    assert.equal(out.holderHead, 'after-lock');
+    assert.equal(io.stderrText, '');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('merge-lease acquire maps mutation-lock contention at deadline to retryable timeout', async () => {
+  const rootDir = freshRoot();
+  try {
+    const leasePath = mergeLeaseFilePath(rootDir, { repo: REPO, base: BASE });
+    const lockPath = `${leasePath}.mutation.lock`;
+    mkdirSync(join(rootDir, 'data', 'merge-leases'), { recursive: true });
+    writeFileSync(
+      lockPath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        lockId: 'mll_live_cli_timeout',
+        holderPid: process.pid,
+        holderHost: hostname(),
+        acquiredAt: new Date().toISOString(),
+      }, null, 2)}\n`,
+    );
+
+    const { code, io } = await runCli(rootDir, [
+      'acquire',
+      '--repo', REPO,
+      '--base', BASE,
+      '--pr', '127',
+      '--head', 'lock-timeout',
+      '--owner-pid', '8127',
+      '--wait', '0',
+    ]);
+
+    const out = jsonOutput(io);
+    assert.equal(code, 75);
+    assert.equal(out.acquired, false);
+    assert.equal(out.timedOut, true);
+    assert.equal(io.stderrText, '');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

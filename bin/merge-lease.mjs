@@ -110,6 +110,10 @@ function jsonLine(stdout, value) {
   stdout.write(`${JSON.stringify(value)}\n`);
 }
 
+function isMutationLockBusyError(err) {
+  return /\bmutation lock busy\b/.test(String(err?.message || ''));
+}
+
 function leaseJson({ result, waitedSeconds }) {
   const lease = result.lease;
   return {
@@ -122,6 +126,23 @@ function leaseJson({ result, waitedSeconds }) {
     acquiredAt: lease.acquiredAt,
     waited_s: waitedSeconds,
   };
+}
+
+function timeoutJson({ repo, base, waitedSeconds }) {
+  return {
+    acquired: false,
+    timedOut: true,
+    key: deriveLeaseKey({ repo, base }).key,
+    waited_s: waitedSeconds,
+  };
+}
+
+function removeWaiterForTimeout({ rootDir, repo, base, waiterId, updatedAt }) {
+  try {
+    removeMergeLeaseWaiter({ rootDir, repo, base, waiterId, updatedAt });
+  } catch (err) {
+    if (!isMutationLockBusyError(err)) throw err;
+  }
 }
 
 function waiterAge(waiter, inspectedAt) {
@@ -192,51 +213,54 @@ async function runAcquire(argv, deps) {
 
   while (true) {
     const tickNow = deps.nowIso();
-    reclaimIfStale({
-      rootDir,
-      repo,
-      base,
-      now: tickNow,
-      host: deps.host,
-      pidAliveFn: deps.pidAliveFn,
-    });
-    const result = acquireMergeLease({
-      rootDir,
-      repo,
-      base,
-      holderPr: pr,
-      holderHead: head,
-      holderPid: ownerPid,
-      holderHost: deps.host,
-      holderProcessGroup: ownerPgid,
-      now: tickNow,
-      waiterId,
-      registerWaiter: true,
-      attempt,
-      pidAliveFn: deps.pidAliveFn,
-    });
-    if (result.acquired) {
-      jsonLine(deps.stdout, leaseJson({
-        result,
-        waitedSeconds: Math.max(0, Math.floor((deps.nowMs() - startedMs) / 1000)),
-      }));
-      return 0;
+    try {
+      reclaimIfStale({
+        rootDir,
+        repo,
+        base,
+        now: tickNow,
+        host: deps.host,
+        pidAliveFn: deps.pidAliveFn,
+      });
+      const result = acquireMergeLease({
+        rootDir,
+        repo,
+        base,
+        holderPr: pr,
+        holderHead: head,
+        holderPid: ownerPid,
+        holderHost: deps.host,
+        holderProcessGroup: ownerPgid,
+        now: tickNow,
+        waiterId,
+        registerWaiter: true,
+        attempt,
+        pidAliveFn: deps.pidAliveFn,
+      });
+      if (result.acquired) {
+        jsonLine(deps.stdout, leaseJson({
+          result,
+          waitedSeconds: Math.max(0, Math.floor((deps.nowMs() - startedMs) / 1000)),
+        }));
+        return 0;
+      }
+    } catch (err) {
+      if (!isMutationLockBusyError(err)) throw err;
     }
 
     if (deps.nowMs() >= deadlineMs) {
-      removeMergeLeaseWaiter({
+      removeWaiterForTimeout({
         rootDir,
         repo,
         base,
         waiterId,
         updatedAt: deps.nowIso(),
       });
-      jsonLine(deps.stdout, {
-        acquired: false,
-        timedOut: true,
-        key: deriveLeaseKey({ repo, base }).key,
-        waited_s: Math.max(0, Math.floor((deps.nowMs() - startedMs) / 1000)),
-      });
+      jsonLine(deps.stdout, timeoutJson({
+        repo,
+        base,
+        waitedSeconds: Math.max(0, Math.floor((deps.nowMs() - startedMs) / 1000)),
+      }));
       return EXIT_TIMEOUT;
     }
 

@@ -33,6 +33,16 @@ is dead or when the lock has exceeded its short critical-section TTL. A busy liv
 mutation lock must be reported as `mutation-lock-busy`, not hidden behind an
 identity-change reason.
 
+The operator-facing `merge-lease` CLI exposes `acquire`, `release`, `status`,
+and `list` subcommands over this lease state. `acquire` is the blocking command:
+callers pass the target repo/base, PR, head SHA, owner PID, optional owner PGID,
+and a wait deadline. Argument and validation failures exit `64`; successful
+acquire/status/release output exits `0`; an unmet acquire deadline exits `75`
+with `acquired:false` and is retryable. Live `mutation-lock-busy` contention
+during waiter registration, pruning, or timeout cleanup is a transient acquire
+condition: the CLI must retry inside the caller's wait window and, if the
+deadline expires, return `75` rather than reclassifying contention as usage.
+
 Reclaim is allowed only when the holder can no longer be trusted to serialize
 the merge lane:
 

@@ -51,7 +51,7 @@ re-run any time.
 Verify:
 
 ```bash
-gh label list --repo laceyenterprises/<repo> --limit 200 --json name --jq \
+gh label list --repo laceyenterprises/<repo> --limit 1000 --json name --jq \
   '(["retrigger-remediation","retrigger-review","merge-agent-requested","merge-agent-dispatched","merge-agent-recovery-in-flight","operator-approved","adversarial-merge-requested","adversarial-merge-blocked","merge-on-comment-only","address-all-findings","merge-agent-skip","do-not-merge","no-auto-merge","no-merge-hold","merge-agent-stuck","stale-drift","pr-class: additive-only","operator-approved: scope-expand","reviewer-cycle-cap-reached","paused-for-redesign","operator-approved: advisory-only-review","ticket-pipeline-paused","fast-merge-veto","fast-merge:docs","fast-merge:spec-hash-rebind","fast-merge:test-fixtures","fast-merge:submodule-bump"] - map(.name)) as $missing | if ($missing|length)==0 then "ok" else "MISSING: \($missing)" end'
 # expect ok
 ```

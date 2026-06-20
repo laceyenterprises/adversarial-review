@@ -27,11 +27,34 @@ declare -a LABELS=(
   "no-merge-hold|Operator hold: block merge-agent and adversarial gate.|D93F0B"
 )
 
+description_length() {
+  python3 - "$1" <<'PY'
+import sys
+print(len(sys.argv[1]))
+PY
+}
+
 for repo in "${REPOS[@]}"; do
   echo "Initializing adversarial-review labels in $repo"
   for entry in "${LABELS[@]}"; do
     IFS='|' read -r name desc color <<< "$entry"
-    gh label create "$name" --repo "$repo" --description "$desc" --color "$color" 2>/dev/null \
-      || gh label edit "$name" --repo "$repo" --description "$desc" --color "$color"
+    description_chars="$(description_length "$desc")"
+    if [[ "$description_chars" -gt 100 ]]; then
+      echo "error: label '$name' description is $description_chars characters; GitHub allows at most 100" >&2
+      exit 1
+    fi
+    gh_stderr="$(mktemp)"
+    if gh label create "$name" --repo "$repo" --description "$desc" --color "$color" >/dev/null 2>"$gh_stderr"; then
+      rm -f "$gh_stderr"
+      continue
+    fi
+    if gh label edit "$name" --repo "$repo" --description "$desc" --color "$color" >/dev/null 2>>"$gh_stderr"; then
+      rm -f "$gh_stderr"
+      continue
+    fi
+    echo "error: failed to create/update label '$name' on $repo" >&2
+    sed 's/^/  gh: /' "$gh_stderr" >&2
+    rm -f "$gh_stderr"
+    exit 1
   done
 done

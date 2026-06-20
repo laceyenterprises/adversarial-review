@@ -67,17 +67,33 @@ declare -a LABELS=(
   "fast-merge:submodule-bump|Submodule pointer bump.|0E8A16"
 )
 
+description_length() {
+  python3 - "$1" <<'PY'
+import sys
+print(len(sys.argv[1]))
+PY
+}
+
 rc=0
 for repo in "${REPOS[@]}"; do
   ensured=0
   for spec in "${LABELS[@]}"; do
     IFS='|' read -r name desc color <<< "$spec"
-    if gh label create "$name" --repo "$repo" --description "$desc" --color "$color" --force >/dev/null 2>&1; then
+    description_chars="$(description_length "$desc")"
+    if [[ "$description_chars" -gt 100 ]]; then
+      echo "  ERROR: label '$name' description is $description_chars characters; GitHub allows at most 100" >&2
+      rc=1
+      continue
+    fi
+    gh_stderr="$(mktemp)"
+    if gh label create "$name" --repo "$repo" --description "$desc" --color "$color" --force >/dev/null 2>"$gh_stderr"; then
       ensured=$((ensured + 1))
     else
       echo "  WARN: failed to ensure label '$name' on $repo" >&2
+      sed 's/^/    gh: /' "$gh_stderr" >&2
       rc=1
     fi
+    rm -f "$gh_stderr"
   done
   echo "$repo: ensured $ensured/${#LABELS[@]} adversarial-review labels"
 done

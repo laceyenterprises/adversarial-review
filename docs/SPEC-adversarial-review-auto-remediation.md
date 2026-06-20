@@ -227,6 +227,22 @@ contexts, head/state reads, review bodies for a head SHA, label events, issue
 comments, open PR discovery, single-PR snapshots, and PR diffs. Each call site
 must preserve the fallback behavior independently, because the adapter is an
 optional preferred read source rather than the authoritative availability gate.
+Adapter-absent reads must not emit synthetic adapter telemetry or consume a
+second throttle wait before falling through to the existing GitHub client path.
+
+Open-PR discovery is the highest-blast-radius adapter read because an empty
+result can silence the entire watcher. During rollout, an empty adapter
+`open-pull-requests` result is inconclusive when an Octokit discovery client is
+available; the subject adapter must cross-check Octokit instead of treating the
+empty adapter list as authoritative. Adapter-only deployments may still return
+an empty subject set when no fallback client exists.
+
+The review-context adapter path is intentionally narrower than the full PR
+rollup. It must normalize to the same contract as the GraphQL/legacy review
+context reader: PR metadata plus comments, with `labels`, `reviews`, and
+`checks` empty and `mergeable` / `mergeStateStatus` set to `null`. Missing or
+present mergeability fields must not decide whether the review-context adapter
+path engages.
 
 The `pull-request-review-bodies-for-head` read kind must return structured
 review objects carrying body, submitted state, reviewed commit/head SHA, submit

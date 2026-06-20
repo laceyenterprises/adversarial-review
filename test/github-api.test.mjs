@@ -1885,6 +1885,44 @@ test('review context helper fetches only PR metadata and comments', async () => 
   );
 });
 
+test('adapter-present review context does not require or surface mergeability fields', async () => {
+  const expected = makeExpectedRollup();
+  const calls = [];
+  const telemetry = makeTelemetrySink();
+  const mod = await importGithubApiFresh();
+
+  const result = await mod.fetchPullRequestReviewContext(FIXTURE_REPO, FIXTURE_PR, {
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    recordApiCallImpl: telemetry.recordApiCallImpl,
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      assert.equal(command, '/fixture/github-adapter');
+      assert.equal(args.includes('pull-request-review-context'), true);
+      const { mergeable, mergeStateStatus, labels, reviews, checks, ...reviewContext } = expected;
+      return { stdout: JSON.stringify({ rollup: reviewContext }) };
+    },
+  });
+
+  assert.equal(result.number, expected.number);
+  assert.equal(result.headRefOid, expected.headRefOid);
+  assert.equal(result.comments.length, expected.comments.length);
+  assert.equal(result.mergeable, null);
+  assert.equal(result.mergeStateStatus, null);
+  assert.deepEqual(result.labels, []);
+  assert.deepEqual(result.reviews, []);
+  assert.deepEqual(result.checks, []);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(telemetry.events.map((entry) => ({
+    category: entry.category,
+    status: entry.status,
+    transport: entry.extra?.transport,
+  })), [{
+    category: 'pr_review_context',
+    status: 200,
+    transport: 'github-adapter',
+  }]);
+});
+
 test('legacy review context matches GraphQL by leaving labels empty', async () => {
   const expected = makeExpectedRollup();
   const legacyExec = makeLegacyExecStub(expected);

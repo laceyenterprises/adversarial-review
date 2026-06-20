@@ -561,6 +561,32 @@ function normalizeAdapterRollup(payload) {
   return normalized;
 }
 
+function normalizeAdapterReviewContext(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('GitHub adapter review-context payload must be an object');
+  }
+  const normalized = normalizeRollup(payload, {
+    labels: [],
+    comments: Array.isArray(payload.comments) ? payload.comments.map(normalizeComment) : [],
+    reviews: [],
+    checks: [],
+  });
+  if (!Number.isInteger(normalized.number)) {
+    throw new Error('GitHub adapter review-context payload missing PR number');
+  }
+  if (!normalized.headRefOid) {
+    throw new Error('GitHub adapter review-context payload missing headRefOid');
+  }
+  return {
+    ...normalized,
+    mergeable: null,
+    mergeStateStatus: null,
+    labels: [],
+    reviews: [],
+    checks: [],
+  };
+}
+
 function normalizeHeadAndStateShape({
   state,
   mergedAt = null,
@@ -1675,12 +1701,7 @@ async function fetchPullRequestReviewContext(repo, prNumber, {
       recordApiCallImpl,
     }, () => readAdapterReviewContext(repo, normalizedPrNumber, { execFileImpl, env }));
     if (adapterResult) {
-      return normalizeAdapterRollup({
-        ...adapterResult,
-        labels: [],
-        reviews: [],
-        checks: [],
-      });
+      return normalizeAdapterReviewContext(adapterResult);
     }
   } catch {
     // Optional adapter failed or returned malformed data; preserve fallback.
@@ -1739,6 +1760,7 @@ const __test__ = {
   fetchLegacyReviews,
   fetchReviewBodiesForHead,
   normalizeAdapterHeadAndState,
+  normalizeAdapterReviewContext,
   normalizeAdapterRollup,
   normalizeCheck,
   normalizeComment,

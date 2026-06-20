@@ -440,6 +440,69 @@ test('github-pr subject adapter falls back to gh diff when optional adapter diff
   ]);
 });
 
+test('github-pr subject adapter falls back to Octokit when adapter discovery returns empty', async () => {
+  const calls = [];
+  let octokitListCalls = 0;
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: {
+      rest: {
+        pulls: {
+          list: async ({ owner, repo, state }) => {
+            octokitListCalls += 1;
+            assert.equal(`${owner}/${repo}`, fixture.repo);
+            assert.equal(state, 'open');
+            return { data: fixture.pulls };
+          },
+        },
+      },
+    },
+    repos: [fixture.repo],
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      assert.equal(command, '/fixture/github-adapter');
+      const kind = args[args.indexOf('--kind') + 1];
+      assert.equal(kind, 'open-pull-requests');
+      return { stdout: JSON.stringify({ pullRequests: [] }) };
+    },
+  });
+
+  const refs = await adapter.discoverSubjects();
+
+  assert.deepEqual(refs.map((ref) => ref.subjectExternalId), [`${fixture.repo}#484`]);
+  assert.equal(octokitListCalls, 1);
+  assert.deepEqual(calls.map((call) => call.args[call.args.indexOf('--kind') + 1]), [
+    'open-pull-requests',
+  ]);
+});
+
+test('github-pr subject adapter does not emit adapter telemetry when adapter is absent', async () => {
+  const telemetry = [];
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: makeOctokitSnapshot(),
+    repos: [fixture.repo],
+    env: {},
+    recordApiCall: (entry) => telemetry.push(entry),
+    execFileImpl: async (command, args) => {
+      assert.equal(command, 'gh');
+      assert.deepEqual(args, ['pr', 'diff', '484', '--repo', fixture.repo]);
+      return { stdout: fixture.diff, stderr: '' };
+    },
+  });
+
+  const [ref] = await adapter.discoverSubjects();
+  await adapter.fetchContent(ref);
+
+  assert.deepEqual(telemetry.map((entry) => ({
+    category: entry.category,
+    status: entry.status,
+    transport: entry.extra?.transport,
+  })), [
+    { category: 'pr_view', status: 200, transport: undefined },
+    { category: 'diff_fetch', status: 200, transport: undefined },
+  ]);
+});
+
 test('github-pr subject adapter uses optional GitHub adapter when present without Octokit', async () => {
   const calls = [];
   const telemetry = [];

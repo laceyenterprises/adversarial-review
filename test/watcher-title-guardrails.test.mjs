@@ -39,6 +39,17 @@ test('routePR maps known title prefixes to effective default reviewers', () => {
   });
 });
 
+test('routePR accepts the shared title, subject, options call shape', () => {
+  assert.deepEqual(routePR('[codex] LAC-181: tighten watcher', {
+    domainId: 'code-pr',
+    subjectExternalId: 'laceyenterprises/agent-os#181',
+  }, ALWAYS_ON_ROUTE_OPTIONS), {
+    tag: 'codex',
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+  });
+});
+
 test('routePR returns null for malformed titles missing required prefix', () => {
   assert.equal(routePR('LAC-181: missing reviewer tag', ALWAYS_ON_ROUTE_OPTIONS), null);
   assert.equal(routePR('[codex LAC-181 malformed prefix', ALWAYS_ON_ROUTE_OPTIONS), null);

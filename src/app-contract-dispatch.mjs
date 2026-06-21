@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 const CONTRACT_VERSION = '1.0';
 const DEFAULT_ENDPOINT_URL = 'http://127.0.0.1:8003';
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_STANDALONE_DISPATCH_CACHE_MAX_ENTRIES = 1_000;
 const APP_ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
 
 export async function connectAppContract(options = {}) {
@@ -64,6 +65,9 @@ function normalizeConnectOptions(options) {
     request_retry_attempts: options.request_retry_attempts
       ?? options.requestRetryAttempts
       ?? 3,
+    standalone_dispatch_cache_max_entries: options.standalone_dispatch_cache_max_entries
+      ?? options.standaloneDispatchCacheMaxEntries
+      ?? DEFAULT_STANDALONE_DISPATCH_CACHE_MAX_ENTRIES,
   };
 }
 
@@ -143,24 +147,33 @@ class StandaloneSession {
     this.mode = 'standalone';
     this.config = config;
     this.dispatches = new Map();
+    this.pendingDispatches = new Map();
     this.listeners = new Map();
+    this.dispatchCacheMaxEntries = normalizePositiveInteger(
+      config.standalone_dispatch_cache_max_entries,
+      DEFAULT_STANDALONE_DISPATCH_CACHE_MAX_ENTRIES,
+    );
   }
 
   async dispatch(payload) {
     const requestId = requireRequestId(payload);
     const existing = this.dispatches.get(requestId);
     if (existing) {
-      return await existing;
+      return existing;
+    }
+    const inFlight = this.pendingDispatches.get(requestId);
+    if (inFlight) {
+      return await inFlight;
     }
     const pending = this.acceptDispatch(payload, requestId);
-    this.dispatches.set(requestId, pending);
+    this.pendingDispatches.set(requestId, pending);
     try {
       const accepted = await pending;
-      this.dispatches.set(requestId, accepted);
+      this.recordAcceptedDispatch(requestId, accepted);
       return accepted;
     } catch (error) {
-      if (this.dispatches.get(requestId) === pending) {
-        this.dispatches.delete(requestId);
+      if (this.pendingDispatches.get(requestId) === pending) {
+        this.pendingDispatches.delete(requestId);
       }
       throw error;
     }
@@ -175,12 +188,6 @@ class StandaloneSession {
       watch_url: `standalone://watch/${launchRequestId}`,
       audit_ref: `standalone://audit/${this.app_id}/${requestId}`,
     };
-    this.dispatches.set(requestId, accepted);
-    this.emitTopic(`health.worker.terminal.${launchRequestId}`, {
-      status: 'accepted',
-      launch_request_id: launchRequestId,
-      request_id: requestId,
-    });
     return accepted;
   }
 
@@ -191,7 +198,9 @@ class StandaloneSession {
     }
     const command = this.config.dispatch_command ?? this.config.dispatchCommand;
     if (command) {
-      const result = await runDispatchCommand(command, payload);
+      const result = await runDispatchCommand(command, payload, {
+        timeoutMs: this.config.request_timeout_ms,
+      });
       return normalizeLaunchRequestId(result);
     }
     return `standalone-${randomUUID()}`;
@@ -199,10 +208,22 @@ class StandaloneSession {
 
   async dispatchStatus(requestId) {
     const existing = this.dispatches.get(requestId);
-    if (!existing) {
-      return { status: 'not_found', app_id: this.app_id, request_id: requestId };
+    if (existing) {
+      return { status: 'found', ...existing };
     }
-    return { status: 'found', ...existing };
+    if (this.pendingDispatches.has(requestId)) {
+      return { status: 'dispatching', app_id: this.app_id, request_id: requestId };
+    }
+    return { status: 'not_found', app_id: this.app_id, request_id: requestId };
+  }
+
+  recordAcceptedDispatch(requestId, accepted) {
+    this.pendingDispatches.delete(requestId);
+    this.dispatches.set(requestId, accepted);
+    while (this.dispatches.size > this.dispatchCacheMaxEntries) {
+      const oldestRequestId = this.dispatches.keys().next().value;
+      this.dispatches.delete(oldestRequestId);
+    }
   }
 
   on(topic, callback) {
@@ -360,32 +381,69 @@ function parseJsonResponse(text, status) {
   }
 }
 
-function runDispatchCommand(command, payload) {
+function runDispatchCommand(command, payload, { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS } = {}) {
   const argv = Array.isArray(command) ? command : [command];
   return new Promise((resolveCommand, reject) => {
     const child = spawn(argv[0], argv.slice(1), { stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
+    const commandTimeoutMs = normalizePositiveInteger(timeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let settled = false;
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+      settleReject(retryableDispatchCommandError(`standalone dispatch command timed out after ${commandTimeoutMs}ms`));
+    }, commandTimeoutMs);
+
+    function settleResolve(value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolveCommand(value);
+    }
+
+    function settleReject(error) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    }
+
     child.stdout.on('data', (chunk) => {
-      stdout += chunk;
+      stdoutChunks.push(chunk);
     });
     child.stderr.on('data', (chunk) => {
-      stderr += chunk;
+      stderrChunks.push(chunk);
     });
-    child.on('error', reject);
+    child.on('error', settleReject);
+    child.stdin.on('error', settleReject);
     child.on('close', (code) => {
+      if (settled && timedOut) return;
+      const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+      const stderr = Buffer.concat(stderrChunks).toString('utf8');
       if (code !== 0) {
-        reject(new Error(`standalone dispatch command failed (${code}): ${stderr || stdout}`));
+        settleReject(new Error(`standalone dispatch command failed (${code}): ${stderr || stdout}`));
         return;
       }
       try {
-        resolveCommand(stdout.trim() ? JSON.parse(stdout) : {});
+        settleResolve(stdout.trim() ? JSON.parse(stdout) : {});
       } catch (error) {
-        reject(error);
+        settleReject(error);
       }
     });
-    child.stdin.end(JSON.stringify(stripUndefined(payload)));
+    try {
+      child.stdin.end(JSON.stringify(stripUndefined(payload)));
+    } catch (error) {
+      settleReject(error);
+    }
   });
+}
+
+function retryableDispatchCommandError(message) {
+  const error = new Error(message);
+  error.retryable = true;
+  return error;
 }
 
 function normalizeLaunchRequestId(result) {
@@ -411,6 +469,11 @@ function requireRequestId(payload) {
     throw new Error('dispatch requires request_id');
   }
   return requestId;
+}
+
+function normalizePositiveInteger(value, fallback) {
+  const numeric = Number(value);
+  return Number.isInteger(numeric) && numeric > 0 ? numeric : fallback;
 }
 
 function trimTrailingSlash(value) {

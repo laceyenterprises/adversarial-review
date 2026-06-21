@@ -214,14 +214,7 @@ process.stdout.write(JSON.stringify({ launch_request_id: 'standalone-lrq-control
         watch_url: 'standalone://watch/standalone-lrq-controlled-pr-42',
         audit_ref: `standalone://audit/adversarial-review/${CONTROLLED_PR_REVIEW_PAYLOAD.request_id}`,
       });
-      assert.deepEqual(terminalEvents, [{
-        topic: 'health.worker.terminal.standalone-lrq-controlled-pr-42',
-        event: {
-          status: 'accepted',
-          launch_request_id: 'standalone-lrq-controlled-pr-42',
-          request_id: CONTROLLED_PR_REVIEW_PAYLOAD.request_id,
-        },
-      }]);
+      assert.deepEqual(terminalEvents, []);
     } finally {
       for (const [key, value] of Object.entries(previous)) {
         if (value === undefined) delete process.env[key];
@@ -237,4 +230,131 @@ process.stdout.write(JSON.stringify({ launch_request_id: 'standalone-lrq-control
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('standalone dispatchStatus reports dispatching while launch is in flight', async () => {
+  let resolveLaunch;
+  let resolveLaunchStarted;
+  const launchStarted = new Promise((resolve) => {
+    resolveLaunchStarted = resolve;
+  });
+  const launchRelease = new Promise((resolve) => {
+    resolveLaunch = resolve;
+  });
+  const session = await connectAppContract({
+    app_id: 'test.app-contract',
+    mode: 'standalone',
+    standalone_dispatcher: async () => {
+      resolveLaunchStarted();
+      await launchRelease;
+      return 'lrq_pending_then_found';
+    },
+  });
+
+  const dispatchPromise = session.dispatch({ request_id: 'req-pending-status' });
+  await launchStarted;
+
+  assert.deepEqual(await session.dispatchStatus('req-pending-status'), {
+    status: 'dispatching',
+    app_id: 'test.app-contract',
+    request_id: 'req-pending-status',
+  });
+
+  resolveLaunch();
+  await dispatchPromise;
+  assert.deepEqual(await session.dispatchStatus('req-pending-status'), {
+    status: 'found',
+    app_id: 'test.app-contract',
+    request_id: 'req-pending-status',
+    launch_request_id: 'lrq_pending_then_found',
+    watch_url: 'standalone://watch/lrq_pending_then_found',
+    audit_ref: 'standalone://audit/test.app-contract/req-pending-status',
+  });
+});
+
+test('standalone dispatch command timeout rejects and clears in-flight memo entry', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'apc06-dispatch-timeout-'));
+  const dispatchCliPath = join(root, 'hang-dispatch.mjs');
+  writeFileSync(dispatchCliPath, `
+setInterval(() => {}, 1000);
+`, 'utf8');
+
+  try {
+    const session = await connectAppContract({
+      app_id: 'test.app-contract',
+      mode: 'standalone',
+      requestTimeoutMs: 50,
+      dispatchCommand: [process.execPath, dispatchCliPath],
+    });
+
+    await assert.rejects(
+      session.dispatch({ request_id: 'req-timeout' }),
+      /standalone dispatch command timed out after 50ms/,
+    );
+    assert.deepEqual(await session.dispatchStatus('req-timeout'), {
+      status: 'not_found',
+      app_id: 'test.app-contract',
+      request_id: 'req-timeout',
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('standalone dispatch command spawn or stdin errors reject instead of crashing', async () => {
+  const session = await connectAppContract({
+    app_id: 'test.app-contract',
+    mode: 'standalone',
+    requestTimeoutMs: 100,
+    dispatchCommand: ['definitely-missing-standalone-dispatch-command-apc06'],
+  });
+
+  await assert.rejects(
+    session.dispatch({ request_id: 'req-missing-command' }),
+    /ENOENT|spawn definitely-missing-standalone-dispatch-command-apc06/,
+  );
+  assert.deepEqual(await session.dispatchStatus('req-missing-command'), {
+    status: 'not_found',
+    app_id: 'test.app-contract',
+    request_id: 'req-missing-command',
+  });
+});
+
+test('standalone dispatch command decodes split multibyte stdout once', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'apc06-dispatch-utf8-'));
+  const dispatchCliPath = join(root, 'utf8-dispatch.mjs');
+  writeFileSync(dispatchCliPath, `
+const output = Buffer.from(JSON.stringify({ launch_request_id: 'lrq_utf8_é' }), 'utf8');
+const split = output.indexOf(0xc3) + 1;
+process.stdout.write(output.subarray(0, split));
+setTimeout(() => process.stdout.end(output.subarray(split)), 10);
+`, 'utf8');
+
+  try {
+    const session = await connectAppContract({
+      app_id: 'test.app-contract',
+      mode: 'standalone',
+      dispatchCommand: [process.execPath, dispatchCliPath],
+    });
+
+    const accepted = await session.dispatch({ request_id: 'req-utf8' });
+    assert.equal(accepted.launch_request_id, 'lrq_utf8_é');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('standalone accepted dispatch cache is bounded', async () => {
+  const session = await connectAppContract({
+    app_id: 'test.app-contract',
+    mode: 'standalone',
+    standaloneDispatchCacheMaxEntries: 1,
+    standalone_dispatcher: (payload) => `lrq_${payload.request_id}`,
+  });
+
+  await session.dispatch({ request_id: 'req-cache-a' });
+  await session.dispatch({ request_id: 'req-cache-b' });
+
+  assert.equal((await session.dispatchStatus('req-cache-a')).status, 'not_found');
+  assert.equal((await session.dispatchStatus('req-cache-b')).status, 'found');
 });

@@ -1157,6 +1157,26 @@ payload before transient-vs-terminal requeue classification runs. A failed topic
 event that omits `failureClass` is therefore only a wakeup signal; it is not
 trusted as the complete failure record.
 
+- Standalone App Contract sessions are a local dispatch shim for development
+  and controlled deployments that cannot reach an agent-os endpoint. They may
+  resolve launches with either an injected `standalone_dispatcher(payload)`
+  function or a configured `dispatch_command` / `dispatchCommand`. The command
+  is spawned as either a string executable or an argv array, receives the
+  dispatch payload as JSON on stdin, and must write either JSON containing
+  `launch_request_id`, `launchRequestId`, or `dispatchId`, or a JSON string
+  containing the launch request id. A non-zero exit, invalid JSON response,
+  missing launch id, spawn/stdin error, or timeout is a failed dispatch and must
+  clear the in-flight memo entry so the same stable `request_id` can be retried.
+  The timeout is bounded by
+  `request_timeout_ms` / `requestTimeoutMs` (default 10000ms), and a timed-out
+  command is killed before the dispatch promise rejects. Standalone sessions
+  must not emit `health.worker.terminal.<launchRequestId>` on acceptance:
+  terminal topics are reserved for worker-completion lifecycle events from the
+  real App Contract transport. While a standalone launch is still in flight,
+  `dispatchStatus(request_id)` reports `status:"dispatching"`; after acceptance
+  it reports the accepted ticket fields from the bounded in-memory cache, and
+  unknown or evicted request ids report `status:"not_found"`.
+
 - The worker record persists both `launchRequestId` and `dispatchId` from the
   HQ dispatch ticket. `launchRequestId` remains the reply-storage and audit key;
   `dispatchId` is the authoritative handle for `hq dispatch status` and

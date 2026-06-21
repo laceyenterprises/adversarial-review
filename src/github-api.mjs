@@ -1765,10 +1765,11 @@ async function fetchPullRequestMergeability(repo, prNumber, {
       env,
     }, () => readAdapterPrRollup(repo, normalizedPrNumber, { execFileImpl, env }));
     if (adapterResult && typeof adapterResult === 'object' && !Array.isArray(adapterResult)) {
-      return {
-        mergeable: adapterResult.mergeable ?? null,
-        mergeStateStatus: adapterResult.mergeStateStatus ?? null,
-      };
+      const mergeable = adapterResult.mergeable ?? null;
+      const mergeStateStatus = adapterResult.mergeStateStatus ?? null;
+      if (mergeable && mergeStateStatus) {
+        return { mergeable, mergeStateStatus };
+      }
     }
   } catch {
     // Optional adapter failures must not make mergeability sampling mandatory.
@@ -1784,7 +1785,10 @@ async function fetchPullRequestMergeability(repo, prNumber, {
       repo,
       '--json',
       'mergeable,mergeStateStatus',
-    ]);
+    ], {
+      maxBuffer: GH_MAX_BUFFER,
+      env: buildGhEnv(env),
+    });
     const parsed = JSON.parse(String(stdout || '{}'));
     recordApiCallImpl?.({
       category: 'pr_mergeability',

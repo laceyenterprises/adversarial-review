@@ -764,6 +764,61 @@ test('malformed adapter mergeability output falls back to existing gh implementa
   assert.deepEqual(telemetry.events.map((entry) => entry.extra || null), [{ transport: 'github-adapter' }, null]);
 });
 
+test('null adapter mergeability output falls back to sanitized gh implementation', async () => {
+  const mod = await importGithubApiFresh();
+  const telemetry = makeTelemetrySink();
+  const calls = [];
+  const env = {
+    GHA_ADAPTER_BIN: '/fixture/github-adapter',
+    GITHUB_TOKEN: 'fixture-token',
+    SECRET_SHOULD_NOT_PASS: 'nope',
+  };
+
+  const result = await mod.fetchPullRequestMergeability(FIXTURE_REPO, FIXTURE_PR, {
+    env,
+    recordApiCallImpl: telemetry.recordApiCallImpl,
+    execFileImpl: async (command, args, options = {}) => {
+      calls.push({ command, args: [...args], options });
+      if (command === '/fixture/github-adapter') {
+        return {
+          stdout: JSON.stringify({
+            rollup: {
+              number: FIXTURE_PR,
+              mergeable: null,
+              mergeStateStatus: null,
+            },
+          }),
+        };
+      }
+      assert.equal(command, 'gh');
+      assert.deepEqual(args, [
+        'pr',
+        'view',
+        String(FIXTURE_PR),
+        '--repo',
+        FIXTURE_REPO,
+        '--json',
+        'mergeable,mergeStateStatus',
+      ]);
+      assert.equal(options.maxBuffer, 10 * 1024 * 1024);
+      assert.equal(options.env.GH_TOKEN, 'fixture-token');
+      assert.equal(options.env.GITHUB_TOKEN, 'fixture-token');
+      assert.equal(options.env.SECRET_SHOULD_NOT_PASS, undefined);
+      return {
+        stdout: JSON.stringify({
+          mergeable: 'MERGEABLE',
+          mergeStateStatus: 'CLEAN',
+        }),
+      };
+    },
+  });
+
+  assert.deepEqual(result, { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
+  assert.deepEqual(calls.map((call) => call.command), ['/fixture/github-adapter', 'gh']);
+  assert.deepEqual(telemetry.events.map((entry) => entry.category), ['pr_mergeability', 'pr_mergeability']);
+  assert.deepEqual(telemetry.events.map((entry) => entry.extra || null), [{ transport: 'github-adapter' }, null]);
+});
+
 test('github adapter auto-discovery reaches the superproject path and ignores unsafe binaries', async () => {
   const { __test__ } = await importGithubAdapterClientFresh();
   const rootDir = '/Users/airlock/agent-os/tools/adversarial-review';

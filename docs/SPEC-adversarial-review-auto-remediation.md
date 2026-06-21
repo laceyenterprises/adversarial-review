@@ -272,6 +272,10 @@ context reader: PR metadata plus comments, with `labels`, `reviews`, and
 present mergeability fields must not decide whether the review-context adapter
 path engages.
 
+AMA mergeability sampling is adapter-first through the pull-request rollup read
+and falls back to `gh pr view` when the adapter is absent, malformed, or missing
+the required mergeability enums; both paths record `pr_mergeability` telemetry.
+
 The `pull-request-review-bodies-for-head` read kind must return structured
 review objects carrying body, submitted state, reviewed commit/head SHA, submit
 time, and author metadata. String-only body arrays are not sufficiently

@@ -120,7 +120,11 @@ new PR
   `reviewer-command-failed` stored as `[unknown] Command failed...`) use a dedicated
   claim path that atomically promotes the row to `reviewing` and increments
   `infra_auto_recover_attempts` only if the row is still the same failed
-  infrastructure class. Once the counter reaches the cap, the row stays
+  infrastructure class. For `reviewer-command-failed`, the watcher first uses
+  the persisted reviewer session/start evidence to query GitHub for a matching
+  reviewer-bot review posted after the failed attempt started. If one exists,
+  the watcher marks the row `posted`; if the proof cannot be performed, the row
+  remains `failed` rather than retrying. Once the counter reaches the cap, the row stays
   `failed` for operator inspection. The counter resets after a successful
   posted review or an intentional re-review re-arm. `forbidden-fallback`,
   `failed-orphan`, `malformed`, inactive repos, closed/merged PRs, undiscovered

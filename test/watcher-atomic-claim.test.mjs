@@ -70,7 +70,10 @@ const INFRA_RECOVERY_CLAIM_SQL = `UPDATE reviewed_prs
        (? = 'oauth-broken' AND lower(COALESCE(failure_message, '')) LIKE '%[oauth-broken]%') OR
        (? = 'quota-exhausted' AND lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%') OR
        (? = 'reviewer-command-failed' AND (
-         lower(COALESCE(failure_message, '')) = '[unknown] command failed' OR
+         (
+           lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed%' AND
+           lower(COALESCE(failure_message, '')) NOT LIKE '[unknown] command failed with code %'
+         ) OR
          lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed with code %'
        ))
      )`;
@@ -206,6 +209,24 @@ test('infra auto-recovery claim handles reviewer command-failed unknown rows', (
   seedReviewRow(db, {
     reviewStatus: 'failed',
     failureMessage: '[unknown] Command failed with code 1\nstdout tail:\n[reviewer] Starting review: laceyenterprises/agent-os#2322',
+  });
+
+  const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'reviewer-command-failed');
+
+  assert.equal(claim.changes, 1);
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.reviewer_session_uuid, 'session-999');
+  assert.equal(row.failed_at, null);
+  assert.equal(row.failure_message, null);
+  assert.equal(row.infra_auto_recover_attempts, 1);
+});
+
+test('infra auto-recovery claim handles reviewer command-failed no-code rows with diagnostics', () => {
+  const db = setupDb();
+  seedReviewRow(db, {
+    reviewStatus: 'failed',
+    failureMessage: '[unknown] Command failed\nstdout tail:\n[reviewer] Starting review: laceyenterprises/agent-os#2322',
   });
 
   const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'reviewer-command-failed');

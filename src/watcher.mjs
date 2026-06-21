@@ -156,7 +156,8 @@ import {
 } from './review-cycle-cap.mjs';
 import { extractReviewVerdict } from './review-verdict.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
-import { reconcileReviewerSessions } from './reviewer-reattach.mjs';
+import { makeReviewPostedProbe, reconcileReviewerSessions, reviewerBotLogin } from './reviewer-reattach.mjs';
+import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-failed-recovery.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { createWatcherHealthProbe } from './health-probe.mjs';
@@ -2300,7 +2301,10 @@ const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
        (? = 'oauth-broken' AND lower(COALESCE(failure_message, '')) LIKE '%[oauth-broken]%') OR
        (? = 'quota-exhausted' AND lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%') OR
        (? = 'reviewer-command-failed' AND (
-         lower(COALESCE(failure_message, '')) = '[unknown] command failed' OR
+         (
+           lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed%' AND
+           lower(COALESCE(failure_message, '')) NOT LIKE '[unknown] command failed with code %'
+         ) OR
          lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed with code %'
        ))
      )`
@@ -5561,6 +5565,7 @@ async function pollOnce(
   const reviewerMemoryReservationState = { reservedMb: 0 };
   const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({ logger: console });
   const getRoutingTierReadinessForTick = createRoutingTierReadinessProbeCache();
+  const reviewerCommandFailedReviewProbe = makeReviewPostedProbe(octokit);
   async function drainReviewerDispatchCandidates(reason) {
     if (!reviewerPoolConfig.enabled || reviewerDispatchCandidates.length === 0) {
       return { dispatched: 0, maxObservedConcurrency: 0 };
@@ -6289,6 +6294,24 @@ async function pollOnce(
             `failure is not infrastructure-recoverable; leaving evidence intact`
         );
         continue;
+      }
+      if (infraRecoveryClass === 'reviewer-command-failed') {
+        const reconciliation = await reconcileReviewerCommandFailedBeforeRetry({
+          row: current,
+          findPostedReview: reviewerCommandFailedReviewProbe,
+          markPosted: ({ postedAt, row }) => stmtMarkPosted.run(postedAt, row.repo, row.pr_number),
+          settleRunRecord: ({ sessionUuid, state, settledAt, reason }) => settleDurableReviewerRunState({
+            sessionUuid,
+            state,
+            settledAt,
+            reason,
+          }),
+          resolveReviewerLogin: reviewerBotLogin,
+          log: console,
+        });
+        if (reconciliation.handled) {
+          continue;
+        }
       }
       // HRR graceful-degradation for hard provider usage caps. A quota-exhausted
       // reviewer cannot succeed until the provider's cap window lifts, so retrying

@@ -39,6 +39,25 @@ function infraRecoverableFailureClass(reviewRow) {
   if (message.includes('[oauth-broken]')) {
     return 'oauth-broken';
   }
+  // LAC-1359: a reviewer that exited non-zero WITHOUT posting a verdict
+  // (`[unknown] Command failed with code N`, with stdout showing it had already
+  // begun the review) is an infrastructure crash, not a review outcome — the
+  // reviewer process died mid-run for a non-categorized reason (transient host
+  // flakiness, sandbox limits, an OOM, a runtime fault). Before this it returned
+  // null, so the watcher hit the `failed && !infraRecoveryClass` branch and
+  // STRANDED the PR permanently ("Skipping failed review: failure is not
+  // infrastructure-recoverable; leaving evidence intact"), orphaning it from the
+  // pipeline forever (~10 OPEN PRs orphaned this way on 2026-06-21). Classify it
+  // as boundedly-recoverable so the watcher's INFRA_AUTO_RECOVER_CAP gives it a
+  // few retries, then goes terminal for operator inspection once the cap is
+  // exhausted (the actionable alert is preserved). This is SAFE: the caller only
+  // consults this on `review_status === 'failed'` (no verdict was posted), so a
+  // genuine Request-changes verdict is never reopened, and the security-class
+  // `forbidden-fallback` failure is deliberately NOT matched here (it keeps its
+  // own tag and stays terminal).
+  if (/^\[unknown\]\s+command failed(?:\s+with code\s+\d+)?\b/.test(message)) {
+    return 'reviewer-command-failed';
+  }
   return null;
 }
 

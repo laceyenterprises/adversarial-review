@@ -62,6 +62,48 @@ function failedChecks() {
   return [{ name: 'ci', state: 'FAILURE', bucket: 'fail' }];
 }
 
+function hamCommit({
+  sha = 'sha-HAM',
+  parentSha = 'sha-A',
+  author = 'merge-agent-lacey',
+  remediatedFindings = '1 addressed (0 blocking, 1 non-blocking)',
+  files = [{ filename: 'src/fix.mjs' }],
+} = {}) {
+  return {
+    sha,
+    parents: [{ sha: parentSha }],
+    author: { login: author },
+    committer: { login: author },
+    files,
+    commit: {
+      message: [
+        'HAM-02 remediate final adversarial findings',
+        '',
+        'Worker-Class: hammer',
+        'Worker-Ticket: HAM-02',
+        `Reviewed-Head: ${parentSha}`,
+        'Closed-By: hammer (adversarial-pipe-mode)',
+        `Remediated-Findings: ${remediatedFindings}`,
+      ].join('\n'),
+    },
+  };
+}
+
+function hamTimeline({
+  author = 'merge-agent-lacey',
+  remediatedFindings = '1 addressed (0 blocking, 1 non-blocking)',
+} = {}) {
+  return [{
+    id: 12345,
+    body: [
+      'HAM remediation audit',
+      `Remediated-Findings: ${remediatedFindings}`,
+      'Closed-By: hammer (adversarial-pipe-mode)',
+    ].join('\n'),
+    user: { login: author },
+  }];
+}
+
 function transportError(message = 'timed out') {
   const err = new Error(message);
   err.code = 'ETIMEDOUT';
@@ -95,6 +137,8 @@ function makeGhStub({
   views = [],
   checks = [],
   merges = [],
+  commits = {},
+  timeline = [],
 } = {}) {
   const calls = [];
   const queues = {
@@ -125,6 +169,19 @@ function makeGhStub({
       const item = queues.merges.length ? queues.merges.shift() : { stdout: 'Merged abcdef1234567890abcdef1234567890abcdef12\n', stderr: '' };
       if (item instanceof Error) throw item;
       return item;
+    }
+    if (args[0] === 'api') {
+      const pathArg = args[1];
+      const commitMatch = /^repos\/[^/]+\/[^/]+\/commits\/(.+)$/.exec(pathArg);
+      if (commitMatch) {
+        const item = commits[commitMatch[1]];
+        if (item instanceof Error) throw item;
+        return { stdout: JSON.stringify(item || {}), stderr: '' };
+      }
+      if (/^repos\/[^/]+\/[^/]+\/issues\/\d+\/timeline$/.test(pathArg)) {
+        const item = Array.isArray(timeline) ? timeline : [];
+        return { stdout: JSON.stringify(item), stderr: '' };
+      }
     }
     throw new Error(`unexpected gh call: ${cmd} ${args.join(' ')}`);
   }
@@ -196,6 +253,89 @@ test('fast-merge head change requeues through canonical review reset and never m
   assert.equal(audits.at(-1).current_head_sha, 'sha-B');
   assert.equal(audits.at(-1).requeue_path, 'retrigger_helper');
   assert.equal(claimWithWatcherCas(db, 802).changes, 1);
+});
+
+test('fast-merge HAM provenance head change is authorized and merged at the new exact head', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 8021);
+  const audits = [];
+  const gh = makeGhStub({
+    views: [openView('sha-HAM'), openView('sha-HAM')],
+    checks: [successChecks(), successChecks()],
+    commits: { 'sha-HAM': hamCommit({ sha: 'sha-HAM', parentSha: 'sha-A' }) },
+    timeline: hamTimeline(),
+  });
+
+  const result = await processFastMergePR({
+    db,
+    ghClient: gh,
+    repo: REPO,
+    prNumber: 8021,
+    authorizedHeadSha: 'sha-A',
+    auditWriter: (entry) => audits.push(entry),
+  });
+
+  assert.equal(result.status, 'merged');
+  assert.equal(row(db, 8021).pr_state, 'fast_merge_merged');
+  assert.equal(row(db, 8021).review_status, 'fast_merge_merged');
+  assert.equal(mergeCalls(gh).length, 1);
+  assert.deepEqual(mergeCalls(gh)[0].args.slice(-3), ['--match-head-commit', 'sha-HAM', '--delete-branch']);
+  assert.equal(audits.at(-1).authorized_head_sha, 'sha-HAM');
+  assert.equal(audits.at(-1).merged_head_sha, 'sha-HAM');
+  assert.equal(claimWithWatcherCas(db, 8021).changes, 0);
+});
+
+test('fast-merge HAM-looking head still requeues when GitHub provenance is missing', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 8022);
+  const audits = [];
+  const gh = makeGhStub({
+    views: [openView('sha-HAM')],
+    commits: { 'sha-HAM': hamCommit({ sha: 'sha-HAM', parentSha: 'sha-A' }) },
+    timeline: [],
+  });
+
+  const result = await processFastMergePR({
+    db,
+    ghClient: gh,
+    repo: REPO,
+    prNumber: 8022,
+    authorizedHeadSha: 'sha-A',
+    auditWriter: (entry) => audits.push(entry),
+  });
+
+  assert.equal(result.status, 'requeued_head_change');
+  assert.equal(mergeCalls(gh).length, 0);
+  assert.equal(row(db, 8022).review_status, 'pending');
+  assert.equal(audits.at(-1).action, 'head-changed-requeued');
+  assert.equal(audits.at(-1).current_head_sha, 'sha-HAM');
+});
+
+test('fast-merge HAM-authorized new head requeues if the head changes again before merge', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 8023);
+  const audits = [];
+  const gh = makeGhStub({
+    views: [openView('sha-HAM'), openView('sha-C')],
+    checks: [successChecks()],
+    commits: { 'sha-HAM': hamCommit({ sha: 'sha-HAM', parentSha: 'sha-A' }) },
+    timeline: hamTimeline(),
+  });
+
+  const result = await processFastMergePR({
+    db,
+    ghClient: gh,
+    repo: REPO,
+    prNumber: 8023,
+    authorizedHeadSha: 'sha-A',
+    auditWriter: (entry) => audits.push(entry),
+  });
+
+  assert.equal(result.status, 'requeued_head_change');
+  assert.equal(mergeCalls(gh).length, 0);
+  assert.equal(row(db, 8023).review_status, 'pending');
+  assert.equal(audits.at(-1).authorized_head_sha, 'sha-HAM');
+  assert.equal(audits.at(-1).current_head_sha, 'sha-C');
 });
 
 test('fast-merge head change between CI and merge requeues and never merges', async () => {

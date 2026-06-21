@@ -4307,6 +4307,177 @@ function parseGhJson(stdout, fallback = {}) {
   return JSON.parse(String(stdout || '').trim() || JSON.stringify(fallback));
 }
 
+function parseCommitTrailers(message) {
+  const lines = String(message || '').replace(/\r\n/g, '\n').split('\n');
+  const trailers = {};
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index].trim();
+    if (!line) continue;
+    const match = /^([A-Za-z][A-Za-z0-9-]*):[ \t]*(.+)$/.exec(line);
+    if (!match) break;
+    trailers[match[1].trim().toLowerCase()] = match[2].trim();
+  }
+  return trailers;
+}
+
+function parseRemediatedFindingsTrailer(value) {
+  const match = /^\s*(\d+)\s+addressed\s+\((\d+)\s+blocking,\s+(\d+)\s+non-blocking\)\s*$/i
+    .exec(String(value || ''));
+  if (!match) return null;
+  const counts = {
+    total: Number(match[1]),
+    blocking: Number(match[2]),
+    nonBlocking: Number(match[3]),
+  };
+  if (!Object.values(counts).every(Number.isInteger)) return null;
+  if (counts.total !== counts.blocking + counts.nonBlocking) return null;
+  return counts;
+}
+
+function normalizeVerifiedHamCommit(commitJson = {}) {
+  const sha = String(commitJson?.sha || commitJson?.oid || '').trim();
+  const parentSha = String(
+    commitJson?.parents?.[0]?.sha
+      || commitJson?.parents?.nodes?.[0]?.oid
+      || commitJson?.parentSha
+      || '',
+  ).trim();
+  const message = commitJson?.commit?.message || commitJson?.message || '';
+  const changedFiles = Array.isArray(commitJson?.files)
+    ? commitJson.files
+      .map((file) => String(file?.filename || file?.path || '').trim())
+      .filter(Boolean)
+    : [];
+  return {
+    sha,
+    parentSha,
+    trailers: parseCommitTrailers(message),
+    author: commitJson?.author?.login || commitJson?.commit?.author?.login || null,
+    committer: commitJson?.committer?.login || commitJson?.commit?.committer?.login || null,
+    changedFiles,
+  };
+}
+
+function timelineCommentBody(event) {
+  if (!event || typeof event !== 'object') return '';
+  if (typeof event.body === 'string') return event.body;
+  if (typeof event.comment?.body === 'string') return event.comment.body;
+  return '';
+}
+
+function timelineCommentAuthor(event) {
+  return (
+    event?.user?.login
+    || event?.actor?.login
+    || event?.comment?.user?.login
+    || null
+  );
+}
+
+const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set([
+  'hammer-worker',
+  'lacey-hammer-worker',
+  'lacey-hammer-reviewer',
+  'merge-agent-lacey',
+  'github-actions',
+]);
+
+function hamAuditCommentAuthorMatches(author, verifiedCommit) {
+  const commentAuthor = normalizeLogin(author);
+  if (!commentAuthor) return false;
+  const commitAuthor = normalizeLogin(verifiedCommit?.author || verifiedCommit?.committer);
+  if (commitAuthor && commentAuthor === commitAuthor) return true;
+  return HAM_AUDIT_COMMENT_AUTHOR_LOGINS.has(commentAuthor);
+}
+
+function hasMatchingHamAuditComment(timelineJson, verifiedCommit) {
+  const timeline = Array.isArray(timelineJson) ? timelineJson : [];
+  const remediatedFindings = String(verifiedCommit?.trailers?.['remediated-findings'] || '').trim();
+  return timeline.some((event) => {
+    const body = timelineCommentBody(event);
+    if (!body || !hamAuditCommentAuthorMatches(timelineCommentAuthor(event), verifiedCommit)) return false;
+    return body.includes('Closed-By: hammer (adversarial-pipe-mode)')
+      || (remediatedFindings && body.includes(remediatedFindings));
+  });
+}
+
+async function fetchFastMergeHamCommit({ ghClient, repo, headSha }) {
+  const execFileImpl = execFileFromGhClient(ghClient);
+  const { stdout } = await withGhRetry(() => execFileImpl('gh', [
+    'api',
+    `repos/${repo}/commits/${headSha}`,
+  ], {
+    maxBuffer: 5 * 1024 * 1024,
+    timeout: FAST_MERGE_GH_TIMEOUT_MS,
+  }));
+  return normalizeVerifiedHamCommit(parseGhJson(stdout));
+}
+
+async function fetchFastMergeTimeline({ ghClient, repo, prNumber }) {
+  const execFileImpl = execFileFromGhClient(ghClient);
+  const { stdout } = await withGhRetry(() => execFileImpl('gh', [
+    'api',
+    `repos/${repo}/issues/${prNumber}/timeline`,
+    '--paginate',
+  ], {
+    maxBuffer: 5 * 1024 * 1024,
+    timeout: FAST_MERGE_GH_TIMEOUT_MS,
+  }));
+  return parseGhJson(stdout, []);
+}
+
+async function verifyFastMergeHamRemediationHead({
+  ghClient,
+  repo,
+  prNumber,
+  authorizedHeadSha,
+  currentHeadSha,
+  logger = console,
+} = {}) {
+  const reviewedHead = String(authorizedHeadSha || '').trim();
+  const liveHead = String(currentHeadSha || '').trim();
+  if (!reviewedHead || !liveHead || reviewedHead === liveHead) {
+    return { authorized: false, reason: 'not-head-change' };
+  }
+
+  try {
+    const verifiedCommit = await fetchFastMergeHamCommit({ ghClient, repo, headSha: liveHead });
+    const trailers = verifiedCommit.trailers || {};
+    const remediatedFindingCounts = parseRemediatedFindingsTrailer(trailers['remediated-findings']);
+    const commitChecks = {
+      workerClass: trailers['worker-class'] === 'hammer',
+      ticket: /^HAM-\d+$/i.test(String(trailers['worker-ticket'] || '').trim()),
+      reviewedHead: String(trailers['reviewed-head'] || '').trim() === reviewedHead,
+      closedBy: trailers['closed-by'] === 'hammer (adversarial-pipe-mode)',
+      head: verifiedCommit.sha === liveHead,
+      parent: verifiedCommit.parentSha === reviewedHead,
+      nonEmptyCommit: Array.isArray(verifiedCommit.changedFiles) && verifiedCommit.changedFiles.length > 0,
+      remediatedFindings: remediatedFindingCounts !== null,
+    };
+    if (!Object.values(commitChecks).every(Boolean)) {
+      return { authorized: false, reason: 'ham-commit-provenance-invalid', checks: commitChecks };
+    }
+
+    const timeline = await fetchFastMergeTimeline({ ghClient, repo, prNumber });
+    if (!hasMatchingHamAuditComment(timeline, verifiedCommit)) {
+      return { authorized: false, reason: 'ham-audit-comment-missing' };
+    }
+
+    return {
+      authorized: true,
+      reason: 'ham-remediation-head-authorized',
+      authorizedHeadSha: liveHead,
+      reviewedHeadSha: reviewedHead,
+      remediatedFindingCounts,
+    };
+  } catch (err) {
+    logger?.warn?.(
+      `[follow-up-merge-agent] HAM remediation head verification failed for ${repo}#${prNumber}: ${err?.message || err}`
+    );
+    return { authorized: false, reason: 'ham-provenance-lookup-failed' };
+  }
+}
+
 function normalizePrView(parsed = {}) {
   const labels = Array.isArray(parsed.labels) ? parsed.labels : [];
   const state = String(parsed.state || '').trim().toUpperCase();
@@ -4656,6 +4827,7 @@ async function processFastMergePR({
   auditWriter = null,
   logger = console,
 } = {}) {
+  let exactHeadSha = authorizedHeadSha;
   const firstView = await fetchFastMergePrView({ ghClient, repo, prNumber });
   if (firstView.state === 'MERGED' || firstView.mergedAt) {
     const at = firstView.mergedAt || isoNow();
@@ -4710,22 +4882,34 @@ async function processFastMergePR({
     return { status: 'closed' };
   }
 
-  if (!authorizedHeadSha || String(firstView.headRefOid || '') !== String(authorizedHeadSha)) {
-    return auditAndRequeueFastMerge({
-      db,
-      rootDir,
+  if (!exactHeadSha || String(firstView.headRefOid || '') !== String(exactHeadSha)) {
+    const hamAuthorization = await verifyFastMergeHamRemediationHead({
       ghClient,
       repo,
       prNumber,
-      authorizedHeadSha,
+      authorizedHeadSha: exactHeadSha,
       currentHeadSha: firstView.headRefOid || null,
-      labels: firstView.labels,
-      reason: `fast-merge head changed: authorized ${authorizedHeadSha || 'missing'}; current ${firstView.headRefOid || 'missing'}`,
-      action: 'head-changed-requeued',
-      headChanged: true,
-      auditWriter,
       logger,
     });
+    if (hamAuthorization.authorized) {
+      exactHeadSha = hamAuthorization.authorizedHeadSha;
+    } else {
+      return auditAndRequeueFastMerge({
+        db,
+        rootDir,
+        ghClient,
+        repo,
+        prNumber,
+        authorizedHeadSha: exactHeadSha,
+        currentHeadSha: firstView.headRefOid || null,
+        labels: firstView.labels,
+        reason: `fast-merge head changed: authorized ${exactHeadSha || 'missing'}; current ${firstView.headRefOid || 'missing'}`,
+        action: 'head-changed-requeued',
+        headChanged: true,
+        auditWriter,
+        logger,
+      });
+    }
   }
 
   if (hasFastMergeVeto(firstView.labels)) {
@@ -4735,7 +4919,7 @@ async function processFastMergePR({
       ghClient,
       repo,
       prNumber,
-      authorizedHeadSha,
+      authorizedHeadSha: exactHeadSha,
       currentHeadSha: firstView.headRefOid || null,
       labels: firstView.labels,
       reason: 'fast-merge veto label detected; requeueing normal first-pass review',
@@ -4753,7 +4937,7 @@ async function processFastMergePR({
       ghClient,
       repo,
       prNumber,
-      authorizedHeadSha,
+      authorizedHeadSha: exactHeadSha,
       currentHeadSha: firstView.headRefOid || null,
       labels: firstView.labels,
       reason: 'fast-merge authorization label absent; requeueing normal first-pass review',
@@ -4783,7 +4967,7 @@ async function processFastMergePR({
         action: 'blocked',
         repo,
         prNumber,
-        authorizedHeadSha,
+        authorizedHeadSha: exactHeadSha,
         currentHeadSha: firstView.headRefOid,
         failureReason: checkSummary.failureMessage,
         checkConclusions: checkSummary.checkConclusions,
@@ -4796,17 +4980,17 @@ async function processFastMergePR({
   }
 
   const preMergeView = await fetchFastMergePrView({ ghClient, repo, prNumber });
-  if (!authorizedHeadSha || String(preMergeView.headRefOid || '') !== String(authorizedHeadSha)) {
+  if (!exactHeadSha || String(preMergeView.headRefOid || '') !== String(exactHeadSha)) {
     return auditAndRequeueFastMerge({
       db,
       rootDir,
       ghClient,
       repo,
       prNumber,
-      authorizedHeadSha,
+      authorizedHeadSha: exactHeadSha,
       currentHeadSha: preMergeView.headRefOid || null,
       labels: preMergeView.labels,
-      reason: `fast-merge head changed before merge: authorized ${authorizedHeadSha || 'missing'}; current ${preMergeView.headRefOid || 'missing'}`,
+      reason: `fast-merge head changed before merge: authorized ${exactHeadSha || 'missing'}; current ${preMergeView.headRefOid || 'missing'}`,
       action: 'head-changed-requeued',
       headChanged: true,
       auditWriter,
@@ -4820,7 +5004,7 @@ async function processFastMergePR({
       ghClient,
       repo,
       prNumber,
-      authorizedHeadSha,
+      authorizedHeadSha: exactHeadSha,
       currentHeadSha: preMergeView.headRefOid || null,
       labels: preMergeView.labels,
       reason: 'fast-merge veto label detected before merge; requeueing normal first-pass review',
@@ -4837,7 +5021,7 @@ async function processFastMergePR({
       ghClient,
       repo,
       prNumber,
-      authorizedHeadSha,
+      authorizedHeadSha: exactHeadSha,
       currentHeadSha: preMergeView.headRefOid || null,
       labels: preMergeView.labels,
       reason: 'fast-merge authorization label absent before merge; requeueing normal first-pass review',
@@ -4866,7 +5050,7 @@ async function processFastMergePR({
         action: 'blocked',
         repo,
         prNumber,
-        authorizedHeadSha,
+        authorizedHeadSha: exactHeadSha,
         currentHeadSha: preMergeView.headRefOid,
         failureReason: preMergeChecks.summary.failureMessage,
         checkConclusions: preMergeChecks.summary.checkConclusions,
@@ -4884,7 +5068,7 @@ async function processFastMergePR({
       ghClient,
       repo,
       prNumber,
-      matchHeadCommit: authorizedHeadSha,
+      matchHeadCommit: exactHeadSha,
     });
   } catch (err) {
     if (isRetryableGhTransportError(err)) {
@@ -4926,9 +5110,9 @@ async function processFastMergePR({
           action: 'merged',
           repo,
           prNumber,
-          authorizedHeadSha,
+          authorizedHeadSha: exactHeadSha,
           currentHeadSha: postMergeView.headRefOid || preMergeView.headRefOid,
-          mergedHeadSha: postMergeView.headRefOid || authorizedHeadSha,
+          mergedHeadSha: postMergeView.headRefOid || exactHeadSha,
           mergeSha,
           manualMergeDetected: true,
           checkConclusions: checkSummary.checkConclusions,
@@ -4955,7 +5139,7 @@ async function processFastMergePR({
         action: 'blocked',
         repo,
         prNumber,
-        authorizedHeadSha,
+        authorizedHeadSha: exactHeadSha,
         currentHeadSha: preMergeView.headRefOid,
         failureReason: detail || 'GitHub refused fast-merge',
         checkConclusions: checkSummary.checkConclusions,
@@ -4986,9 +5170,9 @@ async function processFastMergePR({
       action: 'merged',
       repo,
       prNumber,
-      authorizedHeadSha,
+      authorizedHeadSha: exactHeadSha,
       currentHeadSha: preMergeView.headRefOid,
-      mergedHeadSha: authorizedHeadSha,
+      mergedHeadSha: exactHeadSha,
       mergeSha,
       checkConclusions: checkSummary.checkConclusions,
       mergeStdout: mergeResult?.stdout || null,

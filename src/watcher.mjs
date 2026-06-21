@@ -61,7 +61,11 @@ import {
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
 } from './reviewer-cascade.mjs';
-import { infraRecoverableFailureClass, reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
+import {
+  infraRecoverableFailureClass,
+  reviewerFailureClassFromStoredRow,
+  unknownReviewerCommandFailureClass,
+} from './reviewer-failure-classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaustion.mjs';
 import {
   createReviewerRuntimeAdapterByName,
@@ -2258,6 +2262,15 @@ const stmtGetPendingFastMergeAudits = db.prepare(
 // The counter below bounds those claim-path recoveries so a persistent infra
 // failure eventually remains terminal instead of retrying forever.
 const INFRA_AUTO_RECOVER_CAP = 3;
+const DEFAULT_REVIEW_UNKNOWN_FAILURE_MAX_RETRIES = 3;
+function resolveReviewUnknownFailureMaxRetries(env = process.env) {
+  const raw = env.REVIEW_UNKNOWN_FAILURE_MAX_RETRIES;
+  if (raw == null || raw === '') return DEFAULT_REVIEW_UNKNOWN_FAILURE_MAX_RETRIES;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) return DEFAULT_REVIEW_UNKNOWN_FAILURE_MAX_RETRIES;
+  return parsed;
+}
+const REVIEW_UNKNOWN_FAILURE_MAX_RETRIES = resolveReviewUnknownFailureMaxRetries();
 // Quota-exhaustion (hard provider usage cap) graceful-degradation backoff.
 // When a reviewer CLI hits a hard usage cap, HRR's domain is "suspend until the
 // cap clears, then resume" — NOT "burn the infra auto-recover budget retrying a
@@ -2307,6 +2320,33 @@ const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
          ) OR
          lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed with code %'
        ))
+     )`
+);
+const stmtMarkUnknownFailureRetryAttemptStarted = db.prepare(
+  `UPDATE reviewed_prs
+     SET review_status = 'reviewing',
+         last_attempted_at = ?,
+         reviewer_session_uuid = ?,
+         reviewer_started_at = NULL,
+         reviewer_head_sha = ?,
+         reviewer_timeout_ms = ?,
+         reviewer_lease_expires_at = ?,
+         reviewer_pgid = NULL,
+         failed_at = NULL,
+         failure_message = NULL
+   WHERE repo = ?
+     AND pr_number = ?
+     AND review_status = 'failed'
+     AND review_attempts < ?
+     AND (
+       lower(COALESCE(failure_message, '')) LIKE '%command failed with code %' OR
+       lower(COALESCE(failure_message, '')) LIKE '%command exited with code %' OR
+       lower(COALESCE(failure_message, '')) LIKE '%non-zero exit code %' OR
+       lower(COALESCE(failure_message, '')) LIKE '%non-zero exit %'
+     )
+     AND (
+       lower(COALESCE(failure_message, '')) LIKE '[unknown]%' OR
+       lower(COALESCE(failure_message, '')) NOT GLOB '[[]*[]]*'
      )`
 );
 const stmtMarkFastMergeAuditPending = db.prepare(
@@ -6298,7 +6338,22 @@ async function pollOnce(
       const infraRecoveryClass = current?.review_status === 'failed'
         ? infraRecoverableFailureClass(current)
         : null;
-      if (current?.review_status === 'failed' && !infraRecoveryClass) {
+      const unknownFailureClass = current?.review_status === 'failed' && !infraRecoveryClass
+        ? unknownReviewerCommandFailureClass(current)
+        : null;
+      const unknownFailureAttempts = Number(current?.review_attempts || 0);
+      const unknownFailureRetryable = Boolean(
+        unknownFailureClass && unknownFailureAttempts < REVIEW_UNKNOWN_FAILURE_MAX_RETRIES
+      );
+      if (current?.review_status === 'failed' && !infraRecoveryClass && !unknownFailureRetryable) {
+        if (unknownFailureClass) {
+          console.log(
+            `[watcher] Unknown reviewer failure retry cap exhausted for ${repoPath}#${prNumber}: ` +
+              `attempts=${unknownFailureAttempts}/${REVIEW_UNKNOWN_FAILURE_MAX_RETRIES}; ` +
+              `leaving evidence intact`
+          );
+          continue;
+        }
         console.log(
           `[watcher] Skipping failed review ${repoPath}#${prNumber}: ` +
             `failure is not infrastructure-recoverable; leaving evidence intact`
@@ -6546,6 +6601,17 @@ async function pollOnce(
                 infraRecoveryClass,
                 infraRecoveryClass
               )
+              : unknownFailureRetryable
+                ? stmtMarkUnknownFailureRetryAttemptStarted.run(
+                  attemptAt,
+                  reviewerSessionUuid,
+                  reviewerHeadSha,
+                  reviewerTimeoutMs,
+                  reviewerLeaseExpiresAt,
+                  repoPath,
+                  prNumber,
+                  REVIEW_UNKNOWN_FAILURE_MAX_RETRIES
+                )
               : stmtMarkAttemptStarted.run(
                 attemptAt,
                 reviewerSessionUuid,
@@ -6573,6 +6639,12 @@ async function pollOnce(
               console.log(
                 `[watcher] Claimed infra-failed review ${repoPath}#${prNumber} ` +
                   `(class=${infraRecoveryClass}, infra attempt ${infraRecoveryAttempts + 1}/${INFRA_AUTO_RECOVER_CAP})`
+              );
+            }
+            if (unknownFailureRetryable) {
+              console.log(
+                `[watcher] Claimed unknown-failed review ${repoPath}#${prNumber} ` +
+                  `(attempt ${unknownFailureAttempts + 1}/${REVIEW_UNKNOWN_FAILURE_MAX_RETRIES})`
               );
             }
             if (afterClaim) {
@@ -7048,6 +7120,7 @@ export {
   maybeFireMergeAgentStuckAlert,
   pollOnce,
   persistReviewerPgid,
+  resolveReviewUnknownFailureMaxRetries,
   readWatcherDrainState,
   reconcilePendingDraftsBeforeSpawn,
   reconcileOrphanedReviewing,

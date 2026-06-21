@@ -77,6 +77,31 @@ const INFRA_RECOVERY_CLAIM_SQL = `UPDATE reviewed_prs
          lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed with code %'
        ))
      )`;
+const UNKNOWN_FAILURE_RETRY_CLAIM_SQL = `UPDATE reviewed_prs
+     SET review_status = 'reviewing',
+         last_attempted_at = ?,
+         reviewer_session_uuid = ?,
+         reviewer_started_at = NULL,
+         reviewer_head_sha = ?,
+         reviewer_timeout_ms = ?,
+         reviewer_lease_expires_at = ?,
+         reviewer_pgid = NULL,
+         failed_at = NULL,
+         failure_message = NULL
+   WHERE repo = ?
+     AND pr_number = ?
+     AND review_status = 'failed'
+     AND review_attempts < ?
+     AND (
+       lower(COALESCE(failure_message, '')) LIKE '%command failed with code %' OR
+       lower(COALESCE(failure_message, '')) LIKE '%command exited with code %' OR
+       lower(COALESCE(failure_message, '')) LIKE '%non-zero exit code %' OR
+       lower(COALESCE(failure_message, '')) LIKE '%non-zero exit %'
+     )
+     AND (
+       lower(COALESCE(failure_message, '')) LIKE '[unknown]%' OR
+       lower(COALESCE(failure_message, '')) NOT GLOB '[[]*[]]*'
+     )`;
 
 function runClaim(db, attemptedAt, repo = REPO, prNumber = PR, {
   sessionUuid = 'session-999',
@@ -118,6 +143,24 @@ function runInfraRecoveryClaim(db, attemptedAt, infraClass = 'oauth-broken', rep
   );
 }
 
+function runUnknownFailureRetryClaim(db, attemptedAt, repo = REPO, prNumber = PR, {
+  sessionUuid = 'session-999',
+  headSha = 'head-999',
+  reviewerTimeoutMs = 20 * 60 * 1000,
+  cap = 3,
+} = {}) {
+  return db.prepare(UNKNOWN_FAILURE_RETRY_CLAIM_SQL).run(
+    attemptedAt,
+    sessionUuid,
+    headSha,
+    reviewerTimeoutMs,
+    '2026-05-02T18:30:00.000Z',
+    repo,
+    prNumber,
+    cap
+  );
+}
+
 const REPO = 'laceyenterprises/agent-os';
 const PR = 999;
 
@@ -129,6 +172,7 @@ function setupDb() {
 
 function seedReviewRow(db, {
   reviewStatus,
+  reviewAttempts = 0,
   lastAttemptedAt = null,
   failedAt = null,
   failureMessage = null,
@@ -146,7 +190,7 @@ function seedReviewRow(db, {
     'claude',
     'open',
     reviewStatus,
-    0,
+    reviewAttempts,
     lastAttemptedAt,
     failedAt,
     failureMessage,
@@ -266,6 +310,96 @@ test('infra auto-recovery claim refuses a changed failure class', () => {
   assert.equal(row.review_status, 'failed');
   assert.equal(row.failure_message, '[cascade] LiteLLM upstream cascade');
   assert.equal(row.infra_auto_recover_attempts, 0);
+});
+
+test('unknown command failure retry claim atomically promotes when under review_attempts budget', () => {
+  const db = setupDb();
+  seedReviewRow(db, {
+    reviewStatus: 'failed',
+    reviewAttempts: 1,
+    failedAt: '2026-05-02T18:00:00.000Z',
+    failureMessage: '[unknown] Command failed with code 1',
+  });
+
+  const claim = runUnknownFailureRetryClaim(db, '2026-05-02T18:10:00.000Z', REPO, PR, { cap: 3 });
+
+  assert.equal(claim.changes, 1);
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.review_attempts, 1, 'claim does not burn the next attempt until the retry settles');
+  assert.equal(row.failed_at, null);
+  assert.equal(row.failure_message, null);
+  assert.equal(row.reviewer_session_uuid, 'session-999');
+});
+
+test('unknown command failure retry claim accepts untagged generic non-zero exits', () => {
+  const db = setupDb();
+  seedReviewRow(db, {
+    reviewStatus: 'failed',
+    reviewAttempts: 1,
+    failedAt: '2026-05-02T18:00:00.000Z',
+    failureMessage: 'reviewer command exited with code 1',
+  });
+
+  const claim = runUnknownFailureRetryClaim(db, '2026-05-02T18:10:00.000Z', REPO, PR, { cap: 3 });
+
+  assert.equal(claim.changes, 1);
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.failure_message, null);
+});
+
+test('unknown command failure retry claim strands with evidence intact after review_attempts budget', () => {
+  const db = setupDb();
+  seedReviewRow(db, {
+    reviewStatus: 'failed',
+    reviewAttempts: 3,
+    failedAt: '2026-05-02T18:00:00.000Z',
+    failureMessage: '[unknown] Command failed with code 1',
+  });
+
+  const claim = runUnknownFailureRetryClaim(db, '2026-05-02T18:10:00.000Z', REPO, PR, { cap: 3 });
+
+  assert.equal(claim.changes, 0);
+  const row = readRow(db);
+  assert.equal(row.review_status, 'failed');
+  assert.equal(row.review_attempts, 3);
+  assert.equal(row.failure_message, '[unknown] Command failed with code 1');
+});
+
+test('unknown command failure retry claim refuses terminal tagged failures', () => {
+  const db = setupDb();
+  seedReviewRow(db, {
+    reviewStatus: 'failed',
+    reviewAttempts: 1,
+    failedAt: '2026-05-02T18:00:00.000Z',
+    failureMessage: '[forbidden-fallback] Command failed with code 1',
+  });
+
+  const claim = runUnknownFailureRetryClaim(db, '2026-05-02T18:10:00.000Z', REPO, PR, { cap: 3 });
+
+  assert.equal(claim.changes, 0);
+  const row = readRow(db);
+  assert.equal(row.review_status, 'failed');
+  assert.equal(row.failure_message, '[forbidden-fallback] Command failed with code 1');
+});
+
+test('quota infra auto-recovery claim remains separate from unknown retry claim', () => {
+  const db = setupDb();
+  seedReviewRow(db, {
+    reviewStatus: 'failed',
+    reviewAttempts: 1,
+    failureMessage: '[quota-exhausted] Command failed with code 1',
+  });
+
+  const unknownClaim = runUnknownFailureRetryClaim(db, '2026-05-02T18:10:00.000Z', REPO, PR, { cap: 3 });
+  assert.equal(unknownClaim.changes, 0);
+
+  const quotaClaim = runInfraRecoveryClaim(db, '2026-05-02T18:11:00.000Z', 'quota-exhausted');
+  assert.equal(quotaClaim.changes, 1);
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.infra_auto_recover_attempts, 1);
 });
 
 test('successful post resets infra auto-recovery budget for later incidents', () => {

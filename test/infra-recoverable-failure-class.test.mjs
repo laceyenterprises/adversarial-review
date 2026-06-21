@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import {
   infraRecoverableFailureClass,
   reviewerFailureClassFromStoredRow,
+  unknownReviewerCommandFailureClass,
 } from '../src/reviewer-failure-classification.mjs';
 
 test('oauth-broken spawn failure is infra-recoverable (the 2026-06-13 incident shape)', () => {
@@ -41,10 +42,41 @@ test('cascade / reviewer-timeout / launchctl-bootstrap remain infra-recoverable'
 test('forbidden-fallback is NOT infra-recoverable (security must stay terminal)', () => {
   const row = { failure_message: 'forbidden fallback: api-key fallback detected; env-strip violation' };
   assert.equal(infraRecoverableFailureClass(row), null);
+  assert.equal(unknownReviewerCommandFailureClass(row), null);
 });
 
 test('a real review verdict / unknown failure is NOT infra-recoverable', () => {
   assert.equal(infraRecoverableFailureClass({ failure_message: 'Request changes: the patch drops a test.' }), null);
   assert.equal(infraRecoverableFailureClass({ failure_message: '' }), null);
   assert.equal(infraRecoverableFailureClass({}), null);
+});
+
+test('unknown reviewer command failures are retryable by the bounded unknown-failure path', () => {
+  assert.equal(
+    infraRecoverableFailureClass({ failure_message: '[unknown] Command failed with code 1' }),
+    null
+  );
+  assert.equal(
+    unknownReviewerCommandFailureClass({ failure_message: '[unknown] Command failed with code 1' }),
+    'unknown'
+  );
+  assert.equal(
+    unknownReviewerCommandFailureClass({ failure_message: 'Command failed with code 1' }),
+    'unknown'
+  );
+});
+
+test('terminal tagged failures are not reclassified as retryable unknown failures', () => {
+  assert.equal(
+    unknownReviewerCommandFailureClass({ failure_message: '[forbidden-fallback] Command failed with code 1' }),
+    null
+  );
+  assert.equal(
+    unknownReviewerCommandFailureClass({ failure_message: '[bug] Command failed with code 1' }),
+    null
+  );
+  assert.equal(
+    unknownReviewerCommandFailureClass({ failure_message: 'Request changes: the patch drops a test.' }),
+    null
+  );
 });

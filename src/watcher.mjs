@@ -2416,6 +2416,16 @@ const stmtReleaseReviewerClaim = db.prepare(
 const stmtMarkPosted = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
 );
+// CAS variant for reviewer-command-failed posted-reconciliation (LAC-1359
+// follow-up). The reconcile path shells out to GitHub (async) BEFORE mutating
+// SQLite, so a generic repo+pr_number UPDATE could overwrite a row that moved on
+// since the probe. This statement ties the `posted` write to the exact `failed`
+// row + reviewer session/start + command-failed shape the probe inspected, so a
+// raced row (new claim/failure/operator action) matches 0 rows instead of being
+// force-posted. Callers MUST check `.changes === 1`.
+const stmtMarkReviewerCommandFailedRecoveredPosted = db.prepare(
+  "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ? AND review_status = 'failed' AND reviewer_session_uuid = ? AND reviewer_started_at = ? AND lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed%'"
+);
 const stmtMarkFailed = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
 );
@@ -6299,7 +6309,13 @@ async function pollOnce(
         const reconciliation = await reconcileReviewerCommandFailedBeforeRetry({
           row: current,
           findPostedReview: reviewerCommandFailedReviewProbe,
-          markPosted: ({ postedAt, row }) => stmtMarkPosted.run(postedAt, row.repo, row.pr_number),
+          markPosted: ({ postedAt, row }) => stmtMarkReviewerCommandFailedRecoveredPosted.run(
+            postedAt,
+            row.repo,
+            row.pr_number,
+            row.reviewer_session_uuid,
+            row.reviewer_started_at,
+          ).changes,
           settleRunRecord: ({ sessionUuid, state, settledAt, reason }) => settleDurableReviewerRunState({
             sessionUuid,
             state,

@@ -45,13 +45,29 @@ async function reconcileReviewerCommandFailedBeforeRetry({
   }
 
   const postedAt = postedReview.submitted_at || new Date().toISOString();
+  // CAS BEFORE settling. `markPosted` must atomically match the exact failed row
+  // + reviewer session this probe inspected and return the number of rows it
+  // changed. If the row moved on between the async GitHub probe and now — a newer
+  // claim flipped it to `reviewing`, a newer failure replaced the session, or an
+  // operator changed it — the CAS matches 0 rows. In that case we must NOT force
+  // `posted` (which would clear failure evidence, reset attempts, and settle a
+  // stale session's run record over the live one); leave the row untouched for
+  // the next poll. Only settle the run record once the CAS provably won.
+  const casChanges = markPosted({ row, postedAt, postedReview });
+  if (casChanges !== 1) {
+    log.warn?.(
+      `[watcher] Skipping reviewer-command-failed auto-recovery for ${row.repo}#${row.pr_number}: ` +
+        `the failed row changed since the GitHub review probe (posted-reconcile CAS matched ${casChanges} row(s)); ` +
+        'leaving evidence intact for the next poll'
+    );
+    return { handled: true, action: 'reconcile-cas-lost', casChanges };
+  }
   await settleRunRecord({
     sessionUuid: row.reviewer_session_uuid,
     state: 'completed',
     settledAt: postedAt,
     reason: 'posted-review-recovered-before-command-failed-retry',
   });
-  markPosted({ row, postedAt, postedReview });
   log.log?.(
     `[watcher] Recovered reviewer-command-failed row ${row.repo}#${row.pr_number}: ` +
       `reviewer session ${row.reviewer_session_uuid} already posted GitHub review at ${postedAt}; ` +

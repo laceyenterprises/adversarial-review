@@ -82,7 +82,10 @@ test('reviewer-command-failed recovery marks already-posted reviews posted inste
       assert.deepEqual(options, { refresh: true });
       return { id: 1234, submitted_at: '2026-06-21T13:02:00.000Z' };
     },
-    markPosted: (payload) => marked.push(payload),
+    markPosted: (payload) => {
+      marked.push(payload);
+      return 1; // CAS matched the inspected failed row
+    },
     settleRunRecord: (payload) => settled.push(payload),
     resolveReviewerLogin: () => 'codex-reviewer-lacey',
     log,
@@ -100,6 +103,30 @@ test('reviewer-command-failed recovery marks already-posted reviews posted inste
     reason: 'posted-review-recovered-before-command-failed-retry',
   });
   assert.match(log.lines.join('\n'), /marked review_status=posted instead of retrying/);
+});
+
+test('reviewer-command-failed recovery does NOT overwrite a row that changed since the probe (CAS lost)', async () => {
+  // The GitHub probe finds a posted review, but between the (async) probe and the
+  // SQLite write the row moved on (new claim / newer failure / operator action),
+  // so the CAS markPosted matches 0 rows. The recovery must treat this as handled
+  // WITHOUT settling the stale session's run record or clearing failure evidence.
+  const settled = [];
+  const log = makeLog();
+
+  const result = await reconcileReviewerCommandFailedBeforeRetry({
+    row: ROW,
+    findPostedReview: async () => ({ id: 1234, submitted_at: '2026-06-21T13:02:00.000Z' }),
+    markPosted: () => 0, // CAS lost: the inspected failed row no longer matches
+    settleRunRecord: (payload) => settled.push(payload),
+    resolveReviewerLogin: () => 'codex-reviewer-lacey',
+    log,
+  });
+
+  assert.equal(result.handled, true);
+  assert.equal(result.action, 'reconcile-cas-lost');
+  assert.equal(result.casChanges, 0);
+  assert.equal(settled.length, 0); // never settle a stale session's run record
+  assert.match(log.lines.join('\n'), /leaving evidence intact for the next poll/);
 });
 
 test('reviewer-command-failed recovery proceeds to bounded retry only after no posted review is found', async () => {

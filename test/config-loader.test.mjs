@@ -122,6 +122,8 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('operator.full_name'), 'Paul Lacey');
     assert.equal(cfg.get('linear.team_name'), 'Laceyenterprises');
     assert.equal(cfg.get('linear.issue_prefix'), 'LAC');
+    // CFG-01 parity: global op.vault mirrored from agent_os_config.
+    assert.equal(cfg.get('op.vault'), 'Cliovault');
     assert.equal(cfg.get('update.channel'), 'rolling');
     assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_per_hour'), 3);
     assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_finding_dedupe_seconds'), 86400);

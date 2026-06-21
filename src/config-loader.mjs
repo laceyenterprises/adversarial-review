@@ -896,6 +896,22 @@ function schemaV1() {
           },
         },
       },
+      // CFG-01 multi-loader parity: Python owns the global `op.vault` key (the
+      // single source of truth for the 1Password vault in op://<vault>/... refs).
+      // The adversarial-review loader does not consume it, but the top-level
+      // schema is __strict, so it must be mirrored here or strict validation
+      // rejects checked-in config.yaml ("op: unknown key"). Keep in lockstep with
+      // agent_os_config `_schema_v1()` `op`.
+      op: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          vault: {
+            __type: TYPE_STRING,
+            __default: 'Cliovault',
+          },
+        },
+      },
       submodules: {
         __type: TYPE_DICT,
         __strict: false,

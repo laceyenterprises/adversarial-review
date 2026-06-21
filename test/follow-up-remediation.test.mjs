@@ -1,7 +1,7 @@
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -18,12 +18,16 @@ import {
   buildDrainSummaryLogLine,
   buildRemediationPrompt,
   buildInheritedPath,
+  attachFollowUpTelemetryListeners,
+  cleanupReconcileClaimArtifacts,
   classifyHqDispatchFailure,
+  connectFollowUpTelemetryListener,
   consumeFollowUpJobsUntilCapacity,
   consumeNextFollowUpJob,
   countPendingFollowUpJobsByRetryWindow,
   digestWorkerFinalMessage,
   dispatchRemediationViaHq,
+  handleRemediationTelemetryEvent,
   installWorkerProvenanceHook,
   auditWorkspaceForContamination,
   isDrainQueueIdle,
@@ -35,6 +39,8 @@ import {
   prepareWorkspaceForJob,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
+  releaseFollowUpReconcileClaim,
+  resolveAdversarialReviewAppSubscribes,
   resolveHqReplyPath,
   resolveHqRoot,
   resolveLocalRepliesRoot,
@@ -42,6 +48,7 @@ import {
   resolveRemediationReplyTarget,
   resolveRemediationWorkspaceRoot,
   remediationWorkerGitIdentity,
+  tryAcquireFollowUpReconcileClaim,
   resetOAuthPreflightCache,
   resolveClaudeCodeCliPath,
   resolveJobRelativePath,
@@ -4050,6 +4057,49 @@ test('reconcileInProgressFollowUpJobs leaves live workers in place', async () =>
   assert.equal(persisted.remediationWorker.state, 'spawned');
 });
 
+test('reconcileInProgressFollowUpJobs skips a job moved after listing and continues', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const first = makeQueuedJob(rootDir, { prNumber: 910, reviewPostedAt: '2026-04-21T08:06:00.000Z' });
+  const second = makeQueuedJob(rootDir, { prNumber: 911, reviewPostedAt: '2026-04-21T08:07:00.000Z' });
+  for (const { claimed } of [first, second]) {
+    const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+    const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+    mkdirSync(artifactDir, { recursive: true });
+    markFollowUpJobSpawned({
+      jobPath: claimed.jobPath,
+      spawnedAt: '2026-04-21T10:01:00.000Z',
+      worker: {
+        processId: 8125,
+        state: 'spawned',
+        workspaceDir: path.relative(rootDir, workspaceDir),
+        outputPath: path.relative(rootDir, path.join(artifactDir, 'codex-last-message.md')),
+        logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      },
+    });
+  }
+
+  let nowCalls = 0;
+  const result = await reconcileInProgressFollowUpJobs({
+    rootDir,
+    now: () => {
+      nowCalls += 1;
+      if (nowCalls === 1) {
+        rmSync(first.claimed.jobPath, { force: true });
+      }
+      return '2026-04-21T10:20:00.000Z';
+    },
+    isWorkerRunning: () => true,
+    resolvePRLifecycleImpl: async () => null,
+    log: { log() {}, warn() {}, error() {} },
+  });
+
+  assert.equal(result.scanned, 2);
+  assert.equal(result.active, 1);
+  assert.equal(result.skipped, 1);
+  assert.equal(result.results.some((entry) => entry.reason === 'follow-up-job-moved'), true);
+  assert.equal(existsSync(`${first.claimed.jobPath}.reconcile.lock`), false);
+});
+
 test('assessWorkerLiveness bounds suspicious worker states for manual inspection', () => {
   const job = {
     remediationWorker: {
@@ -4525,6 +4575,459 @@ test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon 
     assert.equal(completed.job.remediationWorker.dispatchMode, 'hq');
     assert.equal(completed.job.reReview.requested, true);
   });
+});
+
+test('health.worker.terminal topic event completes an HQ remediation worker without dispatch-status polling', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 73, linearTicketId: 'LAC-273' });
+  const hqRoot = path.join(rootDir, 'hq');
+  const workspaceDir = path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId);
+  const promptPath = path.join(workspaceDir, '.adversarial-follow-up', 'prompt.md');
+  mkdirSync(path.dirname(promptPath), { recursive: true });
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+  const { replyPath } = prepareCanonicalReply(rootDir, claimed.job, {
+    hqRoot,
+    launchRequestId: 'lrq_apc05_topic_success',
+  });
+  writeValidReply(replyPath, claimed.job, {
+    reReview: { requested: true, reason: 'Topic-driven worker success should request re-review.' },
+  });
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      dispatchMode: 'hq',
+      completionShape: 'branch-push',
+      launchRequestId: 'lrq_apc05_topic_success',
+      dispatchId: 'dispatch_apc05_topic_success',
+      hqRoot,
+      workspaceDir,
+      promptPath,
+      replyPath,
+      outputPath: null,
+      logPath: null,
+    },
+  });
+
+  const result = await withHqRootEnv(hqRoot, async () => handleRemediationTelemetryEvent({
+    rootDir,
+    topic: 'health.worker.terminal.lrq_apc05_topic_success',
+    event: {
+      lrq: 'lrq_apc05_topic_success',
+      status: 'succeeded',
+    },
+    now: () => '2026-04-21T10:25:00.000Z',
+    execFileImpl: async (command, args) => {
+      throw new Error(`unexpected poll command: ${command} ${args.join(' ')}`);
+    },
+    resolvePRLifecycleImpl: async () => null,
+    requestReviewRereviewImpl: () => ({
+      triggered: true,
+      status: 'pending',
+      reason: 'review-status-reset',
+      reviewRow: { repo: spawned.job.repo, pr_number: spawned.job.prNumber, pr_state: 'open', review_status: 'pending' },
+    }),
+    auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+  }));
+
+  assert.equal(result.action, 'completed');
+  assert.equal(result.reason, 'final-message-artifact-present');
+  assert.equal(result.job.status, 'completed');
+  assert.equal(result.job.remediationWorker.state, 'completed');
+  assert.equal(result.job.remediationWorker.launchRequestId, 'lrq_apc05_topic_success');
+  assert.equal(result.job.completion.dispatchStatus.source, 'app-contract-topic');
+  assert.equal(result.job.completion.dispatchStatus.status, 'succeeded');
+  assert.equal(result.job.reReview.requested, true);
+  assert.equal(existsSync(spawned.jobPath), false);
+});
+
+test('health.worker.terminal succeeded topic waits for durable reply before treating the worker as exited', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 730, linearTicketId: 'LAC-2730' });
+  const hqRoot = path.join(rootDir, 'hq');
+  const workspaceDir = path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId);
+  const promptPath = path.join(workspaceDir, '.adversarial-follow-up', 'prompt.md');
+  mkdirSync(path.dirname(promptPath), { recursive: true });
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+  const { replyPath } = prepareCanonicalReply(rootDir, claimed.job, {
+    hqRoot,
+    launchRequestId: 'lrq_apc05_topic_success_unflushed',
+  });
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      dispatchMode: 'hq',
+      completionShape: 'branch-push',
+      launchRequestId: 'lrq_apc05_topic_success_unflushed',
+      dispatchId: 'dispatch_apc05_topic_success_unflushed',
+      hqRoot,
+      workspaceDir,
+      promptPath,
+      replyPath,
+      outputPath: null,
+      logPath: null,
+    },
+  });
+
+  let statusPolls = 0;
+  const result = await withHqRootEnv(hqRoot, async () => handleRemediationTelemetryEvent({
+    rootDir,
+    topic: 'health.worker.terminal.lrq_apc05_topic_success_unflushed',
+    event: {
+      lrq: 'lrq_apc05_topic_success_unflushed',
+      status: 'succeeded',
+    },
+    now: () => '2026-04-21T10:25:00.000Z',
+    execFileImpl: async (command, args) => {
+      if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+        statusPolls += 1;
+        return {
+          stdout: JSON.stringify({
+            status: 'running',
+            health: 'healthy',
+            workspacePath: spawned.job.remediationWorker.workspaceDir,
+          }),
+          stderr: '',
+        };
+      }
+      throw new Error(`unexpected poll command: ${command} ${args.join(' ')}`);
+    },
+    resolvePRLifecycleImpl: async () => null,
+  }));
+
+  assert.equal(statusPolls, 1, 'missing reply must fall back to canonical HQ status polling');
+  assert.equal(result.action, 'active');
+  assert.equal(result.reason, 'hq-dispatch-running');
+  assert.equal(existsSync(spawned.jobPath), true);
+  assert.equal(existsSync(replyPath), false);
+});
+
+test('health.worker.terminal failed topic event polls HQ status when failureClass is absent', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 720, linearTicketId: 'LAC-2720' });
+  const hqRoot = path.join(rootDir, 'hq');
+  const promptPath = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId, '.adversarial-follow-up', 'prompt.md');
+  mkdirSync(path.dirname(promptPath), { recursive: true });
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      dispatchMode: 'hq',
+      completionShape: 'branch-push',
+      launchRequestId: 'lrq_apc05_topic_failed',
+      dispatchId: 'dispatch_apc05_topic_failed',
+      hqRoot,
+      workspaceDir: path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId),
+      promptPath,
+      replyPath: path.join(hqRoot, 'dispatch', 'remediation-replies', claimed.job.jobId, 'remediation-reply.json'),
+      outputPath: null,
+      logPath: null,
+    },
+  });
+
+  let statusPolls = 0;
+  const result = await withHqRootEnv(hqRoot, async () => handleRemediationTelemetryEvent({
+    rootDir,
+    topic: 'health.worker.terminal.lrq_apc05_topic_failed',
+    event: {
+      lrq: 'lrq_apc05_topic_failed',
+      status: 'failed',
+    },
+    now: () => '2026-04-21T10:25:00.000Z',
+    execFileImpl: async (command, args) => {
+      if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+        statusPolls += 1;
+        return {
+          stdout: JSON.stringify({
+            status: 'failed',
+            health: 'failed',
+            failureClass: 'memory_pressure',
+            failureDetail: 'transient worker startup failure',
+            workspacePath: spawned.job.remediationWorker.workspaceDir,
+          }),
+          stderr: '',
+        };
+      }
+      throw new Error(`unexpected poll command: ${command} ${args.join(' ')}`);
+    },
+    resolvePRLifecycleImpl: async () => null,
+    log: { warn() {}, error() {}, log() {} },
+  }));
+
+  assert.equal(statusPolls, 1, 'failed topic events must fetch canonical HQ failure classification');
+  assert.equal(result.action, 'requeued');
+  assert.equal(result.reason, 'hq-dispatch-transient');
+  assert.match(result.job.remediationPlan.retryHistory.at(-1)?.retryReason || '', /transient worker startup failure/);
+});
+
+test('health.worker.terminal topic event skips when the reconcile claim is held', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 721 });
+  const hqRoot = path.join(rootDir, 'hq');
+  const promptPath = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId, '.adversarial-follow-up', 'prompt.md');
+  mkdirSync(path.dirname(promptPath), { recursive: true });
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      dispatchMode: 'hq',
+      completionShape: 'branch-push',
+      launchRequestId: 'lrq_apc05_claim_held',
+      dispatchId: 'dispatch_apc05_claim_held',
+      hqRoot,
+      workspaceDir: path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId),
+      promptPath,
+      replyPath: path.join(hqRoot, 'dispatch', 'remediation-replies', claimed.job.jobId, 'remediation-reply.json'),
+      outputPath: null,
+      logPath: null,
+    },
+  });
+  writeFileSync(`${spawned.jobPath}.reconcile.lock`, JSON.stringify({
+    claimedAt: '2026-04-21T10:24:59.000Z',
+    ownerPid: process.pid,
+  }), 'utf8');
+
+  const result = await handleRemediationTelemetryEvent({
+    rootDir,
+    topic: 'health.worker.terminal.lrq_apc05_claim_held',
+    event: { status: 'succeeded' },
+    now: () => '2026-04-21T10:25:00.000Z',
+    execFileImpl: async () => {
+      throw new Error('telemetry handler should not reconcile while claim is held');
+    },
+  });
+
+  assert.equal(result.action, 'skipped');
+  assert.equal(result.reason, 'reconcile-claim-held');
+  assert.equal(existsSync(spawned.jobPath), true);
+});
+
+test('health.worker.terminal topic event ignores jobs moved after lookup', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 732 });
+  const hqRoot = path.join(rootDir, 'hq');
+  const promptPath = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId, '.adversarial-follow-up', 'prompt.md');
+  mkdirSync(path.dirname(promptPath), { recursive: true });
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      dispatchMode: 'hq',
+      completionShape: 'branch-push',
+      launchRequestId: 'lrq_apc05_moved_before_read',
+      dispatchId: 'dispatch_apc05_moved_before_read',
+      hqRoot,
+      workspaceDir: path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId),
+      promptPath,
+      replyPath: path.join(hqRoot, 'dispatch', 'remediation-replies', claimed.job.jobId, 'remediation-reply.json'),
+      outputPath: null,
+      logPath: null,
+    },
+  });
+
+  let nowCalls = 0;
+  const result = await handleRemediationTelemetryEvent({
+    rootDir,
+    topic: 'health.worker.terminal.lrq_apc05_moved_before_read',
+    event: { status: 'succeeded' },
+    now: () => {
+      nowCalls += 1;
+      if (nowCalls === 1) {
+        rmSync(spawned.jobPath, { force: true });
+      }
+      return '2026-04-21T10:25:00.000Z';
+    },
+    execFileImpl: async () => {
+      throw new Error('telemetry handler should not poll after the job record moved');
+    },
+    log: { warn() {}, error() {}, log() {} },
+  });
+
+  assert.equal(result.action, 'ignored');
+  assert.equal(result.reason, 'launch-request-not-in-progress');
+  assert.equal(existsSync(`${spawned.jobPath}.reconcile.lock`), false);
+});
+
+test('health.worker.terminal topic event reclaims corrupt reconcile claim locks', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 731 });
+  const hqRoot = path.join(rootDir, 'hq');
+  const workspaceDir = path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId);
+  const promptPath = path.join(workspaceDir, '.adversarial-follow-up', 'prompt.md');
+  mkdirSync(path.dirname(promptPath), { recursive: true });
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+  const { replyPath } = prepareCanonicalReply(rootDir, claimed.job, {
+    hqRoot,
+    launchRequestId: 'lrq_apc05_corrupt_claim',
+  });
+  writeValidReply(replyPath, claimed.job, {
+    reReview: { requested: true, reason: 'Recovered despite a corrupt reconcile claim.' },
+  });
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      dispatchMode: 'hq',
+      completionShape: 'branch-push',
+      launchRequestId: 'lrq_apc05_corrupt_claim',
+      dispatchId: 'dispatch_apc05_corrupt_claim',
+      hqRoot,
+      workspaceDir,
+      promptPath,
+      replyPath,
+      outputPath: null,
+      logPath: null,
+    },
+  });
+  writeFileSync(`${spawned.jobPath}.reconcile.lock`, '{', 'utf8');
+
+  const result = await withHqRootEnv(hqRoot, async () => handleRemediationTelemetryEvent({
+    rootDir,
+    topic: 'health.worker.terminal.lrq_apc05_corrupt_claim',
+    event: {
+      lrq: 'lrq_apc05_corrupt_claim',
+      status: 'succeeded',
+    },
+    now: () => '2026-04-21T10:25:00.000Z',
+    execFileImpl: async (command, args) => {
+      throw new Error(`unexpected poll command: ${command} ${args.join(' ')}`);
+    },
+    resolvePRLifecycleImpl: async () => null,
+    requestReviewRereviewImpl: () => ({
+      triggered: true,
+      status: 'pending',
+      reason: 'review-status-reset',
+      reviewRow: { repo: spawned.job.repo, pr_number: spawned.job.prNumber, pr_state: 'open', review_status: 'pending' },
+    }),
+    auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+  }));
+
+  assert.equal(result.action, 'completed');
+  assert.equal(result.job.status, 'completed');
+  assert.equal(existsSync(spawned.jobPath), false);
+  assert.equal(existsSync(`${spawned.jobPath}.reconcile.lock`), false);
+});
+
+test('releaseFollowUpReconcileClaim preserves a lock reclaimed by another owner', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
+  mkdirSync(inProgressDir, { recursive: true });
+  const jobPath = path.join(inProgressDir, 'reclaimed-job.json');
+  writeFileSync(jobPath, '{}\n', 'utf8');
+
+  const originalClaim = tryAcquireFollowUpReconcileClaim({
+    jobPath,
+    now: () => '2026-04-21T10:00:00.000Z',
+    ownerPid: 1111,
+  });
+  assert.equal(originalClaim.acquired, true);
+
+  const replacementClaim = {
+    claimedAt: '2026-04-21T10:12:00.000Z',
+    ownerPid: 2222,
+    ownerToken: 'owner-2222-token',
+  };
+  writeFileSync(`${jobPath}.reconcile.lock`, `${JSON.stringify(replacementClaim)}\n`, 'utf8');
+
+  releaseFollowUpReconcileClaim(originalClaim);
+
+  assert.equal(existsSync(`${jobPath}.reconcile.lock`), true);
+  assert.deepEqual(JSON.parse(readFileSync(`${jobPath}.reconcile.lock`, 'utf8')), replacementClaim);
+});
+
+test('tryAcquireFollowUpReconcileClaim waits one hour before age-based reclaim', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
+  mkdirSync(inProgressDir, { recursive: true });
+  const jobPath = path.join(inProgressDir, 'stale-live-pid-job.json');
+  writeFileSync(jobPath, '{}\n', 'utf8');
+  writeFileSync(`${jobPath}.reconcile.lock`, `${JSON.stringify({
+    claimedAt: '2026-04-21T10:00:00.000Z',
+    ownerPid: process.pid,
+    ownerToken: 'old-live-pid-token',
+  })}\n`, 'utf8');
+
+  const early = tryAcquireFollowUpReconcileClaim({
+    jobPath,
+    now: () => '2026-04-21T10:12:00.000Z',
+    ownerPid: process.pid,
+  });
+
+  assert.equal(early.acquired, false);
+  assert.equal(early.ownerToken, 'old-live-pid-token');
+
+  const claim = tryAcquireFollowUpReconcileClaim({
+    jobPath,
+    now: () => '2026-04-21T11:01:00.000Z',
+    ownerPid: process.pid,
+  });
+
+  assert.equal(claim.acquired, true);
+  assert.equal(claim.reclaimedStale, true);
+  const persisted = JSON.parse(readFileSync(`${jobPath}.reconcile.lock`, 'utf8'));
+  assert.notEqual(persisted.ownerToken, 'old-live-pid-token');
+  releaseFollowUpReconcileClaim(claim);
+  assert.equal(existsSync(`${jobPath}.reconcile.lock`), false);
+});
+
+test('cleanupReconcileClaimArtifacts removes stale tmp files and stale locks only', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
+  mkdirSync(inProgressDir, { recursive: true });
+  const nowMs = Date.parse('2026-04-21T10:30:00.000Z');
+  const oldMs = Date.parse('2026-04-21T10:00:00.000Z') / 1000;
+  const freshMs = Date.parse('2026-04-21T10:29:45.000Z') / 1000;
+  const staleTmp = path.join(inProgressDir, 'job-a.json.reconcile.lock.100.200.abc.tmp');
+  const freshTmp = path.join(inProgressDir, 'job-b.json.reconcile.lock.100.200.def.tmp');
+  const corruptLock = path.join(inProgressDir, 'job-c.json.reconcile.lock');
+  const liveLock = path.join(inProgressDir, 'job-d.json.reconcile.lock');
+  writeFileSync(staleTmp, 'claim\n', 'utf8');
+  writeFileSync(freshTmp, 'claim\n', 'utf8');
+  writeFileSync(corruptLock, '{', 'utf8');
+  writeFileSync(liveLock, `${JSON.stringify({
+    claimedAt: '2026-04-21T10:29:45.000Z',
+    ownerPid: process.pid,
+    ownerToken: 'live-owner',
+  })}\n`, 'utf8');
+  utimesSync(staleTmp, oldMs, oldMs);
+  utimesSync(freshTmp, freshMs, freshMs);
+  utimesSync(corruptLock, oldMs, oldMs);
+
+  const result = cleanupReconcileClaimArtifacts({
+    rootDir,
+    nowMs,
+    staleMs: 60 * 1000,
+    log: { log() {}, warn() {}, error() {} },
+  });
+
+  assert.equal(result.removedTmp, 1);
+  assert.equal(result.removedLocks, 1);
+  assert.equal(existsSync(staleTmp), false);
+  assert.equal(existsSync(corruptLock), false);
+  assert.equal(existsSync(freshTmp), true);
+  assert.equal(existsSync(liveLock), true);
 });
 
 test('reconcileFollowUpJob requeues a dead HQ remediation worker when dispatch status reports a transient failure with no reply', async () => {
@@ -5050,6 +5553,114 @@ test('dispatchRemediationViaHq omits branch from the agent-os payload when falsy
     assert.equal('branch' in dispatchRequest.body, false);
     assert.equal(dispatchRequest.body.pr_number, 81);
   });
+});
+
+test('dispatchRemediationViaHq registers with CFG app telemetry subscriptions', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  mkdirSync(hqRoot, { recursive: true });
+  const promptPath = path.join(rootDir, 'prompt.md');
+  const replyPath = path.join(rootDir, 'reply.json');
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+
+  await withAppContractDispatchServer(async ({ requests }) => {
+    const env = {
+      ...process.env,
+      AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+      HQ_ROOT: hqRoot,
+      HQ_PARENT_SESSION: 'sess_parent_123',
+      HQ_PROJECT: 'adversarial-review',
+    };
+
+    assert.deepEqual(resolveAdversarialReviewAppSubscribes(env), ['health.worker.*', 'token.*']);
+
+    await dispatchRemediationViaHq({
+      hqRoot,
+      workerClass: 'codex',
+      repo: 'laceyenterprises/clio',
+      prNumber: 82,
+      branch: 'codex/fix-pr-82',
+      promptPath,
+      replyPath,
+      launchRequestId: 'laceyenterprises__clio-pr-82-headabc123',
+      jobId: 'laceyenterprises__clio-pr-82-headabc123',
+      execFileImpl: async () => {
+        throw new Error('agent-os dispatch must not shell out for workspace resolution');
+      },
+      env,
+    });
+
+    const registerRequest = requests.find((entry) => entry.url === '/v1/register');
+    assert.ok(registerRequest);
+    assert.equal(registerRequest.body.app_id, 'adversarial-review');
+    assert.deepEqual(registerRequest.body.subscribes, ['health.worker.*', 'token.*']);
+  });
+});
+
+test('connectFollowUpTelemetryListener registers health.worker handlers for daemon delivery', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const registrations = [];
+  const session = {
+    on(topic, callback) {
+      const registration = { topic, callback, active: true };
+      registrations.push(registration);
+      return () => {
+        registration.active = false;
+      };
+    },
+  };
+  const handled = [];
+  const listener = await connectFollowUpTelemetryListener({
+    rootDir,
+    env: {
+      ...process.env,
+      AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+      HQ_ROOT: path.join(rootDir, 'agent-os-hq'),
+    },
+    connectAppContractImpl: async (options) => {
+      assert.equal(options.app_id, 'adversarial-review');
+      assert.deepEqual(options.subscribes, ['health.worker.*', 'token.*']);
+      return session;
+    },
+    handleTelemetryEventImpl: async (input) => {
+      handled.push(input);
+      return { action: 'active' };
+    },
+    log: { log() {}, warn() {}, error() {} },
+  });
+
+  assert.deepEqual(listener.subscriptions, ['health.worker.*']);
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0].topic, 'health.worker.*');
+
+  await registrations[0].callback(
+    { lrq: 'lrq_listener_delivery', status: 'succeeded' },
+    'health.worker.terminal.lrq_listener_delivery',
+  );
+
+  assert.equal(handled.length, 1);
+  assert.equal(handled[0].rootDir, rootDir);
+  assert.equal(handled[0].topic, 'health.worker.terminal.lrq_listener_delivery');
+  assert.deepEqual(handled[0].event, { lrq: 'lrq_listener_delivery', status: 'succeeded' });
+
+  listener.dispose();
+  assert.equal(registrations[0].active, false);
+});
+
+test('attachFollowUpTelemetryListeners skips non-worker subscription topics', () => {
+  const registrations = [];
+  const listener = attachFollowUpTelemetryListeners({
+    session: {
+      on(topic, callback) {
+        registrations.push({ topic, callback });
+        return () => {};
+      },
+    },
+    subscribes: ['token.*'],
+  });
+
+  assert.deepEqual(listener.subscriptions, []);
+  assert.deepEqual(registrations, []);
 });
 
 test('dispatchRemediationViaHq rejects App Contract tickets without dispatch_id', async () => {

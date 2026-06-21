@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +17,7 @@ import {
   markFollowUpJobFailed,
   markFollowUpJobStopped,
   markFollowUpJobSpawned,
+  readFollowUpJob,
   readRemediationReplyArtifact,
   requeueInProgressFollowUpJobForRetry,
   remediationAttemptNumber,
@@ -364,6 +365,7 @@ function remediationWorkerGitIdentity(workerClass, env = process.env) {
 }
 
 const RECONCILIATION_MAX_ACTIVE_MS = 6 * 60 * 60 * 1000;
+const FOLLOW_UP_RECONCILE_CLAIM_STALE_MS = 60 * 60 * 1000;
 const MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES = 4 * 1024 * 1024;
 
 function logRoundBudgetDecision(log, {
@@ -651,6 +653,44 @@ function parseHqDispatchStatus(stdout) {
     ...payload,
     status,
     health: String(payload?.health || '').trim().toLowerCase() || null,
+  };
+}
+
+function normalizeWorkerTerminalEvent(topic, event = {}) {
+  const normalizedTopic = String(topic || '').trim();
+  const match = normalizedTopic.match(/^health\.worker\.terminal\.([^.\s]+)$/);
+  const lrq = String(event?.lrq || event?.launch_request_id || event?.launchRequestId || match?.[1] || '').trim();
+  const status = String(event?.status || '').trim().toLowerCase();
+  if (!lrq || !status || !HQ_TERMINAL_STATUSES.has(status)) {
+    return null;
+  }
+  return {
+    ...event,
+    topic: normalizedTopic,
+    lrq,
+    status,
+    health: String(event?.health || '').trim().toLowerCase() || (status === 'succeeded' ? 'healthy' : 'failed'),
+  };
+}
+
+function workerTerminalEventMatches(worker, terminalEvent) {
+  if (!worker || !terminalEvent) return false;
+  const workerLrq = String(worker.launchRequestId || worker.launch_request_id || '').trim();
+  return Boolean(workerLrq && workerLrq === terminalEvent.lrq);
+}
+
+function workerTerminalEventToDispatchStatus(terminalEvent, worker = {}) {
+  return {
+    status: terminalEvent.status,
+    health: terminalEvent.health || (terminalEvent.status === 'succeeded' ? 'healthy' : 'failed'),
+    lrq: terminalEvent.lrq,
+    launch_request_id: terminalEvent.lrq,
+    failureClass: terminalEvent.failureClass || terminalEvent.failure_class || null,
+    failureDetail: terminalEvent.failureDetail || terminalEvent.failure_detail || null,
+    recoveryAttempt: terminalEvent.recoveryAttempt ?? terminalEvent.recovery_attempt ?? null,
+    workspacePath: terminalEvent.workspacePath || terminalEvent.workspaceDir || worker.workspaceDir || null,
+    source: 'app-contract-topic',
+    topic: terminalEvent.topic,
   };
 }
 
@@ -1826,6 +1866,20 @@ function spawnRemediationWorker(workerClass, opts) {
   }
 }
 
+function resolveAdversarialReviewAppSubscribes(env = process.env, options = {}) {
+  const cfg = loadRoleConfig({
+    env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+    loaderImpl: options.loaderImpl,
+    contextKey: 'apps.adversarial-review.subscribes',
+  });
+  const subscribes = cfg.get('apps.adversarial-review.subscribes', []);
+  return Array.isArray(subscribes)
+    ? subscribes.map((topic) => String(topic).trim()).filter(Boolean)
+    : [];
+}
+
 async function dispatchRemediationViaHq({
   hqRoot,
   workerClass,
@@ -1871,6 +1925,7 @@ async function dispatchRemediationViaHq({
           app_id: 'adversarial-review',
           mode: appMode,
           hqRoot,
+          subscribes: resolveAdversarialReviewAppSubscribes(env),
         });
         return os.dispatch({
           request_id: requestId,
@@ -3349,8 +3404,26 @@ async function assessWorkerLivenessDetailed(job, {
   isWorkerRunning = isWorkerProcessRunning,
   execFileImpl = execFileAsync,
   env = process.env,
+  workerTerminalEvent = null,
+  workerTerminalReplyPath = null,
 } = {}) {
   const worker = job?.remediationWorker || {};
+  if (
+    workerTerminalEvent?.status === 'succeeded'
+    && workerTerminalEventMatches(worker, workerTerminalEvent)
+    && workerTerminalReplyPath
+    && existsSync(workerTerminalReplyPath)
+  ) {
+    const nowAt = parseIsoTime(now());
+    const spawnedAt = parseIsoTime(worker.spawnedAt);
+    const ageMs = nowAt !== null && spawnedAt !== null ? nowAt - spawnedAt : null;
+    return {
+      state: 'exited',
+      reason: `health-worker-terminal-${workerTerminalEvent.status}`,
+      ageMs,
+      dispatchStatus: workerTerminalEventToDispatchStatus(workerTerminalEvent, worker),
+    };
+  }
   if (!worker?.dispatchId || worker?.dispatchMode !== 'hq') {
     return assessWorkerLiveness(job, { now, isWorkerRunning });
   }
@@ -3694,6 +3767,7 @@ async function reconcileFollowUpJob({
   resolvePRLifecycleImpl = resolvePRLifecycle,
   auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
   execFileImpl = execFileAsync,
+  workerTerminalEvent = null,
   log = console,
 } = {}) {
   const worker = job?.remediationWorker;
@@ -3707,10 +3781,22 @@ async function reconcileFollowUpJob({
     };
   }
 
+  let paths = null;
+  let pathsError = null;
+  if (workerTerminalEvent?.status === 'succeeded' && workerTerminalEventMatches(worker, workerTerminalEvent)) {
+    try {
+      paths = buildReconciliationPaths(rootDir, job);
+    } catch (err) {
+      pathsError = err;
+    }
+  }
+
   const liveness = await assessWorkerLivenessDetailed(job, {
     now,
     isWorkerRunning,
     execFileImpl,
+    workerTerminalEvent,
+    workerTerminalReplyPath: paths?.replyPath || null,
   });
   const lifecycle = await resolveJobPRLifecycleSafe({
     rootDir,
@@ -3862,9 +3948,13 @@ async function reconcileFollowUpJob({
     };
   }
 
-  let paths;
   try {
-    paths = buildReconciliationPaths(rootDir, job);
+    if (!paths && !pathsError) {
+      paths = buildReconciliationPaths(rootDir, job);
+    }
+    if (pathsError) {
+      throw pathsError;
+    }
   } catch (err) {
     const invalidPathFailure = { code: 'invalid-output-path', message: err.message };
     const { commentDelivery: invalidPathDelivery } = buildReconcileCommentDelivery({
@@ -4136,8 +4226,9 @@ async function reconcileFollowUpJob({
         }
         let auditWorkspaceDir = paths.workspaceDir;
         if (worker?.dispatchMode === 'hq') {
+          const topicWorkspaceDir = parseHqWorkerWorkspaceFromPayload(liveness?.dispatchStatus || {});
           try {
-            auditWorkspaceDir = await resolveHqWorkerWorkspace({
+            auditWorkspaceDir = topicWorkspaceDir || await resolveHqWorkerWorkspace({
               worker,
               execFileImpl,
             }) || paths.workspaceDir;
@@ -4421,6 +4512,7 @@ async function reconcileFollowUpJob({
       preview: summarizeWorkerFinalMessage(finalMessage.text, 240),
       finalMessageSummary: summarizeWorkerFinalMessage(finalMessage.text, 120),
       logPath: worker.logPath || null,
+      ...(worker?.dispatchMode === 'hq' ? { dispatchStatus: liveness?.dispatchStatus || null } : {}),
     };
 
     // Gate the terminal transition on whether the rereview was actually
@@ -4827,6 +4919,171 @@ async function reconcileFollowUpJob({
   };
 }
 
+function reconcileClaimPath(jobPath) {
+  return `${jobPath}.reconcile.lock`;
+}
+
+function buildReconcileClaimOwnerToken({ ownerPid, claimedAt }) {
+  return `${ownerPid}:${claimedAt}:${Math.random().toString(16).slice(2)}`;
+}
+
+function writeReconcileClaimLock(lockPath, payload) {
+  const tmpPath = `${lockPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+  try {
+    writeFileSync(tmpPath, payload, { encoding: 'utf8', flag: 'wx' });
+    linkSync(tmpPath, lockPath);
+    return true;
+  } catch (err) {
+    if (err?.code === 'EEXIST') {
+      return false;
+    }
+    throw err;
+  } finally {
+    rmSync(tmpPath, { force: true });
+  }
+}
+
+function readReconcileClaimLock(lockPath) {
+  try {
+    return JSON.parse(readFileSync(lockPath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function tryAcquireFollowUpReconcileClaim({ jobPath, now = () => new Date().toISOString(), ownerPid = process.pid } = {}) {
+  const lockPath = reconcileClaimPath(jobPath);
+  const claimedAt = now();
+  const ownerToken = buildReconcileClaimOwnerToken({ ownerPid, claimedAt });
+  const payload = `${JSON.stringify({ claimedAt, ownerPid, ownerToken })}\n`;
+  if (writeReconcileClaimLock(lockPath, payload)) {
+    return { acquired: true, lockPath, claimedAt, ownerPid, ownerToken };
+  }
+
+  const existing = readReconcileClaimLock(lockPath);
+  const corruptOrInvalid = existing === null;
+  const claimedAtMs = Date.parse(existing?.claimedAt || '');
+  const nowMs = Date.parse(claimedAt);
+  const hasValidClaimedAt = Number.isFinite(claimedAtMs);
+  const stale = corruptOrInvalid
+    || !hasValidClaimedAt
+    || (Number.isFinite(nowMs) && nowMs - claimedAtMs > FOLLOW_UP_RECONCILE_CLAIM_STALE_MS);
+  if (!stale) {
+    return {
+      acquired: false,
+      lockPath,
+      claimedAt: existing?.claimedAt || null,
+      ownerPid: existing?.ownerPid || null,
+      ownerToken: existing?.ownerToken || null,
+    };
+  }
+
+  rmSync(lockPath, { force: true });
+  if (writeReconcileClaimLock(lockPath, payload)) {
+    return { acquired: true, lockPath, claimedAt, ownerPid, ownerToken, reclaimedStale: true };
+  }
+  return { acquired: false, lockPath, claimedAt: null, ownerPid: null };
+}
+
+function reconcileClaimMatchesOwner(existing, claim) {
+  if (!existing || !claim) return false;
+  if (claim.ownerToken) {
+    return existing.ownerToken === claim.ownerToken;
+  }
+  return existing.claimedAt === claim.claimedAt
+    && Number(existing.ownerPid) === Number(claim.ownerPid);
+}
+
+function releaseFollowUpReconcileClaim(claim) {
+  if (!claim?.acquired || !claim?.lockPath) return;
+  const existing = readReconcileClaimLock(claim.lockPath);
+  if (reconcileClaimMatchesOwner(existing, claim)) {
+    rmSync(claim.lockPath, { force: true });
+  }
+}
+
+function cleanupReconcileClaimArtifacts({
+  rootDir = ROOT,
+  nowMs = Date.now(),
+  staleMs = FOLLOW_UP_RECONCILE_CLAIM_STALE_MS,
+  log = console,
+} = {}) {
+  const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
+  let scanned = 0;
+  let removedTmp = 0;
+  let removedLocks = 0;
+  let skipped = 0;
+  let errors = 0;
+  let entries = [];
+  try {
+    entries = readdirSync(inProgressDir);
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      return { scanned, removedTmp, removedLocks, skipped, errors };
+    }
+    throw err;
+  }
+
+  for (const entry of entries) {
+    const isTmpClaim = entry.includes('.reconcile.lock.') && entry.endsWith('.tmp');
+    const isClaimLock = entry.endsWith('.reconcile.lock');
+    if (!isTmpClaim && !isClaimLock) continue;
+    scanned += 1;
+    const entryPath = join(inProgressDir, entry);
+    let stat = null;
+    try {
+      stat = lstatSync(entryPath);
+    } catch (err) {
+      if (err?.code === 'ENOENT') {
+        skipped += 1;
+        continue;
+      }
+      errors += 1;
+      log.warn?.(`[follow-up-remediation] reconcile claim artifact stat failed for ${entryPath}: ${err?.message || err}`);
+      continue;
+    }
+    if (!stat.isFile()) {
+      skipped += 1;
+      continue;
+    }
+
+    const ageMs = nowMs - stat.mtimeMs;
+    if (isTmpClaim) {
+      if (ageMs <= staleMs) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        rmSync(entryPath, { force: true });
+        removedTmp += 1;
+      } catch (err) {
+        errors += 1;
+        log.warn?.(`[follow-up-remediation] reconcile claim tmp cleanup failed for ${entryPath}: ${err?.message || err}`);
+      }
+      continue;
+    }
+
+    const existing = readReconcileClaimLock(entryPath);
+    const claimedAtMs = Date.parse(existing?.claimedAt || '');
+    const lockAgeMs = Number.isFinite(claimedAtMs) ? nowMs - claimedAtMs : ageMs;
+    const stale = existing === null
+      || !Number.isFinite(claimedAtMs)
+      || lockAgeMs > staleMs;
+    if (!stale) {
+      skipped += 1;
+      continue;
+    }
+    try {
+      rmSync(entryPath, { force: true });
+      removedLocks += 1;
+    } catch (err) {
+      errors += 1;
+      log.warn?.(`[follow-up-remediation] reconcile claim lock cleanup failed for ${entryPath}: ${err?.message || err}`);
+    }
+  }
+  return { scanned, removedTmp, removedLocks, skipped, errors };
+}
+
 async function reconcileInProgressFollowUpJobs({
   rootDir = ROOT,
   now = () => new Date().toISOString(),
@@ -4845,6 +5102,13 @@ async function reconcileInProgressFollowUpJobs({
   // by accident; this reset makes it robust against a future long-
   // running tick loop that folds reconciliation in.
   resetRoleConfigCache();
+  const cleanup = cleanupReconcileClaimArtifacts({ rootDir, log });
+  if (cleanup.removedTmp || cleanup.removedLocks || cleanup.errors) {
+    log.log?.(
+      `[follow-up-remediation] reconcile claim cleanup scanned=${cleanup.scanned} ` +
+      `removedTmp=${cleanup.removedTmp} removedLocks=${cleanup.removedLocks} errors=${cleanup.errors}`
+    );
+  }
   const jobs = listInProgressFollowUpJobs(rootDir);
   // Sequential, not Promise.all: each comment post is a network call to
   // GitHub, and if many jobs land on the same PR we'd rather queue a
@@ -4853,21 +5117,58 @@ async function reconcileInProgressFollowUpJobs({
   // jobs at most), so serial is the right tradeoff.
   const results = [];
   for (const { job, jobPath } of jobs) {
-    /* eslint-disable no-await-in-loop */
-    const result = await reconcileFollowUpJob({
-      rootDir,
-      job,
-      jobPath,
-      now,
-      isWorkerRunning,
-      postCommentImpl,
-      requestReviewRereviewImpl,
-      resolvePRLifecycleImpl,
-      execFileImpl,
-      log,
-    });
-    results.push(result);
-    /* eslint-enable no-await-in-loop */
+    const claim = tryAcquireFollowUpReconcileClaim({ jobPath, now });
+    if (!claim.acquired) {
+      results.push({
+        action: 'skipped',
+        reason: 'reconcile-claim-held',
+        job,
+        jobPath,
+      });
+      continue;
+    }
+    try {
+      if (!existsSync(jobPath)) {
+        results.push({
+          action: 'skipped',
+          reason: 'follow-up-job-moved',
+          job,
+          jobPath,
+        });
+        continue;
+      }
+      let currentJob;
+      try {
+        currentJob = readFollowUpJob(jobPath);
+      } catch (err) {
+        const missing = err?.code === 'ENOENT';
+        log.warn?.(
+          `[follow-up-remediation] skipped unreadable in-progress job ${jobPath}: ${err?.message || err}`
+        );
+        results.push({
+          action: 'skipped',
+          reason: missing ? 'follow-up-job-moved' : 'follow-up-job-read-failed',
+          job,
+          jobPath,
+        });
+        continue;
+      }
+      const result = await reconcileFollowUpJob({
+        rootDir,
+        job: currentJob,
+        jobPath,
+        now,
+        isWorkerRunning,
+        postCommentImpl,
+        requestReviewRereviewImpl,
+        resolvePRLifecycleImpl,
+        execFileImpl,
+        log,
+      });
+      results.push(result);
+    } finally {
+      releaseFollowUpReconcileClaim(claim);
+    }
   }
 
   return {
@@ -4880,6 +5181,188 @@ async function reconcileInProgressFollowUpJobs({
     skipped: results.filter((result) => result.action === 'skipped').length,
     results,
   };
+}
+
+function findInProgressFollowUpJobByLaunchRequestId(rootDir, launchRequestId) {
+  const lrq = String(launchRequestId || '').trim();
+  if (!lrq) return null;
+  for (const entry of listInProgressFollowUpJobs(rootDir)) {
+    const workerLrq = String(entry.job?.remediationWorker?.launchRequestId || '').trim();
+    if (workerLrq === lrq) return entry;
+  }
+  return null;
+}
+
+async function handleRemediationTelemetryEvent({
+  rootDir = ROOT,
+  topic,
+  event,
+  now = () => new Date().toISOString(),
+  isWorkerRunning = isWorkerProcessRunning,
+  postCommentImpl = postRemediationOutcomeComment,
+  requestReviewRereviewImpl = requestReviewRereview,
+  resolvePRLifecycleImpl = resolvePRLifecycle,
+  auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
+  execFileImpl = execFileAsync,
+  log = console,
+} = {}) {
+  const terminalEvent = normalizeWorkerTerminalEvent(topic, event);
+  if (!terminalEvent) {
+    return { action: 'ignored', reason: 'unsupported-topic-event' };
+  }
+  const found = findInProgressFollowUpJobByLaunchRequestId(rootDir, terminalEvent.lrq);
+  if (!found) {
+    return { action: 'ignored', reason: 'launch-request-not-in-progress', lrq: terminalEvent.lrq };
+  }
+  const claim = tryAcquireFollowUpReconcileClaim({ jobPath: found.jobPath, now });
+  if (!claim.acquired) {
+    return {
+      action: 'skipped',
+      reason: 'reconcile-claim-held',
+      lrq: terminalEvent.lrq,
+      job: found.job,
+      jobPath: found.jobPath,
+    };
+  }
+  try {
+    if (!existsSync(found.jobPath)) {
+      return { action: 'ignored', reason: 'launch-request-not-in-progress', lrq: terminalEvent.lrq };
+    }
+    let currentJob;
+    try {
+      currentJob = readFollowUpJob(found.jobPath);
+    } catch (err) {
+      const missing = err?.code === 'ENOENT';
+      log.warn?.(
+        `[follow-up-remediation] skipped telemetry reconcile for unreadable job ${found.jobPath}: ${err?.message || err}`
+      );
+      return {
+        action: 'ignored',
+        reason: missing ? 'launch-request-not-in-progress' : 'follow-up-job-read-failed',
+        lrq: terminalEvent.lrq,
+        jobPath: found.jobPath,
+      };
+    }
+    if (!workerTerminalEventMatches(currentJob?.remediationWorker, terminalEvent)) {
+      return { action: 'ignored', reason: 'launch-request-not-current-worker', lrq: terminalEvent.lrq };
+    }
+    // Topic-driven reconcile uses the same per-job claim as the periodic
+    // scanner, so side effects inside reconcileFollowUpJob remain single-writer.
+    return reconcileFollowUpJob({
+      rootDir,
+      job: currentJob,
+      jobPath: found.jobPath,
+      now,
+      isWorkerRunning,
+      postCommentImpl,
+      requestReviewRereviewImpl,
+      resolvePRLifecycleImpl,
+      auditWorkspaceForContaminationImpl,
+      execFileImpl,
+      workerTerminalEvent: terminalEvent,
+      log,
+    });
+  } finally {
+    releaseFollowUpReconcileClaim(claim);
+  }
+}
+
+function resolveFollowUpTelemetryTopics(subscribes = []) {
+  const topics = [];
+  for (const topic of subscribes) {
+    const normalized = String(topic || '').trim();
+    if (!normalized) continue;
+    if (normalized === 'health.worker.*' || normalized.startsWith('health.worker.')) {
+      topics.push(normalized);
+    }
+  }
+  return [...new Set(topics)];
+}
+
+function attachFollowUpTelemetryListeners({
+  session,
+  rootDir = ROOT,
+  subscribes = ['health.worker.*'],
+  now = () => new Date().toISOString(),
+  isWorkerRunning = isWorkerProcessRunning,
+  postCommentImpl = postRemediationOutcomeComment,
+  requestReviewRereviewImpl = requestReviewRereview,
+  resolvePRLifecycleImpl = resolvePRLifecycle,
+  auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
+  execFileImpl = execFileAsync,
+  handleTelemetryEventImpl = handleRemediationTelemetryEvent,
+  log = console,
+} = {}) {
+  if (!session || typeof session.on !== 'function') {
+    throw new Error('follow-up telemetry listener requires an App Contract session with on()');
+  }
+  const topics = resolveFollowUpTelemetryTopics(subscribes);
+  const unsubscribers = topics.map((topicPattern) => session.on(topicPattern, async (event, topic) => {
+    const deliveredTopic = String(topic || topicPattern);
+    const result = await handleTelemetryEventImpl({
+      rootDir,
+      topic: deliveredTopic,
+      event,
+      now,
+      isWorkerRunning,
+      postCommentImpl,
+      requestReviewRereviewImpl,
+      resolvePRLifecycleImpl,
+      auditWorkspaceForContaminationImpl,
+      execFileImpl,
+      log,
+    });
+    if (!['ignored', 'skipped'].includes(result?.action)) {
+      log.log?.(`[follow-up-remediation] telemetry reconcile ${deliveredTopic}: ${result?.action || 'unknown'}`);
+    }
+    return result;
+  }));
+  return {
+    session,
+    subscriptions: topics,
+    dispose: () => {
+      for (const unsubscribe of unsubscribers) unsubscribe();
+    },
+  };
+}
+
+async function connectFollowUpTelemetryListener({
+  rootDir = ROOT,
+  env = process.env,
+  hqRoot = env.HQ_ROOT,
+  connectAppContractImpl = connectAppContract,
+  log = console,
+  ...listenerOptions
+} = {}) {
+  const subscribes = resolveAdversarialReviewAppSubscribes(env);
+  const topics = resolveFollowUpTelemetryTopics(subscribes);
+  if (topics.length === 0) {
+    return { session: null, subscriptions: [], dispose: () => {} };
+  }
+  const mode = resolveAdversarialReviewAppMode(env);
+  const session = await connectAppContractImpl({
+    app_id: 'adversarial-review',
+    mode,
+    hqRoot,
+    subscribes,
+  });
+  const listener = attachFollowUpTelemetryListeners({
+    session,
+    rootDir,
+    subscribes: topics,
+    log,
+    ...listenerOptions,
+  });
+  const topicList = listener.subscriptions.join(',');
+  if (mode === 'agent-os') {
+    log.log?.(
+      `[follow-up-remediation] App Contract telemetry listener registered for ${topicList}; ` +
+      'inbound topic delivery transport is pending, so periodic reconcile remains authoritative'
+    );
+  } else {
+    log.log?.(`[follow-up-remediation] App Contract telemetry listener subscribed to ${topicList}`);
+  }
+  return listener;
 }
 
 async function consumeNextFollowUpJob({
@@ -5587,6 +6070,10 @@ export {
   buildInheritedPath,
   consumeFollowUpJobsUntilCapacity,
   consumeNextFollowUpJob,
+  attachFollowUpTelemetryListeners,
+  cleanupReconcileClaimArtifacts,
+  connectFollowUpTelemetryListener,
+  handleRemediationTelemetryEvent,
   inspectWorkspaceState,
   digestWorkerFinalMessage,
   isWorkerProcessRunning,
@@ -5598,6 +6085,8 @@ export {
   REMEDIATION_WORKER_IDENTITY_DEFAULTS,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
+  releaseFollowUpReconcileClaim,
+  tryAcquireFollowUpReconcileClaim,
   lifecycleStopDecision,
   dispatchRemediationViaHq,
   resolveCodexCliPath,
@@ -5605,6 +6094,7 @@ export {
   resolveHqReplyPath,
   prepareHqReplyLandingPad,
   resolveHqRoot,
+  resolveAdversarialReviewAppSubscribes,
   resolveLocalRepliesRoot,
   resolveRemediationReplyTarget,
   resolveRemediationWorkspaceRoot,

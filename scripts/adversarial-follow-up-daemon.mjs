@@ -38,6 +38,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   REMEDIATION_MAX_CONCURRENT_JOBS_ENV,
+  connectFollowUpTelemetryListener,
   consumeFollowUpJobsUntilCapacity,
   isWorkerProcessRunning,
   resolveRemediationWorkspaceRoot,
@@ -60,6 +61,7 @@ const ROOT = resolve(__dirname, '..');
 const TICK_INTERVAL_SECONDS = Number(process.env.TICK_INTERVAL_SECONDS) || 120;
 const TICK_INTERVAL_MS = TICK_INTERVAL_SECONDS * 1000;
 const STOPPED_ARCHIVE_INTERVAL_MS = 60 * 60 * 1000;
+const TELEMETRY_LISTENER_START_TIMEOUT_DEFAULT_MS = 5000;
 export const REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS_ENV =
   'ADVERSARIAL_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS';
 // The reviewer-token handoff floor for spawning a remediation worker. The old
@@ -397,11 +399,72 @@ function installSignalHandlers() {
   }
 }
 
+function resolveTelemetryListenerStartTimeoutMs(env = process.env) {
+  const raw = env.ADVERSARIAL_REVIEW_TELEMETRY_LISTENER_START_TIMEOUT_MS;
+  if (raw == null || raw === '') return TELEMETRY_LISTENER_START_TIMEOUT_DEFAULT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : TELEMETRY_LISTENER_START_TIMEOUT_DEFAULT_MS;
+}
+
+async function startFollowUpTelemetryListener({
+  rootDir = ROOT,
+  env = process.env,
+  connectFollowUpTelemetryListenerImpl = connectFollowUpTelemetryListener,
+  log = console,
+} = {}) {
+  const timeoutMs = resolveTelemetryListenerStartTimeoutMs(env);
+  let timeoutId = null;
+  let timedOut = false;
+  try {
+    const connectPromise = Promise.resolve().then(() => (
+      connectFollowUpTelemetryListenerImpl({ rootDir, env, log })
+    ));
+    connectPromise.catch((err) => {
+      if (timedOut) {
+        log.error?.(
+          `[follow-up-daemon ${ts()}] App Contract telemetry listener late failure: ${err?.message || err}`
+        );
+      }
+    });
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        reject(new Error(`telemetry listener startup timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+    const listener = await Promise.race([connectPromise, timeoutPromise]);
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+    if (listener?.subscriptions?.length) {
+      log.log?.(
+        `[follow-up-daemon ${ts()}] App Contract telemetry listener registered ` +
+        `subscriptions=${listener.subscriptions.join(',')}`
+      );
+    } else {
+      log.log?.(`[follow-up-daemon ${ts()}] App Contract telemetry listener skipped; no health.worker subscriptions configured`);
+    }
+    return listener;
+  } catch (err) {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+    log.error?.(
+      `[follow-up-daemon ${ts()}] App Contract telemetry listener disabled: ${err?.message || err}`
+    );
+    return null;
+  }
+}
+
 async function main() {
   if (process.argv.includes('--with-hq-integration')) {
     process.env.ADV_WITH_HQ_INTEGRATION = '1';
   }
   installSignalHandlers();
+  const telemetryListener = await startFollowUpTelemetryListener();
   logInfo(
     `startup complete; entering tick loop (interval=${TICK_INTERVAL_SECONDS}s ` +
     `${REMEDIATION_MAX_CONCURRENT_JOBS_ENV}=${MAX_CONCURRENT_REMEDIATION_JOBS})`
@@ -496,6 +559,7 @@ async function main() {
   }
 
   logInfo('exiting tick loop');
+  telemetryListener?.dispose?.();
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -508,10 +572,12 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 export {
   main,
   resolveRemediationWorkerTokenMinLifetimeMs,
+  resolveTelemetryListenerStartTimeoutMs,
   normalizeMaintenanceSweepState,
   readMaintenanceSweepState,
   reviewerTokenHandoffUnsafeRoles,
   runStoppedArchiveSweepIfDue,
   shouldConsumeAfterReviewerTokenRefresh,
+  startFollowUpTelemetryListener,
   writeMaintenanceSweepState,
 };

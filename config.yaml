@@ -101,3 +101,9 @@ feature_flags:
   # Default false because degraded alert-free startup must be an explicit choice.
   # Motivation: adversarial-watcher degraded bring-up path / CFG-05.
   allow_missing_alert_to: false
+
+apps:
+  adversarial-review:
+    subscribes:
+      - health.worker.*
+      - token.*

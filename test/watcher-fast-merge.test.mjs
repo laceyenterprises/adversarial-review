@@ -174,6 +174,9 @@ export async function load(url, context, nextLoad) {
       export async function fetchPullRequestCommitSubjects() {
         return scenario.commitSubjects || [];
       }
+      export async function fetchPullRequestMergeability(repo, prNumber) {
+        return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' };
+      }
     `)},
   };
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {

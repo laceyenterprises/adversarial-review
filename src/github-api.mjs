@@ -1751,6 +1751,68 @@ async function fetchPullRequestCommitSubjects(repo, prNumber, {
   }
 }
 
+async function fetchPullRequestMergeability(repo, prNumber, {
+  execFileImpl = execFileAsync,
+  recordApiCallImpl = recordApiCall,
+  env = process.env,
+} = {}) {
+  const normalizedPrNumber = normalizePrNumber(prNumber);
+  try {
+    const adapterResult = await runAdapterReadWithTelemetry('pr_mergeability', {
+      repo,
+      prNumber: normalizedPrNumber,
+      recordApiCallImpl,
+      env,
+    }, () => readAdapterPrRollup(repo, normalizedPrNumber, { execFileImpl, env }));
+    if (adapterResult && typeof adapterResult === 'object' && !Array.isArray(adapterResult)) {
+      const mergeable = adapterResult.mergeable ?? null;
+      const mergeStateStatus = adapterResult.mergeStateStatus ?? null;
+      if (mergeable && mergeStateStatus) {
+        return { mergeable, mergeStateStatus };
+      }
+    }
+  } catch {
+    // Optional adapter failures must not make mergeability sampling mandatory.
+  }
+
+  const startedAt = Date.now();
+  try {
+    const { stdout } = await execFileImpl('gh', [
+      'pr',
+      'view',
+      String(normalizedPrNumber),
+      '--repo',
+      repo,
+      '--json',
+      'mergeable,mergeStateStatus',
+    ], {
+      maxBuffer: GH_MAX_BUFFER,
+      env: buildGhEnv(env),
+    });
+    const parsed = JSON.parse(String(stdout || '{}'));
+    recordApiCallImpl?.({
+      category: 'pr_mergeability',
+      repo,
+      prNumber: normalizedPrNumber,
+      status: 200,
+      durationMs: Date.now() - startedAt,
+    });
+    return {
+      mergeable: parsed?.mergeable ?? null,
+      mergeStateStatus: parsed?.mergeStateStatus ?? null,
+    };
+  } catch (err) {
+    recordApiCallImpl?.({
+      category: 'pr_mergeability',
+      repo,
+      prNumber: normalizedPrNumber,
+      status: apiStatusFromError(err),
+      durationMs: Date.now() - startedAt,
+    });
+    throw err;
+  }
+}
+
 const __test__ = {
   buildGhEnv,
   extractChecksConnection,
@@ -1766,6 +1828,7 @@ const __test__ = {
   fetchLegacyPr,
   fetchLegacyReviewContextWithTelemetry,
   fetchLegacyReviews,
+  fetchPullRequestMergeability,
   fetchReviewBodiesForHead,
   normalizeAdapterHeadAndState,
   normalizeAdapterReviewContext,
@@ -1789,6 +1852,7 @@ export {
   __test__,
   fetchPullRequestCommitSubjects,
   fetchPullRequestHeadAndState,
+  fetchPullRequestMergeability,
   fetchPullRequestReviewContext,
   fetchPullRequestRollup,
   fetchReviewBodiesForHead,

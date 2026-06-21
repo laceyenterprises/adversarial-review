@@ -9,6 +9,7 @@ import {
   listPendingMergeCloseouts,
 } from '../src/review-state.mjs';
 import {
+  fetchPullRequestCreatedAt,
   fetchIssueComments,
   scrapeMergeCloseout,
   scraperFetchIssueComments,
@@ -67,6 +68,53 @@ test('closeout comment readers prefer optional adapter payloads', async () => {
     authorLogin: 'operator',
     url: 'https://example.test/comment',
   }]);
+});
+
+test('closeout PR created-at reader prefers optional adapter metadata', async () => {
+  const calls = [];
+  const createdAt = await fetchPullRequestCreatedAt({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 17,
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      assert.equal(command, '/fixture/github-adapter');
+      assert.equal(args.includes('pull-request'), true);
+      return {
+        stdout: JSON.stringify({
+          pullRequest: {
+            number: 17,
+            createdAt: '2026-05-20T19:45:00.000Z',
+          },
+        }),
+      };
+    },
+  });
+
+  assert.equal(createdAt, '2026-05-20T19:45:00.000Z');
+  assert.equal(calls.length, 1);
+});
+
+test('closeout PR created-at reader falls back to gh on malformed adapter output', async () => {
+  const calls = [];
+  const createdAt = await fetchPullRequestCreatedAt({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 17,
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      if (command === '/fixture/github-adapter') {
+        return { stdout: '{not json' };
+      }
+      assert.equal(command, 'gh');
+      return {
+        stdout: JSON.stringify({ created_at: '2026-05-20T19:50:00.000Z' }),
+      };
+    },
+  });
+
+  assert.equal(createdAt, '2026-05-20T19:50:00.000Z');
+  assert.deepEqual(calls.map((call) => call.command), ['/fixture/github-adapter', 'gh']);
 });
 
 function seedReviewerPass(db, {

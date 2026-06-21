@@ -687,6 +687,138 @@ test('adapter-present rollup path returns the normalized PR rollup shape without
   assert.deepEqual(telemetry.events[0].extra, { transport: 'github-adapter' });
 });
 
+test('adapter-present mergeability read uses optional adapter payload without gh', async () => {
+  const mod = await importGithubApiFresh();
+  const telemetry = makeTelemetrySink();
+  const calls = [];
+
+  const result = await mod.fetchPullRequestMergeability(FIXTURE_REPO, FIXTURE_PR, {
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    recordApiCallImpl: telemetry.recordApiCallImpl,
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      assert.equal(command, '/fixture/github-adapter');
+      assert.deepEqual(args, [
+        'read',
+        '--kind',
+        'pull-request-rollup',
+        '--json',
+        '--repo',
+        FIXTURE_REPO,
+        '--pr-number',
+        String(FIXTURE_PR),
+      ]);
+      return {
+        stdout: JSON.stringify({
+          rollup: {
+            number: FIXTURE_PR,
+            mergeable: 'MERGEABLE',
+            mergeStateStatus: 'CLEAN',
+          },
+        }),
+      };
+    },
+  });
+
+  assert.deepEqual(result, { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
+  assert.equal(calls.length, 1);
+  assert.equal(telemetry.events[0].category, 'pr_mergeability');
+  assert.deepEqual(telemetry.events[0].extra, { transport: 'github-adapter' });
+});
+
+test('malformed adapter mergeability output falls back to existing gh implementation', async () => {
+  const mod = await importGithubApiFresh();
+  const telemetry = makeTelemetrySink();
+  const calls = [];
+
+  const result = await mod.fetchPullRequestMergeability(FIXTURE_REPO, FIXTURE_PR, {
+    env: { GHA_ADAPTER_BIN: '/fixture/github-adapter' },
+    recordApiCallImpl: telemetry.recordApiCallImpl,
+    execFileImpl: async (command, args) => {
+      calls.push({ command, args: [...args] });
+      if (command === '/fixture/github-adapter') {
+        return { stdout: '{not json' };
+      }
+      assert.equal(command, 'gh');
+      assert.deepEqual(args, [
+        'pr',
+        'view',
+        String(FIXTURE_PR),
+        '--repo',
+        FIXTURE_REPO,
+        '--json',
+        'mergeable,mergeStateStatus',
+      ]);
+      return {
+        stdout: JSON.stringify({
+          mergeable: 'CONFLICTING',
+          mergeStateStatus: 'DIRTY',
+        }),
+      };
+    },
+  });
+
+  assert.deepEqual(result, { mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY' });
+  assert.deepEqual(calls.map((call) => call.command), ['/fixture/github-adapter', 'gh']);
+  assert.deepEqual(telemetry.events.map((entry) => entry.category), ['pr_mergeability', 'pr_mergeability']);
+  assert.deepEqual(telemetry.events.map((entry) => entry.extra || null), [{ transport: 'github-adapter' }, null]);
+});
+
+test('null adapter mergeability output falls back to sanitized gh implementation', async () => {
+  const mod = await importGithubApiFresh();
+  const telemetry = makeTelemetrySink();
+  const calls = [];
+  const env = {
+    GHA_ADAPTER_BIN: '/fixture/github-adapter',
+    GITHUB_TOKEN: 'fixture-token',
+    SECRET_SHOULD_NOT_PASS: 'nope',
+  };
+
+  const result = await mod.fetchPullRequestMergeability(FIXTURE_REPO, FIXTURE_PR, {
+    env,
+    recordApiCallImpl: telemetry.recordApiCallImpl,
+    execFileImpl: async (command, args, options = {}) => {
+      calls.push({ command, args: [...args], options });
+      if (command === '/fixture/github-adapter') {
+        return {
+          stdout: JSON.stringify({
+            rollup: {
+              number: FIXTURE_PR,
+              mergeable: null,
+              mergeStateStatus: null,
+            },
+          }),
+        };
+      }
+      assert.equal(command, 'gh');
+      assert.deepEqual(args, [
+        'pr',
+        'view',
+        String(FIXTURE_PR),
+        '--repo',
+        FIXTURE_REPO,
+        '--json',
+        'mergeable,mergeStateStatus',
+      ]);
+      assert.equal(options.maxBuffer, 10 * 1024 * 1024);
+      assert.equal(options.env.GH_TOKEN, 'fixture-token');
+      assert.equal(options.env.GITHUB_TOKEN, 'fixture-token');
+      assert.equal(options.env.SECRET_SHOULD_NOT_PASS, undefined);
+      return {
+        stdout: JSON.stringify({
+          mergeable: 'MERGEABLE',
+          mergeStateStatus: 'CLEAN',
+        }),
+      };
+    },
+  });
+
+  assert.deepEqual(result, { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
+  assert.deepEqual(calls.map((call) => call.command), ['/fixture/github-adapter', 'gh']);
+  assert.deepEqual(telemetry.events.map((entry) => entry.category), ['pr_mergeability', 'pr_mergeability']);
+  assert.deepEqual(telemetry.events.map((entry) => entry.extra || null), [{ transport: 'github-adapter' }, null]);
+});
+
 test('github adapter auto-discovery reaches the superproject path and ignores unsafe binaries', async () => {
   const { __test__ } = await importGithubAdapterClientFresh();
   const rootDir = '/Users/airlock/agent-os/tools/adversarial-review';
@@ -1372,7 +1504,7 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-reviewer-pool': "export function compareReviewerDispatchCandidates() { return 0; } export function createReviewerMemoryAdmissionSampler() { return { sample: async () => ({ admit: true }) }; } export function reserveReviewerMemoryAdmission() { return () => {}; } export function resolveFirstPassReviewerPoolConfig() { return { enabled: false }; } export async function runBoundedReviewerDispatchQueue() { return { dispatched: 0, skipped: 0 }; } export function sortReviewerDispatchCandidates(items) { return items; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
     'fixture:atomic-write': "export function writeFileAtomic() {}",
-    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { globalThis.__githubApiWatcherRollupCalls = (globalThis.__githubApiWatcherRollupCalls || 0) + 1; return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1; return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid, labels: [...scenario.rollup.labels] }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchPullRequestCommitSubjects() { return []; }",
+    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { globalThis.__githubApiWatcherRollupCalls = (globalThis.__githubApiWatcherRollupCalls || 0) + 1; return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1; return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestMergeability() { return { mergeable: scenario.rollup.mergeable, mergeStateStatus: scenario.rollup.mergeStateStatus }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchPullRequestCommitSubjects() { return []; }",
   };
 
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {

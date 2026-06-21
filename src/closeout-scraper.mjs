@@ -8,7 +8,10 @@ import {
   parseJsonLines,
 } from './gh-cli.mjs';
 
-import { readAdapterIssueComments } from './github-adapter-client.mjs';
+import {
+  readAdapterIssueComments,
+  readAdapterPullRequest,
+} from './github-adapter-client.mjs';
 
 import {
   readLatestCompletedReviewerPassEndedAt,
@@ -162,7 +165,15 @@ async function fetchPullRequestCreatedAt({
   repo,
   prNumber,
   execFileImpl = execFileAsync,
+  env = process.env,
 } = {}) {
+  try {
+    const adapterPr = await readAdapterPullRequest(repo, prNumber, { execFileImpl, env });
+    const createdAt = adapterPr?.created_at ?? adapterPr?.createdAt ?? null;
+    if (createdAt) return createdAt;
+  } catch {
+    // Optional adapter metadata is a preferred source only; preserve gh fallback.
+  }
   const { stdout } = await execFileImpl(
     'gh',
     ['api', `repos/${repo}/pulls/${encodeURIComponent(prNumber)}`],
@@ -335,6 +346,7 @@ async function scrapeMergeCloseout({
   recordMergeCloseoutScrapeFailureImpl = recordMergeCloseoutScrapeFailure,
   maxAttempts = DEFAULT_MAX_ATTEMPTS,
   retryBackoffMs = DEFAULT_RETRY_BACKOFF_MS,
+  env = process.env,
 } = {}) {
   if (!db) throw new TypeError('scrapeMergeCloseout requires db');
   if (!repo || !prNumber || !mergedAt) {
@@ -354,7 +366,7 @@ async function scrapeMergeCloseout({
     // GH is degraded. The lower bound cannot change between attempts within
     // a single scrape, so resolve it once before the retry shell.
     const lowerBound = readLatestCompletedReviewerPassEndedAt(db, { repo, prNumber })
-      || await fetchPullRequestCreatedAtImpl({ repo, prNumber, execFileImpl });
+      || await fetchPullRequestCreatedAtImpl({ repo, prNumber, execFileImpl, env });
     const lowerBoundMs = parseIsoMs(lowerBound);
     if (lowerBoundMs === null) {
       throw new Error(`Unable to resolve closeout lower bound for ${repo}#${prNumber}`);

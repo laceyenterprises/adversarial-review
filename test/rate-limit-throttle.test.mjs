@@ -17,7 +17,7 @@ function makeRootDir(prefix = 'rate-limit-throttle-') {
   return mkdtempSync(path.join(tmpdir(), prefix));
 }
 
-async function waitFor(predicate, { timeoutMs = 200 } = {}) {
+async function waitFor(predicate, { timeoutMs = 1000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;

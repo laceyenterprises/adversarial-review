@@ -783,7 +783,18 @@ gate above must report healthy before an infrastructure failed row is claimed.
 Eligible infrastructure classes are routing-tier `cascade`, exhausted
 GitHub diff-fetch transients tagged as `cascade`, `reviewer-timeout`,
 `launchctl-bootstrap`, reviewer-spawn `oauth-broken`, and hard provider usage
-caps recorded as `quota-exhausted`. `forbidden-fallback`,
+caps recorded as `quota-exhausted`. Reviewer subprocess exits recorded as
+`[unknown] Command failed` (including stored stdout/stderr tails) or
+`[unknown] Command failed with code <n>` before any verdict exists are also
+eligible as `reviewer-command-failed`. Before retrying that class, the watcher
+must have durable reviewer session/start evidence, query GitHub for a matching
+reviewer-bot review posted after that start time, and mark the row `posted`
+instead of respawning when such a review exists. If the watcher cannot perform
+that proof because the row lacks session/start evidence or the GitHub probe
+fails, it leaves the failed evidence intact for a later poll/operator
+inspection. Only rows whose probe finds no posted review continue to the same
+bounded claim and cap semantics as the other infrastructure classes.
+`forbidden-fallback`,
 `failed-orphan`, `malformed`, inactive repos, closed or merged PRs,
 undiscovered PRs, drain-skipped rows, and rows blocked by active follow-up jobs
 are not recovered by this path. `oauth-broken` is included only for spawn

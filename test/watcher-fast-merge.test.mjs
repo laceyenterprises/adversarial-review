@@ -126,7 +126,7 @@ export async function load(url, context, nextLoad) {
     'fixture:follow-up-retrigger-review-label': "export const RETRIGGER_REVIEW_LABEL = 'retrigger-review'; export async function retryPendingRetriggerReviewAckComments() { return { attempted: 0, posted: 0 }; } export async function tryRetriggerReviewFromLabel() { return { outcome: 'noop' }; }",
     'fixture:operator-retrigger-helpers': "export function findLatestFollowUpJob() { return null; }",
     'fixture:reviewer-cascade': "export const CASCADE_FAILURE_CAP = 3; export function clearCascadeState() {} export function formatTransientFailureBreakdown() { return ''; } export function readCascadeState() { return null; } export function recordCascadeFailure() { return { consecutiveTransientFailures: 1, transientFailureBreakdown: {}, backoffMinutes: 1 }; } export function shouldBackoffReviewerSpawn() { return { shouldBackoff: false }; }",
-    'fixture:reviewer-reattach': "export async function reconcileReviewerSessions() { return { reconciled: 0, skipped: 0 }; }",
+    'fixture:reviewer-reattach': "export function makeReviewPostedProbe() { return async () => null; } export function reviewerBotLogin(reviewer) { return reviewer ? 'codex-reviewer-lacey' : null; } export async function reconcileReviewerSessions() { return { reconciled: 0, skipped: 0 }; }",
     'fixture:reviewer-timeout': "export function resolveReviewerTimeoutMs() { return 300000; }",
     'fixture:stale-drift': "export function shouldSkipReviewerForStaleDrift() { return null; }",
     'fixture:watcher-fail-loud': "export async function signalMalformedTitleFailure() { throw new Error('unexpected malformed title'); }",

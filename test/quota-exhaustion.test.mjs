@@ -8,8 +8,11 @@
 // graceful degradation — suspend on a usage cap, resume when it clears — in the
 // DISPATCH lane (the Python daemon). But the reviewer spawns the codex/claude
 // CLI directly, outside dispatch, so a hard cap surfaced as a bare
-// "Command failed with code 1" → classified 'unknown' →
-// "not infrastructure-recoverable" → the review was abandoned with no retry.
+// "Command failed with code 1" without a quota marker was previously classified
+// 'unknown' and abandoned with no retry. LAC-1359 now recovers that bare
+// command-failed shape through the bounded reviewer-command-failed path, while
+// real quota evidence still routes to quota-exhausted so the watcher can hold
+// until reset instead of burning the infra auto-recover budget.
 // The 2026-06-16 codex weekly-cap outage abandoned every [claude-code] PR review
 // this way.
 import test from 'node:test';
@@ -206,8 +209,8 @@ test('an untagged stored quota row is still recovered via the legacy classifier 
   assert.equal(reviewerFailureClassFromStoredRow(row), QUOTA_EXHAUSTED_FAILURE_CLASS);
 });
 
-test('a plain unknown failure is NOT infra-recoverable', () => {
-  const row = { failure_message: '[unknown] Command failed with code 1' };
+test('a plain non-command unknown failure is NOT infra-recoverable', () => {
+  const row = { failure_message: '[unknown] reviewer emitted an unsupported terminal error' };
   assert.equal(infraRecoverableFailureClass(row), null);
 });
 

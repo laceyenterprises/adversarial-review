@@ -51,9 +51,13 @@ test('a real review verdict / unknown failure is NOT infra-recoverable', () => {
   assert.equal(infraRecoverableFailureClass({}), null);
 });
 
-test('unknown reviewer command failures are retryable by the bounded unknown-failure path', () => {
+test('unknown reviewer command failures route through tagged infra recovery or untagged bounded retry', () => {
   assert.equal(
     infraRecoverableFailureClass({ failure_message: '[unknown] Command failed with code 1' }),
+    'reviewer-command-failed'
+  );
+  assert.equal(
+    infraRecoverableFailureClass({ failure_message: 'Command failed with code 1' }),
     null
   );
   assert.equal(

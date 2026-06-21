@@ -668,6 +668,13 @@ function schemaV1() {
             __pattern: PATTERN_SQL_IDENTIFIER,
             __pattern_description: PATTERN_SQL_IDENTIFIER_DESCRIPTION,
           },
+          vdb: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              enabled: { __type: TYPE_BOOL, __default: true },
+            },
+          },
           // CFG-04 dual-write nested block — mirrors agent_os_config
           // `_schema_v1()` (Python loader, line ~276). Added 2026-06-02
           // after operator's config.local.yaml set `session_ledger.dual_write.mode`
@@ -1714,6 +1721,10 @@ export const ENV_ALIASES = {
   },
   'session_ledger.database_name': {
     canonical: 'AGENT_OS_SESSION_LEDGER_DATABASE_NAME',
+    aliases: [],
+  },
+  'session_ledger.vdb.enabled': {
+    canonical: 'AGENT_OS_SESSION_LEDGER_VDB',
     aliases: [],
   },
   'operator.email': {

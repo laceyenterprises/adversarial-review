@@ -215,6 +215,48 @@ exits zero. Shell callers that want to branch on the decision must parse
 `needsRevalidation`; non-zero exit remains reserved for argument usage failures
 or unexpected process errors.
 
+AMA closers must acquire the `(repo, base)` merge lease before any local merge
+execution. The lease key is scoped to the PR repository and live base branch, so
+all closers targeting the same base serialize through one lane. The closer arms
+its shell exit trap before acquisition, records the current `origin/<base>` SHA
+as the validation base immediately before the wait, uses the CLI's blocking
+`acquire` surface with the configured wait window, and releases the lease
+through the stored `leaseId` and original lease base on shell exit.
+
+Closer acquisition outcomes are operator-visible contract:
+
+- `acquire` exit `0` with `acquired:true` lets the closer continue to merge
+  eligibility and, if needed, base revalidation.
+- `acquire` exit `75` with `timedOut:true` is transient contention. The closer
+  must append a deferred AMA audit attempt with reason `merge-lease-timeout` and
+  exit through that append result so the next dispatch can retry without losing
+  the contention trail.
+- `acquire` exit `70` with `parked:true` is terminal for that PR/head attempt
+  budget. The closer must append a `failed-without-merge` audit attempt with
+  hard blocker reason `merge-lease-parked`.
+- A transient or exhausted pre-acquire `origin/<base>` fetch failure is an
+  observable deferred AMA audit attempt with reason
+  `merge-lease-base-fetch-failure`, not a bare shell failure.
+- Other non-zero acquire outcomes fail closed after surfacing the CLI stderr;
+  they do not grant merge authority.
+
+When the base advanced between the pre-wait validation-base snapshot and the
+post-acquire base snapshot, the closer must run `needs-revalidation` while it
+holds the lease. If revalidation is required, it must refresh the PR, review,
+and timeline snapshots and re-run `ama-check` against the current PR head before
+merging. Fetch, snapshot, helper, or `ama-check` failures in this revalidation
+path are deferred AMA audit outcomes using stable reasons such as
+`merge-lease-base-fetch-failure`, `merge-lease-needs-revalidation-failure`,
+`merge-lease-pr-snapshot-failure`, `merge-lease-review-snapshot-failure`,
+`merge-lease-timeline-snapshot-failure`, and
+`merge-lease-ama-check-failure`.
+
+If a fresh PR snapshot shows that the PR base branch changed after the closer
+acquired a lease, the closer must defer with reason
+`merge-lease-base-retargeted` rather than merging under a lease scoped to the old
+base. All merge-lease deferred or parked audit append paths must use the same
+HQ-owner guard before writing to the HQ audit surface.
+
 ## 1.1.1 HAM terminal-remediation mode
 
 HAM terminal remediation is a bounded final-review closer path for the

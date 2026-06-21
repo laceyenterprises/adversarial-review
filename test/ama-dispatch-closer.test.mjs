@@ -813,6 +813,44 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
   );
   assert.match(prompt, /Rebase-Attempts: \${REBASE_ATTEMPTS:-0}/);
   assert.match(prompt, /ham_terminal_remediation_validated/);
+  assert.match(prompt, /AMA_MERGE_LEASE_BIN="\/Users\/airlock\/agent-os\/tools\/adversarial-review\/bin\/merge-lease\.mjs"/);
+  assert.match(prompt, /MERGE_LEASE_BASE_BRANCH=""/);
+  assert.match(prompt, /fetch_current_base_sha\(\) \{[\s\S]*attempt=1[\s\S]*is_merge_lease_revalidation_transient "\$err_path"[\s\S]*merge-lease base fetch transient failure/);
+  assert.match(prompt, /if ! MERGE_VALIDATION_BASE=\$\(fetch_current_base_sha "\$MERGE_LEASE_BASE_BRANCH"\); then[\s\S]*append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-base-fetch-failure/);
+  assert.match(prompt, /ensure_ama_audit_owner\(\)/);
+  assert.match(prompt, /append_merge_lease_parked_attempt_and_exit\(\) \{[\s\S]*ensure_ama_audit_owner/);
+  assert.match(prompt, /append_merge_lease_timeout_deferred_attempt_and_exit\(\) \{[\s\S]*ensure_ama_audit_owner/);
+  assert.match(prompt, /MERGE_LEASE_OWNER_PGID_ARGS=\(\)/);
+  assert.match(prompt, /MERGE_LEASE_OWNER_PGID_ARGS=\(--owner-pgid "\$MERGE_LEASE_OWNER_PGID"\)/);
+  assert.match(prompt, /node "\$AMA_MERGE_LEASE_BIN" acquire[\s\S]*--owner-pid "\$\$"[\s\S]*"\$\{MERGE_LEASE_OWNER_PGID_ARGS\[@\]\}"[\s\S]*MERGE_LEASE_ID=\$\(jq -r '\.leaseId'/);
+  assert.match(prompt, /ACQUIRE_EXIT=\$\?/);
+  assert.match(prompt, /\[ "\$ACQUIRE_EXIT" -eq 75 \] && jq -e '\.timedOut == true'/);
+  assert.match(prompt, /append_merge_lease_timeout_deferred_attempt_and_exit/);
+  assert.match(prompt, /preMergeReasons: \["merge-lease-timeout"\], mergeLeaseTimeout: true/);
+  assert.match(prompt, /--outcome deferred/);
+  assert.match(prompt, /\[ "\$ACQUIRE_EXIT" -eq 70 \] && jq -e '\.parked == true'/);
+  assert.match(prompt, /hardBlockerReason: "merge-lease-parked"/);
+  const mergeLeaseTransientFn = prompt.match(
+    /is_merge_lease_revalidation_transient\(\) \{[\s\S]*?\n\}/,
+  )?.[0] || '';
+  assert.doesNotMatch(mergeLeaseTransientFn, /\(\^\\\|\[\^0-9\]\)\(500\|502\|503\|504\)/);
+  assert.doesNotMatch(mergeLeaseTransientFn, /server error/);
+  assert.match(prompt, /trap 'release_merge_lease_if_held \|\| true; rm -rf "\$AMA_TMP_DIR"' EXIT/);
+  assert.match(prompt, /trap 'release_merge_lease_if_held \|\| true; rm -rf "\$AMA_TMP_DIR"' EXIT\nacquire_merge_lease/);
+  assert.doesNotMatch(prompt, /acquire_merge_lease\ntrap 'release_merge_lease_if_held \|\| true; rm -rf "\$AMA_TMP_DIR"' EXIT/);
+  assert.match(prompt, /MERGE_VALIDATION_BASE=\$\(fetch_current_base_sha "\$MERGE_LEASE_BASE_BRANCH"\)/);
+  assert.match(prompt, /run_revalidation_snapshot_command ama-pr-base-guard/);
+  assert.match(prompt, /CURRENT_PR_BASE_BRANCH=\$\(jq -r '\.baseRefName' "\$AMA_TMP_DIR\/ama-pr-base-guard\.json"\)/);
+  assert.match(prompt, /append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-base-retargeted/);
+  assert.match(prompt, /run_revalidation_snapshot_command ama-pr/);
+  assert.match(prompt, /append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-ama-check-failure/);
+  assert.match(prompt, /node "\$AMA_MERGE_LEASE_BIN" needs-revalidation[\s\S]*--validation-base "\$MERGE_VALIDATION_BASE"[\s\S]*--current-base "\$CURRENT_BASE_SHA"/);
+  assert.match(prompt, /if jq -e '\.needsRevalidation == true'/);
+  assert.match(prompt, /REBASE_ASSESSED_HEAD="\$VALIDATED_HEAD"/);
+  assert.match(prompt, /--match-head-commit "\$VALIDATED_HEAD"/);
+  assert.match(prompt, /node "\$AMA_MERGE_LEASE_BIN" release[\s\S]*--lease-id "\$MERGE_LEASE_ID"/);
+  assert.doesNotMatch(prompt, /UPDATE_BRANCH_EXIT"\s+-eq 2[\s\S]*release_merge_lease_if_held \|\| true[\s\S]*unresolvable-rebase-conflict/);
+  assert.doesNotMatch(prompt, /if \[ "\$OUTCOME" = "succeeded" \]; then[\s\S]*release_merge_lease_if_held \|\| true/);
 });
 
 test('composed hammer prompt body matches the checked-in golden snapshot', () => {
@@ -1873,25 +1911,35 @@ test('terminal AMA audit releases a stale lease so the same head can be retried'
   //
   //   import { readFileSync, writeFileSync } from 'node:fs';
   //   import { composeCloserPrompt } from '../src/ama/dispatch-closer.mjs';
+  //   import { amaAuditTraceRef } from '../src/ama/audit.mjs';
   //   const tpl = readFileSync('templates/ama-closer-prompt.md', 'utf8');
+  //   const repo = 'acme/myrepo';
+  //   const prNumber = 1234;
+  //   const reviewedSha = 'abc12345abc12345abc12345abc12345abc12345';
+  //   const hqRoot = '/tmp/ama-test-hqroot';
+  //   const auditPath = `${hqRoot}/dispatch/audit/adversarial-merge-authority/${repo.replace('/', '-')}-pr-${prNumber}-${reviewedSha}.json`;
+  //   const auditRef = amaAuditTraceRef(repo, prNumber, reviewedSha);
   //   const prompt = composeCloserPrompt({
   //     prUrl: 'https://github.com/acme/myrepo/pull/1234',
-  //     repo: 'acme/myrepo',
-  //     prNumber: 1234,
-  //     reviewedSha: 'abc12345abc12345abc12345abc12345abc12345',
+  //     repo,
+  //     prNumber,
+  //     reviewedSha,
   //     riskClass: 'low',
   //     mergeMethod: 'squash',
   //     requiredGateContext: 'agent-os/adversarial-gate',
-  //     auditPath: '/tmp/ama-test-hqroot/dispatch/audit/adversarial-merge-authority/acme-myrepo-pr-1234-abc12345abc12345abc12345abc12345abc12345.json',
+  //     auditPath,
+  //     hqRoot,
+  //     rootDir: '/tmp/ama-test-root',
   //     hqOwnerUser: 'unknown',
   //     reviewedBy: 'claude-reviewer-lacey',
+  //     reviewer: 'claude',
   //     dispatchedAt: '2026-06-11T20:00:00Z',
   //     amaTrailers: [
   //       'Closed-By: codex-closer (adversarial-pipe-mode)',
   //       'Reviewed-By: claude-reviewer-lacey',
   //       'Risk-Class: low',
   //       'Eligibility-Reason: latest_review_settled_success, reviewer_family_recorded, risk_class_low_permitted, head_sha_matches_review, ci_all_green, no_blocking_labels, configured_gate_context_required',
-  //       'Eligibility-Trace: ama-audit:acme/myrepo:pr-1234:head-abc12345abc12345abc12345abc12345abc12345',
+  //       `Eligibility-Trace: ${auditRef}`,
   //     ].join('\\n'),
   //     templateBody: tpl,
   //   });

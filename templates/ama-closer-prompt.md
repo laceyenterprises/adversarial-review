@@ -131,8 +131,286 @@ REBASE_ATTEMPTS=$(
 REBASE_UPDATE_BRANCH_RETRY_CAP="${REBASE_UPDATE_BRANCH_RETRY_CAP:-3}"
 VALIDATED_HEAD="<<REVIEWED_SHA>>"
 HEAD_MATCH_EVIDENCE="head_sha_matches_review"
+REBASE_ASSESSED_HEAD=""
 HARD_BLOCKER_REASON=""
 AMA_REBASE_AUTHORITY_BIN="/Users/airlock/agent-os/tools/adversarial-review/bin/ama-rebase-authority.mjs"
+AMA_MERGE_LEASE_BIN="/Users/airlock/agent-os/tools/adversarial-review/bin/merge-lease.mjs"
+BASE_BRANCH=$(jq -r '.baseRefName' "$AMA_TMP_DIR/ama-pr.json")
+MERGE_LEASE_ID=""
+MERGE_LEASE_BASE_BRANCH=""
+MERGE_LEASE_WAIT_SECONDS="${MERGE_LEASE_WAIT_SECONDS:-600}"
+MERGE_VALIDATION_BASE=""
+
+fetch_current_base_sha() {
+  base_branch="${1:-$BASE_BRANCH}"
+  err_path="$AMA_TMP_DIR/ama-merge-lease-base-fetch.stderr"
+  attempt=1
+  max_attempts=3
+  while true; do
+    : > "$err_path"
+    if git -C "<<ROOT_DIR>>" fetch origin "$base_branch" >/dev/null 2> "$err_path"; then
+      git -C "<<ROOT_DIR>>" rev-parse "origin/$base_branch"
+      rm -f "$err_path"
+      return 0
+    fi
+    if [ "$attempt" -lt "$max_attempts" ] && is_merge_lease_revalidation_transient "$err_path"; then
+      echo "merge-lease base fetch transient failure for origin/$base_branch (attempt $attempt/$max_attempts); retrying" >&2
+      cat "$err_path" >&2
+      sleep "$attempt"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    echo "merge-lease base fetch failed for origin/$base_branch" >&2
+    cat "$err_path" >&2
+    return 1
+  done
+}
+
+release_merge_lease_if_held() {
+  if [ -n "$MERGE_LEASE_ID" ]; then
+    node "$AMA_MERGE_LEASE_BIN" release \
+      --repo <<REPO>> \
+      --base "${MERGE_LEASE_BASE_BRANCH:-$BASE_BRANCH}" \
+      --pr <<PR_NUMBER>> \
+      --lease-id "$MERGE_LEASE_ID" \
+      --root-dir <<ROOT_DIR>> \
+      > "$AMA_TMP_DIR/ama-merge-lease-release.json" \
+      2> "$AMA_TMP_DIR/ama-merge-lease-release.stderr" || {
+        cat "$AMA_TMP_DIR/ama-merge-lease-release.stderr" >&2
+        return 1
+      }
+    MERGE_LEASE_ID=""
+  fi
+  return 0
+}
+
+is_merge_lease_revalidation_transient() {
+  grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|connection aborted|temporary failure|network is unreachable|try again|rate limit|secondary rate limit|HTTP[ /]5[0-9][0-9]|bad gateway|service unavailable|gateway timeout|unable to access|fatal: unable to access' "$1"
+}
+
+run_revalidation_snapshot_command() {
+  label="$1"
+  out_path="$2"
+  shift 2
+  err_path="$AMA_TMP_DIR/${label}.stderr"
+  tmp_path="$AMA_TMP_DIR/${label}.tmp"
+  attempt=1
+  max_attempts=3
+  while true; do
+    rm -f "$tmp_path"
+    : > "$err_path"
+    if "$@" > "$tmp_path" 2> "$err_path"; then
+      mv "$tmp_path" "$out_path"
+      rm -f "$err_path"
+      return 0
+    fi
+    if [ "$attempt" -lt "$max_attempts" ] && is_merge_lease_revalidation_transient "$err_path"; then
+      echo "merge-lease revalidation $label transient failure (attempt $attempt/$max_attempts); retrying" >&2
+      cat "$err_path" >&2
+      sleep "$attempt"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    cat "$err_path" >&2
+    rm -f "$tmp_path"
+    return 1
+  done
+}
+
+ensure_ama_audit_owner() {
+  if [ "$(id -un)" != "<<HQ_OWNER>>" ]; then
+    echo "ama-closer owner mismatch: expected <<HQ_OWNER>>, got $(id -un)" >&2
+    exit 1
+  fi
+}
+
+append_merge_lease_revalidation_deferred_attempt_and_exit() {
+  defer_reason="$1"
+  ensure_ama_audit_owner
+  echo "AMG merge gate deferred PR <<PR_NUMBER>> during merge-lease flow: $defer_reason" >&2
+  REVALIDATION_ATTEMPT_JSON="$AMA_TMP_DIR/ama-merge-lease-revalidation-deferred-attempt.json"
+  jq -n \
+    --arg reason "$defer_reason" \
+    '{ preMergeEligible: false, preMergeReasons: [$reason], mergeLeaseRevalidationFailure: true }' \
+    > "$REVALIDATION_ATTEMPT_JSON"
+  node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
+    --hq-root <<HQ_ROOT>> \
+    --repo <<REPO>> \
+    --pr <<PR_NUMBER>> \
+    --head "$VALIDATED_HEAD" \
+    --outcome deferred \
+    --attempt-json "$REVALIDATION_ATTEMPT_JSON" \
+    --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  APPEND_EXIT=$?
+  rm -f "$REVALIDATION_ATTEMPT_JSON"
+  if [ $APPEND_EXIT -eq 65 ]; then
+    echo "audit append refused by sticky-succeeded guard after merge-lease revalidation failure; treating as no-op" >&2
+    exit 0
+  fi
+  exit $APPEND_EXIT
+}
+
+append_merge_lease_parked_attempt_and_exit() {
+  ensure_ama_audit_owner
+  parked_reason=$(jq -r '.reason // "merge-lease-parked"' "$AMA_TMP_DIR/ama-merge-lease-acquire.json")
+  echo "AMG merge gate parked PR <<PR_NUMBER>>: $parked_reason" >&2
+  PARKED_ATTEMPT_JSON="$AMA_TMP_DIR/ama-merge-lease-parked-attempt.json"
+  jq -n \
+    --arg reason "$parked_reason" \
+    '{ preMergeEligible: false, hardBlocker: true, hardBlockerReason: "merge-lease-parked", mergeLeaseParkedReason: $reason }' \
+    > "$PARKED_ATTEMPT_JSON"
+  node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
+    --hq-root <<HQ_ROOT>> \
+    --repo <<REPO>> \
+    --pr <<PR_NUMBER>> \
+    --head "$VALIDATED_HEAD" \
+    --outcome failed-without-merge \
+    --attempt-json "$PARKED_ATTEMPT_JSON" \
+    --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  APPEND_EXIT=$?
+  rm -f "$PARKED_ATTEMPT_JSON"
+  if [ $APPEND_EXIT -eq 65 ]; then
+    echo "audit append refused by sticky-succeeded guard after merge-lease park; treating as no-op" >&2
+    exit 0
+  fi
+  exit $APPEND_EXIT
+}
+
+append_merge_lease_timeout_deferred_attempt_and_exit() {
+  ensure_ama_audit_owner
+  echo "AMG merge gate deferred PR <<PR_NUMBER>> while waiting for merge lease" >&2
+  TIMEOUT_ATTEMPT_JSON="$AMA_TMP_DIR/ama-merge-lease-timeout-attempt.json"
+  jq -n \
+    '{ preMergeEligible: false, preMergeReasons: ["merge-lease-timeout"], mergeLeaseTimeout: true }' \
+    > "$TIMEOUT_ATTEMPT_JSON"
+  node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
+    --hq-root <<HQ_ROOT>> \
+    --repo <<REPO>> \
+    --pr <<PR_NUMBER>> \
+    --head "$VALIDATED_HEAD" \
+    --outcome deferred \
+    --attempt-json "$TIMEOUT_ATTEMPT_JSON" \
+    --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  APPEND_EXIT=$?
+  rm -f "$TIMEOUT_ATTEMPT_JSON"
+  if [ $APPEND_EXIT -eq 65 ]; then
+    echo "audit append refused by sticky-succeeded guard after merge-lease timeout; treating as no-op" >&2
+    exit 0
+  fi
+  exit $APPEND_EXIT
+}
+
+acquire_merge_lease() {
+  MERGE_LEASE_BASE_BRANCH="$BASE_BRANCH"
+  if ! MERGE_VALIDATION_BASE=$(fetch_current_base_sha "$MERGE_LEASE_BASE_BRANCH"); then
+    append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-base-fetch-failure
+  fi
+  MERGE_LEASE_OWNER_PGID="$(ps -o pgid= -p $$ | tr -d ' ')"
+  MERGE_LEASE_OWNER_PGID_ARGS=()
+  if [ -n "$MERGE_LEASE_OWNER_PGID" ]; then
+    MERGE_LEASE_OWNER_PGID_ARGS=(--owner-pgid "$MERGE_LEASE_OWNER_PGID")
+  fi
+  node "$AMA_MERGE_LEASE_BIN" acquire \
+    --repo <<REPO>> \
+    --base "$MERGE_LEASE_BASE_BRANCH" \
+    --pr <<PR_NUMBER>> \
+    --head "$VALIDATED_HEAD" \
+    --owner-pid "$$" \
+    "${MERGE_LEASE_OWNER_PGID_ARGS[@]}" \
+    --wait "$MERGE_LEASE_WAIT_SECONDS" \
+    --root-dir <<ROOT_DIR>> \
+    > "$AMA_TMP_DIR/ama-merge-lease-acquire.json" \
+    2> "$AMA_TMP_DIR/ama-merge-lease-acquire.stderr"
+  ACQUIRE_EXIT=$?
+  if [ "$ACQUIRE_EXIT" -eq 75 ] && jq -e '.timedOut == true' "$AMA_TMP_DIR/ama-merge-lease-acquire.json" >/dev/null; then
+    append_merge_lease_timeout_deferred_attempt_and_exit
+  fi
+  if [ "$ACQUIRE_EXIT" -eq 70 ] && jq -e '.parked == true' "$AMA_TMP_DIR/ama-merge-lease-acquire.json" >/dev/null; then
+    append_merge_lease_parked_attempt_and_exit
+  fi
+  if [ "$ACQUIRE_EXIT" -ne 0 ]; then
+    cat "$AMA_TMP_DIR/ama-merge-lease-acquire.stderr" >&2
+    exit "$ACQUIRE_EXIT"
+  fi
+  MERGE_LEASE_ID=$(jq -r '.leaseId' "$AMA_TMP_DIR/ama-merge-lease-acquire.json")
+}
+
+run_merge_lease_base_revalidation() {
+  if ! run_revalidation_snapshot_command ama-pr-base-guard "$AMA_TMP_DIR/ama-pr-base-guard.json" \
+    gh pr view <<PR_URL>> --json headRefOid,baseRefName; then
+    append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-pr-snapshot-failure
+  fi
+  CURRENT_PR_BASE_BRANCH=$(jq -r '.baseRefName' "$AMA_TMP_DIR/ama-pr-base-guard.json")
+  if [ "$CURRENT_PR_BASE_BRANCH" != "$MERGE_LEASE_BASE_BRANCH" ]; then
+    VALIDATED_HEAD=$(jq -r '.headRefOid' "$AMA_TMP_DIR/ama-pr-base-guard.json")
+    BASE_BRANCH="$CURRENT_PR_BASE_BRANCH"
+    append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-base-retargeted
+  fi
+  if ! CURRENT_BASE_SHA=$(fetch_current_base_sha "$MERGE_LEASE_BASE_BRANCH"); then
+    append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-base-fetch-failure
+  fi
+  if ! run_revalidation_snapshot_command ama-merge-lease-revalidation "$AMA_TMP_DIR/ama-merge-lease-revalidation.json" \
+    node "$AMA_MERGE_LEASE_BIN" needs-revalidation \
+    --repo-path <<ROOT_DIR>> \
+    --base "$MERGE_LEASE_BASE_BRANCH" \
+    --validation-base "$MERGE_VALIDATION_BASE" \
+    --current-base "$CURRENT_BASE_SHA" \
+    --changed-files-from "$VALIDATED_HEAD"; then
+    append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-needs-revalidation-failure
+  fi
+  if jq -e '.needsRevalidation == true' "$AMA_TMP_DIR/ama-merge-lease-revalidation.json" >/dev/null; then
+    if ! run_revalidation_snapshot_command ama-pr "$AMA_TMP_DIR/ama-pr.json" \
+      gh pr view <<PR_URL>> --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName; then
+      append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-pr-snapshot-failure
+    fi
+    VALIDATED_HEAD=$(jq -r '.headRefOid' "$AMA_TMP_DIR/ama-pr.json")
+    BASE_BRANCH=$(jq -r '.baseRefName' "$AMA_TMP_DIR/ama-pr.json")
+    if [ "$BASE_BRANCH" != "$MERGE_LEASE_BASE_BRANCH" ]; then
+      append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-base-retargeted
+    fi
+    if ! run_revalidation_snapshot_command ama-reviews "$AMA_TMP_DIR/ama-reviews.json" \
+      gh pr view <<PR_URL>> --json reviews; then
+      append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-review-snapshot-failure
+    fi
+    if ! run_revalidation_snapshot_command ama-timeline "$AMA_TMP_DIR/ama-timeline.json" \
+      gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate; then
+      append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-timeline-snapshot-failure
+    fi
+    if [ -s "$AMA_TMP_DIR/ama-rebase-assessment.json" ] && [ "${REBASE_ASSESSED_HEAD:-}" = "$VALIDATED_HEAD" ]; then
+      if ! run_revalidation_snapshot_command ama-verdict "$AMA_TMP_DIR/ama-verdict.json" \
+        node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
+          --pr "$AMA_TMP_DIR/ama-pr.json" \
+          --reviews "$AMA_TMP_DIR/ama-reviews.json" \
+          --protection "$AMA_TMP_DIR/ama-protection.json" \
+          --timeline "$AMA_TMP_DIR/ama-timeline.json" \
+          --repo <<REPO>> \
+          --root-dir <<ROOT_DIR>> \
+          --reviewed-sha <<REVIEWED_SHA>> \
+          --reviewer <<REVIEWER>> \
+          --risk-class <<RISK_CLASS>> \
+          --rebase-assessment "$AMA_TMP_DIR/ama-rebase-assessment.json" \
+          --review-cycle-exhausted <<REVIEW_CYCLE_EXHAUSTED>>; then
+        append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-ama-check-failure
+      fi
+    else
+      if ! run_revalidation_snapshot_command ama-verdict "$AMA_TMP_DIR/ama-verdict.json" \
+        node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
+          --pr "$AMA_TMP_DIR/ama-pr.json" \
+          --reviews "$AMA_TMP_DIR/ama-reviews.json" \
+          --protection "$AMA_TMP_DIR/ama-protection.json" \
+          --timeline "$AMA_TMP_DIR/ama-timeline.json" \
+          --repo <<REPO>> \
+          --root-dir <<ROOT_DIR>> \
+          --reviewed-sha <<REVIEWED_SHA>> \
+          --reviewer <<REVIEWER>> \
+          --risk-class <<RISK_CLASS>> \
+          --review-cycle-exhausted <<REVIEW_CYCLE_EXHAUSTED>>; then
+        append_merge_lease_revalidation_deferred_attempt_and_exit merge-lease-ama-check-failure
+      fi
+    fi
+    MERGE_VALIDATION_BASE="$CURRENT_BASE_SHA"
+  fi
+}
 
 is_update_branch_conflict() {
   grep -Eiq 'conflict|cannot be rebased|resolve conflicts' "$1"
@@ -199,6 +477,9 @@ write_non_empty_patch_ids() {
   fi
   return 0
 }
+
+trap 'release_merge_lease_if_held || true; rm -rf "$AMA_TMP_DIR"' EXIT
+acquire_merge_lease
 
 if needs_rebase_recovery; then
   reviewed_base_enc=$(printf '%s' "$(jq -r '.baseRefName' "$AMA_TMP_DIR/ama-pr.json")" | jq -sRr @uri)
@@ -275,7 +556,12 @@ while [ -z "$HARD_BLOCKER_REASON" ] && needs_rebase_recovery; do
     --review-cycle-exhausted <<REVIEW_CYCLE_EXHAUSTED>> \
     > "$AMA_TMP_DIR/ama-verdict.json"
   HEAD_MATCH_EVIDENCE="content_equivalent_rebased_head"
+  REBASE_ASSESSED_HEAD="$VALIDATED_HEAD"
 done
+
+if [ -z "$HARD_BLOCKER_REASON" ]; then
+  run_merge_lease_base_revalidation
+fi
 
 if [ -n "$HARD_BLOCKER_REASON" ]; then
   HARD_BLOCKER_ATTEMPT_JSON="$AMA_TMP_DIR/ama-hard-blocker-attempt.json"

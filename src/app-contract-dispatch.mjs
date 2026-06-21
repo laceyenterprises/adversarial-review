@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
+import { spawn } from 'node:child_process';
 
 const CONTRACT_VERSION = '1.0';
 const DEFAULT_ENDPOINT_URL = 'http://127.0.0.1:8003';
@@ -140,6 +141,7 @@ class StandaloneSession {
   constructor(config) {
     this.app_id = config.app_id;
     this.mode = 'standalone';
+    this.config = config;
     this.dispatches = new Map();
     this.listeners = new Map();
   }
@@ -148,9 +150,24 @@ class StandaloneSession {
     const requestId = requireRequestId(payload);
     const existing = this.dispatches.get(requestId);
     if (existing) {
-      return existing;
+      return await existing;
     }
-    const launchRequestId = `standalone-${randomUUID()}`;
+    const pending = this.acceptDispatch(payload, requestId);
+    this.dispatches.set(requestId, pending);
+    try {
+      const accepted = await pending;
+      this.dispatches.set(requestId, accepted);
+      return accepted;
+    } catch (error) {
+      if (this.dispatches.get(requestId) === pending) {
+        this.dispatches.delete(requestId);
+      }
+      throw error;
+    }
+  }
+
+  async acceptDispatch(payload, requestId) {
+    const launchRequestId = await this.launch(payload);
     const accepted = {
       app_id: this.app_id,
       request_id: requestId,
@@ -159,7 +176,25 @@ class StandaloneSession {
       audit_ref: `standalone://audit/${this.app_id}/${requestId}`,
     };
     this.dispatches.set(requestId, accepted);
+    this.emitTopic(`health.worker.terminal.${launchRequestId}`, {
+      status: 'accepted',
+      launch_request_id: launchRequestId,
+      request_id: requestId,
+    });
     return accepted;
+  }
+
+  async launch(payload) {
+    if (typeof this.config.standalone_dispatcher === 'function') {
+      const result = await this.config.standalone_dispatcher(payload);
+      return normalizeLaunchRequestId(result);
+    }
+    const command = this.config.dispatch_command ?? this.config.dispatchCommand;
+    if (command) {
+      const result = await runDispatchCommand(command, payload);
+      return normalizeLaunchRequestId(result);
+    }
+    return `standalone-${randomUUID()}`;
   }
 
   async dispatchStatus(requestId) {
@@ -323,6 +358,45 @@ function parseJsonResponse(text, status) {
     const snippet = text.slice(0, 120);
     throw new Error(`app-contract bad_response: non-JSON response (status ${status}): ${snippet}`);
   }
+}
+
+function runDispatchCommand(command, payload) {
+  const argv = Array.isArray(command) ? command : [command];
+  return new Promise((resolveCommand, reject) => {
+    const child = spawn(argv[0], argv.slice(1), { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`standalone dispatch command failed (${code}): ${stderr || stdout}`));
+        return;
+      }
+      try {
+        resolveCommand(stdout.trim() ? JSON.parse(stdout) : {});
+      } catch (error) {
+        reject(error);
+      }
+    });
+    child.stdin.end(JSON.stringify(stripUndefined(payload)));
+  });
+}
+
+function normalizeLaunchRequestId(result) {
+  if (typeof result === 'string' && result) {
+    return result;
+  }
+  const launchRequestId = result?.launch_request_id ?? result?.launchRequestId ?? result?.dispatchId;
+  if (!launchRequestId) {
+    throw new Error('standalone dispatch did not return a launch request id');
+  }
+  return String(launchRequestId);
 }
 
 function stripUndefined(value) {

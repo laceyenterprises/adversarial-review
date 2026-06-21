@@ -36,7 +36,6 @@ const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set([
   // commit-author login resolution lags. (worker-pool: hq_resolve_worker_identity
   // hammer -> merge-agent-lacey.)
   'merge-agent-lacey',
-  'github-actions',
 ]);
 
 /**
@@ -490,11 +489,9 @@ function parseRemediatedFindingsTrailer(value) {
   return { total, blocking, nonBlocking };
 }
 
-function hamAuditCommentAuthorMatches(verifiedAuditComment, verifiedCommit) {
+function hamAuditCommentAuthorMatches(verifiedAuditComment) {
   const commentAuthor = normalizeLogin(verifiedAuditComment?.author);
   if (!commentAuthor) return false;
-  const commitAuthor = normalizeLogin(verifiedCommit?.author || verifiedCommit?.committer);
-  if (commitAuthor && commentAuthor === commitAuthor) return true;
   return HAM_AUDIT_COMMENT_AUTHOR_LOGINS.has(commentAuthor);
 }
 
@@ -714,7 +711,7 @@ function validateHamTerminalRemediationEvidence(
         verifiedAuditBody,
         evidence?.auditComment?.findings || evidence?.addressedFindings,
       ),
-    auditCommentAuthor: hamAuditCommentAuthorMatches(verifiedAuditComment, verifiedCommit),
+    auditCommentAuthor: hamAuditCommentAuthorMatches(verifiedAuditComment),
     docCurrency: docCurrency.ok,
     closedBy: closedBy === 'hammer (adversarial-pipe-mode)',
     remediatedFindings: remediatedFindingCountsMatch && blockingCountMatches,

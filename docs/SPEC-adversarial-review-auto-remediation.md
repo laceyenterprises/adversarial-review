@@ -1447,13 +1447,33 @@ Each poll makes up to `DEFAULT_FML_MERGE_AGENT_PER_POLL_CAP = 5` terminal fast-m
 
 For each row the daemon must:
 
-- Re-fetch the PR view and refuse the bypass if the live head no longer matches `fast_merge_authorized_head_sha`.
+- Re-fetch the PR view and refuse the bypass if the live head no longer matches `fast_merge_authorized_head_sha`, except for the narrow HAM terminal-remediation carve-out below.
 - Requeue normal first-pass review instead of merging when the head changed, `fast-merge-veto` is present, or the live fast-merge authorization label is absent.
 - Validate CI with `gh pr checks --json name,state,bucket,workflow,link`, treating CLI exits `8` (pending) and `1` (failed) as data-bearing results when stdout contains parseable JSON rather than as transport failures, and treating the real `gh` "no checks reported" diagnostic as an empty check set.
 - Re-fetch and re-summarize CI in the immediate pre-merge window, after the head/veto/authorization-label re-check and before the admin merge.
 - Merge only with `gh pr merge --squash --admin --delete-branch --match-head-commit <authorizedHeadSha>` so GitHub rejects the merge if the head moved after the last verification step.
 
 The `--admin` flag is an intentional branch-protection bypass for this lane. The safety floor is therefore explicit and cumulative: the row must already be in the watcher-authorized fast-merge state, the live head must still equal the authorized SHA, CI must summarize as successful, an allowlisted `fast-merge:*` label must still be present, and `fast-merge-veto` must remain absent. If any of those predicates stop being true, the daemon must fail closed to the normal adversarial-review path or leave the row in `fast_merge_skipped` for a later poll; it must not broaden merge authority.
+
+The only supported changed-head exception is a HAM terminal-remediation commit
+directly on top of the authorized head. That exception is fail-closed and
+requires all of the following before the daemon may replace the exact merge head
+with the HAM head: the live commit's first parent is the authorized head; the
+live GitHub commit has a non-empty diff; the commit trailers include
+`Worker-Class: hammer`, `Worker-Ticket: HAM-<n>`, `Reviewed-Head:
+<authorizedHeadSha>`, `Closed-By: hammer (adversarial-pipe-mode)`, and a
+parseable `Remediated-Findings` count; a PR timeline comment from an allowlisted
+hammer bot identity contains both the canonical `Closed-By` marker and the same
+findings count; and the local AMA audit JSON at
+`$HQ_ROOT/dispatch/audit/adversarial-merge-authority/<repo>-pr-<n>-<liveHead>.json`
+matches the exact `(repo, pr, liveHead)` tuple with a latest
+`preMergeEligible: true` attempt whose `headMatchEvidence` is
+`ham_terminal_remediation_validated`. Commit trailers and PR comments are
+attacker-controlled corroborating evidence, not sufficient authority. If
+`HQ_ROOT` is unset, the audit record is absent, the audit record is not keyed to
+the live head, the comment is by the commit author alone, or the comment only
+echoes the findings string without the `Closed-By` marker, the daemon requeues
+normal first-pass review and never merges the changed head.
 
 Fast-merge state transitions are audit-bearing. Successful merges persist `fast_merge_merged`; closed-unmerged PRs persist `fast_merge_closed`; deterministic refusals while the PR is provably still open persist `fast_merge_blocked`. Merge CLI errors are not authoritative on their own: before recording `fast_merge_blocked`, the daemon must re-fetch PR state and treat an already-merged PR as `fast_merge_merged` so a server-side merge followed by client timeout or branch-delete failure does not strand the row in a false blocked state. Merge audits should capture the real merge commit SHA from `gh pr view --json mergeCommit` when available rather than regex-scraping CLI output. Fast-merge audit JSON belongs under `data/fast-merge-audits/` rather than the reviewer runtime state directory, uses an explicit audit type to distinguish skip vs. close records, and must leave a pending retry marker on the row if a terminal close-path audit write fails.
 

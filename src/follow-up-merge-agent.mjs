@@ -57,6 +57,7 @@ import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.m
 import {
   readLatestWorkerRunStatusFromLedger,
 } from './session-ledger-read-adapter.mjs';
+import { readAmaAuditEntry } from './ama/audit.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -4379,14 +4380,11 @@ const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set([
   'lacey-hammer-worker',
   'lacey-hammer-reviewer',
   'merge-agent-lacey',
-  'github-actions',
 ]);
 
-function hamAuditCommentAuthorMatches(author, verifiedCommit) {
+function hamAuditCommentAuthorMatches(author) {
   const commentAuthor = normalizeLogin(author);
   if (!commentAuthor) return false;
-  const commitAuthor = normalizeLogin(verifiedCommit?.author || verifiedCommit?.committer);
-  if (commitAuthor && commentAuthor === commitAuthor) return true;
   return HAM_AUDIT_COMMENT_AUTHOR_LOGINS.has(commentAuthor);
 }
 
@@ -4395,10 +4393,16 @@ function hasMatchingHamAuditComment(timelineJson, verifiedCommit) {
   const remediatedFindings = String(verifiedCommit?.trailers?.['remediated-findings'] || '').trim();
   return timeline.some((event) => {
     const body = timelineCommentBody(event);
-    if (!body || !hamAuditCommentAuthorMatches(timelineCommentAuthor(event), verifiedCommit)) return false;
+    if (!body || !hamAuditCommentAuthorMatches(timelineCommentAuthor(event))) return false;
     return body.includes('Closed-By: hammer (adversarial-pipe-mode)')
-      || (remediatedFindings && body.includes(remediatedFindings));
+      && (!remediatedFindings || body.includes(remediatedFindings));
   });
+}
+
+function flattenGhPaginatedJson(parsed) {
+  if (!Array.isArray(parsed)) return [];
+  if (parsed.every((item) => Array.isArray(item))) return parsed.flat();
+  return parsed;
 }
 
 async function fetchFastMergeHamCommit({ ghClient, repo, headSha }) {
@@ -4419,11 +4423,53 @@ async function fetchFastMergeTimeline({ ghClient, repo, prNumber }) {
     'api',
     `repos/${repo}/issues/${prNumber}/timeline`,
     '--paginate',
+    '--slurp',
   ], {
     maxBuffer: 5 * 1024 * 1024,
     timeout: FAST_MERGE_GH_TIMEOUT_MS,
   }));
-  return parseGhJson(stdout, []);
+  return flattenGhPaginatedJson(parseGhJson(stdout, []));
+}
+
+function attemptHasHamAuthorizationMarker(attempt) {
+  if (!attempt || typeof attempt !== 'object') return false;
+  if (attempt.headMatchEvidence === 'ham_terminal_remediation_validated') return true;
+  if (attempt.eligibilityReason === 'ham_terminal_remediation_validated') return true;
+  const trace = attempt.eligibilityReasons || attempt.preMergeReasons || attempt.trace || null;
+  return JSON.stringify(trace || '').includes('ham_terminal_remediation_validated');
+}
+
+function verifyFastMergeHamAuditRecord({
+  hqRoot,
+  repo,
+  prNumber,
+  reviewedHead,
+  liveHead,
+}) {
+  if (!hqRoot) {
+    return { ok: false, reason: 'ham-audit-root-missing' };
+  }
+  const audit = readAmaAuditEntry(hqRoot, repo, prNumber, liveHead);
+  const attempts = Array.isArray(audit?.attempts) ? audit.attempts : [];
+  const latestAttempt = attempts.at(-1) || null;
+  const checks = {
+    exists: Boolean(audit),
+    schemaVersion: audit?.schemaVersion === 1,
+    repo: audit?.repo === repo,
+    prNumber: Number(audit?.prNumber) === Number(prNumber),
+    headSha: String(audit?.headSha || '').trim() === liveHead,
+    status: ['in_progress', 'succeeded'].includes(String(audit?.status || '').trim()),
+    preMergeEligible: latestAttempt?.preMergeEligible === true,
+    hamMarker: attemptHasHamAuthorizationMarker(latestAttempt),
+  };
+  const ok = Object.values(checks).every(Boolean);
+  return {
+    ok,
+    reason: ok ? 'ham-audit-record-authorized' : 'ham-audit-record-invalid',
+    checks,
+    reviewedHead,
+    liveHead,
+  };
 }
 
 async function verifyFastMergeHamRemediationHead({
@@ -4432,6 +4478,7 @@ async function verifyFastMergeHamRemediationHead({
   prNumber,
   authorizedHeadSha,
   currentHeadSha,
+  hqRoot = resolveHqRoot(process.env),
   logger = console,
 } = {}) {
   const reviewedHead = String(authorizedHeadSha || '').trim();
@@ -4463,12 +4510,31 @@ async function verifyFastMergeHamRemediationHead({
       return { authorized: false, reason: 'ham-audit-comment-missing' };
     }
 
+    const auditRecord = verifyFastMergeHamAuditRecord({
+      hqRoot,
+      repo,
+      prNumber,
+      reviewedHead,
+      liveHead,
+    });
+    if (!auditRecord.ok) {
+      return {
+        authorized: false,
+        reason: auditRecord.reason,
+        checks: {
+          ...commitChecks,
+          auditRecord: auditRecord.checks,
+        },
+      };
+    }
+
     return {
       authorized: true,
       reason: 'ham-remediation-head-authorized',
       authorizedHeadSha: liveHead,
       reviewedHeadSha: reviewedHead,
       remediatedFindingCounts,
+      auditRecord: auditRecord.checks,
     };
   } catch (err) {
     logger?.warn?.(
@@ -4825,6 +4891,7 @@ async function processFastMergePR({
   prNumber,
   authorizedHeadSha,
   auditWriter = null,
+  env = process.env,
   logger = console,
 } = {}) {
   let exactHeadSha = authorizedHeadSha;
@@ -4889,6 +4956,7 @@ async function processFastMergePR({
       prNumber,
       authorizedHeadSha: exactHeadSha,
       currentHeadSha: firstView.headRefOid || null,
+      hqRoot: resolveHqRoot(env),
       logger,
     });
     if (hamAuthorization.authorized) {

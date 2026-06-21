@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -12,6 +12,7 @@ import {
   resolveFastMergePerPollCap,
   writeFastMergeCloseAuditEntry,
 } from '../src/follow-up-merge-agent.mjs';
+import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import { fastMergeAuditDir } from '../src/fast-merge-audit-storage.mjs';
 import { ensureReviewStateSchema, getReviewRow } from '../src/review-state.mjs';
 
@@ -102,6 +103,26 @@ function hamTimeline({
     ].join('\n'),
     user: { login: author },
   }];
+}
+
+function seedHamFastMergeAudit(hqRoot, {
+  repo = REPO,
+  prNumber,
+  headSha = 'sha-HAM',
+} = {}) {
+  writeAmaAuditEntry({
+    hqRoot,
+    repo,
+    prNumber,
+    headSha,
+    attempt: {
+      outcome: 'in_progress',
+      preMergeEligible: true,
+      attemptPhase: 'before-gh-pr-merge',
+      headMatchEvidence: 'ham_terminal_remediation_validated',
+    },
+    now: '2026-05-24T12:21:30.000Z',
+  });
 }
 
 function transportError(message = 'timed out') {
@@ -256,6 +277,7 @@ test('fast-merge head change requeues through canonical review reset and never m
 });
 
 test('fast-merge HAM provenance head change is authorized and merged at the new exact head', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'fast-merge-ham-audit-'));
   const db = makeDb();
   seedFastMerge(db, 8021);
   const audits = [];
@@ -265,24 +287,94 @@ test('fast-merge HAM provenance head change is authorized and merged at the new 
     commits: { 'sha-HAM': hamCommit({ sha: 'sha-HAM', parentSha: 'sha-A' }) },
     timeline: hamTimeline(),
   });
+  seedHamFastMergeAudit(hqRoot, { prNumber: 8021, headSha: 'sha-HAM' });
+
+  try {
+    const result = await processFastMergePR({
+      db,
+      ghClient: gh,
+      repo: REPO,
+      prNumber: 8021,
+      authorizedHeadSha: 'sha-A',
+      auditWriter: (entry) => audits.push(entry),
+      env: { HQ_ROOT: hqRoot },
+    });
+
+    assert.equal(result.status, 'merged');
+    assert.equal(row(db, 8021).pr_state, 'fast_merge_merged');
+    assert.equal(row(db, 8021).review_status, 'fast_merge_merged');
+    assert.equal(mergeCalls(gh).length, 1);
+    assert.deepEqual(mergeCalls(gh)[0].args.slice(-3), ['--match-head-commit', 'sha-HAM', '--delete-branch']);
+    assert.equal(audits.at(-1).authorized_head_sha, 'sha-HAM');
+    assert.equal(audits.at(-1).merged_head_sha, 'sha-HAM');
+    assert.equal(claimWithWatcherCas(db, 8021).changes, 0);
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
+test('fast-merge HAM-looking head from untrusted author and same-author comment requeues', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 80211);
+  const audits = [];
+  const gh = makeGhStub({
+    views: [openView('sha-HAM')],
+    commits: {
+      'sha-HAM': hamCommit({
+        sha: 'sha-HAM',
+        parentSha: 'sha-A',
+        author: 'codex-worker-bot',
+      }),
+    },
+    timeline: hamTimeline({ author: 'codex-worker-bot' }),
+  });
 
   const result = await processFastMergePR({
     db,
     ghClient: gh,
     repo: REPO,
-    prNumber: 8021,
+    prNumber: 80211,
     authorizedHeadSha: 'sha-A',
     auditWriter: (entry) => audits.push(entry),
   });
 
-  assert.equal(result.status, 'merged');
-  assert.equal(row(db, 8021).pr_state, 'fast_merge_merged');
-  assert.equal(row(db, 8021).review_status, 'fast_merge_merged');
-  assert.equal(mergeCalls(gh).length, 1);
-  assert.deepEqual(mergeCalls(gh)[0].args.slice(-3), ['--match-head-commit', 'sha-HAM', '--delete-branch']);
-  assert.equal(audits.at(-1).authorized_head_sha, 'sha-HAM');
-  assert.equal(audits.at(-1).merged_head_sha, 'sha-HAM');
-  assert.equal(claimWithWatcherCas(db, 8021).changes, 0);
+  assert.equal(result.status, 'requeued_head_change');
+  assert.equal(mergeCalls(gh).length, 0);
+  assert.equal(row(db, 80211).review_status, 'pending');
+  assert.equal(audits.at(-1).action, 'head-changed-requeued');
+  assert.equal(audits.at(-1).current_head_sha, 'sha-HAM');
+});
+
+test('fast-merge HAM-looking head with GitHub provenance but no trusted audit record requeues', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'fast-merge-ham-missing-audit-'));
+  const db = makeDb();
+  seedFastMerge(db, 80212);
+  const audits = [];
+  const gh = makeGhStub({
+    views: [openView('sha-HAM')],
+    commits: { 'sha-HAM': hamCommit({ sha: 'sha-HAM', parentSha: 'sha-A' }) },
+    timeline: hamTimeline(),
+  });
+
+  try {
+    const result = await processFastMergePR({
+      db,
+      ghClient: gh,
+      repo: REPO,
+      prNumber: 80212,
+      authorizedHeadSha: 'sha-A',
+      auditWriter: (entry) => audits.push(entry),
+      env: { HQ_ROOT: hqRoot },
+    });
+
+    assert.equal(result.status, 'requeued_head_change');
+    assert.equal(mergeCalls(gh).length, 0);
+    assert.equal(row(db, 80212).review_status, 'pending');
+    assert.equal(audits.at(-1).action, 'head-changed-requeued');
+    assert.equal(audits.at(-1).current_head_sha, 'sha-HAM');
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
 });
 
 test('fast-merge HAM-looking head still requeues when GitHub provenance is missing', async () => {
@@ -312,6 +404,7 @@ test('fast-merge HAM-looking head still requeues when GitHub provenance is missi
 });
 
 test('fast-merge HAM-authorized new head requeues if the head changes again before merge', async () => {
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'fast-merge-ham-audit-race-'));
   const db = makeDb();
   seedFastMerge(db, 8023);
   const audits = [];
@@ -321,21 +414,27 @@ test('fast-merge HAM-authorized new head requeues if the head changes again befo
     commits: { 'sha-HAM': hamCommit({ sha: 'sha-HAM', parentSha: 'sha-A' }) },
     timeline: hamTimeline(),
   });
+  seedHamFastMergeAudit(hqRoot, { prNumber: 8023, headSha: 'sha-HAM' });
 
-  const result = await processFastMergePR({
-    db,
-    ghClient: gh,
-    repo: REPO,
-    prNumber: 8023,
-    authorizedHeadSha: 'sha-A',
-    auditWriter: (entry) => audits.push(entry),
-  });
+  try {
+    const result = await processFastMergePR({
+      db,
+      ghClient: gh,
+      repo: REPO,
+      prNumber: 8023,
+      authorizedHeadSha: 'sha-A',
+      auditWriter: (entry) => audits.push(entry),
+      env: { HQ_ROOT: hqRoot },
+    });
 
-  assert.equal(result.status, 'requeued_head_change');
-  assert.equal(mergeCalls(gh).length, 0);
-  assert.equal(row(db, 8023).review_status, 'pending');
-  assert.equal(audits.at(-1).authorized_head_sha, 'sha-HAM');
-  assert.equal(audits.at(-1).current_head_sha, 'sha-C');
+    assert.equal(result.status, 'requeued_head_change');
+    assert.equal(mergeCalls(gh).length, 0);
+    assert.equal(row(db, 8023).review_status, 'pending');
+    assert.equal(audits.at(-1).authorized_head_sha, 'sha-HAM');
+    assert.equal(audits.at(-1).current_head_sha, 'sha-C');
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
 });
 
 test('fast-merge head change between CI and merge requeues and never merges', async () => {

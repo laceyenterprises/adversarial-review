@@ -2298,7 +2298,11 @@ const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
          lower(COALESCE(failure_message, '')) LIKE '%launchctlsessionerror%'
        )) OR
        (? = 'oauth-broken' AND lower(COALESCE(failure_message, '')) LIKE '%[oauth-broken]%') OR
-       (? = 'quota-exhausted' AND lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%')
+       (? = 'quota-exhausted' AND lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%') OR
+       (? = 'reviewer-command-failed' AND (
+         lower(COALESCE(failure_message, '')) = '[unknown] command failed' OR
+         lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed with code %'
+       ))
      )`
 );
 const stmtMarkFastMergeAuditPending = db.prepare(
@@ -6496,6 +6500,7 @@ async function pollOnce(
                 repoPath,
                 prNumber,
                 INFRA_AUTO_RECOVER_CAP,
+                infraRecoveryClass,
                 infraRecoveryClass,
                 infraRecoveryClass,
                 infraRecoveryClass,

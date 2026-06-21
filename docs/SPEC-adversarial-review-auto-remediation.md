@@ -783,7 +783,11 @@ gate above must report healthy before an infrastructure failed row is claimed.
 Eligible infrastructure classes are routing-tier `cascade`, exhausted
 GitHub diff-fetch transients tagged as `cascade`, `reviewer-timeout`,
 `launchctl-bootstrap`, reviewer-spawn `oauth-broken`, and hard provider usage
-caps recorded as `quota-exhausted`. `forbidden-fallback`,
+caps recorded as `quota-exhausted`. Reviewer subprocess exits recorded as
+`[unknown] Command failed` or `[unknown] Command failed with code <n>` before
+any verdict exists are also eligible as `reviewer-command-failed`, using the
+same bounded claim and cap semantics as the other infrastructure classes.
+`forbidden-fallback`,
 `failed-orphan`, `malformed`, inactive repos, closed or merged PRs,
 undiscovered PRs, drain-skipped rows, and rows blocked by active follow-up jobs
 are not recovered by this path. `oauth-broken` is included only for spawn

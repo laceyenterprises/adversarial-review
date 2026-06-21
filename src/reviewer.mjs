@@ -20,7 +20,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -587,6 +587,17 @@ function formatAgrAllCappedPageText(payload) {
   );
 }
 
+function writeJsonFileAtomic(fsImpl, path, payload) {
+  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`;
+  const body = `${JSON.stringify(payload, null, 2)}\n`;
+  fsImpl.writeFileSync(tmpPath, body);
+  if (typeof fsImpl.renameSync === 'function') {
+    fsImpl.renameSync(tmpPath, path);
+    return;
+  }
+  fsImpl.writeFileSync(path, body);
+}
+
 async function maybePageAgrAllCapped({
   retryAfter,
   accountStatus = null,
@@ -594,10 +605,13 @@ async function maybePageAgrAllCapped({
   now = Date.now(),
   alertStateDir = AGR_ALL_CAPPED_ALERT_STATE_DIR,
   dedupeMs = AGR_ALL_CAPPED_ALERT_DEDUPE_MS,
-  fsImpl = { existsSync, readFileSync, mkdirSync, writeFileSync },
+  fsImpl = { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync },
   log = console,
 } = {}) {
   const statePath = join(alertStateDir, 'agr-all-capped.json');
+  // Best-effort, single-writer debounce. Overlapping reviewers may race and
+  // double-page, but atomic replace keeps the sidecar parseable for the next
+  // tick instead of corrupting the dedupe state.
   let prior = null;
   try {
     if (fsImpl.existsSync(statePath)) {
@@ -612,12 +626,12 @@ async function maybePageAgrAllCapped({
     const suppressedCount = Math.max(0, Number(prior?.suppressedCount) || 0) + 1;
     try {
       fsImpl.mkdirSync(alertStateDir, { recursive: true });
-      fsImpl.writeFileSync(statePath, `${JSON.stringify({
+      writeJsonFileAtomic(fsImpl, statePath, {
         ...prior,
         suppressedCount,
         lastSuppressedAt: new Date(now).toISOString(),
         retryAfter: retryAfter || prior?.retryAfter || null,
-      }, null, 2)}\n`);
+      });
     } catch (err) {
       log?.warn?.(`[reviewWithGemini] failed to persist AGR all-capped suppressed count: ${err?.message || err}`);
     }
@@ -632,11 +646,11 @@ async function maybePageAgrAllCapped({
   });
   try {
     fsImpl.mkdirSync(alertStateDir, { recursive: true });
-    fsImpl.writeFileSync(statePath, `${JSON.stringify({
+    writeJsonFileAtomic(fsImpl, statePath, {
       pagedAt: new Date(now).toISOString(),
       retryAfter: retryAfter || null,
       suppressedCount: 0,
-    }, null, 2)}\n`);
+    });
   } catch (err) {
     log?.warn?.(`[reviewWithGemini] failed to persist AGR all-capped page state: ${err?.message || err}`);
   }

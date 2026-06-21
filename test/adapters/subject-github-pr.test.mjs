@@ -95,13 +95,8 @@ test('github-pr subject adapter discovers GitHub PR subjects with normalized bui
   assert.deepEqual(routeSubject(subject, { env: HERMETIC_CONFIG_ENV }), {
     builderClass: 'codex',
     tag: 'codex',
-    reviewerModel: 'gemini',
-    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    geminiReviewerSelection: {
-      mode: 'always-on',
-      replacedReviewerModel: 'claude',
-      reason: 'always-on-third-reviewer',
-    },
+    reviewerModel: 'claude',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
   });
 });
 
@@ -145,13 +140,8 @@ test('github-pr routing extracts configured linear issue prefix', () => {
   }), {
     builderClass: 'codex',
     tag: 'codex',
-    reviewerModel: 'gemini',
-    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    geminiReviewerSelection: {
-      mode: 'always-on',
-      replacedReviewerModel: 'claude',
-      reason: 'always-on-third-reviewer',
-    },
+    reviewerModel: 'claude',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
     linearTicketId: 'ACME-484',
   });
 });
@@ -172,13 +162,8 @@ test('github-pr routing extracts configured linear issue prefix from topPath', (
     }), {
       builderClass: 'codex',
       tag: 'codex',
-      reviewerModel: 'gemini',
-      botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-      geminiReviewerSelection: {
-        mode: 'always-on',
-        replacedReviewerModel: 'claude',
-        reason: 'always-on-third-reviewer',
-      },
+      reviewerModel: 'claude',
+      botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
       linearTicketId: 'ACME-484',
     });
   } finally {

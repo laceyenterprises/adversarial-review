@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CLAUDE_CLI, GEMINI_CLI, __test__ } from '../src/reviewer.mjs';
@@ -8,6 +8,7 @@ import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-di
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
+import { CATEGORY_ORDER } from '../src/api-telemetry.mjs';
 
 const {
   CLAUDE_STRIPPED_ENV_VARS,
@@ -1914,6 +1915,17 @@ test('AGR-06 reviewWithGemini antigravity emits account telemetry for selection,
   assert.equal(JSON.stringify(events).includes('token-a'), false);
 });
 
+test('AGR-06 antigravity account telemetry events are registered API categories', () => {
+  const emittedAgrEvents = [
+    'agr_account_selected',
+    'agr_account_rate_limited',
+    'agr_all_capped',
+  ];
+  for (const eventName of emittedAgrEvents) {
+    assert.ok(CATEGORY_ORDER.includes(eventName), `${eventName} must be in CATEGORY_ORDER`);
+  }
+});
+
 test('AGR-06 all-capped page payload dedupes and coalesces suppressed count', async () => {
   const stateDir = mkdtempSync(join(tmpdir(), 'agr-all-capped-page-'));
   const pages = [];
@@ -1955,6 +1967,42 @@ test('AGR-06 all-capped page payload dedupes and coalesces suppressed count', as
     assert.equal(pages[0].structured.payload.suppressedCount, 0);
     assert.equal(pages[1].structured.payload.suppressedCount, 1);
     assert.deepEqual(pages[1].structured.payload.accounts, accountStatus);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('AGR-06 all-capped state persistence uses atomic tmp rename', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'agr-all-capped-atomic-'));
+  const writes = [];
+  try {
+    const fsImpl = {
+      existsSync,
+      readFileSync,
+      mkdirSync,
+      writeFileSync: (target, body) => {
+        writes.push({ op: 'write', target });
+        writeFileSync(target, body);
+      },
+      renameSync: (from, to) => {
+        writes.push({ op: 'rename', from, to });
+        renameSync(from, to);
+      },
+    };
+
+    await maybePageAgrAllCapped({
+      retryAfter: '2026-06-20T21:15:00.000Z',
+      deliverAlertFn: async () => {},
+      now: Date.parse('2026-06-20T20:00:00.000Z'),
+      alertStateDir: stateDir,
+      fsImpl,
+    });
+
+    assert.match(writes[0].target, /agr-all-capped\.json\.tmp-/);
+    assert.equal(writes[1].op, 'rename');
+    assert.match(writes[1].from, /agr-all-capped\.json\.tmp-/);
+    assert.equal(writes[1].to, join(stateDir, 'agr-all-capped.json'));
+    assert.equal(JSON.parse(readFileSync(join(stateDir, 'agr-all-capped.json'), 'utf8')).suppressedCount, 0);
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }

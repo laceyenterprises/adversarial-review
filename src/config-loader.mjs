@@ -668,6 +668,13 @@ function schemaV1() {
             __pattern: PATTERN_SQL_IDENTIFIER,
             __pattern_description: PATTERN_SQL_IDENTIFIER_DESCRIPTION,
           },
+          vdb: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              enabled: { __type: TYPE_BOOL, __default: true },
+            },
+          },
           // CFG-04 dual-write nested block — mirrors agent_os_config
           // `_schema_v1()` (Python loader, line ~276). Added 2026-06-02
           // after operator's config.local.yaml set `session_ledger.dual_write.mode`
@@ -1716,6 +1723,10 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_SESSION_LEDGER_DATABASE_NAME',
     aliases: [],
   },
+  'session_ledger.vdb.enabled': {
+    canonical: 'AGENT_OS_SESSION_LEDGER_VDB',
+    aliases: [],
+  },
   'operator.email': {
     canonical: 'AGENT_OS_OPERATOR_EMAIL',
     aliases: [],
@@ -2560,10 +2571,10 @@ function coerceEnvValue(key, value, schemaLeaf, source = null) {
   if (expected === TYPE_BOOL) {
     const lower = value.trim().toLowerCase();
     if (lower === '') return false;
-    if (lower === 'true' || lower === '1') return true;
-    if (lower === 'false' || lower === '0') return false;
+    if (lower === 'true' || lower === '1' || lower === 'yes' || lower === 'on') return true;
+    if (lower === 'false' || lower === '0' || lower === 'no' || lower === 'off') return false;
     throw new AgentOSConfigError(
-      `${key}: env value ${JSON.stringify(value)} is not a recognized boolean (use 'true'/'false', '1'/'0', or empty string for false)`,
+      `${key}: env value ${JSON.stringify(value)} is not a recognized boolean (use 'true'/'false', '1'/'0', 'on'/'off', or empty string for false)`,
       { key, expected: 'bool', got: value, source },
     );
   }

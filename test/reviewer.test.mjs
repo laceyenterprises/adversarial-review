@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CLAUDE_CLI, GEMINI_CLI, __test__ } from '../src/reviewer.mjs';
+import { CLAUDE_CLI, GEMINI_CLI, AGY_CLI, __test__ } from '../src/reviewer.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
@@ -31,18 +31,25 @@ const {
   spawnCodexReview,
   spawnClaude,
   resolveGeminiCliPath,
+  resolveAgyCliPath,
   resolveGeminiOAuthCredsPath,
   assertGeminiOAuth,
+  assertAgyReviewerAuth,
+  checkAgyReviewerAuth,
   resolveGeminiRuntime,
   resolveGeminiReviewerModel,
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
+  buildAgyReviewArgs,
+  AGY_KEYCHAIN_SERVICE,
+  AGY_KEYCHAIN_REMEDIATION,
   isRetryableGeminiSubprocessError,
   retryAfterFromGeminiFailure,
   formatAntigravityQuotaHoldMessage,
   buildAgrAllCappedPagePayload,
   maybePageAgrAllCapped,
   spawnGeminiReview,
+  spawnAgyReview,
   reviewWithGemini,
   dispatchReviewerModel,
   formatAdvisoryFindingsContext,
@@ -1637,6 +1644,11 @@ test('buildGeminiReviewArgs enters headless mode without carrying the prompt bod
   assert.equal(args[args.indexOf('--prompt') + 1], '');
 });
 
+test('buildAgyReviewArgs uses agy print mode without carrying the prompt body', () => {
+  const args = buildAgyReviewArgs({ model: 'gemini-2.5-pro' });
+  assert.deepEqual(args, ['--print', '-m', 'gemini-2.5-pro']);
+});
+
 test('spawnGeminiReview feeds the prompt over stdin and keeps it out of argv', async () => {
   const prompt = 'ADVERSARIAL PROMPT\n\n---\n\n```diff\n+secret diff body\n```';
   const calls = [];
@@ -1659,6 +1671,38 @@ test('spawnGeminiReview feeds the prompt over stdin and keeps it out of argv', a
   assert.equal(calls[0].command, '/usr/local/bin/gemini');
   assert.deepEqual(calls[0].args, ['-m', 'gemini-2.5-pro', '-o', 'text', '--prompt', '']);
   // The prompt (and the diff body inside it) is observed ONLY on stdin.
+  assert.equal(calls[0].options.input, prompt);
+  for (const arg of calls[0].args) {
+    assert.ok(!arg.includes('secret diff body'), `argv leaked prompt body: ${arg}`);
+    assert.ok(!arg.includes('ADVERSARIAL PROMPT'), `argv leaked prompt body: ${arg}`);
+  }
+  assert.deepEqual(
+    { cwd: calls[0].options.cwd, timeout: calls[0].options.timeout, maxBuffer: calls[0].options.maxBuffer },
+    { cwd: '/tmp/repo', timeout: 9_999, maxBuffer: 555 },
+  );
+});
+
+test('spawnAgyReview feeds the prompt over stdin and keeps it out of argv', async () => {
+  const prompt = 'ADVERSARIAL PROMPT\n\n---\n\n```diff\n+secret diff body\n```';
+  const calls = [];
+
+  await spawnAgyReview({
+    agyCli: '/usr/local/bin/agy',
+    prompt,
+    model: 'gemini-2.5-pro',
+    env: { HOME: '/tmp/home', PATH: process.env.PATH },
+    cwd: '/tmp/repo',
+    timeout: 9_999,
+    maxBuffer: 555,
+    spawnWithInputImpl: async (command, args, options) => {
+      calls.push({ command, args, options });
+      return { stdout: 'ok', stderr: '' };
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, '/usr/local/bin/agy');
+  assert.deepEqual(calls[0].args, ['--print', '-m', 'gemini-2.5-pro']);
   assert.equal(calls[0].options.input, prompt);
   for (const arg of calls[0].args) {
     assert.ok(!arg.includes('secret diff body'), `argv leaked prompt body: ${arg}`);
@@ -1736,109 +1780,94 @@ test('reviewWithGemini cli runtime keeps native binary, argv, env scrub, and cre
   assert.equal(calls[0].env.GEMINI_OAUTH_ACCESS_TOKEN, undefined);
 });
 
-test('reviewWithGemini antigravity runtime scrubs API-key fallbacks before token injection', async () => {
-  const spawnEnvs = [];
-  const credsPaths = [];
-  const credsBodies = [];
-  await withEnvAsync({
+test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scrub, and agy auth', async () => {
+  const authCalls = [];
+  const spawnCalls = [];
+  const result = await withEnvAsync({
+    HOME: '/tmp/agy-home',
     GEMINI_API_KEY: 'must-strip',
     GOOGLE_API_KEY: 'must-strip-too',
-  }, () => reviewWithGemini('+diff\n', '', {
+  }, () => reviewWithGemini('+diff\n', 'AGY CONTEXT', {
     resolveGeminiRuntimeImpl: () => 'antigravity',
-    assertAntigravityOAuthImpl: async ({ selectAccountImpl }) => selectAccountImpl(),
-    selectAntigravityAccountImpl: () => 'acct-a',
-    getAntigravityAccessTokenImpl: async () => 'fresh-access-token',
-    spawnGeminiReviewImpl: async ({ env }) => {
-      spawnEnvs.push(env);
-      credsPaths.push(env.GEMINI_AUTH_PATH);
-      credsBodies.push(readFileSync(env.GEMINI_AUTH_PATH, 'utf8'));
-      return { stdout: 'Antigravity review', stderr: '' };
+    assertAgyAuthImpl: async ({ agyCli, env }) => {
+      authCalls.push({ agyCli, env });
+    },
+    spawnAgyReviewImpl: async ({ agyCli, prompt, model, env }) => {
+      spawnCalls.push({ agyCli, args: buildAgyReviewArgs({ model }), prompt, env });
+      return { stdout: 'Antigravity agy review', stderr: '' };
+    },
+    spawnGeminiReviewImpl: async () => {
+      throw new Error('native gemini must not be called for antigravity runtime');
     },
   }));
 
-  assert.equal(spawnEnvs.length, 1);
-  assert.equal(spawnEnvs[0].GEMINI_API_KEY, undefined);
-  assert.equal(spawnEnvs[0].GOOGLE_API_KEY, undefined);
-  assert.equal(spawnEnvs[0].GEMINI_OAUTH_ACCESS_TOKEN, 'fresh-access-token');
-  assert.equal(spawnEnvs[0].GEMINI_ANTIGRAVITY_ACCOUNT, 'acct-a');
-  assert.match(spawnEnvs[0].GEMINI_AUTH_PATH, /oauth_creds\.json$/);
-  assert.match(credsBodies[0], /fresh-access-token/);
-  assert.equal(existsSync(credsPaths[0]), false, 'temporary antigravity oauth_creds.json should be removed after spawn');
+  assert.equal(result.reviewText, 'Antigravity agy review');
+  assert.equal(authCalls.length, 1);
+  assert.equal(authCalls[0].agyCli, AGY_CLI);
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(spawnCalls[0].agyCli, AGY_CLI);
+  assert.deepEqual(spawnCalls[0].args, ['--print', '-m', 'gemini-2.5-pro']);
+  assert.match(spawnCalls[0].prompt, /AGY CONTEXT/);
+  assert.match(spawnCalls[0].prompt, /```diff\n\+diff/);
+  assert.equal(spawnCalls[0].env.HOME, '/tmp/agy-home');
+  assert.equal(spawnCalls[0].env.GEMINI_API_KEY, undefined);
+  assert.equal(spawnCalls[0].env.GOOGLE_API_KEY, undefined);
+  assert.equal(spawnCalls[0].env.GEMINI_OAUTH_ACCESS_TOKEN, undefined);
+  assert.equal(spawnCalls[0].env.GEMINI_ANTIGRAVITY_ACCOUNT, undefined);
 });
 
-test('reviewWithGemini antigravity 401 marks rate-limited account and retries exactly once on the next account', async () => {
-  const selected = ['acct-a', 'acct-b'];
-  const marked = [];
-  const spawns = [];
+test('reviewWithGemini cli runtime does not call agy auth or agy spawn', async () => {
+  const calls = [];
   const result = await reviewWithGemini('+diff\n', '', {
-    resolveGeminiRuntimeImpl: () => 'antigravity',
-    assertAntigravityOAuthImpl: async ({ selectAccountImpl }) => selectAccountImpl(),
-    selectAntigravityAccountImpl: () => selected.shift() || null,
-    getAntigravityAccessTokenImpl: async (accountId) => `token-${accountId}`,
-    markAntigravityRateLimitedImpl: (accountId, retryAfter) => marked.push({ accountId, retryAfter }),
-    allAntigravityCappedImpl: () => ({ allCapped: false, retryAfter: null }),
-    spawnGeminiReviewImpl: async ({ env }) => {
-      spawns.push(env);
-      if (spawns.length === 1) {
-        const err = new Error('Command failed');
-        err.stderr = '401 Unauthorized';
-        throw err;
-      }
-      return { stdout: 'rotated review', stderr: '' };
+    resolveGeminiRuntimeImpl: () => 'cli',
+    assertOAuthImpl: async () => {},
+    assertAgyAuthImpl: async () => {
+      throw new Error('agy auth must not be called for cli runtime');
+    },
+    spawnAgyReviewImpl: async () => {
+      throw new Error('agy spawn must not be called for cli runtime');
+    },
+    spawnGeminiReviewImpl: async ({ geminiCli, model }) => {
+      calls.push({ geminiCli, args: buildGeminiReviewArgs({ model }) });
+      return { stdout: 'CLI review', stderr: '' };
     },
   });
 
-  assert.equal(result.reviewText, 'rotated review');
-  assert.equal(spawns.length, 2);
-  assert.equal(spawns[0].GEMINI_ANTIGRAVITY_ACCOUNT, 'acct-a');
-  assert.equal(spawns[0].GEMINI_OAUTH_ACCESS_TOKEN, 'token-acct-a');
-  assert.equal(spawns[1].GEMINI_ANTIGRAVITY_ACCOUNT, 'acct-b');
-  assert.equal(spawns[1].GEMINI_OAUTH_ACCESS_TOKEN, 'token-acct-b');
-  assert.equal(marked.length, 1);
-  assert.equal(marked[0].accountId, 'acct-a');
+  assert.equal(result.reviewText, 'CLI review');
+  assert.equal(calls[0].geminiCli, GEMINI_CLI);
+  assert.deepEqual(calls[0].args, ['-m', 'gemini-2.5-pro', '-o', 'text', '--prompt', '']);
 });
 
-test('reviewWithGemini antigravity walks to a third live account before failing', async () => {
-  const selected = ['acct-a', 'acct-b', 'acct-c'];
-  const marked = [];
-  const spawns = [];
-  const result = await reviewWithGemini('+diff\n', '', {
-    resolveGeminiRuntimeImpl: () => 'antigravity',
-    assertAntigravityOAuthImpl: async ({ selectAccountImpl }) => selectAccountImpl(),
-    selectAntigravityAccountImpl: () => selected.shift() || null,
-    getAntigravityAccessTokenImpl: async (accountId) => `token-${accountId}`,
-    markAntigravityRateLimitedImpl: (accountId, retryAfter) => marked.push({ accountId, retryAfter }),
-    allAntigravityCappedImpl: () => ({ allCapped: false, retryAfter: null }),
-    spawnGeminiReviewImpl: async ({ env }) => {
-      spawns.push(env.GEMINI_ANTIGRAVITY_ACCOUNT);
-      if (spawns.length < 3) {
-        const err = new Error('Command failed');
-        err.stderr = '401 Unauthorized';
+test('reviewWithGemini antigravity auth missing fails closed before spawning a review', async () => {
+  const spawnCalls = [];
+  await assert.rejects(
+    () => reviewWithGemini('+diff\n', '', {
+      resolveGeminiRuntimeImpl: () => 'antigravity',
+      assertAgyAuthImpl: async () => {
+        const err = new Error(`[OAuth] gemini credentials unavailable: Antigravity agy auth failed (keychain-missing): missing. ${AGY_KEYCHAIN_REMEDIATION}`);
+        err.isOAuthError = true;
+        err.model = 'gemini';
         throw err;
-      }
-      return { stdout: 'third account review', stderr: '' };
-    },
-  });
-
-  assert.equal(result.reviewText, 'third account review');
-  assert.deepEqual(spawns, ['acct-a', 'acct-b', 'acct-c']);
-  assert.deepEqual(marked.map((item) => item.accountId), ['acct-a', 'acct-b']);
+      },
+      spawnAgyReviewImpl: async () => {
+        spawnCalls.push('spawn');
+        return { stdout: 'must not happen', stderr: '' };
+      },
+    }),
+    (err) => err?.isOAuthError === true && /keychain-missing/.test(err.message),
+  );
+  assert.deepEqual(spawnCalls, []);
 });
 
-test('reviewWithGemini antigravity retries transient subprocess errors without rotating accounts', async () => {
+test('reviewWithGemini antigravity retries transient agy subprocess errors', async () => {
   const spawns = [];
-  const marked = [];
   const result = await reviewWithGemini('+diff\n', '', {
     resolveGeminiRuntimeImpl: () => 'antigravity',
-    assertAntigravityOAuthImpl: async ({ selectAccountImpl }) => selectAccountImpl(),
-    selectAntigravityAccountImpl: () => 'acct-a',
-    getAntigravityAccessTokenImpl: async () => 'token-acct-a',
-    markAntigravityRateLimitedImpl: (accountId) => marked.push(accountId),
-    allAntigravityCappedImpl: () => ({ allCapped: false, retryAfter: null }),
+    assertAgyAuthImpl: async () => {},
     retryDelaysMs: [0],
     sleepImpl: async () => {},
-    spawnGeminiReviewImpl: async ({ env }) => {
-      spawns.push(env.GEMINI_ANTIGRAVITY_ACCOUNT);
+    spawnAgyReviewImpl: async () => {
+      spawns.push('agy');
       if (spawns.length === 1) {
         const err = new Error('Command failed');
         err.code = 'ETIMEDOUT';
@@ -1850,69 +1879,7 @@ test('reviewWithGemini antigravity retries transient subprocess errors without r
   });
 
   assert.equal(result.reviewText, 'retried antigravity review');
-  assert.deepEqual(spawns, ['acct-a', 'acct-a']);
-  assert.deepEqual(marked, []);
-});
-
-test('reviewWithGemini antigravity all-capped returns hold decision without producing review text', async () => {
-  const retryAfter = '2026-06-20T21:15:00.000Z';
-  const result = await reviewWithGemini('+diff\n', '', {
-    resolveGeminiRuntimeImpl: () => 'antigravity',
-    assertAntigravityOAuthImpl: async ({ selectAccountImpl }) => selectAccountImpl(),
-    selectAntigravityAccountImpl: () => 'acct-a',
-    getAntigravityAccessTokenImpl: async () => 'token-a',
-    markAntigravityRateLimitedImpl: () => {},
-    allAntigravityCappedImpl: () => ({ allCapped: true, retryAfter }),
-    pageAgrAllCappedImpl: async () => ({ paged: true, suppressedCount: 0 }),
-    spawnGeminiReviewImpl: async () => {
-      const err = new Error('Command failed');
-      err.stderr = `429 RESOURCE_EXHAUSTED quota exceeded\nRetry-After: ${retryAfter}`;
-      throw err;
-    },
-  });
-
-  assert.equal(result.reviewText, null);
-  assert.equal(result.quotaHoldDecision.hold, true);
-  assert.equal(result.quotaHoldDecision.retryAfter, retryAfter);
-  assert.equal(result.quotaHoldDecision.waitUntilMs, Date.parse(retryAfter));
-});
-
-test('AGR-06 reviewWithGemini antigravity emits account telemetry for selection, rate-limit, and all-capped', async () => {
-  const retryAfter = '2026-06-20T21:15:00.000Z';
-  const events = [];
-  const result = await reviewWithGemini('+diff\n', '', {
-    resolveGeminiRuntimeImpl: () => 'antigravity',
-    assertAntigravityOAuthImpl: async ({ selectAccountImpl }) => selectAccountImpl(),
-    selectAntigravityAccountImpl: () => 'acct-a',
-    getAntigravityAccessTokenImpl: async () => 'token-a',
-    markAntigravityRateLimitedImpl: (accountId, retryAfterValue) => ({ accountId, retryAfter: retryAfterValue }),
-    allAntigravityCappedImpl: () => ({ allCapped: true, retryAfter }),
-    accountStatusImpl: () => [{ accountId: 'acct-a', eligible: false, retryAfter }],
-    deliverAgrAllCappedAlertImpl: async () => {},
-    pageAgrAllCappedImpl: async () => ({ paged: true, suppressedCount: 0 }),
-    log: {
-      log: (line) => events.push(JSON.parse(line)),
-      warn: (line) => events.push(JSON.parse(line)),
-      error: (line) => events.push(JSON.parse(line)),
-    },
-    spawnGeminiReviewImpl: async () => {
-      const err = new Error('Command failed');
-      err.stderr = `429 RESOURCE_EXHAUSTED quota exceeded\nRetry-After: ${retryAfter}`;
-      throw err;
-    },
-  });
-
-  assert.equal(result.quotaHoldDecision.hold, true);
-  assert.deepEqual(events.map((event) => event.event), [
-    'agr_account_selected',
-    'agr_account_rate_limited',
-    'agr_all_capped',
-  ]);
-  assert.equal(events[0].schemaVersion, 1);
-  assert.equal(events[0].accountId, 'acct-a');
-  assert.equal(events[1].retryAfter, retryAfter);
-  assert.equal(events[2].retryAfter, retryAfter);
-  assert.equal(JSON.stringify(events).includes('token-a'), false);
+  assert.deepEqual(spawns, ['agy', 'agy']);
 });
 
 test('AGR-06 antigravity account telemetry events are registered API categories', () => {
@@ -2216,6 +2183,83 @@ test('assertGeminiOAuth accepts a valid creds file and rejects a missing/invalid
   }
 });
 
+test('checkAgyReviewerAuth mirrors AGY-01 auth contract fields', async () => {
+  const calls = [];
+  const result = await checkAgyReviewerAuth({
+    agyCli: '/opt/bin/agy',
+    env: { PATH: '/opt/bin' },
+    timeoutMs: 1234,
+    execFileImpl: async (command, args, options) => {
+      calls.push({ command, args, options });
+      if (command === 'security') return { stdout: 'password item', stderr: '' };
+      if (command === '/opt/bin/agy') return { stdout: 'gemini-2.5-pro\n', stderr: '' };
+      throw new Error(`unexpected command ${command}`);
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.keychainItem, AGY_KEYCHAIN_SERVICE);
+  assert.equal(result.keychainItem, 'Gemini Safe Storage');
+  assert.equal(result.probe, 'agy models');
+  assert.deepEqual(calls.map((call) => [call.command, call.args]), [
+    ['security', ['find-generic-password', '-s', 'Gemini Safe Storage']],
+    ['/opt/bin/agy', ['models']],
+  ]);
+  assert.deepEqual(calls.map((call) => call.options.timeout), [1234, 1234]);
+  assert.match(AGY_KEYCHAIN_REMEDIATION, /launchd-spawned airlock processes/);
+  assert.match(AGY_KEYCHAIN_REMEDIATION, /security set-generic-password-partition-list -S apple-tool:,apple: -s "Gemini Safe Storage"/);
+});
+
+test('checkAgyReviewerAuth fail-closed reasons distinguish keychain and agy probe failures', async () => {
+  const missing = await checkAgyReviewerAuth({
+    execFileImpl: async () => {
+      const err = new Error('Command failed');
+      err.stderr = 'SecKeychainSearchCopyNext: The specified item could not be found in the keychain.';
+      throw err;
+    },
+  });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.reason, 'keychain-missing');
+
+  const empty = await checkAgyReviewerAuth({
+    execFileImpl: async (command) => {
+      if (command === 'security') return { stdout: 'ok', stderr: '' };
+      return { stdout: '', stderr: '' };
+    },
+  });
+  assert.equal(empty.reason, 'agy-probe-empty');
+
+  const timeout = await checkAgyReviewerAuth({
+    execFileImpl: async (command) => {
+      if (command === 'security') return { stdout: 'ok', stderr: '' };
+      const err = new Error('timed out');
+      err.killed = true;
+      throw err;
+    },
+  });
+  assert.equal(timeout.reason, 'agy-probe-timeout');
+});
+
+test('assertAgyReviewerAuth surfaces fail-closed reason and launchd remediation as OAuthError', async () => {
+  await assert.rejects(
+    () => assertAgyReviewerAuth({
+      checkAuthImpl: async () => ({
+        ok: false,
+        reason: 'keychain-missing',
+        detail: 'not found',
+        remediation: AGY_KEYCHAIN_REMEDIATION,
+      }),
+    }),
+    (err) => {
+      assert.equal(err.isOAuthError, true);
+      assert.equal(err.model, 'gemini');
+      assert.match(err.message, /keychain-missing/);
+      assert.match(err.message, /launchd-spawned airlock/);
+      return true;
+    },
+  );
+});
+
 test('resolveGeminiOAuthCredsPath honors explicit override, GEMINI_HOME, then HOME', () => {
   assert.equal(
     resolveGeminiOAuthCredsPath({ GEMINI_OAUTH_CREDS_PATH: '/explicit/creds.json' }),
@@ -2235,4 +2279,10 @@ test('resolveGeminiCliPath prefers GEMINI_CLI_PATH / GEMINI_CLI overrides', () =
   assert.equal(resolveGeminiCliPath({ GEMINI_CLI_PATH: '/a/gemini', PATH: '' }), '/a/gemini');
   assert.equal(resolveGeminiCliPath({ GEMINI_CLI: '/b/gemini', PATH: '' }), '/b/gemini');
   assert.equal(resolveGeminiCliPath({ PATH: '' }), 'gemini');
+});
+
+test('resolveAgyCliPath prefers AGY_CLI_PATH / AGY_CLI overrides', () => {
+  assert.equal(resolveAgyCliPath({ AGY_CLI_PATH: '/a/agy', PATH: '' }), '/a/agy');
+  assert.equal(resolveAgyCliPath({ AGY_CLI: '/b/agy', PATH: '' }), '/b/agy');
+  assert.equal(resolveAgyCliPath({ PATH: '' }), 'agy');
 });

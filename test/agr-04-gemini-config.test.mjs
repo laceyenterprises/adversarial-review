@@ -128,3 +128,54 @@ reviewer:
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('AGR-04 local account entries tolerate unknown rollout keys', () => {
+  const tmp = makeTmp();
+  try {
+    const modulePath = join(tmp, 'config.yaml');
+    const moduleLocalPath = join(tmp, 'config.local.yaml');
+    writeYaml(modulePath, `
+reviewer:
+  gemini:
+    antigravity:
+      accounts:
+        - id: module
+          tokenFile: /tmp/module-token.json
+`);
+    writeYaml(moduleLocalPath, `
+reviewer:
+  gemini:
+    antigravity:
+      accounts:
+        - id: local
+          tokenFile: op://Cliovault/LOCAL/token
+          priority: 10
+`);
+
+    assert.deepEqual(
+      resolveAntigravityAccounts({ env: {}, topPath: '/dev/null', modulePaths: [modulePath] }),
+      [{ id: 'local', tokenFile: 'op://Cliovault/LOCAL/token' }],
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('AGR-04 account env JSON parse errors redact raw value', () => {
+  assert.throws(
+    () => resolveAntigravityAccounts({
+      env: {
+        AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_ACCOUNTS: '[{"id":"primary","tokenFile":"inline-secret-token"}',
+      },
+      topPath: '/dev/null',
+      modulePaths: ['/dev/null'],
+    }),
+    (err) => {
+      assert.match(err.message, /env value must be a JSON array/);
+      assert.match(err.got, /^<redacted:\d+ chars>$/);
+      assert.doesNotMatch(err.message, /inline-secret-token/);
+      assert.doesNotMatch(String(err.got), /inline-secret-token/);
+      return true;
+    },
+  );
+});

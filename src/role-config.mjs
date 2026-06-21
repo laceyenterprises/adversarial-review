@@ -61,6 +61,8 @@ function reshapeLoaderError(err, contextKey) {
   if (!source.startsWith('env:')) return err;
   const envName = source.slice('env:'.length);
   const canonicalKey = err.key || contextKey;
+  const enumLike = Array.isArray(err.allowed) || (typeof err.expected === 'string' && /^one of /.test(err.expected));
+  if (!enumLike) return err;
   // CFG-02 round-1 review B4 fix: prefer structured `err.allowed`
   // (an array; future loader shape) over parsing `err.expected`
   // (a human-display string). When neither shape works, the
@@ -75,7 +77,7 @@ function reshapeLoaderError(err, contextKey) {
     ? JSON.stringify(err.got)
     : '<unset>';
   const allowedText = allowedForLegacyMessage(canonicalKey, allowed);
-  const message = canonicalKey.startsWith('reviewer.gemini.')
+  const message = canonicalKey === 'reviewer.gemini.runtime'
     ? `${canonicalKey}: ${envName} must be one of: ${allowedText}; got ${got}`
     : `${envName} must be one of: ${allowedText}; got ${got} (canonical key: ${canonicalKey})`;
   const wrapped = new AgentOSConfigError(message, {

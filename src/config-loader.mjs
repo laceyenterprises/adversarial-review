@@ -1879,7 +1879,7 @@ function jsTypeName(value) {
   return typeof value;
 }
 
-function checkLeaf(value, schema, keyPath, source) {
+function checkLeaf(value, schema, keyPath, source, tolerateUnknown = false) {
   const expected = schema.__type;
   if (value === null || value === undefined) {
     if (schema.__nullable) return null;
@@ -1934,7 +1934,7 @@ function checkLeaf(value, schema, keyPath, source) {
       );
     }
   } else if (expected === TYPE_DICT) {
-    return validateDictPresentKeysOnly(value, schema, keyPath, source, null);
+    return validateDictPresentKeysOnly(value, schema, keyPath, source, null, tolerateUnknown);
   } else if (expected === TYPE_LIST) {
     if (!Array.isArray(value)) {
       throw new AgentOSConfigError(
@@ -1943,7 +1943,7 @@ function checkLeaf(value, schema, keyPath, source) {
       );
     }
     const itemSchema = schema.__item || {};
-    return value.map((item, index) => checkLeaf(item, itemSchema, `${keyPath}[${index}]`, source));
+    return value.map((item, index) => checkLeaf(item, itemSchema, `${keyPath}[${index}]`, source, tolerateUnknown));
   }
   if (schema.__enum && !schema.__enum.includes(value)) {
     throw new AgentOSConfigError(
@@ -2135,7 +2135,7 @@ function validateDictPresentKeysOnly(
           // entries without treating app ids as dotted paths.
           out[childKey] = validatedExtra;
         } else {
-          out[childKey] = checkLeaf(raw, extraSchema, full, childSource);
+          out[childKey] = checkLeaf(raw, extraSchema, full, childSource, tolerateUnknown);
         }
       } else if (!strict) {
         out[childKey] = raw;
@@ -2155,7 +2155,7 @@ function validateDictPresentKeysOnly(
         tolerateUnknown,
       );
     } else {
-      out[childKey] = checkLeaf(raw, childSchema, full, childSource);
+      out[childKey] = checkLeaf(raw, childSchema, full, childSource, tolerateUnknown);
     }
   }
   return out;
@@ -2535,7 +2535,7 @@ function coerceEnvValue(key, value, schemaLeaf, source = null) {
       } catch (err) {
         throw new AgentOSConfigError(
           `${key}: env value must be a JSON array of {id, tokenFile} entries: ${err.message}`,
-          { key, expected: 'JSON array', got: value, source },
+          { key, expected: 'JSON array', got: `<redacted:${value.length} chars>`, source },
         );
       }
     }

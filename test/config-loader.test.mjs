@@ -2107,6 +2107,32 @@ test('YAML 1.1 yes/off/on/y/n all fail', () => {
   }
 });
 
+test('env YAML 1.1 boolean tokens fail', () => {
+  for (const bad of ['yes', 'off', 'on', 'no', 'Yes', 'OFF']) {
+    const tmp = freshTmp();
+    try {
+      const top = join(tmp, 'config.yaml');
+      writeFile(top, 'version: 1\n');
+      assert.throws(
+        () => loadConfig({
+          topPath: top,
+          env: { AGENT_OS_FEATURE_FLAGS_LIVE_STEER_ALLOW_UNVETTED: bad },
+        }),
+        (err) => {
+          assert.ok(err instanceof AgentOSConfigError);
+          assert.equal(err.key, 'feature_flags.live_steer_allow_unvetted');
+          assert.match(err.message, /true'\/'false/);
+          assert.match(err.message, /1'\/'0/);
+          return true;
+        },
+        `expected env token ${bad} to be rejected`,
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+});
+
 test('YAML 1.2 true/false parse as bool', () => {
   const tmp = freshTmp();
   try {

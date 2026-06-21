@@ -226,7 +226,7 @@ test('detached reviewer process group survives parent SIGTERM for daemon bounce 
       const [bashPidPath, sleepPidPath, stdoutPath, stderrPath] = process.argv.slice(-4);
       spawnCapturedProcessGroup(
         'bash',
-        ['-c', \`trap "" TERM; sleep 30 & echo $! > "\${sleepPidPath}"; echo $$ > "\${bashPidPath}"; wait\`],
+        ['-c', \`trap "" HUP TERM; sleep 30 & echo $! > "\${sleepPidPath}"; echo $$ > "\${bashPidPath}"; wait\`],
         { stdoutPath, stderrPath, progressTimeout: 0, timeout: 0 }
       );
       const ready = setInterval(() => {
@@ -252,6 +252,10 @@ test('detached reviewer process group survives parent SIGTERM for daemon bounce 
     const sleepPid = Number.parseInt(readFileSync(sleepPidPath, 'utf8').trim(), 10);
     assert.equal(Number.isInteger(bashPid), true);
     assert.equal(Number.isInteger(sleepPid), true);
+    await waitFor(() => {
+      assert.equal(processExists(bashPid), true);
+      assert.equal(processExists(sleepPid), true);
+    }, { timeoutMs: 5_000, intervalMs: 50 });
 
     child.kill('SIGTERM');
     await new Promise((resolve, reject) => {

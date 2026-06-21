@@ -1,10 +1,13 @@
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
+import { spawn } from 'node:child_process';
 
 const CONTRACT_VERSION = '1.0';
 const DEFAULT_ENDPOINT_URL = 'http://127.0.0.1:8003';
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_STANDALONE_DISPATCH_CACHE_MAX_ENTRIES = 1_000;
+const DEFAULT_DISPATCH_COMMAND_OUTPUT_MAX_BYTES = 4 * 1024 * 1024;
 const APP_ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
 
 export async function connectAppContract(options = {}) {
@@ -63,6 +66,9 @@ function normalizeConnectOptions(options) {
     request_retry_attempts: options.request_retry_attempts
       ?? options.requestRetryAttempts
       ?? 3,
+    standalone_dispatch_cache_max_entries: options.standalone_dispatch_cache_max_entries
+      ?? options.standaloneDispatchCacheMaxEntries
+      ?? DEFAULT_STANDALONE_DISPATCH_CACHE_MAX_ENTRIES,
   };
 }
 
@@ -140,8 +146,14 @@ class StandaloneSession {
   constructor(config) {
     this.app_id = config.app_id;
     this.mode = 'standalone';
+    this.config = config;
     this.dispatches = new Map();
+    this.pendingDispatches = new Map();
     this.listeners = new Map();
+    this.dispatchCacheMaxEntries = normalizePositiveInteger(
+      config.standalone_dispatch_cache_max_entries,
+      DEFAULT_STANDALONE_DISPATCH_CACHE_MAX_ENTRIES,
+    );
   }
 
   async dispatch(payload) {
@@ -150,7 +162,26 @@ class StandaloneSession {
     if (existing) {
       return existing;
     }
-    const launchRequestId = `standalone-${randomUUID()}`;
+    const inFlight = this.pendingDispatches.get(requestId);
+    if (inFlight) {
+      return await inFlight;
+    }
+    const pending = this.acceptDispatch(payload, requestId);
+    this.pendingDispatches.set(requestId, pending);
+    try {
+      const accepted = await pending;
+      this.recordAcceptedDispatch(requestId, accepted);
+      return accepted;
+    } catch (error) {
+      if (this.pendingDispatches.get(requestId) === pending) {
+        this.pendingDispatches.delete(requestId);
+      }
+      throw error;
+    }
+  }
+
+  async acceptDispatch(payload, requestId) {
+    const launchRequestId = await this.launch(payload);
     const accepted = {
       app_id: this.app_id,
       request_id: requestId,
@@ -158,16 +189,42 @@ class StandaloneSession {
       watch_url: `standalone://watch/${launchRequestId}`,
       audit_ref: `standalone://audit/${this.app_id}/${requestId}`,
     };
-    this.dispatches.set(requestId, accepted);
     return accepted;
+  }
+
+  async launch(payload) {
+    if (typeof this.config.standalone_dispatcher === 'function') {
+      const result = await this.config.standalone_dispatcher(payload);
+      return normalizeLaunchRequestId(result);
+    }
+    const command = this.config.dispatch_command ?? this.config.dispatchCommand;
+    if (command) {
+      const result = await runDispatchCommand(command, payload, {
+        timeoutMs: this.config.request_timeout_ms,
+      });
+      return normalizeLaunchRequestId(result);
+    }
+    return `standalone-${randomUUID()}`;
   }
 
   async dispatchStatus(requestId) {
     const existing = this.dispatches.get(requestId);
-    if (!existing) {
-      return { status: 'not_found', app_id: this.app_id, request_id: requestId };
+    if (existing) {
+      return { status: 'found', ...existing };
     }
-    return { status: 'found', ...existing };
+    if (this.pendingDispatches.has(requestId)) {
+      return { status: 'dispatching', app_id: this.app_id, request_id: requestId };
+    }
+    return { status: 'not_found', app_id: this.app_id, request_id: requestId };
+  }
+
+  recordAcceptedDispatch(requestId, accepted) {
+    this.pendingDispatches.delete(requestId);
+    this.dispatches.set(requestId, accepted);
+    while (this.dispatches.size > this.dispatchCacheMaxEntries) {
+      const oldestRequestId = this.dispatches.keys().next().value;
+      this.dispatches.delete(oldestRequestId);
+    }
   }
 
   on(topic, callback) {
@@ -325,6 +382,122 @@ function parseJsonResponse(text, status) {
   }
 }
 
+function runDispatchCommand(command, payload, { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS } = {}) {
+  const argv = Array.isArray(command) ? command : [command];
+  return new Promise((resolveCommand, reject) => {
+    const child = spawn(argv[0], argv.slice(1), { stdio: ['pipe', 'pipe', 'pipe'] });
+    const commandTimeoutMs = normalizePositiveInteger(timeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let settled = false;
+    const timeout = setTimeout(() => {
+      child.kill('SIGKILL');
+      settleReject(retryableDispatchCommandError(`standalone dispatch command timed out after ${commandTimeoutMs}ms`));
+    }, commandTimeoutMs);
+
+    function settleResolve(value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolveCommand(value);
+    }
+
+    function settleReject(error) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    }
+
+    child.stdout.on('data', (chunk) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes + stderrBytes > DEFAULT_DISPATCH_COMMAND_OUTPUT_MAX_BYTES) {
+        child.kill('SIGKILL');
+        settleReject(retryableDispatchCommandError(
+          `standalone dispatch command output exceeded ${DEFAULT_DISPATCH_COMMAND_OUTPUT_MAX_BYTES} bytes`,
+        ));
+        return;
+      }
+      stdoutChunks.push(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+      stderrBytes += chunk.length;
+      if (stdoutBytes + stderrBytes > DEFAULT_DISPATCH_COMMAND_OUTPUT_MAX_BYTES) {
+        child.kill('SIGKILL');
+        settleReject(retryableDispatchCommandError(
+          `standalone dispatch command output exceeded ${DEFAULT_DISPATCH_COMMAND_OUTPUT_MAX_BYTES} bytes`,
+        ));
+        return;
+      }
+      stderrChunks.push(chunk);
+    });
+    child.on('error', (error) => {
+      settleReject(markRetryableTransientDispatchError(error));
+    });
+    child.stdin.on('error', (error) => {
+      if (isBestEffortStdinWriteError(error)) return;
+      settleReject(markRetryableTransientDispatchError(error));
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+      const stderr = Buffer.concat(stderrChunks).toString('utf8');
+      if (code !== 0) {
+        settleReject(new Error(`standalone dispatch command failed (${code}): ${stderr || stdout}`));
+        return;
+      }
+      try {
+        settleResolve(stdout.trim() ? JSON.parse(stdout) : {});
+      } catch (error) {
+        settleReject(error);
+      }
+    });
+    try {
+      child.stdin.end(JSON.stringify(stripUndefined(payload)));
+    } catch (error) {
+      if (!isBestEffortStdinWriteError(error)) {
+        settleReject(markRetryableTransientDispatchError(error));
+      }
+    }
+  });
+}
+
+function retryableDispatchCommandError(message) {
+  const error = new Error(message);
+  error.retryable = true;
+  return error;
+}
+
+function markRetryableTransientDispatchError(error) {
+  if (isTransientDispatchCommandError(error)) {
+    error.retryable = true;
+  }
+  return error;
+}
+
+function isTransientDispatchCommandError(error) {
+  const code = String(error?.code || '').toUpperCase();
+  return ['EAGAIN', 'EIO', 'ENOMEM'].includes(code);
+}
+
+function isBestEffortStdinWriteError(error) {
+  const code = String(error?.code || '').toUpperCase();
+  return code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED';
+}
+
+function normalizeLaunchRequestId(result) {
+  if (typeof result === 'string' && result) {
+    return result;
+  }
+  const launchRequestId = result?.launch_request_id ?? result?.launchRequestId ?? result?.dispatchId;
+  if (!launchRequestId) {
+    throw new Error('standalone dispatch did not return a launch request id');
+  }
+  return String(launchRequestId);
+}
+
 function stripUndefined(value) {
   return Object.fromEntries(
     Object.entries(value).filter(([, entry]) => entry !== undefined),
@@ -337,6 +510,11 @@ function requireRequestId(payload) {
     throw new Error('dispatch requires request_id');
   }
   return requestId;
+}
+
+function normalizePositiveInteger(value, fallback) {
+  const numeric = Number(value);
+  return Number.isInteger(numeric) && numeric > 0 ? numeric : fallback;
 }
 
 function trimTrailingSlash(value) {

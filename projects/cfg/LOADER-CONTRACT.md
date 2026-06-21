@@ -115,10 +115,16 @@ foreign top-level tolerance does not make `main_catchup` foreign.
 ## `op` Node mirror
 
 The adversarial-review Node loader treats `op` as a known schema root, not as a
-foreign top-level local section. Python remains canonical for the global
-1Password schema, but the Node loader mirrors `op.vault` so shared checked-in
-`config.yaml` files can carry the vault used in `op://<vault>/...` references
-without crash-looping the adversarial-review watcher.
+foreign top-level local section. The Agent OS Python/shell CFG loaders remain
+canonical for the global 1Password schema; this repository mirrors only the
+Node side until the parent Agent OS rollout lands the canonical Python/shell
+schema and conformance cases. Shared checked-in `config.yaml` files must not
+depend on `op.vault` being portable across all CFG loaders until that parent
+rollout is merged.
+
+The Node mirror exists so an Agent OS rollout that introduces `op.vault` can
+update the adversarial-review submodule in the same parent change without
+crash-looping the adversarial-review watcher.
 
 Checked-in `config.yaml` accepts only `op.vault`, which defaults to
 `Cliovault`. Any other checked-in `op.*` key is an unknown nested key under a
@@ -170,8 +176,6 @@ Python, Node, and shell CFG loaders must agree on this surface:
   `worker_pool.*` keys fail as nested unknown keys
 - checked-in `main_catchup` accepts only the mirrored daemon keys; all other
   checked-in `main_catchup.*` keys fail as nested unknown keys
-- checked-in `op` accepts only `op.vault`; all other checked-in `op.*` keys
-  fail as nested unknown keys
 - direct validator calls remain strict even when `source` names a `.local.yaml`
   file
 - Layer-4 local siblings may drop nested unknown keys under owned roots
@@ -180,8 +184,6 @@ Python, Node, and shell CFG loaders must agree on this surface:
   `worker_pool.dag.autowalk.deep_reconcile` value
 - Layer-4 local siblings may drop non-mirrored nested `main_catchup.*` keys only
   through nested-local tolerance, while preserving the mirrored daemon keys
-- Layer-4 local siblings may drop non-mirrored nested `op.*` keys only through
-  nested-local tolerance, while preserving the mirrored `op.vault` value
 - Layer-4 local siblings still reject arbitrary unknown top-level typo roots
 - tolerated unknown keys are omitted from resolved values and provenance
 - env-materialized `apps.<id>` entries receive the same schema defaults as
@@ -194,6 +196,13 @@ Any loader that infers nested-key tolerance from filename alone is out of
 contract; the tolerance must be scoped to the actual local-sibling layer or an
 explicit validator option used by a caller that is deliberately reproducing that
 layer.
+
+The Node-only `op.vault` mirror above is intentionally excluded from the
+cross-loader conformance list until the Agent OS Python/shell loaders accept the
+same checked-in key, default, strict rejection behavior, and local-sibling
+nested tolerance. The parent Agent OS rollout that promotes shared `op.vault`
+must add those canonical loader changes before treating `op.vault` as part of
+the portable CFG contract.
 
 ## Role enums
 

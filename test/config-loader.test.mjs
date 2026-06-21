@@ -1,8 +1,8 @@
 // Conformance test suite for `config-loader.mjs`.
 //
 // Each test case maps to a row in the agent-os repo's
-// `projects/cfg/LOADER-CONTRACT.md` §8 and mirrors the Python loader's
-// `tests/test_loader.py` one-to-one.
+// `projects/cfg/LOADER-CONTRACT.md` §8. Most rows mirror the Python loader's
+// `tests/test_loader.py` one-to-one; Node-only mirror tests are marked in-line.
 //
 // Run from inside this submodule: `node --test test/config-loader.test.mjs`.
 
@@ -122,7 +122,8 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('operator.full_name'), 'Paul Lacey');
     assert.equal(cfg.get('linear.team_name'), 'Laceyenterprises');
     assert.equal(cfg.get('linear.issue_prefix'), 'LAC');
-    // CFG-01 parity: global op.vault mirrored from agent_os_config.
+    // Node-only mirror: global op.vault stays readable once the parent Agent OS
+    // rollout introduces the canonical Python/shell schema.
     assert.equal(cfg.get('op.vault'), 'Cliovault');
     assert.equal(cfg.get('update.channel'), 'rolling');
     assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_per_hour'), 3);
@@ -873,6 +874,32 @@ test('top-level config.yaml accepts mirrored op.vault and rejects unknown nested
         return true;
       },
     );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('config.local.yaml tolerates unknown nested op keys and reads mirrored vault', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(local, `
+      roots:
+        hq: /from-local
+      op:
+        vault: LocalOpsVault
+        account: example
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roots.hq'), '/from-local');
+    assert.equal(cfg.get('op.vault'), 'LocalOpsVault');
+    assert.equal(cfg.get('op.account'), null);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -2590,6 +2617,56 @@ test('validateSchema tolerates unknown nested main_catchup keys in local files a
   assert.equal(out.main_catchup?.poll_interval_seconds, 300);
   assert.equal(out.main_catchup?.adversarial_review_drain_timeout_seconds, 240);
   assert.equal(out.main_catchup?.adversarial_watcher_drain_bounce_slack_seconds, 45);
+});
+
+test('validateSchema rejects unknown nested op keys unless nested-local tolerance is explicit', () => {
+  assert.throws(
+    () => validateSchema(
+      { version: 1, op: { vault: 'OpsVault', account: 'example' } },
+      { source: '/tmp/config.local.yaml' },
+    ),
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError);
+      assert.match(err.message, /op\.account/);
+      assert.match(err.message, /unknown key/);
+      return true;
+    },
+  );
+});
+
+test('validateSchema foreign top-level tolerance does not make op foreign', () => {
+  assert.throws(
+    () => validateSchema(
+      { version: 1, op: { vault: 'OpsVault', account: 'example' } },
+      { source: '/tmp/config.yaml', tolerateForeignTopLevelSections: true },
+    ),
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError);
+      assert.match(err.message, /op\.account/);
+      assert.match(err.message, /unknown key/);
+      return true;
+    },
+  );
+});
+
+test('validateSchema tolerates unknown nested op keys in local files and keeps mirrored vault', () => {
+  const out = validateSchema(
+    {
+      version: 1,
+      op: {
+        vault: 'LocalOpsVault',
+        account: 'example',
+      },
+    },
+    {
+      source: '/tmp/config.local.yaml',
+      tolerateForeignTopLevelSections: true,
+      tolerateNestedUnknownLocalKeys: true,
+    },
+  );
+  assert.equal(out.version, 1);
+  assert.equal(out.op?.account, undefined, 'unknown nested key dropped');
+  assert.equal(out.op?.vault, 'LocalOpsVault');
 });
 
 test('validateSchema rejects arbitrary unknown top-level keys as typos', () => {

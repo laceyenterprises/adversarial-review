@@ -956,11 +956,16 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
     }),
     maybeDispatchAmaCloserImpl: async (payload) => {
       observed = payload;
-      return { dispatched: false, reason: 'fixture' };
+      return {
+        dispatched: false,
+        reason: 'not-eligible',
+        reasons: ['blocking-findings-present', 'ci-not-green'],
+      };
     },
   });
 
   assert.equal(result.dispatched, false);
+  assert.equal(result.namedReason, 'not-eligible:blocking-findings-present');
   assert.equal(observed.reviewState.blockingFindingCount, 0);
   assert.equal(observed.reviewState.blockingFindingState, 'known');
   assert.equal(observed.reviewState.nonBlockingFindingCount, 0);

@@ -12,6 +12,7 @@ import {
   isHammerRemediableEligibilityMiss,
   isInterruptedInFlightAmaCloserDispatch,
   maybeDispatchAmaCloser,
+  namedAmaNoDispatchReason,
   substituteTemplate,
 } from '../src/ama/dispatch-closer.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../src/config-loader.mjs';
@@ -977,6 +978,15 @@ test('substituteTemplate leaves unknown placeholders alone', () => {
   assert.equal(out, 'a=k b=<<UNKNOWN>>');
 });
 
+test('namedAmaNoDispatchReason keeps not-eligible token stable and single-reason', () => {
+  assert.equal(
+    namedAmaNoDispatchReason('not-eligible', ['blocking-findings-present', 'ci-not-green']),
+    'not-eligible:blocking-findings-present',
+  );
+  assert.equal(namedAmaNoDispatchReason('not-eligible', []), 'not-eligible:unknown');
+  assert.equal(namedAmaNoDispatchReason('dispatch-failed'), 'dispatch-failed');
+});
+
 // ---------------------------------------------------------------------------
 // Helper: dispatch failure surfaces as { dispatched: false, reason: 'dispatch-failed' }
 // rather than throwing — so the watcher can fall through to merge-agent.
@@ -1001,6 +1011,7 @@ test('dispatch failure returns dispatched=false, reason=dispatch-failed (caller 
   });
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'dispatch-failed');
+  assert.equal(result.namedReason, 'dispatch-failed');
   assert.ok(result.error.includes('simulated dispatch failure'));
 });
 
@@ -1279,6 +1290,7 @@ test('SSG-06: ledger merged signal resolves closer ownership as done', async (t)
   assert.equal(result.dispatched, false);
   assert.equal(result.skipMergeAgent, true);
   assert.equal(result.reason, 'merged-signal-present');
+  assert.equal(result.namedReason, 'merged-signal-present');
   assert.equal(result.mergedSignal.completion_id, 'bcmp_merged');
   assert.equal(result.mergedSignalProducerHeadSha, 'f'.repeat(40));
   assert.equal(result.mergedSignalHeadShaMatchesReviewed, false);
@@ -1521,6 +1533,7 @@ test('AMA-07 lease blocks regardless of how hq dispatch status would have respon
   });
   assert.equal(second.dispatched, false);
   assert.equal(second.reason, 'dispatch-status-unknown');
+  assert.equal(second.namedReason, 'dispatch-status-unknown');
   assert.equal(second.skipMergeAgent, true);
   const hqStatusProbes = calls.filter((args) => args[0] === 'dispatch' && args[1] === 'status');
   assert.ok(hqStatusProbes.length >= 1);
@@ -1835,6 +1848,7 @@ test('genuine repeated dispatch failures at the bound are still exhausted', asyn
 
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'dispatch-retry-exhausted');
+  assert.equal(result.namedReason, 'dispatch-retry-exhausted');
   assert.equal(execCalled, false, 'must not redispatch a genuinely-exhausted closer');
 });
 

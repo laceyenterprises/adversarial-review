@@ -203,6 +203,7 @@ async function runRenderedWatcherWrapper({
     TMPDIR: fakeTmp,
     ALERT_TO: alertTo,
     GITHUB_TOKEN: githubToken,
+    GH_TOKEN: githubToken,
     ADVERSARIAL_REVIEW_ALERT_TO_OP_REF: alertToOpRef,
     OP_SERVICE_ACCOUNT_TOKEN: opServiceAccountToken,
     ADVERSARIAL_REVIEW_OP_CLI: opCliPath ?? path.join(fakeBin, 'op'),

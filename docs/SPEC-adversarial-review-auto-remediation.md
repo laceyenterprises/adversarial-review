@@ -297,24 +297,31 @@ for every supported title prefix:
   review to Codex and use `GH_CODEX_REVIEWER_TOKEN`.
 
 The exported GitHub-PR route helpers and watcher dispatch path then apply
-`reviewer.gemini.mode` through the same effective-route helper. The default mode is `always-on`.
+`reviewer.gemini.mode` through the same effective-route helper. The default
+mode is `off`; operators must explicitly enable Gemini routing after the
+Antigravity reviewer accounts are provisioned.
 
 `routePR` helpers use the shared `(title, subject, options)` call shape; wrappers
 that do not need subject context still pass the subject through so future
 subject-aware routing cannot silently diverge.
 
-The public default matrix is:
+With the `off` default, the public default matrix remains the base
+opposite-agent route:
 
-- `[codex]`, `[claude-code]`, and `[clio-agent]` PRs route first-pass review to
-  Gemini and use `GH_GEMINI_REVIEWER_TOKEN`.
+- `[codex]` and `[clio-agent]` PRs route first-pass review to Claude and use
+  `GH_CLAUDE_REVIEWER_TOKEN`; `[claude-code]` PRs route first-pass review to
+  Codex and use `GH_CODEX_REVIEWER_TOKEN`.
 - `[gemini]`, `[pi]`, `[opencode]`, and `[hermes]` PRs keep the base Codex
   route and use `GH_CODEX_REVIEWER_TOKEN`.
 
-`reviewer.gemini.mode: fallback` selects Gemini only when the base reviewer is
-inside the quota-exhausted hold window. `reviewer.gemini.mode: off` preserves
-the base route above. Gemini is never permitted to review a `[gemini]` PR: even
-an operator pin or default route that resolves to `reviewerModel: gemini` for a
-Gemini-built PR is stripped back to the Codex base route before dispatch.
+`reviewer.gemini.mode: always-on` is the opt-in staged rollout mode that routes
+`[codex]`, `[claude-code]`, and `[clio-agent]` first-pass reviews to Gemini and
+uses `GH_GEMINI_REVIEWER_TOKEN`. `reviewer.gemini.mode: fallback` selects
+Gemini only when the base reviewer is inside the quota-exhausted hold window.
+`reviewer.gemini.mode: off` preserves the base route above. Gemini is never
+permitted to review a `[gemini]` PR: even an operator pin or default route that
+resolves to `reviewerModel: gemini` for a Gemini-built PR is stripped back to
+the Codex base route before dispatch.
 
 The canonical GitHub-PR title-prefix allowlist is therefore:
 `[codex]`, `[claude-code]`, `[clio-agent]`, `[gemini]`, `[pi]`, `[opencode]`,

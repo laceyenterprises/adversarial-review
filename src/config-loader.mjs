@@ -549,6 +549,24 @@ function schemaV1() {
           },
         },
       },
+      entitlements: {
+        __type: TYPE_DICT,
+        __strict: false,
+        __default: {},
+        __keys: {},
+        __extra_keys_schema: {
+          __type: TYPE_DICT,
+          __strict: true,
+          __keys: {
+            git_name: { __type: TYPE_STRING, __default: '' },
+            git_email: { __type: TYPE_STRING, __default: '' },
+            gh_token_var: { __type: TYPE_STRING, __default: '' },
+            gh_token_op_ref: { __type: TYPE_STRING, __default: '' },
+            gh_token_op_ref_fallback: { __type: TYPE_STRING, __default: '' },
+            gh_bot_login: { __type: TYPE_STRING, __default: '' },
+          },
+        },
+      },
       // DRP-01N — retention policy block. Strict-shape parity matters here
       // because the adversarial watcher consumes this Node loader and must
       // tolerate the top-level Agent OS `retention:` surface. Policy names are
@@ -1817,6 +1835,42 @@ export const ENV_ALIASES = {
     aliases: [],
   },
 };
+
+const ENTITLEMENT_ENV_ALIAS_IDS = [
+  'claude-worker',
+  'codex-worker-lacey',
+  'gemini-worker',
+  'pi-worker',
+  'hermes-worker',
+  'opencode-worker',
+  'merge-agent-worker',
+  'merge-agent-lacey',
+  'post-merge-actions-worker',
+  'clio-agent-worker',
+  'foundry-draft-worker',
+  'sentinel-talk',
+  'sre-worker',
+  'stub-worker',
+];
+
+const ENTITLEMENT_ENV_ALIAS_FIELDS = [
+  'git_name',
+  'git_email',
+  'gh_token_var',
+  'gh_token_op_ref',
+  'gh_token_op_ref_fallback',
+  'gh_bot_login',
+];
+
+for (const entitlementId of ENTITLEMENT_ENV_ALIAS_IDS) {
+  const entitlementEnvId = entitlementId.toUpperCase().replaceAll('-', '_');
+  for (const field of ENTITLEMENT_ENV_ALIAS_FIELDS) {
+    ENV_ALIASES[`entitlements.${entitlementId}.${field}`] = {
+      canonical: `AGENT_OS_ENTITLEMENTS_${entitlementEnvId}_${field.toUpperCase()}`,
+      aliases: [],
+    };
+  }
+}
 
 // -------- YAML 1.2 strict-bool loader --------------------------------------
 

@@ -61,7 +61,25 @@ function infraRecoverableFailureClass(reviewRow) {
   return null;
 }
 
+function unknownReviewerCommandFailureClass(reviewRow) {
+  const rawMessage = String(reviewRow?.failure_message || '');
+  const message = rawMessage.toLowerCase();
+  const tagMatch = message.match(/^\[([^\]]+)\]/);
+  if (tagMatch && tagMatch[1] !== 'unknown') return null;
+  if (reviewerFailureClassFromStoredRow(reviewRow)) return null;
+  if (classifyReviewerFailure(rawMessage, null) !== 'unknown') return null;
+  if (
+    /\bcommand failed with code \d+\b/.test(message) ||
+    /\bcommand exited with code \d+\b/.test(message) ||
+    /\bnon-zero exit(?: code)? \d+\b/.test(message)
+  ) {
+    return 'unknown';
+  }
+  return null;
+}
+
 export {
   infraRecoverableFailureClass,
   reviewerFailureClassFromStoredRow,
+  unknownReviewerCommandFailureClass,
 };

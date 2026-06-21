@@ -344,6 +344,61 @@ setTimeout(() => process.stdout.end(output.subarray(split)), 10);
   }
 });
 
+test('standalone dispatch command may ignore stdin and still resolve from stdout', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'apc06-dispatch-ignore-stdin-'));
+  const dispatchCliPath = join(root, 'ignore-stdin-dispatch.mjs');
+  writeFileSync(dispatchCliPath, `
+process.stdout.write(JSON.stringify({ launch_request_id: 'lrq_ignore_stdin' }));
+`, 'utf8');
+
+  try {
+    const session = await connectAppContract({
+      app_id: 'test.app-contract',
+      mode: 'standalone',
+      dispatchCommand: [process.execPath, dispatchCliPath],
+    });
+
+    const accepted = await session.dispatch({
+      request_id: 'req-ignore-stdin',
+      prompt: 'x'.repeat(1024 * 1024),
+    });
+    assert.equal(accepted.launch_request_id, 'lrq_ignore_stdin');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('standalone dispatch command output is capped', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'apc06-dispatch-output-cap-'));
+  const dispatchCliPath = join(root, 'output-cap-dispatch.mjs');
+  writeFileSync(dispatchCliPath, `
+process.stdout.write('x'.repeat(5 * 1024 * 1024));
+setInterval(() => {}, 1000);
+`, 'utf8');
+
+  try {
+    const session = await connectAppContract({
+      app_id: 'test.app-contract',
+      mode: 'standalone',
+      requestTimeoutMs: 5000,
+      dispatchCommand: [process.execPath, dispatchCliPath],
+    });
+
+    await assert.rejects(
+      session.dispatch({ request_id: 'req-output-cap' }),
+      (error) => error.retryable === true
+        && /standalone dispatch command output exceeded \d+ bytes/.test(error.message),
+    );
+    assert.deepEqual(await session.dispatchStatus('req-output-cap'), {
+      status: 'not_found',
+      app_id: 'test.app-contract',
+      request_id: 'req-output-cap',
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('standalone accepted dispatch cache is bounded', async () => {
   const session = await connectAppContract({
     app_id: 'test.app-contract',

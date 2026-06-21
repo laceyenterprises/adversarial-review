@@ -1175,7 +1175,10 @@ trusted as the complete failure record.
   real App Contract transport. While a standalone launch is still in flight,
   `dispatchStatus(request_id)` reports `status:"dispatching"`; after acceptance
   it reports the accepted ticket fields from the bounded in-memory cache, and
-  unknown or evicted request ids report `status:"not_found"`.
+  unknown or evicted request ids report `status:"not_found"`. Standalone
+  idempotency is best-effort and bounded by
+  `standalone_dispatch_cache_max_entries`; unlike the agent-os transport, it is
+  not durable after cache eviction.
 
 - The worker record persists both `launchRequestId` and `dispatchId` from the
   HQ dispatch ticket. `launchRequestId` remains the reply-storage and audit key;

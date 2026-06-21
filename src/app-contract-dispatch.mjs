@@ -7,6 +7,7 @@ const CONTRACT_VERSION = '1.0';
 const DEFAULT_ENDPOINT_URL = 'http://127.0.0.1:8003';
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_STANDALONE_DISPATCH_CACHE_MAX_ENTRIES = 1_000;
+const DEFAULT_DISPATCH_COMMAND_OUTPUT_MAX_BYTES = 4 * 1024 * 1024;
 const APP_ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
 
 export async function connectAppContract(options = {}) {
@@ -388,10 +389,10 @@ function runDispatchCommand(command, payload, { timeoutMs = DEFAULT_REQUEST_TIME
     const commandTimeoutMs = normalizePositiveInteger(timeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
     const stdoutChunks = [];
     const stderrChunks = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let settled = false;
-    let timedOut = false;
     const timeout = setTimeout(() => {
-      timedOut = true;
       child.kill('SIGKILL');
       settleReject(retryableDispatchCommandError(`standalone dispatch command timed out after ${commandTimeoutMs}ms`));
     }, commandTimeoutMs);
@@ -411,15 +412,36 @@ function runDispatchCommand(command, payload, { timeoutMs = DEFAULT_REQUEST_TIME
     }
 
     child.stdout.on('data', (chunk) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes + stderrBytes > DEFAULT_DISPATCH_COMMAND_OUTPUT_MAX_BYTES) {
+        child.kill('SIGKILL');
+        settleReject(retryableDispatchCommandError(
+          `standalone dispatch command output exceeded ${DEFAULT_DISPATCH_COMMAND_OUTPUT_MAX_BYTES} bytes`,
+        ));
+        return;
+      }
       stdoutChunks.push(chunk);
     });
     child.stderr.on('data', (chunk) => {
+      stderrBytes += chunk.length;
+      if (stdoutBytes + stderrBytes > DEFAULT_DISPATCH_COMMAND_OUTPUT_MAX_BYTES) {
+        child.kill('SIGKILL');
+        settleReject(retryableDispatchCommandError(
+          `standalone dispatch command output exceeded ${DEFAULT_DISPATCH_COMMAND_OUTPUT_MAX_BYTES} bytes`,
+        ));
+        return;
+      }
       stderrChunks.push(chunk);
     });
-    child.on('error', settleReject);
-    child.stdin.on('error', settleReject);
+    child.on('error', (error) => {
+      settleReject(markRetryableTransientDispatchError(error));
+    });
+    child.stdin.on('error', (error) => {
+      if (isBestEffortStdinWriteError(error)) return;
+      settleReject(markRetryableTransientDispatchError(error));
+    });
     child.on('close', (code) => {
-      if (settled && timedOut) return;
+      if (settled) return;
       const stdout = Buffer.concat(stdoutChunks).toString('utf8');
       const stderr = Buffer.concat(stderrChunks).toString('utf8');
       if (code !== 0) {
@@ -435,7 +457,9 @@ function runDispatchCommand(command, payload, { timeoutMs = DEFAULT_REQUEST_TIME
     try {
       child.stdin.end(JSON.stringify(stripUndefined(payload)));
     } catch (error) {
-      settleReject(error);
+      if (!isBestEffortStdinWriteError(error)) {
+        settleReject(markRetryableTransientDispatchError(error));
+      }
     }
   });
 }
@@ -444,6 +468,23 @@ function retryableDispatchCommandError(message) {
   const error = new Error(message);
   error.retryable = true;
   return error;
+}
+
+function markRetryableTransientDispatchError(error) {
+  if (isTransientDispatchCommandError(error)) {
+    error.retryable = true;
+  }
+  return error;
+}
+
+function isTransientDispatchCommandError(error) {
+  const code = String(error?.code || '').toUpperCase();
+  return ['EAGAIN', 'EIO', 'ENOMEM'].includes(code);
+}
+
+function isBestEffortStdinWriteError(error) {
+  const code = String(error?.code || '').toUpperCase();
+  return code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED';
 }
 
 function normalizeLaunchRequestId(result) {

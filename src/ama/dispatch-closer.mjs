@@ -105,6 +105,16 @@ export function isHammerRemediableEligibilityMiss(reasons) {
   return reasons.every((reason) => HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason));
 }
 
+function namedAmaNoDispatchReason(reason, reasons = []) {
+  if (reason === 'not-eligible') {
+    const why = Array.isArray(reasons) && reasons.length
+      ? String(reasons[0] || '').trim()
+      : '';
+    return `not-eligible:${why || 'unknown'}`;
+  }
+  return reason;
+}
+
 /**
  * Decide whether the HAM terminal-remediation prompt (`hammer-prompt.md`) is
  * warranted for this closure, given the eligibility verdict.
@@ -772,7 +782,11 @@ export async function maybeDispatchAmaCloser({
   // The master gate. With no operator config, this is `false` per
   // AMA-01 schema defaults and the entire path is a no-op.
   if (!cfg?.enabled) {
-    return { dispatched: false, reason: 'ama-disabled' };
+    return {
+      dispatched: false,
+      reason: 'ama-disabled',
+      namedReason: namedAmaNoDispatchReason('ama-disabled'),
+    };
   }
 
   // The eligibility predicate is the second gate.
@@ -798,6 +812,7 @@ export async function maybeDispatchAmaCloser({
       return {
         dispatched: false,
         reason: 'not-eligible',
+        namedReason: namedAmaNoDispatchReason('not-eligible', verdict.reasons),
         reasons: verdict.reasons,
       };
     }
@@ -1010,6 +1025,7 @@ export async function maybeDispatchAmaCloser({
       dispatched: false,
       skipMergeAgent: true,
       reason: 'lease-held',
+      namedReason: namedAmaNoDispatchReason('lease-held'),
       existingLease: existingLeaseBeforeDispatch,
     };
   } else if (
@@ -1161,6 +1177,7 @@ export async function maybeDispatchAmaCloser({
       dispatched: false,
       skipMergeAgent: true,
       reason: 'lease-held',
+      namedReason: namedAmaNoDispatchReason('lease-held'),
       existingLease: leaseResult.existingLease,
     };
   }

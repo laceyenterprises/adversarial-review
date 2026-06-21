@@ -4750,6 +4750,14 @@ async function maybeDispatchAmaClosureFor({
   // upstream code paths (`cfg-load-failed`, `ama-disabled`) already
   // include the flag; this wraps the maybeDispatchAmaCloser return.
   if (result && typeof result === 'object' && result.amaEnabled === undefined) {
+    if (
+      result.reason === 'not-eligible'
+      && !result.namedReason
+      && Array.isArray(result.reasons)
+    ) {
+      const why = String(result.reasons[0] || '').trim() || 'unknown';
+      return { ...result, namedReason: `not-eligible:${why}`, amaEnabled: true };
+    }
     return { ...result, amaEnabled: true };
   }
   return result;
@@ -4977,9 +4985,14 @@ async function handlePostedReviewRow({
       const reasonsHint = Array.isArray(amaClosureResult?.reasons)
         ? amaClosureResult.reasons.slice(0, 8).join(',')
         : amaClosureResult?.reason || 'unknown';
+      const namedReason = amaClosureResult?.namedReason || (
+        amaClosureResult?.reason === 'not-eligible'
+          ? `not-eligible:${reasonsHint || 'unknown'}`
+          : amaClosureResult?.reason || 'unknown'
+      );
       logger.log(
         `[watcher] AMA enabled but not eligible for ${repoPath}#${prNumber} ` +
-        `(reasons: ${reasonsHint}); awaiting operator action ` +
+        `(${namedReason}; reasons: ${reasonsHint}); awaiting operator action ` +
         `(apply 'operator-approved'/'adversarial-merge-requested' to make AMA-eligible ` +
         `OR 'merge-agent-requested' for the operator-fallback lane)`
       );

@@ -211,6 +211,7 @@ test('cfg.enabled=false returns ama-disabled and never spawns hq dispatch', asyn
   });
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'ama-disabled');
+  assert.equal(result.namedReason, 'ama-disabled');
   assert.equal(exec.calls.length, 0, 'hq dispatch must not be invoked when AMA is disabled');
   assert.equal(write.captured.body, null, 'no prompt is written when AMA is disabled');
 });
@@ -237,6 +238,7 @@ test('cfg.enabled=true + ineligible returns reasons and never spawns hq dispatch
   });
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'not-eligible');
+  assert.equal(result.namedReason, 'not-eligible:risk-class-not-permitted');
   assert.ok(Array.isArray(result.reasons));
   assert.ok(result.reasons.includes('risk-class-not-permitted'));
   assert.equal(exec.calls.length, 0, 'hq dispatch must not be invoked when ineligible');
@@ -1781,6 +1783,7 @@ test('live pending lease below redispatch bound does not consume a phantom retry
 
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'lease-held');
+  assert.equal(result.namedReason, 'lease-held');
   assert.equal(result.skipMergeAgent, true);
   assert.equal(execCalled, false, 'must not launch a duplicate AMA closer while the pending lease is live');
   const record = JSON.parse(readFileSync(recordPath, 'utf8'));

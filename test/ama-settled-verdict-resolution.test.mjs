@@ -1,9 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir, userInfo } from 'node:os';
+import { join } from 'node:path';
 
 import { resolveSettledReviewVerdict } from '../src/adversarial-gate-status.mjs';
+import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
 import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-context.mjs';
+
+const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
 
 // These cover the AMA phantom-column fix: AMA must resolve the verdict +
 // remediation-pending from the canonical follow-up-job / review-row body, NOT
@@ -497,6 +503,93 @@ test('E2E: comment-only + empty section no longer emits blocking-findings-unknow
     `unexpected reasons: ${JSON.stringify(result.reasons)}`,
   );
   assert.equal(result.eligible, true, `expected eligible, reasons: ${JSON.stringify(result.reasons)}`);
+});
+
+test('E2E: settled-success + eligible + clean mergeability dispatches AMA closer', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-settled-clean-dispatch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const HEAD2 = 'b'.repeat(40);
+  const settled = resolveSettledReviewVerdict('/root', {
+    repo: 'acme/agent-os',
+    prNumber: 2291,
+    currentHeadSha: HEAD2,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: HEAD2 },
+    latestJobFinder: finder({ status: 'completed', reviewBody: REVIEW_BODY('Comment only', '- None.') }),
+    liveHeadReview: { resolved: true, bodies: [REVIEW_BODY('Comment only', '- None.')] },
+  });
+  const reviewState = {
+    verdict: settled.verdict,
+    headSha: HEAD2,
+    riskClass: 'low',
+    remediationPending: settled.remediationPending,
+    operatorApprovedEvidence: null,
+    blockingFindingCount: settled.blockingFindingCount,
+    blockingFindingState: settled.blockingFindingState,
+    nonBlockingFindingCount: settled.nonBlockingFindingCount,
+    nonBlockingFindingState: settled.nonBlockingFindingState,
+    prAuthor: 'codex-worker-bot',
+  };
+  const prMetadata = {
+    prNumber: 2291,
+    headSha: HEAD2,
+    isOpen: true,
+    isDraft: false,
+    // Watcher normalizes GitHub mergeStateStatus=CLEAN to the eligibility
+    // predicate's MERGEABLE state before invoking the closer.
+    mergeableState: 'MERGEABLE',
+    labels: [],
+    statusCheckRollup: [{ __typename: 'CheckRun', name: DEFAULT_ADVERSARIAL_GATE_CONTEXT, conclusion: 'SUCCESS' }],
+    branchProtection: { requiredContexts: [DEFAULT_ADVERSARIAL_GATE_CONTEXT] },
+    author: 'codex-worker-bot',
+  };
+  const cfg = {
+    enabled: true,
+    workerClass: 'codex',
+    mergeMethod: 'squash',
+    eligibility: { riskClasses: ['low'], reviewerFamilyPolicy: 'audit_existing_gate_contract' },
+    branchProtection: { requiredGateContextSource: 'resolveGateStatusContext' },
+  };
+  const eligibility = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: { ADV_GATE_STATUS_CONTEXT: DEFAULT_ADVERSARIAL_GATE_CONTEXT },
+  });
+  assert.equal(eligibility.eligible, true, JSON.stringify(eligibility.reasons));
+
+  const execCalls = [];
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    options: { env: { ADV_GATE_STATUS_CONTEXT: DEFAULT_ADVERSARIAL_GATE_CONTEXT } },
+    dispatchContext: {
+      rootDir,
+      repo: 'acme/agent-os',
+      prUrl: 'https://github.com/acme/agent-os/pull/2291',
+      reviewedSha: HEAD2,
+      riskClass: 'low',
+      requiredGateContext: DEFAULT_ADVERSARIAL_GATE_CONTEXT,
+      reviewedBy: 'codex-reviewer-lacey',
+      reviewer: 'codex',
+      parentSession: 'session:test:watcher',
+      hqProject: 'adversarial-merge-authority',
+      hqPath: '/bin/hq-test',
+      hqRoot: join(rootDir, 'hq-root'),
+      hqOwnerUser: CURRENT_USER,
+      currentUser: CURRENT_USER,
+      dispatchedAt: '2026-06-21T12:00:00Z',
+    },
+    execFileImpl: async (cmd, args) => {
+      execCalls.push({ cmd, args });
+      return { stdout: '{"dispatchId":"dispatch_clean","launchRequestId":"lrq_clean"}', stderr: '' };
+    },
+    readTemplateImpl: () => 'Close PR {{PR_URL}} at {{REVIEWED_SHA}} with {{MERGE_METHOD}}.',
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(result.dispatchId, 'dispatch_clean');
+  assert.equal(execCalls.length, 1);
+  assert.equal(execCalls[0].args[execCalls[0].args.indexOf('--task-kind') + 1], 'merge');
+  assert.equal(execCalls[0].args[execCalls[0].args.indexOf('--completion-shape') + 1], 'decision-only');
 });
 
 test('E2E: comment-only + real blocking finding stays ineligible (blocking-findings-present)', () => {

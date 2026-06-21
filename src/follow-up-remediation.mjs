@@ -654,6 +654,44 @@ function parseHqDispatchStatus(stdout) {
   };
 }
 
+function normalizeWorkerTerminalEvent(topic, event = {}) {
+  const normalizedTopic = String(topic || '').trim();
+  const match = normalizedTopic.match(/^health\.worker\.terminal\.([^.\s]+)$/);
+  const lrq = String(event?.lrq || event?.launch_request_id || event?.launchRequestId || match?.[1] || '').trim();
+  const status = String(event?.status || '').trim().toLowerCase();
+  if (!lrq || !status || !HQ_TERMINAL_STATUSES.has(status)) {
+    return null;
+  }
+  return {
+    ...event,
+    topic: normalizedTopic,
+    lrq,
+    status,
+    health: String(event?.health || '').trim().toLowerCase() || (status === 'succeeded' ? 'healthy' : 'failed'),
+  };
+}
+
+function workerTerminalEventMatches(worker, terminalEvent) {
+  if (!worker || !terminalEvent) return false;
+  const workerLrq = String(worker.launchRequestId || worker.launch_request_id || '').trim();
+  return Boolean(workerLrq && workerLrq === terminalEvent.lrq);
+}
+
+function workerTerminalEventToDispatchStatus(terminalEvent, worker = {}) {
+  return {
+    status: terminalEvent.status,
+    health: terminalEvent.health || (terminalEvent.status === 'succeeded' ? 'healthy' : 'failed'),
+    lrq: terminalEvent.lrq,
+    launch_request_id: terminalEvent.lrq,
+    failureClass: terminalEvent.failureClass || terminalEvent.failure_class || null,
+    failureDetail: terminalEvent.failureDetail || terminalEvent.failure_detail || null,
+    recoveryAttempt: terminalEvent.recoveryAttempt ?? terminalEvent.recovery_attempt ?? null,
+    workspacePath: terminalEvent.workspacePath || terminalEvent.workspaceDir || worker.workspaceDir || null,
+    source: 'app-contract-topic',
+    topic: terminalEvent.topic,
+  };
+}
+
 function parseHqDispatchWorkspaceStatus(stdout) {
   const payload = parseHqDispatchStatus(stdout);
   const workspaceDir = parseHqWorkerWorkspaceFromPayload(payload);
@@ -1826,6 +1864,20 @@ function spawnRemediationWorker(workerClass, opts) {
   }
 }
 
+function resolveAdversarialReviewAppSubscribes(env = process.env, options = {}) {
+  const cfg = loadRoleConfig({
+    env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+    loaderImpl: options.loaderImpl,
+    contextKey: 'apps.adversarial-review.subscribes',
+  });
+  const subscribes = cfg.get('apps.adversarial-review.subscribes', []);
+  return Array.isArray(subscribes)
+    ? subscribes.map((topic) => String(topic).trim()).filter(Boolean)
+    : [];
+}
+
 async function dispatchRemediationViaHq({
   hqRoot,
   workerClass,
@@ -1871,6 +1923,7 @@ async function dispatchRemediationViaHq({
           app_id: 'adversarial-review',
           mode: appMode,
           hqRoot,
+          subscribes: resolveAdversarialReviewAppSubscribes(env),
         });
         return os.dispatch({
           request_id: requestId,
@@ -3349,8 +3402,20 @@ async function assessWorkerLivenessDetailed(job, {
   isWorkerRunning = isWorkerProcessRunning,
   execFileImpl = execFileAsync,
   env = process.env,
+  workerTerminalEvent = null,
 } = {}) {
   const worker = job?.remediationWorker || {};
+  if (workerTerminalEventMatches(worker, workerTerminalEvent)) {
+    const nowAt = parseIsoTime(now());
+    const spawnedAt = parseIsoTime(worker.spawnedAt);
+    const ageMs = nowAt !== null && spawnedAt !== null ? nowAt - spawnedAt : null;
+    return {
+      state: 'exited',
+      reason: `health-worker-terminal-${workerTerminalEvent.status}`,
+      ageMs,
+      dispatchStatus: workerTerminalEventToDispatchStatus(workerTerminalEvent, worker),
+    };
+  }
   if (!worker?.dispatchId || worker?.dispatchMode !== 'hq') {
     return assessWorkerLiveness(job, { now, isWorkerRunning });
   }
@@ -3694,6 +3759,7 @@ async function reconcileFollowUpJob({
   resolvePRLifecycleImpl = resolvePRLifecycle,
   auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
   execFileImpl = execFileAsync,
+  workerTerminalEvent = null,
   log = console,
 } = {}) {
   const worker = job?.remediationWorker;
@@ -3711,6 +3777,7 @@ async function reconcileFollowUpJob({
     now,
     isWorkerRunning,
     execFileImpl,
+    workerTerminalEvent,
   });
   const lifecycle = await resolveJobPRLifecycleSafe({
     rootDir,
@@ -4136,8 +4203,9 @@ async function reconcileFollowUpJob({
         }
         let auditWorkspaceDir = paths.workspaceDir;
         if (worker?.dispatchMode === 'hq') {
+          const topicWorkspaceDir = parseHqWorkerWorkspaceFromPayload(liveness?.dispatchStatus || {});
           try {
-            auditWorkspaceDir = await resolveHqWorkerWorkspace({
+            auditWorkspaceDir = topicWorkspaceDir || await resolveHqWorkerWorkspace({
               worker,
               execFileImpl,
             }) || paths.workspaceDir;
@@ -4421,6 +4489,7 @@ async function reconcileFollowUpJob({
       preview: summarizeWorkerFinalMessage(finalMessage.text, 240),
       finalMessageSummary: summarizeWorkerFinalMessage(finalMessage.text, 120),
       logPath: worker.logPath || null,
+      ...(worker?.dispatchMode === 'hq' ? { dispatchStatus: liveness?.dispatchStatus || null } : {}),
     };
 
     // Gate the terminal transition on whether the rereview was actually
@@ -4880,6 +4949,53 @@ async function reconcileInProgressFollowUpJobs({
     skipped: results.filter((result) => result.action === 'skipped').length,
     results,
   };
+}
+
+function findInProgressFollowUpJobByLaunchRequestId(rootDir, launchRequestId) {
+  const lrq = String(launchRequestId || '').trim();
+  if (!lrq) return null;
+  for (const entry of listInProgressFollowUpJobs(rootDir)) {
+    const workerLrq = String(entry.job?.remediationWorker?.launchRequestId || '').trim();
+    if (workerLrq === lrq) return entry;
+  }
+  return null;
+}
+
+async function handleRemediationTelemetryEvent({
+  rootDir = ROOT,
+  topic,
+  event,
+  now = () => new Date().toISOString(),
+  isWorkerRunning = isWorkerProcessRunning,
+  postCommentImpl = postRemediationOutcomeComment,
+  requestReviewRereviewImpl = requestReviewRereview,
+  resolvePRLifecycleImpl = resolvePRLifecycle,
+  auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
+  execFileImpl = execFileAsync,
+  log = console,
+} = {}) {
+  const terminalEvent = normalizeWorkerTerminalEvent(topic, event);
+  if (!terminalEvent) {
+    return { action: 'ignored', reason: 'unsupported-topic-event' };
+  }
+  const found = findInProgressFollowUpJobByLaunchRequestId(rootDir, terminalEvent.lrq);
+  if (!found) {
+    return { action: 'ignored', reason: 'launch-request-not-in-progress', lrq: terminalEvent.lrq };
+  }
+  return reconcileFollowUpJob({
+    rootDir,
+    job: found.job,
+    jobPath: found.jobPath,
+    now,
+    isWorkerRunning,
+    postCommentImpl,
+    requestReviewRereviewImpl,
+    resolvePRLifecycleImpl,
+    auditWorkspaceForContaminationImpl,
+    execFileImpl,
+    workerTerminalEvent: terminalEvent,
+    log,
+  });
 }
 
 async function consumeNextFollowUpJob({
@@ -5587,6 +5703,7 @@ export {
   buildInheritedPath,
   consumeFollowUpJobsUntilCapacity,
   consumeNextFollowUpJob,
+  handleRemediationTelemetryEvent,
   inspectWorkspaceState,
   digestWorkerFinalMessage,
   isWorkerProcessRunning,
@@ -5605,6 +5722,7 @@ export {
   resolveHqReplyPath,
   prepareHqReplyLandingPad,
   resolveHqRoot,
+  resolveAdversarialReviewAppSubscribes,
   resolveLocalRepliesRoot,
   resolveRemediationReplyTarget,
   resolveRemediationWorkspaceRoot,

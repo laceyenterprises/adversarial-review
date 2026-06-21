@@ -24,6 +24,7 @@ import {
   countPendingFollowUpJobsByRetryWindow,
   digestWorkerFinalMessage,
   dispatchRemediationViaHq,
+  handleRemediationTelemetryEvent,
   installWorkerProvenanceHook,
   auditWorkspaceForContamination,
   isDrainQueueIdle,
@@ -35,6 +36,7 @@ import {
   prepareWorkspaceForJob,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
+  resolveAdversarialReviewAppSubscribes,
   resolveHqReplyPath,
   resolveHqRoot,
   resolveLocalRepliesRoot,
@@ -4527,6 +4529,73 @@ test('reconcileFollowUpJob keeps HQ-dispatched remediation active across daemon 
   });
 });
 
+test('health.worker.terminal topic event completes an HQ remediation worker without dispatch-status polling', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 73, linearTicketId: 'LAC-273' });
+  const hqRoot = path.join(rootDir, 'hq');
+  const workspaceDir = path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId);
+  const promptPath = path.join(workspaceDir, '.adversarial-follow-up', 'prompt.md');
+  mkdirSync(path.dirname(promptPath), { recursive: true });
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+  const { replyPath } = prepareCanonicalReply(rootDir, claimed.job, {
+    hqRoot,
+    launchRequestId: 'lrq_apc05_topic_success',
+  });
+  writeValidReply(replyPath, claimed.job, {
+    reReview: { requested: true, reason: 'Topic-driven worker success should request re-review.' },
+  });
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      dispatchMode: 'hq',
+      completionShape: 'branch-push',
+      launchRequestId: 'lrq_apc05_topic_success',
+      dispatchId: 'dispatch_apc05_topic_success',
+      hqRoot,
+      workspaceDir,
+      promptPath,
+      replyPath,
+      outputPath: null,
+      logPath: null,
+    },
+  });
+
+  const result = await withHqRootEnv(hqRoot, async () => handleRemediationTelemetryEvent({
+    rootDir,
+    topic: 'health.worker.terminal.lrq_apc05_topic_success',
+    event: {
+      lrq: 'lrq_apc05_topic_success',
+      status: 'succeeded',
+    },
+    now: () => '2026-04-21T10:25:00.000Z',
+    execFileImpl: async (command, args) => {
+      throw new Error(`unexpected poll command: ${command} ${args.join(' ')}`);
+    },
+    resolvePRLifecycleImpl: async () => null,
+    requestReviewRereviewImpl: () => ({
+      triggered: true,
+      status: 'pending',
+      reason: 'review-status-reset',
+      reviewRow: { repo: spawned.job.repo, pr_number: spawned.job.prNumber, pr_state: 'open', review_status: 'pending' },
+    }),
+    auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+  }));
+
+  assert.equal(result.action, 'completed');
+  assert.equal(result.reason, 'final-message-artifact-present');
+  assert.equal(result.job.status, 'completed');
+  assert.equal(result.job.remediationWorker.state, 'completed');
+  assert.equal(result.job.remediationWorker.launchRequestId, 'lrq_apc05_topic_success');
+  assert.equal(result.job.completion.dispatchStatus.source, 'app-contract-topic');
+  assert.equal(result.job.completion.dispatchStatus.status, 'succeeded');
+  assert.equal(result.job.reReview.requested, true);
+  assert.equal(existsSync(spawned.jobPath), false);
+});
+
 test('reconcileFollowUpJob requeues a dead HQ remediation worker when dispatch status reports a transient failure with no reply', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, { prNumber: 722, linearTicketId: 'LAC-2722' });
@@ -5049,6 +5118,48 @@ test('dispatchRemediationViaHq omits branch from the agent-os payload when falsy
     // must send the same shape for the same input).
     assert.equal('branch' in dispatchRequest.body, false);
     assert.equal(dispatchRequest.body.pr_number, 81);
+  });
+});
+
+test('dispatchRemediationViaHq registers with CFG app telemetry subscriptions', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  mkdirSync(hqRoot, { recursive: true });
+  const promptPath = path.join(rootDir, 'prompt.md');
+  const replyPath = path.join(rootDir, 'reply.json');
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+
+  await withAppContractDispatchServer(async ({ requests }) => {
+    const env = {
+      ...process.env,
+      AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+      HQ_ROOT: hqRoot,
+      HQ_PARENT_SESSION: 'sess_parent_123',
+      HQ_PROJECT: 'adversarial-review',
+    };
+
+    assert.deepEqual(resolveAdversarialReviewAppSubscribes(env), ['health.worker.*', 'token.*']);
+
+    await dispatchRemediationViaHq({
+      hqRoot,
+      workerClass: 'codex',
+      repo: 'laceyenterprises/clio',
+      prNumber: 82,
+      branch: 'codex/fix-pr-82',
+      promptPath,
+      replyPath,
+      launchRequestId: 'laceyenterprises__clio-pr-82-headabc123',
+      jobId: 'laceyenterprises__clio-pr-82-headabc123',
+      execFileImpl: async () => {
+        throw new Error('agent-os dispatch must not shell out for workspace resolution');
+      },
+      env,
+    });
+
+    const registerRequest = requests.find((entry) => entry.url === '/v1/register');
+    assert.ok(registerRequest);
+    assert.equal(registerRequest.body.app_id, 'adversarial-review');
+    assert.deepEqual(registerRequest.body.subscribes, ['health.worker.*', 'token.*']);
   });
 });
 

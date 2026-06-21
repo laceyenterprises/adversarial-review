@@ -102,6 +102,7 @@ class AppContractSession {
     this.sessionToken = sessionToken;
     this.requestTimeoutMs = config.request_timeout_ms;
     this.requestRetryAttempts = config.request_retry_attempts;
+    this.listeners = new Map();
   }
 
   async dispatch(payload) {
@@ -125,6 +126,14 @@ class AppContractSession {
       maxAttempts: this.requestRetryAttempts,
     });
   }
+
+  on(topic, callback) {
+    return registerTopicListener(this.listeners, topic, callback);
+  }
+
+  emitTopic(topic, event) {
+    return emitTopic(this.listeners, topic, event);
+  }
 }
 
 class StandaloneSession {
@@ -132,6 +141,7 @@ class StandaloneSession {
     this.app_id = config.app_id;
     this.mode = 'standalone';
     this.dispatches = new Map();
+    this.listeners = new Map();
   }
 
   async dispatch(payload) {
@@ -159,6 +169,53 @@ class StandaloneSession {
     }
     return { status: 'found', ...existing };
   }
+
+  on(topic, callback) {
+    return registerTopicListener(this.listeners, topic, callback);
+  }
+
+  emitTopic(topic, event) {
+    return emitTopic(this.listeners, topic, event);
+  }
+}
+
+function registerTopicListener(listeners, topic, callback) {
+  const normalizedTopic = String(topic || '').trim();
+  if (!normalizedTopic) {
+    throw new Error('os.on requires a topic');
+  }
+  if (typeof callback !== 'function') {
+    throw new Error('os.on requires a callback');
+  }
+  const topicListeners = listeners.get(normalizedTopic) || new Set();
+  topicListeners.add(callback);
+  listeners.set(normalizedTopic, topicListeners);
+  return () => {
+    topicListeners.delete(callback);
+    if (topicListeners.size === 0) listeners.delete(normalizedTopic);
+  };
+}
+
+function emitTopic(listeners, topic, event) {
+  const normalizedTopic = String(topic || '').trim();
+  const deliveries = [];
+  for (const [pattern, callbacks] of listeners.entries()) {
+    if (!topicMatches(pattern, normalizedTopic)) continue;
+    for (const callback of callbacks) {
+      deliveries.push(callback(event, normalizedTopic));
+    }
+  }
+  return deliveries;
+}
+
+function topicMatches(pattern, topic) {
+  if (pattern === topic) return true;
+  if (!pattern.includes('*')) return false;
+  const escaped = pattern
+    .split('*')
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('.+');
+  return new RegExp(`^${escaped}$`).test(topic);
 }
 
 async function requestJson(url, {

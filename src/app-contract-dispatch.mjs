@@ -202,7 +202,23 @@ function emitTopic(listeners, topic, event) {
   for (const [pattern, callbacks] of listeners.entries()) {
     if (!topicMatches(pattern, normalizedTopic)) continue;
     for (const callback of callbacks) {
-      deliveries.push(callback(event, normalizedTopic));
+      try {
+        deliveries.push(Promise.resolve(callback(event, normalizedTopic)).catch((err) => {
+          console.error?.('[app-contract] topic listener rejected', {
+            topic: normalizedTopic,
+            pattern,
+            error: err?.message || String(err),
+          });
+          return { delivered: false, error: err };
+        }));
+      } catch (err) {
+        console.error?.('[app-contract] topic listener threw', {
+          topic: normalizedTopic,
+          pattern,
+          error: err?.message || String(err),
+        });
+        deliveries.push(Promise.resolve({ delivered: false, error: err }));
+      }
     }
   }
   return deliveries;
@@ -214,7 +230,7 @@ function topicMatches(pattern, topic) {
   const escaped = pattern
     .split('*')
     .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-    .join('.+');
+    .join('.*');
   return new RegExp(`^${escaped}$`).test(topic);
 }
 

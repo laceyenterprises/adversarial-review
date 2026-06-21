@@ -17,6 +17,7 @@ import {
   markFollowUpJobFailed,
   markFollowUpJobStopped,
   markFollowUpJobSpawned,
+  readFollowUpJob,
   readRemediationReplyArtifact,
   requeueInProgressFollowUpJobForRetry,
   remediationAttemptNumber,
@@ -364,6 +365,7 @@ function remediationWorkerGitIdentity(workerClass, env = process.env) {
 }
 
 const RECONCILIATION_MAX_ACTIVE_MS = 6 * 60 * 60 * 1000;
+const FOLLOW_UP_RECONCILE_CLAIM_STALE_MS = 10 * 60 * 1000;
 const MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES = 4 * 1024 * 1024;
 
 function logRoundBudgetDecision(log, {
@@ -3405,7 +3407,7 @@ async function assessWorkerLivenessDetailed(job, {
   workerTerminalEvent = null,
 } = {}) {
   const worker = job?.remediationWorker || {};
-  if (workerTerminalEventMatches(worker, workerTerminalEvent)) {
+  if (workerTerminalEvent?.status === 'succeeded' && workerTerminalEventMatches(worker, workerTerminalEvent)) {
     const nowAt = parseIsoTime(now());
     const spawnedAt = parseIsoTime(worker.spawnedAt);
     const ageMs = nowAt !== null && spawnedAt !== null ? nowAt - spawnedAt : null;
@@ -4896,6 +4898,67 @@ async function reconcileFollowUpJob({
   };
 }
 
+function reconcileClaimPath(jobPath) {
+  return `${jobPath}.reconcile.lock`;
+}
+
+function isPidAlive(pid) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) return false;
+  try {
+    process.kill(numericPid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === 'EPERM';
+  }
+}
+
+function tryAcquireFollowUpReconcileClaim({ jobPath, now = () => new Date().toISOString(), ownerPid = process.pid } = {}) {
+  const lockPath = reconcileClaimPath(jobPath);
+  const claimedAt = now();
+  const payload = `${JSON.stringify({ claimedAt, ownerPid })}\n`;
+  try {
+    writeFileSync(lockPath, payload, { encoding: 'utf8', flag: 'wx' });
+    return { acquired: true, lockPath, claimedAt };
+  } catch (err) {
+    if (err?.code !== 'EEXIST') throw err;
+  }
+
+  let existing = null;
+  try {
+    existing = JSON.parse(readFileSync(lockPath, 'utf8'));
+  } catch {
+    existing = null;
+  }
+  const claimedAtMs = Date.parse(existing?.claimedAt || '');
+  const nowMs = Date.parse(claimedAt);
+  const stale = Number.isFinite(claimedAtMs) && Number.isFinite(nowMs)
+    && nowMs - claimedAtMs > FOLLOW_UP_RECONCILE_CLAIM_STALE_MS;
+  if (!stale || isPidAlive(existing?.ownerPid)) {
+    return {
+      acquired: false,
+      lockPath,
+      claimedAt: existing?.claimedAt || null,
+      ownerPid: existing?.ownerPid || null,
+    };
+  }
+
+  rmSync(lockPath, { force: true });
+  try {
+    writeFileSync(lockPath, payload, { encoding: 'utf8', flag: 'wx' });
+    return { acquired: true, lockPath, claimedAt, reclaimedStale: true };
+  } catch (err) {
+    if (err?.code !== 'EEXIST') throw err;
+    return { acquired: false, lockPath, claimedAt: null, ownerPid: null };
+  }
+}
+
+function releaseFollowUpReconcileClaim(claim) {
+  if (claim?.acquired && claim?.lockPath) {
+    rmSync(claim.lockPath, { force: true });
+  }
+}
+
 async function reconcileInProgressFollowUpJobs({
   rootDir = ROOT,
   now = () => new Date().toISOString(),
@@ -4922,21 +4985,34 @@ async function reconcileInProgressFollowUpJobs({
   // jobs at most), so serial is the right tradeoff.
   const results = [];
   for (const { job, jobPath } of jobs) {
-    /* eslint-disable no-await-in-loop */
-    const result = await reconcileFollowUpJob({
-      rootDir,
-      job,
-      jobPath,
-      now,
-      isWorkerRunning,
-      postCommentImpl,
-      requestReviewRereviewImpl,
-      resolvePRLifecycleImpl,
-      execFileImpl,
-      log,
-    });
-    results.push(result);
-    /* eslint-enable no-await-in-loop */
+    const claim = tryAcquireFollowUpReconcileClaim({ jobPath, now });
+    if (!claim.acquired) {
+      results.push({
+        action: 'skipped',
+        reason: 'reconcile-claim-held',
+        job,
+        jobPath,
+      });
+      continue;
+    }
+    try {
+      const currentJob = readFollowUpJob(jobPath);
+      const result = await reconcileFollowUpJob({
+        rootDir,
+        job: currentJob,
+        jobPath,
+        now,
+        isWorkerRunning,
+        postCommentImpl,
+        requestReviewRereviewImpl,
+        resolvePRLifecycleImpl,
+        execFileImpl,
+        log,
+      });
+      results.push(result);
+    } finally {
+      releaseFollowUpReconcileClaim(claim);
+    }
   }
 
   return {
@@ -4982,20 +5058,40 @@ async function handleRemediationTelemetryEvent({
   if (!found) {
     return { action: 'ignored', reason: 'launch-request-not-in-progress', lrq: terminalEvent.lrq };
   }
-  return reconcileFollowUpJob({
-    rootDir,
-    job: found.job,
-    jobPath: found.jobPath,
-    now,
-    isWorkerRunning,
-    postCommentImpl,
-    requestReviewRereviewImpl,
-    resolvePRLifecycleImpl,
-    auditWorkspaceForContaminationImpl,
-    execFileImpl,
-    workerTerminalEvent: terminalEvent,
-    log,
-  });
+  const claim = tryAcquireFollowUpReconcileClaim({ jobPath: found.jobPath, now });
+  if (!claim.acquired) {
+    return {
+      action: 'skipped',
+      reason: 'reconcile-claim-held',
+      lrq: terminalEvent.lrq,
+      job: found.job,
+      jobPath: found.jobPath,
+    };
+  }
+  try {
+    const currentJob = readFollowUpJob(found.jobPath);
+    if (!workerTerminalEventMatches(currentJob?.remediationWorker, terminalEvent)) {
+      return { action: 'ignored', reason: 'launch-request-not-current-worker', lrq: terminalEvent.lrq };
+    }
+    // Topic-driven reconcile uses the same per-job claim as the periodic
+    // scanner, so side effects inside reconcileFollowUpJob remain single-writer.
+    return reconcileFollowUpJob({
+      rootDir,
+      job: currentJob,
+      jobPath: found.jobPath,
+      now,
+      isWorkerRunning,
+      postCommentImpl,
+      requestReviewRereviewImpl,
+      resolvePRLifecycleImpl,
+      auditWorkspaceForContaminationImpl,
+      execFileImpl,
+      workerTerminalEvent: terminalEvent,
+      log,
+    });
+  } finally {
+    releaseFollowUpReconcileClaim(claim);
+  }
 }
 
 async function consumeNextFollowUpJob({

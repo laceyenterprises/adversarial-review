@@ -1105,6 +1105,31 @@ in-memory standalone App Contract session because the worker record would look
 dispatched without a backing worker. The durable worker record must still
 preserve the same reconciliation invariants as the local lane:
 
+The App Contract registration advertises the configured
+`apps.adversarial-review.subscribes` topics from `config.yaml`. The shipped
+subscription set includes `health.worker.*` so the daemon can observe
+`health.worker.terminal.<launchRequestId>` worker-completion events, and
+`token.*` for future token lifecycle notices. Topic delivery is an acceleration
+path, not a separate state machine: the periodic follow-up reconcile tick
+remains authoritative and continues to scan `data/follow-up-jobs/in-progress/`.
+Both the topic handler and the periodic scanner acquire the same short-lived
+per-job reconcile claim before calling `reconcileFollowUpJob`; if another
+reconcile owns that job, the topic handler skips and lets the owner finish.
+This preserves the single-writer invariant for side effects such as re-review
+row resets, branch-contamination audits, lifecycle cancellation, and terminal
+comment delivery.
+
+`health.worker.terminal.<launchRequestId>` events may short-circuit the HQ
+status poll only for `status:"succeeded"`. Success remains gated by the
+worker's durable reply artifact and the normal branch-contamination audit before
+the queue can complete or request re-review. Non-success terminal statuses
+(`failed`, `canceled`, `cancelled`, and `superseded`) must fall through to
+`hq dispatch status <dispatchId> --root <HQ_ROOT>` so `failureClass`,
+`failureDetail`, and retry-attempt metadata come from the canonical HQ status
+payload before transient-vs-terminal requeue classification runs. A failed topic
+event that omits `failureClass` is therefore only a wakeup signal; it is not
+trusted as the complete failure record.
+
 - The worker record persists both `launchRequestId` and `dispatchId` from the
   HQ dispatch ticket. `launchRequestId` remains the reply-storage and audit key;
   `dispatchId` is the authoritative handle for `hq dispatch status` and

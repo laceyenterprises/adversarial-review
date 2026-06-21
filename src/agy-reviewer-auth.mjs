@@ -11,6 +11,9 @@ const AGY_KEYCHAIN_REMEDIATION =
   'Antigravity reviewer auth requires launchd-spawned airlock processes to read the per-user keychain item. '
   + 'Known remediation: unlock the airlock keychain before daemon-spawned work runs and grant command-line access with '
   + 'security set-generic-password-partition-list -S apple-tool:,apple: -s "Gemini Safe Storage" -k <keychain-password>.';
+const AGY_TRANSIENT_REMEDIATION =
+  'Antigravity agy auth preflight hit a transient agy transport failure. Retry after the local agy/network path is healthy; '
+  + 'if this persists, run `agy models` under the same launchd user environment and inspect stderr.';
 
 function resolveAgyAuthProbeTimeoutMs(env = process.env) {
   const parsed = Number.parseInt(env.AGY_AUTH_PROBE_TIMEOUT_MS || '', 10);
@@ -28,10 +31,30 @@ function resolveAgyAuthProbeRetryBackoffMs(env = process.env) {
 }
 
 function isTimeoutError(err) {
-  return err?.killed === true
-    || err?.signal === 'SIGTERM'
+  return (err?.killed === true && err?.signal === 'SIGTERM')
     || err?.code === 'ETIMEDOUT'
     || /timed out|timeout/i.test(String(err?.message || ''));
+}
+
+function isRetryableAgyModelsProbeError(err) {
+  const detail = [
+    err?.code,
+    err?.message,
+    err?.stderr,
+    err?.stdout,
+  ].filter(Boolean).join('\n').toLowerCase();
+  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain|tls)\b/.test(detail)
+    || detail.includes('timeout')
+    || detail.includes('timed out')
+    || detail.includes('temporary failure')
+    || detail.includes('temporarily unavailable')
+    || detail.includes('socket hang up')
+    || detail.includes('network')
+    || detail.includes('connection reset')
+    || detail.includes('connection refused')
+    || detail.includes('service unavailable')
+    || detail.includes('503')
+    || detail.includes('504');
 }
 
 function formatDetail(err) {
@@ -44,14 +67,14 @@ function keychainMissingFromError(err) {
     || /could not be found|specified item could not be found|not found/i.test(detail);
 }
 
-function failure(reason, detail = '') {
+function failure(reason, detail = '', remediation = AGY_KEYCHAIN_REMEDIATION) {
   return {
     ok: false,
     reason,
     keychainItem: AGY_KEYCHAIN_SERVICE,
     probe: 'agy models',
     detail,
-    remediation: AGY_KEYCHAIN_REMEDIATION,
+    remediation,
   };
 }
 
@@ -65,7 +88,8 @@ async function runProbe(command, args, { execFileImpl, timeout, env }) {
 
 function isRetriableAgyAuthFailure(result) {
   return result?.reason === 'keychain-probe-timeout'
-    || result?.reason === 'agy-probe-timeout';
+    || result?.reason === 'agy-probe-timeout'
+    || result?.reason === 'agy-probe-transient';
 }
 
 function withAttemptDetail(result, attempt, maxAttempts) {
@@ -112,6 +136,9 @@ async function checkAgyReviewerAuthOnce({
     }
   } catch (err) {
     if (isTimeoutError(err)) return failure('agy-probe-timeout', '`agy models` timed out');
+    if (isRetryableAgyModelsProbeError(err)) {
+      return failure('agy-probe-transient', formatDetail(err), AGY_TRANSIENT_REMEDIATION);
+    }
     return failure('agy-probe-failed', formatDetail(err));
   }
 
@@ -150,7 +177,6 @@ async function checkAgyReviewerAuth({
       await sleepImpl(retryBackoffMs);
     }
   }
-  return failure('agy-probe-failed', 'preflight retry exhausted');
 }
 
 export {

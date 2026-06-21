@@ -2264,12 +2264,57 @@ test('checkAgyReviewerAuth fail-closed reasons distinguish keychain and agy prob
     execFileImpl: async () => {
       keychainAttempts += 1;
       const err = new Error('timeout');
+      err.killed = true;
       err.signal = 'SIGTERM';
       throw err;
     },
   });
   assert.equal(keychainTimeout.reason, 'keychain-probe-timeout');
   assert.equal(keychainAttempts, 2);
+
+  let bareSigtermAttempts = 0;
+  const bareSigterm = await checkAgyReviewerAuth({
+    maxAttempts: 3,
+    retryBackoffMs: 0,
+    execFileImpl: async () => {
+      bareSigtermAttempts += 1;
+      const err = new Error('terminated');
+      err.signal = 'SIGTERM';
+      throw err;
+    },
+  });
+  assert.equal(bareSigterm.reason, 'keychain-probe-failed');
+  assert.equal(bareSigtermAttempts, 1);
+
+  let agyNetworkAttempts = 0;
+  const agyNetworkTransient = await checkAgyReviewerAuth({
+    maxAttempts: 3,
+    retryBackoffMs: 0,
+    execFileImpl: async (command) => {
+      if (command === 'security') return { stdout: 'ok', stderr: '' };
+      agyNetworkAttempts += 1;
+      if (agyNetworkAttempts === 1) {
+        const err = new Error('socket hang up');
+        err.code = 'ECONNRESET';
+        throw err;
+      }
+      return { stdout: 'gemini-2.5-pro\n', stderr: '' };
+    },
+  });
+  assert.equal(agyNetworkTransient.ok, true);
+  assert.equal(agyNetworkAttempts, 2);
+
+  const agyNetworkExhausted = await checkAgyReviewerAuth({
+    maxAttempts: 1,
+    execFileImpl: async (command) => {
+      if (command === 'security') return { stdout: 'ok', stderr: '' };
+      const err = new Error('TLS handshake failed');
+      err.code = 'ECONNRESET';
+      throw err;
+    },
+  });
+  assert.equal(agyNetworkExhausted.reason, 'agy-probe-transient');
+  assert.doesNotMatch(agyNetworkExhausted.remediation, /partition-list/);
 
   const timeout = await checkAgyReviewerAuth({
     maxAttempts: 2,

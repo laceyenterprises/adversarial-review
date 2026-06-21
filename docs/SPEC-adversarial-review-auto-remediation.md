@@ -367,7 +367,10 @@ the `agy` CLI instead of the historical file-backed account-rotation bridge.
 probe or review spawn, stripping `GEMINI_API_KEY`, `GOOGLE_API_KEY`, and the
 rest of the canonical OAuth fallback env set. The fail-closed pre-flight first
 checks for the macOS keychain item `Gemini Safe Storage` and then runs
-`agy models` with that same scrubbed env. The review itself runs
+`agy models` with that same scrubbed env. Timeout-shaped keychain probe
+failures and transient `agy models` transport failures use bounded
+retry/backoff before surfacing an OAuth failure; definitive missing-keychain and
+non-transient probe failures fail closed immediately. The review itself runs
 `agy --print -m <model>` and receives the complete reviewer prompt on stdin.
 
 Because auth and provider quota behavior are delegated to `agy`, the live

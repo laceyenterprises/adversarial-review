@@ -21,9 +21,10 @@ all-capped account pools, or emits AGR-06 account telemetry.
   `security find-generic-password -s "Gemini Safe Storage"`, then `agy models`.
   Both probes run with the same OAuth-scrubbed env used for the review spawn,
   so `GEMINI_API_KEY` and `GOOGLE_API_KEY` cannot satisfy the probe. The
-  default probe timeout is 5s. Timeout-shaped probe failures are retried with
-  bounded backoff before surfacing an OAuth failure; definitive missing-keychain
-  and non-timeout probe failures still fail closed immediately.
+  default probe timeout is 5s. Timeout-shaped keychain probe failures and
+  transient `agy models` transport failures are retried with bounded backoff
+  before surfacing an OAuth failure; definitive missing-keychain and
+  non-transient probe failures still fail closed immediately.
 - Quota and rate-limit handling for the live Antigravity reviewer is whatever
   `agy` returns to the subprocess. The old bridge-level hold decision,
   all-capped page, and per-account rate-limit marking are retired for this
@@ -76,10 +77,12 @@ reviewer:
 
 Before spawning a review, the runtime checks that the `Gemini Safe Storage`
 keychain item exists and that `agy models` returns non-empty stdout. Transient
-timeouts are retried before escalation. If the keychain item is definitively
-missing, `agy models` returns empty output, or a non-timeout probe failure
-persists, the reviewer fails closed with an OAuth error and the remediation text
-points operators at the keychain partition-list fix.
+timeouts and `agy models` network/transport blips are retried before
+escalation. The keychain existence probe is only the fast-path for a truly
+absent item; `agy models` is the authoritative readability/ACL check. If the
+keychain item is definitively missing, `agy models` returns empty output, or a
+non-transient probe failure persists, the reviewer fails closed with an OAuth
+error and remediation text matched to the failed probe class.
 
 Probe knobs:
 

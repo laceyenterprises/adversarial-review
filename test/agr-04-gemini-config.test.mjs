@@ -79,14 +79,13 @@ reviewer:
   }
 });
 
-test('AGR-04 antigravity runtime with empty accounts fails closed in boot validator', () => {
+test('AGR-04 antigravity runtime with empty accounts boots under agy runtime', () => {
   const tmp = makeTmp();
   try {
     const modulePath = join(tmp, 'config.yaml');
     writeYaml(modulePath, 'reviewer:\n  gemini:\n    runtime: antigravity\n    antigravity:\n      accounts: []\n');
-    assert.throws(
+    assert.doesNotThrow(
       () => validateDefaultReviewerRouteConfig({}, { topPath: '/dev/null', modulePaths: [modulePath] }),
-      /runtime=antigravity requires at least one reviewer\.gemini\.antigravity\.accounts/i,
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

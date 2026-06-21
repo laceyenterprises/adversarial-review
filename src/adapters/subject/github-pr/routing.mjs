@@ -10,7 +10,6 @@
 
 import { builderClassFromTitle, tagFromBuilderClass } from './title-tagging.mjs';
 import {
-  resolveAntigravityAccounts,
   resolveDefaultReviewer as resolveDefaultReviewerFromConfig,
   resolveGeminiRuntime,
   resolveGeminiReviewerMode as resolveGeminiReviewerModeFromConfig,
@@ -151,18 +150,7 @@ function defaultReviewerRouteFromEnv(env = process.env, opts = {}) {
 
 function validateDefaultReviewerRouteConfig(env = process.env, opts = {}) {
   defaultReviewerRouteFromEnv(env, opts);
-  const runtime = resolveGeminiRuntime({ env, ...opts });
-  const accounts = resolveAntigravityAccounts({ env, ...opts });
-  if (runtime === 'antigravity' && accounts.length === 0) {
-    throw new AgentOSConfigError(
-      'reviewer.gemini.runtime=antigravity requires at least one reviewer.gemini.antigravity.accounts[] entry',
-      {
-        key: 'reviewer.gemini.antigravity.accounts',
-        expected: 'non-empty when reviewer.gemini.runtime is antigravity',
-        got: [],
-      },
-    );
-  }
+  resolveGeminiRuntime({ env, ...opts });
 }
 
 function isCrossModelReviewWaived(builderClassInput, reviewerInput) {

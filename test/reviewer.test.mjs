@@ -2217,8 +2217,11 @@ test('checkAgyReviewerAuth mirrors AGY-01 auth contract fields', async () => {
 });
 
 test('checkAgyReviewerAuth fail-closed reasons distinguish keychain and agy probe failures', async () => {
+  let missingCalls = 0;
   const missing = await checkAgyReviewerAuth({
+    maxAttempts: 3,
     execFileImpl: async () => {
+      missingCalls += 1;
       const err = new Error('Command failed');
       err.stderr = 'SecKeychainSearchCopyNext: The specified item could not be found in the keychain.';
       throw err;
@@ -2226,6 +2229,7 @@ test('checkAgyReviewerAuth fail-closed reasons distinguish keychain and agy prob
   });
   assert.equal(missing.ok, false);
   assert.equal(missing.reason, 'keychain-missing');
+  assert.equal(missingCalls, 1);
 
   const empty = await checkAgyReviewerAuth({
     execFileImpl: async (command) => {
@@ -2235,7 +2239,41 @@ test('checkAgyReviewerAuth fail-closed reasons distinguish keychain and agy prob
   });
   assert.equal(empty.reason, 'agy-probe-empty');
 
+  let agyAttempts = 0;
+  const transient = await checkAgyReviewerAuth({
+    maxAttempts: 3,
+    retryBackoffMs: 0,
+    execFileImpl: async (command) => {
+      if (command === 'security') return { stdout: 'ok', stderr: '' };
+      agyAttempts += 1;
+      if (agyAttempts === 1) {
+        const err = new Error('timed out');
+        err.killed = true;
+        throw err;
+      }
+      return { stdout: 'gemini-2.5-pro\n', stderr: '' };
+    },
+  });
+  assert.equal(transient.ok, true);
+  assert.equal(agyAttempts, 2);
+
+  let keychainAttempts = 0;
+  const keychainTimeout = await checkAgyReviewerAuth({
+    maxAttempts: 2,
+    retryBackoffMs: 0,
+    execFileImpl: async () => {
+      keychainAttempts += 1;
+      const err = new Error('timeout');
+      err.signal = 'SIGTERM';
+      throw err;
+    },
+  });
+  assert.equal(keychainTimeout.reason, 'keychain-probe-timeout');
+  assert.equal(keychainAttempts, 2);
+
   const timeout = await checkAgyReviewerAuth({
+    maxAttempts: 2,
+    retryBackoffMs: 0,
     execFileImpl: async (command) => {
       if (command === 'security') return { stdout: 'ok', stderr: '' };
       const err = new Error('timed out');
@@ -2244,6 +2282,7 @@ test('checkAgyReviewerAuth fail-closed reasons distinguish keychain and agy prob
     },
   });
   assert.equal(timeout.reason, 'agy-probe-timeout');
+  assert.match(timeout.detail, /attempt 2\/2/);
 });
 
 test('assertAgyReviewerAuth surfaces fail-closed reason and launchd remediation as OAuthError', async () => {

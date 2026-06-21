@@ -124,6 +124,43 @@ test('GMW-02 watcher: fallback wiring end-to-end (capped → gemini, healthy →
   assert.equal(geminiAlreadyCapped.reviewerModel, 'codex');
 });
 
+test('AGR-06 routing: fallback injects gemini only on primary cap; always-on injects immediately', () => {
+  const baseRoute = {
+    builderClass: 'codex',
+    tag: '[codex]',
+    reviewerModel: 'claude',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+  };
+
+  assert.equal(
+    applyGeminiReviewerRoute({
+      builderClass: 'codex',
+      baseRoute,
+      mode: 'fallback',
+      primaryReviewerQuotaCapped: false,
+    }).reviewerModel,
+    'claude',
+  );
+  assert.equal(
+    applyGeminiReviewerRoute({
+      builderClass: 'codex',
+      baseRoute,
+      mode: 'fallback',
+      primaryReviewerQuotaCapped: true,
+    }).reviewerModel,
+    'gemini',
+  );
+  assert.equal(
+    applyGeminiReviewerRoute({
+      builderClass: 'codex',
+      baseRoute,
+      mode: 'always-on',
+      primaryReviewerQuotaCapped: false,
+    }).reviewerModel,
+    'gemini',
+  );
+});
+
 test('GMW-02 watcher: fallback gemini route bypasses the original primary reviewer quota hold', () => {
   const baseRoute = {
     builderClass: 'claude-code',

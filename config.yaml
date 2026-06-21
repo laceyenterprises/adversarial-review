@@ -39,7 +39,7 @@ __aliases:
 #   [{"id":"primary","tokenFile":"op://vault/item/token"}]
 reviewer:
   gemini:
-    mode: always-on                 # enum: off / fallback / always-on
+    mode: off                       # enum: off / fallback / always-on
     runtime: cli                    # enum: cli / antigravity
     antigravity:
       accounts: []                  # ordered list of {id, tokenFile}

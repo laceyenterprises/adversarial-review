@@ -94,17 +94,23 @@ test('GMW-02 fallback: gemini only when the primary reviewer is quota-capped', (
   assert.equal(capped.geminiReviewerSelection.reason, 'primary-reviewer-quota-capped');
 });
 
-test('GMW-02 exported route surfaces default to effective always-on Gemini routing', () => {
+test('GMW-02 exported route surfaces default to off base routing', () => {
+  const expected = new Map([
+    ['claude-code', { reviewerModel: 'codex', botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN' }],
+    ['codex', { reviewerModel: 'claude', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN' }],
+    ['clio-agent', { reviewerModel: 'claude', botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN' }],
+  ]);
   for (const builderClass of ['claude-code', 'codex', 'clio-agent']) {
+    const want = expected.get(builderClass);
     const subjectRoute = routeSubject({ builderClass }, HERMETIC);
-    assert.equal(subjectRoute.reviewerModel, 'gemini', `${builderClass} subject route`);
-    assert.equal(subjectRoute.botTokenEnv, 'GH_GEMINI_REVIEWER_TOKEN');
-    assert.equal(subjectRoute.geminiReviewerSelection.reason, 'always-on-third-reviewer');
+    assert.equal(subjectRoute.reviewerModel, want.reviewerModel, `${builderClass} subject route`);
+    assert.equal(subjectRoute.botTokenEnv, want.botTokenEnv);
+    assert.equal(subjectRoute.geminiReviewerSelection, undefined);
 
     const prRoute = routePR(`[${builderClass}] LAC-484: effective route`, null, HERMETIC);
-    assert.equal(prRoute.reviewerModel, 'gemini', `${builderClass} PR route`);
-    assert.equal(prRoute.botTokenEnv, 'GH_GEMINI_REVIEWER_TOKEN');
-    assert.equal(prRoute.geminiReviewerSelection.reason, 'always-on-third-reviewer');
+    assert.equal(prRoute.reviewerModel, want.reviewerModel, `${builderClass} PR route`);
+    assert.equal(prRoute.botTokenEnv, want.botTokenEnv);
+    assert.equal(prRoute.geminiReviewerSelection, undefined);
   }
 });
 
@@ -202,24 +208,24 @@ test('GMW-02 gemini pinned onto a non-gemini builder is allowed (cross-model)', 
 
 // ── mode normalization + config cascade ────────────────────────────────────
 
-test('GMW-02 mode normalization defaults only blank/unset to always-on', () => {
+test('GMW-02 mode normalization defaults only blank/unset to off', () => {
   assert.equal(normalizeGeminiReviewerMode('always-on'), 'always-on');
   assert.equal(normalizeGeminiReviewerMode('OFF'), 'off');
   assert.equal(normalizeGeminiReviewerMode(' fallback '), 'fallback');
-  assert.equal(normalizeGeminiReviewerMode(''), 'always-on');
-  assert.equal(normalizeGeminiReviewerMode(undefined), 'always-on');
+  assert.equal(normalizeGeminiReviewerMode(''), 'off');
+  assert.equal(normalizeGeminiReviewerMode(undefined), 'off');
   assert.throws(
     () => normalizeGeminiReviewerMode('nonsense'),
     /reviewer\.gemini\.mode must be one of: off, fallback, always-on/i,
   );
 });
 
-test('GMW-02 config: default mode is always-on; module file + env override resolve', () => {
+test('GMW-02 config: default mode is off; module file + env override resolve', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'gmw-02-mode-'));
   try {
     // No file pin → schema default.
     const def = resolveGeminiReviewerMode({ env: {}, topPath: '/dev/null', modulePaths: [join(tmp, 'none.yaml')] });
-    assert.equal(def, 'always-on');
+    assert.equal(def, 'off');
 
     const modulePath = join(tmp, 'config.yaml');
     writeFileSync(modulePath, 'reviewer:\n  gemini:\n    mode: fallback\n', 'utf8');
@@ -321,7 +327,7 @@ test('GMW-02 reviewer-roster CLI prints the roster and resolved mode', () => {
   }, HERMETIC);
   assert.equal(rc, 0);
   assert.match(out, /reviewer\.gemini\.mode=/);
-  assert.match(out, /gemini\s+-> default: \[codex, claude-code, clio-agent\]; eligible: \[codex, claude-code, clio-agent\]/);
+  assert.match(out, /gemini\s+-> default: \[\]; eligible: \[codex, claude-code, clio-agent\]/);
 });
 
 test('GMW-02 reviewer-roster CLI --json emits structured roster', () => {
@@ -333,20 +339,21 @@ test('GMW-02 reviewer-roster CLI --json emits structured roster', () => {
   }, HERMETIC);
   assert.equal(rc, 0);
   const parsed = JSON.parse(out);
-  assert.ok(['off', 'fallback', 'always-on'].includes(parsed.mode));
+  assert.equal(parsed.mode, 'off');
   const gemini = parsed.roster.find((r) => r.reviewerModel === 'gemini');
-  assert.deepEqual(gemini.defaultBuilderClasses, ['codex', 'claude-code', 'clio-agent']);
+  assert.deepEqual(gemini.defaultBuilderClasses, []);
   assert.deepEqual(gemini.eligibleBuilderClasses, ['codex', 'claude-code', 'clio-agent']);
 });
 
-test('GMW-02 docs record the always-on routing contract and hard guard', () => {
+test('GMW-02 docs record the off default, always-on opt-in, and hard guard', () => {
   const spec = readFileSync('docs/SPEC-adversarial-review-auto-remediation.md', 'utf8');
   const runbook = readFileSync('docs/follow-up-runbook.md', 'utf8');
   for (const doc of [spec, runbook]) {
     assert.match(doc, /reviewer\.gemini\.mode/);
-    assert.match(doc, /default [`"]?always-on[`"]?|default mode is [`"]?always-on[`"]?/i);
+    assert.match(doc, /default\s+(?:mode\s+is\s+)?[`"]?off[`"]?/i);
+    assert.match(doc, /reviewer\.gemini\.mode[=:] ?always-on/i);
     assert.match(doc, /\[codex\].*\[claude-code\].*\[clio-agent\].*Gemini/s);
     assert.match(doc, /GH_GEMINI_REVIEWER_TOKEN/);
-    assert.match(doc, /Gemini is never (?:permitted|allowed) to review .*?\[gemini\]/i);
+    assert.match(doc, /Gemini is never\s+(?:permitted|allowed) to review\s+[\s\S]*?\[gemini\]/i);
   }
 });

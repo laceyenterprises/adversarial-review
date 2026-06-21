@@ -35,6 +35,9 @@ const CATEGORY_ORDER = Object.freeze([
   'review_post',
   'other',
   'rate_limit_throttle_seconds',
+  'agr_account_selected',
+  'agr_account_rate_limited',
+  'agr_all_capped',
 ]);
 
 function resolveApiCallLogDir(rootDir) {

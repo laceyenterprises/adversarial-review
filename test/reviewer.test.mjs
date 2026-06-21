@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CLAUDE_CLI, GEMINI_CLI, __test__ } from '../src/reviewer.mjs';
@@ -8,6 +8,7 @@ import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-di
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
+import { CATEGORY_ORDER } from '../src/api-telemetry.mjs';
 
 const {
   CLAUDE_STRIPPED_ENV_VARS,
@@ -39,6 +40,8 @@ const {
   isRetryableGeminiSubprocessError,
   retryAfterFromGeminiFailure,
   formatAntigravityQuotaHoldMessage,
+  buildAgrAllCappedPagePayload,
+  maybePageAgrAllCapped,
   spawnGeminiReview,
   reviewWithGemini,
   dispatchReviewerModel,
@@ -1860,9 +1863,10 @@ test('reviewWithGemini antigravity all-capped returns hold decision without prod
     getAntigravityAccessTokenImpl: async () => 'token-a',
     markAntigravityRateLimitedImpl: () => {},
     allAntigravityCappedImpl: () => ({ allCapped: true, retryAfter }),
+    pageAgrAllCappedImpl: async () => ({ paged: true, suppressedCount: 0 }),
     spawnGeminiReviewImpl: async () => {
       const err = new Error('Command failed');
-      err.stderr = '429 RESOURCE_EXHAUSTED quota exceeded';
+      err.stderr = `429 RESOURCE_EXHAUSTED quota exceeded\nRetry-After: ${retryAfter}`;
       throw err;
     },
   });
@@ -1871,6 +1875,157 @@ test('reviewWithGemini antigravity all-capped returns hold decision without prod
   assert.equal(result.quotaHoldDecision.hold, true);
   assert.equal(result.quotaHoldDecision.retryAfter, retryAfter);
   assert.equal(result.quotaHoldDecision.waitUntilMs, Date.parse(retryAfter));
+});
+
+test('AGR-06 reviewWithGemini antigravity emits account telemetry for selection, rate-limit, and all-capped', async () => {
+  const retryAfter = '2026-06-20T21:15:00.000Z';
+  const events = [];
+  const result = await reviewWithGemini('+diff\n', '', {
+    resolveGeminiRuntimeImpl: () => 'antigravity',
+    assertAntigravityOAuthImpl: async ({ selectAccountImpl }) => selectAccountImpl(),
+    selectAntigravityAccountImpl: () => 'acct-a',
+    getAntigravityAccessTokenImpl: async () => 'token-a',
+    markAntigravityRateLimitedImpl: (accountId, retryAfterValue) => ({ accountId, retryAfter: retryAfterValue }),
+    allAntigravityCappedImpl: () => ({ allCapped: true, retryAfter }),
+    accountStatusImpl: () => [{ accountId: 'acct-a', eligible: false, retryAfter }],
+    deliverAgrAllCappedAlertImpl: async () => {},
+    pageAgrAllCappedImpl: async () => ({ paged: true, suppressedCount: 0 }),
+    log: {
+      log: (line) => events.push(JSON.parse(line)),
+      warn: (line) => events.push(JSON.parse(line)),
+      error: (line) => events.push(JSON.parse(line)),
+    },
+    spawnGeminiReviewImpl: async () => {
+      const err = new Error('Command failed');
+      err.stderr = `429 RESOURCE_EXHAUSTED quota exceeded\nRetry-After: ${retryAfter}`;
+      throw err;
+    },
+  });
+
+  assert.equal(result.quotaHoldDecision.hold, true);
+  assert.deepEqual(events.map((event) => event.event), [
+    'agr_account_selected',
+    'agr_account_rate_limited',
+    'agr_all_capped',
+  ]);
+  assert.equal(events[0].schemaVersion, 1);
+  assert.equal(events[0].accountId, 'acct-a');
+  assert.equal(events[1].retryAfter, retryAfter);
+  assert.equal(events[2].retryAfter, retryAfter);
+  assert.equal(JSON.stringify(events).includes('token-a'), false);
+});
+
+test('AGR-06 antigravity account telemetry events are registered API categories', () => {
+  const emittedAgrEvents = [
+    'agr_account_selected',
+    'agr_account_rate_limited',
+    'agr_all_capped',
+  ];
+  for (const eventName of emittedAgrEvents) {
+    assert.ok(CATEGORY_ORDER.includes(eventName), `${eventName} must be in CATEGORY_ORDER`);
+  }
+});
+
+test('AGR-06 all-capped page payload dedupes and coalesces suppressed count', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'agr-all-capped-page-'));
+  const pages = [];
+  try {
+    const deliverAlertFn = async (text, structured) => {
+      pages.push({ text, structured });
+    };
+    const retryAfter = '2026-06-20T21:15:00.000Z';
+    const accountStatus = [{ accountId: 'acct-a', eligible: false, retryAfter }];
+    const first = await maybePageAgrAllCapped({
+      retryAfter,
+      accountStatus,
+      deliverAlertFn,
+      now: Date.parse('2026-06-20T20:00:00.000Z'),
+      alertStateDir: stateDir,
+      dedupeMs: 60_000,
+    });
+    const suppressed = await maybePageAgrAllCapped({
+      retryAfter,
+      accountStatus,
+      deliverAlertFn,
+      now: Date.parse('2026-06-20T20:00:30.000Z'),
+      alertStateDir: stateDir,
+      dedupeMs: 60_000,
+    });
+    const next = await maybePageAgrAllCapped({
+      retryAfter,
+      accountStatus,
+      deliverAlertFn,
+      now: Date.parse('2026-06-20T20:01:01.000Z'),
+      alertStateDir: stateDir,
+      dedupeMs: 60_000,
+    });
+
+    assert.deepEqual(first, { paged: true, suppressedCount: 0 });
+    assert.deepEqual(suppressed, { paged: false, suppressedCount: 1 });
+    assert.deepEqual(next, { paged: true, suppressedCount: 1 });
+    assert.equal(pages.length, 2);
+    assert.equal(pages[0].structured.payload.suppressedCount, 0);
+    assert.equal(pages[1].structured.payload.suppressedCount, 1);
+    assert.deepEqual(pages[1].structured.payload.accounts, accountStatus);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('AGR-06 all-capped state persistence uses atomic tmp rename', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'agr-all-capped-atomic-'));
+  const writes = [];
+  try {
+    const fsImpl = {
+      existsSync,
+      readFileSync,
+      mkdirSync,
+      writeFileSync: (target, body) => {
+        writes.push({ op: 'write', target });
+        writeFileSync(target, body);
+      },
+      renameSync: (from, to) => {
+        writes.push({ op: 'rename', from, to });
+        renameSync(from, to);
+      },
+    };
+
+    await maybePageAgrAllCapped({
+      retryAfter: '2026-06-20T21:15:00.000Z',
+      deliverAlertFn: async () => {},
+      now: Date.parse('2026-06-20T20:00:00.000Z'),
+      alertStateDir: stateDir,
+      fsImpl,
+    });
+
+    assert.match(writes[0].target, /agr-all-capped\.json\.tmp-/);
+    assert.equal(writes[1].op, 'rename');
+    assert.match(writes[1].from, /agr-all-capped\.json\.tmp-/);
+    assert.equal(writes[1].to, join(stateDir, 'agr-all-capped.json'));
+    assert.equal(JSON.parse(readFileSync(join(stateDir, 'agr-all-capped.json'), 'utf8')).suppressedCount, 0);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('AGR-06 all-capped page payload schema is stable', () => {
+  assert.deepEqual(
+    buildAgrAllCappedPagePayload({
+      retryAfter: '2026-06-20T21:15:00.000Z',
+      suppressedCount: 2,
+      accountStatus: [{ accountId: 'acct-a', eligible: false, retryAfter: '2026-06-20T21:15:00.000Z' }],
+    }),
+    {
+      schemaVersion: 1,
+      event: 'agr_all_capped',
+      severity: 'page',
+      reviewerModel: 'gemini',
+      runtime: 'antigravity',
+      retryAfter: '2026-06-20T21:15:00.000Z',
+      suppressedCount: 2,
+      accounts: [{ accountId: 'acct-a', eligible: false, retryAfter: '2026-06-20T21:15:00.000Z' }],
+    },
+  );
 });
 
 test('Antigravity all-capped hold message is classified as quota-exhausted', () => {

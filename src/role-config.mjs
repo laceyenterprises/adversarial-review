@@ -300,10 +300,10 @@ export function resolveDefaultReviewer({
   return route;
 }
 
-// resolveGeminiReviewerMode — returns the gemini always-on-third-reviewer
+// resolveGeminiReviewerMode — returns the gemini circuit-breaker
 // selection mode (`off` | `fallback` | `always-on`) through the same file→env
-// cascade as the role pins. Default is `always-on` (operator decision). The
-// loader enforces the enum allowlist before this function sees the value.
+// cascade as the role pins. Default is `off`; activation is an operator step.
+// The loader enforces the enum allowlist before this function sees the value.
 export function resolveGeminiReviewerMode({
   env = process.env,
   topPath,
@@ -317,7 +317,7 @@ export function resolveGeminiReviewerMode({
     loaderImpl,
     contextKey: 'reviewer.gemini.mode',
   });
-  return cfg.get('reviewer.gemini.mode', 'always-on');
+  return cfg.get('reviewer.gemini.mode', 'off');
 }
 
 // resolveGeminiRuntime — returns the Gemini reviewer runtime

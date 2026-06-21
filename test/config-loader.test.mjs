@@ -857,6 +857,18 @@ test('top-level config.yaml accepts mirrored op.vault and rejects unknown nested
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('op.vault'), 'OpsVault');
 
+    const envCfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_OP_VAULT: 'EnvOpsVault',
+      },
+    });
+    assert.equal(envCfg.get('op.vault'), 'EnvOpsVault');
+    assert.equal(
+      envCfg.resolutionTrace('op.vault').at(-1).source,
+      'env:AGENT_OS_OP_VAULT',
+    );
+
     const bad = join(tmp, 'bad-op.yaml');
     writeFile(bad, `
       version: 1

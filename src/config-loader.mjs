@@ -1767,6 +1767,10 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_LINEAR_ISSUE_PREFIX',
     aliases: [],
   },
+  'op.vault': {
+    canonical: 'AGENT_OS_OP_VAULT',
+    aliases: [],
+  },
   'host.name': {
     canonical: 'AGENT_OS_HOST_NAME',
     aliases: [],

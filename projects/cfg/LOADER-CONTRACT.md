@@ -112,6 +112,29 @@ filename alone. A direct call with `source: "/tmp/config.local.yaml"` remains
 strict unless it explicitly opts into `tolerateNestedUnknownLocalKeys`; enabling
 foreign top-level tolerance does not make `main_catchup` foreign.
 
+## `op` Node mirror
+
+The adversarial-review Node loader treats `op` as a known schema root, not as a
+foreign top-level local section. Python remains canonical for the global
+1Password schema, but the Node loader mirrors `op.vault` so shared checked-in
+`config.yaml` files can carry the vault used in `op://<vault>/...` references
+without crash-looping the adversarial-review watcher.
+
+Checked-in `config.yaml` accepts only `op.vault`, which defaults to
+`Cliovault`. Any other checked-in `op.*` key is an unknown nested key under a
+known strict root and must fail loud.
+
+Layer-4 `config.local.yaml` siblings may drop other nested `op.*` keys only
+when nested-local tolerance is enabled by the local-sibling layer or by an
+explicit `tolerateNestedUnknownLocalKeys` validator option. Those tolerated
+unknown nested keys are omitted from resolved values and provenance. The
+mirrored `op.vault` key is validated and exposed normally when present.
+
+Direct `validateSchema` callers do not get this local tolerance from the
+filename alone. A direct call with `source: "/tmp/config.local.yaml"` remains
+strict unless it explicitly opts into `tolerateNestedUnknownLocalKeys`; enabling
+foreign top-level tolerance does not make `op` foreign.
+
 ## Env-materialized app entries
 
 `apps` is a keyed map. The key after `apps.` is an app id, not dotted path
@@ -147,6 +170,8 @@ Python, Node, and shell CFG loaders must agree on this surface:
   `worker_pool.*` keys fail as nested unknown keys
 - checked-in `main_catchup` accepts only the mirrored daemon keys; all other
   checked-in `main_catchup.*` keys fail as nested unknown keys
+- checked-in `op` accepts only `op.vault`; all other checked-in `op.*` keys
+  fail as nested unknown keys
 - direct validator calls remain strict even when `source` names a `.local.yaml`
   file
 - Layer-4 local siblings may drop nested unknown keys under owned roots
@@ -155,6 +180,8 @@ Python, Node, and shell CFG loaders must agree on this surface:
   `worker_pool.dag.autowalk.deep_reconcile` value
 - Layer-4 local siblings may drop non-mirrored nested `main_catchup.*` keys only
   through nested-local tolerance, while preserving the mirrored daemon keys
+- Layer-4 local siblings may drop non-mirrored nested `op.*` keys only through
+  nested-local tolerance, while preserving the mirrored `op.vault` value
 - Layer-4 local siblings still reject arbitrary unknown top-level typo roots
 - tolerated unknown keys are omitted from resolved values and provenance
 - env-materialized `apps.<id>` entries receive the same schema defaults as

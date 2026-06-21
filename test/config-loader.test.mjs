@@ -844,6 +844,40 @@ test('config.local.yaml tolerates unknown nested main_catchup keys and reads mir
   }
 });
 
+test('top-level config.yaml accepts mirrored op.vault and rejects unknown nested op keys', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      op:
+        vault: OpsVault
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('op.vault'), 'OpsVault');
+
+    const bad = join(tmp, 'bad-op.yaml');
+    writeFile(bad, `
+      version: 1
+      op:
+        vault: OpsVault
+        account: example
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: bad, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'op.account');
+        assert.match(err.message, /unknown key/);
+        assert.ok(String(err.source).startsWith(bad));
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('config.local.yaml tolerates a NESTED unknown key under an owned root (no watcher crash)', () => {
   // Mirror of agent-os#1743: a nested unknown key under a root THIS reader owns
   // (here retention.policies.standard_backup, a strict nested dict) must be

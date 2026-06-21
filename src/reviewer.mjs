@@ -20,7 +20,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -67,13 +67,12 @@ import {
   resolveAdditiveOnlyScopeReview,
   reviewBodyHasScopeViolationFinding,
 } from './additive-only-scope.mjs';
-import { assertAntigravityOAuth, getAccessToken } from './auth/antigravity-bridge.mjs';
 import {
-  allCapped,
-  accountStatus,
-  markRateLimited,
-  selectAccount,
-} from './auth/antigravity-accounts.mjs';
+  AGY_KEYCHAIN_REMEDIATION,
+  AGY_KEYCHAIN_SERVICE,
+  checkAgyReviewerAuth,
+  resolveAgyAuthProbeTimeoutMs,
+} from './agy-reviewer-auth.mjs';
 import { parseQuotaResetAt } from './quota-exhaustion.mjs';
 import { resolveGeminiRuntime } from './role-config.mjs';
 import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
@@ -167,6 +166,7 @@ const CODEX_CLI = resolveCodexCliPath();
 // Like Claude/Codex, it MUST authenticate via OAuth (~/.gemini/oauth_creds.json);
 // GEMINI_API_KEY / GOOGLE_API_KEY are scrubbed from the env before invoking.
 const GEMINI_CLI = resolveGeminiCliPath();
+const AGY_CLI = resolveAgyCliPath();
 
 // OPENAI_API_KEY is stripped from env so Codex cannot fall back to API-key auth.
 
@@ -193,6 +193,10 @@ function resolveCodexCliPath(env = process.env) {
 
 function resolveGeminiCliPath(env = process.env) {
   return env.GEMINI_CLI_PATH || env.GEMINI_CLI || findOnPath('gemini', env.PATH) || 'gemini';
+}
+
+function resolveAgyCliPath(env = process.env) {
+  return env.AGY_CLI_PATH || env.AGY_CLI || findOnPath('agy', env.PATH) || 'agy';
 }
 
 function resolveAcpxCliPath({ env = process.env, preferLocalAcpx = false } = {}) {
@@ -419,20 +423,23 @@ async function assertGeminiOAuth(env = process.env) {
   assertGeminiAuthReadable(env);
 }
 
-async function assertGeminiAntigravityOAuth({
-  selectAccountImpl = selectAccount,
-  assertAntigravityOAuthImpl = assertAntigravityOAuth,
+async function assertAgyReviewerAuth({
+  agyCli = AGY_CLI,
+  env = process.env,
+  checkAuthImpl = checkAgyReviewerAuth,
+  timeoutMs = resolveAgyAuthProbeTimeoutMs(env),
 } = {}) {
-  const accountId = selectAccountImpl();
-  if (!accountId) {
-    throw new OAuthError('gemini', 'no Antigravity account is available');
+  const result = await checkAuthImpl({ agyCli, env, timeoutMs });
+  if (!result?.ok) {
+    const reason = result?.reason || 'agy-probe-failed';
+    const detail = result?.detail ? `: ${result.detail}` : '';
+    const remediation = result?.remediation || AGY_KEYCHAIN_REMEDIATION;
+    throw new OAuthError(
+      'gemini',
+      `Antigravity agy auth failed (${reason})${detail}. ${remediation}`
+    );
   }
-  try {
-    assertAntigravityOAuthImpl(accountId);
-  } catch (err) {
-    throw new OAuthError('gemini', err?.message || String(err));
-  }
-  return accountId;
+  return result;
 }
 
 /**
@@ -2285,6 +2292,10 @@ function buildGeminiReviewArgs({ model }) {
   return ['-m', model, '-o', 'text', '--prompt', ''];
 }
 
+function buildAgyReviewArgs({ model }) {
+  return ['--print', '-m', model];
+}
+
 function isRetryableGeminiSubprocessError(err) {
   const detail = buildGhErrorDetail(err);
   return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain|tls)\b/.test(detail)
@@ -2303,11 +2314,6 @@ function isRetryableGeminiSubprocessError(err) {
     || detail.includes('rate limit');
 }
 
-function isAntigravityRateLimitOrAuthFailure(err) {
-  const msg = `${err?.message || ''}\n${err?.stdout || ''}\n${err?.stderr || ''}`;
-  return /401|unauthorized|oauth|login required|not logged in|429|quota|resource_exhausted|rate limit/i.test(msg);
-}
-
 function normalizeRetryAfterHint(value, nowMs = Date.now()) {
   const raw = String(value || '').trim();
   if (!raw) return null;
@@ -2323,16 +2329,6 @@ function retryAfterFromGeminiFailure(err) {
   const explicit = normalizeRetryAfterHint(msg.match(/\bretry-after[:=]\s*([^\r\n;]+)/i)?.[1]);
   const parsed = parseQuotaResetAt(msg);
   return explicit || parsed || new Date(Date.now() + 15 * 60 * 1000).toISOString();
-}
-
-function antigravityQuotaHoldDecision({ retryAfter }) {
-  const retryAfterMs = Date.parse(retryAfter);
-  return {
-    hold: true,
-    waitUntilMs: Number.isFinite(retryAfterMs) ? retryAfterMs : null,
-    retryAfter,
-    source: 'antigravity-all-capped',
-  };
 }
 
 function formatAntigravityQuotaHoldMessage(retryAfter) {
@@ -2375,29 +2371,6 @@ function resolveGeminiRuntimeForReview(resolveGeminiRuntimeImpl, log = console) 
   }
 }
 
-function materializeAntigravityGeminiOAuthEnv({
-  env,
-  accountId,
-  accessToken,
-  tmpRoot = tmpdir(),
-} = {}) {
-  const home = mkdtempSync(join(tmpRoot, 'gemini-antigravity-reviewer-'));
-  const geminiDir = join(home, '.gemini');
-  mkdirSync(geminiDir, { recursive: true, mode: 0o700 });
-  const credsPath = join(geminiDir, 'oauth_creds.json');
-  writeFileSync(credsPath, `${JSON.stringify({ access_token: accessToken }, null, 2)}\n`, { mode: 0o600 });
-  return {
-    env: {
-      ...env,
-      HOME: home,
-      GEMINI_AUTH_PATH: credsPath,
-      GEMINI_OAUTH_ACCESS_TOKEN: accessToken,
-      GEMINI_ANTIGRAVITY_ACCOUNT: accountId,
-    },
-    cleanup: () => rmSync(home, { recursive: true, force: true }),
-  };
-}
-
 async function spawnGeminiReview({
   geminiCli = GEMINI_CLI,
   prompt,
@@ -2422,6 +2395,29 @@ async function spawnGeminiReview({
   );
 }
 
+async function spawnAgyReview({
+  agyCli = AGY_CLI,
+  prompt,
+  model = resolveGeminiReviewerModel(),
+  env,
+  cwd = process.cwd(),
+  timeout = resolveReviewerTimeoutMs(env),
+  maxBuffer = 10 * 1024 * 1024,
+  spawnWithInputImpl = spawnWithInput,
+}) {
+  return spawnWithInputImpl(
+    agyCli,
+    buildAgyReviewArgs({ model }),
+    {
+      env,
+      cwd,
+      input: prompt,
+      timeout,
+      maxBuffer,
+    },
+  );
+}
+
 /**
  * Run adversarial review using the native Gemini CLI (OAuth only).
  * GEMINI_API_KEY / GOOGLE_API_KEY are scrubbed from the env so Gemini uses
@@ -2431,16 +2427,10 @@ async function spawnGeminiReview({
 async function reviewWithGemini(diff, extraContext = '', {
   promptStage = 'first',
   assertOAuthImpl = assertGeminiOAuth,
-  assertAntigravityOAuthImpl = assertGeminiAntigravityOAuth,
   spawnGeminiReviewImpl = spawnGeminiReview,
+  assertAgyAuthImpl = assertAgyReviewerAuth,
+  spawnAgyReviewImpl = spawnAgyReview,
   resolveGeminiRuntimeImpl = resolveGeminiRuntime,
-  selectAntigravityAccountImpl = selectAccount,
-  getAntigravityAccessTokenImpl = getAccessToken,
-  markAntigravityRateLimitedImpl = markRateLimited,
-  allAntigravityCappedImpl = allCapped,
-  accountStatusImpl = accountStatus,
-  deliverAgrAllCappedAlertImpl = defaultDeliverAlert,
-  pageAgrAllCappedImpl = maybePageAgrAllCapped,
   retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
   sleepImpl = sleep,
   log = console,
@@ -2449,55 +2439,52 @@ async function reviewWithGemini(diff, extraContext = '', {
   if (runtime !== 'cli' && runtime !== 'antigravity') {
     throw new Error(`Unsupported Gemini runtime: ${runtime}`);
   }
+
+  // Strip API keys (incl. GEMINI_API_KEY / GOOGLE_API_KEY) before any Gemini
+  // subprocess probe or review spawn so the runtime exercises OAuth only.
+  const { env } = scrubOAuthFallbackEnv({
+    ...process.env,
+    HOME: process.env.HOME || homedir(),
+  });
   console.error('[reviewWithGemini] asserting OAuth...');
-  const assertedAccountId = runtime === 'antigravity'
-    ? await assertAntigravityOAuthImpl({ selectAccountImpl: selectAntigravityAccountImpl })
-    : await assertOAuthImpl();
+  if (runtime === 'antigravity') {
+    await assertAgyAuthImpl({ agyCli: AGY_CLI, env });
+  } else {
+    await assertOAuthImpl();
+  }
   console.error('[reviewWithGemini] OAuth OK');
 
   const promptPrefix = buildReviewerPromptPrefix({ stage: promptStage });
   const prompt = `${promptPrefix}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
   const model = resolveGeminiReviewerModel();
 
-  // Strip API keys (incl. GEMINI_API_KEY / GOOGLE_API_KEY) so the gemini CLI
-  // falls through to OAuth. Pin HOME so it reads the same oauth_creds.json
-  // asserted above.
-  const { env } = scrubOAuthFallbackEnv({
-    ...process.env,
-    HOME: process.env.HOME || homedir(),
-  });
-
   let stdout = '';
   let stderr = '';
   try {
-    console.error(`[reviewWithGemini] invoking native Gemini CLI (model=${model}, runtime=${runtime})`);
-    const invoke = (invokeEnv) => spawnGeminiReviewImpl({
-      geminiCli: GEMINI_CLI,
-      prompt,
-      model,
-      env: invokeEnv,
-      cwd: process.cwd(),
-      timeout: resolveReviewerTimeoutMs(invokeEnv),
-      maxBuffer: 10 * 1024 * 1024,
-    });
+    console.error(`[reviewWithGemini] invoking Gemini reviewer CLI (model=${model}, runtime=${runtime})`);
     const result = runtime === 'antigravity'
-      ? await invokeGeminiWithAntigravity({
-        env,
-        assertedAccountId,
-        invoke,
-        getAccessTokenImpl: getAntigravityAccessTokenImpl,
-        selectAccountImpl: selectAntigravityAccountImpl,
-        markRateLimitedImpl: markAntigravityRateLimitedImpl,
-        allCappedImpl: allAntigravityCappedImpl,
-        accountStatusImpl,
-        deliverAllCappedAlertImpl: deliverAgrAllCappedAlertImpl,
-        pageAllCappedImpl: pageAgrAllCappedImpl,
-        retryDelaysMs,
-        sleepImpl,
-        log,
-      })
+      ? await withGeminiSubprocessRetry(
+        () => spawnAgyReviewImpl({
+          agyCli: AGY_CLI,
+          prompt,
+          model,
+          env,
+          cwd: process.cwd(),
+          timeout: resolveReviewerTimeoutMs(env),
+          maxBuffer: 10 * 1024 * 1024,
+        }),
+        { retryDelaysMs, sleepImpl },
+      )
       : await withGeminiSubprocessRetry(
-        () => invoke(env),
+        () => spawnGeminiReviewImpl({
+          geminiCli: GEMINI_CLI,
+          prompt,
+          model,
+          env,
+          cwd: process.cwd(),
+          timeout: resolveReviewerTimeoutMs(env),
+          maxBuffer: 10 * 1024 * 1024,
+        }),
         { retryDelaysMs, sleepImpl },
       );
     if (result?.quotaHoldDecision) {
@@ -2528,93 +2515,6 @@ async function reviewWithGemini(diff, extraContext = '', {
   }
 
   return { reviewText: combined, tokenUsage: null };
-}
-
-async function invokeGeminiWithAntigravity({
-  env,
-  assertedAccountId,
-  invoke,
-  getAccessTokenImpl,
-  selectAccountImpl,
-  markRateLimitedImpl,
-  allCappedImpl,
-  accountStatusImpl = null,
-  deliverAllCappedAlertImpl = defaultDeliverAlert,
-  pageAllCappedImpl = maybePageAgrAllCapped,
-  retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
-  sleepImpl = sleep,
-  log = console,
-  materializeOAuthEnvImpl = materializeAntigravityGeminiOAuthEnv,
-} = {}) {
-  let accountId = assertedAccountId || selectAccountImpl();
-  if (!accountId) {
-    const capped = allCappedImpl();
-    if (capped?.allCapped) {
-      emitAgrAccountEvent(log, {
-        event: 'agr_all_capped',
-        retryAfter: capped.retryAfter || null,
-      });
-      await pageAllCappedImpl({
-        retryAfter: capped.retryAfter || null,
-        accountStatus: accountStatusImpl?.() || null,
-        deliverAlertFn: deliverAllCappedAlertImpl,
-        log,
-      });
-      return { quotaHoldDecision: antigravityQuotaHoldDecision({ retryAfter: capped.retryAfter }) };
-    }
-    throw new OAuthError('gemini', 'no Antigravity account is available');
-  }
-
-  const attemptedAccounts = new Set();
-  while (accountId && !attemptedAccounts.has(accountId)) {
-    attemptedAccounts.add(accountId);
-    emitAgrAccountEvent(log, {
-      event: 'agr_account_selected',
-      accountId,
-    });
-    const accessToken = await getAccessTokenImpl(accountId);
-    const materialized = materializeOAuthEnvImpl({ env, accountId, accessToken });
-    try {
-      return await withGeminiSubprocessRetry(
-        () => invoke(materialized.env),
-        {
-          retryDelaysMs,
-          sleepImpl,
-          log,
-          isRetryableError: (err) => isRetryableGeminiSubprocessError(err) && !isAntigravityRateLimitOrAuthFailure(err),
-        },
-      );
-    } catch (err) {
-      if (!isAntigravityRateLimitOrAuthFailure(err)) throw err;
-      const retryAfter = retryAfterFromGeminiFailure(err);
-      const rateLimited = markRateLimitedImpl(accountId, retryAfter) || { accountId, retryAfter };
-      emitAgrAccountEvent(log, {
-        event: 'agr_account_rate_limited',
-        accountId: rateLimited.accountId || accountId,
-        retryAfter: rateLimited.retryAfter || retryAfter,
-      });
-      const capped = allCappedImpl();
-      if (capped?.allCapped) {
-        emitAgrAccountEvent(log, {
-          event: 'agr_all_capped',
-          retryAfter: capped.retryAfter || null,
-        });
-        await pageAllCappedImpl({
-          retryAfter: capped.retryAfter || null,
-          accountStatus: accountStatusImpl?.() || null,
-          deliverAlertFn: deliverAllCappedAlertImpl,
-          log,
-        });
-        return { quotaHoldDecision: antigravityQuotaHoldDecision({ retryAfter: capped.retryAfter }) };
-      }
-      const nextAccountId = selectAccountImpl();
-      if (!nextAccountId || attemptedAccounts.has(nextAccountId)) throw err;
-      accountId = nextAccountId;
-    } finally {
-      materialized.cleanup?.();
-    }
-  }
-  throw new Error('Gemini Antigravity invocation exhausted retry budget');
 }
 
 // ── Reviewer-model selection ──────────────────────────────────────────────────
@@ -3468,26 +3368,29 @@ const __test__ = {
   postGitHubReview,
   spawnCodexReview,
   resolveGeminiCliPath,
+  resolveAgyCliPath,
   resolveGeminiOAuthCredsPath,
   assertGeminiOAuth,
-  assertGeminiAntigravityOAuth,
+  assertAgyReviewerAuth,
+  checkAgyReviewerAuth,
+  resolveAgyAuthProbeTimeoutMs,
+  AGY_KEYCHAIN_SERVICE,
+  AGY_KEYCHAIN_REMEDIATION,
   resolveGeminiRuntime,
   resolveGeminiReviewerModel,
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
+  buildAgyReviewArgs,
   isRetryableGeminiSubprocessError,
-  isAntigravityRateLimitOrAuthFailure,
   retryAfterFromGeminiFailure,
   resolveGeminiRuntimeForReview,
-  materializeAntigravityGeminiOAuthEnv,
   emitAgrAccountEvent,
   buildAgrAllCappedPagePayload,
   formatAgrAllCappedPageText,
   maybePageAgrAllCapped,
-  antigravityQuotaHoldDecision,
   formatAntigravityQuotaHoldMessage,
-  invokeGeminiWithAntigravity,
   spawnGeminiReview,
+  spawnAgyReview,
   reviewWithGemini,
   dispatchReviewerModel,
   formatAdvisoryFindingsContext,
@@ -3515,6 +3418,7 @@ export {
   CLAUDE_CLI,
   CODEX_CLI,
   GEMINI_CLI,
+  AGY_CLI,
   assertClaudeOAuth,
   assertCodexOAuth,
   sanitizeCodexReviewPayload,

@@ -1,21 +1,37 @@
-# Antigravity Gemini Reviewer OAuth Bridge
+# Antigravity Gemini Reviewer Runtime
 
-This runbook covers the AGR-01 authentication bridge and the AGR-04 Gemini
-reviewer runtime/account-pool configuration. The bridge creates and validates
-local Antigravity OAuth credentials; AGR-04 lets operators select the
-Antigravity Gemini runtime and declare the ordered account pool it may use.
+This runbook covers the Antigravity Gemini reviewer runtime. The live reviewer
+path now delegates Antigravity auth and quota behavior to the `agy` CLI, which
+uses the per-user macOS keychain item `Gemini Safe Storage`. The older AGR-01
+file-backed OAuth bridge remains documented below only for legacy credential
+maintenance; `reviewWithGemini(runtime=antigravity)` no longer selects bridge
+accounts, injects per-account access tokens, marks rate limits, pages
+all-capped account pools, or emits AGR-06 account telemetry.
 
 ## Scope
 
 - `bin/agr-auth.mjs` is the operator CLI.
 - `src/auth/antigravity-bridge.mjs` owns PKCE login, refresh-token storage,
-  access-token refresh, and credential validation.
+  access-token refresh, and credential validation for the legacy file-backed
+  bridge only.
 - `reviewer.gemini.runtime` selects the Gemini reviewer runtime.
-- `reviewer.gemini.antigravity.accounts[]` declares the ordered Antigravity
-  account pool for the Gemini reviewer.
+- `reviewer.gemini.runtime: antigravity` invokes `agy --print -m <model>` and
+  feeds the review prompt on stdin.
+- `src/agy-reviewer-auth.mjs` owns the fail-closed pre-flight: first
+  `security find-generic-password -s "Gemini Safe Storage"`, then `agy models`.
+  Both probes run with the same OAuth-scrubbed env used for the review spawn,
+  so `GEMINI_API_KEY` and `GOOGLE_API_KEY` cannot satisfy the probe. The
+  default probe timeout is 5s. Timeout-shaped keychain probe failures and
+  transient `agy models` transport failures are retried with bounded backoff
+  before surfacing an OAuth failure; definitive missing-keychain and
+  non-transient probe failures still fail closed immediately.
+- Quota and rate-limit handling for the live Antigravity reviewer is whatever
+  `agy` returns to the subprocess. The old bridge-level hold decision,
+  all-capped page, and per-account rate-limit marking are retired for this
+  runtime path.
 - Credential validity is asserted by direct JSON file read, schema validation,
-  and file-mode checks. The bridge does not call `agy`, macOS Keychain, or any
-  Antigravity CLI probe.
+  and file-mode checks only when an operator explicitly uses the legacy bridge
+  CLI. The live reviewer path does not consume these files.
 
 ## Configuration
 
@@ -41,7 +57,7 @@ export GEMINI_ANTIGRAVITY_BRIDGE_DIR=/path/to/private/bridge-dir
 The directory must be mode `0700`. Credential files must be mode `0600`.
 Reads reject looser permissions before parsing credential JSON.
 
-### Runtime Selection & Account Pool
+### Runtime Selection
 
 The Gemini reviewer defaults to the direct Gemini CLI runtime:
 
@@ -51,41 +67,46 @@ reviewer:
     runtime: cli
 ```
 
-Select the Antigravity runtime with at least one ordered account entry:
+Select the Antigravity runtime:
 
 ```yaml
 reviewer:
   gemini:
     runtime: antigravity
-    antigravity:
-      accounts:
-        - id: primary
-          tokenFile: op://Cliovault/GEMINI_ANTIGRAVITY_PRIMARY/token
-        - id: backup
-          tokenFile: /Users/airlock/.gemini/antigravity-bridge/backup.json
 ```
 
-`tokenFile` may be a literal filesystem path or an `op://` secret reference
-resolved by the launch wrapper. It is validated as metadata by this module; do
-not inline token contents in YAML or env values.
+Before spawning a review, the runtime checks that the `Gemini Safe Storage`
+keychain item exists and that `agy models` returns non-empty stdout. Transient
+timeouts and `agy models` network/transport blips are retried before
+escalation. The keychain existence probe is only the fast-path for a truly
+absent item; `agy models` is the authoritative readability/ACL check. If the
+keychain item is definitively missing, `agy models` returns empty output, or a
+non-transient probe failure persists, the reviewer fails closed with an OAuth
+error and remediation text matched to the failed probe class.
+
+Probe knobs:
+
+```bash
+export AGY_AUTH_PROBE_TIMEOUT_MS=5000
+export AGY_AUTH_PROBE_MAX_ATTEMPTS=3
+export AGY_AUTH_PROBE_RETRY_BACKOFF_MS=250
+```
 
 Env aliases:
 
 ```bash
 export AGENT_OS_REVIEWER_GEMINI_RUNTIME=antigravity
-export AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_ACCOUNTS='[{"id":"primary","tokenFile":"op://Cliovault/GEMINI_ANTIGRAVITY_PRIMARY/token"}]'
 ```
 
 Legacy aliases are also accepted:
 
 ```bash
 export ADVERSARIAL_REVIEW_GEMINI_RUNTIME=antigravity
-export ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_ACCOUNTS='[{"id":"primary","tokenFile":"/path/to/oauth.json"}]'
 ```
 
-Watcher boot fails closed when `runtime: antigravity` has no account entries:
-`reviewer.gemini.runtime=antigravity requires at least one
-reviewer.gemini.antigravity.accounts[] entry`.
+The historical `reviewer.gemini.antigravity.accounts[]` config remains parsed
+for compatibility with older modules, but the live `agy` runtime does not use
+it for reviewer dispatch.
 
 ## Login
 
@@ -143,6 +164,6 @@ that account id. Do not hand-edit refresh tokens.
 
 ## Current Non-Goals
 
-- No multi-account scheduler or rotation policy is enabled by AGR-04; the
-  configured list is an ordered account pool.
+- No multi-account scheduler, rotation policy, all-capped hold decision, or
+  AGR-06 account telemetry is enabled for the live `agy` runtime.
 - No OAuth client secrets are committed to the repository.

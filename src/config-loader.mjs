@@ -760,13 +760,20 @@ function schemaV1() {
             __type: TYPE_STRING,
             __default: 'laceyenterprises',
           },
-          // OSR-01 follow-on (agent-os PR #1216): the Python + YAML schemas
-          // accept `github.workspace_email_domain` as a nullable string. The
+          // OSR-05: the Python + YAML schemas accept
+          // `github.org_email_domain` as a nullable string. The
           // Node loader must accept the same key or the watcher crash-loops
           // at startup with `unknown key (strict schema)` — 4th occurrence of
           // the CFG-01 multi-loader drift bug. Keep in lockstep with
           // `platform/agent-os-config/src/agent_os_config/__init__.py`
-          // `workspace_email_domain` entry under `github`.
+          // `org_email_domain` entry under `github`.
+          org_email_domain: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+          },
+          // Compatibility for configs written before OSR-05 settled on the
+          // `org_email_domain` name.
           workspace_email_domain: {
             __type: TYPE_STRING,
             __default: null,
@@ -1130,12 +1137,8 @@ function schemaV1() {
               worker_identity_emails: {
                 __type: TYPE_LIST,
                 __item: { __type: TYPE_STRING },
-                __default: [
-                  'claude-code@laceyenterprises.com',
-                  'clio-agent@laceyenterprises.com',
-                  'codex@laceyenterprises.com',
-                  'merge-agent@laceyenterprises.com',
-                ],
+                __default: null,
+                __nullable: true,
               },
             },
           },
@@ -1703,9 +1706,13 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_OPERATOR_FULL_NAME',
     aliases: [],
   },
+  'github.org_email_domain': {
+    canonical: 'AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN',
+    aliases: [['AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN', identity]],
+  },
   'github.workspace_email_domain': {
     canonical: 'AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN',
-    aliases: [['AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN', identity]],
+    aliases: [],
   },
   'linear.team_name': {
     canonical: 'AGENT_OS_LINEAR_TEAM_NAME',

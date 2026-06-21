@@ -324,14 +324,14 @@ test('linear issue prefix and session ledger database name reject invalid shapes
   }
 });
 
-test('OSR-05 operator and workspace identity load through strict Node schema', () => {
+test('OSR-05 operator and org identity load through strict Node schema', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
     writeFile(top, `
       version: 1
       github:
-        workspace_email_domain: cfg.example
+        org_email_domain: cfg.example
       operator:
         email: operator@example.com
         full_name: Example Operator
@@ -340,7 +340,7 @@ test('OSR-05 operator and workspace identity load through strict Node schema', (
         issue_prefix: EX
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
-    assert.equal(cfg.get('github.workspace_email_domain'), 'cfg.example');
+    assert.equal(cfg.get('github.org_email_domain'), 'cfg.example');
     assert.equal(cfg.get('operator.email'), 'operator@example.com');
     assert.equal(cfg.get('operator.full_name'), 'Example Operator');
     assert.equal(cfg.get('linear.team_name'), 'ExampleTeam');
@@ -349,19 +349,19 @@ test('OSR-05 operator and workspace identity load through strict Node schema', (
     const envCfg = loadConfig({
       topPath: top,
       env: {
-        AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN: 'ops.example',
+        AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN: 'ops.example',
         AGENT_OS_OPERATOR_EMAIL: 'env-operator@example.com',
         AGENT_OS_OPERATOR_FULL_NAME: 'Env Operator',
         AGENT_OS_LINEAR_TEAM_NAME: 'EnvTeam',
       },
     });
-    assert.equal(envCfg.get('github.workspace_email_domain'), 'ops.example');
+    assert.equal(envCfg.get('github.org_email_domain'), 'ops.example');
     assert.equal(envCfg.get('operator.email'), 'env-operator@example.com');
     assert.equal(envCfg.get('operator.full_name'), 'Env Operator');
     assert.equal(envCfg.get('linear.team_name'), 'EnvTeam');
     assert.equal(
-      envCfg.resolutionTrace('github.workspace_email_domain').at(-1).source,
-      'env:AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN',
+      envCfg.resolutionTrace('github.org_email_domain').at(-1).source,
+      'env:AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN',
     );
     assert.equal(
       envCfg.resolutionTrace('operator.email').at(-1).source,
@@ -378,12 +378,45 @@ test('OSR-05 operator and workspace identity load through strict Node schema', (
 
     const legacyEnvCfg = loadConfig({
       topPath: top,
-      env: { AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN: 'legacy.example' },
+      env: { AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN: 'legacy.example' },
     });
-    assert.equal(legacyEnvCfg.get('github.workspace_email_domain'), 'legacy.example');
+    assert.equal(legacyEnvCfg.get('github.org_email_domain'), 'legacy.example');
     assert.equal(
-      legacyEnvCfg.resolutionTrace('github.workspace_email_domain').at(-1).source,
-      'env:AGENT_OS_GITHUB_ORG_EMAIL_DOMAIN',
+      legacyEnvCfg.resolutionTrace('github.org_email_domain').at(-1).source,
+      'env:AGENT_OS_GITHUB_WORKSPACE_EMAIL_DOMAIN',
+    );
+
+    const legacyConfig = join(tmp, 'legacy-config.yaml');
+    writeFile(legacyConfig, `
+      version: 1
+      github:
+        workspace_email_domain: legacy-config.example
+    `);
+    const legacyCfg = loadConfig({ topPath: legacyConfig, env: {} });
+    assert.equal(legacyCfg.get('github.workspace_email_domain'), 'legacy-config.example');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('OSR-05 Linear team env override flows through strict Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      linear:
+        team_name: ConfigTeam
+    `);
+    const cfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_LINEAR_TEAM_NAME: 'AcmeCorp' },
+    });
+
+    assert.equal(cfg.get('linear.team_name'), 'AcmeCorp');
+    assert.equal(
+      cfg.resolutionTrace('linear.team_name').at(-1).source,
+      'env:AGENT_OS_LINEAR_TEAM_NAME',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -1189,12 +1222,7 @@ test('checked-in top-level sentinel detector config loads through strict Node sc
 
   assert.equal(cfg.get('sentinel.spec_drift.cycle_interval_seconds'), 86400);
   assert.equal(cfg.get('sentinel.deploy_checkout.repo_path'), '/Users/airlock/agent-os');
-  assert.deepEqual(cfg.get('sentinel.deploy_checkout.worker_identity_emails'), [
-    'claude-code@laceyenterprises.com',
-    'clio-agent@laceyenterprises.com',
-    'codex@laceyenterprises.com',
-    'merge-agent@laceyenterprises.com',
-  ]);
+  assert.equal(cfg.get('sentinel.deploy_checkout.worker_identity_emails'), null);
   assert.equal(cfg.get('sentinel.codex_compaction.rate_alarm_per_hour'), 3);
   assert.deepEqual(cfg.get('sentinel.convergence_stall.observed_worker_classes'), [
     'codex',

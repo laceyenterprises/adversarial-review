@@ -4596,6 +4596,71 @@ test('health.worker.terminal topic event completes an HQ remediation worker with
   assert.equal(existsSync(spawned.jobPath), false);
 });
 
+test('health.worker.terminal succeeded topic waits for durable reply before treating the worker as exited', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 730, linearTicketId: 'LAC-2730' });
+  const hqRoot = path.join(rootDir, 'hq');
+  const workspaceDir = path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId);
+  const promptPath = path.join(workspaceDir, '.adversarial-follow-up', 'prompt.md');
+  mkdirSync(path.dirname(promptPath), { recursive: true });
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+  const { replyPath } = prepareCanonicalReply(rootDir, claimed.job, {
+    hqRoot,
+    launchRequestId: 'lrq_apc05_topic_success_unflushed',
+  });
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      dispatchMode: 'hq',
+      completionShape: 'branch-push',
+      launchRequestId: 'lrq_apc05_topic_success_unflushed',
+      dispatchId: 'dispatch_apc05_topic_success_unflushed',
+      hqRoot,
+      workspaceDir,
+      promptPath,
+      replyPath,
+      outputPath: null,
+      logPath: null,
+    },
+  });
+
+  let statusPolls = 0;
+  const result = await withHqRootEnv(hqRoot, async () => handleRemediationTelemetryEvent({
+    rootDir,
+    topic: 'health.worker.terminal.lrq_apc05_topic_success_unflushed',
+    event: {
+      lrq: 'lrq_apc05_topic_success_unflushed',
+      status: 'succeeded',
+    },
+    now: () => '2026-04-21T10:25:00.000Z',
+    execFileImpl: async (command, args) => {
+      if (command === 'hq' && args[0] === 'dispatch' && args[1] === 'status') {
+        statusPolls += 1;
+        return {
+          stdout: JSON.stringify({
+            status: 'running',
+            health: 'healthy',
+            workspacePath: spawned.job.remediationWorker.workspaceDir,
+          }),
+          stderr: '',
+        };
+      }
+      throw new Error(`unexpected poll command: ${command} ${args.join(' ')}`);
+    },
+    resolvePRLifecycleImpl: async () => null,
+  }));
+
+  assert.equal(statusPolls, 1, 'missing reply must fall back to canonical HQ status polling');
+  assert.equal(result.action, 'active');
+  assert.equal(result.reason, 'hq-dispatch-running');
+  assert.equal(existsSync(spawned.jobPath), true);
+  assert.equal(existsSync(replyPath), false);
+});
+
 test('health.worker.terminal failed topic event polls HQ status when failureClass is absent', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, { prNumber: 720, linearTicketId: 'LAC-2720' });
@@ -4702,6 +4767,69 @@ test('health.worker.terminal topic event skips when the reconcile claim is held'
   assert.equal(result.action, 'skipped');
   assert.equal(result.reason, 'reconcile-claim-held');
   assert.equal(existsSync(spawned.jobPath), true);
+});
+
+test('health.worker.terminal topic event reclaims corrupt reconcile claim locks', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 731 });
+  const hqRoot = path.join(rootDir, 'hq');
+  const workspaceDir = path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId);
+  const promptPath = path.join(workspaceDir, '.adversarial-follow-up', 'prompt.md');
+  mkdirSync(path.dirname(promptPath), { recursive: true });
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+  const { replyPath } = prepareCanonicalReply(rootDir, claimed.job, {
+    hqRoot,
+    launchRequestId: 'lrq_apc05_corrupt_claim',
+  });
+  writeValidReply(replyPath, claimed.job, {
+    reReview: { requested: true, reason: 'Recovered despite a corrupt reconcile claim.' },
+  });
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      dispatchMode: 'hq',
+      completionShape: 'branch-push',
+      launchRequestId: 'lrq_apc05_corrupt_claim',
+      dispatchId: 'dispatch_apc05_corrupt_claim',
+      hqRoot,
+      workspaceDir,
+      promptPath,
+      replyPath,
+      outputPath: null,
+      logPath: null,
+    },
+  });
+  writeFileSync(`${spawned.jobPath}.reconcile.lock`, '{', 'utf8');
+
+  const result = await withHqRootEnv(hqRoot, async () => handleRemediationTelemetryEvent({
+    rootDir,
+    topic: 'health.worker.terminal.lrq_apc05_corrupt_claim',
+    event: {
+      lrq: 'lrq_apc05_corrupt_claim',
+      status: 'succeeded',
+    },
+    now: () => '2026-04-21T10:25:00.000Z',
+    execFileImpl: async (command, args) => {
+      throw new Error(`unexpected poll command: ${command} ${args.join(' ')}`);
+    },
+    resolvePRLifecycleImpl: async () => null,
+    requestReviewRereviewImpl: () => ({
+      triggered: true,
+      status: 'pending',
+      reason: 'review-status-reset',
+      reviewRow: { repo: spawned.job.repo, pr_number: spawned.job.prNumber, pr_state: 'open', review_status: 'pending' },
+    }),
+    auditWorkspaceForContaminationImpl: cleanContaminationAudit,
+  }));
+
+  assert.equal(result.action, 'completed');
+  assert.equal(result.job.status, 'completed');
+  assert.equal(existsSync(spawned.jobPath), false);
+  assert.equal(existsSync(`${spawned.jobPath}.reconcile.lock`), false);
 });
 
 test('reconcileFollowUpJob requeues a dead HQ remediation worker when dispatch status reports a transient failure with no reply', async () => {

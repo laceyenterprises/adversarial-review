@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -3405,9 +3405,15 @@ async function assessWorkerLivenessDetailed(job, {
   execFileImpl = execFileAsync,
   env = process.env,
   workerTerminalEvent = null,
+  workerTerminalReplyPath = null,
 } = {}) {
   const worker = job?.remediationWorker || {};
-  if (workerTerminalEvent?.status === 'succeeded' && workerTerminalEventMatches(worker, workerTerminalEvent)) {
+  if (
+    workerTerminalEvent?.status === 'succeeded'
+    && workerTerminalEventMatches(worker, workerTerminalEvent)
+    && workerTerminalReplyPath
+    && existsSync(workerTerminalReplyPath)
+  ) {
     const nowAt = parseIsoTime(now());
     const spawnedAt = parseIsoTime(worker.spawnedAt);
     const ageMs = nowAt !== null && spawnedAt !== null ? nowAt - spawnedAt : null;
@@ -3775,11 +3781,22 @@ async function reconcileFollowUpJob({
     };
   }
 
+  let paths = null;
+  let pathsError = null;
+  if (workerTerminalEvent?.status === 'succeeded' && workerTerminalEventMatches(worker, workerTerminalEvent)) {
+    try {
+      paths = buildReconciliationPaths(rootDir, job);
+    } catch (err) {
+      pathsError = err;
+    }
+  }
+
   const liveness = await assessWorkerLivenessDetailed(job, {
     now,
     isWorkerRunning,
     execFileImpl,
     workerTerminalEvent,
+    workerTerminalReplyPath: paths?.replyPath || null,
   });
   const lifecycle = await resolveJobPRLifecycleSafe({
     rootDir,
@@ -3931,9 +3948,13 @@ async function reconcileFollowUpJob({
     };
   }
 
-  let paths;
   try {
-    paths = buildReconciliationPaths(rootDir, job);
+    if (!paths && !pathsError) {
+      paths = buildReconciliationPaths(rootDir, job);
+    }
+    if (pathsError) {
+      throw pathsError;
+    }
   } catch (err) {
     const invalidPathFailure = { code: 'invalid-output-path', message: err.message };
     const { commentDelivery: invalidPathDelivery } = buildReconcileCommentDelivery({
@@ -4902,6 +4923,22 @@ function reconcileClaimPath(jobPath) {
   return `${jobPath}.reconcile.lock`;
 }
 
+function writeReconcileClaimLock(lockPath, payload) {
+  const tmpPath = `${lockPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+  try {
+    writeFileSync(tmpPath, payload, { encoding: 'utf8', flag: 'wx' });
+    linkSync(tmpPath, lockPath);
+    return true;
+  } catch (err) {
+    if (err?.code === 'EEXIST') {
+      return false;
+    }
+    throw err;
+  } finally {
+    rmSync(tmpPath, { force: true });
+  }
+}
+
 function isPidAlive(pid) {
   const numericPid = Number(pid);
   if (!Number.isInteger(numericPid) || numericPid <= 0) return false;
@@ -4917,23 +4954,23 @@ function tryAcquireFollowUpReconcileClaim({ jobPath, now = () => new Date().toIS
   const lockPath = reconcileClaimPath(jobPath);
   const claimedAt = now();
   const payload = `${JSON.stringify({ claimedAt, ownerPid })}\n`;
-  try {
-    writeFileSync(lockPath, payload, { encoding: 'utf8', flag: 'wx' });
+  if (writeReconcileClaimLock(lockPath, payload)) {
     return { acquired: true, lockPath, claimedAt };
-  } catch (err) {
-    if (err?.code !== 'EEXIST') throw err;
   }
 
   let existing = null;
+  let corruptOrInvalid = false;
   try {
     existing = JSON.parse(readFileSync(lockPath, 'utf8'));
   } catch {
-    existing = null;
+    corruptOrInvalid = true;
   }
   const claimedAtMs = Date.parse(existing?.claimedAt || '');
   const nowMs = Date.parse(claimedAt);
-  const stale = Number.isFinite(claimedAtMs) && Number.isFinite(nowMs)
-    && nowMs - claimedAtMs > FOLLOW_UP_RECONCILE_CLAIM_STALE_MS;
+  const hasValidClaimedAt = Number.isFinite(claimedAtMs);
+  const stale = corruptOrInvalid
+    || !hasValidClaimedAt
+    || (Number.isFinite(nowMs) && nowMs - claimedAtMs > FOLLOW_UP_RECONCILE_CLAIM_STALE_MS);
   if (!stale || isPidAlive(existing?.ownerPid)) {
     return {
       acquired: false,
@@ -4944,13 +4981,10 @@ function tryAcquireFollowUpReconcileClaim({ jobPath, now = () => new Date().toIS
   }
 
   rmSync(lockPath, { force: true });
-  try {
-    writeFileSync(lockPath, payload, { encoding: 'utf8', flag: 'wx' });
+  if (writeReconcileClaimLock(lockPath, payload)) {
     return { acquired: true, lockPath, claimedAt, reclaimedStale: true };
-  } catch (err) {
-    if (err?.code !== 'EEXIST') throw err;
-    return { acquired: false, lockPath, claimedAt: null, ownerPid: null };
   }
+  return { acquired: false, lockPath, claimedAt: null, ownerPid: null };
 }
 
 function releaseFollowUpReconcileClaim(claim) {

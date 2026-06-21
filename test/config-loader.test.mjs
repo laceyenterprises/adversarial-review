@@ -2108,7 +2108,7 @@ test('YAML 1.1 yes/off/on/y/n all fail', () => {
 });
 
 test('env YAML 1.1 boolean tokens fail', () => {
-  for (const bad of ['yes', 'off', 'on', 'no', 'Yes', 'OFF']) {
+  for (const bad of ['yes', 'off', 'on', 'no', 'y', 'n', 'Yes', 'OFF']) {
     const tmp = freshTmp();
     try {
       const top = join(tmp, 'config.yaml');

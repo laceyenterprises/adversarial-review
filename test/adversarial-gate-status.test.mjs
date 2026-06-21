@@ -956,11 +956,16 @@ test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot in
     }),
     maybeDispatchAmaCloserImpl: async (payload) => {
       observed = payload;
-      return { dispatched: false, reason: 'fixture' };
+      return {
+        dispatched: false,
+        reason: 'not-eligible',
+        reasons: ['blocking-findings-present', 'ci-not-green'],
+      };
     },
   });
 
   assert.equal(result.dispatched, false);
+  assert.equal(result.namedReason, 'not-eligible:blocking-findings-present');
   assert.equal(observed.reviewState.blockingFindingCount, 0);
   assert.equal(observed.reviewState.blockingFindingState, 'known');
   assert.equal(observed.reviewState.nonBlockingFindingCount, 0);
@@ -1424,4 +1429,69 @@ test('resolveMergeAgentCoexistenceForWatcher recovers AMA dispatch failures via 
   assert.deepEqual(decision.dispatchEnv, {
     AMA_OPERATOR_MERGE_AGENT_OVERRIDE: 'true',
   });
+});
+
+test('resolveMergeAgentCoexistenceForWatcher treats eligible clean AMA dispatch as terminal, not await-operator', async () => {
+  const decision = await resolveMergeAgentCoexistenceForWatcher({
+    reviewStateRow: makeReviewRow(),
+    dispatchJob: {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 53,
+      headSha: 'abc123',
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+    },
+    candidate: {
+      headSha: 'abc123',
+      mergeStateStatus: 'CLEAN',
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+    },
+    labelNames: [],
+    mergeAgentRequestEvent: null,
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 53,
+    currentRevisionRef: 'abc123',
+    logger: { log() {}, warn() {}, error() {} },
+    maybeDispatchAmaClosureForImpl: async () => ({
+      amaEnabled: true,
+      dispatched: true,
+      dispatchId: 'lrq_clean',
+      workerClass: 'codex',
+    }),
+  });
+
+  assert.equal(decision.outcome, 'ama-dispatched');
+  assert.notEqual(decision.outcome, 'await-operator');
+});
+
+test('resolveMergeAgentCoexistenceForWatcher preserves await-operator with named ineligible reason', async () => {
+  const decision = await resolveMergeAgentCoexistenceForWatcher({
+    reviewStateRow: makeReviewRow(),
+    dispatchJob: {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 53,
+      headSha: 'abc123',
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+    },
+    candidate: {
+      headSha: 'abc123',
+      mergeStateStatus: 'CLEAN',
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+    },
+    labelNames: [],
+    mergeAgentRequestEvent: null,
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 53,
+    currentRevisionRef: 'abc123',
+    logger: { log() {}, warn() {}, error() {} },
+    maybeDispatchAmaClosureForImpl: async () => ({
+      amaEnabled: true,
+      dispatched: false,
+      reason: 'not-eligible',
+      namedReason: 'not-eligible:blocking-findings-present',
+      reasons: ['blocking-findings-present'],
+    }),
+  });
+
+  assert.equal(decision.outcome, 'await-operator');
+  assert.equal(decision.amaClosureResult.namedReason, 'not-eligible:blocking-findings-present');
 });

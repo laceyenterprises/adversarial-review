@@ -12,6 +12,7 @@ import {
   isHammerRemediableEligibilityMiss,
   isInterruptedInFlightAmaCloserDispatch,
   maybeDispatchAmaCloser,
+  namedAmaNoDispatchReason,
   substituteTemplate,
 } from '../src/ama/dispatch-closer.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../src/config-loader.mjs';
@@ -211,6 +212,7 @@ test('cfg.enabled=false returns ama-disabled and never spawns hq dispatch', asyn
   });
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'ama-disabled');
+  assert.equal(result.namedReason, 'ama-disabled');
   assert.equal(exec.calls.length, 0, 'hq dispatch must not be invoked when AMA is disabled');
   assert.equal(write.captured.body, null, 'no prompt is written when AMA is disabled');
 });
@@ -237,6 +239,7 @@ test('cfg.enabled=true + ineligible returns reasons and never spawns hq dispatch
   });
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'not-eligible');
+  assert.equal(result.namedReason, 'not-eligible:risk-class-not-permitted');
   assert.ok(Array.isArray(result.reasons));
   assert.ok(result.reasons.includes('risk-class-not-permitted'));
   assert.equal(exec.calls.length, 0, 'hq dispatch must not be invoked when ineligible');
@@ -975,6 +978,15 @@ test('substituteTemplate leaves unknown placeholders alone', () => {
   assert.equal(out, 'a=k b=<<UNKNOWN>>');
 });
 
+test('namedAmaNoDispatchReason keeps not-eligible token stable and single-reason', () => {
+  assert.equal(
+    namedAmaNoDispatchReason('not-eligible', ['blocking-findings-present', 'ci-not-green']),
+    'not-eligible:blocking-findings-present',
+  );
+  assert.equal(namedAmaNoDispatchReason('not-eligible', []), 'not-eligible:unknown');
+  assert.equal(namedAmaNoDispatchReason('dispatch-failed'), 'dispatch-failed');
+});
+
 // ---------------------------------------------------------------------------
 // Helper: dispatch failure surfaces as { dispatched: false, reason: 'dispatch-failed' }
 // rather than throwing — so the watcher can fall through to merge-agent.
@@ -999,6 +1011,7 @@ test('dispatch failure returns dispatched=false, reason=dispatch-failed (caller 
   });
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'dispatch-failed');
+  assert.equal(result.namedReason, 'dispatch-failed');
   assert.ok(result.error.includes('simulated dispatch failure'));
 });
 
@@ -1277,6 +1290,7 @@ test('SSG-06: ledger merged signal resolves closer ownership as done', async (t)
   assert.equal(result.dispatched, false);
   assert.equal(result.skipMergeAgent, true);
   assert.equal(result.reason, 'merged-signal-present');
+  assert.equal(result.namedReason, 'merged-signal-present');
   assert.equal(result.mergedSignal.completion_id, 'bcmp_merged');
   assert.equal(result.mergedSignalProducerHeadSha, 'f'.repeat(40));
   assert.equal(result.mergedSignalHeadShaMatchesReviewed, false);
@@ -1519,6 +1533,7 @@ test('AMA-07 lease blocks regardless of how hq dispatch status would have respon
   });
   assert.equal(second.dispatched, false);
   assert.equal(second.reason, 'dispatch-status-unknown');
+  assert.equal(second.namedReason, 'dispatch-status-unknown');
   assert.equal(second.skipMergeAgent, true);
   const hqStatusProbes = calls.filter((args) => args[0] === 'dispatch' && args[1] === 'status');
   assert.ok(hqStatusProbes.length >= 1);
@@ -1781,6 +1796,7 @@ test('live pending lease below redispatch bound does not consume a phantom retry
 
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'lease-held');
+  assert.equal(result.namedReason, 'lease-held');
   assert.equal(result.skipMergeAgent, true);
   assert.equal(execCalled, false, 'must not launch a duplicate AMA closer while the pending lease is live');
   const record = JSON.parse(readFileSync(recordPath, 'utf8'));
@@ -1832,6 +1848,7 @@ test('genuine repeated dispatch failures at the bound are still exhausted', asyn
 
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'dispatch-retry-exhausted');
+  assert.equal(result.namedReason, 'dispatch-retry-exhausted');
   assert.equal(execCalled, false, 'must not redispatch a genuinely-exhausted closer');
 });
 

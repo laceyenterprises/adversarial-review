@@ -105,6 +105,24 @@ export function isHammerRemediableEligibilityMiss(reasons) {
   return reasons.every((reason) => HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason));
 }
 
+export function namedAmaNoDispatchReason(reason, reasons = []) {
+  if (reason === 'not-eligible') {
+    const why = Array.isArray(reasons) && reasons.length
+      ? String(reasons[0] || '').trim()
+      : '';
+    return `not-eligible:${why || 'unknown'}`;
+  }
+  return reason;
+}
+
+function noAmaDispatch(result) {
+  const reason = String(result?.reason || 'unknown');
+  return {
+    ...result,
+    namedReason: result?.namedReason || namedAmaNoDispatchReason(reason, result?.reasons),
+  };
+}
+
 /**
  * Decide whether the HAM terminal-remediation prompt (`hammer-prompt.md`) is
  * warranted for this closure, given the eligibility verdict.
@@ -628,7 +646,7 @@ function isUnknownMergedSignal(result) {
 }
 
 function retainExistingAmaCloserDispatch(existingRecord, workerClass, status) {
-  return {
+  return noAmaDispatch({
     dispatched: false,
     skipMergeAgent: true,
     reason: `existing-dispatch-${status || 'unknown'}`,
@@ -636,7 +654,7 @@ function retainExistingAmaCloserDispatch(existingRecord, workerClass, status) {
     dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
     launchRequestId: existingRecord.launchRequestId || null,
     promptPath: existingRecord.promptPath || null,
-  };
+  });
 }
 
 /**
@@ -772,7 +790,10 @@ export async function maybeDispatchAmaCloser({
   // The master gate. With no operator config, this is `false` per
   // AMA-01 schema defaults and the entire path is a no-op.
   if (!cfg?.enabled) {
-    return { dispatched: false, reason: 'ama-disabled' };
+    return noAmaDispatch({
+      dispatched: false,
+      reason: 'ama-disabled',
+    });
   }
 
   // The eligibility predicate is the second gate.
@@ -795,11 +816,11 @@ export async function maybeDispatchAmaCloser({
       && workerClassForMiss === 'hammer'
       && isHammerRemediableEligibilityMiss(verdict.reasons);
     if (!autoHammer) {
-      return {
+      return noAmaDispatch({
         dispatched: false,
         reason: 'not-eligible',
         reasons: verdict.reasons,
-      };
+      });
     }
     logger.log?.(
       `[ama-closer] auto-hammer: dispatching terminal remediation for ineligible ` +
@@ -895,7 +916,7 @@ export async function maybeDispatchAmaCloser({
     readBuildCompletionSignalForPrImpl,
   });
   if (mergedSignal?.ok) {
-    return {
+    return noAmaDispatch({
       dispatched: false,
       skipMergeAgent: true,
       reason: 'merged-signal-present',
@@ -906,7 +927,7 @@ export async function maybeDispatchAmaCloser({
       mergedSignal: mergedSignal.row,
       mergedSignalHeadShaMatchesReviewed: mergedSignal.headShaMatchesReviewed,
       mergedSignalProducerHeadSha: mergedSignal.producerHeadSha,
-    };
+    });
   }
   const mergedSignalUnknown = isUnknownMergedSignal(mergedSignal);
   const existingRecordIsReclaimableInterruption = isInterruptedInFlightAmaCloserDispatch(
@@ -992,7 +1013,7 @@ export async function maybeDispatchAmaCloser({
         lastObservedAt: dispatchContext.dispatchedAt,
         lastError: statusProbe?.error || null,
       }));
-      return {
+      return noAmaDispatch({
         dispatched: false,
         skipMergeAgent: true,
         reason: 'dispatch-status-unknown',
@@ -1000,18 +1021,18 @@ export async function maybeDispatchAmaCloser({
         dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
         launchRequestId: existingRecord.launchRequestId || null,
         promptPath: existingRecord.promptPath || null,
-      };
+      });
     }
     if (!releaseUnprovenTerminalHold && !AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
-      return { dispatched: false, reason: `dispatch-status-${status || 'unknown'}` };
+      return noAmaDispatch({ dispatched: false, reason: `dispatch-status-${status || 'unknown'}` });
     }
   } else if (existingRecordHasLivePendingInterruption) {
-    return {
+    return noAmaDispatch({
       dispatched: false,
       skipMergeAgent: true,
       reason: 'lease-held',
       existingLease: existingLeaseBeforeDispatch,
-    };
+    });
   } else if (
     existingRecord
     && Number(existingRecord.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND
@@ -1021,7 +1042,7 @@ export async function maybeDispatchAmaCloser({
     // (watcher SIGTERM'd mid-launch, e.g. a deploy bounce) is reclaimed below
     // only after the stale `pending` lease it left behind proves the owner died
     // or outlived the full hq dispatch retry loop.
-    return { dispatched: false, reason: 'dispatch-retry-exhausted' };
+    return noAmaDispatch({ dispatched: false, reason: 'dispatch-retry-exhausted' });
   }
 
   assertAmaAuditOwner({
@@ -1157,12 +1178,12 @@ export async function maybeDispatchAmaCloser({
     }
   }
   if (!leaseResult.acquired) {
-    return {
+    return noAmaDispatch({
       dispatched: false,
       skipMergeAgent: true,
       reason: 'lease-held',
       existingLease: leaseResult.existingLease,
-    };
+    });
   }
 
   // `hq dispatch` args mirror the existing merge-agent dispatch (see
@@ -1241,7 +1262,7 @@ export async function maybeDispatchAmaCloser({
         lastObservedAt: ambiguousLaunch ? dispatchContext.dispatchedAt : null,
         lastError: String(err?.stderr || err?.message || err),
       }));
-      return {
+      return noAmaDispatch({
         dispatched: false,
         skipMergeAgent: ambiguousLaunch || (
           isTransientHqDispatchError(err)
@@ -1253,7 +1274,7 @@ export async function maybeDispatchAmaCloser({
         dispatchId: parsedFailure.dispatchId || null,
         launchRequestId: parsedFailure.launchRequestId || null,
         promptPath,
-      };
+      });
     }
   }
 

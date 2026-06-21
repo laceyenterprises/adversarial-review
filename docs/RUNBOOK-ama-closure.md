@@ -522,6 +522,11 @@ When AMA is enabled, the watcher does NOT silently fall back to
 merge-agent on an ineligible PR (SPEC §4.8). The watcher logs the
 eligibility reasons and waits. The operator has two options:
 
+The parenthesized `namedReason` in this log is a stable single-token summary
+for scraping (`not-eligible:<first-reason>` for eligibility misses, otherwise
+the no-dispatch `reason`). The separate `reasons:` field remains the fuller
+diagnostic list.
+
 1. **Make AMA-eligible** — apply `operator-approved` /
    `adversarial-merge-requested` per §5 to override the failing gates.
 2. **Operator-fallback lane** — apply a fresh current-head

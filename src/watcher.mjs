@@ -126,7 +126,10 @@ import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 // the current tick. Otherwise it's a no-op and the merge-agent path
 // runs unchanged. AMA-06A/06N flip the broader coexistence semantics
 // once the closer has soaked.
-import { maybeDispatchAmaCloser } from './ama/dispatch-closer.mjs';
+import {
+  maybeDispatchAmaCloser,
+  namedAmaNoDispatchReason,
+} from './ama/dispatch-closer.mjs';
 import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import {
@@ -443,6 +446,21 @@ const DEFAULT_DAG_AUTOWALK_ON_MERGE_PER_POLL = 2;
 const DEFAULT_DAG_AUTOWALK_ON_MERGE_MAX_ATTEMPTS = 5;
 const DEFAULT_DAG_AUTOWALK_ON_MERGE_TIMEOUT_MS = 2 * 60 * 1000;
 const AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS = [250, 1_000];
+
+function withAmaDispatchMetadata(result, { amaEnabled }) {
+  if (!result || typeof result !== 'object') return result;
+  const wrapped = {
+    ...result,
+    amaEnabled: result.amaEnabled === undefined ? amaEnabled : result.amaEnabled,
+  };
+  if (wrapped.dispatched === false && !wrapped.namedReason) {
+    wrapped.namedReason = namedAmaNoDispatchReason(
+      wrapped.reason || 'unknown',
+      wrapped.reasons,
+    );
+  }
+  return wrapped;
+}
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_RETRY_MS = 60 * 1000;
 const DEFAULT_MERGE_AGENT_LIFECYCLE_CLEANUP_PER_POLL = 5;
 // Transient mergeability sampling window (GitHub returns mergeable=UNKNOWN right
@@ -4501,14 +4519,20 @@ async function maybeDispatchAmaClosureFor({
     // CFG load failure isn't an AMA problem; let the existing
     // merge-agent path handle the tick.
     logger?.warn?.(`[watcher] AMA cfg load failed: ${err?.message || err}`);
-    return { dispatched: false, reason: 'cfg-load-failed', amaEnabled: false };
+    return withAmaDispatchMetadata(
+      { dispatched: false, reason: 'cfg-load-failed' },
+      { amaEnabled: false },
+    );
   }
   if (!cfg?.enabled) {
     // AMA-06N — surface `amaEnabled` so the watcher's coexistence
     // decision (the call site of this helper) can branch on it. With
     // AMA off, the default `merge-agent-default` action falls through
     // to the existing merge-agent dispatch without any override env.
-    return { dispatched: false, reason: 'ama-disabled', amaEnabled: false };
+    return withAmaDispatchMetadata(
+      { dispatched: false, reason: 'ama-disabled' },
+      { amaEnabled: false },
+    );
   }
 
   // AMA "final hammer" signal: the review cycle is EXHAUSTED once the PR has
@@ -4743,16 +4767,16 @@ async function maybeDispatchAmaClosureFor({
     });
   } catch (err) {
     logger?.warn?.(`[watcher] AMA dispatch failed: ${err?.message || err}`);
-    return { dispatched: false, reason: 'ama-dispatch-failed', amaEnabled: Boolean(cfg?.enabled) };
+    return withAmaDispatchMetadata(
+      { dispatched: false, reason: 'ama-dispatch-failed' },
+      { amaEnabled: Boolean(cfg?.enabled) },
+    );
   }
   // AMA-06N — expose `amaEnabled` so the watcher's coexistence
   // decision (downstream of this helper) can branch on it. The
   // upstream code paths (`cfg-load-failed`, `ama-disabled`) already
   // include the flag; this wraps the maybeDispatchAmaCloser return.
-  if (result && typeof result === 'object' && result.amaEnabled === undefined) {
-    return { ...result, amaEnabled: true };
-  }
-  return result;
+  return withAmaDispatchMetadata(result, { amaEnabled: true });
 }
 
 async function resolveMergeAgentCoexistenceForWatcher({
@@ -4977,9 +5001,13 @@ async function handlePostedReviewRow({
       const reasonsHint = Array.isArray(amaClosureResult?.reasons)
         ? amaClosureResult.reasons.slice(0, 8).join(',')
         : amaClosureResult?.reason || 'unknown';
+      const namedReason = amaClosureResult?.namedReason || namedAmaNoDispatchReason(
+        amaClosureResult?.reason || 'unknown',
+        amaClosureResult?.reasons,
+      );
       logger.log(
         `[watcher] AMA enabled but not eligible for ${repoPath}#${prNumber} ` +
-        `(reasons: ${reasonsHint}); awaiting operator action ` +
+        `(${namedReason}; reasons: ${reasonsHint}); awaiting operator action ` +
         `(apply 'operator-approved'/'adversarial-merge-requested' to make AMA-eligible ` +
         `OR 'merge-agent-requested' for the operator-fallback lane)`
       );

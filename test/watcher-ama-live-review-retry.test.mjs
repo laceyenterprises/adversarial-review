@@ -137,7 +137,12 @@ test('AMA live review reconciliation retries a transient lookup and lets authori
     assert.equal(lookupCalls, 2);
     assert.equal(seenReviewStates[0].verdict, 'request-changes');
     assert.equal(seenReviewStates[0].headSha, 'head-live');
-    assert.deepEqual(result, { dispatched: false, reason: 'request-changes', amaEnabled: true });
+    assert.deepEqual(result, {
+      dispatched: false,
+      reason: 'request-changes',
+      namedReason: 'request-changes',
+      amaEnabled: true,
+    });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -197,7 +202,12 @@ test('AMA live review reconciliation fails closed after exhausting transient loo
     assert.equal(lookupCalls, 3);
     assert.equal(seenReviewStates[0].verdict, '');
     assert.equal(seenReviewStates[0].headSha, 'head-live');
-    assert.deepEqual(result, { dispatched: false, reason: 'fail-closed', amaEnabled: true });
+    assert.deepEqual(result, {
+      dispatched: false,
+      reason: 'fail-closed',
+      namedReason: 'fail-closed',
+      amaEnabled: true,
+    });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

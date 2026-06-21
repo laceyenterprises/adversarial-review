@@ -70,11 +70,13 @@ import {
 import { assertAntigravityOAuth, getAccessToken } from './auth/antigravity-bridge.mjs';
 import {
   allCapped,
+  accountStatus,
   markRateLimited,
   selectAccount,
 } from './auth/antigravity-accounts.mjs';
 import { parseQuotaResetAt } from './quota-exhaustion.mjs';
 import { resolveGeminiRuntime } from './role-config.mjs';
+import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
 
 const execFileAsync = promisify(execFile);
 const REVIEW_POST_RETRY_DELAYS_MS = [0];
@@ -531,6 +533,114 @@ function logStructuredEvent(log = console, event) {
   if (event?.level === 'warning') log.warn?.(line);
   else if (event?.level === 'error') log.error?.(line);
   else log.log?.(line);
+}
+
+function emitAgrAccountEvent(log = console, event) {
+  logStructuredEvent(log, {
+    level: 'info',
+    schemaVersion: 1,
+    ...event,
+  });
+  recordApiCall({
+    category: event.event,
+    status: 'ok',
+    extra: {
+      event: event.event,
+      reviewerModel: 'gemini',
+      runtime: 'antigravity',
+      ...(event.accountId ? { accountId: event.accountId } : {}),
+      ...(event.retryAfter ? { retryAfter: event.retryAfter } : {}),
+    },
+  });
+}
+
+function buildAgrAllCappedPagePayload({
+  retryAfter,
+  suppressedCount = 0,
+  accountStatus = null,
+} = {}) {
+  return {
+    schemaVersion: 1,
+    event: 'agr_all_capped',
+    severity: 'page',
+    reviewerModel: 'gemini',
+    runtime: 'antigravity',
+    retryAfter: retryAfter || null,
+    suppressedCount: Math.max(0, Number(suppressedCount) || 0),
+    accounts: Array.isArray(accountStatus)
+      ? accountStatus.map((account) => ({
+        accountId: account.accountId,
+        eligible: Boolean(account.eligible),
+        retryAfter: account.retryAfter || null,
+      }))
+      : null,
+  };
+}
+
+function formatAgrAllCappedPageText(payload) {
+  const suppressed = payload.suppressedCount > 0
+    ? ` Suppressed ${payload.suppressedCount} duplicate all-capped events in the prior window.`
+    : '';
+  return (
+    `Gemini Antigravity reviewer accounts are all quota-capped; ` +
+    `reviews are held until ${payload.retryAfter || 'unknown'}.${suppressed}`
+  );
+}
+
+async function maybePageAgrAllCapped({
+  retryAfter,
+  accountStatus = null,
+  deliverAlertFn = defaultDeliverAlert,
+  now = Date.now(),
+  alertStateDir = AGR_ALL_CAPPED_ALERT_STATE_DIR,
+  dedupeMs = AGR_ALL_CAPPED_ALERT_DEDUPE_MS,
+  fsImpl = { existsSync, readFileSync, mkdirSync, writeFileSync },
+  log = console,
+} = {}) {
+  const statePath = join(alertStateDir, 'agr-all-capped.json');
+  let prior = null;
+  try {
+    if (fsImpl.existsSync(statePath)) {
+      prior = JSON.parse(fsImpl.readFileSync(statePath, 'utf8'));
+    }
+  } catch {
+    prior = null;
+  }
+
+  const lastPagedAtMs = Date.parse(String(prior?.pagedAt || ''));
+  if (Number.isFinite(lastPagedAtMs) && now - lastPagedAtMs < dedupeMs) {
+    const suppressedCount = Math.max(0, Number(prior?.suppressedCount) || 0) + 1;
+    try {
+      fsImpl.mkdirSync(alertStateDir, { recursive: true });
+      fsImpl.writeFileSync(statePath, `${JSON.stringify({
+        ...prior,
+        suppressedCount,
+        lastSuppressedAt: new Date(now).toISOString(),
+        retryAfter: retryAfter || prior?.retryAfter || null,
+      }, null, 2)}\n`);
+    } catch (err) {
+      log?.warn?.(`[reviewWithGemini] failed to persist AGR all-capped suppressed count: ${err?.message || err}`);
+    }
+    return { paged: false, suppressedCount };
+  }
+
+  const suppressedCount = Math.max(0, Number(prior?.suppressedCount) || 0);
+  const payload = buildAgrAllCappedPagePayload({ retryAfter, suppressedCount, accountStatus });
+  await deliverAlertFn(formatAgrAllCappedPageText(payload), {
+    event: 'agr_all_capped',
+    payload,
+  });
+  try {
+    fsImpl.mkdirSync(alertStateDir, { recursive: true });
+    fsImpl.writeFileSync(statePath, `${JSON.stringify({
+      pagedAt: new Date(now).toISOString(),
+      retryAfter: retryAfter || null,
+      suppressedCount: 0,
+    }, null, 2)}\n`);
+  } catch (err) {
+    log?.warn?.(`[reviewWithGemini] failed to persist AGR all-capped page state: ${err?.message || err}`);
+  }
+  return { paged: true, suppressedCount };
 }
 
 function normalizeLabelName(label) {
@@ -1450,6 +1560,8 @@ function isClaudeLoggedOutStatus(text) {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT = join(__dirname, '..');
+const AGR_ALL_CAPPED_ALERT_STATE_DIR = join(ROOT, 'data', 'follow-up-jobs', 'agr-all-capped-alerts');
+const AGR_ALL_CAPPED_ALERT_DEDUPE_MS = 60 * 60 * 1000;
 const REVIEWER_PROMPT_SET = 'code-pr';
 const ADVERSARIAL_PROMPT = loadStagePrompt({
   rootDir: ROOT,
@@ -2312,6 +2424,9 @@ async function reviewWithGemini(diff, extraContext = '', {
   getAntigravityAccessTokenImpl = getAccessToken,
   markAntigravityRateLimitedImpl = markRateLimited,
   allAntigravityCappedImpl = allCapped,
+  accountStatusImpl = accountStatus,
+  deliverAgrAllCappedAlertImpl = defaultDeliverAlert,
+  pageAgrAllCappedImpl = maybePageAgrAllCapped,
   retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
   sleepImpl = sleep,
   log = console,
@@ -2360,6 +2475,9 @@ async function reviewWithGemini(diff, extraContext = '', {
         selectAccountImpl: selectAntigravityAccountImpl,
         markRateLimitedImpl: markAntigravityRateLimitedImpl,
         allCappedImpl: allAntigravityCappedImpl,
+        accountStatusImpl,
+        deliverAllCappedAlertImpl: deliverAgrAllCappedAlertImpl,
+        pageAllCappedImpl: pageAgrAllCappedImpl,
         retryDelaysMs,
         sleepImpl,
         log,
@@ -2406,6 +2524,9 @@ async function invokeGeminiWithAntigravity({
   selectAccountImpl,
   markRateLimitedImpl,
   allCappedImpl,
+  accountStatusImpl = null,
+  deliverAllCappedAlertImpl = defaultDeliverAlert,
+  pageAllCappedImpl = maybePageAgrAllCapped,
   retryDelaysMs = REVIEW_POST_RETRY_DELAYS_MS,
   sleepImpl = sleep,
   log = console,
@@ -2415,6 +2536,16 @@ async function invokeGeminiWithAntigravity({
   if (!accountId) {
     const capped = allCappedImpl();
     if (capped?.allCapped) {
+      emitAgrAccountEvent(log, {
+        event: 'agr_all_capped',
+        retryAfter: capped.retryAfter || null,
+      });
+      await pageAllCappedImpl({
+        retryAfter: capped.retryAfter || null,
+        accountStatus: accountStatusImpl?.() || null,
+        deliverAlertFn: deliverAllCappedAlertImpl,
+        log,
+      });
       return { quotaHoldDecision: antigravityQuotaHoldDecision({ retryAfter: capped.retryAfter }) };
     }
     throw new OAuthError('gemini', 'no Antigravity account is available');
@@ -2423,6 +2554,10 @@ async function invokeGeminiWithAntigravity({
   const attemptedAccounts = new Set();
   while (accountId && !attemptedAccounts.has(accountId)) {
     attemptedAccounts.add(accountId);
+    emitAgrAccountEvent(log, {
+      event: 'agr_account_selected',
+      accountId,
+    });
     const accessToken = await getAccessTokenImpl(accountId);
     const materialized = materializeOAuthEnvImpl({ env, accountId, accessToken });
     try {
@@ -2438,9 +2573,24 @@ async function invokeGeminiWithAntigravity({
     } catch (err) {
       if (!isAntigravityRateLimitOrAuthFailure(err)) throw err;
       const retryAfter = retryAfterFromGeminiFailure(err);
-      markRateLimitedImpl(accountId, retryAfter);
+      const rateLimited = markRateLimitedImpl(accountId, retryAfter) || { accountId, retryAfter };
+      emitAgrAccountEvent(log, {
+        event: 'agr_account_rate_limited',
+        accountId: rateLimited.accountId || accountId,
+        retryAfter: rateLimited.retryAfter || retryAfter,
+      });
       const capped = allCappedImpl();
       if (capped?.allCapped) {
+        emitAgrAccountEvent(log, {
+          event: 'agr_all_capped',
+          retryAfter: capped.retryAfter || null,
+        });
+        await pageAllCappedImpl({
+          retryAfter: capped.retryAfter || null,
+          accountStatus: accountStatusImpl?.() || null,
+          deliverAlertFn: deliverAllCappedAlertImpl,
+          log,
+        });
         return { quotaHoldDecision: antigravityQuotaHoldDecision({ retryAfter: capped.retryAfter }) };
       }
       const nextAccountId = selectAccountImpl();
@@ -3316,6 +3466,10 @@ const __test__ = {
   retryAfterFromGeminiFailure,
   resolveGeminiRuntimeForReview,
   materializeAntigravityGeminiOAuthEnv,
+  emitAgrAccountEvent,
+  buildAgrAllCappedPagePayload,
+  formatAgrAllCappedPageText,
+  maybePageAgrAllCapped,
   antigravityQuotaHoldDecision,
   formatAntigravityQuotaHoldMessage,
   invokeGeminiWithAntigravity,

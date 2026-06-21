@@ -1266,17 +1266,15 @@ function schemaV1() {
             __min: 1000,
           },
           fallback_threshold: { __type: TYPE_INT, __default: 2 },
-          // GMW-02 — gemini always-on third reviewer. `always-on` (operator
-          // default) selects gemini as the reviewer for the cross-model-eligible
-          // builder classes; `fallback` selects gemini only when the assigned
-          // primary reviewer is quota-capped; `off` preserves pre-GMW routing.
+          // Gemini circuit-breaker. Default stays `off`; operators explicitly
+          // switch to `fallback` or `always-on` after provisioning auth.
           gemini: {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
               mode: {
                 __type: TYPE_STRING,
-                __default: 'always-on',
+                __default: 'off',
                 __enum: ENUM_REVIEWER_GEMINI_MODE,
               },
               runtime: {

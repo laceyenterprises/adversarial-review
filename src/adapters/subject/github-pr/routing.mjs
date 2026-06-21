@@ -54,17 +54,17 @@ const ROUTE_BY_BUILDER_CLASS = {
 
 const DEFAULT_REVIEWER_ENV = 'ADVERSARIAL_REVIEW_DEFAULT_REVIEWER';
 
-// GMW-02 — Gemini as an always-on third reviewer.
+// Gemini circuit-breaker / optional third reviewer.
 //
-// Operator-decided default is `always-on`: gemini is selected as the reviewer
-// for the cross-model-eligible builder classes below. `fallback` selects gemini
-// ONLY when the assigned primary cross-model reviewer is quota-capped (reusing
-// the HRR quota-exhaustion signal). `off` preserves the pre-GMW claude↔codex
-// routing untouched. The governing config knob is `reviewer.gemini.mode`
+// Default is `off`: activation is an explicit operator step after Antigravity
+// accounts are provisioned. `fallback` selects gemini ONLY when the assigned
+// primary cross-model reviewer is quota-capped (reusing the HRR
+// quota-exhaustion signal). `always-on` selects gemini for the reviewable
+// builder classes below. The governing config knob is `reviewer.gemini.mode`
 // (resolved via role-config's file→env cascade); this module's pure helpers
 // take the resolved mode as an argument so they stay trivially testable.
 const GEMINI_REVIEWER_MODES = Object.freeze(['off', 'fallback', 'always-on']);
-const DEFAULT_GEMINI_REVIEWER_MODE = 'always-on';
+const DEFAULT_GEMINI_REVIEWER_MODE = 'off';
 const GEMINI_REVIEWER_ROUTE = Object.freeze({
   reviewerModel: 'gemini',
   botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',

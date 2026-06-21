@@ -4,9 +4,13 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { validateDefaultReviewerRouteConfig } from '../src/adapters/subject/github-pr/routing.mjs';
+import {
+  routeSubject,
+  validateDefaultReviewerRouteConfig,
+} from '../src/adapters/subject/github-pr/routing.mjs';
 import {
   resolveAntigravityAccounts,
+  resolveGeminiReviewerMode,
   resolveGeminiRuntime,
 } from '../src/role-config.mjs';
 
@@ -32,6 +36,44 @@ test('AGR-04 runtime defaults to cli and rejects unknown runtime values', () => 
       () => resolveGeminiRuntime({ env: {}, topPath: '/dev/null', modulePaths: [modulePath] }),
       /reviewer\.gemini\.runtime.*cli.*antigravity/i,
     );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('AGR-06 gemini reviewer mode tracked default remains off', () => {
+  const tmp = makeTmp();
+  try {
+    assert.equal(
+      resolveGeminiReviewerMode({ env: {}, topPath: '/dev/null', modulePaths: [join(tmp, 'none.yaml')] }),
+      'off',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('AGR-06 mode wiring can select gemini while runtime resolves to antigravity', () => {
+  const tmp = makeTmp();
+  try {
+    const modulePath = join(tmp, 'config.yaml');
+    writeYaml(modulePath, `
+reviewer:
+  gemini:
+    mode: always-on
+    runtime: antigravity
+    antigravity:
+      accounts:
+        - id: primary
+          tokenFile: op://Cliovault/GEMINI_PRIMARY/token
+`);
+    const options = { env: {}, topPath: '/dev/null', modulePaths: [modulePath] };
+    const route = routeSubject({ builderClass: 'codex' }, options);
+
+    assert.equal(resolveGeminiReviewerMode(options), 'always-on');
+    assert.equal(resolveGeminiRuntime(options), 'antigravity');
+    assert.equal(route.reviewerModel, 'gemini');
+    assert.equal(route.botTokenEnv, 'GH_GEMINI_REVIEWER_TOKEN');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

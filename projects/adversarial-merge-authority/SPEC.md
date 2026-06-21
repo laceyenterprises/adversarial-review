@@ -288,8 +288,8 @@ must verify that claim against durable GitHub state:
   `Worker-Ticket: HAM-<n>`, `Closed-By: hammer (adversarial-pipe-mode)`, and a
   `Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)` count;
 - the PR timeline contains the claimed audit comment body;
-- the matched audit comment author is the verified commit author or an
-  allowlisted hammer bot identity, and the eligibility trace records the
+- the matched audit comment author is an allowlisted hammer bot identity
+  independent of the commit author, and the eligibility trace records the
   comment `author`, `createdAt`, and `id`;
 - the audit comment body names each claimed finding title and changed file;
 - the audit comment reports any doc-currency remediation performed, and any
@@ -302,6 +302,23 @@ must verify that claim against durable GitHub state:
 HAM attests that each mapped finding was resolved; the predicate verifies the
 commit, trailers, audit mapping, counts, and non-empty diff, but it does not
 semantically prove the code change fixes the reviewer's finding.
+
+GitHub-side commit text and PR comments are corroborating evidence, not an
+authorization anchor for any other merge lane. A fast-merge row whose live head
+changed may merge a HAM remediation head only when the keyed AMA audit JSON under
+`$HQ_ROOT/dispatch/audit/adversarial-merge-authority/<repo>-pr-<n>-<head>.json`
+exists for that exact live head and its latest attempt records
+`preMergeEligible: true` with
+`headMatchEvidence: ham_terminal_remediation_validated`. The audit JSON is a
+local authority anchor only when it is owned by the configured HQ owner and is
+not world-writable. An audit in `status: "in_progress"` is valid only while the
+matching AMA closer lease for `(repo, pr, head)` is `dispatched`; a `succeeded`
+audit is terminal authority. If `HQ_ROOT` is unavailable, the keyed audit record
+is missing or untrusted, the matching closer lease is absent for an in-progress
+record, or the record does not match the live `(repo, pr, head)` tuple, the
+fast-merge daemon must requeue through normal first-pass review instead of
+trusting trailers or PR comments alone, and the requeue audit must include the
+specific HAM rejection reason.
 
 Only after those checks pass may the predicate record
 `ham_terminal_remediation_validated`. That marker may waive

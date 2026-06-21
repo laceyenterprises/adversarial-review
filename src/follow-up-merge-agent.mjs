@@ -57,6 +57,16 @@ import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.m
 import {
   readLatestWorkerRunStatusFromLedger,
 } from './session-ledger-read-adapter.mjs';
+import { amaAuditFilePath, readAmaAuditEntry } from './ama/audit.mjs';
+import {
+  AMA_CLOSER_LEASE_STATUS,
+  readAmaCloserLease,
+} from './ama/closer-lease.mjs';
+import {
+  hamAuditCommentAuthorMatches,
+  parseCommitTrailers,
+  parseRemediatedFindingsTrailer,
+} from './ama/ham-provenance.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -4307,6 +4317,344 @@ function parseGhJson(stdout, fallback = {}) {
   return JSON.parse(String(stdout || '').trim() || JSON.stringify(fallback));
 }
 
+function normalizeVerifiedHamCommit(commitJson = {}) {
+  const sha = String(commitJson?.sha || commitJson?.oid || '').trim();
+  const parentSha = String(
+    commitJson?.parents?.[0]?.sha
+      || commitJson?.parents?.nodes?.[0]?.oid
+      || commitJson?.parentSha
+      || '',
+  ).trim();
+  const message = commitJson?.commit?.message || commitJson?.message || '';
+  const changedFiles = Array.isArray(commitJson?.files)
+    ? commitJson.files
+      .map((file) => String(file?.filename || file?.path || '').trim())
+      .filter(Boolean)
+    : [];
+  return {
+    sha,
+    parentSha,
+    trailers: parseCommitTrailers(message),
+    author: commitJson?.author?.login || commitJson?.commit?.author?.login || null,
+    committer: commitJson?.committer?.login || commitJson?.commit?.committer?.login || null,
+    changedFiles,
+  };
+}
+
+function timelineCommentBody(event) {
+  if (!event || typeof event !== 'object') return '';
+  if (typeof event.body === 'string') return event.body;
+  if (typeof event.comment?.body === 'string') return event.comment.body;
+  return '';
+}
+
+function timelineCommentAuthor(event) {
+  return (
+    event?.user?.login
+    || event?.actor?.login
+    || event?.comment?.user?.login
+    || null
+  );
+}
+
+function hasMatchingHamAuditComment(timelineJson, verifiedCommit) {
+  const timeline = Array.isArray(timelineJson) ? timelineJson : [];
+  const remediatedFindings = String(verifiedCommit?.trailers?.['remediated-findings'] || '').trim();
+  return timeline.some((event) => {
+    const body = timelineCommentBody(event);
+    if (!body || !hamAuditCommentAuthorMatches(timelineCommentAuthor(event))) return false;
+    return body.includes('Closed-By: hammer (adversarial-pipe-mode)')
+      && (!remediatedFindings || body.includes(remediatedFindings));
+  });
+}
+
+function flattenGhPaginatedJson(parsed) {
+  if (!Array.isArray(parsed)) return [];
+  if (parsed.every((item) => Array.isArray(item))) return parsed.flat();
+  return parsed;
+}
+
+async function fetchFastMergeHamCommit({ ghClient, repo, headSha }) {
+  const execFileImpl = execFileFromGhClient(ghClient);
+  const { stdout } = await withGhRetry(() => execFileImpl('gh', [
+    'api',
+    `repos/${repo}/commits/${headSha}`,
+  ], {
+    maxBuffer: 5 * 1024 * 1024,
+    timeout: FAST_MERGE_GH_TIMEOUT_MS,
+  }));
+  return normalizeVerifiedHamCommit(parseGhJson(stdout));
+}
+
+async function fetchFastMergeTimeline({ ghClient, repo, prNumber }) {
+  const execFileImpl = execFileFromGhClient(ghClient);
+  const { stdout } = await withGhRetry(() => execFileImpl('gh', [
+    'api',
+    `repos/${repo}/issues/${prNumber}/timeline`,
+    '--paginate',
+    '--slurp',
+  ], {
+    maxBuffer: 5 * 1024 * 1024,
+    timeout: FAST_MERGE_GH_TIMEOUT_MS,
+  }));
+  return flattenGhPaginatedJson(parseGhJson(stdout, []));
+}
+
+function attemptHasHamAuthorizationMarker(attempt) {
+  if (!attempt || typeof attempt !== 'object') return false;
+  if (attempt.headMatchEvidence === 'ham_terminal_remediation_validated') return true;
+  if (attempt.eligibilityReason === 'ham_terminal_remediation_validated') return true;
+  const markerFields = [
+    attempt?.trace?.hamTerminalRemediation?.marker,
+    attempt?.trace?.hamTerminalRemediation?.evidence,
+    attempt?.hamTerminalRemediation?.marker,
+    attempt?.hamTerminalRemediation?.evidence,
+  ];
+  return markerFields.includes('ham_terminal_remediation_validated');
+}
+
+function resolveUserUid(user) {
+  const normalized = String(user || '').trim();
+  if (!normalized) return { ok: false, reason: 'ham-audit-owner-unknown' };
+  const result = spawnSync('id', ['-u', normalized], { encoding: 'utf8' });
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      reason: 'ham-audit-owner-uid-unresolved',
+      detail: String(result.stderr || result.error?.message || '').trim(),
+    };
+  }
+  const uid = Number.parseInt(String(result.stdout || '').trim(), 10);
+  if (!Number.isInteger(uid) || uid < 0) {
+    return { ok: false, reason: 'ham-audit-owner-uid-unresolved' };
+  }
+  return { ok: true, uid };
+}
+
+function verifyFastMergeHamAuditFileTrust({
+  hqRoot,
+  repo,
+  prNumber,
+  liveHead,
+}) {
+  let filePath;
+  try {
+    filePath = amaAuditFilePath(hqRoot, repo, prNumber, liveHead);
+  } catch (err) {
+    return { ok: false, reason: 'ham-audit-path-invalid', detail: err?.message || String(err) };
+  }
+  let stat;
+  try {
+    stat = statSync(filePath);
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      return { ok: false, reason: 'ham-audit-record-missing', filePath };
+    }
+    return { ok: false, reason: 'ham-audit-stat-failed', filePath, detail: err?.message || String(err) };
+  }
+  const ownerResolution = resolveHqOwner(hqRoot);
+  if (!ownerResolution?.ownerUser) {
+    return {
+      ok: false,
+      reason: ownerResolution?.reason || 'ham-audit-owner-unknown',
+      filePath,
+      detail: ownerResolution?.detail || null,
+    };
+  }
+  const uidResolution = resolveUserUid(ownerResolution.ownerUser);
+  if (!uidResolution.ok) {
+    return {
+      ok: false,
+      reason: uidResolution.reason,
+      filePath,
+      ownerUser: ownerResolution.ownerUser,
+      detail: uidResolution.detail || null,
+    };
+  }
+  const mode = stat.mode & 0o777;
+  const checks = {
+    regularFile: stat.isFile(),
+    owner: stat.uid === uidResolution.uid,
+    notWorldWritable: (mode & 0o002) === 0,
+  };
+  const ok = Object.values(checks).every(Boolean);
+  return {
+    ok,
+    reason: ok ? 'ham-audit-file-trusted' : 'ham-audit-file-untrusted',
+    filePath,
+    checks,
+    ownerUser: ownerResolution.ownerUser,
+    expectedUid: uidResolution.uid,
+    actualUid: stat.uid,
+    mode: mode.toString(8).padStart(3, '0'),
+  };
+}
+
+function verifyFastMergeHamCloserLease({
+  rootDir,
+  repo,
+  prNumber,
+  liveHead,
+  auditStatus,
+}) {
+  if (auditStatus === 'succeeded') {
+    return { ok: true, reason: 'ham-audit-succeeded' };
+  }
+  if (auditStatus !== 'in_progress') {
+    return { ok: false, reason: 'ham-audit-status-not-authorizing' };
+  }
+  try {
+    const lease = readAmaCloserLease(rootDir, { repo, prNumber, headSha: liveHead });
+    const checks = {
+      exists: Boolean(lease),
+      repo: lease?.repo === repo,
+      prNumber: Number(lease?.prNumber) === Number(prNumber),
+      headSha: String(lease?.headSha || '').trim() === liveHead,
+      status: lease?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED,
+      lrqId: String(lease?.lrqId || '').trim() !== '',
+    };
+    const ok = Object.values(checks).every(Boolean);
+    return {
+      ok,
+      reason: ok ? 'ham-closer-lease-active' : 'ham-closer-lease-invalid',
+      checks,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'ham-closer-lease-read-failed',
+      detail: err?.message || String(err),
+    };
+  }
+}
+
+function verifyFastMergeHamAuditRecord({
+  rootDir,
+  hqRoot,
+  repo,
+  prNumber,
+  reviewedHead,
+  liveHead,
+}) {
+  if (!hqRoot) {
+    return { ok: false, reason: 'ham-audit-root-missing' };
+  }
+  const fileTrust = verifyFastMergeHamAuditFileTrust({ hqRoot, repo, prNumber, liveHead });
+  if (!fileTrust.ok) {
+    return {
+      ok: false,
+      reason: fileTrust.reason,
+      checks: { fileTrust },
+      reviewedHead,
+      liveHead,
+    };
+  }
+  const audit = readAmaAuditEntry(hqRoot, repo, prNumber, liveHead);
+  const attempts = Array.isArray(audit?.attempts) ? audit.attempts : [];
+  const latestAttempt = attempts.at(-1) || null;
+  const auditStatus = String(audit?.status || '').trim();
+  const closerLease = verifyFastMergeHamCloserLease({
+    rootDir,
+    repo,
+    prNumber,
+    liveHead,
+    auditStatus,
+  });
+  const checks = {
+    exists: Boolean(audit),
+    schemaVersion: audit?.schemaVersion === 1,
+    repo: audit?.repo === repo,
+    prNumber: Number(audit?.prNumber) === Number(prNumber),
+    headSha: String(audit?.headSha || '').trim() === liveHead,
+    status: ['in_progress', 'succeeded'].includes(auditStatus),
+    closerLease: closerLease.ok,
+    preMergeEligible: latestAttempt?.preMergeEligible === true,
+    hamMarker: attemptHasHamAuthorizationMarker(latestAttempt),
+  };
+  const ok = Object.values(checks).every(Boolean);
+  return {
+    ok,
+    reason: ok ? 'ham-audit-record-authorized' : (closerLease.ok ? 'ham-audit-record-invalid' : closerLease.reason),
+    checks: { ...checks, fileTrust, closerLease },
+    reviewedHead,
+    liveHead,
+  };
+}
+
+async function verifyFastMergeHamRemediationHead({
+  ghClient,
+  rootDir = process.cwd(),
+  repo,
+  prNumber,
+  authorizedHeadSha,
+  currentHeadSha,
+  hqRoot = resolveHqRoot(process.env),
+  logger = console,
+} = {}) {
+  const reviewedHead = String(authorizedHeadSha || '').trim();
+  const liveHead = String(currentHeadSha || '').trim();
+  if (!reviewedHead || !liveHead || reviewedHead === liveHead) {
+    return { authorized: false, reason: 'not-head-change' };
+  }
+
+  try {
+    const verifiedCommit = await fetchFastMergeHamCommit({ ghClient, repo, headSha: liveHead });
+    const trailers = verifiedCommit.trailers || {};
+    const remediatedFindingCounts = parseRemediatedFindingsTrailer(trailers['remediated-findings']);
+    const commitChecks = {
+      workerClass: trailers['worker-class'] === 'hammer',
+      ticket: /^HAM-\d+$/i.test(String(trailers['worker-ticket'] || '').trim()),
+      reviewedHead: String(trailers['reviewed-head'] || '').trim() === reviewedHead,
+      closedBy: trailers['closed-by'] === 'hammer (adversarial-pipe-mode)',
+      head: verifiedCommit.sha === liveHead,
+      parent: verifiedCommit.parentSha === reviewedHead,
+      nonEmptyCommit: Array.isArray(verifiedCommit.changedFiles) && verifiedCommit.changedFiles.length > 0,
+      remediatedFindings: remediatedFindingCounts !== null,
+    };
+    if (!Object.values(commitChecks).every(Boolean)) {
+      return { authorized: false, reason: 'ham-commit-provenance-invalid', checks: commitChecks };
+    }
+
+    const timeline = await fetchFastMergeTimeline({ ghClient, repo, prNumber });
+    if (!hasMatchingHamAuditComment(timeline, verifiedCommit)) {
+      return { authorized: false, reason: 'ham-audit-comment-missing' };
+    }
+
+    const auditRecord = verifyFastMergeHamAuditRecord({
+      rootDir,
+      hqRoot,
+      repo,
+      prNumber,
+      reviewedHead,
+      liveHead,
+    });
+    if (!auditRecord.ok) {
+      return {
+        authorized: false,
+        reason: auditRecord.reason,
+        checks: {
+          ...commitChecks,
+          auditRecord: auditRecord.checks,
+        },
+      };
+    }
+
+    return {
+      authorized: true,
+      reason: 'ham-remediation-head-authorized',
+      authorizedHeadSha: liveHead,
+      reviewedHeadSha: reviewedHead,
+      remediatedFindingCounts,
+      auditRecord: auditRecord.checks,
+    };
+  } catch (err) {
+    logger?.warn?.(
+      `[follow-up-merge-agent] HAM remediation head verification failed for ${repo}#${prNumber}: ${err?.message || err}`
+    );
+    return { authorized: false, reason: 'ham-provenance-lookup-failed' };
+  }
+}
+
 function normalizePrView(parsed = {}) {
   const labels = Array.isArray(parsed.labels) ? parsed.labels : [];
   const state = String(parsed.state || '').trim().toUpperCase();
@@ -4654,8 +5002,10 @@ async function processFastMergePR({
   prNumber,
   authorizedHeadSha,
   auditWriter = null,
+  env = process.env,
   logger = console,
 } = {}) {
+  let exactHeadSha = authorizedHeadSha;
   const firstView = await fetchFastMergePrView({ ghClient, repo, prNumber });
   if (firstView.state === 'MERGED' || firstView.mergedAt) {
     const at = firstView.mergedAt || isoNow();
@@ -4710,22 +5060,41 @@ async function processFastMergePR({
     return { status: 'closed' };
   }
 
-  if (!authorizedHeadSha || String(firstView.headRefOid || '') !== String(authorizedHeadSha)) {
-    return auditAndRequeueFastMerge({
-      db,
-      rootDir,
+  if (!exactHeadSha || String(firstView.headRefOid || '') !== String(exactHeadSha)) {
+    const hamAuthorization = await verifyFastMergeHamRemediationHead({
       ghClient,
+      rootDir,
       repo,
       prNumber,
-      authorizedHeadSha,
+      authorizedHeadSha: exactHeadSha,
       currentHeadSha: firstView.headRefOid || null,
-      labels: firstView.labels,
-      reason: `fast-merge head changed: authorized ${authorizedHeadSha || 'missing'}; current ${firstView.headRefOid || 'missing'}`,
-      action: 'head-changed-requeued',
-      headChanged: true,
-      auditWriter,
+      hqRoot: resolveHqRoot(env),
       logger,
     });
+    if (hamAuthorization.authorized) {
+      exactHeadSha = hamAuthorization.authorizedHeadSha;
+    } else {
+      const hamReason = hamAuthorization.reason || 'unknown';
+      logger?.warn?.(
+        `[follow-up-merge-agent] fast-merge HAM head authorization rejected for ` +
+        `${repo}#${prNumber}: ${hamReason}`
+      );
+      return auditAndRequeueFastMerge({
+        db,
+        rootDir,
+        ghClient,
+        repo,
+        prNumber,
+        authorizedHeadSha: exactHeadSha,
+        currentHeadSha: firstView.headRefOid || null,
+        labels: firstView.labels,
+        reason: `fast-merge head changed: authorized ${exactHeadSha || 'missing'}; current ${firstView.headRefOid || 'missing'}; ham-eval: ${hamReason}`,
+        action: 'head-changed-requeued',
+        headChanged: true,
+        auditWriter,
+        logger,
+      });
+    }
   }
 
   if (hasFastMergeVeto(firstView.labels)) {
@@ -4735,7 +5104,7 @@ async function processFastMergePR({
       ghClient,
       repo,
       prNumber,
-      authorizedHeadSha,
+      authorizedHeadSha: exactHeadSha,
       currentHeadSha: firstView.headRefOid || null,
       labels: firstView.labels,
       reason: 'fast-merge veto label detected; requeueing normal first-pass review',
@@ -4753,7 +5122,7 @@ async function processFastMergePR({
       ghClient,
       repo,
       prNumber,
-      authorizedHeadSha,
+      authorizedHeadSha: exactHeadSha,
       currentHeadSha: firstView.headRefOid || null,
       labels: firstView.labels,
       reason: 'fast-merge authorization label absent; requeueing normal first-pass review',
@@ -4783,7 +5152,7 @@ async function processFastMergePR({
         action: 'blocked',
         repo,
         prNumber,
-        authorizedHeadSha,
+        authorizedHeadSha: exactHeadSha,
         currentHeadSha: firstView.headRefOid,
         failureReason: checkSummary.failureMessage,
         checkConclusions: checkSummary.checkConclusions,
@@ -4796,17 +5165,17 @@ async function processFastMergePR({
   }
 
   const preMergeView = await fetchFastMergePrView({ ghClient, repo, prNumber });
-  if (!authorizedHeadSha || String(preMergeView.headRefOid || '') !== String(authorizedHeadSha)) {
+  if (!exactHeadSha || String(preMergeView.headRefOid || '') !== String(exactHeadSha)) {
     return auditAndRequeueFastMerge({
       db,
       rootDir,
       ghClient,
       repo,
       prNumber,
-      authorizedHeadSha,
+      authorizedHeadSha: exactHeadSha,
       currentHeadSha: preMergeView.headRefOid || null,
       labels: preMergeView.labels,
-      reason: `fast-merge head changed before merge: authorized ${authorizedHeadSha || 'missing'}; current ${preMergeView.headRefOid || 'missing'}`,
+      reason: `fast-merge head changed before merge: authorized ${exactHeadSha || 'missing'}; current ${preMergeView.headRefOid || 'missing'}`,
       action: 'head-changed-requeued',
       headChanged: true,
       auditWriter,
@@ -4820,7 +5189,7 @@ async function processFastMergePR({
       ghClient,
       repo,
       prNumber,
-      authorizedHeadSha,
+      authorizedHeadSha: exactHeadSha,
       currentHeadSha: preMergeView.headRefOid || null,
       labels: preMergeView.labels,
       reason: 'fast-merge veto label detected before merge; requeueing normal first-pass review',
@@ -4837,7 +5206,7 @@ async function processFastMergePR({
       ghClient,
       repo,
       prNumber,
-      authorizedHeadSha,
+      authorizedHeadSha: exactHeadSha,
       currentHeadSha: preMergeView.headRefOid || null,
       labels: preMergeView.labels,
       reason: 'fast-merge authorization label absent before merge; requeueing normal first-pass review',
@@ -4866,7 +5235,7 @@ async function processFastMergePR({
         action: 'blocked',
         repo,
         prNumber,
-        authorizedHeadSha,
+        authorizedHeadSha: exactHeadSha,
         currentHeadSha: preMergeView.headRefOid,
         failureReason: preMergeChecks.summary.failureMessage,
         checkConclusions: preMergeChecks.summary.checkConclusions,
@@ -4884,7 +5253,7 @@ async function processFastMergePR({
       ghClient,
       repo,
       prNumber,
-      matchHeadCommit: authorizedHeadSha,
+      matchHeadCommit: exactHeadSha,
     });
   } catch (err) {
     if (isRetryableGhTransportError(err)) {
@@ -4926,9 +5295,9 @@ async function processFastMergePR({
           action: 'merged',
           repo,
           prNumber,
-          authorizedHeadSha,
+          authorizedHeadSha: exactHeadSha,
           currentHeadSha: postMergeView.headRefOid || preMergeView.headRefOid,
-          mergedHeadSha: postMergeView.headRefOid || authorizedHeadSha,
+          mergedHeadSha: postMergeView.headRefOid || exactHeadSha,
           mergeSha,
           manualMergeDetected: true,
           checkConclusions: checkSummary.checkConclusions,
@@ -4955,7 +5324,7 @@ async function processFastMergePR({
         action: 'blocked',
         repo,
         prNumber,
-        authorizedHeadSha,
+        authorizedHeadSha: exactHeadSha,
         currentHeadSha: preMergeView.headRefOid,
         failureReason: detail || 'GitHub refused fast-merge',
         checkConclusions: checkSummary.checkConclusions,
@@ -4986,9 +5355,9 @@ async function processFastMergePR({
       action: 'merged',
       repo,
       prNumber,
-      authorizedHeadSha,
+      authorizedHeadSha: exactHeadSha,
       currentHeadSha: preMergeView.headRefOid,
-      mergedHeadSha: authorizedHeadSha,
+      mergedHeadSha: exactHeadSha,
       mergeSha,
       checkConclusions: checkSummary.checkConclusions,
       mergeStdout: mergeResult?.stdout || null,
@@ -5007,6 +5376,7 @@ async function pollFastMergeQueue({
   repos = null,
   auditWriter = null,
   logger = console,
+  env = process.env,
 } = {}) {
   const cap = Number.isInteger(perPollCap) && perPollCap > 0
     ? perPollCap
@@ -5047,6 +5417,7 @@ async function pollFastMergeQueue({
         authorizedHeadSha: row.fast_merge_authorized_head_sha,
         auditWriter,
         logger,
+        env,
       });
       if (result?.status === 'merged') summary.merged += 1;
       else if (result?.status === 'blocked') summary.blocked += 1;

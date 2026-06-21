@@ -10,6 +10,7 @@ import {
   normalizeMaintenanceSweepState,
   readMaintenanceSweepState,
   resolveRemediationWorkerTokenMinLifetimeMs,
+  resolveTelemetryListenerStartTimeoutMs,
   reviewerTokenHandoffUnsafeRoles,
   runStoppedArchiveSweepIfDue,
   shouldConsumeAfterReviewerTokenRefresh,
@@ -373,7 +374,7 @@ test('daemon telemetry listener startup is best-effort and keeps the tick loop a
   });
 
   assert.deepEqual(listener.subscriptions, ['health.worker.*']);
-  assert.ok(logs.some((entry) => entry.includes('telemetry listener active')));
+  assert.ok(logs.some((entry) => entry.includes('telemetry listener registered')));
 
   const failed = await startFollowUpTelemetryListener({
     rootDir,
@@ -385,6 +386,16 @@ test('daemon telemetry listener startup is best-effort and keeps the tick loop a
 
   assert.equal(failed, null);
   assert.ok(logs.some((entry) => entry.includes('telemetry listener disabled: broker unavailable')));
+
+  const timedOut = await startFollowUpTelemetryListener({
+    rootDir,
+    env: { ADVERSARIAL_REVIEW_TELEMETRY_LISTENER_START_TIMEOUT_MS: '5' },
+    log,
+    connectFollowUpTelemetryListenerImpl: async () => new Promise(() => {}),
+  });
+
+  assert.equal(timedOut, null);
+  assert.ok(logs.some((entry) => entry.includes('telemetry listener startup timed out after 5ms')));
 });
 
 test('resolves remediation worker token handoff lifetime from the dedicated env knob', () => {
@@ -414,6 +425,18 @@ test('resolves remediation worker token handoff lifetime from the dedicated env 
   assert.ok(
     DEFAULT_REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS < 25 * 60 * 1000,
     'remediation handoff floor must stay below the broker default refresh window (~25min) to be satisfiable',
+  );
+});
+
+test('resolves telemetry listener startup timeout from env', () => {
+  assert.equal(resolveTelemetryListenerStartTimeoutMs({}), 5000);
+  assert.equal(
+    resolveTelemetryListenerStartTimeoutMs({ ADVERSARIAL_REVIEW_TELEMETRY_LISTENER_START_TIMEOUT_MS: '17' }),
+    17,
+  );
+  assert.equal(
+    resolveTelemetryListenerStartTimeoutMs({ ADVERSARIAL_REVIEW_TELEMETRY_LISTENER_START_TIMEOUT_MS: 'nope' }),
+    5000,
   );
 });
 

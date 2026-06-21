@@ -104,7 +104,6 @@ feature_flags:
 
 apps:
   adversarial-review:
-    mode: agent-os
     subscribes:
       - health.worker.*
       - token.*

@@ -1112,7 +1112,11 @@ subscription set includes `health.worker.*`, and `token.*` remains reserved for
 future token lifecycle notices. In `agent-os` mode this is currently a staged
 registration: the request/response App Contract session has no inbound delivery
 transport that feeds topics into `session.emitTopic(...)`, so production
-convergence still depends on the periodic scanner. When an inbound transport is
+convergence still depends on the periodic scanner. Listener registration is
+best-effort and bounded by
+`ADVERSARIAL_REVIEW_TELEMETRY_LISTENER_START_TIMEOUT_MS` (default 5000ms); a
+slow or hung App Contract registration must disable the listener for that start
+instead of blocking the authoritative periodic tick loop. When an inbound transport is
 added, delivered `health.worker.terminal.<launchRequestId>` worker-completion
 events will route into `handleRemediationTelemetryEvent` as an acceleration
 path, not a separate state machine: the periodic follow-up reconcile tick
@@ -1123,8 +1127,9 @@ scanner acquire the same short-lived per-job reconcile claim before calling
 skips and lets the owner finish. This preserves the single-writer invariant for
 side effects such as re-review row resets, branch-contamination audits,
 lifecycle cancellation, and terminal comment delivery. Reconcile claims older
-than the stale window are reclaimable by age, so pid reuse cannot indefinitely
-protect an abandoned claim left by a crashed daemon.
+than the one-hour stale window are reclaimable by age, so pid reuse cannot
+indefinitely protect an abandoned claim left by a crashed daemon while normal
+multi-call reconcile work is not stolen after the old ten-minute window.
 
 `health.worker.terminal.<launchRequestId>` events may short-circuit the HQ
 status poll only for `status:"succeeded"`. Success remains gated by the

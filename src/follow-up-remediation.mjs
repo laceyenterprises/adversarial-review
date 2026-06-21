@@ -365,7 +365,7 @@ function remediationWorkerGitIdentity(workerClass, env = process.env) {
 }
 
 const RECONCILIATION_MAX_ACTIVE_MS = 6 * 60 * 60 * 1000;
-const FOLLOW_UP_RECONCILE_CLAIM_STALE_MS = 10 * 60 * 1000;
+const FOLLOW_UP_RECONCILE_CLAIM_STALE_MS = 60 * 60 * 1000;
 const MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES = 4 * 1024 * 1024;
 
 function logRoundBudgetDecision(log, {
@@ -5225,7 +5225,24 @@ async function handleRemediationTelemetryEvent({
     };
   }
   try {
-    const currentJob = readFollowUpJob(found.jobPath);
+    if (!existsSync(found.jobPath)) {
+      return { action: 'ignored', reason: 'launch-request-not-in-progress', lrq: terminalEvent.lrq };
+    }
+    let currentJob;
+    try {
+      currentJob = readFollowUpJob(found.jobPath);
+    } catch (err) {
+      const missing = err?.code === 'ENOENT';
+      log.warn?.(
+        `[follow-up-remediation] skipped telemetry reconcile for unreadable job ${found.jobPath}: ${err?.message || err}`
+      );
+      return {
+        action: 'ignored',
+        reason: missing ? 'launch-request-not-in-progress' : 'follow-up-job-read-failed',
+        lrq: terminalEvent.lrq,
+        jobPath: found.jobPath,
+      };
+    }
     if (!workerTerminalEventMatches(currentJob?.remediationWorker, terminalEvent)) {
       return { action: 'ignored', reason: 'launch-request-not-current-worker', lrq: terminalEvent.lrq };
     }

@@ -4817,6 +4817,56 @@ test('health.worker.terminal topic event skips when the reconcile claim is held'
   assert.equal(existsSync(spawned.jobPath), true);
 });
 
+test('health.worker.terminal topic event ignores jobs moved after lookup', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { claimed } = makeQueuedJob(rootDir, { prNumber: 732 });
+  const hqRoot = path.join(rootDir, 'hq');
+  const promptPath = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId, '.adversarial-follow-up', 'prompt.md');
+  mkdirSync(path.dirname(promptPath), { recursive: true });
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      model: 'codex',
+      state: 'spawned',
+      dispatchMode: 'hq',
+      completionShape: 'branch-push',
+      launchRequestId: 'lrq_apc05_moved_before_read',
+      dispatchId: 'dispatch_apc05_moved_before_read',
+      hqRoot,
+      workspaceDir: path.join(hqRoot, 'adversarial-review', 'follow-up-workspaces', claimed.job.jobId),
+      promptPath,
+      replyPath: path.join(hqRoot, 'dispatch', 'remediation-replies', claimed.job.jobId, 'remediation-reply.json'),
+      outputPath: null,
+      logPath: null,
+    },
+  });
+
+  let nowCalls = 0;
+  const result = await handleRemediationTelemetryEvent({
+    rootDir,
+    topic: 'health.worker.terminal.lrq_apc05_moved_before_read',
+    event: { status: 'succeeded' },
+    now: () => {
+      nowCalls += 1;
+      if (nowCalls === 1) {
+        rmSync(spawned.jobPath, { force: true });
+      }
+      return '2026-04-21T10:25:00.000Z';
+    },
+    execFileImpl: async () => {
+      throw new Error('telemetry handler should not poll after the job record moved');
+    },
+    log: { warn() {}, error() {}, log() {} },
+  });
+
+  assert.equal(result.action, 'ignored');
+  assert.equal(result.reason, 'launch-request-not-in-progress');
+  assert.equal(existsSync(`${spawned.jobPath}.reconcile.lock`), false);
+});
+
 test('health.worker.terminal topic event reclaims corrupt reconcile claim locks', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, { prNumber: 731 });
@@ -4907,7 +4957,7 @@ test('releaseFollowUpReconcileClaim preserves a lock reclaimed by another owner'
   assert.deepEqual(JSON.parse(readFileSync(`${jobPath}.reconcile.lock`, 'utf8')), replacementClaim);
 });
 
-test('tryAcquireFollowUpReconcileClaim lets stale age dominate live pid checks', () => {
+test('tryAcquireFollowUpReconcileClaim waits one hour before age-based reclaim', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
   mkdirSync(inProgressDir, { recursive: true });
@@ -4919,9 +4969,18 @@ test('tryAcquireFollowUpReconcileClaim lets stale age dominate live pid checks',
     ownerToken: 'old-live-pid-token',
   })}\n`, 'utf8');
 
-  const claim = tryAcquireFollowUpReconcileClaim({
+  const early = tryAcquireFollowUpReconcileClaim({
     jobPath,
     now: () => '2026-04-21T10:12:00.000Z',
+    ownerPid: process.pid,
+  });
+
+  assert.equal(early.acquired, false);
+  assert.equal(early.ownerToken, 'old-live-pid-token');
+
+  const claim = tryAcquireFollowUpReconcileClaim({
+    jobPath,
+    now: () => '2026-04-21T11:01:00.000Z',
     ownerPid: process.pid,
   });
 

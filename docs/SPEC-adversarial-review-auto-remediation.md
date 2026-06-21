@@ -1448,7 +1448,7 @@ Each poll makes up to `DEFAULT_FML_MERGE_AGENT_PER_POLL_CAP = 5` terminal fast-m
 For each row the daemon must:
 
 - Re-fetch the PR view and refuse the bypass if the live head no longer matches `fast_merge_authorized_head_sha`.
-- Requeue normal first-pass review instead of merging when the head changed, `fast-merge-veto` is present, or the live fast-merge authorization label is absent.
+- Requeue normal first-pass review instead of merging when the head changed, `fast-merge-veto` is present, or the live fast-merge authorization label is absent. Fast-merge must not import HAM terminal-remediation trailers, audit comments, or other worker-authored provenance as authority to advance `fast_merge_authorized_head_sha`; a changed head is reviewed through the normal adversarial path.
 - Validate CI with `gh pr checks --json name,state,bucket,workflow,link`, treating CLI exits `8` (pending) and `1` (failed) as data-bearing results when stdout contains parseable JSON rather than as transport failures, and treating the real `gh` "no checks reported" diagnostic as an empty check set.
 - Re-fetch and re-summarize CI in the immediate pre-merge window, after the head/veto/authorization-label re-check and before the admin merge.
 - Merge only with `gh pr merge --squash --admin --delete-branch --match-head-commit <authorizedHeadSha>` so GitHub rejects the merge if the head moved after the last verification step.

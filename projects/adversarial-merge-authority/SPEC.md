@@ -315,6 +315,12 @@ also active, HAM and final-hammer waivers compose by filtering the remaining
 reason set in sequence; one waiver path must not discard the other path's
 accepted waivers.
 
+This HAM predicate is scoped to AMA closure after a final-review closer handoff.
+It is not a fast-merge authorization primitive: the fast-merge skip lane may
+merge only the stored `fast_merge_authorized_head_sha`, and any later head change
+must requeue normal adversarial review rather than advancing authority from
+worker-authored trailers or PR comments.
+
 ## 4.2 Eligibility predicate
 
 Direct AMA closure requires a current-head settled-success review (`Approved`

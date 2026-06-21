@@ -62,39 +62,6 @@ function failedChecks() {
   return [{ name: 'ci', state: 'FAILURE', bucket: 'fail' }];
 }
 
-function hamCommit(headSha = 'sha-B', parentSha = 'sha-A') {
-  return {
-    sha: headSha,
-    parents: [{ sha: parentSha }],
-    author: { login: 'hammer-worker' },
-    committer: { login: 'hammer-worker' },
-    commit: {
-      message: [
-        'HAM-02 remediate final adversarial findings',
-        '',
-        'Worker-Class: hammer',
-        'Worker-Ticket: HAM-02',
-        'Closed-By: hammer (adversarial-pipe-mode)',
-        'Remediated-Findings: 1 addressed (0 blocking, 1 non-blocking)',
-      ].join('\n'),
-    },
-    files: [{ filename: 'README.md' }],
-  };
-}
-
-function hamAuditComment(headSha = 'sha-B') {
-  return {
-    id: 9001,
-    created_at: '2026-06-20T12:34:56Z',
-    user: { login: 'hammer-worker' },
-    body: [
-      `HAM audit: remediated post-review findings at ${headSha}.`,
-      'Closed-By: hammer (adversarial-pipe-mode)',
-      'Remediated-Findings: 1 addressed (0 blocking, 1 non-blocking)',
-    ].join('\n'),
-  };
-}
-
 function transportError(message = 'timed out') {
   const err = new Error(message);
   err.code = 'ETIMEDOUT';
@@ -238,17 +205,12 @@ test('fast-merge head change requeues through canonical review reset and never m
   assert.equal(claimWithWatcherCas(db, 802).changes, 1);
 });
 
-test('fast-merge HAM-provenance remediation head is authorized and merged with exact new head', async () => {
+test('fast-merge never imports HAM provenance to authorize a changed head', async () => {
   const db = makeDb();
   seedFastMerge(db, 8021);
   const audits = [];
   const gh = makeGhStub({
-    views: [openView('sha-B'), openView('sha-B')],
-    checks: [successChecks()],
-    api: [
-      hamCommit('sha-B', 'sha-A'),
-      [hamAuditComment('sha-B')],
-    ],
+    views: [openView('sha-B')],
   });
 
   const result = await processFastMergePR({
@@ -260,14 +222,14 @@ test('fast-merge HAM-provenance remediation head is authorized and merged with e
     auditWriter: (entry) => audits.push(entry),
   });
 
-  assert.equal(result.status, 'merged');
-  assert.equal(row(db, 8021).review_status, 'fast_merge_merged');
-  assert.equal(mergeCalls(gh).length, 1);
-  assert.deepEqual(mergeCalls(gh)[0].args.slice(-3), ['--match-head-commit', 'sha-B', '--delete-branch']);
-  assert.equal(audits.at(-1).authorized_head_sha, 'sha-B');
-  assert.equal(audits.at(-1).merged_head_sha, 'sha-B');
-  assert.equal(audits.some((entry) => entry.action === 'head-changed-requeued'), false);
-  assert.equal(claimWithWatcherCas(db, 8021).changes, 0);
+  assert.equal(result.status, 'requeued_head_change');
+  assert.equal(row(db, 8021).review_status, 'pending');
+  assert.equal(mergeCalls(gh).length, 0);
+  assert.equal(gh.calls.some((call) => call.args[0] === 'api'), false);
+  assert.equal(audits.at(-1).action, 'head-changed-requeued');
+  assert.equal(audits.at(-1).authorized_head_sha, 'sha-A');
+  assert.equal(audits.at(-1).current_head_sha, 'sha-B');
+  assert.equal(claimWithWatcherCas(db, 8021).changes, 1);
 });
 
 test('fast-merge head change between CI and merge requeues and never merges', async () => {

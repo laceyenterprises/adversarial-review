@@ -324,6 +324,11 @@ for the bypass lane. The follow-up daemon now actively consumes
 - records `fast_merge_merged`, `fast_merge_closed`, or `fast_merge_blocked`,
 - and requeues normal first-pass review when the head changed, veto appeared, or the authorization label was removed.
 
+Fast-merge does not consume HAM terminal-remediation trailers or PR audit
+comments as an alternate authorization source. Any live head that differs from
+`fast_merge_authorized_head_sha` exits the bypass lane and returns to normal
+review.
+
 Before recording `fast_merge_blocked` on a merge error, the daemon must re-fetch
 PR state; if GitHub already shows the PR merged, the durable state becomes
 `fast_merge_merged` instead so partial merge success cannot be misreported as a

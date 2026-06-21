@@ -112,6 +112,35 @@ filename alone. A direct call with `source: "/tmp/config.local.yaml"` remains
 strict unless it explicitly opts into `tolerateNestedUnknownLocalKeys`; enabling
 foreign top-level tolerance does not make `main_catchup` foreign.
 
+## `op` Node mirror
+
+The adversarial-review Node loader treats `op` as a known schema root, not as a
+foreign top-level local section. The Agent OS Python/shell CFG loaders remain
+canonical for the global 1Password schema; this repository mirrors only the
+Node side until the parent Agent OS rollout lands the canonical Python/shell
+schema and conformance cases. Shared checked-in `config.yaml` files must not
+depend on `op.vault` being portable across all CFG loaders until that parent
+rollout is merged.
+
+The Node mirror exists so an Agent OS rollout that introduces `op.vault` can
+update the adversarial-review submodule in the same parent change without
+crash-looping the adversarial-review watcher.
+
+Checked-in `config.yaml` accepts only `op.vault`, which defaults to
+`Cliovault`. Any other checked-in `op.*` key is an unknown nested key under a
+known strict root and must fail loud.
+
+Layer-4 `config.local.yaml` siblings may drop other nested `op.*` keys only
+when nested-local tolerance is enabled by the local-sibling layer or by an
+explicit `tolerateNestedUnknownLocalKeys` validator option. Those tolerated
+unknown nested keys are omitted from resolved values and provenance. The
+mirrored `op.vault` key is validated and exposed normally when present.
+
+Direct `validateSchema` callers do not get this local tolerance from the
+filename alone. A direct call with `source: "/tmp/config.local.yaml"` remains
+strict unless it explicitly opts into `tolerateNestedUnknownLocalKeys`; enabling
+foreign top-level tolerance does not make `op` foreign.
+
 ## Env-materialized app entries
 
 `apps` is a keyed map. The key after `apps.` is an app id, not dotted path
@@ -167,6 +196,13 @@ Any loader that infers nested-key tolerance from filename alone is out of
 contract; the tolerance must be scoped to the actual local-sibling layer or an
 explicit validator option used by a caller that is deliberately reproducing that
 layer.
+
+The Node-only `op.vault` mirror above is intentionally excluded from the
+cross-loader conformance list until the Agent OS Python/shell loaders accept the
+same checked-in key, default, strict rejection behavior, and local-sibling
+nested tolerance. The parent Agent OS rollout that promotes shared `op.vault`
+must add those canonical loader changes before treating `op.vault` as part of
+the portable CFG contract.
 
 ## Role enums
 

@@ -3814,6 +3814,7 @@ async function runFastMergeClosePathIsolated({
   perPollCap = resolveFastMergePerPollCap(),
   repos = activeRepos,
   logger = console,
+  env = process.env,
 } = {}) {
   try {
     const fastMergeSummary = await pollImpl({
@@ -3823,6 +3824,7 @@ async function runFastMergeClosePathIsolated({
       perPollCap,
       repos,
       logger,
+      env,
     });
     if (fastMergeSummary.processed > 0) {
       logger.log?.(

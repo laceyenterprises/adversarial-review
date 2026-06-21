@@ -24,19 +24,13 @@ import {
   ADVERSARIAL_MERGE_BLOCKED_LABEL,
   ADVERSARIAL_MERGE_REQUESTED_LABEL,
 } from './labels.mjs';
+import {
+  hamAuditCommentAuthorMatches,
+  parseRemediatedFindingsTrailer,
+} from './ham-provenance.mjs';
 
 const OPERATOR_APPROVED_LABEL = 'operator-approved';
 const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
-const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set([
-  'hammer-worker',
-  'lacey-hammer-worker',
-  'lacey-hammer-reviewer',
-  // The hammer now operates under the merge-agent app identity, so its audit /
-  // closing comment is authored by the merge-agent bot. Accept it even if the
-  // commit-author login resolution lags. (worker-pool: hq_resolve_worker_identity
-  // hammer -> merge-agent-lacey.)
-  'merge-agent-lacey',
-]);
 
 /**
  * Hard-stop labels imported from the existing adversarial-review / merge-agent
@@ -476,23 +470,6 @@ function shaClaimMatches(claimed, verified) {
   if (lhs === rhs) return true;
   const minPrefixLength = 7;
   return lhs.length >= minPrefixLength && rhs.startsWith(lhs);
-}
-
-function parseRemediatedFindingsTrailer(value) {
-  const match = /^\s*(\d+)\s+addressed\s+\((\d+)\s+blocking,\s+(\d+)\s+non-blocking\)\s*$/i
-    .exec(String(value || ''));
-  if (!match) return null;
-  const total = Number(match[1]);
-  const blocking = Number(match[2]);
-  const nonBlocking = Number(match[3]);
-  if (![total, blocking, nonBlocking].every(Number.isInteger)) return null;
-  return { total, blocking, nonBlocking };
-}
-
-function hamAuditCommentAuthorMatches(verifiedAuditComment) {
-  const commentAuthor = normalizeLogin(verifiedAuditComment?.author);
-  if (!commentAuthor) return false;
-  return HAM_AUDIT_COMMENT_AUTHOR_LOGINS.has(commentAuthor);
 }
 
 function verifiedCommitHasNonEmptyDiff(verifiedCommit) {

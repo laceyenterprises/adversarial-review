@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
@@ -13,6 +13,10 @@ import {
   writeFastMergeCloseAuditEntry,
 } from '../src/follow-up-merge-agent.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
+import {
+  acquireAmaCloserLease,
+  updateAmaCloserLease,
+} from '../src/ama/closer-lease.mjs';
 import { fastMergeAuditDir } from '../src/fast-merge-audit-storage.mjs';
 import { ensureReviewStateSchema, getReviewRow } from '../src/review-state.mjs';
 
@@ -122,6 +126,43 @@ function seedHamFastMergeAudit(hqRoot, {
       headMatchEvidence: 'ham_terminal_remediation_validated',
     },
     now: '2026-05-24T12:21:30.000Z',
+  });
+}
+
+function currentTestUser() {
+  return process.env.USER || process.env.LOGNAME || 'unknown';
+}
+
+function seedHqOwnerConfig(hqRoot, ownerUser = currentTestUser()) {
+  mkdirSync(path.join(hqRoot, '.hq'), { recursive: true });
+  writeFileSync(
+    path.join(hqRoot, '.hq', 'config.json'),
+    `${JSON.stringify({ ownerUser }, null, 2)}\n`,
+    'utf8',
+  );
+}
+
+function seedDispatchedCloserLease(rootDir, {
+  repo = REPO,
+  prNumber,
+  headSha = 'sha-HAM',
+} = {}) {
+  acquireAmaCloserLease({
+    rootDir,
+    repo,
+    prNumber,
+    headSha,
+    watcherPid: process.pid,
+    now: '2026-05-24T12:21:00.000Z',
+  });
+  updateAmaCloserLease({
+    rootDir,
+    repo,
+    prNumber,
+    headSha,
+    status: 'dispatched',
+    lrqId: `lrq-${prNumber}`,
+    now: '2026-05-24T12:21:05.000Z',
   });
 }
 
@@ -277,6 +318,7 @@ test('fast-merge head change requeues through canonical review reset and never m
 });
 
 test('fast-merge HAM provenance head change is authorized and merged at the new exact head', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'fast-merge-ham-root-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'fast-merge-ham-audit-'));
   const db = makeDb();
   seedFastMerge(db, 8021);
@@ -287,12 +329,15 @@ test('fast-merge HAM provenance head change is authorized and merged at the new 
     commits: { 'sha-HAM': hamCommit({ sha: 'sha-HAM', parentSha: 'sha-A' }) },
     timeline: hamTimeline(),
   });
+  seedHqOwnerConfig(hqRoot);
   seedHamFastMergeAudit(hqRoot, { prNumber: 8021, headSha: 'sha-HAM' });
+  seedDispatchedCloserLease(rootDir, { prNumber: 8021, headSha: 'sha-HAM' });
 
   try {
     const result = await processFastMergePR({
       db,
       ghClient: gh,
+      rootDir,
       repo: REPO,
       prNumber: 8021,
       authorizedHeadSha: 'sha-A',
@@ -309,6 +354,7 @@ test('fast-merge HAM provenance head change is authorized and merged at the new 
     assert.equal(audits.at(-1).merged_head_sha, 'sha-HAM');
     assert.equal(claimWithWatcherCas(db, 8021).changes, 0);
   } finally {
+    rmSync(rootDir, { recursive: true, force: true });
     rmSync(hqRoot, { recursive: true, force: true });
   }
 });
@@ -355,6 +401,7 @@ test('fast-merge HAM-looking head with GitHub provenance but no trusted audit re
     commits: { 'sha-HAM': hamCommit({ sha: 'sha-HAM', parentSha: 'sha-A' }) },
     timeline: hamTimeline(),
   });
+  seedHqOwnerConfig(hqRoot);
 
   try {
     const result = await processFastMergePR({
@@ -372,6 +419,7 @@ test('fast-merge HAM-looking head with GitHub provenance but no trusted audit re
     assert.equal(row(db, 80212).review_status, 'pending');
     assert.equal(audits.at(-1).action, 'head-changed-requeued');
     assert.equal(audits.at(-1).current_head_sha, 'sha-HAM');
+    assert.ok(audits.some((entry) => /ham-eval: ham-audit-record-missing/.test(entry?.requeue_result?.reason || '')));
   } finally {
     rmSync(hqRoot, { recursive: true, force: true });
   }
@@ -404,6 +452,7 @@ test('fast-merge HAM-looking head still requeues when GitHub provenance is missi
 });
 
 test('fast-merge HAM-authorized new head requeues if the head changes again before merge', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'fast-merge-ham-race-root-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'fast-merge-ham-audit-race-'));
   const db = makeDb();
   seedFastMerge(db, 8023);
@@ -414,12 +463,15 @@ test('fast-merge HAM-authorized new head requeues if the head changes again befo
     commits: { 'sha-HAM': hamCommit({ sha: 'sha-HAM', parentSha: 'sha-A' }) },
     timeline: hamTimeline(),
   });
+  seedHqOwnerConfig(hqRoot);
   seedHamFastMergeAudit(hqRoot, { prNumber: 8023, headSha: 'sha-HAM' });
+  seedDispatchedCloserLease(rootDir, { prNumber: 8023, headSha: 'sha-HAM' });
 
   try {
     const result = await processFastMergePR({
       db,
       ghClient: gh,
+      rootDir,
       repo: REPO,
       prNumber: 8023,
       authorizedHeadSha: 'sha-A',
@@ -433,6 +485,7 @@ test('fast-merge HAM-authorized new head requeues if the head changes again befo
     assert.equal(audits.at(-1).authorized_head_sha, 'sha-HAM');
     assert.equal(audits.at(-1).current_head_sha, 'sha-C');
   } finally {
+    rmSync(rootDir, { recursive: true, force: true });
     rmSync(hqRoot, { recursive: true, force: true });
   }
 });

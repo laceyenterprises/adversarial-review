@@ -1468,12 +1468,18 @@ findings count; and the local AMA audit JSON at
 `$HQ_ROOT/dispatch/audit/adversarial-merge-authority/<repo>-pr-<n>-<liveHead>.json`
 matches the exact `(repo, pr, liveHead)` tuple with a latest
 `preMergeEligible: true` attempt whose `headMatchEvidence` is
-`ham_terminal_remediation_validated`. Commit trailers and PR comments are
-attacker-controlled corroborating evidence, not sufficient authority. If
-`HQ_ROOT` is unset, the audit record is absent, the audit record is not keyed to
-the live head, the comment is by the commit author alone, or the comment only
-echoes the findings string without the `Closed-By` marker, the daemon requeues
-normal first-pass review and never merges the changed head.
+`ham_terminal_remediation_validated`. The audit JSON must be owned by the
+configured HQ owner, must not be world-writable, and an `in_progress` audit is
+authoritative only while the matching AMA closer lease for `(repo, pr, liveHead)`
+is still `dispatched`; a `succeeded` audit is terminal authority. Commit
+trailers and PR comments are attacker-controlled corroborating evidence, not
+sufficient authority. If `HQ_ROOT` is unset, the audit record is absent,
+untrusted, not keyed to the live head, missing its matching closer lease, the
+comment is by the commit author alone, or the comment only echoes the findings
+string without the `Closed-By` marker, the daemon requeues normal first-pass
+review and never merges the changed head. The requeue audit records the precise
+HAM rejection reason so operators can distinguish missing HQ roots, untrusted
+audit files, bad provenance, missing comments, and lease drift.
 
 Fast-merge state transitions are audit-bearing. Successful merges persist `fast_merge_merged`; closed-unmerged PRs persist `fast_merge_closed`; deterministic refusals while the PR is provably still open persist `fast_merge_blocked`. Merge CLI errors are not authoritative on their own: before recording `fast_merge_blocked`, the daemon must re-fetch PR state and treat an already-merged PR as `fast_merge_merged` so a server-side merge followed by client timeout or branch-delete failure does not strand the row in a false blocked state. Merge audits should capture the real merge commit SHA from `gh pr view --json mergeCommit` when available rather than regex-scraping CLI output. Fast-merge audit JSON belongs under `data/fast-merge-audits/` rather than the reviewer runtime state directory, uses an explicit audit type to distinguish skip vs. close records, and must leave a pending retry marker on the row if a terminal close-path audit write fails.
 

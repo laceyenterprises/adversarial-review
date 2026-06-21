@@ -57,7 +57,16 @@ import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.m
 import {
   readLatestWorkerRunStatusFromLedger,
 } from './session-ledger-read-adapter.mjs';
-import { readAmaAuditEntry } from './ama/audit.mjs';
+import { amaAuditFilePath, readAmaAuditEntry } from './ama/audit.mjs';
+import {
+  AMA_CLOSER_LEASE_STATUS,
+  readAmaCloserLease,
+} from './ama/closer-lease.mjs';
+import {
+  hamAuditCommentAuthorMatches,
+  parseCommitTrailers,
+  parseRemediatedFindingsTrailer,
+} from './ama/ham-provenance.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -4308,33 +4317,6 @@ function parseGhJson(stdout, fallback = {}) {
   return JSON.parse(String(stdout || '').trim() || JSON.stringify(fallback));
 }
 
-function parseCommitTrailers(message) {
-  const lines = String(message || '').replace(/\r\n/g, '\n').split('\n');
-  const trailers = {};
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index].trim();
-    if (!line) continue;
-    const match = /^([A-Za-z][A-Za-z0-9-]*):[ \t]*(.+)$/.exec(line);
-    if (!match) break;
-    trailers[match[1].trim().toLowerCase()] = match[2].trim();
-  }
-  return trailers;
-}
-
-function parseRemediatedFindingsTrailer(value) {
-  const match = /^\s*(\d+)\s+addressed\s+\((\d+)\s+blocking,\s+(\d+)\s+non-blocking\)\s*$/i
-    .exec(String(value || ''));
-  if (!match) return null;
-  const counts = {
-    total: Number(match[1]),
-    blocking: Number(match[2]),
-    nonBlocking: Number(match[3]),
-  };
-  if (!Object.values(counts).every(Number.isInteger)) return null;
-  if (counts.total !== counts.blocking + counts.nonBlocking) return null;
-  return counts;
-}
-
 function normalizeVerifiedHamCommit(commitJson = {}) {
   const sha = String(commitJson?.sha || commitJson?.oid || '').trim();
   const parentSha = String(
@@ -4373,19 +4355,6 @@ function timelineCommentAuthor(event) {
     || event?.comment?.user?.login
     || null
   );
-}
-
-const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set([
-  'hammer-worker',
-  'lacey-hammer-worker',
-  'lacey-hammer-reviewer',
-  'merge-agent-lacey',
-]);
-
-function hamAuditCommentAuthorMatches(author) {
-  const commentAuthor = normalizeLogin(author);
-  if (!commentAuthor) return false;
-  return HAM_AUDIT_COMMENT_AUTHOR_LOGINS.has(commentAuthor);
 }
 
 function hasMatchingHamAuditComment(timelineJson, verifiedCommit) {
@@ -4435,11 +4404,132 @@ function attemptHasHamAuthorizationMarker(attempt) {
   if (!attempt || typeof attempt !== 'object') return false;
   if (attempt.headMatchEvidence === 'ham_terminal_remediation_validated') return true;
   if (attempt.eligibilityReason === 'ham_terminal_remediation_validated') return true;
-  const trace = attempt.eligibilityReasons || attempt.preMergeReasons || attempt.trace || null;
-  return JSON.stringify(trace || '').includes('ham_terminal_remediation_validated');
+  const markerFields = [
+    attempt?.trace?.hamTerminalRemediation?.marker,
+    attempt?.trace?.hamTerminalRemediation?.evidence,
+    attempt?.hamTerminalRemediation?.marker,
+    attempt?.hamTerminalRemediation?.evidence,
+  ];
+  return markerFields.includes('ham_terminal_remediation_validated');
+}
+
+function resolveUserUid(user) {
+  const normalized = String(user || '').trim();
+  if (!normalized) return { ok: false, reason: 'ham-audit-owner-unknown' };
+  const result = spawnSync('id', ['-u', normalized], { encoding: 'utf8' });
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      reason: 'ham-audit-owner-uid-unresolved',
+      detail: String(result.stderr || result.error?.message || '').trim(),
+    };
+  }
+  const uid = Number.parseInt(String(result.stdout || '').trim(), 10);
+  if (!Number.isInteger(uid) || uid < 0) {
+    return { ok: false, reason: 'ham-audit-owner-uid-unresolved' };
+  }
+  return { ok: true, uid };
+}
+
+function verifyFastMergeHamAuditFileTrust({
+  hqRoot,
+  repo,
+  prNumber,
+  liveHead,
+}) {
+  let filePath;
+  try {
+    filePath = amaAuditFilePath(hqRoot, repo, prNumber, liveHead);
+  } catch (err) {
+    return { ok: false, reason: 'ham-audit-path-invalid', detail: err?.message || String(err) };
+  }
+  let stat;
+  try {
+    stat = statSync(filePath);
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      return { ok: false, reason: 'ham-audit-record-missing', filePath };
+    }
+    return { ok: false, reason: 'ham-audit-stat-failed', filePath, detail: err?.message || String(err) };
+  }
+  const ownerResolution = resolveHqOwner(hqRoot);
+  if (!ownerResolution?.ownerUser) {
+    return {
+      ok: false,
+      reason: ownerResolution?.reason || 'ham-audit-owner-unknown',
+      filePath,
+      detail: ownerResolution?.detail || null,
+    };
+  }
+  const uidResolution = resolveUserUid(ownerResolution.ownerUser);
+  if (!uidResolution.ok) {
+    return {
+      ok: false,
+      reason: uidResolution.reason,
+      filePath,
+      ownerUser: ownerResolution.ownerUser,
+      detail: uidResolution.detail || null,
+    };
+  }
+  const mode = stat.mode & 0o777;
+  const checks = {
+    regularFile: stat.isFile(),
+    owner: stat.uid === uidResolution.uid,
+    notWorldWritable: (mode & 0o002) === 0,
+  };
+  const ok = Object.values(checks).every(Boolean);
+  return {
+    ok,
+    reason: ok ? 'ham-audit-file-trusted' : 'ham-audit-file-untrusted',
+    filePath,
+    checks,
+    ownerUser: ownerResolution.ownerUser,
+    expectedUid: uidResolution.uid,
+    actualUid: stat.uid,
+    mode: mode.toString(8).padStart(3, '0'),
+  };
+}
+
+function verifyFastMergeHamCloserLease({
+  rootDir,
+  repo,
+  prNumber,
+  liveHead,
+  auditStatus,
+}) {
+  if (auditStatus === 'succeeded') {
+    return { ok: true, reason: 'ham-audit-succeeded' };
+  }
+  if (auditStatus !== 'in_progress') {
+    return { ok: false, reason: 'ham-audit-status-not-authorizing' };
+  }
+  try {
+    const lease = readAmaCloserLease(rootDir, { repo, prNumber, headSha: liveHead });
+    const checks = {
+      exists: Boolean(lease),
+      repo: lease?.repo === repo,
+      prNumber: Number(lease?.prNumber) === Number(prNumber),
+      headSha: String(lease?.headSha || '').trim() === liveHead,
+      status: lease?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED,
+      lrqId: String(lease?.lrqId || '').trim() !== '',
+    };
+    const ok = Object.values(checks).every(Boolean);
+    return {
+      ok,
+      reason: ok ? 'ham-closer-lease-active' : 'ham-closer-lease-invalid',
+      checks,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'ham-closer-lease-read-failed',
+      detail: err?.message || String(err),
+    };
+  }
 }
 
 function verifyFastMergeHamAuditRecord({
+  rootDir,
   hqRoot,
   repo,
   prNumber,
@@ -4449,24 +4539,43 @@ function verifyFastMergeHamAuditRecord({
   if (!hqRoot) {
     return { ok: false, reason: 'ham-audit-root-missing' };
   }
+  const fileTrust = verifyFastMergeHamAuditFileTrust({ hqRoot, repo, prNumber, liveHead });
+  if (!fileTrust.ok) {
+    return {
+      ok: false,
+      reason: fileTrust.reason,
+      checks: { fileTrust },
+      reviewedHead,
+      liveHead,
+    };
+  }
   const audit = readAmaAuditEntry(hqRoot, repo, prNumber, liveHead);
   const attempts = Array.isArray(audit?.attempts) ? audit.attempts : [];
   const latestAttempt = attempts.at(-1) || null;
+  const auditStatus = String(audit?.status || '').trim();
+  const closerLease = verifyFastMergeHamCloserLease({
+    rootDir,
+    repo,
+    prNumber,
+    liveHead,
+    auditStatus,
+  });
   const checks = {
     exists: Boolean(audit),
     schemaVersion: audit?.schemaVersion === 1,
     repo: audit?.repo === repo,
     prNumber: Number(audit?.prNumber) === Number(prNumber),
     headSha: String(audit?.headSha || '').trim() === liveHead,
-    status: ['in_progress', 'succeeded'].includes(String(audit?.status || '').trim()),
+    status: ['in_progress', 'succeeded'].includes(auditStatus),
+    closerLease: closerLease.ok,
     preMergeEligible: latestAttempt?.preMergeEligible === true,
     hamMarker: attemptHasHamAuthorizationMarker(latestAttempt),
   };
   const ok = Object.values(checks).every(Boolean);
   return {
     ok,
-    reason: ok ? 'ham-audit-record-authorized' : 'ham-audit-record-invalid',
-    checks,
+    reason: ok ? 'ham-audit-record-authorized' : (closerLease.ok ? 'ham-audit-record-invalid' : closerLease.reason),
+    checks: { ...checks, fileTrust, closerLease },
     reviewedHead,
     liveHead,
   };
@@ -4474,6 +4583,7 @@ function verifyFastMergeHamAuditRecord({
 
 async function verifyFastMergeHamRemediationHead({
   ghClient,
+  rootDir = process.cwd(),
   repo,
   prNumber,
   authorizedHeadSha,
@@ -4511,6 +4621,7 @@ async function verifyFastMergeHamRemediationHead({
     }
 
     const auditRecord = verifyFastMergeHamAuditRecord({
+      rootDir,
       hqRoot,
       repo,
       prNumber,
@@ -4952,6 +5063,7 @@ async function processFastMergePR({
   if (!exactHeadSha || String(firstView.headRefOid || '') !== String(exactHeadSha)) {
     const hamAuthorization = await verifyFastMergeHamRemediationHead({
       ghClient,
+      rootDir,
       repo,
       prNumber,
       authorizedHeadSha: exactHeadSha,
@@ -4962,6 +5074,11 @@ async function processFastMergePR({
     if (hamAuthorization.authorized) {
       exactHeadSha = hamAuthorization.authorizedHeadSha;
     } else {
+      const hamReason = hamAuthorization.reason || 'unknown';
+      logger?.warn?.(
+        `[follow-up-merge-agent] fast-merge HAM head authorization rejected for ` +
+        `${repo}#${prNumber}: ${hamReason}`
+      );
       return auditAndRequeueFastMerge({
         db,
         rootDir,
@@ -4971,7 +5088,7 @@ async function processFastMergePR({
         authorizedHeadSha: exactHeadSha,
         currentHeadSha: firstView.headRefOid || null,
         labels: firstView.labels,
-        reason: `fast-merge head changed: authorized ${exactHeadSha || 'missing'}; current ${firstView.headRefOid || 'missing'}`,
+        reason: `fast-merge head changed: authorized ${exactHeadSha || 'missing'}; current ${firstView.headRefOid || 'missing'}; ham-eval: ${hamReason}`,
         action: 'head-changed-requeued',
         headChanged: true,
         auditWriter,
@@ -5259,6 +5376,7 @@ async function pollFastMergeQueue({
   repos = null,
   auditWriter = null,
   logger = console,
+  env = process.env,
 } = {}) {
   const cap = Number.isInteger(perPollCap) && perPollCap > 0
     ? perPollCap
@@ -5299,6 +5417,7 @@ async function pollFastMergeQueue({
         authorizedHeadSha: row.fast_merge_authorized_head_sha,
         auditWriter,
         logger,
+        env,
       });
       if (result?.status === 'merged') summary.merged += 1;
       else if (result?.status === 'blocked') summary.blocked += 1;

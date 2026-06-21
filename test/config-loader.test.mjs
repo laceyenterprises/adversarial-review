@@ -117,6 +117,7 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('tailscale.iphone_ip'), null);
     assert.equal(cfg.get('launchd.label_prefix'), 'ai.laceyenterprises');
     assert.equal(cfg.get('session_ledger.database_name'), 'agent_os_ledger');
+    assert.equal(cfg.get('session_ledger.vdb.enabled'), true);
     assert.equal(cfg.get('operator.email'), 'virtualpaul@gmail.com');
     assert.equal(cfg.get('operator.full_name'), 'Paul Lacey');
     assert.equal(cfg.get('linear.team_name'), 'Laceyenterprises');
@@ -2222,6 +2223,29 @@ test('session_ledger postgres_runtime alias coerces', () => {
       env: { AGENT_OS_SESSION_LEDGER_POSTGRES_RUNTIME: 'off' },
     });
     assert.equal(cfg.get('session_ledger.backend'), 'sqlite');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('session_ledger VDB key and env alias resolve in Node loader', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      session_ledger:
+        vdb:
+          enabled: false
+    `);
+    let cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('session_ledger.vdb.enabled'), false);
+
+    cfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_SESSION_LEDGER_VDB: 'true' },
+    });
+    assert.equal(cfg.get('session_ledger.vdb.enabled'), true);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

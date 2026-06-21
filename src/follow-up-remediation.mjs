@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -4923,6 +4923,10 @@ function reconcileClaimPath(jobPath) {
   return `${jobPath}.reconcile.lock`;
 }
 
+function buildReconcileClaimOwnerToken({ ownerPid, claimedAt }) {
+  return `${ownerPid}:${claimedAt}:${Math.random().toString(16).slice(2)}`;
+}
+
 function writeReconcileClaimLock(lockPath, payload) {
   const tmpPath = `${lockPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
   try {
@@ -4936,6 +4940,14 @@ function writeReconcileClaimLock(lockPath, payload) {
     throw err;
   } finally {
     rmSync(tmpPath, { force: true });
+  }
+}
+
+function readReconcileClaimLock(lockPath) {
+  try {
+    return JSON.parse(readFileSync(lockPath, 'utf8'));
+  } catch {
+    return null;
   }
 }
 
@@ -4953,18 +4965,14 @@ function isPidAlive(pid) {
 function tryAcquireFollowUpReconcileClaim({ jobPath, now = () => new Date().toISOString(), ownerPid = process.pid } = {}) {
   const lockPath = reconcileClaimPath(jobPath);
   const claimedAt = now();
-  const payload = `${JSON.stringify({ claimedAt, ownerPid })}\n`;
+  const ownerToken = buildReconcileClaimOwnerToken({ ownerPid, claimedAt });
+  const payload = `${JSON.stringify({ claimedAt, ownerPid, ownerToken })}\n`;
   if (writeReconcileClaimLock(lockPath, payload)) {
-    return { acquired: true, lockPath, claimedAt };
+    return { acquired: true, lockPath, claimedAt, ownerPid, ownerToken };
   }
 
-  let existing = null;
-  let corruptOrInvalid = false;
-  try {
-    existing = JSON.parse(readFileSync(lockPath, 'utf8'));
-  } catch {
-    corruptOrInvalid = true;
-  }
+  const existing = readReconcileClaimLock(lockPath);
+  const corruptOrInvalid = existing === null;
   const claimedAtMs = Date.parse(existing?.claimedAt || '');
   const nowMs = Date.parse(claimedAt);
   const hasValidClaimedAt = Number.isFinite(claimedAtMs);
@@ -4977,20 +4985,114 @@ function tryAcquireFollowUpReconcileClaim({ jobPath, now = () => new Date().toIS
       lockPath,
       claimedAt: existing?.claimedAt || null,
       ownerPid: existing?.ownerPid || null,
+      ownerToken: existing?.ownerToken || null,
     };
   }
 
   rmSync(lockPath, { force: true });
   if (writeReconcileClaimLock(lockPath, payload)) {
-    return { acquired: true, lockPath, claimedAt, reclaimedStale: true };
+    return { acquired: true, lockPath, claimedAt, ownerPid, ownerToken, reclaimedStale: true };
   }
   return { acquired: false, lockPath, claimedAt: null, ownerPid: null };
 }
 
+function reconcileClaimMatchesOwner(existing, claim) {
+  if (!existing || !claim) return false;
+  if (claim.ownerToken) {
+    return existing.ownerToken === claim.ownerToken;
+  }
+  return existing.claimedAt === claim.claimedAt
+    && Number(existing.ownerPid) === Number(claim.ownerPid);
+}
+
 function releaseFollowUpReconcileClaim(claim) {
-  if (claim?.acquired && claim?.lockPath) {
+  if (!claim?.acquired || !claim?.lockPath) return;
+  const existing = readReconcileClaimLock(claim.lockPath);
+  if (reconcileClaimMatchesOwner(existing, claim)) {
     rmSync(claim.lockPath, { force: true });
   }
+}
+
+function cleanupReconcileClaimArtifacts({
+  rootDir = ROOT,
+  nowMs = Date.now(),
+  staleMs = FOLLOW_UP_RECONCILE_CLAIM_STALE_MS,
+  log = console,
+} = {}) {
+  const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
+  let scanned = 0;
+  let removedTmp = 0;
+  let removedLocks = 0;
+  let skipped = 0;
+  let errors = 0;
+  let entries = [];
+  try {
+    entries = readdirSync(inProgressDir);
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      return { scanned, removedTmp, removedLocks, skipped, errors };
+    }
+    throw err;
+  }
+
+  for (const entry of entries) {
+    const isTmpClaim = entry.includes('.reconcile.lock.') && entry.endsWith('.tmp');
+    const isClaimLock = entry.endsWith('.reconcile.lock');
+    if (!isTmpClaim && !isClaimLock) continue;
+    scanned += 1;
+    const entryPath = join(inProgressDir, entry);
+    let stat = null;
+    try {
+      stat = lstatSync(entryPath);
+    } catch (err) {
+      if (err?.code === 'ENOENT') {
+        skipped += 1;
+        continue;
+      }
+      errors += 1;
+      log.warn?.(`[follow-up-remediation] reconcile claim artifact stat failed for ${entryPath}: ${err?.message || err}`);
+      continue;
+    }
+    if (!stat.isFile()) {
+      skipped += 1;
+      continue;
+    }
+
+    const ageMs = nowMs - stat.mtimeMs;
+    if (isTmpClaim) {
+      if (ageMs <= staleMs) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        rmSync(entryPath, { force: true });
+        removedTmp += 1;
+      } catch (err) {
+        errors += 1;
+        log.warn?.(`[follow-up-remediation] reconcile claim tmp cleanup failed for ${entryPath}: ${err?.message || err}`);
+      }
+      continue;
+    }
+
+    const existing = readReconcileClaimLock(entryPath);
+    const claimedAtMs = Date.parse(existing?.claimedAt || '');
+    const lockAgeMs = Number.isFinite(claimedAtMs) ? nowMs - claimedAtMs : ageMs;
+    const stale = existing === null
+      || !Number.isFinite(claimedAtMs)
+      || lockAgeMs > staleMs;
+    if (!stale || isPidAlive(existing?.ownerPid)) {
+      skipped += 1;
+      continue;
+    }
+    try {
+      rmSync(entryPath, { force: true });
+      removedLocks += 1;
+    } catch (err) {
+      errors += 1;
+      log.warn?.(`[follow-up-remediation] reconcile claim lock cleanup failed for ${entryPath}: ${err?.message || err}`);
+    }
+  }
+  return { scanned, removedTmp, removedLocks, skipped, errors };
 }
 
 async function reconcileInProgressFollowUpJobs({
@@ -5011,6 +5113,13 @@ async function reconcileInProgressFollowUpJobs({
   // by accident; this reset makes it robust against a future long-
   // running tick loop that folds reconciliation in.
   resetRoleConfigCache();
+  const cleanup = cleanupReconcileClaimArtifacts({ rootDir, log });
+  if (cleanup.removedTmp || cleanup.removedLocks || cleanup.errors) {
+    log.log?.(
+      `[follow-up-remediation] reconcile claim cleanup scanned=${cleanup.scanned} ` +
+      `removedTmp=${cleanup.removedTmp} removedLocks=${cleanup.removedLocks} errors=${cleanup.errors}`
+    );
+  }
   const jobs = listInProgressFollowUpJobs(rootDir);
   // Sequential, not Promise.all: each comment post is a network call to
   // GitHub, and if many jobs land on the same PR we'd rather queue a
@@ -5126,6 +5235,95 @@ async function handleRemediationTelemetryEvent({
   } finally {
     releaseFollowUpReconcileClaim(claim);
   }
+}
+
+function resolveFollowUpTelemetryTopics(subscribes = []) {
+  const topics = [];
+  for (const topic of subscribes) {
+    const normalized = String(topic || '').trim();
+    if (!normalized) continue;
+    if (normalized === 'health.worker.*' || normalized.startsWith('health.worker.')) {
+      topics.push(normalized);
+    }
+  }
+  return [...new Set(topics)];
+}
+
+function attachFollowUpTelemetryListeners({
+  session,
+  rootDir = ROOT,
+  subscribes = ['health.worker.*'],
+  now = () => new Date().toISOString(),
+  isWorkerRunning = isWorkerProcessRunning,
+  postCommentImpl = postRemediationOutcomeComment,
+  requestReviewRereviewImpl = requestReviewRereview,
+  resolvePRLifecycleImpl = resolvePRLifecycle,
+  auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
+  execFileImpl = execFileAsync,
+  handleTelemetryEventImpl = handleRemediationTelemetryEvent,
+  log = console,
+} = {}) {
+  if (!session || typeof session.on !== 'function') {
+    throw new Error('follow-up telemetry listener requires an App Contract session with on()');
+  }
+  const topics = resolveFollowUpTelemetryTopics(subscribes);
+  const unsubscribers = topics.map((topicPattern) => session.on(topicPattern, async (event, topic) => {
+    const deliveredTopic = String(topic || topicPattern);
+    const result = await handleTelemetryEventImpl({
+      rootDir,
+      topic: deliveredTopic,
+      event,
+      now,
+      isWorkerRunning,
+      postCommentImpl,
+      requestReviewRereviewImpl,
+      resolvePRLifecycleImpl,
+      auditWorkspaceForContaminationImpl,
+      execFileImpl,
+      log,
+    });
+    if (!['ignored', 'skipped'].includes(result?.action)) {
+      log.log?.(`[follow-up-remediation] telemetry reconcile ${deliveredTopic}: ${result?.action || 'unknown'}`);
+    }
+    return result;
+  }));
+  return {
+    session,
+    subscriptions: topics,
+    dispose: () => {
+      for (const unsubscribe of unsubscribers) unsubscribe();
+    },
+  };
+}
+
+async function connectFollowUpTelemetryListener({
+  rootDir = ROOT,
+  env = process.env,
+  hqRoot = env.HQ_ROOT,
+  connectAppContractImpl = connectAppContract,
+  log = console,
+  ...listenerOptions
+} = {}) {
+  const subscribes = resolveAdversarialReviewAppSubscribes(env);
+  const topics = resolveFollowUpTelemetryTopics(subscribes);
+  if (topics.length === 0) {
+    return { session: null, subscriptions: [], dispose: () => {} };
+  }
+  const session = await connectAppContractImpl({
+    app_id: 'adversarial-review',
+    mode: resolveAdversarialReviewAppMode(env),
+    hqRoot,
+    subscribes,
+  });
+  const listener = attachFollowUpTelemetryListeners({
+    session,
+    rootDir,
+    subscribes: topics,
+    log,
+    ...listenerOptions,
+  });
+  log.log?.(`[follow-up-remediation] App Contract telemetry listener subscribed to ${listener.subscriptions.join(',')}`);
+  return listener;
 }
 
 async function consumeNextFollowUpJob({
@@ -5833,6 +6031,9 @@ export {
   buildInheritedPath,
   consumeFollowUpJobsUntilCapacity,
   consumeNextFollowUpJob,
+  attachFollowUpTelemetryListeners,
+  cleanupReconcileClaimArtifacts,
+  connectFollowUpTelemetryListener,
   handleRemediationTelemetryEvent,
   inspectWorkspaceState,
   digestWorkerFinalMessage,
@@ -5845,6 +6046,8 @@ export {
   REMEDIATION_WORKER_IDENTITY_DEFAULTS,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
+  releaseFollowUpReconcileClaim,
+  tryAcquireFollowUpReconcileClaim,
   lifecycleStopDecision,
   dispatchRemediationViaHq,
   resolveCodexCliPath,

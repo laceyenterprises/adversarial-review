@@ -13,6 +13,7 @@ import {
   reviewerTokenHandoffUnsafeRoles,
   runStoppedArchiveSweepIfDue,
   shouldConsumeAfterReviewerTokenRefresh,
+  startFollowUpTelemetryListener,
   writeMaintenanceSweepState,
 } from '../scripts/adversarial-follow-up-daemon.mjs';
 
@@ -352,6 +353,38 @@ test('tick loop refreshes the reviewer broker token before any GitHub step', () 
     /minTokenLifetimeMs:\s*resolveRemediationWorkerTokenMinLifetimeMs\(process\.env\)/,
     'daemon must pass an explicit remediation-worker handoff floor',
   );
+});
+
+test('daemon telemetry listener startup is best-effort and keeps the tick loop available', async (t) => {
+  const rootDir = makeTempDir(t);
+  const logs = [];
+  const log = {
+    log(message) { logs.push(String(message)); },
+    error(message) { logs.push(String(message)); },
+  };
+
+  const listener = await startFollowUpTelemetryListener({
+    rootDir,
+    log,
+    connectFollowUpTelemetryListenerImpl: async ({ rootDir: calledRoot }) => {
+      assert.equal(calledRoot, rootDir);
+      return { subscriptions: ['health.worker.*'], dispose() {} };
+    },
+  });
+
+  assert.deepEqual(listener.subscriptions, ['health.worker.*']);
+  assert.ok(logs.some((entry) => entry.includes('telemetry listener active')));
+
+  const failed = await startFollowUpTelemetryListener({
+    rootDir,
+    log,
+    connectFollowUpTelemetryListenerImpl: async () => {
+      throw new Error('broker unavailable');
+    },
+  });
+
+  assert.equal(failed, null);
+  assert.ok(logs.some((entry) => entry.includes('telemetry listener disabled: broker unavailable')));
 });
 
 test('resolves remediation worker token handoff lifetime from the dedicated env knob', () => {

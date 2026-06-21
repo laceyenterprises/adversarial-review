@@ -38,6 +38,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   REMEDIATION_MAX_CONCURRENT_JOBS_ENV,
+  connectFollowUpTelemetryListener,
   consumeFollowUpJobsUntilCapacity,
   isWorkerProcessRunning,
   resolveRemediationWorkspaceRoot,
@@ -397,11 +398,37 @@ function installSignalHandlers() {
   }
 }
 
+async function startFollowUpTelemetryListener({
+  rootDir = ROOT,
+  env = process.env,
+  connectFollowUpTelemetryListenerImpl = connectFollowUpTelemetryListener,
+  log = console,
+} = {}) {
+  try {
+    const listener = await connectFollowUpTelemetryListenerImpl({ rootDir, env, log });
+    if (listener?.subscriptions?.length) {
+      log.log?.(
+        `[follow-up-daemon ${ts()}] App Contract telemetry listener active ` +
+        `subscriptions=${listener.subscriptions.join(',')}`
+      );
+    } else {
+      log.log?.(`[follow-up-daemon ${ts()}] App Contract telemetry listener skipped; no health.worker subscriptions configured`);
+    }
+    return listener;
+  } catch (err) {
+    log.error?.(
+      `[follow-up-daemon ${ts()}] App Contract telemetry listener disabled: ${err?.message || err}`
+    );
+    return null;
+  }
+}
+
 async function main() {
   if (process.argv.includes('--with-hq-integration')) {
     process.env.ADV_WITH_HQ_INTEGRATION = '1';
   }
   installSignalHandlers();
+  const telemetryListener = await startFollowUpTelemetryListener();
   logInfo(
     `startup complete; entering tick loop (interval=${TICK_INTERVAL_SECONDS}s ` +
     `${REMEDIATION_MAX_CONCURRENT_JOBS_ENV}=${MAX_CONCURRENT_REMEDIATION_JOBS})`
@@ -496,6 +523,7 @@ async function main() {
   }
 
   logInfo('exiting tick loop');
+  telemetryListener?.dispose?.();
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -513,5 +541,6 @@ export {
   reviewerTokenHandoffUnsafeRoles,
   runStoppedArchiveSweepIfDue,
   shouldConsumeAfterReviewerTokenRefresh,
+  startFollowUpTelemetryListener,
   writeMaintenanceSweepState,
 };

@@ -1,7 +1,7 @@
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -18,7 +18,10 @@ import {
   buildDrainSummaryLogLine,
   buildRemediationPrompt,
   buildInheritedPath,
+  attachFollowUpTelemetryListeners,
+  cleanupReconcileClaimArtifacts,
   classifyHqDispatchFailure,
+  connectFollowUpTelemetryListener,
   consumeFollowUpJobsUntilCapacity,
   consumeNextFollowUpJob,
   countPendingFollowUpJobsByRetryWindow,
@@ -36,6 +39,7 @@ import {
   prepareWorkspaceForJob,
   reconcileFollowUpJob,
   reconcileInProgressFollowUpJobs,
+  releaseFollowUpReconcileClaim,
   resolveAdversarialReviewAppSubscribes,
   resolveHqReplyPath,
   resolveHqRoot,
@@ -44,6 +48,7 @@ import {
   resolveRemediationReplyTarget,
   resolveRemediationWorkspaceRoot,
   remediationWorkerGitIdentity,
+  tryAcquireFollowUpReconcileClaim,
   resetOAuthPreflightCache,
   resolveClaudeCodeCliPath,
   resolveJobRelativePath,
@@ -4832,6 +4837,71 @@ test('health.worker.terminal topic event reclaims corrupt reconcile claim locks'
   assert.equal(existsSync(`${spawned.jobPath}.reconcile.lock`), false);
 });
 
+test('releaseFollowUpReconcileClaim preserves a lock reclaimed by another owner', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
+  mkdirSync(inProgressDir, { recursive: true });
+  const jobPath = path.join(inProgressDir, 'reclaimed-job.json');
+  writeFileSync(jobPath, '{}\n', 'utf8');
+
+  const originalClaim = tryAcquireFollowUpReconcileClaim({
+    jobPath,
+    now: () => '2026-04-21T10:00:00.000Z',
+    ownerPid: 1111,
+  });
+  assert.equal(originalClaim.acquired, true);
+
+  const replacementClaim = {
+    claimedAt: '2026-04-21T10:12:00.000Z',
+    ownerPid: 2222,
+    ownerToken: 'owner-2222-token',
+  };
+  writeFileSync(`${jobPath}.reconcile.lock`, `${JSON.stringify(replacementClaim)}\n`, 'utf8');
+
+  releaseFollowUpReconcileClaim(originalClaim);
+
+  assert.equal(existsSync(`${jobPath}.reconcile.lock`), true);
+  assert.deepEqual(JSON.parse(readFileSync(`${jobPath}.reconcile.lock`, 'utf8')), replacementClaim);
+});
+
+test('cleanupReconcileClaimArtifacts removes stale tmp files and dead-owner locks only', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
+  mkdirSync(inProgressDir, { recursive: true });
+  const nowMs = Date.parse('2026-04-21T10:30:00.000Z');
+  const oldMs = Date.parse('2026-04-21T10:00:00.000Z') / 1000;
+  const freshMs = Date.parse('2026-04-21T10:29:45.000Z') / 1000;
+  const staleTmp = path.join(inProgressDir, 'job-a.json.reconcile.lock.100.200.abc.tmp');
+  const freshTmp = path.join(inProgressDir, 'job-b.json.reconcile.lock.100.200.def.tmp');
+  const corruptLock = path.join(inProgressDir, 'job-c.json.reconcile.lock');
+  const liveLock = path.join(inProgressDir, 'job-d.json.reconcile.lock');
+  writeFileSync(staleTmp, 'claim\n', 'utf8');
+  writeFileSync(freshTmp, 'claim\n', 'utf8');
+  writeFileSync(corruptLock, '{', 'utf8');
+  writeFileSync(liveLock, `${JSON.stringify({
+    claimedAt: '2026-04-21T10:29:45.000Z',
+    ownerPid: process.pid,
+    ownerToken: 'live-owner',
+  })}\n`, 'utf8');
+  utimesSync(staleTmp, oldMs, oldMs);
+  utimesSync(freshTmp, freshMs, freshMs);
+  utimesSync(corruptLock, oldMs, oldMs);
+
+  const result = cleanupReconcileClaimArtifacts({
+    rootDir,
+    nowMs,
+    staleMs: 60 * 1000,
+    log: { log() {}, warn() {}, error() {} },
+  });
+
+  assert.equal(result.removedTmp, 1);
+  assert.equal(result.removedLocks, 1);
+  assert.equal(existsSync(staleTmp), false);
+  assert.equal(existsSync(corruptLock), false);
+  assert.equal(existsSync(freshTmp), true);
+  assert.equal(existsSync(liveLock), true);
+});
+
 test('reconcileFollowUpJob requeues a dead HQ remediation worker when dispatch status reports a transient failure with no reply', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const { claimed } = makeQueuedJob(rootDir, { prNumber: 722, linearTicketId: 'LAC-2722' });
@@ -5397,6 +5467,72 @@ test('dispatchRemediationViaHq registers with CFG app telemetry subscriptions', 
     assert.equal(registerRequest.body.app_id, 'adversarial-review');
     assert.deepEqual(registerRequest.body.subscribes, ['health.worker.*', 'token.*']);
   });
+});
+
+test('connectFollowUpTelemetryListener registers health.worker handlers for daemon delivery', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const registrations = [];
+  const session = {
+    on(topic, callback) {
+      const registration = { topic, callback, active: true };
+      registrations.push(registration);
+      return () => {
+        registration.active = false;
+      };
+    },
+  };
+  const handled = [];
+  const listener = await connectFollowUpTelemetryListener({
+    rootDir,
+    env: {
+      ...process.env,
+      AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+      HQ_ROOT: path.join(rootDir, 'agent-os-hq'),
+    },
+    connectAppContractImpl: async (options) => {
+      assert.equal(options.app_id, 'adversarial-review');
+      assert.deepEqual(options.subscribes, ['health.worker.*', 'token.*']);
+      return session;
+    },
+    handleTelemetryEventImpl: async (input) => {
+      handled.push(input);
+      return { action: 'active' };
+    },
+    log: { log() {}, warn() {}, error() {} },
+  });
+
+  assert.deepEqual(listener.subscriptions, ['health.worker.*']);
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0].topic, 'health.worker.*');
+
+  await registrations[0].callback(
+    { lrq: 'lrq_listener_delivery', status: 'succeeded' },
+    'health.worker.terminal.lrq_listener_delivery',
+  );
+
+  assert.equal(handled.length, 1);
+  assert.equal(handled[0].rootDir, rootDir);
+  assert.equal(handled[0].topic, 'health.worker.terminal.lrq_listener_delivery');
+  assert.deepEqual(handled[0].event, { lrq: 'lrq_listener_delivery', status: 'succeeded' });
+
+  listener.dispose();
+  assert.equal(registrations[0].active, false);
+});
+
+test('attachFollowUpTelemetryListeners skips non-worker subscription topics', () => {
+  const registrations = [];
+  const listener = attachFollowUpTelemetryListeners({
+    session: {
+      on(topic, callback) {
+        registrations.push({ topic, callback });
+        return () => {};
+      },
+    },
+    subscribes: ['token.*'],
+  });
+
+  assert.deepEqual(listener.subscriptions, []);
+  assert.deepEqual(registrations, []);
 });
 
 test('dispatchRemediationViaHq rejects App Contract tickets without dispatch_id', async () => {

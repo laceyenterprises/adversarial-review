@@ -4951,17 +4951,6 @@ function readReconcileClaimLock(lockPath) {
   }
 }
 
-function isPidAlive(pid) {
-  const numericPid = Number(pid);
-  if (!Number.isInteger(numericPid) || numericPid <= 0) return false;
-  try {
-    process.kill(numericPid, 0);
-    return true;
-  } catch (err) {
-    return err?.code === 'EPERM';
-  }
-}
-
 function tryAcquireFollowUpReconcileClaim({ jobPath, now = () => new Date().toISOString(), ownerPid = process.pid } = {}) {
   const lockPath = reconcileClaimPath(jobPath);
   const claimedAt = now();
@@ -4979,7 +4968,7 @@ function tryAcquireFollowUpReconcileClaim({ jobPath, now = () => new Date().toIS
   const stale = corruptOrInvalid
     || !hasValidClaimedAt
     || (Number.isFinite(nowMs) && nowMs - claimedAtMs > FOLLOW_UP_RECONCILE_CLAIM_STALE_MS);
-  if (!stale || isPidAlive(existing?.ownerPid)) {
+  if (!stale) {
     return {
       acquired: false,
       lockPath,
@@ -5080,7 +5069,7 @@ function cleanupReconcileClaimArtifacts({
     const stale = existing === null
       || !Number.isFinite(claimedAtMs)
       || lockAgeMs > staleMs;
-    if (!stale || isPidAlive(existing?.ownerPid)) {
+    if (!stale) {
       skipped += 1;
       continue;
     }
@@ -5139,7 +5128,31 @@ async function reconcileInProgressFollowUpJobs({
       continue;
     }
     try {
-      const currentJob = readFollowUpJob(jobPath);
+      if (!existsSync(jobPath)) {
+        results.push({
+          action: 'skipped',
+          reason: 'follow-up-job-moved',
+          job,
+          jobPath,
+        });
+        continue;
+      }
+      let currentJob;
+      try {
+        currentJob = readFollowUpJob(jobPath);
+      } catch (err) {
+        const missing = err?.code === 'ENOENT';
+        log.warn?.(
+          `[follow-up-remediation] skipped unreadable in-progress job ${jobPath}: ${err?.message || err}`
+        );
+        results.push({
+          action: 'skipped',
+          reason: missing ? 'follow-up-job-moved' : 'follow-up-job-read-failed',
+          job,
+          jobPath,
+        });
+        continue;
+      }
       const result = await reconcileFollowUpJob({
         rootDir,
         job: currentJob,
@@ -5309,9 +5322,10 @@ async function connectFollowUpTelemetryListener({
   if (topics.length === 0) {
     return { session: null, subscriptions: [], dispose: () => {} };
   }
+  const mode = resolveAdversarialReviewAppMode(env);
   const session = await connectAppContractImpl({
     app_id: 'adversarial-review',
-    mode: resolveAdversarialReviewAppMode(env),
+    mode,
     hqRoot,
     subscribes,
   });
@@ -5322,7 +5336,15 @@ async function connectFollowUpTelemetryListener({
     log,
     ...listenerOptions,
   });
-  log.log?.(`[follow-up-remediation] App Contract telemetry listener subscribed to ${listener.subscriptions.join(',')}`);
+  const topicList = listener.subscriptions.join(',');
+  if (mode === 'agent-os') {
+    log.log?.(
+      `[follow-up-remediation] App Contract telemetry listener registered for ${topicList}; ` +
+      'inbound topic delivery transport is pending, so periodic reconcile remains authoritative'
+    );
+  } else {
+    log.log?.(`[follow-up-remediation] App Contract telemetry listener subscribed to ${topicList}`);
+  }
   return listener;
 }
 

@@ -1105,20 +1105,26 @@ in-memory standalone App Contract session because the worker record would look
 dispatched without a backing worker. The durable worker record must still
 preserve the same reconciliation invariants as the local lane:
 
-The follow-up daemon starts a long-lived App Contract telemetry listener before
-entering its periodic tick loop and registers handlers for the configured
+The follow-up daemon registers App Contract telemetry subscriptions before
+entering its periodic tick loop and installs handlers for the configured
 `apps.adversarial-review.subscribes` topics from `config.yaml`. The shipped
-subscription set includes `health.worker.*` so delivered
-`health.worker.terminal.<launchRequestId>` worker-completion events route into
-`handleRemediationTelemetryEvent`, and `token.*` remains reserved for future
-token lifecycle notices. Topic delivery is an acceleration path, not a separate
-state machine: the periodic follow-up reconcile tick remains authoritative and
-continues to scan `data/follow-up-jobs/in-progress/`. Both the topic handler and
-the periodic scanner acquire the same short-lived per-job reconcile claim before
-calling `reconcileFollowUpJob`; if another reconcile owns that job, the topic
-handler skips and lets the owner finish. This preserves the single-writer
-invariant for side effects such as re-review row resets, branch-contamination
-audits, lifecycle cancellation, and terminal comment delivery.
+subscription set includes `health.worker.*`, and `token.*` remains reserved for
+future token lifecycle notices. In `agent-os` mode this is currently a staged
+registration: the request/response App Contract session has no inbound delivery
+transport that feeds topics into `session.emitTopic(...)`, so production
+convergence still depends on the periodic scanner. When an inbound transport is
+added, delivered `health.worker.terminal.<launchRequestId>` worker-completion
+events will route into `handleRemediationTelemetryEvent` as an acceleration
+path, not a separate state machine: the periodic follow-up reconcile tick
+remains authoritative and continues to scan
+`data/follow-up-jobs/in-progress/`. Both the topic handler and the periodic
+scanner acquire the same short-lived per-job reconcile claim before calling
+`reconcileFollowUpJob`; if another reconcile owns that job, the topic handler
+skips and lets the owner finish. This preserves the single-writer invariant for
+side effects such as re-review row resets, branch-contamination audits,
+lifecycle cancellation, and terminal comment delivery. Reconcile claims older
+than the stale window are reclaimable by age, so pid reuse cannot indefinitely
+protect an abandoned claim left by a crashed daemon.
 
 `health.worker.terminal.<launchRequestId>` events may short-circuit the HQ
 status poll only for `status:"succeeded"`. Success remains gated by the

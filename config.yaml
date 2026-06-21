@@ -26,9 +26,23 @@ __aliases:
 # quota-capped (reusing the HRR quota-exhaustion signal); `off` preserves the
 # pre-GMW claude↔codex routing. Gemini NEVER reviews a [gemini]-built PR.
 # Env override: ADVERSARIAL_REVIEW_GEMINI_REVIEWER_MODE / AGENT_OS_REVIEWER_GEMINI_MODE.
+# Runtime defaults to the direct Gemini CLI. Set `runtime: antigravity` to use
+# the Antigravity account pool; watcher boot refuses that mode unless at least
+# one account is listed below. Token files may be literal filesystem paths or
+# op:// secret refs resolved by the launch wrapper; never place token contents
+# in this file.
+# Env overrides:
+#   AGENT_OS_REVIEWER_GEMINI_RUNTIME / ADVERSARIAL_REVIEW_GEMINI_RUNTIME
+#   AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_ACCOUNTS /
+#     ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_ACCOUNTS
+# The accounts env value is a JSON array, e.g.
+#   [{"id":"primary","tokenFile":"op://vault/item/token"}]
 reviewer:
   gemini:
     mode: always-on                 # enum: off / fallback / always-on
+    runtime: cli                    # enum: cli / antigravity
+    antigravity:
+      accounts: []                  # ordered list of {id, tokenFile}
 
 # Role pins. Canonical home is the top-level config.yaml; these are the
 # module-internal defaults when the operator hasn't pinned a value there.

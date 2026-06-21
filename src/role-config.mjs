@@ -20,10 +20,8 @@
 // or override `topPath` to make the cascade hermetic against the real
 // `~/agent-os/config.yaml` on the host.
 
-import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import yaml from 'js-yaml';
 
 import {
   AgentOSConfigError,
@@ -63,6 +61,8 @@ function reshapeLoaderError(err, contextKey) {
   if (!source.startsWith('env:')) return err;
   const envName = source.slice('env:'.length);
   const canonicalKey = err.key || contextKey;
+  const enumLike = Array.isArray(err.allowed) || (typeof err.expected === 'string' && /^one of /.test(err.expected));
+  if (!enumLike) return err;
   // CFG-02 round-1 review B4 fix: prefer structured `err.allowed`
   // (an array; future loader shape) over parsing `err.expected`
   // (a human-display string). When neither shape works, the
@@ -76,7 +76,10 @@ function reshapeLoaderError(err, contextKey) {
   const got = err.got !== null && err.got !== undefined
     ? JSON.stringify(err.got)
     : '<unset>';
-  const message = `${envName} must be one of: ${allowedForLegacyMessage(canonicalKey, allowed)}; got ${got} (canonical key: ${canonicalKey})`;
+  const allowedText = allowedForLegacyMessage(canonicalKey, allowed);
+  const message = canonicalKey === 'reviewer.gemini.runtime'
+    ? `${canonicalKey}: ${envName} must be one of: ${allowedText}; got ${got}`
+    : `${envName} must be one of: ${allowedText}; got ${got} (canonical key: ${canonicalKey})`;
   const wrapped = new AgentOSConfigError(message, {
     key: canonicalKey,
     expected: err.expected,
@@ -150,6 +153,8 @@ const ROLE_ENV_NAMES_TO_BLANK_PRUNE = new Set([
   'ADVERSARIAL_REVIEW_GEMINI_REVIEWER_MODE',
   'AGENT_OS_REVIEWER_GEMINI_RUNTIME',
   'ADVERSARIAL_REVIEW_GEMINI_RUNTIME',
+  'AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_ACCOUNTS',
+  'ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_ACCOUNTS',
 ]);
 
 function pruneBlankRoleEnvVars(env) {
@@ -315,83 +320,101 @@ export function resolveGeminiReviewerMode({
   return cfg.get('reviewer.gemini.mode', 'always-on');
 }
 
-function localSibling(path) {
-  if (!path) return null;
-  if (path.endsWith('.yaml')) return join(dirname(path), `${path.split('/').pop().slice(0, -'.yaml'.length)}.local.yaml`);
-  if (path.endsWith('.yml')) return join(dirname(path), `${path.split('/').pop().slice(0, -'.yml'.length)}.local.yml`);
-  return null;
-}
-
-function readGeminiRuntimeFromYaml(path) {
-  if (!path || !existsSync(path)) return null;
-  let doc;
-  try {
-    doc = yaml.load(readFileSync(path, 'utf8'));
-  } catch (err) {
-    throw new AgentOSConfigError(
-      `reviewer.gemini.runtime config file is not valid YAML: ${err.message}`,
-      {
-        key: 'reviewer.gemini.runtime',
-        expected: 'valid YAML with reviewer.gemini.runtime set to cli or antigravity',
-        got: err.message,
-        source: path,
-      },
-    );
-  }
-  const value = doc?.reviewer?.gemini?.runtime;
-  return typeof value === 'string' && value.trim() ? value.trim() : null;
-}
-
-function normalizeGeminiRuntime(value, source = 'config') {
-  const runtime = String(value || '').trim().toLowerCase();
-  if (!runtime) return null;
-  if (runtime === 'cli' || runtime === 'antigravity') return runtime;
-  throw new AgentOSConfigError(
-    `reviewer.gemini.runtime must be one of: cli, antigravity; got ${JSON.stringify(value)}`,
-    {
-      key: 'reviewer.gemini.runtime',
-      expected: 'one of ["cli", "antigravity"]',
-      allowed: ['cli', 'antigravity'],
-      got: value,
-      source,
-    },
-  );
-}
-
-// resolveGeminiRuntime — temporary AGR-03 selector for Gemini backend wiring.
-// AGR-04 will move this into the strict schema. Until then this resolver keeps
-// the same cascade shape without teaching the schema a new key in this ticket.
+// resolveGeminiRuntime — returns the Gemini reviewer runtime
+// (`cli` | `antigravity`) through the same file→env cascade as
+// `resolveGeminiReviewerMode`. Default is `cli`.
 export function resolveGeminiRuntime({
   env = process.env,
   topPath,
   modulePaths,
   loaderImpl,
 } = {}) {
-  if (loaderImpl) {
-    const cfg = loadRoleConfig({
+  let cfg;
+  try {
+    cfg = loadRoleConfig({
       env,
       topPath,
       modulePaths,
       loaderImpl,
       contextKey: 'reviewer.gemini.runtime',
     });
-    return normalizeGeminiRuntime(cfg.get('reviewer.gemini.runtime', 'cli'), 'loader') || 'cli';
+  } catch (err) {
+    if (err instanceof AgentOSConfigError && !err.key) {
+      const wrapped = new AgentOSConfigError(
+        `reviewer.gemini.runtime: ${err.message}`,
+        {
+          key: 'reviewer.gemini.runtime',
+          expected: err.expected,
+          got: err.got,
+          source: err.source,
+        },
+      );
+      wrapped.cause = err;
+      throw wrapped;
+    }
+    throw err;
   }
+  return cfg.get('reviewer.gemini.runtime', 'cli');
+}
 
-  const modulePathsResolved = modulePaths || [MODULE_CONFIG_PATH];
-  let resolved = null;
-  for (const path of modulePathsResolved) {
-    resolved = readGeminiRuntimeFromYaml(path) || resolved;
-    resolved = readGeminiRuntimeFromYaml(localSibling(path)) || resolved;
+function normalizeAntigravityAccounts(accounts, source = 'config') {
+  if (!Array.isArray(accounts)) {
+    throw new AgentOSConfigError(
+      'reviewer.gemini.antigravity.accounts must be a list of {id, tokenFile} entries',
+      {
+        key: 'reviewer.gemini.antigravity.accounts',
+        expected: 'list of {id, tokenFile}',
+        got: accounts,
+        source,
+      },
+    );
   }
-  const topPathResolved = topPath || env.AGENT_OS_CONFIG_PATH || null;
-  resolved = readGeminiRuntimeFromYaml(topPathResolved) || resolved;
-  resolved = readGeminiRuntimeFromYaml(localSibling(topPathResolved)) || resolved;
+  return accounts.map((account, index) => {
+    const key = `reviewer.gemini.antigravity.accounts[${index}]`;
+    if (!account || typeof account !== 'object' || Array.isArray(account)) {
+      throw new AgentOSConfigError(
+        `${key} must be a mapping with id and tokenFile`,
+        { key, expected: '{id, tokenFile}', got: account, source },
+      );
+    }
+    const id = typeof account.id === 'string' ? account.id.trim() : '';
+    const tokenFile = typeof account.tokenFile === 'string' ? account.tokenFile.trim() : '';
+    if (!id) {
+      throw new AgentOSConfigError(
+        `${key}.id must be a non-empty string`,
+        { key: `${key}.id`, expected: 'non-empty string', got: account.id, source },
+      );
+    }
+    if (!tokenFile) {
+      throw new AgentOSConfigError(
+        `${key}.tokenFile must be a non-empty path or op:// secret reference`,
+        { key: `${key}.tokenFile`, expected: 'non-empty path or op:// secret reference', got: account.tokenFile, source },
+      );
+    }
+    return { id, tokenFile };
+  });
+}
 
-  const envPruned = pruneBlankRoleEnvVars(env);
-  resolved = envPruned.AGENT_OS_REVIEWER_GEMINI_RUNTIME || resolved;
-  resolved = envPruned.ADVERSARIAL_REVIEW_GEMINI_RUNTIME || resolved;
-  return normalizeGeminiRuntime(resolved, 'config') || 'cli';
+// resolveAntigravityAccounts — returns the ordered account list used by the
+// Antigravity Gemini runtime. `tokenFile` is metadata only here; it may be a
+// literal path or an op:// secret reference and is never resolved or printed.
+export function resolveAntigravityAccounts({
+  env = process.env,
+  topPath,
+  modulePaths,
+  loaderImpl,
+} = {}) {
+  const cfg = loadRoleConfig({
+    env,
+    topPath,
+    modulePaths,
+    loaderImpl,
+    contextKey: 'reviewer.gemini.antigravity.accounts',
+  });
+  return normalizeAntigravityAccounts(
+    cfg.get('reviewer.gemini.antigravity.accounts', []),
+    'loader',
+  );
 }
 
 // resolveDefaultMergeAgentWorkerClass — returns the merge-agent worker
@@ -418,11 +441,13 @@ export function resolveDefaultMergeAgentWorkerClass({
 export function validateStartupRoleConfig({
   env = process.env,
   topPath,
+  modulePaths,
   loaderImpl,
 } = {}) {
   loadRoleConfig({
     env,
     topPath,
+    modulePaths,
     loaderImpl,
     contextKey: null,
   });

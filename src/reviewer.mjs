@@ -2500,9 +2500,16 @@ async function reviewWithGemini(diff, extraContext = '', {
   if (runtime !== 'cli' && runtime !== 'antigravity') {
     throw new Error(`Unsupported Gemini runtime: ${runtime}`);
   }
+
+  // Strip API keys (incl. GEMINI_API_KEY / GOOGLE_API_KEY) before any Gemini
+  // subprocess probe or review spawn so the runtime exercises OAuth only.
+  const { env } = scrubOAuthFallbackEnv({
+    ...process.env,
+    HOME: process.env.HOME || homedir(),
+  });
   console.error('[reviewWithGemini] asserting OAuth...');
   if (runtime === 'antigravity') {
-    await assertAgyAuthImpl({ agyCli: AGY_CLI, env: process.env });
+    await assertAgyAuthImpl({ agyCli: AGY_CLI, env });
   } else {
     await assertOAuthImpl();
   }
@@ -2511,14 +2518,6 @@ async function reviewWithGemini(diff, extraContext = '', {
   const promptPrefix = buildReviewerPromptPrefix({ stage: promptStage });
   const prompt = `${promptPrefix}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
   const model = resolveGeminiReviewerModel();
-
-  // Strip API keys (incl. GEMINI_API_KEY / GOOGLE_API_KEY) so the gemini CLI
-  // falls through to OAuth. Pin HOME so it reads the same oauth_creds.json
-  // asserted above.
-  const { env } = scrubOAuthFallbackEnv({
-    ...process.env,
-    HOME: process.env.HOME || homedir(),
-  });
 
   let stdout = '';
   let stderr = '';

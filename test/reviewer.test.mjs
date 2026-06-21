@@ -1804,11 +1804,17 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   assert.equal(result.reviewText, 'Antigravity agy review');
   assert.equal(authCalls.length, 1);
   assert.equal(authCalls[0].agyCli, AGY_CLI);
+  assert.equal(authCalls[0].env.HOME, '/tmp/agy-home');
+  assert.equal(authCalls[0].env.GEMINI_API_KEY, undefined);
+  assert.equal(authCalls[0].env.GOOGLE_API_KEY, undefined);
+  assert.equal(authCalls[0].env.GEMINI_OAUTH_ACCESS_TOKEN, undefined);
+  assert.equal(authCalls[0].env.GEMINI_ANTIGRAVITY_ACCOUNT, undefined);
   assert.equal(spawnCalls.length, 1);
   assert.equal(spawnCalls[0].agyCli, AGY_CLI);
   assert.deepEqual(spawnCalls[0].args, ['--print', '-m', 'gemini-2.5-pro']);
   assert.match(spawnCalls[0].prompt, /AGY CONTEXT/);
   assert.match(spawnCalls[0].prompt, /```diff\n\+diff/);
+  assert.strictEqual(authCalls[0].env, spawnCalls[0].env);
   assert.equal(spawnCalls[0].env.HOME, '/tmp/agy-home');
   assert.equal(spawnCalls[0].env.GEMINI_API_KEY, undefined);
   assert.equal(spawnCalls[0].env.GOOGLE_API_KEY, undefined);

@@ -303,7 +303,7 @@ for every supported title prefix:
 The exported GitHub-PR route helpers and watcher dispatch path then apply
 `reviewer.gemini.mode` through the same effective-route helper. The default
 mode is `off`; operators must explicitly enable Gemini routing after the
-Antigravity reviewer accounts are provisioned.
+Antigravity reviewer runtime is provisioned.
 
 `routePR` helpers use the shared `(title, subject, options)` call shape; wrappers
 that do not need subject context still pass the subject through so future
@@ -358,6 +358,28 @@ as the GitHub App author `lacey-gemini-reviewer[bot]`, captures reviews against
 that canonical login plus the legacy `gemini-reviewer-lacey` alias, and uses
 `GH_GEMINI_REVIEWER_TOKEN`. No same-family waiver is inferred for `[opencode]`
 without a future explicit writer-family config knob.
+
+### Gemini Antigravity Runtime
+
+`reviewer.gemini.runtime: antigravity` delegates the live reviewer invocation to
+the `agy` CLI instead of the historical file-backed account-rotation bridge.
+`reviewWithGemini` builds one OAuth-scrubbed environment before any Antigravity
+probe or review spawn, stripping `GEMINI_API_KEY`, `GOOGLE_API_KEY`, and the
+rest of the canonical OAuth fallback env set. The fail-closed pre-flight first
+checks for the macOS keychain item `Gemini Safe Storage` and then runs
+`agy models` with that same scrubbed env. The review itself runs
+`agy --print -m <model>` and receives the complete reviewer prompt on stdin.
+
+Because auth and provider quota behavior are delegated to `agy`, the live
+Antigravity path no longer injects per-account access tokens, rotates through
+`reviewer.gemini.antigravity.accounts[]`, marks bridge accounts as
+rate-limited, pages all-capped account pools, emits AGR-06 account telemetry, or
+synthesizes the old bridge-level `quotaHoldDecision`. Operators should treat an
+`agy` quota or auth failure as a normal reviewer subprocess failure unless a
+future `agy` integration exposes a structured reset signal that can be mapped
+back into the watcher quota-hold contract. The legacy account config remains
+parseable for older modules, but it is not the dispatch contract for the live
+Antigravity reviewer runtime.
 
 Follow-up remediation defaults to cross-model routing by PR builder tag:
 `[codex]` PRs route to `claude-code`, `[claude-code]` PRs route to `codex`,

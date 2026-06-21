@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import { infraRecoverableFailureClass } from '../src/reviewer-failure-classification.mjs';
 
 // The atomic-claim SQL lives inline in src/watcher.mjs (it's bound to
 // the module's prepared-statement set there). The watcher module has
@@ -387,4 +388,44 @@ test('atomic claim refuses pending row from a different PR — repo/pr scoping i
   assert.equal(claim.changes, 0);
   const row = readRow(db);
   assert.equal(row.review_status, 'pending', 'unrelated row not touched');
+});
+
+// LAC-1359 follow-up (2026-06-21 review): the JS classifier
+// (infraRecoverableFailureClass) and the inline SQL infra-recovery claim
+// predicate are SEPARATE copies of the reviewer-command-failed message contract.
+// They happen to agree today, but nothing locks that — a future edit to one
+// (e.g. reverting the SQL no-code branch to an equality match) would silently
+// strand rows the classifier accepts, repeating a self-inconsistent
+// classify/claim decision every poll. This parity guard fails the moment they
+// drift, across all realistic stored-message shapes (single-space `[unknown]
+// Command failed ...` is what err.message yields; multiline carries stdout/stderr).
+test('classifier <-> SQL claim parity for reviewer-command-failed (no drift)', () => {
+  const cases = [
+    '[unknown] Command failed',
+    '[unknown] Command failed with code 1',
+    '[unknown] Command failed\nstdout tail:\n[reviewer] Starting review: laceyenterprises/agent-os#2322',
+    '[unknown] Command failed with code 137\nstderr tail:\nkilled',
+    '[unknown] reviewer produced malformed verdict json',
+    '[reviewer-timeout] exceeded 1800s',
+    '[forbidden-fallback] api-key fallback detected',
+    '[cascade] litellm/upstream cascade',
+  ];
+  for (const failureMessage of cases) {
+    const jsIsCommandFailed =
+      infraRecoverableFailureClass({ failure_message: failureMessage }) === 'reviewer-command-failed';
+    const db = setupDb();
+    seedReviewRow(db, {
+      reviewStatus: 'failed',
+      failedAt: '2026-05-02T18:05:00.000Z',
+      failureMessage,
+    });
+    const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'reviewer-command-failed');
+    const sqlClaims = claim.changes === 1;
+    assert.equal(
+      sqlClaims,
+      jsIsCommandFailed,
+      `classifier/SQL disagree for ${JSON.stringify(failureMessage)}: JS=${jsIsCommandFailed} SQL=${sqlClaims}`,
+    );
+    db.close();
+  }
 });

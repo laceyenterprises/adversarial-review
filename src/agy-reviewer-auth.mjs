@@ -3,7 +3,8 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
-const AGY_KEYCHAIN_SERVICE = 'Gemini Safe Storage';
+const AGY_KEYCHAIN_SERVICE = 'gemini';
+const AGY_KEYCHAIN_ACCOUNT = 'antigravity';
 const DEFAULT_AGY_AUTH_PROBE_TIMEOUT_MS = 5_000;
 const DEFAULT_AGY_AUTH_PROBE_MAX_ATTEMPTS = 3;
 const DEFAULT_AGY_AUTH_PROBE_RETRY_BACKOFF_MS = 250;
@@ -11,7 +12,7 @@ const DEFAULT_AGY_AUTH_PROBE_SUCCESS_TTL_MS = 60_000;
 const AGY_KEYCHAIN_REMEDIATION =
   'Antigravity reviewer auth requires launchd-spawned airlock processes to read the per-user keychain item. '
   + 'Known remediation: unlock the airlock keychain before daemon-spawned work runs and grant command-line access with '
-  + 'security set-generic-password-partition-list -S apple-tool:,apple: -s "Gemini Safe Storage" -k <keychain-password>.';
+  + 'security set-generic-password-partition-list -S apple-tool:,apple: -s gemini -a antigravity -k <keychain-password>.';
 const AGY_TRANSIENT_REMEDIATION =
   'Antigravity agy auth preflight hit a transient agy transport failure. Retry after the local agy/network path is healthy; '
   + 'if this persists, run `agy models` under the same launchd user environment and inspect stderr.';
@@ -78,7 +79,7 @@ function failure(reason, detail = '', remediation = AGY_KEYCHAIN_REMEDIATION) {
   return {
     ok: false,
     reason,
-    keychainItem: AGY_KEYCHAIN_SERVICE,
+    keychainItem: `${AGY_KEYCHAIN_SERVICE}/${AGY_KEYCHAIN_ACCOUNT}`,
     probe: 'agy models',
     detail,
     remediation,
@@ -137,7 +138,7 @@ async function checkAgyReviewerAuthOnce({
   securityCli = 'security',
 } = {}) {
   try {
-    await runProbe(securityCli, ['find-generic-password', '-s', AGY_KEYCHAIN_SERVICE], {
+    await runProbe(securityCli, ['find-generic-password', '-s', AGY_KEYCHAIN_SERVICE, '-a', AGY_KEYCHAIN_ACCOUNT], {
       execFileImpl,
       timeout: timeoutMs,
       env,
@@ -168,7 +169,7 @@ async function checkAgyReviewerAuthOnce({
   return {
     ok: true,
     reason: null,
-    keychainItem: AGY_KEYCHAIN_SERVICE,
+    keychainItem: `${AGY_KEYCHAIN_SERVICE}/${AGY_KEYCHAIN_ACCOUNT}`,
     probe: 'agy models',
     remediation: AGY_KEYCHAIN_REMEDIATION,
   };
@@ -228,6 +229,7 @@ export {
   DEFAULT_AGY_AUTH_PROBE_RETRY_BACKOFF_MS,
   DEFAULT_AGY_AUTH_PROBE_SUCCESS_TTL_MS,
   AGY_KEYCHAIN_SERVICE,
+  AGY_KEYCHAIN_ACCOUNT,
   AGY_KEYCHAIN_REMEDIATION,
   AGY_TRANSIENT_REMEDIATION,
   DEFAULT_AGY_AUTH_PROBE_TIMEOUT_MS,

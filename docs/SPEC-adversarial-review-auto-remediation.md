@@ -377,7 +377,7 @@ the `agy` CLI instead of the historical file-backed account-rotation bridge.
 `reviewWithGemini` builds one OAuth-scrubbed environment before any Antigravity
 probe or review spawn, stripping `GEMINI_API_KEY`, `GOOGLE_API_KEY`, and the
 rest of the canonical OAuth fallback env set. The fail-closed pre-flight first
-checks for the macOS keychain item `Gemini Safe Storage` and then runs
+checks for the macOS keychain item `gemini`/`antigravity` and then runs
 `agy models` with that same scrubbed env. Timeout-shaped keychain probe
 failures and transient `agy models` transport failures use bounded
 retry/backoff before surfacing an OAuth failure; definitive missing-keychain and

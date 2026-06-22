@@ -2,11 +2,11 @@
 
 This runbook covers the Antigravity Gemini reviewer runtime. The live reviewer
 path now delegates Antigravity auth and quota behavior to the `agy` CLI, which
-uses the per-user macOS keychain item `Gemini Safe Storage`. The older AGR-01
-file-backed OAuth bridge remains documented below only for legacy credential
-maintenance; `reviewWithGemini(runtime=antigravity)` no longer selects bridge
-accounts, injects per-account access tokens, marks rate limits, pages
-all-capped account pools, or emits AGR-06 account telemetry.
+uses the per-user macOS keychain generic-password item service `gemini`, account
+`antigravity`. The older AGR-01 file-backed OAuth bridge remains documented
+below only for legacy credential maintenance; `reviewWithGemini(runtime=antigravity)`
+no longer selects bridge accounts, injects per-account access tokens, marks
+rate limits, pages all-capped account pools, or emits AGR-06 account telemetry.
 
 ## Scope
 
@@ -18,7 +18,7 @@ all-capped account pools, or emits AGR-06 account telemetry.
 - `reviewer.gemini.runtime: antigravity` invokes `agy --print -m <model>` and
   feeds the review prompt on stdin.
 - `src/agy-reviewer-auth.mjs` owns the fail-closed pre-flight: first
-  `security find-generic-password -s "Gemini Safe Storage"`, then `agy models`.
+  `security find-generic-password -s gemini -a antigravity`, then `agy models`.
   Both probes run with the same OAuth-scrubbed env used for the review spawn,
   so `GEMINI_API_KEY` and `GOOGLE_API_KEY` cannot satisfy the probe. The
   default probe timeout is 5s. Timeout-shaped keychain probe failures and
@@ -78,7 +78,7 @@ reviewer:
     runtime: antigravity
 ```
 
-Before spawning a review, the runtime checks that the `Gemini Safe Storage`
+Before spawning a review, the runtime checks that the `gemini`/`antigravity`
 keychain item exists and that `agy models` returns non-empty stdout. Transient
 timeouts and `agy models` network/transport blips are retried before
 escalation. The keychain existence probe is only the fast-path for a truly
@@ -86,6 +86,11 @@ absent item; `agy models` is the authoritative readability/ACL check. If the
 keychain item is definitively missing, `agy models` returns empty output, or a
 non-transient probe failure persists, the reviewer fails closed with an OAuth
 error and remediation text matched to the failed probe class.
+
+Troubleshooting logs and remediation surfaces report the probed keychain item as
+`keychainItem: gemini/antigravity`. Search for that composite value when
+diagnosing an Antigravity reviewer auth failure; the older `Gemini Safe Storage`
+item belongs to the desktop app path and is not the live `agy` selector.
 
 Watcher startup also runs this probe when `runtime: antigravity` is configured.
 Startup logs a warning on failure rather than refusing to boot; the per-review

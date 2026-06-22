@@ -28,6 +28,16 @@ rate limits, pages all-capped account pools, or emits AGR-06 account telemetry.
   runs the same probe as a warning-only visibility check when the runtime is
   `antigravity`, and successful real probes are cached briefly in the process
   that performs the check.
+- `agy` may leave a language-server descendant alive after the direct command
+  exits, with that descendant still holding inherited stdout/stderr pipes. The
+  auth preflight therefore runs `agy models` in a detached process group and
+  treats main-process exit as authoritative: after the direct `agy` process
+  exits, the runtime kills the group, drains already-buffered stdout/stderr
+  until close, and reports the direct process's real output/status instead of a
+  synthetic timeout. The live reviewer spawn uses the same contract for
+  `agy --print -m <model>` via process-group reaping. Killing descendants is
+  safe only for these dedicated AGY probe/review groups after the direct process
+  has exited, or when the configured timeout/max-buffer guard has fired.
 - Quota and rate-limit handling for the live Antigravity reviewer is whatever
   `agy` returns to the subprocess. The old bridge-level hold decision,
   all-capped page, and per-account rate-limit marking are retired for this
@@ -86,6 +96,17 @@ absent item; `agy models` is the authoritative readability/ACL check. If the
 keychain item is definitively missing, `agy models` returns empty output, or a
 non-transient probe failure persists, the reviewer fails closed with an OAuth
 error and remediation text matched to the failed probe class.
+
+If `agy models` or `agy --print` appears to return useful output but the caller
+hangs until timeout, suspect the inherited-pipe language-server failure mode
+first. Do not replace the runtime helper with `execFile`, command substitution,
+or another capture primitive that waits for pipe EOF from all descendants. The
+expected diagnostic shape after the fix is the direct `agy` result: successful
+model output, a normal non-zero `agy` failure, `agy-probe-empty`, or the
+configured timeout/max-buffer guard. A recurring `agy-probe-timeout` after the
+group-reaping path usually means the direct `agy` process itself failed to exit
+inside `AGY_AUTH_PROBE_TIMEOUT_MS`, not merely that an orphaned language server
+kept the pipes open.
 
 Troubleshooting logs and remediation surfaces report the probed keychain item as
 `keychainItem: gemini/antigravity`. Search for that composite value when

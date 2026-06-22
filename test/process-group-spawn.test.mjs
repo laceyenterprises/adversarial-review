@@ -278,3 +278,55 @@ test('detached reviewer process group survives parent SIGTERM for daemon bounce 
     rmSync(fixtureDir, { recursive: true, force: true });
   }
 });
+
+// Regression: agy spawns a long-lived language-server grandchild that inherits
+// the stdout/stderr pipes. Resolving on 'close' (stdio EOF) then waits for that
+// orphan to release the pipe, wedging the capture until the progress/wall
+// timeout — the root cause of the `agy models` 5s preflight timeouts. The
+// `reapGroupOnExit` opt-in must SIGKILL the group once the main child exits.
+const LEAKY_GRANDCHILD_SCRIPT = (pidPath) =>
+  `printf 'READY\\n'; sleep 30 & printf '%s' "$!" > ${JSON.stringify(pidPath)}; exit 0`;
+
+test('reapGroupOnExit resolves promptly when a leaked grandchild holds the stdout pipe', async () => {
+  const fixtureDir = mkdtempSync(path.join(tmpdir(), 'process-group-reap-'));
+  const pidPath = path.join(fixtureDir, 'grandchild.pid');
+  try {
+    const start = Date.now();
+    const result = await spawnCapturedProcessGroup('/bin/sh', ['-c', LEAKY_GRANDCHILD_SCRIPT(pidPath)], {
+      reapGroupOnExit: true,
+      timeout: 10_000,
+      progressTimeout: 0,
+    });
+    const elapsed = Date.now() - start;
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /READY/);
+    // Must not crawl toward the 10s wall timeout: reaping lets 'close' fire
+    // right after the (near-instant) main exit.
+    assert.ok(elapsed < 5_000, `expected prompt resolve, took ${elapsed}ms`);
+    const grandchildPid = Number(readFileSync(pidPath, 'utf8').trim());
+    assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0);
+    await waitFor(() => assert.equal(processExists(grandchildPid), false));
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test('without reapGroupOnExit a leaked grandchild stalls capture until the timeout', async () => {
+  // Control: default callers are unchanged — the same fixture hits the wall
+  // timeout because the orphan holds the stdout pipe open past the main exit.
+  const fixtureDir = mkdtempSync(path.join(tmpdir(), 'process-group-noreap-'));
+  const pidPath = path.join(fixtureDir, 'grandchild.pid');
+  try {
+    const start = Date.now();
+    await assert.rejects(
+      () => spawnCapturedProcessGroup('/bin/sh', ['-c', LEAKY_GRANDCHILD_SCRIPT(pidPath)], {
+        timeout: 1_200,
+        progressTimeout: 0,
+      }),
+      (err) => err.timedOut === true,
+    );
+    assert.ok(Date.now() - start >= 1_000, 'expected to wait out the wall timeout');
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});

@@ -17,6 +17,7 @@ const SUPPORTED_OPTIONS = new Set([
   'maxBuffer',
   'onSpawn',
   'progressTimeout',
+  'reapGroupOnExit',
   'signal',
   'stderrPath',
   'stdoutPath',
@@ -117,6 +118,7 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     failureTailBytes = DEFAULT_FAILURE_TAIL_BYTES,
     stdoutPath = null,
     stderrPath = null,
+    reapGroupOnExit = false,
   } = options;
 
   return new Promise((resolve, reject) => {
@@ -317,6 +319,22 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     child.on('error', (err) => {
       finishReject(err);
     });
+
+    if (reapGroupOnExit) {
+      child.on('exit', () => {
+        if (settled) return;
+        // The main process has exited but we resolve on 'close' (stdio EOF),
+        // which can stall indefinitely when a leaked grandchild inherited our
+        // stdout/stderr pipe write-ends and keeps them open — e.g. agy's
+        // long-lived language-server child. SIGKILL the process group now that
+        // the main child is gone so those orphans are reaped, the pipes reach
+        // EOF, and 'close' fires with the main child's real exit status. This
+        // is safe: the main child is already gone (so its status is fixed),
+        // and Node still drains data already buffered in the pipes before
+        // emitting 'close'. Opt-in; default callers are unchanged.
+        signalProcessGroup(child, 'SIGKILL');
+      });
+    }
 
     child.on('close', (code, closeSignal) => {
       if (settled) return;

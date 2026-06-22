@@ -19,8 +19,7 @@ import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import yaml from 'js-yaml';
-
+import { __testYamlHooks } from '../src/config-loader.mjs';
 import { loadRoleConfig, resetRoleConfigCache } from '../src/role-config.mjs';
 import { routeSubject } from '../src/adapters/subject/github-pr/routing.mjs';
 
@@ -91,12 +90,12 @@ test('CFG-09 cache hit: repeated loadRoleConfig within a tick does not re-parse'
     // Prime the cache.
     loadRoleConfig(callArgs);
 
-    // Now spy on yaml.load — config-loader.mjs imports the same
-    // default export, so this intercepts its parses. In the full
+    // Now spy on the loader hook around yaml.load, so this intercepts
+    // config-loader.mjs parses. In the full
     // suite the process-wide LRU cache can have been reset/evicted by
     // previous config-heavy tests; allow the first measured call to
     // refresh the slot, then prove the repeated hot path stays cached.
-    const yamlLoadSpy = t.mock.method(yaml, 'load');
+    const yamlLoadSpy = t.mock.method(__testYamlHooks, 'load');
     try {
       loadRoleConfig(callArgs);
       const parseCountAfterFirstMeasuredCall = yamlLoadCountFor(yamlLoadSpy, modulePath);
@@ -198,7 +197,7 @@ test('CFG-09 N2 hot path: routeSubject parses once per tick across 10 PRs', (t) 
       assert.equal(firstRoute.reviewerModel, 'claude');
 
       // Now count parses for the remaining 9 PRs. Each should be a cache hit.
-      const yamlLoadSpy = t.mock.method(yaml, 'load');
+      const yamlLoadSpy = t.mock.method(__testYamlHooks, 'load');
       try {
         for (let i = 1; i < subjects.length; i++) {
           routeSubject(subjects[i], callOpts);

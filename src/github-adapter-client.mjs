@@ -395,8 +395,8 @@ async function writeAdapterPullRequestReview(repo, prNumber, { body, reviewerLog
   return writeGitHubAdapter('pull-request-review', { repo, prNumber, body, reviewerLogin }, options);
 }
 
-async function writeAdapterIssueComment(repo, prNumber, { body } = {}, options) {
-  return writeGitHubAdapter('issue-comment', { repo, prNumber, body }, options);
+async function writeAdapterIssueComment(repo, prNumber, { body, reviewerLogin = null } = {}, options) {
+  return writeGitHubAdapter('issue-comment', { repo, prNumber, body, reviewerLogin }, options);
 }
 
 async function writeAdapterCommitStatus(repo, headSha, {

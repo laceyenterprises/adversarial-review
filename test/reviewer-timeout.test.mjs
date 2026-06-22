@@ -2,8 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS,
+  DEFAULT_AGY_PRINT_TIMEOUT_MS,
   DEFAULT_PROGRESS_TIMEOUT_MS,
   DEFAULT_REVIEWER_TIMEOUT_MS,
+  resolveAgyPrintTimeoutMs,
+  resolveAgyReviewerSubprocessTimeoutMs,
   resolveProgressTimeoutMs,
   resolveReviewerTimeoutMs,
 } from '../src/reviewer-timeout.mjs';
@@ -66,5 +70,36 @@ test('resolveProgressTimeoutMs follows the reviewer env override parser shape', 
   assert.throws(
     () => resolveProgressTimeoutMs({ ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: 'nope' }),
     AgentOSConfigError
+  );
+});
+
+test('default agy print timeout is independent of shared reviewer timeout', () => {
+  assert.equal(DEFAULT_AGY_PRINT_TIMEOUT_MS, 19 * 60 * 1000);
+  assert.equal(resolveAgyPrintTimeoutMs({}), DEFAULT_AGY_PRINT_TIMEOUT_MS);
+  assert.equal(
+    resolveAgyPrintTimeoutMs({ AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS: '1500000' }),
+    1_500_000,
+  );
+  assert.equal(
+    resolveAgyPrintTimeoutMs({ ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS: '1250000' }),
+    1_250_000,
+  );
+});
+
+test('agy reviewer subprocess timeout is never shorter than agy print timeout', () => {
+  assert.equal(AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS, 30_000);
+  assert.equal(
+    resolveAgyReviewerSubprocessTimeoutMs(
+      { AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS: '1500000' },
+      { reviewerTimeoutMs: DEFAULT_REVIEWER_TIMEOUT_MS },
+    ),
+    1_530_000,
+  );
+  assert.equal(
+    resolveAgyReviewerSubprocessTimeoutMs(
+      { AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS: '60000' },
+      { reviewerTimeoutMs: DEFAULT_REVIEWER_TIMEOUT_MS },
+    ),
+    DEFAULT_REVIEWER_TIMEOUT_MS,
   );
 });

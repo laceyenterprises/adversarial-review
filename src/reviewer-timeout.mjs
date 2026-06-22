@@ -13,6 +13,8 @@ import { loadRoleConfig } from './role-config.mjs';
 
 const DEFAULT_REVIEWER_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_PROGRESS_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_AGY_PRINT_TIMEOUT_MS = 19 * 60 * 1000;
+const AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS = 30 * 1000;
 
 function _resolvePositiveInt(value, fallback) {
   if (value === undefined || value === null || value === '') {
@@ -47,9 +49,33 @@ function resolveProgressTimeoutMs(env = process.env, options = {}) {
   return _resolvePositiveInt(cfgValue, DEFAULT_PROGRESS_TIMEOUT_MS);
 }
 
+function resolveAgyPrintTimeoutMs(env = process.env, options = {}) {
+  const cfgValue = loadRoleConfig({
+    env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+    loaderImpl: options.loaderImpl,
+    contextKey: 'reviewer.gemini.antigravity.print_timeout_ms',
+  }).get('reviewer.gemini.antigravity.print_timeout_ms', DEFAULT_AGY_PRINT_TIMEOUT_MS);
+  return _resolvePositiveInt(cfgValue, DEFAULT_AGY_PRINT_TIMEOUT_MS);
+}
+
+function resolveAgyReviewerSubprocessTimeoutMs(env = process.env, options = {}) {
+  const reviewerTimeoutMs = options.reviewerTimeoutMs ?? resolveReviewerTimeoutMs(env, options);
+  const printTimeoutMs = options.printTimeoutMs ?? resolveAgyPrintTimeoutMs(env, options);
+  return Math.max(
+    _resolvePositiveInt(reviewerTimeoutMs, DEFAULT_REVIEWER_TIMEOUT_MS),
+    _resolvePositiveInt(printTimeoutMs, DEFAULT_AGY_PRINT_TIMEOUT_MS) + AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS,
+  );
+}
+
 export {
+  AGY_PRINT_TIMEOUT_SUBPROCESS_SLACK_MS,
+  DEFAULT_AGY_PRINT_TIMEOUT_MS,
   DEFAULT_PROGRESS_TIMEOUT_MS,
   DEFAULT_REVIEWER_TIMEOUT_MS,
+  resolveAgyPrintTimeoutMs,
+  resolveAgyReviewerSubprocessTimeoutMs,
   resolveProgressTimeoutMs,
   resolveReviewerTimeoutMs,
 };

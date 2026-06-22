@@ -35,6 +35,8 @@ __aliases:
 #   AGENT_OS_REVIEWER_GEMINI_RUNTIME / ADVERSARIAL_REVIEW_GEMINI_RUNTIME
 #   AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_ACCOUNTS /
 #     ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_ACCOUNTS
+#   AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS /
+#     ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS
 # The accounts env value is a JSON array, e.g.
 #   [{"id":"primary","tokenFile":"op://vault/item/token"}]
 reviewer:
@@ -53,6 +55,7 @@ reviewer:
     mode: off                       # enum: off / fallback / always-on
     runtime: cli                    # enum: cli / antigravity
     antigravity:
+      print_timeout_ms: 1140000     # agy --print-timeout; outer reviewer gets +30s headroom
       accounts: []                  # ordered list of {id, tokenFile}
 
 # Role pins. Canonical home is the top-level config.yaml; these are the

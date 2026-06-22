@@ -167,7 +167,7 @@ import {
   shouldEscalateReviewCycle,
 } from './review-cycle-cap.mjs';
 import { extractReviewVerdict } from './review-verdict.mjs';
-import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+import { resolveAgyReviewerSubprocessTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { makeReviewPostedProbe, reconcileReviewerSessions, reviewerBotLogin } from './reviewer-reattach.mjs';
 import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-failed-recovery.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
@@ -2949,6 +2949,13 @@ async function spawnReviewer({
     // isolation, failure classification. The `forbiddenFallbacks` arg is
     // additive opt-in beyond the canonical 8-env set the adapter always
     // strips when `oauthStripEnforced: true`.
+    const effectiveReviewerTimeoutMs = (
+      String(reviewerModel || '').toLowerCase() === 'gemini' &&
+      resolveGeminiRuntime({ env: process.env }) === 'antigravity'
+    )
+      ? resolveAgyReviewerSubprocessTimeoutMs(process.env, { reviewerTimeoutMs })
+      : reviewerTimeoutMs;
+
     const result = await reviewerRuntimeAdapter.spawnReviewer({
       model: reviewerModel,
       prompt: '',
@@ -2971,7 +2978,7 @@ async function spawnReviewer({
         crossModelReviewWaived,
         crossModelReviewWaiverReason,
       },
-      timeoutMs: reviewerTimeoutMs,
+      timeoutMs: effectiveReviewerTimeoutMs,
       sessionUuid: reviewerSessionUuid,
       forbiddenFallbacks: ['api-key', 'anthropic-api-key'],
       onReviewerPgid,

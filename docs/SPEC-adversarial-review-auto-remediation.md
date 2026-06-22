@@ -15,7 +15,18 @@ launch and the generic provenance trailer
 `Closed-By: gemini-closer (adversarial-pipe-mode)`. HAM terminal-remediation
 is the exception to the generic suffix rule: its remediation commit uses
 `Closed-By: hammer (adversarial-pipe-mode)` exactly, per the HAM predicate
-contract.
+contract. The AMA eligibility predicate trusts active HAM terminal remediation
+without full `.ok` finding-count provenance only after it independently verifies
+the HAM worker trailers, reviewed-parent/current-head match, non-empty verified
+diff, allowlisted audit-comment author, matching audit-comment body, and
+doc-currency evidence. That active lane is limited to strict non-blocking
+remediation: a settled-success-family verdict whose remaining refusal reasons are
+`non-blocking-findings-present` or `non-blocking-findings-unknown`, plus the
+accompanying `verdict-not-settled-success`. A bare
+`verdict-not-settled-success`, a `Request changes` verdict, blocking-finding
+reasons, stale-head reasons, and remediation-state reasons still require
+validated HAM evidence (`ham_terminal_remediation_validated`) or a current-head
+operator override.
 
 AMA closer dispatch must also declare the workspace repo set required by the
 closer prompt. The PR repository is always passed as the primary `--repo`. When
@@ -1549,11 +1560,12 @@ For each row the daemon must:
 The `--admin` flag is an intentional branch-protection bypass for this lane. The safety floor is therefore explicit and cumulative: the row must already be in the watcher-authorized fast-merge state, the live head must still equal the authorized SHA, CI must summarize as successful, an allowlisted `fast-merge:*` label must still be present, and `fast-merge-veto` must remain absent. If any of those predicates stop being true, the daemon must fail closed to the normal adversarial-review path or leave the row in `fast_merge_skipped` for a later poll; it must not broaden merge authority.
 
 The only supported changed-head exception is a HAM terminal-remediation commit
-directly on top of the authorized head. That exception is fail-closed and
-requires all of the following before the daemon may replace the exact merge head
-with the HAM head: the live commit's first parent is the authorized head; the
-live GitHub commit has a non-empty diff; the commit trailers include
-`Worker-Class: hammer`, `Worker-Ticket: HAM-<n>`, `Reviewed-Head:
+directly on top of the authorized head. That exception is fail-closed. For any
+lane that waives stale-head, blocking-finding, remediation-state, or non-HAM
+verdict failures, it requires all of the following before the daemon may replace
+the exact merge head with the HAM head: the live commit's first parent is the
+authorized head; the live GitHub commit has a non-empty diff; the commit trailers
+include `Worker-Class: hammer`, `Worker-Ticket: HAM-<n>`, `Reviewed-Head:
 <authorizedHeadSha>`, `Closed-By: hammer (adversarial-pipe-mode)`, and a
 parseable `Remediated-Findings` count; a PR timeline comment from an allowlisted
 hammer bot identity contains both the canonical `Closed-By` marker and the same
@@ -1564,7 +1576,16 @@ matches the exact `(repo, pr, liveHead)` tuple with a latest
 `ham_terminal_remediation_validated`. The audit JSON must be owned by the
 configured HQ owner, must not be world-writable, and an `in_progress` audit is
 authoritative only while the matching AMA closer lease for `(repo, pr, liveHead)`
-is still `dispatched`; a `succeeded` audit is terminal authority. Commit
+is still `dispatched`; a `succeeded` audit is terminal authority. In the narrow
+strict-non-blocking lane, the eligibility predicate may also accept an active HAM
+closer session when the only HAM-waived reasons are
+`non-blocking-findings-present` or `non-blocking-findings-unknown` and the paired
+`verdict-not-settled-success`, but the active state is authoritative only after
+the predicate verifies the live HAM commit, reviewed-parent/current-head match,
+non-empty diff, HAM worker trailers, allowlisted audit-comment author, matching
+audit-comment body, and doc-currency evidence from trusted inputs. That trust
+does not extend to `Request changes`, bare verdict failures, blocking findings,
+stale review heads, or unknown/pending remediation state. Commit
 trailers and PR comments are attacker-controlled corroborating evidence, not
 sufficient authority. If `HQ_ROOT` is unset, the audit record is absent,
 untrusted, not keyed to the live head, missing its matching closer lease, the

@@ -4700,6 +4700,14 @@ async function maybeDispatchAmaClosureFor({
     blockingFindingState: String(gateSnapshot.settledReview?.blockingFindingState || 'unknown').trim().toLowerCase(),
     nonBlockingFindingCount: Number(gateSnapshot.settledReview?.nonBlockingFindingCount ?? 0),
     nonBlockingFindingState: String(gateSnapshot.settledReview?.nonBlockingFindingState || 'unknown').trim().toLowerCase(),
+    // Per-finding non-blocking identities (normalized titles) from the same
+    // authoritative body the verdict/counts came from. Drives the HAM
+    // non-blocking waiver coverage gate: AMA waives non-blocking only when the
+    // HAM addressed-findings cover EVERY current identity. `null`/absent →
+    // identities unknown → fail closed (no waiver).
+    nonBlockingFindingIdentities: Array.isArray(gateSnapshot.settledReview?.nonBlockingFindingIdentities)
+      ? gateSnapshot.settledReview.nonBlockingFindingIdentities
+      : null,
     operatorApprovedEvidence: operatorApprovalEvent
       ? {
           applied: true,

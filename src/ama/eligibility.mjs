@@ -28,6 +28,7 @@ import {
   hamAuditCommentAuthorMatches,
   parseRemediatedFindingsTrailer,
 } from './ham-provenance.mjs';
+import { normalizeCoverageTitle } from '../kernel/remediation-reply.mjs';
 
 const OPERATOR_APPROVED_LABEL = 'operator-approved';
 const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
@@ -105,6 +106,7 @@ export const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @property {string=}                   blockingFindingState     `'known'` when the count is trustworthy; `'unknown'` or missing fail closed.
  * @property {number=}                   nonBlockingFindingCount  Structured non-blocking-finding count from the latest current-head review.
  * @property {string=}                   nonBlockingFindingState  `'known'` when the count is trustworthy; `'unknown'` or missing fail closed in strict mode.
+ * @property {string[]=}                 nonBlockingFindingIdentities  Normalized non-blocking finding titles parsed from the same current-head review body the counts came from. `null`/absent fails the HAM non-blocking waiver coverage gate closed.
  * @property {string=}                   prAuthor                 PR author login — audit-only in the current single-operator contract.
  * @property {string=}                   reviewerFamily           'codex' | 'claude' — audit-only field.
  */
@@ -528,21 +530,32 @@ function validateRebaseReviewCoverageEvidence(
 
 function validateHamFindingMap(findings) {
   if (!Array.isArray(findings) || findings.length === 0) {
-    return { ok: false, count: 0, blocking: 0, nonBlocking: 0 };
+    return { ok: false, count: 0, blocking: 0, nonBlocking: 0, nonBlockingTitles: [] };
   }
   let blocking = 0;
   let nonBlocking = 0;
+  // Normalized titles of the HAM's addressed NON-blocking findings. Used by the
+  // non-blocking waiver coverage gate to prove the hammer addressed EVERY
+  // current standing non-blocking finding by identity (not just by count).
+  // Reuses the same `normalizeCoverageTitle` normalizer the review-body parser
+  // uses so the two title sets compare on identical normalization.
+  const nonBlockingTitles = [];
   for (const finding of findings) {
     const title = String(finding?.title || finding?.finding || '').trim();
     const file = String(finding?.file || finding?.path || '').trim();
     const addressed = finding?.addressed === true;
     if (!title || !file || !addressed) {
-      return { ok: false, count: findings.length, blocking, nonBlocking };
+      return { ok: false, count: findings.length, blocking, nonBlocking, nonBlockingTitles };
     }
-    if (finding?.blocking === true) blocking += 1;
-    else nonBlocking += 1;
+    if (finding?.blocking === true) {
+      blocking += 1;
+    } else {
+      nonBlocking += 1;
+      const normalized = normalizeCoverageTitle(title);
+      if (normalized) nonBlockingTitles.push(normalized);
+    }
   }
-  return { ok: true, count: findings.length, blocking, nonBlocking };
+  return { ok: true, count: findings.length, blocking, nonBlocking, nonBlockingTitles };
 }
 
 function hamAuditBodyCoversFindings(body, findings) {
@@ -693,9 +706,21 @@ function validateHamTerminalRemediationEvidence(
     closedBy: closedBy === 'hammer (adversarial-pipe-mode)',
     remediatedFindings: remediatedFindingCountsMatch && blockingCountMatches,
   };
+  const activeClaimed = evidence?.enabled === true || evidence?.active === true;
+  const activeAuthorized = activeClaimed === true
+    && checks.workerClass
+    && checks.ticket
+    && checks.head
+    && checks.parent
+    && checks.nonEmptyCommit
+    && checks.auditComment
+    && checks.auditCommentAuthor
+    && checks.docCurrency
+    && checks.closedBy;
   const ok = Object.values(checks).every(Boolean);
   return {
-    active: evidence?.enabled === true || evidence?.active === true,
+    active: activeClaimed,
+    activeAuthorized,
     ok,
     checks,
     reviewedParent: verifiedParentSha || parentSha || null,
@@ -975,21 +1000,134 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const waivedByFinalHammer = [];
   let effectiveReasons = reasons;
   const waivedByHamTerminalRemediation = [];
-  const HAM_TERMINAL_REMEDIATION_WAIVABLE_REASONS = new Set([
+  // Tier 1 — non-blocking churn is TRUSTED to the entitled hammer agent on
+  // authorized active HAM evidence (without strict `.ok` finding-count
+  // provenance). A fresh adversarial review can surface new non-blocking nits on
+  // each remediated head, so requiring `.ok` (whose provenance must match the
+  // CURRENT review's finding counts) against an ever-changing non-blocking set
+  // can deadlock terminal close. The active lane still requires trusted
+  // current-head HAM commit/audit provenance; it is not a caller-controlled JSON
+  // claim.
+  const HAM_TERMINAL_NONBLOCKING_WAIVABLE_REASONS = new Set([
+    'non-blocking-findings-present',
+    'non-blocking-findings-unknown',
+  ]);
+  // Tier 2 — anything that could mask a REAL defect still requires the strict
+  // `.ok` provenance proving the hammer actually remediated it (commit +
+  // HAM-NN/closed-by trailers + audit comment covering the findings).
+  const HAM_TERMINAL_STRICT_WAIVABLE_REASONS = new Set([
     'stale-review-head',
-    'verdict-not-settled-success',
     'remediation-pending',
     'remediation-state-unknown',
     'blocking-findings-present',
     'blocking-findings-unknown',
-    'non-blocking-findings-unknown',
-    'non-blocking-findings-present',
   ]);
-  if (hamTerminalRemediation.active && hamTerminalRemediation.ok) {
+  // Round-3 fix (2026-06-21): the non-blocking waiver previously dropped
+  // `non-blocking-findings-present`/`-unknown` on ANY `activeAuthorized` HAM
+  // evidence, with NOTHING tying the HAM's addressed-findings list to the
+  // CURRENT review's standing non-blocking findings. A hammer that addressed 1
+  // of 2 standing non-blocking findings would still close. We now require, IN
+  // ADDITION to `activeAuthorized`, that the HAM's addressed non-blocking
+  // findings COVER EVERY current standing non-blocking finding BY IDENTITY
+  // (normalized title). The brittle exact-COUNT match stays relaxed, but the
+  // parsed identity set must be at least as complete as the known count; a
+  // shorter identity list means the parser/count paths disagree and we fail
+  // closed instead of checking only the subset we managed to parse. Fail closed:
+  // if the current non-blocking identities are unavailable/unknown we do NOT
+  // waive.
+  const currentNonBlockingIdentities = Array.isArray(reviewState?.nonBlockingFindingIdentities)
+    ? reviewState.nonBlockingFindingIdentities
+        .map((title) => normalizeCoverageTitle(title))
+        .filter(Boolean)
+    : null;
+  const hamAddressedNonBlockingTitles = new Set(
+    Array.isArray(hamTerminalRemediation?.addressedFindings?.nonBlockingTitles)
+      ? hamTerminalRemediation.addressedFindings.nonBlockingTitles
+      : [],
+  );
+  // `nonBlockingFindings` (classified above) is the current standing
+  // non-blocking finding count from the same review body.
+  const currentNonBlockingCount = nonBlockingFindings.known ? nonBlockingFindings.count : null;
+  const currentNonBlockingIdentityCount = currentNonBlockingIdentities === null
+    ? null
+    : currentNonBlockingIdentities.length;
+  const currentNonBlockingIdentityCountCoversKnownCount =
+    currentNonBlockingCount === null
+    || currentNonBlockingCount === 0
+    || (
+      currentNonBlockingIdentityCount !== null
+      && currentNonBlockingIdentityCount >= currentNonBlockingCount
+    );
+  let identityCoverageOk;
+  if (currentNonBlockingCount === 0) {
+    // Zero current non-blocking findings → coverage trivially satisfied.
+    identityCoverageOk = true;
+  } else if (
+    currentNonBlockingIdentities === null
+    || (currentNonBlockingCount !== null && currentNonBlockingIdentities.length === 0)
+  ) {
+    // Identities unavailable, or count says there ARE non-blocking findings but
+    // we parsed zero identities → fail closed (no waiver).
+    identityCoverageOk = false;
+  } else if (!currentNonBlockingIdentityCountCoversKnownCount) {
+    // Count says there are more standing non-blocking findings than the
+    // identities parser could name. Do not let a subset pass `.every(...)`.
+    identityCoverageOk = false;
+  } else if (currentNonBlockingIdentities.length === 0) {
+    // Count unknown but identities present-and-empty → nothing standing to
+    // cover. (Count-unknown with non-empty identities falls through to the
+    // explicit per-identity coverage check below.)
+    identityCoverageOk = true;
+  } else {
+    identityCoverageOk = currentNonBlockingIdentities.every(
+      (identity) => hamAddressedNonBlockingTitles.has(identity),
+    );
+  }
+  // Hoisted for the audit trace; only meaningful when the HAM evidence is
+  // `activeAuthorized` (set inside the block below).
+  let nonBlockingCoverageOk = false;
+  if (hamTerminalRemediation.activeAuthorized) {
+    const strictOk = hamTerminalRemediation.ok === true;
+    // The non-blocking waiver holds ONLY when the HAM's addressed non-blocking
+    // findings cover every CURRENT standing non-blocking finding by identity.
+    // `strictOk` must NOT short-circuit this (round-4 finding): `.ok` only
+    // proves the addressed set matches the current review's finding COUNTS
+    // (remediatedFindings) plus the HAM's own audit-coverage — it does NOT
+    // prove the HAM addressed the current review's specific non-blocking
+    // findings BY IDENTITY. A HAM could match the count while addressing two
+    // different findings than the two currently standing. So identity coverage
+    // governs the non-blocking lane outright. `strictOk` still suffices for the
+    // blocking / stale-review-head / remediation-state reasons below.
+    // (identityCoverageOk already fails closed when identities are unavailable
+    // and is trivially true when the current non-blocking count is zero.)
+    nonBlockingCoverageOk = identityCoverageOk;
+    // `verdict-not-settled-success` is non-blocking-driven (Tier 1) only when
+    // the settled-success verdict gate failed alongside an explicit
+    // non-blocking reason. A bare verdict failure (for example Request changes
+    // with known-zero structured blockers) still gates strictly.
+    const hasBlockingReason =
+      effectiveReasons.includes('blocking-findings-present')
+      || effectiveReasons.includes('blocking-findings-unknown');
+    const hasNonBlockingReason =
+      effectiveReasons.includes('non-blocking-findings-present')
+      || effectiveReasons.includes('non-blocking-findings-unknown');
     const inputReasons = effectiveReasons;
     effectiveReasons = [];
     for (const reason of inputReasons) {
-      if (HAM_TERMINAL_REMEDIATION_WAIVABLE_REASONS.has(reason)) {
+      let waivable = false;
+      if (HAM_TERMINAL_NONBLOCKING_WAIVABLE_REASONS.has(reason)) {
+        // Tier 1 non-blocking waiver now ALSO requires identity coverage.
+        waivable = nonBlockingCoverageOk;
+      } else if (reason === 'verdict-not-settled-success') {
+        // Non-blocking-driven verdict failure additionally needs coverage; a
+        // blocking-driven verdict failure still needs strict `.ok`.
+        waivable = hasBlockingReason
+          ? strictOk
+          : hasNonBlockingReason && nonBlockingCoverageOk;
+      } else if (HAM_TERMINAL_STRICT_WAIVABLE_REASONS.has(reason)) {
+        waivable = strictOk;
+      }
+      if (waivable) {
         waivedByHamTerminalRemediation.push(reason);
       } else {
         effectiveReasons.push(reason);
@@ -1031,6 +1169,15 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     hamTerminalRemediation: {
       ...hamTerminalRemediation,
       waived: waivedByHamTerminalRemediation,
+      nonBlockingCoverage: {
+        ok: nonBlockingCoverageOk,
+        identityCoverageOk,
+        identityCountCoversKnownCount: currentNonBlockingIdentityCountCoversKnownCount,
+        currentIdentities: currentNonBlockingIdentities,
+        currentIdentityCount: currentNonBlockingIdentityCount,
+        addressedNonBlockingTitles: [...hamAddressedNonBlockingTitles],
+        currentNonBlockingCount,
+      },
     },
     riskClass: {
       resolved: riskClass,

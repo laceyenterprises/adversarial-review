@@ -13,6 +13,7 @@ import {
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { CASCADE_FAILURE_CAP, recordCascadeFailure } from '../src/reviewer-cascade.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../src/config-loader.mjs';
+import { extractNonBlockingFindingIdentities } from '../src/kernel/remediation-reply.mjs';
 import {
   FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER,
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
@@ -83,6 +84,27 @@ test('classifyNonBlockingFindings counts top-level non-blocking issue bullets', 
   assert.deepEqual(
     classifyNonBlockingFindings(body, { lastVerdict: 'comment-only' }),
     { count: 2, state: 'known' },
+  );
+});
+
+test('extractNonBlockingFindingIdentities returns every compact non-blocking issue bullet', () => {
+  const body = [
+    '## Summary',
+    'Looks close.',
+    '',
+    '## Blocking Issues',
+    '- None.',
+    '',
+    '## Non-blocking Issues',
+    '- **Docs note is stale** Refresh the docs.',
+    '- **Cleanup can be tighter** Remove the dead helper.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+  assert.deepEqual(
+    extractNonBlockingFindingIdentities(body),
+    ['docs note is stale', 'cleanup can be tighter'],
   );
 });
 

@@ -561,6 +561,13 @@ function parseReviewFindingsSection(reviewBody, sectionPattern) {
   if (current) findings.push(current);
   if (findings.length > 0) return findings;
 
+  const compactBoldFindings = lines
+    .map((line) => parseBulletBoldTitle(line))
+    .filter(Boolean);
+  if (compactBoldFindings.length > 0) {
+    return compactBoldFindings.map((title) => ({ title }));
+  }
+
   const fallbackLines = lines
     .map((line) => line.trim())
     .filter(Boolean);
@@ -593,6 +600,26 @@ function normalizeCoverageTitle(title) {
     .replace(/\s+/g, ' ')
     .trim()
     .toLocaleLowerCase('en-US');
+}
+
+/**
+ * Extract the normalized non-blocking finding identities (titles) from a review
+ * body. Returns `null` when the body has no parseable non-blocking section
+ * (fail-closed: the AMA coverage gate treats a `null` identity list as
+ * "identities unknown" and refuses to waive). Returns `[]` for a present but
+ * empty (`- None.`) section. Identity normalization reuses
+ * `normalizeCoverageTitle` so the parsed review identities match the HAM
+ * addressed-finding titles byte-for-byte under the same normalization.
+ *
+ * @param {string} reviewBody
+ * @returns {string[]|null}
+ */
+function extractNonBlockingFindingIdentities(reviewBody) {
+  const parsed = parseNonBlockingFindingsSection(reviewBody);
+  if (parsed === null) return null;
+  return parsed
+    .map((finding) => normalizeCoverageTitle(finding?.title))
+    .filter(Boolean);
 }
 
 function usesPerFindingReplyContract(reply) {
@@ -917,7 +944,9 @@ export {
   REMEDIATION_REPLY_SCHEMA_VERSION,
   assertNoPlaceholderText,
   detectPublicReplyNoiseSignal,
+  extractNonBlockingFindingIdentities,
   isNoneFindingsSentinelOnly,
+  normalizeCoverageTitle,
   parseBlockingFindingsSection,
   parseNonBlockingFindingsSection,
   parseRemediationReply,

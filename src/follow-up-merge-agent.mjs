@@ -5552,10 +5552,12 @@ function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
 // File-tagged STRUCTURED findings (a subset), so using it as the primary count
 // would UNDER-report (e.g. 1 vs 2 for two bullets where only one carries a File:
 // line). The strict gate consumes only `count > 0`, so the exact value never
-// changes a direct-close decision; HAM terminal-remediation reconciles against the
-// audit comment's own declared findings (validateHamFindingMap), not this number.
-// Keeping the granular bullet count is therefore both more accurate for the
-// operator-facing trace and decision-neutral for the gate.
+// changes a direct-close decision. HAM terminal-remediation now also uses this
+// count as a fail-closed completeness check against the parsed non-blocking
+// finding identities; if the identity parser can name fewer current findings
+// than this count, the non-blocking waiver is refused instead of checking only a
+// subset. Keeping the granular bullet count is therefore both more accurate for
+// the operator-facing trace and load-bearing for coverage safety.
 function classifyNonBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
   const text = String(reviewBody ?? '');
   if (!text.trim()) return { count: 0, state: 'unknown' };

@@ -28,6 +28,7 @@ import {
   hamAuditCommentAuthorMatches,
   parseRemediatedFindingsTrailer,
 } from './ham-provenance.mjs';
+import { normalizeCoverageTitle } from '../kernel/remediation-reply.mjs';
 
 const OPERATOR_APPROVED_LABEL = 'operator-approved';
 const MERGE_AGENT_REQUESTED_LABEL = 'merge-agent-requested';
@@ -105,6 +106,7 @@ export const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @property {string=}                   blockingFindingState     `'known'` when the count is trustworthy; `'unknown'` or missing fail closed.
  * @property {number=}                   nonBlockingFindingCount  Structured non-blocking-finding count from the latest current-head review.
  * @property {string=}                   nonBlockingFindingState  `'known'` when the count is trustworthy; `'unknown'` or missing fail closed in strict mode.
+ * @property {string[]=}                 nonBlockingFindingIdentities  Normalized non-blocking finding titles parsed from the same current-head review body the counts came from. `null`/absent fails the HAM non-blocking waiver coverage gate closed.
  * @property {string=}                   prAuthor                 PR author login — audit-only in the current single-operator contract.
  * @property {string=}                   reviewerFamily           'codex' | 'claude' — audit-only field.
  */
@@ -528,21 +530,32 @@ function validateRebaseReviewCoverageEvidence(
 
 function validateHamFindingMap(findings) {
   if (!Array.isArray(findings) || findings.length === 0) {
-    return { ok: false, count: 0, blocking: 0, nonBlocking: 0 };
+    return { ok: false, count: 0, blocking: 0, nonBlocking: 0, nonBlockingTitles: [] };
   }
   let blocking = 0;
   let nonBlocking = 0;
+  // Normalized titles of the HAM's addressed NON-blocking findings. Used by the
+  // non-blocking waiver coverage gate to prove the hammer addressed EVERY
+  // current standing non-blocking finding by identity (not just by count).
+  // Reuses the same `normalizeCoverageTitle` normalizer the review-body parser
+  // uses so the two title sets compare on identical normalization.
+  const nonBlockingTitles = [];
   for (const finding of findings) {
     const title = String(finding?.title || finding?.finding || '').trim();
     const file = String(finding?.file || finding?.path || '').trim();
     const addressed = finding?.addressed === true;
     if (!title || !file || !addressed) {
-      return { ok: false, count: findings.length, blocking, nonBlocking };
+      return { ok: false, count: findings.length, blocking, nonBlocking, nonBlockingTitles };
     }
-    if (finding?.blocking === true) blocking += 1;
-    else nonBlocking += 1;
+    if (finding?.blocking === true) {
+      blocking += 1;
+    } else {
+      nonBlocking += 1;
+      const normalized = normalizeCoverageTitle(title);
+      if (normalized) nonBlockingTitles.push(normalized);
+    }
   }
-  return { ok: true, count: findings.length, blocking, nonBlocking };
+  return { ok: true, count: findings.length, blocking, nonBlocking, nonBlockingTitles };
 }
 
 function hamAuditBodyCoversFindings(body, findings) {
@@ -1009,8 +1022,63 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     'blocking-findings-present',
     'blocking-findings-unknown',
   ]);
+  // Round-3 fix (2026-06-21): the non-blocking waiver previously dropped
+  // `non-blocking-findings-present`/`-unknown` on ANY `activeAuthorized` HAM
+  // evidence, with NOTHING tying the HAM's addressed-findings list to the
+  // CURRENT review's standing non-blocking findings. A hammer that addressed 1
+  // of 2 standing non-blocking findings would still close. We now require, IN
+  // ADDITION to `activeAuthorized`, that the HAM's addressed non-blocking
+  // findings COVER EVERY current standing non-blocking finding BY IDENTITY
+  // (normalized title). The brittle exact-COUNT match stays relaxed (it lives in
+  // the strict `.ok` provenance which the non-blocking lane no longer requires);
+  // identity COVERAGE replaces it. Fail closed: if the current non-blocking
+  // identities are unavailable/unknown we do NOT waive.
+  const currentNonBlockingIdentities = Array.isArray(reviewState?.nonBlockingFindingIdentities)
+    ? reviewState.nonBlockingFindingIdentities
+        .map((title) => normalizeCoverageTitle(title))
+        .filter(Boolean)
+    : null;
+  const hamAddressedNonBlockingTitles = new Set(
+    Array.isArray(hamTerminalRemediation?.addressedFindings?.nonBlockingTitles)
+      ? hamTerminalRemediation.addressedFindings.nonBlockingTitles
+      : [],
+  );
+  // `nonBlockingFindings` (classified above) is the current standing
+  // non-blocking finding count from the same review body.
+  const currentNonBlockingCount = nonBlockingFindings.known ? nonBlockingFindings.count : null;
+  let identityCoverageOk;
+  if (currentNonBlockingCount === 0) {
+    // Zero current non-blocking findings → coverage trivially satisfied.
+    identityCoverageOk = true;
+  } else if (
+    currentNonBlockingIdentities === null
+    || (currentNonBlockingCount !== null && currentNonBlockingIdentities.length === 0)
+  ) {
+    // Identities unavailable, or count says there ARE non-blocking findings but
+    // we parsed zero identities → fail closed (no waiver).
+    identityCoverageOk = false;
+  } else if (currentNonBlockingIdentities.length === 0) {
+    // Count unknown but identities present-and-empty → nothing standing to
+    // cover. (Count-unknown with non-empty identities falls through to the
+    // explicit per-identity coverage check below.)
+    identityCoverageOk = true;
+  } else {
+    identityCoverageOk = currentNonBlockingIdentities.every(
+      (identity) => hamAddressedNonBlockingTitles.has(identity),
+    );
+  }
+  // Hoisted for the audit trace; only meaningful when the HAM evidence is
+  // `activeAuthorized` (set inside the block below).
+  let nonBlockingCoverageOk = false;
   if (hamTerminalRemediation.activeAuthorized) {
     const strictOk = hamTerminalRemediation.ok === true;
+    // The non-blocking waiver holds only when the HAM's addressed non-blocking
+    // findings cover every CURRENT standing non-blocking finding by identity.
+    // `strictOk` short-circuits to true: a fully `.ok` finding map already
+    // proves the addressed set matches the current review's finding counts
+    // (including non-blocking), so coverage is implied; this preserves the
+    // backward-compatible behavior for fully-strict evidence.
+    nonBlockingCoverageOk = strictOk || identityCoverageOk;
     // `verdict-not-settled-success` is non-blocking-driven (Tier 1) only when
     // the settled-success verdict gate failed alongside an explicit
     // non-blocking reason. A bare verdict failure (for example Request changes
@@ -1026,9 +1094,14 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     for (const reason of inputReasons) {
       let waivable = false;
       if (HAM_TERMINAL_NONBLOCKING_WAIVABLE_REASONS.has(reason)) {
-        waivable = true;
+        // Tier 1 non-blocking waiver now ALSO requires identity coverage.
+        waivable = nonBlockingCoverageOk;
       } else if (reason === 'verdict-not-settled-success') {
-        waivable = hasBlockingReason ? strictOk : hasNonBlockingReason;
+        // Non-blocking-driven verdict failure additionally needs coverage; a
+        // blocking-driven verdict failure still needs strict `.ok`.
+        waivable = hasBlockingReason
+          ? strictOk
+          : hasNonBlockingReason && nonBlockingCoverageOk;
       } else if (HAM_TERMINAL_STRICT_WAIVABLE_REASONS.has(reason)) {
         waivable = strictOk;
       }
@@ -1074,6 +1147,13 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     hamTerminalRemediation: {
       ...hamTerminalRemediation,
       waived: waivedByHamTerminalRemediation,
+      nonBlockingCoverage: {
+        ok: nonBlockingCoverageOk,
+        identityCoverageOk,
+        currentIdentities: currentNonBlockingIdentities,
+        addressedNonBlockingTitles: [...hamAddressedNonBlockingTitles],
+        currentNonBlockingCount,
+      },
     },
     riskClass: {
       resolved: riskClass,

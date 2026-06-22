@@ -23,6 +23,7 @@ import {
 } from './review-state.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import { normalizeGithubMergeability } from './github-mergeability.mjs';
+import { extractNonBlockingFindingIdentities } from './kernel/remediation-reply.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -169,6 +170,11 @@ const UNKNOWN_BLOCKERS = {
   blockingFindingCount: 0,
   nonBlockingFindingState: 'unknown',
   nonBlockingFindingCount: 0,
+  // `null` = non-blocking finding identities could not be resolved. The AMA
+  // coverage gate fails closed on a null identity list (no waiver). Never
+  // synthesize `[]` out of an unresolved body — `[]` means "present section,
+  // zero findings" and would be read as "coverage trivially satisfied".
+  nonBlockingFindingIdentities: null,
 };
 
 /**
@@ -188,6 +194,10 @@ function classifyBlockersFromBody(body, verdict) {
     blockingFindingCount: blocking.count,
     nonBlockingFindingState: nonBlocking.state,
     nonBlockingFindingCount: nonBlocking.count,
+    // Per-finding non-blocking identities (normalized titles) from the SAME
+    // authoritative body the verdict + counts came from. `null` when the body
+    // has no parseable non-blocking section → AMA coverage gate fails closed.
+    nonBlockingFindingIdentities: extractNonBlockingFindingIdentities(body),
   };
 }
 

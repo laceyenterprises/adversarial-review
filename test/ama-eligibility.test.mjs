@@ -1596,6 +1596,9 @@ test('ham terminal remediation: valid evidence waives strict non-blocking findin
       blockingFindingState: 'known',
       nonBlockingFindingCount: 1,
       nonBlockingFindingState: 'known',
+      // Coverage gate input: the single current non-blocking finding identity
+      // matches the HAM addressed finding title below, so coverage is met.
+      nonBlockingFindingIdentities: ['readme note is stale'],
     },
     prMetadata: { headSha: 'def67890' },
   });
@@ -1621,14 +1624,16 @@ test('ham terminal remediation: valid evidence waives strict non-blocking findin
   assert.equal(result.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
   assert.ok(result.trace.hamTerminalRemediation.waived.includes('non-blocking-findings-present'));
   assert.equal(result.trace.hamTerminalRemediation.addressedFindings.nonBlocking, 1);
+  assert.equal(result.trace.hamTerminalRemediation.nonBlockingCoverage.ok, true);
 });
 
-// Single-shot trust retrofit (2026-06-22): the entitled hammer agent's merge is
-// no longer gated on a fresh review returning ZERO non-blocking findings (which
-// never converges: each remediated head draws a new nit). Non-blocking findings
-// are waived on an authorized active HAM session without requiring strict
-// finding-count `.ok`; blocking findings still require strict `.ok` provenance.
-test('ham terminal remediation: non-blocking findings are waived on authorized active HAM evidence', () => {
+// Round-3 fix (2026-06-21): the non-blocking waiver is no longer dropped on bare
+// `activeAuthorized` HAM evidence. Even with a real HAM commit + provenance +
+// audit, the waiver requires the HAM's addressed non-blocking findings to COVER
+// EVERY current standing non-blocking finding by identity. This is the
+// reviewer's exact scenario: the review has 2 non-blocking findings, the HAM
+// addressed only 1 → coverage not met → the PR does NOT merge.
+test('ham terminal remediation: non-blocking waiver REFUSED when HAM covers only a subset of current non-blocking findings', () => {
   const finding = { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true };
   const auditBody = 'HAM audit: addressed README note is stale in README.md. Doc-currency: updated README.md for changed files README.md.';
   const { reviewState, prMetadata, cfg } = eligibleFixture({
@@ -1636,8 +1641,11 @@ test('ham terminal remediation: non-blocking findings are waived on authorized a
       verdict: 'comment-only',
       blockingFindingCount: 0,
       blockingFindingState: 'known',
+      // Two current standing non-blocking findings; the HAM addressed only the
+      // first ('README note is stale'). The second is uncovered → no waiver.
       nonBlockingFindingCount: 2,
       nonBlockingFindingState: 'known',
+      nonBlockingFindingIdentities: ['readme note is stale', 'unrelated nit still standing'],
     },
     prMetadata: { headSha: 'abc12345' },
   });
@@ -1669,9 +1677,155 @@ test('ham terminal remediation: non-blocking findings are waived on authorized a
     JSON.stringify(result.trace.hamTerminalRemediation, null, 2),
   );
   assert.equal(result.trace.hamTerminalRemediation.activeAuthorized, true);
+  assert.equal(result.trace.hamTerminalRemediation.nonBlockingCoverage.ok, false);
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('non-blocking-findings-present'));
+  assert.ok(!result.trace.hamTerminalRemediation.waived.includes('non-blocking-findings-present'));
+});
+
+// Coverage MET: when the HAM's addressed non-blocking findings cover EVERY
+// current standing non-blocking finding by identity, the non-blocking waiver
+// holds even though strict `.ok` finding-count provenance fails (the HAM's
+// declared count never matches an ever-churning fresh review).
+test('ham terminal remediation: non-blocking waiver GRANTED when HAM covers every current non-blocking finding by identity', () => {
+  const findings = [
+    { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
+    { title: 'Typo in CONTRIBUTING', blocking: false, file: 'CONTRIBUTING.md', addressed: true },
+  ];
+  const auditBody = 'HAM audit: addressed README note is stale in README.md and Typo in CONTRIBUTING in CONTRIBUTING.md. Doc-currency: updated README.md for changed files README.md.';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+      nonBlockingFindingCount: 2,
+      nonBlockingFindingState: 'known',
+      nonBlockingFindingIdentities: ['readme note is stale', 'typo in contributing'],
+    },
+    prMetadata: { headSha: 'abc12345' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({
+      headSha: 'abc12345',
+      parentSha: 'abc12345',
+      // Strict count mismatch on purpose: 99 declared vs 2 in the map → .ok=false.
+      remediatedFindings: '2 addressed (0 blocking, 99 non-blocking)',
+      auditBody,
+      docCurrency: {
+        status: 'updated',
+        changedFiles: ['README.md'],
+        docsUpdated: ['README.md'],
+      },
+      findings,
+    }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      headSha: 'abc12345',
+      parentSha: 'abc12345',
+      remediatedFindings: '2 addressed (0 blocking, 99 non-blocking)',
+      auditBody,
+      changedFiles: ['README.md'],
+    }),
+  });
+  assert.equal(
+    result.trace.hamTerminalRemediation.ok,
+    false,
+    JSON.stringify(result.trace.hamTerminalRemediation, null, 2),
+  );
+  assert.equal(result.trace.hamTerminalRemediation.activeAuthorized, true);
+  assert.equal(result.trace.hamTerminalRemediation.nonBlockingCoverage.ok, true);
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
   assert.ok(result.trace.hamTerminalRemediation.waived.includes('non-blocking-findings-present'));
   assert.ok(!result.reasons.includes('non-blocking-findings-present'));
+});
+
+// Fail closed: identities unknown (not supplied) while the review reports
+// non-blocking findings present → no waiver regardless of activeAuthorized HAM.
+test('ham terminal remediation: non-blocking waiver REFUSED when current non-blocking identities are unknown', () => {
+  const finding = { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true };
+  const auditBody = 'HAM audit: addressed README note is stale in README.md. Doc-currency: updated README.md for changed files README.md.';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+      nonBlockingFindingCount: 1,
+      nonBlockingFindingState: 'known',
+      // Identities deliberately omitted → undefined → fail closed.
+    },
+    prMetadata: { headSha: 'abc12345' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({
+      headSha: 'abc12345',
+      parentSha: 'abc12345',
+      remediatedFindings: '1 addressed (0 blocking, 99 non-blocking)',
+      auditBody,
+      docCurrency: {
+        status: 'updated',
+        changedFiles: ['README.md'],
+        docsUpdated: ['README.md'],
+      },
+      findings: [finding],
+    }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      headSha: 'abc12345',
+      parentSha: 'abc12345',
+      remediatedFindings: '1 addressed (0 blocking, 99 non-blocking)',
+      auditBody,
+      changedFiles: ['README.md'],
+    }),
+  });
+  assert.equal(result.trace.hamTerminalRemediation.activeAuthorized, true);
+  assert.equal(result.trace.hamTerminalRemediation.nonBlockingCoverage.ok, false);
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('non-blocking-findings-present'));
+});
+
+// Trivial coverage: zero current non-blocking findings + activeAuthorized HAM
+// → still eligible (coverage trivially satisfied, no waiver even needed).
+test('ham terminal remediation: zero current non-blocking findings remains eligible (trivial coverage)', () => {
+  const auditBody = 'HAM audit: addressed Auth path not threaded in src/auth.js. Doc-currency: updated src/auth.js for changed files src/auth.js.';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      // Request-changes head with a real blocking finding the HAM remediated
+      // (strict .ok lane) and ZERO current non-blocking findings → the
+      // non-blocking coverage gate is trivially satisfied and never blocks.
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+      nonBlockingFindingCount: 0,
+      nonBlockingFindingState: 'known',
+      nonBlockingFindingIdentities: [],
+    },
+    prMetadata: { headSha: 'abc12345' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({
+      headSha: 'abc12345',
+      parentSha: 'abc12345',
+      remediatedFindings: '1 addressed (1 blocking, 0 non-blocking)',
+      auditBody,
+      docCurrency: {
+        status: 'updated',
+        changedFiles: ['src/auth.js'],
+        docsUpdated: ['src/auth.js'],
+      },
+      findings: [{ title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true }],
+    }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      headSha: 'abc12345',
+      parentSha: 'abc12345',
+      remediatedFindings: '1 addressed (1 blocking, 0 non-blocking)',
+      auditBody,
+      changedFiles: ['src/auth.js'],
+    }),
+  });
+  assert.equal(result.trace.hamTerminalRemediation.activeAuthorized, true);
+  assert.equal(result.trace.hamTerminalRemediation.nonBlockingCoverage.ok, true);
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
 });
 
 test('ham terminal remediation: self-attested active does not waive strict non-blocking gate', () => {

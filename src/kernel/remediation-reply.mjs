@@ -595,6 +595,26 @@ function normalizeCoverageTitle(title) {
     .toLocaleLowerCase('en-US');
 }
 
+/**
+ * Extract the normalized non-blocking finding identities (titles) from a review
+ * body. Returns `null` when the body has no parseable non-blocking section
+ * (fail-closed: the AMA coverage gate treats a `null` identity list as
+ * "identities unknown" and refuses to waive). Returns `[]` for a present but
+ * empty (`- None.`) section. Identity normalization reuses
+ * `normalizeCoverageTitle` so the parsed review identities match the HAM
+ * addressed-finding titles byte-for-byte under the same normalization.
+ *
+ * @param {string} reviewBody
+ * @returns {string[]|null}
+ */
+function extractNonBlockingFindingIdentities(reviewBody) {
+  const parsed = parseNonBlockingFindingsSection(reviewBody);
+  if (parsed === null) return null;
+  return parsed
+    .map((finding) => normalizeCoverageTitle(finding?.title))
+    .filter(Boolean);
+}
+
 function usesPerFindingReplyContract(reply) {
   if (!reply || typeof reply !== 'object') return false;
   // nonBlocking[] qualifies as a new-schema signal even when the worker
@@ -917,7 +937,9 @@ export {
   REMEDIATION_REPLY_SCHEMA_VERSION,
   assertNoPlaceholderText,
   detectPublicReplyNoiseSignal,
+  extractNonBlockingFindingIdentities,
   isNoneFindingsSentinelOnly,
+  normalizeCoverageTitle,
   parseBlockingFindingsSection,
   parseNonBlockingFindingsSection,
   parseRemediationReply,

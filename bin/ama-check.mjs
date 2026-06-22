@@ -33,6 +33,7 @@ import {
   classifyNonBlockingFindings,
 } from '../src/follow-up-merge-agent.mjs';
 import { normalizeGithubMergeability } from '../src/github-mergeability.mjs';
+import { extractNonBlockingFindingIdentities } from '../src/kernel/remediation-reply.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from '../src/ama/reviewer-authority.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from '../src/kernel/verdict.mjs';
 
@@ -45,6 +46,10 @@ const UNKNOWN_BLOCKERS = Object.freeze({
   blockingFindingCount: 0,
   nonBlockingFindingState: 'unknown',
   nonBlockingFindingCount: 0,
+  // `null` = non-blocking finding identities could not be resolved. The AMA
+  // coverage gate fails closed on a null identity list (no waiver). Mirrors
+  // `adversarial-gate-status.mjs::UNKNOWN_BLOCKERS`.
+  nonBlockingFindingIdentities: null,
 });
 
 const SUBMITTED_REVIEW_STATES = new Set(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']);
@@ -116,6 +121,10 @@ function classifyBlockersFromReviewBody(body, verdict) {
     blockingFindingCount: blocking.count,
     nonBlockingFindingState: nonBlocking.state,
     nonBlockingFindingCount: nonBlocking.count,
+    // Per-finding non-blocking identities (normalized titles) from the SAME
+    // authoritative on-head body the verdict + counts came from. `null` when no
+    // parseable non-blocking section → AMA coverage gate fails closed.
+    nonBlockingFindingIdentities: extractNonBlockingFindingIdentities(text),
   };
 }
 
@@ -294,6 +303,7 @@ function buildReviewState({
     blockingFindingCount,
     nonBlockingFindingState,
     nonBlockingFindingCount,
+    nonBlockingFindingIdentities,
   } = authoritativeReview
     ? (verdict
       ? classifyBlockersFromReviewBody(authoritativeReview.review.body, verdict)
@@ -334,6 +344,10 @@ function buildReviewState({
     blockingFindingCount,
     nonBlockingFindingState,
     nonBlockingFindingCount,
+    // Non-blocking finding identities (normalized titles) from the same
+    // on-head body the verdict/counts came from. Drives the HAM non-blocking
+    // waiver coverage gate; `null` → identities unknown → fail closed.
+    nonBlockingFindingIdentities,
     operatorApprovedEvidence: opApprovedEvent?.commit_id
       ? {
           applied: true,

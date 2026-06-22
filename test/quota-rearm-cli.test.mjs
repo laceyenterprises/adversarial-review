@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import {
   applyQuotaRearm,
+  hasReviewerProcessEvidence,
   isQuotaRearmEligible,
   main,
   planQuotaRearm,
@@ -35,17 +36,23 @@ function setupRow(overrides = {}) {
     failed_at: '2026-06-17T17:30:00.000Z',
     failure_message: '[quota-exhausted] Command failed with code 1\nstdout tail:...',
     quota_reset_at_utc: '2026-06-18T00:39:00.000Z',
+    reviewer_session_uuid: null,
+    reviewer_started_at: null,
+    reviewer_pgid: null,
+    reviewer_lease_expires_at: null,
     ...overrides,
   };
   db.prepare(
     `INSERT INTO reviewed_prs
        (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts,
-        infra_auto_recover_attempts, failed_at, failure_message, quota_reset_at_utc)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        infra_auto_recover_attempts, failed_at, failure_message, quota_reset_at_utc,
+        reviewer_session_uuid, reviewer_started_at, reviewer_pgid, reviewer_lease_expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     REPO, PR, '2026-06-17T17:00:00.000Z', 'codex',
     row.pr_state, row.review_status, row.review_attempts,
-    row.infra_auto_recover_attempts, row.failed_at, row.failure_message, row.quota_reset_at_utc
+    row.infra_auto_recover_attempts, row.failed_at, row.failure_message, row.quota_reset_at_utc,
+    row.reviewer_session_uuid, row.reviewer_started_at, row.reviewer_pgid, row.reviewer_lease_expires_at
   );
   db.close();
   return rootDir;
@@ -76,6 +83,14 @@ test('isQuotaRearmEligible: a non-quota failure does NOT qualify (but --force do
   assert.equal(isQuotaRearmEligible(row, { force: true }), true);
 });
 
+test('hasReviewerProcessEvidence detects preserved reviewer session/process fields', () => {
+  assert.equal(hasReviewerProcessEvidence({}), false);
+  assert.equal(hasReviewerProcessEvidence({ reviewer_session_uuid: 'session-123' }), true);
+  assert.equal(hasReviewerProcessEvidence({ reviewer_started_at: '2026-06-22T15:00:00.000Z' }), true);
+  assert.equal(hasReviewerProcessEvidence({ reviewer_pgid: 12345 }), true);
+  assert.equal(hasReviewerProcessEvidence({ reviewer_lease_expires_at: '2026-06-22T15:10:00.000Z' }), true);
+});
+
 test('planQuotaRearm refuses a missing / closed / in-flight row', () => {
   assert.equal(planQuotaRearm(null).action, 'refuse');
   assert.equal(planQuotaRearm({ pr_state: 'merged', review_status: 'failed' }).reason, 'pr-not-open');
@@ -97,6 +112,21 @@ test('planQuotaRearm refuses non-failed terminal/backoff rows even with --force'
     }, { force: true });
     assert.equal(plan.action, 'refuse');
     assert.equal(plan.reason, 'not-recoverable-failed-row');
+  }
+});
+
+test('planQuotaRearm refuses failed rows that still carry reviewer process evidence, even with --force', () => {
+  const row = {
+    pr_state: 'open',
+    review_status: 'failed',
+    failure_message: '[quota-exhausted] x',
+    quota_reset_at_utc: '2026-06-18T00:39:00.000Z',
+    reviewer_session_uuid: 'session-123',
+  };
+  for (const force of [false, true]) {
+    const plan = planQuotaRearm(row, { force });
+    assert.equal(plan.action, 'refuse');
+    assert.equal(plan.reason, 'reviewer-evidence-present');
   }
 });
 
@@ -185,6 +215,31 @@ test('re-arm refuses a row with a reviewer in flight (does not clobber the live 
     assert.equal(result.ok, false);
     assert.equal(result.reason, 'reviewing');
     assert.equal(readRow(rootDir).review_status, 'reviewing');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('re-arm refuses failed rows with reviewer process evidence and preserves that evidence', () => {
+  const rootDir = setupRow({
+    reviewer_session_uuid: 'session-123',
+    reviewer_started_at: '2026-06-22T15:00:00.000Z',
+    reviewer_pgid: 12345,
+    reviewer_lease_expires_at: '2026-06-22T15:10:00.000Z',
+  });
+  try {
+    for (const force of [false, true]) {
+      const result = rearmQuotaReview({ rootDir, repo: REPO, prNumber: PR, force });
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'reviewer-evidence-present');
+
+      const row = readRow(rootDir);
+      assert.equal(row.review_status, 'failed');
+      assert.equal(row.reviewer_session_uuid, 'session-123');
+      assert.equal(row.reviewer_started_at, '2026-06-22T15:00:00.000Z');
+      assert.equal(row.reviewer_pgid, 12345);
+      assert.equal(row.reviewer_lease_expires_at, '2026-06-22T15:10:00.000Z');
+    }
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

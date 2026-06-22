@@ -80,6 +80,16 @@ function isQuotaRearmEligible(row, { force = false } = {}) {
   return false;
 }
 
+function hasReviewerProcessEvidence(row) {
+  if (!row) return false;
+  return Boolean(
+    String(row.reviewer_session_uuid || '').trim()
+      || String(row.reviewer_started_at || '').trim()
+      || row.reviewer_pgid !== null && row.reviewer_pgid !== undefined && String(row.reviewer_pgid).trim() !== ''
+      || String(row.reviewer_lease_expires_at || '').trim()
+  );
+}
+
 // Pure decision over the row state. Returns { action, reason }.
 //   action: 'rearm' | 'noop-already-pending' | 'refuse'
 function planQuotaRearm(row, { force = false } = {}) {
@@ -88,6 +98,7 @@ function planQuotaRearm(row, { force = false } = {}) {
   if (row.review_status === 'reviewing') return { action: 'refuse', reason: 'reviewing' };
   if (row.review_status === 'pending') return { action: 'noop-already-pending', reason: 'already-pending' };
   if (row.review_status !== 'failed') return { action: 'refuse', reason: 'not-recoverable-failed-row' };
+  if (hasReviewerProcessEvidence(row)) return { action: 'refuse', reason: 'reviewer-evidence-present' };
   if (!isQuotaRearmEligible(row, { force })) {
     return { action: 'refuse', reason: 'not-a-quota-row' };
   }
@@ -241,6 +252,7 @@ function main(argv, { stdout = process.stdout, stderr = process.stderr } = {}) {
       'pr-not-open': 'PR is not open (merged/closed)',
       reviewing: 'a reviewer subprocess is currently in flight; wait for it to settle',
       'not-recoverable-failed-row': 'only open failed quota rows can be re-armed; inspect this status manually',
+      'reviewer-evidence-present': 'failed row still has reviewer process/session evidence; cancel the reviewer first',
       'not-a-quota-row': 'this row is not a quota-class hold; re-run with --force if you are sure',
       'state-changed': 'row state changed concurrently; re-run to inspect',
     };
@@ -258,6 +270,7 @@ if (isDirectInvocation) {
 
 export {
   applyQuotaRearm,
+  hasReviewerProcessEvidence,
   isQuotaRearmEligible,
   main,
   planQuotaRearm,

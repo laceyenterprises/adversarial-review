@@ -75,19 +75,11 @@ test('benign output with no cap marker is not a false positive', () => {
 // ---------------------------------------------------------------------------
 
 test('parseQuotaResetAt handles the codex human "try again at <Month Day>, <Year> <time>" shape', () => {
-  // The provider prints the reset clock-time WITHOUT a timezone, so it denotes
-  // the host's local time (that is how the codex CLI renders it). The parser
-  // therefore resolves it to the same absolute instant that local-time Date
-  // construction yields — verify it round-trips to that instant, rather than
-  // asserting a UTC calendar field that flips across the local→UTC offset.
+  // The Codex CLI prints a dated human reset without an offset, but the provider
+  // account clock is Pacific. GitHub runners are UTC, so this must not rely on
+  // the process timezone.
   const iso = parseQuotaResetAt('try again at Jun 17th, 2026 5:39 PM');
-  assert.ok(iso, 'expected a parsed ISO string');
-  assert.equal(iso, new Date('Jun 17 2026 5:39 PM').toISOString());
-  // And the local calendar date is the 17th as the provider stated.
-  const d = new Date(iso);
-  assert.equal(d.getFullYear(), 2026);
-  assert.equal(d.getMonth(), 5); // June (0-indexed), local
-  assert.equal(d.getDate(), 17); // local day
+  assert.equal(iso, '2026-06-18T00:39:00.000Z');
 });
 
 test('parseQuotaResetAt handles an explicit ISO reset timestamp', () => {

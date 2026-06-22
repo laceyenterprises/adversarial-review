@@ -967,6 +967,24 @@ If "node would like to access X" / "claude would like to access X" popups start 
 
 Both paths converge on the same TCC subjects, but their CLI resolution is **different** code (the reviewer hardcodes `CLAUDE_CLI` / `CODEX_CLI`; the worker uses `resolveCodexCliPath` / `resolveClaudeCodeCliPath` against the daemon's launch-time PATH). Resolve the exact paths each flow will use with `node scripts/print-tcc-targets.mjs`. Read `docs/MACOS-TCC.md` for the security tradeoff before granting Full Disk Access on a non-isolated host — both spawn flows already exec with bypass-style approvals on untrusted PR content, so FDA expands the trust boundary.
 
+### 10. Manually editing a queued job file — do it AS THE DAEMON OWNER, never as another user
+
+When you hand-edit a job under `data/follow-up-jobs/{pending,in-progress}/` to rescue a stranded item (e.g. clearing a stale `remediationPlan.retryAfter` quota hold so a requeued job re-dispatches), **the edit must leave the file owned by, and readable by, the user the follow-up daemon runs as** (here: `airlock`, `airlock:staff` mode `0640`/`0644`).
+
+The footgun: a "safe" atomic write performed as the *wrong* user silently re-owns the file. `python3` `tempfile.mkstemp()` + `os.replace()` run under `sudo -u placey` creates a **`placey:placey` mode `0600`** temp file and renames it over the original — so the airlock daemon can no longer open it.
+
+Blast radius is the **entire queue**, not just the edited job: `consumeFollowUpJobsUntilCapacity` reads pending jobs in a single pass, and one unreadable file makes the whole `consume` step **throw and abort every tick** (`consume: threw: EACCES: permission denied, open '.../pending/<job>.json'` in `~/Library/Logs/adversarial-follow-up.log`). No remediation worker spawns for *any* PR until the bad file is fixed. On 2026-06-22 a single such file stalled the queue for ~45 min — see `docs/POSTMORTEM-followup-consume-eaccess-self-inflicted-stall-2026-06-22.md`.
+
+Safe manual-rescue procedure:
+
+1. Edit as the daemon owner: `sudo -A -H -u airlock python3 - <<'PY' ...` (or any in-place edit that does not change ownership). The `-H` matters for any subcommand that reads `$HOME`.
+2. After the edit, **verify ownership + mode against a sibling**: `ls -la data/follow-up-jobs/pending/` — the rescued file must match its neighbors (`airlock:staff`, group-readable), not show `placey`/`0600`.
+3. Confirm the daemon recovered: the next `consume:` line in `~/Library/Logs/adversarial-follow-up.log` should read `consume: ok` (not `consume: threw: EACCES`).
+
+If you already clobbered ownership, repair it: `sudo -A chown airlock:staff <file> && sudo -A chmod 640 <file>` (chowning across users needs root, hence `sudo` not `sudo -u`). The daemon self-heals on the next tick — no bounce required.
+
+> Hardening gap (owed): `consume` should quarantine-and-skip an individual unreadable/corrupt job instead of throwing and aborting the whole pass, so one bad file degrades to a single dropped job rather than a full-queue stall. Tracked as a follow-up fix.
+
 ---
 
 ## Common operator playbooks

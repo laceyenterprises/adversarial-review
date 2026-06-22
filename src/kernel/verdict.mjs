@@ -151,7 +151,7 @@ function normalizeReviewVerdict(verdict) {
   if (!text) return null;
   if (text.startsWith('request changes')) return 'request-changes';
   if (text.startsWith('comment only')) return 'comment-only';
-  if (text.startsWith('approved')) return 'approved';
+  if (text === 'approve' || /^approved\b/.test(text)) return 'approved';
   return 'unknown';
 }
 

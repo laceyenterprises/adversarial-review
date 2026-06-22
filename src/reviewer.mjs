@@ -2173,8 +2173,87 @@ function buildGeminiReviewArgs({ model }) {
   return ['-m', model, '-o', 'text', '--prompt', ''];
 }
 
-function buildAgyReviewArgs({ model }) {
-  return ['--print', '-m', model];
+function formatAgyPrintTimeout(timeoutMs) {
+  const ms = Math.max(1_000, Math.floor(Number(timeoutMs) || 0));
+  const seconds = Math.max(1, Math.floor(ms / 1000));
+  return `${seconds}s`;
+}
+
+function resolveAgyPrintTimeoutMs(reviewerTimeoutMs) {
+  const timeout = Math.max(1_000, Math.floor(Number(reviewerTimeoutMs) || resolveReviewerTimeoutMs()));
+  const slackMs = Math.min(30_000, Math.max(5_000, Math.floor(timeout * 0.05)));
+  return Math.max(1_000, timeout - slackMs);
+}
+
+function buildAgyReviewArgs({ model, printTimeoutMs = resolveAgyPrintTimeoutMs(resolveReviewerTimeoutMs()) }) {
+  return ['--print', '--print-timeout', formatAgyPrintTimeout(printTimeoutMs), '-m', model];
+}
+
+function hasAgyErrorSentinel(output) {
+  const text = String(output ?? '');
+  return /^Error:\s+timed out waiting for response\s*$/im.test(text)
+    || /^Error:\s+/m.test(text)
+    || /^panic:\s+/im.test(text)
+    || /^fatal:\s+/im.test(text)
+    || /\bagy(?:\s+\w+)*\s+failed\b/i.test(text);
+}
+
+function candidateAgyReviewBlocks(rawOutput) {
+  const text = normalizeWhitespace(rawOutput);
+  if (!text) return [];
+
+  const reviewStarts = [];
+  const reviewPattern = /^##\s+Adversarial Review\b.*$/gm;
+  for (let match; (match = reviewPattern.exec(text));) {
+    reviewStarts.push(match.index);
+  }
+  if (reviewStarts.length > 0) {
+    return reviewStarts.map((start, index) => {
+      const end = reviewStarts[index + 1] ?? text.length;
+      return text.slice(start, end).trim();
+    }).filter(Boolean);
+  }
+
+  const firstHeading = text.match(/^##\s+/m);
+  return firstHeading ? [text.slice(firstHeading.index).trim()] : [];
+}
+
+function normalizeAgyReviewBlock(block) {
+  return normalizeWhitespace(block)
+    .replace(/^##\s+Verdict\s*:\s*(.+?)\s*$/gim, '## Verdict\n$1')
+    .trim();
+}
+
+function sanitizeAgyReviewOutput(rawOutput) {
+  const text = normalizeWhitespace(rawOutput);
+  if (!text) {
+    throw new Error('Antigravity agy returned empty output');
+  }
+
+  const candidates = candidateAgyReviewBlocks(text);
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const candidate = normalizeAgyReviewBlock(candidates[index]);
+    const verdict = normalizeReviewVerdict(extractReviewVerdict(candidate));
+    if (verdict && verdict !== 'unknown') {
+      return candidate;
+    }
+  }
+
+  if (hasAgyErrorSentinel(text)) {
+    throw new Error(`Antigravity agy returned error output instead of a review: ${previewText(text, 400)}`);
+  }
+
+  throw new Error(`Antigravity agy returned output without a parseable review verdict: ${previewText(text, 400)}`);
+}
+
+function buildAgyReviewerPromptPrefix({ stage }) {
+  return `${buildReviewerPromptPrefix({ stage })}
+
+Antigravity runtime instructions:
+- Review only the PR diff and supplied context in this prompt. Use tools only when the diff is insufficient to decide a concrete finding.
+- Emit exactly one Markdown review block for GitHub. Do not narrate your plan, tool calls, exploration steps, or internal reasoning.
+- Start the final answer with "## Adversarial Review — Gemini (gemini-reviewer-lacey)" unless an outer caller already supplied that header.
+- Include a "## Verdict" section whose first non-empty verdict line is exactly one of: "Comment only", "Request changes", or "Approve".`;
 }
 
 function isRetryableGeminiSubprocessError(err) {
@@ -2262,12 +2341,13 @@ async function spawnAgyReview({
   env,
   cwd = process.cwd(),
   timeout = resolveReviewerTimeoutMs(env),
+  printTimeoutMs = resolveAgyPrintTimeoutMs(timeout),
   maxBuffer = 10 * 1024 * 1024,
   spawnWithInputImpl = spawnWithInput,
 }) {
   return spawnWithInputImpl(
     agyCli,
-    buildAgyReviewArgs({ model }),
+    buildAgyReviewArgs({ model, printTimeoutMs }),
     {
       env,
       cwd,
@@ -2319,7 +2399,9 @@ async function reviewWithGemini(diff, extraContext = '', {
   }
   console.error('[reviewWithGemini] OAuth OK');
 
-  const promptPrefix = buildReviewerPromptPrefix({ stage: promptStage });
+  const promptPrefix = runtime === 'antigravity'
+    ? buildAgyReviewerPromptPrefix({ stage: promptStage })
+    : buildReviewerPromptPrefix({ stage: promptStage });
   const prompt = `${promptPrefix}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
   const model = resolveGeminiReviewerModel();
 
@@ -2376,7 +2458,11 @@ async function reviewWithGemini(diff, extraContext = '', {
     throw new Error(`Gemini returned empty output.${hint}`);
   }
 
-  return { reviewText: combined, tokenUsage: null };
+  const reviewText = runtime === 'antigravity'
+    ? sanitizeAgyReviewOutput(combined)
+    : combined;
+
+  return { reviewText, tokenUsage: null };
 }
 
 // ── Reviewer-model selection ──────────────────────────────────────────────────
@@ -3238,6 +3324,11 @@ const __test__ = {
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
   buildAgyReviewArgs,
+  resolveAgyPrintTimeoutMs,
+  formatAgyPrintTimeout,
+  hasAgyErrorSentinel,
+  sanitizeAgyReviewOutput,
+  buildAgyReviewerPromptPrefix,
   isRetryableGeminiSubprocessError,
   resolveGeminiRuntimeForReview,
   spawnGeminiReview,

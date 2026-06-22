@@ -15,8 +15,10 @@ rate limits, pages all-capped account pools, or emits AGR-06 account telemetry.
   access-token refresh, and credential validation for the legacy file-backed
   bridge only.
 - `reviewer.gemini.runtime` selects the Gemini reviewer runtime.
-- `reviewer.gemini.runtime: antigravity` invokes `agy --print -m <model>` and
-  feeds the review prompt on stdin.
+- `reviewer.gemini.runtime: antigravity` invokes
+  `agy --print --print-timeout <N> -m <model>` and feeds the review prompt on
+  stdin. The print timeout is derived from the reviewer subprocess timeout and
+  kept slightly lower than the outer wall clock so capture/cleanup has slack.
 - `src/agy-reviewer-auth.mjs` owns the fail-closed pre-flight: first
   `security find-generic-password -s gemini -a antigravity`, then `agy models`.
   Both probes run with the same OAuth-scrubbed env used for the review spawn,
@@ -145,6 +147,37 @@ export ADVERSARIAL_REVIEW_GEMINI_RUNTIME=antigravity
 The historical `reviewer.gemini.antigravity.accounts[]` config remains parsed
 for compatibility with older modules, but the live `agy` runtime does not use
 it for reviewer dispatch.
+
+## Output Guard And Timeout Behavior
+
+`agy --print` does not expose a quiet, JSON, or final-message-only flag. In
+agentic mode it can print planning/tool narration before the final answer. The
+bad failure shape seen on PR #2435 was two concatenated attempts under the
+Gemini review heading, each made of "I will..." exploration text, one ending in
+`Error: timed out waiting for response`, and neither containing `## Verdict`.
+
+The reviewer therefore validates captured AGY output before posting:
+
+- a body must contain a parseable `## Verdict` section that normalizes to
+  `Comment only`, `Request changes`, or `Approve`/`Approved`
+- narration-only output, `Error: timed out waiting for response`, other AGY
+  error sentinel lines, and unparseable bodies raise reviewer failure instead
+  of posting a GitHub review
+- when a valid review block is preceded by narration, only the review block
+  from the review heading or first real `##` section is posted
+- inline verdict headings such as `## Verdict: Comment only` are normalized to
+  the downstream parser's canonical two-line form before posting
+
+This is intentionally the same operational class as a Claude/Codex subprocess
+failure before posting a verdict: the watcher retry and attempt-budget handling
+owns recovery, and operators diagnose the failed reviewer attempt rather than
+cleaning up a garbage PR review.
+
+The review command's `--print-timeout` is sized from
+`reviewer.timeout_ms`. With the default 20 minute reviewer timeout, AGY receives
+`--print-timeout 1170s`. If `reviewer.timeout_ms` is lowered, confirm the
+derived print timeout still leaves enough time for AGY to finish a real review;
+if it is raised, the AGY print timeout rises with it.
 
 ## Login
 

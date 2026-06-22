@@ -1029,10 +1029,12 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   // of 2 standing non-blocking findings would still close. We now require, IN
   // ADDITION to `activeAuthorized`, that the HAM's addressed non-blocking
   // findings COVER EVERY current standing non-blocking finding BY IDENTITY
-  // (normalized title). The brittle exact-COUNT match stays relaxed (it lives in
-  // the strict `.ok` provenance which the non-blocking lane no longer requires);
-  // identity COVERAGE replaces it. Fail closed: if the current non-blocking
-  // identities are unavailable/unknown we do NOT waive.
+  // (normalized title). The brittle exact-COUNT match stays relaxed, but the
+  // parsed identity set must be at least as complete as the known count; a
+  // shorter identity list means the parser/count paths disagree and we fail
+  // closed instead of checking only the subset we managed to parse. Fail closed:
+  // if the current non-blocking identities are unavailable/unknown we do NOT
+  // waive.
   const currentNonBlockingIdentities = Array.isArray(reviewState?.nonBlockingFindingIdentities)
     ? reviewState.nonBlockingFindingIdentities
         .map((title) => normalizeCoverageTitle(title))
@@ -1046,6 +1048,16 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   // `nonBlockingFindings` (classified above) is the current standing
   // non-blocking finding count from the same review body.
   const currentNonBlockingCount = nonBlockingFindings.known ? nonBlockingFindings.count : null;
+  const currentNonBlockingIdentityCount = currentNonBlockingIdentities === null
+    ? null
+    : currentNonBlockingIdentities.length;
+  const currentNonBlockingIdentityCountCoversKnownCount =
+    currentNonBlockingCount === null
+    || currentNonBlockingCount === 0
+    || (
+      currentNonBlockingIdentityCount !== null
+      && currentNonBlockingIdentityCount >= currentNonBlockingCount
+    );
   let identityCoverageOk;
   if (currentNonBlockingCount === 0) {
     // Zero current non-blocking findings → coverage trivially satisfied.
@@ -1056,6 +1068,10 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   ) {
     // Identities unavailable, or count says there ARE non-blocking findings but
     // we parsed zero identities → fail closed (no waiver).
+    identityCoverageOk = false;
+  } else if (!currentNonBlockingIdentityCountCoversKnownCount) {
+    // Count says there are more standing non-blocking findings than the
+    // identities parser could name. Do not let a subset pass `.every(...)`.
     identityCoverageOk = false;
   } else if (currentNonBlockingIdentities.length === 0) {
     // Count unknown but identities present-and-empty → nothing standing to
@@ -1156,7 +1172,9 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       nonBlockingCoverage: {
         ok: nonBlockingCoverageOk,
         identityCoverageOk,
+        identityCountCoversKnownCount: currentNonBlockingIdentityCountCoversKnownCount,
         currentIdentities: currentNonBlockingIdentities,
+        currentIdentityCount: currentNonBlockingIdentityCount,
         addressedNonBlockingTitles: [...hamAddressedNonBlockingTitles],
         currentNonBlockingCount,
       },

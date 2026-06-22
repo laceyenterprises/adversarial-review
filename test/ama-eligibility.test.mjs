@@ -1727,6 +1727,55 @@ test('ham terminal remediation: non-blocking waiver REFUSED when HAM covers only
   assert.ok(!result.trace.hamTerminalRemediation.waived.includes('non-blocking-findings-present'));
 });
 
+test('ham terminal remediation: non-blocking waiver REFUSED when known count exceeds parsed identities', () => {
+  const finding = { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true };
+  const auditBody = 'HAM audit: addressed README note is stale in README.md. Doc-currency: updated README.md for changed files README.md.';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+      // Regression for compact legacy sections: the count path saw two
+      // top-level bullets, while the identity parser only surfaced one title.
+      // That one title being addressed must not waive the unparsed second
+      // standing finding.
+      nonBlockingFindingCount: 2,
+      nonBlockingFindingState: 'known',
+      nonBlockingFindingIdentities: ['readme note is stale'],
+    },
+    prMetadata: { headSha: 'abc12345' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({
+      headSha: 'abc12345',
+      parentSha: 'abc12345',
+      remediatedFindings: '1 addressed (0 blocking, 99 non-blocking)',
+      auditBody,
+      docCurrency: {
+        status: 'updated',
+        changedFiles: ['README.md'],
+        docsUpdated: ['README.md'],
+      },
+      findings: [finding],
+    }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      headSha: 'abc12345',
+      parentSha: 'abc12345',
+      remediatedFindings: '1 addressed (0 blocking, 99 non-blocking)',
+      auditBody,
+      changedFiles: ['README.md'],
+    }),
+  });
+  assert.equal(result.trace.hamTerminalRemediation.activeAuthorized, true);
+  assert.equal(result.trace.hamTerminalRemediation.nonBlockingCoverage.identityCoverageOk, false);
+  assert.equal(result.trace.hamTerminalRemediation.nonBlockingCoverage.identityCountCoversKnownCount, false);
+  assert.equal(result.trace.hamTerminalRemediation.nonBlockingCoverage.ok, false);
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('non-blocking-findings-present'));
+  assert.ok(!result.trace.hamTerminalRemediation.waived.includes('non-blocking-findings-present'));
+});
+
 // Coverage MET: when the HAM's addressed non-blocking findings cover EVERY
 // current standing non-blocking finding by identity, the non-blocking waiver
 // holds even though strict `.ok` finding-count provenance fails (the HAM's

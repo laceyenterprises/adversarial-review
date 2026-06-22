@@ -561,6 +561,13 @@ function parseReviewFindingsSection(reviewBody, sectionPattern) {
   if (current) findings.push(current);
   if (findings.length > 0) return findings;
 
+  const compactBoldFindings = lines
+    .map((line) => parseBulletBoldTitle(line))
+    .filter(Boolean);
+  if (compactBoldFindings.length > 0) {
+    return compactBoldFindings.map((title) => ({ title }));
+  }
+
   const fallbackLines = lines
     .map((line) => line.trim())
     .filter(Boolean);

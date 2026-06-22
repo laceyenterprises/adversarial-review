@@ -3656,7 +3656,7 @@ function reviewPopulationRetryDecision(row, {
 } = {}) {
   const failureClass = reviewPopulationFailureClass(row);
   if (!row || row.review_status !== 'failed' || !failureClass) {
-    return { retryable: false, action: 'not-population-failure', failureClass: null };
+    return { matched: false, retryable: false, action: 'not-population-failure', failureClass: null };
   }
   const normalized = normalizeReviewPopulationRetryConfig(config);
   const storedHead = row.review_population_retry_head_sha || null;
@@ -3664,7 +3664,8 @@ function reviewPopulationRetryDecision(row, {
   const attempts = sameHead ? Number(row.review_population_retry_attempts || 0) : 0;
   if (normalized.maxAttempts <= 0) {
     return {
-      retryable: true,
+      matched: true,
+      retryable: false,
       action: 'exhausted',
       failureClass,
       attempts,
@@ -3674,7 +3675,8 @@ function reviewPopulationRetryDecision(row, {
   }
   if (attempts >= normalized.maxAttempts) {
     return {
-      retryable: true,
+      matched: true,
+      retryable: false,
       action: 'exhausted',
       failureClass,
       attempts,
@@ -3687,7 +3689,8 @@ function reviewPopulationRetryDecision(row, {
   const waitUntilMs = Number.isFinite(anchorMs) ? anchorMs + backoffMs : nowMs;
   if (backoffMs > 0 && waitUntilMs > nowMs) {
     return {
-      retryable: true,
+      matched: true,
+      retryable: false,
       action: 'wait',
       failureClass,
       attempts,
@@ -3697,6 +3700,7 @@ function reviewPopulationRetryDecision(row, {
     };
   }
   return {
+    matched: true,
     retryable: true,
     action: 'retry',
     failureClass,
@@ -6547,12 +6551,12 @@ async function pollOnce(
           config: reviewPopulationRetryConfig,
           headSha: subject?.headSha || null,
         })
-        : { retryable: false };
+        : { matched: false, retryable: false };
       const unknownFailureAttempts = Number(current?.review_attempts || 0);
       const unknownFailureRetryable = Boolean(
         unknownFailureClass && unknownFailureAttempts < REVIEW_UNKNOWN_FAILURE_MAX_RETRIES
       );
-      if (populationRetry.retryable && populationRetry.action === 'wait') {
+      if (populationRetry.matched && populationRetry.action === 'wait') {
         console.log(
           `[watcher] Holding review-population retry for ${repoPath}#${prNumber}: ` +
             `class=${populationRetry.failureClass} attempts=${populationRetry.attempts}/${populationRetry.maxAttempts}; ` +
@@ -6561,7 +6565,7 @@ async function pollOnce(
         continue;
       }
       const reviewPopulationRetryable = Boolean(
-        populationRetry.retryable && populationRetry.action === 'retry'
+        populationRetry.matched && populationRetry.action === 'retry'
       );
       if (current?.review_status === 'failed' && !infraRecoveryClass && !unknownFailureRetryable && !reviewPopulationRetryable) {
         if (unknownFailureClass) {
@@ -6572,7 +6576,7 @@ async function pollOnce(
           );
           continue;
         }
-        if (populationRetry.retryable && populationRetry.action === 'exhausted') {
+        if (populationRetry.matched && populationRetry.action === 'exhausted') {
           console.log(
             `[watcher] Review-population retry cap exhausted for ${repoPath}#${prNumber}: ` +
               `class=${populationRetry.failureClass} attempts=${populationRetry.attempts}/${populationRetry.maxAttempts}; ` +

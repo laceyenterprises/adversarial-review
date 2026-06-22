@@ -27,6 +27,8 @@ test('review-population failure waits for backoff, retries up to budget, then ex
     nowMs: Date.parse('2026-06-22T10:00:10.000Z'),
   });
   assert.equal(beforeBackoff.action, 'wait');
+  assert.equal(beforeBackoff.matched, true);
+  assert.equal(beforeBackoff.retryable, false);
   assert.equal(beforeBackoff.waitUntilMs, Date.parse('2026-06-22T10:00:30.000Z'));
 
   const firstRetry = reviewPopulationRetryDecision(failedPopulationRow(), {
@@ -35,6 +37,8 @@ test('review-population failure waits for backoff, retries up to budget, then ex
     nowMs: Date.parse('2026-06-22T10:00:31.000Z'),
   });
   assert.equal(firstRetry.action, 'retry');
+  assert.equal(firstRetry.matched, true);
+  assert.equal(firstRetry.retryable, true);
   assert.equal(firstRetry.attempts, 0);
 
   const exhausted = reviewPopulationRetryDecision(failedPopulationRow({
@@ -45,6 +49,8 @@ test('review-population failure waits for backoff, retries up to budget, then ex
     nowMs: Date.parse('2026-06-22T10:05:00.000Z'),
   });
   assert.equal(exhausted.action, 'exhausted');
+  assert.equal(exhausted.matched, true);
+  assert.equal(exhausted.retryable, false);
   assert.equal(exhausted.attempts, 2);
 });
 
@@ -55,6 +61,8 @@ test('review-population retry max_attempts=0 preserves immediate skip behavior',
     nowMs: Date.parse('2026-06-22T10:05:00.000Z'),
   });
   assert.equal(decision.action, 'exhausted');
+  assert.equal(decision.matched, true);
+  assert.equal(decision.retryable, false);
   assert.equal(decision.maxAttempts, 0);
 });
 
@@ -68,6 +76,8 @@ test('review-population retry budget is scoped to the current head', () => {
     nowMs: Date.parse('2026-06-22T10:05:00.000Z'),
   });
   assert.equal(decision.action, 'retry');
+  assert.equal(decision.matched, true);
+  assert.equal(decision.retryable, true);
   assert.equal(decision.attempts, 0);
 });
 
@@ -87,7 +97,7 @@ test('non-population non-recoverable failures are not retried by population path
       config: { maxAttempts: 1, backoffSeconds: 0 },
       headSha: 'head-a',
     }),
-    { retryable: false, action: 'not-population-failure', failureClass: null },
+    { matched: false, retryable: false, action: 'not-population-failure', failureClass: null },
   );
 });
 

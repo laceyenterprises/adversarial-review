@@ -1095,6 +1095,7 @@ async function postRemediationOutcomeComment({
       }
     }
     if (!adapterHandled) {
+      // The gh CLI fallback identity is token-driven via the allowlisted GH_TOKEN.
       ghResult = await execFileImpl(
         'gh',
         ['pr', 'comment', String(prNumber), '--repo', repo, '--body', body],

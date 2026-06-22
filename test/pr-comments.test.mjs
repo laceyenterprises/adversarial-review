@@ -550,6 +550,8 @@ test('postRemediationOutcomeComment uses adapter mutation after marker dedupe fi
     '7',
     '--body',
     `<!-- ${REMEDIATION_COMMENT_MARKER_PREFIX}:demo:r1:completed -->\n\nSummary`,
+    '--reviewer-login',
+    'codex-reviewer-lacey',
   ]);
   assert.equal(calls[0].options.env.GH_TOKEN, 'test-pat-codex');
 });

@@ -40,6 +40,65 @@ async function importGithubAdapterClientFresh() {
   return import(url);
 }
 
+test('adapterUnsupportedError keys fallback on structured unsupported signals', async () => {
+  const mod = await importGithubAdapterClientFresh();
+
+  const structured = new Error('adapter write failed');
+  structured.stdout = JSON.stringify({ error: 'unsupported_kind' });
+  assert.equal(mod.__test__.adapterUnsupportedError(structured), true);
+
+  const exitCode = new Error('adapter write failed');
+  exitCode.code = 78;
+  assert.equal(mod.__test__.adapterUnsupportedError(exitCode), true);
+});
+
+test('adapterUnsupportedError does not fall back on unrelated prose token collisions', async () => {
+  const mod = await importGithubAdapterClientFresh();
+  const err = new Error('command failed: unknown ref while running write --kind pull-request-merge');
+  err.stderr = 'GitHub rejected unknown ref deadbeef';
+
+  assert.equal(mod.__test__.adapterUnsupportedError(err), false);
+});
+
+test('pull-request-review adapter args omit unresolved reviewer identity', async () => {
+  const mod = await importGithubAdapterClientFresh();
+
+  assert.deepEqual(mod.__test__.makeAdapterWriteArgs('pull-request-review', {
+    repo: FIXTURE_REPO,
+    prNumber: FIXTURE_PR,
+    body: 'review body',
+  }), [
+    'write',
+    '--kind',
+    'pull-request-review',
+    '--json',
+    '--repo',
+    FIXTURE_REPO,
+    '--pr-number',
+    String(FIXTURE_PR),
+    '--body',
+    'review body',
+  ]);
+
+  assert.deepEqual(mod.__test__.makeAdapterWriteArgs('pull-request-review', {
+    repo: FIXTURE_REPO,
+    prNumber: FIXTURE_PR,
+    body: 'review body',
+    reviewerLogin: null,
+  }), [
+    'write',
+    '--kind',
+    'pull-request-review',
+    '--json',
+    '--repo',
+    FIXTURE_REPO,
+    '--pr-number',
+    String(FIXTURE_PR),
+    '--body',
+    'review body',
+  ]);
+});
+
 function makeExpectedRollup() {
   return {
     id: 'PR_kwDOA1',

@@ -52,6 +52,7 @@ const {
   reviewWithGemini,
   dispatchReviewerModel,
   formatAdvisoryFindingsContext,
+  postGitHubReview,
   LOCAL_REVIEW_SHADOW_LABEL,
   hasLocalReviewShadowLabel,
   evaluateLocalReviewShadowEligibility,
@@ -102,6 +103,54 @@ async function withEnvAsync(overrides, fn) {
     }
   }
 }
+
+test('postGitHubReview uses adapter mutation with the intended reviewer bot identity', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'review-post-adapter-'));
+  const calls = [];
+  await withEnvAsync({
+    GHA_ADAPTER_BIN: '/fixture/github-adapter',
+    GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+    GITHUB_TOKEN: 'ghp_ambient_operator_token',
+  }, async () => {
+    await postGitHubReview(
+      'laceyenterprises/demo',
+      42,
+      'review body',
+      'GH_CODEX_REVIEWER_TOKEN',
+      async (command, args, options = {}) => {
+        calls.push({ command, args, options });
+        assert.equal(command, '/fixture/github-adapter');
+        return { stdout: JSON.stringify({ ok: true }) };
+      },
+      {
+        rootDir,
+        reviewerIdentity: 'codex-reviewer-lacey',
+        prepareReviewWrite: async ({ selfLogin, token }) => {
+          assert.equal(selfLogin, 'codex-reviewer-lacey');
+          assert.equal(token, 'ghp_codex_reviewer_pat');
+        },
+      }
+    );
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.env.GH_TOKEN, 'ghp_codex_reviewer_pat');
+  assert.equal(calls[0].options.env.GITHUB_TOKEN, undefined);
+  assert.deepEqual(calls[0].args, [
+    'write',
+    '--kind',
+    'pull-request-review',
+    '--json',
+    '--repo',
+    'laceyenterprises/demo',
+    '--pr-number',
+    '42',
+    '--body',
+    'review body',
+    '--reviewer-login',
+    'codex-reviewer-lacey',
+  ]);
+});
 
 function queueWithFakes(reviewText, overrides = {}) {
   const created = [];

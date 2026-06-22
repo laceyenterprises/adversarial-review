@@ -675,6 +675,57 @@ test('publishAdversarialGateStatus skips duplicate decisions already recorded fo
   assert.equal(record.description, decision.description);
 });
 
+test('publishAdversarialGateStatus sends byte-equivalent required fields through adapter mutation', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'gate-status-adapter-'));
+  const calls = [];
+  const decision = {
+    state: 'success',
+    description: 'Adversarial review passed',
+    reason: 'settled-success',
+    context: ADVERSARIAL_GATE_CONTEXT,
+  };
+
+  const result = await publishAdversarialGateStatus(rootDir, {
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 54,
+    headSha: 'def456',
+    decision,
+    execFileImpl: async (command, args, options = {}) => {
+      calls.push({ command, args, options });
+      assert.equal(command, '/fixture/github-adapter');
+      return { stdout: JSON.stringify({ ok: true }) };
+    },
+    env: {
+      PATH: '/usr/bin:/bin',
+      HOME: '/tmp/test-home',
+      GITHUB_TOKEN: 'status-token',
+      GHA_ADAPTER_BIN: '/fixture/github-adapter',
+      SHOULD_NOT_LEAK: 'nope',
+    },
+  });
+
+  assert.equal(result.posted, true);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, [
+    'write',
+    '--kind',
+    'commit-status',
+    '--json',
+    '--repo',
+    'laceyenterprises/adversarial-review',
+    '--head-sha',
+    'def456',
+    '--state',
+    'success',
+    '--context',
+    ADVERSARIAL_GATE_CONTEXT,
+    '--description',
+    'Adversarial review passed',
+  ]);
+  assert.equal(calls[0].options.env.GH_TOKEN, 'status-token');
+  assert.equal(calls[0].options.env.SHOULD_NOT_LEAK, undefined);
+});
+
 test('publishAdversarialGateStatus early-returns disabled-by-config when ADVERSARIAL_GATE_STATUS_DISABLED=true', async () => {
   const ghCalls = [];
   const writeCalls = [];

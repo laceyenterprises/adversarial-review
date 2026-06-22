@@ -236,12 +236,15 @@ boundary, those modules should bind to these interfaces rather than fork new
 shapes. Until then, updates to the declaration file must keep the fixture and
 the runtime-bound JSDoc consumers in sync.
 
-## Optional GitHub Read Adapter
+## Optional GitHub Adapter
 
-The GitHub-PR domain may prefer a local `github-adapter` read binary for GitHub
-lookups during review and remediation orchestration. The integration is
-rollout-safe: adapter reads are opportunistic, and failures or missing binaries
-must fall back to the existing `gh` or Octokit path for the same lookup.
+The GitHub-PR domain may prefer a local `github-adapter` binary for GitHub
+lookups and selected GitHub mutations during review and remediation
+orchestration. The integration is rollout-safe: adapter reads are
+opportunistic, and failures or missing binaries must fall back to the existing
+`gh` or Octokit path for the same lookup. Adapter writes are likewise optional
+for the supported mutation kinds listed below; absence of the adapter must
+preserve the historical `gh` behavior.
 
 `src/github-adapter-client.mjs` resolves the binary in this order:
 
@@ -263,11 +266,37 @@ adapter is present it is invoked with the caller's GitHub/OAuth environment
 needed by the binary); `GITHUB_TOKEN` is copied to `GH_TOKEN` only when
 `GH_TOKEN` is unset. The adapter currently covers pull-request rollups, review
 contexts, head/state reads, review bodies for a head SHA, label events, issue
-comments, open PR discovery, single-PR snapshots, and PR diffs. Each call site
+comments, open PR discovery, single-PR snapshots, and PR diffs. Each read call site
 must preserve the fallback behavior independently, because the adapter is an
 optional preferred read source rather than the authoritative availability gate.
 Adapter-absent reads must not emit synthetic adapter telemetry or consume a
 second throttle wait before falling through to the existing GitHub client path.
+
+Adapter writes currently cover issue comments, commit statuses, pull-request
+reviews, pull-request label add/remove, and pull-request merge. Write calls use
+the same binary resolution and env gate (`GHA_ADAPTER_BIN` /
+`AGENT_OS_GITHUB_ADAPTER_BIN`) as reads. A write helper must distinguish
+"adapter absent" from "adapter ran": an absent adapter returns the no-adapter
+sentinel and falls through to `gh`, while a present adapter that successfully
+emits JSON `null` is still a handled write and must not be retried through
+`gh`. This prevents duplicate public side effects after an adapter successfully
+creates a comment, review, status, label, or merge and chooses not to return an
+object payload.
+
+Write fallback is allowed only when the adapter is absent or reports a
+machine-checkable unsupported signal: exit code `78` or JSON output/error
+payload with `error`, `code`, `reason`, or `type` set to `unsupported_kind`,
+`unsupported_write_kind`, `unsupported_write_operation`, or
+`unsupported_command`. A narrow legacy usage-string classifier may remain for
+adapter CLI rollout, but free-form GitHub failure prose such as "unknown ref" or
+"command failed" must not by itself trigger fallback because a second `gh` write
+can duplicate public artifacts.
+
+Fast-merge is the special high-authority write path. The adapter merge request
+must carry explicit admin intent via `--admin`; if an enabled adapter merge
+fails for any reason, the closer must fall back to the historical `gh pr merge
+--admin --squash --match-head-commit <sha> --delete-branch` command so protected
+branch bypass semantics are preserved.
 
 Open-PR discovery is the highest-blast-radius adapter read because an empty
 result can silence the entire watcher. During rollout, an empty adapter

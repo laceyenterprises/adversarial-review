@@ -190,8 +190,7 @@ function buildAdapterEnv(env = process.env) {
   return adapterEnv;
 }
 
-function makeAdapterArgs(kind, params = {}) {
-  const args = ['read', '--kind', kind, '--json'];
+function appendCommonAdapterArgs(args, params = {}) {
   if (params.repo) args.push('--repo', String(params.repo));
   if (params.prNumber !== undefined) args.push('--pr-number', String(normalizePrNumber(params.prNumber)));
   if (params.headSha) args.push('--head-sha', String(params.headSha));
@@ -205,6 +204,28 @@ function makeAdapterArgs(kind, params = {}) {
   if (params.currentHeadSha) args.push('--current-head-sha', String(params.currentHeadSha));
   if (params.withLabels === false) args.push('--no-labels');
   if (params.limit !== undefined) args.push('--limit', String(params.limit));
+  return args;
+}
+
+function makeAdapterArgs(kind, params = {}) {
+  const args = ['read', '--kind', kind, '--json'];
+  appendCommonAdapterArgs(args, params);
+  return args;
+}
+
+function makeAdapterWriteArgs(kind, params = {}) {
+  const args = ['write', '--kind', kind, '--json'];
+  appendCommonAdapterArgs(args, params);
+  if (params.body !== undefined) args.push('--body', String(params.body));
+  if (params.state !== undefined) args.push('--state', String(params.state));
+  if (params.context !== undefined) args.push('--context', String(params.context));
+  if (params.description !== undefined) args.push('--description', String(params.description));
+  if (params.action !== undefined) args.push('--action', String(params.action));
+  if (params.reviewerLogin) args.push('--reviewer-login', String(params.reviewerLogin));
+  if (params.matchHeadCommit !== undefined) args.push('--match-head-commit', String(params.matchHeadCommit));
+  if (params.mergeMethod !== undefined) args.push('--merge-method', String(params.mergeMethod));
+  if (params.deleteBranch !== undefined) args.push(params.deleteBranch ? '--delete-branch' : '--no-delete-branch');
+  if (params.admin === true) args.push('--admin');
   return args;
 }
 
@@ -224,6 +245,58 @@ async function runGitHubAdapter(kind, params = {}, {
     env: buildAdapterEnv(env),
   });
   return parseAdapterJson(stdout, kind);
+}
+
+function adapterUnsupportedError(err) {
+  if (!err) return false;
+  if ([err.code, err.exitCode, err.status].some((code) => Number(code) === 78)) return true;
+
+  const candidates = [
+    err?.message,
+    err?.stderr,
+    err?.stdout,
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(String(candidate).trim());
+      const code = String(parsed?.error || parsed?.code || parsed?.reason || parsed?.type || '').trim();
+      if (/^(unsupported_kind|unsupported_write_kind|unsupported_write_operation|unsupported_command)$/.test(code)) {
+        return true;
+      }
+    } catch {
+      // Non-JSON diagnostics are handled by the narrowly-scoped legacy fallback below.
+    }
+  }
+
+  const detail = candidates.join('\n');
+  return /(^|\n)(github-adapter: )?(error: )?unsupported write kind\b/i.test(detail)
+    || /(^|\n)(github-adapter: )?(error: )?unsupported write operation\b/i.test(detail)
+    || /(^|\n)(github-adapter: )?(error: )?unknown write kind\b/i.test(detail)
+    || (
+      /(^|\n)usage: .*github-adapter\b.*\bwrite\b.*--kind\b/i.test(detail)
+      && /(^|\n)(error: )?(invalid choice|unrecognized arguments?): .*--kind\b/i.test(detail)
+    );
+}
+
+async function writeGitHubAdapter(kind, params = {}, {
+  execFileImpl,
+  env = process.env,
+  rootDir,
+} = {}) {
+  if (typeof execFileImpl !== 'function') {
+    throw new TypeError('writeGitHubAdapter requires execFileImpl');
+  }
+  const adapterBin = resolveGitHubAdapterBin({ env, rootDir });
+  if (!adapterBin) return null;
+  const { stdout } = await execFileImpl(adapterBin, makeAdapterWriteArgs(kind, params), {
+    maxBuffer: ADAPTER_MAX_BUFFER,
+    timeout: ADAPTER_TIMEOUT_MS,
+    env: buildAdapterEnv(env),
+  });
+  return {
+    ran: true,
+    payload: parseAdapterJson(stdout, kind),
+  };
 }
 
 function asPayloadObject(payload, kind) {
@@ -325,17 +398,56 @@ async function readAdapterPullRequestDiff(repo, prNumber, options) {
   return diff.trim() ? diff : null;
 }
 
+async function writeAdapterPullRequestReview(repo, prNumber, { body, reviewerLogin = null } = {}, options) {
+  return writeGitHubAdapter('pull-request-review', { repo, prNumber, body, reviewerLogin }, options);
+}
+
+async function writeAdapterIssueComment(repo, prNumber, { body } = {}, options) {
+  return writeGitHubAdapter('issue-comment', { repo, prNumber, body }, options);
+}
+
+async function writeAdapterCommitStatus(repo, headSha, {
+  state,
+  context,
+  description,
+} = {}, options) {
+  return writeGitHubAdapter('commit-status', { repo, headSha, state, context, description }, options);
+}
+
+async function writeAdapterPullRequestLabel(repo, prNumber, { action, labelName } = {}, options) {
+  return writeGitHubAdapter('pull-request-label', { repo, prNumber, action, labelName }, options);
+}
+
+async function writeAdapterPullRequestMerge(repo, prNumber, {
+  matchHeadCommit,
+  mergeMethod = 'squash',
+  deleteBranch = true,
+  admin = false,
+} = {}, options) {
+  return writeGitHubAdapter('pull-request-merge', {
+    repo,
+    prNumber,
+    matchHeadCommit,
+    mergeMethod,
+    deleteBranch,
+    admin,
+  }, options);
+}
+
 const __test__ = {
+  adapterUnsupportedError,
   buildAdapterEnv,
   candidateSuperprojectAdapterPaths,
   isTrustedAutoDiscoveredAdapterBin,
   makeAdapterArgs,
+  makeAdapterWriteArgs,
   parseAdapterJson,
   resolveGitHubAdapterBin,
   trustedAutoDiscoveryRoots,
 };
 
 export {
+  adapterUnsupportedError,
   __test__,
   readAdapterHeadAndState,
   readAdapterIssueComments,
@@ -347,4 +459,9 @@ export {
   readAdapterReviewBodiesForHead,
   readAdapterReviewContext,
   resolveGitHubAdapterBin,
+  writeAdapterCommitStatus,
+  writeAdapterIssueComment,
+  writeAdapterPullRequestLabel,
+  writeAdapterPullRequestMerge,
+  writeAdapterPullRequestReview,
 };

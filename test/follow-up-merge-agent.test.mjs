@@ -65,6 +65,23 @@ import './helpers/role-config-cache-reset.mjs';
 const AGENT_OS_PRESENT_STUB = () => ({ present: true, source: 'test' });
 const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
 
+async function withProcessEnv(overrides, fn) {
+  const previous = {};
+  for (const key of Object.keys(overrides)) {
+    previous[key] = process.env[key];
+    if (overrides[key] === undefined) delete process.env[key];
+    else process.env[key] = overrides[key];
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
 test('classifyNonBlockingFindings counts top-level non-blocking issue bullets', () => {
   const body = [
     '## Summary',
@@ -5779,6 +5796,54 @@ test('dispatchMergeAgentForPR records skip-no-agent-os and clears consumed trigg
   assert.equal(skipRecord.trigger, 'operator-approved');
   assert.equal(skipRecord.agentOsDetectionSource, 'not-found');
   assert.equal(skipRecord.labelRemoval.removed, true);
+});
+
+test('dispatchMergeAgentForPR keeps label removal audit rows when adapter removes consumed label', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const ghCalls = [];
+  await withProcessEnv({ GHA_ADAPTER_BIN: '/fixture/github-adapter' }, async () => {
+    const result = await dispatchMergeAgentForPR({
+      agentOsDetectImpl: () => ({ present: false, source: 'not-found' }),
+      rootDir,
+      ...makeJob({
+        lastVerdict: 'Request changes',
+        labels: [{ name: 'operator-approved' }],
+        operatorApproval: makeOperatorApproval(),
+      }),
+      execFileImpl: async () => {
+        throw new Error('hq must not be invoked when agent-os is absent');
+      },
+      ghExecFileImpl: async (cmd, args, options = {}) => {
+        ghCalls.push({ cmd, args, options });
+        assert.equal(cmd, '/fixture/github-adapter');
+        return { stdout: JSON.stringify({ ok: true }) };
+      },
+      now: '2026-05-08T12:00:00.000Z',
+    });
+
+    assert.equal(result.decision, 'skip-no-agent-os');
+    assert.equal(result.operatorApprovalLabelRemoved, true);
+  });
+
+  assert.equal(ghCalls.length, 1);
+  assert.deepEqual(ghCalls[0].args, [
+    'write',
+    '--kind',
+    'pull-request-label',
+    '--json',
+    '--repo',
+    'laceyenterprises/agent-os',
+    '--pr-number',
+    '401',
+    '--label',
+    'operator-approved',
+    '--action',
+    'remove',
+  ]);
+  const [skipRecord] = listMergeAgentSkippedDispatches(rootDir);
+  assert.equal(skipRecord.labelRemoval.trigger, 'operator-approved');
+  assert.equal(skipRecord.labelRemoval.removed, true);
+  assert.equal(skipRecord.labelRemoval.error, null);
 });
 
 test('dispatchMergeAgentForPR honors ADV_REVIEW_MERGE_AGENT_DISABLED=1 even when hq is on PATH', async () => {

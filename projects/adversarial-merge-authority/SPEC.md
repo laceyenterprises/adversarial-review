@@ -426,6 +426,12 @@ roles:
         # as a documentation mirror; implementations must not fork the
         # classifier into a narrower AMA-only list.
         ci_green_classifier: existingAdversarialMergeClassifier
+        # HAM close validation requires all GitHub required checks on the
+        # post-remediation head plus the tests covering changed files. Failures
+        # proven red on origin/main before this branch, or caused only by the
+        # worker sandbox environment, must be documented in the closing comment
+        # after hardening/triage instead of becoming an automatic merge blocker.
+        test_bar: required_checks_plus_changed_surface
       branch_protection:
         # Fail-closed branch-protection gate. Operators on GitHub plans
         # with no branch protection may set this false in config.local.yaml

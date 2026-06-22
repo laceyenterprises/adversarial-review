@@ -1625,10 +1625,12 @@ test('ham terminal remediation: valid evidence waives strict non-blocking findin
 
 // Single-shot trust retrofit (2026-06-22): the entitled hammer agent's merge is
 // no longer gated on a fresh review returning ZERO non-blocking findings (which
-// never converges — each remediated head draws a new nit). Non-blocking findings
-// are waived on `.active` alone; blocking findings still require strict `.ok`
-// provenance proving the hammer actually remediated them.
-test('ham terminal remediation: non-blocking findings are waived on .active alone (no strict .ok)', () => {
+// never converges: each remediated head draws a new nit). Non-blocking findings
+// are waived on an authorized active HAM session without requiring strict
+// finding-count `.ok`; blocking findings still require strict `.ok` provenance.
+test('ham terminal remediation: non-blocking findings are waived on authorized active HAM evidence', () => {
+  const finding = { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true };
+  const auditBody = 'HAM audit: addressed README note is stale in README.md. Doc-currency: updated README.md for changed files README.md.';
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
       verdict: 'comment-only',
@@ -1637,20 +1639,61 @@ test('ham terminal remediation: non-blocking findings are waived on .active alon
       nonBlockingFindingCount: 2,
       nonBlockingFindingState: 'known',
     },
+    prMetadata: { headSha: 'abc12345' },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: ENV,
-    // active terminal closer, but NOT validated (.ok=false — no commit/audit/ground-truth).
-    hamTerminalRemediation: { active: true },
+    hamTerminalRemediation: hamEvidence({
+      headSha: 'abc12345',
+      parentSha: 'abc12345',
+      remediatedFindings: '1 addressed (0 blocking, 99 non-blocking)',
+      auditBody,
+      docCurrency: {
+        status: 'updated',
+        changedFiles: ['README.md'],
+        docsUpdated: ['README.md'],
+      },
+      findings: [finding],
+    }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      headSha: 'abc12345',
+      parentSha: 'abc12345',
+      remediatedFindings: '1 addressed (0 blocking, 99 non-blocking)',
+      auditBody,
+      changedFiles: ['README.md'],
+    }),
   });
   assert.equal(
     result.trace.hamTerminalRemediation.ok,
     false,
     JSON.stringify(result.trace.hamTerminalRemediation, null, 2),
   );
+  assert.equal(result.trace.hamTerminalRemediation.activeAuthorized, true);
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
   assert.ok(result.trace.hamTerminalRemediation.waived.includes('non-blocking-findings-present'));
   assert.ok(!result.reasons.includes('non-blocking-findings-present'));
+});
+
+test('ham terminal remediation: self-attested active does not waive strict non-blocking gate', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+      nonBlockingFindingCount: 1,
+      nonBlockingFindingState: 'known',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: { active: true },
+  });
+  assert.equal(result.trace.hamTerminalRemediation.active, true);
+  assert.equal(result.trace.hamTerminalRemediation.activeAuthorized, false);
+  assert.equal(result.trace.hamTerminalRemediation.ok, false);
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('non-blocking-findings-present'));
+  assert.ok(!result.trace.hamTerminalRemediation.waived.includes('non-blocking-findings-present'));
 });
 
 test('ham terminal remediation: request-changes with known-zero blockers is not waived on .active alone', () => {

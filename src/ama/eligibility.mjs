@@ -693,9 +693,21 @@ function validateHamTerminalRemediationEvidence(
     closedBy: closedBy === 'hammer (adversarial-pipe-mode)',
     remediatedFindings: remediatedFindingCountsMatch && blockingCountMatches,
   };
+  const activeClaimed = evidence?.enabled === true || evidence?.active === true;
+  const activeAuthorized = activeClaimed === true
+    && checks.workerClass
+    && checks.ticket
+    && checks.head
+    && checks.parent
+    && checks.nonEmptyCommit
+    && checks.auditComment
+    && checks.auditCommentAuthor
+    && checks.docCurrency
+    && checks.closedBy;
   const ok = Object.values(checks).every(Boolean);
   return {
-    active: evidence?.enabled === true || evidence?.active === true,
+    active: activeClaimed,
+    activeAuthorized,
     ok,
     checks,
     reviewedParent: verifiedParentSha || parentSha || null,
@@ -976,13 +988,13 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   let effectiveReasons = reasons;
   const waivedByHamTerminalRemediation = [];
   // Tier 1 — non-blocking churn is TRUSTED to the entitled hammer agent on
-  // `.active` alone (no strict `.ok` provenance required). A fresh adversarial
-  // review keeps surfacing NEW non-blocking nits on each remediated head, so
-  // requiring `.ok` (whose provenance must match the CURRENT review's finding
-  // counts) against an ever-changing non-blocking set never converges — the
-  // structural deadlock behind "the hammer never autonomously closes". The
-  // agent is mandated to address non-blocking findings; we do not block its
-  // own merge on them, and non-blocking-driven "not settled" rides along.
+  // authorized active HAM evidence (without strict `.ok` finding-count
+  // provenance). A fresh adversarial review can surface new non-blocking nits on
+  // each remediated head, so requiring `.ok` (whose provenance must match the
+  // CURRENT review's finding counts) against an ever-changing non-blocking set
+  // can deadlock terminal close. The active lane still requires trusted
+  // current-head HAM commit/audit provenance; it is not a caller-controlled JSON
+  // claim.
   const HAM_TERMINAL_NONBLOCKING_WAIVABLE_REASONS = new Set([
     'non-blocking-findings-present',
     'non-blocking-findings-unknown',
@@ -997,7 +1009,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     'blocking-findings-present',
     'blocking-findings-unknown',
   ]);
-  if (hamTerminalRemediation.active) {
+  if (hamTerminalRemediation.activeAuthorized) {
     const strictOk = hamTerminalRemediation.ok === true;
     // `verdict-not-settled-success` is non-blocking-driven (Tier 1) only when
     // the settled-success verdict gate failed alongside an explicit

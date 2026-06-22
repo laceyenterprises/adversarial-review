@@ -26,20 +26,20 @@ not replace the machine gate.
    freshest findings.
 2. Remediate ALL final comments, blocking and non-blocking. Make real fixes for
    the findings the review raised. Do not add net-new FEATURE scope.
-2b. **Get the full test suite AND all CI green — this is the bar for keeping
-   `main` clean.** Run the repository's complete test suite against your
-   post-remediation head and fix EVERY failing test AND every red required check
-   / CI job (lint, build, type-check, etc.), *including failures that are
-   unrelated to this PR's findings or that pre-date this branch*. A merge that
-   leaves `main` red is not acceptable. Fixing tests/CI (and the minimal
-   production change a legitimately failing check proves is needed) is the one
-   sanctioned exception to "scope only to the findings" — it is always in scope;
-   net-new feature scope is not. Also leave the working tree clean: commit or
-   discard any stray/dirty changes so the head is not left in a dirty state. **If a
-   check fails on a missing dependency, extension, or tool, resolve it only through
-   a repo-controlled, reproducible dependency path and re-run the check — do not
-   treat missing dependencies as host-local green-bar work.** Prefer an existing
-   repository-pinned install/provisioning script (e.g.
+2b. **Get required checks and changed-surface tests green.** Run the tests that
+   cover the files this PR touches against your post-remediation head, confirm
+   every required GitHub check is green, and fix every failing regression you can.
+   A failure that is also red on `origin/main` before this branch's changes, or
+   that is purely a worker-sandbox limitation, must be hardened or triaged and
+   documented in the closing comment rather than blocking an otherwise clean
+   close. Fixing tests/CI (and the minimal production change a legitimately
+   failing check proves is needed) is the one sanctioned exception to "scope only
+   to the findings"; net-new feature scope is not. Also leave the working tree
+   clean: commit or discard any stray/dirty changes so the head is not left in a
+   dirty state. **If a check fails on a missing dependency, extension, or tool,
+   resolve it only through a repo-controlled, reproducible dependency path and
+   re-run the check before classifying it as a sandbox/pre-existing limitation.**
+   Prefer an existing repository-pinned install/provisioning script (e.g.
    `platform/session-ledger/scripts/install-pgvector.sh` for the `vector` Postgres
    extension). If no pinned path exists, add or update the governing provisioning,
    setup, CI, or docs in the PR so the dependency contract is reviewable and
@@ -106,8 +106,8 @@ not replace the machine gate.
    the lease until `mergeStateStatus` is no longer `BEHIND`; if `gh` reports the
    branch is already up to date that confirms it is on the latest `main`. After
    the rebase, fetch the base, capture the exact current base SHA, and run
-   `merge-lease.mjs needs-revalidation ... --current-base <sha>`. Re-run the FULL
-   test suite (mandate step 2b) and required checks only when
+   `merge-lease.mjs needs-revalidation ... --current-base <sha>`. Re-run the
+   changed-surface tests (mandate step 2b) and required checks only when
    `needsRevalidation` is true; otherwise trust the parallel-phase validation.
    `HAM_VALIDATION_BASE_SHA` must name the base SHA that the parallel-phase full
    suite actually validated. If that value is missing or malformed, force the
@@ -123,10 +123,11 @@ not replace the machine gate.
    `ham_terminal_remediation_validated`. For the narrow strict-non-blocking lane,
    where the only HAM-waived reasons are `non-blocking-findings-present` or
    `non-blocking-findings-unknown` plus the accompanying
-   `verdict-not-settled-success`, the entitled hammer session's `.active` claim
-   is sufficient. Finding resolution is a HAM attestation; the predicate verifies
-   evidence and counts when strict `.ok` provenance is required, not semantic code
-   correctness.
+   `verdict-not-settled-success`, an active HAM session is sufficient only when
+   the predicate independently verifies current-head HAM authority from trusted
+   commit/audit inputs. Finding resolution is a HAM attestation; the predicate
+   verifies evidence and counts when strict `.ok` provenance is required, not
+   semantic code correctness.
 6. Merge only after the exact-head HAM predicate passes, using
    `gh pr merge --match-head-commit <validated-post-remediation-sha>`, and only
    while holding the merge lease. No merge is allowed without the lease. Release
@@ -394,11 +395,11 @@ else
 fi
 
 # CONFIRM THE REBASE HOLDS: the head is now rebased onto the latest main. If
-# HAM_NEEDS_REVALIDATION is true, re-run the FULL test suite (mandate step 2b)
-# and required checks against THIS rebased $POST_REMEDIATION_SHA and fix anything
+# HAM_NEEDS_REVALIDATION is true, re-run the changed-surface tests (mandate step
+# 2b) and required checks against THIS rebased $POST_REMEDIATION_SHA and fix anything
 # the rebase newly broke. If HAM_NEEDS_REVALIDATION is false, trust the
 # parallel-phase validation already performed for this head/base relationship.
-# A rebase that turns the suite or required checks red must be fixed (and
+# A rebase that turns changed-surface tests or required checks red must be fixed (and
 # re-committed, which moves the head and re-enters this validation), never
 # merged. Do not proceed past this point with a red applicable suite, a red
 # required check, or a still-BEHIND mergeStateStatus.
@@ -409,7 +410,7 @@ fi
 The hammer OWNS merge-conflict resolution. A conflicting (`mergeable=CONFLICTING`)
 or behind PR must NOT be left for the operator, but the merge lease must be
 released BEFORE conflict resolution starts. Never hold the lease while opening
-files, resolving markers, running the full suite, or force-pushing the conflict
+files, resolving markers, running changed-surface tests, or force-pushing the conflict
 resolution. After the conflict is resolved and re-validated in the parallel
 phase, re-enter the merge step and re-acquire the lease before rebasing/merging.
 When the rebase loop above hits a conflict, this is the procedure to run only
@@ -435,9 +436,9 @@ fi
 git push --force-with-lease
 ```
 
-After resolving, the head has moved — re-run the FULL test suite (mandate 2b) and
-required checks on the new head before re-acquiring the merge lease and merging,
-exactly as for any parallel-phase validation.
+After resolving, the head has moved — re-run changed-surface tests (mandate 2b)
+and required checks on the new head before re-acquiring the merge lease and
+merging, exactly as for any parallel-phase validation.
 
 ```bash
 gh pr view <<PR_URL>> --json reviews > /tmp/ham-reviews.json
@@ -582,10 +583,12 @@ EOF
 - No `gh pr merge` without `--match-head-commit "$POST_REMEDIATION_SHA"`.
 - No merge when the live post-remediation head has failed, missing, stale, or
   unchecked required checks.
-- No merging while ANY test in the suite fails — including tests unrelated to
-  this branch or pre-existing on `main`. Keeping `main` clean is the bar.
+- No merging while required checks or changed-surface tests fail on this head.
+  Failures proven pre-existing on `origin/main` or purely sandbox-limited must be
+  documented in the closing comment after hardening/triage.
 - No merging a branch that is `BEHIND` / not rebased onto the latest `main`; the
-  rebase must be re-validated (full suite + checks green) before merge.
+  rebase must be re-validated (required checks + changed-surface tests green)
+  before merge.
 - No merge without holding the merge lease for `(<<REPO>>, base, PR <<PR_NUMBER>>)`
   and saving its `leaseId`; no cleanup path may release without
   `--lease-id "$HAM_MERGE_LEASE_ID"`.

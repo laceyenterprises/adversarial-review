@@ -15,15 +15,18 @@ launch and the generic provenance trailer
 `Closed-By: gemini-closer (adversarial-pipe-mode)`. HAM terminal-remediation
 is the exception to the generic suffix rule: its remediation commit uses
 `Closed-By: hammer (adversarial-pipe-mode)` exactly, per the HAM predicate
-contract. The AMA eligibility predicate trusts an entitled HAM terminal
-remediation `.active` claim without full `.ok` provenance only for the
-strict-non-blocking lane: a settled-success-family verdict whose remaining
-refusal reasons are `non-blocking-findings-present` or
-`non-blocking-findings-unknown`, plus the accompanying
-`verdict-not-settled-success`. A bare `verdict-not-settled-success`, a
-`Request changes` verdict, blocking-finding reasons, stale-head reasons, and
-remediation-state reasons still require validated HAM evidence
-(`ham_terminal_remediation_validated`) or a current-head operator override.
+contract. The AMA eligibility predicate trusts active HAM terminal remediation
+without full `.ok` finding-count provenance only after it independently verifies
+the HAM worker trailers, reviewed-parent/current-head match, non-empty verified
+diff, allowlisted audit-comment author, matching audit-comment body, and
+doc-currency evidence. That active lane is limited to strict non-blocking
+remediation: a settled-success-family verdict whose remaining refusal reasons are
+`non-blocking-findings-present` or `non-blocking-findings-unknown`, plus the
+accompanying `verdict-not-settled-success`. A bare
+`verdict-not-settled-success`, a `Request changes` verdict, blocking-finding
+reasons, stale-head reasons, and remediation-state reasons still require
+validated HAM evidence (`ham_terminal_remediation_validated`) or a current-head
+operator override.
 
 AMA closer dispatch must also declare the workspace repo set required by the
 closer prompt. The PR repository is always passed as the primary `--repo`. When
@@ -1574,12 +1577,15 @@ matches the exact `(repo, pr, liveHead)` tuple with a latest
 configured HQ owner, must not be world-writable, and an `in_progress` audit is
 authoritative only while the matching AMA closer lease for `(repo, pr, liveHead)`
 is still `dispatched`; a `succeeded` audit is terminal authority. In the narrow
-strict-non-blocking lane, the eligibility predicate may also accept the entitled
-HAM closer's `.active` claim when the only HAM-waived reasons are
-`non-blocking-findings-present` or `non-blocking-findings-unknown` and the
-paired `verdict-not-settled-success`; that trust does not extend to
-`Request changes`, bare verdict failures, blocking findings, stale review heads,
-or unknown/pending remediation state. Commit
+strict-non-blocking lane, the eligibility predicate may also accept an active HAM
+closer session when the only HAM-waived reasons are
+`non-blocking-findings-present` or `non-blocking-findings-unknown` and the paired
+`verdict-not-settled-success`, but the active state is authoritative only after
+the predicate verifies the live HAM commit, reviewed-parent/current-head match,
+non-empty diff, HAM worker trailers, allowlisted audit-comment author, matching
+audit-comment body, and doc-currency evidence from trusted inputs. That trust
+does not extend to `Request changes`, bare verdict failures, blocking findings,
+stale review heads, or unknown/pending remediation state. Commit
 trailers and PR comments are attacker-controlled corroborating evidence, not
 sufficient authority. If `HQ_ROOT` is unset, the audit record is absent,
 untrusted, not keyed to the live head, missing its matching closer lease, the

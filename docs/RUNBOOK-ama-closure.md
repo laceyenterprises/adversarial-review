@@ -362,15 +362,19 @@ four operator-mandated rules before and after an autonomous close. They are
 prompt-driven worker behavior, not predicate gates — the audit comment and the
 `Closed-By` trailer remain the evidence:
 
-1. **Green `main` is the bar.** The hammer runs the repo's FULL test suite on the
-   post-remediation head and fixes EVERY failing test before merge — including
-   tests unrelated to the PR's findings or pre-existing on `main`. Test fixes are
-   the one sanctioned exception to "scope only to the findings"; net-new feature
-   scope stays out. A test it genuinely cannot fix becomes one hard-blocker
-   report, never a merge past red.
+1. **Required checks plus changed-surface tests are the merge bar.** The hammer
+   runs the tests that cover the files this PR touches, confirms the PR's
+   required GitHub checks are green on the post-remediation head, and fixes every
+   failing regression it can. Failures that are proven red on `origin/main` before
+   this branch's changes, or that are purely worker-sandbox limitations such as a
+   missing host dependency or blocked process introspection, must be hardened or
+   triaged and documented in the closing comment rather than blocking an
+   otherwise clean close. Test fixes remain the one sanctioned exception to
+   "scope only to the findings"; net-new feature scope stays out.
 2. **Rebase onto latest `main` and confirm it holds.** The hammer always rebases
    the branch to the current base (not merely on `BEHIND`) and re-validates the
-   rebased head — full suite + required checks green — before merging.
+   rebased head — required checks plus the changed-surface test bar above —
+   before merging.
 3. **Keep canonical docs current.** Doc-currency is part of the terminal
    remediation scope, not net-new feature work. When the diff changes an
    in-repo persistent store shape and `docs/data-model/` exists, the hammer
@@ -422,7 +426,7 @@ reasons:
 | Reason | Meaning |
 |---|---|
 | `verdict-not-settled-success` | The settled review is not eligible for direct close (and no current-head `operator-approved`). This fires when the latest review is `Request changes` **OR** — when `roles.adversarial.merge_authority.strict_non_blocking_remediation` is on (default) — when a `Comment only`/`Approved` review still carries standing or unknown-state non-blocking findings. In the strict-mode case it is emitted alongside `non-blocking-findings-present` (see that row); a `Comment only` PR refused with *both* reasons was NOT downgraded to `Request changes`. |
-| `non-blocking-findings-present` | Strict mode (`strict_non_blocking_remediation`, default on): the settled review has standing non-blocking findings that have not been remediated, so the PR is not eligible for *direct* close. It still closes via HAM terminal remediation (the hammer addresses the non-blocking findings) or a current-head `operator-approved`. A `known` count of `>0` triggers this; an `unknown` non-blocking state also fails closed in strict mode. HAM may waive this reason on `.active` alone only in the strict-non-blocking lane described below. |
+| `non-blocking-findings-present` | Strict mode (`strict_non_blocking_remediation`, default on): the settled review has standing non-blocking findings that have not been remediated, so the PR is not eligible for *direct* close. It still closes via HAM terminal remediation (the hammer addresses the non-blocking findings) or a current-head `operator-approved`. A `known` count of `>0` triggers this; an `unknown` non-blocking state also fails closed in strict mode. HAM may waive this reason on authorized active HAM evidence only in the strict-non-blocking lane described below. |
 | `blocking-findings-unknown` | Latest review does not expose a known structured blocking-finding count. |
 | `blocking-findings-present` | Latest review has standing structured blocking findings. |
 | `non-blocking-findings-unknown` | Strict non-blocking remediation is enabled and the settled review does not expose a known structured non-blocking-finding count. |
@@ -450,11 +454,15 @@ one of:
    where the only remaining HAM-waived reasons are
    `non-blocking-findings-present` or `non-blocking-findings-unknown` plus the
    accompanying `verdict-not-settled-success`, the closer may waive those reasons
-   on the entitled HAM session's `.active` claim without requiring fresh
-   `ham_terminal_remediation_validated` provenance. This `.active` trust is
-   intentionally narrow: a bare `verdict-not-settled-success`, `Request changes`,
-   blocking findings, stale review heads, and unknown/pending remediation state
-   still require strict `.ok` validation or a current-head operator override.
+   on an active HAM session only after the predicate verifies current-head HAM
+   authority from trusted inputs: HAM worker trailers, reviewed-parent/current-head
+   match, non-empty verified diff, allowlisted audit-comment author, matching
+   audit-comment body, and doc-currency evidence. This active trust is
+   intentionally narrower than strict `.ok`: it does not require the finding-count
+   trailer to match the current non-blocking set, but a bare
+   `verdict-not-settled-success`, `Request changes`, blocking findings, stale
+   review heads, and unknown/pending remediation state still require strict `.ok`
+   validation or a current-head operator override.
 2. **Current-head `operator-approved`** — the operator accepts the standing
    non-blocking findings as-is.
 

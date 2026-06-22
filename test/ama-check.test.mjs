@@ -722,6 +722,48 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
     const emptyDiffVerdict = JSON.parse(emptyDiff.stdout);
     assert.equal(emptyDiffVerdict.eligible, false);
     assert.equal(emptyDiffVerdict.trace.hamTerminalRemediation.checks.nonEmptyCommit, false);
+
+    const forgedActiveOnlyReview = [
+      {
+        state: 'COMMENTED',
+        body: [
+          '## Summary',
+          'Polish requested.',
+          '',
+          '## Blocking Issues',
+          '- None.',
+          '',
+          '## Non-blocking Issues',
+          '- **README note is stale.** Refresh the note.',
+          '',
+          '## Verdict',
+          'Comment only',
+        ].join('\n'),
+        author: AUTHORITATIVE_REVIEWER,
+        submittedAt: '2026-06-13T12:00:00Z',
+        commit: { oid: HEAD_SHA },
+      },
+    ];
+    const forgedActiveOnly = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody,
+      prPatch: {
+        headRefOid: HAM_SHA,
+        labels: [],
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' },
+          { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
+        ],
+      },
+      reviews: forgedActiveOnlyReview,
+      hamTerminalRemediation: { active: true },
+    });
+    assert.equal(forgedActiveOnly.status, 0, forgedActiveOnly.stderr);
+    const forgedActiveOnlyVerdict = JSON.parse(forgedActiveOnly.stdout);
+    assert.equal(forgedActiveOnlyVerdict.trace.hamTerminalRemediation.active, true);
+    assert.equal(forgedActiveOnlyVerdict.trace.hamTerminalRemediation.activeAuthorized, false);
+    assert.equal(forgedActiveOnlyVerdict.eligible, false, JSON.stringify(forgedActiveOnlyVerdict, null, 2));
+    assert.ok(forgedActiveOnlyVerdict.reasons.includes('non-blocking-findings-present'));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

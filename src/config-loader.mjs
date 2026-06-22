@@ -103,6 +103,31 @@ function configDebugLog(message) {
   }
 }
 
+const _RUNTIME_UNKNOWN_WARNED_KEYS = new Set();
+
+function runtimeWarningSource(source) {
+  if (!source) return '(unknown source)';
+  const match = String(source).match(/^(.*):[0-9]+$/);
+  if (match) return match[1];
+  return String(source);
+}
+
+function warnRuntimeUnknownKeyOnce(keyPath, source, hint = '') {
+  const warningSource = runtimeWarningSource(source);
+  const warnedKey = `${warningSource}\0${keyPath}`;
+  if (_RUNTIME_UNKNOWN_WARNED_KEYS.has(warnedKey)) return;
+  _RUNTIME_UNKNOWN_WARNED_KEYS.add(warnedKey);
+  const suffix = hint ? ` — ${hint.trim()}` : '';
+  console.warn(
+    `[adversarial-config] ignoring unknown key ${JSON.stringify(keyPath)} ` +
+      `in runtime config ${warningSource}${suffix} (not in this reader's schema)`,
+  );
+}
+
+export function resetRuntimeUnknownWarningCacheForTests() {
+  _RUNTIME_UNKNOWN_WARNED_KEYS.clear();
+}
+
 // -------- Schema declaration -----------------------------------------------
 
 const ENUM_ROLES_REVIEWER = ['claude-code', 'codex', 'claude', 'gemini', 'adversarial'];
@@ -2172,6 +2197,12 @@ function validateDictPresentKeysOnly(
   source,
   lineMap,
   tolerateUnknown = false,
+  {
+    tolerateTopLevelUnknown = false,
+    warnUnknownOnce = false,
+    warningSource = null,
+    droppedUnknownKeys = null,
+  } = {},
 ) {
   if (doc === null || doc === undefined) return {};
   if (typeof doc !== 'object' || Array.isArray(doc)) {
@@ -2197,7 +2228,7 @@ function validateDictPresentKeysOnly(
         const near = nearestValidKey(rawKey, Object.keys(allowed));
         const full = keyPath ? `${keyPath}.${rawKey}` : rawKey;
         const hint = near ? ` did you mean ${keyPath ? keyPath + '.' : ''}${JSON.stringify(near)}?` : '';
-        if (tolerateUnknown && keyPath) {
+        if (tolerateUnknown && (keyPath || tolerateTopLevelUnknown)) {
           // Operator-local override (config.local.yaml / module *.local.yaml):
           // a NESTED unknown key under a root this reader owns is dropped, not
           // raised. This is the Node mirror of agent-os#1743: the local
@@ -2206,10 +2237,21 @@ function validateDictPresentKeysOnly(
           // different deployed schema version during a rollout, so a premature
           // key must be a no-op here instead of a watcher crash-loop. Debug-only
           // (never stderr by default — see agent-os#1738 warning-leak lesson).
-          configDebugLog(
-            `dropping unknown key ${JSON.stringify(full)} from local override` +
-              `${source ? ` (${source})` : ''} — not in this reader's schema`,
-          );
+          if (warnUnknownOnce) {
+            warnRuntimeUnknownKeyOnce(full, warningSource || source, hint);
+            if (Array.isArray(droppedUnknownKeys)) {
+              droppedUnknownKeys.push({
+                key: full,
+                source: runtimeWarningSource(warningSource || source),
+                hint: hint.trim(),
+              });
+            }
+          } else {
+            configDebugLog(
+              `dropping unknown key ${JSON.stringify(full)} from local override` +
+                `${source ? ` (${source})` : ''} — not in this reader's schema`,
+            );
+          }
           continue;
         }
         throw new AgentOSConfigError(
@@ -2244,6 +2286,12 @@ function validateDictPresentKeysOnly(
             childSource,
             null,
             tolerateUnknown,
+            {
+              tolerateTopLevelUnknown,
+              warnUnknownOnce,
+              warningSource: warningSource || source,
+              droppedUnknownKeys,
+            },
           );
           // Keyed-map defaults are backfilled after all layers merge so default
           // provenance can distinguish file-declared entries from env-created
@@ -2268,6 +2316,12 @@ function validateDictPresentKeysOnly(
         childSource,
         null,
         tolerateUnknown,
+        {
+          tolerateTopLevelUnknown,
+          warnUnknownOnce,
+          warningSource: warningSource || source,
+          droppedUnknownKeys,
+        },
       );
     } else {
       out[childKey] = checkLeaf(raw, childSchema, full, childSource, tolerateUnknown);
@@ -2283,6 +2337,9 @@ export function validateSchema(
     rawText = null,
     tolerateForeignTopLevelSections = false,
     tolerateNestedUnknownLocalKeys = false,
+    tolerateUnknownTopLevelKeys = false,
+    warnUnknownOnce = false,
+    droppedUnknownKeys = null,
   } = {},
 ) {
   const schema = schemaV1();
@@ -2323,6 +2380,12 @@ export function validateSchema(
     source,
     lineMap,
     tolerateNestedUnknownLocalKeys,
+    {
+      tolerateTopLevelUnknown: tolerateUnknownTopLevelKeys,
+      warnUnknownOnce,
+      warningSource: source,
+      droppedUnknownKeys,
+    },
   );
 }
 
@@ -2451,6 +2514,9 @@ function validateModuleDoc(
   {
     tolerateForeignTopLevelSections = false,
     tolerateNestedUnknownLocalKeys = false,
+    tolerateUnknownTopLevelKeys = false,
+    warnUnknownOnce = false,
+    droppedUnknownKeys = null,
   } = {},
 ) {
   if (doc === null || doc === undefined) return { validated: {}, aliases: {} };
@@ -2556,6 +2622,12 @@ function validateModuleDoc(
     source,
     lineMap,
     tolerateNestedUnknownLocalKeys,
+    {
+      tolerateTopLevelUnknown: tolerateUnknownTopLevelKeys,
+      warnUnknownOnce,
+      warningSource: source,
+      droppedUnknownKeys,
+    },
   );
   return { validated, aliases };
 }
@@ -2905,11 +2977,14 @@ function localSibling(path) {
 // -------- AgentOSConfig (public class) -------------------------------------
 
 export class AgentOSConfig {
-  constructor({ values, trace, sources, schema }) {
+  constructor({ values, trace, sources, schema, runtimeDroppedUnknownKeys = [] }) {
     this.values = values;
     this._trace = trace;
     this.sources = sources;
     this.schema = schema;
+    this.runtimeDroppedUnknownKeys = Object.freeze(
+      runtimeDroppedUnknownKeys.map((entry) => Object.freeze({ ...entry })),
+    );
   }
 
   get(key, defaultValue = null) {
@@ -3013,6 +3088,37 @@ export function loadConfig({
   env = null,
   cliOverrides = null,
 } = {}) {
+  return loadConfigImpl({
+    topPath,
+    modulePaths,
+    env,
+    cliOverrides,
+    tolerateCheckedInUnknown: false,
+  });
+}
+
+export function loadConfigRuntime({
+  topPath = null,
+  modulePaths = [],
+  env = null,
+  cliOverrides = null,
+} = {}) {
+  return loadConfigImpl({
+    topPath,
+    modulePaths,
+    env,
+    cliOverrides,
+    tolerateCheckedInUnknown: true,
+  });
+}
+
+function loadConfigImpl({
+  topPath = null,
+  modulePaths = [],
+  env = null,
+  cliOverrides = null,
+  tolerateCheckedInUnknown = false,
+} = {}) {
   const envView = env || process.env;
   checkDeprecatedEnvVars(envView);
   const schema = schemaV1();
@@ -3020,6 +3126,7 @@ export function loadConfig({
   const defaults = buildDefaultsDict(schema);
   const merged = {};
   const trace = {};
+  const runtimeDroppedUnknownKeys = [];
   for (const [dotted, value] of Object.entries(flatten(defaults))) {
     setLeaf(merged, dotted, value);
     (trace[dotted] = trace[dotted] || []).push({
@@ -3034,7 +3141,12 @@ export function loadConfig({
   for (const rawPath of modulePaths) {
     const { doc, rawText } = loadLayerFile(rawPath);
     if (doc === null || doc === undefined) continue;
-    const { validated, aliases } = validateModuleDoc(doc, rawPath, rawText);
+    const { validated, aliases } = validateModuleDoc(doc, rawPath, rawText, {
+      tolerateNestedUnknownLocalKeys: tolerateCheckedInUnknown,
+      tolerateUnknownTopLevelKeys: tolerateCheckedInUnknown,
+      warnUnknownOnce: tolerateCheckedInUnknown,
+      droppedUnknownKeys: runtimeDroppedUnknownKeys,
+    });
     for (const [moduleKey, canonicalKey] of Object.entries(aliases)) {
       const prior = moduleAliases[moduleKey];
       if (prior && prior !== canonicalKey) {
@@ -3060,7 +3172,14 @@ export function loadConfig({
     topPath || envView.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
   const { doc: topDoc, rawText: topRaw } = loadLayerFile(topPathResolved);
   if (topDoc !== null && topDoc !== undefined && !isEmptyDoc(topDoc)) {
-    const validated = validateSchema(topDoc, { source: topPathResolved, rawText: topRaw });
+    const validated = validateSchema(topDoc, {
+      source: topPathResolved,
+      rawText: topRaw,
+      tolerateNestedUnknownLocalKeys: tolerateCheckedInUnknown,
+      tolerateUnknownTopLevelKeys: tolerateCheckedInUnknown,
+      warnUnknownOnce: tolerateCheckedInUnknown,
+      droppedUnknownKeys: runtimeDroppedUnknownKeys,
+    });
     for (const { dotted, path, value } of flattenSchemaLeaves(validated, schema)) {
       if (dotted === 'version') continue;
       setLeafPath(merged, path, value);
@@ -3190,7 +3309,13 @@ export function loadConfig({
     sources[key] = entries[entries.length - 1].source;
   }
 
-  return new AgentOSConfig({ values: merged, trace, sources, schema });
+  return new AgentOSConfig({
+    values: merged,
+    trace,
+    sources,
+    schema,
+    runtimeDroppedUnknownKeys,
+  });
 }
 
 function isEmptyDoc(doc) {

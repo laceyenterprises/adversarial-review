@@ -1728,6 +1728,9 @@ test('resolveReviewerMetadata labels Gemini reviews with the Gemini reviewer ide
   });
 });
 
+// These generic Gemini reviewer tests pin the cli runtime so host-local
+// antigravity config cannot route them through the agy auth preflight; dedicated
+// antigravity tests below cover the production agy spawn and auth path.
 test('reviewWithGemini happy path returns the captured review text', async () => {
   const captured = [];
   const result = await reviewWithGemini('+diff body\n', 'EXTRA CONTEXT', {

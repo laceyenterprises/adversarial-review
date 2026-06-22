@@ -87,6 +87,11 @@ keychain item is definitively missing, `agy models` returns empty output, or a
 non-transient probe failure persists, the reviewer fails closed with an OAuth
 error and remediation text matched to the failed probe class.
 
+Troubleshooting logs and remediation surfaces report the probed keychain item as
+`keychainItem: gemini/antigravity`. Search for that composite value when
+diagnosing an Antigravity reviewer auth failure; the older `Gemini Safe Storage`
+item belongs to the desktop app path and is not the live `agy` selector.
+
 Watcher startup also runs this probe when `runtime: antigravity` is configured.
 Startup logs a warning on failure rather than refusing to boot; the per-review
 probe remains fail-closed. Startup visibility is not a cross-process cache

@@ -25,8 +25,11 @@ import {
 import {
   loadRoleConfig,
   resetRoleConfigCache,
+  resolveGeminiRuntime,
   resolveGeminiReviewerMode,
 } from './role-config.mjs';
+import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
+import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
@@ -6977,6 +6980,48 @@ function requireEnv(name) {
   }
 }
 
+async function warnIfAntigravityReviewerAuthUnavailable({
+  env = process.env,
+  log = console,
+  resolveGeminiRuntimeImpl = resolveGeminiRuntime,
+  checkAgyReviewerAuthImpl = checkAgyReviewerAuth,
+  scrubOAuthFallbackEnvImpl = scrubOAuthFallbackEnv,
+} = {}) {
+  const runtime = resolveGeminiRuntimeImpl({ env });
+  if (runtime !== 'antigravity') {
+    return { checked: false, runtime };
+  }
+
+  const { env: scrubbedEnv } = scrubOAuthFallbackEnvImpl({
+    ...env,
+    HOME: env.HOME || homedir(),
+  });
+  let result;
+  try {
+    result = await checkAgyReviewerAuthImpl({ env: scrubbedEnv });
+  } catch (err) {
+    const detail = err?.message ? `: ${err.message}` : '';
+    log.warn?.(
+      `[watcher] WARN config key=reviewer.gemini.runtime: ` +
+      `antigravity agy auth startup preflight threw (agy-probe-threw)${detail}. ` +
+      'Startup will continue; the per-review AGY auth probe remains fail-closed.'
+    );
+    return { checked: true, ok: false, reason: 'agy-probe-threw' };
+  }
+  if (result?.ok) {
+    return { checked: true, ok: true, reason: null, cached: Boolean(result.cached) };
+  }
+
+  const reason = result?.reason || 'agy-probe-failed';
+  const detail = result?.detail ? `: ${result.detail}` : '';
+  const remediation = result?.remediation ? ` ${result.remediation}` : '';
+  log.warn?.(
+    `[watcher] WARN config key=reviewer.gemini.runtime: ` +
+    `antigravity agy auth startup preflight failed (${reason})${detail}.${remediation}`
+  );
+  return { checked: true, ok: false, reason };
+}
+
 async function main() {
   requireEnv('GITHUB_TOKEN');
   process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = resolveRateLimitSharedStatePath(process.env, ROOT);
@@ -6992,6 +7037,7 @@ async function main() {
     resolvePendingDraftRespawnAgeSeconds(process.env);
     resolveStuckDispatchAlertDebounceMs(process.env);
     validateFenceConfig(process.env);
+    await warnIfAntigravityReviewerAuthUnavailable({ env: process.env });
     if (resolveSigtermFenceMode(process.env) !== 'off') {
       const exitTimeoutCheck = inspectWatcherExitTimeout(process.env);
       if (!exitTimeoutCheck.ok) {
@@ -7202,5 +7248,6 @@ export {
   processQueuedFenceCleanupJobs,
   validateFenceConfig,
   waitForActiveReviewerFencesOnSigterm,
+  warnIfAntigravityReviewerAuthUnavailable,
   writeFastMergeAuditEntry,
 };

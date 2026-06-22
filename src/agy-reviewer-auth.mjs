@@ -7,6 +7,7 @@ const AGY_KEYCHAIN_SERVICE = 'Gemini Safe Storage';
 const DEFAULT_AGY_AUTH_PROBE_TIMEOUT_MS = 5_000;
 const DEFAULT_AGY_AUTH_PROBE_MAX_ATTEMPTS = 3;
 const DEFAULT_AGY_AUTH_PROBE_RETRY_BACKOFF_MS = 250;
+const DEFAULT_AGY_AUTH_PROBE_SUCCESS_TTL_MS = 60_000;
 const AGY_KEYCHAIN_REMEDIATION =
   'Antigravity reviewer auth requires launchd-spawned airlock processes to read the per-user keychain item. '
   + 'Known remediation: unlock the airlock keychain before daemon-spawned work runs and grant command-line access with '
@@ -14,6 +15,7 @@ const AGY_KEYCHAIN_REMEDIATION =
 const AGY_TRANSIENT_REMEDIATION =
   'Antigravity agy auth preflight hit a transient agy transport failure. Retry after the local agy/network path is healthy; '
   + 'if this persists, run `agy models` under the same launchd user environment and inspect stderr.';
+const AGY_AUTH_SUCCESS_CACHE = new Map();
 
 function resolveAgyAuthProbeTimeoutMs(env = process.env) {
   const parsed = Number.parseInt(env.AGY_AUTH_PROBE_TIMEOUT_MS || '', 10);
@@ -28,6 +30,11 @@ function resolveAgyAuthProbeMaxAttempts(env = process.env) {
 function resolveAgyAuthProbeRetryBackoffMs(env = process.env) {
   const parsed = Number.parseInt(env.AGY_AUTH_PROBE_RETRY_BACKOFF_MS || '', 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_AGY_AUTH_PROBE_RETRY_BACKOFF_MS;
+}
+
+function resolveAgyAuthProbeSuccessTtlMs(env = process.env) {
+  const parsed = Number.parseInt(env.AGY_AUTH_PROBE_SUCCESS_TTL_MS || '', 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_AGY_AUTH_PROBE_SUCCESS_TTL_MS;
 }
 
 function isTimeoutError(err) {
@@ -106,6 +113,22 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function agyAuthSuccessCacheKey({ agyCli, env, securityCli, timeoutMs }) {
+  return JSON.stringify({
+    agyCli,
+    securityCli,
+    timeoutMs,
+    home: env?.HOME || '',
+    logname: env?.LOGNAME || '',
+    path: env?.PATH || '',
+    user: env?.USER || '',
+  });
+}
+
+function clearAgyReviewerAuthCache() {
+  AGY_AUTH_SUCCESS_CACHE.clear();
+}
+
 async function checkAgyReviewerAuthOnce({
   agyCli = 'agy',
   env = process.env,
@@ -135,7 +158,7 @@ async function checkAgyReviewerAuthOnce({
       return failure('agy-probe-empty', '`agy models` returned empty stdout');
     }
   } catch (err) {
-    if (isTimeoutError(err)) return failure('agy-probe-timeout', '`agy models` timed out');
+    if (isTimeoutError(err)) return failure('agy-probe-timeout', '`agy models` timed out', AGY_TRANSIENT_REMEDIATION);
     if (isRetryableAgyModelsProbeError(err)) {
       return failure('agy-probe-transient', formatDetail(err), AGY_TRANSIENT_REMEDIATION);
     }
@@ -159,9 +182,23 @@ async function checkAgyReviewerAuth({
   securityCli = 'security',
   maxAttempts = resolveAgyAuthProbeMaxAttempts(env),
   retryBackoffMs = resolveAgyAuthProbeRetryBackoffMs(env),
+  successTtlMs = resolveAgyAuthProbeSuccessTtlMs(env),
   sleepImpl = sleep,
+  cacheSuccess,
+  nowMs = Date.now(),
 } = {}) {
   const attempts = Math.max(1, maxAttempts);
+  const useSuccessCache = (cacheSuccess ?? execFileImpl === execFileAsync) && successTtlMs > 0;
+  const cacheKey = useSuccessCache
+    ? agyAuthSuccessCacheKey({ agyCli, env, securityCli, timeoutMs })
+    : null;
+  if (cacheKey) {
+    const cached = AGY_AUTH_SUCCESS_CACHE.get(cacheKey);
+    if (cached && cached.expiresAtMs > nowMs) {
+      return { ...cached.result, cached: true };
+    }
+    AGY_AUTH_SUCCESS_CACHE.delete(cacheKey);
+  }
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const result = await checkAgyReviewerAuthOnce({
       agyCli,
@@ -171,7 +208,14 @@ async function checkAgyReviewerAuth({
       securityCli,
     });
     if (result.ok || !isRetriableAgyAuthFailure(result) || attempt === attempts) {
-      return withAttemptDetail(result, attempt, attempts);
+      const finalResult = withAttemptDetail(result, attempt, attempts);
+      if (cacheKey && finalResult?.ok) {
+        AGY_AUTH_SUCCESS_CACHE.set(cacheKey, {
+          expiresAtMs: nowMs + successTtlMs,
+          result: finalResult,
+        });
+      }
+      return finalResult;
     }
     if (retryBackoffMs > 0) {
       await sleepImpl(retryBackoffMs);
@@ -182,11 +226,15 @@ async function checkAgyReviewerAuth({
 export {
   DEFAULT_AGY_AUTH_PROBE_MAX_ATTEMPTS,
   DEFAULT_AGY_AUTH_PROBE_RETRY_BACKOFF_MS,
+  DEFAULT_AGY_AUTH_PROBE_SUCCESS_TTL_MS,
   AGY_KEYCHAIN_SERVICE,
   AGY_KEYCHAIN_REMEDIATION,
+  AGY_TRANSIENT_REMEDIATION,
   DEFAULT_AGY_AUTH_PROBE_TIMEOUT_MS,
   checkAgyReviewerAuth,
+  clearAgyReviewerAuthCache,
   resolveAgyAuthProbeMaxAttempts,
   resolveAgyAuthProbeRetryBackoffMs,
+  resolveAgyAuthProbeSuccessTtlMs,
   resolveAgyAuthProbeTimeoutMs,
 };

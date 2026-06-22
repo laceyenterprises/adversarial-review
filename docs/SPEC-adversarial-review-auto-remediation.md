@@ -372,6 +372,16 @@ failures and transient `agy models` transport failures use bounded
 retry/backoff before surfacing an OAuth failure; definitive missing-keychain and
 non-transient probe failures fail closed immediately. The review itself runs
 `agy --print -m <model>` and receives the complete reviewer prompt on stdin.
+Watcher startup runs the same scrubbed-env AGY auth probe when this runtime is
+selected, but startup treats failures as warning-only visibility signals rather
+than refusing to boot. The per-review probe remains fail-closed. Successful real
+preflights may be cached briefly in the process performing the probe, keyed by
+the resolved AGY/security command and launchd user environment, to avoid
+repeated `security`/`agy models` subprocess probes on that process's hot path.
+The startup visibility probe is not a cross-process cache warmup for reviewer
+subprocesses. The subsequent `agy --print` invocation remains authoritative and
+still fails closed if credential state changes inside the short success-cache
+TTL.
 
 Because auth and provider quota behavior are delegated to `agy`, the live
 Antigravity path no longer injects per-account access tokens, rotates through

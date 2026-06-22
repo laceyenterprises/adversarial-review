@@ -507,6 +507,26 @@ daemon's operational GitHub identity; its broker path exists to move high-volume
 watcher reads off the operator PAT, but its fallback preserves daemon startup
 when the broker is temporarily unavailable.
 
+### Merge-agent broker CFG mirror
+
+The shared CFG surface also permits
+`oauth_broker.merge_agent.broker_auth_enabled`,
+`oauth_broker.merge_agent.expected_app_id`, and
+`oauth_broker.merge_agent.expected_installation_id` in checked-in
+`config.yaml` / `config.local.yaml`. These keys describe the GitHub App
+installation-token cutover and metadata pins for the merge-agent / AMA broker
+role.
+
+The adversarial-review Node loader treats `oauth_broker.merge_agent` as a
+strict, partial mirror for CFG parity only. It validates and exposes the three
+keys above so shared config files parse consistently across loaders, and it
+rejects unknown siblings such as `oauth_broker.merge_agent.secret_file` in
+checked-in config. The watcher and follow-up daemon do not consume these keys
+directly; their runtime broker behavior remains controlled by the launcher/env
+surfaces documented above and by the broker verification helpers. Operational
+changes to merge-agent broker auth must therefore update the owning broker/CFG
+implementation as well as this tolerated Node-schema mirror.
+
 ### Runtime reviewer-token refresh (watcher and follow-up daemon ticks)
 
 The launcher mints the reviewer tokens **once**, at startup. The watcher and

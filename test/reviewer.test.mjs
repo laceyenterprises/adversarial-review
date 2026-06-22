@@ -44,6 +44,9 @@ const {
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
   buildAgyReviewArgs,
+  resolveAgyPrintTimeoutMs,
+  formatAgyPrintTimeout,
+  sanitizeAgyReviewOutput,
   AGY_KEYCHAIN_ACCOUNT,
   AGY_KEYCHAIN_SERVICE,
   AGY_KEYCHAIN_REMEDIATION,
@@ -1694,8 +1697,20 @@ test('buildGeminiReviewArgs enters headless mode without carrying the prompt bod
 });
 
 test('buildAgyReviewArgs uses agy print mode without carrying the prompt body', () => {
-  const args = buildAgyReviewArgs({ model: 'gemini-2.5-pro' });
-  assert.deepEqual(args, ['--print', '-m', 'gemini-2.5-pro']);
+  const args = buildAgyReviewArgs({ model: 'gemini-2.5-pro', printTimeoutMs: 1_170_000 });
+  assert.deepEqual(args, ['--print', '--print-timeout', '1170s', '-m', 'gemini-2.5-pro']);
+});
+
+test('buildAgyReviewArgs sizes print timeout below reviewer timeout', () => {
+  const reviewerTimeoutMs = 20 * 60 * 1000;
+  const printTimeoutMs = resolveAgyPrintTimeoutMs(reviewerTimeoutMs);
+  const args = buildAgyReviewArgs({ model: 'gemini-2.5-pro', printTimeoutMs });
+  const printTimeoutArg = args[args.indexOf('--print-timeout') + 1];
+
+  assert.equal(printTimeoutMs, 1_170_000);
+  assert.equal(formatAgyPrintTimeout(printTimeoutMs), '1170s');
+  assert.equal(printTimeoutArg, '1170s');
+  assert.ok(printTimeoutMs < reviewerTimeoutMs);
 });
 
 test('spawnGeminiReview feeds the prompt over stdin and keeps it out of argv', async () => {
@@ -1742,6 +1757,7 @@ test('spawnAgyReview feeds the prompt over stdin and keeps it out of argv', asyn
     env: { HOME: '/tmp/home', PATH: process.env.PATH },
     cwd: '/tmp/repo',
     timeout: 9_999,
+    printTimeoutMs: 9_000,
     maxBuffer: 555,
     spawnWithInputImpl: async (command, args, options) => {
       calls.push({ command, args, options });
@@ -1751,7 +1767,7 @@ test('spawnAgyReview feeds the prompt over stdin and keeps it out of argv', asyn
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, '/usr/local/bin/agy');
-  assert.deepEqual(calls[0].args, ['--print', '-m', 'gemini-2.5-pro']);
+  assert.deepEqual(calls[0].args, ['--print', '--print-timeout', '9s', '-m', 'gemini-2.5-pro']);
   assert.equal(calls[0].options.input, prompt);
   for (const arg of calls[0].args) {
     assert.ok(!arg.includes('secret diff body'), `argv leaked prompt body: ${arg}`);
@@ -1836,6 +1852,7 @@ test('reviewWithGemini cli runtime keeps native binary, argv, env scrub, and cre
 test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scrub, and agy auth', async () => {
   const authCalls = [];
   const spawnCalls = [];
+  const validAgyReview = '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n## Summary\nClean.\n\n## Verdict\nComment only';
   const result = await withEnvAsync({
     HOME: '/tmp/agy-home',
     GEMINI_API_KEY: 'must-strip',
@@ -1847,14 +1864,14 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
     },
     spawnAgyReviewImpl: async ({ agyCli, prompt, model, env }) => {
       spawnCalls.push({ agyCli, args: buildAgyReviewArgs({ model }), prompt, env });
-      return { stdout: 'Antigravity agy review', stderr: '' };
+      return { stdout: validAgyReview, stderr: '' };
     },
     spawnGeminiReviewImpl: async () => {
       throw new Error('native gemini must not be called for antigravity runtime');
     },
   }));
 
-  assert.equal(result.reviewText, 'Antigravity agy review');
+  assert.equal(result.reviewText, validAgyReview);
   assert.equal(authCalls.length, 1);
   assert.equal(authCalls[0].agyCli, AGY_CLI);
   assert.equal(authCalls[0].env.HOME, '/tmp/agy-home');
@@ -1864,8 +1881,9 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   assert.equal(authCalls[0].env.GEMINI_ANTIGRAVITY_ACCOUNT, undefined);
   assert.equal(spawnCalls.length, 1);
   assert.equal(spawnCalls[0].agyCli, AGY_CLI);
-  assert.deepEqual(spawnCalls[0].args, ['--print', '-m', 'gemini-2.5-pro']);
+  assert.deepEqual(spawnCalls[0].args, ['--print', '--print-timeout', '1170s', '-m', 'gemini-2.5-pro']);
   assert.match(spawnCalls[0].prompt, /AGY CONTEXT/);
+  assert.match(spawnCalls[0].prompt, /Do not narrate your plan/);
   assert.match(spawnCalls[0].prompt, /```diff\n\+diff/);
   assert.strictEqual(authCalls[0].env, spawnCalls[0].env);
   assert.equal(spawnCalls[0].env.HOME, '/tmp/agy-home');
@@ -1873,6 +1891,80 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   assert.equal(spawnCalls[0].env.GOOGLE_API_KEY, undefined);
   assert.equal(spawnCalls[0].env.GEMINI_OAUTH_ACCESS_TOKEN, undefined);
   assert.equal(spawnCalls[0].env.GEMINI_ANTIGRAVITY_ACCOUNT, undefined);
+});
+
+test('sanitizeAgyReviewOutput rejects narration-only captured output', () => {
+  const sample = [
+    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    'I will start by listing the files in the workspace ...',
+    'I will run `git log` ...',
+    'I will search `hq-common.sh` for the definition of `hq_ensure_python3` ...',
+    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    'I will list the contents of the workspace directory to orient myself.',
+  ].join('\n');
+
+  assert.throws(
+    () => sanitizeAgyReviewOutput(sample),
+    /without a parseable review verdict/,
+  );
+});
+
+test('sanitizeAgyReviewOutput rejects agy timeout output instead of posting it', () => {
+  const sample = [
+    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    'I will run `git log` ...',
+    'Error: timed out waiting for response',
+  ].join('\n');
+
+  assert.throws(
+    () => sanitizeAgyReviewOutput(sample),
+    /error output instead of a review/,
+  );
+});
+
+test('sanitizeAgyReviewOutput accepts a well-formed agy review with inline verdict', () => {
+  const result = sanitizeAgyReviewOutput([
+    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '',
+    '## Summary',
+    'No blocking findings.',
+    '',
+    '## Verdict: Comment only',
+  ].join('\n'));
+
+  assert.equal(result, [
+    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '',
+    '## Summary',
+    'No blocking findings.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n'));
+});
+
+test('sanitizeAgyReviewOutput strips narration before a valid agy review block', () => {
+  const result = sanitizeAgyReviewOutput([
+    'I will inspect the workspace first.',
+    'I will run `git log`.',
+    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '',
+    '## Summary',
+    'The change is safe.',
+    '',
+    '## Verdict',
+    'Approve',
+  ].join('\n'));
+
+  assert.equal(result, [
+    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '',
+    '## Summary',
+    'The change is safe.',
+    '',
+    '## Verdict',
+    'Approve',
+  ].join('\n'));
 });
 
 test('reviewWithGemini cli runtime does not call agy auth or agy spawn', async () => {
@@ -1933,11 +2025,11 @@ test('reviewWithGemini antigravity retries transient agy subprocess errors', asy
         err.stderr = 'TLS handshake timeout';
         throw err;
       }
-      return { stdout: 'retried antigravity review', stderr: '' };
+      return { stdout: '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n## Verdict\nComment only', stderr: '' };
     },
   });
 
-  assert.equal(result.reviewText, 'retried antigravity review');
+  assert.equal(result.reviewText, '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n## Verdict\nComment only');
   assert.deepEqual(spawns, ['agy', 'agy']);
 });
 

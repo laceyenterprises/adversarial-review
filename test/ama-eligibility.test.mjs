@@ -1653,6 +1653,26 @@ test('ham terminal remediation: non-blocking findings are waived on .active alon
   assert.ok(!result.reasons.includes('non-blocking-findings-present'));
 });
 
+test('ham terminal remediation: request-changes with known-zero blockers is not waived on .active alone', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+      nonBlockingFindingCount: 0,
+      nonBlockingFindingState: 'known',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: { active: true },
+  });
+  assert.equal(result.trace.hamTerminalRemediation.ok, false);
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.ok(!result.trace.hamTerminalRemediation.waived.includes('verdict-not-settled-success'));
+});
+
 test('ham terminal remediation: blocking findings are NOT waived without strict .ok provenance', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {

@@ -1000,10 +1000,15 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   if (hamTerminalRemediation.active) {
     const strictOk = hamTerminalRemediation.ok === true;
     // `verdict-not-settled-success` is non-blocking-driven (Tier 1) only when
-    // no blocking-finding reason is present; otherwise it gates strictly.
+    // the settled-success verdict gate failed alongside an explicit
+    // non-blocking reason. A bare verdict failure (for example Request changes
+    // with known-zero structured blockers) still gates strictly.
     const hasBlockingReason =
       effectiveReasons.includes('blocking-findings-present')
       || effectiveReasons.includes('blocking-findings-unknown');
+    const hasNonBlockingReason =
+      effectiveReasons.includes('non-blocking-findings-present')
+      || effectiveReasons.includes('non-blocking-findings-unknown');
     const inputReasons = effectiveReasons;
     effectiveReasons = [];
     for (const reason of inputReasons) {
@@ -1011,7 +1016,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       if (HAM_TERMINAL_NONBLOCKING_WAIVABLE_REASONS.has(reason)) {
         waivable = true;
       } else if (reason === 'verdict-not-settled-success') {
-        waivable = hasBlockingReason ? strictOk : true;
+        waivable = hasBlockingReason ? strictOk : hasNonBlockingReason;
       } else if (HAM_TERMINAL_STRICT_WAIVABLE_REASONS.has(reason)) {
         waivable = strictOk;
       }

@@ -422,7 +422,7 @@ reasons:
 | Reason | Meaning |
 |---|---|
 | `verdict-not-settled-success` | The settled review is not eligible for direct close (and no current-head `operator-approved`). This fires when the latest review is `Request changes` **OR** — when `roles.adversarial.merge_authority.strict_non_blocking_remediation` is on (default) — when a `Comment only`/`Approved` review still carries standing or unknown-state non-blocking findings. In the strict-mode case it is emitted alongside `non-blocking-findings-present` (see that row); a `Comment only` PR refused with *both* reasons was NOT downgraded to `Request changes`. |
-| `non-blocking-findings-present` | Strict mode (`strict_non_blocking_remediation`, default on): the settled review has standing non-blocking findings that have not been remediated, so the PR is not eligible for *direct* close. It still closes via HAM terminal remediation (the hammer addresses the non-blocking findings) or a current-head `operator-approved`. A `known` count of `>0` triggers this; an `unknown` non-blocking state also fails closed in strict mode. |
+| `non-blocking-findings-present` | Strict mode (`strict_non_blocking_remediation`, default on): the settled review has standing non-blocking findings that have not been remediated, so the PR is not eligible for *direct* close. It still closes via HAM terminal remediation (the hammer addresses the non-blocking findings) or a current-head `operator-approved`. A `known` count of `>0` triggers this; an `unknown` non-blocking state also fails closed in strict mode. HAM may waive this reason on `.active` alone only in the strict-non-blocking lane described below. |
 | `blocking-findings-unknown` | Latest review does not expose a known structured blocking-finding count. |
 | `blocking-findings-present` | Latest review has standing structured blocking findings. |
 | `non-blocking-findings-unknown` | Strict non-blocking remediation is enabled and the settled review does not expose a known structured non-blocking-finding count. |
@@ -446,9 +446,15 @@ non-blocking polish suggestion, this means the common `Comment only` /
 one of:
 
 1. **HAM terminal remediation** (preferred) — the hammer worker addresses the
-   non-blocking findings on the PR branch and the closer waives the gate against
-   the validated remediation evidence. This is the intended steady-state path and
-   makes the codex HAM worker load-bearing for most closes.
+   non-blocking findings on the PR branch. For a settled-success-family verdict
+   where the only remaining HAM-waived reasons are
+   `non-blocking-findings-present` or `non-blocking-findings-unknown` plus the
+   accompanying `verdict-not-settled-success`, the closer may waive those reasons
+   on the entitled HAM session's `.active` claim without requiring fresh
+   `ham_terminal_remediation_validated` provenance. This `.active` trust is
+   intentionally narrow: a bare `verdict-not-settled-success`, `Request changes`,
+   blocking findings, stale review heads, and unknown/pending remediation state
+   still require strict `.ok` validation or a current-head operator override.
 2. **Current-head `operator-approved`** — the operator accepts the standing
    non-blocking findings as-is.
 

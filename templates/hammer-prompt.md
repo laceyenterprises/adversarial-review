@@ -115,12 +115,17 @@ not replace the machine gate.
    Fix any test the rebase newly broke, and re-run the closer eligibility
    predicate in SPEC §1.1.1 HAM terminal-remediation mode for that same live
    head. Only a rebased-onto-latest-main head whose applicable suite/check bar is
-   green may proceed to merge while still holding the lease. The predicate must prove
-   the HAM-authored remediation commit, provenance trailers, PR audit comment,
-   reviewed-parent coverage, non-empty verified diff, successful live-head
-   checks, and non-waived gates. It must record
-   `ham_terminal_remediation_validated`. Finding resolution is a HAM
-   attestation; the predicate verifies evidence and counts, not semantic code
+   green may proceed to merge while still holding the lease. For any blocking,
+   stale-head, remediation-state, or bare verdict failure, the predicate must
+   prove the HAM-authored remediation commit, provenance trailers, PR audit
+   comment, reviewed-parent coverage, non-empty verified diff, successful
+   live-head checks, and non-waived gates, and it must record
+   `ham_terminal_remediation_validated`. For the narrow strict-non-blocking lane,
+   where the only HAM-waived reasons are `non-blocking-findings-present` or
+   `non-blocking-findings-unknown` plus the accompanying
+   `verdict-not-settled-success`, the entitled hammer session's `.active` claim
+   is sufficient. Finding resolution is a HAM attestation; the predicate verifies
+   evidence and counts when strict `.ok` provenance is required, not semantic code
    correctness.
 6. Merge only after the exact-head HAM predicate passes, using
    `gh pr merge --match-head-commit <validated-post-remediation-sha>`, and only
@@ -590,7 +595,8 @@ EOF
   re-acquires. Hard-block ONLY a conflict that is genuinely unsafe to resolve (a
   semantic conflict you cannot correctly settle).
 - No skipping the post-merge closing comment on a successful merge.
-- No treating a rebased HAM head as valid without `ham_terminal_remediation_validated`.
+- No treating a rebased HAM head as valid without `ham_terminal_remediation_validated`
+  except for the narrow strict-non-blocking `.active` lane described above.
 - No landing a schema or module change that leaves an in-repo data-model doc
   (`docs/data-model/`, incl. `catalog.json`) or module walkthrough
   (`modules/<name>/<name>-walkthrough.md`) stale (mandate 2c).

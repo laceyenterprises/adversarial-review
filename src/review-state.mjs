@@ -10,7 +10,7 @@ import { ensureReviewCycleCapSchema } from './review-cycle-cap.mjs';
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
-const REVIEW_STATE_SCHEMA_VERSION = 9;
+const REVIEW_STATE_SCHEMA_VERSION = 10;
 const REVIEW_STATE_MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 const execFileAsyncDefault = promisify(execFile);
 const REVIEW_STATE_TABLE_NAMES = new Set([
@@ -69,6 +69,7 @@ function ensureReviewStateSchema(db) {
       reviewer_head_sha TEXT,
       reviewer_timeout_ms INTEGER,
       reviewer_lease_expires_at TEXT,
+      quota_reset_at_utc TEXT,
       UNIQUE(repo, pr_number)
     )
   `);
@@ -100,6 +101,11 @@ function ensureReviewStateSchema(db) {
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_head_sha TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_timeout_ms INTEGER`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN reviewer_lease_expires_at TEXT`);
+  // HRR review-lane: durable provider usage-cap reset time. Owned by
+  // 20260622_quota_reset_at_utc.sql; kept here too as an idempotent backstop for
+  // DBs that briefly existed before the migration sentinel (same rationale as
+  // the fast_merge_audit_* columns above).
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN quota_reset_at_utc TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN domain_id TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN subject_external_id TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN revision_ref TEXT`);

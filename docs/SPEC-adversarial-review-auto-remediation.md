@@ -902,22 +902,47 @@ the recovered row would only trade a GitHub-side failure for another
 infrastructure failure.
 
 `quota-exhausted` is a hold-until-reset recovery class, not a normal immediate
-retry. The reviewer/runtime classifier must preserve the provider's reset hint
-in the failed-row evidence with a `[quota-exhausted]` prefix. Before claiming
-that row again, the watcher parses provider reset strings from the stored
-message, including Codex month/day strings, explicit ISO timestamps (with a
+retry. The reviewer/runtime classifier must tag failed-row evidence with a
+`[quota-exhausted]` prefix and the watcher must capture the provider reset hint
+from the full reviewer output, before truncation, into
+`reviewed_prs.quota_reset_at_utc`. That column is the preferred durable reset
+source for the hold decision. It is set only when a reviewer failure is recorded
+as `quota-exhausted`; it is cleared when the row is claimed for a replacement
+review, when a review posts successfully, and when an operator quota re-arm
+moves the row back to `pending`.
+
+Before claiming a quota row again, the watcher resolves the reset in this order:
+first `quota_reset_at_utc`; then a fallback parse of the stored
+`failure_message` for Codex month/day strings, explicit ISO timestamps (with a
 trailing `Z` or a `+HH:MM`/`-HH:MM` offset), and Claude clock-only strings such
 as `resets at 5:39 PM` anchored to the host's local date and rolled to the next
-day if the clock time has already elapsed. If the reset is still in the future,
-the watcher leaves the row `failed`, skips the spawn for that poll, and does not
-consume an infrastructure auto-recovery attempt. If no provider reset can be
-parsed, the row is held for the fixed quota fallback window anchored to a
-**durable** timestamp (`failed_at`, then `last_attempted_at`). When no durable
-anchor exists at all, the row is **not** held: anchoring the window on the
-current poll time would recompute `now + window` every tick and suspend the row
-forever, so the decision releases it to bounded recovery (capped by the
-infrastructure auto-recovery budget) instead. A `failed` row always carries
-`failed_at` in practice, so this guards only the pathological no-timestamp case.
+day if the clock time has already elapsed; finally a fixed quota fallback window
+anchored to a **durable** timestamp (`failed_at`, then `last_attempted_at`). If
+the resolved reset/fallback window is still in the future, the watcher leaves
+the row `failed`, skips the spawn for that poll, and does not consume an
+infrastructure auto-recovery attempt. When no durable anchor exists at all, the
+row is **not** held: anchoring the window on the current poll time would
+recompute `now + window` every tick and suspend the row forever, so the decision
+releases it to bounded recovery (capped by the infrastructure auto-recovery
+budget) instead. A `failed` row always carries `failed_at` in practice, so this
+guards only the pathological no-timestamp case.
+
+Operators may manually release a stuck quota hold with
+`npm run quota-rearm -- --repo <owner/repo> --pr <number>` (or
+`node bin/quota-rearm.mjs ...`). The command is intentionally narrower than a
+generic re-review reset: it refuses missing rows, non-open PRs, `reviewing`
+rows, already terminal/backoff statuses such as `posted`, `malformed`,
+`failed-orphan`, and `pending-upstream`, and non-quota failed rows unless
+`--force` is supplied. `--force` only bypasses the quota-evidence check for an
+open `failed` row; it does not authorize rewriting posted reviews or unrelated
+state-machine statuses. The mutation itself is a compare-and-swap against the
+failed row that was read, including stable failure/session evidence, so a
+concurrent watcher claim, posted review, or operator edit returns
+`state-changed` instead of clearing the new state. A successful re-arm moves the
+row to `pending`, clears `failed_at`, `failure_message`,
+`quota_reset_at_utc`, and reviewer lease/session fields, and resets
+`infra_auto_recover_attempts` to `0` so the next watcher poll treats the next
+quota incident as a fresh bounded recovery window.
 
 The same hard-cap contract applies to follow-up remediation workers that spawn
 direct harness CLIs outside the dispatch lane. Reconcile may move a

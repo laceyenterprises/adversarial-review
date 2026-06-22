@@ -1,0 +1,16 @@
+-- HRR (harness rate-limit resilience), review lane: durably store the provider
+-- usage-cap reset time captured at the reviewer-failure recording point.
+--
+-- Why: when a reviewer CLI (codex / claude) hits a hard usage cap it prints the
+-- reset hint ("try again at <time>") in its FULL stdout/stderr. The terse
+-- `failure_message` the watcher persists truncates that line away (the 8KB
+-- stdout/stderr tails push it past the 4KB detail cap), so `quotaHoldDecision`
+-- could no longer re-derive the reset and fell back to a blind 15-minute window
+-- — burning the bounded infra auto-recover budget against a cap that physically
+-- cannot lift for hours. Capturing the parsed reset ONCE, durably, lets the
+-- watcher hold-until-reset instead. Mirrors the dispatch-lane reset-time capture
+-- (agent-os PR #2430).
+--
+-- NULL means "no reset was parseable at capture time" — readers fall back to
+-- re-deriving from failure_message and then to the configured default window.
+ALTER TABLE reviewed_prs ADD COLUMN quota_reset_at_utc TEXT;

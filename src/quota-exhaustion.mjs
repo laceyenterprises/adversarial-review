@@ -43,8 +43,58 @@ const GENERIC_QUOTA_PATTERNS = [
   /\bplan_limit\b/i,
 ];
 
+const CODEX_HUMAN_RESET_TIME_ZONE = 'America/Los_Angeles';
+const MONTH_INDEX_BY_PREFIX = new Map([
+  ['jan', 0],
+  ['feb', 1],
+  ['mar', 2],
+  ['apr', 3],
+  ['may', 4],
+  ['jun', 5],
+  ['jul', 6],
+  ['aug', 7],
+  ['sep', 8],
+  ['oct', 9],
+  ['nov', 10],
+  ['dec', 11],
+]);
+
 function _matches(text, patterns) {
   return patterns.some((re) => re.test(text));
+}
+
+function timeZoneOffsetMs(timeZone, utcMs) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(new Date(utcMs));
+  const values = Object.fromEntries(parts.filter((p) => p.type !== 'literal').map((p) => [p.type, p.value]));
+  const wallAsUtcMs = Date.UTC(
+    Number(values.year),
+    Number(values.month) - 1,
+    Number(values.day),
+    Number(values.hour),
+    Number(values.minute),
+    Number(values.second),
+    0
+  );
+  return wallAsUtcMs - utcMs;
+}
+
+function wallTimeInZoneToDate({ year, month, day, hour, minute }, timeZone) {
+  const wallAsUtcMs = Date.UTC(year, month, day, hour, minute, 0, 0);
+  let offsetMs = timeZoneOffsetMs(timeZone, wallAsUtcMs);
+  let utcMs = wallAsUtcMs - offsetMs;
+  const refinedOffsetMs = timeZoneOffsetMs(timeZone, utcMs);
+  if (refinedOffsetMs !== offsetMs) utcMs = wallAsUtcMs - refinedOffsetMs;
+  const d = new Date(utcMs);
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 // Parse the reset time the provider returns, if any. Returns an ISO-8601 string
@@ -59,16 +109,32 @@ function parseQuotaResetAt(text, { nowMs = null } = {}) {
   const iso = t.match(/(?:try again at|resets? at)\s+(\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)/i);
   if (iso) {
     const d = new Date(iso[1]);
-    if (!Number.isNaN(d.getTime())) return d.toISOString();
+    if (d && !Number.isNaN(d.getTime())) return d.toISOString();
   }
   // "try again at Jun 17th, 2026 5:39 PM" — strip the ordinal suffix Date can't parse.
   const human = t.match(/(?:try again at|resets? at)\s+([A-Za-z]{3,9}\s+\d{1,2})(?:st|nd|rd|th)?(,?\s+\d{4})?\s+(\d{1,2}:\d{2}\s*(?:am|pm))/i);
   if (human) {
     const base = nowMs != null ? new Date(nowMs) : null;
     const year = human[2] ? human[2].replace(/[,\s]/g, '') : (base ? String(base.getUTCFullYear()) : '');
-    const candidate = `${human[1]} ${year} ${human[3]}`.replace(/\s+/g, ' ').trim();
-    const d = new Date(candidate);
-    if (!Number.isNaN(d.getTime())) return d.toISOString();
+    const dateParts = human[1].match(/^([A-Za-z]{3,9})\s+(\d{1,2})$/);
+    const timeParts = human[3].match(/^(\d{1,2}):(\d{2})\s*(am|pm)$/i);
+    const month = MONTH_INDEX_BY_PREFIX.get(String(dateParts?.[1] || '').slice(0, 3).toLowerCase());
+    const day = Number(dateParts?.[2]);
+    let hour = Number(timeParts?.[1]);
+    const minute = Number(timeParts?.[2]);
+    const meridiem = String(timeParts?.[3] || '').toLowerCase();
+    if (hour === 12) hour = 0;
+    if (meridiem === 'pm') hour += 12;
+    const d = Number.isInteger(month) && year && day >= 1 && day <= 31 && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59
+      ? wallTimeInZoneToDate({
+        year: Number(year),
+        month,
+        day,
+        hour,
+        minute,
+      }, CODEX_HUMAN_RESET_TIME_ZONE)
+      : null;
+    if (d && !Number.isNaN(d.getTime())) return d.toISOString();
   }
   // Claude often prints only a local clock time for rolling caps:
   // "resets at 5:39 PM". Anchor that to today's local date, then roll forward
@@ -125,26 +191,46 @@ const QUOTA_EXHAUSTED_FAILURE_CLASS = 'quota-exhausted';
 // Default hold window when the provider gives no parseable reset time.
 const DEFAULT_QUOTA_BACKOFF_MS = 15 * 60 * 1000;
 
+// Capture the provider usage-cap reset time at the failure-recording point, for
+// durable storage in reviewed_prs.quota_reset_at_utc. Runs `parseQuotaResetAt`
+// over the FULL reviewer output (stdout + stderr, before it is truncated into
+// the terse failure_message) so the "try again at <time>" line is not lost.
+// Returns an ISO-8601 UTC string or null. `nowMs` anchors year/date inference
+// for the human/clock-only phrasings; pass the failure timestamp.
+function resolveQuotaResetIso(fullOutput, { nowMs = null } = {}) {
+  return parseQuotaResetAt(fullOutput, { nowMs });
+}
+
 // Decide whether a quota-exhausted reviewed_prs row should be HELD (skipped
 // without consuming an infra auto-recover attempt) because the provider's cap
 // window has not yet elapsed. Pure function over the stored row so the watcher's
 // inline gate stays trivially testable.
 //
+//   row.quota_reset_at_utc — durably-captured provider reset (PREFERRED source;
+//                          set at failure-recording time from the full output,
+//                          before failure_message truncation can drop it).
 //   row.failure_message  — carries the `[quota-exhausted] …try again at <time>…`
-//                          text the reset is parsed from.
+//                          text the reset is RE-derived from as a fallback when
+//                          the durable column is absent.
 //   row.failed_at        — when the cap was last observed (fallback-window base).
 //   row.last_attempted_at — secondary fallback base if failed_at is absent.
 //
-// Returns { hold, waitUntilMs, source } where source is 'provider-reported'
-// (reset parsed from the message) or 'fallback-window' (fixed backoff since the
-// last failure). When neither a reset nor a usable timestamp is available, the
-// window is anchored at nowMs so the first observation always holds once before
-// recovery is attempted.
+// Returns { hold, waitUntilMs, source } where source is 'provider-reported-stored'
+// (durable column), 'provider-reported' (re-parsed from the message), or
+// 'fallback-window' (fixed backoff since the last failure). When neither a reset
+// nor a usable timestamp is available, the window is anchored at nowMs so the
+// first observation always holds once before recovery is attempted.
 function quotaHoldDecision(row, { nowMs = null, fallbackBackoffMs = DEFAULT_QUOTA_BACKOFF_MS } = {}) {
   const now = nowMs == null ? Date.now() : nowMs;
   const lastFailureMs = Date.parse(row?.failed_at || row?.last_attempted_at || '');
   const hasAnchor = !Number.isNaN(lastFailureMs);
   const observationMs = hasAnchor ? lastFailureMs : now;
+  // Prefer the durable, captured-at-failure reset over re-parsing the terse
+  // failure_message (which may have truncated the "try again at" line away).
+  const storedResetMs = Date.parse(row?.quota_reset_at_utc || '');
+  if (!Number.isNaN(storedResetMs)) {
+    return { hold: now < storedResetMs, waitUntilMs: storedResetMs, source: 'provider-reported-stored' };
+  }
   const resetIso = parseQuotaResetAt(row?.failure_message, { nowMs: observationMs });
   const resetMs = resetIso ? Date.parse(resetIso) : NaN;
   if (!Number.isNaN(resetMs)) {
@@ -173,5 +259,6 @@ export {
   DEFAULT_QUOTA_BACKOFF_MS,
   detectQuotaExhaustion,
   parseQuotaResetAt,
+  resolveQuotaResetIso,
   quotaHoldDecision,
 };

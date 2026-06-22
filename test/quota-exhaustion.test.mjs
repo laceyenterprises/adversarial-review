@@ -20,6 +20,7 @@ import assert from 'node:assert/strict';
 import {
   detectQuotaExhaustion,
   parseQuotaResetAt,
+  resolveQuotaResetIso,
   quotaHoldDecision,
   QUOTA_EXHAUSTED_FAILURE_CLASS,
 } from '../src/quota-exhaustion.mjs';
@@ -74,19 +75,11 @@ test('benign output with no cap marker is not a false positive', () => {
 // ---------------------------------------------------------------------------
 
 test('parseQuotaResetAt handles the codex human "try again at <Month Day>, <Year> <time>" shape', () => {
-  // The provider prints the reset clock-time WITHOUT a timezone, so it denotes
-  // the host's local time (that is how the codex CLI renders it). The parser
-  // therefore resolves it to the same absolute instant that local-time Date
-  // construction yields — verify it round-trips to that instant, rather than
-  // asserting a UTC calendar field that flips across the local→UTC offset.
+  // The Codex CLI prints a dated human reset without an offset, but the provider
+  // account clock is Pacific. GitHub runners are UTC, so this must not rely on
+  // the process timezone.
   const iso = parseQuotaResetAt('try again at Jun 17th, 2026 5:39 PM');
-  assert.ok(iso, 'expected a parsed ISO string');
-  assert.equal(iso, new Date('Jun 17 2026 5:39 PM').toISOString());
-  // And the local calendar date is the 17th as the provider stated.
-  const d = new Date(iso);
-  assert.equal(d.getFullYear(), 2026);
-  assert.equal(d.getMonth(), 5); // June (0-indexed), local
-  assert.equal(d.getDate(), 17); // local day
+  assert.equal(iso, '2026-06-18T00:39:00.000Z');
 });
 
 test('parseQuotaResetAt handles an explicit ISO reset timestamp', () => {
@@ -313,4 +306,66 @@ test('quotaHoldDecision does NOT hold when no durable timestamp anchor exists', 
   const d = quotaHoldDecision(row, { nowMs, fallbackBackoffMs: 15 * 60 * 1000 });
   assert.equal(d.hold, false);
   assert.equal(d.source, 'no-anchor');
+});
+
+// ---------------------------------------------------------------------------
+// resolveQuotaResetIso — capture from the FULL output at failure time
+// ---------------------------------------------------------------------------
+
+test('resolveQuotaResetIso captures the codex "try again at" reset from full output', () => {
+  // The reset line lives in codex stdout amid lots of JSON event noise; the
+  // capture runs over the WHOLE output, before failure_message truncation.
+  const fullOutput = [
+    'Command failed with code 1',
+    'stdout tail:',
+    '{"type":"event_msg","payload":{"type":"token_count"}}',
+    'You have hit your usage limit. Try again at Jun 17th, 2026 5:39 PM or purchase more credits.',
+    'stderr tail:',
+    'reviewer aborted',
+  ].join('\n');
+  const iso = resolveQuotaResetIso(fullOutput, { nowMs: Date.parse('2026-06-17T10:00:00Z') });
+  assert.equal(iso, '2026-06-18T00:39:00.000Z');
+});
+
+test('resolveQuotaResetIso returns null when no reset is present (operator falls back to default window)', () => {
+  const iso = resolveQuotaResetIso('Command failed with code 1\nstdout tail:...', {
+    nowMs: Date.parse('2026-06-17T10:00:00Z'),
+  });
+  assert.equal(iso, null);
+});
+
+// ---------------------------------------------------------------------------
+// quotaHoldDecision — prefers the durably-stored reset column
+// ---------------------------------------------------------------------------
+
+test('quotaHoldDecision PREFERS the stored quota_reset_at_utc over re-parsing the message', () => {
+  // The terse failure_message has lost the "try again at" line (the #2429 shape),
+  // so re-parsing it would yield nothing — but the durable column carries the
+  // real reset captured at failure time. The hold must honor the stored reset.
+  const row = {
+    review_status: 'failed',
+    failure_message: '[quota-exhausted] Command failed with code 1\nstdout tail:...',
+    failed_at: '2026-06-17T17:30:00Z',
+    quota_reset_at_utc: '2026-06-18T00:39:00.000Z',
+  };
+  const heldBefore = quotaHoldDecision(row, { nowMs: Date.parse('2026-06-17T20:00:00Z') });
+  assert.equal(heldBefore.hold, true);
+  assert.equal(heldBefore.source, 'provider-reported-stored');
+  assert.equal(heldBefore.waitUntilMs, Date.parse('2026-06-18T00:39:00.000Z'));
+
+  const releasedAfter = quotaHoldDecision(row, { nowMs: Date.parse('2026-06-18T01:00:00Z') });
+  assert.equal(releasedAfter.hold, false);
+  assert.equal(releasedAfter.source, 'provider-reported-stored');
+});
+
+test('quotaHoldDecision falls back to message re-parse when the stored column is absent', () => {
+  const row = {
+    review_status: 'failed',
+    failure_message: '[quota-exhausted] try again at Jun 17th, 2026 5:39 PM',
+    failed_at: '2026-06-17T10:00:00Z',
+    quota_reset_at_utc: null,
+  };
+  const d = quotaHoldDecision(row, { nowMs: Date.parse('2026-06-17T20:00:00Z') });
+  assert.equal(d.source, 'provider-reported');
+  assert.equal(d.hold, true);
 });

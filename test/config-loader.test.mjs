@@ -3956,3 +3956,51 @@ test('apps.<id> env value change busts the config cache', () => {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// oauth_broker.merge_agent is a tolerate-only partial mirror: the watcher does
+// NOT consume these keys (the merge-agent App-installation-token auth is
+// resolved by modules/worker-pool/lib/hq-gh.sh; the authoritative CFG contract
+// lives in agent-os platform/agent-os-config + projects/adversarial-merge-authority/SPEC.md).
+// The mirror exists so the strict loader does not crash on shared config that
+// carries these keys. Prove valid values parse AND unknown nested keys still fail.
+test('oauth_broker.merge_agent strict mirror: valid keys parse; unknown nested key rejected', () => {
+  const tmp = freshTmp();
+  try {
+    const ok = join(tmp, 'merge-agent-ok.yaml');
+    writeFile(ok, `
+      version: 1
+      oauth_broker:
+        merge_agent:
+          broker_auth_enabled: true
+          expected_app_id: "3978009"
+          expected_installation_id: "138360282"
+    `);
+    const cfg = loadConfig({ topPath: ok, env: {} });
+    assert.equal(cfg.get('oauth_broker.merge_agent.broker_auth_enabled'), true);
+    assert.equal(cfg.get('oauth_broker.merge_agent.expected_app_id'), '3978009');
+    assert.equal(
+      cfg.get('oauth_broker.merge_agent.expected_installation_id'),
+      '138360282',
+    );
+
+    const bad = join(tmp, 'merge-agent-bad.yaml');
+    writeFile(bad, `
+      version: 1
+      oauth_broker:
+        merge_agent:
+          secret_file: /tmp/x
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: bad, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /unknown key/);
+        assert.match(String(err.key), /oauth_broker\.merge_agent/);
+        return true;
+      },
+    );
+  } finally {
+    resetConfigCache();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

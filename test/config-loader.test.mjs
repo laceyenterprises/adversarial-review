@@ -17,11 +17,13 @@ import {
   AgentOSConfig,
   AgentOSConfigError,
   loadConfig,
+  loadConfigRuntime,
   validateSchema,
   SCHEMA_VERSION,
   getConfig,
   loadConfigCached,
   resetConfigCache,
+  resetRuntimeUnknownWarningCacheForTests,
 } from '../src/config-loader.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -93,6 +95,20 @@ function dedent(s) {
 
 function writeFile(path, contents) {
   writeFileSync(path, dedent(contents), { encoding: 'utf8' });
+}
+
+function captureWarns(fn) {
+  const prior = console.warn;
+  const warnings = [];
+  console.warn = (...args) => {
+    warnings.push(args.map((arg) => String(arg)).join(' '));
+  };
+  try {
+    fn();
+  } finally {
+    console.warn = prior;
+  }
+  return warnings;
 }
 
 // -------- §1 + §8 rows 1-4, 12-14 ------------------------------------------
@@ -1007,6 +1023,92 @@ test('checked-in config.yaml STILL rejects a nested unknown key (strict preserve
       },
     );
   } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('runtime loader tolerates an unknown checked-in config.yaml key while strict load rejects it', () => {
+  resetRuntimeUnknownWarningCacheForTests();
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+        future_runtime_home: /newer-than-loader
+    `);
+
+    const warnings = captureWarns(() => {
+      const cfg = loadConfigRuntime({ topPath: top, env: {} });
+      assert.equal(cfg.get('roots.hq'), '/from-top');
+      assert.equal(cfg.get('roots.future_runtime_home'), null);
+      assert.deepEqual(cfg.runtimeDroppedUnknownKeys, [
+        {
+          key: 'roots.future_runtime_home',
+          source: top,
+          hint: 'did you mean roots."runtime_home"?',
+        },
+      ]);
+    });
+    assert.equal(warnings.filter((line) => line.includes('roots.future_runtime_home')).length, 1);
+    assert.match(warnings.join('\n'), /runtime config/);
+
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /roots\.future_runtime_home/);
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    resetRuntimeUnknownWarningCacheForTests();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('runtime loader tolerates unknown checked-in module keys and warns once per file/key', () => {
+  resetRuntimeUnknownWarningCacheForTests();
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const mod = join(tmp, 'mod.yaml');
+    writeFile(top, 'version: 1\n');
+    writeFile(mod, `
+      roles:
+        reviewer: codex
+        future_worker_role: fast-lane
+    `);
+
+    const warnings = captureWarns(() => {
+      const first = loadConfigRuntime({ topPath: top, modulePaths: [mod], env: {} });
+      const second = loadConfigRuntime({ topPath: top, modulePaths: [mod], env: {} });
+      assert.equal(first.get('roles.reviewer'), 'codex');
+      assert.equal(second.get('roles.reviewer'), 'codex');
+      assert.equal(first.get('roles.future_worker_role'), null);
+      assert.deepEqual(first.runtimeDroppedUnknownKeys, [
+        {
+          key: 'roles.future_worker_role',
+          source: mod,
+          hint: '',
+        },
+      ]);
+    });
+    assert.equal(warnings.filter((line) => line.includes('roles.future_worker_role')).length, 1);
+
+    assert.throws(
+      () => loadConfig({ topPath: top, modulePaths: [mod], env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /roles\.future_worker_role/);
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    resetRuntimeUnknownWarningCacheForTests();
     rmSync(tmp, { recursive: true, force: true });
   }
 });

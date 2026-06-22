@@ -493,14 +493,23 @@ node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
 Do not merge unless all of these are true:
 
 - `HAM_MERGE_LEASE_HELD=1` and `HAM_MERGE_LEASE_ID` is non-empty.
-- `/tmp/ham-verdict.json` has `eligible: true`.
-- The trace contains `ham_terminal_remediation_validated`.
+- `/tmp/ham-verdict.json` has `eligible: true`. (For any BLOCKING finding the
+  predicate still requires validated terminal-remediation provenance —
+  `ham_terminal_remediation_validated` — to reach `eligible: true`; for a
+  non-blocking-only close the entitled hammer is trusted and `eligible: true`
+  alone is sufficient.)
 - `POST_REMEDIATION_SHA` still equals the PR head.
 - The branch is rebased onto the latest `main` — `mergeStateStatus` is NOT
   `BEHIND` for `POST_REMEDIATION_SHA`.
-- The FULL test suite is green for `POST_REMEDIATION_SHA` — no failing tests,
-  including ones unrelated to this branch or pre-existing on `main`.
-- Required checks are successful for `POST_REMEDIATION_SHA`.
+- The PR's REQUIRED GitHub checks are successful for `POST_REMEDIATION_SHA`, and
+  the changed-surface tests (the tests covering files this PR touches) pass.
+  You remain mandated to FIX or HARDEN every failing regression you can —
+  including ones unrelated to this branch — but a failure that is ALSO red on
+  `origin/main` (pre-existing) or that is purely a worker-sandbox-environment
+  limitation (missing host dependency, blocked `ps`/process introspection, etc.)
+  must be HARDENED or TRIAGED and DOCUMENTED in your closing comment rather than
+  blocking the merge. Do not let an infeasible whole-host aggregate strand an
+  otherwise-clean close.
 - No failed, missing, stale, or unchecked required check exists.
 - No non-waived gate remains.
 

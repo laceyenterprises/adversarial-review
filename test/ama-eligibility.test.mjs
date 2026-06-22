@@ -1623,6 +1623,55 @@ test('ham terminal remediation: valid evidence waives strict non-blocking findin
   assert.equal(result.trace.hamTerminalRemediation.addressedFindings.nonBlocking, 1);
 });
 
+// Single-shot trust retrofit (2026-06-22): the entitled hammer agent's merge is
+// no longer gated on a fresh review returning ZERO non-blocking findings (which
+// never converges — each remediated head draws a new nit). Non-blocking findings
+// are waived on `.active` alone; blocking findings still require strict `.ok`
+// provenance proving the hammer actually remediated them.
+test('ham terminal remediation: non-blocking findings are waived on .active alone (no strict .ok)', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+      nonBlockingFindingCount: 2,
+      nonBlockingFindingState: 'known',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    // active terminal closer, but NOT validated (.ok=false — no commit/audit/ground-truth).
+    hamTerminalRemediation: { active: true },
+  });
+  assert.equal(
+    result.trace.hamTerminalRemediation.ok,
+    false,
+    JSON.stringify(result.trace.hamTerminalRemediation, null, 2),
+  );
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.ok(result.trace.hamTerminalRemediation.waived.includes('non-blocking-findings-present'));
+  assert.ok(!result.reasons.includes('non-blocking-findings-present'));
+});
+
+test('ham terminal remediation: blocking findings are NOT waived without strict .ok provenance', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    // active but NOT validated: an entitled hammer can't merge past a real blocker
+    // it hasn't proven it remediated.
+    hamTerminalRemediation: { active: true },
+  });
+  assert.equal(result.trace.hamTerminalRemediation.ok, false);
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('blocking-findings-present'));
+});
+
 test('ham terminal remediation: claimed doc updates must be in the verified diff', () => {
   const auditBody = [
     'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md.',

@@ -975,21 +975,47 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const waivedByFinalHammer = [];
   let effectiveReasons = reasons;
   const waivedByHamTerminalRemediation = [];
-  const HAM_TERMINAL_REMEDIATION_WAIVABLE_REASONS = new Set([
+  // Tier 1 — non-blocking churn is TRUSTED to the entitled hammer agent on
+  // `.active` alone (no strict `.ok` provenance required). A fresh adversarial
+  // review keeps surfacing NEW non-blocking nits on each remediated head, so
+  // requiring `.ok` (whose provenance must match the CURRENT review's finding
+  // counts) against an ever-changing non-blocking set never converges — the
+  // structural deadlock behind "the hammer never autonomously closes". The
+  // agent is mandated to address non-blocking findings; we do not block its
+  // own merge on them, and non-blocking-driven "not settled" rides along.
+  const HAM_TERMINAL_NONBLOCKING_WAIVABLE_REASONS = new Set([
+    'non-blocking-findings-present',
+    'non-blocking-findings-unknown',
+  ]);
+  // Tier 2 — anything that could mask a REAL defect still requires the strict
+  // `.ok` provenance proving the hammer actually remediated it (commit +
+  // HAM-NN/closed-by trailers + audit comment covering the findings).
+  const HAM_TERMINAL_STRICT_WAIVABLE_REASONS = new Set([
     'stale-review-head',
-    'verdict-not-settled-success',
     'remediation-pending',
     'remediation-state-unknown',
     'blocking-findings-present',
     'blocking-findings-unknown',
-    'non-blocking-findings-unknown',
-    'non-blocking-findings-present',
   ]);
-  if (hamTerminalRemediation.active && hamTerminalRemediation.ok) {
+  if (hamTerminalRemediation.active) {
+    const strictOk = hamTerminalRemediation.ok === true;
+    // `verdict-not-settled-success` is non-blocking-driven (Tier 1) only when
+    // no blocking-finding reason is present; otherwise it gates strictly.
+    const hasBlockingReason =
+      effectiveReasons.includes('blocking-findings-present')
+      || effectiveReasons.includes('blocking-findings-unknown');
     const inputReasons = effectiveReasons;
     effectiveReasons = [];
     for (const reason of inputReasons) {
-      if (HAM_TERMINAL_REMEDIATION_WAIVABLE_REASONS.has(reason)) {
+      let waivable = false;
+      if (HAM_TERMINAL_NONBLOCKING_WAIVABLE_REASONS.has(reason)) {
+        waivable = true;
+      } else if (reason === 'verdict-not-settled-success') {
+        waivable = hasBlockingReason ? strictOk : true;
+      } else if (HAM_TERMINAL_STRICT_WAIVABLE_REASONS.has(reason)) {
+        waivable = strictOk;
+      }
+      if (waivable) {
         waivedByHamTerminalRemediation.push(reason);
       } else {
         effectiveReasons.push(reason);

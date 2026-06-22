@@ -134,6 +134,8 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('launchd.label_prefix'), 'ai.laceyenterprises');
     assert.equal(cfg.get('session_ledger.database_name'), 'agent_os_ledger');
     assert.equal(cfg.get('session_ledger.vdb.enabled'), true);
+    assert.equal(cfg.get('session_ledger.vdb.direct_dsn'), null);
+    assert.equal(cfg.get('session_ledger.vdb.allowCanonicalFallback'), false);
     assert.equal(cfg.get('operator.email'), 'virtualpaul@gmail.com');
     assert.equal(cfg.get('operator.full_name'), 'Paul Lacey');
     assert.equal(cfg.get('linear.team_name'), 'Laceyenterprises');
@@ -2431,7 +2433,7 @@ test('session_ledger postgres_runtime alias coerces', () => {
   }
 });
 
-test('session_ledger VDB key and env alias resolve in Node loader', () => {
+test('session_ledger VDB keys and env aliases resolve in Node loader', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -2440,15 +2442,25 @@ test('session_ledger VDB key and env alias resolve in Node loader', () => {
       session_ledger:
         vdb:
           enabled: false
+          direct_dsn: postgresql://file.example:5432/file_db
+          allowCanonicalFallback: false
     `);
     let cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('session_ledger.vdb.enabled'), false);
+    assert.equal(cfg.get('session_ledger.vdb.direct_dsn'), 'postgresql://file.example:5432/file_db');
+    assert.equal(cfg.get('session_ledger.vdb.allowCanonicalFallback'), false);
 
     cfg = loadConfig({
       topPath: top,
-      env: { AGENT_OS_SESSION_LEDGER_VDB: 'true' },
+      env: {
+        AGENT_OS_SESSION_LEDGER_VDB: 'true',
+        AGENT_OS_SESSION_LEDGER_VDB_DIRECT_DSN: 'postgresql://env.example:5432/env_db',
+        AGENT_OS_SESSION_LEDGER_VDB_ALLOW_CANONICAL_FALLBACK: 'true',
+      },
     });
     assert.equal(cfg.get('session_ledger.vdb.enabled'), true);
+    assert.equal(cfg.get('session_ledger.vdb.direct_dsn'), 'postgresql://env.example:5432/env_db');
+    assert.equal(cfg.get('session_ledger.vdb.allowCanonicalFallback'), true);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

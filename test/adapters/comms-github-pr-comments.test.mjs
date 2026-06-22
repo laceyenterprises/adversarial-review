@@ -6,6 +6,11 @@ import path from 'node:path';
 
 import { createGitHubPRCommentsAdapter } from '../../src/adapters/comms/github-pr-comments/index.mjs';
 import {
+  postRemediationOutcomeComment,
+  resolveCommentBotLogin,
+  resolveCommentBotTokenEnv,
+} from '../../src/adapters/comms/github-pr-comments/pr-comments.mjs';
+import {
   ensureReviewStateSchema,
   openReviewStateDb,
 } from '../../src/review-state.mjs';
@@ -468,6 +473,112 @@ test('adapter gh fallback does not pass through GITHUB_TOKEN when an explicit to
     HOME: '/Users/airlock',
     GH_TOKEN: 'explicit-bot-token',
   });
+});
+
+test('remediation outcome comment writes through worker-family bot token and reviewer login', async () => {
+  const calls = [];
+
+  const result = await postRemediationOutcomeComment({
+    repo: 'laceyenterprises/demo',
+    prNumber: 7,
+    workerClass: 'codex',
+    body: '### Remediation Worker (codex)\n\nDone.',
+    env: {
+      PATH: '/usr/bin:/bin',
+      HOME: '/Users/airlock',
+      GH_TOKEN: 'ambient-clio-token',
+      GITHUB_TOKEN: 'operator-token',
+      GH_CODEX_REVIEWER_TOKEN: 'codex-bot-token',
+      OP_SERVICE_ACCOUNT_TOKEN: 'op-secret',
+      AGENT_OS_GITHUB_ADAPTER_BIN: '/fixture/github-adapter',
+    },
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, options });
+      return {
+        stdout: JSON.stringify({
+          ok: true,
+          output: 'https://github.com/laceyenterprises/demo/pull/7#issuecomment-101',
+          created: true,
+        }),
+      };
+    },
+  });
+
+  assert.equal(result.posted, true);
+  assert.equal(result.tokenEnvName, 'GH_CODEX_REVIEWER_TOKEN');
+  assert.equal(result.reviewerLogin, 'codex-reviewer-lacey');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cmd, '/fixture/github-adapter');
+  assert.deepEqual(calls[0].args, [
+    'write',
+    '--kind',
+    'issue-comment',
+    '--json',
+    '--repo',
+    'laceyenterprises/demo',
+    '--pr-number',
+    '7',
+    '--body',
+    '### Remediation Worker (codex)\n\nDone.',
+    '--reviewer-login',
+    'codex-reviewer-lacey',
+  ]);
+  assert.equal(calls[0].options.env.GH_TOKEN, 'codex-bot-token');
+  assert.equal(calls[0].options.env.GITHUB_TOKEN, undefined);
+  assert.equal(calls[0].options.env.OP_SERVICE_ACCOUNT_TOKEN, undefined);
+});
+
+test('remediation outcome comment skips instead of falling back to ambient token when bot token is missing', async () => {
+  const logs = [];
+  const result = await postRemediationOutcomeComment({
+    repo: 'laceyenterprises/demo',
+    prNumber: 7,
+    workerClass: 'codex',
+    body: '### Remediation Worker (codex)\n\nDone.',
+    env: {
+      PATH: '/usr/bin:/bin',
+      HOME: '/Users/airlock',
+      GH_TOKEN: 'ambient-clio-token',
+      GITHUB_TOKEN: 'operator-token',
+      AGENT_OS_GITHUB_ADAPTER_BIN: '/fixture/github-adapter',
+    },
+    execFileImpl: async () => {
+      throw new Error('should not post with ambient auth');
+    },
+    log: {
+      error(message) {
+        logs.push(String(message));
+      },
+    },
+  });
+
+  assert.deepEqual(result, {
+    posted: false,
+    reason: 'token-env-missing',
+    tokenEnvName: 'GH_CODEX_REVIEWER_TOKEN',
+    workerClass: 'codex',
+  });
+  assert.equal(logs.some((line) => line.includes('GH_CODEX_REVIEWER_TOKEN not set')), true);
+});
+
+test('remediation outcome comment identity selection is worker-class specific', () => {
+  assert.deepEqual(
+    ['codex', 'pi', 'opencode', 'hermes'].map((workerClass) => [
+      workerClass,
+      resolveCommentBotTokenEnv(workerClass),
+      resolveCommentBotLogin(workerClass),
+    ]),
+    [
+      ['codex', 'GH_CODEX_REVIEWER_TOKEN', 'codex-reviewer-lacey'],
+      ['pi', 'GH_CODEX_REVIEWER_TOKEN', 'codex-reviewer-lacey'],
+      ['opencode', 'GH_CODEX_REVIEWER_TOKEN', 'codex-reviewer-lacey'],
+      ['hermes', 'GH_CODEX_REVIEWER_TOKEN', 'codex-reviewer-lacey'],
+    ]
+  );
+  assert.equal(resolveCommentBotTokenEnv('claude-code'), 'GH_CLAUDE_REVIEWER_TOKEN');
+  assert.equal(resolveCommentBotLogin('claude-code'), 'claude-reviewer-lacey');
+  assert.equal(resolveCommentBotTokenEnv('gemini'), 'GH_GEMINI_REVIEWER_TOKEN');
+  assert.equal(resolveCommentBotLogin('gemini'), 'gemini-reviewer-lacey');
 });
 
 test('adapter gh fallback honors ambient GH_TOKEN when operator notices allow fallback auth', async () => {

@@ -59,8 +59,19 @@ const WORKER_CLASS_TO_BOT_TOKEN_ENV = {
   hermes: 'GH_CODEX_REVIEWER_TOKEN',
 };
 
+const COMMENT_BOT_LOGIN_BY_TOKEN_ENV = {
+  GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
+  GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
+  GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer-lacey',
+};
+
 function resolveCommentBotTokenEnv(workerClass) {
   return WORKER_CLASS_TO_BOT_TOKEN_ENV[workerClass] || null;
+}
+
+function resolveCommentBotLogin(workerClass) {
+  const tokenEnvName = resolveCommentBotTokenEnv(workerClass);
+  return tokenEnvName ? COMMENT_BOT_LOGIN_BY_TOKEN_ENV[tokenEnvName] || null : null;
 }
 
 // Wrap untrusted text in a fenced code block so any markdown inside
@@ -980,6 +991,13 @@ async function postRemediationOutcomeComment({
     );
     return { posted: false, reason: 'no-token-mapping', workerClass };
   }
+  const reviewerLogin = resolveCommentBotLogin(workerClass);
+  if (!reviewerLogin) {
+    log.error?.(
+      `[pr-comments] skipping comment: no reviewer-login mapping for ${tokenEnvName} (worker class "${workerClass}")`
+    );
+    return { posted: false, reason: 'no-reviewer-login-mapping', tokenEnvName, workerClass };
+  }
 
   try {
     preflightGeminiReviewerToken({ env, botTokenEnv: tokenEnvName });
@@ -1066,7 +1084,7 @@ async function postRemediationOutcomeComment({
       const adapterResult = await writeAdapterIssueComment(
         repo,
         prNumber,
-        { body },
+        { body, reviewerLogin },
         { execFileImpl, env: allowlistedEnv, rootDir }
       );
       adapterHandled = adapterResult?.ran === true;
@@ -1077,6 +1095,7 @@ async function postRemediationOutcomeComment({
       }
     }
     if (!adapterHandled) {
+      // The gh CLI fallback identity is token-driven via the allowlisted GH_TOKEN.
       ghResult = await execFileImpl(
         'gh',
         ['pr', 'comment', String(prNumber), '--repo', repo, '--body', body],
@@ -1094,7 +1113,7 @@ async function postRemediationOutcomeComment({
     // succeeded and must not re-post (which would create a duplicate
     // public comment).
     const commentUrl = ghResult?.commentUrl || ghResult?.url || parseCommentUrlFromStdout(ghResult?.stdout);
-    return { posted: true, repo, prNumber, workerClass, tokenEnvName, commentUrl };
+    return { posted: true, repo, prNumber, workerClass, tokenEnvName, reviewerLogin, commentUrl };
   } catch (err) {
     // execFile with `timeout` SIGTERMs the child when the deadline
     // expires; the resulting error has .killed === true and
@@ -1115,6 +1134,7 @@ async function postRemediationOutcomeComment({
 
 export {
   WORKER_CLASS_TO_BOT_TOKEN_ENV,
+  COMMENT_BOT_LOGIN_BY_TOKEN_ENV,
   REMEDIATION_COMMENT_MARKER_PREFIX,
   buildRemediationOutcomeCommentBody,
   buildRemediationOutcomeCommentMarker,
@@ -1124,5 +1144,6 @@ export {
   findExistingRemediationComment,
   parseCommentUrlFromStdout,
   postRemediationOutcomeComment,
+  resolveCommentBotLogin,
   resolveCommentBotTokenEnv,
 };

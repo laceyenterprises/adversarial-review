@@ -1,7 +1,123 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn } from 'node:child_process';
 
-const execFileAsync = promisify(execFile);
+const DEFAULT_SAFE_EXEC_MAX_BUFFER = 1024 * 1024;
+
+function reapProcessGroup(child) {
+  if (!child?.pid) return;
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch (err) {
+    if (err?.code === 'ESRCH') return;
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+// execFile-compatible adapter used as the default probe runner.
+//
+// `agy` spawns a long-lived language-server child that inherits its parent's
+// stdout/stderr. A plain execFile resolves only on stdio EOF, which never
+// arrives because that grandchild keeps the pipes open — so `agy models`
+// wedges until the probe timeout even though agy itself exits in ~2s (and the
+// timeout is then mis-reported as `agy-probe-timeout`/transient and retried).
+//
+// This spawns the probe in its own (detached) process group, accumulates
+// output, and the instant the MAIN process exits it SIGKILLs the group to reap
+// that orphaned grandchild. That releases the inherited pipes so 'close' fires
+// and we settle with agy's real output and exit status. We resolve on 'close'
+// (not 'exit') so all buffered output is drained first — no data loss. The
+// keychain `security` probe shares this path harmlessly (no grandchild to
+// reap). Kept self-contained (node builtins only) on purpose: this module is
+// imported by the watcher startup preflight, and pulling in heavier siblings
+// perturbs harnesses that stub them.
+//
+// Keep ALL future agy preflights on this adapter (or a file-redirect spawn) —
+// never a bare execFile / `$(...)` / `subprocess.run(capture_output=True)`.
+// See docs/NOTE-agy-auth.md "language-server pipe hang".
+async function safeExecFile(command, args, { env, timeout = 0, maxBuffer = DEFAULT_SAFE_EXEC_MAX_BUFFER } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      env,
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let stdoutBytes = 0;
+    let settled = false;
+    let timedOut = false;
+    let timer = null;
+
+    const finalize = (fn) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      fn();
+    };
+
+    if (timeout > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        reapProcessGroup(child);
+      }, timeout);
+    }
+
+    child.stdout.on('data', (chunk) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes <= maxBuffer) {
+        stdout += chunk;
+        return;
+      }
+      reapProcessGroup(child);
+      finalize(() => {
+        const err = new Error(`Command failed: stdout maxBuffer exceeded (${maxBuffer} bytes)`);
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+      });
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+
+    child.on('error', (err) => finalize(() => {
+      err.stdout = stdout;
+      err.stderr = stderr;
+      reject(err);
+    }));
+
+    // Reap orphaned group members the moment the main process exits, so the
+    // inherited stdout/stderr pipes reach EOF and 'close' can fire.
+    child.on('exit', () => reapProcessGroup(child));
+
+    child.on('close', (code, signal) => finalize(() => {
+      if (timedOut) {
+        const err = new Error(`Command timed out after ${timeout}ms`);
+        err.killed = true;
+        err.signal = 'SIGTERM';
+        err.timedOut = true;
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      const err = new Error(`Command failed (exit ${code ?? signal})`);
+      err.code = code;
+      err.signal = signal;
+      err.stdout = stdout;
+      err.stderr = stderr;
+      reject(err);
+    }));
+  });
+}
 
 const AGY_KEYCHAIN_SERVICE = 'gemini';
 const AGY_KEYCHAIN_ACCOUNT = 'antigravity';
@@ -133,7 +249,7 @@ function clearAgyReviewerAuthCache() {
 async function checkAgyReviewerAuthOnce({
   agyCli = 'agy',
   env = process.env,
-  execFileImpl = execFileAsync,
+  execFileImpl = safeExecFile,
   timeoutMs = resolveAgyAuthProbeTimeoutMs(env),
   securityCli = 'security',
 } = {}) {
@@ -178,7 +294,7 @@ async function checkAgyReviewerAuthOnce({
 async function checkAgyReviewerAuth({
   agyCli = 'agy',
   env = process.env,
-  execFileImpl = execFileAsync,
+  execFileImpl = safeExecFile,
   timeoutMs = resolveAgyAuthProbeTimeoutMs(env),
   securityCli = 'security',
   maxAttempts = resolveAgyAuthProbeMaxAttempts(env),
@@ -189,7 +305,7 @@ async function checkAgyReviewerAuth({
   nowMs = Date.now(),
 } = {}) {
   const attempts = Math.max(1, maxAttempts);
-  const useSuccessCache = (cacheSuccess ?? execFileImpl === execFileAsync) && successTtlMs > 0;
+  const useSuccessCache = (cacheSuccess ?? execFileImpl === safeExecFile) && successTtlMs > 0;
   const cacheKey = useSuccessCache
     ? agyAuthSuccessCacheKey({ agyCli, env, securityCli, timeoutMs })
     : null;

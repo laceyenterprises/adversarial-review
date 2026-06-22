@@ -125,26 +125,46 @@ const QUOTA_EXHAUSTED_FAILURE_CLASS = 'quota-exhausted';
 // Default hold window when the provider gives no parseable reset time.
 const DEFAULT_QUOTA_BACKOFF_MS = 15 * 60 * 1000;
 
+// Capture the provider usage-cap reset time at the failure-recording point, for
+// durable storage in reviewed_prs.quota_reset_at_utc. Runs `parseQuotaResetAt`
+// over the FULL reviewer output (stdout + stderr, before it is truncated into
+// the terse failure_message) so the "try again at <time>" line is not lost.
+// Returns an ISO-8601 UTC string or null. `nowMs` anchors year/date inference
+// for the human/clock-only phrasings; pass the failure timestamp.
+function resolveQuotaResetIso(fullOutput, { nowMs = null } = {}) {
+  return parseQuotaResetAt(fullOutput, { nowMs });
+}
+
 // Decide whether a quota-exhausted reviewed_prs row should be HELD (skipped
 // without consuming an infra auto-recover attempt) because the provider's cap
 // window has not yet elapsed. Pure function over the stored row so the watcher's
 // inline gate stays trivially testable.
 //
+//   row.quota_reset_at_utc — durably-captured provider reset (PREFERRED source;
+//                          set at failure-recording time from the full output,
+//                          before failure_message truncation can drop it).
 //   row.failure_message  — carries the `[quota-exhausted] …try again at <time>…`
-//                          text the reset is parsed from.
+//                          text the reset is RE-derived from as a fallback when
+//                          the durable column is absent.
 //   row.failed_at        — when the cap was last observed (fallback-window base).
 //   row.last_attempted_at — secondary fallback base if failed_at is absent.
 //
-// Returns { hold, waitUntilMs, source } where source is 'provider-reported'
-// (reset parsed from the message) or 'fallback-window' (fixed backoff since the
-// last failure). When neither a reset nor a usable timestamp is available, the
-// window is anchored at nowMs so the first observation always holds once before
-// recovery is attempted.
+// Returns { hold, waitUntilMs, source } where source is 'provider-reported-stored'
+// (durable column), 'provider-reported' (re-parsed from the message), or
+// 'fallback-window' (fixed backoff since the last failure). When neither a reset
+// nor a usable timestamp is available, the window is anchored at nowMs so the
+// first observation always holds once before recovery is attempted.
 function quotaHoldDecision(row, { nowMs = null, fallbackBackoffMs = DEFAULT_QUOTA_BACKOFF_MS } = {}) {
   const now = nowMs == null ? Date.now() : nowMs;
   const lastFailureMs = Date.parse(row?.failed_at || row?.last_attempted_at || '');
   const hasAnchor = !Number.isNaN(lastFailureMs);
   const observationMs = hasAnchor ? lastFailureMs : now;
+  // Prefer the durable, captured-at-failure reset over re-parsing the terse
+  // failure_message (which may have truncated the "try again at" line away).
+  const storedResetMs = Date.parse(row?.quota_reset_at_utc || '');
+  if (!Number.isNaN(storedResetMs)) {
+    return { hold: now < storedResetMs, waitUntilMs: storedResetMs, source: 'provider-reported-stored' };
+  }
   const resetIso = parseQuotaResetAt(row?.failure_message, { nowMs: observationMs });
   const resetMs = resetIso ? Date.parse(resetIso) : NaN;
   if (!Number.isNaN(resetMs)) {
@@ -173,5 +193,6 @@ export {
   DEFAULT_QUOTA_BACKOFF_MS,
   detectQuotaExhaustion,
   parseQuotaResetAt,
+  resolveQuotaResetIso,
   quotaHoldDecision,
 };

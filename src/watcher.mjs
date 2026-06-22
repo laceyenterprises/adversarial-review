@@ -69,7 +69,7 @@ import {
   reviewerFailureClassFromStoredRow,
   unknownReviewerCommandFailureClass,
 } from './reviewer-failure-classification.mjs';
-import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaustion.mjs';
+import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision, resolveQuotaResetIso } from './quota-exhaustion.mjs';
 import {
   createReviewerRuntimeAdapterByName,
   createReviewerRuntimeAdapterForDomain,
@@ -2302,7 +2302,15 @@ const REVIEW_UNKNOWN_FAILURE_MAX_RETRIES = resolveReviewUnknownFailureMaxRetries
 // since the last failure) has not elapsed, the row is skipped WITHOUT consuming
 // an infra_auto_recover attempt. Once the window clears, normal bounded
 // auto-recovery resumes and the cap (INFRA_AUTO_RECOVER_CAP) still applies.
-const QUOTA_EXHAUSTED_BACKOFF_MS = 15 * 60 * 1000;
+const DEFAULT_QUOTA_EXHAUSTED_BACKOFF_MS = 15 * 60 * 1000;
+function resolveQuotaExhaustedBackoffMs(env = process.env) {
+  const raw = env.ADVERSARIAL_QUOTA_EXHAUSTED_FALLBACK_BACKOFF_MS;
+  if (raw == null || String(raw).trim() === '') return DEFAULT_QUOTA_EXHAUSTED_BACKOFF_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_QUOTA_EXHAUSTED_BACKOFF_MS;
+  return Math.floor(parsed);
+}
+const QUOTA_EXHAUSTED_BACKOFF_MS = resolveQuotaExhaustedBackoffMs();
 const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
   `UPDATE reviewed_prs
      SET review_status = 'reviewing',
@@ -2315,6 +2323,7 @@ const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
          reviewer_pgid = NULL,
          failed_at = NULL,
          failure_message = NULL,
+         quota_reset_at_utc = NULL,
          infra_auto_recover_attempts = infra_auto_recover_attempts + 1
    WHERE repo = ?
      AND pr_number = ?
@@ -2445,7 +2454,8 @@ const stmtMarkAttemptStarted = db.prepare(
          failure_message = CASE
            WHEN review_status = 'pending-upstream' THEN failure_message
            ELSE NULL
-         END
+         END,
+         quota_reset_at_utc = NULL
    WHERE repo = ?
      AND pr_number = ?
      AND review_status IN ('pending', 'pending-upstream')`
@@ -2475,7 +2485,7 @@ const stmtReleaseReviewerClaim = db.prepare(
       AND review_status = 'reviewing'`
 );
 const stmtMarkPosted = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
+  "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
 );
 // CAS variant for reviewer-command-failed posted-reconciliation (LAC-1359
 // follow-up). The reconcile path shells out to GitHub (async) BEFORE mutating
@@ -2485,13 +2495,23 @@ const stmtMarkPosted = db.prepare(
 // raced row (new claim/failure/operator action) matches 0 rows instead of being
 // force-posted. Callers MUST check `.changes === 1`.
 const stmtMarkReviewerCommandFailedRecoveredPosted = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ? AND review_status = 'failed' AND reviewer_session_uuid = ? AND reviewer_started_at = ? AND lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed%'"
+  "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ? AND review_status = 'failed' AND reviewer_session_uuid = ? AND reviewer_started_at = ? AND lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed%'"
 );
 const stmtMarkFailed = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
+  "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
 );
 const stmtReleaseReviewLease = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+  "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+);
+// Quota-exhaustion variants: identical to markFailed / releaseReviewLease but
+// ALSO persist the provider usage-cap reset time (captured from the full
+// reviewer output before failure_message truncation) into quota_reset_at_utc so
+// the hold-until-reset gate can honor it instead of the blind fallback window.
+const stmtMarkFailedQuota = db.prepare(
+  "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, quota_reset_at_utc = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
+);
+const stmtReleaseReviewLeaseQuota = db.prepare(
+  "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, quota_reset_at_utc = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
 );
 const stmtMarkCascadeFailed = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
@@ -2982,6 +3002,8 @@ function settleReviewerAttempt({
     markPosted: stmtMarkPosted,
     markFailed: stmtMarkFailed,
     releaseReviewLease: stmtReleaseReviewLease,
+    markFailedQuota: stmtMarkFailedQuota,
+    releaseReviewLeaseQuota: stmtReleaseReviewLeaseQuota,
     markCascadeFailed: stmtMarkCascadeFailed,
     markPendingUpstream: stmtMarkPendingUpstream,
     getReviewRow: stmtGetReviewRow,
@@ -3082,6 +3104,37 @@ function settleReviewerAttempt({
   }
 
   clearCascadeState(rootDir, { repo: repoPath, prNumber });
+  if (failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
+    // Capture the provider usage-cap reset time from the FULL reviewer output
+    // (stdout + stderr + error message) BEFORE failure_message truncation can
+    // drop the "try again at <time>" line. Anchor year/date inference on the
+    // failure timestamp. Persist it durably in quota_reset_at_utc so the
+    // hold-until-reset gate honors the real reset instead of a blind window.
+    const fullQuotaOutput = [result.error, result.stdout, result.stderr]
+      .filter(Boolean)
+      .join('\n');
+    const failureAtMs = Date.parse(failureAt);
+    const quotaResetIso = resolveQuotaResetIso(fullQuotaOutput, {
+      nowMs: Number.isNaN(failureAtMs) ? null : failureAtMs,
+    });
+    if (!quotaResetIso) {
+      log.warn(
+        `[watcher] Quota-exhausted reviewer failure on #${prNumber} with NO parseable provider reset time; ` +
+          `falling back to the ${Math.round(QUOTA_EXHAUSTED_BACKOFF_MS / 60000)}m default hold window`
+      );
+    }
+    const quotaSettleStatement = leaseRecoveryEnabled
+      ? statements.releaseReviewLeaseQuota
+      : statements.markFailedQuota;
+    quotaSettleStatement.run(failureAt, classifiedMessage, quotaResetIso, repoPath, prNumber);
+    const updatedQuotaRow = statements.getReviewRow.get(repoPath, prNumber);
+    log.warn(
+      `[watcher] Reviewer quota-exhausted failure on #${prNumber}; ` +
+        `reset=${quotaResetIso || 'unknown'}; will hold until the cap clears ` +
+        `(attempt ${updatedQuotaRow?.review_attempts}/${1 + Number(maxRemediationRounds || 0)})`
+    );
+    return;
+  }
   const terminalFailureStatement = leaseRecoveryEnabled
     ? statements.releaseReviewLease
     : statements.markFailed;

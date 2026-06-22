@@ -78,8 +78,27 @@ function unknownReviewerCommandFailureClass(reviewRow) {
   return null;
 }
 
+function reviewPopulationFailureClass(reviewRow) {
+  const message = String(reviewRow?.failure_message || '').toLowerCase();
+  if (!message) return null;
+  if (
+    /reviewer session .+ is no longer alive/.test(message)
+    && /no github review (?:was )?found/.test(message)
+  ) {
+    return 'session-dead-no-review';
+  }
+  if (/no github review (?:was )?found/.test(message)) {
+    return 'no-github-review-found';
+  }
+  if (/generated[-\s]+but[-\s]+not[-\s]+posted/.test(message)) {
+    return 'generated-but-not-posted';
+  }
+  return null;
+}
+
 export {
   infraRecoverableFailureClass,
   reviewerFailureClassFromStoredRow,
+  reviewPopulationFailureClass,
   unknownReviewerCommandFailureClass,
 };

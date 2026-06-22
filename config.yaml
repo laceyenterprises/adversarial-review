@@ -38,6 +38,17 @@ __aliases:
 # The accounts env value is a JSON array, e.g.
 #   [{"id":"primary","tokenFile":"op://vault/item/token"}]
 reviewer:
+  # Retry failed reviewer population (session died / generated but no GitHub
+  # review appeared) before leaving the failed row terminal for operator
+  # inspection. Set max_attempts: 0 to restore immediate skip behavior.
+  # Env overrides:
+  #   AGENT_OS_REVIEWER_REVIEW_POPULATION_RETRY_MAX_ATTEMPTS /
+  #     ADVERSARIAL_REVIEW_POPULATION_RETRY_MAX_ATTEMPTS
+  #   AGENT_OS_REVIEWER_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS /
+  #     ADVERSARIAL_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS
+  review_population_retry:
+    max_attempts: 1
+    backoff_seconds: 45
   gemini:
     mode: off                       # enum: off / fallback / always-on
     runtime: cli                    # enum: cli / antigravity

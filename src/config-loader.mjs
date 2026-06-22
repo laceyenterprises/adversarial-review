@@ -1370,6 +1370,14 @@ function schemaV1() {
             __min: 1000,
           },
           fallback_threshold: { __type: TYPE_INT, __default: 2 },
+          review_population_retry: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              max_attempts: { __type: TYPE_INT, __default: 1, __min: 0 },
+              backoff_seconds: { __type: TYPE_INT, __default: 45, __min: 0 },
+            },
+          },
           // Gemini circuit-breaker. Default stays `off`; operators explicitly
           // switch to `fallback` or `always-on` after provisioning auth.
           gemini: {
@@ -1594,6 +1602,14 @@ export const ENV_ALIASES = {
   'reviewer.no_progress_timeout_ms': {
     canonical: 'AGENT_OS_REVIEWER_NO_PROGRESS_TIMEOUT_MS',
     aliases: [['ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS', identity]],
+  },
+  'reviewer.review_population_retry.max_attempts': {
+    canonical: 'AGENT_OS_REVIEWER_REVIEW_POPULATION_RETRY_MAX_ATTEMPTS',
+    aliases: [['ADVERSARIAL_REVIEW_POPULATION_RETRY_MAX_ATTEMPTS', identity]],
+  },
+  'reviewer.review_population_retry.backoff_seconds': {
+    canonical: 'AGENT_OS_REVIEWER_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS',
+    aliases: [['ADVERSARIAL_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS', identity]],
   },
   'reviewer.gemini.mode': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_MODE',

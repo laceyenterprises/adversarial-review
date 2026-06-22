@@ -43,6 +43,16 @@ async function importGithubAdapterClientFresh() {
 test('adapterUnsupportedError keys fallback on structured unsupported signals', async () => {
   const mod = await importGithubAdapterClientFresh();
 
+  const current = new Error('adapter write failed');
+  current.stdout = JSON.stringify({
+    ok: false,
+    complete: false,
+    failureClass: 'unsupported',
+    code: 'unsupported_argument',
+    requested: '--future-flag',
+  });
+  assert.equal(mod.__test__.adapterUnsupportedError(current), true);
+
   const structured = new Error('adapter write failed');
   structured.stdout = JSON.stringify({ error: 'unsupported_kind' });
   assert.equal(mod.__test__.adapterUnsupportedError(structured), true);
@@ -50,6 +60,28 @@ test('adapterUnsupportedError keys fallback on structured unsupported signals', 
   const exitCode = new Error('adapter write failed');
   exitCode.code = 78;
   assert.equal(mod.__test__.adapterUnsupportedError(exitCode), true);
+});
+
+test('adapterUnsupportedError keeps legacy argparse unsupported fallbacks', async () => {
+  const mod = await importGithubAdapterClientFresh();
+
+  const unknownCommand = new Error('adapter write failed');
+  unknownCommand.stdout = JSON.stringify({
+    ok: false,
+    complete: false,
+    failureClass: 'input',
+    message: "argument command: invalid choice: 'write' (choose from 'pr-state')",
+  });
+  assert.equal(mod.__test__.adapterUnsupportedError(unknownCommand), true);
+
+  const unknownFlag = new Error('adapter write failed');
+  unknownFlag.stdout = JSON.stringify({
+    ok: false,
+    complete: false,
+    failureClass: 'input',
+    message: 'unrecognized arguments: --kind pull-request-review',
+  });
+  assert.equal(mod.__test__.adapterUnsupportedError(unknownFlag), true);
 });
 
 test('adapterUnsupportedError does not fall back on unrelated prose token collisions', async () => {

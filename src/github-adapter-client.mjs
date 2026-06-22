@@ -1,6 +1,10 @@
 import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  isUnsupportedOperationPayload,
+  isUnsupportedOperationText,
+} from './github-adapter-unsupported.mjs';
 
 const ADAPTER_MAX_BUFFER = 25 * 1024 * 1024;
 const ADAPTER_TIMEOUT_MS = 30_000;
@@ -251,48 +255,20 @@ function adapterUnsupportedError(err) {
   if (!err) return false;
   if ([err.code, err.exitCode, err.status].some((code) => Number(code) === 78)) return true;
 
+  // Prefer the adapter contract: failureClass:"unsupported" plus a stable code
+  // such as unsupported_command/unsupported_kind/unsupported_argument. The
+  // helper intentionally keeps legacy argparse input-prose detection below that
+  // structured branch so older adapter binaries can still fall back cleanly.
   const candidates = [
     err?.message,
     err?.stderr,
     err?.stdout,
   ].filter(Boolean);
   for (const candidate of candidates) {
-    try {
-      const parsed = JSON.parse(String(candidate).trim());
-      const code = String(parsed?.error || parsed?.code || parsed?.reason || parsed?.type || '').trim();
-      if (/^(unsupported_kind|unsupported_write_kind|unsupported_write_operation|unsupported_command)$/.test(code)) {
-        return true;
-      }
-      // Adapter-version skew, generally: the deployed adapter binary may predate
-      // a command (e.g. the unified `write`), a `--kind` value, or a flag the
-      // caller used. Its argparse rejects the request with a structured input
-      // envelope like {"failureClass":"input","message":"argument command:
-      // invalid choice: 'write' (choose from ...)"} (or "unrecognized
-      // arguments: ..."). Any such "this adapter doesn't understand the request"
-      // signal should route the caller to its direct-gh fallback rather than
-      // fail closed — true for EVERY caller (reviewer, merge-agent, gate-status,
-      // hcp, reconcile, ...), not just one command. Genuinely-unsupported
-      // operations are exactly the ones we want to fall back around an older
-      // adapter; a real malformed-arg bug still surfaces from the gh path.
-      const failureClass = String(parsed?.failureClass || '').trim();
-      const message = String(parsed?.message || '').trim();
-      if (failureClass === 'input'
-        && (/invalid choice:/i.test(message) || /unrecognized arguments?:/i.test(message))) {
-        return true;
-      }
-    } catch {
-      // Non-JSON diagnostics are handled by the narrowly-scoped legacy fallback below.
-    }
+    if (isUnsupportedOperationText(candidate)) return true;
   }
 
-  const detail = candidates.join('\n');
-  return /(^|\n)(github-adapter: )?(error: )?unsupported write kind\b/i.test(detail)
-    || /(^|\n)(github-adapter: )?(error: )?unsupported write operation\b/i.test(detail)
-    || /(^|\n)(github-adapter: )?(error: )?unknown write kind\b/i.test(detail)
-    || (
-      /(^|\n)usage: .*github-adapter\b.*\bwrite\b.*--kind\b/i.test(detail)
-      && /(^|\n)(error: )?(invalid choice|unrecognized arguments?): .*--kind\b/i.test(detail)
-    );
+  return isUnsupportedOperationPayload(err);
 }
 
 async function writeGitHubAdapter(kind, params = {}, {

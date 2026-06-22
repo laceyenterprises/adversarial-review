@@ -26,7 +26,11 @@ import { readFileSync, existsSync, statSync } from 'node:fs';
 import { dirname, basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
+
+export const __testYamlHooks = {
+  load: (...args) => yaml.load(...args),
+};
 
 export const SCHEMA_VERSION = 1;
 // Default top-level path resolves relative to the current user's home dir so
@@ -1967,8 +1971,9 @@ for (const entitlementId of ENTITLEMENT_ENV_ALIAS_IDS) {
 // JS_COMPAT_SCHEMA. The schema-validator catches them downstream.
 
 function parseYaml(text, sourcePath) {
+  if (String(text ?? '').trim() === '') return null;
   try {
-    return yaml.load(text, {
+    return __testYamlHooks.load(text, {
       schema: yaml.DEFAULT_SCHEMA,
       filename: sourcePath,
       // Convert warnings into fail-loud errors. The warning's `.mark` carries
@@ -1985,6 +1990,7 @@ function parseYaml(text, sourcePath) {
     });
   } catch (err) {
     if (err instanceof AgentOSConfigError) throw err;
+    if (isEmptyYamlDocumentError(err)) return null;
     const line = extractYamlErrorLine(err);
     const where = line !== null ? `${sourcePath}:${line}` : sourcePath;
     const reason = err && err.reason ? err.reason : (err && err.message) || String(err);
@@ -1993,6 +1999,12 @@ function parseYaml(text, sourcePath) {
       { source: where },
     );
   }
+}
+
+function isEmptyYamlDocumentError(err) {
+  const reason = err && err.reason ? err.reason : '';
+  const message = err && err.message ? err.message : '';
+  return reason === 'expected a document, but the input is empty' || message.includes('expected a document, but the input is empty');
 }
 
 function extractYamlErrorLine(err) {

@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import {
+  applyQuotaRearm,
   isQuotaRearmEligible,
   main,
   planQuotaRearm,
@@ -86,6 +87,19 @@ test('planQuotaRearm is a no-op when already pending', () => {
   assert.equal(plan.action, 'noop-already-pending');
 });
 
+test('planQuotaRearm refuses non-failed terminal/backoff rows even with --force', () => {
+  for (const review_status of ['posted', 'malformed', 'failed-orphan', 'pending-upstream']) {
+    const plan = planQuotaRearm({
+      pr_state: 'open',
+      review_status,
+      failure_message: '[quota-exhausted] x',
+      quota_reset_at_utc: '2026-06-18T00:39:00.000Z',
+    }, { force: true });
+    assert.equal(plan.action, 'refuse');
+    assert.equal(plan.reason, 'not-recoverable-failed-row');
+  }
+});
+
 // --- end-to-end re-arm against a real db ---
 
 test('re-arm clears the quota hold state and resets the infra auto-recover budget', () => {
@@ -121,6 +135,45 @@ test('re-arm refuses a non-quota row without --force, allows it with --force', (
     assert.equal(forced.ok, true);
     assert.equal(readRow(rootDir).review_status, 'pending');
   } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('re-arm --force refuses to clobber an already posted row', () => {
+  const rootDir = setupRow({ review_status: 'posted' });
+  try {
+    const result = rearmQuotaReview({ rootDir, repo: REPO, prNumber: PR, force: true });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'not-recoverable-failed-row');
+    assert.equal(readRow(rootDir).review_status, 'posted');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('applyQuotaRearm refuses stale planned rows instead of clobbering changed evidence', () => {
+  const rootDir = setupRow();
+  const db = new Database(path.join(rootDir, 'data', 'reviews.db'));
+  try {
+    const plannedRow = db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(REPO, PR);
+    db.prepare(
+      `UPDATE reviewed_prs
+          SET failure_message = ?,
+              quota_reset_at_utc = ?
+        WHERE repo = ?
+          AND pr_number = ?`
+    ).run('[unknown] different failure', null, REPO, PR);
+
+    const changes = applyQuotaRearm(db, { repo: REPO, prNumber: PR, plannedRow });
+    assert.equal(changes, 0);
+
+    const row = db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(REPO, PR);
+    assert.equal(row.review_status, 'failed');
+    assert.equal(row.failure_message, '[unknown] different failure');
+    assert.equal(row.quota_reset_at_utc, null);
+    assert.equal(row.infra_auto_recover_attempts, 3);
+  } finally {
+    db.close();
     rmSync(rootDir, { recursive: true, force: true });
   }
 });

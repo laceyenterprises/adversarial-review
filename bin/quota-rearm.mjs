@@ -10,10 +10,11 @@
  * the bounded infra auto-recover budget so the watcher re-reviews on the next
  * poll.
  *
- * It deliberately ONLY operates on rows whose stored failure is quota-class
- * (`[quota-exhausted]` failure_message, or a parked quota row carrying a
- * quota_reset_at_utc). Use `--force` to re-arm a row whose failure is no longer
- * quota-tagged (e.g. the watcher already nulled the message mid-recovery).
+ * It deliberately ONLY operates on failed rows whose stored failure is
+ * quota-class (`[quota-exhausted]` failure_message, or a parked quota row
+ * carrying a quota_reset_at_utc). Use `--force` to re-arm a failed row whose
+ * failure is no longer quota-tagged (e.g. after operator-verified evidence was
+ * lost), but force never re-arms posted/malformed/backoff rows.
  *
  * Effect (single UPDATE): review_status -> 'pending', clears failed_at /
  * failure_message / quota_reset_at_utc, resets infra_auto_recover_attempts -> 0,
@@ -22,8 +23,8 @@
  *
  * Exit codes:
  *   0   re-armed (or already pending — nothing to do)
- *   1   refused (row missing, PR not open, not a quota row without --force, or
- *       a reviewer is currently in flight)
+ *   1   refused (row missing, PR not open, not failed/recoverable, not a quota
+ *       row without --force, or a reviewer is currently in flight)
  *   2   usage error
  *   4   runtime error
  */
@@ -59,7 +60,7 @@ Required:
   --pr <number>         Pull request number
 
 Optional:
-  --force               Re-arm even if the row's failure is no longer quota-tagged
+  --force               Re-arm a failed row even if its failure is no longer quota-tagged
   --root-dir <path>     Tool root containing data/reviews.db (default: repo root)
   --json                Emit machine-readable JSON outcome
   -h, --help            Show this help text
@@ -86,15 +87,17 @@ function planQuotaRearm(row, { force = false } = {}) {
   if (row.pr_state !== 'open') return { action: 'refuse', reason: 'pr-not-open' };
   if (row.review_status === 'reviewing') return { action: 'refuse', reason: 'reviewing' };
   if (row.review_status === 'pending') return { action: 'noop-already-pending', reason: 'already-pending' };
+  if (row.review_status !== 'failed') return { action: 'refuse', reason: 'not-recoverable-failed-row' };
   if (!isQuotaRearmEligible(row, { force })) {
     return { action: 'refuse', reason: 'not-a-quota-row' };
   }
   return { action: 'rearm', reason: 'quota-hold' };
 }
 
-// Apply the re-arm: idempotent single UPDATE guarded on the current status so a
-// concurrent watcher claim cannot be clobbered. Returns the changed-row count.
-function applyQuotaRearm(db, { repo, prNumber }) {
+// Apply the re-arm: idempotent single UPDATE guarded on the exact failed row
+// observed during planning so a concurrent watcher/operator transition cannot
+// be clobbered. Returns the changed-row count.
+function applyQuotaRearm(db, { repo, prNumber, plannedRow }) {
   const stmt = db.prepare(
     `UPDATE reviewed_prs
         SET review_status = 'pending',
@@ -109,9 +112,20 @@ function applyQuotaRearm(db, { repo, prNumber }) {
       WHERE repo = ?
         AND pr_number = ?
         AND pr_state = 'open'
-        AND review_status NOT IN ('reviewing', 'pending')`
+        AND review_status = 'failed'
+        AND failed_at IS ?
+        AND failure_message IS ?
+        AND quota_reset_at_utc IS ?
+        AND reviewer_session_uuid IS ?`
   );
-  return stmt.run(repo, prNumber).changes;
+  return stmt.run(
+    repo,
+    prNumber,
+    plannedRow.failed_at ?? null,
+    plannedRow.failure_message ?? null,
+    plannedRow.quota_reset_at_utc ?? null,
+    plannedRow.reviewer_session_uuid ?? null
+  ).changes;
 }
 
 function rearmQuotaReview({ rootDir, repo, prNumber, force = false }) {
@@ -121,9 +135,9 @@ function rearmQuotaReview({ rootDir, repo, prNumber, force = false }) {
     const row = getReviewRow(db, { repo, prNumber });
     const plan = planQuotaRearm(row, { force });
     if (plan.action === 'rearm') {
-      const changes = applyQuotaRearm(db, { repo, prNumber });
+      const changes = applyQuotaRearm(db, { repo, prNumber, plannedRow: row });
       if (changes === 0) {
-        // Lost the race: the watcher moved the row out from under us.
+        // Lost the race: the watcher/operator moved or edited the row.
         const after = getReviewRow(db, { repo, prNumber });
         return { ok: false, action: 'refuse', reason: 'state-changed', row: after };
       }
@@ -222,6 +236,7 @@ function main(argv, { stdout = process.stdout, stderr = process.stderr } = {}) {
       'review-row-missing': 'no reviewed_prs row exists for this PR (watcher has not seen it yet)',
       'pr-not-open': 'PR is not open (merged/closed)',
       reviewing: 'a reviewer subprocess is currently in flight; wait for it to settle',
+      'not-recoverable-failed-row': 'only open failed quota rows can be re-armed; inspect this status manually',
       'not-a-quota-row': 'this row is not a quota-class hold; re-run with --force if you are sure',
       'state-changed': 'row state changed concurrently; re-run to inspect',
     };

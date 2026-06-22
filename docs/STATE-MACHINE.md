@@ -116,20 +116,36 @@ new PR
   evidence is cleared because a replacement review pass is now durably
   `reviewing`.
 - Infrastructure-class `failed` rows (`cascade`, `reviewer-timeout`,
-  `launchctl-bootstrap`, reviewer-spawn `oauth-broken`, and
+  `launchctl-bootstrap`, reviewer-spawn `oauth-broken`, `quota-exhausted`, and
   `reviewer-command-failed` stored as `[unknown] Command failed...`) use a dedicated
   claim path that atomically promotes the row to `reviewing` and increments
   `infra_auto_recover_attempts` only if the row is still the same failed
-  infrastructure class. For `reviewer-command-failed`, the watcher first uses
-  the persisted reviewer session/start evidence to query GitHub for a matching
-  reviewer-bot review posted after the failed attempt started. If one exists,
-  the watcher marks the row `posted`; if the proof cannot be performed, the row
-  remains `failed` rather than retrying. Once the counter reaches the cap, the row stays
-  `failed` for operator inspection. The counter resets after a successful
-  posted review or an intentional re-review re-arm. `forbidden-fallback`,
-  `failed-orphan`, `malformed`, inactive repos, closed/merged PRs, undiscovered
-  PRs, active watcher drain, and active follow-up jobs are not auto-recovered by
-  this path.
+  infrastructure class. `quota-exhausted` is held until the provider reset window
+  clears before that claim is attempted: the watcher prefers
+  `quota_reset_at_utc`, falls back to parsing the tagged `failure_message`, then
+  falls back to a fixed window anchored to `failed_at` / `last_attempted_at`.
+  For `reviewer-command-failed`, the watcher first uses the persisted reviewer
+  session/start evidence to query GitHub for a matching reviewer-bot review
+  posted after the failed attempt started. If one exists, the watcher marks the
+  row `posted`; if the proof cannot be performed, the row remains `failed`
+  rather than retrying. Once the counter reaches the cap, the row stays `failed`
+  for operator inspection. The counter resets after a successful posted review or
+  an intentional re-review re-arm. `forbidden-fallback`, `failed-orphan`,
+  `malformed`, inactive repos, closed/merged PRs, undiscovered PRs, active
+  watcher drain, and active follow-up jobs are not auto-recovered by this path.
+- **Quota re-arm surface (`bin/quota-rearm.mjs`).** Operators can run
+  `npm run quota-rearm -- --repo <slug> --pr <n>` to release a stuck
+  `quota-exhausted` failed row after verifying the provider window is clear. A
+  successful re-arm moves the row to `pending`, clears `failed_at`,
+  `failure_message`, `quota_reset_at_utc`, and reviewer lease/session fields, and
+  resets `infra_auto_recover_attempts` to `0`. The command refuses missing rows,
+  non-open PRs, `reviewing` rows, already pending rows as a no-op, and non-failed
+  statuses such as `posted`, `malformed`, `failed-orphan`, and
+  `pending-upstream`. `--force` bypasses only the quota-evidence check on an open
+  `failed` row; it does not authorize rewriting posted reviews or unrelated
+  statuses. The SQL update is a compare-and-swap against the failed row that was
+  read, including stable failure/session fields, so concurrent watcher/operator
+  changes surface as `state-changed` instead of clearing newer evidence.
 - **Cancellation surface (`src/review-cancel.mjs`).** The canonical CLI for cancelling an in-flight reviewer is `node src/review-cancel.mjs --repo <slug> --pr <n> [--signal SIGTERM] [--allow-status <comma-list>] [reason]`. By default the CLI accepts only rows in `review_status='reviewing'` (the durable claim that a reviewer subprocess is in flight). Supported values for `--allow-status` are `reviewing`, `posted`, `failed`. The flag explicitly excludes `pending` (no subprocess to signal), `failed-orphan` (sticky operator-only recovery; use `npm run retrigger-review` instead), and `malformed` (terminal by design). The canonical surface MUST cover the extended cases so operators do not fall back to `sudo kill -KILL <pgid>` or hand-editing the row to fool the guard.
   - **`--allow-status posted`** covers the **post-merge race** observed 2026-05-30: a prior attempt's row had already transitioned to `posted` while the watcher had re-spawned a retry whose subprocess outlived the PR's own merge.
   - **`--allow-status failed`** covers the **draining-subprocess** shape: the subprocess errored (timeout, cleanup-phase exception) and flipped the row to `failed`, but the OS process is still alive — for example holding a file handle, an open Linear API session, or its own SIGTERM teardown timer. Distinct from `failed-orphan`: a `failed` row preserves the reviewer failure evidence for operator inspection unless it matches the bounded infrastructure-recovery classifier (`cascade`, `reviewer-timeout`, `launchctl-bootstrap`, reviewer-spawn `oauth-broken`, or `reviewer-command-failed` for stored `[unknown] Command failed...` rows). Only that dedicated infra claim may promote `failed → reviewing`; generic failed rows are not re-promoted by `stmtMarkAttemptStarted`. The CLI's PID-identity guard (`verifyPgidIdentity` start-time match) is what makes the kill safe if row state changes during cancellation, and the CLI re-fetches the row on `identity-unconfirmed` to surface the new state so the operator can target the live reviewer instead.

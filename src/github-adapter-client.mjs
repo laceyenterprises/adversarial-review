@@ -225,6 +225,7 @@ function makeAdapterWriteArgs(kind, params = {}) {
   if (params.matchHeadCommit !== undefined) args.push('--match-head-commit', String(params.matchHeadCommit));
   if (params.mergeMethod !== undefined) args.push('--merge-method', String(params.mergeMethod));
   if (params.deleteBranch !== undefined) args.push(params.deleteBranch ? '--delete-branch' : '--no-delete-branch');
+  if (params.admin === true) args.push('--admin');
   return args;
 }
 
@@ -247,13 +248,34 @@ async function runGitHubAdapter(kind, params = {}, {
 }
 
 function adapterUnsupportedError(err) {
-  const detail = [
+  if (!err) return false;
+  if ([err.code, err.exitCode, err.status].some((code) => Number(code) === 78)) return true;
+
+  const candidates = [
     err?.message,
     err?.stderr,
     err?.stdout,
-  ].filter(Boolean).join('\n').toLowerCase();
-  return /\bunsupported\b|\bunknown\b|\bunrecognized\b|\binvalid choice\b/.test(detail)
-    && /\bwrite\b|\bkind\b|\boperation\b|\bcommand\b/.test(detail);
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(String(candidate).trim());
+      const code = String(parsed?.error || parsed?.code || parsed?.reason || parsed?.type || '').trim();
+      if (/^(unsupported_kind|unsupported_write_kind|unsupported_write_operation|unsupported_command)$/.test(code)) {
+        return true;
+      }
+    } catch {
+      // Non-JSON diagnostics are handled by the narrowly-scoped legacy fallback below.
+    }
+  }
+
+  const detail = candidates.join('\n');
+  return /(^|\n)(github-adapter: )?(error: )?unsupported write kind\b/i.test(detail)
+    || /(^|\n)(github-adapter: )?(error: )?unsupported write operation\b/i.test(detail)
+    || /(^|\n)(github-adapter: )?(error: )?unknown write kind\b/i.test(detail)
+    || (
+      /(^|\n)usage: .*github-adapter\b.*\bwrite\b.*--kind\b/i.test(detail)
+      && /(^|\n)(error: )?(invalid choice|unrecognized arguments?): .*--kind\b/i.test(detail)
+    );
 }
 
 async function writeGitHubAdapter(kind, params = {}, {
@@ -271,7 +293,10 @@ async function writeGitHubAdapter(kind, params = {}, {
     timeout: ADAPTER_TIMEOUT_MS,
     env: buildAdapterEnv(env),
   });
-  return parseAdapterJson(stdout, kind);
+  return {
+    ran: true,
+    payload: parseAdapterJson(stdout, kind),
+  };
 }
 
 function asPayloadObject(payload, kind) {
@@ -397,6 +422,7 @@ async function writeAdapterPullRequestMerge(repo, prNumber, {
   matchHeadCommit,
   mergeMethod = 'squash',
   deleteBranch = true,
+  admin = false,
 } = {}, options) {
   return writeGitHubAdapter('pull-request-merge', {
     repo,
@@ -404,6 +430,7 @@ async function writeAdapterPullRequestMerge(repo, prNumber, {
     matchHeadCommit,
     mergeMethod,
     deleteBranch,
+    admin,
   }, options);
 }
 

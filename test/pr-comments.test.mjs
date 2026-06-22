@@ -532,6 +532,33 @@ test('postRemediationOutcomeComment uses adapter mutation after marker dedupe fi
   assert.equal(calls[0].options.env.GH_TOKEN, 'test-pat-codex');
 });
 
+test('postRemediationOutcomeComment treats adapter JSON null as a handled write', async () => {
+  const calls = [];
+  const result = await postRemediationOutcomeComment({
+    repo: 'laceyenterprises/demo',
+    prNumber: 7,
+    workerClass: 'codex',
+    body: `<!-- ${REMEDIATION_COMMENT_MARKER_PREFIX}:demo:r1:completed -->\n\nSummary`,
+    env: {
+      GH_CODEX_REVIEWER_TOKEN: 'test-pat-codex',
+      PATH: '/usr/bin',
+      HOME: '/tmp/home',
+      GHA_ADAPTER_BIN: '/fixture/github-adapter',
+    },
+    findExistingImpl: async () => ({ found: false }),
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, options });
+      assert.equal(cmd, '/fixture/github-adapter');
+      return { stdout: 'null' };
+    },
+  });
+
+  assert.equal(result.posted, true);
+  assert.equal(result.commentUrl, null);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cmd, '/fixture/github-adapter');
+});
+
 test('postRemediationOutcomeComment posts gemini comments with only the Gemini bot token', async () => {
   const calls = [];
   const result = await postRemediationOutcomeComment({

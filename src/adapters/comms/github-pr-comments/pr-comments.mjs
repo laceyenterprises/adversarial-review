@@ -1068,8 +1068,8 @@ async function postRemediationOutcomeComment({
         { body },
         { execFileImpl, env: allowlistedEnv }
       );
-      adapterHandled = adapterResult !== null;
-      ghResult = adapterResult;
+      adapterHandled = adapterResult?.ran === true;
+      ghResult = adapterResult?.payload ?? null;
     } catch (adapterErr) {
       if (!adapterUnsupportedError(adapterErr)) {
         throw adapterErr;

@@ -2592,7 +2592,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
               { body: reviewBody, reviewerLogin: refreshIdentity },
               { execFileImpl, env: adapterEnv, rootDir: opts.rootDir || ROOT }
             );
-            adapterHandled = adapterResult !== null;
+            adapterHandled = adapterResult?.ran === true;
           } catch (adapterErr) {
             if (!adapterUnsupportedError(adapterErr)) {
               throw adapterErr;

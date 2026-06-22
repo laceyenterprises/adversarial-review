@@ -352,9 +352,44 @@ test('fast-merge uses adapter mutation after eligibility checks and still writes
     '--merge-method',
     'squash',
     '--delete-branch',
+    '--admin',
   ]);
   assert.equal(audits.at(-1).authorized_head_sha, 'sha-A');
   assert.equal(audits.at(-1).merged_head_sha, 'sha-A');
+});
+
+test('fast-merge falls back to gh admin merge when adapter merge fails', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 803);
+  const baseGh = makeGhStub({ views: [openView('sha-A'), openView('sha-A')], checks: [successChecks()] });
+  const calls = [];
+  async function gh(cmd, args, options = {}) {
+    calls.push({ cmd, args, options });
+    if (cmd === '/fixture/github-adapter') {
+      const err = new Error('merge failed: branch protection requires admin bypass');
+      err.stderr = 'merge failed';
+      throw err;
+    }
+    return baseGh(cmd, args, options);
+  }
+  gh.calls = calls;
+
+  let result;
+  await withProcessEnv({ GHA_ADAPTER_BIN: '/fixture/github-adapter' }, async () => {
+    result = await processFastMergePR({
+      db,
+      ghClient: gh,
+      repo: REPO,
+      prNumber: 803,
+      authorizedHeadSha: 'sha-A',
+      auditWriter: () => {},
+    });
+  });
+
+  assert.equal(result.status, 'merged');
+  assert.equal(calls.find((call) => call.cmd === '/fixture/github-adapter').args.includes('--admin'), true);
+  assert.equal(mergeCalls(gh).length, 1);
+  assert.equal(mergeCalls(gh)[0].args.includes('--admin'), true);
 });
 
 test('fast-merge head change requeues through canonical review reset and never merges', async () => {

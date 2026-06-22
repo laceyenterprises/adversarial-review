@@ -40,6 +40,26 @@ async function importGithubAdapterClientFresh() {
   return import(url);
 }
 
+test('adapterUnsupportedError keys fallback on structured unsupported signals', async () => {
+  const mod = await importGithubAdapterClientFresh();
+
+  const structured = new Error('adapter write failed');
+  structured.stdout = JSON.stringify({ error: 'unsupported_kind' });
+  assert.equal(mod.__test__.adapterUnsupportedError(structured), true);
+
+  const exitCode = new Error('adapter write failed');
+  exitCode.code = 78;
+  assert.equal(mod.__test__.adapterUnsupportedError(exitCode), true);
+});
+
+test('adapterUnsupportedError does not fall back on unrelated prose token collisions', async () => {
+  const mod = await importGithubAdapterClientFresh();
+  const err = new Error('command failed: unknown ref while running write --kind pull-request-merge');
+  err.stderr = 'GitHub rejected unknown ref deadbeef';
+
+  assert.equal(mod.__test__.adapterUnsupportedError(err), false);
+});
+
 function makeExpectedRollup() {
   return {
     id: 'PR_kwDOA1',

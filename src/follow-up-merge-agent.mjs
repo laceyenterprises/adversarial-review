@@ -276,7 +276,7 @@ async function tryAdapterPullRequestLabel({
 } = {}) {
   try {
     const result = await writeAdapterPullRequestLabel(repo, prNumber, { action, labelName }, { execFileImpl, env });
-    return result !== null;
+    return result?.ran === true;
   } catch (err) {
     if (adapterUnsupportedError(err)) return false;
     throw err;
@@ -4813,14 +4813,15 @@ async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit }) {
           matchHeadCommit,
           mergeMethod: 'squash',
           deleteBranch: true,
+          admin: true,
         },
         { execFileImpl, env: process.env }
       );
-      if (adapterResult !== null) return adapterResult;
-    } catch (err) {
-      if (!adapterUnsupportedError(err)) {
-        throw err;
-      }
+      if (adapterResult?.ran === true) return adapterResult.payload;
+    } catch {
+      // Preserve the historical fast-merge contract: an enabled adapter is a
+      // preferred write path, but protected-branch/admin failures must still
+      // reach the existing gh --admin fallback.
     }
     return execFileImpl('gh', [
       'pr',

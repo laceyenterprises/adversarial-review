@@ -633,7 +633,7 @@ async function publishAdversarialGateStatus(rootDir, {
       },
       { execFileImpl, env: allowlistedEnv, rootDir }
     );
-    adapterHandled = adapterResult !== null;
+    adapterHandled = adapterResult?.ran === true;
   } catch (adapterErr) {
     if (!adapterUnsupportedError(adapterErr)) {
       throw adapterErr;

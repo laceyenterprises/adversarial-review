@@ -43,6 +43,7 @@ const {
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
   buildAgyReviewArgs,
+  AGY_KEYCHAIN_ACCOUNT,
   AGY_KEYCHAIN_SERVICE,
   AGY_KEYCHAIN_REMEDIATION,
   isRetryableGeminiSubprocessError,
@@ -1731,6 +1732,7 @@ test('reviewWithGemini happy path returns the captured review text', async () =>
   const captured = [];
   const result = await reviewWithGemini('+diff body\n', 'EXTRA CONTEXT', {
     promptStage: 'first',
+    resolveGeminiRuntimeImpl: () => 'cli',
     assertOAuthImpl: async () => {},
     spawnGeminiReviewImpl: async ({ prompt, model }) => {
       captured.push({ prompt, model });
@@ -1914,6 +1916,7 @@ test('reviewWithGemini falls back to cli when temporary runtime resolver rejects
 test('reviewWithGemini maps auth-failure spawn output to OAuthError(gemini)', async () => {
   await assert.rejects(
     () => reviewWithGemini('+diff\n', '', {
+      resolveGeminiRuntimeImpl: () => 'cli',
       assertOAuthImpl: async () => {},
       spawnGeminiReviewImpl: async () => {
         const err = new Error('Command failed');
@@ -1928,6 +1931,7 @@ test('reviewWithGemini maps auth-failure spawn output to OAuthError(gemini)', as
 test('reviewWithGemini wraps non-auth spawn failures as a Gemini exec error', async () => {
   await assert.rejects(
     () => reviewWithGemini('+diff\n', '', {
+      resolveGeminiRuntimeImpl: () => 'cli',
       assertOAuthImpl: async () => {},
       spawnGeminiReviewImpl: async () => {
         const err = new Error('spawn ENOENT');
@@ -1943,6 +1947,7 @@ test('reviewWithGemini retries transient Gemini subprocess failures before succe
   const attempts = [];
   const sleeps = [];
   const result = await reviewWithGemini('+diff\n', '', {
+    resolveGeminiRuntimeImpl: () => 'cli',
     assertOAuthImpl: async () => {},
     retryDelaysMs: [0, 0],
     sleepImpl: async (ms) => { sleeps.push(ms); },
@@ -2074,16 +2079,23 @@ test('checkAgyReviewerAuth mirrors AGY-01 auth contract fields', async () => {
   });
 
   assert.equal(result.ok, true);
-  assert.equal(result.keychainItem, AGY_KEYCHAIN_SERVICE);
-  assert.equal(result.keychainItem, 'Gemini Safe Storage');
+  assert.equal(AGY_KEYCHAIN_SERVICE, 'gemini');
+  assert.equal(AGY_KEYCHAIN_ACCOUNT, 'antigravity');
+  assert.equal(result.keychainItem, `${AGY_KEYCHAIN_SERVICE}/${AGY_KEYCHAIN_ACCOUNT}`);
+  assert.notEqual(result.keychainItem, 'Gemini Safe Storage');
   assert.equal(result.probe, 'agy models');
   assert.deepEqual(calls.map((call) => [call.command, call.args]), [
-    ['security', ['find-generic-password', '-s', 'Gemini Safe Storage']],
+    ['security', ['find-generic-password', '-s', 'gemini', '-a', 'antigravity']],
     ['/opt/bin/agy', ['models']],
   ]);
+  assert.equal(
+    calls.some((call) => call.args.includes('Gemini Safe Storage')),
+    false,
+  );
   assert.deepEqual(calls.map((call) => call.options.timeout), [1234, 1234]);
   assert.match(AGY_KEYCHAIN_REMEDIATION, /launchd-spawned airlock processes/);
-  assert.match(AGY_KEYCHAIN_REMEDIATION, /security set-generic-password-partition-list -S apple-tool:,apple: -s "Gemini Safe Storage"/);
+  assert.match(AGY_KEYCHAIN_REMEDIATION, /security set-generic-password-partition-list -S apple-tool:,apple: -s gemini -a antigravity/);
+  assert.doesNotMatch(AGY_KEYCHAIN_REMEDIATION, /Gemini Safe Storage/);
 });
 
 test('checkAgyReviewerAuth fail-closed reasons distinguish keychain and agy probe failures', async () => {
@@ -2099,6 +2111,7 @@ test('checkAgyReviewerAuth fail-closed reasons distinguish keychain and agy prob
   });
   assert.equal(missing.ok, false);
   assert.equal(missing.reason, 'keychain-missing');
+  assert.equal(missing.keychainItem, 'gemini/antigravity');
   assert.equal(missingCalls, 1);
 
   const empty = await checkAgyReviewerAuth({

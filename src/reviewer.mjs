@@ -68,6 +68,7 @@ import {
   reviewBodyHasScopeViolationFinding,
 } from './additive-only-scope.mjs';
 import {
+  AGY_KEYCHAIN_ACCOUNT,
   AGY_KEYCHAIN_REMEDIATION,
   AGY_KEYCHAIN_SERVICE,
   checkAgyReviewerAuth,
@@ -3200,6 +3201,7 @@ const __test__ = {
   assertAgyReviewerAuth,
   checkAgyReviewerAuth,
   resolveAgyAuthProbeTimeoutMs,
+  AGY_KEYCHAIN_ACCOUNT,
   AGY_KEYCHAIN_SERVICE,
   AGY_KEYCHAIN_REMEDIATION,
   resolveGeminiRuntime,

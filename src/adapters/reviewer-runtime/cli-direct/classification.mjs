@@ -7,6 +7,7 @@ import {
 const BUG_ERROR_CODES = new Set(['ENOENT', 'EACCES', 'EPERM']);
 const CASCADE_ERROR_CODES = new Set(['ETIMEDOUT']);
 const REVIEWER_TIMEOUT_MESSAGE_RE = /command timed out after \d+ms/;
+const AGY_PRINT_TIMEOUT_MESSAGE_RE = /^error:\s+timed out waiting for response\s*$/im;
 const REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE = new RegExp(
   `command ${escapeRegExp(PROGRESS_TIMEOUT_REASON_PREFIX)} \\d+ms`
 );
@@ -38,7 +39,8 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   const timeoutKilled = details?.timeoutKilled === true || isReviewerSubprocessTimeout(details);
   const mentionsReviewerTimeout =
     REVIEWER_TIMEOUT_MESSAGE_RE.test(lower) ||
-    REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE.test(lower);
+    REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE.test(lower) ||
+    AGY_PRINT_TIMEOUT_MESSAGE_RE.test(text);
   const launchctlBootstrap = lower.split(/\r?\n/).some((line) => (
     /launchctlsessionerror|claude launchctl session bootstrap failed/.test(line) ||
     (/launchctl/.test(line) && LAUNCHCTL_BOOTSTRAP_ERROR_RE.test(line))

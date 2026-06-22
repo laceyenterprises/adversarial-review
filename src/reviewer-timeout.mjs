@@ -13,6 +13,7 @@ import { loadRoleConfig } from './role-config.mjs';
 
 const DEFAULT_REVIEWER_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_PROGRESS_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_AGY_PRINT_TIMEOUT_MS = 19.5 * 60 * 1000;
 
 function _resolvePositiveInt(value, fallback) {
   if (value === undefined || value === null || value === '') {
@@ -47,9 +48,22 @@ function resolveProgressTimeoutMs(env = process.env, options = {}) {
   return _resolvePositiveInt(cfgValue, DEFAULT_PROGRESS_TIMEOUT_MS);
 }
 
+function resolveAgyPrintTimeoutMs(env = process.env, options = {}) {
+  const cfgValue = loadRoleConfig({
+    env,
+    topPath: options.topPath,
+    modulePaths: options.modulePaths,
+    loaderImpl: options.loaderImpl,
+    contextKey: 'reviewer.gemini.agy_print_timeout_ms',
+  }).get('reviewer.gemini.agy_print_timeout_ms', DEFAULT_AGY_PRINT_TIMEOUT_MS);
+  return _resolvePositiveInt(cfgValue, DEFAULT_AGY_PRINT_TIMEOUT_MS);
+}
+
 export {
+  DEFAULT_AGY_PRINT_TIMEOUT_MS,
   DEFAULT_PROGRESS_TIMEOUT_MS,
   DEFAULT_REVIEWER_TIMEOUT_MS,
+  resolveAgyPrintTimeoutMs,
   resolveProgressTimeoutMs,
   resolveReviewerTimeoutMs,
 };

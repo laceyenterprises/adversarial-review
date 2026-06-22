@@ -47,6 +47,7 @@ const {
   resolveAgyPrintTimeoutMs,
   formatAgyPrintTimeout,
   sanitizeAgyReviewOutput,
+  buildAgyReviewerPromptPrefix,
   AGY_KEYCHAIN_ACCOUNT,
   AGY_KEYCHAIN_SERVICE,
   AGY_KEYCHAIN_REMEDIATION,
@@ -1703,7 +1704,7 @@ test('buildAgyReviewArgs uses agy print mode without carrying the prompt body', 
 
 test('buildAgyReviewArgs sizes print timeout below reviewer timeout', () => {
   const reviewerTimeoutMs = 20 * 60 * 1000;
-  const printTimeoutMs = resolveAgyPrintTimeoutMs(reviewerTimeoutMs);
+  const printTimeoutMs = resolveAgyPrintTimeoutMs({});
   const args = buildAgyReviewArgs({ model: 'gemini-2.5-pro', printTimeoutMs });
   const printTimeoutArg = args[args.indexOf('--print-timeout') + 1];
 
@@ -1711,6 +1712,19 @@ test('buildAgyReviewArgs sizes print timeout below reviewer timeout', () => {
   assert.equal(formatAgyPrintTimeout(printTimeoutMs), '1170s');
   assert.equal(printTimeoutArg, '1170s');
   assert.ok(printTimeoutMs < reviewerTimeoutMs);
+});
+
+test('buildAgyReviewerPromptPrefix forces provided-diff convergence and verdict-only output', () => {
+  const prompt = buildAgyReviewerPromptPrefix({ stage: 'first' });
+
+  assert.match(prompt, /Treat the supplied PR diff and context as the source of truth/);
+  assert.match(prompt, /Do not re-list the repository/);
+  assert.match(prompt, /Do not use filesystem, shell, git, search, or browsing tools for orientation/);
+  assert.match(prompt, /Use a tool only if a specific changed line cannot be judged/);
+  assert.match(prompt, /Emit exactly one Markdown review block for GitHub and nothing else/);
+  assert.match(prompt, /Do not narrate your plan, tool calls, exploration steps, or internal reasoning/);
+  assert.match(prompt, /## Adversarial Review — Gemini \(gemini-reviewer-lacey\)/);
+  assert.match(prompt, /"Comment only", "Request changes", or "Approve"/);
 });
 
 test('spawnGeminiReview feeds the prompt over stdin and keeps it out of argv', async () => {
@@ -1777,6 +1791,28 @@ test('spawnAgyReview feeds the prompt over stdin and keeps it out of argv', asyn
     { cwd: calls[0].options.cwd, timeout: calls[0].options.timeout, maxBuffer: calls[0].options.maxBuffer },
     { cwd: '/tmp/repo', timeout: 9_999, maxBuffer: 555 },
   );
+});
+
+test('spawnAgyReview keeps subprocess timeout at least as long as agy print timeout', async () => {
+  const calls = [];
+
+  await spawnAgyReview({
+    agyCli: '/usr/local/bin/agy',
+    prompt: 'review this diff',
+    model: 'gemini-2.5-pro',
+    env: { HOME: '/tmp/home', PATH: process.env.PATH },
+    cwd: '/tmp/repo',
+    timeout: 9_999,
+    printTimeoutMs: 15_000,
+    spawnWithInputImpl: async (command, args, options) => {
+      calls.push({ command, args, options });
+      return { stdout: 'ok', stderr: '' };
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, ['--print', '--print-timeout', '15s', '-m', 'gemini-2.5-pro']);
+  assert.equal(calls[0].options.timeout, 15_000);
 });
 
 test('resolveReviewerMetadata labels Gemini reviews with the Gemini reviewer identity', () => {
@@ -1862,8 +1898,8 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
     assertAgyAuthImpl: async ({ agyCli, env }) => {
       authCalls.push({ agyCli, env });
     },
-    spawnAgyReviewImpl: async ({ agyCli, prompt, model, env, timeout }) => {
-      const printTimeoutMs = resolveAgyPrintTimeoutMs(timeout);
+    spawnAgyReviewImpl: async ({ agyCli, prompt, model, env }) => {
+      const printTimeoutMs = resolveAgyPrintTimeoutMs(env);
       spawnCalls.push({ agyCli, args: buildAgyReviewArgs({ model, printTimeoutMs }), prompt, env });
       return { stdout: validAgyReview, stderr: '' };
     },
@@ -1884,6 +1920,7 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   assert.equal(spawnCalls[0].agyCli, AGY_CLI);
   assert.deepEqual(spawnCalls[0].args, ['--print', '--print-timeout', '1170s', '-m', 'gemini-2.5-pro']);
   assert.match(spawnCalls[0].prompt, /AGY CONTEXT/);
+  assert.match(spawnCalls[0].prompt, /Do not re-list the repository/);
   assert.match(spawnCalls[0].prompt, /Do not narrate your plan/);
   assert.match(spawnCalls[0].prompt, /```diff\n\+diff/);
   assert.strictEqual(authCalls[0].env, spawnCalls[0].env);
@@ -1921,6 +1958,7 @@ test('sanitizeAgyReviewOutput rejects agy timeout output instead of posting it',
     () => sanitizeAgyReviewOutput(sample),
     /error output instead of a review/,
   );
+  assert.equal(classifyReviewerFailure(sample, 1), 'reviewer-timeout');
 });
 
 test('sanitizeAgyReviewOutput accepts a well-formed agy review with inline verdict', () => {

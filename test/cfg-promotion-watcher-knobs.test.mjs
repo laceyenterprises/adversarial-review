@@ -16,7 +16,7 @@ import {
   resolveHqDispatchTimeoutMs,
   resolveHqWorkerTearDownTimeoutMs,
 } from '../src/follow-up-merge-agent.mjs';
-import { resolveReviewerTimeoutMs, resolveProgressTimeoutMs } from '../src/reviewer-timeout.mjs';
+import { resolveAgyPrintTimeoutMs, resolveReviewerTimeoutMs, resolveProgressTimeoutMs } from '../src/reviewer-timeout.mjs';
 import { resolveFirstPassReviewerPoolConfig } from '../src/watcher-reviewer-pool.mjs';
 import { normalizeMaxConcurrentFollowUpJobs, resolveRemediationMaxConcurrentJobs } from '../src/follow-up-remediation.mjs';
 import {
@@ -32,6 +32,7 @@ const ALL_NEW_FLAT_KEYS = Object.freeze([
   'remediation.reconciliation_max_active_age_ms_before_abandon',
   'reviewer.timeout_ms',
   'reviewer.no_progress_timeout_ms',
+  'reviewer.gemini.agy_print_timeout_ms',
   'watcher.max_drain_wait_ms',
   'watcher.pending_draft_review_respawn_age_seconds',
   'watcher.stuck_dispatch_alert_debounce_ms',
@@ -108,6 +109,13 @@ test('promoted resolvers fail loud on canonical-vs-legacy env conflicts', () => 
       ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: '300001',
     }),
     ['AGENT_OS_REVIEWER_NO_PROGRESS_TIMEOUT_MS', 'ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS']
+  );
+  assertEnvAliasConflict(
+    () => resolveAgyPrintTimeoutMs({
+      AGENT_OS_REVIEWER_GEMINI_AGY_PRINT_TIMEOUT_MS: '1200000',
+      ADVERSARIAL_REVIEWER_AGY_PRINT_TIMEOUT_MS: '1200001',
+    }),
+    ['AGENT_OS_REVIEWER_GEMINI_AGY_PRINT_TIMEOUT_MS', 'ADVERSARIAL_REVIEWER_AGY_PRINT_TIMEOUT_MS']
   );
   assertEnvAliasConflict(
     () => resolveFirstPassReviewerPoolConfig({
@@ -211,6 +219,7 @@ test('schema defaults resolve to documented values when nothing is overridden', 
     'remediation.reconciliation_max_active_age_ms_before_abandon': 21_600_000,
     'reviewer.timeout_ms': 1_200_000,
     'reviewer.no_progress_timeout_ms': 900_000,
+    'reviewer.gemini.agy_print_timeout_ms': 1_170_000,
     'watcher.max_drain_wait_ms': 3_600_000,
     'watcher.pending_draft_review_respawn_age_seconds': 900,
     'watcher.stuck_dispatch_alert_debounce_ms': 3_600_000,
@@ -245,6 +254,8 @@ test('reviewer timeout helpers honor canonical env keys and env-scoped AGENT_OS_
 reviewer:
   timeout_ms: 345000
   no_progress_timeout_ms: 234000
+  gemini:
+    agy_print_timeout_ms: 456000
 `);
   try {
     const env = {
@@ -252,6 +263,7 @@ reviewer:
     };
     assert.strictEqual(resolveReviewerTimeoutMs(env), 345_000);
     assert.strictEqual(resolveProgressTimeoutMs(env), 234_000);
+    assert.strictEqual(resolveAgyPrintTimeoutMs(env), 456_000);
   } finally {
     cleanup();
   }
@@ -261,6 +273,8 @@ test('reviewer timeout helpers honor module-local config cascade', () => {
   const { configPath: moduleConfigPath, cleanup } = createTempConfig(`reviewer:
   timeout_ms: 345000
   no_progress_timeout_ms: 234000
+  gemini:
+    agy_print_timeout_ms: 456000
 `);
   try {
     assert.strictEqual(
@@ -271,6 +285,10 @@ test('reviewer timeout helpers honor module-local config cascade', () => {
       resolveProgressTimeoutMs({}, { topPath: '/dev/null', modulePaths: [moduleConfigPath] }),
       234_000
     );
+    assert.strictEqual(
+      resolveAgyPrintTimeoutMs({}, { topPath: '/dev/null', modulePaths: [moduleConfigPath] }),
+      456_000
+    );
   } finally {
     cleanup();
   }
@@ -280,9 +298,11 @@ test('reviewer timeout helpers honor canonical AGENT_OS_* env overrides from the
   const env = {
     AGENT_OS_REVIEWER_TIMEOUT_MS: '456000',
     AGENT_OS_REVIEWER_NO_PROGRESS_TIMEOUT_MS: '123000',
+    AGENT_OS_REVIEWER_GEMINI_AGY_PRINT_TIMEOUT_MS: '789000',
   };
   assert.strictEqual(resolveReviewerTimeoutMs(env), 456_000);
   assert.strictEqual(resolveProgressTimeoutMs(env), 123_000);
+  assert.strictEqual(resolveAgyPrintTimeoutMs(env), 789_000);
 });
 
 test('reviewer timeout helpers fail loud on canonical env parse errors', () => {

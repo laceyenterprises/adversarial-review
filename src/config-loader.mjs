@@ -1376,6 +1376,11 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
+              agy_print_timeout_ms: {
+                __type: TYPE_INT,
+                __default: 1170000,
+                __min: 1000,
+              },
               mode: {
                 __type: TYPE_STRING,
                 __default: 'off',
@@ -1602,6 +1607,13 @@ export const ENV_ALIASES = {
   'reviewer.gemini.runtime': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_RUNTIME',
     aliases: [['ADVERSARIAL_REVIEW_GEMINI_RUNTIME', identity]],
+  },
+  'reviewer.gemini.agy_print_timeout_ms': {
+    canonical: 'AGENT_OS_REVIEWER_GEMINI_AGY_PRINT_TIMEOUT_MS',
+    aliases: [
+      ['ADVERSARIAL_REVIEWER_AGY_PRINT_TIMEOUT_MS', identity],
+      ['AGY_PRINT_TIMEOUT_MS', identity],
+    ],
   },
   'reviewer.gemini.antigravity.accounts': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_ACCOUNTS',

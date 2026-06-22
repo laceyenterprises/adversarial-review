@@ -17,8 +17,14 @@ rate limits, pages all-capped account pools, or emits AGR-06 account telemetry.
 - `reviewer.gemini.runtime` selects the Gemini reviewer runtime.
 - `reviewer.gemini.runtime: antigravity` invokes
   `agy --print --print-timeout <N> -m <model>` and feeds the review prompt on
-  stdin. The print timeout is derived from the reviewer subprocess timeout and
-  kept slightly lower than the outer wall clock so capture/cleanup has slack.
+  stdin. The print timeout is controlled independently by
+  `reviewer.gemini.agy_print_timeout_ms` (env:
+  `AGENT_OS_REVIEWER_GEMINI_AGY_PRINT_TIMEOUT_MS`; compatibility aliases:
+  `ADVERSARIAL_REVIEWER_AGY_PRINT_TIMEOUT_MS`, `AGY_PRINT_TIMEOUT_MS`) so
+  operators can raise Antigravity headroom without changing Claude/Codex
+  review budgets. The reviewer subprocess timeout is kept at least as large as
+  the AGY print timeout so the wrapper does not kill `agy` before its own
+  print wait expires.
 - `src/agy-reviewer-auth.mjs` owns the fail-closed pre-flight: first
   `security find-generic-password -s gemini -a antigravity`, then `agy models`.
   Both probes run with the same OAuth-scrubbed env used for the review spawn,
@@ -174,10 +180,11 @@ owns recovery, and operators diagnose the failed reviewer attempt rather than
 cleaning up a garbage PR review.
 
 The review command's `--print-timeout` is sized from
-`reviewer.timeout_ms`. With the default 20 minute reviewer timeout, AGY receives
-`--print-timeout 1170s`. If `reviewer.timeout_ms` is lowered, confirm the
-derived print timeout still leaves enough time for AGY to finish a real review;
-if it is raised, the AGY print timeout rises with it.
+`reviewer.gemini.agy_print_timeout_ms`. The default is 1,170,000 ms, so AGY
+receives `--print-timeout 1170s` while the shared reviewer timeout remains 20
+minutes. Raise the AGY-specific key when Antigravity needs more headroom; do
+not raise `reviewer.timeout_ms` unless all reviewer subprocesses need a larger
+budget.
 
 ## Login
 

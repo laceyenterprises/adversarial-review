@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  DEFAULT_AGY_PRINT_TIMEOUT_MS,
   DEFAULT_PROGRESS_TIMEOUT_MS,
   DEFAULT_REVIEWER_TIMEOUT_MS,
+  resolveAgyPrintTimeoutMs,
   resolveProgressTimeoutMs,
   resolveReviewerTimeoutMs,
 } from '../src/reviewer-timeout.mjs';
@@ -66,5 +68,33 @@ test('resolveProgressTimeoutMs follows the reviewer env override parser shape', 
   assert.throws(
     () => resolveProgressTimeoutMs({ ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS: 'nope' }),
     AgentOSConfigError
+  );
+});
+
+test('default agy print timeout is independently below the reviewer wall timeout', () => {
+  assert.equal(DEFAULT_AGY_PRINT_TIMEOUT_MS, 19.5 * 60 * 1000);
+  assert.equal(resolveAgyPrintTimeoutMs({}), DEFAULT_AGY_PRINT_TIMEOUT_MS);
+  assert.ok(resolveAgyPrintTimeoutMs({}) < resolveReviewerTimeoutMs({}));
+});
+
+test('resolveAgyPrintTimeoutMs honors independent antigravity env aliases', () => {
+  assert.equal(
+    resolveAgyPrintTimeoutMs({ AGENT_OS_REVIEWER_GEMINI_AGY_PRINT_TIMEOUT_MS: '2400000' }),
+    2_400_000
+  );
+  assert.equal(
+    resolveAgyPrintTimeoutMs({ ADVERSARIAL_REVIEWER_AGY_PRINT_TIMEOUT_MS: '1800000' }),
+    1_800_000
+  );
+  assert.equal(resolveAgyPrintTimeoutMs({ AGY_PRINT_TIMEOUT_MS: '120000' }), 120_000);
+});
+
+test('resolveAgyPrintTimeoutMs is independent of shared reviewer timeout', () => {
+  assert.equal(
+    resolveAgyPrintTimeoutMs({
+      ADVERSARIAL_REVIEWER_TIMEOUT_MS: '60000',
+      ADVERSARIAL_REVIEWER_AGY_PRINT_TIMEOUT_MS: '1800000',
+    }),
+    1_800_000
   );
 });

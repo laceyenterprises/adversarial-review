@@ -2276,8 +2276,8 @@ async function spawnAgyReview({
       maxBuffer,
       // agy leaves a long-lived language-server child holding our stdout/stderr
       // pipes; without this the capture never sees EOF and every review stalls
-      // until the progress/wall timeout SIGKILLs it. See process-group-spawn
-      // reapGroupOnExit + docs/NOTE-agy-auth.md "language-server pipe hang".
+      // until the progress/wall timeout SIGKILLs it. `reapGroupOnExit`
+      // treats main-process exit as authoritative and reaps descendants.
       reapGroupOnExit: true,
     },
   );

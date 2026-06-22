@@ -410,8 +410,26 @@ checks for the macOS keychain item `gemini`/`antigravity` and then runs
 `agy models` with that same scrubbed env. Timeout-shaped keychain probe
 failures and transient `agy models` transport failures use bounded
 retry/backoff before surfacing an OAuth failure; definitive missing-keychain and
-non-transient probe failures fail closed immediately. The review itself runs
-`agy --print -m <model>` and receives the complete reviewer prompt on stdin.
+non-transient probe failures fail closed immediately.
+
+The `agy` CLI can spawn a long-lived language-server descendant that inherits
+the parent's stdout/stderr pipes. In that failure shape the main `agy` process
+can exit successfully while the descendant keeps capture pipes open forever,
+which makes a bare `execFile` or shell capture misreport the operation as a
+probe/reviewer timeout. The Antigravity runtime contract is therefore that both
+the auth probe's `agy models` command and the review command
+`agy --print -m <model>` run in their own process group. Main-process exit is
+authoritative: once the direct `agy` process exits, the runtime reaps the
+process group to release inherited pipes, drains already-buffered stdout/stderr
+until close, and then reports the direct process's real exit code/output. This
+descendant kill is considered safe only for these dedicated, detached AGY probe
+and reviewer spawns, after the direct `agy` process has exited or the configured
+timeout/max-buffer guard has fired. Future AGY preflights must use the same
+process-group/file-redirect capture pattern rather than a bare `execFile`,
+command substitution, or equivalent inherited-pipe capture.
+
+The review itself runs `agy --print -m <model>` and receives the complete
+reviewer prompt on stdin.
 Watcher startup runs the same scrubbed-env AGY auth probe when this runtime is
 selected, but startup treats failures as warning-only visibility signals rather
 than refusing to boot. The per-review probe remains fail-closed. Successful real

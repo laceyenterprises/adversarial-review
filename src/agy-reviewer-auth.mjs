@@ -34,9 +34,8 @@ function reapProcessGroup(child) {
 // imported by the watcher startup preflight, and pulling in heavier siblings
 // perturbs harnesses that stub them.
 //
-// Keep ALL future agy preflights on this adapter (or a file-redirect spawn) —
+// Keep ALL future agy preflights on this adapter (or a file-redirect spawn) -
 // never a bare execFile / `$(...)` / `subprocess.run(capture_output=True)`.
-// See docs/NOTE-agy-auth.md "language-server pipe hang".
 async function safeExecFile(command, args, { env, timeout = 0, maxBuffer = DEFAULT_SAFE_EXEC_MAX_BUFFER } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -48,6 +47,7 @@ async function safeExecFile(command, args, { env, timeout = 0, maxBuffer = DEFAU
     let stdout = '';
     let stderr = '';
     let stdoutBytes = 0;
+    let stderrBytes = 0;
     let settled = false;
     let timedOut = false;
     let timer = null;
@@ -81,7 +81,18 @@ async function safeExecFile(command, args, { env, timeout = 0, maxBuffer = DEFAU
       });
     });
     child.stderr.on('data', (chunk) => {
-      stderr += chunk;
+      stderrBytes += chunk.length;
+      if (stderrBytes <= maxBuffer) {
+        stderr += chunk;
+        return;
+      }
+      reapProcessGroup(child);
+      finalize(() => {
+        const err = new Error(`Command failed: stderr maxBuffer exceeded (${maxBuffer} bytes)`);
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+      });
     });
 
     child.on('error', (err) => finalize(() => {
@@ -355,4 +366,5 @@ export {
   resolveAgyAuthProbeRetryBackoffMs,
   resolveAgyAuthProbeSuccessTtlMs,
   resolveAgyAuthProbeTimeoutMs,
+  safeExecFile,
 };

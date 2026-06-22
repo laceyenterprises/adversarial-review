@@ -10,6 +10,7 @@ import { AgentOSConfigError } from '../src/config-loader.mjs';
 import {
   AGY_TRANSIENT_REMEDIATION,
   clearAgyReviewerAuthCache,
+  safeExecFile,
 } from '../src/agy-reviewer-auth.mjs';
 
 const {
@@ -2148,6 +2149,20 @@ test('checkAgyReviewerAuth mirrors AGY-01 auth contract fields', async () => {
   assert.match(AGY_KEYCHAIN_REMEDIATION, /launchd-spawned airlock processes/);
   assert.match(AGY_KEYCHAIN_REMEDIATION, /security set-generic-password-partition-list -S apple-tool:,apple: -s gemini -a antigravity/);
   assert.doesNotMatch(AGY_KEYCHAIN_REMEDIATION, /Gemini Safe Storage/);
+});
+
+test('safeExecFile enforces maxBuffer for stderr capture', async () => {
+  await assert.rejects(
+    () => safeExecFile(process.execPath, [
+      '-e',
+      'process.stderr.write("x".repeat(2048));',
+    ], { maxBuffer: 1024 }),
+    (err) => {
+      assert.match(err.message, /stderr maxBuffer exceeded \(1024 bytes\)/);
+      assert.ok(err.stderr.length <= 1024);
+      return true;
+    },
+  );
 });
 
 test('checkAgyReviewerAuth fail-closed reasons distinguish keychain and agy probe failures', async () => {

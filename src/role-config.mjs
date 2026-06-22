@@ -151,6 +151,10 @@ const ROLE_ENV_NAMES_TO_BLANK_PRUNE = new Set([
   'ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS',
   'AGENT_OS_REVIEWER_GEMINI_MODE',
   'ADVERSARIAL_REVIEW_GEMINI_REVIEWER_MODE',
+  'AGENT_OS_REVIEWER_REVIEW_POPULATION_RETRY_MAX_ATTEMPTS',
+  'ADVERSARIAL_REVIEW_POPULATION_RETRY_MAX_ATTEMPTS',
+  'AGENT_OS_REVIEWER_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS',
+  'ADVERSARIAL_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS',
   'AGENT_OS_REVIEWER_GEMINI_RUNTIME',
   'ADVERSARIAL_REVIEW_GEMINI_RUNTIME',
   'AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_ACCOUNTS',
@@ -318,6 +322,25 @@ export function resolveGeminiReviewerMode({
     contextKey: 'reviewer.gemini.mode',
   });
   return cfg.get('reviewer.gemini.mode', 'off');
+}
+
+export function resolveReviewPopulationRetryConfig({
+  env = process.env,
+  topPath,
+  modulePaths,
+  loaderImpl,
+} = {}) {
+  const cfg = loadRoleConfig({
+    env,
+    topPath,
+    modulePaths,
+    loaderImpl,
+    contextKey: 'reviewer.review_population_retry.max_attempts',
+  });
+  return {
+    maxAttempts: cfg.get('reviewer.review_population_retry.max_attempts', 1),
+    backoffSeconds: cfg.get('reviewer.review_population_retry.backoff_seconds', 45),
+  };
 }
 
 // resolveGeminiRuntime — returns the Gemini reviewer runtime

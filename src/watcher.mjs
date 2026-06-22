@@ -27,6 +27,7 @@ import {
   resetRoleConfigCache,
   resolveGeminiRuntime,
   resolveGeminiReviewerMode,
+  resolveReviewPopulationRetryConfig,
 } from './role-config.mjs';
 import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
 import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
@@ -66,6 +67,7 @@ import {
 } from './reviewer-cascade.mjs';
 import {
   infraRecoverableFailureClass,
+  reviewPopulationFailureClass,
   reviewerFailureClassFromStoredRow,
   unknownReviewerCommandFailureClass,
 } from './reviewer-failure-classification.mjs';
@@ -2311,6 +2313,22 @@ function resolveQuotaExhaustedBackoffMs(env = process.env) {
   return Math.floor(parsed);
 }
 const QUOTA_EXHAUSTED_BACKOFF_MS = resolveQuotaExhaustedBackoffMs();
+const DEFAULT_REVIEW_POPULATION_RETRY_CONFIG = Object.freeze({
+  maxAttempts: 1,
+  backoffSeconds: 45,
+});
+function normalizeReviewPopulationRetryConfig(config = {}) {
+  const maxAttempts = Number(config.maxAttempts);
+  const backoffSeconds = Number(config.backoffSeconds);
+  return {
+    maxAttempts: Number.isInteger(maxAttempts) && maxAttempts >= 0
+      ? maxAttempts
+      : DEFAULT_REVIEW_POPULATION_RETRY_CONFIG.maxAttempts,
+    backoffSeconds: Number.isFinite(backoffSeconds) && backoffSeconds >= 0
+      ? Math.floor(backoffSeconds)
+      : DEFAULT_REVIEW_POPULATION_RETRY_CONFIG.backoffSeconds,
+  };
+}
 const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
   `UPDATE reviewed_prs
      SET review_status = 'reviewing',
@@ -2350,6 +2368,42 @@ const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
          ) OR
          lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed with code %'
        ))
+     )`
+);
+const stmtMarkReviewPopulationRetryAttemptStarted = db.prepare(
+  `UPDATE reviewed_prs
+     SET review_status = 'reviewing',
+         last_attempted_at = ?,
+         reviewer_session_uuid = ?,
+         reviewer_started_at = NULL,
+         reviewer_head_sha = ?,
+         reviewer_timeout_ms = ?,
+         reviewer_lease_expires_at = ?,
+         reviewer_pgid = NULL,
+         failed_at = NULL,
+         failure_message = NULL,
+         quota_reset_at_utc = NULL,
+         review_population_retry_attempts = CASE
+           WHEN COALESCE(review_population_retry_head_sha, '') = COALESCE(?, '') THEN review_population_retry_attempts + 1
+           ELSE 1
+         END,
+         review_population_retry_last_at = ?,
+         review_population_retry_head_sha = ?
+   WHERE repo = ?
+     AND pr_number = ?
+     AND review_status = 'failed'
+     AND (
+       COALESCE(review_population_retry_head_sha, '') != COALESCE(?, '') OR
+       review_population_retry_attempts < ?
+     )
+     AND (
+       (
+         lower(COALESCE(failure_message, '')) LIKE '%reviewer session % is no longer alive%' AND
+         lower(COALESCE(failure_message, '')) LIKE '%no github review%found%'
+       ) OR
+       lower(COALESCE(failure_message, '')) LIKE '%no github review%found%' OR
+       lower(COALESCE(failure_message, '')) LIKE '%generated-but-not-posted%' OR
+       lower(COALESCE(failure_message, '')) LIKE '%generated but not posted%'
      )`
 );
 const stmtMarkUnknownFailureRetryAttemptStarted = db.prepare(
@@ -3593,6 +3647,63 @@ function shouldBypassPrimaryReviewerQuotaHold(route, row = null) {
       )
     )
   );
+}
+
+function reviewPopulationRetryDecision(row, {
+  config = DEFAULT_REVIEW_POPULATION_RETRY_CONFIG,
+  headSha = null,
+  nowMs = Date.now(),
+} = {}) {
+  const failureClass = reviewPopulationFailureClass(row);
+  if (!row || row.review_status !== 'failed' || !failureClass) {
+    return { retryable: false, action: 'not-population-failure', failureClass: null };
+  }
+  const normalized = normalizeReviewPopulationRetryConfig(config);
+  const storedHead = row.review_population_retry_head_sha || null;
+  const sameHead = String(storedHead || '') === String(headSha || '');
+  const attempts = sameHead ? Number(row.review_population_retry_attempts || 0) : 0;
+  if (normalized.maxAttempts <= 0) {
+    return {
+      retryable: true,
+      action: 'exhausted',
+      failureClass,
+      attempts,
+      maxAttempts: normalized.maxAttempts,
+      backoffSeconds: normalized.backoffSeconds,
+    };
+  }
+  if (attempts >= normalized.maxAttempts) {
+    return {
+      retryable: true,
+      action: 'exhausted',
+      failureClass,
+      attempts,
+      maxAttempts: normalized.maxAttempts,
+      backoffSeconds: normalized.backoffSeconds,
+    };
+  }
+  const backoffMs = normalized.backoffSeconds * 1000;
+  const anchorMs = Date.parse(row.failed_at || row.last_attempted_at || '');
+  const waitUntilMs = Number.isFinite(anchorMs) ? anchorMs + backoffMs : nowMs;
+  if (backoffMs > 0 && waitUntilMs > nowMs) {
+    return {
+      retryable: true,
+      action: 'wait',
+      failureClass,
+      attempts,
+      maxAttempts: normalized.maxAttempts,
+      backoffSeconds: normalized.backoffSeconds,
+      waitUntilMs,
+    };
+  }
+  return {
+    retryable: true,
+    action: 'retry',
+    failureClass,
+    attempts,
+    maxAttempts: normalized.maxAttempts,
+    backoffSeconds: normalized.backoffSeconds,
+  };
 }
 
 function resolveGeminiReviewerModeForWatcher({
@@ -6430,15 +6541,41 @@ async function pollOnce(
       const unknownFailureClass = current?.review_status === 'failed' && !infraRecoveryClass
         ? unknownReviewerCommandFailureClass(current)
         : null;
+      const reviewPopulationRetryConfig = normalizeReviewPopulationRetryConfig(resolveReviewPopulationRetryConfig());
+      const populationRetry = current?.review_status === 'failed' && !infraRecoveryClass && !unknownFailureClass
+        ? reviewPopulationRetryDecision(current, {
+          config: reviewPopulationRetryConfig,
+          headSha: subject?.headSha || null,
+        })
+        : { retryable: false };
       const unknownFailureAttempts = Number(current?.review_attempts || 0);
       const unknownFailureRetryable = Boolean(
         unknownFailureClass && unknownFailureAttempts < REVIEW_UNKNOWN_FAILURE_MAX_RETRIES
       );
-      if (current?.review_status === 'failed' && !infraRecoveryClass && !unknownFailureRetryable) {
+      if (populationRetry.retryable && populationRetry.action === 'wait') {
+        console.log(
+          `[watcher] Holding review-population retry for ${repoPath}#${prNumber}: ` +
+            `class=${populationRetry.failureClass} attempts=${populationRetry.attempts}/${populationRetry.maxAttempts}; ` +
+            `waiting until ${new Date(populationRetry.waitUntilMs).toISOString()}`
+        );
+        continue;
+      }
+      const reviewPopulationRetryable = Boolean(
+        populationRetry.retryable && populationRetry.action === 'retry'
+      );
+      if (current?.review_status === 'failed' && !infraRecoveryClass && !unknownFailureRetryable && !reviewPopulationRetryable) {
         if (unknownFailureClass) {
           console.log(
             `[watcher] Unknown reviewer failure retry cap exhausted for ${repoPath}#${prNumber}: ` +
               `attempts=${unknownFailureAttempts}/${REVIEW_UNKNOWN_FAILURE_MAX_RETRIES}; ` +
+              `leaving evidence intact`
+          );
+          continue;
+        }
+        if (populationRetry.retryable && populationRetry.action === 'exhausted') {
+          console.log(
+            `[watcher] Review-population retry cap exhausted for ${repoPath}#${prNumber}: ` +
+              `class=${populationRetry.failureClass} attempts=${populationRetry.attempts}/${populationRetry.maxAttempts}; ` +
               `leaving evidence intact`
           );
           continue;
@@ -6690,6 +6827,21 @@ async function pollOnce(
                 infraRecoveryClass,
                 infraRecoveryClass
               )
+              : reviewPopulationRetryable
+                ? stmtMarkReviewPopulationRetryAttemptStarted.run(
+                  attemptAt,
+                  reviewerSessionUuid,
+                  reviewerHeadSha,
+                  reviewerTimeoutMs,
+                  reviewerLeaseExpiresAt,
+                  reviewerHeadSha,
+                  attemptAt,
+                  reviewerHeadSha,
+                  repoPath,
+                  prNumber,
+                  reviewerHeadSha,
+                  reviewPopulationRetryConfig.maxAttempts
+                )
               : unknownFailureRetryable
                 ? stmtMarkUnknownFailureRetryAttemptStarted.run(
                   attemptAt,
@@ -6734,6 +6886,12 @@ async function pollOnce(
               console.log(
                 `[watcher] Claimed unknown-failed review ${repoPath}#${prNumber} ` +
                   `(attempt ${unknownFailureAttempts + 1}/${REVIEW_UNKNOWN_FAILURE_MAX_RETRIES})`
+              );
+            }
+            if (reviewPopulationRetryable) {
+              console.log(
+                `[watcher] Claimed review-population retry ${repoPath}#${prNumber} ` +
+                  `(class=${populationRetry.failureClass}, attempt ${populationRetry.attempts + 1}/${reviewPopulationRetryConfig.maxAttempts})`
               );
             }
             if (afterClaim) {
@@ -7283,6 +7441,7 @@ export {
   retryPendingDagAutowalkOnMerge,
   retryPendingMergeCloseouts,
   primaryReviewerQuotaCappedForRow,
+  reviewPopulationRetryDecision,
   shouldBypassPrimaryReviewerQuotaHold,
   resolveGeminiReviewerModeForWatcher,
   selectReviewerRouteForAttempt,

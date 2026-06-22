@@ -70,6 +70,9 @@ function ensureReviewStateSchema(db) {
       reviewer_timeout_ms INTEGER,
       reviewer_lease_expires_at TEXT,
       quota_reset_at_utc TEXT,
+      review_population_retry_attempts INTEGER NOT NULL DEFAULT 0,
+      review_population_retry_last_at TEXT,
+      review_population_retry_head_sha TEXT,
       UNIQUE(repo, pr_number)
     )
   `);
@@ -106,6 +109,9 @@ function ensureReviewStateSchema(db) {
   // DBs that briefly existed before the migration sentinel (same rationale as
   // the fast_merge_audit_* columns above).
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN quota_reset_at_utc TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN review_population_retry_attempts INTEGER NOT NULL DEFAULT 0`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN review_population_retry_last_at TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN review_population_retry_head_sha TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN domain_id TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN subject_external_id TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN revision_ref TEXT`);

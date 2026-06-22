@@ -1862,8 +1862,9 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
     assertAgyAuthImpl: async ({ agyCli, env }) => {
       authCalls.push({ agyCli, env });
     },
-    spawnAgyReviewImpl: async ({ agyCli, prompt, model, env }) => {
-      spawnCalls.push({ agyCli, args: buildAgyReviewArgs({ model }), prompt, env });
+    spawnAgyReviewImpl: async ({ agyCli, prompt, model, env, timeout }) => {
+      const printTimeoutMs = resolveAgyPrintTimeoutMs(timeout);
+      spawnCalls.push({ agyCli, args: buildAgyReviewArgs({ model, printTimeoutMs }), prompt, env });
       return { stdout: validAgyReview, stderr: '' };
     },
     spawnGeminiReviewImpl: async () => {
@@ -1941,6 +1942,29 @@ test('sanitizeAgyReviewOutput accepts a well-formed agy review with inline verdi
     '## Verdict',
     'Comment only',
   ].join('\n'));
+});
+
+test('sanitizeAgyReviewOutput accepts a valid review that discusses error sentinels', () => {
+  const result = sanitizeAgyReviewOutput([
+    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '',
+    '## Summary',
+    'The reviewed code can print this valid diagnostic:',
+    'Error: user configuration is missing',
+    '',
+    '## Blocking issues',
+    '- **Crash path**',
+    '  - **Problem:** The service may panic:',
+    'panic: nil pointer dereference',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n'));
+
+  assert.match(result, /^## Adversarial Review/m);
+  assert.match(result, /^Error: user configuration is missing$/m);
+  assert.match(result, /^panic: nil pointer dereference$/m);
+  assert.match(result, /^Request changes$/m);
 });
 
 test('sanitizeAgyReviewOutput strips narration before a valid agy review block', () => {

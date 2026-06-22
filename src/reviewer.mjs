@@ -2229,9 +2229,6 @@ function sanitizeAgyReviewOutput(rawOutput) {
   if (!text) {
     throw new Error('Antigravity agy returned empty output');
   }
-  if (hasAgyErrorSentinel(text)) {
-    throw new Error(`Antigravity agy returned error output instead of a review: ${previewText(text, 400)}`);
-  }
 
   const candidates = candidateAgyReviewBlocks(text);
   for (let index = candidates.length - 1; index >= 0; index -= 1) {
@@ -2240,6 +2237,10 @@ function sanitizeAgyReviewOutput(rawOutput) {
     if (verdict && verdict !== 'unknown') {
       return candidate;
     }
+  }
+
+  if (hasAgyErrorSentinel(text)) {
+    throw new Error(`Antigravity agy returned error output instead of a review: ${previewText(text, 400)}`);
   }
 
   throw new Error(`Antigravity agy returned output without a parseable review verdict: ${previewText(text, 400)}`);

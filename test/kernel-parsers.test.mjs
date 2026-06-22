@@ -98,6 +98,14 @@ test('kernel verdict parser keeps request-changes when trailing prose starts wit
   }
 });
 
+test('kernel verdict parser does not approve conditional approve prose', () => {
+  assert.equal(normalizeReviewVerdict('Approve'), 'approved');
+  assert.equal(normalizeReviewVerdict('Approved'), 'approved');
+  assert.equal(normalizeReviewVerdict('Approved.'), 'approved');
+  assert.equal(normalizeReviewVerdict('Approve once changes are addressed'), 'unknown');
+  assert.equal(normalizeReviewVerdict('Approve after the migration is fixed'), 'unknown');
+});
+
 test('kernel verdict parser fails closed on request-changes clauses before permissive prose', () => {
   const cases = [
     'Request changes: migration unsafe.',

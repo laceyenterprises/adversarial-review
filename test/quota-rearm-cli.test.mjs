@@ -236,3 +236,23 @@ test('CLI main() exits 2 on usage error (missing --pr)', () => {
   assert.equal(code, 2);
   assert.match(err, /--repo and --pr are required/);
 });
+
+test('CLI main() rejects partial numeric --pr values as usage errors', () => {
+  for (const value of ['2429abc', '2429.7', '0']) {
+    let err = '';
+    const code = main(['--repo', REPO, '--pr', value], {
+      stdout: { write: () => {} },
+      stderr: { write: (s) => { err += s; } },
+    });
+    assert.equal(code, 2, value);
+    assert.match(err, /--pr must be a positive integer/);
+  }
+
+  let err = '';
+  const code = main(['--repo', REPO, '--pr=-2429'], {
+    stdout: { write: () => {} },
+    stderr: { write: (s) => { err += s; } },
+  });
+  assert.equal(code, 2, '-2429');
+  assert.match(err, /--pr must be a positive integer/);
+});

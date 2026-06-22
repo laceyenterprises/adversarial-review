@@ -119,6 +119,51 @@ test('quota-exhausted failure captures + stores the provider reset time durably'
   }
 });
 
+test('quota-exhausted lease-recovery settlement still lands in failed for hold-until-reset', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: REPO,
+      prNumber: PR,
+      result: {
+        ok: false,
+        failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
+        error: CODEX_QUOTA_OUTPUT,
+        stdout: CODEX_QUOTA_OUTPUT,
+      },
+      failureAt: '2026-06-17T17:30:00.000Z',
+      maxRemediationRounds: 2,
+      leaseRecoveryEnabled: true,
+      statements: quotaStatements(db),
+    });
+
+    const row = getRow(db);
+    assert.equal(row.review_status, 'failed');
+    assert.equal(row.quota_reset_at_utc, '2026-06-18T00:39:00.000Z');
+    assert.equal(infraRecoverableFailureClass(row), QUOTA_EXHAUSTED_FAILURE_CLASS);
+
+    const held = quotaHoldDecision(row, { nowMs: Date.parse('2026-06-17T20:00:00Z') });
+    assert.equal(held.hold, true);
+    assert.equal(held.source, 'provider-reported-stored');
+
+    const pendingClaim = db.prepare(
+      `UPDATE reviewed_prs
+          SET review_status = 'reviewing',
+              failed_at = NULL,
+              failure_message = NULL,
+              quota_reset_at_utc = NULL
+        WHERE repo = ?
+          AND pr_number = ?
+          AND review_status IN ('pending', 'pending-upstream')`
+    ).run(REPO, PR);
+    assert.equal(pendingClaim.changes, 0, 'normal pending claim must not bypass the quota hold');
+    assert.equal(getRow(db).review_status, 'failed');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('hold-until-reset honors the stored reset and does NOT burn an infra auto-recover attempt', () => {
   const { rootDir, db } = setupFixture();
   try {

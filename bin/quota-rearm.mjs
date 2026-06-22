@@ -175,8 +175,12 @@ function parseCliArgs(argv) {
   if (!parsed.values.repo || !parsed.values.pr) {
     throw new UsageError('--repo and --pr are required');
   }
-  const prNumber = Number.parseInt(parsed.values.pr, 10);
-  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+  const rawPr = String(parsed.values.pr);
+  if (!/^[1-9][0-9]*$/.test(rawPr)) {
+    throw new UsageError(`--pr must be a positive integer (got: ${parsed.values.pr})`);
+  }
+  const prNumber = Number(rawPr);
+  if (!Number.isSafeInteger(prNumber)) {
     throw new UsageError(`--pr must be a positive integer (got: ${parsed.values.pr})`);
   }
   return { ...parsed.values, prNumber };

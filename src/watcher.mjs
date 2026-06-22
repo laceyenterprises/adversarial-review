@@ -3123,10 +3123,7 @@ function settleReviewerAttempt({
           `falling back to the ${Math.round(QUOTA_EXHAUSTED_BACKOFF_MS / 60000)}m default hold window`
       );
     }
-    const quotaSettleStatement = leaseRecoveryEnabled
-      ? statements.releaseReviewLeaseQuota
-      : statements.markFailedQuota;
-    quotaSettleStatement.run(failureAt, classifiedMessage, quotaResetIso, repoPath, prNumber);
+    statements.markFailedQuota.run(failureAt, classifiedMessage, quotaResetIso, repoPath, prNumber);
     const updatedQuotaRow = statements.getReviewRow.get(repoPath, prNumber);
     log.warn(
       `[watcher] Reviewer quota-exhausted failure on #${prNumber}; ` +

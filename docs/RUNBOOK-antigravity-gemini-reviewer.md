@@ -24,7 +24,10 @@ all-capped account pools, or emits AGR-06 account telemetry.
   default probe timeout is 5s. Timeout-shaped keychain probe failures and
   transient `agy models` transport failures are retried with bounded backoff
   before surfacing an OAuth failure; definitive missing-keychain and
-  non-transient probe failures still fail closed immediately.
+  non-transient probe failures still fail closed immediately. Watcher startup
+  runs the same probe as a warning-only visibility check when the runtime is
+  `antigravity`, and successful real probes are cached briefly in the process
+  that performs the check.
 - Quota and rate-limit handling for the live Antigravity reviewer is whatever
   `agy` returns to the subprocess. The old bridge-level hold decision,
   all-capped page, and per-account rate-limit marking are retired for this
@@ -84,12 +87,21 @@ keychain item is definitively missing, `agy models` returns empty output, or a
 non-transient probe failure persists, the reviewer fails closed with an OAuth
 error and remediation text matched to the failed probe class.
 
+Watcher startup also runs this probe when `runtime: antigravity` is configured.
+Startup logs a warning on failure rather than refusing to boot; the per-review
+probe remains fail-closed. Startup visibility is not a cross-process cache
+warmup for reviewer subprocesses. Successful real preflights may be cached
+briefly in the process performing the probe; `agy --print` remains the
+authoritative reviewer invocation and still fails closed if credential state is
+lost inside that short TTL.
+
 Probe knobs:
 
 ```bash
 export AGY_AUTH_PROBE_TIMEOUT_MS=5000
 export AGY_AUTH_PROBE_MAX_ATTEMPTS=3
 export AGY_AUTH_PROBE_RETRY_BACKOFF_MS=250
+export AGY_AUTH_PROBE_SUCCESS_TTL_MS=60000
 ```
 
 Env aliases:

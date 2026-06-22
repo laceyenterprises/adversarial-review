@@ -49,7 +49,12 @@ import {
   resolveAdversarialReviewStateDir,
   resolveSigtermFenceGraceSeconds,
 } from './reviewer-fence.mjs';
-import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
+import {
+  resolveAgyPrintTimeoutMs,
+  resolveAgyReviewerSubprocessTimeoutMs,
+  resolveProgressTimeoutMs,
+  resolveReviewerTimeoutMs,
+} from './reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { extractReviewVerdict, looksLikeRuntimeJunk, normalizeReviewVerdict, normalizeWhitespace, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
 import { loadStagePrompt, pickReviewerStage } from './kernel/prompt-stage.mjs';
@@ -2179,13 +2184,7 @@ function formatAgyPrintTimeout(timeoutMs) {
   return `${seconds}s`;
 }
 
-function resolveAgyPrintTimeoutMs(reviewerTimeoutMs) {
-  const timeout = Math.max(1_000, Math.floor(Number(reviewerTimeoutMs) || resolveReviewerTimeoutMs()));
-  const slackMs = Math.min(30_000, Math.max(5_000, Math.floor(timeout * 0.05)));
-  return Math.max(1_000, timeout - slackMs);
-}
-
-function buildAgyReviewArgs({ model, printTimeoutMs = resolveAgyPrintTimeoutMs(resolveReviewerTimeoutMs()) }) {
+function buildAgyReviewArgs({ model, printTimeoutMs = resolveAgyPrintTimeoutMs() }) {
   return ['--print', '--print-timeout', formatAgyPrintTimeout(printTimeoutMs), '-m', model];
 }
 
@@ -2250,10 +2249,12 @@ function buildAgyReviewerPromptPrefix({ stage }) {
   return `${buildReviewerPromptPrefix({ stage })}
 
 Antigravity runtime instructions:
-- Review only the PR diff and supplied context in this prompt. Use tools only when the diff is insufficient to decide a concrete finding.
-- Emit exactly one Markdown review block for GitHub. Do not narrate your plan, tool calls, exploration steps, or internal reasoning.
-- Start the final answer with "## Adversarial Review — Gemini (gemini-reviewer-lacey)" unless an outer caller already supplied that header.
-- Include a "## Verdict" section whose first non-empty verdict line is exactly one of: "Comment only", "Request changes", or "Approve".`;
+- This is a single-shot GitHub review. The PR diff and all needed context are already provided below.
+- Review the PROVIDED diff. Do not re-list the repository, re-derive the diff with git, inspect unrelated files, or run exploratory filesystem/git commands.
+- Use at most one narrowly targeted lookup only if the provided diff is insufficient to verify a concrete suspected bug. Otherwise use no tools.
+- Emit ONLY the final Markdown review block for GitHub. Do not narrate your plan, tool calls, exploration steps, uncertainty, or internal reasoning.
+- Start with "## Adversarial Review — Gemini (gemini-reviewer-lacey)" unless an outer caller already supplied that header.
+- Include "## Verdict" with the first non-empty verdict line exactly one of: "Comment only", "Request changes", or "Approve".`;
 }
 
 function isRetryableGeminiSubprocessError(err) {
@@ -2341,10 +2342,14 @@ async function spawnAgyReview({
   env,
   cwd = process.cwd(),
   timeout = resolveReviewerTimeoutMs(env),
-  printTimeoutMs = resolveAgyPrintTimeoutMs(timeout),
+  printTimeoutMs = resolveAgyPrintTimeoutMs(env),
   maxBuffer = 10 * 1024 * 1024,
   spawnWithInputImpl = spawnWithInput,
 }) {
+  const effectiveTimeout = resolveAgyReviewerSubprocessTimeoutMs(env, {
+    reviewerTimeoutMs: timeout,
+    printTimeoutMs,
+  });
   return spawnWithInputImpl(
     agyCli,
     buildAgyReviewArgs({ model, printTimeoutMs }),
@@ -2352,7 +2357,7 @@ async function spawnAgyReview({
       env,
       cwd,
       input: prompt,
-      timeout,
+      timeout: effectiveTimeout,
       maxBuffer,
       // agy leaves a long-lived language-server child holding our stdout/stderr
       // pipes; without this the capture never sees EOF and every review stalls
@@ -3325,6 +3330,7 @@ const __test__ = {
   buildGeminiReviewArgs,
   buildAgyReviewArgs,
   resolveAgyPrintTimeoutMs,
+  resolveAgyReviewerSubprocessTimeoutMs,
   formatAgyPrintTimeout,
   hasAgyErrorSentinel,
   sanitizeAgyReviewOutput,

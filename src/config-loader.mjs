@@ -1398,6 +1398,11 @@ function schemaV1() {
                 __type: TYPE_DICT,
                 __strict: true,
                 __keys: {
+                  print_timeout_ms: {
+                    __type: TYPE_INT,
+                    __default: 1140000,
+                    __min: 1000,
+                  },
                   accounts: {
                     __type: TYPE_LIST,
                     __default: [],
@@ -1622,6 +1627,10 @@ export const ENV_ALIASES = {
   'reviewer.gemini.antigravity.accounts': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_ACCOUNTS',
     aliases: [['ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_ACCOUNTS', identity]],
+  },
+  'reviewer.gemini.antigravity.print_timeout_ms': {
+    canonical: 'AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS',
+    aliases: [['ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS', identity]],
   },
   'watcher.max_drain_wait_ms': {
     canonical: 'AGENT_OS_WATCHER_MAX_DRAIN_WAIT_MS',

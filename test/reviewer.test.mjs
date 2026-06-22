@@ -45,6 +45,7 @@ const {
   buildGeminiReviewArgs,
   buildAgyReviewArgs,
   resolveAgyPrintTimeoutMs,
+  resolveAgyReviewerSubprocessTimeoutMs,
   formatAgyPrintTimeout,
   sanitizeAgyReviewOutput,
   AGY_KEYCHAIN_ACCOUNT,
@@ -1697,20 +1698,31 @@ test('buildGeminiReviewArgs enters headless mode without carrying the prompt bod
 });
 
 test('buildAgyReviewArgs uses agy print mode without carrying the prompt body', () => {
-  const args = buildAgyReviewArgs({ model: 'gemini-2.5-pro', printTimeoutMs: 1_170_000 });
-  assert.deepEqual(args, ['--print', '--print-timeout', '1170s', '-m', 'gemini-2.5-pro']);
+  const args = buildAgyReviewArgs({ model: 'gemini-2.5-pro', printTimeoutMs: 1_140_000 });
+  assert.deepEqual(args, ['--print', '--print-timeout', '1140s', '-m', 'gemini-2.5-pro']);
 });
 
-test('buildAgyReviewArgs sizes print timeout below reviewer timeout', () => {
+test('agy print timeout is independently tunable and reviewer subprocess gets headroom', () => {
   const reviewerTimeoutMs = 20 * 60 * 1000;
-  const printTimeoutMs = resolveAgyPrintTimeoutMs(reviewerTimeoutMs);
+  const printTimeoutMs = resolveAgyPrintTimeoutMs({});
   const args = buildAgyReviewArgs({ model: 'gemini-2.5-pro', printTimeoutMs });
   const printTimeoutArg = args[args.indexOf('--print-timeout') + 1];
 
-  assert.equal(printTimeoutMs, 1_170_000);
-  assert.equal(formatAgyPrintTimeout(printTimeoutMs), '1170s');
-  assert.equal(printTimeoutArg, '1170s');
+  assert.equal(printTimeoutMs, 1_140_000);
+  assert.equal(formatAgyPrintTimeout(printTimeoutMs), '1140s');
+  assert.equal(printTimeoutArg, '1140s');
   assert.ok(printTimeoutMs < reviewerTimeoutMs);
+  assert.equal(
+    resolveAgyPrintTimeoutMs({ ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS: '1500000' }),
+    1_500_000,
+  );
+  assert.equal(
+    resolveAgyReviewerSubprocessTimeoutMs(
+      { ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS: '1500000' },
+      { reviewerTimeoutMs },
+    ),
+    1_530_000,
+  );
 });
 
 test('spawnGeminiReview feeds the prompt over stdin and keeps it out of argv', async () => {
@@ -1775,7 +1787,7 @@ test('spawnAgyReview feeds the prompt over stdin and keeps it out of argv', asyn
   }
   assert.deepEqual(
     { cwd: calls[0].options.cwd, timeout: calls[0].options.timeout, maxBuffer: calls[0].options.maxBuffer },
-    { cwd: '/tmp/repo', timeout: 9_999, maxBuffer: 555 },
+    { cwd: '/tmp/repo', timeout: 39_000, maxBuffer: 555 },
   );
 });
 
@@ -1863,8 +1875,9 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
       authCalls.push({ agyCli, env });
     },
     spawnAgyReviewImpl: async ({ agyCli, prompt, model, env, timeout }) => {
-      const printTimeoutMs = resolveAgyPrintTimeoutMs(timeout);
+      const printTimeoutMs = resolveAgyPrintTimeoutMs(env);
       spawnCalls.push({ agyCli, args: buildAgyReviewArgs({ model, printTimeoutMs }), prompt, env });
+      assert.equal(timeout, 1_200_000);
       return { stdout: validAgyReview, stderr: '' };
     },
     spawnGeminiReviewImpl: async () => {
@@ -1882,9 +1895,11 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   assert.equal(authCalls[0].env.GEMINI_ANTIGRAVITY_ACCOUNT, undefined);
   assert.equal(spawnCalls.length, 1);
   assert.equal(spawnCalls[0].agyCli, AGY_CLI);
-  assert.deepEqual(spawnCalls[0].args, ['--print', '--print-timeout', '1170s', '-m', 'gemini-2.5-pro']);
+  assert.deepEqual(spawnCalls[0].args, ['--print', '--print-timeout', '1140s', '-m', 'gemini-2.5-pro']);
   assert.match(spawnCalls[0].prompt, /AGY CONTEXT/);
-  assert.match(spawnCalls[0].prompt, /Do not narrate your plan/);
+  assert.match(spawnCalls[0].prompt, /Review the PROVIDED diff/);
+  assert.match(spawnCalls[0].prompt, /Do not re-list the repository/);
+  assert.match(spawnCalls[0].prompt, /Emit ONLY the final Markdown review block/);
   assert.match(spawnCalls[0].prompt, /```diff\n\+diff/);
   assert.strictEqual(authCalls[0].env, spawnCalls[0].env);
   assert.equal(spawnCalls[0].env.HOME, '/tmp/agy-home');

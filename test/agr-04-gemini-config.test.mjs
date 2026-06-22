@@ -13,6 +13,7 @@ import {
   resolveGeminiReviewerMode,
   resolveGeminiRuntime,
 } from '../src/role-config.mjs';
+import { resolveAgyPrintTimeoutMs } from '../src/reviewer-timeout.mjs';
 
 function makeTmp() {
   return mkdtempSync(join(tmpdir(), 'agr-04-gemini-config-'));
@@ -86,6 +87,30 @@ test('AGR-04 antigravity runtime with empty accounts boots under agy runtime', (
     writeYaml(modulePath, 'reviewer:\n  gemini:\n    runtime: antigravity\n    antigravity:\n      accounts: []\n');
     assert.doesNotThrow(
       () => validateDefaultReviewerRouteConfig({}, { topPath: '/dev/null', modulePaths: [modulePath] }),
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('AGR-CONVERGE-01 antigravity print timeout resolves from CFG and env aliases', () => {
+  const tmp = makeTmp();
+  try {
+    const modulePath = join(tmp, 'config.yaml');
+    writeYaml(modulePath, `
+reviewer:
+  gemini:
+    antigravity:
+      print_timeout_ms: 1500000
+`);
+    const options = { env: {}, topPath: '/dev/null', modulePaths: [modulePath] };
+    assert.equal(resolveAgyPrintTimeoutMs(options.env, options), 1_500_000);
+    assert.equal(
+      resolveAgyPrintTimeoutMs(
+        { ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS: '1600000' },
+        options,
+      ),
+      1_600_000,
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

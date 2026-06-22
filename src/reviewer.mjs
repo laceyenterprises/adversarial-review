@@ -2584,6 +2584,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
         try {
           await awaitThrottleIfNeeded();
           const adapterEnv = { ...process.env, GH_TOKEN: token };
+          delete adapterEnv.GITHUB_TOKEN;
           let adapterHandled = false;
           try {
             const adapterResult = await writeAdapterPullRequestReview(

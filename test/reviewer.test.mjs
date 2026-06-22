@@ -110,6 +110,7 @@ test('postGitHubReview uses adapter mutation with the intended reviewer bot iden
   await withEnvAsync({
     GHA_ADAPTER_BIN: '/fixture/github-adapter',
     GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+    GITHUB_TOKEN: 'ghp_ambient_operator_token',
   }, async () => {
     await postGitHubReview(
       'laceyenterprises/demo',
@@ -133,6 +134,8 @@ test('postGitHubReview uses adapter mutation with the intended reviewer bot iden
   });
 
   assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.env.GH_TOKEN, 'ghp_codex_reviewer_pat');
+  assert.equal(calls[0].options.env.GITHUB_TOKEN, undefined);
   assert.deepEqual(calls[0].args, [
     'write',
     '--kind',
@@ -147,7 +150,6 @@ test('postGitHubReview uses adapter mutation with the intended reviewer bot iden
     '--reviewer-login',
     'codex-reviewer-lacey',
   ]);
-  assert.equal(calls[0].options.env.GH_TOKEN, 'ghp_codex_reviewer_pat');
 });
 
 function queueWithFakes(reviewText, overrides = {}) {

@@ -60,6 +60,45 @@ test('adapterUnsupportedError does not fall back on unrelated prose token collis
   assert.equal(mod.__test__.adapterUnsupportedError(err), false);
 });
 
+test('pull-request-review adapter args omit unresolved reviewer identity', async () => {
+  const mod = await importGithubAdapterClientFresh();
+
+  assert.deepEqual(mod.__test__.makeAdapterWriteArgs('pull-request-review', {
+    repo: FIXTURE_REPO,
+    prNumber: FIXTURE_PR,
+    body: 'review body',
+  }), [
+    'write',
+    '--kind',
+    'pull-request-review',
+    '--json',
+    '--repo',
+    FIXTURE_REPO,
+    '--pr-number',
+    String(FIXTURE_PR),
+    '--body',
+    'review body',
+  ]);
+
+  assert.deepEqual(mod.__test__.makeAdapterWriteArgs('pull-request-review', {
+    repo: FIXTURE_REPO,
+    prNumber: FIXTURE_PR,
+    body: 'review body',
+    reviewerLogin: null,
+  }), [
+    'write',
+    '--kind',
+    'pull-request-review',
+    '--json',
+    '--repo',
+    FIXTURE_REPO,
+    '--pr-number',
+    String(FIXTURE_PR),
+    '--body',
+    'review body',
+  ]);
+});
+
 function makeExpectedRollup() {
   return {
     id: 'PR_kwDOA1',

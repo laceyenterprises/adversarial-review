@@ -221,7 +221,7 @@ function makeAdapterWriteArgs(kind, params = {}) {
   if (params.context !== undefined) args.push('--context', String(params.context));
   if (params.description !== undefined) args.push('--description', String(params.description));
   if (params.action !== undefined) args.push('--action', String(params.action));
-  if (params.reviewerLogin !== undefined) args.push('--reviewer-login', String(params.reviewerLogin));
+  if (params.reviewerLogin) args.push('--reviewer-login', String(params.reviewerLogin));
   if (params.matchHeadCommit !== undefined) args.push('--match-head-commit', String(params.matchHeadCommit));
   if (params.mergeMethod !== undefined) args.push('--merge-method', String(params.mergeMethod));
   if (params.deleteBranch !== undefined) args.push(params.deleteBranch ? '--delete-branch' : '--no-delete-branch');

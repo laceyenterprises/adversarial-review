@@ -511,6 +511,28 @@ function schemaV1() {
               },
             },
           },
+          // AMA closer merge-agent App-token auth is consumed by the
+          // worker-pool shell loader, but checked-in top-level config.yaml is
+          // also parsed by this strict watcher loader. Mirror the shape so the
+          // watcher tolerates the shared CFG block without owning runtime use.
+          merge_agent: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              broker_auth_enabled: {
+                __type: TYPE_BOOL,
+                __default: false,
+              },
+              expected_app_id: {
+                __type: TYPE_STRING,
+                __default: '',
+              },
+              expected_installation_id: {
+                __type: TYPE_STRING,
+                __default: '',
+              },
+            },
+          },
         },
       },
       governance: {

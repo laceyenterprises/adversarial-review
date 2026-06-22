@@ -683,6 +683,27 @@ test('top-level config.yaml accepts the mirrored worker_pool.dag.autowalk.deep_r
   }
 });
 
+test('top-level config.yaml accepts oauth_broker.merge_agent App-token auth keys', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      oauth_broker:
+        merge_agent:
+          broker_auth_enabled: true
+          expected_app_id: "1786284"
+          expected_installation_id: "80684608"
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('oauth_broker.merge_agent.broker_auth_enabled'), true);
+    assert.equal(cfg.get('oauth_broker.merge_agent.expected_app_id'), '1786284');
+    assert.equal(cfg.get('oauth_broker.merge_agent.expected_installation_id'), '80684608');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('versioned config.local.yaml tolerates unknown nested worker_pool keys and reads the mirrored one', () => {
   // worker_pool is now a known partial root; in operator-local config.local.yaml
   // unknown nested worker_pool.* keys (dispatch/memory/etc., owned by the Python

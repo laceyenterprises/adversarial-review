@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 
 import {
   buildFastMergeCloseAuditEntry,
+  addMergeAgentDispatchedLabel,
   pollFastMergeQueue,
   processFastMergePR,
   resolveFastMergePerPollCap,
@@ -157,6 +158,14 @@ function seedHqOwnerConfig(hqRoot, ownerUser = currentTestUser()) {
     `${JSON.stringify({ ownerUser }, null, 2)}\n`,
     'utf8',
   );
+}
+
+function seedAutoDiscoveredAdapter(rootDir) {
+  const adapterBin = path.join(rootDir, 'modules', 'github-adapter', 'bin', 'github-adapter');
+  mkdirSync(path.dirname(adapterBin), { recursive: true });
+  writeFileSync(adapterBin, '#!/bin/sh\nexit 0\n', 'utf8');
+  chmodSync(adapterBin, 0o755);
+  return adapterBin;
 }
 
 function seedDispatchedCloserLease(rootDir, {
@@ -311,12 +320,14 @@ test('fast-merge happy path merges authorized green head and writes audit', asyn
 test('fast-merge uses adapter mutation after eligibility checks and still writes audit', async () => {
   const db = makeDb();
   seedFastMerge(db, 802);
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'fast-merge-adapter-root-'));
+  const adapterBin = seedAutoDiscoveredAdapter(rootDir);
   const audits = [];
   const baseGh = makeGhStub({ views: [openView('sha-A'), openView('sha-A')], checks: [successChecks()] });
   const calls = [];
   async function gh(cmd, args, options = {}) {
     calls.push({ cmd, args, options });
-    if (cmd === '/fixture/github-adapter') {
+    if (cmd === adapterBin) {
       return { stdout: JSON.stringify({ merged: true }) };
     }
     return baseGh(cmd, args, options);
@@ -324,21 +335,26 @@ test('fast-merge uses adapter mutation after eligibility checks and still writes
   gh.calls = calls;
 
   let result;
-  await withProcessEnv({ GHA_ADAPTER_BIN: '/fixture/github-adapter' }, async () => {
-    result = await processFastMergePR({
-      db,
-      ghClient: gh,
-      repo: REPO,
-      prNumber: 802,
-      authorizedHeadSha: 'sha-A',
-      auditWriter: (entry) => audits.push(entry),
+  try {
+    await withProcessEnv({ GHA_ADAPTER_BIN: undefined, AGENT_OS_GITHUB_ADAPTER_BIN: undefined }, async () => {
+      result = await processFastMergePR({
+        db,
+        ghClient: gh,
+        rootDir,
+        repo: REPO,
+        prNumber: 802,
+        authorizedHeadSha: 'sha-A',
+        auditWriter: (entry) => audits.push(entry),
+      });
     });
-  });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 
   assert.equal(result.status, 'merged');
   assert.equal(row(db, 802).pr_state, 'fast_merge_merged');
   assert.equal(mergeCalls(gh).length, 0);
-  assert.deepEqual(calls.find((call) => call.cmd === '/fixture/github-adapter').args, [
+  assert.deepEqual(calls.find((call) => call.cmd === adapterBin).args, [
     'write',
     '--kind',
     'pull-request-merge',
@@ -363,6 +379,7 @@ test('fast-merge falls back to gh admin merge when adapter merge fails', async (
   seedFastMerge(db, 803);
   const baseGh = makeGhStub({ views: [openView('sha-A'), openView('sha-A')], checks: [successChecks()] });
   const calls = [];
+  const warnings = [];
   async function gh(cmd, args, options = {}) {
     calls.push({ cmd, args, options });
     if (cmd === '/fixture/github-adapter') {
@@ -383,6 +400,7 @@ test('fast-merge falls back to gh admin merge when adapter merge fails', async (
       prNumber: 803,
       authorizedHeadSha: 'sha-A',
       auditWriter: () => {},
+      logger: { warn: (msg) => warnings.push(msg) },
     });
   });
 
@@ -390,6 +408,43 @@ test('fast-merge falls back to gh admin merge when adapter merge fails', async (
   assert.equal(calls.find((call) => call.cmd === '/fixture/github-adapter').args.includes('--admin'), true);
   assert.equal(mergeCalls(gh).length, 1);
   assert.equal(mergeCalls(gh)[0].args.includes('--admin'), true);
+  assert.match(warnings.join('\n'), /fast-merge adapter merge failed.*falling back to gh --admin/);
+});
+
+test('merge-agent label add falls back to gh on transient adapter failure', async () => {
+  const calls = [];
+  async function gh(cmd, args, options = {}) {
+    calls.push({ cmd, args, options });
+    if (cmd === '/fixture/github-adapter') {
+      const err = new Error('TLS handshake timeout');
+      err.code = 'ETIMEDOUT';
+      throw err;
+    }
+    return { stdout: '', stderr: '' };
+  }
+
+  let result;
+  await withProcessEnv({ GHA_ADAPTER_BIN: '/fixture/github-adapter' }, async () => {
+    result = await addMergeAgentDispatchedLabel({
+      repo: REPO,
+      prNumber: 804,
+      ghExecFileImpl: gh,
+    });
+  });
+
+  assert.equal(result.added, true);
+  assert.equal(calls.some((call) => call.cmd === '/fixture/github-adapter'), true);
+  const labelCall = calls.find((call) => call.cmd === 'gh' && call.args.includes('--add-label'));
+  assert.ok(labelCall, 'transient adapter failure should fall back to gh label add');
+  assert.deepEqual(labelCall.args, [
+    'pr',
+    'edit',
+    '804',
+    '--repo',
+    REPO,
+    '--add-label',
+    'merge-agent-dispatched',
+  ]);
 });
 
 test('fast-merge head change requeues through canonical review reset and never merges', async () => {

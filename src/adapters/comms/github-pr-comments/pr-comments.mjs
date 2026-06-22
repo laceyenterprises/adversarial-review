@@ -960,6 +960,7 @@ async function postRemediationOutcomeComment({
   body,
   execFileImpl = execFileAsync,
   env = process.env,
+  rootDir = process.cwd(),
   log = console,
   timeoutMs = GH_COMMENT_TIMEOUT_MS,
   // Test seam: skip the dedup lookup entirely. Production callers
@@ -1066,7 +1067,7 @@ async function postRemediationOutcomeComment({
         repo,
         prNumber,
         { body },
-        { execFileImpl, env: allowlistedEnv }
+        { execFileImpl, env: allowlistedEnv, rootDir }
       );
       adapterHandled = adapterResult?.ran === true;
       ghResult = adapterResult?.payload ?? null;

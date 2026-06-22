@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import {
   REMEDIATION_COMMENT_MARKER_PREFIX,
@@ -26,6 +29,14 @@ function makeJob(overrides = {}) {
     },
     ...overrides,
   };
+}
+
+function seedAutoDiscoveredAdapter(rootDir) {
+  const adapterBin = path.join(rootDir, 'modules', 'github-adapter', 'bin', 'github-adapter');
+  mkdirSync(path.dirname(adapterBin), { recursive: true });
+  writeFileSync(adapterBin, '#!/bin/sh\nexit 0\n', 'utf8');
+  chmodSync(adapterBin, 0o755);
+  return adapterBin;
 }
 
 // ── defangUntrustedMarkdown unit tests ───────────────────────────────────
@@ -530,6 +541,40 @@ test('postRemediationOutcomeComment uses adapter mutation after marker dedupe fi
     `<!-- ${REMEDIATION_COMMENT_MARKER_PREFIX}:demo:r1:completed -->\n\nSummary`,
   ]);
   assert.equal(calls[0].options.env.GH_TOKEN, 'test-pat-codex');
+});
+
+test('postRemediationOutcomeComment forwards rootDir for adapter auto-discovery', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'pr-comment-adapter-root-'));
+  const adapterBin = seedAutoDiscoveredAdapter(rootDir);
+  const calls = [];
+  try {
+    const result = await postRemediationOutcomeComment({
+      repo: 'laceyenterprises/demo',
+      prNumber: 7,
+      workerClass: 'codex',
+      body: `<!-- ${REMEDIATION_COMMENT_MARKER_PREFIX}:demo:r1:completed -->\n\nSummary`,
+      rootDir,
+      env: {
+        GH_CODEX_REVIEWER_TOKEN: 'test-pat-codex',
+        PATH: '/usr/bin',
+        HOME: '/tmp/home',
+      },
+      findExistingImpl: async () => ({ found: false }),
+      execFileImpl: async (cmd, args, options) => {
+        calls.push({ cmd, args, options });
+        assert.equal(cmd, adapterBin);
+        return { stdout: JSON.stringify({ commentUrl: 'https://github.com/laceyenterprises/demo/pull/7#issuecomment-456' }) };
+      },
+    });
+
+    assert.equal(result.posted, true);
+    assert.equal(result.commentUrl, 'https://github.com/laceyenterprises/demo/pull/7#issuecomment-456');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].options.env.GH_TOKEN, 'test-pat-codex');
+    assert.equal(calls[0].options.env.GHA_ADAPTER_BIN, undefined);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('postRemediationOutcomeComment treats adapter JSON null as a handled write', async () => {

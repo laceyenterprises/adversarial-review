@@ -279,8 +279,33 @@ async function tryAdapterPullRequestLabel({
     return result?.ran === true;
   } catch (err) {
     if (adapterUnsupportedError(err)) return false;
+    if (isTransientAdapterLabelError(err)) return false;
     throw err;
   }
+}
+
+function isTransientAdapterLabelError(err) {
+  if (!err) return false;
+  if (err.timedOut === true || err.killed === true) return true;
+  const code = String(err.code || err.errno || '').trim().toUpperCase();
+  if ([
+    'EAI_AGAIN',
+    'ECONNABORTED',
+    'ECONNREFUSED',
+    'ECONNRESET',
+    'EHOSTUNREACH',
+    'ENETDOWN',
+    'ENETUNREACH',
+    'ETIMEDOUT',
+    'EPIPE',
+  ].includes(code)) {
+    return true;
+  }
+  const detail = [err.message, err.stderr, err.stdout]
+    .filter(Boolean)
+    .join('\n')
+    .toLowerCase();
+  return /\b(timed out|timeout|socket hang up|tls handshake timeout|temporarily unavailable|service unavailable)\b/.test(detail);
 }
 
 // Grace window before the watcher treats a terminal-failed dispatch whose
@@ -4802,7 +4827,7 @@ function isNoChecksReportedGhError(err) {
   return detail.includes('no checks') && detail.includes('reported');
 }
 
-async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit }) {
+async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit, rootDir = process.cwd(), logger = console }) {
   const execFileImpl = execFileFromGhClient(ghClient);
   return withGhRetry(async () => {
     try {
@@ -4815,13 +4840,18 @@ async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit }) {
           deleteBranch: true,
           admin: true,
         },
-        { execFileImpl, env: process.env }
+        { execFileImpl, env: process.env, rootDir }
       );
       if (adapterResult?.ran === true) return adapterResult.payload;
-    } catch {
+    } catch (err) {
+      logger?.warn?.(
+        `[follow-up-merge-agent] fast-merge adapter merge failed for ${repo}#${prNumber}; falling back to gh --admin: ${err?.message || err}`
+      );
       // Preserve the historical fast-merge contract: an enabled adapter is a
       // preferred write path, but protected-branch/admin failures must still
-      // reach the existing gh --admin fallback.
+      // reach the existing gh --admin fallback. withGhRetry may re-run this
+      // callback after transient gh failure; GitHub treats an already-merged
+      // PR/head as idempotently terminal, so the fallback remains retry-safe.
     }
     return execFileImpl('gh', [
       'pr',
@@ -5332,6 +5362,8 @@ async function processFastMergePR({
       repo,
       prNumber,
       matchHeadCommit: exactHeadSha,
+      rootDir,
+      logger,
     });
   } catch (err) {
     if (isRetryableGhTransportError(err)) {

@@ -26,7 +26,7 @@ import {
   loadRoleConfig,
   resetRoleConfigCache,
   resolveGeminiRuntime,
-  resolveGeminiReviewerMode,
+  resolveGeminiReviewerModeResolution,
 } from './role-config.mjs';
 import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
 import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
@@ -3597,12 +3597,40 @@ function shouldBypassPrimaryReviewerQuotaHold(route, row = null) {
 
 function resolveGeminiReviewerModeForWatcher({
   env = process.env,
-  resolver = resolveGeminiReviewerMode,
+  resolver = resolveGeminiReviewerModeResolution,
 } = {}) {
   try {
-    return { mode: resolver({ env }), error: null };
+    const resolved = resolver({ env });
+    if (typeof resolved === 'string') {
+      return {
+        mode: resolved,
+        rawValue: resolved,
+        source: 'default',
+        sourceDetail: 'unknown',
+        topPath: null,
+        modulePaths: [],
+        error: null,
+      };
+    }
+    return {
+      mode: resolved.mode,
+      rawValue: resolved.rawValue,
+      source: resolved.source,
+      sourceDetail: resolved.sourceDetail,
+      topPath: resolved.topPath,
+      modulePaths: resolved.modulePaths,
+      error: null,
+    };
   } catch (err) {
-    return { mode: 'off', error: err };
+    return {
+      mode: 'off',
+      rawValue: 'off',
+      source: 'default',
+      sourceDetail: 'resolve-error',
+      topPath: null,
+      modulePaths: [],
+      error: err,
+    };
   }
 }
 
@@ -6163,6 +6191,10 @@ async function pollOnce(
       // could otherwise produce.
       const geminiModeResolution = resolveGeminiReviewerModeForWatcher({ env: process.env });
       const geminiReviewerMode = geminiModeResolution.mode;
+      const geminiModeLog =
+        `gemini-mode resolved=${geminiReviewerMode} ` +
+        `source=${geminiModeResolution.source || 'default'} ` +
+        `topPath=${geminiModeResolution.topPath || '<unknown>'}`;
       if (geminiModeResolution.error) {
         console.error(
           `[watcher] gemini reviewer-mode resolve failed for ${repoPath}#${prNumber}: ` +
@@ -6185,7 +6217,8 @@ async function pollOnce(
         console.log(
           `[watcher] reviewer-selection ${repoPath}#${prNumber} → gemini ` +
             `(${geminiBaseRoute.geminiReviewerSelection.reason}; mode=${geminiReviewerMode}; ` +
-            `replaced reviewer=${geminiBaseRoute.geminiReviewerSelection.replacedReviewerModel})`
+            `replaced reviewer=${geminiBaseRoute.geminiReviewerSelection.replacedReviewerModel}; ` +
+            `${geminiModeLog}; sourceDetail=${geminiModeResolution.sourceDetail || '<unknown>'})`
         );
       } else if (geminiBaseRoute.geminiIntegrityGuard) {
         console.warn(

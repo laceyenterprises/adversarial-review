@@ -239,6 +239,37 @@ test('GMW-02 watcher: invalid gemini mode resolution fails closed to off', () =>
   assert.equal(resolved.error, failure);
 });
 
+test('CFGDRIFT-01 watcher: gemini mode resolution keeps source diagnostics', () => {
+  const resolved = resolveGeminiReviewerModeForWatcher({
+    env: {},
+    resolver() {
+      return {
+        mode: 'fallback',
+        rawValue: 'fallback',
+        source: 'file',
+        sourceDetail: 'local:/Users/airlock/agent-os/config.local.yaml',
+        topPath: '/Users/airlock/agent-os/config.yaml',
+        modulePaths: ['/Users/airlock/agent-os/tools/adversarial-review/config.yaml'],
+      };
+    },
+  });
+
+  assert.equal(resolved.mode, 'fallback');
+  assert.equal(resolved.rawValue, 'fallback');
+  assert.equal(resolved.source, 'file');
+  assert.equal(resolved.sourceDetail, 'local:/Users/airlock/agent-os/config.local.yaml');
+  assert.equal(resolved.topPath, '/Users/airlock/agent-os/config.yaml');
+  assert.deepEqual(resolved.modulePaths, ['/Users/airlock/agent-os/tools/adversarial-review/config.yaml']);
+});
+
+test('CFGDRIFT-01 watcher: reviewer-selection log includes mode source and topPath', () => {
+  const source = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  assert.match(source, /gemini-mode resolved=\$\{geminiReviewerMode\}/);
+  assert.match(source, /source=\$\{geminiModeResolution\.source \|\| 'default'\}/);
+  assert.match(source, /topPath=\$\{geminiModeResolution\.topPath \|\| '<unknown>'\}/);
+  assert.match(source, /sourceDetail=\$\{geminiModeResolution\.sourceDetail \|\| '<unknown>'\}/);
+});
+
 test('GMW-02 watcher: existing-row routing updates happen only after spawn claim', () => {
   const source = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
   const createRowStart = source.indexOf('if (!existing) {\n        stmtCreateReviewRow.run(');

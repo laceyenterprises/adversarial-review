@@ -24,7 +24,11 @@ import {
   routeSubject,
   GEMINI_REVIEWABLE_BUILDER_CLASSES,
 } from '../src/adapters/subject/github-pr/routing.mjs';
-import { resolveGeminiReviewerMode } from '../src/role-config.mjs';
+import {
+  DEFAULT_ROLE_TOP_CONFIG_PATH,
+  resolveGeminiReviewerMode,
+  resolveGeminiReviewerModeResolution,
+} from '../src/role-config.mjs';
 import { reviewerRosterMain } from '../src/cli.mjs';
 import { resolveReviewerBotLogin } from '../src/review-body-capture.mjs';
 import { reviewerBotLogin } from '../src/reviewer-reattach.mjs';
@@ -251,6 +255,79 @@ test('GMW-02 config: default mode is off; module file + env override resolve', (
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test('CFGDRIFT-01 config: top local mode resolves identically under shell and launchd env shapes', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'cfgdrift-01-mode-'));
+  try {
+    const topPath = join(tmp, 'config.yaml');
+    const topLocalPath = join(tmp, 'config.local.yaml');
+    const modulePath = join(tmp, 'module.yaml');
+    writeFileSync(topPath, 'version: 1\n', 'utf8');
+    writeFileSync(topLocalPath, 'version: 1\nreviewer:\n  gemini:\n    mode: fallback\n', 'utf8');
+    writeFileSync(modulePath, 'reviewer:\n  gemini:\n    mode: always-on\n', 'utf8');
+
+    const shellEnv = {
+      HOME: '/Users/airlock',
+      PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+      SHELL: '/bin/zsh',
+      USER: 'airlock',
+      LOGNAME: 'airlock',
+    };
+    const launchdEnv = {
+      HOME: '/Users/airlock',
+      PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+      USER: 'airlock',
+      LOGNAME: 'airlock',
+      HQ_ROOT: '/Users/airlock/agent-os-hq',
+      ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR: 'codex',
+      ADVERSARIAL_REVIEW_WATCHER_PLIST_PATH:
+        '/Users/airlock/agent-os/tools/adversarial-review/launchd/ai.laceyenterprises.adversarial-watcher.airlock.plist',
+    };
+
+    for (const env of [shellEnv, launchdEnv]) {
+      const resolved = resolveGeminiReviewerModeResolution({
+        env,
+        topPath,
+        modulePaths: [modulePath],
+      });
+      assert.equal(resolved.mode, 'fallback');
+      assert.equal(resolved.rawValue, 'fallback');
+      assert.equal(resolved.source, 'file');
+      assert.equal(resolved.sourceDetail, `local:${topLocalPath}`);
+      assert.equal(resolved.topPath, topPath);
+      assert.deepEqual(resolved.modulePaths, [modulePath]);
+    }
+
+    const envMode = resolveGeminiReviewerModeResolution({
+      env: { ...launchdEnv, AGENT_OS_REVIEWER_GEMINI_MODE: 'off' },
+      topPath,
+      modulePaths: [modulePath],
+    });
+    assert.equal(envMode.mode, 'off');
+    assert.equal(envMode.source, 'env');
+    assert.equal(envMode.sourceDetail, 'env:AGENT_OS_REVIEWER_GEMINI_MODE');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('CFGDRIFT-01 config: role resolver default top path is repo-relative', () => {
+  let captured = null;
+  const resolved = resolveGeminiReviewerModeResolution({
+    env: {},
+    loaderImpl(options) {
+      captured = options;
+      return {
+        get: () => 'off',
+        sources: { 'reviewer.gemini.mode': 'code-default' },
+        resolutionTrace: () => [{ source: 'code-default', value: 'off', path: null }],
+      };
+    },
+  });
+  assert.equal(captured.topPath, DEFAULT_ROLE_TOP_CONFIG_PATH);
+  assert.equal(resolved.topPath, DEFAULT_ROLE_TOP_CONFIG_PATH);
+  assert.equal(resolved.source, 'default');
 });
 
 test('GMW-02 config: a bad mode value fails the strict schema', () => {

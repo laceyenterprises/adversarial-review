@@ -32,9 +32,14 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
+const AGENT_OS_ROOT = join(ROOT, '..', '..');
 
 // Canonical path of the adversarial-review module's checked-in config.yaml.
 export const MODULE_CONFIG_PATH = join(ROOT, 'config.yaml');
+// Role resolvers are part of the deployed Agent OS checkout. Resolve the
+// top-level config relative to this module instead of `os.homedir()` so
+// launchd HOME/cwd differences cannot send the watcher to another checkout.
+export const DEFAULT_ROLE_TOP_CONFIG_PATH = join(AGENT_OS_ROOT, 'config.yaml');
 
 // Env-var labels surfaced in re-shaped error messages. Keep these aligned
 // with `ENV_ALIASES` in config-loader.mjs.
@@ -171,6 +176,45 @@ function pruneBlankRoleEnvVars(env) {
   return pruned !== null ? pruned : env;
 }
 
+function resolveRoleTopPath({ topPath, env }) {
+  return topPath || env?.AGENT_OS_CONFIG_PATH || DEFAULT_ROLE_TOP_CONFIG_PATH;
+}
+
+function resolveRoleModulePaths(modulePaths) {
+  return modulePaths || [MODULE_CONFIG_PATH];
+}
+
+function classifyResolutionSource(source) {
+  if (typeof source !== 'string' || source === '') return 'default';
+  if (source.startsWith('env:')) return 'env';
+  if (source === 'code-default') return 'default';
+  if (
+    source === 'top'
+    || source.startsWith('module:')
+    || source.startsWith('local:')
+  ) {
+    return 'file';
+  }
+  return 'default';
+}
+
+function resolutionDetailsForKey(cfg, key, fallbackValue) {
+  const trace = typeof cfg.resolutionTrace === 'function'
+    ? cfg.resolutionTrace(key)
+    : [];
+  const last = trace.length > 0 ? trace[trace.length - 1] : null;
+  const sourceDetail = last?.source || cfg.sources?.[key] || 'code-default';
+  const rawValue = last && Object.prototype.hasOwnProperty.call(last, 'value')
+    ? last.value
+    : fallbackValue;
+  return {
+    rawValue,
+    source: classifyResolutionSource(sourceDetail),
+    sourceDetail,
+    trace,
+  };
+}
+
 // loadRoleConfig — single entry point for role resolvers. Returns the
 // fully-merged AgentOSConfig (file + env layered) with the adversarial-
 // review module config.yaml plugged into the modulePaths slot.
@@ -204,8 +248,9 @@ export function loadRoleConfig({
   loaderImpl,
   contextKey = null,
 } = {}) {
-  const modulePathsResolved = modulePaths || [MODULE_CONFIG_PATH];
   const envPruned = pruneBlankRoleEnvVars(env);
+  const topPathResolved = resolveRoleTopPath({ topPath, env: envPruned });
+  const modulePathsResolved = resolveRoleModulePaths(modulePaths);
   // Only an `undefined` loaderImpl opts into the default cached loader;
   // an explicit `null` / `false` / `0` opts OUT of caching (passes
   // through, which throws because it isn't callable — surfacing the
@@ -215,7 +260,7 @@ export function loadRoleConfig({
   const loader = loaderImpl !== undefined ? loaderImpl : loadConfigCached;
   try {
     return loader({
-      topPath,
+      topPath: topPathResolved,
       modulePaths: modulePathsResolved,
       env: envPruned,
     });
@@ -310,14 +355,41 @@ export function resolveGeminiReviewerMode({
   modulePaths,
   loaderImpl,
 } = {}) {
-  const cfg = loadRoleConfig({
+  return resolveGeminiReviewerModeResolution({
     env,
     topPath,
     modulePaths,
     loaderImpl,
+  }).mode;
+}
+
+export function resolveGeminiReviewerModeResolution({
+  env = process.env,
+  topPath,
+  modulePaths,
+  loaderImpl,
+} = {}) {
+  const envPruned = pruneBlankRoleEnvVars(env);
+  const topPathResolved = resolveRoleTopPath({ topPath, env: envPruned });
+  const modulePathsResolved = resolveRoleModulePaths(modulePaths);
+  const cfg = loadRoleConfig({
+    env: envPruned,
+    topPath: topPathResolved,
+    modulePaths: modulePathsResolved,
+    loaderImpl,
     contextKey: 'reviewer.gemini.mode',
   });
-  return cfg.get('reviewer.gemini.mode', 'off');
+  const mode = cfg.get('reviewer.gemini.mode', 'off');
+  const details = resolutionDetailsForKey(cfg, 'reviewer.gemini.mode', mode);
+  return {
+    mode,
+    rawValue: details.rawValue,
+    source: details.source,
+    sourceDetail: details.sourceDetail,
+    topPath: topPathResolved,
+    modulePaths: modulePathsResolved,
+    trace: details.trace,
+  };
 }
 
 // resolveGeminiRuntime — returns the Gemini reviewer runtime

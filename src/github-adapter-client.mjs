@@ -263,6 +263,23 @@ function adapterUnsupportedError(err) {
       if (/^(unsupported_kind|unsupported_write_kind|unsupported_write_operation|unsupported_command)$/.test(code)) {
         return true;
       }
+      // Adapter-version skew, generally: the deployed adapter binary may predate
+      // a command (e.g. the unified `write`), a `--kind` value, or a flag the
+      // caller used. Its argparse rejects the request with a structured input
+      // envelope like {"failureClass":"input","message":"argument command:
+      // invalid choice: 'write' (choose from ...)"} (or "unrecognized
+      // arguments: ..."). Any such "this adapter doesn't understand the request"
+      // signal should route the caller to its direct-gh fallback rather than
+      // fail closed — true for EVERY caller (reviewer, merge-agent, gate-status,
+      // hcp, reconcile, ...), not just one command. Genuinely-unsupported
+      // operations are exactly the ones we want to fall back around an older
+      // adapter; a real malformed-arg bug still surfaces from the gh path.
+      const failureClass = String(parsed?.failureClass || '').trim();
+      const message = String(parsed?.message || '').trim();
+      if (failureClass === 'input'
+        && (/invalid choice:/i.test(message) || /unrecognized arguments?:/i.test(message))) {
+        return true;
+      }
     } catch {
       // Non-JSON diagnostics are handled by the narrowly-scoped legacy fallback below.
     }

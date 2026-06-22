@@ -59,6 +59,10 @@ import {
   fetchPullRequestHeadAndState,
   fetchPullRequestReviewContext,
 } from './github-api.mjs';
+import {
+  adapterUnsupportedError,
+  writeAdapterPullRequestReview,
+} from './github-adapter-client.mjs';
 import { GH_LOOKUP_TIMEOUT_MS, execGhWithRetry } from './gh-cli.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -2579,14 +2583,31 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
         });
         try {
           await awaitThrottleIfNeeded();
-          await execFileImpl(
-            'gh',
-            ['pr', 'review', String(prNumber), '--repo', repo, '--comment', '--body', reviewBody],
-            {
-              env: { ...process.env, GH_TOKEN: token },
-              maxBuffer: 5 * 1024 * 1024,
+          const adapterEnv = { ...process.env, GH_TOKEN: token };
+          let adapterHandled = false;
+          try {
+            const adapterResult = await writeAdapterPullRequestReview(
+              repo,
+              prNumber,
+              { body: reviewBody, reviewerLogin: refreshIdentity },
+              { execFileImpl, env: adapterEnv, rootDir: opts.rootDir || ROOT }
+            );
+            adapterHandled = adapterResult !== null;
+          } catch (adapterErr) {
+            if (!adapterUnsupportedError(adapterErr)) {
+              throw adapterErr;
             }
-          );
+          }
+          if (!adapterHandled) {
+            await execFileImpl(
+              'gh',
+              ['pr', 'review', String(prNumber), '--repo', repo, '--comment', '--body', reviewBody],
+              {
+                env: adapterEnv,
+                maxBuffer: 5 * 1024 * 1024,
+              }
+            );
+          }
         } catch (err) {
           const authRetryable = isReviewerPostAuthFailure(err, {
             preWriteSaw401: preWriteLog.tracker.saw401,

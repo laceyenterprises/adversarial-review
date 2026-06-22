@@ -30,6 +30,11 @@ import {
 import { createGitHubPRCommentsAdapter } from './adapters/comms/github-pr-comments/index.mjs';
 import { getFollowUpJobDir, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
+import {
+  adapterUnsupportedError,
+  writeAdapterPullRequestLabel,
+  writeAdapterPullRequestMerge,
+} from './github-adapter-client.mjs';
 import { buildCodePrSubjectIdentity } from './identity-shapes.mjs';
 import {
   getReviewRow,
@@ -260,6 +265,23 @@ const FAST_MERGE_SUCCESS_CONCLUSIONS = new Set(['success', 'neutral', 'skipped',
 // this bound.
 const _WATCHER_REDISPATCH_BOUND = 2;
 const _FINAL_PASS_CONFIG_WARNED_PATHS = new Set();
+
+async function tryAdapterPullRequestLabel({
+  repo,
+  prNumber,
+  action,
+  labelName,
+  execFileImpl,
+  env = process.env,
+} = {}) {
+  try {
+    const result = await writeAdapterPullRequestLabel(repo, prNumber, { action, labelName }, { execFileImpl, env });
+    return result !== null;
+  } catch (err) {
+    if (adapterUnsupportedError(err)) return false;
+    throw err;
+  }
+}
 
 // Grace window before the watcher treats a terminal-failed dispatch whose
 // `merge-agent-dispatched` marker is already cleared as a PHANTOM HANDOFF.
@@ -3186,15 +3208,24 @@ async function applyMergeAgentStuckLabel({
 } = {}) {
   if (normalizeLabelNames(labels).includes(MERGE_AGENT_STUCK_LABEL)) return false;
   try {
-    await ghExecFileImpl('gh', [
-      'pr',
-      'edit',
-      String(prNumber),
-      '--repo',
+    const adapterHandled = await tryAdapterPullRequestLabel({
       repo,
-      '--add-label',
-      MERGE_AGENT_STUCK_LABEL,
-    ], { maxBuffer: 5 * 1024 * 1024 });
+      prNumber,
+      action: 'add',
+      labelName: MERGE_AGENT_STUCK_LABEL,
+      execFileImpl: ghExecFileImpl,
+    });
+    if (!adapterHandled) {
+      await ghExecFileImpl('gh', [
+        'pr',
+        'edit',
+        String(prNumber),
+        '--repo',
+        repo,
+        '--add-label',
+        MERGE_AGENT_STUCK_LABEL,
+      ], { maxBuffer: 5 * 1024 * 1024 });
+    }
     return true;
   } catch (err) {
     logger?.error?.(
@@ -3226,15 +3257,24 @@ async function removeConsumedTriggerLabel({
 
   result.attempted = true;
   try {
-    await ghExecFileImpl('gh', [
-      'pr',
-      'edit',
-      String(prNumber),
-      '--repo',
+    const adapterHandled = await tryAdapterPullRequestLabel({
       repo,
-      '--remove-label',
-      trigger,
-    ], { maxBuffer: 5 * 1024 * 1024 });
+      prNumber,
+      action: 'remove',
+      labelName: trigger,
+      execFileImpl: ghExecFileImpl,
+    });
+    if (!adapterHandled) {
+      await ghExecFileImpl('gh', [
+        'pr',
+        'edit',
+        String(prNumber),
+        '--repo',
+        repo,
+        '--remove-label',
+        trigger,
+      ], { maxBuffer: 5 * 1024 * 1024 });
+    }
     if (trigger === OPERATOR_APPROVED_LABEL) {
       result.operatorApprovalLabelRemoved = true;
     }
@@ -3278,15 +3318,24 @@ async function addMergeAgentDispatchedLabel({
     error: null,
   };
   try {
-    await ghExecFileImpl('gh', [
-      'pr',
-      'edit',
-      String(prNumber),
-      '--repo',
+    const adapterHandled = await tryAdapterPullRequestLabel({
       repo,
-      '--add-label',
-      MERGE_AGENT_DISPATCHED_LABEL,
-    ], { maxBuffer: 5 * 1024 * 1024 });
+      prNumber,
+      action: 'add',
+      labelName: MERGE_AGENT_DISPATCHED_LABEL,
+      execFileImpl: ghExecFileImpl,
+    });
+    if (!adapterHandled) {
+      await ghExecFileImpl('gh', [
+        'pr',
+        'edit',
+        String(prNumber),
+        '--repo',
+        repo,
+        '--add-label',
+        MERGE_AGENT_DISPATCHED_LABEL,
+      ], { maxBuffer: 5 * 1024 * 1024 });
+    }
     result.added = true;
   } catch (err) {
     result.error = err?.message || String(err);
@@ -3393,15 +3442,24 @@ async function cancelMergeAgentDispatchOnMerge({
 
   if (cancelReachedTerminalOutcome) {
     try {
-      await ghExecFileImpl('gh', [
-        'pr',
-        'edit',
-        String(prNumber),
-        '--repo',
+      const adapterHandled = await tryAdapterPullRequestLabel({
         repo,
-        '--remove-label',
-        MERGE_AGENT_DISPATCHED_LABEL,
-      ], { maxBuffer: 5 * 1024 * 1024 });
+        prNumber,
+        action: 'remove',
+        labelName: MERGE_AGENT_DISPATCHED_LABEL,
+        execFileImpl: ghExecFileImpl,
+      });
+      if (!adapterHandled) {
+        await ghExecFileImpl('gh', [
+          'pr',
+          'edit',
+          String(prNumber),
+          '--repo',
+          repo,
+          '--remove-label',
+          MERGE_AGENT_DISPATCHED_LABEL,
+        ], { maxBuffer: 5 * 1024 * 1024 });
+      }
       result.labelRemoved = true;
     } catch (err) {
       result.labelRemovalError = err?.message || String(err);
@@ -4746,21 +4804,40 @@ function isNoChecksReportedGhError(err) {
 
 async function mergeFastMergePr({ ghClient, repo, prNumber, matchHeadCommit }) {
   const execFileImpl = execFileFromGhClient(ghClient);
-  return withGhRetry(() => execFileImpl('gh', [
-    'pr',
-    'merge',
-    String(prNumber),
-    '--repo',
-    repo,
-    '--squash',
-    '--admin',
-    '--match-head-commit',
-    String(matchHeadCommit),
-    '--delete-branch',
-  ], {
-    maxBuffer: 5 * 1024 * 1024,
-    timeout: FAST_MERGE_GH_TIMEOUT_MS,
-  }));
+  return withGhRetry(async () => {
+    try {
+      const adapterResult = await writeAdapterPullRequestMerge(
+        repo,
+        prNumber,
+        {
+          matchHeadCommit,
+          mergeMethod: 'squash',
+          deleteBranch: true,
+        },
+        { execFileImpl, env: process.env }
+      );
+      if (adapterResult !== null) return adapterResult;
+    } catch (err) {
+      if (!adapterUnsupportedError(err)) {
+        throw err;
+      }
+    }
+    return execFileImpl('gh', [
+      'pr',
+      'merge',
+      String(prNumber),
+      '--repo',
+      repo,
+      '--squash',
+      '--admin',
+      '--match-head-commit',
+      String(matchHeadCommit),
+      '--delete-branch',
+    ], {
+      maxBuffer: 5 * 1024 * 1024,
+      timeout: FAST_MERGE_GH_TIMEOUT_MS,
+    });
+  });
 }
 
 function normalizeFastMergeLabelNames(labels) {

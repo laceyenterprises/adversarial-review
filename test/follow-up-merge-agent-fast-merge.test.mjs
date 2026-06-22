@@ -22,6 +22,23 @@ import { ensureReviewStateSchema, getReviewRow } from '../src/review-state.mjs';
 
 const REPO = 'laceyenterprises/adversarial-review';
 
+async function withProcessEnv(overrides, fn) {
+  const previous = {};
+  for (const key of Object.keys(overrides)) {
+    previous[key] = process.env[key];
+    if (overrides[key] === undefined) delete process.env[key];
+    else process.env[key] = overrides[key];
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
 function makeDb() {
   const db = new Database(':memory:');
   ensureReviewStateSchema(db);
@@ -289,6 +306,55 @@ test('fast-merge happy path merges authorized green head and writes audit', asyn
   assert.equal(audits.at(-1).merged_head_sha, 'sha-A');
   assert.equal(audits.at(-1).merge_sha, 'feedfacefeedfacefeedfacefeedfacefeedface');
   assert.deepEqual(mergeCalls(gh)[0].args.slice(-3), ['--match-head-commit', 'sha-A', '--delete-branch']);
+});
+
+test('fast-merge uses adapter mutation after eligibility checks and still writes audit', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 802);
+  const audits = [];
+  const baseGh = makeGhStub({ views: [openView('sha-A'), openView('sha-A')], checks: [successChecks()] });
+  const calls = [];
+  async function gh(cmd, args, options = {}) {
+    calls.push({ cmd, args, options });
+    if (cmd === '/fixture/github-adapter') {
+      return { stdout: JSON.stringify({ merged: true }) };
+    }
+    return baseGh(cmd, args, options);
+  }
+  gh.calls = calls;
+
+  let result;
+  await withProcessEnv({ GHA_ADAPTER_BIN: '/fixture/github-adapter' }, async () => {
+    result = await processFastMergePR({
+      db,
+      ghClient: gh,
+      repo: REPO,
+      prNumber: 802,
+      authorizedHeadSha: 'sha-A',
+      auditWriter: (entry) => audits.push(entry),
+    });
+  });
+
+  assert.equal(result.status, 'merged');
+  assert.equal(row(db, 802).pr_state, 'fast_merge_merged');
+  assert.equal(mergeCalls(gh).length, 0);
+  assert.deepEqual(calls.find((call) => call.cmd === '/fixture/github-adapter').args, [
+    'write',
+    '--kind',
+    'pull-request-merge',
+    '--json',
+    '--repo',
+    REPO,
+    '--pr-number',
+    '802',
+    '--match-head-commit',
+    'sha-A',
+    '--merge-method',
+    'squash',
+    '--delete-branch',
+  ]);
+  assert.equal(audits.at(-1).authorized_head_sha, 'sha-A');
+  assert.equal(audits.at(-1).merged_head_sha, 'sha-A');
 });
 
 test('fast-merge head change requeues through canonical review reset and never merges', async () => {

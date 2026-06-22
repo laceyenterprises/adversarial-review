@@ -493,6 +493,45 @@ test('postRemediationOutcomeComment posts via gh pr comment with the bot token i
   assert.equal(calls[0].options.env.GH_TOKEN, 'test-pat-claude');
 });
 
+test('postRemediationOutcomeComment uses adapter mutation after marker dedupe finds nothing', async () => {
+  const calls = [];
+  const result = await postRemediationOutcomeComment({
+    repo: 'laceyenterprises/demo',
+    prNumber: 7,
+    workerClass: 'codex',
+    body: `<!-- ${REMEDIATION_COMMENT_MARKER_PREFIX}:demo:r1:completed -->\n\nSummary`,
+    env: {
+      GH_CODEX_REVIEWER_TOKEN: 'test-pat-codex',
+      PATH: '/usr/bin',
+      HOME: '/tmp/home',
+      GHA_ADAPTER_BIN: '/fixture/github-adapter',
+    },
+    findExistingImpl: async () => ({ found: false }),
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, options });
+      assert.equal(cmd, '/fixture/github-adapter');
+      return { stdout: JSON.stringify({ commentUrl: 'https://github.com/laceyenterprises/demo/pull/7#issuecomment-123' }) };
+    },
+  });
+
+  assert.equal(result.posted, true);
+  assert.equal(result.commentUrl, 'https://github.com/laceyenterprises/demo/pull/7#issuecomment-123');
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, [
+    'write',
+    '--kind',
+    'issue-comment',
+    '--json',
+    '--repo',
+    'laceyenterprises/demo',
+    '--pr-number',
+    '7',
+    '--body',
+    `<!-- ${REMEDIATION_COMMENT_MARKER_PREFIX}:demo:r1:completed -->\n\nSummary`,
+  ]);
+  assert.equal(calls[0].options.env.GH_TOKEN, 'test-pat-codex');
+});
+
 test('postRemediationOutcomeComment posts gemini comments with only the Gemini bot token', async () => {
   const calls = [];
   const result = await postRemediationOutcomeComment({

@@ -24,6 +24,10 @@ import {
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import { normalizeGithubMergeability } from './github-mergeability.mjs';
 import { extractNonBlockingFindingIdentities } from './kernel/remediation-reply.mjs';
+import {
+  adapterUnsupportedError,
+  writeAdapterCommitStatus,
+} from './github-adapter-client.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -612,26 +616,50 @@ async function publishAdversarialGateStatus(rootDir, {
     HOME: env.HOME ?? '',
     GH_TOKEN: token,
   };
+  if (env.GHA_ADAPTER_BIN) allowlistedEnv.GHA_ADAPTER_BIN = env.GHA_ADAPTER_BIN;
+  if (env.AGENT_OS_GITHUB_ADAPTER_BIN) {
+    allowlistedEnv.AGENT_OS_GITHUB_ADAPTER_BIN = env.AGENT_OS_GITHUB_ADAPTER_BIN;
+  }
 
-  await execFileImpl(
-    'gh',
-    [
-      'api',
-      '--method',
-      'POST',
-      `repos/${owner}/${repoName}/statuses/${headSha}`,
-      '-f',
-      `state=${decision.state}`,
-      '-f',
-      `context=${context}`,
-      '-f',
-      `description=${decision.description}`,
-    ],
-    {
-      env: allowlistedEnv,
-      maxBuffer: 2 * 1024 * 1024,
+  let adapterHandled = false;
+  try {
+    const adapterResult = await writeAdapterCommitStatus(
+      repo,
+      headSha,
+      {
+        state: decision.state,
+        context,
+        description: decision.description,
+      },
+      { execFileImpl, env: allowlistedEnv, rootDir }
+    );
+    adapterHandled = adapterResult !== null;
+  } catch (adapterErr) {
+    if (!adapterUnsupportedError(adapterErr)) {
+      throw adapterErr;
     }
-  );
+  }
+  if (!adapterHandled) {
+    await execFileImpl(
+      'gh',
+      [
+        'api',
+        '--method',
+        'POST',
+        `repos/${owner}/${repoName}/statuses/${headSha}`,
+        '-f',
+        `state=${decision.state}`,
+        '-f',
+        `context=${context}`,
+        '-f',
+        `description=${decision.description}`,
+      ],
+      {
+        env: allowlistedEnv,
+        maxBuffer: 2 * 1024 * 1024,
+      }
+    );
+  }
 
   mkdirImpl(gateRecordDir(rootDir), { recursive: true });
   const record = {

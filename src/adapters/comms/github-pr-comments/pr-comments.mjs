@@ -23,6 +23,10 @@ import { promisify } from 'node:util';
 
 import { PUBLIC_REPLY_MAX_CHARS, detectPublicReplyNoiseSignal } from '../../../follow-up-jobs.mjs';
 import { preflightGeminiReviewerToken } from '../../../gemini-reviewer-preflight.mjs';
+import {
+  adapterUnsupportedError,
+  writeAdapterIssueComment,
+} from '../../../github-adapter-client.mjs';
 import { awaitThrottleIfNeeded } from '../../../rate-limit-throttle.mjs';
 import { redactBulletList, redactPathlikeText, redactPublicSafeText, redactSensitiveText } from './redaction.mjs';
 
@@ -1012,6 +1016,10 @@ async function postRemediationOutcomeComment({
     HOME: env.HOME ?? '',
     GH_TOKEN: token,
   };
+  if (env.GHA_ADAPTER_BIN) allowlistedEnv.GHA_ADAPTER_BIN = env.GHA_ADAPTER_BIN;
+  if (env.AGENT_OS_GITHUB_ADAPTER_BIN) {
+    allowlistedEnv.AGENT_OS_GITHUB_ADAPTER_BIN = env.AGENT_OS_GITHUB_ADAPTER_BIN;
+  }
 
   // Pre-post dedup: if `gh pr comment` previously timed out AFTER
   // GitHub accepted the create, the comment landed on the PR but our
@@ -1051,22 +1059,40 @@ async function postRemediationOutcomeComment({
 
   try {
     await awaitThrottleIfNeeded();
-    const ghResult = await execFileImpl(
-      'gh',
-      ['pr', 'comment', String(prNumber), '--repo', repo, '--body', body],
-      {
-        env: allowlistedEnv,
-        maxBuffer: 5 * 1024 * 1024,
-        timeout: timeoutMs,
-        killSignal: 'SIGTERM',
+    let ghResult = null;
+    let adapterHandled = false;
+    try {
+      const adapterResult = await writeAdapterIssueComment(
+        repo,
+        prNumber,
+        { body },
+        { execFileImpl, env: allowlistedEnv }
+      );
+      adapterHandled = adapterResult !== null;
+      ghResult = adapterResult;
+    } catch (adapterErr) {
+      if (!adapterUnsupportedError(adapterErr)) {
+        throw adapterErr;
       }
-    );
+    }
+    if (!adapterHandled) {
+      ghResult = await execFileImpl(
+        'gh',
+        ['pr', 'comment', String(prNumber), '--repo', repo, '--body', body],
+        {
+          env: allowlistedEnv,
+          maxBuffer: 5 * 1024 * 1024,
+          timeout: timeoutMs,
+          killSignal: 'SIGTERM',
+        }
+      );
+    }
     // gh prints the comment URL to stdout on success. Capture it so
     // the retry path can dedupe: if a later retry sees the same record
     // with a commentUrl already populated, it knows a previous attempt
     // succeeded and must not re-post (which would create a duplicate
     // public comment).
-    const commentUrl = parseCommentUrlFromStdout(ghResult?.stdout);
+    const commentUrl = ghResult?.commentUrl || ghResult?.url || parseCommentUrlFromStdout(ghResult?.stdout);
     return { posted: true, repo, prNumber, workerClass, tokenEnvName, commentUrl };
   } catch (err) {
     // execFile with `timeout` SIGTERMs the child when the deadline

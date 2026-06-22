@@ -34,6 +34,17 @@ function makeJob(overrides = {}) {
 function seedAutoDiscoveredAdapter(rootDir) {
   const adapterBin = path.join(rootDir, 'modules', 'github-adapter', 'bin', 'github-adapter');
   mkdirSync(path.dirname(adapterBin), { recursive: true });
+  // Adapter auto-discovery refuses any group/world-writable directory in the
+  // trust chain (a security check). Under a permissive umask (e.g. 002),
+  // mkdirSync creates 0775 dirs and discovery rejects the seeded adapter, so
+  // normalize the chain to 0755 for deterministic tests regardless of host umask.
+  for (const dir of [
+    path.join(rootDir, 'modules'),
+    path.join(rootDir, 'modules', 'github-adapter'),
+    path.dirname(adapterBin),
+  ]) {
+    chmodSync(dir, 0o755);
+  }
   writeFileSync(adapterBin, '#!/bin/sh\nexit 0\n', 'utf8');
   chmodSync(adapterBin, 0o755);
   return adapterBin;

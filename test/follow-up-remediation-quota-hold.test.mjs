@@ -8,7 +8,7 @@
 // failure. Bounded by the shared transient-retry budget.
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -94,7 +94,7 @@ test('a quota-exhausted direct-CLI remediation worker is HELD (requeued to pendi
 
   // retryAfter is pinned to the provider-reported reset, so the consume gate
   // (claimNextFollowUpJob) holds it until quota returns.
-  const expectedReset = new Date('Jun 17 2026 5:39 PM').toISOString();
+  const expectedReset = '2026-06-18T00:39:00.000Z';
   assert.equal(reconciled.job.remediationPlan.retryAfter, expectedReset);
   assert.equal(reconciled.job.remediationPlan.transientRetries, 1);
 

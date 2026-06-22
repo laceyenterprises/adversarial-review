@@ -727,6 +727,12 @@ function schemaV1() {
             __strict: true,
             __keys: {
               enabled: { __type: TYPE_BOOL, __default: true },
+              direct_dsn: {
+                __type: TYPE_STRING,
+                __default: null,
+                __nullable: true,
+              },
+              allowCanonicalFallback: { __type: TYPE_BOOL, __default: false },
             },
           },
           // CFG-04 dual-write nested block — mirrors agent_os_config
@@ -1795,6 +1801,14 @@ export const ENV_ALIASES = {
   },
   'session_ledger.vdb.enabled': {
     canonical: 'AGENT_OS_SESSION_LEDGER_VDB',
+    aliases: [],
+  },
+  'session_ledger.vdb.direct_dsn': {
+    canonical: 'AGENT_OS_SESSION_LEDGER_VDB_DIRECT_DSN',
+    aliases: [],
+  },
+  'session_ledger.vdb.allowCanonicalFallback': {
+    canonical: 'AGENT_OS_SESSION_LEDGER_VDB_ALLOW_CANONICAL_FALLBACK',
     aliases: [],
   },
   'operator.email': {

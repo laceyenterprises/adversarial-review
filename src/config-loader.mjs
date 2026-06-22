@@ -511,6 +511,31 @@ function schemaV1() {
               },
             },
           },
+          // AMA closer (hammer/merge-agent/post-merge-actions) GitHub App
+          // installation-token auth. Mirrors the Python authority
+          // (`oauth_broker.merge_agent` in
+          // platform/agent-os-config/src/agent_os_config/__init__.py). The
+          // watcher does not consume these keys; the partial mirror exists so
+          // the strict loader tolerates them in config.yaml / config.local.yaml
+          // (CFG-01 multi-loader parity).
+          merge_agent: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              broker_auth_enabled: {
+                __type: TYPE_BOOL,
+                __default: false,
+              },
+              expected_app_id: {
+                __type: TYPE_STRING,
+                __default: '',
+              },
+              expected_installation_id: {
+                __type: TYPE_STRING,
+                __default: '',
+              },
+            },
+          },
         },
       },
       governance: {

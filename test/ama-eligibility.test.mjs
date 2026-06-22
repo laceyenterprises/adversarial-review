@@ -1627,6 +1627,50 @@ test('ham terminal remediation: valid evidence waives strict non-blocking findin
   assert.equal(result.trace.hamTerminalRemediation.nonBlockingCoverage.ok, true);
 });
 
+// Round-4 fix (2026-06-22): strict `.ok` must NOT bypass identity coverage for
+// the non-blocking lane. `.ok` proves the addressed COUNT matches the current
+// review and the HAM's own audit-coverage, but NOT that the HAM addressed the
+// current review's specific non-blocking findings by identity. A HAM can match
+// the count (1 addressed, 1 standing) while addressing a DIFFERENT finding.
+test('ham terminal remediation: strict .ok does NOT bypass non-blocking identity coverage', () => {
+  const finding = { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true };
+  const auditBody = 'HAM audit: addressed README note is stale in README.md. Doc-currency: updated README.md for changed files README.md.';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+      nonBlockingFindingCount: 1,
+      nonBlockingFindingState: 'known',
+      // The current standing non-blocking finding is a DIFFERENT identity than
+      // the one the HAM addressed — count matches (1 == 1), identity does not.
+      nonBlockingFindingIdentities: ['unrelated nit the ham did not address'],
+    },
+    prMetadata: { headSha: 'def67890' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({
+      remediatedFindings: '1 addressed (0 blocking, 1 non-blocking)',
+      auditBody,
+      docCurrency: { status: 'updated', changedFiles: ['README.md'], docsUpdated: ['README.md'] },
+      findings: [finding],
+    }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      remediatedFindings: '1 addressed (0 blocking, 1 non-blocking)',
+      auditBody,
+      changedFiles: ['README.md'],
+    }),
+  });
+  // `.ok` is true (full provenance + count-match) ...
+  assert.equal(result.trace.hamTerminalRemediation.ok, true, JSON.stringify(result.trace.hamTerminalRemediation, null, 2));
+  // ... but identity coverage fails, so the non-blocking finding is NOT waived.
+  assert.equal(result.trace.hamTerminalRemediation.nonBlockingCoverage.ok, false);
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('non-blocking-findings-present'));
+  assert.ok(!result.trace.hamTerminalRemediation.waived.includes('non-blocking-findings-present'));
+});
+
 // Round-3 fix (2026-06-21): the non-blocking waiver is no longer dropped on bare
 // `activeAuthorized` HAM evidence. Even with a real HAM commit + provenance +
 // audit, the waiver requires the HAM's addressed non-blocking findings to COVER

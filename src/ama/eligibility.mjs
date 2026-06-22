@@ -1072,13 +1072,19 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   let nonBlockingCoverageOk = false;
   if (hamTerminalRemediation.activeAuthorized) {
     const strictOk = hamTerminalRemediation.ok === true;
-    // The non-blocking waiver holds only when the HAM's addressed non-blocking
+    // The non-blocking waiver holds ONLY when the HAM's addressed non-blocking
     // findings cover every CURRENT standing non-blocking finding by identity.
-    // `strictOk` short-circuits to true: a fully `.ok` finding map already
-    // proves the addressed set matches the current review's finding counts
-    // (including non-blocking), so coverage is implied; this preserves the
-    // backward-compatible behavior for fully-strict evidence.
-    nonBlockingCoverageOk = strictOk || identityCoverageOk;
+    // `strictOk` must NOT short-circuit this (round-4 finding): `.ok` only
+    // proves the addressed set matches the current review's finding COUNTS
+    // (remediatedFindings) plus the HAM's own audit-coverage — it does NOT
+    // prove the HAM addressed the current review's specific non-blocking
+    // findings BY IDENTITY. A HAM could match the count while addressing two
+    // different findings than the two currently standing. So identity coverage
+    // governs the non-blocking lane outright. `strictOk` still suffices for the
+    // blocking / stale-review-head / remediation-state reasons below.
+    // (identityCoverageOk already fails closed when identities are unavailable
+    // and is trivially true when the current non-blocking count is zero.)
+    nonBlockingCoverageOk = identityCoverageOk;
     // `verdict-not-settled-success` is non-blocking-driven (Tier 1) only when
     // the settled-success verdict gate failed alongside an explicit
     // non-blocking reason. A bare verdict failure (for example Request changes

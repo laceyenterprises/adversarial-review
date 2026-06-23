@@ -131,6 +131,38 @@ test('pull-request-review adapter args omit unresolved reviewer identity', async
   ]);
 });
 
+test('pull-request-review adapter args bind reviewer login to matching token env', async () => {
+  const mod = await importGithubAdapterClientFresh();
+
+  assert.deepEqual(mod.__test__.makeAdapterWriteArgs('pull-request-review', {
+    repo: FIXTURE_REPO,
+    prNumber: FIXTURE_PR,
+    body: 'review body',
+    reviewerLogin: 'codex-reviewer-lacey',
+  }), [
+    'write',
+    '--kind',
+    'pull-request-review',
+    '--json',
+    '--repo',
+    FIXTURE_REPO,
+    '--pr-number',
+    String(FIXTURE_PR),
+    '--body',
+    'review body',
+    '--reviewer-login',
+    'codex-reviewer-lacey',
+    '--auth',
+    'codex-reviewer',
+    '--auth-mode',
+    'env-token',
+    '--pat-env',
+    'GH_CODEX_REVIEWER_TOKEN',
+    '--expected-login',
+    'codex-reviewer-lacey',
+  ]);
+});
+
 function makeExpectedRollup() {
   return {
     id: 'PR_kwDOA1',

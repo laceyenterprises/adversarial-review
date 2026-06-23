@@ -553,6 +553,16 @@ reviewer bot token and is controlled by a watcher-specific surface:
 - `WATCHER_GH_BROKER_ROLE` defaults to `merge-agent`. Operators may point it at
   a dedicated watcher role once provisioned; the startup and runtime refresh
   paths both use the same role value.
+
+Reviewer review and remediation-comment mutations that go through
+`modules/github-adapter` must bind the resolved reviewer identity explicitly:
+the caller passes `--reviewer-login`, `--auth-mode env-token`, and the matching
+`GH_CLAUDE_REVIEWER_TOKEN`, `GH_CODEX_REVIEWER_TOKEN`, or
+`GH_GEMINI_REVIEWER_TOKEN` env var. GitHub App installation tokens cannot rely
+on `/user` identity probing, so the adapter treats these as pre-resolved launch
+tokens and never falls through to generic `GITHUB_TOKEN` or the host's ambient
+`gh` keychain. Missing selected token env is a posting auth failure and is
+retried through the existing durable delivery retry path.
 - On successful broker minting, launchers export the App installation token to
   both `GITHUB_TOKEN` and `GH_TOKEN`. `GITHUB_TOKEN` is consumed by the
   watcher's in-process Octokit client, while `GH_TOKEN` is the GitHub CLI

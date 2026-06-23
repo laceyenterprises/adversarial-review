@@ -522,8 +522,17 @@ test('remediation outcome comment writes through worker-family bot token and rev
     '### Remediation Worker (codex)\n\nDone.',
     '--reviewer-login',
     'codex-reviewer-lacey',
+    '--auth',
+    'codex-reviewer',
+    '--auth-mode',
+    'env-token',
+    '--pat-env',
+    'GH_CODEX_REVIEWER_TOKEN',
+    '--expected-login',
+    'codex-reviewer-lacey',
   ]);
   assert.equal(calls[0].options.env.GH_TOKEN, 'codex-bot-token');
+  assert.equal(calls[0].options.env.GH_CODEX_REVIEWER_TOKEN, 'codex-bot-token');
   assert.equal(calls[0].options.env.GITHUB_TOKEN, undefined);
   assert.equal(calls[0].options.env.OP_SERVICE_ACCOUNT_TOKEN, undefined);
 });

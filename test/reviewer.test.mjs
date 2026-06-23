@@ -113,10 +113,22 @@ test('postGitHubReview uses adapter mutation with the intended reviewer bot iden
   const rootDir = mkdtempSync(join(tmpdir(), 'review-post-adapter-'));
   const calls = [];
   await withEnvAsync({
-    GHA_ADAPTER_BIN: '/fixture/github-adapter',
-    GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+    GHA_ADAPTER_BIN: '/wrong/global-adapter',
+    GH_CODEX_REVIEWER_TOKEN: 'ghp_wrong_global_pat',
+    HTTP_PROXY: 'http://wrong-global-proxy.invalid:8080',
     GITHUB_TOKEN: 'ghp_ambient_operator_token',
   }, async () => {
+    const sourceEnv = {
+      GHA_ADAPTER_BIN: '/fixture/github-adapter',
+      GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+      GH_CODEX_REVIEWER_TOKEN_SOURCE: 'oauth-broker',
+      GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER: '',
+      PATH: '/opt/homebrew/bin:/usr/bin',
+      HOME: '/Users/test',
+      HTTP_PROXY: 'http://proxy.example:8080',
+      SSL_CERT_FILE: '/tmp/corp-ca.pem',
+      GITHUB_TOKEN: 'ghp_ambient_operator_token',
+    };
     await postGitHubReview(
       'laceyenterprises/demo',
       42,
@@ -129,6 +141,7 @@ test('postGitHubReview uses adapter mutation with the intended reviewer bot iden
       },
       {
         rootDir,
+        env: sourceEnv,
         reviewerIdentity: 'codex-reviewer-lacey',
         prepareReviewWrite: async ({ selfLogin, token }) => {
           assert.equal(selfLogin, 'codex-reviewer-lacey');
@@ -140,6 +153,11 @@ test('postGitHubReview uses adapter mutation with the intended reviewer bot iden
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].options.env.GH_TOKEN, 'ghp_codex_reviewer_pat');
+  assert.equal(calls[0].options.env.GH_CODEX_REVIEWER_TOKEN, 'ghp_codex_reviewer_pat');
+  assert.equal(calls[0].options.env.GH_CODEX_REVIEWER_TOKEN_SOURCE, 'oauth-broker');
+  assert.equal(calls[0].options.env.GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER, '');
+  assert.equal(calls[0].options.env.HTTP_PROXY, 'http://proxy.example:8080');
+  assert.equal(calls[0].options.env.SSL_CERT_FILE, '/tmp/corp-ca.pem');
   assert.equal(calls[0].options.env.GITHUB_TOKEN, undefined);
   assert.deepEqual(calls[0].args, [
     'write',
@@ -153,6 +171,14 @@ test('postGitHubReview uses adapter mutation with the intended reviewer bot iden
     '--body',
     'review body',
     '--reviewer-login',
+    'codex-reviewer-lacey',
+    '--auth',
+    'codex-reviewer',
+    '--auth-mode',
+    'env-token',
+    '--pat-env',
+    'GH_CODEX_REVIEWER_TOKEN',
+    '--expected-login',
     'codex-reviewer-lacey',
   ]);
 });

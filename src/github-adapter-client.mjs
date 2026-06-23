@@ -9,6 +9,21 @@ import {
 const ADAPTER_MAX_BUFFER = 25 * 1024 * 1024;
 const ADAPTER_TIMEOUT_MS = 30_000;
 
+const REVIEWER_ADAPTER_AUTH_BY_LOGIN = {
+  'claude-reviewer-lacey': {
+    selector: 'claude-reviewer',
+    tokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+  },
+  'codex-reviewer-lacey': {
+    selector: 'codex-reviewer',
+    tokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  },
+  'gemini-reviewer-lacey': {
+    selector: 'gemini-reviewer',
+    tokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+  },
+};
+
 function firstNonEmpty(...values) {
   for (const value of values) {
     const text = String(value || '').trim();
@@ -170,6 +185,15 @@ function buildAdapterEnv(env = process.env) {
     'TMPDIR',
     'GH_TOKEN',
     'GITHUB_TOKEN',
+    'GH_CLAUDE_REVIEWER_TOKEN',
+    'GH_CODEX_REVIEWER_TOKEN',
+    'GH_GEMINI_REVIEWER_TOKEN',
+    'GH_CLAUDE_REVIEWER_TOKEN_SOURCE',
+    'GH_CODEX_REVIEWER_TOKEN_SOURCE',
+    'GH_GEMINI_REVIEWER_TOKEN_SOURCE',
+    'GH_CLAUDE_REVIEWER_TOKEN_BROKER_PROVIDER',
+    'GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER',
+    'GH_GEMINI_REVIEWER_TOKEN_BROKER_PROVIDER',
     'GH_CONFIG_DIR',
     'GH_HOST',
     'GITHUB_HOST',
@@ -217,6 +241,23 @@ function makeAdapterArgs(kind, params = {}) {
   return args;
 }
 
+function appendReviewerAuthAdapterArgs(args, reviewerLogin) {
+  const normalized = String(reviewerLogin || '').trim().toLowerCase();
+  const profile = REVIEWER_ADAPTER_AUTH_BY_LOGIN[normalized];
+  if (!profile) return args;
+  args.push(
+    '--auth',
+    profile.selector,
+    '--auth-mode',
+    'env-token',
+    '--pat-env',
+    profile.tokenEnv,
+    '--expected-login',
+    normalized
+  );
+  return args;
+}
+
 function makeAdapterWriteArgs(kind, params = {}) {
   const args = ['write', '--kind', kind, '--json'];
   appendCommonAdapterArgs(args, params);
@@ -226,6 +267,7 @@ function makeAdapterWriteArgs(kind, params = {}) {
   if (params.description !== undefined) args.push('--description', String(params.description));
   if (params.action !== undefined) args.push('--action', String(params.action));
   if (params.reviewerLogin) args.push('--reviewer-login', String(params.reviewerLogin));
+  appendReviewerAuthAdapterArgs(args, params.reviewerLogin);
   if (params.matchHeadCommit !== undefined) args.push('--match-head-commit', String(params.matchHeadCommit));
   if (params.mergeMethod !== undefined) args.push('--merge-method', String(params.mergeMethod));
   if (params.deleteBranch !== undefined) args.push(params.deleteBranch ? '--delete-branch' : '--no-delete-branch');
@@ -431,6 +473,7 @@ const __test__ = {
   adapterUnsupportedError,
   buildAdapterEnv,
   candidateSuperprojectAdapterPaths,
+  appendReviewerAuthAdapterArgs,
   isTrustedAutoDiscoveredAdapterBin,
   makeAdapterArgs,
   makeAdapterWriteArgs,

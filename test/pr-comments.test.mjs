@@ -552,8 +552,17 @@ test('postRemediationOutcomeComment uses adapter mutation after marker dedupe fi
     `<!-- ${REMEDIATION_COMMENT_MARKER_PREFIX}:demo:r1:completed -->\n\nSummary`,
     '--reviewer-login',
     'codex-reviewer-lacey',
+    '--auth',
+    'codex-reviewer',
+    '--auth-mode',
+    'env-token',
+    '--pat-env',
+    'GH_CODEX_REVIEWER_TOKEN',
+    '--expected-login',
+    'codex-reviewer-lacey',
   ]);
   assert.equal(calls[0].options.env.GH_TOKEN, 'test-pat-codex');
+  assert.equal(calls[0].options.env.GH_CODEX_REVIEWER_TOKEN, 'test-pat-codex');
 });
 
 test('postRemediationOutcomeComment forwards rootDir for adapter auto-discovery', async () => {
@@ -584,6 +593,7 @@ test('postRemediationOutcomeComment forwards rootDir for adapter auto-discovery'
     assert.equal(result.commentUrl, 'https://github.com/laceyenterprises/demo/pull/7#issuecomment-456');
     assert.equal(calls.length, 1);
     assert.equal(calls[0].options.env.GH_TOKEN, 'test-pat-codex');
+    assert.equal(calls[0].options.env.GH_CODEX_REVIEWER_TOKEN, 'test-pat-codex');
     assert.equal(calls[0].options.env.GHA_ADAPTER_BIN, undefined);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -641,6 +651,7 @@ test('postRemediationOutcomeComment posts gemini comments with only the Gemini b
   assert.equal(result.tokenEnvName, 'GH_GEMINI_REVIEWER_TOKEN');
   assert.equal(calls.length, 1);
   assert.equal(calls[0].options.env.GH_TOKEN, 'test-pat-gemini');
+  assert.equal(calls[0].options.env.GH_GEMINI_REVIEWER_TOKEN, 'test-pat-gemini');
   assert.equal(calls[0].options.env.GH_CODEX_REVIEWER_TOKEN, undefined);
   assert.equal(calls[0].options.env.GH_CLAUDE_REVIEWER_TOKEN, undefined);
 });
@@ -673,8 +684,8 @@ test('postRemediationOutcomeComment refuses gemini comments when legacy Gemini e
 
 test('postRemediationOutcomeComment passes only an allowlisted env to gh', async () => {
   // The daemon's parent env carries unrelated high-value secrets. The gh
-  // subprocess must NOT see them. Only PATH, HOME, and the selected
-  // GH_TOKEN should reach the child.
+  // subprocess must NOT see them. Only PATH, HOME, selected auth, and
+  // operational GitHub subprocess knobs should reach the child.
   const calls = [];
   await postRemediationOutcomeComment({
     repo: 'laceyenterprises/demo',
@@ -690,9 +701,14 @@ test('postRemediationOutcomeComment passes only an allowlisted env to gh', async
       GITHUB_TOKEN: 'operator-pat-YYYYY',
       GH_CODEX_REVIEWER_TOKEN: 'codex-bot-pat-ZZZZZ',
       ANTHROPIC_AUTH_TOKEN: 'oauth-bearer-WWWWW',
-      // Other unrelated env that's also unnecessary:
-      LINEAR_API_KEY: 'linear-pat-AAAAA',
+      // Operational env needed for GitHub subprocesses:
       LANG: 'en_US.UTF-8',
+      HTTP_PROXY: 'http://proxy.example:8080',
+      SSL_CERT_FILE: '/tmp/corp-ca.pem',
+      NODE_EXTRA_CA_CERTS: '/tmp/node-ca.pem',
+      GH_CLAUDE_REVIEWER_TOKEN_SOURCE: '',
+      // Other unrelated env that's still unnecessary:
+      LINEAR_API_KEY: 'linear-pat-AAAAA',
     },
     execFileImpl: async (cmd, args, options) => {
       calls.push({ cmd, args, options });
@@ -703,12 +719,28 @@ test('postRemediationOutcomeComment passes only an allowlisted env to gh', async
   const childEnv = calls[0].options.env;
   assert.deepEqual(
     Object.keys(childEnv).sort(),
-    ['GH_TOKEN', 'HOME', 'PATH'],
+    [
+      'GH_CLAUDE_REVIEWER_TOKEN',
+      'GH_CLAUDE_REVIEWER_TOKEN_SOURCE',
+      'GH_TOKEN',
+      'HOME',
+      'HTTP_PROXY',
+      'LANG',
+      'NODE_EXTRA_CA_CERTS',
+      'PATH',
+      'SSL_CERT_FILE',
+    ],
     `child env must be exactly the allowlist; got: ${Object.keys(childEnv).join(', ')}`
   );
   assert.equal(childEnv.GH_TOKEN, 'test-pat-claude');
+  assert.equal(childEnv.GH_CLAUDE_REVIEWER_TOKEN, 'test-pat-claude');
+  assert.equal(childEnv.GH_CLAUDE_REVIEWER_TOKEN_SOURCE, '');
   assert.equal(childEnv.PATH, '/opt/homebrew/bin:/usr/bin');
   assert.equal(childEnv.HOME, '/Users/test');
+  assert.equal(childEnv.LANG, 'en_US.UTF-8');
+  assert.equal(childEnv.HTTP_PROXY, 'http://proxy.example:8080');
+  assert.equal(childEnv.SSL_CERT_FILE, '/tmp/corp-ca.pem');
+  assert.equal(childEnv.NODE_EXTRA_CA_CERTS, '/tmp/node-ca.pem');
   assert.equal(childEnv.OP_SERVICE_ACCOUNT_TOKEN, undefined);
   assert.equal(childEnv.GITHUB_TOKEN, undefined);
   assert.equal(childEnv.GH_CODEX_REVIEWER_TOKEN, undefined);

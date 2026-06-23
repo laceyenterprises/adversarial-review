@@ -85,6 +85,29 @@ import {
 } from './agy-reviewer-auth.mjs';
 import { resolveGeminiRuntime } from './role-config.mjs';
 
+const REVIEW_ADAPTER_ENV_KEYS = [
+  'USER',
+  'LOGNAME',
+  'TMPDIR',
+  'GH_CONFIG_DIR',
+  'GH_HOST',
+  'GITHUB_HOST',
+  'LANG',
+  'LC_ALL',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+  'NODE_EXTRA_CA_CERTS',
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
+  'SSL_CERT_FILE_BUNDLE',
+  'GHA_ADAPTER_BIN',
+  'AGENT_OS_GITHUB_ADAPTER_BIN',
+];
+
 const execFileAsync = promisify(execFile);
 const REVIEW_POST_RETRY_DELAYS_MS = [0];
 const ADVISORY_ONLY_REVIEW_LABEL = 'operator-approved: advisory-only-review';
@@ -2624,16 +2647,17 @@ function createReviewerPreWriteLogProxy(log = console) {
 // fail, log and continue — the post may still succeed, and a failure here is
 // strictly less bad than the leak it's trying to prevent.
 async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl = execFileAsync, opts = {}) {
+  const sourceEnv = opts.env || process.env;
   // GMW-06 safety net: a gemini reviewer must never silently mis-post under
   // another identity's token, and the legacy GEMINI_REVIEWER_GH_TOKEN item name
   // must never leak into the runtime. Fails closed with a legible error before
   // we read/use any token.
   preflightGeminiReviewerToken({
-    env: process.env,
+    env: sourceEnv,
     botTokenEnv,
     reviewerIdentity: opts.reviewerIdentity,
   });
-  let token = process.env[botTokenEnv];
+  let token = sourceEnv[botTokenEnv];
   if (!token) {
     throw new Error(`Missing env var: ${botTokenEnv}`);
   }
@@ -2643,7 +2667,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
   const refreshIdentity = resolveReviewerIdentityForBotTokenEnv(botTokenEnv, opts.reviewerIdentity);
   let refreshedAfterAuthFailure = false;
 
-  const stateDir = resolveAdversarialReviewStateDir(opts.rootDir || ROOT, opts.env || process.env);
+  const stateDir = resolveAdversarialReviewStateDir(opts.rootDir || ROOT, sourceEnv);
   let reviewerFence = null;
   try {
     reviewerFence = openReviewerFence({
@@ -2681,8 +2705,19 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
         });
         try {
           await awaitThrottleIfNeeded();
-          const adapterEnv = { ...process.env, GH_TOKEN: token };
-          delete adapterEnv.GITHUB_TOKEN;
+          const adapterEnv = {
+            PATH: sourceEnv.PATH ?? '/usr/bin:/bin',
+            HOME: sourceEnv.HOME ?? '',
+            GH_TOKEN: token,
+            [botTokenEnv]: token,
+          };
+          for (const key of REVIEW_ADAPTER_ENV_KEYS) {
+            if (sourceEnv[key] !== undefined) adapterEnv[key] = sourceEnv[key];
+          }
+          for (const suffix of ['_SOURCE', '_BROKER_PROVIDER']) {
+            const key = `${botTokenEnv}${suffix}`;
+            if (sourceEnv[key] !== undefined) adapterEnv[key] = sourceEnv[key];
+          }
           let adapterHandled = false;
           try {
             const adapterResult = await writeAdapterPullRequestReview(
@@ -2713,7 +2748,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
           });
           if (!refreshedAfterAuthFailure && authRetryable) {
             const refreshed = await resolveReviewerAppToken(refreshIdentity, {
-              env: process.env,
+              env: sourceEnv,
               fetchImpl: opts.fetchImpl,
               readFileImpl: opts.readFileImpl,
               timeoutMs: opts.reviewerTokenFetchTimeoutMs,

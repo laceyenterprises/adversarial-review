@@ -65,6 +65,29 @@ const COMMENT_BOT_LOGIN_BY_TOKEN_ENV = {
   GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer-lacey',
 };
 
+const ADAPTER_SUBPROCESS_ENV_KEYS = [
+  'USER',
+  'LOGNAME',
+  'TMPDIR',
+  'GH_CONFIG_DIR',
+  'GH_HOST',
+  'GITHUB_HOST',
+  'LANG',
+  'LC_ALL',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+  'NODE_EXTRA_CA_CERTS',
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
+  'SSL_CERT_FILE_BUNDLE',
+  'GHA_ADAPTER_BIN',
+  'AGENT_OS_GITHUB_ADAPTER_BIN',
+];
+
 function resolveCommentBotTokenEnv(workerClass) {
   return WORKER_CLASS_TO_BOT_TOKEN_ENV[workerClass] || null;
 }
@@ -1026,18 +1049,21 @@ async function postRemediationOutcomeComment({
   // Allowlist the gh subprocess env. The daemon's parent env carries
   // unrelated high-value secrets (OP_SERVICE_ACCOUNT_TOKEN, the
   // operator's GITHUB_TOKEN, both reviewer PATs, OAuth bearers).
-  // gh only needs PATH (to find its helpers) plus HOME (so it can
-  // resolve its own config / cache dir) plus the GH_TOKEN we want it
-  // to authenticate as. Inheriting the rest broadens blast radius if
-  // gh shells out to a hook, an extension, or any unexpected helper.
+  // gh needs PATH/HOME plus the selected auth token; adapter-backed writes may
+  // also need proxy, locale, and certificate trust-store knobs. Keep this as a
+  // positive allowlist so unrelated high-value parent secrets stay out.
   const allowlistedEnv = {
     PATH: env.PATH ?? '/usr/bin:/bin',
     HOME: env.HOME ?? '',
     GH_TOKEN: token,
+    [tokenEnvName]: token,
   };
-  if (env.GHA_ADAPTER_BIN) allowlistedEnv.GHA_ADAPTER_BIN = env.GHA_ADAPTER_BIN;
-  if (env.AGENT_OS_GITHUB_ADAPTER_BIN) {
-    allowlistedEnv.AGENT_OS_GITHUB_ADAPTER_BIN = env.AGENT_OS_GITHUB_ADAPTER_BIN;
+  for (const key of ADAPTER_SUBPROCESS_ENV_KEYS) {
+    if (env[key] !== undefined) allowlistedEnv[key] = env[key];
+  }
+  for (const suffix of ['_SOURCE', '_BROKER_PROVIDER']) {
+    const key = `${tokenEnvName}${suffix}`;
+    if (env[key] !== undefined) allowlistedEnv[key] = env[key];
   }
 
   // Pre-post dedup: if `gh pr comment` previously timed out AFTER

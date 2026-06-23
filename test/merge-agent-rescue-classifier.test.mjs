@@ -94,6 +94,19 @@ test('operator-approved persists across a same-head rereview', () => {
   assert.equal(result.decision, 'merge-eligible');
 });
 
+test('operator-approved accepts explicit empty check rollup', () => {
+  const result = classify(inputFor('operator-approved-override.md', {
+    statusCheckRollup: [],
+    operatorApprovalHeadSha: HEAD_SHA,
+    operatorApprovalLabelEventId: 'evt-operator-approved',
+    operatorApprovalActor: 'VirtualPaul',
+    operatorApprovalLabeledAt: '2026-06-23T12:00:00.000Z',
+  }));
+
+  assert.equal(result.decision, 'merge-eligible');
+  assert.equal(result.reason, 'operator-approved');
+});
+
 test('operator-approved stale-head approval is ignored', () => {
   const result = classify(inputFor('operator-approved-override.md', {
     operatorApprovalHeadSha: 'older-head',
@@ -160,13 +173,46 @@ test('check rollup ignores stale rows and the adversarial gate context', () => {
   assert.equal(result.decision, 'merge-eligible');
 });
 
+test('explicit empty check rollup is merge eligible but missing rollup fails closed', () => {
+  assert.equal(
+    classify(inputFor('comment-only-merge-eligible.md', { statusCheckRollup: [] })).decision,
+    'merge-eligible',
+  );
+  assert.equal(
+    classify(inputFor('comment-only-merge-eligible.md', { statusCheckRollup: undefined })).decision,
+    'inconclusive',
+  );
+});
+
 test('parsed findings expose normalized category and structured fields', () => {
   const parsed = parseReviewBody(fixture('request-changes-with-blockers-addressable.md'));
 
   assert.equal(parsed.blocking.count, 2);
+  assert.equal(parsed.parsedFindings[0].title, 'Normalize stale-review routing');
   assert.equal(parsed.parsedFindings[0].category, 'correctness');
   assert.equal(parsed.parsedFindings[0].file, '`src/merge-agent-rescue-classifier.mjs`');
+  assert.equal(parsed.parsedFindings[0].whyItMatters, null);
   assert.equal(parsed.parsedFindings[0].recommendedFix, 'Check `reviewHeadSha` against `headSha` before any merge/remediation routing.');
+});
+
+test('parsed findings retain why-it-matters field when present', () => {
+  const parsed = parseReviewBody(`
+## Blocking issues
+- **Preserve diagnostic shape**
+  - **File:** \`src/merge-agent-rescue-classifier.mjs\`
+  - **Problem:** The parser drops fields.
+  - **Why it matters:** Downstream diagnostics lose reviewer context.
+  - **Recommended fix:** Preserve the canonical fields.
+
+## Non-blocking issues
+- None.
+
+## Verdict
+Request changes
+`);
+
+  assert.equal(parsed.parsedFindings[0].title, 'Preserve diagnostic shape');
+  assert.equal(parsed.parsedFindings[0].whyItMatters, 'Downstream diagnostics lose reviewer context.');
 });
 
 test('parsed findings retain multi-line nested fields', () => {

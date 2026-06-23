@@ -85,12 +85,17 @@ function parseNestedField(blockLines, label) {
 
 function parseFindingBlock(blockLines, kind) {
   const category = parseNestedField(blockLines, 'Category');
+  const titleLine = blockLines[0] || '';
+  const titleMatch = titleLine.match(/^-\s+\*\*(.+?)\*\*(.*)$/);
+  const title = titleMatch ? normalizeOptionalString(titleMatch[1].replace(/[ \t]*:[ \t]*$/u, '')) : null;
   return {
     kind,
+    title,
     category: category == null ? null : category.toLowerCase(),
     file: parseNestedField(blockLines, 'File'),
     lines: parseNestedField(blockLines, 'Lines'),
     problem: parseNestedField(blockLines, 'Problem'),
+    whyItMatters: parseNestedField(blockLines, 'Why it matters'),
     recommendedFix: parseNestedField(blockLines, 'Recommended fix'),
   };
 }
@@ -145,8 +150,9 @@ function checkState(row) {
 }
 
 function checksPass(input) {
+  if (!Array.isArray(input?.statusCheckRollup)) return false;
   const rows = checkRowsForHead(input?.statusCheckRollup, input?.headSha);
-  if (rows.length === 0) return false;
+  if (rows.length === 0) return true;
   for (const row of rows) {
     const state = checkState(row);
     if (!state || PENDING_CHECK_STATES.has(state)) return false;

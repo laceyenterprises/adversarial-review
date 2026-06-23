@@ -238,8 +238,8 @@ function classifyFailure(value) {
     text.includes(PROVIDER_OVERLOADED_FAILURE_CLASS) ||
     /\b529\b/.test(text) ||
     /\boverloaded[_ -]?error\b/.test(text) ||
-    /\boverloaded\b.*\b(provider|model|backend|upstream|api)\b/.test(text) ||
-    /\b(provider|model|backend|upstream|api)\b.*\boverloaded\b/.test(text)
+    /\boverloaded\b.*\b(provider|model|backend|upstream|server|service|api)\b/.test(text) ||
+    /\b(provider|model|backend|upstream|server|service|api)\b.*\boverloaded\b/.test(text)
   ) return PROVIDER_OVERLOADED_FAILURE_CLASS;
   if (text.includes('timeout') || text.includes('timed out') || text.includes('no output')) return 'timeout';
   if (text.includes('oauth') || text.includes('auth') || text.includes('token') || text.includes('credential')) return 'auth';

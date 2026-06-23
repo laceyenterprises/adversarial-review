@@ -65,9 +65,9 @@ function reviewerSignalAwareFailureClass(err, classificationText, exitCode, deta
   const messageTail = tailText(err?.message || '');
   const quotaText = [stdoutTail, stderrTail, messageTail].filter(Boolean).join('\n');
   if (detectQuotaExhaustion(quotaText).isQuotaExhausted) return QUOTA_EXHAUSTED_FAILURE_CLASS;
-  const signalText = [classificationText, stdoutTail].filter(Boolean).join('\n');
-  if (hasProviderOverloadedSignal(signalText)) return PROVIDER_OVERLOADED_FAILURE_CLASS;
-  return classifyReviewerFailure(signalText, exitCode, err?.code, details);
+  const providerSignalText = [classificationText, stdoutTail].filter(Boolean).join('\n');
+  if (hasProviderOverloadedSignal(providerSignalText)) return PROVIDER_OVERLOADED_FAILURE_CLASS;
+  return classifyReviewerFailure(classificationText, exitCode, err?.code, details);
 }
 
 function readTailFile(filePath, maxBytes = DEFAULT_TAIL_BYTES) {

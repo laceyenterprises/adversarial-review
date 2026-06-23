@@ -146,6 +146,29 @@ test('reviewer death-rate finding aggregates mixed failure classes over settled 
   assert.equal(snapshot.findings[0].details.excludedStatuses.join(','), 'running,cancelled');
 });
 
+test('reviewer health classifier recognizes server and service overload wording', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, { prNumber: 3, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });
+  insertReviewerPass(rootDir, {
+    prNumber: 3,
+    attemptNumber: 1,
+    status: 'failed',
+    metadata: { failureClass: 'The server is overloaded; retry later' },
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 3,
+    attemptNumber: 2,
+    status: 'failed',
+    metadata: { failureClass: 'The service is temporarily overloaded' },
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.equal(
+    snapshot.reviewer.failureRatios.find((row) => row.failureClass === PROVIDER_OVERLOADED_FAILURE_CLASS)?.failed,
+    2
+  );
+});
+
 test('unknown failure-rate finding fires on 6/10 failures from 2 distinct PRs in-window', () => {
   const rootDir = tempRoot();
   insertReviewRow(rootDir, { prNumber: 40, reviewStatus: 'posted', postedAt: '2026-05-25T17:00:00.000Z' });

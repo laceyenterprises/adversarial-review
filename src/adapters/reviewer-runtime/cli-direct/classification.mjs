@@ -14,11 +14,11 @@ const REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE = new RegExp(
 const LAUNCHCTL_BOOTSTRAP_ERROR_RE =
   /bootstrap failed|could not find domain|input\/output error|not privileged to set domain/;
 const PROVIDER_CONTEXT_RE =
-  /\b(?:provider|model|backend|upstream|anthropic|claude|openai|codex|gemini|api)\b/;
+  /\b(?:provider|model|backend|upstream|server|service|anthropic|claude|openai|codex|gemini|api)\b/;
 const PROVIDER_OVERLOADED_FORWARD_RE =
-  /\b(?:provider|model|backend|upstream|anthropic|claude|openai|codex|gemini|api)\b[^\r\n]{0,160}\boverloaded\b/;
+  /\b(?:provider|model|backend|upstream|server|service|anthropic|claude|openai|codex|gemini|api)\b[^\r\n]{0,160}\boverloaded\b/;
 const PROVIDER_OVERLOADED_REVERSE_RE =
-  /\boverloaded\b[^\r\n]{0,160}\b(?:provider|model|backend|upstream|anthropic|claude|openai|codex|gemini|api)\b/;
+  /\boverloaded\b[^\r\n]{0,160}\b(?:provider|model|backend|upstream|server|service|anthropic|claude|openai|codex|gemini|api)\b/;
 const PROVIDER_CAPACITY_RE =
   /\b(?:api|service|server|backend|provider|model)\s+(?:is\s+)?(?:at|over)\s+capacity\b/;
 

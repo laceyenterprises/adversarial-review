@@ -69,6 +69,14 @@ test('HTTP 529 and provider overload classify as provider-overloaded', () => {
     PROVIDER_OVERLOADED_FAILURE_CLASS
   );
   assert.equal(
+    classifyReviewerFailure('The server is overloaded; please retry later', 1),
+    PROVIDER_OVERLOADED_FAILURE_CLASS
+  );
+  assert.equal(
+    classifyReviewerFailure('The service is temporarily overloaded', 1),
+    PROVIDER_OVERLOADED_FAILURE_CLASS
+  );
+  assert.equal(
     classifyReviewerFailure('TypeScript overload resolution failed', 1),
     'unknown'
   );
@@ -92,7 +100,15 @@ test('reviewer signal wrapper preserves stdout-only non-overload classifications
       'Command failed with code 1',
       1
     ),
-    'oauth-broken'
+    'unknown'
+  );
+  assert.equal(
+    reviewerSignalAwareFailureClass(
+      { stdout: 'claude launchctl session bootstrap failed', stderr: 'Command failed', code: 1 },
+      'Command failed with code 1',
+      1
+    ),
+    'unknown'
   );
 });
 

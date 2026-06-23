@@ -53,11 +53,7 @@ import {
 } from './role-config.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE, loadConfigCached } from './config-loader.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
-import {
-  isNoneFindingsSentinelOnly,
-  parseBlockingFindingsSection,
-  parseNonBlockingFindingsSection,
-} from './kernel/remediation-reply.mjs';
+import classifyMergeAgentRescue, { parseReviewBody } from './merge-agent-rescue-classifier.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 import {
   readLatestWorkerRunStatusFromLedger,
@@ -5634,22 +5630,27 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
 // with `skip-blocking-findings-unknown` until a fresh structured review exists
 // or an operator applies a scoped override.
 function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
-  const parsed = parseBlockingFindingsSection(reviewBody);
-  if (parsed && parsed.length > 0) {
-    return { count: parsed.length, state: 'known' };
-  }
-  const match = String(reviewBody ?? '').match(/##\s+Blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
+  const parsed = classifyMergeAgentRescue({
+    reviewBody,
+    mergeable: 'UNKNOWN',
+    mergeStateStatus: 'UNKNOWN',
+    labels: [],
+    statusCheckRollup: [],
+    headSha: null,
+    reviewHeadSha: null,
+    operatorApprovalHeadSha: null,
+    operatorApprovalLabelEventId: null,
+    operatorApprovalActor: null,
+    operatorApprovalLabeledAt: null,
+  });
+  const sections = parseReviewBody(reviewBody);
   const normalizedVerdict = normalizeReviewVerdict(lastVerdict);
-  if (!match) {
+  if (!sections.blockingSectionPresent) {
     return normalizedVerdict === 'request-changes'
       ? { count: 0, state: 'unknown' }
       : { count: 0, state: 'known' };
   }
-  const section = match[1].trim();
-  if (!section) return { count: 0, state: 'known' };
-  return isNoneFindingsSentinelOnly(section)
-    ? { count: 0, state: 'known' }
-    : { count: 1, state: 'known' };
+  return { count: parsed.blockingFindings, state: 'known' };
 }
 
 // NOTE on the count strategy (review finding 2026-06-19, intentional divergence
@@ -5672,32 +5673,30 @@ function classifyNonBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
   const text = String(reviewBody ?? '');
   if (!text.trim()) return { count: 0, state: 'unknown' };
 
-  const match = text.match(/##\s+Non[-\s]+blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
+  const parsed = classifyMergeAgentRescue({
+    reviewBody,
+    mergeable: 'UNKNOWN',
+    mergeStateStatus: 'UNKNOWN',
+    labels: [],
+    statusCheckRollup: [],
+    headSha: null,
+    reviewHeadSha: null,
+    operatorApprovalHeadSha: null,
+    operatorApprovalLabelEventId: null,
+    operatorApprovalActor: null,
+    operatorApprovalLabeledAt: null,
+  });
+  const sections = parseReviewBody(reviewBody);
   const normalizedVerdict = normalizeReviewVerdict(lastVerdict);
   const verdictKey = normalizedVerdict === 'unknown'
     ? String(lastVerdict || '').trim().toLowerCase()
     : normalizedVerdict;
-  if (!match) {
+  if (!sections.nonBlockingSectionPresent) {
     return verdictKey === 'approved' || verdictKey === 'comment-only'
       ? { count: 0, state: 'known' }
       : { count: 0, state: 'unknown' };
   }
-
-  const section = match[1].trim();
-  if (!section) return { count: 0, state: 'known' };
-  if (isNoneFindingsSentinelOnly(section)) return { count: 0, state: 'known' };
-
-  const topLevelFindingBullets = section
-    .split(/\n/)
-    .filter((line) => /^-\s+\*\*.+?\*\*/.test(line));
-  if (topLevelFindingBullets.length > 0) {
-    return { count: topLevelFindingBullets.length, state: 'known' };
-  }
-  const parsed = parseNonBlockingFindingsSection(reviewBody);
-  return {
-    count: parsed && parsed.length > 0 ? parsed.length : 1,
-    state: 'known',
-  };
+  return { count: parsed.nonBlockingFindings, state: 'known' };
 }
 
 function readMergeAgentReviewFailureState(rootDir, { repo, prNumber, headSha = null } = {}) {
@@ -5750,7 +5749,20 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
     prNumber: candidate.prNumber,
     revisionRef: candidate.headSha,
   });
-  const lastVerdict = extractReviewVerdict(latestJob?.reviewBody);
+  const classification = classifyMergeAgentRescue({
+    reviewBody: latestJob?.reviewBody ?? null,
+    mergeable: candidate.mergeable || 'UNKNOWN',
+    mergeStateStatus: candidate.mergeStateStatus || 'UNKNOWN',
+    labels: normalizeLabelNames(candidate.labels),
+    statusCheckRollup: candidate.statusCheckRollup || [],
+    headSha: candidate.headSha || null,
+    reviewHeadSha: latestJob?.revisionRef || null,
+    operatorApprovalHeadSha: candidate.operatorApprovalEvent?.headSha || null,
+    operatorApprovalLabelEventId: candidate.operatorApprovalEvent?.id || candidate.operatorApprovalEvent?.nodeId || null,
+    operatorApprovalActor: candidate.operatorApprovalEvent?.actor || null,
+    operatorApprovalLabeledAt: candidate.operatorApprovalEvent?.createdAt || null,
+  });
+  const lastVerdict = classification.verdict;
   const reviewFailureState = readMergeAgentReviewFailureStateWithDb(rootDir, reviewStateDb, {
     repo: candidate.repo,
     prNumber: candidate.prNumber,
@@ -5765,7 +5777,14 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
     // The timeout-exhausted path has no fresh review for the remediated head.
     // Treat blocker state as unknown unless a scoped operator override accepts it.
     ? { count: 0, state: 'unknown' }
-    : classifyBlockingFindings(latestJob?.reviewBody, { lastVerdict });
+    : {
+        count: classification.blockingFindings,
+        state: parseReviewBody(latestJob?.reviewBody).blockingSectionPresent
+          ? 'known'
+          : normalizeReviewVerdict(lastVerdict) === 'request-changes'
+            ? 'unknown'
+            : 'known',
+      };
   return {
     ...candidate,
     lastVerdict,

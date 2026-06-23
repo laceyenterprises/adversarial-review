@@ -8,6 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  PROVIDER_OVERLOADED_FAILURE_CLASS,
   classifyReviewerFailure,
 } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 
@@ -54,6 +55,21 @@ test('HTTP 502/503/504 require routing-tier context', () => {
   assert.equal(classifyReviewerFailure('upstream returned status 502', 1), 'cascade');
   assert.equal(classifyReviewerFailure('HTTP/503 from API gateway', 1), 'cascade');
   assert.equal(classifyReviewerFailure('response: 504 from LiteLLM upstream', 1), 'cascade');
+});
+
+test('HTTP 529 and provider overload classify as provider-overloaded', () => {
+  assert.equal(
+    classifyReviewerFailure('API Error 529: overloaded_error from Anthropic provider', 1),
+    PROVIDER_OVERLOADED_FAILURE_CLASS
+  );
+  assert.equal(
+    classifyReviewerFailure('backend is overloaded; please retry later', 1),
+    PROVIDER_OVERLOADED_FAILURE_CLASS
+  );
+  assert.equal(
+    classifyReviewerFailure('TypeScript overload resolution failed', 1),
+    'unknown'
+  );
 });
 
 test('transient GitHub diff-fetch failures classify as cascade', () => {

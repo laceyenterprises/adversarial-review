@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import {
   CASCADE_FAILURE_CAP,
+  PROVIDER_OVERLOADED_FAILURE_CLASS,
   classifyReviewerFailure,
   clearCascadeState,
   getCascadeStatePath,
@@ -186,6 +187,10 @@ test('rate-limit and 5xx heuristics distinguish real 429s from cascades', () => 
   assert.equal(
     classifyReviewerFailure('RateLimitError: rate_limit_exceeded for current quota window', 1),
     'unknown'
+  );
+  assert.equal(
+    classifyReviewerFailure('API Error 529: provider overloaded; please retry later', 1),
+    PROVIDER_OVERLOADED_FAILURE_CLASS
   );
   assert.equal(
     classifyReviewerFailure('upstream retry exhausted after HTTP/1.1 503 from LiteLLM', 1),
@@ -1043,6 +1048,57 @@ test('settleReviewerAttempt records reviewer timeout class without burning attem
     assert.match(row.failure_message, /^\[reviewer-timeout\]/);
     assert.match(warnings.join('\n'), /Reviewer reviewer-timeout failure/);
     assert.equal(readCascadeState(rootDir, { repo, prNumber }).consecutiveTransientFailures, 1);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('settleReviewerAttempt records provider overload without burning attempts', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    const warnings = [];
+    const statements = {
+      markPosted: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      ),
+      markFailed: stmtMarkBugFailed(db),
+      releaseReviewLease: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+      ),
+      markCascadeFailed: stmtMarkCascadeFailed(db),
+      markPendingUpstream: stmtMarkPendingUpstream(db),
+      getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
+    };
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      result: {
+        ok: false,
+        error: 'API Error 529: provider overloaded',
+        failureClass: PROVIDER_OVERLOADED_FAILURE_CLASS,
+      },
+      failureAt: '2026-05-04T07:10:00.000Z',
+      maxRemediationRounds: 1,
+      statements,
+      log: { warn: (line) => warnings.push(line) },
+    });
+
+    const row = db.prepare(
+      'SELECT review_status, review_attempts, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber);
+    const state = readCascadeState(rootDir, { repo, prNumber });
+
+    assert.equal(row.review_status, 'failed');
+    assert.equal(row.review_attempts, 0);
+    assert.match(row.failure_message, new RegExp(`^\\[${PROVIDER_OVERLOADED_FAILURE_CLASS}\\]`));
+    assert.equal(state.lastFailureClass, PROVIDER_OVERLOADED_FAILURE_CLASS);
+    assert.deepEqual(state.transientFailureBreakdown, { [PROVIDER_OVERLOADED_FAILURE_CLASS]: 1 });
+    assert.match(warnings.join('\n'), /Reviewer provider-overloaded failure/);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

@@ -9,6 +9,7 @@ import {
   probeRoutingTierReadiness,
   probeRoutingTierReadinessWithRetry,
 } from '../src/routing-tier-readiness.mjs';
+import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 
 function mockResponse({ status = 200 } = {}) {
   return { status, ok: status >= 200 && status < 300 };
@@ -47,6 +48,18 @@ test('502 / 504 also produce readiness_http_{status}', async () => {
     assert.equal(result.reason, `readiness_http_${status}`);
     assert.equal(result.failureClass, 'cascade');
   }
+});
+
+test('529 provider overload is surfaced as provider-overloaded', async () => {
+  const fetchFn = async () => mockResponse({ status: 529 });
+  const result = await probeRoutingTierReadiness({
+    env: { WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED: '' },
+    fetchFn,
+  });
+  assert.equal(result.ready, false);
+  assert.equal(result.reason, 'readiness_http_529');
+  assert.equal(result.failureClass, PROVIDER_OVERLOADED_FAILURE_CLASS);
+  assert.match(result.failureMessage, /HTTP 529/);
 });
 
 test('ECONNREFUSED → ready: false with routing_tier_connection_refused', async () => {

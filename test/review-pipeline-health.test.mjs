@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -18,6 +19,8 @@ import {
   collectReviewPipelineHealth,
   renderReviewPipelinePrometheus,
 } from '../src/review-pipeline-health.mjs';
+import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
+import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 import { parseArgs } from '../src/review-pipeline-health-cli.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 
@@ -330,6 +333,21 @@ test('collector emits a page finding when an existing review-state ledger cannot
   assert.deepEqual(finding.details, snapshot.reviewStateLedger);
 });
 
+test('collector skips unreadable follow-up job queues instead of failing the snapshot', () => {
+  const rootDir = tempRoot();
+  const unreadableDir = path.join(rootDir, 'data', 'follow-up-jobs', 'in-progress');
+  mkdirSync(unreadableDir, { recursive: true });
+  chmodSync(unreadableDir, 0o000);
+  try {
+    const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+    assert.equal(snapshot.reviewStateLedger.exists, false);
+    assert.equal(snapshot.followUpQueues.states.in_progress, 0);
+  } finally {
+    chmodSync(unreadableDir, 0o700);
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('legacy fallback death-rate denominator counts only settled review rows', () => {
   const rootDir = tempRoot();
   insertReviewRow(rootDir, {
@@ -495,6 +513,64 @@ test('merge stalled finding skips settled jobs with no review row', () => {
   assert.equal(snapshot.mergeStalls.candidates.length, 0);
 });
 
+test('collector surfaces active provider overload backoffs and quota holds', () => {
+  const rootDir = tempRoot();
+  const overloadedPr = 960;
+  const quotaPr = 961;
+  openDb(rootDir).close();
+
+  const cascadeStateDir = path.join(rootDir, 'data', 'cascade-state');
+  mkdirSync(cascadeStateDir, { recursive: true });
+  writeFileSync(
+    path.join(cascadeStateDir, `${encodeURIComponent(REPO)}__${overloadedPr}.json`),
+    `${JSON.stringify({
+      consecutiveTransientFailures: 2,
+      transientFailureBreakdown: { [PROVIDER_OVERLOADED_FAILURE_CLASS]: 2 },
+      lastFailureClass: PROVIDER_OVERLOADED_FAILURE_CLASS,
+      lastFailureAt: '2026-05-25T17:58:00.000Z',
+      nextRetryAfter: '2026-05-25T18:05:00.000Z',
+      backoffMinutes: 8,
+    }, null, 2)}\n`
+  );
+  insertReviewRow(rootDir, {
+    prNumber: quotaPr,
+    reviewStatus: 'failed',
+    reviewAttempts: 1,
+    lastAttemptedAt: '2026-05-25T17:55:00.000Z',
+    failedAt: '2026-05-25T17:55:00.000Z',
+    failureMessage: '[quota-exhausted] usage limit; try again at 2026-05-25T18:10:00Z',
+  });
+  const db = openDb(rootDir);
+  try {
+    db.prepare('UPDATE reviewed_prs SET quota_reset_at_utc = ? WHERE repo = ? AND pr_number = ?')
+      .run('2026-05-25T18:10:00.000Z', REPO, quotaPr);
+  } finally {
+    db.close();
+  }
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.equal(snapshot.reviewerDegradation.active, 2);
+  assert.equal(
+    snapshot.reviewerDegradation.byClass.find((row) => row.failureClass === PROVIDER_OVERLOADED_FAILURE_CLASS)?.states['transient-backoff'],
+    1
+  );
+  assert.equal(
+    snapshot.reviewerDegradation.byClass.find((row) => row.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS)?.states['quota-hold'],
+    1
+  );
+  assert.ok(findingCodes(snapshot).includes('review:reviewer_degradation_active'));
+
+  const output = renderReviewPipelinePrometheus(snapshot);
+  assert.match(
+    output,
+    /^review_pipeline_reviewer_degradation_active\{failure_class="provider-overloaded",state="transient-backoff"\} 1$/m
+  );
+  assert.match(
+    output,
+    /^review_pipeline_reviewer_degradation_active\{failure_class="quota-exhausted",state="quota-hold"\} 1$/m
+  );
+});
+
 test('Grafana dashboard JSON references only exported review pipeline metric names', () => {
   const dashboard = JSON.parse(readFileSync('observability/grafana/review-pipeline-health.json', 'utf8'));
   const metricNames = new Set(REVIEW_PIPELINE_HEALTH_METRICS);
@@ -527,15 +603,19 @@ test('documented Sentinel findings match emitted finding definition codes', () =
   }
 });
 
-test('unknown failure-rate finding definition code matches the spec contract and dashboard includes the unknown panels', () => {
+test('failure-rate/degradation finding definitions match the spec contract and dashboard panels', () => {
   assert.ok(
     REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS.some((definition) => definition.code === 'review:unknown_failure_rate_high')
+  );
+  assert.ok(
+    REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS.some((definition) => definition.code === 'review:reviewer_degradation_active')
   );
 
   const dashboard = JSON.parse(readFileSync('observability/grafana/review-pipeline-health.json', 'utf8'));
   const titles = dashboard.panels.map((panel) => panel.title);
   assert.ok(titles.includes('Unknown Failure Rate'));
   assert.ok(titles.includes('Unknown Failure Distinct PRs'));
+  assert.ok(titles.includes('Reviewer Degradation Holds'));
 });
 
 test('Prometheus renderer emits every dashboard metric at least once', () => {

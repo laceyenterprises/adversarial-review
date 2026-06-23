@@ -6,6 +6,7 @@ import {
 
 const BUG_ERROR_CODES = new Set(['ENOENT', 'EACCES', 'EPERM']);
 const CASCADE_ERROR_CODES = new Set(['ETIMEDOUT']);
+const PROVIDER_OVERLOADED_FAILURE_CLASS = 'provider-overloaded';
 const REVIEWER_TIMEOUT_MESSAGE_RE = /command timed out after \d+ms/;
 const REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE = new RegExp(
   `command ${escapeRegExp(PROGRESS_TIMEOUT_REASON_PREFIX)} \\d+ms`
@@ -46,6 +47,13 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   const mentionsReal429 =
     /\b429\b|too many requests|http\s*429|rate_limit_exceeded|ratelimiterror|quota/.test(lower);
   const mentionsRateLimit = /rate.?limit/.test(lower);
+  const mentionsProviderOverloaded =
+    /\b529\b/.test(lower) ||
+    /\boverloaded[_ -]?error\b/.test(lower) ||
+    /\b(?:provider|model|backend|upstream|anthropic|claude|openai|codex|gemini|api)\b.*\boverloaded\b/.test(lower) ||
+    /\boverloaded\b.*\b(?:provider|model|backend|upstream|anthropic|claude|openai|codex|gemini|api)\b/.test(lower) ||
+    /\b(?:api|service|server|backend|provider|model)\s+(?:is\s+)?(?:at|over)\s+capacity\b/.test(lower) ||
+    /\btemporarily\s+overloaded\b|\bover\s+capacity\b/.test(lower);
   // Routing-tier unavailability: the LiteLLM proxy on 127.0.0.1:4000 is the
   // single bottleneck every Claude/Codex CLI reviewer goes through. When the
   // proxy bounces (os-restart, main-catchup classification, post-reboot
@@ -150,6 +158,10 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return 'oauth-broken';
   }
 
+  if (mentionsProviderOverloaded) {
+    return PROVIDER_OVERLOADED_FAILURE_CLASS;
+  }
+
   // Cascade wins over both wall-timeout and progress-timeout markers. Once the
   // run has clear upstream-cascade evidence, operators should treat the timeout
   // text as a symptom of the exhausted upstream path rather than the primary
@@ -184,6 +196,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
 }
 
 export {
+  PROVIDER_OVERLOADED_FAILURE_CLASS,
   classifyReviewerFailure,
   isReviewerSubprocessTimeout,
 };

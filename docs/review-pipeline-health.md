@@ -1,10 +1,11 @@
 # Review Pipeline Health
 
 `src/review-pipeline-health.mjs` reads the live `data/reviews.db` ledger plus
-`data/follow-up-jobs/` and emits both Prometheus metrics and Sentinel-shaped
-findings. The collector opens `reviews.db` read-only, never runs schema
-convergence from the metrics path, and treats missing review-state tables or
-columns as an empty snapshot instead of mutating the watcher-owned database.
+`data/follow-up-jobs/` and `data/cascade-state/`, then emits both Prometheus
+metrics and Sentinel-shaped findings. The collector opens `reviews.db`
+read-only, never runs schema convergence from the metrics path, and treats
+missing review-state tables or columns as an empty snapshot instead of mutating
+the watcher-owned database.
 
 Run locally:
 
@@ -26,6 +27,11 @@ The Grafana dashboard lives at
   failed reviewer attempts by `failure_class` within the configured
   unknown-rate alert window. This drives the dashboard sub-panel that shows
   whether an unknown spike is one flapping PR or a cross-PR incident.
+- `review_pipeline_reviewer_degradation_active`: active reviewer degradation
+  count by `failure_class` and `state`. `provider-overloaded` appears as
+  `transient-backoff` for HTTP 529/backend capacity signals, while
+  `quota-exhausted` appears as `quota-hold` until the stored provider reset
+  time or fallback window clears.
 - `review_pipeline_health_collector_up`: 1 when the collector can open
   `reviews.db` read-only, 0 when the review-state ledger is missing or
   unreadable. Page on the specific unreadable-ledger Sentinel finding for the
@@ -56,6 +62,7 @@ The Grafana dashboard lives at
 | `review:review_state_ledger_unreadable` | `reviews.db` exists but cannot be opened read-only | page | the collector can open `reviews.db` read-only again |
 | `review:reviewer_death_rate_high` | failed reviewer attempts are >50% of completed+failed attempts over 1h, with at least 3 completed+failed attempts; `running` and `cancelled` are excluded from the denominator | page | the settled-attempt window falls below threshold or the minimum-attempt guard |
 | `review:unknown_failure_rate_high` | unknown-classified failures are >30% of failures over 15m, with at least 5 failures and at least 2 distinct PRs contributing unknown failures | page | the failure window falls back to threshold or below, the sample floor is no longer met, or unknown failures collapse to fewer than 2 PRs |
+| `review:reviewer_degradation_active` | at least one PR is currently held by `provider-overloaded` transient backoff or `quota-exhausted` quota hold | page | no active provider-overload backoff or quota hold remains |
 | `review:queue_starvation` | oldest pending first-pass row is >30m old | page | no pending row exceeds the age threshold |
 | `review:remediation_backlog` | `follow-up-jobs/pending` has >5 jobs | ticket | pending job count returns to threshold or below |
 | `review:merge_stalled` | a `stopped:review-settled` job remains open for >3 watcher ticks | page | the PR is merged/closed or the settled job is no longer past threshold |

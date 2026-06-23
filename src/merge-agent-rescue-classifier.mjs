@@ -32,7 +32,7 @@ function parseVerdict(reviewBody) {
   if (section == null) return null;
   const lines = section
     .split('\n')
-    .map((line) => line.trim())
+    .map((line) => line.trim().replace(/^(?:[-*]\s+)+/, '').replace(/^[*_]+|[*_]+$/g, ''))
     .filter(Boolean);
   let verdict = null;
   for (const line of lines) {
@@ -54,16 +54,31 @@ function topLevelBulletIndexes(lines) {
 function sectionIsNone(lines) {
   const nonEmpty = lines.map((line) => line.trimEnd()).filter((line) => line.trim());
   if (nonEmpty.length === 0) return true;
-  if (!/^-\s+None\.(?:\s+.*)?$/.test(nonEmpty[0].trim())) return false;
+  if (!/^-\s+none\.?(?:\s+.*)?$/i.test(nonEmpty[0].trim())) return false;
   return nonEmpty.slice(1).every((line) => /^\s+/.test(line));
 }
 
 function parseNestedField(blockLines, label) {
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const pattern = new RegExp(`^\\s+-\\s+\\*\\*${escaped}:\\*\\*\\s*(.*)$`);
-  for (const line of blockLines) {
+  const nestedFieldPattern = /^\s+-\s+\*\*[^*]+:\*\*/;
+  for (let index = 0; index < blockLines.length; index += 1) {
+    const line = blockLines[index];
     const match = line.match(pattern);
-    if (match) return normalizeOptionalString(match[1]);
+    if (!match) continue;
+
+    const parts = [match[1].trim()];
+    for (let next = index + 1; next < blockLines.length; next += 1) {
+      const nextLine = blockLines[next];
+      if (/^-\s+/.test(nextLine) || nestedFieldPattern.test(nextLine)) break;
+      if (!nextLine.trim()) {
+        parts.push('');
+        continue;
+      }
+      if (!/^\s+/.test(nextLine)) break;
+      parts.push(nextLine.trim());
+    }
+    return normalizeOptionalString(parts.join('\n'));
   }
   return null;
 }
@@ -196,7 +211,10 @@ function classify(input = {}) {
     };
   }
 
-  if ((verdict === 'Approved' || verdict === 'Comment only') && (blockingFindings > 0 || nonBlockingFindings > 0)) {
+  if (
+    (verdict === 'Approved' && blockingFindings > 0)
+    || (verdict === 'Comment only' && (blockingFindings > 0 || nonBlockingFindings > 0))
+  ) {
     return {
       decision: 'inconclusive',
       reason: 'clean-verdict-with-findings',

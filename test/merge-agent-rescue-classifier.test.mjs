@@ -43,6 +43,8 @@ function inputFor(name, overrides = {}) {
 const decisionFixtures = [
   ['comment-only-merge-eligible.md', 'merge-eligible'],
   ['approved-merge-eligible.md', 'merge-eligible'],
+  ['approved-with-non-blocking-findings.md', 'merge-eligible'],
+  ['formatted-verdict-and-none-variants.md', 'merge-eligible'],
   ['request-changes-non-blocking-only.md', 'remediation-eligible'],
   ['request-changes-with-blockers-addressable.md', 'remediation-eligible'],
   ['request-changes-with-blockers-auth.md', 'escalate-blockers'],
@@ -129,6 +131,23 @@ test('None sentinel tolerates trailing prose on the same line', () => {
   assert.equal(result.nonBlockingFindings, 0);
 });
 
+test('Approved reviews ignore non-blocking findings for merge eligibility', () => {
+  const result = classify(inputFor('approved-with-non-blocking-findings.md'));
+
+  assert.equal(result.decision, 'merge-eligible');
+  assert.equal(result.reason, 'clean-review');
+  assert.equal(result.blockingFindings, 0);
+  assert.equal(result.nonBlockingFindings, 1);
+});
+
+test('formatted verdicts and none sentinel variants are accepted', () => {
+  const result = classify(inputFor('formatted-verdict-and-none-variants.md'));
+
+  assert.equal(result.decision, 'merge-eligible');
+  assert.equal(result.blockingFindings, 0);
+  assert.equal(result.nonBlockingFindings, 0);
+});
+
 test('check rollup ignores stale rows and the adversarial gate context', () => {
   const result = classify(inputFor('comment-only-merge-eligible.md', {
     statusCheckRollup: [
@@ -148,6 +167,20 @@ test('parsed findings expose normalized category and structured fields', () => {
   assert.equal(parsed.parsedFindings[0].category, 'correctness');
   assert.equal(parsed.parsedFindings[0].file, '`src/merge-agent-rescue-classifier.mjs`');
   assert.equal(parsed.parsedFindings[0].recommendedFix, 'Check `reviewHeadSha` against `headSha` before any merge/remediation routing.');
+});
+
+test('parsed findings retain multi-line nested fields', () => {
+  const parsed = parseReviewBody(fixture('request-changes-multiline-field.md'));
+
+  assert.equal(parsed.blocking.count, 1);
+  assert.equal(
+    parsed.parsedFindings[0].problem,
+    'The first sentence is on the label line.\nThe second sentence is wrapped onto the next indented line.\n\nThe third sentence starts a new paragraph.',
+  );
+  assert.equal(
+    parsed.parsedFindings[0].recommendedFix,
+    'Accumulate indented continuation lines until the next nested field.',
+  );
 });
 
 test('watcher smoke: merge-eligible fixture still dispatches', () => {

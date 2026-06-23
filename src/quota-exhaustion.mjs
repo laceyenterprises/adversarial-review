@@ -66,7 +66,19 @@ function _matches(text, patterns) {
   return patterns.some((re) => re.test(text));
 }
 
+function fixedTimeZoneOffsetMs(timeZone) {
+  const match = String(timeZone || '').trim().match(/^(?:UTC|GMT)\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?$/i);
+  if (!match) return null;
+  const hours = Number(match[2]);
+  const minutes = match[3] == null ? 0 : Number(match[3]);
+  if (hours > 23 || minutes > 59) return null;
+  const sign = match[1] === '-' ? -1 : 1;
+  return sign * ((hours * 60 + minutes) * 60 * 1000);
+}
+
 function timeZoneOffsetMs(timeZone, utcMs) {
+  const fixedOffsetMs = fixedTimeZoneOffsetMs(timeZone);
+  if (fixedOffsetMs != null) return fixedOffsetMs;
   try {
     const parts = new Intl.DateTimeFormat('en-US', {
       timeZone,
@@ -133,7 +145,7 @@ function parseQuotaResetAt(text, { nowMs = null } = {}) {
     if (d && !Number.isNaN(d.getTime())) return d.toISOString();
   }
   // "try again at Jun 17th, 2026 5:39 PM" — strip the ordinal suffix Date can't parse.
-  const human = t.match(/(?:try again at\s+|resets?\s+(?:at\s+)?)([A-Za-z]{3,9}\s+\d{1,2})(?:st|nd|rd|th)?(,?\s+\d{4})?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([A-Za-z0-9_+/-]+)\))?/i);
+  const human = t.match(/(?:try again at\s+|resets?\s+(?:at\s+)?)([A-Za-z]{3,9}\s+\d{1,2})(?:st|nd|rd|th)?(,?\s+\d{4})?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([A-Za-z0-9_+\/:\-]+)\))?/i);
   if (human) {
     const base = nowMs != null ? new Date(nowMs) : null;
     const explicitYear = Boolean(human[2]);

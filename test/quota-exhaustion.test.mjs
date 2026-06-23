@@ -107,18 +107,35 @@ test('parseQuotaResetAt handles Claude weekly reset without a year or minute', (
   assert.equal(iso, '2026-06-27T10:00:00.000Z');
 });
 
-test('parseQuotaResetAt falls back instead of throwing on invalid timezone labels', () => {
-  assert.doesNotThrow(() => {
+test('parseQuotaResetAt handles fixed UTC/GMT offset timezone labels exactly', () => {
+  assert.equal(
     parseQuotaResetAt(
       "You've hit your weekly limit · resets Jun 27 at 3am (GMT-8)",
       { nowMs: Date.parse('2026-06-23T00:39:39.000Z') },
-    );
-  });
+    ),
+    '2026-06-27T11:00:00.000Z'
+  );
   const iso = parseQuotaResetAt(
     "You've hit your weekly limit · resets Jun 27 at 3am (UTC-5)",
     { nowMs: Date.parse('2026-06-23T00:39:39.000Z') },
   );
-  assert.equal(iso, '2026-06-27T10:00:00.000Z');
+  assert.equal(iso, '2026-06-27T08:00:00.000Z');
+  assert.equal(
+    parseQuotaResetAt(
+      "You've hit your weekly limit · resets Jun 27 at 3am (UTC+05:30)",
+      { nowMs: Date.parse('2026-06-23T00:39:39.000Z') },
+    ),
+    '2026-06-26T21:30:00.000Z'
+  );
+});
+
+test('parseQuotaResetAt falls back instead of throwing on invalid timezone labels', () => {
+  assert.doesNotThrow(() => {
+    parseQuotaResetAt(
+      "You've hit your weekly limit · resets Jun 27 at 3am (UTC-invalid)",
+      { nowMs: Date.parse('2026-06-23T00:39:39.000Z') },
+    );
+  });
 });
 
 test('parseQuotaResetAt infers the year from nowMs when the provider omits it', () => {

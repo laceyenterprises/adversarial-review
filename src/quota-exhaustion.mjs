@@ -46,6 +46,7 @@ const GENERIC_QUOTA_PATTERNS = [
 ];
 
 const CODEX_HUMAN_RESET_TIME_ZONE = 'America/Los_Angeles';
+const HUMAN_RESET_YEAR_CROSSOVER_THRESHOLD_MS = 180 * 24 * 60 * 60 * 1000;
 const MONTH_INDEX_BY_PREFIX = new Map([
   ['jan', 0],
   ['feb', 1],
@@ -155,7 +156,7 @@ function parseQuotaResetAt(text, { nowMs = null } = {}) {
         minute,
       }, timeZone)
       : null;
-    if (d && base && !explicitYear && d.getTime() <= base.getTime()) {
+    if (d && base && !explicitYear && base.getTime() - d.getTime() > HUMAN_RESET_YEAR_CROSSOVER_THRESHOLD_MS) {
       year = String(Number(year) + 1);
       d = wallTimeInZoneToDate({
         year: Number(year),

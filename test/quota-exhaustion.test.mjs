@@ -134,6 +134,18 @@ test('parseQuotaResetAt infers omitted year from the reset timezone local date',
   assert.equal(iso, '2026-01-01T04:00:00.000Z');
 });
 
+test('parseQuotaResetAt does not roll a just-elapsed no-year reset into next year', () => {
+  const nowMs = Date.parse('2026-06-27T10:05:00Z');
+  const iso = parseQuotaResetAt('resets Jun 27 at 3am (America/Los_Angeles)', { nowMs });
+  assert.equal(iso, '2026-06-27T10:00:00.000Z');
+});
+
+test('parseQuotaResetAt rolls a stale no-year reset across a genuine year boundary', () => {
+  const nowMs = Date.parse('2026-12-31T12:00:00Z');
+  const iso = parseQuotaResetAt('resets Jan 2 at 3am (America/Los_Angeles)', { nowMs });
+  assert.equal(iso, '2027-01-02T11:00:00.000Z');
+});
+
 test('parseQuotaResetAt handles Claude clock-only reset times before the local reset', () => {
   const base = new Date(2026, 5, 17, 12, 0, 0, 0);
   const iso = parseQuotaResetAt('Claude usage limit reached; resets at 5:39 PM', {

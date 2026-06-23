@@ -348,6 +348,7 @@ function sourceKind(source) {
   if (typeof source !== 'string' || source === '') return 'default';
   if (source.startsWith('env:')) return 'env';
   if (source === 'code-default') return 'default';
+  if (source === 'cli') return 'cli';
   return 'file';
 }
 

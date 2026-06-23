@@ -524,3 +524,26 @@ test('CFGDRIFT-01 gemini mode env alias still overrides file and reports env sou
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('CFGDRIFT-01 gemini mode source trace reports cli overrides as cli', () => {
+  const resolved = resolveGeminiReviewerModeWithSource({
+    topPath: '/dev/null',
+    modulePaths: ['/dev/null'],
+    loaderImpl: () => ({
+      get(key, defaultValue) {
+        return key === 'reviewer.gemini.mode' ? 'always-on' : defaultValue;
+      },
+      resolutionTrace(key) {
+        return key === 'reviewer.gemini.mode'
+          ? [{ source: 'cli', value: 'always-on', path: null }]
+          : [];
+      },
+    }),
+  });
+
+  assert.equal(resolved.mode, 'always-on');
+  assert.equal(resolved.rawValue, 'always-on');
+  assert.equal(resolved.source, 'cli');
+  assert.equal(resolved.sourceDetail, 'cli');
+  assert.equal(resolved.path, null);
+});

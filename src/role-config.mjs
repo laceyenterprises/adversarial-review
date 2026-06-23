@@ -136,12 +136,10 @@ function allowedForLegacyMessage(canonicalKey, allowedRaw) {
   return tokens.join(', ');
 }
 
-// The role-pin / optional string env vars (both canonical and legacy aliases) treat empty
-// / whitespace-only values as "unset". This preserves the back-compat
-// behavior of the pre-CFG-02 resolvers — operators have long relied on
-// `ENV=` and `unset ENV` being equivalent for these knobs. This only
-// affects these string-typed optional knobs; the main config loader keeps its
-// own bool/int coercion rules.
+// These role/config env vars (both canonical and legacy aliases) treat empty /
+// whitespace-only values as "unset". This preserves the back-compat behavior
+// of the pre-CFG-02 resolvers — operators have long relied on `ENV=` and
+// `unset ENV` being equivalent for these knobs.
 const ROLE_ENV_NAMES_TO_BLANK_PRUNE = new Set([
   'AGENT_OS_ROLES_REVIEWER',
   'ADVERSARIAL_REVIEW_DEFAULT_REVIEWER',
@@ -151,6 +149,18 @@ const ROLE_ENV_NAMES_TO_BLANK_PRUNE = new Set([
   'ADVERSARIAL_REVIEW_MERGE_AGENT_WORKER_CLASS',
   'AGENT_OS_REVIEWER_GEMINI_MODE',
   'ADVERSARIAL_REVIEW_GEMINI_REVIEWER_MODE',
+  'AGENT_OS_REVIEWER_MEMORY_PRESSURE_PROJECTED_HEADROOM_FLOOR_MB',
+  'ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_PROJECTED_HEADROOM_FLOOR_MB',
+  'AGENT_OS_REVIEWER_MEMORY_PRESSURE_ELEVATED_AVAILABLE_MB',
+  'ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_ELEVATED_AVAILABLE_MB',
+  'AGENT_OS_REVIEWER_MEMORY_PRESSURE_CRITICAL_AVAILABLE_MB',
+  'ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_CRITICAL_AVAILABLE_MB',
+  'AGENT_OS_REVIEWER_MEMORY_PRESSURE_ELEVATED_SWAP_USED_PCT',
+  'ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_ELEVATED_SWAP_USED_PCT',
+  'AGENT_OS_REVIEWER_MEMORY_PRESSURE_CRITICAL_SWAP_USED_PCT',
+  'ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_CRITICAL_SWAP_USED_PCT',
+  'AGENT_OS_REVIEWER_MEMORY_PRESSURE_SWAP_PRESSURE_AVAILABLE_MB',
+  'ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_SWAP_PRESSURE_AVAILABLE_MB',
   'AGENT_OS_REVIEWER_REVIEW_POPULATION_RETRY_MAX_ATTEMPTS',
   'ADVERSARIAL_REVIEW_POPULATION_RETRY_MAX_ATTEMPTS',
   'AGENT_OS_REVIEWER_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS',

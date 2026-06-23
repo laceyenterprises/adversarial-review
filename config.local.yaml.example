@@ -2,6 +2,39 @@
 # Copy relevant keys into config.local.yaml; this example is not loaded.
 
 reviewer:
+  # Memory-pressure profile examples. Uncomment one profile on each host and
+  # tune the numbers after observing local reviewer behavior.
+  #
+  # Small laptop / 16 GB:
+  # memory:
+  #   pressure:
+  #     projected_headroom_floor_mb: 1536
+  #     elevated_available_mb: 3072
+  #     critical_available_mb: 1536
+  #     elevated_swap_used_pct: 80.0
+  #     critical_swap_used_pct: 90.0
+  #     swap_pressure_available_mb: 4096
+  #
+  # Standard laptop / 32-64 GB:
+  # memory:
+  #   pressure:
+  #     projected_headroom_floor_mb: 1024
+  #     elevated_available_mb: 2048
+  #     critical_available_mb: 1024
+  #     elevated_swap_used_pct: 85.0
+  #     critical_swap_used_pct: 95.0
+  #     swap_pressure_available_mb: 8192
+  #
+  # Large workstation / 96+ GB:
+  # memory:
+  #   pressure:
+  #     projected_headroom_floor_mb: 2048
+  #     elevated_available_mb: 4096
+  #     critical_available_mb: 2048
+  #     elevated_swap_used_pct: 90.0
+  #     critical_swap_used_pct: 98.0
+  #     swap_pressure_available_mb: 16384
+
   gemini:
     # Default is cli. Antigravity mode requires at least one account entry.
     runtime: antigravity

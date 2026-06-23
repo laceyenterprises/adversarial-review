@@ -1358,6 +1358,54 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          memory: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              pressure: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  projected_headroom_floor_mb: {
+                    __type: TYPE_INT,
+                    __default: 1024,
+                    __min: 0,
+                    __max: 65536,
+                  },
+                  elevated_available_mb: {
+                    __type: TYPE_INT,
+                    __default: 2048,
+                    __min: 0,
+                    __max: 131072,
+                  },
+                  critical_available_mb: {
+                    __type: TYPE_INT,
+                    __default: 1024,
+                    __min: 0,
+                    __max: 131072,
+                  },
+                  elevated_swap_used_pct: {
+                    __type: TYPE_FLOAT,
+                    __default: 85.0,
+                    __min: 0.0,
+                    __max: 100.0,
+                  },
+                  critical_swap_used_pct: {
+                    __type: TYPE_FLOAT,
+                    __default: 95.0,
+                    __min: 0.0,
+                    __max: 100.0,
+                  },
+                  swap_pressure_available_mb: {
+                    __type: TYPE_INT,
+                    __default: 8192,
+                    __min: 0,
+                    __max: 131072,
+                  },
+                },
+              },
+            },
+          },
           timeout_ms: { __type: TYPE_INT, __default: 1200000 },
           // The reviewer is also killed if it makes no progress (no output
           // event) for this many ms. Distinct from the total wall-clock
@@ -1607,6 +1655,30 @@ export const ENV_ALIASES = {
   'reviewer.no_progress_timeout_ms': {
     canonical: 'AGENT_OS_REVIEWER_NO_PROGRESS_TIMEOUT_MS',
     aliases: [['ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS', identity]],
+  },
+  'reviewer.memory.pressure.projected_headroom_floor_mb': {
+    canonical: 'AGENT_OS_REVIEWER_MEMORY_PRESSURE_PROJECTED_HEADROOM_FLOOR_MB',
+    aliases: [['ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_PROJECTED_HEADROOM_FLOOR_MB', identity]],
+  },
+  'reviewer.memory.pressure.elevated_available_mb': {
+    canonical: 'AGENT_OS_REVIEWER_MEMORY_PRESSURE_ELEVATED_AVAILABLE_MB',
+    aliases: [['ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_ELEVATED_AVAILABLE_MB', identity]],
+  },
+  'reviewer.memory.pressure.critical_available_mb': {
+    canonical: 'AGENT_OS_REVIEWER_MEMORY_PRESSURE_CRITICAL_AVAILABLE_MB',
+    aliases: [['ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_CRITICAL_AVAILABLE_MB', identity]],
+  },
+  'reviewer.memory.pressure.elevated_swap_used_pct': {
+    canonical: 'AGENT_OS_REVIEWER_MEMORY_PRESSURE_ELEVATED_SWAP_USED_PCT',
+    aliases: [['ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_ELEVATED_SWAP_USED_PCT', identity]],
+  },
+  'reviewer.memory.pressure.critical_swap_used_pct': {
+    canonical: 'AGENT_OS_REVIEWER_MEMORY_PRESSURE_CRITICAL_SWAP_USED_PCT',
+    aliases: [['ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_CRITICAL_SWAP_USED_PCT', identity]],
+  },
+  'reviewer.memory.pressure.swap_pressure_available_mb': {
+    canonical: 'AGENT_OS_REVIEWER_MEMORY_PRESSURE_SWAP_PRESSURE_AVAILABLE_MB',
+    aliases: [['ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_SWAP_PRESSURE_AVAILABLE_MB', identity]],
   },
   'reviewer.review_population_retry.max_attempts': {
     canonical: 'AGENT_OS_REVIEWER_REVIEW_POPULATION_RETRY_MAX_ATTEMPTS',

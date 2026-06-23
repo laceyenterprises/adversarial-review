@@ -2026,6 +2026,58 @@ test('roles.reviewer accepts gemini from the legacy default reviewer env', () =>
   }
 });
 
+test('reviewer memory pressure thresholds load from YAML and env aliases', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      reviewer:
+        memory:
+          pressure:
+            projected_headroom_floor_mb: 2048
+            elevated_available_mb: 4096
+            critical_available_mb: 2048
+            elevated_swap_used_pct: 90.0
+            critical_swap_used_pct: 98.0
+            swap_pressure_available_mb: 16384
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('reviewer.memory.pressure.projected_headroom_floor_mb'), 2048);
+    assert.equal(cfg.get('reviewer.memory.pressure.elevated_available_mb'), 4096);
+    assert.equal(cfg.get('reviewer.memory.pressure.critical_available_mb'), 2048);
+    assert.equal(cfg.get('reviewer.memory.pressure.elevated_swap_used_pct'), 90.0);
+    assert.equal(cfg.get('reviewer.memory.pressure.critical_swap_used_pct'), 98.0);
+    assert.equal(cfg.get('reviewer.memory.pressure.swap_pressure_available_mb'), 16384);
+
+    const canonicalCfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_REVIEWER_MEMORY_PRESSURE_SWAP_PRESSURE_AVAILABLE_MB: '24576',
+      },
+    });
+    assert.equal(canonicalCfg.get('reviewer.memory.pressure.swap_pressure_available_mb'), 24576);
+    assert.equal(
+      canonicalCfg.resolutionTrace('reviewer.memory.pressure.swap_pressure_available_mb').at(-1).source,
+      'env:AGENT_OS_REVIEWER_MEMORY_PRESSURE_SWAP_PRESSURE_AVAILABLE_MB',
+    );
+
+    const legacyCfg = loadConfig({
+      topPath: top,
+      env: {
+        ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_PROJECTED_HEADROOM_FLOOR_MB: '3072',
+      },
+    });
+    assert.equal(legacyCfg.get('reviewer.memory.pressure.projected_headroom_floor_mb'), 3072);
+    assert.equal(
+      legacyCfg.resolutionTrace('reviewer.memory.pressure.projected_headroom_floor_mb').at(-1).source,
+      'env:ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_PROJECTED_HEADROOM_FLOOR_MB',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('canonical + alias same value ok', () => {
   const tmp = freshTmp();
   try {

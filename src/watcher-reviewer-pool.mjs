@@ -7,6 +7,14 @@ import { loadRoleConfig } from './role-config.mjs';
 
 const DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 3;
 const DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS = 120_000;
+const DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG = Object.freeze({
+  projectedHeadroomFloorMb: 1024,
+  elevatedAvailableMb: 2048,
+  criticalAvailableMb: 1024,
+  elevatedSwapUsedPct: 85.0,
+  criticalSwapUsedPct: 95.0,
+  swapPressureAvailableMb: 8192,
+});
 
 function parseBooleanFlag(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -22,6 +30,52 @@ function parsePositiveInteger(value, fallback) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function finiteNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizeReviewerMemoryPressureConfig(config = {}) {
+  return {
+    projectedHeadroomFloorMb: Math.max(
+      0,
+      Math.trunc(finiteNumber(
+        config.projectedHeadroomFloorMb ?? config.projected_headroom_floor_mb,
+        DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG.projectedHeadroomFloorMb
+      ))
+    ),
+    elevatedAvailableMb: Math.max(
+      0,
+      Math.trunc(finiteNumber(
+        config.elevatedAvailableMb ?? config.elevated_available_mb,
+        DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG.elevatedAvailableMb
+      ))
+    ),
+    criticalAvailableMb: Math.max(
+      0,
+      Math.trunc(finiteNumber(
+        config.criticalAvailableMb ?? config.critical_available_mb,
+        DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG.criticalAvailableMb
+      ))
+    ),
+    elevatedSwapUsedPct: finiteNumber(
+      config.elevatedSwapUsedPct ?? config.elevated_swap_used_pct,
+      DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG.elevatedSwapUsedPct
+    ),
+    criticalSwapUsedPct: finiteNumber(
+      config.criticalSwapUsedPct ?? config.critical_swap_used_pct,
+      DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG.criticalSwapUsedPct
+    ),
+    swapPressureAvailableMb: Math.max(
+      0,
+      Math.trunc(finiteNumber(
+        config.swapPressureAvailableMb ?? config.swap_pressure_available_mb,
+        DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG.swapPressureAvailableMb
+      ))
+    ),
+  };
+}
+
 function _resolveFirstPassPoolMaxFromCfg(env = process.env, options = {}) {
   // CFG-01 anchor: `watcher.first_pass_reviewer_pool_max_concurrent_reviewers`
   // promoted 2026-06-09. Legacy `ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT`
@@ -34,6 +88,29 @@ function _resolveFirstPassPoolMaxFromCfg(env = process.env, options = {}) {
     loaderImpl: options.loaderImpl,
     contextKey: 'watcher.first_pass_reviewer_pool_max_concurrent_reviewers',
   }).get('watcher.first_pass_reviewer_pool_max_concurrent_reviewers', null);
+}
+
+function resolveReviewerMemoryPressureConfig({
+  env = process.env,
+  topPath,
+  modulePaths,
+  loaderImpl,
+} = {}) {
+  const cfg = loadRoleConfig({
+    env,
+    topPath,
+    modulePaths,
+    loaderImpl,
+    contextKey: 'reviewer.memory.pressure',
+  });
+  return normalizeReviewerMemoryPressureConfig({
+    projectedHeadroomFloorMb: cfg.get('reviewer.memory.pressure.projected_headroom_floor_mb', undefined),
+    elevatedAvailableMb: cfg.get('reviewer.memory.pressure.elevated_available_mb', undefined),
+    criticalAvailableMb: cfg.get('reviewer.memory.pressure.critical_available_mb', undefined),
+    elevatedSwapUsedPct: cfg.get('reviewer.memory.pressure.elevated_swap_used_pct', undefined),
+    criticalSwapUsedPct: cfg.get('reviewer.memory.pressure.critical_swap_used_pct', undefined),
+    swapPressureAvailableMb: cfg.get('reviewer.memory.pressure.swap_pressure_available_mb', undefined),
+  });
 }
 
 function resolveFirstPassReviewerPoolConfig({
@@ -104,6 +181,7 @@ function createReviewerMemoryAdmissionSampler({
   readSample = readMemoryPressureSample,
   logger = console,
   sampleTtlMs = DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS,
+  memoryPressureConfig = {},
   now = () => Date.now(),
 } = {}) {
   let samplePromise = null;
@@ -113,7 +191,7 @@ function createReviewerMemoryAdmissionSampler({
     const ttlMs = Math.max(0, Number(sampleTtlMs) || 0);
     if (!samplePromise || (ttlMs > 0 && nowMs - sampledAtMs >= ttlMs)) {
       sampledAtMs = nowMs;
-      samplePromise = readSample().catch((err) => {
+      samplePromise = readSample({ memoryPressureConfig }).catch((err) => {
         logger?.warn?.(
           `[watcher] memory pressure gate unavailable; admitting by legacy policy: ${err?.message || err}`
         );
@@ -129,6 +207,7 @@ async function reserveReviewerMemoryAdmission({
   reservationState,
   checkAdmission = checkReviewerMemoryAdmission,
   getMemoryPressureSample = null,
+  memoryPressureConfig = {},
   logger = console,
 } = {}) {
   const estimatedReviewerRssMb = peakReviewerMemoryMbFor(reviewerModel);
@@ -139,6 +218,7 @@ async function reserveReviewerMemoryAdmission({
       reviewerModel,
       reservedMb: reservedMbBeforeAdmission,
       logger,
+      memoryPressureConfig,
     };
     if (getMemoryPressureSample) {
       admissionOptions.sample = await getMemoryPressureSample();
@@ -233,6 +313,7 @@ export {
   compareReviewerDispatchCandidates,
   createReviewerMemoryAdmissionSampler,
   reserveReviewerMemoryAdmission,
+  resolveReviewerMemoryPressureConfig,
   resolveFirstPassReviewerPoolConfig,
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,

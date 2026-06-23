@@ -224,6 +224,7 @@ import {
   createReviewerMemoryAdmissionSampler,
   reserveReviewerMemoryAdmission,
   resolveFirstPassReviewerPoolConfig,
+  resolveReviewerMemoryPressureConfig,
   runBoundedReviewerDispatchQueue,
   sortReviewerDispatchCandidates,
 } from './watcher-reviewer-pool.mjs';
@@ -5824,11 +5825,15 @@ async function pollOnce(
   }
 
   const reviewerPoolConfig = resolveFirstPassReviewerPoolConfig({ watcherConfig: config });
+  const reviewerMemoryPressureConfig = resolveReviewerMemoryPressureConfig();
   const reviewerDispatchCandidates = [];
   const postedReviewHandlers = [];
   const postReviewMaintenanceHandlers = [];
   const reviewerMemoryReservationState = { reservedMb: 0 };
-  const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({ logger: console });
+  const reviewerMemoryAdmissionSampleForTick = createReviewerMemoryAdmissionSampler({
+    logger: console,
+    memoryPressureConfig: reviewerMemoryPressureConfig,
+  });
   const getRoutingTierReadinessForTick = createRoutingTierReadinessProbeCache();
   const reviewerCommandFailedReviewProbe = makeReviewPostedProbe(octokit);
   async function drainReviewerDispatchCandidates(reason) {
@@ -6797,6 +6802,7 @@ async function pollOnce(
             reviewerModel: route.reviewerModel,
             reservationState: reviewerMemoryReservationState,
             getMemoryPressureSample: reviewerMemoryAdmissionSampleForTick,
+            memoryPressureConfig: reviewerMemoryPressureConfig,
             logger: console,
           });
           const { estimatedReviewerRssMb, memoryDecision, reservedMbBeforeAdmission } = reservation;

@@ -40,6 +40,23 @@ __aliases:
 # The accounts env value is a JSON array, e.g.
 #   [{"id":"primary","tokenFile":"op://vault/item/token"}]
 reviewer:
+  # Reviewer memory-pressure admission. Swap occupancy on macOS is sticky, so
+  # swap thresholds only apply while available memory is below
+  # swap_pressure_available_mb. Tune these in host-local config for small
+  # laptops vs large workstations.
+  # Env overrides:
+  #   AGENT_OS_REVIEWER_MEMORY_PRESSURE_PROJECTED_HEADROOM_FLOOR_MB /
+  #     ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_PROJECTED_HEADROOM_FLOOR_MB
+  #   AGENT_OS_REVIEWER_MEMORY_PRESSURE_SWAP_PRESSURE_AVAILABLE_MB /
+  #     ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_SWAP_PRESSURE_AVAILABLE_MB
+  memory:
+    pressure:
+      projected_headroom_floor_mb: 1024
+      elevated_available_mb: 2048
+      critical_available_mb: 1024
+      elevated_swap_used_pct: 85.0
+      critical_swap_used_pct: 95.0
+      swap_pressure_available_mb: 8192
   # Retry failed reviewer population (session died / generated but no GitHub
   # review appeared) before leaving the failed row terminal for operator
   # inspection. Set max_attempts: 0 to restore immediate skip behavior.

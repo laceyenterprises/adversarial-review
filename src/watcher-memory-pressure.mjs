@@ -7,6 +7,7 @@ const ELEVATED_AVAILABLE_MB = 2048;
 const CRITICAL_AVAILABLE_MB = 1024;
 const ELEVATED_SWAP_USED_PCT = 85.0;
 const CRITICAL_SWAP_USED_PCT = 95.0;
+const SWAP_PRESSURE_AVAILABLE_MB = 8192;
 const PROJECTED_HEADROOM_FLOOR_MB = 1024;
 
 const PAGE_SIZE_RE = /page size of (\d+) bytes/i;
@@ -76,10 +77,20 @@ function parseSwapusage(swapusage) {
 }
 
 function pressureLevelFor({ availableMb, swapUsedPct }) {
-  if (availableMb < CRITICAL_AVAILABLE_MB || swapUsedPct > CRITICAL_SWAP_USED_PCT) {
+  // macOS swap occupancy is a lagging signal: on large hosts, swap can stay
+  // nearly full long after tens of GiB are available again. Treat swap as a
+  // hard pressure signal only when available memory is also meaningfully low.
+  const swapPressureApplies = availableMb < SWAP_PRESSURE_AVAILABLE_MB;
+  if (
+    availableMb < CRITICAL_AVAILABLE_MB
+    || (swapPressureApplies && swapUsedPct > CRITICAL_SWAP_USED_PCT)
+  ) {
     return 'critical';
   }
-  if (availableMb < ELEVATED_AVAILABLE_MB || swapUsedPct > ELEVATED_SWAP_USED_PCT) {
+  if (
+    availableMb < ELEVATED_AVAILABLE_MB
+    || (swapPressureApplies && swapUsedPct > ELEVATED_SWAP_USED_PCT)
+  ) {
     return 'elevated';
   }
   return 'nominal';
@@ -230,6 +241,7 @@ export {
   ELEVATED_AVAILABLE_MB,
   ELEVATED_SWAP_USED_PCT,
   PROJECTED_HEADROOM_FLOOR_MB,
+  SWAP_PRESSURE_AVAILABLE_MB,
   checkReviewerMemoryAdmission,
   decideReviewerMemoryAdmission,
   parseMemoryPressureSample,

@@ -12,6 +12,7 @@ import {
   PROJECTED_HEADROOM_FLOOR_MB,
   decideReviewerMemoryAdmission,
   peakReviewerMemoryMbFor,
+  pressureLevelFor,
 } from '../src/watcher-memory-pressure.mjs';
 
 function candidate(prNumber, run, createdAt = `2026-05-01T00:00:${String(prNumber).padStart(2, '0')}.000Z`) {
@@ -97,6 +98,33 @@ test('reviewer memory gate refuses a spawn when one more reviewer cannot fit', (
 
   assert.equal(decision.admit, false);
   assert.equal(decision.reason, 'memory_pressure_projected_headroom_low');
+});
+
+test('reviewer memory pressure ignores sticky swap when available memory is abundant', () => {
+  const pressureLevel = pressureLevelFor({
+    availableMb: 85_000,
+    swapUsedPct: 96,
+  });
+  const decision = decideReviewerMemoryAdmission({
+    reviewerModel: 'gemini',
+    sample: {
+      pressureLevel,
+      availableMb: 85_000,
+      swapUsedPct: 96,
+    },
+  });
+
+  assert.equal(pressureLevel, 'nominal');
+  assert.equal(decision.admit, true);
+  assert.equal(decision.reason, null);
+  assert.equal(decision.projectedHeadroomMb, 85_000 - 512);
+});
+
+test('reviewer memory pressure still treats low headroom plus high swap as critical', () => {
+  assert.equal(pressureLevelFor({
+    availableMb: 4000,
+    swapUsedPct: 96,
+  }), 'critical');
 });
 
 test('reviewer memory estimates keep browser-backed reviewers conservative', () => {

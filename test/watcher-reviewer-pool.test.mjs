@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   createReviewerMemoryAdmissionSampler,
+  resolveReviewerMemoryPressureConfig,
   resolveFirstPassReviewerPoolConfig,
   reserveReviewerMemoryAdmission,
   runBoundedReviewerDispatchQueue,
@@ -12,6 +13,7 @@ import {
   PROJECTED_HEADROOM_FLOOR_MB,
   decideReviewerMemoryAdmission,
   peakReviewerMemoryMbFor,
+  pressureLevelFor,
 } from '../src/watcher-memory-pressure.mjs';
 
 function candidate(prNumber, run, createdAt = `2026-05-01T00:00:${String(prNumber).padStart(2, '0')}.000Z`) {
@@ -97,6 +99,43 @@ test('reviewer memory gate refuses a spawn when one more reviewer cannot fit', (
 
   assert.equal(decision.admit, false);
   assert.equal(decision.reason, 'memory_pressure_projected_headroom_low');
+});
+
+test('reviewer memory pressure ignores sticky swap when available memory is abundant', () => {
+  const pressureLevel = pressureLevelFor({
+    availableMb: 85_000,
+    swapUsedPct: 96,
+  });
+  const decision = decideReviewerMemoryAdmission({
+    reviewerModel: 'gemini',
+    sample: {
+      pressureLevel,
+      availableMb: 85_000,
+      swapUsedPct: 96,
+    },
+  });
+
+  assert.equal(pressureLevel, 'nominal');
+  assert.equal(decision.admit, true);
+  assert.equal(decision.reason, null);
+  assert.equal(decision.projectedHeadroomMb, 85_000 - 512);
+});
+
+test('reviewer memory pressure swap floor is CFG-tunable for host profiles', () => {
+  assert.equal(pressureLevelFor({
+    availableMb: 85_000,
+    swapUsedPct: 96,
+    memoryPressureConfig: {
+      swapPressureAvailableMb: 100_000,
+    },
+  }), 'critical');
+});
+
+test('reviewer memory pressure still treats low headroom plus high swap as critical', () => {
+  assert.equal(pressureLevelFor({
+    availableMb: 4000,
+    swapUsedPct: 96,
+  }), 'critical');
 });
 
 test('reviewer memory estimates keep browser-backed reviewers conservative', () => {
@@ -271,6 +310,32 @@ test('denied reviewer reservation reports the reservation used for the decision'
   assert.equal(reservationState.reservedMb, 1024);
 });
 
+test('reviewer memory gate projected headroom floor is CFG-tunable', () => {
+  const defaultDecision = decideReviewerMemoryAdmission({
+    reviewerModel: 'codex',
+    sample: {
+      pressureLevel: 'nominal',
+      availableMb: 2600,
+      swapUsedPct: 10,
+    },
+  });
+  const tunedDecision = decideReviewerMemoryAdmission({
+    reviewerModel: 'codex',
+    memoryPressureConfig: {
+      projectedHeadroomFloorMb: 2000,
+    },
+    sample: {
+      pressureLevel: 'nominal',
+      availableMb: 2600,
+      swapUsedPct: 10,
+    },
+  });
+
+  assert.equal(defaultDecision.admit, true);
+  assert.equal(tunedDecision.admit, false);
+  assert.equal(tunedDecision.reason, 'memory_pressure_projected_headroom_low');
+});
+
 test('reviewer pool clamps non-positive concurrency to one worker', async () => {
   let runs = 0;
   const tasks = Array.from({ length: 2 }, (_unused, index) => candidate(index + 1, async () => {
@@ -358,4 +423,31 @@ test('reviewer pool config accepts the first-pass pool concurrency alias', () =>
     }),
     { enabled: true, maxConcurrent: 5 }
   );
+});
+
+test('reviewer memory pressure config resolves through the CFG loader', () => {
+  const config = resolveReviewerMemoryPressureConfig({
+    loaderImpl: () => ({
+      get(key, fallback) {
+        const values = new Map([
+          ['reviewer.memory.pressure.projected_headroom_floor_mb', 2048],
+          ['reviewer.memory.pressure.elevated_available_mb', 4096],
+          ['reviewer.memory.pressure.critical_available_mb', 2048],
+          ['reviewer.memory.pressure.elevated_swap_used_pct', 90.0],
+          ['reviewer.memory.pressure.critical_swap_used_pct', 98.0],
+          ['reviewer.memory.pressure.swap_pressure_available_mb', 16384],
+        ]);
+        return values.has(key) ? values.get(key) : fallback;
+      },
+    }),
+  });
+
+  assert.deepEqual(config, {
+    projectedHeadroomFloorMb: 2048,
+    elevatedAvailableMb: 4096,
+    criticalAvailableMb: 2048,
+    elevatedSwapUsedPct: 90.0,
+    criticalSwapUsedPct: 98.0,
+    swapPressureAvailableMb: 16384,
+  });
 });

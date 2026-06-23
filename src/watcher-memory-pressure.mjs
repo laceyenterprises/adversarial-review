@@ -7,7 +7,16 @@ const ELEVATED_AVAILABLE_MB = 2048;
 const CRITICAL_AVAILABLE_MB = 1024;
 const ELEVATED_SWAP_USED_PCT = 85.0;
 const CRITICAL_SWAP_USED_PCT = 95.0;
+const SWAP_PRESSURE_AVAILABLE_MB = 8192;
 const PROJECTED_HEADROOM_FLOOR_MB = 1024;
+const DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG = Object.freeze({
+  elevatedAvailableMb: ELEVATED_AVAILABLE_MB,
+  criticalAvailableMb: CRITICAL_AVAILABLE_MB,
+  elevatedSwapUsedPct: ELEVATED_SWAP_USED_PCT,
+  criticalSwapUsedPct: CRITICAL_SWAP_USED_PCT,
+  swapPressureAvailableMb: SWAP_PRESSURE_AVAILABLE_MB,
+  projectedHeadroomFloorMb: PROJECTED_HEADROOM_FLOOR_MB,
+});
 
 const PAGE_SIZE_RE = /page size of (\d+) bytes/i;
 const VM_STAT_LINE_RE = /^([^:]+):\s+([0-9.]+)\.?$/;
@@ -75,22 +84,85 @@ function parseSwapusage(swapusage) {
   };
 }
 
-function pressureLevelFor({ availableMb, swapUsedPct }) {
-  if (availableMb < CRITICAL_AVAILABLE_MB || swapUsedPct > CRITICAL_SWAP_USED_PCT) {
+function finiteNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizeReviewerMemoryPressureConfig(config = {}) {
+  return {
+    elevatedAvailableMb: Math.max(
+      0,
+      Math.trunc(finiteNumber(
+        config.elevatedAvailableMb ?? config.elevated_available_mb,
+        DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG.elevatedAvailableMb
+      ))
+    ),
+    criticalAvailableMb: Math.max(
+      0,
+      Math.trunc(finiteNumber(
+        config.criticalAvailableMb ?? config.critical_available_mb,
+        DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG.criticalAvailableMb
+      ))
+    ),
+    elevatedSwapUsedPct: finiteNumber(
+      config.elevatedSwapUsedPct ?? config.elevated_swap_used_pct,
+      DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG.elevatedSwapUsedPct
+    ),
+    criticalSwapUsedPct: finiteNumber(
+      config.criticalSwapUsedPct ?? config.critical_swap_used_pct,
+      DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG.criticalSwapUsedPct
+    ),
+    swapPressureAvailableMb: Math.max(
+      0,
+      Math.trunc(finiteNumber(
+        config.swapPressureAvailableMb ?? config.swap_pressure_available_mb,
+        DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG.swapPressureAvailableMb
+      ))
+    ),
+    projectedHeadroomFloorMb: Math.max(
+      0,
+      Math.trunc(finiteNumber(
+        config.projectedHeadroomFloorMb ?? config.projected_headroom_floor_mb,
+        DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG.projectedHeadroomFloorMb
+      ))
+    ),
+  };
+}
+
+function pressureLevelFor({ availableMb, swapUsedPct, memoryPressureConfig = {} }) {
+  const config = normalizeReviewerMemoryPressureConfig(memoryPressureConfig);
+  // macOS swap occupancy is a lagging signal: on large hosts, swap can stay
+  // nearly full long after tens of GiB are available again. Treat swap as a
+  // hard pressure signal only when available memory is also meaningfully low.
+  const swapPressureApplies = availableMb < config.swapPressureAvailableMb;
+  if (
+    availableMb < config.criticalAvailableMb
+    || (swapPressureApplies && swapUsedPct > config.criticalSwapUsedPct)
+  ) {
     return 'critical';
   }
-  if (availableMb < ELEVATED_AVAILABLE_MB || swapUsedPct > ELEVATED_SWAP_USED_PCT) {
+  if (
+    availableMb < config.elevatedAvailableMb
+    || (swapPressureApplies && swapUsedPct > config.elevatedSwapUsedPct)
+  ) {
     return 'elevated';
   }
   return 'nominal';
 }
 
-function parseMemoryPressureSample({ vmStat, swapusage, sampledAt = utcNowIso() } = {}) {
+function parseMemoryPressureSample({
+  vmStat,
+  swapusage,
+  sampledAt = utcNowIso(),
+  memoryPressureConfig = {},
+} = {}) {
   const vm = parseVmStat(vmStat);
   const swap = parseSwapusage(swapusage);
   const pressureLevel = pressureLevelFor({
     availableMb: vm.availableMb,
     swapUsedPct: swap.swapUsedPct,
+    memoryPressureConfig,
   });
   return {
     freePages: vm.freePages,
@@ -109,6 +181,7 @@ async function readMemoryPressureSample({
   execFileImpl = execFileAsync,
   platform = process.platform,
   sampledAt = utcNowIso(),
+  memoryPressureConfig = {},
 } = {}) {
   if (platform !== 'darwin') {
     throw new Error('Memory pressure sampling is Darwin-only');
@@ -121,6 +194,7 @@ async function readMemoryPressureSample({
     vmStat: vmStat?.stdout || '',
     swapusage: swapusage?.stdout || '',
     sampledAt,
+    memoryPressureConfig,
   });
 }
 
@@ -137,8 +211,13 @@ function decideReviewerMemoryAdmission({
   reviewerModel,
   reservedMb = 0,
   estimatedReviewerRssMb = peakReviewerMemoryMbFor(reviewerModel),
-  projectedHeadroomFloorMb = PROJECTED_HEADROOM_FLOOR_MB,
+  memoryPressureConfig = {},
+  projectedHeadroomFloorMb = null,
 } = {}) {
+  const config = normalizeReviewerMemoryPressureConfig({
+    ...memoryPressureConfig,
+    ...(projectedHeadroomFloorMb === null ? {} : { projectedHeadroomFloorMb }),
+  });
   if (!sample) {
     return {
       admit: true,
@@ -166,7 +245,7 @@ function decideReviewerMemoryAdmission({
     };
   }
   const projectedHeadroomMb = availableMb - Math.max(0, Number(reservedMb) || 0) - estimatedReviewerRssMb;
-  if (projectedHeadroomMb < projectedHeadroomFloorMb) {
+  if (projectedHeadroomMb < config.projectedHeadroomFloorMb) {
     return {
       admit: false,
       reason: 'memory_pressure_projected_headroom_low',
@@ -192,22 +271,24 @@ function decideReviewerMemoryAdmission({
 
 async function checkReviewerMemoryAdmission(options = {}) {
   const {
-  reviewerModel,
-  reservedMb = 0,
-  execFileImpl = execFileAsync,
-  platform = process.platform,
-  logger = console,
-  sample = null,
+    reviewerModel,
+    reservedMb = 0,
+    execFileImpl = execFileAsync,
+    platform = process.platform,
+    logger = console,
+    sample = null,
+    memoryPressureConfig = {},
   } = options;
   const hasInjectedSample = Object.prototype.hasOwnProperty.call(options, 'sample');
   try {
     const pressureSample = hasInjectedSample
       ? sample
-      : await readMemoryPressureSample({ execFileImpl, platform });
+      : await readMemoryPressureSample({ execFileImpl, platform, memoryPressureConfig });
     return decideReviewerMemoryAdmission({
       sample: pressureSample,
       reviewerModel,
       reservedMb,
+      memoryPressureConfig,
     });
   } catch (err) {
     logger?.warn?.(
@@ -227,11 +308,14 @@ async function checkReviewerMemoryAdmission(options = {}) {
 export {
   CRITICAL_AVAILABLE_MB,
   CRITICAL_SWAP_USED_PCT,
+  DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG,
   ELEVATED_AVAILABLE_MB,
   ELEVATED_SWAP_USED_PCT,
   PROJECTED_HEADROOM_FLOOR_MB,
+  SWAP_PRESSURE_AVAILABLE_MB,
   checkReviewerMemoryAdmission,
   decideReviewerMemoryAdmission,
+  normalizeReviewerMemoryPressureConfig,
   parseMemoryPressureSample,
   peakReviewerMemoryMbFor,
   pressureLevelFor,

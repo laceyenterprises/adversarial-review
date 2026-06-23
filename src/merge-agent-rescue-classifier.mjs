@@ -46,7 +46,7 @@ function parseVerdict(reviewBody) {
   for (const rawLine of section.split('\n')) {
     const line = rawLine.trim();
     if (!line) continue;
-    const match = line.match(/^(?:[-*]\s+)?(?:\*\*)?(Approved|Comment only|Request changes)(?:\*\*)?(?:\s*$|\b\s*(?::|--|-).*$)/i);
+    const match = line.match(/^(?:[-*]\s+)?(?:\*\*)?(Approved|Comment only|Request changes)(?:\*\*)?(?:\s*$|\s*(?::|--|-).*$)/i);
     if (match) {
       const normalized = match[1].toLowerCase();
       if (normalized === 'approved') verdict = 'Approved';

@@ -153,6 +153,37 @@ test('verdict parser accepts common markdown bullets, bolding, and casing', () =
   assert.equal(result.decision, 'merge-eligible');
 });
 
+test('verdict parser preserves Request changes verdict for remediation routing', () => {
+  const result = classify({
+    ...baseInput('request-changes-with-blockers-addressable.md'),
+    reviewBody: [
+      '## Summary',
+      'Needs remediation.',
+      '',
+      '## Blocking issues',
+      '- **Addressable bug**',
+      '  - **Problem:** Fix this before merge.',
+      '',
+      '## Non-blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      '**Request changes** - the bug is still present.',
+    ].join('\n'),
+  });
+
+  assert.equal(result.verdict, 'Request changes');
+  assert.equal(result.decision, 'remediation-eligible');
+  assert.equal(result.reason, 'addressable-review-findings');
+});
+
+test('clean review returns merge-eligible decision with clean-review reason', () => {
+  const result = classify(baseInput('comment-only-merge-eligible.md'));
+
+  assert.equal(result.decision, 'merge-eligible');
+  assert.equal(result.reason, 'clean-review-and-passing-gates');
+});
+
 test('None sentinel accepts missing period and lowercase variants', () => {
   const result = classify({
     ...baseInput('comment-only-merge-eligible.md'),

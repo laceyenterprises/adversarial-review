@@ -27,18 +27,11 @@ __aliases:
 # pre-GMW claude↔codex routing. Gemini NEVER reviews a [gemini]-built PR.
 # Env override: ADVERSARIAL_REVIEW_GEMINI_REVIEWER_MODE / AGENT_OS_REVIEWER_GEMINI_MODE.
 # Runtime defaults to the direct Gemini CLI. Set `runtime: antigravity` to use
-# the Antigravity account pool; watcher boot refuses that mode unless at least
-# one account is listed below. Token files may be literal filesystem paths or
-# op:// secret refs resolved by the launch wrapper; never place token contents
-# in this file.
+# the real `agy --print` CLI path with its keychain-backed auth.
 # Env overrides:
 #   AGENT_OS_REVIEWER_GEMINI_RUNTIME / ADVERSARIAL_REVIEW_GEMINI_RUNTIME
-#   AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_ACCOUNTS /
-#     ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_ACCOUNTS
 #   AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS /
 #     ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS
-# The accounts env value is a JSON array, e.g.
-#   [{"id":"primary","tokenFile":"op://vault/item/token"}]
 reviewer:
   # Retry failed reviewer population (session died / generated but no GitHub
   # review appeared) before leaving the failed row terminal for operator
@@ -56,7 +49,6 @@ reviewer:
     runtime: cli                    # enum: cli / antigravity
     antigravity:
       print_timeout_ms: 1140000     # agy --print-timeout; outer reviewer gets +30s headroom
-      accounts: []                  # ordered list of {id, tokenFile}
 
 # Role pins. Canonical home is the top-level config.yaml; these are the
 # module-internal defaults when the operator hasn't pinned a value there.

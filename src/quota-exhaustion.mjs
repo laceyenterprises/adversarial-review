@@ -66,11 +66,18 @@ function _matches(text, patterns) {
   return patterns.some((re) => re.test(text));
 }
 
+function baseDateFromNowMs(nowMs, { fallbackMissingToNow = false, fallbackInvalidToNow = false } = {}) {
+  if (nowMs == null) return fallbackMissingToNow ? new Date() : null;
+  const base = new Date(nowMs);
+  if (!Number.isNaN(base.getTime())) return base;
+  return fallbackInvalidToNow ? new Date() : null;
+}
+
 function fixedTimeZoneOffsetMs(timeZone) {
-  const match = String(timeZone || '').trim().match(/^(?:UTC|GMT)\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?$/i);
+  const match = String(timeZone || '').trim().match(/^(?:UTC|GMT)\s*([+-])\s*(?:(\d{1,2})(?::(\d{2}))?|(\d{2})(\d{2}))$/i);
   if (!match) return null;
-  const hours = Number(match[2]);
-  const minutes = match[3] == null ? 0 : Number(match[3]);
+  const hours = Number(match[2] ?? match[4]);
+  const minutes = match[3] == null && match[5] == null ? 0 : Number(match[3] ?? match[5]);
   if (hours > 23 || minutes > 59) return null;
   const sign = match[1] === '-' ? -1 : 1;
   return sign * ((hours * 60 + minutes) * 60 * 1000);
@@ -147,7 +154,7 @@ function parseQuotaResetAt(text, { nowMs = null } = {}) {
   // "try again at Jun 17th, 2026 5:39 PM" — strip the ordinal suffix Date can't parse.
   const human = t.match(/(?:try again at\s+|resets?\s+(?:at\s+)?)([A-Za-z]{3,9}\s+\d{1,2})(?:st|nd|rd|th)?(,?\s+\d{4})?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([A-Za-z0-9_+\/:\-]+)\))?/i);
   if (human) {
-    const base = nowMs != null ? new Date(nowMs) : null;
+    const base = baseDateFromNowMs(nowMs, { fallbackInvalidToNow: true });
     const explicitYear = Boolean(human[2]);
     const timeZone = human[6] || CODEX_HUMAN_RESET_TIME_ZONE;
     let year = explicitYear ? human[2].replace(/[,\s]/g, '') : (base ? localYearInTimeZone(base, timeZone) : '');
@@ -185,7 +192,7 @@ function parseQuotaResetAt(text, { nowMs = null } = {}) {
   // one day if that wall-clock time has already elapsed.
   const clockOnly = t.match(/resets? at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
   if (clockOnly) {
-    const base = nowMs != null ? new Date(nowMs) : new Date();
+    const base = baseDateFromNowMs(nowMs, { fallbackMissingToNow: true, fallbackInvalidToNow: true });
     let hour = Number(clockOnly[1]);
     const minute = clockOnly[2] == null ? 0 : Number(clockOnly[2]);
     const meridiem = clockOnly[3].toLowerCase();
@@ -202,6 +209,7 @@ function parseQuotaResetAt(text, { nowMs = null } = {}) {
         0
       );
       if (d.getTime() <= base.getTime()) d.setDate(d.getDate() + 1);
+      if (Number.isNaN(d.getTime())) return null;
       return d.toISOString();
     }
   }

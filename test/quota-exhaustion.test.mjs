@@ -127,6 +127,25 @@ test('parseQuotaResetAt handles fixed UTC/GMT offset timezone labels exactly', (
     ),
     '2026-06-26T21:30:00.000Z'
   );
+  assert.equal(
+    parseQuotaResetAt(
+      "You've hit your weekly limit · resets Jun 27 at 3am (UTC+0530)",
+      { nowMs: Date.parse('2026-06-23T00:39:39.000Z') },
+    ),
+    '2026-06-26T21:30:00.000Z'
+  );
+});
+
+test('parseQuotaResetAt rejects malformed fixed-offset timezone labels without backtracking', () => {
+  const nowMs = Date.parse('2026-06-23T00:39:39.000Z');
+  assert.equal(
+    parseQuotaResetAt("You've hit your weekly limit · resets Jun 27 at 3am (UTC+05:3)", { nowMs }),
+    '2026-06-27T10:00:00.000Z'
+  );
+  assert.equal(
+    parseQuotaResetAt("You've hit your weekly limit · resets Jun 27 at 3am (UTC+053)", { nowMs }),
+    '2026-06-27T10:00:00.000Z'
+  );
 });
 
 test('parseQuotaResetAt falls back instead of throwing on invalid timezone labels', () => {
@@ -136,6 +155,13 @@ test('parseQuotaResetAt falls back instead of throwing on invalid timezone label
       { nowMs: Date.parse('2026-06-23T00:39:39.000Z') },
     );
   });
+});
+
+test('parseQuotaResetAt does not throw when nowMs is invalid', () => {
+  const iso = parseQuotaResetAt('Claude usage limit reached; resets at 5:39 PM', {
+    nowMs: 'not-a-date',
+  });
+  assert.match(iso, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/);
 });
 
 test('parseQuotaResetAt infers the year from nowMs when the provider omits it', () => {

@@ -466,8 +466,7 @@ function readActiveTransientBackoffs(rootDir, { nowMs }) {
     const nextRetryRaw = state.nextRetryAfter;
     if (!nextRetryRaw) continue;
     const nextRetryMs = Date.parse(nextRetryRaw);
-    const active = Number.isNaN(nextRetryMs) || nextRetryMs > nowMs;
-    if (!active) continue;
+    if (Number.isNaN(nextRetryMs) || nextRetryMs <= nowMs) continue;
     const failureClass = String(state.lastFailureClass || 'cascade').trim() || 'cascade';
     entries.push({
       ...identity,

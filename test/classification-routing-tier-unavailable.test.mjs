@@ -10,7 +10,9 @@ import assert from 'node:assert/strict';
 import {
   PROVIDER_OVERLOADED_FAILURE_CLASS,
   classifyReviewerFailure,
+  hasProviderOverloadedSignal,
 } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
+import { reviewerSignalAwareFailureClass } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 
 test('claude CLI "Unable to connect to API (ConnectionRefused)" stays unknown without local-routing context', () => {
   // Verbatim shape of the failure observed in the 2026-06-04 watcher log.
@@ -69,6 +71,28 @@ test('HTTP 529 and provider overload classify as provider-overloaded', () => {
   assert.equal(
     classifyReviewerFailure('TypeScript overload resolution failed', 1),
     'unknown'
+  );
+});
+
+test('provider overload signal requires close provider context', () => {
+  assert.equal(
+    hasProviderOverloadedSignal('provider diagnostics start\nlocal disk queue overloaded at shutdown'),
+    false
+  );
+  assert.equal(
+    hasProviderOverloadedSignal('anthropic provider temporarily overloaded'),
+    true
+  );
+});
+
+test('reviewer signal wrapper preserves stdout-only non-overload classifications', () => {
+  assert.equal(
+    reviewerSignalAwareFailureClass(
+      { stdout: 'OAuth token expired', stderr: 'Command failed', code: 1 },
+      'Command failed with code 1',
+      1
+    ),
+    'oauth-broken'
   );
 });
 

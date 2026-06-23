@@ -18,6 +18,7 @@ import {
 import {
   PROVIDER_OVERLOADED_FAILURE_CLASS,
   classifyReviewerFailure,
+  hasProviderOverloadedSignal,
   isReviewerSubprocessTimeout,
 } from './classification.mjs';
 import {
@@ -59,12 +60,14 @@ function tailText(value, maxBytes = DEFAULT_TAIL_BYTES) {
 }
 
 function reviewerSignalAwareFailureClass(err, classificationText, exitCode, details = {}) {
-  const quotaText = [err?.stdout, err?.stderr, err?.message].filter(Boolean).join('\n');
+  const stdoutTail = tailText(err?.stdout || '');
+  const stderrTail = tailText(err?.stderr || '');
+  const messageTail = tailText(err?.message || '');
+  const quotaText = [stdoutTail, stderrTail, messageTail].filter(Boolean).join('\n');
   if (detectQuotaExhaustion(quotaText).isQuotaExhausted) return QUOTA_EXHAUSTED_FAILURE_CLASS;
-  const providerSignalText = [classificationText, err?.stdout].filter(Boolean).join('\n');
-  const providerFailureClass = classifyReviewerFailure(providerSignalText, exitCode, err?.code, details);
-  if (providerFailureClass === PROVIDER_OVERLOADED_FAILURE_CLASS) return providerFailureClass;
-  return classifyReviewerFailure(classificationText, exitCode, err?.code, details);
+  const signalText = [classificationText, stdoutTail].filter(Boolean).join('\n');
+  if (hasProviderOverloadedSignal(signalText)) return PROVIDER_OVERLOADED_FAILURE_CLASS;
+  return classifyReviewerFailure(signalText, exitCode, err?.code, details);
 }
 
 function readTailFile(filePath, maxBytes = DEFAULT_TAIL_BYTES) {
@@ -704,5 +707,6 @@ export {
   createCliDirectReviewerRuntimeAdapter,
   isReviewerSubprocessTimeout,
   resolveProgressTimeoutForModel,
+  reviewerSignalAwareFailureClass,
   stripForbiddenFallbackEnv,
 };

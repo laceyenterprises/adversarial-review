@@ -571,6 +571,27 @@ test('collector surfaces active provider overload backoffs and quota holds', () 
   );
 });
 
+test('malformed transient backoff retry dates are not treated as active degradation', () => {
+  const rootDir = tempRoot();
+  openDb(rootDir).close();
+
+  const cascadeStateDir = path.join(rootDir, 'data', 'cascade-state');
+  mkdirSync(cascadeStateDir, { recursive: true });
+  writeFileSync(
+    path.join(cascadeStateDir, `${encodeURIComponent(REPO)}__777.json`),
+    `${JSON.stringify({
+      consecutiveTransientFailures: 2,
+      lastFailureClass: PROVIDER_OVERLOADED_FAILURE_CLASS,
+      lastFailureAt: '2026-05-25T17:58:00.000Z',
+      nextRetryAfter: 'not-a-date',
+    }, null, 2)}\n`
+  );
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.equal(snapshot.reviewerDegradation.active, 0);
+  assert.ok(!findingCodes(snapshot).includes('review:reviewer_degradation_active'));
+});
+
 test('Grafana dashboard JSON references only exported review pipeline metric names', () => {
   const dashboard = JSON.parse(readFileSync('observability/grafana/review-pipeline-health.json', 'utf8'));
   const metricNames = new Set(REVIEW_PIPELINE_HEALTH_METRICS);

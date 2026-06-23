@@ -13,6 +13,14 @@ const REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE = new RegExp(
 );
 const LAUNCHCTL_BOOTSTRAP_ERROR_RE =
   /bootstrap failed|could not find domain|input\/output error|not privileged to set domain/;
+const PROVIDER_CONTEXT_RE =
+  /\b(?:provider|model|backend|upstream|anthropic|claude|openai|codex|gemini|api)\b/;
+const PROVIDER_OVERLOADED_FORWARD_RE =
+  /\b(?:provider|model|backend|upstream|anthropic|claude|openai|codex|gemini|api)\b[^\r\n]{0,160}\boverloaded\b/;
+const PROVIDER_OVERLOADED_REVERSE_RE =
+  /\boverloaded\b[^\r\n]{0,160}\b(?:provider|model|backend|upstream|anthropic|claude|openai|codex|gemini|api)\b/;
+const PROVIDER_CAPACITY_RE =
+  /\b(?:api|service|server|backend|provider|model)\s+(?:is\s+)?(?:at|over)\s+capacity\b/;
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -32,6 +40,26 @@ function isReviewerSubprocessTimeout(error, { killSignal = 'SIGTERM' } = {}) {
   );
 }
 
+function hasProviderOverloadedSignal(value) {
+  const lower = String(value || '').toLowerCase();
+  if (
+    !lower.includes('529') &&
+    !lower.includes('overloaded') &&
+    !lower.includes('capacity')
+  ) {
+    return false;
+  }
+  return (
+    /\b529\b/.test(lower) ||
+    /\boverloaded[_ -]?error\b/.test(lower) ||
+    PROVIDER_OVERLOADED_FORWARD_RE.test(lower) ||
+    PROVIDER_OVERLOADED_REVERSE_RE.test(lower) ||
+    PROVIDER_CAPACITY_RE.test(lower) ||
+    (/\btemporarily\s+overloaded\b/.test(lower) && PROVIDER_CONTEXT_RE.test(lower)) ||
+    /\bover\s+capacity\b/.test(lower)
+  );
+}
+
 function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {}) {
   const text = String(stderr || '');
   const lower = text.toLowerCase();
@@ -47,13 +75,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
   const mentionsReal429 =
     /\b429\b|too many requests|http\s*429|rate_limit_exceeded|ratelimiterror|quota/.test(lower);
   const mentionsRateLimit = /rate.?limit/.test(lower);
-  const mentionsProviderOverloaded =
-    /\b529\b/.test(lower) ||
-    /\boverloaded[_ -]?error\b/.test(lower) ||
-    /\b(?:provider|model|backend|upstream|anthropic|claude|openai|codex|gemini|api)\b.*\boverloaded\b/.test(lower) ||
-    /\boverloaded\b.*\b(?:provider|model|backend|upstream|anthropic|claude|openai|codex|gemini|api)\b/.test(lower) ||
-    /\b(?:api|service|server|backend|provider|model)\s+(?:is\s+)?(?:at|over)\s+capacity\b/.test(lower) ||
-    /\btemporarily\s+overloaded\b|\bover\s+capacity\b/.test(lower);
+  const mentionsProviderOverloaded = hasProviderOverloadedSignal(lower);
   // Routing-tier unavailability: the LiteLLM proxy on 127.0.0.1:4000 is the
   // single bottleneck every Claude/Codex CLI reviewer goes through. When the
   // proxy bounces (os-restart, main-catchup classification, post-reboot
@@ -198,5 +220,6 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
 export {
   PROVIDER_OVERLOADED_FAILURE_CLASS,
   classifyReviewerFailure,
+  hasProviderOverloadedSignal,
   isReviewerSubprocessTimeout,
 };

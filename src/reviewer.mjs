@@ -115,6 +115,7 @@ const VERDICT_MODE_ENFORCE = 'enforce';
 const VERDICT_MODE_ADVISORY_ONLY = 'advisory-only';
 const ENFORCE_REVIEW_HEADER_RE = /^## Adversarial Review — .+ \(.+\)$/;
 const ADVISORY_ONLY_REVIEW_HEADER_RE = /^## Adversarial Review \(advisory-only\) — .+ \(.+\)$/;
+const ANY_ADVERSARIAL_REVIEW_HEADER_RE = /^##\s+Adversarial Review\b.*$/;
 
 const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
@@ -736,6 +737,43 @@ function classifyReviewCommentHeader(reviewBody) {
     verdictMode: null,
     advisoryOnly: false,
   };
+}
+
+function startsWithReviewCommentHeader(reviewBody) {
+  const [firstLine = ''] = String(reviewBody || '').split(/\r?\n/, 1);
+  return ANY_ADVERSARIAL_REVIEW_HEADER_RE.test(firstLine.trim());
+}
+
+function insertAfterExistingReviewHeader(reviewBody, insertText) {
+  const text = String(reviewBody || '');
+  const block = String(insertText || '');
+  if (!block) return text;
+
+  const lineBreakMatch = text.match(/\r?\n/);
+  if (!lineBreakMatch) {
+    return `${text}\n\n${block}`;
+  }
+
+  const headerLine = text.slice(0, lineBreakMatch.index);
+  const rest = text
+    .slice(lineBreakMatch.index + lineBreakMatch[0].length)
+    .replace(/^(?:[ \t]*\r?\n)+/, '');
+  return `${headerLine}\n\n${block}${rest}`;
+}
+
+function buildReviewCommentBody({
+  reviewerMetadata,
+  verdictMode,
+  waiverAuditBlock = '',
+  reviewText,
+}) {
+  const text = String(reviewText || '');
+  if (startsWithReviewCommentHeader(text)) {
+    return insertAfterExistingReviewHeader(text, waiverAuditBlock);
+  }
+
+  const header = buildReviewCommentHeader({ reviewerMetadata, verdictMode });
+  return header + String(waiverAuditBlock || '') + text;
 }
 
 function normalizeBuilderTag(builderTag) {
@@ -3132,7 +3170,6 @@ async function main() {
     `[reviewer] Verdict mode for ${repo}#${prNumber}@${reviewerHeadSha || '<unknown-head>'}: ${verdictMode}` +
       (verdictModeResolution.currentHeadSha ? ` (current head ${verdictModeResolution.currentHeadSha})` : '')
   );
-  const header = buildReviewCommentHeader({ reviewerMetadata, verdictMode });
   const waiverAuditBlock = crossModelReviewWaived
     ? `> Cross-model review waiver: ${String(crossModelReviewWaiverReason || 'operator override selected the same reviewer family as the builder for this pass.')}\n\n`
     : '';
@@ -3158,7 +3195,12 @@ async function main() {
   const reviewTextForPost = scopeViolationFinding
     ? appendScopeViolationFinding(reviewText, scopeViolationFinding)
     : reviewText;
-  const fullComment = header + waiverAuditBlock + reviewTextForPost;
+  const fullComment = buildReviewCommentBody({
+    reviewerMetadata,
+    verdictMode,
+    waiverAuditBlock,
+    reviewText: reviewTextForPost,
+  });
   const localShadowEligibility = evaluateLocalReviewShadowEligibility({
     labels,
     builderTag,
@@ -3332,6 +3374,8 @@ const __test__ = {
   VERDICT_MODE_ENFORCE,
   buildReviewCommentHeader,
   classifyReviewCommentHeader,
+  startsWithReviewCommentHeader,
+  buildReviewCommentBody,
   fetchCurrentHeadVerdictMode,
   normalizeVerdictMode,
   resolveVerdictModeForHead,

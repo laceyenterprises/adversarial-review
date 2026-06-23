@@ -35,6 +35,10 @@ const ROOT = join(__dirname, '..');
 
 // Canonical path of the adversarial-review module's checked-in config.yaml.
 export const MODULE_CONFIG_PATH = join(ROOT, 'config.yaml');
+// Role/config callers live under the adversarial-review module but must read
+// the top-level config from the containing Agent OS checkout, not whichever
+// account home `os.homedir()` reports under launchd.
+export const DEFAULT_ROLE_TOP_PATH = join(ROOT, '..', '..', 'config.yaml');
 
 // Env-var labels surfaced in re-shaped error messages. Keep these aligned
 // with `ENV_ALIASES` in config-loader.mjs.
@@ -220,6 +224,7 @@ export function loadRoleConfig({
 } = {}) {
   const modulePathsResolved = modulePaths || [MODULE_CONFIG_PATH];
   const envPruned = pruneBlankRoleEnvVars(env);
+  const topPathResolved = topPath || envPruned.AGENT_OS_CONFIG_PATH || DEFAULT_ROLE_TOP_PATH;
   // Only an `undefined` loaderImpl opts into the default cached loader;
   // an explicit `null` / `false` / `0` opts OUT of caching (passes
   // through, which throws because it isn't callable — surfacing the
@@ -229,13 +234,18 @@ export function loadRoleConfig({
   const loader = loaderImpl !== undefined ? loaderImpl : loadConfigCached;
   try {
     return loader({
-      topPath,
+      topPath: topPathResolved,
       modulePaths: modulePathsResolved,
       env: envPruned,
     });
   } catch (err) {
     throw reshapeLoaderError(err, contextKey);
   }
+}
+
+export function resolvedRoleTopPath({ env = process.env, topPath } = {}) {
+  const envPruned = pruneBlankRoleEnvVars(env);
+  return topPath || envPruned.AGENT_OS_CONFIG_PATH || DEFAULT_ROLE_TOP_PATH;
 }
 
 // resetRoleConfigCache — drops the cached role-config slot so the next
@@ -332,6 +342,45 @@ export function resolveGeminiReviewerMode({
     contextKey: 'reviewer.gemini.mode',
   });
   return cfg.get('reviewer.gemini.mode', 'off');
+}
+
+function sourceKind(source) {
+  if (typeof source !== 'string' || source === '') return 'default';
+  if (source.startsWith('env:')) return 'env';
+  if (source === 'code-default') return 'default';
+  if (source === 'cli') return 'cli';
+  return 'file';
+}
+
+export function resolveGeminiReviewerModeWithSource({
+  env = process.env,
+  topPath,
+  modulePaths,
+  loaderImpl,
+} = {}) {
+  const topPathResolved = resolvedRoleTopPath({ env, topPath });
+  const cfg = loadRoleConfig({
+    env,
+    topPath: topPathResolved,
+    modulePaths,
+    loaderImpl,
+    contextKey: 'reviewer.gemini.mode',
+  });
+  const trace = cfg.resolutionTrace('reviewer.gemini.mode');
+  const winning = trace[trace.length - 1] || {
+    source: 'code-default',
+    value: cfg.get('reviewer.gemini.mode', 'off'),
+    path: null,
+  };
+  return {
+    mode: cfg.get('reviewer.gemini.mode', 'off'),
+    source: sourceKind(winning.source),
+    sourceDetail: winning.source,
+    rawValue: winning.value,
+    path: winning.path,
+    topPath: topPathResolved,
+    modulePaths: modulePaths || [MODULE_CONFIG_PATH],
+  };
 }
 
 export function resolveReviewPopulationRetryConfig({

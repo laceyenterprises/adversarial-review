@@ -239,6 +239,37 @@ test('GMW-02 watcher: invalid gemini mode resolution fails closed to off', () =>
   assert.equal(resolved.error, failure);
 });
 
+test('CFGDRIFT-01 watcher: gemini mode wrapper preserves source metadata', () => {
+  const resolved = resolveGeminiReviewerModeForWatcher({
+    env: { HOME: '/tmp/launchd-like' },
+    resolver({ env }) {
+      return {
+        mode: 'fallback',
+        source: 'file',
+        sourceDetail: 'local:/tmp/agent-os/config.local.yaml',
+        rawValue: 'fallback',
+        topPath: '/tmp/agent-os/config.yaml',
+        env,
+      };
+    },
+  });
+
+  assert.equal(resolved.mode, 'fallback');
+  assert.equal(resolved.source, 'file');
+  assert.equal(resolved.sourceDetail, 'local:/tmp/agent-os/config.local.yaml');
+  assert.equal(resolved.rawValue, 'fallback');
+  assert.equal(resolved.topPath, '/tmp/agent-os/config.yaml');
+  assert.equal(resolved.error, null);
+});
+
+test('CFGDRIFT-01 watcher: selection source logging is present', () => {
+  const source = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  assert.match(source, /gemini-mode resolved=\$\{geminiReviewerMode\} /);
+  assert.match(source, /source=\$\{geminiModeResolution\.source \|\| 'unknown'\} /);
+  assert.match(source, /topPath=\$\{geminiModeResolution\.topPath \|\| '<unknown>'\}/);
+  assert.match(source, /mode-source=\$\{geminiModeResolution\.source \|\| 'unknown'\}/);
+});
+
 test('GMW-02 watcher: existing-row routing updates happen only after spawn claim', () => {
   const source = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
   const createRowStart = source.indexOf('if (!existing) {\n        stmtCreateReviewRow.run(');

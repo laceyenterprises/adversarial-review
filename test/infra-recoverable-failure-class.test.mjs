@@ -12,6 +12,8 @@ import {
   reviewerFailureClassFromStoredRow,
   unknownReviewerCommandFailureClass,
 } from '../src/reviewer-failure-classification.mjs';
+import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/reviewer-cascade.mjs';
+import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 
 test('oauth-broken spawn failure is infra-recoverable (the 2026-06-13 incident shape)', () => {
   const row = {
@@ -24,7 +26,7 @@ test('oauth-broken spawn failure is infra-recoverable (the 2026-06-13 incident s
   assert.equal(infraRecoverableFailureClass(row), 'oauth-broken');
 });
 
-test('cascade / reviewer-timeout / launchctl-bootstrap remain infra-recoverable', () => {
+test('cascade / reviewer-timeout / launchctl-bootstrap / provider degradation remain infra-recoverable', () => {
   assert.equal(
     infraRecoverableFailureClass({ failure_message: '[cascade] Routing-tier readiness probe could not connect.' }),
     'cascade'
@@ -36,6 +38,14 @@ test('cascade / reviewer-timeout / launchctl-bootstrap remain infra-recoverable'
   assert.equal(
     infraRecoverableFailureClass({ failure_message: '[launchctl-bootstrap] claude launchctl session bootstrap failed' }),
     'launchctl-bootstrap'
+  );
+  assert.equal(
+    infraRecoverableFailureClass({ failure_message: '[provider-overloaded] HTTP 529 provider overloaded' }),
+    PROVIDER_OVERLOADED_FAILURE_CLASS
+  );
+  assert.equal(
+    infraRecoverableFailureClass({ failure_message: '[quota-exhausted] usage limit; try again later' }),
+    QUOTA_EXHAUSTED_FAILURE_CLASS
   );
 });
 

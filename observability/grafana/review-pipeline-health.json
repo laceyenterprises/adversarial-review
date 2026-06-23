@@ -183,6 +183,33 @@
         "overrides": []
       },
       "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "id": 12,
+      "targets": [
+        {
+          "expr": "sum by (failure_class, state) (review_pipeline_reviewer_degradation_active)",
+          "refId": "A"
+        }
+      ],
+      "title": "Reviewer Degradation Holds",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
         "h": 8,
         "w": 8,
         "x": 0,
@@ -267,7 +294,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 20
+        "y": 24
       },
       "id": 8,
       "targets": [
@@ -294,7 +321,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 26
+        "y": 30
       },
       "id": 9,
       "targets": [

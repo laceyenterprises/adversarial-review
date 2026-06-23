@@ -83,6 +83,7 @@ import {
   settleReviewerRunRecord,
 } from './adapters/reviewer-runtime/run-state.mjs';
 import {
+  PROVIDER_OVERLOADED_FAILURE_CLASS,
   classifyReviewerFailure,
   isReviewerSubprocessTimeout,
 } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
@@ -2353,6 +2354,7 @@ const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
          lower(COALESCE(failure_message, '')) LIKE '%litellm/upstream cascade%' OR
          lower(COALESCE(failure_message, '')) LIKE '%watcher backoff engaged%'
        )) OR
+       (? = 'provider-overloaded' AND lower(COALESCE(failure_message, '')) LIKE '[provider-overloaded]%') OR
        (? = 'reviewer-timeout' AND lower(COALESCE(failure_message, '')) LIKE '[reviewer-timeout]%') OR
        (? = 'launchctl-bootstrap' AND (
          lower(COALESCE(failure_message, '')) LIKE '[launchctl-bootstrap]%' OR
@@ -3127,9 +3129,11 @@ function settleReviewerAttempt({
     'reviewer-timeout',
     'launchctl-bootstrap',
     'daemon-bounce',
+    PROVIDER_OVERLOADED_FAILURE_CLASS,
   ]);
   const defaultFailureMessages = {
     cascade: 'Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.',
+    [PROVIDER_OVERLOADED_FAILURE_CLASS]: 'Reviewer hit a provider/backend overload (HTTP 529 or capacity signal); watcher backoff engaged.',
     'quota-exhausted': 'Reviewer hit a hard provider usage cap; holding until the cap window clears (HRR graceful degradation).',
     'reviewer-timeout': 'Reviewer command timed out before posting; watcher backoff engaged.',
     'launchctl-bootstrap': 'Claude launchctl session bootstrap failed; watcher backoff engaged.',
@@ -6831,6 +6835,7 @@ async function pollOnce(
                 repoPath,
                 prNumber,
                 INFRA_AUTO_RECOVER_CAP,
+                infraRecoveryClass,
                 infraRecoveryClass,
                 infraRecoveryClass,
                 infraRecoveryClass,

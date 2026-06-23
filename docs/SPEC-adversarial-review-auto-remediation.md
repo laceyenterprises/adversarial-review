@@ -894,7 +894,8 @@ must allow dispatch, memory admission must pass, and the routing-tier readiness
 gate above must report healthy before an infrastructure failed row is claimed.
 
 Eligible infrastructure classes are routing-tier `cascade`, exhausted
-GitHub diff-fetch transients tagged as `cascade`, `reviewer-timeout`,
+GitHub diff-fetch transients tagged as `cascade`, explicit HTTP 529/backend
+capacity failures tagged as `provider-overloaded`, `reviewer-timeout`,
 `launchctl-bootstrap`, reviewer-spawn `oauth-broken`, and hard provider usage
 caps recorded as `quota-exhausted`. Reviewer subprocess exits recorded as
 `[unknown] Command failed` (including stored stdout/stderr tails) or
@@ -919,6 +920,13 @@ full reviewer after the diff is fetched; if the local model route is still down,
 the recovered row would only trade a GitHub-side failure for another
 infrastructure failure.
 
+`provider-overloaded` is the explicit backend-instability class for HTTP 529,
+`overloaded_error`, and provider/backend capacity messages. It uses the same
+transient no-attempt-burn backoff machinery as `cascade`, but the class is
+preserved in `data/cascade-state/*.json`, `reviewed_prs.failure_message`, and
+pipeline-health output so operators can distinguish provider instability from a
+local LiteLLM/proxy cascade.
+
 `quota-exhausted` is a hold-until-reset recovery class, not a normal immediate
 retry. The reviewer/runtime classifier must tag failed-row evidence with a
 `[quota-exhausted]` prefix and the watcher must capture the provider reset hint
@@ -928,6 +936,10 @@ source for the hold decision. It is set only when a reviewer failure is recorded
 as `quota-exhausted`; it is cleared when the row is claimed for a replacement
 review, when a review posts successfully, and when an operator quota re-arm
 moves the row back to `pending`.
+
+Pipeline health reports both active `provider-overloaded` transient backoffs and
+active `quota-exhausted` holds as reviewer degradation. Quota rows use state
+`quota-hold`; provider overload rows use state `transient-backoff`.
 
 Before claiming a quota row again, the watcher resolves the reset in this order:
 first `quota_reset_at_utc`; then a fallback parse of the stored

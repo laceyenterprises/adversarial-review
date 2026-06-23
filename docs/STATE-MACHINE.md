@@ -115,15 +115,18 @@ new PR
   `stmtMarkAttemptStarted`. That atomic claim is the point where failure
   evidence is cleared because a replacement review pass is now durably
   `reviewing`.
-- Infrastructure-class `failed` rows (`cascade`, `reviewer-timeout`,
-  `launchctl-bootstrap`, reviewer-spawn `oauth-broken`, `quota-exhausted`, and
-  `reviewer-command-failed` stored as `[unknown] Command failed...`) use a dedicated
+- Infrastructure-class `failed` rows (`cascade`, `provider-overloaded`,
+  `reviewer-timeout`, `launchctl-bootstrap`, reviewer-spawn `oauth-broken`,
+  `quota-exhausted`, and `reviewer-command-failed` stored as `[unknown] Command failed...`) use a dedicated
   claim path that atomically promotes the row to `reviewing` and increments
   `infra_auto_recover_attempts` only if the row is still the same failed
   infrastructure class. `quota-exhausted` is held until the provider reset window
   clears before that claim is attempted: the watcher prefers
   `quota_reset_at_utc`, falls back to parsing the tagged `failure_message`, then
   falls back to a fixed window anchored to `failed_at` / `last_attempted_at`.
+  `provider-overloaded` preserves HTTP 529/backend capacity failures separately
+  from generic `cascade` so pipeline health can report provider instability
+  without burning the normal review attempt budget.
   For `reviewer-command-failed`, the watcher first uses the persisted reviewer
   session/start evidence to query GitHub for a matching reviewer-bot review
   posted after the failed attempt started. If one exists, the watcher marks the

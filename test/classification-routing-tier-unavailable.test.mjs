@@ -8,8 +8,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  PROVIDER_OVERLOADED_FAILURE_CLASS,
   classifyReviewerFailure,
+  hasProviderOverloadedSignal,
 } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
+import { reviewerSignalAwareFailureClass } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 
 test('claude CLI "Unable to connect to API (ConnectionRefused)" stays unknown without local-routing context', () => {
   // Verbatim shape of the failure observed in the 2026-06-04 watcher log.
@@ -54,6 +57,63 @@ test('HTTP 502/503/504 require routing-tier context', () => {
   assert.equal(classifyReviewerFailure('upstream returned status 502', 1), 'cascade');
   assert.equal(classifyReviewerFailure('HTTP/503 from API gateway', 1), 'cascade');
   assert.equal(classifyReviewerFailure('response: 504 from LiteLLM upstream', 1), 'cascade');
+});
+
+test('HTTP 529 and provider overload classify as provider-overloaded', () => {
+  assert.equal(
+    classifyReviewerFailure('API Error 529: overloaded_error from Anthropic provider', 1),
+    PROVIDER_OVERLOADED_FAILURE_CLASS
+  );
+  assert.equal(
+    classifyReviewerFailure('backend is overloaded; please retry later', 1),
+    PROVIDER_OVERLOADED_FAILURE_CLASS
+  );
+  assert.equal(
+    classifyReviewerFailure('The server is overloaded; please retry later', 1),
+    PROVIDER_OVERLOADED_FAILURE_CLASS
+  );
+  assert.equal(
+    classifyReviewerFailure('The service is temporarily overloaded', 1),
+    PROVIDER_OVERLOADED_FAILURE_CLASS
+  );
+  assert.equal(
+    classifyReviewerFailure('TypeScript overload resolution failed', 1),
+    'unknown'
+  );
+});
+
+test('provider overload signal requires close provider context', () => {
+  assert.equal(
+    hasProviderOverloadedSignal(`provider diagnostics start\n${'x'.repeat(200)}\nlocal disk queue overloaded at shutdown`),
+    false
+  );
+  assert.equal(
+    hasProviderOverloadedSignal('anthropic provider temporarily overloaded'),
+    true
+  );
+  assert.equal(
+    hasProviderOverloadedSignal('anthropic provider diagnostics\nupstream queue overloaded; retry later'),
+    true
+  );
+});
+
+test('reviewer signal wrapper preserves stdout-only non-overload classifications', () => {
+  assert.equal(
+    reviewerSignalAwareFailureClass(
+      { stdout: 'OAuth token expired', stderr: 'Command failed', code: 1 },
+      'Command failed with code 1',
+      1
+    ),
+    'unknown'
+  );
+  assert.equal(
+    reviewerSignalAwareFailureClass(
+      { stdout: 'claude launchctl session bootstrap failed', stderr: 'Command failed', code: 1 },
+      'Command failed with code 1',
+      1
+    ),
+    'unknown'
+  );
 });
 
 test('transient GitHub diff-fetch failures classify as cascade', () => {

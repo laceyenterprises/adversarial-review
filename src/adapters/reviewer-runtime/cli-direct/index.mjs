@@ -16,7 +16,9 @@ import {
   updateReviewerRunRecord,
 } from '../run-state.mjs';
 import {
+  PROVIDER_OVERLOADED_FAILURE_CLASS,
   classifyReviewerFailure,
+  hasProviderOverloadedSignal,
   isReviewerSubprocessTimeout,
 } from './classification.mjs';
 import {
@@ -57,9 +59,14 @@ function tailText(value, maxBytes = DEFAULT_TAIL_BYTES) {
   return buffer.subarray(start).toString('utf8');
 }
 
-function quotaAwareFailureClass(err, classificationText, exitCode, details = {}) {
-  const quotaText = [err?.stdout, err?.stderr, err?.message].filter(Boolean).join('\n');
+function reviewerSignalAwareFailureClass(err, classificationText, exitCode, details = {}) {
+  const stdoutTail = tailText(err?.stdout || '');
+  const stderrTail = tailText(err?.stderr || '');
+  const messageTail = tailText(err?.message || '');
+  const quotaText = [stdoutTail, stderrTail, messageTail].filter(Boolean).join('\n');
   if (detectQuotaExhaustion(quotaText).isQuotaExhausted) return QUOTA_EXHAUSTED_FAILURE_CLASS;
+  const providerSignalText = [classificationText, stdoutTail].filter(Boolean).join('\n');
+  if (hasProviderOverloadedSignal(providerSignalText)) return PROVIDER_OVERLOADED_FAILURE_CLASS;
   return classifyReviewerFailure(classificationText, exitCode, err?.code, details);
 }
 
@@ -398,7 +405,7 @@ function createCliDirectReviewerRuntimeAdapter({
     } catch (err) {
       const detail = [err.message, err.stdout, err.stderr].filter(Boolean).join('\n').trim();
       const classificationText = [err?.message, err?.stderr].filter(Boolean).join('\n').trim();
-      const failureClass = err?.failureClass || quotaAwareFailureClass(err, classificationText, null);
+      const failureClass = err?.failureClass || reviewerSignalAwareFailureClass(err, classificationText, null);
       return emptyResult({
         ok: false,
         spawnedAt,
@@ -514,7 +521,7 @@ function createCliDirectReviewerRuntimeAdapter({
       const stdoutTail = tailText(err?.stdout || '');
       const cancelled = activeRun.cancelled || controller.signal.aborted || errorCode === 'ABORT_ERR';
       const classificationText = [err?.message, err?.stderr].filter(Boolean).join('\n').trim().slice(0, 4000);
-      const failureClass = quotaAwareFailureClass(
+      const failureClass = reviewerSignalAwareFailureClass(
         err,
         classificationText,
         exitCode,
@@ -700,5 +707,6 @@ export {
   createCliDirectReviewerRuntimeAdapter,
   isReviewerSubprocessTimeout,
   resolveProgressTimeoutForModel,
+  reviewerSignalAwareFailureClass,
   stripForbiddenFallbackEnv,
 };

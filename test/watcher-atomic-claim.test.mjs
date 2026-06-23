@@ -51,6 +51,7 @@ const INFRA_RECOVERY_CLAIM_SQL = `UPDATE reviewed_prs
          reviewer_pgid = NULL,
          failed_at = NULL,
          failure_message = NULL,
+         quota_reset_at_utc = NULL,
          infra_auto_recover_attempts = infra_auto_recover_attempts + 1
    WHERE repo = ?
      AND pr_number = ?
@@ -62,6 +63,7 @@ const INFRA_RECOVERY_CLAIM_SQL = `UPDATE reviewed_prs
          lower(COALESCE(failure_message, '')) LIKE '%litellm/upstream cascade%' OR
          lower(COALESCE(failure_message, '')) LIKE '%watcher backoff engaged%'
        )) OR
+       (? = 'provider-overloaded' AND lower(COALESCE(failure_message, '')) LIKE '[provider-overloaded]%') OR
        (? = 'reviewer-timeout' AND lower(COALESCE(failure_message, '')) LIKE '[reviewer-timeout]%') OR
        (? = 'launchctl-bootstrap' AND (
          lower(COALESCE(failure_message, '')) LIKE '[launchctl-bootstrap]%' OR
@@ -135,6 +137,7 @@ function runInfraRecoveryClaim(db, attemptedAt, infraClass = 'oauth-broken', rep
     repo,
     prNumber,
     cap,
+    infraClass,
     infraClass,
     infraClass,
     infraClass,
@@ -400,6 +403,22 @@ test('quota infra auto-recovery claim remains separate from unknown retry claim'
   assert.equal(quotaClaim.changes, 1);
   const row = readRow(db);
   assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.infra_auto_recover_attempts, 1);
+});
+
+test('provider-overloaded infra auto-recovery claim matches tagged provider failures', () => {
+  const db = setupDb();
+  seedReviewRow(db, {
+    reviewStatus: 'failed',
+    reviewAttempts: 1,
+    failureMessage: '[provider-overloaded] HTTP 529 upstream provider overloaded',
+  });
+
+  const claim = runInfraRecoveryClaim(db, '2026-05-02T18:11:00.000Z', 'provider-overloaded');
+  assert.equal(claim.changes, 1);
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.failure_message, null);
   assert.equal(row.infra_auto_recover_attempts, 1);
 });
 

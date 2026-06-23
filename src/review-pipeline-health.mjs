@@ -2,6 +2,9 @@ import Database from 'better-sqlite3';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { PROVIDER_OVERLOADED_FAILURE_CLASS } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
+import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaustion.mjs';
+
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
 const DEFAULT_REVIEWER_DEATH_RATE_MIN_ATTEMPTS = 3;
@@ -28,6 +31,7 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_health_collector_up',
   'review_pipeline_reviewer_attempts_total',
   'review_pipeline_failed_attempts_distinct_prs',
+  'review_pipeline_reviewer_degradation_active',
   'review_pipeline_first_pass_queue_depth',
   'review_pipeline_first_pass_oldest_pending_age_seconds',
   'review_pipeline_remediation_backlog_jobs',
@@ -42,6 +46,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_health_collector_up: 'Whether the collector could open the review-state ledger.',
   review_pipeline_reviewer_attempts_total: 'Windowed reviewer attempt count by status, failure class, and pass kind.',
   review_pipeline_failed_attempts_distinct_prs: 'Windowed distinct PR count contributing failed reviewer attempts by failure class.',
+  review_pipeline_reviewer_degradation_active: 'Active reviewer degradation/backoff PR count by failure class and state.',
   review_pipeline_first_pass_queue_depth: 'Current count of pending first-pass or rereview rows.',
   review_pipeline_first_pass_oldest_pending_age_seconds: 'Age in seconds of the oldest pending first-pass or rereview row.',
   review_pipeline_remediation_backlog_jobs: 'Current follow-up remediation job count by state.',
@@ -78,6 +83,14 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     defaultThreshold: DEFAULT_REVIEW_UNKNOWN_RATE_THRESHOLD,
     windowKey: 'reviewUnknownRateWindowMs',
     defaultWindowMs: DEFAULT_REVIEW_UNKNOWN_RATE_WINDOW_MINUTES * 60 * 1000,
+  },
+  {
+    code: 'review:reviewer_degradation_active',
+    tier: 'page',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+    thresholdDescription: 'one or more PRs are currently held by provider overload or quota exhaustion',
   },
   {
     code: 'review:queue_starvation',
@@ -216,6 +229,18 @@ function parseJson(raw, fallback = {}) {
 function classifyFailure(value) {
   const text = String(value || '').toLowerCase();
   if (!text.trim()) return 'unknown';
+  if (
+    text.includes(QUOTA_EXHAUSTED_FAILURE_CLASS) ||
+    text.includes('usage cap') ||
+    text.includes('usage limit')
+  ) return QUOTA_EXHAUSTED_FAILURE_CLASS;
+  if (
+    text.includes(PROVIDER_OVERLOADED_FAILURE_CLASS) ||
+    /\b529\b/.test(text) ||
+    /\boverloaded[_ -]?error\b/.test(text) ||
+    /\boverloaded\b[\s\S]{0,160}\b(provider|model|backend|upstream|server|service|api)\b/.test(text) ||
+    /\b(provider|model|backend|upstream|server|service|api)\b[\s\S]{0,160}\boverloaded\b/.test(text)
+  ) return PROVIDER_OVERLOADED_FAILURE_CLASS;
   if (text.includes('timeout') || text.includes('timed out') || text.includes('no output')) return 'timeout';
   if (text.includes('oauth') || text.includes('auth') || text.includes('token') || text.includes('credential')) return 'auth';
   if (text.includes('upstream') || text.includes('litellm') || text.includes('rate limit') || text.includes('5xx')) return 'upstream';
@@ -402,6 +427,151 @@ function summarizeReviewerAttempts(db, { nowMs, config }) {
   };
 }
 
+function decodeCascadeStateRepo(encodedRepo) {
+  try {
+    return decodeURIComponent(encodedRepo);
+  } catch {
+    return encodedRepo;
+  }
+}
+
+function parseCascadeStateIdentity(fileName) {
+  if (!fileName.endsWith('.json')) return null;
+  const stem = fileName.slice(0, -'.json'.length);
+  const separator = stem.lastIndexOf('__');
+  if (separator <= 0) return null;
+  const prNumber = Number(stem.slice(separator + 2));
+  if (!Number.isInteger(prNumber) || prNumber <= 0) return null;
+  return {
+    repo: decodeCascadeStateRepo(stem.slice(0, separator)),
+    prNumber,
+  };
+}
+
+function readActiveTransientBackoffs(rootDir, { nowMs }) {
+  const stateDir = join(rootDir, 'data', 'cascade-state');
+  if (!existsSync(stateDir)) return [];
+  const entries = [];
+  for (const fileName of readdirSync(stateDir)) {
+    const identity = parseCascadeStateIdentity(fileName);
+    if (!identity) continue;
+    const filePath = join(stateDir, fileName);
+    let state;
+    try {
+      state = parseJson(readFileSync(filePath, 'utf8'), null);
+    } catch {
+      continue;
+    }
+    if (!state) continue;
+    const nextRetryRaw = state.nextRetryAfter;
+    if (!nextRetryRaw) continue;
+    const nextRetryMs = Date.parse(nextRetryRaw);
+    if (Number.isNaN(nextRetryMs) || nextRetryMs <= nowMs) continue;
+    const failureClass = String(state.lastFailureClass || 'cascade').trim() || 'cascade';
+    entries.push({
+      ...identity,
+      failureClass,
+      state: 'transient-backoff',
+      since: state.lastFailureAt || null,
+      retryAfter: new Date(nextRetryMs).toISOString(),
+      source: 'cascade-state',
+      consecutiveTransientFailures: Number(state.consecutiveTransientFailures ?? state.consecutiveCascadeFailures ?? 0),
+      transientFailureBreakdown: state.transientFailureBreakdown || {},
+    });
+  }
+  return entries;
+}
+
+function readActiveQuotaHolds(db, { nowMs }) {
+  if (!db) return [];
+  const rows = safeAll(
+    db,
+    `SELECT repo,
+            pr_number,
+            review_status,
+            pr_state,
+            failed_at,
+            last_attempted_at,
+            failure_message,
+            quota_reset_at_utc,
+            infra_auto_recover_attempts
+       FROM reviewed_prs
+      WHERE review_status = 'failed'
+        AND COALESCE(pr_state, 'open') = 'open'
+        AND lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%'`
+  );
+  const entries = [];
+  for (const row of rows) {
+    const hold = quotaHoldDecision(row, { nowMs });
+    if (!hold.hold) continue;
+    entries.push({
+      repo: row.repo,
+      prNumber: row.pr_number,
+      failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
+      state: 'quota-hold',
+      since: row.failed_at || row.last_attempted_at || null,
+      retryAfter: new Date(hold.waitUntilMs).toISOString(),
+      source: hold.source,
+      infraAutoRecoverAttempts: Number(row.infra_auto_recover_attempts || 0),
+    });
+  }
+  return entries;
+}
+
+function summarizeReviewerDegradation(rootDir, db, { nowMs }) {
+  const entries = [
+    ...readActiveTransientBackoffs(rootDir, { nowMs }),
+    ...readActiveQuotaHolds(db, { nowMs }),
+  ].sort((left, right) => (
+    String(left.failureClass).localeCompare(String(right.failureClass)) ||
+    String(left.repo).localeCompare(String(right.repo)) ||
+    Number(left.prNumber) - Number(right.prNumber)
+  ));
+  const byClass = new Map();
+  for (const entry of entries) {
+    const failureClass = entry.failureClass || 'unknown';
+    if (!byClass.has(failureClass)) {
+      byClass.set(failureClass, {
+        failureClass,
+        active: 0,
+        states: {},
+        earliestRetryAfter: null,
+        latestRetryAfter: null,
+        examples: [],
+      });
+    }
+    const summary = byClass.get(failureClass);
+    summary.active += 1;
+    summary.states[entry.state] = Number(summary.states[entry.state] || 0) + 1;
+    const retryAfterMs = Date.parse(entry.retryAfter || '');
+    if (!Number.isNaN(retryAfterMs)) {
+      const retryAfterIso = new Date(retryAfterMs).toISOString();
+      const earliestMs = Date.parse(summary.earliestRetryAfter || '');
+      const latestMs = Date.parse(summary.latestRetryAfter || '');
+      if (Number.isNaN(earliestMs) || retryAfterMs < earliestMs) {
+        summary.earliestRetryAfter = retryAfterIso;
+      }
+      if (Number.isNaN(latestMs) || retryAfterMs > latestMs) {
+        summary.latestRetryAfter = retryAfterIso;
+      }
+    }
+    if (summary.examples.length < 5) {
+      summary.examples.push({
+        repo: entry.repo,
+        prNumber: entry.prNumber,
+        state: entry.state,
+        retryAfter: entry.retryAfter,
+        source: entry.source,
+      });
+    }
+  }
+  return {
+    active: entries.length,
+    byClass: Array.from(byClass.values()).sort((left, right) => left.failureClass.localeCompare(right.failureClass)),
+    entries,
+  };
+}
+
 function summarizeFirstPassQueue(db, { nowMs }) {
   const rows = safeAll(
     db,
@@ -445,7 +615,13 @@ function readFollowUpJobs(rootDir) {
   for (const [state, parts] of Object.entries(FOLLOW_UP_JOB_DIRS)) {
     const dir = join(rootDir, ...parts);
     if (!existsSync(dir)) continue;
-    for (const name of readdirSync(dir)) {
+    let names;
+    try {
+      names = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
       if (!name.endsWith('.json')) continue;
       const jobPath = join(dir, name);
       let stat;
@@ -654,6 +830,35 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  const surfacedReviewerDegradationEntries = snapshot.reviewerDegradation.entries.filter((entry) => (
+    entry.failureClass === PROVIDER_OVERLOADED_FAILURE_CLASS ||
+    entry.failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS
+  ));
+  if (surfacedReviewerDegradationEntries.length > 0) {
+    const surfacedClassSet = new Set(surfacedReviewerDegradationEntries.map((entry) => entry.failureClass));
+    const surfacedByClass = snapshot.reviewerDegradation.byClass
+      .filter((row) => surfacedClassSet.has(row.failureClass));
+    const classSummary = surfacedByClass
+      .map((row) => `${row.failureClass}=${row.active}`)
+      .join(', ');
+    findings.push(buildFinding({
+      code: 'review:reviewer_degradation_active',
+      tier: 'page',
+      subject: `Reviewer lane has ${surfacedReviewerDegradationEntries.length} active provider degradation hold(s)`,
+      message: `Active reviewer degradation classes: ${classSummary}.`,
+      evidence: surfacedReviewerDegradationEntries.map((entry) => (
+        `${entry.repo}#${entry.prNumber} ${entry.failureClass}/${entry.state} retryAfter=${entry.retryAfter || 'unknown'}`
+      )),
+      recommendedAction: 'Inspect failure_class and state: provider-overloaded means HTTP 529/backend capacity short backoff; quota-exhausted means hold until retryAfter or route around the capped reviewer.',
+      observedAt,
+      details: {
+        active: surfacedReviewerDegradationEntries.length,
+        byClass: surfacedByClass,
+        entries: surfacedReviewerDegradationEntries,
+      },
+    }));
+  }
+
   const oldest = snapshot.firstPassQueue.oldest;
   if (oldest && oldest.ageMs > config.queueStarvationMaxAgeMs) {
     findings.push(buildFinding({
@@ -745,6 +950,7 @@ function collectReviewPipelineHealth({
       ? summarizeFirstPassQueue(db, { nowMs })
       : { depth: 0, oldest: null };
     const followUpQueues = summarizeFollowUpQueues(rootDir, { nowMs, config });
+    const reviewerDegradation = summarizeReviewerDegradation(rootDir, db, { nowMs });
     const mergeOutcomes = db ? summarizeMergeOutcomes(db) : [];
     const mergeStalls = summarizeMergeStalls({
       followUpJobs: followUpQueues.jobs,
@@ -757,6 +963,7 @@ function collectReviewPipelineHealth({
       rootDir,
       config,
       reviewer,
+      reviewerDegradation,
       firstPassQueue,
       followUpQueues: {
         states: followUpQueues.states,
@@ -817,6 +1024,17 @@ function renderReviewPipelinePrometheus(snapshot) {
       failure_class: row.failureClass,
       window: `${snapshot.config.reviewUnknownRateWindowMs}ms`,
     }, row.distinctPrs);
+  }
+  const reviewerDegradationByClass = snapshot.reviewerDegradation?.byClass?.length
+    ? snapshot.reviewerDegradation.byClass
+    : [{ failureClass: 'none', states: { none: 0 } }];
+  for (const row of reviewerDegradationByClass) {
+    for (const [state, count] of Object.entries(row.states || { none: 0 })) {
+      pushMetric('review_pipeline_reviewer_degradation_active', {
+        failure_class: row.failureClass,
+        state,
+      }, count);
+    }
   }
   pushMetric('review_pipeline_first_pass_queue_depth', {}, snapshot.firstPassQueue.depth);
   pushMetric(

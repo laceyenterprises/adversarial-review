@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from 'node:timers/promises';
+import { PROVIDER_OVERLOADED_FAILURE_CLASS } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 
 const ROUTING_TIER_READINESS_RETRY_DELAYS_MS = [200, 500];
 const ROUTING_TIER_READINESS_FAILURE_CACHE_TTL_MS = 500;
@@ -31,11 +32,11 @@ function isRoutingTierReadinessProbeDisabled(env = process.env) {
   return /^(1|true|yes|on)$/i.test(env.WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED || '');
 }
 
-function buildRoutingTierReadinessFailure(reason, failureMessage) {
+function buildRoutingTierReadinessFailure(reason, failureMessage, failureClass = 'cascade') {
   return {
     ready: false,
     reason,
-    failureClass: 'cascade',
+    failureClass,
     failureMessage,
   };
 }
@@ -54,7 +55,8 @@ async function probeRoutingTierReadiness({ env = process.env, fetchFn = globalTh
       const status = res?.status ?? 'no_response';
       return buildRoutingTierReadinessFailure(
         `readiness_http_${status}`,
-        `Routing-tier readiness probe returned HTTP ${status}.`
+        `Routing-tier readiness probe returned HTTP ${status}.`,
+        status === 529 ? PROVIDER_OVERLOADED_FAILURE_CLASS : 'cascade'
       );
     }
     return { ready: true };

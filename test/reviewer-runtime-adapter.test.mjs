@@ -42,6 +42,7 @@ import {
   writeReviewerRunRecord,
 } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
 
 const noopPreflight = async ({ model }) => (
@@ -844,6 +845,40 @@ test('cli-direct classifies quota text from stdout even when stderr has wrapper 
     assert.equal(result.ok, false);
     assert.equal(result.failureClass, QUOTA_EXHAUSTED_FAILURE_CLASS);
     assert.match(result.stdoutTail, /weekly limit/);
+    assert.match(result.stderrTail, /ERROR STACK/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct classifies provider overload text from stdout even when stderr has wrapper noise', async () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      spawnCapturedImpl: async () => {
+        const err = new Error('Command failed with code 1');
+        err.stdout = 'API Error 529: overloaded_error from provider backend';
+        err.stderr = '[reviewer] DEBUG: fetching diff...\n[reviewer] ERROR STACK: Error: Command failed with code 1';
+        err.exitCode = 1;
+        throw err;
+      },
+      now: () => '2026-06-23T00:39:39.000Z',
+    });
+
+    const result = await adapter.spawnReviewer({
+      model: 'claude',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2454 },
+      timeoutMs: 100,
+      sessionUuid: 'classification-provider-overload-stdout-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, PROVIDER_OVERLOADED_FAILURE_CLASS);
+    assert.match(result.stdoutTail, /529/);
     assert.match(result.stderrTail, /ERROR STACK/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

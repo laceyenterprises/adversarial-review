@@ -1,6 +1,7 @@
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  PROVIDER_OVERLOADED_FAILURE_CLASS,
   classifyReviewerFailure,
   isReviewerSubprocessTimeout,
 } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
@@ -69,7 +70,12 @@ function resolveCascadeBackoffMinutes(consecutiveCascadeFailures) {
 
 function normalizeTransientFailureClass(failureClass) {
   const value = String(failureClass || '').trim();
-  if (value === 'cascade' || value === 'reviewer-timeout' || value === 'launchctl-bootstrap') {
+  if (
+    value === 'cascade' ||
+    value === 'reviewer-timeout' ||
+    value === 'launchctl-bootstrap' ||
+    value === PROVIDER_OVERLOADED_FAILURE_CLASS
+  ) {
     return value;
   }
   return 'cascade';
@@ -138,6 +144,7 @@ function shouldBackoffReviewerSpawn(rootDir, { repo, prNumber, now = new Date().
 
 export {
   CASCADE_FAILURE_CAP,
+  PROVIDER_OVERLOADED_FAILURE_CLASS,
   classifyReviewerFailure,
   clearCascadeState,
   formatTransientFailureBreakdown,

@@ -2354,6 +2354,7 @@ const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
          lower(COALESCE(failure_message, '')) LIKE '%litellm/upstream cascade%' OR
          lower(COALESCE(failure_message, '')) LIKE '%watcher backoff engaged%'
        )) OR
+       (? = 'provider-overloaded' AND lower(COALESCE(failure_message, '')) LIKE '[provider-overloaded]%') OR
        (? = 'reviewer-timeout' AND lower(COALESCE(failure_message, '')) LIKE '[reviewer-timeout]%') OR
        (? = 'launchctl-bootstrap' AND (
          lower(COALESCE(failure_message, '')) LIKE '[launchctl-bootstrap]%' OR
@@ -6834,6 +6835,7 @@ async function pollOnce(
                 repoPath,
                 prNumber,
                 INFRA_AUTO_RECOVER_CAP,
+                infraRecoveryClass,
                 infraRecoveryClass,
                 infraRecoveryClass,
                 infraRecoveryClass,

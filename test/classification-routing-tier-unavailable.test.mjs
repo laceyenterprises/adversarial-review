@@ -84,11 +84,15 @@ test('HTTP 529 and provider overload classify as provider-overloaded', () => {
 
 test('provider overload signal requires close provider context', () => {
   assert.equal(
-    hasProviderOverloadedSignal('provider diagnostics start\nlocal disk queue overloaded at shutdown'),
+    hasProviderOverloadedSignal(`provider diagnostics start\n${'x'.repeat(200)}\nlocal disk queue overloaded at shutdown`),
     false
   );
   assert.equal(
     hasProviderOverloadedSignal('anthropic provider temporarily overloaded'),
+    true
+  );
+  assert.equal(
+    hasProviderOverloadedSignal('anthropic provider diagnostics\nupstream queue overloaded; retry later'),
     true
   );
 });

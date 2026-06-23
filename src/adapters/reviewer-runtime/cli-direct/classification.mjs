@@ -16,9 +16,9 @@ const LAUNCHCTL_BOOTSTRAP_ERROR_RE =
 const PROVIDER_CONTEXT_RE =
   /\b(?:provider|model|backend|upstream|server|service|anthropic|claude|openai|codex|gemini|api)\b/;
 const PROVIDER_OVERLOADED_FORWARD_RE =
-  /\b(?:provider|model|backend|upstream|server|service|anthropic|claude|openai|codex|gemini|api)\b[^\r\n]{0,160}\boverloaded\b/;
+  /\b(?:provider|model|backend|upstream|server|service|anthropic|claude|openai|codex|gemini|api)\b[\s\S]{0,160}\boverloaded\b/;
 const PROVIDER_OVERLOADED_REVERSE_RE =
-  /\boverloaded\b[^\r\n]{0,160}\b(?:provider|model|backend|upstream|server|service|anthropic|claude|openai|codex|gemini|api)\b/;
+  /\boverloaded\b[\s\S]{0,160}\b(?:provider|model|backend|upstream|server|service|anthropic|claude|openai|codex|gemini|api)\b/;
 const PROVIDER_CAPACITY_RE =
   /\b(?:api|service|server|backend|provider|model)\s+(?:is\s+)?(?:at|over)\s+capacity\b/;
 

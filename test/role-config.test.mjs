@@ -11,10 +11,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  DEFAULT_ROLE_TOP_PATH,
   loadRoleConfig,
   resolveDefaultMergeAgentWorkerClass,
   resolveDefaultRemediator,
   resolveDefaultReviewer,
+  resolveGeminiReviewerModeWithSource,
+  resolvedRoleTopPath,
   validateStartupRoleConfig,
 } from '../src/role-config.mjs';
 
@@ -440,6 +443,83 @@ test('CFG-02 resolveDefaultReviewer rejects unsupported MHX-09 title tags as con
         return true;
       },
     );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('CFGDRIFT-01 role config default top path is checkout-anchored, not HOME-anchored', () => {
+  const tmp = makeTmp();
+  try {
+    assert.equal(
+      resolvedRoleTopPath({ env: { HOME: tmp, PATH: '/usr/bin:/bin' } }),
+      DEFAULT_ROLE_TOP_PATH,
+    );
+    assert.notEqual(resolvedRoleTopPath({ env: { HOME: tmp } }), join(tmp, 'agent-os/config.yaml'));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('CFGDRIFT-01 gemini mode source trace honors top local under login and launchd-like envs', () => {
+  const tmp = makeTmp();
+  try {
+    const topPath = join(tmp, 'config.yaml');
+    const topLocalPath = join(tmp, 'config.local.yaml');
+    const modulePath = join(tmp, 'module.yaml');
+    writeYaml(topPath, 'version: 1\n');
+    writeYaml(topLocalPath, 'reviewer:\n  gemini:\n    mode: fallback\n');
+    writeYaml(modulePath, 'reviewer:\n  gemini:\n    mode: off\n');
+
+    const loginLike = {
+      HOME: tmp,
+      PATH: '/opt/homebrew/bin:/usr/bin:/bin',
+      SHELL: '/bin/zsh',
+      AGENT_OS_CONFIG_PATH: topPath,
+    };
+    const launchdLike = {
+      HOME: tmp,
+      PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+      AGENT_OS_CONFIG_PATH: topPath,
+    };
+
+    for (const env of [loginLike, launchdLike]) {
+      const resolved = resolveGeminiReviewerModeWithSource({ env, modulePaths: [modulePath] });
+      assert.equal(resolved.mode, 'fallback');
+      assert.equal(resolved.rawValue, 'fallback');
+      assert.equal(resolved.source, 'file');
+      assert.equal(resolved.sourceDetail, `local:${topLocalPath}`);
+      assert.equal(resolved.path, topLocalPath);
+      assert.equal(resolved.topPath, topPath);
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('CFGDRIFT-01 gemini mode env alias still overrides file and reports env source', () => {
+  const tmp = makeTmp();
+  try {
+    const topPath = join(tmp, 'config.yaml');
+    const topLocalPath = join(tmp, 'config.local.yaml');
+    const modulePath = join(tmp, 'module.yaml');
+    writeYaml(topPath, 'version: 1\n');
+    writeYaml(topLocalPath, 'reviewer:\n  gemini:\n    mode: fallback\n');
+    writeYaml(modulePath, 'reviewer:\n  gemini:\n    mode: off\n');
+
+    const resolved = resolveGeminiReviewerModeWithSource({
+      env: {
+        AGENT_OS_CONFIG_PATH: topPath,
+        AGENT_OS_REVIEWER_GEMINI_MODE: 'always-on',
+      },
+      modulePaths: [modulePath],
+    });
+    assert.equal(resolved.mode, 'always-on');
+    assert.equal(resolved.rawValue, 'always-on');
+    assert.equal(resolved.source, 'env');
+    assert.equal(resolved.sourceDetail, 'env:AGENT_OS_REVIEWER_GEMINI_MODE');
+    assert.equal(resolved.path, null);
+    assert.equal(resolved.topPath, topPath);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

@@ -740,12 +740,12 @@ function classifyReviewCommentHeader(reviewBody) {
 }
 
 function startsWithReviewCommentHeader(reviewBody) {
-  const [firstLine = ''] = String(reviewBody || '').split(/\r?\n/, 1);
+  const [firstLine = ''] = String(reviewBody || '').trimStart().split(/\r?\n/, 1);
   return ANY_ADVERSARIAL_REVIEW_HEADER_RE.test(firstLine.trim());
 }
 
 function insertAfterExistingReviewHeader(reviewBody, insertText) {
-  const text = String(reviewBody || '');
+  const text = String(reviewBody || '').trimStart();
   const block = String(insertText || '');
   if (!block) return text;
 

@@ -26,7 +26,7 @@ import {
   loadRoleConfig,
   resetRoleConfigCache,
   resolveGeminiRuntime,
-  resolveGeminiReviewerMode,
+  resolveGeminiReviewerModeWithSource,
   resolveReviewPopulationRetryConfig,
 } from './role-config.mjs';
 import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
@@ -3724,12 +3724,30 @@ function reviewPopulationRetryDecision(row, {
 
 function resolveGeminiReviewerModeForWatcher({
   env = process.env,
-  resolver = resolveGeminiReviewerMode,
+  resolver = resolveGeminiReviewerModeWithSource,
 } = {}) {
   try {
-    return { mode: resolver({ env }), error: null };
+    const resolved = resolver({ env });
+    if (typeof resolved === 'string') {
+      return {
+        mode: resolved,
+        error: null,
+        source: 'unknown',
+        sourceDetail: null,
+        rawValue: resolved,
+        topPath: null,
+      };
+    }
+    return { ...resolved, error: null };
   } catch (err) {
-    return { mode: 'off', error: err };
+    return {
+      mode: 'off',
+      error: err,
+      source: 'default',
+      sourceDetail: 'fail-closed',
+      rawValue: 'off',
+      topPath: null,
+    };
   }
 }
 
@@ -6294,6 +6312,11 @@ async function pollOnce(
       // could otherwise produce.
       const geminiModeResolution = resolveGeminiReviewerModeForWatcher({ env: process.env });
       const geminiReviewerMode = geminiModeResolution.mode;
+      console.log(
+        `[watcher] gemini-mode resolved=${geminiReviewerMode} ` +
+          `source=${geminiModeResolution.source || 'unknown'} ` +
+          `topPath=${geminiModeResolution.topPath || '<unknown>'}`
+      );
       if (geminiModeResolution.error) {
         console.error(
           `[watcher] gemini reviewer-mode resolve failed for ${repoPath}#${prNumber}: ` +
@@ -6316,6 +6339,7 @@ async function pollOnce(
         console.log(
           `[watcher] reviewer-selection ${repoPath}#${prNumber} → gemini ` +
             `(${geminiBaseRoute.geminiReviewerSelection.reason}; mode=${geminiReviewerMode}; ` +
+            `mode-source=${geminiModeResolution.source || 'unknown'}; ` +
             `replaced reviewer=${geminiBaseRoute.geminiReviewerSelection.replacedReviewerModel})`
         );
       } else if (geminiBaseRoute.geminiIntegrityGuard) {

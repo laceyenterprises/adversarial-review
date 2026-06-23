@@ -29,6 +29,8 @@ const CODEX_QUOTA_PATTERNS = [
 ];
 
 const CLAUDE_QUOTA_PATTERNS = [
+  /hit your weekly limit/i,
+  /weekly limit.*resets/i,
   /usage limit reached/i,
   /reached your usage limit/i,
   /claude usage limit/i,
@@ -44,6 +46,7 @@ const GENERIC_QUOTA_PATTERNS = [
 ];
 
 const CODEX_HUMAN_RESET_TIME_ZONE = 'America/Los_Angeles';
+const HUMAN_RESET_YEAR_CROSSOVER_THRESHOLD_MS = 180 * 24 * 60 * 60 * 1000;
 const MONTH_INDEX_BY_PREFIX = new Map([
   ['jan', 0],
   ['feb', 1],
@@ -63,28 +66,54 @@ function _matches(text, patterns) {
   return patterns.some((re) => re.test(text));
 }
 
+function baseDateFromNowMs(nowMs, { fallbackMissingToNow = false, fallbackInvalidToNow = false } = {}) {
+  if (nowMs == null) return fallbackMissingToNow ? new Date() : null;
+  const base = new Date(nowMs);
+  if (!Number.isNaN(base.getTime())) return base;
+  return fallbackInvalidToNow ? new Date() : null;
+}
+
+function fixedTimeZoneOffsetMs(timeZone) {
+  const match = String(timeZone || '').trim().match(/^(?:UTC|GMT)\s*([+-])\s*(?:(\d{1,2})(?::(\d{2}))?|(\d{2})(\d{2}))$/i);
+  if (!match) return null;
+  const hours = Number(match[2] ?? match[4]);
+  const minutes = match[3] == null && match[5] == null ? 0 : Number(match[3] ?? match[5]);
+  if (hours > 23 || minutes > 59) return null;
+  const sign = match[1] === '-' ? -1 : 1;
+  return sign * ((hours * 60 + minutes) * 60 * 1000);
+}
+
 function timeZoneOffsetMs(timeZone, utcMs) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    hourCycle: 'h23',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).formatToParts(new Date(utcMs));
-  const values = Object.fromEntries(parts.filter((p) => p.type !== 'literal').map((p) => [p.type, p.value]));
-  const wallAsUtcMs = Date.UTC(
-    Number(values.year),
-    Number(values.month) - 1,
-    Number(values.day),
-    Number(values.hour),
-    Number(values.minute),
-    Number(values.second),
-    0
-  );
-  return wallAsUtcMs - utcMs;
+  const fixedOffsetMs = fixedTimeZoneOffsetMs(timeZone);
+  if (fixedOffsetMs != null) return fixedOffsetMs;
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    }).formatToParts(new Date(utcMs));
+    const values = Object.fromEntries(parts.filter((p) => p.type !== 'literal').map((p) => [p.type, p.value]));
+    const wallAsUtcMs = Date.UTC(
+      Number(values.year),
+      Number(values.month) - 1,
+      Number(values.day),
+      Number(values.hour),
+      Number(values.minute),
+      Number(values.second),
+      0
+    );
+    return wallAsUtcMs - utcMs;
+  } catch {
+    if (timeZone !== CODEX_HUMAN_RESET_TIME_ZONE) {
+      return timeZoneOffsetMs(CODEX_HUMAN_RESET_TIME_ZONE, utcMs);
+    }
+    return 0;
+  }
 }
 
 function wallTimeInZoneToDate({ year, month, day, hour, minute }, timeZone) {
@@ -97,6 +126,17 @@ function wallTimeInZoneToDate({ year, month, day, hour, minute }, timeZone) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+function localYearInTimeZone(base, timeZone) {
+  try {
+    return new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric' }).format(base);
+  } catch {
+    if (timeZone !== CODEX_HUMAN_RESET_TIME_ZONE) {
+      return localYearInTimeZone(base, CODEX_HUMAN_RESET_TIME_ZONE);
+    }
+    return String(base.getUTCFullYear());
+  }
+}
+
 // Parse the reset time the provider returns, if any. Returns an ISO-8601 string
 // (UTC) or null. Handles the two known phrasings:
 //   codex:  "try again at Jun 17th, 2026 5:39 PM"
@@ -106,44 +146,55 @@ function wallTimeInZoneToDate({ year, month, day, hour, minute }, timeZone) {
 function parseQuotaResetAt(text, { nowMs = null } = {}) {
   const t = String(text || '');
   // Prefer an explicit ISO timestamp if the provider gave one.
-  const iso = t.match(/(?:try again at|resets? at)\s+(\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)/i);
+  const iso = t.match(/(?:try again at\s+|resets?\s+(?:at\s+)?)(\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)/i);
   if (iso) {
     const d = new Date(iso[1]);
     if (d && !Number.isNaN(d.getTime())) return d.toISOString();
   }
   // "try again at Jun 17th, 2026 5:39 PM" — strip the ordinal suffix Date can't parse.
-  const human = t.match(/(?:try again at|resets? at)\s+([A-Za-z]{3,9}\s+\d{1,2})(?:st|nd|rd|th)?(,?\s+\d{4})?\s+(\d{1,2}:\d{2}\s*(?:am|pm))/i);
+  const human = t.match(/(?:try again at\s+|resets?\s+(?:at\s+)?)([A-Za-z]{3,9}\s+\d{1,2})(?:st|nd|rd|th)?(,?\s+\d{4})?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([A-Za-z0-9_+\/:\-]+)\))?/i);
   if (human) {
-    const base = nowMs != null ? new Date(nowMs) : null;
-    const year = human[2] ? human[2].replace(/[,\s]/g, '') : (base ? String(base.getUTCFullYear()) : '');
+    const base = baseDateFromNowMs(nowMs, { fallbackInvalidToNow: true });
+    const explicitYear = Boolean(human[2]);
+    const timeZone = human[6] || CODEX_HUMAN_RESET_TIME_ZONE;
+    let year = explicitYear ? human[2].replace(/[,\s]/g, '') : (base ? localYearInTimeZone(base, timeZone) : '');
     const dateParts = human[1].match(/^([A-Za-z]{3,9})\s+(\d{1,2})$/);
-    const timeParts = human[3].match(/^(\d{1,2}):(\d{2})\s*(am|pm)$/i);
     const month = MONTH_INDEX_BY_PREFIX.get(String(dateParts?.[1] || '').slice(0, 3).toLowerCase());
     const day = Number(dateParts?.[2]);
-    let hour = Number(timeParts?.[1]);
-    const minute = Number(timeParts?.[2]);
-    const meridiem = String(timeParts?.[3] || '').toLowerCase();
+    let hour = Number(human[3]);
+    const minute = human[4] == null ? 0 : Number(human[4]);
+    const meridiem = String(human[5] || '').toLowerCase();
     if (hour === 12) hour = 0;
     if (meridiem === 'pm') hour += 12;
-    const d = Number.isInteger(month) && year && day >= 1 && day <= 31 && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59
+    let d = Number.isInteger(month) && year && day >= 1 && day <= 31 && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59
       ? wallTimeInZoneToDate({
         year: Number(year),
         month,
         day,
         hour,
         minute,
-      }, CODEX_HUMAN_RESET_TIME_ZONE)
+      }, timeZone)
       : null;
+    if (d && base && !explicitYear && base.getTime() - d.getTime() > HUMAN_RESET_YEAR_CROSSOVER_THRESHOLD_MS) {
+      year = String(Number(year) + 1);
+      d = wallTimeInZoneToDate({
+        year: Number(year),
+        month,
+        day,
+        hour,
+        minute,
+      }, timeZone);
+    }
     if (d && !Number.isNaN(d.getTime())) return d.toISOString();
   }
   // Claude often prints only a local clock time for rolling caps:
   // "resets at 5:39 PM". Anchor that to today's local date, then roll forward
   // one day if that wall-clock time has already elapsed.
-  const clockOnly = t.match(/resets? at\s+(\d{1,2}):(\d{2})\s*(am|pm)\b/i);
+  const clockOnly = t.match(/resets? at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
   if (clockOnly) {
-    const base = nowMs != null ? new Date(nowMs) : new Date();
+    const base = baseDateFromNowMs(nowMs, { fallbackMissingToNow: true, fallbackInvalidToNow: true });
     let hour = Number(clockOnly[1]);
-    const minute = Number(clockOnly[2]);
+    const minute = clockOnly[2] == null ? 0 : Number(clockOnly[2]);
     const meridiem = clockOnly[3].toLowerCase();
     if (hour >= 1 && hour <= 12 && minute >= 0 && minute <= 59) {
       if (hour === 12) hour = 0;
@@ -158,6 +209,7 @@ function parseQuotaResetAt(text, { nowMs = null } = {}) {
         0
       );
       if (d.getTime() <= base.getTime()) d.setDate(d.getDate() + 1);
+      if (Number.isNaN(d.getTime())) return null;
       return d.toISOString();
     }
   }

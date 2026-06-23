@@ -85,6 +85,14 @@ const CODEX_QUOTA_OUTPUT = [
   'reviewer subprocess exited non-zero',
 ].join('\n');
 
+const CLAUDE_WEEKLY_QUOTA_OUTPUT = [
+  'Command failed with code 1',
+  'stdout tail:',
+  "You've hit your weekly limit · resets Jun 27 at 3am (America/Los_Angeles)",
+  'stderr tail:',
+  '[reviewer] ERROR STACK: Error: Command failed with code 1',
+].join('\n');
+
 test('quota-exhausted failure captures + stores the provider reset time durably', () => {
   const { rootDir, db } = setupFixture();
   try {
@@ -114,6 +122,35 @@ test('quota-exhausted failure captures + stores the provider reset time durably'
     assert.match(row.failure_message, /try again at Jun 17th, 2026 5:39 PM/i);
     // Classifies as the recoverable quota class.
     assert.equal(infraRecoverableFailureClass(row), QUOTA_EXHAUSTED_FAILURE_CLASS);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('quota-exhausted failure captures Claude weekly reset from stdout', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: REPO,
+      prNumber: PR,
+      result: {
+        ok: false,
+        failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
+        error: 'Command failed with code 1',
+        stdout: CLAUDE_WEEKLY_QUOTA_OUTPUT,
+        stderr: '[reviewer] ERROR STACK: Error: Command failed with code 1',
+      },
+      failureAt: '2026-06-23T00:39:39.000Z',
+      maxRemediationRounds: 2,
+      leaseRecoveryEnabled: false,
+      statements: quotaStatements(db),
+    });
+
+    const row = getRow(db);
+    assert.equal(row.review_status, 'failed');
+    assert.equal(row.quota_reset_at_utc, '2026-06-27T10:00:00.000Z');
+    assert.match(row.failure_message, /^\[quota-exhausted\]/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

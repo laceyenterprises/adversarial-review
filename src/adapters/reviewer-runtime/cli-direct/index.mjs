@@ -20,6 +20,10 @@ import {
   isReviewerSubprocessTimeout,
 } from './classification.mjs';
 import {
+  detectQuotaExhaustion,
+  QUOTA_EXHAUSTED_FAILURE_CLASS,
+} from '../../../quota-exhaustion.mjs';
+import {
   CliDirectPreflightError,
   probeReviewerCliOAuth,
 } from './discovery.mjs';
@@ -51,6 +55,12 @@ function tailText(value, maxBytes = DEFAULT_TAIL_BYTES) {
     start += 1;
   }
   return buffer.subarray(start).toString('utf8');
+}
+
+function quotaAwareFailureClass(err, classificationText, exitCode, details = {}) {
+  const quotaText = [err?.stdout, err?.stderr, err?.message].filter(Boolean).join('\n');
+  if (detectQuotaExhaustion(quotaText).isQuotaExhausted) return QUOTA_EXHAUSTED_FAILURE_CLASS;
+  return classifyReviewerFailure(classificationText, exitCode, err?.code, details);
 }
 
 function readTailFile(filePath, maxBytes = DEFAULT_TAIL_BYTES) {
@@ -387,7 +397,8 @@ function createCliDirectReviewerRuntimeAdapter({
       }
     } catch (err) {
       const detail = [err.message, err.stdout, err.stderr].filter(Boolean).join('\n').trim();
-      const failureClass = err?.failureClass || classifyReviewerFailure(err?.stderr || detail, null, err?.code);
+      const classificationText = [err?.message, err?.stderr].filter(Boolean).join('\n').trim();
+      const failureClass = err?.failureClass || quotaAwareFailureClass(err, classificationText, null);
       return emptyResult({
         ok: false,
         spawnedAt,
@@ -502,10 +513,11 @@ function createCliDirectReviewerRuntimeAdapter({
       const stderrTail = tailText(err?.stderr || detail || '');
       const stdoutTail = tailText(err?.stdout || '');
       const cancelled = activeRun.cancelled || controller.signal.aborted || errorCode === 'ABORT_ERR';
-      const failureClass = classifyReviewerFailure(
-        err?.stderr || detail || '',
+      const classificationText = [err?.message, err?.stderr].filter(Boolean).join('\n').trim().slice(0, 4000);
+      const failureClass = quotaAwareFailureClass(
+        err,
+        classificationText,
         exitCode,
-        err?.code,
         {
           killed: err?.killed === true,
           signal: err?.signal,

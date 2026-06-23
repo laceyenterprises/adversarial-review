@@ -51,6 +51,16 @@ test('claude hard usage cap is detected with harness=claude', () => {
   assert.equal(result.resetAt, '2026-06-17T17:39:00.000Z');
 });
 
+test('claude weekly cap is detected and carries the provider reset', () => {
+  const result = detectQuotaExhaustion(
+    "You've hit your weekly limit · resets Jun 27 at 3am (America/Los_Angeles)",
+    { nowMs: Date.parse('2026-06-23T00:39:39.000Z') },
+  );
+  assert.equal(result.isQuotaExhausted, true);
+  assert.equal(result.harness, 'claude');
+  assert.equal(result.resetAt, '2026-06-27T10:00:00.000Z');
+});
+
 test('generic resource_exhausted is detected as a hard cap (harness unknown)', () => {
   const result = detectQuotaExhaustion('Error: RESOURCE_EXHAUSTED: quota exceeded');
   assert.equal(result.isQuotaExhausted, true);
@@ -89,11 +99,94 @@ test('parseQuotaResetAt handles an explicit ISO reset timestamp', () => {
   );
 });
 
+test('parseQuotaResetAt handles Claude weekly reset without a year or minute', () => {
+  const iso = parseQuotaResetAt(
+    "You've hit your weekly limit · resets Jun 27 at 3am (America/Los_Angeles)",
+    { nowMs: Date.parse('2026-06-23T00:39:39.000Z') },
+  );
+  assert.equal(iso, '2026-06-27T10:00:00.000Z');
+});
+
+test('parseQuotaResetAt handles fixed UTC/GMT offset timezone labels exactly', () => {
+  assert.equal(
+    parseQuotaResetAt(
+      "You've hit your weekly limit · resets Jun 27 at 3am (GMT-8)",
+      { nowMs: Date.parse('2026-06-23T00:39:39.000Z') },
+    ),
+    '2026-06-27T11:00:00.000Z'
+  );
+  const iso = parseQuotaResetAt(
+    "You've hit your weekly limit · resets Jun 27 at 3am (UTC-5)",
+    { nowMs: Date.parse('2026-06-23T00:39:39.000Z') },
+  );
+  assert.equal(iso, '2026-06-27T08:00:00.000Z');
+  assert.equal(
+    parseQuotaResetAt(
+      "You've hit your weekly limit · resets Jun 27 at 3am (UTC+05:30)",
+      { nowMs: Date.parse('2026-06-23T00:39:39.000Z') },
+    ),
+    '2026-06-26T21:30:00.000Z'
+  );
+  assert.equal(
+    parseQuotaResetAt(
+      "You've hit your weekly limit · resets Jun 27 at 3am (UTC+0530)",
+      { nowMs: Date.parse('2026-06-23T00:39:39.000Z') },
+    ),
+    '2026-06-26T21:30:00.000Z'
+  );
+});
+
+test('parseQuotaResetAt rejects malformed fixed-offset timezone labels without backtracking', () => {
+  const nowMs = Date.parse('2026-06-23T00:39:39.000Z');
+  assert.equal(
+    parseQuotaResetAt("You've hit your weekly limit · resets Jun 27 at 3am (UTC+05:3)", { nowMs }),
+    '2026-06-27T10:00:00.000Z'
+  );
+  assert.equal(
+    parseQuotaResetAt("You've hit your weekly limit · resets Jun 27 at 3am (UTC+053)", { nowMs }),
+    '2026-06-27T10:00:00.000Z'
+  );
+});
+
+test('parseQuotaResetAt falls back instead of throwing on invalid timezone labels', () => {
+  assert.doesNotThrow(() => {
+    parseQuotaResetAt(
+      "You've hit your weekly limit · resets Jun 27 at 3am (UTC-invalid)",
+      { nowMs: Date.parse('2026-06-23T00:39:39.000Z') },
+    );
+  });
+});
+
+test('parseQuotaResetAt does not throw when nowMs is invalid', () => {
+  const iso = parseQuotaResetAt('Claude usage limit reached; resets at 5:39 PM', {
+    nowMs: 'not-a-date',
+  });
+  assert.match(iso, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/);
+});
+
 test('parseQuotaResetAt infers the year from nowMs when the provider omits it', () => {
   const nowMs = Date.parse('2026-06-16T12:00:00Z');
   const iso = parseQuotaResetAt('try again at Jun 17th 5:39 PM', { nowMs });
   assert.ok(iso);
   assert.equal(new Date(iso).getUTCFullYear(), 2026);
+});
+
+test('parseQuotaResetAt infers omitted year from the reset timezone local date', () => {
+  const nowMs = Date.parse('2026-01-01T01:30:00Z');
+  const iso = parseQuotaResetAt('resets Dec 31 at 11pm (America/New_York)', { nowMs });
+  assert.equal(iso, '2026-01-01T04:00:00.000Z');
+});
+
+test('parseQuotaResetAt does not roll a just-elapsed no-year reset into next year', () => {
+  const nowMs = Date.parse('2026-06-27T10:05:00Z');
+  const iso = parseQuotaResetAt('resets Jun 27 at 3am (America/Los_Angeles)', { nowMs });
+  assert.equal(iso, '2026-06-27T10:00:00.000Z');
+});
+
+test('parseQuotaResetAt rolls a stale no-year reset across a genuine year boundary', () => {
+  const nowMs = Date.parse('2026-12-31T12:00:00Z');
+  const iso = parseQuotaResetAt('resets Jan 2 at 3am (America/Los_Angeles)', { nowMs });
+  assert.equal(iso, '2027-01-02T11:00:00.000Z');
 });
 
 test('parseQuotaResetAt handles Claude clock-only reset times before the local reset', () => {
@@ -102,6 +195,14 @@ test('parseQuotaResetAt handles Claude clock-only reset times before the local r
     nowMs: base.getTime(),
   });
   assert.equal(iso, new Date(2026, 5, 17, 17, 39, 0, 0).toISOString());
+});
+
+test('parseQuotaResetAt handles Claude clock-only reset times without minutes', () => {
+  const base = new Date(2026, 5, 17, 12, 0, 0, 0);
+  const iso = parseQuotaResetAt('Claude usage limit reached; resets at 3pm', {
+    nowMs: base.getTime(),
+  });
+  assert.equal(iso, new Date(2026, 5, 17, 15, 0, 0, 0).toISOString());
 });
 
 test('parseQuotaResetAt rolls Claude clock-only reset times to tomorrow when already elapsed', () => {

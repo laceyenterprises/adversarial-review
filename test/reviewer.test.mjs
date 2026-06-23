@@ -28,7 +28,9 @@ const {
   VERDICT_MODE_ADVISORY_ONLY,
   VERDICT_MODE_ENFORCE,
   buildReviewCommentHeader,
+  buildReviewCommentBody,
   classifyReviewCommentHeader,
+  startsWithReviewCommentHeader,
   fetchCurrentHeadVerdictMode,
   resolveVerdictModeForHead,
   spawnCodexReview,
@@ -414,6 +416,132 @@ test('review header classifier locates enforce and advisory reviews while distin
     verdictMode: null,
     advisoryOnly: false,
   });
+});
+
+test('review comment body prepends canonical header when reviewer output has none', () => {
+  const body = buildReviewCommentBody({
+    reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'gemini-reviewer-lacey' },
+    verdictMode: VERDICT_MODE_ENFORCE,
+    reviewText: '## Summary\nClean.\n\n## Verdict\nComment only',
+  });
+
+  assert.equal(
+    body,
+    '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n' +
+      '## Summary\nClean.\n\n## Verdict\nComment only',
+  );
+});
+
+test('review comment body skips prepending when reviewer output already has a title', () => {
+  const modelOutput = [
+    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '',
+    '## Summary',
+    'Clean.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+
+  const body = buildReviewCommentBody({
+    reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'gemini-reviewer-lacey' },
+    verdictMode: VERDICT_MODE_ENFORCE,
+    reviewText: modelOutput,
+  });
+
+  assert.equal(body, modelOutput);
+  assert.equal(body.match(/^##\s+Adversarial Review\b/gm).length, 1);
+});
+
+test('review comment body recognizes loose model-supplied adversarial review titles', () => {
+  const modelOutput = [
+    '## Adversarial Review - Gemini',
+    '',
+    '## Summary',
+    'Clean.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+
+  assert.equal(startsWithReviewCommentHeader(modelOutput), true);
+  assert.equal(
+    buildReviewCommentBody({
+      reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'gemini-reviewer-lacey' },
+      verdictMode: VERDICT_MODE_ENFORCE,
+      reviewText: modelOutput,
+    }),
+    modelOutput,
+  );
+});
+
+test('review comment body skips prepending when model title has leading whitespace', () => {
+  const modelOutput = [
+    '',
+    '  ## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '',
+    '## Summary',
+    'Clean.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+
+  const body = buildReviewCommentBody({
+    reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'gemini-reviewer-lacey' },
+    verdictMode: VERDICT_MODE_ENFORCE,
+    reviewText: modelOutput,
+  });
+
+  assert.equal(startsWithReviewCommentHeader(modelOutput), true);
+  assert.equal(
+    body,
+    '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n' +
+      '## Summary\nClean.\n\n## Verdict\nComment only',
+  );
+  assert.equal(body.match(/^##\s+Adversarial Review\b/gm).length, 1);
+});
+
+test('review comment body inserts waiver under existing model-supplied title', () => {
+  const waiverAuditBlock = '> Cross-model review waiver: operator override.\n\n';
+  const body = buildReviewCommentBody({
+    reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'gemini-reviewer-lacey' },
+    verdictMode: VERDICT_MODE_ENFORCE,
+    waiverAuditBlock,
+    reviewText: [
+      '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+      '',
+      '## Summary',
+      'Clean.',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n'),
+  });
+
+  assert.equal(
+    body,
+    '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n' +
+      waiverAuditBlock +
+      '## Summary\nClean.\n\n## Verdict\nComment only',
+  );
+});
+
+test('review comment body inserts waiver below title with leading carriage-return newlines', () => {
+  const waiverAuditBlock = '> Cross-model review waiver: operator override.\n\n';
+  const body = buildReviewCommentBody({
+    reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'gemini-reviewer-lacey' },
+    verdictMode: VERDICT_MODE_ENFORCE,
+    waiverAuditBlock,
+    reviewText: '\r\n\r\n## Adversarial Review — Gemini (gemini-reviewer-lacey)\r\n\r\n## Summary\r\nClean.\r\n\r\n## Verdict\r\nComment only',
+  });
+
+  assert.equal(
+    body,
+    '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n' +
+      waiverAuditBlock +
+      '## Summary\r\nClean.\r\n\r\n## Verdict\r\nComment only',
+  );
 });
 
 test('clean comment-only reviews still queue a durable follow-up verdict carrier through the production queue helper', () => {

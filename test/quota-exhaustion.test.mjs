@@ -51,6 +51,16 @@ test('claude hard usage cap is detected with harness=claude', () => {
   assert.equal(result.resetAt, '2026-06-17T17:39:00.000Z');
 });
 
+test('claude weekly cap is detected and carries the provider reset', () => {
+  const result = detectQuotaExhaustion(
+    "You've hit your weekly limit · resets Jun 27 at 3am (America/Los_Angeles)",
+    { nowMs: Date.parse('2026-06-23T00:39:39.000Z') },
+  );
+  assert.equal(result.isQuotaExhausted, true);
+  assert.equal(result.harness, 'claude');
+  assert.equal(result.resetAt, '2026-06-27T10:00:00.000Z');
+});
+
 test('generic resource_exhausted is detected as a hard cap (harness unknown)', () => {
   const result = detectQuotaExhaustion('Error: RESOURCE_EXHAUSTED: quota exceeded');
   assert.equal(result.isQuotaExhausted, true);
@@ -87,6 +97,14 @@ test('parseQuotaResetAt handles an explicit ISO reset timestamp', () => {
     parseQuotaResetAt('resets at 2026-06-17T17:39:00Z'),
     '2026-06-17T17:39:00.000Z'
   );
+});
+
+test('parseQuotaResetAt handles Claude weekly reset without a year or minute', () => {
+  const iso = parseQuotaResetAt(
+    "You've hit your weekly limit · resets Jun 27 at 3am (America/Los_Angeles)",
+    { nowMs: Date.parse('2026-06-23T00:39:39.000Z') },
+  );
+  assert.equal(iso, '2026-06-27T10:00:00.000Z');
 });
 
 test('parseQuotaResetAt infers the year from nowMs when the provider omits it', () => {

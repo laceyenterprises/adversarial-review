@@ -465,10 +465,11 @@ function createAcpxReviewerRuntimeAdapter({
       const stderrSource = err instanceof OAuthProbeError ? detail : (err?.stderr || detail || '');
       const stderrTail = addAcpxHint(tailText(stderrSource));
       const stdoutTail = tailText(err?.stdout || '');
+      const classificationText = detail || err?.stderr || '';
       const failureClass = err instanceof OAuthProbeError
         ? 'oauth-broken'
         : classifyAcpxFailure(
-          err?.stderr || detail || '',
+          classificationText,
           exitCode,
           err?.code,
           {

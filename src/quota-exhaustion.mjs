@@ -29,6 +29,8 @@ const CODEX_QUOTA_PATTERNS = [
 ];
 
 const CLAUDE_QUOTA_PATTERNS = [
+  /hit your weekly limit/i,
+  /weekly limit.*resets/i,
   /usage limit reached/i,
   /reached your usage limit/i,
   /claude usage limit/i,
@@ -106,34 +108,45 @@ function wallTimeInZoneToDate({ year, month, day, hour, minute }, timeZone) {
 function parseQuotaResetAt(text, { nowMs = null } = {}) {
   const t = String(text || '');
   // Prefer an explicit ISO timestamp if the provider gave one.
-  const iso = t.match(/(?:try again at|resets? at)\s+(\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)/i);
+  const iso = t.match(/(?:try again at\s+|resets?\s+(?:at\s+)?)(\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)/i);
   if (iso) {
     const d = new Date(iso[1]);
     if (d && !Number.isNaN(d.getTime())) return d.toISOString();
   }
   // "try again at Jun 17th, 2026 5:39 PM" — strip the ordinal suffix Date can't parse.
-  const human = t.match(/(?:try again at|resets? at)\s+([A-Za-z]{3,9}\s+\d{1,2})(?:st|nd|rd|th)?(,?\s+\d{4})?\s+(\d{1,2}:\d{2}\s*(?:am|pm))/i);
+  const human = t.match(/(?:try again at\s+|resets?\s+(?:at\s+)?)([A-Za-z]{3,9}\s+\d{1,2})(?:st|nd|rd|th)?(,?\s+\d{4})?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([A-Za-z_/-]+)\))?/i);
   if (human) {
     const base = nowMs != null ? new Date(nowMs) : null;
-    const year = human[2] ? human[2].replace(/[,\s]/g, '') : (base ? String(base.getUTCFullYear()) : '');
+    const explicitYear = Boolean(human[2]);
+    let year = explicitYear ? human[2].replace(/[,\s]/g, '') : (base ? String(base.getUTCFullYear()) : '');
     const dateParts = human[1].match(/^([A-Za-z]{3,9})\s+(\d{1,2})$/);
-    const timeParts = human[3].match(/^(\d{1,2}):(\d{2})\s*(am|pm)$/i);
     const month = MONTH_INDEX_BY_PREFIX.get(String(dateParts?.[1] || '').slice(0, 3).toLowerCase());
     const day = Number(dateParts?.[2]);
-    let hour = Number(timeParts?.[1]);
-    const minute = Number(timeParts?.[2]);
-    const meridiem = String(timeParts?.[3] || '').toLowerCase();
+    let hour = Number(human[3]);
+    const minute = human[4] == null ? 0 : Number(human[4]);
+    const meridiem = String(human[5] || '').toLowerCase();
+    const timeZone = human[6] || CODEX_HUMAN_RESET_TIME_ZONE;
     if (hour === 12) hour = 0;
     if (meridiem === 'pm') hour += 12;
-    const d = Number.isInteger(month) && year && day >= 1 && day <= 31 && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59
+    let d = Number.isInteger(month) && year && day >= 1 && day <= 31 && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59
       ? wallTimeInZoneToDate({
         year: Number(year),
         month,
         day,
         hour,
         minute,
-      }, CODEX_HUMAN_RESET_TIME_ZONE)
+      }, timeZone)
       : null;
+    if (d && base && !explicitYear && d.getTime() <= base.getTime()) {
+      year = String(Number(year) + 1);
+      d = wallTimeInZoneToDate({
+        year: Number(year),
+        month,
+        day,
+        hour,
+        minute,
+      }, timeZone);
+    }
     if (d && !Number.isNaN(d.getTime())) return d.toISOString();
   }
   // Claude often prints only a local clock time for rolling caps:

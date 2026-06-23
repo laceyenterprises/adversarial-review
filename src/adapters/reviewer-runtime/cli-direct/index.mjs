@@ -387,7 +387,8 @@ function createCliDirectReviewerRuntimeAdapter({
       }
     } catch (err) {
       const detail = [err.message, err.stdout, err.stderr].filter(Boolean).join('\n').trim();
-      const failureClass = err?.failureClass || classifyReviewerFailure(err?.stderr || detail, null, err?.code);
+      const classificationText = detail || err?.stderr || '';
+      const failureClass = err?.failureClass || classifyReviewerFailure(classificationText, null, err?.code);
       return emptyResult({
         ok: false,
         spawnedAt,
@@ -502,8 +503,9 @@ function createCliDirectReviewerRuntimeAdapter({
       const stderrTail = tailText(err?.stderr || detail || '');
       const stdoutTail = tailText(err?.stdout || '');
       const cancelled = activeRun.cancelled || controller.signal.aborted || errorCode === 'ABORT_ERR';
+      const classificationText = detail || err?.stderr || '';
       const failureClass = classifyReviewerFailure(
-        err?.stderr || detail || '',
+        classificationText,
         exitCode,
         err?.code,
         {

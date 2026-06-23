@@ -53,11 +53,7 @@ import {
 } from './role-config.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE, loadConfigCached } from './config-loader.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
-import {
-  isNoneFindingsSentinelOnly,
-  parseBlockingFindingsSection,
-  parseNonBlockingFindingsSection,
-} from './kernel/remediation-reply.mjs';
+import classifyMergeAgentRescue, { parseReviewBody as parseMergeAgentRescueReviewBody } from './merge-agent-rescue-classifier.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 import {
   readLatestWorkerRunStatusFromLedger,
@@ -5622,82 +5618,30 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
   };
 }
 
-// Standing blocking-finding state in a review body, used by the merge gate to
-// refuse final-pass auto-merge (PR #901). Primary signal is the canonical
-// structured parser; fail SAFE when the `## Blocking issues` section is present
-// and is NOT the `- None.` sentinel but the structured parse yields nothing
-// (e.g. a malformed/incomplete finding card) — treat it as one standing
-// blocker so the gate refuses rather than auto-merging an unparseable section.
-//
-// Legacy `Request changes` reviews that predate the structured issue sections
-// are different: blocker presence is unknowable, so the final-pass gate parks
-// with `skip-blocking-findings-unknown` until a fresh structured review exists
-// or an operator applies a scoped override.
 function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
-  const parsed = parseBlockingFindingsSection(reviewBody);
-  if (parsed && parsed.length > 0) {
-    return { count: parsed.length, state: 'known' };
-  }
-  const match = String(reviewBody ?? '').match(/##\s+Blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
+  const parsed = parseMergeAgentRescueReviewBody(reviewBody);
   const normalizedVerdict = normalizeReviewVerdict(lastVerdict);
-  if (!match) {
+  if (parsed.blocking.missing) {
     return normalizedVerdict === 'request-changes'
       ? { count: 0, state: 'unknown' }
       : { count: 0, state: 'known' };
   }
-  const section = match[1].trim();
-  if (!section) return { count: 0, state: 'known' };
-  return isNoneFindingsSentinelOnly(section)
-    ? { count: 0, state: 'known' }
-    : { count: 1, state: 'known' };
+  return { count: parsed.blocking.count, state: 'known' };
 }
 
-// NOTE on the count strategy (review finding 2026-06-19, intentional divergence
-// from classifyBlockingFindings): classifyBlockingFindings falls back to a BINARY
-// (0/1) "is anything present" count because the gate only needs to know whether a
-// blocker exists. Non-blocking is deliberately counted more granularly here —
-// every top-level `- **...**` bullet — because the count is surfaced to operators
-// in trace.verdict.nonBlockingFindings.count as the honest "how many polish items
-// remain" signal. The canonical parseNonBlockingFindingsSection counts only
-// File-tagged STRUCTURED findings (a subset), so using it as the primary count
-// would UNDER-report (e.g. 1 vs 2 for two bullets where only one carries a File:
-// line). The strict gate consumes only `count > 0`, so the exact value never
-// changes a direct-close decision. HAM terminal-remediation now also uses this
-// count as a fail-closed completeness check against the parsed non-blocking
-// finding identities; if the identity parser can name fewer current findings
-// than this count, the non-blocking waiver is refused instead of checking only a
-// subset. Keeping the granular bullet count is therefore both more accurate for
-// the operator-facing trace and load-bearing for coverage safety.
 function classifyNonBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
-  const text = String(reviewBody ?? '');
-  if (!text.trim()) return { count: 0, state: 'unknown' };
-
-  const match = text.match(/##\s+Non[-\s]+blocking\s+Issues?\s*\n([\s\S]*?)(?=\n##\s+|$)/i);
+  if (!String(reviewBody ?? '').trim()) return { count: 0, state: 'unknown' };
+  const parsed = parseMergeAgentRescueReviewBody(reviewBody);
   const normalizedVerdict = normalizeReviewVerdict(lastVerdict);
   const verdictKey = normalizedVerdict === 'unknown'
     ? String(lastVerdict || '').trim().toLowerCase()
     : normalizedVerdict;
-  if (!match) {
+  if (parsed.nonBlocking.missing) {
     return verdictKey === 'approved' || verdictKey === 'comment-only'
       ? { count: 0, state: 'known' }
       : { count: 0, state: 'unknown' };
   }
-
-  const section = match[1].trim();
-  if (!section) return { count: 0, state: 'known' };
-  if (isNoneFindingsSentinelOnly(section)) return { count: 0, state: 'known' };
-
-  const topLevelFindingBullets = section
-    .split(/\n/)
-    .filter((line) => /^-\s+\*\*.+?\*\*/.test(line));
-  if (topLevelFindingBullets.length > 0) {
-    return { count: topLevelFindingBullets.length, state: 'known' };
-  }
-  const parsed = parseNonBlockingFindingsSection(reviewBody);
-  return {
-    count: parsed && parsed.length > 0 ? parsed.length : 1,
-    state: 'known',
-  };
+  return { count: parsed.nonBlocking.count, state: 'known' };
 }
 
 function readMergeAgentReviewFailureState(rootDir, { repo, prNumber, headSha = null } = {}) {
@@ -5750,7 +5694,21 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
     prNumber: candidate.prNumber,
     revisionRef: candidate.headSha,
   });
-  const lastVerdict = extractReviewVerdict(latestJob?.reviewBody);
+  const parsedReview = parseMergeAgentRescueReviewBody(latestJob?.reviewBody);
+  const classifierResult = classifyMergeAgentRescue({
+    reviewBody: latestJob?.reviewBody ?? null,
+    mergeable: candidate.mergeable || 'UNKNOWN',
+    mergeStateStatus: candidate.mergeStateStatus || '',
+    labels: normalizeLabelNames(candidate.labels),
+    statusCheckRollup: candidate.statusCheckRollup || [],
+    headSha: candidate.headSha || null,
+    reviewHeadSha: latestJob?.revisionRef || latestJob?.reviewHeadSha || null,
+    operatorApprovalHeadSha: candidate.operatorApprovalEvent?.headSha || null,
+    operatorApprovalLabelEventId: candidate.operatorApprovalEvent?.id || candidate.operatorApprovalEvent?.nodeId || null,
+    operatorApprovalActor: candidate.operatorApprovalEvent?.actor || null,
+    operatorApprovalLabeledAt: candidate.operatorApprovalEvent?.createdAt || null,
+  });
+  const lastVerdict = parsedReview.verdict;
   const reviewFailureState = readMergeAgentReviewFailureStateWithDb(rootDir, reviewStateDb, {
     repo: candidate.repo,
     prNumber: candidate.prNumber,
@@ -5765,7 +5723,9 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
     // The timeout-exhausted path has no fresh review for the remediated head.
     // Treat blocker state as unknown unless a scoped operator override accepts it.
     ? { count: 0, state: 'unknown' }
-    : classifyBlockingFindings(latestJob?.reviewBody, { lastVerdict });
+    : parsedReview.blocking.missing && normalizeReviewVerdict(lastVerdict) === 'request-changes'
+      ? { count: 0, state: 'unknown' }
+      : { count: classifierResult.blockingFindings, state: 'known' };
   return {
     ...candidate,
     lastVerdict,

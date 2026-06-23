@@ -850,6 +850,39 @@ test('cli-direct classifies quota text from stdout even when stderr has wrapper 
   }
 });
 
+test('cli-direct does not classify generated stdout review prose as a bug', async () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      spawnCapturedImpl: async () => {
+        const err = new Error('Command failed with code 1');
+        err.stdout = 'Review draft: blocking issue mentions SyntaxError in the submitted code.';
+        err.stderr = '';
+        err.exitCode = 1;
+        throw err;
+      },
+      now: () => '2026-06-23T00:39:39.000Z',
+    });
+
+    const result = await adapter.spawnReviewer({
+      model: 'claude',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2454 },
+      timeoutMs: 100,
+      sessionUuid: 'classification-stdout-prose-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'unknown');
+    assert.match(result.stdoutTail, /SyntaxError/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('acpx classifies quota text from stdout even when stderr has wrapper noise', async () => {
   const rootDir = makeRoot();
   try {
@@ -879,6 +912,40 @@ test('acpx classifies quota text from stdout even when stderr has wrapper noise'
     assert.equal(result.ok, false);
     assert.equal(result.failureClass, QUOTA_EXHAUSTED_FAILURE_CLASS);
     assert.match(result.stdoutTail, /weekly limit/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('acpx does not classify generated stdout review prose as a bug', async () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createAcpxReviewerRuntimeAdapter({
+      rootDir,
+      resolveAcpxCliImpl: async () => '/bin/acpx',
+      execFileImpl: async () => ({ stdout: '[]\n', stderr: '' }),
+      spawnCapturedImpl: async () => {
+        const err = new Error('Command failed with code 1');
+        err.stdout = 'Review draft: blocking issue mentions TypeError in the submitted code.';
+        err.stderr = '';
+        err.exitCode = 1;
+        throw err;
+      },
+      now: () => '2026-06-23T00:39:39.000Z',
+    });
+
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 2454 },
+      timeoutMs: 100,
+      sessionUuid: 'acpx-classification-stdout-prose-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.failureClass, 'unknown');
+    assert.match(result.stdoutTail, /TypeError/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

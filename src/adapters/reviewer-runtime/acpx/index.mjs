@@ -22,6 +22,10 @@ import {
   CANONICAL_OAUTH_STRIP_ENV,
   stripForbiddenFallbackEnv,
 } from '../cli-direct/index.mjs';
+import {
+  detectQuotaExhaustion,
+  QUOTA_EXHAUSTED_FAILURE_CLASS,
+} from '../../../quota-exhaustion.mjs';
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_TAIL_BYTES = 8 * 1024;
@@ -288,6 +292,12 @@ function classifyAcpxFailure(stderr, exitCode, errorCode, details = {}) {
   return classifyReviewerFailure(stderr, exitCode, errorCode, details);
 }
 
+function quotaAwareAcpxFailureClass(err, classificationText, exitCode, details = {}) {
+  const quotaText = [err?.stdout, err?.stderr, err?.message].filter(Boolean).join('\n');
+  if (detectQuotaExhaustion(quotaText).isQuotaExhausted) return QUOTA_EXHAUSTED_FAILURE_CLASS;
+  return classifyAcpxFailure(classificationText, exitCode, err?.code, details);
+}
+
 function addAcpxHint(stderrTail) {
   const text = String(stderrTail || '');
   if (/zombie codex-acp process(?:es)? detected/i.test(text) && !/hq codex-acp-reaper sweep/i.test(text)) {
@@ -465,13 +475,13 @@ function createAcpxReviewerRuntimeAdapter({
       const stderrSource = err instanceof OAuthProbeError ? detail : (err?.stderr || detail || '');
       const stderrTail = addAcpxHint(tailText(stderrSource));
       const stdoutTail = tailText(err?.stdout || '');
-      const classificationText = detail || err?.stderr || '';
+      const classificationText = [err?.message, err?.stderr].filter(Boolean).join('\n').trim().slice(0, 4000);
       const failureClass = err instanceof OAuthProbeError
         ? 'oauth-broken'
-        : classifyAcpxFailure(
+        : quotaAwareAcpxFailureClass(
+          err,
           classificationText,
           exitCode,
-          err?.code,
           {
             killed: err?.killed === true,
             signal: err?.signal,

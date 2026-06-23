@@ -1,3 +1,5 @@
+import { normalizeReviewVerdict } from './kernel/verdict.mjs';
+
 const GATE_CONTEXT = 'agent-os/adversarial-gate';
 
 const PASSING_CHECK_STATES = new Set(['SUCCESS', 'COMPLETED', 'NEUTRAL', 'SKIPPED']);
@@ -36,9 +38,10 @@ function parseVerdict(reviewBody) {
     .filter(Boolean);
   let verdict = null;
   for (const line of lines) {
-    if (/^Approved(?:\s*$|[\s:.,;!?()\-–—])/.test(line)) verdict = 'Approved';
-    else if (/^Comment only(?:\s*$|[\s:.,;!?()\-–—])/.test(line)) verdict = 'Comment only';
-    else if (/^Request changes(?:\s*$|[\s:.,;!?()\-–—])/.test(line)) verdict = 'Request changes';
+    const normalized = normalizeReviewVerdict(line);
+    if (normalized === 'approved') verdict = 'Approved';
+    else if (normalized === 'comment-only') verdict = 'Comment only';
+    else if (normalized === 'request-changes') verdict = 'Request changes';
   }
   return verdict;
 }

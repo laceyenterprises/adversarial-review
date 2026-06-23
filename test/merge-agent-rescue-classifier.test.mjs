@@ -153,6 +153,15 @@ test('Approved reviews ignore non-blocking findings for merge eligibility', () =
   assert.equal(result.nonBlockingFindings, 1);
 });
 
+test('lowercase approved verdict is accepted for merge eligibility', () => {
+  const reviewBody = fixture('approved-merge-eligible.md').replace('Approved', 'approved');
+  const result = classify(inputFor('approved-merge-eligible.md', { reviewBody }));
+
+  assert.equal(parseReviewBody(reviewBody).verdict, 'Approved');
+  assert.equal(result.decision, 'merge-eligible');
+  assert.equal(result.reason, 'clean-review');
+});
+
 test('formatted verdicts and none sentinel variants are accepted', () => {
   const result = classify(inputFor('formatted-verdict-and-none-variants.md'));
 

@@ -167,8 +167,6 @@ const ROLE_ENV_NAMES_TO_BLANK_PRUNE = new Set([
   'ADVERSARIAL_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS',
   'AGENT_OS_REVIEWER_GEMINI_RUNTIME',
   'ADVERSARIAL_REVIEW_GEMINI_RUNTIME',
-  'AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_ACCOUNTS',
-  'ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_ACCOUNTS',
   'AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS',
   'ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS',
 ]);
@@ -390,66 +388,6 @@ export function resolveGeminiRuntime({
     throw err;
   }
   return cfg.get('reviewer.gemini.runtime', 'cli');
-}
-
-function normalizeAntigravityAccounts(accounts, source = 'config') {
-  if (!Array.isArray(accounts)) {
-    throw new AgentOSConfigError(
-      'reviewer.gemini.antigravity.accounts must be a list of {id, tokenFile} entries',
-      {
-        key: 'reviewer.gemini.antigravity.accounts',
-        expected: 'list of {id, tokenFile}',
-        got: accounts,
-        source,
-      },
-    );
-  }
-  return accounts.map((account, index) => {
-    const key = `reviewer.gemini.antigravity.accounts[${index}]`;
-    if (!account || typeof account !== 'object' || Array.isArray(account)) {
-      throw new AgentOSConfigError(
-        `${key} must be a mapping with id and tokenFile`,
-        { key, expected: '{id, tokenFile}', got: account, source },
-      );
-    }
-    const id = typeof account.id === 'string' ? account.id.trim() : '';
-    const tokenFile = typeof account.tokenFile === 'string' ? account.tokenFile.trim() : '';
-    if (!id) {
-      throw new AgentOSConfigError(
-        `${key}.id must be a non-empty string`,
-        { key: `${key}.id`, expected: 'non-empty string', got: account.id, source },
-      );
-    }
-    if (!tokenFile) {
-      throw new AgentOSConfigError(
-        `${key}.tokenFile must be a non-empty path or op:// secret reference`,
-        { key: `${key}.tokenFile`, expected: 'non-empty path or op:// secret reference', got: account.tokenFile, source },
-      );
-    }
-    return { id, tokenFile };
-  });
-}
-
-// resolveAntigravityAccounts — returns the ordered account list used by the
-// Antigravity Gemini runtime. `tokenFile` is metadata only here; it may be a
-// literal path or an op:// secret reference and is never resolved or printed.
-export function resolveAntigravityAccounts({
-  env = process.env,
-  topPath,
-  modulePaths,
-  loaderImpl,
-} = {}) {
-  const cfg = loadRoleConfig({
-    env,
-    topPath,
-    modulePaths,
-    loaderImpl,
-    contextKey: 'reviewer.gemini.antigravity.accounts',
-  });
-  return normalizeAntigravityAccounts(
-    cfg.get('reviewer.gemini.antigravity.accounts', []),
-    'loader',
-  );
 }
 
 // resolveDefaultMergeAgentWorkerClass — returns the merge-agent worker

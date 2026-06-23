@@ -1451,18 +1451,6 @@ function schemaV1() {
                     __default: 1140000,
                     __min: 1000,
                   },
-                  accounts: {
-                    __type: TYPE_LIST,
-                    __default: [],
-                    __item: {
-                      __type: TYPE_DICT,
-                      __strict: true,
-                      __keys: {
-                        id: { __type: TYPE_STRING },
-                        tokenFile: { __type: TYPE_STRING },
-                      },
-                    },
-                  },
                 },
               },
             },
@@ -1695,10 +1683,6 @@ export const ENV_ALIASES = {
   'reviewer.gemini.runtime': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_RUNTIME',
     aliases: [['ADVERSARIAL_REVIEW_GEMINI_RUNTIME', identity]],
-  },
-  'reviewer.gemini.antigravity.accounts': {
-    canonical: 'AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_ACCOUNTS',
-    aliases: [['ADVERSARIAL_REVIEW_GEMINI_ANTIGRAVITY_ACCOUNTS', identity]],
   },
   'reviewer.gemini.antigravity.print_timeout_ms': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS',
@@ -2839,16 +2823,6 @@ function coerceEnvValue(key, value, schemaLeaf, source = null) {
     return n;
   }
   if (expected === TYPE_LIST) {
-    if (key === 'reviewer.gemini.antigravity.accounts') {
-      try {
-        return JSON.parse(value);
-      } catch (err) {
-        throw new AgentOSConfigError(
-          `${key}: env value must be a JSON array of {id, tokenFile} entries: ${err.message}`,
-          { key, expected: 'JSON array', got: `<redacted:${value.length} chars>`, source },
-        );
-      }
-    }
     return value.split(',').map((part) => part.trim()).filter(Boolean);
   }
   return value;

@@ -200,6 +200,45 @@ test('update channel loads through strict Node schema and env override', () => {
   }
 });
 
+test('gemini runtime and mode remain valid while antigravity accounts is rejected', () => {
+  const tmp = freshTmp();
+  try {
+    const valid = join(tmp, 'valid-gemini.yaml');
+    writeFile(valid, `
+      version: 1
+      reviewer:
+        gemini:
+          mode: always-on
+          runtime: antigravity
+    `);
+    const cfg = loadConfig({ topPath: valid, env: {} });
+    assert.equal(cfg.get('reviewer.gemini.mode'), 'always-on');
+    assert.equal(cfg.get('reviewer.gemini.runtime'), 'antigravity');
+
+    const rejected = join(tmp, 'rejected-gemini-accounts.yaml');
+    writeFile(rejected, `
+      version: 1
+      reviewer:
+        gemini:
+          mode: fallback
+          runtime: antigravity
+          antigravity:
+            accounts: []
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: rejected, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'reviewer.gemini.antigravity.accounts');
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('codex runaway guardrail vocabulary fatigue config resolves through strict schema', () => {
   const tmp = freshTmp();
   try {

@@ -36,11 +36,7 @@ reviewer:
   #     swap_pressure_available_mb: 16384
 
   gemini:
-    # Default is cli. Antigravity mode requires at least one account entry.
+    # Default is cli. Antigravity mode uses the real agy CLI keychain auth.
     runtime: antigravity
     antigravity:
-      accounts:
-        - id: primary
-          tokenFile: op://Cliovault/GEMINI_ANTIGRAVITY_PRIMARY/token
-        - id: backup
-          tokenFile: /Users/airlock/.config/gemini/backup-oauth.json
+      print_timeout_ms: 1140000

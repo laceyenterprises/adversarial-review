@@ -46,8 +46,13 @@ function parseVerdict(reviewBody) {
   for (const rawLine of section.split('\n')) {
     const line = rawLine.trim();
     if (!line) continue;
-    const match = line.match(/^(Approved|Comment only|Request changes)(?:\s*$|\s*(?::|--|[-]).*$)/);
-    if (match) verdict = match[1];
+    const match = line.match(/^(?:[-*]\s+)?(?:\*\*)?(Approved|Comment only|Request changes)(?:\*\*)?(?:\s*$|\b\s*(?::|--|-).*$)/i);
+    if (match) {
+      const normalized = match[1].toLowerCase();
+      if (normalized === 'approved') verdict = 'Approved';
+      else if (normalized === 'comment only') verdict = 'Comment only';
+      else if (normalized === 'request changes') verdict = 'Request changes';
+    }
   }
   return { verdict, sectionPresent: true };
 }
@@ -98,7 +103,7 @@ function parseFindingsSection(reviewBody, titlePattern) {
   }
 
   const firstBullet = lines[bulletIndexes[0]].trim();
-  const noneSentinel = /^-\s+None\.(?:\s+.*)?$/.test(firstBullet);
+  const noneSentinel = /^-\s+None(?:\.(?:\s+.*)?|\s*)$/i.test(firstBullet);
   const nonBulletContent = lines.some((line, index) => {
     if (!line.trim()) return false;
     if (bulletIndexes.includes(index)) return false;
@@ -112,7 +117,7 @@ function parseFindingsSection(reviewBody, titlePattern) {
   for (let i = 0; i < bulletIndexes.length; i += 1) {
     const start = bulletIndexes[i];
     const end = i + 1 < bulletIndexes.length ? bulletIndexes[i + 1] : lines.length;
-    if (/^-\s+None\.(?:\s+.*)?$/.test(lines[start].trim())) continue;
+    if (/^-\s+None(?:\.(?:\s+.*)?|\s*)$/i.test(lines[start].trim())) continue;
     findings.push(parseFindingChunk(lines.slice(start, end).join('\n')));
   }
   if (findings.length === 0 && nonBulletContent) {
@@ -149,12 +154,9 @@ function checkIdentity(row) {
 }
 
 export function evaluateStatusChecks(statusCheckRollup, { headSha = null } = {}) {
+  void headSha;
   const rows = (Array.isArray(statusCheckRollup) ? statusCheckRollup : [])
-    .filter((row) => {
-      const oid = normalizeString(row?.commit?.oid);
-      if (oid && headSha && oid !== headSha) return false;
-      return checkIdentity(row) !== GATE_STATUS_CONTEXT;
-    });
+    .filter((row) => checkIdentity(row) !== GATE_STATUS_CONTEXT);
   if (rows.length === 0) {
     return { hasPassingCheck: false, allPassing: false, hasPending: false, hasNonPassing: false };
   }
@@ -186,7 +188,7 @@ function hasCurrentHeadOperatorApproval(input) {
     && normalizeNullable(input?.operatorApprovalLabeledAt)
     && normalizeNullable(input?.operatorApprovalHeadSha)
     && normalizeNullable(input?.headSha)
-    && normalizeNullable(input.operatorApprovalHeadSha) === normalizeNullable(input.headSha)
+    && normalizeNullable(input?.operatorApprovalHeadSha) === normalizeNullable(input?.headSha)
   );
 }
 

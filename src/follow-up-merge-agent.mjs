@@ -2452,6 +2452,20 @@ function pickNormalMergeAgentDispatchDetail({
     return pickReviewerTimeoutExhaustedMergeGate(job, { operatorApproved });
   }
 
+  const classifierDecision = String(job?.mergeAgentRescueDecision || '').trim();
+  const classifierReason = String(job?.mergeAgentRescueReason || '').trim();
+  if (classifierDecision === 'escalate-stale-review') {
+    return { decision: 'skip-stale-review', trigger: null, classifierReason };
+  }
+  if (classifierDecision === 'escalate-blockers' && !operatorApproved) {
+    return {
+      decision: 'skip-blockers-present',
+      trigger: null,
+      handoffRequired: true,
+      classifierReason,
+    };
+  }
+
   if (normalizedVerdict === null) {
     return { decision: 'skip-no-verdict', trigger: null };
   }
@@ -5800,6 +5814,8 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
     remediationMaxRounds: Number(latestJob?.remediationPlan?.maxRounds || 0),
     reviewFailureClass: reviewFailureState.reviewFailureClass,
     reviewFailureExhausted: reviewFailureState.reviewFailureExhausted,
+    mergeAgentRescueDecision: classification.decision,
+    mergeAgentRescueReason: classification.reason,
     operatorApproval: buildScopedOperatorApproval(candidate, latestJob),
     mergeAgentRequest: buildScopedMergeAgentRequest(candidate),
   };

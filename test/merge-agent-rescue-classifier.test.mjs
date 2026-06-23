@@ -15,9 +15,8 @@ import { createFollowUpJob, markFollowUpJobCompleted } from '../src/follow-up-jo
 const FIXTURE_DIR = path.join(import.meta.dirname, 'fixtures', 'review-bodies');
 const HEAD_SHA = 'head-current';
 const PASSING_CHECKS = [
-  { name: 'agent-os/adversarial-gate', conclusion: 'FAILURE', commit: { oid: HEAD_SHA } },
-  { name: 'unit-tests', conclusion: 'SUCCESS', commit: { oid: HEAD_SHA } },
-  { name: 'old-head-check', conclusion: 'FAILURE', commit: { oid: 'old-head' } },
+  { name: 'agent-os/adversarial-gate', conclusion: 'FAILURE' },
+  { name: 'unit-tests', conclusion: 'SUCCESS' },
 ];
 
 function fixture(name) {
@@ -130,6 +129,76 @@ test('None sentinel tolerates trailing prose on the same bullet line', () => {
   assert.equal(result.decision, 'merge-eligible');
 });
 
+test('verdict parser accepts common markdown bullets, bolding, and casing', () => {
+  const result = classify({
+    ...baseInput('comment-only-merge-eligible.md'),
+    reviewBody: [
+      '## Summary',
+      'Clean.',
+      '',
+      '## Blocking issues',
+      '- None',
+      '',
+      '## Non-blocking issues',
+      '- none.',
+      '',
+      '## Verdict',
+      '- **comment only**',
+    ].join('\n'),
+  });
+
+  assert.equal(result.verdict, 'Comment only');
+  assert.equal(result.blockingFindings, 0);
+  assert.equal(result.nonBlockingFindings, 0);
+  assert.equal(result.decision, 'merge-eligible');
+});
+
+test('None sentinel accepts missing period and lowercase variants', () => {
+  const result = classify({
+    ...baseInput('comment-only-merge-eligible.md'),
+    reviewBody: [
+      '## Summary',
+      'Clean.',
+      '',
+      '## Blocking issues',
+      '- None',
+      '',
+      '## Non-blocking issues',
+      '- none',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n'),
+  });
+
+  assert.equal(result.blockingFindings, 0);
+  assert.equal(result.nonBlockingFindings, 0);
+  assert.equal(result.decision, 'merge-eligible');
+});
+
+test('status check evaluation trusts current-head rollup rows without commit OIDs', () => {
+  const result = classify(baseInput('comment-only-merge-eligible.md', {
+    statusCheckRollup: [
+      { name: 'agent-os/adversarial-gate', conclusion: 'FAILURE' },
+      { name: 'unit-tests', conclusion: 'SUCCESS' },
+    ],
+  }));
+
+  assert.equal(result.decision, 'merge-eligible');
+});
+
+test('status check evaluation does not silently drop rows with mismatched commit OIDs', () => {
+  const result = classify(baseInput('comment-only-merge-eligible.md', {
+    statusCheckRollup: [
+      { name: 'unit-tests', conclusion: 'SUCCESS', commit: { oid: HEAD_SHA } },
+      { name: 'integration-tests', conclusion: 'FAILURE', commit: { oid: 'old-head' } },
+    ],
+  }));
+
+  assert.equal(result.decision, 'inconclusive');
+  assert.equal(result.reason, 'no-decision-rule-matched');
+});
+
 test('watcher smoke: merge-eligible fixture routes to dispatch with clean parsed counts', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-classifier-'));
   const created = createFollowUpJob({
@@ -167,7 +236,62 @@ test('watcher smoke: merge-eligible fixture routes to dispatch with clean parsed
 
   assert.equal(job.lastVerdict, 'Comment only');
   assert.equal(job.blockingFindingCount, 0);
+  assert.equal(job.mergeAgentRescueDecision, 'merge-eligible');
+  assert.equal(job.mergeAgentRescueReason, 'clean-review-and-passing-gates');
   assert.equal(pickMergeAgentDispatchDetail(job).decision, 'dispatch');
+});
+
+test('watcher smoke: classifier stale-review decision blocks dispatch', () => {
+  const detail = pickMergeAgentDispatchDetail({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 7003,
+    headSha: HEAD_SHA,
+    lastVerdict: 'Comment only',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [],
+    prState: 'open',
+    merged: false,
+    latestFollowUpJobStatus: 'completed',
+    remediationCurrentRound: 2,
+    remediationMaxRounds: 2,
+    blockingFindingCount: 0,
+    blockingFindingState: 'known',
+    operatorApproval: null,
+    mergeAgentRescueDecision: 'escalate-stale-review',
+    mergeAgentRescueReason: 'review-head-sha-does-not-match-head-sha',
+  });
+
+  assert.equal(detail.decision, 'skip-stale-review');
+  assert.equal(detail.classifierReason, 'review-head-sha-does-not-match-head-sha');
+});
+
+test('watcher smoke: classifier unaddressable-blocker decision blocks dispatch', () => {
+  const detail = pickMergeAgentDispatchDetail({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 7004,
+    headSha: HEAD_SHA,
+    lastVerdict: 'Request changes',
+    mergeable: 'MERGEABLE',
+    checksConclusion: 'SUCCESS',
+    labels: [],
+    prState: 'open',
+    merged: false,
+    latestFollowUpJobStatus: 'completed',
+    remediationCurrentRound: 2,
+    remediationMaxRounds: 2,
+    blockingFindingCount: 1,
+    blockingFindingState: 'known',
+    operatorApproval: null,
+    mergeAgentRescueDecision: 'escalate-blockers',
+    mergeAgentRescueReason: 'unaddressable-blocking-finding',
+  }, {
+    finalPassOnRequestChangesEnabled: true,
+  });
+
+  assert.equal(detail.decision, 'skip-blockers-present');
+  assert.equal(detail.handoffRequired, true);
+  assert.equal(detail.classifierReason, 'unaddressable-blocking-finding');
 });
 
 test('watcher smoke: remediation-eligible fixture routes through budget-exhausted request-changes dispatch', () => {

@@ -1,8 +1,9 @@
 import { normalizeReviewVerdict } from './kernel/verdict.mjs';
+import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 
 const GATE_CONTEXT = 'agent-os/adversarial-gate';
 
-const PASSING_CHECK_STATES = new Set(['SUCCESS', 'COMPLETED', 'NEUTRAL', 'SKIPPED']);
+const PASSING_CHECK_STATES = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
 const PENDING_CHECK_STATES = new Set(['PENDING', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED']);
 const HARD_STOP_LABELS = new Set([
   'merge-agent-stuck',
@@ -11,6 +12,7 @@ const HARD_STOP_LABELS = new Set([
   'reviewer-cycle-cap-reached',
 ]);
 const UNADDRESSABLE_CATEGORIES = new Set(['auth', 'schema-migration', 'external-system', 'policy']);
+const NESTED_FIELD_LABEL_PATTERN = String.raw`(?:Category|File|Lines|Problem|Why it matters|Recommended fix)`;
 
 function normalizeOptionalString(value) {
   if (value == null) return null;
@@ -20,13 +22,35 @@ function normalizeOptionalString(value) {
 
 function extractSection(reviewBody, heading) {
   const text = String(reviewBody ?? '').replace(/\r\n/g, '\n');
-  const pattern = new RegExp(`^##\\s+${heading}\\s*$`, 'im');
-  const match = text.match(pattern);
-  if (!match) return null;
-  const start = match.index + match[0].length;
-  const remainder = text.slice(start);
-  const nextHeading = remainder.search(/^##\s+/m);
-  return nextHeading >= 0 ? remainder.slice(0, nextHeading) : remainder;
+  const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`^##\\s+${escapedHeading}\\s*$`, 'i');
+  const lines = text.split('\n');
+  let inFence = false;
+  let offset = 0;
+  let start = null;
+  for (const line of lines) {
+    const trimmed = line.trimStart();
+    if (/^(?:```|~~~)/.test(trimmed)) inFence = !inFence;
+    if (!inFence && pattern.test(line)) {
+      start = offset + line.length;
+      break;
+    }
+    offset += line.length + 1;
+  }
+  if (start == null) return null;
+
+  inFence = false;
+  offset = 0;
+  for (const line of lines) {
+    const lineStart = offset;
+    const trimmed = line.trimStart();
+    if (lineStart > start && !inFence && /^##\s+/.test(line)) {
+      return text.slice(start, lineStart);
+    }
+    if (/^(?:```|~~~)/.test(trimmed)) inFence = !inFence;
+    offset += line.length + 1;
+  }
+  return text.slice(start);
 }
 
 function parseVerdict(reviewBody) {
@@ -36,14 +60,13 @@ function parseVerdict(reviewBody) {
     .split('\n')
     .map((line) => line.trim().replace(/^(?:[-*]\s+)+/, '').replace(/^[*_]+|[*_]+$/g, ''))
     .filter(Boolean);
-  let verdict = null;
   for (const line of lines) {
     const normalized = normalizeReviewVerdict(line);
-    if (normalized === 'approved') verdict = 'Approved';
-    else if (normalized === 'comment-only') verdict = 'Comment only';
-    else if (normalized === 'request-changes') verdict = 'Request changes';
+    if (normalized === 'approved') return 'Approved';
+    if (normalized === 'comment-only') return 'Comment only';
+    if (normalized === 'request-changes') return 'Request changes';
   }
-  return verdict;
+  return null;
 }
 
 function topLevelBulletIndexes(lines) {
@@ -63,8 +86,8 @@ function sectionIsNone(lines) {
 
 function parseNestedField(blockLines, label) {
   const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(`^\\s+-\\s+\\*\\*${escaped}:\\*\\*\\s*(.*)$`);
-  const nestedFieldPattern = /^\s+-\s+\*\*[^*]+:\*\*/;
+  const pattern = new RegExp(`^\\s+-\\s+\\*\\*${escaped}:\\*\\*\\s*(.*)$`, 'i');
+  const nestedFieldPattern = new RegExp(`^\\s+-\\s+\\*\\*${NESTED_FIELD_LABEL_PATTERN}:\\*\\*`, 'i');
   for (let index = 0; index < blockLines.length; index += 1) {
     const line = blockLines[index];
     const match = line.match(pattern);
@@ -128,7 +151,12 @@ function parseIssueSection(reviewBody, heading, kind) {
 function normalizeLabels(labels) {
   if (!Array.isArray(labels)) return [];
   return labels
-    .map((label) => String(label ?? '').trim().toLowerCase())
+    .map((label) => {
+      if (label && typeof label === 'object' && 'name' in label) {
+        return String(label.name ?? '').trim().toLowerCase();
+      }
+      return String(label ?? '').trim().toLowerCase();
+    })
     .filter(Boolean);
 }
 
@@ -137,7 +165,14 @@ function hasHardStopLabel(labels) {
 }
 
 function isGateRow(row) {
-  return String(row?.context ?? '').trim().toLowerCase() === GATE_CONTEXT;
+  const contexts = new Set([GATE_CONTEXT]);
+  try {
+    contexts.add(String(resolveGateStatusContext(process.env)).trim().toLowerCase());
+  } catch {
+    // Keep the default context active if the env override is malformed.
+  }
+  const label = String(row?.context || row?.name || '').trim().toLowerCase();
+  return contexts.has(label);
 }
 
 function checkRowsForHead(statusCheckRollup, headSha) {

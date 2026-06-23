@@ -40,6 +40,18 @@ function inputFor(name, overrides = {}) {
   };
 }
 
+function withEnv(name, value, fn) {
+  const previous = process.env[name];
+  if (value == null) delete process.env[name];
+  else process.env[name] = value;
+  try {
+    return fn();
+  } finally {
+    if (previous == null) delete process.env[name];
+    else process.env[name] = previous;
+  }
+}
+
 const decisionFixtures = [
   ['comment-only-merge-eligible.md', 'merge-eligible'],
   ['approved-merge-eligible.md', 'merge-eligible'],
@@ -182,6 +194,34 @@ test('check rollup ignores stale rows and the adversarial gate context', () => {
   assert.equal(result.decision, 'merge-eligible');
 });
 
+test('check rollup ignores adversarial gate CheckRun names and custom gate contexts', () => {
+  const withDefaultGateName = classify(inputFor('comment-only-merge-eligible.md', {
+    statusCheckRollup: [
+      { name: 'agent-os/adversarial-gate', status: 'IN_PROGRESS', commit: { oid: HEAD_SHA } },
+    ],
+  }));
+  assert.equal(withDefaultGateName.decision, 'merge-eligible');
+
+  const withCustomGateName = withEnv('ADV_GATE_STATUS_CONTEXT', 'agent-os/custom-gate', () => (
+    classify(inputFor('comment-only-merge-eligible.md', {
+      statusCheckRollup: [
+        { name: 'agent-os/custom-gate', status: 'IN_PROGRESS', commit: { oid: HEAD_SHA } },
+      ],
+    }))
+  ));
+  assert.equal(withCustomGateName.decision, 'merge-eligible');
+});
+
+test('completed check-run status without success conclusion is not passing', () => {
+  const result = classify(inputFor('comment-only-merge-eligible.md', {
+    statusCheckRollup: [
+      { name: 'unit-tests', status: 'COMPLETED', commit: { oid: HEAD_SHA } },
+    ],
+  }));
+
+  assert.equal(result.decision, 'inconclusive');
+});
+
 test('explicit empty check rollup is merge eligible but missing rollup fails closed', () => {
   assert.equal(
     classify(inputFor('comment-only-merge-eligible.md', { statusCheckRollup: [] })).decision,
@@ -193,6 +233,56 @@ test('explicit empty check rollup is merge eligible but missing rollup fails clo
   );
 });
 
+test('raw GitHub label objects are normalized before hard-stop checks', () => {
+  const result = classify(inputFor('comment-only-merge-eligible.md', {
+    labels: [{ name: 'merge-agent-stuck' }],
+  }));
+
+  assert.equal(result.decision, 'inconclusive');
+});
+
+test('section extraction ignores headings inside fenced code blocks', () => {
+  const reviewBody = `
+## Blocking issues
+- **Fence contains heading text**
+  - **Category:** correctness
+  - **File:** \`README.md\`
+  - **Problem:** Example:
+    \`\`\`
+    ## Non-blocking issues
+    not a real heading
+    \`\`\`
+  - **Recommended fix:** Keep reading the blocking section.
+
+## Non-blocking issues
+- None.
+
+## Verdict
+Request changes
+`;
+  const parsed = parseReviewBody(reviewBody);
+
+  assert.equal(parsed.blocking.count, 1);
+  assert.equal(parsed.nonBlocking.count, 0);
+  assert.match(parsed.parsedFindings[0].problem, /not a real heading/);
+});
+
+test('verdict parser returns the first valid verdict line', () => {
+  const reviewBody = `
+## Blocking issues
+- None.
+
+## Non-blocking issues
+- None.
+
+## Verdict
+Approved
+Request changes
+`;
+
+  assert.equal(parseReviewBody(reviewBody).verdict, 'Approved');
+});
+
 test('parsed findings expose normalized category and structured fields', () => {
   const parsed = parseReviewBody(fixture('request-changes-with-blockers-addressable.md'));
 
@@ -202,6 +292,29 @@ test('parsed findings expose normalized category and structured fields', () => {
   assert.equal(parsed.parsedFindings[0].file, '`src/merge-agent-rescue-classifier.mjs`');
   assert.equal(parsed.parsedFindings[0].whyItMatters, null);
   assert.equal(parsed.parsedFindings[0].recommendedFix, 'Check `reviewHeadSha` against `headSha` before any merge/remediation routing.');
+});
+
+test('nested field parser does not stop at unknown bold sub-bullets', () => {
+  const parsed = parseReviewBody(`
+## Blocking issues
+- **Preserve diagnostic shape**
+  - **Category:** correctness
+  - **File:** \`src/merge-agent-rescue-classifier.mjs\`
+  - **Problem:** The parser keeps the first line.
+    - **Note:** This note should remain part of the problem field.
+    The continuation should remain too.
+  - **Recommended fix:** Restrict boundaries to known structured fields.
+
+## Non-blocking issues
+- None.
+
+## Verdict
+Request changes
+`);
+
+  assert.match(parsed.parsedFindings[0].problem, /Note:/);
+  assert.match(parsed.parsedFindings[0].problem, /continuation should remain/);
+  assert.equal(parsed.parsedFindings[0].recommendedFix, 'Restrict boundaries to known structured fields.');
 });
 
 test('parsed findings retain why-it-matters field when present', () => {
@@ -275,8 +388,12 @@ test('watcher smoke: merge-eligible fixture still dispatches', () => {
     });
 
     assert.equal(job.lastVerdict, 'Comment only');
+    assert.equal(job.mergeAgentRescueDecision, 'merge-eligible');
+    assert.equal(job.mergeAgentRescueReason, 'clean-review');
     assert.equal(job.blockingFindingCount, 0);
     assert.equal(job.blockingFindingState, 'known');
+    assert.equal(job.nonBlockingFindingCount, 0);
+    assert.equal(job.nonBlockingFindingState, 'known');
     assert.equal(pickMergeAgentDispatch(job), 'dispatch');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -320,8 +437,12 @@ test('watcher smoke: remediation-eligible fixture still waits while budget remai
     });
 
     assert.equal(job.lastVerdict, 'Request changes');
+    assert.equal(job.mergeAgentRescueDecision, 'remediation-eligible');
+    assert.equal(job.mergeAgentRescueReason, 'addressable-findings');
     assert.equal(job.blockingFindingCount, 2);
     assert.equal(job.blockingFindingState, 'known');
+    assert.equal(job.nonBlockingFindingCount, 0);
+    assert.equal(job.nonBlockingFindingState, 'known');
     assert.equal(pickMergeAgentDispatch(job), 'skip-remediation-claimable');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

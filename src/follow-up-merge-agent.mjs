@@ -5723,18 +5723,21 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
     // The timeout-exhausted path has no fresh review for the remediated head.
     // Treat blocker state as unknown unless a scoped operator override accepts it.
     ? { count: 0, state: 'unknown' }
-    : parsedReview.blocking.missing && normalizeReviewVerdict(lastVerdict) === 'request-changes'
-      ? { count: 0, state: 'unknown' }
-      : { count: classifierResult.blockingFindings, state: 'known' };
+    : classifyBlockingFindings(latestJob?.reviewBody, { lastVerdict });
+  const nonBlockingFindings = classifyNonBlockingFindings(latestJob?.reviewBody, { lastVerdict });
   return {
     ...candidate,
     lastVerdict,
+    mergeAgentRescueDecision: classifierResult.decision,
+    mergeAgentRescueReason: classifierResult.reason,
     // Count of standing blocking findings in the latest review (`- None.` → 0;
     // malformed non-None section → >=1; legacy Request changes body with no
     // structured section → state unknown). The merge gate refuses final-pass
     // auto-merge when the count is > 0 or the state is unknown (PR #901).
     blockingFindingCount: blockingFindings.count,
     blockingFindingState: blockingFindings.state,
+    nonBlockingFindingCount: nonBlockingFindings.count,
+    nonBlockingFindingState: nonBlockingFindings.state,
     latestFollowUpJobStatus: normalizeFollowUpJobStatus(latestJob?.status),
     latestFollowUpReReviewRequested: latestJob?.reReview?.requested === true,
     remediationCurrentRound: Number(latestJob?.remediationPlan?.currentRound || 0),

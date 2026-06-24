@@ -765,7 +765,27 @@ if [ $APPEND_EXIT -eq 65 ]; then
   echo "audit append refused by sticky-succeeded guard; treating as no-op" >&2
   exit 0
 fi
-exit $APPEND_EXIT
+if [ $APPEND_EXIT -ne 0 ]; then
+  exit $APPEND_EXIT
+fi
+
+if [ "$OUTCOME" = "succeeded" ]; then
+  gh pr comment <<PR_URL>> --body "$(cat <<EOF
+<!-- hq:closeout:pr -->
+## AMA close-out
+
+- Merged head: \`$POST_HEAD\`
+- Merge commit: \`${MERGE_COMMIT:-unknown}\`
+- Merge method: \`<<MERGE_METHOD>>\`
+- Reviewed head: \`<<REVIEWED_SHA>>\`
+- Rebase attempts: ${REBASE_ATTEMPTS:-0}
+- Findings remediated: none required; clean AMA close.
+
+Closed-By: autonomous-merge-authority
+EOF
+)"
+fi
+exit 0
 ```
 
 The audit doc shape the writer produces (managed by AMA-04; do NOT
@@ -813,6 +833,7 @@ hand-roll the fields here):
 
 ## Close-out
 
-When you've written the terminal audit JSON, exit 0. The watcher will
-reconcile on its next tick. No PR open is required — this worker
-doesn't open a PR; it closes someone else's.
+When you've written the terminal audit JSON, post the marker-bearing
+closeout comment for a confirmed successful merge, then exit 0. The
+watcher will reconcile on its next tick. No PR open is required — this
+worker doesn't open a PR; it closes someone else's.

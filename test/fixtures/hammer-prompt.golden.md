@@ -590,6 +590,7 @@ Post the CLOSING comment (mandate step 7) once the merge is confirmed:
 ```bash
 # Only after re-reading GitHub confirms the PR is merged at $POST_REMEDIATION_SHA.
 gh pr comment https://github.com/acme/myrepo/pull/1234 --body "$(cat <<EOF
+<!-- hq:closeout:pr -->
 ✅ Closed by **Hammer** (adversarial-pipe-mode).
 
 - Merged: \`$POST_REMEDIATION_SHA\` via squash (rebased onto latest \`main\`)

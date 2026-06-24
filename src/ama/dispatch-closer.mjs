@@ -441,6 +441,28 @@ function isTransientHqDispatchError(err) {
     || detail.includes('temporarily unavailable');
 }
 
+function isProvisionBranchHolderBlocked(errOrText) {
+  const detail = typeof errOrText === 'string'
+    ? errOrText
+    : [
+      errOrText?.code,
+      errOrText?.message,
+      errOrText?.stderr,
+      errOrText?.stdout,
+    ].filter(Boolean).join('\n');
+  const normalized = detail.toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized.includes('already used by worktree') ||
+    normalized.includes('already checked out in worktree')
+  ) && (
+    normalized.includes('refusing grace-waived git worktree holder drop') ||
+    normalized.includes('holder has unrecovered local state') ||
+    normalized.includes('could not be safely inspected') ||
+    normalized.includes('auto-tear-down')
+  );
+}
+
 function sleep(ms) {
   if (!ms) return Promise.resolve();
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -943,6 +965,7 @@ export async function maybeDispatchAmaCloser({
   const existingRecordHasLivePendingInterruption = hasInterruptedInFlightAmaCloserDispatchShape(existingRecord)
     && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.PENDING
     && !existingRecordIsReclaimableInterruption;
+  const existingRecordIsBranchHolderBlocked = isProvisionBranchHolderBlocked(existingRecord?.lastError || '');
   let existingDispatchStatus = null;
   if (existingRecord?.launchRequestId) {
     let releaseUnprovenTerminalHold = false;
@@ -1042,6 +1065,7 @@ export async function maybeDispatchAmaCloser({
     existingRecord
     && Number(existingRecord.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND
     && !existingRecordIsReclaimableInterruption
+    && !existingRecordIsBranchHolderBlocked
   ) {
     // Genuine completed failures are bounded; an interrupted in-flight dispatch
     // (watcher SIGTERM'd mid-launch, e.g. a deploy bounce) is reclaimed below
@@ -1247,6 +1271,7 @@ export async function maybeDispatchAmaCloser({
       }
       const parsedFailure = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(err?.stdout || ''));
       const ambiguousLaunch = Boolean(parsedFailure.launchRequestId || parsedFailure.dispatchId);
+      const branchHolderBlocked = !ambiguousLaunch && isProvisionBranchHolderBlocked(err);
       updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
         ...(current || {}),
         schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
@@ -1261,19 +1286,25 @@ export async function maybeDispatchAmaCloser({
         dispatchedAt: ambiguousLaunch ? dispatchContext.dispatchedAt : null,
         dispatchId: parsedFailure.dispatchId,
         launchRequestId: parsedFailure.launchRequestId,
-        retryCount: Number(current?.retryCount || priorRetryCount + 1),
-        state: ambiguousLaunch ? 'dispatched' : 'dispatch-failed',
-        lastObservedStatus: ambiguousLaunch ? 'unknown' : null,
-        lastObservedAt: ambiguousLaunch ? dispatchContext.dispatchedAt : null,
+        retryCount: branchHolderBlocked
+          ? priorRetryCount
+          : Number(current?.retryCount || priorRetryCount + 1),
+        state: ambiguousLaunch ? 'dispatched' : (
+          branchHolderBlocked ? 'dispatch-blocked-branch-holder' : 'dispatch-failed'
+        ),
+        lastObservedStatus: ambiguousLaunch ? 'unknown' : (branchHolderBlocked ? 'blocked' : null),
+        lastObservedAt: ambiguousLaunch || branchHolderBlocked ? dispatchContext.dispatchedAt : null,
         lastError: String(err?.stderr || err?.message || err),
       }));
       return noAmaDispatch({
         dispatched: false,
-        skipMergeAgent: ambiguousLaunch || (
+        skipMergeAgent: branchHolderBlocked || ambiguousLaunch || (
           isTransientHqDispatchError(err)
           && Number((existingRecord?.retryCount || 0) + 1) < AMA_CLOSER_REDISPATCH_BOUND
         ),
-        reason: ambiguousLaunch ? 'dispatch-response-ambiguous' : 'dispatch-failed',
+        reason: ambiguousLaunch ? 'dispatch-response-ambiguous' : (
+          branchHolderBlocked ? 'dispatch-branch-holder-blocked' : 'dispatch-failed'
+        ),
         error: String(err?.stderr || err?.message || err),
         workerClass,
         dispatchId: parsedFailure.dispatchId || null,

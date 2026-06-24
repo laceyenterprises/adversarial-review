@@ -13,6 +13,12 @@ const DEFAULT_HTTP_TIMEOUT_MS = 5_000;
 const HTTP_TIMEOUT_MS = Number(
   process.env.ALERT_HTTP_TIMEOUT_MS || process.env.HTTP_TIMEOUT_MS || DEFAULT_HTTP_TIMEOUT_MS
 );
+const TEL_COMMS_TELEMETRY_URL = new URL(
+  '../../../modules/agent-gateway/lib/tel-comms-telemetry.mjs',
+  import.meta.url
+);
+
+let telTelemetryPromise;
 
 function firstNonEmpty(...values) {
   for (const value of values) {
@@ -77,6 +83,27 @@ function readHooksToken({ env = process.env, fsImpl = { readFileSync } } = {}) {
   return token;
 }
 
+function notificationHookPath(urlString) {
+  try {
+    const url = new URL(urlString);
+    return url.pathname || '/';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function telTelemetry() {
+  if (!telTelemetryPromise) {
+    telTelemetryPromise = import(TEL_COMMS_TELEMETRY_URL).catch(() => null);
+  }
+  return telTelemetryPromise;
+}
+
+async function emitNotificationBusDeliverSpan(attrs) {
+  const telemetry = await telTelemetry();
+  telemetry?.emitNotificationBusDeliverSpan?.(attrs);
+}
+
 function httpRequestText(urlString, { method = 'GET', headers = {}, body, timeoutMs = HTTP_TIMEOUT_MS } = {}) {
   const url = new URL(urlString);
   const payload = body != null ? JSON.stringify(body) : null;
@@ -133,21 +160,29 @@ async function deliverAlert(text, {
 } = {}) {
   const config = resolveAlertDefaults(env);
   const token = readHooksToken({ env, fsImpl });
-  await requestText(config.openclawAgentHooksUrl, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
-    body: {
-      message: text,
-      name: config.alertName,
-      agentId: config.alertAgentId,
-      wakeMode: 'now',
-      deliver: true,
-      channel: config.alertChannel,
-      to: config.alertTo,
-      ...(event ? { event } : {}),
-      ...(payload ? { payload } : {}),
-    },
-  });
+  const hookPath = notificationHookPath(config.openclawAgentHooksUrl);
+  const producer = 'adversarial-review';
+  try {
+    await requestText(config.openclawAgentHooksUrl, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: {
+        message: text,
+        name: config.alertName,
+        agentId: config.alertAgentId,
+        wakeMode: 'now',
+        deliver: true,
+        channel: config.alertChannel,
+        to: config.alertTo,
+        ...(event ? { event } : {}),
+        ...(payload ? { payload } : {}),
+      },
+    });
+    await emitNotificationBusDeliverSpan({ hookPath, producer, outcome: 'success' });
+  } catch (error) {
+    await emitNotificationBusDeliverSpan({ hookPath, producer, outcome: 'error' });
+    throw error;
+  }
 }
 
 export {

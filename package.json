@@ -27,6 +27,7 @@
     "merge-agent:cancel": "node src/merge-agent-cancel.mjs",
     "no-merge:hold": "node src/no-merge-hold.mjs",
     "ticket-pipeline:pause": "node src/ticket-pipeline-pause.mjs",
+    "c5:tel11-activation": "node src/c5-tel11-activation.mjs",
     "check-branch-protection": "node src/check-branch-protection.mjs",
     "retrigger-review": "node src/retrigger-review.mjs",
     "retrigger-remediation": "node src/retrigger-remediation.mjs",

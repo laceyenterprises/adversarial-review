@@ -638,6 +638,8 @@ test('cfg.workerClass=hammer selects the terminal HAM mandate prompt when findin
   assert.match(write.captured.body, /remediate, commit, comment, validate, merge/i);
   assert.match(write.captured.body, /Do not request another adversarial review round/);
   assert.match(write.captured.body, /Do not defer the review findings into follow-up PRs/);
+  assert.match(write.captured.body, /Every shell command you run must have an explicit wall-clock bound/);
+  assert.match(write.captured.body, /do not fall back to broad host\s+scans/);
   assert.match(write.captured.body, /ham_terminal_remediation_validated/);
   assert.match(write.captured.body, /--match-head-commit "\$POST_REMEDIATION_SHA"/);
   assert.match(write.captured.body, /failed, missing, stale, or\s+unchecked required checks/);

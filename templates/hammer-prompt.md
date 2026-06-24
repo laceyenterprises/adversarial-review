@@ -586,7 +586,8 @@ Post the CLOSING comment (mandate step 7) once the merge is confirmed:
 
 ```bash
 # Only after re-reading GitHub confirms the PR is merged at $POST_REMEDIATION_SHA.
-gh pr comment <<PR_URL>> --body "$(cat <<EOF
+HAM_CLOSEOUT_COMMENT_BODY="$(cat <<EOF
+<!-- hq:closeout:pr -->
 ✅ Closed by **Hammer** (adversarial-pipe-mode).
 
 - Merged: \`$POST_REMEDIATION_SHA\` via <<MERGE_METHOD>> (rebased onto latest \`main\`)
@@ -597,6 +598,20 @@ gh pr comment <<PR_URL>> --body "$(cat <<EOF
 Closed-By: hammer (adversarial-pipe-mode)
 EOF
 )"
+HAM_CLOSEOUT_COMMENT_POSTED=0
+for HAM_CLOSEOUT_COMMENT_ATTEMPT in 1 2 3; do
+  if gh pr comment <<PR_URL>> --body "$HAM_CLOSEOUT_COMMENT_BODY"; then
+    HAM_CLOSEOUT_COMMENT_POSTED=1
+    break
+  fi
+  echo "closeout comment post failed on attempt $HAM_CLOSEOUT_COMMENT_ATTEMPT/3; retrying" >&2
+  if [ "$HAM_CLOSEOUT_COMMENT_ATTEMPT" -lt 3 ]; then
+    sleep $((HAM_CLOSEOUT_COMMENT_ATTEMPT * 2))
+  fi
+done
+if [ "$HAM_CLOSEOUT_COMMENT_POSTED" -ne 1 ]; then
+  echo "closeout comment post failed after 3 attempts; merge already confirmed, continuing" >&2
+fi
 ```
 
 ## Hard prohibitions

@@ -898,6 +898,9 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
   assert.match(prompt, /REBASE_ASSESSED_HEAD="\$VALIDATED_HEAD"/);
   assert.match(prompt, /--match-head-commit "\$VALIDATED_HEAD"/);
   assert.match(prompt, /node "\$AMA_MERGE_LEASE_BIN" release[\s\S]*--lease-id "\$MERGE_LEASE_ID"/);
+  assert.match(prompt, /gh pr comment https:\/\/github\.com\/acme\/myrepo\/pull\/1234/);
+  assert.match(prompt, /<!-- hq:closeout:pr -->/);
+  assert.match(prompt, /Findings remediated: none required; clean AMA close/);
   assert.doesNotMatch(prompt, /UPDATE_BRANCH_EXIT"\s+-eq 2[\s\S]*release_merge_lease_if_held \|\| true[\s\S]*unresolvable-rebase-conflict/);
   assert.doesNotMatch(prompt, /if \[ "\$OUTCOME" = "succeeded" \]; then[\s\S]*release_merge_lease_if_held \|\| true/);
 });
@@ -974,6 +977,7 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /parked PR 1234/);
   assert.match(prompt, /AMG-04 hard-blocker: no merge without holding the merge lease/);
   assert.match(prompt, /No merge without holding the merge lease/);
+  assert.match(prompt, /<!-- hq:closeout:pr -->/);
 });
 
 test('composed prompt documents that branch_protection.required=false does not require the GitHub-plan sentinel', () => {
@@ -1059,6 +1063,143 @@ test('dispatch failure returns dispatched=false, reason=dispatch-failed (caller 
   assert.equal(result.reason, 'dispatch-failed');
   assert.equal(result.namedReason, 'dispatch-failed');
   assert.ok(result.error.includes('simulated dispatch failure'));
+});
+
+test('branch-holder provision failures use bounded cleanup-debt counter outside redispatch budget', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-branch-holder-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  const branchHolderError = [
+    '[hq] worker provision failed:',
+    "refusing grace-waived git worktree holder drop for branch 'codex-oap-05/OAP-05': holder has unrecovered local state or could not be safely inspected: /tmp/hq/workers/codex-oap-05/agent-os",
+    "fatal: 'codex-oap-05/OAP-05' is already used by worktree at '/tmp/hq/workers/codex-oap-05/agent-os'",
+  ].join('\n');
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatch-failed',
+    retryCount: 2,
+    dispatchId: null,
+    launchRequestId: null,
+    lastError: branchHolderError,
+  });
+
+  let execCalled = false;
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: async () => {
+      execCalled = true;
+      const err = new Error('provision failed');
+      err.stderr = branchHolderError;
+      throw err;
+    },
+    readTemplateImpl: () => 'stubbed',
+  });
+
+  assert.equal(execCalled, true, 'branch-holder blocked records must retry instead of exhausting');
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'dispatch-branch-holder-blocked');
+  assert.equal(result.skipMergeAgent, true);
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  assert.equal(record.state, 'dispatch-blocked-branch-holder');
+  assert.equal(record.retryCount, 2, 'branch-holder provision blockers are cleanup debt, not consumed launch attempts');
+  assert.equal(record.branchHolderBlockCount, 1);
+  assert.equal(record.lastObservedStatus, 'blocked');
+});
+
+test('branch-holder provision detection tolerates generic worktree collision wording', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-branch-holder-generic-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  const branchHolderError = [
+    '[hq] worker provision failed: branch-holder-blocked',
+    "fatal: branch 'codex-oap-05/OAP-05' is already checked out in worktree '/tmp/hq/workers/codex-oap-05/agent-os'",
+  ].join('\n');
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatch-failed',
+    retryCount: 2,
+    dispatchId: null,
+    launchRequestId: null,
+    lastError: branchHolderError,
+  });
+
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: async () => {
+      const err = new Error('provision failed');
+      err.stderr = branchHolderError;
+      throw err;
+    },
+    readTemplateImpl: () => 'stubbed',
+  });
+
+  assert.equal(result.reason, 'dispatch-branch-holder-blocked');
+  assert.equal(result.skipMergeAgent, true);
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  assert.equal(record.retryCount, 2);
+  assert.equal(record.branchHolderBlockCount, 1);
+});
+
+test('branch-holder provision failures stop retrying after bounded cleanup-debt attempts', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-branch-holder-exhausted-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  const branchHolderError = [
+    '[hq] worker provision failed:',
+    "refusing grace-waived git worktree holder drop for branch 'codex-oap-05/OAP-05': holder has unrecovered local state or could not be safely inspected: /tmp/hq/workers/codex-oap-05/agent-os",
+    "fatal: 'codex-oap-05/OAP-05' is already used by worktree at '/tmp/hq/workers/codex-oap-05/agent-os'",
+  ].join('\n');
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatch-branch-holder-block-exhausted',
+    retryCount: 2,
+    branchHolderBlockCount: 3,
+    dispatchId: null,
+    launchRequestId: null,
+    lastError: branchHolderError,
+  });
+
+  let execCalled = false;
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: async () => {
+      execCalled = true;
+      throw new Error('must not dispatch after exhausted branch-holder block');
+    },
+    readTemplateImpl: () => 'stubbed',
+  });
+
+  assert.equal(execCalled, false, 'exhausted branch-holder blockers must not retry every tick');
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'dispatch-branch-holder-block-exhausted');
+  assert.equal(result.skipMergeAgent, true);
 });
 
 test('dispatch parses machine-readable JSON stdout and records the launch request id', async (t) => {

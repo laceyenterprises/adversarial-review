@@ -56,6 +56,16 @@ Agent OS merge capture stores the merge commit in `build_completions.head_sha`,
 while the closer's `--match-head-commit <reviewedSha>` guard uses the PR head.
 The producer SHA is evidence returned to operators, not an equality gate.
 
+Branch-holder provisioning failures are bounded cleanup debt, not ordinary
+closer launch attempts. When `hq dispatch` refuses to drop a branch-holder
+worktree because it still has unrecovered local state, the watcher records
+`state:"dispatch-blocked-branch-holder"` and increments
+`branchHolderBlockCount` without consuming the normal `retryCount` redispatch
+budget. The watcher may retry that cleanup path only three consecutive times;
+after that it records/stops on `dispatch-branch-holder-block-exhausted` with
+`skipMergeAgent:true` so the daemon does not spin on every reconciliation tick
+against a persistent local-worktree blockage.
+
 The merged-signal producer is outside this repository's write path: watcher
 lifecycle sync records owed
 `hq dag autowalk-on-merge --repo <repo> --pr <n>` work when it observes a PR

@@ -657,6 +657,7 @@ function validateHamTerminalRemediationEvidence(
   const parentSha = String(evidence?.commit?.parentSha || evidence?.parentSha || '').trim();
   const verifiedCommitSha = String(verifiedCommit?.sha || '').trim();
   const verifiedParentSha = String(verifiedCommit?.parentSha || '').trim();
+  const verifiedReviewedHeadSha = String(verifiedTrailers['reviewed-head'] || '').trim();
   const claimedAuditBody = String(evidence?.auditComment?.body || '').trim();
   const verifiedAuditBody = String(verifiedAuditComment?.body || '').trim();
   const docCurrency = validateHamDocCurrencyEvidence(
@@ -680,6 +681,15 @@ function validateHamTerminalRemediationEvidence(
     && remediatedFindingCounts.blocking === findingMap.blocking
     && remediatedFindingCounts.nonBlocking === findingMap.nonBlocking
     && (!blockingFindings?.known || remediatedFindingCounts.blocking === expectedBlockingCount);
+  const directReviewedParent =
+    verifiedParentSha !== ''
+    && verifiedParentSha === String(reviewedHead || '')
+    && shaClaimMatches(parentSha, verifiedParentSha);
+  const reviewedHeadTrailerCoversRebase =
+    String(reviewedHead || '') !== ''
+    && verifiedReviewedHeadSha !== ''
+    && shaClaimMatches(verifiedReviewedHeadSha, String(reviewedHead || ''))
+    && shaClaimMatches(parentSha, String(reviewedHead || ''));
   const checks = {
     workerClass: verifiedTrailers['worker-class'] === 'hammer',
     ticket: /^HAM-\d+$/i.test(ticket),
@@ -687,10 +697,7 @@ function validateHamTerminalRemediationEvidence(
       verifiedCommitSha !== ''
       && verifiedCommitSha === String(currentHead || '')
       && shaClaimMatches(commitSha, verifiedCommitSha),
-    parent:
-      verifiedParentSha !== ''
-      && verifiedParentSha === String(reviewedHead || '')
-      && shaClaimMatches(parentSha, verifiedParentSha),
+    parent: directReviewedParent || reviewedHeadTrailerCoversRebase,
     nonEmptyCommit: verifiedCommitHasNonEmptyDiff(verifiedCommit),
     auditComment:
       claimedAuditBody !== ''
@@ -723,7 +730,9 @@ function validateHamTerminalRemediationEvidence(
     activeAuthorized,
     ok,
     checks,
-    reviewedParent: verifiedParentSha || parentSha || null,
+    reviewedParent: directReviewedParent ? verifiedParentSha : (verifiedReviewedHeadSha || parentSha || null),
+    actualParent: verifiedParentSha || null,
+    reviewedHeadTrailer: verifiedReviewedHeadSha || null,
     remediationHead: verifiedCommitSha || commitSha || null,
     addressedFindings: findingMap,
     remediatedFindingCounts,

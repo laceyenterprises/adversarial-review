@@ -603,6 +603,21 @@ function schemaV1() {
           },
         },
       },
+      // TEL-04 / GBI alert bus. Parse-only for adversarial-review, but this
+      // strict Node CFG consumer must accept the top-level Agent OS key or the
+      // watcher can reject config.yaml before it reaches PR routing.
+      agent_gateway: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          alert_bus_url: {
+            __type: TYPE_STRING,
+            __default: 'http://host.docker.internal:18799/hooks/wake',
+            __pattern: '^https?://[^/]+/hooks/wake/?$',
+            __pattern_description: 'http(s) URL ending in /hooks/wake, with optional trailing slash',
+          },
+        },
+      },
       entitlements: {
         __type: TYPE_DICT,
         __strict: false,
@@ -1764,6 +1779,13 @@ export const ENV_ALIASES = {
   'agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats': {
     canonical: 'AGENT_OS_AGENT_CONTROL_CODEX_RUNAWAY_GUARDRAILS_VOCABULARY_FATIGUE_MIN_REPEATS',
     aliases: [],
+  },
+  'agent_gateway.alert_bus_url': {
+    canonical: 'AGENT_OS_GBI_ALERT_BUS_URL',
+    aliases: [
+      ['AGENT_OS_AGENT_GATEWAY_ALERT_BUS_URL', identity],
+      ['AGENT_GATEWAY_ALERT_BUS_URL', identity],
+    ],
   },
   'sentinel.spec_drift.cycle_interval_seconds': {
     canonical: 'AGENT_OS_SENTINEL_SPEC_DRIFT_CYCLE_INTERVAL_SECONDS',

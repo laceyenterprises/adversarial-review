@@ -140,6 +140,7 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('operator.full_name'), 'Paul Lacey');
     assert.equal(cfg.get('linear.team_name'), 'Laceyenterprises');
     assert.equal(cfg.get('linear.issue_prefix'), 'LAC');
+    assert.equal(cfg.get('agent_gateway.alert_bus_url'), 'http://host.docker.internal:18799/hooks/wake');
     // Node-only mirror: global op.vault stays readable once the parent Agent OS
     // rollout introduces the canonical Python/shell schema.
     assert.equal(cfg.get('op.vault'), 'Cliovault');
@@ -478,6 +479,102 @@ test('OSR-05 Linear team env override flows through strict Node schema', () => {
     assert.equal(
       cfg.resolutionTrace('linear.team_name').at(-1).source,
       'env:AGENT_OS_LINEAR_TEAM_NAME',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('agent_gateway alert bus URL loads through strict Node schema and env aliases', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      agent_gateway:
+        alert_bus_url: https://alerts.example.test/hooks/wake
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('agent_gateway.alert_bus_url'), 'https://alerts.example.test/hooks/wake');
+
+    const trailingSlash = join(tmp, 'agent-gateway-url-trailing-slash.yaml');
+    writeFile(trailingSlash, `
+      version: 1
+      agent_gateway:
+        alert_bus_url: https://alerts.example.test/hooks/wake/
+    `);
+    const trailingSlashCfg = loadConfig({ topPath: trailingSlash, env: {} });
+    assert.equal(
+      trailingSlashCfg.get('agent_gateway.alert_bus_url'),
+      'https://alerts.example.test/hooks/wake/',
+    );
+
+    const envCfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_GBI_ALERT_BUS_URL: 'http://gbi.local:18799/hooks/wake' },
+    });
+    assert.equal(envCfg.get('agent_gateway.alert_bus_url'), 'http://gbi.local:18799/hooks/wake');
+    assert.equal(
+      envCfg.resolutionTrace('agent_gateway.alert_bus_url').at(-1).source,
+      'env:AGENT_OS_GBI_ALERT_BUS_URL',
+    );
+
+    const legacyEnvCfg = loadConfig({
+      topPath: top,
+      env: { AGENT_GATEWAY_ALERT_BUS_URL: 'http://gateway.local:18799/hooks/wake' },
+    });
+    assert.equal(legacyEnvCfg.get('agent_gateway.alert_bus_url'), 'http://gateway.local:18799/hooks/wake');
+    assert.equal(
+      legacyEnvCfg.resolutionTrace('agent_gateway.alert_bus_url').at(-1).source,
+      'env:AGENT_GATEWAY_ALERT_BUS_URL',
+    );
+
+    const badUrl = join(tmp, 'bad-agent-gateway-url.yaml');
+    writeFile(badUrl, `
+      version: 1
+      agent_gateway:
+        alert_bus_url: http://gbi.local:18799/wake
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: badUrl, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'agent_gateway.alert_bus_url');
+        assert.match(err.message, /does not match/);
+        return true;
+      },
+    );
+
+    const emptyHost = join(tmp, 'bad-agent-gateway-empty-host.yaml');
+    writeFile(emptyHost, `
+      version: 1
+      agent_gateway:
+        alert_bus_url: http:///hooks/wake
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: emptyHost, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'agent_gateway.alert_bus_url');
+        assert.match(err.message, /does not match/);
+        return true;
+      },
+    );
+
+    const unknownKey = join(tmp, 'bad-agent-gateway-key.yaml');
+    writeFile(unknownKey, `
+      version: 1
+      agent_gateway:
+        wake_url: http://gbi.local:18799/hooks/wake
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: unknownKey, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'agent_gateway.wake_url');
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

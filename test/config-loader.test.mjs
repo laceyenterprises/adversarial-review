@@ -497,6 +497,18 @@ test('agent_gateway alert bus URL loads through strict Node schema and env alias
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('agent_gateway.alert_bus_url'), 'https://alerts.example.test/hooks/wake');
 
+    const trailingSlash = join(tmp, 'agent-gateway-url-trailing-slash.yaml');
+    writeFile(trailingSlash, `
+      version: 1
+      agent_gateway:
+        alert_bus_url: https://alerts.example.test/hooks/wake/
+    `);
+    const trailingSlashCfg = loadConfig({ topPath: trailingSlash, env: {} });
+    assert.equal(
+      trailingSlashCfg.get('agent_gateway.alert_bus_url'),
+      'https://alerts.example.test/hooks/wake/',
+    );
+
     const envCfg = loadConfig({
       topPath: top,
       env: { AGENT_OS_GBI_ALERT_BUS_URL: 'http://gbi.local:18799/hooks/wake' },
@@ -525,6 +537,22 @@ test('agent_gateway alert bus URL loads through strict Node schema and env alias
     `);
     assert.throws(
       () => loadConfig({ topPath: badUrl, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'agent_gateway.alert_bus_url');
+        assert.match(err.message, /does not match/);
+        return true;
+      },
+    );
+
+    const emptyHost = join(tmp, 'bad-agent-gateway-empty-host.yaml');
+    writeFile(emptyHost, `
+      version: 1
+      agent_gateway:
+        alert_bus_url: http:///hooks/wake
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: emptyHost, env: {} }),
       (err) => {
         assert.ok(err instanceof AgentOSConfigError);
         assert.equal(err.key, 'agent_gateway.alert_bus_url');

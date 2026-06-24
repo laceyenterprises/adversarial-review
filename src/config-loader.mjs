@@ -613,8 +613,8 @@ function schemaV1() {
           alert_bus_url: {
             __type: TYPE_STRING,
             __default: 'http://host.docker.internal:18799/hooks/wake',
-            __pattern: '^https?://.+/hooks/wake$',
-            __pattern_description: 'http(s) URL ending in /hooks/wake',
+            __pattern: '^https?://[^/]+/hooks/wake/?$',
+            __pattern_description: 'http(s) URL ending in /hooks/wake, with optional trailing slash',
           },
         },
       },

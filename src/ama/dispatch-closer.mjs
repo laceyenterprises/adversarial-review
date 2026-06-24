@@ -70,19 +70,16 @@ const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
   'non-blocking-findings-unknown',
 ]);
 
-// Auto-hammer (2026-06-19): the eligibility-miss reasons that a hammer TERMINAL
-// remediation pass can clear on its own — i.e. the strict-mode "settled review
-// has standing non-blocking findings" case. The hammer-prompt remediates the
-// non-blocking findings, then re-validates the gate with ham-terminal-remediation
-// evidence (fail-closed), so auto-dispatching it here is safe for this exact
-// shape only. The hammer ALSO owns merge-conflict / behind-base resolution
-// (rebase onto main, resolve conflicts locally, re-validate), so
-// `pr-not-mergeable` is hammer-remediable too — a conflicting/behind PR routes
-// to the hammer instead of parking await-operator. Still NARROW: blocking
-// findings (these go through remediation rounds first), stale head, risk-class,
-// branch-protection, remediation-pending, and hard-stop labels are NOT
-// auto-hammer and stay await-operator. Blocking findings are handled by the
-// budget-exhausted final-pass rescue, not the immediate auto-hammer.
+// Auto-hammer (2026-06-19): before the remediation cycle is exhausted, route
+// only the eligibility-miss reasons that a hammer TERMINAL remediation pass can
+// clear on its own — strict non-blocking churn, mergeability repair, or red CI.
+//
+// Once the bounded remediation cycle IS exhausted, the contract changes: the
+// hammer is the terminal rescue lane. It gets dispatched for any eligibility
+// miss, remediates the final adversarial review comments (blocking and
+// non-blocking), fixes red CI, posts the audit closeout, and then re-validates
+// the exact live head fail-closed before merge. Exhaustion never waives the
+// merge predicate by itself; it only routes the work to the hammer.
 const HAMMER_AUTO_REMEDIABLE_MISS_REASONS = new Set([
   'non-blocking-findings-present',
   'verdict-not-settled-success', // strict mode emits this alongside the above
@@ -90,8 +87,9 @@ const HAMMER_AUTO_REMEDIABLE_MISS_REASONS = new Set([
   'ci-not-green', // hammer fixes the failing required checks (green-main bar), then merges
 ]);
 
-export function isHammerRemediableEligibilityMiss(reasons) {
+export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   if (!Array.isArray(reasons) || reasons.length === 0) return false;
+  if (options?.reviewCycleExhausted === true) return true;
   // The hammer must have something it can actually act on: non-blocking findings
   // to remediate, a not-mergeable state (conflict / behind) to rebase+resolve, or
   // red CI to fix.
@@ -798,23 +796,24 @@ export async function maybeDispatchAmaCloser({
 
   // The eligibility predicate is the second gate.
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, options);
+  let forceHammerTerminalRemediationPrompt = false;
   if (!verdict.eligible) {
     // Auto-hammer fall-through (gated by
-    // roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss): when the
-    // ONLY reason the PR is ineligible is standing non-blocking findings under
-    // strict mode, dispatch the hammer closer in remediation mode instead of
-    // parking await-operator. The hammer-prompt remediates the non-blocking
-    // findings, commits, writes the audit comment, then re-runs the eligibility
-    // predicate with --ham-terminal-remediation evidence — which is validated
-    // strictly and fails CLOSED if the findings were not actually addressed. So
-    // this never merges anything the gate wouldn't otherwise accept; it only
-    // automates the remediation step that the operator would have triggered with
-    // a label. Only valid when the configured closer worker IS the hammer.
+    // roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss): before
+    // cycle exhaustion this covers narrow hammer-owned repairs (non-blocking
+    // findings, mergeability, red CI). At cycle exhaustion it is the terminal
+    // rescue handoff for any final review comments. The hammer-prompt commits,
+    // writes the audit comment, then re-runs the eligibility predicate with
+    // --ham-terminal-remediation evidence, which is validated strictly and
+    // fails closed if the findings/checks were not actually addressed.
     const workerClassForMiss = String(cfg.workerClass || 'hammer');
+    const reviewCycleExhausted =
+      reviewState?.reviewCycleExhausted === true ||
+      verdict?.trace?.finalHammer?.active === true;
     const autoHammer =
       cfg?.autoHammerOnEligibilityMiss === true
       && workerClassForMiss === 'hammer'
-      && isHammerRemediableEligibilityMiss(verdict.reasons);
+      && isHammerRemediableEligibilityMiss(verdict.reasons, { reviewCycleExhausted });
     if (!autoHammer) {
       return noAmaDispatch({
         dispatched: false,
@@ -822,10 +821,11 @@ export async function maybeDispatchAmaCloser({
         reasons: verdict.reasons,
       });
     }
+    forceHammerTerminalRemediationPrompt = true;
     logger.log?.(
       `[ama-closer] auto-hammer: dispatching terminal remediation for ineligible ` +
       `PR (reasons: ${(verdict.reasons || []).join(',')}) — hammer will remediate ` +
-      `non-blocking findings then re-validate the gate fail-closed`
+      `final findings/checks then re-validate the gate fail-closed`
     );
     // fall through to the dispatch below (hammer template, remediation mode)
   }
@@ -838,9 +838,14 @@ export async function maybeDispatchAmaCloser({
   // worker class, gating purely on `workerClass === 'hammer'` would route every
   // clean closure through the terminal-remediation mandate. Require both the
   // hammer worker class AND a closure that genuinely needs terminal remediation;
-  // otherwise a hammer worker performs an ordinary clean close.
+  // otherwise a hammer worker performs an ordinary clean close. Auto-hammer
+  // eligibility misses force the terminal prompt because that worker is being
+  // launched to repair findings, mergeability, or CI before merge.
   const useHammerTerminalRemediationPrompt =
-    workerClass === 'hammer' && amaClosureNeedsTerminalRemediation(verdict);
+    workerClass === 'hammer' && (
+      forceHammerTerminalRemediationPrompt ||
+      amaClosureNeedsTerminalRemediation(verdict)
+    );
   const templatePath = dispatchContext.templatePath || (
     useHammerTerminalRemediationPrompt ? HAMMER_TEMPLATE_PATH : TEMPLATE_PATH
   );

@@ -647,6 +647,50 @@ test('cfg.workerClass=hammer selects the terminal HAM mandate prompt when findin
   assert.match(write.captured.body, /Rebase-Attempts: \${HAM_REBASE_ATTEMPTS:-0}/);
 });
 
+test('auto-hammer dispatches HAM terminal remediation at review-cycle exhaustion even for verdict-only misses', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-exhausted-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const readPaths = [];
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: {
+      workerClass: 'hammer',
+      autoHammerOnEligibilityMiss: true,
+    },
+    reviewState: {
+      verdict: 'request-changes',
+      reviewCycleExhausted: true,
+      blockingFindingState: 'known',
+      blockingFindingCount: 0,
+      nonBlockingFindingState: 'known',
+      nonBlockingFindingCount: 0,
+    },
+    dispatchContext: { rootDir, templatePath: null },
+  });
+  const exec = buildExecMock();
+  const write = buildWriteMock();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: (path) => {
+      readPaths.push(path);
+      return readFileSync(path, 'utf8');
+    },
+  });
+  assert.equal(result.dispatched, true);
+  assert.equal(result.workerClass, 'hammer');
+  assert.deepEqual(readPaths, [HAMMER_TEMPLATE_PATH]);
+  assert.equal(exec.calls.length, 1);
+  assert.equal(exec.calls[0].args[exec.calls[0].args.indexOf('--worker-class') + 1], 'hammer');
+  assert.ok(write.captured.body.includes('Closed-By: hammer (adversarial-pipe-mode)'));
+  assert.equal(write.captured.body.includes('Closed-By: hammer-closer (adversarial-pipe-mode)'), false);
+  assert.match(write.captured.body, /remediate, commit, comment, validate, merge/i);
+  assert.match(write.captured.body, /Get required checks and changed-surface tests green/);
+});
+
 // Unit coverage for the prompt-selection predicate itself (HAM-04, SPEC §1.1.1).
 test('amaClosureNeedsTerminalRemediation gates the hammer mandate on real findings', () => {
   const clean = {
@@ -1963,9 +2007,9 @@ test('terminal AMA audit releases a stale lease so the same head can be retried'
   //   writeFileSync('test/fixtures/ama-closer-prompt.golden.md', prompt);
 */
 
-// --- Auto-hammer eligibility-miss gate (2026-06-19) ---
+// --- Auto-hammer eligibility-miss gate (2026-06-19, final-cycle widened 2026-06-24) ---
 
-test('isHammerRemediableEligibilityMiss fires for the strict-mode non-blocking case and for not-mergeable (conflict/behind)', () => {
+test('isHammerRemediableEligibilityMiss fires narrowly before exhaustion and for any miss at exhaustion', () => {
   // Remediable: standing non-blocking findings (optionally + the strict
   // verdict-not-settled-success that accompanies them).
   assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present']), true);
@@ -2003,4 +2047,36 @@ test('isHammerRemediableEligibilityMiss fires for the strict-mode non-blocking c
   assert.equal(isHammerRemediableEligibilityMiss(['pr-not-mergeable', 'blocking-findings-present']), false, 'blocking finding still disqualifies even with a conflict');
   assert.equal(isHammerRemediableEligibilityMiss(['ci-not-green', 'blocking-findings-present']), false, 'blocking finding still disqualifies even with red CI');
   assert.equal(isHammerRemediableEligibilityMiss(['non-blocking-findings-present', 'stale-review-head']), false);
+
+  // At review-cycle exhaustion, the hammer is the terminal rescue lane. It
+  // dispatches for any miss reason and re-validates fail-closed after repair.
+  assert.equal(
+    isHammerRemediableEligibilityMiss(
+      ['verdict-not-settled-success'],
+      { reviewCycleExhausted: true },
+    ),
+    true,
+    'exhausted verdict-only miss routes to hammer',
+  );
+  assert.equal(
+    isHammerRemediableEligibilityMiss(
+      ['verdict-not-settled-success', 'blocking-findings-present'],
+      { reviewCycleExhausted: true },
+    ),
+    true,
+    'exhausted blocking findings route to hammer',
+  );
+  assert.equal(
+    isHammerRemediableEligibilityMiss(
+      ['ci-not-green', 'blocking-findings-present', 'risk-class-not-permitted'],
+      { reviewCycleExhausted: true },
+    ),
+    true,
+    'exhausted mixed misses route to hammer',
+  );
+  assert.equal(
+    isHammerRemediableEligibilityMiss([], { reviewCycleExhausted: true }),
+    false,
+    'no miss reasons means there is no eligibility miss to route',
+  );
 });

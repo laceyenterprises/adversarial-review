@@ -16,6 +16,12 @@ function cleanString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+function cleanIdentity(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'bigint') return String(value);
+  return cleanString(value);
+}
+
 function safePathPart(value) {
   return String(value || 'unknown')
     .replace(/[^A-Za-z0-9_.-]/g, '_')
@@ -61,11 +67,16 @@ function activationRecordPath(rootDir, { c5RunId, c5DeployId, activatedAt }) {
 
 function requireC5Identity({ c5RunId, c5DeployId }) {
   const missing = [];
-  if (!cleanString(c5RunId)) missing.push('c5RunId');
-  if (!cleanString(c5DeployId)) missing.push('c5DeployId');
+  const normalized = {
+    c5RunId: cleanIdentity(c5RunId),
+    c5DeployId: cleanIdentity(c5DeployId),
+  };
+  if (!normalized.c5RunId) missing.push('c5RunId');
+  if (!normalized.c5DeployId) missing.push('c5DeployId');
   if (missing.length > 0) {
     throw new Error(`C5 TEL-11 activation missing required identity: ${missing.join(', ')}`);
   }
+  return normalized;
 }
 
 function buildActivationRecord({
@@ -78,7 +89,7 @@ function buildActivationRecord({
   activation,
   activatedAt = new Date().toISOString(),
 }) {
-  requireC5Identity({ c5RunId, c5DeployId });
+  const identity = requireC5Identity({ c5RunId, c5DeployId });
   const live = activation.live === true;
   return {
     kind: ACTIVATION_KIND,
@@ -88,8 +99,8 @@ function buildActivationRecord({
     status: live ? 'live' : 'not-live',
     live,
     c5: {
-      runId: c5RunId,
-      deployId: c5DeployId,
+      runId: identity.c5RunId,
+      deployId: identity.c5DeployId,
       removalArtifact: c5RemovalArtifact,
     },
     tel11: {
@@ -162,21 +173,21 @@ async function activateTel11ForC5Closure({
   shouldAlert = true,
   activatedAt = new Date().toISOString(),
 } = {}) {
-  requireC5Identity({ c5RunId, c5DeployId });
+  const identity = requireC5Identity({ c5RunId, c5DeployId });
   if (typeof runTel11StandingDetections !== 'function') {
     throw new Error('C5 TEL-11 activation requires runTel11StandingDetections');
   }
 
   const activation = normalizeActivationResult(await runTel11StandingDetections({
     phase: 'post-c5-removal',
-    c5RunId,
-    c5DeployId,
+    c5RunId: identity.c5RunId,
+    c5DeployId: identity.c5DeployId,
     c5RemovalArtifact,
   }));
 
   const record = buildActivationRecord({
-    c5RunId,
-    c5DeployId,
+    c5RunId: identity.c5RunId,
+    c5DeployId: identity.c5DeployId,
     c5RemovalArtifact,
     sourceRepo,
     rcdG7aPr,
@@ -184,7 +195,11 @@ async function activateTel11ForC5Closure({
     activation,
     activatedAt,
   });
-  const recordPath = activationRecordPath(rootDir, { c5RunId, c5DeployId, activatedAt });
+  const recordPath = activationRecordPath(rootDir, {
+    c5RunId: identity.c5RunId,
+    c5DeployId: identity.c5DeployId,
+    activatedAt,
+  });
   writeFileAtomic(recordPath, `${JSON.stringify(record, null, 2)}\n`);
 
   if (!record.live && shouldAlert) {
@@ -212,6 +227,9 @@ async function enforceTel11StandingDetectionsAfterActivation({
 } = {}) {
   if (!activationRecord || activationRecord.kind !== ACTIVATION_KIND) {
     throw new Error('TEL-11 standing detection enforcement requires a C5 activation record');
+  }
+  if (!activationRecord.c5 || typeof activationRecord.c5 !== 'object' || Array.isArray(activationRecord.c5)) {
+    throw new Error('TEL-11 standing detection enforcement requires a valid c5 metadata object in the activation record');
   }
   if (activationRecord.live !== true) {
     return {
@@ -255,36 +273,46 @@ function splitCommand(command) {
   let current = '';
   let quote = null;
   let escaped = false;
+  let tokenStarted = false;
   for (const char of text) {
     if (escaped) {
       current += char;
       escaped = false;
+      tokenStarted = true;
       continue;
     }
     if (char === '\\') {
       escaped = true;
+      tokenStarted = true;
       continue;
     }
     if (quote) {
-      if (char === quote) quote = null;
-      else current += char;
+      if (char === quote) {
+        quote = null;
+      } else {
+        current += char;
+      }
+      tokenStarted = true;
       continue;
     }
     if (char === '"' || char === "'") {
       quote = char;
+      tokenStarted = true;
       continue;
     }
     if (/\s/.test(char)) {
-      if (current) {
+      if (tokenStarted) {
         parts.push(current);
         current = '';
+        tokenStarted = false;
       }
       continue;
     }
     current += char;
+    tokenStarted = true;
   }
   if (escaped) current += '\\';
-  if (current) parts.push(current);
+  if (current || tokenStarted) parts.push(current);
   return parts.length > 0 ? parts : null;
 }
 

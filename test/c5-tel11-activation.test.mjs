@@ -102,6 +102,26 @@ test('live activation record includes the C5 run and deploy identity for RCD-G7A
   assert.equal(result.record.acceptGate.adversarialReviewPr, 'laceyenterprises/adversarial-review#pending');
 });
 
+test('activation accepts numeric C5 identity values and normalizes them to strings', async () => {
+  const detectorCalls = [];
+  const result = await activateTel11ForC5Closure({
+    rootDir: tempRoot(),
+    c5RunId: 12345,
+    c5DeployId: 67890,
+    runTel11StandingDetections: async (args) => {
+      detectorCalls.push(args);
+      return { live: true, reason: 'tel11-live' };
+    },
+    shouldAlert: false,
+  });
+
+  assert.equal(detectorCalls[0].c5RunId, '12345');
+  assert.equal(detectorCalls[0].c5DeployId, '67890');
+  assert.equal(result.record.c5.runId, '12345');
+  assert.equal(result.record.c5.deployId, '67890');
+  assert.match(result.recordPath, /12345-67890-/);
+});
+
 test('synthetic OpenClaw reintroduction after activation invokes standing detection and pages fail-loud', async () => {
   const record = buildActivationRecord({
     c5RunId: 'c5-run-reintro',
@@ -139,6 +159,31 @@ test('synthetic OpenClaw reintroduction after activation invokes standing detect
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].options.event, 'runtime_cutover.tel11_openclaw_reintroduction');
   assert.equal(alerts[0].options.payload.findingsCount, 1);
+});
+
+test('OpenClaw reintroduction enforcement rejects malformed activation metadata cleanly', async () => {
+  const record = buildActivationRecord({
+    c5RunId: 'c5-run-malformed-record',
+    c5DeployId: 'deploy-malformed-record',
+    activation: {
+      live: true,
+      status: 'live',
+      reason: 'tel11-live',
+      detectorRef: 'tel-11@fixture',
+      checkedAt: '2026-06-24T22:00:00Z',
+      findings: [],
+    },
+  });
+  delete record.c5;
+
+  await assert.rejects(
+    enforceTel11StandingDetectionsAfterActivation({
+      activationRecord: record,
+      runTel11StandingDetections: async () => ({ live: true }),
+      shouldAlert: false,
+    }),
+    /requires a valid c5 metadata object/
+  );
 });
 
 test('OpenClaw reintroduction enforcement still returns fail-loud when alert delivery fails', async () => {
@@ -309,4 +354,21 @@ test('command TEL-11 detector splits single quotes and escaped spaces in configu
 
   assert.equal(calls[0].bin, 'tel11-detector');
   assert.deepEqual(calls[0].args.slice(0, 4), ['--label', 'quoted value', '--path', 'escaped value']);
+});
+
+test('command TEL-11 detector preserves explicitly quoted empty arguments', async () => {
+  const calls = [];
+  const detector = commandTel11Detector({
+    command: 'tel11-detector --empty "" --single \'\' --tail end',
+    execFileImpl: async (bin, args) => {
+      calls.push({ bin, args });
+      return { stdout: JSON.stringify({ live: true }) };
+    },
+    env: {},
+  });
+
+  await detector({ c5RunId: 'c5-run-empty-arg', c5DeployId: 'deploy-empty-arg' });
+
+  assert.equal(calls[0].bin, 'tel11-detector');
+  assert.deepEqual(calls[0].args.slice(0, 6), ['--empty', '', '--single', '', '--tail', 'end']);
 });

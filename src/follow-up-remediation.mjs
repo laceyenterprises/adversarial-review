@@ -52,6 +52,7 @@ import {
 import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 import { detectQuotaExhaustion, parseQuotaResetAt } from './quota-exhaustion.mjs';
+import { emitRemediationStarted } from './tel-workflow.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -5693,6 +5694,14 @@ async function consumeNextFollowUpJob({
           now,
         });
     spawnedWorker = worker;
+    emitRemediationStarted({
+      repo: claimed.job.repo,
+      prNumber: claimed.job.prNumber,
+      riskClass: claimed.job.riskClass || roundBudgetResolution.riskClass,
+      roundNumber: Number(claimed.job?.remediationPlan?.currentRound || 0),
+      lrq: worker.launchRequestId || null,
+      dispatchId: worker.dispatchId || null,
+    });
 
     const updated = markFollowUpJobSpawned({
       rootDir,

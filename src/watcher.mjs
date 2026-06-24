@@ -168,6 +168,11 @@ import {
   shouldEscalateReviewCycle,
 } from './review-cycle-cap.mjs';
 import { extractReviewVerdict } from './review-verdict.mjs';
+import {
+  emitClosureMerged,
+  emitReviewStarted,
+  emitReviewVerdict,
+} from './tel-workflow.mjs';
 import { resolveAgyReviewerSubprocessTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { makeReviewPostedProbe, reconcileReviewerSessions, reviewerBotLogin } from './reviewer-reattach.mjs';
 import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-failed-recovery.mjs';
@@ -2902,6 +2907,7 @@ async function spawnReviewer({
   workspacePath = null,
   crossModelReviewWaived = false,
   crossModelReviewWaiverReason = null,
+  riskClass = null,
   onReviewerPgid = () => {},
 }) {
   const finalRound = (
@@ -2916,6 +2922,12 @@ async function spawnReviewer({
 
   const reviewerSpawnToken = randomUUID();
   const reviewerIdentity = resolveReviewerIdentity({ reviewerModel, botTokenEnv });
+  emitReviewStarted({
+    repo,
+    prNumber,
+    reviewerClass: reviewerModel,
+    riskClass,
+  });
   const spawnRecord = {
     spawnToken: reviewerSpawnToken,
     repo,
@@ -2988,6 +3000,20 @@ async function spawnReviewer({
     });
     if (result.stdoutTail) console.log(`[reviewer:${prNumber}] ${String(result.stdoutTail).trim()}`);
     if (result.stderrTail) console.error(`[reviewer:${prNumber}] stderr: ${String(result.stderrTail).trim()}`);
+    if (result.ok) {
+      emitReviewVerdict({
+        repo,
+        prNumber,
+        reviewerClass: reviewerModel,
+        riskClass,
+        verdict: extractReviewVerdict([
+          result.reviewBody,
+          result.body,
+          result.stdout,
+          result.stdoutTail,
+        ].filter(Boolean).join('\n')),
+      });
+    }
     try {
       const endedAt = new Date().toISOString();
       const tokenUsage = result.tokenUsage || readBestReviewerEvidenceTokenUsage({
@@ -4413,6 +4439,14 @@ async function syncPRLifecycle(octokit, operatorSurface) {
 
     if (pr.mergedAt) {
       console.log(`[watcher] PR ${repo}#${prNumber} was merged — syncing Linear`);
+      emitClosureMerged({
+        repo,
+        prNumber,
+        riskClass: row.risk_class || null,
+        closerClass: labelNames.includes(MERGE_AGENT_DISPATCHED_LABEL) ? 'merge-agent' : 'ama-or-operator',
+        lrq: row.launchRequestId || row.launch_request_id || null,
+        dispatchId: row.dispatchId || row.dispatch_id || null,
+      });
       await queueAndAttemptMergeAgentLifecycleCleanup({
         pr, repo, prNumber, transition: 'merged',
       });
@@ -7105,6 +7139,7 @@ async function pollOnce(
               advisoryFindings: vocabularyFatigueFinding ? [vocabularyFatigueFinding] : [],
               reviewerSessionUuid,
               reviewerTimeoutMs,
+              riskClass: ledger.latestRiskClass,
               workspacePath: null,
               onReviewerPgid: ({ pgid, spawnedAt }) => {
                 persistReviewerPgid({

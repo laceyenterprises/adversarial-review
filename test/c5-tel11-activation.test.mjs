@@ -145,3 +145,102 @@ test('command TEL-11 detector returns not-live when no command is configured', a
     reason: 'tel11-standing-detections-command-not-configured',
   });
 });
+
+test('command TEL-11 detector forwards the requested verification phase', async () => {
+  const calls = [];
+  const detector = commandTel11Detector({
+    command: ['tel11-detector', '--mode', 'standing'],
+    execFileImpl: async (bin, args) => {
+      calls.push({ bin, args });
+      return { stdout: JSON.stringify({ live: true, reason: 'tel11-live' }) };
+    },
+    env: {},
+  });
+
+  const result = await detector({
+    phase: 'post-activation-openclaw-reintroduction-check',
+    c5RunId: 'c5-run-phase',
+    c5DeployId: 'deploy-phase',
+    c5RemovalArtifact: 'artifact://removal/phase',
+  });
+
+  assert.equal(result.live, true);
+  assert.equal(calls[0].bin, 'tel11-detector');
+  assert.deepEqual(calls[0].args, [
+    '--mode',
+    'standing',
+    '--phase',
+    'post-activation-openclaw-reintroduction-check',
+    '--c5-run-id',
+    'c5-run-phase',
+    '--c5-deploy-id',
+    'deploy-phase',
+    '--c5-removal-artifact',
+    'artifact://removal/phase',
+    '--json',
+  ]);
+});
+
+test('command TEL-11 detector parses JSON stdout from non-zero verification exits', async () => {
+  const detector = commandTel11Detector({
+    command: ['tel11-detector'],
+    execFileImpl: async () => {
+      const err = new Error('Command failed: tel11-detector');
+      err.code = 1;
+      err.stdout = Buffer.from(JSON.stringify({
+        live: false,
+        reason: 'openclaw-config-dependency-found',
+        findings: [{ path: 'config.yaml', package: 'openclaw' }],
+      }));
+      throw err;
+    },
+    env: {},
+  });
+
+  const result = await detector({ c5RunId: 'c5-run-exit', c5DeployId: 'deploy-exit' });
+
+  assert.equal(result.live, false);
+  assert.equal(result.reason, 'openclaw-config-dependency-found');
+  assert.equal(result.findings.length, 1);
+});
+
+test('command TEL-11 detector retries transient child-process failures before failing closed', async () => {
+  let attempts = 0;
+  const detector = commandTel11Detector({
+    command: ['tel11-detector'],
+    retryDelayMs: 0,
+    execFileImpl: async () => {
+      attempts += 1;
+      if (attempts < 3) {
+        const err = new Error('temporary EIO');
+        err.code = 'EIO';
+        throw err;
+      }
+      return { stdout: JSON.stringify({ live: true, reason: 'tel11-live-after-retry' }) };
+    },
+    env: {},
+  });
+
+  const result = await detector({ c5RunId: 'c5-run-retry', c5DeployId: 'deploy-retry' });
+
+  assert.equal(attempts, 3);
+  assert.equal(result.live, true);
+  assert.equal(result.reason, 'tel11-live-after-retry');
+});
+
+test('command TEL-11 detector splits single quotes and escaped spaces in configured command', async () => {
+  const calls = [];
+  const detector = commandTel11Detector({
+    command: "tel11-detector --label 'quoted value' --path escaped\\ value",
+    execFileImpl: async (bin, args) => {
+      calls.push({ bin, args });
+      return { stdout: JSON.stringify({ live: true }) };
+    },
+    env: {},
+  });
+
+  await detector({ c5RunId: 'c5-run-quoted', c5DeployId: 'deploy-quoted' });
+
+  assert.equal(calls[0].bin, 'tel11-detector');
+  assert.deepEqual(calls[0].args.slice(0, 4), ['--label', 'quoted value', '--path', 'escaped value']);
+});

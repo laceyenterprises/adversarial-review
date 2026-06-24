@@ -24,9 +24,11 @@ function safePathPart(value) {
 }
 
 function parseJsonMaybe(text, fallback = null) {
-  if (!cleanString(text)) return fallback;
+  const raw = Buffer.isBuffer(text) ? text.toString('utf8') : typeof text === 'string' ? text : text == null ? null : String(text);
+  const cleaned = cleanString(raw);
+  if (!cleaned) return fallback;
   try {
-    return JSON.parse(text);
+    return JSON.parse(cleaned);
   } catch {
     return fallback;
   }
@@ -237,11 +239,70 @@ async function enforceTel11StandingDetectionsAfterActivation({
 function splitCommand(command) {
   const text = cleanString(command);
   if (!text) return null;
-  const parts = text.match(/(?:[^\s"]+|"[^"]*")+/g)?.map((part) => part.replace(/^"|"$/g, '')) || [];
+  const parts = [];
+  let current = '';
+  let quote = null;
+  let escaped = false;
+  for (const char of text) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      else current += char;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        parts.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (escaped) current += '\\';
+  if (current) parts.push(current);
   return parts.length > 0 ? parts : null;
 }
 
-function commandTel11Detector({ command, execFileImpl = execFileAsync, env = process.env } = {}) {
+function isTransientExecError(err) {
+  const code = err?.code;
+  return code === 'EIO'
+    || code === 'EAGAIN'
+    || code === 'ETIMEDOUT'
+    || code === 'ETIME'
+    || err?.timedOut === true
+    || /timeout/i.test(err?.message || '');
+}
+
+function commandFailureResult(err, reason) {
+  return {
+    live: false,
+    reason,
+    exitCode: typeof err?.code === 'number' ? err.code : null,
+    signal: cleanString(err?.signal) || null,
+    stderr: cleanString(Buffer.isBuffer(err?.stderr) ? err.stderr.toString('utf8') : err?.stderr) || null,
+  };
+}
+
+function commandTel11Detector({
+  command,
+  execFileImpl = execFileAsync,
+  env = process.env,
+  retryDelayMs = 100,
+  maxAttempts = 3,
+} = {}) {
   const parts = Array.isArray(command) ? command : splitCommand(command || env.TEL11_STANDING_DETECTIONS_COMMAND);
   if (!parts || parts.length === 0) {
     return async () => ({
@@ -250,23 +311,39 @@ function commandTel11Detector({ command, execFileImpl = execFileAsync, env = pro
     });
   }
   const [bin, ...baseArgs] = parts;
-  return async ({ c5RunId, c5DeployId, c5RemovalArtifact }) => {
-    const { stdout } = await execFileImpl(
-      bin,
-      [
-        ...baseArgs,
-        '--phase',
-        'post-c5-removal',
-        '--c5-run-id',
-        c5RunId,
-        '--c5-deploy-id',
-        c5DeployId,
-        ...(c5RemovalArtifact ? ['--c5-removal-artifact', c5RemovalArtifact] : []),
-        '--json',
-      ],
-      { env }
-    );
-    return parseJsonMaybe(stdout, { live: false, reason: 'tel11-standing-detections-returned-non-json', stdout });
+  return async ({ phase = 'post-c5-removal', c5RunId, c5DeployId, c5RemovalArtifact }) => {
+    const args = [
+      ...baseArgs,
+      '--phase',
+      phase,
+      '--c5-run-id',
+      c5RunId,
+      '--c5-deploy-id',
+      c5DeployId,
+      ...(c5RemovalArtifact ? ['--c5-removal-artifact', c5RemovalArtifact] : []),
+      '--json',
+    ];
+    const attempts = Math.max(1, Number(maxAttempts) || 1);
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        const { stdout } = await execFileImpl(bin, args, { env });
+        return parseJsonMaybe(stdout, { live: false, reason: 'tel11-standing-detections-returned-non-json', stdout });
+      } catch (err) {
+        const parsed = parseJsonMaybe(err?.stdout);
+        if (parsed && typeof parsed === 'object') return parsed;
+        if (isTransientExecError(err) && attempt < attempts) {
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
+          continue;
+        }
+        return commandFailureResult(
+          err,
+          isTransientExecError(err)
+            ? 'tel11-standing-detections-command-transient-failed'
+            : 'tel11-standing-detections-command-failed'
+        );
+      }
+    }
+    return { live: false, reason: 'tel11-standing-detections-command-failed' };
   };
 }
 

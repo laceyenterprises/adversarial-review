@@ -3246,8 +3246,12 @@ function evaluateRoundBudgetForReview({
     linearTicketId,
     riskClass: ledger.latestRiskClass,
   }, { rootDir });
-  const latestMaxRounds = Number(ledger.latestMaxRounds);
-  const roundBudget = Number.isInteger(latestMaxRounds) && latestMaxRounds > resolution.roundBudget
+  const latestMaxRoundsValue = ledger.latestMaxRounds;
+  const latestMaxRounds = Number(latestMaxRoundsValue);
+  const hasLatestMaxRounds = latestMaxRoundsValue !== null && latestMaxRoundsValue !== undefined;
+  const roundBudget = hasLatestMaxRounds &&
+    Number.isInteger(latestMaxRounds) &&
+    latestMaxRounds > resolution.roundBudget
     ? latestMaxRounds
     : resolution.roundBudget;
 
@@ -3301,8 +3305,12 @@ function getStalePostedReviewBudgetSuppression({
     };
   }
 
-  const latestMaxRounds = Number(ledger.latestMaxRounds);
-  const roundBudget = Number.isInteger(latestMaxRounds) && latestMaxRounds > resolution.roundBudget
+  const latestMaxRoundsValue = ledger.latestMaxRounds;
+  const latestMaxRounds = Number(latestMaxRoundsValue);
+  const hasLatestMaxRounds = latestMaxRoundsValue !== null && latestMaxRoundsValue !== undefined;
+  const roundBudget = hasLatestMaxRounds &&
+    Number.isInteger(latestMaxRounds) &&
+    latestMaxRounds > resolution.roundBudget
     ? latestMaxRounds
     : resolution.roundBudget;
   const completedRoundsForPR = Number(ledger.completedRoundsForPR || 0);

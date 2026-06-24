@@ -453,10 +453,33 @@ test('watcher preserves elevated legacy budgets before suppressing stale-review 
   });
 });
 
+test('watcher treats null latestMaxRounds as absent when resolving stale-review budget', () => {
+  const suppression = getStalePostedReviewBudgetSuppression({
+    rootDir: '/tmp/adversarial-review-test-root',
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2590,
+    reviewRow: { review_status: 'posted' },
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 1,
+      latestRiskClass: 'medium',
+      latestMaxRounds: null,
+    }),
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: -1, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: false,
+    reason: null,
+    completedRoundsForPR: 1,
+    roundBudget: -1,
+    riskClass: 'medium',
+  });
+});
+
 test('watcher suppresses stale-review auto-refresh when review-cycle cap is already paused', () => {
   const fromLabel = getStalePostedReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',
-    prNumber: 2590,
+    prNumber: 2591,
     reviewRow: { review_status: 'posted' },
     labelNames: [REVIEWER_CYCLE_CAP_REACHED_LABEL],
     summarizePRRemediationLedgerImpl: () => {
@@ -471,7 +494,7 @@ test('watcher suppresses stale-review auto-refresh when review-cycle cap is alre
 
   const fromRow = getStalePostedReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',
-    prNumber: 2591,
+    prNumber: 2592,
     reviewRow: {
       review_status: 'failed',
       failure_message: '[review-cycle-cap] automatic review paused after 5 successive cycles',

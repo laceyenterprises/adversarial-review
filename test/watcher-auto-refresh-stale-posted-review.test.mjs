@@ -10,8 +10,9 @@
  *
  * The fix calls `requestReviewRereview` directly when the watcher sees
  * a posted row whose `reviewer_head_sha` no longer matches the current
- * PR head. requestReviewRereview's own CAS refuses `reviewing`, so a
- * head change mid-tick can't race a duplicate spawn.
+ * PR head, unless a higher-priority convergence guard suppresses the
+ * automatic refresh. requestReviewRereview's own CAS refuses `reviewing`,
+ * so a head change mid-tick can't race a duplicate spawn.
  *
  * These tests exercise the contract end-to-end via the underlying
  * `requestReviewRereview` mutation, mirroring how the watcher invokes
@@ -40,7 +41,11 @@ import {
   MERGE_AGENT_STUCK_LABEL,
   NO_MERGE_HOLD_LABEL,
 } from '../src/adapters/operator/github-pr-label-controls/index.mjs';
-import { getStalePostedReviewAutoRereviewSuppression } from '../src/watcher.mjs';
+import { REVIEWER_CYCLE_CAP_REACHED_LABEL } from '../src/review-cycle-cap.mjs';
+import {
+  getStalePostedReviewAutoRereviewSuppression,
+  getStalePostedReviewBudgetSuppression,
+} from '../src/watcher.mjs';
 
 
 function makeTempRoot() {
@@ -371,4 +376,113 @@ test('watcher does not suppress rereview for raw hold/stuck labels without curre
       reason: null,
     });
   }
+});
+
+test('watcher suppresses stale-review auto-refresh after remediation round budget is exhausted', () => {
+  const suppression = getStalePostedReviewBudgetSuppression({
+    rootDir: '/tmp/adversarial-review-test-root',
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2587,
+    linearTicketId: 'ASB-09',
+    reviewRow: { review_status: 'posted' },
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 2,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    resolveRoundBudgetForJobImpl: (job, { rootDir }) => {
+      assert.equal(rootDir, '/tmp/adversarial-review-test-root');
+      assert.equal(job.linearTicketId, 'ASB-09');
+      assert.equal(job.riskClass, 'medium');
+      return { roundBudget: 2, riskClass: 'medium' };
+    },
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: true,
+    reason: 'remediation-round-budget-exhausted',
+    completedRoundsForPR: 2,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
+});
+
+test('watcher allows stale-review auto-refresh while remediation budget remains', () => {
+  const suppression = getStalePostedReviewBudgetSuppression({
+    rootDir: '/tmp/adversarial-review-test-root',
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2588,
+    reviewRow: { review_status: 'posted' },
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 1,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: false,
+    reason: null,
+    completedRoundsForPR: 1,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
+});
+
+test('watcher preserves elevated legacy budgets before suppressing stale-review auto-refresh', () => {
+  const suppression = getStalePostedReviewBudgetSuppression({
+    rootDir: '/tmp/adversarial-review-test-root',
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2589,
+    reviewRow: { review_status: 'posted' },
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 2,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 6,
+    }),
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: false,
+    reason: null,
+    completedRoundsForPR: 2,
+    roundBudget: 6,
+    riskClass: 'medium',
+  });
+});
+
+test('watcher suppresses stale-review auto-refresh when review-cycle cap is already paused', () => {
+  const fromLabel = getStalePostedReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2590,
+    reviewRow: { review_status: 'posted' },
+    labelNames: [REVIEWER_CYCLE_CAP_REACHED_LABEL],
+    summarizePRRemediationLedgerImpl: () => {
+      throw new Error('label pause should short-circuit before ledger read');
+    },
+  });
+
+  assert.deepEqual(fromLabel, {
+    suppressed: true,
+    reason: 'review-cycle-cap-paused',
+  });
+
+  const fromRow = getStalePostedReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2591,
+    reviewRow: {
+      review_status: 'failed',
+      failure_message: '[review-cycle-cap] automatic review paused after 5 successive cycles',
+    },
+    summarizePRRemediationLedgerImpl: () => {
+      throw new Error('row pause should short-circuit before ledger read');
+    },
+  });
+
+  assert.deepEqual(fromRow, {
+    suppressed: true,
+    reason: 'review-cycle-cap-paused',
+  });
 });

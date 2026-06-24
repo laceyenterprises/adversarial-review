@@ -774,7 +774,7 @@ if [ $APPEND_EXIT -ne 0 ]; then
 fi
 
 if [ "$OUTCOME" = "succeeded" ]; then
-  gh pr comment https://github.com/acme/myrepo/pull/1234 --body "$(cat <<EOF
+  CLOSEOUT_COMMENT_BODY="$(cat <<EOF
 <!-- hq:closeout:pr -->
 ## AMA close-out
 
@@ -788,6 +788,20 @@ if [ "$OUTCOME" = "succeeded" ]; then
 Closed-By: autonomous-merge-authority
 EOF
 )"
+  CLOSEOUT_COMMENT_POSTED=0
+  for CLOSEOUT_COMMENT_ATTEMPT in 1 2 3; do
+    if gh pr comment https://github.com/acme/myrepo/pull/1234 --body "$CLOSEOUT_COMMENT_BODY"; then
+      CLOSEOUT_COMMENT_POSTED=1
+      break
+    fi
+    echo "closeout comment post failed on attempt $CLOSEOUT_COMMENT_ATTEMPT/3; retrying" >&2
+    if [ "$CLOSEOUT_COMMENT_ATTEMPT" -lt 3 ]; then
+      sleep $((CLOSEOUT_COMMENT_ATTEMPT * 2))
+    fi
+  done
+  if [ "$CLOSEOUT_COMMENT_POSTED" -ne 1 ]; then
+    echo "closeout comment post failed after 3 attempts; merge already confirmed, continuing" >&2
+  fi
 fi
 exit 0
 ```

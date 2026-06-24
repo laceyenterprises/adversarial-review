@@ -199,6 +199,7 @@ const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = (
   + AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0);
 const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 const AMA_CLOSER_REDISPATCH_BOUND = 2;
+const AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND = 3;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
 const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
 const AMA_CLOSER_RETRYABLE_STATUSES = new Set([
@@ -966,6 +967,7 @@ export async function maybeDispatchAmaCloser({
     && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.PENDING
     && !existingRecordIsReclaimableInterruption;
   const existingRecordIsBranchHolderBlocked = isProvisionBranchHolderBlocked(existingRecord?.lastError || '');
+  const existingBranchHolderBlockCount = Number(existingRecord?.branchHolderBlockCount || 0);
   let existingDispatchStatus = null;
   if (existingRecord?.launchRequestId) {
     let releaseUnprovenTerminalHold = false;
@@ -1072,6 +1074,19 @@ export async function maybeDispatchAmaCloser({
     // only after the stale `pending` lease it left behind proves the owner died
     // or outlived the full hq dispatch retry loop.
     return noAmaDispatch({ dispatched: false, reason: 'dispatch-retry-exhausted' });
+  } else if (
+    existingRecordIsBranchHolderBlocked
+    && existingBranchHolderBlockCount >= AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND
+  ) {
+    return noAmaDispatch({
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'dispatch-branch-holder-block-exhausted',
+      workerClass: existingRecord.workerClass || workerClass,
+      dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+      launchRequestId: existingRecord.launchRequestId || null,
+      promptPath: existingRecord.promptPath || null,
+    });
   }
 
   assertAmaAuditOwner({
@@ -1161,6 +1176,7 @@ export async function maybeDispatchAmaCloser({
     dispatchId: existingRecord?.dispatchId || null,
     launchRequestId: existingRecord?.launchRequestId || null,
     retryCount: priorRetryCount + 1,
+    branchHolderBlockCount: existingBranchHolderBlockCount,
     state: 'dispatching',
     lastObservedStatus: existingRecord?.lastObservedStatus || null,
     lastObservedAt: existingRecord?.lastObservedAt || null,
@@ -1272,30 +1288,38 @@ export async function maybeDispatchAmaCloser({
       const parsedFailure = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(err?.stdout || ''));
       const ambiguousLaunch = Boolean(parsedFailure.launchRequestId || parsedFailure.dispatchId);
       const branchHolderBlocked = !ambiguousLaunch && isProvisionBranchHolderBlocked(err);
-      updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
-        ...(current || {}),
-        schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
-        repo,
-        prNumber,
-        headSha: reviewedSha,
-        workerClass,
-        promptPath,
-        promptDir,
-        hqRoot,
-        lastAttemptedAt: dispatchContext.dispatchedAt,
-        dispatchedAt: ambiguousLaunch ? dispatchContext.dispatchedAt : null,
-        dispatchId: parsedFailure.dispatchId,
-        launchRequestId: parsedFailure.launchRequestId,
-        retryCount: branchHolderBlocked
-          ? priorRetryCount
-          : Number(current?.retryCount || priorRetryCount + 1),
-        state: ambiguousLaunch ? 'dispatched' : (
-          branchHolderBlocked ? 'dispatch-blocked-branch-holder' : 'dispatch-failed'
-        ),
-        lastObservedStatus: ambiguousLaunch ? 'unknown' : (branchHolderBlocked ? 'blocked' : null),
-        lastObservedAt: ambiguousLaunch || branchHolderBlocked ? dispatchContext.dispatchedAt : null,
-        lastError: String(err?.stderr || err?.message || err),
-      }));
+      updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => {
+        const branchHolderBlockCount = branchHolderBlocked
+          ? Number(current?.branchHolderBlockCount || existingBranchHolderBlockCount) + 1
+          : 0;
+        return {
+          ...(current || {}),
+          schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
+          repo,
+          prNumber,
+          headSha: reviewedSha,
+          workerClass,
+          promptPath,
+          promptDir,
+          hqRoot,
+          lastAttemptedAt: dispatchContext.dispatchedAt,
+          dispatchedAt: ambiguousLaunch ? dispatchContext.dispatchedAt : null,
+          dispatchId: parsedFailure.dispatchId,
+          launchRequestId: parsedFailure.launchRequestId,
+          retryCount: branchHolderBlocked
+            ? priorRetryCount
+            : Number(current?.retryCount || priorRetryCount + 1),
+          branchHolderBlockCount,
+          state: ambiguousLaunch ? 'dispatched' : (
+            branchHolderBlocked && branchHolderBlockCount >= AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND
+              ? 'dispatch-branch-holder-block-exhausted'
+              : (branchHolderBlocked ? 'dispatch-blocked-branch-holder' : 'dispatch-failed')
+          ),
+          lastObservedStatus: ambiguousLaunch ? 'unknown' : (branchHolderBlocked ? 'blocked' : null),
+          lastObservedAt: ambiguousLaunch || branchHolderBlocked ? dispatchContext.dispatchedAt : null,
+          lastError: String(err?.stderr || err?.message || err),
+        };
+      });
       return noAmaDispatch({
         dispatched: false,
         skipMergeAgent: branchHolderBlocked || ambiguousLaunch || (
@@ -1330,6 +1354,7 @@ export async function maybeDispatchAmaCloser({
     dispatchId: parsed.dispatchId,
     launchRequestId: parsed.launchRequestId,
     retryCount: Number(current?.retryCount || priorRetryCount + 1),
+    branchHolderBlockCount: 0,
     state: 'dispatched',
     lastObservedStatus: 'starting',
     lastObservedAt: dispatchContext.dispatchedAt,

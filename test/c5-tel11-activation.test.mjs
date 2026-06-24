@@ -45,6 +45,33 @@ test('TEL-11 activation returning not-live records non-live state and blocks C5 
   assert.equal(persisted.c5.deployId, 'deploy-abc');
 });
 
+test('TEL-11 activation still returns blocked closure when alert delivery fails', async () => {
+  const originalError = console.error;
+  const logs = [];
+  console.error = (...args) => logs.push(args.join(' '));
+  try {
+    const result = await activateTel11ForC5Closure({
+      rootDir: tempRoot(),
+      c5RunId: 'c5-run-alert-failure',
+      c5DeployId: 'deploy-alert-failure',
+      runTel11StandingDetections: async () => ({
+        live: false,
+        reason: 'tel11-pack-not-live',
+      }),
+      alert: async () => {
+        throw new Error('webhook unavailable');
+      },
+    });
+
+    assert.equal(result.accepted, false);
+    assert.equal(result.holdClosure, true);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0], /Failed to deliver blocked-closure alert: webhook unavailable/);
+  } finally {
+    console.error = originalError;
+  }
+});
+
 test('live activation record includes the C5 run and deploy identity for RCD-G7A', async () => {
   const result = await activateTel11ForC5Closure({
     rootDir: tempRoot(),
@@ -114,6 +141,44 @@ test('synthetic OpenClaw reintroduction after activation invokes standing detect
   assert.equal(alerts[0].options.payload.findingsCount, 1);
 });
 
+test('OpenClaw reintroduction enforcement still returns fail-loud when alert delivery fails', async () => {
+  const record = buildActivationRecord({
+    c5RunId: 'c5-run-reintro-alert-failure',
+    c5DeployId: 'deploy-reintro-alert-failure',
+    activation: {
+      live: true,
+      status: 'live',
+      reason: 'tel11-live',
+      detectorRef: 'tel-11@fixture',
+      checkedAt: '2026-06-24T22:00:00Z',
+      findings: [],
+    },
+  });
+  const originalError = console.error;
+  const logs = [];
+  console.error = (...args) => logs.push(args.join(' '));
+  try {
+    const result = await enforceTel11StandingDetectionsAfterActivation({
+      activationRecord: record,
+      runTel11StandingDetections: async () => ({
+        live: true,
+        reason: 'openclaw-config-dependency-found',
+        findings: [{ kind: 'config-dependency', path: 'config.yaml', package: 'openclaw' }],
+      }),
+      alert: async () => {
+        throw new Error('pager unavailable');
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.failLoud, true);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0], /Failed to deliver openclaw-reintroduction alert: pager unavailable/);
+  } finally {
+    console.error = originalError;
+  }
+});
+
 test('activation handshake is synchronous before closure acceptance is returned', async () => {
   const events = [];
   const resultPromise = activateTel11ForC5Closure({
@@ -150,8 +215,8 @@ test('command TEL-11 detector forwards the requested verification phase', async 
   const calls = [];
   const detector = commandTel11Detector({
     command: ['tel11-detector', '--mode', 'standing'],
-    execFileImpl: async (bin, args) => {
-      calls.push({ bin, args });
+    execFileImpl: async (bin, args, options) => {
+      calls.push({ bin, args, options });
       return { stdout: JSON.stringify({ live: true, reason: 'tel11-live' }) };
     },
     env: {},
@@ -179,6 +244,7 @@ test('command TEL-11 detector forwards the requested verification phase', async 
     'artifact://removal/phase',
     '--json',
   ]);
+  assert.equal(calls[0].options.timeout, 30000);
 });
 
 test('command TEL-11 detector parses JSON stdout from non-zero verification exits', async () => {
@@ -212,8 +278,8 @@ test('command TEL-11 detector retries transient child-process failures before fa
     execFileImpl: async () => {
       attempts += 1;
       if (attempts < 3) {
-        const err = new Error('temporary EIO');
-        err.code = 'EIO';
+        const err = new Error('Command failed: tel11-detector\nstderr: temporary EIO while launchd settled');
+        err.code = 1;
         throw err;
       }
       return { stdout: JSON.stringify({ live: true, reason: 'tel11-live-after-retry' }) };

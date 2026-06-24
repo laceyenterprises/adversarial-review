@@ -145,6 +145,10 @@ async function defaultReintroductionAlert({ record, detection, alert = deliverAl
   );
 }
 
+function logAlertDeliveryFailure(scope, err) {
+  console.error(`[c5-tel11-activation] Failed to deliver ${scope} alert: ${err?.message || err}`);
+}
+
 async function activateTel11ForC5Closure({
   rootDir = ROOT,
   c5RunId,
@@ -184,7 +188,11 @@ async function activateTel11ForC5Closure({
   writeFileAtomic(recordPath, `${JSON.stringify(record, null, 2)}\n`);
 
   if (!record.live && shouldAlert) {
-    await defaultAlert({ record, alert });
+    try {
+      await defaultAlert({ record, alert });
+    } catch (err) {
+      logAlertDeliveryFailure('blocked-closure', err);
+    }
   }
 
   return {
@@ -226,7 +234,11 @@ async function enforceTel11StandingDetectionsAfterActivation({
   }));
   const failed = detection.live !== true || detection.findings.length > 0;
   if (failed && shouldAlert) {
-    await defaultReintroductionAlert({ record: activationRecord, detection, alert });
+    try {
+      await defaultReintroductionAlert({ record: activationRecord, detection, alert });
+    } catch (err) {
+      logAlertDeliveryFailure('openclaw-reintroduction', err);
+    }
   }
   return {
     ok: !failed,
@@ -278,12 +290,13 @@ function splitCommand(command) {
 
 function isTransientExecError(err) {
   const code = err?.code;
+  const message = err?.message || '';
   return code === 'EIO'
     || code === 'EAGAIN'
     || code === 'ETIMEDOUT'
     || code === 'ETIME'
     || err?.timedOut === true
-    || /timeout/i.test(err?.message || '');
+    || /timeout|eio|eagain|temporary|tls/i.test(message);
 }
 
 function commandFailureResult(err, reason) {
@@ -302,6 +315,7 @@ function commandTel11Detector({
   env = process.env,
   retryDelayMs = 100,
   maxAttempts = 3,
+  timeoutMs = 30000,
 } = {}) {
   const parts = Array.isArray(command) ? command : splitCommand(command || env.TEL11_STANDING_DETECTIONS_COMMAND);
   if (!parts || parts.length === 0) {
@@ -326,7 +340,7 @@ function commandTel11Detector({
     const attempts = Math.max(1, Number(maxAttempts) || 1);
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
-        const { stdout } = await execFileImpl(bin, args, { env });
+        const { stdout } = await execFileImpl(bin, args, { env, timeout: timeoutMs });
         return parseJsonMaybe(stdout, { live: false, reason: 'tel11-standing-detections-returned-non-json', stdout });
       } catch (err) {
         const parsed = parseJsonMaybe(err?.stdout);
@@ -343,7 +357,6 @@ function commandTel11Detector({
         );
       }
     }
-    return { live: false, reason: 'tel11-standing-detections-command-failed' };
   };
 }
 

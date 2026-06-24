@@ -471,8 +471,9 @@ gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > /tmp/ham-commit.json
 Build `/tmp/ham-terminal-remediation.json` as the claim to verify. `ama-check`
 must confirm the commit parent/trailers from `/tmp/ham-commit.json` and confirm
 the audit comment body and author exist in `/tmp/ham-timeline.json`; the raw
-commit payload must include a non-empty `files[]` diff. The JSON claim alone
-does not satisfy the predicate.
+commit payload must include a non-empty `files[]` diff. If the mandatory rebase
+rewrites the commit parent, the verified `Reviewed-Head` trailer must still
+match `<<REVIEWED_SHA>>`. The JSON claim alone does not satisfy the predicate.
 
 ```json
 {
@@ -490,6 +491,12 @@ does not satisfy the predicate.
   },
   "auditComment": {
     "body": "<posted PR audit comment body>",
+    "docCurrency": {
+      "status": "updated | skipped_superproject | not_applicable",
+      "changedFiles": ["<every path from the verified commit files[]>"],
+      "docsUpdated": ["<doc paths changed in this commit, when status is updated>"],
+      "skippedSuperprojectDocs": ["<owed superproject docs, when status is skipped_superproject>"]
+    },
     "findings": [
       { "title": "<finding title>", "blocking": true, "file": "<path>", "addressed": true }
     ]

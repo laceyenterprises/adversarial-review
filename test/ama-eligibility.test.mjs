@@ -1478,6 +1478,7 @@ test('final hammer: waives risk-class for medium not in allowlist with adversari
 function hamEvidence({
   headSha = 'def67890',
   parentSha = 'abc12345',
+  reviewedHead = parentSha,
   audit = true,
   workerClass = 'hammer',
   remediatedFindings = '2 addressed (1 blocking, 1 non-blocking)',
@@ -1500,6 +1501,7 @@ function hamEvidence({
       trailers: {
         'Worker-Class': workerClass,
         'Worker-Ticket': 'HAM-02',
+        'Reviewed-Head': reviewedHead,
         'Closed-By': 'hammer (adversarial-pipe-mode)',
         'Remediated-Findings': remediatedFindings,
       },
@@ -1517,6 +1519,7 @@ function hamEvidence({
 function hamGroundTruth({
   headSha = 'def67890',
   parentSha = 'abc12345',
+  reviewedHead = parentSha,
   audit = true,
   workerClass = 'hammer',
   closedBy = 'hammer (adversarial-pipe-mode)',
@@ -1534,6 +1537,7 @@ function hamGroundTruth({
       trailers: {
         'Worker-Class': workerClass,
         'Worker-Ticket': 'HAM-02',
+        'Reviewed-Head': reviewedHead,
         'Closed-By': closedBy,
         'Remediated-Findings': remediatedFindings,
       },
@@ -1584,6 +1588,59 @@ test('ham terminal remediation: HAM-authored live head over reviewed parent is e
     result.trace.hamTerminalRemediation.waived.sort(),
     ['blocking-findings-present', 'stale-review-head', 'verdict-not-settled-success'].sort(),
   );
+});
+
+test('ham terminal remediation: server-rebased HAM commit proves reviewed head with trailer', () => {
+  const reviewedHead = 'abc12345';
+  const rebasedParent = 'fc53d29b';
+  const currentHead = 'def67890';
+  const auditBody = 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      headSha: reviewedHead,
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: {
+      ...hamEvidence({
+        headSha: currentHead,
+        parentSha: reviewedHead,
+        reviewedHead,
+        auditBody,
+      }),
+      auditComment: {
+        body: auditBody,
+        docCurrency: {
+          status: 'not_applicable',
+          changedFiles: ['src/auth.js'],
+        },
+        findings: [
+          { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true },
+          { title: 'README note is stale', blocking: false, file: 'README.md', addressed: true },
+        ],
+      },
+    },
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      headSha: currentHead,
+      parentSha: rebasedParent,
+      reviewedHead,
+      auditAuthor: 'clio-airlock',
+      auditBody,
+    }),
+  });
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.hamTerminalRemediation.checks.parent, true);
+  assert.equal(result.trace.hamTerminalRemediation.checks.auditCommentAuthor, true);
+  assert.equal(result.trace.hamTerminalRemediation.reviewedParent, reviewedHead);
+  assert.equal(result.trace.hamTerminalRemediation.actualParent, rebasedParent);
+  assert.equal(result.trace.hamTerminalRemediation.reviewedHeadTrailer, reviewedHead);
+  assert.ok(result.trace.hamTerminalRemediation.waived.includes('stale-review-head'));
+  assert.ok(result.trace.hamTerminalRemediation.waived.includes('verdict-not-settled-success'));
 });
 
 test('ham terminal remediation: valid evidence waives strict non-blocking finding gate', () => {

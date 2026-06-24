@@ -3246,14 +3246,93 @@ function evaluateRoundBudgetForReview({
     linearTicketId,
     riskClass: ledger.latestRiskClass,
   }, { rootDir });
-  const latestMaxRounds = Number(ledger.latestMaxRounds);
-  const roundBudget = Number.isInteger(latestMaxRounds) && latestMaxRounds > resolution.roundBudget
+  const latestMaxRoundsValue = ledger.latestMaxRounds;
+  const latestMaxRounds = Number(latestMaxRoundsValue);
+  const hasLatestMaxRounds = latestMaxRoundsValue !== null && latestMaxRoundsValue !== undefined;
+  const roundBudget = hasLatestMaxRounds &&
+    Number.isInteger(latestMaxRounds) &&
+    latestMaxRounds > resolution.roundBudget
     ? latestMaxRounds
     : resolution.roundBudget;
 
   return {
     skip: false,
     completedRoundsForPR: ledger.completedRoundsForPR,
+    roundBudget,
+    riskClass: resolution.riskClass,
+  };
+}
+
+function getStalePostedReviewBudgetSuppression({
+  rootDir = ROOT,
+  repoPath,
+  prNumber,
+  linearTicketId = null,
+  reviewRow = null,
+  labelNames = [],
+  logger = console,
+  summarizePRRemediationLedgerImpl = summarizePRRemediationLedger,
+  resolveRoundBudgetForJobImpl = resolveRoundBudgetForJob,
+} = {}) {
+  const normalizedLabelNames = new Set(normalizeLabelNames(labelNames));
+  if (
+    normalizedLabelNames.has(REVIEWER_CYCLE_CAP_REACHED_LABEL) ||
+    isAutomaticReviewCycleCapPause(reviewRow)
+  ) {
+    return {
+      suppressed: true,
+      reason: 'review-cycle-cap-paused',
+    };
+  }
+
+  let ledger;
+  let resolution;
+  try {
+    ledger = summarizePRRemediationLedgerImpl(rootDir, { repo: repoPath, prNumber });
+    resolution = resolveRoundBudgetForJobImpl({
+      linearTicketId,
+      riskClass: ledger.latestRiskClass,
+    }, { rootDir });
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] stale posted review budget probe failed for ${repoPath}#${prNumber}; ` +
+        `allowing auto-refresh: ${err?.message || err}`
+    );
+    return {
+      suppressed: false,
+      reason: null,
+      probeError: err?.message || String(err),
+    };
+  }
+
+  const latestMaxRoundsValue = ledger.latestMaxRounds;
+  const latestMaxRounds = Number(latestMaxRoundsValue);
+  const hasLatestMaxRounds = latestMaxRoundsValue !== null && latestMaxRoundsValue !== undefined;
+  const roundBudget = hasLatestMaxRounds &&
+    Number.isInteger(latestMaxRounds) &&
+    latestMaxRounds > resolution.roundBudget
+    ? latestMaxRounds
+    : resolution.roundBudget;
+  const completedRoundsForPR = Number(ledger.completedRoundsForPR || 0);
+  if (
+    Number.isFinite(completedRoundsForPR) &&
+    Number.isFinite(roundBudget) &&
+    roundBudget > 0 &&
+    completedRoundsForPR >= roundBudget
+  ) {
+    return {
+      suppressed: true,
+      reason: 'remediation-round-budget-exhausted',
+      completedRoundsForPR,
+      roundBudget,
+      riskClass: resolution.riskClass,
+    };
+  }
+
+  return {
+    suppressed: false,
+    reason: null,
+    completedRoundsForPR,
     roundBudget,
     riskClass: resolution.riskClass,
   };
@@ -5934,6 +6013,7 @@ async function pollOnce(
 
     for (const { subject, prNumber, current: cachedCurrent } of subjectEntries) {
       const prTitle = subject.title || '';
+      const linearTicketId = operatorSurface.extractLinearTicketId(prTitle);
       const staleDriftSkip = shouldSkipReviewerForStaleDrift({
         number: prNumber,
         labels: subject.labels,
@@ -6186,11 +6266,34 @@ async function pollOnce(
           logger: console,
         })
         : { suppressed: false, reason: null };
+      const stalePostedReviewBudgetSuppression =
+        postedReviewHeadMoved && !stalePostedReviewSuppression.suppressed
+          ? getStalePostedReviewBudgetSuppression({
+            rootDir: ROOT,
+            repoPath,
+            prNumber,
+            linearTicketId,
+            reviewRow: existing,
+            labelNames: prLabelNames,
+            logger: console,
+          })
+          : { suppressed: false, reason: null };
       if (postedReviewHeadMoved && stalePostedReviewSuppression.suppressed) {
         console.log(
           `[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: ` +
             `head moved ${existing.reviewer_head_sha.slice(0, 12)} → ${subject.headSha.slice(0, 12)} ` +
             `because ${stalePostedReviewSuppression.reason}; leaving posted review to the merge-agent`
+        );
+      } else if (postedReviewHeadMoved && stalePostedReviewBudgetSuppression.suppressed) {
+        const budgetDetail =
+          stalePostedReviewBudgetSuppression.reason === 'remediation-round-budget-exhausted'
+            ? ` (${stalePostedReviewBudgetSuppression.completedRoundsForPR}/${stalePostedReviewBudgetSuppression.roundBudget} rounds, ` +
+              `risk=${stalePostedReviewBudgetSuppression.riskClass || 'unknown'})`
+            : '';
+        console.log(
+          `[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: ` +
+            `head moved ${existing.reviewer_head_sha.slice(0, 12)} → ${subject.headSha.slice(0, 12)} ` +
+            `because ${stalePostedReviewBudgetSuppression.reason}${budgetDetail}; leaving posted review intact`
         );
       } else if (postedReviewHeadMoved) {
         try {
@@ -6380,7 +6483,6 @@ async function pollOnce(
       // (stale-drift check already ran at the top of the per-PR loop;
       // duplicate block removed — caused SyntaxError on import per LAC-439.)
 
-      const linearTicketId = operatorSurface.extractLinearTicketId(prTitle);
       let liveLabels = null;
       const preRoutingUpdateRow = existing;
       if (!existing) {
@@ -7446,6 +7548,7 @@ export {
   computeVocabularyFatigueFindingForPR,
   detectCommitVocabularyFatigue,
   getStalePostedReviewAutoRereviewSuppression,
+  getStalePostedReviewBudgetSuppression,
   handlePostedReviewRow,
   maybeDispatchReviewerTimeoutExhaustedMergeAgent,
   maybeDispatchAmaClosureFor,

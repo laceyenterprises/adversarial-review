@@ -345,6 +345,7 @@ function schemaV1() {
         __keys: {
           // OSR-04b: top-level keys must be accepted by every strict CFG
           // loader even when only one language consumes the value at runtime.
+          live: { __type: TYPE_BOOL, __default: false },
           install_root: { __type: TYPE_STRING, __default: null, __nullable: true },
         },
       },
@@ -1968,6 +1969,10 @@ export const ENV_ALIASES = {
   },
   'launchd.label_prefix': {
     canonical: 'AGENT_OS_LAUNCHD_LABEL_PREFIX',
+    aliases: [],
+  },
+  'openclaw.live': {
+    canonical: 'AGENT_OS_OPENCLAW_LIVE',
     aliases: [],
   },
   'openclaw.install_root': {

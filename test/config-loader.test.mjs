@@ -1935,22 +1935,30 @@ test('OSR-04 host-local roots load through strict Node schema and env aliases', 
     writeFile(top, `
       version: 1
       openclaw:
+        live: false
         install_root: /cfg/openclaw
       codex:
         acp_state_home: /cfg/codex-acp
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('openclaw.live'), false);
     assert.equal(cfg.get('openclaw.install_root'), '/cfg/openclaw');
     assert.equal(cfg.get('codex.acp_state_home'), '/cfg/codex-acp');
     const envCfg = loadConfig({
       topPath: top,
       env: {
+        AGENT_OS_OPENCLAW_LIVE: 'true',
         AGENT_OS_OPENCLAW_INSTALL_ROOT: '/env/openclaw',
         AGENT_OS_CODEX_ACP_STATE_HOME: '/env/codex-acp',
       },
     });
+    assert.equal(envCfg.get('openclaw.live'), true);
     assert.equal(envCfg.get('openclaw.install_root'), '/env/openclaw');
     assert.equal(envCfg.get('codex.acp_state_home'), '/env/codex-acp');
+    assert.equal(
+      envCfg.resolutionTrace('openclaw.live').at(-1).source,
+      'env:AGENT_OS_OPENCLAW_LIVE',
+    );
     assert.equal(
       envCfg.resolutionTrace('openclaw.install_root').at(-1).source,
       'env:AGENT_OS_OPENCLAW_INSTALL_ROOT',

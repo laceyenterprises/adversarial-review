@@ -689,7 +689,10 @@ function validateHamTerminalRemediationEvidence(
     String(reviewedHead || '') !== ''
     && verifiedReviewedHeadSha !== ''
     && shaClaimMatches(verifiedReviewedHeadSha, String(reviewedHead || ''))
-    && shaClaimMatches(parentSha, String(reviewedHead || ''));
+    && (
+      shaClaimMatches(parentSha, String(reviewedHead || ''))
+      || shaClaimMatches(parentSha, verifiedParentSha)
+    );
   const checks = {
     workerClass: verifiedTrailers['worker-class'] === 'hammer',
     ticket: /^HAM-\d+$/i.test(ticket),

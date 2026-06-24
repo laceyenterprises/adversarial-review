@@ -1593,7 +1593,8 @@ test('ham terminal remediation: HAM-authored live head over reviewed parent is e
 test('ham terminal remediation: server-rebased HAM commit proves reviewed head with trailer', () => {
   const reviewedHead = 'abc12345';
   const rebasedParent = 'fc53d29b';
-  const currentHead = 'def67890';
+  const preRebaseHead = 'def67890';
+  const currentHead = 'fedcba09';
   const auditBody = 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.';
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
@@ -1609,7 +1610,7 @@ test('ham terminal remediation: server-rebased HAM commit proves reviewed head w
     hamTerminalRemediation: {
       ...hamEvidence({
         headSha: currentHead,
-        parentSha: reviewedHead,
+        parentSha: rebasedParent,
         reviewedHead,
         auditBody,
       }),
@@ -1634,6 +1635,7 @@ test('ham terminal remediation: server-rebased HAM commit proves reviewed head w
     }),
   });
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.notEqual(currentHead, preRebaseHead);
   assert.equal(result.trace.hamTerminalRemediation.checks.parent, true);
   assert.equal(result.trace.hamTerminalRemediation.checks.auditCommentAuthor, true);
   assert.equal(result.trace.hamTerminalRemediation.reviewedParent, reviewedHead);

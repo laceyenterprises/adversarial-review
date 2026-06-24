@@ -1115,6 +1115,49 @@ test('branch-holder provision failures use bounded cleanup-debt counter outside 
   assert.equal(record.lastObservedStatus, 'blocked');
 });
 
+test('branch-holder provision detection tolerates generic worktree collision wording', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-branch-holder-generic-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: { rootDir },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  const branchHolderError = [
+    '[hq] worker provision failed: branch-holder-blocked',
+    "fatal: branch 'codex-oap-05/OAP-05' is already checked out in worktree '/tmp/hq/workers/codex-oap-05/agent-os'",
+  ].join('\n');
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatch-failed',
+    retryCount: 2,
+    dispatchId: null,
+    launchRequestId: null,
+    lastError: branchHolderError,
+  });
+
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: async () => {
+      const err = new Error('provision failed');
+      err.stderr = branchHolderError;
+      throw err;
+    },
+    readTemplateImpl: () => 'stubbed',
+  });
+
+  assert.equal(result.reason, 'dispatch-branch-holder-blocked');
+  assert.equal(result.skipMergeAgent, true);
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  assert.equal(record.retryCount, 2);
+  assert.equal(record.branchHolderBlockCount, 1);
+});
+
 test('branch-holder provision failures stop retrying after bounded cleanup-debt attempts', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-branch-holder-exhausted-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

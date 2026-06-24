@@ -453,15 +453,25 @@ function isProvisionBranchHolderBlocked(errOrText) {
     ].filter(Boolean).join('\n');
   const normalized = detail.toLowerCase();
   if (!normalized) return false;
-  return (
+  if (/\b(branch[-_]holder[-_](blocked|collision|worktree)|worktree[-_]branch[-_]holder[-_]blocked)\b/.test(normalized)) {
+    return true;
+  }
+  const hasWorktreeCollision = (
     normalized.includes('already used by worktree') ||
-    normalized.includes('already checked out in worktree')
-  ) && (
+    normalized.includes('already checked out in worktree') ||
+    (normalized.includes('worktree') && normalized.includes('already') && normalized.includes('branch'))
+  );
+  const hasBranchHolderContext = (
+    normalized.includes('branch holder') ||
+    normalized.includes('branch-holder') ||
+    normalized.includes('git worktree holder') ||
+    normalized.includes('worker provision failed') ||
     normalized.includes('refusing grace-waived git worktree holder drop') ||
     normalized.includes('holder has unrecovered local state') ||
     normalized.includes('could not be safely inspected') ||
     normalized.includes('auto-tear-down')
   );
+  return hasWorktreeCollision && hasBranchHolderContext;
 }
 
 function sleep(ms) {

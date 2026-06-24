@@ -8,6 +8,25 @@ or future refactors. The final adversarial review is the authority; the audit
 comment plus HAM provenance trailers replace a human re-review gate, and they do
 not replace the machine gate.
 
+## Shell safety
+
+Every shell command you run must have an explicit wall-clock bound. On macOS,
+where GNU `timeout` may not exist, wrap commands like this:
+
+```bash
+/usr/bin/perl -e 'alarm shift; exec @ARGV' <seconds> <command> ...
+```
+
+Use focused timeouts that match the operation: short reads/searches should be
+seconds, test suites and GitHub waits can be longer. Never run unbounded
+recursive searches over `/tmp`, `/private/tmp`, `$HOME`,
+`/Users/airlock/agent-os-hq`, or an entire checkout when looking for review
+state. Prefer the live PR, the final review body, this prompt's audit inputs,
+and narrow repo-local paths. If GitHub GraphQL has no quota, use REST endpoints
+such as `gh api repos/acme/myrepo/pulls/1234/reviews` or the dispatch
+prompt/audit files already named by this run; do not fall back to broad host
+scans.
+
 ## Snapshot
 
 - **PR:** https://github.com/acme/myrepo/pull/1234

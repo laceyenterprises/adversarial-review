@@ -83,7 +83,7 @@ import {
   checkAgyReviewerAuth,
   resolveAgyAuthProbeTimeoutMs,
 } from './agy-reviewer-auth.mjs';
-import { resolveGeminiRuntime } from './role-config.mjs';
+import { resolveGeminiRuntime, resolveGeminiAntigravityModel } from './role-config.mjs';
 
 const REVIEW_ADAPTER_ENV_KEYS = [
   'USER',
@@ -2245,8 +2245,47 @@ function formatAgyPrintTimeout(timeoutMs) {
   return `${seconds}s`;
 }
 
-function buildAgyReviewArgs({ model, printTimeoutMs = resolveAgyPrintTimeoutMs() }) {
-  return ['--print', '--print-timeout', formatAgyPrintTimeout(printTimeoutMs), '-m', model];
+// agy's `--print` is a VALUE-taking flag (it consumes the next token as the
+// prompt body), NOT a boolean. The previous form
+//   ['--print', '--print-timeout', <T>, '-m', <model>]
+// with the prompt on stdin caused `--print` to swallow `--print-timeout`'s
+// value and left `-m`/`--model` unbound, so agy logged `model=""` and fell
+// back to the persisted default ("Gemini 3.5 Flash (High)") — the reviewer
+// silently ran Flash regardless of config.
+//
+// The verified-working form binds the model and delivers the prompt as the
+// `--print` ARGUMENT:
+//   ['--model', <token>, '--print-timeout', <T>, '--dangerously-skip-permissions', '--print', <prompt>]
+// Every flag with its own value sits BEFORE `--print` so `--print` consumes
+// the prompt (the last argv element) as its value.
+function buildAgyReviewArgs({ model, prompt, printTimeoutMs = resolveAgyPrintTimeoutMs() }) {
+  return [
+    '--model', model,
+    '--print-timeout', formatAgyPrintTimeout(printTimeoutMs),
+    '--dangerously-skip-permissions',
+    '--print', String(prompt ?? ''),
+  ];
+}
+
+// Defensive argv-size guard. Review prompts carry the diff and can be large;
+// the claude reviewer already delivers its whole prompt via argv (see
+// reviewWithClaude / buildClaudeReviewArgs), so review prompts are known to
+// fit argv in practice, but a pathologically large diff could exceed the OS
+// argv limit (macOS ARG_MAX ~1 MiB, shared with env). We refuse rather than
+// silently revert to the broken stdin form (which unbinds the model). The
+// caller can lower the diff/context budget; this is a hard, observable fail.
+const AGY_ARGV_MAX_BYTES = 256 * 1024;
+
+function assertAgyPromptFitsArgv(prompt, { maxBytes = AGY_ARGV_MAX_BYTES } = {}) {
+  const bytes = Buffer.byteLength(String(prompt ?? ''), 'utf8');
+  if (bytes > maxBytes) {
+    throw new Error(
+      `Antigravity agy review prompt is ${bytes} bytes, exceeding the ${maxBytes}-byte argv budget. `
+      + 'agy requires the prompt on argv to bind --model; refusing rather than reverting to the '
+      + 'stdin form (which unbinds the model and silently runs the persisted default).',
+    );
+  }
+  return bytes;
 }
 
 function hasAgyErrorSentinel(output) {
@@ -2399,7 +2438,7 @@ async function spawnGeminiReview({
 async function spawnAgyReview({
   agyCli = AGY_CLI,
   prompt,
-  model = resolveGeminiReviewerModel(),
+  model = resolveGeminiAntigravityModel(),
   env,
   cwd = process.cwd(),
   timeout = resolveReviewerTimeoutMs(env),
@@ -2411,13 +2450,18 @@ async function spawnAgyReview({
     reviewerTimeoutMs: timeout,
     printTimeoutMs,
   });
+  // The prompt MUST travel on argv (as the `--print` value) so `--model`
+  // binds. Refuse if it would blow the argv budget rather than silently
+  // reverting to stdin (which unbinds the model — the bug this fixes).
+  assertAgyPromptFitsArgv(prompt);
   return spawnWithInputImpl(
     agyCli,
-    buildAgyReviewArgs({ model, printTimeoutMs }),
+    buildAgyReviewArgs({ model, prompt, printTimeoutMs }),
     {
       env,
       cwd,
-      input: prompt,
+      // Prompt is delivered on argv (see buildAgyReviewArgs); stdin is closed.
+      input: '',
       timeout: effectiveTimeout,
       maxBuffer,
       // agy leaves a long-lived language-server child holding our stdout/stderr
@@ -2469,7 +2513,15 @@ async function reviewWithGemini(diff, extraContext = '', {
     ? buildAgyReviewerPromptPrefix({ stage: promptStage })
     : buildReviewerPromptPrefix({ stage: promptStage });
   const prompt = `${promptPrefix}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
-  const model = resolveGeminiReviewerModel();
+  // Runtime-aware model token. The token FORMATS differ and are NOT
+  // interchangeable: the gemini-CLI path expects a slug (gemini-2.5-pro);
+  // the agy/antigravity path expects agy's verbatim display name
+  // (e.g. "Gemini 3.1 Pro (High)"). Feeding the cli slug to agy is the bug
+  // that previously left the model unbound — agy ignores an unknown token and
+  // falls back to its persisted default (Flash).
+  const model = runtime === 'antigravity'
+    ? resolveGeminiAntigravityModel({ env })
+    : resolveGeminiReviewerModel(env);
 
   let stdout = '';
   let stderr = '';
@@ -3404,10 +3456,13 @@ const __test__ = {
   AGY_KEYCHAIN_SERVICE,
   AGY_KEYCHAIN_REMEDIATION,
   resolveGeminiRuntime,
+  resolveGeminiAntigravityModel,
   resolveGeminiReviewerModel,
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
   buildAgyReviewArgs,
+  assertAgyPromptFitsArgv,
+  AGY_ARGV_MAX_BYTES,
   resolveAgyPrintTimeoutMs,
   resolveAgyReviewerSubprocessTimeoutMs,
   formatAgyPrintTimeout,

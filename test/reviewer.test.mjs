@@ -42,10 +42,13 @@ const {
   assertAgyReviewerAuth,
   checkAgyReviewerAuth,
   resolveGeminiRuntime,
+  resolveGeminiAntigravityModel,
   resolveGeminiReviewerModel,
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
   buildAgyReviewArgs,
+  assertAgyPromptFitsArgv,
+  AGY_ARGV_MAX_BYTES,
   resolveAgyPrintTimeoutMs,
   resolveAgyReviewerSubprocessTimeoutMs,
   formatAgyPrintTimeout,
@@ -1851,15 +1854,33 @@ test('buildGeminiReviewArgs enters headless mode without carrying the prompt bod
   assert.equal(args[args.indexOf('--prompt') + 1], '');
 });
 
-test('buildAgyReviewArgs uses agy print mode without carrying the prompt body', () => {
-  const args = buildAgyReviewArgs({ model: 'gemini-2.5-pro', printTimeoutMs: 1_140_000 });
-  assert.deepEqual(args, ['--print', '--print-timeout', '1140s', '-m', 'gemini-2.5-pro']);
+test('buildAgyReviewArgs binds --model before --print and carries the prompt as the --print value', () => {
+  const prompt = '## Adversarial Review\n\n```diff\n+x\n```';
+  const args = buildAgyReviewArgs({ model: 'Gemini 3.1 Pro (High)', prompt, printTimeoutMs: 1_140_000 });
+  // agy's --print is a VALUE flag: the prompt must be its argument, and every
+  // value-bearing flag (incl. --model) must precede --print so it binds.
+  assert.deepEqual(args, [
+    '--model', 'Gemini 3.1 Pro (High)',
+    '--print-timeout', '1140s',
+    '--dangerously-skip-permissions',
+    '--print', prompt,
+  ]);
+  const modelIdx = args.indexOf('--model');
+  const printIdx = args.indexOf('--print');
+  assert.ok(modelIdx >= 0, '--model present');
+  assert.equal(args[modelIdx + 1], 'Gemini 3.1 Pro (High)', '--model bound to the agy display-name token');
+  assert.ok(modelIdx < printIdx, '--model must precede --print so the model binds (was the silent-Flash bug)');
+  // The prompt rides on argv as the --print value, NOT left to stdin (which
+  // would let --print swallow the next token and unbind --model).
+  assert.equal(args[printIdx + 1], prompt, 'prompt delivered as the --print argv value');
+  // The old boolean `-m`/stdin form must be gone.
+  assert.ok(!args.includes('-m'), 'legacy -m short flag removed');
 });
 
 test('agy print timeout is independently tunable and reviewer subprocess gets headroom', () => {
   const reviewerTimeoutMs = 20 * 60 * 1000;
   const printTimeoutMs = resolveAgyPrintTimeoutMs({});
-  const args = buildAgyReviewArgs({ model: 'gemini-2.5-pro', printTimeoutMs });
+  const args = buildAgyReviewArgs({ model: 'Gemini 3.1 Pro (High)', prompt: 'p', printTimeoutMs });
   const printTimeoutArg = args[args.indexOf('--print-timeout') + 1];
 
   assert.equal(printTimeoutMs, 1_140_000);
@@ -1912,14 +1933,14 @@ test('spawnGeminiReview feeds the prompt over stdin and keeps it out of argv', a
   );
 });
 
-test('spawnAgyReview feeds the prompt over stdin and keeps it out of argv', async () => {
-  const prompt = 'ADVERSARIAL PROMPT\n\n---\n\n```diff\n+secret diff body\n```';
+test('spawnAgyReview delivers the prompt on argv (as the --print value) so the model binds, and closes stdin', async () => {
+  const prompt = 'ADVERSARIAL PROMPT\n\n---\n\n```diff\n+diff body\n```';
   const calls = [];
 
   await spawnAgyReview({
     agyCli: '/usr/local/bin/agy',
     prompt,
-    model: 'gemini-2.5-pro',
+    model: 'Gemini 3.1 Pro (High)',
     env: { HOME: '/tmp/home', PATH: process.env.PATH },
     cwd: '/tmp/repo',
     timeout: 9_999,
@@ -1933,15 +1954,81 @@ test('spawnAgyReview feeds the prompt over stdin and keeps it out of argv', asyn
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, '/usr/local/bin/agy');
-  assert.deepEqual(calls[0].args, ['--print', '--print-timeout', '9s', '-m', 'gemini-2.5-pro']);
-  assert.equal(calls[0].options.input, prompt);
-  for (const arg of calls[0].args) {
-    assert.ok(!arg.includes('secret diff body'), `argv leaked prompt body: ${arg}`);
-    assert.ok(!arg.includes('ADVERSARIAL PROMPT'), `argv leaked prompt body: ${arg}`);
-  }
+  assert.deepEqual(calls[0].args, [
+    '--model', 'Gemini 3.1 Pro (High)',
+    '--print-timeout', '9s',
+    '--dangerously-skip-permissions',
+    '--print', prompt,
+  ]);
+  // --model precedes --print so it actually binds (the silent-Flash regression).
+  const modelIdx = calls[0].args.indexOf('--model');
+  const printIdx = calls[0].args.indexOf('--print');
+  assert.ok(modelIdx < printIdx, '--model must precede --print');
+  assert.equal(calls[0].args[modelIdx + 1], 'Gemini 3.1 Pro (High)');
+  // Prompt is on argv, stdin is closed (NOT fed the prompt — that unbinds the model).
+  assert.equal(calls[0].args[printIdx + 1], prompt);
+  assert.equal(calls[0].options.input, '');
   assert.deepEqual(
     { cwd: calls[0].options.cwd, timeout: calls[0].options.timeout, maxBuffer: calls[0].options.maxBuffer },
     { cwd: '/tmp/repo', timeout: 39_000, maxBuffer: 555 },
+  );
+});
+
+test('spawnAgyReview refuses an oversized prompt rather than reverting to the model-unbinding stdin form', async () => {
+  const oversized = 'x'.repeat(AGY_ARGV_MAX_BYTES + 1);
+  let spawned = false;
+  await assert.rejects(
+    () => spawnAgyReview({
+      agyCli: '/usr/local/bin/agy',
+      prompt: oversized,
+      model: 'Gemini 3.1 Pro (High)',
+      env: { HOME: '/tmp/home', PATH: process.env.PATH },
+      printTimeoutMs: 9_000,
+      spawnWithInputImpl: async () => { spawned = true; return { stdout: 'ok', stderr: '' }; },
+    }),
+    /argv budget/,
+  );
+  assert.equal(spawned, false, 'must not spawn agy with an oversized argv');
+});
+
+test('assertAgyPromptFitsArgv accepts prompts under the budget and rejects oversized ones', () => {
+  assert.equal(assertAgyPromptFitsArgv('ok', { maxBytes: 10 }), 2);
+  assert.throws(() => assertAgyPromptFitsArgv('x'.repeat(11), { maxBytes: 10 }), /argv budget/);
+});
+
+test('resolveGeminiAntigravityModel: agy uses the display-name token while the cli path keeps its slug', () => {
+  const modulePath = join(mkdtempSync(join(tmpdir(), 'agy-model-')), 'config.yaml');
+  // Antigravity model comes from reviewer.gemini.model (agy display name).
+  writeFileSync(modulePath, 'reviewer:\n  gemini:\n    model: "Gemini 3.1 Pro (High)"\n', 'utf8');
+  assert.equal(
+    resolveGeminiAntigravityModel({ env: {}, topPath: '/dev/null', modulePaths: [modulePath] }),
+    'Gemini 3.1 Pro (High)',
+  );
+  // Default when unset is the agy display-name token, NOT a cli slug.
+  const emptyPath = join(mkdtempSync(join(tmpdir(), 'agy-model-')), 'config.yaml');
+  writeFileSync(emptyPath, 'reviewer:\n  gemini:\n    runtime: antigravity\n', 'utf8');
+  assert.equal(
+    resolveGeminiAntigravityModel({ env: {}, topPath: '/dev/null', modulePaths: [emptyPath] }),
+    'Gemini 3.1 Pro (High)',
+  );
+  // Env override (canonical + legacy alias).
+  assert.equal(
+    resolveGeminiAntigravityModel({ env: { AGENT_OS_REVIEWER_GEMINI_MODEL: 'Claude Opus 4.6 (Thinking)' }, topPath: '/dev/null', modulePaths: [emptyPath] }),
+    'Claude Opus 4.6 (Thinking)',
+  );
+  assert.equal(
+    resolveGeminiAntigravityModel({ env: { ADVERSARIAL_REVIEW_GEMINI_MODEL: 'GPT-OSS 120B (Medium)' }, topPath: '/dev/null', modulePaths: [emptyPath] }),
+    'GPT-OSS 120B (Medium)',
+  );
+  // The gemini-CLI model resolver is unchanged: still a slug.
+  assert.equal(
+    withEnv({ GEMINI_REVIEWER_MODEL: undefined }, () => resolveGeminiReviewerModel()),
+    'gemini-2.5-pro',
+  );
+  // And buildGeminiReviewArgs (cli path) is untouched.
+  assert.deepEqual(
+    buildGeminiReviewArgs({ model: 'gemini-2.5-pro' }),
+    ['-m', 'gemini-2.5-pro', '-o', 'text', '--prompt', ''],
   );
 });
 
@@ -2030,7 +2117,7 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
     },
     spawnAgyReviewImpl: async ({ agyCli, prompt, model, env, timeout }) => {
       const printTimeoutMs = resolveAgyPrintTimeoutMs(env);
-      spawnCalls.push({ agyCli, args: buildAgyReviewArgs({ model, printTimeoutMs }), prompt, env });
+      spawnCalls.push({ agyCli, model, args: buildAgyReviewArgs({ model, prompt, printTimeoutMs }), prompt, env });
       assert.equal(timeout, 1_200_000);
       return { stdout: validAgyReview, stderr: '' };
     },
@@ -2049,7 +2136,14 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   assert.equal(authCalls[0].env.GEMINI_ANTIGRAVITY_ACCOUNT, undefined);
   assert.equal(spawnCalls.length, 1);
   assert.equal(spawnCalls[0].agyCli, AGY_CLI);
-  assert.deepEqual(spawnCalls[0].args, ['--print', '--print-timeout', '1140s', '-m', 'gemini-2.5-pro']);
+  // antigravity runtime resolves the agy display-name token (default), NOT the
+  // cli slug, and binds --model BEFORE --print with the prompt as the --print value.
+  assert.equal(spawnCalls[0].model, 'Gemini 3.1 Pro (High)');
+  const aMi = spawnCalls[0].args.indexOf('--model');
+  const aPi = spawnCalls[0].args.indexOf('--print');
+  assert.ok(aMi >= 0 && aMi < aPi, '--model must be present and precede --print');
+  assert.equal(spawnCalls[0].args[aMi + 1], 'Gemini 3.1 Pro (High)');
+  assert.equal(spawnCalls[0].args[aPi + 1], spawnCalls[0].prompt, 'prompt rides on argv as --print value');
   assert.match(spawnCalls[0].prompt, /AGY CONTEXT/);
   assert.match(spawnCalls[0].prompt, /Review the PROVIDED diff/);
   assert.match(spawnCalls[0].prompt, /Do not re-list the repository/);

@@ -64,6 +64,11 @@ reviewer:
   gemini:
     mode: off                       # enum: off / fallback / always-on
     runtime: cli                    # enum: cli / antigravity
+    # agy/antigravity model token. agy display name (e.g. "Gemini 3.1 Pro (High)"),
+    # NOT the gemini-CLI slug. Only used on runtime: antigravity. The cli runtime
+    # keeps its own slug default (gemini-2.5-pro via GEMINI_REVIEWER_MODEL).
+    # Env: AGENT_OS_REVIEWER_GEMINI_MODEL / ADVERSARIAL_REVIEW_GEMINI_MODEL
+    model: "Gemini 3.1 Pro (High)"
     antigravity:
       print_timeout_ms: 1140000     # agy --print-timeout; outer reviewer gets +30s headroom
 

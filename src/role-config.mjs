@@ -439,6 +439,30 @@ export function resolveGeminiRuntime({
   return cfg.get('reviewer.gemini.runtime', 'cli');
 }
 
+// resolveGeminiAntigravityModel — returns the agy/antigravity reviewer model
+// token through the same file→env cascade as `resolveGeminiRuntime`. This is
+// the model passed to `agy --model <token>` and is DISTINCT from the
+// gemini-CLI model slug (`gemini-2.5-pro`): agy expects its verbatim display
+// names (e.g. `Gemini 3.1 Pro (High)`). Default `Gemini 3.1 Pro (High)`.
+export const DEFAULT_GEMINI_ANTIGRAVITY_MODEL = 'Gemini 3.1 Pro (High)';
+
+export function resolveGeminiAntigravityModel({
+  env = process.env,
+  topPath,
+  modulePaths,
+  loaderImpl,
+} = {}) {
+  const cfg = loadRoleConfig({
+    env,
+    topPath,
+    modulePaths,
+    loaderImpl,
+    contextKey: 'reviewer.gemini.model',
+  });
+  const value = String(cfg.get('reviewer.gemini.model', DEFAULT_GEMINI_ANTIGRAVITY_MODEL) || '').trim();
+  return value || DEFAULT_GEMINI_ANTIGRAVITY_MODEL;
+}
+
 // resolveDefaultMergeAgentWorkerClass — returns the merge-agent worker
 // class (always a real value — default `merge-agent`). The loader enforces
 // the §10.3 allowlist and applies the §10.2 module-to-top alias.

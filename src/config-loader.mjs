@@ -1458,6 +1458,14 @@ function schemaV1() {
                 __default: 'cli',
                 __enum: ENUM_REVIEWER_GEMINI_RUNTIME,
               },
+              // agy/antigravity reviewer model token. Uses agy's verbatim
+              // display names (e.g. "Gemini 3.1 Pro (High)"), NOT the
+              // gemini-CLI slug. Only consulted on the antigravity runtime;
+              // the cli runtime keeps its own slug default (gemini-2.5-pro).
+              model: {
+                __type: TYPE_STRING,
+                __default: 'Gemini 3.1 Pro (High)',
+              },
               antigravity: {
                 __type: TYPE_DICT,
                 __strict: true,
@@ -1699,6 +1707,10 @@ export const ENV_ALIASES = {
   'reviewer.gemini.runtime': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_RUNTIME',
     aliases: [['ADVERSARIAL_REVIEW_GEMINI_RUNTIME', identity]],
+  },
+  'reviewer.gemini.model': {
+    canonical: 'AGENT_OS_REVIEWER_GEMINI_MODEL',
+    aliases: [['ADVERSARIAL_REVIEW_GEMINI_MODEL', identity]],
   },
   'reviewer.gemini.antigravity.print_timeout_ms': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_ANTIGRAVITY_PRINT_TIMEOUT_MS',

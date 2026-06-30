@@ -7396,6 +7396,17 @@ async function warnIfAntigravityReviewerAuthUnavailable({
   return { checked: true, ok: false, reason };
 }
 
+function isProcessAlive(pid) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) return false;
+  try {
+    process.kill(numericPid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === 'EPERM';
+  }
+}
+
 async function main() {
   requireEnv('GITHUB_TOKEN');
   process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = resolveRateLimitSharedStatePath(process.env, ROOT);
@@ -7465,7 +7476,13 @@ async function main() {
   // `pending|dispatched`/`terminalOutcome=null`. Age-gated reaping releases
   // both so PRs re-review and closers re-dispatch instead of wedging until a
   // manual rescue. Never throws — a reaper failure must not block polling.
-  runStartupStaleStateReaper({ rootDir: ROOT, db, env: process.env, logger: console });
+  runStartupStaleStateReaper({
+    rootDir: ROOT,
+    db,
+    env: process.env,
+    logger: console,
+    isProcessAlive,
+  });
 
   // Workload-aware deadline: the previous fixed 10m watchdog tripped
   // on legitimate org-wide work (a single reviewer can consume most of

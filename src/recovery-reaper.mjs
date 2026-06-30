@@ -126,6 +126,7 @@ export function selectReleasableCloserLeases(leases, {
   if (!Number.isFinite(nowMs) || !Number.isFinite(Number(thresholdMs))) return [];
   return (Array.isArray(leases) ? leases : []).filter((lease) => {
     if (!lease) return false;
+    if (lease._isCorrupt === true) return true;
     if (String(lease.status || '') === 'terminal') return false;
     if (lease.terminalOutcome != null) return false;
     if (livePid != null && Number(lease.watcherPid) === Number(livePid)) return false;
@@ -204,8 +205,13 @@ function readLeaseRecords(rootDir) {
       const lease = JSON.parse(readFileSync(path, 'utf8'));
       if (lease && typeof lease === 'object') records.push({ ...lease, _path: path });
     } catch {
-      // A truncated/corrupt lease file is itself abandoned state; skip it so a
-      // single bad file can't wedge the whole sweep.
+      records.push({
+        _path: path,
+        _isCorrupt: true,
+        status: 'corrupt',
+        terminalOutcome: null,
+        updatedAt: 0,
+      });
     }
   }
   return records;
@@ -271,15 +277,23 @@ export function reapStaleCloserLeases({
   let released = 0;
   let budgetsReset = 0;
   for (const lease of releasable) {
-    if (resetTransientExhaustedCloserBudget(rootDir, lease, logger)) budgetsReset += 1;
+    if (lease._isCorrupt !== true && resetTransientExhaustedCloserBudget(rootDir, lease, logger)) {
+      budgetsReset += 1;
+    }
     try {
       rmSync(lease._path, { force: true });
       released += 1;
-      logger?.warn?.(
-        `[reaper] released stale closer lease repo=${lease.repo} pr=${lease.prNumber} `
-        + `head=${String(lease.headSha || '').slice(0, 12)} status=${lease.status} `
-        + `updatedAt=${lease.updatedAt || lease.acquiredAt} (closer re-dispatch unblocked)`,
-      );
+      if (lease._isCorrupt === true) {
+        logger?.warn?.(
+          `[reaper] released corrupt closer lease path=${lease._path} (closer re-dispatch unblocked)`,
+        );
+      } else {
+        logger?.warn?.(
+          `[reaper] released stale closer lease repo=${lease.repo} pr=${lease.prNumber} `
+          + `head=${String(lease.headSha || '').slice(0, 12)} status=${lease.status} `
+          + `updatedAt=${lease.updatedAt || lease.acquiredAt} (closer re-dispatch unblocked)`,
+        );
+      }
     } catch (err) {
       logger?.error?.(`[reaper] failed to release lease ${lease._path}: ${err?.message || err}`);
     }

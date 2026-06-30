@@ -152,6 +152,18 @@ test('selectReleasableCloserLeases: below-threshold lease released only when own
   assert.equal(dead.length, 1, 'dead owner -> released even below threshold');
 });
 
+test('selectReleasableCloserLeases: corrupt lease records are always releasable', () => {
+  const releasable = selectReleasableCloserLeases([
+    { _path: 'bad.json', _isCorrupt: true, status: 'corrupt', terminalOutcome: null },
+  ], {
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    livePid: process.pid,
+    isProcessAlive: () => true,
+  });
+  assert.deepEqual(releasable.map((l) => l._path), ['bad.json']);
+});
+
 // ---------------------------------------------------------------------------
 // FS driver: reapStaleCloserLeases + transient-exhausted budget reset
 // ---------------------------------------------------------------------------
@@ -210,6 +222,29 @@ test('reapStaleCloserLeases does NOT reset a budget exhausted by a genuine (non-
   assert.equal(result.budgetsReset, 0, 'genuine-failure budget preserved');
   const record = JSON.parse(readFileSync(recordPath, 'utf8'));
   assert.equal(record.retryCount, 2, 'genuine-failure budget NOT reset');
+});
+
+test('reapStaleCloserLeases unlinks corrupt lease files', (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const dir = join(rootDir, 'data', 'ama-closer-leases');
+  mkdirSync(dir, { recursive: true });
+  const corruptPath = join(dir, 'acme__repo-pr-99-deadbeef.json');
+  writeFileSync(corruptPath, '');
+
+  const result = reapStaleCloserLeases({
+    rootDir,
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    isProcessAlive: () => true,
+    logger: { warn() {}, error() {} },
+  });
+
+  assert.equal(result.released, 1);
+  assert.equal(result.budgetsReset, 0);
+  assert.equal(result.leases[0]._isCorrupt, true);
+  assert.equal(existsSync(corruptPath), false, 'corrupt lease deleted -> closer can re-dispatch');
 });
 
 // ---------------------------------------------------------------------------

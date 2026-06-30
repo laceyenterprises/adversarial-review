@@ -54,7 +54,7 @@ import {
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE, loadConfigCached } from './config-loader.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import classifyMergeAgentRescue, { parseReviewBody as parseMergeAgentRescueReviewBody } from './merge-agent-rescue-classifier.mjs';
-import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
+import { extractReviewVerdict, normalizeEffectiveReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 import {
   readLatestWorkerRunStatusFromLedger,
 } from './session-ledger-read-adapter.mjs';
@@ -5670,6 +5670,13 @@ function classifyNonBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
   return { count: parsed.nonBlocking.count, state: 'known' };
 }
 
+function verdictKindToDisplay(kind, fallback = null) {
+  if (kind === 'approved') return 'Approved';
+  if (kind === 'comment-only') return 'Comment only';
+  if (kind === 'request-changes') return 'Request changes';
+  return fallback;
+}
+
 function readMergeAgentReviewFailureState(rootDir, { repo, prNumber, headSha = null } = {}) {
   return readMergeAgentReviewFailureStateWithDb(rootDir, null, { repo, prNumber, headSha });
 }
@@ -5734,7 +5741,8 @@ function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null }
     operatorApprovalActor: candidate.operatorApprovalEvent?.actor || null,
     operatorApprovalLabeledAt: candidate.operatorApprovalEvent?.createdAt || null,
   });
-  const lastVerdict = parsedReview.verdict;
+  const effectiveVerdict = normalizeEffectiveReviewVerdict(latestJob?.reviewBody);
+  const lastVerdict = verdictKindToDisplay(effectiveVerdict, parsedReview.verdict);
   const reviewFailureState = readMergeAgentReviewFailureStateWithDb(rootDir, reviewStateDb, {
     repo: candidate.repo,
     prNumber: candidate.prNumber,
@@ -5815,6 +5823,7 @@ export {
   dispatchMergeAgentForPR,
   extractOperatorNotes,
   extractReviewVerdict,
+  normalizeEffectiveReviewVerdict,
   fetchMergeAgentCandidate,
   findLatestFollowUpJobForPR,
   isFinalPassOnRequestChangesEnabled,

@@ -15,15 +15,17 @@ When triaging each issue you find, only escalate to `## Blocking issues` for:
 
 Everything else (style, naming, formatting, doc tone; edge cases not exercised in production paths; performance issues without user-visible impact; future-proofing concerns; speculative refactors; test gaps without a known bug; internal implementation choices) goes under `## Non-blocking issues`. Use the same `- **<Title>**` top-level bullet + nested `**File:**` / `**Lines:**` / `**Problem:**` / `**Why it matters:**` / `**Recommended fix:**` sub-bullets so a human follow-up reviewer can act on them without re-reading the diff.
 
-## Verdict policy (do NOT downgrade to `Comment only` to force convergence)
+## Verdict policy (pure blocking-list mapping)
 
-The downstream merge gate auto-merges any PR whose final review verdict is `Comment only`. To keep that gate honest, the final-round verdict mapping is strict:
+The verdict is a pure function of `## Blocking issues`:
 
-- **`Comment only`** — only when `## Blocking issues` AND `## Non-blocking issues` are both `- None.`. The PR has nothing the reviewer would want to flag, and it is safe for the gate to merge it without further human attention.
-- **`Request changes`** — whenever `## Blocking issues` OR `## Non-blocking issues` contains any item. This includes the case where the lenient-threshold categorization moved everything out of blocking into non-blocking. The remaining findings exist; the merge gate must not silently land them. The bounded remediation loop will then stop with `max-rounds-reached` (no more rounds left). What happens next: **by default (as of 2026-05-16) the merge-agent is dispatched with the `final-pass-on-budget-exhausted` trigger only when blocker state is known and the `## Blocking issues` section is `- None.`**. If blocking findings remain, the watcher permits at most one `final-pass-blocker-remediation` dispatch that remediates and requests a fresh adversarial review of the pushed head; it must not merge its own blocker fixes. For the known-zero-blocker path, the merge-agent's `comment_only_followups.py` sub-worker is expected to apply every actionable in-scope finding inline, merge after light-to-medium fixes, request another review only for major in-PR refactors, file Linear tickets for cross-module follow-up refactors, and refuse to merge when `blockers_observed` is non-empty. The legacy halt-at-max-rounds behavior is still reachable via explicit `MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES=0` opt-out on the watcher LaunchAgent. **Your job as reviewer is unchanged either way:** categorize what you see honestly. The downstream pipeline's policy is not your call.
+- **`Comment only`** — when `## Blocking issues` is empty / `- None.`. Any `## Non-blocking issues` remain visible as advisory findings.
+- **`Request changes`** — only when `## Blocking issues` contains at least one item. Non-blocking issues never escalate the verdict.
 
-The lenient threshold's value is in the **categorization** step (it stops marginal nits from generating new blocking findings every round, which prevents structural-fix complexity from stacking up). It is **not** an off-ramp for unresolved findings to merge silently — the convergence-vs-known-issues tradeoff is a human decision, not a reviewer-prompt decision.
+The downstream merge-agent still owns the final substance check: advisory findings stay visible, actionable in-scope findings should be applied before merge when they are light-to-medium, major in-PR refactors can request another review, and any observed real blocker must refuse the merge path. **Your job as reviewer is unchanged:** categorize what you see honestly.
+
+The lenient threshold's value is in the **categorization** step (it stops marginal nits from generating new blocking findings every round, which prevents structural-fix complexity from stacking up). It is **not** permission to hide remaining concerns; keep advisory findings under `## Non-blocking issues` while still emitting `Comment only` when no blocking issue remains.
 
 ## When to ship clean (`Comment only`)
 
-Look hard before declaring the review clean — the lenient threshold relaxes the *blocking* bar, not the "look hard" bar. But if after a careful pass you find nothing substantive in either category, say so plainly and emit `Comment only`. That is the convergence path the loop is built for.
+Look hard before declaring the blocking list clean — the lenient threshold relaxes the *blocking* bar, not the "look hard" bar. But if after a careful pass no blocking issue remains, say so plainly, keep any advisory findings under `## Non-blocking issues`, and emit `Comment only`. That is the convergence path the loop is built for.

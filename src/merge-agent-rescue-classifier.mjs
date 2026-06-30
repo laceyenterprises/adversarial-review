@@ -1,4 +1,4 @@
-import { normalizeReviewVerdict } from './kernel/verdict.mjs';
+import { normalizeEffectiveReviewVerdict, normalizeReviewVerdict } from './kernel/verdict.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 
 const GATE_CONTEXT = 'agent-os/adversarial-gate';
@@ -66,6 +66,13 @@ function parseVerdict(reviewBody) {
     if (normalized === 'comment-only') return 'Comment only';
     if (normalized === 'request-changes') return 'Request changes';
   }
+  return null;
+}
+
+function verdictKindToDisplay(kind) {
+  if (kind === 'approved') return 'Approved';
+  if (kind === 'comment-only') return 'Comment only';
+  if (kind === 'request-changes') return 'Request changes';
   return null;
 }
 
@@ -215,7 +222,7 @@ function isMergeable(input) {
 }
 
 function classify(input = {}) {
-  const verdict = parseVerdict(input.reviewBody);
+  const verdict = verdictKindToDisplay(normalizeEffectiveReviewVerdict(input.reviewBody));
   const blocking = parseIssueSection(input.reviewBody, 'Blocking issues', 'blocking');
   const nonBlocking = parseIssueSection(input.reviewBody, 'Non-blocking issues', 'non-blocking');
   const parsedFindings = [...blocking.findings, ...nonBlocking.findings].map(({ kind: _kind, ...finding }) => finding);
@@ -257,7 +264,7 @@ function classify(input = {}) {
 
   if (
     (verdict === 'Approved' && blockingFindings > 0)
-    || (verdict === 'Comment only' && (blockingFindings > 0 || nonBlockingFindings > 0))
+    || (verdict === 'Comment only' && blockingFindings > 0)
   ) {
     return {
       decision: 'inconclusive',
@@ -271,7 +278,6 @@ function classify(input = {}) {
   if (
     (verdict === 'Approved' || verdict === 'Comment only')
     && blockingFindings === 0
-    && (verdict !== 'Comment only' || nonBlockingFindings === 0)
     && mergeable
     && checksArePassing
     && !hardStop
@@ -322,7 +328,7 @@ function parseReviewBody(reviewBody) {
   const blocking = parseIssueSection(reviewBody, 'Blocking issues', 'blocking');
   const nonBlocking = parseIssueSection(reviewBody, 'Non-blocking issues', 'non-blocking');
   return {
-    verdict: parseVerdict(reviewBody),
+    verdict: verdictKindToDisplay(normalizeEffectiveReviewVerdict(reviewBody)),
     blocking,
     nonBlocking,
     parsedFindings: [...blocking.findings, ...nonBlocking.findings].map(({ kind: _kind, ...finding }) => finding),

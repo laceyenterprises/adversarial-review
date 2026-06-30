@@ -36,3 +36,7 @@ Output requirements:
 - In ## Verdict, end with exactly one of:
   - Request changes
   - Comment only
+- Verdict is a pure function of the structured `## Blocking issues` list:
+  - Use `Comment only` when `## Blocking issues` is empty / `- None.`
+  - Use `Request changes` only when at least one blocking issue is listed
+  - Non-blocking issues never escalate the verdict

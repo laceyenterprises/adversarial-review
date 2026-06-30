@@ -56,7 +56,7 @@ import {
   resolveReviewerTimeoutMs,
 } from './reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
-import { extractReviewVerdict, looksLikeRuntimeJunk, normalizeReviewVerdict, normalizeWhitespace, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
+import { extractReviewVerdict, looksLikeRuntimeJunk, normalizeEffectiveReviewVerdict, normalizeReviewVerdict, normalizeWhitespace, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
 import { loadStagePrompt, pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
@@ -2354,7 +2354,8 @@ Antigravity runtime instructions:
 - Use at most one narrowly targeted lookup only if the provided diff is insufficient to verify a concrete suspected bug. Otherwise use no tools.
 - Emit ONLY the final Markdown review block for GitHub. Do not narrate your plan, tool calls, exploration steps, uncertainty, or internal reasoning.
 - Start with "## Adversarial Review — Gemini (gemini-reviewer-lacey)" unless an outer caller already supplied that header.
-- Include "## Verdict" with the first non-empty verdict line exactly one of: "Comment only", "Request changes", or "Approve".`;
+- Include "## Verdict" with the first non-empty verdict line exactly one of: "Comment only", "Request changes", or "Approve".
+- Verdict is a pure function of the structured Blocking issues list: if "## Blocking issues" is empty / "- None.", the Verdict MUST be "Comment only"; emit "Request changes" only when at least one blocking issue is listed. Non-blocking issues never escalate the verdict.`;
 }
 
 function isRetryableGeminiSubprocessError(err) {
@@ -2944,7 +2945,10 @@ async function postGitHubReviewWithCapture({
   // does not abort the body-capture UPDATE when a reviewer goes off-script.
   // Losing the parsed-verdict shortcut is preferable to losing body capture
   // entirely; downstream consumers already treat NULL as "verdict unknown".
-  const normalizedVerdict = normalizeReviewVerdict(extractReviewVerdict(reviewBody));
+  const normalizedVerdict = normalizeEffectiveReviewVerdict(reviewBody, {
+    log,
+    context: `${repo}#${prNumber} attempt=${attemptNumber} reviewer=${reviewerModel}`,
+  });
   const persistedVerdict = normalizedVerdict === 'unknown' ? null : normalizedVerdict;
 
   await captureReviewerBodyAfterPost(rootDir, {

@@ -116,6 +116,82 @@ function extractReviewVerdict(reviewBody) {
   return lines.at(-1);
 }
 
+function extractMarkdownSection(markdown, heading) {
+  const text = String(markdown ?? '').replace(/\r\n/g, '\n');
+  const escapedHeading = String(heading ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`^##\\s+${escapedHeading}\\s*$`, 'i');
+  const lines = text.split('\n');
+  let inFence = false;
+  let offset = 0;
+  let start = null;
+
+  for (const line of lines) {
+    const trimmed = line.trimStart();
+    if (/^(?:```|~~~)/.test(trimmed)) inFence = !inFence;
+    if (!inFence && pattern.test(line)) {
+      start = offset + line.length;
+      break;
+    }
+    offset += line.length + 1;
+  }
+  if (start == null) return null;
+
+  inFence = false;
+  offset = 0;
+  for (const line of lines) {
+    const lineStart = offset;
+    const trimmed = line.trimStart();
+    if (lineStart > start && !inFence && /^##\s+/.test(line)) {
+      return text.slice(start, lineStart);
+    }
+    if (/^(?:```|~~~)/.test(trimmed)) inFence = !inFence;
+    offset += line.length + 1;
+  }
+  return text.slice(start);
+}
+
+function sectionIsNone(lines) {
+  const nonEmpty = lines.map((line) => line.trimEnd()).filter((line) => line.trim());
+  if (nonEmpty.length === 0) return true;
+  if (!/^-\s+none\.?(?:\s+.*)?$/i.test(nonEmpty[0].trim())) return false;
+  return nonEmpty.slice(1).every((line) => /^\s+/.test(line));
+}
+
+function classifyStructuredBlockingIssues(reviewBody) {
+  const section = extractMarkdownSection(reviewBody, 'Blocking issues');
+  if (section == null) {
+    return { count: 0, state: 'unknown' };
+  }
+
+  const lines = section.replace(/\r\n/g, '\n').split('\n');
+  if (sectionIsNone(lines)) {
+    return { count: 0, state: 'known' };
+  }
+
+  const topLevelFindings = lines.filter((line) => /^-\s+/.test(line));
+  return {
+    count: Math.max(1, topLevelFindings.length),
+    state: 'known',
+  };
+}
+
+function normalizeEffectiveReviewVerdict(reviewBody, { log = null, context = '' } = {}) {
+  const statedVerdict = extractReviewVerdict(reviewBody);
+  const normalizedVerdict = normalizeReviewVerdict(statedVerdict);
+  if (normalizedVerdict !== 'request-changes') return normalizedVerdict;
+
+  const blockingIssues = classifyStructuredBlockingIssues(reviewBody);
+  if (blockingIssues.state === 'known' && blockingIssues.count === 0) {
+    const suffix = context ? ` ${context}` : '';
+    log?.warn?.(
+      `[review-verdict] Reconciled Request changes to Comment only because structured Blocking issues is empty.${suffix}`,
+    );
+    return 'comment-only';
+  }
+
+  return normalizedVerdict;
+}
+
 function normalizeVerdictSectionLine(verdict) {
   const normalized = normalizeVerdictText(verdict);
   if (!normalized) return null;
@@ -137,6 +213,7 @@ function isResolvedRequestChangesProse(normalized) {
 function normalizeVerdictText(verdict) {
   return String(verdict ?? '')
     .replace(/[*_`~]/g, ' ')
+    .replace(/^(?:\s*[-*]\s+)+/, '')
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
@@ -160,8 +237,10 @@ function normalizeReviewVerdict(verdict) {
 // reviewer.mjs (the second real caller invoked by the prior comment), so
 // it is exported here rather than duplicated inline.
 export {
+  classifyStructuredBlockingIssues,
   extractReviewVerdict,
   looksLikeRuntimeJunk,
+  normalizeEffectiveReviewVerdict,
   normalizeReviewVerdict,
   normalizeWhitespace,
   sanitizeCodexReviewPayload,

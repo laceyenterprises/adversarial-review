@@ -121,14 +121,14 @@ function extractMarkdownSection(markdown, heading) {
   const escapedHeading = String(heading ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const pattern = new RegExp(`^##\\s+${escapedHeading}\\s*$`, 'i');
   const lines = text.split('\n');
-  let inFence = false;
+  let fenceMarker = null;
   let offset = 0;
   let start = null;
 
   for (const line of lines) {
     const trimmed = line.trimStart();
-    if (/^(?:```|~~~)/.test(trimmed)) inFence = !inFence;
-    if (!inFence && pattern.test(line)) {
+    fenceMarker = updateMarkdownFenceMarker(fenceMarker, trimmed);
+    if (!fenceMarker && pattern.test(line)) {
       start = offset + line.length;
       break;
     }
@@ -136,18 +136,35 @@ function extractMarkdownSection(markdown, heading) {
   }
   if (start == null) return null;
 
-  inFence = false;
+  fenceMarker = null;
   offset = 0;
   for (const line of lines) {
     const lineStart = offset;
     const trimmed = line.trimStart();
-    if (lineStart > start && !inFence && /^##\s+/.test(line)) {
+    if (lineStart > start && !fenceMarker && /^##\s+/.test(line)) {
       return text.slice(start, lineStart);
     }
-    if (/^(?:```|~~~)/.test(trimmed)) inFence = !inFence;
+    fenceMarker = updateMarkdownFenceMarker(fenceMarker, trimmed);
     offset += line.length + 1;
   }
   return text.slice(start);
+}
+
+function updateMarkdownFenceMarker(openMarker, trimmedLine) {
+  const match = trimmedLine.match(/^(`{3,}|~{3,})/);
+  if (!match) return openMarker;
+
+  const marker = match[1];
+  if (!openMarker) return marker;
+
+  if (
+    marker[0] === openMarker[0]
+    && marker.length >= openMarker.length
+  ) {
+    return null;
+  }
+
+  return openMarker;
 }
 
 function sectionIsNone(lines) {
@@ -163,7 +180,7 @@ function classifyStructuredBlockingIssues(reviewBody) {
     return { count: 0, state: 'unknown' };
   }
 
-  const lines = section.replace(/\r\n/g, '\n').split('\n');
+  const lines = section.split('\n');
   if (sectionIsNone(lines)) {
     return { count: 0, state: 'known' };
   }

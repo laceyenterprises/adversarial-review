@@ -264,6 +264,27 @@ test('effective verdict preserves malformed verdict when blocking list is non-em
   assert.deepEqual(messages, []);
 });
 
+test('effective verdict ignores shorter nested fence markers inside blocking section', () => {
+  const review = [
+    '## Summary',
+    'No blockers remain; the finding includes a fenced example.',
+    '',
+    '## Blocking issues',
+    '- None.',
+    '  ````markdown',
+    '  ```',
+    '  ## Verdict',
+    '  Request changes',
+    '  ```',
+    '  ````',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+
+  assert.equal(normalizeEffectiveReviewVerdict(review), 'comment-only');
+});
+
 test('kernel verdict parser ignores prose that starts with a verdict keyword when the final verdict is clean', () => {
   const review = [
     '## Summary',

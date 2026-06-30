@@ -4412,6 +4412,7 @@ test('buildMergeAgentPrompt makes budget-exhausted standing blockers remediate t
   assert.ok(prompt.includes(`Dispatch trigger: ${FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER}`));
   assert.ok(prompt.includes('## Mode: final-pass-blocker-remediation'));
   assert.ok(prompt.includes('terminal automated pass'));
+  assert.ok(prompt.includes('then request a fresh adversarial review for the remediated head'));
   assert.ok(prompt.includes('Default action: REMEDIATE, PUSH, AND REQUEST A FRESH REVIEW'));
   assert.ok(prompt.includes('blocking and non-blocking findings inline'));
   assert.ok(prompt.includes('Apply the blocking and non-blocking findings inline, then rebase'));
@@ -4433,7 +4434,10 @@ test('buildMergeAgentPrompt makes budget-exhausted standing blockers remediate t
   assert.ok(!prompt.includes('## Mode: final-pass-on-budget-exhausted'));
   assert.ok(!prompt.includes('MERGE (`gh pr merge --squash --auto`)'));
   assert.ok(!prompt.includes('let `gh pr merge --auto` wait for required GitHub checks'));
+  assert.ok(!prompt.includes('either merge the remediated head'));
   assert.ok(!prompt.includes('merge the remediated head unless the'));
+  assert.ok(!prompt.includes('before merging, not just the review findings'));
+  assert.ok(!prompt.includes('On a successful merge, post a closing comment'));
 });
 
 test('buildMergeAgentPrompt leaves in-budget request-changes dispatch outside final-pass re-review contract', () => {

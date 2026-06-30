@@ -2010,8 +2010,9 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         'The adversarial-review round budget for this PR is consumed and the'
         + ' latest reviewer verdict is still `Request changes` with standing'
         + ' blocking findings. This is the terminal automated pass: remediate'
-        + ' the findings, then either merge the remediated head or hard-stop'
-        + ' for operator escalation if a genuinely unfixable blocker remains.'
+        + ' the findings, then request a fresh adversarial review for the'
+        + ' remediated head, or hard-stop for operator escalation if a'
+        + ' genuinely unfixable blocker remains.'
       );
     } else if (isZeroBlockerFinalPass) {
       lines.push('## Mode: final-pass-on-budget-exhausted');
@@ -2051,10 +2052,18 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
     lines.push('');
     lines.push('## Full rescue mandate (hammer parity)');
     lines.push('');
-    lines.push(
-      'This is the end-of-budget rescue — handle EVERYTHING an interactive codex'
-      + ' rescue session would before merging, not just the review findings:'
-    );
+    if (finalPassHasStandingBlockingFindings) {
+      lines.push(
+        'This is the end-of-budget blocker-remediation rescue — handle EVERYTHING'
+        + ' an interactive codex rescue session would before requesting a fresh'
+        + ' adversarial review, not just the review findings:'
+      );
+    } else {
+      lines.push(
+        'This is the end-of-budget rescue — handle EVERYTHING an interactive codex'
+        + ' rescue session would before merging, not just the review findings:'
+      );
+    }
     lines.push(
       '- Green `main` is the bar: run the full test suite and fix EVERY failing'
       + ' test AND every red required check / CI job (lint, build, type-check),'
@@ -2090,12 +2099,23 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       + ' the skipped superproject-doc obligation in the audit or closing comment'
       + ' with the changed files that created the obligation.'
     );
-    lines.push(
-      '- On a successful merge, post a closing comment summarizing what was done'
-      + ' (findings remediated, failing tests / CI fixed, rebase / conflict'
-      + ' handling, and doc-currency work or skipped superproject-doc obligations).'
-      + ' This is the human-visible audit trail of an autonomous close.'
-    );
+    if (finalPassHasStandingBlockingFindings) {
+      lines.push(
+        '- On a successful blocker-remediation pass, write the durable'
+        + ' machine-readable remediation reply requesting rereview and summarize'
+        + ' what was done (findings remediated, failing tests / CI fixed, rebase /'
+        + ' conflict handling, and doc-currency work or skipped superproject-doc'
+        + ' obligations). This is the human-visible audit trail for the fresh'
+        + ' adversarial review request.'
+      );
+    } else {
+      lines.push(
+        '- On a successful merge, post a closing comment summarizing what was done'
+        + ' (findings remediated, failing tests / CI fixed, rebase / conflict'
+        + ' handling, and doc-currency work or skipped superproject-doc obligations).'
+        + ' This is the human-visible audit trail of an autonomous close.'
+      );
+    }
     lines.push('');
     lines.push('Required behavior:');
     lines.push(
@@ -2554,8 +2574,9 @@ function pickNormalMergeAgentDispatchDetail({
   ) {
     // ROOT-CAUSE GATE (PR #901): a budget-exhausted Request changes review may
     // dispatch once even with standing blockers, but that terminal worker must
-    // remediate before merging and must hard-stop for operator handoff if a
-    // genuinely unfixable blocker remains. If a repeated dispatch sees
+    // remediate and request a fresh adversarial review instead of merging. It
+    // must hard-stop for operator handoff if a genuinely unfixable blocker
+    // remains. If a repeated dispatch sees
     // blockers after that one automatic blocker-remediation pass was already
     // consumed, hand off instead of looping.
     if (blockingFindingState === 'unknown') {

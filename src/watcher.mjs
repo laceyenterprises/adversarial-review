@@ -51,6 +51,7 @@ import {
   requestReviewRereview,
 } from './review-state.mjs';
 import { scrapeMergeCloseout } from './closeout-scraper.mjs';
+import { runStartupStaleStateReaper } from './recovery-reaper.mjs';
 import {
   beginReviewerPass,
   completeReviewerPass,
@@ -7457,6 +7458,14 @@ async function main() {
     log: console,
     leaseRecoveryEnabled: REVIEWER_LEASE_RECOVERY_ENABLED,
   });
+
+  // Offline-period resilience: after a host outage (macOS upgrade + os-restart,
+  // a GitHub rate-limit storm, or any long watcher-down window) reviewer passes
+  // can be stranded `status='running'` and AMA closer leases stranded
+  // `pending|dispatched`/`terminalOutcome=null`. Age-gated reaping releases
+  // both so PRs re-review and closers re-dispatch instead of wedging until a
+  // manual rescue. Never throws — a reaper failure must not block polling.
+  runStartupStaleStateReaper({ rootDir: ROOT, db, env: process.env, logger: console });
 
   // Workload-aware deadline: the previous fixed 10m watchdog tripped
   // on legitimate org-wide work (a single reviewer can consume most of

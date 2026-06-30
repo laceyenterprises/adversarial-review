@@ -4401,7 +4401,7 @@ test('buildMergeAgentPrompt rescue mandate requires keeping data-model + module-
   }
 });
 
-test('buildMergeAgentPrompt requires fresh re-review for final-pass with standing blockers', () => {
+test('buildMergeAgentPrompt makes budget-exhausted standing blockers remediate then request rereview', () => {
   const prompt = buildMergeAgentPrompt(makeJob({
     lastVerdict: 'Request changes',
     blockingFindingCount: 2,
@@ -4411,17 +4411,49 @@ test('buildMergeAgentPrompt requires fresh re-review for final-pass with standin
 
   assert.ok(prompt.includes(`Dispatch trigger: ${FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER}`));
   assert.ok(prompt.includes('## Mode: final-pass-blocker-remediation'));
+  assert.ok(prompt.includes('terminal automated pass'));
+  assert.ok(prompt.includes('then request a fresh adversarial review for the remediated head'));
   assert.ok(prompt.includes('Default action: REMEDIATE, PUSH, AND REQUEST A FRESH REVIEW'));
   assert.ok(prompt.includes('blocking and non-blocking findings inline'));
-  assert.ok(prompt.includes('`reReview.requested = true` / `requires_rereview`'));
-  assert.ok(prompt.includes('exit `awaiting-rereview`'));
+  assert.ok(prompt.includes('Apply the blocking and non-blocking findings inline, then rebase'));
+  assert.ok(prompt.includes('force-push the updated head, and request a fresh adversarial review'));
   assert.ok(prompt.includes('Do NOT merge this invocation'));
-  assert.ok(prompt.includes('gated on the fresh review of the remediated head'));
+  assert.ok(prompt.includes('do NOT call `gh pr merge`'));
+  assert.ok(prompt.includes('PR #901 keeps blocker remediation gated on an'));
+  assert.ok(prompt.includes('Use `reReview.requested = true` / `awaiting-rereview`'));
+  assert.ok(prompt.includes('The only non-rereview exit on this terminal pass'));
   assert.ok(prompt.includes('handoff_required=true'));
-  assert.ok(prompt.includes('single automatic blocker-remediation pass'));
+  assert.ok(prompt.includes('data corruption, secret leakage, security regression, or broken external contract'));
+  assert.ok(prompt.includes('non-empty `blockers_observed` result in this invocation must hard-refuse immediately'));
+  assert.ok(prompt.includes('single terminal automatic blocker-remediation pass'));
+  assert.ok(prompt.includes('do not merge the remediated head'));
+  assert.ok(prompt.includes('The only successful terminal'));
+  assert.ok(prompt.includes('fresh adversarial review request'));
   assert.ok(!prompt.includes('Default action: MERGE'));
   assert.ok(!prompt.includes('Default to MERGE'));
   assert.ok(!prompt.includes('## Mode: final-pass-on-budget-exhausted'));
+  assert.ok(!prompt.includes('MERGE (`gh pr merge --squash --auto`)'));
+  assert.ok(!prompt.includes('let `gh pr merge --auto` wait for required GitHub checks'));
+  assert.ok(!prompt.includes('either merge the remediated head'));
+  assert.ok(!prompt.includes('merge the remediated head unless the'));
+  assert.ok(!prompt.includes('before merging, not just the review findings'));
+  assert.ok(!prompt.includes('On a successful merge, post a closing comment'));
+});
+
+test('buildMergeAgentPrompt leaves in-budget request-changes dispatch outside final-pass re-review contract', () => {
+  const prompt = buildMergeAgentPrompt(makeJob({
+    lastVerdict: 'Request changes',
+    blockingFindingCount: 2,
+  }), {
+    trigger: 'merge-agent-requested',
+  });
+
+  assert.ok(prompt.includes('Dispatch trigger: merge-agent-requested'));
+  assert.ok(!prompt.includes('## Mode: final-pass-blocker-remediation'));
+  assert.ok(!prompt.includes('Default action: REMEDIATE, PUSH, AND MERGE'));
+  assert.ok(!prompt.includes('terminal automated pass'));
+  assert.ok(!prompt.includes('handoff_required=true'));
+  assert.ok(!prompt.includes('single terminal automatic blocker-remediation pass'));
 });
 
 test('buildMergeAgentPrompt records non-final-pass triggers without injecting either convergence contract block', () => {

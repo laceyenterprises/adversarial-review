@@ -236,6 +236,34 @@ test('effective verdict escalates permissive verdict when blocking list is non-e
   assert.match(messages[0], /test-context/);
 });
 
+test('effective verdict preserves malformed verdict when blocking list is non-empty', () => {
+  const messages = [];
+  const review = [
+    '## Summary',
+    'A real blocker remains but the verdict line is malformed.',
+    '',
+    '## Blocking issues',
+    '- **Broken migration**',
+    '  - **File:** `migrations/001.sql`',
+    '  - **Lines:** `1-3`',
+    '  - **Problem:** The migration drops live data.',
+    '  - **Why it matters:** It can corrupt production state.',
+    '  - **Recommended fix:** Make the migration idempotent and preserving.',
+    '',
+    '## Non-blocking issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Needs work',
+  ].join('\n');
+
+  assert.equal(normalizeEffectiveReviewVerdict(review, {
+    log: { warn: (message) => messages.push(message) },
+    context: 'test-context',
+  }), 'unknown');
+  assert.deepEqual(messages, []);
+});
+
 test('kernel verdict parser ignores prose that starts with a verdict keyword when the final verdict is clean', () => {
   const review = [
     '## Summary',

@@ -346,7 +346,7 @@ test('comment-only with NO Blocking Issues section resolves to known: 0 (live he
   assert.equal(res.blockingFindingCount, 0);
 });
 
-test('comment-only with a REAL blocking finding resolves to count >= 1 (still ineligible)', () => {
+test('comment-only with a REAL blocking finding reconciles to request-changes and count >= 1', () => {
   const res = resolveSettledReviewVerdict('/root', {
     repo: 'acme/agent-os',
     prNumber: 1858,
@@ -358,7 +358,7 @@ test('comment-only with a REAL blocking finding resolves to count >= 1 (still in
       bodies: [REVIEW_BODY('Comment only', '### 1. Null deref in handler\nThis crashes on empty input.\n')],
     },
   });
-  assert.equal(res.verdict, 'comment-only');
+  assert.equal(res.verdict, 'request-changes');
   assert.equal(res.blockingFindingState, 'known');
   assert.ok(res.blockingFindingCount >= 1, `expected >= 1, got ${res.blockingFindingCount}`);
 });

@@ -1,4 +1,4 @@
-import { normalizeEffectiveReviewVerdict, normalizeReviewVerdict } from './kernel/verdict.mjs';
+import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 
 const GATE_CONTEXT = 'agent-os/adversarial-gate';
@@ -51,22 +51,6 @@ function extractSection(reviewBody, heading) {
     offset += line.length + 1;
   }
   return text.slice(start);
-}
-
-function parseVerdict(reviewBody) {
-  const section = extractSection(reviewBody, 'Verdict');
-  if (section == null) return null;
-  const lines = section
-    .split('\n')
-    .map((line) => line.trim().replace(/^(?:[-*]\s+)+/, '').replace(/^[*_]+|[*_]+$/g, ''))
-    .filter(Boolean);
-  for (const line of lines) {
-    const normalized = normalizeReviewVerdict(line);
-    if (normalized === 'approved') return 'Approved';
-    if (normalized === 'comment-only') return 'Comment only';
-    if (normalized === 'request-changes') return 'Request changes';
-  }
-  return null;
 }
 
 function verdictKindToDisplay(kind) {
@@ -263,19 +247,6 @@ function classify(input = {}) {
   }
 
   if (
-    (verdict === 'Approved' && blockingFindings > 0)
-    || (verdict === 'Comment only' && blockingFindings > 0)
-  ) {
-    return {
-      decision: 'inconclusive',
-      reason: 'clean-verdict-with-findings',
-      blockingFindings,
-      nonBlockingFindings,
-      parsedFindings,
-    };
-  }
-
-  if (
     (verdict === 'Approved' || verdict === 'Comment only')
     && blockingFindings === 0
     && mergeable
@@ -341,7 +312,6 @@ export {
   checkRowsForHead,
   checksPass,
   parseReviewBody,
-  parseVerdict,
 };
 
 export default classify;

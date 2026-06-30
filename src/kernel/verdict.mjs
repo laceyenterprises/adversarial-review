@@ -189,7 +189,10 @@ function normalizeEffectiveReviewVerdict(reviewBody, { log = null, context = '' 
       return 'comment-only';
     }
 
-    if (blockingIssues.count > 0 && normalizedVerdict !== 'request-changes') {
+    if (
+      blockingIssues.count > 0
+      && (normalizedVerdict === 'comment-only' || normalizedVerdict === 'approved')
+    ) {
       const suffix = context ? ` ${context}` : '';
       log?.warn?.(
         `[review-verdict] Escalated ${normalizedVerdict} to Request changes because structured Blocking issues is non-empty.${suffix}`,

@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import classify, { parseReviewBody, parseVerdict } from '../src/merge-agent-rescue-classifier.mjs';
+import classify, { parseReviewBody } from '../src/merge-agent-rescue-classifier.mjs';
 import { createFollowUpJob, markFollowUpJobCompleted } from '../src/follow-up-jobs.mjs';
 import {
   buildMergeAgentDispatchJob,
@@ -306,7 +306,7 @@ test('request-changes with non-empty blocking list remains blocking', () => {
   assert.ok(result.blockingFindings > 0);
 });
 
-test('verdict parser returns the first valid verdict line', () => {
+test('parsed review body exposes the reconciled effective verdict', () => {
   const reviewBody = `
 ## Blocking issues
 - None.
@@ -319,7 +319,7 @@ Approved
 Request changes
 `;
 
-  assert.equal(parseVerdict(reviewBody), 'Approved');
+  assert.equal(parseReviewBody(reviewBody).verdict, 'Comment only');
 });
 
 test('parsed findings expose normalized category and structured fields', () => {

@@ -188,7 +188,7 @@ function leaseDirPath(rootDir) {
   return join(rootDir, ...LEASE_DIR_SEGMENTS);
 }
 
-function readLeaseRecords(rootDir) {
+function readLeaseRecords(rootDir, logger = console) {
   const dir = leaseDirPath(rootDir);
   let names;
   try {
@@ -204,14 +204,18 @@ function readLeaseRecords(rootDir) {
     try {
       const lease = JSON.parse(readFileSync(path, 'utf8'));
       if (lease && typeof lease === 'object') records.push({ ...lease, _path: path });
-    } catch {
-      records.push({
-        _path: path,
-        _isCorrupt: true,
-        status: 'corrupt',
-        terminalOutcome: null,
-        updatedAt: 0,
-      });
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        records.push({
+          _path: path,
+          _isCorrupt: true,
+          status: 'corrupt',
+          terminalOutcome: null,
+          updatedAt: 0,
+        });
+      } else {
+        logger?.error?.(`[reaper] failed to read lease ${path}: ${err?.message || err}`);
+      }
     }
   }
   return records;
@@ -229,14 +233,14 @@ function resetTransientExhaustedCloserBudget(rootDir, lease, logger) {
   try {
     record = readAmaCloserDispatchRecord(rootDir, identity);
   } catch {
-    return false;
+    return 'failed';
   }
-  if (!record) return false;
+  if (!record) return 'not-needed';
   const exhausted = Number(record.retryCount || 0) >= AMA_CLOSER_REDISPATCH_BOUND;
-  if (!exhausted) return false;
+  if (!exhausted) return 'not-needed';
   const transient = record.lastFailureTransient === true
     || isTransientHqDispatchError({ message: String(record.lastError || '') });
-  if (!transient) return false;
+  if (!transient) return 'not-needed';
   try {
     updateAmaCloserDispatchRecord(rootDir, identity, (current) => ({
       ...(current || {}),
@@ -244,14 +248,18 @@ function resetTransientExhaustedCloserBudget(rootDir, lease, logger) {
       state: 'dispatch-budget-reset-transient',
       lastFailureTransient: false,
     }));
-  } catch {
-    return false;
+  } catch (err) {
+    logger?.error?.(
+      `[reaper] failed to reset transient-exhausted closer budget repo=${lease.repo} `
+      + `pr=${lease.prNumber} head=${String(lease.headSha || '').slice(0, 12)}: ${err?.message || err}`,
+    );
+    return 'failed';
   }
   logger?.warn?.(
     `[reaper] reset transient-exhausted closer budget repo=${lease.repo} pr=${lease.prNumber} `
     + `head=${String(lease.headSha || '').slice(0, 12)} (prior failure was rate-limit/offline-class)`,
   );
-  return true;
+  return 'reset';
 }
 
 /**
@@ -270,15 +278,21 @@ export function reapStaleCloserLeases({
   logger = console,
 } = {}) {
   if (!rootDir) return { released: 0, budgetsReset: 0, leases: [] };
-  const leases = readLeaseRecords(rootDir);
+  const leases = readLeaseRecords(rootDir, logger);
   const releasable = selectReleasableCloserLeases(leases, {
     now, thresholdMs, livePid, isProcessAlive,
   });
   let released = 0;
   let budgetsReset = 0;
   for (const lease of releasable) {
-    if (lease._isCorrupt !== true && resetTransientExhaustedCloserBudget(rootDir, lease, logger)) {
-      budgetsReset += 1;
+    if (lease._isCorrupt !== true) {
+      const resetStatus = resetTransientExhaustedCloserBudget(rootDir, lease, logger);
+      if (resetStatus === 'failed') {
+        continue;
+      }
+      if (resetStatus === 'reset') {
+        budgetsReset += 1;
+      }
     }
     try {
       rmSync(lease._path, { force: true });

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -245,6 +245,62 @@ test('reapStaleCloserLeases unlinks corrupt lease files', (t) => {
   assert.equal(result.budgetsReset, 0);
   assert.equal(result.leases[0]._isCorrupt, true);
   assert.equal(existsSync(corruptPath), false, 'corrupt lease deleted -> closer can re-dispatch');
+});
+
+test('reapStaleCloserLeases skips filesystem read errors instead of treating them as corruption', (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const dir = join(rootDir, 'data', 'ama-closer-leases');
+  mkdirSync(join(dir, 'acme__repo-pr-100-deadbeef.json'), { recursive: true });
+
+  const errors = [];
+  const result = reapStaleCloserLeases({
+    rootDir,
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    isProcessAlive: () => true,
+    logger: { warn() {}, error(message) { errors.push(String(message)); } },
+  });
+
+  assert.equal(result.released, 0);
+  assert.equal(result.budgetsReset, 0);
+  assert.equal(result.leases.length, 0);
+  assert.ok(errors.some((line) => line.includes('failed to read lease')), 'read failure logged for retry');
+});
+
+test('reapStaleCloserLeases keeps lease when transient budget reset cannot be persisted', (t) => {
+  const rootDir = tempRoot();
+  t.after(() => {
+    chmodSync(join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-dispatches'), 0o755);
+    rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  const identity = { repo: 'acme/repo', prNumber: 101, headSha: 'badc0ffeebadc0ffeebadc0ffeebadc0ffeebadc0f' };
+  const leasePath = writeLease(rootDir, {
+    ...identity, status: 'dispatched', terminalOutcome: null,
+    acquiredAt: hoursAgo(20), updatedAt: hoursAgo(20), watcherPid: 31337,
+  });
+
+  const recordPath = amaCloserDispatchFilePath(rootDir, identity);
+  mkdirSync(dirname(recordPath), { recursive: true });
+  writeFileSync(recordPath, `${JSON.stringify({
+    ...identity, retryCount: 2, state: 'dispatch-deferred-transient',
+    lastFailureTransient: true,
+    lastError: 'gh: API rate limit exceeded (HTTP 403)',
+  }, null, 2)}\n`);
+  chmodSync(dirname(recordPath), 0o555);
+
+  const errors = [];
+  const result = reapStaleCloserLeases({
+    rootDir, now: NOW, thresholdMs: 6 * 60 * 60 * 1000,
+    logger: { warn() {}, error(message) { errors.push(String(message)); } },
+  });
+
+  assert.equal(result.released, 0, 'lease retained so reset can be retried on the next tick');
+  assert.equal(result.budgetsReset, 0);
+  assert.equal(existsSync(leasePath), true, 'failed reset does not remove the recovery trigger');
+  assert.ok(errors.some((line) => line.includes('failed to reset transient-exhausted closer budget')));
 });
 
 // ---------------------------------------------------------------------------

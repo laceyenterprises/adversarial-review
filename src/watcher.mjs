@@ -3016,6 +3016,7 @@ async function spawnReviewer({
           reviewerSessionUuid,
           reattachToken: result.reattachToken || null,
           failureClass: result.failureClass || null,
+          tokenUsageNoUsageReason: result.tokenUsageNoUsageReason || null,
         },
       });
     } catch (err) {
@@ -3027,6 +3028,9 @@ async function spawnReviewer({
     return result;
   } catch (err) {
     try {
+      const tokenUsage = err?.tokenUsage && typeof err.tokenUsage === 'object'
+        ? err.tokenUsage
+        : null;
       completeReviewerPass(ROOT, {
         repo,
         prNumber,
@@ -3034,9 +3038,14 @@ async function spawnReviewer({
         passKind,
         status: 'failed',
         endedAt: new Date().toISOString(),
+        tokenUsage,
+        tokenSource: tokenUsage?.source || null,
         metadata: {
           reviewerSessionUuid,
           reviewerModel,
+          tokenUsageNoUsageReason: tokenUsage
+            ? null
+            : (err?.tokenUsageNoUsageReason || null),
           error: err?.message || String(err),
         },
       });

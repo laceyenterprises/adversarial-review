@@ -206,6 +206,36 @@ test('effective verdict preserves request-changes when blocking list is non-empt
   assert.equal(normalizeEffectiveReviewVerdict(review), 'request-changes');
 });
 
+test('effective verdict escalates permissive verdict when blocking list is non-empty', () => {
+  const messages = [];
+  const review = [
+    '## Summary',
+    'A real blocker remains despite the permissive stated verdict.',
+    '',
+    '## Blocking issues',
+    '- **Broken migration**',
+    '  - **File:** `migrations/001.sql`',
+    '  - **Lines:** `1-3`',
+    '  - **Problem:** The migration drops live data.',
+    '  - **Why it matters:** It can corrupt production state.',
+    '  - **Recommended fix:** Make the migration idempotent and preserving.',
+    '',
+    '## Non-blocking issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+
+  assert.equal(normalizeEffectiveReviewVerdict(review, {
+    log: { warn: (message) => messages.push(message) },
+    context: 'test-context',
+  }), 'request-changes');
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /Escalated comment-only to Request changes/);
+  assert.match(messages[0], /test-context/);
+});
+
 test('kernel verdict parser ignores prose that starts with a verdict keyword when the final verdict is clean', () => {
   const review = [
     '## Summary',

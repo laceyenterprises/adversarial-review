@@ -178,15 +178,24 @@ function classifyStructuredBlockingIssues(reviewBody) {
 function normalizeEffectiveReviewVerdict(reviewBody, { log = null, context = '' } = {}) {
   const statedVerdict = extractReviewVerdict(reviewBody);
   const normalizedVerdict = normalizeReviewVerdict(statedVerdict);
-  if (normalizedVerdict !== 'request-changes') return normalizedVerdict;
 
   const blockingIssues = classifyStructuredBlockingIssues(reviewBody);
-  if (blockingIssues.state === 'known' && blockingIssues.count === 0) {
-    const suffix = context ? ` ${context}` : '';
-    log?.warn?.(
-      `[review-verdict] Reconciled Request changes to Comment only because structured Blocking issues is empty.${suffix}`,
-    );
-    return 'comment-only';
+  if (blockingIssues.state === 'known') {
+    if (blockingIssues.count === 0 && normalizedVerdict === 'request-changes') {
+      const suffix = context ? ` ${context}` : '';
+      log?.warn?.(
+        `[review-verdict] Reconciled Request changes to Comment only because structured Blocking issues is empty.${suffix}`,
+      );
+      return 'comment-only';
+    }
+
+    if (blockingIssues.count > 0 && normalizedVerdict !== 'request-changes') {
+      const suffix = context ? ` ${context}` : '';
+      log?.warn?.(
+        `[review-verdict] Escalated ${normalizedVerdict} to Request changes because structured Blocking issues is non-empty.${suffix}`,
+      );
+      return 'request-changes';
+    }
   }
 
   return normalizedVerdict;

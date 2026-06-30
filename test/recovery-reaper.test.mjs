@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -140,7 +140,7 @@ test('selectReleasableCloserLeases: aged non-terminal leases, never live or term
   assert.deepEqual(releasable.map((l) => l._path), ['p1']);
 });
 
-test('selectReleasableCloserLeases: below-threshold lease released only when owning process is dead', () => {
+test('selectReleasableCloserLeases: below-threshold lease is retained even when local pid lookup fails', () => {
   const lease = { repo: 'a/x', prNumber: 1, headSha: 'h1', status: 'dispatched', terminalOutcome: null, updatedAt: hoursAgo(1), watcherPid: 4242, _path: 'p1' };
   const keepAlive = selectReleasableCloserLeases([lease], {
     now: NOW, thresholdMs: 6 * 60 * 60 * 1000, isProcessAlive: () => true,
@@ -149,19 +149,20 @@ test('selectReleasableCloserLeases: below-threshold lease released only when own
   const dead = selectReleasableCloserLeases([lease], {
     now: NOW, thresholdMs: 6 * 60 * 60 * 1000, isProcessAlive: () => false,
   });
-  assert.equal(dead.length, 1, 'dead owner -> released even below threshold');
+  assert.equal(dead.length, 0, 'local dead-pid result is ignored for cross-namespace leases');
 });
 
-test('selectReleasableCloserLeases: corrupt lease records are always releasable', () => {
+test('selectReleasableCloserLeases: corrupt lease records are age-gated by file mtime', () => {
   const releasable = selectReleasableCloserLeases([
-    { _path: 'bad.json', _isCorrupt: true, status: 'corrupt', terminalOutcome: null },
+    { _path: 'fresh.json', _isCorrupt: true, mtimeMs: Date.parse(hoursAgo(1)), status: 'corrupt', terminalOutcome: null },
+    { _path: 'stale.json', _isCorrupt: true, mtimeMs: Date.parse(hoursAgo(20)), status: 'corrupt', terminalOutcome: null },
   ], {
     now: NOW,
     thresholdMs: 6 * 60 * 60 * 1000,
     livePid: process.pid,
     isProcessAlive: () => true,
   });
-  assert.deepEqual(releasable.map((l) => l._path), ['bad.json']);
+  assert.deepEqual(releasable.map((l) => l._path), ['stale.json']);
 });
 
 // ---------------------------------------------------------------------------
@@ -232,6 +233,8 @@ test('reapStaleCloserLeases unlinks corrupt lease files', (t) => {
   mkdirSync(dir, { recursive: true });
   const corruptPath = join(dir, 'acme__repo-pr-99-deadbeef.json');
   writeFileSync(corruptPath, '');
+  const stale = new Date(Date.parse(hoursAgo(20)));
+  utimesSync(corruptPath, stale, stale);
 
   const result = reapStaleCloserLeases({
     rootDir,
@@ -245,6 +248,30 @@ test('reapStaleCloserLeases unlinks corrupt lease files', (t) => {
   assert.equal(result.budgetsReset, 0);
   assert.equal(result.leases[0]._isCorrupt, true);
   assert.equal(existsSync(corruptPath), false, 'corrupt lease deleted -> closer can re-dispatch');
+});
+
+test('reapStaleCloserLeases keeps fresh corrupt lease files for concurrent writers', (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const dir = join(rootDir, 'data', 'ama-closer-leases');
+  mkdirSync(dir, { recursive: true });
+  const corruptPath = join(dir, 'acme__repo-pr-98-deadbeef.json');
+  writeFileSync(corruptPath, '{');
+  const fresh = new Date(Date.parse(hoursAgo(1)));
+  utimesSync(corruptPath, fresh, fresh);
+
+  const result = reapStaleCloserLeases({
+    rootDir,
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    isProcessAlive: () => false,
+    logger: { warn() {}, error() {} },
+  });
+
+  assert.equal(result.released, 0);
+  assert.equal(result.budgetsReset, 0);
+  assert.equal(existsSync(corruptPath), true, 'fresh corrupt lease retained for writer to finish');
 });
 
 test('reapStaleCloserLeases skips filesystem read errors instead of treating them as corruption', (t) => {

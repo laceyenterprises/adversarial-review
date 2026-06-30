@@ -25,7 +25,7 @@
  * @module recovery-reaper
  */
 
-import { readdirSync, readFileSync, rmSync } from 'node:fs';
+import { readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -107,39 +107,33 @@ export function selectStaleRunningReviewerPasses(rows, { now, thresholdMs } = {}
  * Pure — given closer-lease records, return the subset to release: not yet
  * `terminal`, `terminalOutcome` still null, and older than `thresholdMs`. A
  * lease still owned by the live watcher process (`watcherPid === livePid`) is
- * never released. When `isProcessAlive` is supplied, a lease whose owning pid
- * is still alive AND is younger than the threshold is skipped; past the
- * threshold the age gate wins (the pid may have been recycled).
+ * never released. Corrupt lease files are also age-gated by file mtime so a
+ * concurrent non-atomic writer is given time to finish before recovery unlinks
+ * the lease.
  *
  * @param {Array<object>} leases  each `{ ...lease, _path }`
- * @param {{ now:any, thresholdMs:number, livePid?:number,
- *           isProcessAlive?:(pid:number)=>boolean }} opts
+ * @param {{ now:any, thresholdMs:number, livePid?:number }} opts
  * @returns {Array<object>}
  */
 export function selectReleasableCloserLeases(leases, {
   now,
   thresholdMs,
   livePid = null,
-  isProcessAlive = null,
 } = {}) {
   const nowMs = parseTimestampMs(now) ?? (now instanceof Date ? now.getTime() : Number(now));
   if (!Number.isFinite(nowMs) || !Number.isFinite(Number(thresholdMs))) return [];
   return (Array.isArray(leases) ? leases : []).filter((lease) => {
     if (!lease) return false;
-    if (lease._isCorrupt === true) return true;
+    if (lease._isCorrupt === true) {
+      const mtimeMs = Number(lease.mtimeMs);
+      return Number.isFinite(mtimeMs) && nowMs - mtimeMs >= Number(thresholdMs);
+    }
     if (String(lease.status || '') === 'terminal') return false;
     if (lease.terminalOutcome != null) return false;
     if (livePid != null && Number(lease.watcherPid) === Number(livePid)) return false;
     const stampMs = parseTimestampMs(lease.updatedAt) ?? parseTimestampMs(lease.acquiredAt);
     if (stampMs == null) return false;
-    const aged = nowMs - stampMs >= Number(thresholdMs);
-    if (aged) return true;
-    // Below threshold: only release when we can positively prove the owning
-    // watcher process is gone.
-    if (typeof isProcessAlive === 'function' && Number.isFinite(Number(lease.watcherPid))) {
-      return !isProcessAlive(Number(lease.watcherPid));
-    }
-    return false;
+    return nowMs - stampMs >= Number(thresholdMs);
   });
 }
 
@@ -206,9 +200,16 @@ function readLeaseRecords(rootDir, logger = console) {
       if (lease && typeof lease === 'object') records.push({ ...lease, _path: path });
     } catch (err) {
       if (err instanceof SyntaxError) {
+        let mtimeMs = null;
+        try {
+          mtimeMs = statSync(path).mtimeMs;
+        } catch {
+          mtimeMs = null;
+        }
         records.push({
           _path: path,
           _isCorrupt: true,
+          mtimeMs,
           status: 'corrupt',
           terminalOutcome: null,
           updatedAt: 0,
@@ -274,13 +275,12 @@ export function reapStaleCloserLeases({
   now = new Date().toISOString(),
   thresholdMs = DEFAULT_STALE_CLOSER_LEASE_MS,
   livePid = (typeof process !== 'undefined' ? process.pid : null),
-  isProcessAlive = null,
   logger = console,
 } = {}) {
   if (!rootDir) return { released: 0, budgetsReset: 0, leases: [] };
   const leases = readLeaseRecords(rootDir, logger);
   const releasable = selectReleasableCloserLeases(leases, {
-    now, thresholdMs, livePid, isProcessAlive,
+    now, thresholdMs, livePid,
   });
   let released = 0;
   let budgetsReset = 0;
@@ -328,7 +328,6 @@ export function runStartupStaleStateReaper({
   env = process.env,
   now = new Date().toISOString(),
   logger = console,
-  isProcessAlive = null,
 } = {}) {
   const out = { reviewerPasses: { reaped: 0, passes: [] }, closerLeases: { released: 0, budgetsReset: 0, leases: [] } };
   try {
@@ -346,7 +345,6 @@ export function runStartupStaleStateReaper({
       rootDir,
       now,
       thresholdMs: resolveStaleCloserLeaseMs(env),
-      isProcessAlive,
       logger,
     });
   } catch (err) {

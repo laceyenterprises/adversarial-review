@@ -426,12 +426,15 @@ function isExecTimeout(err) {
 function errDetailText(errOrText) {
   if (typeof errOrText === 'string') return errOrText.toLowerCase();
   return [
-    errOrText?.code,
-    errOrText?.message,
-    errOrText?.stderr,
-    errOrText?.stdout,
+    ['code', errOrText?.code],
+    ['status', errOrText?.status],
+    ['statusCode', errOrText?.statusCode],
+    ['message', errOrText?.message],
+    ['stderr', errOrText?.stderr],
+    ['stdout', errOrText?.stdout],
   ]
-    .filter(Boolean)
+    .filter(([, value]) => value != null && value !== '')
+    .map(([key, value]) => `${key}: ${String(value)}`)
     .join('\n')
     .toLowerCase();
 }
@@ -460,7 +463,7 @@ export function isGithubRateLimitOrBrokerThrottle(errOrText) {
     || detail.includes('retry your request')
     || detail.includes('too many requests')
     || detail.includes('http 429')
-    || /\b429\b/.test(detail)
+    || /\b(?:status|statuscode|status_code|code)\s*[:=]?\s*429\b/.test(detail)
     // OAuth-broker unavailability while it fetches/refreshes the bot token.
     || detail.includes('http 503')
     || detail.includes('broker fetch')

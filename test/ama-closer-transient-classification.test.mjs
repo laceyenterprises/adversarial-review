@@ -53,7 +53,19 @@ test('isGithubRateLimitOrBrokerThrottle does NOT match genuine auth failures', (
 test('isGithubRateLimitOrBrokerThrottle accepts both string and error-object shapes', () => {
   assert.equal(isGithubRateLimitOrBrokerThrottle({ message: 'API rate limit exceeded' }), true);
   assert.equal(isGithubRateLimitOrBrokerThrottle({ stdout: 'secondary rate limit' }), true);
+  assert.equal(isGithubRateLimitOrBrokerThrottle({ status: 429, message: 'request failed' }), true);
+  assert.equal(isGithubRateLimitOrBrokerThrottle({ statusCode: 429, message: 'request failed' }), true);
   assert.equal(isGithubRateLimitOrBrokerThrottle('plain string with rate limit'), true);
+});
+
+test('isGithubRateLimitOrBrokerThrottle does NOT match unrelated bare 429 text', () => {
+  for (const msg of [
+    'wrote 429 bytes before exiting',
+    'line 429: assertion failed',
+    'processed 429 records',
+  ]) {
+    assert.equal(isGithubRateLimitOrBrokerThrottle(msg), false, `must not be throttle: ${msg}`);
+  }
 });
 
 // ---------------------------------------------------------------------------

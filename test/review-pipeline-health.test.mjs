@@ -536,6 +536,139 @@ test('merge stalled finding skips settled jobs with no review row', () => {
   assert.equal(snapshot.mergeStalls.candidates.length, 0);
 });
 
+test('stale AMA closer leases are reported without mutating lease files', () => {
+  const rootDir = tempRoot();
+  const leaseDir = path.join(rootDir, 'data', 'ama-closer-leases');
+  mkdirSync(leaseDir, { recursive: true });
+  const leasePath = path.join(leaseDir, 'laceyenterprises__agent-os-pr-12-abc.json');
+  writeFileSync(leasePath, `${JSON.stringify({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 12,
+    headSha: 'abc',
+    acquiredAt: '2026-05-25T16:00:00.000Z',
+    updatedAt: '2026-05-25T16:10:00.000Z',
+    lrqId: 'lrq_ama',
+    status: 'dispatched',
+    terminalOutcome: null,
+  }, null, 2)}\n`);
+  const before = readFileSync(leasePath, 'utf8');
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { amaCloserLeaseMaxAgeMs: 20 * 60 * 1000 },
+  });
+
+  assert.ok(findingCodes(snapshot).includes('review:ama_closer_lease_stale'));
+  assert.equal(snapshot.amaCloserLeases.stale[0].lrqId, 'lrq_ama');
+  assert.equal(readFileSync(leasePath, 'utf8'), before);
+});
+
+test('running reviewer passes older than threshold are reported as zombies', () => {
+  const rootDir = tempRoot();
+  insertReviewerPass(rootDir, {
+    prNumber: 970,
+    attemptNumber: 1,
+    status: 'running',
+    startedAt: '2026-05-25T17:00:00.000Z',
+    endedAt: null,
+    metadata: { session: 'stuck' },
+  });
+  insertReviewerPass(rootDir, {
+    prNumber: 971,
+    attemptNumber: 1,
+    status: 'running',
+    startedAt: '2026-05-25T17:55:00.000Z',
+    endedAt: null,
+    metadata: {},
+  });
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { runningReviewerPassMaxAgeMs: 30 * 60 * 1000 },
+  });
+
+  assert.ok(findingCodes(snapshot).includes('review:reviewer_pass_zombie'));
+  assert.deepEqual(snapshot.zombieReviewerPasses.rows.map((row) => row.prNumber), [970]);
+});
+
+test('round-budget selector detects over-budget and awaiting-rereview final-pass jobs', () => {
+  const rootDir = tempRoot();
+  writeJob(rootDir, 'in-progress', 'over-budget', {
+    jobId: 'over-budget',
+    repo: REPO,
+    prNumber: 980,
+    riskClass: 'low',
+    remediationPlan: {
+      currentRound: 2,
+      rounds: [{ round: 1, state: 'completed' }, { round: 2, state: 'spawned' }],
+    },
+  });
+  writeJob(rootDir, 'in-progress', 'awaiting-final', {
+    jobId: 'awaiting-final',
+    repo: REPO,
+    prNumber: 981,
+    riskClass: 'medium',
+    status: 'awaiting-rereview',
+    remediationPlan: {
+      currentRound: 2,
+      rounds: [{ round: 1, state: 'completed' }, { round: 2, state: 'completed' }],
+    },
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+
+  assert.ok(findingCodes(snapshot).includes('review:round_budget_anomaly'));
+  assert.equal(snapshot.roundBudget.anomalies.length, 2);
+  assert.ok(snapshot.roundBudget.anomalies.some((row) => row.codes.includes('round-count-exceeds-risk-budget')));
+  assert.ok(snapshot.roundBudget.anomalies.some((row) => row.codes.includes('awaiting-rereview-on-budget-exhausted-final-pass')));
+});
+
+test('host checks are opt-in and report launchd, dispatch-log, and dag-autowalk anomalies', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(dispatchLog, 'hammer spawn failed: entitlement-auth 403 exit 65\n');
+  const dagErr = path.join(hqRoot, 'dag.err.log');
+  const dagOut = path.join(hqRoot, 'dag.out.log');
+  writeFileSync(dagErr, '');
+  writeFileSync(dagOut, 'tick ok\n');
+  const execFileSyncImpl = (_bin, argv) => {
+    const target = argv.at(-1);
+    if (target.includes('adversarial-follow-up')) {
+      const error = new Error('not loaded');
+      error.stderr = 'Could not find service';
+      throw error;
+    }
+    if (target.includes('dag-autowalk')) return 'last exit code = 65\n';
+    return 'state = running\nlast exit code = 0\n';
+  };
+
+  const disabled = collectReviewPipelineHealth({ rootDir, hqRoot, now: () => new Date(NOW), execFileSyncImpl });
+  assert.ok(!findingCodes(disabled).includes('review:daemon_liveness'));
+
+  const enabled = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: {
+      USER: 'fixture',
+      ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1',
+      ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_ERR_LOG: dagErr,
+      ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_OUT_LOG: dagOut,
+    },
+    execFileSyncImpl,
+  });
+
+  assert.ok(findingCodes(enabled).includes('review:daemon_liveness'));
+  assert.ok(findingCodes(enabled).includes('review:dispatch_spawn_failures'));
+  assert.ok(findingCodes(enabled).includes('review:dag_autowalk_launchd_unhealthy'));
+  assert.equal(enabled.dispatchSpawnFailures.matches.length, 1);
+  assert.equal(enabled.dagAutowalk.lastExitCode, 65);
+});
+
 test('collector surfaces active provider overload backoffs and quota holds', () => {
   const rootDir = tempRoot();
   const overloadedPr = 960;

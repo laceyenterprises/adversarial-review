@@ -2034,12 +2034,12 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
     lines.push('');
     if (finalPassHasStandingBlockingFindings) {
       lines.push(
-        'Default action: REMEDIATE, PUSH, AND MERGE. The latest review has'
+        'Default action: REMEDIATE, PUSH, AND REQUEST A FRESH REVIEW. The latest review has'
         + ' standing blocking findings, so apply the blocking and non-blocking'
-        + ' findings inline before taking any terminal action. Do NOT request'
-        + ' another adversarial review, do NOT mark re-review as requested,'
-        + ' and do NOT hand the PR back for another review on this'
-        + ' budget-exhausted pass.'
+        + ' findings inline before taking any terminal action. Do NOT merge this'
+        + ' invocation. Set `reReview.requested = true` / exit'
+        + ' `awaiting-rereview` so the watcher can obtain an independent'
+        + ' adversarial confirmation of the remediated head.'
       );
     } else {
       lines.push(
@@ -2121,17 +2121,16 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
     if (finalPassHasStandingBlockingFindings) {
       lines.push(
         '2. Apply the blocking and non-blocking findings inline, then rebase,'
-        + ' force-push the updated head, wait only for real external CI on'
-        + ' that pushed head, and MERGE (`gh pr merge --squash --auto`). Do'
-        + ' NOT use `--admin` for this standard merge path; GitHub must still'
-        + ' enforce required checks at merge time. Do NOT request another'
-        + ' adversarial review after remediation, even if the fixes are'
-        + ' substantial-but-bounded inside the reviewed area. The only'
-        + ' non-merge exit on this terminal pass is a hard-stop with'
-        + ' handoff_required=true when a genuinely unfixable blocker-class'
-        + ' finding remains after remediation (data corruption, secret'
-        + ' leakage, security regression, or broken external contract). A'
-        + ' non-empty `blockers_observed` result in this invocation must'
+        + ' force-push the updated head, and request a fresh adversarial review'
+        + ' of that pushed head. Do NOT merge this invocation and do NOT call'
+        + ' `gh pr merge`; PR #901 keeps blocker remediation gated on an'
+        + ' independent review rather than the worker self-judging its own fix.'
+        + ' Use `reReview.requested = true` / `awaiting-rereview` for the normal'
+        + ' successful exit. The only non-rereview exit on this terminal pass is'
+        + ' a hard-stop with handoff_required=true when a genuinely unfixable'
+        + ' blocker-class finding remains after remediation (data corruption,'
+        + ' secret leakage, security regression, or broken external contract).'
+        + ' A non-empty `blockers_observed` result in this invocation must'
         + ' hard-refuse immediately.'
       );
     } else {
@@ -2241,9 +2240,11 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       if (finalPassHasStandingBlockingFindings) {
         lines.push(
           '3. This is the single terminal automatic blocker-remediation pass'
-          + ' for this PR. Do not request another blocker-remediation loop or'
-          + ' a fresh adversarial review; merge the remediated head unless the'
-          + ' unfixable-blocker hard-stop above requires operator handoff.'
+          + ' for this PR. Do not request another blocker-remediation loop and'
+          + ' do not merge the remediated head. The only successful terminal'
+          + ' action is a fresh adversarial review request for the pushed'
+          + ' remediation; the only hard-stop is the unfixable-blocker handoff'
+          + ' above.'
         );
       } else {
         lines.push(

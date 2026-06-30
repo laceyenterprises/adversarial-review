@@ -52,6 +52,21 @@ The Grafana dashboard lives at
   states.
 - `review_pipeline_merge_stalled_jobs`: clean `review-settled` verdict jobs
   whose PR row remains open past the merge-stall tick threshold.
+- `review_pipeline_stale_ama_closer_leases`: AMA closer leases in
+  `pending`/`dispatched` with no terminal outcome past the age threshold.
+- `review_pipeline_zombie_reviewer_passes`: `reviewer_passes` rows still
+  `running` past the age threshold.
+- `review_pipeline_round_budget_anomalies`: follow-up jobs whose remediation
+  rounds exceed the risk-class budget, or final-pass jobs stuck
+  `awaiting-rereview` after the budget is exhausted.
+- `review_pipeline_launchd_service_up`: required local pipeline LaunchAgents
+  loaded state. Host launchd checks are opt-in for the scheduled local
+  diagnostic with `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS=1`.
+- `review_pipeline_dispatch_spawn_failures`: recent dispatch daemon stderr
+  lines matching closer/hammer spawn failure signals such as entitlement-auth,
+  403 rate-limit, or exit 65.
+- `review_pipeline_dag_autowalk_healthy`: dag-autowalk LaunchAgent last-exit
+  and recent-log health.
 - `review_pipeline_sentinel_finding_active`: 1 when a finding code is currently
   firing, 0 after it clears.
 
@@ -66,6 +81,12 @@ The Grafana dashboard lives at
 | `review:queue_starvation` | oldest pending first-pass row is >30m old | page | no pending row exceeds the age threshold |
 | `review:remediation_backlog` | `follow-up-jobs/pending` has >5 jobs | ticket | pending job count returns to threshold or below |
 | `review:merge_stalled` | a `stopped:review-settled` job remains open for >3 watcher ticks | page | the PR is merged/closed or the settled job is no longer past threshold |
+| `review:ama_closer_lease_stale` | AMA closer lease is `pending`/`dispatched`, `terminalOutcome=null`, and older than 30m | page | the lease reaches terminal state or falls below the age threshold |
+| `review:reviewer_pass_zombie` | `reviewer_passes.status='running'` row is older than 30m | page | no running reviewer pass exceeds the age threshold |
+| `review:round_budget_anomaly` | remediation round count exceeds the risk-class budget, or a final-pass job remains `awaiting-rereview` after budget exhaustion | page | no follow-up job violates the risk-class round budget |
+| `review:daemon_liveness` | required local pipeline LaunchAgent is not loaded | page | adversarial watcher, adversarial follow-up, and dispatch daemon labels are loaded |
+| `review:dispatch_spawn_failures` | dispatch daemon stderr has recent closer/hammer spawn-failure signals over 1h | page | no matching recent dispatch daemon stderr lines remain |
+| `review:dag_autowalk_launchd_unhealthy` | dag-autowalk is unloaded, last exit is non-zero, or logs are stale for >2h | page | dag-autowalk is loaded with a zero/unknown last exit and fresh logs |
 
 ## Configuration
 
@@ -83,6 +104,12 @@ All thresholds are configurable through environment variables:
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_MERGE_STALLED_MAX_TICKS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_TICK_INTERVAL_MS`
 - `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REMEDIATION_THROUGHPUT_WINDOW_MS`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AMA_CLOSER_LEASE_MAX_AGE_MS`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_RUNNING_REVIEWER_PASS_MAX_AGE_MS`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_MAX_LOG_AGE_MS`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DISPATCH_SPAWN_FAILURE_WINDOW_MS`
+- `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LAUNCHD_TIMEOUT_MS`
 
 Later ARP tracks can extend this collector by adding hq remediation and merge
 dispatch ledgers to the same snapshot. The current version intentionally ships

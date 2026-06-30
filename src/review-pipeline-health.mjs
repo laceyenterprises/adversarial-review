@@ -1,8 +1,11 @@
 import Database from 'better-sqlite3';
+import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
+import { ROUND_BUDGET_BY_RISK_CLASS } from './follow-up-jobs.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaustion.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
@@ -18,6 +21,12 @@ const DEFAULT_REMEDIATION_BACKLOG_THRESHOLD = 5;
 const DEFAULT_MERGE_STALLED_MAX_TICKS = 3;
 const DEFAULT_PIPELINE_TICK_INTERVAL_MS = 5 * 60 * 1000;
 const DEFAULT_REMEDIATION_THROUGHPUT_WINDOW_MS = 60 * 60 * 1000;
+const DEFAULT_AMA_CLOSER_LEASE_MAX_AGE_MS = 30 * 60 * 1000;
+const DEFAULT_RUNNING_REVIEWER_PASS_MAX_AGE_MS = 30 * 60 * 1000;
+const DEFAULT_DAG_AUTOWALK_MAX_LOG_AGE_MS = 2 * 60 * 60 * 1000;
+const DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS = 60 * 60 * 1000;
+const DEFAULT_LAUNCHD_TIMEOUT_MS = 2_000;
+const DEFAULT_LABEL_PREFIX = 'ai.laceyenterprises';
 
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
   pending: ['data', 'follow-up-jobs', 'pending'],
@@ -39,6 +48,12 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_remediation_throughput_jobs',
   'review_pipeline_merge_outcomes_total',
   'review_pipeline_merge_stalled_jobs',
+  'review_pipeline_stale_ama_closer_leases',
+  'review_pipeline_zombie_reviewer_passes',
+  'review_pipeline_round_budget_anomalies',
+  'review_pipeline_launchd_service_up',
+  'review_pipeline_dispatch_spawn_failures',
+  'review_pipeline_dag_autowalk_healthy',
   'review_pipeline_sentinel_finding_active',
 ]);
 
@@ -54,6 +69,12 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_remediation_throughput_jobs: 'Terminal remediation jobs observed in the configured throughput window.',
   review_pipeline_merge_outcomes_total: 'Current review-ledger PR outcome count by state.',
   review_pipeline_merge_stalled_jobs: 'Current count of clean review-settled jobs still waiting on merge.',
+  review_pipeline_stale_ama_closer_leases: 'Current count of AMA closer leases stuck pending or dispatched past the configured age.',
+  review_pipeline_zombie_reviewer_passes: 'Current count of reviewer_passes rows stuck running past the configured age.',
+  review_pipeline_round_budget_anomalies: 'Current count of remediation jobs whose rounds exceed or misuse their risk-class budget.',
+  review_pipeline_launchd_service_up: 'Whether required local pipeline launchd services are loaded.',
+  review_pipeline_dispatch_spawn_failures: 'Recent dispatch daemon stderr lines matching closer/hammer spawn failure patterns.',
+  review_pipeline_dag_autowalk_healthy: 'Whether the dag-autowalk LaunchAgent has a healthy exit/log recency state.',
   review_pipeline_sentinel_finding_active: 'Whether a Sentinel finding code is active in the current snapshot.',
 });
 
@@ -113,6 +134,50 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     thresholdKey: 'mergeStalledMaxTicks',
     defaultThreshold: DEFAULT_MERGE_STALLED_MAX_TICKS,
   },
+  {
+    code: 'review:ama_closer_lease_stale',
+    tier: 'page',
+    category: 'review-pipeline',
+    thresholdKey: 'amaCloserLeaseMaxAgeMs',
+    defaultThreshold: DEFAULT_AMA_CLOSER_LEASE_MAX_AGE_MS,
+  },
+  {
+    code: 'review:reviewer_pass_zombie',
+    tier: 'page',
+    category: 'review-pipeline',
+    thresholdKey: 'runningReviewerPassMaxAgeMs',
+    defaultThreshold: DEFAULT_RUNNING_REVIEWER_PASS_MAX_AGE_MS,
+  },
+  {
+    code: 'review:round_budget_anomaly',
+    tier: 'page',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+    thresholdDescription: 'remediation round count exceeds the risk-class budget or final-pass awaiting-rereview persists after budget exhaustion',
+  },
+  {
+    code: 'review:daemon_liveness',
+    tier: 'page',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+    thresholdDescription: 'adversarial watcher, follow-up daemon, or dispatch daemon launchd service is not loaded',
+  },
+  {
+    code: 'review:dispatch_spawn_failures',
+    tier: 'page',
+    category: 'review-pipeline',
+    thresholdKey: 'dispatchSpawnFailureWindowMs',
+    defaultThreshold: DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS,
+  },
+  {
+    code: 'review:dag_autowalk_launchd_unhealthy',
+    tier: 'page',
+    category: 'review-pipeline',
+    thresholdKey: 'dagAutowalkMaxLogAgeMs',
+    defaultThreshold: DEFAULT_DAG_AUTOWALK_MAX_LOG_AGE_MS,
+  },
 ]);
 
 function parseNumber(value, fallback) {
@@ -130,8 +195,18 @@ function parseIntegerAtLeast(value, fallback, min) {
   return Number.isInteger(parsed) && parsed >= min ? parsed : fallback;
 }
 
+function parseBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+}
+
 function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
   return {
+    hostChecksEnabled: parseBoolean(
+      overrides.hostChecksEnabled
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS,
+      false
+    ),
     reviewerDeathRateWindowMs: parsePositiveInteger(
       overrides.reviewerDeathRateWindowMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REVIEWER_DEATH_RATE_WINDOW_MS,
@@ -193,6 +268,31 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
       overrides.remediationThroughputWindowMs
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_REMEDIATION_THROUGHPUT_WINDOW_MS,
       DEFAULT_REMEDIATION_THROUGHPUT_WINDOW_MS
+    ),
+    amaCloserLeaseMaxAgeMs: parsePositiveInteger(
+      overrides.amaCloserLeaseMaxAgeMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_AMA_CLOSER_LEASE_MAX_AGE_MS,
+      DEFAULT_AMA_CLOSER_LEASE_MAX_AGE_MS
+    ),
+    runningReviewerPassMaxAgeMs: parsePositiveInteger(
+      overrides.runningReviewerPassMaxAgeMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_RUNNING_REVIEWER_PASS_MAX_AGE_MS,
+      DEFAULT_RUNNING_REVIEWER_PASS_MAX_AGE_MS
+    ),
+    dagAutowalkMaxLogAgeMs: parsePositiveInteger(
+      overrides.dagAutowalkMaxLogAgeMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_MAX_LOG_AGE_MS,
+      DEFAULT_DAG_AUTOWALK_MAX_LOG_AGE_MS
+    ),
+    dispatchSpawnFailureWindowMs: parsePositiveInteger(
+      overrides.dispatchSpawnFailureWindowMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DISPATCH_SPAWN_FAILURE_WINDOW_MS,
+      DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS
+    ),
+    launchdTimeoutMs: parsePositiveInteger(
+      overrides.launchdTimeoutMs
+        ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LAUNCHD_TIMEOUT_MS,
+      DEFAULT_LAUNCHD_TIMEOUT_MS
     ),
     get reviewUnknownRateWindowMs() {
       return this.reviewUnknownRateWindowMinutes * 60 * 1000;
@@ -742,6 +842,267 @@ function summarizeMergeStalls({ followUpJobs, reviewRows, nowMs, config }) {
   };
 }
 
+function readAmaCloserLeases(rootDir, { nowMs, config }) {
+  const dir = join(rootDir, 'data', 'ama-closer-leases');
+  const stale = [];
+  let total = 0;
+  if (!existsSync(dir)) return { total, stale };
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return { total, stale };
+  }
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    const leasePath = join(dir, name);
+    let stat;
+    let lease;
+    try {
+      stat = statSync(leasePath);
+      lease = parseJson(readFileSync(leasePath, 'utf8'), null);
+    } catch {
+      continue;
+    }
+    if (!lease) continue;
+    total += 1;
+    const status = String(lease.status || '').trim();
+    if (!['pending', 'dispatched'].includes(status)) continue;
+    if (lease.terminalOutcome !== null && lease.terminalOutcome !== undefined) continue;
+    const anchor = lease.updatedAt || lease.acquiredAt || new Date(stat.mtimeMs).toISOString();
+    const staleMs = ageMs(nowMs, anchor);
+    if (staleMs === null || staleMs <= config.amaCloserLeaseMaxAgeMs) continue;
+    stale.push({
+      leasePath,
+      repo: lease.repo || null,
+      prNumber: lease.prNumber || null,
+      headSha: lease.headSha || null,
+      lrqId: lease.lrqId || null,
+      status,
+      acquiredAt: lease.acquiredAt || null,
+      updatedAt: lease.updatedAt || null,
+      ageMs: staleMs,
+      thresholdMs: config.amaCloserLeaseMaxAgeMs,
+    });
+  }
+  return { total, stale };
+}
+
+function summarizeZombieReviewerPasses(db, { nowMs, config }) {
+  const cutoff = new Date(nowMs - config.runningReviewerPassMaxAgeMs).toISOString();
+  const rows = safeAll(
+    db,
+    `SELECT repo, pr_number, attempt_number, pass_kind, reviewer_class, started_at, metadata_json
+       FROM reviewer_passes
+      WHERE status = 'running'
+        AND started_at < ?
+      ORDER BY started_at ASC`,
+    [cutoff]
+  );
+  return {
+    thresholdMs: config.runningReviewerPassMaxAgeMs,
+    rows: rows.map((row) => ({
+      repo: row.repo,
+      prNumber: row.pr_number,
+      attemptNumber: row.attempt_number,
+      passKind: row.pass_kind,
+      reviewerClass: row.reviewer_class,
+      startedAt: row.started_at,
+      ageMs: ageMs(nowMs, row.started_at),
+      metadata: parseJson(row.metadata_json, {}),
+    })),
+  };
+}
+
+function normalizeRiskClassForBudget(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(ROUND_BUDGET_BY_RISK_CLASS, normalized) ? normalized : 'medium';
+}
+
+function roundNumbersForJob(job) {
+  const numbers = [];
+  const currentRound = Number(job?.remediationPlan?.currentRound ?? job?.currentRound);
+  if (Number.isInteger(currentRound) && currentRound > 0) numbers.push(currentRound);
+  for (const round of job?.remediationPlan?.rounds || []) {
+    const value = Number(round?.round);
+    if (Number.isInteger(value) && value > 0) numbers.push(value);
+  }
+  return numbers;
+}
+
+function isAwaitingRereviewJob(job) {
+  const texts = [
+    job?.status,
+    job?.completion?.status,
+    job?.remediationReply?.status,
+    job?.remediationPlan?.nextAction?.type,
+    job?.remediationPlan?.nextAction?.status,
+    job?.remediationPlan?.state,
+  ].map((value) => String(value || '').toLowerCase());
+  return texts.some((text) => text.includes('awaiting-rereview'));
+}
+
+function summarizeRoundBudgetAnomalies(followUpJobs) {
+  const anomalies = [];
+  for (const entry of followUpJobs) {
+    const job = entry.job || {};
+    const repo = job.repo || null;
+    const prNumber = Number(job.prNumber);
+    if (!repo || !Number.isInteger(prNumber)) continue;
+    const riskClass = normalizeRiskClassForBudget(job.riskClass);
+    const budget = ROUND_BUDGET_BY_RISK_CLASS[riskClass];
+    const rounds = roundNumbersForJob(job);
+    const highestRound = rounds.length ? Math.max(...rounds) : 0;
+    const consumedRounds = rounds.length;
+    const awaitingRereview = isAwaitingRereviewJob(job);
+    const codes = [];
+    if (highestRound > budget || consumedRounds > budget) codes.push('round-count-exceeds-risk-budget');
+    if (awaitingRereview && highestRound >= budget) codes.push('awaiting-rereview-on-budget-exhausted-final-pass');
+    if (!codes.length) continue;
+    anomalies.push({
+      repo,
+      prNumber,
+      jobId: job.jobId || null,
+      state: entry.state,
+      riskClass,
+      budget,
+      highestRound,
+      consumedRounds,
+      awaitingRereview,
+      codes,
+      jobPath: entry.jobPath,
+    });
+  }
+  return { anomalies };
+}
+
+function launchdPrint(label, { timeoutMs, execFileSyncImpl = execFileSync } = {}) {
+  try {
+    const stdout = execFileSyncImpl('launchctl', ['print', `gui/${process.getuid?.()}/${label}`], {
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { label, loaded: true, raw: stdout, error: null };
+  } catch (error) {
+    return {
+      label,
+      loaded: false,
+      raw: String(error?.stdout || error?.stderr || ''),
+      error: error?.message || 'launchctl-print-failed',
+    };
+  }
+}
+
+function parseLaunchdLastExit(raw) {
+  const text = String(raw || '');
+  const match = text.match(/(?:last exit code|LastExitStatus|last exit status)\s*[:=]\s*(-?\d+)/i);
+  return match ? Number(match[1]) : null;
+}
+
+function currentUserName(env = process.env) {
+  return env.USER || env.LOGNAME || userInfo().username;
+}
+
+function launchdLabelSet(env = process.env) {
+  const labelPrefix = env.AGENT_OS_LAUNCHD_LABEL_PREFIX || DEFAULT_LABEL_PREFIX;
+  const owner = env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_OWNER_USER || currentUserName(env);
+  return {
+    owner,
+    watcher: env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_WATCHER_LABEL || `${labelPrefix}.adversarial-watcher.${owner}`,
+    followUp: env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FOLLOW_UP_LABEL || `${labelPrefix}.adversarial-follow-up.${owner}`,
+    dispatchDaemon: env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DISPATCH_DAEMON_LABEL || `${labelPrefix}.cwp-dispatch-daemon.${owner}`,
+    dagAutowalk: env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_LABEL || `${labelPrefix}.dag-autowalk.${owner}`,
+  };
+}
+
+function summarizeLaunchdServices({ env, config, execFileSyncImpl }) {
+  const labels = launchdLabelSet(env);
+  const serviceEntries = [
+    ['adversarial-watcher', labels.watcher],
+    ['adversarial-follow-up', labels.followUp],
+    ['cwp-dispatch-daemon', labels.dispatchDaemon],
+  ];
+  const services = serviceEntries.map(([name, label]) => ({
+    name,
+    ...launchdPrint(label, { timeoutMs: config.launchdTimeoutMs, execFileSyncImpl }),
+  }));
+  const dag = launchdPrint(labels.dagAutowalk, { timeoutMs: config.launchdTimeoutMs, execFileSyncImpl });
+  return {
+    owner: labels.owner,
+    services,
+    dagAutowalk: {
+      ...dag,
+      lastExitCode: parseLaunchdLastExit(dag.raw),
+    },
+  };
+}
+
+function tailRecentLines(path, maxBytes = 64 * 1024) {
+  if (!existsSync(path)) return { path, exists: false, lines: [], mtimeMs: null };
+  const stat = statSync(path);
+  const raw = readFileSync(path, { encoding: 'utf8' });
+  const sliced = raw.length > maxBytes ? raw.slice(raw.length - maxBytes) : raw;
+  return {
+    path,
+    exists: true,
+    lines: sliced.split(/\r?\n/).filter((line) => line.trim()),
+    mtimeMs: stat.mtimeMs,
+  };
+}
+
+function dispatchSpawnFailurePattern() {
+  return /(entitlement-auth|rate[- ]?limit|403|exit\s+65|spawn[\s\S]{0,120}(hammer|closer|ama|merge-agent)|(hammer|closer|ama|merge-agent)[\s\S]{0,120}(spawn|failed|exit))/i;
+}
+
+function summarizeDispatchSpawnFailures(hqRoot, { nowMs, config }) {
+  const logPath = join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  const log = tailRecentLines(logPath);
+  const pattern = dispatchSpawnFailurePattern();
+  const matches = [];
+  if (log.exists) {
+    for (const line of log.lines) {
+      if (!pattern.test(line)) continue;
+      matches.push(line.slice(0, 800));
+    }
+  }
+  const logAgeMs = log.mtimeMs === null ? null : Math.max(0, nowMs - log.mtimeMs);
+  return {
+    logPath,
+    logExists: log.exists,
+    logAgeMs,
+    windowMs: config.dispatchSpawnFailureWindowMs,
+    matches: logAgeMs !== null && logAgeMs <= config.dispatchSpawnFailureWindowMs ? matches.slice(-20) : [],
+  };
+}
+
+function summarizeDagAutowalkHealth({ env, hqRoot, nowMs, config, launchd }) {
+  const owner = launchd.owner;
+  const defaultErrLog = join(homedir(), 'Library', 'Logs', `${DEFAULT_LABEL_PREFIX}.dag-autowalk.${owner}.tick.err.log`);
+  const defaultOutLog = join(homedir(), 'Library', 'Logs', `${DEFAULT_LABEL_PREFIX}.dag-autowalk.${owner}.tick.out.log`);
+  const errLogPath = env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_ERR_LOG || defaultErrLog;
+  const outLogPath = env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_OUT_LOG || defaultOutLog;
+  const err = tailRecentLines(errLogPath, 16 * 1024);
+  const out = tailRecentLines(outLogPath, 16 * 1024);
+  const freshestMtime = Math.max(err.mtimeMs || 0, out.mtimeMs || 0);
+  const logAgeMs = freshestMtime > 0 ? Math.max(0, nowMs - freshestMtime) : null;
+  const healthy = launchd.dagAutowalk.loaded
+    && (launchd.dagAutowalk.lastExitCode === null || launchd.dagAutowalk.lastExitCode === 0)
+    && logAgeMs !== null
+    && logAgeMs <= config.dagAutowalkMaxLogAgeMs;
+  return {
+    hqRoot,
+    label: launchd.dagAutowalk.label,
+    loaded: launchd.dagAutowalk.loaded,
+    lastExitCode: launchd.dagAutowalk.lastExitCode,
+    errLogPath,
+    outLogPath,
+    logAgeMs,
+    thresholdMs: config.dagAutowalkMaxLogAgeMs,
+    healthy,
+  };
+}
+
 function buildFinding({ code, tier, subject, message, evidence, recommendedAction, observedAt, details = {} }) {
   return {
     agent_id: 'sentinel',
@@ -914,14 +1275,108 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  if (snapshot.amaCloserLeases.stale.length > 0) {
+    const sample = snapshot.amaCloserLeases.stale[0];
+    findings.push(buildFinding({
+      code: 'review:ama_closer_lease_stale',
+      tier: 'page',
+      subject: `${snapshot.amaCloserLeases.stale.length} AMA closer lease(s) are stale`,
+      message: `${sample.repo || 'unknown'}#${sample.prNumber || 'unknown'} has a ${sample.status} closer lease older than ${Math.round(sample.thresholdMs / 60000)} minute(s).`,
+      evidence: snapshot.amaCloserLeases.stale.map((lease) => `${lease.leasePath} status=${lease.status} lrq=${lease.lrqId || 'none'}`),
+      recommendedAction: 'Inspect the AMA closer dispatch/audit records and merge-agent lane before manually clearing any lease.',
+      observedAt,
+      details: {
+        thresholdMs: config.amaCloserLeaseMaxAgeMs,
+        stale: snapshot.amaCloserLeases.stale,
+      },
+    }));
+  }
+
+  if (snapshot.zombieReviewerPasses.rows.length > 0) {
+    const sample = snapshot.zombieReviewerPasses.rows[0];
+    findings.push(buildFinding({
+      code: 'review:reviewer_pass_zombie',
+      tier: 'page',
+      subject: `${snapshot.zombieReviewerPasses.rows.length} reviewer pass(es) are still running past the threshold`,
+      message: `${sample.repo}#${sample.prNumber} attempt ${sample.attemptNumber} has been running since ${sample.startedAt}.`,
+      evidence: snapshot.zombieReviewerPasses.rows.map((row) => (
+        `reviews.db reviewer_passes ${row.repo}#${row.prNumber} attempt=${row.attemptNumber} pass=${row.passKind}`
+      )),
+      recommendedAction: 'Compare reviewer_passes rows with watcher process/session evidence; repair through the documented adversarial-review recovery path only after preserving logs.',
+      observedAt,
+      details: snapshot.zombieReviewerPasses,
+    }));
+  }
+
+  if (snapshot.roundBudget.anomalies.length > 0) {
+    const sample = snapshot.roundBudget.anomalies[0];
+    findings.push(buildFinding({
+      code: 'review:round_budget_anomaly',
+      tier: 'page',
+      subject: `${snapshot.roundBudget.anomalies.length} remediation job(s) violate the risk-class round budget`,
+      message: `${sample.repo}#${sample.prNumber} has round=${sample.highestRound} budget=${sample.budget} risk=${sample.riskClass}.`,
+      evidence: snapshot.roundBudget.anomalies.map((row) => (
+        `${row.jobPath} ${row.codes.join(',')} round=${row.highestRound} budget=${row.budget}`
+      )),
+      recommendedAction: 'Inspect the follow-up job and merge-agent prompt path for the final-pass awaiting-rereview bug class before requeueing.',
+      observedAt,
+      details: snapshot.roundBudget,
+    }));
+  }
+
+  const downServices = snapshot.launchd.services.filter((service) => !service.loaded);
+  if (downServices.length > 0) {
+    findings.push(buildFinding({
+      code: 'review:daemon_liveness',
+      tier: 'page',
+      subject: `${downServices.length} pipeline daemon launchd service(s) are not loaded`,
+      message: downServices.map((service) => `${service.name} (${service.label})`).join(', '),
+      evidence: downServices.map((service) => service.label),
+      recommendedAction: 'Use launchctl print and the service runbook to inspect the owner-scoped LaunchAgent; avoid repair commands until the owner and restart path are confirmed.',
+      observedAt,
+      details: {
+        owner: snapshot.launchd.owner,
+        services: snapshot.launchd.services,
+      },
+    }));
+  }
+
+  if (snapshot.dispatchSpawnFailures.matches.length > 0) {
+    findings.push(buildFinding({
+      code: 'review:dispatch_spawn_failures',
+      tier: 'page',
+      subject: `${snapshot.dispatchSpawnFailures.matches.length} recent dispatch daemon spawn-failure log line(s) matched`,
+      message: `Dispatch daemon stderr contains recent closer/hammer spawn failure signals in ${snapshot.dispatchSpawnFailures.logPath}.`,
+      evidence: snapshot.dispatchSpawnFailures.matches.slice(-10),
+      recommendedAction: 'Inspect the dispatch daemon error log for entitlement-auth, rate-limit 403, or exit 65 before launching new closer/remediation work.',
+      observedAt,
+      details: snapshot.dispatchSpawnFailures,
+    }));
+  }
+
+  if (!snapshot.dagAutowalk.healthy) {
+    findings.push(buildFinding({
+      code: 'review:dag_autowalk_launchd_unhealthy',
+      tier: 'page',
+      subject: 'dag-autowalk LaunchAgent is not healthy',
+      message: `dag-autowalk loaded=${snapshot.dagAutowalk.loaded} lastExit=${snapshot.dagAutowalk.lastExitCode ?? 'unknown'} logAgeMs=${snapshot.dagAutowalk.logAgeMs ?? 'unknown'}.`,
+      evidence: [snapshot.dagAutowalk.label, snapshot.dagAutowalk.errLogPath, snapshot.dagAutowalk.outLogPath],
+      recommendedAction: 'Check dag-autowalk launchd state and recent logs; this is the post-merge DAG advancement backstop.',
+      observedAt,
+      details: snapshot.dagAutowalk,
+    }));
+  }
+
   return findings;
 }
 
 function collectReviewPipelineHealth({
   rootDir = process.cwd(),
+  hqRoot = process.env.HQ_ROOT || join(homedir(), 'agent-os-hq'),
   now = () => new Date(),
   env = process.env,
   config: configOverrides = {},
+  execFileSyncImpl = execFileSync,
 } = {}) {
   const observedAt = toIso(now);
   const nowMs = Date.parse(observedAt);
@@ -958,9 +1413,24 @@ function collectReviewPipelineHealth({
       nowMs,
       config,
     });
+    const amaCloserLeases = readAmaCloserLeases(rootDir, { nowMs, config });
+    const zombieReviewerPasses = db
+      ? summarizeZombieReviewerPasses(db, { nowMs, config })
+      : { thresholdMs: config.runningReviewerPassMaxAgeMs, rows: [] };
+    const roundBudget = summarizeRoundBudgetAnomalies(followUpQueues.jobs);
+    const launchd = config.hostChecksEnabled
+      ? summarizeLaunchdServices({ env, config, execFileSyncImpl })
+      : { owner: currentUserName(env), services: [], dagAutowalk: { label: null, loaded: true, lastExitCode: 0 } };
+    const dispatchSpawnFailures = config.hostChecksEnabled
+      ? summarizeDispatchSpawnFailures(hqRoot, { nowMs, config })
+      : { logPath: join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log'), logExists: false, logAgeMs: null, windowMs: config.dispatchSpawnFailureWindowMs, matches: [] };
+    const dagAutowalk = config.hostChecksEnabled
+      ? summarizeDagAutowalkHealth({ env, hqRoot, nowMs, config, launchd })
+      : { hqRoot, label: null, loaded: true, lastExitCode: 0, errLogPath: null, outLogPath: null, logAgeMs: null, thresholdMs: config.dagAutowalkMaxLogAgeMs, healthy: true };
     const snapshot = {
       observedAt,
       rootDir,
+      hqRoot,
       config,
       reviewer,
       reviewerDegradation,
@@ -973,6 +1443,12 @@ function collectReviewPipelineHealth({
       reviewStateLedger,
       mergeOutcomes,
       mergeStalls,
+      amaCloserLeases,
+      zombieReviewerPasses,
+      roundBudget,
+      launchd,
+      dispatchSpawnFailures,
+      dagAutowalk,
     };
     return {
       ...snapshot,
@@ -1063,6 +1539,20 @@ function renderReviewPipelinePrometheus(snapshot) {
     pushMetric('review_pipeline_merge_outcomes_total', { outcome: outcome.outcome }, outcome.count);
   }
   pushMetric('review_pipeline_merge_stalled_jobs', {}, snapshot.mergeStalls.candidates.length);
+  pushMetric('review_pipeline_stale_ama_closer_leases', {}, snapshot.amaCloserLeases?.stale?.length || 0);
+  pushMetric('review_pipeline_zombie_reviewer_passes', {}, snapshot.zombieReviewerPasses?.rows?.length || 0);
+  pushMetric('review_pipeline_round_budget_anomalies', {}, snapshot.roundBudget?.anomalies?.length || 0);
+  const launchdServices = snapshot.launchd?.services?.length
+    ? snapshot.launchd.services
+    : [{ name: 'none', label: 'none', loaded: false }];
+  for (const service of launchdServices) {
+    pushMetric('review_pipeline_launchd_service_up', {
+      service: service.name,
+      label: service.label,
+    }, service.loaded ? 1 : 0);
+  }
+  pushMetric('review_pipeline_dispatch_spawn_failures', {}, snapshot.dispatchSpawnFailures?.matches?.length || 0);
+  pushMetric('review_pipeline_dag_autowalk_healthy', {}, snapshot.dagAutowalk?.healthy ? 1 : 0);
   for (const definition of REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS) {
     const active = snapshot.findings.some((finding) => finding.code === definition.code);
     pushMetric('review_pipeline_sentinel_finding_active', {
@@ -1080,4 +1570,6 @@ export {
   evaluateReviewPipelineFindings,
   renderReviewPipelinePrometheus,
   resolveReviewPipelineHealthConfig,
+  summarizeRoundBudgetAnomalies,
+  summarizeZombieReviewerPasses,
 };

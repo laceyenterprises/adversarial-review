@@ -9,12 +9,13 @@ import {
 
 const USAGE = `\
 Usage:
-  node src/review-pipeline-health-cli.mjs [--root <dir>] [--json | --prometheus | --sentinel] [--now <iso>]
+  node src/review-pipeline-health-cli.mjs [--root <dir>] [--hq-root <dir>] [--json | --prometheus | --sentinel] [--now <iso>]
 `;
 
 function parseArgs(argv) {
   const options = {
     rootDir: process.cwd(),
+    hqRoot: process.env.HQ_ROOT || null,
     format: 'json',
     now: null,
   };
@@ -23,6 +24,9 @@ function parseArgs(argv) {
     if (arg === '--root') {
       if (!argv[i + 1]) throw new Error('--root requires a directory');
       options.rootDir = argv[++i];
+    } else if (arg === '--hq-root') {
+      if (!argv[i + 1]) throw new Error('--hq-root requires a directory');
+      options.hqRoot = argv[++i];
     } else if (arg === '--json') {
       options.format = 'json';
     } else if (arg === '--prometheus') {
@@ -64,6 +68,7 @@ function main(argv = process.argv.slice(2), io = {}) {
 
   const snapshot = collectReviewPipelineHealth({
     rootDir: options.rootDir,
+    ...(options.hqRoot ? { hqRoot: options.hqRoot } : {}),
     now: options.now ? () => new Date(options.now) : () => new Date(),
   });
   if (options.format === 'prometheus') {

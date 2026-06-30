@@ -198,7 +198,7 @@ const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = (
 )
   + AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0);
 const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
-const AMA_CLOSER_REDISPATCH_BOUND = 2;
+export const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND = 3;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
 const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
@@ -326,7 +326,7 @@ function readJsonFile(filePath) {
   }
 }
 
-function readAmaCloserDispatchRecord(rootDir, identity) {
+export function readAmaCloserDispatchRecord(rootDir, identity) {
   return readJsonFile(amaCloserDispatchFilePath(rootDir, identity));
 }
 
@@ -373,7 +373,7 @@ function resolveMergeClassDispatchRoute({
   return route;
 }
 
-function updateAmaCloserDispatchRecord(rootDir, identity, mutate) {
+export function updateAmaCloserDispatchRecord(rootDir, identity, mutate) {
   const existing = readAmaCloserDispatchRecord(rootDir, identity);
   const next = mutate(existing ? { ...existing } : null);
   if (!next) return existing;
@@ -423,17 +423,60 @@ function isExecTimeout(err) {
     || String(err?.message || '').toLowerCase().includes('timed out');
 }
 
-function isTransientHqDispatchError(err) {
-  if (isExecTimeout(err)) return true;
-  const detail = [
-    err?.code,
-    err?.message,
-    err?.stderr,
-    err?.stdout,
+function errDetailText(errOrText) {
+  if (typeof errOrText === 'string') return errOrText.toLowerCase();
+  return [
+    ['code', errOrText?.code],
+    ['status', errOrText?.status],
+    ['statusCode', errOrText?.statusCode],
+    ['message', errOrText?.message],
+    ['stderr', errOrText?.stderr],
+    ['stdout', errOrText?.stdout],
   ]
-    .filter(Boolean)
+    .filter(([, value]) => value != null && value !== '')
+    .map(([key, value]) => `${key}: ${String(value)}`)
     .join('\n')
     .toLowerCase();
+}
+
+// GitHub primary/secondary rate-limit + HTTP 429 + OAuth-broker 503 signals.
+// These are TRANSIENT: the bot token is valid and authorized — the request was
+// merely throttled (or the broker that mints the token is briefly unavailable).
+// GitHub returns the *primary* rate limit as HTTP 403, so a naive 403/exit-65
+// check misreads a throttle as a terminal auth failure and permanently grounds
+// the AMA closer, so autonomous merges never run (observed during the macOS
+// upgrade + os-restart storm that exhausted merge-agent-lacey's rate limit).
+//
+// This mirrors the rate-limit clauses of `_TRANSIENT_GH_ERROR_RE` in
+// cwp_dispatch/dag_reconcile.py and `hq_entitlement_gh_identity_error_is_rate_limit`
+// in modules/worker-pool/lib/hq-gh.sh so classification is consistent across
+// the worker-pool entitlement path and this dispatch path.
+export function isGithubRateLimitOrBrokerThrottle(errOrText) {
+  const detail = errDetailText(errOrText);
+  if (!detail) return false;
+  return detail.includes('rate limit')
+    || detail.includes('rate-limit')
+    || detail.includes('ratelimit')
+    || detail.includes('secondary rate')
+    || detail.includes('abuse detection')
+    || detail.includes('submitted too quickly')
+    || detail.includes('retry your request')
+    || detail.includes('too many requests')
+    || detail.includes('http 429')
+    || /\b(?:status|statuscode|status_code|code)\s*[:=]?\s*429\b/.test(detail)
+    // OAuth-broker unavailability while it fetches/refreshes the bot token.
+    || detail.includes('http 503')
+    || detail.includes('broker fetch')
+    || detail.includes('broker unavailable')
+    || detail.includes('service unavailable');
+}
+
+export function isTransientHqDispatchError(err) {
+  if (isExecTimeout(err)) return true;
+  // A throttle / broker outage is transient, never terminal — classify it
+  // first so the retry loop and retry-budget guard both treat it as retryable.
+  if (isGithubRateLimitOrBrokerThrottle(err)) return true;
+  const detail = errDetailText(err);
   return /\b(etimedout|econnreset|econnrefused|ehostunreach|eagain|epipe)\b/.test(detail)
     || detail.includes('database is locked')
     || detail.includes('sqlite_busy')
@@ -1298,6 +1341,17 @@ export async function maybeDispatchAmaCloser({
       const parsedFailure = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(err?.stdout || ''));
       const ambiguousLaunch = Boolean(parsedFailure.launchRequestId || parsedFailure.dispatchId);
       const branchHolderBlocked = !ambiguousLaunch && isProvisionBranchHolderBlocked(err);
+      // A throttle / OAuth-broker outage / host-offline window is TRANSIENT: the
+      // dispatch did not fail on its merits, GitHub or the broker was merely
+      // unavailable. Treat it like a branch-holder block for budget purposes —
+      // do NOT decrement the persisted redispatch budget toward
+      // `dispatch-retry-exhausted`. Otherwise a transient rate-limit storm
+      // permanently grounds the closer for a PR even after the limit resets,
+      // which is exactly the cascade observed in the macOS-upgrade incident.
+      const transientFailure = !ambiguousLaunch
+        && !branchHolderBlocked
+        && isTransientHqDispatchError(err);
+      const budgetPreservingFailure = branchHolderBlocked || transientFailure;
       updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => {
         const branchHolderBlockCount = branchHolderBlocked
           ? Number(current?.branchHolderBlockCount || existingBranchHolderBlockCount) + 1
@@ -1316,28 +1370,34 @@ export async function maybeDispatchAmaCloser({
           dispatchedAt: ambiguousLaunch ? dispatchContext.dispatchedAt : null,
           dispatchId: parsedFailure.dispatchId,
           launchRequestId: parsedFailure.launchRequestId,
-          retryCount: branchHolderBlocked
+          retryCount: budgetPreservingFailure
             ? priorRetryCount
             : Number(current?.retryCount || priorRetryCount + 1),
           branchHolderBlockCount,
           state: ambiguousLaunch ? 'dispatched' : (
             branchHolderBlocked && branchHolderBlockCount >= AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND
               ? 'dispatch-branch-holder-block-exhausted'
-              : (branchHolderBlocked ? 'dispatch-blocked-branch-holder' : 'dispatch-failed')
+              : (branchHolderBlocked
+                ? 'dispatch-blocked-branch-holder'
+                : (transientFailure ? 'dispatch-deferred-transient' : 'dispatch-failed'))
           ),
           lastObservedStatus: ambiguousLaunch ? 'unknown' : (branchHolderBlocked ? 'blocked' : null),
           lastObservedAt: ambiguousLaunch || branchHolderBlocked ? dispatchContext.dispatchedAt : null,
+          lastFailureTransient: transientFailure,
           lastError: String(err?.stderr || err?.message || err),
         };
       });
       return noAmaDispatch({
         dispatched: false,
-        skipMergeAgent: branchHolderBlocked || ambiguousLaunch || (
-          isTransientHqDispatchError(err)
-          && Number((existingRecord?.retryCount || 0) + 1) < AMA_CLOSER_REDISPATCH_BOUND
-        ),
+        // Transient failures keep the merge-agent fallback suppressed so the
+        // closer (not merge-agent) re-dispatches once the throttle/broker
+        // clears, since the budget was preserved above and re-dispatch is
+        // guaranteed to be retry-eligible on the next tick.
+        skipMergeAgent: branchHolderBlocked || ambiguousLaunch || transientFailure,
         reason: ambiguousLaunch ? 'dispatch-response-ambiguous' : (
-          branchHolderBlocked ? 'dispatch-branch-holder-blocked' : 'dispatch-failed'
+          branchHolderBlocked ? 'dispatch-branch-holder-blocked' : (
+            transientFailure ? 'dispatch-deferred-transient' : 'dispatch-failed'
+          )
         ),
         error: String(err?.stderr || err?.message || err),
         workerClass,

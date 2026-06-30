@@ -51,6 +51,7 @@ import {
   requestReviewRereview,
 } from './review-state.mjs';
 import { scrapeMergeCloseout } from './closeout-scraper.mjs';
+import { runStartupStaleStateReaper } from './recovery-reaper.mjs';
 import {
   beginReviewerPass,
   completeReviewerPass,
@@ -7395,6 +7396,17 @@ async function warnIfAntigravityReviewerAuthUnavailable({
   return { checked: true, ok: false, reason };
 }
 
+function isProcessAlive(pid) {
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) return false;
+  try {
+    process.kill(numericPid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === 'EPERM';
+  }
+}
+
 async function main() {
   requireEnv('GITHUB_TOKEN');
   process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = resolveRateLimitSharedStatePath(process.env, ROOT);
@@ -7456,6 +7468,20 @@ async function main() {
     db,
     log: console,
     leaseRecoveryEnabled: REVIEWER_LEASE_RECOVERY_ENABLED,
+  });
+
+  // Offline-period resilience: after a host outage (macOS upgrade + os-restart,
+  // a GitHub rate-limit storm, or any long watcher-down window) reviewer passes
+  // can be stranded `status='running'` and AMA closer leases stranded
+  // `pending|dispatched`/`terminalOutcome=null`. Age-gated reaping releases
+  // both so PRs re-review and closers re-dispatch instead of wedging until a
+  // manual rescue. Never throws — a reaper failure must not block polling.
+  runStartupStaleStateReaper({
+    rootDir: ROOT,
+    db,
+    env: process.env,
+    logger: console,
+    isProcessAlive,
   });
 
   // Workload-aware deadline: the previous fixed 10m watchdog tripped

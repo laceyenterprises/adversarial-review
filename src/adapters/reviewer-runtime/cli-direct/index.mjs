@@ -118,6 +118,7 @@ function emptyResult({
   pgid = null,
   reattachToken = null,
   tokenUsage = null,
+  tokenUsageNoUsageReason = null,
   error = null,
 } = {}) {
   return {
@@ -132,6 +133,7 @@ function emptyResult({
     spawnedAt,
     reattachToken,
     tokenUsage,
+    tokenUsageNoUsageReason,
     error,
     stderr: stderrTail,
     stdout: stdoutTail,
@@ -177,6 +179,21 @@ function parseCodexJsonTokenUsage(stdout) {
     };
   }
   return tokenUsage;
+}
+
+function parseCodexJsonTokenUsageFromFailureStdout(stdout) {
+  try {
+    const tokenUsage = parseCodexJsonTokenUsage(stdout);
+    return {
+      tokenUsage,
+      tokenUsageNoUsageReason: tokenUsage ? null : 'unparseable-stdout',
+    };
+  } catch {
+    return {
+      tokenUsage: null,
+      tokenUsageNoUsageReason: 'unparseable-stdout',
+    };
+  }
 }
 
 // CANONICAL_OAUTH_STRIP_ENV is the load-bearing set every adapter advertising
@@ -519,6 +536,9 @@ function createCliDirectReviewerRuntimeAdapter({
       const errorCode = typeof err?.code === 'string' ? err.code : null;
       const stderrTail = tailText(err?.stderr || detail || '');
       const stdoutTail = tailText(err?.stdout || '');
+      const failureTokenEvidence = isCodexModel(req.model)
+        ? parseCodexJsonTokenUsageFromFailureStdout(err?.stdout || '')
+        : { tokenUsage: null, tokenUsageNoUsageReason: null };
       const cancelled = activeRun.cancelled || controller.signal.aborted || errorCode === 'ABORT_ERR';
       const classificationText = [err?.message, err?.stderr].filter(Boolean).join('\n').trim().slice(0, 4000);
       const failureClass = reviewerSignalAwareFailureClass(
@@ -547,6 +567,8 @@ function createCliDirectReviewerRuntimeAdapter({
         signal: typeof err?.signal === 'string' ? err.signal : null,
         pgid: record.pgid,
         reattachToken: record.reattachToken,
+        tokenUsage: failureTokenEvidence.tokenUsage,
+        tokenUsageNoUsageReason: failureTokenEvidence.tokenUsageNoUsageReason,
         error: detail || err.message,
       });
     } finally {

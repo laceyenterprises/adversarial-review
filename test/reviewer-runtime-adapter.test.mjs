@@ -1267,6 +1267,89 @@ test('cli-direct returns Codex JSON token usage from reviewer stdout', async () 
   }
 });
 
+test('cli-direct returns Codex JSON token usage from failed reviewer stdout', async () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      spawnCapturedImpl: async (_command, _args, options) => {
+        options.onSpawn({ pgid: 5252 });
+        const err = new Error('reviewer timed out');
+        err.signal = 'SIGTERM';
+        err.killed = true;
+        err.stdout = [
+          JSON.stringify({
+            type: 'turn.completed',
+            usage: {
+              input_tokens: 456,
+              cached_input_tokens: 78,
+              output_tokens: 9,
+              total_tokens: 465,
+            },
+          }),
+          '',
+        ].join('\n');
+        err.stderr = 'timeout after reviewer subprocess grace window';
+        throw err;
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 3 },
+      timeoutMs: 100,
+      sessionUuid: 'codex-json-token-failure-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.tokenUsage, {
+      input: 456,
+      output: 9,
+      cacheRead: 78,
+      cacheWrite: 0,
+      total: 465,
+      source: 'codex-json',
+    });
+    assert.equal(result.tokenUsageNoUsageReason, null);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('cli-direct records typed no-usage reason for unparseable failed Codex stdout', async () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      spawnCapturedImpl: async (_command, _args, options) => {
+        options.onSpawn({ pgid: 5253 });
+        const err = new Error('reviewer killed');
+        err.signal = 'SIGTERM';
+        err.killed = true;
+        err.stdout = '{"type":"turn.completed","usage":';
+        err.stderr = 'killed before JSON completed';
+        throw err;
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 3 },
+      timeoutMs: 100,
+      sessionUuid: 'codex-json-token-unparseable-failure-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.tokenUsage, null);
+    assert.equal(result.tokenUsageNoUsageReason, 'unparseable-stdout');
+    assert.match(result.stdoutTail, /turn\.completed/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('cli-direct threads cross-model waiver fields into reviewer process args', async () => {
   const rootDir = makeRoot();
   try {

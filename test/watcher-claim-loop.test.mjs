@@ -264,7 +264,7 @@ function readRows(db) {
 
 function readPassRows(db) {
   return db.prepare(
-    'SELECT repo, pr_number, attempt_number, pass_kind, status, workspace_path, metadata_json FROM reviewer_passes ORDER BY pr_number, pass_id'
+    'SELECT repo, pr_number, attempt_number, pass_kind, status, workspace_path, token_input, token_output, token_cache_read, token_cache_write, token_total, token_source, metadata_json FROM reviewer_passes ORDER BY pr_number, pass_id'
   ).all();
 }
 
@@ -894,6 +894,140 @@ test('watcher pollOnce settles reviewer_passes as failed when reviewer spawn thr
     assert.ok(summary.reviewerPassRows.every((row) => row.status === 'failed'));
     assert.ok(summary.reviewerPassRows.every((row) => row.workspace_path === REPO_ROOT));
     assert.ok(summary.reviewerPassRows.every((row) => /fixture reviewer spawn failure/.test(row.metadata_json)));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watcher pollOnce records failed reviewer token usage in reviewer_passes', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-claim-loop-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource({
+      reviewerRuntimeSource: `
+        globalThis.__watcherClaimLoopReviewerSpawns = [];
+        export function createReviewerRuntimeAdapterForDomain() {
+          return {
+            spawnReviewer: async (payload) => {
+              globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+              return {
+                ok: false,
+                failureClass: 'timeout',
+                stdoutTail: '{"type":"turn.completed"}',
+                stderrTail: 'fixture timeout',
+                tokenUsage: {
+                  input: 12345,
+                  output: 67,
+                  cacheRead: 890,
+                  cacheWrite: 0,
+                  total: 12412,
+                  source: 'codex-json',
+                },
+              };
+            },
+            cancel: async () => {},
+            reattach: async () => ({}),
+          };
+        }
+        export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
+        export function loadDomainConfig() { return {}; }
+        export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
+      `,
+    }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource());
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: fixtureEnv(),
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+
+    assert.equal(summary.pollError, null);
+    assert.equal(summary.reviewerPassRows.length, 2);
+    assert.ok(summary.reviewerPassRows.every((row) => row.status === 'failed'));
+    assert.ok(summary.reviewerPassRows.every((row) => row.token_input === 12345));
+    assert.ok(summary.reviewerPassRows.every((row) => row.token_total === 12412));
+    assert.ok(summary.reviewerPassRows.every((row) => row.token_source === 'codex-json'));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watcher pollOnce records no-usage reason for failed reviewer without parseable usage', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-claim-loop-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource({
+      reviewerRuntimeSource: `
+        globalThis.__watcherClaimLoopReviewerSpawns = [];
+        export function createReviewerRuntimeAdapterForDomain() {
+          return {
+            spawnReviewer: async (payload) => {
+              globalThis.__watcherClaimLoopReviewerSpawns.push(payload);
+              return {
+                ok: false,
+                failureClass: 'timeout',
+                stdoutTail: '{"type":"turn.completed","usage":',
+                stderrTail: 'fixture timeout',
+                tokenUsage: null,
+                tokenUsageNoUsageReason: 'unparseable-stdout',
+              };
+            },
+            cancel: async () => {},
+            reattach: async () => ({}),
+          };
+        }
+        export function createReviewerRuntimeAdapterByName() { return createReviewerRuntimeAdapterForDomain(); }
+        export function loadDomainConfig() { return {}; }
+        export async function recoverReviewerRunRecords() { return { recovered: 0, failed: 0 }; }
+      `,
+    }));
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildRunnerSource());
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: fixtureEnv(),
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+
+    assert.equal(summary.pollError, null);
+    assert.equal(summary.reviewerPassRows.length, 2);
+    assert.ok(summary.reviewerPassRows.every((row) => row.status === 'failed'));
+    assert.ok(summary.reviewerPassRows.every((row) => row.token_input === null));
+    assert.ok(summary.reviewerPassRows.every((row) => {
+      const metadata = JSON.parse(row.metadata_json);
+      return metadata.tokenUsageNoUsageReason === 'unparseable-stdout';
+    }));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

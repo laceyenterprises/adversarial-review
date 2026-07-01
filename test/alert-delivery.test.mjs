@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -159,4 +160,50 @@ test('watcher alert defaults fall back to the legacy secrets root when the new d
       alertName: 'Adversarial Watcher Health',
     }
   );
+});
+
+test('watcher alert delivery logs target and payload hash before surfacing delivery errors', async () => {
+  const env = {
+    OPENCLAW_AGENT_HOOKS_URL: 'http://127.0.0.1:9/hooks/agent',
+    ALERT_TO: '123456',
+    ALERT_AGENT_ID: 'ops',
+    HOOKS_TOKEN: 'hook-token',
+    ALERT_DELIVERY_FAIL_ON_ERROR: 'true',
+  };
+  const body = {
+    message: 'watcher.no_progress text',
+    name: 'Adversarial Watcher Health',
+    agentId: 'ops',
+    wakeMode: 'now',
+    deliver: true,
+    channel: 'telegram',
+    to: '123456',
+  };
+  const expectedHash = createHash('sha256').update(JSON.stringify(body)).digest('hex');
+  const originalError = console.error;
+  const lines = [];
+  console.error = (...args) => lines.push(args.map((arg) => String(arg)).join(' '));
+  try {
+    await assert.rejects(
+      deliverAlert(body.message, {
+        env,
+        requestText: async () => {
+          throw new Error('fixture unreachable');
+        },
+      }),
+      (error) => {
+        assert.equal(error.alertDeliveryFailOnError, true);
+        assert.match(error.message, /fixture unreachable/);
+        return true;
+      }
+    );
+  } finally {
+    console.error = originalError;
+  }
+
+  const logLine = lines.find((line) => line.includes('alert_delivery_failed'));
+  assert.ok(logLine);
+  assert.match(logLine, /"producer":"adversarial-review\/alert-delivery"/);
+  assert.match(logLine, /"target_url":"http:\/\/127.0.0.1:9\/hooks\/agent"/);
+  assert.match(logLine, new RegExp(expectedHash));
 });

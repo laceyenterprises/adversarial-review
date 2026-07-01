@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
+import { createHash } from 'node:crypto';
 
 const DEFAULT_SECRETS_ROOT = join(homedir(), '.config', 'adversarial-review', 'secrets');
 const LEGACY_SECRETS_ROOT = '/Users/airlock/agent-os/agents/clio/credentials/local';
@@ -10,6 +11,7 @@ const DEFAULT_OPENCLAW_AGENT_HOOKS_URL = 'http://127.0.0.1:18789/hooks/agent';
 const DEFAULT_ALERT_AGENT_ID = 'main';
 const DEFAULT_ALERT_NAME = 'Adversarial Watcher Health';
 const DEFAULT_HTTP_TIMEOUT_MS = 5_000;
+const ALERT_DELIVERY_PRODUCER = 'adversarial-review/alert-delivery';
 const HTTP_TIMEOUT_MS = Number(
   process.env.ALERT_HTTP_TIMEOUT_MS || process.env.HTTP_TIMEOUT_MS || DEFAULT_HTTP_TIMEOUT_MS
 );
@@ -151,6 +153,27 @@ function httpRequestText(urlString, { method = 'GET', headers = {}, body, timeou
   });
 }
 
+function alertDeliveryPayloadHash(body) {
+  return createHash('sha256').update(JSON.stringify(body ?? {})).digest('hex');
+}
+
+function logAlertDeliveryFailure({ targetUrl, body, error, now = new Date() }) {
+  const record = {
+    event: 'alert_delivery_failed',
+    producer: ALERT_DELIVERY_PRODUCER,
+    target_url: targetUrl,
+    payload_sha256: alertDeliveryPayloadHash(body),
+    timestamp: now.toISOString(),
+    error: error?.message || String(error),
+  };
+  console.error(`[alert-delivery] ${JSON.stringify(record)}`);
+  return record;
+}
+
+function alertDeliveryFailOnErrorEnabled(env = process.env) {
+  return String(env.ALERT_DELIVERY_FAIL_ON_ERROR || '').trim().toLowerCase() === 'true';
+}
+
 async function deliverAlert(text, {
   event = null,
   payload = null,
@@ -162,33 +185,41 @@ async function deliverAlert(text, {
   const token = readHooksToken({ env, fsImpl });
   const hookPath = notificationHookPath(config.openclawAgentHooksUrl);
   const producer = 'adversarial-review';
+  const body = {
+    message: text,
+    name: config.alertName,
+    agentId: config.alertAgentId,
+    wakeMode: 'now',
+    deliver: true,
+    channel: config.alertChannel,
+    to: config.alertTo,
+    ...(event ? { event } : {}),
+    ...(payload ? { payload } : {}),
+  };
   try {
     await requestText(config.openclawAgentHooksUrl, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
-      body: {
-        message: text,
-        name: config.alertName,
-        agentId: config.alertAgentId,
-        wakeMode: 'now',
-        deliver: true,
-        channel: config.alertChannel,
-        to: config.alertTo,
-        ...(event ? { event } : {}),
-        ...(payload ? { payload } : {}),
-      },
+      body,
     });
     await emitNotificationBusDeliverSpan({ hookPath, producer, outcome: 'success' });
   } catch (error) {
     await emitNotificationBusDeliverSpan({ hookPath, producer, outcome: 'error' });
+    logAlertDeliveryFailure({ targetUrl: config.openclawAgentHooksUrl, body, error });
+    if (alertDeliveryFailOnErrorEnabled(env)) {
+      error.alertDeliveryFailOnError = true;
+    }
     throw error;
   }
 }
 
 export {
   deliverAlert,
+  alertDeliveryFailOnErrorEnabled,
+  alertDeliveryPayloadHash,
   firstNonEmpty,
   httpRequestText,
+  logAlertDeliveryFailure,
   readHooksToken,
   resolveAlertDefaults,
 };

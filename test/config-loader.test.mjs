@@ -837,11 +837,81 @@ test('top-level config.yaml accepts the mirrored worker_pool.dag.autowalk.deep_r
   }
 });
 
+test('top-level config.yaml accepts mirrored worker_pool.memory.dynamic keys', () => {
+  // DMG-01 is still Python-owned, but these checked-in keys live in the shared
+  // config.yaml and must parse under the watcher strict schema.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        memory:
+          dynamic:
+            enabled: true
+            shadow_only: false
+            admit_percentile: p99
+            pressure_margin_mb: 768
+            rss_window_minutes: 45
+            oss_model_reserve_mb: 8192
+            snapshot_stale_seconds: 90
+            require_pressure_normal: false
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.memory.dynamic.enabled'), true);
+    assert.equal(cfg.get('worker_pool.memory.dynamic.shadow_only'), false);
+    assert.equal(cfg.get('worker_pool.memory.dynamic.admit_percentile'), 'p99');
+    assert.equal(cfg.get('worker_pool.memory.dynamic.pressure_margin_mb'), 768);
+    assert.equal(cfg.get('worker_pool.memory.dynamic.rss_window_minutes'), 45);
+    assert.equal(cfg.get('worker_pool.memory.dynamic.oss_model_reserve_mb'), 8192);
+    assert.equal(cfg.get('worker_pool.memory.dynamic.snapshot_stale_seconds'), 90);
+    assert.equal(cfg.get('worker_pool.memory.dynamic.require_pressure_normal'), false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('worker_pool.memory.dynamic legacy env aliases resolve through Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        HQ_MEMORY_DYNAMIC_ENABLED: 'true',
+        HQ_MEMORY_DYNAMIC_SHADOW_ONLY: 'false',
+        HQ_MEMORY_DYNAMIC_ADMIT_PERCENTILE: 'p50',
+        HQ_MEMORY_DYNAMIC_PRESSURE_MARGIN_MB: '1024',
+        HQ_MEMORY_DYNAMIC_RSS_WINDOW_MINUTES: '60',
+        HQ_MEMORY_DYNAMIC_OSS_MODEL_RESERVE_MB: '4096',
+        HQ_MEMORY_DYNAMIC_SNAPSHOT_STALE_SECONDS: '120',
+        HQ_MEMORY_DYNAMIC_REQUIRE_PRESSURE_NORMAL: 'false',
+      },
+    });
+    assert.equal(cfg.get('worker_pool.memory.dynamic.enabled'), true);
+    assert.equal(cfg.get('worker_pool.memory.dynamic.shadow_only'), false);
+    assert.equal(cfg.get('worker_pool.memory.dynamic.admit_percentile'), 'p50');
+    assert.equal(cfg.get('worker_pool.memory.dynamic.pressure_margin_mb'), 1024);
+    assert.equal(cfg.get('worker_pool.memory.dynamic.rss_window_minutes'), 60);
+    assert.equal(cfg.get('worker_pool.memory.dynamic.oss_model_reserve_mb'), 4096);
+    assert.equal(cfg.get('worker_pool.memory.dynamic.snapshot_stale_seconds'), 120);
+    assert.equal(cfg.get('worker_pool.memory.dynamic.require_pressure_normal'), false);
+    assert.equal(
+      cfg.resolutionTrace('worker_pool.memory.dynamic.enabled').at(-1).source,
+      'env:HQ_MEMORY_DYNAMIC_ENABLED',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('versioned config.local.yaml tolerates unknown nested worker_pool keys and reads the mirrored one', () => {
   // worker_pool is now a known partial root; in operator-local config.local.yaml
-  // unknown nested worker_pool.* keys (dispatch/memory/etc., owned by the Python
-  // CFG reader) are tolerated-dropped (nested-unknown drop, debug log — NOT a
-  // top-level foreign warn), while the mirrored deep_reconcile key is read.
+  // unknown nested worker_pool.* keys (dispatch/memory.pressure/etc., owned by
+  // the Python CFG reader) are tolerated-dropped (nested-unknown drop, debug
+  // log — NOT a top-level foreign warn), while mirrored deep_reconcile and
+  // memory.dynamic keys are read.
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -860,11 +930,18 @@ test('versioned config.local.yaml tolerates unknown nested worker_pool keys and 
         dag:
           autowalk:
             deep_reconcile: true
+        memory:
+          pressure:
+            projected_headroom_floor_mb: 4096
+          dynamic:
+            enabled: true
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('roots.hq'), '/from-local');
     assert.equal(cfg.get('worker_pool.anything'), null);
     assert.equal(cfg.get('worker_pool.dag.autowalk.deep_reconcile'), true);
+    assert.equal(cfg.get('worker_pool.memory.pressure.projected_headroom_floor_mb'), null);
+    assert.equal(cfg.get('worker_pool.memory.dynamic.enabled'), true);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -2869,12 +2946,19 @@ test('validateSchema tolerates unknown nested worker_pool keys in local files an
   // config.local.yaml is shared by several loaders (CFG-01 python loader, this
   // adversarial-review loader, ...). worker_pool is now a KNOWN partial root in
   // this reader; its unknown nested keys (owned by the Python CFG reader) are
-  // tolerated-dropped per-key under tolerateNestedUnknownLocalKeys, while the
-  // mirrored deep_reconcile is validated and kept.
+  // tolerated-dropped per-key under tolerateNestedUnknownLocalKeys, while
+  // mirrored deep_reconcile and memory.dynamic are validated and kept.
   const out = validateSchema(
     {
       version: 1,
-      worker_pool: { anything: true, dag: { autowalk: { deep_reconcile: true } } },
+      worker_pool: {
+        anything: true,
+        dag: { autowalk: { deep_reconcile: true } },
+        memory: {
+          pressure: { projected_headroom_floor_mb: 4096 },
+          dynamic: { enabled: true },
+        },
+      },
     },
     {
       source: '/tmp/config.local.yaml',
@@ -2885,6 +2969,8 @@ test('validateSchema tolerates unknown nested worker_pool keys in local files an
   assert.equal(out.version, 1);
   assert.equal(out.worker_pool?.anything, undefined, 'unknown nested key dropped');
   assert.equal(out.worker_pool?.dag?.autowalk?.deep_reconcile, true);
+  assert.equal(out.worker_pool?.memory?.pressure, undefined, 'unknown sibling subtree dropped');
+  assert.equal(out.worker_pool?.memory?.dynamic?.enabled, true);
 });
 
 test('validateSchema rejects unknown nested main_catchup keys unless nested-local tolerance is explicit', () => {

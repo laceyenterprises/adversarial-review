@@ -1196,7 +1196,8 @@ function schemaV1() {
           },
         },
       },
-      // worker_pool.dag.autowalk.deep_reconcile and
+      // worker_pool.dag.autowalk.deep_reconcile,
+      // worker_pool.dispatch.goal_lineage.*, and
       // worker_pool.memory.dynamic.* — Python-owned (canonical schema at
       // platform/agent-os-config). PARTIAL mirror, same rationale as the
       // sentinel block below: this Node reader does not consume the values, but
@@ -1218,6 +1219,30 @@ function schemaV1() {
                 __strict: true,
                 __keys: {
                   deep_reconcile: { __type: TYPE_BOOL, __default: false },
+                },
+              },
+            },
+          },
+          dispatch: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              goal_lineage: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  enabled: { __type: TYPE_BOOL, __default: true },
+                  max_bytes: {
+                    __type: TYPE_INT,
+                    __default: 1200,
+                    __min: 200,
+                    __max: 8000,
+                  },
+                  spec_excerpt_bytes: {
+                    __type: TYPE_INT,
+                    __default: 400,
+                    __min: 0,
+                  },
                 },
               },
             },
@@ -1756,6 +1781,18 @@ export const ENV_ALIASES = {
   'worker_pool.memory.dynamic.require_pressure_normal': {
     canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_REQUIRE_PRESSURE_NORMAL',
     aliases: [['HQ_MEMORY_DYNAMIC_REQUIRE_PRESSURE_NORMAL', identity]],
+  },
+  'worker_pool.dispatch.goal_lineage.enabled': {
+    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_GOAL_LINEAGE_ENABLED',
+    aliases: [['HQ_GLN_LINEAGE_ENABLED', identity]],
+  },
+  'worker_pool.dispatch.goal_lineage.max_bytes': {
+    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_GOAL_LINEAGE_MAX_BYTES',
+    aliases: [['HQ_GLN_LINEAGE_MAX_BYTES', identity]],
+  },
+  'worker_pool.dispatch.goal_lineage.spec_excerpt_bytes': {
+    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_GOAL_LINEAGE_SPEC_EXCERPT_BYTES',
+    aliases: [['HQ_GLN_LINEAGE_SPEC_EXCERPT_BYTES', identity]],
   },
   'reviewer.gemini.mode': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_MODE',
@@ -3108,6 +3145,26 @@ function backfillExtraKeyEntryDefaults(merged, schema, dynamicAppIds, trace) {
   }
 }
 
+function validateGoalLineageConfig(merged, trace) {
+  const maxKey = 'worker_pool.dispatch.goal_lineage.max_bytes';
+  const excerptKey = 'worker_pool.dispatch.goal_lineage.spec_excerpt_bytes';
+  const maxBytes = getLeaf(merged, maxKey);
+  const specExcerptBytes = getLeaf(merged, excerptKey);
+  if (maxBytes === MISSING || specExcerptBytes === MISSING) return;
+  if (Number(specExcerptBytes) <= Number(maxBytes)) return;
+  const entries = trace[excerptKey] || [];
+  const source = entries.length ? entries[entries.length - 1].source : 'merged-config';
+  throw new AgentOSConfigError(
+    `${excerptKey}: expected <= ${maxKey} (${maxBytes}), got ${specExcerptBytes}`,
+    {
+      key: excerptKey,
+      expected: `<= ${maxKey} (${maxBytes})`,
+      got: specExcerptBytes,
+      source,
+    },
+  );
+}
+
 // True iff `key` is a path the schema accepts. Walks like schemaLeaf, but
 // also accepts paths that descend into a non-strict dict (extension point,
 // e.g. `submodules.X.Y`) where no further leaf is declared. Used by
@@ -3496,6 +3553,8 @@ function loadConfigImpl({
   // Backfill defaults into keyed-map entries (e.g. env-only `apps.<id>`) so
   // env- and YAML-declared entries converge on the same defaulted shape.
   backfillExtraKeyEntryDefaults(merged, schema, envMaterializedAppIds, trace);
+
+  validateGoalLineageConfig(merged, trace);
 
   const sources = {};
   for (const [key, entries] of Object.entries(trace)) {

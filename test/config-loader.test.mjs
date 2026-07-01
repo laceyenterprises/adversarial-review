@@ -871,6 +871,81 @@ test('top-level config.yaml accepts mirrored worker_pool.memory.dynamic keys', (
   }
 });
 
+test('top-level config.yaml accepts mirrored worker_pool.dispatch.goal_lineage keys', () => {
+  // GLN-02 is Python-owned, but these checked-in keys live in shared
+  // config.yaml and must parse under the watcher strict schema.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        dispatch:
+          goal_lineage:
+            enabled: false
+            max_bytes: 8000
+            spec_excerpt_bytes: 600
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.dispatch.goal_lineage.enabled'), false);
+    assert.equal(cfg.get('worker_pool.dispatch.goal_lineage.max_bytes'), 8000);
+    assert.equal(cfg.get('worker_pool.dispatch.goal_lineage.spec_excerpt_bytes'), 600);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('worker_pool.dispatch.goal_lineage legacy env aliases resolve through Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        HQ_GLN_LINEAGE_ENABLED: 'false',
+        HQ_GLN_LINEAGE_MAX_BYTES: '700',
+        HQ_GLN_LINEAGE_SPEC_EXCERPT_BYTES: '500',
+      },
+    });
+    assert.equal(cfg.get('worker_pool.dispatch.goal_lineage.enabled'), false);
+    assert.equal(cfg.get('worker_pool.dispatch.goal_lineage.max_bytes'), 700);
+    assert.equal(cfg.get('worker_pool.dispatch.goal_lineage.spec_excerpt_bytes'), 500);
+    assert.equal(
+      cfg.resolutionTrace('worker_pool.dispatch.goal_lineage.spec_excerpt_bytes').at(-1).source,
+      'env:HQ_GLN_LINEAGE_SPEC_EXCERPT_BYTES',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('worker_pool.dispatch.goal_lineage rejects spec excerpt larger than max bytes', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        dispatch:
+          goal_lineage:
+            max_bytes: 300
+            spec_excerpt_bytes: 301
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'worker_pool.dispatch.goal_lineage.spec_excerpt_bytes');
+        assert.match(err.message, /expected <= worker_pool\.dispatch\.goal_lineage\.max_bytes \(300\)/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('worker_pool.memory.dynamic legacy env aliases resolve through Node schema', () => {
   const tmp = freshTmp();
   try {

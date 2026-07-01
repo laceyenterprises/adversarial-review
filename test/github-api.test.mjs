@@ -1461,6 +1461,8 @@ function buildWatcherLoaderSource(scenario) {
     [fileUrl('src', 'health-probe.mjs')]: 'fixture:health-probe',
     [fileUrl('src', 'atomic-write.mjs')]: 'fixture:atomic-write',
     [fileUrl('src', 'github-api.mjs')]: 'fixture:github-api',
+    [fileUrl('src', 'gh-cli.mjs')]: 'fixture:gh-cli',
+    [fileUrl('src', 'ama', 'ham-provenance.mjs')]: 'fixture:ama-ham-provenance',
   };
 
   return `
@@ -1627,6 +1629,8 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-reviewer-pool': "export function compareReviewerDispatchCandidates() { return 0; } export function createReviewerMemoryAdmissionSampler() { return { sample: async () => ({ admit: true }) }; } export function reserveReviewerMemoryAdmission() { return () => {}; } export function resolveFirstPassReviewerPoolConfig() { return { enabled: false }; } export function resolveReviewerMemoryPressureConfig() { return {}; } export async function runBoundedReviewerDispatchQueue() { return { dispatched: 0, skipped: 0 }; } export function sortReviewerDispatchCandidates(items) { return items; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
     'fixture:atomic-write': "export function writeFileAtomic() {}",
+    'fixture:gh-cli': "export const GH_LOOKUP_MAX_BUFFER = 26214400; export const GH_LOOKUP_TIMEOUT_MS = 30000; export function buildAllowlistedGhEnv(env = process.env) { return { ...env }; } export async function execGhWithRetry() { throw new Error('unexpected gh-cli fixture call'); } export function isTransientGhError() { return false; } export function parseDate(value) { return value ? new Date(value) : null; } export function parseJsonLines(stdout) { return String(stdout || '').split('\\\\n').filter(Boolean).map((line) => JSON.parse(line)); }",
+    'fixture:ama-ham-provenance': "export const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set(); export function hamAuditCommentAuthorMatches() { return false; } export function parseCommitTrailers() { return {}; } export function parseRemediatedFindingsTrailer() { return null; }",
     'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { globalThis.__githubApiWatcherRollupCalls = (globalThis.__githubApiWatcherRollupCalls || 0) + 1; return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1; return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestMergeability() { return { mergeable: scenario.rollup.mergeable, mergeStateStatus: scenario.rollup.mergeStateStatus }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchPullRequestCommitSubjects() { return []; }",
   };
 

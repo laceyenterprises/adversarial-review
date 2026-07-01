@@ -68,6 +68,8 @@ function buildLoaderSource({
     [fileUrl('src', 'watcher-memory-pressure.mjs')]: 'fixture:watcher-memory-pressure',
     [fileUrl('src', 'github-api.mjs')]: 'fixture:github-api',
     [fileUrl('src', 'health-probe.mjs')]: 'fixture:health-probe',
+    [fileUrl('src', 'gh-cli.mjs')]: 'fixture:gh-cli',
+    [fileUrl('src', 'ama', 'ham-provenance.mjs')]: 'fixture:ama-ham-provenance',
   };
 
   return `
@@ -240,6 +242,8 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0, reservedMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; } export async function readMemoryPressureSample() { return { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }; }",
     'fixture:github-api': "export async function fetchPullRequestRollup() { throw new Error('unexpected github rollup call'); } export async function fetchPullRequestHeadAndState() { return { state: 'open', mergedAt: null, closedAt: null, headRefOid: 'fixture-head', labels: [] }; } export async function fetchPullRequestMergeability() { return { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchPullRequestCommitSubjects() { return []; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
+    'fixture:gh-cli': "export const GH_LOOKUP_MAX_BUFFER = 26214400; export const GH_LOOKUP_TIMEOUT_MS = 30000; export function buildAllowlistedGhEnv(env = process.env) { return { ...env }; } export async function execGhWithRetry() { throw new Error('unexpected gh-cli fixture call'); } export function isTransientGhError() { return false; } export function parseDate(value) { return value ? new Date(value) : null; } export function parseJsonLines(stdout) { return String(stdout || '').split('\\\\n').filter(Boolean).map((line) => JSON.parse(line)); }",
+    'fixture:ama-ham-provenance': "export const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set(); export function hamAuditCommentAuthorMatches() { return false; } export function parseCommitTrailers() { return {}; } export function parseRemediatedFindingsTrailer() { return null; }",
   };
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {
     return { format: 'module', shortCircuit: true, source: simpleStubs[url] };

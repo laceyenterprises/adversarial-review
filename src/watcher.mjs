@@ -73,7 +73,7 @@ import {
   unknownReviewerCommandFailureClass,
 } from './reviewer-failure-classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision, resolveQuotaResetIso } from './quota-exhaustion.mjs';
-import { isTransientGhError } from './gh-cli.mjs';
+import { execGhWithRetry } from './gh-cli.mjs';
 import {
   createReviewerRuntimeAdapterByName,
   createReviewerRuntimeAdapterForDomain,
@@ -3454,6 +3454,7 @@ async function getHeadCloserCommitSuppression({
   prNumber,
   headSha,
   execFileImpl = execFileAsync,
+  execGhWithRetryImpl = execGhWithRetry,
   logger = console,
   retryBackoffMs = [250, 1000],
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -3461,47 +3462,40 @@ async function getHeadCloserCommitSuppression({
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return { suppressed: false, reason: null };
   const retryDelays = Array.isArray(retryBackoffMs) ? retryBackoffMs : [];
-  for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
-    try {
-      const { stdout } = await execFileImpl('gh', [
+  try {
+    const { stdout } = await execGhWithRetryImpl({
+      execFileImpl,
+      args: [
         'api',
         `repos/${repoPath}/commits/${sha}`,
         '--jq',
         '{sha:.sha,message:.commit.message,committerLogin:.committer.login,authorLogin:.author.login,committerName:.commit.committer.name,committerEmail:.commit.committer.email}',
-      ]);
-      const raw = JSON.parse(String(stdout || '{}'));
-      const commit = {
-        sha: raw.sha || sha,
-        message: raw.message || '',
-        committer: { login: raw.committerLogin || null },
-        author: { login: raw.authorLogin || null },
-        commit: {
-          committer: {
-            name: raw.committerName || null,
-            email: raw.committerEmail || null,
-          },
+      ],
+      retries: retryDelays.length,
+      backoffMs: Number(retryDelays[0]) || 500,
+      sleep: sleepImpl,
+    });
+    const raw = JSON.parse(String(stdout || '{}'));
+    const commit = {
+      sha: raw.sha || sha,
+      message: raw.message || '',
+      committer: { login: raw.committerLogin || null },
+      author: { login: raw.authorLogin || null },
+      commit: {
+        committer: {
+          name: raw.committerName || null,
+          email: raw.committerEmail || null,
         },
-      };
-      return isTerminalCloserCommitIdentity(commit);
-    } catch (err) {
-      const transient = isTransientGhError(err);
-      if (transient && attempt < retryDelays.length) {
-        const delayMs = Number(retryDelays[attempt]) || 0;
-        logger?.warn?.(
-          `[watcher] closer commit identity probe transient failure for ${repoPath}#${prNumber} ` +
-            `head=${sha.slice(0, 12)} attempt=${attempt + 1}/${retryDelays.length + 1}; retrying: ${err?.message || err}`
-        );
-        if (delayMs > 0) await sleepImpl(delayMs);
-        continue;
-      }
-      logger?.warn?.(
-        `[watcher] closer commit identity probe failed for ${repoPath}#${prNumber} ` +
-          `head=${sha.slice(0, 12)} transient=${transient}; failing closed: ${err?.message || err}`
-      );
-      throw err;
-    }
+      },
+    };
+    return isTerminalCloserCommitIdentity(commit);
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] closer commit identity probe failed for ${repoPath}#${prNumber} ` +
+        `head=${sha.slice(0, 12)}; failing closed: ${err?.message || err}`
+    );
+    throw err;
   }
-  return { suppressed: false, reason: null };
 }
 
 function createHeadCloserCommitSuppressionResolver(options = {}) {

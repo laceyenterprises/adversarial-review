@@ -653,7 +653,7 @@ test('watcher retries transient closer identity probe failures before suppressin
   assert.equal(calls, 3);
   assert.equal(identitySuppression.suppressed, true);
   assert.equal(identitySuppression.reason, 'closer-commit-identity');
-  assert.match(warnings.join('\n'), /transient failure/);
+  assert.equal(warnings.length, 0);
 });
 
 test('watcher fails closed on non-transient closer identity probe errors', async () => {
@@ -676,6 +676,7 @@ test('watcher fails closed on non-transient closer identity probe errors', async
   );
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /failing closed/);
+  assert.doesNotMatch(warnings[0], /transient=/);
 });
 
 test('watcher closer identity resolver reuses the same commit probe result', async () => {

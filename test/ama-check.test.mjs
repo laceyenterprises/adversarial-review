@@ -66,13 +66,13 @@ function hamTerminalEvidence({
 } = {}) {
   return {
     active: true,
-    ticket: 'HAM-02',
+    ticket: 'HAM',
     commit: {
       sha: headSha,
       parentSha,
       trailers: {
         'Worker-Class': workerClass,
-        'Worker-Ticket': 'HAM-02',
+        'Worker-Ticket': 'HAM',
         'Closed-By': closedBy,
         'Remediated-Findings': remediatedFindings,
       },
@@ -164,11 +164,11 @@ function hamCommitFixture({
     files: changedFiles.map((filename) => ({ filename })),
     commit: {
       message: [
-        'HAM-02 remediate final adversarial findings',
+        'HAM remediate final adversarial findings',
         '',
         `Worker-Class: ${workerClass}`,
         '',
-        'Worker-Ticket: HAM-02',
+        'Worker-Ticket: HAM',
         '',
         `Reviewed-Head: ${parentSha}`,
         '',

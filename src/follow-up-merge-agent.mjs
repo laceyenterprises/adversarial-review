@@ -4708,7 +4708,7 @@ async function verifyFastMergeHamRemediationHead({
     const remediatedFindingCounts = parseRemediatedFindingsTrailer(trailers['remediated-findings']);
     const commitChecks = {
       workerClass: trailers['worker-class'] === 'hammer',
-      ticket: /^HAM-\d+$/i.test(String(trailers['worker-ticket'] || '').trim()),
+      ticket: /^(HAM|AMA-PR-\d+)$/i.test(String(trailers['worker-ticket'] || '').trim()),
       reviewedHead: String(trailers['reviewed-head'] || '').trim() === reviewedHead,
       closedBy: trailers['closed-by'] === 'hammer (adversarial-pipe-mode)',
       head: verifiedCommit.sha === liveHead,

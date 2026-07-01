@@ -70,7 +70,16 @@ scans.
    do not have, an unreachable external service, a destructive/irreversible host
    change, or net-new feature scope to fix. Name the exact failing check(s) in
    that report. Do NOT merge past a red test or a red required check, related or
-   not.
+   not. **No silent red exits:** every failed, pending, missing, stale, or
+   unchecked required check at exit must be named in the PR audit/hard-blocker
+   comment and mapped to one of: fix applied on this head, subrepo PR opened,
+   or the exact out-of-scope/blocked reason. If the correct remediation for a
+   required check such as CFG parity, dual-source SQLite/Postgres migration
+   parity, or a data-model validator belongs in a different repository or
+   submodule than this PR's repository, open a PR in that repository for the
+   parity remediation and link it in the audit comment. If you cannot open that
+   subrepo PR, stop and report the precise owed repo/path/change and the failed
+   check instead of leaving the superproject PR red without explanation.
 2c. **Keep the canonical documentation surfaces current — doc-currency for the
    change you are landing is IN SCOPE, exactly like the test/CI fixes in 2b, and
    is NOT net-new feature scope.** If the post-remediation diff touches either
@@ -96,11 +105,17 @@ scans.
    it in your audit comment if a superproject doc is owed). Do NOT land a schema
    or module change that leaves an in-repo data-model doc or module walkthrough
    stale.
+   **Dual-source migration parity is mandatory.** If a migration/schema change
+   has SQLite and Postgres sources, update both sources and the generated or
+   mirrored data-model catalog together. If the missing parity source lives in
+   another repo/submodule, open the subrepo PR for that parity fix (or stop with
+   the exact owed change) and map the red parity check to that PR/report in the
+   audit comment.
 3. Commit the remediation. The commit must have provenance trailers including:
 
    ```text
    Worker-Class: hammer
-   Worker-Ticket: HAM-02
+   Worker-Ticket: HAM
    Reviewed-Head: <<REVIEWED_SHA>>
    Closed-By: hammer (adversarial-pipe-mode)
    Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)
@@ -178,9 +193,9 @@ Commit the remediation:
 ```bash
 git status --short
 git add <changed files>
-git commit -m "HAM-02 remediate final adversarial findings" \
+git commit -m "HAM remediate final adversarial findings" \
   -m "Worker-Class: hammer" \
-  -m "Worker-Ticket: HAM-02" \
+  -m "Worker-Ticket: HAM" \
   -m "Reviewed-Head: <<REVIEWED_SHA>>" \
   -m "Closed-By: hammer (adversarial-pipe-mode)" \
   -m "Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)"
@@ -478,13 +493,13 @@ match `<<REVIEWED_SHA>>`. The JSON claim alone does not satisfy the predicate.
 ```json
 {
   "active": true,
-  "ticket": "HAM-02",
+  "ticket": "HAM",
   "commit": {
     "sha": "<validated-post-remediation-sha>",
     "parentSha": "<<REVIEWED_SHA>>",
     "trailers": {
       "Worker-Class": "hammer",
-      "Worker-Ticket": "HAM-02",
+      "Worker-Ticket": "HAM",
       "Closed-By": "hammer (adversarial-pipe-mode)",
       "Remediated-Findings": "<n> addressed (<b> blocking, <nb> non-blocking)"
     }
@@ -627,6 +642,10 @@ fi
 - No merging while required checks or changed-surface tests fail on this head.
   Failures proven pre-existing on `origin/main` or purely sandbox-limited must be
   documented in the closing comment after hardening/triage.
+- No silent red required-check exits. A red required check whose correct fix
+  lives in another repo/submodule must have a linked subrepo PR, or the
+  hard-blocker/audit comment must name the exact owed repo/path/change and why
+  the subrepo PR could not be opened.
 - No merging a branch that is `BEHIND` / not rebased onto the latest `main`; the
   rebase must be re-validated (required checks + changed-surface tests green)
   before merge.

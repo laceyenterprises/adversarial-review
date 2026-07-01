@@ -944,6 +944,12 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   const golden = readFileSync(HAMMER_GOLDEN_PROMPT_PATH, 'utf8');
   assert.equal(prompt, golden);
   assert.match(prompt, /Remediate ALL final comments, blocking and non-blocking/);
+  assert.match(prompt, /No silent red exits/);
+  assert.match(prompt, /subrepo PR opened/);
+  assert.match(prompt, /CFG parity/);
+  assert.match(prompt, /Dual-source migration parity is mandatory/);
+  assert.match(prompt, /Worker-Ticket: HAM/);
+  assert.doesNotMatch(prompt, /HAM-02/);
   assert.match(prompt, /Do not request another adversarial review round/);
   assert.match(prompt, /No follow-up PRs\/issues for the final findings/);
   assert.match(prompt, /ham_terminal_remediation_validated/);

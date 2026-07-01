@@ -1481,6 +1481,7 @@ function hamEvidence({
   reviewedHead = parentSha,
   audit = true,
   workerClass = 'hammer',
+  workerTicket = 'HAM',
   remediatedFindings = '2 addressed (1 blocking, 1 non-blocking)',
   auditBody = 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.',
   docCurrency = {
@@ -1494,13 +1495,13 @@ function hamEvidence({
 } = {}) {
   return {
     active: true,
-    ticket: 'HAM-02',
+    ticket: workerTicket,
     commit: {
       sha: headSha,
       parentSha,
       trailers: {
         'Worker-Class': workerClass,
-        'Worker-Ticket': 'HAM-02',
+        'Worker-Ticket': workerTicket,
         'Reviewed-Head': reviewedHead,
         'Closed-By': 'hammer (adversarial-pipe-mode)',
         'Remediated-Findings': remediatedFindings,
@@ -1522,6 +1523,7 @@ function hamGroundTruth({
   reviewedHead = parentSha,
   audit = true,
   workerClass = 'hammer',
+  workerTicket = 'HAM',
   closedBy = 'hammer (adversarial-pipe-mode)',
   remediatedFindings = '2 addressed (1 blocking, 1 non-blocking)',
   auditAuthor = 'hammer-worker',
@@ -1536,7 +1538,7 @@ function hamGroundTruth({
       changedFiles,
       trailers: {
         'Worker-Class': workerClass,
-        'Worker-Ticket': 'HAM-02',
+        'Worker-Ticket': workerTicket,
         'Reviewed-Head': reviewedHead,
         'Closed-By': closedBy,
         'Remediated-Findings': remediatedFindings,
@@ -1588,6 +1590,26 @@ test('ham terminal remediation: HAM-authored live head over reviewed parent is e
     result.trace.hamTerminalRemediation.waived.sort(),
     ['blocking-findings-present', 'stale-review-head', 'verdict-not-settled-success'].sort(),
   );
+});
+
+test('ham terminal remediation: leaked build-time HAM-02 ticket is not valid provenance', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+    prMetadata: { headSha: 'def67890' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({ workerTicket: 'HAM-02' }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({ workerTicket: 'HAM-02' }),
+  });
+
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.hamTerminalRemediation.checks.ticket, false);
+  assert.equal(result.trace.hamTerminalRemediation.ok, false);
 });
 
 test('ham terminal remediation: server-rebased HAM commit proves reviewed head with trailer', () => {

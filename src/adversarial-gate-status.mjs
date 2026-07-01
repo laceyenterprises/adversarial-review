@@ -9,10 +9,9 @@ import {
   buildScopedOperatorApproval,
   classifyBlockingFindings,
   classifyNonBlockingFindings,
-  extractReviewVerdict,
   findLatestFollowUpJobForPR,
+  normalizeEffectiveReviewVerdict,
   normalizeFollowUpJobStatus,
-  normalizeReviewVerdict,
   OPERATOR_APPROVED_LABEL,
   OPERATOR_SKIP_LABELS,
 } from './follow-up-merge-agent.mjs';
@@ -248,7 +247,7 @@ function resolveSettledReviewVerdict(
     let liveVerdict = '';
     let liveBodyForBlockers = '';
     for (const liveBody of liveHeadReview.bodies) {
-      const candidate = String(normalizeReviewVerdict(extractReviewVerdict(liveBody)) || '').toLowerCase();
+      const candidate = String(normalizeEffectiveReviewVerdict(liveBody) || '').toLowerCase();
       if (candidate) {
         liveVerdict = candidate;
         liveBodyForBlockers = liveBody;
@@ -266,7 +265,7 @@ function resolveSettledReviewVerdict(
   const body = latestJob
     ? latestJob.reviewBody
     : extractReviewBodyFromRow(reviewRow);
-  const verdict = String(normalizeReviewVerdict(extractReviewVerdict(body)) || '').toLowerCase();
+  const verdict = String(normalizeEffectiveReviewVerdict(body) || '').toLowerCase();
   return {
     verdict,
     remediationPending: false,
@@ -438,7 +437,7 @@ function pickAdversarialGateStatus({
   if (!latestJob) {
     const reviewBody = extractReviewBodyFromRow(reviewRow);
     if (typeof reviewBody === 'string' && reviewBody.trim()) {
-      const normalizedVerdict = normalizeReviewVerdict(extractReviewVerdict(reviewBody));
+      const normalizedVerdict = normalizeEffectiveReviewVerdict(reviewBody);
       if (normalizedVerdict === 'comment-only' || normalizedVerdict === 'approved') {
         return decide('success', 'Non-blocking adversarial review is settled.', 'review-settled');
       }
@@ -455,7 +454,7 @@ function pickAdversarialGateStatus({
   if (latestJobStatus === 'in-progress') {
     return decide('pending', 'Remediation is in progress.', 'remediation-in-progress');
   }
-  const normalizedVerdict = normalizeReviewVerdict(extractReviewVerdict(latestJob.reviewBody));
+  const normalizedVerdict = normalizeEffectiveReviewVerdict(latestJob.reviewBody);
   if (normalizedVerdict === 'comment-only' || normalizedVerdict === 'approved') {
     return decide('success', 'Non-blocking adversarial review is settled.', 'review-settled');
   }

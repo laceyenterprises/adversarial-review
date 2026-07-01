@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
   extractReviewVerdict,
+  normalizeEffectiveReviewVerdict,
   normalizeReviewVerdict,
   sanitizeCodexReviewPayload,
 } from '../src/kernel/verdict.mjs';
@@ -149,6 +150,139 @@ test('kernel verdict parser preserves verdict line when trailing clarifier is no
 
   assert.equal(extractReviewVerdict(review), 'Request changes');
   assert.equal(normalizeReviewVerdict(extractReviewVerdict(review)), 'request-changes');
+});
+
+test('effective verdict reconciles empty blocking list request-changes to comment-only', () => {
+  const messages = [];
+  const review = [
+    '## Summary',
+    'Only advisory findings remain.',
+    '',
+    '## Blocking issues',
+    '- None.',
+    '',
+    '## Non-blocking issues',
+    '- **Registry name nit**',
+    '  - **File:** `registry.json`',
+    '  - **Lines:** `12`',
+    '  - **Problem:** The label could be clearer.',
+    '  - **Why it matters:** It affects readability only.',
+    '  - **Recommended fix:** Rename it later.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+
+  assert.equal(extractReviewVerdict(review), 'Request changes');
+  assert.equal(normalizeEffectiveReviewVerdict(review, {
+    log: { warn: (message) => messages.push(message) },
+    context: 'test-context',
+  }), 'comment-only');
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /Reconciled Request changes to Comment only/);
+  assert.match(messages[0], /test-context/);
+});
+
+test('effective verdict preserves request-changes when blocking list is non-empty', () => {
+  const review = [
+    '## Summary',
+    'A real blocker remains.',
+    '',
+    '## Blocking issues',
+    '- **Broken migration**',
+    '  - **File:** `migrations/001.sql`',
+    '  - **Lines:** `1-3`',
+    '  - **Problem:** The migration drops live data.',
+    '  - **Why it matters:** It can corrupt production state.',
+    '  - **Recommended fix:** Make the migration idempotent and preserving.',
+    '',
+    '## Non-blocking issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+
+  assert.equal(normalizeEffectiveReviewVerdict(review), 'request-changes');
+});
+
+test('effective verdict escalates permissive verdict when blocking list is non-empty', () => {
+  const messages = [];
+  const review = [
+    '## Summary',
+    'A real blocker remains despite the permissive stated verdict.',
+    '',
+    '## Blocking issues',
+    '- **Broken migration**',
+    '  - **File:** `migrations/001.sql`',
+    '  - **Lines:** `1-3`',
+    '  - **Problem:** The migration drops live data.',
+    '  - **Why it matters:** It can corrupt production state.',
+    '  - **Recommended fix:** Make the migration idempotent and preserving.',
+    '',
+    '## Non-blocking issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+
+  assert.equal(normalizeEffectiveReviewVerdict(review, {
+    log: { warn: (message) => messages.push(message) },
+    context: 'test-context',
+  }), 'request-changes');
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /Escalated comment-only to Request changes/);
+  assert.match(messages[0], /test-context/);
+});
+
+test('effective verdict preserves malformed verdict when blocking list is non-empty', () => {
+  const messages = [];
+  const review = [
+    '## Summary',
+    'A real blocker remains but the verdict line is malformed.',
+    '',
+    '## Blocking issues',
+    '- **Broken migration**',
+    '  - **File:** `migrations/001.sql`',
+    '  - **Lines:** `1-3`',
+    '  - **Problem:** The migration drops live data.',
+    '  - **Why it matters:** It can corrupt production state.',
+    '  - **Recommended fix:** Make the migration idempotent and preserving.',
+    '',
+    '## Non-blocking issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Needs work',
+  ].join('\n');
+
+  assert.equal(normalizeEffectiveReviewVerdict(review, {
+    log: { warn: (message) => messages.push(message) },
+    context: 'test-context',
+  }), 'unknown');
+  assert.deepEqual(messages, []);
+});
+
+test('effective verdict ignores shorter nested fence markers inside blocking section', () => {
+  const review = [
+    '## Summary',
+    'No blockers remain; the finding includes a fenced example.',
+    '',
+    '## Blocking issues',
+    '- None.',
+    '  ````markdown',
+    '  ```',
+    '  ## Verdict',
+    '  Request changes',
+    '  ```',
+    '  ````',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+
+  assert.equal(normalizeEffectiveReviewVerdict(review), 'comment-only');
 });
 
 test('kernel verdict parser ignores prose that starts with a verdict keyword when the final verdict is clean', () => {

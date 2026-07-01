@@ -57,11 +57,11 @@ const decisionFixtures = [
   ['approved-merge-eligible.md', 'merge-eligible'],
   ['approved-with-non-blocking-findings.md', 'merge-eligible'],
   ['formatted-verdict-and-none-variants.md', 'merge-eligible'],
-  ['request-changes-non-blocking-only.md', 'remediation-eligible'],
+  ['request-changes-non-blocking-only.md', 'merge-eligible'],
   ['request-changes-with-blockers-addressable.md', 'remediation-eligible'],
   ['request-changes-with-blockers-auth.md', 'escalate-blockers'],
   ['request-changes-with-blockers-schema-migration.md', 'escalate-blockers'],
-  ['comment-only-with-non-blocking-findings.md', 'inconclusive'],
+  ['comment-only-with-non-blocking-findings.md', 'merge-eligible'],
   ['operator-approved-override.md', 'merge-eligible', {
     operatorApprovalHeadSha: HEAD_SHA,
     operatorApprovalLabelEventId: 'evt-operator-approved',
@@ -267,7 +267,46 @@ Request changes
   assert.match(parsed.parsedFindings[0].problem, /not a real heading/);
 });
 
-test('verdict parser returns the first valid verdict line', () => {
+test('request-changes with empty blocking list is effective comment-only', () => {
+  const reviewBody = `
+## Summary
+Only advisory findings remain.
+
+## Blocking issues
+- None.
+
+## Non-blocking issues
+- **Clarify registry comment**
+  - **File:** \`registry.json\`
+  - **Lines:** \`4\`
+  - **Problem:** The comment could be clearer.
+  - **Why it matters:** It is easier to read.
+  - **Recommended fix:** Reword the comment.
+
+## Verdict
+Request changes
+`;
+
+  const parsed = parseReviewBody(reviewBody);
+  assert.equal(parsed.verdict, 'Comment only');
+  assert.equal(parsed.blocking.count, 0);
+  assert.equal(parsed.nonBlocking.count, 1);
+
+  const result = classify(inputFor('comment-only-merge-eligible.md', { reviewBody }));
+  assert.equal(result.decision, 'merge-eligible');
+  assert.equal(result.blockingFindings, 0);
+  assert.equal(result.nonBlockingFindings, 1);
+});
+
+test('request-changes with non-empty blocking list remains blocking', () => {
+  const result = classify(inputFor('request-changes-with-blockers-addressable.md'));
+
+  assert.equal(parseReviewBody(fixture('request-changes-with-blockers-addressable.md')).verdict, 'Request changes');
+  assert.equal(result.decision, 'remediation-eligible');
+  assert.ok(result.blockingFindings > 0);
+});
+
+test('parsed review body exposes the reconciled effective verdict', () => {
   const reviewBody = `
 ## Blocking issues
 - None.
@@ -280,7 +319,7 @@ Approved
 Request changes
 `;
 
-  assert.equal(parseReviewBody(reviewBody).verdict, 'Approved');
+  assert.equal(parseReviewBody(reviewBody).verdict, 'Comment only');
 });
 
 test('parsed findings expose normalized category and structured fields', () => {

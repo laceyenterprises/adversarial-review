@@ -23,7 +23,7 @@ import {
   detectPublicReplyNoiseSignal,
   validateRemediationReply as validateKernelRemediationReply,
 } from './kernel/remediation-reply.mjs';
-import { extractReviewVerdict, normalizeReviewVerdict } from './kernel/verdict.mjs';
+import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
 
 const MAX_CREATE_ATTEMPTS = 100;
 
@@ -364,7 +364,7 @@ function isSettledReviewJob(job) {
   // proceed even if the stored review body is still Comment-only.
   if (nextAction?.operatorOverride === true) return false;
 
-  const verdict = normalizeReviewVerdict(extractReviewVerdict(job?.reviewBody));
+  const verdict = normalizeEffectiveReviewVerdict(job?.reviewBody);
   return verdict === 'comment-only' || verdict === 'approved';
 }
 

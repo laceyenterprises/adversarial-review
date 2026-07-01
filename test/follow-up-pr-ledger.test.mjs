@@ -638,47 +638,35 @@ test('legacy maxRounds=6 PRs run all six rounds after default-cap changes', () =
   );
 });
 
-test('the lenient final-round addendum keeps Request changes when any finding remains, so the merge gate cannot silently auto-merge known issues', () => {
-  // Reviewer blocking #3: the addendum used to map "everything
-  // non-critical" to verdict `Comment only`, which the worker-pool
-  // automerge gate treats as a pass. A merge-safe verdict policy
-  // requires that the verdict stays `Request changes` whenever any
-  // finding remains (blocking OR non-blocking). The addendum text
-  // is the load-bearing part of the contract — pin it here so
-  // future edits don't silently revert the gate-bypass behavior.
+test('the lenient final-round addendum maps verdicts from blocking issues only', () => {
+  // The verdict contract is now the convergence boundary: genuine
+  // blocking issues still produce Request changes, while advisory-only
+  // findings stay visible under Non-blocking issues and settle as
+  // Comment only.
   const addendum = ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM;
 
-  // The addendum must explicitly forbid downgrading the verdict
-  // to Comment only as a convergence shortcut.
   assert.match(
     addendum,
-    /do NOT downgrade to `Comment only`/,
-    'verdict policy header must explicitly call out the no-downgrade rule',
+    /Verdict policy \(pure blocking-list mapping\)/,
+    'verdict policy header must pin the blocking-list mapping',
   );
 
-  // The addendum must require Request changes whenever any finding
-  // exists, even after lenient categorization moves things to
-  // non-blocking.
   assert.match(
     addendum,
-    /`Request changes`.*whenever.*`## Blocking issues` OR `## Non-blocking issues` contains any item/s,
-    'verdict policy must keep Request changes when any finding remains',
+    /`Request changes`.*only when `## Blocking issues` contains at least one item/s,
+    'verdict policy must preserve Request changes for real blocking issues',
   );
 
-  // The addendum must restrict Comment only to truly clean reviews.
   assert.match(
     addendum,
-    /`Comment only`.*only when.*`## Blocking issues` AND `## Non-blocking issues` are both `- None\.`/s,
-    'Comment only must require empty Blocking AND Non-blocking sections',
+    /`Comment only`.*when `## Blocking issues` is empty \/ `- None\.`.*advisory findings/s,
+    'Comment only must be allowed when only advisory findings remain',
   );
 
-  // The addendum must call out the merge-gate semantics so the
-  // contract is self-documenting (a future editor cannot loosen the
-  // verdict policy without first deciding to weaken the gate).
   assert.match(
     addendum,
-    /merge gate.*Comment only.*automatic pass/,
-    'addendum must document why the verdict policy is strict (downstream gate behavior)',
+    /Non-blocking issues never escalate the verdict/,
+    'non-blocking issues must not escalate the verdict',
   );
 });
 

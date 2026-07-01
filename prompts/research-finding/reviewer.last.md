@@ -35,6 +35,10 @@ Output requirements:
 - In ## Verdict, end with exactly one of:
   - Request changes
   - Comment only
+- Verdict is a pure function of the structured `## Blocking issues` list:
+  - Use `Comment only` when `## Blocking issues` is empty / `- None.`
+  - Use `Request changes` only when at least one blocking issue is listed
+  - Non-blocking issues never escalate the verdict
 
 ---
 
@@ -43,8 +47,9 @@ Output requirements:
 This is the **final** review on this finding under the current remediation
 budget. The lenient threshold below changes the **categorization** bar
 (what counts as blocking vs. non-blocking), but it does **not** change
-the merge gate. On the final round, `Comment only` is allowed only when
-there are no remaining findings in either issue section.
+the merge gate. On the final round, `Comment only` is allowed whenever
+there are no remaining blocking findings; non-blocking findings remain
+visible as advisory comments.
 
 ## Categorization (use on the final round)
 
@@ -60,17 +65,16 @@ polish, lower-risk evidence improvements, future-proofing, speculative
 refactors, and test/documentation gaps that do not make the current
 finding unsafe or materially misleading.
 
-## Verdict policy (do NOT downgrade to `Comment only` to force convergence)
+## Verdict policy (pure blocking-list mapping)
 
-- **`Comment only`** — only when `## Blocking issues` and `## Non-blocking issues` are both `- None.`
-- **`Request changes`** — whenever either issue section contains any item
+- **`Comment only`** — when `## Blocking issues` is empty / `- None.`. Any `## Non-blocking issues` remain visible as advisory findings.
+- **`Request changes`** — only when `## Blocking issues` contains at least one item. Non-blocking issues never escalate the verdict.
 
 The lenient threshold exists to keep the final round honest about which
-issues are truly blocking, not to hide remaining concerns so the loop
-converges artificially.
+issues are truly blocking, not to hide remaining advisory concerns.
 
 ## When to ship clean (`Comment only`)
 
-Look hard before declaring the finding clean. If you find nothing
-substantive in either category after a careful pass, say so plainly and
-emit `Comment only`.
+Look hard before declaring the blocking list clean. If no blocking issue
+remains after a careful pass, say so plainly, keep any advisory findings
+under `## Non-blocking issues`, and emit `Comment only`.

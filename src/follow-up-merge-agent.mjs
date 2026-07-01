@@ -54,7 +54,7 @@ import {
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE, loadConfigCached } from './config-loader.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import classifyMergeAgentRescue, { parseReviewBody as parseMergeAgentRescueReviewBody } from './merge-agent-rescue-classifier.mjs';
-import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
+import { extractReviewVerdict, normalizeEffectiveReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 import {
   readLatestWorkerRunStatusFromLedger,
 } from './session-ledger-read-adapter.mjs';
@@ -5815,6 +5815,7 @@ export {
   dispatchMergeAgentForPR,
   extractOperatorNotes,
   extractReviewVerdict,
+  normalizeEffectiveReviewVerdict,
   fetchMergeAgentCandidate,
   findLatestFollowUpJobForPR,
   isFinalPassOnRequestChangesEnabled,

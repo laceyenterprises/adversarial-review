@@ -9,7 +9,7 @@ import {
 } from './session-ledger-read-adapter.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 
-const PASS_KINDS = new Set(['first-pass', 'remediation', 'rereview']);
+const PASS_KINDS = new Set(['first-pass', 'remediation', 'rereview', 'closer']);
 const PASS_STATUSES = new Set(['running', 'completed', 'failed', 'cancelled']);
 
 function normalizeReviewerClass(value) {
@@ -298,13 +298,19 @@ function readReviewerSessionTokenUsage({
   return result.ok ? tokenUsageFromRuntimeSession(result.row) : null;
 }
 
-function readWorkerRunTokenUsage({
+function readWorkerRunTokenUsage(options = {}) {
+  const result = readWorkerRunTokenUsageResult(options);
+  return result.ok ? result.usage : null;
+}
+
+function readWorkerRunTokenUsageResult({
   workerRunId,
   launchRequestId = null,
   ledgerTarget = null,
   ledgerDbPath = null,
   env = process.env,
   rootDir = process.cwd(),
+  hqRoot = null,
 } = {}) {
   const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath });
   const result = readWorkerRunUsageFromLedger({
@@ -313,9 +319,15 @@ function readWorkerRunTokenUsage({
     ledgerTarget: selectedLedgerTarget,
     env,
     rootDir,
+    hqRoot,
   });
   warnTokenRollupDegraded('worker-run', result);
-  return result.ok ? tokenUsageFromWorkerRun(result.row, { workerRunId, launchRequestId }) : null;
+  return result.ok
+    ? {
+        ...result,
+        usage: tokenUsageFromWorkerRun(result.row, { workerRunId, launchRequestId }),
+      }
+    : result;
 }
 
 function tokenUsageFromWorkerRun(row, { workerRunId = null, launchRequestId = null } = {}) {
@@ -1213,5 +1225,6 @@ export {
   readCodexWorkerLogTokenUsage,
   readReviewerSessionTokenUsage,
   readWorkerRunTokenUsage,
+  readWorkerRunTokenUsageResult,
   reviewerPassRows,
 };

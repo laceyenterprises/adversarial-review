@@ -8,7 +8,7 @@ import { deliverAlert, resolveAlertDefaults } from '../src/alert-delivery.mjs';
 test('watcher alert delivery uses the litellm drift-watch ALERT env shape', async () => {
   const calls = [];
   const env = {
-    OPENCLAW_AGENT_HOOKS_URL: 'http://127.0.0.1:18789/hooks/agent',
+    AGENT_GATEWAY_AGENT_HOOKS_URL: 'http://127.0.0.1:19999/hooks/agent',
     OPENCLAW_HOOKS_TOKEN_FILE: '/secrets/hooks.token',
     ALERT_TO: '123456',
     ALERT_AGENT_ID: 'ops',
@@ -34,7 +34,7 @@ test('watcher alert delivery uses the litellm drift-watch ALERT env shape', asyn
   });
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, 'http://127.0.0.1:18789/hooks/agent');
+  assert.equal(calls[0].url, 'http://127.0.0.1:19999/hooks/agent');
   assert.equal(calls[0].options.method, 'POST');
   assert.deepEqual(calls[0].options.headers, {
     Authorization: 'Bearer hook-token',
@@ -66,7 +66,7 @@ test('watcher alert defaults use the operator Telegram route once ALERT_TO is co
       { fsImpl: { existsSync: () => false } }
     ),
     {
-      openclawAgentHooksUrl: 'http://127.0.0.1:18789/hooks/agent',
+      openclawAgentHooksUrl: 'http://127.0.0.1:18799/hooks/agent',
       hooksTokenFile: join(homedir(), '.config', 'adversarial-review', 'secrets', 'litellm-alert-bridge.token'),
       alertChannel: 'telegram',
       alertTo: '123456',
@@ -100,7 +100,7 @@ test('watcher alert defaults ignore a missing ADV_SECRETS_ROOT token file and ke
       }
     ),
     {
-      openclawAgentHooksUrl: 'http://127.0.0.1:18789/hooks/agent',
+      openclawAgentHooksUrl: 'http://127.0.0.1:18799/hooks/agent',
       hooksTokenFile: defaultTokenFile,
       alertChannel: 'telegram',
       alertTo: '123456',
@@ -128,7 +128,7 @@ test('watcher alert defaults still honor ADV_SECRETS_ROOT when its token file ex
       }
     ),
     {
-      openclawAgentHooksUrl: 'http://127.0.0.1:18789/hooks/agent',
+      openclawAgentHooksUrl: 'http://127.0.0.1:18799/hooks/agent',
       hooksTokenFile: advTokenFile,
       alertChannel: 'telegram',
       alertTo: '123456',
@@ -151,7 +151,7 @@ test('watcher alert defaults fall back to the legacy secrets root when the new d
       }
     ),
     {
-      openclawAgentHooksUrl: 'http://127.0.0.1:18789/hooks/agent',
+      openclawAgentHooksUrl: 'http://127.0.0.1:18799/hooks/agent',
       hooksTokenFile: '/Users/airlock/agent-os/agents/clio/credentials/local/litellm-alert-bridge.token',
       alertChannel: 'telegram',
       alertTo: '123456',

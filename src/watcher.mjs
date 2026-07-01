@@ -73,6 +73,7 @@ import {
   unknownReviewerCommandFailureClass,
 } from './reviewer-failure-classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision, resolveQuotaResetIso } from './quota-exhaustion.mjs';
+import { isTransientGhError } from './gh-cli.mjs';
 import {
   createReviewerRuntimeAdapterByName,
   createReviewerRuntimeAdapterForDomain,
@@ -3388,11 +3389,26 @@ function normalizeIdentityPart(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function normalizeCommitTrailers(trailers) {
+  if (!trailers || typeof trailers !== 'object') return {};
+  if (!Array.isArray(trailers)) return trailers;
+  const normalized = {};
+  for (const trailer of trailers) {
+    if (!trailer || typeof trailer !== 'object') continue;
+    const key = trailer.key ?? trailer.name ?? trailer.token ?? trailer.label;
+    const value = trailer.value ?? trailer.text ?? trailer.rawValue;
+    if (key !== undefined && value !== undefined) {
+      normalized[String(key)] = value;
+    }
+  }
+  return normalized;
+}
+
 function isTerminalCloserCommitIdentity(commit = {}) {
   const message = commit?.commit?.message || commit?.message || '';
   const trailers = {
     ...parseCommitTrailers(message),
-    ...(commit?.trailers && typeof commit.trailers === 'object' ? commit.trailers : {}),
+    ...normalizeCommitTrailers(commit?.trailers),
   };
   const normalizedTrailers = {};
   for (const [key, value] of Object.entries(trailers)) {
@@ -3439,41 +3455,63 @@ async function getHeadCloserCommitSuppression({
   headSha,
   execFileImpl = execFileAsync,
   logger = console,
+  retryBackoffMs = [250, 1000],
+  sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return { suppressed: false, reason: null };
-  try {
-    const { stdout } = await execFileImpl('gh', [
-      'api',
-      `repos/${repoPath}/commits/${sha}`,
-      '--jq',
-      '{sha:.sha,message:.commit.message,committerLogin:.committer.login,authorLogin:.author.login,committerName:.commit.committer.name,committerEmail:.commit.committer.email}',
-    ]);
-    const raw = JSON.parse(String(stdout || '{}'));
-    const commit = {
-      sha: raw.sha || sha,
-      message: raw.message || '',
-      committer: { login: raw.committerLogin || null },
-      author: { login: raw.authorLogin || null },
-      commit: {
-        committer: {
-          name: raw.committerName || null,
-          email: raw.committerEmail || null,
+  const retryDelays = Array.isArray(retryBackoffMs) ? retryBackoffMs : [];
+  for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+    try {
+      const { stdout } = await execFileImpl('gh', [
+        'api',
+        `repos/${repoPath}/commits/${sha}`,
+        '--jq',
+        '{sha:.sha,message:.commit.message,committerLogin:.committer.login,authorLogin:.author.login,committerName:.commit.committer.name,committerEmail:.commit.committer.email}',
+      ]);
+      const raw = JSON.parse(String(stdout || '{}'));
+      const commit = {
+        sha: raw.sha || sha,
+        message: raw.message || '',
+        committer: { login: raw.committerLogin || null },
+        author: { login: raw.authorLogin || null },
+        commit: {
+          committer: {
+            name: raw.committerName || null,
+            email: raw.committerEmail || null,
+          },
         },
-      },
-    };
-    return isTerminalCloserCommitIdentity(commit);
-  } catch (err) {
-    logger?.warn?.(
-      `[watcher] closer commit identity probe failed for ${repoPath}#${prNumber} ` +
-        `head=${sha.slice(0, 12)}; falling through to budget gate: ${err?.message || err}`
-    );
-    return {
-      suppressed: false,
-      reason: null,
-      probeError: err?.message || String(err),
-    };
+      };
+      return isTerminalCloserCommitIdentity(commit);
+    } catch (err) {
+      const transient = isTransientGhError(err);
+      if (transient && attempt < retryDelays.length) {
+        const delayMs = Number(retryDelays[attempt]) || 0;
+        logger?.warn?.(
+          `[watcher] closer commit identity probe transient failure for ${repoPath}#${prNumber} ` +
+            `head=${sha.slice(0, 12)} attempt=${attempt + 1}/${retryDelays.length + 1}; retrying: ${err?.message || err}`
+        );
+        if (delayMs > 0) await sleepImpl(delayMs);
+        continue;
+      }
+      logger?.warn?.(
+        `[watcher] closer commit identity probe failed for ${repoPath}#${prNumber} ` +
+          `head=${sha.slice(0, 12)} transient=${transient}; failing closed: ${err?.message || err}`
+      );
+      throw err;
+    }
   }
+  return { suppressed: false, reason: null };
+}
+
+function createHeadCloserCommitSuppressionResolver(options = {}) {
+  let suppressionPromise = null;
+  return () => {
+    if (!suppressionPromise) {
+      suppressionPromise = getHeadCloserCommitSuppression(options);
+    }
+    return suppressionPromise;
+  };
 }
 
 function isExplicitOperatorReviewRetrigger(reviewRow = null) {
@@ -6395,6 +6433,13 @@ async function pollOnce(
         subject.headSha &&
         existing.reviewer_head_sha !== subject.headSha &&
         !subject.terminal;
+      const resolveHeadCloserCommitSuppression = createHeadCloserCommitSuppressionResolver({
+        repoPath,
+        prNumber,
+        headSha: subject.headSha,
+        execFileImpl: execFileAsync,
+        logger: console,
+      });
       const stalePostedReviewSuppression = postedReviewHeadMoved
         ? await getStalePostedReviewAutoRereviewSuppression({
           rootDir: ROOT,
@@ -6411,13 +6456,7 @@ async function pollOnce(
         : { suppressed: false, reason: null };
       const stalePostedReviewCloserSuppression =
         postedReviewHeadMoved && !stalePostedReviewSuppression.suppressed
-          ? await getHeadCloserCommitSuppression({
-            repoPath,
-            prNumber,
-            headSha: subject.headSha,
-            execFileImpl: execFileAsync,
-            logger: console,
-          })
+          ? await resolveHeadCloserCommitSuppression()
           : { suppressed: false, reason: null };
       const stalePostedReviewBudgetSuppression =
         postedReviewHeadMoved &&
@@ -6997,13 +7036,7 @@ async function pollOnce(
       }
 
       if (!isExplicitOperatorReviewRetrigger(existing)) {
-        const closerSpawnSuppression = await getHeadCloserCommitSuppression({
-          repoPath,
-          prNumber,
-          headSha: subject.headSha,
-          execFileImpl: execFileAsync,
-          logger: console,
-        });
+        const closerSpawnSuppression = await resolveHeadCloserCommitSuppression();
         if (closerSpawnSuppression.suppressed) {
           console.log(
             `[watcher] reviewer spawn SUPPRESSED for ${repoPath}#${prNumber}: ` +
@@ -7775,6 +7808,7 @@ export {
   computeVocabularyFatigueFindingForPR,
   detectCommitVocabularyFatigue,
   countCompletedReviewerRereviewRounds,
+  createHeadCloserCommitSuppressionResolver,
   getStalePostedReviewAutoRereviewSuppression,
   getStalePostedReviewBudgetSuppression,
   getHeadCloserCommitSuppression,

@@ -69,6 +69,8 @@ function isTransientGhError(err) {
   if (/timeout/i.test(stderr)) return true;
   if (/TLS handshake/i.test(stderr)) return true;
   if (/HTTP\s+5\d\d/i.test(stderr)) return true;
+  if (/HTTP\s+429/i.test(stderr)) return true;
+  if (/rate limit|secondary rate limit|too many requests|resource unavailable/i.test(stderr)) return true;
   return false;
 }
 

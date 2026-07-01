@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -16,6 +16,22 @@ function fixtureEnv(overrides = {}) {
     WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED: '1',
     ...overrides,
   };
+}
+
+function installGhFixture(tmp) {
+  const ghPath = path.join(tmp, 'gh');
+  writeFileSync(ghPath, `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "api" && "\${2:-}" =~ ^repos/[^/]+/[^/]+/commits/(.+)$ ]]; then
+  sha="\${BASH_REMATCH[1]}"
+  printf '{"sha":"%s","message":"Fixture commit","committerLogin":null,"authorLogin":null,"committerName":"Fixture Worker","committerEmail":"fixture@example.com"}\\n' "$sha"
+  exit 0
+fi
+echo "unexpected gh fixture call: $*" >&2
+exit 1
+`);
+  chmodSync(ghPath, 0o755);
+  return { PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}` };
 }
 
 function fileUrl(...parts) {
@@ -640,7 +656,7 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
       {
         cwd: REPO_ROOT,
         encoding: 'utf8',
-        env: fixtureEnv(),
+        env: fixtureEnv(installGhFixture(tmp)),
       }
     );
 
@@ -748,7 +764,7 @@ test('watcher reviewer runtime refresh memoizes and falls back on config errors'
       {
         cwd: REPO_ROOT,
         encoding: 'utf8',
-        env: fixtureEnv(),
+        env: fixtureEnv(installGhFixture(tmp)),
       }
     );
 
@@ -776,6 +792,7 @@ test('watcher pollOnce refreshes broker tokens when orchestration_mode config is
         cwd: REPO_ROOT,
         encoding: 'utf8',
         env: fixtureEnv({
+          ...installGhFixture(tmp),
           AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agent-os',
         }),
       }
@@ -837,7 +854,7 @@ test('watcher pollOnce isolates fast-merge poll exceptions and still claims norm
       {
         cwd: REPO_ROOT,
         encoding: 'utf8',
-        env: fixtureEnv(),
+        env: fixtureEnv(installGhFixture(tmp)),
       }
     );
 
@@ -876,7 +893,7 @@ test('watcher pollOnce settles reviewer_passes as failed when reviewer spawn thr
       {
         cwd: REPO_ROOT,
         encoding: 'utf8',
-        env: fixtureEnv(),
+        env: fixtureEnv(installGhFixture(tmp)),
       }
     );
 
@@ -945,7 +962,7 @@ test('watcher pollOnce records failed reviewer token usage in reviewer_passes', 
       {
         cwd: REPO_ROOT,
         encoding: 'utf8',
-        env: fixtureEnv(),
+        env: fixtureEnv(installGhFixture(tmp)),
       }
     );
 
@@ -1008,7 +1025,7 @@ test('watcher pollOnce records no-usage reason for failed reviewer without parse
       {
         cwd: REPO_ROOT,
         encoding: 'utf8',
-        env: fixtureEnv(),
+        env: fixtureEnv(installGhFixture(tmp)),
       }
     );
 
@@ -1052,6 +1069,7 @@ test('watcher pollOnce serial fallback preserves stop-on-first-spawn-failure beh
         cwd: REPO_ROOT,
         encoding: 'utf8',
         env: fixtureEnv({
+          ...installGhFixture(tmp),
           ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_ENABLED: 'false',
         }),
       }

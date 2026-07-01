@@ -44,6 +44,7 @@ import {
 import { REVIEWER_CYCLE_CAP_REACHED_LABEL } from '../src/review-cycle-cap.mjs';
 import {
   countCompletedReviewerRereviewRounds,
+  createHeadCloserCommitSuppressionResolver,
   getStalePostedReviewAutoRereviewSuppression,
   getStalePostedReviewBudgetSuppression,
   getHeadCloserCommitSuppression,
@@ -549,6 +550,25 @@ test('watcher suppresses closer identity commits even when budget remains', asyn
     reason: 'closer-commit-trailer',
     matched: 'Closed-By',
   });
+  assert.deepEqual(isTerminalCloserCommitIdentity({
+    message: 'Close resolved PR',
+    trailers: [
+      { key: 'Closed-By', value: 'hammer (adversarial-pipe-mode)' },
+    ],
+  }), {
+    suppressed: true,
+    reason: 'closer-commit-trailer',
+    matched: 'Closed-By',
+  });
+  assert.deepEqual(isTerminalCloserCommitIdentity({
+    message: 'Close resolved PR',
+    trailers: [
+      { ClosedBy: 'not-a-supported-trailer-shape' },
+    ],
+  }), {
+    suppressed: false,
+    reason: null,
+  });
 
   assert.equal(isTerminalCloserCommitIdentity({
     message: 'Finalize PR',
@@ -580,7 +600,7 @@ test('watcher suppresses closer identity commits even when budget remains', asyn
   assert.equal(viaProbe.reason, 'closer-commit-identity');
 });
 
-test('watcher budget and identity probes fail open without crashing', async () => {
+test('watcher budget probe fails open without crashing', () => {
   const warnings = [];
   const budgetSuppression = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',
@@ -593,20 +613,97 @@ test('watcher budget and identity probes fail open without crashing', async () =
   assert.equal(budgetSuppression.suppressed, false);
   assert.equal(budgetSuppression.reason, null);
   assert.equal(budgetSuppression.probeError, 'ledger unavailable');
+  assert.equal(warnings.length, 1);
+});
 
+test('watcher retries transient closer identity probe failures before suppressing', async () => {
+  const warnings = [];
+  let calls = 0;
   const identitySuppression = await getHeadCloserCommitSuppression({
     repoPath: 'laceyenterprises/agent-os',
     prNumber: 2604,
     headSha: 'def456',
     execFileImpl: async () => {
-      throw new Error('gh unavailable');
+      calls += 1;
+      if (calls === 1) {
+        const err = new Error('TLS handshake timeout');
+        err.stderr = 'TLS handshake timeout';
+        throw err;
+      }
+      if (calls === 2) {
+        const err = new Error('secondary rate limit');
+        err.stderr = 'secondary rate limit';
+        throw err;
+      }
+      return {
+        stdout: JSON.stringify({
+          sha: 'def456',
+          message: 'Finalize PR',
+          committerLogin: 'merge-agent-lacey',
+          authorLogin: null,
+          committerName: 'Merge Agent Worker',
+          committerEmail: '282134940+merge-agent-lacey@users.noreply.github.com',
+        }),
+      };
     },
     logger: { warn: (message) => warnings.push(message) },
+    retryBackoffMs: [1, 1],
+    sleepImpl: async () => {},
   });
-  assert.equal(identitySuppression.suppressed, false);
-  assert.equal(identitySuppression.reason, null);
-  assert.equal(identitySuppression.probeError, 'gh unavailable');
-  assert.equal(warnings.length, 2);
+  assert.equal(calls, 3);
+  assert.equal(identitySuppression.suppressed, true);
+  assert.equal(identitySuppression.reason, 'closer-commit-identity');
+  assert.match(warnings.join('\n'), /transient failure/);
+});
+
+test('watcher fails closed on non-transient closer identity probe errors', async () => {
+  const warnings = [];
+  await assert.rejects(
+    getHeadCloserCommitSuppression({
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 2604,
+      headSha: 'def456',
+      execFileImpl: async () => {
+        const err = new Error('HTTP 404 Not Found');
+        err.stderr = 'HTTP 404 Not Found';
+        throw err;
+      },
+      logger: { warn: (message) => warnings.push(message) },
+      retryBackoffMs: [1],
+      sleepImpl: async () => {},
+    }),
+    /HTTP 404 Not Found/
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /failing closed/);
+});
+
+test('watcher closer identity resolver reuses the same commit probe result', async () => {
+  let calls = 0;
+  const resolveSuppression = createHeadCloserCommitSuppressionResolver({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2605,
+    headSha: 'fed789',
+    execFileImpl: async () => {
+      calls += 1;
+      return {
+        stdout: JSON.stringify({
+          sha: 'fed789',
+          message: 'Finalize PR',
+          committerLogin: 'merge-agent-lacey',
+          authorLogin: null,
+          committerName: 'Merge Agent Worker',
+          committerEmail: '282134940+merge-agent-lacey@users.noreply.github.com',
+        }),
+      };
+    },
+  });
+
+  const first = await resolveSuppression();
+  const second = await resolveSuppression();
+  assert.equal(calls, 1);
+  assert.equal(first, second);
+  assert.equal(first.suppressed, true);
 });
 
 test('watcher recognizes explicit operator retrigger-review override marker', () => {

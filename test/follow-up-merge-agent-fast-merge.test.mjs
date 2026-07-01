@@ -100,10 +100,10 @@ function hamCommit({
     files,
     commit: {
       message: [
-        'HAM-02 remediate final adversarial findings',
+        'HAM remediate final adversarial findings',
         '',
         'Worker-Class: hammer',
-        'Worker-Ticket: HAM-02',
+        'Worker-Ticket: HAM',
         `Reviewed-Head: ${parentSha}`,
         'Closed-By: hammer (adversarial-pipe-mode)',
         `Remediated-Findings: ${remediatedFindings}`,

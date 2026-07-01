@@ -384,7 +384,7 @@ test('watcher does not suppress rereview for raw hold/stuck labels without curre
   }
 });
 
-test('watcher suppresses stale-review auto-refresh after remediation round budget is exhausted', () => {
+test('watcher allows stale-review auto-refresh for the post-budget final review', () => {
   const suppression = getStalePostedReviewBudgetSuppression({
     rootDir: '/tmp/adversarial-review-test-root',
     repoPath: 'laceyenterprises/agent-os',
@@ -405,10 +405,37 @@ test('watcher suppresses stale-review auto-refresh after remediation round budge
   });
 
   assert.deepEqual(suppression, {
-    suppressed: true,
-    reason: 'remediation-round-budget-exhausted',
+    suppressed: false,
+    reason: null,
     completedRoundsForPR: 2,
     roundBudget: 2,
+    reviewAllowance: 3,
+    riskClass: 'medium',
+  });
+});
+
+test('watcher suppresses stale-review auto-refresh after the final review is posted', () => {
+  const suppression = getStalePostedReviewBudgetSuppression({
+    rootDir: '/tmp/adversarial-review-test-root',
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2587,
+    linearTicketId: 'ASB-09',
+    reviewRow: { review_status: 'posted' },
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 2,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 3,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: true,
+    reason: 'remediation-round-budget-exhausted',
+    completedRoundsForPR: 3,
+    roundBudget: 2,
+    reviewAllowance: 3,
     riskClass: 'medium',
   });
 });
@@ -432,6 +459,7 @@ test('watcher allows stale-review auto-refresh while remediation budget remains'
     reason: null,
     completedRoundsForPR: 1,
     roundBudget: 2,
+    reviewAllowance: 3,
     riskClass: 'medium',
   });
 });
@@ -478,10 +506,11 @@ test('watcher counts completed auto-refresh rereviews toward exhausted budget wi
     });
 
     assert.deepEqual(suppression, {
-      suppressed: true,
-      reason: 'remediation-round-budget-exhausted',
+      suppressed: false,
+      reason: null,
       completedRoundsForPR: 2,
       roundBudget: 2,
+      reviewAllowance: 3,
       riskClass: 'medium',
     });
   } finally {
@@ -489,7 +518,7 @@ test('watcher counts completed auto-refresh rereviews toward exhausted budget wi
   }
 });
 
-test('watcher keeps remediation-worker rereview within budget but suppresses ordinary codex once exhausted', () => {
+test('watcher keeps remediation-worker rereview within the final-review allowance', () => {
   const withinBudget = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',
     prNumber: 2601,
@@ -507,6 +536,7 @@ test('watcher keeps remediation-worker rereview within budget but suppresses ord
     reason: null,
     completedRoundsForPR: 1,
     roundBudget: 2,
+    reviewAllowance: 3,
     riskClass: 'medium',
   });
 
@@ -520,7 +550,7 @@ test('watcher keeps remediation-worker rereview within budget but suppresses ord
     },
   }).suppressed, false);
 
-  const exhausted = resolveFirstPassReviewBudgetSuppression({
+  const finalAllowed = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',
     prNumber: 2602,
     reviewRow: { review_status: 'pending' },
@@ -532,8 +562,14 @@ test('watcher keeps remediation-worker rereview within budget but suppresses ord
     countCompletedReviewerRereviewRoundsImpl: () => 0,
     resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
   });
-  assert.equal(exhausted.suppressed, true);
-  assert.equal(exhausted.reason, 'remediation-round-budget-exhausted');
+  assert.deepEqual(finalAllowed, {
+    suppressed: false,
+    reason: null,
+    completedRoundsForPR: 2,
+    roundBudget: 2,
+    reviewAllowance: 3,
+    riskClass: 'medium',
+  });
 });
 
 test('watcher suppresses closer identity commits even when budget remains', async () => {
@@ -737,6 +773,7 @@ test('watcher preserves elevated legacy budgets before suppressing stale-review 
     reason: null,
     completedRoundsForPR: 2,
     roundBudget: 6,
+    reviewAllowance: 7,
     riskClass: 'medium',
   });
 });
@@ -760,6 +797,7 @@ test('watcher treats null latestMaxRounds as absent when resolving stale-review 
     reason: null,
     completedRoundsForPR: 1,
     roundBudget: -1,
+    reviewAllowance: -1,
     riskClass: 'medium',
   });
 });

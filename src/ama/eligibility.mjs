@@ -692,7 +692,7 @@ function validateHamTerminalRemediationEvidence(
     && shaClaimMatches(parentSha, String(reviewedHead || ''));
   const checks = {
     workerClass: verifiedTrailers['worker-class'] === 'hammer',
-    ticket: /^HAM-\d+$/i.test(ticket),
+    ticket: /^(HAM|AMA-PR-\d+)$/i.test(ticket),
     head:
       verifiedCommitSha !== ''
       && verifiedCommitSha === String(currentHead || '')

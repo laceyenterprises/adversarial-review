@@ -285,8 +285,9 @@ must verify that claim against durable GitHub state:
 - the live commit's first parent is exactly the reviewed head;
 - the live commit has a non-empty verified GitHub diff;
 - the live commit message trailers include `Worker-Class: hammer`,
-  `Worker-Ticket: HAM-<n>`, `Closed-By: hammer (adversarial-pipe-mode)`, and a
-  `Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)` count;
+  `Worker-Ticket: HAM` (or `Worker-Ticket: AMA-PR-<n>`), `Closed-By:
+  hammer (adversarial-pipe-mode)`, and a `Remediated-Findings: <n> addressed
+  (<b> blocking, <nb> non-blocking)` count;
 - the PR timeline contains the claimed audit comment body;
 - the matched audit comment author is an allowlisted hammer bot identity
   independent of the commit author, and the eligibility trace records the
@@ -302,6 +303,16 @@ must verify that claim against durable GitHub state:
 HAM attests that each mapped finding was resolved; the predicate verifies the
 commit, trailers, audit mapping, counts, and non-empty diff, but it does not
 semantically prove the code change fixes the reviewer's finding.
+
+HAM must not silently leave required CI red. Any terminal-remediation exit with
+a failed, missing, pending, stale, or unchecked required check must name the
+check in the PR audit or hard-blocker comment and map it to the local fix
+applied, the linked PR opened in the owning subrepo/submodule, or the precise
+blocked/out-of-scope reason. CFG parity, SQLite/Postgres migration parity, and
+data-model validator failures remain merge-blocking; when their correct fix
+belongs outside the current PR repository, HAM opens the subrepo PR or stops
+with the exact owed repo/path/change instead of leaving the superproject PR red
+without explanation.
 
 GitHub-side commit text and PR comments are corroborating evidence, not an
 authorization anchor for any other merge lane. A fast-merge row whose live head

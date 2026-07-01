@@ -1609,7 +1609,7 @@ test('CAP-05: terminal closer records worker_run token usage after async ledger 
   }
 });
 
-test('CAP-05: missing closer token rollup defers state advance for retry', async (t) => {
+test('CAP-05: missing closer token rollup records empty usage and advances retry', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-cap05-rollup-missing-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const ledgerDb = join(rootDir, 'ledger.db');
@@ -1670,25 +1670,33 @@ test('CAP-05: missing closer token rollup defers state advance for retry', async
     readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
   });
 
-  assert.equal(result.dispatched, false);
-  assert.equal(result.reason, 'waiting-for-tokens');
-  assert.deepEqual(calls.map((args) => args.slice(0, 2)), [['dispatch', 'status']]);
+  assert.equal(result.dispatched, true);
+  assert.equal(result.dispatchId, 'dispatch_retry');
+  assert.equal(result.launchRequestId, 'lrq_retry');
+  assert.deepEqual(calls.map((args) => args.slice(0, 2)), [['dispatch', 'status'], ['dispatch', '--worker-class']]);
   const dispatchRecord = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
-  assert.equal(dispatchRecord.retryCount, 1);
-  assert.equal(dispatchRecord.dispatchId, 'dispatch_missing_rollup');
+  assert.equal(dispatchRecord.retryCount, 2);
+  assert.equal(dispatchRecord.dispatchId, 'dispatch_retry');
   const db = openReviewStateDb(rootDir);
   try {
-    const hasReviewerPassesTable = db.prepare(
-      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'reviewer_passes'"
-    ).get();
-    const count = hasReviewerPassesTable
-      ? db.prepare(
-        `SELECT COUNT(*) AS count
-           FROM reviewer_passes
-          WHERE repo = ? AND pr_number = ? AND pass_kind = 'closer'`
-      ).get(dispatchContext.repo, prMetadata.prNumber).count
-      : 0;
-    assert.equal(count, 0);
+    const row = db.prepare(
+      `SELECT attempt_number, status, worker_run_id, token_input, token_output,
+              token_cache_read, token_cache_write, token_total, token_cost_usd,
+              token_source, metadata_json
+         FROM reviewer_passes
+        WHERE repo = ? AND pr_number = ? AND pass_kind = 'closer'`
+    ).get(dispatchContext.repo, prMetadata.prNumber);
+    assert.equal(row.attempt_number, 1);
+    assert.equal(row.status, 'failed');
+    assert.equal(row.worker_run_id, null);
+    assert.equal(row.token_input, null);
+    assert.equal(row.token_output, null);
+    assert.equal(row.token_cache_read, null);
+    assert.equal(row.token_cache_write, null);
+    assert.equal(row.token_total, null);
+    assert.equal(row.token_cost_usd, null);
+    assert.equal(row.token_source, null);
+    assert.equal(JSON.parse(row.metadata_json).tokenUsageUnavailable, true);
   } finally {
     db.close();
   }

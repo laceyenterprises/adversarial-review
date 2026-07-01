@@ -194,6 +194,13 @@ configured, NOT a hardcoded `codex`):
    under `$HQ_ROOT`. For an `agent-os` PR, `workspaceRepos` must contain
    `agent-os` only once; the closer must not duplicate the primary repo via an
    additional workspace entry.
+   When a closer attempt reaches a retryable or terminal state, the watcher
+   polls the session ledger for token usage once using the configured bounded
+   rollup delays. If no `worker_run` token row appears by then, the watcher
+   records the `reviewer_passes` closer row with empty token fields and
+   `metadata_json.tokenUsageUnavailable=true`, then advances to retry or
+   completion handling. `waiting-for-tokens` is therefore only a transient
+   within the local poll window, not a durable operator state.
 4. The closer's prompt logs the gh CLI invocation:
    `gh pr merge <prUrl> --match-head-commit <sha> --<merge_method>`.
 5. PR closes; the commit on the target branch carries the §4.4 trailers

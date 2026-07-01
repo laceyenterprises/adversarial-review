@@ -203,7 +203,10 @@ const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = (
   AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS * AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS
 )
   + AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0)
-  + AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS.reduce((total, delay) => total + delay, 0);
+  + (
+    AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS.reduce((total, delay) => total + delay, 0)
+    * AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS
+  );
 const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 export const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND = 3;
@@ -788,26 +791,6 @@ async function readCloserWorkerRunUsageAfterRollup({
   return null;
 }
 
-class AmaCloserTokenRollupNotReadyError extends Error {
-  constructor({
-    repo,
-    prNumber,
-    attemptNumber,
-    launchRequestId,
-  } = {}) {
-    super(
-      `AMA closer token rollup not ready for ${repo}#${prNumber} ` +
-      `attempt=${attemptNumber} launchRequestId=${launchRequestId || 'unknown'}`
-    );
-    this.name = 'AmaCloserTokenRollupNotReadyError';
-    this.code = 'AMA_CLOSER_TOKEN_ROLLUP_NOT_READY';
-    this.repo = repo;
-    this.prNumber = prNumber;
-    this.attemptNumber = attemptNumber;
-    this.launchRequestId = launchRequestId || null;
-  }
-}
-
 function isAmaCloserTokenRollupNotReadyError(error) {
   return error?.code === 'AMA_CLOSER_TOKEN_ROLLUP_NOT_READY';
 }
@@ -840,22 +823,17 @@ async function recordAmaCloserReviewerPassTokens({
     env,
     pollDelaysMs,
   });
+  const missingUsage = !usage;
   if (!usage) {
     logger.warn?.(
       `[ama-closer] token rollup not ready for ${repo}#${prNumber} ` +
       `attempt=${attemptNumber} launchRequestId=${launchRequestId || 'unknown'}; ` +
-      'deferring closer state advance until reviewer_passes tokens are available'
+      'recording closer pass without token usage so dispatch state can advance'
     );
-    throw new AmaCloserTokenRollupNotReadyError({
-      repo,
-      prNumber,
-      attemptNumber,
-      launchRequestId,
-    });
   }
   const startedAt = record.dispatchedAt || record.lastAttemptedAt || observedAt || new Date().toISOString();
   const endedAt = observedAt || record.lastObservedAt || new Date().toISOString();
-  const workerRunId = usage.workerRunId || record.workerRunId || null;
+  const workerRunId = usage?.workerRunId || record.workerRunId || null;
   const metadata = {
     amaCloser: true,
     headSha: record.headSha || null,
@@ -863,6 +841,7 @@ async function recordAmaCloserReviewerPassTokens({
     launchRequestId,
     terminalStatus: status || null,
     merged,
+    ...(missingUsage ? { tokenUsageUnavailable: true } : {}),
   };
   beginReviewerPass(rootDir, {
     repo,
@@ -884,8 +863,8 @@ async function recordAmaCloserReviewerPassTokens({
     status: closerReviewerPassStatusForDispatchStatus(status, { merged }),
     endedAt,
     workerRunId,
-    tokenUsage: usage,
-    tokenSource: usage.source || 'session-ledger',
+    tokenUsage: usage || null,
+    tokenSource: usage?.source || null,
     metadata,
   });
 }

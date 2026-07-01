@@ -38,6 +38,11 @@ import {
   readBuildCompletionSignalForPr,
 } from '../session-ledger-read-adapter.mjs';
 import {
+  beginReviewerPass,
+  completeReviewerPass,
+  readWorkerRunTokenUsageResult,
+} from '../reviewer-pass-tokens.mjs';
+import {
   amaAuditFilePath,
   amaAuditTraceRef,
   composeAmaTrailers,
@@ -193,10 +198,15 @@ const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;
 const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
 const AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS = 90_000;
 const AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS = AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length + 1;
+const AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS = [500, 1_000, 2_000, 5_000];
 const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = (
   AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS * AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS
 )
-  + AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0);
+  + AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0)
+  + (
+    AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS.reduce((total, delay) => total + delay, 0)
+    * AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS
+  );
 const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 export const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND = 3;
@@ -731,6 +741,136 @@ function retainExistingAmaCloserDispatch(existingRecord, workerClass, status) {
   });
 }
 
+function closerReviewerPassStatusForDispatchStatus(status, { merged = false } = {}) {
+  if (merged) return 'completed';
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'succeeded' || normalized === 'unverified-terminal-success') return 'completed';
+  if (normalized === 'cancelled' || normalized === 'canceled' || normalized === 'superseded') return 'cancelled';
+  return 'failed';
+}
+
+function usageHasTokenFigure(usage) {
+  if (!usage) return false;
+  return usage.input !== null && usage.input !== undefined
+    || usage.output !== null && usage.output !== undefined
+    || usage.cacheRead !== null && usage.cacheRead !== undefined
+    || usage.cacheWrite !== null && usage.cacheWrite !== undefined
+    || usage.total !== null && usage.total !== undefined
+    || usage.costUSD !== null && usage.costUSD !== undefined;
+}
+
+async function readCloserWorkerRunUsageAfterRollup({
+  rootDir,
+  hqRoot,
+  workerRunId = null,
+  launchRequestId = null,
+  ledgerTarget = null,
+  ledgerDbPath = null,
+  env = process.env,
+  pollDelaysMs = AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS,
+} = {}) {
+  const attempts = [0, ...pollDelaysMs];
+  for (const delayMs of attempts) {
+    if (delayMs > 0) await sleep(delayMs);
+    const result = readWorkerRunTokenUsageResult({
+      workerRunId,
+      launchRequestId,
+      ledgerTarget,
+      ledgerDbPath,
+      env,
+      rootDir,
+      hqRoot,
+    });
+    if (!result?.ok) {
+      if (result?.reason === 'missing-worker-run-row') continue;
+      return null;
+    }
+    const usage = result.usage;
+    if (usageHasTokenFigure(usage)) return usage;
+  }
+  return null;
+}
+
+async function recordAmaCloserReviewerPassTokens({
+  rootDir,
+  hqRoot,
+  repo,
+  prNumber,
+  record,
+  status,
+  merged = false,
+  observedAt,
+  ledgerTarget = null,
+  ledgerDbPath = null,
+  env = process.env,
+  pollDelaysMs = AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS,
+  logger = console,
+} = {}) {
+  if (!record?.launchRequestId && !record?.dispatchId) return null;
+  const attemptNumber = normalizeCloserAttemptNumber(record);
+  const launchRequestId = record.launchRequestId || record.dispatchId || null;
+  const usage = await readCloserWorkerRunUsageAfterRollup({
+    rootDir,
+    hqRoot,
+    workerRunId: record.workerRunId || null,
+    launchRequestId,
+    ledgerTarget,
+    ledgerDbPath,
+    env,
+    pollDelaysMs,
+  });
+  const missingUsage = !usage;
+  if (!usage) {
+    logger.warn?.(
+      `[ama-closer] token rollup not ready for ${repo}#${prNumber} ` +
+      `attempt=${attemptNumber} launchRequestId=${launchRequestId || 'unknown'}; ` +
+      'recording closer pass without token usage so dispatch state can advance'
+    );
+  }
+  const startedAt = record.dispatchedAt || record.lastAttemptedAt || observedAt || new Date().toISOString();
+  const endedAt = observedAt || record.lastObservedAt || new Date().toISOString();
+  const workerRunId = usage?.workerRunId || record.workerRunId || null;
+  const metadata = {
+    amaCloser: true,
+    headSha: record.headSha || null,
+    dispatchId: record.dispatchId || null,
+    launchRequestId,
+    terminalStatus: status || null,
+    merged,
+    ...(missingUsage ? { tokenUsageUnavailable: true } : {}),
+  };
+  beginReviewerPass(rootDir, {
+    repo,
+    prNumber,
+    attemptNumber,
+    reviewerClass: record.workerClass || 'codex',
+    reviewerModel: record.workerClass || 'codex',
+    passKind: 'closer',
+    workerRunId,
+    workspacePath: record.workspacePath || null,
+    startedAt,
+    metadata,
+  });
+  return completeReviewerPass(rootDir, {
+    repo,
+    prNumber,
+    attemptNumber,
+    passKind: 'closer',
+    status: closerReviewerPassStatusForDispatchStatus(status, { merged }),
+    endedAt,
+    workerRunId,
+    tokenUsage: usage || null,
+    tokenSource: usage?.source || null,
+    metadata,
+  });
+}
+
+function normalizeCloserAttemptNumber(record) {
+  const parsed = Number(record?.retryCount);
+  if (Number.isInteger(parsed) && parsed > 0) return parsed;
+  return 1;
+}
+
 /**
  * Substitute `<<PLACEHOLDER>>` markers in the template body.
  *
@@ -997,6 +1137,23 @@ export async function maybeDispatchAmaCloser({
     readBuildCompletionSignalForPrImpl,
   });
   if (mergedSignal?.ok) {
+    if (existingRecord?.launchRequestId || existingRecord?.dispatchId) {
+      await recordAmaCloserReviewerPassTokens({
+        rootDir,
+        hqRoot,
+        repo,
+        prNumber,
+        record: existingRecord,
+        status: existingRecord.lastObservedStatus || 'succeeded',
+        merged: true,
+        observedAt: dispatchContext.dispatchedAt,
+        ledgerTarget: dispatchContext.ledgerTarget || null,
+        ledgerDbPath: dispatchContext.ledgerDbPath || null,
+        env: process.env,
+        pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
+        logger,
+      });
+    }
     return noAmaDispatch({
       dispatched: false,
       skipMergeAgent: true,
@@ -1024,6 +1181,7 @@ export async function maybeDispatchAmaCloser({
   let existingDispatchStatus = null;
   if (existingRecord?.launchRequestId) {
     let releaseUnprovenTerminalHold = false;
+    let releaseUnprovenTerminalHoldError = null;
     const statusProbe = await probeAmaCloserDispatchStatus({
       hqPath,
       launchRequestId: existingRecord.launchRequestId,
@@ -1047,14 +1205,9 @@ export async function maybeDispatchAmaCloser({
         return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
       }
       if (auditTerminalOutcome === 'succeeded') {
-        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
-          ...(current || existingRecord),
-          lastObservedStatus: status,
-          lastObservedAt: dispatchContext.dispatchedAt,
-          lastError: 'audit-succeeded-without-merged-signal',
-        }));
         existingDispatchStatus = 'unverified-terminal-success';
         releaseUnprovenTerminalHold = true;
+        releaseUnprovenTerminalHoldError = 'audit-succeeded-without-merged-signal';
       } else if (
         auditTerminalOutcome
         && auditTerminalOutcome !== 'succeeded'
@@ -1062,15 +1215,11 @@ export async function maybeDispatchAmaCloser({
       ) {
         existingDispatchStatus = 'failed';
         releaseUnprovenTerminalHold = true;
+        releaseUnprovenTerminalHoldError = statusProbe?.error || null;
       } else if (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
-        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
-          ...(current || existingRecord),
-          lastObservedStatus: status,
-          lastObservedAt: dispatchContext.dispatchedAt,
-          lastError: 'terminal-success-status-without-audit-or-merged-signal',
-        }));
         existingDispatchStatus = 'unverified-terminal-success';
         releaseUnprovenTerminalHold = true;
+        releaseUnprovenTerminalHoldError = 'terminal-success-status-without-audit-or-merged-signal';
       } else {
         updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
           ...(current || existingRecord),
@@ -1089,6 +1238,34 @@ export async function maybeDispatchAmaCloser({
         };
       }
     }
+    if (releaseUnprovenTerminalHold) {
+      const tokenRecord = {
+        ...existingRecord,
+        lastObservedStatus: existingDispatchStatus || status,
+        lastObservedAt: dispatchContext.dispatchedAt,
+      };
+      await recordAmaCloserReviewerPassTokens({
+        rootDir,
+        hqRoot,
+        repo,
+        prNumber,
+        record: tokenRecord,
+        status: existingDispatchStatus || status,
+        merged: auditTerminalOutcome === 'succeeded',
+        observedAt: dispatchContext.dispatchedAt,
+        ledgerTarget: dispatchContext.ledgerTarget || null,
+        ledgerDbPath: dispatchContext.ledgerDbPath || null,
+        env: process.env,
+        pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
+        logger,
+      });
+      updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+        ...(current || existingRecord),
+        lastObservedStatus: status,
+        lastObservedAt: dispatchContext.dispatchedAt,
+        lastError: releaseUnprovenTerminalHoldError,
+      }));
+    }
     if (status === 'unknown') {
       updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
         ...(current || existingRecord),
@@ -1104,6 +1281,27 @@ export async function maybeDispatchAmaCloser({
         dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
         launchRequestId: existingRecord.launchRequestId || null,
         promptPath: existingRecord.promptPath || null,
+      });
+    }
+    if (AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
+      await recordAmaCloserReviewerPassTokens({
+        rootDir,
+        hqRoot,
+        repo,
+        prNumber,
+        record: {
+          ...existingRecord,
+          lastObservedStatus: status,
+          lastObservedAt: dispatchContext.dispatchedAt,
+        },
+        status,
+        merged: false,
+        observedAt: dispatchContext.dispatchedAt,
+        ledgerTarget: dispatchContext.ledgerTarget || null,
+        ledgerDbPath: dispatchContext.ledgerDbPath || null,
+        env: process.env,
+        pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
+        logger,
       });
     }
     if (!releaseUnprovenTerminalHold && !AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {

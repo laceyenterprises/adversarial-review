@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -28,6 +29,9 @@ import {
   readAmaCloserLease,
   updateAmaCloserLease,
 } from '../src/ama/closer-lease.mjs';
+import { openReviewStateDb } from '../src/review-state.mjs';
+import { main as tokensMain } from '../src/tokens-cli.mjs';
+import { createSessionLedgerDb } from './helpers/session-ledger-fixtures.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
@@ -1288,9 +1292,23 @@ test('existing AMA closer dispatch suppresses a duplicate launch for the same he
 test('SSG-06: failed prior closer dispatch releases ownership and re-dispatches', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-ssg06-failed-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const ledgerDb = join(rootDir, 'ledger.db');
+  createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
+  insertWorkerRun(ledgerDb, {
+    runId: 'wr_failed',
+    launchRequestId: 'lrq_failed',
+    input: 10,
+    output: 2,
+    cost: 0.01,
+    status: 'failed',
+  });
 
   const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
-    dispatchContext: { rootDir },
+    dispatchContext: {
+      rootDir,
+      ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+      closerTokenRollupPollDelaysMs: [],
+    },
   });
   const identity = {
     repo: dispatchContext.repo,
@@ -1490,12 +1508,456 @@ test('SSG-06: ledger merged signal resolves closer ownership as done', async (t)
   assert.equal(execCalled, false, 'merged signal is authoritative; no dispatch/status probe needed');
 });
 
+test('CAP-05: terminal closer records worker_run token usage after async ledger rollup', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-cap05-rollup-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const ledgerDb = join(rootDir, 'ledger.db');
+  createSessionLedgerDb(ledgerDb, {
+    runtimeSessions: [],
+    workerRuns: [{
+      run_id: 'wr_delayed',
+      launch_request_id: 'lrq_delayed',
+      session_id: null,
+      status: 'failed',
+      token_usage_input: null,
+      token_usage_output: null,
+      token_usage_cost_usd: null,
+      token_usage_source: null,
+      started_at: '2026-06-20T10:00:00.000Z',
+      ended_at: '2026-06-20T10:02:00.000Z',
+      updated_at: '2026-06-20T10:02:00.000Z',
+    }],
+  });
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: {
+      rootDir,
+      ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+      closerTokenRollupPollDelaysMs: [10, 10],
+    },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatched',
+    retryCount: 1,
+    dispatchedAt: '2026-06-20T10:00:00Z',
+    dispatchId: 'dispatch_delayed',
+    launchRequestId: 'lrq_delayed',
+    lastObservedStatus: 'starting',
+    lastObservedAt: '2026-06-20T10:00:00Z',
+    lastError: null,
+  });
+  acquireAmaCloserLease({
+    rootDir,
+    ...identity,
+    watcherPid: 1001,
+    now: '2026-06-20T10:00:00Z',
+  });
+  updateAmaCloserLease({
+    rootDir,
+    ...identity,
+    status: 'dispatched',
+    lrqId: 'lrq_delayed',
+    now: '2026-06-20T10:00:01Z',
+  });
+
+  setTimeout(() => {
+    const db = new Database(ledgerDb);
+    db.prepare(
+      `UPDATE worker_runs
+          SET token_usage_input = 321,
+              token_usage_output = 45,
+              token_usage_cost_usd = 0.42,
+              token_usage_source = 'session-ledger',
+              updated_at = '2026-06-20T10:03:00.000Z'
+        WHERE launch_request_id = 'lrq_delayed'`
+    ).run();
+    db.close();
+  }, 5);
+
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:05:00Z' },
+    execFileImpl: async (_cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: '{"status":"failed"}', stderr: '' };
+      }
+      return { stdout: '{"dispatchId":"dispatch_retry","launchRequestId":"lrq_retry"}', stderr: '' };
+    },
+    readTemplateImpl: () => 'stubbed',
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+  });
+
+  assert.equal(result.dispatched, true);
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare(
+      `SELECT pass_kind, attempt_number, worker_run_id, token_input, token_output, token_total, token_cost_usd, token_source
+         FROM reviewer_passes
+        WHERE repo = ? AND pr_number = ? AND pass_kind = 'closer'`
+    ).get(dispatchContext.repo, prMetadata.prNumber);
+    assert.equal(row.pass_kind, 'closer');
+    assert.equal(row.attempt_number, 1);
+    assert.equal(row.worker_run_id, 'wr_delayed');
+    assert.equal(row.token_input, 321);
+    assert.equal(row.token_output, 45);
+    assert.equal(row.token_total, null, 'must not persist a zero placeholder before rollup lands');
+    assert.equal(row.token_cost_usd, 0.42);
+    assert.equal(row.token_source, 'session-ledger');
+  } finally {
+    db.close();
+  }
+});
+
+test('CAP-05: missing closer token rollup records empty usage and advances retry', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-cap05-rollup-missing-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const ledgerDb = join(rootDir, 'ledger.db');
+  createSessionLedgerDb(ledgerDb, {
+    runtimeSessions: [],
+    workerRuns: [{
+      run_id: 'wr_missing_rollup',
+      launch_request_id: 'lrq_missing_rollup',
+      session_id: null,
+      status: 'failed',
+      token_usage_input: null,
+      token_usage_output: null,
+      token_usage_cost_usd: null,
+      token_usage_source: null,
+      started_at: '2026-06-20T10:00:00.000Z',
+      ended_at: '2026-06-20T10:02:00.000Z',
+      updated_at: '2026-06-20T10:02:00.000Z',
+    }],
+  });
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: {
+      rootDir,
+      ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+      closerTokenRollupPollDelaysMs: [],
+    },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatched',
+    retryCount: 1,
+    dispatchedAt: '2026-06-20T10:00:00Z',
+    dispatchId: 'dispatch_missing_rollup',
+    launchRequestId: 'lrq_missing_rollup',
+    lastObservedStatus: 'starting',
+    lastObservedAt: '2026-06-20T10:00:00Z',
+    lastError: null,
+  });
+
+  const calls = [];
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:05:00Z' },
+    execFileImpl: async (_cmd, args) => {
+      calls.push(args);
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        return { stdout: '{"status":"failed"}', stderr: '' };
+      }
+      return { stdout: '{"dispatchId":"dispatch_retry","launchRequestId":"lrq_retry"}', stderr: '' };
+    },
+    readTemplateImpl: () => 'stubbed',
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(result.dispatchId, 'dispatch_retry');
+  assert.equal(result.launchRequestId, 'lrq_retry');
+  assert.deepEqual(calls.map((args) => args.slice(0, 2)), [['dispatch', 'status'], ['dispatch', '--worker-class']]);
+  const dispatchRecord = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  assert.equal(dispatchRecord.retryCount, 2);
+  assert.equal(dispatchRecord.dispatchId, 'dispatch_retry');
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare(
+      `SELECT attempt_number, status, worker_run_id, token_input, token_output,
+              token_cache_read, token_cache_write, token_total, token_cost_usd,
+              token_source, metadata_json
+         FROM reviewer_passes
+        WHERE repo = ? AND pr_number = ? AND pass_kind = 'closer'`
+    ).get(dispatchContext.repo, prMetadata.prNumber);
+    assert.equal(row.attempt_number, 1);
+    assert.equal(row.status, 'failed');
+    assert.equal(row.worker_run_id, null);
+    assert.equal(row.token_input, null);
+    assert.equal(row.token_output, null);
+    assert.equal(row.token_cache_read, null);
+    assert.equal(row.token_cache_write, null);
+    assert.equal(row.token_total, null);
+    assert.equal(row.token_cost_usd, null);
+    assert.equal(row.token_source, null);
+    assert.equal(JSON.parse(row.metadata_json).tokenUsageUnavailable, true);
+  } finally {
+    db.close();
+  }
+});
+
+test('CAP-05: repeated closer token write for same attempt is idempotent', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-cap05-token-idempotent-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const ledgerDb = join(rootDir, 'ledger.db');
+  createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
+  insertWorkerRun(ledgerDb, {
+    runId: 'wr_idempotent',
+    launchRequestId: 'lrq_idempotent',
+    input: 111,
+    output: 22,
+    cost: 0.13,
+    status: 'succeeded',
+  });
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: {
+      rootDir,
+      ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+      closerTokenRollupPollDelaysMs: [],
+    },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatched',
+    retryCount: 1,
+    workerClass: 'codex',
+    dispatchedAt: '2026-06-20T10:00:00Z',
+    dispatchId: 'dispatch_idempotent',
+    launchRequestId: 'lrq_idempotent',
+    lastObservedStatus: 'succeeded',
+    lastObservedAt: '2026-06-20T10:02:00Z',
+    lastError: null,
+  });
+  const mergedSignal = {
+    ok: true,
+    row: {
+      completion_id: 'bcmp_idempotent',
+      repo: dispatchContext.repo,
+      pr_number: prMetadata.prNumber,
+      head_sha: dispatchContext.reviewedSha,
+      signal_kind: 'merged',
+    },
+  };
+  const args = {
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:05:00Z' },
+    execFileImpl: async () => ({ stdout: '{}', stderr: '' }),
+    readTemplateImpl: () => 'stubbed',
+    readBuildCompletionSignalForPrImpl: () => mergedSignal,
+  };
+
+  const first = await maybeDispatchAmaCloser(args);
+  const second = await maybeDispatchAmaCloser(args);
+  assert.equal(first.reason, 'merged-signal-present');
+  assert.equal(second.reason, 'merged-signal-present');
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    const rows = db.prepare(
+      `SELECT attempt_number, worker_run_id, token_input, token_output, token_cost_usd
+         FROM reviewer_passes
+        WHERE repo = ? AND pr_number = ? AND pass_kind = 'closer'`
+    ).all(dispatchContext.repo, prMetadata.prNumber);
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0], {
+      attempt_number: 1,
+      worker_run_id: 'wr_idempotent',
+      token_input: 111,
+      token_output: 22,
+      token_cost_usd: 0.13,
+    });
+  } finally {
+    db.close();
+  }
+});
+
+test('CAP-05: redispatched closer rows accumulate under tokens --by-pr', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-cap05-redispatch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const ledgerDb = join(rootDir, 'ledger.db');
+  createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: {
+      rootDir,
+      ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+      closerTokenRollupPollDelaysMs: [],
+    },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  insertWorkerRun(ledgerDb, {
+    runId: 'wr_close_1',
+    launchRequestId: 'lrq_close_1',
+    input: 100,
+    output: 10,
+    cost: 0.11,
+    status: 'failed',
+  });
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatched',
+    retryCount: 1,
+    dispatchedAt: '2026-06-20T10:00:00Z',
+    dispatchId: 'dispatch_close_1',
+    launchRequestId: 'lrq_close_1',
+    lastObservedStatus: 'starting',
+    lastObservedAt: '2026-06-20T10:00:00Z',
+    lastError: null,
+  });
+  acquireAmaCloserLease({
+    rootDir,
+    ...identity,
+    watcherPid: 1001,
+    now: '2026-06-20T10:00:00Z',
+  });
+  updateAmaCloserLease({
+    rootDir,
+    ...identity,
+    status: 'dispatched',
+    lrqId: 'lrq_close_1',
+    now: '2026-06-20T10:00:01Z',
+  });
+
+  let launchCount = 1;
+  const execFileImpl = async (_cmd, args) => {
+    if (args[0] === 'dispatch' && args[1] === 'status') {
+      return { stdout: '{"status":"failed"}', stderr: '' };
+    }
+    launchCount += 1;
+    return {
+      stdout: JSON.stringify({
+        dispatchId: `dispatch_close_${launchCount}`,
+        launchRequestId: `lrq_close_${launchCount}`,
+      }),
+      stderr: '',
+    };
+  };
+
+  const second = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:05:00Z' },
+    execFileImpl,
+    readTemplateImpl: () => 'stubbed',
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+  });
+  assert.equal(second.launchRequestId, 'lrq_close_2');
+
+  insertWorkerRun(ledgerDb, {
+    runId: 'wr_close_2',
+    launchRequestId: 'lrq_close_2',
+    input: 200,
+    output: 20,
+    cost: 0.22,
+    status: 'failed',
+  });
+  const third = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:10:00Z' },
+    execFileImpl,
+    readTemplateImpl: () => 'stubbed',
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+  });
+  assert.equal(third.launchRequestId, 'lrq_close_3');
+
+  insertWorkerRun(ledgerDb, {
+    runId: 'wr_close_3',
+    launchRequestId: 'lrq_close_3',
+    input: 300,
+    output: 30,
+    cost: 0.33,
+    status: 'succeeded',
+  });
+  const merged = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:15:00Z' },
+    execFileImpl,
+    readTemplateImpl: () => 'stubbed',
+    readBuildCompletionSignalForPrImpl: () => ({
+      ok: true,
+      row: {
+        completion_id: 'bcmp_close_3',
+        repo: dispatchContext.repo,
+        pr_number: prMetadata.prNumber,
+        head_sha: dispatchContext.reviewedSha,
+        signal_kind: 'merged',
+      },
+    }),
+  });
+  assert.equal(merged.reason, 'merged-signal-present');
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    const rows = db.prepare(
+      `SELECT attempt_number, pass_kind, worker_run_id, token_input, token_output, token_cost_usd
+         FROM reviewer_passes
+        WHERE repo = ? AND pr_number = ? AND pass_kind = 'closer'
+        ORDER BY attempt_number`
+    ).all(dispatchContext.repo, prMetadata.prNumber);
+    assert.deepEqual(rows.map((row) => row.attempt_number), [1, 2, 3]);
+    assert.deepEqual(rows.map((row) => row.worker_run_id), ['wr_close_1', 'wr_close_2', 'wr_close_3']);
+    assert.deepEqual(rows.map((row) => row.token_input + row.token_output), [110, 220, 330]);
+  } finally {
+    db.close();
+  }
+
+  const out = { value: '', write(chunk) { this.value += chunk; } };
+  const err = { value: '', write(chunk) { this.value += chunk; } };
+  const code = tokensMain(['--root-dir', rootDir, '--by-pr'], { stdout: out, stderr: err });
+  assert.equal(code, 0, err.value);
+  assert.match(out.value, /acme\/myrepo#1234/);
+  assert.match(out.value, /\b3\b/);
+  assert.match(out.value, /\b660\b/);
+  assert.match(out.value, /codex:660\/\$0\.66/);
+});
+
 test('SSG-06: hq succeeded status alone does not retain closer ownership', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-ssg06-succeeded-admit-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const ledgerDb = join(rootDir, 'ledger.db');
+  createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
+  insertWorkerRun(ledgerDb, {
+    runId: 'wr_admitted',
+    launchRequestId: 'lrq_admitted',
+    input: 10,
+    output: 2,
+    cost: 0.01,
+    status: 'succeeded',
+  });
 
   const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
-    dispatchContext: { rootDir },
+    dispatchContext: {
+      rootDir,
+      ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+      closerTokenRollupPollDelaysMs: [],
+    },
   });
   const identity = {
     repo: dispatchContext.repo,
@@ -1817,6 +2279,31 @@ function plantDispatchRecord(rootDir, identity, overrides) {
   return recordPath;
 }
 
+function insertWorkerRun(ledgerDb, {
+  runId,
+  launchRequestId,
+  input,
+  output,
+  cost,
+  status,
+}) {
+  const db = new Database(ledgerDb);
+  try {
+    db.prepare(
+      `INSERT INTO worker_runs (
+         run_id, launch_request_id, session_id, status, token_usage_input,
+         token_usage_output, token_usage_cost_usd, token_usage_source,
+         started_at, ended_at, updated_at
+       ) VALUES (?, ?, NULL, ?, ?, ?, ?, 'session-ledger',
+         '2026-06-20T10:00:00.000Z',
+         '2026-06-20T10:02:00.000Z',
+         '2026-06-20T10:02:00.000Z')`
+    ).run(runId, launchRequestId, status, input, output, cost);
+  } finally {
+    db.close();
+  }
+}
+
 test('isInterruptedInFlightAmaCloserDispatch identifies a watcher-killed mid-dispatch record', () => {
   // The exact frozen signature: dispatching, no launch id, no error.
   assert.equal(
@@ -2048,9 +2535,23 @@ test('genuine repeated dispatch failures at the bound are still exhausted', asyn
 test('terminal AMA audit releases a stale lease so the same head can be retried', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-terminal-repair-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const ledgerDb = join(rootDir, 'ledger.db');
+  createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
+  insertWorkerRun(ledgerDb, {
+    runId: 'wr_bootstrap',
+    launchRequestId: 'lrq_bootstrap',
+    input: 10,
+    output: 2,
+    cost: 0.01,
+    status: 'superseded',
+  });
 
   const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
-    dispatchContext: { rootDir },
+    dispatchContext: {
+      rootDir,
+      ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+      closerTokenRollupPollDelaysMs: [],
+    },
   });
   const identity = {
     repo: dispatchContext.repo,

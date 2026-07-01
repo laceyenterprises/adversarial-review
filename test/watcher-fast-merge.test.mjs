@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -47,6 +47,8 @@ function buildLoaderSource(scenario) {
     [fileUrl('src', 'health-probe.mjs')]: 'fixture:health-probe',
     [fileUrl('src', 'atomic-write.mjs')]: 'fixture:atomic-write',
     [fileUrl('src', 'github-api.mjs')]: 'fixture:github-api',
+    [fileUrl('src', 'gh-cli.mjs')]: 'fixture:gh-cli',
+    [fileUrl('src', 'ama', 'ham-provenance.mjs')]: 'fixture:ama-ham-provenance',
   };
 
   return `
@@ -133,6 +135,8 @@ export async function load(url, context, nextLoad) {
     'fixture:watcher-memory-pressure': "export async function checkReviewerMemoryAdmission() { return { admit: true, reason: null, sample: { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }, projectedHeadroomMb: 999999, availableMb: 999999, swapUsedPct: 0, estimatedReviewerRssMb: 0, reservedMb: 0 }; } export function peakReviewerMemoryMbFor() { return 0; } export async function readMemoryPressureSample() { return { pressureLevel: 'nominal', availableMb: 999999, swapUsedPct: 0 }; }",
     'fixture:health-probe': "export function createWatcherHealthProbe() { return { beginTick() { return {}; }, recordOpenPending() {}, recordSpawn() {}, async finishTick() {} }; }",
     'fixture:atomic-write': "globalThis.__fastMergeAuditWrites = []; export function writeFileAtomic(path, content, options) { if (globalThis.__fastMergeFailAuditWrites) { throw new Error('fixture audit write failed'); } globalThis.__fastMergeAuditWrites.push({ path, content, options }); }",
+    'fixture:gh-cli': "export const GH_LOOKUP_MAX_BUFFER = 26214400; export const GH_LOOKUP_TIMEOUT_MS = 30000; export function buildAllowlistedGhEnv(env = process.env) { return { ...env }; } export async function execGhWithRetry({ execFileImpl, args } = {}) { return execFileImpl('gh', args); } export function isTransientGhError() { return false; } export function parseDate(value) { return value ? new Date(value) : null; } export function parseJsonLines(stdout) { return String(stdout || '').split('\\\\n').filter(Boolean).map((line) => JSON.parse(line)); }",
+    'fixture:ama-ham-provenance': "export const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set(); export function hamAuditCommentAuthorMatches() { return false; } export function parseCommitTrailers() { return {}; } export function parseRemediatedFindingsTrailer() { return null; }",
     'fixture:github-api': ${JSON.stringify(`
       const scenario = ${JSON.stringify(scenario)};
       export async function fetchPullRequestRollup(repo, prNumber) {
@@ -310,6 +314,18 @@ function runWatcherScenario(scenario, { skipEnabled = false } = {}) {
     writeFileSync(loaderPath, buildLoaderSource(scenario));
     writeFileSync(registerPath, buildRegisterSource(loaderPath));
     writeFileSync(runnerPath, buildRunnerSource(scenario));
+    const ghPath = path.join(tmp, 'gh');
+    writeFileSync(ghPath, `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "api" && "\${2:-}" =~ ^repos/[^/]+/[^/]+/commits/(.+)$ ]]; then
+  sha="\${BASH_REMATCH[1]}"
+  printf '{"sha":"%s","message":"Fixture commit","committerLogin":null,"authorLogin":null,"committerName":"Fixture Worker","committerEmail":"fixture@example.com"}\\n' "$sha"
+  exit 0
+fi
+echo "unexpected gh fixture call: $*" >&2
+exit 1
+`);
+    chmodSync(ghPath, 0o755);
     const result = spawnSync(
       process.execPath,
       ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
@@ -320,6 +336,7 @@ function runWatcherScenario(scenario, { skipEnabled = false } = {}) {
           ...process.env,
           GITHUB_TOKEN: 'fixture-token',
           FML_WATCHER_SKIP_ENABLED: skipEnabled ? 'true' : 'false',
+          PATH: `${tmp}${path.delimiter}${process.env.PATH || ''}`,
           WATCHER_ROUTING_TIER_READINESS_PROBE_DISABLED: '1',
         },
       }

@@ -73,6 +73,7 @@ import {
   unknownReviewerCommandFailureClass,
 } from './reviewer-failure-classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision, resolveQuotaResetIso } from './quota-exhaustion.mjs';
+import { execGhWithRetry } from './gh-cli.mjs';
 import {
   createReviewerRuntimeAdapterByName,
   createReviewerRuntimeAdapterForDomain,
@@ -197,6 +198,7 @@ import {
   fetchPullRequestRollup,
   fetchReviewBodiesForHead,
 } from './github-api.mjs';
+import { parseCommitTrailers } from './ama/ham-provenance.mjs';
 import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
   appendFenceAuditEvent,
@@ -3273,7 +3275,27 @@ function evaluateRoundBudgetForReview({
   };
 }
 
-function getStalePostedReviewBudgetSuppression({
+function countCompletedReviewerRereviewRounds({ db: dbOverride = null, rootDir = ROOT, repoPath, prNumber } = {}) {
+  const ownedDb = dbOverride ? null : openReviewStateDb(rootDir);
+  const readDb = dbOverride || ownedDb;
+  try {
+    if (!dbOverride) ensureReviewStateSchema(readDb);
+    const row = readDb.prepare(
+      `SELECT COUNT(*) AS count
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pass_kind = 'rereview'
+          AND status = 'completed'`
+    ).get(repoPath, prNumber);
+    const count = Number(row?.count || 0);
+    return Number.isFinite(count) && count > 0 ? count : 0;
+  } finally {
+    if (ownedDb) ownedDb.close();
+  }
+}
+
+function resolveFirstPassReviewBudgetSuppression({
   rootDir = ROOT,
   repoPath,
   prNumber,
@@ -3281,8 +3303,10 @@ function getStalePostedReviewBudgetSuppression({
   reviewRow = null,
   labelNames = [],
   logger = console,
+  db: dbOverride = null,
   summarizePRRemediationLedgerImpl = summarizePRRemediationLedger,
   resolveRoundBudgetForJobImpl = resolveRoundBudgetForJob,
+  countCompletedReviewerRereviewRoundsImpl = countCompletedReviewerRereviewRounds,
 } = {}) {
   const normalizedLabelNames = new Set(normalizeLabelNames(labelNames));
   if (
@@ -3297,16 +3321,23 @@ function getStalePostedReviewBudgetSuppression({
 
   let ledger;
   let resolution;
+  let completedRereviewRounds = 0;
   try {
     ledger = summarizePRRemediationLedgerImpl(rootDir, { repo: repoPath, prNumber });
+    completedRereviewRounds = countCompletedReviewerRereviewRoundsImpl({
+      db: dbOverride,
+      rootDir,
+      repoPath,
+      prNumber,
+    });
     resolution = resolveRoundBudgetForJobImpl({
       linearTicketId,
       riskClass: ledger.latestRiskClass,
     }, { rootDir });
   } catch (err) {
     logger?.warn?.(
-      `[watcher] stale posted review budget probe failed for ${repoPath}#${prNumber}; ` +
-        `allowing auto-refresh: ${err?.message || err}`
+      `[watcher] first-pass review budget probe failed for ${repoPath}#${prNumber}; ` +
+        `allowing review spawn path: ${err?.message || err}`
     );
     return {
       suppressed: false,
@@ -3321,9 +3352,13 @@ function getStalePostedReviewBudgetSuppression({
   const roundBudget = hasLatestMaxRounds &&
     Number.isInteger(latestMaxRounds) &&
     latestMaxRounds > resolution.roundBudget
-    ? latestMaxRounds
-    : resolution.roundBudget;
-  const completedRoundsForPR = Number(ledger.completedRoundsForPR || 0);
+      ? latestMaxRounds
+      : resolution.roundBudget;
+  const completedRemediationRoundsForPR = Number(ledger.completedRoundsForPR || 0);
+  const completedRoundsForPR = Math.max(
+    Number.isFinite(completedRemediationRoundsForPR) ? completedRemediationRoundsForPR : 0,
+    Number.isFinite(completedRereviewRounds) ? completedRereviewRounds : 0,
+  );
   if (
     Number.isFinite(completedRoundsForPR) &&
     Number.isFinite(roundBudget) &&
@@ -3346,6 +3381,136 @@ function getStalePostedReviewBudgetSuppression({
     roundBudget,
     riskClass: resolution.riskClass,
   };
+}
+
+const getStalePostedReviewBudgetSuppression = resolveFirstPassReviewBudgetSuppression;
+
+function normalizeIdentityPart(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizeCommitTrailers(trailers) {
+  if (!trailers || typeof trailers !== 'object') return {};
+  if (!Array.isArray(trailers)) return trailers;
+  const normalized = {};
+  for (const trailer of trailers) {
+    if (!trailer || typeof trailer !== 'object') continue;
+    const key = trailer.key ?? trailer.name ?? trailer.token ?? trailer.label;
+    const value = trailer.value ?? trailer.text ?? trailer.rawValue;
+    if (key !== undefined && value !== undefined) {
+      normalized[String(key)] = value;
+    }
+  }
+  return normalized;
+}
+
+function isTerminalCloserCommitIdentity(commit = {}) {
+  const message = commit?.commit?.message || commit?.message || '';
+  const trailers = {
+    ...parseCommitTrailers(message),
+    ...normalizeCommitTrailers(commit?.trailers),
+  };
+  const normalizedTrailers = {};
+  for (const [key, value] of Object.entries(trailers)) {
+    normalizedTrailers[normalizeIdentityPart(key)] = String(value || '').trim();
+  }
+  if (normalizedTrailers['closed-by'] || normalizedTrailers.closer) {
+    return {
+      suppressed: true,
+      reason: 'closer-commit-trailer',
+      matched: normalizedTrailers['closed-by'] ? 'Closed-By' : 'Closer',
+    };
+  }
+
+  const candidates = [
+    commit?.committer?.login,
+    commit?.author?.login,
+    commit?.commit?.committer?.login,
+    commit?.commit?.author?.login,
+    commit?.commit?.committer?.name,
+    commit?.commit?.committer?.email,
+  ].map(normalizeIdentityPart).filter(Boolean);
+  const closerIdentity = candidates.find((candidate) => (
+    candidate === 'merge-agent-lacey' ||
+    candidate === '282134940+merge-agent-lacey@users.noreply.github.com' ||
+    candidate === 'merge agent worker' ||
+    candidate === 'merge-agent worker' ||
+    candidate === 'merge-agent@users.noreply.github.com' ||
+    candidate.startsWith('merge-agent@')
+  ));
+  if (closerIdentity) {
+    return {
+      suppressed: true,
+      reason: 'closer-commit-identity',
+      matched: closerIdentity,
+    };
+  }
+
+  return { suppressed: false, reason: null };
+}
+
+async function getHeadCloserCommitSuppression({
+  repoPath,
+  prNumber,
+  headSha,
+  execFileImpl = execFileAsync,
+  execGhWithRetryImpl = execGhWithRetry,
+  logger = console,
+  retryBackoffMs = [250, 1000],
+  sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
+  const sha = String(headSha || '').trim();
+  if (!repoPath || !sha) return { suppressed: false, reason: null };
+  const retryDelays = Array.isArray(retryBackoffMs) ? retryBackoffMs : [];
+  try {
+    const { stdout } = await execGhWithRetryImpl({
+      execFileImpl,
+      args: [
+        'api',
+        `repos/${repoPath}/commits/${sha}`,
+        '--jq',
+        '{sha:.sha,message:.commit.message,committerLogin:.committer.login,authorLogin:.author.login,committerName:.commit.committer.name,committerEmail:.commit.committer.email}',
+      ],
+      retries: retryDelays.length,
+      backoffMs: Number(retryDelays[0]) || 500,
+      sleep: sleepImpl,
+    });
+    const raw = JSON.parse(String(stdout || '{}'));
+    const commit = {
+      sha: raw.sha || sha,
+      message: raw.message || '',
+      committer: { login: raw.committerLogin || null },
+      author: { login: raw.authorLogin || null },
+      commit: {
+        committer: {
+          name: raw.committerName || null,
+          email: raw.committerEmail || null,
+        },
+      },
+    };
+    return isTerminalCloserCommitIdentity(commit);
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] closer commit identity probe failed for ${repoPath}#${prNumber} ` +
+        `head=${sha.slice(0, 12)}; failing closed: ${err?.message || err}`
+    );
+    throw err;
+  }
+}
+
+function createHeadCloserCommitSuppressionResolver(options = {}) {
+  let suppressionPromise = null;
+  return () => {
+    if (!suppressionPromise) {
+      suppressionPromise = getHeadCloserCommitSuppression(options);
+    }
+    return suppressionPromise;
+  };
+}
+
+function isExplicitOperatorReviewRetrigger(reviewRow = null) {
+  const reason = String(reviewRow?.rereview_reason || '').toLowerCase();
+  return Boolean(reviewRow?.rereview_requested_at && reason.includes('retrigger-review'));
 }
 
 // "Active follow-up exists for this PR; do not spawn a new first-pass
@@ -6262,6 +6427,13 @@ async function pollOnce(
         subject.headSha &&
         existing.reviewer_head_sha !== subject.headSha &&
         !subject.terminal;
+      const resolveHeadCloserCommitSuppression = createHeadCloserCommitSuppressionResolver({
+        repoPath,
+        prNumber,
+        headSha: subject.headSha,
+        execFileImpl: execFileAsync,
+        logger: console,
+      });
       const stalePostedReviewSuppression = postedReviewHeadMoved
         ? await getStalePostedReviewAutoRereviewSuppression({
           rootDir: ROOT,
@@ -6276,8 +6448,14 @@ async function pollOnce(
           logger: console,
         })
         : { suppressed: false, reason: null };
-      const stalePostedReviewBudgetSuppression =
+      const stalePostedReviewCloserSuppression =
         postedReviewHeadMoved && !stalePostedReviewSuppression.suppressed
+          ? await resolveHeadCloserCommitSuppression()
+          : { suppressed: false, reason: null };
+      const stalePostedReviewBudgetSuppression =
+        postedReviewHeadMoved &&
+          !stalePostedReviewSuppression.suppressed &&
+          !stalePostedReviewCloserSuppression.suppressed
           ? getStalePostedReviewBudgetSuppression({
             rootDir: ROOT,
             repoPath,
@@ -6286,6 +6464,7 @@ async function pollOnce(
             reviewRow: existing,
             labelNames: prLabelNames,
             logger: console,
+            db,
           })
           : { suppressed: false, reason: null };
       if (postedReviewHeadMoved && stalePostedReviewSuppression.suppressed) {
@@ -6293,6 +6472,12 @@ async function pollOnce(
           `[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: ` +
             `head moved ${existing.reviewer_head_sha.slice(0, 12)} → ${subject.headSha.slice(0, 12)} ` +
             `because ${stalePostedReviewSuppression.reason}; leaving posted review to the merge-agent`
+        );
+      } else if (postedReviewHeadMoved && stalePostedReviewCloserSuppression.suppressed) {
+        console.log(
+          `[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: ` +
+            `head moved ${existing.reviewer_head_sha.slice(0, 12)} → ${subject.headSha.slice(0, 12)} ` +
+            `because ${stalePostedReviewCloserSuppression.reason}; leaving posted review intact`
         );
       } else if (postedReviewHeadMoved && stalePostedReviewBudgetSuppression.suppressed) {
         const budgetDetail =
@@ -6842,6 +7027,40 @@ async function pollOnce(
       });
       if (roundBudgetDecision.skip) {
         continue;
+      }
+
+      if (!isExplicitOperatorReviewRetrigger(existing)) {
+        const closerSpawnSuppression = await resolveHeadCloserCommitSuppression();
+        if (closerSpawnSuppression.suppressed) {
+          console.log(
+            `[watcher] reviewer spawn SUPPRESSED for ${repoPath}#${prNumber}: ` +
+              `${closerSpawnSuppression.reason} on head ${String(subject.headSha || '').slice(0, 12) || 'unknown'}`
+          );
+          continue;
+        }
+
+        const firstPassBudgetSuppression = resolveFirstPassReviewBudgetSuppression({
+          rootDir: ROOT,
+          repoPath,
+          prNumber,
+          linearTicketId,
+          reviewRow: existing,
+          labelNames: prLabelNames,
+          logger: console,
+          db,
+        });
+        if (firstPassBudgetSuppression.suppressed) {
+          const budgetDetail =
+            firstPassBudgetSuppression.reason === 'remediation-round-budget-exhausted'
+              ? ` (${firstPassBudgetSuppression.completedRoundsForPR}/${firstPassBudgetSuppression.roundBudget} rounds, ` +
+                `risk=${firstPassBudgetSuppression.riskClass || 'unknown'})`
+              : '';
+          console.log(
+            `[watcher] reviewer spawn SUPPRESSED for ${repoPath}#${prNumber}: ` +
+              `${firstPassBudgetSuppression.reason}${budgetDetail}; leaving existing review row intact`
+          );
+          continue;
+        }
       }
 
       const cycleCapConfig = resolveReviewCycleCapConfig({
@@ -7582,11 +7801,17 @@ export {
   fetchLivePRLabels,
   computeVocabularyFatigueFindingForPR,
   detectCommitVocabularyFatigue,
+  countCompletedReviewerRereviewRounds,
+  createHeadCloserCommitSuppressionResolver,
   getStalePostedReviewAutoRereviewSuppression,
   getStalePostedReviewBudgetSuppression,
+  getHeadCloserCommitSuppression,
   handlePostedReviewRow,
+  isExplicitOperatorReviewRetrigger,
+  isTerminalCloserCommitIdentity,
   maybeDispatchReviewerTimeoutExhaustedMergeAgent,
   maybeDispatchAmaClosureFor,
+  resolveFirstPassReviewBudgetSuppression,
   refreshReviewerRuntimeAdapter,
   reviewerRuntimeAdapterForRunRecord,
   resolveMergeAgentCoexistenceForWatcher,

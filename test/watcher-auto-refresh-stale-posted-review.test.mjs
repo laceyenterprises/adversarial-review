@@ -43,8 +43,14 @@ import {
 } from '../src/adapters/operator/github-pr-label-controls/index.mjs';
 import { REVIEWER_CYCLE_CAP_REACHED_LABEL } from '../src/review-cycle-cap.mjs';
 import {
+  countCompletedReviewerRereviewRounds,
+  createHeadCloserCommitSuppressionResolver,
   getStalePostedReviewAutoRereviewSuppression,
   getStalePostedReviewBudgetSuppression,
+  getHeadCloserCommitSuppression,
+  isExplicitOperatorReviewRetrigger,
+  isTerminalCloserCommitIdentity,
+  resolveFirstPassReviewBudgetSuppression,
 } from '../src/watcher.mjs';
 
 
@@ -428,6 +434,288 @@ test('watcher allows stale-review auto-refresh while remediation budget remains'
     roundBudget: 2,
     riskClass: 'medium',
   });
+});
+
+test('watcher counts completed auto-refresh rereviews toward exhausted budget without remediation jobs', () => {
+  const rootDir = makeTempRoot();
+  try {
+    const db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    for (const attemptNumber of [1, 2]) {
+      db.prepare(
+        `INSERT INTO reviewer_passes (
+           repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind,
+           started_at, ended_at, status, metadata_json
+         ) VALUES (?, ?, ?, 'codex', 'codex', 'rereview', ?, ?, 'completed', '{}')`
+      ).run(
+        'laceyenterprises/agent-os',
+        2600,
+        attemptNumber,
+        `2026-07-01T00:0${attemptNumber}:00.000Z`,
+        `2026-07-01T00:0${attemptNumber}:30.000Z`,
+      );
+    }
+
+    assert.equal(countCompletedReviewerRereviewRounds({
+      db,
+      rootDir,
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 2600,
+    }), 2);
+
+    const suppression = resolveFirstPassReviewBudgetSuppression({
+      rootDir,
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 2600,
+      reviewRow: { review_status: 'posted' },
+      db,
+      summarizePRRemediationLedgerImpl: () => ({
+        completedRoundsForPR: 0,
+        latestRiskClass: 'medium',
+        latestMaxRounds: 2,
+      }),
+      resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+    });
+
+    assert.deepEqual(suppression, {
+      suppressed: true,
+      reason: 'remediation-round-budget-exhausted',
+      completedRoundsForPR: 2,
+      roundBudget: 2,
+      riskClass: 'medium',
+    });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('watcher keeps remediation-worker rereview within budget but suppresses ordinary codex once exhausted', () => {
+  const withinBudget = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2601,
+    reviewRow: { review_status: 'pending' },
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 1,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 1,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+  assert.deepEqual(withinBudget, {
+    suppressed: false,
+    reason: null,
+    completedRoundsForPR: 1,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
+
+  assert.equal(isTerminalCloserCommitIdentity({
+    message: 'Fix backlog item\n\nWorker-Class: codex',
+    commit: {
+      committer: {
+        name: 'codex',
+        email: 'codex@example.com',
+      },
+    },
+  }).suppressed, false);
+
+  const exhausted = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2602,
+    reviewRow: { review_status: 'pending' },
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 2,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+  assert.equal(exhausted.suppressed, true);
+  assert.equal(exhausted.reason, 'remediation-round-budget-exhausted');
+});
+
+test('watcher suppresses closer identity commits even when budget remains', async () => {
+  assert.deepEqual(isTerminalCloserCommitIdentity({
+    message: 'Close resolved PR\n\nClosed-By: hammer (adversarial-pipe-mode)',
+    commit: {
+      committer: {
+        name: 'Codex Remediation Worker',
+        email: 'codex-remediation-worker@example.com',
+      },
+    },
+  }), {
+    suppressed: true,
+    reason: 'closer-commit-trailer',
+    matched: 'Closed-By',
+  });
+  assert.deepEqual(isTerminalCloserCommitIdentity({
+    message: 'Close resolved PR',
+    trailers: [
+      { key: 'Closed-By', value: 'hammer (adversarial-pipe-mode)' },
+    ],
+  }), {
+    suppressed: true,
+    reason: 'closer-commit-trailer',
+    matched: 'Closed-By',
+  });
+  assert.deepEqual(isTerminalCloserCommitIdentity({
+    message: 'Close resolved PR',
+    trailers: [
+      { ClosedBy: 'not-a-supported-trailer-shape' },
+    ],
+  }), {
+    suppressed: false,
+    reason: null,
+  });
+
+  assert.equal(isTerminalCloserCommitIdentity({
+    message: 'Finalize PR',
+    committer: { login: 'merge-agent-lacey' },
+    commit: {
+      committer: {
+        name: 'Merge Agent Worker',
+        email: '282134940+merge-agent-lacey@users.noreply.github.com',
+      },
+    },
+  }).reason, 'closer-commit-identity');
+
+  const viaProbe = await getHeadCloserCommitSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2603,
+    headSha: 'abc123',
+    execFileImpl: async () => ({
+      stdout: JSON.stringify({
+        sha: 'abc123',
+        message: 'Finalize PR',
+        committerLogin: 'merge-agent-lacey',
+        authorLogin: null,
+        committerName: 'Merge Agent Worker',
+        committerEmail: '282134940+merge-agent-lacey@users.noreply.github.com',
+      }),
+    }),
+  });
+  assert.equal(viaProbe.suppressed, true);
+  assert.equal(viaProbe.reason, 'closer-commit-identity');
+});
+
+test('watcher budget probe fails open without crashing', () => {
+  const warnings = [];
+  const budgetSuppression = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2604,
+    summarizePRRemediationLedgerImpl: () => {
+      throw new Error('ledger unavailable');
+    },
+    logger: { warn: (message) => warnings.push(message) },
+  });
+  assert.equal(budgetSuppression.suppressed, false);
+  assert.equal(budgetSuppression.reason, null);
+  assert.equal(budgetSuppression.probeError, 'ledger unavailable');
+  assert.equal(warnings.length, 1);
+});
+
+test('watcher retries transient closer identity probe failures before suppressing', async () => {
+  const warnings = [];
+  let calls = 0;
+  const identitySuppression = await getHeadCloserCommitSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2604,
+    headSha: 'def456',
+    execFileImpl: async () => {
+      calls += 1;
+      if (calls === 1) {
+        const err = new Error('TLS handshake timeout');
+        err.stderr = 'TLS handshake timeout';
+        throw err;
+      }
+      if (calls === 2) {
+        const err = new Error('secondary rate limit');
+        err.stderr = 'secondary rate limit';
+        throw err;
+      }
+      return {
+        stdout: JSON.stringify({
+          sha: 'def456',
+          message: 'Finalize PR',
+          committerLogin: 'merge-agent-lacey',
+          authorLogin: null,
+          committerName: 'Merge Agent Worker',
+          committerEmail: '282134940+merge-agent-lacey@users.noreply.github.com',
+        }),
+      };
+    },
+    logger: { warn: (message) => warnings.push(message) },
+    retryBackoffMs: [1, 1],
+    sleepImpl: async () => {},
+  });
+  assert.equal(calls, 3);
+  assert.equal(identitySuppression.suppressed, true);
+  assert.equal(identitySuppression.reason, 'closer-commit-identity');
+  assert.equal(warnings.length, 0);
+});
+
+test('watcher fails closed on non-transient closer identity probe errors', async () => {
+  const warnings = [];
+  await assert.rejects(
+    getHeadCloserCommitSuppression({
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 2604,
+      headSha: 'def456',
+      execFileImpl: async () => {
+        const err = new Error('HTTP 404 Not Found');
+        err.stderr = 'HTTP 404 Not Found';
+        throw err;
+      },
+      logger: { warn: (message) => warnings.push(message) },
+      retryBackoffMs: [1],
+      sleepImpl: async () => {},
+    }),
+    /HTTP 404 Not Found/
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /failing closed/);
+  assert.doesNotMatch(warnings[0], /transient=/);
+});
+
+test('watcher closer identity resolver reuses the same commit probe result', async () => {
+  let calls = 0;
+  const resolveSuppression = createHeadCloserCommitSuppressionResolver({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2605,
+    headSha: 'fed789',
+    execFileImpl: async () => {
+      calls += 1;
+      return {
+        stdout: JSON.stringify({
+          sha: 'fed789',
+          message: 'Finalize PR',
+          committerLogin: 'merge-agent-lacey',
+          authorLogin: null,
+          committerName: 'Merge Agent Worker',
+          committerEmail: '282134940+merge-agent-lacey@users.noreply.github.com',
+        }),
+      };
+    },
+  });
+
+  const first = await resolveSuppression();
+  const second = await resolveSuppression();
+  assert.equal(calls, 1);
+  assert.equal(first, second);
+  assert.equal(first.suppressed, true);
+});
+
+test('watcher recognizes explicit operator retrigger-review override marker', () => {
+  assert.equal(isExplicitOperatorReviewRetrigger({
+    rereview_requested_at: '2026-07-01T12:00:00.000Z',
+    rereview_reason: 'retrigger-review label applied; re-review requested on current HEAD.',
+  }), true);
+  assert.equal(isExplicitOperatorReviewRetrigger({
+    rereview_requested_at: '2026-07-01T12:00:00.000Z',
+    rereview_reason: 'auto-refresh: posted review on stale head aaa; current head is bbb',
+  }), false);
 });
 
 test('watcher preserves elevated legacy budgets before suppressing stale-review auto-refresh', () => {

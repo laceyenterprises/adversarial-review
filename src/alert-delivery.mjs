@@ -6,7 +6,7 @@ import https from 'node:https';
 
 const DEFAULT_SECRETS_ROOT = join(homedir(), '.config', 'adversarial-review', 'secrets');
 const LEGACY_SECRETS_ROOT = '/Users/airlock/agent-os/agents/clio/credentials/local';
-const DEFAULT_OPENCLAW_AGENT_HOOKS_URL = 'http://127.0.0.1:18789/hooks/agent';
+const DEFAULT_AGENT_GATEWAY_AGENT_HOOKS_URL = 'http://127.0.0.1:18799/hooks/agent';
 const DEFAULT_ALERT_AGENT_ID = 'main';
 const DEFAULT_ALERT_NAME = 'Adversarial Watcher Health';
 const DEFAULT_HTTP_TIMEOUT_MS = 5_000;
@@ -48,7 +48,10 @@ function resolveAlertDefaults(env = process.env, { fsImpl = { existsSync } } = {
     throw new Error('ALERT_TO must be configured for alert delivery');
   }
   return {
-    openclawAgentHooksUrl: env.OPENCLAW_AGENT_HOOKS_URL || DEFAULT_OPENCLAW_AGENT_HOOKS_URL,
+    openclawAgentHooksUrl:
+      env.AGENT_GATEWAY_AGENT_HOOKS_URL ||
+      env.OPENCLAW_AGENT_HOOKS_URL ||
+      DEFAULT_AGENT_GATEWAY_AGENT_HOOKS_URL,
     hooksTokenFile:
       env.OPENCLAW_HOOKS_TOKEN_FILE ||
       env.HOOKS_TOKEN_FILE ||

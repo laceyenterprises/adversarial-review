@@ -198,12 +198,13 @@ const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;
 const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
 const AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS = 90_000;
 const AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS = AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length + 1;
+const AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS = [500, 1_000, 2_000, 5_000];
 const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = (
   AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS * AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS
 )
-  + AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0);
+  + AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0)
+  + AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS.reduce((total, delay) => total + delay, 0);
 const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
-const AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS = [500, 1_000, 2_000, 5_000];
 export const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND = 3;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
@@ -787,6 +788,30 @@ async function readCloserWorkerRunUsageAfterRollup({
   return null;
 }
 
+class AmaCloserTokenRollupNotReadyError extends Error {
+  constructor({
+    repo,
+    prNumber,
+    attemptNumber,
+    launchRequestId,
+  } = {}) {
+    super(
+      `AMA closer token rollup not ready for ${repo}#${prNumber} ` +
+      `attempt=${attemptNumber} launchRequestId=${launchRequestId || 'unknown'}`
+    );
+    this.name = 'AmaCloserTokenRollupNotReadyError';
+    this.code = 'AMA_CLOSER_TOKEN_ROLLUP_NOT_READY';
+    this.repo = repo;
+    this.prNumber = prNumber;
+    this.attemptNumber = attemptNumber;
+    this.launchRequestId = launchRequestId || null;
+  }
+}
+
+function isAmaCloserTokenRollupNotReadyError(error) {
+  return error?.code === 'AMA_CLOSER_TOKEN_ROLLUP_NOT_READY';
+}
+
 async function recordAmaCloserReviewerPassTokens({
   rootDir,
   hqRoot,
@@ -819,9 +844,14 @@ async function recordAmaCloserReviewerPassTokens({
     logger.warn?.(
       `[ama-closer] token rollup not ready for ${repo}#${prNumber} ` +
       `attempt=${attemptNumber} launchRequestId=${launchRequestId || 'unknown'}; ` +
-      'skipping reviewer_passes closer write to avoid null token persistence'
+      'deferring closer state advance until reviewer_passes tokens are available'
     );
-    return null;
+    throw new AmaCloserTokenRollupNotReadyError({
+      repo,
+      prNumber,
+      attemptNumber,
+      launchRequestId,
+    });
   }
   const startedAt = record.dispatchedAt || record.lastAttemptedAt || observedAt || new Date().toISOString();
   const endedAt = observedAt || record.lastObservedAt || new Date().toISOString();
@@ -1131,23 +1161,37 @@ export async function maybeDispatchAmaCloser({
     readBuildCompletionProducerEvidenceImpl,
     readBuildCompletionSignalForPrImpl,
   });
+  const waitingForTokensResult = (record = existingRecord) => noAmaDispatch({
+    dispatched: false,
+    skipMergeAgent: true,
+    reason: 'waiting-for-tokens',
+    workerClass: record?.workerClass || workerClass,
+    dispatchId: record?.dispatchId || record?.launchRequestId || null,
+    launchRequestId: record?.launchRequestId || null,
+    promptPath: record?.promptPath || null,
+  });
   if (mergedSignal?.ok) {
     if (existingRecord?.launchRequestId || existingRecord?.dispatchId) {
-      await recordAmaCloserReviewerPassTokens({
-        rootDir,
-        hqRoot,
-        repo,
-        prNumber,
-        record: existingRecord,
-        status: existingRecord.lastObservedStatus || 'succeeded',
-        merged: true,
-        observedAt: dispatchContext.dispatchedAt,
-        ledgerTarget: dispatchContext.ledgerTarget || null,
-        ledgerDbPath: dispatchContext.ledgerDbPath || null,
-        env: process.env,
-        pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
-        logger,
-      });
+      try {
+        await recordAmaCloserReviewerPassTokens({
+          rootDir,
+          hqRoot,
+          repo,
+          prNumber,
+          record: existingRecord,
+          status: existingRecord.lastObservedStatus || 'succeeded',
+          merged: true,
+          observedAt: dispatchContext.dispatchedAt,
+          ledgerTarget: dispatchContext.ledgerTarget || null,
+          ledgerDbPath: dispatchContext.ledgerDbPath || null,
+          env: process.env,
+          pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
+          logger,
+        });
+      } catch (error) {
+        if (isAmaCloserTokenRollupNotReadyError(error)) return waitingForTokensResult(existingRecord);
+        throw error;
+      }
     }
     return noAmaDispatch({
       dispatched: false,
@@ -1176,6 +1220,7 @@ export async function maybeDispatchAmaCloser({
   let existingDispatchStatus = null;
   if (existingRecord?.launchRequestId) {
     let releaseUnprovenTerminalHold = false;
+    let releaseUnprovenTerminalHoldError = null;
     const statusProbe = await probeAmaCloserDispatchStatus({
       hqPath,
       launchRequestId: existingRecord.launchRequestId,
@@ -1199,14 +1244,9 @@ export async function maybeDispatchAmaCloser({
         return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
       }
       if (auditTerminalOutcome === 'succeeded') {
-        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
-          ...(current || existingRecord),
-          lastObservedStatus: status,
-          lastObservedAt: dispatchContext.dispatchedAt,
-          lastError: 'audit-succeeded-without-merged-signal',
-        }));
         existingDispatchStatus = 'unverified-terminal-success';
         releaseUnprovenTerminalHold = true;
+        releaseUnprovenTerminalHoldError = 'audit-succeeded-without-merged-signal';
       } else if (
         auditTerminalOutcome
         && auditTerminalOutcome !== 'succeeded'
@@ -1214,15 +1254,11 @@ export async function maybeDispatchAmaCloser({
       ) {
         existingDispatchStatus = 'failed';
         releaseUnprovenTerminalHold = true;
+        releaseUnprovenTerminalHoldError = statusProbe?.error || null;
       } else if (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
-        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
-          ...(current || existingRecord),
-          lastObservedStatus: status,
-          lastObservedAt: dispatchContext.dispatchedAt,
-          lastError: 'terminal-success-status-without-audit-or-merged-signal',
-        }));
         existingDispatchStatus = 'unverified-terminal-success';
         releaseUnprovenTerminalHold = true;
+        releaseUnprovenTerminalHoldError = 'terminal-success-status-without-audit-or-merged-signal';
       } else {
         updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
           ...(current || existingRecord),
@@ -1242,25 +1278,37 @@ export async function maybeDispatchAmaCloser({
       }
     }
     if (releaseUnprovenTerminalHold) {
-      await recordAmaCloserReviewerPassTokens({
-        rootDir,
-        hqRoot,
-        repo,
-        prNumber,
-        record: {
-          ...existingRecord,
-          lastObservedStatus: existingDispatchStatus || status,
-          lastObservedAt: dispatchContext.dispatchedAt,
-        },
-        status: existingDispatchStatus || status,
-        merged: auditTerminalOutcome === 'succeeded',
-        observedAt: dispatchContext.dispatchedAt,
-        ledgerTarget: dispatchContext.ledgerTarget || null,
-        ledgerDbPath: dispatchContext.ledgerDbPath || null,
-        env: process.env,
-        pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
-        logger,
-      });
+      const tokenRecord = {
+        ...existingRecord,
+        lastObservedStatus: existingDispatchStatus || status,
+        lastObservedAt: dispatchContext.dispatchedAt,
+      };
+      try {
+        await recordAmaCloserReviewerPassTokens({
+          rootDir,
+          hqRoot,
+          repo,
+          prNumber,
+          record: tokenRecord,
+          status: existingDispatchStatus || status,
+          merged: auditTerminalOutcome === 'succeeded',
+          observedAt: dispatchContext.dispatchedAt,
+          ledgerTarget: dispatchContext.ledgerTarget || null,
+          ledgerDbPath: dispatchContext.ledgerDbPath || null,
+          env: process.env,
+          pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
+          logger,
+        });
+      } catch (error) {
+        if (isAmaCloserTokenRollupNotReadyError(error)) return waitingForTokensResult(existingRecord);
+        throw error;
+      }
+      updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+        ...(current || existingRecord),
+        lastObservedStatus: status,
+        lastObservedAt: dispatchContext.dispatchedAt,
+        lastError: releaseUnprovenTerminalHoldError,
+      }));
     }
     if (status === 'unknown') {
       updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
@@ -1280,25 +1328,30 @@ export async function maybeDispatchAmaCloser({
       });
     }
     if (AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
-      await recordAmaCloserReviewerPassTokens({
-        rootDir,
-        hqRoot,
-        repo,
-        prNumber,
-        record: {
-          ...existingRecord,
-          lastObservedStatus: status,
-          lastObservedAt: dispatchContext.dispatchedAt,
-        },
-        status,
-        merged: false,
-        observedAt: dispatchContext.dispatchedAt,
-        ledgerTarget: dispatchContext.ledgerTarget || null,
-        ledgerDbPath: dispatchContext.ledgerDbPath || null,
-        env: process.env,
-        pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
-        logger,
-      });
+      try {
+        await recordAmaCloserReviewerPassTokens({
+          rootDir,
+          hqRoot,
+          repo,
+          prNumber,
+          record: {
+            ...existingRecord,
+            lastObservedStatus: status,
+            lastObservedAt: dispatchContext.dispatchedAt,
+          },
+          status,
+          merged: false,
+          observedAt: dispatchContext.dispatchedAt,
+          ledgerTarget: dispatchContext.ledgerTarget || null,
+          ledgerDbPath: dispatchContext.ledgerDbPath || null,
+          env: process.env,
+          pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
+          logger,
+        });
+      } catch (error) {
+        if (isAmaCloserTokenRollupNotReadyError(error)) return waitingForTokensResult(existingRecord);
+        throw error;
+      }
     }
     if (!releaseUnprovenTerminalHold && !AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
       return noAmaDispatch({ dispatched: false, reason: `dispatch-status-${status || 'unknown'}` });

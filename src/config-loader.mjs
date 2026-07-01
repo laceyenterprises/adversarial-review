@@ -188,6 +188,7 @@ const ENUM_SESSION_LEDGER_DUAL_WRITE_MODE = [null, 'postgres', 'sqlite', 'off'];
 const ENUM_SESSION_LEDGER_SERVICE_LOG_LEVEL = ['CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'];
 const ENUM_APP_MODE = ['agent-os', 'standalone'];
 const ENUM_UPDATE_CHANNEL = ['rolling', 'stable', 'pinned'];
+const ENUM_WORKER_POOL_MEMORY_DYNAMIC_ADMIT_PERCENTILE = ['p50', 'p95', 'p99'];
 const PATTERN_LINEAR_ISSUE_PREFIX = '^[A-Z][A-Z0-9]{1,9}$';
 const PATTERN_LINEAR_ISSUE_PREFIX_DESCRIPTION = 'Linear issue prefix /^[A-Z][A-Z0-9]{1,9}$/';
 const PATTERN_SQL_IDENTIFIER = '^[A-Za-z_][A-Za-z0-9_]{0,62}$';
@@ -1195,15 +1196,15 @@ function schemaV1() {
           },
         },
       },
-      // worker_pool.dag.autowalk.deep_reconcile — Python-owned (canonical schema
-      // at platform/agent-os-config). PARTIAL mirror, same rationale as the
-      // sentinel block below: this Node reader does not consume the value, but
-      // it must not crash-loop if this checked-in key reaches the shared
-      // canonical config.yaml (CFG-01 strict-schema parity). Only deep_reconcile
-      // is mirrored; every other worker_pool.* key stays Python-owned and is
+      // worker_pool.dag.autowalk.deep_reconcile and
+      // worker_pool.memory.dynamic.* — Python-owned (canonical schema at
+      // platform/agent-os-config). PARTIAL mirror, same rationale as the
+      // sentinel block below: this Node reader does not consume the values, but
+      // it must not crash-loop if these checked-in keys reach the shared
+      // canonical config.yaml (CFG-01 strict-schema parity). Worker-pool tuning
+      // outside these mirrored subtrees stays Python-owned and is
       // tolerated-dropped in operator-local config.local.yaml (nested-unknown
-      // drop), so worker-pool tuning like dispatch.max_concurrent_in_flight /
-      // memory.pressure.* still lives there untouched. Python stays canonical.
+      // drop). Python stays canonical.
       worker_pool: {
         __type: TYPE_DICT,
         __strict: true,
@@ -1217,6 +1218,30 @@ function schemaV1() {
                 __strict: true,
                 __keys: {
                   deep_reconcile: { __type: TYPE_BOOL, __default: false },
+                },
+              },
+            },
+          },
+          memory: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              dynamic: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  enabled: { __type: TYPE_BOOL, __default: false },
+                  shadow_only: { __type: TYPE_BOOL, __default: true },
+                  admit_percentile: {
+                    __type: TYPE_STRING,
+                    __default: 'p95',
+                    __enum: ENUM_WORKER_POOL_MEMORY_DYNAMIC_ADMIT_PERCENTILE,
+                  },
+                  pressure_margin_mb: { __type: TYPE_INT, __default: 512, __min: 0 },
+                  rss_window_minutes: { __type: TYPE_INT, __default: 30, __min: 1 },
+                  oss_model_reserve_mb: { __type: TYPE_INT, __default: 0, __min: 0 },
+                  snapshot_stale_seconds: { __type: TYPE_INT, __default: 60, __min: 0 },
+                  require_pressure_normal: { __type: TYPE_BOOL, __default: true },
                 },
               },
             },
@@ -1699,6 +1724,38 @@ export const ENV_ALIASES = {
   'reviewer.review_population_retry.backoff_seconds': {
     canonical: 'AGENT_OS_REVIEWER_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS',
     aliases: [['ADVERSARIAL_REVIEW_POPULATION_RETRY_BACKOFF_SECONDS', identity]],
+  },
+  'worker_pool.memory.dynamic.enabled': {
+    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_ENABLED',
+    aliases: [['HQ_MEMORY_DYNAMIC_ENABLED', identity]],
+  },
+  'worker_pool.memory.dynamic.shadow_only': {
+    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_SHADOW_ONLY',
+    aliases: [['HQ_MEMORY_DYNAMIC_SHADOW_ONLY', identity]],
+  },
+  'worker_pool.memory.dynamic.admit_percentile': {
+    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_ADMIT_PERCENTILE',
+    aliases: [['HQ_MEMORY_DYNAMIC_ADMIT_PERCENTILE', identity]],
+  },
+  'worker_pool.memory.dynamic.pressure_margin_mb': {
+    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_PRESSURE_MARGIN_MB',
+    aliases: [['HQ_MEMORY_DYNAMIC_PRESSURE_MARGIN_MB', identity]],
+  },
+  'worker_pool.memory.dynamic.rss_window_minutes': {
+    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_RSS_WINDOW_MINUTES',
+    aliases: [['HQ_MEMORY_DYNAMIC_RSS_WINDOW_MINUTES', identity]],
+  },
+  'worker_pool.memory.dynamic.oss_model_reserve_mb': {
+    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_OSS_MODEL_RESERVE_MB',
+    aliases: [['HQ_MEMORY_DYNAMIC_OSS_MODEL_RESERVE_MB', identity]],
+  },
+  'worker_pool.memory.dynamic.snapshot_stale_seconds': {
+    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_SNAPSHOT_STALE_SECONDS',
+    aliases: [['HQ_MEMORY_DYNAMIC_SNAPSHOT_STALE_SECONDS', identity]],
+  },
+  'worker_pool.memory.dynamic.require_pressure_normal': {
+    canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_REQUIRE_PRESSURE_NORMAL',
+    aliases: [['HQ_MEMORY_DYNAMIC_REQUIRE_PRESSURE_NORMAL', identity]],
   },
   'reviewer.gemini.mode': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_MODE',

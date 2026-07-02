@@ -126,6 +126,104 @@ function noAmaDispatch(result) {
   };
 }
 
+function hammerCloserWorkerId(prNumber) {
+  const normalized = String(prNumber || '').trim();
+  if (!/^[0-9]+$/.test(normalized)) return null;
+  return `hammer-ama-pr-${normalized}`;
+}
+
+async function cleanupHammerCloserWorker({
+  prNumber,
+  workerClass,
+  existingRecord = null,
+  hqPath,
+  hqRoot,
+  execFileImpl,
+  logger = console,
+  reason,
+}) {
+  const effectiveWorkerClass = String(existingRecord?.workerClass || workerClass || '').trim();
+  if (effectiveWorkerClass !== 'hammer') return null;
+  const workerId = hammerCloserWorkerId(prNumber);
+  if (!workerId) return null;
+  const args = ['worker', 'tear-down', workerId, '--force', '--root', hqRoot];
+  for (let attempt = 0; attempt <= AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      await execFileImpl(hqPath, args, {
+        env: process.env,
+        maxBuffer: 1024 * 1024,
+        timeout: 60_000,
+        killSignal: 'SIGTERM',
+      });
+      logger.info?.(JSON.stringify({
+        event: 'ama_closer.hammer_worker_cleanup',
+        workerId,
+        reason,
+        status: 'ok',
+        attempts: attempt + 1,
+      }));
+      return { ok: true, workerId, reason, attempts: attempt + 1 };
+    } catch (err) {
+      const error = String(err?.stderr || err?.message || err);
+      if (isWorkerTearDownNotFoundError(err)) {
+        logger.info?.(JSON.stringify({
+          event: 'ama_closer.hammer_worker_cleanup',
+          workerId,
+          reason,
+          status: 'not-found',
+          attempts: attempt + 1,
+        }));
+        return { ok: true, workerId, reason, alreadyAbsent: true, attempts: attempt + 1 };
+      }
+      const transient = isTransientHqDispatchError(err);
+      if (transient && attempt < AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS.length) {
+        logger.warn?.(JSON.stringify({
+          event: 'ama_closer.hammer_worker_cleanup',
+          workerId,
+          reason,
+          status: 'retrying',
+          attempt: attempt + 1,
+          error,
+        }));
+        await sleep(AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS[attempt]);
+        continue;
+      }
+      logger.warn?.(JSON.stringify({
+        event: 'ama_closer.hammer_worker_cleanup',
+        workerId,
+        reason,
+        status: 'failed',
+        attempts: attempt + 1,
+        transient,
+        error,
+      }));
+      return { ok: false, workerId, reason, attempts: attempt + 1, error };
+    }
+  }
+  return { ok: false, workerId, reason, error: 'unreachable-teardown-state' };
+}
+
+function isWorkerTearDownNotFoundError(err) {
+  const detail = errDetailText(err);
+  if (!detail) return false;
+  return detail.includes('worker not found')
+    || detail.includes('worker does not exist')
+    || detail.includes('no worker with id')
+    || detail.includes('no such worker')
+    || detail.includes('service not found')
+    || detail.includes('could not find service')
+    || detail.includes('not loaded')
+    || detail.includes('no such process');
+}
+
+function assertHammerCleanupSucceeded(hammerCleanup) {
+  if (!hammerCleanup || hammerCleanup.ok === true) return;
+  throw new Error(
+    `AMA hammer worker teardown failed for ${hammerCleanup.workerId || 'unknown-worker'}: ` +
+    `${hammerCleanup.error || 'unknown error'}`,
+  );
+}
+
 /**
  * Decide whether the HAM terminal-remediation prompt (`hammer-prompt.md`) is
  * warranted for this closure, given the eligibility verdict.
@@ -196,6 +294,7 @@ export function amaClosureNeedsTerminalRemediation(verdict) {
 
 const AMA_CLOSER_DISPATCH_SCHEMA_VERSION = 1;
 const AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
+const AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000];
 const AMA_CLOSER_HQ_DISPATCH_LAUNCH_WINDOW_MS = 90_000;
 const AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS = AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length + 1;
 const AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS = [500, 1_000, 2_000, 5_000];
@@ -487,7 +586,7 @@ export function isTransientHqDispatchError(err) {
   // first so the retry loop and retry-budget guard both treat it as retryable.
   if (isGithubRateLimitOrBrokerThrottle(err)) return true;
   const detail = errDetailText(err);
-  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eagain|epipe)\b/.test(detail)
+  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eagain|epipe|eio)\b/.test(detail)
     || detail.includes('database is locked')
     || detail.includes('sqlite_busy')
     || detail.includes('resource temporarily unavailable')
@@ -1149,6 +1248,17 @@ export async function maybeDispatchAmaCloser({
     readBuildCompletionSignalForPrImpl,
   });
   if (mergedSignal?.ok) {
+    const hammerCleanup = await cleanupHammerCloserWorker({
+      prNumber,
+      workerClass,
+      existingRecord,
+      hqPath,
+      hqRoot,
+      execFileImpl,
+      logger,
+      reason: 'merged-signal-present',
+    });
+    assertHammerCleanupSucceeded(hammerCleanup);
     if (existingRecord?.launchRequestId || existingRecord?.dispatchId) {
       await recordAmaCloserReviewerPassTokens({
         rootDir,
@@ -1177,6 +1287,7 @@ export async function maybeDispatchAmaCloser({
       mergedSignal: mergedSignal.row,
       mergedSignalHeadShaMatchesReviewed: mergedSignal.headShaMatchesReviewed,
       mergedSignalProducerHeadSha: mergedSignal.producerHeadSha,
+      ...(hammerCleanup ? { hammerCleanup } : {}),
     });
   }
   const mergedSignalUnknown = isUnknownMergedSignal(mergedSignal);
@@ -1315,6 +1426,17 @@ export async function maybeDispatchAmaCloser({
         pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
         logger,
       });
+      const hammerCleanup = await cleanupHammerCloserWorker({
+        prNumber,
+        workerClass,
+        existingRecord,
+        hqPath,
+        hqRoot,
+        execFileImpl,
+        logger,
+        reason: `terminal-status-${status}`,
+      });
+      assertHammerCleanupSucceeded(hammerCleanup);
     }
     if (!releaseUnprovenTerminalHold && !AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
       return noAmaDispatch({ dispatched: false, reason: `dispatch-status-${status || 'unknown'}` });

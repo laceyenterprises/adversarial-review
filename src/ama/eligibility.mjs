@@ -529,8 +529,11 @@ function validateRebaseReviewCoverageEvidence(
 }
 
 function validateHamFindingMap(findings) {
-  if (!Array.isArray(findings) || findings.length === 0) {
+  if (!Array.isArray(findings)) {
     return { ok: false, count: 0, blocking: 0, nonBlocking: 0, nonBlockingTitles: [] };
+  }
+  if (findings.length === 0) {
+    return { ok: true, count: 0, blocking: 0, nonBlocking: 0, nonBlockingTitles: [] };
   }
   let blocking = 0;
   let nonBlocking = 0;

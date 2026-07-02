@@ -2000,6 +2000,46 @@ test('ham terminal remediation: zero current non-blocking findings remains eligi
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
 });
 
+test('ham terminal remediation: clean zero-finding review accepts empty finding map', () => {
+  const auditBody = 'HAM audit: final review had no blocking or non-blocking findings. Doc-currency: updated modules/worker-pool/worker-pool-walkthrough.md.';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+      nonBlockingFindingCount: 0,
+      nonBlockingFindingState: 'known',
+      nonBlockingFindingIdentities: [],
+    },
+    prMetadata: { headSha: 'def67890' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({
+      headSha: 'def67890',
+      parentSha: 'abc12345',
+      remediatedFindings: '0 addressed (0 blocking, 0 non-blocking)',
+      auditBody,
+      docCurrency: {
+        status: 'updated',
+        changedFiles: ['modules/worker-pool/worker-pool-walkthrough.md'],
+        docsUpdated: ['modules/worker-pool/worker-pool-walkthrough.md'],
+      },
+      findings: [],
+    }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      headSha: 'def67890',
+      parentSha: 'abc12345',
+      remediatedFindings: '0 addressed (0 blocking, 0 non-blocking)',
+      auditAuthor: 'lacey-merge-agent[bot]',
+      auditBody,
+      changedFiles: ['modules/worker-pool/worker-pool-walkthrough.md'],
+    }),
+  });
+  assert.equal(result.trace.hamTerminalRemediation.activeAuthorized, true);
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+});
+
 test('ham terminal remediation: self-attested active does not waive strict non-blocking gate', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {

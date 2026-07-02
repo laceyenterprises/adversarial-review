@@ -9,20 +9,35 @@ import {
 const ADAPTER_MAX_BUFFER = 25 * 1024 * 1024;
 const ADAPTER_TIMEOUT_MS = 30_000;
 
-const REVIEWER_ADAPTER_AUTH_BY_LOGIN = {
-  'claude-reviewer-lacey': {
+const REVIEWER_ADAPTER_AUTH_BY_ROLE = Object.freeze({
+  'claude-reviewer': {
     selector: 'claude-reviewer',
     tokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
   },
-  'codex-reviewer-lacey': {
+  'codex-reviewer': {
     selector: 'codex-reviewer',
     tokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
   },
-  'gemini-reviewer-lacey': {
+  'gemini-reviewer': {
     selector: 'gemini-reviewer',
     tokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
   },
-};
+});
+
+function reviewerRoleFromLogin(login) {
+  const normalized = String(login || '').trim().toLowerCase().replace(/\[bot\]$/, '');
+  if (!normalized) return null;
+  for (const role of Object.keys(REVIEWER_ADAPTER_AUTH_BY_ROLE)) {
+    if (
+      normalized === role ||
+      normalized === `${role}-lacey` ||
+      normalized.endsWith(`-${role}`)
+    ) {
+      return role;
+    }
+  }
+  return null;
+}
 
 function firstNonEmpty(...values) {
   for (const value of values) {
@@ -243,7 +258,7 @@ function makeAdapterArgs(kind, params = {}) {
 
 function appendReviewerAuthAdapterArgs(args, reviewerLogin) {
   const normalized = String(reviewerLogin || '').trim().toLowerCase();
-  const profile = REVIEWER_ADAPTER_AUTH_BY_LOGIN[normalized];
+  const profile = REVIEWER_ADAPTER_AUTH_BY_ROLE[reviewerRoleFromLogin(normalized)];
   if (!profile) return args;
   args.push(
     '--auth',

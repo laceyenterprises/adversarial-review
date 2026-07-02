@@ -147,6 +147,7 @@ import {
   mergeAgentDispatchEnvForAction,
 } from './ama/coexistence.mjs';
 import { loadConfigCached } from './config-loader.mjs';
+import { resolveGitHubAppBotLogin } from './github-app-identity.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
   retryPendingRetriggerAckComments,
@@ -715,6 +716,7 @@ async function reconcilePendingDraftsBeforeSpawn({
   repoPath,
   prNumber,
   botTokenEnv,
+  selfLogin = null,
   currentHeadSha,
   respawnAgeSeconds = resolvePendingDraftRespawnAgeSeconds(),
   now = new Date(),
@@ -723,10 +725,16 @@ async function reconcilePendingDraftsBeforeSpawn({
   log = console,
 } = {}) {
   const token = process.env[botTokenEnv];
+  const resolvedSelfLogin = selfLogin || resolveGitHubAppBotLogin({
+    identity: resolveReviewerIdentity({ botTokenEnv }),
+    botTokenEnv,
+    log,
+  });
   const reconciliation = await reconcileImpl({
     repo: repoPath,
     prNumber,
     token,
+    selfLogin: resolvedSelfLogin,
     currentHeadSha,
     respawnAgeSeconds,
     now,

@@ -127,7 +127,7 @@ test('postGitHubReview uses adapter mutation with the intended reviewer bot iden
       GHA_ADAPTER_BIN: '/fixture/github-adapter',
       GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
       GH_CODEX_REVIEWER_TOKEN_SOURCE: 'oauth-broker',
-      GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER: '',
+      GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER: 'github-app-lacey-codex-reviewer',
       PATH: '/opt/homebrew/bin:/usr/bin',
       HOME: '/Users/test',
       HTTP_PROXY: 'http://proxy.example:8080',
@@ -149,7 +149,7 @@ test('postGitHubReview uses adapter mutation with the intended reviewer bot iden
         env: sourceEnv,
         reviewerIdentity: 'codex-reviewer-lacey',
         prepareReviewWrite: async ({ selfLogin, token }) => {
-          assert.equal(selfLogin, 'codex-reviewer-lacey');
+          assert.equal(selfLogin, 'lacey-codex-reviewer[bot]');
           assert.equal(token, 'ghp_codex_reviewer_pat');
         },
       }
@@ -160,7 +160,7 @@ test('postGitHubReview uses adapter mutation with the intended reviewer bot iden
   assert.equal(calls[0].options.env.GH_TOKEN, 'ghp_codex_reviewer_pat');
   assert.equal(calls[0].options.env.GH_CODEX_REVIEWER_TOKEN, 'ghp_codex_reviewer_pat');
   assert.equal(calls[0].options.env.GH_CODEX_REVIEWER_TOKEN_SOURCE, 'oauth-broker');
-  assert.equal(calls[0].options.env.GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER, '');
+  assert.equal(calls[0].options.env.GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER, 'github-app-lacey-codex-reviewer');
   assert.equal(calls[0].options.env.HTTP_PROXY, 'http://proxy.example:8080');
   assert.equal(calls[0].options.env.SSL_CERT_FILE, '/tmp/corp-ca.pem');
   assert.equal(calls[0].options.env.GITHUB_TOKEN, undefined);
@@ -176,7 +176,7 @@ test('postGitHubReview uses adapter mutation with the intended reviewer bot iden
     '--body',
     'review body',
     '--reviewer-login',
-    'codex-reviewer-lacey',
+    'lacey-codex-reviewer[bot]',
     '--auth',
     'codex-reviewer',
     '--auth-mode',
@@ -184,7 +184,7 @@ test('postGitHubReview uses adapter mutation with the intended reviewer bot iden
     '--pat-env',
     'GH_CODEX_REVIEWER_TOKEN',
     '--expected-login',
-    'codex-reviewer-lacey',
+    'lacey-codex-reviewer[bot]',
   ]);
 });
 

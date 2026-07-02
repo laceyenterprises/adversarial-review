@@ -126,6 +126,53 @@ function noAmaDispatch(result) {
   };
 }
 
+function hammerCloserWorkerId(prNumber) {
+  const normalized = String(prNumber || '').trim();
+  if (!/^[0-9]+$/.test(normalized)) return null;
+  return `hammer-ama-pr-${normalized}`;
+}
+
+async function cleanupHammerCloserWorker({
+  prNumber,
+  workerClass,
+  existingRecord = null,
+  hqPath,
+  hqRoot,
+  execFileImpl,
+  logger = console,
+  reason,
+}) {
+  const effectiveWorkerClass = String(existingRecord?.workerClass || workerClass || '').trim();
+  if (effectiveWorkerClass !== 'hammer') return null;
+  const workerId = hammerCloserWorkerId(prNumber);
+  if (!workerId) return null;
+  try {
+    await execFileImpl(hqPath, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot], {
+      env: process.env,
+      maxBuffer: 1024 * 1024,
+      timeout: 60_000,
+      killSignal: 'SIGTERM',
+    });
+    logger.info?.(JSON.stringify({
+      event: 'ama_closer.hammer_worker_cleanup',
+      workerId,
+      reason,
+      status: 'ok',
+    }));
+    return { ok: true, workerId, reason };
+  } catch (err) {
+    const error = String(err?.stderr || err?.message || err);
+    logger.warn?.(JSON.stringify({
+      event: 'ama_closer.hammer_worker_cleanup',
+      workerId,
+      reason,
+      status: 'failed',
+      error,
+    }));
+    return { ok: false, workerId, reason, error };
+  }
+}
+
 /**
  * Decide whether the HAM terminal-remediation prompt (`hammer-prompt.md`) is
  * warranted for this closure, given the eligibility verdict.
@@ -1149,6 +1196,16 @@ export async function maybeDispatchAmaCloser({
     readBuildCompletionSignalForPrImpl,
   });
   if (mergedSignal?.ok) {
+    const hammerCleanup = await cleanupHammerCloserWorker({
+      prNumber,
+      workerClass,
+      existingRecord,
+      hqPath,
+      hqRoot,
+      execFileImpl,
+      logger,
+      reason: 'merged-signal-present',
+    });
     if (existingRecord?.launchRequestId || existingRecord?.dispatchId) {
       await recordAmaCloserReviewerPassTokens({
         rootDir,
@@ -1177,6 +1234,7 @@ export async function maybeDispatchAmaCloser({
       mergedSignal: mergedSignal.row,
       mergedSignalHeadShaMatchesReviewed: mergedSignal.headShaMatchesReviewed,
       mergedSignalProducerHeadSha: mergedSignal.producerHeadSha,
+      ...(hammerCleanup ? { hammerCleanup } : {}),
     });
   }
   const mergedSignalUnknown = isUnknownMergedSignal(mergedSignal);
@@ -1314,6 +1372,16 @@ export async function maybeDispatchAmaCloser({
         env: process.env,
         pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
         logger,
+      });
+      await cleanupHammerCloserWorker({
+        prNumber,
+        workerClass,
+        existingRecord,
+        hqPath,
+        hqRoot,
+        execFileImpl,
+        logger,
+        reason: `terminal-status-${status}`,
       });
     }
     if (!releaseUnprovenTerminalHold && !AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {

@@ -49,9 +49,11 @@ scans.
    cover the files this PR touches against your post-remediation head, confirm
    every required GitHub check is green, and fix every failing regression. Red CI
    blocks merge even when the failure looks unrelated to the PR, pre-existing on
-   `origin/main`, flaky, or sandbox-specific; the hammer owns making the exact
-   rebased head green by fixing or legitimately re-running the check. Fixing
-   tests/CI (and the minimal production change a legitimately
+   `origin/main`, or flaky; the hammer owns making the exact rebased head green
+   by fixing or legitimately re-running the check unless the failure is a
+   physically unfixable worker-sandbox limitation, which must be triaged and
+   documented before continuing. Fixing tests/CI (and the minimal production
+   change a legitimately
    failing check proves is needed) is the one sanctioned exception to "scope only
    to the findings"; net-new feature scope is not. Also leave the working tree
    clean: commit or discard any stray/dirty changes so the head is not left in a

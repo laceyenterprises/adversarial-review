@@ -2009,10 +2009,11 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       lines.push(
         'The adversarial-review round budget for this PR is consumed and the'
         + ' latest reviewer verdict is still `Request changes` with standing'
-        + ' blocking findings. This is the terminal automated pass: remediate'
-        + ' the findings, get the rebased head green, and merge. Do not request'
-        + ' a fresh adversarial review or wait for operator approval unless a'
-        + ' genuinely unfixable structural blocker prevents a safe merge.'
+        + ' blocking findings. This is the terminal automated blocker-remediation'
+        + ' pass: remediate the findings, get the rebased head green, push, and'
+        + ' request a fresh adversarial review. Do not merge this invocation or'
+        + ' wait for operator approval unless a genuinely unfixable structural'
+        + ' blocker prevents safe handoff for rereview.'
       );
     } else if (isZeroBlockerFinalPass) {
       lines.push('## Mode: final-pass-on-budget-exhausted');

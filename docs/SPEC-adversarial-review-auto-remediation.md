@@ -227,8 +227,6 @@ convergence-dependent gates so AMA can land the PR:
   authority for verdict or blocking-finding gates; it is scoped to the
   risk-class decision below.
 - `remediation-pending` / `remediation-state-unknown`
-- `branch-protection-missing-gate` (the structural gate this GitHub plan can't
-  provide — the historical reason AMA closed zero PRs)
 - `risk-class-not-permitted` for any risk class only when strict current-head HAM
   terminal-remediation evidence validates on an exhausted review cycle. Before
   exhaustion, validated HAM evidence is remediation proof, not risk-class merge
@@ -240,8 +238,10 @@ Exhaustion **never waives the hard safety gates** — these still block AMA even
 cycle-end: PR open / non-draft / **mergeable**; **head-match** to the reviewed
 head (AMA still pins `--match-head-commit <reviewedSha>` at merge); **CI green**;
 **hard-stop labels** (including head-scoped `adversarial-merge-blocked`);
-fast-merge state; AMA enabled; the **two-key override for unknown risk**; and the
-configured high/critical risk contract described above.
+fast-merge state; AMA enabled; **branch-protection-missing-gate** (structural
+branch-protection coverage is never waived, even on the exhausted final pass);
+the **two-key override for unknown risk**; and the configured high/critical risk
+contract described above.
 
 A PR that converges normally (settled-success `Comment only` / `Approved` with no
 standing blocking findings) merges via the ordinary path and never reaches this

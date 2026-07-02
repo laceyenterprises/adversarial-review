@@ -4411,7 +4411,7 @@ test('buildMergeAgentPrompt makes budget-exhausted standing blockers remediate t
 
   assert.ok(prompt.includes(`Dispatch trigger: ${FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER}`));
   assert.ok(prompt.includes('## Mode: final-pass-blocker-remediation'));
-  assert.ok(prompt.includes('terminal automated pass'));
+  assert.ok(prompt.includes('terminal automated blocker-remediation pass'));
   assert.ok(prompt.includes('then request a fresh adversarial review for the remediated head'));
   assert.ok(prompt.includes('Default action: REMEDIATE, PUSH, AND REQUEST A FRESH REVIEW'));
   assert.ok(prompt.includes('blocking and non-blocking findings inline'));

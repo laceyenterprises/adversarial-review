@@ -698,7 +698,7 @@ test('auto-hammer dispatches HAM terminal remediation at review-cycle exhaustion
 });
 
 // Unit coverage for the prompt-selection predicate itself (HAM-04, SPEC §1.1.1).
-test('amaClosureNeedsTerminalRemediation gates the hammer mandate on real findings', () => {
+test('amaClosureNeedsTerminalRemediation triggers on waived unset verdict without findings', () => {
   const clean = {
     trace: {
       verdict: {

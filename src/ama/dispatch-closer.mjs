@@ -70,9 +70,10 @@ const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
 const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
   'blocking-findings-present',
-  'non-blocking-findings-present',
   'blocking-findings-unknown',
+  'non-blocking-findings-present',
   'non-blocking-findings-unknown',
+  'verdict-not-settled-success',
 ]);
 
 // Auto-hammer (2026-06-19): before the remediation cycle is exhausted, route
@@ -83,8 +84,10 @@ const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
 // hammer is the terminal rescue lane. It gets dispatched for any eligibility
 // miss, remediates the final adversarial review comments (blocking and
 // non-blocking), fixes red CI, posts the audit closeout, and then re-validates
-// the exact live head fail-closed before merge. Exhaustion never waives the
-// merge predicate by itself; it only routes the work to the hammer.
+// the exact live head fail-closed before merge. The validated strict-mode HAM
+// terminal remediation is the exhausted-round adversarial-verdict merge
+// authority; no fresh settled-success verdict or operator-approved override is
+// required for the adversarial verdict gate.
 const HAMMER_AUTO_REMEDIABLE_MISS_REASONS = new Set([
   'non-blocking-findings-present',
   'verdict-not-settled-success', // strict mode emits this alongside the above

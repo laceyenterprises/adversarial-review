@@ -2010,9 +2010,9 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
         'The adversarial-review round budget for this PR is consumed and the'
         + ' latest reviewer verdict is still `Request changes` with standing'
         + ' blocking findings. This is the terminal automated pass: remediate'
-        + ' the findings, then request a fresh adversarial review for the'
-        + ' remediated head, or hard-stop for operator escalation if a'
-        + ' genuinely unfixable blocker remains.'
+        + ' the findings, get the rebased head green, and merge. Do not request'
+        + ' a fresh adversarial review or wait for operator approval unless a'
+        + ' genuinely unfixable structural blocker prevents a safe merge.'
       );
     } else if (isZeroBlockerFinalPass) {
       lines.push('## Mode: final-pass-on-budget-exhausted');
@@ -2020,7 +2020,8 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
       lines.push(
         'The adversarial-review round budget for this PR is consumed and the'
         + ' latest reviewer verdict is still `Request changes`. You are the'
-        + ' final automated pass before operator escalation.'
+        + ' final automated close; remediate final findings and merge once'
+        + ' structural gates are green.'
       );
     } else {
       lines.push('## Mode: converge-and-merge');
@@ -2035,12 +2036,12 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
     lines.push('');
     if (finalPassHasStandingBlockingFindings) {
       lines.push(
-        'Default action: REMEDIATE, PUSH, AND REQUEST A FRESH REVIEW. The latest review has'
+        'Default action: REMEDIATE, PUSH, AND MERGE. The latest review has'
         + ' standing blocking findings, so apply the blocking and non-blocking'
-        + ' findings inline before taking any terminal action. Do NOT merge this'
-        + ' invocation. Set `reReview.requested = true` / exit'
-        + ' `awaiting-rereview` so the watcher can obtain an independent'
-        + ' adversarial confirmation of the remediated head.'
+        + ' findings inline before taking any terminal action. Do NOT wait for'
+        + ' a fresh adversarial review or operator-approved label after the'
+        + ' exhausted-round remediation is complete; merge once structural gates'
+        + ' are green.'
       );
     } else {
       lines.push(
@@ -2055,8 +2056,8 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
     if (finalPassHasStandingBlockingFindings) {
       lines.push(
         'This is the end-of-budget blocker-remediation rescue — handle EVERYTHING'
-        + ' an interactive codex rescue session would before requesting a fresh'
-        + ' adversarial review, not just the review findings:'
+        + ' an interactive codex rescue session would before merging, not just'
+        + ' the review findings:'
       );
     } else {
       lines.push(
@@ -2101,12 +2102,11 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
     );
     if (finalPassHasStandingBlockingFindings) {
       lines.push(
-        '- On a successful blocker-remediation pass, write the durable'
-        + ' machine-readable remediation reply requesting rereview and summarize'
-        + ' what was done (findings remediated, failing tests / CI fixed, rebase /'
-        + ' conflict handling, and doc-currency work or skipped superproject-doc'
-        + ' obligations). This is the human-visible audit trail for the fresh'
-        + ' adversarial review request.'
+        '- On a successful blocker-remediation pass, post a closing comment'
+        + ' summarizing what was done (findings remediated, failing tests / CI'
+        + ' fixed, rebase / conflict handling, and doc-currency work or skipped'
+        + ' superproject-doc obligations). This is the human-visible audit trail'
+        + ' of an autonomous close.'
       );
     } else {
       lines.push(
@@ -2141,17 +2141,14 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
     if (finalPassHasStandingBlockingFindings) {
       lines.push(
         '2. Apply the blocking and non-blocking findings inline, then rebase,'
-        + ' force-push the updated head, and request a fresh adversarial review'
-        + ' of that pushed head. Do NOT merge this invocation and do NOT call'
-        + ' `gh pr merge`; PR #901 keeps blocker remediation gated on an'
-        + ' independent review rather than the worker self-judging its own fix.'
-        + ' Use `reReview.requested = true` / `awaiting-rereview` for the normal'
-        + ' successful exit. The only non-rereview exit on this terminal pass is'
-        + ' a hard-stop with handoff_required=true when a genuinely unfixable'
-        + ' blocker-class finding remains after remediation (data corruption,'
-        + ' secret leakage, security regression, or broken external contract).'
-        + ' A non-empty `blockers_observed` result in this invocation must'
-        + ' hard-refuse immediately.'
+        + ' force-push the updated head, wait for required checks on that pushed'
+        + ' head, and MERGE. Do NOT request a fresh adversarial review and do NOT'
+        + ' require `operator-approved` after the budget is exhausted. The only'
+        + ' non-merge exit on this terminal pass is a hard-stop with'
+        + ' handoff_required=true when a genuinely unfixable structural blocker'
+        + ' remains after remediation (data corruption, secret leakage, security'
+        + ' regression, broken external contract, unresolvable conflict, or red'
+        + ' required checks that cannot be made green).'
       );
     } else {
       lines.push(
@@ -2545,12 +2542,11 @@ function pickNormalMergeAgentDispatchDetail({
   // converged to "operator must admin-merge" — the daemon never auto-merged
   // a single PR in the observed window leading up to 2026-05-14.
   //
-  // With FINAL_PASS_ON_BUDGET_EXHAUSTED enabled, we let merge-agent take the
-  // final pass: it owns the comment_only_followups sub-worker path, which is
-  // already designed to triage non-blocking findings (apply if trivial,
-  // defer if non-trivial) and refuse to merge when a blocker-class issue
-  // is still standing. The trigger value lets the dispatch record and the
-  // merge-agent prompt distinguish this from an operator-approved override.
+  // With FINAL_PASS_ON_BUDGET_EXHAUSTED enabled, the terminal worker owns the
+  // final pass: remediate every final blocking/non-blocking finding, get the
+  // rebased head green, and close. The trigger value lets the dispatch record
+  // and the merge-agent prompt distinguish this from an operator-approved
+  // override.
   // Stale or unverifiable operator-approved label always hard-stops,
   // BEFORE the final-pass branch can fire. The label's presence is an
   // operator signal that this PR needed manual review; we will not
@@ -2574,11 +2570,11 @@ function pickNormalMergeAgentDispatchDetail({
   ) {
     // ROOT-CAUSE GATE (PR #901): a budget-exhausted Request changes review may
     // dispatch once even with standing blockers, but that terminal worker must
-    // remediate and request a fresh adversarial review instead of merging. It
-    // must hard-stop for operator handoff if a genuinely unfixable blocker
-    // remains. If a repeated dispatch sees
-    // blockers after that one automatic blocker-remediation pass was already
-    // consumed, hand off instead of looping.
+    // remediate every final finding and merge after structural gates are green.
+    // It must hard-stop only if a genuinely unfixable structural blocker
+    // remains. If a repeated dispatch sees blockers after that one automatic
+    // blocker-remediation pass was already consumed, hand off instead of
+    // looping.
     if (blockingFindingState === 'unknown') {
       return { decision: 'skip-blocking-findings-unknown', trigger: null };
     }

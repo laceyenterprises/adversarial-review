@@ -553,8 +553,11 @@ Do not merge unless all of these are true:
   You remain mandated to FIX or HARDEN every failing regression you can —
   including ones unrelated to this branch, pre-existing on `origin/main`, flaky,
   or purely worker-sandbox-environment limited (missing host dependency, blocked
-  `ps`/process introspection, etc.). Such failures block the merge until the
-  hammer fixes them or legitimately re-runs them green.
+  `ps`/process introspection, etc.). If the failure is fixable from this PR,
+  it blocks the merge until the hammer fixes it or legitimately re-runs it green.
+  If it is purely worker-sandbox-environment limited and physically unfixable
+  from this workspace, triage it, document the host limitation in the closing
+  audit comment, and continue only when every repo-fixable regression is green.
 - No failed, missing, stale, or unchecked required check exists.
 - No non-waived gate remains.
 
@@ -641,8 +644,11 @@ fi
 - No merge when the live post-remediation head has failed, missing, stale, or
   unchecked required checks.
 - No merging while required checks or changed-surface tests fail on this head.
-  Failures proven pre-existing on `origin/main`, unrelated, flaky, or purely
-  sandbox-limited still block until fixed or legitimately re-run green.
+  Repo-fixable failures proven pre-existing on `origin/main`, unrelated, or
+  flaky still block until fixed or legitimately re-run green. Purely
+  worker-sandbox-limited failures that are physically unfixable from this
+  workspace must be triaged and documented in the closing audit comment instead
+  of being treated as a permanent hard-stop.
 - No silent red required-check exits. A red required check whose correct fix
   lives in another repo/submodule must have a linked subrepo PR, or the
   hard-blocker/audit comment must name the exact owed repo/path/change and why

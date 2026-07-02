@@ -2036,12 +2036,12 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
     lines.push('');
     if (finalPassHasStandingBlockingFindings) {
       lines.push(
-        'Default action: REMEDIATE, PUSH, AND MERGE. The latest review has'
+        'Default action: REMEDIATE, PUSH, AND REQUEST A FRESH REVIEW. The latest review has'
         + ' standing blocking findings, so apply the blocking and non-blocking'
-        + ' findings inline before taking any terminal action. Do NOT wait for'
-        + ' a fresh adversarial review or operator-approved label after the'
-        + ' exhausted-round remediation is complete; merge once structural gates'
-        + ' are green.'
+        + ' findings inline, push the remediated head, then request a fresh'
+        + ' adversarial review for the remediated head, and exit awaiting rereview.'
+        + ' Do NOT merge this invocation; the AMA daemon owns gate validation and'
+        + ' merge after this worker exits.'
       );
     } else {
       lines.push(
@@ -2056,8 +2056,8 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
     if (finalPassHasStandingBlockingFindings) {
       lines.push(
         'This is the end-of-budget blocker-remediation rescue — handle EVERYTHING'
-        + ' an interactive codex rescue session would before merging, not just'
-        + ' the review findings:'
+        + ' an interactive codex rescue session would before handing off for'
+        + ' rereview, not just the review findings:'
       );
     } else {
       lines.push(
@@ -2141,14 +2141,19 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
     if (finalPassHasStandingBlockingFindings) {
       lines.push(
         '2. Apply the blocking and non-blocking findings inline, then rebase,'
-        + ' force-push the updated head, wait for required checks on that pushed'
-        + ' head, and MERGE. Do NOT request a fresh adversarial review and do NOT'
-        + ' require `operator-approved` after the budget is exhausted. The only'
-        + ' non-merge exit on this terminal pass is a hard-stop with'
+        + ' force-push the updated head, and request a fresh adversarial review'
+        + ' for the remediated head.'
+        + ' Do NOT merge this invocation and do NOT call `gh pr merge`; PR #901'
+        + ' keeps blocker remediation gated on an external adversarial verdict'
+        + ' because the agent-os/adversarial-gate status can only turn green after'
+        + ' this worker exits and the AMA daemon validates the audit trail. Use'
+        + ' `reReview.requested = true` / `awaiting-rereview`. The only'
+        + ' non-rereview exit on this terminal pass is a hard-stop with'
         + ' handoff_required=true when a genuinely unfixable structural blocker'
         + ' remains after remediation (data corruption, secret leakage, security'
-        + ' regression, broken external contract, unresolvable conflict, or red'
-        + ' required checks that cannot be made green).'
+        + ' regression, or broken external contract, plus unresolvable conflict or red'
+        + ' required checks that cannot be made green). A non-empty'
+        + ' `blockers_observed` result in this invocation must hard-refuse immediately.'
       );
     } else {
       lines.push(

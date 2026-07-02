@@ -1412,6 +1412,29 @@ test('final hammer: exhausted validated HAM remediation waives risk class withou
   assert.equal(result.trace.riskClass.permitted, false);
 });
 
+test('final hammer: pre-exhaustion HAM remediation does not waive high/critical risk', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      riskClass: 'critical',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+      reviewCycleExhausted: false,
+    },
+    prMetadata: { headSha: 'def67890' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence(),
+    hamTerminalRemediationGroundTruth: hamGroundTruth(),
+  });
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('risk-class-not-permitted'));
+  assert.equal(result.trace.finalHammer.active, false);
+  assert.equal(result.trace.riskClass.finalHammerWaivable, false);
+  assert.ok(!result.trace.finalHammer.waived.includes('risk-class-not-permitted'));
+});
+
 test('final hammer: operator-approved alone does not waive risk-class for medium not in allowlist', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     // verdict satisfied via operator override so this isolates the risk-class waiver.

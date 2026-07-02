@@ -964,7 +964,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   );
   const reviewCycleExhausted = reviewState?.reviewCycleExhausted === true;
   const riskClassFinalHammerWaivable =
-    hamTerminalRemediation.ok === true ||
+    (hamTerminalRemediation.ok === true && reviewCycleExhausted) ||
     (
       adversarialMergeRequestedOverride &&
       !riskClassRequiresTwoKey &&

@@ -950,6 +950,11 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /Remediate ALL final comments, blocking and non-blocking/);
   assert.match(prompt, /No silent red exits/);
   assert.match(prompt, /subrepo PR opened/);
+  assert.match(prompt, /submodule-rooted failure/);
+  assert.match(prompt, /real PR against the submodule's owning\s+repository/);
+  assert.match(prompt, /main-catchup automatically floats the superproject `tools\/<submodule>`\s+gitlink/);
+  assert.match(prompt, /Never create a separate\s+superproject pointer-bump PR/);
+  assert.match(prompt, /No superproject pointer-bump PRs for submodule fixes/);
   assert.match(prompt, /CFG parity/);
   assert.match(prompt, /Dual-source migration parity is mandatory/);
   assert.match(prompt, /Worker-Ticket: HAM/);

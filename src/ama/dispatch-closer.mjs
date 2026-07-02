@@ -1132,9 +1132,13 @@ export async function maybeDispatchAmaCloser({
     // roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss): before
     // cycle exhaustion this covers narrow hammer-owned repairs (non-blocking
     // findings, mergeability, red CI). At cycle exhaustion it is the terminal
-    // rescue handoff for any final review comments. The hammer-prompt commits,
-    // writes the audit comment, then re-runs the eligibility predicate with
-    // --ham-terminal-remediation evidence, which is validated strictly and
+    // rescue handoff for any final review comments, including failures whose
+    // correct fix belongs in a submodule. The hammer-prompt owns that routing:
+    // submodule-rooted fixes are real submodule PRs, never superproject
+    // gitlink-only pointer-bump PRs, because main-catchup auto-floats the
+    // superproject gitlink after the submodule PR merges. The hammer-prompt
+    // commits, writes the audit comment, then re-runs the eligibility predicate
+    // with --ham-terminal-remediation evidence, which is validated strictly and
     // fails closed if the findings/checks were not actually addressed.
     const workerClassForMiss = String(cfg.workerClass || 'hammer');
     const reviewCycleExhausted =

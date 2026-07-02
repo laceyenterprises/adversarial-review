@@ -577,21 +577,42 @@ function schemaV1() {
             __default: {},
             __keys: {},
             // Parse-only mirror: the Python agent-os-config authority owns the
-            // canonical schema and validation for each provider block. The Node
-            // loader only needs to accept documented shared CFG without crashing,
-            // so this inner schema is intentionally permissive. Do NOT re-add a
-            // strict typed schema here: (1) `expected_app_id` /
-            // `expected_installation_id` are inherently numeric GitHub IDs and
-            // operators write them unquoted, so a strict TYPE_STRING would crash
-            // the loader on valid numeric input; (2) `__strict: true` would crash
-            // every JS service the moment a new Python-only key (webhook secret,
-            // API URL, ...) is added upstream. Keep this a permissive dict; the
-            // Python side enforces the real contract.
+            // canonical schema and validation for each provider block. Keep the
+            // known fields defaulted for Node consumers, but keep each provider
+            // block non-strict so unmirrored Python-only keys do not crash JS
+            // services during shared-CFG rollouts.
             __extra_keys_schema: {
               __type: TYPE_DICT,
               __strict: false,
               __default: {},
-              __keys: {},
+              __keys: {
+                broker_auth_enabled: {
+                  __type: TYPE_BOOL,
+                  __default: false,
+                },
+                provider: {
+                  __type: TYPE_STRING,
+                  __default: '',
+                },
+                expected_app_id: {
+                  __type: TYPE_STRING,
+                  __default: '',
+                  __coerce_number_to_string: true,
+                },
+                expected_installation_id: {
+                  __type: TYPE_STRING,
+                  __default: '',
+                  __coerce_number_to_string: true,
+                },
+                private_key_op_ref: {
+                  __type: TYPE_STRING,
+                  __default: '',
+                },
+                pat_fallback_op_ref: {
+                  __type: TYPE_STRING,
+                  __default: '',
+                },
+              },
             },
           },
         },
@@ -2327,6 +2348,13 @@ function checkLeaf(value, schema, keyPath, source, tolerateUnknown = false) {
       );
     }
   } else if (expected === TYPE_STRING) {
+    if (
+      schema.__coerce_number_to_string &&
+      typeof value === 'number' &&
+      Number.isFinite(value)
+    ) {
+      value = String(value);
+    }
     if (typeof value !== 'string') {
       throw new AgentOSConfigError(
         `${keyPath}: expected string, got ${jsTypeName(value)} (${JSON.stringify(value)})`,

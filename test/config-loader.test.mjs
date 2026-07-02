@@ -4500,9 +4500,40 @@ test('oauth_broker.github_app_providers permissive mirror: numeric IDs + future 
             private_key_op_ref: "op://Cliovault/sentinel/private-key"
             pat_fallback_op_ref: "op://Cliovault/sentinel/pat"
     `);
-    // This is a PARSE-ONLY mirror of the Python authority; the Node loader must
-    // accept documented shared CFG without crashing.
-    assert.doesNotThrow(() => loadConfig({ topPath: ok, env: {} }));
+    // This is a permissive mirror of the Python authority; the Node loader must
+    // accept documented shared CFG without crashing while retaining the known
+    // fields Node consumers read.
+    const cfg = loadConfig({ topPath: ok, env: {} });
+    assert.equal(
+      cfg.get('oauth_broker.github_app_providers.hammer.broker_auth_enabled'),
+      true,
+    );
+    assert.equal(cfg.get('oauth_broker.github_app_providers.hammer.provider'), 'hammer');
+    assert.equal(
+      cfg.get('oauth_broker.github_app_providers.hammer.expected_app_id'),
+      '3978009',
+    );
+    assert.equal(
+      cfg.get('oauth_broker.github_app_providers.hammer.expected_installation_id'),
+      '138360282',
+    );
+    assert.equal(
+      cfg.get('oauth_broker.github_app_providers.hammer.private_key_op_ref'),
+      'op://Cliovault/hammer/private-key',
+    );
+    assert.equal(
+      cfg.get('oauth_broker.github_app_providers.hammer.pat_fallback_op_ref'),
+      'op://Cliovault/hammer/pat',
+    );
+    assert.equal(
+      cfg.get('oauth_broker.github_app_providers.sentinel.broker_auth_enabled'),
+      false,
+    );
+    assert.equal(cfg.get('oauth_broker.github_app_providers.sentinel.provider'), 'sentinel');
+    assert.equal(
+      cfg.get('oauth_broker.github_app_providers.sentinel.expected_app_id'),
+      '3978010',
+    );
 
     // FOOTGUN REGRESSION (adversarial-review #475 follow-on). Both of these
     // previously threw and would have hard-failed every JS service at startup:
@@ -4523,7 +4554,31 @@ test('oauth_broker.github_app_providers permissive mirror: numeric IDs + future 
             private_key_op_ref: "op://Cliovault/hammer/private-key"
             webhook_secret_op_ref: "op://Cliovault/hammer/webhook"
     `);
-    assert.doesNotThrow(() => loadConfig({ topPath: footguns, env: {} }));
+    const footgunCfg = loadConfig({ topPath: footguns, env: {} });
+    assert.equal(
+      footgunCfg.get('oauth_broker.github_app_providers.hammer.broker_auth_enabled'),
+      true,
+    );
+    assert.equal(
+      footgunCfg.get('oauth_broker.github_app_providers.hammer.expected_app_id'),
+      '3978009',
+    );
+    assert.equal(
+      footgunCfg.get('oauth_broker.github_app_providers.hammer.expected_installation_id'),
+      '138360282',
+    );
+    assert.equal(
+      footgunCfg.get('oauth_broker.github_app_providers.hammer.private_key_op_ref'),
+      'op://Cliovault/hammer/private-key',
+    );
+    assert.equal(
+      footgunCfg.get('oauth_broker.github_app_providers.hammer.pat_fallback_op_ref'),
+      '',
+    );
+    assert.equal(
+      footgunCfg.get('oauth_broker.github_app_providers.hammer.webhook_secret_op_ref'),
+      'op://Cliovault/hammer/webhook',
+    );
 
     // The OUTER oauth_broker block stays strict: an unknown sibling key of
     // github_app_providers is still rejected (only the provider blocks are the

@@ -4476,9 +4476,10 @@ test('oauth_broker.merge_agent strict mirror: valid keys parse; unknown nested k
   }
 });
 
-test('oauth_broker.github_app_providers strict mirror: provider blocks parse; unknown keys rejected', () => {
+test('oauth_broker.github_app_providers permissive mirror: numeric IDs + future Python-only keys tolerated', () => {
   const tmp = freshTmp();
   try {
+    // Documented provider blocks parse (quoted string IDs, all known fields).
     const ok = join(tmp, 'github-app-providers-ok.yaml');
     writeFile(ok, `
       version: 1
@@ -4499,6 +4500,9 @@ test('oauth_broker.github_app_providers strict mirror: provider blocks parse; un
             private_key_op_ref: "op://Cliovault/sentinel/private-key"
             pat_fallback_op_ref: "op://Cliovault/sentinel/pat"
     `);
+    // This is a permissive mirror of the Python authority; the Node loader must
+    // accept documented shared CFG without crashing while retaining the known
+    // fields Node consumers read.
     const cfg = loadConfig({ topPath: ok, env: {} });
     assert.equal(
       cfg.get('oauth_broker.github_app_providers.hammer.broker_auth_enabled'),
@@ -4506,34 +4510,79 @@ test('oauth_broker.github_app_providers strict mirror: provider blocks parse; un
     );
     assert.equal(cfg.get('oauth_broker.github_app_providers.hammer.provider'), 'hammer');
     assert.equal(
-      cfg.get('oauth_broker.github_app_providers.sentinel.private_key_op_ref'),
-      'op://Cliovault/sentinel/private-key',
+      cfg.get('oauth_broker.github_app_providers.hammer.expected_app_id'),
+      '3978009',
     );
     assert.equal(
-      cfg.get('oauth_broker.github_app_providers.sentinel.pat_fallback_op_ref'),
-      'op://Cliovault/sentinel/pat',
+      cfg.get('oauth_broker.github_app_providers.hammer.expected_installation_id'),
+      '138360282',
+    );
+    assert.equal(
+      cfg.get('oauth_broker.github_app_providers.hammer.private_key_op_ref'),
+      'op://Cliovault/hammer/private-key',
+    );
+    assert.equal(
+      cfg.get('oauth_broker.github_app_providers.hammer.pat_fallback_op_ref'),
+      'op://Cliovault/hammer/pat',
+    );
+    assert.equal(
+      cfg.get('oauth_broker.github_app_providers.sentinel.broker_auth_enabled'),
+      false,
+    );
+    assert.equal(cfg.get('oauth_broker.github_app_providers.sentinel.provider'), 'sentinel');
+    assert.equal(
+      cfg.get('oauth_broker.github_app_providers.sentinel.expected_app_id'),
+      '3978010',
     );
 
-    const badProvider = join(tmp, 'github-app-providers-bad-provider.yaml');
-    writeFile(badProvider, `
+    // FOOTGUN REGRESSION (adversarial-review #475 follow-on). Both of these
+    // previously threw and would have hard-failed every JS service at startup:
+    //   (a) inherently numeric GitHub App / installation IDs written UNQUOTED;
+    //   (b) a future Python-only key (webhook secret, API URL, ...) added to the
+    //       canonical Python model but not yet mirrored here.
+    // A parse-only mirror must tolerate both.
+    const footguns = join(tmp, 'github-app-providers-footguns.yaml');
+    writeFile(footguns, `
       version: 1
       oauth_broker:
         github_app_providers:
           hammer:
             broker_auth_enabled: true
             provider: hammer
-            unexpected_secret_file: /tmp/x
+            expected_app_id: 3978009
+            expected_installation_id: 138360282
+            private_key_op_ref: "op://Cliovault/hammer/private-key"
+            webhook_secret_op_ref: "op://Cliovault/hammer/webhook"
     `);
-    assert.throws(
-      () => loadConfig({ topPath: badProvider, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.match(err.message, /unknown key/);
-        assert.equal(err.key, 'oauth_broker.github_app_providers.hammer.unexpected_secret_file');
-        return true;
-      },
+    const footgunCfg = loadConfig({ topPath: footguns, env: {} });
+    assert.equal(
+      footgunCfg.get('oauth_broker.github_app_providers.hammer.broker_auth_enabled'),
+      true,
+    );
+    assert.equal(
+      footgunCfg.get('oauth_broker.github_app_providers.hammer.expected_app_id'),
+      '3978009',
+    );
+    assert.equal(
+      footgunCfg.get('oauth_broker.github_app_providers.hammer.expected_installation_id'),
+      '138360282',
+    );
+    assert.equal(
+      footgunCfg.get('oauth_broker.github_app_providers.hammer.private_key_op_ref'),
+      'op://Cliovault/hammer/private-key',
+    );
+    assert.equal(
+      footgunCfg.get('oauth_broker.github_app_providers.hammer.pat_fallback_op_ref'),
+      '',
+    );
+    assert.equal(
+      footgunCfg.get('oauth_broker.github_app_providers.hammer.webhook_secret_op_ref'),
+      'op://Cliovault/hammer/webhook',
     );
 
+    // The OUTER oauth_broker block stays strict: an unknown sibling key of
+    // github_app_providers is still rejected (only the provider blocks are the
+    // permissive parse-only mirror).
     const badBroker = join(tmp, 'github-app-providers-bad-broker.yaml');
     writeFile(badBroker, `
       version: 1

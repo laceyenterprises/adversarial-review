@@ -576,9 +576,15 @@ function schemaV1() {
             __strict: false,
             __default: {},
             __keys: {},
+            // Parse-only mirror: the Python agent-os-config authority owns the
+            // canonical schema and validation for each provider block. Keep the
+            // known fields defaulted for Node consumers, but keep each provider
+            // block non-strict so unmirrored Python-only keys do not crash JS
+            // services during shared-CFG rollouts.
             __extra_keys_schema: {
               __type: TYPE_DICT,
-              __strict: true,
+              __strict: false,
+              __default: {},
               __keys: {
                 broker_auth_enabled: {
                   __type: TYPE_BOOL,
@@ -591,10 +597,12 @@ function schemaV1() {
                 expected_app_id: {
                   __type: TYPE_STRING,
                   __default: '',
+                  __coerce_number_to_string: true,
                 },
                 expected_installation_id: {
                   __type: TYPE_STRING,
                   __default: '',
+                  __coerce_number_to_string: true,
                 },
                 private_key_op_ref: {
                   __type: TYPE_STRING,
@@ -2340,6 +2348,13 @@ function checkLeaf(value, schema, keyPath, source, tolerateUnknown = false) {
       );
     }
   } else if (expected === TYPE_STRING) {
+    if (
+      schema.__coerce_number_to_string &&
+      typeof value === 'number' &&
+      Number.isFinite(value)
+    ) {
+      value = String(value);
+    }
     if (typeof value !== 'string') {
       throw new AgentOSConfigError(
         `${keyPath}: expected string, got ${jsTypeName(value)} (${JSON.stringify(value)})`,

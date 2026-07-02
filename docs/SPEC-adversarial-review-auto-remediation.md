@@ -61,8 +61,15 @@ closer launch attempts. When `hq dispatch` refuses to drop a branch-holder
 worktree because it still has unrecovered local state, the watcher records
 `state:"dispatch-blocked-branch-holder"` and increments
 `branchHolderBlockCount` without consuming the normal `retryCount` redispatch
-budget. The watcher may retry that cleanup path only three consecutive times;
-after that it records/stops on `dispatch-branch-holder-block-exhausted` with
+budget. The watcher may retry that cleanup path only three times across the
+dispatch record's lifetime; unrelated transient or ordinary dispatch failures
+do not reset `branchHolderBlockCount`. Known stale own-worktree cleanup
+diagnostics, such as missing admin-entry fallback lines or incomplete provision
+cleanup after releasing the worktree mutation lock, are ignored line-by-line
+when classifying branch-holder evidence so they do not consume this dedicated
+budget by themselves and do not mask genuine branch-holder blockers elsewhere
+in the same multi-line log. After the lifetime budget is exhausted, the watcher
+records/stops on `dispatch-branch-holder-block-exhausted` with
 `skipMergeAgent:true` so the daemon does not spin on every reconciliation tick
 against a persistent local-worktree blockage.
 

@@ -79,9 +79,28 @@ scans.
    required check such as CFG parity, dual-source SQLite/Postgres migration
    parity, or a data-model validator belongs in a different repository or
    submodule than this PR's repository, open a PR in that repository for the
-   parity remediation and link it in the audit comment. If you cannot open that
-   subrepo PR, stop and report the precise owed repo/path/change and the failed
-   check instead of leaving the superproject PR red without explanation.
+   parity remediation and link it in the audit comment. This applies to any
+   submodule-rooted failure, including code, test, green-main-bar CI, or CFG
+   schema-parity fixes in paths such as `tools/adversarial-review` or
+   `tools/foundry`: author the fix as a real PR against the submodule's owning
+   repository. Do not smuggle the source change into the superproject and do not
+   open a superproject PR whose only change is the submodule gitlink. If you
+   cannot open that subrepo PR, stop and report the precise owed
+   repo/path/change and the failed check instead of leaving the superproject PR
+   red without explanation.
+2bb. **Submodule PR sequencing and main-catchup auto-float.** When the PR you
+   are closing is blocked by a fix that belongs inside a submodule, land the
+   submodule PR first. After that PR merges and the submodule's main advances,
+   main-catchup automatically floats the superproject `tools/<submodule>`
+   gitlink to the new submodule main on its next cycle. Never create a separate
+   superproject pointer-bump PR whose only diff is `Subproject commit ...`; it is
+   dangling/redundant, races the auto-float, and can point at an orphaned
+   pre-squash commit if the submodule PR squash-merges. The correct sequence is:
+   submodule fix PR merged, main-catchup floats the gitlink, the superproject PR
+   rebases or otherwise validates against the floated current main, checks rerun
+   green, then the superproject PR may merge. Do not merge the superproject PR
+   while the submodule fix is unmerged, and do not fabricate a pointer bump to
+   force it.
 2c. **Keep the canonical documentation surfaces current — doc-currency for the
    change you are landing is IN SCOPE, exactly like the test/CI fixes in 2b, and
    is NOT net-new feature scope.** If the post-remediation diff touches either
@@ -652,6 +671,11 @@ fi
   lives in another repo/submodule must have a linked subrepo PR, or the
   hard-blocker/audit comment must name the exact owed repo/path/change and why
   the subrepo PR could not be opened.
+- No superproject pointer-bump PRs for submodule fixes. Main-catchup auto-floats
+  submodule gitlinks after the submodule PR merges; wait for or rebase onto the
+  floated current main instead of creating a gitlink-only PR.
+- No merging a superproject PR that is still blocked on an unmerged submodule
+  fix PR.
 - No merging a branch that is `BEHIND` / not rebased onto the latest `main`; the
   rebase must be re-validated (required checks + changed-surface tests green)
   before merge.

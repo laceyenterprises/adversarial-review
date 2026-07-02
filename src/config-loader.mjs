@@ -567,6 +567,46 @@ function schemaV1() {
               },
             },
           },
+          // GitHub App provider identities keyed by provider name
+          // (hammer/sentinel/argus/etc.). Parse-only mirror of the Python
+          // authority so shared CFG stays strict without rejecting documented
+          // provider blocks.
+          github_app_providers: {
+            __type: TYPE_DICT,
+            __strict: false,
+            __default: {},
+            __keys: {},
+            __extra_keys_schema: {
+              __type: TYPE_DICT,
+              __strict: true,
+              __keys: {
+                broker_auth_enabled: {
+                  __type: TYPE_BOOL,
+                  __default: false,
+                },
+                provider: {
+                  __type: TYPE_STRING,
+                  __default: '',
+                },
+                expected_app_id: {
+                  __type: TYPE_STRING,
+                  __default: '',
+                },
+                expected_installation_id: {
+                  __type: TYPE_STRING,
+                  __default: '',
+                },
+                private_key_op_ref: {
+                  __type: TYPE_STRING,
+                  __default: '',
+                },
+                pat_fallback_op_ref: {
+                  __type: TYPE_STRING,
+                  __default: '',
+                },
+              },
+            },
+          },
         },
       },
       governance: {

@@ -165,7 +165,7 @@ async function cleanupHammerCloserWorker({
       return { ok: true, workerId, reason, attempts: attempt + 1 };
     } catch (err) {
       const error = String(err?.stderr || err?.message || err);
-      if (isWorkerTearDownNotFoundError(err)) {
+      if (isWorkerTearDownNotFoundError(error)) {
         logger.info?.(JSON.stringify({
           event: 'ama_closer.hammer_worker_cleanup',
           workerId,
@@ -175,7 +175,7 @@ async function cleanupHammerCloserWorker({
         }));
         return { ok: true, workerId, reason, alreadyAbsent: true, attempts: attempt + 1 };
       }
-      const transient = isTransientHqDispatchError(err);
+      const transient = isTransientHqDispatchError(error);
       if (transient && attempt < AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS.length) {
         logger.warn?.(JSON.stringify({
           event: 'ama_closer.hammer_worker_cleanup',
@@ -1407,6 +1407,17 @@ export async function maybeDispatchAmaCloser({
       });
     }
     if (AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
+      const hammerCleanup = await cleanupHammerCloserWorker({
+        prNumber,
+        workerClass,
+        existingRecord,
+        hqPath,
+        hqRoot,
+        execFileImpl,
+        logger,
+        reason: `terminal-status-${status}`,
+      });
+      assertHammerCleanupSucceeded(hammerCleanup);
       await recordAmaCloserReviewerPassTokens({
         rootDir,
         hqRoot,
@@ -1426,17 +1437,6 @@ export async function maybeDispatchAmaCloser({
         pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
         logger,
       });
-      const hammerCleanup = await cleanupHammerCloserWorker({
-        prNumber,
-        workerClass,
-        existingRecord,
-        hqPath,
-        hqRoot,
-        execFileImpl,
-        logger,
-        reason: `terminal-status-${status}`,
-      });
-      assertHammerCleanupSucceeded(hammerCleanup);
     }
     if (!releaseUnprovenTerminalHold && !AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
       return noAmaDispatch({ dispatched: false, reason: `dispatch-status-${status || 'unknown'}` });

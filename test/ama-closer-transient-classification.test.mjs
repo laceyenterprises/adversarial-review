@@ -58,6 +58,13 @@ test('isGithubRateLimitOrBrokerThrottle accepts both string and error-object sha
   assert.equal(isGithubRateLimitOrBrokerThrottle('plain string with rate limit'), true);
 });
 
+test('isTransientHqDispatchError recognizes transient diagnostics after a non-matching first line', () => {
+  assert.equal(
+    isTransientHqDispatchError('Bad request.\nresource temporarily unavailable while tearing down worker'),
+    true,
+  );
+});
+
 test('isGithubRateLimitOrBrokerThrottle does NOT match unrelated bare 429 text', () => {
   for (const msg of [
     'wrote 429 bytes before exiting',

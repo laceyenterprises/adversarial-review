@@ -895,6 +895,46 @@ test('top-level config.yaml accepts mirrored worker_pool.dispatch.goal_lineage k
   }
 });
 
+test('top-level config.yaml accepts mirrored worker_pool.dispatch.codex_exec_mode key', () => {
+  // CXD-07 is Python-owned, but the shared checked-in config must parse under
+  // the watcher strict schema.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        dispatch:
+          codex_exec_mode: true
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.dispatch.codex_exec_mode'), true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('worker_pool.dispatch.codex_exec_mode legacy env alias resolves through Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        HQ_CODEX_EXEC_MODE: 'true',
+      },
+    });
+    assert.equal(cfg.get('worker_pool.dispatch.codex_exec_mode'), true);
+    assert.equal(
+      cfg.resolutionTrace('worker_pool.dispatch.codex_exec_mode').at(-1).source,
+      'env:HQ_CODEX_EXEC_MODE',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('worker_pool.dispatch.goal_lineage legacy env aliases resolve through Node schema', () => {
   const tmp = freshTmp();
   try {

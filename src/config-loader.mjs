@@ -1245,6 +1245,7 @@ function schemaV1() {
         },
       },
       // worker_pool.dag.autowalk.deep_reconcile,
+      // worker_pool.dispatch.codex_exec_mode,
       // worker_pool.dispatch.goal_lineage.*, and
       // worker_pool.memory.dynamic.* — Python-owned (canonical schema at
       // platform/agent-os-config). PARTIAL mirror, same rationale as the
@@ -1275,6 +1276,7 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
+              codex_exec_mode: { __type: TYPE_BOOL, __default: false },
               goal_lineage: {
                 __type: TYPE_DICT,
                 __strict: true,
@@ -1829,6 +1831,10 @@ export const ENV_ALIASES = {
   'worker_pool.memory.dynamic.require_pressure_normal': {
     canonical: 'AGENT_OS_WORKER_POOL_MEMORY_DYNAMIC_REQUIRE_PRESSURE_NORMAL',
     aliases: [['HQ_MEMORY_DYNAMIC_REQUIRE_PRESSURE_NORMAL', identity]],
+  },
+  'worker_pool.dispatch.codex_exec_mode': {
+    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_CODEX_EXEC_MODE',
+    aliases: [['HQ_CODEX_EXEC_MODE', identity]],
   },
   'worker_pool.dispatch.goal_lineage.enabled': {
     canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_GOAL_LINEAGE_ENABLED',

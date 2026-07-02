@@ -55,6 +55,13 @@ replacement closer. The merged-signal lookup is intentionally scoped to
 Agent OS merge capture stores the merge commit in `build_completions.head_sha`,
 while the closer's `--match-head-commit <reviewedSha>` guard uses the PR head.
 The producer SHA is evidence returned to operators, not an equality gate.
+When a deterministic HAM closer worker exists for the PR, the watcher must
+tear it down before accepting the merged signal as terminal or before
+redispatching after a retryable terminal status. The teardown is idempotent:
+missing-worker diagnostics count as clean, transient subprocess/system failures
+are retried with bounded backoff, and an exhausted teardown failure aborts the
+current watcher pass so the next poll can retry without leaking the worker or
+colliding on `hammer-ama-pr-<n>`.
 
 Branch-holder provisioning failures are bounded cleanup debt, not ordinary
 closer launch attempts. When `hq dispatch` refuses to drop a branch-holder

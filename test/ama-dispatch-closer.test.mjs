@@ -1736,6 +1736,181 @@ test('merged hammer closer tears down deterministic worker after merged signal',
   assert.equal(result.hammerCleanup.ok, true);
 });
 
+test('merged hammer closer retries transient worker teardown before marking done', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-merged-cleanup-retry-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: { workerClass: 'hammer' },
+    dispatchContext: { rootDir },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatched',
+    retryCount: 1,
+    workerClass: 'hammer',
+    dispatchedAt: '2026-06-20T10:00:00Z',
+    dispatchId: 'dispatch_hammer_done',
+    launchRequestId: 'lrq_hammer_done',
+    lastObservedStatus: 'succeeded',
+    lastObservedAt: '2026-06-20T10:02:00Z',
+    lastError: null,
+  });
+
+  const calls = [];
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:05:00Z' },
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args[0] === 'worker' && args[1] === 'tear-down' && calls.length < 3) {
+        const err = new Error('transient launchd read failed');
+        err.code = 'EIO';
+        err.stderr = 'EIO: resource temporarily unavailable';
+        throw err;
+      }
+      return { stdout: '{}', stderr: '' };
+    },
+    readTemplateImpl: () => 'stubbed',
+    readBuildCompletionSignalForPrImpl: () => ({
+      ok: true,
+      row: {
+        completion_id: 'bcmp_hammer_done',
+        repo: dispatchContext.repo,
+        pr_number: prMetadata.prNumber,
+        head_sha: dispatchContext.reviewedSha,
+        signal_kind: 'merged',
+      },
+    }),
+  });
+
+  assert.equal(result.reason, 'merged-signal-present');
+  assert.equal(result.hammerCleanup.ok, true);
+  assert.equal(result.hammerCleanup.attempts, 3);
+  assert.deepEqual(calls.map((call) => call.args.slice(0, 3)), [
+    ['worker', 'tear-down', 'hammer-ama-pr-1234'],
+    ['worker', 'tear-down', 'hammer-ama-pr-1234'],
+    ['worker', 'tear-down', 'hammer-ama-pr-1234'],
+  ]);
+});
+
+test('merged hammer closer treats absent worker teardown as already clean', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-merged-cleanup-absent-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: { workerClass: 'hammer' },
+    dispatchContext: { rootDir },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatched',
+    retryCount: 1,
+    workerClass: 'hammer',
+    dispatchedAt: '2026-06-20T10:00:00Z',
+    dispatchId: 'dispatch_hammer_done',
+    launchRequestId: 'lrq_hammer_done',
+    lastObservedStatus: 'succeeded',
+    lastObservedAt: '2026-06-20T10:02:00Z',
+    lastError: null,
+  });
+
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:05:00Z' },
+    execFileImpl: async (_cmd, args) => {
+      if (args[0] === 'worker' && args[1] === 'tear-down') {
+        const err = new Error('worker not found');
+        err.stderr = 'worker not found: hammer-ama-pr-1234';
+        throw err;
+      }
+      return { stdout: '{}', stderr: '' };
+    },
+    readTemplateImpl: () => 'stubbed',
+    readBuildCompletionSignalForPrImpl: () => ({
+      ok: true,
+      row: {
+        completion_id: 'bcmp_hammer_done',
+        repo: dispatchContext.repo,
+        pr_number: prMetadata.prNumber,
+        head_sha: dispatchContext.reviewedSha,
+        signal_kind: 'merged',
+      },
+    }),
+  });
+
+  assert.equal(result.reason, 'merged-signal-present');
+  assert.equal(result.hammerCleanup.ok, true);
+  assert.equal(result.hammerCleanup.alreadyAbsent, true);
+});
+
+test('merged hammer closer aborts when worker teardown fails', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-merged-cleanup-fail-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: { workerClass: 'hammer' },
+    dispatchContext: { rootDir },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatched',
+    retryCount: 1,
+    workerClass: 'hammer',
+    dispatchedAt: '2026-06-20T10:00:00Z',
+    dispatchId: 'dispatch_hammer_done',
+    launchRequestId: 'lrq_hammer_done',
+    lastObservedStatus: 'succeeded',
+    lastObservedAt: '2026-06-20T10:02:00Z',
+    lastError: null,
+  });
+
+  await assert.rejects(
+    () => maybeDispatchAmaCloser({
+      reviewState,
+      prMetadata,
+      cfg,
+      dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:05:00Z' },
+      execFileImpl: async (_cmd, args) => {
+        if (args[0] === 'worker' && args[1] === 'tear-down') {
+          const err = new Error('fatal teardown failure');
+          err.stderr = 'permission denied while tearing down worker';
+          throw err;
+        }
+        return { stdout: '{}', stderr: '' };
+      },
+      readTemplateImpl: () => 'stubbed',
+      readBuildCompletionSignalForPrImpl: () => ({
+        ok: true,
+        row: {
+          completion_id: 'bcmp_hammer_done',
+          repo: dispatchContext.repo,
+          pr_number: prMetadata.prNumber,
+          head_sha: dispatchContext.reviewedSha,
+          signal_kind: 'merged',
+        },
+      }),
+    }),
+    /AMA hammer worker teardown failed for hammer-ama-pr-1234/,
+  );
+});
+
 test('CAP-05: terminal closer records worker_run token usage after async ledger rollup', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-cap05-rollup-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -2219,6 +2394,65 @@ test('terminal failed hammer closer tears down stale worker before redispatch', 
     ['dispatch', 'status', 'lrq_hammer_failed'],
     ['worker', 'tear-down', 'hammer-ama-pr-1234'],
     ['dispatch', '--worker-class', 'hammer'],
+  ]);
+});
+
+test('terminal failed hammer closer aborts redispatch when worker teardown fails', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-terminal-cleanup-fail-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: { workerClass: 'hammer' },
+    dispatchContext: {
+      rootDir,
+      closerTokenRollupPollDelaysMs: [],
+    },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatched',
+    retryCount: 1,
+    workerClass: 'hammer',
+    dispatchedAt: '2026-06-20T10:00:00Z',
+    dispatchId: 'dispatch_hammer_failed',
+    launchRequestId: 'lrq_hammer_failed',
+    lastObservedStatus: 'starting',
+    lastObservedAt: '2026-06-20T10:00:00Z',
+    lastError: null,
+  });
+
+  const calls = [];
+  await assert.rejects(
+    () => maybeDispatchAmaCloser({
+      reviewState,
+      prMetadata,
+      cfg,
+      dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:05:00Z' },
+      execFileImpl: async (cmd, args) => {
+        calls.push({ cmd, args });
+        if (args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: '{"status":"failed"}', stderr: '' };
+        }
+        if (args[0] === 'worker' && args[1] === 'tear-down') {
+          const err = new Error('fatal teardown failure');
+          err.stderr = 'permission denied while tearing down worker';
+          throw err;
+        }
+        return { stdout: '{"dispatchId":"dispatch_hammer_new","launchRequestId":"lrq_hammer_new"}', stderr: '' };
+      },
+      readTemplateImpl: () => 'stubbed',
+      readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+    }),
+    /AMA hammer worker teardown failed for hammer-ama-pr-1234/,
+  );
+
+  assert.deepEqual(calls.map((call) => call.args.slice(0, 3)), [
+    ['dispatch', 'status', 'lrq_hammer_failed'],
+    ['worker', 'tear-down', 'hammer-ama-pr-1234'],
   ]);
 });
 

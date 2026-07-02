@@ -506,6 +506,16 @@ function isProvisionBranchHolderBlocked(errOrText) {
     ].filter(Boolean).join('\n');
   const normalized = detail.toLowerCase();
   if (!normalized) return false;
+  if (
+    normalized.includes('hammer-ama-pr-')
+    && (
+      normalized.includes('targeted worktree fallback could not find admin entry')
+      || normalized.includes('provision cleanup')
+      || normalized.includes('force-reclaimed stale own merge worktree')
+    )
+  ) {
+    return false;
+  }
   if (/\b(branch[-_]holder[-_](blocked|collision|worktree)|worktree[-_]branch[-_]holder[-_]blocked)\b/.test(normalized)) {
     return true;
   }
@@ -1177,7 +1187,9 @@ export async function maybeDispatchAmaCloser({
     && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.PENDING
     && !existingRecordIsReclaimableInterruption;
   const existingRecordIsBranchHolderBlocked = isProvisionBranchHolderBlocked(existingRecord?.lastError || '');
-  const existingBranchHolderBlockCount = Number(existingRecord?.branchHolderBlockCount || 0);
+  const existingBranchHolderBlockCount = existingRecordIsBranchHolderBlocked
+    ? Number(existingRecord?.branchHolderBlockCount || 0)
+    : 0;
   let existingDispatchStatus = null;
   if (existingRecord?.launchRequestId) {
     let releaseUnprovenTerminalHold = false;

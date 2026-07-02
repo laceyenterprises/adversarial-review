@@ -504,7 +504,19 @@ function isProvisionBranchHolderBlocked(errOrText) {
       errOrText?.stderr,
       errOrText?.stdout,
     ].filter(Boolean).join('\n');
-  const normalized = detail.toLowerCase();
+  const normalized = detail
+    .split(/\r?\n/)
+    .map(line => line.toLowerCase())
+    .filter(line => {
+      if (line.includes('targeted worktree fallback could not find admin entry')) return false;
+      if (line.includes('force-reclaimed stale own merge worktree')) return false;
+      return !(line.includes('provision cleanup')
+        && (
+          line.includes('releasing worktree mutation lock')
+          || line.includes('was incomplete; continuing')
+        ));
+    })
+    .join('\n');
   if (!normalized) return false;
   if (/\b(branch[-_]holder[-_](blocked|collision|worktree)|worktree[-_]branch[-_]holder[-_]blocked)\b/.test(normalized)) {
     return true;
@@ -1550,10 +1562,10 @@ export async function maybeDispatchAmaCloser({
         && !branchHolderBlocked
         && isTransientHqDispatchError(err);
       const budgetPreservingFailure = branchHolderBlocked || transientFailure;
-      updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => {
+      const updatedDispatchRecord = updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => {
         const branchHolderBlockCount = branchHolderBlocked
           ? Number(current?.branchHolderBlockCount || existingBranchHolderBlockCount) + 1
-          : 0;
+          : Number(current?.branchHolderBlockCount || existingBranchHolderBlockCount);
         return {
           ...(current || {}),
           schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
@@ -1585,6 +1597,8 @@ export async function maybeDispatchAmaCloser({
           lastError: String(err?.stderr || err?.message || err),
         };
       });
+      const branchHolderBlockExhausted = branchHolderBlocked
+        && Number(updatedDispatchRecord?.branchHolderBlockCount || 0) >= AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND;
       return noAmaDispatch({
         dispatched: false,
         // Transient failures keep the merge-agent fallback suppressed so the
@@ -1593,7 +1607,11 @@ export async function maybeDispatchAmaCloser({
         // guaranteed to be retry-eligible on the next tick.
         skipMergeAgent: branchHolderBlocked || ambiguousLaunch || transientFailure,
         reason: ambiguousLaunch ? 'dispatch-response-ambiguous' : (
-          branchHolderBlocked ? 'dispatch-branch-holder-blocked' : (
+          branchHolderBlocked ? (
+            branchHolderBlockExhausted
+              ? 'dispatch-branch-holder-block-exhausted'
+              : 'dispatch-branch-holder-blocked'
+          ) : (
             transientFailure ? 'dispatch-deferred-transient' : 'dispatch-failed'
           )
         ),

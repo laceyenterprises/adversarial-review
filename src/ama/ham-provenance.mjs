@@ -7,6 +7,7 @@ const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set([
   // commit-author login resolution lags. (worker-pool: hq_resolve_worker_identity
   // hammer -> merge-agent-lacey.)
   'merge-agent-lacey',
+  'lacey-merge-agent[bot]',
   // HQ hammer workers may write PR comments through the owner-lane gh token
   // while the commit itself is authored by merge-agent-lacey.
   'clio-airlock',

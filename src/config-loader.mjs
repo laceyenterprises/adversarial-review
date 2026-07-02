@@ -576,35 +576,22 @@ function schemaV1() {
             __strict: false,
             __default: {},
             __keys: {},
+            // Parse-only mirror: the Python agent-os-config authority owns the
+            // canonical schema and validation for each provider block. The Node
+            // loader only needs to accept documented shared CFG without crashing,
+            // so this inner schema is intentionally permissive. Do NOT re-add a
+            // strict typed schema here: (1) `expected_app_id` /
+            // `expected_installation_id` are inherently numeric GitHub IDs and
+            // operators write them unquoted, so a strict TYPE_STRING would crash
+            // the loader on valid numeric input; (2) `__strict: true` would crash
+            // every JS service the moment a new Python-only key (webhook secret,
+            // API URL, ...) is added upstream. Keep this a permissive dict; the
+            // Python side enforces the real contract.
             __extra_keys_schema: {
               __type: TYPE_DICT,
-              __strict: true,
-              __keys: {
-                broker_auth_enabled: {
-                  __type: TYPE_BOOL,
-                  __default: false,
-                },
-                provider: {
-                  __type: TYPE_STRING,
-                  __default: '',
-                },
-                expected_app_id: {
-                  __type: TYPE_STRING,
-                  __default: '',
-                },
-                expected_installation_id: {
-                  __type: TYPE_STRING,
-                  __default: '',
-                },
-                private_key_op_ref: {
-                  __type: TYPE_STRING,
-                  __default: '',
-                },
-                pat_fallback_op_ref: {
-                  __type: TYPE_STRING,
-                  __default: '',
-                },
-              },
+              __strict: false,
+              __default: {},
+              __keys: {},
             },
           },
         },

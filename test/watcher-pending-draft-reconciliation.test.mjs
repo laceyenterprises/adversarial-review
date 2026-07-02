@@ -99,6 +99,62 @@ test('watcher pre-spawn reconciliation clears stale-head drafts before spawn and
   assert.equal(event.skippedReason, null);
 });
 
+test('watcher app-token reconciliation derives bot login and never probes /user', async () => {
+  const deleted = [];
+  const log = makeLog();
+  const calls = [];
+  const fetchImpl = async (url, opts = {}) => {
+    calls.push(String(url));
+    if (url === 'https://api.github.com/user') {
+      throw new Error('/user must not be probed for app tokens');
+    }
+    if (url.endsWith('/pulls/177/reviews') && (!opts.method || opts.method === 'GET')) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return [
+            {
+              id: 7004,
+              state: 'PENDING',
+              commit_id: 'old-head',
+              created_at: '2026-05-30T03:59:00.000Z',
+              user: { login: 'lacey-claude-reviewer[bot]' },
+            },
+          ];
+        },
+      };
+    }
+    if (url.endsWith('/reviews/7004') && opts.method === 'DELETE') {
+      deleted.push(7004);
+      return { ok: true, status: 200, async json() { return {}; } };
+    }
+    throw new Error(`unmocked fetch: ${opts.method || 'GET'} ${url}`);
+  };
+
+  const result = await withEnv({
+    GH_CLAUDE_REVIEWER_TOKEN: 'app-token',
+    OAUTH_BROKER_CLAUDE_REVIEWER_PROVIDER: 'github-app-lacey-claude-reviewer',
+  }, () => reconcilePendingDraftsBeforeSpawn({
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 177,
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+    currentHeadSha: 'new-head',
+    now: new Date('2026-05-30T04:00:00.000Z'),
+    fetchImpl,
+    log,
+  }));
+
+  assert.equal(calls.includes('https://api.github.com/user'), false);
+  assert.equal(result.selfLogin, 'lacey-claude-reviewer[bot]');
+  assert.equal(result.skippedReason, null);
+  assert.deepEqual(deleted, [7004]);
+  const event = parseStructuredEvent(log);
+  assert.equal(event.identity, 'lacey-claude-reviewer[bot]');
+  assert.equal(event.pendingMine, 1);
+  assert.equal(event.cleared, 1);
+});
+
 test('watcher runs pending-draft reconciliation after claim and freshness re-check', () => {
   const source = readFileSync(WATCHER_SOURCE, 'utf8');
   const claimIndex = source.indexOf(': stmtMarkAttemptStarted.run(');

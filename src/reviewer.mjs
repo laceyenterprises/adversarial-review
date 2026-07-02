@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
+import { resolveGitHubAppBotLogin } from './github-app-identity.mjs';
 import { getCachedDiff, putCachedDiff } from './diff-cache.mjs';
 import {
   createFollowUpJob,
@@ -2756,6 +2757,13 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
   const prepareReviewWrite = opts.prepareReviewWrite || clearPendingReviewsForSelf;
   const log = opts.log || console;
   const refreshIdentity = resolveReviewerIdentityForBotTokenEnv(botTokenEnv, opts.reviewerIdentity);
+  const appSelfLogin = resolveGitHubAppBotLogin({
+    identity: refreshIdentity,
+    botTokenEnv,
+    env: sourceEnv,
+    log,
+  });
+  const writeIdentity = appSelfLogin || refreshIdentity;
   let refreshedAfterAuthFailure = false;
 
   const stateDir = resolveAdversarialReviewStateDir(opts.rootDir || ROOT, sourceEnv);
@@ -2788,9 +2796,9 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
           token,
           // The reviewer bot tokens are GitHub App tokens — `GET /user` returns
           // 403 ("Resource not accessible by integration"), so pass the known
-          // reviewer identity to skip the self-login probe. (PAT path still
-          // falls back to /user when no identity is supplied.)
-          selfLogin: refreshIdentity,
+          // GitHub author login to skip the self-login probe. (PAT path still
+          // falls back to /user when no app/provider identity is supplied.)
+          selfLogin: appSelfLogin,
           fetchImpl: opts.fetchImpl,
           log: preWriteLog.log,
         });
@@ -2814,7 +2822,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
             const adapterResult = await writeAdapterPullRequestReview(
               repo,
               prNumber,
-              { body: reviewBody, reviewerLogin: refreshIdentity },
+              { body: reviewBody, reviewerLogin: writeIdentity },
               { execFileImpl, env: adapterEnv, rootDir: opts.rootDir || ROOT }
             );
             adapterHandled = adapterResult?.ran === true;

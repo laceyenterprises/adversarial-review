@@ -698,7 +698,7 @@ test('auto-hammer dispatches HAM terminal remediation at review-cycle exhaustion
 });
 
 // Unit coverage for the prompt-selection predicate itself (HAM-04, SPEC §1.1.1).
-test('amaClosureNeedsTerminalRemediation gates the hammer mandate on real findings', () => {
+test('amaClosureNeedsTerminalRemediation triggers on waived unset verdict without findings', () => {
   const clean = {
     trace: {
       verdict: {
@@ -742,7 +742,7 @@ test('amaClosureNeedsTerminalRemediation gates the hammer mandate on real findin
     active: true,
     waived: ['verdict-not-settled-success'],
   };
-  assert.equal(amaClosureNeedsTerminalRemediation(finalHammerWaivedVerdictGate), false);
+  assert.equal(amaClosureNeedsTerminalRemediation(finalHammerWaivedVerdictGate), true);
 
   const finalHammerWaivedVerdictGateWithFindings = structuredClone(finalHammerWaivedVerdictGate);
   finalHammerWaivedVerdictGateWithFindings.trace.verdict.nonBlockingFindings = { known: true, count: 1 };

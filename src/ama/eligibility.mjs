@@ -901,10 +901,6 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const highOrCriticalClass = ['high', 'critical'].includes(riskClass);
   const highRiskTwoKeyClass = highRiskRequiresTwoKey && highOrCriticalClass;
   const riskClassRequiresTwoKey = alwaysTwoKeyClass || highRiskTwoKeyClass;
-  const riskClassFinalHammerWaivable =
-    adversarialMergeRequestedOverride &&
-    !riskClassRequiresTwoKey &&
-    !(highOrCriticalClass && !riskAllowed);
   const riskPermitted = riskClassRequiresTwoKey
     ? adversarialMergeRequestedOverride && operatorOverride
     : riskAllowed;
@@ -966,40 +962,37 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       blockingFindings,
     },
   );
-
-  // AMA "final hammer" (operator directive 2026-06-14): once the review cycle is
-  // EXHAUSTED — the remediation round budget is fully spent and the verdict still
-  // has not converged — AMA may waive only the documented cycle-end soft gates.
-  // Remediation state and the structural branch-protection gate are waivable at
-  // cycle-end. Verdict and blocking-finding gates require current-head
-  // `operator-approved`, and low/medium risk-class allowlist misses require
-  // current-head `adversarial-merge-requested`. We NEVER waive the hard safety
-  // gates: the PR must still be open/non-draft/mergeable, the head must still
-  // match the reviewed head (AMA pins --match-head-commit so a moved head cannot
-  // be closed), CI must still be green, hard-stop labels (incl. head-scoped
-  // adversarial-merge-blocked) still block, fast-merge state still blocks, AMA
-  // must be enabled, unknown risk still requires the explicit two-key override,
-  // and high/critical risk still requires either the configured single-key
-  // allowlist (`high_risk_requires_two_key=false` plus risk_classes membership)
-  // or the explicit two-key override. A PR that converges normally merges via
-  // the settled-success path above and never reaches this waiver.
   const reviewCycleExhausted = reviewState?.reviewCycleExhausted === true;
+  const riskClassFinalHammerWaivable =
+    (hamTerminalRemediation.ok === true && reviewCycleExhausted) ||
+    (
+      adversarialMergeRequestedOverride &&
+      !riskClassRequiresTwoKey &&
+      !(highOrCriticalClass && !riskAllowed)
+    );
+
+  // AMA "final hammer" (operator directive 2026-07-02): once the review cycle is
+  // EXHAUSTED — the remediation round budget is fully spent and the verdict still
+  // has not converged — a validated strict-mode HAM terminal-remediation pass is
+  // the merge authority for the adversarial verdict gate. A fresh settled-success
+  // verdict and current-head `operator-approved` are not required on the
+  // exhausted round. We NEVER waive the structural safety gates: the PR must
+  // still be open/non-draft/mergeable, the head must still match reviewed or
+  // validated HAM/rebase authority, CI must still be green, hard-stop labels
+  // (incl. head-scoped adversarial-merge-blocked) still block, fast-merge state
+  // still blocks, and AMA must be enabled. Risk-class policy is not a passive
+  // post-exhaustion hold: validated HAM terminal remediation waives
+  // `risk-class-not-permitted` for every risk class.
   const FINAL_HAMMER_WAIVABLE_REASONS = new Set([
     'verdict-not-settled-success',
     'remediation-pending',
     'remediation-state-unknown',
     'blocking-findings-present',
     'blocking-findings-unknown',
-    'branch-protection-missing-gate',
   ]);
-  // FAIL-OPEN FIX (2026-06-15): budget exhaustion ALONE must NOT auto-waive the
-  // VERDICT gate. The final hammer previously waived `verdict-not-settled-success`
-  // and `blocking-findings-*` automatically, so AMA merged #1830 on a
-  // `Request changes` head WITH a real blocking finding. Per CLAUDE.md the merge
-  // gate stays STRICT after the cap unless a current-head operator override
-  // applies. Require an operator override to waive the verdict/blocking gates;
-  // the remediation and branch-protection waivers keep their existing
-  // final-hammer behavior, and the risk-class waiver stays its own operator knob.
+  // Exhausted-round HAM authority waives every adversarial verdict/finding
+  // reason after strict terminal remediation evidence has been validated.
+  // Structural gates remain outside this set.
   const FINAL_HAMMER_VERDICT_GATE_REASONS = new Set([
     'verdict-not-settled-success',
     'blocking-findings-present',
@@ -1008,7 +1001,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     'non-blocking-findings-present',
   ]);
   const finalHammerVerdictWaiverAllowed =
-    operatorOverride === true;
+    hamTerminalRemediation.ok === true;
   const waivedByFinalHammer = [];
   let effectiveReasons = reasons;
   const waivedByHamTerminalRemediation = [];
@@ -1100,6 +1093,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   let nonBlockingCoverageOk = false;
   if (hamTerminalRemediation.activeAuthorized) {
     const strictOk = hamTerminalRemediation.ok === true;
+    const exhaustedStrictOk = strictOk && reviewCycleExhausted;
     // The non-blocking waiver holds ONLY when the HAM's addressed non-blocking
     // findings cover every CURRENT standing non-blocking finding by identity.
     // `strictOk` must NOT short-circuit this (round-4 finding): `.ok` only
@@ -1132,12 +1126,13 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
         waivable = nonBlockingCoverageOk;
       } else if (reason === 'verdict-not-settled-success') {
         // Non-blocking-driven verdict failure additionally needs coverage; a
-        // blocking-driven verdict failure still needs strict `.ok`.
+        // blocking-driven or bare verdict failure needs strict `.ok` on the
+        // exhausted round so request-changes cannot skip the remediation budget.
         waivable = hasBlockingReason
-          ? strictOk
-          : hasNonBlockingReason && nonBlockingCoverageOk;
+          ? exhaustedStrictOk
+          : hasNonBlockingReason ? nonBlockingCoverageOk : exhaustedStrictOk;
       } else if (HAM_TERMINAL_STRICT_WAIVABLE_REASONS.has(reason)) {
-        waivable = strictOk;
+        waivable = reason === 'stale-review-head' ? strictOk : exhaustedStrictOk;
       }
       if (waivable) {
         waivedByHamTerminalRemediation.push(reason);

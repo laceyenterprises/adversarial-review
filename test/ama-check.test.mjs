@@ -256,6 +256,8 @@ function runAmaCheck(tmp, {
   strictNonBlockingRemediation = true,
   hamTerminalRemediation = null,
   rebaseAssessment = null,
+  reviewCycleExhausted = null,
+  rootDir = null,
 }) {
   const paths = writeFixtureFiles(tmp, { protectionBody, prPatch, reviews });
   const configPath = writeConfig(tmp, { branchProtectionRequired, strictNonBlockingRemediation });
@@ -299,6 +301,9 @@ function runAmaCheck(tmp, {
     writeJson(paths.rebaseAssessment, rebaseAssessment);
     extraArgs.push('--rebase-assessment', paths.rebaseAssessment);
   }
+  if (reviewCycleExhausted !== null) {
+    extraArgs.push('--review-cycle-exhausted', reviewCycleExhausted ? 'true' : 'false');
+  }
   return spawnSync(
     process.execPath,
     [
@@ -310,6 +315,8 @@ function runAmaCheck(tmp, {
       '--reviewed-sha', HEAD_SHA,
       '--reviewer', reviewer,
       '--risk-class', riskClass,
+      '--repo', REPO,
+      ...(rootDir ? ['--root-dir', rootDir] : []),
       ...extraArgs,
     ],
     {
@@ -493,6 +500,8 @@ test('ama-check does not let mergeStateStatus=CLEAN override mergeable=CONFLICTI
 test('ama-check validates HAM terminal remediation only with HAM head provenance and audit evidence', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ama-check-ham-terminal-'));
   try {
+    const rootDir = join(tmp, 'root');
+    writeCompletedLedgerJob(rootDir, { currentRound: 2, maxRounds: 2 });
     const protectionBody = '{ "required_status_checks": { "contexts": ["agent-os/adversarial-gate"] } }\n';
     const reviews = [
       {
@@ -516,6 +525,8 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
       },
       reviews,
       hamTerminalRemediation: hamTerminalEvidence(),
+      reviewCycleExhausted: true,
+      rootDir,
     });
     assert.equal(passing.status, 0, passing.stderr);
     const passingVerdict = JSON.parse(passing.stdout);
@@ -543,6 +554,8 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
         headSha: HAM_SHA.slice(0, 12),
         parentSha: HEAD_SHA.slice(0, 12),
       }),
+      reviewCycleExhausted: true,
+      rootDir,
     });
     assert.equal(abbreviatedClaim.status, 0, abbreviatedClaim.stderr);
     const abbreviatedVerdict = JSON.parse(abbreviatedClaim.stdout);
@@ -923,7 +936,7 @@ test('ama-check fails closed on empty protection snapshot when branch protection
   }
 });
 
-test('ama-check: --review-cycle-exhausted true waives the soft gates (final hammer)', () => {
+test('ama-check: exhausted cycle still requires validated HAM evidence for request-changes', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ama-check-final-hammer-'));
   try {
     const rootDir = join(tmp, 'root');
@@ -964,15 +977,61 @@ test('ama-check: --review-cycle-exhausted true waives the soft gates (final hamm
     assert.equal(strict.eligible, false);
     assert.ok(strict.reasons.includes('verdict-not-settled-success'));
 
-    // Exhausted → final hammer waives the STRUCTURAL gate (branch-protection)
-    // but NOT the verdict gate — that now requires a current-head operator
-    // override (fail-open fix). So still blocked on verdict-not-settled-success.
+    // Exhausted without HAM terminal-remediation evidence is not merge
+    // authority by itself.
     const hammer = JSON.parse(run('true').stdout);
     assert.equal(hammer.eligible, false, JSON.stringify(hammer, null, 2));
     assert.equal(hammer.trace.finalHammer.active, true);
     assert.ok(hammer.reasons.includes('verdict-not-settled-success'));
     assert.ok(!hammer.trace.finalHammer.waived.includes('verdict-not-settled-success'));
-    assert.ok(hammer.trace.finalHammer.waived.includes('branch-protection-missing-gate'));
+    assert.ok(hammer.reasons.includes('branch-protection-missing-gate'));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check: exhausted request-changes with blocking findings closes after validated HAM evidence without operator-approved', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-final-hammer-ham-authority-'));
+  try {
+    const rootDir = join(tmp, 'root');
+    writeCompletedLedgerJob(rootDir, { currentRound: 2, maxRounds: 2 });
+    const protectionBody = '{ "required_status_checks": { "contexts": ["agent-os/adversarial-gate"] } }\n';
+    const reviews = [
+      {
+        state: 'CHANGES_REQUESTED',
+        body: BLOCKING_COMMENT_BODY,
+        author: AUTHORITATIVE_REVIEWER,
+        submittedAt: '2026-06-13T12:00:00Z',
+        commit: { oid: HEAD_SHA },
+      },
+    ];
+    const run = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody,
+      prPatch: {
+        headRefOid: HAM_SHA,
+        labels: [],
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' },
+          { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
+        ],
+      },
+      reviews,
+      hamTerminalRemediation: hamTerminalEvidence(),
+      reviewCycleExhausted: true,
+      rootDir,
+    });
+    assert.equal(run.status, 0, run.stderr);
+    const verdict = JSON.parse(run.stdout);
+    assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
+    assert.equal(verdict.trace.verdict.operatorOverride, false);
+    assert.equal(verdict.trace.finalHammer.active, true);
+    assert.equal(
+      verdict.trace.hamTerminalRemediation.marker,
+      'ham_terminal_remediation_validated',
+    );
+    assert.ok(verdict.trace.hamTerminalRemediation.waived.includes('blocking-findings-present'));
+    assert.ok(verdict.trace.hamTerminalRemediation.waived.includes('verdict-not-settled-success'));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

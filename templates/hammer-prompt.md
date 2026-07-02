@@ -47,11 +47,13 @@ scans.
    the findings the review raised. Do not add net-new FEATURE scope.
 2b. **Get required checks and changed-surface tests green.** Run the tests that
    cover the files this PR touches against your post-remediation head, confirm
-   every required GitHub check is green, and fix every failing regression you can.
-   A failure that is also red on `origin/main` before this branch's changes, or
-   that is purely a worker-sandbox limitation, must be hardened or triaged and
-   documented in the closing comment rather than blocking an otherwise clean
-   close. Fixing tests/CI (and the minimal production change a legitimately
+   every required GitHub check is green, and fix every failing regression. Red CI
+   blocks merge even when the failure looks unrelated to the PR, pre-existing on
+   `origin/main`, or flaky; the hammer owns making the exact rebased head green
+   by fixing or legitimately re-running the check unless the failure is a
+   physically unfixable worker-sandbox limitation, which must be triaged and
+   documented before continuing. Fixing tests/CI (and the minimal production
+   change a legitimately
    failing check proves is needed) is the one sanctioned exception to "scope only
    to the findings"; net-new feature scope is not. Also leave the working tree
    clean: commit or discard any stray/dirty changes so the head is not left in a
@@ -551,12 +553,13 @@ Do not merge unless all of these are true:
 - The PR's REQUIRED GitHub checks are successful for `POST_REMEDIATION_SHA`, and
   the changed-surface tests (the tests covering files this PR touches) pass.
   You remain mandated to FIX or HARDEN every failing regression you can —
-  including ones unrelated to this branch — but a failure that is ALSO red on
-  `origin/main` (pre-existing) or that is purely a worker-sandbox-environment
-  limitation (missing host dependency, blocked `ps`/process introspection, etc.)
-  must be HARDENED or TRIAGED and DOCUMENTED in your closing comment rather than
-  blocking the merge. Do not let an infeasible whole-host aggregate strand an
-  otherwise-clean close.
+  including ones unrelated to this branch, pre-existing on `origin/main`, flaky,
+  or purely worker-sandbox-environment limited (missing host dependency, blocked
+  `ps`/process introspection, etc.). If the failure is fixable from this PR,
+  it blocks the merge until the hammer fixes it or legitimately re-runs it green.
+  If it is purely worker-sandbox-environment limited and physically unfixable
+  from this workspace, triage it, document the host limitation in the closing
+  audit comment, and continue only when every repo-fixable regression is green.
 - No failed, missing, stale, or unchecked required check exists.
 - No non-waived gate remains.
 
@@ -640,8 +643,11 @@ fi
 - No merge when the live post-remediation head has failed, missing, stale, or
   unchecked required checks.
 - No merging while required checks or changed-surface tests fail on this head.
-  Failures proven pre-existing on `origin/main` or purely sandbox-limited must be
-  documented in the closing comment after hardening/triage.
+  Repo-fixable failures proven pre-existing on `origin/main`, unrelated, or
+  flaky still block until fixed or legitimately re-run green. Purely
+  worker-sandbox-limited failures that are physically unfixable from this
+  workspace must be triaged and documented in the closing audit comment instead
+  of being treated as a permanent hard-stop.
 - No silent red required-check exits. A red required check whose correct fix
   lives in another repo/submodule must have a linked subrepo PR, or the
   hard-blocker/audit comment must name the exact owed repo/path/change and why

@@ -7152,7 +7152,7 @@ async function pollOnce(
         if (!alreadyCapPaused) {
           stmtMarkReviewCycleCapPaused.run(
             escalatedAt,
-            `[review-cycle-cap] automatic review paused after ${cycleCapConfig.cap} successive review/remediation cycles; awaiting operator-approved, merge-agent-requested, or ${PAUSED_FOR_REDESIGN_LABEL}`,
+            `[review-cycle-cap] automatic remediation budget exhausted after ${cycleCapConfig.cap} successive review/remediation cycles; dispatching final hammer close unless blocked by structural gates, explicit operator labels, or ${PAUSED_FOR_REDESIGN_LABEL}`,
             repoPath,
             prNumber,
           );

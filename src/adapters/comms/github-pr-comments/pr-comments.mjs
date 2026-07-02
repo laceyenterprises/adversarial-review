@@ -635,7 +635,7 @@ function buildRemediationOutcomeCommentBody({
     } else if (stopCode === 'max-rounds-reached') {
       lines.push('');
       lines.push(
-        '> **Human intervention required.** The remediation loop exhausted its bounded round cap without converging. Review the changes by hand, decide whether to re-arm or close.'
+        '> **Terminal close queued.** The remediation loop exhausted its bounded round cap without converging. The hammer owns the final strict-mode remediation and close once structural gates are green.'
       );
     } else if (stopCode === 'round-budget-exhausted') {
       // Risk-tiered budget refusal from
@@ -645,8 +645,8 @@ function buildRemediationOutcomeCommentBody({
       // Distinct from `max-rounds-reached` (which is per-job
       // legacy capacity); this branch fires when the riskClass
       // tier itself has been exhausted across all rounds for
-      // this PR. Operator next step is to either accept the PR
-      // as-is or justify a higher riskClass via the linked spec.
+      // this PR. The next step is the terminal hammer close, not a
+      // risk-class bump or passive operator hold.
       const riskClass = job?.riskClass || 'medium';
       const roundBudget = Number(
         job?.remediationPlan?.maxRounds
@@ -656,7 +656,7 @@ function buildRemediationOutcomeCommentBody({
       const currentRound = Number(job?.remediationPlan?.currentRound || 0);
       lines.push('');
       lines.push(
-        `> **Human intervention required.** This PR exhausted its \`${riskClass}\` risk-class remediation budget (${roundBudget} round${roundBudget === 1 ? '' : 's'}; completed: ${currentRound}). Review the prior rounds and either accept the PR as-is or reopen the linked spec to justify a higher \`riskClass\` before requesting more remediation.`
+        `> **Terminal close queued.** This PR exhausted its \`${riskClass}\` risk-class remediation budget (${roundBudget} round${roundBudget === 1 ? '' : 's'}; completed: ${currentRound}). The hammer owns the final strict-mode remediation of all remaining findings and close once structural gates are green.`
       );
     } else if (reply && (reply.outcome === 'blocked' || reply.operationalBlockers?.length)) {
       lines.push('');

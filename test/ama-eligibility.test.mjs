@@ -1233,7 +1233,7 @@ test('__testables__ settled-success verdict set matches SPEC §4.2 #1', () => {
 // AMA waives the soft convergence gates but keeps the hard safety gates.
 // ---------------------------------------------------------------------------
 
-test('final hammer: exhausted cycle does NOT waive verdict/blocking without an operator override (fail-open fix)', () => {
+test('final hammer: exhausted cycle does NOT waive verdict/blocking without validated HAM evidence', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
       verdict: 'request-changes',
@@ -1244,7 +1244,8 @@ test('final hammer: exhausted cycle does NOT waive verdict/blocking without an o
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
   // Budget exhaustion ALONE must NOT auto-merge a Request-changes head with a
-  // blocking finding (#1830 fail-open). The merge gate stays strict.
+  // blocking finding. The hammer must first produce validated terminal
+  // remediation evidence.
   assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
   assert.equal(result.trace.finalHammer.active, true);
   assert.ok(result.reasons.includes('verdict-not-settled-success'));
@@ -1252,7 +1253,7 @@ test('final hammer: exhausted cycle does NOT waive verdict/blocking without an o
   assert.ok(!result.trace.finalHammer.waived.includes('verdict-not-settled-success'));
 });
 
-test('final hammer: adversarial-merge-requested without operator-approved does not waive verdict/blocking', () => {
+test('final hammer: adversarial-merge-requested without validated HAM evidence does not waive verdict/blocking', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     prMetadata: { labels: ['adversarial-merge-requested'] },
     reviewState: {
@@ -1282,7 +1283,7 @@ test('final hammer: adversarial-merge-requested without operator-approved does n
   assert.ok(!result.trace.finalHammer.waived.includes('blocking-findings-present'));
 });
 
-test('final hammer + current-head operator override waives verdict/blocking and is eligible', () => {
+test('final hammer + current-head operator override remains an optional early authority', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     prMetadata: { labels: ['operator-approved'] },
     reviewState: {
@@ -1304,10 +1305,10 @@ test('final hammer + current-head operator override waives verdict/blocking and 
   assert.equal(result.trace.verdict.operatorOverride, true);
 });
 
-test('final hammer: waives the structural branch-protection-missing-gate', () => {
+test('final hammer: NEVER waives the structural branch-protection-missing-gate', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     // verdict satisfied by a current-head operator override so this isolates the
-    // structural branch-protection waiver (verdict gate now needs the override).
+    // structural branch-protection gate.
     reviewState: {
       verdict: 'request-changes',
       reviewCycleExhausted: true,
@@ -1323,8 +1324,9 @@ test('final hammer: waives the structural branch-protection-missing-gate', () =>
     prMetadata: { labels: ['operator-approved'], branchProtection: { requiredContexts: [] } },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
-  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
-  assert.ok(result.trace.finalHammer.waived.includes('branch-protection-missing-gate'));
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('branch-protection-missing-gate'));
+  assert.ok(!result.trace.finalHammer.waived.includes('branch-protection-missing-gate'));
 });
 
 test('final hammer: does NOT fire before the cycle is exhausted', () => {
@@ -1378,7 +1380,7 @@ test('final hammer: NEVER waives a head-scoped adversarial-merge-blocked hard st
   assert.ok(result.reasons.some((r) => r.startsWith('label-')));
 });
 
-test('final hammer: by default still requires the two-key override for high/critical risk', () => {
+test('final hammer: high/critical risk still requires HAM evidence before terminal close', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: { verdict: 'request-changes', riskClass: 'critical', reviewCycleExhausted: true },
   });
@@ -1387,29 +1389,49 @@ test('final hammer: by default still requires the two-key override for high/crit
   assert.ok(result.reasons.includes('risk-class-not-permitted'));
 });
 
-test('final hammer: high/critical are single-key eligible when explicitly configured', () => {
+test('final hammer: exhausted validated HAM remediation waives risk class without operator-approved', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
-    // verdict satisfied via operator override so this isolates the risk-class path.
-    prMetadata: { labels: ['operator-approved'] },
     reviewState: {
       verdict: 'request-changes',
       riskClass: 'critical',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
       reviewCycleExhausted: true,
-      operatorApprovedEvidence: {
-        applied: true,
-        observedRevisionRef: 'abc12345',
-        actor: 'paul-the-operator',
-        eventId: 'LE_abc',
-        observedAt: '2026-06-10T20:00:00Z',
-      },
     },
-    cfg: eligibilityCfg(false),
+    prMetadata: { headSha: 'def67890' },
   });
-  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence(),
+    hamTerminalRemediationGroundTruth: hamGroundTruth(),
+  });
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
-  assert.equal(result.trace.riskClass.allowed, true);
-  assert.equal(result.trace.riskClass.requiresTwoKey, false);
-  assert.equal(result.trace.riskClass.permitted, true);
+  assert.equal(result.trace.verdict.operatorOverride, false);
+  assert.ok(result.trace.finalHammer.waived.includes('risk-class-not-permitted'));
+  assert.equal(result.trace.riskClass.requiresTwoKey, true);
+  assert.equal(result.trace.riskClass.permitted, false);
+});
+
+test('final hammer: pre-exhaustion HAM remediation does not waive high/critical risk', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      riskClass: 'critical',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+      reviewCycleExhausted: false,
+    },
+    prMetadata: { headSha: 'def67890' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence(),
+    hamTerminalRemediationGroundTruth: hamGroundTruth(),
+  });
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('risk-class-not-permitted'));
+  assert.equal(result.trace.finalHammer.active, false);
+  assert.equal(result.trace.riskClass.finalHammerWaivable, false);
   assert.ok(!result.trace.finalHammer.waived.includes('risk-class-not-permitted'));
 });
 
@@ -1555,12 +1577,13 @@ function hamGroundTruth({
   };
 }
 
-test('ham terminal remediation: HAM-authored live head over reviewed parent is eligible and records marker', () => {
+test('ham terminal remediation: exhausted HAM-authored live head over reviewed parent is eligible and records marker', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
       verdict: 'request-changes',
       blockingFindingCount: 1,
       blockingFindingState: 'known',
+      reviewCycleExhausted: true,
     },
     prMetadata: { headSha: 'def67890' },
   });
@@ -1590,6 +1613,28 @@ test('ham terminal remediation: HAM-authored live head over reviewed parent is e
     result.trace.hamTerminalRemediation.waived.sort(),
     ['blocking-findings-present', 'stale-review-head', 'verdict-not-settled-success'].sort(),
   );
+});
+
+test('ham terminal remediation: pre-exhaustion blocking request-changes stays on remediation loop', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+      reviewCycleExhausted: false,
+    },
+    prMetadata: { headSha: 'def67890' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence(),
+    hamTerminalRemediationGroundTruth: hamGroundTruth(),
+  });
+  assert.equal(result.trace.hamTerminalRemediation.ok, true);
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('blocking-findings-present'));
+  assert.ok(result.reasons.includes('verdict-not-settled-success'));
+  assert.ok(!result.trace.hamTerminalRemediation.waived.includes('blocking-findings-present'));
 });
 
 test('ham terminal remediation: leaked build-time HAM-02 ticket is not valid provenance', () => {
@@ -1623,6 +1668,7 @@ test('ham terminal remediation: server-rebased HAM commit proves reviewed head w
       verdict: 'request-changes',
       blockingFindingCount: 1,
       blockingFindingState: 'known',
+      reviewCycleExhausted: true,
     },
     prMetadata: { headSha: currentHead },
   });
@@ -1970,6 +2016,7 @@ test('ham terminal remediation: zero current non-blocking findings remains eligi
       nonBlockingFindingCount: 0,
       nonBlockingFindingState: 'known',
       nonBlockingFindingIdentities: [],
+      reviewCycleExhausted: true,
     },
     prMetadata: { headSha: 'abc12345' },
   });
@@ -2320,7 +2367,7 @@ test('ham terminal remediation: forged audit author, loose closed-by, bad counts
   assert.equal(emptyDiff.trace.hamTerminalRemediation.checks.nonEmptyCommit, false);
 });
 
-test('ham terminal remediation composes with final-hammer waivers', () => {
+test('exhausted request-changes with blocking findings is eligible after validated HAM remediation without operator-approved', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
       verdict: 'request-changes',
@@ -2330,7 +2377,6 @@ test('ham terminal remediation composes with final-hammer waivers', () => {
     },
     prMetadata: {
       headSha: 'def67890',
-      branchProtection: { requiredContexts: [] },
     },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
@@ -2352,6 +2398,9 @@ test('ham terminal remediation composes with final-hammer waivers', () => {
     hamTerminalRemediationGroundTruth: hamGroundTruth(),
   });
   assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.verdict.operatorOverride, false);
+  assert.equal(result.trace.finalHammer.active, true);
+  assert.equal(result.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
   assert.ok(result.trace.hamTerminalRemediation.waived.includes('blocking-findings-present'));
-  assert.ok(result.trace.finalHammer.waived.includes('branch-protection-missing-gate'));
+  assert.ok(result.trace.hamTerminalRemediation.waived.includes('verdict-not-settled-success'));
 });

@@ -281,7 +281,7 @@ test('buildRemediationOutcomeCommentBody on stopped (rereview-blocked) flags the
   assert.match(body, /Re-review status:\*\*\s*\*\*BLOCKED\*\*\s*\(`review-row-missing`\)/);
 });
 
-test('buildRemediationOutcomeCommentBody on stopped (max-rounds-reached) flags human intervention', () => {
+test('buildRemediationOutcomeCommentBody on stopped (max-rounds-reached) queues terminal hammer close', () => {
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',
     action: 'stopped',
@@ -307,7 +307,8 @@ test('buildRemediationOutcomeCommentBody on stopped (max-rounds-reached) flags h
   });
   assert.match(body, /round 6 of 6/);
   assert.match(body, /Outcome:.*stopped.*max-rounds-reached/);
-  assert.match(body, /Human intervention required/);
+  assert.match(body, /Terminal close queued/);
+  assert.match(body, /hammer owns the final strict-mode remediation/);
   assert.match(body, /exhausted its bounded round cap/);
   assert.match(body, /Blockers/);
   // Structured blockers render with both Finding and Reasoning lines
@@ -1980,12 +1981,12 @@ test('buildRemediationOutcomeCommentBody truncates an absurdly long Files: line 
   assert.ok(maxFileNum < 100, `expected truncation well below 200 files, got max=${maxFileNum}`);
 });
 
-test('buildRemediationOutcomeCommentBody renders round-budget-exhausted with risk class and operator next step', () => {
+test('buildRemediationOutcomeCommentBody renders round-budget-exhausted with risk class and terminal hammer close', () => {
   // Track A surfaces a new stop code from the daemon. The renderer
   // must produce a comment that names the riskClass tier, the budget,
-  // and the operator-next-step (review prior rounds, decide whether
-  // to reopen the spec at a higher tier or accept as-is). Mirrors the
-  // existing `max-rounds-reached` branch shape.
+  // and the terminal-close next step: budget exhaustion queues the
+  // hammer's final strict-mode remediation and close, not a human
+  // hand-off. Mirrors the existing `max-rounds-reached` branch shape.
   const body = buildRemediationOutcomeCommentBody({
     workerClass: 'codex',
     action: 'stopped',
@@ -2005,8 +2006,8 @@ test('buildRemediationOutcomeCommentBody renders round-budget-exhausted with ris
   assert.match(body, /Outcome:.*stopped.*round-budget-exhausted/);
   assert.match(body, /medium.*risk-class remediation budget \(1 round/);
   assert.match(body, /completed: 1/);
-  assert.match(body, /reopen the linked spec to justify a higher.*riskClass/);
-  assert.match(body, /Human intervention required/);
+  assert.match(body, /hammer owns the final strict-mode remediation/);
+  assert.match(body, /Terminal close queued/);
 });
 
 test('buildRemediationOutcomeCommentBody salvages worker response on invalid-remediation-reply failure', () => {

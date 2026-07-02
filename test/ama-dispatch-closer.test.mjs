@@ -1832,8 +1832,8 @@ test('merged hammer closer treats absent worker teardown as already clean', asyn
     dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:05:00Z' },
     execFileImpl: async (_cmd, args) => {
       if (args[0] === 'worker' && args[1] === 'tear-down') {
-        const err = new Error('worker not found');
-        err.stderr = 'worker not found: hammer-ama-pr-1234';
+        const err = new Error('Bad request.\nCould not find service "hammer-ama-pr-1234" in domain');
+        err.stderr = 'Bad request.\nCould not find service "hammer-ama-pr-1234" in domain';
         throw err;
       }
       return { stdout: '{}', stderr: '' };
@@ -2454,6 +2454,122 @@ test('terminal failed hammer closer aborts redispatch when worker teardown fails
     ['dispatch', 'status', 'lrq_hammer_failed'],
     ['worker', 'tear-down', 'hammer-ama-pr-1234'],
   ]);
+});
+
+test('terminal failed hammer closer records tokens only after teardown succeeds across polls', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-terminal-token-retry-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const ledgerDb = join(rootDir, 'ledger.db');
+  createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
+  insertWorkerRun(ledgerDb, {
+    runId: 'wr_hammer_failed',
+    launchRequestId: 'lrq_hammer_failed',
+    input: 123,
+    output: 45,
+    cost: 0.17,
+    status: 'failed',
+  });
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: { workerClass: 'hammer' },
+    dispatchContext: {
+      rootDir,
+      ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+      closerTokenRollupPollDelaysMs: [],
+    },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  plantDispatchRecord(rootDir, identity, {
+    state: 'dispatched',
+    retryCount: 1,
+    workerClass: 'hammer',
+    dispatchedAt: '2026-06-20T10:00:00Z',
+    dispatchId: 'dispatch_hammer_failed',
+    launchRequestId: 'lrq_hammer_failed',
+    lastObservedStatus: 'starting',
+    lastObservedAt: '2026-06-20T10:00:00Z',
+    lastError: null,
+  });
+
+  let tearDownAttempts = 0;
+  const execFileImpl = async (_cmd, args) => {
+    if (args[0] === 'dispatch' && args[1] === 'status') {
+      return { stdout: '{"status":"failed"}', stderr: '' };
+    }
+    if (args[0] === 'worker' && args[1] === 'tear-down') {
+      tearDownAttempts += 1;
+      if (tearDownAttempts === 1) {
+        const err = new Error('permission denied while tearing down worker');
+        err.stderr = 'permission denied while tearing down worker';
+        throw err;
+      }
+      return { stdout: '{}', stderr: '' };
+    }
+    return { stdout: '{"dispatchId":"dispatch_hammer_new","launchRequestId":"lrq_hammer_new"}', stderr: '' };
+  };
+
+  const args = {
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:05:00Z' },
+    execFileImpl,
+    readTemplateImpl: () => 'stubbed',
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+  };
+
+  await assert.rejects(
+    () => maybeDispatchAmaCloser(args),
+    /AMA hammer worker teardown failed for hammer-ama-pr-1234/,
+  );
+
+  let db = openReviewStateDb(rootDir);
+  try {
+    const hasPassTable = db.prepare(
+      `SELECT 1 AS present
+         FROM sqlite_master
+        WHERE type = 'table' AND name = 'reviewer_passes'`
+    ).get()?.present === 1;
+    const rowCount = hasPassTable
+      ? db.prepare(
+        `SELECT COUNT(*) AS count
+           FROM reviewer_passes
+          WHERE repo = ? AND pr_number = ? AND pass_kind = 'closer'`
+      ).get(dispatchContext.repo, prMetadata.prNumber).count
+      : 0;
+    assert.equal(rowCount, 0, 'failed teardown poll must not record closer tokens');
+  } finally {
+    db.close();
+  }
+
+  const result = await maybeDispatchAmaCloser({
+    ...args,
+    dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:06:00Z' },
+  });
+
+  assert.equal(result.launchRequestId, 'lrq_hammer_new');
+  db = openReviewStateDb(rootDir);
+  try {
+    const rows = db.prepare(
+      `SELECT attempt_number, worker_run_id, token_input, token_output, token_cost_usd
+         FROM reviewer_passes
+        WHERE repo = ? AND pr_number = ? AND pass_kind = 'closer'`
+    ).all(dispatchContext.repo, prMetadata.prNumber);
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0], {
+      attempt_number: 1,
+      worker_run_id: 'wr_hammer_failed',
+      token_input: 123,
+      token_output: 45,
+      token_cost_usd: 0.17,
+    });
+  } finally {
+    db.close();
+  }
 });
 
 test('SSG-06: hq succeeded status alone does not retain closer ownership', async (t) => {

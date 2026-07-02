@@ -4475,3 +4475,85 @@ test('oauth_broker.merge_agent strict mirror: valid keys parse; unknown nested k
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('oauth_broker.github_app_providers strict mirror: provider blocks parse; unknown keys rejected', () => {
+  const tmp = freshTmp();
+  try {
+    const ok = join(tmp, 'github-app-providers-ok.yaml');
+    writeFile(ok, `
+      version: 1
+      oauth_broker:
+        github_app_providers:
+          hammer:
+            broker_auth_enabled: true
+            provider: hammer
+            expected_app_id: "3978009"
+            expected_installation_id: "138360282"
+            private_key_op_ref: "op://Cliovault/hammer/private-key"
+            pat_fallback_op_ref: "op://Cliovault/hammer/pat"
+          sentinel:
+            broker_auth_enabled: false
+            provider: sentinel
+            expected_app_id: "3978010"
+            expected_installation_id: "138360283"
+            private_key_op_ref: "op://Cliovault/sentinel/private-key"
+            pat_fallback_op_ref: "op://Cliovault/sentinel/pat"
+    `);
+    const cfg = loadConfig({ topPath: ok, env: {} });
+    assert.equal(
+      cfg.get('oauth_broker.github_app_providers.hammer.broker_auth_enabled'),
+      true,
+    );
+    assert.equal(cfg.get('oauth_broker.github_app_providers.hammer.provider'), 'hammer');
+    assert.equal(
+      cfg.get('oauth_broker.github_app_providers.sentinel.private_key_op_ref'),
+      'op://Cliovault/sentinel/private-key',
+    );
+    assert.equal(
+      cfg.get('oauth_broker.github_app_providers.sentinel.pat_fallback_op_ref'),
+      'op://Cliovault/sentinel/pat',
+    );
+
+    const badProvider = join(tmp, 'github-app-providers-bad-provider.yaml');
+    writeFile(badProvider, `
+      version: 1
+      oauth_broker:
+        github_app_providers:
+          hammer:
+            broker_auth_enabled: true
+            provider: hammer
+            unexpected_secret_file: /tmp/x
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: badProvider, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /unknown key/);
+        assert.equal(err.key, 'oauth_broker.github_app_providers.hammer.unexpected_secret_file');
+        return true;
+      },
+    );
+
+    const badBroker = join(tmp, 'github-app-providers-bad-broker.yaml');
+    writeFile(badBroker, `
+      version: 1
+      oauth_broker:
+        github_apps:
+          hammer:
+            provider: hammer
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: badBroker, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.match(err.message, /unknown key/);
+        assert.equal(err.key, 'oauth_broker.github_apps');
+        assert.match(String(err.expected), /github_app_providers/);
+        return true;
+      },
+    );
+  } finally {
+    resetConfigCache();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

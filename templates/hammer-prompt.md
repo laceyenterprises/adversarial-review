@@ -558,7 +558,7 @@ node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
   > /tmp/ham-verdict.json
 ```
 
-Do not merge unless all of these are true:
+Do not hand off to the AMA daemon unless all of these are true:
 
 - `HAM_MERGE_LEASE_HELD=1` and `HAM_MERGE_LEASE_ID` is non-empty.
 - `/tmp/ham-verdict.json` has `eligible: true`. (For any BLOCKING finding the
@@ -582,74 +582,48 @@ Do not merge unless all of these are true:
 - No failed, missing, stale, or unchecked required check exists.
 - No non-waived gate remains.
 
-Merge:
+Daemon handoff:
 
 ```bash
 if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ] || [ -z "${HAM_MERGE_LEASE_ID:-}" ]; then
-  echo "AMG-04 hard-blocker: no merge without holding the merge lease" >&2
+  echo "AMG-04 hard-blocker: no daemon handoff without holding the merge lease" >&2
   exit 1
 fi
 
-TRAILERS_FILE=$(mktemp)
-cat <<EOF > "$TRAILERS_FILE"
-<<AMA_TRAILERS>>
-Rebase-Attempts: ${HAM_REBASE_ATTEMPTS:-0}
-Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)
-EOF
-
-gh pr merge <<PR_URL>> \
-  --<<MERGE_METHOD>> \
-  --match-head-commit "$POST_REMEDIATION_SHA" \
-  --body-file "$TRAILERS_FILE"
-MERGE_EXIT=$?
-rm -f "$TRAILERS_FILE"
-```
-
-Re-read GitHub after `gh pr merge`; the CLI exit code is not authoritative.
-If the PR is merged at `POST_REMEDIATION_SHA`, record success in the AMA audit.
-If the head moved, a required check failed or is unchecked, HAM evidence is
-missing, the predicate fails for the exact live SHA, the PR is closed/draft, or
-there is an unresolvable conflict, release the lease, emit exactly one
-hard-blocker report, and do not call `gh pr merge`. After a confirmed successful
-merge, release the lease with `--lease-id "$HAM_MERGE_LEASE_ID"` before posting
-the closing comment.
-
-```bash
-# Only after re-reading GitHub confirms the terminal merge or hard-block state.
+HAM_DAEMON_HANDOFF_ATTEMPT=$(jq -n \
+  --arg reviewedHead "<<REVIEWED_SHA>>" \
+  --arg validatedHead "$POST_REMEDIATION_SHA" \
+  --arg remediatedFindings "<n> addressed (<b> blocking, <nb> non-blocking)" \
+  --argjson eligibilityTrace "$(cat /tmp/ham-verdict.json)" \
+  '{
+    outcome: "in_progress",
+    preMergeEligible: true,
+    attemptPhase: "before-daemon-gh-pr-merge",
+    headMatchEvidence: "ham_terminal_remediation_validated",
+    reviewedHead: $reviewedHead,
+    validatedHead: $validatedHead,
+    remediatedFindings: $remediatedFindings,
+    eligibilityTrace: $eligibilityTrace
+  }')
+node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
+  --hq-root <<HQ_ROOT>> \
+  --repo <<REPO>> \
+  --pr <<PR_NUMBER>> \
+  --head "$POST_REMEDIATION_SHA" \
+  --attempt-json "$HAM_DAEMON_HANDOFF_ATTEMPT"
 ham_release_merge_lease
 ```
 
-Post the CLOSING comment (mandate step 7) once the merge is confirmed:
+After the audit append succeeds, stop. The AMA daemon validates the HAM evidence
+and executes `gh pr merge --match-head-commit "$POST_REMEDIATION_SHA"` on this
+exact head. The hammer worker must not write `mergeCommit`, `mergedAt`, or a
+merged closeout comment; those are post-merge facts owned by the daemon after
+GitHub confirms the merge.
 
-```bash
-# Only after re-reading GitHub confirms the PR is merged at $POST_REMEDIATION_SHA.
-HAM_CLOSEOUT_COMMENT_BODY="$(cat <<EOF
-<!-- hq:closeout:pr -->
-✅ Closed by **Hammer** (adversarial-pipe-mode).
-
-- Merged: \`$POST_REMEDIATION_SHA\` via <<MERGE_METHOD>> (rebased onto latest \`main\`)
-- Findings remediated: <n> (<b> blocking, <nb> non-blocking)
-- Failing tests fixed to keep \`main\` green: <list, or "suite already green">
-- Rebase attempts: ${HAM_REBASE_ATTEMPTS:-0}
-
-Closed-By: hammer (adversarial-pipe-mode)
-EOF
-)"
-HAM_CLOSEOUT_COMMENT_POSTED=0
-for HAM_CLOSEOUT_COMMENT_ATTEMPT in 1 2 3; do
-  if gh pr comment <<PR_URL>> --body "$HAM_CLOSEOUT_COMMENT_BODY"; then
-    HAM_CLOSEOUT_COMMENT_POSTED=1
-    break
-  fi
-  echo "closeout comment post failed on attempt $HAM_CLOSEOUT_COMMENT_ATTEMPT/3; retrying" >&2
-  if [ "$HAM_CLOSEOUT_COMMENT_ATTEMPT" -lt 3 ]; then
-    sleep $((HAM_CLOSEOUT_COMMENT_ATTEMPT * 2))
-  fi
-done
-if [ "$HAM_CLOSEOUT_COMMENT_POSTED" -ne 1 ]; then
-  echo "closeout comment post failed after 3 attempts; merge already confirmed, continuing" >&2
-fi
-```
+If the head moved, a required check failed or is unchecked, HAM evidence is
+missing, the predicate fails for the exact live SHA, the PR is closed/draft, or
+there is an unresolvable conflict, release the lease, emit exactly one
+hard-blocker report, and do not hand off.
 
 ## Hard prohibitions
 
@@ -658,7 +632,8 @@ fi
 - No merging the old `<<REVIEWED_SHA>>` merely because it passed.
 - No unbounded rebase/update-branch retries; cap them and stop through the
   single hard-blocker report path described above.
-- No `gh pr merge` without `--match-head-commit "$POST_REMEDIATION_SHA"`.
+- No `gh pr merge`. The AMA daemon performs the only merge, using
+  `--match-head-commit "$POST_REMEDIATION_SHA"`.
 - No merge when the live post-remediation head has failed, missing, stale, or
   unchecked required checks.
 - No merging while required checks or changed-surface tests fail on this head.
@@ -679,7 +654,7 @@ fi
 - No merging a branch that is `BEHIND` / not rebased onto the latest `main`; the
   rebase must be re-validated (required checks + changed-surface tests green)
   before merge.
-- No merge without holding the merge lease for `(<<REPO>>, base, PR <<PR_NUMBER>>)`
+- No daemon handoff without holding the merge lease for `(<<REPO>>, base, PR <<PR_NUMBER>>)`
   and saving its `leaseId`; no cleanup path may release without
   `--lease-id "$HAM_MERGE_LEASE_ID"`.
 - No abandoning a merge conflict to the operator. The hammer resolves conflicts
@@ -687,7 +662,8 @@ fi
   preserving both sides, force-push with lease), then re-validates and
   re-acquires. Hard-block ONLY a conflict that is genuinely unsafe to resolve (a
   semantic conflict you cannot correctly settle).
-- No skipping the post-merge closing comment on a successful merge.
+- No merged closeout comment from the hammer worker. The daemon owns post-merge
+  facts and closeout after GitHub confirms the merge.
 - No treating a rebased HAM head as valid without `ham_terminal_remediation_validated`
   except for the narrow strict-non-blocking `.active` lane described above.
 - No landing a schema or module change that leaves an in-repo data-model doc

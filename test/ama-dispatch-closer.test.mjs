@@ -645,12 +645,14 @@ test('cfg.workerClass=hammer selects the terminal HAM mandate prompt when findin
   assert.match(write.captured.body, /Every shell command you run must have an explicit wall-clock bound/);
   assert.match(write.captured.body, /do not fall back to broad host\s+scans/);
   assert.match(write.captured.body, /ham_terminal_remediation_validated/);
-  assert.match(write.captured.body, /--match-head-commit "\$POST_REMEDIATION_SHA"/);
+  assert.match(write.captured.body, /before-daemon-gh-pr-merge/);
+  assert.match(write.captured.body, /AMA daemon validates the HAM evidence/);
+  assert.doesNotMatch(write.captured.body, /\ngh pr merge /);
   assert.match(write.captured.body, /failed, missing, stale, or\s+unchecked required checks/);
   assert.match(write.captured.body, /HAM-03 hard-blocker: rebase attempt cap exceeded/);
   assert.match(write.captured.body, /HAM_UPDATE_BRANCH_RETRY_CAP="\$\{HAM_UPDATE_BRANCH_RETRY_CAP:-3\}"/);
   assert.match(write.captured.body, /HAM_UPDATE_BRANCH_EXIT=\$\?/);
-  assert.match(write.captured.body, /Rebase-Attempts: \${HAM_REBASE_ATTEMPTS:-0}/);
+  assert.match(write.captured.body, /validatedHead: \$validatedHead/);
 });
 
 test('auto-hammer dispatches HAM terminal remediation at review-cycle exhaustion even for verdict-only misses', async (t) => {
@@ -962,7 +964,7 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /Do not request another adversarial review round/);
   assert.match(prompt, /No follow-up PRs\/issues for the final findings/);
   assert.match(prompt, /ham_terminal_remediation_validated/);
-  assert.match(prompt, /Do not merge unless all of these are true/);
+  assert.match(prompt, /Do not hand off to the AMA daemon unless all of these are true/);
   assert.match(prompt, /HAM_REBASE_ATTEMPT_CAP="\$\{HAM_REBASE_ATTEMPT_CAP:-3\}"/);
   assert.match(prompt, /HAM_MERGE_LEASE_RELEASE_RETRY_CAP="\$\{HAM_MERGE_LEASE_RELEASE_RETRY_CAP:-3\}"/);
   assert.match(prompt, /ham_update_branch_conflict/);
@@ -980,7 +982,9 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /needs-revalidation-tool-failed/);
   assert.match(prompt, /needs-revalidation-output-invalid/);
   assert.match(prompt, /jq -er 'if \(\.needsRevalidation \| type\) == "boolean" then \.needsRevalidation else true end'/);
-  assert.match(prompt, /gh pr merge[\s\S]*--match-head-commit "\$POST_REMEDIATION_SHA"/);
+  assert.match(prompt, /before-daemon-gh-pr-merge/);
+  assert.match(prompt, /AMA daemon validates the HAM evidence/);
+  assert.doesNotMatch(prompt, /\ngh pr merge /);
   assert.match(prompt, /merge-lease\.mjs release[\s\S]*--lease-id "\$HAM_MERGE_LEASE_ID"/);
   assert.match(prompt, /keeping EXIT trap armed/);
   assert.match(prompt, /do not continue while the lease is unconfirmed/);
@@ -990,9 +994,9 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /re-acquire before the next rebase\/merge attempt/);
   assert.match(prompt, /HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 70/);
   assert.match(prompt, /parked PR 1234/);
-  assert.match(prompt, /AMG-04 hard-blocker: no merge without holding the merge lease/);
-  assert.match(prompt, /No merge without holding the merge lease/);
-  assert.match(prompt, /<!-- hq:closeout:pr -->/);
+  assert.match(prompt, /AMG-04 hard-blocker: no daemon handoff without holding the merge lease/);
+  assert.match(prompt, /No daemon handoff without holding the merge lease/);
+  assert.match(prompt, /No merged closeout comment from the hammer worker/);
 });
 
 test('composed prompt documents that branch_protection.required=false does not require the GitHub-plan sentinel', () => {
@@ -1078,6 +1082,16 @@ test('dispatch failure returns dispatched=false, reason=dispatch-failed (caller 
   assert.equal(result.reason, 'dispatch-failed');
   assert.equal(result.namedReason, 'dispatch-failed');
   assert.ok(result.error.includes('simulated dispatch failure'));
+  assert.equal(result.releasedPendingLease, true);
+  assert.equal(
+    readAmaCloserLease(rootDir, {
+      repo: dispatchContext.repo,
+      prNumber: prMetadata.prNumber,
+      headSha: dispatchContext.reviewedSha,
+    }),
+    null,
+    'a completed dispatch refusal must release the pending lease for the next tick',
+  );
 });
 
 test('branch-holder provision failures use bounded cleanup-debt counter outside redispatch budget', async (t) => {

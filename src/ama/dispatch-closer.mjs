@@ -1728,6 +1728,36 @@ export async function maybeDispatchAmaCloser({
       });
       const branchHolderBlockExhausted = branchHolderBlocked
         && Number(updatedDispatchRecord?.branchHolderBlockCount || 0) >= AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND;
+      let releasedPendingLease = false;
+      let releasePendingLeaseError = null;
+      if (!ambiguousLaunch) {
+        try {
+          deleteAmaCloserLease(rootDir, leaseIdentity);
+          releasedPendingLease = true;
+          logger?.warn?.(JSON.stringify({
+            event: 'ama_closer.pending_lease_released_after_dispatch_refusal',
+            repo,
+            prNumber,
+            headSha: reviewedSha,
+            reason: transientFailure ? 'dispatch-deferred-transient' : (
+              branchHolderBlocked ? 'dispatch-branch-holder-blocked' : 'dispatch-failed'
+            ),
+            error: String(err?.stderr || err?.message || err),
+          }));
+        } catch (releaseErr) {
+          releasePendingLeaseError = String(releaseErr?.message || releaseErr);
+          logger?.error?.(JSON.stringify({
+            event: 'ama_closer.pending_lease_release_failed_after_dispatch_refusal',
+            repo,
+            prNumber,
+            headSha: reviewedSha,
+            reason: transientFailure ? 'dispatch-deferred-transient' : (
+              branchHolderBlocked ? 'dispatch-branch-holder-blocked' : 'dispatch-failed'
+            ),
+            error: releasePendingLeaseError,
+          }));
+        }
+      }
       return noAmaDispatch({
         dispatched: false,
         // Transient failures keep the merge-agent fallback suppressed so the
@@ -1749,6 +1779,8 @@ export async function maybeDispatchAmaCloser({
         dispatchId: parsedFailure.dispatchId || null,
         launchRequestId: parsedFailure.launchRequestId || null,
         promptPath,
+        releasedPendingLease,
+        ...(releasePendingLeaseError ? { releasePendingLeaseError } : {}),
       });
     }
   }

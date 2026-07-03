@@ -4292,6 +4292,7 @@ function buildFastMergeCloseAuditEntry({
   manualMergeDetected = false,
   closedWithoutMerge = false,
   failureReason = null,
+  refusalReason = null,
   checkConclusions = null,
   headChanged = false,
   vetoDetected = false,
@@ -4320,6 +4321,7 @@ function buildFastMergeCloseAuditEntry({
     manual_merge_detected: Boolean(manualMergeDetected),
     closed_without_merge: Boolean(closedWithoutMerge),
     failure_reason: failureReason,
+    refusal_reason: refusalReason,
     check_conclusions: checkConclusions,
     head_changed: Boolean(headChanged),
     veto_detected: Boolean(vetoDetected),
@@ -5459,30 +5461,34 @@ async function processFastMergePR({
       return { status: 'merged', manualMergeDetected: true };
     }
     const detail = String(err?.stderr || err?.stdout || err?.message || err).trim();
-    updateFastMergeTerminalState(db, {
-      state: FAST_MERGE_BLOCKED_STATE,
-      repo,
-      prNumber,
-      failureMessage: detail || 'GitHub refused fast-merge',
-    });
+    const refusalReason = detail || 'GitHub refused fast-merge';
     await writeFastMergeAudit({
       db,
       rootDir,
       auditWriter,
       logger,
       entry: buildFastMergeCloseAuditEntry({
-        action: 'blocked',
+        action: 'merge-refused-retryable',
         repo,
         prNumber,
         authorizedHeadSha: exactHeadSha,
         currentHeadSha: preMergeView.headRefOid,
-        failureReason: detail || 'GitHub refused fast-merge',
+        failureReason: refusalReason,
+        refusalReason,
         checkConclusions: checkSummary.checkConclusions,
         mergeStderr: err?.stderr || null,
         mergeStdout: err?.stdout || null,
       }),
     });
-    return { status: 'blocked', reason: 'merge-refused' };
+    logger?.error?.(JSON.stringify({
+      event: 'ama_daemon.merge_refused',
+      repo,
+      prNumber,
+      authorizedHeadSha: exactHeadSha,
+      currentHeadSha: preMergeView.headRefOid,
+      refusalReason,
+    }));
+    return { status: 'skipped_still_pending', reason: 'merge-refused', refusalReason };
   }
 
   const mergedAt = isoNow();

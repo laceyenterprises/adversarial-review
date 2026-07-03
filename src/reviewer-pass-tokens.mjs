@@ -173,7 +173,7 @@ function completeReviewerPass(rootDir, {
     const tokenMetadata = usage?.usageTag
       ? {
           tokenUsageTag: usage.usageTag,
-          ...(usage.guardrail !== null && usage.guardrail !== undefined
+          ...(usage.guardrail !== undefined
             ? { tokenUsageGuardrail: usage.guardrail }
             : {}),
         }

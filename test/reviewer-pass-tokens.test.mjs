@@ -265,15 +265,35 @@ test('reviewer pass usage tag records guardrail attribution metadata', () => {
 });
 
 test('reviewer pass usage tag preserves explicit null guardrail attribution', () => {
+  const rootDir = tempRoot();
   const tagged = tagTokenUsage(
     { input: 999, output: 333, guardrail: null, source: 'session-ledger' },
     'guardrail',
   );
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 44,
+    attemptNumber: 1,
+    reviewerClass: 'codex',
+    passKind: 'first-pass',
+    startedAt: '2026-05-18T00:00:00.000Z',
+  });
+  const row = completeReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 44,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    tokenUsage: tagged,
+  });
+  const metadata = JSON.parse(row.metadata_json);
 
   assert.equal(tagged.input, 999);
   assert.equal(tagged.output, 333);
   assert.equal(tagged.guardrail, null);
   assert.equal(tagged.usageTag, 'guardrail');
+  assert.equal(Object.prototype.hasOwnProperty.call(metadata, 'tokenUsageGuardrail'), true);
+  assert.equal(metadata.tokenUsageGuardrail, null);
 });
 
 test('reviewer session lookup prefers adapter session keys over newer workspace siblings', () => {

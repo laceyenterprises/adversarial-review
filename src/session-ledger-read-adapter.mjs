@@ -342,20 +342,76 @@ function querySqliteRows(target, sql, params) {
   }
 }
 
+const SQLITE_IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const SQLITE_SCHEMA_PROBE_ATTEMPTS = 3;
+const SQLITE_SCHEMA_PROBE_BASE_DELAY_MS = 25;
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, ms));
+}
+
+function isTransientSqliteError(err) {
+  const code = String(err?.code || '').toUpperCase();
+  const message = String(err?.message || err || '').toLowerCase();
+  return code === 'SQLITE_BUSY'
+    || code === 'SQLITE_LOCKED'
+    || message.includes('database is locked')
+    || message.includes('database is busy');
+}
+
 function sqliteTableHasColumn(target, tableName, columnName) {
-  if (!existsSync(target.path)) return false;
-  const loaded = loadBetterSqlite3();
-  if (!loaded.ok) return false;
-  let db = null;
-  try {
-    db = new loaded.Database(target.path, { readonly: true, fileMustExist: true });
-    return db.prepare(`PRAGMA table_info(${tableName})`).all()
-      .some((column) => column.name === columnName);
-  } catch {
-    return false;
-  } finally {
-    if (db) db.close();
+  if (!SQLITE_IDENTIFIER_RE.test(tableName) || !SQLITE_IDENTIFIER_RE.test(columnName)) {
+    return {
+      ok: false,
+      reason: 'ledger-read-failed',
+      detail: `unsafe sqlite identifier in schema probe: ${tableName}.${columnName}`,
+      target,
+    };
   }
+  if (!existsSync(target.path)) {
+    return {
+      ok: false,
+      reason: 'missing-ledger-target',
+      detail: `sqlite ledger path does not exist: ${target.path}`,
+      target,
+    };
+  }
+  const loaded = loadBetterSqlite3();
+  if (!loaded.ok) return loaded;
+  let lastError = null;
+  for (let attempt = 1; attempt <= SQLITE_SCHEMA_PROBE_ATTEMPTS; attempt += 1) {
+    let db = null;
+    try {
+      db = new loaded.Database(target.path, { readonly: true, fileMustExist: true });
+      db.pragma('busy_timeout = 5000');
+      const rows = db.prepare(`PRAGMA table_info(${tableName})`).all();
+      return {
+        ok: true,
+        exists: rows.some((column) => column.name === columnName),
+        target,
+      };
+    } catch (err) {
+      lastError = err;
+      if (attempt < SQLITE_SCHEMA_PROBE_ATTEMPTS && isTransientSqliteError(err)) {
+        sleepSync(SQLITE_SCHEMA_PROBE_BASE_DELAY_MS * attempt);
+        continue;
+      }
+      return {
+        ok: false,
+        reason: 'ledger-read-failed',
+        detail: err?.message || String(err),
+        target,
+      };
+    } finally {
+      if (db) db.close();
+    }
+  }
+  return {
+    ok: false,
+    reason: 'ledger-read-failed',
+    detail: lastError?.message || String(lastError || 'sqlite schema probe failed'),
+    target,
+  };
 }
 
 function truncateForDetail(value, limit = 200) {
@@ -943,7 +999,9 @@ export function readWorkerRunUsageFromLedger({
   });
   if (!resolution.ok) return resolution;
   if (resolution.target.backend !== 'sqlite') return unsupportedBackend(resolution.target);
-  const guardrailColumn = sqliteTableHasColumn(resolution.target, 'worker_runs', 'token_usage_guardrail')
+  const guardrailColumn = sqliteTableHasColumn(resolution.target, 'worker_runs', 'token_usage_guardrail');
+  if (!guardrailColumn.ok) return guardrailColumn;
+  const guardrailColumnSql = guardrailColumn.exists
     ? 'wr.token_usage_guardrail'
     : 'NULL AS token_usage_guardrail';
   if (workerRunId) {
@@ -951,7 +1009,7 @@ export function readWorkerRunUsageFromLedger({
       resolution.target,
       `SELECT wr.run_id, wr.launch_request_id, wr.session_id,
               wr.token_usage_input, wr.token_usage_output,
-              ${guardrailColumn},
+              ${guardrailColumnSql},
               wr.token_usage_cost_usd, wr.token_usage_source,
               wr.started_at, wr.ended_at, wr.updated_at,
               rs.total_cache_read_tokens, rs.total_cache_write_tokens
@@ -972,7 +1030,7 @@ export function readWorkerRunUsageFromLedger({
     resolution.target,
     `SELECT wr.run_id, wr.launch_request_id, wr.session_id,
             wr.token_usage_input, wr.token_usage_output,
-            ${guardrailColumn},
+            ${guardrailColumnSql},
             wr.token_usage_cost_usd, wr.token_usage_source,
             wr.started_at, wr.ended_at, wr.updated_at,
             rs.total_cache_read_tokens, rs.total_cache_write_tokens

@@ -1140,6 +1140,8 @@ test('fast-merge merge refusal records refusalReason loudly and remains retryabl
   assert.match(result.refusalReason, /Head sha did not match/);
   assert.equal(row(db, 8271).pr_state, 'fast_merge_skipped');
   assert.equal(row(db, 8271).review_status, 'fast_merge_skipped');
+  assert.match(row(db, 8271).failure_message, /Head sha did not match/);
+  assert.match(row(db, 8271).failed_at, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(audits.at(-1).action, 'merge-refused-retryable');
   assert.match(audits.at(-1).refusal_reason, /Head sha did not match/);
   assert.equal(audits.at(-1).merged_head_sha, null);

@@ -5053,6 +5053,22 @@ function updateFastMergeTerminalState(db, {
   }
 }
 
+function updateFastMergeRetryableRefusalState(db, {
+  repo,
+  prNumber,
+  at = isoNow(),
+  refusalReason,
+}) {
+  db.prepare(
+    `UPDATE reviewed_prs
+        SET failed_at = ?,
+            failure_message = ?
+      WHERE repo = ?
+        AND pr_number = ?
+        AND pr_state = ?`
+  ).run(at, refusalReason || 'GitHub refused fast-merge', repo, prNumber, FAST_MERGE_SKIPPED_STATE);
+}
+
 function requeueFastMergeForNormalReview(db, {
   rootDir,
   repo,
@@ -5462,6 +5478,11 @@ async function processFastMergePR({
     }
     const detail = String(err?.stderr || err?.stdout || err?.message || err).trim();
     const refusalReason = detail || 'GitHub refused fast-merge';
+    updateFastMergeRetryableRefusalState(db, {
+      repo,
+      prNumber,
+      refusalReason,
+    });
     await writeFastMergeAudit({
       db,
       rootDir,

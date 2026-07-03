@@ -346,12 +346,16 @@ for the bypass lane. The follow-up daemon now actively consumes
 - re-summarizes checks in the immediate pre-merge window,
 - merges with `gh pr merge --squash --admin --delete-branch --match-head-commit <authorizedHeadSha>`,
 - records `fast_merge_merged`, `fast_merge_closed`, or `fast_merge_blocked`,
+- leaves retryable GitHub merge refusals in `fast_merge_skipped` while writing
+  the refusal reason to the row's failure fields for live operator visibility,
 - and requeues normal first-pass review when the head changed, veto appeared, or the authorization label was removed.
 
 Before recording `fast_merge_blocked` on a merge error, the daemon must re-fetch
 PR state; if GitHub already shows the PR merged, the durable state becomes
 `fast_merge_merged` instead so partial merge success cannot be misreported as a
-blocked refusal. Fast-merge audit JSON is stored separately under
+blocked refusal. If GitHub instead refused the merge but the PR remains open at
+the authorized head, the row remains `fast_merge_skipped` for a later retry and
+its failure fields carry the refusal reason. Fast-merge audit JSON is stored separately under
 `data/fast-merge-audits/`; it is not part of the reviewer runtime
 `data/reviewer-runs/` ledger. Skip and close records share the directory but
 carry distinct audit-type discriminators, and terminal close-path audit failures

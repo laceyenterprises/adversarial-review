@@ -593,7 +593,10 @@ fi
 HAM_DAEMON_HANDOFF_ATTEMPT=$(jq -n \
   --arg reviewedHead "<<REVIEWED_SHA>>" \
   --arg validatedHead "$POST_REMEDIATION_SHA" \
+  --arg mergeMethod "<<MERGE_METHOD>>" \
   --arg remediatedFindings "<n> addressed (<b> blocking, <nb> non-blocking)" \
+  --arg failingTestsFixed "<list, or 'suite already green'>" \
+  --argjson rebaseAttempts "${HAM_REBASE_ATTEMPTS:-0}" \
   --argjson eligibilityTrace "$(cat /tmp/ham-verdict.json)" \
   '{
     outcome: "in_progress",
@@ -602,7 +605,10 @@ HAM_DAEMON_HANDOFF_ATTEMPT=$(jq -n \
     headMatchEvidence: "ham_terminal_remediation_validated",
     reviewedHead: $reviewedHead,
     validatedHead: $validatedHead,
+    mergeMethod: $mergeMethod,
     remediatedFindings: $remediatedFindings,
+    failingTestsFixed: $failingTestsFixed,
+    rebaseAttempts: $rebaseAttempts,
     eligibilityTrace: $eligibilityTrace
   }')
 node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \

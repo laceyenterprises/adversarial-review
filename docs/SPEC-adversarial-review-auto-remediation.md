@@ -1013,9 +1013,18 @@ quota incident as a fresh bounded recovery window.
 The same hard-cap contract applies to follow-up remediation workers that spawn
 direct harness CLIs outside the dispatch lane. Reconcile may move a
 quota-exhausted in-progress remediation job back to `pending` with
-`retryAfter` pinned to the provider reset or the fixed fallback window. That
-hold does not request re-review and does not consume the PR's normal
-remediation round by itself; it is a delayed retry of the same worker round.
+`retryAfter` set to the provider reset or the fixed fallback window, but the
+daemon must cap any single unvalidated quota hold to a bounded max window
+(default one hour). A provider reset further in the future is treated as an
+upper-bound hint, not an authority to park remediation for days. Before the
+consume gate honors a future `retryAfter` from a quota-exhausted remediation
+retry, it may revalidate the harness provider's live quota state via the cached
+HQ fleet quota status (`hq fleet quota status --json`, provider OAuth state).
+If that live signal reports quota available, the gate clears the per-job hold
+and consumes the job in that tick; if the signal is missing, unknown, exhausted,
+or errors, the gate fails closed and keeps the clamped hold. That hold does not
+request re-review and does not consume the PR's normal remediation round by
+itself; it is a delayed retry of the same worker round.
 If the remediation job exhausts its bounded quota retry budget before the
 provider window clears or the worker can produce a valid remediation reply, it
 must become terminal with `quota-exhausted-budget-exhausted` so operators see a

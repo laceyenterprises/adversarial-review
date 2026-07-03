@@ -3,9 +3,10 @@
 // directly, default path when ADV_WITH_HQ_INTEGRATION is unset) gets the same
 // HRR graceful degradation as the reviewer when a hard provider usage cap is
 // hit: detect the cap in the worker's stderr log, requeue the job to pending
-// with retryAfter pinned to the provider reset (held by the consume gate) until
-// quota returns — instead of a misleading terminal "exited without artifact"
-// failure. Bounded by the shared transient-retry budget.
+// with retryAfter clamped to a bounded quota-hold window (held by the consume
+// gate and live-revalidated there) until quota returns — instead of a misleading
+// terminal "exited without artifact" failure. Bounded by the shared
+// transient-retry budget.
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -80,7 +81,7 @@ async function reconcileDeadWorkerWithLog(rootDir, logText) {
   });
 }
 
-test('a quota-exhausted direct-CLI remediation worker is HELD (requeued to pending) until the provider reset, not terminal-failed', async () => {
+test('a quota-exhausted direct-CLI remediation worker is HELD with provider reset clamped to the max unvalidated window', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const log = `[reviewer] remediation worker starting...
 {"type":"error","message":"You've hit your usage limit. Try again at Jun 17th, 2026 5:39 PM or purchase more credits."}`;
@@ -92,9 +93,9 @@ test('a quota-exhausted direct-CLI remediation worker is HELD (requeued to pendi
   assert.match(reconciled.jobPath, /data\/follow-up-jobs\/pending\/.+\.json$/);
   assert.equal(reconciled.job.status, 'pending');
 
-  // retryAfter is pinned to the provider-reported reset, so the consume gate
-  // (claimNextFollowUpJob) holds it until quota returns.
-  const expectedReset = '2026-06-18T00:39:00.000Z';
+  // retryAfter is clamped from the provider-reported reset, so a stale far-future
+  // reset cannot park remediation for days without live revalidation.
+  const expectedReset = '2026-06-16T11:05:00.000Z';
   assert.equal(reconciled.job.remediationPlan.retryAfter, expectedReset);
   assert.equal(reconciled.job.remediationPlan.transientRetries, 1);
 
@@ -102,6 +103,7 @@ test('a quota-exhausted direct-CLI remediation worker is HELD (requeued to pendi
   assert.equal(historyEntry.retryMetadata.code, 'quota-exhausted');
   assert.equal(historyEntry.retryMetadata.harness, 'codex');
   assert.equal(historyEntry.retryMetadata.source, 'provider-reported');
+  assert.equal(historyEntry.retryMetadata.providerResetAt, '2026-06-18T00:39:00.000Z');
 });
 
 test('a claude-harness quota cap is also held (both harnesses we know the shape for)', async () => {
@@ -112,7 +114,7 @@ test('a claude-harness quota cap is also held (both harnesses we know the shape 
   assert.equal(reconciled.reconciled, false);
   assert.equal(reconciled.reason, 'quota-exhausted');
   assert.equal(reconciled.job.status, 'pending');
-  assert.equal(reconciled.job.remediationPlan.retryAfter, '2026-06-17T17:39:00.000Z');
+  assert.equal(reconciled.job.remediationPlan.retryAfter, '2026-06-16T11:05:00.000Z');
   assert.equal(reconciled.job.remediationPlan.retryHistory.at(-1).retryMetadata.harness, 'claude');
 });
 

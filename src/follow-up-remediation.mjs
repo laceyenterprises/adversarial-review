@@ -10,6 +10,7 @@ import {
   buildRemediationReply,
   claimNextFollowUpJob,
   DEFAULT_MAX_TRANSIENT_RETRIES,
+  MAX_QUOTA_HOLD_WINDOW_MS,
   getFollowUpJobDir,
   listInProgressFollowUpJobs,
   listPendingFollowUpJobs,
@@ -73,6 +74,7 @@ const HQ_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'cancel
 const HQ_SUCCESS_STATUSES = new Set(['succeeded']);
 const HQ_CANCEL_RETRY_DELAYS_MS = [250, 500];
 const WORKSPACE_GIT_RETRY_DELAYS_MS = [250, 750];
+const QUOTA_HOLD_REVALIDATION_TTL_MS = 60 * 1000;
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
@@ -746,6 +748,82 @@ function resolveMaxTransientRemediationRetries(env = process.env) {
 // path's QUOTA_EXHAUSTED_BACKOFF_MS (15 min) so both worker classes degrade
 // the same way under a hard usage cap.
 const QUOTA_REMEDIATION_BACKOFF_MS = 15 * 60 * 1000;
+
+const QUOTA_HARNESS_PROVIDER = Object.freeze({
+  codex: 'openai',
+  claude: 'anthropic',
+  'claude-code': 'anthropic',
+});
+
+function providerForQuotaHarness(harness) {
+  return QUOTA_HARNESS_PROVIDER[String(harness || '').trim().toLowerCase()] || null;
+}
+
+function parseHqFleetQuotaStatus(stdout) {
+  const payload = parseHqJsonObject(stdout, 'hq fleet quota status');
+  const providerStatuses = Array.isArray(payload?.providerStatuses) ? payload.providerStatuses : [];
+  return providerStatuses.map((entry) => ({
+    provider: String(entry?.provider || '').trim().toLowerCase(),
+    authPath: String(entry?.authPath || entry?.auth_path || '').trim().toLowerCase(),
+    state: String(entry?.state || '').trim().toLowerCase(),
+    source: entry?.source || 'hq-fleet-quota-status',
+    lastGoodAt: entry?.lastGoodAt || entry?.last_good_at || null,
+    lastProbeAt: entry?.lastProbeAt || entry?.last_probe_at || null,
+  }));
+}
+
+function quotaAvailableFromFleetStatus(stdout, { harness } = {}) {
+  const provider = providerForQuotaHarness(harness);
+  if (!provider) {
+    return { available: false, state: 'unknown-harness', source: 'hq-fleet-quota-status' };
+  }
+  const statuses = parseHqFleetQuotaStatus(stdout);
+  const status = statuses.find((entry) => entry.provider === provider && entry.authPath === 'oauth')
+    || statuses.find((entry) => entry.provider === provider);
+  if (!status) {
+    return { available: false, state: 'missing-provider-status', source: 'hq-fleet-quota-status' };
+  }
+  return {
+    available: status.state === 'ok',
+    state: status.state || 'unknown',
+    source: 'hq-fleet-quota-status',
+    checkedAt: status.lastProbeAt || null,
+  };
+}
+
+function createQuotaHoldRevalidator({
+  execFileSyncImpl = execFileSync,
+  env = process.env,
+  nowMs = () => Date.now(),
+  ttlMs = QUOTA_HOLD_REVALIDATION_TTL_MS,
+} = {}) {
+  const cache = new Map();
+  return ({ harness, now } = {}) => {
+    const normalizedHarness = String(harness || '').trim().toLowerCase() || 'unknown';
+    const nowValueMs = Number(nowMs());
+    const cached = cache.get(normalizedHarness);
+    if (cached && Number.isFinite(nowValueMs) && nowValueMs - cached.checkedAtMs < ttlMs) {
+      return cached.decision;
+    }
+    const hqBin = resolveHqBin(env);
+    const stdout = execFileSyncImpl(hqBin, ['fleet', 'quota', 'status', '--json'], {
+      env,
+      encoding: 'utf8',
+      maxBuffer: 5 * 1024 * 1024,
+    });
+    const decision = quotaAvailableFromFleetStatus(stdout, { harness: normalizedHarness });
+    const checkedAt = typeof now === 'string' && now.trim() ? now : new Date(nowValueMs).toISOString();
+    const cachedDecision = {
+      ...decision,
+      checkedAt: decision.checkedAt || checkedAt,
+    };
+    cache.set(normalizedHarness, {
+      checkedAtMs: Number.isFinite(nowValueMs) ? nowValueMs : Date.now(),
+      decision: cachedDecision,
+    });
+    return cachedDecision;
+  };
+}
 
 // Best-effort read of a remediation worker's stderr log. The direct-CLI worker
 // routes both stdout and stderr to this log (see spawnClaudeRemediationWorker /
@@ -4790,8 +4868,12 @@ async function reconcileFollowUpJob({
     const maxQuotaRetries = resolveMaxTransientRemediationRetries();
     if (nextQuotaRetry <= maxQuotaRetries) {
       const resetIso = parseQuotaResetAt(quotaLogText, { nowMs: completedAtMs });
-      const retryAfter = resetIso
-        || new Date(completedAtMs + QUOTA_REMEDIATION_BACKOFF_MS).toISOString();
+      const providerRetryAfterMs = resetIso ? Date.parse(resetIso) : NaN;
+      const fallbackRetryAfterMs = completedAtMs + QUOTA_REMEDIATION_BACKOFF_MS;
+      const retryAfterMs = Number.isFinite(providerRetryAfterMs)
+        ? Math.min(providerRetryAfterMs, completedAtMs + MAX_QUOTA_HOLD_WINDOW_MS)
+        : fallbackRetryAfterMs;
+      const retryAfter = new Date(retryAfterMs).toISOString();
       const retryReason = `Provider usage cap hit (${quotaSignal.harness} harness); holding remediation until ${retryAfter} (HRR graceful degradation, retry ${nextQuotaRetry}/${maxQuotaRetries}).`;
       const requeued = requeueInProgressFollowUpJobForRetry({
         rootDir,
@@ -4804,7 +4886,9 @@ async function reconcileFollowUpJob({
           code: 'quota-exhausted',
           harness: quotaSignal.harness,
           resetAt: resetIso || null,
+          providerResetAt: resetIso || null,
           source: resetIso ? 'provider-reported' : 'fallback-window',
+          maxUnvalidatedHoldMs: MAX_QUOTA_HOLD_WINDOW_MS,
         },
       });
       log?.log?.(
@@ -5377,6 +5461,7 @@ async function consumeNextFollowUpJob({
   onExcludedRepoPrKey = null,
   delayedPendingPaths = null,
   onDelayedPendingJob = null,
+  quotaHoldRevalidator = null,
   log = console,
 } = {}) {
   // CFG-09: per-job boundary for the role-config cascade cache. Match
@@ -5397,6 +5482,7 @@ async function consumeNextFollowUpJob({
     onExcludedRepoPrKey,
     delayedPendingPaths,
     onDelayedPendingJob,
+    quotaHoldRevalidator,
   });
 
   if (!claimed) {
@@ -5810,6 +5896,7 @@ async function consumeFollowUpJobsUntilCapacity({
   resolvePRLifecycleImpl = resolvePRLifecycle,
   postCommentImpl = postRemediationOutcomeComment,
   shouldStop = () => false,
+  quotaHoldRevalidator = createQuotaHoldRevalidator({ execFileSyncImpl: execFileSync, env: process.env }),
   log = console,
 } = {}) {
   const concurrencyCap = normalizeMaxConcurrentFollowUpJobs(maxConcurrent);
@@ -5843,6 +5930,7 @@ async function consumeFollowUpJobsUntilCapacity({
         onDelayedPendingJob: () => {
           pendingRetryDelayed += 1;
         },
+        quotaHoldRevalidator,
         log,
       });
     } catch (err) {

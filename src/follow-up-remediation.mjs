@@ -794,36 +794,52 @@ function quotaAvailableFromFleetStatus(stdout, { harness } = {}) {
 function createQuotaHoldRevalidator({
   execFileSyncImpl = execFileSync,
   env = process.env,
-  nowMs = () => Date.now(),
+  nowMs: defaultNowMs = () => Date.now(),
   ttlMs = QUOTA_HOLD_REVALIDATION_TTL_MS,
 } = {}) {
   const cache = new Map();
-  return ({ harness, now } = {}) => {
+  return ({ harness, now, nowMs } = {}) => {
     const normalizedHarness = String(harness || '').trim().toLowerCase() || 'unknown';
-    const nowValueMs = Number(nowMs());
+    const nowValueMs = Number(nowMs ?? defaultNowMs());
+    const checkedAtMs = Number.isFinite(nowValueMs) ? nowValueMs : Date.now();
     const cached = cache.get(normalizedHarness);
-    if (cached && Number.isFinite(nowValueMs) && nowValueMs - cached.checkedAtMs < ttlMs) {
+    if (cached && checkedAtMs - cached.checkedAtMs < ttlMs) {
       return cached.decision;
     }
-    const hqBin = resolveHqBin(env);
-    const stdout = execFileSyncImpl(hqBin, ['fleet', 'quota', 'status', '--json'], {
-      env,
-      encoding: 'utf8',
-      maxBuffer: 5 * 1024 * 1024,
-    });
-    const decision = quotaAvailableFromFleetStatus(stdout, { harness: normalizedHarness });
-    const checkedAt = typeof now === 'string' && now.trim() ? now : new Date(nowValueMs).toISOString();
+    let decision;
+    try {
+      const hqBin = resolveHqBin(env);
+      const stdout = execFileSyncImpl(hqBin, ['fleet', 'quota', 'status', '--json'], {
+        env,
+        encoding: 'utf8',
+        maxBuffer: 5 * 1024 * 1024,
+      });
+      decision = quotaAvailableFromFleetStatus(stdout, { harness: normalizedHarness });
+    } catch (err) {
+      decision = {
+        available: false,
+        state: 'error',
+        source: 'hq-fleet-quota-status',
+        error: err?.message || String(err),
+      };
+    }
+    const checkedAt = typeof now === 'string' && now.trim() ? now : new Date(checkedAtMs).toISOString();
     const cachedDecision = {
       ...decision,
       checkedAt: decision.checkedAt || checkedAt,
     };
     cache.set(normalizedHarness, {
-      checkedAtMs: Number.isFinite(nowValueMs) ? nowValueMs : Date.now(),
+      checkedAtMs,
       decision: cachedDecision,
     });
     return cachedDecision;
   };
 }
+
+const defaultQuotaHoldRevalidator = createQuotaHoldRevalidator({
+  execFileSyncImpl: execFileSync,
+  env: process.env,
+});
 
 // Best-effort read of a remediation worker's stderr log. The direct-CLI worker
 // routes both stdout and stderr to this log (see spawnClaudeRemediationWorker /
@@ -5896,7 +5912,7 @@ async function consumeFollowUpJobsUntilCapacity({
   resolvePRLifecycleImpl = resolvePRLifecycle,
   postCommentImpl = postRemediationOutcomeComment,
   shouldStop = () => false,
-  quotaHoldRevalidator = createQuotaHoldRevalidator({ execFileSyncImpl: execFileSync, env: process.env }),
+  quotaHoldRevalidator = defaultQuotaHoldRevalidator,
   log = console,
 } = {}) {
   const concurrencyCap = normalizeMaxConcurrentFollowUpJobs(maxConcurrent);
@@ -6222,6 +6238,7 @@ export {
   buildDrainSummaryLogLine,
   isDrainQueueIdle,
   classifyHqDispatchFailure,
+  createQuotaHoldRevalidator,
   countPendingFollowUpJobsByRetryWindow,
   REMEDIATION_LEGACY_UNSTAGE_COMMANDS,
   WORKSPACE_ARTIFACT_EXCLUDE_ENTRY,

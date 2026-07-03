@@ -22,6 +22,7 @@ import {
   cleanupReconcileClaimArtifacts,
   classifyHqDispatchFailure,
   connectFollowUpTelemetryListener,
+  createQuotaHoldRevalidator,
   consumeFollowUpJobsUntilCapacity,
   consumeNextFollowUpJob,
   countPendingFollowUpJobsByRetryWindow,
@@ -64,6 +65,67 @@ import {
   remediationWorkerTrailerClass,
   validateStartupRemediationConfig,
 } from '../src/follow-up-remediation.mjs';
+
+test('createQuotaHoldRevalidator caches hq quota status failures for the TTL window', () => {
+  let calls = 0;
+  const revalidator = createQuotaHoldRevalidator({
+    execFileSyncImpl: () => {
+      calls += 1;
+      throw new Error('hq quota status unavailable');
+    },
+    nowMs: () => 1000,
+    ttlMs: 60_000,
+  });
+
+  const first = revalidator({
+    harness: 'codex',
+    now: '2026-04-21T10:06:00.000Z',
+    nowMs: 1000,
+  });
+  const second = revalidator({
+    harness: 'codex',
+    now: '2026-04-21T10:06:01.000Z',
+    nowMs: 2000,
+  });
+  const afterTtl = revalidator({
+    harness: 'codex',
+    now: '2026-04-21T10:07:01.000Z',
+    nowMs: 61_001,
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(first.available, false);
+  assert.equal(first.state, 'error');
+  assert.equal(first.error, 'hq quota status unavailable');
+  assert.equal(second, first);
+  assert.equal(afterTtl.available, false);
+  assert.equal(afterTtl.state, 'error');
+});
+
+test('createQuotaHoldRevalidator uses invocation nowMs for cache expiry', () => {
+  let calls = 0;
+  const revalidator = createQuotaHoldRevalidator({
+    execFileSyncImpl: () => {
+      calls += 1;
+      return JSON.stringify({
+        providerStatuses: [
+          { provider: 'openai', authPath: 'oauth', state: 'ok', lastProbeAt: '2026-04-21T10:06:00.000Z' },
+        ],
+      });
+    },
+    nowMs: () => 999_999,
+    ttlMs: 60_000,
+  });
+
+  const first = revalidator({ harness: 'codex', nowMs: 1000 });
+  const second = revalidator({ harness: 'codex', nowMs: 2000 });
+  const afterTtl = revalidator({ harness: 'codex', nowMs: 61_001 });
+
+  assert.equal(calls, 2);
+  assert.equal(first.available, true);
+  assert.equal(second, first);
+  assert.equal(afterTtl.available, true);
+});
 
 // The OAuth pre-flight caches its result at module scope so per-tick
 // reads of ~/.codex/auth.json don't trigger macOS TCC popups in

@@ -4605,7 +4605,9 @@ test('oauth_broker.github_app_providers permissive mirror: numeric IDs + future 
             expected_app_id: "3978009"
             expected_installation_id: "138360282"
             private_key_op_ref: "op://Cliovault/hammer/private-key"
+            private_key_file: ""
             pat_fallback_op_ref: "op://Cliovault/hammer/pat"
+            source: identity_descriptor
           sentinel:
             broker_auth_enabled: false
             provider: sentinel
@@ -4636,8 +4638,16 @@ test('oauth_broker.github_app_providers permissive mirror: numeric IDs + future 
       'op://Cliovault/hammer/private-key',
     );
     assert.equal(
+      cfg.get('oauth_broker.github_app_providers.hammer.private_key_file'),
+      '',
+    );
+    assert.equal(
       cfg.get('oauth_broker.github_app_providers.hammer.pat_fallback_op_ref'),
       'op://Cliovault/hammer/pat',
+    );
+    assert.equal(
+      cfg.get('oauth_broker.github_app_providers.hammer.source'),
+      'identity_descriptor',
     );
     assert.equal(
       cfg.get('oauth_broker.github_app_providers.sentinel.broker_auth_enabled'),

@@ -608,7 +608,15 @@ function schemaV1() {
                   __type: TYPE_STRING,
                   __default: '',
                 },
+                private_key_file: {
+                  __type: TYPE_STRING,
+                  __default: '',
+                },
                 pat_fallback_op_ref: {
+                  __type: TYPE_STRING,
+                  __default: '',
+                },
+                source: {
                   __type: TYPE_STRING,
                   __default: '',
                 },

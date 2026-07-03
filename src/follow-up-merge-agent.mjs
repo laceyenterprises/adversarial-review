@@ -4292,6 +4292,7 @@ function buildFastMergeCloseAuditEntry({
   manualMergeDetected = false,
   closedWithoutMerge = false,
   failureReason = null,
+  refusalReason = null,
   checkConclusions = null,
   headChanged = false,
   vetoDetected = false,
@@ -4320,6 +4321,7 @@ function buildFastMergeCloseAuditEntry({
     manual_merge_detected: Boolean(manualMergeDetected),
     closed_without_merge: Boolean(closedWithoutMerge),
     failure_reason: failureReason,
+    refusal_reason: refusalReason,
     check_conclusions: checkConclusions,
     head_changed: Boolean(headChanged),
     veto_detected: Boolean(vetoDetected),
@@ -5051,6 +5053,30 @@ function updateFastMergeTerminalState(db, {
   }
 }
 
+function updateFastMergeRetryableRefusalState(db, {
+  repo,
+  prNumber,
+  at = isoNow(),
+  refusalReason,
+}) {
+  db.prepare(
+    `UPDATE reviewed_prs
+        SET failed_at = ?,
+            failure_message = ?,
+            pr_state = ?,
+            review_status = ?
+      WHERE repo = ?
+        AND pr_number = ?`
+  ).run(
+    at,
+    refusalReason || 'GitHub refused fast-merge',
+    FAST_MERGE_SKIPPED_STATE,
+    FAST_MERGE_SKIPPED_STATE,
+    repo,
+    prNumber,
+  );
+}
+
 function requeueFastMergeForNormalReview(db, {
   rootDir,
   repo,
@@ -5459,11 +5485,11 @@ async function processFastMergePR({
       return { status: 'merged', manualMergeDetected: true };
     }
     const detail = String(err?.stderr || err?.stdout || err?.message || err).trim();
-    updateFastMergeTerminalState(db, {
-      state: FAST_MERGE_BLOCKED_STATE,
+    const refusalReason = detail || 'GitHub refused fast-merge';
+    updateFastMergeRetryableRefusalState(db, {
       repo,
       prNumber,
-      failureMessage: detail || 'GitHub refused fast-merge',
+      refusalReason,
     });
     await writeFastMergeAudit({
       db,
@@ -5471,18 +5497,27 @@ async function processFastMergePR({
       auditWriter,
       logger,
       entry: buildFastMergeCloseAuditEntry({
-        action: 'blocked',
+        action: 'merge-refused-retryable',
         repo,
         prNumber,
         authorizedHeadSha: exactHeadSha,
         currentHeadSha: preMergeView.headRefOid,
-        failureReason: detail || 'GitHub refused fast-merge',
+        failureReason: 'github_refused_merge',
+        refusalReason,
         checkConclusions: checkSummary.checkConclusions,
         mergeStderr: err?.stderr || null,
         mergeStdout: err?.stdout || null,
       }),
     });
-    return { status: 'blocked', reason: 'merge-refused' };
+    logger?.error?.(JSON.stringify({
+      event: 'ama_daemon.merge_refused',
+      repo,
+      prNumber,
+      authorizedHeadSha: exactHeadSha,
+      currentHeadSha: preMergeView.headRefOid,
+      refusalReason,
+    }));
+    return { status: 'skipped_still_pending', reason: 'merge-refused', refusalReason };
   }
 
   const mergedAt = isoNow();

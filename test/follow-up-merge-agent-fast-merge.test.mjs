@@ -969,7 +969,7 @@ test('fast-merge per-poll cap resolves from env var', async () => {
   assert.equal(row(db, 818).pr_state, 'fast_merge_skipped');
 });
 
-test('fast-merge deterministic refusal blocks one PR without stopping others', async () => {
+test('fast-merge deterministic refusal leaves one PR retryable without stopping others', async () => {
   const db = makeDb();
   for (let pr = 821; pr <= 823; pr += 1) seedFastMerge(db, pr);
   const gh = makeGhStub({
@@ -981,9 +981,10 @@ test('fast-merge deterministic refusal blocks one PR without stopping others', a
   const summary = await pollFastMergeQueue({ db, ghClient: gh, perPollCap: 3, auditWriter: () => {} });
 
   assert.equal(summary.processed, 3);
-  assert.equal(summary.blocked, 1);
+  assert.equal(summary.blocked, 0);
+  assert.equal(summary.skipped_still_pending, 1);
   assert.equal(summary.merged, 2);
-  assert.equal(row(db, 821).pr_state, 'fast_merge_blocked');
+  assert.equal(row(db, 821).pr_state, 'fast_merge_skipped');
   assert.equal(row(db, 822).pr_state, 'fast_merge_merged');
   assert.equal(row(db, 823).pr_state, 'fast_merge_merged');
 });
@@ -1102,6 +1103,58 @@ test('fast-merge merge refusal that already landed records merged instead of blo
   assert.equal(row(db, 827).pr_state, 'fast_merge_merged');
   assert.equal(row(db, 827).review_status, 'fast_merge_merged');
   assert.equal(audits.at(-1).merge_sha, 'feedfacefeedfacefeedfacefeedfacefeedface');
+});
+
+test('fast-merge merge refusal records refusalReason loudly and remains retryable', async () => {
+  const db = makeDb();
+  seedFastMerge(db, 8271);
+  db.prepare(
+    `UPDATE reviewed_prs
+        SET pr_state = 'open'
+      WHERE repo = ?
+        AND pr_number = ?`
+  ).run(REPO, 8271);
+  const audits = [];
+  const errors = [];
+  const gh = makeGhStub({
+    views: [
+      openView('sha-A'),
+      openView('sha-A'),
+      openView('sha-A'),
+    ],
+    checks: [successChecks()],
+    merges: [refusalError('GraphQL: Head sha did not match pull request head')],
+  });
+
+  const result = await processFastMergePR({
+    db,
+    ghClient: gh,
+    repo: REPO,
+    prNumber: 8271,
+    authorizedHeadSha: 'sha-A',
+    auditWriter: (entry) => audits.push(entry),
+    logger: {
+      warn() {},
+      error(line) {
+        errors.push(JSON.parse(line));
+      },
+    },
+  });
+
+  assert.equal(result.status, 'skipped_still_pending');
+  assert.equal(result.reason, 'merge-refused');
+  assert.match(result.refusalReason, /Head sha did not match/);
+  assert.equal(row(db, 8271).pr_state, 'fast_merge_skipped');
+  assert.equal(row(db, 8271).review_status, 'fast_merge_skipped');
+  assert.match(row(db, 8271).failure_message, /Head sha did not match/);
+  assert.match(row(db, 8271).failed_at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(audits.at(-1).action, 'merge-refused-retryable');
+  assert.equal(audits.at(-1).failure_reason, 'github_refused_merge');
+  assert.match(audits.at(-1).refusal_reason, /Head sha did not match/);
+  assert.equal(audits.at(-1).merged_head_sha, null);
+  assert.equal(audits.at(-1).merge_sha, null);
+  assert.equal(errors.at(-1).event, 'ama_daemon.merge_refused');
+  assert.match(errors.at(-1).refusalReason, /Head sha did not match/);
 });
 
 test('fast-merge checks request only real gh JSON fields', async () => {

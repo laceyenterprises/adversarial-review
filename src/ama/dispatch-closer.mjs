@@ -1680,6 +1680,7 @@ export async function maybeDispatchAmaCloser({
       const parsedFailure = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(err?.stdout || ''));
       const ambiguousLaunch = Boolean(parsedFailure.launchRequestId || parsedFailure.dispatchId);
       const branchHolderBlocked = !ambiguousLaunch && isProvisionBranchHolderBlocked(err);
+      const dispatchError = String(err?.stderr || err?.message || err);
       // A throttle / OAuth-broker outage / host-offline window is TRANSIENT: the
       // dispatch did not fail on its merits, GitHub or the broker was merely
       // unavailable. Treat it like a branch-holder block for budget purposes —
@@ -1723,11 +1724,41 @@ export async function maybeDispatchAmaCloser({
           lastObservedStatus: ambiguousLaunch ? 'unknown' : (branchHolderBlocked ? 'blocked' : null),
           lastObservedAt: ambiguousLaunch || branchHolderBlocked ? dispatchContext.dispatchedAt : null,
           lastFailureTransient: transientFailure,
-          lastError: String(err?.stderr || err?.message || err),
+          lastError: dispatchError,
         };
       });
       const branchHolderBlockExhausted = branchHolderBlocked
         && Number(updatedDispatchRecord?.branchHolderBlockCount || 0) >= AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND;
+      let releasedPendingLease = false;
+      let releasePendingLeaseError = null;
+      if (!ambiguousLaunch) {
+        try {
+          deleteAmaCloserLease(rootDir, leaseIdentity);
+          releasedPendingLease = true;
+          logger?.warn?.(JSON.stringify({
+            event: 'ama_closer.pending_lease_released_after_dispatch_refusal',
+            repo,
+            prNumber,
+            headSha: reviewedSha,
+            reason: transientFailure ? 'dispatch-deferred-transient' : (
+              branchHolderBlocked ? 'dispatch-branch-holder-blocked' : 'dispatch-failed'
+            ),
+            error: dispatchError,
+          }));
+        } catch (releaseErr) {
+          releasePendingLeaseError = String(releaseErr?.message || releaseErr);
+          logger?.error?.(JSON.stringify({
+            event: 'ama_closer.pending_lease_release_failed_after_dispatch_refusal',
+            repo,
+            prNumber,
+            headSha: reviewedSha,
+            reason: transientFailure ? 'dispatch-deferred-transient' : (
+              branchHolderBlocked ? 'dispatch-branch-holder-blocked' : 'dispatch-failed'
+            ),
+            error: releasePendingLeaseError,
+          }));
+        }
+      }
       return noAmaDispatch({
         dispatched: false,
         // Transient failures keep the merge-agent fallback suppressed so the
@@ -1749,6 +1780,8 @@ export async function maybeDispatchAmaCloser({
         dispatchId: parsedFailure.dispatchId || null,
         launchRequestId: parsedFailure.launchRequestId || null,
         promptPath,
+        releasedPendingLease,
+        ...(releasePendingLeaseError ? { releasePendingLeaseError } : {}),
       });
     }
   }

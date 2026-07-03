@@ -686,6 +686,68 @@ function schemaV1() {
           },
         },
       },
+      services: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          ports: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              hcp: { __type: TYPE_INT, __default: 8002 },
+            },
+          },
+          hcp: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              bind_host: { __type: TYPE_STRING, __default: '127.0.0.1' },
+              audit_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },
+              token_expired_keep_days: { __type: TYPE_INT, __default: 7, __min: 0 },
+              token_revoked_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },
+              idempotency_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },
+              confirmation_token_keep_minutes: { __type: TYPE_INT, __default: 60, __min: 0 },
+              comms_jobs_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },
+              rotation_cadence_days: { __type: TYPE_INT, __default: 90, __min: 1 },
+              persistent_agent_principals: {
+                __type: TYPE_LIST,
+                __item: { __type: TYPE_STRING },
+                __default: [
+                  'clio',
+                  'aria',
+                  'argus',
+                  'sentinel',
+                  'claude-responder',
+                  'codex-responder',
+                  'agent-os-responder',
+                ],
+              },
+              persistent_agent_default_capabilities: {
+                __type: TYPE_DICT,
+                __strict: false,
+                __keys: {
+                  clio: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: ['dispatch.read', 'talk'] },
+                  aria: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: ['dispatch.read', 'talk'] },
+                  argus: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: ['dispatch.read', 'talk'] },
+                  sentinel: { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: ['dispatch.read', 'talk'] },
+                  'claude-responder': { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: ['dispatch.read', 'talk'] },
+                  'codex-responder': { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: ['dispatch.read', 'talk'] },
+                  'agent-os-responder': { __type: TYPE_LIST, __item: { __type: TYPE_STRING }, __default: ['dispatch.read', 'talk'] },
+                },
+                __extra_keys_schema: {
+                  __type: TYPE_LIST,
+                  __item: { __type: TYPE_STRING },
+                  __default: [],
+                },
+              },
+              op_rate_limit_regex: {
+                __type: TYPE_STRING,
+                __default: String.raw`account\s+read_write\s+[0-9]+/[0-9]+`,
+              },
+            },
+          },
+        },
+      },
       // DRP-01N — retention policy block. Strict-shape parity matters here
       // because the adversarial watcher consumes this Node loader and must
       // tolerate the top-level Agent OS `retention:` surface. Policy names are
@@ -2049,6 +2111,50 @@ export const ENV_ALIASES = {
   },
   'sentinel.disk_headroom.sensor_failure_page_threshold': {
     canonical: 'AGENT_OS_SENTINEL_DISK_HEADROOM_SENSOR_FAILURE_PAGE_THRESHOLD',
+    aliases: [],
+  },
+  'services.ports.hcp': {
+    canonical: 'AGENT_OS_SERVICES_PORTS_HCP',
+    aliases: [],
+  },
+  'services.hcp.bind_host': {
+    canonical: 'AGENT_OS_SERVICES_HCP_BIND_HOST',
+    aliases: [],
+  },
+  'services.hcp.audit_keep_days': {
+    canonical: 'AGENT_OS_SERVICES_HCP_AUDIT_KEEP_DAYS',
+    aliases: [],
+  },
+  'services.hcp.token_expired_keep_days': {
+    canonical: 'AGENT_OS_SERVICES_HCP_TOKEN_EXPIRED_KEEP_DAYS',
+    aliases: [],
+  },
+  'services.hcp.token_revoked_keep_days': {
+    canonical: 'AGENT_OS_SERVICES_HCP_TOKEN_REVOKED_KEEP_DAYS',
+    aliases: [],
+  },
+  'services.hcp.idempotency_keep_days': {
+    canonical: 'AGENT_OS_SERVICES_HCP_IDEMPOTENCY_KEEP_DAYS',
+    aliases: [],
+  },
+  'services.hcp.confirmation_token_keep_minutes': {
+    canonical: 'AGENT_OS_SERVICES_HCP_CONFIRMATION_TOKEN_KEEP_MINUTES',
+    aliases: [],
+  },
+  'services.hcp.comms_jobs_keep_days': {
+    canonical: 'AGENT_OS_SERVICES_HCP_COMMS_JOBS_KEEP_DAYS',
+    aliases: [],
+  },
+  'services.hcp.rotation_cadence_days': {
+    canonical: 'AGENT_OS_SERVICES_HCP_ROTATION_CADENCE_DAYS',
+    aliases: [],
+  },
+  'services.hcp.persistent_agent_principals': {
+    canonical: 'AGENT_OS_SERVICES_HCP_PERSISTENT_AGENT_PRINCIPALS',
+    aliases: [],
+  },
+  'services.hcp.op_rate_limit_regex': {
+    canonical: 'AGENT_OS_SERVICES_HCP_OP_RATE_LIMIT_REGEX',
     aliases: [],
   },
   'session_ledger.backend': {

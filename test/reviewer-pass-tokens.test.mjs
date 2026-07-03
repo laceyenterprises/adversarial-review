@@ -22,6 +22,7 @@ import {
   readClaudeTranscriptTokenUsage,
   readCodexTranscriptTokenUsage,
   readReviewerSessionTokenUsage,
+  tagTokenUsage,
   readWorkerRunTokenUsage,
 } from '../src/reviewer-pass-tokens.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
@@ -161,11 +162,15 @@ test('worker-run and reviewer-session readers accept ledger target object, URI, 
     assert.equal(workerUsage.output, 45, fixture.name);
     assert.equal(workerUsage.cacheRead, 11, fixture.name);
     assert.equal(workerUsage.cacheWrite, 7, fixture.name);
+    assert.equal(workerUsage.guardrail, 165, fixture.name);
+    assert.equal(workerUsage.usageTag, 'guardrail', fixture.name);
     assert.equal(workerUsage.costUSD, 0.35, fixture.name);
     assert.equal(workerUsage.source, 'session-ledger', fixture.name);
     assert.equal(failedWorkerUsage.workerRunId, 'wr_2', fixture.name);
     assert.equal(failedWorkerUsage.input, 999, fixture.name);
     assert.equal(failedWorkerUsage.output, 333, fixture.name);
+    assert.equal(failedWorkerUsage.guardrail, null, fixture.name);
+    assert.equal(failedWorkerUsage.usageTag, null, fixture.name);
     assert.equal(failedWorkerUsage.source, 'session-ledger', fixture.name);
 
     assert.equal(reviewerUsage.adapterSessionKey, 'session-1', fixture.name);
@@ -224,7 +229,39 @@ test('worker-run lookup skips empty HQ_ROOT ledger stubs', () => {
   assert.equal(usage.output, 45);
   assert.equal(usage.cacheRead, 11);
   assert.equal(usage.cacheWrite, 7);
+  assert.equal(usage.guardrail, 165);
+  assert.equal(usage.usageTag, 'guardrail');
   assert.equal(usage.source, 'session-ledger');
+});
+
+test('reviewer pass usage tag records guardrail attribution metadata', () => {
+  const rootDir = tempRoot();
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 43,
+    attemptNumber: 1,
+    reviewerClass: 'codex',
+    passKind: 'first-pass',
+    startedAt: '2026-05-18T00:00:00.000Z',
+  });
+  const tagged = tagTokenUsage(
+    { input: 20, output: 8, total: 28, source: 'codex-json' },
+    'guardrail',
+  );
+  const row = completeReviewerPass(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 43,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    tokenUsage: tagged,
+  });
+  const metadata = JSON.parse(row.metadata_json);
+  assert.equal(row.token_input, 20);
+  assert.equal(row.token_output, 8);
+  assert.equal(row.token_total, 28);
+  assert.equal(metadata.tokenUsageTag, 'guardrail');
+  assert.equal(metadata.tokenUsageGuardrail, 28);
 });
 
 test('reviewer session lookup prefers adapter session keys over newer workspace siblings', () => {

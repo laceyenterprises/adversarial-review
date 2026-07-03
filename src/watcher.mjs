@@ -56,6 +56,7 @@ import {
   beginReviewerPass,
   completeReviewerPass,
   readBestReviewerEvidenceTokenUsage,
+  tagTokenUsage,
 } from './reviewer-pass-tokens.mjs';
 import { isSqliteOrphanError } from './sqlite-orphan.mjs';
 import {
@@ -3001,7 +3002,7 @@ async function spawnReviewer({
     if (result.stderrTail) console.error(`[reviewer:${prNumber}] stderr: ${String(result.stderrTail).trim()}`);
     try {
       const endedAt = new Date().toISOString();
-      const tokenUsage = result.tokenUsage || readBestReviewerEvidenceTokenUsage({
+      const tokenUsage = tagTokenUsage(result.tokenUsage || readBestReviewerEvidenceTokenUsage({
         adapterSessionKey: result.reattachToken || reviewerSessionUuid,
         sessionKeys: [
           reviewerSessionUuid,
@@ -3013,7 +3014,7 @@ async function spawnReviewer({
         endedAt,
         reviewerModel,
         rootDir: ROOT,
-      });
+      }), 'guardrail');
       completeReviewerPass(ROOT, {
         repo,
         prNumber,
@@ -3040,7 +3041,7 @@ async function spawnReviewer({
   } catch (err) {
     try {
       const tokenUsage = err?.tokenUsage && typeof err.tokenUsage === 'object'
-        ? err.tokenUsage
+        ? tagTokenUsage(err.tokenUsage, 'guardrail')
         : null;
       completeReviewerPass(ROOT, {
         repo,

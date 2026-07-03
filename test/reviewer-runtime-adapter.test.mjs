@@ -1261,6 +1261,8 @@ test('cli-direct returns Codex JSON token usage from reviewer stdout', async () 
       cacheWrite: 0,
       total: 129,
       source: 'codex-json',
+      usageTag: 'guardrail',
+      guardrail: 129,
     });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -1310,6 +1312,8 @@ test('cli-direct returns Codex JSON token usage from failed reviewer stdout', as
       cacheWrite: 0,
       total: 465,
       source: 'codex-json',
+      usageTag: 'guardrail',
+      guardrail: 465,
     });
     assert.equal(result.tokenUsageNoUsageReason, null);
   } finally {
@@ -1435,6 +1439,8 @@ test('cli-direct returns Codex token usage from reviewer token side-channel mark
       cacheWrite: 0,
       total: 1500,
       source: 'codex-json',
+      usageTag: 'guardrail',
+      guardrail: 1500,
     });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

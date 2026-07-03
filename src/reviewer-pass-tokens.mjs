@@ -170,8 +170,17 @@ function completeReviewerPass(rootDir, {
       `SELECT metadata_json FROM reviewer_passes
         WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
     ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind);
+    const tokenMetadata = usage?.usageTag
+      ? {
+          tokenUsageTag: usage.usageTag,
+          ...(usage.guardrail !== null && usage.guardrail !== undefined
+            ? { tokenUsageGuardrail: usage.guardrail }
+            : {}),
+        }
+      : {};
     const mergedMetadata = {
       ...parseMetadataJson(existing?.metadata_json),
+      ...tokenMetadata,
       ...metadata,
     };
     db.prepare(
@@ -221,8 +230,12 @@ function normalizeTokenUsage(tokenUsage) {
   const cacheRead = coerceNonNegativeInt(tokenUsage.cacheRead ?? tokenUsage.cache_read ?? tokenUsage.token_cache_read);
   const cacheWrite = coerceNonNegativeInt(tokenUsage.cacheWrite ?? tokenUsage.cache_write ?? tokenUsage.token_cache_write);
   const total = coerceNonNegativeInt(tokenUsage.total ?? tokenUsage.totalTokens ?? tokenUsage.token_total);
+  const guardrail = coerceNonNegativeInt(tokenUsage.guardrail ?? tokenUsage.guardrailTokens ?? tokenUsage.token_usage_guardrail);
   const costUSD = coerceNonNegativeFloat(tokenUsage.costUSD ?? tokenUsage.cost_usd ?? tokenUsage.token_cost_usd);
-  if (input === null && output === null && cacheRead === null && cacheWrite === null && total === null && costUSD === null) {
+  const usageTag = normalizeUsageTag(
+    tokenUsage.usageTag ?? tokenUsage.usage_tag ?? tokenUsage.usageCategory ?? tokenUsage.usage_category ?? tokenUsage.category ?? tokenUsage.tag
+  );
+  if (input === null && output === null && cacheRead === null && cacheWrite === null && total === null && guardrail === null && costUSD === null) {
     return null;
   }
   return {
@@ -231,8 +244,32 @@ function normalizeTokenUsage(tokenUsage) {
     cacheRead,
     cacheWrite,
     total,
+    guardrail,
     costUSD,
     source: tokenUsage.source || null,
+    usageTag,
+  };
+}
+
+function normalizeUsageTag(value) {
+  const text = String(value || '').trim().toLowerCase();
+  return text || null;
+}
+
+function tagTokenUsage(tokenUsage, usageTag) {
+  const normalized = normalizeTokenUsage(tokenUsage);
+  if (!normalized) return null;
+  const tag = normalizeUsageTag(usageTag) || normalized.usageTag;
+  if (!tag) return normalized;
+  const guardrail = normalized.guardrail ?? (
+    tag === 'guardrail'
+      ? (normalized.total ?? ((normalized.input || 0) + (normalized.output || 0)))
+      : null
+  );
+  return {
+    ...normalized,
+    guardrail,
+    usageTag: tag,
   };
 }
 
@@ -339,8 +376,10 @@ function tokenUsageFromWorkerRun(row, { workerRunId = null, launchRequestId = nu
     output: coerceNonNegativeInt(row.token_usage_output),
     cacheRead: coerceNonNegativeInt(row.total_cache_read_tokens),
     cacheWrite: coerceNonNegativeInt(row.total_cache_write_tokens),
+    guardrail: coerceNonNegativeInt(row.token_usage_guardrail),
     costUSD: coerceNonNegativeFloat(row.token_usage_cost_usd),
     source: row.token_usage_source || 'session-ledger',
+    usageTag: coerceNonNegativeInt(row.token_usage_guardrail) !== null ? 'guardrail' : null,
   };
 }
 
@@ -1216,6 +1255,7 @@ export {
   backfillReviewerPasses,
   beginReviewerPass,
   completeReviewerPass,
+  tagTokenUsage,
   normalizeReviewerClass,
   normalizeTokenUsage,
   parseSince,

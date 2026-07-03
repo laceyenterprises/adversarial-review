@@ -932,6 +932,7 @@ export function readWorkerRunUsageFromLedger({
       resolution.target,
       `SELECT wr.run_id, wr.launch_request_id, wr.session_id,
               wr.token_usage_input, wr.token_usage_output,
+              wr.token_usage_guardrail,
               wr.token_usage_cost_usd, wr.token_usage_source,
               wr.started_at, wr.ended_at, wr.updated_at,
               rs.total_cache_read_tokens, rs.total_cache_write_tokens
@@ -952,6 +953,7 @@ export function readWorkerRunUsageFromLedger({
     resolution.target,
     `SELECT wr.run_id, wr.launch_request_id, wr.session_id,
             wr.token_usage_input, wr.token_usage_output,
+            wr.token_usage_guardrail,
             wr.token_usage_cost_usd, wr.token_usage_source,
             wr.started_at, wr.ended_at, wr.updated_at,
             rs.total_cache_read_tokens, rs.total_cache_write_tokens

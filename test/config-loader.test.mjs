@@ -136,6 +136,29 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('session_ledger.vdb.enabled'), true);
     assert.equal(cfg.get('session_ledger.vdb.direct_dsn'), null);
     assert.equal(cfg.get('session_ledger.vdb.allowCanonicalFallback'), false);
+    assert.equal(cfg.get('services.ports.hcp'), 8002);
+    assert.equal(cfg.get('services.hcp.bind_host'), '127.0.0.1');
+    assert.equal(cfg.get('services.hcp.audit_keep_days'), 30);
+    assert.equal(cfg.get('services.hcp.token_expired_keep_days'), 7);
+    assert.equal(cfg.get('services.hcp.token_revoked_keep_days'), 30);
+    assert.equal(cfg.get('services.hcp.idempotency_keep_days'), 30);
+    assert.equal(cfg.get('services.hcp.confirmation_token_keep_minutes'), 60);
+    assert.equal(cfg.get('services.hcp.comms_jobs_keep_days'), 30);
+    assert.equal(cfg.get('services.hcp.rotation_cadence_days'), 90);
+    assert.deepEqual(cfg.get('services.hcp.persistent_agent_principals'), [
+      'clio',
+      'aria',
+      'argus',
+      'sentinel',
+      'claude-responder',
+      'codex-responder',
+      'agent-os-responder',
+    ]);
+    assert.deepEqual(cfg.get('services.hcp.persistent_agent_default_capabilities.argus'), [
+      'dispatch.read',
+      'talk',
+    ]);
+    assert.equal(cfg.get('services.hcp.op_rate_limit_regex'), String.raw`account\s+read_write\s+[0-9]+/[0-9]+`);
     assert.equal(cfg.get('operator.email'), 'virtualpaul@gmail.com');
     assert.equal(cfg.get('operator.full_name'), 'Paul Lacey');
     assert.equal(cfg.get('linear.team_name'), 'Laceyenterprises');
@@ -156,6 +179,57 @@ test('missing file returns defaults', () => {
     ]);
     assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits'), 5);
     assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats'), 3);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('services.hcp loads through strict Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      services:
+        ports:
+          hcp: 9123
+        hcp:
+          bind_host: 127.0.0.2
+          audit_keep_days: 31
+          token_expired_keep_days: 8
+          token_revoked_keep_days: 32
+          idempotency_keep_days: 33
+          confirmation_token_keep_minutes: 61
+          comms_jobs_keep_days: 34
+          rotation_cadence_days: 45
+          persistent_agent_principals:
+            - argus
+            - custom-agent
+          persistent_agent_default_capabilities:
+            argus:
+              - dispatch.read
+              - custom.argus
+            custom-agent:
+              - talk
+          op_rate_limit_regex: custom-rate-limit
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('services.ports.hcp'), 9123);
+    assert.equal(cfg.get('services.hcp.bind_host'), '127.0.0.2');
+    assert.equal(cfg.get('services.hcp.audit_keep_days'), 31);
+    assert.equal(cfg.get('services.hcp.token_expired_keep_days'), 8);
+    assert.equal(cfg.get('services.hcp.token_revoked_keep_days'), 32);
+    assert.equal(cfg.get('services.hcp.idempotency_keep_days'), 33);
+    assert.equal(cfg.get('services.hcp.confirmation_token_keep_minutes'), 61);
+    assert.equal(cfg.get('services.hcp.comms_jobs_keep_days'), 34);
+    assert.equal(cfg.get('services.hcp.rotation_cadence_days'), 45);
+    assert.deepEqual(cfg.get('services.hcp.persistent_agent_principals'), ['argus', 'custom-agent']);
+    assert.deepEqual(cfg.get('services.hcp.persistent_agent_default_capabilities.argus'), [
+      'dispatch.read',
+      'custom.argus',
+    ]);
+    assert.deepEqual(cfg.get('services.hcp.persistent_agent_default_capabilities.custom-agent'), ['talk']);
+    assert.equal(cfg.get('services.hcp.op_rate_limit_regex'), 'custom-rate-limit');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

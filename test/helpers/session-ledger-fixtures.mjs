@@ -37,6 +37,7 @@ const DEFAULT_WORKER_RUNS = [
     status: 'succeeded',
     token_usage_input: 120,
     token_usage_output: 45,
+    token_usage_guardrail: 165,
     token_usage_cost_usd: 0.35,
     token_usage_source: 'session-ledger',
     started_at: '2026-05-18T01:00:00.000Z',
@@ -50,6 +51,7 @@ const DEFAULT_WORKER_RUNS = [
     status: 'failed',
     token_usage_input: 999,
     token_usage_output: 333,
+    token_usage_guardrail: null,
     token_usage_cost_usd: 1.11,
     token_usage_source: 'session-ledger',
     started_at: '2026-05-18T03:00:00.000Z',
@@ -63,6 +65,7 @@ const DEFAULT_WORKER_RUNS = [
     status: 'succeeded',
     token_usage_input: 999,
     token_usage_output: 333,
+    token_usage_guardrail: null,
     token_usage_cost_usd: 1.11,
     token_usage_source: 'session-ledger',
     started_at: '2026-05-18T03:00:00.000Z',
@@ -76,6 +79,7 @@ const DEFAULT_WORKER_RUNS = [
     status: 'succeeded',
     token_usage_input: 120,
     token_usage_output: 45,
+    token_usage_guardrail: 165,
     token_usage_cost_usd: 0.35,
     token_usage_source: 'session-ledger',
     started_at: '2026-05-18T01:00:00.000Z',
@@ -123,6 +127,7 @@ export function createSessionLedgerDb(
       status TEXT,
       token_usage_input INTEGER,
       token_usage_output INTEGER,
+      token_usage_guardrail INTEGER,
       token_usage_cost_usd REAL,
       token_usage_source TEXT,
       started_at TEXT,
@@ -145,17 +150,22 @@ export function createSessionLedgerDb(
   const insertWorkerRun = db.prepare(
     `INSERT INTO worker_runs (
        run_id, launch_request_id, session_id, status, token_usage_input,
-       token_usage_output, token_usage_cost_usd, token_usage_source,
+       token_usage_output, token_usage_guardrail, token_usage_cost_usd, token_usage_source,
        started_at, ended_at, updated_at
      ) VALUES (
        @run_id, @launch_request_id, @session_id, @status, @token_usage_input,
-       @token_usage_output, @token_usage_cost_usd, @token_usage_source,
+       @token_usage_output, @token_usage_guardrail, @token_usage_cost_usd, @token_usage_source,
        @started_at, @ended_at, @updated_at
      )`
   );
 
   for (const row of runtimeSessions) insertRuntimeSession.run(row);
-  for (const row of workerRuns) insertWorkerRun.run(row);
+  for (const row of workerRuns) {
+    insertWorkerRun.run({
+      token_usage_guardrail: null,
+      ...row,
+    });
+  }
   db.close();
 }
 

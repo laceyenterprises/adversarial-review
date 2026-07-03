@@ -592,6 +592,59 @@ test('adapter exposes the same ledger target contract to worker-run and runtime-
 
   assert.equal(workerUsage.ok, true);
   assert.equal(workerUsage.target.path, ledgerDb);
+  assert.equal(workerUsage.row.token_usage_guardrail, null);
   assert.equal(sessionUsage.ok, true);
   assert.equal(sessionUsage.target.path, ledgerDb);
+});
+
+test('readWorkerRunUsageFromLedger treats historical sqlite ledgers without guardrail column as null guardrail usage', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  mkdirSync(path.dirname(ledgerDb), { recursive: true });
+  const db = new Database(ledgerDb);
+  db.exec(`
+    CREATE TABLE runtime_sessions (
+      session_id TEXT PRIMARY KEY,
+      total_cache_read_tokens INTEGER,
+      total_cache_write_tokens INTEGER
+    );
+    CREATE TABLE worker_runs (
+      run_id TEXT PRIMARY KEY,
+      launch_request_id TEXT,
+      session_id TEXT,
+      status TEXT,
+      token_usage_input INTEGER,
+      token_usage_output INTEGER,
+      token_usage_cost_usd REAL,
+      token_usage_source TEXT,
+      started_at TEXT,
+      ended_at TEXT,
+      updated_at TEXT
+    );
+  `);
+  db.prepare(
+    `INSERT INTO runtime_sessions (
+       session_id, total_cache_read_tokens, total_cache_write_tokens
+     ) VALUES (?, ?, ?)`
+  ).run('rs_old', 3, 2);
+  db.prepare(
+    `INSERT INTO worker_runs (
+       run_id, launch_request_id, session_id, status, token_usage_input, token_usage_output,
+       token_usage_cost_usd, token_usage_source, started_at, ended_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run('wr_old', 'lrq_old', 'rs_old', 'succeeded', 10, 4, 0.05, 'session-ledger', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z', '2026-06-04T00:01:00.000Z');
+  db.close();
+
+  const result = readWorkerRunUsageFromLedger({
+    workerRunId: 'wr_old',
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.row.run_id, 'wr_old');
+  assert.equal(result.row.token_usage_input, 10);
+  assert.equal(result.row.token_usage_output, 4);
+  assert.equal(result.row.token_usage_guardrail, null);
+  assert.equal(result.row.total_cache_read_tokens, 3);
+  assert.equal(result.row.total_cache_write_tokens, 2);
 });

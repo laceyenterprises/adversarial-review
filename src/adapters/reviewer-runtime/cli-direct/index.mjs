@@ -158,7 +158,19 @@ function parseCodexJsonTokenUsage(stdout) {
       continue;
     }
     if (item.type === 'reviewer.token_usage' && item.tokenUsage) {
-      tokenUsage = item.tokenUsage;
+      const hasExplicitGuardrail = Object.prototype.hasOwnProperty.call(item.tokenUsage, 'guardrail')
+        && item.tokenUsage.guardrail !== undefined;
+      tokenUsage = {
+        ...item.tokenUsage,
+        usageTag: item.tokenUsage.usageTag || 'guardrail',
+        guardrail: hasExplicitGuardrail
+          ? item.tokenUsage.guardrail
+          : (
+              item.tokenUsage.total ?? (
+                Number(item.tokenUsage.input || 0) + Number(item.tokenUsage.output || 0)
+              )
+            ),
+      };
       continue;
     }
     const total = item.type === 'turn.completed'
@@ -176,7 +188,9 @@ function parseCodexJsonTokenUsage(stdout) {
       cacheWrite: 0,
       total: Number.isFinite(Number(total.total_tokens)) ? Math.trunc(Number(total.total_tokens)) : null,
       source: 'codex-json',
+      usageTag: 'guardrail',
     };
+    tokenUsage.guardrail = tokenUsage.total ?? ((tokenUsage.input || 0) + (tokenUsage.output || 0));
   }
   return tokenUsage;
 }

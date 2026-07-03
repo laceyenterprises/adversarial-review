@@ -112,3 +112,40 @@ test('materializePerWorkerCodexAuth sweeps stale per-worker dirs', () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('materializePerWorkerCodexAuth broker refresh uses neutral runtime/codex sync helper', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pw-auth-'));
+  try {
+    const sharedAuthPath = writeSharedAuth(root);
+    const syncBin = path.join(root, 'bin', 'codex-worker-auth-sync');
+    const marker = path.join(root, 'sync-env.json');
+    mkdirSync(path.dirname(syncBin), { recursive: true });
+    writeFileSync(
+      syncBin,
+      `#!/usr/bin/env node
+const fs = require('node:fs');
+fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({
+  argv: process.argv.slice(2),
+  authPath: process.env.CODEX_WORKER_AUTH_PATH
+}));
+`,
+      { mode: 0o755 },
+    );
+    const result = materializePerWorkerCodexAuth({
+      sharedAuthPath,
+      key: 'refresh-job',
+      env: { AGENT_OS_CODEX_WORKER_AUTH_SYNC_BIN: syncBin },
+      brokerRefresh: true,
+      pythonBin: process.execPath,
+    });
+    assert.ok(result);
+    const called = JSON.parse(readFileSync(marker, 'utf8'));
+    assert.equal(called.authPath, result.authPath);
+    assert.equal(called.authPath.includes(path.join('.codex', '.per-worker', 'refresh-job')), true);
+    const written = JSON.parse(readFileSync(result.authPath, 'utf8'));
+    assert.equal(written.tokens.refresh_token, PER_WORKER_PLACEHOLDER_REFRESH_TOKEN);
+    result.cleanup();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

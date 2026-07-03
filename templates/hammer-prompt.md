@@ -233,13 +233,34 @@ ham_audit_comment_transient() {
   grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
 }
 
+ham_audit_cleanup_tmp_files() {
+  if [ -n "${HAM_AUDIT_PR_VIEW_STDERR:-}" ]; then
+    rm -f "$HAM_AUDIT_PR_VIEW_STDERR"
+  fi
+  if [ -n "${HAM_AUDIT_COMMENT_LOOKUP_STDERR:-}" ]; then
+    rm -f "$HAM_AUDIT_COMMENT_LOOKUP_STDERR"
+  fi
+  if [ -n "${HAM_AUDIT_COMMENT_POST_STDERR:-}" ]; then
+    rm -f "$HAM_AUDIT_COMMENT_POST_STDERR"
+  fi
+}
+HAM_AUDIT_PR_VIEW_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-pr-view.XXXXXX") || exit 1
+HAM_AUDIT_COMMENT_LOOKUP_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-comment-lookup.XXXXXX") || {
+  ham_audit_cleanup_tmp_files
+  exit 1
+}
+HAM_AUDIT_COMMENT_POST_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-comment-post.XXXXXX") || {
+  ham_audit_cleanup_tmp_files
+  exit 1
+}
+
 POST_REMEDIATION_SHA=""
 for HAM_AUDIT_SHA_ATTEMPT in 1 2 3; do
-  if POST_REMEDIATION_SHA=$(gh pr view <<PR_URL>> --json headRefOid --jq '.headRefOid' 2> /tmp/ham-audit-pr-view.stderr) &&
+  if POST_REMEDIATION_SHA=$(gh pr view <<PR_URL>> --json headRefOid --jq '.headRefOid' 2> "$HAM_AUDIT_PR_VIEW_STDERR") &&
     ham_is_full_sha "$POST_REMEDIATION_SHA"; then
     break
   fi
-  if [ "$HAM_AUDIT_SHA_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient /tmp/ham-audit-pr-view.stderr; then
+  if [ "$HAM_AUDIT_SHA_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_PR_VIEW_STDERR"; then
     break
   fi
   echo "hammer audit head lookup failed on attempt $HAM_AUDIT_SHA_ATTEMPT/3; retrying" >&2
@@ -247,6 +268,7 @@ for HAM_AUDIT_SHA_ATTEMPT in 1 2 3; do
 done
 if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
   echo "HAM hard-blocker: unable to resolve post-remediation head before audit comment" >&2
+  ham_audit_cleanup_tmp_files
   exit 1
 fi
 HAM_AUDIT_COMMENT_MARKER='<!-- hq:ham-terminal-remediation:audit -->'
@@ -268,7 +290,7 @@ ham_existing_terminal_audit_comment_id() {
   HAM_AUDIT_COMMENTS_JSON=$(GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh api \
     --paginate \
     "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments" \
-    -q '.[] | {id: .id, body: .body}' 2> /tmp/ham-audit-comment-lookup.stderr) || return 1
+    -q '.[] | {id: .id, body: .body}' 2> "$HAM_AUDIT_COMMENT_LOOKUP_STDERR") || return 1
   printf '%s\n' "$HAM_AUDIT_COMMENTS_JSON" |
     jq -r --arg marker "$HAM_AUDIT_COMMENT_MARKER" --arg head "$HAM_AUDIT_COMMENT_HEAD" \
       'select(((.body // "") | contains($marker)) and ((.body // "") | contains($head))) | .id' |
@@ -276,12 +298,13 @@ ham_existing_terminal_audit_comment_id() {
 }
 if [ -z "${MERGE_AGENT_GH_TOKEN:-}" ]; then
   echo "HAM hard-blocker: MERGE_AGENT_GH_TOKEN is required for hammer audit comment identity" >&2
+  ham_audit_cleanup_tmp_files
   exit 1
 fi
 HAM_AUDIT_COMMENT_POSTED=0
 for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
   if ! HAM_EXISTING_AUDIT_COMMENT_ID=$(ham_existing_terminal_audit_comment_id); then
-    if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient /tmp/ham-audit-comment-lookup.stderr; then
+    if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_LOOKUP_STDERR"; then
       echo "hammer audit comment lookup failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3" >&2
       break
     fi
@@ -294,19 +317,27 @@ for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
     echo "hammer audit comment already exists for $POST_REMEDIATION_SHA: $HAM_EXISTING_AUDIT_COMMENT_ID" >&2
     break
   fi
-  if GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh pr comment <<PR_URL>> --body "$HAM_AUDIT_COMMENT_BODY"; then
+  if GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh pr comment <<PR_URL>> --body "$HAM_AUDIT_COMMENT_BODY" 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
     HAM_AUDIT_COMMENT_POSTED=1
     break
   fi
-  echo "hammer audit comment post failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
-  if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -lt 3 ]; then
-    sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
+  HAM_AUDIT_COMMENT_POST_EXIT=$?
+  if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_POST_STDERR"; then
+    cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
+    echo "hammer audit comment post failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; not retrying" >&2
+    ham_audit_cleanup_tmp_files
+    exit "$HAM_AUDIT_COMMENT_POST_EXIT"
   fi
+  cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
+  echo "hammer audit comment post failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
+  sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
 done
 if [ "$HAM_AUDIT_COMMENT_POSTED" -ne 1 ]; then
   echo "HAM hard-blocker: hammer audit comment post failed after 3 attempts" >&2
+  ham_audit_cleanup_tmp_files
   exit 1
 fi
+ham_audit_cleanup_tmp_files
 ```
 
 Refresh and validate the live head:

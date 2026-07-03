@@ -992,8 +992,10 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /HAM_MERGE_LEASE_ID=""\n\s+trap - EXIT/);
   assert.match(prompt, /HAM_AUDIT_COMMENT_MARKER='<!-- hq:ham-terminal-remediation:audit -->'/);
   assert.match(prompt, /HAM_AUDIT_COMMENT_HEAD="HAM-Terminal-Remediation-Head: \$POST_REMEDIATION_SHA"/);
-  assert.match(prompt, /for HAM_AUDIT_SHA_ATTEMPT in 1 2 3; do[\s\S]*gh pr view https:\/\/github\.com\/acme\/myrepo\/pull\/1234 --json headRefOid --jq '\.headRefOid' 2> \/tmp\/ham-audit-pr-view\.stderr[\s\S]*hammer audit head lookup failed on attempt/);
-  assert.match(prompt, /ham_existing_terminal_audit_comment_id\(\) \{[\s\S]*HAM_AUDIT_COMMENTS_JSON=\$\(GH_TOKEN="\$MERGE_AGENT_GH_TOKEN" gh api[\s\S]*repos\/acme\/myrepo\/issues\/1234\/comments[\s\S]*\/tmp\/ham-audit-comment-lookup\.stderr\) \|\| return 1[\s\S]*contains\(\$marker\)[\s\S]*contains\(\$head\)/);
+  assert.match(prompt, /HAM_AUDIT_PR_VIEW_STDERR=\$\(mktemp "\$\{TMPDIR:-\/tmp\}\/ham-audit-pr-view\.XXXXXX"\) \|\| exit 1/);
+  assert.match(prompt, /HAM_AUDIT_COMMENT_LOOKUP_STDERR=\$\(mktemp "\$\{TMPDIR:-\/tmp\}\/ham-audit-comment-lookup\.XXXXXX"\) \|\| \{/);
+  assert.match(prompt, /for HAM_AUDIT_SHA_ATTEMPT in 1 2 3; do[\s\S]*gh pr view https:\/\/github\.com\/acme\/myrepo\/pull\/1234 --json headRefOid --jq '\.headRefOid' 2> "\$HAM_AUDIT_PR_VIEW_STDERR"[\s\S]*ham_audit_comment_transient "\$HAM_AUDIT_PR_VIEW_STDERR"[\s\S]*hammer audit head lookup failed on attempt/);
+  assert.match(prompt, /ham_existing_terminal_audit_comment_id\(\) \{[\s\S]*HAM_AUDIT_COMMENTS_JSON=\$\(GH_TOKEN="\$MERGE_AGENT_GH_TOKEN" gh api[\s\S]*repos\/acme\/myrepo\/issues\/1234\/comments[\s\S]*"\$HAM_AUDIT_COMMENT_LOOKUP_STDERR"\) \|\| return 1[\s\S]*contains\(\$marker\)[\s\S]*contains\(\$head\)/);
   assert.match(prompt, /if ! HAM_EXISTING_AUDIT_COMMENT_ID=\$\(ham_existing_terminal_audit_comment_id\); then[\s\S]*hammer audit comment lookup failed on attempt[\s\S]*continue/);
   assert.match(prompt, /GH_TOKEN="\$MERGE_AGENT_GH_TOKEN" gh pr comment https:\/\/github\.com\/acme\/myrepo\/pull\/1234 --body "\$HAM_AUDIT_COMMENT_BODY"/);
   assert.match(prompt, /MERGE_AGENT_GH_TOKEN is required for hammer audit comment identity/);
@@ -1005,6 +1007,11 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /AMG-04 hard-blocker: no daemon handoff without holding the merge lease/);
   assert.match(prompt, /No daemon handoff without holding the merge lease/);
   assert.match(prompt, /No merged closeout comment from the hammer worker/);
+  assert.doesNotMatch(prompt, /trap ham_audit_cleanup_tmp_files EXIT/);
+  assert.doesNotMatch(prompt, /ham_audit_cleanup_tmp_files\ntrap - EXIT/);
+  assert.match(prompt, /HAM_AUDIT_COMMENT_POST_STDERR=\$\(mktemp "\$\{TMPDIR:-\/tmp\}\/ham-audit-comment-post\.XXXXXX"\) \|\| \{/);
+  assert.match(prompt, /gh pr comment https:\/\/github\.com\/acme\/myrepo\/pull\/1234 --body "\$HAM_AUDIT_COMMENT_BODY" 2> "\$HAM_AUDIT_COMMENT_POST_STDERR"/);
+  assert.match(prompt, /ham_audit_comment_transient "\$HAM_AUDIT_COMMENT_POST_STDERR"[\s\S]*not retrying/);
 });
 
 test('composed prompt documents that branch_protection.required=false does not require the GitHub-plan sentinel', () => {

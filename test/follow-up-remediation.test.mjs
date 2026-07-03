@@ -68,9 +68,11 @@ import {
 
 test('createQuotaHoldRevalidator caches hq quota status failures for the TTL window', () => {
   let calls = 0;
+  const execOptions = [];
   const revalidator = createQuotaHoldRevalidator({
-    execFileSyncImpl: () => {
+    execFileSyncImpl: (_bin, _args, options) => {
       calls += 1;
+      execOptions.push(options);
       throw new Error('hq quota status unavailable');
     },
     nowMs: () => 1000,
@@ -94,6 +96,7 @@ test('createQuotaHoldRevalidator caches hq quota status failures for the TTL win
   });
 
   assert.equal(calls, 2);
+  assert.deepEqual(execOptions.map((options) => options.timeout), [10_000, 10_000]);
   assert.equal(first.available, false);
   assert.equal(first.state, 'error');
   assert.equal(first.error, 'hq quota status unavailable');

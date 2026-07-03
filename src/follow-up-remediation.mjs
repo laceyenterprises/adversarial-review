@@ -75,6 +75,7 @@ const HQ_SUCCESS_STATUSES = new Set(['succeeded']);
 const HQ_CANCEL_RETRY_DELAYS_MS = [250, 500];
 const WORKSPACE_GIT_RETRY_DELAYS_MS = [250, 750];
 const QUOTA_HOLD_REVALIDATION_TTL_MS = 60 * 1000;
+const QUOTA_HOLD_REVALIDATION_TIMEOUT_MS = 10_000;
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
@@ -796,6 +797,7 @@ function createQuotaHoldRevalidator({
   env = process.env,
   nowMs: defaultNowMs = () => Date.now(),
   ttlMs = QUOTA_HOLD_REVALIDATION_TTL_MS,
+  timeoutMs = QUOTA_HOLD_REVALIDATION_TIMEOUT_MS,
 } = {}) {
   const cache = new Map();
   return ({ harness, now, nowMs } = {}) => {
@@ -813,6 +815,7 @@ function createQuotaHoldRevalidator({
         env,
         encoding: 'utf8',
         maxBuffer: 5 * 1024 * 1024,
+        timeout: timeoutMs,
       });
       decision = quotaAvailableFromFleetStatus(stdout, { harness: normalizedHarness });
     } catch (err) {

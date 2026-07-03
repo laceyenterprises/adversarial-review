@@ -1020,11 +1020,17 @@ upper-bound hint, not an authority to park remediation for days. Before the
 consume gate honors a future `retryAfter` from a quota-exhausted remediation
 retry, it may revalidate the harness provider's live quota state via the cached
 HQ fleet quota status (`hq fleet quota status --json`, provider OAuth state).
-If that live signal reports quota available, the gate clears the per-job hold
-and consumes the job in that tick; if the signal is missing, unknown, exhausted,
-or errors, the gate fails closed and keeps the clamped hold. That hold does not
-request re-review and does not consume the PR's normal remediation round by
-itself; it is a delayed retry of the same worker round.
+The synchronous HQ probe must be bounded (default 10s) and cached briefly per
+harness so a slow or failing local HQ command cannot deadlock the daemon tick or
+spam subprocesses on every poll. If that live signal reports quota available,
+the gate clears the per-job hold and consumes the job in that tick; if the signal
+is missing, unknown, exhausted, or errors, the gate fails closed and keeps the
+clamped hold. Error decisions from the cached probe are persisted back to the
+pending job as `quotaHoldRevalidatedErroredAt` and
+`quotaHoldRevalidationError`, the same as thrown revalidation failures, so
+operators have durable evidence for why the live wakeup did not clear the hold.
+That hold does not request re-review and does not consume the PR's normal
+remediation round by itself; it is a delayed retry of the same worker round.
 If the remediation job exhausts its bounded quota retry budget before the
 provider window clears or the worker can produce a valid remediation reply, it
 must become terminal with `quota-exhausted-budget-exhausted` so operators see a

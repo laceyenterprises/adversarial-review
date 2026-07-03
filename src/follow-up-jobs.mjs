@@ -1792,6 +1792,24 @@ function clampQuotaRetryAfter({ retryAfterMs, requeuedAtMs }) {
   return Math.min(retryAfterMs, ceilingBaseMs + MAX_QUOTA_HOLD_WINDOW_MS);
 }
 
+function recordQuotaHoldRevalidationError({
+  pendingPath,
+  pendingJob,
+  claimedAt,
+  error,
+}) {
+  const updatedJob = {
+    ...pendingJob,
+    remediationPlan: {
+      ...(pendingJob?.remediationPlan || buildRemediationRoundPlan()),
+      quotaHoldRevalidatedErroredAt: claimedAt,
+      quotaHoldRevalidationError: error?.message || String(error),
+    },
+  };
+  writeFollowUpJob(pendingPath, updatedJob);
+  return { cleared: false, job: updatedJob };
+}
+
 function maybeRevalidateQuotaHold({
   pendingPath,
   pendingJob,
@@ -1812,16 +1830,20 @@ function maybeRevalidateQuotaHold({
       nowMs: claimedAtMs,
     });
   } catch (err) {
-    const updatedJob = {
-      ...pendingJob,
-      remediationPlan: {
-        ...(pendingJob?.remediationPlan || buildRemediationRoundPlan()),
-        quotaHoldRevalidatedErroredAt: claimedAt,
-        quotaHoldRevalidationError: err?.message || String(err),
-      },
-    };
-    writeFollowUpJob(pendingPath, updatedJob);
-    return { cleared: false, job: updatedJob };
+    return recordQuotaHoldRevalidationError({
+      pendingPath,
+      pendingJob,
+      claimedAt,
+      error: err,
+    });
+  }
+  if (decision?.state === 'error') {
+    return recordQuotaHoldRevalidationError({
+      pendingPath,
+      pendingJob,
+      claimedAt,
+      error: decision.error || 'quota revalidation failed',
+    });
   }
   if (decision?.available !== true) {
     return { cleared: false, job: pendingJob };

@@ -4353,6 +4353,31 @@ test('claimNextFollowUpJob keeps the clamped quota hold when live revalidation e
   assert.equal(pending.remediationPlan.quotaHoldRevalidationError, 'quota status unavailable');
 });
 
+test('claimNextFollowUpJob records cached quota revalidation error decisions', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const requeued = createQuotaHeldPendingJob(rootDir);
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T10:06:00.000Z',
+    quotaHoldRevalidator: () => ({
+      available: false,
+      source: 'hq-fleet-quota-status',
+      state: 'error',
+      error: 'hq quota status unavailable',
+    }),
+  });
+
+  assert.equal(claimed, null);
+  const pending = readFollowUpJob(requeued.jobPath);
+  assert.equal(
+    pending.remediationPlan.retryAfter,
+    new Date(Date.parse('2026-04-21T10:05:00.000Z') + MAX_QUOTA_HOLD_WINDOW_MS).toISOString()
+  );
+  assert.equal(pending.remediationPlan.quotaHoldRevalidatedErroredAt, '2026-04-21T10:06:00.000Z');
+  assert.equal(pending.remediationPlan.quotaHoldRevalidationError, 'hq quota status unavailable');
+});
+
 test('requeueInProgressFollowUpJobForRetry rejects non-HQ remediation workers', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createFollowUpJob(makeJobInput(rootDir));

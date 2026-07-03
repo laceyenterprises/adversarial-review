@@ -1013,8 +1013,24 @@ quota incident as a fresh bounded recovery window.
 The same hard-cap contract applies to follow-up remediation workers that spawn
 direct harness CLIs outside the dispatch lane. Reconcile may move a
 quota-exhausted in-progress remediation job back to `pending` with
-`retryAfter` pinned to the provider reset or the fixed fallback window. That
-hold does not request re-review and does not consume the PR's normal
+`retryAfter` set to the provider reset or the fixed fallback window, but the
+daemon must cap any single unvalidated quota hold to a bounded max window
+(default one hour). A provider reset further in the future is treated as an
+upper-bound hint, not an authority to park remediation for days. Before the
+consume gate honors a future `retryAfter` from a quota-exhausted remediation
+retry, it may revalidate the harness provider's live quota state via cached HQ
+fleet quota status (`hq fleet quota status --json`, provider OAuth state). The
+probe is asynchronously prefetched at the start of the consume tick, bounded
+(default 10s), and cached briefly per harness so a slow or failing local HQ
+command cannot block the synchronous job-claim loop or spam subprocesses on every
+poll. If that live signal reports quota available, the gate clears the per-job
+hold and consumes the job in that tick; if the signal is missing, unknown,
+exhausted, not yet prefetched, or errors, the gate fails closed and keeps the
+clamped hold. Error decisions from the cached probe are persisted back to the
+pending job as `quotaHoldRevalidatedErroredAt` and
+`quotaHoldRevalidationError`, the same as thrown revalidation failures, so
+operators have durable evidence for why the live wakeup did not clear the hold.
+That hold does not request re-review and does not consume the PR's normal
 remediation round by itself; it is a delayed retry of the same worker round.
 If the remediation job exhausts its bounded quota retry budget before the
 provider window clears or the worker can produce a valid remediation reply, it

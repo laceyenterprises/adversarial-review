@@ -73,6 +73,7 @@ const DEFAULT_MAX_REMEDIATION_ROUNDS = ROUND_BUDGET_BY_RISK_CLASS[DEFAULT_RISK_C
 const DEFAULT_MAX_TRANSIENT_RETRIES = 3;
 const DEFAULT_TRANSIENT_RETRY_BACKOFF_MS = 5 * 60 * 1000;
 const MAX_TRANSIENT_RETRY_BACKOFF_MS = 60 * 60 * 1000;
+const MAX_QUOTA_HOLD_WINDOW_MS = 60 * 60 * 1000;
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
   pending: ['data', 'follow-up-jobs', 'pending'],
   inProgress: ['data', 'follow-up-jobs', 'in-progress'],
@@ -1763,6 +1764,110 @@ function createFollowUpJob({ rootDir, ...jobInput }) {
   throw new Error(`Unable to create unique follow-up job file for ${resolvedJob.jobId} after ${MAX_CREATE_ATTEMPTS} attempts`);
 }
 
+function latestRetryHistoryEntry(job) {
+  const history = Array.isArray(job?.remediationPlan?.retryHistory)
+    ? job.remediationPlan.retryHistory
+    : [];
+  return history.length ? history[history.length - 1] : null;
+}
+
+function isQuotaExhaustedRetryHold(job) {
+  const latestRetry = latestRetryHistoryEntry(job);
+  if (latestRetry) {
+    return latestRetry?.retryMetadata?.code === 'quota-exhausted';
+  }
+  return job?.remediationPlan?.lastRetryMetadata?.code === 'quota-exhausted';
+}
+
+function quotaHoldHarness(job) {
+  const latestRetry = latestRetryHistoryEntry(job);
+  return String(
+    latestRetry?.retryMetadata?.harness
+    || job?.remediationPlan?.lastRetryMetadata?.harness
+    || ''
+  ).trim().toLowerCase() || 'unknown';
+}
+
+function clampQuotaRetryAfter({ retryAfterMs, requeuedAtMs }) {
+  if (!Number.isFinite(retryAfterMs)) return null;
+  const ceilingBaseMs = Number.isFinite(requeuedAtMs) ? requeuedAtMs : Date.now();
+  return Math.min(retryAfterMs, ceilingBaseMs + MAX_QUOTA_HOLD_WINDOW_MS);
+}
+
+function recordQuotaHoldRevalidationError({
+  pendingPath,
+  pendingJob,
+  claimedAt,
+  error,
+}) {
+  const updatedJob = {
+    ...pendingJob,
+    remediationPlan: {
+      ...(pendingJob?.remediationPlan || buildRemediationRoundPlan()),
+      quotaHoldRevalidatedErroredAt: claimedAt,
+      quotaHoldRevalidationError: error?.message || String(error),
+    },
+  };
+  writeFollowUpJob(pendingPath, updatedJob);
+  return { cleared: false, job: updatedJob };
+}
+
+function maybeRevalidateQuotaHold({
+  pendingPath,
+  pendingJob,
+  claimedAt,
+  claimedAtMs,
+  quotaHoldRevalidator,
+} = {}) {
+  if (!isQuotaExhaustedRetryHold(pendingJob) || typeof quotaHoldRevalidator !== 'function') {
+    return { cleared: false, job: pendingJob };
+  }
+  let decision;
+  try {
+    decision = quotaHoldRevalidator({
+      job: pendingJob,
+      jobPath: pendingPath,
+      harness: quotaHoldHarness(pendingJob),
+      now: claimedAt,
+      nowMs: claimedAtMs,
+    });
+  } catch (err) {
+    return recordQuotaHoldRevalidationError({
+      pendingPath,
+      pendingJob,
+      claimedAt,
+      error: err,
+    });
+  }
+  if (decision?.state === 'error') {
+    return recordQuotaHoldRevalidationError({
+      pendingPath,
+      pendingJob,
+      claimedAt,
+      error: decision.error || 'quota revalidation failed',
+    });
+  }
+  if (decision?.available !== true) {
+    return { cleared: false, job: pendingJob };
+  }
+  const updatedJob = {
+    ...pendingJob,
+    remediationPlan: {
+      ...(pendingJob?.remediationPlan || buildRemediationRoundPlan()),
+      retryAfter: new Date(claimedAtMs).toISOString(),
+      quotaHoldRevalidatedClearedAt: claimedAt,
+      quotaHoldRevalidation: {
+        harness: quotaHoldHarness(pendingJob),
+        source: decision.source || 'live-quota',
+        state: decision.state || 'available',
+        checkedAt: decision.checkedAt || claimedAt,
+      },
+    },
+  };
+  writeFollowUpJob(pendingPath, updatedJob);
+  return { cleared: true, job: updatedJob };
+}
+
 function claimNextFollowUpJob({
   rootDir,
   workerType = 'codex-remediation',
@@ -1774,6 +1879,7 @@ function claimNextFollowUpJob({
   onExcludedRepoPrKey = null,
   delayedPendingPaths = null,
   onDelayedPendingJob = null,
+  quotaHoldRevalidator = null,
 } = {}) {
   ensureFollowUpJobDirs(rootDir);
   const normalizedExcludedRepoPrKeys = new Set(
@@ -1794,9 +1900,20 @@ function claimNextFollowUpJob({
     const retryAfterMs = parseIsoTimestamp(pendingJob?.remediationPlan?.retryAfter);
     const claimedAtMs = parseIsoTimestamp(claimedAt);
     if (retryAfterMs !== null && claimedAtMs !== null && retryAfterMs > claimedAtMs) {
-      delayedPendingPaths?.add?.(pendingPath);
-      onDelayedPendingJob?.(pendingPath, pendingJob);
-      continue;
+      const revalidation = maybeRevalidateQuotaHold({
+        pendingPath,
+        pendingJob,
+        claimedAt,
+        claimedAtMs,
+        quotaHoldRevalidator,
+      });
+      if (revalidation.cleared) {
+        pendingJob = revalidation.job;
+      } else {
+        delayedPendingPaths?.add?.(pendingPath);
+        onDelayedPendingJob?.(pendingPath, revalidation.job || pendingJob);
+        continue;
+      }
     }
 
     if (normalizedExcludedRepoPrKeys.size) {
@@ -2023,8 +2140,11 @@ function requeueInProgressFollowUpJobForRetry({
   const nextTransientRetries = priorTransientRetries + 1;
   const requeuedAtMs = parseIsoTimestamp(requeuedAt) ?? Date.now();
   const overrideRetryAfterMs = retryAfterOverride ? parseIsoTimestamp(retryAfterOverride) : null;
-  const retryAfter = overrideRetryAfterMs !== null
-    ? new Date(overrideRetryAfterMs).toISOString()
+  const effectiveOverrideRetryAfterMs = retryMetadata?.code === 'quota-exhausted'
+    ? clampQuotaRetryAfter({ retryAfterMs: overrideRetryAfterMs, requeuedAtMs })
+    : overrideRetryAfterMs;
+  const retryAfter = effectiveOverrideRetryAfterMs !== null
+    ? new Date(effectiveOverrideRetryAfterMs).toISOString()
     : new Date(requeuedAtMs + computeTransientRetryBackoffMs(nextTransientRetries)).toISOString();
   const activeRound = currentRoundNumber > 0 ? getCurrentRound(currentJob) : null;
   const nextCurrentRound = Math.max(0, currentRoundNumber - 1);
@@ -2549,6 +2669,7 @@ function isRetriggerableStoppedFollowUpJob(job) {
 export {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
   DEFAULT_MAX_TRANSIENT_RETRIES,
+  MAX_QUOTA_HOLD_WINDOW_MS,
   FOLLOW_UP_JOB_DIRS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
   LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS,

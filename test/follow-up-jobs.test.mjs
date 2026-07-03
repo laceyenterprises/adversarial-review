@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   DEFAULT_MAX_REMEDIATION_ROUNDS,
   FOLLOW_UP_JOB_SCHEMA_VERSION,
+  MAX_QUOTA_HOLD_WINDOW_MS,
   ROUND_BUDGET_BY_RISK_CLASS,
   REMEDIATION_REPLY_KIND,
   REMEDIATION_REPLY_SCHEMA_VERSION,
@@ -4258,6 +4259,169 @@ test('claimNextFollowUpJob skips transiently requeued jobs until retryAfter elap
   assert.equal(reclaimed?.job?.status, 'in_progress');
   assert.equal(reclaimed?.job?.remediationPlan?.currentRound, 1);
   assert.equal(reclaimed?.job?.remediationPlan?.retryAfter, null);
+});
+
+function createQuotaHeldPendingJob(rootDir, {
+  requeuedAt = '2026-04-21T10:05:00.000Z',
+  retryAfterOverride = '2026-04-25T10:05:00.000Z',
+} = {}) {
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  return requeueInProgressFollowUpJobForRetry({
+    rootDir,
+    jobPath: claimed.jobPath,
+    requeuedAt,
+    retryReason: 'Provider usage cap hit (codex harness); holding remediation.',
+    retryAfterOverride,
+    allowDirectWorkerRetry: true,
+    remediationWorker: { dispatchMode: 'bare', processId: 8123 },
+    retryMetadata: {
+      code: 'quota-exhausted',
+      harness: 'codex',
+      resetAt: retryAfterOverride,
+      source: 'provider-reported',
+    },
+  });
+}
+
+test('quota retry requeue clamps provider resets beyond the max unvalidated hold window', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const requeued = createQuotaHeldPendingJob(rootDir);
+
+  assert.equal(
+    requeued.job.remediationPlan.retryAfter,
+    new Date(Date.parse('2026-04-21T10:05:00.000Z') + MAX_QUOTA_HOLD_WINDOW_MS).toISOString()
+  );
+});
+
+test('claimNextFollowUpJob clears a quota hold when live quota revalidation reports available', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createQuotaHeldPendingJob(rootDir);
+  const calls = [];
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T10:06:00.000Z',
+    quotaHoldRevalidator: (input) => {
+      calls.push(input);
+      return { available: true, source: 'test-live-quota', state: 'ok', checkedAt: '2026-04-21T10:06:00.000Z' };
+    },
+  });
+
+  assert.equal(claimed?.job?.status, 'in_progress');
+  assert.equal(claimed.job.remediationPlan.retryAfter, null);
+  assert.equal(claimed.job.remediationPlan.quotaHoldRevalidatedClearedAt, '2026-04-21T10:06:00.000Z');
+  assert.equal(claimed.job.remediationPlan.quotaHoldRevalidation.source, 'test-live-quota');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].harness, 'codex');
+});
+
+test('claimNextFollowUpJob ignores stale quota metadata when latest retry is transient', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const requeued = createQuotaHeldPendingJob(rootDir);
+  const pending = readFollowUpJob(requeued.jobPath);
+  writeFollowUpJob(requeued.jobPath, {
+    ...pending,
+    remediationPlan: {
+      ...pending.remediationPlan,
+      retryAfter: '2026-04-25T10:05:00.000Z',
+      lastRetryMetadata: {
+        code: 'quota-exhausted',
+        harness: 'codex',
+      },
+      retryHistory: [
+        ...(pending.remediationPlan.retryHistory || []),
+        {
+          round: 1,
+          transientRetry: 2,
+          requeuedAt: '2026-04-21T10:06:00.000Z',
+          retryAfter: '2026-04-21T10:16:00.000Z',
+          retryReason: 'Transient HQ remediation dispatch failure: network timeout',
+          retryMetadata: {
+            code: 'transient-dispatch-error',
+          },
+          worker: { dispatchMode: 'hq', launchRequestId: 'lrq_transient' },
+        },
+      ],
+    },
+  });
+  let calls = 0;
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T10:07:00.000Z',
+    quotaHoldRevalidator: () => {
+      calls += 1;
+      return { available: true, source: 'test-live-quota', state: 'ok' };
+    },
+  });
+
+  assert.equal(claimed, null);
+  assert.equal(calls, 0);
+  const stillPending = readFollowUpJob(requeued.jobPath);
+  assert.equal(stillPending.remediationPlan.quotaHoldRevalidatedClearedAt, undefined);
+});
+
+test('claimNextFollowUpJob keeps a quota hold when live quota revalidation reports exhausted', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  createQuotaHeldPendingJob(rootDir);
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T10:06:00.000Z',
+    quotaHoldRevalidator: () => ({ available: false, source: 'test-live-quota', state: 'exhausted' }),
+  });
+
+  assert.equal(claimed, null);
+  assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'inProgress')).filter((name) => name.endsWith('.json')).length, 0);
+  assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter((name) => name.endsWith('.json')).length, 1);
+});
+
+test('claimNextFollowUpJob keeps the clamped quota hold when live revalidation errors', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const requeued = createQuotaHeldPendingJob(rootDir);
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T10:06:00.000Z',
+    quotaHoldRevalidator: () => {
+      throw new Error('quota status unavailable');
+    },
+  });
+
+  assert.equal(claimed, null);
+  const pending = readFollowUpJob(requeued.jobPath);
+  assert.equal(
+    pending.remediationPlan.retryAfter,
+    new Date(Date.parse('2026-04-21T10:05:00.000Z') + MAX_QUOTA_HOLD_WINDOW_MS).toISOString()
+  );
+  assert.equal(pending.remediationPlan.quotaHoldRevalidatedErroredAt, '2026-04-21T10:06:00.000Z');
+  assert.equal(pending.remediationPlan.quotaHoldRevalidationError, 'quota status unavailable');
+});
+
+test('claimNextFollowUpJob records cached quota revalidation error decisions', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const requeued = createQuotaHeldPendingJob(rootDir);
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T10:06:00.000Z',
+    quotaHoldRevalidator: () => ({
+      available: false,
+      source: 'hq-fleet-quota-status',
+      state: 'error',
+      error: 'hq quota status unavailable',
+    }),
+  });
+
+  assert.equal(claimed, null);
+  const pending = readFollowUpJob(requeued.jobPath);
+  assert.equal(
+    pending.remediationPlan.retryAfter,
+    new Date(Date.parse('2026-04-21T10:05:00.000Z') + MAX_QUOTA_HOLD_WINDOW_MS).toISOString()
+  );
+  assert.equal(pending.remediationPlan.quotaHoldRevalidatedErroredAt, '2026-04-21T10:06:00.000Z');
+  assert.equal(pending.remediationPlan.quotaHoldRevalidationError, 'hq quota status unavailable');
 });
 
 test('requeueInProgressFollowUpJobForRetry rejects non-HQ remediation workers', () => {

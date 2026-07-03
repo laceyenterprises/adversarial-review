@@ -342,6 +342,22 @@ function querySqliteRows(target, sql, params) {
   }
 }
 
+function sqliteTableHasColumn(target, tableName, columnName) {
+  if (!existsSync(target.path)) return false;
+  const loaded = loadBetterSqlite3();
+  if (!loaded.ok) return false;
+  let db = null;
+  try {
+    db = new loaded.Database(target.path, { readonly: true, fileMustExist: true });
+    return db.prepare(`PRAGMA table_info(${tableName})`).all()
+      .some((column) => column.name === columnName);
+  } catch {
+    return false;
+  } finally {
+    if (db) db.close();
+  }
+}
+
 function truncateForDetail(value, limit = 200) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
   if (text.length <= limit) return text;
@@ -927,12 +943,15 @@ export function readWorkerRunUsageFromLedger({
   });
   if (!resolution.ok) return resolution;
   if (resolution.target.backend !== 'sqlite') return unsupportedBackend(resolution.target);
+  const guardrailColumn = sqliteTableHasColumn(resolution.target, 'worker_runs', 'token_usage_guardrail')
+    ? 'wr.token_usage_guardrail'
+    : 'NULL AS token_usage_guardrail';
   if (workerRunId) {
     const queried = querySqliteRows(
       resolution.target,
       `SELECT wr.run_id, wr.launch_request_id, wr.session_id,
               wr.token_usage_input, wr.token_usage_output,
-              wr.token_usage_guardrail,
+              ${guardrailColumn},
               wr.token_usage_cost_usd, wr.token_usage_source,
               wr.started_at, wr.ended_at, wr.updated_at,
               rs.total_cache_read_tokens, rs.total_cache_write_tokens
@@ -953,7 +972,7 @@ export function readWorkerRunUsageFromLedger({
     resolution.target,
     `SELECT wr.run_id, wr.launch_request_id, wr.session_id,
             wr.token_usage_input, wr.token_usage_output,
-            wr.token_usage_guardrail,
+            ${guardrailColumn},
             wr.token_usage_cost_usd, wr.token_usage_source,
             wr.started_at, wr.ended_at, wr.updated_at,
             rs.total_cache_read_tokens, rs.total_cache_write_tokens

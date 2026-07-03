@@ -592,6 +592,7 @@ test('adapter exposes the same ledger target contract to worker-run and runtime-
 
   assert.equal(workerUsage.ok, true);
   assert.equal(workerUsage.target.path, ledgerDb);
+  assert.equal(workerUsage.row.token_usage_guardrail, null);
   assert.equal(sessionUsage.ok, true);
   assert.equal(sessionUsage.target.path, ledgerDb);
 });

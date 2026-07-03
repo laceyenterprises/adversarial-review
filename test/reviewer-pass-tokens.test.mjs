@@ -264,6 +264,18 @@ test('reviewer pass usage tag records guardrail attribution metadata', () => {
   assert.equal(metadata.tokenUsageGuardrail, 28);
 });
 
+test('reviewer pass usage tag preserves explicit null guardrail attribution', () => {
+  const tagged = tagTokenUsage(
+    { input: 999, output: 333, guardrail: null, source: 'session-ledger' },
+    'guardrail',
+  );
+
+  assert.equal(tagged.input, 999);
+  assert.equal(tagged.output, 333);
+  assert.equal(tagged.guardrail, null);
+  assert.equal(tagged.usageTag, 'guardrail');
+});
+
 test('reviewer session lookup prefers adapter session keys over newer workspace siblings', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');

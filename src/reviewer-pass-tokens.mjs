@@ -230,12 +230,13 @@ function normalizeTokenUsage(tokenUsage) {
   const cacheRead = coerceNonNegativeInt(tokenUsage.cacheRead ?? tokenUsage.cache_read ?? tokenUsage.token_cache_read);
   const cacheWrite = coerceNonNegativeInt(tokenUsage.cacheWrite ?? tokenUsage.cache_write ?? tokenUsage.token_cache_write);
   const total = coerceNonNegativeInt(tokenUsage.total ?? tokenUsage.totalTokens ?? tokenUsage.token_total);
-  const guardrail = coerceNonNegativeInt(tokenUsage.guardrail ?? tokenUsage.guardrailTokens ?? tokenUsage.token_usage_guardrail);
+  const guardrailRaw = firstPresentValue(tokenUsage, ['guardrail', 'guardrailTokens', 'token_usage_guardrail']);
+  const guardrail = guardrailRaw === undefined ? undefined : coerceNonNegativeInt(guardrailRaw);
   const costUSD = coerceNonNegativeFloat(tokenUsage.costUSD ?? tokenUsage.cost_usd ?? tokenUsage.token_cost_usd);
   const usageTag = normalizeUsageTag(
     tokenUsage.usageTag ?? tokenUsage.usage_tag ?? tokenUsage.usageCategory ?? tokenUsage.usage_category ?? tokenUsage.category ?? tokenUsage.tag
   );
-  if (input === null && output === null && cacheRead === null && cacheWrite === null && total === null && guardrail === null && costUSD === null) {
+  if (input === null && output === null && cacheRead === null && cacheWrite === null && total === null && guardrail == null && costUSD === null) {
     return null;
   }
   return {
@@ -256,12 +257,19 @@ function normalizeUsageTag(value) {
   return text || null;
 }
 
+function firstPresentValue(source, keys) {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) return source[key];
+  }
+  return undefined;
+}
+
 function tagTokenUsage(tokenUsage, usageTag) {
   const normalized = normalizeTokenUsage(tokenUsage);
   if (!normalized) return null;
   const tag = normalizeUsageTag(usageTag) || normalized.usageTag;
   if (!tag) return normalized;
-  const guardrail = normalized.guardrail ?? (
+  const guardrail = normalized.guardrail !== undefined ? normalized.guardrail : (
     tag === 'guardrail'
       ? (normalized.total ?? ((normalized.input || 0) + (normalized.output || 0)))
       : null

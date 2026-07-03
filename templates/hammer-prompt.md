@@ -229,7 +229,22 @@ hammer GitHub token from `MERGE_AGENT_GH_TOKEN`, not an ambient `GH_TOKEN` or
 `GITHUB_TOKEN`.
 
 ```bash
-POST_REMEDIATION_SHA=$(gh pr view <<PR_URL>> --json headRefOid --jq '.headRefOid')
+ham_audit_comment_transient() {
+  grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
+}
+
+POST_REMEDIATION_SHA=""
+for HAM_AUDIT_SHA_ATTEMPT in 1 2 3; do
+  if POST_REMEDIATION_SHA=$(gh pr view <<PR_URL>> --json headRefOid --jq '.headRefOid' 2> /tmp/ham-audit-pr-view.stderr) &&
+    ham_is_full_sha "$POST_REMEDIATION_SHA"; then
+    break
+  fi
+  if [ "$HAM_AUDIT_SHA_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient /tmp/ham-audit-pr-view.stderr; then
+    break
+  fi
+  echo "hammer audit head lookup failed on attempt $HAM_AUDIT_SHA_ATTEMPT/3; retrying" >&2
+  sleep $((HAM_AUDIT_SHA_ATTEMPT * 2))
+done
 if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
   echo "HAM hard-blocker: unable to resolve post-remediation head before audit comment" >&2
   exit 1
@@ -250,10 +265,11 @@ Findings:
 EOF
 )"
 ham_existing_terminal_audit_comment_id() {
-  GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh api \
+  HAM_AUDIT_COMMENTS_JSON=$(GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh api \
     --paginate \
     "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments" \
-    -q '.[] | {id: .id, body: .body}' |
+    -q '.[] | {id: .id, body: .body}' 2> /tmp/ham-audit-comment-lookup.stderr) || return 1
+  printf '%s\n' "$HAM_AUDIT_COMMENTS_JSON" |
     jq -r --arg marker "$HAM_AUDIT_COMMENT_MARKER" --arg head "$HAM_AUDIT_COMMENT_HEAD" \
       'select(((.body // "") | contains($marker)) and ((.body // "") | contains($head))) | .id' |
     head -n 1
@@ -264,7 +280,15 @@ if [ -z "${MERGE_AGENT_GH_TOKEN:-}" ]; then
 fi
 HAM_AUDIT_COMMENT_POSTED=0
 for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
-  HAM_EXISTING_AUDIT_COMMENT_ID=$(ham_existing_terminal_audit_comment_id)
+  if ! HAM_EXISTING_AUDIT_COMMENT_ID=$(ham_existing_terminal_audit_comment_id); then
+    if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient /tmp/ham-audit-comment-lookup.stderr; then
+      echo "hammer audit comment lookup failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3" >&2
+      break
+    fi
+    echo "hammer audit comment lookup failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
+    sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
+    continue
+  fi
   if [ -n "$HAM_EXISTING_AUDIT_COMMENT_ID" ]; then
     HAM_AUDIT_COMMENT_POSTED=1
     echo "hammer audit comment already exists for $POST_REMEDIATION_SHA: $HAM_EXISTING_AUDIT_COMMENT_ID" >&2

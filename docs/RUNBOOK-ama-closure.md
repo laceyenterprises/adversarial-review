@@ -396,7 +396,11 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
 4. **Post a closing comment.** On a confirmed merge the hammer posts a
    `✅ Closed by Hammer` comment with the merged SHA, merge method, remediated
    finding counts, the failing tests it fixed, doc-currency work or skipped
-   superproject-doc obligations, and the rebase-attempt count.
+   superproject-doc obligations, and the rebase-attempt count. The terminal
+   remediation audit-comment path resolves the post-remediation PR head and
+   checks for an existing same-head audit comment with bounded transient retries;
+   unresolved lookup failures fail closed instead of posting duplicate audit
+   evidence.
 5. **Merge-agent identity.** The hammer commits/comments/merges under the
    merge-agent app identity (see the worker-pool hammer identity + token wiring),
    so the close is attributable to the merge-agent bot, not a generic worker.

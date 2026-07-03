@@ -617,7 +617,6 @@ node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
   --pr <<PR_NUMBER>> \
   --head "$POST_REMEDIATION_SHA" \
   --attempt-json "$HAM_DAEMON_HANDOFF_ATTEMPT" || exit 1
-ham_release_merge_lease
 ```
 
 After the audit append succeeds, stop. The AMA daemon validates the HAM evidence

@@ -5502,7 +5502,7 @@ async function processFastMergePR({
         prNumber,
         authorizedHeadSha: exactHeadSha,
         currentHeadSha: preMergeView.headRefOid,
-        failureReason: refusalReason,
+        failureReason: 'github_refused_merge',
         refusalReason,
         checkConclusions: checkSummary.checkConclusions,
         mergeStderr: err?.stderr || null,

@@ -1108,6 +1108,12 @@ test('fast-merge merge refusal that already landed records merged instead of blo
 test('fast-merge merge refusal records refusalReason loudly and remains retryable', async () => {
   const db = makeDb();
   seedFastMerge(db, 8271);
+  db.prepare(
+    `UPDATE reviewed_prs
+        SET pr_state = 'open'
+      WHERE repo = ?
+        AND pr_number = ?`
+  ).run(REPO, 8271);
   const audits = [];
   const errors = [];
   const gh = makeGhStub({

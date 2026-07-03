@@ -5062,11 +5062,11 @@ function updateFastMergeRetryableRefusalState(db, {
   db.prepare(
     `UPDATE reviewed_prs
         SET failed_at = ?,
-            failure_message = ?
+            failure_message = ?,
+            pr_state = ?
       WHERE repo = ?
-        AND pr_number = ?
-        AND pr_state = ?`
-  ).run(at, refusalReason || 'GitHub refused fast-merge', repo, prNumber, FAST_MERGE_SKIPPED_STATE);
+        AND pr_number = ?`
+  ).run(at, refusalReason || 'GitHub refused fast-merge', FAST_MERGE_SKIPPED_STATE, repo, prNumber);
 }
 
 function requeueFastMergeForNormalReview(db, {

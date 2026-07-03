@@ -990,6 +990,12 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /do not continue while the lease is unconfirmed/);
   assert.match(prompt, /trap ham_release_merge_lease EXIT/);
   assert.match(prompt, /HAM_MERGE_LEASE_ID=""\n\s+trap - EXIT/);
+  assert.match(prompt, /HAM_AUDIT_COMMENT_MARKER='<!-- hq:ham-terminal-remediation:audit -->'/);
+  assert.match(prompt, /HAM_AUDIT_COMMENT_HEAD="HAM-Terminal-Remediation-Head: \$POST_REMEDIATION_SHA"/);
+  assert.match(prompt, /ham_existing_terminal_audit_comment_id\(\) \{[\s\S]*GH_TOKEN="\$MERGE_AGENT_GH_TOKEN" gh api[\s\S]*repos\/acme\/myrepo\/issues\/1234\/comments[\s\S]*contains\(\$marker\)[\s\S]*contains\(\$head\)/);
+  assert.match(prompt, /GH_TOKEN="\$MERGE_AGENT_GH_TOKEN" gh pr comment https:\/\/github\.com\/acme\/myrepo\/pull\/1234 --body "\$HAM_AUDIT_COMMENT_BODY"/);
+  assert.match(prompt, /MERGE_AGENT_GH_TOKEN is required for hammer audit comment identity/);
+  assert.doesNotMatch(prompt, /fallbackTokenEnvNames/);
   assert.match(prompt, /HAM-03 conflict: releasing merge lease before local conflict resolution/);
   assert.match(prompt, /re-acquire before the next rebase\/merge attempt/);
   assert.match(prompt, /HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 70/);

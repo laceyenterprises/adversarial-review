@@ -223,7 +223,67 @@ git commit -m "HAM remediate final adversarial findings" \
 ```
 
 Post the PR audit comment. It must list every final finding, whether it was
-blocking or non-blocking, and the file paths changed for that finding.
+blocking or non-blocking, and the file paths changed for that finding. The
+comment is HAM-authored terminal-remediation output: post it with the entitled
+hammer GitHub token from `MERGE_AGENT_GH_TOKEN`, not an ambient `GH_TOKEN` or
+`GITHUB_TOKEN`.
+
+```bash
+POST_REMEDIATION_SHA=$(gh pr view <<PR_URL>> --json headRefOid --jq '.headRefOid')
+if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
+  echo "HAM hard-blocker: unable to resolve post-remediation head before audit comment" >&2
+  exit 1
+fi
+HAM_AUDIT_COMMENT_MARKER='<!-- hq:ham-terminal-remediation:audit -->'
+HAM_AUDIT_COMMENT_HEAD="HAM-Terminal-Remediation-Head: $POST_REMEDIATION_SHA"
+HAM_AUDIT_COMMENT_BODY="$(cat <<EOF
+$HAM_AUDIT_COMMENT_MARKER
+HAM-Terminal-Remediation-Head: $POST_REMEDIATION_SHA
+
+HAM remediation audit
+
+Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)
+Closed-By: hammer (adversarial-pipe-mode)
+
+Findings:
+- <finding title> [blocking|non-blocking] -> <files changed and fix summary>
+EOF
+)"
+ham_existing_terminal_audit_comment_id() {
+  GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh api \
+    --paginate \
+    "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments" \
+    -q '.[] | {id: .id, body: .body}' |
+    jq -r --arg marker "$HAM_AUDIT_COMMENT_MARKER" --arg head "$HAM_AUDIT_COMMENT_HEAD" \
+      'select(((.body // "") | contains($marker)) and ((.body // "") | contains($head))) | .id' |
+    head -n 1
+}
+if [ -z "${MERGE_AGENT_GH_TOKEN:-}" ]; then
+  echo "HAM hard-blocker: MERGE_AGENT_GH_TOKEN is required for hammer audit comment identity" >&2
+  exit 1
+fi
+HAM_AUDIT_COMMENT_POSTED=0
+for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
+  HAM_EXISTING_AUDIT_COMMENT_ID=$(ham_existing_terminal_audit_comment_id)
+  if [ -n "$HAM_EXISTING_AUDIT_COMMENT_ID" ]; then
+    HAM_AUDIT_COMMENT_POSTED=1
+    echo "hammer audit comment already exists for $POST_REMEDIATION_SHA: $HAM_EXISTING_AUDIT_COMMENT_ID" >&2
+    break
+  fi
+  if GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh pr comment <<PR_URL>> --body "$HAM_AUDIT_COMMENT_BODY"; then
+    HAM_AUDIT_COMMENT_POSTED=1
+    break
+  fi
+  echo "hammer audit comment post failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
+  if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -lt 3 ]; then
+    sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
+  fi
+done
+if [ "$HAM_AUDIT_COMMENT_POSTED" -ne 1 ]; then
+  echo "HAM hard-blocker: hammer audit comment post failed after 3 attempts" >&2
+  exit 1
+fi
+```
 
 Refresh and validate the live head:
 

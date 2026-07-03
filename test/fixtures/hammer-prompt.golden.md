@@ -616,7 +616,7 @@ node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
   --repo acme/myrepo \
   --pr 1234 \
   --head "$POST_REMEDIATION_SHA" \
-  --attempt-json "$HAM_DAEMON_HANDOFF_ATTEMPT"
+  --attempt-json "$HAM_DAEMON_HANDOFF_ATTEMPT" || exit 1
 ham_release_merge_lease
 ```
 

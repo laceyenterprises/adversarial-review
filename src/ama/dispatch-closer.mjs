@@ -1680,6 +1680,7 @@ export async function maybeDispatchAmaCloser({
       const parsedFailure = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(err?.stdout || ''));
       const ambiguousLaunch = Boolean(parsedFailure.launchRequestId || parsedFailure.dispatchId);
       const branchHolderBlocked = !ambiguousLaunch && isProvisionBranchHolderBlocked(err);
+      const dispatchError = String(err?.stderr || err?.message || err);
       // A throttle / OAuth-broker outage / host-offline window is TRANSIENT: the
       // dispatch did not fail on its merits, GitHub or the broker was merely
       // unavailable. Treat it like a branch-holder block for budget purposes —
@@ -1723,7 +1724,7 @@ export async function maybeDispatchAmaCloser({
           lastObservedStatus: ambiguousLaunch ? 'unknown' : (branchHolderBlocked ? 'blocked' : null),
           lastObservedAt: ambiguousLaunch || branchHolderBlocked ? dispatchContext.dispatchedAt : null,
           lastFailureTransient: transientFailure,
-          lastError: String(err?.stderr || err?.message || err),
+          lastError: dispatchError,
         };
       });
       const branchHolderBlockExhausted = branchHolderBlocked
@@ -1742,7 +1743,7 @@ export async function maybeDispatchAmaCloser({
             reason: transientFailure ? 'dispatch-deferred-transient' : (
               branchHolderBlocked ? 'dispatch-branch-holder-blocked' : 'dispatch-failed'
             ),
-            error: String(err?.stderr || err?.message || err),
+            error: dispatchError,
           }));
         } catch (releaseErr) {
           releasePendingLeaseError = String(releaseErr?.message || releaseErr);

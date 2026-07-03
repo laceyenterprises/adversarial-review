@@ -247,6 +247,8 @@ function schemaV1() {
     __strict: true,
     __keys: {
       version: { __type: TYPE_INT, __required: true, __enum: [1] },
+      // alert_delivery is owned by the alert-delivery reader; tolerate its subtree.
+      alert_delivery: { __type: TYPE_DICT, __strict: false },
       review_cycle_cap: { __type: TYPE_INT, __default: 5, __min: 1 },
       review_cycle_window_hours: { __type: TYPE_INT, __default: 24, __min: 1 },
       update: {
@@ -709,6 +711,11 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
+              capability_vocabulary: {
+                __type: TYPE_LIST,
+                __item: { __type: TYPE_STRING },
+                __default: [],
+              },
               bind_host: { __type: TYPE_STRING, __default: '127.0.0.1' },
               audit_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },
               token_expired_keep_days: { __type: TYPE_INT, __default: 7, __min: 0 },

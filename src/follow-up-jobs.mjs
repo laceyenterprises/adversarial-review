@@ -1773,8 +1773,10 @@ function latestRetryHistoryEntry(job) {
 
 function isQuotaExhaustedRetryHold(job) {
   const latestRetry = latestRetryHistoryEntry(job);
-  return latestRetry?.retryMetadata?.code === 'quota-exhausted'
-    || job?.remediationPlan?.lastRetryMetadata?.code === 'quota-exhausted';
+  if (latestRetry) {
+    return latestRetry?.retryMetadata?.code === 'quota-exhausted';
+  }
+  return job?.remediationPlan?.lastRetryMetadata?.code === 'quota-exhausted';
 }
 
 function quotaHoldHarness(job) {

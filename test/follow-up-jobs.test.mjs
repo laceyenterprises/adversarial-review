@@ -4316,6 +4316,52 @@ test('claimNextFollowUpJob clears a quota hold when live quota revalidation repo
   assert.equal(calls[0].harness, 'codex');
 });
 
+test('claimNextFollowUpJob ignores stale quota metadata when latest retry is transient', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const requeued = createQuotaHeldPendingJob(rootDir);
+  const pending = readFollowUpJob(requeued.jobPath);
+  writeFollowUpJob(requeued.jobPath, {
+    ...pending,
+    remediationPlan: {
+      ...pending.remediationPlan,
+      retryAfter: '2026-04-25T10:05:00.000Z',
+      lastRetryMetadata: {
+        code: 'quota-exhausted',
+        harness: 'codex',
+      },
+      retryHistory: [
+        ...(pending.remediationPlan.retryHistory || []),
+        {
+          round: 1,
+          transientRetry: 2,
+          requeuedAt: '2026-04-21T10:06:00.000Z',
+          retryAfter: '2026-04-21T10:16:00.000Z',
+          retryReason: 'Transient HQ remediation dispatch failure: network timeout',
+          retryMetadata: {
+            code: 'transient-dispatch-error',
+          },
+          worker: { dispatchMode: 'hq', launchRequestId: 'lrq_transient' },
+        },
+      ],
+    },
+  });
+  let calls = 0;
+
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-04-21T10:07:00.000Z',
+    quotaHoldRevalidator: () => {
+      calls += 1;
+      return { available: true, source: 'test-live-quota', state: 'ok' };
+    },
+  });
+
+  assert.equal(claimed, null);
+  assert.equal(calls, 0);
+  const stillPending = readFollowUpJob(requeued.jobPath);
+  assert.equal(stillPending.remediationPlan.quotaHoldRevalidatedClearedAt, undefined);
+});
+
 test('claimNextFollowUpJob keeps a quota hold when live quota revalidation reports exhausted', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   createQuotaHeldPendingJob(rootDir);

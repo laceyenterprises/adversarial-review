@@ -66,11 +66,11 @@ import {
   validateStartupRemediationConfig,
 } from '../src/follow-up-remediation.mjs';
 
-test('createQuotaHoldRevalidator caches hq quota status failures for the TTL window', () => {
+test('createQuotaHoldRevalidator caches hq quota status failures for the TTL window', async () => {
   let calls = 0;
   const execOptions = [];
   const revalidator = createQuotaHoldRevalidator({
-    execFileSyncImpl: (_bin, _args, options) => {
+    execFileImpl: async (_bin, _args, options) => {
       calls += 1;
       execOptions.push(options);
       throw new Error('hq quota status unavailable');
@@ -79,6 +79,12 @@ test('createQuotaHoldRevalidator caches hq quota status failures for the TTL win
     ttlMs: 60_000,
   });
 
+  await revalidator.prefetch({
+    harnesses: ['codex'],
+    harness: 'codex',
+    now: '2026-04-21T10:06:00.000Z',
+    nowMs: 1000,
+  });
   const first = revalidator({
     harness: 'codex',
     now: '2026-04-21T10:06:00.000Z',
@@ -88,6 +94,11 @@ test('createQuotaHoldRevalidator caches hq quota status failures for the TTL win
     harness: 'codex',
     now: '2026-04-21T10:06:01.000Z',
     nowMs: 2000,
+  });
+  await revalidator.prefetch({
+    harnesses: ['codex'],
+    now: '2026-04-21T10:07:01.000Z',
+    nowMs: 61_001,
   });
   const afterTtl = revalidator({
     harness: 'codex',
@@ -105,29 +116,99 @@ test('createQuotaHoldRevalidator caches hq quota status failures for the TTL win
   assert.equal(afterTtl.state, 'error');
 });
 
-test('createQuotaHoldRevalidator uses invocation nowMs for cache expiry', () => {
+test('createQuotaHoldRevalidator uses invocation nowMs for cache expiry', async () => {
   let calls = 0;
   const revalidator = createQuotaHoldRevalidator({
-    execFileSyncImpl: () => {
+    execFileImpl: async () => {
       calls += 1;
-      return JSON.stringify({
+      return {
+        stdout: JSON.stringify({
         providerStatuses: [
           { provider: 'openai', authPath: 'oauth', state: 'ok', lastProbeAt: '2026-04-21T10:06:00.000Z' },
         ],
-      });
+        }),
+      };
     },
     nowMs: () => 999_999,
     ttlMs: 60_000,
   });
 
+  await revalidator.prefetch({ harnesses: ['codex'], nowMs: 1000 });
   const first = revalidator({ harness: 'codex', nowMs: 1000 });
   const second = revalidator({ harness: 'codex', nowMs: 2000 });
+  await revalidator.prefetch({ harnesses: ['codex'], nowMs: 61_001 });
   const afterTtl = revalidator({ harness: 'codex', nowMs: 61_001 });
 
   assert.equal(calls, 2);
   assert.equal(first.available, true);
   assert.equal(second, first);
   assert.equal(afterTtl.available, true);
+});
+
+test('createQuotaHoldRevalidator does not run hq synchronously on cache miss', () => {
+  let calls = 0;
+  const revalidator = createQuotaHoldRevalidator({
+    execFileImpl: async () => {
+      calls += 1;
+      return { stdout: '{"providerStatuses":[]}' };
+    },
+    nowMs: () => 1000,
+  });
+
+  const decision = revalidator({ harness: 'codex', nowMs: 1000 });
+
+  assert.equal(calls, 0);
+  assert.equal(decision.available, false);
+  assert.equal(decision.state, 'not-prefetched');
+});
+
+test('consumeFollowUpJobsUntilCapacity prefetches quota holds before synchronous claiming', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const created = createFollowUpJob({ rootDir, ...makeJob({ repo: 'laceyenterprises/clio', prNumber: 107 }) });
+  writeFollowUpJob(created.jobPath, {
+    ...created.job,
+    pendingAt: '2026-04-21T10:05:00.000Z',
+    claimedAt: null,
+    claimedBy: null,
+    remediationPlan: {
+      ...created.job.remediationPlan,
+      currentRound: 1,
+      retryAfter: '2026-04-25T10:05:00.000Z',
+      retryHistory: [
+        {
+          round: 1,
+          transientRetry: 1,
+          requeuedAt: '2026-04-21T10:05:00.000Z',
+          retryAfter: '2026-04-25T10:05:00.000Z',
+          retryReason: 'Provider usage cap hit (codex harness); holding remediation.',
+          retryMetadata: {
+            code: 'quota-exhausted',
+            harness: 'codex',
+          },
+        },
+      ],
+    },
+  });
+  const prefetchCalls = [];
+  const revalidator = ({ harness }) => {
+    assert.equal(prefetchCalls.length, 1);
+    assert.equal(prefetchCalls[0].rootDir, rootDir);
+    return { available: true, source: 'test-live-quota', state: 'ok', checkedAt: '2026-04-21T10:06:00.000Z' };
+  };
+  revalidator.prefetch = async (input) => {
+    prefetchCalls.push(input);
+  };
+
+  await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
+    rootDir,
+    maxConcurrent: 1,
+    promptTemplate: 'Remediate PR {{prNumber}}.',
+    spawnImpl: () => ({ pid: 8123, unref() {} }),
+    quotaHoldRevalidator: revalidator,
+    now: () => '2026-04-21T10:06:00.000Z',
+  }));
+
+  assert.equal(prefetchCalls.length, 1);
 });
 
 // The OAuth pre-flight caches its result at module scope so per-tick

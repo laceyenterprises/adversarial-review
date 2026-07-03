@@ -792,32 +792,82 @@ function quotaAvailableFromFleetStatus(stdout, { harness } = {}) {
   };
 }
 
+function latestRetryHistoryEntry(job) {
+  const history = Array.isArray(job?.remediationPlan?.retryHistory)
+    ? job.remediationPlan.retryHistory
+    : [];
+  return history.length ? history[history.length - 1] : null;
+}
+
+function isQuotaExhaustedRetryHold(job) {
+  const latestRetry = latestRetryHistoryEntry(job);
+  if (latestRetry) {
+    return latestRetry?.retryMetadata?.code === 'quota-exhausted';
+  }
+  return job?.remediationPlan?.lastRetryMetadata?.code === 'quota-exhausted';
+}
+
+function quotaHoldHarness(job) {
+  const latestRetry = latestRetryHistoryEntry(job);
+  return String(
+    latestRetry?.retryMetadata?.harness
+    || job?.remediationPlan?.lastRetryMetadata?.harness
+    || ''
+  ).trim().toLowerCase() || 'unknown';
+}
+
+function quotaHoldHarnessesForPendingJobs(rootDir, { nowMs = Date.now() } = {}) {
+  const harnesses = new Set();
+  for (const { job } of listPendingFollowUpJobs(rootDir)) {
+    const retryAfterMs = Date.parse(job?.remediationPlan?.retryAfter || '');
+    if (!Number.isFinite(retryAfterMs) || retryAfterMs <= nowMs) continue;
+    if (!isQuotaExhaustedRetryHold(job)) continue;
+    harnesses.add(quotaHoldHarness(job));
+  }
+  return Array.from(harnesses);
+}
+
 function createQuotaHoldRevalidator({
-  execFileSyncImpl = execFileSync,
+  execFileImpl = execFileAsync,
   env = process.env,
   nowMs: defaultNowMs = () => Date.now(),
   ttlMs = QUOTA_HOLD_REVALIDATION_TTL_MS,
   timeoutMs = QUOTA_HOLD_REVALIDATION_TIMEOUT_MS,
 } = {}) {
   const cache = new Map();
-  return ({ harness, now, nowMs } = {}) => {
-    const normalizedHarness = String(harness || '').trim().toLowerCase() || 'unknown';
-    const nowValueMs = Number(nowMs ?? defaultNowMs());
-    const checkedAtMs = Number.isFinite(nowValueMs) ? nowValueMs : Date.now();
+
+  function buildCachedDecision(decision, { now, checkedAtMs }) {
+    const checkedAt = typeof now === 'string' && now.trim() ? now : new Date(checkedAtMs).toISOString();
+    return {
+      ...decision,
+      checkedAt: decision.checkedAt || checkedAt,
+    };
+  }
+
+  function cachedDecisionFor(normalizedHarness, checkedAtMs) {
     const cached = cache.get(normalizedHarness);
     if (cached && checkedAtMs - cached.checkedAtMs < ttlMs) {
       return cached.decision;
     }
+    return null;
+  }
+
+  async function refreshHarness(normalizedHarness, { now, nowMs } = {}) {
+    const nowValueMs = Number(nowMs ?? defaultNowMs());
+    const checkedAtMs = Number.isFinite(nowValueMs) ? nowValueMs : Date.now();
+    const cached = cachedDecisionFor(normalizedHarness, checkedAtMs);
+    if (cached) return cached;
     let decision;
     try {
       const hqBin = resolveHqBin(env);
-      const stdout = execFileSyncImpl(hqBin, ['fleet', 'quota', 'status', '--json'], {
+      const result = await execFileImpl(hqBin, ['fleet', 'quota', 'status', '--json'], {
         env,
         encoding: 'utf8',
         maxBuffer: 5 * 1024 * 1024,
         timeout: timeoutMs,
       });
-      decision = quotaAvailableFromFleetStatus(stdout, { harness: normalizedHarness });
+      const stdout = typeof result === 'string' ? result : result?.stdout;
+      decision = quotaAvailableFromFleetStatus(stdout || '', { harness: normalizedHarness });
     } catch (err) {
       decision = {
         available: false,
@@ -826,21 +876,45 @@ function createQuotaHoldRevalidator({
         error: err?.message || String(err),
       };
     }
-    const checkedAt = typeof now === 'string' && now.trim() ? now : new Date(checkedAtMs).toISOString();
-    const cachedDecision = {
-      ...decision,
-      checkedAt: decision.checkedAt || checkedAt,
-    };
+    const cachedDecision = buildCachedDecision(decision, { now, checkedAtMs });
     cache.set(normalizedHarness, {
       checkedAtMs,
       decision: cachedDecision,
     });
     return cachedDecision;
+  }
+
+  const revalidator = ({ harness, now, nowMs } = {}) => {
+    const normalizedHarness = String(harness || '').trim().toLowerCase() || 'unknown';
+    const nowValueMs = Number(nowMs ?? defaultNowMs());
+    const checkedAtMs = Number.isFinite(nowValueMs) ? nowValueMs : Date.now();
+    const cached = cachedDecisionFor(normalizedHarness, checkedAtMs);
+    if (cached) return cached;
+    return buildCachedDecision({
+      available: false,
+      state: 'not-prefetched',
+      source: 'hq-fleet-quota-status',
+    }, { now, checkedAtMs });
   };
+
+  revalidator.prefetch = async ({ harnesses = [], rootDir = null, now, nowMs } = {}) => {
+    const nowValueMs = Number(nowMs ?? defaultNowMs());
+    const checkedAtMs = Number.isFinite(nowValueMs) ? nowValueMs : Date.now();
+    const pendingHarnesses = rootDir
+      ? quotaHoldHarnessesForPendingJobs(rootDir, { nowMs: checkedAtMs })
+      : [];
+    const normalizedHarnesses = new Set();
+    for (const harness of [...harnesses, ...pendingHarnesses]) {
+      normalizedHarnesses.add(String(harness || '').trim().toLowerCase() || 'unknown');
+    }
+    return Promise.all(Array.from(normalizedHarnesses, (harness) => refreshHarness(harness, { now, nowMs: checkedAtMs })));
+  };
+
+  return revalidator;
 }
 
 const defaultQuotaHoldRevalidator = createQuotaHoldRevalidator({
-  execFileSyncImpl: execFileSync,
+  execFileImpl: execFileAsync,
   env: process.env,
 });
 
@@ -5928,6 +6002,14 @@ async function consumeFollowUpJobsUntilCapacity({
   const delayedPendingPaths = new Set();
   let pendingRetryDelayed = 0;
   const pendingCountsAtStart = countPendingFollowUpJobsByRetryWindow(rootDir, now());
+  if (typeof quotaHoldRevalidator?.prefetch === 'function') {
+    const prefetchNow = now();
+    await quotaHoldRevalidator.prefetch({
+      rootDir,
+      now: prefetchNow,
+      nowMs: Date.parse(prefetchNow),
+    });
+  }
 
   while (!shouldStop() && (activeJobs.length + spawned) < concurrencyCap) {
     /* eslint-disable no-await-in-loop */

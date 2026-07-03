@@ -1018,13 +1018,14 @@ daemon must cap any single unvalidated quota hold to a bounded max window
 (default one hour). A provider reset further in the future is treated as an
 upper-bound hint, not an authority to park remediation for days. Before the
 consume gate honors a future `retryAfter` from a quota-exhausted remediation
-retry, it may revalidate the harness provider's live quota state via the cached
-HQ fleet quota status (`hq fleet quota status --json`, provider OAuth state).
-The synchronous HQ probe must be bounded (default 10s) and cached briefly per
-harness so a slow or failing local HQ command cannot deadlock the daemon tick or
-spam subprocesses on every poll. If that live signal reports quota available,
-the gate clears the per-job hold and consumes the job in that tick; if the signal
-is missing, unknown, exhausted, or errors, the gate fails closed and keeps the
+retry, it may revalidate the harness provider's live quota state via cached HQ
+fleet quota status (`hq fleet quota status --json`, provider OAuth state). The
+probe is asynchronously prefetched at the start of the consume tick, bounded
+(default 10s), and cached briefly per harness so a slow or failing local HQ
+command cannot block the synchronous job-claim loop or spam subprocesses on every
+poll. If that live signal reports quota available, the gate clears the per-job
+hold and consumes the job in that tick; if the signal is missing, unknown,
+exhausted, not yet prefetched, or errors, the gate fails closed and keeps the
 clamped hold. Error decisions from the cached probe are persisted back to the
 pending job as `quotaHoldRevalidatedErroredAt` and
 `quotaHoldRevalidationError`, the same as thrown revalidation failures, so

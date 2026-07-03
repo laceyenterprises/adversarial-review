@@ -160,7 +160,12 @@ export function createSessionLedgerDb(
   );
 
   for (const row of runtimeSessions) insertRuntimeSession.run(row);
-  for (const row of workerRuns) insertWorkerRun.run(row);
+  for (const row of workerRuns) {
+    insertWorkerRun.run({
+      token_usage_guardrail: null,
+      ...row,
+    });
+  }
   db.close();
 }
 

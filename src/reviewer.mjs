@@ -3218,12 +3218,16 @@ async function main() {
   }
 
   if (tokenUsage) {
+    const hasExplicitGuardrail = Object.prototype.hasOwnProperty.call(tokenUsage, 'guardrail')
+      && tokenUsage.guardrail !== undefined;
     console.log(JSON.stringify({
       type: 'reviewer.token_usage',
       tokenUsage: {
         ...tokenUsage,
         usageTag: tokenUsage.usageTag || 'guardrail',
-        guardrail: tokenUsage.guardrail ?? tokenUsage.total ?? ((tokenUsage.input || 0) + (tokenUsage.output || 0)),
+        guardrail: hasExplicitGuardrail
+          ? tokenUsage.guardrail
+          : (tokenUsage.total ?? ((tokenUsage.input || 0) + (tokenUsage.output || 0))),
       },
     }));
   }

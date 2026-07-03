@@ -402,6 +402,7 @@ test('watcher allows stale-review auto-refresh for the post-budget final review'
       assert.equal(job.riskClass, 'medium');
       return { roundBudget: 2, riskClass: 'medium' };
     },
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
   });
 
   assert.deepEqual(suppression, {
@@ -452,6 +453,7 @@ test('watcher allows stale-review auto-refresh while remediation budget remains'
       latestMaxRounds: 2,
     }),
     resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
   });
 
   assert.deepEqual(suppression, {
@@ -766,6 +768,7 @@ test('watcher preserves elevated legacy budgets before suppressing stale-review 
       latestMaxRounds: 6,
     }),
     resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
   });
 
   assert.deepEqual(suppression, {
@@ -790,6 +793,7 @@ test('watcher treats null latestMaxRounds as absent when resolving stale-review 
       latestMaxRounds: null,
     }),
     resolveRoundBudgetForJobImpl: () => ({ roundBudget: -1, riskClass: 'medium' }),
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
   });
 
   assert.deepEqual(suppression, {

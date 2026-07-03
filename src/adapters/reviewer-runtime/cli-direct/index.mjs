@@ -158,12 +158,18 @@ function parseCodexJsonTokenUsage(stdout) {
       continue;
     }
     if (item.type === 'reviewer.token_usage' && item.tokenUsage) {
+      const hasExplicitGuardrail = Object.prototype.hasOwnProperty.call(item.tokenUsage, 'guardrail')
+        && item.tokenUsage.guardrail !== undefined;
       tokenUsage = {
         ...item.tokenUsage,
         usageTag: item.tokenUsage.usageTag || 'guardrail',
-        guardrail: item.tokenUsage.guardrail ?? item.tokenUsage.total ?? (
-          Number(item.tokenUsage.input || 0) + Number(item.tokenUsage.output || 0)
-        ),
+        guardrail: hasExplicitGuardrail
+          ? item.tokenUsage.guardrail
+          : (
+              item.tokenUsage.total ?? (
+                Number(item.tokenUsage.input || 0) + Number(item.tokenUsage.output || 0)
+              )
+            ),
       };
       continue;
     }

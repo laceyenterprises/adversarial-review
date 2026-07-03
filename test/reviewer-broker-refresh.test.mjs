@@ -728,10 +728,10 @@ test('broker activation reads GEMINI_REVIEWER_AUTH_VIA_BROKER and resolves the g
   assert.equal(env.GH_CLAUDE_REVIEWER_TOKEN, 'ghs_OLD_token');
 });
 
-test('resolveReviewerAppToken resolves the gemini-reviewer-lacey identity to GH_GEMINI_REVIEWER_TOKEN', async () => {
+test('resolveReviewerAppToken resolves the lacey-gemini-reviewer identity to GH_GEMINI_REVIEWER_TOKEN', async () => {
   const env = makeEnv({ GH_GEMINI_REVIEWER_TOKEN: 'ghs_old_gemini' });
   let calledUrl = null;
-  const resolved = await resolveReviewerAppToken('gemini-reviewer-lacey', {
+  const resolved = await resolveReviewerAppToken('lacey-gemini-reviewer', {
     env,
     readFileImpl: readSecret,
     fetchImpl: async (url) => {

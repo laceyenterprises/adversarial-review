@@ -86,7 +86,7 @@ test('normalizeReviewVerdict handles comment-only and request-changes fixtures',
 });
 
 test('resolveReviewerBotLogin maps MHX-09 reviewer classes onto existing reviewer bots', () => {
-  assert.equal(resolveReviewerBotLogin('gemini'), 'lacey-gemini-reviewer[bot]');
+  assert.equal(resolveReviewerBotLogin('gemini'), 'lacey-gemini-reviewer');
   assert.equal(resolveReviewerBotLogin('pi'), 'lacey-codex-reviewer[bot]');
   assert.equal(resolveReviewerBotLogin('opencode'), 'lacey-codex-reviewer[bot]');
   assert.equal(resolveReviewerBotLogin('hermes'), 'lacey-codex-reviewer[bot]');

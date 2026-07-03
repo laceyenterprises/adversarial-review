@@ -25,14 +25,14 @@ const REVIEWER_BOT_LOGIN_ALIASES = Object.freeze({
   claude: ['lacey-claude-reviewer[bot]', 'claude-reviewer-lacey'],
   codex: ['lacey-codex-reviewer[bot]', 'codex-reviewer-lacey'],
   'claude-code': ['lacey-claude-reviewer[bot]', 'claude-reviewer-lacey'],
-  gemini: ['lacey-gemini-reviewer[bot]', 'gemini-reviewer-lacey'],
+  gemini: ['lacey-gemini-reviewer', 'lacey-gemini-reviewer[bot]', 'gemini-reviewer-lacey'],
   pi: ['lacey-codex-reviewer[bot]', 'codex-reviewer-lacey'],
   // opencode defaults to Anthropic Claude; keep the reviewer cross-model.
   opencode: ['lacey-codex-reviewer[bot]', 'codex-reviewer-lacey'],
   hermes: ['lacey-codex-reviewer[bot]', 'codex-reviewer-lacey'],
   GH_CLAUDE_REVIEWER_TOKEN: ['lacey-claude-reviewer[bot]', 'claude-reviewer-lacey'],
   GH_CODEX_REVIEWER_TOKEN: ['lacey-codex-reviewer[bot]', 'codex-reviewer-lacey'],
-  GH_GEMINI_REVIEWER_TOKEN: ['lacey-gemini-reviewer[bot]', 'gemini-reviewer-lacey'],
+  GH_GEMINI_REVIEWER_TOKEN: ['lacey-gemini-reviewer', 'lacey-gemini-reviewer[bot]', 'gemini-reviewer-lacey'],
 });
 
 // Match two GitHub logins tolerant of the `[bot]` suffix (app-token authors carry

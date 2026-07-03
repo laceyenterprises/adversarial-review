@@ -74,6 +74,7 @@ const REVIEWER_ROLE_BY_IDENTITY = Object.freeze({
   'codex-reviewer-lacey': 'codex-reviewer',
   'gemini-reviewer': 'gemini-reviewer',
   'gemini-reviewer-lacey': 'gemini-reviewer',
+  'lacey-gemini-reviewer': 'gemini-reviewer',
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer',
   GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer',
   GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer',

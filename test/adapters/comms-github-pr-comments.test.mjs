@@ -587,7 +587,7 @@ test('remediation outcome comment identity selection is worker-class specific', 
   assert.equal(resolveCommentBotTokenEnv('claude-code'), 'GH_CLAUDE_REVIEWER_TOKEN');
   assert.equal(resolveCommentBotLogin('claude-code'), 'claude-reviewer-lacey');
   assert.equal(resolveCommentBotTokenEnv('gemini'), 'GH_GEMINI_REVIEWER_TOKEN');
-  assert.equal(resolveCommentBotLogin('gemini'), 'gemini-reviewer-lacey');
+  assert.equal(resolveCommentBotLogin('gemini'), 'lacey-gemini-reviewer');
 });
 
 test('adapter gh fallback honors ambient GH_TOKEN when operator notices allow fallback auth', async () => {

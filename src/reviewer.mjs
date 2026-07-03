@@ -121,7 +121,7 @@ const ANY_ADVERSARIAL_REVIEW_HEADER_RE = /^##\s+Adversarial Review\b.*$/;
 const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
   GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
-  GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer-lacey',
+  GH_GEMINI_REVIEWER_TOKEN: 'lacey-gemini-reviewer',
 });
 
 function resolveReviewerIdentityForBotTokenEnv(botTokenEnv, fallbackIdentity = null) {
@@ -2217,7 +2217,7 @@ const REVIEWER_METADATA_BY_MODEL = Object.freeze({
   },
   gemini: {
     displayName: 'Gemini',
-    reviewerIdentity: 'gemini-reviewer-lacey',
+    reviewerIdentity: 'lacey-gemini-reviewer',
   },
 });
 
@@ -2354,7 +2354,7 @@ Antigravity runtime instructions:
 - Review the PROVIDED diff. Do not re-list the repository, re-derive the diff with git, inspect unrelated files, or run exploratory filesystem/git commands.
 - Use at most one narrowly targeted lookup only if the provided diff is insufficient to verify a concrete suspected bug. Otherwise use no tools.
 - Emit ONLY the final Markdown review block for GitHub. Do not narrate your plan, tool calls, exploration steps, uncertainty, or internal reasoning.
-- Start with "## Adversarial Review — Gemini (gemini-reviewer-lacey)" unless an outer caller already supplied that header.
+- Start with "## Adversarial Review — Gemini (lacey-gemini-reviewer)" unless an outer caller already supplied that header.
 - Include "## Verdict" with the first non-empty verdict line exactly one of: "Comment only", "Request changes", or "Approve".
 - Verdict is a pure function of the structured Blocking issues list: if "## Blocking issues" is empty / "- None.", the Verdict MUST be "Comment only"; emit "Request changes" only when at least one blocking issue is listed. Non-blocking issues never escalate the verdict.`;
 }

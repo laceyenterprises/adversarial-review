@@ -508,7 +508,7 @@ const REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL = {
 const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
   GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
-  GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer-lacey',
+  GH_GEMINI_REVIEWER_TOKEN: 'lacey-gemini-reviewer',
 });
 let lastEtagCacheSweepAtMs = 0;
 
@@ -620,7 +620,7 @@ function resolveReviewerIdentity({ reviewerModel, botTokenEnv } = {}) {
   }
   const normalizedModel = String(reviewerModel || '').trim().toLowerCase();
   if (normalizedModel === 'codex') return 'codex-reviewer-lacey';
-  if (normalizedModel === 'gemini') return 'gemini-reviewer-lacey';
+  if (normalizedModel === 'gemini') return 'lacey-gemini-reviewer';
   return 'claude-reviewer-lacey';
 }
 
@@ -628,7 +628,7 @@ function resolveBotTokenEnvForIdentity(identity) {
   const normalized = String(identity || '').trim().toLowerCase();
   if (normalized.startsWith('codex-reviewer-')) return 'GH_CODEX_REVIEWER_TOKEN';
   if (normalized.startsWith('claude-reviewer-')) return 'GH_CLAUDE_REVIEWER_TOKEN';
-  if (normalized.startsWith('gemini-reviewer-')) return 'GH_GEMINI_REVIEWER_TOKEN';
+  if (normalized.startsWith('gemini-reviewer-') || normalized === 'lacey-gemini-reviewer') return 'GH_GEMINI_REVIEWER_TOKEN';
   return null;
 }
 

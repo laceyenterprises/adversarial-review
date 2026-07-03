@@ -842,7 +842,7 @@ test('clio-agent reviewer-class login excludes the codex reviewer bot', async ()
   assert.match(row.closeout_body_md, /Operator closeout stays/);
 });
 
-test('historical gemini builder-tag closeouts still exclude the Codex reviewer bot', async () => {
+test('gemini builder-tag closeouts exclude the live Gemini reviewer bot', async () => {
   const db = setupDb();
   seedReviewerPass(db, { reviewerClass: 'gemini', reviewerModel: null });
 
@@ -854,10 +854,10 @@ test('historical gemini builder-tag closeouts still exclude the Codex reviewer b
     now: new Date('2026-05-20T20:56:00.000Z'),
     fetchIssueCommentsImpl: async () => ([
       {
-        id: 'IC_codex_reviewer',
-        login: 'codex-reviewer-lacey',
+        id: 'IC_gemini_reviewer',
+        login: 'lacey-gemini-reviewer',
         created_at: '2026-05-20T20:40:00.000Z',
-        body: 'Historical Codex reviewer comment must be excluded.',
+        body: 'Gemini reviewer comment must be excluded.',
       },
       {
         id: 'IC_operator',
@@ -869,7 +869,7 @@ test('historical gemini builder-tag closeouts still exclude the Codex reviewer b
   });
 
   const row = readCloseoutRow(db);
-  assert.doesNotMatch(row.closeout_body_md, /Historical Codex reviewer comment must be excluded/);
+  assert.doesNotMatch(row.closeout_body_md, /Gemini reviewer comment must be excluded/);
   assert.match(row.closeout_body_md, /Operator closeout stays/);
 });
 
@@ -886,7 +886,7 @@ test('native Gemini closeouts exclude the Gemini reviewer bot', async () => {
     fetchIssueCommentsImpl: async () => ([
       {
         id: 'IC_gemini_reviewer',
-        login: 'gemini-reviewer-lacey',
+        login: 'lacey-gemini-reviewer',
         created_at: '2026-05-20T20:40:00.000Z',
         body: 'Native Gemini reviewer comment must be excluded.',
       },

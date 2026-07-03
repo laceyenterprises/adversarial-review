@@ -27,7 +27,7 @@ const OVERDUE_RECOVERY_FAILURE_MESSAGE =
 const REVIEWER_BOT_LOGINS = new Map([
   ['claude', 'claude-reviewer-lacey'],
   ['codex', 'codex-reviewer-lacey'],
-  ['gemini', 'gemini-reviewer-lacey'],
+  ['gemini', 'lacey-gemini-reviewer'],
   ['pi', 'codex-reviewer-lacey'],
   // opencode defaults to Anthropic Claude; keep the reviewer cross-model.
   ['opencode', 'codex-reviewer-lacey'],

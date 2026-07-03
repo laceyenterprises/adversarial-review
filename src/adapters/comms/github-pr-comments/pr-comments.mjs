@@ -62,7 +62,7 @@ const WORKER_CLASS_TO_BOT_TOKEN_ENV = {
 const COMMENT_BOT_LOGIN_BY_TOKEN_ENV = {
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
   GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
-  GH_GEMINI_REVIEWER_TOKEN: 'gemini-reviewer-lacey',
+  GH_GEMINI_REVIEWER_TOKEN: 'lacey-gemini-reviewer',
 };
 
 const ADAPTER_SUBPROCESS_ENV_KEYS = [

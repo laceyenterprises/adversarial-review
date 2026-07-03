@@ -85,6 +85,8 @@ roles:
     fallback_path: none
   codex-reviewer-lacey:
     fallback_path: none
+  lacey-gemini-reviewer:
+    fallback_path: none
   merge-agent-failure-recovery:
     fallback_path: none
 

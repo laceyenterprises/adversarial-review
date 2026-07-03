@@ -218,7 +218,7 @@ test('dry-run pass (A) logs four proposed updates, leaves DB untouched, and repo
   });
 });
 
-test('body backfill separates historical gemini builder tags from native Gemini reviewer rows', async () => {
+test('body backfill maps Gemini and current builder-tag fallbacks to the live Gemini reviewer login', async () => {
   const rootDir = makeRootDir();
   withDb(rootDir, (db) => {
     seedReviewedPr(db, { prNumber: 801 });
@@ -251,6 +251,27 @@ test('body backfill separates historical gemini builder tags from native Gemini 
       endedAt: '2026-06-17T10:10:00.000Z',
       status: 'completed',
     });
+
+    for (const [prNumber, reviewerClass] of [[803, 'codex'], [804, 'claude-code']]) {
+      seedReviewedPr(db, { prNumber });
+      db.prepare(
+        `INSERT INTO reviewer_passes (
+           repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind,
+           started_at, ended_at, status, metadata_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        'laceyenterprises/adversarial-review',
+        prNumber,
+        1,
+        reviewerClass,
+        null,
+        'first-pass',
+        '2026-07-02T10:00:00.000Z',
+        '2026-07-02T10:10:00.000Z',
+        'completed',
+        '{}'
+      );
+    }
   });
 
   const result = await runCli(rootDir, ['--apply', '--pass', 'bodies'], {
@@ -260,8 +281,8 @@ test('body backfill separates historical gemini builder tags from native Gemini 
           node_id: 'RV_801',
           submitted_at: '2026-05-29T10:05:00.000Z',
           state: 'COMMENTED',
-          body: 'historical codex-reviewed gemini builder row',
-          user: { login: 'codex-reviewer-lacey' },
+          body: 'gemini row captured from live Gemini reviewer',
+          user: { login: 'lacey-gemini-reviewer' },
         },
       ]),
       'repos/laceyenterprises/adversarial-review/issues/801/comments': '\n',
@@ -271,23 +292,45 @@ test('body backfill separates historical gemini builder tags from native Gemini 
           submitted_at: '2026-06-17T10:05:00.000Z',
           state: 'COMMENTED',
           body: 'native gemini review row',
-          user: { login: 'gemini-reviewer-lacey' },
+          user: { login: 'lacey-gemini-reviewer' },
         },
       ]),
       'repos/laceyenterprises/adversarial-review/issues/802/comments': '\n',
+      'repos/laceyenterprises/adversarial-review/pulls/803/reviews': jsonLines([
+        {
+          node_id: 'RV_803',
+          submitted_at: '2026-07-02T10:05:00.000Z',
+          state: 'COMMENTED',
+          body: 'codex builder-tag fallback captured from live Gemini reviewer',
+          user: { login: 'lacey-gemini-reviewer' },
+        },
+      ]),
+      'repos/laceyenterprises/adversarial-review/issues/803/comments': '\n',
+      'repos/laceyenterprises/adversarial-review/pulls/804/reviews': jsonLines([
+        {
+          node_id: 'RV_804',
+          submitted_at: '2026-07-02T10:05:00.000Z',
+          state: 'COMMENTED',
+          body: 'claude-code builder-tag fallback captured from live Gemini reviewer',
+          user: { login: 'lacey-gemini-reviewer' },
+        },
+      ]),
+      'repos/laceyenterprises/adversarial-review/issues/804/comments': '\n',
     }),
     now: () => '2026-06-17T12:30:00.000Z',
   });
 
   assert.equal(result.code, 0);
-  assert.match(result.stdout, /bodies populated:\s+2/);
+  assert.match(result.stdout, /bodies populated:\s+4/);
   withDb(rootDir, (db) => {
     const rows = db.prepare(
-      'SELECT pr_number, body_md FROM reviewer_passes WHERE pr_number IN (801, 802) ORDER BY pr_number'
+      'SELECT pr_number, body_md FROM reviewer_passes WHERE pr_number IN (801, 802, 803, 804) ORDER BY pr_number'
     ).all();
     assert.deepEqual(rows, [
-      { pr_number: 801, body_md: 'historical codex-reviewed gemini builder row' },
+      { pr_number: 801, body_md: 'gemini row captured from live Gemini reviewer' },
       { pr_number: 802, body_md: 'native gemini review row' },
+      { pr_number: 803, body_md: 'codex builder-tag fallback captured from live Gemini reviewer' },
+      { pr_number: 804, body_md: 'claude-code builder-tag fallback captured from live Gemini reviewer' },
     ]);
   });
 });

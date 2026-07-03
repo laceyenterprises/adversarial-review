@@ -41,32 +41,29 @@ const DEFAULT_MAX_ATTEMPTS = DEFAULT_RETRY_BACKOFF_MS.length + 1;
 //   - reviewer-side: 'claude' → claude-reviewer-lacey, 'codex' → codex-reviewer-lacey
 //     (these are the values reviewer_class / reviewer_model authoritatively hold).
 //     Native Gemini rows are resolved from reviewer_model, not this fallback
-//     map, so historical [gemini] builder-tag rows still exclude Codex.
+//     map. Current always-on Gemini reviewer rows and defensive builder-tag
+//     fallbacks exclude the live Gemini reviewer login.
 //   - builder-side defensive fallbacks: in legacy rows or job-schema corruption
 //     paths, the *builder* tag can end up in reviewer_class. For those rows we
 //     must exclude the actual *reviewer* bot per the cross-model routing table.
-//     '[clio-agent]' PRs are reviewed by Codex (Clio dispatches Codex writers,
-//     so reviewer = opposite = Codex). '[claude-code]' PRs are reviewed by
-//     Codex (writer = Claude, opposite = Codex). Both defensive rows must
-//     point at codex-reviewer-lacey for the exclusion to fire correctly.
-//     The defensive 'claude-code' entry was previously claude-reviewer-lacey,
-//     a partial guard that left Codex reviewer comments leaking into operator
-//     closeout attribution when reviewer_class held the builder tag.
+//     Current [codex] / [claude-code] / [clio-agent] PRs are reviewed by
+//     Gemini on this host, so defensive builder-tag rows must point at the
+//     live Gemini reviewer login for the exclusion to fire correctly.
 const REVIEWER_LOGIN_BY_CLASS = new Map([
   ['claude', 'claude-reviewer-lacey'],
-  ['claude-code', 'codex-reviewer-lacey'],
-  ['clio-agent', 'codex-reviewer-lacey'],
-  ['codex', 'codex-reviewer-lacey'],
-  ['gemini', 'codex-reviewer-lacey'],
-  ['pi', 'codex-reviewer-lacey'],
+  ['claude-code', 'lacey-gemini-reviewer'],
+  ['clio-agent', 'lacey-gemini-reviewer'],
+  ['codex', 'lacey-gemini-reviewer'],
+  ['gemini', 'lacey-gemini-reviewer'],
+  ['pi', 'lacey-gemini-reviewer'],
   // opencode defaults to Anthropic Claude; keep the reviewer cross-model.
-  ['opencode', 'codex-reviewer-lacey'],
-  ['hermes', 'codex-reviewer-lacey'],
+  ['opencode', 'lacey-gemini-reviewer'],
+  ['hermes', 'lacey-gemini-reviewer'],
 ]);
 const REVIEWER_LOGIN_BY_MODEL = new Map([
   ['claude', 'claude-reviewer-lacey'],
   ['codex', 'codex-reviewer-lacey'],
-  ['gemini', 'gemini-reviewer-lacey'],
+  ['gemini', 'lacey-gemini-reviewer'],
 ]);
 
 // Builder-bot identities that can self-comment on their own PRs (status
@@ -78,7 +75,7 @@ const BUILDER_BOT_LOGINS = new Set([
 ]);
 
 function isReviewerBotLogin(loginLower) {
-  return loginLower.endsWith('-reviewer-lacey');
+  return loginLower.endsWith('-reviewer-lacey') || loginLower === 'lacey-gemini-reviewer';
 }
 
 function isGitHubBotLogin(loginLower) {

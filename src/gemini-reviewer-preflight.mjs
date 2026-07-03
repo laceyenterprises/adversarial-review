@@ -53,7 +53,9 @@ export function isGeminiReviewerSelected({ botTokenEnv, reviewerIdentity } = {})
     return true;
   }
   const identity = String(reviewerIdentity || '').trim().toLowerCase();
-  return identity === 'gemini-reviewer' || identity === 'gemini-reviewer-lacey';
+  return identity === 'gemini-reviewer'
+    || identity === 'gemini-reviewer-lacey'
+    || identity === 'lacey-gemini-reviewer';
 }
 
 // Fail closed when the 1Password item name leaked into the runtime as an env

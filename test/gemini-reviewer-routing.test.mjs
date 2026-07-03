@@ -3,7 +3,7 @@
 //
 // These exercise the pure routing helpers (mode-driven selection + the
 // adversarial-integrity hard guard), the reviewer-bot-login identity maps
-// (reviewer side resolves to gemini-reviewer-lacey; builder side stays
+// (reviewer side resolves to lacey-gemini-reviewer; builder side stays
 // codex-reviewer-lacey), and the reviewer-roster debug surface against the
 // SPEC §1 mockup. The fallback-mode quota signal is injected so the test does
 // not depend on live HRR state.
@@ -271,10 +271,10 @@ test('GMW-02 config: a bad mode value fails the strict schema', () => {
 
 test('GMW-02 identity: a gemini REVIEW captures against the GitHub App bot login', () => {
   // review-body-capture: reviewer-model key and the reviewer token-env key.
-  assert.equal(resolveReviewerBotLogin('gemini'), 'lacey-gemini-reviewer[bot]');
-  assert.equal(resolveReviewerBotLogin('GH_GEMINI_REVIEWER_TOKEN'), 'lacey-gemini-reviewer[bot]');
+  assert.equal(resolveReviewerBotLogin('gemini'), 'lacey-gemini-reviewer');
+  assert.equal(resolveReviewerBotLogin('GH_GEMINI_REVIEWER_TOKEN'), 'lacey-gemini-reviewer');
   // reviewer-reattach: reviewer-model key.
-  assert.equal(reviewerBotLogin('gemini'), 'gemini-reviewer-lacey');
+  assert.equal(reviewerBotLogin('gemini'), 'lacey-gemini-reviewer');
 });
 
 test('GMW-02 identity: builder-side reviewer of a [gemini] PR stays codex-reviewer-lacey', () => {

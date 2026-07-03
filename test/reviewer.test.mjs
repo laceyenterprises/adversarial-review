@@ -423,21 +423,21 @@ test('review header classifier locates enforce and advisory reviews while distin
 
 test('review comment body prepends canonical header when reviewer output has none', () => {
   const body = buildReviewCommentBody({
-    reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'gemini-reviewer-lacey' },
+    reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'lacey-gemini-reviewer' },
     verdictMode: VERDICT_MODE_ENFORCE,
     reviewText: '## Summary\nClean.\n\n## Verdict\nComment only',
   });
 
   assert.equal(
     body,
-    '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n' +
+    '## Adversarial Review — Gemini (lacey-gemini-reviewer)\n\n' +
       '## Summary\nClean.\n\n## Verdict\nComment only',
   );
 });
 
 test('review comment body skips prepending when reviewer output already has a title', () => {
   const modelOutput = [
-    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '## Adversarial Review — Gemini (lacey-gemini-reviewer)',
     '',
     '## Summary',
     'Clean.',
@@ -447,7 +447,7 @@ test('review comment body skips prepending when reviewer output already has a ti
   ].join('\n');
 
   const body = buildReviewCommentBody({
-    reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'gemini-reviewer-lacey' },
+    reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'lacey-gemini-reviewer' },
     verdictMode: VERDICT_MODE_ENFORCE,
     reviewText: modelOutput,
   });
@@ -470,7 +470,7 @@ test('review comment body recognizes loose model-supplied adversarial review tit
   assert.equal(startsWithReviewCommentHeader(modelOutput), true);
   assert.equal(
     buildReviewCommentBody({
-      reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'gemini-reviewer-lacey' },
+      reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'lacey-gemini-reviewer' },
       verdictMode: VERDICT_MODE_ENFORCE,
       reviewText: modelOutput,
     }),
@@ -481,7 +481,7 @@ test('review comment body recognizes loose model-supplied adversarial review tit
 test('review comment body skips prepending when model title has leading whitespace', () => {
   const modelOutput = [
     '',
-    '  ## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '  ## Adversarial Review — Gemini (lacey-gemini-reviewer)',
     '',
     '## Summary',
     'Clean.',
@@ -491,7 +491,7 @@ test('review comment body skips prepending when model title has leading whitespa
   ].join('\n');
 
   const body = buildReviewCommentBody({
-    reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'gemini-reviewer-lacey' },
+    reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'lacey-gemini-reviewer' },
     verdictMode: VERDICT_MODE_ENFORCE,
     reviewText: modelOutput,
   });
@@ -499,7 +499,7 @@ test('review comment body skips prepending when model title has leading whitespa
   assert.equal(startsWithReviewCommentHeader(modelOutput), true);
   assert.equal(
     body,
-    '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n' +
+    '## Adversarial Review — Gemini (lacey-gemini-reviewer)\n\n' +
       '## Summary\nClean.\n\n## Verdict\nComment only',
   );
   assert.equal(body.match(/^##\s+Adversarial Review\b/gm).length, 1);
@@ -508,11 +508,11 @@ test('review comment body skips prepending when model title has leading whitespa
 test('review comment body inserts waiver under existing model-supplied title', () => {
   const waiverAuditBlock = '> Cross-model review waiver: operator override.\n\n';
   const body = buildReviewCommentBody({
-    reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'gemini-reviewer-lacey' },
+    reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'lacey-gemini-reviewer' },
     verdictMode: VERDICT_MODE_ENFORCE,
     waiverAuditBlock,
     reviewText: [
-      '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+      '## Adversarial Review — Gemini (lacey-gemini-reviewer)',
       '',
       '## Summary',
       'Clean.',
@@ -524,7 +524,7 @@ test('review comment body inserts waiver under existing model-supplied title', (
 
   assert.equal(
     body,
-    '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n' +
+    '## Adversarial Review — Gemini (lacey-gemini-reviewer)\n\n' +
       waiverAuditBlock +
       '## Summary\nClean.\n\n## Verdict\nComment only',
   );
@@ -533,15 +533,15 @@ test('review comment body inserts waiver under existing model-supplied title', (
 test('review comment body inserts waiver below title with leading carriage-return newlines', () => {
   const waiverAuditBlock = '> Cross-model review waiver: operator override.\n\n';
   const body = buildReviewCommentBody({
-    reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'gemini-reviewer-lacey' },
+    reviewerMetadata: { displayName: 'Gemini', reviewerIdentity: 'lacey-gemini-reviewer' },
     verdictMode: VERDICT_MODE_ENFORCE,
     waiverAuditBlock,
-    reviewText: '\r\n\r\n## Adversarial Review — Gemini (gemini-reviewer-lacey)\r\n\r\n## Summary\r\nClean.\r\n\r\n## Verdict\r\nComment only',
+    reviewText: '\r\n\r\n## Adversarial Review — Gemini (lacey-gemini-reviewer)\r\n\r\n## Summary\r\nClean.\r\n\r\n## Verdict\r\nComment only',
   });
 
   assert.equal(
     body,
-    '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n' +
+    '## Adversarial Review — Gemini (lacey-gemini-reviewer)\n\n' +
       waiverAuditBlock +
       '## Summary\r\nClean.\r\n\r\n## Verdict\r\nComment only',
   );
@@ -2043,7 +2043,7 @@ test('resolveReviewerMetadata labels Gemini reviews with the Gemini reviewer ide
   });
   assert.deepEqual(resolveReviewerMetadata('gemini'), {
     displayName: 'Gemini',
-    reviewerIdentity: 'gemini-reviewer-lacey',
+    reviewerIdentity: 'lacey-gemini-reviewer',
   });
 });
 
@@ -2105,7 +2105,7 @@ test('reviewWithGemini cli runtime keeps native binary, argv, env scrub, and cre
 test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scrub, and agy auth', async () => {
   const authCalls = [];
   const spawnCalls = [];
-  const validAgyReview = '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n## Summary\nClean.\n\n## Verdict\nComment only';
+  const validAgyReview = '## Adversarial Review — Gemini (lacey-gemini-reviewer)\n\n## Summary\nClean.\n\n## Verdict\nComment only';
   const result = await withEnvAsync({
     HOME: '/tmp/agy-home',
     GEMINI_API_KEY: 'must-strip',
@@ -2159,11 +2159,11 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
 
 test('sanitizeAgyReviewOutput rejects narration-only captured output', () => {
   const sample = [
-    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '## Adversarial Review — Gemini (lacey-gemini-reviewer)',
     'I will start by listing the files in the workspace ...',
     'I will run `git log` ...',
     'I will search `hq-common.sh` for the definition of `hq_ensure_python3` ...',
-    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '## Adversarial Review — Gemini (lacey-gemini-reviewer)',
     'I will list the contents of the workspace directory to orient myself.',
   ].join('\n');
 
@@ -2175,7 +2175,7 @@ test('sanitizeAgyReviewOutput rejects narration-only captured output', () => {
 
 test('sanitizeAgyReviewOutput rejects agy timeout output instead of posting it', () => {
   const sample = [
-    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '## Adversarial Review — Gemini (lacey-gemini-reviewer)',
     'I will run `git log` ...',
     'Error: timed out waiting for response',
   ].join('\n');
@@ -2188,7 +2188,7 @@ test('sanitizeAgyReviewOutput rejects agy timeout output instead of posting it',
 
 test('sanitizeAgyReviewOutput accepts a well-formed agy review with inline verdict', () => {
   const result = sanitizeAgyReviewOutput([
-    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '## Adversarial Review — Gemini (lacey-gemini-reviewer)',
     '',
     '## Summary',
     'No blocking findings.',
@@ -2197,7 +2197,7 @@ test('sanitizeAgyReviewOutput accepts a well-formed agy review with inline verdi
   ].join('\n'));
 
   assert.equal(result, [
-    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '## Adversarial Review — Gemini (lacey-gemini-reviewer)',
     '',
     '## Summary',
     'No blocking findings.',
@@ -2209,7 +2209,7 @@ test('sanitizeAgyReviewOutput accepts a well-formed agy review with inline verdi
 
 test('sanitizeAgyReviewOutput accepts a valid review that discusses error sentinels', () => {
   const result = sanitizeAgyReviewOutput([
-    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '## Adversarial Review — Gemini (lacey-gemini-reviewer)',
     '',
     '## Summary',
     'The reviewed code can print this valid diagnostic:',
@@ -2234,7 +2234,7 @@ test('sanitizeAgyReviewOutput strips narration before a valid agy review block',
   const result = sanitizeAgyReviewOutput([
     'I will inspect the workspace first.',
     'I will run `git log`.',
-    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '## Adversarial Review — Gemini (lacey-gemini-reviewer)',
     '',
     '## Summary',
     'The change is safe.',
@@ -2244,7 +2244,7 @@ test('sanitizeAgyReviewOutput strips narration before a valid agy review block',
   ].join('\n'));
 
   assert.equal(result, [
-    '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+    '## Adversarial Review — Gemini (lacey-gemini-reviewer)',
     '',
     '## Summary',
     'The change is safe.',
@@ -2312,11 +2312,11 @@ test('reviewWithGemini antigravity retries transient agy subprocess errors', asy
         err.stderr = 'TLS handshake timeout';
         throw err;
       }
-      return { stdout: '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n## Verdict\nComment only', stderr: '' };
+      return { stdout: '## Adversarial Review — Gemini (lacey-gemini-reviewer)\n\n## Verdict\nComment only', stderr: '' };
     },
   });
 
-  assert.equal(result.reviewText, '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n## Verdict\nComment only');
+  assert.equal(result.reviewText, '## Adversarial Review — Gemini (lacey-gemini-reviewer)\n\n## Verdict\nComment only');
   assert.deepEqual(spawns, ['agy', 'agy']);
 });
 

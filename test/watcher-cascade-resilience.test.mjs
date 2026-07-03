@@ -530,14 +530,14 @@ test('resolveReviewerIdentity maps the Gemini bot token env to the Gemini review
       reviewerModel: 'gemini',
       botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
     }),
-    'gemini-reviewer-lacey',
+    'lacey-gemini-reviewer',
   );
   assert.equal(
     resolveReviewerIdentity({
       reviewerModel: 'claude',
       botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
     }),
-    'gemini-reviewer-lacey',
+    'lacey-gemini-reviewer',
   );
 });
 

@@ -172,6 +172,7 @@ const ROLE_FALLBACK_CLASSES = [
   'codex',
   'claude-reviewer-lacey',
   'codex-reviewer-lacey',
+  'lacey-gemini-reviewer',
   'merge-agent',
   'merge-agent-failure-recovery',
   'clio-agent',

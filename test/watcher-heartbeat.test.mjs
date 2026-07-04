@@ -23,7 +23,7 @@ function readJson(filePath) {
   return JSON.parse(readFileSync(filePath, 'utf8'));
 }
 
-test('watcher heartbeat persists poll counter and review timestamps', () => {
+test('watcher heartbeat persists poll counter and review timestamps', async () => {
   const rootDir = tempRoot();
   try {
     const times = [
@@ -52,6 +52,7 @@ test('watcher heartbeat persists poll counter and review timestamps', () => {
       pr_number: 3046,
       posted_at: '2026-07-04T10:00:05.000Z',
     });
+    await heartbeat.flush();
     persisted = readJson(watcherHeartbeatPath(rootDir));
     assert.equal(persisted.event, 'review');
     assert.equal(persisted.last_poll_at, '2026-07-04T10:00:00.000Z');
@@ -59,6 +60,49 @@ test('watcher heartbeat persists poll counter and review timestamps', () => {
     assert.equal(persisted.poll_counter, 1);
     assert.equal(persisted.repo, 'laceyenterprises/adversarial-review');
     assert.equal(persisted.pr_number, 3046);
+  } finally {
+    cleanup(rootDir);
+  }
+});
+
+test('watcher heartbeat debounces review persistence within a tick', async () => {
+  const rootDir = tempRoot();
+  const writes = [];
+  const times = [
+    new Date('2026-07-04T10:03:00.000Z'),
+    new Date('2026-07-04T10:03:01.000Z'),
+  ];
+  try {
+    const heartbeat = createWatcherHeartbeat({
+      filePath: join(rootDir, 'heartbeat.json'),
+      now: () => times.shift() || new Date('2026-07-04T10:03:02.000Z'),
+      writeFile(_filePath, content) {
+        writes.push(JSON.parse(content));
+      },
+      readFile() {
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      },
+      pid: 4242,
+      logger: { warn() {} },
+    });
+
+    heartbeat.markReview({
+      repo: 'laceyenterprises/adversarial-review',
+      pr_number: 492,
+    });
+    heartbeat.markReview({
+      repo: 'laceyenterprises/adversarial-review',
+      pr_number: 493,
+    });
+
+    assert.equal(writes.length, 0);
+    await heartbeat.flush();
+
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].event, 'review');
+    assert.equal(writes[0].watcher_pid, 4242);
+    assert.equal(writes[0].pr_number, 493);
+    assert.equal(writes[0].last_review_at, '2026-07-04T10:03:01.000Z');
   } finally {
     cleanup(rootDir);
   }

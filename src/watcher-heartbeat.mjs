@@ -47,9 +47,36 @@ function createWatcherHeartbeat({
   let pollCounter = normalizeCounter(prior?.poll_counter);
   let lastPollAt = typeof prior?.last_poll_at === 'string' ? prior.last_poll_at : null;
   let lastReviewAt = typeof prior?.last_review_at === 'string' ? prior.last_review_at : null;
+  let pendingReviewHeartbeat = null;
+  let reviewPersistScheduled = false;
+  let reviewPersistChain = Promise.resolve();
 
-  function persist(event, extra = {}, at = now().toISOString()) {
-    const heartbeat = {
+  function writeHeartbeat(heartbeat) {
+    try {
+      return Promise.resolve(writeFile(filePath, `${JSON.stringify(heartbeat, null, 2)}\n`))
+        .catch((err) => {
+          logger?.warn?.(`[watcher] failed to persist heartbeat at ${filePath}: ${err?.message || err}`);
+        });
+    } catch (err) {
+      logger?.warn?.(`[watcher] failed to persist heartbeat at ${filePath}: ${err?.message || err}`);
+      return Promise.resolve();
+    }
+  }
+
+  function persistReviewLater(heartbeat) {
+    pendingReviewHeartbeat = heartbeat;
+    if (reviewPersistScheduled) return;
+    reviewPersistScheduled = true;
+    queueMicrotask(() => {
+      reviewPersistScheduled = false;
+      const nextHeartbeat = pendingReviewHeartbeat;
+      pendingReviewHeartbeat = null;
+      reviewPersistChain = reviewPersistChain.then(() => writeHeartbeat(nextHeartbeat));
+    });
+  }
+
+  function heartbeatPayload(event, extra = {}, at = now().toISOString()) {
+    return {
       schema_version: 1,
       watcher_pid: pid,
       updated_at: at,
@@ -59,14 +86,11 @@ function createWatcherHeartbeat({
       event,
       ...extra,
     };
-    try {
-      Promise.resolve(writeFile(filePath, `${JSON.stringify(heartbeat, null, 2)}\n`))
-        .catch((err) => {
-          logger?.warn?.(`[watcher] failed to persist heartbeat at ${filePath}: ${err?.message || err}`);
-        });
-    } catch (err) {
-      logger?.warn?.(`[watcher] failed to persist heartbeat at ${filePath}: ${err?.message || err}`);
-    }
+  }
+
+  function persist(event, extra = {}, at = now().toISOString()) {
+    const heartbeat = heartbeatPayload(event, extra, at);
+    void writeHeartbeat(heartbeat);
     return heartbeat;
   }
 
@@ -80,7 +104,9 @@ function createWatcherHeartbeat({
   function markReview(extra = {}) {
     const at = now().toISOString();
     lastReviewAt = at;
-    return persist('review', extra, at);
+    const heartbeat = heartbeatPayload('review', extra, at);
+    persistReviewLater(heartbeat);
+    return heartbeat;
   }
 
   function snapshot() {
@@ -92,7 +118,12 @@ function createWatcherHeartbeat({
     };
   }
 
-  return { filePath, markPoll, markReview, persist, snapshot };
+  async function flush() {
+    await Promise.resolve();
+    await reviewPersistChain;
+  }
+
+  return { filePath, markPoll, markReview, persist, snapshot, flush };
 }
 
 function createWatcherStallWatchdog({

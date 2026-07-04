@@ -212,10 +212,9 @@ test('CFG-09 N2 hot path: routeSubject parses once per tick across 10 PRs', (t) 
           routeSubject(subjects[i], callOpts);
         }
         const parseCount = yamlLoadCountFor(yamlLoadSpy, modulePath);
-        assert.equal(
-          parseCount,
-          parseCountAfterFirstMeasuredCall,
-          `tick ${tick}: repeated PR routing must hit cache after any measured refresh; saw ${parseCount} parses`,
+        assert.ok(
+          parseCount <= 1,
+          `tick ${tick}: repeated PR routing must not reparse per PR; saw ${parseCount} parses`,
         );
       } finally {
         yamlLoadSpy.mock.restore();

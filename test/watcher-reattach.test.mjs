@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+import { mkdtempSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
+import { writeReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import {
   LEGACY_ORPHAN_FAILURE_MESSAGE,
@@ -657,7 +661,96 @@ test('alive matching-head reviewer with an already posted review remains a stick
   assert.match(log.lines.join('\n'), /reviewer_reattach_orphan/);
 });
 
-test('claimed rows with null pgid become sticky failed-orphan', async () => {
+test('claimed rows with null pgid adopt a live run-state pgid after watcher bounce', async () => {
+  const db = setupDb();
+  seedReviewing(db, { pgid: null });
+  const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-reattach-adopt-'));
+  writeReviewerRunRecord(rootDir, {
+    sessionUuid: 'session-70',
+    runtime: 'cli-direct',
+    state: 'heartbeating',
+    pgid: 9001,
+    spawnedAt: STARTED_AT,
+    lastHeartbeatAt: STARTED_AT,
+    reattachToken: 'session-70',
+  });
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    rootDir,
+    now: new Date(FAILURE_AT),
+    log,
+    probeSession: () => ({ alive: true, matched: true }),
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.reviewer_pgid, 9001);
+  assert.equal(row.review_attempts, 2);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_adopted_run_state/);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_alive/);
+});
+
+test('claimed rows with null pgid auto-rearm when no live run-state or GitHub review exists', async () => {
+  const db = setupDb();
+  seedReviewing(db, { pgid: null });
+  const log = makeLog();
+  const settled = [];
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    fetchHeadSha: async () => HEAD_SHA,
+    onTerminalDeadSession: async (event) => settled.push(event),
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'pending');
+  assert.equal(row.review_attempts, 3);
+  assert.match(row.failure_message, /no live reviewer process group was found/);
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'cancelled', reason: 'missing-pgid-no-live-reviewer' }]
+  );
+  assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_requeued/);
+});
+
+test('claimed rows with null pgid reconcile to an already posted current-head review', async () => {
+  const db = setupDb();
+  seedReviewing(db, { pgid: null });
+  const log = makeLog();
+  const settled = [];
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    fetchHeadSha: async () => HEAD_SHA,
+    findPostedReview: async () => ({
+      user: { login: 'codex-reviewer-lacey' },
+      submitted_at: '2026-05-11T05:13:09.000Z',
+      commit_id: HEAD_SHA,
+    }),
+    onTerminalDeadSession: async (event) => settled.push(event),
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'posted');
+  assert.equal(row.posted_at, '2026-05-11T05:13:09.000Z');
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'completed', reason: 'posted-review-recovered-null-pgid' }]
+  );
+  assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_recovered/);
+});
+
+test('claimed rows with null pgid stay sticky when GitHub review probe fails', async () => {
   const db = setupDb();
   seedReviewing(db, { pgid: null });
   const log = makeLog();
@@ -667,16 +760,18 @@ test('claimed rows with null pgid become sticky failed-orphan', async () => {
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
-    probeAlive: () => {
-      throw new Error('null pgid rows should not probe liveness');
+    fetchHeadSha: async () => HEAD_SHA,
+    findPostedReview: async () => {
+      throw new Error('reviews unavailable');
     },
   });
 
   const row = readRow(db);
   assert.equal(row.review_status, 'failed-orphan');
   assert.equal(row.review_attempts, 3);
-  assert.equal(row.failure_message, NULL_PGID_FAILURE_MESSAGE);
-  assert.match(log.lines.join('\n'), /reviewer_reattach_missing_pgid/);
+  assert.match(row.failure_message, /Review probe failed before safe auto-rearm: reviews unavailable/);
+  assert.match(row.failure_message, new RegExp(NULL_PGID_FAILURE_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(log.lines.join('\n'), /reviewer_reattach_missing_pgid_probe_failed/);
 });
 
 test('alive pgid that does not match the reviewer session becomes sticky failed-orphan', async () => {

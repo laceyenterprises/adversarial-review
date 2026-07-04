@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 
+import { readReviewerRunRecord } from './adapters/reviewer-runtime/run-state.mjs';
 import { resolveReviewerLeaseRecoveryEnabled } from './reviewer-lease.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 
@@ -11,6 +12,9 @@ const LEGACY_ORPHAN_FAILURE_MESSAGE =
 const NULL_PGID_FAILURE_MESSAGE =
   'Reviewer session was claimed but its pgid was never persisted. ' +
   'The watcher likely died between the claim and spawn callback; operator must verify GitHub before clearing.';
+const NULL_PGID_REARM_MESSAGE =
+  'Reviewer session was claimed but no live reviewer process group was found after watcher restart; ' +
+  'GitHub was checked for a completed review before automatically re-arming.';
 const UNKNOWN_REVIEWER_FAILURE_MESSAGE =
   'Reviewer session has an unknown reviewer value; operator must verify GitHub before retrying.';
 const CORRUPT_SESSION_FAILURE_MESSAGE =
@@ -180,6 +184,17 @@ function prepareStatements(db) {
     markPosted: db.prepare(
       "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
     ),
+    adoptRunStatePgid: db.prepare(
+      `UPDATE reviewed_prs
+          SET reviewer_pgid = ?,
+              reviewer_started_at = COALESCE(reviewer_started_at, ?),
+              reviewer_lease_expires_at = COALESCE(reviewer_lease_expires_at, ?)
+        WHERE repo = ?
+          AND pr_number = ?
+          AND review_status = 'reviewing'
+          AND reviewer_session_uuid = ?
+          AND (reviewer_pgid IS NULL OR reviewer_pgid = '')`
+    ),
   };
 }
 
@@ -200,9 +215,34 @@ function markStickyOrphan({ statements, row, failureAt, message, log, event }) {
   );
 }
 
+function reviewerRunStateAdoptionCandidate(rootDir, row) {
+  if (!row?.reviewer_session_uuid) return null;
+  let record = null;
+  try {
+    record = readReviewerRunRecord(rootDir, row.reviewer_session_uuid);
+  } catch {
+    return null;
+  }
+  const pgid = parsePositiveInteger(record?.pgid);
+  if (!record || record.sessionUuid !== row.reviewer_session_uuid || pgid === null) return null;
+  return {
+    pgid,
+    spawnedAt: record.spawnedAt || row.reviewer_started_at,
+    reattachToken: record.reattachToken || record.sessionUuid,
+  };
+}
+
+function reviewerLeaseExpiryAt(startedAt, timeoutMs) {
+  const startedAtMs = parseTime(startedAt);
+  const timeout = parsePositiveInteger(timeoutMs);
+  if (startedAtMs === null || timeout === null) return null;
+  return new Date(startedAtMs + timeout).toISOString();
+}
+
 async function reconcileReviewerSessions({
   db,
   octokit,
+  rootDir = process.cwd(),
   now = new Date(),
   log = console,
   statements = prepareStatements(db),
@@ -227,21 +267,10 @@ async function reconcileReviewerSessions({
   if (rows.length === 0) return { reconciled: 0, skipped: matchingRows.length };
 
   const failureAt = now.toISOString();
-  for (const row of rows) {
+  for (const listedRow of rows) {
+    let row = listedRow;
     if (!row.reviewer_session_uuid) {
       markLegacyOrphan({ statements, row, failureAt, log });
-      continue;
-    }
-
-    if (row.reviewer_pgid === null || row.reviewer_pgid === undefined || row.reviewer_pgid === '') {
-      markStickyOrphan({
-        statements,
-        row,
-        failureAt,
-        message: NULL_PGID_FAILURE_MESSAGE,
-        log,
-        event: 'reviewer_reattach_missing_pgid',
-      });
       continue;
     }
 
@@ -255,6 +284,108 @@ async function reconcileReviewerSessions({
         event: 'reviewer_reattach_unknown_reviewer',
       });
       continue;
+    }
+
+    if (row.reviewer_pgid === null || row.reviewer_pgid === undefined || row.reviewer_pgid === '') {
+      const adoption = reviewerRunStateAdoptionCandidate(rootDir, row);
+      if (adoption) {
+        const startedAt = adoption.spawnedAt || row.reviewer_started_at || row.last_attempted_at || failureAt;
+        const leaseExpiresAt = reviewerLeaseExpiryAt(startedAt, row.reviewer_timeout_ms);
+        statements.adoptRunStatePgid.run(
+          adoption.pgid,
+          startedAt,
+          leaseExpiresAt,
+          row.repo,
+          row.pr_number,
+          row.reviewer_session_uuid
+        );
+        row = {
+          ...row,
+          reviewer_pgid: adoption.pgid,
+          reviewer_started_at: row.reviewer_started_at || startedAt,
+          reviewer_lease_expires_at: row.reviewer_lease_expires_at || leaseExpiresAt,
+        };
+        log.log(
+          `[watcher] reviewer_reattach_adopted_run_state repo=${row.repo} pr=${row.pr_number} ` +
+          `session=${row.reviewer_session_uuid} token=${adoption.reattachToken || row.reviewer_session_uuid} ` +
+          `pgid=${adoption.pgid}`
+        );
+      } else {
+        let currentHeadSha = null;
+        try {
+          currentHeadSha = await fetchHeadSha(row);
+        } catch (err) {
+          log.warn(
+            `[watcher] reviewer_reattach_null_pgid_head_probe_failed repo=${row.repo} pr=${row.pr_number} ` +
+            `session=${row.reviewer_session_uuid} error=${err?.message || err}`
+          );
+          markStickyOrphan({
+            statements,
+            row,
+            failureAt,
+            message: `${NULL_PGID_FAILURE_MESSAGE} Head probe failed before safe auto-rearm: ${err?.message || err}`,
+            log,
+            event: 'reviewer_reattach_missing_pgid_probe_failed',
+          });
+          continue;
+        }
+
+        let postedReview = null;
+        try {
+          const probeRow = {
+            ...row,
+            reviewer_started_at: row.reviewer_started_at || row.last_attempted_at || failureAt,
+          };
+          postedReview = await findPostedReview(probeRow, { refresh: true });
+        } catch (err) {
+          log.warn(
+            `[watcher] reviewer_reattach_null_pgid_review_probe_failed repo=${row.repo} pr=${row.pr_number} ` +
+            `session=${row.reviewer_session_uuid} error=${err?.message || err}`
+          );
+          markStickyOrphan({
+            statements,
+            row,
+            failureAt,
+            message: `${NULL_PGID_FAILURE_MESSAGE} Review probe failed before safe auto-rearm: ${err?.message || err}`,
+            log,
+            event: 'reviewer_reattach_missing_pgid_probe_failed',
+          });
+          continue;
+        }
+
+        if (postedReview && (!currentHeadSha || !postedReview.commit_id || postedReview.commit_id === currentHeadSha)) {
+          await onTerminalDeadSession({
+            row,
+            state: 'completed',
+            settledAt: postedReview.submitted_at,
+            reason: 'posted-review-recovered-null-pgid',
+          });
+          statements.markPosted.run(postedReview.submitted_at, row.repo, row.pr_number);
+          log.log(
+            `[watcher] reviewer_reattach_null_pgid_recovered repo=${row.repo} pr=${row.pr_number} ` +
+            `session=${row.reviewer_session_uuid} posted_at=${postedReview.submitted_at}`
+          );
+          continue;
+        }
+
+        await onTerminalDeadSession({
+          row,
+          state: 'cancelled',
+          settledAt: failureAt,
+          reason: 'missing-pgid-no-live-reviewer',
+        });
+        statements.releasePending.run(
+          failureAt,
+          NULL_PGID_REARM_MESSAGE,
+          row.repo,
+          row.pr_number
+        );
+        log.warn(
+          `[watcher] reviewer_reattach_null_pgid_requeued repo=${row.repo} pr=${row.pr_number} ` +
+          `session=${row.reviewer_session_uuid} current_head=${currentHeadSha || 'unknown'}`
+        );
+        continue;
+      }
     }
 
     if (parseTime(row.reviewer_started_at) === null) {

@@ -168,8 +168,8 @@ test('missing file returns defaults', () => {
     // rollout introduces the canonical Python/shell schema.
     assert.equal(cfg.get('op.vault'), 'Cliovault');
     assert.equal(cfg.get('update.channel'), 'rolling');
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_per_hour'), 3);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_finding_dedupe_seconds'), 86400);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_per_hour'), null);
+    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_finding_dedupe_seconds'), null);
     assert.equal(cfg.get('agent_control.codex_runaway_guardrails.token_budget_per_session'), 50000000);
     assert.deepEqual(cfg.get('agent_control.codex_runaway_guardrails.pr_class_additive_only_allowlist'), [
       'projects/*',
@@ -345,7 +345,43 @@ test('codex runaway guardrail vocabulary fatigue config resolves through strict 
   }
 });
 
-test('codex runaway guardrail strict schema accepts Python-owned keys', () => {
+test('codex runaway guardrail strict schema rejects removed sentinel-owned legacy keys', () => {
+  const removedKeys = [
+    'observed_repos',
+    'convergence_stall_commit_window_seconds',
+    'convergence_stall_min_commits',
+    'convergence_stall_file_fetch_budget_per_cycle',
+    'convergence_stall_finding_dedupe_seconds',
+    'convergence_stall_repo_backoff_seconds',
+    'convergence_stall_observed_worker_classes',
+    'compaction_rate_alarm_per_hour',
+    'compaction_rate_alarm_finding_dedupe_seconds',
+  ];
+
+  for (const key of removedKeys) {
+    const tmp = freshTmp();
+    try {
+      const top = join(tmp, 'config.yaml');
+      writeFile(top, `
+        version: 1
+        agent_control:
+          codex_runaway_guardrails:
+            ${key}: 7
+      `);
+      assert.throws(
+        () => loadConfig({ topPath: top, env: {} }),
+        (err) =>
+          err instanceof AgentOSConfigError &&
+          err.key === `agent_control.codex_runaway_guardrails.${key}` &&
+          /unknown key/.test(err.message),
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+});
+
+test('codex runaway guardrail strict schema keeps live agent_control keys', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -353,19 +389,6 @@ test('codex runaway guardrail strict schema accepts Python-owned keys', () => {
       version: 1
       agent_control:
         codex_runaway_guardrails:
-          observed_repos:
-            - laceyenterprises/agent-os
-            - laceyenterprises/adversarial-review
-          convergence_stall_commit_window_seconds: 1800
-          convergence_stall_min_commits: 4
-          convergence_stall_file_fetch_budget_per_cycle: 12
-          convergence_stall_finding_dedupe_seconds: 600
-          convergence_stall_repo_backoff_seconds: 30
-          convergence_stall_observed_worker_classes:
-            - codex
-            - claude-code
-          compaction_rate_alarm_per_hour: 7
-          compaction_rate_alarm_finding_dedupe_seconds: 120
           token_budget_per_session: 200000
           pr_class_additive_only_allowlist:
             - projects/*
@@ -374,21 +397,6 @@ test('codex runaway guardrail strict schema accepts Python-owned keys', () => {
           vocabulary_fatigue_min_repeats: 4
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
-    assert.deepEqual(cfg.get('agent_control.codex_runaway_guardrails.observed_repos'), [
-      'laceyenterprises/agent-os',
-      'laceyenterprises/adversarial-review',
-    ]);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_commit_window_seconds'), 1800);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_min_commits'), 4);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_file_fetch_budget_per_cycle'), 12);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_finding_dedupe_seconds'), 600);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_repo_backoff_seconds'), 30);
-    assert.deepEqual(cfg.get('agent_control.codex_runaway_guardrails.convergence_stall_observed_worker_classes'), [
-      'codex',
-      'claude-code',
-    ]);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_per_hour'), 7);
-    assert.equal(cfg.get('agent_control.codex_runaway_guardrails.compaction_rate_alarm_finding_dedupe_seconds'), 120);
     assert.equal(cfg.get('agent_control.codex_runaway_guardrails.token_budget_per_session'), 200000);
     assert.deepEqual(cfg.get('agent_control.codex_runaway_guardrails.pr_class_additive_only_allowlist'), [
       'projects/*',

@@ -369,23 +369,6 @@ function schemaV1() {
             __type: TYPE_DICT,
             __strict: true,
             __keys: {
-              observed_repos: {
-                __type: TYPE_LIST,
-                __item: { __type: TYPE_STRING },
-                __default: ['laceyenterprises/agent-os', 'laceyenterprises/adversarial-review'],
-              },
-              convergence_stall_commit_window_seconds: { __type: TYPE_INT, __default: 3600, __min: 1 },
-              convergence_stall_min_commits: { __type: TYPE_INT, __default: 3, __min: 1 },
-              convergence_stall_file_fetch_budget_per_cycle: { __type: TYPE_INT, __default: 20, __min: 1 },
-              convergence_stall_finding_dedupe_seconds: { __type: TYPE_INT, __default: 900, __min: 1 },
-              convergence_stall_repo_backoff_seconds: { __type: TYPE_INT, __default: 60, __min: 1 },
-              convergence_stall_observed_worker_classes: {
-                __type: TYPE_LIST,
-                __item: { __type: TYPE_STRING },
-                __default: ['codex', 'claude-code', 'clio-agent'],
-              },
-              compaction_rate_alarm_per_hour: { __type: TYPE_INT, __default: 3, __min: 1 },
-              compaction_rate_alarm_finding_dedupe_seconds: { __type: TYPE_INT, __default: 86400, __min: 1 },
               token_budget_per_session: { __type: TYPE_INT, __default: 50000000, __min: 0 },
               pr_class_additive_only_allowlist: {
                 __type: TYPE_LIST,

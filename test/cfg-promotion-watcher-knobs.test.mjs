@@ -299,15 +299,42 @@ test('first-pass reviewer pool: legacy ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_
   assert.strictEqual(cfg.maxConcurrent, 7);
 });
 
-test('first-pass reviewer pool: falls back to internal default when CFG + env both unset', () => {
+test('first-pass reviewer pool: defaults to durable runtime value when env is unset', () => {
   const env = {};
   const cfg = resolveFirstPassReviewerPoolConfig({
     env,
     watcherConfig: {},
     topPath: '/dev/null',
   });
-  // DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 3
-  assert.strictEqual(cfg.maxConcurrent, 3);
+  assert.strictEqual(cfg.maxConcurrent, 6);
+});
+
+test('first-pass reviewer pool: watcherConfig fallback is honored when CFG is unset', () => {
+  const cfg = resolveFirstPassReviewerPoolConfig({
+    env: {},
+    watcherConfig: { maxConcurrentFirstPassReviewers: 2 },
+    topPath: '/dev/null',
+  });
+  assert.strictEqual(cfg.enabled, true);
+  assert.strictEqual(cfg.maxConcurrent, 2);
+});
+
+test('first-pass reviewer pool: accepts legacy persisted null and maps it to the durable default', () => {
+  const { configPath, cleanup } = createTempConfig(`version: 1
+watcher:
+  first_pass_reviewer_pool_max_concurrent_reviewers: null
+`);
+  try {
+    const cfg = resolveFirstPassReviewerPoolConfig({
+      env: { AGENT_OS_CONFIG_PATH: configPath },
+      watcherConfig: {},
+      logger: { warn() {} },
+    });
+    assert.strictEqual(cfg.enabled, true);
+    assert.strictEqual(cfg.maxConcurrent, 6);
+  } finally {
+    cleanup();
+  }
 });
 
 test('first-pass reviewer pool honors canonical env-scoped config path', () => {
@@ -347,11 +374,42 @@ test('first-pass reviewer pool honors module-local config cascade', () => {
 
 test('first-pass reviewer pool honors canonical AGENT_OS_* env overrides from the supplied env', () => {
   const cfg = resolveFirstPassReviewerPoolConfig({
-    env: { AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '6' },
+    env: { AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '8' },
     watcherConfig: {},
   });
   assert.strictEqual(cfg.enabled, true);
-  assert.strictEqual(cfg.maxConcurrent, 6);
+  assert.strictEqual(cfg.maxConcurrent, 8);
+});
+
+test('first-pass reviewer pool clamps over-large canonical AGENT_OS_* env overrides', () => {
+  const warnings = [];
+  const cfg = resolveFirstPassReviewerPoolConfig({
+    env: { AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '99' },
+    watcherConfig: {},
+    logger: { warn: (message) => warnings.push(String(message)) },
+  });
+  assert.strictEqual(cfg.enabled, true);
+  assert.strictEqual(cfg.maxConcurrent, 12);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /WARN config key=watcher\.first_pass_reviewer_pool_max_concurrent_reviewers/);
+  assert.match(warnings[0], /requested max_concurrent_reviewers=99/);
+  assert.match(warnings[0], /clamping to 12/);
+});
+
+test('first-pass reviewer pool clamp warning identifies watcherConfig fallback source', () => {
+  const warnings = [];
+  const cfg = resolveFirstPassReviewerPoolConfig({
+    env: {},
+    watcherConfig: { maxConcurrentFirstPassReviewers: 99 },
+    topPath: '/dev/null',
+    logger: { warn: (message) => warnings.push(String(message)) },
+  });
+  assert.strictEqual(cfg.enabled, true);
+  assert.strictEqual(cfg.maxConcurrent, 12);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /WARN config key=watcherConfig\.maxConcurrentFirstPassReviewers/);
+  assert.match(warnings[0], /requested max_concurrent_reviewers=99/);
+  assert.match(warnings[0], /clamping to 12/);
 });
 
 test('first-pass reviewer pool fails loud on canonical env parse errors', () => {

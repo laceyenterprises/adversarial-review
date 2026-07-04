@@ -606,6 +606,21 @@ test('reviewer pool config accepts the first-pass pool concurrency alias', () =>
   );
 });
 
+test('reviewer pool config clamps over-large concurrency values', () => {
+  const warnings = [];
+  assert.deepEqual(
+    resolveFirstPassReviewerPoolConfig({
+      env: { AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '99' },
+      watcherConfig: {},
+      logger: { warn: (message) => warnings.push(String(message)) },
+    }),
+    { enabled: true, maxConcurrent: 12 }
+  );
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /requested max_concurrent_reviewers=99/);
+  assert.match(warnings[0], /clamping to 12/);
+});
+
 test('reviewer memory pressure config resolves through the CFG loader', () => {
   const config = resolveReviewerMemoryPressureConfig({
     loaderImpl: () => ({

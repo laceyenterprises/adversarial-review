@@ -1694,10 +1694,8 @@ function schemaV1() {
           },
           // First-pass reviewer pool concurrency cap. Maximum number of
           // concurrent first-pass review processes the watcher may have in
-          // flight. Currently env-only via `ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT`;
-          // promoting it gives operators a CFG anchor so the value is visible
-          // in `agent-os config doctor`. Null = use the watcher's internal
-          // default (currently dynamic based on review surface).
+          // flight. Null preserves the runtime cascade:
+          // CFG/env -> watcherConfig -> durable default.
           first_pass_reviewer_pool_max_concurrent_reviewers: {
             __type: TYPE_INT,
             __default: null,

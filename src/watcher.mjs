@@ -2347,6 +2347,108 @@ function resolveQuotaExhaustedBackoffMs(env = process.env) {
   return Math.floor(parsed);
 }
 const QUOTA_EXHAUSTED_BACKOFF_MS = resolveQuotaExhaustedBackoffMs();
+
+function readJsonFile(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    if (err?.code === 'ENOENT') return null;
+    return { __unreadableJson: true };
+  }
+}
+
+function mainCatchupOutageSignal({ env = process.env } = {}) {
+  const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
+  const state = readJsonFile(join(hqRoot, 'main-catchup', '.state.json'));
+  if (!state || typeof state !== 'object') return null;
+  if (state.__unreadableJson) {
+    return { reason: 'deploy-wedge', detail: 'state-unreadable', retryAfter: null };
+  }
+  const freezeClass = state.freezeClass
+    || state.pendingFreeze?.freezeClass
+    || state.pendingPgSchemaGateFreeze?.freezeClass
+    || state.pendingRecovery?.freezeClass
+    || null;
+  if (freezeClass) {
+    return { reason: 'deploy-wedge', detail: String(freezeClass), retryAfter: null };
+  }
+  if (
+    state.currentState === 'frozen' ||
+    state.currentState === 'deploy-freeze' ||
+    state.pendingPgSchemaGateFreeze ||
+    state.pendingPgSchemaSelfHeal ||
+    state.pendingRecovery?.classification?.freezeClass
+  ) {
+    return { reason: 'deploy-wedge', detail: String(state.currentState || 'main-catchup-freeze'), retryAfter: null };
+  }
+  return null;
+}
+
+function classifyOutageText(text) {
+  const lower = String(text || '').toLowerCase();
+  if (
+    /\boauth[-_ ]?broker\b|\bbroker\b/.test(lower) &&
+    (
+      /\b(?:econnrefused|econnreset|etimedout|eai_again|enotfound)\b/.test(lower) ||
+      /connection (?:refused|reset|timed out|aborted)/.test(lower) ||
+      /fetch failed|body timeout|broker returned http 5\d\d|broker.*unavailable|shared secret.*unavailable/.test(lower)
+    )
+  ) {
+    return { reason: 'broker-unavailable', detail: 'reviewer-token-broker-unavailable' };
+  }
+  if (
+    /\b(?:gh|github|api\.github\.com|graphql)\b/.test(lower) &&
+    (
+      /\b(?:econnrefused|econnreset|etimedout|eai_again|enotfound)\b/.test(lower) ||
+      /connection (?:refused|reset|timed out|aborted)/.test(lower) ||
+      /tls handshake|temporary failure|temporarily unavailable|network is unreachable/.test(lower) ||
+      /\bhttp\s*5\d\d\b|service unavailable|gateway timeout|secondary rate limit|too many requests/.test(lower)
+    )
+  ) {
+    return { reason: 'github-unavailable', detail: 'github-unavailable' };
+  }
+  return null;
+}
+
+function resolveReviewerOutageSignal({
+  failureClass,
+  fullOutput = '',
+  failureAt,
+  env = process.env,
+  nowMs = Date.now(),
+  quotaResetIso = null,
+} = {}) {
+  const failureAtMs = Date.parse(failureAt || '');
+  const anchorMs = Number.isNaN(failureAtMs) ? nowMs : failureAtMs;
+  if (failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
+    return {
+      active: true,
+      reason: 'quota-outage',
+      failureClass,
+      retryAfter: quotaResetIso || new Date(anchorMs + QUOTA_EXHAUSTED_BACKOFF_MS).toISOString(),
+      quotaResetIso,
+    };
+  }
+  const textSignal = classifyOutageText(fullOutput);
+  if (textSignal) {
+    return {
+      active: true,
+      failureClass: textSignal.reason,
+      retryAfter: new Date(anchorMs + 5 * 60_000).toISOString(),
+      ...textSignal,
+    };
+  }
+  const deploySignal = mainCatchupOutageSignal({ env });
+  if (deploySignal) {
+    return {
+      ...deploySignal,
+      active: true,
+      failureClass: 'deploy-wedge',
+      retryAfter: deploySignal.retryAfter || new Date(anchorMs + 5 * 60_000).toISOString(),
+    };
+  }
+  return { active: false, reason: null, failureClass: null, retryAfter: null, quotaResetIso: null };
+}
 const DEFAULT_REVIEW_POPULATION_RETRY_CONFIG = Object.freeze({
   maxAttempts: 1,
   backoffSeconds: 45,
@@ -2601,6 +2703,9 @@ const stmtMarkFailedQuota = db.prepare(
 );
 const stmtReleaseReviewLeaseQuota = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, quota_reset_at_utc = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+);
+const stmtMarkOutageTransient = db.prepare(
+  "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, quota_reset_at_utc = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
 );
 const stmtMarkCascadeFailed = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
@@ -3109,6 +3214,7 @@ function settleReviewerAttempt({
     releaseReviewLease: stmtReleaseReviewLease,
     markFailedQuota: stmtMarkFailedQuota,
     releaseReviewLeaseQuota: stmtReleaseReviewLeaseQuota,
+    markOutageTransient: stmtMarkOutageTransient,
     markCascadeFailed: stmtMarkCascadeFailed,
     markPendingUpstream: stmtMarkPendingUpstream,
     getReviewRow: stmtGetReviewRow,
@@ -3211,35 +3317,51 @@ function settleReviewerAttempt({
     return;
   }
 
-  clearCascadeState(rootDir, { repo: repoPath, prNumber });
-  if (failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
-    // Capture the provider usage-cap reset time from the FULL reviewer output
-    // (stdout + stderr + error message) BEFORE failure_message truncation can
-    // drop the "try again at <time>" line. Anchor year/date inference on the
-    // failure timestamp. Persist it durably in quota_reset_at_utc so the
-    // hold-until-reset gate honors the real reset instead of a blind window.
-    const fullQuotaOutput = [result.error, result.stdout, result.stderr]
-      .filter(Boolean)
-      .join('\n');
-    const failureAtMs = Date.parse(failureAt);
-    const quotaResetIso = resolveQuotaResetIso(fullQuotaOutput, {
+  const fullFailureOutput = [result.error, result.stdout, result.stderr]
+    .filter(Boolean)
+    .join('\n');
+  const failureAtMs = Date.parse(failureAt);
+  const quotaResetIso = failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS
+    ? resolveQuotaResetIso(fullFailureOutput, {
       nowMs: Number.isNaN(failureAtMs) ? null : failureAtMs,
-    });
-    if (!quotaResetIso) {
+    })
+    : null;
+  const outageSignal = resolveReviewerOutageSignal({
+    failureClass,
+    fullOutput: fullFailureOutput,
+    failureAt,
+    quotaResetIso,
+  });
+  if (outageSignal.active) {
+    if (failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS && !quotaResetIso) {
       log.warn(
         `[watcher] Quota-exhausted reviewer failure on #${prNumber} with NO parseable provider reset time; ` +
           `falling back to the ${Math.round(QUOTA_EXHAUSTED_BACKOFF_MS / 60000)}m default hold window`
       );
     }
-    statements.markFailedQuota.run(failureAt, classifiedMessage, quotaResetIso, repoPath, prNumber);
-    const updatedQuotaRow = statements.getReviewRow.get(repoPath, prNumber);
+    recordCascadeFailure(rootDir, {
+      repo: repoPath,
+      prNumber,
+      failedAt: failureAt,
+      failureClass: outageSignal.failureClass || outageSignal.reason,
+      nextRetryAfter: outageSignal.retryAfter,
+    });
+    statements.markOutageTransient.run(
+      failureAt,
+      `[outage-transient:${outageSignal.reason}] ${classifiedMessage}`,
+      quotaResetIso,
+      repoPath,
+      prNumber
+    );
+    const updatedOutageRow = statements.getReviewRow.get(repoPath, prNumber);
     log.warn(
-      `[watcher] Reviewer quota-exhausted failure on #${prNumber}; ` +
-        `reset=${quotaResetIso || 'unknown'}; will hold until the cap clears ` +
-        `(attempt ${updatedQuotaRow?.review_attempts}/${1 + Number(maxRemediationRounds || 0)})`
+      `[watcher] Reviewer failure on #${prNumber} coincided with ${outageSignal.reason}; ` +
+        `paused until ${outageSignal.retryAfter || 'next healthy poll'} without charging attempt budget ` +
+        `(attempts=${updatedOutageRow?.review_attempts ?? 'unknown'})`
     );
     return;
   }
+  clearCascadeState(rootDir, { repo: repoPath, prNumber });
   const terminalFailureStatement = leaseRecoveryEnabled
     ? statements.releaseReviewLease
     : statements.markFailed;

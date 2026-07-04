@@ -727,6 +727,37 @@ test('collector surfaces active provider overload backoffs and quota holds', () 
   );
 });
 
+test('reviewer degradation does not activate global outage metrics', () => {
+  const rootDir = tempRoot();
+  openDb(rootDir).close();
+
+  const cascadeStateDir = path.join(rootDir, 'data', 'cascade-state');
+  mkdirSync(cascadeStateDir, { recursive: true });
+  writeFileSync(
+    path.join(cascadeStateDir, `${encodeURIComponent(REPO)}__779.json`),
+    `${JSON.stringify({
+      consecutiveTransientFailures: 1,
+      transientFailureBreakdown: { [PROVIDER_OVERLOADED_FAILURE_CLASS]: 1 },
+      lastFailureClass: PROVIDER_OVERLOADED_FAILURE_CLASS,
+      lastFailureAt: '2026-05-25T17:58:00.000Z',
+      nextRetryAfter: '2026-05-25T18:05:00.000Z',
+      backoffMinutes: 8,
+    }, null, 2)}\n`
+  );
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.equal(snapshot.reviewerDegradation.active, 1);
+  assert.equal(snapshot.outage.active, false);
+  assert.equal(snapshot.outage.reason, null);
+  assert.equal(snapshot.outage.reviews_paused, false);
+  assert.equal(snapshot.outage.attempts_not_charged, 0);
+
+  const output = renderReviewPipelinePrometheus(snapshot);
+  assert.match(output, /^review_pipeline_reviewer_degradation_active\{failure_class="provider-overloaded",state="transient-backoff"\} 1$/m);
+  assert.match(output, /^review_pipeline_outage_active 0$/m);
+  assert.match(output, /^review_pipeline_outage_attempts_not_charged 0$/m);
+});
+
 test('malformed transient backoff retry dates are not treated as active degradation', () => {
   const rootDir = tempRoot();
   openDb(rootDir).close();
@@ -746,6 +777,29 @@ test('malformed transient backoff retry dates are not treated as active degradat
   const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
   assert.equal(snapshot.reviewerDegradation.active, 0);
   assert.ok(!findingCodes(snapshot).includes('review:reviewer_degradation_active'));
+});
+
+test('health output surfaces outage pause and attempts not charged', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 778,
+    reviewStatus: 'pending-upstream',
+    reviewAttempts: 0,
+    lastAttemptedAt: '2026-05-25T17:55:00.000Z',
+    failedAt: '2026-05-25T17:55:00.000Z',
+    failureMessage: '[outage-transient:quota-outage] [quota-exhausted] usage limit',
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.equal(snapshot.outage.active, true);
+  assert.equal(snapshot.outage.reason, 'quota-outage');
+  assert.equal(snapshot.outage.reviews_paused, true);
+  assert.equal(snapshot.outage.attempts_not_charged, 1);
+  assert.deepEqual(snapshot.outage.reasons, [{ reason: 'quota-outage', count: 1 }]);
+
+  const output = renderReviewPipelinePrometheus(snapshot);
+  assert.match(output, /^review_pipeline_outage_active 1$/m);
+  assert.match(output, /^review_pipeline_outage_attempts_not_charged 1$/m);
 });
 
 test('Grafana dashboard JSON references only exported review pipeline metric names', () => {

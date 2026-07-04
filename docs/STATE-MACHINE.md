@@ -127,6 +127,10 @@ new PR
   `provider-overloaded` preserves HTTP 529/backend capacity failures separately
   from generic `cascade` so pipeline health can report provider instability
   without burning the normal review attempt budget.
+  `deploy-wedge` rows are recorded as `pending-upstream` when main-catchup is
+  frozen or its outage state file is unreadable; malformed JSON in
+  `main-catchup/.state.json` is treated as `state-unreadable` and pauses reviews
+  without consuming `review_attempts` or crashing the watcher.
   For `reviewer-command-failed`, the watcher first uses the persisted reviewer
   session/start evidence to query GitHub for a matching reviewer-bot review
   posted after the failed attempt started. If one exists, the watcher marks the

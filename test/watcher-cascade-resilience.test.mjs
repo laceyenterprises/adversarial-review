@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import Database from 'better-sqlite3';
@@ -27,6 +27,21 @@ import {
 } from '../src/watcher.mjs';
 
 const execFileAsync = promisify(execFile);
+const originalHqRoot = process.env.HQ_ROOT;
+const testHqRoot = mkdtempSync(path.join(tmpdir(), 'watcher-cascade-hq-'));
+
+before(() => {
+  process.env.HQ_ROOT = testHqRoot;
+});
+
+after(() => {
+  if (originalHqRoot === undefined) {
+    delete process.env.HQ_ROOT;
+  } else {
+    process.env.HQ_ROOT = originalHqRoot;
+  }
+  rmSync(testHqRoot, { recursive: true, force: true });
+});
 
 function setupFixture() {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-cascade-'));

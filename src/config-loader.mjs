@@ -2651,7 +2651,6 @@ function validateDictPresentKeysOnly(
 
   if (strict) {
     for (const rawKey of Object.keys(doc)) {
-      if (rawKey.startsWith('__')) continue;
       if (!(rawKey in allowed)) {
         const lineSrc = annotateLine(source, lineMap, rawKey);
         const near = nearestValidKey(rawKey, Object.keys(allowed));
@@ -2698,7 +2697,6 @@ function validateDictPresentKeysOnly(
 
   const out = {};
   for (const [childKey, raw] of Object.entries(doc)) {
-    if (childKey.startsWith('__')) continue;
     if (!(childKey in allowed)) {
       // Non-strict dicts are extension points. If they provide an
       // __extra_keys_schema, arbitrary child keys are validated against it
@@ -2828,7 +2826,7 @@ function filterForeignTopLevelSections(
   // this reader cannot silently diverge from sibling CFG loaders.
   const filtered = {};
   for (const topKey of Object.keys(doc || {})) {
-    if (topKey === 'version' || topKey.startsWith('__') || topKey in knownTop) {
+    if (topKey === 'version' || topKey in knownTop) {
       filtered[topKey] = doc[topKey];
     } else if (
       tolerateForeignTopLevelSections &&

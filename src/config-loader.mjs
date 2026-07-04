@@ -203,6 +203,23 @@ const TYPE_FLOAT = 'float';
 const TYPE_LIST = 'list';
 const TYPE_DICT = 'dict';
 
+const DISPATCH_DEFAULT_WORKER_CLASS_TASK_KINDS = [
+  'coding',
+  'research',
+  'drafting',
+  'analysis',
+  'other',
+  'merge',
+  'merge_conflict_resolution',
+  'merge_comment_only_followups',
+  'merge_agent_failure_recovery',
+];
+const DISPATCH_DEFAULT_WORKER_CLASS_OVERRIDES = {
+  merge: 'merge-agent',
+  merge_conflict_resolution: 'merge-agent',
+  merge_comment_only_followups: 'merge-agent',
+};
+
 function buildRoleFallbackSchemaKeys() {
   return Object.fromEntries(
     ROLE_FALLBACK_CLASSES.map((roleClass) => [
@@ -217,6 +234,19 @@ function buildRoleFallbackSchemaKeys() {
             __enum: ENUM_ROLES_FALLBACK_PATH,
           },
         },
+      },
+    ]),
+  );
+}
+
+function buildDispatchDefaultWorkerClassSchemaKeys() {
+  return Object.fromEntries(
+    DISPATCH_DEFAULT_WORKER_CLASS_TASK_KINDS.map((taskKind) => [
+      taskKind,
+      {
+        __type: TYPE_STRING,
+        __default: DISPATCH_DEFAULT_WORKER_CLASS_OVERRIDES[taskKind] ?? 'codex',
+        __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
       },
     ]),
   );
@@ -238,6 +268,18 @@ function buildRoleFallbackEnvAliases() {
         },
       ];
     }),
+  );
+}
+
+function buildDispatchDefaultWorkerClassEnvAliases() {
+  return Object.fromEntries(
+    DISPATCH_DEFAULT_WORKER_CLASS_TASK_KINDS.map((taskKind) => [
+      `dispatch.default_worker_class_by_task_kind.${taskKind}`,
+      {
+        canonical: `AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_${taskKind.toUpperCase()}`,
+        aliases: [],
+      },
+    ]),
   );
 }
 
@@ -1749,53 +1791,7 @@ function schemaV1() {
           default_worker_class_by_task_kind: {
             __type: TYPE_DICT,
             __strict: true,
-            __keys: {
-              coding: {
-                __type: TYPE_STRING,
-                __default: 'codex',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-              research: {
-                __type: TYPE_STRING,
-                __default: 'codex',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-              drafting: {
-                __type: TYPE_STRING,
-                __default: 'codex',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-              analysis: {
-                __type: TYPE_STRING,
-                __default: 'codex',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-              other: {
-                __type: TYPE_STRING,
-                __default: 'codex',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-              merge: {
-                __type: TYPE_STRING,
-                __default: 'merge-agent',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-              merge_conflict_resolution: {
-                __type: TYPE_STRING,
-                __default: 'merge-agent',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-              merge_comment_only_followups: {
-                __type: TYPE_STRING,
-                __default: 'merge-agent',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-              merge_agent_failure_recovery: {
-                __type: TYPE_STRING,
-                __default: 'codex',
-                __enum: ENUM_DISPATCH_DEFAULT_WORKER_CLASS,
-              },
-            },
+            __keys: buildDispatchDefaultWorkerClassSchemaKeys(),
           },
         },
       },
@@ -2267,42 +2263,7 @@ export const ENV_ALIASES = {
   // Per-task-kind dispatch default worker class env aliases. One canonical
   // env var per leaf — matches the Python sibling at
   // `platform/agent-os-config/src/agent_os_config/__init__.py`.
-  'dispatch.default_worker_class_by_task_kind.coding': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_CODING',
-    aliases: [],
-  },
-  'dispatch.default_worker_class_by_task_kind.research': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_RESEARCH',
-    aliases: [],
-  },
-  'dispatch.default_worker_class_by_task_kind.drafting': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_DRAFTING',
-    aliases: [],
-  },
-  'dispatch.default_worker_class_by_task_kind.analysis': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_ANALYSIS',
-    aliases: [],
-  },
-  'dispatch.default_worker_class_by_task_kind.other': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_OTHER',
-    aliases: [],
-  },
-  'dispatch.default_worker_class_by_task_kind.merge': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_MERGE',
-    aliases: [],
-  },
-  'dispatch.default_worker_class_by_task_kind.merge_conflict_resolution': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_MERGE_CONFLICT_RESOLUTION',
-    aliases: [],
-  },
-  'dispatch.default_worker_class_by_task_kind.merge_comment_only_followups': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_MERGE_COMMENT_ONLY_FOLLOWUPS',
-    aliases: [],
-  },
-  'dispatch.default_worker_class_by_task_kind.merge_agent_failure_recovery': {
-    canonical: 'AGENT_OS_DISPATCH_DEFAULT_WORKER_CLASS_BY_TASK_KIND_MERGE_AGENT_FAILURE_RECOVERY',
-    aliases: [],
-  },
+  ...buildDispatchDefaultWorkerClassEnvAliases(),
   'feature_flags.live_steer_allow_unvetted': {
     canonical: 'AGENT_OS_FEATURE_FLAGS_LIVE_STEER_ALLOW_UNVETTED',
     aliases: [['HQ_LIVE_STEER_ALLOW_UNVETTED', identity]],

@@ -1517,9 +1517,9 @@ export async function load(url, context, nextLoad) {
               }
               if (normalized.startsWith('INSERT OR IGNORE INTO watcher_db_canary')) {
                 return {
-                  run: (id, token, updatedAt) => {
+                  run: (id) => {
                     if (canary.has(id)) return { changes: 0 };
-                    canary.set(id, { token, updated_at: updatedAt });
+                    canary.set(id, { token: '', updated_at: '' });
                     return { changes: 1 };
                   },
                 };

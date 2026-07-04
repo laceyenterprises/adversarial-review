@@ -39,7 +39,7 @@ async function captureExitFromHandlePollError(err) {
   };
   try {
     handlePollError(err, 'test db canary');
-    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 150));
     return { exitCode: process.exitCode, calls };
   } finally {
     process.exit = originalExit;

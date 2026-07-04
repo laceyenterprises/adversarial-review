@@ -2353,6 +2353,7 @@ function readJsonFile(path) {
     return JSON.parse(readFileSync(path, 'utf8'));
   } catch (err) {
     if (err?.code === 'ENOENT') return null;
+    if (err instanceof SyntaxError) return { __unreadableJson: true };
     throw err;
   }
 }
@@ -2361,6 +2362,9 @@ function mainCatchupOutageSignal({ env = process.env } = {}) {
   const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
   const state = readJsonFile(join(hqRoot, 'main-catchup', '.state.json'));
   if (!state || typeof state !== 'object') return null;
+  if (state.__unreadableJson) {
+    return { reason: 'deploy-wedge', detail: 'state-unreadable', retryAfter: null };
+  }
   const freezeClass = state.freezeClass
     || state.pendingFreeze?.freezeClass
     || state.pendingPgSchemaGateFreeze?.freezeClass
@@ -3359,27 +3363,6 @@ function settleReviewerAttempt({
     return;
   }
   clearCascadeState(rootDir, { repo: repoPath, prNumber });
-  if (failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
-    // Capture the provider usage-cap reset time from the FULL reviewer output
-    // (stdout + stderr + error message) BEFORE failure_message truncation can
-    // drop the "try again at <time>" line. Anchor year/date inference on the
-    // failure timestamp. Persist it durably in quota_reset_at_utc so the
-    // hold-until-reset gate honors the real reset instead of a blind window.
-    if (!quotaResetIso) {
-      log.warn(
-        `[watcher] Quota-exhausted reviewer failure on #${prNumber} with NO parseable provider reset time; ` +
-          `falling back to the ${Math.round(QUOTA_EXHAUSTED_BACKOFF_MS / 60000)}m default hold window`
-      );
-    }
-    statements.markFailedQuota.run(failureAt, classifiedMessage, quotaResetIso, repoPath, prNumber);
-    const updatedQuotaRow = statements.getReviewRow.get(repoPath, prNumber);
-    log.warn(
-      `[watcher] Reviewer quota-exhausted failure on #${prNumber}; ` +
-        `reset=${quotaResetIso || 'unknown'}; will hold until the cap clears ` +
-        `(attempt ${updatedQuotaRow?.review_attempts}/${1 + Number(maxRemediationRounds || 0)})`
-    );
-    return;
-  }
   const terminalFailureStatement = leaseRecoveryEnabled
     ? statements.releaseReviewLease
     : statements.markFailed;

@@ -469,28 +469,32 @@ test('malformed main-catchup outage state fails closed instead of pretending hea
     writeFileSync(path.join(hqRoot, 'main-catchup', '.state.json'), '{"currentState":');
     process.env.HQ_ROOT = hqRoot;
 
-    assert.throws(
-      () => settleReviewerAttempt({
-        rootDir,
-        repoPath: REPO,
-        prNumber: PR,
-        result: {
-          ok: false,
-          failureClass: 'unknown',
-          error: 'reviewer exited while deploy freeze state was unreadable',
-        },
-        failureAt: '2026-06-17T17:30:00.000Z',
-        maxRemediationRounds: 2,
-        leaseRecoveryEnabled: false,
-        statements: quotaStatements(db),
-      }),
-      SyntaxError
-    );
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: REPO,
+      prNumber: PR,
+      result: {
+        ok: false,
+        failureClass: 'unknown',
+        error: 'reviewer exited while deploy freeze state was unreadable',
+      },
+      failureAt: '2026-06-17T17:30:00.000Z',
+      maxRemediationRounds: 2,
+      leaseRecoveryEnabled: false,
+      statements: quotaStatements(db),
+    });
 
     const row = getRow(db);
-    assert.equal(row.review_status, 'reviewing');
-    assert.equal(row.failed_at, null);
-    assert.equal(row.failure_message, null);
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.equal(row.review_attempts, 0);
+    assert.equal(row.quota_reset_at_utc, null);
+    assert.match(row.failure_message, /^\[outage-transient:deploy-wedge\]/);
+    assert.match(row.failure_message, /reviewer exited while deploy freeze state was unreadable/);
+    const state = JSON.parse(readFileSync(
+      path.join(rootDir, 'data', 'cascade-state', `${encodeURIComponent(REPO)}__${PR}.json`),
+      'utf8'
+    ));
+    assert.equal(state.lastFailureClass, 'deploy-wedge');
   } finally {
     if (oldHqRoot === undefined) {
       delete process.env.HQ_ROOT;

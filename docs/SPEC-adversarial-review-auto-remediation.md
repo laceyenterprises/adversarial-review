@@ -963,6 +963,15 @@ preserved in `data/cascade-state/*.json`, `reviewed_prs.failure_message`, and
 pipeline-health output so operators can distinguish provider instability from a
 local LiteLLM/proxy cascade.
 
+`deploy-wedge` is the explicit class for a main-catchup deploy freeze or
+unreadable main-catchup outage state. The watcher reads
+`$HQ_ROOT/main-catchup/.state.json` before settling a reviewer failure; a frozen
+state, freeze-class marker, or malformed JSON must settle the review as
+`pending-upstream` with an `[outage-transient:deploy-wedge]` audit message and
+must not consume `review_attempts`. Malformed JSON is treated as
+`state-unreadable` so a partially written outage file pauses reviews instead of
+crashing the watcher daemon.
+
 `quota-exhausted` is a hold-until-reset recovery class, not a normal immediate
 retry. The reviewer/runtime classifier must tag failed-row evidence with a
 `[quota-exhausted]` prefix and the watcher must capture the provider reset hint

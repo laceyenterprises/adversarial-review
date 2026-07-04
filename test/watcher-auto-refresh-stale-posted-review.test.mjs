@@ -477,7 +477,9 @@ test('watcher allows exactly one post-budget stale-head final review, then suppr
     roundBudget: 2,
     riskClass: 'medium',
   });
+});
 
+test('watcher identifies explicit operator review retrigger rows', () => {
   assert.equal(isExplicitOperatorReviewRetrigger({
     rereview_requested_at: '2026-07-03T12:00:00.000Z',
     rereview_reason: 'retrigger-review label applied; re-review requested on current HEAD.',

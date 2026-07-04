@@ -1802,6 +1802,8 @@ test('checked-in top-level sentinel detector config loads through strict Node sc
   const top = join(REPO_ROOT, '..', '..', 'config.yaml');
   const cfg = loadConfig({ topPath: top, env: {} });
 
+  assert.equal(cfg.get('sentinel.profile'), 'balanced');
+  assert.equal(cfg.get('sentinel.quiet_window'), 'adaptive');
   assert.equal(cfg.get('sentinel.spec_drift.cycle_interval_seconds'), 86400);
   assert.equal(cfg.get('sentinel.deploy_checkout.repo_path'), '/Users/airlock/agent-os');
   assert.equal(cfg.get('sentinel.deploy_checkout.worker_identity_emails'), null);
@@ -1827,6 +1829,41 @@ test('checked-in top-level sentinel detector config loads through strict Node sc
     },
   });
   assert.equal(legacyEnvCfg.get('sentinel.codex_compaction.rate_alarm_per_hour'), 7);
+});
+
+test('sentinel quiet_window accepts numeric YAML and string env values', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFileSync(top, dedent(`
+      version: 1
+      sentinel:
+        quiet_window: 300
+    `));
+
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('sentinel.quiet_window'), '300');
+
+    const zeroTop = join(tmp, 'zero-config.yaml');
+    writeFileSync(zeroTop, dedent(`
+      version: 1
+      sentinel:
+        quiet_window: 0
+    `));
+
+    const zeroCfg = loadConfig({ topPath: zeroTop, env: {} });
+    assert.equal(zeroCfg.get('sentinel.quiet_window'), '0');
+
+    const envCfg = loadConfig({
+      topPath: top,
+      env: {
+        HQ_SENTINEL_QUIET_WINDOW: '0',
+      },
+    });
+    assert.equal(envCfg.get('sentinel.quiet_window'), '0');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('retention surfaces reject unknown keys with structured path', () => {

@@ -1430,8 +1430,9 @@ function schemaV1() {
           quiet_window: {
             __type: TYPE_STRING,
             __default: 'adaptive',
-            __pattern: '^adaptive$|^[1-9][0-9]*$',
-            __pattern_description: 'adaptive or positive integer seconds',
+            __coerce_number_to_string: true,
+            __pattern: '^adaptive$|^0$|^[1-9][0-9]*$',
+            __pattern_description: 'adaptive or non-negative integer seconds',
           },
           spec_drift: {
             __type: TYPE_DICT,

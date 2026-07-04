@@ -193,7 +193,6 @@ roles:
         risk_classes: ["low"]
       branch_protection:
         required: ${branchProtectionRequired ? 'true' : 'false'}
-        required_gate_context_source: resolveGateStatusContext
 `);
   return configPath;
 }

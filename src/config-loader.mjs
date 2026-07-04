@@ -1214,6 +1214,11 @@ function schemaV1() {
                         __item: { __type: TYPE_STRING },
                         __default: ['fast-merge:test-fixtures', 'fast-merge:docs'],
                       },
+                      // Deprecated schema-compatibility no-ops. Existing
+                      // deployed configs may still carry these historical
+                      // documentation mirrors; strict validation must accept
+                      // them, but runtime eligibility uses the canonical
+                      // implementation directly.
                       reviewer_family_policy: {
                         __type: TYPE_STRING,
                         __default: 'audit_existing_gate_contract',
@@ -1248,6 +1253,8 @@ function schemaV1() {
                     __type: TYPE_DICT,
                     __strict: true,
                     __keys: {
+                      // Deprecated schema-compatibility no-op. The gate context
+                      // is always resolved by resolveGateStatusContext().
                       required_gate_context_source: {
                         __type: TYPE_STRING,
                         __default: 'resolveGateStatusContext',
@@ -1506,6 +1513,8 @@ function schemaV1() {
         __keys: {
           live_steer_allow_unvetted: { __type: TYPE_BOOL, __default: false },
           claude_code_ambient_auth_fallback: { __type: TYPE_BOOL, __default: false },
+          // Deprecated schema-compatibility no-op retained so strict validation
+          // accepts older module configs during migration.
           merge_agent_failure_recovery_disable: { __type: TYPE_BOOL, __default: false },
           merge_agent_final_pass_on_request_changes: { __type: TYPE_BOOL, __default: true },
           allow_missing_alert_to: { __type: TYPE_BOOL, __default: false },
@@ -3479,24 +3488,12 @@ export class AgentOSConfig {
           'roles.adversarial.merge_authority.eligibility.fast_merge_labels',
           ['fast-merge:test-fixtures', 'fast-merge:docs'],
         )],
-        reviewerFamilyPolicy: this.get(
-          'roles.adversarial.merge_authority.eligibility.reviewer_family_policy',
-          'audit_existing_gate_contract',
-        ),
-        ciGreenClassifier: this.get(
-          'roles.adversarial.merge_authority.eligibility.ci_green_classifier',
-          'existingAdversarialMergeClassifier',
-        ),
         highRiskRequiresTwoKey: this.get(
           'roles.adversarial.merge_authority.eligibility.high_risk_requires_two_key',
           true,
         ),
       },
       branchProtection: {
-        requiredGateContextSource: this.get(
-          'roles.adversarial.merge_authority.branch_protection.required_gate_context_source',
-          'resolveGateStatusContext',
-        ),
         required: this.get(
           'roles.adversarial.merge_authority.branch_protection.required',
           true,

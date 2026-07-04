@@ -50,10 +50,8 @@ function eligibleFixture(overrides = {}) {
     eligibility: {
       riskClasses: ['low'],
       fastMergeLabels: ['fast-merge:test-fixtures', 'fast-merge:docs'],
-      reviewerFamilyPolicy: 'audit_existing_gate_contract',
-      ciGreenClassifier: 'existingAdversarialMergeClassifier',
     },
-    branchProtection: { requiredGateContextSource: 'resolveGateStatusContext' },
+    branchProtection: {},
     ...overrides.cfg,
   };
   return { reviewState, prMetadata, cfg };
@@ -378,8 +376,6 @@ test('eligible: medium risk class passes when the operator extends `risk_classes
       eligibility: {
         riskClasses: ['low', 'medium'],
         fastMergeLabels: ['fast-merge:test-fixtures', 'fast-merge:docs'],
-        reviewerFamilyPolicy: 'audit_existing_gate_contract',
-        ciGreenClassifier: 'existingAdversarialMergeClassifier',
       },
     },
   });
@@ -531,8 +527,6 @@ const eligibilityCfg = (highRiskRequiresTwoKey, riskClasses = ['low', 'medium', 
   eligibility: {
     riskClasses,
     fastMergeLabels: ['fast-merge:test-fixtures', 'fast-merge:docs'],
-    reviewerFamilyPolicy: 'audit_existing_gate_contract',
-    ciGreenClassifier: 'existingAdversarialMergeClassifier',
     highRiskRequiresTwoKey,
   },
 });
@@ -609,8 +603,6 @@ test('not eligible: high risk still requires two-key by default (knob unset) eve
       eligibility: {
         riskClasses: ['low', 'medium', 'high', 'critical'],
         fastMergeLabels: ['fast-merge:test-fixtures', 'fast-merge:docs'],
-        reviewerFamilyPolicy: 'audit_existing_gate_contract',
-        ciGreenClassifier: 'existingAdversarialMergeClassifier',
       },
     },
   });
@@ -722,7 +714,6 @@ test('eligible: branch_protection.required=false drops ONLY the gate requirement
     prMetadata: { branchProtection: { requiredContexts: [] } },
     cfg: {
       branchProtection: {
-        requiredGateContextSource: 'resolveGateStatusContext',
         required: false,
       },
     },
@@ -745,7 +736,6 @@ test('not eligible: branch_protection.required=false still enforces every OTHER 
     prMetadata: { branchProtection: { requiredContexts: [] } },
     cfg: {
       branchProtection: {
-        requiredGateContextSource: 'resolveGateStatusContext',
         required: false,
       },
     },

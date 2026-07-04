@@ -471,8 +471,8 @@ function eligibilityFor(settledReview, { riskClass = 'low' } = {}) {
     enabled: true,
     workerClass: 'codex',
     mergeMethod: 'squash',
-    eligibility: { riskClasses: ['low'], reviewerFamilyPolicy: 'audit_existing_gate_contract' },
-    branchProtection: { requiredGateContextSource: 'resolveGateStatusContext' },
+    eligibility: { riskClasses: ['low'] },
+    branchProtection: {},
   };
   return isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: { ADV_GATE_STATUS_CONTEXT: DEFAULT_ADVERSARIAL_GATE_CONTEXT },
@@ -547,8 +547,8 @@ test('E2E: settled-success + eligible + clean mergeability dispatches AMA closer
     enabled: true,
     workerClass: 'codex',
     mergeMethod: 'squash',
-    eligibility: { riskClasses: ['low'], reviewerFamilyPolicy: 'audit_existing_gate_contract' },
-    branchProtection: { requiredGateContextSource: 'resolveGateStatusContext' },
+    eligibility: { riskClasses: ['low'] },
+    branchProtection: {},
   };
   const eligibility = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
     env: { ADV_GATE_STATUS_CONTEXT: DEFAULT_ADVERSARIAL_GATE_CONTEXT },

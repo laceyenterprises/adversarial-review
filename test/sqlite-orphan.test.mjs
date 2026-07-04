@@ -33,15 +33,30 @@ async function captureExitFromHandlePollError(err) {
   const originalExit = process.exit;
   const originalExitCode = process.exitCode;
   const calls = [];
+  let timeout;
+  let resolveExit;
+  const exitCalled = new Promise((resolve) => {
+    resolveExit = resolve;
+  });
   process.exitCode = undefined;
   process.exit = (code) => {
+    process.exitCode = code;
     calls.push(code);
+    resolveExit({ exitCode: process.exitCode, calls: [...calls] });
   };
   try {
     handlePollError(err, 'test db canary');
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    return { exitCode: process.exitCode, calls };
+    return await Promise.race([
+      exitCalled,
+      new Promise((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('timed out waiting for process.exit')),
+          1000
+        );
+      }),
+    ]);
   } finally {
+    clearTimeout(timeout);
     process.exit = originalExit;
     process.exitCode = originalExitCode;
   }

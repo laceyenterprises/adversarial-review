@@ -7,6 +7,7 @@ import { loadRoleConfig } from './role-config.mjs';
 
 const DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 3;
 const DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS = 120_000;
+const DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS = 15 * 60 * 1000;
 const DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG = Object.freeze({
   projectedHeadroomFloorMb: 1024,
   elevatedAvailableMb: 2048,
@@ -153,28 +154,57 @@ function parseSortTimeMs(value) {
 }
 
 function reviewerDispatchSortTimeMs(candidate) {
-  const values = [
-    candidate?.subject?.createdAt,
-    candidate?.current?.reviewed_at,
-    candidate?.subject?.updatedAt,
-  ];
-  for (const value of values) {
-    const ms = parseSortTimeMs(value);
-    if (ms !== null) return ms;
-  }
-  return 0;
+  return parseSortTimeMs(candidate?.subject?.createdAt) ?? Number.MAX_SAFE_INTEGER;
 }
 
 function compareReviewerDispatchCandidates(a, b) {
   const timeDelta = reviewerDispatchSortTimeMs(a) - reviewerDispatchSortTimeMs(b);
   if (timeDelta !== 0) return timeDelta;
-  const repoDelta = String(a?.repoPath || '').localeCompare(String(b?.repoPath || ''));
-  if (repoDelta !== 0) return repoDelta;
-  return Number(a?.prNumber || 0) - Number(b?.prNumber || 0);
+  const prDelta = Number(a?.prNumber || 0) - Number(b?.prNumber || 0);
+  if (prDelta !== 0) return prDelta;
+  return String(a?.repoPath || '').localeCompare(String(b?.repoPath || ''));
 }
 
 function sortReviewerDispatchCandidates(candidates) {
   return [...candidates].sort(compareReviewerDispatchCandidates);
+}
+
+function reviewerDispatchAgeMs(candidate, nowMs = Date.now()) {
+  const createdAtMs = parseSortTimeMs(candidate?.subject?.createdAt);
+  if (createdAtMs === null) return null;
+  return Math.max(0, nowMs - createdAtMs);
+}
+
+function reviewerDispatchWaitMs(candidate, nowMs = Date.now()) {
+  const enqueuedAtMs = Number(candidate?.enqueuedAtMs);
+  if (Number.isFinite(enqueuedAtMs)) {
+    return Math.max(0, nowMs - enqueuedAtMs);
+  }
+  const enqueuedAt = parseSortTimeMs(candidate?.enqueuedAt);
+  return enqueuedAt === null ? null : Math.max(0, nowMs - enqueuedAt);
+}
+
+function logReviewerDispatchWait(candidate, {
+  logger = console,
+  nowMs = Date.now(),
+  waitWarnMs = DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
+} = {}) {
+  const waitMs = reviewerDispatchWaitMs(candidate, nowMs);
+  const ageMs = reviewerDispatchAgeMs(candidate, nowMs);
+  const waitText = waitMs === null ? 'unknown' : String(Math.round(waitMs));
+  const ageText = ageMs === null ? 'unknown' : String(Math.round(ageMs));
+  const passKind = candidate?.current?.rereview_requested_at ? 'rereview' : 'first-pass';
+  const message =
+    `[watcher] reviewer dispatch wait ${candidate?.repoPath || 'unknown'}#${candidate?.prNumber || 'unknown'}: ` +
+    `wait_ms=${waitText} pr_age_ms=${ageText} pass_kind=${passKind}`;
+  logger?.log?.(message);
+  if (waitMs !== null && waitMs >= waitWarnMs) {
+    logger?.warn?.(
+      `[watcher] reviewer dispatch wait exceeded threshold ` +
+      `${candidate?.repoPath || 'unknown'}#${candidate?.prNumber || 'unknown'}: ` +
+      `wait_ms=${Math.round(waitMs)} threshold_ms=${Math.round(waitWarnMs)} pr_age_ms=${ageText} pass_kind=${passKind}`
+    );
+  }
 }
 
 function createReviewerMemoryAdmissionSampler({
@@ -257,6 +287,8 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   maxConcurrent = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
   maxThrownFailures = 1,
   logger = console,
+  now = () => Date.now(),
+  waitWarnMs = DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
 } = {}) {
   const concurrencyLimit = Math.max(1, Number.parseInt(String(maxConcurrent), 10) || 0);
   const thrownFailureLimit = Math.max(1, Number.parseInt(String(maxThrownFailures), 10) || 0);
@@ -268,6 +300,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   let started = 0;
 
   async function start(candidate) {
+    logReviewerDispatchWait(candidate, { logger, nowMs: Number(now()) || Date.now(), waitWarnMs });
     try {
       await candidate.run();
     } catch (err) {
@@ -309,9 +342,11 @@ async function runBoundedReviewerDispatchQueue(candidates, {
 
 export {
   DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
+  DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
   DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS,
   compareReviewerDispatchCandidates,
   createReviewerMemoryAdmissionSampler,
+  logReviewerDispatchWait,
   reserveReviewerMemoryAdmission,
   resolveReviewerMemoryPressureConfig,
   resolveFirstPassReviewerPoolConfig,

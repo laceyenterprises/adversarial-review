@@ -7177,6 +7177,7 @@ async function pollOnce(
         prNumber,
         subject,
         current,
+        enqueuedAtMs: Date.now(),
         async run() {
           const reservation = await reserveReviewerMemoryAdmission({
             reviewerModel: route.reviewerModel,

@@ -60,6 +60,32 @@ function parsePositiveInteger(value) {
   return numeric;
 }
 
+function errorText(err) {
+  return [
+    err?.message,
+    err?.code,
+    err?.status,
+    err?.statusCode,
+    err?.response?.status,
+    err?.stderr,
+    err?.stdout,
+  ].filter((part) => part !== null && part !== undefined && String(part).trim() !== '').join(' ');
+}
+
+function isTransientGithubProbeError(err) {
+  const code = String(err?.code || err?.cause?.code || '').toUpperCase();
+  if (['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'ENOTFOUND', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT'].includes(code)) {
+    return true;
+  }
+
+  const status = Number(err?.status || err?.statusCode || err?.response?.status);
+  if (status === 408 || status === 409 || status === 425 || status === 429 || status >= 500) {
+    return true;
+  }
+
+  return /timed?\s*out|timeout|socket hang up|connection (?:reset|refused|aborted|timed out)|temporary failure|temporarily unavailable|network is unreachable|try again|rate limit|secondary rate limit|too many requests|bad gateway|service unavailable|gateway timeout|server error|http[ /]5\d\d/i.test(errorText(err));
+}
+
 function probePgidAlive(pgid) {
   const numericPgid = Number(pgid);
   if (!Number.isInteger(numericPgid) || numericPgid <= 0) return false;
@@ -111,12 +137,11 @@ function killPgid(pgid, signal = 'SIGKILL') {
   }
 }
 
-function makeReviewPostedProbe(octokit, { log = console } = {}) {
+function makeReviewPostedProbe(octokit) {
   const cache = new Map();
 
   return async function reviewPostedAfter(row, { refresh = false } = {}) {
     const startedAtMs = parseTime(row.reviewer_started_at);
-    if (startedAtMs === null) return null;
 
     const { owner, repo } = splitRepoPath(row.repo);
     const key = `${row.repo}#${row.pr_number}`;
@@ -147,7 +172,7 @@ function makeReviewPostedProbe(octokit, { log = console } = {}) {
       .filter((review) => review?.user?.login === expectedLogin)
       .filter((review) => {
         const submittedAtMs = parseTime(review?.submitted_at);
-        return submittedAtMs !== null && submittedAtMs >= startedAtMs;
+        return submittedAtMs !== null && (startedAtMs === null || submittedAtMs >= startedAtMs);
       })
       .sort((a, b) => Date.parse(a.submitted_at) - Date.parse(b.submitted_at))[0] || null;
   };
@@ -315,6 +340,13 @@ async function reconcileReviewerSessions({
         try {
           currentHeadSha = await fetchHeadSha(row);
         } catch (err) {
+          if (isTransientGithubProbeError(err)) {
+            log.warn(
+              `[watcher] reviewer_reattach_null_pgid_head_probe_transient repo=${row.repo} pr=${row.pr_number} ` +
+              `session=${row.reviewer_session_uuid} error=${err?.message || err}; leaving review_status='reviewing' for retry`
+            );
+            continue;
+          }
           log.warn(
             `[watcher] reviewer_reattach_null_pgid_head_probe_failed repo=${row.repo} pr=${row.pr_number} ` +
             `session=${row.reviewer_session_uuid} error=${err?.message || err}`
@@ -334,10 +366,17 @@ async function reconcileReviewerSessions({
         try {
           const probeRow = {
             ...row,
-            reviewer_started_at: row.reviewer_started_at || row.last_attempted_at || failureAt,
+            reviewer_started_at: row.reviewer_started_at || row.last_attempted_at || null,
           };
           postedReview = await findPostedReview(probeRow, { refresh: true });
         } catch (err) {
+          if (isTransientGithubProbeError(err)) {
+            log.warn(
+              `[watcher] reviewer_reattach_null_pgid_review_probe_transient repo=${row.repo} pr=${row.pr_number} ` +
+              `session=${row.reviewer_session_uuid} error=${err?.message || err}; leaving review_status='reviewing' for retry`
+            );
+            continue;
+          }
           log.warn(
             `[watcher] reviewer_reattach_null_pgid_review_probe_failed repo=${row.repo} pr=${row.pr_number} ` +
             `session=${row.reviewer_session_uuid} error=${err?.message || err}`
@@ -404,6 +443,13 @@ async function reconcileReviewerSessions({
     try {
       currentHeadSha = await fetchHeadSha(row);
     } catch (err) {
+      if (isTransientGithubProbeError(err)) {
+        log.warn(
+          `[watcher] reviewer_reattach_head_probe_transient repo=${row.repo} pr=${row.pr_number} ` +
+          `session=${row.reviewer_session_uuid} error=${err?.message || err}; leaving review_status='reviewing' for retry`
+        );
+        continue;
+      }
       log.warn(
         `[watcher] reviewer_reattach_head_probe_failed repo=${row.repo} pr=${row.pr_number} ` +
         `session=${row.reviewer_session_uuid} error=${err?.message || err}`
@@ -440,6 +486,13 @@ async function reconcileReviewerSessions({
         postedReview = await findPostedReview(row, { refresh });
         return true;
       } catch (err) {
+        if (isTransientGithubProbeError(err)) {
+          log.warn(
+            `[watcher] reviewer_reattach_review_probe_transient repo=${row.repo} pr=${row.pr_number} ` +
+            `session=${row.reviewer_session_uuid} error=${err?.message || err}; leaving review_status='reviewing' for retry`
+          );
+          return false;
+        }
         log.warn(
           `[watcher] reviewer_reattach_review_probe_failed repo=${row.repo} pr=${row.pr_number} ` +
           `session=${row.reviewer_session_uuid} error=${err?.message || err}`
@@ -721,4 +774,5 @@ export {
   probeReviewerSession,
   reconcileReviewerSessions,
   reviewerBotLogin,
+  isTransientGithubProbeError,
 };

@@ -41,12 +41,16 @@ function seedReviewing(db, overrides = {}) {
     'open',
     'reviewing',
     overrides.reviewAttempts ?? 2,
-    overrides.lastAttemptedAt || STARTED_AT,
+    Object.prototype.hasOwnProperty.call(overrides, 'lastAttemptedAt')
+      ? overrides.lastAttemptedAt
+      : STARTED_AT,
     Object.prototype.hasOwnProperty.call(overrides, 'sessionUuid')
       ? overrides.sessionUuid
       : 'session-70',
     Object.prototype.hasOwnProperty.call(overrides, 'pgid') ? overrides.pgid : 9001,
-    overrides.startedAt || STARTED_AT,
+    Object.prototype.hasOwnProperty.call(overrides, 'startedAt')
+      ? overrides.startedAt
+      : STARTED_AT,
     Object.prototype.hasOwnProperty.call(overrides, 'headSha') ? overrides.headSha : HEAD_SHA,
     Object.prototype.hasOwnProperty.call(overrides, 'reviewerTimeoutMs')
       ? overrides.reviewerTimeoutMs
@@ -750,7 +754,7 @@ test('claimed rows with null pgid reconcile to an already posted current-head re
   assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_recovered/);
 });
 
-test('claimed rows with null pgid stay sticky when GitHub review probe fails', async () => {
+test('claimed rows with null pgid retry later when GitHub review probe fails transiently', async () => {
   const db = setupDb();
   seedReviewing(db, { pgid: null });
   const log = makeLog();
@@ -762,16 +766,66 @@ test('claimed rows with null pgid stay sticky when GitHub review probe fails', a
     log,
     fetchHeadSha: async () => HEAD_SHA,
     findPostedReview: async () => {
-      throw new Error('reviews unavailable');
+      const err = new Error('reviews unavailable');
+      err.status = 503;
+      throw err;
+    },
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.review_attempts, 2, 'transient probe failures must not burn an attempt');
+  assert.equal(row.failure_message, null);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_review_probe_transient/);
+});
+
+test('claimed rows with null pgid stay sticky when GitHub review probe fails non-transiently', async () => {
+  const db = setupDb();
+  seedReviewing(db, { pgid: null });
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    fetchHeadSha: async () => HEAD_SHA,
+    findPostedReview: async () => {
+      throw new Error('bad credentials');
     },
   });
 
   const row = readRow(db);
   assert.equal(row.review_status, 'failed-orphan');
   assert.equal(row.review_attempts, 3);
-  assert.match(row.failure_message, /Review probe failed before safe auto-rearm: reviews unavailable/);
+  assert.match(row.failure_message, /Review probe failed before safe auto-rearm: bad credentials/);
   assert.match(row.failure_message, new RegExp(NULL_PGID_FAILURE_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(log.lines.join('\n'), /reviewer_reattach_missing_pgid_probe_failed/);
+});
+
+test('claimed rows with null pgid do not synthesize now as the review lookup start time', async () => {
+  const db = setupDb();
+  seedReviewing(db, { pgid: null, startedAt: null, lastAttemptedAt: null });
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([
+      {
+        user: { login: 'codex-reviewer-lacey' },
+        submitted_at: '2026-05-11T05:13:09.000Z',
+        commit_id: HEAD_SHA,
+      },
+    ]),
+    now: new Date(FAILURE_AT),
+    log,
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'posted');
+  assert.equal(row.posted_at, '2026-05-11T05:13:09.000Z');
+  assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_recovered/);
 });
 
 test('alive pgid that does not match the reviewer session becomes sticky failed-orphan', async () => {
@@ -833,7 +887,7 @@ test('corrupt reviewer_started_at becomes sticky failed-orphan', async () => {
   assert.match(log.lines.join('\n'), /reviewer_reattach_corrupt_started_at/);
 });
 
-test('fetchHeadSha failures become sticky failed-orphan', async () => {
+test('fetchHeadSha transient failures stay reviewing for retry', async () => {
   const db = setupDb();
   seedReviewing(db);
   const log = makeLog();
@@ -844,18 +898,42 @@ test('fetchHeadSha failures become sticky failed-orphan', async () => {
     now: new Date(FAILURE_AT),
     log,
     fetchHeadSha: async () => {
-      throw new Error('github down');
+      const err = new Error('read ECONNRESET');
+      err.code = 'ECONNRESET';
+      throw err;
+    },
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.review_attempts, 2, 'transient probe failures must not burn an attempt');
+  assert.equal(row.failure_message, null);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_head_probe_transient/);
+});
+
+test('fetchHeadSha non-transient failures become sticky failed-orphan', async () => {
+  const db = setupDb();
+  seedReviewing(db);
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    fetchHeadSha: async () => {
+      throw new Error('bad credentials');
     },
   });
 
   const row = readRow(db);
   assert.equal(row.review_status, 'failed-orphan');
   assert.equal(row.review_attempts, 3);
-  assert.match(row.failure_message, /head probe failed: github down/);
+  assert.match(row.failure_message, /head probe failed: bad credentials/);
   assert.match(log.lines.join('\n'), /reviewer_reattach_probe_failed/);
 });
 
-test('findPostedReview failures become sticky failed-orphan', async () => {
+test('findPostedReview transient failures stay reviewing for retry', async () => {
   const db = setupDb();
   seedReviewing(db);
   const log = makeLog();
@@ -867,13 +945,38 @@ test('findPostedReview failures become sticky failed-orphan', async () => {
     log,
     fetchHeadSha: async () => HEAD_SHA,
     findPostedReview: async () => {
-      throw new Error('reviews unavailable');
+      const err = new Error('secondary rate limit');
+      err.status = 429;
+      throw err;
+    },
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.review_attempts, 2, 'transient probe failures must not burn an attempt');
+  assert.equal(row.failure_message, null);
+  assert.match(log.lines.join('\n'), /reviewer_reattach_review_probe_transient/);
+});
+
+test('findPostedReview non-transient failures become sticky failed-orphan', async () => {
+  const db = setupDb();
+  seedReviewing(db);
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    fetchHeadSha: async () => HEAD_SHA,
+    findPostedReview: async () => {
+      throw new Error('bad credentials');
     },
   });
 
   const row = readRow(db);
   assert.equal(row.review_status, 'failed-orphan');
   assert.equal(row.review_attempts, 3);
-  assert.match(row.failure_message, /review probe failed: reviews unavailable/);
+  assert.match(row.failure_message, /review probe failed: bad credentials/);
   assert.match(log.lines.join('\n'), /reviewer_reattach_probe_failed/);
 });

@@ -214,7 +214,7 @@ test('schema defaults resolve to documented values when nothing is overridden', 
     'watcher.max_drain_wait_ms': 3_600_000,
     'watcher.pending_draft_review_respawn_age_seconds': 900,
     'watcher.stuck_dispatch_alert_debounce_ms': 3_600_000,
-    'watcher.first_pass_reviewer_pool_max_concurrent_reviewers': null,
+    'watcher.first_pass_reviewer_pool_max_concurrent_reviewers': 6,
     'follow_up.hq_worker_tear_down_subprocess_timeout_ms': 60_000,
     'follow_up.hq_dispatch_subprocess_timeout_ms': 90_000,
   };
@@ -299,15 +299,14 @@ test('first-pass reviewer pool: legacy ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_
   assert.strictEqual(cfg.maxConcurrent, 7);
 });
 
-test('first-pass reviewer pool: falls back to internal default when CFG + env both unset', () => {
+test('first-pass reviewer pool: defaults to durable CFG value when env is unset', () => {
   const env = {};
   const cfg = resolveFirstPassReviewerPoolConfig({
     env,
     watcherConfig: {},
     topPath: '/dev/null',
   });
-  // DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 3
-  assert.strictEqual(cfg.maxConcurrent, 3);
+  assert.strictEqual(cfg.maxConcurrent, 6);
 });
 
 test('first-pass reviewer pool honors canonical env-scoped config path', () => {
@@ -347,11 +346,20 @@ test('first-pass reviewer pool honors module-local config cascade', () => {
 
 test('first-pass reviewer pool honors canonical AGENT_OS_* env overrides from the supplied env', () => {
   const cfg = resolveFirstPassReviewerPoolConfig({
-    env: { AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '6' },
+    env: { AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '8' },
     watcherConfig: {},
   });
   assert.strictEqual(cfg.enabled, true);
-  assert.strictEqual(cfg.maxConcurrent, 6);
+  assert.strictEqual(cfg.maxConcurrent, 8);
+});
+
+test('first-pass reviewer pool clamps over-large canonical AGENT_OS_* env overrides', () => {
+  const cfg = resolveFirstPassReviewerPoolConfig({
+    env: { AGENT_OS_WATCHER_FIRST_PASS_REVIEWER_POOL_MAX_CONCURRENT_REVIEWERS: '99' },
+    watcherConfig: {},
+  });
+  assert.strictEqual(cfg.enabled, true);
+  assert.strictEqual(cfg.maxConcurrent, 12);
 });
 
 test('first-pass reviewer pool fails loud on canonical env parse errors', () => {

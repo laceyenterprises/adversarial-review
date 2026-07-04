@@ -5,7 +5,8 @@ import {
 } from './watcher-memory-pressure.mjs';
 import { loadRoleConfig } from './role-config.mjs';
 
-const DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 3;
+const DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX = 6;
+const MAX_FIRST_PASS_REVIEWER_POOL_MAX = 12;
 const DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS = 120_000;
 const DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS = 15 * 60 * 1000;
 const DEFAULT_REVIEWER_MEMORY_PRESSURE_CONFIG = Object.freeze({
@@ -29,6 +30,14 @@ function parsePositiveInteger(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
   const parsed = Number.parseInt(String(value), 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function normalizeFirstPassReviewerPoolMax(value, {
+  fallback = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
+  max = MAX_FIRST_PASS_REVIEWER_POOL_MAX,
+} = {}) {
+  const parsed = parsePositiveInteger(value, fallback);
+  return Math.min(parsed, max);
 }
 
 function finiteNumber(value, fallback) {
@@ -138,9 +147,9 @@ function resolveFirstPassReviewerPoolConfig({
     ?? watcherConfig.reviewerPoolMaxConcurrent
     ?? DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX;
   const cfgMax = _resolveFirstPassPoolMaxFromCfg(env, { topPath, modulePaths, loaderImpl });
-  const maxConcurrent = parsePositiveInteger(
+  const maxConcurrent = normalizeFirstPassReviewerPoolMax(
     cfgMax,
-    parsePositiveInteger(configuredMax, DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX)
+    { fallback: parsePositiveInteger(configuredMax, DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX) }
   );
   return {
     enabled,
@@ -347,6 +356,7 @@ async function runBoundedReviewerDispatchQueue(candidates, {
 export {
   DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
   DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
+  MAX_FIRST_PASS_REVIEWER_POOL_MAX,
   DEFAULT_REVIEWER_MEMORY_SAMPLE_TTL_MS,
   compareReviewerDispatchCandidates,
   createReviewerMemoryAdmissionSampler,

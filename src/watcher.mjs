@@ -2353,8 +2353,7 @@ function readJsonFile(path) {
     return JSON.parse(readFileSync(path, 'utf8'));
   } catch (err) {
     if (err?.code === 'ENOENT') return null;
-    if (err instanceof SyntaxError) return { __unreadableJson: true };
-    throw err;
+    return { __unreadableJson: true };
   }
 }
 

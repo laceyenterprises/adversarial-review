@@ -504,3 +504,42 @@ test('malformed main-catchup outage state fails closed instead of pretending hea
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+test('unreadable main-catchup outage state fails closed instead of crashing', () => {
+  const { rootDir, db } = setupFixture();
+  const oldHqRoot = process.env.HQ_ROOT;
+  const hqRoot = path.join(rootDir, 'hq');
+  try {
+    mkdirSync(path.join(hqRoot, 'main-catchup', '.state.json'), { recursive: true });
+    process.env.HQ_ROOT = hqRoot;
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: REPO,
+      prNumber: PR,
+      result: {
+        ok: false,
+        failureClass: 'unknown',
+        error: 'reviewer exited while deploy freeze state could not be read',
+      },
+      failureAt: '2026-06-17T17:30:00.000Z',
+      maxRemediationRounds: 2,
+      leaseRecoveryEnabled: false,
+      statements: quotaStatements(db),
+    });
+
+    const row = getRow(db);
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.equal(row.review_attempts, 0);
+    assert.equal(row.quota_reset_at_utc, null);
+    assert.match(row.failure_message, /^\[outage-transient:deploy-wedge\]/);
+    assert.match(row.failure_message, /reviewer exited while deploy freeze state could not be read/);
+  } finally {
+    if (oldHqRoot === undefined) {
+      delete process.env.HQ_ROOT;
+    } else {
+      process.env.HQ_ROOT = oldHqRoot;
+    }
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

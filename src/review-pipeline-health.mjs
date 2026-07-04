@@ -647,7 +647,7 @@ function outageReasonFromMessage(message) {
   return match?.[1] || 'unknown';
 }
 
-function summarizeOutage(db, reviewerDegradation) {
+function summarizeOutage(db) {
   const rows = readOutageTransientRows(db);
   const reasons = new Map();
   const examples = [];
@@ -665,12 +665,10 @@ function summarizeOutage(db, reviewerDegradation) {
       });
     }
   }
-  const active = rows.length > 0 || Number(reviewerDegradation?.active || 0) > 0;
+  const active = rows.length > 0;
   return {
     active,
-    reason: rows.length === 0
-      ? (Number(reviewerDegradation?.active || 0) > 0 ? 'reviewer-degradation' : null)
-      : (reasons.size === 1 ? Array.from(reasons.keys())[0] : 'multiple'),
+    reason: rows.length === 0 ? null : (reasons.size === 1 ? Array.from(reasons.keys())[0] : 'multiple'),
     reviews_paused: rows.length > 0,
     attempts_not_charged: rows.length,
     reasons: Array.from(reasons, ([reason, count]) => ({ reason, count }))
@@ -1468,7 +1466,7 @@ function collectReviewPipelineHealth({
     const followUpQueues = summarizeFollowUpQueues(rootDir, { nowMs, config });
     const reviewerDegradation = summarizeReviewerDegradation(rootDir, db, { nowMs });
     const outage = db
-      ? summarizeOutage(db, reviewerDegradation)
+      ? summarizeOutage(db)
       : {
           active: false,
           reason: null,

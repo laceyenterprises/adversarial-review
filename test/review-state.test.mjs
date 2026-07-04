@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   ensureReviewStateSchema,
   openReviewStateDb,
+  persistPRStateToMirror,
   REVIEW_STATE_SCHEMA_VERSION,
   requestReviewRereview,
 } from '../src/review-state.mjs';
@@ -457,6 +458,188 @@ test('pr_merge_closeouts primary key rejects duplicate repo/pr_number rows', () 
       ),
       /UNIQUE constraint failed: pr_merge_closeouts\.repo, pr_merge_closeouts\.pr_number/
     );
+  } finally {
+    db.close();
+  }
+});
+
+test('persistPRStateToMirror re-arms a reopened terminal failed PR for first-pass review', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewRow(rootDir, {
+    prState: 'closed',
+    reviewStatus: 'failed',
+    reviewAttempts: 3,
+    lastAttemptedAt: '2026-07-04T15:18:00.000Z',
+    postedAt: null,
+    failedAt: '2026-07-04T15:19:00.000Z',
+    failureMessage: '[outage-stall] first-pass watcher stopped making forward progress',
+  });
+  const seededDb = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(seededDb);
+    seededDb.prepare(
+      `UPDATE reviewed_prs
+          SET closed_at = ?,
+              rereview_requested_at = ?,
+              rereview_reason = ?,
+              reviewer_session_uuid = ?,
+              reviewer_pgid = ?,
+              reviewer_started_at = ?,
+              reviewer_head_sha = ?,
+              reviewer_timeout_ms = ?,
+              reviewer_lease_expires_at = ?,
+              quota_reset_at_utc = ?,
+              infra_auto_recover_attempts = ?,
+              review_population_retry_attempts = ?,
+              review_population_retry_last_at = ?,
+              review_population_retry_head_sha = ?
+        WHERE repo = ?
+          AND pr_number = ?`
+    ).run(
+      '2026-07-04T15:20:00.000Z',
+      '2026-07-04T15:21:00.000Z',
+      'stale manual request',
+      'stale-session',
+      12345,
+      '2026-07-04T15:17:00.000Z',
+      'old-head',
+      600000,
+      '2026-07-04T15:27:00.000Z',
+      '2026-07-04T16:00:00.000Z',
+      2,
+      4,
+      '2026-07-04T15:18:30.000Z',
+      'old-head',
+      'laceyenterprises/adversarial-review',
+      10
+    );
+  } finally {
+    seededDb.close();
+  }
+
+  persistPRStateToMirror(rootDir, {
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 10,
+    prState: 'open',
+    labels: ['reopened-after-outage'],
+  });
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare(
+      `SELECT pr_state,
+              closed_at,
+              merged_at,
+              labels_json,
+              review_status,
+              review_attempts,
+              last_attempted_at,
+              posted_at,
+              failed_at,
+              failure_message,
+              rereview_requested_at,
+              rereview_reason,
+              reviewer_session_uuid,
+              reviewer_pgid,
+              reviewer_started_at,
+              reviewer_head_sha,
+              reviewer_timeout_ms,
+              reviewer_lease_expires_at,
+              quota_reset_at_utc,
+              infra_auto_recover_attempts,
+              review_population_retry_attempts,
+              review_population_retry_last_at,
+              review_population_retry_head_sha
+         FROM reviewed_prs
+        WHERE repo = ?
+          AND pr_number = ?`
+    ).get('laceyenterprises/adversarial-review', 10);
+
+    assert.equal(row.pr_state, 'open');
+    assert.equal(row.closed_at, null);
+    assert.equal(row.merged_at, null);
+    assert.deepEqual(JSON.parse(row.labels_json), ['reopened-after-outage']);
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.review_attempts, 0);
+    assert.equal(row.last_attempted_at, null);
+    assert.equal(row.posted_at, null);
+    assert.equal(row.failed_at, null);
+    assert.equal(row.failure_message, null);
+    assert.equal(row.rereview_requested_at, null);
+    assert.equal(row.rereview_reason, null);
+    assert.equal(row.reviewer_session_uuid, null);
+    assert.equal(row.reviewer_pgid, null);
+    assert.equal(row.reviewer_started_at, null);
+    assert.equal(row.reviewer_head_sha, null);
+    assert.equal(row.reviewer_timeout_ms, null);
+    assert.equal(row.reviewer_lease_expires_at, null);
+    assert.equal(row.quota_reset_at_utc, null);
+    assert.equal(row.infra_auto_recover_attempts, 0);
+    assert.equal(row.review_population_retry_attempts, 0);
+    assert.equal(row.review_population_retry_last_at, null);
+    assert.equal(row.review_population_retry_head_sha, null);
+
+    const eligible = db.prepare(
+      `SELECT COUNT(*) AS count
+         FROM reviewed_prs
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pr_state = 'open'
+          AND review_status = 'pending'`
+    ).get('laceyenterprises/adversarial-review', 10);
+    assert.equal(eligible.count, 1, 'watcher can claim the reopened PR for review');
+  } finally {
+    db.close();
+  }
+});
+
+test('persistPRStateToMirror keeps a genuinely closed failed PR ineligible', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewRow(rootDir, {
+    prState: 'closed',
+    reviewStatus: 'failed-orphan',
+    reviewAttempts: 2,
+    lastAttemptedAt: '2026-07-04T15:18:00.000Z',
+    postedAt: null,
+    failedAt: '2026-07-04T15:19:00.000Z',
+    failureMessage: '[outage-stall] orphaned reviewer during watcher outage',
+  });
+
+  persistPRStateToMirror(rootDir, {
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 10,
+    prState: 'closed',
+    closedAt: '2026-07-04T15:20:00.000Z',
+    labels: ['closed'],
+  });
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare(
+      `SELECT pr_state, closed_at, labels_json, review_status, review_attempts, failed_at, failure_message
+         FROM reviewed_prs
+        WHERE repo = ?
+          AND pr_number = ?`
+    ).get('laceyenterprises/adversarial-review', 10);
+    assert.equal(row.pr_state, 'closed');
+    assert.equal(row.closed_at, '2026-07-04T15:20:00.000Z');
+    assert.deepEqual(JSON.parse(row.labels_json), ['closed']);
+    assert.equal(row.review_status, 'failed-orphan');
+    assert.equal(row.review_attempts, 2);
+    assert.equal(row.failed_at, '2026-07-04T15:19:00.000Z');
+    assert.equal(row.failure_message, '[outage-stall] orphaned reviewer during watcher outage');
+
+    const eligible = db.prepare(
+      `SELECT COUNT(*) AS count
+         FROM reviewed_prs
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pr_state = 'open'
+          AND review_status = 'pending'`
+    ).get('laceyenterprises/adversarial-review', 10);
+    assert.equal(eligible.count, 0, 'closed PR is not re-armed for review');
   } finally {
     db.close();
   }

@@ -229,13 +229,16 @@ test('detached reviewer process group survives parent SIGTERM for daemon bounce 
         ['-c', \`trap "" HUP TERM; sleep 30 & echo $! > "\${sleepPidPath}"; echo $$ > "\${bashPidPath}"; wait\`],
         { stdoutPath, stderrPath, progressTimeout: 0, timeout: 0 }
       );
+      const keepAlive = setInterval(() => {}, 1_000);
       const ready = setInterval(() => {
         if (existsSync(bashPidPath) && existsSync(sleepPidPath)) {
           clearInterval(ready);
+          clearTimeout(failReady);
         }
       }, 10);
-      setTimeout(() => {
+      const failReady = setTimeout(() => {
         clearInterval(ready);
+        clearInterval(keepAlive);
         process.exit(2);
       }, 2_000);
     `;

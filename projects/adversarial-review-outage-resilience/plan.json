@@ -1,0 +1,81 @@
+{
+  "planSchemaVersion": 2,
+  "planId": "adversarial-review-outage-resilience-v1",
+  "specRef": "adversarial-review-outage-resilience@db1e40639cdc",
+  "parentTicket": null,
+  "linearTeam": "OSS-Maintainers",
+  "tracking": "linear",
+  "defaults": {
+    "workerSpec": {
+      "workerClass": "codex",
+      "tools": [
+        "read",
+        "write",
+        "bash:git-safe",
+        "bash:unrestricted"
+      ],
+      "commsAllowance": "none",
+      "budgetEnforcement": "best-effort",
+      "retryPolicy": {
+        "backoffSeconds": 60
+      }
+    }
+  },
+  "linearProject": "Adversarial-Review Outage Resilience",
+  "tickets": [
+    {
+      "id": "ARR-01",
+      "title": "Liveness heartbeat + stall watchdog",
+      "scope": "Persist a heartbeat on every poll and every posted review (last_poll_at, last_review_at, monotonically-advancing poll counter) to a durable location (state DB or heartbeat file). Add a stall watchdog - in-process timer that exits 75 (launchd respawn) on no-forward-progress in N seconds, and/or a sibling liveness probe mirroring sentinel-liveness that restarts the watcher when the heartbeat is stale despite the process being up. Catches the alive-but-not-progressing stall the inode-only detector (watcher.mjs:1735) missed. Tests: a simulated wedged poll loop trips the watchdog and exits 75; a healthy watcher does not.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [],
+      "expectedDurationHours": 5,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-outage-resilience/prompts/arr-01-prompt.md"
+    },
+    {
+      "id": "ARR-02",
+      "title": "Broaden the DB-connection health canary",
+      "scope": "The existing inode-orphan check (watcher.mjs:1735-1752) only catches the DB file being replaced. Add a periodic write-canary (a cheap UPDATE/PRAGMA user_version round-trip or heartbeat-row write+read-back) so a connection silently failing writes for ANY reason triggers the same exit-75 restart. Tests: a connection whose writes silently no-op trips the canary and exits 75; existing inode-orphan detection still works.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARR-01"
+      ],
+      "expectedDurationHours": 5,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-outage-resilience/prompts/arr-02-prompt.md"
+    },
+    {
+      "id": "ARR-03",
+      "title": "Outage-aware attempt-budget accounting",
+      "scope": "Classify a review/remediation attempt failure as transient when it coincides with a detected system outage - deploy wedge (main-catchup freezeClass), quota outage (quota-exhaustion.mjs), or broker/gh unavailability - versus a genuine review failure. A transient/outage failure must NOT set review_status='failed' terminally, NOT increment the terminal review_attempts budget, and be re-queued for a fresh attempt once the outage clears (pause-and-resume not fail-and-exhaust). Surface outage.active, reviews_paused, attempts_not_charged in health output. Tests: an attempt failing during a simulated outage does not increment review_attempts or set terminal failed and is re-queued on recovery; a genuine (non-outage) failure still counts and terminalizes.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARR-01"
+      ],
+      "expectedDurationHours": 5,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-outage-resilience/prompts/arr-03-prompt.md"
+    },
+    {
+      "id": "ARR-04",
+      "title": "Reopen-aware review-state reset",
+      "scope": "When a PR's pr_state transitions from closed/merged back to open (reopened), reset a terminal review_status (failed/failed-orphan) so it becomes eligible for a fresh first-pass review, instead of staying permanently ineligible on a stale row (the exact state hand-cleared in the incident). Keep audit history (don't blindly delete); reset the eligibility fields. Tests: a reopened PR with a prior terminal failed row is re-reviewed; a genuinely-closed PR is not.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARR-03"
+      ],
+      "expectedDurationHours": 5,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-outage-resilience/prompts/arr-04-prompt.md"
+    }
+  ]
+}

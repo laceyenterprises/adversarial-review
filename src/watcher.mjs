@@ -3376,7 +3376,7 @@ function resolveFirstPassReviewBudgetSuppression({
     Number.isFinite(completedRereviewRounds) &&
     hasPositiveRoundBudget &&
     completedRemediationRoundsForPR >= roundBudget &&
-    completedRereviewRounds >= 1;
+    completedRereviewRounds >= roundBudget;
   const rereviewBudgetConsumed =
     Number.isFinite(completedRereviewRounds) &&
     hasPositiveRoundBudget &&

@@ -20,6 +20,7 @@ const REVIEW_STATE_TABLE_NAMES = new Set([
   'pr_merge_closeouts',
   'review_cycle_verdicts',
   'review_cycle_counters',
+  'watcher_db_canary',
 ]);
 
 const REVIEWED_PRS_HEAD_SHA_COLUMNS = Object.freeze([
@@ -120,6 +121,13 @@ function ensureReviewStateSchema(db) {
 
   runReviewStateMigrations(db);
   ensureReviewCycleCapSchema(db);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS watcher_db_canary (
+      id         TEXT PRIMARY KEY,
+      token      TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
   // Handles DBs that briefly saw the inline reviewer_passes schema before the
   // migration runner became the canonical path.
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN reviewer_model TEXT`);

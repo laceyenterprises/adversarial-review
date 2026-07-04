@@ -1491,6 +1491,7 @@ export async function load(url, context, nextLoad) {
         let db = null;
         function makeDb() {
           const rows = [];
+          const canary = new Map();
           function findRow(repo, prNumber) {
             return rows.find((row) => row.repo === repo && row.pr_number === prNumber) || null;
           }
@@ -1513,6 +1514,29 @@ export async function load(url, context, nextLoad) {
               const normalized = String(sql || '').replace(/\\s+/g, ' ').trim();
               if (normalized.includes("FROM reviewed_prs") && normalized.includes("pr_state = 'open'")) {
                 return { all: () => rows.filter((row) => row.pr_state === 'open').map((row) => ({ ...row })) };
+              }
+              if (normalized.startsWith('INSERT OR IGNORE INTO watcher_db_canary')) {
+                return {
+                  run: (id, token, updatedAt) => {
+                    if (canary.has(id)) return { changes: 0 };
+                    canary.set(id, { token, updated_at: updatedAt });
+                    return { changes: 1 };
+                  },
+                };
+              }
+              if (normalized.startsWith('UPDATE watcher_db_canary')) {
+                return {
+                  run: (token, id) => {
+                    if (!canary.has(id)) return { changes: 0 };
+                    canary.set(id, { token, updated_at: 'fixture-current-timestamp' });
+                    return { changes: 1 };
+                  },
+                };
+              }
+              if (normalized.startsWith('SELECT token FROM watcher_db_canary')) {
+                return {
+                  get: (id) => canary.has(id) ? { token: canary.get(id).token } : null,
+                };
               }
               if (normalized.startsWith("UPDATE reviewed_prs SET pr_state = 'merged'")) {
                 return {

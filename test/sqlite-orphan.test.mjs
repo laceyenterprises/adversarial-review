@@ -1,7 +1,51 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-import { SQLITE_READONLY_DBMOVED, isSqliteOrphanError } from '../src/sqlite-orphan.mjs';
+import {
+  SQLITE_READONLY_DBMOVED,
+  SQLITE_WRITE_CANARY_FAILED,
+  SqliteWriteCanaryError,
+  assertReviewDbWritesRoundTrip,
+  isSqliteOrphanError,
+} from '../src/sqlite-orphan.mjs';
+import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
+import { handlePollError } from '../src/watcher.mjs';
+
+function withTempReviewDb(fn) {
+  const rootDir = mkdtempSync(join(tmpdir(), 'sqlite-canary-'));
+  try {
+    const db = openReviewStateDb(rootDir);
+    try {
+      ensureReviewStateSchema(db);
+      return fn(db);
+    } finally {
+      db.close();
+    }
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+async function captureExitFromHandlePollError(err) {
+  const originalExit = process.exit;
+  const originalExitCode = process.exitCode;
+  const calls = [];
+  process.exitCode = undefined;
+  process.exit = (code) => {
+    calls.push(code);
+  };
+  try {
+    handlePollError(err, 'test db canary');
+    await new Promise((resolve) => setImmediate(resolve));
+    return { exitCode: process.exitCode, calls };
+  } finally {
+    process.exit = originalExit;
+    process.exitCode = originalExitCode;
+  }
+}
 
 test('isSqliteOrphanError matches better-sqlite3\'s direct code shape', () => {
   // better-sqlite3 surfaces SQLite extended error codes on err.code.
@@ -10,6 +54,13 @@ test('isSqliteOrphanError matches better-sqlite3\'s direct code shape', () => {
   const err = new Error('attempt to write a readonly database');
   err.code = SQLITE_READONLY_DBMOVED;
   assert.equal(isSqliteOrphanError(err), true);
+});
+
+test('isSqliteOrphanError matches DB write-canary failures', () => {
+  assert.equal(
+    isSqliteOrphanError(new SqliteWriteCanaryError('read-back mismatch')),
+    true
+  );
 });
 
 test('isSqliteOrphanError matches a wrapped err.cause.code', () => {
@@ -50,6 +101,64 @@ test('isSqliteOrphanError returns false for unrelated SQLite errors', () => {
   }
 });
 
+test('assertReviewDbWritesRoundTrip updates and reads back the canary row on a healthy DB', () => {
+  withTempReviewDb((db) => {
+    const result = assertReviewDbWritesRoundTrip(db, { token: 'healthy-token' });
+
+    assert.deepEqual(result, { ok: true, token: 'healthy-token' });
+    assert.deepEqual(
+      db.prepare('SELECT id, token FROM watcher_db_canary').all(),
+      [{ id: 'watcher-db-write-canary', token: 'healthy-token' }]
+    );
+  });
+});
+
+test('assertReviewDbWritesRoundTrip trips when writes silently no-op', () => {
+  const fakeDb = {
+    prepare(sql) {
+      if (sql.includes('INSERT OR IGNORE')) {
+        return { run: () => ({ changes: 1 }) };
+      }
+      if (sql.includes('UPDATE watcher_db_canary')) {
+        return { run: () => ({ changes: 1 }) };
+      }
+      if (sql.includes('SELECT token')) {
+        return { get: () => ({ token: 'stale-token' }) };
+      }
+      throw new Error(`unexpected SQL: ${sql}`);
+    },
+  };
+
+  assert.throws(
+    () => assertReviewDbWritesRoundTrip(fakeDb, { token: 'fresh-token' }),
+    (err) => {
+      assert.equal(err.code, SQLITE_WRITE_CANARY_FAILED);
+      assert.equal(err.expected, 'fresh-token');
+      assert.equal(err.actual, 'stale-token');
+      return true;
+    }
+  );
+});
+
+test('watcher DB write-canary failure exits 75 for launchd respawn', async () => {
+  const result = await captureExitFromHandlePollError(
+    new SqliteWriteCanaryError('connection writes are silently no-oping')
+  );
+
+  assert.equal(result.exitCode, 75);
+  assert.deepEqual(result.calls, [75]);
+});
+
+test('watcher inode-orphan detection still exits 75 for launchd respawn', async () => {
+  const err = new Error('attempt to write a readonly database');
+  err.code = SQLITE_READONLY_DBMOVED;
+
+  const result = await captureExitFromHandlePollError(err);
+
+  assert.equal(result.exitCode, 75);
+  assert.deepEqual(result.calls, [75]);
+});
+
 test('isSqliteOrphanError returns false for non-Error inputs', () => {
   assert.equal(isSqliteOrphanError(null), false);
   assert.equal(isSqliteOrphanError(undefined), false);
@@ -59,4 +168,8 @@ test('isSqliteOrphanError returns false for non-Error inputs', () => {
 
 test('SQLITE_READONLY_DBMOVED constant is exported as the canonical string', () => {
   assert.equal(SQLITE_READONLY_DBMOVED, 'SQLITE_READONLY_DBMOVED');
+});
+
+test('SQLITE_WRITE_CANARY_FAILED constant is exported as the canonical string', () => {
+  assert.equal(SQLITE_WRITE_CANARY_FAILED, 'SQLITE_WRITE_CANARY_FAILED');
 });

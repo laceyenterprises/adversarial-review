@@ -58,7 +58,7 @@ import {
   readBestReviewerEvidenceTokenUsage,
   tagTokenUsage,
 } from './reviewer-pass-tokens.mjs';
-import { isSqliteOrphanError } from './sqlite-orphan.mjs';
+import { assertReviewDbWritesRoundTrip, isSqliteOrphanError } from './sqlite-orphan.mjs';
 import {
   CASCADE_FAILURE_CAP,
   clearCascadeState,
@@ -1772,9 +1772,12 @@ function markWatcherReviewHeartbeat(details = {}) {
 }
 
 function exitForSqliteOrphan(err, contextLabel) {
+  const reason = err?.code === 'SQLITE_WRITE_CANARY_FAILED'
+    ? 'SQLite DB write canary failed'
+    : 'SQLite database file was replaced on disk while we held it open';
   console.error(
-    `[watcher] FATAL: SQLite database file was replaced on disk while we held it open ` +
-    `(SQLITE_READONLY_DBMOVED in ${contextLabel}); exiting so launchd KeepAlive can respawn ` +
+    `[watcher] FATAL: ${reason} ` +
+    `(${err?.code || 'sqlite-health-failure'} in ${contextLabel}); exiting so launchd KeepAlive can respawn ` +
     `us with a fresh handle. Original error: ${err?.message || err}`
   );
   // Allow the log line to flush before exit.
@@ -6070,6 +6073,7 @@ async function pollOnce(
   // propagate after this reset, not at next file-mtime change.
   resetRoleConfigCache();
   refreshReviewerRuntimeAdapter();
+  assertReviewDbWritesRoundTrip(db);
   // Keep the reviewer-bot GitHub App installation tokens fresh. The watcher is
   // a single long-lived process that resolved these once at startup; App
   // installation tokens expire ~1h, so without a periodic refresh the GitHub
@@ -7939,6 +7943,7 @@ export {
   retryPendingMergeAgentLifecycleCleanups,
   retryPendingDagAutowalkOnMerge,
   retryPendingMergeCloseouts,
+  handlePollError,
   primaryReviewerQuotaCappedForRow,
   reviewPopulationRetryDecision,
   shouldBypassPrimaryReviewerQuotaHold,

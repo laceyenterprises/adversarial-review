@@ -9,6 +9,7 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
 const DEFAULT_REAP_LIMIT = 8;
+const DEFAULT_REAP_BUDGET_MS = 20_000;
 const HAMMER_WORKER_RE = /^hammer-ama-pr-(\d+)(?:-.+)?$/;
 
 function normalizePositiveInteger(value, fallback) {
@@ -211,6 +212,7 @@ async function reapCloserHammerWorktrees({
   hqRoot = process.env.HQ_ROOT || process.env.AGENT_OS_HQ_ROOT || DEFAULT_HQ_ROOT,
   hqPath = process.env.HQ_PATH || DEFAULT_HQ_PATH,
   limit = normalizePositiveInteger(process.env.AMA_CLOSER_WORKTREE_REAP_LIMIT, DEFAULT_REAP_LIMIT),
+  budgetMs = normalizePositiveInteger(process.env.AMA_CLOSER_WORKTREE_REAP_BUDGET_MS, DEFAULT_REAP_BUDGET_MS),
   repoPaths = null,
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
@@ -258,7 +260,17 @@ async function reapCloserHammerWorktrees({
   };
 
   const prStateCache = new Map();
+  const reapStartedAt = Date.now();
+  summary.budgetMs = budgetMs;
+  summary.budgetExceeded = false;
   for (const entry of entries) {
+    if (Date.now() - reapStartedAt > budgetMs) {
+      // Wall-clock budget: never let the reap phase monopolize the follow-up
+      // tick and starve remediation `consume`. Remaining worktrees are
+      // deferred to the next tick.
+      summary.budgetExceeded = true;
+      break;
+    }
     if (summary.reaped >= limit) {
       summary.skipped += 1;
       continue;

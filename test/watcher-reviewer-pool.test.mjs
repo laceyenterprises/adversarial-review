@@ -16,12 +16,13 @@ import {
   pressureLevelFor,
 } from '../src/watcher-memory-pressure.mjs';
 
-function candidate(prNumber, run, createdAt = `2026-05-01T00:00:${String(prNumber).padStart(2, '0')}.000Z`) {
+function candidate(prNumber, run, createdAt = `2026-05-01T00:00:${String(prNumber).padStart(2, '0')}.000Z`, options = {}) {
   return {
-    repoPath: 'laceyenterprises/adversarial-review',
+    repoPath: options.repoPath || 'laceyenterprises/adversarial-review',
     prNumber,
     subject: { createdAt },
-    current: null,
+    current: options.current ?? null,
+    enqueuedAtMs: options.enqueuedAtMs,
     run,
   };
 }
@@ -85,6 +86,186 @@ test('reviewer dispatch candidates sort oldest pending PR first', () => {
   ]);
 
   assert.deepEqual(sorted.map((item) => item.prNumber), [10, 15, 20]);
+});
+
+test('reviewer dispatch tie-breaks equal ages by repo path before PR number', () => {
+  const createdAt = '2026-05-01T00:00:00.000Z';
+  const sorted = sortReviewerDispatchCandidates([
+    candidate(10, async () => {}, createdAt, { repoPath: 'z/repo' }),
+    candidate(1000, async () => {}, createdAt, { repoPath: 'a/repo' }),
+    candidate(5, async () => {}, createdAt, { repoPath: 'a/repo' }),
+  ]);
+
+  assert.deepEqual(sorted.map((item) => `${item.repoPath}#${item.prNumber}`), [
+    'a/repo#5',
+    'a/repo#1000',
+    'z/repo#10',
+  ]);
+});
+
+test('reviewer pool dispatches oldest PRs first when candidates exceed pool size', async () => {
+  const started = [];
+  let releaseRunning;
+  const runningCanFinish = new Promise((resolve) => {
+    releaseRunning = resolve;
+  });
+  const tasks = [
+    candidate(30, async () => {
+      started.push(30);
+      await runningCanFinish;
+    }, '2026-05-03T00:00:00.000Z'),
+    candidate(10, async () => {
+      started.push(10);
+      await runningCanFinish;
+    }, '2026-05-01T00:00:00.000Z'),
+    candidate(20, async () => {
+      started.push(20);
+      await runningCanFinish;
+    }, '2026-05-02T00:00:00.000Z'),
+  ];
+
+  const runPromise = runBoundedReviewerDispatchQueue(tasks, {
+    maxConcurrent: 2,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(started, [10, 20]);
+  releaseRunning();
+  await runPromise;
+  assert.deepEqual(started, [10, 20, 30]);
+});
+
+test('reviewer dispatch keeps an older pending PR ahead of newer arrivals across ticks', async () => {
+  const startsByTick = [];
+  const oldPr = candidate(10, async () => {
+    startsByTick.push('old');
+  }, '2026-05-01T00:00:00.000Z');
+
+  await runBoundedReviewerDispatchQueue([
+    candidate(20, async () => {
+      startsByTick.push('newer-tick-1');
+    }, '2026-05-02T00:00:00.000Z'),
+  ], {
+    maxConcurrent: 1,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  await runBoundedReviewerDispatchQueue([
+    candidate(30, async () => {
+      startsByTick.push('newer-tick-2');
+    }, '2026-05-03T00:00:00.000Z'),
+    oldPr,
+  ], {
+    maxConcurrent: 1,
+    logger: { error() {}, log() {}, warn() {} },
+  });
+
+  assert.deepEqual(startsByTick, ['newer-tick-1', 'old', 'newer-tick-2']);
+});
+
+test('reviewer dispatch sorts re-reviews in the same FIFO lane by original PR age', () => {
+  const sorted = sortReviewerDispatchCandidates([
+    candidate(50, async () => {}, '2026-05-05T00:00:00.000Z', {
+      current: {
+        rereview_requested_at: '2026-05-05T12:00:00.000Z',
+        reviewed_at: '2026-05-01T00:00:00.000Z',
+      },
+    }),
+    candidate(40, async () => {}, '2026-05-04T00:00:00.000Z'),
+    candidate(10, async () => {}, '2026-05-01T00:00:00.000Z', {
+      current: {
+        rereview_requested_at: '2026-05-06T00:00:00.000Z',
+        reviewed_at: '2026-05-06T00:00:00.000Z',
+      },
+    }),
+  ]);
+
+  assert.deepEqual(sorted.map((item) => item.prNumber), [10, 40, 50]);
+});
+
+test('reviewer dispatch logs wait time and warns beyond threshold', async () => {
+  const logs = [];
+  const warnings = [];
+  await runBoundedReviewerDispatchQueue([
+    candidate(10, async () => {}, '2026-05-01T00:00:00.000Z', {
+      enqueuedAtMs: 1000,
+      current: { rereview_requested_at: '2026-05-01T00:05:00.000Z' },
+    }),
+  ], {
+    maxConcurrent: 1,
+    now: () => 5000,
+    waitWarnMs: 3000,
+    logger: {
+      error() {},
+      log(message) {
+        logs.push(message);
+      },
+      warn(message) {
+        warnings.push(message);
+      },
+    },
+  });
+
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /wait_ms=4000/);
+  assert.match(logs[0], /pass_kind=rereview/);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /threshold_ms=3000/);
+});
+
+test('reviewer dispatch logs deterministic epoch-zero wait time', async () => {
+  const logs = [];
+  await runBoundedReviewerDispatchQueue([
+    candidate(10, async () => {}, '1970-01-01T00:00:00.000Z', {
+      enqueuedAtMs: 0,
+    }),
+  ], {
+    maxConcurrent: 1,
+    now: () => 0,
+    waitWarnMs: 1,
+    logger: {
+      error() {},
+      log(message) {
+        logs.push(message);
+      },
+      warn() {},
+    },
+  });
+
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /wait_ms=0/);
+  assert.match(logs[0], /pr_age_ms=0/);
+});
+
+test('reviewer dispatch ignores non-number enqueuedAtMs values', async () => {
+  const logs = [];
+  const warnings = [];
+  await runBoundedReviewerDispatchQueue([
+    {
+      ...candidate(10, async () => {}, '2026-05-01T00:00:00.000Z', {
+        enqueuedAtMs: null,
+      }),
+      enqueuedAt: '2026-05-01T00:00:05.000Z',
+    },
+  ], {
+    maxConcurrent: 1,
+    now: () => Date.parse('2026-05-01T00:00:10.000Z'),
+    waitWarnMs: 6000,
+    logger: {
+      error() {},
+      log(message) {
+        logs.push(message);
+      },
+      warn(message) {
+        warnings.push(message);
+      },
+    },
+  });
+
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /wait_ms=5000/);
+  assert.equal(warnings.length, 0);
 });
 
 test('reviewer memory gate refuses a spawn when one more reviewer cannot fit', () => {

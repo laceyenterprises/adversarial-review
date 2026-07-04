@@ -58,7 +58,7 @@ function quotaStatements(db) {
       "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, quota_reset_at_utc = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
     ),
     markOutageTransient: db.prepare(
-      "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, quota_reset_at_utc = ? WHERE repo = ? AND pr_number = ?"
+      "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, quota_reset_at_utc = ? WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
     ),
     markCascadeFailed: db.prepare(
       "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ? WHERE repo = ? AND pr_number = ?"
@@ -373,6 +373,81 @@ test('main-catchup freezeClass deploy outage is requeued without charging review
     assert.equal(row.review_status, 'pending-upstream');
     assert.equal(row.review_attempts, 0);
     assert.match(row.failure_message, /^\[outage-transient:deploy-wedge\] \[unknown\]/);
+  } finally {
+    if (oldHqRoot === undefined) {
+      delete process.env.HQ_ROOT;
+    } else {
+      process.env.HQ_ROOT = oldHqRoot;
+    }
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('outage transient settlement does not overwrite a row after the review lease is gone', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    db.prepare(
+      "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ? WHERE repo = ? AND pr_number = ?"
+    ).run('2026-06-17T17:20:00.000Z', REPO, PR);
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: REPO,
+      prNumber: PR,
+      result: {
+        ok: false,
+        failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
+        error: CODEX_QUOTA_OUTPUT,
+        stdout: CODEX_QUOTA_OUTPUT,
+        stderr: '',
+      },
+      failureAt: '2026-06-17T17:30:00.000Z',
+      maxRemediationRounds: 2,
+      leaseRecoveryEnabled: false,
+      statements: quotaStatements(db),
+    });
+
+    const row = getRow(db);
+    assert.equal(row.review_status, 'posted');
+    assert.equal(row.failed_at, null);
+    assert.equal(row.failure_message, null);
+    assert.equal(row.quota_reset_at_utc, null);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('malformed main-catchup outage state fails closed instead of pretending healthy', () => {
+  const { rootDir, db } = setupFixture();
+  const oldHqRoot = process.env.HQ_ROOT;
+  const hqRoot = path.join(rootDir, 'hq');
+  try {
+    mkdirSync(path.join(hqRoot, 'main-catchup'), { recursive: true });
+    writeFileSync(path.join(hqRoot, 'main-catchup', '.state.json'), '{"currentState":');
+    process.env.HQ_ROOT = hqRoot;
+
+    assert.throws(
+      () => settleReviewerAttempt({
+        rootDir,
+        repoPath: REPO,
+        prNumber: PR,
+        result: {
+          ok: false,
+          failureClass: 'unknown',
+          error: 'reviewer exited while deploy freeze state was unreadable',
+        },
+        failureAt: '2026-06-17T17:30:00.000Z',
+        maxRemediationRounds: 2,
+        leaseRecoveryEnabled: false,
+        statements: quotaStatements(db),
+      }),
+      SyntaxError
+    );
+
+    const row = getRow(db);
+    assert.equal(row.review_status, 'reviewing');
+    assert.equal(row.failed_at, null);
+    assert.equal(row.failure_message, null);
   } finally {
     if (oldHqRoot === undefined) {
       delete process.env.HQ_ROOT;

@@ -2351,8 +2351,9 @@ const QUOTA_EXHAUSTED_BACKOFF_MS = resolveQuotaExhaustedBackoffMs();
 function readJsonFile(path) {
   try {
     return JSON.parse(readFileSync(path, 'utf8'));
-  } catch {
-    return null;
+  } catch (err) {
+    if (err?.code === 'ENOENT') return null;
+    throw err;
   }
 }
 
@@ -2701,7 +2702,7 @@ const stmtReleaseReviewLeaseQuota = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, quota_reset_at_utc = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
 );
 const stmtMarkOutageTransient = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, quota_reset_at_utc = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
+  "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, quota_reset_at_utc = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
 );
 const stmtMarkCascadeFailed = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"

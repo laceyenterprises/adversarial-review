@@ -10,6 +10,7 @@ import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import {
   LEGACY_ORPHAN_FAILURE_MESSAGE,
   NULL_PGID_FAILURE_MESSAGE,
+  makeReviewPostedProbe,
   reconcileReviewerSessions,
 } from '../src/reviewer-reattach.mjs';
 
@@ -488,6 +489,32 @@ test('recovers a dead reviewer when GitHub has a posted review from this bot sin
   assert.match(log.lines.join('\n'), /reviewer_reattach_recovered/);
 });
 
+test('review probe with no start time selects the newest bot review', async () => {
+  const octokit = makeOctokit([
+    {
+      user: { login: 'codex-reviewer-lacey' },
+      submitted_at: '2026-05-11T04:00:00.000Z',
+      commit_id: 'old-head',
+    },
+    {
+      user: { login: 'codex-reviewer-lacey' },
+      submitted_at: '2026-05-11T05:13:09.000Z',
+      commit_id: HEAD_SHA,
+    },
+  ]);
+  const findPostedReview = makeReviewPostedProbe(octokit);
+
+  const review = await findPostedReview({
+    repo: REPO,
+    pr_number: PR,
+    reviewer: 'codex',
+    reviewer_started_at: null,
+  });
+
+  assert.equal(review.submitted_at, '2026-05-11T05:13:09.000Z');
+  assert.equal(review.commit_id, HEAD_SHA);
+});
+
 test('dead reviewer with posted review is not recovered when PR head changed', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'codex' });
@@ -722,6 +749,42 @@ test('claimed rows with null pgid auto-rearm when no live run-state or GitHub re
     [{ state: 'cancelled', reason: 'missing-pgid-no-live-reviewer' }]
   );
   assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_requeued/);
+});
+
+test('claimed rows with null pgid stay reviewing while launch guard window is active', async () => {
+  const db = setupDb();
+  seedReviewing(db, {
+    pgid: null,
+    lastAttemptedAt: '2026-05-11T05:19:00.000Z',
+    startedAt: null,
+    reviewerTimeoutMs: 20 * 60 * 1000,
+  });
+  const log = makeLog();
+  let headProbeCount = 0;
+  let reviewProbeCount = 0;
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    fetchHeadSha: async () => {
+      headProbeCount += 1;
+      return HEAD_SHA;
+    },
+    findPostedReview: async () => {
+      reviewProbeCount += 1;
+      return null;
+    },
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.review_attempts, 2);
+  assert.equal(row.failure_message, null);
+  assert.equal(headProbeCount, 0, 'active launch guard must avoid head probing');
+  assert.equal(reviewProbeCount, 0, 'active launch guard must avoid review probing');
+  assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_guard_active/);
 });
 
 test('claimed rows with null pgid reconcile to an already posted current-head review', async () => {

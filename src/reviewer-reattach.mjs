@@ -174,7 +174,7 @@ function makeReviewPostedProbe(octokit) {
         const submittedAtMs = parseTime(review?.submitted_at);
         return submittedAtMs !== null && (startedAtMs === null || submittedAtMs >= startedAtMs);
       })
-      .sort((a, b) => Date.parse(a.submitted_at) - Date.parse(b.submitted_at))[0] || null;
+      .sort((a, b) => Date.parse(b.submitted_at) - Date.parse(a.submitted_at))[0] || null;
   };
 }
 
@@ -336,6 +336,21 @@ async function reconcileReviewerSessions({
           `pgid=${adoption.pgid}`
         );
       } else {
+        const claimedAtMs = parseTime(row.last_attempted_at);
+        const reviewerTimeoutMs = parsePositiveInteger(row.reviewer_timeout_ms);
+        if (
+          claimedAtMs !== null &&
+          reviewerTimeoutMs !== null &&
+          now.getTime() <= claimedAtMs + reviewerTimeoutMs
+        ) {
+          log.log(
+            `[watcher] reviewer_reattach_null_pgid_guard_active repo=${row.repo} pr=${row.pr_number} ` +
+            `session=${row.reviewer_session_uuid} last_attempted_at=${row.last_attempted_at} ` +
+            `timeout_ms=${reviewerTimeoutMs}`
+          );
+          continue;
+        }
+
         let currentHeadSha = null;
         try {
           currentHeadSha = await fetchHeadSha(row);

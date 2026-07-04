@@ -29,6 +29,41 @@ const REVIEWED_PRS_HEAD_SHA_COLUMNS = Object.freeze([
   'head_ref_oid',
   'headRefOid',
 ]);
+const REVIEW_STATE_RESET_ASSIGNMENTS = Object.freeze([
+  ['review_status', "'pending'"],
+  ['review_attempts', '0'],
+  ['last_attempted_at', 'NULL'],
+  ['posted_at', 'NULL'],
+  ['failed_at', 'NULL'],
+  ['failure_message', 'NULL'],
+  ['rereview_requested_at', 'NULL'],
+  ['rereview_reason', 'NULL'],
+  ['reviewer_session_uuid', 'NULL'],
+  ['reviewer_pgid', 'NULL'],
+  ['reviewer_started_at', 'NULL'],
+  ['reviewer_head_sha', 'NULL'],
+  ['reviewer_timeout_ms', 'NULL'],
+  ['reviewer_lease_expires_at', 'NULL'],
+  ['quota_reset_at_utc', 'NULL'],
+  ['infra_auto_recover_attempts', '0'],
+  ['review_population_retry_attempts', '0'],
+  ['review_population_retry_last_at', 'NULL'],
+  ['review_population_retry_head_sha', 'NULL'],
+]);
+
+function buildReviewStateResetAssignments({ condition = null, overrides = {} } = {}) {
+  return REVIEW_STATE_RESET_ASSIGNMENTS.map(([column, resetValue]) => {
+    const assignmentValue = Object.prototype.hasOwnProperty.call(overrides, column)
+      ? overrides[column]
+      : resetValue;
+    if (!condition) return `${column} = ${assignmentValue}`;
+    return `${column} = CASE
+                  WHEN ${condition}
+                  THEN ${assignmentValue}
+                  ELSE ${column}
+                END`;
+  }).join(',\n                ');
+}
 
 function openReviewStateDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } = {}) {
   mkdirSync(join(rootDir, 'data'), { recursive: true });
@@ -734,126 +769,15 @@ function persistPRStateToMirror(rootDir, { repo, prNumber, prState, mergedAt, cl
         "UPDATE reviewed_prs SET pr_state = 'closed', closed_at = COALESCE(?, closed_at), labels_json = COALESCE(?, labels_json) WHERE repo = ? AND pr_number = ?"
       ).run(closedAt || null, Array.isArray(labels) ? JSON.stringify(labels) : null, repo, prNumber);
     } else {
+      const reopenFailedReviewResetCondition = `pr_state IN ('closed', 'merged')
+                   AND review_status IN ('failed', 'failed-orphan')`;
       db.prepare(
         `UPDATE reviewed_prs
             SET pr_state = 'open',
                 merged_at = NULL,
                 closed_at = NULL,
                 labels_json = COALESCE(?, labels_json),
-                review_status = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN 'pending'
-                  ELSE review_status
-                END,
-                review_attempts = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN 0
-                  ELSE review_attempts
-                END,
-                last_attempted_at = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN NULL
-                  ELSE last_attempted_at
-                END,
-                posted_at = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN NULL
-                  ELSE posted_at
-                END,
-                failed_at = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN NULL
-                  ELSE failed_at
-                END,
-                failure_message = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN NULL
-                  ELSE failure_message
-                END,
-                rereview_requested_at = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN NULL
-                  ELSE rereview_requested_at
-                END,
-                rereview_reason = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN NULL
-                  ELSE rereview_reason
-                END,
-                reviewer_session_uuid = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN NULL
-                  ELSE reviewer_session_uuid
-                END,
-                reviewer_pgid = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN NULL
-                  ELSE reviewer_pgid
-                END,
-                reviewer_started_at = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN NULL
-                  ELSE reviewer_started_at
-                END,
-                reviewer_head_sha = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN NULL
-                  ELSE reviewer_head_sha
-                END,
-                reviewer_timeout_ms = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN NULL
-                  ELSE reviewer_timeout_ms
-                END,
-                reviewer_lease_expires_at = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN NULL
-                  ELSE reviewer_lease_expires_at
-                END,
-                quota_reset_at_utc = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN NULL
-                  ELSE quota_reset_at_utc
-                END,
-                infra_auto_recover_attempts = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN 0
-                  ELSE infra_auto_recover_attempts
-                END,
-                review_population_retry_attempts = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN 0
-                  ELSE review_population_retry_attempts
-                END,
-                review_population_retry_last_at = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN NULL
-                  ELSE review_population_retry_last_at
-                END,
-                review_population_retry_head_sha = CASE
-                  WHEN pr_state IN ('closed', 'merged')
-                   AND review_status IN ('failed', 'failed-orphan')
-                  THEN NULL
-                  ELSE review_population_retry_head_sha
-                END
+                ${buildReviewStateResetAssignments({ condition: reopenFailedReviewResetCondition })}
           WHERE repo = ?
             AND pr_number = ?`
       ).run(Array.isArray(labels) ? JSON.stringify(labels) : null, repo, prNumber);
@@ -971,14 +895,15 @@ function requestReviewRereview({
       : "pr_state = 'open'";
     const updateResult = db.prepare(
       `UPDATE reviewed_prs
-         SET review_status = 'pending',
-             pr_state = 'open',
-             posted_at = NULL,
-             failed_at = NULL,
-             failure_message = NULL,
-             infra_auto_recover_attempts = 0,
-             rereview_requested_at = ?,
-             rereview_reason = ?
+         SET pr_state = 'open',
+             ${buildReviewStateResetAssignments({
+               overrides: {
+                 review_attempts: 'review_attempts',
+                 last_attempted_at: 'last_attempted_at',
+                 rereview_requested_at: '?',
+                 rereview_reason: '?',
+               },
+             })}
        WHERE repo = ?
          AND pr_number = ?
          AND ${allowedPrStatePredicate}

@@ -88,6 +88,21 @@ test('reviewer dispatch candidates sort oldest pending PR first', () => {
   assert.deepEqual(sorted.map((item) => item.prNumber), [10, 15, 20]);
 });
 
+test('reviewer dispatch tie-breaks equal ages by repo path before PR number', () => {
+  const createdAt = '2026-05-01T00:00:00.000Z';
+  const sorted = sortReviewerDispatchCandidates([
+    candidate(10, async () => {}, createdAt, { repoPath: 'z/repo' }),
+    candidate(1000, async () => {}, createdAt, { repoPath: 'a/repo' }),
+    candidate(5, async () => {}, createdAt, { repoPath: 'a/repo' }),
+  ]);
+
+  assert.deepEqual(sorted.map((item) => `${item.repoPath}#${item.prNumber}`), [
+    'a/repo#5',
+    'a/repo#1000',
+    'z/repo#10',
+  ]);
+});
+
 test('reviewer pool dispatches oldest PRs first when candidates exceed pool size', async () => {
   const started = [];
   let releaseRunning;
@@ -197,6 +212,60 @@ test('reviewer dispatch logs wait time and warns beyond threshold', async () => 
   assert.match(logs[0], /pass_kind=rereview/);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /threshold_ms=3000/);
+});
+
+test('reviewer dispatch logs deterministic epoch-zero wait time', async () => {
+  const logs = [];
+  await runBoundedReviewerDispatchQueue([
+    candidate(10, async () => {}, '1970-01-01T00:00:00.000Z', {
+      enqueuedAtMs: 0,
+    }),
+  ], {
+    maxConcurrent: 1,
+    now: () => 0,
+    waitWarnMs: 1,
+    logger: {
+      error() {},
+      log(message) {
+        logs.push(message);
+      },
+      warn() {},
+    },
+  });
+
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /wait_ms=0/);
+  assert.match(logs[0], /pr_age_ms=0/);
+});
+
+test('reviewer dispatch ignores non-number enqueuedAtMs values', async () => {
+  const logs = [];
+  const warnings = [];
+  await runBoundedReviewerDispatchQueue([
+    {
+      ...candidate(10, async () => {}, '2026-05-01T00:00:00.000Z', {
+        enqueuedAtMs: null,
+      }),
+      enqueuedAt: '2026-05-01T00:00:05.000Z',
+    },
+  ], {
+    maxConcurrent: 1,
+    now: () => Date.parse('2026-05-01T00:00:10.000Z'),
+    waitWarnMs: 6000,
+    logger: {
+      error() {},
+      log(message) {
+        logs.push(message);
+      },
+      warn(message) {
+        warnings.push(message);
+      },
+    },
+  });
+
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /wait_ms=5000/);
+  assert.equal(warnings.length, 0);
 });
 
 test('reviewer memory gate refuses a spawn when one more reviewer cannot fit', () => {

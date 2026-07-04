@@ -160,9 +160,9 @@ function reviewerDispatchSortTimeMs(candidate) {
 function compareReviewerDispatchCandidates(a, b) {
   const timeDelta = reviewerDispatchSortTimeMs(a) - reviewerDispatchSortTimeMs(b);
   if (timeDelta !== 0) return timeDelta;
-  const prDelta = Number(a?.prNumber || 0) - Number(b?.prNumber || 0);
-  if (prDelta !== 0) return prDelta;
-  return String(a?.repoPath || '').localeCompare(String(b?.repoPath || ''));
+  const repoDelta = String(a?.repoPath || '').localeCompare(String(b?.repoPath || ''));
+  if (repoDelta !== 0) return repoDelta;
+  return Number(a?.prNumber || 0) - Number(b?.prNumber || 0);
 }
 
 function sortReviewerDispatchCandidates(candidates) {
@@ -176,9 +176,11 @@ function reviewerDispatchAgeMs(candidate, nowMs = Date.now()) {
 }
 
 function reviewerDispatchWaitMs(candidate, nowMs = Date.now()) {
-  const enqueuedAtMs = Number(candidate?.enqueuedAtMs);
-  if (Number.isFinite(enqueuedAtMs)) {
-    return Math.max(0, nowMs - enqueuedAtMs);
+  if (
+    typeof candidate?.enqueuedAtMs === 'number'
+    && Number.isFinite(candidate.enqueuedAtMs)
+  ) {
+    return Math.max(0, nowMs - candidate.enqueuedAtMs);
   }
   const enqueuedAt = parseSortTimeMs(candidate?.enqueuedAt);
   return enqueuedAt === null ? null : Math.max(0, nowMs - enqueuedAt);
@@ -300,7 +302,9 @@ async function runBoundedReviewerDispatchQueue(candidates, {
   let started = 0;
 
   async function start(candidate) {
-    logReviewerDispatchWait(candidate, { logger, nowMs: Number(now()) || Date.now(), waitWarnMs });
+    const currentNowMs = Number(now());
+    const resolvedNowMs = Number.isFinite(currentNowMs) ? currentNowMs : Date.now();
+    logReviewerDispatchWait(candidate, { logger, nowMs: resolvedNowMs, waitWarnMs });
     try {
       await candidate.run();
     } catch (err) {

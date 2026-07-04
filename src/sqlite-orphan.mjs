@@ -42,6 +42,14 @@ function isSqliteOrphanError(err) {
   return false;
 }
 
+function isSqliteWriteCanaryError(err) {
+  if (!err) return false;
+  if (err.code === SQLITE_WRITE_CANARY_FAILED) return true;
+  if (err.cause && err.cause.code === SQLITE_WRITE_CANARY_FAILED) return true;
+  if (typeof err.message === 'string' && err.message.includes(SQLITE_WRITE_CANARY_FAILED)) return true;
+  return false;
+}
+
 function dbWriteCanaryToken({ now = () => new Date(), random = Math.random } = {}) {
   const timestamp = now();
   const iso = timestamp instanceof Date ? timestamp.toISOString() : new Date(timestamp).toISOString();
@@ -52,24 +60,16 @@ function assertReviewDbWritesRoundTrip(db, {
   canaryId = DB_WRITE_CANARY_ID,
   token = dbWriteCanaryToken(),
 } = {}) {
-  let info;
-  try {
-    db.prepare(
-      `INSERT OR IGNORE INTO watcher_db_canary (id, token, updated_at)
-       VALUES (?, '', '')`
-    ).run(canaryId);
-    info = db.prepare(
-      `UPDATE watcher_db_canary
-          SET token = ?,
-              updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?`
-    ).run(token, canaryId);
-  } catch (err) {
-    throw new SqliteWriteCanaryError(
-      `SQLite write canary failed during write: ${err?.message || err}`,
-      { cause: err, expected: token }
-    );
-  }
+  db.prepare(
+    `INSERT OR IGNORE INTO watcher_db_canary (id, token, updated_at)
+     VALUES (?, '', '')`
+  ).run(canaryId);
+  const info = db.prepare(
+    `UPDATE watcher_db_canary
+        SET token = ?,
+            updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?`
+  ).run(token, canaryId);
 
   if (info?.changes !== 1) {
     throw new SqliteWriteCanaryError(
@@ -78,15 +78,7 @@ function assertReviewDbWritesRoundTrip(db, {
     );
   }
 
-  let row;
-  try {
-    row = db.prepare('SELECT token FROM watcher_db_canary WHERE id = ?').get(canaryId);
-  } catch (err) {
-    throw new SqliteWriteCanaryError(
-      `SQLite write canary failed during read-back: ${err?.message || err}`,
-      { cause: err, expected: token }
-    );
-  }
+  const row = db.prepare('SELECT token FROM watcher_db_canary WHERE id = ?').get(canaryId);
 
   if (row?.token !== token) {
     throw new SqliteWriteCanaryError(
@@ -105,4 +97,5 @@ export {
   SqliteWriteCanaryError,
   assertReviewDbWritesRoundTrip,
   isSqliteOrphanError,
+  isSqliteWriteCanaryError,
 };

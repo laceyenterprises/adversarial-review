@@ -32,17 +32,22 @@ function withTempReviewDb(fn) {
 async function captureExitFromHandlePollError(err) {
   const originalExit = process.exit;
   const originalExitCode = process.exitCode;
+  const originalConsoleError = console.error;
   const calls = [];
+  const errorLines = [];
   let timeout;
   let resolveExit;
   const exitCalled = new Promise((resolve) => {
     resolveExit = resolve;
   });
   process.exitCode = undefined;
+  console.error = (...args) => {
+    errorLines.push(args.join(' '));
+  };
   process.exit = (code) => {
     process.exitCode = code;
     calls.push(code);
-    resolveExit({ exitCode: process.exitCode, calls: [...calls] });
+    resolveExit({ exitCode: process.exitCode, calls: [...calls], errorLines: [...errorLines] });
   };
   try {
     handlePollError(err, 'test db canary');
@@ -59,6 +64,7 @@ async function captureExitFromHandlePollError(err) {
     clearTimeout(timeout);
     process.exit = originalExit;
     process.exitCode = originalExitCode;
+    console.error = originalConsoleError;
   }
 }
 
@@ -155,6 +161,59 @@ test('assertReviewDbWritesRoundTrip trips when writes silently no-op', () => {
   );
 });
 
+test('assertReviewDbWritesRoundTrip lets explicit write errors propagate', () => {
+  const busy = new Error('database is locked');
+  busy.code = 'SQLITE_BUSY';
+  const fakeDb = {
+    prepare(sql) {
+      if (sql.includes('INSERT OR IGNORE')) {
+        return { run: () => ({ changes: 1 }) };
+      }
+      if (sql.includes('UPDATE watcher_db_canary')) {
+        return { run: () => { throw busy; } };
+      }
+      throw new Error(`unexpected SQL: ${sql}`);
+    },
+  };
+
+  assert.throws(
+    () => assertReviewDbWritesRoundTrip(fakeDb, { token: 'fresh-token' }),
+    (err) => {
+      assert.equal(err, busy);
+      assert.equal(err.code, 'SQLITE_BUSY');
+      return true;
+    }
+  );
+});
+
+test('assertReviewDbWritesRoundTrip lets explicit read-back errors propagate', () => {
+  const moved = new Error('attempt to write a readonly database');
+  moved.code = SQLITE_READONLY_DBMOVED;
+  const fakeDb = {
+    prepare(sql) {
+      if (sql.includes('INSERT OR IGNORE')) {
+        return { run: () => ({ changes: 1 }) };
+      }
+      if (sql.includes('UPDATE watcher_db_canary')) {
+        return { run: () => ({ changes: 1 }) };
+      }
+      if (sql.includes('SELECT token')) {
+        return { get: () => { throw moved; } };
+      }
+      throw new Error(`unexpected SQL: ${sql}`);
+    },
+  };
+
+  assert.throws(
+    () => assertReviewDbWritesRoundTrip(fakeDb, { token: 'fresh-token' }),
+    (err) => {
+      assert.equal(err, moved);
+      assert.equal(err.code, SQLITE_READONLY_DBMOVED);
+      return true;
+    }
+  );
+});
+
 test('watcher DB write-canary failure exits 75 for launchd respawn', async () => {
   const result = await captureExitFromHandlePollError(
     new SqliteWriteCanaryError('connection writes are silently no-oping')
@@ -162,6 +221,17 @@ test('watcher DB write-canary failure exits 75 for launchd respawn', async () =>
 
   assert.equal(result.exitCode, 75);
   assert.deepEqual(result.calls, [75]);
+});
+
+test('watcher wrapped DB write-canary failure logs the canary reason', async () => {
+  const wrapped = new Error('wrapped SQLITE_WRITE_CANARY_FAILED');
+  wrapped.cause = new SqliteWriteCanaryError('connection writes are silently no-oping');
+
+  const result = await captureExitFromHandlePollError(wrapped);
+
+  assert.equal(result.exitCode, 75);
+  assert.deepEqual(result.calls, [75]);
+  assert.match(result.errorLines.join('\n'), /SQLite DB write canary failed/);
 });
 
 test('watcher inode-orphan detection still exits 75 for launchd respawn', async () => {

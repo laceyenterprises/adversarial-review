@@ -58,7 +58,11 @@ import {
   readBestReviewerEvidenceTokenUsage,
   tagTokenUsage,
 } from './reviewer-pass-tokens.mjs';
-import { assertReviewDbWritesRoundTrip, isSqliteOrphanError } from './sqlite-orphan.mjs';
+import {
+  assertReviewDbWritesRoundTrip,
+  isSqliteOrphanError,
+  isSqliteWriteCanaryError,
+} from './sqlite-orphan.mjs';
 import {
   CASCADE_FAILURE_CAP,
   clearCascadeState,
@@ -1772,7 +1776,7 @@ function markWatcherReviewHeartbeat(details = {}) {
 }
 
 function exitForSqliteOrphan(err, contextLabel) {
-  const reason = err?.code === 'SQLITE_WRITE_CANARY_FAILED'
+  const reason = isSqliteWriteCanaryError(err)
     ? 'SQLite DB write canary failed'
     : 'SQLite database file was replaced on disk while we held it open';
   console.error(

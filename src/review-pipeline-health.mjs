@@ -38,6 +38,8 @@ const FOLLOW_UP_JOB_DIRS = Object.freeze({
 
 const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_health_collector_up',
+  'review_pipeline_outage_active',
+  'review_pipeline_outage_attempts_not_charged',
   'review_pipeline_reviewer_attempts_total',
   'review_pipeline_failed_attempts_distinct_prs',
   'review_pipeline_reviewer_degradation_active',
@@ -59,6 +61,8 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
 
 const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_health_collector_up: 'Whether the collector could open the review-state ledger.',
+  review_pipeline_outage_active: 'Whether review attempts are paused by an active outage signal.',
+  review_pipeline_outage_attempts_not_charged: 'Current count of outage-transient reviewer failures that preserved the attempt budget.',
   review_pipeline_reviewer_attempts_total: 'Windowed reviewer attempt count by status, failure class, and pass kind.',
   review_pipeline_failed_attempts_distinct_prs: 'Windowed distinct PR count contributing failed reviewer attempts by failure class.',
   review_pipeline_reviewer_degradation_active: 'Active reviewer degradation/backoff PR count by failure class and state.',
@@ -616,6 +620,63 @@ function readActiveQuotaHolds(db, { nowMs }) {
     });
   }
   return entries;
+}
+
+function readOutageTransientRows(db) {
+  if (!db) return [];
+  return safeAll(
+    db,
+    `SELECT repo,
+            pr_number,
+            review_status,
+            pr_state,
+            failed_at,
+            last_attempted_at,
+            failure_message,
+            quota_reset_at_utc,
+            review_attempts
+       FROM reviewed_prs
+      WHERE COALESCE(pr_state, 'open') = 'open'
+        AND review_status IN ('pending', 'pending-upstream')
+        AND lower(COALESCE(failure_message, '')) LIKE '[outage-transient:%'`
+  );
+}
+
+function outageReasonFromMessage(message) {
+  const match = String(message || '').match(/^\[outage-transient:([^\]]+)\]/i);
+  return match?.[1] || 'unknown';
+}
+
+function summarizeOutage(db, reviewerDegradation) {
+  const rows = readOutageTransientRows(db);
+  const reasons = new Map();
+  const examples = [];
+  for (const row of rows) {
+    const reason = outageReasonFromMessage(row.failure_message);
+    reasons.set(reason, Number(reasons.get(reason) || 0) + 1);
+    if (examples.length < 5) {
+      examples.push({
+        repo: row.repo,
+        prNumber: row.pr_number,
+        reason,
+        reviewStatus: row.review_status,
+        since: row.failed_at || row.last_attempted_at || null,
+        reviewAttempts: Number(row.review_attempts || 0),
+      });
+    }
+  }
+  const active = rows.length > 0 || Number(reviewerDegradation?.active || 0) > 0;
+  return {
+    active,
+    reason: rows.length === 0
+      ? (Number(reviewerDegradation?.active || 0) > 0 ? 'reviewer-degradation' : null)
+      : (reasons.size === 1 ? Array.from(reasons.keys())[0] : 'multiple'),
+    reviews_paused: rows.length > 0,
+    attempts_not_charged: rows.length,
+    reasons: Array.from(reasons, ([reason, count]) => ({ reason, count }))
+      .sort((left, right) => left.reason.localeCompare(right.reason)),
+    examples,
+  };
 }
 
 function summarizeReviewerDegradation(rootDir, db, { nowMs }) {
@@ -1406,6 +1467,16 @@ function collectReviewPipelineHealth({
       : { depth: 0, oldest: null };
     const followUpQueues = summarizeFollowUpQueues(rootDir, { nowMs, config });
     const reviewerDegradation = summarizeReviewerDegradation(rootDir, db, { nowMs });
+    const outage = db
+      ? summarizeOutage(db, reviewerDegradation)
+      : {
+          active: false,
+          reason: null,
+          reviews_paused: false,
+          attempts_not_charged: 0,
+          reasons: [],
+          examples: [],
+        };
     const mergeOutcomes = db ? summarizeMergeOutcomes(db) : [];
     const mergeStalls = summarizeMergeStalls({
       followUpJobs: followUpQueues.jobs,
@@ -1434,6 +1505,7 @@ function collectReviewPipelineHealth({
       config,
       reviewer,
       reviewerDegradation,
+      outage,
       firstPassQueue,
       followUpQueues: {
         states: followUpQueues.states,
@@ -1482,6 +1554,8 @@ function renderReviewPipelinePrometheus(snapshot) {
     lines.push(metricLine(name, labels, value));
   };
   pushMetric('review_pipeline_health_collector_up', {}, snapshot.reviewStateLedger?.readable ? 1 : 0);
+  pushMetric('review_pipeline_outage_active', {}, snapshot.outage?.active ? 1 : 0);
+  pushMetric('review_pipeline_outage_attempts_not_charged', {}, snapshot.outage?.attempts_not_charged || 0);
   const reviewerAttempts = snapshot.reviewer.attempts.length
     ? snapshot.reviewer.attempts
     : [{ status: 'none', failure_class: 'none', pass_kind: 'first-pass', value: 0 }];

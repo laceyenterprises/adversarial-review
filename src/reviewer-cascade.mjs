@@ -74,6 +74,10 @@ function normalizeTransientFailureClass(failureClass) {
     value === 'cascade' ||
     value === 'reviewer-timeout' ||
     value === 'launchctl-bootstrap' ||
+    value === 'quota-exhausted' ||
+    value === 'broker-unavailable' ||
+    value === 'github-unavailable' ||
+    value === 'deploy-wedge' ||
     value === PROVIDER_OVERLOADED_FAILURE_CLASS
   ) {
     return value;
@@ -94,6 +98,7 @@ function recordCascadeFailure(rootDir, {
   prNumber,
   failedAt = new Date().toISOString(),
   failureClass = 'cascade',
+  nextRetryAfter = null,
 } = {}) {
   const previous = readCascadeState(rootDir, { repo, prNumber });
   const previousCount = Number(
@@ -102,7 +107,7 @@ function recordCascadeFailure(rootDir, {
   const consecutiveTransientFailures = Math.min(previousCount + 1, CASCADE_FAILURE_CAP);
   const backoffMinutes = resolveCascadeBackoffMinutes(consecutiveTransientFailures);
   const failedAtMs = Date.parse(failedAt);
-  const nextRetryAfter = new Date(failedAtMs + (backoffMinutes * 60_000)).toISOString();
+  const retryAfter = nextRetryAfter || new Date(failedAtMs + (backoffMinutes * 60_000)).toISOString();
   const normalizedFailureClass = normalizeTransientFailureClass(failureClass);
   const transientFailureBreakdown = previous?.transientFailureBreakdown
     ? { ...previous.transientFailureBreakdown }
@@ -118,7 +123,7 @@ function recordCascadeFailure(rootDir, {
     transientFailureBreakdown,
     lastFailureClass: normalizedFailureClass,
     lastFailureAt: failedAt,
-    nextRetryAfter,
+    nextRetryAfter: retryAfter,
     backoffMinutes,
   });
 }

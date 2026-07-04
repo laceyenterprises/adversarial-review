@@ -748,6 +748,29 @@ test('malformed transient backoff retry dates are not treated as active degradat
   assert.ok(!findingCodes(snapshot).includes('review:reviewer_degradation_active'));
 });
 
+test('health output surfaces outage pause and attempts not charged', () => {
+  const rootDir = tempRoot();
+  insertReviewRow(rootDir, {
+    prNumber: 778,
+    reviewStatus: 'pending-upstream',
+    reviewAttempts: 0,
+    lastAttemptedAt: '2026-05-25T17:55:00.000Z',
+    failedAt: '2026-05-25T17:55:00.000Z',
+    failureMessage: '[outage-transient:quota-outage] [quota-exhausted] usage limit',
+  });
+
+  const snapshot = collectReviewPipelineHealth({ rootDir, now: () => new Date(NOW) });
+  assert.equal(snapshot.outage.active, true);
+  assert.equal(snapshot.outage.reason, 'quota-outage');
+  assert.equal(snapshot.outage.reviews_paused, true);
+  assert.equal(snapshot.outage.attempts_not_charged, 1);
+  assert.deepEqual(snapshot.outage.reasons, [{ reason: 'quota-outage', count: 1 }]);
+
+  const output = renderReviewPipelinePrometheus(snapshot);
+  assert.match(output, /^review_pipeline_outage_active 1$/m);
+  assert.match(output, /^review_pipeline_outage_attempts_not_charged 1$/m);
+});
+
 test('Grafana dashboard JSON references only exported review pipeline metric names', () => {
   const dashboard = JSON.parse(readFileSync('observability/grafana/review-pipeline-health.json', 'utf8'));
   const metricNames = new Set(REVIEW_PIPELINE_HEALTH_METRICS);

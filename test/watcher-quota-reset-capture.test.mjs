@@ -5,27 +5,24 @@
 //      reset time from the FULL output (stdout/stderr, before failure_message
 //      truncation can drop the "try again at" line) and stores it durably in
 //      reviewed_prs.quota_reset_at_utc.
-//   2. The hold-until-reset gate honors that stored reset.
-//   3. Holding does NOT consume an infra_auto_recover attempt.
-//   4. Once the reset has passed, the row IS re-claimed for a real attempt and
-//      the attempt budget is incremented exactly once.
-//   5. A quota failure with NO parseable reset falls back to the default window
+//   2. The outage settlement is non-terminal and does not consume review_attempts.
+//   3. Once the reset has passed, the pending-upstream row is re-claimed for a
+//      real attempt.
+//   4. A quota failure with NO parseable reset falls back to the default window
 //      and logs loudly, with quota_reset_at_utc left NULL.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import path from 'node:path';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { settleReviewerAttempt } from '../src/watcher.mjs';
 import {
-  quotaHoldDecision,
   QUOTA_EXHAUSTED_FAILURE_CLASS,
 } from '../src/quota-exhaustion.mjs';
-import { infraRecoverableFailureClass } from '../src/reviewer-failure-classification.mjs';
 
 const REPO = 'laceyenterprises/agent-os';
 const PR = 2429;
@@ -60,6 +57,9 @@ function quotaStatements(db) {
     releaseReviewLeaseQuota: db.prepare(
       "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, quota_reset_at_utc = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
     ),
+    markOutageTransient: db.prepare(
+      "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, quota_reset_at_utc = ? WHERE repo = ? AND pr_number = ?"
+    ),
     markCascadeFailed: db.prepare(
       "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ? WHERE repo = ? AND pr_number = ?"
     ),
@@ -93,7 +93,7 @@ const CLAUDE_WEEKLY_QUOTA_OUTPUT = [
   '[reviewer] ERROR STACK: Error: Command failed with code 1',
 ].join('\n');
 
-test('quota-exhausted failure captures + stores the provider reset time durably', () => {
+test('quota-exhausted outage failure preserves attempt budget and requeues after reset', () => {
   const { rootDir, db } = setupFixture();
   try {
     settleReviewerAttempt({
@@ -114,14 +114,19 @@ test('quota-exhausted failure captures + stores the provider reset time durably'
     });
 
     const row = getRow(db);
-    assert.equal(row.review_status, 'failed');
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.equal(row.review_attempts, 0);
     assert.equal(row.quota_reset_at_utc, '2026-06-18T00:39:00.000Z');
-    assert.match(row.failure_message, /^\[quota-exhausted\]/);
+    assert.match(row.failure_message, /^\[outage-transient:quota-outage\] \[quota-exhausted\]/);
     // The full output is preserved in failure_message so the reset is also
     // re-derivable as a fallback.
     assert.match(row.failure_message, /try again at Jun 17th, 2026 5:39 PM/i);
-    // Classifies as the recoverable quota class.
-    assert.equal(infraRecoverableFailureClass(row), QUOTA_EXHAUSTED_FAILURE_CLASS);
+    const state = JSON.parse(readFileSync(
+      path.join(rootDir, 'data', 'cascade-state', `${encodeURIComponent(REPO)}__${PR}.json`),
+      'utf8'
+    ));
+    assert.equal(state.lastFailureClass, QUOTA_EXHAUSTED_FAILURE_CLASS);
+    assert.equal(state.nextRetryAfter, '2026-06-18T00:39:00.000Z');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -148,15 +153,16 @@ test('quota-exhausted failure captures Claude weekly reset from stdout', () => {
     });
 
     const row = getRow(db);
-    assert.equal(row.review_status, 'failed');
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.equal(row.review_attempts, 0);
     assert.equal(row.quota_reset_at_utc, '2026-06-27T10:00:00.000Z');
-    assert.match(row.failure_message, /^\[quota-exhausted\]/);
+    assert.match(row.failure_message, /^\[outage-transient:quota-outage\] \[quota-exhausted\]/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
 
-test('quota-exhausted lease-recovery settlement still lands in failed for hold-until-reset', () => {
+test('quota-exhausted lease-recovery settlement stays non-terminal for hold-until-reset', () => {
   const { rootDir, db } = setupFixture();
   try {
     settleReviewerAttempt({
@@ -176,13 +182,10 @@ test('quota-exhausted lease-recovery settlement still lands in failed for hold-u
     });
 
     const row = getRow(db);
-    assert.equal(row.review_status, 'failed');
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.equal(row.review_attempts, 0);
     assert.equal(row.quota_reset_at_utc, '2026-06-18T00:39:00.000Z');
-    assert.equal(infraRecoverableFailureClass(row), QUOTA_EXHAUSTED_FAILURE_CLASS);
-
-    const held = quotaHoldDecision(row, { nowMs: Date.parse('2026-06-17T20:00:00Z') });
-    assert.equal(held.hold, true);
-    assert.equal(held.source, 'provider-reported-stored');
+    assert.match(row.failure_message, /^\[outage-transient:quota-outage\]/);
 
     const pendingClaim = db.prepare(
       `UPDATE reviewed_prs
@@ -194,14 +197,14 @@ test('quota-exhausted lease-recovery settlement still lands in failed for hold-u
           AND pr_number = ?
           AND review_status IN ('pending', 'pending-upstream')`
     ).run(REPO, PR);
-    assert.equal(pendingClaim.changes, 0, 'normal pending claim must not bypass the quota hold');
-    assert.equal(getRow(db).review_status, 'failed');
+    assert.equal(pendingClaim.changes, 1, 'pending-upstream row is the non-terminal requeue state');
+    assert.equal(getRow(db).review_status, 'reviewing');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
 
-test('hold-until-reset honors the stored reset and does NOT burn an infra auto-recover attempt', () => {
+test('hold-until-reset honors the stored reset and does NOT burn a review attempt', () => {
   const { rootDir, db } = setupFixture();
   try {
     settleReviewerAttempt({
@@ -221,25 +224,20 @@ test('hold-until-reset honors the stored reset and does NOT burn an infra auto-r
     });
     const row = getRow(db);
     assert.equal(row.infra_auto_recover_attempts, 0);
-
-    // Before the reset: hold. The watcher gate `continue`s here WITHOUT calling
-    // the recovery claim, so the attempt counter stays 0.
-    const held = quotaHoldDecision(row, { nowMs: Date.parse('2026-06-17T20:00:00Z') });
-    assert.equal(held.hold, true);
-    assert.equal(held.source, 'provider-reported-stored');
-    // The recovery claim statement is the ONLY thing that bumps the counter; the
-    // hold short-circuits before it, so the on-disk counter is untouched.
+    assert.equal(row.review_attempts, 0);
+    const state = JSON.parse(readFileSync(
+      path.join(rootDir, 'data', 'cascade-state', `${encodeURIComponent(REPO)}__${PR}.json`),
+      'utf8'
+    ));
+    assert.equal(state.nextRetryAfter, '2026-06-18T00:39:00.000Z');
     assert.equal(getRow(db).infra_auto_recover_attempts, 0);
-
-    // After the reset: release.
-    const released = quotaHoldDecision(row, { nowMs: Date.parse('2026-06-18T01:00:00Z') });
-    assert.equal(released.hold, false);
+    assert.equal(getRow(db).review_attempts, 0);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
 
-test('a qualifying quota row IS re-claimed once the reset has passed (cap incremented exactly once)', () => {
+test('a qualifying quota row IS re-claimed once the reset has passed without prior budget charge', () => {
   const { rootDir, db } = setupFixture();
   try {
     settleReviewerAttempt({
@@ -257,16 +255,9 @@ test('a qualifying quota row IS re-claimed once the reset has passed (cap increm
       leaseRecoveryEnabled: false,
       statements: quotaStatements(db),
     });
-    const failedRow = getRow(db);
-
-    // The watcher computes infraRecoveryClass + the hold; once the hold clears
-    // it runs the real infra-recovery claim. Replicate that claim here (the
-    // statement is byte-identical to stmtMarkInfraAutoRecoveryAttemptStarted's
-    // quota branch).
-    const infraClass = infraRecoverableFailureClass(failedRow);
-    assert.equal(infraClass, QUOTA_EXHAUSTED_FAILURE_CLASS);
-    const hold = quotaHoldDecision(failedRow, { nowMs: Date.parse('2026-06-18T01:00:00Z') });
-    assert.equal(hold.hold, false, 'reset has passed; recovery should proceed');
+    const outageRow = getRow(db);
+    assert.equal(outageRow.review_status, 'pending-upstream');
+    assert.equal(outageRow.review_attempts, 0);
 
     const claim = db.prepare(
       `UPDATE reviewed_prs
@@ -274,17 +265,15 @@ test('a qualifying quota row IS re-claimed once the reset has passed (cap increm
               failed_at = NULL,
               failure_message = NULL,
               quota_reset_at_utc = NULL,
-              infra_auto_recover_attempts = infra_auto_recover_attempts + 1
+              last_attempted_at = ?
         WHERE repo = ? AND pr_number = ?
-          AND review_status = 'failed'
-          AND infra_auto_recover_attempts < 3
-          AND lower(COALESCE(failure_message, '')) LIKE '[quota-exhausted]%'`
-    ).run(REPO, PR);
-    assert.equal(claim.changes, 1, 'the quota row must be claimable for recovery');
+          AND review_status = 'pending-upstream'`
+    ).run('2026-06-18T01:00:00.000Z', REPO, PR);
+    assert.equal(claim.changes, 1, 'the quota row must be requeued for recovery');
 
     const reclaimed = getRow(db);
     assert.equal(reclaimed.review_status, 'reviewing');
-    assert.equal(reclaimed.infra_auto_recover_attempts, 1);
+    assert.equal(reclaimed.review_attempts, 0);
     assert.equal(reclaimed.quota_reset_at_utc, null);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -311,18 +300,85 @@ test('quota failure with NO parseable reset leaves quota_reset_at_utc NULL (fall
       statements: quotaStatements(db),
     });
     const row = getRow(db);
-    assert.equal(row.review_status, 'failed');
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.equal(row.review_attempts, 0);
     assert.equal(row.quota_reset_at_utc, null);
-    // Still classified quota (via the bracket tag) so the hold uses the fallback
-    // window anchored on failed_at.
-    assert.equal(infraRecoverableFailureClass(row), QUOTA_EXHAUSTED_FAILURE_CLASS);
-    const d = quotaHoldDecision(row, {
-      nowMs: Date.parse('2026-06-17T17:35:00Z'),
-      fallbackBackoffMs: 15 * 60 * 1000,
-    });
-    assert.equal(d.source, 'fallback-window');
-    assert.equal(d.hold, true);
+    assert.match(row.failure_message, /^\[outage-transient:quota-outage\]/);
+    const state = JSON.parse(readFileSync(
+      path.join(rootDir, 'data', 'cascade-state', `${encodeURIComponent(REPO)}__${PR}.json`),
+      'utf8'
+    ));
+    assert.equal(state.nextRetryAfter, '2026-06-17T17:45:00.000Z');
   } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('broker outage failure is requeued without charging review attempts', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: REPO,
+      prNumber: PR,
+      result: {
+        ok: false,
+        failureClass: 'unknown',
+        error: 'OAuth broker fetch failed: ECONNREFUSED 127.0.0.1:4099',
+        stderr: 'broker unavailable',
+      },
+      failureAt: '2026-06-17T17:30:00.000Z',
+      maxRemediationRounds: 2,
+      leaseRecoveryEnabled: false,
+      statements: quotaStatements(db),
+    });
+
+    const row = getRow(db);
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.equal(row.review_attempts, 0);
+    assert.match(row.failure_message, /^\[outage-transient:broker-unavailable\] \[unknown\]/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('main-catchup freezeClass deploy outage is requeued without charging review attempts', () => {
+  const { rootDir, db } = setupFixture();
+  const oldHqRoot = process.env.HQ_ROOT;
+  const hqRoot = path.join(rootDir, 'hq');
+  try {
+    mkdirSync(path.join(hqRoot, 'main-catchup'), { recursive: true });
+    writeFileSync(
+      path.join(hqRoot, 'main-catchup', '.state.json'),
+      `${JSON.stringify({ currentState: 'frozen', freezeClass: 'privileged-bounce-failed' })}\n`
+    );
+    process.env.HQ_ROOT = hqRoot;
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: REPO,
+      prNumber: PR,
+      result: {
+        ok: false,
+        failureClass: 'unknown',
+        error: 'reviewer exited while deploy freeze was active',
+      },
+      failureAt: '2026-06-17T17:30:00.000Z',
+      maxRemediationRounds: 2,
+      leaseRecoveryEnabled: false,
+      statements: quotaStatements(db),
+    });
+
+    const row = getRow(db);
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.equal(row.review_attempts, 0);
+    assert.match(row.failure_message, /^\[outage-transient:deploy-wedge\] \[unknown\]/);
+  } finally {
+    if (oldHqRoot === undefined) {
+      delete process.env.HQ_ROOT;
+    } else {
+      process.env.HQ_ROOT = oldHqRoot;
+    }
     rmSync(rootDir, { recursive: true, force: true });
   }
 });

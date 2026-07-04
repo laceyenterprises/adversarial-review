@@ -178,6 +178,13 @@ import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-fa
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { createWatcherHealthProbe } from './health-probe.mjs';
+import {
+  createWatcherHeartbeat,
+  createWatcherStallWatchdog,
+  DEFAULT_WATCHER_STALL_CHECK_INTERVAL_MS,
+  DEFAULT_WATCHER_STALL_EXIT_CODE,
+  DEFAULT_WATCHER_STALL_WATCHDOG_MS,
+} from './watcher-heartbeat.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { apiStatusFromError, recordApiCall } from './api-telemetry.mjs';
 import {
@@ -1758,6 +1765,12 @@ const SQLITE_ORPHAN_EXIT_CODE = 75;
 // or a hung poll deadline (86). KeepAlive=true respawns either way.
 const POLL_DEADLINE_EXIT_CODE = 86;
 
+let watcherHeartbeat = null;
+
+function markWatcherReviewHeartbeat(details = {}) {
+  watcherHeartbeat?.markReview?.(details);
+}
+
 function exitForSqliteOrphan(err, contextLabel) {
   console.error(
     `[watcher] FATAL: SQLite database file was replaced on disk while we held it open ` +
@@ -3098,6 +3111,7 @@ function settleReviewerAttempt({
   if (result.ok) {
     const postedAt = new Date().toISOString();
     statements.markPosted.run(postedAt, repoPath, prNumber);
+    markWatcherReviewHeartbeat({ repo: repoPath, pr_number: prNumber, posted_at: postedAt });
     try {
       const currentRow = typeof statements.getReviewRow?.get === 'function'
         ? statements.getReviewRow.get(repoPath, prNumber)
@@ -6951,13 +6965,19 @@ async function pollOnce(
         const reconciliation = await reconcileReviewerCommandFailedBeforeRetry({
           row: current,
           findPostedReview: reviewerCommandFailedReviewProbe,
-          markPosted: ({ postedAt, row }) => stmtMarkReviewerCommandFailedRecoveredPosted.run(
-            postedAt,
-            row.repo,
-            row.pr_number,
-            row.reviewer_session_uuid,
-            row.reviewer_started_at,
-          ).changes,
+          markPosted: ({ postedAt, row }) => {
+            const changes = stmtMarkReviewerCommandFailedRecoveredPosted.run(
+              postedAt,
+              row.repo,
+              row.pr_number,
+              row.reviewer_session_uuid,
+              row.reviewer_started_at,
+            ).changes;
+            if (changes === 1) {
+              markWatcherReviewHeartbeat({ repo: row.repo, pr_number: row.pr_number, posted_at: postedAt });
+            }
+            return changes;
+          },
           settleRunRecord: ({ sessionUuid, state, settledAt, reason }) => settleDurableReviewerRunState({
             sessionUuid,
             state,
@@ -7685,6 +7705,15 @@ async function main() {
   });
   const intervalMs = config.pollIntervalMs ?? 300_000;
   const configuredDeadlineMs = config.pollDeadlineMs;
+  const heartbeatPath = process.env.ADVERSARIAL_WATCHER_HEARTBEAT_PATH || undefined;
+  const configuredStallMs = Number(process.env.ADVERSARIAL_WATCHER_STALL_WATCHDOG_MS);
+  const stallWatchdogMs = Number.isFinite(configuredStallMs) && configuredStallMs > 0
+    ? configuredStallMs
+    : Math.max(DEFAULT_WATCHER_STALL_WATCHDOG_MS, intervalMs * 3);
+  const configuredStallCheckMs = Number(process.env.ADVERSARIAL_WATCHER_STALL_CHECK_INTERVAL_MS);
+  const stallWatchdogCheckMs = Number.isFinite(configuredStallCheckMs) && configuredStallCheckMs > 0
+    ? configuredStallCheckMs
+    : Math.min(DEFAULT_WATCHER_STALL_CHECK_INTERVAL_MS, Math.max(1_000, Math.floor(stallWatchdogMs / 4)));
 
   if (Object.prototype.hasOwnProperty.call(config, 'fallbackReviewer')) {
     console.error(
@@ -7749,8 +7778,37 @@ async function main() {
     ? `${configuredDeadlineMs / 1000}s (configured)`
     : `workload-aware (default floor ${DEFAULT_POLL_DEADLINE_FLOOR_MS / 1000}s)`;
   console.log(
-    `[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s | poll deadline: ${deadlineLabel}`
+    `[watcher] Starting — ${watchMode} | poll interval: ${intervalMs / 1000}s | ` +
+    `poll deadline: ${deadlineLabel} | stall watchdog: ${stallWatchdogMs / 1000}s`
   );
+
+  watcherHeartbeat = createWatcherHeartbeat({
+    rootDir: ROOT,
+    filePath: heartbeatPath,
+    logger: console,
+  });
+  watcherHeartbeat.persist('startup');
+  const stallWatchdog = createWatcherStallWatchdog({
+    heartbeat: watcherHeartbeat,
+    stallMs: stallWatchdogMs,
+    checkIntervalMs: stallWatchdogCheckMs,
+    exitCode: DEFAULT_WATCHER_STALL_EXIT_CODE,
+    logger: console,
+    onStall: ({ exitCode, stalledForMs, heartbeat }) => {
+      exitAfterReviewerCleanup({
+        code: exitCode,
+        reason: 'watcher stall watchdog',
+        source: 'watcher stall watchdog',
+        err: new Error(
+          `watcher poll counter stalled for ${stalledForMs}ms ` +
+          `(poll_counter=${heartbeat.poll_counter}, last_poll_at=${heartbeat.last_poll_at || 'null'})`
+        ),
+        message:
+          'FATAL: watcher made no poll-counter progress while idle; preserving in-flight reviewer runtime sessions so launchd can respawn',
+      });
+    },
+  });
+  stallWatchdog.start();
 
   // Self-scheduling loop. Awaiting safePollOnce before sleeping
   // guarantees no two polls overlap, so the previous overlap-skip
@@ -7770,10 +7828,19 @@ async function main() {
     onTimeout: exitForPollDeadline,
     deadlineMs: resolveDeadlineMsForCall,
   });
+  async function runHeartbeatPoll(source) {
+    watcherHeartbeat.markPoll({ source });
+    stallWatchdog.beginPoll();
+    try {
+      return await safePollOnce(source);
+    } finally {
+      stallWatchdog.endPoll();
+    }
+  }
 
   (async function pollLoop() {
     let nextStart = Date.now();
-    await safePollOnce('startup pollOnce');
+    await runHeartbeatPoll('startup pollOnce');
     nextStart += intervalMs;
     while (true) {
       // Fixed-rate cadence: subtract elapsed work from the next
@@ -7785,7 +7852,7 @@ async function main() {
       // The interval-sleep timer is the only handle keeping the
       // event loop alive between polls, so it MUST NOT be unref'd.
       await new Promise((resolve) => setTimeout(resolve, sleepMs));
-      await safePollOnce('scheduled pollOnce');
+      await runHeartbeatPoll('scheduled pollOnce');
       nextStart += intervalMs;
     }
   })().catch((err) => {
@@ -7809,6 +7876,8 @@ export {
   amaAuthoritativeReviewerLoginsForModel,
   classifyReviewerFailure,
   createWatcherOctokit,
+  createWatcherHeartbeat,
+  createWatcherStallWatchdog,
   attemptDagAutowalkOnMerge,
   cancelReviewerRuntimeSession,
   clearReviewCycleCapForOverride,

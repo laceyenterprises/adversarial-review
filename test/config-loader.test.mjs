@@ -3334,6 +3334,21 @@ test('validateSchema stays strict on unknown keys INSIDE a known section', () =>
   );
 });
 
+test('validateSchema rejects schema metadata keys in instance data', () => {
+  assert.throws(
+    () => validateSchema(
+      { version: 1, roots: { __frozen: true, hq: '/tmp/hq' } },
+      { source: '/tmp/config.yaml' },
+    ),
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError);
+      assert.match(err.message, /roots\.__frozen/);
+      assert.match(err.message, /unknown key/);
+      return true;
+    },
+  );
+});
+
 test('validateSchema can explicitly tolerate nested unknown keys for local-layer callers', () => {
   const out = validateSchema(
     {

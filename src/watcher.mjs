@@ -3314,7 +3314,6 @@ function settleReviewerAttempt({
     return;
   }
 
-  clearCascadeState(rootDir, { repo: repoPath, prNumber });
   const fullFailureOutput = [result.error, result.stdout, result.stderr]
     .filter(Boolean)
     .join('\n');
@@ -3359,6 +3358,7 @@ function settleReviewerAttempt({
     );
     return;
   }
+  clearCascadeState(rootDir, { repo: repoPath, prNumber });
   if (failureClass === QUOTA_EXHAUSTED_FAILURE_CLASS) {
     // Capture the provider usage-cap reset time from the FULL reviewer output
     // (stdout + stderr + error message) BEFORE failure_message truncation can

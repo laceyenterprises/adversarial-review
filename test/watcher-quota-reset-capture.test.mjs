@@ -23,6 +23,7 @@ import { settleReviewerAttempt } from '../src/watcher.mjs';
 import {
   QUOTA_EXHAUSTED_FAILURE_CLASS,
 } from '../src/quota-exhaustion.mjs';
+import { recordCascadeFailure } from '../src/reviewer-cascade.mjs';
 
 const REPO = 'laceyenterprises/agent-os';
 const PR = 2429;
@@ -337,6 +338,48 @@ test('broker outage failure is requeued without charging review attempts', () =>
     assert.equal(row.review_status, 'pending-upstream');
     assert.equal(row.review_attempts, 0);
     assert.match(row.failure_message, /^\[outage-transient:broker-unavailable\] \[unknown\]/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('broker outage preserves existing cascade history while recording retry', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    recordCascadeFailure(rootDir, {
+      repo: REPO,
+      prNumber: PR,
+      failedAt: '2026-06-17T17:29:00.000Z',
+      failureClass: 'reviewer-timeout',
+    });
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: REPO,
+      prNumber: PR,
+      result: {
+        ok: false,
+        failureClass: 'unknown',
+        error: 'OAuth broker fetch failed: ECONNREFUSED 127.0.0.1:4099',
+        stderr: 'broker unavailable',
+      },
+      failureAt: '2026-06-17T17:30:00.000Z',
+      maxRemediationRounds: 2,
+      leaseRecoveryEnabled: false,
+      statements: quotaStatements(db),
+    });
+
+    const state = JSON.parse(readFileSync(
+      path.join(rootDir, 'data', 'cascade-state', `${encodeURIComponent(REPO)}__${PR}.json`),
+      'utf8'
+    ));
+    assert.equal(state.consecutiveTransientFailures, 2);
+    assert.deepEqual(state.transientFailureBreakdown, {
+      'reviewer-timeout': 1,
+      'broker-unavailable': 1,
+    });
+    assert.equal(state.lastFailureClass, 'broker-unavailable');
+    assert.equal(state.nextRetryAfter, '2026-06-17T17:35:00.000Z');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

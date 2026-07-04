@@ -1700,6 +1700,7 @@ function schemaV1() {
           first_pass_reviewer_pool_max_concurrent_reviewers: {
             __type: TYPE_INT,
             __default: 6,
+            __nullable: true,
             __min: 1,
           },
         },

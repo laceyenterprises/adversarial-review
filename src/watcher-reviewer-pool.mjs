@@ -35,8 +35,15 @@ function parsePositiveInteger(value, fallback) {
 function normalizeFirstPassReviewerPoolMax(value, {
   fallback = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
   max = MAX_FIRST_PASS_REVIEWER_POOL_MAX,
+  logger = console,
+  source = 'watcher.first_pass_reviewer_pool_max_concurrent_reviewers',
 } = {}) {
   const parsed = parsePositiveInteger(value, fallback);
+  if (parsed > max && logger && typeof logger.warn === 'function') {
+    logger.warn(
+      `[watcher-reviewer-pool] WARN config key=${source}: requested max_concurrent_reviewers=${parsed} exceeds system_max=${max}; clamping to ${max}`
+    );
+  }
   return Math.min(parsed, max);
 }
 
@@ -129,6 +136,7 @@ function resolveFirstPassReviewerPoolConfig({
   topPath,
   modulePaths,
   loaderImpl,
+  logger = console,
 } = {}) {
   const configuredEnabled = watcherConfig.firstPassReviewerPoolEnabled
     ?? watcherConfig.reviewerPoolEnabled
@@ -149,7 +157,10 @@ function resolveFirstPassReviewerPoolConfig({
   const cfgMax = _resolveFirstPassPoolMaxFromCfg(env, { topPath, modulePaths, loaderImpl });
   const maxConcurrent = normalizeFirstPassReviewerPoolMax(
     cfgMax,
-    { fallback: parsePositiveInteger(configuredMax, DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX) }
+    {
+      fallback: parsePositiveInteger(configuredMax, DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX),
+      logger,
+    }
   );
   return {
     enabled,

@@ -189,6 +189,7 @@ const ENUM_SESSION_LEDGER_SERVICE_LOG_LEVEL = ['CRITICAL', 'ERROR', 'WARNING', '
 const ENUM_APP_MODE = ['agent-os', 'standalone'];
 const ENUM_UPDATE_CHANNEL = ['rolling', 'stable', 'pinned'];
 const ENUM_WORKER_POOL_MEMORY_DYNAMIC_ADMIT_PERCENTILE = ['p50', 'p95', 'p99'];
+const ENUM_SENTINEL_PROFILE = ['strict', 'balanced', 'relaxed'];
 const PATTERN_LINEAR_ISSUE_PREFIX = '^[A-Z][A-Z0-9]{1,9}$';
 const PATTERN_LINEAR_ISSUE_PREFIX_DESCRIPTION = 'Linear issue prefix /^[A-Z][A-Z0-9]{1,9}$/';
 const PATTERN_SQL_IDENTIFIER = '^[A-Za-z_][A-Za-z0-9_]{0,62}$';
@@ -1421,6 +1422,17 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          profile: {
+            __type: TYPE_STRING,
+            __default: 'balanced',
+            __enum: ENUM_SENTINEL_PROFILE,
+          },
+          quiet_window: {
+            __type: TYPE_STRING,
+            __default: 'adaptive',
+            __pattern: '^adaptive$|^[1-9][0-9]*$',
+            __pattern_description: 'adaptive or positive integer seconds',
+          },
           spec_drift: {
             __type: TYPE_DICT,
             __strict: true,
@@ -2031,6 +2043,14 @@ export const ENV_ALIASES = {
       ['AGENT_OS_AGENT_GATEWAY_ALERT_BUS_URL', identity],
       ['AGENT_GATEWAY_ALERT_BUS_URL', identity],
     ],
+  },
+  'sentinel.profile': {
+    canonical: 'AGENT_OS_SENTINEL_PROFILE',
+    aliases: [['HQ_SENTINEL_PROFILE', identity]],
+  },
+  'sentinel.quiet_window': {
+    canonical: 'AGENT_OS_SENTINEL_QUIET_WINDOW',
+    aliases: [['HQ_SENTINEL_QUIET_WINDOW', identity]],
   },
   'sentinel.spec_drift.cycle_interval_seconds': {
     canonical: 'AGENT_OS_SENTINEL_SPEC_DRIFT_CYCLE_INTERVAL_SECONDS',

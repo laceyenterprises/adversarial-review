@@ -88,6 +88,28 @@ test('watcher heartbeat resumes monotonically from the prior durable counter', (
   }
 });
 
+test('watcher heartbeat catches asynchronous atomic write failures', async () => {
+  const warnings = [];
+  const heartbeat = createWatcherHeartbeat({
+    filePath: join(tempRoot(), 'heartbeat.json'),
+    now: () => new Date('2026-07-04T10:00:00.000Z'),
+    writeFile() {
+      return Promise.reject(new Error('disk full'));
+    },
+    readFile() {
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    },
+    logger: { warn(message) { warnings.push(message); } },
+  });
+
+  heartbeat.markPoll();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /failed to persist heartbeat/);
+  assert.match(warnings[0], /disk full/);
+});
+
 test('stall watchdog trips exit 75 when an idle watcher makes no poll progress', () => {
   const heartbeat = createWatcherHeartbeat({
     filePath: join(tempRoot(), 'heartbeat.json'),
@@ -151,6 +173,11 @@ test('stall watchdog does not fire while a poll is in flight', () => {
   assert.equal(watchdog.check(), false);
   assert.deepEqual(stalls, []);
   watchdog.endPoll();
+  assert.equal(watchdog.check(), false);
+  assert.deepEqual(stalls, []);
+  now = 10_499;
+  assert.equal(watchdog.check(), false);
+  now = 10_500;
   assert.equal(watchdog.check(), true);
 });
 

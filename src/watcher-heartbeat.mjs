@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { writeFileAtomic } from './atomic-write.mjs';
 
 const DEFAULT_WATCHER_STALL_EXIT_CODE = 75;
@@ -59,7 +60,10 @@ function createWatcherHeartbeat({
       ...extra,
     };
     try {
-      writeFile(filePath, `${JSON.stringify(heartbeat, null, 2)}\n`);
+      Promise.resolve(writeFile(filePath, `${JSON.stringify(heartbeat, null, 2)}\n`))
+        .catch((err) => {
+          logger?.warn?.(`[watcher] failed to persist heartbeat at ${filePath}: ${err?.message || err}`);
+        });
     } catch (err) {
       logger?.warn?.(`[watcher] failed to persist heartbeat at ${filePath}: ${err?.message || err}`);
     }
@@ -95,7 +99,7 @@ function createWatcherStallWatchdog({
   heartbeat,
   stallMs = DEFAULT_WATCHER_STALL_WATCHDOG_MS,
   checkIntervalMs = DEFAULT_WATCHER_STALL_CHECK_INTERVAL_MS,
-  nowMs = () => Date.now(),
+  nowMs = () => performance.now(),
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
   onStall,
@@ -131,6 +135,7 @@ function createWatcherStallWatchdog({
 
   function endPoll() {
     pollInFlight = false;
+    lastProgressMs = nowMs();
     noteProgress();
   }
 

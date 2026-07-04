@@ -3368,21 +3368,33 @@ function resolveFirstPassReviewBudgetSuppression({
     Number.isFinite(completedRemediationRoundsForPR) ? completedRemediationRoundsForPR : 0,
     Number.isFinite(completedRereviewRounds) ? completedRereviewRounds : 0,
   );
-  const reviewAllowance = Number.isFinite(roundBudget) && roundBudget > 0
-    ? roundBudget + 1
-    : roundBudget;
-  if (
-    Number.isFinite(completedRoundsForPR) &&
+  const hasPositiveRoundBudget =
     Number.isFinite(roundBudget) &&
-    roundBudget > 0 &&
-    completedRoundsForPR >= reviewAllowance
+    roundBudget > 0;
+  const remediationRoundsExceeded =
+    Number.isFinite(completedRemediationRoundsForPR) &&
+    hasPositiveRoundBudget &&
+    completedRemediationRoundsForPR > roundBudget;
+  const postBudgetFinalReviewCompleted =
+    Number.isFinite(completedRemediationRoundsForPR) &&
+    Number.isFinite(completedRereviewRounds) &&
+    hasPositiveRoundBudget &&
+    completedRemediationRoundsForPR >= roundBudget &&
+    completedRereviewRounds >= 1;
+  const rereviewBudgetConsumed =
+    Number.isFinite(completedRereviewRounds) &&
+    hasPositiveRoundBudget &&
+    completedRereviewRounds >= roundBudget;
+  if (
+    remediationRoundsExceeded ||
+    postBudgetFinalReviewCompleted ||
+    rereviewBudgetConsumed
   ) {
     return {
       suppressed: true,
       reason: 'remediation-round-budget-exhausted',
       completedRoundsForPR,
       roundBudget,
-      reviewAllowance,
       riskClass: resolution.riskClass,
     };
   }
@@ -3392,7 +3404,6 @@ function resolveFirstPassReviewBudgetSuppression({
     reason: null,
     completedRoundsForPR,
     roundBudget,
-    reviewAllowance,
     riskClass: resolution.riskClass,
   };
 }

@@ -410,12 +410,11 @@ test('watcher allows stale-review auto-refresh for the post-budget final review'
     reason: null,
     completedRoundsForPR: 2,
     roundBudget: 2,
-    reviewAllowance: 3,
     riskClass: 'medium',
   });
 });
 
-test('watcher suppresses stale-review auto-refresh after the final review is posted', () => {
+test('watcher suppresses stale-review auto-refresh after the post-budget final review is posted', () => {
   const suppression = getStalePostedReviewBudgetSuppression({
     rootDir: '/tmp/adversarial-review-test-root',
     repoPath: 'laceyenterprises/agent-os',
@@ -427,18 +426,64 @@ test('watcher suppresses stale-review auto-refresh after the final review is pos
       latestRiskClass: 'medium',
       latestMaxRounds: 2,
     }),
-    countCompletedReviewerRereviewRoundsImpl: () => 3,
+    countCompletedReviewerRereviewRoundsImpl: () => 1,
     resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
   });
 
   assert.deepEqual(suppression, {
     suppressed: true,
     reason: 'remediation-round-budget-exhausted',
-    completedRoundsForPR: 3,
+    completedRoundsForPR: 2,
     roundBudget: 2,
-    reviewAllowance: 3,
     riskClass: 'medium',
   });
+});
+
+test('watcher allows exactly one post-budget stale-head final review, then suppresses the next head', () => {
+  const common = {
+    rootDir: '/tmp/adversarial-review-test-root',
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2980,
+    linearTicketId: 'ASB-09',
+    reviewRow: { review_status: 'posted' },
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 2,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  };
+
+  const beforeFinalReviewPosted = getStalePostedReviewBudgetSuppression({
+    ...common,
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
+  });
+  assert.deepEqual(beforeFinalReviewPosted, {
+    suppressed: false,
+    reason: null,
+    completedRoundsForPR: 2,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
+
+  const afterFinalReviewPosted = getStalePostedReviewBudgetSuppression({
+    ...common,
+    countCompletedReviewerRereviewRoundsImpl: () => 1,
+  });
+  assert.deepEqual(afterFinalReviewPosted, {
+    suppressed: true,
+    reason: 'remediation-round-budget-exhausted',
+    completedRoundsForPR: 2,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
+});
+
+test('watcher identifies explicit operator review retrigger rows', () => {
+  assert.equal(isExplicitOperatorReviewRetrigger({
+    rereview_requested_at: '2026-07-03T12:00:00.000Z',
+    rereview_reason: 'retrigger-review label applied; re-review requested on current HEAD.',
+  }), true);
 });
 
 test('watcher allows stale-review auto-refresh while remediation budget remains', () => {
@@ -461,12 +506,11 @@ test('watcher allows stale-review auto-refresh while remediation budget remains'
     reason: null,
     completedRoundsForPR: 1,
     roundBudget: 2,
-    reviewAllowance: 3,
     riskClass: 'medium',
   });
 });
 
-test('watcher counts completed auto-refresh rereviews toward exhausted budget without remediation jobs', () => {
+test('watcher suppresses completed auto-refresh rereviews at the budget without remediation jobs', () => {
   const rootDir = makeTempRoot();
   try {
     const db = openReviewStateDb(rootDir);
@@ -508,16 +552,38 @@ test('watcher counts completed auto-refresh rereviews toward exhausted budget wi
     });
 
     assert.deepEqual(suppression, {
-      suppressed: false,
-      reason: null,
+      suppressed: true,
+      reason: 'remediation-round-budget-exhausted',
       completedRoundsForPR: 2,
       roundBudget: 2,
-      reviewAllowance: 3,
       riskClass: 'medium',
     });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('watcher suppresses remediation rounds beyond budget without requiring final-review completion', () => {
+  const suppression = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2606,
+    reviewRow: { review_status: 'posted' },
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 3,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: true,
+    reason: 'remediation-round-budget-exhausted',
+    completedRoundsForPR: 3,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
 });
 
 test('watcher keeps remediation-worker rereview within the final-review allowance', () => {
@@ -538,7 +604,6 @@ test('watcher keeps remediation-worker rereview within the final-review allowanc
     reason: null,
     completedRoundsForPR: 1,
     roundBudget: 2,
-    reviewAllowance: 3,
     riskClass: 'medium',
   });
 
@@ -569,7 +634,6 @@ test('watcher keeps remediation-worker rereview within the final-review allowanc
     reason: null,
     completedRoundsForPR: 2,
     roundBudget: 2,
-    reviewAllowance: 3,
     riskClass: 'medium',
   });
 });
@@ -776,7 +840,6 @@ test('watcher preserves elevated legacy budgets before suppressing stale-review 
     reason: null,
     completedRoundsForPR: 2,
     roundBudget: 6,
-    reviewAllowance: 7,
     riskClass: 'medium',
   });
 });
@@ -801,7 +864,6 @@ test('watcher treats null latestMaxRounds as absent when resolving stale-review 
     reason: null,
     completedRoundsForPR: 1,
     roundBudget: -1,
-    reviewAllowance: -1,
     riskClass: 'medium',
   });
 });

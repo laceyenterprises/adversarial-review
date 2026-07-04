@@ -414,7 +414,7 @@ test('watcher allows stale-review auto-refresh for the post-budget final review'
   });
 });
 
-test('watcher suppresses stale-review auto-refresh after the post-budget final review is posted', () => {
+test('watcher allows stale-review auto-refresh when only in-budget rereviews are completed', () => {
   const suppression = getStalePostedReviewBudgetSuppression({
     rootDir: '/tmp/adversarial-review-test-root',
     repoPath: 'laceyenterprises/agent-os',
@@ -431,8 +431,8 @@ test('watcher suppresses stale-review auto-refresh after the post-budget final r
   });
 
   assert.deepEqual(suppression, {
-    suppressed: true,
-    reason: 'remediation-round-budget-exhausted',
+    suppressed: false,
+    reason: null,
     completedRoundsForPR: 2,
     roundBudget: 2,
     riskClass: 'medium',
@@ -466,11 +466,23 @@ test('watcher allows exactly one post-budget stale-head final review, then suppr
     riskClass: 'medium',
   });
 
-  const afterFinalReviewPosted = getStalePostedReviewBudgetSuppression({
+  const beforePostBudgetFinalReviewPosted = getStalePostedReviewBudgetSuppression({
     ...common,
     countCompletedReviewerRereviewRoundsImpl: () => 1,
   });
-  assert.deepEqual(afterFinalReviewPosted, {
+  assert.deepEqual(beforePostBudgetFinalReviewPosted, {
+    suppressed: false,
+    reason: null,
+    completedRoundsForPR: 2,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
+
+  const afterPostBudgetFinalReviewPosted = getStalePostedReviewBudgetSuppression({
+    ...common,
+    countCompletedReviewerRereviewRoundsImpl: () => 2,
+  });
+  assert.deepEqual(afterPostBudgetFinalReviewPosted, {
     suppressed: true,
     reason: 'remediation-round-budget-exhausted',
     completedRoundsForPR: 2,
@@ -599,7 +611,7 @@ test('watcher allows #3033-shaped exhausted moved head until the post-budget fin
       latestRiskClass: 'medium',
       latestMaxRounds: 2,
     }),
-    countCompletedReviewerRereviewRoundsImpl: () => 0,
+    countCompletedReviewerRereviewRoundsImpl: () => 1,
     resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
   });
 
@@ -623,7 +635,7 @@ test('watcher allows #3033-shaped exhausted moved head until the post-budget fin
       latestRiskClass: 'medium',
       latestMaxRounds: 2,
     }),
-    countCompletedReviewerRereviewRoundsImpl: () => 1,
+    countCompletedReviewerRereviewRoundsImpl: () => 2,
     resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
   });
 

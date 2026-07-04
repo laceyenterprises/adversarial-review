@@ -115,6 +115,17 @@ Audit/provenance strings must distinguish the two successful cases:
 the configured gate, while `branch_protection_requirement_waived` means the
 explicit no-branch-protection plan opt-out satisfied §4.2 #9.
 
+The historical mirror keys
+`roles.adversarial.merge_authority.branch_protection.required_gate_context_source`,
+`roles.adversarial.merge_authority.eligibility.ci_green_classifier`, and
+`roles.adversarial.merge_authority.eligibility.reviewer_family_policy` are
+deprecated compatibility no-ops. The strict config loader still accepts their
+old enum values so deployed YAML can roll forward without a startup failure,
+but AMA always resolves the gate context through `resolveGateStatusContext()`,
+uses the shared CI-green classifier, and records reviewer-family evidence from
+the existing review/dispatch data rather than consulting those keys. Operators
+should remove the deprecated keys during normal config cleanup.
+
 AMA risk-class configuration accepts `low`, `medium`, `high`, and `critical`.
 
 **Risk-class resolution (eligibility).** AMA resolves the PR's risk class in this
@@ -1565,6 +1576,14 @@ Operators must require `agent-os/adversarial-gate` in branch protection before r
 The watcher verifies that policy in process: on a cached interval it checks watched repositories' branch protection and logs `branch-protection-warning` when the configured gate context is missing, when the protection endpoint cannot be read, or when `ADV_GATE_STATUS_CONTEXT` is invalid. Operators can run the same probe with `npm run check-branch-protection`.
 
 Status-context migrations are explicit operator work, not an in-place default flip: update branch protection to require the new context and roll the same `ADV_GATE_STATUS_CONTEXT` override to every watcher and branch-protection probe before depending on the renamed check.
+
+Legacy configs may still contain
+`roles.adversarial.merge_authority.branch_protection.required_gate_context_source`
+set to `resolveGateStatusContext`; that key is accepted only as a deprecated
+strict-schema compatibility no-op. `ADV_GATE_STATUS_CONTEXT` is the supported
+way to change the status context, and it must be deployed consistently across
+status posting, branch-protection probing, and GitHub branch protection before
+operators rely on the renamed gate.
 
 State mapping:
 

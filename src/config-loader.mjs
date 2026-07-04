@@ -1214,6 +1214,21 @@ function schemaV1() {
                         __item: { __type: TYPE_STRING },
                         __default: ['fast-merge:test-fixtures', 'fast-merge:docs'],
                       },
+                      // Deprecated schema-compatibility no-ops. Existing
+                      // deployed configs may still carry these historical
+                      // documentation mirrors; strict validation must accept
+                      // them, but runtime eligibility uses the canonical
+                      // implementation directly.
+                      reviewer_family_policy: {
+                        __type: TYPE_STRING,
+                        __default: 'audit_existing_gate_contract',
+                        __enum: ['audit_existing_gate_contract'],
+                      },
+                      ci_green_classifier: {
+                        __type: TYPE_STRING,
+                        __default: 'existingAdversarialMergeClassifier',
+                        __enum: ['existingAdversarialMergeClassifier'],
+                      },
                       // SPEC §4.2 #3 — by default `high`/`critical` risk PRs
                       // require the explicit two-key override (a non-author
                       // `adversarial-merge-requested` label AND an operator
@@ -1238,6 +1253,13 @@ function schemaV1() {
                     __type: TYPE_DICT,
                     __strict: true,
                     __keys: {
+                      // Deprecated schema-compatibility no-op. The gate context
+                      // is always resolved by resolveGateStatusContext().
+                      required_gate_context_source: {
+                        __type: TYPE_STRING,
+                        __default: 'resolveGateStatusContext',
+                        __enum: ['resolveGateStatusContext'],
+                      },
                       // SPEC §4.2 #9 is satisfied by a required branch-protection
                       // status check. Some repos run on a GitHub plan that does
                       // not offer branch protection at all (the protection API
@@ -1491,6 +1513,9 @@ function schemaV1() {
         __keys: {
           live_steer_allow_unvetted: { __type: TYPE_BOOL, __default: false },
           claude_code_ambient_auth_fallback: { __type: TYPE_BOOL, __default: false },
+          // Deprecated schema-compatibility no-op retained so strict validation
+          // accepts older module configs during migration.
+          merge_agent_failure_recovery_disable: { __type: TYPE_BOOL, __default: false },
           merge_agent_final_pass_on_request_changes: { __type: TYPE_BOOL, __default: true },
           allow_missing_alert_to: { __type: TYPE_BOOL, __default: false },
           resume_context_envelope: { __type: TYPE_BOOL, __default: true },
@@ -2294,6 +2319,10 @@ export const ENV_ALIASES = {
   'feature_flags.claude_code_ambient_auth_fallback': {
     canonical: 'AGENT_OS_FEATURE_FLAGS_CLAUDE_CODE_AMBIENT_AUTH_FALLBACK',
     aliases: [['CLAUDE_CODE_ALLOW_AMBIENT_AUTH_FALLBACK', identity]],
+  },
+  'feature_flags.merge_agent_failure_recovery_disable': {
+    canonical: 'AGENT_OS_FEATURE_FLAGS_MERGE_AGENT_FAILURE_RECOVERY_DISABLE',
+    aliases: [['MERGE_AGENT_FAILURE_RECOVERY_DISABLE', identity]],
   },
   'feature_flags.merge_agent_final_pass_on_request_changes': {
     canonical: 'AGENT_OS_FEATURE_FLAGS_MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES',

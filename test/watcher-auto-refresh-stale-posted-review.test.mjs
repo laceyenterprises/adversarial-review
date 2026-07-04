@@ -410,7 +410,6 @@ test('watcher allows stale-review auto-refresh for the post-budget final review'
     reason: null,
     completedRoundsForPR: 2,
     roundBudget: 2,
-    reviewAllowance: 3,
     riskClass: 'medium',
   });
 });
@@ -427,7 +426,7 @@ test('watcher suppresses stale-review auto-refresh after the post-budget final r
       latestRiskClass: 'medium',
       latestMaxRounds: 2,
     }),
-    countCompletedReviewerRereviewRoundsImpl: () => 2,
+    countCompletedReviewerRereviewRoundsImpl: () => 1,
     resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
   });
 
@@ -436,7 +435,6 @@ test('watcher suppresses stale-review auto-refresh after the post-budget final r
     reason: 'remediation-round-budget-exhausted',
     completedRoundsForPR: 2,
     roundBudget: 2,
-    reviewAllowance: 3,
     riskClass: 'medium',
   });
 });
@@ -456,29 +454,27 @@ test('watcher allows exactly one post-budget stale-head final review, then suppr
     resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
   };
 
-  const finalReviewStillOwed = getStalePostedReviewBudgetSuppression({
+  const beforeFinalReviewPosted = getStalePostedReviewBudgetSuppression({
     ...common,
-    countCompletedReviewerRereviewRoundsImpl: () => 1,
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
   });
-  assert.deepEqual(finalReviewStillOwed, {
+  assert.deepEqual(beforeFinalReviewPosted, {
     suppressed: false,
     reason: null,
     completedRoundsForPR: 2,
     roundBudget: 2,
-    reviewAllowance: 3,
     riskClass: 'medium',
   });
 
   const afterFinalReviewPosted = getStalePostedReviewBudgetSuppression({
     ...common,
-    countCompletedReviewerRereviewRoundsImpl: () => 2,
+    countCompletedReviewerRereviewRoundsImpl: () => 1,
   });
   assert.deepEqual(afterFinalReviewPosted, {
     suppressed: true,
     reason: 'remediation-round-budget-exhausted',
     completedRoundsForPR: 2,
     roundBudget: 2,
-    reviewAllowance: 3,
     riskClass: 'medium',
   });
 
@@ -508,7 +504,6 @@ test('watcher allows stale-review auto-refresh while remediation budget remains'
     reason: null,
     completedRoundsForPR: 1,
     roundBudget: 2,
-    reviewAllowance: 3,
     riskClass: 'medium',
   });
 });
@@ -559,7 +554,6 @@ test('watcher counts completed auto-refresh rereviews toward exhausted budget wi
       reason: null,
       completedRoundsForPR: 2,
       roundBudget: 2,
-      reviewAllowance: 3,
       riskClass: 'medium',
     });
   } finally {
@@ -585,7 +579,6 @@ test('watcher keeps remediation-worker rereview within the final-review allowanc
     reason: null,
     completedRoundsForPR: 1,
     roundBudget: 2,
-    reviewAllowance: 3,
     riskClass: 'medium',
   });
 
@@ -616,7 +609,6 @@ test('watcher keeps remediation-worker rereview within the final-review allowanc
     reason: null,
     completedRoundsForPR: 2,
     roundBudget: 2,
-    reviewAllowance: 3,
     riskClass: 'medium',
   });
 });
@@ -823,7 +815,6 @@ test('watcher preserves elevated legacy budgets before suppressing stale-review 
     reason: null,
     completedRoundsForPR: 2,
     roundBudget: 6,
-    reviewAllowance: 7,
     riskClass: 'medium',
   });
 });
@@ -848,7 +839,6 @@ test('watcher treats null latestMaxRounds as absent when resolving stale-review 
     reason: null,
     completedRoundsForPR: 1,
     roundBudget: -1,
-    reviewAllowance: -1,
     riskClass: 'medium',
   });
 });

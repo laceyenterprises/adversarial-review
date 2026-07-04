@@ -32,16 +32,32 @@ function parsePositiveInteger(value, fallback) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parsePositiveIntegerWithSource(value, fallback, valueSource, fallbackSource) {
+  if (value === undefined || value === null || value === '') {
+    return { value: fallback, source: fallbackSource };
+  }
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isInteger(parsed) && parsed > 0
+    ? { value: parsed, source: valueSource }
+    : { value: fallback, source: fallbackSource };
+}
+
 function normalizeFirstPassReviewerPoolMax(value, {
   fallback = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
   max = MAX_FIRST_PASS_REVIEWER_POOL_MAX,
   logger = console,
   source = 'watcher.first_pass_reviewer_pool_max_concurrent_reviewers',
+  fallbackSource = 'watcherConfig.maxConcurrentFirstPassReviewers',
 } = {}) {
-  const parsed = parsePositiveInteger(value, fallback);
+  const { value: parsed, source: parsedSource } = parsePositiveIntegerWithSource(
+    value,
+    fallback,
+    source,
+    fallbackSource
+  );
   if (parsed > max && logger && typeof logger.warn === 'function') {
     logger.warn(
-      `[watcher-reviewer-pool] WARN config key=${source}: requested max_concurrent_reviewers=${parsed} exceeds system_max=${max}; clamping to ${max}`
+      `[watcher-reviewer-pool] WARN config key=${parsedSource}: requested max_concurrent_reviewers=${parsed} exceeds system_max=${max}; clamping to ${max}`
     );
   }
   return Math.min(parsed, max);
@@ -151,14 +167,27 @@ function resolveFirstPassReviewerPoolConfig({
   //      and their conflict checks.
   //   2. watcherConfig kwarg
   //   3. DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX
-  const configuredMax = watcherConfig.maxConcurrentFirstPassReviewers
-    ?? watcherConfig.reviewerPoolMaxConcurrent
-    ?? DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX;
+  let configuredMax = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX;
+  let configuredMaxSource = 'internal default';
+  if (
+    watcherConfig.maxConcurrentFirstPassReviewers !== undefined
+    && watcherConfig.maxConcurrentFirstPassReviewers !== null
+  ) {
+    configuredMax = watcherConfig.maxConcurrentFirstPassReviewers;
+    configuredMaxSource = 'watcherConfig.maxConcurrentFirstPassReviewers';
+  } else if (
+    watcherConfig.reviewerPoolMaxConcurrent !== undefined
+    && watcherConfig.reviewerPoolMaxConcurrent !== null
+  ) {
+    configuredMax = watcherConfig.reviewerPoolMaxConcurrent;
+    configuredMaxSource = 'watcherConfig.reviewerPoolMaxConcurrent';
+  }
   const cfgMax = _resolveFirstPassPoolMaxFromCfg(env, { topPath, modulePaths, loaderImpl });
   const maxConcurrent = normalizeFirstPassReviewerPoolMax(
     cfgMax,
     {
       fallback: parsePositiveInteger(configuredMax, DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX),
+      fallbackSource: configuredMaxSource,
       logger,
     }
   );

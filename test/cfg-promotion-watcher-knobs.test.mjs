@@ -214,7 +214,7 @@ test('schema defaults resolve to documented values when nothing is overridden', 
     'watcher.max_drain_wait_ms': 3_600_000,
     'watcher.pending_draft_review_respawn_age_seconds': 900,
     'watcher.stuck_dispatch_alert_debounce_ms': 3_600_000,
-    'watcher.first_pass_reviewer_pool_max_concurrent_reviewers': 6,
+    'watcher.first_pass_reviewer_pool_max_concurrent_reviewers': null,
     'follow_up.hq_worker_tear_down_subprocess_timeout_ms': 60_000,
     'follow_up.hq_dispatch_subprocess_timeout_ms': 90_000,
   };
@@ -299,7 +299,7 @@ test('first-pass reviewer pool: legacy ADVERSARIAL_FIRST_PASS_REVIEWER_POOL_MAX_
   assert.strictEqual(cfg.maxConcurrent, 7);
 });
 
-test('first-pass reviewer pool: defaults to durable CFG value when env is unset', () => {
+test('first-pass reviewer pool: defaults to durable runtime value when env is unset', () => {
   const env = {};
   const cfg = resolveFirstPassReviewerPoolConfig({
     env,
@@ -307,6 +307,16 @@ test('first-pass reviewer pool: defaults to durable CFG value when env is unset'
     topPath: '/dev/null',
   });
   assert.strictEqual(cfg.maxConcurrent, 6);
+});
+
+test('first-pass reviewer pool: watcherConfig fallback is honored when CFG is unset', () => {
+  const cfg = resolveFirstPassReviewerPoolConfig({
+    env: {},
+    watcherConfig: { maxConcurrentFirstPassReviewers: 2 },
+    topPath: '/dev/null',
+  });
+  assert.strictEqual(cfg.enabled, true);
+  assert.strictEqual(cfg.maxConcurrent, 2);
 });
 
 test('first-pass reviewer pool: accepts legacy persisted null and maps it to the durable default', () => {
@@ -382,6 +392,22 @@ test('first-pass reviewer pool clamps over-large canonical AGENT_OS_* env overri
   assert.strictEqual(cfg.maxConcurrent, 12);
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /WARN config key=watcher\.first_pass_reviewer_pool_max_concurrent_reviewers/);
+  assert.match(warnings[0], /requested max_concurrent_reviewers=99/);
+  assert.match(warnings[0], /clamping to 12/);
+});
+
+test('first-pass reviewer pool clamp warning identifies watcherConfig fallback source', () => {
+  const warnings = [];
+  const cfg = resolveFirstPassReviewerPoolConfig({
+    env: {},
+    watcherConfig: { maxConcurrentFirstPassReviewers: 99 },
+    topPath: '/dev/null',
+    logger: { warn: (message) => warnings.push(String(message)) },
+  });
+  assert.strictEqual(cfg.enabled, true);
+  assert.strictEqual(cfg.maxConcurrent, 12);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /WARN config key=watcherConfig\.maxConcurrentFirstPassReviewers/);
   assert.match(warnings[0], /requested max_concurrent_reviewers=99/);
   assert.match(warnings[0], /clamping to 12/);
 });

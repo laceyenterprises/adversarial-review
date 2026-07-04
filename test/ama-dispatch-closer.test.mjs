@@ -92,10 +92,8 @@ function eligibleFixture(overrides = {}) {
     eligibility: {
       riskClasses: ['low'],
       fastMergeLabels: ['fast-merge:test-fixtures', 'fast-merge:docs'],
-      reviewerFamilyPolicy: 'audit_existing_gate_contract',
-      ciGreenClassifier: 'existingAdversarialMergeClassifier',
     },
-    branchProtection: { requiredGateContextSource: 'resolveGateStatusContext' },
+    branchProtection: {},
     ...overrides.cfg,
   };
   const dispatchContext = {
@@ -390,7 +388,6 @@ test('cfg.enabled=true + branch protection opt-out records waived eligibility re
     prMetadata: { branchProtection: { requiredContexts: [] } },
     cfg: {
       branchProtection: {
-        requiredGateContextSource: 'resolveGateStatusContext',
         required: false,
       },
     },
@@ -1018,7 +1015,6 @@ test('composed prompt documents that branch_protection.required=false does not r
   const { cfg, dispatchContext, prMetadata } = eligibleFixture({
     cfg: {
       branchProtection: {
-        requiredGateContextSource: 'resolveGateStatusContext',
         required: false,
       },
     },

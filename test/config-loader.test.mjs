@@ -3805,10 +3805,8 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
               fast_merge_labels:
                 - "fast-merge:test-fixtures"
                 - "fast-merge:docs"
-              reviewer_family_policy: audit_existing_gate_contract
-              ci_green_classifier: existingAdversarialMergeClassifier
             branch_protection:
-              required_gate_context_source: resolveGateStatusContext
+              required: true
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('roles.adversarial.merge_authority.enabled'), false);
@@ -3820,18 +3818,6 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
     assert.deepEqual(
       cfg.get('roles.adversarial.merge_authority.eligibility.fast_merge_labels'),
       ['fast-merge:test-fixtures', 'fast-merge:docs'],
-    );
-    assert.equal(
-      cfg.get('roles.adversarial.merge_authority.eligibility.reviewer_family_policy'),
-      'audit_existing_gate_contract',
-    );
-    assert.equal(
-      cfg.get('roles.adversarial.merge_authority.eligibility.ci_green_classifier'),
-      'existingAdversarialMergeClassifier',
-    );
-    assert.equal(
-      cfg.get('roles.adversarial.merge_authority.branch_protection.required_gate_context_source'),
-      'resolveGateStatusContext',
     );
     assert.equal(
       cfg.get('roles.adversarial.merge_authority.branch_protection.required'),
@@ -4024,9 +4010,6 @@ test('AMA getMergeAuthorityConfig returns the camelCased subtree with defaults i
       ma.eligibility.fastMergeLabels,
       ['fast-merge:test-fixtures', 'fast-merge:docs'],
     );
-    assert.equal(ma.eligibility.reviewerFamilyPolicy, 'audit_existing_gate_contract');
-    assert.equal(ma.eligibility.ciGreenClassifier, 'existingAdversarialMergeClassifier');
-    assert.equal(ma.branchProtection.requiredGateContextSource, 'resolveGateStatusContext');
     assert.equal(ma.branchProtection.required, true);
     assert.equal(ma.autoHammerOnEligibilityMiss, false);
     assert.equal(ma.dispatchTimeoutMs, 300000);

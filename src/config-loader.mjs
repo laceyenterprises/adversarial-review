@@ -1214,16 +1214,6 @@ function schemaV1() {
                         __item: { __type: TYPE_STRING },
                         __default: ['fast-merge:test-fixtures', 'fast-merge:docs'],
                       },
-                      reviewer_family_policy: {
-                        __type: TYPE_STRING,
-                        __default: 'audit_existing_gate_contract',
-                        __enum: ['audit_existing_gate_contract'],
-                      },
-                      ci_green_classifier: {
-                        __type: TYPE_STRING,
-                        __default: 'existingAdversarialMergeClassifier',
-                        __enum: ['existingAdversarialMergeClassifier'],
-                      },
                       // SPEC §4.2 #3 — by default `high`/`critical` risk PRs
                       // require the explicit two-key override (a non-author
                       // `adversarial-merge-requested` label AND an operator
@@ -1248,11 +1238,6 @@ function schemaV1() {
                     __type: TYPE_DICT,
                     __strict: true,
                     __keys: {
-                      required_gate_context_source: {
-                        __type: TYPE_STRING,
-                        __default: 'resolveGateStatusContext',
-                        __enum: ['resolveGateStatusContext'],
-                      },
                       // SPEC §4.2 #9 is satisfied by a required branch-protection
                       // status check. Some repos run on a GitHub plan that does
                       // not offer branch protection at all (the protection API
@@ -3474,24 +3459,12 @@ export class AgentOSConfig {
           'roles.adversarial.merge_authority.eligibility.fast_merge_labels',
           ['fast-merge:test-fixtures', 'fast-merge:docs'],
         )],
-        reviewerFamilyPolicy: this.get(
-          'roles.adversarial.merge_authority.eligibility.reviewer_family_policy',
-          'audit_existing_gate_contract',
-        ),
-        ciGreenClassifier: this.get(
-          'roles.adversarial.merge_authority.eligibility.ci_green_classifier',
-          'existingAdversarialMergeClassifier',
-        ),
         highRiskRequiresTwoKey: this.get(
           'roles.adversarial.merge_authority.eligibility.high_risk_requires_two_key',
           true,
         ),
       },
       branchProtection: {
-        requiredGateContextSource: this.get(
-          'roles.adversarial.merge_authority.branch_protection.required_gate_context_source',
-          'resolveGateStatusContext',
-        ),
         required: this.get(
           'roles.adversarial.merge_authority.branch_protection.required',
           true,

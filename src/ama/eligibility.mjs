@@ -142,10 +142,7 @@ export const SETTLED_SUCCESS_VERDICTS = new Set(['approved', 'comment-only']);
  * @property {Object}  eligibility
  * @property {string[]} eligibility.riskClasses
  * @property {string[]} eligibility.fastMergeLabels
- * @property {string}  eligibility.reviewerFamilyPolicy
- * @property {string}  eligibility.ciGreenClassifier
  * @property {Object}  branchProtection
- * @property {string}  branchProtection.requiredGateContextSource
  */
 
 /**
@@ -332,9 +329,7 @@ function presentHardStopLabels(reviewState, prMetadata, recoveryEvidence, advers
  * `summarizeChecksConclusion()` classifier (see
  * `follow-up-merge-agent.mjs`) verbatim — including its `SUCCESS`,
  * `NEUTRAL`, `SKIPPED` accept set and its self-gate exclusion of the
- * adversarial-review pipeline's own status context. Per SPEC §4.7 the
- * config knob `ci_green_classifier` is documentation-only; AMA must not
- * fork into a narrower allowlist.
+ * adversarial-review pipeline's own status context.
  *
  * @param {PrMetadata} prMetadata
  * @param {Object}     env
@@ -388,23 +383,12 @@ function classifyNonBlockingFindings(reviewState) {
 }
 
 /**
- * Resolve the configured adversarial-gate status context for the host
- * per SPEC §4.7. `required_gate_context_source` is the documented mirror
- * for `resolveGateStatusContext()` (from `adversarial-gate-context.mjs`);
- * a future surface that wants a different resolver must register it here
- * AND update SPEC §4.7 enum together.
+ * Resolve the adversarial-gate status context for the host per SPEC §4.7.
  *
- * @param {AmaEligibilityConfig} cfg
- * @param {Object}               env
+ * @param {Object} env
  * @returns {string|null}
  */
-function resolveRequiredGateContext(cfg, env) {
-  const source = cfg?.branchProtection?.requiredGateContextSource;
-  if (source !== 'resolveGateStatusContext') {
-    // Schema enforces this enum, so falling here means a malformed cfg.
-    // Returning null causes the branch-protection gate to fail closed.
-    return null;
-  }
+function resolveRequiredGateContext(env) {
   try {
     return resolveGateStatusContext(env);
   } catch {
@@ -923,7 +907,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   // existing fail-closed contract.
   const branchProtectionRequired = cfg?.branchProtection?.required !== false;
   const requiredContext = branchProtectionRequired
-    ? resolveRequiredGateContext(cfg, env)
+    ? resolveRequiredGateContext(env)
     : null;
   const branchProtectionWaived = branchProtectionRequired === false;
   const protectionOk =

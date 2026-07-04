@@ -58,10 +58,8 @@ function eligibleFixture(overrides = {}) {
     eligibility: {
       riskClasses: ['low'],
       fastMergeLabels: ['fast-merge:test-fixtures', 'fast-merge:docs'],
-      reviewerFamilyPolicy: 'audit_existing_gate_contract',
-      ciGreenClassifier: 'existingAdversarialMergeClassifier',
     },
-    branchProtection: { requiredGateContextSource: 'resolveGateStatusContext' },
+    branchProtection: {},
     ...overrides.cfg,
   };
   return { reviewState, prMetadata, cfg };

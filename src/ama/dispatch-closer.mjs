@@ -654,7 +654,7 @@ function samePrHammerHolderWorktreePaths(errOrText, prNumber) {
   if (!/^[0-9]+$/.test(normalizedPr)) return [];
   const escapedPr = normalizedPr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const pattern = new RegExp(
-    `(['"]?)(/[^\\s'"]*/workers/hammer-ama-pr-${escapedPr}(?:-[^/\\s'"]+)?/agent-os)\\1`,
+    `(['"]?)(/[^'"\n]*?/workers/hammer-ama-pr-${escapedPr}(?:-[^/'"\n]+)?/agent-os)\\1`,
     'g',
   );
   const paths = [];
@@ -682,7 +682,6 @@ async function teardownSamePrHammerHolder({
     return { attempted: false, ok: false, worktreePaths: [] };
   }
 
-  let ok = false;
   const attempts = [];
   for (const worktreePath of worktreePaths) {
     const workerId = basename(dirname(worktreePath));
@@ -700,7 +699,6 @@ async function teardownSamePrHammerHolder({
         timeout: 60_000,
         killSignal: 'SIGTERM',
       });
-      ok = true;
       attempts.push({ worktreePath, action: 'git-worktree-remove', ok: true });
     } catch (removeErr) {
       attempts.push({
@@ -718,12 +716,10 @@ async function teardownSamePrHammerHolder({
         timeout: 60_000,
         killSignal: 'SIGTERM',
       });
-      ok = true;
       attempts.push({ worktreePath, workerId, action: 'hq-worker-tear-down', ok: true });
     } catch (tearDownErr) {
       const detail = String(tearDownErr?.stderr || tearDownErr?.message || tearDownErr);
       const absent = isWorkerTearDownNotFoundError(detail);
-      if (absent) ok = true;
       attempts.push({
         worktreePath,
         workerId,
@@ -735,6 +731,7 @@ async function teardownSamePrHammerHolder({
     }
   }
 
+  const ok = attempts.every(attempt => attempt.ok);
   logger?.warn?.(JSON.stringify({
     event: 'ama_closer.same_pr_hammer_holder_teardown',
     prNumber,

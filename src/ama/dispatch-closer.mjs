@@ -1281,6 +1281,10 @@ export async function maybeDispatchAmaCloser({
       forceHammerTerminalRemediationPrompt ||
       amaClosureNeedsTerminalRemediation(verdict)
     );
+  const currentHeadFinalHammerTerminalRemediation =
+    useHammerTerminalRemediationPrompt &&
+    workerClass === 'hammer' &&
+    reviewState?.reviewCycleExhausted === true;
   const templatePath = dispatchContext.templatePath || (
     useHammerTerminalRemediationPrompt ? HAMMER_TEMPLATE_PATH : TEMPLATE_PATH
   );
@@ -1423,6 +1427,40 @@ export async function maybeDispatchAmaCloser({
     const status = statusProbe?.status || null;
     existingDispatchStatus = status;
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
+      if (
+        currentHeadFinalHammerTerminalRemediation &&
+        AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
+      ) {
+        const reason = 'current-head-hammer-already-ran-needs-operator';
+        logger?.error?.(JSON.stringify({
+          event: 'ama_closer.current_head_hammer_stuck',
+          repo,
+          prNumber,
+          headSha: reviewedSha,
+          reason,
+          launchRequestId: existingRecord.launchRequestId || null,
+          dispatchId: existingRecord.dispatchId || null,
+          status,
+          message:
+            'Final HAM terminal remediation already completed for the current head, but no merged signal is present; refusing same-head re-dispatch',
+        }));
+        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+          ...(current || existingRecord),
+          lastObservedStatus: status,
+          lastObservedAt: dispatchContext.dispatchedAt,
+          lastError: reason,
+        }));
+        return noAmaDispatch({
+          dispatched: false,
+          skipMergeAgent: true,
+          reason,
+          workerClass: existingRecord.workerClass || workerClass,
+          dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+          launchRequestId: existingRecord.launchRequestId || null,
+          promptPath: existingRecord.promptPath || null,
+          needsOperator: true,
+        });
+      }
       if (
         mergedSignalUnknown
         && (auditTerminalOutcome === 'succeeded' || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status))

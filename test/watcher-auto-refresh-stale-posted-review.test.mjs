@@ -50,6 +50,7 @@ import {
   getHeadCloserCommitSuppression,
   isExplicitOperatorReviewRetrigger,
   isTerminalCloserCommitIdentity,
+  maybeDispatchAmaClosureFor,
   resolveFirstPassReviewBudgetSuppression,
 } from '../src/watcher.mjs';
 
@@ -962,4 +963,89 @@ test('watcher suppresses stale-review auto-refresh when review-cycle cap is alre
     suppressed: true,
     reason: 'review-cycle-cap-paused',
   });
+});
+
+test('AMA #3084: exhausted stale posted review re-hammers the current head without requesting a fresh review', async () => {
+  const rootDir = makeTempRoot();
+  try {
+    let liveReviewFetches = 0;
+    const captured = [];
+    const warnings = [];
+    const currentHead = '6358df76358df76358df76358df76358df76358d';
+    const staleReviewedHead = 'c727df4c727df4c727df4c727df4c727df4c727d';
+
+    const result = await maybeDispatchAmaClosureFor({
+      rootDir,
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 3084,
+      currentRevisionRef: currentHead,
+      reviewStateRow: {
+        repo: 'laceyenterprises/agent-os',
+        pr_number: 3084,
+        review_status: 'posted',
+        reviewer: 'codex',
+        reviewer_head_sha: staleReviewedHead,
+        body_md: 'Verdict: Comment only\n\n## Blocking Issues\n- None.',
+      },
+      candidate: {
+        headSha: currentHead,
+        prState: 'open',
+        isDraft: false,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
+        ],
+        branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
+        prAuthor: 'codex-worker-bot',
+        prUpdatedAt: '2026-07-04T12:00:00Z',
+      },
+      dispatchJob: { prUpdatedAt: '2026-07-04T12:00:00Z' },
+      labelNames: [],
+      loadConfigImpl: () => ({
+        getMergeAuthorityConfig: () => ({
+          enabled: true,
+          workerClass: 'hammer',
+          autoHammerOnEligibilityMiss: true,
+          mergeMethod: 'squash',
+          eligibility: { riskClasses: ['medium'] },
+          branchProtection: {},
+        }),
+        getOrchestrationMode: () => 'native',
+      }),
+      resolveReviewCycleExhaustionImpl: () => ({
+        reviewCycleExhausted: true,
+        ledgerRiskClass: 'medium',
+      }),
+      fetchLatestHeadReviewBodiesImpl: async () => {
+        liveReviewFetches += 1;
+        throw new Error('fresh review lookup must not run on exhausted stale head');
+      },
+      maybeDispatchAmaCloserImpl: async (args) => {
+        captured.push(args);
+        return {
+          dispatched: true,
+          workerClass: 'hammer',
+          dispatchId: 'dispatch-3084-current-head',
+        };
+      },
+      logger: {
+        warn(message) {
+          warnings.push(message);
+        },
+        log() {},
+      },
+    });
+
+    assert.equal(result.dispatched, true);
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].reviewState.reviewCycleExhausted, true);
+    assert.equal(captured[0].reviewState.headSha, currentHead);
+    assert.equal(captured[0].dispatchContext.reviewedSha, currentHead);
+    assert.equal(captured[0].prMetadata.headSha, currentHead);
+    assert.equal(liveReviewFetches, 0, 'no fresh adversarial review lookup is requested on exhaustion');
+    assert.match(warnings.join('\n'), /no fresh adversarial review/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });

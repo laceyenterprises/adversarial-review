@@ -5119,6 +5119,7 @@ async function maybeDispatchAmaClosureFor({
   fetchLatestHeadReviewBodiesImpl = (repo, pr, head, options = {}) =>
     fetchReviewBodiesForHead(execFileAsync, repo, pr, head, options),
   liveReviewRetryDelaysMs = AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
+  resolveReviewCycleExhaustionImpl = null,
 }) {
   let cfg;
   let orchestrationMode;
@@ -5167,21 +5168,31 @@ async function maybeDispatchAmaClosureFor({
   // probe failure.
   let ledgerRiskClass = null;
   try {
-    const remLedger = summarizePRRemediationLedger(rootDir, { repo: repoPath, prNumber });
-    ledgerRiskClass = remLedger?.latestRiskClass || null;
-    const rbResolution = resolveRoundBudgetForJob(
-      { riskClass: remLedger.latestRiskClass },
-      { rootDir },
-    );
-    const latestMaxRounds = Number(remLedger.latestMaxRounds);
-    const effectiveRoundBudget =
-      Number.isInteger(latestMaxRounds) && latestMaxRounds > rbResolution.roundBudget
-        ? latestMaxRounds
-        : rbResolution.roundBudget;
-    reviewCycleExhausted =
-      Number.isFinite(effectiveRoundBudget) &&
-      effectiveRoundBudget > 0 &&
-      Number(remLedger.completedRoundsForPR) >= effectiveRoundBudget;
+    if (typeof resolveReviewCycleExhaustionImpl === 'function') {
+      const resolved = resolveReviewCycleExhaustionImpl({
+        rootDir,
+        repoPath,
+        prNumber,
+      }) || {};
+      reviewCycleExhausted = resolved.reviewCycleExhausted === true;
+      ledgerRiskClass = resolved.ledgerRiskClass || resolved.riskClass || null;
+    } else {
+      const remLedger = summarizePRRemediationLedger(rootDir, { repo: repoPath, prNumber });
+      ledgerRiskClass = remLedger?.latestRiskClass || null;
+      const rbResolution = resolveRoundBudgetForJob(
+        { riskClass: remLedger.latestRiskClass },
+        { rootDir },
+      );
+      const latestMaxRounds = Number(remLedger.latestMaxRounds);
+      const effectiveRoundBudget =
+        Number.isInteger(latestMaxRounds) && latestMaxRounds > rbResolution.roundBudget
+          ? latestMaxRounds
+          : rbResolution.roundBudget;
+      reviewCycleExhausted =
+        Number.isFinite(effectiveRoundBudget) &&
+        effectiveRoundBudget > 0 &&
+        Number(remLedger.completedRoundsForPR) >= effectiveRoundBudget;
+    }
   } catch (err) {
     console.warn(
       `[watcher] AMA final-hammer round-budget probe failed for ${repoPath}#${prNumber}; ` +
@@ -5293,9 +5304,32 @@ async function maybeDispatchAmaClosureFor({
       liveHeadReview,
     });
   }
+  const currentPrHeadSha = candidate?.headSha || currentRevisionRef || null;
+  const exhaustedStaleReviewNeedsCurrentHeadHammer = Boolean(
+    reviewCycleExhausted &&
+      gateSnapshot.reviewedHeadSha &&
+      currentPrHeadSha &&
+      String(gateSnapshot.reviewedHeadSha) !== String(currentPrHeadSha)
+  );
+  if (exhaustedStaleReviewNeedsCurrentHeadHammer) {
+    logger?.warn?.(
+      `[watcher] AMA final-hammer exhaustion for ${repoPath}#${prNumber}: ` +
+        `posted review head ${String(gateSnapshot.reviewedHeadSha).slice(0, 12)} is stale; ` +
+        `dispatching HAM terminal remediation against current head ${String(currentPrHeadSha).slice(0, 12)} ` +
+        `with no fresh adversarial review`
+    );
+  }
+
   const reviewState = {
     verdict: gateSnapshot.settledReview?.verdict || '',
-    headSha: gateSnapshot.reviewedHeadSha,
+    // At review-budget exhaustion, validated HAM terminal remediation is the
+    // merge authority. If remediation commits moved the PR beyond the posted
+    // review head, key the final hammer to the CURRENT head so the resulting
+    // HAM evidence is head-matched instead of retaining the stale reviewed
+    // head's closer lease forever (#3084: c727df4 -> 40e3024 -> 6358df7).
+    headSha: exhaustedStaleReviewNeedsCurrentHeadHammer
+        ? currentPrHeadSha
+        : gateSnapshot.reviewedHeadSha,
     riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || ledgerRiskClass || 'unknown').toLowerCase(),
     remediationPending: gateSnapshot.settledReview?.remediationPending,
     reviewCycleExhausted,
@@ -5333,7 +5367,7 @@ async function maybeDispatchAmaClosureFor({
   };
   const prMetadata = {
     prNumber,
-    headSha: candidate?.headSha || currentRevisionRef || null,
+    headSha: currentPrHeadSha,
     isOpen: String(candidate?.prState || 'open').toLowerCase() === 'open',
     isDraft: Boolean(candidate?.isDraft),
     mergeableState: gateSnapshot.mergeableState,
@@ -6652,7 +6686,8 @@ async function pollOnce(
         console.log(
           `[watcher] auto-refresh SUPPRESSED for ${repoPath}#${prNumber}: ` +
             `head moved ${existing.reviewer_head_sha.slice(0, 12)} → ${subject.headSha.slice(0, 12)} ` +
-            `because ${stalePostedReviewBudgetSuppression.reason}${budgetDetail}; leaving posted review intact`
+            `because ${stalePostedReviewBudgetSuppression.reason}${budgetDetail}; ` +
+            `leaving posted review intact and routing exhausted close through AMA/HAM`
         );
       } else if (postedReviewHeadMoved) {
         try {

@@ -5311,6 +5311,9 @@ async function maybeDispatchAmaClosureFor({
       currentPrHeadSha &&
       String(gateSnapshot.reviewedHeadSha) !== String(currentPrHeadSha)
   );
+  const exhaustedCurrentHeadHammerDispatchKey = exhaustedStaleReviewNeedsCurrentHeadHammer
+    ? 'exhausted-final-hammer'
+    : null;
   if (exhaustedStaleReviewNeedsCurrentHeadHammer) {
     logger?.warn?.(
       `[watcher] AMA final-hammer exhaustion for ${repoPath}#${prNumber}: ` +
@@ -5325,8 +5328,8 @@ async function maybeDispatchAmaClosureFor({
     // At review-budget exhaustion, validated HAM terminal remediation is the
     // merge authority. If remediation commits moved the PR beyond the posted
     // review head, key the final hammer to the CURRENT head so the resulting
-    // HAM evidence is head-matched instead of retaining the stale reviewed
-    // head's closer lease forever (#3084: c727df4 -> 40e3024 -> 6358df7).
+    // HAM evidence is head-matched. The dispatch record itself uses a stable
+    // PR-scoped key below so the retry budget survives any HAM-pushed commits.
     headSha: exhaustedStaleReviewNeedsCurrentHeadHammer
         ? currentPrHeadSha
         : gateSnapshot.reviewedHeadSha,
@@ -5390,6 +5393,9 @@ async function maybeDispatchAmaClosureFor({
     parentSession: process.env.HQ_PARENT_SESSION || 'session:unknown:airlock+watcher',
     dispatchedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     orchestrationMode,
+    ...(exhaustedCurrentHeadHammerDispatchKey
+      ? { dispatchRecordHeadSha: exhaustedCurrentHeadHammerDispatchKey }
+      : {}),
   };
 
   let result;

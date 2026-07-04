@@ -1042,6 +1042,7 @@ test('AMA #3084: exhausted stale posted review re-hammers the current head witho
     assert.equal(captured[0].reviewState.reviewCycleExhausted, true);
     assert.equal(captured[0].reviewState.headSha, currentHead);
     assert.equal(captured[0].dispatchContext.reviewedSha, currentHead);
+    assert.equal(captured[0].dispatchContext.dispatchRecordHeadSha, 'exhausted-final-hammer');
     assert.equal(captured[0].prMetadata.headSha, currentHead);
     assert.equal(liveReviewFetches, 0, 'no fresh adversarial review lookup is requested on exhaustion');
     assert.match(warnings.join('\n'), /no fresh adversarial review/);

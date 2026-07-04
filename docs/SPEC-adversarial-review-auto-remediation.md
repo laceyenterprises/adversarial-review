@@ -80,6 +80,16 @@ records/stops on `dispatch-branch-holder-block-exhausted` with
 `skipMergeAgent:true` so the daemon does not spin on every reconciliation tick
 against a persistent local-worktree blockage.
 
+When the review cycle is exhausted and the posted review head is stale, the
+watcher may authorize HAM terminal remediation against the current PR head
+without first requesting another adversarial review. In that lane the closer
+prompt, audit path, lease, and merge guard still use the current PR head so the
+HAM evidence is exact-head evidence. The durable AMA dispatch record, however,
+is keyed with the stable `exhausted-final-hammer` head token for that PR. That
+stable key is the cross-head retry budget: if HAM pushes another remediation
+commit instead of merging, the next watcher poll must observe the existing
+dispatch record rather than creating a fresh per-commit budget.
+
 The merged-signal producer is outside this repository's write path: watcher
 lifecycle sync records owed
 `hq dag autowalk-on-merge --repo <repo> --pr <n>` work when it observes a PR

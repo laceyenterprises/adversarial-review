@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -303,6 +303,65 @@ test('cfg.enabled=true + eligible dispatches with workerClass=hammer by default'
   assert.ok(write.captured.body.includes('Risk-Class: low'));
   assert.ok(write.captured.body.includes('Eligibility-Trace: ama-audit:acme/myrepo:pr-1234:head-abc12345abc12345abc12345abc12345abc12345'));
   assert.ok(write.captured.body.includes('attemptPhase: "before-gh-pr-merge"'));
+});
+
+test('exhausted final hammer can use stable dispatch-record key while validating current head', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-stable-key-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const currentHead = '6358df76358df76358df76358df76358df76358d';
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: {
+      workerClass: 'hammer',
+      autoHammerOnEligibilityMiss: true,
+    },
+    reviewState: {
+      verdict: 'request-changes',
+      headSha: currentHead,
+      riskClass: 'medium',
+      reviewCycleExhausted: true,
+      blockingFindingState: 'known',
+      blockingFindingCount: 1,
+    },
+    prMetadata: {
+      headSha: currentHead,
+      mergeableState: 'MERGEABLE',
+    },
+    dispatchContext: {
+      rootDir,
+      reviewedSha: currentHead,
+      dispatchRecordHeadSha: 'exhausted-final-hammer',
+      riskClass: 'medium',
+    },
+  });
+  const exec = buildExecMock();
+  const write = buildWriteMock();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.ok(write.captured.body.includes(currentHead), 'prompt must still authorize the current PR head');
+  const stablePath = amaCloserDispatchFilePath(rootDir, {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: 'exhausted-final-hammer',
+  });
+  const currentHeadPath = amaCloserDispatchFilePath(rootDir, {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: currentHead,
+  });
+  assert.equal(existsSync(stablePath), true, 'dispatch retry budget must be recorded under the stable key');
+  assert.equal(existsSync(currentHeadPath), false, 'current-head movement must not create a fresh dispatch budget');
+  const record = JSON.parse(readFileSync(stablePath, 'utf8'));
+  assert.equal(record.headSha, currentHead);
+  assert.equal(record.retryCount, 1);
 });
 
 test('eligible agent-os dispatch does not add agent-os as a duplicate workspace repo', async (t) => {
@@ -696,8 +755,8 @@ test('auto-hammer dispatches HAM terminal remediation at review-cycle exhaustion
   assert.match(write.captured.body, /Get required checks and changed-surface tests green/);
 });
 
-test('AMA #3084: exhausted hammer dispatch is keyed per moved head', async (t) => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-per-head-'));
+test('AMA #3084: exhausted hammer dispatch retry budget is stable across moved heads', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-stable-head-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
   const heads = [
@@ -706,6 +765,7 @@ test('AMA #3084: exhausted hammer dispatch is keyed per moved head', async (t) =
   ];
   const exec = buildExecMock({ stdout: 'dispatchId=lrq_rehammer\n' });
   const write = buildWriteMock();
+  const results = [];
   for (const headSha of heads) {
     const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
       cfg: {
@@ -729,6 +789,7 @@ test('AMA #3084: exhausted hammer dispatch is keyed per moved head', async (t) =
       dispatchContext: {
         rootDir,
         reviewedSha: headSha,
+        dispatchRecordHeadSha: 'exhausted-final-hammer',
         riskClass: 'medium',
         templatePath: null,
       },
@@ -743,25 +804,37 @@ test('AMA #3084: exhausted hammer dispatch is keyed per moved head', async (t) =
       writeFileImpl: write.impl,
       readTemplateImpl: (path) => readFileSync(path, 'utf8'),
     });
-    assert.equal(result.dispatched, true);
-    assert.equal(result.workerClass, 'hammer');
+    results.push(result);
   }
 
+  assert.equal(results[0].dispatched, true);
+  assert.equal(results[0].workerClass, 'hammer');
+  assert.equal(results[1].dispatched, false);
+  assert.equal(results[1].skipMergeAgent, true);
+  assert.match(results[1].reason, /^dispatch-status-|^existing-dispatch-/);
   const dispatchCalls = exec.calls.filter((call) => {
     const args = call.args || [];
     return args[0] === 'dispatch' && args[1] !== 'status';
   });
-  assert.equal(dispatchCalls.length, 2, 'a second moved head gets a new per-head hammer dispatch');
+  assert.equal(dispatchCalls.length, 1, 'a second moved head must not create a new hammer launch');
+  const stableRecordPath = amaCloserDispatchFilePath(rootDir, {
+    repo: 'acme/myrepo',
+    prNumber: 1234,
+    headSha: 'exhausted-final-hammer',
+  });
+  const stableRecord = JSON.parse(readFileSync(stableRecordPath, 'utf8'));
+  assert.equal(stableRecord.retryCount, 1);
+  assert.equal(stableRecord.headSha, heads[0]);
   for (const headSha of heads) {
-    assert.ok(readFileSync(amaCloserDispatchFilePath(rootDir, {
+    assert.equal(existsSync(amaCloserDispatchFilePath(rootDir, {
       repo: 'acme/myrepo',
       prNumber: 1234,
       headSha,
-    }), 'utf8').includes(headSha));
+    })), false);
   }
 });
 
-test('AMA #3084 loop guard: same current-head hammer success does not re-dispatch and alerts operator', async (t) => {
+test('AMA #3084 loop guard: same current-head hammer success with unknown merged signal alerts operator', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-loop-guard-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const headSha = '6358df76358df76358df76358df76358df76358d';
@@ -821,7 +894,7 @@ test('AMA #3084 loop guard: same current-head hammer success does not re-dispatc
       throw new Error(`unexpected redispatch: ${args.join(' ')}`);
     },
     readTemplateImpl: (path) => readFileSync(path, 'utf8'),
-    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'sqlite-read-failed' }),
     readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
     logger: {
       error(line) {
@@ -845,6 +918,87 @@ test('AMA #3084 loop guard: same current-head hammer success does not re-dispatc
   assert.equal(errors.length, 1);
   assert.equal(errors[0].event, 'ama_closer.current_head_hammer_stuck');
   assert.equal(errors[0].headSha, headSha);
+});
+
+test('AMA #3084 loop guard: same current-head hammer success with merged signal does not alert stuck', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-merged-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const headSha = '6358df76358df76358df76358df76358df76358d';
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: {
+      workerClass: 'hammer',
+      autoHammerOnEligibilityMiss: true,
+    },
+    reviewState: {
+      verdict: 'request-changes',
+      headSha,
+      riskClass: 'medium',
+      reviewCycleExhausted: true,
+      blockingFindingState: 'known',
+      blockingFindingCount: 0,
+      nonBlockingFindingState: 'known',
+      nonBlockingFindingCount: 0,
+    },
+    prMetadata: {
+      headSha,
+      mergeableState: 'MERGEABLE',
+    },
+    dispatchContext: {
+      rootDir,
+      reviewedSha: headSha,
+      riskClass: 'medium',
+      templatePath: null,
+      dispatchedAt: '2026-07-04T12:00:00Z',
+    },
+  });
+  plantDispatchRecord(rootDir, {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha,
+  }, {
+    workerClass: 'hammer',
+    state: 'dispatched',
+    retryCount: 1,
+    dispatchId: 'dispatch-current-head-hammer',
+    launchRequestId: 'lrq-current-head-hammer',
+    lastObservedStatus: 'starting',
+    dispatchedAt: '2026-07-04T11:55:00Z',
+  });
+
+  const errors = [];
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: async (_cmd, args) => {
+      if (args[0] === 'worker' && args[1] === 'tear-down') {
+        return { stdout: '', stderr: '' };
+      }
+      throw new Error(`unexpected dispatch call: ${args.join(' ')}`);
+    },
+    readTemplateImpl: (path) => readFileSync(path, 'utf8'),
+    readBuildCompletionSignalForPrImpl: () => ({
+      ok: true,
+      row: { signal_kind: 'merged', head_sha: 'merge-commit-sha' },
+      headShaMatchesReviewed: false,
+      producerHeadSha: 'merge-commit-sha',
+    }),
+    readBuildCompletionProducerEvidenceImpl: () => ({ ok: true, row: { producer: 'autowalk' } }),
+    logger: {
+      error(line) {
+        errors.push(JSON.parse(line));
+      },
+      info() {},
+      warn() {},
+      log() {},
+    },
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(result.reason, 'merged-signal-present');
+  assert.equal(errors.length, 0);
 });
 
 // Unit coverage for the prompt-selection predicate itself (HAM-04, SPEC §1.1.1).

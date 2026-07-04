@@ -52,6 +52,7 @@ import {
   resolveRemediationReplyTarget,
   resolveRemediationWorkspaceRoot,
   remediationWorkerGitIdentity,
+  remediationTouchesWorkflowFiles,
   tryAcquireFollowUpReconcileClaim,
   resetOAuthPreflightCache,
   resolveClaudeCodeCliPath,
@@ -255,6 +256,7 @@ function makeJob(overrides = {}) {
     createdAt: '2026-04-21T08:00:00.000Z',
     reviewSummary: 'Handle token refresh before retrying.',
     reviewBody: '## Summary\nHandle token refresh before retrying.\n\n## Verdict\nRequest changes',
+    changedFiles: ['src/follow-up-remediation.mjs'],
     remediationPlan: {
       mode: 'bounded-manual-rounds',
       maxRounds: 2,
@@ -1252,6 +1254,102 @@ test('workflow push capability detection parses OAuth headers, gh auth status, a
   assert.equal(app.hasWorkflowCapability, true);
 });
 
+test('workflow push capability detection retries transient gh API failures', async () => {
+  let calls = 0;
+  const logs = [];
+  const capability = await inspectRemediationPushTokenCapability({
+    env: { GITHUB_TOKEN: 'gho_without_workflow' },
+    retryDelaysMs: [0, 0],
+    log: { warn: (line) => logs.push(line) },
+    execFileImpl: async (command, args) => {
+      assert.equal(command, 'gh');
+      assert.deepEqual(args, ['api', '/', '--include']);
+      calls += 1;
+      if (calls < 3) {
+        const err = new Error('EIO: i/o error during TLS handshake');
+        err.code = 'EIO';
+        throw err;
+      }
+      return { stdout: 'HTTP/2 200\nx-oauth-scopes: repo, workflow\n', stderr: '' };
+    },
+  });
+
+  assert.equal(calls, 3);
+  assert.equal(capability.hasWorkflowCapability, true);
+  assert.match(logs.join('\n'), /oauth-scope header probe transient failure/);
+});
+
+test('workflow changed-file lookup retries transient errors and fails closed when unavailable', async () => {
+  let calls = 0;
+  await assert.rejects(
+    remediationTouchesWorkflowFiles({
+      job: { repo: 'laceyenterprises/adversarial-review', prNumber: 504 },
+      retryDelaysMs: [0, 0],
+      log: { warn() {} },
+      execFileImpl: async (command, args) => {
+        assert.equal(command, 'gh');
+        assert.deepEqual(args.slice(0, 2), ['pr', 'view']);
+        calls += 1;
+        const err = new Error('TLS handshake timeout');
+        err.code = 'ETIMEDOUT';
+        throw err;
+      },
+    }),
+    (err) => {
+      assert.equal(err.name, 'WorkflowPushPreflightTransientError');
+      assert.equal(err.isWorkflowPushPreflightTransientError, true);
+      assert.equal(err.code, 'workflow-push-changed-files-unavailable');
+      return true;
+    },
+  );
+  assert.equal(calls, 3);
+});
+
+test('workflow changed-file lookup preflight outage requeues instead of spawning or terminalizing', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const created = createPendingRemediationJob(rootDir, { changedFiles: null });
+  const spawnCalls = [];
+  const logs = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
+    rootDir,
+    maxConcurrent: 1,
+    promptTemplate: 'You are a remediation worker.',
+    now: () => '2026-07-04T10:00:00.000Z',
+    resolvePRLifecycleImpl: async () => null,
+    log: {
+      log: (line) => logs.push(line),
+      warn: (line) => logs.push(line),
+      error: (line) => logs.push(line),
+    },
+    execFileImpl: async (command, args) => {
+      if (command === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+        const err = new Error('HTTP 503 Service Unavailable');
+        err.stderr = 'HTTP 503 Service Unavailable';
+        throw err;
+      }
+      throw new Error(`unexpected command after workflow changed-file preflight outage: ${command} ${args.join(' ')}`);
+    },
+    spawnImpl: (...args) => {
+      spawnCalls.push(args);
+      return { pid: 9999, unref() {} };
+    },
+  }));
+
+  assert.equal(result.spawned, 0);
+  assert.equal(spawnCalls.length, 0);
+  assert.equal(result.results[0].reason, 'workflow-push-changed-files-unavailable');
+  assert.match(logs.join('\n'), /workflow-push preflight transient/);
+
+  const pendingDir = getFollowUpJobDir(rootDir, 'pending');
+  const pendingFiles = readdirSync(pendingDir).filter((name) => name.endsWith('.json'));
+  assert.equal(pendingFiles.length, 1);
+  const pendingJob = JSON.parse(readFileSync(path.join(pendingDir, pendingFiles[0]), 'utf8'));
+  assert.equal(pendingJob.status, 'pending');
+  assert.equal(pendingJob.remediationPlan.currentRound, 0);
+  assert.equal(pendingJob.lastWorkflowPushPreflightFailure.code, 'workflow-push-changed-files-unavailable');
+  assert.equal(pendingJob.lastWorkflowPushPreflightFailure.recoverable, true);
+});
+
 test('workflow-touching remediation without workflow push capability blocks before spawn, alerts, and marks needs-operator', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const created = createPendingRemediationJob(rootDir);
@@ -1315,6 +1413,76 @@ test('workflow-touching remediation without workflow push capability blocks befo
   } finally {
     if (originalToken === undefined) delete process.env.GITHUB_TOKEN;
     else process.env.GITHUB_TOKEN = originalToken;
+  }
+});
+
+test('workflow push capability alert gives configured-token recovery instead of ambient gh refresh', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const created = createPendingRemediationJob(rootDir);
+  writeFollowUpJob(created.jobPath, {
+    ...created.job,
+    changedFiles: ['.github/workflows/unit-tests.yml'],
+  });
+  const alerts = [];
+  const spawnCalls = [];
+  const logs = [];
+  const original = {
+    ADVERSARIAL_REMEDIATION_PUSH_TOKEN: process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN,
+    ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY: process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY,
+  };
+  process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN = 'configured_without_workflow';
+  process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY = 'remediation-app-installation';
+  try {
+    const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
+      rootDir,
+      maxConcurrent: 1,
+      promptTemplate: 'You are a remediation worker.',
+      now: () => '2026-07-04T10:00:00.000Z',
+      resolvePRLifecycleImpl: async () => null,
+      deliverAlertImpl: async (text, structured) => {
+        alerts.push({ text, structured });
+      },
+      log: {
+        log: (line) => logs.push(line),
+        warn: (line) => logs.push(line),
+        error: (line) => logs.push(line),
+      },
+      execFileImpl: async (command, args, options) => {
+        if (command === 'gh' && args[0] === 'api' && args[1] === '/' && args.includes('--include')) {
+          assert.equal(options.env.GITHUB_TOKEN, 'configured_without_workflow');
+          assert.equal(options.env.GH_TOKEN, 'configured_without_workflow');
+          return {
+            stdout: 'HTTP/2 200\nx-oauth-scopes: repo, read:org\n',
+            stderr: '',
+          };
+        }
+        throw new Error(`unexpected command after configured-token workflow preflight block: ${command} ${args.join(' ')}`);
+      },
+      spawnImpl: (...args) => {
+        spawnCalls.push(args);
+        return { pid: 9999, unref() {} };
+      },
+    }));
+
+    assert.equal(result.spawned, 0);
+    assert.equal(spawnCalls.length, 0);
+    assert.equal(alerts.length, 1);
+    assert.match(alerts[0].text, /Update ADVERSARIAL_REMEDIATION_PUSH_TOKEN to a PAT\/OAuth token with workflow scope/);
+    assert.doesNotMatch(alerts[0].text, /gh auth refresh/);
+    assert.match(alerts[0].structured.operatorAction, /Update ADVERSARIAL_REMEDIATION_PUSH_TOKEN/);
+    assert.doesNotMatch(alerts[0].structured.operatorAction, /gh auth refresh/);
+
+    const failedDir = getFollowUpJobDir(rootDir, 'failed');
+    const failedFiles = readdirSync(failedDir).filter((name) => name.endsWith('.json'));
+    assert.equal(failedFiles.length, 1);
+    const failedJob = JSON.parse(readFileSync(path.join(failedDir, failedFiles[0]), 'utf8'));
+    assert.match(failedJob.failure.workflowPushCapability.operatorAction, /Update ADVERSARIAL_REMEDIATION_PUSH_TOKEN/);
+    assert.doesNotMatch(failedJob.failure.workflowPushCapability.operatorAction, /gh auth refresh/);
+  } finally {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 
@@ -3451,8 +3619,16 @@ function makeQueuedJob(rootDir, overrides = {}) {
     linearTicketId: 'LAC-207',
     reviewBody: '## Summary\nHandle token refresh before retrying.\n\n## Verdict\nRequest changes',
     reviewPostedAt: '2026-04-21T08:00:00.000Z',
+    changedFiles: ['src/follow-up-remediation.mjs'],
     critical: true,
     ...overrides,
+  });
+  const changedFiles = Object.prototype.hasOwnProperty.call(overrides, 'changedFiles')
+    ? overrides.changedFiles
+    : ['src/follow-up-remediation.mjs'];
+  writeFollowUpJob(created.jobPath, {
+    ...created.job,
+    changedFiles,
   });
 
   const claimed = claimNextFollowUpJob({
@@ -3482,7 +3658,7 @@ function markActiveInProgressJob(rootDir, overrides = {}) {
 }
 
 function createPendingRemediationJob(rootDir, overrides = {}) {
-  return createFollowUpJob({
+  const created = createFollowUpJob({
     rootDir,
     repo: 'laceyenterprises/clio',
     prNumber: 7,
@@ -3490,9 +3666,24 @@ function createPendingRemediationJob(rootDir, overrides = {}) {
     linearTicketId: 'LAC-207',
     reviewBody: '## Summary\nHandle token refresh before retrying.\n\n## Verdict\nRequest changes',
     reviewPostedAt: '2026-04-21T08:00:00.000Z',
+    changedFiles: ['src/follow-up-remediation.mjs'],
     critical: true,
     ...overrides,
   });
+  const changedFiles = Object.prototype.hasOwnProperty.call(overrides, 'changedFiles')
+    ? overrides.changedFiles
+    : ['src/follow-up-remediation.mjs'];
+  writeFollowUpJob(created.jobPath, {
+    ...created.job,
+    changedFiles,
+  });
+  return {
+    ...created,
+    job: {
+      ...created.job,
+      changedFiles,
+    },
+  };
 }
 
 function drainerTestOptions(rootDir, spawnCalls, overrides = {}) {

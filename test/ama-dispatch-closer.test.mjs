@@ -1291,6 +1291,59 @@ test('stale own worktree cleanup lines do not mask later branch-holder blockers'
   assert.equal(record.branchHolderBlockCount, 1);
 });
 
+test('same-PR hammer branch-holder collision tears down prior attempt and retries provision once', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-same-pr-holder-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const hqRoot = join(rootDir, 'hq');
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: { workerClass: 'hammer' },
+    dispatchContext: { rootDir, hqRoot },
+  });
+  const identity = {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: dispatchContext.reviewedSha,
+  };
+  const holderPath = join(hqRoot, 'workers', 'hammer-ama-pr-1234-first', 'agent-os');
+  const samePrHolderError = [
+    "[hq] error: targeted worktree fallback could not find admin entry for '" + holderPath + "' in '" + join(hqRoot, 'repos', 'agent-os') + "'",
+    "[hq] warning: provision cleanup for 'hammer-ama-pr-1234-first' was incomplete; continuing after releasing worktree mutation lock",
+    '[hq] worker provision failed: branch-holder-collision',
+    "fatal: branch 'codex/feature' is already checked out in worktree '" + holderPath + "'",
+  ].join('\n');
+
+  const calls = [];
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args[0] === 'dispatch' && calls.filter((call) => call.args[0] === 'dispatch').length === 1) {
+        const err = new Error('provision failed');
+        err.stderr = samePrHolderError;
+        throw err;
+      }
+      return { stdout: '{"dispatchId":"dispatch_after_reap","launchRequestId":"lrq_after_reap"}', stderr: '' };
+    },
+    readTemplateImpl: () => 'stubbed',
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(result.dispatchId, 'dispatch_after_reap');
+  assert.deepEqual(calls.map((call) => call.args.slice(0, 3)), [
+    ['dispatch', '--worker-class', 'hammer'],
+    ['-C', join(hqRoot, 'repos', 'agent-os'), 'worktree'],
+    ['worker', 'tear-down', 'hammer-ama-pr-1234-first'],
+    ['dispatch', '--worker-class', 'hammer'],
+  ]);
+  assert.equal(calls[1].args.includes(holderPath), true);
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  assert.equal(record.state, 'dispatched');
+  assert.equal(record.branchHolderBlockCount, 0);
+});
+
 test('non-branch dispatch failures preserve branch-holder lifetime count', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-branch-holder-lifetime-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

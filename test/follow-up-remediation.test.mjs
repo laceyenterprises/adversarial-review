@@ -33,6 +33,9 @@ import {
   auditWorkspaceForContamination,
   isDrainQueueIdle,
   killDetachedWorkerProcessGroup,
+  hasWorkflowGitHubAppPermission,
+  hasWorkflowOAuthScope,
+  inspectRemediationPushTokenCapability,
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
   prepareCodexRemediationStartupEnv,
@@ -63,6 +66,8 @@ import {
   spawnRemediationWorker,
   resolveGeminiRemediationModel,
   remediationWorkerTrailerClass,
+  resolveRemediationPushTokenIdentity,
+  parseOAuthScopesFromGhAuthStatus,
   validateStartupRemediationConfig,
 } from '../src/follow-up-remediation.mjs';
 
@@ -1202,6 +1207,246 @@ test('prepareWorkspaceForJob authenticates git clone/fetch via the inline gh cre
   const checkout = calls.find((c) => c.command === 'git' && c.args.includes('checkout'));
   assert.ok(checkout, 'expected a git checkout call');
   assert.equal(checkout.args[0], '-C', 'checkout argv is unchanged (no credential prefix)');
+});
+
+test('workflow push capability detection parses OAuth headers, gh auth status, and GitHub App permissions', async () => {
+  assert.equal(
+    hasWorkflowOAuthScope('HTTP/2 200\r\nx-oauth-scopes: admin:public_key, gist, read:org, repo, workflow\r\n'),
+    true
+  );
+  assert.equal(
+    hasWorkflowOAuthScope('HTTP/2 200\r\nx-oauth-scopes: admin:public_key, gist, read:org, repo\r\n'),
+    false
+  );
+  assert.deepEqual(
+    [...parseOAuthScopesFromGhAuthStatus("✓ Logged in to github.com\n  - Token scopes: 'repo', 'workflow', 'read:org'\n")],
+    ['repo', 'workflow', 'read:org']
+  );
+  assert.equal(hasWorkflowGitHubAppPermission({ contents: 'write', workflows: 'write' }), true);
+  assert.equal(hasWorkflowGitHubAppPermission({ contents: 'write', workflows: 'read' }), false);
+
+  const oauth = await inspectRemediationPushTokenCapability({
+    env: { GITHUB_TOKEN: 'gho_without_workflow' },
+    execFileImpl: async (command, args) => {
+      assert.equal(command, 'gh');
+      assert.deepEqual(args, ['api', '/', '--include']);
+      return { stdout: 'HTTP/2 200\nx-oauth-scopes: repo, read:org\n', stderr: '' };
+    },
+  });
+  assert.equal(oauth.tokenType, 'oauth');
+  assert.equal(oauth.hasWorkflowCapability, false);
+  assert.deepEqual(oauth.scopes, ['repo', 'read:org']);
+
+  const app = await inspectRemediationPushTokenCapability({
+    env: {
+      ADVERSARIAL_REMEDIATION_PUSH_TOKEN: 'ghs_app_token',
+      ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS: '{"contents":"write","workflows":"write"}',
+      ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY: 'remediation-app-installation',
+    },
+    execFileImpl: async () => {
+      throw new Error('configured app permissions should avoid live probes');
+    },
+  });
+  assert.equal(app.tokenType, 'github-app');
+  assert.equal(app.identity, 'remediation-app-installation');
+  assert.equal(app.hasWorkflowCapability, true);
+});
+
+test('workflow-touching remediation without workflow push capability blocks before spawn, alerts, and marks needs-operator', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const created = createPendingRemediationJob(rootDir);
+  writeFollowUpJob(created.jobPath, {
+    ...created.job,
+    changedFiles: ['.github/workflows/unit-tests.yml', 'src/follow-up-remediation.mjs'],
+  });
+  const alerts = [];
+  const spawnCalls = [];
+  const logs = [];
+  const originalToken = process.env.GITHUB_TOKEN;
+  process.env.GITHUB_TOKEN = 'gho_repo_without_workflow';
+  try {
+    const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
+      rootDir,
+      maxConcurrent: 1,
+      promptTemplate: 'You are a remediation worker.',
+      now: () => '2026-07-04T10:00:00.000Z',
+      resolvePRLifecycleImpl: async () => null,
+      deliverAlertImpl: async (text, structured) => {
+        alerts.push({ text, structured });
+      },
+      log: {
+        log: (line) => logs.push(line),
+        warn: (line) => logs.push(line),
+        error: (line) => logs.push(line),
+      },
+      execFileImpl: async (command, args) => {
+        if (command === 'gh' && args[0] === 'api' && args[1] === '/' && args.includes('--include')) {
+          return {
+            stdout: 'HTTP/2 200\nx-oauth-scopes: admin:public_key, gist, read:org, repo\n',
+            stderr: '',
+          };
+        }
+        throw new Error(`unexpected command after workflow preflight block: ${command} ${args.join(' ')}`);
+      },
+      spawnImpl: (...args) => {
+        spawnCalls.push(args);
+        return { pid: 9999, unref() {} };
+      },
+    }));
+
+    assert.equal(result.spawned, 0);
+    assert.equal(spawnCalls.length, 0);
+    assert.equal(alerts.length, 1);
+    assert.match(alerts[0].text, /gh auth refresh -h github\.com -s workflow/);
+    assert.equal(alerts[0].structured.event, 'remediation-workflow-push-capability-missing');
+    assert.equal(alerts[0].structured.repo, created.job.repo);
+    assert.equal(alerts[0].structured.prNumber, created.job.prNumber);
+    assert.match(logs.join('\n'), /workflow=no/);
+
+    const failedDir = getFollowUpJobDir(rootDir, 'failed');
+    const failedFiles = readdirSync(failedDir).filter((name) => name.endsWith('.json'));
+    assert.equal(failedFiles.length, 1);
+    const failedJob = JSON.parse(readFileSync(path.join(failedDir, failedFiles[0]), 'utf8'));
+    assert.equal(failedJob.status, 'failed');
+    assert.equal(failedJob.remediationWorker.state, 'never-spawned');
+    assert.equal(failedJob.failure.code, 'workflow-push-capability-missing');
+    assert.equal(failedJob.failure.needsOperator, true);
+    assert.match(failedJob.failure.workflowPushCapability.operatorAction, /sudo -A -H -u .* gh auth refresh -h github\.com -s workflow/);
+  } finally {
+    if (originalToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = originalToken;
+  }
+});
+
+test('workflow-touching remediation with workflow-capable push token proceeds to spawn', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const created = createPendingRemediationJob(rootDir);
+  writeFollowUpJob(created.jobPath, {
+    ...created.job,
+    changedFiles: ['.github/workflows/unit-tests.yml'],
+  });
+  const spawnCalls = [];
+  const logs = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, spawnCalls, {
+      maxConcurrent: 1,
+      log: {
+        log: (line) => logs.push(line),
+        warn: (line) => logs.push(line),
+        error: (line) => logs.push(line),
+      },
+      execFileImpl: async (command, args) => {
+        if (command === 'gh' && args[0] === 'api' && args[1] === '/' && args.includes('--include')) {
+          return { stdout: 'HTTP/2 200\nx-oauth-scopes: repo, workflow\n', stderr: '' };
+        }
+        if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+          return {
+            stdout: JSON.stringify({
+              base: { ref: 'main' },
+              head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+            }),
+            stderr: '',
+          };
+        }
+        if (command === 'git' && args[0] === 'clone') {
+          mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        }
+        return { stdout: '', stderr: '' };
+      },
+    })
+  ));
+
+  assert.equal(result.spawned, 1);
+  assert.equal(spawnCalls.length, 1);
+  assert.match(logs.join('\n'), /workflow=yes/);
+});
+
+test('non-workflow remediation proceeds when the push token lacks workflow scope', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const created = createPendingRemediationJob(rootDir);
+  writeFollowUpJob(created.jobPath, {
+    ...created.job,
+    changedFiles: ['src/follow-up-remediation.mjs'],
+  });
+  const spawnCalls = [];
+  const commands = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, spawnCalls, {
+      maxConcurrent: 1,
+      execFileImpl: async (command, args) => {
+        commands.push([command, ...args]);
+        if (command === 'gh' && args[0] === 'api' && args[1] === '/' && args.includes('--include')) {
+          throw new Error('non-workflow remediation must not be workflow-scope gated');
+        }
+        if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+          return {
+            stdout: JSON.stringify({
+              base: { ref: 'main' },
+              head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+            }),
+            stderr: '',
+          };
+        }
+        if (command === 'git' && args[0] === 'clone') {
+          mkdirSync(path.join(args[2], '.git'), { recursive: true });
+        }
+        return { stdout: '', stderr: '' };
+      },
+    })
+  ));
+
+  assert.equal(result.spawned, 1);
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(commands.some((cmd) => cmd[0] === 'gh' && cmd[1] === 'api' && cmd[2] === '/' && cmd.includes('--include')), false);
+});
+
+test('configured remediation push token overrides ambient gh token for git clone/fetch', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const calls = [];
+  await prepareWorkspaceForJob({
+    rootDir,
+    job: makeJob(),
+    env: {
+      GITHUB_TOKEN: 'ambient_without_workflow',
+      GH_TOKEN: 'ambient_without_workflow',
+      ADVERSARIAL_REMEDIATION_PUSH_TOKEN: 'configured_workflow_capable',
+      ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY: 'remediation-app-installation',
+      PATH: '/usr/bin:/bin',
+    },
+    execFileImpl: async (command, args, options = {}) => {
+      calls.push({ command, args, options });
+      if (command === 'git' && args[0] === 'clone') {
+        mkdirSync(path.join(args[2], '.git'), { recursive: true });
+      }
+      if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+        return {
+          stdout: JSON.stringify({
+            base: { ref: 'main' },
+            head: { ref: 'clio-feature', repo: { full_name: 'laceyenterprises/clio' } },
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  for (const sub of ['clone', 'fetch']) {
+    const call = calls.find((c) => c.command === 'git' && c.args.includes(sub));
+    assert.ok(call, `expected a git ${sub} call`);
+    assert.equal(call.options.env.GITHUB_TOKEN, 'configured_workflow_capable');
+    assert.equal(call.options.env.GH_TOKEN, 'configured_workflow_capable');
+    assert.equal(call.options.env.GIT_CONFIG_VALUE_1, '!gh auth git-credential');
+  }
+  assert.deepEqual(resolveRemediationPushTokenIdentity({
+    ADVERSARIAL_REMEDIATION_PUSH_TOKEN: 'configured_workflow_capable',
+    ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY: 'remediation-app-installation',
+  }), {
+    source: 'configured-token',
+    envName: 'ADVERSARIAL_REMEDIATION_PUSH_TOKEN',
+    identity: 'remediation-app-installation',
+    configured: true,
+  });
 });
 
 test('prepareWorkspaceForJob rejects a malformed PR number before building a REST path', async () => {

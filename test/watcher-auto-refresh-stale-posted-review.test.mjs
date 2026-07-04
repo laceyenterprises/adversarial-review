@@ -508,7 +508,7 @@ test('watcher allows stale-review auto-refresh while remediation budget remains'
   });
 });
 
-test('watcher counts completed auto-refresh rereviews toward exhausted budget without remediation jobs', () => {
+test('watcher suppresses completed auto-refresh rereviews at the budget without remediation jobs', () => {
   const rootDir = makeTempRoot();
   try {
     const db = openReviewStateDb(rootDir);
@@ -550,8 +550,8 @@ test('watcher counts completed auto-refresh rereviews toward exhausted budget wi
     });
 
     assert.deepEqual(suppression, {
-      suppressed: false,
-      reason: null,
+      suppressed: true,
+      reason: 'remediation-round-budget-exhausted',
       completedRoundsForPR: 2,
       roundBudget: 2,
       riskClass: 'medium',
@@ -559,6 +559,29 @@ test('watcher counts completed auto-refresh rereviews toward exhausted budget wi
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('watcher suppresses remediation rounds beyond budget without requiring final-review completion', () => {
+  const suppression = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2606,
+    reviewRow: { review_status: 'posted' },
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 3,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: true,
+    reason: 'remediation-round-budget-exhausted',
+    completedRoundsForPR: 3,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
 });
 
 test('watcher keeps remediation-worker rereview within the final-review allowance', () => {

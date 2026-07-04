@@ -27,7 +27,7 @@
 import { execFile } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -639,6 +639,107 @@ function isProvisionBranchHolderBlocked(errOrText) {
     normalized.includes('auto-tear-down')
   );
   return hasWorktreeCollision && hasBranchHolderContext;
+}
+
+function samePrHammerHolderWorktreePaths(errOrText, prNumber) {
+  const detail = typeof errOrText === 'string'
+    ? errOrText
+    : [
+      errOrText?.code,
+      errOrText?.message,
+      errOrText?.stderr,
+      errOrText?.stdout,
+    ].filter(Boolean).join('\n');
+  const normalizedPr = String(prNumber || '').trim();
+  if (!/^[0-9]+$/.test(normalizedPr)) return [];
+  const escapedPr = normalizedPr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(
+    `(['"]?)(/[^'"\n]*?/workers/hammer-ama-pr-${escapedPr}(?:-[^/'"\n]+)?/agent-os)\\1`,
+    'g',
+  );
+  const paths = [];
+  const seen = new Set();
+  for (const match of String(detail || '').matchAll(pattern)) {
+    const path = match[2];
+    if (!seen.has(path)) {
+      seen.add(path);
+      paths.push(path);
+    }
+  }
+  return paths;
+}
+
+async function teardownSamePrHammerHolder({
+  err,
+  prNumber,
+  hqPath,
+  hqRoot,
+  execFileImpl,
+  logger = console,
+}) {
+  const worktreePaths = samePrHammerHolderWorktreePaths(err, prNumber);
+  if (!worktreePaths.length) {
+    return { attempted: false, ok: false, worktreePaths: [] };
+  }
+
+  const attempts = [];
+  for (const worktreePath of worktreePaths) {
+    const workerId = basename(dirname(worktreePath));
+    try {
+      await execFileImpl('git', [
+        '-C',
+        join(hqRoot, 'repos', AGENT_OS_TOOLING_REPO),
+        'worktree',
+        'remove',
+        '--force',
+        worktreePath,
+      ], {
+        env: process.env,
+        maxBuffer: 1024 * 1024,
+        timeout: 60_000,
+        killSignal: 'SIGTERM',
+      });
+      attempts.push({ worktreePath, action: 'git-worktree-remove', ok: true });
+    } catch (removeErr) {
+      attempts.push({
+        worktreePath,
+        action: 'git-worktree-remove',
+        ok: false,
+        error: String(removeErr?.stderr || removeErr?.message || removeErr),
+      });
+    }
+
+    try {
+      await execFileImpl(hqPath, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot], {
+        env: process.env,
+        maxBuffer: 1024 * 1024,
+        timeout: 60_000,
+        killSignal: 'SIGTERM',
+      });
+      attempts.push({ worktreePath, workerId, action: 'hq-worker-tear-down', ok: true });
+    } catch (tearDownErr) {
+      const detail = String(tearDownErr?.stderr || tearDownErr?.message || tearDownErr);
+      const absent = isWorkerTearDownNotFoundError(detail);
+      attempts.push({
+        worktreePath,
+        workerId,
+        action: 'hq-worker-tear-down',
+        ok: absent,
+        alreadyAbsent: absent,
+        error: detail,
+      });
+    }
+  }
+
+  const ok = attempts.every(attempt => attempt.ok);
+  logger?.warn?.(JSON.stringify({
+    event: 'ama_closer.same_pr_hammer_holder_teardown',
+    prNumber,
+    status: ok ? 'ok' : 'failed',
+    worktreePaths,
+    attempts,
+  }));
+  return { attempted: true, ok, worktreePaths, attempts };
 }
 
 function sleep(ms) {
@@ -1656,6 +1757,7 @@ export async function maybeDispatchAmaCloser({
 
   let execResult;
   let transientRetryIndex = 0;
+  let samePrHammerHolderRetryUsed = false;
   for (;;) {
     try {
       execResult = await execFileImpl(hqPath, args, {
@@ -1681,6 +1783,20 @@ export async function maybeDispatchAmaCloser({
       const ambiguousLaunch = Boolean(parsedFailure.launchRequestId || parsedFailure.dispatchId);
       const branchHolderBlocked = !ambiguousLaunch && isProvisionBranchHolderBlocked(err);
       const dispatchError = String(err?.stderr || err?.message || err);
+      if (branchHolderBlocked && workerClass === 'hammer' && !samePrHammerHolderRetryUsed) {
+        samePrHammerHolderRetryUsed = true;
+        const samePrTeardown = await teardownSamePrHammerHolder({
+          err,
+          prNumber,
+          hqPath,
+          hqRoot,
+          execFileImpl,
+          logger,
+        });
+        if (samePrTeardown.ok) {
+          continue;
+        }
+      }
       // A throttle / OAuth-broker outage / host-offline window is TRANSIENT: the
       // dispatch did not fail on its merits, GitHub or the broker was merely
       // unavailable. Treat it like a branch-holder block for budget purposes —

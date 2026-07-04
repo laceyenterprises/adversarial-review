@@ -21,10 +21,11 @@
 //   2. emitHeartbeatsForActiveJobs — refresh live detached workers so
 //      daemon bounces do not age them into the stale-claim path
 //   3. sweepStuckInProgressClaims — reclaim only genuinely stale claims
-//   4. consumeFollowUpJobsUntilCapacity — claim + spawn pending jobs
+//   4. reapCloserHammerWorktrees — remove terminal/prunable AMA hammer worktrees
+//   5. consumeFollowUpJobsUntilCapacity — claim + spawn pending jobs
 //      until active workers reach ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS
 //      (default 1, preserving the legacy one-worker behavior)
-//   5. retryFailedCommentDeliveries — bounded historical retry drain
+//   6. retryFailedCommentDeliveries — bounded historical retry drain
 //
 // Workers spawned by the consume step are detached subprocesses of `codex` /
 // `claude` (separate binaries with their own TCC identity), not
@@ -47,6 +48,7 @@ import {
 import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs';
 import { retryFailedCommentDeliveries } from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
 import { refreshReviewerBrokerTokens } from '../src/reviewer-broker-refresh.mjs';
+import { reapCloserHammerWorktrees } from '../src/ama/closer-worktree-reaper.mjs';
 import { archiveStoppedFollowUpJobs, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
 import {
   emitHeartbeatsForActiveJobs,
@@ -512,6 +514,17 @@ async function main() {
         'stale-claim-sweep',
         `scanned=${result.scanned} reclaimed=${result.reclaimed} skipped=${result.skipped} ` +
         `thresholdMs=${result.thresholdMs}`
+      );
+    });
+    if (stopping) break;
+    await runStep('closer-worktree-reap', async () => {
+      const result = await reapCloserHammerWorktrees({ logger: console });
+      logTick(
+        'closer-worktree-reap',
+        `scanned=${result.scanned} reaped=${result.reaped} skipped=${result.skipped} ` +
+        `terminal=${result.terminal} prunable=${result.prunable} ` +
+        `halfRegistered=${result.halfRegistered} open=${result.open} ` +
+        `unknown=${result.unknown} errors=${result.errors} limit=${result.limit}`
       );
     });
     if (stopping) break;

@@ -517,17 +517,6 @@ async function main() {
       );
     });
     if (stopping) break;
-    await runStep('closer-worktree-reap', async () => {
-      const result = await reapCloserHammerWorktrees({ logger: console });
-      logTick(
-        'closer-worktree-reap',
-        `scanned=${result.scanned} reaped=${result.reaped} skipped=${result.skipped} ` +
-        `terminal=${result.terminal} prunable=${result.prunable} ` +
-        `halfRegistered=${result.halfRegistered} open=${result.open} ` +
-        `unknown=${result.unknown} errors=${result.errors} limit=${result.limit}`
-      );
-    });
-    if (stopping) break;
     if (shouldConsumeAfterReviewerTokenRefresh(reviewerTokenRefreshSummary)) {
       await runStep('consume', async () => {
         const result = await consumeFollowUpJobsUntilCapacity({
@@ -548,6 +537,17 @@ async function main() {
         `skipped unsafe reviewer token handoff roles=${describeUnsafeReviewerTokenHandoff(reviewerTokenRefreshSummary)}`
       );
     }
+    if (stopping) break;
+    await runStep('closer-worktree-reap', async () => {
+      const result = await reapCloserHammerWorktrees({ logger: console });
+      logTick(
+        'closer-worktree-reap',
+        `scanned=${result.scanned} reaped=${result.reaped} skipped=${result.skipped} ` +
+        `terminal=${result.terminal} prunable=${result.prunable} ` +
+        `halfRegistered=${result.halfRegistered} open=${result.open} ` +
+        `unknown=${result.unknown} errors=${result.errors} limit=${result.limit}`
+      );
+    });
     if (stopping) break;
     await runStep('retry-comments', () => retryFailedCommentDeliveries());
     if (stopping) break;

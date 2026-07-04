@@ -3371,11 +3371,19 @@ function resolveFirstPassReviewBudgetSuppression({
   const reviewAllowance = Number.isFinite(roundBudget) && roundBudget > 0
     ? roundBudget + 1
     : roundBudget;
-  if (
-    Number.isFinite(completedRoundsForPR) &&
+  const remediationBudgetConsumed =
+    Number.isFinite(completedRemediationRoundsForPR) &&
     Number.isFinite(roundBudget) &&
     roundBudget > 0 &&
-    completedRoundsForPR >= reviewAllowance
+    completedRemediationRoundsForPR >= roundBudget;
+  const postBudgetFinalReviewCompleted =
+    Number.isFinite(completedRereviewRounds) &&
+    Number.isFinite(roundBudget) &&
+    roundBudget > 0 &&
+    completedRereviewRounds >= roundBudget;
+  if (
+    remediationBudgetConsumed &&
+    postBudgetFinalReviewCompleted
   ) {
     return {
       suppressed: true,

@@ -1255,10 +1255,12 @@ function extractChangedPathsFromJob(job) {
 async function listPRChangedPaths({
   repo,
   prNumber,
+  env = process.env,
   execFileImpl = execFileAsync,
   log = console,
   retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
 }) {
+  const authEnv = withGhGitCredentialEnv(env);
   const { stdout } = await execWorkflowPushPreflightGh({
     args: [
       'pr',
@@ -1270,6 +1272,7 @@ async function listPRChangedPaths({
       'files',
     ],
     options: {
+      env: authEnv,
       maxBuffer: 5 * 1024 * 1024,
     },
     execFileImpl,
@@ -1287,6 +1290,7 @@ async function listPRChangedPaths({
 
 async function remediationTouchesWorkflowFiles({
   job,
+  env = process.env,
   execFileImpl = execFileAsync,
   log = console,
   retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
@@ -1303,6 +1307,7 @@ async function remediationTouchesWorkflowFiles({
     const livePaths = await listPRChangedPaths({
       repo: assertValidRepoSlug(job.repo),
       prNumber: job.prNumber,
+      env,
       execFileImpl,
       log,
       retryDelaysMs,

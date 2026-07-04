@@ -1305,6 +1305,46 @@ test('workflow changed-file lookup retries transient errors and fails closed whe
   assert.equal(calls, 3);
 });
 
+test('workflow changed-file lookup uses configured remediation push token auth env', async () => {
+  let observedEnv = null;
+  const result = await remediationTouchesWorkflowFiles({
+    job: { repo: 'laceyenterprises/adversarial-review', prNumber: 504 },
+    env: {
+      GITHUB_TOKEN: 'ambient_token_without_access',
+      ADVERSARIAL_REMEDIATION_PUSH_TOKEN: 'configured_push_token',
+    },
+    retryDelaysMs: [],
+    execFileImpl: async (command, args, options = {}) => {
+      assert.equal(command, 'gh');
+      assert.deepEqual(args, [
+        'pr',
+        'view',
+        '504',
+        '--repo',
+        'laceyenterprises/adversarial-review',
+        '--json',
+        'files',
+      ]);
+      observedEnv = options.env;
+      return {
+        stdout: JSON.stringify({ files: [{ path: '.github/workflows/unit-tests.yml' }] }),
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.touches, true);
+  assert.deepEqual(result.paths, ['.github/workflows/unit-tests.yml']);
+  assert.equal(result.source, 'gh-pr-view');
+  assert.equal(observedEnv.GITHUB_TOKEN, 'configured_push_token');
+  assert.equal(observedEnv.GH_TOKEN, 'configured_push_token');
+  assert.equal(observedEnv.GIT_CONFIG_COUNT, '2');
+  assert.equal(observedEnv.GIT_CONFIG_KEY_0, 'credential.helper');
+  assert.equal(observedEnv.GIT_CONFIG_VALUE_0, '');
+  assert.equal(observedEnv.GIT_CONFIG_KEY_1, 'credential.helper');
+  assert.equal(observedEnv.GIT_CONFIG_VALUE_1, '!gh auth git-credential');
+});
+
 test('workflow changed-file lookup preflight outage requeues instead of spawning or terminalizing', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const created = createPendingRemediationJob(rootDir, { changedFiles: null });

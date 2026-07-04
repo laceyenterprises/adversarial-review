@@ -563,7 +563,7 @@ test('watcher suppresses completed auto-refresh rereviews at the budget without 
   }
 });
 
-test('watcher suppresses remediation rounds beyond budget without requiring final-review completion', () => {
+test('watcher allows the owed post-budget final review even when remediation rounds exceed budget', () => {
   const suppression = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',
     prNumber: 2606,
@@ -578,9 +578,59 @@ test('watcher suppresses remediation rounds beyond budget without requiring fina
   });
 
   assert.deepEqual(suppression, {
+    suppressed: false,
+    reason: null,
+    completedRoundsForPR: 3,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
+});
+
+test('watcher allows #3033-shaped exhausted moved head until the post-budget final review completes', () => {
+  const finalOwed = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 3033,
+    reviewRow: {
+      review_status: 'posted',
+      reviewer_head_sha: '02c1fd11',
+    },
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 2,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(finalOwed, {
+    suppressed: false,
+    reason: null,
+    completedRoundsForPR: 2,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
+
+  const finalCompleted = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 3033,
+    reviewRow: {
+      review_status: 'posted',
+      reviewer_head_sha: '42094c99',
+    },
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 2,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 1,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(finalCompleted, {
     suppressed: true,
     reason: 'remediation-round-budget-exhausted',
-    completedRoundsForPR: 3,
+    completedRoundsForPR: 2,
     roundBudget: 2,
     riskClass: 'medium',
   });

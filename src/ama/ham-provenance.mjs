@@ -11,6 +11,9 @@ const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set([
   // HQ hammer workers may write PR comments through the owner-lane gh token
   // while the commit itself is authored by merge-agent-lacey.
   'clio-airlock',
+  // MERGE_AGENT_GH_TOKEN comments from the dedicated hammer app resolve to
+  // this GitHub App bot login in PR timelines.
+  'the-hammer-lacey[bot]',
 ]);
 
 function normalizeHamLogin(value) {

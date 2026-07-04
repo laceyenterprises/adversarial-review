@@ -1697,7 +1697,7 @@ test('ham terminal remediation: server-rebased HAM commit proves reviewed head w
       headSha: currentHead,
       parentSha: rebasedParent,
       reviewedHead,
-      auditAuthor: 'clio-airlock',
+      auditAuthor: 'the-hammer-lacey[bot]',
       auditBody,
     }),
   });

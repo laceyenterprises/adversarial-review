@@ -795,6 +795,8 @@ const badChecks = checks.filter((check) => {
   return !['SUCCESS', 'NEUTRAL', 'SKIPPED'].includes(conclusion);
 });
 const headMatches = String(rollup.headSha || rollup.headRefOid || '') === expectedHead;
+const mergeable = String(rollup.mergeable || '').toUpperCase() === 'MERGEABLE';
+const notBehind = String(rollup.mergeStateStatus || '').toUpperCase() !== 'BEHIND';
 const state = String(rollup.state || '').toUpperCase();
 const open = state === 'OPEN';
 // MSM-02: the GitHub-side gate (required checks green + mergeable + head-match)

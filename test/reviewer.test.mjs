@@ -2140,6 +2140,53 @@ test('agy chunk fallback preserves file headers on line-split chunks', () => {
   }
 });
 
+test('agy chunk fallback carries the active hunk header on split chunks', () => {
+  const header = [
+    'diff --git a/big.txt b/big.txt',
+    'index 1111111..2222222 100644',
+    '--- a/big.txt',
+    '+++ b/big.txt',
+  ];
+  const firstHunk = [
+    '@@ -10,4 +10,4 @@',
+    '+early 0 ' + 'x'.repeat(120),
+    '+early 1 ' + 'x'.repeat(120),
+    '+early 2 ' + 'x'.repeat(120),
+  ];
+  const secondHunk = [
+    '@@ -500,4 +500,4 @@',
+    '+later 0 ' + 'y'.repeat(120),
+    '+later 1 ' + 'y'.repeat(120),
+    '+later 2 ' + 'y'.repeat(120),
+  ];
+  const diff = [...header, ...firstHunk, ...secondHunk].join('\n');
+  const promptOverheadBytes = agyPromptBytes(buildPromptForReviewerModel('gemini', '', '', {
+    promptStage: 'first',
+    runtime: 'antigravity',
+  }));
+  const maxBytes = promptOverheadBytes
+    + agyPromptBytes(header.join('\n'))
+    + 1
+    + agyPromptBytes([
+      '@@ -500,4 +500,4 @@',
+      '+later 0 ' + 'y'.repeat(120),
+    ].join('\n'));
+
+  const split = splitDiffForAgyChunks(diff, {
+    extraContext: '',
+    promptStage: 'first',
+    maxBytes,
+    maxChunks: 20,
+  });
+
+  assert.equal(split.ok, true);
+  assert.ok(split.chunks.length > 2);
+  const laterChunk = split.chunks.find((chunk) => chunk.diff.includes('+later 2'));
+  assert.ok(laterChunk);
+  assert.match(laterChunk.diff, /\n@@ -500,4 \+500,4 @@\n\+later 2 /);
+  assert.doesNotMatch(laterChunk.diff, /\n@@ -10,4 \+10,4 @@\n\+later 2 /);
+});
+
 test('agy chunking preserves leading and trailing diff whitespace', () => {
   const diff = ' context line\n ';
   const split = splitDiffForAgyChunks(diff, {
@@ -2169,6 +2216,9 @@ test('mergeChunkedAgyReviews merges only issue bullets from child review section
         '## Non-blocking issues',
         '- Nit from first chunk.',
         '',
+        '## Suggested fixes',
+        '- Patch first chunk.',
+        '',
         '## Verdict',
         'Request changes',
       ].join('\n'),
@@ -2184,6 +2234,9 @@ test('mergeChunkedAgyReviews merges only issue bullets from child review section
         '## Non-blocking issues',
         '- Nit from second chunk.',
         '',
+        '## Suggested fixes',
+        '- Patch second chunk.',
+        '',
         '## Verdict',
         'Comment only',
       ].join('\n'),
@@ -2192,10 +2245,39 @@ test('mergeChunkedAgyReviews merges only issue bullets from child review section
 
   assert.match(merged, /## Blocking issues\n- \*\*Bad split\*\*\n  - Detail from first chunk\./);
   assert.match(merged, /## Non-blocking issues\n- Nit from first chunk\.\n- Nit from second chunk\./);
+  assert.match(merged, /## Suggested fixes\n- Patch first chunk\.\n- Patch second chunk\./);
   assert.match(merged, /## Verdict\nRequest changes/);
   assert.doesNotMatch(merged, /First summary must not be nested/);
   assert.doesNotMatch(merged, /Second summary must not be nested/);
   assert.equal((merged.match(/## Summary/g) || []).length, 1);
+});
+
+test('mergeChunkedAgyReviews derives verdict from merged blocking issues', () => {
+  const merged = mergeChunkedAgyReviews([
+    {
+      reviewText: [
+        '## Summary',
+        'Child verdict must not drive the merged verdict.',
+        '',
+        '## Blocking issues',
+        '- None.',
+        '',
+        '## Non-blocking issues',
+        '- Nit.',
+        '',
+        '## Suggested fixes',
+        '- None.',
+        '',
+        '## Verdict',
+        'Request changes',
+      ].join('\n'),
+    },
+  ]);
+
+  assert.match(merged, /## Blocking issues\n- None\./);
+  assert.match(merged, /## Non-blocking issues\n- Nit\./);
+  assert.match(merged, /## Suggested fixes\n- None\./);
+  assert.match(merged, /## Verdict\nComment only/);
 });
 
 test('oversized agy alert retries transient curl failures before succeeding', async () => {

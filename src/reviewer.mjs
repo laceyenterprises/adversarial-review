@@ -2736,10 +2736,10 @@ function pushAgyChunk(chunks, chunkDiff, {
 
 function splitPatchHeaderAndBodyLines(lines) {
   const hunkIndex = lines.findIndex((line) => /^@@\s/.test(line));
-  if (hunkIndex <= 0) return { headerLines: [], bodyLines: lines };
+  if (hunkIndex < 0) return { headerLines: [], bodyLines: lines };
   return {
-    headerLines: lines.slice(0, hunkIndex + 1),
-    bodyLines: lines.slice(hunkIndex + 1),
+    headerLines: lines.slice(0, hunkIndex),
+    bodyLines: lines.slice(hunkIndex),
   };
 }
 
@@ -2747,6 +2747,13 @@ function joinPatchLines(headerLines, bodyLines) {
   if (headerLines.length === 0) return bodyLines.join('\n');
   if (bodyLines.length === 0) return headerLines.join('\n');
   return `${headerLines.join('\n')}\n${bodyLines.join('\n')}`;
+}
+
+function patchChunkBodyLines(bodyLines, activeHunkLine) {
+  if (!activeHunkLine || bodyLines.length === 0 || /^@@\s/.test(bodyLines[0])) {
+    return bodyLines;
+  }
+  return [activeHunkLine, ...bodyLines];
 }
 
 function splitOversizedPatchByLines(patch, {
@@ -2766,23 +2773,29 @@ function splitOversizedPatchByLines(patch, {
   const headerBytes = agyPromptBytes(headerText);
   const headerBodySeparatorBytes = headerLines.length > 0 ? 1 : 0;
   let currentLines = [];
-  let currentBodyBytes = 0;
+  let activeHunkLine = null;
   for (const line of bodyLines) {
-    const lineBytes = agyPromptBytes(line);
-    const candidateBodyBytes = currentBodyBytes + (currentLines.length > 0 ? 1 : 0) + lineBytes;
+    const lineIsHunkHeader = /^@@\s/.test(line);
+    const candidateLines = [...currentLines, line];
+    const candidateActiveHunkLine = lineIsHunkHeader && currentLines.length === 0 ? line : activeHunkLine;
+    const candidateBodyLines = patchChunkBodyLines(candidateLines, candidateActiveHunkLine);
+    const candidateBodyBytes = agyPromptBytes(candidateBodyLines.join('\n'));
     const candidatePromptBytes = promptOverheadBytes
       + headerBytes
       + (headerLines.length > 0 ? headerBodySeparatorBytes : 0)
       + candidateBodyBytes;
     if (candidatePromptBytes <= maxBytes) {
       currentLines.push(line);
-      currentBodyBytes = candidateBodyBytes;
+      if (lineIsHunkHeader) activeHunkLine = line;
       continue;
     }
     if (currentLines.length === 0) {
       return { ok: false, reason: 'single-line-over-budget' };
     }
-    const pushed = pushAgyChunk(chunks, joinPatchLines(headerLines, currentLines), {
+    const pushed = pushAgyChunk(chunks, joinPatchLines(
+      headerLines,
+      patchChunkBodyLines(currentLines, activeHunkLine),
+    ), {
       extraContext,
       promptStage,
       maxBytes,
@@ -2790,10 +2803,13 @@ function splitOversizedPatchByLines(patch, {
     });
     if (!pushed.ok) return pushed;
     currentLines = [line];
-    currentBodyBytes = lineBytes;
+    if (lineIsHunkHeader) activeHunkLine = line;
   }
   if (currentLines.length > 0) {
-    const pushed = pushAgyChunk(chunks, joinPatchLines(headerLines, currentLines), {
+    const pushed = pushAgyChunk(chunks, joinPatchLines(
+      headerLines,
+      patchChunkBodyLines(currentLines, activeHunkLine),
+    ), {
       extraContext,
       promptStage,
       maxBytes,
@@ -2844,16 +2860,6 @@ function splitDiffForAgyChunks(diff, {
   return { ok: chunks.length > 0, chunks, truncated: false, reason: chunks.length > 0 ? null : 'empty-diff' };
 }
 
-function strongestReviewVerdict(reviewTexts) {
-  let strongest = 'Comment only';
-  for (const text of reviewTexts) {
-    const verdict = normalizeReviewVerdict(extractReviewVerdict(text));
-    if (verdict === 'request-changes') return 'Request changes';
-    if (verdict === 'approve' && strongest !== 'Request changes') strongest = 'Approve';
-  }
-  return strongest;
-}
-
 function markdownSectionBody(markdown, heading) {
   const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
   const sectionStart = lines.findIndex((line) => line.trim().toLowerCase() === `## ${heading}`.toLowerCase());
@@ -2886,7 +2892,6 @@ function extractMarkdownIssueList(markdown, heading) {
 
 function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes = null, maxBytes = null } = {}) {
   const texts = chunkReviews.map((chunk) => String(chunk.reviewText || '').trim()).filter(Boolean);
-  const verdict = strongestReviewVerdict(texts);
   const parts = [
     '## Summary',
     `Reviewed an oversized diff through ${chunkReviews.length} bounded Antigravity chunks because the full agy prompt exceeded the argv budget${promptBytes ? ` (${promptBytes} bytes > ${maxBytes} bytes)` : ''}.`,
@@ -2897,9 +2902,13 @@ function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes =
   parts.push('', '## Blocking issues');
   const blocking = texts.flatMap((text) => extractMarkdownIssueList(text, 'Blocking issues'));
   parts.push(blocking.length > 0 ? blocking.join('\n') : '- None.');
+  const verdict = blocking.length > 0 ? 'Request changes' : 'Comment only';
   parts.push('', '## Non-blocking issues');
   const nonBlocking = texts.flatMap((text) => extractMarkdownIssueList(text, 'Non-blocking issues'));
   parts.push(nonBlocking.length > 0 ? nonBlocking.join('\n') : '- None.');
+  parts.push('', '## Suggested fixes');
+  const suggestedFixes = texts.flatMap((text) => extractMarkdownIssueList(text, 'Suggested fixes'));
+  parts.push(suggestedFixes.length > 0 ? suggestedFixes.join('\n') : '- None.');
   parts.push('', '## Verdict', verdict);
   return parts.join('\n');
 }

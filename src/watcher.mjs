@@ -143,6 +143,7 @@ import {
   maybeDispatchAmaCloser,
   namedAmaNoDispatchReason,
 } from './ama/dispatch-closer.mjs';
+import { maybeDaemonMergeCleanReview } from './ama/daemon-merge.mjs';
 import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import {
@@ -5120,6 +5121,7 @@ async function maybeDispatchAmaClosureFor({
     fetchReviewBodiesForHead(execFileAsync, repo, pr, head, options),
   liveReviewRetryDelaysMs = AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
   resolveReviewCycleExhaustionImpl = null,
+  maybeDaemonMergeCleanReviewImpl = maybeDaemonMergeCleanReview,
 }) {
   let cfg;
   let orchestrationMode;
@@ -5366,9 +5368,11 @@ async function maybeDispatchAmaClosureFor({
   const prMetadata = {
     prNumber,
     headSha: currentPrHeadSha,
+    baseBranch: candidate?.baseBranch || candidate?.baseRefName || null,
     isOpen: String(candidate?.prState || 'open').toLowerCase() === 'open',
     isDraft: Boolean(candidate?.isDraft),
     mergeableState: gateSnapshot.mergeableState,
+    mergeStateStatus: candidate?.mergeStateStatus || null,
     labels: Array.isArray(labelNames) ? labelNames : [],
     statusCheckRollup: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
@@ -5396,6 +5400,36 @@ async function maybeDispatchAmaClosureFor({
         }
       : {}),
   };
+
+  let daemonMergeResult;
+  try {
+    daemonMergeResult = await maybeDaemonMergeCleanReviewImpl({
+      rootDir,
+      repo: repoPath,
+      prNumber,
+      reviewState,
+      prMetadata,
+      cfg,
+      logger,
+    });
+  } catch (err) {
+    logger?.warn?.(`[watcher] AMA daemon clean-merge failed: ${err?.message || err}`);
+    return withAmaDispatchMetadata(
+      { dispatched: false, reason: 'daemon-merge-failed' },
+      { amaEnabled: Boolean(cfg?.enabled) },
+    );
+  }
+  if (daemonMergeResult?.handled) {
+    return withAmaDispatchMetadata(
+      {
+        dispatched: false,
+        skipMergeAgent: true,
+        daemonMerge: true,
+        ...daemonMergeResult,
+      },
+      { amaEnabled: true },
+    );
+  }
 
   let result;
   try {

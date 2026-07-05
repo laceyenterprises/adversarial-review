@@ -4125,3 +4125,241 @@ test('isHammerRemediableEligibilityMiss fires narrowly before exhaustion and for
     'no miss reasons means there is no eligibility miss to route',
   );
 });
+
+// ---------------------------------------------------------------------------
+// HHR — harness-fallback protection for the codex-capped closer/hammer.
+//
+// The AMA closer worker_class defaults to `hammer` (a codex/OpenAI harness).
+// When codex OAuth is grounded the hammer cannot spawn, so settled PRs never
+// close. These tests exercise the dispatch-time harness fallback that swaps the
+// PHYSICAL `--worker-class` to an available harness while preserving the
+// closer's terminal-remediation + merge-under-lease behavior, emits the
+// `ama_closer.harness_fallback` audit, and auto-reverts when codex recovers.
+// ---------------------------------------------------------------------------
+
+// `hq fleet quota status --json` payload for the given provider→state map.
+function fleetQuotaPayload(states = {}) {
+  return JSON.stringify({
+    providerStatuses: Object.entries(states).map(([provider, state]) => ({
+      provider,
+      authPath: 'oauth',
+      state,
+      lastProbeAt: '2026-07-05T00:00:00Z',
+      lastGoodAt: '2026-07-04T00:00:00Z',
+    })),
+    lastProbeAt: '2026-07-05T00:00:00Z',
+  });
+}
+
+// exec mock that answers `hq fleet quota status --json` with a scripted fleet
+// payload and every other call (i.e. `hq dispatch`) with the dispatch id.
+function buildFleetAwareExecMock({ providerStates = {}, dispatchStdout = 'dispatchId=lrq_test_0001\n' } = {}) {
+  const calls = [];
+  const impl = async (cmd, args) => {
+    calls.push({ cmd, args });
+    if (Array.isArray(args) && args[0] === 'fleet' && args[1] === 'quota' && args[2] === 'status') {
+      return { stdout: fleetQuotaPayload(providerStates), stderr: '' };
+    }
+    return { stdout: dispatchStdout, stderr: '' };
+  };
+  const dispatchCall = () => calls.find((c) => Array.isArray(c.args) && c.args[0] === 'dispatch');
+  const fleetCall = () => calls.find((c) => Array.isArray(c.args) && c.args[0] === 'fleet');
+  return { impl, calls, dispatchCall, fleetCall };
+}
+
+test('HHR: codex grounded + hammer closer falls back to claude-code with harness_fallback audit', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-hhr-fallback-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: { workerClass: 'hammer', workerClassFallback: ['claude-code'] },
+    dispatchContext: { rootDir },
+  });
+  const exec = buildFleetAwareExecMock({ providerStates: { openai: 'exhausted', anthropic: 'ok' } });
+  const write = buildWriteMock();
+  const { events, logger } = buildStructuredLogger();
+  const alertCalls = [];
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: () => readFileSync(TEMPLATE_PATH, 'utf8'),
+    deliverAlertImpl: async (text, opts) => { alertCalls.push({ text, opts }); },
+    logger,
+  });
+
+  assert.equal(result.dispatched, true);
+  // The LOGICAL worker class is unchanged (drives prompt/audit provenance)...
+  assert.equal(result.workerClass, 'hammer');
+  // ...but the PHYSICAL dispatch harness swapped to the available fallback.
+  assert.equal(result.dispatchWorkerClass, 'claude-code');
+  const dispatchArgs = exec.dispatchCall().args;
+  assert.equal(dispatchArgs[dispatchArgs.indexOf('--worker-class') + 1], 'claude-code');
+
+  // Fleet quota was consulted (authoritative signal, not a guess).
+  assert.ok(exec.fleetCall(), 'hq fleet quota status was queried');
+
+  // Merge-under-lease preserved: the closer lease was acquired for this head.
+  assert.ok(result.leasePath, 'closer lease is acquired on the fallback path');
+
+  // Loud audit fired with provider + from/to.
+  const audit = events.find((e) => e.event === 'ama_closer.harness_fallback');
+  assert.ok(audit, 'ama_closer.harness_fallback audit event fired');
+  assert.equal(audit.provider, 'openai');
+  assert.equal(audit.from, 'hammer');
+  assert.equal(audit.to, 'claude-code');
+  assert.equal(audit.primaryState, 'exhausted');
+  assert.equal(audit.fallbackProvider, 'anthropic');
+  assert.equal(result.harnessFallback.to, 'claude-code');
+
+  // Operator alert delivered with the same from/to/provider payload.
+  assert.equal(alertCalls.length, 1);
+  assert.equal(alertCalls[0].opts.event, 'ama_closer.harness_fallback');
+  assert.equal(alertCalls[0].opts.payload.provider, 'openai');
+  assert.equal(alertCalls[0].opts.payload.from, 'hammer');
+  assert.equal(alertCalls[0].opts.payload.to, 'claude-code');
+});
+
+test('HHR regression: codex healthy → closer dispatches on the configured primary (no fallback, auto-revert)', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-hhr-healthy-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: { workerClass: 'hammer', workerClassFallback: ['claude-code'] },
+    dispatchContext: { rootDir },
+  });
+  const exec = buildFleetAwareExecMock({ providerStates: { openai: 'ok', anthropic: 'ok' } });
+  const write = buildWriteMock();
+  const { events, logger } = buildStructuredLogger();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: () => readFileSync(TEMPLATE_PATH, 'utf8'),
+    logger,
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(result.workerClass, 'hammer');
+  assert.equal(result.dispatchWorkerClass, undefined, 'no dispatchWorkerClass override when primary is healthy');
+  const dispatchArgs = exec.dispatchCall().args;
+  assert.equal(dispatchArgs[dispatchArgs.indexOf('--worker-class') + 1], 'hammer');
+  assert.equal(events.find((e) => e.event === 'ama_closer.harness_fallback'), undefined, 'no fallback audit when codex is healthy');
+});
+
+test('HHR: fallback preserves the hammer terminal-remediation prompt + merge-under-lease', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-hhr-terminal-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const reviewedHead = '40e302440e302440e302440e302440e302440e3024';
+  const currentHead = '6358df76358df76358df76358df76358df76358d';
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: {
+      workerClass: 'hammer',
+      workerClassFallback: ['claude-code'],
+      autoHammerOnEligibilityMiss: true,
+    },
+    reviewState: {
+      verdict: 'request-changes',
+      headSha: reviewedHead,
+      riskClass: 'medium',
+      reviewCycleExhausted: true,
+      blockingFindingState: 'known',
+      blockingFindingCount: 1,
+    },
+    prMetadata: { headSha: currentHead, mergeableState: 'MERGEABLE' },
+    dispatchContext: { rootDir, reviewedSha: reviewedHead, riskClass: 'medium', templatePath: null },
+  });
+  const exec = buildFleetAwareExecMock({ providerStates: { openai: 'exhausted', anthropic: 'ok' } });
+  const write = buildWriteMock();
+  const templatePathsRead = [];
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: (p) => { templatePathsRead.push(p); return readFileSync(p, 'utf8'); },
+    deliverAlertImpl: async () => {},
+  });
+
+  assert.equal(result.dispatched, true);
+  // Physical harness fell back...
+  assert.equal(result.dispatchWorkerClass, 'claude-code');
+  const dispatchArgs = exec.dispatchCall().args;
+  assert.equal(dispatchArgs[dispatchArgs.indexOf('--worker-class') + 1], 'claude-code');
+  // ...but the HAMMER terminal-remediation template (not the plain closer
+  // template) was still selected — terminal remediation is preserved.
+  assert.ok(
+    templatePathsRead.includes(HAMMER_TEMPLATE_PATH),
+    'the hammer terminal-remediation template drives the prompt even under fallback',
+  );
+  // Merge-under-lease preserved.
+  assert.ok(result.leasePath, 'closer lease is acquired');
+  const lease = readAmaCloserLease(rootDir, {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: reviewedHead,
+  });
+  assert.ok(lease, 'a closer lease persists for the reviewed head');
+});
+
+test('HHR: alert transport down → fail-open (dispatch still falls back and merges)', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-hhr-alert-down-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: { workerClass: 'hammer', workerClassFallback: ['claude-code'] },
+    dispatchContext: { rootDir },
+  });
+  const exec = buildFleetAwareExecMock({ providerStates: { openai: 'exhausted', anthropic: 'ok' } });
+  const write = buildWriteMock();
+  const { events, logger } = buildStructuredLogger();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: () => readFileSync(TEMPLATE_PATH, 'utf8'),
+    // Alert transport is down: throws on delivery.
+    deliverAlertImpl: async () => { throw new Error('ALERT_TO must be configured for alert delivery'); },
+    logger,
+  });
+
+  // The merge path is unaffected: fallback still fired and the closer dispatched.
+  assert.equal(result.dispatched, true);
+  assert.equal(result.dispatchWorkerClass, 'claude-code');
+  const dispatchArgs = exec.dispatchCall().args;
+  assert.equal(dispatchArgs[dispatchArgs.indexOf('--worker-class') + 1], 'claude-code');
+  // The durable audit still fired; the alert failure was logged, not thrown.
+  assert.ok(events.find((e) => e.event === 'ama_closer.harness_fallback'), 'audit fired despite alert transport failure');
+});
+
+test('HHR: no fallback configured ([]) keeps the codex-capped primary (no fleet query)', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-hhr-no-fallback-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: { workerClass: 'hammer', workerClassFallback: [] },
+    dispatchContext: { rootDir },
+  });
+  const exec = buildFleetAwareExecMock({ providerStates: { openai: 'exhausted', anthropic: 'ok' } });
+  const write = buildWriteMock();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: () => readFileSync(TEMPLATE_PATH, 'utf8'),
+  });
+  assert.equal(result.dispatched, true);
+  const dispatchArgs = exec.dispatchCall().args;
+  assert.equal(dispatchArgs[dispatchArgs.indexOf('--worker-class') + 1], 'hammer');
+  assert.equal(exec.fleetCall(), undefined, 'no fleet quota query when fallback is disabled');
+});

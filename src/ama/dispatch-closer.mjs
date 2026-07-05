@@ -57,6 +57,7 @@ import {
   updateAmaCloserLease,
 } from './closer-lease.mjs';
 import { isEligibleForAmaClosure } from './eligibility.mjs';
+import { resolveCloserDispatchHarness } from './harness-fallback.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -455,6 +456,65 @@ function logAmaCloserDispatchEvent(logger, event, fields = {}) {
     ? logger.info.bind(logger)
     : console.log.bind(console);
   sink(JSON.stringify({ event, ...fields }));
+}
+
+// Best-effort operator alert that the closer/hammer fell back to another harness
+// because its configured provider is quota-grounded. The structured
+// `ama_closer.harness_fallback` audit log is the durable record; this is the
+// human-facing ping. Fail OPEN: a down alert transport (missing ALERT_TO, HTTP
+// error, …) must never block the merge the fallback exists to enable.
+async function emitHarnessFallbackAlert({
+  deliverAlertImpl,
+  repo,
+  prNumber,
+  harness,
+  logger = console,
+  env = process.env,
+}) {
+  let deliver = deliverAlertImpl;
+  if (deliver === null || deliver === undefined) {
+    try {
+      ({ deliverAlert: deliver } = await import('../alert-delivery.mjs'));
+    } catch (err) {
+      logger?.warn?.(JSON.stringify({
+        event: 'ama_closer.harness_fallback_alert_skipped',
+        repo,
+        prNumber: prNumber == null ? null : Number(prNumber),
+        reason: 'alert-transport-unavailable',
+        error: String(err?.message || err),
+      }));
+      return { delivered: false, reason: 'alert-transport-unavailable' };
+    }
+  }
+  const text =
+    `⚠️ AMA closer harness fallback: ${repo}#${prNumber} — provider ${harness.provider} `
+    + `is quota-grounded (${harness.primaryState}); dispatching the closer on `
+    + `${harness.to} instead of ${harness.from}. Auto-reverts when ${harness.provider} recovers.`;
+  try {
+    await deliver(text, {
+      event: 'ama_closer.harness_fallback',
+      payload: {
+        repo,
+        prNumber: prNumber == null ? null : Number(prNumber),
+        provider: harness.provider,
+        from: harness.from,
+        to: harness.to,
+        primaryState: harness.primaryState,
+        fallbackProvider: harness.fallbackProvider || null,
+      },
+      env,
+    });
+    return { delivered: true };
+  } catch (err) {
+    logger?.warn?.(JSON.stringify({
+      event: 'ama_closer.harness_fallback_alert_failed',
+      repo,
+      prNumber: prNumber == null ? null : Number(prNumber),
+      reason: 'alert-delivery-failed',
+      error: String(err?.message || err),
+    }));
+    return { delivered: false, reason: 'alert-delivery-failed', error: String(err?.message || err) };
+  }
 }
 
 function resolveMergeClassDispatchRoute({
@@ -1221,6 +1281,8 @@ export async function maybeDispatchAmaCloser({
   writeFileImpl = null,
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
+  resolveCloserDispatchHarnessImpl = resolveCloserDispatchHarness,
+  deliverAlertImpl = null,
   logger = console,
 }) {
   // The master gate. With no operator config, this is `false` per
@@ -1702,6 +1764,50 @@ export async function maybeDispatchAmaCloser({
   const priorRetryCount = existingRecordIsReclaimableInterruption
     ? Math.max(0, Number(existingRecord?.retryCount || 1) - 1)
     : Number(existingRecord?.retryCount || 0);
+
+  // HHR harness-fallback: resolve the PHYSICAL harness the closer runs on. The
+  // LOGICAL `workerClass` above still drives the prompt (terminal remediation),
+  // trailers, and merge-under-lease behavior; only `--worker-class` swaps to an
+  // available harness when the configured harness's provider is quota-grounded
+  // (`hq fleet quota status`). This is placed after every early-return gate so
+  // the fleet-quota read + audit only run when we are committed to a launch. It
+  // auto-reverts to the primary the moment the provider recovers to `ok`.
+  let dispatchWorkerClass = workerClass;
+  let harnessFallback = null;
+  try {
+    harnessFallback = await resolveCloserDispatchHarnessImpl({
+      workerClass,
+      fallbackWorkerClasses: Array.isArray(cfg?.workerClassFallback) ? cfg.workerClassFallback : [],
+      hqPath,
+      execFileImpl,
+      env: process.env,
+    });
+  } catch (err) {
+    // Fail-open: a resolver fault must never block the merge. Dispatch on the
+    // configured primary exactly as the pre-HHR path did.
+    harnessFallback = { workerClass, fellBack: false, reason: 'harness-fallback-resolver-error', error: String(err?.message || err) };
+  }
+  if (harnessFallback?.fellBack === true && harnessFallback.workerClass) {
+    dispatchWorkerClass = harnessFallback.workerClass;
+    logAmaCloserDispatchEvent(logger, 'ama_closer.harness_fallback', {
+      repo,
+      prNumber,
+      provider: harnessFallback.provider,
+      from: harnessFallback.from,
+      to: harnessFallback.to,
+      primaryState: harnessFallback.primaryState,
+      fallbackProvider: harnessFallback.fallbackProvider || null,
+    });
+    await emitHarnessFallbackAlert({
+      deliverAlertImpl,
+      repo,
+      prNumber,
+      harness: harnessFallback,
+      logger,
+      env: process.env,
+    });
+  }
+
   // AOM-04: the orchestration switch is a deliberate no-op for merge-class
   // dispatch. Native and agentos both stay on `hq dispatch` because no bare
   // merge orchestration exists to fall back to.
@@ -1727,6 +1833,7 @@ export async function maybeDispatchAmaCloser({
     targetRemediationSha,
     dispatchReason,
     workerClass,
+    dispatchWorkerClass,
     promptPath,
     promptDir,
     hqRoot,
@@ -1794,7 +1901,9 @@ export async function maybeDispatchAmaCloser({
   // src/follow-up-merge-agent.mjs around line 3866). Differences:
   //
   //   - `--worker-class` reads from cfg (default `hammer`); merge-agent
-  //     uses the `merge-agent` resolver.
+  //     uses the `merge-agent` resolver. HHR may swap the PHYSICAL harness
+  //     (`dispatchWorkerClass`) to a fallback when the configured provider is
+  //     quota-grounded; the logical `workerClass` still drives the prompt/audit.
   //   - `--task-kind merge` matches merge-agent.
   //   - `--completion-shape decision-only` because the closer worker
   //     writes the audit JSON artifact; it does NOT open a PR. This
@@ -1806,7 +1915,7 @@ export async function maybeDispatchAmaCloser({
   const repoBasename = repo.split('/')[1] || repo;
   const args = [
     'dispatch',
-    '--worker-class', workerClass,
+    '--worker-class', dispatchWorkerClass,
     '--task-kind', 'merge',
     '--completion-shape', 'decision-only',
     '--project', hqProject,
@@ -1891,6 +2000,7 @@ export async function maybeDispatchAmaCloser({
           targetRemediationSha,
           dispatchReason,
           workerClass,
+          dispatchWorkerClass,
           promptPath,
           promptDir,
           hqRoot,
@@ -1965,6 +2075,7 @@ export async function maybeDispatchAmaCloser({
         ),
         error: String(err?.stderr || err?.message || err),
         workerClass,
+        ...(dispatchWorkerClass !== workerClass ? { dispatchWorkerClass } : {}),
         dispatchId: parsedFailure.dispatchId || null,
         launchRequestId: parsedFailure.launchRequestId || null,
         promptPath,
@@ -1985,6 +2096,7 @@ export async function maybeDispatchAmaCloser({
     targetRemediationSha,
     dispatchReason,
     workerClass,
+    dispatchWorkerClass,
     promptPath,
     promptDir,
     hqRoot,
@@ -2020,6 +2132,18 @@ export async function maybeDispatchAmaCloser({
   return {
     dispatched: true,
     workerClass,
+    ...(dispatchWorkerClass !== workerClass ? { dispatchWorkerClass } : {}),
+    ...(harnessFallback?.fellBack === true
+      ? {
+          harnessFallback: {
+            provider: harnessFallback.provider,
+            from: harnessFallback.from,
+            to: harnessFallback.to,
+            primaryState: harnessFallback.primaryState,
+            fallbackProvider: harnessFallback.fallbackProvider || null,
+          },
+        }
+      : {}),
     dispatchId: parsed.dispatchId || parsed.launchRequestId || null,
     launchRequestId: parsed.launchRequestId || null,
     promptPath,

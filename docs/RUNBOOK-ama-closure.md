@@ -89,6 +89,7 @@ dispatcher debugging), see
        merge_authority:
          enabled: true
          worker_class: hammer    # default; operators may pin codex, claude-code, or gemini
+         # worker_class_fallback: [claude-code]  # HHR harness-fallback (default-on; see §2a)
          merge_method: squash    # or merge — never rebase (SPEC §4.4)
          strict_non_blocking_remediation: true  # default; require known-zero non-blocking findings for direct close
          eligibility:
@@ -115,6 +116,48 @@ dispatcher debugging), see
    become AMA single-key eligible only if the concrete class is also present in
    `risk_classes`; final-hammer review-cycle exhaustion does not waive a
    missing high/critical allowlist entry.
+
+### 2a. HHR harness-fallback (codex-capped hammer → available harness)
+
+The default closer `worker_class: hammer` runs on the **codex** (OpenAI OAuth)
+harness. When the codex OAuth quota is grounded (LAC-1463: the re-hammer loop
+burned the weekly cap), the hammer cannot spawn at all — `hq dispatch
+--worker-class hammer` provisions a worker that dies on the cap, so settled PRs
+never close even though hammer-merges-under-its-own-lease (MSM-01) is deployed.
+
+`worker_class_fallback` protects this path automatically. At each closer launch
+the dispatcher reads the HHR fleet-quota provider-state
+(`hq fleet quota status --json`, the same authoritative classifier the
+reviewer/remediator quota-hold path uses). If the configured `worker_class`'s
+provider is **authoritatively grounded** (`exhausted`/`suspended` — never a
+`degraded`/`unknown` guess), it dispatches the closer on the first
+`worker_class_fallback` entry whose provider is *not* also grounded, preserving
+the closer's terminal-remediation + merge-under-lease behavior (only the
+physical `--worker-class` harness changes; the prompt, trailers, and audit
+provenance still key off the configured logical class). It emits a loud
+`ama_closer.harness_fallback` audit log + operator alert with `provider`,
+`from`, and `to`.
+
+- **Auto-revert:** the resolution is stateless and re-runs every tick. The
+  moment codex recovers to `ok`, the next close returns to the configured
+  primary — no manual flip. This **replaces** the manual
+  `roles.adversarial.merge_authority.worker_class: claude-code` config.local.yaml
+  hot-patch (which was static and never reverted).
+- **Default:** `[claude-code]`, applied by the code-level schema default — the
+  protection is **on automatically with no config edit**. The order is honored
+  left-to-right; a fallback whose provider is also grounded is skipped.
+  Explicitly pinning `worker_class_fallback` in the shared `config.local.yaml`
+  (e.g. to reorder or to set `[]` to disable) additionally requires the
+  companion `platform/agent-os-config` Python schema key, which is a tracked
+  follow-up; until it lands, the shared Python loader would reject an explicit
+  `worker_class_fallback` key (fail-loud, never silent). The default protection
+  needs neither.
+- **Fail-open:** if `hq fleet quota status` is unreadable, or the alert
+  transport is down, the closer dispatches on the configured primary exactly as
+  before — a resolver/alert fault never blocks the merge.
+- **Scope:** this protects the AMA closer/hammer path (the one that stalls PR
+  closure fleet-wide). Extending the same harness-fallback to the dag-walker's
+  ticket dispatch is a documented follow-up, not built here.
 
 2. Bounce the dispatch daemon per the standard procedure:
 

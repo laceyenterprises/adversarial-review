@@ -3937,6 +3937,52 @@ test('AMA merge_authority accepts hammer as closer worker class in Node loader',
   }
 });
 
+test('AMA merge_authority worker_class_fallback defaults to [claude-code] (HHR)', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(
+      cfg.get('roles.adversarial.merge_authority.worker_class_fallback'),
+      ['claude-code'],
+    );
+    assert.deepEqual(cfg.getMergeAuthorityConfig().workerClassFallback, ['claude-code']);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('AMA merge_authority worker_class_fallback is operator-overridable and disablable (HHR)', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        adversarial:
+          merge_authority:
+            worker_class: hammer
+            worker_class_fallback: [gemini, claude-code]
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.getMergeAuthorityConfig().workerClassFallback, ['gemini', 'claude-code']);
+
+    const off = join(tmp, 'off.yaml');
+    writeFile(off, `
+      version: 1
+      roles:
+        adversarial:
+          merge_authority:
+            worker_class_fallback: []
+    `);
+    const offCfg = loadConfig({ topPath: off, env: {} });
+    assert.deepEqual(offCfg.getMergeAuthorityConfig().workerClassFallback, []);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('AMA merge_authority accepts gemini as closer worker class in Node loader', () => {
   // GMW-04: gemini is a selectable AMA closer harness.
   const tmp = freshTmp();

@@ -2749,13 +2749,6 @@ function joinPatchLines(headerLines, bodyLines) {
   return `${headerLines.join('\n')}\n${bodyLines.join('\n')}`;
 }
 
-function patchChunkBodyLines(bodyLines, activeHunkLine) {
-  if (!activeHunkLine || bodyLines.length === 0 || /^@@\s/.test(bodyLines[0])) {
-    return bodyLines;
-  }
-  return [activeHunkLine, ...bodyLines];
-}
-
 function splitOversizedPatchByLines(patch, {
   extraContext,
   promptStage,
@@ -2773,43 +2766,62 @@ function splitOversizedPatchByLines(patch, {
   const headerBytes = agyPromptBytes(headerText);
   const headerBodySeparatorBytes = headerLines.length > 0 ? 1 : 0;
   let currentLines = [];
+  let currentBodyBytes = 0;
   let activeHunkLine = null;
+  let activeHunkBytes = 0;
+  const promptBytesForBody = (bodyBytes) => promptOverheadBytes
+    + headerBytes
+    + (headerLines.length > 0 && bodyBytes > 0 ? headerBodySeparatorBytes : 0)
+    + bodyBytes;
+  const startBodyWithLine = (line, lineBytes) => {
+    if (/^@@\s/.test(line)) return { lines: [line], bytes: lineBytes };
+    if (activeHunkLine) {
+      return {
+        lines: [activeHunkLine, line],
+        bytes: activeHunkBytes + 1 + lineBytes,
+      };
+    }
+    return { lines: [line], bytes: lineBytes };
+  };
   for (const line of bodyLines) {
-    const lineIsHunkHeader = /^@@\s/.test(line);
-    const candidateLines = [...currentLines, line];
-    const candidateActiveHunkLine = lineIsHunkHeader && currentLines.length === 0 ? line : activeHunkLine;
-    const candidateBodyLines = patchChunkBodyLines(candidateLines, candidateActiveHunkLine);
-    const candidateBodyBytes = agyPromptBytes(candidateBodyLines.join('\n'));
-    const candidatePromptBytes = promptOverheadBytes
-      + headerBytes
-      + (headerLines.length > 0 ? headerBodySeparatorBytes : 0)
-      + candidateBodyBytes;
+    const lineBytes = agyPromptBytes(line);
+    if (/^@@\s/.test(line)) {
+      activeHunkLine = line;
+      activeHunkBytes = lineBytes;
+    }
+    const start = currentLines.length === 0 ? startBodyWithLine(line, lineBytes) : null;
+    const candidateBodyBytes = start
+      ? start.bytes
+      : currentBodyBytes + 1 + lineBytes;
+    const candidatePromptBytes = promptBytesForBody(candidateBodyBytes);
     if (candidatePromptBytes <= maxBytes) {
-      currentLines.push(line);
-      if (lineIsHunkHeader) activeHunkLine = line;
+      if (start) {
+        currentLines = start.lines;
+      } else {
+        currentLines.push(line);
+      }
+      currentBodyBytes = candidateBodyBytes;
       continue;
     }
     if (currentLines.length === 0) {
       return { ok: false, reason: 'single-line-over-budget' };
     }
-    const pushed = pushAgyChunk(chunks, joinPatchLines(
-      headerLines,
-      patchChunkBodyLines(currentLines, activeHunkLine),
-    ), {
+    const pushed = pushAgyChunk(chunks, joinPatchLines(headerLines, currentLines), {
       extraContext,
       promptStage,
       maxBytes,
       maxChunks,
     });
     if (!pushed.ok) return pushed;
-    currentLines = [line];
-    if (lineIsHunkHeader) activeHunkLine = line;
+    const next = startBodyWithLine(line, lineBytes);
+    if (promptBytesForBody(next.bytes) > maxBytes) {
+      return { ok: false, reason: 'single-line-over-budget' };
+    }
+    currentLines = next.lines;
+    currentBodyBytes = next.bytes;
   }
   if (currentLines.length > 0) {
-    const pushed = pushAgyChunk(chunks, joinPatchLines(
-      headerLines,
-      patchChunkBodyLines(currentLines, activeHunkLine),
-    ), {
+    const pushed = pushAgyChunk(chunks, joinPatchLines(headerLines, currentLines), {
       extraContext,
       promptStage,
       maxBytes,
@@ -2887,7 +2899,11 @@ function extractMarkdownIssueList(markdown, heading) {
     if (current.length > 0) current.push(line);
   }
   if (current.length > 0) issues.push(current.join('\n').trimEnd());
-  return issues.filter((issue) => !/^[-*+]\s+none\.?\s*$/i.test(issue.trim()));
+  const filtered = issues.filter((issue) => !/^[-*+]\s+none\.?\s*$/i.test(issue.trim()));
+  if (filtered.length === 0 && body.trim()) {
+    return [`- ${body.trim().replace(/\n/g, '\n  ')}`];
+  }
+  return filtered;
 }
 
 function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes = null, maxBytes = null } = {}) {

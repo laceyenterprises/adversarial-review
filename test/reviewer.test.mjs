@@ -2140,7 +2140,7 @@ test('agy chunk fallback preserves file headers on line-split chunks', () => {
   }
 });
 
-test('agy chunk fallback carries the active hunk header on split chunks', () => {
+test('agy chunk fallback tracks the active hunk header for multi-hunk line splits', () => {
   const header = [
     'diff --git a/big.txt b/big.txt',
     'index 1111111..2222222 100644',
@@ -2148,16 +2148,12 @@ test('agy chunk fallback carries the active hunk header on split chunks', () => 
     '+++ b/big.txt',
   ];
   const firstHunk = [
-    '@@ -10,4 +10,4 @@',
-    '+early 0 ' + 'x'.repeat(120),
-    '+early 1 ' + 'x'.repeat(120),
-    '+early 2 ' + 'x'.repeat(120),
+    '@@ -1,8 +1,8 @@',
+    ...Array.from({ length: 8 }, (_, index) => `+early ${index} ${'x'.repeat(90)}`),
   ];
   const secondHunk = [
-    '@@ -500,4 +500,4 @@',
-    '+later 0 ' + 'y'.repeat(120),
-    '+later 1 ' + 'y'.repeat(120),
-    '+later 2 ' + 'y'.repeat(120),
+    '@@ -500,8 +500,8 @@',
+    ...Array.from({ length: 8 }, (_, index) => `+later ${index} ${'y'.repeat(90)}`),
   ];
   const diff = [...header, ...firstHunk, ...secondHunk].join('\n');
   const promptOverheadBytes = agyPromptBytes(buildPromptForReviewerModel('gemini', '', '', {
@@ -2167,10 +2163,7 @@ test('agy chunk fallback carries the active hunk header on split chunks', () => 
   const maxBytes = promptOverheadBytes
     + agyPromptBytes(header.join('\n'))
     + 1
-    + agyPromptBytes([
-      '@@ -500,4 +500,4 @@',
-      '+later 0 ' + 'y'.repeat(120),
-    ].join('\n'));
+    + agyPromptBytes(secondHunk.slice(0, 3).join('\n'));
 
   const split = splitDiffForAgyChunks(diff, {
     extraContext: '',
@@ -2180,11 +2173,36 @@ test('agy chunk fallback carries the active hunk header on split chunks', () => 
   });
 
   assert.equal(split.ok, true);
-  assert.ok(split.chunks.length > 2);
-  const laterChunk = split.chunks.find((chunk) => chunk.diff.includes('+later 2'));
-  assert.ok(laterChunk);
-  assert.match(laterChunk.diff, /\n@@ -500,4 \+500,4 @@\n\+later 2 /);
-  assert.doesNotMatch(laterChunk.diff, /\n@@ -10,4 \+10,4 @@\n\+later 2 /);
+  const laterChunk = split.chunks.find((chunk) => chunk.diff.includes('+later 4 '));
+  assert.ok(laterChunk, 'expected a split chunk from the second hunk');
+  assert.match(laterChunk.diff, /^diff --git a\/big\.txt b\/big\.txt\nindex 1111111\.\.2222222 100644\n--- a\/big\.txt\n\+\+\+ b\/big\.txt\n@@ -500,8 \+500,8 @@/);
+  assert.doesNotMatch(laterChunk.diff, /@@ -1,8 \+1,8 @@/);
+});
+
+test('agy chunk fallback preserves active hunk context for metadata-less diffs', () => {
+  const diff = [
+    '@@ -1,8 +1,8 @@',
+    ...Array.from({ length: 8 }, (_, index) => `+line ${index} ${'z'.repeat(100)}`),
+  ].join('\n');
+  const promptOverheadBytes = agyPromptBytes(buildPromptForReviewerModel('gemini', '', '', {
+    promptStage: 'first',
+    runtime: 'antigravity',
+  }));
+  const maxBytes = promptOverheadBytes + agyPromptBytes(diff.split('\n').slice(0, 3).join('\n'));
+
+  const split = splitDiffForAgyChunks(diff, {
+    extraContext: '',
+    promptStage: 'first',
+    maxBytes,
+    maxChunks: 20,
+  });
+
+  assert.equal(split.ok, true);
+  assert.ok(split.chunks.length > 1);
+  for (const chunk of split.chunks) {
+    assert.match(chunk.diff, /^@@ -1,8 \+1,8 @@/);
+    assert.ok(chunk.promptBytes <= maxBytes);
+  }
 });
 
 test('agy chunking preserves leading and trailing diff whitespace', () => {
@@ -2217,7 +2235,7 @@ test('mergeChunkedAgyReviews merges only issue bullets from child review section
         '- Nit from first chunk.',
         '',
         '## Suggested fixes',
-        '- Patch first chunk.',
+        '- Fix the split.',
         '',
         '## Verdict',
         'Request changes',
@@ -2235,7 +2253,7 @@ test('mergeChunkedAgyReviews merges only issue bullets from child review section
         '- Nit from second chunk.',
         '',
         '## Suggested fixes',
-        '- Patch second chunk.',
+        '- Add a regression test.',
         '',
         '## Verdict',
         'Comment only',
@@ -2245,7 +2263,7 @@ test('mergeChunkedAgyReviews merges only issue bullets from child review section
 
   assert.match(merged, /## Blocking issues\n- \*\*Bad split\*\*\n  - Detail from first chunk\./);
   assert.match(merged, /## Non-blocking issues\n- Nit from first chunk\.\n- Nit from second chunk\./);
-  assert.match(merged, /## Suggested fixes\n- Patch first chunk\.\n- Patch second chunk\./);
+  assert.match(merged, /## Suggested fixes\n- Fix the split\.\n- Add a regression test\./);
   assert.match(merged, /## Verdict\nRequest changes/);
   assert.doesNotMatch(merged, /First summary must not be nested/);
   assert.doesNotMatch(merged, /Second summary must not be nested/);
@@ -2257,16 +2275,16 @@ test('mergeChunkedAgyReviews derives verdict from merged blocking issues', () =>
     {
       reviewText: [
         '## Summary',
-        'Child verdict must not drive the merged verdict.',
+        'Child had a stale verdict.',
         '',
         '## Blocking issues',
         '- None.',
         '',
         '## Non-blocking issues',
-        '- Nit.',
+        '- Worth noting.',
         '',
         '## Suggested fixes',
-        '- None.',
+        '- Optional cleanup.',
         '',
         '## Verdict',
         'Request changes',
@@ -2275,9 +2293,37 @@ test('mergeChunkedAgyReviews derives verdict from merged blocking issues', () =>
   ]);
 
   assert.match(merged, /## Blocking issues\n- None\./);
-  assert.match(merged, /## Non-blocking issues\n- Nit\./);
-  assert.match(merged, /## Suggested fixes\n- None\./);
+  assert.match(merged, /## Non-blocking issues\n- Worth noting\./);
+  assert.match(merged, /## Suggested fixes\n- Optional cleanup\./);
   assert.match(merged, /## Verdict\nComment only/);
+});
+
+test('mergeChunkedAgyReviews preserves non-bulleted issue section text as a synthetic bullet', () => {
+  const merged = mergeChunkedAgyReviews([
+    {
+      reviewText: [
+        '## Summary',
+        'Plain prose child.',
+        '',
+        '## Blocking issues',
+        'This blocking issue lost its bullet formatting.',
+        'It still needs to survive merging.',
+        '',
+        '## Non-blocking issues',
+        '- None.',
+        '',
+        '## Suggested fixes',
+        'Use a fallback bullet.',
+        '',
+        '## Verdict',
+        'Request changes',
+      ].join('\n'),
+    },
+  ]);
+
+  assert.match(merged, /## Blocking issues\n- This blocking issue lost its bullet formatting\.\n  It still needs to survive merging\./);
+  assert.match(merged, /## Suggested fixes\n- Use a fallback bullet\./);
+  assert.match(merged, /## Verdict\nRequest changes/);
 });
 
 test('oversized agy alert retries transient curl failures before succeeding', async () => {

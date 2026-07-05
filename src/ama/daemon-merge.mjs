@@ -32,14 +32,16 @@
  *
  * Retry semantics are shared with the MSM-01 hammer merge loop
  * (`templates/hammer-prompt.md`): transient `gh`/GitHub failures (transport
- * reset, TLS handshake timeout, DNS/socket timeout, HTTP 5xx, rate-limit /
- * secondary-rate-limit) retry with bounded exponential backoff + jitter under
- * the same lease, and the live head is re-read before every attempt.
- * Non-transient failures (head mismatch, merge rejection, permission/auth
- * failure, branch-protection/ruleset failure, already-merged/closed,
- * unmergeable state, required-check failure) fail closed immediately with no
- * retry. Exhausted retries write a non-merged `daemon-merge` audit and release
- * the lease. No path here spawns a hammer.
+ * reset, TLS handshake timeout, DNS/socket timeout, OS-level spawn/resource
+ * errors, HTTP 5xx, rate-limit / secondary-rate-limit) retry with bounded
+ * exponential backoff + jitter under the same lease, and the live head is
+ * re-read before every attempt. A fresh read with no candidate head is treated
+ * like a transient gate-read failure; the daemon never substitutes the earlier
+ * validated head for that missing live data. Non-transient failures (head
+ * mismatch, merge rejection, permission/auth failure, branch-protection/ruleset
+ * failure, already-merged/closed, unmergeable state, required-check failure)
+ * fail closed immediately with no retry. Exhausted retries write a non-merged
+ * `daemon-merge` audit and release the lease. No path here spawns a hammer.
  *
  * @module ama/daemon-merge
  */
@@ -162,7 +164,7 @@ export function classifyDaemonMergeError(text) {
   }
   // ham_merge_error_retryable
   if (
-    /connection reset|ECONNRESET|TLS handshake timeout|timeout|timed out|ETIMEDOUT|DNS|ENOTFOUND|EAI_AGAIN|socket|HTTP 5[0-9][0-9]|502|503|504|rate limit|secondary rate limit|Retry-After|temporar(y|ily)|try again|service unavailable|gateway/i.test(
+    /connection reset|ECONNRESET|TLS handshake timeout|timeout|timed out|ETIMEDOUT|DNS|ENOTFOUND|EAI_AGAIN|EIO|Input\/output error|EAGAIN|resource temporarily unavailable|socket|HTTP 5[0-9][0-9]|502|503|504|rate limit|secondary rate limit|Retry-After|temporar(y|ily)|try again|service unavailable|gateway/i.test(
       haystack,
     )
   ) {
@@ -201,7 +203,7 @@ function normalizeGateState(live = {}) {
         : live.requiredChecks,
     mergeable: live.mergeable,
     mergeStateStatus: live.mergeStateStatus,
-    prState: String(live.prState ?? live.state ?? '').trim(),
+    prState: String(live.prState ?? live.state ?? '').trim().toUpperCase(),
     merged: Boolean(live.merged) || String(live.prState ?? live.state ?? '').toUpperCase() === 'MERGED',
   };
 }
@@ -370,6 +372,7 @@ export async function attemptDaemonCleanMerge({
     }
   };
 
+  try {
   // ── Bootstrap the daemon-merge audit doc (in_progress). If we can't even
   // record intent, don't merge — release and defer. ─────────────────────────
   const auditKeys = { hqRoot, repo, prNumber, headSha: validatedHead };
@@ -392,7 +395,6 @@ export async function attemptDaemonCleanMerge({
     logger?.warn?.(
       `[daemon-merge] audit bootstrap failed for ${repo}#${prNumber}@${validatedHead}; not merging: ${err?.message || err}`,
     );
-    releaseLease();
     return {
       disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
       reason: 'audit-init-failed',
@@ -428,12 +430,20 @@ export async function attemptDaemonCleanMerge({
     }
 
     // Already merged at the validated head → success (idempotent re-entry).
-    if (live.merged && (live.candidateHead === validatedHead || live.candidateHead === '')) {
+    if (live.merged && live.candidateHead === validatedHead) {
       merged = true;
       break;
     }
+    if (!live.candidateHead) {
+      if (attempts >= retryCap) {
+        terminal = { reason: 'gate-read-failed', permanent: false };
+        break;
+      }
+      await sleep(daemonMergeBackoffMs(attempts, { baseMs: backoffBaseMs, rng }));
+      continue;
+    }
     // Live head moved off the validated head → permanent for this head.
-    if (live.candidateHead && live.candidateHead !== validatedHead) {
+    if (live.candidateHead !== validatedHead) {
       terminal = { reason: 'stale-head', permanent: true };
       break;
     }
@@ -446,7 +456,7 @@ export async function attemptDaemonCleanMerge({
       mergeable: live.mergeable,
       mergeStateStatus: live.mergeStateStatus,
       prState: live.prState,
-      candidateHead: live.candidateHead || validatedHead,
+      candidateHead: live.candidateHead,
       validatedHead,
     });
     if (!elig.eligible) {
@@ -495,7 +505,7 @@ export async function attemptDaemonCleanMerge({
     terminal = { reason: 'merge-retry-budget-exhausted', permanent: false };
   }
 
-  // ── Finalize: append the terminal audit, then ALWAYS release the lease. ────
+  // ── Finalize: append the terminal audit before the outer lease release. ────
   let auditWritten = false;
   try {
     if (merged) {
@@ -534,8 +544,6 @@ export async function attemptDaemonCleanMerge({
     logger?.warn?.(
       `[daemon-merge] terminal audit append failed for ${repo}#${prNumber}@${validatedHead}: ${err?.message || err}`,
     );
-  } finally {
-    releaseLease();
   }
 
   if (merged) {
@@ -564,6 +572,9 @@ export async function attemptDaemonCleanMerge({
     auditWritten,
     ...(terminal.reasons ? { reasons: terminal.reasons } : {}),
   };
+  } finally {
+    releaseLease();
+  }
 }
 
 // Internal helpers exposed for unit tests.

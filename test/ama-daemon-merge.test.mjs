@@ -173,7 +173,16 @@ test('classifyDaemonMergeError mirrors the hammer classifier order', () => {
   assert.equal(classifyDaemonMergeError('connection reset by peer'), 'retryable');
   assert.equal(classifyDaemonMergeError('HTTP 503 service unavailable'), 'retryable');
   assert.equal(classifyDaemonMergeError('secondary rate limit; Retry-After: 30'), 'retryable');
+  assert.equal(classifyDaemonMergeError('spawn gh EIO'), 'retryable');
+  assert.equal(classifyDaemonMergeError('Input/output error'), 'retryable');
+  assert.equal(classifyDaemonMergeError('spawn gh EAGAIN'), 'retryable');
+  assert.equal(classifyDaemonMergeError('resource temporarily unavailable'), 'retryable');
   assert.equal(classifyDaemonMergeError('some brand new error text'), 'unclassified');
+});
+
+test('normalizeGateState uppercases PR state', () => {
+  assert.equal(__testables__.normalizeGateState({ prState: ' open ' }).prState, 'OPEN');
+  assert.equal(__testables__.normalizeGateState({ state: 'closed' }).prState, 'CLOSED');
 });
 
 test('daemonMergeBackoffMs: exponential base with deterministic jitter', () => {
@@ -266,6 +275,40 @@ test('head moves off validated head between pre-lease gate and merge loop → fa
   assert.equal(result.reason, 'stale-head');
   assert.equal(h.calls.merge, 0, 'never attempted merge on a moved head');
   assert.equal(h.calls.release, 1);
+});
+
+test('missing fresh candidate head is treated as transient gate-read failure', async () => {
+  const h = makeHarness({ liveGateSequence: [greenGate({ candidateHead: '' })] });
+  const result = await attemptDaemonCleanMerge(baseArgs(h, { retryCap: 1 }));
+
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+  assert.equal(result.reason, 'gate-read-failed');
+  assert.equal(result.attempts, 1);
+  assert.equal(h.calls.merge, 0, 'never merges without a fresh head');
+  assert.equal(h.calls.release, 1);
+  const doc = h.auditStore.get('o/r#7@' + HEAD);
+  const terminal = doc.attempts[doc.attempts.length - 1];
+  assert.equal(terminal.reason, 'gate-read-failed');
+  assert.equal(terminal.permanent, false);
+});
+
+test('unexpected exception after lease acquisition still releases lease', async () => {
+  const h = makeHarness({ liveGateSequence: [greenGate()] });
+  await assert.rejects(
+    () => attemptDaemonCleanMerge(baseArgs(h, {
+      evaluateEligibilityImpl: (state) => {
+        if (state.candidateHead === HEAD && h.calls.fetchLiveGate > 0) {
+          throw new TypeError('malformed live gate');
+        }
+        return { eligible: true, reasons: [] };
+      },
+    })),
+    /malformed live gate/,
+  );
+
+  assert.equal(h.calls.acquire, 1);
+  assert.equal(h.calls.release, 1, 'lease released by outer finally');
+  assert.equal(h.calls.merge, 0);
 });
 
 test('retryable failures exhaust the bounded budget → fail closed (non-permanent), one audit', async () => {

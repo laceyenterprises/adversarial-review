@@ -1117,6 +1117,7 @@ export function substituteTemplate(body, substitutions) {
  * @param {string} args.repo            — owner/name
  * @param {number} args.prNumber
  * @param {string} args.reviewedSha
+ * @param {string=} args.targetRemediationSha
  * @param {string} args.riskClass
  * @param {string} args.mergeMethod     — 'squash' | 'merge'
  * @param {string} args.requiredGateContext
@@ -1136,6 +1137,7 @@ export function composeCloserPrompt({
   repo,
   prNumber,
   reviewedSha,
+  targetRemediationSha = reviewedSha,
   riskClass,
   mergeMethod,
   requiredGateContext,
@@ -1155,6 +1157,7 @@ export function composeCloserPrompt({
     REPO: repo,
     PR_NUMBER: prNumber,
     REVIEWED_SHA: reviewedSha,
+    TARGET_REMEDIATION_SHA: targetRemediationSha || reviewedSha,
     RISK_CLASS: riskClass,
     MERGE_METHOD: mergeMethod,
     REQUIRED_GATE_CONTEXT: requiredGateContext,
@@ -1344,6 +1347,7 @@ export async function maybeDispatchAmaCloser({
     repo,
     prNumber,
     reviewedSha,
+    targetRemediationSha,
     riskClass: dispatchContext.riskClass,
     mergeMethod,
     requiredGateContext: dispatchContext.requiredGateContext,

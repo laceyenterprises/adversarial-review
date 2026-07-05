@@ -28,6 +28,7 @@ evidence instead of failing on a path assumption.
 - **Repository:** acme/myrepo
 - **PR number:** 1234
 - **Reviewed head SHA:** `abc12345abc12345abc12345abc12345abc12345`
+- **Target remediation SHA:** `abc12345abc12345abc12345abc12345abc12345`
 - **Risk class:** `low`
 - **Merge method:** `squash` (squash/merge remains the canonical landed commit; HAM-03 may update/rebase the PR branch before the final merge)
 <!-- Do NOT print the raw agent-os/adversarial-gate value here as an inline

@@ -347,6 +347,7 @@ test('exhausted final hammer preserves reviewed SHA while recording current targ
 
   assert.equal(result.dispatched, true);
   assert.ok(write.captured.body.includes(reviewedHead), 'prompt must preserve the reviewed head');
+  assert.ok(write.captured.body.includes(currentHead), 'prompt must expose the live target head');
   const currentHeadPath = amaCloserDispatchFilePath(rootDir, {
     repo: dispatchContext.repo,
     prNumber: prMetadata.prNumber,
@@ -861,6 +862,7 @@ test('auto-hammer dispatches exhausted CONFLICTING stale-head PRs through hammer
   assert.notEqual(workerClassIndex, -1, 'hq dispatch args must include --worker-class');
   assert.equal(exec.calls[0].args[workerClassIndex + 1], 'hammer');
   assert.ok(write.captured.body.includes(reviewedHead), 'terminal hammer prompt must preserve the reviewed head');
+  assert.ok(write.captured.body.includes(currentHead), 'terminal hammer prompt must expose the live target head');
   const recordPath = amaCloserDispatchFilePath(rootDir, {
     repo: dispatchContext.repo,
     prNumber: prMetadata.prNumber,
@@ -923,6 +925,7 @@ test('auto-hammer still dispatches exhausted MERGEABLE stale-head PRs through ha
   assert.notEqual(workerClassIndex, -1, 'hq dispatch args must include --worker-class');
   assert.equal(exec.calls[0].args[workerClassIndex + 1], 'hammer');
   assert.ok(write.captured.body.includes(reviewedHead));
+  assert.ok(write.captured.body.includes(currentHead));
   const recordPath = amaCloserDispatchFilePath(rootDir, {
     repo: dispatchContext.repo,
     prNumber: prMetadata.prNumber,

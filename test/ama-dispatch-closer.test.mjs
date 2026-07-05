@@ -702,7 +702,7 @@ test('cfg.workerClass=hammer selects the terminal HAM mandate prompt when findin
   const headSha = 'abc12345abc12345abc12345abc12345abc12345';
   const readPaths = [];
   const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
-    cfg: { workerClass: 'hammer' },
+    cfg: { workerClass: 'hammer', mergeMethod: 'merge' },
     reviewState: {
       verdict: 'request-changes',
       reviewCycleExhausted: true,
@@ -748,9 +748,12 @@ test('cfg.workerClass=hammer selects the terminal HAM mandate prompt when findin
   assert.match(write.captured.body, /Every shell command you run must have an explicit wall-clock bound/);
   assert.match(write.captured.body, /do not fall back to broad host\s+scans/);
   assert.match(write.captured.body, /ham_terminal_remediation_validated/);
-  assert.match(write.captured.body, /before-daemon-gh-pr-merge/);
-  assert.match(write.captured.body, /AMA daemon validates the HAM evidence/);
-  assert.doesNotMatch(write.captured.body, /\ngh pr merge /);
+  assert.match(write.captured.body, /before-hammer-gh-pr-merge/);
+  assert.match(write.captured.body, /HAM_LOCAL_BATTERY_COMMAND="\$\{HAM_LOCAL_BATTERY_COMMAND:-npm test\}"/);
+  assert.match(write.captured.body, /fetchPullRequestRollup/);
+  assert.match(write.captured.body, /gh pr merge https:\/\/github\.com\/acme\/myrepo\/pull\/1234[\s\S]*--merge[\s\S]*--match-head-commit "\$POST_REMEDIATION_SHA"/);
+  assert.doesNotMatch(write.captured.body, /gh pr merge https:\/\/github\.com\/acme\/myrepo\/pull\/1234[\s\S]*--squash[\s\S]*--match-head-commit "\$POST_REMEDIATION_SHA"/);
+  assert.match(write.captured.body, /hammer owns the in-lease merge/);
   assert.match(write.captured.body, /failed, missing, stale, or\s+unchecked required checks/);
   assert.match(write.captured.body, /HAM-03 hard-blocker: rebase attempt cap exceeded/);
   assert.match(write.captured.body, /HAM_UPDATE_BRANCH_RETRY_CAP="\$\{HAM_UPDATE_BRANCH_RETRY_CAP:-3\}"/);
@@ -1488,7 +1491,7 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /Do not request another adversarial review round/);
   assert.match(prompt, /No follow-up PRs\/issues for the final findings/);
   assert.match(prompt, /ham_terminal_remediation_validated/);
-  assert.match(prompt, /Do not hand off to the AMA daemon unless all of these are true/);
+  assert.match(prompt, /Do not merge unless all of these are true/);
   assert.match(prompt, /HAM_REBASE_ATTEMPT_CAP="\$\{HAM_REBASE_ATTEMPT_CAP:-3\}"/);
   assert.match(prompt, /HAM_MERGE_LEASE_RELEASE_RETRY_CAP="\$\{HAM_MERGE_LEASE_RELEASE_RETRY_CAP:-3\}"/);
   assert.match(prompt, /ham_update_branch_conflict/);
@@ -1506,9 +1509,48 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /needs-revalidation-tool-failed/);
   assert.match(prompt, /needs-revalidation-output-invalid/);
   assert.match(prompt, /jq -er 'if \(\.needsRevalidation \| type\) == "boolean" then \.needsRevalidation else true end'/);
-  assert.match(prompt, /before-daemon-gh-pr-merge/);
-  assert.match(prompt, /AMA daemon validates the HAM evidence/);
-  assert.doesNotMatch(prompt, /\ngh pr merge /);
+  assert.match(prompt, /before-hammer-gh-pr-merge/);
+  assert.match(prompt, /HAM_LOCAL_BATTERY_COMMAND="\$\{HAM_LOCAL_BATTERY_COMMAND:-npm test\}"/);
+  assert.match(prompt, /ham_run_local_battery_with_timeout/);
+  assert.match(prompt, /use POSIX qw\(setsid\)/);
+  assert.match(prompt, /kill "TERM", -\$pid/);
+  assert.doesNotMatch(prompt, /perl -e 'alarm shift @ARGV; exec @ARGV'/);
+  assert.match(prompt, /fetchPullRequestRollup/);
+  assert.match(prompt, /statusCheckRollup/);
+  assert.match(prompt, /const mergeable = String\(rollup\.mergeable \|\| ''\)\.toUpperCase\(\) === 'MERGEABLE'/);
+  assert.match(prompt, /const state = String\(rollup\.state \|\| ''\)\.toUpperCase\(\)/);
+  assert.match(prompt, /ham_already_merged_validated_head/);
+  assert.match(prompt, /HAM_MERGE_TMP_PREFIX="\$\{TMPDIR:-\/tmp\}\/ham-1234-\$\{HAM_MERGE_LEASE_ID:-no-lease\}-\$\$"/);
+  assert.match(prompt, /HAM_MERGE_STDOUT=\$\(mktemp "\$\{HAM_MERGE_TMP_PREFIX\}\.gh-pr-merge\.stdout\.XXXXXX"\) \|\| exit 1/);
+  assert.doesNotMatch(prompt, /HAM_MERGE_STDOUT="\/tmp\/ham-gh-pr-merge\.stdout"/);
+  assert.match(prompt, /--argjson githubGate "\$\(\[ -s "\$HAM_GATE_JSON" \] && cat "\$HAM_GATE_JSON" \|\| printf '\{\}'\)"/);
+  assert.match(prompt, /--argjson preMergeEligible "\$\{HAM_PRE_MERGE_ELIGIBLE:-0\}"/);
+  assert.match(prompt, /preMergeEligible: \(\$preMergeEligible == 1\)/);
+  assert.match(prompt, /ham_refresh_github_gate_once\(\)/);
+  assert.match(prompt, /HAM GitHub gate read transient failure; retrying/);
+  assert.match(prompt, /HAM preflight: PR is already merged at validated head; proceeding to post-merge validation/);
+  assert.match(prompt, /ham_merge_error_retryable/);
+  assert.match(prompt, /ham_merge_error_already_merged/);
+  assert.match(prompt, /ham_merge_error_permanent/);
+  assert.match(prompt, /HAM_MERGE_RETRY_CAP="\$\{HAM_MERGE_RETRY_CAP:-4\}"/);
+  assert.match(prompt, /gh pr merge https:\/\/github\.com\/acme\/myrepo\/pull\/1234[\s\S]*--squash[\s\S]*--match-head-commit "\$POST_REMEDIATION_SHA"/);
+  assert.match(prompt, /PR is already merged at validated head; proceeding to post-merge validation/);
+  assert.match(prompt, /full local test battery failed; fix locally before merge/);
+  assert.match(prompt, /ham_append_terminal_audit failed-without-merge local-battery-red/);
+  assert.match(prompt, /live PR head moved off validated head; releasing lease without merge or re-dispatch/);
+  assert.match(prompt, /ham_append_terminal_audit superseded live-head-moved-before-merge/);
+  assert.match(prompt, /ham_append_terminal_audit failed-without-merge github-gate-not-green/);
+  assert.match(prompt, /HAM merge response says PR is already merged; proceeding to post-merge validation/);
+  assert.match(prompt, /permanent gh pr merge rejection; not retrying/);
+  assert.match(prompt, /merge transient failure; retrying/);
+  assert.match(prompt, /merge-retry-budget-exhausted/);
+  assert.match(prompt, /gh pr view https:\/\/github\.com\/acme\/myrepo\/pull\/1234 --json state,mergedAt,mergeCommit,headRefOid[\s\S]*2> "\$HAM_POST_MERGE_STDERR"/);
+  assert.match(prompt, /post-merge confirmation transient failure; retrying/);
+  assert.match(prompt, /merge-confirmation-read-failed/);
+  assert.match(prompt, /deferred merge-confirmation-read-failed-after-merge-accepted/);
+  assert.match(prompt, /\.mergeCommit\?\.oid \/\/ ""/);
+  assert.match(prompt, /ham_append_terminal_audit succeeded merged\n\s+HAM_MERGED_AUDIT_APPEND_EXIT=\$\?/);
+  assert.doesNotMatch(prompt, new RegExp("ham_merge_error_permanent\\(\\) \\{\\n  grep -Eiq '[^']*already merged"));
   assert.match(prompt, /merge-lease\.mjs release[\s\S]*--lease-id "\$HAM_MERGE_LEASE_ID"/);
   assert.match(prompt, /keeping EXIT trap armed/);
   assert.match(prompt, /do not continue while the lease is unconfirmed/);
@@ -1528,9 +1570,9 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /re-acquire before the next rebase\/merge attempt/);
   assert.match(prompt, /HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 70/);
   assert.match(prompt, /parked PR 1234/);
-  assert.match(prompt, /AMG-04 hard-blocker: no daemon handoff without holding the merge lease/);
-  assert.match(prompt, /No daemon handoff without holding the merge lease/);
-  assert.match(prompt, /No merged closeout comment from the hammer worker/);
+  assert.match(prompt, /AMG-04 hard-blocker: no hammer merge without holding the merge lease/);
+  assert.match(prompt, /No hammer merge without holding the merge lease/);
+  assert.match(prompt, /No daemon handoff/);
   assert.doesNotMatch(prompt, /trap ham_audit_cleanup_tmp_files EXIT/);
   assert.doesNotMatch(prompt, /ham_audit_cleanup_tmp_files\ntrap - EXIT/);
   assert.match(prompt, /HAM_AUDIT_COMMENT_POST_STDERR=\$\(mktemp "\$\{TMPDIR:-\/tmp\}\/ham-audit-comment-post\.XXXXXX"\) \|\| \{/);

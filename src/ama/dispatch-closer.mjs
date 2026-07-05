@@ -1243,7 +1243,7 @@ export async function maybeDispatchAmaCloser({
     // commits, writes the audit comment, then re-runs the eligibility predicate
     // with --ham-terminal-remediation evidence, which is validated strictly and
     // fails closed if the findings/checks were not actually addressed.
-    const workerClassForMiss = String(cfg.workerClass || 'hammer');
+    const workerClassForMiss = String(cfg?.workerClass || 'hammer');
     const reviewCycleExhausted =
       reviewState?.reviewCycleExhausted === true ||
       verdict?.trace?.finalHammer?.active === true;
@@ -1264,13 +1264,22 @@ export async function maybeDispatchAmaCloser({
       `PR (reasons: ${(verdict.reasons || []).join(',')}) — hammer will remediate ` +
       `final findings/checks then re-validate the gate fail-closed`
     );
+    if (
+      reviewCycleExhausted &&
+      prMetadata?.headSha &&
+      reviewState?.headSha &&
+      prMetadata.headSha !== reviewState.headSha
+    ) {
+      dispatchContext.reviewedSha = prMetadata.headSha;
+      dispatchContext.dispatchRecordHeadSha = 'exhausted-final-hammer';
+    }
     // fall through to the dispatch below (hammer template, remediation mode)
     forceHammerWorkerClass = true;
   }
 
   // Compose the prompt body. Template loaded from disk via DI so
   // tests can pass a literal.
-  const workerClass = forceHammerWorkerClass ? 'hammer' : String(cfg.workerClass || 'hammer');
+  const workerClass = forceHammerWorkerClass ? 'hammer' : String(cfg?.workerClass || 'hammer');
   // SPEC §1.1.1: the HAM terminal-remediation prompt is reserved for closures
   // that actually have findings to remediate. With `hammer` now the default
   // worker class, gating purely on `workerClass === 'hammer'` would route every

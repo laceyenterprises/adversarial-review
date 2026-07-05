@@ -829,8 +829,6 @@ test('auto-hammer dispatches exhausted CONFLICTING stale-head PRs through hammer
     },
     dispatchContext: {
       rootDir,
-      reviewedSha: currentHead,
-      dispatchRecordHeadSha: 'exhausted-final-hammer',
       riskClass: 'medium',
       templatePath: null,
     },
@@ -861,7 +859,9 @@ test('auto-hammer dispatches exhausted CONFLICTING stale-head PRs through hammer
   assert.equal(result.dispatched, true);
   assert.equal(result.workerClass, 'hammer');
   assert.deepEqual(readPaths, [HAMMER_TEMPLATE_PATH]);
-  assert.equal(exec.calls[0].args[exec.calls[0].args.indexOf('--worker-class') + 1], 'hammer');
+  const workerClassIndex = exec.calls[0].args.indexOf('--worker-class');
+  assert.notEqual(workerClassIndex, -1, 'hq dispatch args must include --worker-class');
+  assert.equal(exec.calls[0].args[workerClassIndex + 1], 'hammer');
   assert.ok(write.captured.body.includes(currentHead), 'terminal hammer must be keyed to the current PR head');
   assert.ok(write.captured.body.includes('Closed-By: hammer (adversarial-pipe-mode)'));
 });
@@ -892,8 +892,6 @@ test('auto-hammer still dispatches exhausted MERGEABLE stale-head PRs through ha
     },
     dispatchContext: {
       rootDir,
-      reviewedSha: currentHead,
-      dispatchRecordHeadSha: 'exhausted-final-hammer',
       riskClass: 'medium',
       templatePath: null,
     },
@@ -912,7 +910,9 @@ test('auto-hammer still dispatches exhausted MERGEABLE stale-head PRs through ha
 
   assert.equal(result.dispatched, true);
   assert.equal(result.workerClass, 'hammer');
-  assert.equal(exec.calls[0].args[exec.calls[0].args.indexOf('--worker-class') + 1], 'hammer');
+  const workerClassIndex = exec.calls[0].args.indexOf('--worker-class');
+  assert.notEqual(workerClassIndex, -1, 'hq dispatch args must include --worker-class');
+  assert.equal(exec.calls[0].args[workerClassIndex + 1], 'hammer');
   assert.ok(write.captured.body.includes(currentHead));
 });
 

@@ -38,6 +38,7 @@ import {
 } from './adapters/comms/github-pr-comments/pr-comments.mjs';
 import { buildOwedDelivery, recordInitialCommentDelivery } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
 import { redactSensitiveText } from './adapters/comms/github-pr-comments/redaction.mjs';
+import { deliverAlert } from './alert-delivery.mjs';
 import { captureRemediationBodyAfterPost } from './review-body-capture.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
@@ -74,6 +75,7 @@ const HQ_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'cancel
 const HQ_SUCCESS_STATUSES = new Set(['succeeded']);
 const HQ_CANCEL_RETRY_DELAYS_MS = [250, 500];
 const WORKSPACE_GIT_RETRY_DELAYS_MS = [250, 750];
+const WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS = [250, 1000];
 const QUOTA_HOLD_REVALIDATION_TTL_MS = 60 * 1000;
 const QUOTA_HOLD_REVALIDATION_TIMEOUT_MS = 10_000;
 
@@ -1032,8 +1034,539 @@ const GH_GIT_CREDENTIAL_ENV = Object.freeze({
   GIT_CONFIG_VALUE_1: '!gh auth git-credential',
 });
 
+const REMEDIATION_PUSH_TOKEN_ENV_KEYS = Object.freeze([
+  'ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN',
+  'ADVERSARIAL_REMEDIATION_PUSH_TOKEN',
+  'REMEDIATION_PUSH_GITHUB_TOKEN',
+  'REMEDIATION_PUSH_TOKEN',
+]);
+
+const REMEDIATION_PUSH_TOKEN_PERMISSION_ENV_KEYS = Object.freeze([
+  'ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS',
+  'REMEDIATION_PUSH_TOKEN_PERMISSIONS',
+  'GITHUB_APP_INSTALLATION_PERMISSIONS',
+]);
+
+class WorkflowPushCapabilityError extends Error {
+  constructor(message, details = {}) {
+    super(message);
+    this.name = 'WorkflowPushCapabilityError';
+    this.isWorkflowPushCapabilityError = true;
+    Object.assign(this, details);
+  }
+}
+
+class WorkflowPushPreflightTransientError extends Error {
+  constructor(message, { code = 'workflow-push-preflight-transient', cause } = {}) {
+    super(message);
+    this.name = 'WorkflowPushPreflightTransientError';
+    this.isWorkflowPushPreflightTransientError = true;
+    this.configKey = code;
+    this.code = code;
+    this.cause = cause;
+  }
+}
+
+function workflowPushErrorText(err) {
+  return [
+    err?.message,
+    err?.stdout,
+    err?.stderr,
+    err?.code,
+    err?.signal,
+  ].map((value) => String(value || '')).filter(Boolean).join('\n');
+}
+
+function isTransientWorkflowPushPreflightError(err) {
+  const detail = workflowPushErrorText(err).toLowerCase();
+  if (!detail) return true;
+  return /timed?\s*out|timeout|socket hang up|eio\b|etimedout|econnreset|econnrefused|econnaborted|enotfound|eai_again|temporary failure|temporarily unavailable|network is unreachable|try again|tls handshake|rate limit|secondary rate limit|too many requests|bad gateway|service unavailable|gateway timeout|server error|http[ /]5\d\d|(^|[^0-9])5(?:00|02|03|04)([^0-9]|$)/i.test(detail);
+}
+
+async function execWorkflowPushPreflightGh({
+  args,
+  options,
+  execFileImpl = execFileAsync,
+  label,
+  log = console,
+  retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
+}) {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    try {
+      return await execFileImpl('gh', args, options);
+    } catch (err) {
+      lastErr = err;
+      const transient = isTransientWorkflowPushPreflightError(err);
+      if (!transient || attempt >= retryDelaysMs.length) {
+        throw err;
+      }
+      const delayMs = Number(retryDelaysMs[attempt] || 0);
+      log.warn?.(
+        `[follow-up-remediation] workflow-push preflight ${label} transient failure ` +
+        `(attempt ${attempt + 1}/${retryDelaysMs.length + 1}); retrying in ${delayMs}ms: ${err?.message || err}`
+      );
+      if (delayMs > 0) await sleep(delayMs);
+    }
+  }
+  throw lastErr;
+}
+
+function firstNonEmptyEnv(env, keys) {
+  for (const key of keys) {
+    const value = String(env?.[key] || '').trim();
+    if (value) return { key, value };
+  }
+  return null;
+}
+
+function resolveConfiguredRemediationPushToken(env = process.env) {
+  const resolved = firstNonEmptyEnv(env, REMEDIATION_PUSH_TOKEN_ENV_KEYS);
+  if (!resolved) return null;
+  return {
+    source: 'configured-token',
+    envName: resolved.key,
+    token: resolved.value,
+    identity: env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY
+      || env.REMEDIATION_PUSH_TOKEN_IDENTITY
+      || resolved.key,
+  };
+}
+
+function resolveRemediationPushTokenIdentity(env = process.env) {
+  const configured = resolveConfiguredRemediationPushToken(env);
+  if (configured) {
+    return {
+      source: configured.source,
+      envName: configured.envName,
+      identity: configured.identity,
+      configured: true,
+    };
+  }
+  return {
+    source: 'ambient-gh',
+    envName: env.GITHUB_TOKEN ? 'GITHUB_TOKEN' : (env.GH_TOKEN ? 'GH_TOKEN' : 'gh-auth-state'),
+    identity: env.GH_USER || env.GITHUB_ACTOR || 'ambient gh auth',
+    configured: false,
+  };
+}
+
 function withGhGitCredentialEnv(baseEnv) {
-  return { ...(baseEnv || {}), ...GH_GIT_CREDENTIAL_ENV };
+  const env = { ...(baseEnv || {}) };
+  const configured = resolveConfiguredRemediationPushToken(env);
+  if (configured) {
+    env.GITHUB_TOKEN = configured.token;
+    env.GH_TOKEN = configured.token;
+  }
+  return { ...env, ...GH_GIT_CREDENTIAL_ENV };
+}
+
+function parseOAuthScopesFromGhApiHeaders(output = '') {
+  const scopes = new Set();
+  for (const line of String(output || '').split(/\r?\n/)) {
+    const match = /^x-oauth-scopes:\s*(.*)$/i.exec(line.trim());
+    if (!match) continue;
+    for (const scope of match[1].split(',')) {
+      const normalized = scope.trim().toLowerCase();
+      if (normalized) scopes.add(normalized);
+    }
+  }
+  return scopes;
+}
+
+function parseOAuthScopesFromGhAuthStatus(output = '') {
+  const scopes = new Set();
+  for (const line of String(output || '').split(/\r?\n/)) {
+    if (!/Token scopes?:/i.test(line)) continue;
+    const afterColon = line.split(':').slice(1).join(':');
+    for (const rawScope of afterColon.split(',')) {
+      const scope = rawScope.replace(/['"`]/g, '').trim().toLowerCase();
+      if (scope) scopes.add(scope);
+    }
+  }
+  return scopes;
+}
+
+function hasWorkflowOAuthScope(output = '') {
+  const headerScopes = parseOAuthScopesFromGhApiHeaders(output);
+  if (headerScopes.has('workflow')) return true;
+  return parseOAuthScopesFromGhAuthStatus(output).has('workflow');
+}
+
+function parseGitHubAppPermissions(value) {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    return value;
+  }
+  const text = String(value || '').trim();
+  if (!text) return {};
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed?.permissions && typeof parsed.permissions === 'object') {
+      return parsed.permissions;
+    }
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    const permissions = {};
+    for (const entry of text.split(/[,\s]+/)) {
+      const match = /^([A-Za-z0-9_-]+)[:=]([A-Za-z0-9_-]+)$/.exec(entry.trim());
+      if (match) permissions[match[1]] = match[2];
+    }
+    return permissions;
+  }
+}
+
+function hasWorkflowGitHubAppPermission(value) {
+  const permissions = parseGitHubAppPermissions(value);
+  const workflowPermission = String(permissions.workflows || permissions.workflow || '').toLowerCase();
+  return workflowPermission === 'write';
+}
+
+function isWorkflowPath(filePath) {
+  return /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(String(filePath || '').trim());
+}
+
+function extractChangedPathsFromJob(job) {
+  const candidates = [
+    job?.changedPaths,
+    job?.changedFiles,
+    job?.files,
+    job?.pullRequest?.changedFiles,
+    job?.pullRequest?.files,
+    job?.review?.changedFiles,
+    job?.review?.files,
+    job?.remediationPlan?.changedPaths,
+    job?.remediationPlan?.changedFiles,
+  ];
+  const paths = [];
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue;
+    for (const entry of candidate) {
+      if (typeof entry === 'string') paths.push(entry);
+      else if (entry && typeof entry === 'object') {
+        const filePath = entry.path || entry.filename || entry.name;
+        if (filePath) paths.push(filePath);
+      }
+    }
+  }
+  return [...new Set(paths.map((p) => String(p).trim()).filter(Boolean))];
+}
+
+async function listPRChangedPaths({
+  repo,
+  prNumber,
+  env = process.env,
+  execFileImpl = execFileAsync,
+  log = console,
+  retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
+}) {
+  const authEnv = withGhGitCredentialEnv(env);
+  const { stdout } = await execWorkflowPushPreflightGh({
+    args: [
+      'pr',
+      'view',
+      String(prNumber),
+      '--repo',
+      repo,
+      '--json',
+      'files',
+    ],
+    options: {
+      env: authEnv,
+      maxBuffer: 5 * 1024 * 1024,
+    },
+    execFileImpl,
+    label: 'changed-file lookup',
+    log,
+    retryDelaysMs,
+  });
+  const parsed = JSON.parse(stdout || '{}');
+  const files = Array.isArray(parsed?.files) ? parsed.files : [];
+  return files
+    .map((file) => (typeof file === 'string' ? file : file?.path || file?.filename || file?.name))
+    .map((file) => String(file || '').trim())
+    .filter(Boolean);
+}
+
+async function remediationTouchesWorkflowFiles({
+  job,
+  env = process.env,
+  execFileImpl = execFileAsync,
+  log = console,
+  retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
+}) {
+  const embeddedPaths = extractChangedPathsFromJob(job);
+  if (embeddedPaths.length > 0) {
+    return {
+      touches: embeddedPaths.some(isWorkflowPath),
+      paths: embeddedPaths,
+      source: 'job',
+    };
+  }
+  try {
+    const livePaths = await listPRChangedPaths({
+      repo: assertValidRepoSlug(job.repo),
+      prNumber: job.prNumber,
+      env,
+      execFileImpl,
+      log,
+      retryDelaysMs,
+    });
+    return {
+      touches: livePaths.some(isWorkflowPath),
+      paths: livePaths,
+      source: 'gh-pr-view',
+    };
+  } catch (err) {
+    if (!isTransientWorkflowPushPreflightError(err)) {
+      throw err;
+    }
+    log.warn?.(
+      `[follow-up-remediation] workflow-push preflight could not list changed paths for ${job?.repo}#${job?.prNumber}: ${err?.message || err}`
+    );
+    throw new WorkflowPushPreflightTransientError(
+      `Workflow-file preflight could not verify changed files for ${job?.repo}#${job?.prNumber}; requeueing instead of bypassing the workflow push capability guard.`,
+      { code: 'workflow-push-changed-files-unavailable', cause: err }
+    );
+  }
+}
+
+function parseConfiguredAppPermissionsFromEnv(env = process.env) {
+  const configured = firstNonEmptyEnv(env, REMEDIATION_PUSH_TOKEN_PERMISSION_ENV_KEYS);
+  if (!configured) return null;
+  return {
+    source: configured.key,
+    permissions: parseGitHubAppPermissions(configured.value),
+    hasWorkflowCapability: hasWorkflowGitHubAppPermission(configured.value),
+  };
+}
+
+async function inspectRemediationPushTokenCapability({
+  env = process.env,
+  execFileImpl = execFileAsync,
+  log = console,
+  retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
+} = {}) {
+  const identity = resolveRemediationPushTokenIdentity(env);
+  const authEnv = withGhGitCredentialEnv(env);
+  const configuredPermissions = parseConfiguredAppPermissionsFromEnv(env);
+  if (configuredPermissions && identity.configured) {
+    return {
+      ...identity,
+      tokenType: 'github-app',
+      hasWorkflowCapability: configuredPermissions.hasWorkflowCapability,
+      detection: configuredPermissions.source,
+      scopes: [],
+      permissions: configuredPermissions.permissions,
+    };
+  }
+
+  let oauthHeaderOutput = '';
+  try {
+    const { stdout = '', stderr = '' } = await execWorkflowPushPreflightGh({
+      args: ['api', '/', '--include'],
+      options: {
+        env: authEnv,
+        maxBuffer: 1024 * 1024,
+      },
+      execFileImpl,
+      label: 'oauth-scope header probe',
+      log,
+      retryDelaysMs,
+    });
+    oauthHeaderOutput = `${stdout}\n${stderr}`;
+  } catch (err) {
+    oauthHeaderOutput = `${err?.stdout || ''}\n${err?.stderr || ''}`;
+    if (!oauthHeaderOutput.trim()) {
+      throw new WorkflowPushPreflightTransientError(
+        'Workflow-file preflight could not inspect OAuth scopes; requeueing instead of terminalizing a transient token-inspection failure.',
+        { code: 'workflow-push-token-inspection-unavailable', cause: err }
+      );
+    }
+  }
+  const scopes = [...parseOAuthScopesFromGhApiHeaders(oauthHeaderOutput)];
+  if (scopes.length > 0) {
+    return {
+      ...identity,
+      tokenType: 'oauth',
+      hasWorkflowCapability: scopes.includes('workflow'),
+      detection: 'x-oauth-scopes',
+      scopes,
+      permissions: null,
+    };
+  }
+
+  try {
+    const { stdout = '', stderr = '' } = await execWorkflowPushPreflightGh({
+      args: ['auth', 'status', '-h', 'github.com'],
+      options: {
+        env: authEnv,
+        maxBuffer: 1024 * 1024,
+      },
+      execFileImpl,
+      label: 'gh auth status scope probe',
+      log,
+      retryDelaysMs,
+    });
+    const statusScopes = [...parseOAuthScopesFromGhAuthStatus(`${stdout}\n${stderr}`)];
+    if (statusScopes.length > 0) {
+      return {
+        ...identity,
+        tokenType: 'oauth',
+        hasWorkflowCapability: statusScopes.includes('workflow'),
+        detection: 'gh-auth-status',
+        scopes: statusScopes,
+        permissions: null,
+      };
+    }
+  } catch (err) {
+    if (isTransientWorkflowPushPreflightError(err)) {
+      throw new WorkflowPushPreflightTransientError(
+        'Workflow-file preflight could not inspect gh auth status; requeueing instead of terminalizing a transient token-inspection failure.',
+        { code: 'workflow-push-token-inspection-unavailable', cause: err }
+      );
+    }
+    // Fall through to the GitHub App permission probe.
+  }
+
+  try {
+    const { stdout = '' } = await execWorkflowPushPreflightGh({
+      args: ['api', '/installation'],
+      options: {
+        env: authEnv,
+        maxBuffer: 1024 * 1024,
+      },
+      execFileImpl,
+      label: 'installation permission probe',
+      log,
+      retryDelaysMs,
+    });
+    const permissions = parseGitHubAppPermissions(stdout);
+    return {
+      ...identity,
+      tokenType: 'github-app',
+      hasWorkflowCapability: hasWorkflowGitHubAppPermission(permissions),
+      detection: 'installation-permissions',
+      scopes: [],
+      permissions,
+    };
+  } catch (err) {
+    if (isTransientWorkflowPushPreflightError(err)) {
+      throw new WorkflowPushPreflightTransientError(
+        'Workflow-file preflight could not inspect installation permissions; requeueing instead of terminalizing a transient token-inspection failure.',
+        { code: 'workflow-push-token-inspection-unavailable', cause: err }
+      );
+    }
+    return {
+      ...identity,
+      tokenType: 'unknown',
+      hasWorkflowCapability: false,
+      detection: 'unavailable',
+      scopes,
+      permissions: null,
+      error: err?.message || String(err),
+    };
+  }
+}
+
+function workflowPushOperatorAlertText({ job, capability }) {
+  const operatorAction = workflowPushOperatorAction(capability);
+  return [
+    '[follow-up-remediation] Workflow-file remediation blocked before spawn: push credential lacks workflow capability.',
+    `PR: ${job.repo}#${job.prNumber}`,
+    `Job: ${job.jobId}`,
+    `Push identity: ${capability.identity} (${capability.source}; ${capability.envName})`,
+    'Required remediation:',
+    operatorAction,
+    'Context: PR #3110 / clio-airlock root cause was an OAuth token with repo but missing workflow scope, which GitHub rejects for .github/workflows pushes.',
+  ].join('\n');
+}
+
+function workflowPushOperatorAction(capability) {
+  if (capability?.source === 'configured-token') {
+    const envName = capability.envName || 'the configured remediation push-token environment variable';
+    if (capability.tokenType === 'github-app') {
+      return `Update ${envName} or its GitHub App installation permissions so the token has workflows:write before restarting the remediation daemon.`;
+    }
+    return `Update ${envName} to a PAT/OAuth token with workflow scope, or rotate the configured token source, before restarting the remediation daemon.`;
+  }
+  const runtimeUser = userInfo().username || '<runtime-user>';
+  return `sudo -A -H -u ${runtimeUser} gh auth refresh -h github.com -s workflow`;
+}
+
+async function assertWorkflowPushCapabilityForJob({
+  job,
+  execFileImpl = execFileAsync,
+  env = process.env,
+  deliverAlertImpl = deliverAlert,
+  log = console,
+  retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
+} = {}) {
+  const workflowTouch = await remediationTouchesWorkflowFiles({ job, env, execFileImpl, log, retryDelaysMs });
+  if (!workflowTouch.touches) {
+    const identity = resolveRemediationPushTokenIdentity(env);
+    log.log?.(
+      `[follow-up-remediation] push-token workflow capability repo=${job.repo} pr=${job.prNumber} ` +
+      `source=${identity.source} identity=${identity.identity} workflow=not-required detection=${workflowTouch.source}`
+    );
+    return {
+      gated: false,
+      workflowTouch,
+      capability: {
+        ...identity,
+        tokenType: 'not-checked',
+        hasWorkflowCapability: null,
+        detection: workflowTouch.source,
+        scopes: [],
+        permissions: null,
+      },
+    };
+  }
+
+  const capability = await inspectRemediationPushTokenCapability({ env, execFileImpl, log, retryDelaysMs });
+  log.log?.(
+    `[follow-up-remediation] push-token workflow capability repo=${job.repo} pr=${job.prNumber} ` +
+    `source=${capability.source} identity=${capability.identity} workflow=${capability.hasWorkflowCapability ? 'yes' : 'no'} ` +
+    `detection=${capability.detection}`
+  );
+  if (capability.hasWorkflowCapability) {
+    return {
+      gated: false,
+      workflowTouch,
+      capability,
+    };
+  }
+
+  const alertText = workflowPushOperatorAlertText({ job, capability });
+  const operatorAction = workflowPushOperatorAction(capability);
+  try {
+    await deliverAlertImpl(alertText, {
+      event: 'remediation-workflow-push-capability-missing',
+      severity: 'critical',
+      repo: job.repo,
+      prNumber: job.prNumber,
+      jobId: job.jobId,
+      pushToken: {
+        source: capability.source,
+        envName: capability.envName,
+        identity: capability.identity,
+        tokenType: capability.tokenType,
+        detection: capability.detection,
+        hasWorkflowCapability: false,
+      },
+      operatorAction,
+    });
+  } catch (alertErr) {
+    log.error?.(`[follow-up-remediation] workflow-push capability alert delivery failed: ${alertErr?.message || alertErr}`);
+  }
+  throw new WorkflowPushCapabilityError(
+    `Workflow-file remediation for ${job.repo}#${job.prNumber} requires push token workflow capability; operator must refresh the runtime gh auth with workflow scope.`,
+    {
+      workflowTouch,
+      capability,
+      operatorAction,
+    }
+  );
 }
 
 async function runWorkspaceNetworkCommandWithTransientRetry({
@@ -5555,6 +6088,7 @@ async function consumeNextFollowUpJob({
   delayedPendingPaths = null,
   onDelayedPendingJob = null,
   quotaHoldRevalidator = null,
+  deliverAlertImpl = deliverAlert,
   log = console,
 } = {}) {
   // CFG-09: per-job boundary for the role-config cascade cache. Match
@@ -5682,6 +6216,7 @@ async function consumeNextFollowUpJob({
   let workerClass = null;
   let spawnAttempted = false;
   let spawnedWorker = null;
+  let workflowPushPreflight = null;
 
   try {
     workerClass = pickRemediationWorkerClass(claimed.job);
@@ -5751,6 +6286,14 @@ async function consumeNextFollowUpJob({
         jobPath: stopped.jobPath,
       };
     }
+
+    workflowPushPreflight = await assertWorkflowPushCapabilityForJob({
+      job: claimed.job,
+      execFileImpl,
+      env: process.env,
+      deliverAlertImpl,
+      log,
+    });
 
     // OAuth pre-flight runs inside the try so an expired/missing OAuth
     // session moves the already-claimed job to `failed/` via the catch
@@ -5879,6 +6422,23 @@ async function consumeNextFollowUpJob({
       spawnedAt: now(),
       worker: {
         ...worker,
+        pushTokenCapability: workflowPushPreflight?.capability
+          ? {
+              source: workflowPushPreflight.capability.source,
+              envName: workflowPushPreflight.capability.envName,
+              identity: workflowPushPreflight.capability.identity,
+              tokenType: workflowPushPreflight.capability.tokenType,
+              detection: workflowPushPreflight.capability.detection,
+              hasWorkflowCapability: workflowPushPreflight.capability.hasWorkflowCapability,
+              workflowTouch: workflowPushPreflight.workflowTouch
+                ? {
+                    touches: workflowPushPreflight.workflowTouch.touches,
+                    source: workflowPushPreflight.workflowTouch.source,
+                    paths: workflowPushPreflight.workflowTouch.paths || [],
+                  }
+                : null,
+            }
+          : null,
         workspaceState,
         workspaceRoot: worker.workspaceDir ? serializeWorkerPath(rootDir, dirname(worker.workspaceDir)) : (hqDispatchEnabled ? null : serializeWorkerPath(rootDir, workspaceRootDir)),
         workspaceDir: worker.workspaceDir ? serializeWorkerPath(rootDir, worker.workspaceDir) : (hqDispatchEnabled ? null : serializeWorkerPath(rootDir, workspaceDir)),
@@ -5896,6 +6456,41 @@ async function consumeNextFollowUpJob({
       jobPath: updated.jobPath,
     };
   } catch (err) {
+    if (err.isWorkflowPushPreflightTransientError) {
+      const requeuedAt = now();
+      const requeuedAtMs = Date.parse(requeuedAt);
+      const retryAfter = new Date((Number.isFinite(requeuedAtMs) ? requeuedAtMs : Date.now()) + 60_000).toISOString();
+      const requeued = requeueInProgressFollowUpJobForRetry({
+        rootDir,
+        jobPath: claimed.jobPath,
+        requeuedAt,
+        retryReason: err.message,
+        retryMetadata: {
+          code: err.code || 'workflow-push-preflight-transient',
+          recoverable: true,
+        },
+        allowDirectWorkerRetry: true,
+        retryAfterOverride: retryAfter,
+      });
+      requeued.job.lastWorkflowPushPreflightFailure = {
+        code: err.code || 'workflow-push-preflight-transient',
+        message: err.message,
+        recoverable: true,
+        recordedAt: requeuedAt,
+      };
+      writeFollowUpJob(requeued.jobPath, requeued.job);
+      log.warn?.(
+        `[follow-up-remediation] workflow-push preflight transient for ${claimed.job?.repo}#${claimed.job?.prNumber}; ` +
+        `requeued pending job: ${err.message}`
+      );
+      return {
+        consumed: false,
+        reason: err.code || 'workflow-push-preflight-transient',
+        job: requeued.job,
+        jobPath: requeued.jobPath,
+      };
+    }
+
     if (err.isRemediationConfigError) {
       const requeued = requeueClaimedFollowUpJobAfterConfigFailure({
         rootDir,
@@ -5918,6 +6513,28 @@ async function consumeNextFollowUpJob({
         oauthError: {
           model: err.model || workerClass,
           reason: err.message,
+        },
+      };
+    } else if (err.isWorkflowPushCapabilityError) {
+      failureCode = 'workflow-push-capability-missing';
+      failure = {
+        needsOperator: true,
+        workflowPushCapability: {
+          reason: err.message,
+          operatorAction: err.operatorAction,
+          workflowTouch: err.workflowTouch || null,
+          pushToken: err.capability
+            ? {
+                source: err.capability.source,
+                envName: err.capability.envName,
+                identity: err.capability.identity,
+                tokenType: err.capability.tokenType,
+                detection: err.capability.detection,
+                hasWorkflowCapability: err.capability.hasWorkflowCapability,
+                scopes: err.capability.scopes || [],
+                permissions: err.capability.permissions || null,
+              }
+            : null,
         },
       };
     } else if (err.isBaseBranchResolutionError) {
@@ -5990,6 +6607,7 @@ async function consumeFollowUpJobsUntilCapacity({
   postCommentImpl = postRemediationOutcomeComment,
   shouldStop = () => false,
   quotaHoldRevalidator = defaultQuotaHoldRevalidator,
+  deliverAlertImpl = deliverAlert,
   log = console,
 } = {}) {
   const concurrencyCap = normalizeMaxConcurrentFollowUpJobs(maxConcurrent);
@@ -6032,6 +6650,7 @@ async function consumeFollowUpJobsUntilCapacity({
           pendingRetryDelayed += 1;
         },
         quotaHoldRevalidator,
+        deliverAlertImpl,
         log,
       });
     } catch (err) {
@@ -6317,6 +6936,17 @@ export {
   normalizeMaxConcurrentFollowUpJobs,
   normalizeRemediationWorkerClass,
   pickRemediationWorkerClass,
+  assertWorkflowPushCapabilityForJob,
+  extractChangedPathsFromJob,
+  hasWorkflowGitHubAppPermission,
+  hasWorkflowOAuthScope,
+  inspectRemediationPushTokenCapability,
+  isWorkflowPath,
+  parseGitHubAppPermissions,
+  parseOAuthScopesFromGhAuthStatus,
+  parseOAuthScopesFromGhApiHeaders,
+  remediationTouchesWorkflowFiles,
+  resolveRemediationPushTokenIdentity,
   prepareClaudeCodeRemediationStartupEnv,
   resolveClaudeCodeCliPath,
   buildBackpressureLogLine,

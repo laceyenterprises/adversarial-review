@@ -1428,6 +1428,23 @@ trusted as the complete failure record.
   checked-out remediation workspace already has the worker-provenance
   `commit-msg` hook installed before the worker runs, and any pre-existing hook
   must remain chained through `commit-msg.worker-provenance-chain`.
+- Before spawning a worker, `consume` must fail closed around workflow-file
+  push capability. If the job has embedded changed-file paths, those decide
+  whether `.github/workflows/*.yml` or `.yaml` is in scope; otherwise the daemon
+  fetches the live PR file list with `gh pr view` using bounded transient
+  retries. Exhausted changed-file lookup failures move the claimed job back to
+  `pending/` with a recoverable `lastWorkflowPushPreflightFailure` instead of
+  assuming no workflow files changed. For workflow-touching PRs, the daemon
+  probes the remediation push token with bounded transient retries (`gh api /`
+  OAuth-scope headers, `gh auth status`, and GitHub App installation
+  permissions). Exhausted transient token-inspection failures also requeue the
+  job without burning a remediation round. A proven missing workflow scope or
+  `workflows:write` permission remains terminal before spawn with
+  `workflow-push-capability-missing` and an operator alert. The alert action is
+  credential-source aware: ambient CLI credentials use `gh auth refresh -s
+  workflow`, while configured tokens such as
+  `ADVERSARIAL_REMEDIATION_PUSH_TOKEN` instruct operators to rotate/update that
+  configured token or its underlying GitHub App permissions.
 - Before honoring `reReview.requested=true`, reconcile runs the same
   branch-contamination audit used by the legacy lane against the HQ-managed git
   workspace. If the dispatch ticket did not provide that path, reconcile must

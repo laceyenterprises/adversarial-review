@@ -1,0 +1,239 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { maybeDispatchAmaClosureFor, runDaemonCleanMergeAttempt } from '../src/watcher.mjs';
+import {
+  DAEMON_MERGE_DISPOSITION,
+  DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
+} from '../src/ama/daemon-merge.mjs';
+
+// Integration test for the MSM-03 wiring seam in `maybeDispatchAmaClosureFor`:
+// the daemon clean-merge attempt runs BEFORE the AMA closer dispatch, and any
+// disposition other than `not-taken` short-circuits (no closer/hammer spawn).
+
+function tempRoot() {
+  return mkdtempSync(join(tmpdir(), 'watcher-daemon-clean-merge-'));
+}
+
+function loadAmaEnabledConfig() {
+  return {
+    getMergeAuthorityConfig() {
+      return { enabled: true, mergeMethod: 'squash' };
+    },
+    getOrchestrationMode() {
+      return 'native';
+    },
+  };
+}
+
+function baseArgs(rootDir) {
+  return {
+    rootDir,
+    reviewStateRow: {
+      review_status: 'posted',
+      review_body: '## Verdict\n\nComment only',
+      reviewer_head_sha: 'head-live',
+      reviewer: 'codex',
+    },
+    dispatchJob: { blockingFindingCount: 0, blockingFindingState: 'known' },
+    candidate: {
+      headSha: 'head-live',
+      baseBranch: 'main',
+      prState: 'open',
+      isDraft: false,
+      riskClass: 'low',
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN',
+      statusCheckRollup: [],
+      branchProtection: { requiredContexts: [] },
+      prAuthor: 'builder',
+    },
+    labelNames: [],
+    repoPath: 'acme/repo',
+    prNumber: 300,
+    currentRevisionRef: 'head-live',
+    loadConfigImpl: loadAmaEnabledConfig,
+    liveReviewRetryDelaysMs: [0, 0],
+    logger: { warn() {}, log() {} },
+  };
+}
+
+test('daemon merges the clean tick → skips closer dispatch (no agent spawn)', async () => {
+  const rootDir = tempRoot();
+  try {
+    let closerCalls = 0;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.MERGED,
+        reason: 'merged',
+        merged: true,
+        attempts: 1,
+      }),
+      maybeDispatchAmaCloserImpl: async () => {
+        closerCalls += 1;
+        return { dispatched: true };
+      },
+    });
+
+    assert.equal(closerCalls, 0, 'the closer/hammer must NOT be dispatched when the daemon merged');
+    assert.equal(result.dispatched, false);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.reason, `daemon-${DAEMON_MERGE_DISPOSITION.MERGED}`);
+    assert.equal(result.daemonCleanMerge.merged, true);
+    assert.equal(result.amaEnabled, true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('daemon fail-closed → skips closer dispatch; no hammer from the retry path', async () => {
+  const rootDir = tempRoot();
+  try {
+    let closerCalls = 0;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'permanent-merge-rejection',
+        merged: false,
+        attempts: 1,
+      }),
+      maybeDispatchAmaCloserImpl: async () => {
+        closerCalls += 1;
+        return { dispatched: true };
+      },
+    });
+
+    assert.equal(closerCalls, 0, 'a daemon fail-closed must NOT spawn a hammer');
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.reason, `daemon-${DAEMON_MERGE_DISPOSITION.FAILED_CLOSED}`);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('daemon deferred (lease contention) → skips closer dispatch this tick', async () => {
+  const rootDir = tempRoot();
+  try {
+    let closerCalls = 0;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+        reason: 'lease-contended',
+        merged: false,
+      }),
+      maybeDispatchAmaCloserImpl: async () => {
+        closerCalls += 1;
+        return { dispatched: true };
+      },
+    });
+
+    assert.equal(closerCalls, 0);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.reason, `daemon-${DAEMON_MERGE_DISPOSITION.DEFERRED}`);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('daemon not-taken (findings present) → falls through to the closer/hammer dispatch', async () => {
+  const rootDir = tempRoot();
+  try {
+    let closerCalls = 0;
+    let seenReviewState = null;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+        reason: 'blocking-findings-present',
+      }),
+      maybeDispatchAmaCloserImpl: async ({ reviewState }) => {
+        closerCalls += 1;
+        seenReviewState = reviewState;
+        return { dispatched: true, reason: 'closer-took-over' };
+      },
+    });
+
+    assert.equal(closerCalls, 1, 'not-taken must fall through to the existing closer/hammer path');
+    assert.equal(result.dispatched, true);
+    assert.equal(result.reason, 'closer-took-over');
+    assert.ok(seenReviewState, 'closer received the reviewState');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('daemon gh merge subprocess is bounded by the shared timeout', async () => {
+  const rootDir = tempRoot();
+  let capturedOptions = null;
+  try {
+    const result = await runDaemonCleanMergeAttempt({
+      rootDir,
+      cfg: { mergeMethod: 'squash' },
+      repoPath: 'acme/repo',
+      prNumber: 300,
+      candidate: {
+        baseBranch: 'main',
+        headSha: 'head-live',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        prState: 'open',
+      },
+      gateSnapshot: {
+        reviewedHeadSha: 'head-live',
+        settledReview: { verdict: 'settled-success' },
+      },
+      mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviewState: {
+        blockingFindingCount: 0,
+        blockingFindingState: 'known',
+        nonBlockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+      },
+      reviewStateRow: { reviewer: 'codex' },
+      currentPrHeadSha: 'head-live',
+      execFileImpl: async (_command, _args, options) => {
+        capturedOptions = options;
+        return { stdout: '', stderr: '' };
+      },
+      fetchRollupImpl: async () => ({
+        state: 'OPEN',
+        headSha: 'head-live',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      }),
+      acquireMergeLeaseImpl: () => ({
+        acquired: true,
+        lease: {
+          repo: 'acme/repo',
+          base: 'main',
+          leaseId: 'lease-1',
+          holderPr: 300,
+          holderHead: 'head-live',
+          acquiredAt: '2026-07-05T00:00:00.000Z',
+        },
+      }),
+      releaseMergeLeaseImpl: () => {},
+      attemptDaemonCleanMergeImpl: async ({ runMergeImpl }) => runMergeImpl({
+        repo: 'acme/repo',
+        prNumber: 300,
+        head: 'head-live',
+        mergeMethod: 'squash',
+      }),
+      logger: { warn() {}, log() {} },
+      env: { HQ_ROOT: '/tmp/hq' },
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(capturedOptions.timeout, DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

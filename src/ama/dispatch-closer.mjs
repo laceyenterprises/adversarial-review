@@ -66,6 +66,7 @@ const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
 const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const AGENT_OS_TOOLING_REPO = 'agent-os';
+const ADVERSARIAL_REVIEW_REPO = 'adversarial-review';
 const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
 const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
@@ -1792,7 +1793,10 @@ export async function maybeDispatchAmaCloser({
     '--prompt', promptPath,
     '--root', hqRoot,
   ];
-  if (repoBasename !== AGENT_OS_TOOLING_REPO) {
+  if (
+    repoBasename !== AGENT_OS_TOOLING_REPO
+    && repoBasename !== ADVERSARIAL_REVIEW_REPO
+  ) {
     args.push('--additional-repo', AGENT_OS_TOOLING_REPO);
   }
 

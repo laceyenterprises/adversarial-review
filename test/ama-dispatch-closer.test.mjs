@@ -391,6 +391,55 @@ test('eligible agent-os dispatch does not add agent-os as a duplicate workspace 
   assert.equal(exec.calls[0].args.includes('--additional-repo'), false);
 });
 
+test('eligible adversarial-review self-PR dispatch is single-repo for rescue provision', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-adversarial-review-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    dispatchContext: {
+      rootDir,
+      repo: 'laceyenterprises/adversarial-review',
+      prUrl: 'https://github.com/laceyenterprises/adversarial-review/pull/504',
+    },
+    prMetadata: { prNumber: 504 },
+  });
+  const exec = buildExecMock();
+  const write = buildWriteMock();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: () => readFileSync(TEMPLATE_PATH, 'utf8'),
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(exec.calls.length, 1);
+  const promptPath = join(
+    rootDir,
+    'data',
+    'follow-up-jobs',
+    'ama-closer-prompts',
+    `laceyenterprises-adversarial-review-pr-504-${reviewState.headSha}.md`,
+  );
+  assert.deepEqual(exec.calls[0].args, [
+    'dispatch',
+    '--worker-class', 'codex',
+    '--task-kind', 'merge',
+    '--completion-shape', 'decision-only',
+    '--project', 'adversarial-merge-authority',
+    '--repo', 'adversarial-review',
+    '--pr', '504',
+    '--ticket', 'AMA-PR-504',
+    '--parent-session', 'session:test:watcher',
+    '--prompt', promptPath,
+    '--root', dispatchContext.hqRoot,
+  ]);
+  assert.equal(exec.calls[0].args.includes('--additional-repo'), false);
+  assert.equal(exec.calls[0].args.includes('--branch'), false);
+});
+
 test('maybeDispatchAmaCloser is mode-invariant for merge-class dispatch', async (t) => {
   const dispatches = [];
   for (const orchestrationMode of ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE) {

@@ -202,7 +202,7 @@ scans.
 Fetch the live PR and final review:
 
 ```bash
-gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName,reviews > /tmp/ham-pr-before.json
+gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName,reviews > /tmp/ham-1234-pr-before.json
 ```
 
 Identify the newest authoritative adversarial review whose commit is
@@ -344,9 +344,9 @@ ham_audit_cleanup_tmp_files
 Refresh and validate the live head:
 
 ```bash
-gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-pr-after.json
-POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-pr-after.json)
-BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-pr-after.json)
+gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-1234-pr-after.json
+POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-1234-pr-after.json)
+BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-1234-pr-after.json)
 HAM_VALIDATION_BASE_SHA="${HAM_VALIDATION_BASE_SHA:-}"
 HAM_FORCE_REVALIDATION=0
 HAM_REBASE_ATTEMPTS=0
@@ -366,7 +366,7 @@ ham_release_merge_lease() {
         --base "$BASE_BRANCH" \
         --pr 1234 \
         --lease-id "$HAM_MERGE_LEASE_ID" \
-        > /tmp/ham-merge-lease-release.json; then
+        > /tmp/ham-1234-merge-lease-release.json; then
         HAM_MERGE_LEASE_HELD=0
         HAM_MERGE_LEASE_ID=""
         trap - EXIT
@@ -375,7 +375,7 @@ ham_release_merge_lease() {
         HAM_MERGE_LEASE_RELEASE_EXIT=$?
       fi
       echo "AMG-04 warning: merge lease release attempt ${ham_release_attempt}/${HAM_MERGE_LEASE_RELEASE_RETRY_CAP} failed for lease ${HAM_MERGE_LEASE_ID} (exit ${HAM_MERGE_LEASE_RELEASE_EXIT}); keeping EXIT trap armed" >&2
-      cat /tmp/ham-merge-lease-release.json >&2 || true
+      cat /tmp/ham-1234-merge-lease-release.json >&2 || true
       if [ "$ham_release_attempt" -ge "$HAM_MERGE_LEASE_RELEASE_RETRY_CAP" ]; then
         echo "AMG-04 hard-blocker: merge lease release failed after ${HAM_MERGE_LEASE_RELEASE_RETRY_CAP} attempts; do not continue while the lease is unconfirmed" >&2
         return "$HAM_MERGE_LEASE_RELEASE_EXIT"
@@ -395,28 +395,28 @@ ham_acquire_merge_lease() {
     --head "$POST_REMEDIATION_SHA" \
     --owner-pid "$$" \
     --wait "$HAM_MERGE_LEASE_WAIT_SECONDS" \
-    > /tmp/ham-merge-lease-acquire.json; then
+    > /tmp/ham-1234-merge-lease-acquire.json; then
     HAM_MERGE_LEASE_ACQUIRE_EXIT=0
   else
     HAM_MERGE_LEASE_ACQUIRE_EXIT=$?
   fi
   if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 70 ] \
-    && [ "$(jq -r '.parked // false' /tmp/ham-merge-lease-acquire.json)" = "true" ]; then
-    HAM_PARK_REASON=$(jq -r '.reason // "merge-lease-parked"' /tmp/ham-merge-lease-acquire.json)
+    && [ "$(jq -r '.parked // false' /tmp/ham-1234-merge-lease-acquire.json)" = "true" ]; then
+    HAM_PARK_REASON=$(jq -r '.reason // "merge-lease-parked"' /tmp/ham-1234-merge-lease-acquire.json)
     echo "AMG-04 parked: merge lease acquisition parked PR 1234 ($HAM_PARK_REASON)" >&2
     exit 0
   fi
   if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -eq 75 ] \
-    && [ "$(jq -r '.timedOut // false' /tmp/ham-merge-lease-acquire.json)" = "true" ]; then
-    HAM_PARK_WAITED=$(jq -r '.waited_s // "unknown"' /tmp/ham-merge-lease-acquire.json)
+    && [ "$(jq -r '.timedOut // false' /tmp/ham-1234-merge-lease-acquire.json)" = "true" ]; then
+    HAM_PARK_WAITED=$(jq -r '.waited_s // "unknown"' /tmp/ham-1234-merge-lease-acquire.json)
     echo "AMG-04 parked: merge lease acquisition timed out for PR 1234 after ${HAM_PARK_WAITED}s" >&2
     exit 0
   fi
   if [ "$HAM_MERGE_LEASE_ACQUIRE_EXIT" -ne 0 ]; then
-    cat /tmp/ham-merge-lease-acquire.json >&2
+    cat /tmp/ham-1234-merge-lease-acquire.json >&2
     exit "$HAM_MERGE_LEASE_ACQUIRE_EXIT"
   fi
-  HAM_MERGE_LEASE_ID=$(jq -r '.leaseId // empty' /tmp/ham-merge-lease-acquire.json)
+  HAM_MERGE_LEASE_ID=$(jq -r '.leaseId // empty' /tmp/ham-1234-merge-lease-acquire.json)
   if [ -z "$HAM_MERGE_LEASE_ID" ]; then
     echo "AMG-04 hard-blocker: merge lease acquired without leaseId" >&2
     exit 1
@@ -440,10 +440,10 @@ ham_is_full_sha() {
 ham_fetch_base_with_retries() {
   ham_fetch_attempt=1
   while [ "$ham_fetch_attempt" -le "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; do
-    if git fetch origin "$BASE_BRANCH" > /tmp/ham-fetch-base.stdout 2> /tmp/ham-fetch-base.stderr; then
+    if git fetch origin "$BASE_BRANCH" > /tmp/ham-1234-fetch-base.stdout 2> /tmp/ham-1234-fetch-base.stderr; then
       return 0
     fi
-    if ! ham_update_branch_transient /tmp/ham-fetch-base.stderr; then
+    if ! ham_update_branch_transient /tmp/ham-1234-fetch-base.stderr; then
       return 1
     fi
     if [ "$ham_fetch_attempt" -ge "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; then
@@ -459,20 +459,20 @@ ham_capture_current_base_sha() {
   if ! ham_fetch_base_with_retries; then
     return 1
   fi
-  HAM_CAPTURED_BASE_SHA=$(git rev-parse "origin/$BASE_BRANCH" 2>/tmp/ham-rev-parse-base.stderr || true)
+  HAM_CAPTURED_BASE_SHA=$(git rev-parse "origin/$BASE_BRANCH" 2>/tmp/ham-1234-rev-parse-base.stderr || true)
   ham_is_full_sha "$HAM_CAPTURED_BASE_SHA"
 }
 
 ham_update_branch_with_retries() {
   ham_update_attempt=1
   while [ "$ham_update_attempt" -le "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; do
-    if gh pr update-branch https://github.com/acme/myrepo/pull/1234 --rebase > /tmp/ham-update-branch.stdout 2> /tmp/ham-update-branch.stderr; then
+    if gh pr update-branch https://github.com/acme/myrepo/pull/1234 --rebase > /tmp/ham-1234-update-branch.stdout 2> /tmp/ham-1234-update-branch.stderr; then
       return 0
     fi
-    if ham_update_branch_conflict /tmp/ham-update-branch.stderr; then
+    if ham_update_branch_conflict /tmp/ham-1234-update-branch.stderr; then
       return 2
     fi
-    if ! ham_update_branch_transient /tmp/ham-update-branch.stderr; then
+    if ! ham_update_branch_transient /tmp/ham-1234-update-branch.stderr; then
       return 1
     fi
     if [ "$ham_update_attempt" -ge "$HAM_UPDATE_BRANCH_RETRY_CAP" ]; then
@@ -484,7 +484,7 @@ ham_update_branch_with_retries() {
   return 1
 }
 
-while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-pr-after.json)" = "BEHIND" ]; do
+while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-1234-pr-after.json)" = "BEHIND" ]; do
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
     ham_acquire_merge_lease
   fi
@@ -509,9 +509,9 @@ while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-pr-after.json)" = "BEHIND" ]
     fi
     # >>> Perform the local rebase + conflict resolution from the
     #     "## Resolving merge conflicts" section below, re-validate, then fall through. <<<
-    gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-pr-after.json
-    POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-pr-after.json)
-    BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-pr-after.json)
+    gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-1234-pr-after.json
+    POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-1234-pr-after.json)
+    BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-1234-pr-after.json)
     if ham_capture_current_base_sha; then
       HAM_VALIDATION_BASE_SHA="$HAM_CAPTURED_BASE_SHA"
     else
@@ -521,12 +521,12 @@ while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-pr-after.json)" = "BEHIND" ]
     continue
   fi
   if [ "$HAM_UPDATE_BRANCH_EXIT" -ne 0 ]; then
-    cat /tmp/ham-update-branch.stderr >&2
+    cat /tmp/ham-1234-update-branch.stderr >&2
     ham_release_merge_lease
     exit 1
   fi
-  gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-pr-after.json
-  POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-pr-after.json)
+  gh pr view https://github.com/acme/myrepo/pull/1234 --json number,headRefOid,state,isDraft,mergeable,mergeStateStatus,labels,statusCheckRollup,author,baseRefName > /tmp/ham-1234-pr-after.json
+  POST_REMEDIATION_SHA=$(jq -r '.headRefOid' /tmp/ham-1234-pr-after.json)
 done
 
 if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
@@ -543,7 +543,7 @@ else
   HAM_FORCE_REVALIDATION=1
 fi
 if [ "$HAM_FORCE_REVALIDATION" -eq 1 ]; then
-  printf '{"needsRevalidation":true,"reason":"validation-base-unavailable"}\n' > /tmp/ham-merge-lease-revalidation.json
+  printf '{"needsRevalidation":true,"reason":"validation-base-unavailable"}\n' > /tmp/ham-1234-merge-lease-revalidation.json
   HAM_NEEDS_REVALIDATION=true
 else
   if node /tmp/ama-test-root/bin/merge-lease.mjs needs-revalidation \
@@ -552,15 +552,15 @@ else
     --validation-base "$HAM_VALIDATION_BASE_SHA" \
     --current-base "$HAM_CURRENT_BASE_SHA" \
     --changed-files-from "$POST_REMEDIATION_SHA" \
-    > /tmp/ham-merge-lease-revalidation.json; then
-    HAM_NEEDS_REVALIDATION=$(jq -er 'if (.needsRevalidation | type) == "boolean" then .needsRevalidation else true end' /tmp/ham-merge-lease-revalidation.json 2> /tmp/ham-merge-lease-revalidation-jq.stderr || true)
+    > /tmp/ham-1234-merge-lease-revalidation.json; then
+    HAM_NEEDS_REVALIDATION=$(jq -er 'if (.needsRevalidation | type) == "boolean" then .needsRevalidation else true end' /tmp/ham-1234-merge-lease-revalidation.json 2> /tmp/ham-1234-merge-lease-revalidation-jq.stderr || true)
     if [ "$HAM_NEEDS_REVALIDATION" != "true" ] && [ "$HAM_NEEDS_REVALIDATION" != "false" ]; then
-      printf '{"needsRevalidation":true,"reason":"needs-revalidation-output-invalid"}\n' > /tmp/ham-merge-lease-revalidation.json
+      printf '{"needsRevalidation":true,"reason":"needs-revalidation-output-invalid"}\n' > /tmp/ham-1234-merge-lease-revalidation.json
       HAM_NEEDS_REVALIDATION=true
     fi
   else
     HAM_NEEDS_REVALIDATION_EXIT=$?
-    printf '{"needsRevalidation":true,"reason":"needs-revalidation-tool-failed","exitCode":%s}\n' "$HAM_NEEDS_REVALIDATION_EXIT" > /tmp/ham-merge-lease-revalidation.json
+    printf '{"needsRevalidation":true,"reason":"needs-revalidation-tool-failed","exitCode":%s}\n' "$HAM_NEEDS_REVALIDATION_EXIT" > /tmp/ham-1234-merge-lease-revalidation.json
     HAM_NEEDS_REVALIDATION=true
   fi
 fi
@@ -588,7 +588,7 @@ When the rebase loop above hits a conflict, this is the procedure to run only
 after `ham_release_merge_lease` has completed:
 
 ```bash
-BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-pr-after.json)
+BASE_BRANCH=$(jq -r '.baseRefName' /tmp/ham-1234-pr-after.json)
 HEAD_BRANCH=$(gh pr view https://github.com/acme/myrepo/pull/1234 --json headRefName --jq '.headRefName')
 git fetch origin "$BASE_BRANCH" "$HEAD_BRANCH"
 git checkout "$HEAD_BRANCH"
@@ -612,17 +612,17 @@ and required checks on the new head before re-acquiring the merge lease and
 merging, exactly as for any parallel-phase validation.
 
 ```bash
-gh pr view https://github.com/acme/myrepo/pull/1234 --json reviews > /tmp/ham-reviews.json
+gh pr view https://github.com/acme/myrepo/pull/1234 --json reviews > /tmp/ham-1234-reviews.json
 
-base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ham-pr-after.json)" | jq -sRr @uri)
-gh api "repos/acme/myrepo/branches/$base_enc/protection" > /tmp/ham-protection.json
-gh api "repos/acme/myrepo/issues/1234/timeline" --paginate > /tmp/ham-timeline.json
-gh api "repos/acme/myrepo/commits/$POST_REMEDIATION_SHA" > /tmp/ham-commit.json
+base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ham-1234-pr-after.json)" | jq -sRr @uri)
+gh api "repos/acme/myrepo/branches/$base_enc/protection" > /tmp/ham-1234-protection.json
+gh api "repos/acme/myrepo/issues/1234/timeline" --paginate > /tmp/ham-1234-timeline.json
+gh api "repos/acme/myrepo/commits/$POST_REMEDIATION_SHA" > /tmp/ham-1234-commit.json
 ```
 
-Build `/tmp/ham-terminal-remediation.json` as the claim to verify. `ama-check`
-must confirm the commit parent/trailers from `/tmp/ham-commit.json` and confirm
-the audit comment body and author exist in `/tmp/ham-timeline.json`; the raw
+Build `/tmp/ham-1234-terminal-remediation.json` as the claim to verify. `ama-check`
+must confirm the commit parent/trailers from `/tmp/ham-1234-commit.json` and confirm
+the audit comment body and author exist in `/tmp/ham-1234-timeline.json`; the raw
 commit payload must include a non-empty `files[]` diff. If the mandatory rebase
 rewrites the commit parent, the verified `Reviewed-Head` trailer must still
 match `abc12345abc12345abc12345abc12345abc12345`. The JSON claim alone does not satisfy the predicate.
@@ -660,24 +660,24 @@ Run the predicate against the live post-remediation head:
 
 ```bash
 node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
-  --pr /tmp/ham-pr-after.json \
-  --reviews /tmp/ham-reviews.json \
-  --protection /tmp/ham-protection.json \
-  --timeline /tmp/ham-timeline.json \
+  --pr /tmp/ham-1234-pr-after.json \
+  --reviews /tmp/ham-1234-reviews.json \
+  --protection /tmp/ham-1234-protection.json \
+  --timeline /tmp/ham-1234-timeline.json \
   --repo acme/myrepo \
   --root-dir /tmp/ama-test-root \
   --reviewed-sha abc12345abc12345abc12345abc12345abc12345 \
   --reviewer claude \
   --risk-class low \
-  --ham-terminal-remediation /tmp/ham-terminal-remediation.json \
-  --ham-commit /tmp/ham-commit.json \
-  > /tmp/ham-verdict.json
+  --ham-terminal-remediation /tmp/ham-1234-terminal-remediation.json \
+  --ham-commit /tmp/ham-1234-commit.json \
+  > /tmp/ham-1234-verdict.json
 ```
 
 Do not merge unless all of these are true:
 
 - `HAM_MERGE_LEASE_HELD=1` and `HAM_MERGE_LEASE_ID` is non-empty.
-- `/tmp/ham-verdict.json` has `eligible: true`. (For any BLOCKING finding the
+- `/tmp/ham-1234-verdict.json` has `eligible: true`. (For any BLOCKING finding the
   predicate still requires validated terminal-remediation provenance —
   `ham_terminal_remediation_validated` — to reach `eligible: true`; for a
   non-blocking-only close the entitled hammer is trusted and `eligible: true`
@@ -741,7 +741,7 @@ ham_append_terminal_audit() {
     --argjson mergeAttempts "${HAM_MERGE_ATTEMPTS:-0}" \
     --argjson rebaseAttempts "${HAM_REBASE_ATTEMPTS:-0}" \
     --argjson preMergeEligible "${HAM_PRE_MERGE_ELIGIBLE:-0}" \
-    --argjson eligibilityTrace "$(cat /tmp/ham-verdict.json)" \
+    --argjson eligibilityTrace "$(cat /tmp/ham-1234-verdict.json)" \
     --argjson githubGate "$([ -s "$HAM_GATE_JSON" ] && cat "$HAM_GATE_JSON" || printf '{}')" \
     '{
       preMergeEligible: ($preMergeEligible == 1),
@@ -929,7 +929,7 @@ else
     --arg remediatedFindings "<n> addressed (<b> blocking, <nb> non-blocking)" \
     --arg failingTestsFixed "<list, or 'suite already green'>" \
     --argjson rebaseAttempts "${HAM_REBASE_ATTEMPTS:-0}" \
-    --argjson eligibilityTrace "$(cat /tmp/ham-verdict.json)" \
+    --argjson eligibilityTrace "$(cat /tmp/ham-1234-verdict.json)" \
     --argjson githubGate "$(cat "$HAM_GATE_JSON")" \
     '{
       preMergeEligible: true,

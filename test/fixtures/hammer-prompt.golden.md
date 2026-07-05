@@ -780,6 +780,7 @@ ham_append_terminal_audit() {
 ham_refresh_github_gate_once() {
   POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" node --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchPullRequestRollup } from '/tmp/ama-test-root/src/github-api.mjs';
+import { evaluateMergeEligibility } from '/tmp/ama-test-root/src/ama/merge-eligibility.mjs';
 
 const repo = 'acme/myrepo';
 const prNumber = Number('1234');
@@ -798,7 +799,21 @@ const mergeable = String(rollup.mergeable || '').toUpperCase() === 'MERGEABLE';
 const notBehind = String(rollup.mergeStateStatus || '').toUpperCase() !== 'BEHIND';
 const state = String(rollup.state || '').toUpperCase();
 const open = state === 'OPEN';
-const ok = open && headMatches && mergeable && notBehind && checks.length > 0 && badChecks.length === 0;
+// MSM-02: the GitHub-side gate (required checks green + mergeable + head-match)
+// is the shared merge-eligibility predicate. Verdict and lease are gated upstream
+// for this call site — ama-check emits the verdict into /tmp verdict.json and the
+// shell hard-checks HAM_MERGE_LEASE_HELD before reaching here — so they are passed
+// as already-satisfied; `ok` stays exactly the pre-MSM-02 GitHub gate.
+const ok = evaluateMergeEligibility({
+  verdict: 'settled-success',
+  leaseHeld: true,
+  requiredChecks: checks,
+  mergeable: rollup.mergeable,
+  mergeStateStatus: rollup.mergeStateStatus,
+  prState: state,
+  candidateHead: rollup.headSha || rollup.headRefOid || '',
+  validatedHead: expectedHead,
+}).eligible;
 console.log(JSON.stringify({
   ok,
   state,

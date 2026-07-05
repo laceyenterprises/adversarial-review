@@ -47,12 +47,21 @@ const {
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
   buildAgyReviewArgs,
+  DEFAULT_AGY_ARGV_MAX_BYTES,
+  resolveAgyArgvMaxBytes,
+  agyPromptBytes,
   assertAgyPromptFitsArgv,
   AGY_ARGV_MAX_BYTES,
   resolveAgyPrintTimeoutMs,
   resolveAgyReviewerSubprocessTimeoutMs,
   formatAgyPrintTimeout,
   sanitizeAgyReviewOutput,
+  buildPromptForReviewerModel,
+  chooseAgyOversizedCrossModelRoute,
+  resolveAgyOversizedReviewRoute,
+  splitDiffForAgyChunks,
+  mergeChunkedAgyReviews,
+  reviewAgyOversizedInChunks,
   AGY_KEYCHAIN_ACCOUNT,
   AGY_KEYCHAIN_SERVICE,
   AGY_KEYCHAIN_REMEDIATION,
@@ -1994,6 +2003,133 @@ test('spawnAgyReview refuses an oversized prompt rather than reverting to the mo
 test('assertAgyPromptFitsArgv accepts prompts under the budget and rejects oversized ones', () => {
   assert.equal(assertAgyPromptFitsArgv('ok', { maxBytes: 10 }), 2);
   assert.throws(() => assertAgyPromptFitsArgv('x'.repeat(11), { maxBytes: 10 }), /argv budget/);
+});
+
+test('agy argv budget is a named configurable 262144-byte default', () => {
+  assert.equal(DEFAULT_AGY_ARGV_MAX_BYTES, 262_144);
+  assert.equal(AGY_ARGV_MAX_BYTES, 262_144);
+  assert.equal(resolveAgyArgvMaxBytes({}), 262_144);
+  assert.equal(resolveAgyArgvMaxBytes({ ADVERSARIAL_REVIEW_AGY_ARGV_MAX_BYTES: '12345' }), 12_345);
+});
+
+test('oversized agy prompt on [codex] routes this review to claude', () => {
+  const diff = `diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n+${'x'.repeat(500)}`;
+  const route = resolveAgyOversizedReviewRoute({
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    builderTag: '[codex]',
+    diff,
+    extraContext: '',
+    promptStage: 'first',
+    geminiRuntime: 'antigravity',
+    maxBytes: 300,
+  });
+
+  assert.equal(route.oversized, true);
+  assert.equal(route.reason, 'agy-argv-budget-exceeded');
+  assert.equal(route.route.reviewerModel, 'claude');
+  assert.equal(route.route.botTokenEnv, 'GH_CLAUDE_REVIEWER_TOKEN');
+  assert.ok(route.promptBytes > route.maxBytes);
+  assert.deepEqual(chooseAgyOversizedCrossModelRoute('[claude-code]'), {
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  });
+});
+
+test('normal-size always-on gemini antigravity review stays on gemini', () => {
+  const route = resolveAgyOversizedReviewRoute({
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    builderTag: '[codex]',
+    diff: 'diff --git a/a.txt b/a.txt\n+a\n',
+    extraContext: '',
+    promptStage: 'first',
+    geminiRuntime: 'antigravity',
+    maxBytes: 100_000,
+  });
+
+  assert.equal(route.oversized, false);
+  assert.deepEqual(route.route, {
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+  });
+});
+
+test('only agy available: oversized diff chunk fallback keeps each chunk under budget and merges findings', async () => {
+  const diff = [
+    'diff --git a/a.txt b/a.txt',
+    '--- a/a.txt',
+    '+++ b/a.txt',
+    ...Array.from({ length: 12 }, (_, index) => `+line ${index} ${'x'.repeat(20)}`),
+  ].join('\n');
+  const maxBytes = 16_000;
+  const split = splitDiffForAgyChunks(diff, {
+    extraContext: '',
+    promptStage: 'first',
+    maxBytes,
+    maxChunks: 20,
+  });
+  assert.equal(split.ok, true);
+  assert.ok(split.chunks.length > 1);
+  for (const chunk of split.chunks) {
+    assert.ok(chunk.promptBytes <= maxBytes, `chunk prompt ${chunk.promptBytes} exceeded ${maxBytes}`);
+    const prompt = buildPromptForReviewerModel('gemini', chunk.diff, '', {
+      promptStage: 'first',
+      runtime: 'antigravity',
+    });
+    assert.equal(agyPromptBytes(prompt), chunk.promptBytes);
+  }
+
+  const calls = [];
+  const result = await reviewAgyOversizedInChunks(diff, '', {
+    promptStage: 'first',
+    maxBytes,
+    maxChunks: 20,
+    reviewWithGeminiImpl: async (chunkDiff) => {
+      calls.push(chunkDiff);
+      return {
+        reviewText: calls.length === 1
+          ? '## Blocking issues\n- Bad first chunk.\n\n## Verdict\nRequest changes'
+          : '## Blocking issues\n- None.\n\n## Verdict\nComment only',
+        tokenUsage: null,
+      };
+    },
+  });
+
+  assert.equal(calls.length, split.chunks.length);
+  assert.equal(result.needsSanitize, false);
+  assert.equal(result.chunked, true);
+  assert.match(result.reviewText, /Bad first chunk/);
+  assert.match(result.reviewText, /## Verdict\nRequest changes/);
+});
+
+test('oversized agy fallback alerts when cross-model route and chunking are unavailable', async () => {
+  const diff = 'diff --git a/a.txt b/a.txt\n+' + 'x'.repeat(100);
+  const route = resolveAgyOversizedReviewRoute({
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    builderTag: '[pi]',
+    diff,
+    extraContext: '',
+    promptStage: 'first',
+    geminiRuntime: 'antigravity',
+    maxBytes: 50,
+  });
+  assert.equal(route.oversized, true);
+  assert.equal(route.route, null);
+
+  await assert.rejects(
+    () => reviewAgyOversizedInChunks(diff, '', {
+      promptStage: 'first',
+      promptBytes: route.promptBytes,
+      maxBytes: 50,
+      maxChunks: 0,
+      reviewWithGeminiImpl: async () => {
+        throw new Error('must not spawn chunk when chunking is disabled');
+      },
+    }),
+    /chunking unavailable: chunking-disabled/,
+  );
 });
 
 test('resolveGeminiAntigravityModel: agy uses the display-name token while the cli path keeps its slug', () => {

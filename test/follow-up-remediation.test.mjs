@@ -35,6 +35,7 @@ import {
   killDetachedWorkerProcessGroup,
   hasWorkflowGitHubAppPermission,
   hasWorkflowOAuthScope,
+  assertWorkflowPushCapabilityForJob,
   inspectRemediationPushTokenCapability,
   pickRemediationWorkerClass,
   prepareClaudeCodeRemediationStartupEnv,
@@ -1239,6 +1240,26 @@ test('workflow push capability detection parses OAuth headers, gh auth status, a
   assert.equal(oauth.hasWorkflowCapability, false);
   assert.deepEqual(oauth.scopes, ['repo', 'read:org']);
 
+  let ambientProbeCalls = 0;
+  const ambientWithGlobalAppPermissions = await inspectRemediationPushTokenCapability({
+    env: {
+      GITHUB_TOKEN: 'gho_workflow_capable',
+      GITHUB_APP_INSTALLATION_PERMISSIONS: '{"workflows":"read"}',
+    },
+    execFileImpl: async (command, args) => {
+      assert.equal(command, 'gh');
+      assert.deepEqual(args, ['api', '/', '--include']);
+      ambientProbeCalls += 1;
+      return { stdout: 'HTTP/2 200\nx-oauth-scopes: repo, workflow\n', stderr: '' };
+    },
+  });
+  assert.equal(ambientProbeCalls, 1);
+  assert.equal(ambientWithGlobalAppPermissions.source, 'ambient-gh');
+  assert.equal(ambientWithGlobalAppPermissions.configured, false);
+  assert.equal(ambientWithGlobalAppPermissions.tokenType, 'oauth');
+  assert.equal(ambientWithGlobalAppPermissions.detection, 'x-oauth-scopes');
+  assert.equal(ambientWithGlobalAppPermissions.hasWorkflowCapability, true);
+
   const app = await inspectRemediationPushTokenCapability({
     env: {
       ADVERSARIAL_REMEDIATION_PUSH_TOKEN: 'ghs_app_token',
@@ -1305,6 +1326,59 @@ test('workflow changed-file lookup retries transient errors and fails closed whe
   assert.equal(calls, 3);
 });
 
+test('workflow changed-file lookup propagates permanent lookup failures', async () => {
+  let invalidRepoCalls = 0;
+  await assert.rejects(
+    remediationTouchesWorkflowFiles({
+      job: { repo: 'not a repo', prNumber: 504 },
+      retryDelaysMs: [],
+      log: { warn() {} },
+      execFileImpl: async () => {
+        invalidRepoCalls += 1;
+        throw new Error('unexpected gh invocation for invalid repo');
+      },
+    }),
+    (err) => {
+      assert.match(err.message, /Invalid GitHub repo slug/);
+      assert.notEqual(err.isWorkflowPushPreflightTransientError, true);
+      return true;
+    },
+  );
+  assert.equal(invalidRepoCalls, 0);
+
+  await assert.rejects(
+    remediationTouchesWorkflowFiles({
+      job: { repo: 'laceyenterprises/adversarial-review', prNumber: 504 },
+      retryDelaysMs: [],
+      log: { warn() {} },
+      execFileImpl: async () => {
+        const err = new Error('spawn gh ENOENT');
+        err.code = 'ENOENT';
+        throw err;
+      },
+    }),
+    (err) => {
+      assert.equal(err.code, 'ENOENT');
+      assert.notEqual(err.isWorkflowPushPreflightTransientError, true);
+      return true;
+    },
+  );
+
+  await assert.rejects(
+    remediationTouchesWorkflowFiles({
+      job: { repo: 'laceyenterprises/adversarial-review', prNumber: 504 },
+      retryDelaysMs: [],
+      log: { warn() {} },
+      execFileImpl: async () => ({ stdout: 'not-json', stderr: '' }),
+    }),
+    (err) => {
+      assert.equal(err.name, 'SyntaxError');
+      assert.notEqual(err.isWorkflowPushPreflightTransientError, true);
+      return true;
+    },
+  );
+});
+
 test('workflow changed-file lookup uses configured remediation push token auth env', async () => {
   let observedEnv = null;
   const result = await remediationTouchesWorkflowFiles({
@@ -1343,6 +1417,40 @@ test('workflow changed-file lookup uses configured remediation push token auth e
   assert.equal(observedEnv.GIT_CONFIG_VALUE_0, '');
   assert.equal(observedEnv.GIT_CONFIG_KEY_1, 'credential.helper');
   assert.equal(observedEnv.GIT_CONFIG_VALUE_1, '!gh auth git-credential');
+});
+
+test('workflow push preflight threads configured token auth through changed-file lookup', async () => {
+  let observedEnv = null;
+  const result = await assertWorkflowPushCapabilityForJob({
+    job: { repo: 'laceyenterprises/adversarial-review', prNumber: 504 },
+    env: {
+      GITHUB_TOKEN: 'ambient_token_without_access',
+      ADVERSARIAL_REMEDIATION_PUSH_TOKEN: 'configured_push_token',
+    },
+    retryDelaysMs: [],
+    execFileImpl: async (command, args, options = {}) => {
+      assert.equal(command, 'gh');
+      assert.deepEqual(args, [
+        'pr',
+        'view',
+        '504',
+        '--repo',
+        'laceyenterprises/adversarial-review',
+        '--json',
+        'files',
+      ]);
+      observedEnv = options.env;
+      return {
+        stdout: JSON.stringify({ files: [{ path: 'src/follow-up-remediation.mjs' }] }),
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.gated, false);
+  assert.equal(result.workflowTouch.touches, false);
+  assert.equal(observedEnv.GITHUB_TOKEN, 'configured_push_token');
+  assert.equal(observedEnv.GH_TOKEN, 'configured_push_token');
 });
 
 test('workflow changed-file lookup preflight outage requeues instead of spawning or terminalizing', async () => {
@@ -7313,7 +7421,7 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when codex OAuth pre
     process.env.CODEX_HOME = path.join(rootDir, '.codex');
     process.env.HOME = rootDir;
 
-    createFollowUpJob({
+    const created = createFollowUpJob({
       rootDir,
       repo: 'laceyenterprises/clio',
       prNumber: 7,
@@ -7323,6 +7431,12 @@ test('consumeNextFollowUpJob moves a claimed job to failed/ when codex OAuth pre
       reviewBody: '## Summary\nFix it.\n\n## Verdict\nRequest changes',
       reviewPostedAt: '2026-04-21T08:00:00.000Z',
       critical: true,
+    });
+    writeFollowUpJob(created.jobPath, {
+      ...created.job,
+      baseBranch: 'main',
+      branch: 'claude-code-fix-oauth-preflight',
+      changedFiles: ['src/follow-up-remediation.mjs'],
     });
 
     await assert.rejects(

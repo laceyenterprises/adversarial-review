@@ -1318,6 +1318,9 @@ async function remediationTouchesWorkflowFiles({
       source: 'gh-pr-view',
     };
   } catch (err) {
+    if (!isTransientWorkflowPushPreflightError(err)) {
+      throw err;
+    }
     log.warn?.(
       `[follow-up-remediation] workflow-push preflight could not list changed paths for ${job?.repo}#${job?.prNumber}: ${err?.message || err}`
     );
@@ -1347,7 +1350,7 @@ async function inspectRemediationPushTokenCapability({
   const identity = resolveRemediationPushTokenIdentity(env);
   const authEnv = withGhGitCredentialEnv(env);
   const configuredPermissions = parseConfiguredAppPermissionsFromEnv(env);
-  if (configuredPermissions) {
+  if (configuredPermissions && identity.configured) {
     return {
       ...identity,
       tokenType: 'github-app',
@@ -1499,7 +1502,7 @@ async function assertWorkflowPushCapabilityForJob({
   log = console,
   retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
 } = {}) {
-  const workflowTouch = await remediationTouchesWorkflowFiles({ job, execFileImpl, log, retryDelaysMs });
+  const workflowTouch = await remediationTouchesWorkflowFiles({ job, env, execFileImpl, log, retryDelaysMs });
   if (!workflowTouch.touches) {
     const identity = resolveRemediationPushTokenIdentity(env);
     log.log?.(

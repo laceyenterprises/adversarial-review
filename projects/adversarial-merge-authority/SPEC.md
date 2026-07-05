@@ -266,6 +266,12 @@ directly on top of the reviewed head. The mode does not request another review
 round; instead, `ama-check --ham-terminal-remediation <claim.json>` validates
 the post-remediation head immediately before merge.
 
+When the final review head is stale at cycle exhaustion, dispatch must preserve
+the true reviewed head as `reviewedSha` and carry the live PR head separately as
+the HAM target. Dispatch records remain keyed by real commit SHAs; the
+exhaustion lane is identified by a dedicated reason field, not by replacing a
+SHA with a human-readable token.
+
 The HAM remediation scope includes keeping canonical docs current for the
 change it lands. If the remediation diff changes a persistent store shape and
 the repository carries `docs/data-model/`, HAM must update the matching

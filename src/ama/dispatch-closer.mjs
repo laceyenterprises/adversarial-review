@@ -1187,7 +1187,10 @@ export function composeCloserPrompt({
  * @param {Object} args.dispatchContext  — operator-controlled values
  * @param {string} args.dispatchContext.repo           owner/name (e.g. `acme/myrepo`)
  * @param {string} args.dispatchContext.prUrl          PR URL (e.g. `https://github.com/acme/myrepo/pull/123`)
- * @param {string} args.dispatchContext.reviewedSha    PR head SHA the watcher authorized
+ * @param {string} args.dispatchContext.reviewedSha    head SHA the reviewer actually reviewed
+ * @param {string=} args.dispatchContext.targetRemediationSha current PR head targeted by HAM remediation
+ * @param {string=} args.dispatchContext.dispatchRecordHeadSha commit SHA used for the dispatch record key
+ * @param {string=} args.dispatchContext.dispatchReason reason for non-standard dispatch routing
  * @param {string} args.dispatchContext.riskClass      resolved risk class
  * @param {string} args.dispatchContext.requiredGateContext
  * @param {string} args.dispatchContext.reviewedBy
@@ -1270,8 +1273,9 @@ export async function maybeDispatchAmaCloser({
       reviewState?.headSha &&
       prMetadata.headSha !== reviewState.headSha
     ) {
-      dispatchContext.reviewedSha = prMetadata.headSha;
-      dispatchContext.dispatchRecordHeadSha = 'exhausted-final-hammer';
+      dispatchContext.targetRemediationSha = prMetadata.headSha;
+      dispatchContext.dispatchRecordHeadSha ||= prMetadata.headSha;
+      dispatchContext.dispatchReason ||= 'exhausted-final-hammer';
     }
     // fall through to the dispatch below (hammer template, remediation mode)
     forceHammerWorkerClass = true;
@@ -1307,7 +1311,9 @@ export async function maybeDispatchAmaCloser({
   const repo = dispatchContext.repo;
   const prNumber = Number(prMetadata?.prNumber);
   const reviewedSha = dispatchContext.reviewedSha;
-  const dispatchRecordHeadSha = dispatchContext.dispatchRecordHeadSha || reviewedSha;
+  const targetRemediationSha = dispatchContext.targetRemediationSha || reviewedSha;
+  const dispatchRecordHeadSha = dispatchContext.dispatchRecordHeadSha || targetRemediationSha;
+  const dispatchReason = dispatchContext.dispatchReason || null;
   const mergeMethod = String(cfg.mergeMethod || 'squash').toLowerCase();
   const rootDir = dispatchContext.rootDir || SUBMODULE_ROOT;
 
@@ -1712,7 +1718,10 @@ export async function maybeDispatchAmaCloser({
     schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
     repo,
     prNumber,
-    headSha: reviewedSha,
+    headSha: targetRemediationSha,
+    reviewedSha,
+    targetRemediationSha,
+    dispatchReason,
     workerClass,
     promptPath,
     promptDir,
@@ -1873,7 +1882,10 @@ export async function maybeDispatchAmaCloser({
           schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
           repo,
           prNumber,
-          headSha: reviewedSha,
+          headSha: targetRemediationSha,
+          reviewedSha,
+          targetRemediationSha,
+          dispatchReason,
           workerClass,
           promptPath,
           promptDir,
@@ -1964,7 +1976,10 @@ export async function maybeDispatchAmaCloser({
     schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
     repo,
     prNumber,
-    headSha: reviewedSha,
+    headSha: targetRemediationSha,
+    reviewedSha,
+    targetRemediationSha,
+    dispatchReason,
     workerClass,
     promptPath,
     promptDir,

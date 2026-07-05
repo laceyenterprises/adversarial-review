@@ -83,12 +83,12 @@ against a persistent local-worktree blockage.
 When the review cycle is exhausted and the posted review head is stale, the
 watcher may authorize HAM terminal remediation against the current PR head
 without first requesting another adversarial review. In that lane the closer
-prompt, audit path, lease, and merge guard still use the current PR head so the
-HAM evidence is exact-head evidence. The durable AMA dispatch record, however,
-is keyed with the stable `exhausted-final-hammer` head token for that PR. That
-stable key is the cross-head retry budget: if HAM pushes another remediation
-commit instead of merging, the next watcher poll must observe the existing
-dispatch record rather than creating a fresh per-commit budget.
+preserves the posted review head as `reviewedSha` for audit paths, leases, and
+review/head-gap guards, and passes the live PR head separately as
+`targetRemediationSha`. The durable AMA dispatch record is keyed by that real
+target commit SHA and carries `dispatchReason: "exhausted-final-hammer"` for
+the exhausted-cycle lane; no dispatch context field that canonically stores a
+Git commit SHA may be populated with the human-readable reason token.
 
 The merged-signal producer is outside this repository's write path: watcher
 lifecycle sync records owed

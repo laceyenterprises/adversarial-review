@@ -30,9 +30,10 @@
  * closer records only after it verifies the HAM commit + audit provenance.
  * Anything else fails the gate with `verdict-not-eligible`.
  */
-export const ELIGIBLE_MERGE_VERDICTS = Object.freeze(
-  new Set(['settled-success', 'ham_terminal_remediation_validated']),
-);
+export const ELIGIBLE_MERGE_VERDICTS = Object.freeze([
+  'settled-success',
+  'ham_terminal_remediation_validated',
+]);
 
 /**
  * Stable, ordered reason vocabulary. `evaluateMergeEligibility` emits reasons in
@@ -86,7 +87,7 @@ export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
  */
 
 function verdictEligible(verdict) {
-  return ELIGIBLE_MERGE_VERDICTS.has(String(verdict ?? '').trim().toLowerCase());
+  return ELIGIBLE_MERGE_VERDICTS.includes(String(verdict ?? '').trim().toLowerCase());
 }
 
 /**

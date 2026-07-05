@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { readAmaAuditEntry } from '../src/ama/audit.mjs';
-import { maybeDaemonMergeCleanReview } from '../src/ama/daemon-merge.mjs';
+import { maybeDaemonMergeCleanReview, __testables__ } from '../src/ama/daemon-merge.mjs';
 import { inspectMergeLease } from '../src/ama/merge-lease.mjs';
 
 const HEAD = 'abc12345abc12345abc12345abc12345abc12345';
@@ -110,6 +111,77 @@ test('transient gh pr merge failure retries under the lease and writes one daemo
   }
 });
 
+test('transient preflight failure retries under the lease before merge', async () => {
+  const rootDir = freshRoot();
+  let mergeCalls = 0;
+  let headReads = 0;
+  try {
+    const result = await maybeDaemonMergeCleanReview(baseArgs(rootDir, {
+      execFileImpl: async () => {
+        mergeCalls += 1;
+        return { stdout: '' };
+      },
+      fetchHeadAndStateImpl: async () => {
+        headReads += 1;
+        if (headReads === 1) {
+          const err = new Error('HTTP 502 gateway');
+          err.stderr = 'HTTP 502 gateway';
+          throw err;
+        }
+        return { state: 'OPEN', headRefOid: HEAD };
+      },
+    }));
+
+    assert.equal(result.merged, true);
+    assert.equal(result.attempts, 1);
+    assert.equal(headReads, 2);
+    assert.equal(mergeCalls, 1);
+    const audit = readAmaAuditEntry(rootDir, 'owner/name', 42, HEAD);
+    assert.equal(audit.status, 'succeeded');
+    assert.equal(audit.attempts[0].mergeAttempts, 1);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('final audit write is awaited before releasing merge lease', async () => {
+  const rootDir = freshRoot();
+  let resolveAudit;
+  const auditGate = new Promise((resolve) => {
+    resolveAudit = resolve;
+  });
+  let auditStarted = false;
+  let auditResolved = false;
+  let releaseCalled = false;
+  try {
+    const mergePromise = maybeDaemonMergeCleanReview(baseArgs(rootDir, {
+      execFileImpl: async () => ({ stdout: '' }),
+      writeAmaAuditEntryImpl: async () => {
+        auditStarted = true;
+        await auditGate;
+        auditResolved = true;
+      },
+      releaseMergeLeaseImpl: (leaseArgs) => {
+        releaseCalled = true;
+        assert.equal(auditResolved, true);
+        return inspectMergeLease(leaseArgs);
+      },
+    }));
+
+    await delay(0);
+    assert.equal(auditStarted, true);
+    assert.equal(releaseCalled, false);
+
+    resolveAudit();
+    const result = await mergePromise;
+
+    assert.equal(result.merged, true);
+    assert.equal(releaseCalled, true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('permanent merge failure fails closed without retry and releases lease', async () => {
   const rootDir = freshRoot();
   let mergeCalls = 0;
@@ -162,6 +234,46 @@ test('strict mode refuses any blocking or non-blocking finding so watcher can ro
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('strict mode does not coerce missing finding counts to clean', async () => {
+  const rootDir = freshRoot();
+  try {
+    const missingBlocking = await maybeDaemonMergeCleanReview(baseArgs(rootDir, {
+      reviewState: {
+        verdict: 'settled-success',
+        headSha: HEAD,
+        blockingFindingCount: null,
+        nonBlockingFindingCount: 0,
+      },
+    }));
+    const missingNonBlocking = await maybeDaemonMergeCleanReview(baseArgs(rootDir, {
+      reviewState: {
+        verdict: 'settled-success',
+        headSha: HEAD,
+        blockingFindingCount: 0,
+        nonBlockingFindingCount: '',
+      },
+    }));
+
+    assert.equal(missingBlocking.handled, false);
+    assert.equal(missingBlocking.reason, 'findings-present');
+    assert.equal(missingNonBlocking.handled, false);
+    assert.equal(missingNonBlocking.reason, 'findings-present');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('subprocess diagnostics include stdout when stderr is whitespace', () => {
+  const err = new Error('fallback message');
+  err.stderr = '  \n\t';
+  err.stdout = 'HTTP 502 gateway';
+
+  const classified = __testables__.classifyMergeFailure(err);
+
+  assert.equal(classified.transient, true);
+  assert.equal(classified.detail, 'HTTP 502 gateway');
 });
 
 test('lease contention defers cleanly without merging', async () => {

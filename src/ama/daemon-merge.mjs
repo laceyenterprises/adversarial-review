@@ -33,7 +33,11 @@ function sleep(ms) {
 }
 
 function errText(err) {
-  return String(err?.stderr || err?.stdout || err?.message || err || '').trim();
+  const output = [err?.stderr, err?.stdout]
+    .filter((value) => String(value ?? '').trim())
+    .join('\n')
+    .trim();
+  return output || String(err?.message || err || '').trim();
 }
 
 function retryAfterMs(err) {
@@ -66,8 +70,8 @@ function boundedDelay(baseDelayMs, attempt, random = Math.random) {
 
 function isFullyCleanStrictReview(reviewState) {
   return (
-    Number(reviewState?.blockingFindingCount) === 0 &&
-    Number(reviewState?.nonBlockingFindingCount) === 0
+    reviewState?.blockingFindingCount === 0 &&
+    reviewState?.nonBlockingFindingCount === 0
   );
 }
 
@@ -190,7 +194,7 @@ export async function maybeDaemonMergeCleanReview({
   try {
     const eligibility = evaluateMergeEligibility(mergeEligibilityState({ reviewState, prMetadata, leaseHeld: true }));
     if (!eligibility.eligible) {
-      appendFinalAudit(daemonAuditAttempt({
+      await appendFinalAudit(daemonAuditAttempt({
         outcome: 'deferred',
         reason: 'not-eligible',
         eligibility,
@@ -202,34 +206,34 @@ export async function maybeDaemonMergeCleanReview({
     let lastFailure = null;
     const maxAttempts = retryDelaysMs.length + 1;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      const live = await fetchHeadAndStateImpl(repo, prNumber, { execFileImpl, withLabels: false, env });
-      const liveHead = String(live?.headRefOid || live?.headSha || '').trim();
-      const liveState = String(live?.state || '').toUpperCase();
-      if (liveHead !== headSha) {
-        appendFinalAudit(daemonAuditAttempt({
-          outcome: 'deferred',
-          reason: 'stale-head',
-          eligibility,
-          attempts: mergeAttempts,
-          detail: `live head ${liveHead || 'unknown'} did not match ${headSha}`,
-        }));
-        return { handled: true, merged: false, reason: 'stale-head', liveHead };
-      }
-      if (liveState && liveState !== 'OPEN') {
-        appendFinalAudit(daemonAuditAttempt({
-          outcome: 'deferred',
-          reason: 'pr-not-open',
-          eligibility,
-          attempts: mergeAttempts,
-          detail: `live state ${liveState}`,
-        }));
-        return { handled: true, merged: false, reason: 'pr-not-open', liveState };
-      }
-
-      mergeAttempts += 1;
       try {
+        const live = await fetchHeadAndStateImpl(repo, prNumber, { execFileImpl, withLabels: false, env });
+        const liveHead = String(live?.headRefOid || live?.headSha || '').trim();
+        const liveState = String(live?.state || '').toUpperCase();
+        if (liveHead !== headSha) {
+          await appendFinalAudit(daemonAuditAttempt({
+            outcome: 'deferred',
+            reason: 'stale-head',
+            eligibility,
+            attempts: mergeAttempts,
+            detail: `live head ${liveHead || 'unknown'} did not match ${headSha}`,
+          }));
+          return { handled: true, merged: false, reason: 'stale-head', liveHead };
+        }
+        if (liveState && liveState !== 'OPEN') {
+          await appendFinalAudit(daemonAuditAttempt({
+            outcome: 'deferred',
+            reason: 'pr-not-open',
+            eligibility,
+            attempts: mergeAttempts,
+            detail: `live state ${liveState}`,
+          }));
+          return { handled: true, merged: false, reason: 'pr-not-open', liveState };
+        }
+
+        mergeAttempts += 1;
         await runGhPrMerge({ repo, prNumber, headSha, execFileImpl, env, timeoutMs: mergeTimeoutMs });
-        appendFinalAudit(daemonAuditAttempt({
+        await appendFinalAudit(daemonAuditAttempt({
           outcome: 'succeeded',
           reason: 'daemon-merge',
           eligibility,
@@ -246,7 +250,7 @@ export async function maybeDaemonMergeCleanReview({
     }
 
     const finalReason = lastFailure?.classified?.reason || 'merge-failed';
-    appendFinalAudit(daemonAuditAttempt({
+    await appendFinalAudit(daemonAuditAttempt({
       outcome: 'failed-without-merge',
       reason: finalReason,
       eligibility,

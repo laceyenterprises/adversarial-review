@@ -1519,6 +1519,11 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /statusCheckRollup/);
   assert.match(prompt, /const mergeable = String\(rollup\.mergeable \|\| ''\)\.toUpperCase\(\) === 'MERGEABLE'/);
   assert.match(prompt, /const state = String\(rollup\.state \|\| ''\)\.toUpperCase\(\)/);
+  // MSM-02: the hammer's GitHub pre-merge gate routes through the shared
+  // merge-eligibility predicate instead of an inline boolean expression.
+  assert.match(prompt, /import \{ evaluateMergeEligibility \} from '[^']*\/src\/ama\/merge-eligibility\.mjs'/);
+  assert.match(prompt, /const ok = evaluateMergeEligibility\(\{[\s\S]*requiredChecks: checks,[\s\S]*validatedHead: expectedHead,[\s\S]*\}\)\.eligible;/);
+  assert.doesNotMatch(prompt, /const ok = open && headMatches && mergeable && notBehind/);
   assert.match(prompt, /ham_already_merged_validated_head/);
   assert.match(prompt, /HAM_MERGE_TMP_PREFIX="\$\{TMPDIR:-\/tmp\}\/ham-1234-\$\{HAM_MERGE_LEASE_ID:-no-lease\}-\$\$"/);
   assert.match(prompt, /HAM_MERGE_STDOUT=\$\(mktemp "\$\{HAM_MERGE_TMP_PREFIX\}\.gh-pr-merge\.stdout\.XXXXXX"\) \|\| exit 1/);

@@ -13,6 +13,15 @@ HAM-03 bounded rebase authority below.
 
 The predicate is the gate. Trust nothing else.
 
+Workspace/tooling note: this dispatch may be a single-repo rescue workspace,
+including `adversarial-review` self-PRs that intentionally do not provision an
+`agent-os` sibling checkout. Do not assume `../agent-os`, `$HQ_ROOT/repos/agent-os`,
+or any additional repo is present in the worker workspace. Use the absolute
+deployed tooling paths in this prompt (for example
+`/Users/airlock/agent-os/tools/adversarial-review/...`) for AMA helpers. If a
+required optional checkout is genuinely absent, record that fact as audit
+evidence instead of failing on a path assumption.
+
 ## Snapshot the watcher used (for audit context)
 
 - **PR:** <<PR_URL>>

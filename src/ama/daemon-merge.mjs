@@ -63,6 +63,10 @@ export const DAEMON_MERGE_DEFAULTS = Object.freeze({
   jitterSteps: 3,
 });
 
+export const DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS = 30_000;
+
+const DAEMON_MERGE_DIAGNOSTIC_MAX_CHARS = 4_000;
+
 /**
  * Marker recorded on every daemon-written audit doc + attempt so the audit is
  * distinguishable from the hammer's (`Closed-By: hammer`) audit for the same
@@ -166,9 +170,11 @@ export function classifyDaemonMergeError(text) {
   const haystack = String(text || '');
   // ham_merge_error_already_merged
   if (/already merged/i.test(haystack)) return 'already-merged';
+  // ham_merge_error_retryable: throttling must win before generic HTTP 403.
+  if (/rate limit|secondary rate limit|Retry-After/i.test(haystack)) return 'retryable';
   // ham_merge_error_permanent
   if (
-    /match-head-commit|head.*(mismatch|changed|does not match)|not authorized|permission|authentication|forbidden|HTTP 401|HTTP 403|branch protection|ruleset|required check|status checks? (not|have not)|not mergeable|merge conflict|closed|pull request.*not open|draft/i.test(
+    /match-head-commit|head.*(mismatch|changed|does not match)|not authorized|permission|authentication|forbidden|HTTP 401|HTTP 403|branch protection|ruleset|required check|status checks? (not|have not)|not mergeable|merge conflict|pull request.*closed|closed pull request|pr is closed|state:?\s*closed|pull request.*not open|draft/i.test(
       haystack,
     )
   ) {
@@ -176,7 +182,7 @@ export function classifyDaemonMergeError(text) {
   }
   // ham_merge_error_retryable
   if (
-    /connection reset|ECONNRESET|TLS handshake timeout|timeout|timed out|ETIMEDOUT|DNS|ENOTFOUND|EAI_AGAIN|EIO|Input\/output error|EAGAIN|resource temporarily unavailable|socket|HTTP 5[0-9][0-9]|502|503|504|rate limit|secondary rate limit|Retry-After|temporar(y|ily)|try again|service unavailable|gateway/i.test(
+    /connection (?:reset|closed)|ECONNRESET|TLS handshake timeout|timeout|timed out|ETIMEDOUT|DNS|ENOTFOUND|EAI_AGAIN|EIO|Input\/output error|EAGAIN|resource temporarily unavailable|socket|HTTP 5[0-9][0-9]|502|503|504|temporar(y|ily)|try again|service unavailable|gateway/i.test(
       haystack,
     )
   ) {
@@ -217,6 +223,19 @@ function normalizeGateState(live = {}) {
     mergeStateStatus: live.mergeStateStatus,
     prState: String(live.prState ?? live.state ?? '').trim().toUpperCase(),
     merged: Boolean(live.merged) || String(live.prState ?? live.state ?? '').toUpperCase() === 'MERGED',
+  };
+}
+
+function truncateDaemonMergeDiagnostic(value) {
+  const text = String(value || '');
+  if (text.length <= DAEMON_MERGE_DIAGNOSTIC_MAX_CHARS) return text;
+  return `${text.slice(0, DAEMON_MERGE_DIAGNOSTIC_MAX_CHARS)}...[truncated]`;
+}
+
+function daemonMergeDiagnostics(mergeRes) {
+  return {
+    stderr: truncateDaemonMergeDiagnostic(mergeRes?.stderr),
+    stdout: truncateDaemonMergeDiagnostic(mergeRes?.stdout),
   };
 }
 
@@ -493,16 +512,28 @@ export async function attemptDaemonCleanMerge({
       break;
     }
     if (cls === 'permanent') {
-      terminal = { reason: 'permanent-merge-rejection', permanent: true };
+      terminal = {
+        reason: 'permanent-merge-rejection',
+        permanent: true,
+        mergeDiagnostics: daemonMergeDiagnostics(mergeRes),
+      };
       break;
     }
     if (cls === 'unclassified') {
-      terminal = { reason: 'unclassified-merge-failure', permanent: true };
+      terminal = {
+        reason: 'unclassified-merge-failure',
+        permanent: true,
+        mergeDiagnostics: daemonMergeDiagnostics(mergeRes),
+      };
       break;
     }
     // Retryable: back off within the bounded budget, then re-read + re-attempt.
     if (attempts >= retryCap) {
-      terminal = { reason: 'merge-retry-budget-exhausted', permanent: false };
+      terminal = {
+        reason: 'merge-retry-budget-exhausted',
+        permanent: false,
+        mergeDiagnostics: daemonMergeDiagnostics(mergeRes),
+      };
       break;
     }
     logger?.log?.(
@@ -544,6 +575,7 @@ export async function attemptDaemonCleanMerge({
           reason: terminal.reason,
           permanent: Boolean(terminal.permanent),
           ...(terminal.reasons ? { preMergeReasons: terminal.reasons } : {}),
+          ...(terminal.mergeDiagnostics ? { mergeDiagnostics: terminal.mergeDiagnostics } : {}),
           validatedHead,
           mergeMethod,
           attempts,
@@ -573,7 +605,10 @@ export async function attemptDaemonCleanMerge({
   }
   logger?.warn?.(
     `[daemon-merge] fail-closed for ${repo}#${prNumber}@${validatedHead}: ${terminal.reason} ` +
-      `(after ${attempts} attempt(s); no hammer spawned)`,
+      `(after ${attempts} attempt(s); no hammer spawned)` +
+      (terminal.mergeDiagnostics
+        ? ` stderr=${JSON.stringify(terminal.mergeDiagnostics.stderr)} stdout=${JSON.stringify(terminal.mergeDiagnostics.stdout)}`
+        : ''),
   );
   return {
     disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
@@ -595,5 +630,6 @@ export const __testables__ = Object.freeze({
   normalizeFindingCount,
   normalizeGateState,
   priorDaemonPermanentFailure,
+  truncateDaemonMergeDiagnostic,
   PERMANENT_TERMINAL_REASONS,
 });

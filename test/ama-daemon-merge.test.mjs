@@ -179,8 +179,11 @@ test('classifyDaemonMergeError mirrors the hammer classifier order', () => {
   assert.equal(classifyDaemonMergeError('required check has not succeeded'), 'permanent');
   assert.equal(classifyDaemonMergeError('HTTP 403 forbidden'), 'permanent');
   assert.equal(classifyDaemonMergeError('connection reset by peer'), 'retryable');
+  assert.equal(classifyDaemonMergeError('connection closed by peer'), 'retryable');
   assert.equal(classifyDaemonMergeError('HTTP 503 service unavailable'), 'retryable');
+  assert.equal(classifyDaemonMergeError('HTTP 403 Rate Limit Exceeded'), 'retryable');
   assert.equal(classifyDaemonMergeError('secondary rate limit; Retry-After: 30'), 'retryable');
+  assert.equal(classifyDaemonMergeError('pull request was closed'), 'permanent');
   assert.equal(classifyDaemonMergeError('spawn gh EIO'), 'retryable');
   assert.equal(classifyDaemonMergeError('Input/output error'), 'retryable');
   assert.equal(classifyDaemonMergeError('spawn gh EAGAIN'), 'retryable');
@@ -254,10 +257,13 @@ test('transient gh pr merge failure then success → bounded retry, exactly one 
 // ── Mandatory scenario 3: permanent failure → fail closed, no retry loop ──────
 
 test('permanent merge rejection → fail closed with no retry; lease released; reason recorded', async () => {
+  const warns = [];
   const h = makeHarness({
-    mergeResults: [{ exitCode: 1, stderr: 'branch protection rules not satisfied' }],
+    mergeResults: [{ exitCode: 1, stderr: 'branch protection rules not satisfied', stdout: 'merge refused' }],
   });
-  const result = await attemptDaemonCleanMerge(baseArgs(h));
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    logger: { log() {}, warn: (message) => warns.push(String(message)) },
+  }));
 
   assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
   assert.equal(result.merged, false);
@@ -271,6 +277,12 @@ test('permanent merge rejection → fail closed with no retry; lease released; r
   const terminal = doc.attempts[doc.attempts.length - 1];
   assert.equal(terminal.reason, 'permanent-merge-rejection');
   assert.equal(terminal.permanent, true);
+  assert.deepEqual(terminal.mergeDiagnostics, {
+    stderr: 'branch protection rules not satisfied',
+    stdout: 'merge refused',
+  });
+  assert.match(warns.join('\n'), /branch protection rules not satisfied/);
+  assert.match(warns.join('\n'), /merge refused/);
 });
 
 test('head moves off validated head between pre-lease gate and merge loop → fail closed stale-head', async () => {

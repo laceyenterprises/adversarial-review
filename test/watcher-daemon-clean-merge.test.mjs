@@ -4,8 +4,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { maybeDispatchAmaClosureFor } from '../src/watcher.mjs';
-import { DAEMON_MERGE_DISPOSITION } from '../src/ama/daemon-merge.mjs';
+import { maybeDispatchAmaClosureFor, runDaemonCleanMergeAttempt } from '../src/watcher.mjs';
+import {
+  DAEMON_MERGE_DISPOSITION,
+  DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
+} from '../src/ama/daemon-merge.mjs';
 
 // Integration test for the MSM-03 wiring seam in `maybeDispatchAmaClosureFor`:
 // the daemon clean-merge attempt runs BEFORE the AMA closer dispatch, and any
@@ -160,6 +163,76 @@ test('daemon not-taken (findings present) → falls through to the closer/hammer
     assert.equal(result.dispatched, true);
     assert.equal(result.reason, 'closer-took-over');
     assert.ok(seenReviewState, 'closer received the reviewState');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('daemon gh merge subprocess is bounded by the shared timeout', async () => {
+  const rootDir = tempRoot();
+  let capturedOptions = null;
+  try {
+    const result = await runDaemonCleanMergeAttempt({
+      rootDir,
+      cfg: { mergeMethod: 'squash' },
+      repoPath: 'acme/repo',
+      prNumber: 300,
+      candidate: {
+        baseBranch: 'main',
+        headSha: 'head-live',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        prState: 'open',
+      },
+      gateSnapshot: {
+        reviewedHeadSha: 'head-live',
+        settledReview: { verdict: 'settled-success' },
+      },
+      mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviewState: {
+        blockingFindingCount: 0,
+        blockingFindingState: 'known',
+        nonBlockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+      },
+      reviewStateRow: { reviewer: 'codex' },
+      currentPrHeadSha: 'head-live',
+      execFileImpl: async (_command, _args, options) => {
+        capturedOptions = options;
+        return { stdout: '', stderr: '' };
+      },
+      fetchRollupImpl: async () => ({
+        state: 'OPEN',
+        headSha: 'head-live',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      }),
+      acquireMergeLeaseImpl: () => ({
+        acquired: true,
+        lease: {
+          repo: 'acme/repo',
+          base: 'main',
+          leaseId: 'lease-1',
+          holderPr: 300,
+          holderHead: 'head-live',
+          acquiredAt: '2026-07-05T00:00:00.000Z',
+        },
+      }),
+      releaseMergeLeaseImpl: () => {},
+      attemptDaemonCleanMergeImpl: async ({ runMergeImpl }) => runMergeImpl({
+        repo: 'acme/repo',
+        prNumber: 300,
+        head: 'head-live',
+        mergeMethod: 'squash',
+      }),
+      logger: { warn() {}, log() {} },
+      env: { HQ_ROOT: '/tmp/hq' },
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(capturedOptions.timeout, DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

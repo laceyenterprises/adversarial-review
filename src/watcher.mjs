@@ -150,6 +150,7 @@ import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 // with a finding falls through to the AMA closer dispatch (MSM-04) below.
 import {
   attemptDaemonCleanMerge,
+  DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
   DAEMON_MERGE_DISPOSITION,
 } from './ama/daemon-merge.mjs';
 import { acquireMergeLease, releaseMergeLease } from './ama/merge-lease.mjs';
@@ -5211,7 +5212,7 @@ async function runDaemonCleanMergeAttempt({
         const { stdout, stderr } = await execFileImpl(
           'gh',
           ['pr', 'merge', String(pr), '--repo', repo, methodFlag, '--match-head-commit', head],
-          { maxBuffer: 5 * 1024 * 1024 },
+          { maxBuffer: 5 * 1024 * 1024, timeout: DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS },
         );
         return { exitCode: 0, stdout: String(stdout || ''), stderr: String(stderr || '') };
       } catch (err) {
@@ -8264,6 +8265,7 @@ export {
   isTerminalCloserCommitIdentity,
   maybeDispatchReviewerTimeoutExhaustedMergeAgent,
   maybeDispatchAmaClosureFor,
+  runDaemonCleanMergeAttempt,
   resolveFirstPassReviewBudgetSuppression,
   refreshReviewerRuntimeAdapter,
   reviewerRuntimeAdapterForRunRecord,

@@ -232,8 +232,10 @@ test('does not mutate the passed state object', () => {
 });
 
 test('exported vocabulary is stable and frozen', () => {
-  assert.ok(ELIGIBLE_MERGE_VERDICTS.has('settled-success'));
-  assert.ok(ELIGIBLE_MERGE_VERDICTS.has('ham_terminal_remediation_validated'));
+  assert.ok(ELIGIBLE_MERGE_VERDICTS.includes('settled-success'));
+  assert.ok(ELIGIBLE_MERGE_VERDICTS.includes('ham_terminal_remediation_validated'));
+  // A frozen Set is still mutable via .add(); a frozen array truly is not (blocking finding #509).
+  assert.throws(() => ELIGIBLE_MERGE_VERDICTS.push('request-changes'));
   assert.deepEqual(MERGE_ELIGIBILITY_REASONS, [
     'verdict-not-eligible',
     'ci-not-green',

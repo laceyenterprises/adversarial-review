@@ -401,7 +401,15 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    checks for an existing same-head audit comment with bounded transient retries;
    unresolved lookup failures fail closed instead of posting duplicate audit
    evidence.
-5. **Merge-agent identity.** The hammer commits/comments/merges under the
+5. **Bounded gate-read and already-merged recovery.** HAM treats transient
+   GitHub gate-read failures like other merge-time network failures: it retries
+   within the configured merge retry budget before recording a hard blocker. If
+   the PR is already `MERGED` at the validated HAM head during preflight, or a
+   merge retry receives an `already merged` response after a dropped/ambiguous
+   merge request, HAM skips another merge attempt and proceeds to the same
+   post-merge confirmation path that records the merge commit and releases the
+   lease.
+6. **Merge-agent identity.** The hammer commits/comments/merges under the
    merge-agent app identity (see the worker-pool hammer identity + token wiring),
    so the close is attributable to the merge-agent bot, not a generic worker.
 

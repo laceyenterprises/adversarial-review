@@ -739,7 +739,7 @@ ham_append_terminal_audit() {
     --argjson mergeAttempts "${HAM_MERGE_ATTEMPTS:-0}" \
     --argjson rebaseAttempts "${HAM_REBASE_ATTEMPTS:-0}" \
     --argjson eligibilityTrace "$(cat /tmp/ham-verdict.json)" \
-    --argjson githubGate "$(cat "$HAM_GATE_JSON" 2>/dev/null || printf '{}')" \
+    --argjson githubGate "$([ -s "$HAM_GATE_JSON" ] && cat "$HAM_GATE_JSON" || printf '{}')" \
     '{
       preMergeEligible: ($outcome == "succeeded"),
       attemptPhase: "hammer-gh-pr-merge",
@@ -774,7 +774,7 @@ ham_append_terminal_audit() {
   return "$ham_audit_append_exit"
 }
 
-ham_refresh_github_gate() {
+ham_refresh_github_gate_once() {
   POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" node --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchPullRequestRollup } from '/tmp/ama-test-root/src/github-api.mjs';
 
@@ -811,6 +811,25 @@ console.log(JSON.stringify({
 NODE
 }
 
+ham_refresh_github_gate() {
+  HAM_GATE_ATTEMPTS=0
+  while [ "$HAM_GATE_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
+    HAM_GATE_ATTEMPTS=$((HAM_GATE_ATTEMPTS + 1))
+    if ham_refresh_github_gate_once; then
+      return 0
+    fi
+    if [ "$HAM_GATE_ATTEMPTS" -ge "$HAM_MERGE_RETRY_CAP" ]; then
+      return 1
+    fi
+    HAM_GATE_BACKOFF_MULTIPLIER=$((1 << (HAM_GATE_ATTEMPTS - 1)))
+    HAM_GATE_JITTER=$(awk 'BEGIN{srand(); print int(rand()*3)}')
+    HAM_GATE_SLEEP=$((HAM_MERGE_BACKOFF_BASE_SECONDS * HAM_GATE_BACKOFF_MULTIPLIER + HAM_GATE_JITTER))
+    echo "HAM GitHub gate read transient failure; retrying ${HAM_GATE_ATTEMPTS}/${HAM_MERGE_RETRY_CAP} after ${HAM_GATE_SLEEP}s" >&2
+    sleep "$HAM_GATE_SLEEP"
+  done
+  return 1
+}
+
 ham_required_gate_ok() {
   jq -e '.ok == true' "$HAM_GATE_JSON" >/dev/null
 }
@@ -827,8 +846,12 @@ ham_merge_error_retryable() {
   grep -Eiq 'connection reset|ECONNRESET|TLS handshake timeout|timeout|timed out|ETIMEDOUT|DNS|ENOTFOUND|EAI_AGAIN|socket|HTTP 5[0-9][0-9]|502|503|504|rate limit|secondary rate limit|Retry-After|temporar(y|ily)|try again|service unavailable|gateway' "$1"
 }
 
+ham_merge_error_already_merged() {
+  grep -Eiq 'already merged' "$1"
+}
+
 ham_merge_error_permanent() {
-  grep -Eiq 'match-head-commit|head.*(mismatch|changed|does not match)|not authorized|permission|authentication|forbidden|HTTP 401|HTTP 403|branch protection|ruleset|required check|status checks? (not|have not)|not mergeable|merge conflict|closed|already merged|pull request.*not open|draft' "$1"
+  grep -Eiq 'match-head-commit|head.*(mismatch|changed|does not match)|not authorized|permission|authentication|forbidden|HTTP 401|HTTP 403|branch protection|ruleset|required check|status checks? (not|have not)|not mergeable|merge conflict|closed|pull request.*not open|draft' "$1"
 }
 
 echo "HAM local battery: running ${HAM_LOCAL_BATTERY_COMMAND}" >&2
@@ -845,7 +868,11 @@ if ! ham_refresh_github_gate; then
   ham_release_merge_lease
   exit 1
 fi
-if ! ham_required_gate_ok; then
+HAM_ALREADY_MERGED_VALIDATED_HEAD=0
+if ham_already_merged_validated_head; then
+  echo "HAM preflight: PR is already merged at validated head; proceeding to post-merge validation" >&2
+  HAM_ALREADY_MERGED_VALIDATED_HEAD=1
+elif ! ham_required_gate_ok; then
   if ham_live_head_moved; then
     echo "HAM race: live PR head moved off validated head; releasing lease without merge or re-dispatch" >&2
     ham_append_terminal_audit superseded live-head-moved-before-merge || true
@@ -859,44 +886,47 @@ if ! ham_required_gate_ok; then
   exit 0
 fi
 
-HAM_PRE_MERGE_ATTEMPT_FILE="/tmp/ham-pre-merge-attempt.json"
-jq -n \
-  --arg reviewedHead "abc12345abc12345abc12345abc12345abc12345" \
-  --arg validatedHead "$POST_REMEDIATION_SHA" \
-  --arg mergeMethod "squash" \
-  --arg remediatedFindings "<n> addressed (<b> blocking, <nb> non-blocking)" \
-  --arg failingTestsFixed "<list, or 'suite already green'>" \
-  --argjson rebaseAttempts "${HAM_REBASE_ATTEMPTS:-0}" \
-  --argjson eligibilityTrace "$(cat /tmp/ham-verdict.json)" \
-  --argjson githubGate "$(cat "$HAM_GATE_JSON")" \
-  '{
-    preMergeEligible: true,
-    attemptPhase: "before-hammer-gh-pr-merge",
-    headMatchEvidence: "ham_terminal_remediation_validated",
-    reviewedHead: $reviewedHead,
-    validatedHead: $validatedHead,
-    mergeMethod: $mergeMethod,
-    remediatedFindings: $remediatedFindings,
-    failingTestsFixed: $failingTestsFixed,
-    rebaseAttempts: $rebaseAttempts,
-    eligibilityTrace: $eligibilityTrace,
-    githubGate: $githubGate
-  }' > "$HAM_PRE_MERGE_ATTEMPT_FILE"
-node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
-  --hq-root /tmp/ama-test-hqroot \
-  --repo acme/myrepo \
-  --pr 1234 \
-  --head "$POST_REMEDIATION_SHA" \
-  --outcome in_progress \
-  --attempt-json "$HAM_PRE_MERGE_ATTEMPT_FILE" || exit 1
-rm -f "$HAM_PRE_MERGE_ATTEMPT_FILE"
-
 HAM_MERGE_ATTEMPTS=0
 HAM_MERGE_EXIT=1
-while [ "$HAM_MERGE_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
+if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -eq 1 ]; then
+  HAM_MERGE_EXIT=0
+else
+  HAM_PRE_MERGE_ATTEMPT_FILE="/tmp/ham-pre-merge-attempt.json"
+  jq -n \
+    --arg reviewedHead "abc12345abc12345abc12345abc12345abc12345" \
+    --arg validatedHead "$POST_REMEDIATION_SHA" \
+    --arg mergeMethod "squash" \
+    --arg remediatedFindings "<n> addressed (<b> blocking, <nb> non-blocking)" \
+    --arg failingTestsFixed "<list, or 'suite already green'>" \
+    --argjson rebaseAttempts "${HAM_REBASE_ATTEMPTS:-0}" \
+    --argjson eligibilityTrace "$(cat /tmp/ham-verdict.json)" \
+    --argjson githubGate "$(cat "$HAM_GATE_JSON")" \
+    '{
+      preMergeEligible: true,
+      attemptPhase: "before-hammer-gh-pr-merge",
+      headMatchEvidence: "ham_terminal_remediation_validated",
+      reviewedHead: $reviewedHead,
+      validatedHead: $validatedHead,
+      mergeMethod: $mergeMethod,
+      remediatedFindings: $remediatedFindings,
+      failingTestsFixed: $failingTestsFixed,
+      rebaseAttempts: $rebaseAttempts,
+      eligibilityTrace: $eligibilityTrace,
+      githubGate: $githubGate
+    }' > "$HAM_PRE_MERGE_ATTEMPT_FILE"
+  node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
+    --hq-root /tmp/ama-test-hqroot \
+    --repo acme/myrepo \
+    --pr 1234 \
+    --head "$POST_REMEDIATION_SHA" \
+    --outcome in_progress \
+    --attempt-json "$HAM_PRE_MERGE_ATTEMPT_FILE" || exit 1
+  rm -f "$HAM_PRE_MERGE_ATTEMPT_FILE"
+fi
+while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
   HAM_MERGE_ATTEMPTS=$((HAM_MERGE_ATTEMPTS + 1))
   if ! ham_refresh_github_gate; then
-    echo "HAM merge retry ${HAM_MERGE_ATTEMPTS}/${HAM_MERGE_RETRY_CAP}: gate read failed" >&2
+    echo "HAM merge retry ${HAM_MERGE_ATTEMPTS}/${HAM_MERGE_RETRY_CAP}: gate read failed after bounded retries" >&2
     ham_append_terminal_audit failed-without-merge github-gate-read-failed || true
     ham_release_merge_lease
     exit 1
@@ -927,6 +957,12 @@ while [ "$HAM_MERGE_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
     2> "$HAM_MERGE_STDERR"
   HAM_MERGE_EXIT=$?
   if [ "$HAM_MERGE_EXIT" -eq 0 ]; then
+    break
+  fi
+  if ham_merge_error_already_merged "$HAM_MERGE_STDERR"; then
+    cat "$HAM_MERGE_STDERR" >&2 || true
+    echo "HAM merge response says PR is already merged; proceeding to post-merge validation" >&2
+    HAM_MERGE_EXIT=0
     break
   fi
   if ham_merge_error_permanent "$HAM_MERGE_STDERR"; then
@@ -991,7 +1027,7 @@ while [ "$HAM_POST_VIEW_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
 done
 HAM_POST_STATE=$(jq -r '.state // ""' "$HAM_POST_MERGE_JSON")
 HAM_MERGED_AT=$(jq -r '.mergedAt // ""' "$HAM_POST_MERGE_JSON")
-HAM_MERGE_COMMIT=$(jq -r '.mergeCommit.oid // ""' "$HAM_POST_MERGE_JSON")
+HAM_MERGE_COMMIT=$(jq -r '.mergeCommit?.oid // ""' "$HAM_POST_MERGE_JSON")
 HAM_POST_HEAD=$(jq -r '.headRefOid // ""' "$HAM_POST_MERGE_JSON")
 if [ "$HAM_POST_STATE" = "MERGED" ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATION_SHA" ]; then
   ham_append_terminal_audit succeeded merged || exit 1

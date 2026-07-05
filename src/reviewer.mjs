@@ -2401,8 +2401,10 @@ function isRetryableGeminiSubprocessError(err) {
 }
 
 function isRetryableCurlWakeError(err) {
-  const curlTransientExitCodes = new Set([5, 6, 7, 28, 35, 52, 55, 56]);
+  const curlTransientExitCodes = new Set([5, 6, 7, 22, 28, 35, 52, 55, 56]);
   return curlTransientExitCodes.has(Number(err?.code))
+    || err?.killed === true
+    || err?.signal === 'SIGTERM'
     || isRetryableGeminiSubprocessError(err);
 }
 
@@ -2666,6 +2668,15 @@ function resolveAgyChunkMaxChunks(env = process.env) {
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : DEFAULT_AGY_CHUNK_MAX_CHUNKS;
 }
 
+function agyOversizedChunkContextSuffix(index, total) {
+  return `\n\nOversized-diff chunk ${index} of ${total}. Review only this chunk; findings will be merged.`;
+}
+
+function agyOversizedChunkContextBudgetSuffix(maxChunks) {
+  const safeMaxChunks = Math.max(1, Number(maxChunks) || DEFAULT_AGY_CHUNK_MAX_CHUNKS);
+  return agyOversizedChunkContextSuffix(safeMaxChunks, safeMaxChunks);
+}
+
 function chooseAgyOversizedCrossModelRoute(builderTag) {
   const builderClass = normalizeBuilderTag(builderTag);
   const reviewerModel = CROSS_MODEL_PRIMARY_BY_BUILDER_CLASS[builderClass];
@@ -2751,6 +2762,7 @@ function joinPatchLines(headerLines, bodyLines) {
 
 function splitOversizedPatchByLines(patch, {
   extraContext,
+  chunkContextBudgetSuffix = '',
   promptStage,
   maxBytes,
   maxChunks,
@@ -2758,7 +2770,8 @@ function splitOversizedPatchByLines(patch, {
 }) {
   const lines = String(patch || '').replace(/\r\n/g, '\n').split('\n');
   const { headerLines, bodyLines } = splitPatchHeaderAndBodyLines(lines);
-  const promptOverheadBytes = agyPromptBytes(buildPromptForReviewerModel('gemini', '', extraContext, {
+  const budgetExtraContext = `${extraContext || ''}${chunkContextBudgetSuffix || ''}`;
+  const promptOverheadBytes = agyPromptBytes(buildPromptForReviewerModel('gemini', '', budgetExtraContext, {
     promptStage,
     runtime: 'antigravity',
   }));
@@ -2807,7 +2820,7 @@ function splitOversizedPatchByLines(patch, {
       return { ok: false, reason: 'single-line-over-budget' };
     }
     const pushed = pushAgyChunk(chunks, joinPatchLines(headerLines, currentLines), {
-      extraContext,
+      extraContext: budgetExtraContext,
       promptStage,
       maxBytes,
       maxChunks,
@@ -2822,7 +2835,7 @@ function splitOversizedPatchByLines(patch, {
   }
   if (currentLines.length > 0) {
     const pushed = pushAgyChunk(chunks, joinPatchLines(headerLines, currentLines), {
-      extraContext,
+      extraContext: budgetExtraContext,
       promptStage,
       maxBytes,
       maxChunks,
@@ -2834,6 +2847,7 @@ function splitOversizedPatchByLines(patch, {
 
 function splitDiffForAgyChunks(diff, {
   extraContext = '',
+  chunkContextBudgetSuffix = '',
   promptStage = 'first',
   maxBytes = resolveAgyArgvMaxBytes(),
   maxChunks = resolveAgyChunkMaxChunks(),
@@ -2844,19 +2858,55 @@ function splitDiffForAgyChunks(diff, {
   const chunks = [];
   const files = parseDiffFiles(diff);
   const units = files.length > 0 ? files.map((file) => file.patch) : [String(diff || '')];
-  for (const unit of units) {
-    const pushed = pushAgyChunk(chunks, unit, {
-      extraContext,
+  const budgetExtraContext = `${extraContext || ''}${chunkContextBudgetSuffix || ''}`;
+  let pendingUnit = '';
+  const canFitUnit = (unit) => pushAgyChunk([], unit, {
+    extraContext: budgetExtraContext,
+    promptStage,
+    maxBytes,
+    maxChunks: 1,
+  }).ok;
+  const flushPendingUnit = () => {
+    if (!pendingUnit) return { ok: true };
+    const pushed = pushAgyChunk(chunks, pendingUnit, {
+      extraContext: budgetExtraContext,
       promptStage,
       maxBytes,
       maxChunks,
     });
-    if (pushed.ok) continue;
-    if (pushed.reason === 'chunk-cap-hit') {
-      return { ok: true, chunks, truncated: true, reason: pushed.reason };
+    pendingUnit = '';
+    return pushed;
+  };
+  for (const unit of units) {
+    if (!unit) continue;
+    if (pendingUnit) {
+      const combinedUnit = `${pendingUnit}\n${unit}`;
+      if (canFitUnit(combinedUnit)) {
+        pendingUnit = combinedUnit;
+        continue;
+      }
+      const flushed = flushPendingUnit();
+      if (!flushed.ok) {
+        if (flushed.reason === 'chunk-cap-hit') {
+          return { ok: true, chunks, truncated: true, reason: flushed.reason };
+        }
+        return { ok: false, chunks, truncated: false, reason: flushed.reason };
+      }
+    }
+    if (canFitUnit(unit)) {
+      pendingUnit = unit;
+      continue;
+    }
+    const flushed = flushPendingUnit();
+    if (!flushed.ok) {
+      if (flushed.reason === 'chunk-cap-hit') {
+        return { ok: true, chunks, truncated: true, reason: flushed.reason };
+      }
+      return { ok: false, chunks, truncated: false, reason: flushed.reason };
     }
     const split = splitOversizedPatchByLines(unit, {
       extraContext,
+      chunkContextBudgetSuffix,
       promptStage,
       maxBytes,
       maxChunks,
@@ -2868,6 +2918,13 @@ function splitDiffForAgyChunks(diff, {
       }
       return { ok: false, chunks, truncated: false, reason: split.reason };
     }
+  }
+  const flushed = flushPendingUnit();
+  if (!flushed.ok) {
+    if (flushed.reason === 'chunk-cap-hit') {
+      return { ok: true, chunks, truncated: true, reason: flushed.reason };
+    }
+    return { ok: false, chunks, truncated: false, reason: flushed.reason };
   }
   return { ok: chunks.length > 0, chunks, truncated: false, reason: chunks.length > 0 ? null : 'empty-diff' };
 }
@@ -2891,7 +2948,7 @@ function extractMarkdownIssueList(markdown, heading) {
   const issues = [];
   let current = [];
   for (const line of lines) {
-    if (/^\s*[-*+]\s+/.test(line)) {
+    if (/^[-*+]\s+/.test(line)) {
       if (current.length > 0) issues.push(current.join('\n').trimEnd());
       current = [line];
       continue;
@@ -2974,6 +3031,7 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
 } = {}) {
   const split = splitDiffForAgyChunks(diff, {
     extraContext,
+    chunkContextBudgetSuffix: agyOversizedChunkContextBudgetSuffix(maxChunks),
     promptStage,
     maxBytes,
     maxChunks,
@@ -2987,7 +3045,7 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   const chunkReviews = [];
   for (let index = 0; index < split.chunks.length; index += 1) {
     const chunk = split.chunks[index];
-    const chunkContext = `${extraContext}\n\nOversized-diff chunk ${index + 1} of ${split.chunks.length}. Review only this chunk; findings will be merged.`;
+    const chunkContext = `${extraContext}${agyOversizedChunkContextSuffix(index + 1, split.chunks.length)}`;
     const result = await reviewWithGeminiImpl(chunk.diff, chunkContext, { promptStage });
     chunkReviews.push({
       index: index + 1,
@@ -3412,7 +3470,7 @@ async function alertClioOversizedAgyFailure({
     await execFileWithTransientRetry(
       'curl',
       [
-        '-s', '-X', 'POST',
+        '-sS', '-f', '--max-time', '10', '-X', 'POST',
         'http://127.0.0.1:8787/hooks/wake',
         '-H', 'Content-Type: application/json',
         '-d', JSON.stringify({ message: msg }),
@@ -3421,7 +3479,6 @@ async function alertClioOversizedAgyFailure({
         execFileImpl,
         retryDelaysMs,
         sleepImpl,
-        timeout: 10_000,
       }
     );
     console.log('[reviewer] oversized agy prompt alert sent via wake hook');
@@ -3991,6 +4048,7 @@ const __test__ = {
   chooseAgyOversizedCrossModelRoute,
   resolveAgyOversizedReviewRoute,
   splitDiffForAgyChunks,
+  extractMarkdownIssueList,
   mergeChunkedAgyReviews,
   reviewAgyOversizedInChunks,
   resolveAgyChunkMaxChunks,

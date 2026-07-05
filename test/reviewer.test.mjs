@@ -60,6 +60,7 @@ const {
   chooseAgyOversizedCrossModelRoute,
   resolveAgyOversizedReviewRoute,
   splitDiffForAgyChunks,
+  extractMarkdownIssueList,
   mergeChunkedAgyReviews,
   reviewAgyOversizedInChunks,
   AGY_KEYCHAIN_ACCOUNT,
@@ -2086,8 +2087,13 @@ test('only agy available: oversized diff chunk fallback keeps each chunk under b
     promptStage: 'first',
     maxBytes,
     maxChunks: 20,
-    reviewWithGeminiImpl: async (chunkDiff) => {
+    reviewWithGeminiImpl: async (chunkDiff, chunkContext) => {
       calls.push(chunkDiff);
+      const prompt = buildPromptForReviewerModel('gemini', chunkDiff, chunkContext, {
+        promptStage: 'first',
+        runtime: 'antigravity',
+      });
+      assert.ok(agyPromptBytes(prompt) <= maxBytes, 'runtime chunk prompt must stay under argv budget');
       return {
         reviewText: calls.length === 1
           ? '## Blocking issues\n- Bad first chunk.\n\n## Verdict\nRequest changes'
@@ -2097,11 +2103,38 @@ test('only agy available: oversized diff chunk fallback keeps each chunk under b
     },
   });
 
-  assert.equal(calls.length, split.chunks.length);
+  assert.ok(
+    calls.length >= split.chunks.length,
+    'runtime reserved context may split more finely than a raw direct split',
+  );
   assert.equal(result.needsSanitize, false);
   assert.equal(result.chunked, true);
   assert.match(result.reviewText, /Bad first chunk/);
   assert.match(result.reviewText, /## Verdict\nRequest changes/);
+});
+
+test('agy chunk fallback packs multiple small file patches into one chunk when they fit', () => {
+  const filePatch = (name) => [
+    `diff --git a/${name} b/${name}`,
+    `--- a/${name}`,
+    `+++ b/${name}`,
+    '@@ -1 +1 @@',
+    `+${name}`,
+  ].join('\n');
+  const diff = [filePatch('a.txt'), filePatch('b.txt'), filePatch('c.txt')].join('\n');
+
+  const split = splitDiffForAgyChunks(diff, {
+    extraContext: '',
+    promptStage: 'first',
+    maxBytes: 100_000,
+    maxChunks: 20,
+  });
+
+  assert.equal(split.ok, true);
+  assert.equal(split.chunks.length, 1);
+  assert.match(split.chunks[0].diff, /diff --git a\/a\.txt b\/a\.txt/);
+  assert.match(split.chunks[0].diff, /diff --git a\/b\.txt b\/b\.txt/);
+  assert.match(split.chunks[0].diff, /diff --git a\/c\.txt b\/c\.txt/);
 });
 
 test('agy chunk fallback preserves file headers on line-split chunks', () => {
@@ -2326,6 +2359,25 @@ test('mergeChunkedAgyReviews preserves non-bulleted issue section text as a synt
   assert.match(merged, /## Verdict\nRequest changes/);
 });
 
+test('extractMarkdownIssueList keeps indented detail bullets with their parent issue', () => {
+  const issues = extractMarkdownIssueList([
+    '## Blocking issues',
+    '- **Parent issue**',
+    '  - **File:** `src/reviewer.mjs`',
+    '  - **Problem:** detail should stay nested',
+    '- **Second issue**',
+    '  - **File:** `test/reviewer.test.mjs`',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n'), 'Blocking issues');
+
+  assert.equal(issues.length, 2);
+  assert.match(issues[0], /Parent issue/);
+  assert.match(issues[0], /Problem/);
+  assert.match(issues[1], /Second issue/);
+});
+
 test('oversized agy alert retries transient curl failures before succeeding', async () => {
   const calls = [];
   await alertClioOversizedAgyFailure({
@@ -2335,22 +2387,29 @@ test('oversized agy alert retries transient curl failures before succeeding', as
     maxBytes: 262_144,
     reason: 'chunking-disabled',
   }, {
-    retryDelaysMs: [0],
+    retryDelaysMs: [0, 0],
     sleepImpl: async () => {},
     execFileImpl: async (command, args, options) => {
       calls.push({ command, args, options });
       if (calls.length === 1) {
-        const err = new Error('curl: timeout');
-        err.code = 'ETIMEDOUT';
+        const err = new Error('curl: (22) The requested URL returned error: 503');
+        err.code = 22;
+        throw err;
+      }
+      if (calls.length === 2) {
+        const err = new Error('spawn killed after timeout');
+        err.killed = true;
+        err.signal = 'SIGTERM';
         throw err;
       }
       return { stdout: '', stderr: '' };
     },
   });
 
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.equal(calls[0].command, 'curl');
-  assert.equal(calls[0].options.timeout, 10_000);
+  assert.deepEqual(calls[0].args.slice(0, 4), ['-sS', '-f', '--max-time', '10']);
+  assert.equal(calls[0].options.timeout, undefined);
 });
 
 test('oversized agy fallback alerts when cross-model route and chunking are unavailable', async () => {

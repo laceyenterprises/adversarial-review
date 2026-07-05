@@ -47,16 +47,27 @@ const {
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
   buildAgyReviewArgs,
+  DEFAULT_AGY_ARGV_MAX_BYTES,
+  resolveAgyArgvMaxBytes,
+  agyPromptBytes,
   assertAgyPromptFitsArgv,
   AGY_ARGV_MAX_BYTES,
   resolveAgyPrintTimeoutMs,
   resolveAgyReviewerSubprocessTimeoutMs,
   formatAgyPrintTimeout,
   sanitizeAgyReviewOutput,
+  buildPromptForReviewerModel,
+  chooseAgyOversizedCrossModelRoute,
+  resolveAgyOversizedReviewRoute,
+  splitDiffForAgyChunks,
+  extractMarkdownIssueList,
+  mergeChunkedAgyReviews,
+  reviewAgyOversizedInChunks,
   AGY_KEYCHAIN_ACCOUNT,
   AGY_KEYCHAIN_SERVICE,
   AGY_KEYCHAIN_REMEDIATION,
   isRetryableGeminiSubprocessError,
+  alertClioOversizedAgyFailure,
   spawnGeminiReview,
   spawnAgyReview,
   reviewWithGemini,
@@ -1994,6 +2005,440 @@ test('spawnAgyReview refuses an oversized prompt rather than reverting to the mo
 test('assertAgyPromptFitsArgv accepts prompts under the budget and rejects oversized ones', () => {
   assert.equal(assertAgyPromptFitsArgv('ok', { maxBytes: 10 }), 2);
   assert.throws(() => assertAgyPromptFitsArgv('x'.repeat(11), { maxBytes: 10 }), /argv budget/);
+});
+
+test('agy argv budget is a named configurable 262144-byte default', () => {
+  assert.equal(DEFAULT_AGY_ARGV_MAX_BYTES, 262_144);
+  assert.equal(AGY_ARGV_MAX_BYTES, 262_144);
+  assert.equal(resolveAgyArgvMaxBytes({}), 262_144);
+  assert.equal(resolveAgyArgvMaxBytes({ ADVERSARIAL_REVIEW_AGY_ARGV_MAX_BYTES: '12345' }), 12_345);
+});
+
+test('oversized agy prompt on [codex] routes this review to claude', () => {
+  const diff = `diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n+${'x'.repeat(500)}`;
+  const route = resolveAgyOversizedReviewRoute({
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    builderTag: '[codex]',
+    diff,
+    extraContext: '',
+    promptStage: 'first',
+    geminiRuntime: 'antigravity',
+    maxBytes: 300,
+  });
+
+  assert.equal(route.oversized, true);
+  assert.equal(route.reason, 'agy-argv-budget-exceeded');
+  assert.equal(route.route.reviewerModel, 'claude');
+  assert.equal(route.route.botTokenEnv, 'GH_CLAUDE_REVIEWER_TOKEN');
+  assert.ok(route.promptBytes > route.maxBytes);
+  assert.deepEqual(chooseAgyOversizedCrossModelRoute('[claude-code]'), {
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  });
+});
+
+test('normal-size always-on gemini antigravity review stays on gemini', () => {
+  const route = resolveAgyOversizedReviewRoute({
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    builderTag: '[codex]',
+    diff: 'diff --git a/a.txt b/a.txt\n+a\n',
+    extraContext: '',
+    promptStage: 'first',
+    geminiRuntime: 'antigravity',
+    maxBytes: 100_000,
+  });
+
+  assert.equal(route.oversized, false);
+  assert.deepEqual(route.route, {
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+  });
+});
+
+test('only agy available: oversized diff chunk fallback keeps each chunk under budget and merges findings', async () => {
+  const diff = [
+    'diff --git a/a.txt b/a.txt',
+    '--- a/a.txt',
+    '+++ b/a.txt',
+    ...Array.from({ length: 12 }, (_, index) => `+line ${index} ${'x'.repeat(20)}`),
+  ].join('\n');
+  const maxBytes = 16_000;
+  const split = splitDiffForAgyChunks(diff, {
+    extraContext: '',
+    promptStage: 'first',
+    maxBytes,
+    maxChunks: 20,
+  });
+  assert.equal(split.ok, true);
+  assert.ok(split.chunks.length > 1);
+  for (const chunk of split.chunks) {
+    assert.ok(chunk.promptBytes <= maxBytes, `chunk prompt ${chunk.promptBytes} exceeded ${maxBytes}`);
+    const prompt = buildPromptForReviewerModel('gemini', chunk.diff, '', {
+      promptStage: 'first',
+      runtime: 'antigravity',
+    });
+    assert.equal(agyPromptBytes(prompt), chunk.promptBytes);
+  }
+
+  const calls = [];
+  const result = await reviewAgyOversizedInChunks(diff, '', {
+    promptStage: 'first',
+    maxBytes,
+    maxChunks: 20,
+    reviewWithGeminiImpl: async (chunkDiff, chunkContext) => {
+      calls.push(chunkDiff);
+      const prompt = buildPromptForReviewerModel('gemini', chunkDiff, chunkContext, {
+        promptStage: 'first',
+        runtime: 'antigravity',
+      });
+      assert.ok(agyPromptBytes(prompt) <= maxBytes, 'runtime chunk prompt must stay under argv budget');
+      return {
+        reviewText: calls.length === 1
+          ? '## Blocking issues\n- Bad first chunk.\n\n## Verdict\nRequest changes'
+          : '## Blocking issues\n- None.\n\n## Verdict\nComment only',
+        tokenUsage: null,
+      };
+    },
+  });
+
+  assert.ok(
+    calls.length >= split.chunks.length,
+    'runtime reserved context may split more finely than a raw direct split',
+  );
+  assert.equal(result.needsSanitize, false);
+  assert.equal(result.chunked, true);
+  assert.match(result.reviewText, /Bad first chunk/);
+  assert.match(result.reviewText, /## Verdict\nRequest changes/);
+});
+
+test('agy chunk fallback packs multiple small file patches into one chunk when they fit', () => {
+  const filePatch = (name) => [
+    `diff --git a/${name} b/${name}`,
+    `--- a/${name}`,
+    `+++ b/${name}`,
+    '@@ -1 +1 @@',
+    `+${name}`,
+  ].join('\n');
+  const diff = [filePatch('a.txt'), filePatch('b.txt'), filePatch('c.txt')].join('\n');
+
+  const split = splitDiffForAgyChunks(diff, {
+    extraContext: '',
+    promptStage: 'first',
+    maxBytes: 100_000,
+    maxChunks: 20,
+  });
+
+  assert.equal(split.ok, true);
+  assert.equal(split.chunks.length, 1);
+  assert.match(split.chunks[0].diff, /diff --git a\/a\.txt b\/a\.txt/);
+  assert.match(split.chunks[0].diff, /diff --git a\/b\.txt b\/b\.txt/);
+  assert.match(split.chunks[0].diff, /diff --git a\/c\.txt b\/c\.txt/);
+});
+
+test('agy chunk fallback preserves file headers on line-split chunks', () => {
+  const header = [
+    'diff --git a/big.txt b/big.txt',
+    'index 1111111..2222222 100644',
+    '--- a/big.txt',
+    '+++ b/big.txt',
+  ];
+  const body = [
+    '@@ -1,20 +1,20 @@',
+    ...Array.from({ length: 20 }, (_, index) => `+line ${index} ${'x'.repeat(120)}`),
+  ];
+  const diff = [...header, ...body].join('\n');
+  const promptOverheadBytes = agyPromptBytes(buildPromptForReviewerModel('gemini', '', '', {
+    promptStage: 'first',
+    runtime: 'antigravity',
+  }));
+  const maxBytes = promptOverheadBytes
+    + agyPromptBytes(header.join('\n'))
+    + 1
+    + agyPromptBytes(body.slice(0, 3).join('\n'));
+
+  const split = splitDiffForAgyChunks(diff, {
+    extraContext: '',
+    promptStage: 'first',
+    maxBytes,
+    maxChunks: 20,
+  });
+
+  assert.equal(split.ok, true);
+  assert.ok(split.chunks.length > 1);
+  for (const chunk of split.chunks) {
+    assert.match(chunk.diff, /^diff --git a\/big\.txt b\/big\.txt\nindex 1111111\.\.2222222 100644\n--- a\/big\.txt\n\+\+\+ b\/big\.txt\n@@ /);
+    assert.ok(chunk.promptBytes <= maxBytes);
+  }
+});
+
+test('agy chunk fallback tracks the active hunk header for multi-hunk line splits', () => {
+  const header = [
+    'diff --git a/big.txt b/big.txt',
+    'index 1111111..2222222 100644',
+    '--- a/big.txt',
+    '+++ b/big.txt',
+  ];
+  const firstHunk = [
+    '@@ -1,8 +1,8 @@',
+    ...Array.from({ length: 8 }, (_, index) => `+early ${index} ${'x'.repeat(90)}`),
+  ];
+  const secondHunk = [
+    '@@ -500,8 +500,8 @@',
+    ...Array.from({ length: 8 }, (_, index) => `+later ${index} ${'y'.repeat(90)}`),
+  ];
+  const diff = [...header, ...firstHunk, ...secondHunk].join('\n');
+  const promptOverheadBytes = agyPromptBytes(buildPromptForReviewerModel('gemini', '', '', {
+    promptStage: 'first',
+    runtime: 'antigravity',
+  }));
+  const maxBytes = promptOverheadBytes
+    + agyPromptBytes(header.join('\n'))
+    + 1
+    + agyPromptBytes(secondHunk.slice(0, 3).join('\n'));
+
+  const split = splitDiffForAgyChunks(diff, {
+    extraContext: '',
+    promptStage: 'first',
+    maxBytes,
+    maxChunks: 20,
+  });
+
+  assert.equal(split.ok, true);
+  const laterChunk = split.chunks.find((chunk) => chunk.diff.includes('+later 4 '));
+  assert.ok(laterChunk, 'expected a split chunk from the second hunk');
+  assert.match(laterChunk.diff, /^diff --git a\/big\.txt b\/big\.txt\nindex 1111111\.\.2222222 100644\n--- a\/big\.txt\n\+\+\+ b\/big\.txt\n@@ -500,8 \+500,8 @@/);
+  assert.doesNotMatch(laterChunk.diff, /@@ -1,8 \+1,8 @@/);
+});
+
+test('agy chunk fallback preserves active hunk context for metadata-less diffs', () => {
+  const diff = [
+    '@@ -1,8 +1,8 @@',
+    ...Array.from({ length: 8 }, (_, index) => `+line ${index} ${'z'.repeat(100)}`),
+  ].join('\n');
+  const promptOverheadBytes = agyPromptBytes(buildPromptForReviewerModel('gemini', '', '', {
+    promptStage: 'first',
+    runtime: 'antigravity',
+  }));
+  const maxBytes = promptOverheadBytes + agyPromptBytes(diff.split('\n').slice(0, 3).join('\n'));
+
+  const split = splitDiffForAgyChunks(diff, {
+    extraContext: '',
+    promptStage: 'first',
+    maxBytes,
+    maxChunks: 20,
+  });
+
+  assert.equal(split.ok, true);
+  assert.ok(split.chunks.length > 1);
+  for (const chunk of split.chunks) {
+    assert.match(chunk.diff, /^@@ -1,8 \+1,8 @@/);
+    assert.ok(chunk.promptBytes <= maxBytes);
+  }
+});
+
+test('agy chunking preserves leading and trailing diff whitespace', () => {
+  const diff = ' context line\n ';
+  const split = splitDiffForAgyChunks(diff, {
+    extraContext: '',
+    promptStage: 'first',
+    maxBytes: 100_000,
+    maxChunks: 20,
+  });
+
+  assert.equal(split.ok, true);
+  assert.equal(split.chunks[0].diff, diff);
+});
+
+test('mergeChunkedAgyReviews merges only issue bullets from child review sections', () => {
+  const merged = mergeChunkedAgyReviews([
+    {
+      reviewText: [
+        '## Adversarial Review — Gemini (gemini-reviewer-lacey)',
+        '',
+        '## Summary',
+        'First summary must not be nested.',
+        '',
+        '## Blocking issues',
+        '- **Bad split**',
+        '  - Detail from first chunk.',
+        '',
+        '## Non-blocking issues',
+        '- Nit from first chunk.',
+        '',
+        '## Suggested fixes',
+        '- Fix the split.',
+        '',
+        '## Verdict',
+        'Request changes',
+      ].join('\n'),
+    },
+    {
+      reviewText: [
+        '## Summary',
+        'Second summary must not be nested.',
+        '',
+        '## Blocking issues',
+        '- None.',
+        '',
+        '## Non-blocking issues',
+        '- Nit from second chunk.',
+        '',
+        '## Suggested fixes',
+        '- Add a regression test.',
+        '',
+        '## Verdict',
+        'Comment only',
+      ].join('\n'),
+    },
+  ]);
+
+  assert.match(merged, /## Blocking issues\n- \*\*Bad split\*\*\n  - Detail from first chunk\./);
+  assert.match(merged, /## Non-blocking issues\n- Nit from first chunk\.\n- Nit from second chunk\./);
+  assert.match(merged, /## Suggested fixes\n- Fix the split\.\n- Add a regression test\./);
+  assert.match(merged, /## Verdict\nRequest changes/);
+  assert.doesNotMatch(merged, /First summary must not be nested/);
+  assert.doesNotMatch(merged, /Second summary must not be nested/);
+  assert.equal((merged.match(/## Summary/g) || []).length, 1);
+});
+
+test('mergeChunkedAgyReviews derives verdict from merged blocking issues', () => {
+  const merged = mergeChunkedAgyReviews([
+    {
+      reviewText: [
+        '## Summary',
+        'Child had a stale verdict.',
+        '',
+        '## Blocking issues',
+        '- None.',
+        '',
+        '## Non-blocking issues',
+        '- Worth noting.',
+        '',
+        '## Suggested fixes',
+        '- Optional cleanup.',
+        '',
+        '## Verdict',
+        'Request changes',
+      ].join('\n'),
+    },
+  ]);
+
+  assert.match(merged, /## Blocking issues\n- None\./);
+  assert.match(merged, /## Non-blocking issues\n- Worth noting\./);
+  assert.match(merged, /## Suggested fixes\n- Optional cleanup\./);
+  assert.match(merged, /## Verdict\nComment only/);
+});
+
+test('mergeChunkedAgyReviews preserves non-bulleted issue section text as a synthetic bullet', () => {
+  const merged = mergeChunkedAgyReviews([
+    {
+      reviewText: [
+        '## Summary',
+        'Plain prose child.',
+        '',
+        '## Blocking issues',
+        'This blocking issue lost its bullet formatting.',
+        'It still needs to survive merging.',
+        '',
+        '## Non-blocking issues',
+        '- None.',
+        '',
+        '## Suggested fixes',
+        'Use a fallback bullet.',
+        '',
+        '## Verdict',
+        'Request changes',
+      ].join('\n'),
+    },
+  ]);
+
+  assert.match(merged, /## Blocking issues\n- This blocking issue lost its bullet formatting\.\n  It still needs to survive merging\./);
+  assert.match(merged, /## Suggested fixes\n- Use a fallback bullet\./);
+  assert.match(merged, /## Verdict\nRequest changes/);
+});
+
+test('extractMarkdownIssueList keeps indented detail bullets with their parent issue', () => {
+  const issues = extractMarkdownIssueList([
+    '## Blocking issues',
+    '- **Parent issue**',
+    '  - **File:** `src/reviewer.mjs`',
+    '  - **Problem:** detail should stay nested',
+    '- **Second issue**',
+    '  - **File:** `test/reviewer.test.mjs`',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n'), 'Blocking issues');
+
+  assert.equal(issues.length, 2);
+  assert.match(issues[0], /Parent issue/);
+  assert.match(issues[0], /Problem/);
+  assert.match(issues[1], /Second issue/);
+});
+
+test('oversized agy alert retries transient curl failures before succeeding', async () => {
+  const calls = [];
+  await alertClioOversizedAgyFailure({
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 506,
+    promptBytes: 300_000,
+    maxBytes: 262_144,
+    reason: 'chunking-disabled',
+  }, {
+    retryDelaysMs: [0, 0],
+    sleepImpl: async () => {},
+    execFileImpl: async (command, args, options) => {
+      calls.push({ command, args, options });
+      if (calls.length === 1) {
+        const err = new Error('curl: (22) The requested URL returned error: 503');
+        err.code = 22;
+        throw err;
+      }
+      if (calls.length === 2) {
+        const err = new Error('spawn killed after timeout');
+        err.killed = true;
+        err.signal = 'SIGTERM';
+        throw err;
+      }
+      return { stdout: '', stderr: '' };
+    },
+  });
+
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].command, 'curl');
+  assert.deepEqual(calls[0].args.slice(0, 4), ['-sS', '-f', '--max-time', '10']);
+  assert.equal(calls[0].options.timeout, undefined);
+});
+
+test('oversized agy fallback alerts when cross-model route and chunking are unavailable', async () => {
+  const diff = 'diff --git a/a.txt b/a.txt\n+' + 'x'.repeat(100);
+  const route = resolveAgyOversizedReviewRoute({
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    builderTag: '[pi]',
+    diff,
+    extraContext: '',
+    promptStage: 'first',
+    geminiRuntime: 'antigravity',
+    maxBytes: 50,
+  });
+  assert.equal(route.oversized, true);
+  assert.equal(route.route, null);
+
+  await assert.rejects(
+    () => reviewAgyOversizedInChunks(diff, '', {
+      promptStage: 'first',
+      promptBytes: route.promptBytes,
+      maxBytes: 50,
+      maxChunks: 0,
+      reviewWithGeminiImpl: async () => {
+        throw new Error('must not spawn chunk when chunking is disabled');
+      },
+    }),
+    /chunking unavailable: chunking-disabled/,
+  );
 });
 
 test('resolveGeminiAntigravityModel: agy uses the display-name token while the cli path keeps its slug', () => {

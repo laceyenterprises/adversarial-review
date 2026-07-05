@@ -111,6 +111,7 @@ const REVIEW_ADAPTER_ENV_KEYS = [
 
 const execFileAsync = promisify(execFile);
 const REVIEW_POST_RETRY_DELAYS_MS = [0];
+const WAKE_HOOK_RETRY_DELAYS_MS = [250, 1_000];
 const ADVISORY_ONLY_REVIEW_LABEL = 'operator-approved: advisory-only-review';
 const VERDICT_MODE_ENFORCE = 'enforce';
 const VERDICT_MODE_ADVISORY_ONLY = 'advisory-only';
@@ -1580,6 +1581,18 @@ function buildReviewerPromptPrefix({
   });
 }
 
+function buildReviewerPrompt({ promptPrefix, extraContext = '', diff = '' } = {}) {
+  return `${promptPrefix || ''}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
+}
+
+function buildPromptForReviewerModel(reviewerModel, diff, extraContext = '', { promptStage = 'first', runtime = null } = {}) {
+  const model = String(reviewerModel || '').trim().toLowerCase();
+  const promptPrefix = model === 'gemini' && runtime === 'antigravity'
+    ? buildAgyReviewerPromptPrefix({ stage: promptStage })
+    : buildReviewerPromptPrefix({ stage: promptStage });
+  return buildReviewerPrompt({ promptPrefix, extraContext, diff });
+}
+
 // Compute whether the current review attempt is the final one allowed
 // under the bounded remediation cap. Convention:
 //   reviewAttemptNumber=1 = initial review, no remediation done yet
@@ -1880,7 +1893,7 @@ async function reviewWithClaude(diff, extraContext = '', { promptStage = 'first'
   await assertClaudeOAuth();
 
   const promptPrefix = buildReviewerPromptPrefix({ stage: promptStage });
-  const prompt = `${promptPrefix}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
+  const prompt = buildReviewerPrompt({ promptPrefix, extraContext, diff });
 
   // Strip API key from env — Claude CLI falls back to OAuth when it's absent
   const { env } = scrubOAuthFallbackEnv(process.env);
@@ -2109,7 +2122,7 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
   }
 
   const promptPrefix = buildReviewerPromptPrefix({ stage: promptStage });
-  const prompt = `${promptPrefix}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
+  const prompt = buildReviewerPrompt({ promptPrefix, extraContext, diff });
   const authPath = resolveCodexAuthPath();
   // Per-worker codex credential (burst OAuth-cascade fix). Each reviewer spawn
   // gets its own auth.json with a placeholder refresh_token so a review storm
@@ -2268,16 +2281,26 @@ function buildAgyReviewArgs({ model, prompt, printTimeoutMs = resolveAgyPrintTim
   ];
 }
 
-// Defensive argv-size guard. Review prompts carry the diff and can be large;
-// the claude reviewer already delivers its whole prompt via argv (see
-// reviewWithClaude / buildClaudeReviewArgs), so review prompts are known to
-// fit argv in practice, but a pathologically large diff could exceed the OS
-// argv limit (macOS ARG_MAX ~1 MiB, shared with env). We refuse rather than
-// silently revert to the broken stdin form (which unbinds the model). The
-// caller can lower the diff/context budget; this is a hard, observable fail.
-const AGY_ARGV_MAX_BYTES = 256 * 1024;
+// Antigravity `agy --print <prompt>` carries the full review prompt on argv so
+// `--model` remains bound. The observed agy argv budget from #3074/#3122/#3124
+// is 262144 bytes; do not revert oversized prompts to stdin because stdin
+// unbinds `--model` and silently runs the persisted default model.
+const DEFAULT_AGY_ARGV_MAX_BYTES = 262_144;
 
-function assertAgyPromptFitsArgv(prompt, { maxBytes = AGY_ARGV_MAX_BYTES } = {}) {
+function resolveAgyArgvMaxBytes(env = process.env) {
+  const raw = env.ADVERSARIAL_REVIEW_AGY_ARGV_MAX_BYTES || env.AGY_ARGV_MAX_BYTES;
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_AGY_ARGV_MAX_BYTES;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_AGY_ARGV_MAX_BYTES;
+}
+
+const AGY_ARGV_MAX_BYTES = resolveAgyArgvMaxBytes();
+
+function agyPromptBytes(prompt) {
+  return Buffer.byteLength(String(prompt ?? ''), 'utf8');
+}
+
+function assertAgyPromptFitsArgv(prompt, { maxBytes = resolveAgyArgvMaxBytes() } = {}) {
   const bytes = Buffer.byteLength(String(prompt ?? ''), 'utf8');
   if (bytes > maxBytes) {
     throw new Error(
@@ -2361,7 +2384,7 @@ Antigravity runtime instructions:
 
 function isRetryableGeminiSubprocessError(err) {
   const detail = buildGhErrorDetail(err);
-  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain|tls)\b/.test(detail)
+  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain|eio|tls)\b/.test(detail)
     || detail.includes('timeout')
     || detail.includes('timed out')
     || detail.includes('temporary failure')
@@ -2375,6 +2398,34 @@ function isRetryableGeminiSubprocessError(err) {
     || detail.includes('504')
     || detail.includes('429')
     || detail.includes('rate limit');
+}
+
+function isRetryableCurlWakeError(err) {
+  const curlTransientExitCodes = new Set([5, 6, 7, 22, 28, 35, 52, 55, 56]);
+  return curlTransientExitCodes.has(Number(err?.code))
+    || err?.killed === true
+    || err?.signal === 'SIGTERM'
+    || isRetryableGeminiSubprocessError(err);
+}
+
+async function execFileWithTransientRetry(command, args, {
+  execFileImpl = execFileAsync,
+  retryDelaysMs = WAKE_HOOK_RETRY_DELAYS_MS,
+  sleepImpl = sleep,
+  isRetryable = isRetryableCurlWakeError,
+  timeout,
+} = {}) {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    try {
+      return await execFileImpl(command, args, { timeout });
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryable(err) || attempt >= retryDelaysMs.length) throw err;
+      await sleepImpl(retryDelaysMs[attempt]);
+    }
+  }
+  throw lastErr;
 }
 
 async function withGeminiSubprocessRetry(operation, {
@@ -2514,7 +2565,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   const promptPrefix = runtime === 'antigravity'
     ? buildAgyReviewerPromptPrefix({ stage: promptStage })
     : buildReviewerPromptPrefix({ stage: promptStage });
-  const prompt = `${promptPrefix}${extraContext}\n\n---\n\nHere is the PR diff to review:\n\n\`\`\`diff\n${diff}\`\`\``;
+  const prompt = buildReviewerPrompt({ promptPrefix, extraContext, diff });
   // Runtime-aware model token. The token FORMATS differ and are NOT
   // interchangeable: the gemini-CLI path expects a slug (gemini-2.5-pro);
   // the agy/antigravity path expects agy's verbatim display name
@@ -2587,6 +2638,354 @@ async function reviewWithGemini(diff, extraContext = '', {
 
 // ── Reviewer-model selection ──────────────────────────────────────────────────
 
+const REVIEWER_ROUTE_BY_MODEL = Object.freeze({
+  claude: {
+    reviewerModel: 'claude',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+  },
+  codex: {
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  },
+  gemini: {
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+  },
+});
+
+const CROSS_MODEL_PRIMARY_BY_BUILDER_CLASS = Object.freeze({
+  codex: 'claude',
+  'claude-code': 'codex',
+  'clio-agent': 'claude',
+});
+
+const DEFAULT_AGY_CHUNK_MAX_CHUNKS = 20;
+
+function resolveAgyChunkMaxChunks(env = process.env) {
+  const raw = env.ADVERSARIAL_REVIEW_AGY_CHUNK_MAX_CHUNKS;
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_AGY_CHUNK_MAX_CHUNKS;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : DEFAULT_AGY_CHUNK_MAX_CHUNKS;
+}
+
+function agyOversizedChunkContextSuffix(index, total) {
+  return `\n\nOversized-diff chunk ${index} of ${total}. Review only this chunk; findings will be merged.`;
+}
+
+function agyOversizedChunkContextBudgetSuffix(maxChunks) {
+  const safeMaxChunks = Math.max(1, Number(maxChunks) || DEFAULT_AGY_CHUNK_MAX_CHUNKS);
+  return agyOversizedChunkContextSuffix(safeMaxChunks, safeMaxChunks);
+}
+
+function chooseAgyOversizedCrossModelRoute(builderTag) {
+  const builderClass = normalizeBuilderTag(builderTag);
+  const reviewerModel = CROSS_MODEL_PRIMARY_BY_BUILDER_CLASS[builderClass];
+  if (!reviewerModel) return null;
+  return REVIEWER_ROUTE_BY_MODEL[reviewerModel] || null;
+}
+
+function resolveAgyOversizedReviewRoute({
+  reviewerModel,
+  botTokenEnv,
+  builderTag,
+  diff,
+  extraContext = '',
+  promptStage = 'first',
+  geminiRuntime = 'cli',
+  maxBytes = resolveAgyArgvMaxBytes(),
+} = {}) {
+  const normalizedReviewer = String(reviewerModel || '').trim().toLowerCase();
+  if (normalizedReviewer !== 'gemini' || geminiRuntime !== 'antigravity') {
+    return {
+      oversized: false,
+      promptBytes: null,
+      maxBytes,
+      route: { reviewerModel, botTokenEnv },
+    };
+  }
+  const prompt = buildPromptForReviewerModel('gemini', diff, extraContext, {
+    promptStage,
+    runtime: 'antigravity',
+  });
+  const promptBytes = agyPromptBytes(prompt);
+  if (promptBytes <= maxBytes) {
+    return {
+      oversized: false,
+      promptBytes,
+      maxBytes,
+      route: { reviewerModel, botTokenEnv },
+    };
+  }
+  const routed = chooseAgyOversizedCrossModelRoute(builderTag);
+  return {
+    oversized: true,
+    promptBytes,
+    maxBytes,
+    route: routed || null,
+    reason: 'agy-argv-budget-exceeded',
+  };
+}
+
+function pushAgyChunk(chunks, chunkDiff, {
+  extraContext,
+  promptStage,
+  maxBytes,
+  maxChunks,
+}) {
+  const diff = String(chunkDiff || '');
+  if (diff === '') return { ok: true };
+  const prompt = buildPromptForReviewerModel('gemini', diff, extraContext, {
+    promptStage,
+    runtime: 'antigravity',
+  });
+  const bytes = agyPromptBytes(prompt);
+  if (bytes > maxBytes) return { ok: false, reason: 'chunk-over-budget', bytes };
+  if (chunks.length >= maxChunks) return { ok: false, reason: 'chunk-cap-hit', bytes };
+  chunks.push({ diff, promptBytes: bytes });
+  return { ok: true };
+}
+
+function splitPatchHeaderAndBodyLines(lines) {
+  const hunkIndex = lines.findIndex((line) => /^@@\s/.test(line));
+  if (hunkIndex < 0) return { headerLines: [], bodyLines: lines };
+  return {
+    headerLines: lines.slice(0, hunkIndex),
+    bodyLines: lines.slice(hunkIndex),
+  };
+}
+
+function joinPatchLines(headerLines, bodyLines) {
+  if (headerLines.length === 0) return bodyLines.join('\n');
+  if (bodyLines.length === 0) return headerLines.join('\n');
+  return `${headerLines.join('\n')}\n${bodyLines.join('\n')}`;
+}
+
+function splitOversizedPatchByLines(patch, {
+  extraContext,
+  chunkContextBudgetSuffix = '',
+  promptStage,
+  maxBytes,
+  maxChunks,
+  chunks,
+}) {
+  const lines = String(patch || '').replace(/\r\n/g, '\n').split('\n');
+  const { headerLines, bodyLines } = splitPatchHeaderAndBodyLines(lines);
+  const budgetExtraContext = `${extraContext || ''}${chunkContextBudgetSuffix || ''}`;
+  const promptOverheadBytes = agyPromptBytes(buildPromptForReviewerModel('gemini', '', budgetExtraContext, {
+    promptStage,
+    runtime: 'antigravity',
+  }));
+  const headerText = headerLines.join('\n');
+  const headerBytes = agyPromptBytes(headerText);
+  const headerBodySeparatorBytes = headerLines.length > 0 ? 1 : 0;
+  let currentLines = [];
+  let currentBodyBytes = 0;
+  let activeHunkLine = null;
+  let activeHunkBytes = 0;
+  const promptBytesForBody = (bodyBytes) => promptOverheadBytes
+    + headerBytes
+    + (headerLines.length > 0 && bodyBytes > 0 ? headerBodySeparatorBytes : 0)
+    + bodyBytes;
+  const startBodyWithLine = (line, lineBytes) => {
+    if (/^@@\s/.test(line)) return { lines: [line], bytes: lineBytes };
+    if (activeHunkLine) {
+      return {
+        lines: [activeHunkLine, line],
+        bytes: activeHunkBytes + 1 + lineBytes,
+      };
+    }
+    return { lines: [line], bytes: lineBytes };
+  };
+  for (const line of bodyLines) {
+    const lineBytes = agyPromptBytes(line);
+    if (/^@@\s/.test(line)) {
+      activeHunkLine = line;
+      activeHunkBytes = lineBytes;
+    }
+    const start = currentLines.length === 0 ? startBodyWithLine(line, lineBytes) : null;
+    const candidateBodyBytes = start
+      ? start.bytes
+      : currentBodyBytes + 1 + lineBytes;
+    const candidatePromptBytes = promptBytesForBody(candidateBodyBytes);
+    if (candidatePromptBytes <= maxBytes) {
+      if (start) {
+        currentLines = start.lines;
+      } else {
+        currentLines.push(line);
+      }
+      currentBodyBytes = candidateBodyBytes;
+      continue;
+    }
+    if (currentLines.length === 0) {
+      return { ok: false, reason: 'single-line-over-budget' };
+    }
+    const pushed = pushAgyChunk(chunks, joinPatchLines(headerLines, currentLines), {
+      extraContext: budgetExtraContext,
+      promptStage,
+      maxBytes,
+      maxChunks,
+    });
+    if (!pushed.ok) return pushed;
+    const next = startBodyWithLine(line, lineBytes);
+    if (promptBytesForBody(next.bytes) > maxBytes) {
+      return { ok: false, reason: 'single-line-over-budget' };
+    }
+    currentLines = next.lines;
+    currentBodyBytes = next.bytes;
+  }
+  if (currentLines.length > 0) {
+    const pushed = pushAgyChunk(chunks, joinPatchLines(headerLines, currentLines), {
+      extraContext: budgetExtraContext,
+      promptStage,
+      maxBytes,
+      maxChunks,
+    });
+    if (!pushed.ok) return pushed;
+  }
+  return { ok: true };
+}
+
+function splitDiffForAgyChunks(diff, {
+  extraContext = '',
+  chunkContextBudgetSuffix = '',
+  promptStage = 'first',
+  maxBytes = resolveAgyArgvMaxBytes(),
+  maxChunks = resolveAgyChunkMaxChunks(),
+} = {}) {
+  if (maxChunks <= 0) {
+    return { ok: false, chunks: [], truncated: true, reason: 'chunking-disabled' };
+  }
+  const chunks = [];
+  const files = parseDiffFiles(diff);
+  const units = files.length > 0 ? files.map((file) => file.patch) : [String(diff || '')];
+  const budgetExtraContext = `${extraContext || ''}${chunkContextBudgetSuffix || ''}`;
+  let pendingUnit = '';
+  const canFitUnit = (unit) => pushAgyChunk([], unit, {
+    extraContext: budgetExtraContext,
+    promptStage,
+    maxBytes,
+    maxChunks: 1,
+  }).ok;
+  const flushPendingUnit = () => {
+    if (!pendingUnit) return { ok: true };
+    const pushed = pushAgyChunk(chunks, pendingUnit, {
+      extraContext: budgetExtraContext,
+      promptStage,
+      maxBytes,
+      maxChunks,
+    });
+    pendingUnit = '';
+    return pushed;
+  };
+  for (const unit of units) {
+    if (!unit) continue;
+    if (pendingUnit) {
+      const combinedUnit = `${pendingUnit}\n${unit}`;
+      if (canFitUnit(combinedUnit)) {
+        pendingUnit = combinedUnit;
+        continue;
+      }
+      const flushed = flushPendingUnit();
+      if (!flushed.ok) {
+        if (flushed.reason === 'chunk-cap-hit') {
+          return { ok: true, chunks, truncated: true, reason: flushed.reason };
+        }
+        return { ok: false, chunks, truncated: false, reason: flushed.reason };
+      }
+    }
+    if (canFitUnit(unit)) {
+      pendingUnit = unit;
+      continue;
+    }
+    const flushed = flushPendingUnit();
+    if (!flushed.ok) {
+      if (flushed.reason === 'chunk-cap-hit') {
+        return { ok: true, chunks, truncated: true, reason: flushed.reason };
+      }
+      return { ok: false, chunks, truncated: false, reason: flushed.reason };
+    }
+    const split = splitOversizedPatchByLines(unit, {
+      extraContext,
+      chunkContextBudgetSuffix,
+      promptStage,
+      maxBytes,
+      maxChunks,
+      chunks,
+    });
+    if (!split.ok) {
+      if (split.reason === 'chunk-cap-hit') {
+        return { ok: true, chunks, truncated: true, reason: split.reason };
+      }
+      return { ok: false, chunks, truncated: false, reason: split.reason };
+    }
+  }
+  const flushed = flushPendingUnit();
+  if (!flushed.ok) {
+    if (flushed.reason === 'chunk-cap-hit') {
+      return { ok: true, chunks, truncated: true, reason: flushed.reason };
+    }
+    return { ok: false, chunks, truncated: false, reason: flushed.reason };
+  }
+  return { ok: chunks.length > 0, chunks, truncated: false, reason: chunks.length > 0 ? null : 'empty-diff' };
+}
+
+function markdownSectionBody(markdown, heading) {
+  const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
+  const sectionStart = lines.findIndex((line) => line.trim().toLowerCase() === `## ${heading}`.toLowerCase());
+  if (sectionStart < 0) return '';
+  const sectionLines = [];
+  for (const line of lines.slice(sectionStart + 1)) {
+    if (/^##\s+/.test(line)) break;
+    sectionLines.push(line);
+  }
+  return sectionLines.join('\n').trim();
+}
+
+function extractMarkdownIssueList(markdown, heading) {
+  const body = markdownSectionBody(markdown, heading);
+  if (!body || /^[-*+]\s+none\.?\s*$/i.test(body)) return [];
+  const lines = body.split('\n');
+  const issues = [];
+  let current = [];
+  for (const line of lines) {
+    if (/^[-*+]\s+/.test(line)) {
+      if (current.length > 0) issues.push(current.join('\n').trimEnd());
+      current = [line];
+      continue;
+    }
+    if (current.length > 0) current.push(line);
+  }
+  if (current.length > 0) issues.push(current.join('\n').trimEnd());
+  const filtered = issues.filter((issue) => !/^[-*+]\s+none\.?\s*$/i.test(issue.trim()));
+  if (filtered.length === 0 && body.trim()) {
+    return [`- ${body.trim().replace(/\n/g, '\n  ')}`];
+  }
+  return filtered;
+}
+
+function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes = null, maxBytes = null } = {}) {
+  const texts = chunkReviews.map((chunk) => String(chunk.reviewText || '').trim()).filter(Boolean);
+  const parts = [
+    '## Summary',
+    `Reviewed an oversized diff through ${chunkReviews.length} bounded Antigravity chunks because the full agy prompt exceeded the argv budget${promptBytes ? ` (${promptBytes} bytes > ${maxBytes} bytes)` : ''}.`,
+  ];
+  if (truncated) {
+    parts.push('', '> Operator note: the chunk hard cap was hit; this merged review covers the reviewed chunks only.');
+  }
+  parts.push('', '## Blocking issues');
+  const blocking = texts.flatMap((text) => extractMarkdownIssueList(text, 'Blocking issues'));
+  parts.push(blocking.length > 0 ? blocking.join('\n') : '- None.');
+  const verdict = blocking.length > 0 ? 'Request changes' : 'Comment only';
+  parts.push('', '## Non-blocking issues');
+  const nonBlocking = texts.flatMap((text) => extractMarkdownIssueList(text, 'Non-blocking issues'));
+  parts.push(nonBlocking.length > 0 ? nonBlocking.join('\n') : '- None.');
+  parts.push('', '## Suggested fixes');
+  const suggestedFixes = texts.flatMap((text) => extractMarkdownIssueList(text, 'Suggested fixes'));
+  parts.push(suggestedFixes.length > 0 ? suggestedFixes.join('\n') : '- None.');
+  parts.push('', '## Verdict', verdict);
+  return parts.join('\n');
+}
+
 /**
  * Route a review to the reviewer matching `effectiveModel`. This is the
  * single selection site: 'gemini' MUST land on reviewWithGemini and never
@@ -2620,6 +3019,53 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
     reviewText: null,
     tokenUsage: codexResult.tokenUsage,
     needsSanitize: true,
+  };
+}
+
+async function reviewAgyOversizedInChunks(diff, extraContext, {
+  promptStage = 'first',
+  promptBytes = null,
+  maxBytes = resolveAgyArgvMaxBytes(),
+  reviewWithGeminiImpl = reviewWithGemini,
+  maxChunks = resolveAgyChunkMaxChunks(),
+} = {}) {
+  const split = splitDiffForAgyChunks(diff, {
+    extraContext,
+    chunkContextBudgetSuffix: agyOversizedChunkContextBudgetSuffix(maxChunks),
+    promptStage,
+    maxBytes,
+    maxChunks,
+  });
+  if (!split.ok) {
+    throw new Error(
+      `Antigravity agy oversized diff chunking unavailable: ${split.reason}; `
+      + `repo prompt size=${promptBytes ?? 'unknown'} maxBytes=${maxBytes} chunks=${split.chunks.length}`
+    );
+  }
+  const chunkReviews = [];
+  for (let index = 0; index < split.chunks.length; index += 1) {
+    const chunk = split.chunks[index];
+    const chunkContext = `${extraContext}${agyOversizedChunkContextSuffix(index + 1, split.chunks.length)}`;
+    const result = await reviewWithGeminiImpl(chunk.diff, chunkContext, { promptStage });
+    chunkReviews.push({
+      index: index + 1,
+      promptBytes: chunk.promptBytes,
+      reviewText: result.reviewText,
+    });
+  }
+  const mergedReviewText = mergeChunkedAgyReviews(chunkReviews, {
+    truncated: split.truncated,
+    promptBytes,
+    maxBytes,
+  });
+  return {
+    rawReviewText: mergedReviewText,
+    reviewText: mergedReviewText,
+    tokenUsage: null,
+    needsSanitize: false,
+    chunked: true,
+    chunks: split.chunks,
+    truncated: split.truncated,
   };
 }
 
@@ -3005,6 +3451,42 @@ async function alertClioOAuthFailure(model, repo, prNumber, reason) {
   }
 }
 
+async function alertClioOversizedAgyFailure({
+  repo,
+  prNumber,
+  promptBytes,
+  maxBytes,
+  reason,
+}, {
+  execFileImpl = execFileAsync,
+  retryDelaysMs = WAKE_HOOK_RETRY_DELAYS_MS,
+  sleepImpl = sleep,
+} = {}) {
+  const msg = `Adversarial reviewer oversized agy prompt could not be reviewed.\n\nRepo: ${repo} PR #${prNumber}\nPrompt bytes: ${promptBytes ?? 'unknown'}\nAgy argv budget: ${maxBytes ?? 'unknown'}\nReason: ${reason}\n\nThis is the #3074/#3122/#3124 no-review prevention guard; operator action is required because both cross-model routing and chunk fallback were unavailable.`;
+
+  console.error(`[reviewer] ALERT: ${msg}`);
+
+  try {
+    await execFileWithTransientRetry(
+      'curl',
+      [
+        '-sS', '-f', '--max-time', '10', '-X', 'POST',
+        'http://127.0.0.1:8787/hooks/wake',
+        '-H', 'Content-Type: application/json',
+        '-d', JSON.stringify({ message: msg }),
+      ],
+      {
+        execFileImpl,
+        retryDelaysMs,
+        sleepImpl,
+      }
+    );
+    console.log('[reviewer] oversized agy prompt alert sent via wake hook');
+  } catch (err) {
+    console.error('[reviewer] Failed to send oversized agy prompt alert:', err.message);
+  }
+}
+
 // ── Linear integration (LAC-13) ──────────────────────────────────────────────
 
 const linearTriage = createLinearTriageAdapter({
@@ -3152,16 +3634,51 @@ async function main() {
   }
 
   // 2. Run adversarial review (OAuth only — no API key fallback)
-  const effectiveModel = reviewerModel;
+  let effectiveModel = reviewerModel;
+  let effectiveBotTokenEnv = botTokenEnv;
+  let oversizedAgyRoute = null;
+  let useAgyChunkFallback = false;
+  const geminiRuntimeForBudget = effectiveModel === 'gemini'
+    ? resolveGeminiRuntimeForReview(resolveGeminiRuntime, console)
+    : null;
+  oversizedAgyRoute = resolveAgyOversizedReviewRoute({
+    reviewerModel: effectiveModel,
+    botTokenEnv: effectiveBotTokenEnv,
+    builderTag,
+    diff,
+    extraContext,
+    promptStage: reviewerPromptStage,
+    geminiRuntime: geminiRuntimeForBudget,
+  });
+  if (oversizedAgyRoute.oversized) {
+    if (oversizedAgyRoute.route) {
+      effectiveModel = oversizedAgyRoute.route.reviewerModel;
+      effectiveBotTokenEnv = oversizedAgyRoute.route.botTokenEnv;
+      console.warn(
+        `[reviewer] reviewer-selection repo=${repo} pr=${prNumber} reason=agy-argv-budget-exceeded ` +
+          `size=${oversizedAgyRoute.promptBytes} budget=${oversizedAgyRoute.maxBytes} ` +
+          `routed=${effectiveModel} original=gemini refs=#3074,#3122,#3124`
+      );
+    } else {
+      useAgyChunkFallback = true;
+      console.warn(
+        `[reviewer] reviewer-selection repo=${repo} pr=${prNumber} reason=agy-argv-budget-exceeded ` +
+          `size=${oversizedAgyRoute.promptBytes} budget=${oversizedAgyRoute.maxBytes} ` +
+          `routed=agy-chunks original=gemini refs=#3074,#3122,#3124`
+      );
+    }
+  }
   logStructuredEvent(console, {
     event: 'hosted-reviewer-selection',
     level: 'info',
     repo,
     prNumber,
     reviewerModel: effectiveModel,
-    botTokenEnv,
+    botTokenEnv: effectiveBotTokenEnv,
     builderTag: builderTag || null,
     label: hasLocalReviewShadowLabel(labels) ? LOCAL_REVIEW_SHADOW_LABEL : null,
+    oversizedAgyPromptBytes: oversizedAgyRoute?.oversized ? oversizedAgyRoute.promptBytes : null,
+    oversizedAgyBudgetBytes: oversizedAgyRoute?.oversized ? oversizedAgyRoute.maxBytes : null,
   });
 
   let reviewText;
@@ -3171,9 +3688,31 @@ async function main() {
     console.error(`[reviewer] DEBUG: starting ${effectiveModel} review...`);
     // Single selection site (GMW-01): claude / gemini / codex. gemini routes
     // to reviewWithGemini and never falls through to codex.
-    const dispatch = await dispatchReviewerModel(effectiveModel, diff, extraContext, {
-      promptStage: reviewerPromptStage,
-    });
+    let dispatch;
+    try {
+      dispatch = useAgyChunkFallback
+        ? await reviewAgyOversizedInChunks(diff, extraContext, {
+            promptStage: reviewerPromptStage,
+            promptBytes: oversizedAgyRoute?.promptBytes,
+            maxBytes: oversizedAgyRoute?.maxBytes,
+          })
+        : await dispatchReviewerModel(effectiveModel, diff, extraContext, {
+            promptStage: reviewerPromptStage,
+          });
+    } catch (firstErr) {
+      if (!oversizedAgyRoute?.oversized || useAgyChunkFallback) throw firstErr;
+      console.warn(
+        `[reviewer] oversized agy routed reviewer unavailable for ${repo}#${prNumber}: ` +
+          `${firstErr?.message || firstErr}; falling back to bounded agy chunks`
+      );
+      effectiveModel = 'gemini';
+      effectiveBotTokenEnv = 'GH_GEMINI_REVIEWER_TOKEN';
+      dispatch = await reviewAgyOversizedInChunks(diff, extraContext, {
+        promptStage: reviewerPromptStage,
+        promptBytes: oversizedAgyRoute.promptBytes,
+        maxBytes: oversizedAgyRoute.maxBytes,
+      });
+    }
     rawReviewText = dispatch.rawReviewText;
     tokenUsage = dispatch.tokenUsage;
     if (dispatch.needsSanitize) {
@@ -3211,6 +3750,15 @@ async function main() {
       await alertClioOAuthFailure(reviewerModel, repo, prNumber, err.message);
       console.error(`[reviewer] Stopped: OAuth credentials unavailable for ${reviewerModel}`);
       process.exit(2); // exit code 2 = auth failure (distinct from other errors)
+    }
+    if (oversizedAgyRoute?.oversized) {
+      await alertClioOversizedAgyFailure({
+        repo,
+        prNumber,
+        promptBytes: oversizedAgyRoute.promptBytes,
+        maxBytes: oversizedAgyRoute.maxBytes,
+        reason: err.message || String(err),
+      });
     }
     console.error(`[reviewer] AI review failed for ${repo}#${prNumber}:`, err.message);
     console.error(`[reviewer] ERROR STACK: ${err.stack}`);
@@ -3291,7 +3839,7 @@ async function main() {
         builderTag,
         reviewerModel: effectiveModel,
         hostedReviewerIdentity: resolveReviewerIdentityForBotTokenEnv(
-          botTokenEnv,
+          effectiveBotTokenEnv,
           reviewerMetadata.reviewerIdentity
         ),
         eligibility: localShadowEligibility,
@@ -3329,11 +3877,11 @@ async function main() {
       attemptNumber: captureAttemptNumber,
       reviewerModel: effectiveModel,
       reviewBody: fullComment,
-      botTokenEnv,
+      botTokenEnv: effectiveBotTokenEnv,
       passKind,
       reviewerSpawnToken,
       reviewerIdentity: resolveReviewerIdentityForBotTokenEnv(
-        botTokenEnv,
+        effectiveBotTokenEnv,
         reviewerMetadata.reviewerIdentity
       ),
       execFileImpl: execFileAsync,
@@ -3484,6 +4032,9 @@ const __test__ = {
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
   buildAgyReviewArgs,
+  DEFAULT_AGY_ARGV_MAX_BYTES,
+  resolveAgyArgvMaxBytes,
+  agyPromptBytes,
   assertAgyPromptFitsArgv,
   AGY_ARGV_MAX_BYTES,
   resolveAgyPrintTimeoutMs,
@@ -3492,7 +4043,19 @@ const __test__ = {
   hasAgyErrorSentinel,
   sanitizeAgyReviewOutput,
   buildAgyReviewerPromptPrefix,
+  buildReviewerPrompt,
+  buildPromptForReviewerModel,
+  chooseAgyOversizedCrossModelRoute,
+  resolveAgyOversizedReviewRoute,
+  splitDiffForAgyChunks,
+  extractMarkdownIssueList,
+  mergeChunkedAgyReviews,
+  reviewAgyOversizedInChunks,
+  resolveAgyChunkMaxChunks,
   isRetryableGeminiSubprocessError,
+  isRetryableCurlWakeError,
+  execFileWithTransientRetry,
+  alertClioOversizedAgyFailure,
   resolveGeminiRuntimeForReview,
   spawnGeminiReview,
   spawnAgyReview,

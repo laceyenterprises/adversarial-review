@@ -716,16 +716,18 @@ fi
 HAM_LOCAL_BATTERY_COMMAND="${HAM_LOCAL_BATTERY_COMMAND:-npm test}"
 HAM_MERGE_RETRY_CAP="${HAM_MERGE_RETRY_CAP:-4}"
 HAM_MERGE_BACKOFF_BASE_SECONDS="${HAM_MERGE_BACKOFF_BASE_SECONDS:-2}"
-HAM_MERGE_STDOUT="/tmp/ham-gh-pr-merge.stdout"
-HAM_MERGE_STDERR="/tmp/ham-gh-pr-merge.stderr"
-HAM_GATE_JSON="/tmp/ham-github-gate.json"
-HAM_POST_MERGE_JSON="/tmp/ham-post-merge.json"
-HAM_POST_MERGE_STDERR="/tmp/ham-post-merge.stderr"
+HAM_MERGE_TMP_PREFIX="${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-${HAM_MERGE_LEASE_ID:-no-lease}-$$"
+HAM_MERGE_STDOUT=$(mktemp "${HAM_MERGE_TMP_PREFIX}.gh-pr-merge.stdout.XXXXXX") || exit 1
+HAM_MERGE_STDERR=$(mktemp "${HAM_MERGE_TMP_PREFIX}.gh-pr-merge.stderr.XXXXXX") || exit 1
+HAM_GATE_JSON=$(mktemp "${HAM_MERGE_TMP_PREFIX}.github-gate.XXXXXX") || exit 1
+HAM_POST_MERGE_JSON=$(mktemp "${HAM_MERGE_TMP_PREFIX}.post-merge.XXXXXX") || exit 1
+HAM_POST_MERGE_STDERR=$(mktemp "${HAM_MERGE_TMP_PREFIX}.post-merge.stderr.XXXXXX") || exit 1
+HAM_PRE_MERGE_ELIGIBLE=0
 
 ham_append_terminal_audit() {
   ham_audit_outcome="$1"
   ham_audit_reason="$2"
-  ham_audit_attempt_json="/tmp/ham-terminal-audit-attempt.json"
+  ham_audit_attempt_json=$(mktemp "${HAM_MERGE_TMP_PREFIX}.terminal-audit-attempt.XXXXXX") || return 1
   jq -n \
     --arg outcome "$ham_audit_outcome" \
     --arg reason "$ham_audit_reason" \
@@ -738,10 +740,11 @@ ham_append_terminal_audit() {
     --arg mergedAt "${HAM_MERGED_AT:-}" \
     --argjson mergeAttempts "${HAM_MERGE_ATTEMPTS:-0}" \
     --argjson rebaseAttempts "${HAM_REBASE_ATTEMPTS:-0}" \
+    --argjson preMergeEligible "${HAM_PRE_MERGE_ELIGIBLE:-0}" \
     --argjson eligibilityTrace "$(cat /tmp/ham-verdict.json)" \
     --argjson githubGate "$([ -s "$HAM_GATE_JSON" ] && cat "$HAM_GATE_JSON" || printf '{}')" \
     '{
-      preMergeEligible: ($outcome == "succeeded"),
+      preMergeEligible: ($preMergeEligible == 1),
       attemptPhase: "hammer-gh-pr-merge",
       headMatchEvidence: "ham_terminal_remediation_validated",
       reviewedHead: $reviewedHead,
@@ -854,8 +857,33 @@ ham_merge_error_permanent() {
   grep -Eiq 'match-head-commit|head.*(mismatch|changed|does not match)|not authorized|permission|authentication|forbidden|HTTP 401|HTTP 403|branch protection|ruleset|required check|status checks? (not|have not)|not mergeable|merge conflict|closed|pull request.*not open|draft' "$1"
 }
 
+ham_run_local_battery_with_timeout() {
+  perl -e '
+    use POSIX qw(setsid);
+    my $timeout = shift @ARGV;
+    my $pid = fork();
+    die "fork failed: $!" unless defined $pid;
+    if ($pid == 0) {
+      setsid() or die "setsid failed: $!";
+      exec @ARGV;
+      die "exec failed: $!";
+    }
+    local $SIG{ALRM} = sub {
+      kill "TERM", -$pid;
+      sleep 2;
+      kill "KILL", -$pid;
+      exit 124;
+    };
+    alarm $timeout;
+    waitpid($pid, 0);
+    my $status = $?;
+    alarm 0;
+    exit($status & 127 ? 128 + ($status & 127) : $status >> 8);
+  ' "${HAM_LOCAL_BATTERY_TIMEOUT_SECONDS:-3600}" sh -lc "$HAM_LOCAL_BATTERY_COMMAND"
+}
+
 echo "HAM local battery: running ${HAM_LOCAL_BATTERY_COMMAND}" >&2
-if ! perl -e 'alarm shift @ARGV; exec @ARGV' "${HAM_LOCAL_BATTERY_TIMEOUT_SECONDS:-3600}" sh -lc "$HAM_LOCAL_BATTERY_COMMAND"; then
+if ! ham_run_local_battery_with_timeout; then
   echo "HAM hard-blocker: full local test battery failed; fix locally before merge" >&2
   ham_append_terminal_audit failed-without-merge local-battery-red || true
   ham_release_merge_lease
@@ -872,6 +900,7 @@ HAM_ALREADY_MERGED_VALIDATED_HEAD=0
 if ham_already_merged_validated_head; then
   echo "HAM preflight: PR is already merged at validated head; proceeding to post-merge validation" >&2
   HAM_ALREADY_MERGED_VALIDATED_HEAD=1
+  HAM_PRE_MERGE_ELIGIBLE=1
 elif ! ham_required_gate_ok; then
   if ham_live_head_moved; then
     echo "HAM race: live PR head moved off validated head; releasing lease without merge or re-dispatch" >&2
@@ -885,13 +914,14 @@ elif ! ham_required_gate_ok; then
   ham_release_merge_lease
   exit 0
 fi
+HAM_PRE_MERGE_ELIGIBLE=1
 
 HAM_MERGE_ATTEMPTS=0
 HAM_MERGE_EXIT=1
 if [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -eq 1 ]; then
   HAM_MERGE_EXIT=0
 else
-  HAM_PRE_MERGE_ATTEMPT_FILE="/tmp/ham-pre-merge-attempt.json"
+  HAM_PRE_MERGE_ATTEMPT_FILE=$(mktemp "${HAM_MERGE_TMP_PREFIX}.pre-merge-attempt.XXXXXX") || exit 1
   jq -n \
     --arg reviewedHead "<<REVIEWED_SHA>>" \
     --arg validatedHead "$POST_REMEDIATION_SHA" \
@@ -951,7 +981,7 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
   fi
 
   gh pr merge <<PR_URL>> \
-    --squash \
+    --<<MERGE_METHOD>> \
     --match-head-commit "$POST_REMEDIATION_SHA" \
     > "$HAM_MERGE_STDOUT" \
     2> "$HAM_MERGE_STDERR"
@@ -1008,14 +1038,22 @@ while [ "$HAM_POST_VIEW_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
   if ! ham_merge_error_retryable "$HAM_POST_MERGE_STDERR"; then
     cat "$HAM_POST_MERGE_STDERR" >&2 || true
     echo "HAM hard-blocker: unclassified gh pr view confirmation failure; fail closed without retry" >&2
-    ham_append_terminal_audit failed-without-merge merge-confirmation-read-failed || true
+    if [ "$HAM_MERGE_EXIT" -eq 0 ]; then
+      ham_append_terminal_audit deferred merge-confirmation-read-failed-after-merge-accepted || true
+    else
+      ham_append_terminal_audit failed-without-merge merge-confirmation-read-failed || true
+    fi
     ham_release_merge_lease
     exit 1
   fi
   if [ "$HAM_POST_VIEW_ATTEMPTS" -ge "$HAM_MERGE_RETRY_CAP" ]; then
     cat "$HAM_POST_MERGE_STDERR" >&2 || true
     echo "HAM hard-blocker: retryable gh pr view confirmation failures exhausted bounded budget" >&2
-    ham_append_terminal_audit failed-without-merge merge-confirmation-read-failed || true
+    if [ "$HAM_MERGE_EXIT" -eq 0 ]; then
+      ham_append_terminal_audit deferred merge-confirmation-read-failed-after-merge-accepted || true
+    else
+      ham_append_terminal_audit failed-without-merge merge-confirmation-read-failed || true
+    fi
     ham_release_merge_lease
     exit 1
   fi
@@ -1030,7 +1068,12 @@ HAM_MERGED_AT=$(jq -r '.mergedAt // ""' "$HAM_POST_MERGE_JSON")
 HAM_MERGE_COMMIT=$(jq -r '.mergeCommit?.oid // ""' "$HAM_POST_MERGE_JSON")
 HAM_POST_HEAD=$(jq -r '.headRefOid // ""' "$HAM_POST_MERGE_JSON")
 if [ "$HAM_POST_STATE" = "MERGED" ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATION_SHA" ]; then
-  ham_append_terminal_audit succeeded merged || exit 1
+  ham_append_terminal_audit succeeded merged
+  HAM_MERGED_AUDIT_APPEND_EXIT=$?
+  if [ "$HAM_MERGED_AUDIT_APPEND_EXIT" -ne 0 ]; then
+    ham_release_merge_lease
+    exit "$HAM_MERGED_AUDIT_APPEND_EXIT"
+  fi
   ham_release_merge_lease
 else
   echo "HAM hard-blocker: gh pr merge did not confirm merged validated head" >&2
@@ -1063,7 +1106,7 @@ hard-blocker report, and do not re-dispatch.
 - No merging the old `<<REVIEWED_SHA>>` merely because it passed.
 - No unbounded rebase/update-branch retries; cap them and stop through the
   single hard-blocker report path described above.
-- No `gh pr merge` without `--squash --match-head-commit "$POST_REMEDIATION_SHA"`
+- No `gh pr merge` without `--<<MERGE_METHOD>> --match-head-commit "$POST_REMEDIATION_SHA"`
   while holding the merge lease.
 - No merge when the live post-remediation head has failed, missing, stale, or
   unchecked required checks.

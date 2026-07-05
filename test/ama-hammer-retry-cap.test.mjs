@@ -122,6 +122,27 @@ test('recordHammerRetryDispatch + markHammerRetryCapExhausted round-trip on disk
   assert.deepEqual(reset.dispatchHeads, ['fresh']);
 });
 
+test('recordHammerRetryDispatch preserves the existing job key when incoming job key is missing', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-anchor-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+
+  recordHammerRetryDispatch(rootDir, identity, {
+    jobKey: REVIEWED_HEAD,
+    headSha: 'anchor-h1',
+    now: '2026-07-05T00:00:00Z',
+  });
+  const afterMissingJobKey = recordHammerRetryDispatch(rootDir, identity, {
+    jobKey: null,
+    headSha: 'anchor-h2',
+    now: '2026-07-05T00:05:00Z',
+  });
+
+  assert.equal(afterMissingJobKey.jobKey, REVIEWED_HEAD);
+  assert.equal(afterMissingJobKey.attemptCount, 2);
+  assert.deepEqual(afterMissingJobKey.dispatchHeads, ['anchor-h1', 'anchor-h2']);
+});
+
 // ── integration through maybeDispatchAmaCloser ───────────────────────────────
 
 /**
@@ -297,6 +318,50 @@ test('hammer that fails to close twice → exactly 2 dispatches, then GBI alert 
   assert.equal(r4.reason, 'hammer-retry-cap-exhausted');
   assert.equal(exec.launches().length, 2, 'still exactly 2 launches');
   assert.equal(alerts.length, 1, 'no re-alert while suppressed');
+});
+
+test('cap-exhausted hammer dispatch asserts owner before mutating suppression ledger', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-owner-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+  const exec = buildDispatchExecMock();
+  const alerts = [];
+  const deliverAlertImpl = async (text, opts) => { alerts.push({ text, opts }); };
+
+  recordHammerRetryDispatch(rootDir, identity, {
+    jobKey: REVIEWED_HEAD,
+    headSha: 'owner-h1',
+    now: '2026-07-05T00:00:00Z',
+  });
+  recordHammerRetryDispatch(rootDir, identity, {
+    jobKey: REVIEWED_HEAD,
+    headSha: 'owner-h2',
+    now: '2026-07-05T00:05:00Z',
+  });
+
+  const fixture = hammerFixture({ rootDir, currentHead: 'owner-h3' });
+  await assert.rejects(
+    () => maybeDispatchAmaCloser({
+      ...fixture,
+      dispatchContext: {
+        ...fixture.dispatchContext,
+        hqOwnerUser: `${CURRENT_USER}-different`,
+        currentUser: CURRENT_USER,
+      },
+      execFileImpl: exec.impl,
+      readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
+      deliverAlertImpl,
+      ...NO_MERGE_SIGNAL,
+    }),
+    /does not match HQ ownerUser/,
+  );
+
+  const ledger = readHammerRetryCapLedger(rootDir, identity);
+  assert.equal(ledger.suppressed, false, 'owner mismatch failed before suppression write');
+  assert.equal(ledger.attemptCount, 2, 'attempt count was not modified');
+  assert.equal(ledger.jobKey, REVIEWED_HEAD, 'job key anchor was preserved');
+  assert.equal(alerts.length, 0, 'owner mismatch failed before alert delivery');
+  assert.equal(exec.launches().length, 0, 'owner mismatch failed before dispatch exec');
 });
 
 test('a hammer-authored head move does NOT reset the counter', async (t) => {

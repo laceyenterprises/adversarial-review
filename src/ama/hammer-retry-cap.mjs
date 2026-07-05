@@ -161,7 +161,7 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     schemaVersion: HAMMER_RETRY_CAP_SCHEMA_VERSION,
     repo: identity.repo,
     prNumber: Number(identity.prNumber),
-    jobKey: incomingJobKey,
+    jobKey: incomingJobKey || normalizeKey(existing?.jobKey),
     attemptCount: decision.nextAttemptCount,
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,

@@ -1834,6 +1834,12 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
+  assertAmaAuditOwner({
+    hqRoot,
+    ownerUser,
+    currentUser: dispatchContext.currentUser,
+  });
+
   // ── Hammer retry cap (per-PR, robust across head churn) ────────────────────
   // The per-head redispatch bound above resets whenever a hammer moves the head,
   // so it cannot stop the re-hammer loop that burned the weekly Codex quota on
@@ -1872,12 +1878,6 @@ export async function maybeDispatchAmaCloser({
       });
     }
   }
-
-  assertAmaAuditOwner({
-    hqRoot,
-    ownerUser,
-    currentUser: dispatchContext.currentUser,
-  });
   writeAmaAuditEntry({
     hqRoot,
     repo,

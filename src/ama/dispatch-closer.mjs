@@ -141,6 +141,21 @@ function noAmaDispatch(result) {
   };
 }
 
+// In-memory debounce for the exhaustion page, keyed on the stable suppression
+// series (repo + PR + jobKey). The persisted `alertedAt` on the ledger is the
+// cross-restart source of truth, but if the suppression WRITE persistently fails
+// (disk full / permissions), `alertEmitted` never lands on disk and every tick
+// would re-page — an alert storm. This process-local set suppresses the re-page
+// within the long-lived follow-up daemon even when the ledger write keeps failing.
+// A genuinely fresh review series (new jobKey) uses a new key and still alerts.
+// A daemon restart clears it, which at most re-pages once (not a storm) and
+// correctly re-surfaces a still-broken disk.
+const HAMMER_RETRY_CAP_ALERTED_SERIES = new Set();
+
+export function _resetHammerRetryCapAlertDebounceForTests() {
+  HAMMER_RETRY_CAP_ALERTED_SERIES.clear();
+}
+
 /**
  * Fail loud when the per-PR hammer retry cap is exhausted.
  *
@@ -149,7 +164,9 @@ function noAmaDispatch(result) {
  * head churn can't clear it), and returns the non-dispatch result. Fail-open: if
  * the alert transport is down the suppression + log still happen and the closer
  * never crashes — the ledger records that the alert did NOT go out so a later
- * tick retries it.
+ * tick retries it. If instead the ledger WRITE fails, an in-memory series
+ * debounce prevents the operator page from storming every tick while the disk
+ * problem persists (the persist failure is logged distinctly).
  */
 async function suppressHammerRetryCapExhaustion({
   rootDir,
@@ -182,9 +199,15 @@ async function suppressHammerRetryCapExhaustion({
 
   // Only page the operator ON THE TRANSITION (first exhaustion) or when a prior
   // suppressed tick failed to deliver the alert. Repeated suppressed ticks must
-  // not re-page.
+  // not re-page — debounced by the persisted `alertedAt` (cross-restart) AND an
+  // in-memory series guard (survives a persistently-failing ledger write).
+  const alertSeriesKey = `${repo} ${prNumber} ${jobKey || ''}`;
   let alertEmitted = alertAlreadyEmitted;
-  if (!alertAlreadyEmitted && typeof deliverAlertImpl === 'function') {
+  if (
+    !alertAlreadyEmitted
+    && !HAMMER_RETRY_CAP_ALERTED_SERIES.has(alertSeriesKey)
+    && typeof deliverAlertImpl === 'function'
+  ) {
     const shortHead = String(headSha || 'unknown').slice(0, 12);
     const text =
       `Adversarial-review hammer retry cap exhausted for ${repo}#${prNumber} `
@@ -206,6 +229,9 @@ async function suppressHammerRetryCapExhaustion({
         },
       });
       alertEmitted = true;
+      // Record in-process that this series has been paged, so a failing ledger
+      // write below cannot cause a re-page storm on subsequent ticks.
+      HAMMER_RETRY_CAP_ALERTED_SERIES.add(alertSeriesKey);
     } catch (alertErr) {
       // Fail-open: never let a down alert transport crash the closer. The
       // suppression state below still lands, and alertEmitted stays false so a
@@ -230,12 +256,20 @@ async function suppressHammerRetryCapExhaustion({
     });
   } catch (persistErr) {
     // Even if the suppression ledger write fails we must not crash; log and fall
-    // through with the non-dispatch decision (the cap check re-derives from the
-    // per-head record path on the next tick as a backstop).
+    // through with the non-dispatch decision. The cap still holds this tick, and
+    // the in-memory series guard above stops the operator page from storming on
+    // subsequent ticks while the write keeps failing — but the durable
+    // suppression state did NOT land, so surface that distinctly for the operator.
     logger?.error?.(JSON.stringify({
       event: 'ama_closer.hammer_retry_cap_persist_failed',
       repo,
       prNumber,
+      jobKey,
+      alertEmitted,
+      message:
+        'hammer retry-cap suppression state failed to persist; cap held in-memory '
+        + 'this process but will NOT survive a daemon restart until the ledger '
+        + 'write succeeds — operator should check disk/permissions',
       error: persistErr?.message || String(persistErr),
     }));
   }

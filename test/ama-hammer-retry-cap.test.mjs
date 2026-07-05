@@ -8,23 +8,30 @@
 // bound couldn't catch it because a hammer that moves the head creates a fresh
 // per-head record (retryCount=0) — it reset its own counter every loop.
 
-import test from 'node:test';
+import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 
-import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
+import {
+  maybeDispatchAmaCloser,
+  _resetHammerRetryCapAlertDebounceForTests,
+} from '../src/ama/dispatch-closer.mjs';
 import {
   HAMMER_RETRY_CAP_SUPPRESSION_STATE,
   HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
   evaluateHammerRetryCap,
+  hammerRetryCapFilePath,
   markHammerRetryCapExhausted,
   readHammerRetryCapLedger,
   recordHammerRetryDispatch,
 } from '../src/ama/hammer-retry-cap.mjs';
+
+// Keep the process-local exhaustion-alert debounce from leaking across tests.
+beforeEach(() => _resetHammerRetryCapAlertDebounceForTests());
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
@@ -141,6 +148,33 @@ test('recordHammerRetryDispatch preserves the existing job key when incoming job
   assert.equal(afterMissingJobKey.jobKey, REVIEWED_HEAD);
   assert.equal(afterMissingJobKey.attemptCount, 2);
   assert.deepEqual(afterMissingJobKey.dispatchHeads, ['anchor-h1', 'anchor-h2']);
+});
+
+test('readHammerRetryCapLedger: ENOENT → null; corrupt file → fail-closed sentinel (not a silent reset)', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-corrupt-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+
+  // Absent ledger → null: the expected first-time path (count starts at 0).
+  assert.equal(readHammerRetryCapLedger(rootDir, identity), null);
+
+  // A corrupt/truncated ledger must NOT be treated like a fresh PR (that would
+  // silently reset the count to 0 and re-arm the quota-burning loop).
+  const filePath = hammerRetryCapFilePath(rootDir, identity);
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, '{ "attemptCount": 2, "jobKey":', 'utf8'); // truncated JSON
+  const warnings = [];
+  const corrupt = readHammerRetryCapLedger(rootDir, identity, {
+    logger: { warn: (m) => warnings.push(m) },
+  });
+  assert.equal(corrupt?.__corrupt, true, 'corrupt ledger returns the fail-closed sentinel, not null');
+  assert.equal(warnings.length, 1, 'corruption is surfaced loudly, not swallowed');
+
+  // The sentinel must fail CLOSED: the cap is treated as exhausted, so the closer
+  // suppresses instead of dispatching another quota-burning hammer.
+  const decision = evaluateHammerRetryCap(corrupt, { jobKey: REVIEWED_HEAD, headSha: 'h1' });
+  assert.equal(decision.capExhausted, true, 'a corrupt ledger does not bypass the cap');
+  assert.equal(decision.priorAttemptCount, HAMMER_RETRY_CAP_TOTAL_DISPATCHES);
 });
 
 // ── integration through maybeDispatchAmaCloser ───────────────────────────────
@@ -477,4 +511,66 @@ test('the alert path fails open: transport down still suppresses + never crashes
     errorLogs.some((line) => String(line).includes('hammer_retry_cap_alert_failed')),
     'the alert failure is logged',
   );
+});
+
+test('ledger-write loss does not storm the operator: in-memory debounce suppresses the re-page', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-persistloss-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const exec = buildDispatchExecMock();
+  const readTemplateImpl = () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8');
+  const alerts = [];
+  const deliverAlertImpl = async (text, opts) => { alerts.push({ text, opts }); };
+  const identity = { repo: REPO, prNumber: PR_NUMBER };
+
+  // Drive to cap exhaustion: two allowed dispatches, then the suppressing tick.
+  for (const head of ['pl-1111111111111111111111111111111111111', 'pl-2222222222222222222222222222222222222']) {
+    await maybeDispatchAmaCloser({
+      ...hammerFixture({ rootDir, currentHead: head }),
+      execFileImpl: exec.impl, readTemplateImpl, deliverAlertImpl, ...NO_MERGE_SIGNAL,
+    });
+    releaseCloserLeases(rootDir);
+  }
+  const r3 = await maybeDispatchAmaCloser({
+    ...hammerFixture({ rootDir, currentHead: 'pl-3333333333333333333333333333333333333' }),
+    execFileImpl: exec.impl, readTemplateImpl, deliverAlertImpl, ...NO_MERGE_SIGNAL,
+  });
+  assert.equal(r3.dispatched, false);
+  assert.equal(alerts.length, 1, 'the transition page fired exactly once');
+  releaseCloserLeases(rootDir);
+
+  // Simulate the suppression WRITE having silently lost the alert flag (disk
+  // failure / partial write): strip alertedAt from the on-disk ledger so the
+  // ledger-based debounce (alertAlreadyEmitted) would allow a fresh page.
+  const filePath = hammerRetryCapFilePath(rootDir, identity);
+  const doc = JSON.parse(readFileSync(filePath, 'utf8'));
+  delete doc.alertedAt;
+  writeFileSync(filePath, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
+  assert.equal(readHammerRetryCapLedger(rootDir, identity).alertedAt ?? null, null);
+
+  // Next suppressed tick: the ledger no longer proves a prior page, but the
+  // process-local series debounce remembers — so the operator is NOT re-paged.
+  const r4 = await maybeDispatchAmaCloser({
+    ...hammerFixture({ rootDir, currentHead: 'pl-4444444444444444444444444444444444444' }),
+    execFileImpl: exec.impl, readTemplateImpl, deliverAlertImpl, ...NO_MERGE_SIGNAL,
+  });
+  assert.equal(r4.dispatched, false);
+  assert.equal(alerts.length, 1, 'no re-page storm despite the lost persisted alert flag');
+
+  // And a genuinely fresh review series (new job key) still pages, so the
+  // debounce does not muzzle a real new exhaustion.
+  _resetHammerRetryCapAlertDebounceForTests(); // (a daemon restart clears the set)
+  // Fresh reviewed head → new series; drive it to exhaustion again.
+  const FRESH = 'd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1';
+  for (const head of ['pl-5555555555555555555555555555555555555', 'pl-6666666666666666666666666666666666666']) {
+    await maybeDispatchAmaCloser({
+      ...hammerFixture({ rootDir, reviewedHead: FRESH, currentHead: head }),
+      execFileImpl: exec.impl, readTemplateImpl, deliverAlertImpl, ...NO_MERGE_SIGNAL,
+    });
+    releaseCloserLeases(rootDir);
+  }
+  await maybeDispatchAmaCloser({
+    ...hammerFixture({ rootDir, reviewedHead: FRESH, currentHead: 'pl-7777777777777777777777777777777777777' }),
+    execFileImpl: exec.impl, readTemplateImpl, deliverAlertImpl, ...NO_MERGE_SIGNAL,
+  });
+  assert.equal(alerts.length, 2, 'a genuinely new exhaustion series still pages the operator');
 });

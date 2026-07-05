@@ -62,11 +62,49 @@ export function hammerRetryCapFilePath(rootDir, { repo, prNumber } = {}) {
   return join(hammerRetryCapDir(rootDir), `${safeRepo}-pr-${Number(prNumber)}.json`);
 }
 
-export function readHammerRetryCapLedger(rootDir, identity) {
+// A synthetic ledger returned when the on-disk ledger exists but cannot be read
+// or parsed. It fails CLOSED: `suppressed: true` + `attemptCount` at the cap makes
+// `evaluateHammerRetryCap` report `capExhausted` (and, with no `alertedAt`, still
+// pages the operator) so a corrupt/truncated file surfaces loudly instead of
+// silently resetting the count to 0 and re-arming the quota-burning loop. `jobKey`
+// is intentionally null so a genuinely fresh review head can still reset the series
+// once the operator repairs or clears the file.
+function corruptLedgerSentinel(reason) {
+  return Object.freeze({
+    __corrupt: true,
+    corruptReason: reason,
+    suppressed: true,
+    attemptCount: HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
+    jobKey: null,
+  });
+}
+
+export function readHammerRetryCapLedger(rootDir, identity, { logger = console } = {}) {
+  const filePath = hammerRetryCapFilePath(rootDir, identity);
+  let raw;
   try {
-    return JSON.parse(readFileSync(hammerRetryCapFilePath(rootDir, identity), 'utf8'));
-  } catch {
-    return null;
+    raw = readFileSync(filePath, 'utf8');
+  } catch (err) {
+    // Genuinely-absent ledger is the expected first-time path — treat as no prior
+    // attempts (count starts at 0). Any OTHER read failure (permissions, I/O) is
+    // NOT confirmation of "no prior attempts", so fail closed to protect quota.
+    if (err && err.code === 'ENOENT') return null;
+    logger?.warn?.(
+      `[hammer-retry-cap] failed to read ledger ${filePath} (${err?.code || err?.message || 'unknown'}); `
+        + 'failing closed (treating as cap-exhausted) to protect quota',
+    );
+    return corruptLedgerSentinel(`read:${err?.code || 'error'}`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    // The file exists but is corrupt/truncated. Do NOT conflate this with a fresh
+    // PR — that would silently bypass the cap. Fail closed + surface it loudly.
+    logger?.warn?.(
+      `[hammer-retry-cap] ledger ${filePath} is corrupt (${err?.message || 'parse error'}); `
+        + 'failing closed (treating as cap-exhausted) to protect quota — operator must repair or clear it',
+    );
+    return corruptLedgerSentinel('parse');
   }
 }
 

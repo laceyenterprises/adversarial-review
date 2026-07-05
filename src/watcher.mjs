@@ -6,7 +6,7 @@
 
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -144,6 +144,15 @@ import {
   namedAmaNoDispatchReason,
 } from './ama/dispatch-closer.mjs';
 import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
+// MSM-03 — daemon clean-path merge ("Path B"). A fully-clean (zero blocking AND
+// zero non-blocking findings), green, mergeable settled PR is merged INLINE by
+// the daemon — a deterministic `gh pr merge` API call, no agent/hammer. Anything
+// with a finding falls through to the AMA closer dispatch (MSM-04) below.
+import {
+  attemptDaemonCleanMerge,
+  DAEMON_MERGE_DISPOSITION,
+} from './ama/daemon-merge.mjs';
+import { acquireMergeLease, releaseMergeLease } from './ama/merge-lease.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import {
   COEXISTENCE_ACTION,
@@ -5083,6 +5092,141 @@ async function fetchLatestHeadReviewBodiesWithRetry({
 }
 
 /**
+ * MSM-03 — attempt the daemon clean-path merge for a settled review.
+ *
+ * Builds the injected GitHub/lease/audit collaborators from the watcher's live
+ * `candidate` + `gateSnapshot` and delegates the decision + bounded merge loop
+ * to `attemptDaemonCleanMerge`. The daemon uses GitHub required checks +
+ * `mergeable` ONLY — it has NO local environment and NEVER runs local CI (the
+ * original merge-agent state machine's fatal flaw). The merge lease shares the
+ * SAME `(repo, base)` namespace under the submodule `ROOT` that the MSM-01
+ * hammer's `bin/merge-lease.mjs` uses, so daemon and hammer cannot double-merge.
+ *
+ * Returns the `attemptDaemonCleanMerge` result. The caller short-circuits the
+ * closer/merge-agent dispatch on any disposition other than `not-taken`.
+ */
+async function runDaemonCleanMergeAttempt({
+  rootDir = ROOT,
+  cfg,
+  repoPath,
+  prNumber,
+  candidate,
+  gateSnapshot,
+  mergeabilityForGate,
+  reviewState,
+  reviewStateRow,
+  currentPrHeadSha,
+  logger,
+  execFileImpl = execFileAsync,
+  attemptDaemonCleanMergeImpl = attemptDaemonCleanMerge,
+  fetchRollupImpl = fetchPullRequestRollup,
+  acquireMergeLeaseImpl = acquireMergeLease,
+  releaseMergeLeaseImpl = releaseMergeLease,
+  env = process.env,
+} = {}) {
+  const base = candidate?.baseBranch;
+  const validatedHead = gateSnapshot?.reviewedHeadSha || reviewState?.headSha || null;
+  const NOT_TAKEN = (reason) => ({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason });
+  if (!base || !validatedHead) {
+    return NOT_TAKEN('daemon-inputs-missing');
+  }
+  // The MSM-02 predicate clears the verdict gate only for the normalized
+  // `settled-success` token; a settled-success review verdict maps to it, and
+  // anything else stays raw so the predicate refuses it.
+  const settledVerdict = SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict)
+    ? 'settled-success'
+    : String(gateSnapshot?.settledReview?.verdict || '');
+  const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
+  const mergeMethod = cfg?.mergeMethod === 'merge' ? 'merge' : 'squash';
+
+  return attemptDaemonCleanMergeImpl({
+    repo: repoPath,
+    prNumber,
+    base,
+    validatedHead,
+    verdict: settledVerdict,
+    reviewState: {
+      blockingFindingCount: reviewState?.blockingFindingCount,
+      blockingFindingState: reviewState?.blockingFindingState,
+      nonBlockingFindingCount: reviewState?.nonBlockingFindingCount,
+      nonBlockingFindingState: reviewState?.nonBlockingFindingState,
+    },
+    // Initial (pre-lease) GitHub gate snapshot from the live fetch this tick.
+    liveGate: {
+      candidateHead: currentPrHeadSha || candidate?.headSha || '',
+      requiredChecks: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
+      mergeable: mergeabilityForGate?.mergeable,
+      mergeStateStatus: mergeabilityForGate?.mergeStateStatus,
+      prState: String(candidate?.prState || 'open').toUpperCase(),
+    },
+    mergeMethod,
+    hqRoot,
+    auditMetadata: {
+      reviewer: reviewStateRow?.reviewer || '',
+      riskClass: reviewState?.riskClass || 'unknown',
+    },
+    // Re-read the LIVE head + gate before each merge attempt (retry included).
+    fetchLiveGateImpl: async () => {
+      const rollup = await fetchRollupImpl(repoPath, prNumber, { execFileImpl });
+      const state = String(rollup?.state || '');
+      return {
+        candidateHead: rollup?.headSha || rollup?.headRefOid || '',
+        requiredChecks: Array.isArray(rollup?.statusCheckRollup) ? rollup.statusCheckRollup : [],
+        mergeable: rollup?.mergeable,
+        mergeStateStatus: rollup?.mergeStateStatus,
+        prState: state,
+        merged: state.toUpperCase() === 'MERGED',
+      };
+    },
+    // Non-blocking single-shot acquire: contention defers this tick (the watcher
+    // must not block its poll loop waiting on a lease).
+    acquireLeaseImpl: () => {
+      const res = acquireMergeLeaseImpl({
+        rootDir,
+        repo: repoPath,
+        base,
+        holderPr: prNumber,
+        holderHead: validatedHead,
+        holderPid: process.pid,
+        holderHost: hostname(),
+        now: new Date().toISOString(),
+      });
+      return { acquired: Boolean(res?.acquired), lease: res?.lease, existingLease: res?.existingLease };
+    },
+    releaseLeaseImpl: (lease) => {
+      releaseMergeLeaseImpl({
+        rootDir,
+        repo: lease.repo,
+        base: lease.base,
+        leaseId: lease.leaseId,
+        holderPr: lease.holderPr,
+        holderHead: lease.holderHead,
+        acquiredAt: lease.acquiredAt,
+      });
+    },
+    // Click the button: `gh pr merge --squash --match-head-commit <head>`.
+    runMergeImpl: async ({ repo, prNumber: pr, head, mergeMethod: method }) => {
+      const methodFlag = method === 'merge' ? '--merge' : '--squash';
+      try {
+        const { stdout, stderr } = await execFileImpl(
+          'gh',
+          ['pr', 'merge', String(pr), '--repo', repo, methodFlag, '--match-head-commit', head],
+          { maxBuffer: 5 * 1024 * 1024 },
+        );
+        return { exitCode: 0, stdout: String(stdout || ''), stderr: String(stderr || '') };
+      } catch (err) {
+        return {
+          exitCode: Number.isInteger(err?.code) ? err.code : 1,
+          stdout: String(err?.stdout || ''),
+          stderr: String(err?.stderr || err?.message || ''),
+        };
+      }
+    },
+    logger,
+  });
+}
+
+/**
  * Resolve the AMA cfg subtree, build (reviewState, prMetadata)
  * snapshots from the watcher's existing row + candidate data, and
  * call `maybeDispatchAmaCloser`. Returns the dispatch result; the
@@ -5120,6 +5264,7 @@ async function maybeDispatchAmaClosureFor({
     fetchReviewBodiesForHead(execFileAsync, repo, pr, head, options),
   liveReviewRetryDelaysMs = AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
   resolveReviewCycleExhaustionImpl = null,
+  runDaemonCleanMergeAttemptImpl = runDaemonCleanMergeAttempt,
 }) {
   let cfg;
   let orchestrationMode;
@@ -5374,6 +5519,54 @@ async function maybeDispatchAmaClosureFor({
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
     author: candidate?.prAuthor || null,
   };
+
+  // MSM-03 — daemon clean-path merge ("Path B"). Before the AMA closer/hammer
+  // dispatch, attempt an inline daemon merge for a FULLY-CLEAN settled review
+  // (zero blocking AND zero non-blocking findings) that GitHub reports green +
+  // mergeable. STRICT (default on): any finding — or an unknown finding
+  // classification — declines this path so the tick falls through to the
+  // closer/hammer dispatch below (MSM-04). No agent is spawned here; the daemon
+  // clicks the button through the shared bounded merge-subprocess runner under
+  // its own lease. Anything but `not-taken` means the daemon owns this tick:
+  //   - merged        → PR landed, `daemon-merge` audit written, lease released.
+  //   - failed-closed → took the path, failed closed; audit written, lease
+  //                     released; NO hammer spawned (retry path never hammers).
+  //   - deferred      → lease contention / audit bootstrap failure; retry next
+  //                     tick with no double-merge.
+  // TODO(MSM-05): read the dedicated daemon strict-mode flag when it lands; until
+  // then the daemon gates hard on zero-findings unconditionally.
+  const daemonCleanMerge = await runDaemonCleanMergeAttemptImpl({
+    rootDir,
+    cfg,
+    repoPath,
+    prNumber,
+    candidate,
+    gateSnapshot,
+    mergeabilityForGate,
+    reviewState,
+    reviewStateRow,
+    currentPrHeadSha,
+    logger,
+  });
+  if (daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
+    logger?.log?.(
+      `[watcher] AMA daemon clean-merge ${daemonCleanMerge.disposition} for ${repoPath}#${prNumber}` +
+        `@${String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12)}: ${daemonCleanMerge.reason}` +
+        (daemonCleanMerge.attempts ? ` (attempts=${daemonCleanMerge.attempts})` : ''),
+    );
+    // Daemon owns this tick — skip BOTH the AMA closer dispatch and the
+    // merge-agent path. `skipMergeAgent` routes the coexistence decision to
+    // `ama-pending` so the watcher returns without dispatching anything.
+    return withAmaDispatchMetadata(
+      {
+        dispatched: false,
+        skipMergeAgent: true,
+        reason: `daemon-${daemonCleanMerge.disposition}`,
+        daemonCleanMerge,
+      },
+      { amaEnabled: true },
+    );
+  }
 
   const [owner, name] = repoPath.split('/');
   const dispatchContext = {

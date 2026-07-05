@@ -54,6 +54,7 @@ import {
 import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 import { detectQuotaExhaustion, parseQuotaResetAt } from './quota-exhaustion.mjs';
+import { quotaAvailableFromFleetStatus } from './fleet-quota-status.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -752,47 +753,10 @@ function resolveMaxTransientRemediationRetries(env = process.env) {
 // the same way under a hard usage cap.
 const QUOTA_REMEDIATION_BACKOFF_MS = 15 * 60 * 1000;
 
-const QUOTA_HARNESS_PROVIDER = Object.freeze({
-  codex: 'openai',
-  claude: 'anthropic',
-  'claude-code': 'anthropic',
-});
-
-function providerForQuotaHarness(harness) {
-  return QUOTA_HARNESS_PROVIDER[String(harness || '').trim().toLowerCase()] || null;
-}
-
-function parseHqFleetQuotaStatus(stdout) {
-  const payload = parseHqJsonObject(stdout, 'hq fleet quota status');
-  const providerStatuses = Array.isArray(payload?.providerStatuses) ? payload.providerStatuses : [];
-  return providerStatuses.map((entry) => ({
-    provider: String(entry?.provider || '').trim().toLowerCase(),
-    authPath: String(entry?.authPath || entry?.auth_path || '').trim().toLowerCase(),
-    state: String(entry?.state || '').trim().toLowerCase(),
-    source: entry?.source || 'hq-fleet-quota-status',
-    lastGoodAt: entry?.lastGoodAt || entry?.last_good_at || null,
-    lastProbeAt: entry?.lastProbeAt || entry?.last_probe_at || null,
-  }));
-}
-
-function quotaAvailableFromFleetStatus(stdout, { harness } = {}) {
-  const provider = providerForQuotaHarness(harness);
-  if (!provider) {
-    return { available: false, state: 'unknown-harness', source: 'hq-fleet-quota-status' };
-  }
-  const statuses = parseHqFleetQuotaStatus(stdout);
-  const status = statuses.find((entry) => entry.provider === provider && entry.authPath === 'oauth')
-    || statuses.find((entry) => entry.provider === provider);
-  if (!status) {
-    return { available: false, state: 'missing-provider-status', source: 'hq-fleet-quota-status' };
-  }
-  return {
-    available: status.state === 'ok',
-    state: status.state || 'unknown',
-    source: 'hq-fleet-quota-status',
-    checkedAt: status.lastProbeAt || null,
-  };
-}
+// Fleet-quota provider-state parsing + harness→provider mapping now live in the
+// shared HHR classifier (src/fleet-quota-status.mjs) so the reviewer/remediator
+// quota-hold path and the AMA closer/hammer harness-fallback path classify caps
+// identically. `quotaAvailableFromFleetStatus` is imported above.
 
 function latestRetryHistoryEntry(job) {
   const history = Array.isArray(job?.remediationPlan?.retryHistory)

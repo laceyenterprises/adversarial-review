@@ -164,6 +164,14 @@ test('isFullyCleanSettledReview: any finding or unknown state → not clean', ()
   assert.equal(isFullyCleanSettledReview(cleanReview({ nonBlockingFindingState: 'unknown' })), false);
 });
 
+test('isFullyCleanSettledReview: known state still rejects missing or boolean counts', () => {
+  assert.equal(isFullyCleanSettledReview(cleanReview({ blockingFindingCount: null })), false);
+  assert.equal(isFullyCleanSettledReview(cleanReview({ nonBlockingFindingCount: '' })), false);
+  assert.equal(isFullyCleanSettledReview(cleanReview({ blockingFindingCount: false })), false);
+  assert.equal(__testables__.uncleanReason(cleanReview({ blockingFindingCount: null })), 'findings-unknown');
+  assert.equal(__testables__.normalizeFindingCount('0'), 0);
+});
+
 test('classifyDaemonMergeError mirrors the hammer classifier order', () => {
   assert.equal(classifyDaemonMergeError('This pull request was already merged'), 'already-merged');
   assert.equal(classifyDaemonMergeError('Head branch does not match match-head-commit'), 'permanent');

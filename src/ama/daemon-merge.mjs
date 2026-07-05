@@ -123,9 +123,9 @@ export function isFullyCleanSettledReview(reviewState = {}) {
   const blockingState = String(reviewState.blockingFindingState || '').trim().toLowerCase();
   const nonBlockingState = String(reviewState.nonBlockingFindingState || '').trim().toLowerCase();
   if (blockingState !== 'known' || nonBlockingState !== 'known') return false;
-  const blockingCount = Number(reviewState.blockingFindingCount);
-  const nonBlockingCount = Number(reviewState.nonBlockingFindingCount);
-  if (!Number.isFinite(blockingCount) || !Number.isFinite(nonBlockingCount)) return false;
+  const blockingCount = normalizeFindingCount(reviewState.blockingFindingCount);
+  const nonBlockingCount = normalizeFindingCount(reviewState.nonBlockingFindingCount);
+  if (blockingCount === null || nonBlockingCount === null) return false;
   return blockingCount === 0 && nonBlockingCount === 0;
 }
 
@@ -137,8 +137,20 @@ function uncleanReason(reviewState = {}) {
   const blockingState = String(reviewState.blockingFindingState || '').trim().toLowerCase();
   const nonBlockingState = String(reviewState.nonBlockingFindingState || '').trim().toLowerCase();
   if (blockingState !== 'known' || nonBlockingState !== 'known') return 'findings-unknown';
-  if (Number(reviewState.blockingFindingCount) !== 0) return 'blocking-findings-present';
-  if (Number(reviewState.nonBlockingFindingCount) !== 0) return 'non-blocking-findings-present';
+  const blockingCount = normalizeFindingCount(reviewState.blockingFindingCount);
+  const nonBlockingCount = normalizeFindingCount(reviewState.nonBlockingFindingCount);
+  if (blockingCount === null || nonBlockingCount === null) return 'findings-unknown';
+  if (blockingCount !== 0) return 'blocking-findings-present';
+  if (nonBlockingCount !== 0) return 'non-blocking-findings-present';
+  return null;
+}
+
+function normalizeFindingCount(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
   return null;
 }
 
@@ -580,6 +592,7 @@ export async function attemptDaemonCleanMerge({
 // Internal helpers exposed for unit tests.
 export const __testables__ = Object.freeze({
   uncleanReason,
+  normalizeFindingCount,
   normalizeGateState,
   priorDaemonPermanentFailure,
   PERMANENT_TERMINAL_REASONS,

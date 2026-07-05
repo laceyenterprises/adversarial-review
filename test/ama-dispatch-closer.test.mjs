@@ -1514,10 +1514,13 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /fetchPullRequestRollup/);
   assert.match(prompt, /statusCheckRollup/);
   assert.match(prompt, /const mergeable = String\(rollup\.mergeable \|\| ''\)\.toUpperCase\(\) === 'MERGEABLE'/);
+  assert.match(prompt, /const state = String\(rollup\.state \|\| ''\)\.toUpperCase\(\)/);
+  assert.match(prompt, /ham_already_merged_validated_head/);
   assert.match(prompt, /ham_merge_error_retryable/);
   assert.match(prompt, /ham_merge_error_permanent/);
   assert.match(prompt, /HAM_MERGE_RETRY_CAP="\$\{HAM_MERGE_RETRY_CAP:-4\}"/);
   assert.match(prompt, /gh pr merge https:\/\/github\.com\/acme\/myrepo\/pull\/1234[\s\S]*--squash[\s\S]*--match-head-commit "\$POST_REMEDIATION_SHA"/);
+  assert.match(prompt, /PR is already merged at validated head; proceeding to post-merge validation/);
   assert.match(prompt, /full local test battery failed; fix locally before merge/);
   assert.match(prompt, /ham_append_terminal_audit failed-without-merge local-battery-red/);
   assert.match(prompt, /live PR head moved off validated head; releasing lease without merge or re-dispatch/);
@@ -1526,6 +1529,9 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
   assert.match(prompt, /permanent gh pr merge rejection; not retrying/);
   assert.match(prompt, /merge transient failure; retrying/);
   assert.match(prompt, /merge-retry-budget-exhausted/);
+  assert.match(prompt, /gh pr view https:\/\/github\.com\/acme\/myrepo\/pull\/1234 --json state,mergedAt,mergeCommit,headRefOid[\s\S]*2> "\$HAM_POST_MERGE_STDERR"/);
+  assert.match(prompt, /post-merge confirmation transient failure; retrying/);
+  assert.match(prompt, /merge-confirmation-read-failed/);
   assert.match(prompt, /ham_append_terminal_audit succeeded merged/);
   assert.match(prompt, /merge-lease\.mjs release[\s\S]*--lease-id "\$HAM_MERGE_LEASE_ID"/);
   assert.match(prompt, /keeping EXIT trap armed/);

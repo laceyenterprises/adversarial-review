@@ -720,6 +720,7 @@ HAM_MERGE_STDOUT="/tmp/ham-gh-pr-merge.stdout"
 HAM_MERGE_STDERR="/tmp/ham-gh-pr-merge.stderr"
 HAM_GATE_JSON="/tmp/ham-github-gate.json"
 HAM_POST_MERGE_JSON="/tmp/ham-post-merge.json"
+HAM_POST_MERGE_STDERR="/tmp/ham-post-merge.stderr"
 
 ham_append_terminal_audit() {
   ham_audit_outcome="$1"
@@ -792,10 +793,12 @@ const badChecks = checks.filter((check) => {
 const headMatches = String(rollup.headSha || rollup.headRefOid || '') === expectedHead;
 const mergeable = String(rollup.mergeable || '').toUpperCase() === 'MERGEABLE';
 const notBehind = String(rollup.mergeStateStatus || '').toUpperCase() !== 'BEHIND';
-const open = String(rollup.state || '').toUpperCase() === 'OPEN';
+const state = String(rollup.state || '').toUpperCase();
+const open = state === 'OPEN';
 const ok = open && headMatches && mergeable && notBehind && checks.length > 0 && badChecks.length === 0;
 console.log(JSON.stringify({
   ok,
+  state,
   open,
   headMatches,
   expectedHead,
@@ -814,6 +817,10 @@ ham_required_gate_ok() {
 
 ham_live_head_moved() {
   jq -e '.headMatches == false' "$HAM_GATE_JSON" >/dev/null
+}
+
+ham_already_merged_validated_head() {
+  jq -e '.state == "MERGED" and .liveHead == .expectedHead' "$HAM_GATE_JSON" >/dev/null
 }
 
 ham_merge_error_retryable() {
@@ -894,6 +901,11 @@ while [ "$HAM_MERGE_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
     ham_release_merge_lease
     exit 1
   fi
+  if ham_already_merged_validated_head; then
+    echo "HAM merge retry ${HAM_MERGE_ATTEMPTS}/${HAM_MERGE_RETRY_CAP}: PR is already merged at validated head; proceeding to post-merge validation" >&2
+    HAM_MERGE_EXIT=0
+    break
+  fi
   if ham_live_head_moved; then
     echo "HAM race: live PR head moved off validated head before merge retry; releasing lease without merge or re-dispatch" >&2
     ham_append_terminal_audit superseded live-head-moved-before-merge || true
@@ -946,7 +958,37 @@ while [ "$HAM_MERGE_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
 done
 
 sleep 2
-gh pr view <<PR_URL>> --json state,mergedAt,mergeCommit,headRefOid > "$HAM_POST_MERGE_JSON"
+HAM_POST_VIEW_ATTEMPTS=0
+HAM_POST_VIEW_EXIT=1
+while [ "$HAM_POST_VIEW_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
+  HAM_POST_VIEW_ATTEMPTS=$((HAM_POST_VIEW_ATTEMPTS + 1))
+  gh pr view <<PR_URL>> --json state,mergedAt,mergeCommit,headRefOid \
+    > "$HAM_POST_MERGE_JSON" \
+    2> "$HAM_POST_MERGE_STDERR"
+  HAM_POST_VIEW_EXIT=$?
+  if [ "$HAM_POST_VIEW_EXIT" -eq 0 ]; then
+    break
+  fi
+  if ! ham_merge_error_retryable "$HAM_POST_MERGE_STDERR"; then
+    cat "$HAM_POST_MERGE_STDERR" >&2 || true
+    echo "HAM hard-blocker: unclassified gh pr view confirmation failure; fail closed without retry" >&2
+    ham_append_terminal_audit failed-without-merge merge-confirmation-read-failed || true
+    ham_release_merge_lease
+    exit 1
+  fi
+  if [ "$HAM_POST_VIEW_ATTEMPTS" -ge "$HAM_MERGE_RETRY_CAP" ]; then
+    cat "$HAM_POST_MERGE_STDERR" >&2 || true
+    echo "HAM hard-blocker: retryable gh pr view confirmation failures exhausted bounded budget" >&2
+    ham_append_terminal_audit failed-without-merge merge-confirmation-read-failed || true
+    ham_release_merge_lease
+    exit 1
+  fi
+  HAM_POST_VIEW_BACKOFF_MULTIPLIER=$((1 << (HAM_POST_VIEW_ATTEMPTS - 1)))
+  HAM_POST_VIEW_JITTER=$(awk 'BEGIN{srand(); print int(rand()*3)}')
+  HAM_POST_VIEW_SLEEP=$((HAM_MERGE_BACKOFF_BASE_SECONDS * HAM_POST_VIEW_BACKOFF_MULTIPLIER + HAM_POST_VIEW_JITTER))
+  echo "HAM post-merge confirmation transient failure; retrying ${HAM_POST_VIEW_ATTEMPTS}/${HAM_MERGE_RETRY_CAP} after ${HAM_POST_VIEW_SLEEP}s" >&2
+  sleep "$HAM_POST_VIEW_SLEEP"
+done
 HAM_POST_STATE=$(jq -r '.state // ""' "$HAM_POST_MERGE_JSON")
 HAM_MERGED_AT=$(jq -r '.mergedAt // ""' "$HAM_POST_MERGE_JSON")
 HAM_MERGE_COMMIT=$(jq -r '.mergeCommit.oid // ""' "$HAM_POST_MERGE_JSON")
@@ -964,10 +1006,13 @@ fi
 ```
 
 After the merged audit append succeeds and the lease is released, post the
-CLOSING comment described above. If `gh pr merge` returns a retryable transport,
-TLS, DNS/socket, HTTP 5xx, or rate-limit/secondary-rate-limit failure, retry only
-inside the bounded budget above while holding the same lease and re-reading the
-live head before each attempt. Permanent head/protection/auth/check/closed or
+CLOSING comment described above. If `gh pr merge` or the post-merge `gh pr view`
+confirmation returns a retryable transport, TLS, DNS/socket, HTTP 5xx, or
+rate-limit/secondary-rate-limit failure, retry only inside the bounded budget
+above while holding the same lease. The merge retry loop must re-read the live
+head before each attempt; if that pre-flight observes the PR already `MERGED` at
+`POST_REMEDIATION_SHA`, proceed to the post-merge validation instead of
+recording a failed gate. Permanent head/protection/auth/check/closed or
 unmergeable failures fail closed immediately with a non-merged audit reason.
 
 If the head moved, a required check failed or is unchecked, HAM evidence is

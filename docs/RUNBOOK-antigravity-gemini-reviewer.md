@@ -179,6 +179,27 @@ The review command's `--print-timeout` is sized from
 derived print timeout still leaves enough time for AGY to finish a real review;
 if it is raised, the AGY print timeout rises with it.
 
+## Oversized Prompt Fallback
+
+When an Antigravity prompt exceeds the argv budget, the reviewer first tries
+the configured cross-model route for the builder class. If no safe route is
+available, it splits the diff into bounded Antigravity chunks. File patches
+that must be split by line carry the `diff --git`, file metadata, `---`/`+++`,
+and active hunk header on every emitted chunk so the reviewer still has file
+and line context.
+
+Merged chunk reviews preserve the parent review contract: the final body has
+one `## Summary`, one `## Blocking issues`, one `## Non-blocking issues`, and
+one `## Verdict`. Only issue bullets from each child review's matching section
+are copied into the merged sections; child summaries, verdicts, and duplicate
+headings are not nested into the public review body.
+
+If neither cross-model routing nor chunk fallback can produce a review, the
+no-review prevention guard sends the OpenClaw wake-hook alert. Transient
+`curl`/transport failures such as timeouts, DNS/TLS/network errors, and
+temporary 5xx-class unavailability are retried with a small bounded backoff
+before the alert attempt is logged as failed.
+
 ## Login
 
 ```bash

@@ -111,6 +111,7 @@ const REVIEW_ADAPTER_ENV_KEYS = [
 
 const execFileAsync = promisify(execFile);
 const REVIEW_POST_RETRY_DELAYS_MS = [0];
+const WAKE_HOOK_RETRY_DELAYS_MS = [250, 1_000];
 const ADVISORY_ONLY_REVIEW_LABEL = 'operator-approved: advisory-only-review';
 const VERDICT_MODE_ENFORCE = 'enforce';
 const VERDICT_MODE_ADVISORY_ONLY = 'advisory-only';
@@ -2383,7 +2384,7 @@ Antigravity runtime instructions:
 
 function isRetryableGeminiSubprocessError(err) {
   const detail = buildGhErrorDetail(err);
-  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain|tls)\b/.test(detail)
+  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain|eio|tls)\b/.test(detail)
     || detail.includes('timeout')
     || detail.includes('timed out')
     || detail.includes('temporary failure')
@@ -2397,6 +2398,32 @@ function isRetryableGeminiSubprocessError(err) {
     || detail.includes('504')
     || detail.includes('429')
     || detail.includes('rate limit');
+}
+
+function isRetryableCurlWakeError(err) {
+  const curlTransientExitCodes = new Set([5, 6, 7, 28, 35, 52, 55, 56]);
+  return curlTransientExitCodes.has(Number(err?.code))
+    || isRetryableGeminiSubprocessError(err);
+}
+
+async function execFileWithTransientRetry(command, args, {
+  execFileImpl = execFileAsync,
+  retryDelaysMs = WAKE_HOOK_RETRY_DELAYS_MS,
+  sleepImpl = sleep,
+  isRetryable = isRetryableCurlWakeError,
+  timeout,
+} = {}) {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    try {
+      return await execFileImpl(command, args, { timeout });
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryable(err) || attempt >= retryDelaysMs.length) throw err;
+      await sleepImpl(retryDelaysMs[attempt]);
+    }
+  }
+  throw lastErr;
 }
 
 async function withGeminiSubprocessRetry(operation, {
@@ -2694,8 +2721,8 @@ function pushAgyChunk(chunks, chunkDiff, {
   maxBytes,
   maxChunks,
 }) {
-  const diff = String(chunkDiff || '').trim();
-  if (!diff) return { ok: true };
+  const diff = String(chunkDiff || '');
+  if (diff === '') return { ok: true };
   const prompt = buildPromptForReviewerModel('gemini', diff, extraContext, {
     promptStage,
     runtime: 'antigravity',
@@ -2707,6 +2734,21 @@ function pushAgyChunk(chunks, chunkDiff, {
   return { ok: true };
 }
 
+function splitPatchHeaderAndBodyLines(lines) {
+  const hunkIndex = lines.findIndex((line) => /^@@\s/.test(line));
+  if (hunkIndex <= 0) return { headerLines: [], bodyLines: lines };
+  return {
+    headerLines: lines.slice(0, hunkIndex + 1),
+    bodyLines: lines.slice(hunkIndex + 1),
+  };
+}
+
+function joinPatchLines(headerLines, bodyLines) {
+  if (headerLines.length === 0) return bodyLines.join('\n');
+  if (bodyLines.length === 0) return headerLines.join('\n');
+  return `${headerLines.join('\n')}\n${bodyLines.join('\n')}`;
+}
+
 function splitOversizedPatchByLines(patch, {
   extraContext,
   promptStage,
@@ -2715,31 +2757,43 @@ function splitOversizedPatchByLines(patch, {
   chunks,
 }) {
   const lines = String(patch || '').replace(/\r\n/g, '\n').split('\n');
-  let current = '';
-  for (const line of lines) {
-    const candidate = current ? `${current}\n${line}` : line;
-    const candidatePrompt = buildPromptForReviewerModel('gemini', candidate, extraContext, {
-      promptStage,
-      runtime: 'antigravity',
-    });
-    if (agyPromptBytes(candidatePrompt) <= maxBytes) {
-      current = candidate;
+  const { headerLines, bodyLines } = splitPatchHeaderAndBodyLines(lines);
+  const promptOverheadBytes = agyPromptBytes(buildPromptForReviewerModel('gemini', '', extraContext, {
+    promptStage,
+    runtime: 'antigravity',
+  }));
+  const headerText = headerLines.join('\n');
+  const headerBytes = agyPromptBytes(headerText);
+  const headerBodySeparatorBytes = headerLines.length > 0 ? 1 : 0;
+  let currentLines = [];
+  let currentBodyBytes = 0;
+  for (const line of bodyLines) {
+    const lineBytes = agyPromptBytes(line);
+    const candidateBodyBytes = currentBodyBytes + (currentLines.length > 0 ? 1 : 0) + lineBytes;
+    const candidatePromptBytes = promptOverheadBytes
+      + headerBytes
+      + (headerLines.length > 0 ? headerBodySeparatorBytes : 0)
+      + candidateBodyBytes;
+    if (candidatePromptBytes <= maxBytes) {
+      currentLines.push(line);
+      currentBodyBytes = candidateBodyBytes;
       continue;
     }
-    if (!current) {
+    if (currentLines.length === 0) {
       return { ok: false, reason: 'single-line-over-budget' };
     }
-    const pushed = pushAgyChunk(chunks, current, {
+    const pushed = pushAgyChunk(chunks, joinPatchLines(headerLines, currentLines), {
       extraContext,
       promptStage,
       maxBytes,
       maxChunks,
     });
     if (!pushed.ok) return pushed;
-    current = line;
+    currentLines = [line];
+    currentBodyBytes = lineBytes;
   }
-  if (current) {
-    const pushed = pushAgyChunk(chunks, current, {
+  if (currentLines.length > 0) {
+    const pushed = pushAgyChunk(chunks, joinPatchLines(headerLines, currentLines), {
       extraContext,
       promptStage,
       maxBytes,
@@ -2800,6 +2854,36 @@ function strongestReviewVerdict(reviewTexts) {
   return strongest;
 }
 
+function markdownSectionBody(markdown, heading) {
+  const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
+  const sectionStart = lines.findIndex((line) => line.trim().toLowerCase() === `## ${heading}`.toLowerCase());
+  if (sectionStart < 0) return '';
+  const sectionLines = [];
+  for (const line of lines.slice(sectionStart + 1)) {
+    if (/^##\s+/.test(line)) break;
+    sectionLines.push(line);
+  }
+  return sectionLines.join('\n').trim();
+}
+
+function extractMarkdownIssueList(markdown, heading) {
+  const body = markdownSectionBody(markdown, heading);
+  if (!body || /^[-*+]\s+none\.?\s*$/i.test(body)) return [];
+  const lines = body.split('\n');
+  const issues = [];
+  let current = [];
+  for (const line of lines) {
+    if (/^\s*[-*+]\s+/.test(line)) {
+      if (current.length > 0) issues.push(current.join('\n').trimEnd());
+      current = [line];
+      continue;
+    }
+    if (current.length > 0) current.push(line);
+  }
+  if (current.length > 0) issues.push(current.join('\n').trimEnd());
+  return issues.filter((issue) => !/^[-*+]\s+none\.?\s*$/i.test(issue.trim()));
+}
+
 function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes = null, maxBytes = null } = {}) {
   const texts = chunkReviews.map((chunk) => String(chunk.reviewText || '').trim()).filter(Boolean);
   const verdict = strongestReviewVerdict(texts);
@@ -2811,10 +2895,11 @@ function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes =
     parts.push('', '> Operator note: the chunk hard cap was hit; this merged review covers the reviewed chunks only.');
   }
   parts.push('', '## Blocking issues');
-  const blocking = texts.filter((text) => normalizeReviewVerdict(extractReviewVerdict(text)) === 'request-changes');
-  parts.push(blocking.length > 0 ? blocking.join('\n\n') : '- None.');
+  const blocking = texts.flatMap((text) => extractMarkdownIssueList(text, 'Blocking issues'));
+  parts.push(blocking.length > 0 ? blocking.join('\n') : '- None.');
   parts.push('', '## Non-blocking issues');
-  parts.push(texts.length > 0 ? texts.join('\n\n---\n\n') : '- None.');
+  const nonBlocking = texts.flatMap((text) => extractMarkdownIssueList(text, 'Non-blocking issues'));
+  parts.push(nonBlocking.length > 0 ? nonBlocking.join('\n') : '- None.');
   parts.push('', '## Verdict', verdict);
   return parts.join('\n');
 }
@@ -3289,13 +3374,17 @@ async function alertClioOversizedAgyFailure({
   promptBytes,
   maxBytes,
   reason,
-}) {
+}, {
+  execFileImpl = execFileAsync,
+  retryDelaysMs = WAKE_HOOK_RETRY_DELAYS_MS,
+  sleepImpl = sleep,
+} = {}) {
   const msg = `Adversarial reviewer oversized agy prompt could not be reviewed.\n\nRepo: ${repo} PR #${prNumber}\nPrompt bytes: ${promptBytes ?? 'unknown'}\nAgy argv budget: ${maxBytes ?? 'unknown'}\nReason: ${reason}\n\nThis is the #3074/#3122/#3124 no-review prevention guard; operator action is required because both cross-model routing and chunk fallback were unavailable.`;
 
   console.error(`[reviewer] ALERT: ${msg}`);
 
   try {
-    await execFileAsync(
+    await execFileWithTransientRetry(
       'curl',
       [
         '-s', '-X', 'POST',
@@ -3303,7 +3392,12 @@ async function alertClioOversizedAgyFailure({
         '-H', 'Content-Type: application/json',
         '-d', JSON.stringify({ message: msg }),
       ],
-      { timeout: 10_000 }
+      {
+        execFileImpl,
+        retryDelaysMs,
+        sleepImpl,
+        timeout: 10_000,
+      }
     );
     console.log('[reviewer] oversized agy prompt alert sent via wake hook');
   } catch (err) {
@@ -3876,6 +3970,9 @@ const __test__ = {
   reviewAgyOversizedInChunks,
   resolveAgyChunkMaxChunks,
   isRetryableGeminiSubprocessError,
+  isRetryableCurlWakeError,
+  execFileWithTransientRetry,
+  alertClioOversizedAgyFailure,
   resolveGeminiRuntimeForReview,
   spawnGeminiReview,
   spawnAgyReview,

@@ -1229,6 +1229,7 @@ export async function maybeDispatchAmaCloser({
   // The eligibility predicate is the second gate.
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, options);
   let forceHammerTerminalRemediationPrompt = false;
+  let forceHammerWorkerClass = false;
   if (!verdict.eligible) {
     // Auto-hammer fall-through (gated by
     // roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss): before
@@ -1248,7 +1249,7 @@ export async function maybeDispatchAmaCloser({
       verdict?.trace?.finalHammer?.active === true;
     const autoHammer =
       cfg?.autoHammerOnEligibilityMiss === true
-      && workerClassForMiss === 'hammer'
+      && (workerClassForMiss === 'hammer' || reviewCycleExhausted)
       && isHammerRemediableEligibilityMiss(verdict.reasons, { reviewCycleExhausted });
     if (!autoHammer) {
       return noAmaDispatch({
@@ -1264,11 +1265,12 @@ export async function maybeDispatchAmaCloser({
       `final findings/checks then re-validate the gate fail-closed`
     );
     // fall through to the dispatch below (hammer template, remediation mode)
+    forceHammerWorkerClass = true;
   }
 
   // Compose the prompt body. Template loaded from disk via DI so
   // tests can pass a literal.
-  const workerClass = String(cfg.workerClass || 'hammer');
+  const workerClass = forceHammerWorkerClass ? 'hammer' : String(cfg.workerClass || 'hammer');
   // SPEC §1.1.1: the HAM terminal-remediation prompt is reserved for closures
   // that actually have findings to remediate. With `hammer` now the default
   // worker class, gating purely on `workerClass === 'hammer'` would route every

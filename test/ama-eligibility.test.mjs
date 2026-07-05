@@ -1357,6 +1357,20 @@ test('final hammer: NEVER waives a red CI (hard gate)', () => {
   assert.ok(result.reasons.includes('ci-not-green'));
 });
 
+test('final hammer: NEVER waives a stale head without validated HAM or rebase authority', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'request-changes',
+      headSha: 'reviewed-head-before-rebase',
+      reviewCycleExhausted: true,
+    },
+    prMetadata: { headSha: 'live-head-after-rebase' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('stale-review-head'));
+});
+
 test('final hammer: NEVER waives a head-scoped adversarial-merge-blocked hard stop', () => {
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: { verdict: 'request-changes', reviewCycleExhausted: true },

@@ -28,6 +28,7 @@ evidence instead of failing on a path assumption.
 - **Repository:** <<REPO>>
 - **PR number:** <<PR_NUMBER>>
 - **Reviewed head SHA:** `<<REVIEWED_SHA>>`
+- **Target remediation SHA:** `<<TARGET_REMEDIATION_SHA>>`
 - **Risk class:** `<<RISK_CLASS>>`
 - **Merge method:** `<<MERGE_METHOD>>` (squash/merge remains the canonical landed commit; HAM-03 may update/rebase the PR branch before the final merge)
 <!-- Do NOT print the raw <<REQUIRED_GATE_CONTEXT>> value here as an inline

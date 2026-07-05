@@ -1117,6 +1117,7 @@ export function substituteTemplate(body, substitutions) {
  * @param {string} args.repo            — owner/name
  * @param {number} args.prNumber
  * @param {string} args.reviewedSha
+ * @param {string=} args.targetRemediationSha
  * @param {string} args.riskClass
  * @param {string} args.mergeMethod     — 'squash' | 'merge'
  * @param {string} args.requiredGateContext
@@ -1136,6 +1137,7 @@ export function composeCloserPrompt({
   repo,
   prNumber,
   reviewedSha,
+  targetRemediationSha = reviewedSha,
   riskClass,
   mergeMethod,
   requiredGateContext,
@@ -1155,6 +1157,7 @@ export function composeCloserPrompt({
     REPO: repo,
     PR_NUMBER: prNumber,
     REVIEWED_SHA: reviewedSha,
+    TARGET_REMEDIATION_SHA: targetRemediationSha || reviewedSha,
     RISK_CLASS: riskClass,
     MERGE_METHOD: mergeMethod,
     REQUIRED_GATE_CONTEXT: requiredGateContext,
@@ -1187,7 +1190,10 @@ export function composeCloserPrompt({
  * @param {Object} args.dispatchContext  — operator-controlled values
  * @param {string} args.dispatchContext.repo           owner/name (e.g. `acme/myrepo`)
  * @param {string} args.dispatchContext.prUrl          PR URL (e.g. `https://github.com/acme/myrepo/pull/123`)
- * @param {string} args.dispatchContext.reviewedSha    PR head SHA the watcher authorized
+ * @param {string} args.dispatchContext.reviewedSha    head SHA the reviewer actually reviewed
+ * @param {string=} args.dispatchContext.targetRemediationSha current PR head targeted by HAM remediation
+ * @param {string=} args.dispatchContext.dispatchRecordHeadSha commit SHA used for the dispatch record key
+ * @param {string=} args.dispatchContext.dispatchReason reason for non-standard dispatch routing
  * @param {string} args.dispatchContext.riskClass      resolved risk class
  * @param {string} args.dispatchContext.requiredGateContext
  * @param {string} args.dispatchContext.reviewedBy
@@ -1229,6 +1235,7 @@ export async function maybeDispatchAmaCloser({
   // The eligibility predicate is the second gate.
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, options);
   let forceHammerTerminalRemediationPrompt = false;
+  let forceHammerWorkerClass = false;
   if (!verdict.eligible) {
     // Auto-hammer fall-through (gated by
     // roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss): before
@@ -1242,13 +1249,13 @@ export async function maybeDispatchAmaCloser({
     // commits, writes the audit comment, then re-runs the eligibility predicate
     // with --ham-terminal-remediation evidence, which is validated strictly and
     // fails closed if the findings/checks were not actually addressed.
-    const workerClassForMiss = String(cfg.workerClass || 'hammer');
+    const workerClassForMiss = String(cfg?.workerClass || 'hammer');
     const reviewCycleExhausted =
       reviewState?.reviewCycleExhausted === true ||
       verdict?.trace?.finalHammer?.active === true;
     const autoHammer =
       cfg?.autoHammerOnEligibilityMiss === true
-      && workerClassForMiss === 'hammer'
+      && (workerClassForMiss === 'hammer' || reviewCycleExhausted)
       && isHammerRemediableEligibilityMiss(verdict.reasons, { reviewCycleExhausted });
     if (!autoHammer) {
       return noAmaDispatch({
@@ -1263,12 +1270,23 @@ export async function maybeDispatchAmaCloser({
       `PR (reasons: ${(verdict.reasons || []).join(',')}) — hammer will remediate ` +
       `final findings/checks then re-validate the gate fail-closed`
     );
+    if (
+      reviewCycleExhausted &&
+      prMetadata?.headSha &&
+      reviewState?.headSha &&
+      prMetadata.headSha !== reviewState.headSha
+    ) {
+      dispatchContext.targetRemediationSha = prMetadata.headSha;
+      dispatchContext.dispatchRecordHeadSha ||= prMetadata.headSha;
+      dispatchContext.dispatchReason ||= 'exhausted-final-hammer';
+    }
     // fall through to the dispatch below (hammer template, remediation mode)
+    forceHammerWorkerClass = true;
   }
 
   // Compose the prompt body. Template loaded from disk via DI so
   // tests can pass a literal.
-  const workerClass = String(cfg.workerClass || 'hammer');
+  const workerClass = forceHammerWorkerClass ? 'hammer' : String(cfg?.workerClass || 'hammer');
   // SPEC §1.1.1: the HAM terminal-remediation prompt is reserved for closures
   // that actually have findings to remediate. With `hammer` now the default
   // worker class, gating purely on `workerClass === 'hammer'` would route every
@@ -1296,7 +1314,9 @@ export async function maybeDispatchAmaCloser({
   const repo = dispatchContext.repo;
   const prNumber = Number(prMetadata?.prNumber);
   const reviewedSha = dispatchContext.reviewedSha;
-  const dispatchRecordHeadSha = dispatchContext.dispatchRecordHeadSha || reviewedSha;
+  const targetRemediationSha = dispatchContext.targetRemediationSha || reviewedSha;
+  const dispatchRecordHeadSha = dispatchContext.dispatchRecordHeadSha || targetRemediationSha;
+  const dispatchReason = dispatchContext.dispatchReason || null;
   const mergeMethod = String(cfg.mergeMethod || 'squash').toLowerCase();
   const rootDir = dispatchContext.rootDir || SUBMODULE_ROOT;
 
@@ -1327,6 +1347,7 @@ export async function maybeDispatchAmaCloser({
     repo,
     prNumber,
     reviewedSha,
+    targetRemediationSha,
     riskClass: dispatchContext.riskClass,
     mergeMethod,
     requiredGateContext: dispatchContext.requiredGateContext,
@@ -1701,7 +1722,10 @@ export async function maybeDispatchAmaCloser({
     schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
     repo,
     prNumber,
-    headSha: reviewedSha,
+    headSha: targetRemediationSha,
+    reviewedSha,
+    targetRemediationSha,
+    dispatchReason,
     workerClass,
     promptPath,
     promptDir,
@@ -1862,7 +1886,10 @@ export async function maybeDispatchAmaCloser({
           schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
           repo,
           prNumber,
-          headSha: reviewedSha,
+          headSha: targetRemediationSha,
+          reviewedSha,
+          targetRemediationSha,
+          dispatchReason,
           workerClass,
           promptPath,
           promptDir,
@@ -1953,7 +1980,10 @@ export async function maybeDispatchAmaCloser({
     schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
     repo,
     prNumber,
-    headSha: reviewedSha,
+    headSha: targetRemediationSha,
+    reviewedSha,
+    targetRemediationSha,
+    dispatchReason,
     workerClass,
     promptPath,
     promptDir,

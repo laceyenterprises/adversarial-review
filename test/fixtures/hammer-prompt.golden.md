@@ -33,6 +33,7 @@ scans.
 - **Repository:** acme/myrepo
 - **PR number:** 1234
 - **Reviewed head SHA:** `abc12345abc12345abc12345abc12345abc12345`
+- **Target remediation SHA:** `abc12345abc12345abc12345abc12345abc12345`
 - **Risk class:** `low`
 - **Merge method:** `squash`
 - **Required gate context:** the adversarial-review gate check for this PR

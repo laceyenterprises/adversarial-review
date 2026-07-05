@@ -5311,9 +5311,6 @@ async function maybeDispatchAmaClosureFor({
       currentPrHeadSha &&
       String(gateSnapshot.reviewedHeadSha) !== String(currentPrHeadSha)
   );
-  const exhaustedCurrentHeadHammerDispatchKey = exhaustedStaleReviewNeedsCurrentHeadHammer
-    ? 'exhausted-final-hammer'
-    : null;
   if (exhaustedStaleReviewNeedsCurrentHeadHammer) {
     logger?.warn?.(
       `[watcher] AMA final-hammer exhaustion for ${repoPath}#${prNumber}: ` +
@@ -5325,14 +5322,12 @@ async function maybeDispatchAmaClosureFor({
 
   const reviewState = {
     verdict: gateSnapshot.settledReview?.verdict || '',
-    // At review-budget exhaustion, validated HAM terminal remediation is the
-    // merge authority. If remediation commits moved the PR beyond the posted
-    // review head, key the final hammer to the CURRENT head so the resulting
-    // HAM evidence is head-matched. The dispatch record itself uses a stable
-    // PR-scoped key below so the retry budget survives any HAM-pushed commits.
-    headSha: exhaustedStaleReviewNeedsCurrentHeadHammer
-        ? currentPrHeadSha
-        : gateSnapshot.reviewedHeadSha,
+    // `headSha` is the head the adversarial reviewer actually reviewed. At
+    // review-budget exhaustion the watcher may still target the current PR head
+    // for HAM terminal remediation, but that live target travels separately in
+    // dispatchContext.targetRemediationSha so audit and stale-review guards can
+    // see the review/head gap.
+    headSha: gateSnapshot.reviewedHeadSha,
     riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || ledgerRiskClass || 'unknown').toLowerCase(),
     remediationPending: gateSnapshot.settledReview?.remediationPending,
     reviewCycleExhausted,
@@ -5393,8 +5388,12 @@ async function maybeDispatchAmaClosureFor({
     parentSession: process.env.HQ_PARENT_SESSION || 'session:unknown:airlock+watcher',
     dispatchedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     orchestrationMode,
-    ...(exhaustedCurrentHeadHammerDispatchKey
-      ? { dispatchRecordHeadSha: exhaustedCurrentHeadHammerDispatchKey }
+    ...(exhaustedStaleReviewNeedsCurrentHeadHammer
+      ? {
+          targetRemediationSha: currentPrHeadSha,
+          dispatchRecordHeadSha: currentPrHeadSha,
+          dispatchReason: 'exhausted-final-hammer',
+        }
       : {}),
   };
 

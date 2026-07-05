@@ -33,6 +33,7 @@ scans.
 - **Repository:** <<REPO>>
 - **PR number:** <<PR_NUMBER>>
 - **Reviewed head SHA:** `<<REVIEWED_SHA>>`
+- **Target remediation SHA:** `<<TARGET_REMEDIATION_SHA>>`
 - **Risk class:** `<<RISK_CLASS>>`
 - **Merge method:** `<<MERGE_METHOD>>`
 - **Required gate context:** the adversarial-review gate check for this PR

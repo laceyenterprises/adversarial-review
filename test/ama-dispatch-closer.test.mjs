@@ -305,9 +305,10 @@ test('cfg.enabled=true + eligible dispatches with workerClass=hammer by default'
   assert.ok(write.captured.body.includes('attemptPhase: "before-gh-pr-merge"'));
 });
 
-test('exhausted final hammer can use stable dispatch-record key while validating current head', async (t) => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-stable-key-'));
+test('exhausted final hammer preserves reviewed SHA while recording current target head', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-target-head-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const reviewedHead = '40e302440e302440e302440e302440e302440e3024';
   const currentHead = '6358df76358df76358df76358df76358df76358d';
   const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
     cfg: {
@@ -316,7 +317,7 @@ test('exhausted final hammer can use stable dispatch-record key while validating
     },
     reviewState: {
       verdict: 'request-changes',
-      headSha: currentHead,
+      headSha: reviewedHead,
       riskClass: 'medium',
       reviewCycleExhausted: true,
       blockingFindingState: 'known',
@@ -328,8 +329,7 @@ test('exhausted final hammer can use stable dispatch-record key while validating
     },
     dispatchContext: {
       rootDir,
-      reviewedSha: currentHead,
-      dispatchRecordHeadSha: 'exhausted-final-hammer',
+      reviewedSha: reviewedHead,
       riskClass: 'medium',
     },
   });
@@ -346,21 +346,19 @@ test('exhausted final hammer can use stable dispatch-record key while validating
   });
 
   assert.equal(result.dispatched, true);
-  assert.ok(write.captured.body.includes(currentHead), 'prompt must still authorize the current PR head');
-  const stablePath = amaCloserDispatchFilePath(rootDir, {
-    repo: dispatchContext.repo,
-    prNumber: prMetadata.prNumber,
-    headSha: 'exhausted-final-hammer',
-  });
+  assert.ok(write.captured.body.includes(reviewedHead), 'prompt must preserve the reviewed head');
+  assert.ok(write.captured.body.includes(currentHead), 'prompt must expose the live target head');
   const currentHeadPath = amaCloserDispatchFilePath(rootDir, {
     repo: dispatchContext.repo,
     prNumber: prMetadata.prNumber,
     headSha: currentHead,
   });
-  assert.equal(existsSync(stablePath), true, 'dispatch retry budget must be recorded under the stable key');
-  assert.equal(existsSync(currentHeadPath), false, 'current-head movement must not create a fresh dispatch budget');
-  const record = JSON.parse(readFileSync(stablePath, 'utf8'));
+  assert.equal(existsSync(currentHeadPath), true, 'dispatch record key must be the target commit SHA');
+  const record = JSON.parse(readFileSync(currentHeadPath, 'utf8'));
   assert.equal(record.headSha, currentHead);
+  assert.equal(record.reviewedSha, reviewedHead);
+  assert.equal(record.targetRemediationSha, currentHead);
+  assert.equal(record.dispatchReason, 'exhausted-final-hammer');
   assert.equal(record.retryCount, 1);
 });
 
@@ -804,7 +802,182 @@ test('auto-hammer dispatches HAM terminal remediation at review-cycle exhaustion
   assert.match(write.captured.body, /Get required checks and changed-surface tests green/);
 });
 
-test('AMA #3084: exhausted hammer dispatch retry budget is stable across moved heads', async (t) => {
+test('auto-hammer dispatches exhausted CONFLICTING stale-head PRs through hammer', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-conflicting-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const reviewedHead = 'cc01669cc01669cc01669cc01669cc01669cc01';
+  const currentHead = '8cf53758cf53758cf53758cf53758cf53758cf5';
+  const readPaths = [];
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: {
+      workerClass: 'codex',
+      autoHammerOnEligibilityMiss: true,
+    },
+    reviewState: {
+      verdict: 'request-changes',
+      headSha: reviewedHead,
+      riskClass: 'medium',
+      reviewCycleExhausted: true,
+      blockingFindingState: 'unknown',
+      nonBlockingFindingState: 'unknown',
+    },
+    prMetadata: {
+      headSha: currentHead,
+      mergeableState: 'CONFLICTING',
+    },
+    dispatchContext: {
+      rootDir,
+      reviewedSha: reviewedHead,
+      riskClass: 'medium',
+      templatePath: null,
+    },
+  });
+  const exec = buildExecMock();
+  const write = buildWriteMock();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: (path) => {
+      readPaths.push(path);
+      return readFileSync(path, 'utf8');
+    },
+  });
+
+  assert.equal(
+    isHammerRemediableEligibilityMiss(
+      ['pr-not-mergeable', 'stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'],
+      { reviewCycleExhausted: true },
+    ),
+    true,
+    '#3105 exhausted conflict reason set is hammer-remediable',
+  );
+  assert.equal(result.dispatched, true);
+  assert.equal(result.workerClass, 'hammer');
+  assert.deepEqual(readPaths, [HAMMER_TEMPLATE_PATH]);
+  const workerClassIndex = exec.calls[0].args.indexOf('--worker-class');
+  assert.notEqual(workerClassIndex, -1, 'hq dispatch args must include --worker-class');
+  assert.equal(exec.calls[0].args[workerClassIndex + 1], 'hammer');
+  assert.ok(write.captured.body.includes(reviewedHead), 'terminal hammer prompt must preserve the reviewed head');
+  assert.ok(write.captured.body.includes(currentHead), 'terminal hammer prompt must expose the live target head');
+  const recordPath = amaCloserDispatchFilePath(rootDir, {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: currentHead,
+  });
+  const record = JSON.parse(readFileSync(recordPath, 'utf8'));
+  assert.equal(record.headSha, currentHead);
+  assert.equal(record.reviewedSha, reviewedHead);
+  assert.equal(record.targetRemediationSha, currentHead);
+  assert.equal(record.dispatchReason, 'exhausted-final-hammer');
+  assert.ok(write.captured.body.includes('Closed-By: hammer (adversarial-pipe-mode)'));
+});
+
+test('auto-hammer still dispatches exhausted MERGEABLE stale-head PRs through hammer', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-mergeable-stale-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const reviewedHead = 'cc01669cc01669cc01669cc01669cc01669cc01';
+  const currentHead = '8cf53758cf53758cf53758cf53758cf53758cf5';
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: {
+      workerClass: 'codex',
+      autoHammerOnEligibilityMiss: true,
+    },
+    reviewState: {
+      verdict: 'request-changes',
+      headSha: reviewedHead,
+      riskClass: 'medium',
+      reviewCycleExhausted: true,
+      blockingFindingState: 'known',
+      blockingFindingCount: 0,
+      nonBlockingFindingState: 'known',
+      nonBlockingFindingCount: 0,
+    },
+    prMetadata: {
+      headSha: currentHead,
+      mergeableState: 'MERGEABLE',
+    },
+    dispatchContext: {
+      rootDir,
+      reviewedSha: reviewedHead,
+      riskClass: 'medium',
+      templatePath: null,
+    },
+  });
+  const exec = buildExecMock();
+  const write = buildWriteMock();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: (path) => readFileSync(path, 'utf8'),
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(result.workerClass, 'hammer');
+  const workerClassIndex = exec.calls[0].args.indexOf('--worker-class');
+  assert.notEqual(workerClassIndex, -1, 'hq dispatch args must include --worker-class');
+  assert.equal(exec.calls[0].args[workerClassIndex + 1], 'hammer');
+  assert.ok(write.captured.body.includes(reviewedHead));
+  assert.ok(write.captured.body.includes(currentHead));
+  const recordPath = amaCloserDispatchFilePath(rootDir, {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: currentHead,
+  });
+  const record = JSON.parse(readFileSync(recordPath, 'utf8'));
+  assert.equal(record.headSha, currentHead);
+  assert.equal(record.reviewedSha, reviewedHead);
+  assert.equal(record.targetRemediationSha, currentHead);
+  assert.equal(record.dispatchReason, 'exhausted-final-hammer');
+});
+
+test('auto-hammer does not bypass blocking findings before exhaustion on conflicting PRs', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-conflicting-blocking-pre-exhaustion-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: {
+      workerClass: 'hammer',
+      autoHammerOnEligibilityMiss: true,
+    },
+    reviewState: {
+      verdict: 'request-changes',
+      reviewCycleExhausted: false,
+      blockingFindingState: 'known',
+      blockingFindingCount: 1,
+    },
+    prMetadata: {
+      mergeableState: 'CONFLICTING',
+    },
+    dispatchContext: { rootDir },
+  });
+  const exec = buildExecMock();
+  const write = buildWriteMock();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: (path) => readFileSync(path, 'utf8'),
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'not-eligible');
+  assert.ok(result.reasons.includes('pr-not-mergeable'));
+  assert.ok(result.reasons.includes('blocking-findings-present'));
+  assert.equal(exec.calls.length, 0);
+  assert.equal(write.captured.body, null);
+});
+
+test('AMA #3084: exhausted hammer dispatch records are keyed by target head commits', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-stable-head-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -838,7 +1011,9 @@ test('AMA #3084: exhausted hammer dispatch retry budget is stable across moved h
       dispatchContext: {
         rootDir,
         reviewedSha: headSha,
-        dispatchRecordHeadSha: 'exhausted-final-hammer',
+        targetRemediationSha: headSha,
+        dispatchRecordHeadSha: headSha,
+        dispatchReason: 'exhausted-final-hammer',
         riskClass: 'medium',
         templatePath: null,
       },
@@ -858,28 +1033,26 @@ test('AMA #3084: exhausted hammer dispatch retry budget is stable across moved h
 
   assert.equal(results[0].dispatched, true);
   assert.equal(results[0].workerClass, 'hammer');
-  assert.equal(results[1].dispatched, false);
-  assert.equal(results[1].skipMergeAgent, true);
-  assert.match(results[1].reason, /^dispatch-status-|^existing-dispatch-/);
+  assert.equal(results[1].dispatched, true);
+  assert.equal(results[1].workerClass, 'hammer');
   const dispatchCalls = exec.calls.filter((call) => {
     const args = call.args || [];
     return args[0] === 'dispatch' && args[1] !== 'status';
   });
-  assert.equal(dispatchCalls.length, 1, 'a second moved head must not create a new hammer launch');
-  const stableRecordPath = amaCloserDispatchFilePath(rootDir, {
-    repo: 'acme/myrepo',
-    prNumber: 1234,
-    headSha: 'exhausted-final-hammer',
-  });
-  const stableRecord = JSON.parse(readFileSync(stableRecordPath, 'utf8'));
-  assert.equal(stableRecord.retryCount, 1);
-  assert.equal(stableRecord.headSha, heads[0]);
+  assert.equal(dispatchCalls.length, 2, 'each target head is keyed by its commit SHA');
   for (const headSha of heads) {
-    assert.equal(existsSync(amaCloserDispatchFilePath(rootDir, {
+    const recordPath = amaCloserDispatchFilePath(rootDir, {
       repo: 'acme/myrepo',
       prNumber: 1234,
       headSha,
-    })), false);
+    });
+    assert.equal(existsSync(recordPath), true);
+    const record = JSON.parse(readFileSync(recordPath, 'utf8'));
+    assert.equal(record.retryCount, 1);
+    assert.equal(record.headSha, headSha);
+    assert.equal(record.reviewedSha, headSha);
+    assert.equal(record.targetRemediationSha, headSha);
+    assert.equal(record.dispatchReason, 'exhausted-final-hammer');
   }
 });
 

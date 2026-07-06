@@ -17,15 +17,13 @@
  *     the zero-findings case (the full local battery is the hammer's job,
  *     MSM-01). This module reads GitHub state and calls `gh pr merge`; it has no
  *     local-CI seam and injects none.
- *   - **Clean-only (STRICT).** The daemon is never allowed to merge a PR that
- *     carries ANY finding — blocking OR non-blocking — in the final review. Any
- *     finding (or an unknown finding classification) declines the daemon path so
- *     the caller routes to the hammer. See {@link isFullyCleanSettledReview}.
- *
- *     TODO(MSM-05): when the dedicated daemon strict-mode flag lands, read it
- *     here to allow an operator to opt into the legacy non-blocking-tolerant
- *     behavior. Until then this module gates hard on zero-findings
- *     unconditionally — the safe default.
+ *   - **Clean-only by default (STRICT).** With strict mode on, the daemon is
+ *     never allowed to merge a PR that carries ANY finding — blocking OR
+ *     non-blocking — in the final review. Any finding (or an unknown finding
+ *     classification) declines the daemon path so the caller routes to the
+ *     hammer. When strict mode is explicitly off, the daemon may merge over
+ *     known non-blocking findings only; blocking or unknown finding state still
+ *     declines.
  *   - **Eligibility is the shared MSM-02 predicate.** The daemon reuses
  *     `evaluateMergeEligibility` so the hammer and daemon cannot drift apart on
  *     "may this PR merge right now?".
@@ -133,11 +131,23 @@ export function isFullyCleanSettledReview(reviewState = {}) {
   return blockingCount === 0 && nonBlockingCount === 0;
 }
 
+export function isDaemonMergeReviewAllowed(reviewState = {}, { strictMode = true } = {}) {
+  const blockingState = String(reviewState.blockingFindingState || '').trim().toLowerCase();
+  const nonBlockingState = String(reviewState.nonBlockingFindingState || '').trim().toLowerCase();
+  if (blockingState !== 'known' || nonBlockingState !== 'known') return false;
+  const blockingCount = normalizeFindingCount(reviewState.blockingFindingCount);
+  const nonBlockingCount = normalizeFindingCount(reviewState.nonBlockingFindingCount);
+  if (blockingCount === null || nonBlockingCount === null) return false;
+  if (blockingCount !== 0) return false;
+  if (strictMode !== false && nonBlockingCount !== 0) return false;
+  return true;
+}
+
 /**
  * The precise reason a review is NOT daemon-clean, for surfacing to the caller.
  * `null` when the review IS fully clean.
  */
-function uncleanReason(reviewState = {}) {
+function uncleanReason(reviewState = {}, { strictMode = true } = {}) {
   const blockingState = String(reviewState.blockingFindingState || '').trim().toLowerCase();
   const nonBlockingState = String(reviewState.nonBlockingFindingState || '').trim().toLowerCase();
   if (blockingState !== 'known' || nonBlockingState !== 'known') return 'findings-unknown';
@@ -145,7 +155,7 @@ function uncleanReason(reviewState = {}) {
   const nonBlockingCount = normalizeFindingCount(reviewState.nonBlockingFindingCount);
   if (blockingCount === null || nonBlockingCount === null) return 'findings-unknown';
   if (blockingCount !== 0) return 'blocking-findings-present';
-  if (nonBlockingCount !== 0) return 'non-blocking-findings-present';
+  if (strictMode !== false && nonBlockingCount !== 0) return 'non-blocking-findings-present';
   return null;
 }
 
@@ -308,6 +318,8 @@ export async function attemptDaemonCleanMerge({
   mergeMethod = 'squash',
   hqRoot,
   auditMetadata = {},
+  flags = {},
+  strictMode = flags.strictMode ?? true,
   fetchLiveGateImpl,
   acquireLeaseImpl,
   releaseLeaseImpl,
@@ -334,9 +346,11 @@ export async function attemptDaemonCleanMerge({
   });
 
   // ── Gate 1: STRICT clean-only. Any finding (or unknown classification) routes
-  // to the hammer. No hammer is spawned here — the caller falls through. ──────
-  if (!isFullyCleanSettledReview(reviewState)) {
-    return notTaken(uncleanReason(reviewState) || 'findings-unknown');
+  // to the hammer. When strict mode is explicitly off, known non-blocking
+  // findings may stay on the daemon path. No hammer is spawned here — the caller
+  // falls through. ───────────────────────────────────────────────────────────
+  if (!isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
+    return notTaken(uncleanReason(reviewState, { strictMode }) || 'findings-unknown');
   }
 
   // ── Gate 2: substantive eligibility (verdict + green CI + mergeable +
@@ -407,7 +421,15 @@ export async function attemptDaemonCleanMerge({
   // ── Bootstrap the daemon-merge audit doc (in_progress). If we can't even
   // record intent, don't merge — release and defer. ─────────────────────────
   const auditKeys = { hqRoot, repo, prNumber, headSha: validatedHead };
-  const auditMetadataDoc = { ...auditMetadata, closureAuthority: DAEMON_MERGE_CLOSURE_AUTHORITY };
+  const flagState = {
+    autonomousMergeExecutionEnabled: flags.autonomousMergeExecutionEnabled !== false,
+    strictMode: strictMode !== false,
+  };
+  const auditMetadataDoc = {
+    ...auditMetadata,
+    closureAuthority: DAEMON_MERGE_CLOSURE_AUTHORITY,
+    flagState,
+  };
   try {
     writeAuditImpl({
       ...auditKeys,
@@ -418,6 +440,8 @@ export async function attemptDaemonCleanMerge({
         validatedHead,
         mergeMethod,
         preMergeReasons: [],
+        eligibilityReasons: [],
+        flagState,
       },
       metadata: auditMetadataDoc,
       now: now(),
@@ -562,6 +586,8 @@ export async function attemptDaemonCleanMerge({
           validatedHead,
           mergeMethod,
           attempts,
+          eligibilityReasons: [],
+          flagState,
         },
         now: now(),
       });
@@ -575,6 +601,8 @@ export async function attemptDaemonCleanMerge({
           reason: terminal.reason,
           permanent: Boolean(terminal.permanent),
           ...(terminal.reasons ? { preMergeReasons: terminal.reasons } : {}),
+          eligibilityReasons: terminal.reasons || [],
+          flagState,
           ...(terminal.mergeDiagnostics ? { mergeDiagnostics: terminal.mergeDiagnostics } : {}),
           validatedHead,
           mergeMethod,

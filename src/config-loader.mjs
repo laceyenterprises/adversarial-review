@@ -1202,6 +1202,14 @@ function schemaV1() {
                     __type: TYPE_BOOL,
                     __default: true,
                   },
+                  autonomous_merge_execution_enabled: {
+                    __type: TYPE_BOOL,
+                    __default: true,
+                  },
+                  strict_mode: {
+                    __type: TYPE_BOOL,
+                    __default: true,
+                  },
                   auto_hammer_on_eligibility_miss: {
                     __type: TYPE_BOOL,
                     __default: false,
@@ -2021,6 +2029,14 @@ export const ENV_ALIASES = {
   },
   'roles.adversarial.merge_authority.enabled': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
+    aliases: [],
+  },
+  'roles.adversarial.merge_authority.autonomous_merge_execution_enabled': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_AUTONOMOUS_MERGE_EXECUTION_ENABLED',
+    aliases: [],
+  },
+  'roles.adversarial.merge_authority.strict_mode': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_STRICT_MODE',
     aliases: [],
   },
   'roles.adversarial.orchestration_mode': {
@@ -3502,6 +3518,14 @@ export class AgentOSConfig {
       ),
       strictNonBlockingRemediation: this.get(
         'roles.adversarial.merge_authority.strict_non_blocking_remediation',
+        true,
+      ),
+      autonomousMergeExecutionEnabled: this.get(
+        'roles.adversarial.merge_authority.autonomous_merge_execution_enabled',
+        true,
+      ),
+      strictMode: this.get(
+        'roles.adversarial.merge_authority.strict_mode',
         true,
       ),
       autoHammerOnEligibilityMiss: this.get(

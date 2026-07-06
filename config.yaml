@@ -79,6 +79,17 @@ reviewer:
 roles:
   reviewer: adversarial             # enum: claude-code / codex / claude (legacy alias for claude-code) / gemini / adversarial
   remediator: adversarial           # enum: claude-code / codex / adversarial
+  adversarial:
+    merge_authority:
+      # MSM two-path autonomous merge execution. Set false as the hard cutover
+      # kill switch: the watcher still evaluates/audits the merge decision, then
+      # fail-closes and leaves the PR for manual operator intervention. Bounce
+      # the adversarial watcher after changing this value.
+      autonomous_merge_execution_enabled: true
+      # Default strict mode: daemon merges only zero-finding final reviews.
+      # Turning this off permits daemon merge over known non-blocking findings;
+      # blocking or unknown findings still route away from the daemon.
+      strict_mode: true
   merge-agent:
     fallback_path: none
   claude-reviewer-lacey:

@@ -5698,7 +5698,6 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
 }
 
 function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
-  if (!String(reviewBody ?? '').trim()) return { count: 0, state: 'unknown' };
   // Defense-in-depth format-independence: canonicalize the posted body before
   // parsing so a non-`##`-headed gemini/agy review (which reviewer-side
   // sanitation now normalizes at post time, but which may already be posted
@@ -5708,8 +5707,11 @@ function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
   // pass, so the PR never closes and re-enters the review loop.
   const parsed = parseMergeAgentRescueReviewBody(sanitizeReviewPayloadBestEffort(reviewBody));
   const normalizedVerdict = normalizeReviewVerdict(lastVerdict);
+  const verdictKey = normalizedVerdict === 'unknown'
+    ? String(lastVerdict || '').trim().toLowerCase()
+    : normalizedVerdict;
   if (parsed.blocking.missing) {
-    return normalizedVerdict === 'request-changes'
+    return verdictKey === 'request-changes'
       ? { count: 0, state: 'unknown' }
       : { count: 0, state: 'known' };
   }

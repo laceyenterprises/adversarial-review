@@ -181,6 +181,21 @@ test('classifyBlockingFindings fails closed without throwing on missing bodies',
   );
 });
 
+test('classifyBlockingFindings settles blank approving review bodies', () => {
+  assert.deepEqual(
+    classifyBlockingFindings('', { lastVerdict: 'comment-only' }),
+    { count: 0, state: 'known' },
+  );
+  assert.deepEqual(
+    classifyBlockingFindings('   ', { lastVerdict: 'approved' }),
+    { count: 0, state: 'known' },
+  );
+  assert.deepEqual(
+    classifyBlockingFindings('', { lastVerdict: 'request-changes' }),
+    { count: 0, state: 'unknown' },
+  );
+});
+
 function createWorkerRunsLedgerDb(dbPath, rows = []) {
   mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);

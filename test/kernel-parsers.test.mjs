@@ -124,6 +124,70 @@ test('sanitizeReviewPayloadBestEffort strips preamble after fallback heading pro
   assert.match(sanitized, /^## Blocking issues$/m);
 });
 
+test('sanitizeReviewPayloadBestEffort fallback promotes CRLF and trailing-space headings', () => {
+  const truncatedCrlfReview = [
+    'Here is my review:',
+    '### Summary:   ',
+    'Reviewer output was truncated before Verdict.',
+    '',
+    '#### Blocking issues:   ',
+    '- **Missing verdict**',
+  ].join('\r\n');
+
+  const sanitized = sanitizeReviewPayloadBestEffort(truncatedCrlfReview);
+
+  assert.doesNotMatch(sanitized, /\r/);
+  assert.equal(sanitized.startsWith('## Summary\n'), true);
+  assert.match(sanitized, /^## Blocking issues$/m);
+  assert.doesNotMatch(sanitized, /^### Blocking issues/m);
+});
+
+test('sanitizeReviewPayloadBestEffort fallback uses canonical section trimming', () => {
+  const partialWithCustomSections = [
+    'Preamble before the review.',
+    '',
+    '### Summary',
+    'Reviewer output was truncated before Verdict.',
+    '',
+    '## Custom Section',
+    'This top-level section is outside the canonical review contract.',
+    '',
+    '### Blocking issues:',
+    '- **Missing verdict**',
+    '  - **Problem:** The reviewer omitted the required Verdict section.',
+    '',
+    '## Another Custom Section',
+    'This should not leak through the fallback path either.',
+  ].join('\n');
+
+  const sanitized = sanitizeReviewPayloadBestEffort(partialWithCustomSections);
+
+  assert.equal(sanitized.startsWith('## Summary\n'), true);
+  assert.match(sanitized, /^## Blocking issues$/m);
+  assert.doesNotMatch(sanitized, /Custom Section/);
+  assert.doesNotMatch(sanitized, /outside the canonical review contract/);
+});
+
+test('sanitizeReviewPayloadBestEffort promotes trailing-space verdict headings', () => {
+  const review = [
+    '### Summary: ',
+    'Clean after remediation.',
+    '',
+    '### Blocking issues: ',
+    '- None.',
+    '',
+    '### Verdict: ',
+    'Comment only',
+  ].join('\n');
+
+  const sanitized = sanitizeReviewPayloadBestEffort(review);
+
+  assert.match(sanitized, /^## Summary$/m);
+  assert.match(sanitized, /^## Blocking issues$/m);
+  assert.match(sanitized, /^## Verdict$/m);
+  assert.equal(extractReviewVerdict(sanitized), 'Comment only');
+});
+
 test('kernel verdict parser accepts explanatory prose before final verdict line', () => {
   const review = [
     '## Summary',
@@ -517,10 +581,9 @@ test('kernel sanitizer collapses heading levels and canonicalizes recognized sec
 test('kernel sanitizer stops processing further sections after a duplicate is seen', () => {
   // The sanitizer's `firstSeen` dedup BREAKS the section walk on the
   // first duplicate heading. Sections AFTER the duplicate are not
-  // processed (so a malicious second `## Verdict` cannot override the
-  // first one's text via further section trims). Content of the first
-  // Verdict section's slice still extends to end-of-file — the dedup is
-  // a "stop processing more headings" signal, not a content-trimmer.
+  // processed, and canonical sections terminate at the next top-level
+  // section, so a malicious second `## Verdict` cannot override the
+  // first one's text.
   const dupVerdict = [
     '## Summary',
     'First.',
@@ -539,6 +602,7 @@ test('kernel sanitizer stops processing further sections after a duplicate is se
 
   // First Verdict must be the one extractReviewVerdict returns.
   assert.equal(extractReviewVerdict(sanitized), 'Comment only');
+  assert.doesNotMatch(sanitized, /Request changes/);
 });
 
 test('kernel sanitizer rejects payloads missing required Summary/Verdict sections', () => {

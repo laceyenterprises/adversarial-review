@@ -50,6 +50,7 @@ const {
   checkoutGeminiCredentialFromBroker,
   releaseGeminiCredentialCheckout,
   materializeGeminiCheckoutSession,
+  acquireGeminiFallbackLock,
   GeminiCredentialPoolUnavailableError,
   GeminiCredentialPoolNoCreditError,
   resolveReviewerMetadata,
@@ -2656,6 +2657,35 @@ test('purgeStaleGeminiReviewerSessionDirs removes only reviewer-owned session di
   }
 });
 
+test('purgeStaleGeminiReviewerSessionDirs continues after one stale dir fails to delete', () => {
+  const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-purge-error-'));
+  try {
+    const parent = join(root, '.gemini', 'reviewer-sessions');
+    mkdirSync(join(parent, 'review-bad'), { recursive: true, mode: 0o700 });
+    mkdirSync(join(parent, 'review-good'), { recursive: true, mode: 0o700 });
+    const warnings = [];
+    const removed = [];
+    const result = purgeStaleGeminiReviewerSessionDirs({
+      env: { HOME: root },
+      rmSyncImpl: (target, options) => {
+        if (target.endsWith('review-bad')) {
+          throw new Error('permission denied');
+        }
+        removed.push(target);
+        rmSync(target, options);
+      },
+      log: { warn: (message) => warnings.push(message) },
+    });
+    assert.equal(result.purged, 1);
+    assert.equal(existsSync(join(parent, 'review-bad')), true);
+    assert.equal(existsSync(join(parent, 'review-good')), false);
+    assert.deepEqual(removed, [join(parent, 'review-good')]);
+    assert.match(warnings[0], /failed to purge stale Gemini reviewer session review-bad/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('checkoutGeminiCredentialFromBroker normalizes checkout response and release reports quota signal', async () => {
   const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-broker-'));
   try {
@@ -2762,6 +2792,25 @@ test('reviewWithGemini antigravity checks out distinct credentials into isolated
   }
 });
 
+test('acquireGeminiFallbackLock removes lock dir when owner write fails', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-lock-owner-'));
+  try {
+    const writeError = new Error('ENOSPC');
+    await assert.rejects(
+      () => acquireGeminiFallbackLock({
+        env: { HOME: root },
+        writeFileSyncImpl: () => {
+          throw writeError;
+        },
+      }),
+      (err) => err === writeError,
+    );
+    assert.equal(existsSync(join(root, '.gemini', 'reviewer-sessions', 'legacy-fallback.lock')), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('reviewWithGemini broker unavailable uses serialized legacy fallback lock', async () => {
   resetGeminiReviewerSessionPreflightForTest();
   const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-fallback-'));
@@ -2788,6 +2837,72 @@ test('reviewWithGemini broker unavailable uses serialized legacy fallback lock',
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('reviewWithGemini releases broker checkout when session materialization fails', async () => {
+  resetGeminiReviewerSessionPreflightForTest();
+  const checkout = {
+    checkoutId: 'co_materialize_fail',
+    credentialId: 'cred_materialize_fail',
+    oauthCreds: { access_token: 'token' },
+  };
+  const released = [];
+  const materializeError = new Error('disk full');
+  await assert.rejects(
+    () => reviewWithGemini('+diff\n', '', {
+      resolveGeminiRuntimeImpl: () => 'antigravity',
+      checkoutGeminiCredentialImpl: async () => checkout,
+      materializeGeminiCheckoutSessionImpl: () => {
+        throw materializeError;
+      },
+      releaseGeminiCredentialCheckoutImpl: async ({ checkout: releasedCheckout, quotaSignal }) => {
+        released.push({ checkoutId: releasedCheckout.checkoutId, quotaSignal });
+      },
+      assertAgyAuthImpl: async () => {
+        throw new Error('auth must not run after materialization failure');
+      },
+      spawnAgyReviewImpl: async () => {
+        throw new Error('spawn must not run after materialization failure');
+      },
+    }),
+    (err) => err === materializeError,
+  );
+  assert.deepEqual(released, [{ checkoutId: 'co_materialize_fail', quotaSignal: false }]);
+});
+
+test('reviewWithGemini releases broker checkout and cleans session when antigravity auth fails', async () => {
+  resetGeminiReviewerSessionPreflightForTest();
+  const released = [];
+  let cleaned = false;
+  const authError = new Error('not logged in');
+  await assert.rejects(
+    () => reviewWithGemini('+diff\n', '', {
+      resolveGeminiRuntimeImpl: () => 'antigravity',
+      checkoutGeminiCredentialImpl: async () => ({
+        checkoutId: 'co_auth_fail',
+        credentialId: 'cred_auth_fail',
+        oauthCreds: { access_token: 'token' },
+      }),
+      materializeGeminiCheckoutSessionImpl: ({ env }) => ({
+        env,
+        cleanup() {
+          cleaned = true;
+        },
+      }),
+      releaseGeminiCredentialCheckoutImpl: async ({ checkout: releasedCheckout, quotaSignal }) => {
+        released.push({ checkoutId: releasedCheckout.checkoutId, quotaSignal });
+      },
+      assertAgyAuthImpl: async () => {
+        throw authError;
+      },
+      spawnAgyReviewImpl: async () => {
+        throw new Error('spawn must not run after auth failure');
+      },
+    }),
+    (err) => err === authError,
+  );
+  assert.deepEqual(released, [{ checkoutId: 'co_auth_fail', quotaSignal: false }]);
+  assert.equal(cleaned, true);
 });
 
 test('reviewWithGemini no-credit defers without single-credential fallback', async () => {

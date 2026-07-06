@@ -2284,6 +2284,7 @@ function purgeStaleGeminiReviewerSessionDirs({
   rmSyncImpl = rmSync,
   readdirSyncImpl = readdirSync,
   mkdirSyncImpl = mkdirSync,
+  log = console,
 } = {}) {
   mkdirSyncImpl(sessionParent, { recursive: true, mode: 0o700 });
   chmodSync(sessionParent, 0o700);
@@ -2296,8 +2297,12 @@ function purgeStaleGeminiReviewerSessionDirs({
   let purged = 0;
   for (const entry of entries) {
     if (!entry.isDirectory() || !entry.name.startsWith(GEMINI_REVIEWER_SESSION_DIR_PREFIX)) continue;
-    rmSyncImpl(join(sessionParent, entry.name), { recursive: true, force: true });
-    purged += 1;
+    try {
+      rmSyncImpl(join(sessionParent, entry.name), { recursive: true, force: true });
+      purged += 1;
+    } catch (err) {
+      log.warn?.(`[reviewWithGemini] WARN: failed to purge stale Gemini reviewer session ${entry.name}: ${err.message}`);
+    }
   }
   return { sessionParent, purged };
 }
@@ -2506,10 +2511,34 @@ function materializeGeminiCheckoutSession({
   };
 }
 
+async function cleanupGeminiAntigravityResources({
+  checkout,
+  checkoutSession,
+  fallbackLock,
+  quotaSignal = false,
+  env = process.env,
+  log = console,
+  releaseGeminiCredentialCheckoutImpl = releaseGeminiCredentialCheckout,
+}) {
+  await releaseGeminiCredentialCheckoutImpl({
+    checkout,
+    quotaSignal,
+    env,
+    log,
+  });
+  try {
+    checkoutSession?.cleanup();
+  } finally {
+    fallbackLock?.release();
+  }
+}
+
 async function acquireGeminiFallbackLock({
   env = process.env,
   waitMs = GEMINI_CQP_FALLBACK_LOCK_WAIT_MS,
   sleepImpl = sleep,
+  writeFileSyncImpl = writeFileSync,
+  rmSyncImpl = rmSync,
 } = {}) {
   const parent = resolveGeminiReviewerSessionParent(env);
   mkdirSync(parent, { recursive: true, mode: 0o700 });
@@ -2519,14 +2548,19 @@ async function acquireGeminiFallbackLock({
   for (;;) {
     try {
       mkdirSync(lockDir, { mode: 0o700 });
-      writeFileSync(join(lockDir, 'owner.json'), `${JSON.stringify({
-        pid: process.pid,
-        acquiredAt: new Date().toISOString(),
-      })}\n`, { mode: 0o600 });
+      try {
+        writeFileSyncImpl(join(lockDir, 'owner.json'), `${JSON.stringify({
+          pid: process.pid,
+          acquiredAt: new Date().toISOString(),
+        })}\n`, { mode: 0o600 });
+      } catch (err) {
+        rmSyncImpl(lockDir, { recursive: true, force: true });
+        throw err;
+      }
       return {
         lockDir,
         release() {
-          rmSync(lockDir, { recursive: true, force: true });
+          rmSyncImpl(lockDir, { recursive: true, force: true });
         },
       };
     } catch (err) {
@@ -2883,6 +2917,21 @@ async function reviewWithGemini(diff, extraContext = '', {
       checkoutSession = materializeGeminiCheckoutSessionImpl({ checkout, env });
       reviewEnv = checkoutSession.env;
     } catch (err) {
+      if (checkout) {
+        await cleanupGeminiAntigravityResources({
+          checkout,
+          checkoutSession,
+          fallbackLock,
+          quotaSignal: false,
+          env,
+          log,
+          releaseGeminiCredentialCheckoutImpl,
+        });
+        checkout = null;
+        checkoutSession = null;
+        fallbackLock = null;
+        throw err;
+      }
       if (err?.isGeminiCredentialPoolNoCredit) {
         throw err;
       }
@@ -2893,48 +2942,35 @@ async function reviewWithGemini(diff, extraContext = '', {
       fallbackLock = await acquireGeminiFallbackLockImpl({ env, sleepImpl });
       reviewEnv = env;
     }
-    try {
-      await assertAgyAuthImpl({ agyCli: AGY_CLI, env: reviewEnv });
-    } catch (err) {
-      await releaseGeminiCredentialCheckoutImpl({
-        checkout,
-        quotaSignal: false,
-        env,
-        log,
-      });
-      try {
-        checkoutSession?.cleanup();
-      } finally {
-        fallbackLock?.release();
-      }
-      checkout = null;
-      checkoutSession = null;
-      fallbackLock = null;
-      throw err;
-    }
-  } else {
-    await assertOAuthImpl(reviewEnv);
   }
-  console.error('[reviewWithGemini] OAuth OK');
-
-  const promptPrefix = runtime === 'antigravity'
-    ? buildAgyReviewerPromptPrefix({ stage: promptStage })
-    : buildReviewerPromptPrefix({ stage: promptStage });
-  const prompt = buildReviewerPrompt({ promptPrefix, extraContext, diff });
-  // Runtime-aware model token. The token FORMATS differ and are NOT
-  // interchangeable: the gemini-CLI path expects a slug (gemini-2.5-pro);
-  // the agy/antigravity path expects agy's verbatim display name
-  // (e.g. "Gemini 3.1 Pro (High)"). Feeding the cli slug to agy is the bug
-  // that previously left the model unbound — agy ignores an unknown token and
-  // falls back to its persisted default (Flash).
-  const model = runtime === 'antigravity'
-    ? resolveGeminiAntigravityModel({ env: reviewEnv })
-    : resolveGeminiReviewerModel(reviewEnv);
 
   let stdout = '';
   let stderr = '';
+  let subprocessStarted = false;
   try {
+    if (runtime === 'antigravity') {
+      await assertAgyAuthImpl({ agyCli: AGY_CLI, env: reviewEnv });
+    } else {
+      await assertOAuthImpl(reviewEnv);
+    }
+    console.error('[reviewWithGemini] OAuth OK');
+
+    const promptPrefix = runtime === 'antigravity'
+      ? buildAgyReviewerPromptPrefix({ stage: promptStage })
+      : buildReviewerPromptPrefix({ stage: promptStage });
+    const prompt = buildReviewerPrompt({ promptPrefix, extraContext, diff });
+    // Runtime-aware model token. The token FORMATS differ and are NOT
+    // interchangeable: the gemini-CLI path expects a slug (gemini-2.5-pro);
+    // the agy/antigravity path expects agy's verbatim display name
+    // (e.g. "Gemini 3.1 Pro (High)"). Feeding the cli slug to agy is the bug
+    // that previously left the model unbound — agy ignores an unknown token and
+    // falls back to its persisted default (Flash).
+    const model = runtime === 'antigravity'
+      ? resolveGeminiAntigravityModel({ env: reviewEnv })
+      : resolveGeminiReviewerModel(reviewEnv);
+
     console.error(`[reviewWithGemini] invoking Gemini reviewer CLI (model=${model}, runtime=${runtime})`);
+    subprocessStarted = true;
     const result = runtime === 'antigravity'
       ? await withGeminiSubprocessRetry(
         () => spawnAgyReviewImpl({
@@ -2967,23 +3003,27 @@ async function reviewWithGemini(diff, extraContext = '', {
     stderr = err.stderr || '';
     quotaSignal = runtime === 'antigravity' && looksLikeGeminiQuotaError(err, stdout, stderr);
     const msg = `${err.message || ''}\n${stdout}\n${stderr}`;
+    if (!subprocessStarted) {
+      throw err;
+    }
     if (/401|unauthorized|oauth|login required|not logged in/i.test(msg)) {
       throw new OAuthError('gemini', `CLI returned auth error: ${msg.substring(0, 200)}`);
     }
     throw new Error(`Gemini exec failed: ${msg.substring(0, 800)}`);
   } finally {
     if (runtime === 'antigravity') {
-      await releaseGeminiCredentialCheckoutImpl({
+      await cleanupGeminiAntigravityResources({
         checkout,
+        checkoutSession,
+        fallbackLock,
         quotaSignal,
         env,
         log,
+        releaseGeminiCredentialCheckoutImpl,
       });
-      try {
-        checkoutSession?.cleanup();
-      } finally {
-        fallbackLock?.release();
-      }
+      checkout = null;
+      checkoutSession = null;
+      fallbackLock = null;
     }
   }
 

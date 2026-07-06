@@ -69,7 +69,7 @@ import {
   resolveReviewerTimeoutMs,
 } from './reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
-import { extractReviewVerdict, looksLikeRuntimeJunk, normalizeEffectiveReviewVerdict, normalizeReviewVerdict, normalizeWhitespace, sanitizeCodexReviewPayload } from './kernel/verdict.mjs';
+import { extractReviewVerdict, looksLikeRuntimeJunk, normalizeEffectiveReviewVerdict, normalizeReviewVerdict, normalizeWhitespace, sanitizeCodexReviewPayload, sanitizeReviewPayloadBestEffort } from './kernel/verdict.mjs';
 import { loadStagePrompt, pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
@@ -3569,13 +3569,17 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
 } = {}) {
   if (effectiveModel === 'claude') {
     const text = await reviewWithClaudeImpl(diff, extraContext, { promptStage });
-    return { rawReviewText: text, reviewText: text, tokenUsage: null, needsSanitize: false };
+    // Best-effort canonicalization: claude/gemini are posted without the hard
+    // codex sanitize, but non-`##` canonical headings still break the verdict/
+    // blocking-finding parsers the cap + closer depend on. Promote them here
+    // (never throws; falls back to the raw body).
+    return { rawReviewText: text, reviewText: sanitizeReviewPayloadBestEffort(text), tokenUsage: null, needsSanitize: false };
   }
   if (effectiveModel === 'gemini') {
     const result = await reviewWithGeminiImpl(diff, extraContext, { promptStage });
     return {
       rawReviewText: result.reviewText,
-      reviewText: result.reviewText,
+      reviewText: sanitizeReviewPayloadBestEffort(result.reviewText),
       tokenUsage: result.tokenUsage ?? null,
       needsSanitize: false,
     };
@@ -3627,7 +3631,7 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   });
   return {
     rawReviewText: mergedReviewText,
-    reviewText: mergedReviewText,
+    reviewText: sanitizeReviewPayloadBestEffort(mergedReviewText),
     tokenUsage: null,
     needsSanitize: false,
     chunked: true,

@@ -80,6 +80,32 @@ function sanitizeCodexReviewPayload(reviewText) {
   return sanitized;
 }
 
+/**
+ * Best-effort canonicalization for reviewer output that is *expected* to already
+ * be in the canonical shape (claude / gemini, which are posted without the hard
+ * codex sanitize step). Runs the same heading-promotion + section-trim as
+ * `sanitizeCodexReviewPayload`, but NEVER throws: if the body is not recognizably
+ * canonical it is returned whitespace-normalized and otherwise unchanged.
+ *
+ * Rationale: gemini/agy output frequently emits the canonical `## Summary /
+ * ## Blocking issues / ## Verdict` sections at non-`##` heading levels (or with
+ * trailing colons), which the downstream verdict/blocking-finding parsers reject.
+ * A rejected body makes the review-cycle cap counter skip it AND makes the
+ * budget-exhausted final-pass closer refuse (`blockingFindingState='unknown'`),
+ * so gemini-reviewed PRs never close and re-enter the review loop unbounded.
+ * Promoting the headings here re-arms both the cap and the closer for gemini
+ * without changing the codex path (which keeps its throwing sanitize +
+ * forensic-dump behavior). A body that still can't be canonicalized is posted
+ * as-is and is bounded by the format-independent review-cycle cap.
+ */
+function sanitizeReviewPayloadBestEffort(reviewText) {
+  try {
+    return sanitizeCodexReviewPayload(reviewText);
+  } catch {
+    return normalizeWhitespace(reviewText);
+  }
+}
+
 function extractReviewVerdict(reviewBody) {
   const text = String(reviewBody ?? '');
   const heading = text.match(/^##\s+Verdict\s*$/im);
@@ -273,4 +299,5 @@ export {
   normalizeReviewVerdict,
   normalizeWhitespace,
   sanitizeCodexReviewPayload,
+  sanitizeReviewPayloadBestEffort,
 };

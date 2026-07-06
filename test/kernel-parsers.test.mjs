@@ -8,6 +8,7 @@ import {
   normalizeEffectiveReviewVerdict,
   normalizeReviewVerdict,
   sanitizeCodexReviewPayload,
+  sanitizeReviewPayloadBestEffort,
 } from '../src/kernel/verdict.mjs';
 import {
   parseBlockingFindingsSection,
@@ -50,6 +51,38 @@ test('kernel verdict parser preserves a production failing verdict byte-for-byte
   assert.equal(sanitized, failingVerdictJob.reviewBody);
   assert.equal(extractReviewVerdict(sanitized), 'Request changes');
   assert.equal(normalizeReviewVerdict(extractReviewVerdict(sanitized)), 'request-changes');
+});
+
+test('sanitizeReviewPayloadBestEffort promotes mis-headed gemini sections to canonical ##', () => {
+  // Gemini/agy commonly emit the canonical sections at ### / #### levels or with
+  // trailing colons, which the verdict/blocking-finding parsers reject. The
+  // best-effort sanitizer must normalize them so the closer + cap engage.
+  const misHeaded = [
+    '### Summary',
+    'Looks fine overall.',
+    '#### Blocking issues:',
+    '- None.',
+    '### Verdict',
+    'Comment only',
+  ].join('\n');
+  const sanitized = sanitizeReviewPayloadBestEffort(misHeaded);
+  // Now parseable as canonical.
+  assert.equal(extractReviewVerdict(sanitized), 'Comment only');
+  assert.match(sanitized, /^##\s+Summary$/mi);
+  assert.match(sanitized, /^##\s+Blocking issues$/mi);
+  assert.equal(normalizeEffectiveReviewVerdict(sanitized), 'comment-only');
+});
+
+test('sanitizeReviewPayloadBestEffort NEVER throws — falls back to the raw body', () => {
+  // A truly non-canonical body (no Summary/Verdict) must not throw (unlike the
+  // codex sanitizer); it is returned normalized-but-unchanged so it can still be
+  // posted and bounded by the format-independent review-cycle cap.
+  const junk = 'agy: session initializing...\nrunning reviewer\n(no verdict emitted)';
+  let out;
+  assert.doesNotThrow(() => { out = sanitizeReviewPayloadBestEffort(junk); });
+  assert.match(out, /no verdict emitted/);
+  // And the hard codex sanitizer WOULD throw on the same input.
+  assert.throws(() => sanitizeCodexReviewPayload(junk));
 });
 
 test('kernel verdict parser accepts explanatory prose before final verdict line', () => {

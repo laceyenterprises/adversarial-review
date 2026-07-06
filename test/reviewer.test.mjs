@@ -2859,7 +2859,8 @@ test('checkoutGeminiCredentialFromBroker normalizes checkout response and releas
     assert.equal(calls[1].url, 'http://broker.local/checkout/release');
     assert.equal(calls[1].body.lease_id, 'co_123');
     assert.equal(calls[1].body.kind, 'quota_exhausted');
-    assert.equal(calls[1].body.limit, 1000);
+    assert.equal(calls[1].body.unit, undefined);
+    assert.equal(calls[1].body.limit, undefined);
 
     await releaseGeminiCredentialCheckout({
       checkout,
@@ -2871,7 +2872,21 @@ test('checkoutGeminiCredentialFromBroker normalizes checkout response and releas
       fetchImpl,
     });
     assert.equal(calls[2].body.kind, 'release');
+    assert.equal(calls[2].body.unit, 'requests');
     assert.equal(calls[2].body.limit, 0);
+
+    await releaseGeminiCredentialCheckout({
+      checkout,
+      env: {
+        CQP_BROKER_URL: 'http://broker.local',
+        CQP_GEMINI_QUOTA_LIMIT_REQUESTS: '-1',
+        CQP_GEMINI_QUOTA_RESET_AT: '2026-07-13T00:00:00.000Z',
+      },
+      fetchImpl,
+    });
+    assert.equal(calls[3].body.kind, 'release');
+    assert.equal(calls[3].body.unit, 'requests');
+    assert.equal(calls[3].body.limit, undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -3296,6 +3311,52 @@ test('reviewWithGemini releases checkout when final spend report config lookup t
     assert.equal(cleaned, true);
     assert.deepEqual(released, [{ checkoutId: 'co_spend_throw', quotaSignal: false }]);
     assert.match(warnings[0], /failed to report Gemini credential spend cred_spend_throw/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('reviewWithGemini keeps successful antigravity review when spend report lookup throws', async () => {
+  resetGeminiReviewerSessionPreflightForTest();
+  const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-spend-success-'));
+  let cleaned = false;
+  const released = [];
+  const warnings = [];
+  const reviewText = '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n## Summary\nClean.\n\n## Verdict\nComment only';
+  try {
+    const result = await withEnvAsync({
+      CQP_BROKER_SHARED_SECRET_FILE: join(root, 'missing-secret'),
+    }, () => reviewWithGemini('+diff\n', '', {
+      resolveGeminiRuntimeImpl: () => 'antigravity',
+      checkoutGeminiCredentialImpl: async () => ({
+        checkoutId: 'co_spend_success_throw',
+        credentialId: 'cred_spend_success_throw',
+        oauthCreds: { access_token: 'token' },
+      }),
+      materializeGeminiCheckoutSessionImpl: ({ env }) => ({
+        env,
+        cleanup() {
+          cleaned = true;
+        },
+      }),
+      releaseGeminiCredentialCheckoutImpl: async ({ checkout: releasedCheckout, quotaSignal }) => {
+        released.push({ checkoutId: releasedCheckout.checkoutId, quotaSignal });
+      },
+      assertAgyAuthImpl: async () => {},
+      spawnAgyReviewImpl: async () => ({
+        stdout: reviewText,
+        stderr: '',
+        tokenUsage: { total: 42 },
+      }),
+      retryDelaysMs: [],
+      log: { warn: (message) => warnings.push(message) },
+    }));
+
+    assert.deepEqual(result, { reviewText, tokenUsage: null });
+    assert.equal(cleaned, true);
+    assert.deepEqual(released, [{ checkoutId: 'co_spend_success_throw', quotaSignal: false }]);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /failed to report Gemini credential spend cred_spend_success_throw/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

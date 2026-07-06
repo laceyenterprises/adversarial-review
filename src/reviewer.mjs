@@ -2607,20 +2607,26 @@ async function releaseGeminiCredentialCheckout({
   const url = quotaSignal && checkout.quotaUrl
     ? checkout.quotaUrl
     : checkout.releaseUrl || `${brokerUrl}/checkout/release`;
+  const payload = {
+    provider: 'gemini',
+    lease_id: checkout.checkoutId,
+    credential_id: checkout.credentialId,
+    kind: quotaSignal ? 'quota_exhausted' : 'release',
+    window: 'weekly',
+    reset_at: env.CQP_GEMINI_QUOTA_RESET_AT || nextWeeklyQuotaResetIso(),
+  };
+  if (!quotaSignal) {
+    payload.unit = 'requests';
+    const requestLimit = quotaLimitFromEnv(env.CQP_GEMINI_QUOTA_LIMIT_REQUESTS, 1000);
+    if (requestLimit >= 0) {
+      payload.limit = requestLimit;
+    }
+  }
   try {
     await fetchWithTimeout(fetchImpl, url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        provider: 'gemini',
-        lease_id: checkout.checkoutId,
-        credential_id: checkout.credentialId,
-        kind: quotaSignal ? 'quota_exhausted' : 'release',
-        unit: 'requests',
-        window: 'weekly',
-        limit: quotaLimitFromEnv(env.CQP_GEMINI_QUOTA_LIMIT_REQUESTS, 1000),
-        reset_at: env.CQP_GEMINI_QUOTA_RESET_AT || nextWeeklyQuotaResetIso(),
-      }),
+      body: JSON.stringify(payload),
     }, timeoutMs);
   } catch (err) {
     log.warn?.(`[reviewWithGemini] WARN: failed to release Gemini credential checkout ${checkout.checkoutId}: ${err.message}`);
@@ -3242,13 +3248,18 @@ async function reviewWithGemini(diff, extraContext = '', {
     stdout = result.stdout || '';
     stderr = result.stderr || '';
     if (runtime === 'antigravity' && checkout?.credentialId) {
-      await reportGeminiCredentialSpend({
-        checkout,
-        tokenUsage: result.tokenUsage || null,
-        env,
-        log,
-      });
-      spendReported = true;
+      try {
+        await reportGeminiCredentialSpend({
+          checkout,
+          tokenUsage: result.tokenUsage || null,
+          env,
+          log,
+        });
+        spendReported = true;
+      } catch (err) {
+        spendReported = true;
+        log.warn?.(`[reviewWithGemini] WARN: failed to report Gemini credential spend ${checkout.credentialId}: ${err.message}`);
+      }
     }
   } catch (err) {
     stdout = err.stdout || '';

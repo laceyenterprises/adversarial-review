@@ -72,7 +72,7 @@ function resolveReviewerCredentialConcurrencyLimit({
     return parsedPoolSlots;
   }
   const parsedCredentials = Math.max(0, Number.parseInt(String(availableCredentials), 10) || 0);
-  return Math.max(1, Math.min(parsedPoolSlots, parsedCredentials || 1));
+  return Math.min(parsedPoolSlots, parsedCredentials);
 }
 
 function finiteNumber(value, fallback) {
@@ -358,6 +358,12 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     poolSlots: maxConcurrent,
     availableCredentials,
   });
+  if (concurrencyLimit < 1) {
+    return {
+      dispatched: 0,
+      maxObservedConcurrency: 0,
+    };
+  }
   const thrownFailureLimit = Math.max(1, Number.parseInt(String(maxThrownFailures), 10) || 0);
   const queue = sortReviewerDispatchCandidates(candidates);
   const active = new Set();

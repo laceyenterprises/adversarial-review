@@ -2644,11 +2644,15 @@ function nextWeeklyQuotaResetIso(nowMs = Date.now()) {
 }
 
 function geminiSpendReportsForUsage(tokenUsage, env = process.env) {
+  const quotaLimitFromEnv = (value, fallback) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
   const reports = [{
     unit: 'requests',
     amount: 1,
     window: 'weekly',
-    limit: Number(env.CQP_GEMINI_QUOTA_LIMIT_REQUESTS || 1000),
+    limit: quotaLimitFromEnv(env.CQP_GEMINI_QUOTA_LIMIT_REQUESTS, 1000),
     reset_at: env.CQP_GEMINI_QUOTA_RESET_AT || nextWeeklyQuotaResetIso(),
   }];
   const totalTokens = Number(tokenUsage?.total);
@@ -2657,11 +2661,11 @@ function geminiSpendReportsForUsage(tokenUsage, env = process.env) {
       unit: 'tokens',
       amount: Math.trunc(totalTokens),
       window: 'weekly',
-      limit: Number(env.CQP_GEMINI_QUOTA_LIMIT_TOKENS || 1_000_000),
+      limit: quotaLimitFromEnv(env.CQP_GEMINI_QUOTA_LIMIT_TOKENS, 1_000_000),
       reset_at: env.CQP_GEMINI_QUOTA_RESET_AT || nextWeeklyQuotaResetIso(),
     });
   }
-  return reports.filter((report) => Number.isFinite(report.limit) && report.limit > 0);
+  return reports.filter((report) => Number.isFinite(report.limit) && report.limit >= 0);
 }
 
 async function reportGeminiCredentialSpend({
@@ -3260,12 +3264,16 @@ async function reviewWithGemini(diff, extraContext = '', {
   } finally {
     if (runtime === 'antigravity') {
       if (checkout?.credentialId && !quotaSignal && !spendReported && subprocessStarted) {
-        await reportGeminiCredentialSpend({
-          checkout,
-          tokenUsage: null,
-          env,
-          log,
-        });
+        try {
+          await reportGeminiCredentialSpend({
+            checkout,
+            tokenUsage: null,
+            env,
+            log,
+          });
+        } catch (err) {
+          log.warn?.(`[reviewWithGemini] WARN: failed to report Gemini credential spend ${checkout.credentialId}: ${err.message}`);
+        }
       }
       await cleanupGeminiAntigravityResources({
         checkout,

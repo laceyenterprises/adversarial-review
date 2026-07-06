@@ -70,6 +70,23 @@ test('reviewer pool caps concurrency at min(pool slots, available credentials)',
   assert.equal(maxActive, 2);
 });
 
+test('reviewer pool does not dispatch when broker reports zero available credentials', async () => {
+  let dispatched = 0;
+  const tasks = Array.from({ length: 2 }, (_unused, index) => candidate(index + 1, async () => {
+    dispatched += 1;
+  }));
+
+  const summary = await runBoundedReviewerDispatchQueue(tasks, {
+    maxConcurrent: 5,
+    availableCredentials: 0,
+    logger: { error() {} },
+  });
+
+  assert.equal(resolveReviewerCredentialConcurrencyLimit({ poolSlots: 5, availableCredentials: 0 }), 0);
+  assert.equal(summary.dispatched, 0);
+  assert.equal(dispatched, 0);
+});
+
 test('reviewer pool starts another PR while an older review is slow', async () => {
   const events = [];
   let releaseSlow;

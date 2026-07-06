@@ -168,6 +168,75 @@ test('daemon not-taken (findings present) → falls through to the closer/hammer
   }
 });
 
+test('watcher passes live HAM target separately from stable reviewed-head dispatch key', async () => {
+  const rootDir = tempRoot();
+  try {
+    const reviewedHead = 'reviewed-head-before-ham';
+    const liveHead = 'live-head-after-ham';
+    let seenDispatchContext = null;
+    let seenOptions = null;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      reviewStateRow: {
+        ...baseArgs(rootDir).reviewStateRow,
+        review_body: [
+          '## Blocking Issues',
+          '',
+          '- None.',
+          '',
+          '## Non-blocking Issues',
+          '',
+          '- None.',
+          '',
+          '## Verdict',
+          '',
+          'Comment only',
+        ].join('\n'),
+        reviewer_head_sha: reviewedHead,
+        reviewer: 'codex',
+      },
+      dispatchJob: {
+        blockingFindingCount: 0,
+        blockingFindingState: 'known',
+        nonBlockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+      },
+      candidate: {
+        ...baseArgs(rootDir).candidate,
+        headSha: liveHead,
+      },
+      currentRevisionRef: liveHead,
+      resolveReviewCycleExhaustionImpl: () => ({
+        reviewCycleExhausted: true,
+        riskClass: 'low',
+      }),
+      resolveHeadCloserCommitSuppressionImpl: async () => ({
+        suppressed: true,
+        reason: 'closer-commit-trailer',
+      }),
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+        reason: 'not-eligible',
+      }),
+      maybeDispatchAmaCloserImpl: async ({ dispatchContext, options }) => {
+        seenDispatchContext = dispatchContext;
+        seenOptions = options;
+        return { dispatched: true, reason: 'closer-took-over' };
+      },
+    });
+
+    assert.equal(result.dispatched, true);
+    assert.equal(seenDispatchContext.reviewedSha, reviewedHead);
+    assert.equal(seenDispatchContext.targetRemediationSha, liveHead);
+    assert.equal(seenDispatchContext.dispatchRecordHeadSha, reviewedHead);
+    assert.equal(seenDispatchContext.dispatchReason, 'exhausted-final-hammer');
+    assert.equal(seenDispatchContext.allowStaleReviewHeadHammerResume, true);
+    assert.ok(seenOptions, 'closer options are still passed');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('daemon gh merge subprocess is bounded by the shared timeout', async () => {
   const rootDir = tempRoot();
   let capturedOptions = null;

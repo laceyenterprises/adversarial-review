@@ -370,12 +370,11 @@ test('fully-clean eligible closure is daemon-owned — no click-merge agent is d
   assert.equal(write.captured.body, null, 'no closer prompt is written for a clean close');
 });
 
-// MSM-04 — the exhausted-final-hammer CURRENT-HEAD re-targeting is deleted. When
-// the reviewed head is stale at exhaustion, the one hammer no longer re-targets
-// the live current head (that reviewed→current gap re-arming per HAM commit was
-// the #3123 re-hammer loop). The dispatch keys on the STABLE reviewed head, so
-// the per-PR hammer retry cap (same job key) bounds it and the loop cannot fire.
-test('exhausted final hammer keys the dispatch on the reviewed head, never re-targeting the live head', async (t) => {
+// MSM-04 — the exhausted-final-hammer dispatch record is keyed on the reviewed
+// head, but the HAM prompt targets the live PR head. The reviewed→current gap
+// must not create a fresh dispatch record per HAM commit, and the prompt must
+// not tell the worker to reset back to the stale reviewed commit.
+test('exhausted final hammer keys dispatch on reviewed head while targeting the live head', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-target-head-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const reviewedHead = '40e302440e302440e302440e302440e302440e3024';
@@ -400,6 +399,8 @@ test('exhausted final hammer keys the dispatch on the reviewed head, never re-ta
     dispatchContext: {
       rootDir,
       reviewedSha: reviewedHead,
+      targetRemediationSha: currentHead,
+      dispatchRecordHeadSha: reviewedHead,
       riskClass: 'medium',
     },
   });
@@ -417,6 +418,7 @@ test('exhausted final hammer keys the dispatch on the reviewed head, never re-ta
 
   assert.equal(result.dispatched, true);
   assert.ok(write.captured.body.includes(reviewedHead), 'prompt must preserve the reviewed head');
+  assert.ok(write.captured.body.includes(currentHead), 'prompt must target the live PR head');
   // The dispatch record is keyed on the REVIEWED head (stable job anchor), NOT the
   // advanced current head — there is no per-HAM-commit re-target record to re-arm.
   const reviewedHeadPath = amaCloserDispatchFilePath(rootDir, {
@@ -432,9 +434,9 @@ test('exhausted final hammer keys the dispatch on the reviewed head, never re-ta
   });
   assert.equal(existsSync(currentHeadPath), false, 'no current-head re-target record is written');
   const record = JSON.parse(readFileSync(reviewedHeadPath, 'utf8'));
-  assert.equal(record.headSha, reviewedHead);
+  assert.equal(record.headSha, currentHead);
   assert.equal(record.reviewedSha, reviewedHead);
-  assert.equal(record.targetRemediationSha, reviewedHead);
+  assert.equal(record.targetRemediationSha, currentHead);
   assert.notEqual(record.dispatchReason, 'exhausted-final-hammer');
   assert.equal(record.retryCount, 1);
 });
@@ -900,6 +902,8 @@ test('auto-hammer dispatches exhausted CONFLICTING stale-head PRs through hammer
     dispatchContext: {
       rootDir,
       reviewedSha: reviewedHead,
+      targetRemediationSha: currentHead,
+      dispatchRecordHeadSha: reviewedHead,
       riskClass: 'medium',
       templatePath: null,
     },
@@ -943,9 +947,9 @@ test('auto-hammer dispatches exhausted CONFLICTING stale-head PRs through hammer
     headSha: reviewedHead,
   });
   const record = JSON.parse(readFileSync(recordPath, 'utf8'));
-  assert.equal(record.headSha, reviewedHead);
+  assert.equal(record.headSha, currentHead);
   assert.equal(record.reviewedSha, reviewedHead);
-  assert.equal(record.targetRemediationSha, reviewedHead);
+  assert.equal(record.targetRemediationSha, currentHead);
   assert.notEqual(record.dispatchReason, 'exhausted-final-hammer');
   assert.equal(
     existsSync(amaCloserDispatchFilePath(rootDir, {
@@ -1018,6 +1022,72 @@ test('#3123: a clean stale-head (prior HAM commit advanced the head) spawns no h
   assert.equal(result.dispatched, false, 'no hammer is dispatched for a clean stale head');
   assert.equal(exec.calls.length, 0, 'no hq dispatch for a clean stale head (#3123 loop guard)');
   assert.equal(write.captured.body, null, 'no prompt is written for a clean stale head');
+});
+
+test('clean stale-head can resume hammer only after closer-authored head proof', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-clean-stale-resume-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const reviewedHead = 'cc01669cc01669cc01669cc01669cc01669cc01';
+  const currentHead = '8cf53758cf53758cf53758cf53758cf53758cf5';
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    cfg: {
+      workerClass: 'codex',
+      autoHammerOnEligibilityMiss: true,
+    },
+    reviewState: {
+      headSha: reviewedHead,
+      riskClass: 'low',
+      reviewCycleExhausted: true,
+      blockingFindingState: 'known',
+      blockingFindingCount: 0,
+      nonBlockingFindingState: 'known',
+      nonBlockingFindingCount: 0,
+    },
+    prMetadata: {
+      headSha: currentHead,
+      mergeableState: 'MERGEABLE',
+    },
+    dispatchContext: {
+      rootDir,
+      reviewedSha: reviewedHead,
+      targetRemediationSha: currentHead,
+      dispatchRecordHeadSha: reviewedHead,
+      allowStaleReviewHeadHammerResume: true,
+      riskClass: 'low',
+      templatePath: null,
+    },
+  });
+  const exec = buildExecMock();
+  const write = buildWriteMock();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: (path) => readFileSync(path, 'utf8'),
+  });
+
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['stale-review-head'], {
+      reviewCycleExhausted: true,
+      allowStaleReviewHeadHammerResume: true,
+    }),
+    true,
+    'proved closer-authored stale heads can resume the hammer at exhaustion',
+  );
+  assert.equal(result.dispatched, true);
+  assert.equal(result.workerClass, 'hammer');
+  assert.ok(write.captured.body.includes(reviewedHead), 'prompt preserves reviewed-head authority');
+  assert.ok(write.captured.body.includes(currentHead), 'prompt targets live head for resume');
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: reviewedHead,
+  }), 'utf8'));
+  assert.equal(record.reviewedSha, reviewedHead);
+  assert.equal(record.targetRemediationSha, currentHead);
 });
 
 // MSM-04 mandatory — idempotency. Two settle ticks for the SAME logical job/head
@@ -1139,7 +1209,7 @@ test('auto-hammer does not bypass blocking findings before exhaustion on conflic
   assert.equal(write.captured.body, null);
 });
 
-test('AMA #3084: exhausted hammer dispatch records are keyed by target head commits', async (t) => {
+test('AMA #3084: exhausted hammer dispatch records default to the reviewed head key', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-stable-head-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -1201,7 +1271,7 @@ test('AMA #3084: exhausted hammer dispatch records are keyed by target head comm
     const args = call.args || [];
     return args[0] === 'dispatch' && args[1] !== 'status';
   });
-  assert.equal(dispatchCalls.length, 2, 'each target head is keyed by its commit SHA');
+  assert.equal(dispatchCalls.length, 2, 'distinct reviewed heads get distinct dispatch records');
   for (const headSha of heads) {
     const recordPath = amaCloserDispatchFilePath(rootDir, {
       repo: 'acme/myrepo',

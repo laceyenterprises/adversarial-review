@@ -5266,6 +5266,7 @@ async function maybeDispatchAmaClosureFor({
   liveReviewRetryDelaysMs = AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
   resolveReviewCycleExhaustionImpl = null,
   runDaemonCleanMergeAttemptImpl = runDaemonCleanMergeAttempt,
+  resolveHeadCloserCommitSuppressionImpl = null,
 }) {
   let cfg;
   let orchestrationMode;
@@ -5513,6 +5514,35 @@ async function maybeDispatchAmaClosureFor({
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
     author: candidate?.prAuthor || null,
   };
+  let allowStaleReviewHeadHammerResume = false;
+  const reviewedHeadIsStale = Boolean(
+    reviewState.headSha &&
+      currentPrHeadSha &&
+      reviewState.headSha !== currentPrHeadSha,
+  );
+  if (reviewCycleExhausted && reviewedHeadIsStale) {
+    try {
+      const closerCommitSuppression = typeof resolveHeadCloserCommitSuppressionImpl === 'function'
+        ? await resolveHeadCloserCommitSuppressionImpl({
+            repoPath,
+            prNumber,
+            headSha: currentPrHeadSha,
+          })
+        : await getHeadCloserCommitSuppression({
+            repoPath,
+            prNumber,
+            headSha: currentPrHeadSha,
+            logger,
+          });
+      allowStaleReviewHeadHammerResume = closerCommitSuppression?.suppressed === true;
+    } catch (err) {
+      logger?.warn?.(
+        `[watcher] HAM stale-head resume proof failed for ${repoPath}#${prNumber} ` +
+          `head=${String(currentPrHeadSha || '').slice(0, 12)}; not allowing hammer resume: ` +
+          `${err?.message || err}`,
+      );
+    }
+  }
 
   // MSM-03 — daemon clean-path merge ("Path B"). Before the AMA closer/hammer
   // dispatch, attempt an inline daemon merge for a FULLY-CLEAN settled review
@@ -5568,6 +5598,10 @@ async function maybeDispatchAmaClosureFor({
     repo: repoPath,
     prUrl: `https://github.com/${owner}/${name}/pull/${prNumber}`,
     reviewedSha: reviewState.headSha,
+    targetRemediationSha: currentPrHeadSha || reviewState.headSha,
+    dispatchRecordHeadSha: reviewState.headSha,
+    dispatchReason: reviewCycleExhausted ? 'exhausted-final-hammer' : null,
+    allowStaleReviewHeadHammerResume,
     riskClass: reviewState.riskClass,
     requiredGateContext: resolveGateStatusContext(),
     reviewedBy: reviewStateRow?.reviewer_login || '',

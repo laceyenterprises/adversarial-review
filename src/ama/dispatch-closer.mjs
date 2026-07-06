@@ -157,7 +157,12 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
     // quota-burning re-hammer loop MSM-04 removes. Such a PR needs a fresh review
     // of the new head, not another terminal remediation pass. Require genuine
     // remediable work even at exhaustion.
-    return hasRemediableWork;
+    if (hasRemediableWork) return true;
+    const staleOnlyHammerResume =
+      options?.allowStaleReviewHeadHammerResume === true
+      && reasons.length === 1
+      && reasons[0] === 'stale-review-head';
+    return staleOnlyHammerResume;
   }
   if (!hasRemediableWork) return false;
   // Pre-exhaustion this is a narrow auto-repair lane: EVERY reason must be
@@ -1527,7 +1532,11 @@ export async function maybeDispatchAmaCloser({
     const autoHammer =
       cfg?.autoHammerOnEligibilityMiss === true
       && (workerClassForMiss === 'hammer' || reviewCycleExhausted)
-      && isHammerRemediableEligibilityMiss(verdict.reasons, { reviewCycleExhausted });
+      && isHammerRemediableEligibilityMiss(verdict.reasons, {
+        reviewCycleExhausted,
+        allowStaleReviewHeadHammerResume:
+          dispatchContext?.allowStaleReviewHeadHammerResume === true,
+      });
     if (!autoHammer) {
       return noAmaDispatch({
         dispatched: false,
@@ -1591,7 +1600,7 @@ export async function maybeDispatchAmaCloser({
   const prNumber = Number(prMetadata?.prNumber);
   const reviewedSha = dispatchContext.reviewedSha;
   const targetRemediationSha = dispatchContext.targetRemediationSha || reviewedSha;
-  const dispatchRecordHeadSha = dispatchContext.dispatchRecordHeadSha || targetRemediationSha;
+  const dispatchRecordHeadSha = dispatchContext.dispatchRecordHeadSha || reviewedSha;
   const dispatchReason = dispatchContext.dispatchReason || null;
   const mergeMethod = String(cfg.mergeMethod || 'squash').toLowerCase();
   const rootDir = dispatchContext.rootDir || SUBMODULE_ROOT;

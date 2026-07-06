@@ -85,10 +85,13 @@ watcher may authorize HAM terminal remediation against the current PR head
 without first requesting another adversarial review. In that lane the closer
 preserves the posted review head as `reviewedSha` for audit paths, leases, and
 review/head-gap guards, and passes the live PR head separately as
-`targetRemediationSha`. The durable AMA dispatch record is keyed by that real
-target commit SHA and carries `dispatchReason: "exhausted-final-hammer"` for
+`targetRemediationSha`. The durable AMA dispatch record is keyed by the stable
+reviewed commit SHA and carries `dispatchReason: "exhausted-final-hammer"` for
 the exhausted-cycle lane; no dispatch context field that canonically stores a
-Git commit SHA may be populated with the human-readable reason token.
+Git commit SHA may be populated with the human-readable reason token. A clean
+stale head may resume HAM only after the watcher proves the live head is a
+closer/HAM-authored commit, so a partial HAM failure can re-enter without
+opening a general stale-review-head re-hammer loop.
 
 The merged-signal producer is outside this repository's write path: watcher
 lifecycle sync records owed

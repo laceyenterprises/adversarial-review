@@ -33,7 +33,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { hostname, homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -2280,6 +2280,14 @@ function resolveGeminiReviewerSessionParent(env = process.env) {
   return join(env.HOME || homedir(), '.gemini', 'reviewer-sessions');
 }
 
+function normalizeGeminiReviewerHostname(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function currentGeminiReviewerHostname() {
+  return normalizeGeminiReviewerHostname(hostname());
+}
+
 function maybeChmodOwnedPath(path, mode, { chmodSyncImpl = chmodSync, log = console } = {}) {
   try {
     chmodSyncImpl(path, mode);
@@ -2287,13 +2295,6 @@ function maybeChmodOwnedPath(path, mode, { chmodSyncImpl = chmodSync, log = cons
     if (err?.code !== 'EPERM') throw err;
     log.warn?.(`[reviewWithGemini] WARN: cannot chmod shared Gemini reviewer path ${path}: ${err.message}`);
   }
-}
-
-function parseGeminiReviewerSessionPid(name) {
-  const match = /^review-(\d+)-/.exec(name);
-  if (!match) return null;
-  const pid = Number(match[1]);
-  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
 }
 
 function isProcessAlive(pid) {
@@ -2307,14 +2308,31 @@ function isProcessAlive(pid) {
   }
 }
 
+function readGeminiReviewerOwner(fullPath, { readFileSyncImpl = readFileSync } = {}) {
+  try {
+    const owner = JSON.parse(readFileSyncImpl(join(fullPath, 'owner.json'), 'utf8'));
+    return owner && typeof owner === 'object' ? owner : null;
+  } catch {
+    return null;
+  }
+}
+
 function shouldPurgeGeminiReviewerSessionDir(name, fullPath, {
   nowMs = Date.now(),
   staleAgeMs = GEMINI_REVIEWER_SESSION_STALE_AGE_MS,
   statSyncImpl = statSync,
+  readFileSyncImpl = readFileSync,
   isProcessAliveImpl = isProcessAlive,
+  localHostname = currentGeminiReviewerHostname(),
 } = {}) {
-  const pid = parseGeminiReviewerSessionPid(name);
-  if (pid && !isProcessAliveImpl(pid)) return true;
+  const owner = readGeminiReviewerOwner(fullPath, { readFileSyncImpl });
+  const ownerHostname = normalizeGeminiReviewerHostname(owner?.hostname);
+  const normalizedLocalHostname = normalizeGeminiReviewerHostname(localHostname);
+  if (ownerHostname) {
+    if (normalizedLocalHostname && ownerHostname !== normalizedLocalHostname) return false;
+    const ownerPid = Number(owner?.pid);
+    if (Number.isSafeInteger(ownerPid) && ownerPid > 0) return !isProcessAliveImpl(ownerPid);
+  }
   try {
     const stat = statSyncImpl(fullPath);
     return nowMs - stat.mtimeMs > staleAgeMs;
@@ -2330,8 +2348,10 @@ function purgeStaleGeminiReviewerSessionDirs({
   readdirSyncImpl = readdirSync,
   mkdirSyncImpl = mkdirSync,
   statSyncImpl = statSync,
+  readFileSyncImpl = readFileSync,
   chmodSyncImpl = chmodSync,
   isProcessAliveImpl = isProcessAlive,
+  localHostname = currentGeminiReviewerHostname(),
   nowMs = Date.now(),
   staleAgeMs = GEMINI_REVIEWER_SESSION_STALE_AGE_MS,
   log = console,
@@ -2352,7 +2372,9 @@ function purgeStaleGeminiReviewerSessionDirs({
       nowMs,
       staleAgeMs,
       statSyncImpl,
+      readFileSyncImpl,
       isProcessAliveImpl,
+      localHostname,
     })) continue;
     try {
       rmSyncImpl(fullPath, { recursive: true, force: true });
@@ -2372,6 +2394,8 @@ function createGeminiReviewerSessionDir({
   env = process.env,
   sessionParent = resolveGeminiReviewerSessionParent(env),
   mkdirSyncImpl = mkdirSync,
+  writeFileSyncImpl = writeFileSync,
+  rmSyncImpl = rmSync,
   chmodSyncImpl = chmodSync,
   log = console,
 } = {}) {
@@ -2382,7 +2406,17 @@ function createGeminiReviewerSessionDir({
     `${GEMINI_REVIEWER_SESSION_DIR_PREFIX}${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
   );
   mkdirSyncImpl(sessionDir, { mode: 0o700 });
-  chmodSyncImpl(sessionDir, 0o700);
+  try {
+    writeFileSyncImpl(join(sessionDir, 'owner.json'), `${JSON.stringify({
+      pid: process.pid,
+      hostname: currentGeminiReviewerHostname(),
+      acquiredAt: new Date().toISOString(),
+    })}\n`, { mode: 0o600 });
+    chmodSyncImpl(sessionDir, 0o700);
+  } catch (err) {
+    rmSyncImpl(sessionDir, { recursive: true, force: true });
+    throw err;
+  }
   return sessionDir;
 }
 
@@ -2562,7 +2596,9 @@ async function releaseGeminiCredentialCheckout({
   const secret = readCqpBrokerSecret({ env, readFileImpl });
   const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
   if (secret) headers.Authorization = `Bearer ${secret}`;
-  const url = checkout.releaseUrl || `${brokerUrl}/credentials/release`;
+  const url = quotaSignal && checkout.quotaUrl
+    ? checkout.quotaUrl
+    : checkout.releaseUrl || `${brokerUrl}/credentials/release`;
   try {
     await fetchWithTimeout(fetchImpl, url, {
       method: 'POST',
@@ -2613,16 +2649,21 @@ async function cleanupGeminiAntigravityResources({
   log = console,
   releaseGeminiCredentialCheckoutImpl = releaseGeminiCredentialCheckout,
 }) {
-  await releaseGeminiCredentialCheckoutImpl({
-    checkout,
-    quotaSignal,
-    env,
-    log,
-  });
   try {
-    checkoutSession?.cleanup();
+    await releaseGeminiCredentialCheckoutImpl({
+      checkout,
+      quotaSignal,
+      env,
+      log,
+    });
+  } catch (err) {
+    log.warn?.(`[reviewWithGemini] WARN: failed to release Gemini credential checkout ${checkout?.checkoutId || 'unknown'}: ${err.message}`);
   } finally {
-    fallbackLock?.release();
+    try {
+      checkoutSession?.cleanup();
+    } finally {
+      fallbackLock?.release();
+    }
   }
 }
 
@@ -2649,6 +2690,7 @@ async function acquireGeminiFallbackLock({
       try {
         writeFileSyncImpl(join(lockDir, 'owner.json'), `${JSON.stringify({
           pid: process.pid,
+          hostname: currentGeminiReviewerHostname(),
           acquiredAt: new Date().toISOString(),
         })}\n`, { mode: 0o600 });
       } catch (err) {
@@ -2666,7 +2708,14 @@ async function acquireGeminiFallbackLock({
       try {
         const owner = JSON.parse(readFileSyncImpl(join(lockDir, 'owner.json'), 'utf8'));
         const ownerPid = Number(owner?.pid);
-        if (Number.isSafeInteger(ownerPid) && ownerPid > 0 && !isProcessAliveImpl(ownerPid)) {
+        const ownerHostname = normalizeGeminiReviewerHostname(owner?.hostname);
+        if (
+          ownerHostname
+          && ownerHostname === currentGeminiReviewerHostname()
+          && Number.isSafeInteger(ownerPid)
+          && ownerPid > 0
+          && !isProcessAliveImpl(ownerPid)
+        ) {
           rmSyncImpl(lockDir, { recursive: true, force: true });
           continue;
         }

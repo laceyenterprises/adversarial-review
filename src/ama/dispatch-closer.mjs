@@ -58,6 +58,16 @@ import {
 } from './closer-lease.mjs';
 import { isEligibleForAmaClosure } from './eligibility.mjs';
 import { resolveCloserDispatchHarness } from './harness-fallback.mjs';
+import {
+  HAMMER_RETRY_CAP_EXHAUSTED_REASON,
+  HAMMER_RETRY_CAP_SUPPRESSION_STATE,
+  HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
+  evaluateHammerRetryCap,
+  markHammerRetryCapExhausted,
+  readHammerRetryCapLedger,
+  recordHammerRetryDispatch,
+} from './hammer-retry-cap.mjs';
+import { deliverAlert } from '../alert-delivery.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -129,6 +139,157 @@ function noAmaDispatch(result) {
     ...result,
     namedReason: result?.namedReason || namedAmaNoDispatchReason(reason, result?.reasons),
   };
+}
+
+// In-memory debounce for the exhaustion page, keyed on the stable suppression
+// series (repo + PR + jobKey). The persisted `alertedAt` on the ledger is the
+// cross-restart source of truth, but if the suppression WRITE persistently fails
+// (disk full / permissions), `alertEmitted` never lands on disk and every tick
+// would re-page — an alert storm. This process-local set suppresses the re-page
+// within the long-lived follow-up daemon even when the ledger write keeps failing.
+// A genuinely fresh review series (new jobKey) uses a new key and still alerts.
+// A daemon restart clears it, which at most re-pages once (not a storm) and
+// correctly re-surfaces a still-broken disk.
+const HAMMER_RETRY_CAP_ALERTED_SERIES = new Set();
+
+export function _resetHammerRetryCapAlertDebounceForTests() {
+  HAMMER_RETRY_CAP_ALERTED_SERIES.clear();
+}
+
+/**
+ * Fail loud when the per-PR hammer retry cap is exhausted.
+ *
+ * Emits a GBI / alert-bus operator alert naming the repo + PR + head + attempt
+ * count, marks the PR suppressed (PR-scoped, anchored to the stable job key so
+ * head churn can't clear it), and returns the non-dispatch result. Fail-open: if
+ * the alert transport is down the suppression + log still happen and the closer
+ * never crashes — the ledger records that the alert did NOT go out so a later
+ * tick retries it. If instead the ledger WRITE fails, an in-memory series
+ * debounce prevents the operator page from storming every tick while the disk
+ * problem persists (the persist failure is logged distinctly).
+ */
+async function suppressHammerRetryCapExhaustion({
+  rootDir,
+  identity,
+  repo,
+  prNumber,
+  jobKey,
+  headSha,
+  attemptCount,
+  workerClass,
+  existingRecord,
+  alertAlreadyEmitted,
+  deliverAlertImpl,
+  logger,
+  now,
+}) {
+  const attemptTotal = Number(attemptCount || 0);
+  logAmaCloserDispatchEvent(logger, 'ama_closer.hammer_retry_cap_exhausted', {
+    repo,
+    prNumber,
+    headSha,
+    jobKey,
+    attemptCount: attemptTotal,
+    cap: HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
+    suppressionState: HAMMER_RETRY_CAP_SUPPRESSION_STATE,
+    message:
+      'hammer retry cap exhausted; PR not closing — operator intervention required; '
+      + 'further hammer dispatch suppressed to protect quota',
+  });
+
+  // Only page the operator ON THE TRANSITION (first exhaustion) or when a prior
+  // suppressed tick failed to deliver the alert. Repeated suppressed ticks must
+  // not re-page — debounced by the persisted `alertedAt` (cross-restart) AND an
+  // in-memory series guard (survives a persistently-failing ledger write).
+  const alertSeriesKey = `${repo} ${prNumber} ${jobKey || ''}`;
+  let alertEmitted = alertAlreadyEmitted;
+  if (
+    !alertAlreadyEmitted
+    && !HAMMER_RETRY_CAP_ALERTED_SERIES.has(alertSeriesKey)
+    && typeof deliverAlertImpl === 'function'
+  ) {
+    const shortHead = String(headSha || 'unknown').slice(0, 12);
+    const text =
+      `Adversarial-review hammer retry cap exhausted for ${repo}#${prNumber} `
+      + `(head ${shortHead}, ${attemptTotal} hammer dispatches). `
+      + 'PR not closing — operator intervention required; further hammer dispatch '
+      + 'suppressed to protect quota. (Re-hammer loop guard; see the 2026-07-05 '
+      + '189-hammer / codex-quota-burn incident, e.g. #3116 hammered ×10.)';
+    try {
+      await deliverAlertImpl(text, {
+        event: 'ama_closer.hammer_retry_cap_exhausted',
+        payload: {
+          repo,
+          prNumber,
+          headSha,
+          jobKey,
+          attemptCount: attemptTotal,
+          cap: HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
+          suppressionState: HAMMER_RETRY_CAP_SUPPRESSION_STATE,
+        },
+      });
+      alertEmitted = true;
+      // Record in-process that this series has been paged, so a failing ledger
+      // write below cannot cause a re-page storm on subsequent ticks.
+      HAMMER_RETRY_CAP_ALERTED_SERIES.add(alertSeriesKey);
+    } catch (alertErr) {
+      // Fail-open: never let a down alert transport crash the closer. The
+      // suppression state below still lands, and alertEmitted stays false so a
+      // later tick retries the page.
+      logger?.error?.(JSON.stringify({
+        event: 'ama_closer.hammer_retry_cap_alert_failed',
+        repo,
+        prNumber,
+        headSha,
+        error: alertErr?.message || String(alertErr),
+      }));
+    }
+  }
+
+  try {
+    markHammerRetryCapExhausted(rootDir, identity, {
+      jobKey,
+      headSha,
+      attemptCount: attemptTotal,
+      alertEmitted,
+      now,
+    });
+  } catch (persistErr) {
+    // Even if the suppression ledger write fails we must not crash; log and fall
+    // through with the non-dispatch decision. The cap still holds this tick, and
+    // the in-memory series guard above stops the operator page from storming on
+    // subsequent ticks while the write keeps failing — but the durable
+    // suppression state did NOT land, so surface that distinctly for the operator.
+    logger?.error?.(JSON.stringify({
+      event: 'ama_closer.hammer_retry_cap_persist_failed',
+      repo,
+      prNumber,
+      jobKey,
+      alertEmitted,
+      message:
+        'hammer retry-cap suppression state failed to persist; cap held in-memory '
+        + 'this process but will NOT survive a daemon restart until the ledger '
+        + 'write succeeds — operator should check disk/permissions',
+      error: persistErr?.message || String(persistErr),
+    }));
+  }
+
+  return noAmaDispatch({
+    dispatched: false,
+    // skipMergeAgent keeps the watcher from falling through to a merge-agent
+    // dispatch (coexistence treats this as ama-pending, not a recoverable
+    // failure) — suppression must stop ALL automated dispatch, not swap lanes.
+    skipMergeAgent: true,
+    reason: HAMMER_RETRY_CAP_EXHAUSTED_REASON,
+    needsOperator: true,
+    suppressionState: HAMMER_RETRY_CAP_SUPPRESSION_STATE,
+    attemptCount: attemptTotal,
+    alertEmitted,
+    workerClass: existingRecord?.workerClass || workerClass,
+    dispatchId: existingRecord?.dispatchId || existingRecord?.launchRequestId || null,
+    launchRequestId: existingRecord?.launchRequestId || null,
+    promptPath: existingRecord?.promptPath || null,
+  });
 }
 
 function hammerCloserWorkerId(prNumber) {
@@ -1282,7 +1443,7 @@ export async function maybeDispatchAmaCloser({
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
   resolveCloserDispatchHarnessImpl = resolveCloserDispatchHarness,
-  deliverAlertImpl = null,
+  deliverAlertImpl = deliverAlert,
   logger = console,
 }) {
   // The master gate. With no operator config, this is `false` per
@@ -1712,6 +1873,45 @@ export async function maybeDispatchAmaCloser({
     ownerUser,
     currentUser: dispatchContext.currentUser,
   });
+
+  // ── Hammer retry cap (per-PR, robust across head churn) ────────────────────
+  // The per-head redispatch bound above resets whenever a hammer moves the head,
+  // so it cannot stop the re-hammer loop that burned the weekly Codex quota on
+  // 2026-07-05 (189 hammer dispatches; #3116 ×10, #3120 ×7). This per-PR ledger —
+  // anchored to the STABLE reviewed-head job key, not the churning PR head —
+  // bounds hammer dispatch to ONE retry (2 total) across every head a hammer
+  // authors, then fails loud via a GBI operator alert and suppresses further
+  // dispatch. Composes with MSM-01 (hammer-merges-under-lease): this is the
+  // safety cap, not a replacement, and it only bounds the re-dispatch count.
+  if (workerClass === 'hammer') {
+    const hammerCapIdentity = { repo, prNumber };
+    const hammerRetryLedger = readHammerRetryCapLedger(rootDir, hammerCapIdentity);
+    // The per-PR counter increments only on the CONFIRMED-launch path below (not
+    // pre-exec like the per-head record), so an interrupted-in-flight dispatch
+    // never bumped it — there is no phantom increment to reclaim here. A deploy
+    // bounce mid-launch simply never counted, which is the correct fail-safe.
+    const hammerRetryCapDecision = evaluateHammerRetryCap(hammerRetryLedger, {
+      jobKey: reviewedSha,
+      headSha: targetRemediationSha,
+    });
+    if (hammerRetryCapDecision.capExhausted) {
+      return await suppressHammerRetryCapExhaustion({
+        rootDir,
+        identity: hammerCapIdentity,
+        repo,
+        prNumber,
+        jobKey: reviewedSha,
+        headSha: targetRemediationSha,
+        attemptCount: hammerRetryCapDecision.priorAttemptCount,
+        workerClass,
+        existingRecord,
+        alertAlreadyEmitted: hammerRetryCapDecision.alertAlreadyEmitted,
+        deliverAlertImpl,
+        logger,
+        now: dispatchContext.dispatchedAt,
+      });
+    }
+  }
   writeAmaAuditEntry({
     hqRoot,
     repo,
@@ -2127,6 +2327,31 @@ export async function maybeDispatchAmaCloser({
     });
   } catch (err) {
     leaseUpdateError = String(err?.message || err);
+  }
+
+  // Count this genuine hammer launch against the per-PR retry cap ledger. Keyed on
+  // the stable reviewed-head job key so the count accumulates across the head
+  // churn a hammer causes (the per-head dispatch record resets on every head move;
+  // this does not). Placed on the confirmed-launch path only: lease-held /
+  // dispatch-failed / merged-signal / interrupted-mid-launch returns never reach
+  // here, so only real hammer workers that then fail to close accumulate toward
+  // the cap.
+  if (workerClass === 'hammer') {
+    try {
+      recordHammerRetryDispatch(rootDir, { repo, prNumber }, {
+        jobKey: reviewedSha,
+        headSha: targetRemediationSha,
+        now: dispatchContext.dispatchedAt,
+      });
+    } catch (capErr) {
+      // Best-effort: a ledger write failure must never undo a live dispatch.
+      logger?.error?.(JSON.stringify({
+        event: 'ama_closer.hammer_retry_cap_record_failed',
+        repo,
+        prNumber,
+        error: capErr?.message || String(capErr),
+      }));
+    }
   }
 
   return {

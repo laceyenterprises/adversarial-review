@@ -23,6 +23,26 @@ function titleCaseWords(value) {
     .join(' ');
 }
 
+const CANONICAL_REVIEW_SECTION_HEADINGS = new Map([
+  ['summary', 'Summary'],
+  ['blocking issues', 'Blocking issues'],
+  ['non-blocking issues', 'Non-blocking issues'],
+  ['suggested fixes', 'Suggested fixes'],
+  ['verdict', 'Verdict'],
+]);
+
+function canonicalReviewSectionHeading(value) {
+  const key = String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+  return CANONICAL_REVIEW_SECTION_HEADINGS.get(key) ?? null;
+}
+
+function promoteCanonicalReviewSectionHeadings(text) {
+  return String(text ?? '').replace(
+    /^#{1,4}\s+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)\s*:?$/gim,
+    (_, heading) => `## ${canonicalReviewSectionHeading(heading)}`,
+  );
+}
+
 /**
  * @param {string} reviewText
  * @returns {Verdict['body']}
@@ -35,11 +55,7 @@ function sanitizeCodexReviewPayload(reviewText) {
   // per-finding H3 cards the reviewer prompt now emits under the
   // Blocking/Non-blocking sections. Non-canonical `### ` / `#### `
   // headings are preserved so the card layout survives.
-  let text = normalizeWhitespace(reviewText)
-    .replace(
-      /^#{1,4}\s+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)\s*:?$/gim,
-      (_, heading) => `## ${titleCaseWords(heading)}`,
-    );
+  const text = promoteCanonicalReviewSectionHeadings(normalizeWhitespace(reviewText));
 
   const sectionRegex = /^##\s+(Summary|Blocking issues|Non-blocking issues|Suggested fixes|Verdict)\s*$/gim;
   const matches = [...text.matchAll(sectionRegex)];
@@ -103,11 +119,14 @@ function sanitizeReviewPayloadBestEffort(reviewText) {
   try {
     return sanitizeCodexReviewPayload(text);
   } catch {
-    const fallback = text.replace(
-      /^#{1,4}\s+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)\s*:?$/gim,
-      (_, heading) => `## ${titleCaseWords(heading)}`,
+    const fallback = normalizeWhitespace(promoteCanonicalReviewSectionHeadings(text));
+    const firstCanonicalHeading = fallback.match(
+      /^##\s+(Summary|Blocking issues|Non-blocking issues|Suggested fixes|Verdict)\s*$/im,
     );
-    return normalizeWhitespace(fallback);
+    if (firstCanonicalHeading) {
+      return normalizeWhitespace(fallback.slice(firstCanonicalHeading.index));
+    }
+    return fallback;
   }
 }
 

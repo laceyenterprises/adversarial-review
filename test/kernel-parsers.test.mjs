@@ -100,9 +100,28 @@ test('sanitizeReviewPayloadBestEffort promotes headings even when verdict is mis
   const sanitized = sanitizeReviewPayloadBestEffort(partial);
 
   assert.match(sanitized, /^## Summary$/m);
-  assert.match(sanitized, /^## Blocking Issues$/m);
-  assert.match(sanitized, /^## Non-blocking Issues$/m);
+  assert.match(sanitized, /^## Blocking issues$/m);
+  assert.match(sanitized, /^## Non-blocking issues$/m);
   assert.doesNotMatch(sanitized, /^### Blocking issues/m);
+});
+
+test('sanitizeReviewPayloadBestEffort strips preamble after fallback heading promotion', () => {
+  const reviewWithPreamble = [
+    'Here is my review:',
+    '',
+    '### Summary',
+    'Reviewer output was truncated before the verdict.',
+    '',
+    '#### Blocking issues:',
+    '- **Missing verdict**',
+    '  - **Problem:** The reviewer omitted the required Verdict section.',
+  ].join('\n');
+
+  const sanitized = sanitizeReviewPayloadBestEffort(reviewWithPreamble);
+
+  assert.equal(sanitized.startsWith('## Summary\n'), true);
+  assert.doesNotMatch(sanitized, /Here is my review/);
+  assert.match(sanitized, /^## Blocking issues$/m);
 });
 
 test('kernel verdict parser accepts explanatory prose before final verdict line', () => {
@@ -447,11 +466,11 @@ test('kernel remediation-reply validator counts malformed non-empty non-blocking
 // Sanitizer "actual cleaning paths" coverage. The pre-normalized fixture
 // tests above only prove idempotency on already-clean input. This test
 // drives messy input through the transforms the sanitizer actually
-// performs (heading-level collapse, recognized-section title-casing,
+// performs (heading-level collapse, exact recognized-section canonicalization,
 // trailing-colon strip) and pins the canonical output, so a regression
 // in any of those transforms fails loudly here even when the production
 // fixture happens not to exercise the broken path.
-test('kernel sanitizer collapses heading levels and title-cases recognized sections', () => {
+test('kernel sanitizer collapses heading levels and canonicalizes recognized sections', () => {
   const messy = [
     '# summary',
     'Real summary body.',
@@ -469,19 +488,17 @@ test('kernel sanitizer collapses heading levels and title-cases recognized secti
   // Per the sanitizer:
   //   - `# `, `### `, `#### ` all collapse to `## `
   //   - recognized headings (`summary`/`blocking issues`/`non-blocking
-  //     issues`/`suggested fixes`/`verdict`) get title-cased per word
-  //     (so "non-blocking" stays as one hyphenated token; only the first
-  //     letter uppercases)
+  //     issues`/`suggested fixes`/`verdict`) map to exact canonical strings
   //   - trailing colons on the heading line are stripped
   //   - extractReviewVerdict reads the line after `## Verdict`
   const expected = [
     '## Summary',
     'Real summary body.',
     '',
-    '## Blocking Issues',
+    '## Blocking issues',
     '- None.',
     '',
-    '## Non-blocking Issues',
+    '## Non-blocking issues',
     '- Lint smell.',
     '',
     '## Verdict',
@@ -569,7 +586,7 @@ test('kernel sanitizer preserves H3 finding cards under canonical section headin
     '## Summary',
     'One blocker.',
     '',
-    '## Blocking Issues',
+    '## Blocking issues',
     '',
     '### Lead-position title regression',
     '',
@@ -583,7 +600,7 @@ test('kernel sanitizer preserves H3 finding cards under canonical section headin
     '',
     '**Recommended fix:** Restore boundary-based matching for Linear ids.',
     '',
-    '## Non-blocking Issues',
+    '## Non-blocking issues',
     '- None.',
     '',
     '## Verdict',
@@ -597,8 +614,8 @@ test('kernel sanitizer preserves H3 finding cards under canonical section headin
   assert.match(sanitized, /^### Lead-position title regression$/m);
   // The canonical sections still resolve to H2.
   assert.match(sanitized, /^## Summary$/m);
-  assert.match(sanitized, /^## Blocking Issues$/m);
-  assert.match(sanitized, /^## Non-blocking Issues$/m);
+  assert.match(sanitized, /^## Blocking issues$/m);
+  assert.match(sanitized, /^## Non-blocking issues$/m);
   assert.match(sanitized, /^## Verdict$/m);
   assert.equal(extractReviewVerdict(sanitized), 'Request changes');
   // Idempotency must still hold on already-clean H3-card output.

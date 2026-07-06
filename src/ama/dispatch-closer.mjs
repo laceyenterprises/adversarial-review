@@ -1069,6 +1069,10 @@ async function teardownSamePrHammerHolder({
   return { attempted: true, ok, worktreePaths, attempts };
 }
 
+export const __testables__ = Object.freeze({
+  teardownSamePrHammerHolder,
+});
+
 function sleep(ms) {
   if (!ms) return Promise.resolve();
   return new Promise(resolve => setTimeout(resolve, ms));

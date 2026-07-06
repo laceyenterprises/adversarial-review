@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { samePrHammerHolderWorktreePaths } from '../src/ama/dispatch-closer.mjs';
+import { __testables__, samePrHammerHolderWorktreePaths } from '../src/ama/dispatch-closer.mjs';
 
 // Verbatim provision error captured from the live deadlock (agent-os PR #3219,
 // TCT-04): the hammer could not provision because the ORIGINAL coding worker's
@@ -76,4 +76,44 @@ test('preserves prior hammer-ama-pr-<PR> matching when no git holder clause is p
 test('returns [] for empty / non-collision error', () => {
   assert.deepEqual(samePrHammerHolderWorktreePaths('', 3219, HQ_ROOT), []);
   assert.deepEqual(samePrHammerHolderWorktreePaths({ stderr: 'unrelated failure' }, 3219, HQ_ROOT), []);
+});
+
+test('teardown passes hqRoot through to parser and cleanup commands', async () => {
+  const calls = [];
+  const result = await __testables__.teardownSamePrHammerHolder({
+    err: TCT04_PROVISION_ERROR,
+    prNumber: 3219,
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot: HQ_ROOT,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    logger: { warn() {} },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.worktreePaths, [
+    '/Users/airlock/agent-os-hq/workers/hammer-ama-pr-3219/agent-os',
+    '/Users/airlock/agent-os-hq/workers/claude-code-tct-04/agent-os',
+  ]);
+  assert.deepEqual(calls.map(call => call.cmd), ['git', '/opt/hq/bin/hq', 'git', '/opt/hq/bin/hq']);
+  assert.equal(calls[0].args[1], '/Users/airlock/agent-os-hq/repos/agent-os');
+  assert.deepEqual(calls[1].args, [
+    'worker',
+    'tear-down',
+    'hammer-ama-pr-3219',
+    '--force',
+    '--root',
+    HQ_ROOT,
+  ]);
+  assert.equal(calls[2].args[1], '/Users/airlock/agent-os-hq/repos/agent-os');
+  assert.deepEqual(calls[3].args, [
+    'worker',
+    'tear-down',
+    'claude-code-tct-04',
+    '--force',
+    '--root',
+    HQ_ROOT,
+  ]);
 });

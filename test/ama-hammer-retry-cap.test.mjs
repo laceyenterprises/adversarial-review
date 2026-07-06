@@ -209,6 +209,29 @@ test('lifetime suppression is immune to the fresh-review reset', (t) => {
   assert.equal(afterFreshReview.capExhausted, true);
 });
 
+test('a non-finite lifetimeAttemptCount fails CLOSED (no silent NaN bypass)', () => {
+  // An operator hand-editing the ledger to a non-numeric truthy value must not
+  // re-arm the loop by making `NaN > ceiling` evaluate false.
+  for (const corrupt of ['foo', 'NaN', {}, Infinity]) {
+    const decision = evaluateHammerRetryCap(
+      { jobKey: 'jobY', lifetimeAttemptCount: corrupt },
+      { jobKey: 'jobY', headSha: 'headY' },
+    );
+    assert.equal(
+      decision.capExhausted,
+      true,
+      `corrupt lifetimeAttemptCount ${JSON.stringify(corrupt)} must fail closed`,
+    );
+    assert.equal(decision.lifetimeCapExhausted, true);
+  }
+  // A valid numeric value is unaffected.
+  const ok = evaluateHammerRetryCap(
+    { jobKey: 'jobY', lifetimeAttemptCount: 1 },
+    { jobKey: 'jobY', headSha: 'headY' },
+  );
+  assert.equal(ok.capExhausted, false);
+});
+
 test('hammer retry cap ledger round-trips and corrupt ledgers fail closed', (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-unit-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

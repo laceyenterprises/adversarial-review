@@ -141,6 +141,18 @@ function normalizeKey(value) {
   return str.length ? str : null;
 }
 
+// Coerce a persisted ledger count to a non-negative finite integer. An ABSENT
+// value (null/undefined) is a legitimate fresh start (0). A PRESENT-but-non-finite
+// value — e.g. an operator hand-editing the ledger to `"foo"` to unblock a PR —
+// is treated as CORRUPTION and fails CLOSED to the lifetime ceiling, so the loop
+// cannot be silently re-armed by `NaN > ceiling` evaluating false.
+function sanitizeLifetimeCount(rawValue) {
+  if (rawValue === null || rawValue === undefined) return 0;
+  const n = Number(rawValue);
+  if (!Number.isFinite(n)) return HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES;
+  return Math.max(0, Math.trunc(n));
+}
+
 /**
  * Decide, without writing anything, whether a hammer dispatch for this PR is
  * within the retry cap.
@@ -187,7 +199,7 @@ export function evaluateHammerRetryCap(ledger, { jobKey, headSha } = {}) {
   // total. Legacy ledgers (no lifetimeAttemptCount) seed from attemptCount, a safe
   // lower bound.
   const priorLifetimeCount = ledger
-    ? Math.max(0, Number(ledger.lifetimeAttemptCount ?? ledger.attemptCount ?? 0))
+    ? sanitizeLifetimeCount(ledger.lifetimeAttemptCount ?? ledger.attemptCount)
     : 0;
   const nextLifetimeCount = priorLifetimeCount + 1;
   const lifetimeAlreadySuppressed = Boolean(ledger?.lifetimeSuppressed);
@@ -294,9 +306,8 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
     attemptCount: Number.isFinite(Number(attemptCount))
       ? Number(attemptCount)
       : Math.max(0, Number(existing?.attemptCount || 0)),
-    lifetimeAttemptCount: Math.max(
-      0,
-      Number(existing?.lifetimeAttemptCount ?? existing?.attemptCount ?? 0),
+    lifetimeAttemptCount: sanitizeLifetimeCount(
+      existing?.lifetimeAttemptCount ?? existing?.attemptCount,
     ),
     lifetimeSuppressed,
     dispatchHeads,

@@ -63,6 +63,22 @@ function normalizeFirstPassReviewerPoolMax(value, {
   return Math.min(parsed, max);
 }
 
+function resolveReviewerCredentialConcurrencyLimit({
+  poolSlots,
+  availableCredentials = null,
+} = {}) {
+  const parsedPoolSlots = Math.max(1, Number.parseInt(String(poolSlots), 10) || 0);
+  if (availableCredentials === null || availableCredentials === undefined || availableCredentials === '') {
+    return parsedPoolSlots;
+  }
+  const parsedAvailableCredentials = Number.parseInt(String(availableCredentials), 10);
+  if (Number.isNaN(parsedAvailableCredentials)) {
+    return parsedPoolSlots;
+  }
+  const parsedCredentials = Math.max(0, parsedAvailableCredentials);
+  return Math.min(parsedPoolSlots, parsedCredentials);
+}
+
 function finiteNumber(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -336,12 +352,22 @@ async function reserveReviewerMemoryAdmission({
 
 async function runBoundedReviewerDispatchQueue(candidates, {
   maxConcurrent = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
+  availableCredentials = null,
   maxThrownFailures = 1,
   logger = console,
   now = () => Date.now(),
   waitWarnMs = DEFAULT_REVIEWER_DISPATCH_WAIT_WARN_MS,
 } = {}) {
-  const concurrencyLimit = Math.max(1, Number.parseInt(String(maxConcurrent), 10) || 0);
+  const concurrencyLimit = resolveReviewerCredentialConcurrencyLimit({
+    poolSlots: maxConcurrent,
+    availableCredentials,
+  });
+  if (concurrencyLimit < 1) {
+    return {
+      dispatched: 0,
+      maxObservedConcurrency: 0,
+    };
+  }
   const thrownFailureLimit = Math.max(1, Number.parseInt(String(maxThrownFailures), 10) || 0);
   const queue = sortReviewerDispatchCandidates(candidates);
   const active = new Set();
@@ -402,6 +428,7 @@ export {
   createReviewerMemoryAdmissionSampler,
   logReviewerDispatchWait,
   reserveReviewerMemoryAdmission,
+  resolveReviewerCredentialConcurrencyLimit,
   resolveReviewerMemoryPressureConfig,
   resolveFirstPassReviewerPoolConfig,
   runBoundedReviewerDispatchQueue,

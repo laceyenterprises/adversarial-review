@@ -505,7 +505,7 @@ test('E2E: comment-only + empty section no longer emits blocking-findings-unknow
   assert.equal(result.eligible, true, `expected eligible, reasons: ${JSON.stringify(result.reasons)}`);
 });
 
-test('E2E: settled-success + eligible + clean mergeability dispatches AMA closer', async (t) => {
+test('E2E: settled-success + eligible + clean mergeability uses daemon route, no agent dispatch', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-settled-clean-dispatch-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -545,7 +545,7 @@ test('E2E: settled-success + eligible + clean mergeability dispatches AMA closer
   };
   const cfg = {
     enabled: true,
-    workerClass: 'codex',
+    workerClass: 'hammer',
     mergeMethod: 'squash',
     eligibility: { riskClasses: ['low'] },
     branchProtection: {},
@@ -585,11 +585,10 @@ test('E2E: settled-success + eligible + clean mergeability dispatches AMA closer
     readTemplateImpl: () => 'Close PR {{PR_URL}} at {{REVIEWED_SHA}} with {{MERGE_METHOD}}.',
   });
 
-  assert.equal(result.dispatched, true);
-  assert.equal(result.dispatchId, 'dispatch_clean');
-  assert.equal(execCalls.length, 1);
-  assert.equal(execCalls[0].args[execCalls[0].args.indexOf('--task-kind') + 1], 'merge');
-  assert.equal(execCalls[0].args[execCalls[0].args.indexOf('--completion-shape') + 1], 'decision-only');
+  assert.equal(result.dispatched, false);
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(result.reason, 'daemon-clean-route');
+  assert.equal(execCalls.length, 0, 'clean eligible PR must not spawn a click-only agent');
 });
 
 test('E2E: comment-only + real blocking finding stays ineligible (blocking-findings-present)', () => {

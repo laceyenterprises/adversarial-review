@@ -965,12 +965,13 @@ test('watcher suppresses stale-review auto-refresh when review-cycle cap is alre
   });
 });
 
-test('AMA #3084: exhausted stale posted review re-hammers the current head without requesting a fresh review', async () => {
+test('MSM-04: exhausted stale posted review uses stable dispatch key with proved live HAM target', async () => {
   const rootDir = makeTempRoot();
   try {
     let liveReviewFetches = 0;
     const captured = [];
     const warnings = [];
+    let closerProofCalls = 0;
     const currentHead = '6358df76358df76358df76358df76358df76358d';
     const staleReviewedHead = 'c727df4c727df4c727df4c727df4c727df4c727d';
 
@@ -1017,6 +1018,11 @@ test('AMA #3084: exhausted stale posted review re-hammers the current head witho
         reviewCycleExhausted: true,
         ledgerRiskClass: 'medium',
       }),
+      resolveHeadCloserCommitSuppressionImpl: async ({ headSha }) => {
+        closerProofCalls += 1;
+        assert.equal(headSha, currentHead);
+        return { suppressed: true, reason: 'closer-commit-trailer' };
+      },
       fetchLatestHeadReviewBodiesImpl: async () => {
         liveReviewFetches += 1;
         throw new Error('fresh review lookup must not run on exhausted stale head');
@@ -1043,11 +1049,13 @@ test('AMA #3084: exhausted stale posted review re-hammers the current head witho
     assert.equal(captured[0].reviewState.headSha, staleReviewedHead);
     assert.equal(captured[0].dispatchContext.reviewedSha, staleReviewedHead);
     assert.equal(captured[0].dispatchContext.targetRemediationSha, currentHead);
-    assert.equal(captured[0].dispatchContext.dispatchRecordHeadSha, currentHead);
+    assert.equal(captured[0].dispatchContext.dispatchRecordHeadSha, staleReviewedHead);
     assert.equal(captured[0].dispatchContext.dispatchReason, 'exhausted-final-hammer');
+    assert.equal(captured[0].dispatchContext.allowStaleReviewHeadHammerResume, true);
     assert.equal(captured[0].prMetadata.headSha, currentHead);
+    assert.equal(closerProofCalls, 1);
     assert.equal(liveReviewFetches, 0, 'no fresh adversarial review lookup is requested on exhaustion');
-    assert.match(warnings.join('\n'), /no fresh adversarial review/);
+    assert.equal(warnings.join('\n').includes('no fresh adversarial review'), false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

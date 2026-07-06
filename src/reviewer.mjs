@@ -2446,12 +2446,19 @@ function normalizeGeminiOauthCredsPayload(body) {
     }
     if (typeof candidate === 'object' && candidate.access_token) return candidate;
   }
+  if (body?.access_token) {
+    return {
+      access_token: body.access_token,
+      expires_at: body.expires_at,
+      metadata: body.metadata,
+    };
+  }
   return null;
 }
 
 function normalizeGeminiCheckout(body) {
   const oauthCreds = normalizeGeminiOauthCredsPayload(body);
-  const checkoutId = body?.checkout_id || body?.checkoutId || body?.lease_id || body?.leaseId || body?.id || null;
+  const checkoutId = body?.checkout_id || body?.checkoutId || body?.lease_id || body?.leaseId || body?.lease?.id || body?.id || null;
   const credentialId = body?.credential_id || body?.credentialId || body?.credential?.id || body?.credentials?.id || null;
   if (!oauthCreds?.access_token) {
     throw new GeminiCredentialPoolUnavailableError('broker response missing oauth credential JSON');
@@ -2536,13 +2543,14 @@ async function checkoutGeminiCredentialFromBroker({
   if (secret) headers.Authorization = `Bearer ${secret}`;
   let res;
   try {
-    res = await fetchWithTimeout(fetchImpl, `${brokerUrl}/credentials/checkout`, {
+    res = await fetchWithTimeout(fetchImpl, `${brokerUrl}/checkout`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
         provider: 'gemini',
         consumer: 'adversarial-reviewer',
         pid: process.pid,
+        ttl_seconds: 30 * 60,
       }),
     }, timeoutMs);
   } catch (err) {
@@ -2563,7 +2571,7 @@ async function checkoutGeminiCredentialFromBroker({
   try {
     return normalizeGeminiCheckout(body);
   } catch (err) {
-    const checkoutId = body?.checkout_id || body?.checkoutId || body?.lease_id || body?.leaseId || body?.id || null;
+    const checkoutId = body?.checkout_id || body?.checkoutId || body?.lease_id || body?.leaseId || body?.lease?.id || body?.id || null;
     if (checkoutId) {
       await releaseGeminiCredentialCheckout({
         checkout: {
@@ -2598,21 +2606,93 @@ async function releaseGeminiCredentialCheckout({
   if (secret) headers.Authorization = `Bearer ${secret}`;
   const url = quotaSignal && checkout.quotaUrl
     ? checkout.quotaUrl
-    : checkout.releaseUrl || `${brokerUrl}/credentials/release`;
+    : checkout.releaseUrl || `${brokerUrl}/checkout/release`;
   try {
     await fetchWithTimeout(fetchImpl, url, {
       method: 'POST',
       headers,
       body: JSON.stringify({
         provider: 'gemini',
-        checkout_id: checkout.checkoutId,
+        lease_id: checkout.checkoutId,
         credential_id: checkout.credentialId,
-        quota_signal: Boolean(quotaSignal),
-        status: quotaSignal ? 'quota-error' : 'finished',
+        kind: quotaSignal ? 'quota_exhausted' : 'release',
+        unit: 'requests',
+        window: 'weekly',
+        limit: Number(env.CQP_GEMINI_QUOTA_LIMIT_REQUESTS || 1000),
+        reset_at: env.CQP_GEMINI_QUOTA_RESET_AT || nextWeeklyQuotaResetIso(),
       }),
     }, timeoutMs);
   } catch (err) {
     log.warn?.(`[reviewWithGemini] WARN: failed to release Gemini credential checkout ${checkout.checkoutId}: ${err.message}`);
+  }
+}
+
+function nextWeeklyQuotaResetIso(nowMs = Date.now()) {
+  const now = new Date(nowMs);
+  const reset = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+    0,
+    0,
+    0,
+    0
+  ));
+  const daysUntilMonday = (8 - reset.getUTCDay()) % 7 || 7;
+  reset.setUTCDate(reset.getUTCDate() + daysUntilMonday);
+  return reset.toISOString();
+}
+
+function geminiSpendReportsForUsage(tokenUsage, env = process.env) {
+  const reports = [{
+    unit: 'requests',
+    amount: 1,
+    window: 'weekly',
+    limit: Number(env.CQP_GEMINI_QUOTA_LIMIT_REQUESTS || 1000),
+    reset_at: env.CQP_GEMINI_QUOTA_RESET_AT || nextWeeklyQuotaResetIso(),
+  }];
+  const totalTokens = Number(tokenUsage?.total);
+  if (Number.isFinite(totalTokens) && totalTokens > 0) {
+    reports.push({
+      unit: 'tokens',
+      amount: Math.trunc(totalTokens),
+      window: 'weekly',
+      limit: Number(env.CQP_GEMINI_QUOTA_LIMIT_TOKENS || 1_000_000),
+      reset_at: env.CQP_GEMINI_QUOTA_RESET_AT || nextWeeklyQuotaResetIso(),
+    });
+  }
+  return reports.filter((report) => Number.isFinite(report.limit) && report.limit > 0);
+}
+
+async function reportGeminiCredentialSpend({
+  checkout,
+  tokenUsage = null,
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  readFileImpl = readFileSync,
+  timeoutMs = GEMINI_CQP_CHECKOUT_TIMEOUT_MS,
+  log = console,
+} = {}) {
+  if (!checkout?.credentialId || typeof fetchImpl !== 'function') return;
+  const { brokerUrl } = resolveCqpBrokerConfig(env);
+  const secret = readCqpBrokerSecret({ env, readFileImpl });
+  const headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
+  if (secret) headers.Authorization = `Bearer ${secret}`;
+  for (const report of geminiSpendReportsForUsage(tokenUsage, env)) {
+    try {
+      await fetchWithTimeout(fetchImpl, `${brokerUrl}/quota/report`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          provider: 'gemini',
+          credential_id: checkout.credentialId,
+          kind: 'spend',
+          ...report,
+        }),
+      }, timeoutMs);
+    } catch (err) {
+      log.warn?.(`[reviewWithGemini] WARN: failed to report Gemini credential spend ${checkout.credentialId}: ${err.message}`);
+    }
   }
 }
 
@@ -3063,6 +3143,7 @@ async function reviewWithGemini(diff, extraContext = '', {
   let checkoutSession = null;
   let fallbackLock = null;
   let quotaSignal = false;
+  let spendReported = false;
   console.error('[reviewWithGemini] asserting OAuth...');
   if (runtime === 'antigravity') {
     if (!geminiReviewerSessionPreflightDone) {
@@ -3155,6 +3236,15 @@ async function reviewWithGemini(diff, extraContext = '', {
       );
     stdout = result.stdout || '';
     stderr = result.stderr || '';
+    if (runtime === 'antigravity' && checkout?.credentialId) {
+      await reportGeminiCredentialSpend({
+        checkout,
+        tokenUsage: result.tokenUsage || null,
+        env,
+        log,
+      });
+      spendReported = true;
+    }
   } catch (err) {
     stdout = err.stdout || '';
     stderr = err.stderr || '';
@@ -3169,6 +3259,14 @@ async function reviewWithGemini(diff, extraContext = '', {
     throw new Error(`Gemini exec failed: ${msg.substring(0, 800)}`);
   } finally {
     if (runtime === 'antigravity') {
+      if (checkout?.credentialId && !quotaSignal && !spendReported && subprocessStarted) {
+        await reportGeminiCredentialSpend({
+          checkout,
+          tokenUsage: null,
+          env,
+          log,
+        });
+      }
       await cleanupGeminiAntigravityResources({
         checkout,
         checkoutSession,
@@ -4605,6 +4703,8 @@ const __test__ = {
   resetGeminiReviewerSessionPreflightForTest,
   createGeminiReviewerSessionDir,
   checkoutGeminiCredentialFromBroker,
+  geminiSpendReportsForUsage,
+  reportGeminiCredentialSpend,
   releaseGeminiCredentialCheckout,
   materializeGeminiCheckoutSession,
   acquireGeminiFallbackLock,

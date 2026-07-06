@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   createReviewerMemoryAdmissionSampler,
+  resolveReviewerCredentialConcurrencyLimit,
   resolveReviewerMemoryPressureConfig,
   resolveFirstPassReviewerPoolConfig,
   reserveReviewerMemoryAdmission,
@@ -45,6 +46,28 @@ test('reviewer pool respects the configured concurrency cap', async () => {
   assert.equal(summary.dispatched, 6);
   assert.equal(summary.maxObservedConcurrency, 3);
   assert.equal(maxActive, 3);
+});
+
+test('reviewer pool caps concurrency at min(pool slots, available credentials)', async () => {
+  let active = 0;
+  let maxActive = 0;
+  const tasks = Array.from({ length: 6 }, (_unused, index) => candidate(index + 1, async () => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    active -= 1;
+  }));
+
+  const summary = await runBoundedReviewerDispatchQueue(tasks, {
+    maxConcurrent: 5,
+    availableCredentials: 2,
+    logger: { error() {} },
+  });
+
+  assert.equal(resolveReviewerCredentialConcurrencyLimit({ poolSlots: 5, availableCredentials: 2 }), 2);
+  assert.equal(summary.dispatched, 6);
+  assert.equal(summary.maxObservedConcurrency, 2);
+  assert.equal(maxActive, 2);
 });
 
 test('reviewer pool starts another PR while an older review is slow', async () => {

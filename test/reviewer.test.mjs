@@ -48,6 +48,7 @@ const {
   purgeStaleGeminiReviewerSessionDirs,
   resetGeminiReviewerSessionPreflightForTest,
   checkoutGeminiCredentialFromBroker,
+  reportGeminiCredentialSpend,
   releaseGeminiCredentialCheckout,
   materializeGeminiCheckoutSession,
   acquireGeminiFallbackLock,
@@ -2822,15 +2823,15 @@ test('checkoutGeminiCredentialFromBroker normalizes checkout response and releas
     const calls = [];
     const fetchImpl = async (url, options) => {
       calls.push({ url, options, body: JSON.parse(options.body) });
-      if (url.endsWith('/credentials/checkout')) {
+      if (url.endsWith('/checkout')) {
         return {
           ok: true,
           status: 200,
           json: async () => ({
-            checkout_id: 'co_123',
+            lease: { id: 'co_123' },
             credential_id: 'cred_123',
-            quota_url: 'http://broker.local/credentials/quota',
-            credentials: { oauth_creds_json: { access_token: 'tok', refresh_token: 'ref' } },
+            access_token: 'tok',
+            metadata: { subject: 'redacted' },
           }),
         };
       }
@@ -2844,17 +2845,56 @@ test('checkoutGeminiCredentialFromBroker normalizes checkout response and releas
     assert.deepEqual(checkout, {
       checkoutId: 'co_123',
       credentialId: 'cred_123',
-      oauthCreds: { access_token: 'tok', refresh_token: 'ref' },
+      oauthCreds: { access_token: 'tok', expires_at: undefined, metadata: { subject: 'redacted' } },
       releaseUrl: null,
-      quotaUrl: 'http://broker.local/credentials/quota',
+      quotaUrl: null,
     });
     await releaseGeminiCredentialCheckout({ checkout, quotaSignal: true, env, fetchImpl });
-    assert.equal(calls[0].url, 'http://broker.local/credentials/checkout');
+    assert.equal(calls[0].url, 'http://broker.local/checkout');
     assert.equal(calls[0].options.headers.Authorization, 'Bearer shh');
     assert.deepEqual(calls[0].body.provider, 'gemini');
-    assert.equal(calls[1].url, 'http://broker.local/credentials/quota');
-    assert.equal(calls[1].body.checkout_id, 'co_123');
-    assert.equal(calls[1].body.quota_signal, true);
+    assert.equal(calls[1].url, 'http://broker.local/checkout/release');
+    assert.equal(calls[1].body.lease_id, 'co_123');
+    assert.equal(calls[1].body.kind, 'quota_exhausted');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('reportGeminiCredentialSpend reports request spend for the checked-out credential', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-spend-'));
+  try {
+    const secretPath = join(root, 'secret');
+    writeFileSync(secretPath, 'shh\n');
+    const calls = [];
+    const fetchImpl = async (url, options) => {
+      calls.push({ url, headers: options.headers, body: JSON.parse(options.body) });
+      return { ok: true, status: 200, json: async () => ({ credential: { credential_id: 'cred_123' } }) };
+    };
+    await reportGeminiCredentialSpend({
+      checkout: { checkoutId: 'co_123', credentialId: 'cred_123' },
+      env: {
+        CQP_BROKER_URL: 'http://broker.local',
+        CQP_BROKER_SHARED_SECRET_FILE: secretPath,
+        CQP_GEMINI_QUOTA_RESET_AT: '2026-07-13T00:00:00.000Z',
+      },
+      fetchImpl,
+    });
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'http://broker.local/quota/report');
+    assert.equal(calls[0].headers.Authorization, 'Bearer shh');
+    assert.deepEqual(calls[0].body, {
+      provider: 'gemini',
+      credential_id: 'cred_123',
+      kind: 'spend',
+      unit: 'requests',
+      amount: 1,
+      window: 'weekly',
+      limit: 1000,
+      reset_at: '2026-07-13T00:00:00.000Z',
+    });
+    assert.equal(JSON.stringify(calls), JSON.stringify(calls).replace(/tok|refresh|secret-token/g, ''));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -2864,12 +2904,12 @@ test('checkoutGeminiCredentialFromBroker releases checkout when validation fails
   const calls = [];
   const fetchImpl = async (url, options) => {
     calls.push({ url, body: JSON.parse(options.body) });
-    if (url.endsWith('/credentials/checkout')) {
+    if (url.endsWith('/checkout')) {
       return {
         ok: true,
         status: 200,
         json: async () => ({
-          checkout_id: 'co_bad',
+          lease: { id: 'co_bad' },
           credential_id: 'cred_bad',
         }),
       };
@@ -2884,10 +2924,10 @@ test('checkoutGeminiCredentialFromBroker releases checkout when validation fails
     /broker response missing oauth credential JSON/,
   );
   assert.equal(calls.length, 2);
-  assert.equal(calls[1].url, 'http://broker.local/credentials/release');
-  assert.equal(calls[1].body.checkout_id, 'co_bad');
+  assert.equal(calls[1].url, 'http://broker.local/checkout/release');
+  assert.equal(calls[1].body.lease_id, 'co_bad');
   assert.equal(calls[1].body.credential_id, 'cred_bad');
-  assert.equal(calls[1].body.quota_signal, false);
+  assert.equal(calls[1].body.kind, 'release');
 });
 
 test('checkoutGeminiCredentialFromBroker treats typed no-credit as deferral, not fallback', async () => {

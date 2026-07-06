@@ -119,6 +119,94 @@ function eligibleFixture(overrides = {}) {
 }
 
 /**
+ * MSM-04 — a fixture that DISPATCHES the (only surviving) agent: the terminal
+ * remediation hammer. Under MSM-04 a fully-clean, mergeable settled PR is merged
+ * inline by the MSM-03 watcher daemon (no agent); an agent is spawned ONLY when
+ * the closure has genuine remediation work. This fixture models that: a settled
+ * review that still carries a blocking finding at review-cycle exhaustion, so the
+ * auto-hammer lane fires, forces the `hammer` worker class, and dispatches the
+ * `hammer-prompt.md` terminal-remediation prompt. Individual overrides win over
+ * these defaults exactly like {@link eligibleFixture}.
+ */
+function hammerFixture(overrides = {}) {
+  return eligibleFixture({
+    ...overrides,
+    reviewState: {
+      verdict: 'request-changes',
+      reviewCycleExhausted: true,
+      blockingFindingState: 'known',
+      blockingFindingCount: 1,
+      ...overrides.reviewState,
+    },
+    cfg: {
+      autoHammerOnEligibilityMiss: true,
+      ...overrides.cfg,
+    },
+  });
+}
+
+/**
+ * MSM-04 — a hammer-dispatching fixture that is NOT review-cycle-exhausted, so it
+ * exercises the ordinary hammer dispatch + existing-dispatch reconciliation
+ * machinery without tripping the exhausted-final-hammer same-head idempotency
+ * guard. The `hammer` worker class makes a non-blocking-finding eligibility miss
+ * auto-remediable before exhaustion, so it dispatches the terminal-remediation
+ * hammer with `workerClass === 'hammer'`.
+ */
+function liveHammerFixture(overrides = {}) {
+  return eligibleFixture({
+    ...overrides,
+    reviewState: {
+      // Keep the settled-success verdict so the sole eligibility miss is
+      // `non-blocking-findings-present` — a pre-exhaustion hammer-remediable miss
+      // (blocking findings / `verdict-not-settled-success` only become remediable
+      // at exhaustion). This dispatches the hammer without exhaustion.
+      nonBlockingFindingState: 'known',
+      nonBlockingFindingCount: 1,
+      ...overrides.reviewState,
+    },
+    cfg: {
+      workerClass: 'hammer',
+      autoHammerOnEligibilityMiss: true,
+      ...overrides.cfg,
+    },
+  });
+}
+
+/**
+ * MSM-04 — a hammer-dispatching fixture that preserves the CONFIGURED worker
+ * class (harness). Unlike {@link hammerFixture}, this reaches the dispatch via
+ * the eligible-but-dirty path (a current-head `operator-approved` override clears
+ * the verdict gate while a standing blocking finding keeps the terminal-remediation
+ * mandate), so the auto-hammer lane never fires and `cfg.workerClass` is honored
+ * verbatim on `--worker-class`. Use it for worker-class / harness routing tests.
+ */
+function eligibleHammerFixture(overrides = {}) {
+  const headSha = 'abc12345abc12345abc12345abc12345abc12345';
+  return eligibleFixture({
+    ...overrides,
+    reviewState: {
+      verdict: 'request-changes',
+      reviewCycleExhausted: true,
+      blockingFindingState: 'known',
+      blockingFindingCount: 1,
+      operatorApprovedEvidence: {
+        applied: true,
+        actor: 'operator-human',
+        eventId: 'evt-operator-approved-routing',
+        observedAt: '2026-06-18T22:00:00Z',
+        observedRevisionRef: headSha,
+      },
+      ...overrides.reviewState,
+    },
+    prMetadata: {
+      labels: [{ name: 'operator-approved' }],
+      ...overrides.prMetadata,
+    },
+  });
+}
+
+/**
  * Mock `execFile`-style helper that records every call and emits a
  * scripted dispatch id. Mirrors the contract `maybeDispatchAmaCloser`
  * expects (`{ stdout, stderr }` return shape).
@@ -198,7 +286,7 @@ function summarizeDispatchCall(call) {
 // ---------------------------------------------------------------------------
 
 test('cfg.enabled=false returns ama-disabled and never spawns hq dispatch', async () => {
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { enabled: false },
   });
   const exec = buildExecMock();
@@ -224,7 +312,9 @@ test('cfg.enabled=false returns ama-disabled and never spawns hq dispatch', asyn
 // ---------------------------------------------------------------------------
 
 test('cfg.enabled=true + ineligible returns reasons and never spawns hq dispatch', async () => {
-  // Risk class `high` blocks under the default `low`-only allowlist.
+  // Risk class `high` blocks under the default `low`-only allowlist. A clean but
+  // risk-blocked closure is ineligible and has no hammer-remediable work, so no
+  // agent is dispatched and the daemon never gets a clean tick either.
   const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
     reviewState: { riskClass: 'high' },
   });
@@ -248,11 +338,14 @@ test('cfg.enabled=true + ineligible returns reasons and never spawns hq dispatch
 });
 
 // ---------------------------------------------------------------------------
-// Test 3 — cfg.enabled=true + eligible dispatches with default workerClass.
+// Test 3 (MSM-04) — a fully-clean, mergeable eligible closure is DAEMON-OWNED:
+// the standalone AMA-closer agent (a worker spawned solely to click merge) is
+// deleted, so `maybeDispatchAmaCloser` spawns NO agent and routes the clean
+// merge back to the MSM-03 watcher daemon (skipMergeAgent).
 // ---------------------------------------------------------------------------
 
-test('cfg.enabled=true + eligible dispatches with workerClass=hammer by default', async (t) => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-default-'));
+test('fully-clean eligible closure is daemon-owned — no click-merge agent is dispatched', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-clean-daemon-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
     cfg: { workerClass: undefined },
@@ -267,50 +360,27 @@ test('cfg.enabled=true + eligible dispatches with workerClass=hammer by default'
     dispatchContext,
     execFileImpl: exec.impl,
     writeFileImpl: write.impl,
-    readTemplateImpl: () => readFileSync(TEMPLATE_PATH, 'utf8'),
+    readTemplateImpl: () => 'unused',
   });
-  assert.equal(result.dispatched, true);
-  assert.equal(result.workerClass, 'hammer');
-  assert.equal(result.dispatchId, 'lrq_test_0001');
-  assert.equal(exec.calls.length, 1);
-  const args = exec.calls[0].args;
-  assert.ok(args.includes('--worker-class'));
-  const wcIdx = args.indexOf('--worker-class');
-  assert.equal(args[wcIdx + 1], 'hammer');
-  assert.ok(args.includes('--task-kind'));
-  assert.equal(args[args.indexOf('--task-kind') + 1], 'merge');
-  assert.ok(args.includes('--completion-shape'));
-  assert.equal(args[args.indexOf('--completion-shape') + 1], 'decision-only');
-  assert.ok(args.includes('--project'));
-  assert.equal(args[args.indexOf('--project') + 1], 'adversarial-merge-authority');
-  assert.equal(args[args.indexOf('--repo') + 1], 'myrepo');
-  assert.deepEqual(
-    args
-      .map((value, index) => (value === '--additional-repo' ? args[index + 1] : null))
-      .filter(Boolean),
-    ['agent-os'],
-  );
-  // Prompt body was written; capture inspected for substitutions.
-  assert.ok(write.captured.body, 'prompt body must be written');
-  assert.equal(write.captured.dir, `${rootDir}/data/follow-up-jobs/ama-closer-prompts`);
-  assert.ok(write.captured.body.includes(`PR ${dispatchContext.prUrl}`));
-  assert.ok(write.captured.body.includes(reviewState.headSha));
-  assert.ok(write.captured.body.includes('--squash'));
-  assert.ok(write.captured.body.includes('--body-file "$TRAILERS_FILE"'));
-  assert.ok(write.captured.body.includes('Closed-By: hammer-closer (adversarial-pipe-mode)'));
-  assert.ok(write.captured.body.includes('Reviewed-By: claude-reviewer-lacey'));
-  assert.ok(write.captured.body.includes('--reviewer claude'));
-  assert.ok(write.captured.body.includes('Risk-Class: low'));
-  assert.ok(write.captured.body.includes('Eligibility-Trace: ama-audit:acme/myrepo:pr-1234:head-abc12345abc12345abc12345abc12345abc12345'));
-  assert.ok(write.captured.body.includes('attemptPhase: "before-gh-pr-merge"'));
+  // No agent whose sole job is to click merge — the daemon owns the clean merge.
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'clean-close-daemon-owned');
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(exec.calls.length, 0, 'no hq dispatch for a clean daemon-owned close');
+  assert.equal(write.captured.body, null, 'no closer prompt is written for a clean close');
 });
 
-test('exhausted final hammer preserves reviewed SHA while recording current target head', async (t) => {
+// MSM-04 — the exhausted-final-hammer CURRENT-HEAD re-targeting is deleted. When
+// the reviewed head is stale at exhaustion, the one hammer no longer re-targets
+// the live current head (that reviewed→current gap re-arming per HAM commit was
+// the #3123 re-hammer loop). The dispatch keys on the STABLE reviewed head, so
+// the per-PR hammer retry cap (same job key) bounds it and the loop cannot fire.
+test('exhausted final hammer keys the dispatch on the reviewed head, never re-targeting the live head', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-target-head-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const reviewedHead = '40e302440e302440e302440e302440e302440e3024';
   const currentHead = '6358df76358df76358df76358df76358df76358d';
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: {
       workerClass: 'hammer',
       autoHammerOnEligibilityMiss: true,
@@ -347,25 +417,32 @@ test('exhausted final hammer preserves reviewed SHA while recording current targ
 
   assert.equal(result.dispatched, true);
   assert.ok(write.captured.body.includes(reviewedHead), 'prompt must preserve the reviewed head');
-  assert.ok(write.captured.body.includes(currentHead), 'prompt must expose the live target head');
+  // The dispatch record is keyed on the REVIEWED head (stable job anchor), NOT the
+  // advanced current head — there is no per-HAM-commit re-target record to re-arm.
+  const reviewedHeadPath = amaCloserDispatchFilePath(rootDir, {
+    repo: dispatchContext.repo,
+    prNumber: prMetadata.prNumber,
+    headSha: reviewedHead,
+  });
+  assert.equal(existsSync(reviewedHeadPath), true, 'dispatch record key must be the reviewed head');
   const currentHeadPath = amaCloserDispatchFilePath(rootDir, {
     repo: dispatchContext.repo,
     prNumber: prMetadata.prNumber,
     headSha: currentHead,
   });
-  assert.equal(existsSync(currentHeadPath), true, 'dispatch record key must be the target commit SHA');
-  const record = JSON.parse(readFileSync(currentHeadPath, 'utf8'));
-  assert.equal(record.headSha, currentHead);
+  assert.equal(existsSync(currentHeadPath), false, 'no current-head re-target record is written');
+  const record = JSON.parse(readFileSync(reviewedHeadPath, 'utf8'));
+  assert.equal(record.headSha, reviewedHead);
   assert.equal(record.reviewedSha, reviewedHead);
-  assert.equal(record.targetRemediationSha, currentHead);
-  assert.equal(record.dispatchReason, 'exhausted-final-hammer');
+  assert.equal(record.targetRemediationSha, reviewedHead);
+  assert.notEqual(record.dispatchReason, 'exhausted-final-hammer');
   assert.equal(record.retryCount, 1);
 });
 
 test('eligible agent-os dispatch does not add agent-os as a duplicate workspace repo', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-agent-os-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: {
       rootDir,
       repo: 'laceyenterprises/agent-os',
@@ -392,7 +469,7 @@ test('eligible agent-os dispatch does not add agent-os as a duplicate workspace 
 test('eligible adversarial-review self-PR dispatch is single-repo for rescue provision', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-adversarial-review-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: {
       rootDir,
       repo: 'laceyenterprises/adversarial-review',
@@ -423,7 +500,7 @@ test('eligible adversarial-review self-PR dispatch is single-repo for rescue pro
   );
   assert.deepEqual(exec.calls[0].args, [
     'dispatch',
-    '--worker-class', 'codex',
+    '--worker-class', 'hammer',
     '--task-kind', 'merge',
     '--completion-shape', 'decision-only',
     '--project', 'adversarial-merge-authority',
@@ -443,7 +520,7 @@ test('maybeDispatchAmaCloser is mode-invariant for merge-class dispatch', async 
   for (const orchestrationMode of ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE) {
     const rootDir = mkdtempSync(join(tmpdir(), `ama-dispatch-${orchestrationMode}-`));
     t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-    const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
       dispatchContext: { rootDir, orchestrationMode },
     });
     const exec = buildExecMock();
@@ -490,7 +567,7 @@ test('maybeDispatchAmaCloser is mode-invariant for merge-class dispatch', async 
 test('cfg.enabled=true + branch protection opt-out records waived eligibility reason', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-waived-protection-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     prMetadata: { branchProtection: { requiredContexts: [] } },
     cfg: {
       branchProtection: {
@@ -534,7 +611,7 @@ test('eligible dispatch bootstraps the watcher-owned audit record before the fir
     rmSync(rootDir, { recursive: true, force: true });
     rmSync(hqRoot, { recursive: true, force: true });
   });
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir, hqRoot },
   });
   const result = await maybeDispatchAmaCloser({
@@ -590,7 +667,7 @@ test('eligible dispatch bootstraps the watcher-owned audit record before the fir
 test('cfg.workerClass=claude-code routes the closer to claude-code', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-claude-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleHammerFixture({
     cfg: { workerClass: 'claude-code' },
     dispatchContext: { rootDir },
   });
@@ -611,14 +688,15 @@ test('cfg.workerClass=claude-code routes the closer to claude-code', async (t) =
   assert.equal(args[args.indexOf('--worker-class') + 1], 'claude-code');
 });
 
-test('cfg.workerClass=gemini routes the closer to gemini with gemini-closer provenance', async (t) => {
-  // GMW-04: gemini is a selectable AMA closer. Only the executing harness
-  // changes — the dispatch shape (--task-kind merge --completion-shape
-  // decision-only) and the generic `${workerClass}-closer` provenance are
-  // unchanged, so the closer attributes as `gemini-closer`.
+test('cfg.workerClass=gemini routes the hammer to gemini with hammer provenance', async (t) => {
+  // GMW-04 / MSM-04: gemini is a selectable AMA merge HARNESS. Only the executing
+  // harness changes (`--worker-class gemini`) — the dispatched worker is the
+  // terminal-remediation hammer, so the dispatch shape (--task-kind merge
+  // --completion-shape decision-only) and the merge-commit provenance
+  // (`Closed-By: hammer`) are unchanged. The standalone `-closer` agent is deleted.
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-gemini-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleHammerFixture({
     cfg: { workerClass: 'gemini' },
     dispatchContext: { rootDir },
   });
@@ -631,7 +709,7 @@ test('cfg.workerClass=gemini routes the closer to gemini with gemini-closer prov
     dispatchContext,
     execFileImpl: exec.impl,
     writeFileImpl: write.impl,
-    readTemplateImpl: () => readFileSync(TEMPLATE_PATH, 'utf8'),
+    readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
   });
   assert.equal(result.dispatched, true);
   assert.equal(result.workerClass, 'gemini');
@@ -640,26 +718,23 @@ test('cfg.workerClass=gemini routes the closer to gemini with gemini-closer prov
   // The AMA dispatch shape is unchanged — only the harness differs.
   assert.equal(args[args.indexOf('--task-kind') + 1], 'merge');
   assert.equal(args[args.indexOf('--completion-shape') + 1], 'decision-only');
-  assert.ok(write.captured.body.includes('Closed-By: gemini-closer (adversarial-pipe-mode)'));
+  // The dispatched worker is the hammer, so the merge provenance is the hammer's,
+  // regardless of which harness (gemini) executes it.
+  assert.ok(write.captured.body.includes('Closed-By: hammer (adversarial-pipe-mode)'));
 });
 
-// HAM-04 §1.1.1 — the hammer worker class is now the DEFAULT closer class.
-// Terminal-remediation prompt selection must NOT key off `workerClass ===
-// 'hammer'` alone: a clean, finding-free closure has nothing for HAM to
-// remediate. Routing it through `hammer-prompt.md` (a non-empty HAM
-// provenance commit + `Remediated-Findings` audit comment mandate) either
-// stalls the merge (HAM evidence cannot exist) or pushes the closer to invent
-// an unreviewed post-review source change. A clean hammer closure must use the
-// plain `ama-closer-prompt.md`.
-test('cfg.workerClass=hammer on a clean exhausted closure uses the plain closer prompt', async (t) => {
+// MSM-04 — a clean exhausted closure has nothing for HAM to remediate, so it is
+// NOT dispatched to any agent: the standalone `ama-closer-prompt.md` click-merge
+// worker is deleted, and the fully-clean merge is owned by the MSM-03 daemon. The
+// closer never spawns a worker (of any class) whose sole job is to click merge.
+test('a clean exhausted closure dispatches no agent — the daemon owns the clean merge', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-clean-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const readPaths = [];
   const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
     cfg: { workerClass: 'hammer' },
-    // Clean settled-success review: zero blocking and zero non-blocking
-    // findings. Even when the final round is exhausted, that alone must not
-    // trigger the terminal-remediation prompt.
+    // Clean settled-success review: zero blocking and zero non-blocking findings.
+    // Even at review-cycle exhaustion that alone must never spawn a merge agent.
     reviewState: { reviewCycleExhausted: true },
     dispatchContext: { rootDir, templatePath: null },
   });
@@ -677,18 +752,12 @@ test('cfg.workerClass=hammer on a clean exhausted closure uses the plain closer 
       return readFileSync(path, 'utf8');
     },
   });
-  assert.equal(result.dispatched, true);
-  // The worker class itself stays `hammer` — only the prompt/mandate changes.
-  assert.equal(result.workerClass, 'hammer');
-  const args = exec.calls[0].args;
-  assert.equal(args[args.indexOf('--worker-class') + 1], 'hammer');
-  assert.deepEqual(readPaths, [TEMPLATE_PATH]);
-  assert.ok(write.captured.body.includes('Closed-By: hammer-closer (adversarial-pipe-mode)'));
-  assert.equal(write.captured.body.includes('Closed-By: hammer (adversarial-pipe-mode)'), false);
-  // The hammer terminal-remediation mandate text must be absent on a clean
-  // close (these phrases are unique to `hammer-prompt.md`).
-  assert.doesNotMatch(write.captured.body, /remediate, commit, comment, validate, merge/i);
-  assert.doesNotMatch(write.captured.body, /Do not request another adversarial review round/);
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'clean-close-daemon-owned');
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(exec.calls.length, 0, 'no agent is spawned for a clean close');
+  assert.deepEqual(readPaths, [], 'no prompt template is read for a clean close');
+  assert.equal(write.captured.body, null, 'no prompt is written for a clean close');
 });
 
 // The terminal-remediation prompt is still selected for a hammer closure that
@@ -701,7 +770,7 @@ test('cfg.workerClass=hammer selects the terminal HAM mandate prompt when findin
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const headSha = 'abc12345abc12345abc12345abc12345abc12345';
   const readPaths = [];
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer', mergeMethod: 'merge' },
     reviewState: {
       verdict: 'request-changes',
@@ -765,7 +834,7 @@ test('auto-hammer dispatches HAM terminal remediation at review-cycle exhaustion
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-exhausted-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const readPaths = [];
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: {
       workerClass: 'hammer',
       autoHammerOnEligibilityMiss: true,
@@ -811,7 +880,7 @@ test('auto-hammer dispatches exhausted CONFLICTING stale-head PRs through hammer
   const reviewedHead = 'cc01669cc01669cc01669cc01669cc01669cc01';
   const currentHead = '8cf53758cf53758cf53758cf53758cf53758cf5';
   const readPaths = [];
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: {
       workerClass: 'codex',
       autoHammerOnEligibilityMiss: true,
@@ -865,22 +934,38 @@ test('auto-hammer dispatches exhausted CONFLICTING stale-head PRs through hammer
   assert.notEqual(workerClassIndex, -1, 'hq dispatch args must include --worker-class');
   assert.equal(exec.calls[0].args[workerClassIndex + 1], 'hammer');
   assert.ok(write.captured.body.includes(reviewedHead), 'terminal hammer prompt must preserve the reviewed head');
-  assert.ok(write.captured.body.includes(currentHead), 'terminal hammer prompt must expose the live target head');
+  // MSM-04 — the dispatch keys on the REVIEWED head (stable job anchor); the one
+  // hammer works the live branch itself and there is no per-HAM-commit current-head
+  // re-target record to re-arm the loop.
   const recordPath = amaCloserDispatchFilePath(rootDir, {
     repo: dispatchContext.repo,
     prNumber: prMetadata.prNumber,
-    headSha: currentHead,
+    headSha: reviewedHead,
   });
   const record = JSON.parse(readFileSync(recordPath, 'utf8'));
-  assert.equal(record.headSha, currentHead);
+  assert.equal(record.headSha, reviewedHead);
   assert.equal(record.reviewedSha, reviewedHead);
-  assert.equal(record.targetRemediationSha, currentHead);
-  assert.equal(record.dispatchReason, 'exhausted-final-hammer');
+  assert.equal(record.targetRemediationSha, reviewedHead);
+  assert.notEqual(record.dispatchReason, 'exhausted-final-hammer');
+  assert.equal(
+    existsSync(amaCloserDispatchFilePath(rootDir, {
+      repo: dispatchContext.repo,
+      prNumber: prMetadata.prNumber,
+      headSha: currentHead,
+    })),
+    false,
+    'no current-head re-target record is written',
+  );
   assert.ok(write.captured.body.includes('Closed-By: hammer (adversarial-pipe-mode)'));
 });
 
-test('auto-hammer still dispatches exhausted MERGEABLE stale-head PRs through hammer', async (t) => {
-  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-mergeable-stale-'));
+// MSM-04 regression — the #3123 re-hammer loop. A settled review that is FULLY
+// CLEAN (zero findings) but whose reviewed head is stale because a prior HAM
+// commit advanced the PR head is NOT hammer-remediable: there is nothing to
+// remediate, so re-hammering it just re-arms the loop. It must dispatch NO agent
+// (a fresh review of the new head is the correct next step, not another hammer).
+test('#3123: a clean stale-head (prior HAM commit advanced the head) spawns no hammer', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-clean-stale-head-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const reviewedHead = 'cc01669cc01669cc01669cc01669cc01669cc01';
   const currentHead = '8cf53758cf53758cf53758cf53758cf53758cf5';
@@ -890,7 +975,7 @@ test('auto-hammer still dispatches exhausted MERGEABLE stale-head PRs through ha
       autoHammerOnEligibilityMiss: true,
     },
     reviewState: {
-      verdict: 'request-changes',
+      // A clean settled-success review (zero findings) at cycle exhaustion.
       headSha: reviewedHead,
       riskClass: 'medium',
       reviewCycleExhausted: true,
@@ -900,6 +985,7 @@ test('auto-hammer still dispatches exhausted MERGEABLE stale-head PRs through ha
       nonBlockingFindingCount: 0,
     },
     prMetadata: {
+      // The live head advanced past the reviewed head (a prior HAM commit moved it).
       headSha: currentHead,
       mergeableState: 'MERGEABLE',
     },
@@ -922,29 +1008,102 @@ test('auto-hammer still dispatches exhausted MERGEABLE stale-head PRs through ha
     readTemplateImpl: (path) => readFileSync(path, 'utf8'),
   });
 
-  assert.equal(result.dispatched, true);
-  assert.equal(result.workerClass, 'hammer');
-  const workerClassIndex = exec.calls[0].args.indexOf('--worker-class');
-  assert.notEqual(workerClassIndex, -1, 'hq dispatch args must include --worker-class');
-  assert.equal(exec.calls[0].args[workerClassIndex + 1], 'hammer');
-  assert.ok(write.captured.body.includes(reviewedHead));
-  assert.ok(write.captured.body.includes(currentHead));
-  const recordPath = amaCloserDispatchFilePath(rootDir, {
-    repo: dispatchContext.repo,
-    prNumber: prMetadata.prNumber,
-    headSha: currentHead,
+  // A bare stale-review-head with nothing to remediate is not hammer-remediable,
+  // even at exhaustion — this is the guard that keeps the loop from re-arming.
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['stale-review-head'], { reviewCycleExhausted: true }),
+    false,
+    'a clean stale-review-head must not be hammer-remediable at exhaustion',
+  );
+  assert.equal(result.dispatched, false, 'no hammer is dispatched for a clean stale head');
+  assert.equal(exec.calls.length, 0, 'no hq dispatch for a clean stale head (#3123 loop guard)');
+  assert.equal(write.captured.body, null, 'no prompt is written for a clean stale head');
+});
+
+// MSM-04 mandatory — idempotency. Two settle ticks for the SAME logical job/head
+// dispatch AT MOST ONE hammer: the first acquires the merge lease + writes the
+// dispatch record; the second sees the live in-flight dispatch under the same
+// (repo, pr, reviewed-head) key and suppresses, never launching a second worker.
+test('two settle ticks for the same job dispatch at most one hammer (lease + logical-job key)', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-idempotent-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const launches = [];
+  const execFileImpl = async (_cmd, args) => {
+    if (args[0] === 'dispatch' && args[1] === 'status') {
+      // The first tick's worker is still running when the second tick fires.
+      return { stdout: '{"status":"running"}', stderr: '' };
+    }
+    if (args[0] !== 'dispatch') {
+      return { stdout: '{}', stderr: '' };
+    }
+    launches.push(args);
+    return { stdout: '{"dispatchId":"dispatch_once","launchRequestId":"lrq_once"}', stderr: '' };
+  };
+
+  const tick1 = await maybeDispatchAmaCloser({
+    ...hammerFixture({ dispatchContext: { rootDir } }),
+    execFileImpl,
+    readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
   });
-  const record = JSON.parse(readFileSync(recordPath, 'utf8'));
-  assert.equal(record.headSha, currentHead);
-  assert.equal(record.reviewedSha, reviewedHead);
-  assert.equal(record.targetRemediationSha, currentHead);
-  assert.equal(record.dispatchReason, 'exhausted-final-hammer');
+  assert.equal(tick1.dispatched, true, 'the first settle tick dispatches the one hammer');
+
+  // Second concurrent tick for the SAME job/head — the lease is still held and the
+  // dispatch record shows a live in-flight worker.
+  const tick2 = await maybeDispatchAmaCloser({
+    ...hammerFixture({ dispatchContext: { rootDir } }),
+    execFileImpl,
+    readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+  });
+  assert.equal(tick2.dispatched, false, 'the second settle tick does NOT spawn a second hammer');
+  assert.equal(tick2.skipMergeAgent, true, 'the in-flight hammer keeps the tick off the merge-agent lane');
+  assert.equal(launches.length, 1, 'exactly one hammer worker was launched across both ticks');
+});
+
+// MSM-04 mandatory — structural hard-stops still block. A hard-stop label
+// (`do-not-merge`) is not code the hammer may remediate, so even a findings PR at
+// review-cycle exhaustion (which would otherwise auto-hammer) dispatches NO agent.
+test('a structural hard-stop label blocks the hammer even with remediable findings', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hardstop-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
+    prMetadata: { labels: ['do-not-merge'] },
+    dispatchContext: { rootDir },
+  });
+  const exec = buildExecMock();
+  const write = buildWriteMock();
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata,
+    cfg,
+    dispatchContext,
+    execFileImpl: exec.impl,
+    writeFileImpl: write.impl,
+    readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
+  });
+
+  // The hard-stop label makes the miss non-hammer-remediable at every phase.
+  assert.equal(
+    isHammerRemediableEligibilityMiss(
+      ['label-do-not-merge', 'verdict-not-settled-success', 'blocking-findings-present'],
+      { reviewCycleExhausted: true },
+    ),
+    false,
+    'a hard-stop label is never hammer-remediable, even at exhaustion',
+  );
+  assert.equal(result.dispatched, false, 'no hammer is dispatched past a hard-stop label');
+  assert.equal(result.reason, 'not-eligible');
+  assert.equal(exec.calls.length, 0, 'no hq dispatch past a structural hard-stop');
+  assert.equal(write.captured.body, null, 'no prompt is written past a hard-stop');
 });
 
 test('auto-hammer does not bypass blocking findings before exhaustion on conflicting PRs', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-conflicting-blocking-pre-exhaustion-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: {
       workerClass: 'hammer',
       autoHammerOnEligibilityMiss: true,
@@ -992,7 +1151,7 @@ test('AMA #3084: exhausted hammer dispatch records are keyed by target head comm
   const write = buildWriteMock();
   const results = [];
   for (const headSha of heads) {
-    const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+    const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
       cfg: {
         workerClass: 'hammer',
         autoHammerOnEligibilityMiss: true,
@@ -1063,7 +1222,7 @@ test('AMA #3084 loop guard: same current-head hammer success with unknown merged
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-loop-guard-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const headSha = '6358df76358df76358df76358df76358df76358d';
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: {
       workerClass: 'hammer',
       autoHammerOnEligibilityMiss: true,
@@ -1149,7 +1308,7 @@ test('AMA #3084 loop guard: same current-head hammer success with merged signal 
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-merged-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const headSha = '6358df76358df76358df76358df76358df76358d';
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: {
       workerClass: 'hammer',
       autoHammerOnEligibilityMiss: true,
@@ -1292,7 +1451,7 @@ test('eligible dispatch refuses watcher audit writes when runtime user is not th
     rmSync(rootDir, { recursive: true, force: true });
     rmSync(hqRoot, { recursive: true, force: true });
   });
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: {
       rootDir,
       hqRoot,
@@ -1321,7 +1480,7 @@ test('eligible dispatch refuses watcher audit writes when runtime user is not th
 // ---------------------------------------------------------------------------
 
 test('composed prompt body matches the checked-in golden snapshot', () => {
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: {
       rootDir: '/tmp/ama-test-root',
       hqRoot: '/tmp/ama-test-hqroot',
@@ -1439,7 +1598,7 @@ test('composed prompt body matches the checked-in golden snapshot', () => {
 });
 
 test('composed hammer prompt body matches the checked-in golden snapshot', () => {
-  const { prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer' },
     dispatchContext: {
       rootDir: '/tmp/ama-test-root',
@@ -1586,7 +1745,7 @@ test('composed hammer prompt body matches the checked-in golden snapshot', () =>
 });
 
 test('composed prompt documents that branch_protection.required=false does not require the GitHub-plan sentinel', () => {
-  const { cfg, dispatchContext, prMetadata } = eligibleFixture({
+  const { cfg, dispatchContext, prMetadata } = hammerFixture({
     cfg: {
       branchProtection: {
         required: false,
@@ -1649,7 +1808,7 @@ test('namedAmaNoDispatchReason keeps not-eligible token stable and single-reason
 test('dispatch failure returns dispatched=false, reason=dispatch-failed (caller falls through)', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-failure-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir },
   });
   const exec = buildExecMock({ throwOn: () => true });
@@ -1682,7 +1841,7 @@ test('dispatch failure returns dispatched=false, reason=dispatch-failed (caller 
 test('branch-holder provision failures use bounded cleanup-debt counter outside redispatch budget', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-branch-holder-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir },
   });
   const identity = {
@@ -1732,7 +1891,7 @@ test('branch-holder provision failures use bounded cleanup-debt counter outside 
 test('branch-holder provision detection tolerates generic worktree collision wording', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-branch-holder-generic-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir },
   });
   const identity = {
@@ -1775,7 +1934,7 @@ test('branch-holder provision detection tolerates generic worktree collision wor
 test('stale own hammer worktree cleanup does not exhaust branch-holder budget', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-stale-own-worktree-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer' },
     dispatchContext: { rootDir },
   });
@@ -1821,7 +1980,7 @@ test('stale own hammer worktree cleanup does not exhaust branch-holder budget', 
 test('stale own worktree cleanup lines do not mask later branch-holder blockers', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-stale-own-worktree-mixed-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer' },
     dispatchContext: { rootDir },
   });
@@ -1865,7 +2024,7 @@ test('same-PR hammer branch-holder collision tears down prior attempt and retrie
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-same-pr-holder-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const hqRoot = join(rootDir, 'hq');
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer' },
     dispatchContext: { rootDir, hqRoot },
   });
@@ -1918,7 +2077,7 @@ test('same-PR hammer holder path extraction tolerates spaces in hq root', async 
   const rootDir = mkdtempSync(join(tmpdir(), 'ama dispatch same-pr holder spaces '));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const hqRoot = join(rootDir, 'hq root with spaces');
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer' },
     dispatchContext: { rootDir, hqRoot },
   });
@@ -1962,7 +2121,7 @@ test('same-PR hammer holder teardown does not retry when a real teardown step fa
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-same-pr-holder-partial-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const hqRoot = join(rootDir, 'hq');
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer' },
     dispatchContext: { rootDir, hqRoot },
   });
@@ -2021,7 +2180,7 @@ test('same-PR hammer holder teardown does not retry when a real teardown step fa
 test('non-branch dispatch failures preserve branch-holder lifetime count', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-branch-holder-lifetime-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir },
   });
   const identity = {
@@ -2058,7 +2217,7 @@ test('non-branch dispatch failures preserve branch-holder lifetime count', async
 test('alternating dispatch failures still exhaust branch-holder lifetime budget', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-branch-holder-alternating-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir },
   });
   const identity = {
@@ -2103,7 +2262,7 @@ test('alternating dispatch failures still exhaust branch-holder lifetime budget'
 test('branch-holder provision failures stop retrying after bounded cleanup-debt attempts', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-branch-holder-exhausted-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir },
   });
   const identity = {
@@ -2148,7 +2307,7 @@ test('dispatch parses machine-readable JSON stdout and records the launch reques
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-json-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir },
   });
   const result = await maybeDispatchAmaCloser({
@@ -2176,7 +2335,7 @@ test('existing AMA closer dispatch suppresses a duplicate launch for the same he
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-existing-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir },
   });
   const calls = [];
@@ -2235,7 +2394,7 @@ test('SSG-06: failed prior closer dispatch releases ownership and re-dispatches'
     status: 'failed',
   });
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: {
       rootDir,
       ledgerTarget: { backend: 'sqlite', path: ledgerDb },
@@ -2298,7 +2457,7 @@ test('SSG-06: live in-flight closer dispatch is the only retained ownership path
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-ssg06-live-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir },
   });
   const identity = {
@@ -2348,7 +2507,7 @@ test('SSG-06: active hq status retains ownership despite stale failed audit', as
     rmSync(hqRoot, { recursive: true, force: true });
   });
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir, hqRoot },
   });
   const identity = {
@@ -2403,18 +2562,18 @@ test('SSG-06: ledger merged signal resolves closer ownership as done', async (t)
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-ssg06-merged-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir },
   });
 
-  let execCalled = false;
+  const execCalls = [];
   const result = await maybeDispatchAmaCloser({
     reviewState,
     prMetadata,
     cfg,
     dispatchContext: { ...dispatchContext, dispatchedAt: '2026-06-20T10:05:00Z' },
-    execFileImpl: async () => {
-      execCalled = true;
+    execFileImpl: async (_cmd, args) => {
+      execCalls.push(args);
       return { stdout: '{"dispatchId":"dispatch_unexpected","launchRequestId":"lrq_unexpected"}', stderr: '' };
     },
     readTemplateImpl: () => 'stubbed',
@@ -2437,14 +2596,21 @@ test('SSG-06: ledger merged signal resolves closer ownership as done', async (t)
   assert.equal(result.mergedSignal.completion_id, 'bcmp_merged');
   assert.equal(result.mergedSignalProducerHeadSha, 'f'.repeat(40));
   assert.equal(result.mergedSignalHeadShaMatchesReviewed, false);
-  assert.equal(execCalled, false, 'merged signal is authoritative; no dispatch/status probe needed');
+  // The merged signal is authoritative: no NEW dispatch or status probe is made.
+  // (MSM-04 — the merged hammer worker is still torn down, which is a `hq worker
+  // tear-down`, not a `dispatch`/`dispatch status` call.)
+  assert.equal(
+    execCalls.filter((args) => args[0] === 'dispatch').length,
+    0,
+    'merged signal is authoritative; no re-dispatch or status probe needed',
+  );
 });
 
 test('merged hammer closer tears down deterministic worker after merged signal', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-merged-cleanup-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer' },
     dispatchContext: { rootDir },
   });
@@ -2501,7 +2667,7 @@ test('merged hammer closer retries transient worker teardown before marking done
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-merged-cleanup-retry-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer' },
     dispatchContext: { rootDir },
   });
@@ -2565,7 +2731,7 @@ test('merged hammer closer treats absent worker teardown as already clean', asyn
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-merged-cleanup-absent-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer' },
     dispatchContext: { rootDir },
   });
@@ -2621,7 +2787,7 @@ test('merged hammer closer aborts when worker teardown fails', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-merged-cleanup-fail-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer' },
     dispatchContext: { rootDir },
   });
@@ -2693,7 +2859,7 @@ test('CAP-05: terminal closer records worker_run token usage after async ledger 
     }],
   });
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: {
       rootDir,
       ledgerTarget: { backend: 'sqlite', path: ledgerDb },
@@ -2800,7 +2966,7 @@ test('CAP-05: missing closer token rollup records empty usage and advances retry
     }],
   });
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: {
       rootDir,
       ledgerTarget: { backend: 'sqlite', path: ledgerDb },
@@ -2886,7 +3052,7 @@ test('CAP-05: repeated closer token write for same attempt is idempotent', async
     status: 'succeeded',
   });
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: {
       rootDir,
       ledgerTarget: { backend: 'sqlite', path: ledgerDb },
@@ -2960,7 +3126,7 @@ test('CAP-05: redispatched closer rows accumulate under tokens --by-pr', async (
   const ledgerDb = join(rootDir, 'ledger.db');
   createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: {
       rootDir,
       ledgerTarget: { backend: 'sqlite', path: ledgerDb },
@@ -3008,6 +3174,12 @@ test('CAP-05: redispatched closer rows accumulate under tokens --by-pr', async (
   const execFileImpl = async (_cmd, args) => {
     if (args[0] === 'dispatch' && args[1] === 'status') {
       return { stdout: '{"status":"failed"}', stderr: '' };
+    }
+    // MSM-04 — the surviving dispatch is the hammer, whose reconciliation tears
+    // down the prior hammer worker (`hq worker tear-down`) before a redispatch.
+    // That teardown is not a launch, so it must not advance the launch counter.
+    if (args[0] !== 'dispatch') {
+      return { stdout: '{}', stderr: '' };
     }
     launchCount += 1;
     return {
@@ -3099,14 +3271,18 @@ test('CAP-05: redispatched closer rows accumulate under tokens --by-pr', async (
   assert.match(out.value, /acme\/myrepo#1234/);
   assert.match(out.value, /\b3\b/);
   assert.match(out.value, /\b660\b/);
-  assert.match(out.value, /codex:660\/\$0\.66/);
+  // MSM-04 — the redispatched merge worker is the hammer, so its passes attribute
+  // to `hammer`; the initial `codex` pass still accrues under `codex`. The per-PR
+  // total (660 / $0.66 across the 3 rows) is unchanged.
+  assert.match(out.value, /hammer:550\/\$0\.55/);
+  assert.match(out.value, /codex:110\/\$0\.11/);
 });
 
 test('terminal failed hammer closer tears down stale worker before redispatch', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-terminal-cleanup-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer' },
     dispatchContext: {
       rootDir,
@@ -3162,7 +3338,7 @@ test('terminal failed hammer closer aborts redispatch when worker teardown fails
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-hammer-terminal-cleanup-fail-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer' },
     dispatchContext: {
       rootDir,
@@ -3231,7 +3407,7 @@ test('terminal failed hammer closer records tokens only after teardown succeeds 
     status: 'failed',
   });
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer' },
     dispatchContext: {
       rootDir,
@@ -3347,7 +3523,7 @@ test('SSG-06: hq succeeded status alone does not retain closer ownership', async
     status: 'succeeded',
   });
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: {
       rootDir,
       ledgerTarget: { backend: 'sqlite', path: ledgerDb },
@@ -3416,7 +3592,7 @@ test('SSG-06: hq succeeded status retains hold when merge producer has no repo e
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-ssg06-no-producer-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = liveHammerFixture({
     dispatchContext: { rootDir },
   });
   const identity = {
@@ -3472,7 +3648,7 @@ test('SSG-06: transient merged-signal read failure retains terminal closer hold'
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-ssg06-ledger-error-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = liveHammerFixture({
     dispatchContext: { rootDir },
   });
   const identity = {
@@ -3547,7 +3723,7 @@ test('AMA-07 lease blocks regardless of how hq dispatch status would have respon
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-status-noise-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir },
   });
   const calls = [];
@@ -3593,7 +3769,7 @@ test('ambiguous dispatch failure with launch request id suppresses merge-agent f
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-ambiguous-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir },
   });
   const err = new Error('dispatch transport failed');
@@ -3618,7 +3794,7 @@ test('stale pending lease from pre-dispatch failure is repaired on the next tick
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-stale-pending-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir },
   });
   acquireAmaCloserLease({
@@ -3780,7 +3956,7 @@ test('interrupted in-flight dispatch at the redispatch bound is reclaimed, not e
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-interrupted-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir },
   });
   const identity = {
@@ -3831,7 +4007,7 @@ test('live pending lease below redispatch bound does not consume a phantom retry
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-live-pending-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir },
   });
   const identity = {
@@ -3888,7 +4064,7 @@ test('genuine repeated dispatch failures at the bound are still exhausted', asyn
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-dispatch-genuine-exhausted-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: { rootDir },
   });
   const identity = {
@@ -3941,7 +4117,7 @@ test('terminal AMA audit releases a stale lease so the same head can be retried'
     status: 'superseded',
   });
 
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     dispatchContext: {
       rootDir,
       ledgerTarget: { backend: 'sqlite', path: ledgerDb },
@@ -4170,7 +4346,7 @@ function buildFleetAwareExecMock({ providerStates = {}, dispatchStdout = 'dispat
 test('HHR: codex grounded + hammer closer falls back to claude-code with harness_fallback audit', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-hhr-fallback-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer', workerClassFallback: ['claude-code'] },
     dispatchContext: { rootDir },
   });
@@ -4225,7 +4401,7 @@ test('HHR: codex grounded + hammer closer falls back to claude-code with harness
 test('HHR regression: codex healthy → closer dispatches on the configured primary (no fallback, auto-revert)', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-hhr-healthy-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer', workerClassFallback: ['claude-code'] },
     dispatchContext: { rootDir },
   });
@@ -4256,7 +4432,7 @@ test('HHR: fallback preserves the hammer terminal-remediation prompt + merge-und
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const reviewedHead = '40e302440e302440e302440e302440e302440e3024';
   const currentHead = '6358df76358df76358df76358df76358df76358d';
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: {
       workerClass: 'hammer',
       workerClassFallback: ['claude-code'],
@@ -4311,7 +4487,7 @@ test('HHR: fallback preserves the hammer terminal-remediation prompt + merge-und
 test('HHR: alert transport down → fail-open (dispatch still falls back and merges)', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-hhr-alert-down-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer', workerClassFallback: ['claude-code'] },
     dispatchContext: { rootDir },
   });
@@ -4343,7 +4519,7 @@ test('HHR: alert transport down → fail-open (dispatch still falls back and mer
 test('HHR: no fallback configured ([]) keeps the codex-capped primary (no fleet query)', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-hhr-no-fallback-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleFixture({
+  const { reviewState, prMetadata, cfg, dispatchContext } = hammerFixture({
     cfg: { workerClass: 'hammer', workerClassFallback: [] },
     dispatchContext: { rootDir },
   });

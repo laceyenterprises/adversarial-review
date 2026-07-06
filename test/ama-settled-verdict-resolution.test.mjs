@@ -505,7 +505,7 @@ test('E2E: comment-only + empty section no longer emits blocking-findings-unknow
   assert.equal(result.eligible, true, `expected eligible, reasons: ${JSON.stringify(result.reasons)}`);
 });
 
-test('E2E: settled-success + eligible + clean mergeability dispatches AMA closer', async (t) => {
+test('E2E (MSM-04): settled-success + eligible + clean mergeability is daemon-owned — no closer agent', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-settled-clean-dispatch-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -585,11 +585,14 @@ test('E2E: settled-success + eligible + clean mergeability dispatches AMA closer
     readTemplateImpl: () => 'Close PR {{PR_URL}} at {{REVIEWED_SHA}} with {{MERGE_METHOD}}.',
   });
 
-  assert.equal(result.dispatched, true);
-  assert.equal(result.dispatchId, 'dispatch_clean');
-  assert.equal(execCalls.length, 1);
-  assert.equal(execCalls[0].args[execCalls[0].args.indexOf('--task-kind') + 1], 'merge');
-  assert.equal(execCalls[0].args[execCalls[0].args.indexOf('--completion-shape') + 1], 'decision-only');
+  // MSM-04 — the standalone AMA-closer agent (spawned solely to click merge) is
+  // deleted. A fully-clean, mergeable, settled-success closure is merged inline by
+  // the MSM-03 watcher daemon under its own lease; `maybeDispatchAmaCloser` spawns
+  // NO agent and routes the clean merge back to the daemon (skipMergeAgent).
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'clean-close-daemon-owned');
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(execCalls.length, 0, 'no hq dispatch for a clean daemon-owned close');
 });
 
 test('E2E: comment-only + real blocking finding stays ineligible (blocking-findings-present)', () => {

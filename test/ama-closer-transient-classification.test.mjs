@@ -80,15 +80,20 @@ test('isGithubRateLimitOrBrokerThrottle does NOT match unrelated bare 429 text',
 // the persisted redispatch budget toward dispatch-retry-exhausted.
 // ---------------------------------------------------------------------------
 
+// MSM-04 — a dispatching fixture. A fully-clean closure is now daemon-owned (no
+// agent), so to exercise the closer DISPATCH failure classification the review
+// must carry remediation work: a blocking finding at review-cycle exhaustion
+// makes the auto-hammer terminal-remediation lane fire and dispatch the hammer.
 function eligibleInputs(rootDir) {
   const headSha = 'abc12345abc12345abc12345abc12345abc12345';
   const reviewState = {
-    verdict: 'approved',
+    verdict: 'request-changes',
     headSha,
     riskClass: 'low',
     remediationPending: false,
+    reviewCycleExhausted: true,
     blockingFindingState: 'known',
-    blockingFindingCount: 0,
+    blockingFindingCount: 1,
     nonBlockingFindingState: 'known',
     nonBlockingFindingCount: 0,
     operatorApprovedEvidence: null,
@@ -112,6 +117,7 @@ function eligibleInputs(rootDir) {
   const cfg = {
     enabled: true,
     workerClass: 'hammer',
+    autoHammerOnEligibilityMiss: true,
     mergeMethod: 'squash',
     eligibility: {
       riskClasses: ['low'],

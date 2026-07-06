@@ -328,7 +328,10 @@ test('hammer that fails to close twice → exactly 2 dispatches, then GBI alert 
   assert.equal(alert.opts.event, 'ama_closer.hammer_retry_cap_exhausted');
   assert.equal(alert.opts.payload.repo, REPO);
   assert.equal(alert.opts.payload.prNumber, PR_NUMBER);
-  assert.equal(alert.opts.payload.headSha, 'head-3333333333333333333333333333333333333');
+  // MSM-04 — the alert/ledger anchor on the STABLE reviewed head (the job key),
+  // not the live head a prior hammer advanced (the deleted re-targeting used to
+  // put the moved head here). Head churn is exactly what the cap must survive.
+  assert.equal(alert.opts.payload.headSha, REVIEWED_HEAD);
   assert.equal(alert.opts.payload.attemptCount, 2);
   assert.match(alert.text, new RegExp(`${REPO}#${PR_NUMBER}`));
   assert.match(alert.text, /suppressed to protect quota/);
@@ -421,10 +424,11 @@ test('a hammer-authored head move does NOT reset the counter', async (t) => {
 
   const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
   assert.equal(ledger.attemptCount, 2, 'head move under the same reviewed head did not reset the counter');
-  assert.deepEqual(
-    ledger.dispatchHeads,
-    ['move-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'move-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'],
-  );
+  // MSM-04 — the re-hammer loop is deleted: the dispatch no longer re-targets the
+  // moved live head, it anchors on the STABLE reviewed head. So both attempts
+  // record the reviewed head (deduped to one), which is even stronger evidence
+  // that a hammer-authored head move cannot spawn a fresh per-head record.
+  assert.deepEqual(ledger.dispatchHeads, [REVIEWED_HEAD]);
 });
 
 test('a genuinely fresh non-hammer review head resets the counter and re-enables dispatch', async (t) => {

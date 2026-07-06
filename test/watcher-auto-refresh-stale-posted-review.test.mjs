@@ -965,7 +965,7 @@ test('watcher suppresses stale-review auto-refresh when review-cycle cap is alre
   });
 });
 
-test('AMA #3084: exhausted stale posted review re-hammers the current head without requesting a fresh review', async () => {
+test('AMA #3084 (MSM-04): exhausted stale posted review does NOT re-target the current head (re-hammer loop deleted)', async () => {
   const rootDir = makeTempRoot();
   try {
     let liveReviewFetches = 0;
@@ -1040,14 +1040,21 @@ test('AMA #3084: exhausted stale posted review re-hammers the current head witho
     assert.equal(result.dispatched, true);
     assert.equal(captured.length, 1);
     assert.equal(captured[0].reviewState.reviewCycleExhausted, true);
+    // The reviewed head remains the job anchor.
     assert.equal(captured[0].reviewState.headSha, staleReviewedHead);
     assert.equal(captured[0].dispatchContext.reviewedSha, staleReviewedHead);
-    assert.equal(captured[0].dispatchContext.targetRemediationSha, currentHead);
-    assert.equal(captured[0].dispatchContext.dispatchRecordHeadSha, currentHead);
-    assert.equal(captured[0].dispatchContext.dispatchReason, 'exhausted-final-hammer');
+    // MSM-04 — the re-hammer loop is deleted: the watcher no longer re-targets the
+    // live current head at exhaustion. The dispatch context carries NONE of the
+    // former `exhausted-final-hammer` re-targeting fields; the one hammer works the
+    // live PR branch itself, keyed on the stable reviewed head.
+    assert.equal(captured[0].dispatchContext.targetRemediationSha, undefined);
+    assert.equal(captured[0].dispatchContext.dispatchRecordHeadSha, undefined);
+    assert.equal(captured[0].dispatchContext.dispatchReason, undefined);
     assert.equal(captured[0].prMetadata.headSha, currentHead);
     assert.equal(liveReviewFetches, 0, 'no fresh adversarial review lookup is requested on exhaustion');
-    assert.match(warnings.join('\n'), /no fresh adversarial review/);
+    // The former "dispatching HAM against current head with no fresh review"
+    // warning is gone with the loop.
+    assert.doesNotMatch(warnings.join('\n'), /no fresh adversarial review/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

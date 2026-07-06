@@ -5451,28 +5451,21 @@ async function maybeDispatchAmaClosureFor({
     });
   }
   const currentPrHeadSha = candidate?.headSha || currentRevisionRef || null;
-  const exhaustedStaleReviewNeedsCurrentHeadHammer = Boolean(
-    reviewCycleExhausted &&
-      gateSnapshot.reviewedHeadSha &&
-      currentPrHeadSha &&
-      String(gateSnapshot.reviewedHeadSha) !== String(currentPrHeadSha)
-  );
-  if (exhaustedStaleReviewNeedsCurrentHeadHammer) {
-    logger?.warn?.(
-      `[watcher] AMA final-hammer exhaustion for ${repoPath}#${prNumber}: ` +
-        `posted review head ${String(gateSnapshot.reviewedHeadSha).slice(0, 12)} is stale; ` +
-        `dispatching HAM terminal remediation against current head ${String(currentPrHeadSha).slice(0, 12)} ` +
-        `with no fresh adversarial review`
-    );
-  }
+  // MSM-04 — the `exhaustedStaleReviewNeedsCurrentHeadHammer` re-hammer loop is
+  // deleted. It used to re-target the LIVE current head for a fresh HAM terminal
+  // remediation whenever the reviewed head was stale at exhaustion; because every
+  // HAM commit advanced the head, that reviewed→current gap re-opened each pass
+  // and re-dispatched another hammer — the #3123 quota-burning loop. The one
+  // hammer now remediates the live PR branch and merges once under its own lease
+  // (keyed on the stable reviewed head + bounded by the per-PR hammer retry cap),
+  // so no current-head re-targeting or re-dispatch is needed.
 
   const reviewState = {
     verdict: gateSnapshot.settledReview?.verdict || '',
-    // `headSha` is the head the adversarial reviewer actually reviewed. At
-    // review-budget exhaustion the watcher may still target the current PR head
-    // for HAM terminal remediation, but that live target travels separately in
-    // dispatchContext.targetRemediationSha so audit and stale-review guards can
-    // see the review/head gap.
+    // `headSha` is the head the adversarial reviewer actually reviewed. The one
+    // hammer remediates the live PR branch and merges under its own lease keyed on
+    // this reviewed head (MSM-04 removed the current-head re-targeting that armed
+    // the #3123 re-hammer loop), so the reviewed head is the stable job anchor.
     headSha: gateSnapshot.reviewedHeadSha,
     riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || ledgerRiskClass || 'unknown').toLowerCase(),
     remediationPending: gateSnapshot.settledReview?.remediationPending,
@@ -5582,13 +5575,6 @@ async function maybeDispatchAmaClosureFor({
     parentSession: process.env.HQ_PARENT_SESSION || 'session:unknown:airlock+watcher',
     dispatchedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     orchestrationMode,
-    ...(exhaustedStaleReviewNeedsCurrentHeadHammer
-      ? {
-          targetRemediationSha: currentPrHeadSha,
-          dispatchRecordHeadSha: currentPrHeadSha,
-          dispatchReason: 'exhausted-final-hammer',
-        }
-      : {}),
   };
 
   let result;

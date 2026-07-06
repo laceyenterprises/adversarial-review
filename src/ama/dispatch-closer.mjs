@@ -78,7 +78,8 @@ const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
 const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const AGENT_OS_TOOLING_REPO = 'agent-os';
 const ADVERSARIAL_REVIEW_REPO = 'adversarial-review';
-const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
+// MSM-04: the plain `ama-closer-prompt.md` (click-merge-only closer) is no longer
+// dispatched — the only surviving agent path is the terminal-remediation hammer.
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
 const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
   'blocking-findings-present',
@@ -107,19 +108,66 @@ const HAMMER_AUTO_REMEDIABLE_MISS_REASONS = new Set([
   'ci-not-green', // hammer fixes the failing required checks (green-main bar), then merges
 ]);
 
+// Findings / dirty-state reasons a terminal HAM pass can actually act on. A
+// hammer dispatched for one of these has real remediation work: findings to
+// resolve, a not-mergeable state (conflict / behind main) to rebase+resolve, or
+// red CI to fix. NOTE: `stale-review-head` is deliberately NOT here — a stale
+// reviewed head with nothing else wrong is not remediation work, it just means
+// the current head needs a fresh review (see below).
+const HAMMER_REMEDIABLE_WORK_REASONS = new Set([
+  'non-blocking-findings-present',
+  'non-blocking-findings-unknown',
+  'blocking-findings-present',
+  'blocking-findings-unknown',
+  'verdict-not-settled-success',
+  'remediation-pending',
+  'remediation-state-unknown',
+  'pr-not-mergeable',
+  'ci-not-green',
+]);
+
+// STRUCTURAL hard-stop misses a hammer can NEVER remediate: a SPEC §4.2 hard-stop
+// LABEL (`do-not-merge`, `no-merge-hold`, `merge-agent-skip`, the unfixable-blocker
+// `adversarial-merge-blocked`, etc.), emitted by the eligibility predicate as
+// `label-<name>`. An operator (or policy) has explicitly barred the merge, so the
+// closure must NOT auto-hammer even at review-cycle exhaustion — spawning an agent
+// there would defy the hard-stop. (A disallowed risk class remains the hammer's
+// terminal-rescue business at exhaustion; self-merge / identity hard-stops are
+// enforced downstream at the merge gate, which the one hammer re-validates
+// fail-closed under its lease.)
+function hasStructuralHardStopReason(reasons) {
+  return reasons.some((reason) => String(reason).startsWith('label-'));
+}
+
 export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   if (!Array.isArray(reasons) || reasons.length === 0) return false;
-  if (options?.reviewCycleExhausted === true) return true;
-  // The hammer must have something it can actually act on: non-blocking findings
-  // to remediate, a not-mergeable state (conflict / behind) to rebase+resolve, or
-  // red CI to fix.
+  // A structural hard-stop LABEL (operator/policy merge bar) is never
+  // hammer-remediable, at any phase — preserve every hard gate.
+  if (hasStructuralHardStopReason(reasons)) return false;
+  // The hammer must have something it can actually act on: findings to remediate,
+  // a not-mergeable state (conflict / behind) to rebase+resolve, or red CI to fix.
+  const hasRemediableWork = reasons.some((reason) => HAMMER_REMEDIABLE_WORK_REASONS.has(reason));
+  if (options?.reviewCycleExhausted === true) {
+    // At review-cycle exhaustion the hammer is the terminal rescue lane for any
+    // FINDINGS the final review still carries (blocking or non-blocking) or a
+    // dirty merge state (conflict / behind main / red CI). But a bare
+    // `stale-review-head` with NOTHING to remediate — a clean, mergeable, green
+    // PR whose reviewed head merely advanced (e.g. a prior HAM commit moved it) —
+    // must NOT auto-hammer: re-hammering that head is exactly the #3123
+    // quota-burning re-hammer loop MSM-04 removes. Such a PR needs a fresh review
+    // of the new head, not another terminal remediation pass. Require genuine
+    // remediable work even at exhaustion.
+    return hasRemediableWork;
+  }
+  if (!hasRemediableWork) return false;
+  // Pre-exhaustion this is a narrow auto-repair lane: EVERY reason must be
+  // hammer-remediable — a co-occurring blocking finding, stale head, etc. means
+  // NOT auto-hammer (those go through the remediation rounds / operator).
   const hasActionable =
     reasons.includes('non-blocking-findings-present') ||
     reasons.includes('pr-not-mergeable') ||
     reasons.includes('ci-not-green');
   if (!hasActionable) return false;
-  // And EVERY reason must be hammer-remediable — a co-occurring blocking finding,
-  // stale head, etc. means NOT auto-hammer (those go through rounds / operator).
   return reasons.every((reason) => HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason));
 }
 
@@ -1493,16 +1541,14 @@ export async function maybeDispatchAmaCloser({
       `PR (reasons: ${(verdict.reasons || []).join(',')}) — hammer will remediate ` +
       `final findings/checks then re-validate the gate fail-closed`
     );
-    if (
-      reviewCycleExhausted &&
-      prMetadata?.headSha &&
-      reviewState?.headSha &&
-      prMetadata.headSha !== reviewState.headSha
-    ) {
-      dispatchContext.targetRemediationSha = prMetadata.headSha;
-      dispatchContext.dispatchRecordHeadSha ||= prMetadata.headSha;
-      dispatchContext.dispatchReason ||= 'exhausted-final-hammer';
-    }
+    // MSM-04 — the re-hammer loop is deleted. The prior code re-targeted the LIVE
+    // current head whenever the reviewed head was stale at exhaustion
+    // (`exhausted-final-hammer`). That re-targeting is exactly what produced the
+    // #3123 pathology: each HAM commit advanced the head → the reviewed head went
+    // stale → a fresh hammer was dispatched against the new head → repeat. The one
+    // hammer now remediates the live PR branch and merges once under its own
+    // lease, keyed on the STABLE reviewed head, so the per-PR hammer retry cap
+    // (keyed on the same job key) bounds it and the loop cannot re-arm.
     // fall through to the dispatch below (hammer template, remediation mode)
     forceHammerWorkerClass = true;
   }
@@ -1510,26 +1556,33 @@ export async function maybeDispatchAmaCloser({
   // Compose the prompt body. Template loaded from disk via DI so
   // tests can pass a literal.
   const workerClass = forceHammerWorkerClass ? 'hammer' : String(cfg?.workerClass || 'hammer');
-  // SPEC §1.1.1: the HAM terminal-remediation prompt is reserved for closures
-  // that actually have findings to remediate. With `hammer` now the default
-  // worker class, gating purely on `workerClass === 'hammer'` would route every
-  // clean closure through the terminal-remediation mandate. Require both the
-  // hammer worker class AND a closure that genuinely needs terminal remediation;
-  // otherwise a hammer worker performs an ordinary clean close. Auto-hammer
-  // eligibility misses force the terminal prompt because that worker is being
-  // launched to repair findings, mergeability, or CI before merge.
-  const useHammerTerminalRemediationPrompt =
-    workerClass === 'hammer' && (
-      forceHammerTerminalRemediationPrompt ||
-      amaClosureNeedsTerminalRemediation(verdict)
-    );
+  // MSM-04 — the standalone AMA-closer agent (a worker spawned SOLELY to click
+  // merge on an already-clean, mergeable PR) is deleted. A fully-clean, green,
+  // mergeable settled PR is merged inline by the MSM-03 watcher daemon under its
+  // own lease — no agent is spawned for it. The hammer (terminal remediation,
+  // MSM-01) is now the ONLY surviving agent dispatch, and it is launched only when
+  // the closure has genuine remediation work: findings (blocking or non-blocking),
+  // a not-mergeable state (conflict / behind main), or red CI. Prompt selection is
+  // therefore DECOUPLED from the harness `workerClass`: whenever we dispatch we
+  // dispatch the terminal-remediation hammer prompt, regardless of which harness
+  // (codex / claude-code / gemini) the worker class routes it to. A closure with
+  // nothing to remediate never spawns an agent — it routes back to the daemon.
+  const needsTerminalRemediation =
+    forceHammerTerminalRemediationPrompt || amaClosureNeedsTerminalRemediation(verdict);
+  if (!needsTerminalRemediation) {
+    return noAmaDispatch({
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'clean-close-daemon-owned',
+      workerClass,
+    });
+  }
+  // Past this point we ALWAYS dispatch the terminal-remediation hammer (the only
+  // surviving agent). The `current-head final hammer` idempotency guard downstream
+  // keys purely on review-cycle exhaustion now that the prompt is unconditional.
   const currentHeadFinalHammerTerminalRemediation =
-    useHammerTerminalRemediationPrompt &&
-    workerClass === 'hammer' &&
     reviewState?.reviewCycleExhausted === true;
-  const templatePath = dispatchContext.templatePath || (
-    useHammerTerminalRemediationPrompt ? HAMMER_TEMPLATE_PATH : TEMPLATE_PATH
-  );
+  const templatePath = dispatchContext.templatePath || HAMMER_TEMPLATE_PATH;
   const templateBody = readTemplateImpl
     ? readTemplateImpl(templatePath)
     : readFileSync(templatePath, 'utf8');
@@ -1561,9 +1614,6 @@ export async function maybeDispatchAmaCloser({
     riskClass: dispatchContext.riskClass,
     eligibilityReason: summarizeEligibilityReason(bootstrapEligibilityReasons),
     auditRef,
-    closedBy: workerClass === 'hammer' && !useHammerTerminalRemediationPrompt
-      ? 'hammer-closer'
-      : undefined,
   });
   const prompt = composeCloserPrompt({
     prUrl: dispatchContext.prUrl,

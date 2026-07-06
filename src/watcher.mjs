@@ -78,7 +78,7 @@ import {
   unknownReviewerCommandFailureClass,
 } from './reviewer-failure-classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision, resolveQuotaResetIso } from './quota-exhaustion.mjs';
-import { execGhWithRetry } from './gh-cli.mjs';
+import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import {
   createReviewerRuntimeAdapterByName,
   createReviewerRuntimeAdapterForDomain,
@@ -5536,6 +5536,9 @@ async function maybeDispatchAmaClosureFor({
           });
       allowStaleReviewHeadHammerResume = closerCommitSuppression?.suppressed === true;
     } catch (err) {
+      if (!isTransientGhError(err)) {
+        throw err;
+      }
       logger?.warn?.(
         `[watcher] HAM stale-head resume proof failed for ${repoPath}#${prNumber} ` +
           `head=${String(currentPrHeadSha || '').slice(0, 12)}; not allowing hammer resume: ` +

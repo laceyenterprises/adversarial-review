@@ -401,6 +401,7 @@ test('exhausted final hammer keys dispatch on reviewed head while targeting the 
       reviewedSha: reviewedHead,
       targetRemediationSha: currentHead,
       dispatchRecordHeadSha: reviewedHead,
+      allowStaleReviewHeadHammerResume: true,
       riskClass: 'medium',
     },
   });
@@ -904,6 +905,7 @@ test('auto-hammer dispatches exhausted CONFLICTING stale-head PRs through hammer
       reviewedSha: reviewedHead,
       targetRemediationSha: currentHead,
       dispatchRecordHeadSha: reviewedHead,
+      allowStaleReviewHeadHammerResume: true,
       riskClass: 'medium',
       templatePath: null,
     },
@@ -926,7 +928,7 @@ test('auto-hammer dispatches exhausted CONFLICTING stale-head PRs through hammer
   assert.equal(
     isHammerRemediableEligibilityMiss(
       ['pr-not-mergeable', 'stale-review-head', 'verdict-not-settled-success', 'blocking-findings-unknown'],
-      { reviewCycleExhausted: true },
+      { reviewCycleExhausted: true, allowStaleReviewHeadHammerResume: true },
     ),
     true,
     '#3105 exhausted conflict reason set is hammer-remediable',
@@ -1019,6 +1021,14 @@ test('#3123: a clean stale-head (prior HAM commit advanced the head) spawns no h
     false,
     'a clean stale-review-head must not be hammer-remediable at exhaustion',
   );
+  assert.equal(
+    isHammerRemediableEligibilityMiss(
+      ['stale-review-head', 'verdict-not-settled-success'],
+      { reviewCycleExhausted: true },
+    ),
+    false,
+    'an unproved stale head must not become hammer-remediable just because it has other remediable work',
+  );
   assert.equal(result.dispatched, false, 'no hammer is dispatched for a clean stale head');
   assert.equal(exec.calls.length, 0, 'no hq dispatch for a clean stale head (#3123 loop guard)');
   assert.equal(write.captured.body, null, 'no prompt is written for a clean stale head');
@@ -1076,6 +1086,14 @@ test('clean stale-head can resume hammer only after closer-authored head proof',
     }),
     true,
     'proved closer-authored stale heads can resume the hammer at exhaustion',
+  );
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['stale-review-head', 'verdict-not-settled-success'], {
+      reviewCycleExhausted: true,
+      allowStaleReviewHeadHammerResume: true,
+    }),
+    true,
+    'proved closer-authored stale heads can carry remediable work through the terminal hammer lane',
   );
   assert.equal(result.dispatched, true);
   assert.equal(result.workerClass, 'hammer');
@@ -4359,6 +4377,22 @@ test('isHammerRemediableEligibilityMiss fires narrowly before exhaustion and for
   );
   assert.equal(
     isHammerRemediableEligibilityMiss(
+      ['stale-review-head', 'verdict-not-settled-success'],
+      { reviewCycleExhausted: true },
+    ),
+    false,
+    'exhausted unproved stale heads do not route to hammer',
+  );
+  assert.equal(
+    isHammerRemediableEligibilityMiss(
+      ['stale-review-head', 'verdict-not-settled-success'],
+      { reviewCycleExhausted: true, allowStaleReviewHeadHammerResume: true },
+    ),
+    true,
+    'exhausted proved stale heads route to hammer',
+  );
+  assert.equal(
+    isHammerRemediableEligibilityMiss(
       ['ci-not-green', 'blocking-findings-present', 'risk-class-not-permitted'],
       { reviewCycleExhausted: true },
     ),
@@ -4517,7 +4551,15 @@ test('HHR: fallback preserves the hammer terminal-remediation prompt + merge-und
       blockingFindingCount: 1,
     },
     prMetadata: { headSha: currentHead, mergeableState: 'MERGEABLE' },
-    dispatchContext: { rootDir, reviewedSha: reviewedHead, riskClass: 'medium', templatePath: null },
+    dispatchContext: {
+      rootDir,
+      reviewedSha: reviewedHead,
+      targetRemediationSha: currentHead,
+      dispatchRecordHeadSha: reviewedHead,
+      allowStaleReviewHeadHammerResume: true,
+      riskClass: 'medium',
+      templatePath: null,
+    },
   });
   const exec = buildFleetAwareExecMock({ providerStates: { openai: 'exhausted', anthropic: 'ok' } });
   const write = buildWriteMock();

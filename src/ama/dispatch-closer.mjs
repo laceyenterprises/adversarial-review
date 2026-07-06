@@ -156,7 +156,13 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
     // must NOT auto-hammer: re-hammering that head is exactly the #3123
     // quota-burning re-hammer loop MSM-04 removes. Such a PR needs a fresh review
     // of the new head, not another terminal remediation pass. Require genuine
-    // remediable work even at exhaustion.
+    // remediable work even at exhaustion. A stale reviewed head must first
+    // prove the live head was authored by the closer; otherwise human-pushed
+    // unreviewed code could pair `stale-review-head` with an otherwise
+    // remediable reason and bypass the adversarial review gate.
+    if (reasons.includes('stale-review-head') && !options?.allowStaleReviewHeadHammerResume) {
+      return false;
+    }
     if (hasRemediableWork) return true;
     const staleOnlyHammerResume =
       options?.allowStaleReviewHeadHammerResume === true

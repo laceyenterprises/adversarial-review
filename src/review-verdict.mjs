@@ -1,1 +1,1 @@
-export { extractReviewVerdict, normalizeEffectiveReviewVerdict, normalizeReviewVerdict } from './kernel/verdict.mjs';
+export { extractReviewVerdict, normalizeEffectiveReviewVerdict, normalizeReviewVerdict, sanitizeReviewPayloadBestEffort } from './kernel/verdict.mjs';

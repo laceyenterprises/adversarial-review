@@ -15,12 +15,71 @@ function normalizeWhitespace(text) {
     .trim();
 }
 
-function titleCaseWords(value) {
-  return String(value ?? '')
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-    .join(' ');
+const CANONICAL_REVIEW_SECTION_HEADINGS = new Map([
+  ['summary', 'Summary'],
+  ['blocking issues', 'Blocking issues'],
+  ['non-blocking issues', 'Non-blocking issues'],
+  ['suggested fixes', 'Suggested fixes'],
+  ['verdict', 'Verdict'],
+]);
+
+function canonicalReviewSectionHeading(value) {
+  const key = String(value ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+  return CANONICAL_REVIEW_SECTION_HEADINGS.get(key) ?? null;
+}
+
+function promoteCanonicalReviewSectionHeadings(text) {
+  return String(text ?? '').replace(
+    /^#{1,4}[ \t]+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)[ \t]*:?[ \t]*\r?$/gim,
+    (_, heading) => `## ${canonicalReviewSectionHeading(heading)}`,
+  );
+}
+
+const CANONICAL_REVIEW_SECTION_PATTERN = /^##[ \t]+(Summary|Blocking issues|Non-blocking issues|Suggested fixes|Verdict)[ \t]*$/gim;
+const TOP_LEVEL_REVIEW_SECTION_PATTERN = /^##[ \t]+\S.*$/gim;
+
+function canonicalReviewSectionMatches(text) {
+  return [...String(text ?? '').matchAll(CANONICAL_REVIEW_SECTION_PATTERN)];
+}
+
+function nextTopLevelReviewSectionIndex(text, afterIndex) {
+  const sectionPattern = new RegExp(TOP_LEVEL_REVIEW_SECTION_PATTERN);
+  sectionPattern.lastIndex = afterIndex;
+  const match = sectionPattern.exec(text);
+  return match ? match.index : text.length;
+}
+
+function trimCanonicalReviewSections(text, { requireSummaryAndVerdict = false } = {}) {
+  const normalizedText = String(text ?? '');
+  const matches = canonicalReviewSectionMatches(normalizedText);
+  if (matches.length === 0) return null;
+
+  const firstSeen = new Set();
+  const kept = [];
+  for (const match of matches) {
+    const heading = canonicalReviewSectionHeading(match[1]);
+    if (firstSeen.has(heading)) break;
+    firstSeen.add(heading);
+    kept.push({ heading, index: match.index, raw: match[0] });
+  }
+
+  if (requireSummaryAndVerdict && (!firstSeen.has('Summary') || !firstSeen.has('Verdict'))) {
+    throw new Error('Codex payload missing required Summary/Verdict sections');
+  }
+
+  const trimmedSections = kept.map((section) => {
+    const end = nextTopLevelReviewSectionIndex(
+      normalizedText,
+      section.index + section.raw.length,
+    );
+    return normalizeWhitespace(normalizedText.slice(section.index, end));
+  });
+
+  const sanitized = trimmedSections.join('\n\n').trim();
+  if (!sanitized) {
+    throw new Error('Codex payload was empty after sanitation');
+  }
+  return sanitized;
 }
 
 /**
@@ -35,49 +94,47 @@ function sanitizeCodexReviewPayload(reviewText) {
   // per-finding H3 cards the reviewer prompt now emits under the
   // Blocking/Non-blocking sections. Non-canonical `### ` / `#### `
   // headings are preserved so the card layout survives.
-  let text = normalizeWhitespace(reviewText)
-    .replace(
-      /^#{1,4}\s+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)\s*:?$/gim,
-      (_, heading) => `## ${titleCaseWords(heading)}`,
-    );
+  const text = promoteCanonicalReviewSectionHeadings(normalizeWhitespace(reviewText));
 
-  const sectionRegex = /^##\s+(Summary|Blocking issues|Non-blocking issues|Suggested fixes|Verdict)\s*$/gim;
-  const matches = [...text.matchAll(sectionRegex)];
-  if (matches.length === 0) {
+  const sanitized = trimCanonicalReviewSections(text, { requireSummaryAndVerdict: true });
+  if (sanitized == null) {
     if (looksLikeRuntimeJunk(text)) {
       throw new Error('Codex payload did not contain recognizable review sections and still looked like runtime junk');
     }
     throw new Error('Codex payload did not contain recognizable review sections');
   }
 
-  const firstSeen = new Set();
-  const kept = [];
-  for (const match of matches) {
-    const heading = titleCaseWords(match[1]);
-    if (firstSeen.has(heading)) break;
-    firstSeen.add(heading);
-    kept.push({ heading, index: match.index, raw: match[0] });
-    if (heading === 'Verdict') break;
-  }
-
-  if (!firstSeen.has('Summary') || !firstSeen.has('Verdict')) {
-    throw new Error('Codex payload missing required Summary/Verdict sections');
-  }
-
-  const trimmedSections = [];
-  for (let i = 0; i < kept.length; i += 1) {
-    const start = kept[i].index;
-    const end = i + 1 < kept.length ? kept[i + 1].index : text.length;
-    trimmedSections.push(normalizeWhitespace(text.slice(start, end)));
-    if (kept[i].heading === 'Verdict') break;
-  }
-
-  const sanitized = trimmedSections.join('\n\n').trim();
-  if (!sanitized) {
-    throw new Error('Codex payload was empty after sanitation');
-  }
-
   return sanitized;
+}
+
+/**
+ * Best-effort canonicalization for reviewer output that is *expected* to already
+ * be in the canonical shape (claude / gemini, which are posted without the hard
+ * codex sanitize step). Runs the same heading-promotion + section-trim as
+ * `sanitizeCodexReviewPayload`, but NEVER throws: if the body is not recognizably
+ * canonical it is returned whitespace-normalized and otherwise unchanged.
+ *
+ * Rationale: gemini/agy output frequently emits the canonical `## Summary /
+ * ## Blocking issues / ## Verdict` sections at non-`##` heading levels (or with
+ * trailing colons), which the downstream verdict/blocking-finding parsers reject.
+ * A rejected body makes the review-cycle cap counter skip it AND makes the
+ * budget-exhausted final-pass closer refuse (`blockingFindingState='unknown'`),
+ * so gemini-reviewed PRs never close and re-enter the review loop unbounded.
+ * Promoting the headings here re-arms both the cap and the closer for gemini
+ * without changing the codex path (which keeps its throwing sanitize +
+ * forensic-dump behavior). A body that still can't be canonicalized is posted
+ * as-is and is bounded by the format-independent review-cycle cap.
+ */
+function sanitizeReviewPayloadBestEffort(reviewText) {
+  const text = String(reviewText ?? '');
+  try {
+    return sanitizeCodexReviewPayload(text);
+  } catch {
+    const fallback = promoteCanonicalReviewSectionHeadings(normalizeWhitespace(text));
+    const trimmed = trimCanonicalReviewSections(fallback);
+    if (trimmed) return trimmed;
+    return fallback;
+  }
 }
 
 function extractReviewVerdict(reviewBody) {
@@ -261,10 +318,8 @@ function normalizeReviewVerdict(verdict) {
   return 'unknown';
 }
 
-// titleCaseWords is intentionally not exported — it's a private helper of
-// sanitizeCodexReviewPayload. normalizeWhitespace is now used directly by
-// reviewer.mjs (the second real caller invoked by the prior comment), so
-// it is exported here rather than duplicated inline.
+// normalizeWhitespace is used directly by reviewer.mjs, so it is exported here
+// rather than duplicated inline.
 export {
   classifyStructuredBlockingIssues,
   extractReviewVerdict,
@@ -273,4 +328,5 @@ export {
   normalizeReviewVerdict,
   normalizeWhitespace,
   sanitizeCodexReviewPayload,
+  sanitizeReviewPayloadBestEffort,
 };

@@ -54,7 +54,7 @@ import {
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE, loadConfigCached } from './config-loader.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import classifyMergeAgentRescue, { parseReviewBody as parseMergeAgentRescueReviewBody } from './merge-agent-rescue-classifier.mjs';
-import { extractReviewVerdict, normalizeEffectiveReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
+import { extractReviewVerdict, normalizeEffectiveReviewVerdict, normalizeReviewVerdict, sanitizeReviewPayloadBestEffort } from './review-verdict.mjs';
 import {
   readLatestWorkerRunStatusFromLedger,
 } from './session-ledger-read-adapter.mjs';
@@ -5698,10 +5698,20 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
 }
 
 function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
-  const parsed = parseMergeAgentRescueReviewBody(reviewBody);
+  // Defense-in-depth format-independence: canonicalize the posted body before
+  // parsing so a non-`##`-headed gemini/agy review (which reviewer-side
+  // sanitation now normalizes at post time, but which may already be posted
+  // un-canonicalized on an in-flight PR) still yields a parseable
+  // `## Blocking issues` section. Without this the closer resolves
+  // `state:'unknown'` on such bodies and REFUSES the budget-exhausted final
+  // pass, so the PR never closes and re-enters the review loop.
+  const parsed = parseMergeAgentRescueReviewBody(sanitizeReviewPayloadBestEffort(reviewBody));
   const normalizedVerdict = normalizeReviewVerdict(lastVerdict);
+  const verdictKey = normalizedVerdict === 'unknown'
+    ? String(lastVerdict || '').trim().toLowerCase()
+    : normalizedVerdict;
   if (parsed.blocking.missing) {
-    return normalizedVerdict === 'request-changes'
+    return verdictKey === 'request-changes'
       ? { count: 0, state: 'unknown' }
       : { count: 0, state: 'known' };
   }
@@ -5710,7 +5720,7 @@ function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
 
 function classifyNonBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
   if (!String(reviewBody ?? '').trim()) return { count: 0, state: 'unknown' };
-  const parsed = parseMergeAgentRescueReviewBody(reviewBody);
+  const parsed = parseMergeAgentRescueReviewBody(sanitizeReviewPayloadBestEffort(reviewBody));
   const normalizedVerdict = normalizeReviewVerdict(lastVerdict);
   const verdictKey = normalizedVerdict === 'unknown'
     ? String(lastVerdict || '').trim().toLowerCase()

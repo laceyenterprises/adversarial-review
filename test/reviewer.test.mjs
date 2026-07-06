@@ -2312,6 +2312,38 @@ test('mergeChunkedAgyReviews merges only issue bullets from child review section
   assert.equal((merged.match(/## Summary/g) || []).length, 1);
 });
 
+test('mergeChunkedAgyReviews sanitizes each child before extracting sections', () => {
+  const merged = mergeChunkedAgyReviews([
+    {
+      reviewText: [
+        '### Summary',
+        'First chunk.',
+        '',
+        '### Blocking issues:',
+        '- **First chunk blocker**',
+        '',
+        '### Verdict',
+        'Request changes',
+      ].join('\n'),
+    },
+    {
+      reviewText: [
+        '### Summary',
+        'Second chunk.',
+        '',
+        '### Blocking issues:',
+        '- **Second chunk blocker**',
+        '',
+        '### Verdict',
+        'Request changes',
+      ].join('\n'),
+    },
+  ]);
+
+  assert.match(merged, /## Blocking issues\n- \*\*First chunk blocker\*\*\n- \*\*Second chunk blocker\*\*/);
+  assert.match(merged, /## Verdict\nRequest changes/);
+});
+
 test('mergeChunkedAgyReviews derives verdict from merged blocking issues', () => {
   const merged = mergeChunkedAgyReviews([
     {

@@ -21,7 +21,28 @@ function tempRoot() {
 function loadAmaEnabledConfig() {
   return {
     getMergeAuthorityConfig() {
-      return { enabled: true, mergeMethod: 'squash' };
+      return {
+        enabled: true,
+        mergeMethod: 'squash',
+        autonomousMergeExecutionEnabled: true,
+        strictMode: true,
+      };
+    },
+    getOrchestrationMode() {
+      return 'native';
+    },
+  };
+}
+
+function loadAmaEnabledAutonomousDisabledConfig() {
+  return {
+    getMergeAuthorityConfig() {
+      return {
+        enabled: true,
+        mergeMethod: 'squash',
+        autonomousMergeExecutionEnabled: false,
+        strictMode: true,
+      };
     },
     getOrchestrationMode() {
       return 'native';
@@ -34,7 +55,19 @@ function baseArgs(rootDir) {
     rootDir,
     reviewStateRow: {
       review_status: 'posted',
-      review_body: '## Verdict\n\nComment only',
+      review_body: [
+        '## Blocking Issues',
+        '',
+        '- None.',
+        '',
+        '## Non-blocking Issues',
+        '',
+        '- None.',
+        '',
+        '## Verdict',
+        '',
+        'Comment only',
+      ].join('\n'),
       reviewer_head_sha: 'head-live',
       reviewer: 'codex',
     },
@@ -163,6 +196,85 @@ test('daemon not-taken (findings present) → falls through to the closer/hammer
     assert.equal(result.dispatched, true);
     assert.equal(result.reason, 'closer-took-over');
     assert.ok(seenReviewState, 'closer received the reviewState');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('autonomous merge execution disabled → fail-closed audit; no daemon, closer, or old-path dispatch', async () => {
+  const rootDir = tempRoot();
+  try {
+    let daemonCalls = 0;
+    let closerCalls = 0;
+    const audits = [];
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      loadConfigImpl: loadAmaEnabledAutonomousDisabledConfig,
+      runDaemonCleanMergeAttemptImpl: async () => {
+        daemonCalls += 1;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, reason: 'should-not-run' };
+      },
+      maybeDispatchAmaCloserImpl: async () => {
+        closerCalls += 1;
+        return { dispatched: true };
+      },
+      writeAutonomousMergeDisabledAuditImpl: (entry) => {
+        audits.push(entry);
+        return { written: true };
+      },
+      env: { HQ_ROOT: '/tmp/hq-root-for-test' },
+    });
+
+    assert.equal(daemonCalls, 0, 'flag OFF must not execute daemon merge');
+    assert.equal(closerCalls, 0, 'flag OFF must not dispatch hammer/old closer path');
+    assert.equal(result.dispatched, false);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.reason, 'autonomous-merge-execution-disabled');
+    assert.equal(result.autonomousMergeDisabled.path, 'hammer-merge');
+    assert.deepEqual(result.autonomousMergeDisabled.flagState, {
+      autonomousMergeExecutionEnabled: false,
+      strictMode: true,
+    });
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].path, 'hammer-merge');
+    assert.equal(audits[0].flagState.autonomousMergeExecutionEnabled, false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('watcher passes strict_mode false into daemon merge attempt', async () => {
+  const rootDir = tempRoot();
+  try {
+    let seenCfg = null;
+    const cfgLoader = () => ({
+      getMergeAuthorityConfig() {
+        return {
+          enabled: true,
+          mergeMethod: 'squash',
+          autonomousMergeExecutionEnabled: true,
+          strictMode: false,
+        };
+      },
+      getOrchestrationMode() {
+        return 'native';
+      },
+    });
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      loadConfigImpl: cfgLoader,
+      runDaemonCleanMergeAttemptImpl: async ({ cfg }) => {
+        seenCfg = cfg;
+        return {
+          disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+          reason: 'not-eligible',
+        };
+      },
+      maybeDispatchAmaCloserImpl: async () => ({ dispatched: false, reason: 'not-eligible' }),
+    });
+
+    assert.equal(seenCfg.strictMode, false);
+    assert.equal(result.amaEnabled, true);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -334,10 +446,15 @@ test('watcher fails closed on permanent HAM stale-head resume proof errors', asy
 test('daemon gh merge subprocess is bounded by the shared timeout', async () => {
   const rootDir = tempRoot();
   let capturedOptions = null;
+  let capturedAttemptArgs = null;
   try {
     const result = await runDaemonCleanMergeAttempt({
       rootDir,
-      cfg: { mergeMethod: 'squash' },
+      cfg: {
+        mergeMethod: 'squash',
+        autonomousMergeExecutionEnabled: true,
+        strictMode: false,
+      },
       repoPath: 'acme/repo',
       prNumber: 300,
       candidate: {
@@ -384,18 +501,25 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
         },
       }),
       releaseMergeLeaseImpl: () => {},
-      attemptDaemonCleanMergeImpl: async ({ runMergeImpl }) => runMergeImpl({
+      attemptDaemonCleanMergeImpl: async (attemptArgs) => {
+        capturedAttemptArgs = attemptArgs;
+        return attemptArgs.runMergeImpl({
         repo: 'acme/repo',
         prNumber: 300,
         head: 'head-live',
         mergeMethod: 'squash',
-      }),
+        });
+      },
       logger: { warn() {}, log() {} },
       env: { HQ_ROOT: '/tmp/hq' },
     });
 
     assert.equal(result.exitCode, 0);
     assert.equal(capturedOptions.timeout, DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS);
+    assert.deepEqual(capturedAttemptArgs.flags, {
+      autonomousMergeExecutionEnabled: true,
+      strictMode: false,
+    });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

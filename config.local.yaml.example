@@ -40,3 +40,16 @@ reviewer:
     runtime: antigravity
     antigravity:
       print_timeout_ms: 1140000
+
+# MSM hard cutover controls. One-line disable fallback:
+# roles.adversarial.merge_authority.autonomous_merge_execution_enabled: false
+# Then bounce the adversarial watcher. Disabled mode does not restore the old
+# closer; it writes a fail-closed audit and leaves the PR for manual operator
+# intervention.
+roles:
+  adversarial:
+    merge_authority:
+      autonomous_merge_execution_enabled: true
+      # Default on: daemon merges only zero-finding reviews. false permits
+      # daemon merge over known non-blocking findings.
+      strict_mode: true

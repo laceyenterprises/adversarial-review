@@ -5,6 +5,7 @@ import {
   attemptDaemonCleanMerge,
   classifyDaemonMergeError,
   daemonMergeBackoffMs,
+  isDaemonMergeReviewAllowed,
   isFullyCleanSettledReview,
   DAEMON_MERGE_CLOSURE_AUTHORITY,
   DAEMON_MERGE_DISPOSITION,
@@ -164,6 +165,26 @@ test('isFullyCleanSettledReview: any finding or unknown state → not clean', ()
   assert.equal(isFullyCleanSettledReview(cleanReview({ nonBlockingFindingState: 'unknown' })), false);
 });
 
+test('isDaemonMergeReviewAllowed: strict mode controls non-blocking daemon shortcut only', () => {
+  assert.equal(isDaemonMergeReviewAllowed(cleanReview(), { strictMode: true }), true);
+  assert.equal(
+    isDaemonMergeReviewAllowed(cleanReview({ nonBlockingFindingCount: 1 }), { strictMode: true }),
+    false,
+  );
+  assert.equal(
+    isDaemonMergeReviewAllowed(cleanReview({ nonBlockingFindingCount: 1 }), { strictMode: false }),
+    true,
+  );
+  assert.equal(
+    isDaemonMergeReviewAllowed(cleanReview({ blockingFindingCount: 1 }), { strictMode: false }),
+    false,
+  );
+  assert.equal(
+    isDaemonMergeReviewAllowed(cleanReview({ nonBlockingFindingState: 'unknown' }), { strictMode: false }),
+    false,
+  );
+});
+
 test('isFullyCleanSettledReview: known state still rejects missing or boolean counts', () => {
   assert.equal(isFullyCleanSettledReview(cleanReview({ blockingFindingCount: null })), false);
   assert.equal(isFullyCleanSettledReview(cleanReview({ nonBlockingFindingCount: '' })), false);
@@ -224,6 +245,11 @@ test('clean + eligible → daemon merges inline; daemon-merge audit; no local CI
   const terminal = doc.attempts[doc.attempts.length - 1];
   assert.equal(terminal.outcome, 'succeeded');
   assert.equal(terminal.path, DAEMON_MERGE_CLOSURE_AUTHORITY);
+  assert.deepEqual(terminal.flagState, {
+    autonomousMergeExecutionEnabled: true,
+    strictMode: true,
+  });
+  assert.deepEqual(terminal.eligibilityReasons, []);
 
   // The merge used --match-head-commit semantics on the validated head.
   assert.equal(h.lastMergeCtx.head, HEAD);

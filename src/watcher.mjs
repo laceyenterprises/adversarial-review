@@ -148,8 +148,11 @@ import {
   attemptDaemonCleanMerge,
   DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
   DAEMON_MERGE_DISPOSITION,
+  isDaemonMergeReviewAllowed,
 } from './ama/daemon-merge.mjs';
+import { evaluateMergeEligibility } from './ama/merge-eligibility.mjs';
 import { acquireMergeLease, releaseMergeLease } from './ama/merge-lease.mjs';
+import { writeAmaAuditEntry } from './ama/audit.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import {
   COEXISTENCE_ACTION,
@@ -5162,6 +5165,10 @@ async function runDaemonCleanMergeAttempt({
       reviewer: reviewStateRow?.reviewer || '',
       riskClass: reviewState?.riskClass || 'unknown',
     },
+    flags: {
+      autonomousMergeExecutionEnabled: cfg?.autonomousMergeExecutionEnabled !== false,
+      strictMode: cfg?.strictMode !== false,
+    },
     // Re-read the LIVE head + gate before each merge attempt (retry included).
     fetchLiveGateImpl: async () => {
       const rollup = await fetchRollupImpl(repoPath, prNumber, { execFileImpl });
@@ -5223,6 +5230,63 @@ async function runDaemonCleanMergeAttempt({
   });
 }
 
+function writeAutonomousMergeDisabledAudit({
+  hqRoot,
+  repoPath,
+  prNumber,
+  headSha,
+  path,
+  eligibilityReasons = [],
+  flagState = {},
+  reviewStateRow = {},
+  reviewState = {},
+  writeAuditImpl = writeAmaAuditEntry,
+  now = new Date().toISOString(),
+  logger = console,
+} = {}) {
+  if (!hqRoot || !repoPath || !Number.isFinite(Number(prNumber)) || !headSha) {
+    return { written: false, reason: 'audit-inputs-missing' };
+  }
+  const normalizedPath = path === 'hammer-merge' ? 'hammer-merge' : 'daemon-merge';
+  const normalizedReasons = Array.isArray(eligibilityReasons) ? eligibilityReasons : [];
+  const normalizedFlagState = {
+    autonomousMergeExecutionEnabled: flagState.autonomousMergeExecutionEnabled === true,
+    strictMode: flagState.strictMode !== false,
+  };
+  try {
+    writeAuditImpl({
+      hqRoot,
+      repo: repoPath,
+      prNumber: Number(prNumber),
+      headSha,
+      attempt: {
+        outcome: 'failed-without-merge',
+        path: normalizedPath,
+        attemptPhase: 'autonomous-merge-disabled',
+        reason: 'autonomous-merge-execution-disabled',
+        eligibilityReasons: normalizedReasons,
+        preMergeReasons: normalizedReasons,
+        flagState: normalizedFlagState,
+        validatedHead: headSha,
+      },
+      metadata: {
+        closureAuthority: normalizedPath,
+        reviewer: reviewStateRow?.reviewer || '',
+        riskClass: reviewState?.riskClass || 'unknown',
+        flagState: normalizedFlagState,
+      },
+      now,
+    });
+    return { written: true, reason: 'autonomous-merge-execution-disabled' };
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] autonomous merge disabled audit failed for ${repoPath}#${prNumber}@${headSha}: ` +
+        `${err?.message || err}`,
+    );
+    return { written: false, reason: 'audit-write-failed' };
+  }
+}
+
 /**
  * Resolve the AMA cfg subtree, build (reviewState, prMetadata)
  * snapshots from the watcher's existing row + candidate data, and
@@ -5263,6 +5327,8 @@ async function maybeDispatchAmaClosureFor({
   resolveReviewCycleExhaustionImpl = null,
   runDaemonCleanMergeAttemptImpl = runDaemonCleanMergeAttempt,
   resolveHeadCloserCommitSuppressionImpl = null,
+  writeAutonomousMergeDisabledAuditImpl = writeAutonomousMergeDisabledAudit,
+  env = process.env,
 }) {
   let cfg;
   let orchestrationMode;
@@ -5502,6 +5568,63 @@ async function maybeDispatchAmaClosureFor({
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
     author: candidate?.prAuthor || null,
   };
+
+  const strictMode = cfg?.strictMode !== false;
+  const autonomousMergeExecutionEnabled = cfg?.autonomousMergeExecutionEnabled !== false;
+  const autonomousFlagState = {
+    autonomousMergeExecutionEnabled,
+    strictMode,
+  };
+  const settledVerdict = SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict)
+    ? 'settled-success'
+    : String(gateSnapshot?.settledReview?.verdict || '');
+  const wouldUseDaemonPath = isDaemonMergeReviewAllowed(reviewState, { strictMode });
+  const disabledEligibility = evaluateMergeEligibility({
+    verdict: settledVerdict,
+    leaseHeld: true,
+    requiredChecks: prMetadata.statusCheckRollup,
+    mergeable: mergeabilityForGate?.mergeable,
+    mergeStateStatus: mergeabilityForGate?.mergeStateStatus,
+    prState: String(candidate?.prState || 'open').toUpperCase(),
+    candidateHead: currentPrHeadSha || candidate?.headSha || '',
+    validatedHead: reviewState.headSha,
+  });
+  if (!autonomousMergeExecutionEnabled) {
+    const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
+    const disabledAudit = writeAutonomousMergeDisabledAuditImpl({
+      hqRoot,
+      repoPath,
+      prNumber,
+      headSha: reviewState.headSha,
+      path: wouldUseDaemonPath ? 'daemon-merge' : 'hammer-merge',
+      eligibilityReasons: disabledEligibility.reasons,
+      flagState: autonomousFlagState,
+      reviewStateRow,
+      reviewState,
+      logger,
+    });
+    logger?.warn?.(
+      `[watcher] autonomous merge execution disabled for ${repoPath}#${prNumber}` +
+        `@${String(reviewState.headSha || '').slice(0, 12)}; ` +
+        `would_path=${wouldUseDaemonPath ? 'daemon-merge' : 'hammer-merge'} ` +
+        `audit=${disabledAudit?.written ? 'written' : disabledAudit?.reason || 'not-written'}`,
+    );
+    return withAmaDispatchMetadata(
+      {
+        dispatched: false,
+        skipMergeAgent: true,
+        reason: 'autonomous-merge-execution-disabled',
+        autonomousMergeDisabled: {
+          path: wouldUseDaemonPath ? 'daemon-merge' : 'hammer-merge',
+          eligibilityReasons: disabledEligibility.reasons,
+          flagState: autonomousFlagState,
+          auditWritten: Boolean(disabledAudit?.written),
+        },
+      },
+      { amaEnabled: true },
+    );
+  }
+
   let allowStaleReviewHeadHammerResume = false;
   const reviewedHeadIsStale = Boolean(
     reviewState.headSha &&
@@ -5548,8 +5671,6 @@ async function maybeDispatchAmaClosureFor({
   //                     released; NO hammer spawned (retry path never hammers).
   //   - deferred      → lease contention / audit bootstrap failure; retry next
   //                     tick with no double-merge.
-  // TODO(MSM-05): read the dedicated daemon strict-mode flag when it lands; until
-  // then the daemon gates hard on zero-findings unconditionally.
   const daemonCleanMerge = await runDaemonCleanMergeAttemptImpl({
     rootDir,
     cfg,
@@ -5562,6 +5683,7 @@ async function maybeDispatchAmaClosureFor({
     reviewStateRow,
     currentPrHeadSha,
     logger,
+    env,
   });
   if (daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
     logger?.log?.(
@@ -8263,6 +8385,7 @@ export {
   maybeDispatchReviewerTimeoutExhaustedMergeAgent,
   maybeDispatchAmaClosureFor,
   runDaemonCleanMergeAttempt,
+  writeAutonomousMergeDisabledAudit,
   resolveFirstPassReviewBudgetSuppression,
   refreshReviewerRuntimeAdapter,
   reviewerRuntimeAdapterForRunRecord,

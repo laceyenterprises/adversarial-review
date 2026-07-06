@@ -3849,6 +3849,8 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
         adversarial:
           merge_authority:
             enabled: false
+            autonomous_merge_execution_enabled: false
+            strict_mode: false
             worker_class: codex
             merge_method: squash
             strict_non_blocking_remediation: false
@@ -3865,9 +3867,13 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('roles.adversarial.merge_authority.enabled'), false);
+    assert.equal(cfg.get('roles.adversarial.merge_authority.autonomous_merge_execution_enabled'), false);
+    assert.equal(cfg.get('roles.adversarial.merge_authority.strict_mode'), false);
     assert.equal(cfg.get('roles.adversarial.merge_authority.worker_class'), 'codex');
     assert.equal(cfg.get('roles.adversarial.merge_authority.merge_method'), 'squash');
     assert.equal(cfg.get('roles.adversarial.merge_authority.strict_non_blocking_remediation'), false);
+    assert.equal(cfg.getMergeAuthorityConfig().autonomousMergeExecutionEnabled, false);
+    assert.equal(cfg.getMergeAuthorityConfig().strictMode, false);
     assert.equal(cfg.getMergeAuthorityConfig().strictNonBlockingRemediation, false);
     assert.deepEqual(cfg.get('roles.adversarial.merge_authority.eligibility.risk_classes'), ['low']);
     assert.deepEqual(
@@ -3900,6 +3906,18 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
       canonicalFalseEnvCfg.resolutionTrace('roles.adversarial.merge_authority.enabled').at(-1).source,
       'env:AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ENABLED',
     );
+    const envFlagCfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_AUTONOMOUS_MERGE_EXECUTION_ENABLED: 'true',
+        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_STRICT_MODE: 'true',
+      },
+    });
+    assert.equal(
+      envFlagCfg.get('roles.adversarial.merge_authority.autonomous_merge_execution_enabled'),
+      true,
+    );
+    assert.equal(envFlagCfg.get('roles.adversarial.merge_authority.strict_mode'), true);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

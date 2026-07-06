@@ -29,6 +29,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -2254,6 +2255,7 @@ const DEFAULT_CQP_BROKER_URL = 'http://127.0.0.1:4099';
 const GEMINI_REVIEWER_SESSION_DIR_PREFIX = 'review-';
 const GEMINI_CQP_CHECKOUT_TIMEOUT_MS = 5_000;
 const GEMINI_CQP_FALLBACK_LOCK_WAIT_MS = 30 * 60 * 1000;
+const GEMINI_REVIEWER_SESSION_STALE_AGE_MS = 12 * 60 * 60 * 1000;
 let geminiReviewerSessionPreflightDone = false;
 
 class GeminiCredentialPoolUnavailableError extends Error {
@@ -2278,16 +2280,64 @@ function resolveGeminiReviewerSessionParent(env = process.env) {
   return join(env.HOME || homedir(), '.gemini', 'reviewer-sessions');
 }
 
+function maybeChmodOwnedPath(path, mode, { chmodSyncImpl = chmodSync, log = console } = {}) {
+  try {
+    chmodSyncImpl(path, mode);
+  } catch (err) {
+    if (err?.code !== 'EPERM') throw err;
+    log.warn?.(`[reviewWithGemini] WARN: cannot chmod shared Gemini reviewer path ${path}: ${err.message}`);
+  }
+}
+
+function parseGeminiReviewerSessionPid(name) {
+  const match = /^review-(\d+)-/.exec(name);
+  if (!match) return null;
+  const pid = Number(match[1]);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+function isProcessAlive(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if (err?.code === 'ESRCH') return false;
+    return true;
+  }
+}
+
+function shouldPurgeGeminiReviewerSessionDir(name, fullPath, {
+  nowMs = Date.now(),
+  staleAgeMs = GEMINI_REVIEWER_SESSION_STALE_AGE_MS,
+  statSyncImpl = statSync,
+  isProcessAliveImpl = isProcessAlive,
+} = {}) {
+  const pid = parseGeminiReviewerSessionPid(name);
+  if (pid && !isProcessAliveImpl(pid)) return true;
+  try {
+    const stat = statSyncImpl(fullPath);
+    return nowMs - stat.mtimeMs > staleAgeMs;
+  } catch {
+    return false;
+  }
+}
+
 function purgeStaleGeminiReviewerSessionDirs({
   env = process.env,
   sessionParent = resolveGeminiReviewerSessionParent(env),
   rmSyncImpl = rmSync,
   readdirSyncImpl = readdirSync,
   mkdirSyncImpl = mkdirSync,
+  statSyncImpl = statSync,
+  chmodSyncImpl = chmodSync,
+  isProcessAliveImpl = isProcessAlive,
+  nowMs = Date.now(),
+  staleAgeMs = GEMINI_REVIEWER_SESSION_STALE_AGE_MS,
   log = console,
 } = {}) {
   mkdirSyncImpl(sessionParent, { recursive: true, mode: 0o700 });
-  chmodSync(sessionParent, 0o700);
+  maybeChmodOwnedPath(sessionParent, 0o700, { chmodSyncImpl, log });
   let entries = [];
   try {
     entries = readdirSyncImpl(sessionParent, { withFileTypes: true });
@@ -2297,8 +2347,15 @@ function purgeStaleGeminiReviewerSessionDirs({
   let purged = 0;
   for (const entry of entries) {
     if (!entry.isDirectory() || !entry.name.startsWith(GEMINI_REVIEWER_SESSION_DIR_PREFIX)) continue;
+    const fullPath = join(sessionParent, entry.name);
+    if (!shouldPurgeGeminiReviewerSessionDir(entry.name, fullPath, {
+      nowMs,
+      staleAgeMs,
+      statSyncImpl,
+      isProcessAliveImpl,
+    })) continue;
     try {
-      rmSyncImpl(join(sessionParent, entry.name), { recursive: true, force: true });
+      rmSyncImpl(fullPath, { recursive: true, force: true });
       purged += 1;
     } catch (err) {
       log.warn?.(`[reviewWithGemini] WARN: failed to purge stale Gemini reviewer session ${entry.name}: ${err.message}`);
@@ -2315,15 +2372,17 @@ function createGeminiReviewerSessionDir({
   env = process.env,
   sessionParent = resolveGeminiReviewerSessionParent(env),
   mkdirSyncImpl = mkdirSync,
+  chmodSyncImpl = chmodSync,
+  log = console,
 } = {}) {
   mkdirSyncImpl(sessionParent, { recursive: true, mode: 0o700 });
-  chmodSync(sessionParent, 0o700);
+  maybeChmodOwnedPath(sessionParent, 0o700, { chmodSyncImpl, log });
   const sessionDir = join(
     sessionParent,
     `${GEMINI_REVIEWER_SESSION_DIR_PREFIX}${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
   );
   mkdirSyncImpl(sessionDir, { mode: 0o700 });
-  chmodSync(sessionDir, 0o700);
+  chmodSyncImpl(sessionDir, 0o700);
   return sessionDir;
 }
 
@@ -2390,6 +2449,16 @@ function isTypedNoCreditResponse(status, body) {
     || ((status === 409 || status === 429) && values.some((value) => value.includes('no-credit') || value.includes('quota')));
 }
 
+function stringifyGeminiBrokerReason(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 function resolveCqpBrokerConfig(env = process.env) {
   return {
     brokerUrl: (env.CQP_BROKER_URL || env.OAUTH_BROKER_URL || DEFAULT_CQP_BROKER_URL).replace(/\/+$/, ''),
@@ -2447,12 +2516,36 @@ async function checkoutGeminiCredentialFromBroker({
   }
   const body = await readJsonResponse(res);
   if (isTypedNoCreditResponse(res.status, body)) {
-    throw new GeminiCredentialPoolNoCreditError(body?.reason || body?.error?.reason || body?.error || 'no-credit');
+    throw new GeminiCredentialPoolNoCreditError(
+      stringifyGeminiBrokerReason(body?.reason)
+      || stringifyGeminiBrokerReason(body?.error?.reason)
+      || stringifyGeminiBrokerReason(body?.error)
+      || 'no-credit'
+    );
   }
   if (!res.ok) {
     throw new GeminiCredentialPoolUnavailableError(`broker returned HTTP ${res.status}`);
   }
-  return normalizeGeminiCheckout(body);
+  try {
+    return normalizeGeminiCheckout(body);
+  } catch (err) {
+    const checkoutId = body?.checkout_id || body?.checkoutId || body?.lease_id || body?.leaseId || body?.id || null;
+    if (checkoutId) {
+      await releaseGeminiCredentialCheckout({
+        checkout: {
+          checkoutId: String(checkoutId),
+          credentialId: body?.credential_id || body?.credentialId || body?.credential?.id || body?.credentials?.id || null,
+          releaseUrl: body?.release_url || body?.releaseUrl || null,
+        },
+        quotaSignal: false,
+        env,
+        fetchImpl,
+        readFileImpl,
+        timeoutMs,
+      });
+    }
+    throw err;
+  }
 }
 
 async function releaseGeminiCredentialCheckout({
@@ -2538,16 +2631,21 @@ async function acquireGeminiFallbackLock({
   waitMs = GEMINI_CQP_FALLBACK_LOCK_WAIT_MS,
   sleepImpl = sleep,
   writeFileSyncImpl = writeFileSync,
+  readFileSyncImpl = readFileSync,
   rmSyncImpl = rmSync,
+  mkdirSyncImpl = mkdirSync,
+  chmodSyncImpl = chmodSync,
+  isProcessAliveImpl = isProcessAlive,
+  log = console,
 } = {}) {
   const parent = resolveGeminiReviewerSessionParent(env);
-  mkdirSync(parent, { recursive: true, mode: 0o700 });
-  chmodSync(parent, 0o700);
+  mkdirSyncImpl(parent, { recursive: true, mode: 0o700 });
+  maybeChmodOwnedPath(parent, 0o700, { chmodSyncImpl, log });
   const lockDir = join(parent, 'legacy-fallback.lock');
   const deadline = Date.now() + waitMs;
   for (;;) {
     try {
-      mkdirSync(lockDir, { mode: 0o700 });
+      mkdirSyncImpl(lockDir, { mode: 0o700 });
       try {
         writeFileSyncImpl(join(lockDir, 'owner.json'), `${JSON.stringify({
           pid: process.pid,
@@ -2565,6 +2663,16 @@ async function acquireGeminiFallbackLock({
       };
     } catch (err) {
       if (err?.code !== 'EEXIST') throw err;
+      try {
+        const owner = JSON.parse(readFileSyncImpl(join(lockDir, 'owner.json'), 'utf8'));
+        const ownerPid = Number(owner?.pid);
+        if (Number.isSafeInteger(ownerPid) && ownerPid > 0 && !isProcessAliveImpl(ownerPid)) {
+          rmSyncImpl(lockDir, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        // Missing or malformed owner metadata is ambiguous; leave the lock in place.
+      }
       if (Date.now() >= deadline) {
         throw new GeminiCredentialPoolUnavailableError('legacy fallback lock wait timed out');
       }

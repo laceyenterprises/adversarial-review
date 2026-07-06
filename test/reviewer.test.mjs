@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CLAUDE_CLI, GEMINI_CLI, AGY_CLI, __test__ } from '../src/reviewer.mjs';
@@ -2639,19 +2639,53 @@ test('materializeGeminiCheckoutSession writes isolated 0700 session dir and 0600
   }
 });
 
-test('purgeStaleGeminiReviewerSessionDirs removes only reviewer-owned session dirs', () => {
+test('purgeStaleGeminiReviewerSessionDirs removes only stale or dead-owner reviewer session dirs', () => {
   const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-purge-'));
   try {
     const parent = join(root, '.gemini', 'reviewer-sessions');
-    mkdirSync(join(parent, 'review-old'), { recursive: true, mode: 0o700 });
+    const activeSession = join(parent, `review-${process.pid}-active`);
+    const deadSession = join(parent, 'review-999999-dead');
+    const oldSession = join(parent, 'review-old');
+    mkdirSync(activeSession, { recursive: true, mode: 0o700 });
+    mkdirSync(deadSession, { recursive: true, mode: 0o700 });
+    mkdirSync(oldSession, { recursive: true, mode: 0o700 });
     mkdirSync(join(parent, 'operator-files'), { recursive: true, mode: 0o700 });
     writeFileSync(join(parent, 'loose.txt'), 'keep\n');
-    const result = purgeStaleGeminiReviewerSessionDirs({ env: { HOME: root } });
-    assert.equal(result.purged, 1);
-    assert.equal(existsSync(join(parent, 'review-old')), false);
+    const oldDate = new Date(Date.now() - (13 * 60 * 60 * 1000));
+    utimesSync(oldSession, oldDate, oldDate);
+    const result = purgeStaleGeminiReviewerSessionDirs({
+      env: { HOME: root },
+      isProcessAliveImpl: (pid) => pid === process.pid,
+    });
+    assert.equal(result.purged, 2);
+    assert.equal(existsSync(activeSession), true);
+    assert.equal(existsSync(deadSession), false);
+    assert.equal(existsSync(oldSession), false);
     assert.equal(existsSync(join(parent, 'operator-files')), true);
     assert.equal(existsSync(join(parent, 'loose.txt')), true);
     assert.equal(statSync(parent).mode & 0o777, 0o700);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('purgeStaleGeminiReviewerSessionDirs ignores EPERM chmod on shared parent', () => {
+  const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-purge-eperm-'));
+  try {
+    const parent = join(root, '.gemini', 'reviewer-sessions');
+    mkdirSync(parent, { recursive: true, mode: 0o700 });
+    const warnings = [];
+    const result = purgeStaleGeminiReviewerSessionDirs({
+      env: { HOME: root },
+      chmodSyncImpl: () => {
+        const err = new Error('operation not permitted');
+        err.code = 'EPERM';
+        throw err;
+      },
+      log: { warn: (message) => warnings.push(message) },
+    });
+    assert.equal(result.sessionParent, parent);
+    assert.match(warnings[0], /cannot chmod shared Gemini reviewer path/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -2667,6 +2701,8 @@ test('purgeStaleGeminiReviewerSessionDirs continues after one stale dir fails to
     const removed = [];
     const result = purgeStaleGeminiReviewerSessionDirs({
       env: { HOME: root },
+      staleAgeMs: 0,
+      isProcessAliveImpl: () => false,
       rmSyncImpl: (target, options) => {
         if (target.endsWith('review-bad')) {
           throw new Error('permission denied');
@@ -2681,6 +2717,34 @@ test('purgeStaleGeminiReviewerSessionDirs continues after one stale dir fails to
     assert.equal(existsSync(join(parent, 'review-good')), false);
     assert.deepEqual(removed, [join(parent, 'review-good')]);
     assert.match(warnings[0], /failed to purge stale Gemini reviewer session review-bad/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('createGeminiReviewerSessionDir ignores EPERM chmod on shared parent but chmods child', () => {
+  const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-create-eperm-'));
+  try {
+    const parent = join(root, '.gemini', 'reviewer-sessions');
+    const chmodTargets = [];
+    const warnings = [];
+    mkdirSync(parent, { recursive: true, mode: 0o700 });
+    const created = __test__.createGeminiReviewerSessionDir({
+      env: { HOME: root },
+      sessionParent: parent,
+      chmodSyncImpl: (target, mode) => {
+        chmodTargets.push({ target, mode });
+        if (target === parent) {
+          const err = new Error('operation not permitted');
+          err.code = 'EPERM';
+          throw err;
+        }
+      },
+      log: { warn: (message) => warnings.push(message) },
+    });
+    assert.equal(existsSync(created), true);
+    assert.equal(chmodTargets.some((entry) => entry.target === created && entry.mode === 0o700), true);
+    assert.match(warnings[0], /cannot chmod shared Gemini reviewer path/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -2731,6 +2795,36 @@ test('checkoutGeminiCredentialFromBroker normalizes checkout response and releas
   }
 });
 
+test('checkoutGeminiCredentialFromBroker releases checkout when validation fails after allocation', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    if (url.endsWith('/credentials/checkout')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          checkout_id: 'co_bad',
+          credential_id: 'cred_bad',
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({ released: true }) };
+  };
+  await assert.rejects(
+    () => checkoutGeminiCredentialFromBroker({
+      env: { CQP_BROKER_URL: 'http://broker.local' },
+      fetchImpl,
+    }),
+    /broker response missing oauth credential JSON/,
+  );
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].url, 'http://broker.local/credentials/release');
+  assert.equal(calls[1].body.checkout_id, 'co_bad');
+  assert.equal(calls[1].body.credential_id, 'cred_bad');
+  assert.equal(calls[1].body.quota_signal, false);
+});
+
 test('checkoutGeminiCredentialFromBroker treats typed no-credit as deferral, not fallback', async () => {
   await assert.rejects(
     () => checkoutGeminiCredentialFromBroker({
@@ -2742,6 +2836,22 @@ test('checkoutGeminiCredentialFromBroker treats typed no-credit as deferral, not
       }),
     }),
     (err) => err instanceof GeminiCredentialPoolNoCreditError && err.isGeminiCredentialPoolNoCredit === true,
+  );
+});
+
+test('checkoutGeminiCredentialFromBroker formats structured no-credit broker errors', async () => {
+  await assert.rejects(
+    () => checkoutGeminiCredentialFromBroker({
+      env: { CQP_BROKER_URL: 'http://broker.local' },
+      fetchImpl: async () => ({
+        ok: false,
+        status: 429,
+        json: async () => ({ error: { code: 'quota-exhausted', detail: 'empty pool' } }),
+      }),
+    }),
+    (err) => err instanceof GeminiCredentialPoolNoCreditError
+      && err.message.includes('"code":"quota-exhausted"')
+      && !err.message.includes('[object Object]'),
   );
 });
 
@@ -2806,6 +2916,29 @@ test('acquireGeminiFallbackLock removes lock dir when owner write fails', async 
       (err) => err === writeError,
     );
     assert.equal(existsSync(join(root, '.gemini', 'reviewer-sessions', 'legacy-fallback.lock')), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('acquireGeminiFallbackLock reaps orphaned dead-owner lock and reacquires', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-lock-orphan-'));
+  try {
+    const lockDir = join(root, '.gemini', 'reviewer-sessions', 'legacy-fallback.lock');
+    mkdirSync(lockDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(lockDir, 'owner.json'), `${JSON.stringify({ pid: 999999, acquiredAt: new Date().toISOString() })}\n`);
+    const lock = await acquireGeminiFallbackLock({
+      env: { HOME: root },
+      isProcessAliveImpl: () => false,
+      sleepImpl: async () => {
+        throw new Error('should not wait after reaping orphaned lock');
+      },
+    });
+    assert.equal(lock.lockDir, lockDir);
+    const owner = JSON.parse(readFileSync(join(lockDir, 'owner.json'), 'utf8'));
+    assert.equal(owner.pid, process.pid);
+    lock.release();
+    assert.equal(existsSync(lockDir), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

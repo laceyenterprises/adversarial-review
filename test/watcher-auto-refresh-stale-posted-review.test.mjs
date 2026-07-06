@@ -965,7 +965,7 @@ test('watcher suppresses stale-review auto-refresh when review-cycle cap is alre
   });
 });
 
-test('AMA #3084: exhausted stale posted review re-hammers the current head without requesting a fresh review', async () => {
+test('MSM-04: exhausted stale posted review does not retarget a current-head hammer', async () => {
   const rootDir = makeTempRoot();
   try {
     let liveReviewFetches = 0;
@@ -1042,12 +1042,12 @@ test('AMA #3084: exhausted stale posted review re-hammers the current head witho
     assert.equal(captured[0].reviewState.reviewCycleExhausted, true);
     assert.equal(captured[0].reviewState.headSha, staleReviewedHead);
     assert.equal(captured[0].dispatchContext.reviewedSha, staleReviewedHead);
-    assert.equal(captured[0].dispatchContext.targetRemediationSha, currentHead);
-    assert.equal(captured[0].dispatchContext.dispatchRecordHeadSha, currentHead);
-    assert.equal(captured[0].dispatchContext.dispatchReason, 'exhausted-final-hammer');
+    assert.equal(captured[0].dispatchContext.targetRemediationSha, undefined);
+    assert.equal(captured[0].dispatchContext.dispatchRecordHeadSha, undefined);
+    assert.equal(captured[0].dispatchContext.dispatchReason, undefined);
     assert.equal(captured[0].prMetadata.headSha, currentHead);
     assert.equal(liveReviewFetches, 0, 'no fresh adversarial review lookup is requested on exhaustion');
-    assert.match(warnings.join('\n'), /no fresh adversarial review/);
+    assert.equal(warnings.join('\n').includes('no fresh adversarial review'), false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

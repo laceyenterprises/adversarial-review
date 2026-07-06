@@ -132,13 +132,9 @@ import {
 } from './adversarial-gate-status.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
-// AMA-03 — the closer dispatch path. Default-off behind cfg.enabled
-// (AMA-01 defaults to false). When the operator opts in AND the
-// canonical eligibility predicate from SPEC §4.2 returns
-// `eligible: true`, this fires INSTEAD of the merge-agent dispatch for
-// the current tick. Otherwise it's a no-op and the merge-agent path
-// runs unchanged. AMA-06A/06N flip the broader coexistence semantics
-// once the closer has soaked.
+// MSM-04 — the only agent dispatch left on the AMA surface is the hammer.
+// Fully clean PRs merge through the daemon path; dirty/conflicted/red-CI PRs
+// route here under the existing launch lease/idempotency machinery.
 import {
   maybeDispatchAmaCloser,
   namedAmaNoDispatchReason,
@@ -147,7 +143,7 @@ import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 // MSM-03 — daemon clean-path merge ("Path B"). A fully-clean (zero blocking AND
 // zero non-blocking findings), green, mergeable settled PR is merged INLINE by
 // the daemon — a deterministic `gh pr merge` API call, no agent/hammer. Anything
-// with a finding falls through to the AMA closer dispatch (MSM-04) below.
+// with a finding falls through to the hammer route (MSM-04) below.
 import {
   attemptDaemonCleanMerge,
   DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
@@ -5030,7 +5026,7 @@ async function retryPendingMergeCloseouts({
   }
 }
 
-// ── AMA-03: closer dispatch pre-empt ─────────────────────────────────────────
+// ── MSM-04: daemon-or-hammer merge route ─────────────────────────────────────
 
 function isTransientAmaLiveReviewLookupError(err) {
   const haystack = [
@@ -5451,28 +5447,12 @@ async function maybeDispatchAmaClosureFor({
     });
   }
   const currentPrHeadSha = candidate?.headSha || currentRevisionRef || null;
-  const exhaustedStaleReviewNeedsCurrentHeadHammer = Boolean(
-    reviewCycleExhausted &&
-      gateSnapshot.reviewedHeadSha &&
-      currentPrHeadSha &&
-      String(gateSnapshot.reviewedHeadSha) !== String(currentPrHeadSha)
-  );
-  if (exhaustedStaleReviewNeedsCurrentHeadHammer) {
-    logger?.warn?.(
-      `[watcher] AMA final-hammer exhaustion for ${repoPath}#${prNumber}: ` +
-        `posted review head ${String(gateSnapshot.reviewedHeadSha).slice(0, 12)} is stale; ` +
-        `dispatching HAM terminal remediation against current head ${String(currentPrHeadSha).slice(0, 12)} ` +
-        `with no fresh adversarial review`
-    );
-  }
 
   const reviewState = {
     verdict: gateSnapshot.settledReview?.verdict || '',
-    // `headSha` is the head the adversarial reviewer actually reviewed. At
-    // review-budget exhaustion the watcher may still target the current PR head
-    // for HAM terminal remediation, but that live target travels separately in
-    // dispatchContext.targetRemediationSha so audit and stale-review guards can
-    // see the review/head gap.
+    // `headSha` is the head the adversarial reviewer actually reviewed. MSM-04
+    // makes stale reviewed heads terminal for this route; the watcher must not
+    // retarget a hammer to a newer PR head without a fresh adversarial review.
     headSha: gateSnapshot.reviewedHeadSha,
     riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || ledgerRiskClass || 'unknown').toLowerCase(),
     remediationPending: gateSnapshot.settledReview?.remediationPending,
@@ -5521,12 +5501,12 @@ async function maybeDispatchAmaClosureFor({
     author: candidate?.prAuthor || null,
   };
 
-  // MSM-03 — daemon clean-path merge ("Path B"). Before the AMA closer/hammer
+  // MSM-03 — daemon clean-path merge ("Path B"). Before the hammer
   // dispatch, attempt an inline daemon merge for a FULLY-CLEAN settled review
   // (zero blocking AND zero non-blocking findings) that GitHub reports green +
   // mergeable. STRICT (default on): any finding — or an unknown finding
   // classification — declines this path so the tick falls through to the
-  // closer/hammer dispatch below (MSM-04). No agent is spawned here; the daemon
+  // hammer dispatch below (MSM-04). No agent is spawned here; the daemon
   // clicks the button through the shared bounded merge-subprocess runner under
   // its own lease. Anything but `not-taken` means the daemon owns this tick:
   //   - merged        → PR landed, `daemon-merge` audit written, lease released.
@@ -5555,9 +5535,9 @@ async function maybeDispatchAmaClosureFor({
         `@${String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12)}: ${daemonCleanMerge.reason}` +
         (daemonCleanMerge.attempts ? ` (attempts=${daemonCleanMerge.attempts})` : ''),
     );
-    // Daemon owns this tick — skip BOTH the AMA closer dispatch and the
-    // merge-agent path. `skipMergeAgent` routes the coexistence decision to
-    // `ama-pending` so the watcher returns without dispatching anything.
+    // Daemon owns this tick — skip BOTH the hammer dispatch and the merge-agent
+    // path. `skipMergeAgent` routes the coexistence decision to `ama-pending`
+    // so the watcher returns without dispatching anything.
     return withAmaDispatchMetadata(
       {
         dispatched: false,
@@ -5582,13 +5562,6 @@ async function maybeDispatchAmaClosureFor({
     parentSession: process.env.HQ_PARENT_SESSION || 'session:unknown:airlock+watcher',
     dispatchedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     orchestrationMode,
-    ...(exhaustedStaleReviewNeedsCurrentHeadHammer
-      ? {
-          targetRemediationSha: currentPrHeadSha,
-          dispatchRecordHeadSha: currentPrHeadSha,
-          dispatchReason: 'exhausted-final-hammer',
-        }
-      : {}),
   };
 
   let result;
@@ -5786,24 +5759,10 @@ async function handlePostedReviewRow({
     });
     const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });
 
-    // AMA-03: pre-empt the merge-agent dispatch with an AMA closer
-    // when AMA is enabled AND the canonical SPEC §4.2 predicate
-    // returns eligible. Default-off: cfg.enabled is `false` per the
-    // AMA-01 schema; the whole pre-empt branch is a no-op until the
-    // operator opts in.
-    //
-    // When AMA fires:
-    //   - the closer worker is spawned with --task-kind=merge,
-    //     --completion-shape=decision-only, --project=adversarial-merge-authority;
-    //   - we skip merge-agent on this tick (the dispatched.decision
-    //     surfaces as `ama-closer-dispatched`);
-    //   - the closer re-runs the predicate at merge time and writes
-    //     the §4.4 audit JSON either way.
-    //
-    // When AMA does NOT fire (disabled OR not eligible OR dispatch
-    // failed), we fall through to the existing merge-agent dispatch
-    // path verbatim — no behavior change for hosts that haven't
-    // opted in.
+    // MSM-04: AMA-enabled posted-review rows have one autonomous merge route:
+    // clean PRs are handled by the daemon, and dirty/conflicted/red-CI PRs are
+    // handled by one hammer under the launch lease. A separate merge-clicking
+    // agent is no longer a valid outcome.
     const coexistenceDecision = await resolveMergeAgentCoexistenceForWatcherImpl({
       rootDir,
       reviewStateRow: existing,
@@ -5821,7 +5780,7 @@ async function handlePostedReviewRow({
     if (coexistenceDecision.outcome === 'ama-dispatched') {
       const { amaClosureResult } = coexistenceDecision;
       logger.log(
-        `[watcher] AMA closer dispatched for ${repoPath}#${prNumber}: ` +
+        `[watcher] AMA hammer dispatched for ${repoPath}#${prNumber}: ` +
         `lrq=${amaClosureResult.dispatchId || 'unknown'} workerClass=${amaClosureResult.workerClass}`
       );
       return;
@@ -5829,7 +5788,7 @@ async function handlePostedReviewRow({
     if (coexistenceDecision.outcome === 'ama-pending') {
       const { amaClosureResult } = coexistenceDecision;
       logger.log(
-        `[watcher] AMA closer retained ownership for ${repoPath}#${prNumber}: ` +
+        `[watcher] AMA hammer route retained ownership for ${repoPath}#${prNumber}: ` +
         `${amaClosureResult.reason || 'ama-dispatch-pending'} ` +
         `lrq=${amaClosureResult.launchRequestId || amaClosureResult.dispatchId || 'unknown'} ` +
         `workerClass=${amaClosureResult.workerClass || 'unknown'}`
@@ -5838,7 +5797,7 @@ async function handlePostedReviewRow({
     }
 
     // AMA-06N — coexistence decision per SPEC §4.8. When AMA is
-    // enabled and the AMA closer didn't fire (not eligible, dispatch
+    // enabled and the hammer route didn't fire (not eligible, dispatch
     // failed, etc.), the watcher must NOT auto-fall-through to merge-
     // agent. The operator either fixes eligibility (apply
     // operator-approved / adversarial-merge-requested) OR explicitly
@@ -5893,7 +5852,7 @@ async function handlePostedReviewRow({
       );
     } else if (coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_RECOVERY_FALLBACK) {
       logger.log(
-        `[watcher] AMA closer recovery fallback for ${repoPath}#${prNumber}: ` +
+        `[watcher] AMA hammer recovery fallback for ${repoPath}#${prNumber}: ` +
         `${coexistenceDecision?.amaClosureResult?.reason || 'ama-dispatch-failure'}; ` +
         `dispatching merge-agent with AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`
       );
@@ -6142,7 +6101,7 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
     if (coexistenceDecision.outcome === 'ama-dispatched') {
       const { amaClosureResult } = coexistenceDecision;
       logger.log(
-        `[watcher] reviewer-timeout exhaustion handed off to AMA closer for ${repoPath}#${prNumber}: ` +
+        `[watcher] reviewer-timeout exhaustion handed off to AMA hammer for ${repoPath}#${prNumber}: ` +
         `lrq=${amaClosureResult.dispatchId || 'unknown'} workerClass=${amaClosureResult.workerClass || 'unknown'}`
       );
       return { handled: true, dispatchJob, amaClosureResult };
@@ -6150,7 +6109,7 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
     if (coexistenceDecision.outcome === 'ama-pending') {
       const { amaClosureResult } = coexistenceDecision;
       logger.log(
-        `[watcher] reviewer-timeout exhaustion awaiting AMA closer for ${repoPath}#${prNumber}: ` +
+        `[watcher] reviewer-timeout exhaustion awaiting AMA hammer for ${repoPath}#${prNumber}: ` +
         `${amaClosureResult.reason || 'ama-dispatch-pending'} ` +
         `lrq=${amaClosureResult.launchRequestId || amaClosureResult.dispatchId || 'unknown'} ` +
         `workerClass=${amaClosureResult.workerClass || 'unknown'}`

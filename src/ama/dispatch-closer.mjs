@@ -4,8 +4,7 @@
  * The watcher's settled-success hook calls `maybeDispatchAmaCloser`
  * BEFORE the existing merge-agent dispatch. When AMA is enabled and the
  * canonical eligibility predicate from SPEC §4.2 returns `eligible:true`,
- * this module dispatches a closer worker (`codex` or
- * `cfg.workerClass`) via `hq dispatch` and returns
+ * this module dispatches a hammer worker via `hq dispatch` and returns
  * `{ dispatched: true, lrqId, dispatchId }`. The caller skips the
  * merge-agent dispatch on that tick.
  *
@@ -78,7 +77,6 @@ const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
 const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const AGENT_OS_TOOLING_REPO = 'agent-os';
 const ADVERSARIAL_REVIEW_REPO = 'adversarial-review';
-const TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'ama-closer-prompt.md');
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
 const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
   'blocking-findings-present',
@@ -102,9 +100,26 @@ const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
 // required for the adversarial verdict gate.
 const HAMMER_AUTO_REMEDIABLE_MISS_REASONS = new Set([
   'non-blocking-findings-present',
+  'blocking-findings-present',
   'verdict-not-settled-success', // strict mode emits this alongside the above
   'pr-not-mergeable', // hammer rebases onto main / resolves the conflict, then merges
   'ci-not-green', // hammer fixes the failing required checks (green-main bar), then merges
+]);
+const HAMMER_ROUTE_ACTION_REASONS = new Set([
+  'blocking-findings-present',
+  'non-blocking-findings-present',
+  'verdict-not-settled-success',
+  'pr-not-mergeable',
+  'ci-not-green',
+]);
+const HAMMER_ROUTE_STRUCTURAL_BLOCK_REASONS = new Set([
+  'ama-disabled',
+  'pr-not-open',
+  'pr-is-draft',
+  'stale-review-head',
+  'risk-class-not-permitted',
+  'branch-protection-missing-gate',
+  'fast-merge-state-unsupported',
 ]);
 
 export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
@@ -115,12 +130,41 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   // red CI to fix.
   const hasActionable =
     reasons.includes('non-blocking-findings-present') ||
+    reasons.includes('blocking-findings-present') ||
     reasons.includes('pr-not-mergeable') ||
     reasons.includes('ci-not-green');
   if (!hasActionable) return false;
   // And EVERY reason must be hammer-remediable — a co-occurring blocking finding,
   // stale head, etc. means NOT auto-hammer (those go through rounds / operator).
   return reasons.every((reason) => HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason));
+}
+
+function hammerRouteReasonsFromTrace(verdict) {
+  const reasons = [];
+  const trace = verdict?.trace || {};
+  const blocking = trace.verdict?.blockingFindings;
+  const nonBlocking = trace.verdict?.nonBlockingFindings;
+  if (blocking?.known === true && Number(blocking.count) > 0) {
+    reasons.push('blocking-findings-present');
+  }
+  if (nonBlocking?.known === true && Number(nonBlocking.count) > 0) {
+    reasons.push('non-blocking-findings-present');
+  }
+  if (trace.mergeability?.mergeableState && trace.mergeability.mergeableState !== 'MERGEABLE') {
+    reasons.push('pr-not-mergeable');
+  }
+  if (trace.ciGreen?.green === false) {
+    reasons.push('ci-not-green');
+  }
+  return reasons;
+}
+
+function isHammerRouteStructurallyBlocked(reasons) {
+  if (!Array.isArray(reasons)) return false;
+  return reasons.some((reason) => (
+    HAMMER_ROUTE_STRUCTURAL_BLOCK_REASONS.has(reason) ||
+    String(reason || '').startsWith('label-')
+  ));
 }
 
 export function namedAmaNoDispatchReason(reason, reasons = []) {
@@ -412,8 +456,8 @@ function assertHammerCleanupSucceeded(hammerCleanup) {
  * findings (blocking or non-blocking) OR when a closure path explicitly waived
  * a findings gate (validated HAM terminal-remediation evidence, or
  * final-hammer review-cycle exhaustion with a relevant waived findings reason).
- * Otherwise this is an ordinary clean closure and the plain
- * `ama-closer-prompt.md` mandate is the correct one.
+ * Otherwise the daemon clean route should have handled the PR before this
+ * dispatch surface is reached.
  *
  * @param {{ trace?: object }} verdict — result of `isEligibleForAmaClosure`.
  * @returns {boolean}
@@ -1330,7 +1374,7 @@ export function substituteTemplate(body, substitutions) {
 }
 
 /**
- * Compose the closer worker prompt body from the substitutions the
+ * Compose the hammer worker prompt body from the substitutions the
  * dispatch site provides. Exported for the golden-snapshot test.
  *
  * @param {Object} args
@@ -1459,50 +1503,55 @@ export async function maybeDispatchAmaCloser({
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, options);
   let forceHammerTerminalRemediationPrompt = false;
   let forceHammerWorkerClass = false;
-  if (!verdict.eligible) {
-    // Auto-hammer fall-through (gated by
-    // roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss): before
-    // cycle exhaustion this covers narrow hammer-owned repairs (non-blocking
-    // findings, mergeability, red CI). At cycle exhaustion it is the terminal
-    // rescue handoff for any final review comments, including failures whose
-    // correct fix belongs in a submodule. The hammer-prompt owns that routing:
-    // submodule-rooted fixes are real submodule PRs, never superproject
-    // gitlink-only pointer-bump PRs, because main-catchup auto-floats the
-    // superproject gitlink after the submodule PR merges. The hammer-prompt
-    // commits, writes the audit comment, then re-runs the eligibility predicate
-    // with --ham-terminal-remediation evidence, which is validated strictly and
-    // fails closed if the findings/checks were not actually addressed.
+  const eligibleHammerRouteReasons = verdict.eligible ? hammerRouteReasonsFromTrace(verdict) : [];
+  if (verdict.eligible && eligibleHammerRouteReasons.length === 0) {
+    return noAmaDispatch({
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'daemon-clean-route',
+    });
+  }
+  if (!verdict.eligible || eligibleHammerRouteReasons.length > 0) {
+    // MSM-04: the standalone AMA closer is gone. The only agent dispatch left
+    // on this surface is the HAM terminal-remediation worker. Fully clean PRs
+    // are handled by the daemon path before this function is called; dirty,
+    // conflicted/behind, or red-CI PRs get exactly one hammer under the existing
+    // dispatch lease/idempotency machinery. Structural hard-stops still block.
     const workerClassForMiss = String(cfg?.workerClass || 'hammer');
     const reviewCycleExhausted =
       reviewState?.reviewCycleExhausted === true ||
       verdict?.trace?.finalHammer?.active === true;
+    const routeReasons = verdict.eligible ? eligibleHammerRouteReasons : verdict.reasons;
+    if (isHammerRouteStructurallyBlocked(routeReasons)) {
+      return noAmaDispatch({
+        dispatched: false,
+        skipMergeAgent: true,
+        reason: 'not-eligible',
+        reasons: routeReasons,
+      });
+    }
     const autoHammer =
-      cfg?.autoHammerOnEligibilityMiss === true
-      && (workerClassForMiss === 'hammer' || reviewCycleExhausted)
-      && isHammerRemediableEligibilityMiss(verdict.reasons, { reviewCycleExhausted });
+      (workerClassForMiss === 'hammer' || reviewCycleExhausted)
+      && (
+        eligibleHammerRouteReasons.length > 0 ||
+        routeReasons.some((reason) => HAMMER_ROUTE_ACTION_REASONS.has(reason)) ||
+        reviewCycleExhausted
+      )
+      && isHammerRemediableEligibilityMiss(routeReasons, { reviewCycleExhausted });
     if (!autoHammer) {
       return noAmaDispatch({
         dispatched: false,
+        skipMergeAgent: true,
         reason: 'not-eligible',
-        reasons: verdict.reasons,
+        reasons: routeReasons,
       });
     }
     forceHammerTerminalRemediationPrompt = true;
     logger.log?.(
       `[ama-closer] auto-hammer: dispatching terminal remediation for ineligible ` +
-      `PR (reasons: ${(verdict.reasons || []).join(',')}) — hammer will remediate ` +
+      `PR (reasons: ${(routeReasons || []).join(',')}) — hammer will remediate ` +
       `final findings/checks then re-validate the gate fail-closed`
     );
-    if (
-      reviewCycleExhausted &&
-      prMetadata?.headSha &&
-      reviewState?.headSha &&
-      prMetadata.headSha !== reviewState.headSha
-    ) {
-      dispatchContext.targetRemediationSha = prMetadata.headSha;
-      dispatchContext.dispatchRecordHeadSha ||= prMetadata.headSha;
-      dispatchContext.dispatchReason ||= 'exhausted-final-hammer';
-    }
     // fall through to the dispatch below (hammer template, remediation mode)
     forceHammerWorkerClass = true;
   }
@@ -1515,7 +1564,7 @@ export async function maybeDispatchAmaCloser({
   // worker class, gating purely on `workerClass === 'hammer'` would route every
   // clean closure through the terminal-remediation mandate. Require both the
   // hammer worker class AND a closure that genuinely needs terminal remediation;
-  // otherwise a hammer worker performs an ordinary clean close. Auto-hammer
+  // otherwise this route declines and lets the daemon clean path own the tick.
   // eligibility misses force the terminal prompt because that worker is being
   // launched to repair findings, mergeability, or CI before merge.
   const useHammerTerminalRemediationPrompt =
@@ -1527,9 +1576,7 @@ export async function maybeDispatchAmaCloser({
     useHammerTerminalRemediationPrompt &&
     workerClass === 'hammer' &&
     reviewState?.reviewCycleExhausted === true;
-  const templatePath = dispatchContext.templatePath || (
-    useHammerTerminalRemediationPrompt ? HAMMER_TEMPLATE_PATH : TEMPLATE_PATH
-  );
+  const templatePath = dispatchContext.templatePath || HAMMER_TEMPLATE_PATH;
   const templateBody = readTemplateImpl
     ? readTemplateImpl(templatePath)
     : readFileSync(templatePath, 'utf8');
@@ -1561,9 +1608,7 @@ export async function maybeDispatchAmaCloser({
     riskClass: dispatchContext.riskClass,
     eligibilityReason: summarizeEligibilityReason(bootstrapEligibilityReasons),
     auditRef,
-    closedBy: workerClass === 'hammer' && !useHammerTerminalRemediationPrompt
-      ? 'hammer-closer'
-      : undefined,
+    closedBy: undefined,
   });
   const prompt = composeCloserPrompt({
     prUrl: dispatchContext.prUrl,
@@ -2105,7 +2150,7 @@ export async function maybeDispatchAmaCloser({
   //     (`dispatchWorkerClass`) to a fallback when the configured provider is
   //     quota-grounded; the logical `workerClass` still drives the prompt/audit.
   //   - `--task-kind merge` matches merge-agent.
-  //   - `--completion-shape decision-only` because the closer worker
+  //   - `--completion-shape decision-only` because the hammer worker
   //     writes the audit JSON artifact; it does NOT open a PR. This
   //     prevents the dispatcher from injecting the default `pr`
   //     close-out (CLAUDE.md §"_apply_prompt_closeouts").
@@ -2314,7 +2359,7 @@ export async function maybeDispatchAmaCloser({
 
   // AMA-07 — promote the lease from `pending` to `dispatched` now
   // that hq accepted the launch request. Failure here is best-effort:
-  // log via the result but do NOT undo the dispatch (the closer worker
+  // log via the result but do NOT undo the dispatch (the hammer worker
   // is already running). The next watcher tick will reconcile.
   let leaseUpdateError = null;
   try {

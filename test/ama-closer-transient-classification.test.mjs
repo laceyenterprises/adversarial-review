@@ -14,7 +14,7 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
-const TEMPLATE_PATH = join(REPO_ROOT, 'templates', 'ama-closer-prompt.md');
+const HAMMER_TEMPLATE_PATH = join(REPO_ROOT, 'templates', 'hammer-prompt.md');
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
 
 // ---------------------------------------------------------------------------
@@ -76,19 +76,19 @@ test('isGithubRateLimitOrBrokerThrottle does NOT match unrelated bare 429 text',
 });
 
 // ---------------------------------------------------------------------------
-// Budget preservation: a transient closer-dispatch failure must NOT decrement
+// Budget preservation: a transient hammer-dispatch failure must NOT decrement
 // the persisted redispatch budget toward dispatch-retry-exhausted.
 // ---------------------------------------------------------------------------
 
 function eligibleInputs(rootDir) {
   const headSha = 'abc12345abc12345abc12345abc12345abc12345';
   const reviewState = {
-    verdict: 'approved',
+    verdict: 'request changes',
     headSha,
     riskClass: 'low',
     remediationPending: false,
     blockingFindingState: 'known',
-    blockingFindingCount: 0,
+    blockingFindingCount: 1,
     nonBlockingFindingState: 'known',
     nonBlockingFindingCount: 0,
     operatorApprovedEvidence: null,
@@ -134,7 +134,6 @@ function eligibleInputs(rootDir) {
     hqOwnerUser: CURRENT_USER,
     currentUser: CURRENT_USER,
     rootDir,
-    templatePath: TEMPLATE_PATH,
     dispatchedAt: '2026-06-11T20:00:00Z',
   };
   return { reviewState, prMetadata, cfg, dispatchContext, headSha };
@@ -154,12 +153,12 @@ async function dispatchWithError(rootDir, errFactory) {
     dispatchContext,
     execFileImpl,
     writeFileImpl: () => {},
-    readTemplateImpl: () => readFileSync(TEMPLATE_PATH, 'utf8'),
+    readTemplateImpl: () => readFileSync(HAMMER_TEMPLATE_PATH, 'utf8'),
   });
   return { result, calls };
 }
 
-test('a rate-limit closer-dispatch failure does NOT burn the redispatch budget', async (t) => {
+test('a rate-limit hammer-dispatch failure does NOT burn the redispatch budget', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-transient-budget-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const identity = { repo: 'acme/myrepo', prNumber: 1234, headSha: 'abc12345abc12345abc12345abc12345abc12345' };
@@ -172,7 +171,7 @@ test('a rate-limit closer-dispatch failure does NOT burn the redispatch budget',
 
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'dispatch-deferred-transient');
-  assert.equal(result.skipMergeAgent, true, 'transient failure keeps closer on the hook, suppresses merge-agent fallback');
+  assert.equal(result.skipMergeAgent, true, 'transient failure keeps hammer on the hook, suppresses merge-agent fallback');
 
   const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
   assert.equal(record.retryCount, 0, 'transient failure did not increment retryCount');
@@ -180,14 +179,14 @@ test('a rate-limit closer-dispatch failure does NOT burn the redispatch budget',
   assert.equal(record.lastFailureTransient, true);
 });
 
-test('a genuine (non-transient) closer-dispatch failure DOES consume the budget', async (t) => {
+test('a genuine (non-transient) hammer-dispatch failure DOES consume the budget', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-genuine-budget-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const identity = { repo: 'acme/myrepo', prNumber: 1234, headSha: 'abc12345abc12345abc12345abc12345abc12345' };
 
   const { result } = await dispatchWithError(rootDir, () => {
     const err = new Error('hq dispatch failed');
-    err.stderr = 'fatal: unrecoverable closer provisioning error';
+    err.stderr = 'fatal: unrecoverable hammer provisioning error';
     return err;
   });
 

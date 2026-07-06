@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
-import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
+import { maybeDispatchAmaCloser, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { maybeDispatchAmaClosureFor } from '../src/watcher.mjs';
 
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
@@ -115,7 +115,7 @@ test('MSM-04: no source path still uses the standalone closer prompt for dispatc
   assert.equal(/const\s+TEMPLATE_PATH\b/.test(source), false);
 });
 
-test('MSM-04: stale reviewed head is terminal and does not retarget a re-hammer', async (t) => {
+test('MSM-04: stale reviewed head without closer proof does not re-hammer', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'msm-04-stale-head-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const deps = testDeps();
@@ -160,6 +160,7 @@ test('MSM-04: stale reviewed head is terminal and does not retarget a re-hammer'
       },
     }),
     resolveReviewCycleExhaustionImpl: () => ({ reviewCycleExhausted: true, ledgerRiskClass: 'low' }),
+    resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: false, reason: null }),
     runDaemonCleanMergeAttemptImpl: async () => ({ disposition: 'not-taken', reason: 'stale-review-head' }),
     maybeDispatchAmaCloserImpl: (payload) => maybeDispatchAmaCloser({ ...payload, ...deps }),
     fetchLatestHeadReviewBodiesImpl: async () => ['## Verdict\n\nComment only\n\n## Blocking Issues\n\n- None.\n'],
@@ -171,6 +172,125 @@ test('MSM-04: stale reviewed head is terminal and does not retarget a re-hammer'
   assert.equal(result.reason, 'not-eligible');
   assert.ok(result.reasons.includes('stale-review-head'));
   assert.equal(deps.calls.length, 0);
+});
+
+test('MSM-04: clean route reconciles existing hammer dispatch before daemon decline', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'msm-04-clean-existing-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  updateAmaCloserDispatchRecord(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: HEAD }, () => ({
+    schemaVersion: 1,
+    repo: 'acme/repo',
+    prNumber: 404,
+    headSha: HEAD,
+    reviewedSha: HEAD,
+    workerClass: 'hammer',
+    state: 'dispatched',
+    dispatchId: 'dispatch_existing',
+    launchRequestId: 'lrq_existing',
+    promptPath: '/tmp/hammer-prompt.md',
+    retryCount: 1,
+    lastObservedStatus: 'running',
+  }));
+  const deps = testDeps();
+  deps.execFileImpl = async (cmd, args) => {
+    deps.calls.push({ cmd, args });
+    return { stdout: JSON.stringify({ status: 'running' }), stderr: '' };
+  };
+  const result = await maybeDispatchAmaCloser({
+    ...baseHammerArgs(rootDir, {
+      reviewState: {
+        verdict: 'comment-only',
+        blockingFindingState: 'known',
+        blockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+        nonBlockingFindingCount: 0,
+      },
+      prMetadata: {
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' },
+        ],
+        branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
+      },
+      cfg: {
+        branchProtection: { required: true },
+      },
+      dispatchContext: {
+        requiredGateContext: 'agent-os/adversarial-gate',
+      },
+    }),
+    options: { env: { ADV_GATE_STATUS_CONTEXT: 'agent-os/adversarial-gate' } },
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(result.reason, 'existing-dispatch-running');
+  assert.equal(result.launchRequestId, 'lrq_existing');
+  assert.equal(deps.calls.length, 1, 'existing dispatch status is probed before clean-route return');
+});
+
+test('MSM-04: merged signal tears down deterministic hammer worker before clean-route return', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'msm-04-clean-merged-signal-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  updateAmaCloserDispatchRecord(rootDir, { repo: 'acme/repo', prNumber: 404, headSha: HEAD }, () => ({
+    schemaVersion: 1,
+    repo: 'acme/repo',
+    prNumber: 404,
+    headSha: HEAD,
+    reviewedSha: HEAD,
+    workerClass: 'hammer',
+    state: 'dispatched',
+    dispatchId: 'dispatch_existing',
+    launchRequestId: 'lrq_existing',
+    promptPath: '/tmp/hammer-prompt.md',
+    retryCount: 1,
+    lastObservedStatus: 'succeeded',
+  }));
+  const deps = testDeps();
+  deps.execFileImpl = async (cmd, args) => {
+    deps.calls.push({ cmd, args });
+    return { stdout: '{}', stderr: '' };
+  };
+  const result = await maybeDispatchAmaCloser({
+    ...baseHammerArgs(rootDir, {
+      reviewState: {
+        verdict: 'comment-only',
+        blockingFindingState: 'known',
+        blockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+        nonBlockingFindingCount: 0,
+      },
+      prMetadata: {
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' },
+        ],
+        branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
+      },
+      cfg: {
+        branchProtection: { required: true },
+      },
+      dispatchContext: {
+        requiredGateContext: 'agent-os/adversarial-gate',
+      },
+    }),
+    options: { env: { ADV_GATE_STATUS_CONTEXT: 'agent-os/adversarial-gate' } },
+    ...deps,
+    readBuildCompletionSignalForPrImpl: () => ({
+      ok: true,
+      row: {
+        repo: 'acme/repo',
+        pr_number: 404,
+        head_sha: HEAD,
+        signal_kind: 'merged',
+      },
+    }),
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'merged-signal-present');
+  assert.deepEqual(deps.calls.map((call) => call.args.slice(0, 3)), [
+    ['worker', 'tear-down', 'hammer-ama-pr-404'],
+  ]);
 });
 
 test('MSM-04: concurrent settle ticks for one job/head launch at most one hammer', async (t) => {

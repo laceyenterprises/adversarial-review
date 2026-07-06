@@ -116,7 +116,6 @@ const HAMMER_ROUTE_STRUCTURAL_BLOCK_REASONS = new Set([
   'ama-disabled',
   'pr-not-open',
   'pr-is-draft',
-  'stale-review-head',
   'risk-class-not-permitted',
   'branch-protection-missing-gate',
   'fast-merge-state-unsupported',
@@ -124,7 +123,12 @@ const HAMMER_ROUTE_STRUCTURAL_BLOCK_REASONS = new Set([
 
 export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   if (!Array.isArray(reasons) || reasons.length === 0) return false;
-  if (options?.reviewCycleExhausted === true) return true;
+  if (options?.reviewCycleExhausted === true) {
+    if (reasons.includes('stale-review-head') && !options?.allowStaleReviewHeadHammerResume) {
+      return false;
+    }
+    return true;
+  }
   // The hammer must have something it can actually act on: non-blocking findings
   // to remediate, a not-mergeable state (conflict / behind) to rebase+resolve, or
   // red CI to fix.
@@ -245,7 +249,7 @@ async function suppressHammerRetryCapExhaustion({
   // suppressed tick failed to deliver the alert. Repeated suppressed ticks must
   // not re-page — debounced by the persisted `alertedAt` (cross-restart) AND an
   // in-memory series guard (survives a persistently-failing ledger write).
-  const alertSeriesKey = `${repo} ${prNumber} ${jobKey || ''}`;
+  const alertSeriesKey = `${repo}\0${prNumber}\0${jobKey || ''}`;
   let alertEmitted = alertAlreadyEmitted;
   if (
     !alertAlreadyEmitted
@@ -1504,13 +1508,6 @@ export async function maybeDispatchAmaCloser({
   let forceHammerTerminalRemediationPrompt = false;
   let forceHammerWorkerClass = false;
   const eligibleHammerRouteReasons = verdict.eligible ? hammerRouteReasonsFromTrace(verdict) : [];
-  if (verdict.eligible && eligibleHammerRouteReasons.length === 0) {
-    return noAmaDispatch({
-      dispatched: false,
-      skipMergeAgent: true,
-      reason: 'daemon-clean-route',
-    });
-  }
   if (!verdict.eligible || eligibleHammerRouteReasons.length > 0) {
     // MSM-04: the standalone AMA closer is gone. The only agent dispatch left
     // on this surface is the HAM terminal-remediation worker. Fully clean PRs
@@ -1537,7 +1534,11 @@ export async function maybeDispatchAmaCloser({
         routeReasons.some((reason) => HAMMER_ROUTE_ACTION_REASONS.has(reason)) ||
         reviewCycleExhausted
       )
-      && isHammerRemediableEligibilityMiss(routeReasons, { reviewCycleExhausted });
+      && isHammerRemediableEligibilityMiss(routeReasons, {
+        reviewCycleExhausted,
+        allowStaleReviewHeadHammerResume:
+          dispatchContext?.allowStaleReviewHeadHammerResume === true,
+      });
     if (!autoHammer) {
       return noAmaDispatch({
         dispatched: false,
@@ -1910,6 +1911,14 @@ export async function maybeDispatchAmaCloser({
       dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
       launchRequestId: existingRecord.launchRequestId || null,
       promptPath: existingRecord.promptPath || null,
+    });
+  }
+
+  if (verdict.eligible && eligibleHammerRouteReasons.length === 0) {
+    return noAmaDispatch({
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'daemon-clean-route',
     });
   }
 

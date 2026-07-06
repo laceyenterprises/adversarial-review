@@ -168,6 +168,169 @@ test('daemon not-taken (findings present) → falls through to the closer/hammer
   }
 });
 
+test('watcher passes live HAM target separately from stable reviewed-head dispatch key', async () => {
+  const rootDir = tempRoot();
+  try {
+    const reviewedHead = 'reviewed-head-before-ham';
+    const liveHead = 'live-head-after-ham';
+    const args = baseArgs(rootDir);
+    let seenDispatchContext = null;
+    let seenOptions = null;
+    const result = await maybeDispatchAmaClosureFor({
+      ...args,
+      reviewStateRow: {
+        ...args.reviewStateRow,
+        review_body: [
+          '## Blocking Issues',
+          '',
+          '- None.',
+          '',
+          '## Non-blocking Issues',
+          '',
+          '- None.',
+          '',
+          '## Verdict',
+          '',
+          'Comment only',
+        ].join('\n'),
+        reviewer_head_sha: reviewedHead,
+        reviewer: 'codex',
+      },
+      dispatchJob: {
+        blockingFindingCount: 0,
+        blockingFindingState: 'known',
+        nonBlockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+      },
+      candidate: {
+        ...args.candidate,
+        headSha: liveHead,
+      },
+      currentRevisionRef: liveHead,
+      resolveReviewCycleExhaustionImpl: () => ({
+        reviewCycleExhausted: true,
+        riskClass: 'low',
+      }),
+      resolveHeadCloserCommitSuppressionImpl: async () => ({
+        suppressed: true,
+        reason: 'closer-commit-trailer',
+      }),
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+        reason: 'not-eligible',
+      }),
+      maybeDispatchAmaCloserImpl: async ({ dispatchContext, options }) => {
+        seenDispatchContext = dispatchContext;
+        seenOptions = options;
+        return { dispatched: true, reason: 'closer-took-over' };
+      },
+    });
+
+    assert.equal(result.dispatched, true);
+    assert.equal(seenDispatchContext.reviewedSha, reviewedHead);
+    assert.equal(seenDispatchContext.targetRemediationSha, liveHead);
+    assert.equal(seenDispatchContext.dispatchRecordHeadSha, reviewedHead);
+    assert.equal(seenDispatchContext.dispatchReason, 'exhausted-final-hammer');
+    assert.equal(seenDispatchContext.allowStaleReviewHeadHammerResume, true);
+    assert.ok(seenOptions, 'closer options are still passed');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('watcher retries transient HAM stale-head resume proof errors by failing the tick', async () => {
+  const rootDir = tempRoot();
+  try {
+    const reviewedHead = 'reviewed-head-before-ham';
+    const liveHead = 'live-head-after-human-push';
+    const args = baseArgs(rootDir);
+    let closerCalls = 0;
+    await assert.rejects(
+      maybeDispatchAmaClosureFor({
+        ...args,
+        reviewStateRow: {
+          ...args.reviewStateRow,
+          reviewer_head_sha: reviewedHead,
+        },
+        candidate: {
+          ...args.candidate,
+          headSha: liveHead,
+        },
+        currentRevisionRef: liveHead,
+        resolveReviewCycleExhaustionImpl: () => ({
+          reviewCycleExhausted: true,
+          riskClass: 'low',
+        }),
+        resolveHeadCloserCommitSuppressionImpl: async () => {
+          const err = new Error('TLS handshake timeout');
+          err.stderr = 'TLS handshake timeout';
+          throw err;
+        },
+        runDaemonCleanMergeAttemptImpl: async () => ({
+          disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+          reason: 'not-eligible',
+        }),
+        maybeDispatchAmaCloserImpl: async () => {
+          closerCalls += 1;
+          return { dispatched: true };
+        },
+      }),
+      /TLS handshake timeout/,
+    );
+    assert.equal(closerCalls, 0);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('watcher fails closed on permanent HAM stale-head resume proof errors', async () => {
+  const rootDir = tempRoot();
+  try {
+    const reviewedHead = 'reviewed-head-before-ham';
+    const liveHead = 'live-head-after-human-push';
+    const args = baseArgs(rootDir);
+    let seenDispatchContext = null;
+    const warnings = [];
+    const result = await maybeDispatchAmaClosureFor({
+      ...args,
+      reviewStateRow: {
+        ...args.reviewStateRow,
+        reviewer_head_sha: reviewedHead,
+      },
+      candidate: {
+        ...args.candidate,
+        headSha: liveHead,
+      },
+      currentRevisionRef: liveHead,
+      resolveReviewCycleExhaustionImpl: () => ({
+        reviewCycleExhausted: true,
+        riskClass: 'low',
+      }),
+      resolveHeadCloserCommitSuppressionImpl: async () => {
+        const err = new Error('HTTP 404 Not Found');
+        err.stderr = 'HTTP 404 Not Found';
+        throw err;
+      },
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+        reason: 'not-eligible',
+      }),
+      maybeDispatchAmaCloserImpl: async ({ dispatchContext }) => {
+        seenDispatchContext = dispatchContext;
+        return { dispatched: false, reason: 'not-eligible' };
+      },
+      logger: { warn: (message) => warnings.push(message), log() {} },
+    });
+
+    assert.equal(result.dispatched, false);
+    assert.equal(seenDispatchContext.allowStaleReviewHeadHammerResume, false);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /not allowing hammer resume/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('daemon gh merge subprocess is bounded by the shared timeout', async () => {
   const rootDir = tempRoot();
   let capturedOptions = null;

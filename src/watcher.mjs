@@ -78,7 +78,7 @@ import {
   unknownReviewerCommandFailureClass,
 } from './reviewer-failure-classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision, resolveQuotaResetIso } from './quota-exhaustion.mjs';
-import { execGhWithRetry } from './gh-cli.mjs';
+import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import {
   createReviewerRuntimeAdapterByName,
   createReviewerRuntimeAdapterForDomain,
@@ -5262,6 +5262,7 @@ async function maybeDispatchAmaClosureFor({
   liveReviewRetryDelaysMs = AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
   resolveReviewCycleExhaustionImpl = null,
   runDaemonCleanMergeAttemptImpl = runDaemonCleanMergeAttempt,
+  resolveHeadCloserCommitSuppressionImpl = null,
 }) {
   let cfg;
   let orchestrationMode;
@@ -5451,8 +5452,9 @@ async function maybeDispatchAmaClosureFor({
   const reviewState = {
     verdict: gateSnapshot.settledReview?.verdict || '',
     // `headSha` is the head the adversarial reviewer actually reviewed. MSM-04
-    // makes stale reviewed heads terminal for this route; the watcher must not
-    // retarget a hammer to a newer PR head without a fresh adversarial review.
+    // keeps it as the stable hammer dispatch key; a stale live head may be the
+    // remediation target only when it proves to be an already-closer-authored
+    // HAM continuation, never an unreviewed human push.
     headSha: gateSnapshot.reviewedHeadSha,
     riskClass: String(candidate?.riskClass || reviewStateRow?.risk_class || ledgerRiskClass || 'unknown').toLowerCase(),
     remediationPending: gateSnapshot.settledReview?.remediationPending,
@@ -5500,6 +5502,38 @@ async function maybeDispatchAmaClosureFor({
     branchProtection: { requiredContexts: candidate?.branchProtection?.requiredContexts || [] },
     author: candidate?.prAuthor || null,
   };
+  let allowStaleReviewHeadHammerResume = false;
+  const reviewedHeadIsStale = Boolean(
+    reviewState.headSha &&
+      currentPrHeadSha &&
+      reviewState.headSha !== currentPrHeadSha,
+  );
+  if (reviewCycleExhausted && reviewedHeadIsStale) {
+    try {
+      const closerCommitSuppression = typeof resolveHeadCloserCommitSuppressionImpl === 'function'
+        ? await resolveHeadCloserCommitSuppressionImpl({
+            repoPath,
+            prNumber,
+            headSha: currentPrHeadSha,
+          })
+        : await getHeadCloserCommitSuppression({
+            repoPath,
+            prNumber,
+            headSha: currentPrHeadSha,
+            logger,
+          });
+      allowStaleReviewHeadHammerResume = closerCommitSuppression?.suppressed === true;
+    } catch (err) {
+      if (isTransientGhError(err)) {
+        throw err;
+      }
+      logger?.warn?.(
+        `[watcher] HAM stale-head resume proof failed for ${repoPath}#${prNumber} ` +
+          `head=${String(currentPrHeadSha || '').slice(0, 12)}; not allowing hammer resume: ` +
+          `${err?.message || err}`,
+      );
+    }
+  }
 
   // MSM-03 — daemon clean-path merge ("Path B"). Before the hammer
   // dispatch, attempt an inline daemon merge for a FULLY-CLEAN settled review
@@ -5555,6 +5589,10 @@ async function maybeDispatchAmaClosureFor({
     repo: repoPath,
     prUrl: `https://github.com/${owner}/${name}/pull/${prNumber}`,
     reviewedSha: reviewState.headSha,
+    targetRemediationSha: currentPrHeadSha || reviewState.headSha,
+    dispatchRecordHeadSha: reviewState.headSha,
+    dispatchReason: reviewCycleExhausted ? 'exhausted-final-hammer' : null,
+    allowStaleReviewHeadHammerResume,
     riskClass: reviewState.riskClass,
     requiredGateContext: resolveGateStatusContext(),
     reviewedBy: reviewStateRow?.reviewer_login || '',

@@ -45,6 +45,21 @@ export const HAMMER_RETRY_CAP_TOTAL_DISPATCHES = HAMMER_RETRY_CAP_RETRIES + 1; /
 export const HAMMER_RETRY_CAP_SUPPRESSION_STATE = 'hammer-retry-cap-exhausted-needs-operator';
 export const HAMMER_RETRY_CAP_EXHAUSTED_REASON = 'hammer-retry-cap-exhausted';
 
+// Independent LIFETIME ceiling on total hammer dispatches for a logical PR,
+// immune to the fresh-review (jobKey) reset. The per-series cap above resets
+// whenever the reviewed head advances — but a hammer that remediates AND earns a
+// fresh adversarial review on the head it moved advances the jobKey every cycle,
+// resetting the series cap and re-firing unboundedly. Observed 2026-07-06: 4 HAM
+// terminal remediations on PR #3200 in 12 minutes, each on a new gemini-reviewed
+// head, because the PR could not reach green CI (oss-readiness line-pinning) so
+// the AMA merge gate never passed. This ceiling counts total hammer dispatches
+// for the PR across ALL series and NEVER resets on a jobKey change, so the loop
+// is bounded regardless of review-head churn. Set above the per-series cap so a
+// legitimate fresh-review-then-remediate cycle still has room before it trips.
+export const HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES = 4;
+export const HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE = 'hammer-retry-cap-lifetime-exhausted-needs-operator';
+export const HAMMER_RETRY_CAP_LIFETIME_EXHAUSTED_REASON = 'hammer-retry-cap-lifetime-exhausted';
+
 const HAMMER_RETRY_CAP_SCHEMA_VERSION = 1;
 
 function hammerRetryCapDir(rootDir) {
@@ -75,6 +90,12 @@ function corruptLedgerSentinel(reason) {
     corruptReason: reason,
     suppressed: true,
     attemptCount: HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
+    // Fail closed on the lifetime ceiling too: a jobKey change must not let a
+    // corrupt ledger re-arm the loop. `lifetimeSuppressed` is immune to the
+    // fresh-review reset, so a corrupt file stays suppressed until an operator
+    // repairs or clears it.
+    lifetimeSuppressed: true,
+    lifetimeAttemptCount: HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES,
     jobKey: null,
   });
 }
@@ -161,14 +182,31 @@ export function evaluateHammerRetryCap(ledger, { jobKey, headSha } = {}) {
     : Math.max(0, Number(ledger.attemptCount || 0));
   const alreadySuppressed = Boolean(ledger?.suppressed) && !jobKeyChanged;
   const nextAttemptCount = priorAttemptCount + 1;
-  const capExhausted = alreadySuppressed || nextAttemptCount > HAMMER_RETRY_CAP_TOTAL_DISPATCHES;
+  // Lifetime accounting is NEVER reset by a jobKey change — a hammer that keeps
+  // earning fresh reviews on the heads it moves must not be able to reset its own
+  // total. Legacy ledgers (no lifetimeAttemptCount) seed from attemptCount, a safe
+  // lower bound.
+  const priorLifetimeCount = ledger
+    ? Math.max(0, Number(ledger.lifetimeAttemptCount ?? ledger.attemptCount ?? 0))
+    : 0;
+  const nextLifetimeCount = priorLifetimeCount + 1;
+  const lifetimeAlreadySuppressed = Boolean(ledger?.lifetimeSuppressed);
+  const lifetimeCapExhausted = lifetimeAlreadySuppressed
+    || nextLifetimeCount > HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES;
+  const capExhausted = alreadySuppressed
+    || nextAttemptCount > HAMMER_RETRY_CAP_TOTAL_DISPATCHES
+    || lifetimeCapExhausted;
   return {
     jobKeyChanged,
     priorAttemptCount,
     nextAttemptCount,
+    priorLifetimeCount,
+    nextLifetimeCount,
     alreadySuppressed,
+    lifetimeAlreadySuppressed,
+    lifetimeCapExhausted,
     capExhausted,
-    alertAlreadyEmitted: alreadySuppressed && Boolean(ledger?.alertedAt),
+    alertAlreadyEmitted: (alreadySuppressed || lifetimeAlreadySuppressed) && Boolean(ledger?.alertedAt),
     resetFromJobKey: jobKeyChanged ? ledgerJobKey : null,
     headSha: normalizeKey(headSha),
   };
@@ -201,12 +239,17 @@ export function recordHammerRetryDispatch(rootDir, identity, {
     prNumber: Number(identity.prNumber),
     jobKey: incomingJobKey || normalizeKey(existing?.jobKey),
     attemptCount: decision.nextAttemptCount,
+    // Lifetime count accumulates across fresh-review resets and never rolls back.
+    lifetimeAttemptCount: decision.nextLifetimeCount,
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
-    // A dispatch clears any stale suppression from a PRIOR series (the reset
-    // path). Within the same series we never reach here while suppressed (the
-    // closer refuses to dispatch), so this is always the un-suppressed state.
+    // A dispatch clears any stale PER-SERIES suppression from a prior series (the
+    // reset path). Within the same series we never reach here while suppressed
+    // (the closer refuses to dispatch). The LIFETIME suppression is not cleared
+    // by a dispatch — but the closer never dispatches once lifetimeCapExhausted,
+    // so reaching here always means the lifetime ceiling has not been hit.
     suppressed: false,
+    lifetimeSuppressed: false,
     suppressionState: null,
     suppressedJobKey: null,
     suppressedHeadSha: null,
@@ -231,6 +274,7 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
   headSha,
   attemptCount,
   alertEmitted = false,
+  lifetime = false,
   now = null,
 } = {}) {
   const existing = readHammerRetryCapLedger(rootDir, identity);
@@ -238,6 +282,10 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
   const head = normalizeKey(headSha);
   const priorHeads = Array.isArray(existing?.dispatchHeads) ? existing.dispatchHeads : [];
   const dispatchHeads = head && !priorHeads.includes(head) ? [...priorHeads, head] : priorHeads;
+  // A lifetime exhaustion (or one already stamped) is immune to the fresh-review
+  // reset: `lifetimeSuppressed` is never cleared by a jobKey change, so a hammer
+  // cannot re-arm the loop by earning a fresh review on the head it moved.
+  const lifetimeSuppressed = Boolean(lifetime) || Boolean(existing?.lifetimeSuppressed);
   const doc = {
     schemaVersion: HAMMER_RETRY_CAP_SCHEMA_VERSION,
     repo: identity.repo,
@@ -246,10 +294,17 @@ export function markHammerRetryCapExhausted(rootDir, identity, {
     attemptCount: Number.isFinite(Number(attemptCount))
       ? Number(attemptCount)
       : Math.max(0, Number(existing?.attemptCount || 0)),
+    lifetimeAttemptCount: Math.max(
+      0,
+      Number(existing?.lifetimeAttemptCount ?? existing?.attemptCount ?? 0),
+    ),
+    lifetimeSuppressed,
     dispatchHeads,
     lastDispatchedHeadSha: head || existing?.lastDispatchedHeadSha || null,
     suppressed: true,
-    suppressionState: HAMMER_RETRY_CAP_SUPPRESSION_STATE,
+    suppressionState: lifetimeSuppressed
+      ? HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE
+      : HAMMER_RETRY_CAP_SUPPRESSION_STATE,
     suppressedJobKey: incomingJobKey || normalizeKey(existing?.jobKey),
     suppressedHeadSha: head || existing?.suppressedHeadSha || null,
     suppressedAttemptCount: Number.isFinite(Number(attemptCount))

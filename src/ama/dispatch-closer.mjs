@@ -224,6 +224,7 @@ async function suppressHammerRetryCapExhaustion({
   jobKey,
   headSha,
   attemptCount,
+  lifetime = false,
   workerClass,
   existingRecord,
   alertAlreadyEmitted,
@@ -300,6 +301,7 @@ async function suppressHammerRetryCapExhaustion({
       headSha,
       attemptCount: attemptTotal,
       alertEmitted,
+      lifetime,
       now,
     });
   } catch (persistErr) {
@@ -1957,6 +1959,7 @@ export async function maybeDispatchAmaCloser({
         jobKey: reviewedSha,
         headSha: targetRemediationSha,
         attemptCount: hammerRetryCapDecision.priorAttemptCount,
+        lifetime: hammerRetryCapDecision.lifetimeCapExhausted,
         workerClass,
         existingRecord,
         alertAlreadyEmitted: hammerRetryCapDecision.alertAlreadyEmitted,

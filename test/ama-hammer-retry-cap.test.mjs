@@ -11,6 +11,8 @@ import {
 import {
   HAMMER_RETRY_CAP_SUPPRESSION_STATE,
   HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
+  HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES,
+  HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE,
   evaluateHammerRetryCap,
   hammerRetryCapFilePath,
   markHammerRetryCapExhausted,
@@ -143,6 +145,68 @@ test('evaluateHammerRetryCap resets for a genuinely fresh review head', () => {
   assert.equal(decision.priorAttemptCount, 0);
   assert.equal(decision.alreadySuppressed, false);
   assert.equal(decision.capExhausted, false);
+});
+
+test('lifetime ceiling trips across fresh-review resets (the runaway loop-breaker)', (t) => {
+  // Reproduces the 2026-07-06 runaway: each hammer dispatch earns a FRESH
+  // adversarial review on the moved head, so the jobKey advances every cycle and
+  // the per-series cap keeps resetting — but the lifetime ceiling must not.
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-lifetime-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: 4242 };
+
+  for (let i = 1; i <= HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES; i += 1) {
+    const decision = evaluateHammerRetryCap(
+      readHammerRetryCapLedger(rootDir, identity),
+      { jobKey: `job-${i}`, headSha: `head-${i}` },
+    );
+    assert.equal(decision.jobKeyChanged, i > 1, `dispatch ${i} jobKeyChanged`);
+    assert.equal(decision.priorAttemptCount, 0, `dispatch ${i} per-series keeps resetting`);
+    assert.equal(decision.capExhausted, false, `dispatch ${i} should be allowed`);
+    const doc = recordHammerRetryDispatch(rootDir, identity, {
+      jobKey: `job-${i}`,
+      headSha: `head-${i}`,
+    });
+    assert.equal(doc.lifetimeAttemptCount, i, `dispatch ${i} accumulates lifetime`);
+    assert.equal(doc.attemptCount, 1, `dispatch ${i} per-series stays at 1 under churn`);
+  }
+
+  // The next dispatch is still a fresh review head (would reset the series) but is
+  // now blocked by the lifetime ceiling.
+  const blocked = evaluateHammerRetryCap(
+    readHammerRetryCapLedger(rootDir, identity),
+    { jobKey: 'job-final', headSha: 'head-final' },
+  );
+  assert.equal(blocked.jobKeyChanged, true);
+  assert.equal(blocked.lifetimeCapExhausted, true);
+  assert.equal(blocked.capExhausted, true);
+});
+
+test('lifetime suppression is immune to the fresh-review reset', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-lifetime-supp-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: REPO, prNumber: 4243 };
+
+  const suppressed = markHammerRetryCapExhausted(rootDir, identity, {
+    jobKey: 'jobX',
+    headSha: 'headX',
+    attemptCount: 2,
+    lifetime: true,
+    now: '2026-07-06T00:00:00Z',
+  });
+  assert.equal(suppressed.lifetimeSuppressed, true);
+  assert.equal(suppressed.suppressionState, HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE);
+
+  // A genuinely fresh review head clears the PER-SERIES suppression but the
+  // lifetime suppression HOLDS — the loop cannot be re-armed by a new review.
+  const afterFreshReview = evaluateHammerRetryCap(
+    readHammerRetryCapLedger(rootDir, identity),
+    { jobKey: 'totally-new-review-head', headSha: 'newhead' },
+  );
+  assert.equal(afterFreshReview.jobKeyChanged, true);
+  assert.equal(afterFreshReview.alreadySuppressed, false);
+  assert.equal(afterFreshReview.lifetimeAlreadySuppressed, true);
+  assert.equal(afterFreshReview.capExhausted, true);
 });
 
 test('hammer retry cap ledger round-trips and corrupt ledgers fail closed', (t) => {

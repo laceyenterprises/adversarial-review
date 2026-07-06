@@ -30,6 +30,7 @@ import {
   TERMINAL_WORKER_RUN_STATUSES,
   buildMergeAgentDispatchJob,
   buildMergeAgentPrompt,
+  classifyBlockingFindings,
   classifyNonBlockingFindings,
   detectAgentOsPresence,
   dispatchMergeAgentForPR,
@@ -165,6 +166,17 @@ test('classifyNonBlockingFindings fails closed on blank or non-settled sectionle
     classifyNonBlockingFindings('## Summary\nNeeds work.\n## Verdict\nRequest changes', {
       lastVerdict: 'request-changes',
     }),
+    { count: 0, state: 'unknown' },
+  );
+});
+
+test('classifyBlockingFindings fails closed without throwing on missing bodies', () => {
+  assert.deepEqual(
+    classifyBlockingFindings(null, { lastVerdict: 'request-changes' }),
+    { count: 0, state: 'unknown' },
+  );
+  assert.deepEqual(
+    classifyBlockingFindings(undefined, { lastVerdict: 'request-changes' }),
     { count: 0, state: 'unknown' },
   );
 });

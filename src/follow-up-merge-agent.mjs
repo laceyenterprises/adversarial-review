@@ -5698,6 +5698,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
 }
 
 function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
+  if (!String(reviewBody ?? '').trim()) return { count: 0, state: 'unknown' };
   // Defense-in-depth format-independence: canonicalize the posted body before
   // parsing so a non-`##`-headed gemini/agy review (which reviewer-side
   // sanitation now normalizes at post time, but which may already be posted

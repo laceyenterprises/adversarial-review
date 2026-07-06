@@ -85,6 +85,26 @@ test('sanitizeReviewPayloadBestEffort NEVER throws — falls back to the raw bod
   assert.throws(() => sanitizeCodexReviewPayload(junk));
 });
 
+test('sanitizeReviewPayloadBestEffort promotes headings even when verdict is missing', () => {
+  const partial = [
+    '### Summary',
+    'Reviewer output was truncated.',
+    '',
+    '#### Blocking issues:',
+    '- **Real issue**',
+    '',
+    '### Non-blocking issues',
+    '- Optional cleanup.',
+  ].join('\n');
+
+  const sanitized = sanitizeReviewPayloadBestEffort(partial);
+
+  assert.match(sanitized, /^## Summary$/m);
+  assert.match(sanitized, /^## Blocking Issues$/m);
+  assert.match(sanitized, /^## Non-blocking Issues$/m);
+  assert.doesNotMatch(sanitized, /^### Blocking issues/m);
+});
+
 test('kernel verdict parser accepts explanatory prose before final verdict line', () => {
   const review = [
     '## Summary',

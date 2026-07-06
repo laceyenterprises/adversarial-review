@@ -3531,7 +3531,7 @@ function extractMarkdownIssueList(markdown, heading) {
 }
 
 function mergeChunkedAgyReviews(chunkReviews, { truncated = false, promptBytes = null, maxBytes = null } = {}) {
-  const texts = chunkReviews.map((chunk) => String(chunk.reviewText || '').trim()).filter(Boolean);
+  const texts = chunkReviews.map((chunk) => sanitizeReviewPayloadBestEffort(chunk.reviewText)).filter(Boolean);
   const parts = [
     '## Summary',
     `Reviewed an oversized diff through ${chunkReviews.length} bounded Antigravity chunks because the full agy prompt exceeded the argv budget${promptBytes ? ` (${promptBytes} bytes > ${maxBytes} bytes)` : ''}.`,
@@ -3631,7 +3631,7 @@ async function reviewAgyOversizedInChunks(diff, extraContext, {
   });
   return {
     rawReviewText: mergedReviewText,
-    reviewText: sanitizeReviewPayloadBestEffort(mergedReviewText),
+    reviewText: mergedReviewText,
     tokenUsage: null,
     needsSanitize: false,
     chunked: true,

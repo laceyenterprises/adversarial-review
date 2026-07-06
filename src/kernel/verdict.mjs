@@ -99,10 +99,15 @@ function sanitizeCodexReviewPayload(reviewText) {
  * as-is and is bounded by the format-independent review-cycle cap.
  */
 function sanitizeReviewPayloadBestEffort(reviewText) {
+  const text = String(reviewText ?? '');
   try {
-    return sanitizeCodexReviewPayload(reviewText);
+    return sanitizeCodexReviewPayload(text);
   } catch {
-    return normalizeWhitespace(reviewText);
+    const fallback = text.replace(
+      /^#{1,4}\s+(summary|blocking issues|non-blocking issues|suggested fixes|verdict)\s*:?$/gim,
+      (_, heading) => `## ${titleCaseWords(heading)}`,
+    );
+    return normalizeWhitespace(fallback);
   }
 }
 

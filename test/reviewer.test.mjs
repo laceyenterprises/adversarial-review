@@ -2841,6 +2841,8 @@ test('checkoutGeminiCredentialFromBroker normalizes checkout response and releas
     const env = {
       CQP_BROKER_URL: 'http://broker.local',
       CQP_BROKER_SHARED_SECRET_FILE: secretPath,
+      CQP_GEMINI_QUOTA_LIMIT_REQUESTS: 'foo',
+      CQP_GEMINI_QUOTA_RESET_AT: '2026-07-13T00:00:00.000Z',
     };
     const checkout = await checkoutGeminiCredentialFromBroker({ env, fetchImpl });
     assert.deepEqual(checkout, {
@@ -2857,6 +2859,19 @@ test('checkoutGeminiCredentialFromBroker normalizes checkout response and releas
     assert.equal(calls[1].url, 'http://broker.local/checkout/release');
     assert.equal(calls[1].body.lease_id, 'co_123');
     assert.equal(calls[1].body.kind, 'quota_exhausted');
+    assert.equal(calls[1].body.limit, 1000);
+
+    await releaseGeminiCredentialCheckout({
+      checkout,
+      env: {
+        CQP_BROKER_URL: 'http://broker.local',
+        CQP_GEMINI_QUOTA_LIMIT_REQUESTS: '',
+        CQP_GEMINI_QUOTA_RESET_AT: '2026-07-13T00:00:00.000Z',
+      },
+      fetchImpl,
+    });
+    assert.equal(calls[2].body.kind, 'release');
+    assert.equal(calls[2].body.limit, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

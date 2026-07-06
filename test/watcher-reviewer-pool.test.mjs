@@ -87,6 +87,13 @@ test('reviewer pool does not dispatch when broker reports zero available credent
   assert.equal(dispatched, 0);
 });
 
+test('reviewer pool ignores malformed broker credential availability', () => {
+  assert.equal(
+    resolveReviewerCredentialConcurrencyLimit({ poolSlots: 5, availableCredentials: 'not-a-number' }),
+    5,
+  );
+});
+
 test('reviewer pool starts another PR while an older review is slow', async () => {
   const events = [];
   let releaseSlow;

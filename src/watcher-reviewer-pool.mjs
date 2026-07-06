@@ -71,7 +71,11 @@ function resolveReviewerCredentialConcurrencyLimit({
   if (availableCredentials === null || availableCredentials === undefined || availableCredentials === '') {
     return parsedPoolSlots;
   }
-  const parsedCredentials = Math.max(0, Number.parseInt(String(availableCredentials), 10) || 0);
+  const parsedAvailableCredentials = Number.parseInt(String(availableCredentials), 10);
+  if (Number.isNaN(parsedAvailableCredentials)) {
+    return parsedPoolSlots;
+  }
+  const parsedCredentials = Math.max(0, parsedAvailableCredentials);
   return Math.min(parsedPoolSlots, parsedCredentials);
 }
 

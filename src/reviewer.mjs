@@ -2618,7 +2618,7 @@ async function releaseGeminiCredentialCheckout({
         kind: quotaSignal ? 'quota_exhausted' : 'release',
         unit: 'requests',
         window: 'weekly',
-        limit: Number(env.CQP_GEMINI_QUOTA_LIMIT_REQUESTS || 1000),
+        limit: quotaLimitFromEnv(env.CQP_GEMINI_QUOTA_LIMIT_REQUESTS, 1000),
         reset_at: env.CQP_GEMINI_QUOTA_RESET_AT || nextWeeklyQuotaResetIso(),
       }),
     }, timeoutMs);
@@ -2643,11 +2643,12 @@ function nextWeeklyQuotaResetIso(nowMs = Date.now()) {
   return reset.toISOString();
 }
 
+function quotaLimitFromEnv(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function geminiSpendReportsForUsage(tokenUsage, env = process.env) {
-  const quotaLimitFromEnv = (value, fallback) => {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : fallback;
-  };
   const reports = [{
     unit: 'requests',
     amount: 1,

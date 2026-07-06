@@ -77,6 +77,27 @@ test('antigravity retryDelay parsed from loose 429 text', () => {
   assert.equal(sig.source, 'antigravity-429');
 });
 
+test('standalone PR number 429 does not trigger quota fallback', () => {
+  const sig = parseReviewerQuotaExhaustion({
+    stdout: 'Checking out PR 429\nFixes #429\nWrote 429 bytes',
+    nowMs: NOW,
+  });
+  assert.equal(sig.exhausted, false);
+  assert.equal(sig.resetAt, null);
+  assert.equal(sig.source, null);
+});
+
+test('contextual HTTP 429 text still triggers quota fallback', () => {
+  const sig = parseReviewerQuotaExhaustion({
+    stderr: 'HTTP 429 from reviewer runtime; retryDelay: 100 milliseconds',
+    nowMs: NOW,
+  });
+  assert.equal(sig.exhausted, true);
+  assert.equal(sig.retryAfterMs, 100);
+  assert.equal(sig.resetAt, new Date(NOW + 100).toISOString());
+  assert.equal(sig.source, 'antigravity-429');
+});
+
 test('coarse quota text with no reset is exhausted with source=text', () => {
   const sig = parseReviewerQuotaExhaustion({
     stderr: 'rate limit reached for this account',
@@ -101,11 +122,51 @@ test('non-quota error is not exhausted', () => {
 test('parseDurationToMs handles s/ms/m and bare seconds', () => {
   assert.equal(parseDurationToMs('39s'), 39000);
   assert.equal(parseDurationToMs('500ms'), 500);
+  assert.equal(parseDurationToMs('100 milliseconds'), 100);
+  assert.equal(parseDurationToMs('3 seconds'), 3000);
   assert.equal(parseDurationToMs('2m'), 120000);
+  assert.equal(parseDurationToMs('2 minutes'), 120000);
   assert.equal(parseDurationToMs('1.5s'), 1500);
   assert.equal(parseDurationToMs('42'), 42000); // bare number = seconds
   assert.equal(parseDurationToMs(''), null);
   assert.equal(parseDurationToMs('nonsense'), null);
+});
+
+test('stringified epoch reset timestamp is parsed through epoch heuristic', () => {
+  const sig = parseReviewerQuotaExhaustion({
+    brokerBody: { reason: 'no-credit', reset_at: '1719878400' },
+    nowMs: NOW,
+  });
+  assert.equal(sig.exhausted, true);
+  assert.equal(sig.resetAt, '2024-07-02T00:00:00.000Z');
+});
+
+test('nested response data error objects contribute reset and retry delay fields', () => {
+  const err = Object.assign(new Error('request failed'), {
+    response: {
+      data: {
+        error: {
+          code: 429,
+          status: 'RESOURCE_EXHAUSTED',
+          resetAt: '2026-07-07T01:00:00Z',
+          details: [{ retryDelay: '2m' }],
+        },
+      },
+    },
+  });
+  const sig = parseReviewerQuotaExhaustion({ error: err, nowMs: NOW });
+  assert.equal(sig.exhausted, true);
+  assert.equal(sig.resetAt, '2026-07-07T01:00:00.000Z');
+  assert.equal(sig.retryAfterMs, 120000);
+});
+
+test('message-only structured quota bodies are detected without text fallback', () => {
+  const sig = parseReviewerQuotaExhaustion({
+    brokerBody: { error: { message: 'quota exhausted for this account' } },
+    nowMs: NOW,
+  });
+  assert.equal(sig.exhausted, true);
+  assert.equal(sig.source, 'cqp-broker');
 });
 
 test('quotaFallbackDecision: exhausted + primary available -> fall back, skip until reset', () => {

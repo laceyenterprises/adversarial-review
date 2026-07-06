@@ -20,8 +20,9 @@
 // so callers can (a) fall back to the primary cross-model reviewer instead of
 // orphaning, and (b) skip the exhausted reviewer until `resetAt`.
 
+const QUOTA_HTTP_429_TEXT_RE = /\b(?:status|code|error|http)\s*[:=]?\s*429\b/i;
 const QUOTA_TEXT_RE =
-  /\b(429|resource[_ -]?exhausted|quota|rate ?limit|no[_ -]?credit)\b/i;
+  /\b(?:(?:status|code|error|http)\s*[:=]?\s*429|resource[_ -]?exhausted|quota|rate ?limit|no[_ -]?credit)\b/i;
 
 const RESET_KEYS = [
   'reset_at',
@@ -47,6 +48,8 @@ const RETRY_MS_KEYS = ['retry_after_ms', 'retryAfterMs', 'retryDelayMs'];
 // Parse a duration into milliseconds. Accepts Google/HTTP shapes:
 //   "39s" -> 39000, "500ms" -> 500, "2m" -> 120000, "1.5s" -> 1500,
 //   bare number -> SECONDS (HTTP Retry-After / RetryInfo convention).
+const DURATION_UNIT_RE = '(?:milliseconds?|ms|seconds?|s|minutes?|m|hours?|h)';
+
 export function parseDurationToMs(value) {
   if (value === null || value === undefined) return null;
   if (typeof value === 'number' && Number.isFinite(value)) {
@@ -54,12 +57,18 @@ export function parseDurationToMs(value) {
   }
   const raw = String(value).trim();
   if (!raw) return null;
-  const m = raw.match(/^([0-9]*\.?[0-9]+)\s*(ms|s|m|h)?$/i);
+  const m = raw.match(new RegExp(`^([0-9]*\\.?[0-9]+)\\s*(${DURATION_UNIT_RE})?$`, 'i'));
   if (!m) return null;
   const n = Number(m[1]);
   if (!Number.isFinite(n) || n <= 0) return null;
   const unit = (m[2] || 's').toLowerCase();
-  const mult = unit === 'ms' ? 1 : unit === 's' ? 1000 : unit === 'm' ? 60000 : 3600000;
+  const mult = unit === 'ms' || unit.startsWith('millisecond')
+    ? 1
+    : unit === 's' || unit.startsWith('second')
+      ? 1000
+      : unit === 'm' || unit.startsWith('minute')
+        ? 60000
+        : 3600000;
   return Math.round(n * mult);
 }
 
@@ -73,6 +82,14 @@ function toIsoTimestamp(value) {
   }
   const raw = String(value).trim();
   if (!raw) return null;
+  if (/^\d+$/.test(raw)) {
+    const n = Number(raw);
+    if (Number.isFinite(n)) {
+      const ms = n < 1e12 ? n * 1000 : n;
+      const d = new Date(ms);
+      return Number.isNaN(d.getTime()) ? null : d.toISOString();
+    }
+  }
   const parsed = Date.parse(raw);
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
 }
@@ -84,15 +101,20 @@ function candidateObjects(inputs) {
     if (obj && typeof obj === 'object' && !seen.has(obj)) {
       seen.add(obj);
       out.push(obj);
+      return true;
     }
+    return false;
+  };
+  const visit = (obj, depth = 0) => {
+    if (!push(obj) || depth >= 4) return;
+    for (const key of ['error', 'body', 'data', 'response']) {
+      visit(obj?.[key], depth + 1);
+    }
+    // Google RPC status details array (RetryInfo lives here).
+    if (Array.isArray(obj?.details)) obj.details.forEach((detail) => visit(detail, depth + 1));
   };
   for (const obj of inputs) {
-    push(obj);
-    push(obj?.error);
-    push(obj?.body);
-    // Google RPC status details array (RetryInfo lives here).
-    const details = obj?.details || obj?.error?.details;
-    if (Array.isArray(details)) details.forEach(push);
+    visit(obj);
   }
   return out;
 }
@@ -131,7 +153,12 @@ function firstRetryDelayMs(inputs) {
 // `Retry-After: 42`. Text is the last resort when structured fields are absent.
 function retryDelayMsFromText(text) {
   if (!text) return null;
-  const jsonish = text.match(/retry[_-]?delay["'\s:]+["']?([0-9]*\.?[0-9]+\s*(?:ms|s|m|h)?)/i);
+  const jsonish = text.match(
+    new RegExp(
+      `retry[_-]?delay["'\\s:]+["']?([0-9]*\\.?[0-9]+\\s*(?:${DURATION_UNIT_RE}\\b)?)(?![a-z])`,
+      'i',
+    ),
+  );
   if (jsonish) {
     const ms = parseDurationToMs(jsonish[1]);
     if (ms !== null) return ms;
@@ -150,11 +177,13 @@ function bodyLooksNoCredit(body) {
     body?.status,
     body?.code,
     body?.reason,
+    body?.message,
     body?.error,
     body?.error?.type,
     body?.error?.code,
     body?.error?.reason,
     body?.error?.status,
+    body?.error?.message,
   ].map((value) => String(value ?? '').trim().toLowerCase());
   return values.some(
     (v) =>
@@ -162,6 +191,7 @@ function bodyLooksNoCredit(body) {
       v === 'no_credit' ||
       v === 'quota-exhausted' ||
       v === 'resource_exhausted' ||
+      v === '429' ||
       v.includes('no-credit') ||
       v.includes('quota'),
   );
@@ -185,17 +215,18 @@ export function parseReviewerQuotaExhaustion({
     .filter(Boolean)
     .join('\n');
   const hasBrokerBody = brokerBody && typeof brokerBody === 'object';
+  const inputs = [brokerBody, error].filter(Boolean);
+  const structuredQuota = candidateObjects(inputs).some(bodyLooksNoCredit);
 
   const exhausted = Boolean(
     error?.isGeminiCredentialPoolNoCredit ||
-      (hasBrokerBody && bodyLooksNoCredit(brokerBody)) ||
+      structuredQuota ||
       QUOTA_TEXT_RE.test(text),
   );
   if (!exhausted) {
     return { exhausted: false, resetAt: null, retryAfterMs: null, source: null };
   }
 
-  const inputs = [brokerBody, error].filter(Boolean);
   let resetAt = firstResetTimestamp(inputs);
   let retryAfterMs = firstRetryDelayMs(inputs);
   if (retryAfterMs === null) retryAfterMs = retryDelayMsFromText(text);
@@ -211,7 +242,7 @@ export function parseReviewerQuotaExhaustion({
 
   let source;
   if (hasBrokerBody && bodyLooksNoCredit(brokerBody)) source = 'cqp-broker';
-  else if (/resource[_ -]?exhausted|retry[_-]?delay|\b429\b/i.test(text))
+  else if (/resource[_ -]?exhausted|retry[_-]?delay/i.test(text) || QUOTA_HTTP_429_TEXT_RE.test(text))
     source = 'antigravity-429';
   else source = 'text';
 

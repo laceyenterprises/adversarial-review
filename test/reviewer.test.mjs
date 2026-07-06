@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CLAUDE_CLI, GEMINI_CLI, AGY_CLI, __test__ } from '../src/reviewer.mjs';
@@ -44,6 +44,14 @@ const {
   resolveGeminiRuntime,
   resolveGeminiAntigravityModel,
   resolveGeminiReviewerModel,
+  resolveGeminiReviewerSessionParent,
+  purgeStaleGeminiReviewerSessionDirs,
+  resetGeminiReviewerSessionPreflightForTest,
+  checkoutGeminiCredentialFromBroker,
+  releaseGeminiCredentialCheckout,
+  materializeGeminiCheckoutSession,
+  GeminiCredentialPoolUnavailableError,
+  GeminiCredentialPoolNoCreditError,
   resolveReviewerMetadata,
   buildGeminiReviewArgs,
   buildAgyReviewArgs,
@@ -2557,6 +2565,9 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
     GOOGLE_API_KEY: 'must-strip-too',
   }, () => reviewWithGemini('+diff\n', 'AGY CONTEXT', {
     resolveGeminiRuntimeImpl: () => 'antigravity',
+    checkoutGeminiCredentialImpl: async () => ({ checkoutId: 'co_1', credentialId: 'cred_1', oauthCreds: { access_token: 'token-1' } }),
+    materializeGeminiCheckoutSessionImpl: ({ env }) => ({ env, cleanup() {} }),
+    releaseGeminiCredentialCheckoutImpl: async () => {},
     assertAgyAuthImpl: async ({ agyCli, env }) => {
       authCalls.push({ agyCli, env });
     },
@@ -2600,6 +2611,242 @@ test('reviewWithGemini antigravity runtime uses agy print, stdin prompt, env scr
   assert.equal(spawnCalls[0].env.GOOGLE_API_KEY, undefined);
   assert.equal(spawnCalls[0].env.GEMINI_OAUTH_ACCESS_TOKEN, undefined);
   assert.equal(spawnCalls[0].env.GEMINI_ANTIGRAVITY_ACCOUNT, undefined);
+});
+
+test('materializeGeminiCheckoutSession writes isolated 0700 session dir and 0600 oauth_creds.json, then cleans up', () => {
+  const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-session-'));
+  try {
+    const parent = join(root, '.gemini', 'reviewer-sessions');
+    const session = materializeGeminiCheckoutSession({
+      checkout: { checkoutId: 'co_a', credentialId: 'cred_a', oauthCreds: { access_token: 'a', refresh_token: 'ra' } },
+      env: { HOME: root },
+      sessionParent: parent,
+    });
+    assert.equal(resolveGeminiReviewerSessionParent({ HOME: root }), parent);
+    assert.equal(session.env.GEMINI_HOME, session.sessionDir);
+    assert.equal(session.env.GEMINI_OAUTH_CREDS_PATH, session.credsPath);
+    assert.equal(statSync(session.sessionDir).mode & 0o777, 0o700);
+    assert.equal(statSync(session.credsPath).mode & 0o777, 0o600);
+    assert.deepEqual(JSON.parse(readFileSync(session.credsPath, 'utf8')), {
+      access_token: 'a',
+      refresh_token: 'ra',
+    });
+    session.cleanup();
+    assert.equal(existsSync(session.sessionDir), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('purgeStaleGeminiReviewerSessionDirs removes only reviewer-owned session dirs', () => {
+  const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-purge-'));
+  try {
+    const parent = join(root, '.gemini', 'reviewer-sessions');
+    mkdirSync(join(parent, 'review-old'), { recursive: true, mode: 0o700 });
+    mkdirSync(join(parent, 'operator-files'), { recursive: true, mode: 0o700 });
+    writeFileSync(join(parent, 'loose.txt'), 'keep\n');
+    const result = purgeStaleGeminiReviewerSessionDirs({ env: { HOME: root } });
+    assert.equal(result.purged, 1);
+    assert.equal(existsSync(join(parent, 'review-old')), false);
+    assert.equal(existsSync(join(parent, 'operator-files')), true);
+    assert.equal(existsSync(join(parent, 'loose.txt')), true);
+    assert.equal(statSync(parent).mode & 0o777, 0o700);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('checkoutGeminiCredentialFromBroker normalizes checkout response and release reports quota signal', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-broker-'));
+  try {
+    const secretPath = join(root, 'secret');
+    writeFileSync(secretPath, 'shh\n');
+    const calls = [];
+    const fetchImpl = async (url, options) => {
+      calls.push({ url, options, body: JSON.parse(options.body) });
+      if (url.endsWith('/credentials/checkout')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            checkout_id: 'co_123',
+            credential_id: 'cred_123',
+            credentials: { oauth_creds_json: { access_token: 'tok', refresh_token: 'ref' } },
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ released: true }) };
+    };
+    const env = {
+      CQP_BROKER_URL: 'http://broker.local',
+      CQP_BROKER_SHARED_SECRET_FILE: secretPath,
+    };
+    const checkout = await checkoutGeminiCredentialFromBroker({ env, fetchImpl });
+    assert.deepEqual(checkout, {
+      checkoutId: 'co_123',
+      credentialId: 'cred_123',
+      oauthCreds: { access_token: 'tok', refresh_token: 'ref' },
+      releaseUrl: null,
+      quotaUrl: null,
+    });
+    await releaseGeminiCredentialCheckout({ checkout, quotaSignal: true, env, fetchImpl });
+    assert.equal(calls[0].url, 'http://broker.local/credentials/checkout');
+    assert.equal(calls[0].options.headers.Authorization, 'Bearer shh');
+    assert.deepEqual(calls[0].body.provider, 'gemini');
+    assert.equal(calls[1].url, 'http://broker.local/credentials/release');
+    assert.equal(calls[1].body.checkout_id, 'co_123');
+    assert.equal(calls[1].body.quota_signal, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('checkoutGeminiCredentialFromBroker treats typed no-credit as deferral, not fallback', async () => {
+  await assert.rejects(
+    () => checkoutGeminiCredentialFromBroker({
+      env: { CQP_BROKER_URL: 'http://broker.local' },
+      fetchImpl: async () => ({
+        ok: false,
+        status: 429,
+        json: async () => ({ type: 'no-credit', reason: 'pool-exhausted' }),
+      }),
+    }),
+    (err) => err instanceof GeminiCredentialPoolNoCreditError && err.isGeminiCredentialPoolNoCredit === true,
+  );
+});
+
+test('reviewWithGemini antigravity checks out distinct credentials into isolated state dirs and releases them', async () => {
+  resetGeminiReviewerSessionPreflightForTest();
+  const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-concurrent-'));
+  try {
+    const checkouts = [
+      { checkoutId: 'co_1', credentialId: 'cred_1', oauthCreds: { access_token: 'token-1', refresh_token: 'r1' } },
+      { checkoutId: 'co_2', credentialId: 'cred_2', oauthCreds: { access_token: 'token-2', refresh_token: 'r2' } },
+    ];
+    const spawned = [];
+    const released = [];
+    const result = await withEnvAsync({ HOME: root }, () => Promise.all([
+      reviewWithGemini('+diff one\n', '', {
+        resolveGeminiRuntimeImpl: () => 'antigravity',
+        checkoutGeminiCredentialImpl: async () => checkouts.shift(),
+        releaseGeminiCredentialCheckoutImpl: async ({ checkout }) => { released.push(checkout.checkoutId); },
+        assertAgyAuthImpl: async () => {},
+        spawnAgyReviewImpl: async ({ env }) => {
+          const creds = JSON.parse(readFileSync(env.GEMINI_OAUTH_CREDS_PATH, 'utf8'));
+          spawned.push({ sessionDir: env.GEMINI_HOME, credsPath: env.GEMINI_OAUTH_CREDS_PATH, token: creds.access_token });
+          return { stdout: '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n## Verdict\nComment only', stderr: '' };
+        },
+      }),
+      reviewWithGemini('+diff two\n', '', {
+        resolveGeminiRuntimeImpl: () => 'antigravity',
+        checkoutGeminiCredentialImpl: async () => checkouts.shift(),
+        releaseGeminiCredentialCheckoutImpl: async ({ checkout }) => { released.push(checkout.checkoutId); },
+        assertAgyAuthImpl: async () => {},
+        spawnAgyReviewImpl: async ({ env }) => {
+          const creds = JSON.parse(readFileSync(env.GEMINI_OAUTH_CREDS_PATH, 'utf8'));
+          spawned.push({ sessionDir: env.GEMINI_HOME, credsPath: env.GEMINI_OAUTH_CREDS_PATH, token: creds.access_token });
+          return { stdout: '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n## Verdict\nComment only', stderr: '' };
+        },
+      }),
+    ]));
+    assert.equal(result.length, 2);
+    assert.deepEqual(new Set(spawned.map((entry) => entry.token)), new Set(['token-1', 'token-2']));
+    assert.equal(new Set(spawned.map((entry) => entry.sessionDir)).size, 2);
+    for (const entry of spawned) {
+      assert.equal(existsSync(entry.sessionDir), false);
+      assert.equal(existsSync(entry.credsPath), false);
+    }
+    assert.deepEqual(new Set(released), new Set(['co_1', 'co_2']));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('reviewWithGemini broker unavailable uses serialized legacy fallback lock', async () => {
+  resetGeminiReviewerSessionPreflightForTest();
+  const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-fallback-'));
+  try {
+    let active = 0;
+    let maxActive = 0;
+    const runOne = () => reviewWithGemini('+diff\n', '', {
+      resolveGeminiRuntimeImpl: () => 'antigravity',
+      checkoutGeminiCredentialImpl: async () => {
+        throw new GeminiCredentialPoolUnavailableError('broker returned HTTP 500');
+      },
+      assertAgyAuthImpl: async () => {},
+      spawnAgyReviewImpl: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        active -= 1;
+        return { stdout: '## Adversarial Review — Gemini (gemini-reviewer-lacey)\n\n## Verdict\nComment only', stderr: '' };
+      },
+    });
+    await withEnvAsync({ HOME: root }, () => Promise.all([runOne(), runOne()]));
+    assert.equal(maxActive, 1);
+    assert.equal(existsSync(join(root, '.gemini', 'reviewer-sessions', 'legacy-fallback.lock')), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('reviewWithGemini no-credit defers without single-credential fallback', async () => {
+  resetGeminiReviewerSessionPreflightForTest();
+  await assert.rejects(
+    () => reviewWithGemini('+diff\n', '', {
+      resolveGeminiRuntimeImpl: () => 'antigravity',
+      checkoutGeminiCredentialImpl: async () => {
+        throw new GeminiCredentialPoolNoCreditError('pool-exhausted');
+      },
+      acquireGeminiFallbackLockImpl: async () => {
+        throw new Error('fallback lock must not be acquired');
+      },
+      assertAgyAuthImpl: async () => {
+        throw new Error('auth must not run without a credential');
+      },
+      spawnAgyReviewImpl: async () => {
+        throw new Error('spawn must not run without a credential');
+      },
+    }),
+    (err) => err?.isGeminiCredentialPoolNoCredit === true,
+  );
+});
+
+test('reviewWithGemini reports 429 quota signal to broker and removes synthesized credential material', async () => {
+  resetGeminiReviewerSessionPreflightForTest();
+  const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-quota-'));
+  try {
+    const released = [];
+    let sessionDir = null;
+    let credsPath = null;
+    await assert.rejects(
+      () => withEnvAsync({ HOME: root }, () => reviewWithGemini('+diff\n', '', {
+        resolveGeminiRuntimeImpl: () => 'antigravity',
+        checkoutGeminiCredentialImpl: async () => ({
+          checkoutId: 'co_quota',
+          credentialId: 'cred_quota',
+          oauthCreds: { access_token: 'quota-token' },
+        }),
+        releaseGeminiCredentialCheckoutImpl: async ({ checkout, quotaSignal }) => {
+          released.push({ checkoutId: checkout.checkoutId, quotaSignal });
+        },
+        assertAgyAuthImpl: async () => {},
+        spawnAgyReviewImpl: async ({ env }) => {
+          sessionDir = env.GEMINI_HOME;
+          credsPath = env.GEMINI_OAUTH_CREDS_PATH;
+          const err = new Error('Command failed');
+          err.stderr = 'HTTP 429 quota exceeded';
+          throw err;
+        },
+      })),
+      /Gemini exec failed/,
+    );
+    assert.deepEqual(released, [{ checkoutId: 'co_quota', quotaSignal: true }]);
+    assert.equal(existsSync(sessionDir), false);
+    assert.equal(existsSync(credsPath), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('sanitizeAgyReviewOutput rejects narration-only captured output', () => {
@@ -2726,6 +2973,9 @@ test('reviewWithGemini antigravity auth missing fails closed before spawning a r
   await assert.rejects(
     () => reviewWithGemini('+diff\n', '', {
       resolveGeminiRuntimeImpl: () => 'antigravity',
+      checkoutGeminiCredentialImpl: async () => ({ checkoutId: 'co_1', credentialId: 'cred_1', oauthCreds: { access_token: 'token-1' } }),
+      materializeGeminiCheckoutSessionImpl: ({ env }) => ({ env, cleanup() {} }),
+      releaseGeminiCredentialCheckoutImpl: async () => {},
       assertAgyAuthImpl: async () => {
         const err = new Error(`[OAuth] gemini credentials unavailable: Antigravity agy auth failed (keychain-missing): missing. ${AGY_KEYCHAIN_REMEDIATION}`);
         err.isOAuthError = true;
@@ -2746,6 +2996,9 @@ test('reviewWithGemini antigravity retries transient agy subprocess errors', asy
   const spawns = [];
   const result = await reviewWithGemini('+diff\n', '', {
     resolveGeminiRuntimeImpl: () => 'antigravity',
+    checkoutGeminiCredentialImpl: async () => ({ checkoutId: 'co_1', credentialId: 'cred_1', oauthCreds: { access_token: 'token-1' } }),
+    materializeGeminiCheckoutSessionImpl: ({ env }) => ({ env, cleanup() {} }),
+    releaseGeminiCredentialCheckoutImpl: async () => {},
     assertAgyAuthImpl: async () => {},
     retryDelaysMs: [0],
     sleepImpl: async () => {},

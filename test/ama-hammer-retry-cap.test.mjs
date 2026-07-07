@@ -668,6 +668,88 @@ test('terminal old-head hammer dispatch is superseded when remediation advanced 
   assert.equal(currentRecord.state, 'dispatched');
 });
 
+test('active target-head lease on head advance defers without overwriting old-head dispatch', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-lease-target-active-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  acquireAmaCloserLease({
+    rootDir,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    watcherPid: process.pid,
+    now: '2026-07-06T12:00:00Z',
+  });
+
+  const deps = hammerDispatchDeps();
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true },
+      prMetadata: { headSha: ADVANCED_HEAD },
+      dispatchContext: {
+        targetRemediationSha: ADVANCED_HEAD,
+        dispatchRecordHeadSha: REVIEWED_HEAD,
+        allowStaleReviewHeadHammerResume: true,
+        dispatchedAt: '2026-07-06T12:00:30Z',
+      },
+    }),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'closer-lease-held-by-other-process');
+  assert.equal(result.existingLease.headSha, ADVANCED_HEAD);
+  assert.equal(deps.execCalls.length, 0);
+  assert.equal(
+    readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD }),
+    null,
+  );
+});
+
+test('stale target-head pending lease on head advance is reclaimed before dispatch', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-lease-target-stale-pending-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  acquireAmaCloserLease({
+    rootDir,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    watcherPid: 999999,
+    now: '2026-07-06T12:00:00Z',
+  });
+
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true },
+      prMetadata: { headSha: ADVANCED_HEAD },
+      dispatchContext: {
+        targetRemediationSha: ADVANCED_HEAD,
+        dispatchRecordHeadSha: REVIEWED_HEAD,
+        allowStaleReviewHeadHammerResume: true,
+        dispatchedAt: '2026-07-06T12:01:00Z',
+      },
+    }),
+    processKillImpl: () => {
+      const err = new Error('missing process');
+      err.code = 'ESRCH';
+      throw err;
+    },
+    ...hammerDispatchDeps({
+      execFileImpl: async (_cmd, args) => {
+        if (args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'not-found' }), stderr: '' };
+        }
+        return { stdout: JSON.stringify({ dispatchId: 'dispatch_new_head', launchRequestId: 'lrq_new_head' }), stderr: '' };
+      },
+    }),
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(result.launchRequestId, 'lrq_new_head');
+  const currentLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD });
+  assert.equal(currentLease.status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
+  assert.equal(currentLease.lrqId, 'lrq_new_head');
+});
+
 test('terminal current-head hammer dispatch is not superseded after remediation advances the PR head', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-lease-current-head-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

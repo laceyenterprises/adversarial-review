@@ -1797,6 +1797,9 @@ export async function maybeDispatchAmaCloser({
     && existingRecord.headSha !== targetRemediationSha
   );
   const existingLeaseBeforeDispatch = readAmaCloserLease(rootDir, existingDispatchLeaseIdentity);
+  let targetLeaseBeforeDispatch = leaseIdentity.headSha !== existingDispatchLeaseIdentity.headSha
+    ? readAmaCloserLease(rootDir, leaseIdentity)
+    : null;
   const reviewedHeadAuditTerminalOutcome = readAmaAuditTerminalOutcome(hqRoot, auditIdentity);
   const targetHeadAuditTerminalOutcome = headAdvancedDuringDispatch
     ? readAmaAuditTerminalOutcome(hqRoot, targetAuditIdentity)
@@ -1807,6 +1810,48 @@ export async function maybeDispatchAmaCloser({
   const auditTerminalOutcome = existingRecord
     ? existingRecordAuditTerminalOutcome
     : (headAdvancedDuringDispatch ? targetHeadAuditTerminalOutcome : reviewedHeadAuditTerminalOutcome);
+  if (targetLeaseBeforeDispatch) {
+    if (isReclaimableDispatchedAmaCloserLease(targetLeaseBeforeDispatch, {
+      now: dispatchContext.dispatchedAt,
+    })) {
+      const terminalizedLease = {
+        ...targetLeaseBeforeDispatch,
+        status: AMA_CLOSER_LEASE_STATUS.TERMINAL,
+        terminalOutcome: 'failed-without-merge',
+        completedAt: dispatchContext.dispatchedAt || targetLeaseBeforeDispatch?.completedAt || null,
+        updatedAt: dispatchContext.dispatchedAt || targetLeaseBeforeDispatch?.updatedAt || null,
+      };
+      finalizeAmaCloserLeaseBestEffort({
+        rootDir,
+        leaseIdentity,
+        terminalOutcome: 'failed-without-merge',
+        now: dispatchContext.dispatchedAt,
+        logger,
+        repo,
+        prNumber,
+      });
+      return noAmaDispatch({
+        dispatched: false,
+        skipMergeAgent: true,
+        reason: 'stale-dispatched-lease-terminalized',
+        existingLease: terminalizedLease,
+      });
+    }
+    if (isReclaimablePendingAmaCloserLease(targetLeaseBeforeDispatch, {
+      now: dispatchContext.dispatchedAt,
+      processKillImpl,
+    })) {
+      deleteAmaCloserLease(rootDir, leaseIdentity);
+      targetLeaseBeforeDispatch = null;
+    } else if (targetLeaseBeforeDispatch.status !== AMA_CLOSER_LEASE_STATUS.TERMINAL) {
+      return noAmaDispatch({
+        dispatched: false,
+        skipMergeAgent: true,
+        reason: 'closer-lease-held-by-other-process',
+        existingLease: targetLeaseBeforeDispatch,
+      });
+    }
+  }
   if (isReclaimableDispatchedAmaCloserLease(existingLeaseBeforeDispatch, {
     now: dispatchContext.dispatchedAt,
   })) {

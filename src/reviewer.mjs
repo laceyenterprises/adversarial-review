@@ -1940,8 +1940,9 @@ async function reviewWithClaude(diff, extraContext = '', { promptStage = 'first'
   // `--output-format json` wraps the response as {result, usage, ...}. Extract the
   // review text (result) for downstream posting AND the exact usage block, so
   // claude reviewers no longer depend on the flaky ~/.claude/projects transcript
-  // scrape (which missed ~90% of passes -> token_source='unknown'). Fail-safe:
-  // any parse problem falls back to the raw stdout as the review text.
+  // scrape (which missed ~90% of passes -> token_source='unknown'). Fail closed:
+  // malformed JSON or an invalid result must use the normal reviewer retry path,
+  // not post a raw CLI payload as a GitHub review.
   const raw = stdout.trim();
   const parsed = parseClaudeJsonOutput(raw);
   return { reviewText: parsed.reviewText, tokenUsage: parsed.tokenUsage };
@@ -1949,16 +1950,31 @@ async function reviewWithClaude(diff, extraContext = '', { promptStage = 'first'
 
 function parseClaudeJsonOutput(raw) {
   let doc;
+  const jsonText = extractClaudeJsonText(raw);
   try {
-    doc = JSON.parse(raw);
-  } catch {
-    return { reviewText: raw, tokenUsage: null };
+    doc = JSON.parse(jsonText);
+  } catch (err) {
+    throw new Error(`Failed to parse Claude JSON output: ${err.message}`);
   }
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
-    return { reviewText: raw, tokenUsage: null };
+    throw new Error('Claude JSON output is not an object');
   }
-  const reviewText = typeof doc.result === 'string' && doc.result.trim() ? doc.result : raw;
-  return { reviewText, tokenUsage: mapClaudeJsonUsage(doc.usage) };
+  if (typeof doc.result !== 'string') {
+    throw new Error("Claude JSON output missing string 'result' field");
+  }
+  if (!doc.result.trim()) {
+    throw new Error("Claude JSON output contains empty 'result' field");
+  }
+  return { reviewText: doc.result, tokenUsage: mapClaudeJsonUsage(doc.usage) };
+}
+
+function extractClaudeJsonText(raw) {
+  const text = String(raw ?? '').trim();
+  const jsonStart = text.indexOf('{');
+  if (jsonStart < 0) {
+    return text;
+  }
+  return text.slice(jsonStart);
 }
 
 function mapClaudeJsonUsage(usage) {

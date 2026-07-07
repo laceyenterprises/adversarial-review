@@ -1641,10 +1641,30 @@ test('parseClaudeJsonOutput extracts review text + exact usage (no transcript ne
   assert.equal(tokenUsage.source, 'claude-json');
 });
 
-test('parseClaudeJsonOutput fails safe on non-json (raw text, no usage)', () => {
-  const { reviewText, tokenUsage } = parseClaudeJsonOutput('## Verdict\nplain text review');
-  assert.equal(reviewText, '## Verdict\nplain text review');
-  assert.equal(tokenUsage, null);
+test('parseClaudeJsonOutput extracts warning-prefixed json output', () => {
+  const raw = [
+    'Warning: using cached OAuth session',
+    JSON.stringify({ result: '## Verdict\nComment only', usage: { input_tokens: 7 } }),
+  ].join('\n');
+  const { reviewText, tokenUsage } = parseClaudeJsonOutput(raw);
+  assert.equal(reviewText, '## Verdict\nComment only');
+  assert.equal(tokenUsage.input, 7);
+  assert.equal(tokenUsage.source, 'claude-json');
+});
+
+test('parseClaudeJsonOutput fails closed instead of returning raw stdout', () => {
+  assert.throws(
+    () => parseClaudeJsonOutput('## Verdict\nplain text review'),
+    /Failed to parse Claude JSON output/
+  );
+  assert.throws(
+    () => parseClaudeJsonOutput(JSON.stringify({ error: 'Rate limit' })),
+    /missing string 'result' field/
+  );
+  assert.throws(
+    () => parseClaudeJsonOutput(JSON.stringify({ result: '   ' })),
+    /empty 'result' field/
+  );
 });
 
 test('parseClaudeJsonOutput yields no usage when the usage block is absent', () => {

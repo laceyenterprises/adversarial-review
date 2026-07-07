@@ -3,7 +3,7 @@
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { backfillReviewerPasses } from '../src/reviewer-pass-tokens.mjs';
+import { backfillReviewerPasses, backfillCloserReviewerPasses } from '../src/reviewer-pass-tokens.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -87,6 +87,14 @@ function main(argv = process.argv.slice(2), io = {}) {
       transcriptFallback: args.transcriptFallback,
       dryRun: args.dryRun,
     });
+    // Closer passes are recorded post-merge with only a brief ledger poll, so
+    // slow rollups leave them null; the job-driven backfill above only heals
+    // remediation. Self-heal null closer passes straight from the ledger.
+    const closer = backfillCloserReviewerPasses(args.rootDir, {
+      ledgerTarget: args.ledgerTarget,
+      dryRun: args.dryRun,
+    });
+    result.closer = closer;
     if (args.json) {
       stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     } else {
@@ -100,7 +108,9 @@ function main(argv = process.argv.slice(2), io = {}) {
         `worker_log_matched=${result.workerLogMatched} ` +
         `transcript_matched=${result.transcriptMatched} ` +
         `claude_transcript_matched=${result.claudeTranscriptMatched} ` +
-        `skipped=${result.skipped}\n`
+        `skipped=${result.skipped} ` +
+        `closer_considered=${closer.considered} closer_filled=${closer.filled} ` +
+        `closer_still_missing=${closer.stillMissing}\n`
       );
     }
     return 0;

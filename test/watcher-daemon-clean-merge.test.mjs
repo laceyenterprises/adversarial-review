@@ -454,6 +454,7 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
         mergeMethod: 'squash',
         autonomousMergeExecutionEnabled: true,
         strictMode: false,
+        hammerLifetimeDispatchCeiling: 3,
       },
       repoPath: 'acme/repo',
       prNumber: 300,
@@ -520,6 +521,7 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
       autonomousMergeExecutionEnabled: true,
       strictMode: false,
     });
+    assert.equal(capturedAttemptArgs.retryCap, 3);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

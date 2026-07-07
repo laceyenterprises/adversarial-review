@@ -1214,6 +1214,15 @@ function schemaV1() {
                     __type: TYPE_BOOL,
                     __default: false,
                   },
+                  // Upper bound HAM terminal-remediation dispatches per PR. The
+                  // same resolved value also feeds the daemon merge retry
+                  // budget, so operators can tune the ceiling without code
+                  // edits.
+                  hammer_lifetime_dispatch_ceiling: {
+                    __type: TYPE_INT,
+                    __default: 2,
+                    __min: 1,
+                  },
                   // Wall-clock cap (ms) the watcher gives `hq dispatch` to admit
                   // + provision a closer/hammer worker before SIGTERM. The old
                   // hardcoded 90s was below the merge-worker provision time
@@ -2062,6 +2071,10 @@ export const ENV_ALIASES = {
   },
   'roles.adversarial.merge_authority.strict_mode': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_STRICT_MODE',
+    aliases: [],
+  },
+  'roles.adversarial.merge_authority.hammer_lifetime_dispatch_ceiling': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_HAMMER_LIFETIME_DISPATCH_CEILING',
     aliases: [],
   },
   'roles.adversarial.orchestration_mode': {
@@ -3564,6 +3577,10 @@ export class AgentOSConfig {
       autoHammerOnEligibilityMiss: this.get(
         'roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss',
         false,
+      ),
+      hammerLifetimeDispatchCeiling: this.get(
+        'roles.adversarial.merge_authority.hammer_lifetime_dispatch_ceiling',
+        2,
       ),
       dispatchTimeoutMs: this.get(
         'roles.adversarial.merge_authority.dispatch_timeout_ms',

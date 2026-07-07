@@ -90,6 +90,10 @@ roles:
       # Turning this off permits daemon merge over known non-blocking findings;
       # blocking or unknown findings still route away from the daemon.
       strict_mode: true
+      # Lifetime ceiling for HAM terminal-remediation dispatches per PR. This
+      # also drives the daemon merge retry budget so operators can tune the
+      # ceiling without code edits.
+      hammer_lifetime_dispatch_ceiling: 2
   merge-agent:
     fallback_path: none
   claude-reviewer-lacey:

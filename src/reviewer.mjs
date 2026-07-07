@@ -2060,6 +2060,14 @@ function buildCodexReviewArgs({
   return args;
 }
 
+function estimateTokensFromText(text) {
+  // ~4 chars/token heuristic; a visible-text LOWER BOUND (system prompt, tools,
+  // and reasoning tokens are unseen), hence a floor, not an exact count. Used
+  // only for antigravity (agy) reviewers, which expose no local usage.
+  const s = typeof text === 'string' ? text : '';
+  return Math.max(0, Math.round(s.length / 4));
+}
+
 function parseCodexJsonTokenUsage(stdout) {
   let tokenUsage = null;
   for (const line of String(stdout || '').split('\n')) {
@@ -4479,6 +4487,28 @@ async function main() {
     process.exit(1);
   }
 
+  if (!tokenUsage && effectiveModel === 'gemini') {
+    // Antigravity (agy) reviewers emit no local token usage (server-side
+    // conversations, no JSON surface). Persist a heuristic LOWER-BOUND estimate
+    // from the prompt (diff + context) and the review body, tagged distinctly so
+    // it stays separable from exact counts. Mirrors the worker-pool antigravity
+    // estimate-floor (source gemini-antigravity-estimate).
+    const estInput = estimateTokensFromText(`${diff}\n${extraContext}`);
+    const estOutput = estimateTokensFromText(reviewText);
+    if (estInput > 0 || estOutput > 0) {
+      tokenUsage = {
+        input: estInput,
+        output: estOutput,
+        reasoning: null,
+        cacheRead: null,
+        cacheWrite: 0,
+        toolContext: null,
+        total: estInput + estOutput,
+        source: 'gemini-antigravity-estimate',
+      };
+    }
+  }
+
   if (tokenUsage) {
     const hasExplicitGuardrail = Object.prototype.hasOwnProperty.call(tokenUsage, 'guardrail')
       && tokenUsage.guardrail !== undefined;
@@ -4727,6 +4757,7 @@ const __test__ = {
   fetchPRDiff,
   buildClaudeReviewArgs,
   buildCodexReviewArgs,
+  estimateTokensFromText,
   parseCodexJsonTokenUsage,
   postGitHubReview,
   spawnCodexReview,

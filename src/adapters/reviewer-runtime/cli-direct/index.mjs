@@ -315,6 +315,19 @@ function isCodexModel(model) {
   return String(model || '').toLowerCase().includes('codex');
 }
 
+function isGeminiModel(model) {
+  const text = String(model || '').toLowerCase();
+  return text.includes('gemini') || text.includes('antigravity') || text.includes('agy');
+}
+
+// Reviewer stdout token usage is parsed for codex (native token_count/
+// turn.completed) AND gemini (usageMetadata, or the antigravity estimate the
+// reviewer emits as reviewer.token_usage). Claude usage is recovered separately
+// from its transcript, so it is intentionally not parsed from stdout here.
+function shouldParseStdoutTokenUsage(model) {
+  return isCodexModel(model) || isGeminiModel(model);
+}
+
 function resolveCodexReviewerEnv(reviewerEnv) {
   const home = reviewerEnv.HOME || process.env.HOME || null;
   if (home) reviewerEnv.HOME = home;
@@ -560,7 +573,7 @@ function createCliDirectReviewerRuntimeAdapter({
           : tailText(stderr),
         pgid: record.pgid,
         reattachToken: record.reattachToken,
-        tokenUsage: isCodexModel(req.model)
+        tokenUsage: shouldParseStdoutTokenUsage(req.model)
           ? parseCodexJsonTokenUsage(stdout)
           : null,
       });
@@ -577,7 +590,7 @@ function createCliDirectReviewerRuntimeAdapter({
       const errorCode = typeof err?.code === 'string' ? err.code : null;
       const stderrTail = tailText(err?.stderr || detail || '');
       const stdoutTail = tailText(err?.stdout || '');
-      const failureTokenEvidence = isCodexModel(req.model)
+      const failureTokenEvidence = shouldParseStdoutTokenUsage(req.model)
         ? parseCodexJsonTokenUsageFromFailureStdout(err?.stdout || '')
         : { tokenUsage: null, tokenUsageNoUsageReason: null };
       const cancelled = activeRun.cancelled || controller.signal.aborted || errorCode === 'ABORT_ERR';

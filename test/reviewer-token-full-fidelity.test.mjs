@@ -7,6 +7,9 @@ import assert from 'node:assert/strict';
 
 import { parseCodexJsonTokenUsage } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 import { normalizeReviewerClass, normalizeTokenUsage } from '../src/reviewer-pass-tokens.mjs';
+import { __test__ } from '../src/reviewer.mjs';
+
+const { estimateTokensFromText } = __test__;
 
 test('codex reviewer usage captures reasoning (was dropped)', () => {
   const line = JSON.stringify({
@@ -72,6 +75,37 @@ test('normalizeTokenUsage persists a reasoning-only usage (not dropped as empty)
   const n = normalizeTokenUsage({ reasoning: 7 });
   assert.ok(n, 'a usage with only reasoning must not normalize to null');
   assert.equal(n.reasoning, 7);
+});
+
+test('estimateTokensFromText is a ~4-chars/token floor', () => {
+  assert.equal(estimateTokensFromText(''), 0);
+  assert.equal(estimateTokensFromText('a'.repeat(400)), 100);
+  assert.equal(estimateTokensFromText(null), 0);
+});
+
+test('antigravity estimate reviewer.token_usage flows through parser + normalize', () => {
+  // agy reviewers have no native usage; reviewer.mjs emits this estimate line.
+  const line = JSON.stringify({
+    type: 'reviewer.token_usage',
+    tokenUsage: {
+      input: 2000,
+      output: 300,
+      reasoning: null,
+      cacheRead: null,
+      cacheWrite: 0,
+      toolContext: null,
+      total: 2300,
+      source: 'gemini-antigravity-estimate',
+    },
+  });
+  const parsed = parseCodexJsonTokenUsage(line);
+  assert.equal(parsed.input, 2000);
+  assert.equal(parsed.output, 300);
+  assert.equal(parsed.source, 'gemini-antigravity-estimate', 'estimate source preserved');
+  const n = normalizeTokenUsage(parsed);
+  assert.equal(n.input, 2000);
+  assert.equal(n.output, 300);
+  assert.equal(n.source, 'gemini-antigravity-estimate');
 });
 
 test('normalizeReviewerClass recognizes gemini / antigravity', () => {

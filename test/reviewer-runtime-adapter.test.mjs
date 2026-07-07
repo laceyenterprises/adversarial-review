@@ -1220,6 +1220,54 @@ test('cli-direct strips forbidden API-key fallback env before spawning', async (
   }
 });
 
+test('cli-direct captures gemini reviewer token usage from stdout (was dropped)', async () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createCliDirectReviewerRuntimeAdapter({
+      rootDir,
+      preflightImpl: noopPreflight,
+      spawnCapturedImpl: async (_command, _args, options) => {
+        options.onSpawn({ pgid: 5153 });
+        return {
+          // gemini reviewer emits the antigravity estimate as reviewer.token_usage
+          stdout: [
+            JSON.stringify({
+              type: 'reviewer.token_usage',
+              tokenUsage: {
+                input: 2000,
+                output: 300,
+                reasoning: null,
+                cacheRead: null,
+                cacheWrite: 0,
+                toolContext: null,
+                total: 2300,
+                source: 'gemini-antigravity-estimate',
+              },
+            }),
+            '',
+          ].join('\n'),
+          stderr: '',
+        };
+      },
+    });
+    const result = await adapter.spawnReviewer({
+      model: 'gemini',
+      prompt: '',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 4 },
+      timeoutMs: 100,
+      sessionUuid: 'gemini-token-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+    assert.equal(result.ok, true);
+    // Before the shouldParseStdoutTokenUsage fix this was null (gemini skipped).
+    assert.equal(result.tokenUsage.input, 2000);
+    assert.equal(result.tokenUsage.output, 300);
+    assert.equal(result.tokenUsage.source, 'gemini-antigravity-estimate');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('cli-direct returns Codex JSON token usage from reviewer stdout', async () => {
   const rootDir = makeRoot();
   try {

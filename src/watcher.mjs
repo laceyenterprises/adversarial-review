@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { homedir, hostname } from 'node:os';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { readFile as readFileAsync } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
@@ -248,6 +249,7 @@ import {
   compareReviewerDispatchCandidates,
   createReviewerMemoryAdmissionSampler,
   reserveReviewerMemoryAdmission,
+  fetchGeminiCredentialConcurrency,
   resolveFirstPassReviewerPoolConfig,
   resolveReviewerMemoryPressureConfig,
   runBoundedReviewerDispatchQueue,
@@ -283,6 +285,80 @@ let activeReviewerRuntimeOrchestrationMode = 'native';
 let reviewerRuntimeConfigFailureSignal = { key: null, count: 0 };
 let reviewerRuntimeAdapterFailureSignal = { key: null, count: 0 };
 const reviewerRuntimeAdapterByNameCache = new Map();
+
+const DEFAULT_REVIEWER_BROKER_SECRET_CACHE_TTL_MS = 5 * 60 * 1000;
+let reviewerBrokerSharedSecretCache = {
+  file: null,
+  value: '',
+  expiresAtMs: 0,
+};
+
+// Best-effort async read of the CQP/oauth broker shared secret for read-only
+// broker probes (e.g. the gemini credential-count fetch). Returns '' on any
+// miss; the caller fails open (no gemini cap) so a missing secret never wedges
+// dispatch. The read is TTL-cached because this helper can be reached from the
+// watcher's hot dispatch drain.
+async function readReviewerBrokerSharedSecretBestEffort(
+  env = process.env,
+  {
+    fsImpl = { readFile: readFileAsync },
+    now = Date.now,
+    ttlMs = DEFAULT_REVIEWER_BROKER_SECRET_CACHE_TTL_MS,
+    logger = console,
+  } = {}
+) {
+  const secretFile = env.CQP_BROKER_SHARED_SECRET_FILE || env.OAUTH_BROKER_SHARED_SECRET_FILE || '';
+  if (!secretFile) return '';
+  const resolvedNowMs = Number(now());
+  const nowMs = Number.isFinite(resolvedNowMs) ? resolvedNowMs : Date.now();
+  if (
+    reviewerBrokerSharedSecretCache.file === secretFile &&
+    reviewerBrokerSharedSecretCache.expiresAtMs > nowMs
+  ) {
+    return reviewerBrokerSharedSecretCache.value;
+  }
+  try {
+    const value = String(await fsImpl.readFile(secretFile, 'utf8') || '').trim();
+    reviewerBrokerSharedSecretCache = {
+      file: secretFile,
+      value,
+      expiresAtMs: nowMs + Math.max(0, Number(ttlMs) || 0),
+    };
+    return value;
+  } catch (err) {
+    reviewerBrokerSharedSecretCache = {
+      file: secretFile,
+      value: '',
+      expiresAtMs: nowMs + Math.max(0, Number(ttlMs) || 0),
+    };
+    if (err?.code !== 'ENOENT') {
+      logger?.warn?.(
+        `[watcher] failed to read reviewer broker shared secret file ${secretFile}: ${err?.code || err?.message || err}`
+      );
+    }
+    return '';
+  }
+}
+
+async function resolveGeminiCredentialConcurrencyForDispatchCandidates(
+  candidates,
+  {
+    env = process.env,
+    fetchCredentialConcurrency = fetchGeminiCredentialConcurrency,
+    readSharedSecret = readReviewerBrokerSharedSecretBestEffort,
+  } = {}
+) {
+  const hasGeminiCandidates = candidates.some(
+    (candidate) => String(candidate?.reviewerModel || '').toLowerCase() === 'gemini'
+  );
+  if (!hasGeminiCandidates) return null;
+
+  const brokerUrl = env.CQP_BROKER_URL || env.OAUTH_BROKER_URL || null;
+  return await fetchCredentialConcurrency({
+    brokerUrl,
+    secret: brokerUrl ? await readSharedSecret(env) : '',
+  });
+}
 
 function reviewerRuntimeDomainMtimeMs(rootDir = ROOT, domainId = 'code-pr') {
   return statSync(join(rootDir, 'domains', `${domainId}.json`)).mtimeMs;
@@ -6638,8 +6714,16 @@ async function pollOnce(
       // for admission, token refresh, and child spawn bookkeeping, but reviewer
       // subprocess execution is detached and bounded by its own timeout. The
       // outer safePollOnce deadline still bounds pathological drain wedges.
+      // Cap concurrent GEMINI reviewers at the live broker credential count so
+      // they don't over-dispatch against a single-account pool and lose the
+      // checkout-lease race (the "no credential with remaining quota"
+      // misdiagnosis). Fail-open: a missing broker URL / secret / endpoint
+      // yields null => no gemini cap, so review dispatch never wedges on this.
+      const geminiCredentialConcurrency =
+        await resolveGeminiCredentialConcurrencyForDispatchCandidates(candidates);
       return await runBoundedReviewerDispatchQueue(candidates, {
         maxConcurrent: reviewerPoolConfig.maxConcurrent,
+        geminiCredentialConcurrency,
         logger: console,
       });
     } finally {
@@ -8394,6 +8478,8 @@ export {
   maybeFireMergeAgentStuckAlert,
   pollOnce,
   persistReviewerPgid,
+  resolveGeminiCredentialConcurrencyForDispatchCandidates,
+  readReviewerBrokerSharedSecretBestEffort,
   resolveReviewUnknownFailureMaxRetries,
   readWatcherDrainState,
   reconcilePendingDraftsBeforeSpawn,

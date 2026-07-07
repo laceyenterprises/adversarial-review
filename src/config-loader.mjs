@@ -1214,14 +1214,19 @@ function schemaV1() {
                     __type: TYPE_BOOL,
                     __default: false,
                   },
-                  // Upper bound HAM terminal-remediation dispatches per PR. The
-                  // same resolved value also feeds the daemon merge retry
-                  // budget, so operators can tune the ceiling without code
-                  // edits.
+                  // Upper bound HAM terminal-remediation dispatches per PR. Set
+                  // to 0 to disable the hammer terminal-remediation path.
+                  hammer_lifetime_ceiling: {
+                    __type: TYPE_INT,
+                    __default: 6,
+                    __min: 0,
+                  },
+                  // Compatibility spelling kept for existing local configs.
                   hammer_lifetime_dispatch_ceiling: {
                     __type: TYPE_INT,
-                    __default: 2,
-                    __min: 1,
+                    __default: null,
+                    __nullable: true,
+                    __min: 0,
                   },
                   // Wall-clock cap (ms) the watcher gives `hq dispatch` to admit
                   // + provision a closer/hammer worker before SIGTERM. The old
@@ -2072,6 +2077,10 @@ export const ENV_ALIASES = {
   'roles.adversarial.merge_authority.strict_mode': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_STRICT_MODE',
     aliases: [],
+  },
+  'roles.adversarial.merge_authority.hammer_lifetime_ceiling': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_HAMMER_LIFETIME_CEILING',
+    aliases: [['AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_HAMMER_LIFETIME_DISPATCH_CEILING', identity]],
   },
   'roles.adversarial.merge_authority.hammer_lifetime_dispatch_ceiling': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_HAMMER_LIFETIME_DISPATCH_CEILING',
@@ -3548,6 +3557,14 @@ export class AgentOSConfig {
    * the schema above AND this getter together.
    */
   getMergeAuthorityConfig() {
+    const hammerLifetimeCeiling = this.get(
+      'roles.adversarial.merge_authority.hammer_lifetime_ceiling',
+      6,
+    );
+    const legacyHammerLifetimeCeiling = this.get(
+      'roles.adversarial.merge_authority.hammer_lifetime_dispatch_ceiling',
+      null,
+    );
     return {
       enabled: this.get('roles.adversarial.merge_authority.enabled', false),
       workerClass: this.get(
@@ -3578,10 +3595,9 @@ export class AgentOSConfig {
         'roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss',
         false,
       ),
-      hammerLifetimeDispatchCeiling: this.get(
-        'roles.adversarial.merge_authority.hammer_lifetime_dispatch_ceiling',
-        2,
-      ),
+      hammerLifetimeDispatchCeiling: legacyHammerLifetimeCeiling !== null && hammerLifetimeCeiling === 6
+        ? legacyHammerLifetimeCeiling
+        : hammerLifetimeCeiling,
       dispatchTimeoutMs: this.get(
         'roles.adversarial.merge_authority.dispatch_timeout_ms',
         300000,

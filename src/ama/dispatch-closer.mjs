@@ -1778,12 +1778,13 @@ export async function maybeDispatchAmaCloser({
     reviewCycleExhausted: reviewState?.reviewCycleExhausted === true,
   });
 
-  const dispatchIdentity = { repo, prNumber, headSha: dispatchRecordHeadSha };
+  const existingDispatchIdentity = { repo, prNumber, headSha: dispatchRecordHeadSha };
+  const targetDispatchIdentity = { repo, prNumber, headSha: targetRemediationSha };
   const auditIdentity = { repo, prNumber, headSha: reviewedSha };
   const targetAuditIdentity = { repo, prNumber, headSha: targetRemediationSha };
   const hqPath = dispatchContext.hqPath || process.env.HQ_BIN || DEFAULT_HQ_PATH;
   const hqProject = dispatchContext.hqProject || DEFAULT_PROJECT;
-  const existingRecord = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
+  const existingRecord = readAmaCloserDispatchRecord(rootDir, existingDispatchIdentity);
   const existingRecordLeaseIdentity = {
     repo,
     prNumber,
@@ -1805,7 +1806,7 @@ export async function maybeDispatchAmaCloser({
     : null;
   const auditTerminalOutcome = existingRecord
     ? existingRecordAuditTerminalOutcome
-    : (targetHeadAuditTerminalOutcome || reviewedHeadAuditTerminalOutcome);
+    : (headAdvancedDuringDispatch ? targetHeadAuditTerminalOutcome : reviewedHeadAuditTerminalOutcome);
   if (isReclaimableDispatchedAmaCloserLease(existingLeaseBeforeDispatch, {
     now: dispatchContext.dispatchedAt,
   })) {
@@ -1941,7 +1942,7 @@ export async function maybeDispatchAmaCloser({
           repo,
           prNumber,
         });
-        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: status,
           lastObservedAt: dispatchContext.dispatchedAt,
@@ -1970,7 +1971,7 @@ export async function maybeDispatchAmaCloser({
           message:
             'Final HAM terminal remediation already completed for the current head, but no merged signal is present; refusing same-head re-dispatch',
         }));
-        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: status,
           lastObservedAt: dispatchContext.dispatchedAt,
@@ -1994,7 +1995,7 @@ export async function maybeDispatchAmaCloser({
         mergedSignalUnknown
         && (auditTerminalOutcome === 'succeeded' || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status))
       ) {
-        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: status,
           lastObservedAt: dispatchContext.dispatchedAt,
@@ -2048,7 +2049,7 @@ export async function maybeDispatchAmaCloser({
           prNumber,
         });
       } else if (!advancedTerminalDispatchSuperseded) {
-        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: status,
           lastObservedAt: dispatchContext.dispatchedAt,
@@ -2086,7 +2087,7 @@ export async function maybeDispatchAmaCloser({
         pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
         logger,
       });
-      updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+      updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
         ...(current || existingRecord),
         lastObservedStatus: status,
         lastObservedAt: dispatchContext.dispatchedAt,
@@ -2094,7 +2095,7 @@ export async function maybeDispatchAmaCloser({
       }));
     }
     if (status === 'unknown') {
-      updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+      updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
         ...(current || existingRecord),
         lastObservedStatus: status,
         lastObservedAt: dispatchContext.dispatchedAt,
@@ -2360,7 +2361,7 @@ export async function maybeDispatchAmaCloser({
       `[ama-closer] unsupported merge dispatch route=${JSON.stringify(mergeDispatchRoute)}`,
     );
   }
-  writeAmaCloserDispatchRecord(rootDir, dispatchIdentity, {
+  writeAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, {
     schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
     repo,
     prNumber,
@@ -2522,7 +2523,7 @@ export async function maybeDispatchAmaCloser({
         && !branchHolderBlocked
         && isTransientHqDispatchError(err);
       const budgetPreservingFailure = branchHolderBlocked || transientFailure;
-      const updatedDispatchRecord = updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => {
+      const updatedDispatchRecord = updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => {
         const branchHolderBlockCount = branchHolderBlocked
           ? Number(current?.branchHolderBlockCount || existingBranchHolderBlockCount) + 1
           : Number(current?.branchHolderBlockCount || existingBranchHolderBlockCount);
@@ -2622,7 +2623,7 @@ export async function maybeDispatchAmaCloser({
   }
 
   const parsed = normalizeDispatchIdentifiers(parseAmaCloserDispatchOutput(execResult?.stdout || ''));
-  updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+  updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => ({
     ...(current || {}),
     schemaVersion: AMA_CLOSER_DISPATCH_SCHEMA_VERSION,
     repo,

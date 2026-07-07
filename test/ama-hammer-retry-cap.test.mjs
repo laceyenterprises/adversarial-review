@@ -9,6 +9,7 @@ import {
   AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
   isReclaimableDispatchedAmaCloserLease,
   maybeDispatchAmaCloser,
+  readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
 import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
@@ -656,6 +657,15 @@ test('terminal old-head hammer dispatch is superseded when remediation advanced 
   const currentLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD });
   assert.equal(currentLease.status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
   assert.equal(currentLease.lrqId, 'lrq_new_head');
+  const oldRecord = readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
+  assert.equal(oldRecord.headSha, REVIEWED_HEAD);
+  assert.equal(oldRecord.launchRequestId, 'lrq_old_head');
+  assert.equal(oldRecord.lastError, 'terminal-dispatch-superseded-by-head-advance');
+  const currentRecord = readAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD });
+  assert.equal(currentRecord.headSha, ADVANCED_HEAD);
+  assert.equal(currentRecord.reviewedSha, REVIEWED_HEAD);
+  assert.equal(currentRecord.launchRequestId, 'lrq_new_head');
+  assert.equal(currentRecord.state, 'dispatched');
 });
 
 test('terminal current-head hammer dispatch is not superseded after remediation advances the PR head', async (t) => {

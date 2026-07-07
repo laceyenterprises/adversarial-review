@@ -14,7 +14,7 @@ import {
   readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
-import { writeAmaAuditEntry } from '../src/ama/audit.mjs';
+import { readAmaAuditEntry, writeAmaAuditEntry } from '../src/ama/audit.mjs';
 import {
   acquireAmaCloserLease,
   AMA_CLOSER_LEASE_STATUS,
@@ -587,13 +587,9 @@ test('same validated HAM target head can recover until hammer cap is exhausted',
   assert.equal(ledger.lifetimeAttemptCount, 2);
 });
 
-test('terminal-remediation success finalizes lease and failure redispatches replacement', async (t) => {
+test('same-head terminal HAM remediation auto-merges when structural gates pass', async (t) => {
   const successRoot = mkdtempSync(join(tmpdir(), 'hammer-lease-success-'));
-  const failureRoot = mkdtempSync(join(tmpdir(), 'hammer-lease-failure-'));
-  t.after(() => {
-    rmSync(successRoot, { recursive: true, force: true });
-    rmSync(failureRoot, { recursive: true, force: true });
-  });
+  t.after(() => rmSync(successRoot, { recursive: true, force: true }));
 
   const successDeps = hammerDispatchDeps();
   const first = await maybeDispatchAmaCloser({
@@ -601,55 +597,185 @@ test('terminal-remediation success finalizes lease and failure redispatches repl
     ...successDeps,
   });
   assert.equal(first.dispatched, true);
+  const mergeCalls = [];
   const successProbe = await maybeDispatchAmaCloser({
     ...hammerDispatchArgs(successRoot, {
       reviewState: { reviewCycleExhausted: true },
-      dispatchContext: { dispatchedAt: '2026-07-06T12:02:00Z' },
+      prMetadata: {
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+        ],
+      },
+      dispatchContext: {
+        baseBranch: 'main',
+        dispatchedAt: '2026-07-06T12:02:00Z',
+      },
+    }),
+    options: validHamTerminalRemediationOptions({
+      reviewedHead: REVIEWED_HEAD,
+      currentHead: REVIEWED_HEAD,
     }),
     ...hammerDispatchDeps({
-      execFileImpl: async (_cmd, args) => {
+      execFileImpl: async (cmd, args) => {
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
+        if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'merge') {
+          mergeCalls.push(args);
+          const bodyIndex = args.indexOf('--body');
+          assert.notEqual(bodyIndex, -1);
+          assert.match(args[bodyIndex + 1], /Closed-By: hammer \(adversarial-pipe-mode\)/);
+          assert.deepEqual(args.slice(0, 8), [
+            'pr', 'merge', String(PR_NUMBER), '--repo', REPO, '--squash', '--match-head-commit', REVIEWED_HEAD,
+          ]);
+          assert.equal(
+            readAmaCloserLease(successRoot, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }).terminalOutcome,
+            null,
+            'lease must not be succeeded before gh merge returns success',
+          );
+          return { stdout: '', stderr: '' };
+        }
+        if (args[0] === 'worker' && args[1] === 'tear-down') {
+          return { stdout: '', stderr: '' };
+        }
         return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
+      fetchPullRequestRollupImpl: async () => ({
+        state: 'OPEN',
+        headSha: REVIEWED_HEAD,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+        ],
+      }),
     }),
   });
-  assert.equal(successProbe.reason, 'current-head-hammer-already-ran-needs-operator');
-  assert.equal(successProbe.needsOperator, true);
-  // The hammer dispatch reached a terminal-HOLD status but produced NO merged
-  // signal — so the closer parks the PR for the operator. The lease must stay
-  // non-terminal: a false terminal 'succeeded' would falsify the §4.4 audit
-  // trail, and any non-null terminalOutcome hides the still-open PR from
-  // review-pipeline-health / recovery-reaper.
+  assert.equal(successProbe.reason, 'current-head-hammer-terminal-remediation-merged');
+  assert.equal(successProbe.needsOperator, undefined);
+  assert.equal(mergeCalls.length, 1);
   assert.equal(
     readAmaCloserLease(successRoot, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }).terminalOutcome,
-    null,
+    'succeeded',
   );
+  const audit = readAmaAuditEntry(join(successRoot, 'hq-root'), REPO, PR_NUMBER, REVIEWED_HEAD);
+  assert.equal(audit.status, 'succeeded');
+  assert.equal(audit.closureAuthority, 'ham-terminal-remediation');
+  assert.equal(audit.closedBy, 'hammer');
+  assert.match(audit.closeTrailers, /Closed-By: hammer \(adversarial-pipe-mode\)/);
+});
 
+test('same-head terminal HAM remediation parks for operator when structural gates fail', async (t) => {
+  const failureRoot = mkdtempSync(join(tmpdir(), 'hammer-lease-failure-'));
+  t.after(() => rmSync(failureRoot, { recursive: true, force: true }));
   const failureDeps = hammerDispatchDeps();
   const failedFirst = await maybeDispatchAmaCloser({
     ...hammerDispatchArgs(failureRoot),
     ...failureDeps,
   });
   assert.equal(failedFirst.dispatched, true);
+  const mergeCalls = [];
   const failureProbe = await maybeDispatchAmaCloser({
     ...hammerDispatchArgs(failureRoot, {
-      dispatchContext: { dispatchedAt: '2026-07-06T12:02:00Z' },
+      reviewState: { reviewCycleExhausted: true },
+      prMetadata: {
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'FAILURE' },
+        ],
+      },
+      dispatchContext: {
+        baseBranch: 'main',
+        dispatchedAt: '2026-07-06T12:02:00Z',
+      },
+    }),
+    options: validHamTerminalRemediationOptions({
+      reviewedHead: REVIEWED_HEAD,
+      currentHead: REVIEWED_HEAD,
     }),
     ...hammerDispatchDeps({
-      execFileImpl: async (_cmd, args) => {
+      execFileImpl: async (cmd, args) => {
         if (args[0] === 'dispatch' && args[1] === 'status') {
-          return { stdout: JSON.stringify({ status: 'failed' }), stderr: '' };
+          return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
+        }
+        if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'merge') {
+          mergeCalls.push(args);
         }
         return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
       },
+      fetchPullRequestRollupImpl: async () => ({
+        state: 'OPEN',
+        headSha: REVIEWED_HEAD,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'FAILURE' },
+        ],
+      }),
     }),
   });
-  assert.equal(failureProbe.dispatched, true);
-  const replacementLease = readAmaCloserLease(failureRoot, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
-  assert.equal(replacementLease.status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
-  assert.equal(replacementLease.lrqId, 'unexpected');
+  assert.equal(failureProbe.reason, 'current-head-ham-terminal-remediation-needs-operator');
+  assert.equal(failureProbe.needsOperator, true);
+  assert.equal(mergeCalls.length, 0);
+  assert.equal(
+    readAmaCloserLease(failureRoot, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }).terminalOutcome,
+    null,
+  );
+});
+
+test('same-head terminal HAM remediation parks for operator on head mismatch without merging', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-lease-head-mismatch-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const first = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir),
+    ...hammerDispatchDeps(),
+  });
+  assert.equal(first.dispatched, true);
+  const mergeCalls = [];
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true },
+      prMetadata: {
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+        ],
+      },
+      dispatchContext: {
+        baseBranch: 'main',
+        dispatchedAt: '2026-07-06T12:02:00Z',
+      },
+    }),
+    options: validHamTerminalRemediationOptions({
+      reviewedHead: REVIEWED_HEAD,
+      currentHead: REVIEWED_HEAD,
+    }),
+    ...hammerDispatchDeps({
+      execFileImpl: async (cmd, args) => {
+        if (args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
+        }
+        if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'merge') {
+          mergeCalls.push(args);
+        }
+        return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+      },
+      fetchPullRequestRollupImpl: async () => ({
+        state: 'OPEN',
+        headSha: ADVANCED_HEAD,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+        ],
+      }),
+    }),
+  });
+  assert.equal(result.reason, 'current-head-hammer-already-ran-needs-operator');
+  assert.equal(result.needsOperator, true);
+  assert.equal(mergeCalls.length, 0);
+  assert.equal(
+    readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }).terminalOutcome,
+    null,
+  );
 });
 
 test('terminal old-head hammer dispatch is superseded when remediation advanced the head', async (t) => {

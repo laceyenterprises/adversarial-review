@@ -53,6 +53,25 @@ test('does not reap paths outside <hqRoot>/workers (scope guard)', () => {
   assert.deepEqual(paths, [], `no path outside hqRoot/workers should be reaped, got ${JSON.stringify(paths)}`);
 });
 
+test('does not reap nested worker paths under hqRoot', () => {
+  const err = {
+    stderr: [
+      "fatal: 'x/y' is already used by worktree at '/Users/airlock/agent-os-hq/workers/foo/bar/agent-os'",
+      'branch-holder-blocked at /Users/airlock/agent-os-hq/workers/hammer-ama-pr-999/nested/agent-os',
+    ].join('\n'),
+  };
+  const paths = samePrHammerHolderWorktreePaths(err, 999, HQ_ROOT);
+  assert.deepEqual(paths, [], `nested worker paths should be rejected, got ${JSON.stringify(paths)}`);
+});
+
+test('does not reap legacy hammer-ama paths outside hqRoot when hqRoot is known', () => {
+  const err = {
+    stderr: 'branch-holder-blocked at /tmp/workers/hammer-ama-pr-3064-live/agent-os',
+  };
+  const paths = samePrHammerHolderWorktreePaths(err, 3064, HQ_ROOT);
+  assert.deepEqual(paths, [], `legacy hammer paths outside hqRoot should be ignored, got ${JSON.stringify(paths)}`);
+});
+
 test('without hqRoot, still accepts canonical /workers/<id>/agent-os shape but rejects arbitrary paths', () => {
   const err = {
     stderr: [

@@ -953,6 +953,16 @@ export function samePrHammerHolderWorktreePaths(errOrText, prNumber, hqRoot) {
       paths.push(path);
     }
   };
+  const workersPrefix = typeof hqRoot === 'string' && hqRoot.trim()
+    ? join(hqRoot, 'workers') + '/'
+    : null;
+  const isCanonicalWorkerWorktreePath = (candidate) => /\/workers\/[^/]+\/agent-os$/.test(candidate);
+  const isReapableHolderPath = (candidate) => {
+    if (!candidate || !candidate.endsWith('/agent-os')) return false;
+    if (!isCanonicalWorkerWorktreePath(candidate)) return false;
+    if (workersPrefix) return candidate.startsWith(workersPrefix);
+    return true;
+  };
 
   // (1) Prior hammer-ama worktrees for THIS pr.
   const normalizedPr = String(prNumber || '').trim();
@@ -963,21 +973,14 @@ export function samePrHammerHolderWorktreePaths(errOrText, prNumber, hqRoot) {
       'g',
     );
     for (const match of text.matchAll(hammerPattern)) {
-      pushPath(match[2]);
+      const candidate = (match[2] ?? '').trim();
+      if (isReapableHolderPath(candidate)) {
+        pushPath(candidate);
+      }
     }
   }
 
   // (2) The actual branch holder named by git, scoped to the HQ workers dir.
-  const workersPrefix = typeof hqRoot === 'string' && hqRoot.trim()
-    ? join(hqRoot, 'workers') + '/'
-    : null;
-  const isReapableHolderPath = (candidate) => {
-    if (!candidate || !candidate.endsWith('/agent-os')) return false;
-    if (workersPrefix) return candidate.startsWith(workersPrefix);
-    // Without a known hqRoot, only accept the canonical worker-worktree shape
-    // so arbitrary `/agent-os` paths in the error text are ignored.
-    return /\/workers\/[^/]+\/agent-os$/.test(candidate);
-  };
   const holderPatterns = [
     // fatal: '<branch>' is already used by worktree at '<PATH>'
     /already used by worktree at\s+(['"])([^'"\n]+)\1/g,

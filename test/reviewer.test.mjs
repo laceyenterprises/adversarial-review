@@ -1787,6 +1787,8 @@ test('Codex JSON token parser reads turn.completed usage from native stdout', ()
     cacheWrite: 0,
     total: 174,
     source: 'codex-json',
+    usageTag: 'guardrail',
+    guardrail: 174,
   });
 });
 
@@ -1817,6 +1819,31 @@ test('Codex JSON token parser captures reasoning + gemini usageMetadata (full fi
   assert.equal(gemini.cacheRead, 200);
   assert.equal(gemini.toolContext, 5);
   assert.equal(gemini.source, 'gemini-json');
+});
+
+test('Reviewer Codex token parser uses canonical side-channel marker handling', () => {
+  const usage = parseCodexJsonTokenUsage(JSON.stringify({
+    type: 'reviewer.token_usage',
+    tokenUsage: {
+      input: 1000,
+      output: 200,
+      cacheRead: 300,
+      cacheWrite: 0,
+      total: 1500,
+      source: 'codex-json',
+    },
+  }));
+
+  assert.deepEqual(usage, {
+    input: 1000,
+    output: 200,
+    cacheRead: 300,
+    cacheWrite: 0,
+    total: 1500,
+    source: 'codex-json',
+    usageTag: 'guardrail',
+    guardrail: 1500,
+  });
 });
 
 test('spawnClaude rejects invalid darwin uids', async () => {

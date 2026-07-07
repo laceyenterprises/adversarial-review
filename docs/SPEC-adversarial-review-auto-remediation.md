@@ -2004,6 +2004,15 @@ detached runtime concern bounded by the reviewer timeout and by the outer
 `safePollOnce` deadline. A drain that exceeds the watcher SLA emits an explicit
 warning so the inverse starvation class is observable.
 
+When the drain contains Gemini reviewer candidates, the watcher may ask the
+reviewer broker for the live count of non-cooled Gemini credentials and clamp
+only Gemini in-flight dispatch to that count. The broker count fetch is skipped
+entirely for drains with no Gemini candidates so broker latency cannot block
+Codex or Claude review adoption. The shared broker secret used for
+that read-only probe is read asynchronously and cached in-process for a short
+TTL; missing or unreadable secret files fail open to the uncapped Gemini
+dispatch behavior, with non-missing read failures logged for operator diagnosis.
+
 Posted-review handlers run after reviewer dispatch has drained. Because that
 places them before lifecycle sync, merge-side dispatch decisions must re-fetch
 live PR state, head SHA, and mergeability at dispatch time rather than relying

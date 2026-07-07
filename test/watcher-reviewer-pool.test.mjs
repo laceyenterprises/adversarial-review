@@ -21,6 +21,7 @@ function candidate(prNumber, run, createdAt = `2026-05-01T00:00:${String(prNumbe
   return {
     repoPath: options.repoPath || 'laceyenterprises/adversarial-review',
     prNumber,
+    reviewerModel: options.reviewerModel,
     subject: { createdAt },
     current: options.current ?? null,
     enqueuedAtMs: options.enqueuedAtMs,
@@ -313,6 +314,34 @@ test('reviewer dispatch ignores non-number enqueuedAtMs values', async () => {
   assert.equal(logs.length, 1);
   assert.match(logs[0], /wait_ms=5000/);
   assert.equal(warnings.length, 0);
+});
+
+test('reviewer dispatch releases gemini capacity when pre-run bookkeeping throws', async () => {
+  const ran = [];
+  let nowCalls = 0;
+  await assert.rejects(
+    runBoundedReviewerDispatchQueue([
+      candidate(10, async () => {
+        ran.push('first');
+      }, '2026-05-01T00:00:00.000Z', { reviewerModel: 'gemini' }),
+      candidate(11, async () => {
+        ran.push('second');
+      }, '2026-05-01T00:00:01.000Z', { reviewerModel: 'gemini' }),
+    ], {
+      maxConcurrent: 2,
+      geminiCredentialConcurrency: 1,
+      maxThrownFailures: 2,
+      now: () => {
+        nowCalls += 1;
+        if (nowCalls === 1) throw new Error('clock failed');
+        return Date.parse('2026-05-01T00:00:05.000Z');
+      },
+      logger: { error() {}, log() {}, warn() {} },
+    }),
+    /clock failed/
+  );
+
+  assert.deepEqual(ran, ['second']);
 });
 
 test('reviewer memory gate refuses a spawn when one more reviewer cannot fit', () => {

@@ -445,11 +445,11 @@ async function runBoundedReviewerDispatchQueue(candidates, {
 
   async function start(candidate) {
     const gemini = isGeminiCandidate(candidate);
-    if (gemini) activeGemini += 1;
-    const currentNowMs = Number(now());
-    const resolvedNowMs = Number.isFinite(currentNowMs) ? currentNowMs : Date.now();
-    logReviewerDispatchWait(candidate, { logger, nowMs: resolvedNowMs, waitWarnMs });
     try {
+      if (gemini) activeGemini += 1;
+      const currentNowMs = Number(now());
+      const resolvedNowMs = Number.isFinite(currentNowMs) ? currentNowMs : Date.now();
+      logReviewerDispatchWait(candidate, { logger, nowMs: resolvedNowMs, waitWarnMs });
       await candidate.run();
     } catch (err) {
       errors.push(err);

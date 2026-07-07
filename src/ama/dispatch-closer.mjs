@@ -1784,22 +1784,28 @@ export async function maybeDispatchAmaCloser({
   const hqPath = dispatchContext.hqPath || process.env.HQ_BIN || DEFAULT_HQ_PATH;
   const hqProject = dispatchContext.hqProject || DEFAULT_PROJECT;
   const existingRecord = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
-  const existingDispatchHeadAdvanced = headAdvancedDuringDispatch || Boolean(
-    reviewedSha
-    && (
-      (prMetadata?.headSha && prMetadata.headSha !== reviewedSha)
-      || (existingRecord && (
-        (existingRecord.targetRemediationSha && existingRecord.targetRemediationSha !== reviewedSha)
-        || (existingRecord.headSha && existingRecord.headSha !== reviewedSha)
-      ))
-    )
+  const existingRecordLeaseIdentity = {
+    repo,
+    prNumber,
+    headSha: existingRecord?.headSha || dispatchRecordHeadSha || reviewedSha,
+  };
+  const existingDispatchLeaseIdentity = existingRecord ? existingRecordLeaseIdentity : existingLeaseIdentity;
+  const existingDispatchHeadAdvanced = Boolean(
+    existingRecord?.headSha
+    && targetRemediationSha
+    && existingRecord.headSha !== targetRemediationSha
   );
-  const existingLeaseBeforeDispatch = readAmaCloserLease(rootDir, existingLeaseIdentity);
+  const existingLeaseBeforeDispatch = readAmaCloserLease(rootDir, existingDispatchLeaseIdentity);
   const reviewedHeadAuditTerminalOutcome = readAmaAuditTerminalOutcome(hqRoot, auditIdentity);
   const targetHeadAuditTerminalOutcome = headAdvancedDuringDispatch
     ? readAmaAuditTerminalOutcome(hqRoot, targetAuditIdentity)
     : null;
-  const auditTerminalOutcome = targetHeadAuditTerminalOutcome || reviewedHeadAuditTerminalOutcome;
+  const existingRecordAuditTerminalOutcome = existingRecord?.headSha
+    ? readAmaAuditTerminalOutcome(hqRoot, existingRecordLeaseIdentity)
+    : null;
+  const auditTerminalOutcome = existingRecord
+    ? existingRecordAuditTerminalOutcome
+    : (targetHeadAuditTerminalOutcome || reviewedHeadAuditTerminalOutcome);
   if (isReclaimableDispatchedAmaCloserLease(existingLeaseBeforeDispatch, {
     now: dispatchContext.dispatchedAt,
   })) {
@@ -1812,7 +1818,7 @@ export async function maybeDispatchAmaCloser({
     };
     finalizeAmaCloserLeaseBestEffort({
       rootDir,
-      leaseIdentity: existingLeaseIdentity,
+      leaseIdentity: existingDispatchLeaseIdentity,
       terminalOutcome: 'failed-without-merge',
       now: dispatchContext.dispatchedAt,
       logger,
@@ -1848,7 +1854,7 @@ export async function maybeDispatchAmaCloser({
         readBuildCompletionSignalForPrImpl,
       })
     : null;
-  const mergedSignal = targetHeadMergedSignal?.ok
+  const mergedSignal = targetHeadMergedSignal && !isCleanMissingMergedSignal(targetHeadMergedSignal)
     ? targetHeadMergedSignal
     : reviewedHeadMergedSignal;
   if (mergedSignal?.ok) {
@@ -1928,7 +1934,7 @@ export async function maybeDispatchAmaCloser({
         advancedTerminalDispatchSuperseded = true;
         finalizeAmaCloserLeaseBestEffort({
           rootDir,
-          leaseIdentity: existingLeaseIdentity,
+          leaseIdentity: existingRecordLeaseIdentity,
           terminalOutcome: 'superseded',
           now: dispatchContext.dispatchedAt,
           logger,
@@ -2002,7 +2008,7 @@ export async function maybeDispatchAmaCloser({
         releaseUnprovenTerminalHoldError = 'audit-succeeded-without-merged-signal';
         finalizeAmaCloserLeaseBestEffort({
           rootDir,
-          leaseIdentity: existingLeaseIdentity,
+          leaseIdentity: existingRecordLeaseIdentity,
           terminalOutcome: 'succeeded',
           now: dispatchContext.dispatchedAt,
           logger,
@@ -2021,7 +2027,7 @@ export async function maybeDispatchAmaCloser({
         releaseUnprovenTerminalHoldError = statusProbe?.error || null;
         finalizeAmaCloserLeaseBestEffort({
           rootDir,
-          leaseIdentity: existingLeaseIdentity,
+          leaseIdentity: existingRecordLeaseIdentity,
           terminalOutcome: auditTerminalOutcome,
           now: dispatchContext.dispatchedAt,
           logger,
@@ -2034,7 +2040,7 @@ export async function maybeDispatchAmaCloser({
         releaseUnprovenTerminalHoldError = 'terminal-success-status-without-audit-or-merged-signal';
         finalizeAmaCloserLeaseBestEffort({
           rootDir,
-          leaseIdentity: existingLeaseIdentity,
+          leaseIdentity: existingRecordLeaseIdentity,
           terminalOutcome: 'succeeded',
           now: dispatchContext.dispatchedAt,
           logger,
@@ -2107,7 +2113,7 @@ export async function maybeDispatchAmaCloser({
     if (AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
       finalizeAmaCloserLeaseBestEffort({
         rootDir,
-        leaseIdentity: existingLeaseIdentity,
+        leaseIdentity: existingRecordLeaseIdentity,
         terminalOutcome: existingDispatchHeadAdvanced ? 'superseded' : 'failed-without-merge',
         now: dispatchContext.dispatchedAt,
         logger,

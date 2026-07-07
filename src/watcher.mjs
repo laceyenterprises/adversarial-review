@@ -248,6 +248,7 @@ import {
   compareReviewerDispatchCandidates,
   createReviewerMemoryAdmissionSampler,
   reserveReviewerMemoryAdmission,
+  fetchGeminiCredentialConcurrency,
   resolveFirstPassReviewerPoolConfig,
   resolveReviewerMemoryPressureConfig,
   runBoundedReviewerDispatchQueue,
@@ -283,6 +284,20 @@ let activeReviewerRuntimeOrchestrationMode = 'native';
 let reviewerRuntimeConfigFailureSignal = { key: null, count: 0 };
 let reviewerRuntimeAdapterFailureSignal = { key: null, count: 0 };
 const reviewerRuntimeAdapterByNameCache = new Map();
+
+// Best-effort read of the CQP/oauth broker shared secret for read-only broker
+// probes (e.g. the gemini credential-count fetch). Returns '' on any miss; the
+// caller fails open (no gemini cap) so a missing secret never wedges dispatch.
+function readReviewerBrokerSharedSecretBestEffort(env = process.env, fsImpl = { readFileSync, existsSync }) {
+  const secretFile = env.CQP_BROKER_SHARED_SECRET_FILE || env.OAUTH_BROKER_SHARED_SECRET_FILE || '';
+  if (!secretFile) return '';
+  try {
+    if (!fsImpl.existsSync(secretFile)) return '';
+    return String(fsImpl.readFileSync(secretFile, 'utf8') || '').trim();
+  } catch {
+    return '';
+  }
+}
 
 function reviewerRuntimeDomainMtimeMs(rootDir = ROOT, domainId = 'code-pr') {
   return statSync(join(rootDir, 'domains', `${domainId}.json`)).mtimeMs;
@@ -6638,8 +6653,18 @@ async function pollOnce(
       // for admission, token refresh, and child spawn bookkeeping, but reviewer
       // subprocess execution is detached and bounded by its own timeout. The
       // outer safePollOnce deadline still bounds pathological drain wedges.
+      // Cap concurrent GEMINI reviewers at the live broker credential count so
+      // they don't over-dispatch against a single-account pool and lose the
+      // checkout-lease race (the "no credential with remaining quota"
+      // misdiagnosis). Fail-open: a missing broker URL / secret / endpoint
+      // yields null => no gemini cap, so review dispatch never wedges on this.
+      const geminiCredentialConcurrency = await fetchGeminiCredentialConcurrency({
+        brokerUrl: process.env.CQP_BROKER_URL || process.env.OAUTH_BROKER_URL || null,
+        secret: readReviewerBrokerSharedSecretBestEffort(),
+      });
       return await runBoundedReviewerDispatchQueue(candidates, {
         maxConcurrent: reviewerPoolConfig.maxConcurrent,
+        geminiCredentialConcurrency,
         logger: console,
       });
     } finally {

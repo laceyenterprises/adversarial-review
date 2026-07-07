@@ -350,9 +350,68 @@ async function reserveReviewerMemoryAdmission({
   }
 }
 
+// Fetch the number of gemini credentials that can currently serve a concurrent
+// checkout (registered credentials not in a real-429 cooldown) from the broker's
+// /quota endpoint. This is the DYNAMIC source for the gemini dispatch cap — the
+// value lives in the broker/quota DB, never hardcoded here. Fails OPEN (returns
+// null => no gemini cap) on any error so a broker hiccup never wedges review
+// dispatch.
+async function fetchGeminiCredentialConcurrency({
+  brokerUrl,
+  secret = '',
+  fetchImpl = globalThis.fetch,
+  timeoutMs = 4000,
+} = {}) {
+  if (!brokerUrl || typeof fetchImpl !== 'function') return null;
+  const url = `${String(brokerUrl).replace(/\/+$/, '')}/quota?provider=gemini`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const headers = { Accept: 'application/json' };
+    if (secret) headers.Authorization = `Bearer ${secret}`;
+    const res = await fetchImpl(url, { headers, signal: controller.signal });
+    if (!res || !res.ok) return null;
+    const body = await res.json();
+    const credentials = Array.isArray(body?.credentials) ? body.credentials : null;
+    if (credentials === null) return null;
+    // Count credentials NOT in a real quota cooldown — those are the ones that
+    // can hold a concurrent checkout lease right now.
+    return credentials.filter((credential) => !credential?.is_cooled).length;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Resolve the concurrent-GEMINI-reviewer cap. Gemini reviewers all check out
+// from a shared, typically single-account credential pool, so dispatching more
+// concurrent gemini reviewers than gemini credentials just makes them contend on
+// the checkout lease and lose — the broker returns no-credit, which the reviewer
+// surfaces as a MISLEADING "no credential with remaining quota" and the PR gets
+// orphaned. `geminiCredentialConcurrency` is the live broker credential count
+// (see fetchGeminiCredentialConcurrency). `null`/`''`/malformed => no gemini
+// cap (fail-open to the existing behavior); a real count caps gemini in-flight
+// at min(count, pool ceiling). 0 usable credentials => gemini simply does not
+// dispatch this tick (graceful — no spin, retried next tick).
+function resolveGeminiDispatchConcurrencyLimit({ geminiCredentialConcurrency = null, ceiling } = {}) {
+  const cap = Math.max(1, Number.parseInt(String(ceiling), 10) || 1);
+  if (
+    geminiCredentialConcurrency === null
+    || geminiCredentialConcurrency === undefined
+    || geminiCredentialConcurrency === ''
+  ) {
+    return cap;
+  }
+  const parsed = Number.parseInt(String(geminiCredentialConcurrency), 10);
+  if (Number.isNaN(parsed)) return cap;
+  return Math.min(cap, Math.max(0, parsed));
+}
+
 async function runBoundedReviewerDispatchQueue(candidates, {
   maxConcurrent = DEFAULT_FIRST_PASS_REVIEWER_POOL_MAX,
   availableCredentials = null,
+  geminiCredentialConcurrency = null,
   maxThrownFailures = 1,
   logger = console,
   now = () => Date.now(),
@@ -368,15 +427,25 @@ async function runBoundedReviewerDispatchQueue(candidates, {
       maxObservedConcurrency: 0,
     };
   }
+  const geminiConcurrencyLimit = resolveGeminiDispatchConcurrencyLimit({
+    geminiCredentialConcurrency,
+    ceiling: concurrencyLimit,
+  });
   const thrownFailureLimit = Math.max(1, Number.parseInt(String(maxThrownFailures), 10) || 0);
   const queue = sortReviewerDispatchCandidates(candidates);
+  const pending = queue.map((candidate) => ({ candidate, started: false }));
   const active = new Set();
   const errors = [];
-  let nextIndex = 0;
   let maxObservedConcurrency = 0;
   let started = 0;
+  let activeGemini = 0;
+
+  const isGeminiCandidate = (candidate) =>
+    String(candidate?.reviewerModel || '').toLowerCase() === 'gemini';
 
   async function start(candidate) {
+    const gemini = isGeminiCandidate(candidate);
+    if (gemini) activeGemini += 1;
     const currentNowMs = Number(now());
     const resolvedNowMs = Number.isFinite(currentNowMs) ? currentNowMs : Date.now();
     logReviewerDispatchWait(candidate, { logger, nowMs: resolvedNowMs, waitWarnMs });
@@ -388,17 +457,32 @@ async function runBoundedReviewerDispatchQueue(candidates, {
         `[watcher] reviewer dispatch task failed for ${candidate.repoPath}#${candidate.prNumber}:`,
         err?.message || err
       );
+    } finally {
+      if (gemini) activeGemini -= 1;
     }
   }
 
-  while ((nextIndex < queue.length && errors.length < thrownFailureLimit) || active.size > 0) {
-    while (
-      nextIndex < queue.length
-      && errors.length < thrownFailureLimit
-      && active.size < concurrencyLimit
-    ) {
-      const promise = start(queue[nextIndex]);
-      nextIndex += 1;
+  // Next pending entry startable now: overall pool has room AND, for gemini
+  // candidates, the gemini in-flight cap is not yet reached. A capped gemini
+  // head does NOT block codex/claude candidates behind it (no head-of-line
+  // stall on reviewers that don't touch the gemini pool).
+  const nextStartableEntry = () => {
+    if (active.size >= concurrencyLimit) return null;
+    for (const entry of pending) {
+      if (entry.started) continue;
+      if (isGeminiCandidate(entry.candidate) && activeGemini >= geminiConcurrencyLimit) continue;
+      return entry;
+    }
+    return null;
+  };
+
+  const hasUnstarted = () => pending.some((entry) => !entry.started);
+
+  while ((errors.length < thrownFailureLimit && hasUnstarted()) || active.size > 0) {
+    let entry;
+    while (errors.length < thrownFailureLimit && (entry = nextStartableEntry()) !== null) {
+      entry.started = true;
+      const promise = start(entry.candidate);
       started += 1;
       active.add(promise);
       promise.finally(() => active.delete(promise));
@@ -406,6 +490,12 @@ async function runBoundedReviewerDispatchQueue(candidates, {
     }
     if (active.size > 0) {
       await Promise.race(active);
+    } else {
+      // Nothing in flight and nothing startable (only gemini candidates remain
+      // and the gemini cap is 0, or a full pool of gemini is blocked with none
+      // active to free the cap). Leave the remainder for the next tick rather
+      // than spin.
+      break;
     }
   }
 
@@ -428,6 +518,8 @@ export {
   createReviewerMemoryAdmissionSampler,
   logReviewerDispatchWait,
   reserveReviewerMemoryAdmission,
+  fetchGeminiCredentialConcurrency,
+  resolveGeminiDispatchConcurrencyLimit,
   resolveReviewerCredentialConcurrencyLimit,
   resolveReviewerMemoryPressureConfig,
   resolveFirstPassReviewerPoolConfig,

@@ -988,6 +988,93 @@ test('top-level config.yaml accepts mirrored worker_pool.dispatch.codex_exec_mod
   }
 });
 
+test('top-level config.yaml accepts mirrored worker_pool.comms.responder keys', () => {
+  // IRC-05 is Python-owned, but the worker-pool module config is part of the
+  // shared CFG wire format and must parse under the watcher strict schema.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        comms:
+          responder:
+            alert_lookback_hours: 6
+            session_ttl_hours: 48
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.comms.responder.alert_lookback_hours'), 6);
+    assert.equal(cfg.get('worker_pool.comms.responder.session_ttl_hours'), 48);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('worker_pool.comms.responder canonical env aliases resolve through Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_WORKER_POOL_COMMS_RESPONDER_ALERT_LOOKBACK_HOURS: '7',
+        AGENT_OS_WORKER_POOL_COMMS_RESPONDER_SESSION_TTL_HOURS: '36',
+      },
+    });
+    assert.equal(cfg.get('worker_pool.comms.responder.alert_lookback_hours'), 7);
+    assert.equal(cfg.get('worker_pool.comms.responder.session_ttl_hours'), 36);
+    assert.equal(
+      cfg.resolutionTrace('worker_pool.comms.responder.session_ttl_hours').at(-1).source,
+      'env:AGENT_OS_WORKER_POOL_COMMS_RESPONDER_SESSION_TTL_HOURS',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('worker_pool.comms.responder rejects out-of-range values', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        comms:
+          responder:
+            alert_lookback_hours: 0
+            session_ttl_hours: 24
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'worker_pool.comms.responder.alert_lookback_hours');
+        return true;
+      },
+    );
+
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        comms:
+          responder:
+            alert_lookback_hours: 12
+            session_ttl_hours: 169
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'worker_pool.comms.responder.session_ttl_hours');
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('worker_pool.dispatch.codex_exec_mode legacy env alias resolves through Node schema', () => {
   const tmp = freshTmp();
   try {

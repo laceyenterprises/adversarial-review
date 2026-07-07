@@ -21,8 +21,17 @@
 // orphaning, and (b) skip the exhausted reviewer until `resetAt`.
 
 const QUOTA_HTTP_429_TEXT_RE = /\b(?:status|code|error|http)\s*[:=]?\s*429\b/i;
-const QUOTA_TEXT_RE =
-  /\b(?:(?:status|code|error|http)\s*[:=]?\s*429|resource[_ -]?exhausted|quota|rate ?limit|no[_ -]?credit)\b/i;
+const QUOTA_TEXT_RE = new RegExp(
+  String.raw`\b(?:` +
+    String.raw`(?:status|code|error|http)\s*[:=]?\s*429` +
+    String.raw`|resource[_ -]?exhausted` +
+    String.raw`|quota[_ -]?(?:exhausted|exceeded|reached|depleted)` +
+    String.raw`|(?:quota|usage)\s+limit\s+(?:exhausted|exceeded|reached)` +
+    String.raw`|rate ?limit\s+(?:exceeded|reached)` +
+    String.raw`|no[_ -]?credit` +
+    String.raw`)\b`,
+  'i',
+);
 
 const RESET_KEYS = [
   'reset_at',
@@ -92,6 +101,13 @@ function toIsoTimestamp(value) {
   }
   const parsed = Date.parse(raw);
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+}
+
+function timestampFromDelay(nowMs, retryAfterMs) {
+  const resetMs = nowMs + retryAfterMs;
+  if (!Number.isFinite(resetMs)) return null;
+  const d = new Date(resetMs);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 function candidateObjects(inputs) {
@@ -206,12 +222,12 @@ function bodyLooksNoCredit(body) {
  */
 export function parseReviewerQuotaExhaustion({
   error = null,
-  stdout = '',
+  stdout: _stdout = '',
   stderr = '',
   brokerBody = null,
   nowMs = Date.now(),
 } = {}) {
-  const text = [error?.message, error?.stdout, error?.stderr, stdout, stderr]
+  const diagnosticText = [error?.message, error?.stderr, stderr]
     .filter(Boolean)
     .join('\n');
   const hasBrokerBody = brokerBody && typeof brokerBody === 'object';
@@ -221,7 +237,7 @@ export function parseReviewerQuotaExhaustion({
   const exhausted = Boolean(
     error?.isGeminiCredentialPoolNoCredit ||
       structuredQuota ||
-      QUOTA_TEXT_RE.test(text),
+      QUOTA_TEXT_RE.test(diagnosticText),
   );
   if (!exhausted) {
     return { exhausted: false, resetAt: null, retryAfterMs: null, source: null };
@@ -229,11 +245,11 @@ export function parseReviewerQuotaExhaustion({
 
   let resetAt = firstResetTimestamp(inputs);
   let retryAfterMs = firstRetryDelayMs(inputs);
-  if (retryAfterMs === null) retryAfterMs = retryDelayMsFromText(text);
+  if (retryAfterMs === null) retryAfterMs = retryDelayMsFromText(diagnosticText);
 
   const now = Number.isFinite(nowMs) ? nowMs : Date.now();
   if (resetAt === null && retryAfterMs !== null) {
-    resetAt = new Date(now + retryAfterMs).toISOString();
+    resetAt = timestampFromDelay(now, retryAfterMs);
   }
   if (retryAfterMs === null && resetAt !== null) {
     const delta = Date.parse(resetAt) - now;
@@ -242,7 +258,7 @@ export function parseReviewerQuotaExhaustion({
 
   let source;
   if (hasBrokerBody && bodyLooksNoCredit(brokerBody)) source = 'cqp-broker';
-  else if (/resource[_ -]?exhausted|retry[_-]?delay/i.test(text) || QUOTA_HTTP_429_TEXT_RE.test(text))
+  else if (/resource[_ -]?exhausted|retry[_-]?delay/i.test(diagnosticText) || QUOTA_HTTP_429_TEXT_RE.test(diagnosticText))
     source = 'antigravity-429';
   else source = 'text';
 

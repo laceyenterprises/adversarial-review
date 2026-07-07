@@ -108,6 +108,30 @@ test('coarse quota text with no reset is exhausted with source=text', () => {
   assert.equal(sig.source, 'text');
 });
 
+test('stdout PR content mentioning quota does not trigger quota fallback', () => {
+  const sig = parseReviewerQuotaExhaustion({
+    error: new Error('ECONNRESET socket hang up'),
+    stdout: 'PR body: document quota behavior and retryDelay: 100000000000000000000s',
+    stderr: 'network blip',
+    nowMs: NOW,
+  });
+  assert.equal(sig.exhausted, false);
+  assert.equal(sig.resetAt, null);
+  assert.equal(sig.retryAfterMs, null);
+  assert.equal(sig.source, null);
+});
+
+test('oversized diagnostic retryDelay does not throw when reset date is invalid', () => {
+  const sig = parseReviewerQuotaExhaustion({
+    stderr: 'HTTP 429 RESOURCE_EXHAUSTED retryDelay: 100000000000000000000s',
+    nowMs: NOW,
+  });
+  assert.equal(sig.exhausted, true);
+  assert.equal(sig.resetAt, null);
+  assert.equal(sig.retryAfterMs, 1e+23);
+  assert.equal(sig.source, 'antigravity-429');
+});
+
 test('non-quota error is not exhausted', () => {
   const sig = parseReviewerQuotaExhaustion({
     error: new Error('ECONNRESET socket hang up'),

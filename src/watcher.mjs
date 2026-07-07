@@ -3538,6 +3538,7 @@ function resolveFirstPassReviewBudgetSuppression({
   prNumber,
   linearTicketId = null,
   reviewRow = null,
+  currentHeadSha = null,
   labelNames = [],
   logger = console,
   db: dbOverride = null,
@@ -3609,9 +3610,31 @@ function resolveFirstPassReviewBudgetSuppression({
     Number.isFinite(completedRereviewRounds) &&
     hasPositiveRoundBudget &&
     completedRereviewRounds >= roundBudget;
+  // Head-aware override: a moved-to / never-reviewed CURRENT head owes exactly
+  // one review. The remediation ROUND budget caps how many remediation cycles
+  // we ask for on converging content — it must never suppress the FIRST review
+  // of a genuinely-new head. Suppressing it here is what left the final
+  // remediation commit un-reviewed and deadlocked the chain (agent-os#3272:
+  // budget exhausted, head advanced 0b01bbf3→39adeb7c, the new head was never
+  // reviewed, and the settled-gate correctly refused to settle a stale-reviewed
+  // head — so the PR could neither be re-reviewed nor closed). The absolute
+  // review-cycle cap (checked at the top of this function) remains the terminal
+  // backstop against unbounded reviews. When no currentHeadSha is supplied the
+  // behavior is unchanged (count-based budget only), so existing callers/tests
+  // are unaffected.
+  const suppliedCurrentHeadSha =
+    typeof currentHeadSha === 'string' && currentHeadSha.length > 0 ? currentHeadSha : null;
+  const reviewedHeadSha =
+    typeof reviewRow?.reviewer_head_sha === 'string' && reviewRow.reviewer_head_sha.length > 0
+      ? reviewRow.reviewer_head_sha
+      : null;
+  const currentHeadAlreadyReviewed =
+    suppliedCurrentHeadSha !== null && reviewedHeadSha === suppliedCurrentHeadSha;
+  const roundBudgetSuppressionApplies =
+    suppliedCurrentHeadSha === null || currentHeadAlreadyReviewed;
   if (
-    postBudgetFinalReviewCompleted ||
-    rereviewBudgetConsumed
+    roundBudgetSuppressionApplies &&
+    (postBudgetFinalReviewCompleted || rereviewBudgetConsumed)
   ) {
     return {
       suppressed: true,
@@ -7065,6 +7088,7 @@ async function pollOnce(
             prNumber,
             linearTicketId,
             reviewRow: existing,
+            currentHeadSha: subject.headSha,
             labelNames: prLabelNames,
             logger: console,
             db,
@@ -7655,6 +7679,7 @@ async function pollOnce(
           prNumber,
           linearTicketId,
           reviewRow: existing,
+          currentHeadSha: subject.headSha,
           labelNames: prLabelNames,
           logger: console,
           db,

@@ -649,6 +649,99 @@ test('watcher allows #3033-shaped exhausted moved head until the post-budget fin
   });
 });
 
+// --- Head-aware round-budget override (agent-os#3272). ---
+//
+// Regression for "consistently missing the last review on a remediation chain":
+// after the remediation round budget was exhausted, a genuinely-new CURRENT head
+// (never reviewed) was suppressed as `remediation-round-budget-exhausted`. The
+// settled-gate then correctly refused to settle a stale-reviewed head, so the PR
+// could neither be re-reviewed nor closed. The round budget now yields to a
+// never-reviewed current head; once that head IS reviewed, the budget resumes.
+
+test('watcher never round-budget-suppresses a never-reviewed current head past budget (agent-os#3272)', () => {
+  const suppression = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 3272,
+    reviewRow: {
+      review_status: 'posted',
+      // last review landed on the prior remediation head...
+      reviewer_head_sha: '0b01bbf34',
+    },
+    // ...but the chain has since advanced to a never-reviewed head.
+    currentHeadSha: '39adeb7c1',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 2,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    // Budget is exhausted by rereview count — legacy behavior would suppress.
+    countCompletedReviewerRereviewRoundsImpl: () => 2,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: false,
+    reason: null,
+    completedRoundsForPR: 2,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
+});
+
+test('watcher resumes round-budget suppression once the current head has been reviewed', () => {
+  const suppression = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 3272,
+    reviewRow: {
+      review_status: 'posted',
+      // the current head has now itself been reviewed at/over budget.
+      reviewer_head_sha: '39adeb7c1',
+    },
+    currentHeadSha: '39adeb7c1',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 2,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 2,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: true,
+    reason: 'remediation-round-budget-exhausted',
+    completedRoundsForPR: 2,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
+});
+
+test('watcher allows a re-armed current head with no recorded reviewer_head_sha past budget', () => {
+  const suppression = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 3272,
+    // requestReviewRereview may reset the row before spawn; the current head is
+    // still un-reviewed, so the owed review must not be budget-suppressed.
+    reviewRow: { review_status: 'pending' },
+    currentHeadSha: '39adeb7c1',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 2,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 2,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: false,
+    reason: null,
+    completedRoundsForPR: 2,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
+});
+
 test('watcher keeps remediation-worker rereview within the final-review allowance', () => {
   const withinBudget = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',

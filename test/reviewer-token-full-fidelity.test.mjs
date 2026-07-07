@@ -50,6 +50,8 @@ test('gemini reviewer usageMetadata is captured with full breakdown', () => {
   assert.equal(usage.cacheRead, 2000);
   assert.equal(usage.toolContext, 40, 'tool-use tokens captured');
   assert.equal(usage.source, 'gemini-json');
+  assert.equal(usage.usageTag, undefined, 'gemini usage must not be tagged as guardrail');
+  assert.equal(usage.guardrail, undefined, 'gemini usage must not synthesize guardrail totals');
 });
 
 test('normalizeTokenUsage carries reasoning + toolContext through', () => {

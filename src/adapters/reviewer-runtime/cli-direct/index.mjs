@@ -193,9 +193,7 @@ function parseCodexJsonTokenUsage(stdout) {
         toolContext: num(gemini.toolUsePromptTokenCount),
         total: num(gemini.totalTokenCount),
         source: 'gemini-json',
-        usageTag: 'guardrail',
       };
-      tokenUsage.guardrail = tokenUsage.total ?? ((tokenUsage.input || 0) + (tokenUsage.output || 0));
       continue;
     }
     const total = item.type === 'turn.completed'

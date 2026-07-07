@@ -446,7 +446,7 @@ test('configured hammer lifetime ceiling controls closer dispatch at 1 and 3', a
   assert.equal(depsThree.execCalls.length, 3);
 });
 
-test('same validated HAM target head is not re-dispatched on exhausted path', async (t) => {
+test('same validated HAM target head can recover until hammer cap is exhausted', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-same-head-dedup-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   recordHammerRetryDispatch(rootDir, { repo: REPO, prNumber: PR_NUMBER }, {
@@ -468,12 +468,13 @@ test('same validated HAM target head is not re-dispatched on exhausted path', as
     ...deps,
   });
 
-  assert.equal(result.dispatched, false);
-  assert.equal(result.reason, 'current-head-hammer-already-dispatched');
-  assert.equal(deps.execCalls.length, 0);
+  assert.equal(result.dispatched, true);
+  assert.equal(deps.execCalls.length, 1);
+  const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
+  assert.equal(ledger.lifetimeAttemptCount, 2);
 });
 
-test('terminal-remediation success and failure finalize closer lease terminalOutcome', async (t) => {
+test('terminal-remediation success finalizes lease and failure redispatches replacement', async (t) => {
   const successRoot = mkdtempSync(join(tmpdir(), 'hammer-lease-success-'));
   const failureRoot = mkdtempSync(join(tmpdir(), 'hammer-lease-failure-'));
   t.after(() => {
@@ -526,12 +527,10 @@ test('terminal-remediation success and failure finalize closer lease terminalOut
       },
     }),
   });
-  assert.equal(failureProbe.dispatched, false);
-  assert.equal(failureProbe.reason, 'existing-dispatch-failed-terminalized');
-  assert.equal(
-    readAmaCloserLease(failureRoot, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }).terminalOutcome,
-    'failed-without-merge',
-  );
+  assert.equal(failureProbe.dispatched, true);
+  const replacementLease = readAmaCloserLease(failureRoot, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
+  assert.equal(replacementLease.status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
+  assert.equal(replacementLease.lrqId, 'unexpected');
 });
 
 test('stale dispatched/null closer lease is terminalized instead of held forever', async (t) => {

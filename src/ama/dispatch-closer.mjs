@@ -59,7 +59,6 @@ import { isEligibleForAmaClosure } from './eligibility.mjs';
 import { resolveCloserDispatchHarness } from './harness-fallback.mjs';
 import {
   HAMMER_RETRY_CAP_EXHAUSTED_REASON,
-  HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE,
   HAMMER_RETRY_CAP_SUPPRESSION_STATE,
   HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
   evaluateHammerRetryCap,
@@ -2058,15 +2057,6 @@ export async function maybeDispatchAmaCloser({
         pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
         logger,
       });
-      return noAmaDispatch({
-        dispatched: false,
-        skipMergeAgent: true,
-        reason: `existing-dispatch-${status}-terminalized`,
-        workerClass: existingRecord.workerClass || workerClass,
-        dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
-        launchRequestId: existingRecord.launchRequestId || null,
-        promptPath: existingRecord.promptPath || null,
-      });
     }
     if (!releaseUnprovenTerminalHold && !AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
       return noAmaDispatch({ dispatched: false, reason: `dispatch-status-${status || 'unknown'}` });
@@ -2130,26 +2120,6 @@ export async function maybeDispatchAmaCloser({
   if (workerClass === 'hammer') {
     const hammerCapIdentity = { repo, prNumber };
     const hammerRetryLedger = readHammerRetryCapLedger(rootDir, hammerCapIdentity);
-    if (
-      currentHeadFinalHammerTerminalRemediation
-      && targetRemediationSha
-      && Array.isArray(hammerRetryLedger?.dispatchHeads)
-      && hammerRetryLedger.dispatchHeads.includes(targetRemediationSha)
-    ) {
-      return noAmaDispatch({
-        dispatched: false,
-        skipMergeAgent: true,
-        reason: 'current-head-hammer-already-dispatched',
-        needsOperator: true,
-        suppressionState: hammerRetryLedger?.lifetimeSuppressed
-          ? HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE
-          : null,
-        workerClass,
-        dispatchId: existingRecord?.dispatchId || existingRecord?.launchRequestId || null,
-        launchRequestId: existingRecord?.launchRequestId || null,
-        promptPath: existingRecord?.promptPath || null,
-      });
-    }
     const hammerLifetimeDispatchCeiling = normalizeHammerLifetimeDispatchCeiling(
       cfg?.hammerLifetimeDispatchCeiling,
     );

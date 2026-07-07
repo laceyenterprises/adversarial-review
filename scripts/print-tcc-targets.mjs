@@ -40,6 +40,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import {
   buildInheritedPath,
@@ -65,7 +66,7 @@ function whichInPath(executable, path) {
   return null;
 }
 
-function deriveCodexMachOPath(codexEntrypoint) {
+export function deriveCodexMachOPath(codexEntrypoint) {
   if (!codexEntrypoint || !existsSync(codexEntrypoint)) {
     return {
       ok: false,
@@ -82,10 +83,15 @@ function deriveCodexMachOPath(codexEntrypoint) {
     return { ok: false, reason: `readlink failed for ${codexEntrypoint}: ${err.message}` };
   }
 
-  // The user-facing `codex` symlink resolves to a node script that
-  // spawns the real Mach-O binary buried inside the platform sub-package.
-  // The script's bin/ dir is sibling to node_modules/, so go up one level
-  // and into the platform sub-package's vendor tree.
+  // Two install forms, resolved in order:
+  //  1. npm package form: the user-facing `codex` symlink resolves to a node
+  //     script whose bin/ dir is sibling to node_modules/; the real Mach-O is
+  //     buried in the platform sub-package's vendor tree (the join below).
+  //  2. Homebrew CASK form (default since the 2026-07 migration): the symlink
+  //     resolves DIRECTLY to the native Mach-O binary (e.g.
+  //     /opt/homebrew/Caskroom/codex/<version>/codex-aarch64-apple-darwin) —
+  //     there is no node_modules/vendor tree, so `realScript` is itself the
+  //     binary. We fall back to that when the npm vendor path is absent.
   const arm = process.arch === 'arm64';
   const triple = arm ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
   const subPkg = arm ? 'codex-darwin-arm64' : 'codex-darwin-x64';
@@ -102,10 +108,9 @@ function deriveCodexMachOPath(codexEntrypoint) {
   );
 
   if (!existsSync(machO)) {
-    return {
-      ok: false,
-      reason: `expected Mach-O missing at ${machO} (codex package layout may have changed)`,
-    };
+    // Cask form: no vendor tree, so the resolved entrypoint IS the Mach-O.
+    // (realScript already exists on disk — guarded by realpathSync above.)
+    return { ok: true, scriptEntrypoint: realScript, machO: resolve(realScript) };
   }
 
   return { ok: true, scriptEntrypoint: realScript, machO: resolve(machO) };
@@ -286,4 +291,8 @@ function main() {
   }
 }
 
-main();
+// Run as a script, but stay importable for tests (which exercise
+// deriveCodexMachOPath directly without triggering the TCC probe/exit).
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  main();
+}

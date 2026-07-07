@@ -305,7 +305,10 @@ else
       if [[ -f "$codex_candidate" ]]; then
         CODEX_REAL="$(cd "$(dirname "$codex_candidate")" && pwd)/codex"
       else
-        codex_resolution_note="vendor binary not found at expected path: $codex_candidate"
+        # Homebrew CASK form: the resolved symlink target IS the Mach-O binary
+        # (no node_modules/vendor tree). npm form buries it under the candidate
+        # path above; when that's absent, codex_real_target is the binary.
+        CODEX_REAL="$codex_real_target"
       fi
     fi
   fi

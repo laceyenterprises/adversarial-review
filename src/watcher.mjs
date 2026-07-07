@@ -3603,11 +3603,13 @@ function resolveFirstPassReviewBudgetSuppression({
   const hasPositiveRoundBudget =
     Number.isFinite(roundBudget) &&
     roundBudget > 0;
-  const postBudgetFinalReviewCompleted =
+  const remediationBudgetConsumed =
     Number.isFinite(completedRemediationRoundsForPR) &&
-    Number.isFinite(completedRereviewRounds) &&
     hasPositiveRoundBudget &&
-    completedRemediationRoundsForPR >= roundBudget &&
+    completedRemediationRoundsForPR >= roundBudget;
+  const postBudgetFinalReviewCompleted =
+    Number.isFinite(completedRereviewRounds) &&
+    remediationBudgetConsumed &&
     completedRereviewRounds >= roundBudget;
   const rereviewBudgetConsumed =
     Number.isFinite(completedRereviewRounds) &&
@@ -3631,8 +3633,7 @@ function resolveFirstPassReviewBudgetSuppression({
   const currentHeadOwesPostBudgetFinalReview =
     suppliedCurrentHeadSha !== null &&
     !currentHeadAlreadyReviewed &&
-    hasPositiveRoundBudget &&
-    completedRemediationRoundsForPR >= roundBudget;
+    remediationBudgetConsumed;
   if (currentHeadOwesPostBudgetFinalReview) {
     return {
       suppressed: false,

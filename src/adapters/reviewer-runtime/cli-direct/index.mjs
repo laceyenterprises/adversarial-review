@@ -148,7 +148,8 @@ function parseCodexJsonTokenUsage(stdout) {
       (
         !line.includes('token_count') &&
         !line.includes('turn.completed') &&
-        !line.includes('reviewer.token_usage')
+        !line.includes('reviewer.token_usage') &&
+        !line.includes('usageMetadata')
       )
     ) continue;
     let item;
@@ -157,6 +158,7 @@ function parseCodexJsonTokenUsage(stdout) {
     } catch {
       continue;
     }
+    if (!item || typeof item !== 'object') continue;
     if (item.type === 'reviewer.token_usage' && item.tokenUsage) {
       const hasExplicitGuardrail = Object.prototype.hasOwnProperty.call(item.tokenUsage, 'guardrail')
         && item.tokenUsage.guardrail !== undefined;
@@ -173,6 +175,28 @@ function parseCodexJsonTokenUsage(stdout) {
       };
       continue;
     }
+    // Gemini (usageMetadata shape, e.g. from gemini-cli -o json). candidates are
+    // the visible output; thoughts are reasoning (inclusive output = candidates
+    // + thoughts); cached maps to cacheRead; toolUse to tool context.
+    const gemini = item.usageMetadata ?? item.usage_metadata ?? item.payload?.usageMetadata;
+    if (gemini && typeof gemini === 'object') {
+      const num = (v) => (Number.isFinite(Number(v)) ? Math.trunc(Number(v)) : null);
+      const prompt = num(gemini.promptTokenCount);
+      const candidates = num(gemini.candidatesTokenCount);
+      const thoughts = num(gemini.thoughtsTokenCount);
+      const output = candidates === null && thoughts === null ? null : (candidates || 0) + (thoughts || 0);
+      tokenUsage = {
+        input: prompt,
+        output,
+        reasoning: thoughts,
+        cacheRead: num(gemini.cachedContentTokenCount),
+        cacheWrite: 0,
+        toolContext: num(gemini.toolUsePromptTokenCount),
+        total: num(gemini.totalTokenCount),
+        source: 'gemini-json',
+      };
+      continue;
+    }
     const total = item.type === 'turn.completed'
       ? item.usage
       : (
@@ -184,6 +208,10 @@ function parseCodexJsonTokenUsage(stdout) {
     tokenUsage = {
       input: Number.isFinite(Number(total.input_tokens)) ? Math.trunc(Number(total.input_tokens)) : null,
       output: Number.isFinite(Number(total.output_tokens)) ? Math.trunc(Number(total.output_tokens)) : null,
+      // reasoning_output_tokens is part of codex's total_token_usage; capture it
+      // for full-fidelity parity (previously dropped). Codex folds tool tokens
+      // into output, so there is no separate tool-context dimension here.
+      reasoning: Number.isFinite(Number(total.reasoning_output_tokens)) ? Math.trunc(Number(total.reasoning_output_tokens)) : null,
       cacheRead: Number.isFinite(Number(total.cached_input_tokens)) ? Math.trunc(Number(total.cached_input_tokens)) : null,
       cacheWrite: 0,
       total: Number.isFinite(Number(total.total_tokens)) ? Math.trunc(Number(total.total_tokens)) : null,
@@ -286,6 +314,19 @@ function resolveProgressTimeoutForModel(model, env) {
 
 function isCodexModel(model) {
   return String(model || '').toLowerCase().includes('codex');
+}
+
+function isGeminiModel(model) {
+  const text = String(model || '').toLowerCase();
+  return text.includes('gemini') || text.includes('antigravity') || text.includes('agy');
+}
+
+// Reviewer stdout token usage is parsed for codex (native token_count/
+// turn.completed) AND gemini (usageMetadata, or the antigravity estimate the
+// reviewer emits as reviewer.token_usage). Claude usage is recovered separately
+// from its transcript, so it is intentionally not parsed from stdout here.
+function shouldParseStdoutTokenUsage(model) {
+  return isCodexModel(model) || isGeminiModel(model);
 }
 
 function resolveCodexReviewerEnv(reviewerEnv) {
@@ -533,7 +574,7 @@ function createCliDirectReviewerRuntimeAdapter({
           : tailText(stderr),
         pgid: record.pgid,
         reattachToken: record.reattachToken,
-        tokenUsage: isCodexModel(req.model)
+        tokenUsage: shouldParseStdoutTokenUsage(req.model)
           ? parseCodexJsonTokenUsage(stdout)
           : null,
       });
@@ -550,7 +591,7 @@ function createCliDirectReviewerRuntimeAdapter({
       const errorCode = typeof err?.code === 'string' ? err.code : null;
       const stderrTail = tailText(err?.stderr || detail || '');
       const stdoutTail = tailText(err?.stdout || '');
-      const failureTokenEvidence = isCodexModel(req.model)
+      const failureTokenEvidence = shouldParseStdoutTokenUsage(req.model)
         ? parseCodexJsonTokenUsageFromFailureStdout(err?.stdout || '')
         : { tokenUsage: null, tokenUsageNoUsageReason: null };
       const cancelled = activeRun.cancelled || controller.signal.aborted || errorCode === 'ABORT_ERR';
@@ -742,6 +783,7 @@ export {
   classifyReviewerFailure,
   createCliDirectReviewerRuntimeAdapter,
   isReviewerSubprocessTimeout,
+  parseCodexJsonTokenUsage,
   resolveProgressTimeoutForModel,
   reviewerSignalAwareFailureClass,
   stripForbiddenFallbackEnv,

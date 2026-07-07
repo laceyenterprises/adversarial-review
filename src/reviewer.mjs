@@ -72,6 +72,7 @@ import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { extractReviewVerdict, looksLikeRuntimeJunk, normalizeEffectiveReviewVerdict, normalizeReviewVerdict, normalizeWhitespace, sanitizeCodexReviewPayload, sanitizeReviewPayloadBestEffort } from './kernel/verdict.mjs';
 import { loadStagePrompt, pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
+import { parseCodexJsonTokenUsage } from './adapters/reviewer-runtime/cli-direct/index.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import {
   fetchPullRequestHeadAndState,
@@ -2060,34 +2061,12 @@ function buildCodexReviewArgs({
   return args;
 }
 
-function parseCodexJsonTokenUsage(stdout) {
-  let tokenUsage = null;
-  for (const line of String(stdout || '').split('\n')) {
-    if (!line.trim() || (!line.includes('token_count') && !line.includes('turn.completed'))) continue;
-    let item;
-    try {
-      item = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const total = item.type === 'turn.completed'
-      ? item.usage
-      : (
-          item.type === 'event_msg' && item.payload?.type === 'token_count'
-            ? item.payload?.info?.total_token_usage
-            : null
-        );
-    if (!total || typeof total !== 'object') continue;
-    tokenUsage = {
-      input: Number.isFinite(Number(total.input_tokens)) ? Math.trunc(Number(total.input_tokens)) : null,
-      output: Number.isFinite(Number(total.output_tokens)) ? Math.trunc(Number(total.output_tokens)) : null,
-      cacheRead: Number.isFinite(Number(total.cached_input_tokens)) ? Math.trunc(Number(total.cached_input_tokens)) : null,
-      cacheWrite: 0,
-      total: Number.isFinite(Number(total.total_tokens)) ? Math.trunc(Number(total.total_tokens)) : null,
-      source: 'codex-json',
-    };
-  }
-  return tokenUsage;
+function estimateTokensFromText(text) {
+  // ~4 chars/token heuristic; a visible-text LOWER BOUND (system prompt, tools,
+  // and reasoning tokens are unseen), hence a floor, not an exact count. Used
+  // only for antigravity (agy) reviewers, which expose no local usage.
+  const s = typeof text === 'string' ? text : '';
+  return Math.max(0, Math.round(s.length / 4));
 }
 
 async function spawnCodexReview({
@@ -4454,6 +4433,28 @@ async function main() {
     process.exit(1);
   }
 
+  if (!tokenUsage && effectiveModel === 'gemini') {
+    // Antigravity (agy) reviewers emit no local token usage (server-side
+    // conversations, no JSON surface). Persist a heuristic LOWER-BOUND estimate
+    // from the prompt (diff + context) and the review body, tagged distinctly so
+    // it stays separable from exact counts. Mirrors the worker-pool antigravity
+    // estimate-floor (source gemini-antigravity-estimate).
+    const estInput = estimateTokensFromText(`${diff}\n${extraContext || ''}`);
+    const estOutput = estimateTokensFromText(reviewText);
+    if (estInput > 0 || estOutput > 0) {
+      tokenUsage = {
+        input: estInput,
+        output: estOutput,
+        reasoning: null,
+        cacheRead: null,
+        cacheWrite: 0,
+        toolContext: null,
+        total: estInput + estOutput,
+        source: 'gemini-antigravity-estimate',
+      };
+    }
+  }
+
   if (tokenUsage) {
     const hasExplicitGuardrail = Object.prototype.hasOwnProperty.call(tokenUsage, 'guardrail')
       && tokenUsage.guardrail !== undefined;
@@ -4702,6 +4703,7 @@ const __test__ = {
   fetchPRDiff,
   buildClaudeReviewArgs,
   buildCodexReviewArgs,
+  estimateTokensFromText,
   parseCodexJsonTokenUsage,
   postGitHubReview,
   spawnCodexReview,

@@ -1782,10 +1782,67 @@ test('Codex JSON token parser reads turn.completed usage from native stdout', ()
   assert.deepEqual(usage, {
     input: 123,
     output: 6,
+    reasoning: null,
     cacheRead: 45,
     cacheWrite: 0,
     total: 174,
     source: 'codex-json',
+    usageTag: 'guardrail',
+    guardrail: 174,
+  });
+});
+
+test('Codex JSON token parser captures reasoning + gemini usageMetadata (full fidelity)', () => {
+  const codex = parseCodexJsonTokenUsage(
+    JSON.stringify({
+      type: 'turn.completed',
+      usage: { input_tokens: 100, output_tokens: 10, reasoning_output_tokens: 7, total_tokens: 117 },
+    }),
+  );
+  assert.equal(codex.reasoning, 7, 'reasoning_output_tokens captured');
+
+  const gemini = parseCodexJsonTokenUsage(
+    JSON.stringify({
+      usageMetadata: {
+        promptTokenCount: 800,
+        candidatesTokenCount: 20,
+        thoughtsTokenCount: 15,
+        cachedContentTokenCount: 200,
+        toolUsePromptTokenCount: 5,
+        totalTokenCount: 835,
+      },
+    }),
+  );
+  assert.equal(gemini.input, 800);
+  assert.equal(gemini.output, 20 + 15);
+  assert.equal(gemini.reasoning, 15);
+  assert.equal(gemini.cacheRead, 200);
+  assert.equal(gemini.toolContext, 5);
+  assert.equal(gemini.source, 'gemini-json');
+});
+
+test('Reviewer Codex token parser uses canonical side-channel marker handling', () => {
+  const usage = parseCodexJsonTokenUsage(JSON.stringify({
+    type: 'reviewer.token_usage',
+    tokenUsage: {
+      input: 1000,
+      output: 200,
+      cacheRead: 300,
+      cacheWrite: 0,
+      total: 1500,
+      source: 'codex-json',
+    },
+  }));
+
+  assert.deepEqual(usage, {
+    input: 1000,
+    output: 200,
+    cacheRead: 300,
+    cacheWrite: 0,
+    total: 1500,
+    source: 'codex-json',
+    usageTag: 'guardrail',
+    guardrail: 1500,
   });
 });
 

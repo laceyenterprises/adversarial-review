@@ -146,3 +146,108 @@ test('teardown passes hqRoot through to parser and cleanup commands', async () =
     HQ_ROOT,
   ]);
 });
+
+test('pre-provision reclaim tears down stale self-owned hammer worktree and emits audit', async () => {
+  const calls = [];
+  const logs = [];
+  const now = 1_800_000;
+  const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    repo: 'owner/agent-os',
+    prNumber: 3312,
+    workerClass: 'hammer',
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot: HQ_ROOT,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    existsSyncImpl: (path) => path === '/Users/airlock/agent-os-hq/workers/hammer-ama-pr-3312/agent-os',
+    statSyncImpl: () => ({ mtimeMs: now - 41_000 }),
+    nowMs: () => now,
+    logger: { info(line) { logs.push(JSON.parse(line)); }, warn() {} },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [{
+    cmd: '/opt/hq/bin/hq',
+    args: ['worker', 'tear-down', 'hammer-ama-pr-3312', '--force', '--root', HQ_ROOT],
+  }]);
+  assert.deepEqual(logs, [{
+    event: 'closer_provision_collision_reclaimed',
+    repo: 'owner/agent-os',
+    prNumber: 3312,
+    workerId: 'hammer-ama-pr-3312',
+    worktreePath: '/Users/airlock/agent-os-hq/workers/hammer-ama-pr-3312/agent-os',
+    action: 'hq-worker-tear-down',
+    force: true,
+    status: 'reclaimed',
+    worktreeAgeMs: 41000,
+  }]);
+});
+
+test('pre-provision reclaim is unchanged when no self-owned stale worktree exists', async () => {
+  const calls = [];
+  const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    repo: 'owner/agent-os',
+    prNumber: 3312,
+    workerClass: 'hammer',
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot: HQ_ROOT,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    existsSyncImpl: () => false,
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.equal(result.attempted, false);
+  assert.equal(result.reason, 'worktree-absent');
+  assert.deepEqual(calls, []);
+});
+
+test('pre-provision reclaim never tears down a non-closer worker class', async () => {
+  const calls = [];
+  const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    repo: 'owner/agent-os',
+    prNumber: 3312,
+    workerClass: 'codex',
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot: HQ_ROOT,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    existsSyncImpl: () => true,
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.equal(result.attempted, false);
+  assert.equal(result.reason, 'not-hammer-worker-class');
+  assert.deepEqual(calls, []);
+});
+
+test('pre-provision reclaim never tears down a different hammer worker id', async () => {
+  const calls = [];
+  const existingPaths = new Set([
+    '/Users/airlock/agent-os-hq/workers/hammer-ama-pr-9999/agent-os',
+  ]);
+  const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    repo: 'owner/agent-os',
+    prNumber: 3312,
+    workerClass: 'hammer',
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot: HQ_ROOT,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    existsSyncImpl: (path) => existingPaths.has(path),
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.equal(result.attempted, false);
+  assert.equal(result.reason, 'worktree-absent');
+  assert.equal(result.workerId, 'hammer-ama-pr-3312');
+  assert.deepEqual(calls, []);
+});

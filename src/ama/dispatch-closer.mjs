@@ -24,7 +24,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { hostname, userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1138,6 +1138,85 @@ export function samePrHammerHolderWorktreePaths(errOrText, prNumber, hqRoot) {
   return paths;
 }
 
+function selfOwnedHammerCloserWorktreePath(prNumber, hqRoot) {
+  const workerId = hammerCloserWorkerId(prNumber);
+  const root = String(hqRoot || '').trim();
+  if (!workerId || !root) return null;
+  return join(root, 'workers', workerId, 'agent-os');
+}
+
+async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+  repo,
+  prNumber,
+  workerClass,
+  hqPath,
+  hqRoot,
+  execFileImpl,
+  logger = console,
+  existsSyncImpl = existsSync,
+  statSyncImpl = statSync,
+  nowMs = Date.now,
+}) {
+  if (String(workerClass || '').trim() !== 'hammer') {
+    return { attempted: false, reason: 'not-hammer-worker-class' };
+  }
+  const workerId = hammerCloserWorkerId(prNumber);
+  const worktreePath = selfOwnedHammerCloserWorktreePath(prNumber, hqRoot);
+  if (!workerId || !worktreePath) {
+    return { attempted: false, reason: 'invalid-worker-id' };
+  }
+  if (!existsSyncImpl(worktreePath)) {
+    return { attempted: false, workerId, worktreePath, reason: 'worktree-absent' };
+  }
+
+  let worktreeAgeMs = null;
+  try {
+    const mtimeMs = Number(statSyncImpl(worktreePath)?.mtimeMs);
+    const observedNowMs = Number(nowMs());
+    if (Number.isFinite(mtimeMs) && Number.isFinite(observedNowMs)) {
+      worktreeAgeMs = Math.max(0, Math.round(observedNowMs - mtimeMs));
+    }
+  } catch {
+    worktreeAgeMs = null;
+  }
+
+  const args = ['worker', 'tear-down', workerId, '--force', '--root', hqRoot];
+  try {
+    await execFileImpl(hqPath, args, {
+      env: process.env,
+      maxBuffer: 1024 * 1024,
+      timeout: 60_000,
+      killSignal: 'SIGTERM',
+    });
+  } catch (err) {
+    const error = String(err?.stderr || err?.message || err);
+    logger?.warn?.(JSON.stringify({
+      event: 'closer_provision_collision_reclaim_failed',
+      repo,
+      prNumber,
+      workerId,
+      worktreePath,
+      action: 'hq-worker-tear-down',
+      force: true,
+      status: 'failed',
+      error,
+    }));
+    return { attempted: true, ok: false, workerId, worktreePath, error };
+  }
+
+  logAmaCloserDispatchEvent(logger, 'closer_provision_collision_reclaimed', {
+    repo,
+    prNumber,
+    workerId,
+    worktreePath,
+    action: 'hq-worker-tear-down',
+    force: true,
+    status: 'reclaimed',
+    worktreeAgeMs,
+  });
+  return { attempted: true, ok: true, workerId, worktreePath, worktreeAgeMs };
+}
+
 async function teardownSamePrHammerHolder({
   err,
   prNumber,
@@ -1212,6 +1291,8 @@ async function teardownSamePrHammerHolder({
 }
 
 export const __testables__ = Object.freeze({
+  reclaimSelfOwnedHammerCloserWorktreeBeforeProvision,
+  selfOwnedHammerCloserWorktreePath,
   teardownSamePrHammerHolder,
 });
 
@@ -2787,6 +2868,16 @@ export async function maybeDispatchAmaCloser({
   ) {
     args.push('--additional-repo', AGENT_OS_TOOLING_REPO);
   }
+
+  await reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    repo,
+    prNumber,
+    workerClass,
+    hqPath,
+    hqRoot,
+    execFileImpl,
+    logger,
+  });
 
   let execResult;
   let transientRetryIndex = 0;

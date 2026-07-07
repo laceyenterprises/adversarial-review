@@ -1280,7 +1280,73 @@ function historicalWorkerForJob(job) {
   };
 }
 
+// The AMA closer records its pass POST-merge and polls the ledger for the hammer
+// worker's token rollup for only ~8.5s (AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS).
+// A slower rollup leaves the closer pass with null tokens, and the job-driven
+// backfillReviewerPasses only heals `remediation` passes — so closer passes never
+// self-healed (100% null in the live data). This re-reads the ledger for every
+// null-token closer pass that still has its worker_run_id and fills it, so the
+// closer converges once the worker-pool capture lands the hammer tokens.
+function backfillCloserReviewerPasses(rootDir, {
+  ledgerTarget = null,
+  ledgerDbPath = null,
+  hqRoot = null,
+  env = process.env,
+  dryRun = false,
+} = {}) {
+  const db = openReviewStateDb(rootDir);
+  let candidates;
+  try {
+    ensureReviewStateSchema(db);
+    candidates = db.prepare(
+      `SELECT repo, pr_number AS prNumber, attempt_number AS attemptNumber,
+              worker_run_id AS workerRunId, status, metadata_json AS metadataJson
+         FROM reviewer_passes
+        WHERE pass_kind = 'closer'
+          AND token_input IS NULL
+          AND worker_run_id IS NOT NULL`
+    ).all();
+  } finally {
+    closeOwnedReviewDb(db);
+  }
+  let considered = 0;
+  let filled = 0;
+  let stillMissing = 0;
+  for (const row of candidates) {
+    considered += 1;
+    const launchRequestId = parseMetadataJson(row.metadataJson).launchRequestId || null;
+    const usage = readWorkerRunTokenUsage({
+      workerRunId: row.workerRunId,
+      launchRequestId,
+      ledgerTarget,
+      ledgerDbPath,
+      env,
+      rootDir,
+      hqRoot,
+    });
+    if (!usage || (usage.input == null && usage.output == null && usage.cacheRead == null)) {
+      stillMissing += 1;
+      continue;
+    }
+    if (!dryRun) {
+      completeReviewerPass(rootDir, {
+        repo: row.repo,
+        prNumber: row.prNumber,
+        attemptNumber: row.attemptNumber,
+        passKind: 'closer',
+        status: PASS_STATUSES.has(row.status) ? row.status : 'completed',
+        workerRunId: row.workerRunId,
+        tokenUsage: usage,
+        tokenSource: usage.source || null,
+      });
+    }
+    filled += 1;
+  }
+  return { considered, filled, stillMissing };
+}
+
 export {
+  backfillCloserReviewerPasses,
   backfillReviewerPasses,
   beginReviewerPass,
   completeReviewerPass,

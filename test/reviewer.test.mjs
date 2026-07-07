@@ -19,6 +19,7 @@ const {
   LAUNCHCTL,
   buildClaudeReviewArgs,
   buildCodexReviewArgs,
+  parseClaudeJsonOutput,
   parseCodexJsonTokenUsage,
   queueFollowUpForPostedReview,
   resolveCodexAuthPath,
@@ -1613,6 +1614,65 @@ test('spawnClaude invokes claude directly on non-darwin platforms', async () => 
   ]);
 });
 
+test('buildClaudeReviewArgs requests json output for exact usage capture', () => {
+  const args = buildClaudeReviewArgs('the prompt');
+  const oIdx = args.indexOf('--output-format');
+  assert.ok(oIdx >= 0 && args[oIdx + 1] === 'json', 'must pass --output-format json');
+});
+
+test('parseClaudeJsonOutput extracts review text + exact usage (no transcript needed)', () => {
+  const raw = JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    result: '## Verdict\nRequest changes',
+    usage: {
+      input_tokens: 12000,
+      output_tokens: 450,
+      cache_read_input_tokens: 8000,
+      cache_creation_input_tokens: 1500,
+    },
+  });
+  const { reviewText, tokenUsage } = parseClaudeJsonOutput(raw);
+  assert.equal(reviewText, '## Verdict\nRequest changes');
+  assert.equal(tokenUsage.input, 12000);
+  assert.equal(tokenUsage.output, 450);
+  assert.equal(tokenUsage.cacheRead, 8000);
+  assert.equal(tokenUsage.cacheWrite, 1500);
+  assert.equal(tokenUsage.source, 'claude-json');
+});
+
+test('parseClaudeJsonOutput extracts warning-prefixed json output', () => {
+  const raw = [
+    'Warning: using cached OAuth session',
+    JSON.stringify({ result: '## Verdict\nComment only', usage: { input_tokens: 7 } }),
+  ].join('\n');
+  const { reviewText, tokenUsage } = parseClaudeJsonOutput(raw);
+  assert.equal(reviewText, '## Verdict\nComment only');
+  assert.equal(tokenUsage.input, 7);
+  assert.equal(tokenUsage.source, 'claude-json');
+});
+
+test('parseClaudeJsonOutput fails closed instead of returning raw stdout', () => {
+  assert.throws(
+    () => parseClaudeJsonOutput('## Verdict\nplain text review'),
+    /Failed to parse Claude JSON output/
+  );
+  assert.throws(
+    () => parseClaudeJsonOutput(JSON.stringify({ error: 'Rate limit' })),
+    /missing string 'result' field/
+  );
+  assert.throws(
+    () => parseClaudeJsonOutput(JSON.stringify({ result: '   ' })),
+    /empty 'result' field/
+  );
+});
+
+test('parseClaudeJsonOutput yields no usage when the usage block is absent', () => {
+  const { reviewText, tokenUsage } = parseClaudeJsonOutput(JSON.stringify({ result: 'hi' }));
+  assert.equal(reviewText, 'hi');
+  assert.equal(tokenUsage, null);
+});
+
 test('Claude review invocation passes prompt as argv in cli-direct shape', async () => {
   const prompt = 'review this diff';
   const calls = [];
@@ -1629,7 +1689,7 @@ test('Claude review invocation passes prompt as argv in cli-direct shape', async
   assert.deepEqual(calls, [
     {
       command: CLAUDE_CLI,
-      args: ['--print', '--permission-mode', 'bypassPermissions', prompt],
+      args: ['--print', '--output-format', 'json', '--permission-mode', 'bypassPermissions', prompt],
       options: {
         env: { HOME: '/tmp/home', PATH: process.env.PATH },
       },

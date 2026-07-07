@@ -1938,11 +1938,70 @@ async function reviewWithClaude(diff, extraContext = '', { promptStage = 'first'
     throw new Error(`Claude CLI returned empty output.${hint}`);
   }
 
-  return stdout.trim();
+  // `--output-format json` wraps the response as {result, usage, ...}. Extract the
+  // review text (result) for downstream posting AND the exact usage block, so
+  // claude reviewers no longer depend on the flaky ~/.claude/projects transcript
+  // scrape (which missed ~90% of passes -> token_source='unknown'). Fail closed:
+  // malformed JSON or an invalid result must use the normal reviewer retry path,
+  // not post a raw CLI payload as a GitHub review.
+  const raw = stdout.trim();
+  const parsed = parseClaudeJsonOutput(raw);
+  return { reviewText: parsed.reviewText, tokenUsage: parsed.tokenUsage };
+}
+
+function parseClaudeJsonOutput(raw) {
+  let doc;
+  const jsonText = extractClaudeJsonText(raw);
+  try {
+    doc = JSON.parse(jsonText);
+  } catch (err) {
+    throw new Error(`Failed to parse Claude JSON output: ${err.message}`);
+  }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+    throw new Error('Claude JSON output is not an object');
+  }
+  if (typeof doc.result !== 'string') {
+    throw new Error("Claude JSON output missing string 'result' field");
+  }
+  if (!doc.result.trim()) {
+    throw new Error("Claude JSON output contains empty 'result' field");
+  }
+  return { reviewText: doc.result, tokenUsage: mapClaudeJsonUsage(doc.usage) };
+}
+
+function extractClaudeJsonText(raw) {
+  const text = String(raw ?? '').trim();
+  const jsonStart = text.indexOf('{');
+  if (jsonStart < 0) {
+    return text;
+  }
+  return text.slice(jsonStart);
+}
+
+function mapClaudeJsonUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  const num = (v) => (Number.isFinite(Number(v)) ? Math.trunc(Number(v)) : null);
+  const input = num(usage.input_tokens);
+  const output = num(usage.output_tokens);
+  const cacheRead = num(usage.cache_read_input_tokens);
+  const cacheWrite = num(usage.cache_creation_input_tokens);
+  if (input === null && output === null && cacheRead === null && cacheWrite === null) {
+    return null;
+  }
+  return {
+    input,
+    output,
+    // Claude does not expose reasoning as a separate dimension (thinking is
+    // folded into output_tokens); no tool-context dimension either.
+    cacheRead,
+    cacheWrite,
+    total: (input || 0) + (output || 0) + (cacheRead || 0) + (cacheWrite || 0),
+    source: 'claude-json',
+  };
 }
 
 function buildClaudeReviewArgs(prompt) {
-  return ['--print', '--permission-mode', 'bypassPermissions', prompt];
+  return ['--print', '--output-format', 'json', '--permission-mode', 'bypassPermissions', prompt];
 }
 
 const CODEX_EXEC_CONFIG_FORWARD_KEYS = [
@@ -3665,12 +3724,17 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
   reviewWithGeminiImpl = reviewWithGemini,
 } = {}) {
   if (effectiveModel === 'claude') {
-    const text = await reviewWithClaudeImpl(diff, extraContext, { promptStage });
+    const claudeResult = await reviewWithClaudeImpl(diff, extraContext, { promptStage });
+    // reviewWithClaude now returns { reviewText, tokenUsage } (from --output-format
+    // json). Tolerate a bare string too (legacy / mocked impls) so callers and
+    // tests that predate the json capture keep working.
+    const text = typeof claudeResult === 'string' ? claudeResult : claudeResult?.reviewText;
+    const tokenUsage = typeof claudeResult === 'string' ? null : (claudeResult?.tokenUsage ?? null);
     // Best-effort canonicalization: claude/gemini are posted without the hard
     // codex sanitize, but non-`##` canonical headings still break the verdict/
     // blocking-finding parsers the cap + closer depend on. Promote them here
     // (never throws; falls back to the raw body).
-    return { rawReviewText: text, reviewText: sanitizeReviewPayloadBestEffort(text), tokenUsage: null, needsSanitize: false };
+    return { rawReviewText: text, reviewText: sanitizeReviewPayloadBestEffort(text), tokenUsage, needsSanitize: false };
   }
   if (effectiveModel === 'gemini') {
     const result = await reviewWithGeminiImpl(diff, extraContext, { promptStage });
@@ -4702,6 +4766,7 @@ const __test__ = {
   spawnCaptured,
   fetchPRDiff,
   buildClaudeReviewArgs,
+  parseClaudeJsonOutput,
   buildCodexReviewArgs,
   estimateTokensFromText,
   parseCodexJsonTokenUsage,

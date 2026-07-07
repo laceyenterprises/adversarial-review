@@ -53,8 +53,9 @@ import { evaluateMergeEligibility } from './merge-eligibility.mjs';
 
 /** Bounded-retry defaults, byte-for-byte the MSM-01 hammer merge budget. */
 export const DAEMON_MERGE_DEFAULTS = Object.freeze({
-  // HAM_MERGE_RETRY_CAP default (templates/hammer-prompt.md).
-  retryCap: 4,
+  // Fallback only; the live watcher passes the resolved merge-authority
+  // hammer_lifetime_dispatch_ceiling config knob.
+  retryCap: 2,
   // HAM_MERGE_BACKOFF_BASE_SECONDS default, in ms.
   backoffBaseMs: 2000,
   // Hammer jitter is `int(rand()*3)` seconds → 0/1/2 s.

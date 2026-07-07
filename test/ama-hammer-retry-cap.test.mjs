@@ -6,8 +6,16 @@ import { dirname, join } from 'node:path';
 
 import {
   _resetHammerRetryCapAlertDebounceForTests,
+  AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
+  isReclaimableDispatchedAmaCloserLease,
   maybeDispatchAmaCloser,
 } from '../src/ama/dispatch-closer.mjs';
+import {
+  acquireAmaCloserLease,
+  AMA_CLOSER_LEASE_STATUS,
+  readAmaCloserLease,
+  updateAmaCloserLease,
+} from '../src/ama/closer-lease.mjs';
 import {
   HAMMER_RETRY_CAP_SUPPRESSION_STATE,
   HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
@@ -16,6 +24,7 @@ import {
   evaluateHammerRetryCap,
   hammerRetryCapFilePath,
   markHammerRetryCapExhausted,
+  normalizeHammerLifetimeDispatchCeiling,
   readHammerRetryCapLedger,
   recordHammerRetryDispatch,
 } from '../src/ama/hammer-retry-cap.mjs';
@@ -136,10 +145,37 @@ test('evaluateHammerRetryCap accumulates by logical review job key', () => {
   assert.equal(HAMMER_RETRY_CAP_TOTAL_DISPATCHES, 2);
 });
 
+test('hammer lifetime ceiling is injectable and invalid values fall back to default 2', () => {
+  assert.equal(HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES, 2);
+  assert.equal(normalizeHammerLifetimeDispatchCeiling(1), 1);
+  assert.equal(normalizeHammerLifetimeDispatchCeiling(3), 3);
+  assert.equal(normalizeHammerLifetimeDispatchCeiling(0), 2);
+  assert.equal(normalizeHammerLifetimeDispatchCeiling('nope'), 2);
+
+  assert.equal(
+    evaluateHammerRetryCap(
+      { jobKey: 'job', lifetimeAttemptCount: 1 },
+      { jobKey: 'fresh', headSha: 'h', lifetimeDispatchCeiling: 1 },
+    ).capExhausted,
+    true,
+  );
+  assert.equal(
+    evaluateHammerRetryCap(
+      { jobKey: 'job', lifetimeAttemptCount: 2 },
+      { jobKey: 'fresh', headSha: 'h', lifetimeDispatchCeiling: 3 },
+    ).capExhausted,
+    false,
+  );
+});
+
 test('evaluateHammerRetryCap resets for a genuinely fresh review head', () => {
   const decision = evaluateHammerRetryCap(
     { jobKey: REVIEWED_HEAD, attemptCount: 2, suppressed: true },
-    { jobKey: 'b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1', headSha: 'newhead' },
+    {
+      jobKey: 'b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1',
+      headSha: 'newhead',
+      lifetimeDispatchCeiling: 3,
+    },
   );
   assert.equal(decision.jobKeyChanged, true);
   assert.equal(decision.priorAttemptCount, 0);
@@ -294,6 +330,254 @@ test('maybeDispatchAmaCloser records confirmed hammer launches in the retry-cap 
   assert.deepEqual(ledger.dispatchHeads, [REVIEWED_HEAD]);
 });
 
+test('exhausted final-hammer path counts lifetime dispatches and trips default ceiling at 2', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-exhaustion-path-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const alertCalls = [];
+  const deps = hammerDispatchDeps({
+    deliverAlertImpl: async (text, opts) => {
+      alertCalls.push({ text, opts });
+    },
+  });
+
+  const first = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true, headSha: 'job-1' },
+      prMetadata: { headSha: 'head-1', mergeableState: 'DIRTY' },
+      dispatchContext: {
+        reviewedSha: 'job-1',
+        targetRemediationSha: 'head-1',
+        dispatchRecordHeadSha: 'job-1',
+        allowStaleReviewHeadHammerResume: true,
+      },
+    }),
+    ...deps,
+  });
+  const second = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true, headSha: 'job-2' },
+      prMetadata: { headSha: 'head-2', mergeableState: 'DIRTY' },
+      dispatchContext: {
+        reviewedSha: 'job-2',
+        targetRemediationSha: 'head-2',
+        dispatchRecordHeadSha: 'job-2',
+        allowStaleReviewHeadHammerResume: true,
+        dispatchedAt: '2026-07-06T12:05:00Z',
+      },
+    }),
+    ...deps,
+  });
+  const blocked = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true, headSha: 'job-3' },
+      prMetadata: { headSha: 'head-3', mergeableState: 'DIRTY' },
+      dispatchContext: {
+        reviewedSha: 'job-3',
+        targetRemediationSha: 'head-3',
+        dispatchRecordHeadSha: 'job-3',
+        allowStaleReviewHeadHammerResume: true,
+        dispatchedAt: '2026-07-06T12:10:00Z',
+      },
+    }),
+    ...deps,
+  });
+
+  assert.equal(first.dispatched, true);
+  assert.equal(second.dispatched, true);
+  assert.equal(blocked.dispatched, false);
+  assert.equal(blocked.reason, 'hammer-retry-cap-lifetime-exhausted');
+  assert.equal(blocked.suppressionState, HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE);
+  assert.equal(deps.execCalls.length, 2);
+  assert.equal(alertCalls.length, 1);
+  const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
+  assert.equal(ledger.lifetimeAttemptCount, 2, 'ledger equals the actual terminal-remediation launches');
+  assert.equal(ledger.suppressionState, HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE);
+});
+
+test('configured hammer lifetime ceiling controls closer dispatch at 1 and 3', async (t) => {
+  const rootOne = mkdtempSync(join(tmpdir(), 'hammer-cap-cfg-one-'));
+  const rootThree = mkdtempSync(join(tmpdir(), 'hammer-cap-cfg-three-'));
+  t.after(() => {
+    rmSync(rootOne, { recursive: true, force: true });
+    rmSync(rootThree, { recursive: true, force: true });
+  });
+
+  const depsOne = hammerDispatchDeps();
+  const firstOne = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootOne, { cfg: { hammerLifetimeDispatchCeiling: 1 } }),
+    ...depsOne,
+  });
+  const blockedOne = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootOne, {
+      cfg: { hammerLifetimeDispatchCeiling: 1 },
+      prMetadata: { headSha: 'fresh-job' },
+      reviewState: { headSha: 'fresh-job' },
+      dispatchContext: { reviewedSha: 'fresh-job', targetRemediationSha: 'fresh-job' },
+    }),
+    ...depsOne,
+  });
+  assert.equal(firstOne.dispatched, true);
+  assert.equal(blockedOne.dispatched, false);
+  assert.equal(depsOne.execCalls.length, 1);
+
+  const depsThree = hammerDispatchDeps();
+  for (let i = 1; i <= 3; i += 1) {
+    const result = await maybeDispatchAmaCloser({
+      ...hammerDispatchArgs(rootThree, {
+        cfg: { hammerLifetimeDispatchCeiling: 3 },
+        prMetadata: { headSha: `cfg-job-${i}` },
+        reviewState: { headSha: `cfg-job-${i}` },
+        dispatchContext: { reviewedSha: `cfg-job-${i}`, targetRemediationSha: `cfg-job-${i}` },
+      }),
+      ...depsThree,
+    });
+    assert.equal(result.dispatched, true, `dispatch ${i} should be allowed`);
+  }
+  const blockedThree = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootThree, {
+      cfg: { hammerLifetimeDispatchCeiling: 3 },
+      prMetadata: { headSha: 'cfg-job-4' },
+      reviewState: { headSha: 'cfg-job-4' },
+      dispatchContext: { reviewedSha: 'cfg-job-4', targetRemediationSha: 'cfg-job-4' },
+    }),
+    ...depsThree,
+  });
+  assert.equal(blockedThree.dispatched, false);
+  assert.equal(depsThree.execCalls.length, 3);
+});
+
+test('same validated HAM target head can recover until hammer cap is exhausted', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-same-head-dedup-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  recordHammerRetryDispatch(rootDir, { repo: REPO, prNumber: PR_NUMBER }, {
+    jobKey: 'reviewed-before-ham',
+    headSha: '52d98936',
+  });
+  const deps = hammerDispatchDeps();
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true, headSha: 'reviewed-after-ham' },
+      prMetadata: { headSha: '52d98936', mergeableState: 'DIRTY' },
+      dispatchContext: {
+        reviewedSha: 'reviewed-after-ham',
+        targetRemediationSha: '52d98936',
+        dispatchRecordHeadSha: 'reviewed-after-ham',
+        allowStaleReviewHeadHammerResume: true,
+      },
+    }),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(deps.execCalls.length, 1);
+  const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
+  assert.equal(ledger.lifetimeAttemptCount, 2);
+});
+
+test('terminal-remediation success finalizes lease and failure redispatches replacement', async (t) => {
+  const successRoot = mkdtempSync(join(tmpdir(), 'hammer-lease-success-'));
+  const failureRoot = mkdtempSync(join(tmpdir(), 'hammer-lease-failure-'));
+  t.after(() => {
+    rmSync(successRoot, { recursive: true, force: true });
+    rmSync(failureRoot, { recursive: true, force: true });
+  });
+
+  const successDeps = hammerDispatchDeps();
+  const first = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(successRoot),
+    ...successDeps,
+  });
+  assert.equal(first.dispatched, true);
+  const successProbe = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(successRoot, {
+      reviewState: { reviewCycleExhausted: true },
+      dispatchContext: { dispatchedAt: '2026-07-06T12:02:00Z' },
+    }),
+    ...hammerDispatchDeps({
+      execFileImpl: async (_cmd, args) => {
+        if (args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
+        }
+        return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+      },
+    }),
+  });
+  assert.equal(successProbe.reason, 'current-head-hammer-already-ran-needs-operator');
+  assert.equal(
+    readAmaCloserLease(successRoot, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }).terminalOutcome,
+    'succeeded',
+  );
+
+  const failureDeps = hammerDispatchDeps();
+  const failedFirst = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(failureRoot),
+    ...failureDeps,
+  });
+  assert.equal(failedFirst.dispatched, true);
+  const failureProbe = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(failureRoot, {
+      dispatchContext: { dispatchedAt: '2026-07-06T12:02:00Z' },
+    }),
+    ...hammerDispatchDeps({
+      execFileImpl: async (_cmd, args) => {
+        if (args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'failed' }), stderr: '' };
+        }
+        return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+      },
+    }),
+  });
+  assert.equal(failureProbe.dispatched, true);
+  const replacementLease = readAmaCloserLease(failureRoot, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
+  assert.equal(replacementLease.status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
+  assert.equal(replacementLease.lrqId, 'unexpected');
+});
+
+test('stale dispatched/null closer lease is terminalized instead of held forever', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-lease-stale-dispatched-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  acquireAmaCloserLease({
+    rootDir,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: REVIEWED_HEAD,
+    now: '2026-07-06T12:00:00Z',
+  });
+  updateAmaCloserLease({
+    rootDir,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: REVIEWED_HEAD,
+    status: AMA_CLOSER_LEASE_STATUS.DISPATCHED,
+    lrqId: 'lrq_stale',
+    now: '2026-07-06T12:00:00Z',
+  });
+  assert.equal(
+    isReclaimableDispatchedAmaCloserLease(
+      readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }),
+      { now: new Date(Date.parse('2026-07-06T12:00:00Z') + AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS + 1).toISOString() },
+    ),
+    true,
+  );
+
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      dispatchContext: {
+        dispatchedAt: new Date(Date.parse('2026-07-06T12:00:00Z') + AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS + 1).toISOString(),
+      },
+    }),
+    ...hammerDispatchDeps(),
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'stale-dispatched-lease-terminalized');
+  assert.equal(result.existingLease.status, AMA_CLOSER_LEASE_STATUS.TERMINAL);
+  assert.equal(result.existingLease.terminalOutcome, 'failed-without-merge');
+  const lease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
+  assert.equal(lease.status, AMA_CLOSER_LEASE_STATUS.TERMINAL);
+  assert.equal(lease.terminalOutcome, 'failed-without-merge');
+});
+
 test('maybeDispatchAmaCloser suppresses third hammer launch and emits operator alert', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-integration-suppress-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -312,15 +596,15 @@ test('maybeDispatchAmaCloser suppresses third hammer launch and emits operator a
 
   assert.equal(result.dispatched, false);
   assert.equal(result.skipMergeAgent, true);
-  assert.equal(result.reason, 'hammer-retry-cap-exhausted');
+  assert.equal(result.reason, 'hammer-retry-cap-lifetime-exhausted');
   assert.equal(result.needsOperator, true);
   assert.equal(result.attemptCount, HAMMER_RETRY_CAP_TOTAL_DISPATCHES);
   assert.equal(deps.execCalls.length, 0, 'suppression must happen before hq dispatch');
   assert.equal(alertCalls.length, 1);
-  assert.equal(alertCalls[0].opts.event, 'ama_closer.hammer_retry_cap_exhausted');
+  assert.equal(alertCalls[0].opts.event, 'ama_closer.hammer_retry_cap_lifetime_exhausted');
   const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
   assert.equal(ledger.suppressed, true);
-  assert.equal(ledger.suppressionState, HAMMER_RETRY_CAP_SUPPRESSION_STATE);
+  assert.equal(ledger.suppressionState, HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE);
   assert.equal(ledger.alertedAt, '2026-07-06T12:00:00Z');
 });
 
@@ -364,7 +648,7 @@ test('retry-cap alert transport failure fails open but records suppression', asy
     }),
   });
 
-  assert.equal(result.reason, 'hammer-retry-cap-exhausted');
+  assert.equal(result.reason, 'hammer-retry-cap-lifetime-exhausted');
   assert.equal(result.alertEmitted, false);
   const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
   assert.equal(ledger.suppressed, true);
@@ -402,7 +686,7 @@ test('retry-cap alert is debounced in-process when suppression ledger write fail
     },
   });
 
-  assert.equal(first.reason, 'hammer-retry-cap-exhausted');
-  assert.equal(second.reason, 'hammer-retry-cap-exhausted');
+  assert.equal(first.reason, 'hammer-retry-cap-lifetime-exhausted');
+  assert.equal(second.reason, 'hammer-retry-cap-lifetime-exhausted');
   assert.equal(alertCalls.length, 1, 'in-process debounce prevents re-page storms when ledger writes fail');
 });

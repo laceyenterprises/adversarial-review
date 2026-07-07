@@ -59,9 +59,12 @@ import { isEligibleForAmaClosure } from './eligibility.mjs';
 import { resolveCloserDispatchHarness } from './harness-fallback.mjs';
 import {
   HAMMER_RETRY_CAP_EXHAUSTED_REASON,
+  HAMMER_RETRY_CAP_LIFETIME_EXHAUSTED_REASON,
+  HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE,
   HAMMER_RETRY_CAP_SUPPRESSION_STATE,
   HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
   evaluateHammerRetryCap,
+  normalizeHammerLifetimeDispatchCeiling,
   markHammerRetryCapExhausted,
   readHammerRetryCapLedger,
   recordHammerRetryDispatch,
@@ -233,16 +236,25 @@ async function suppressHammerRetryCapExhaustion({
   now,
 }) {
   const attemptTotal = Number(attemptCount || 0);
-  logAmaCloserDispatchEvent(logger, 'ama_closer.hammer_retry_cap_exhausted', {
+  const suppressionReason = lifetime
+    ? HAMMER_RETRY_CAP_LIFETIME_EXHAUSTED_REASON
+    : HAMMER_RETRY_CAP_EXHAUSTED_REASON;
+  const suppressionState = lifetime
+    ? HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE
+    : HAMMER_RETRY_CAP_SUPPRESSION_STATE;
+  const eventName = lifetime
+    ? 'ama_closer.hammer_retry_cap_lifetime_exhausted'
+    : 'ama_closer.hammer_retry_cap_exhausted';
+  logAmaCloserDispatchEvent(logger, eventName, {
     repo,
     prNumber,
     headSha,
     jobKey,
     attemptCount: attemptTotal,
     cap: HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
-    suppressionState: HAMMER_RETRY_CAP_SUPPRESSION_STATE,
+    suppressionState,
     message:
-      'hammer retry cap exhausted; PR not closing — operator intervention required; '
+      `${suppressionReason}; PR not closing — operator intervention required; `
       + 'further hammer dispatch suppressed to protect quota',
   });
 
@@ -266,7 +278,7 @@ async function suppressHammerRetryCapExhaustion({
       + '189-hammer / codex-quota-burn incident, e.g. #3116 hammered ×10.)';
     try {
       await deliverAlertImpl(text, {
-        event: 'ama_closer.hammer_retry_cap_exhausted',
+        event: eventName,
         payload: {
           repo,
           prNumber,
@@ -274,7 +286,7 @@ async function suppressHammerRetryCapExhaustion({
           jobKey,
           attemptCount: attemptTotal,
           cap: HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
-          suppressionState: HAMMER_RETRY_CAP_SUPPRESSION_STATE,
+          suppressionState,
         },
       });
       alertEmitted = true;
@@ -330,9 +342,9 @@ async function suppressHammerRetryCapExhaustion({
     // dispatch (coexistence treats this as ama-pending, not a recoverable
     // failure) — suppression must stop ALL automated dispatch, not swap lanes.
     skipMergeAgent: true,
-    reason: HAMMER_RETRY_CAP_EXHAUSTED_REASON,
+    reason: suppressionReason,
     needsOperator: true,
-    suppressionState: HAMMER_RETRY_CAP_SUPPRESSION_STATE,
+    suppressionState,
     attemptCount: attemptTotal,
     alertEmitted,
     workerClass: existingRecord?.workerClass || workerClass,
@@ -522,6 +534,7 @@ const AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS = (
     AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS.reduce((total, delay) => total + delay, 0)
     * AMA_CLOSER_HQ_DISPATCH_MAX_ATTEMPTS
   );
+export const AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS = 30 * 60 * 1000;
 const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 export const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND = 3;
@@ -607,6 +620,48 @@ function isReclaimablePendingAmaCloserLease(lease, { now = null, processKillImpl
   return acquiredAtMs !== null
     && nowMs !== null
     && nowMs - acquiredAtMs >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
+}
+
+export function isReclaimableDispatchedAmaCloserLease(lease, { now = null } = {}) {
+  if (lease?.status !== AMA_CLOSER_LEASE_STATUS.DISPATCHED) return false;
+  if (lease.terminalOutcome !== null && lease.terminalOutcome !== undefined) return false;
+
+  const updatedAtMs = parseTimeMs(lease.updatedAt || lease.acquiredAt);
+  const nowMs = parseTimeMs(now || new Date().toISOString());
+  return updatedAtMs !== null
+    && nowMs !== null
+    && nowMs - updatedAtMs >= AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS;
+}
+
+function finalizeAmaCloserLeaseBestEffort({
+  rootDir,
+  leaseIdentity,
+  terminalOutcome,
+  now,
+  logger,
+  repo,
+  prNumber,
+}) {
+  try {
+    updateAmaCloserLease({
+      rootDir,
+      ...leaseIdentity,
+      status: AMA_CLOSER_LEASE_STATUS.TERMINAL,
+      terminalOutcome,
+      now,
+    });
+    return true;
+  } catch (err) {
+    logger?.warn?.(JSON.stringify({
+      event: 'ama_closer.lease_terminal_finalize_failed',
+      repo,
+      prNumber,
+      headSha: leaseIdentity?.headSha || null,
+      terminalOutcome,
+      error: err?.message || String(err),
+    }));
+    return false;
+  }
 }
 
 /**
@@ -1714,6 +1769,32 @@ export async function maybeDispatchAmaCloser({
   const existingRecord = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
   const existingLeaseBeforeDispatch = readAmaCloserLease(rootDir, leaseIdentity);
   const auditTerminalOutcome = readAmaAuditTerminalOutcome(hqRoot, auditIdentity);
+  if (isReclaimableDispatchedAmaCloserLease(existingLeaseBeforeDispatch, {
+    now: dispatchContext.dispatchedAt,
+  })) {
+    const terminalizedLease = {
+      ...existingLeaseBeforeDispatch,
+      status: AMA_CLOSER_LEASE_STATUS.TERMINAL,
+      terminalOutcome: 'failed-without-merge',
+      completedAt: dispatchContext.dispatchedAt || existingLeaseBeforeDispatch?.completedAt || null,
+      updatedAt: dispatchContext.dispatchedAt || existingLeaseBeforeDispatch?.updatedAt || null,
+    };
+    finalizeAmaCloserLeaseBestEffort({
+      rootDir,
+      leaseIdentity,
+      terminalOutcome: 'failed-without-merge',
+      now: dispatchContext.dispatchedAt,
+      logger,
+      repo,
+      prNumber,
+    });
+    return noAmaDispatch({
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'stale-dispatched-lease-terminalized',
+      existingLease: terminalizedLease,
+    });
+  }
   const mergedSignal = readMergedBuildCompletionSignal({
     repo,
     prNumber,
@@ -1798,6 +1879,15 @@ export async function maybeDispatchAmaCloser({
         AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
       ) {
         const reason = 'current-head-hammer-already-ran-needs-operator';
+        finalizeAmaCloserLeaseBestEffort({
+          rootDir,
+          leaseIdentity,
+          terminalOutcome: 'succeeded',
+          now: dispatchContext.dispatchedAt,
+          logger,
+          repo,
+          prNumber,
+        });
         logger?.error?.(JSON.stringify({
           event: 'ama_closer.current_head_hammer_stuck',
           repo,
@@ -1843,6 +1933,15 @@ export async function maybeDispatchAmaCloser({
         existingDispatchStatus = 'unverified-terminal-success';
         releaseUnprovenTerminalHold = true;
         releaseUnprovenTerminalHoldError = 'audit-succeeded-without-merged-signal';
+        finalizeAmaCloserLeaseBestEffort({
+          rootDir,
+          leaseIdentity,
+          terminalOutcome: 'succeeded',
+          now: dispatchContext.dispatchedAt,
+          logger,
+          repo,
+          prNumber,
+        });
       } else if (
         auditTerminalOutcome
         && auditTerminalOutcome !== 'succeeded'
@@ -1851,10 +1950,28 @@ export async function maybeDispatchAmaCloser({
         existingDispatchStatus = 'failed';
         releaseUnprovenTerminalHold = true;
         releaseUnprovenTerminalHoldError = statusProbe?.error || null;
+        finalizeAmaCloserLeaseBestEffort({
+          rootDir,
+          leaseIdentity,
+          terminalOutcome: auditTerminalOutcome,
+          now: dispatchContext.dispatchedAt,
+          logger,
+          repo,
+          prNumber,
+        });
       } else if (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
         existingDispatchStatus = 'unverified-terminal-success';
         releaseUnprovenTerminalHold = true;
         releaseUnprovenTerminalHoldError = 'terminal-success-status-without-audit-or-merged-signal';
+        finalizeAmaCloserLeaseBestEffort({
+          rootDir,
+          leaseIdentity,
+          terminalOutcome: 'succeeded',
+          now: dispatchContext.dispatchedAt,
+          logger,
+          repo,
+          prNumber,
+        });
       } else {
         updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
           ...(current || existingRecord),
@@ -1919,6 +2036,15 @@ export async function maybeDispatchAmaCloser({
       });
     }
     if (AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
+      finalizeAmaCloserLeaseBestEffort({
+        rootDir,
+        leaseIdentity,
+        terminalOutcome: 'failed-without-merge',
+        now: dispatchContext.dispatchedAt,
+        logger,
+        repo,
+        prNumber,
+      });
       const hammerCleanup = await cleanupHammerCloserWorker({
         prNumber,
         workerClass,
@@ -2012,6 +2138,9 @@ export async function maybeDispatchAmaCloser({
   if (workerClass === 'hammer') {
     const hammerCapIdentity = { repo, prNumber };
     const hammerRetryLedger = readHammerRetryCapLedger(rootDir, hammerCapIdentity);
+    const hammerLifetimeDispatchCeiling = normalizeHammerLifetimeDispatchCeiling(
+      cfg?.hammerLifetimeDispatchCeiling,
+    );
     // The per-PR counter increments only on the CONFIRMED-launch path below (not
     // pre-exec like the per-head record), so an interrupted-in-flight dispatch
     // never bumped it — there is no phantom increment to reclaim here. A deploy
@@ -2019,6 +2148,7 @@ export async function maybeDispatchAmaCloser({
     const hammerRetryCapDecision = evaluateHammerRetryCap(hammerRetryLedger, {
       jobKey: reviewedSha,
       headSha: targetRemediationSha,
+      lifetimeDispatchCeiling: hammerLifetimeDispatchCeiling,
     });
     if (hammerRetryCapDecision.capExhausted) {
       return await suppressHammerRetryCapExhaustion({
@@ -2468,6 +2598,9 @@ export async function maybeDispatchAmaCloser({
       recordHammerRetryDispatch(rootDir, { repo, prNumber }, {
         jobKey: reviewedSha,
         headSha: targetRemediationSha,
+        lifetimeDispatchCeiling: normalizeHammerLifetimeDispatchCeiling(
+          cfg?.hammerLifetimeDispatchCeiling,
+        ),
         now: dispatchContext.dispatchedAt,
       });
     } catch (capErr) {

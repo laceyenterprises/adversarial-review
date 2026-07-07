@@ -56,7 +56,7 @@ export const HAMMER_RETRY_CAP_EXHAUSTED_REASON = 'hammer-retry-cap-exhausted';
 // for the PR across ALL series and NEVER resets on a jobKey change, so the loop
 // is bounded regardless of review-head churn. Set above the per-series cap so a
 // legitimate fresh-review-then-remediate cycle still has room before it trips.
-export const HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES = 4;
+export const HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES = 2;
 export const HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE = 'hammer-retry-cap-lifetime-exhausted-needs-operator';
 export const HAMMER_RETRY_CAP_LIFETIME_EXHAUSTED_REASON = 'hammer-retry-cap-lifetime-exhausted';
 
@@ -146,10 +146,17 @@ function normalizeKey(value) {
 // value — e.g. an operator hand-editing the ledger to `"foo"` to unblock a PR —
 // is treated as CORRUPTION and fails CLOSED to the lifetime ceiling, so the loop
 // cannot be silently re-armed by `NaN > ceiling` evaluating false.
-function sanitizeLifetimeCount(rawValue) {
+export function normalizeHammerLifetimeDispatchCeiling(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES;
+  const int = Math.trunc(n);
+  return int >= 1 ? int : HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES;
+}
+
+function sanitizeLifetimeCount(rawValue, ceiling = HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES) {
   if (rawValue === null || rawValue === undefined) return 0;
   const n = Number(rawValue);
-  if (!Number.isFinite(n)) return HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES;
+  if (!Number.isFinite(n)) return normalizeHammerLifetimeDispatchCeiling(ceiling);
   return Math.max(0, Math.trunc(n));
 }
 
@@ -173,7 +180,12 @@ function sanitizeLifetimeCount(rawValue) {
  *   resetFromJobKey: (string|null),
  * }}
  */
-export function evaluateHammerRetryCap(ledger, { jobKey, headSha } = {}) {
+export function evaluateHammerRetryCap(ledger, {
+  jobKey,
+  headSha,
+  lifetimeDispatchCeiling = HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES,
+} = {}) {
+  const lifetimeCeiling = normalizeHammerLifetimeDispatchCeiling(lifetimeDispatchCeiling);
   const incomingJobKey = normalizeKey(jobKey);
   const ledgerJobKey = normalizeKey(ledger?.jobKey);
   // A job-key change is the fresh-review reset. Only counts as a change when both
@@ -199,12 +211,12 @@ export function evaluateHammerRetryCap(ledger, { jobKey, headSha } = {}) {
   // total. Legacy ledgers (no lifetimeAttemptCount) seed from attemptCount, a safe
   // lower bound.
   const priorLifetimeCount = ledger
-    ? sanitizeLifetimeCount(ledger.lifetimeAttemptCount ?? ledger.attemptCount)
+    ? sanitizeLifetimeCount(ledger.lifetimeAttemptCount ?? ledger.attemptCount, lifetimeCeiling)
     : 0;
   const nextLifetimeCount = priorLifetimeCount + 1;
   const lifetimeAlreadySuppressed = Boolean(ledger?.lifetimeSuppressed);
   const lifetimeCapExhausted = lifetimeAlreadySuppressed
-    || nextLifetimeCount > HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES;
+    || nextLifetimeCount > lifetimeCeiling;
   const capExhausted = alreadySuppressed
     || nextAttemptCount > HAMMER_RETRY_CAP_TOTAL_DISPATCHES
     || lifetimeCapExhausted;
@@ -214,6 +226,7 @@ export function evaluateHammerRetryCap(ledger, { jobKey, headSha } = {}) {
     nextAttemptCount,
     priorLifetimeCount,
     nextLifetimeCount,
+    lifetimeDispatchCeiling: lifetimeCeiling,
     alreadySuppressed,
     lifetimeAlreadySuppressed,
     lifetimeCapExhausted,
@@ -232,10 +245,11 @@ export function evaluateHammerRetryCap(ledger, { jobKey, headSha } = {}) {
 export function recordHammerRetryDispatch(rootDir, identity, {
   jobKey,
   headSha,
+  lifetimeDispatchCeiling = HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES,
   now = null,
 } = {}) {
   const existing = readHammerRetryCapLedger(rootDir, identity);
-  const decision = evaluateHammerRetryCap(existing, { jobKey, headSha });
+  const decision = evaluateHammerRetryCap(existing, { jobKey, headSha, lifetimeDispatchCeiling });
   const incomingJobKey = normalizeKey(jobKey);
   const head = normalizeKey(headSha);
   // On a fresh-review reset the head history restarts; otherwise accumulate.

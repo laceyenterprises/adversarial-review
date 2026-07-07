@@ -158,6 +158,7 @@ function parseCodexJsonTokenUsage(stdout) {
     } catch {
       continue;
     }
+    if (!item || typeof item !== 'object') continue;
     if (item.type === 'reviewer.token_usage' && item.tokenUsage) {
       const hasExplicitGuardrail = Object.prototype.hasOwnProperty.call(item.tokenUsage, 'guardrail')
         && item.tokenUsage.guardrail !== undefined;

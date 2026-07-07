@@ -4439,7 +4439,7 @@ async function main() {
     // from the prompt (diff + context) and the review body, tagged distinctly so
     // it stays separable from exact counts. Mirrors the worker-pool antigravity
     // estimate-floor (source gemini-antigravity-estimate).
-    const estInput = estimateTokensFromText(`${diff}\n${extraContext}`);
+    const estInput = estimateTokensFromText(`${diff}\n${extraContext || ''}`);
     const estOutput = estimateTokensFromText(reviewText);
     if (estInput > 0 || estOutput > 0) {
       tokenUsage = {

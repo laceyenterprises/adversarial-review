@@ -57,6 +57,11 @@ test('gemini reviewer usageMetadata is captured with full breakdown', () => {
   assert.equal(usage.guardrail, undefined, 'gemini usage must not synthesize guardrail totals');
 });
 
+test('reviewer usage parser skips non-object JSON lines', () => {
+  const usage = parseCodexJsonTokenUsage(JSON.stringify('usageMetadata'));
+  assert.equal(usage, null);
+});
+
 test('normalizeTokenUsage carries reasoning + toolContext through', () => {
   const n = normalizeTokenUsage({
     input: 10,

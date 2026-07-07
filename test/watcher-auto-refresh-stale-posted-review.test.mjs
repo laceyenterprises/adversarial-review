@@ -655,10 +655,11 @@ test('watcher allows #3033-shaped exhausted moved head until the post-budget fin
 // after the remediation round budget was exhausted, a genuinely-new CURRENT head
 // (never reviewed) was suppressed as `remediation-round-budget-exhausted`. The
 // settled-gate then correctly refused to settle a stale-reviewed head, so the PR
-// could neither be re-reviewed nor closed. The round budget now yields to a
-// never-reviewed current head; once that head IS reviewed, the budget resumes.
+// could neither be re-reviewed nor closed). The round budget now yields to a
+// never-reviewed current head only as an explicit owed final review, not as a
+// normal in-budget review cycle.
 
-test('watcher never round-budget-suppresses a never-reviewed current head past budget (agent-os#3272)', () => {
+test('watcher classifies a never-reviewed over-budget current head as the owed final review (agent-os#3272)', () => {
   const suppression = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',
     prNumber: 3272,
@@ -681,7 +682,7 @@ test('watcher never round-budget-suppresses a never-reviewed current head past b
 
   assert.deepEqual(suppression, {
     suppressed: false,
-    reason: null,
+    reason: 'owed-post-budget-final-review',
     completedRoundsForPR: 2,
     roundBudget: 2,
     riskClass: 'medium',
@@ -700,6 +701,33 @@ test('watcher resumes round-budget suppression once the current head has been re
     currentHeadSha: '39adeb7c1',
     summarizePRRemediationLedgerImpl: () => ({
       completedRoundsForPR: 2,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 2,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: true,
+    reason: 'remediation-round-budget-exhausted',
+    completedRoundsForPR: 2,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
+});
+
+test('watcher does not let a new head bypass a consumed standalone rereview budget', () => {
+  const suppression = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 3273,
+    reviewRow: {
+      review_status: 'posted',
+      reviewer_head_sha: 'oldhead',
+    },
+    currentHeadSha: 'newhead',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 1,
       latestRiskClass: 'medium',
       latestMaxRounds: 2,
     }),
@@ -735,7 +763,34 @@ test('watcher allows a re-armed current head with no recorded reviewer_head_sha 
 
   assert.deepEqual(suppression, {
     suppressed: false,
-    reason: null,
+    reason: 'owed-post-budget-final-review',
+    completedRoundsForPR: 2,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
+});
+
+test('watcher classifies a new head after the post-budget final review as owed final review', () => {
+  const suppression = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 3272,
+    reviewRow: {
+      review_status: 'posted',
+      reviewer_head_sha: '39adeb7c1',
+    },
+    currentHeadSha: 'f1nalf00d',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 2,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 2,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: false,
+    reason: 'owed-post-budget-final-review',
     completedRoundsForPR: 2,
     roundBudget: 2,
     riskClass: 'medium',

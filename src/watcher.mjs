@@ -3116,6 +3116,7 @@ async function spawnReviewer({
   reviewerHeadSha,
   reviewAttemptNumber,
   reviewDbAttemptNumber,
+  completedRemediationRounds,
   passKind = 'first-pass',
   maxRemediationRounds,
   advisoryFindings = [],
@@ -3165,6 +3166,7 @@ async function spawnReviewer({
         reviewerSessionUuid,
         reviewerModel,
         reviewAttemptNumber,
+        completedRemediationRounds,
         maxRemediationRounds,
       },
     });
@@ -3196,6 +3198,7 @@ async function spawnReviewer({
         reviewerHeadSha,
         reviewAttemptNumber,
         reviewDbAttemptNumber,
+        completedRemediationRounds,
         maxRemediationRounds,
         advisoryFindings,
         reviewerSessionUuid,
@@ -3611,17 +3614,12 @@ function resolveFirstPassReviewBudgetSuppression({
     hasPositiveRoundBudget &&
     completedRereviewRounds >= roundBudget;
   // Head-aware override: a moved-to / never-reviewed CURRENT head owes exactly
-  // one review. The remediation ROUND budget caps how many remediation cycles
-  // we ask for on converging content — it must never suppress the FIRST review
-  // of a genuinely-new head. Suppressing it here is what left the final
-  // remediation commit un-reviewed and deadlocked the chain (agent-os#3272:
-  // budget exhausted, head advanced 0b01bbf3→39adeb7c, the new head was never
-  // reviewed, and the settled-gate correctly refused to settle a stale-reviewed
-  // head — so the PR could neither be re-reviewed nor closed). The absolute
-  // review-cycle cap (checked at the top of this function) remains the terminal
-  // backstop against unbounded reviews. When no currentHeadSha is supplied the
-  // behavior is unchanged (count-based budget only), so existing callers/tests
-  // are unaffected.
+  // one final review after the remediation budget is consumed. Return a
+  // distinct reason so the caller treats that pass as the terminal lenient
+  // review, not as another ordinary in-budget review cycle. A later moved head
+  // over the remediation cap must keep using this owed-final-review signal;
+  // otherwise a request-changes -> push-commit loop can bypass the remediation
+  // round cap until only the absolute review-cycle cap remains.
   const suppliedCurrentHeadSha =
     typeof currentHeadSha === 'string' && currentHeadSha.length > 0 ? currentHeadSha : null;
   const reviewedHeadSha =
@@ -3630,12 +3628,30 @@ function resolveFirstPassReviewBudgetSuppression({
       : null;
   const currentHeadAlreadyReviewed =
     suppliedCurrentHeadSha !== null && reviewedHeadSha === suppliedCurrentHeadSha;
-  const roundBudgetSuppressionApplies =
-    suppliedCurrentHeadSha === null || currentHeadAlreadyReviewed;
-  if (
-    roundBudgetSuppressionApplies &&
-    (postBudgetFinalReviewCompleted || rereviewBudgetConsumed)
-  ) {
+  const currentHeadOwesPostBudgetFinalReview =
+    suppliedCurrentHeadSha !== null &&
+    !currentHeadAlreadyReviewed &&
+    hasPositiveRoundBudget &&
+    completedRemediationRoundsForPR >= roundBudget;
+  if (currentHeadOwesPostBudgetFinalReview) {
+    return {
+      suppressed: false,
+      reason: 'owed-post-budget-final-review',
+      completedRoundsForPR,
+      roundBudget,
+      riskClass: resolution.riskClass,
+    };
+  }
+  if (postBudgetFinalReviewCompleted) {
+    return {
+      suppressed: true,
+      reason: 'remediation-round-budget-exhausted',
+      completedRoundsForPR,
+      roundBudget,
+      riskClass: resolution.riskClass,
+    };
+  }
+  if (rereviewBudgetConsumed) {
     return {
       suppressed: true,
       reason: 'remediation-round-budget-exhausted',
@@ -8010,6 +8026,9 @@ async function pollOnce(
             const maxRemediationRounds = Number.isInteger(latestMaxRounds) && latestMaxRounds > roundBudget.roundBudget
               ? latestMaxRounds
               : roundBudget.roundBudget;
+            const completedRemediationRounds = Number.isFinite(Number(ledger.completedRoundsForPR))
+              ? Math.max(0, Math.floor(Number(ledger.completedRoundsForPR)))
+              : 0;
             const passKind = reviewAttemptNumber > 1 || current?.rereview_requested_at
               ? 'rereview'
               : 'first-pass';
@@ -8067,6 +8086,7 @@ async function pollOnce(
               reviewerHeadSha,
               reviewAttemptNumber,
               reviewDbAttemptNumber,
+              completedRemediationRounds,
               passKind,
               maxRemediationRounds,
               advisoryFindings: vocabularyFatigueFinding ? [vocabularyFatigueFinding] : [],

@@ -385,8 +385,8 @@ test('exhausted final-hammer path counts lifetime dispatches and trips default c
   assert.equal(first.dispatched, true);
   assert.equal(second.dispatched, true);
   assert.equal(blocked.dispatched, false);
-  assert.equal(blocked.reason, 'hammer-retry-cap-exhausted');
-  assert.equal(blocked.suppressionState, HAMMER_RETRY_CAP_SUPPRESSION_STATE);
+  assert.equal(blocked.reason, 'hammer-retry-cap-lifetime-exhausted');
+  assert.equal(blocked.suppressionState, HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE);
   assert.equal(deps.execCalls.length, 2);
   assert.equal(alertCalls.length, 1);
   const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
@@ -571,6 +571,8 @@ test('stale dispatched/null closer lease is terminalized instead of held forever
 
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'stale-dispatched-lease-terminalized');
+  assert.equal(result.existingLease.status, AMA_CLOSER_LEASE_STATUS.TERMINAL);
+  assert.equal(result.existingLease.terminalOutcome, 'failed-without-merge');
   const lease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
   assert.equal(lease.status, AMA_CLOSER_LEASE_STATUS.TERMINAL);
   assert.equal(lease.terminalOutcome, 'failed-without-merge');
@@ -594,12 +596,12 @@ test('maybeDispatchAmaCloser suppresses third hammer launch and emits operator a
 
   assert.equal(result.dispatched, false);
   assert.equal(result.skipMergeAgent, true);
-  assert.equal(result.reason, 'hammer-retry-cap-exhausted');
+  assert.equal(result.reason, 'hammer-retry-cap-lifetime-exhausted');
   assert.equal(result.needsOperator, true);
   assert.equal(result.attemptCount, HAMMER_RETRY_CAP_TOTAL_DISPATCHES);
   assert.equal(deps.execCalls.length, 0, 'suppression must happen before hq dispatch');
   assert.equal(alertCalls.length, 1);
-  assert.equal(alertCalls[0].opts.event, 'ama_closer.hammer_retry_cap_exhausted');
+  assert.equal(alertCalls[0].opts.event, 'ama_closer.hammer_retry_cap_lifetime_exhausted');
   const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
   assert.equal(ledger.suppressed, true);
   assert.equal(ledger.suppressionState, HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE);
@@ -646,7 +648,7 @@ test('retry-cap alert transport failure fails open but records suppression', asy
     }),
   });
 
-  assert.equal(result.reason, 'hammer-retry-cap-exhausted');
+  assert.equal(result.reason, 'hammer-retry-cap-lifetime-exhausted');
   assert.equal(result.alertEmitted, false);
   const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
   assert.equal(ledger.suppressed, true);
@@ -684,7 +686,7 @@ test('retry-cap alert is debounced in-process when suppression ledger write fail
     },
   });
 
-  assert.equal(first.reason, 'hammer-retry-cap-exhausted');
-  assert.equal(second.reason, 'hammer-retry-cap-exhausted');
+  assert.equal(first.reason, 'hammer-retry-cap-lifetime-exhausted');
+  assert.equal(second.reason, 'hammer-retry-cap-lifetime-exhausted');
   assert.equal(alertCalls.length, 1, 'in-process debounce prevents re-page storms when ledger writes fail');
 });

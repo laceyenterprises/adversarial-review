@@ -59,6 +59,8 @@ import { isEligibleForAmaClosure } from './eligibility.mjs';
 import { resolveCloserDispatchHarness } from './harness-fallback.mjs';
 import {
   HAMMER_RETRY_CAP_EXHAUSTED_REASON,
+  HAMMER_RETRY_CAP_LIFETIME_EXHAUSTED_REASON,
+  HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE,
   HAMMER_RETRY_CAP_SUPPRESSION_STATE,
   HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
   evaluateHammerRetryCap,
@@ -234,16 +236,25 @@ async function suppressHammerRetryCapExhaustion({
   now,
 }) {
   const attemptTotal = Number(attemptCount || 0);
-  logAmaCloserDispatchEvent(logger, 'ama_closer.hammer_retry_cap_exhausted', {
+  const suppressionReason = lifetime
+    ? HAMMER_RETRY_CAP_LIFETIME_EXHAUSTED_REASON
+    : HAMMER_RETRY_CAP_EXHAUSTED_REASON;
+  const suppressionState = lifetime
+    ? HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE
+    : HAMMER_RETRY_CAP_SUPPRESSION_STATE;
+  const eventName = lifetime
+    ? 'ama_closer.hammer_retry_cap_lifetime_exhausted'
+    : 'ama_closer.hammer_retry_cap_exhausted';
+  logAmaCloserDispatchEvent(logger, eventName, {
     repo,
     prNumber,
     headSha,
     jobKey,
     attemptCount: attemptTotal,
     cap: HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
-    suppressionState: HAMMER_RETRY_CAP_SUPPRESSION_STATE,
+    suppressionState,
     message:
-      'hammer retry cap exhausted; PR not closing — operator intervention required; '
+      `${suppressionReason}; PR not closing — operator intervention required; `
       + 'further hammer dispatch suppressed to protect quota',
   });
 
@@ -267,7 +278,7 @@ async function suppressHammerRetryCapExhaustion({
       + '189-hammer / codex-quota-burn incident, e.g. #3116 hammered ×10.)';
     try {
       await deliverAlertImpl(text, {
-        event: 'ama_closer.hammer_retry_cap_exhausted',
+        event: eventName,
         payload: {
           repo,
           prNumber,
@@ -275,7 +286,7 @@ async function suppressHammerRetryCapExhaustion({
           jobKey,
           attemptCount: attemptTotal,
           cap: HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
-          suppressionState: HAMMER_RETRY_CAP_SUPPRESSION_STATE,
+          suppressionState,
         },
       });
       alertEmitted = true;
@@ -331,9 +342,9 @@ async function suppressHammerRetryCapExhaustion({
     // dispatch (coexistence treats this as ama-pending, not a recoverable
     // failure) — suppression must stop ALL automated dispatch, not swap lanes.
     skipMergeAgent: true,
-    reason: HAMMER_RETRY_CAP_EXHAUSTED_REASON,
+    reason: suppressionReason,
     needsOperator: true,
-    suppressionState: HAMMER_RETRY_CAP_SUPPRESSION_STATE,
+    suppressionState,
     attemptCount: attemptTotal,
     alertEmitted,
     workerClass: existingRecord?.workerClass || workerClass,
@@ -1761,6 +1772,13 @@ export async function maybeDispatchAmaCloser({
   if (isReclaimableDispatchedAmaCloserLease(existingLeaseBeforeDispatch, {
     now: dispatchContext.dispatchedAt,
   })) {
+    const terminalizedLease = {
+      ...existingLeaseBeforeDispatch,
+      status: AMA_CLOSER_LEASE_STATUS.TERMINAL,
+      terminalOutcome: 'failed-without-merge',
+      completedAt: dispatchContext.dispatchedAt || existingLeaseBeforeDispatch?.completedAt || null,
+      updatedAt: dispatchContext.dispatchedAt || existingLeaseBeforeDispatch?.updatedAt || null,
+    };
     finalizeAmaCloserLeaseBestEffort({
       rootDir,
       leaseIdentity,
@@ -1774,7 +1792,7 @@ export async function maybeDispatchAmaCloser({
       dispatched: false,
       skipMergeAgent: true,
       reason: 'stale-dispatched-lease-terminalized',
-      existingLease: existingLeaseBeforeDispatch,
+      existingLease: terminalizedLease,
     });
   }
   const mergedSignal = readMergedBuildCompletionSignal({

@@ -148,7 +148,8 @@ function parseCodexJsonTokenUsage(stdout) {
       (
         !line.includes('token_count') &&
         !line.includes('turn.completed') &&
-        !line.includes('reviewer.token_usage')
+        !line.includes('reviewer.token_usage') &&
+        !line.includes('usageMetadata')
       )
     ) continue;
     let item;
@@ -173,6 +174,30 @@ function parseCodexJsonTokenUsage(stdout) {
       };
       continue;
     }
+    // Gemini (usageMetadata shape, e.g. from gemini-cli -o json). candidates are
+    // the visible output; thoughts are reasoning (inclusive output = candidates
+    // + thoughts); cached maps to cacheRead; toolUse to tool context.
+    const gemini = item.usageMetadata ?? item.usage_metadata ?? item.payload?.usageMetadata;
+    if (gemini && typeof gemini === 'object') {
+      const num = (v) => (Number.isFinite(Number(v)) ? Math.trunc(Number(v)) : null);
+      const prompt = num(gemini.promptTokenCount);
+      const candidates = num(gemini.candidatesTokenCount);
+      const thoughts = num(gemini.thoughtsTokenCount);
+      const output = candidates === null && thoughts === null ? null : (candidates || 0) + (thoughts || 0);
+      tokenUsage = {
+        input: prompt,
+        output,
+        reasoning: thoughts,
+        cacheRead: num(gemini.cachedContentTokenCount),
+        cacheWrite: 0,
+        toolContext: num(gemini.toolUsePromptTokenCount),
+        total: num(gemini.totalTokenCount),
+        source: 'gemini-json',
+        usageTag: 'guardrail',
+      };
+      tokenUsage.guardrail = tokenUsage.total ?? ((tokenUsage.input || 0) + (tokenUsage.output || 0));
+      continue;
+    }
     const total = item.type === 'turn.completed'
       ? item.usage
       : (
@@ -184,6 +209,10 @@ function parseCodexJsonTokenUsage(stdout) {
     tokenUsage = {
       input: Number.isFinite(Number(total.input_tokens)) ? Math.trunc(Number(total.input_tokens)) : null,
       output: Number.isFinite(Number(total.output_tokens)) ? Math.trunc(Number(total.output_tokens)) : null,
+      // reasoning_output_tokens is part of codex's total_token_usage; capture it
+      // for full-fidelity parity (previously dropped). Codex folds tool tokens
+      // into output, so there is no separate tool-context dimension here.
+      reasoning: Number.isFinite(Number(total.reasoning_output_tokens)) ? Math.trunc(Number(total.reasoning_output_tokens)) : null,
       cacheRead: Number.isFinite(Number(total.cached_input_tokens)) ? Math.trunc(Number(total.cached_input_tokens)) : null,
       cacheWrite: 0,
       total: Number.isFinite(Number(total.total_tokens)) ? Math.trunc(Number(total.total_tokens)) : null,
@@ -742,6 +771,7 @@ export {
   classifyReviewerFailure,
   createCliDirectReviewerRuntimeAdapter,
   isReviewerSubprocessTimeout,
+  parseCodexJsonTokenUsage,
   resolveProgressTimeoutForModel,
   reviewerSignalAwareFailureClass,
   stripForbiddenFallbackEnv,

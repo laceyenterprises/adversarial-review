@@ -1257,6 +1257,7 @@ test('cli-direct returns Codex JSON token usage from reviewer stdout', async () 
     assert.deepEqual(result.tokenUsage, {
       input: 123,
       output: 6,
+      reasoning: null,
       cacheRead: 45,
       cacheWrite: 0,
       total: 129,
@@ -1308,6 +1309,7 @@ test('cli-direct returns Codex JSON token usage from failed reviewer stdout', as
     assert.deepEqual(result.tokenUsage, {
       input: 456,
       output: 9,
+      reasoning: null,
       cacheRead: 78,
       cacheWrite: 0,
       total: 465,

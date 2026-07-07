@@ -2063,11 +2063,34 @@ function buildCodexReviewArgs({
 function parseCodexJsonTokenUsage(stdout) {
   let tokenUsage = null;
   for (const line of String(stdout || '').split('\n')) {
-    if (!line.trim() || (!line.includes('token_count') && !line.includes('turn.completed'))) continue;
+    if (
+      !line.trim() ||
+      (!line.includes('token_count') && !line.includes('turn.completed') && !line.includes('usageMetadata'))
+    ) continue;
     let item;
     try {
       item = JSON.parse(line);
     } catch {
+      continue;
+    }
+    // Gemini (usageMetadata shape): candidates are visible output, thoughts are
+    // reasoning (inclusive output = candidates + thoughts), cached -> cacheRead,
+    // toolUse -> tool context.
+    const gemini = item.usageMetadata ?? item.usage_metadata ?? item.payload?.usageMetadata;
+    if (gemini && typeof gemini === 'object') {
+      const num = (v) => (Number.isFinite(Number(v)) ? Math.trunc(Number(v)) : null);
+      const candidates = num(gemini.candidatesTokenCount);
+      const thoughts = num(gemini.thoughtsTokenCount);
+      tokenUsage = {
+        input: num(gemini.promptTokenCount),
+        output: candidates === null && thoughts === null ? null : (candidates || 0) + (thoughts || 0),
+        reasoning: thoughts,
+        cacheRead: num(gemini.cachedContentTokenCount),
+        cacheWrite: 0,
+        toolContext: num(gemini.toolUsePromptTokenCount),
+        total: num(gemini.totalTokenCount),
+        source: 'gemini-json',
+      };
       continue;
     }
     const total = item.type === 'turn.completed'
@@ -2081,6 +2104,8 @@ function parseCodexJsonTokenUsage(stdout) {
     tokenUsage = {
       input: Number.isFinite(Number(total.input_tokens)) ? Math.trunc(Number(total.input_tokens)) : null,
       output: Number.isFinite(Number(total.output_tokens)) ? Math.trunc(Number(total.output_tokens)) : null,
+      // reasoning_output_tokens was previously dropped; capture for parity.
+      reasoning: Number.isFinite(Number(total.reasoning_output_tokens)) ? Math.trunc(Number(total.reasoning_output_tokens)) : null,
       cacheRead: Number.isFinite(Number(total.cached_input_tokens)) ? Math.trunc(Number(total.cached_input_tokens)) : null,
       cacheWrite: 0,
       total: Number.isFinite(Number(total.total_tokens)) ? Math.trunc(Number(total.total_tokens)) : null,

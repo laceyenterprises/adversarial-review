@@ -167,6 +167,11 @@ function ensureReviewStateSchema(db) {
   // migration runner became the canonical path.
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN reviewer_model TEXT`);
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_total INTEGER`);
+  // Full-fidelity token breakdown parity with the session ledger
+  // (token_usage_reasoning / token_usage_tool_context): reviewer passes must
+  // record reasoning and tool-use tokens, not just input/output/cache.
+  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_reasoning INTEGER`);
+  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_tool_context INTEGER`);
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS reviewed_prs_identity_round_kind_unique
       ON reviewed_prs(domain_id, subject_external_id, revision_ref);

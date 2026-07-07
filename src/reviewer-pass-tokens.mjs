@@ -15,6 +15,7 @@ const PASS_STATUSES = new Set(['running', 'completed', 'failed', 'cancelled']);
 function normalizeReviewerClass(value) {
   const text = String(value || '').toLowerCase();
   if (text.includes('codex') || text.includes('gpt')) return 'codex';
+  if (text.includes('gemini') || text.includes('antigravity') || text.includes('agy')) return 'gemini';
   return 'claude';
 }
 
@@ -192,6 +193,8 @@ function completeReviewerPass(rootDir, {
               token_output = COALESCE(?, token_output),
               token_cache_read = COALESCE(?, token_cache_read),
               token_cache_write = COALESCE(?, token_cache_write),
+              token_reasoning = COALESCE(?, token_reasoning),
+              token_tool_context = COALESCE(?, token_tool_context),
               token_total = COALESCE(?, token_total),
               token_cost_usd = COALESCE(?, token_cost_usd),
               token_source = COALESCE(?, token_source),
@@ -205,6 +208,8 @@ function completeReviewerPass(rootDir, {
       usage?.output ?? null,
       usage?.cacheRead ?? null,
       usage?.cacheWrite ?? null,
+      usage?.reasoning ?? null,
+      usage?.toolContext ?? null,
       usage?.total ?? null,
       usage?.costUSD ?? null,
       tokenSource || usage?.source || null,
@@ -229,6 +234,13 @@ function normalizeTokenUsage(tokenUsage) {
   const output = coerceNonNegativeInt(tokenUsage.output ?? tokenUsage.outputTokens ?? tokenUsage.token_output);
   const cacheRead = coerceNonNegativeInt(tokenUsage.cacheRead ?? tokenUsage.cache_read ?? tokenUsage.token_cache_read);
   const cacheWrite = coerceNonNegativeInt(tokenUsage.cacheWrite ?? tokenUsage.cache_write ?? tokenUsage.token_cache_write);
+  // Full-fidelity parity with the session ledger: reasoning + tool-use tokens.
+  const reasoning = coerceNonNegativeInt(
+    tokenUsage.reasoning ?? tokenUsage.reasoningTokens ?? tokenUsage.reasoning_output_tokens ?? tokenUsage.token_reasoning
+  );
+  const toolContext = coerceNonNegativeInt(
+    tokenUsage.toolContext ?? tokenUsage.tool ?? tokenUsage.toolTokens ?? tokenUsage.tool_context ?? tokenUsage.token_tool_context
+  );
   const total = coerceNonNegativeInt(tokenUsage.total ?? tokenUsage.totalTokens ?? tokenUsage.token_total);
   const guardrailRaw = firstPresentValue(tokenUsage, ['guardrail', 'guardrailTokens', 'token_usage_guardrail']);
   const guardrail = guardrailRaw === undefined ? undefined : coerceNonNegativeInt(guardrailRaw);
@@ -236,7 +248,10 @@ function normalizeTokenUsage(tokenUsage) {
   const usageTag = normalizeUsageTag(
     tokenUsage.usageTag ?? tokenUsage.usage_tag ?? tokenUsage.usageCategory ?? tokenUsage.usage_category ?? tokenUsage.category ?? tokenUsage.tag
   );
-  if (input === null && output === null && cacheRead === null && cacheWrite === null && total === null && guardrail == null && costUSD === null) {
+  if (
+    input === null && output === null && cacheRead === null && cacheWrite === null &&
+    reasoning === null && toolContext === null && total === null && guardrail == null && costUSD === null
+  ) {
     return null;
   }
   return {
@@ -244,6 +259,8 @@ function normalizeTokenUsage(tokenUsage) {
     output,
     cacheRead,
     cacheWrite,
+    reasoning,
+    toolContext,
     total,
     guardrail,
     costUSD,
@@ -724,6 +741,8 @@ function readClaudeTranscriptSummary(transcriptPath) {
     output: 0,
     cacheRead: 0,
     cacheWrite: 0,
+    reasoning: 0,
+    toolContext: 0,
   };
   let sawUsage = false;
   try {
@@ -751,6 +770,8 @@ function readClaudeTranscriptSummary(transcriptPath) {
           totals.output += normalized.output || 0;
           totals.cacheRead += normalized.cacheRead || 0;
           totals.cacheWrite += normalized.cacheWrite || 0;
+          totals.reasoning += normalized.reasoning || 0;
+          totals.toolContext += normalized.toolContext || 0;
         }
       }
     }

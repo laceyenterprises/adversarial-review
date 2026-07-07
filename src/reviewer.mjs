@@ -1937,11 +1937,54 @@ async function reviewWithClaude(diff, extraContext = '', { promptStage = 'first'
     throw new Error(`Claude CLI returned empty output.${hint}`);
   }
 
-  return stdout.trim();
+  // `--output-format json` wraps the response as {result, usage, ...}. Extract the
+  // review text (result) for downstream posting AND the exact usage block, so
+  // claude reviewers no longer depend on the flaky ~/.claude/projects transcript
+  // scrape (which missed ~90% of passes -> token_source='unknown'). Fail-safe:
+  // any parse problem falls back to the raw stdout as the review text.
+  const raw = stdout.trim();
+  const parsed = parseClaudeJsonOutput(raw);
+  return { reviewText: parsed.reviewText, tokenUsage: parsed.tokenUsage };
+}
+
+function parseClaudeJsonOutput(raw) {
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch {
+    return { reviewText: raw, tokenUsage: null };
+  }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+    return { reviewText: raw, tokenUsage: null };
+  }
+  const reviewText = typeof doc.result === 'string' && doc.result.trim() ? doc.result : raw;
+  return { reviewText, tokenUsage: mapClaudeJsonUsage(doc.usage) };
+}
+
+function mapClaudeJsonUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  const num = (v) => (Number.isFinite(Number(v)) ? Math.trunc(Number(v)) : null);
+  const input = num(usage.input_tokens);
+  const output = num(usage.output_tokens);
+  const cacheRead = num(usage.cache_read_input_tokens);
+  const cacheWrite = num(usage.cache_creation_input_tokens);
+  if (input === null && output === null && cacheRead === null && cacheWrite === null) {
+    return null;
+  }
+  return {
+    input,
+    output,
+    // Claude does not expose reasoning as a separate dimension (thinking is
+    // folded into output_tokens); no tool-context dimension either.
+    cacheRead,
+    cacheWrite,
+    total: (input || 0) + (output || 0) + (cacheRead || 0) + (cacheWrite || 0),
+    source: 'claude-json',
+  };
 }
 
 function buildClaudeReviewArgs(prompt) {
-  return ['--print', '--permission-mode', 'bypassPermissions', prompt];
+  return ['--print', '--output-format', 'json', '--permission-mode', 'bypassPermissions', prompt];
 }
 
 const CODEX_EXEC_CONFIG_FORWARD_KEYS = [
@@ -3686,12 +3729,17 @@ async function dispatchReviewerModel(effectiveModel, diff, extraContext, {
   reviewWithGeminiImpl = reviewWithGemini,
 } = {}) {
   if (effectiveModel === 'claude') {
-    const text = await reviewWithClaudeImpl(diff, extraContext, { promptStage });
+    const claudeResult = await reviewWithClaudeImpl(diff, extraContext, { promptStage });
+    // reviewWithClaude now returns { reviewText, tokenUsage } (from --output-format
+    // json). Tolerate a bare string too (legacy / mocked impls) so callers and
+    // tests that predate the json capture keep working.
+    const text = typeof claudeResult === 'string' ? claudeResult : claudeResult?.reviewText;
+    const tokenUsage = typeof claudeResult === 'string' ? null : (claudeResult?.tokenUsage ?? null);
     // Best-effort canonicalization: claude/gemini are posted without the hard
     // codex sanitize, but non-`##` canonical headings still break the verdict/
     // blocking-finding parsers the cap + closer depend on. Promote them here
     // (never throws; falls back to the raw body).
-    return { rawReviewText: text, reviewText: sanitizeReviewPayloadBestEffort(text), tokenUsage: null, needsSanitize: false };
+    return { rawReviewText: text, reviewText: sanitizeReviewPayloadBestEffort(text), tokenUsage, needsSanitize: false };
   }
   if (effectiveModel === 'gemini') {
     const result = await reviewWithGeminiImpl(diff, extraContext, { promptStage });
@@ -4701,6 +4749,7 @@ const __test__ = {
   spawnCaptured,
   fetchPRDiff,
   buildClaudeReviewArgs,
+  parseClaudeJsonOutput,
   buildCodexReviewArgs,
   parseCodexJsonTokenUsage,
   postGitHubReview,

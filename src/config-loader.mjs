@@ -1354,6 +1354,7 @@ function schemaV1() {
           },
         },
       },
+      // worker_pool.comms.responder.*,
       // worker_pool.dag.autowalk.deep_reconcile,
       // worker_pool.dispatch.codex_exec_mode,
       // worker_pool.dispatch.goal_lineage.*, and
@@ -1369,6 +1370,30 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          comms: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              responder: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  alert_lookback_hours: {
+                    __type: TYPE_INT,
+                    __default: 12,
+                    __min: 1,
+                    __max: 168,
+                  },
+                  session_ttl_hours: {
+                    __type: TYPE_INT,
+                    __default: 24,
+                    __min: 1,
+                    __max: 168,
+                  },
+                },
+              },
+            },
+          },
           dag: {
             __type: TYPE_DICT,
             __strict: true,
@@ -2228,6 +2253,14 @@ export const ENV_ALIASES = {
   },
   'services.hcp.op_rate_limit_regex': {
     canonical: 'AGENT_OS_SERVICES_HCP_OP_RATE_LIMIT_REGEX',
+    aliases: [],
+  },
+  'worker_pool.comms.responder.alert_lookback_hours': {
+    canonical: 'AGENT_OS_WORKER_POOL_COMMS_RESPONDER_ALERT_LOOKBACK_HOURS',
+    aliases: [],
+  },
+  'worker_pool.comms.responder.session_ttl_hours': {
+    canonical: 'AGENT_OS_WORKER_POOL_COMMS_RESPONDER_SESSION_TTL_HOURS',
     aliases: [],
   },
   'session_ledger.backend': {

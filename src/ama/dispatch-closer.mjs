@@ -1880,24 +1880,10 @@ export async function maybeDispatchAmaCloser({
       ) {
         const reason = 'current-head-hammer-already-ran-needs-operator';
         // The hammer's final terminal remediation ran but produced NO merged
-        // signal (mergedSignalUnknown). Record 'deferred' — NOT 'succeeded':
-        // stamping a permanent terminal 'succeeded' with no merge falsifies the
-        // §4.4 audit trail (the PR looks closed-successful while it is still
-        // open, parked for the operator) and hides genuinely-stuck PRs from
-        // review-pipeline-health / recovery-reaper, both of which skip any lease
-        // whose terminalOutcome is non-null. The needs-operator early-return
-        // below is unchanged, so this is honest bookkeeping only and does not
-        // alter dispatch/runaway behavior. Real-merge success is still recorded
-        // 'succeeded' via the mergedSignal.ok path above.
-        finalizeAmaCloserLeaseBestEffort({
-          rootDir,
-          leaseIdentity,
-          terminalOutcome: 'deferred',
-          now: dispatchContext.dispatchedAt,
-          logger,
-          repo,
-          prNumber,
-        });
+        // signal (mergedSignalUnknown). Do not stamp a terminal lease outcome:
+        // 'succeeded' would falsify the §4.4 audit trail, and any non-null
+        // terminalOutcome hides the still-open PR from review-pipeline-health /
+        // recovery-reaper. Leave the dispatched lease reclaimable.
         logger?.error?.(JSON.stringify({
           event: 'ama_closer.current_head_hammer_stuck',
           repo,

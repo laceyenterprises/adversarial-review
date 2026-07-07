@@ -280,6 +280,15 @@ CLAUDE_REAL=$(readlink -f /opt/homebrew/bin/claude 2>/dev/null || echo "<missing
 # banner doesn't silently point operators at a stale install.
 CODEX_REAL=""
 codex_resolution_note=""
+is_macho_binary() {
+  local candidate="$1"
+  local magic
+  magic=$(/usr/bin/od -An -tx1 -N4 "$candidate" 2>/dev/null | tr -d ' \n' || true)
+  case "$magic" in
+    feedface|cefaedfe|feedfacf|cffaedfe|cafebabe|bebafeca|cafebabf|bfbafeca) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 codex_exe="${CODEX_CLI_PATH:-${CODEX_CLI:-}}"
 if [[ -z "$codex_exe" || ! -e "$codex_exe" ]]; then
   codex_exe=$(command -v codex 2>/dev/null || true)
@@ -301,14 +310,21 @@ else
     if [[ -z "$codex_triple" ]]; then
       codex_resolution_note="unsupported macOS arch: $(/usr/bin/uname -m)"
     else
-      codex_candidate="$(dirname "$codex_real_target")/../node_modules/@openai/$codex_subpkg/vendor/$codex_triple/codex/codex"
+      codex_pkg_root="$(cd "$(dirname "$codex_real_target")/.." && pwd)"
+      codex_node_modules_root="$codex_pkg_root/node_modules"
+      if [[ "$(basename "$(dirname "$codex_pkg_root")")" == "node_modules" ]]; then
+        codex_node_modules_root="$(cd "$codex_pkg_root/.." && pwd)"
+      fi
+      codex_candidate="$codex_node_modules_root/@openai/$codex_subpkg/vendor/$codex_triple/codex/codex"
       if [[ -f "$codex_candidate" ]]; then
         CODEX_REAL="$(cd "$(dirname "$codex_candidate")" && pwd)/codex"
-      else
+      elif is_macho_binary "$codex_real_target"; then
         # Homebrew CASK form: the resolved symlink target IS the Mach-O binary
-        # (no node_modules/vendor tree). npm form buries it under the candidate
-        # path above; when that's absent, codex_real_target is the binary.
+        # (no node_modules/vendor tree). npm wrappers are scripts, so only use
+        # this fallback after checking native Mach-O magic.
         CODEX_REAL="$codex_real_target"
+      else
+        codex_resolution_note="codex vendor Mach-O not found and resolved target is not a native Mach-O binary: $codex_real_target"
       fi
     fi
   fi

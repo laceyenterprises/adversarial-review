@@ -38,8 +38,8 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, realpathSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, openSync, readSync, closeSync, realpathSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
@@ -95,25 +95,59 @@ export function deriveCodexMachOPath(codexEntrypoint) {
   const arm = process.arch === 'arm64';
   const triple = arm ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
   const subPkg = arm ? 'codex-darwin-arm64' : 'codex-darwin-x64';
-  const machO = join(
-    dirname(realScript),
-    '..',
-    'node_modules',
-    '@openai',
-    subPkg,
-    'vendor',
-    triple,
-    'codex',
-    'codex'
-  );
+  const candidateRoots = codexNpmNodeModulesRoots(realScript);
+  const machO = candidateRoots
+    .map((root) => join(root, '@openai', subPkg, 'vendor', triple, 'codex', 'codex'))
+    .find((candidate) => existsSync(candidate));
 
-  if (!existsSync(machO)) {
-    // Cask form: no vendor tree, so the resolved entrypoint IS the Mach-O.
-    // (realScript already exists on disk — guarded by realpathSync above.)
-    return { ok: true, scriptEntrypoint: realScript, machO: resolve(realScript) };
+  if (machO) {
+    return { ok: true, scriptEntrypoint: realScript, machO: resolve(machO) };
   }
 
-  return { ok: true, scriptEntrypoint: realScript, machO: resolve(machO) };
+  // Cask form: no vendor tree, so the resolved entrypoint IS the Mach-O.
+  // npm wrappers are scripts, not Mach-O binaries; fail closed instead of
+  // handing TCC/codesign tooling a JavaScript launcher.
+  if (!isMachOBinary(realScript)) {
+    return {
+      ok: false,
+      reason:
+        `codex vendor Mach-O not found for ${realScript}, and resolved entrypoint ` +
+        `is not a native Mach-O binary`,
+    };
+  }
+
+  return { ok: true, scriptEntrypoint: realScript, machO: resolve(realScript) };
+}
+
+function codexNpmNodeModulesRoots(realScript) {
+  const scriptDir = dirname(realScript);
+  const packageRoot = dirname(scriptDir);
+  const roots = [];
+  if (basename(dirname(packageRoot)) === 'node_modules') {
+    roots.push(dirname(packageRoot));
+  }
+  roots.push(join(packageRoot, 'node_modules'));
+  return [...new Set(roots.map((root) => resolve(root)))];
+}
+
+function isMachOBinary(path) {
+  const fd = openSync(path, 'r');
+  try {
+    const buf = Buffer.alloc(4);
+    if (readSync(fd, buf, 0, 4, 0) !== 4) return false;
+    return [
+      'feedface',
+      'cefaedfe',
+      'feedfacf',
+      'cffaedfe',
+      'cafebabe',
+      'bebafeca',
+      'cafebabf',
+      'bfbafeca',
+    ].includes(buf.toString('hex'));
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function resolveClaudeMachOPath(claudeEntrypoint) {

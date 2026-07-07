@@ -59,6 +59,9 @@ import {
 import { isEligibleForAmaClosure } from './eligibility.mjs';
 import {
   attemptDaemonCleanMerge,
+  classifyDaemonMergeError,
+  daemonMergeBackoffMs,
+  DAEMON_MERGE_DEFAULTS,
   DAEMON_MERGE_DISPOSITION,
   DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
 } from './daemon-merge.mjs';
@@ -130,6 +133,8 @@ const HAMMER_ROUTE_STRUCTURAL_BLOCK_REASONS = new Set([
   'branch-protection-missing-gate',
   'fast-merge-state-unsupported',
 ]);
+const AMA_CLOSER_MERGE_RETRY_CAP = DAEMON_MERGE_DEFAULTS.retryCap;
+const AMA_CLOSER_MERGE_BACKOFF_BASE_MS = 250;
 
 export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   if (!Array.isArray(reasons) || reasons.length === 0) return false;
@@ -464,6 +469,71 @@ function assertHammerCleanupSucceeded(hammerCleanup) {
     `AMA hammer worker teardown failed for ${hammerCleanup.workerId || 'unknown-worker'}: ` +
     `${hammerCleanup.error || 'unknown error'}`,
   );
+}
+
+function logHammerCleanupFailure(hammerCleanup, { logger = console, repo, prNumber, phase }) {
+  try {
+    assertHammerCleanupSucceeded(hammerCleanup);
+    return hammerCleanup;
+  } catch (err) {
+    const error = String(err?.message || err);
+    logger?.error?.(JSON.stringify({
+      event: 'ama_closer.hammer_worker_cleanup_nonfatal',
+      repo,
+      prNumber,
+      phase,
+      workerId: hammerCleanup?.workerId || null,
+      reason: hammerCleanup?.reason || null,
+      error,
+    }));
+    return {
+      ...(hammerCleanup || {}),
+      ok: false,
+      nonFatal: true,
+      assertionError: error,
+    };
+  }
+}
+
+async function runGhPrMergeWithTransientRetry({
+  execFileImpl,
+  args,
+  repo,
+  prNumber,
+  head,
+  logger = console,
+}) {
+  let lastFailure = null;
+  for (let attempt = 1; attempt <= AMA_CLOSER_MERGE_RETRY_CAP; attempt += 1) {
+    try {
+      const { stdout, stderr } = await execFileImpl('gh', args, {
+        maxBuffer: 5 * 1024 * 1024,
+        timeout: DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
+      });
+      return { exitCode: 0, stdout: String(stdout || ''), stderr: String(stderr || '') };
+    } catch (err) {
+      lastFailure = {
+        exitCode: Number.isInteger(err?.code) ? err.code : 1,
+        stdout: String(err?.stdout || ''),
+        stderr: String(err?.stderr || err?.message || ''),
+      };
+      const cls = classifyDaemonMergeError(`${lastFailure.stderr}\n${lastFailure.stdout}`);
+      if (cls !== 'retryable' || attempt >= AMA_CLOSER_MERGE_RETRY_CAP) {
+        return lastFailure;
+      }
+      logger?.warn?.(JSON.stringify({
+        event: 'ama_closer.gh_pr_merge_transient_retry',
+        repo,
+        prNumber,
+        head,
+        attempt,
+        retryCap: AMA_CLOSER_MERGE_RETRY_CAP,
+        error: lastFailure.stderr,
+      }));
+      await sleep(daemonMergeBackoffMs(attempt, { baseMs: AMA_CLOSER_MERGE_BACKOFF_BASE_MS }));
+    }
+  }
+  return lastFailure || { exitCode: 1, stdout: '', stderr: 'gh pr merge did not run' };
 }
 
 /**
@@ -1929,17 +1999,6 @@ export async function maybeDispatchAmaCloser({
     ? targetHeadMergedSignal
     : reviewedHeadMergedSignal;
   if (mergedSignal?.ok) {
-    const hammerCleanup = await cleanupHammerCloserWorker({
-      prNumber,
-      workerClass,
-      existingRecord,
-      hqPath,
-      hqRoot,
-      execFileImpl,
-      logger,
-      reason: 'merged-signal-present',
-    });
-    assertHammerCleanupSucceeded(hammerCleanup);
     if (existingRecord?.launchRequestId || existingRecord?.dispatchId) {
       await recordAmaCloserReviewerPassTokens({
         rootDir,
@@ -1957,6 +2016,22 @@ export async function maybeDispatchAmaCloser({
         logger,
       });
     }
+    const rawHammerCleanup = await cleanupHammerCloserWorker({
+      prNumber,
+      workerClass,
+      existingRecord,
+      hqPath,
+      hqRoot,
+      execFileImpl,
+      logger,
+      reason: 'merged-signal-present',
+    });
+    const hammerCleanup = logHammerCleanupFailure(rawHammerCleanup, {
+      logger,
+      repo,
+      prNumber,
+      phase: 'merged-signal-present',
+    });
     return noAmaDispatch({
       dispatched: false,
       skipMergeAgent: true,
@@ -2108,19 +2183,14 @@ export async function maybeDispatchAmaCloser({
                 '--body',
                 amaTrailers,
               ];
-              try {
-                const { stdout, stderr } = await execFileImpl('gh', args, {
-                  maxBuffer: 5 * 1024 * 1024,
-                  timeout: DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
-                });
-                return { exitCode: 0, stdout: String(stdout || ''), stderr: String(stderr || '') };
-              } catch (err) {
-                return {
-                  exitCode: Number.isInteger(err?.code) ? err.code : 1,
-                  stdout: String(err?.stdout || ''),
-                  stderr: String(err?.stderr || err?.message || ''),
-                };
-              }
+              return runGhPrMergeWithTransientRetry({
+                execFileImpl,
+                args,
+                repo: mergeRepo,
+                prNumber: mergePr,
+                head,
+                logger,
+              });
             },
             now: () => dispatchContext.dispatchedAt || new Date().toISOString(),
             logger,
@@ -2143,17 +2213,6 @@ export async function maybeDispatchAmaCloser({
             lastObservedAt: dispatchContext.dispatchedAt,
             lastError: null,
           }));
-          const hammerCleanup = await cleanupHammerCloserWorker({
-            prNumber,
-            workerClass,
-            existingRecord,
-            hqPath,
-            hqRoot,
-            execFileImpl,
-            logger,
-            reason: 'same-head-terminal-ham-merged',
-          });
-          assertHammerCleanupSucceeded(hammerCleanup);
           await recordAmaCloserReviewerPassTokens({
             rootDir,
             hqRoot,
@@ -2172,6 +2231,22 @@ export async function maybeDispatchAmaCloser({
             env: process.env,
             pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
             logger,
+          });
+          const rawHammerCleanup = await cleanupHammerCloserWorker({
+            prNumber,
+            workerClass,
+            existingRecord,
+            hqPath,
+            hqRoot,
+            execFileImpl,
+            logger,
+            reason: 'same-head-terminal-ham-merged',
+          });
+          const hammerCleanup = logHammerCleanupFailure(rawHammerCleanup, {
+            logger,
+            repo,
+            prNumber,
+            phase: 'same-head-terminal-ham-merged',
           });
           return noAmaDispatch({
             dispatched: false,

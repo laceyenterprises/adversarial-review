@@ -633,6 +633,12 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
             null,
             'lease must not be succeeded before gh merge returns success',
           );
+          if (mergeCalls.length === 1) {
+            const err = new Error('TLS handshake timeout');
+            err.stderr = 'TLS handshake timeout';
+            err.code = 1;
+            throw err;
+          }
           return { stdout: '', stderr: '' };
         }
         if (args[0] === 'worker' && args[1] === 'tear-down') {
@@ -653,7 +659,7 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
   });
   assert.equal(successProbe.reason, 'current-head-hammer-terminal-remediation-merged');
   assert.equal(successProbe.needsOperator, undefined);
-  assert.equal(mergeCalls.length, 1);
+  assert.equal(mergeCalls.length, 2);
   assert.equal(
     readAmaCloserLease(successRoot, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }).terminalOutcome,
     'succeeded',
@@ -663,6 +669,70 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
   assert.equal(audit.closureAuthority, 'ham-terminal-remediation');
   assert.equal(audit.closedBy, 'hammer');
   assert.match(audit.closeTrailers, /Closed-By: hammer \(adversarial-pipe-mode\)/);
+});
+
+test('same-head terminal HAM remediation records merged audit before nonfatal cleanup failure', async (t) => {
+  const cleanupRoot = mkdtempSync(join(tmpdir(), 'hammer-cleanup-nonfatal-'));
+  t.after(() => rmSync(cleanupRoot, { recursive: true, force: true }));
+
+  const first = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(cleanupRoot),
+    ...hammerDispatchDeps(),
+  });
+  assert.equal(first.dispatched, true);
+
+  const cleanupProbe = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(cleanupRoot, {
+      reviewState: { reviewCycleExhausted: true },
+      prMetadata: {
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+        ],
+      },
+      dispatchContext: {
+        baseBranch: 'main',
+        dispatchedAt: '2026-07-06T12:02:00Z',
+      },
+    }),
+    options: validHamTerminalRemediationOptions({
+      reviewedHead: REVIEWED_HEAD,
+      currentHead: REVIEWED_HEAD,
+    }),
+    ...hammerDispatchDeps({
+      execFileImpl: async (cmd, args) => {
+        if (args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
+        }
+        if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'merge') {
+          return { stdout: '', stderr: '' };
+        }
+        if (args[0] === 'worker' && args[1] === 'tear-down') {
+          const err = new Error('launchctl teardown failed');
+          err.stderr = 'launchctl teardown failed';
+          throw err;
+        }
+        return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+      },
+      fetchPullRequestRollupImpl: async () => ({
+        state: 'OPEN',
+        headSha: REVIEWED_HEAD,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+        ],
+      }),
+    }),
+  });
+
+  assert.equal(cleanupProbe.reason, 'current-head-hammer-terminal-remediation-merged');
+  assert.equal(cleanupProbe.needsOperator, undefined);
+  assert.equal(cleanupProbe.hammerCleanup.ok, false);
+  assert.equal(cleanupProbe.hammerCleanup.nonFatal, true);
+  assert.match(cleanupProbe.hammerCleanup.assertionError, /teardown failed/);
+  const audit = readAmaAuditEntry(join(cleanupRoot, 'hq-root'), REPO, PR_NUMBER, REVIEWED_HEAD);
+  assert.equal(audit.status, 'succeeded');
+  assert.equal(audit.closureAuthority, 'ham-terminal-remediation');
 });
 
 test('same-head terminal HAM remediation parks for operator when structural gates fail', async (t) => {

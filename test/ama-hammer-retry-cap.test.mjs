@@ -9,6 +9,7 @@ import {
   AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
   isReclaimableDispatchedAmaCloserLease,
   maybeDispatchAmaCloser,
+  updateAmaCloserDispatchRecord,
 } from '../src/ama/dispatch-closer.mjs';
 import {
   acquireAmaCloserLease,
@@ -32,6 +33,7 @@ import {
 const REPO = 'acme/myrepo';
 const PR_NUMBER = 3116;
 const REVIEWED_HEAD = 'a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0';
+const ADVANCED_HEAD = 'b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1';
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
 
 function hammerDispatchArgs(rootDir, overrides = {}) {
@@ -121,6 +123,53 @@ function seedExhaustedHammerCap(rootDir, identity = { repo: REPO, prNumber: PR_N
     headSha: REVIEWED_HEAD,
     now: '2026-07-06T12:05:00Z',
   });
+}
+
+function validHamTerminalRemediationOptions({
+  reviewedHead = REVIEWED_HEAD,
+  currentHead = ADVANCED_HEAD,
+} = {}) {
+  const auditBody = 'HAM audit: addressed Auth path not threaded in src/auth.js. Doc-currency: not applicable for changed files src/auth.js.';
+  const finding = { title: 'Auth path not threaded', blocking: true, file: 'src/auth.js', addressed: true };
+  return {
+    env: {},
+    hamTerminalRemediation: {
+      active: true,
+      commit: {
+        sha: currentHead,
+        parentSha: reviewedHead,
+      },
+      auditComment: {
+        body: auditBody,
+        docCurrency: {
+          status: 'not_applicable',
+          changedFiles: ['src/auth.js'],
+        },
+        findings: [finding],
+      },
+    },
+    hamTerminalRemediationGroundTruth: {
+      commit: {
+        sha: currentHead,
+        parentSha: reviewedHead,
+        author: 'hammer-worker',
+        changedFiles: ['src/auth.js'],
+        trailers: {
+          'Worker-Class': 'hammer',
+          'Worker-Ticket': 'HAM',
+          'Reviewed-Head': reviewedHead,
+          'Closed-By': 'hammer (adversarial-pipe-mode)',
+          'Remediated-Findings': '1 addressed (1 blocking, 0 non-blocking)',
+        },
+      },
+      auditComment: {
+        body: auditBody,
+        author: 'hammer-worker',
+        createdAt: '2026-07-06T12:01:00Z',
+        id: 'IC_ham_audit',
+      },
+    },
+  };
 }
 
 test('evaluateHammerRetryCap accumulates by logical review job key', () => {
@@ -537,6 +586,107 @@ test('terminal-remediation success finalizes lease and failure redispatches repl
   const replacementLease = readAmaCloserLease(failureRoot, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
   assert.equal(replacementLease.status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
   assert.equal(replacementLease.lrqId, 'unexpected');
+});
+
+test('terminal old-head hammer dispatch is superseded when remediation advanced the head', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-lease-head-advanced-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  acquireAmaCloserLease({
+    rootDir,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: REVIEWED_HEAD,
+    now: '2026-07-06T12:00:00Z',
+  });
+  updateAmaCloserLease({
+    rootDir,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: REVIEWED_HEAD,
+    status: AMA_CLOSER_LEASE_STATUS.DISPATCHED,
+    lrqId: 'lrq_old_head',
+    now: '2026-07-06T12:00:00Z',
+  });
+  updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }, () => ({
+    schemaVersion: 1,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    reviewedSha: REVIEWED_HEAD,
+    targetRemediationSha: ADVANCED_HEAD,
+    workerClass: 'hammer',
+    dispatchWorkerClass: 'hammer',
+    promptPath: '/tmp/old-prompt.md',
+    promptDir: '/tmp',
+    hqRoot: join(rootDir, 'hq-root'),
+    launchRequestId: 'lrq_old_head',
+    dispatchId: 'dispatch_old_head',
+    retryCount: 1,
+    state: 'dispatched',
+    lastObservedStatus: 'starting',
+  }));
+
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true },
+      prMetadata: { headSha: ADVANCED_HEAD },
+      dispatchContext: {
+        targetRemediationSha: ADVANCED_HEAD,
+        dispatchRecordHeadSha: REVIEWED_HEAD,
+        allowStaleReviewHeadHammerResume: true,
+        dispatchedAt: '2026-07-06T12:02:00Z',
+      },
+    }),
+    ...hammerDispatchDeps({
+      execFileImpl: async (_cmd, args) => {
+        if (args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
+        }
+        return { stdout: JSON.stringify({ dispatchId: 'dispatch_new_head', launchRequestId: 'lrq_new_head' }), stderr: '' };
+      },
+    }),
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(result.launchRequestId, 'lrq_new_head');
+  const oldLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
+  assert.equal(oldLease.status, AMA_CLOSER_LEASE_STATUS.TERMINAL);
+  assert.equal(oldLease.terminalOutcome, 'superseded');
+  const currentLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD });
+  assert.equal(currentLease.status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
+  assert.equal(currentLease.lrqId, 'lrq_new_head');
+});
+
+test('valid current-head HAM terminal remediation escalates structural misses instead of re-hammering', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-valid-ham-no-rehammer-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = hammerDispatchDeps();
+
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: {
+        reviewCycleExhausted: true,
+      },
+      prMetadata: {
+        headSha: ADVANCED_HEAD,
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'test', conclusion: 'FAILURE' },
+        ],
+      },
+      dispatchContext: {
+        targetRemediationSha: ADVANCED_HEAD,
+        allowStaleReviewHeadHammerResume: true,
+      },
+    }),
+    options: validHamTerminalRemediationOptions(),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'current-head-ham-terminal-remediation-needs-operator');
+  assert.equal(result.needsOperator, true);
+  assert.ok(result.reasons.includes('ci-not-green'));
+  assert.equal(deps.execCalls.length, 0);
 });
 
 test('stale dispatched/null closer lease is terminalized instead of held forever', async (t) => {

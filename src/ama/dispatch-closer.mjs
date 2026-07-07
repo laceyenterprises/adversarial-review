@@ -1637,6 +1637,15 @@ export async function maybeDispatchAmaCloser({
   let forceHammerWorkerClass = false;
   const eligibleHammerRouteReasons = verdict.eligible ? hammerRouteReasonsFromTrace(verdict) : [];
   if (!verdict.eligible || eligibleHammerRouteReasons.length > 0) {
+    if (!verdict.eligible && verdict.trace?.hamTerminalRemediation?.ok === true) {
+      return noAmaDispatch({
+        dispatched: false,
+        skipMergeAgent: true,
+        reason: 'current-head-ham-terminal-remediation-needs-operator',
+        reasons: verdict.reasons,
+        needsOperator: true,
+      });
+    }
     // MSM-04: the standalone AMA closer is gone. The only agent dispatch left
     // on this surface is the HAM terminal-remediation worker. Fully clean PRs
     // are handled by the daemon path before this function is called; dirty,
@@ -1713,12 +1722,19 @@ export async function maybeDispatchAmaCloser({
   const repo = dispatchContext.repo;
   const reviewedSha = dispatchContext.reviewedSha;
   const targetRemediationSha = dispatchContext.targetRemediationSha || reviewedSha;
+  const headAdvancedDuringDispatch =
+    Boolean(reviewedSha && targetRemediationSha && reviewedSha !== targetRemediationSha);
   const dispatchRecordHeadSha = dispatchContext.dispatchRecordHeadSha || targetRemediationSha;
   const dispatchReason = dispatchContext.dispatchReason || null;
   const mergeMethod = String(cfg.mergeMethod || 'squash').toLowerCase();
   const rootDir = dispatchContext.rootDir || SUBMODULE_ROOT;
 
-  const leaseIdentity = { repo, prNumber, headSha: reviewedSha };
+  const existingLeaseIdentity = { repo, prNumber, headSha: reviewedSha };
+  const leaseIdentity = {
+    repo,
+    prNumber,
+    headSha: headAdvancedDuringDispatch ? targetRemediationSha : reviewedSha,
+  };
   const hqRoot = dispatchContext.hqRoot || DEFAULT_HQ_ROOT;
   const promptDir = dispatchContext.promptDir || amaCloserPromptDir(rootDir);
   const ownerUser = dispatchContext.hqOwnerUser || resolveHqOwner(hqRoot);
@@ -1764,11 +1780,26 @@ export async function maybeDispatchAmaCloser({
 
   const dispatchIdentity = { repo, prNumber, headSha: dispatchRecordHeadSha };
   const auditIdentity = { repo, prNumber, headSha: reviewedSha };
+  const targetAuditIdentity = { repo, prNumber, headSha: targetRemediationSha };
   const hqPath = dispatchContext.hqPath || process.env.HQ_BIN || DEFAULT_HQ_PATH;
   const hqProject = dispatchContext.hqProject || DEFAULT_PROJECT;
   const existingRecord = readAmaCloserDispatchRecord(rootDir, dispatchIdentity);
-  const existingLeaseBeforeDispatch = readAmaCloserLease(rootDir, leaseIdentity);
-  const auditTerminalOutcome = readAmaAuditTerminalOutcome(hqRoot, auditIdentity);
+  const existingDispatchHeadAdvanced = headAdvancedDuringDispatch || Boolean(
+    reviewedSha
+    && (
+      (prMetadata?.headSha && prMetadata.headSha !== reviewedSha)
+      || (existingRecord && (
+        (existingRecord.targetRemediationSha && existingRecord.targetRemediationSha !== reviewedSha)
+        || (existingRecord.headSha && existingRecord.headSha !== reviewedSha)
+      ))
+    )
+  );
+  const existingLeaseBeforeDispatch = readAmaCloserLease(rootDir, existingLeaseIdentity);
+  const reviewedHeadAuditTerminalOutcome = readAmaAuditTerminalOutcome(hqRoot, auditIdentity);
+  const targetHeadAuditTerminalOutcome = headAdvancedDuringDispatch
+    ? readAmaAuditTerminalOutcome(hqRoot, targetAuditIdentity)
+    : null;
+  const auditTerminalOutcome = targetHeadAuditTerminalOutcome || reviewedHeadAuditTerminalOutcome;
   if (isReclaimableDispatchedAmaCloserLease(existingLeaseBeforeDispatch, {
     now: dispatchContext.dispatchedAt,
   })) {
@@ -1781,7 +1812,7 @@ export async function maybeDispatchAmaCloser({
     };
     finalizeAmaCloserLeaseBestEffort({
       rootDir,
-      leaseIdentity,
+      leaseIdentity: existingLeaseIdentity,
       terminalOutcome: 'failed-without-merge',
       now: dispatchContext.dispatchedAt,
       logger,
@@ -1795,7 +1826,7 @@ export async function maybeDispatchAmaCloser({
       existingLease: terminalizedLease,
     });
   }
-  const mergedSignal = readMergedBuildCompletionSignal({
+  const reviewedHeadMergedSignal = readMergedBuildCompletionSignal({
     repo,
     prNumber,
     headSha: reviewedSha,
@@ -1805,6 +1836,21 @@ export async function maybeDispatchAmaCloser({
     readBuildCompletionProducerEvidenceImpl,
     readBuildCompletionSignalForPrImpl,
   });
+  const targetHeadMergedSignal = headAdvancedDuringDispatch
+    ? readMergedBuildCompletionSignal({
+        repo,
+        prNumber,
+        headSha: targetRemediationSha,
+        hqRoot,
+        rootDir,
+        env: process.env,
+        readBuildCompletionProducerEvidenceImpl,
+        readBuildCompletionSignalForPrImpl,
+      })
+    : null;
+  const mergedSignal = targetHeadMergedSignal?.ok
+    ? targetHeadMergedSignal
+    : reviewedHeadMergedSignal;
   if (mergedSignal?.ok) {
     const hammerCleanup = await cleanupHammerCloserWorker({
       prNumber,
@@ -1863,6 +1909,7 @@ export async function maybeDispatchAmaCloser({
   if (existingRecord?.launchRequestId) {
     let releaseUnprovenTerminalHold = false;
     let releaseUnprovenTerminalHoldError = null;
+    let advancedTerminalDispatchSuperseded = false;
     const statusProbe = await probeAmaCloserDispatchStatus({
       hqPath,
       launchRequestId: existingRecord.launchRequestId,
@@ -1874,6 +1921,27 @@ export async function maybeDispatchAmaCloser({
     existingDispatchStatus = status;
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
       if (
+        existingDispatchHeadAdvanced &&
+        AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
+      ) {
+        existingDispatchStatus = 'superseded';
+        advancedTerminalDispatchSuperseded = true;
+        finalizeAmaCloserLeaseBestEffort({
+          rootDir,
+          leaseIdentity: existingLeaseIdentity,
+          terminalOutcome: 'superseded',
+          now: dispatchContext.dispatchedAt,
+          logger,
+          repo,
+          prNumber,
+        });
+        updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
+          ...(current || existingRecord),
+          lastObservedStatus: status,
+          lastObservedAt: dispatchContext.dispatchedAt,
+          lastError: 'terminal-dispatch-superseded-by-head-advance',
+        }));
+      } else if (
         currentHeadFinalHammerTerminalRemediation &&
         mergedSignalUnknown &&
         AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
@@ -1914,6 +1982,9 @@ export async function maybeDispatchAmaCloser({
         });
       }
       if (
+        !advancedTerminalDispatchSuperseded
+        && !existingDispatchHeadAdvanced
+        &&
         mergedSignalUnknown
         && (auditTerminalOutcome === 'succeeded' || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status))
       ) {
@@ -1925,13 +1996,13 @@ export async function maybeDispatchAmaCloser({
         }));
         return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
       }
-      if (auditTerminalOutcome === 'succeeded') {
+      if (!advancedTerminalDispatchSuperseded && auditTerminalOutcome === 'succeeded') {
         existingDispatchStatus = 'unverified-terminal-success';
         releaseUnprovenTerminalHold = true;
         releaseUnprovenTerminalHoldError = 'audit-succeeded-without-merged-signal';
         finalizeAmaCloserLeaseBestEffort({
           rootDir,
-          leaseIdentity,
+          leaseIdentity: existingLeaseIdentity,
           terminalOutcome: 'succeeded',
           now: dispatchContext.dispatchedAt,
           logger,
@@ -1939,6 +2010,8 @@ export async function maybeDispatchAmaCloser({
           prNumber,
         });
       } else if (
+        !advancedTerminalDispatchSuperseded
+        &&
         auditTerminalOutcome
         && auditTerminalOutcome !== 'succeeded'
         && !AMA_CLOSER_ACTIVE_STATUSES.has(status)
@@ -1948,27 +2021,27 @@ export async function maybeDispatchAmaCloser({
         releaseUnprovenTerminalHoldError = statusProbe?.error || null;
         finalizeAmaCloserLeaseBestEffort({
           rootDir,
-          leaseIdentity,
+          leaseIdentity: existingLeaseIdentity,
           terminalOutcome: auditTerminalOutcome,
           now: dispatchContext.dispatchedAt,
           logger,
           repo,
           prNumber,
         });
-      } else if (AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
+      } else if (!advancedTerminalDispatchSuperseded && AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
         existingDispatchStatus = 'unverified-terminal-success';
         releaseUnprovenTerminalHold = true;
         releaseUnprovenTerminalHoldError = 'terminal-success-status-without-audit-or-merged-signal';
         finalizeAmaCloserLeaseBestEffort({
           rootDir,
-          leaseIdentity,
+          leaseIdentity: existingLeaseIdentity,
           terminalOutcome: 'succeeded',
           now: dispatchContext.dispatchedAt,
           logger,
           repo,
           prNumber,
         });
-      } else {
+      } else if (!advancedTerminalDispatchSuperseded) {
         updateAmaCloserDispatchRecord(rootDir, dispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: status,
@@ -2034,8 +2107,8 @@ export async function maybeDispatchAmaCloser({
     if (AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
       finalizeAmaCloserLeaseBestEffort({
         rootDir,
-        leaseIdentity,
-        terminalOutcome: 'failed-without-merge',
+        leaseIdentity: existingLeaseIdentity,
+        terminalOutcome: existingDispatchHeadAdvanced ? 'superseded' : 'failed-without-merge',
         now: dispatchContext.dispatchedAt,
         logger,
         repo,
@@ -2072,7 +2145,11 @@ export async function maybeDispatchAmaCloser({
         logger,
       });
     }
-    if (!releaseUnprovenTerminalHold && !AMA_CLOSER_RETRYABLE_STATUSES.has(status)) {
+    if (
+      !releaseUnprovenTerminalHold
+      && !advancedTerminalDispatchSuperseded
+      && !AMA_CLOSER_RETRYABLE_STATUSES.has(status)
+    ) {
       return noAmaDispatch({ dispatched: false, reason: `dispatch-status-${status || 'unknown'}` });
     }
   } else if (existingRecordHasLivePendingInterruption) {

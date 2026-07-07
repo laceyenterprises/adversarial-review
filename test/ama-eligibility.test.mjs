@@ -254,6 +254,117 @@ test('not eligible: rebase coverage ignores legacy enabled and marker aliases', 
   assert.equal(result.trace.headMatch.rebaseReviewCoverage.checks.marker, false);
 });
 
+test('eligible: current-head HAM terminal remediation clears stale reviewed head', () => {
+  const reviewedHead = 'abc12345';
+  const currentHead = 'def67890';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      headSha: reviewedHead,
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+      reviewCycleExhausted: true,
+    },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({ headSha: currentHead, parentSha: reviewedHead }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({ headSha: currentHead, parentSha: reviewedHead }),
+  });
+
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.trace.headMatch.ok, true);
+  assert.equal(result.trace.headMatch.hamTerminalRemediation, true);
+  assert.ok(!result.reasons.includes('stale-review-head'));
+});
+
+test('not eligible: current-head HAM terminal remediation does not waive structural hard gates', () => {
+  const reviewedHead = 'abc12345';
+  const currentHead = 'def67890';
+  const base = {
+    reviewState: {
+      headSha: reviewedHead,
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+      reviewCycleExhausted: true,
+    },
+    prMetadata: { headSha: currentHead },
+  };
+  const options = {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({ headSha: currentHead, parentSha: reviewedHead }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({ headSha: currentHead, parentSha: reviewedHead }),
+  };
+
+  const redCi = eligibleFixture({
+    ...base,
+    prMetadata: {
+      ...base.prMetadata,
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'FAILURE' }],
+    },
+  });
+  const redCiResult = isEligibleForAmaClosure(redCi.reviewState, redCi.prMetadata, redCi.cfg, options);
+  assert.equal(redCiResult.eligible, false);
+  assert.ok(redCiResult.reasons.includes('ci-not-green'));
+  assert.ok(!redCiResult.reasons.includes('stale-review-head'));
+
+  const nonMergeable = eligibleFixture({
+    ...base,
+    prMetadata: {
+      ...base.prMetadata,
+      mergeableState: 'DIRTY',
+    },
+  });
+  const nonMergeableResult = isEligibleForAmaClosure(
+    nonMergeable.reviewState,
+    nonMergeable.prMetadata,
+    nonMergeable.cfg,
+    options,
+  );
+  assert.equal(nonMergeableResult.eligible, false);
+  assert.ok(nonMergeableResult.reasons.includes('pr-not-mergeable'));
+  assert.ok(!nonMergeableResult.reasons.includes('stale-review-head'));
+
+  const mismatchedHead = eligibleFixture({
+    ...base,
+    prMetadata: { headSha: 'feedface' },
+  });
+  const mismatchedHeadResult = isEligibleForAmaClosure(
+    mismatchedHead.reviewState,
+    mismatchedHead.prMetadata,
+    mismatchedHead.cfg,
+    options,
+  );
+  assert.equal(mismatchedHeadResult.eligible, false);
+  assert.ok(mismatchedHeadResult.reasons.includes('stale-review-head'));
+});
+
+test('not eligible: ambiguous HAM audit evidence does not clear stale reviewed head', () => {
+  const reviewedHead = 'abc12345';
+  const currentHead = 'def67890';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      headSha: reviewedHead,
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+      reviewCycleExhausted: true,
+    },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: { active: true },
+  });
+
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.hamTerminalRemediation.ok, false);
+  assert.equal(result.trace.headMatch.hamTerminalRemediation, false);
+  assert.ok(result.reasons.includes('stale-review-head'));
+});
+
 // ---------------------------------------------------------------------------
 // Verdict gate (SPEC §4.2 #1)
 // ---------------------------------------------------------------------------
@@ -1613,9 +1724,11 @@ test('ham terminal remediation: exhausted HAM-authored live head over reviewed p
   assert.equal(result.trace.hamTerminalRemediation.marker, 'ham_terminal_remediation_validated');
   assert.equal(result.trace.hamTerminalRemediation.auditComment.author, 'hammer-worker');
   assert.deepEqual(result.trace.hamTerminalRemediation.verifiedCommit.changedFiles, ['src/auth.js']);
+  assert.equal(result.trace.headMatch.hamTerminalRemediation, true);
+  assert.ok(!result.reasons.includes('stale-review-head'));
   assert.deepEqual(
     result.trace.hamTerminalRemediation.waived.sort(),
-    ['blocking-findings-present', 'stale-review-head', 'verdict-not-settled-success'].sort(),
+    ['blocking-findings-present', 'verdict-not-settled-success'].sort(),
   );
 });
 
@@ -1712,7 +1825,8 @@ for (const auditAuthor of ['clio-airlock', 'the-hammer-lacey[bot]']) {
     assert.equal(result.trace.hamTerminalRemediation.reviewedParent, reviewedHead);
     assert.equal(result.trace.hamTerminalRemediation.actualParent, rebasedParent);
     assert.equal(result.trace.hamTerminalRemediation.reviewedHeadTrailer, reviewedHead);
-    assert.ok(result.trace.hamTerminalRemediation.waived.includes('stale-review-head'));
+    assert.equal(result.trace.headMatch.hamTerminalRemediation, true);
+    assert.ok(!result.reasons.includes('stale-review-head'));
     assert.ok(result.trace.hamTerminalRemediation.waived.includes('verdict-not-settled-success'));
   });
 }

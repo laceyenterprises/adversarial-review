@@ -131,8 +131,9 @@ function codexNpmNodeModulesRoots(realScript) {
 }
 
 function isMachOBinary(path) {
-  const fd = openSync(path, 'r');
+  let fd;
   try {
+    fd = openSync(path, 'r');
     const buf = Buffer.alloc(4);
     if (readSync(fd, buf, 0, 4, 0) !== 4) return false;
     return [
@@ -145,8 +146,10 @@ function isMachOBinary(path) {
       'cafebabf',
       'bfbafeca',
     ].includes(buf.toString('hex'));
+  } catch {
+    return false;
   } finally {
-    closeSync(fd);
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -327,6 +330,6 @@ function main() {
 
 // Run as a script, but stay importable for tests (which exercise
 // deriveCodexMachOPath directly without triggering the TCC probe/exit).
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main();
 }

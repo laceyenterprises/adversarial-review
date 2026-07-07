@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -107,4 +108,25 @@ test('missing entrypoint resolves to ok:false', () => {
   const result = deriveCodexMachOPath('/nonexistent/path/to/codex');
   assert.equal(result.ok, false);
   assert.match(result.reason, /does not exist/);
+});
+
+test('directory entrypoint resolves to ok:false instead of throwing', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'tcc-codex-directory-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const result = deriveCodexMachOPath(root);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /not a native Mach-O binary/);
+});
+
+test('module imports cleanly when node does not set process.argv[1]', () => {
+  const scriptUrl = new URL('../scripts/print-tcc-targets.mjs', import.meta.url).href;
+  const result = spawnSync(
+    process.execPath,
+    ['-e', `await import(${JSON.stringify(scriptUrl)});`],
+    { encoding: 'utf8' },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.signal, null);
 });

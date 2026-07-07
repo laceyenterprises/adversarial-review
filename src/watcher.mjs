@@ -5236,9 +5236,6 @@ async function runDaemonCleanMergeAttempt({
       prState: String(candidate?.prState || 'open').toUpperCase(),
     },
     mergeMethod,
-    retryCap: Number(cfg?.hammerLifetimeDispatchCeiling) >= 1
-      ? Math.trunc(Number(cfg.hammerLifetimeDispatchCeiling))
-      : undefined,
     hqRoot,
     auditMetadata: {
       reviewer: reviewStateRow?.reviewer || '',

@@ -91,7 +91,8 @@ roles:
       # blocking or unknown findings still route away from the daemon.
       strict_mode: true
       # Lifetime ceiling for HAM terminal-remediation dispatches per PR. Set
-      # to 0 to disable the hammer terminal-remediation path.
+      # to 0 to disable the hammer path; daemon clean merges keep their own
+      # retry budget.
       hammer_lifetime_ceiling: 6
   merge-agent:
     fallback_path: none

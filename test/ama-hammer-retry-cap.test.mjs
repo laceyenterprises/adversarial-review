@@ -441,7 +441,7 @@ test('exhausted final-hammer path counts lifetime dispatches across heads and tr
   assert.equal(ledger.suppressionState, HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE);
 });
 
-test('configured hammer lifetime ceiling controls closer dispatch at 0, 1, and 3', async (t) => {
+test('configured hammer lifetime ceiling disables hammer at 0 and controls dispatch at 1 and 3', async (t) => {
   const rootZero = mkdtempSync(join(tmpdir(), 'hammer-cap-cfg-zero-'));
   const rootOne = mkdtempSync(join(tmpdir(), 'hammer-cap-cfg-one-'));
   const rootThree = mkdtempSync(join(tmpdir(), 'hammer-cap-cfg-three-'));
@@ -452,13 +452,15 @@ test('configured hammer lifetime ceiling controls closer dispatch at 0, 1, and 3
   });
 
   const depsZero = hammerDispatchDeps();
-  const blockedZero = await maybeDispatchAmaCloser({
+  const disabledZero = await maybeDispatchAmaCloser({
     ...hammerDispatchArgs(rootZero, { cfg: { hammerLifetimeDispatchCeiling: 0 } }),
     ...depsZero,
   });
-  assert.equal(blockedZero.dispatched, false);
-  assert.equal(blockedZero.reason, 'hammer-lifetime-ceiling-reached');
+  assert.equal(disabledZero.dispatched, false);
+  assert.equal(disabledZero.skipMergeAgent, false);
+  assert.equal(disabledZero.reason, 'hammer-disabled');
   assert.equal(depsZero.execCalls.length, 0);
+  assert.equal(readHammerRetryCapLedger(rootZero, { repo: REPO, prNumber: PR_NUMBER }), null);
 
   const depsOne = hammerDispatchDeps();
   const firstOne = await maybeDispatchAmaCloser({

@@ -331,6 +331,12 @@ The cutover is fully reversible per SPEC §6 AC#9.
          enabled: false
    ```
 
+   To disable only HAM terminal-remediation while keeping the daemon clean-merge
+   path available for fully clean PRs, set
+   `roles.adversarial.merge_authority.hammer_lifetime_ceiling: 0`. The watcher
+   then skips hammer dispatch without entering the lifetime-exhaustion alert
+   path, and daemon clean merges continue to use their independent retry budget.
+
 2. Bounce the dispatch daemon + watcher (same commands as §2 steps 2-3).
 
    Apply the same bounded `kickstart` retry and `launchctl print ... state = running`

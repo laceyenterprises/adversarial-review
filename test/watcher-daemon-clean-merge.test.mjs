@@ -521,7 +521,7 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
       autonomousMergeExecutionEnabled: true,
       strictMode: false,
     });
-    assert.equal(capturedAttemptArgs.retryCap, 3);
+    assert.equal(capturedAttemptArgs.retryCap, undefined);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

@@ -2144,6 +2144,13 @@ export async function maybeDispatchAmaCloser({
     const hammerLifetimeDispatchCeiling = normalizeHammerLifetimeDispatchCeiling(
       cfg?.hammerLifetimeDispatchCeiling,
     );
+    if (hammerLifetimeDispatchCeiling === 0) {
+      return noAmaDispatch({
+        dispatched: false,
+        skipMergeAgent: false,
+        reason: 'hammer-disabled',
+      });
+    }
     // The per-PR counter increments only on the CONFIRMED-launch path below (not
     // pre-exec like the per-head record), so an interrupted-in-flight dispatch
     // never bumped it — there is no phantom increment to reclaim here. A deploy

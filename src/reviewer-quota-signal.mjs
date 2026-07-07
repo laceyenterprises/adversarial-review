@@ -53,6 +53,15 @@ const RETRY_DELAY_KEYS = [
 ];
 
 const RETRY_MS_KEYS = ['retry_after_ms', 'retryAfterMs', 'retryDelayMs'];
+const ANSI_ESCAPE_RE = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+
+function stripAnsi(text) {
+  return String(text || '').replace(ANSI_ESCAPE_RE, '');
+}
+
+function isRetryScalar(value) {
+  return typeof value === 'string' || typeof value === 'number';
+}
 
 // Parse a duration into milliseconds. Accepts Google/HTTP shapes:
 //   "39s" -> 39000, "500ms" -> 500, "2m" -> 120000, "1.5s" -> 1500,
@@ -64,6 +73,7 @@ export function parseDurationToMs(value) {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value > 0 ? Math.round(value * 1000) : null; // bare number = seconds
   }
+  if (typeof value !== 'string') return null;
   const raw = String(value).trim();
   if (!raw) return null;
   const m = raw.match(new RegExp(`^([0-9]*\\.?[0-9]+)\\s*(${DURATION_UNIT_RE})?$`, 'i'));
@@ -151,12 +161,14 @@ function firstRetryDelayMs(inputs) {
   for (const obj of candidateObjects(inputs)) {
     for (const key of RETRY_MS_KEYS) {
       if (obj[key] !== undefined && obj[key] !== null && obj[key] !== '') {
+        if (!isRetryScalar(obj[key])) continue;
         const n = Number(obj[key]);
         if (Number.isFinite(n) && n > 0) return Math.round(n);
       }
     }
     for (const key of RETRY_DELAY_KEYS) {
       if (obj[key] !== undefined && obj[key] !== null && obj[key] !== '') {
+        if (!isRetryScalar(obj[key])) continue;
         const ms = parseDurationToMs(obj[key]);
         if (ms !== null) return ms;
       }
@@ -167,9 +179,10 @@ function firstRetryDelayMs(inputs) {
 
 // Pull a retryDelay out of raw 429 text, e.g. `"retryDelay": "39s"` or
 // `Retry-After: 42`. Text is the last resort when structured fields are absent.
-function retryDelayMsFromText(text) {
+function retryDelayMsFromText(text, nowMs = Date.now()) {
   if (!text) return null;
-  const jsonish = text.match(
+  const normalized = stripAnsi(text);
+  const jsonish = normalized.match(
     new RegExp(
       `retry[_-]?delay["'\\s:]+["']?([0-9]*\\.?[0-9]+\\s*(?:${DURATION_UNIT_RE}\\b)?)(?![a-z])`,
       'i',
@@ -179,10 +192,16 @@ function retryDelayMsFromText(text) {
     const ms = parseDurationToMs(jsonish[1]);
     if (ms !== null) return ms;
   }
-  const header = text.match(/retry[- ]?after["'\s:]+["']?([0-9]+)/i);
+  const header = normalized.match(/retry[- ]?after["'\s:]+["']?([^\r\n]+)/i);
   if (header) {
-    const ms = parseDurationToMs(header[1]);
+    const raw = String(header[1] || '').trim().replace(/^['"]|['"]$/g, '');
+    const ms = parseDurationToMs(raw);
     if (ms !== null) return ms;
+    const parsed = Date.parse(raw);
+    if (Number.isFinite(parsed)) {
+      const delta = parsed - nowMs;
+      if (Number.isFinite(delta) && delta > 0) return delta;
+    }
   }
   return null;
 }
@@ -227,9 +246,14 @@ export function parseReviewerQuotaExhaustion({
   brokerBody = null,
   nowMs = Date.now(),
 } = {}) {
-  const diagnosticText = [error?.message, error?.stderr, stderr]
+  const diagnosticText = stripAnsi([
+    typeof error === 'string' ? error : null,
+    error?.message,
+    error?.stderr,
+    stderr,
+  ]
     .filter(Boolean)
-    .join('\n');
+    .join('\n'));
   const hasBrokerBody = brokerBody && typeof brokerBody === 'object';
   const inputs = [brokerBody, error].filter(Boolean);
   const structuredQuota = candidateObjects(inputs).some(bodyLooksNoCredit);
@@ -245,9 +269,9 @@ export function parseReviewerQuotaExhaustion({
 
   let resetAt = firstResetTimestamp(inputs);
   let retryAfterMs = firstRetryDelayMs(inputs);
-  if (retryAfterMs === null) retryAfterMs = retryDelayMsFromText(diagnosticText);
 
   const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  if (retryAfterMs === null) retryAfterMs = retryDelayMsFromText(diagnosticText, now);
   if (resetAt === null && retryAfterMs !== null) {
     resetAt = timestampFromDelay(now, retryAfterMs);
   }

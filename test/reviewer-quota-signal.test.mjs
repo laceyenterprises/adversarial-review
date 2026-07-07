@@ -77,6 +77,37 @@ test('antigravity retryDelay parsed from loose 429 text', () => {
   assert.equal(sig.source, 'antigravity-429');
 });
 
+test('HTTP-date Retry-After text derives reset and retry delay', () => {
+  const sig = parseReviewerQuotaExhaustion({
+    stderr: 'HTTP 429 RESOURCE_EXHAUSTED\nRetry-After: Tue, 07 Jul 2026 00:00:30 GMT',
+    nowMs: NOW,
+  });
+  assert.equal(sig.exhausted, true);
+  assert.equal(sig.retryAfterMs, 3630000);
+  assert.equal(sig.resetAt, '2026-07-07T00:00:30.000Z');
+  assert.equal(sig.source, 'antigravity-429');
+});
+
+test('ANSI-colored quota diagnostics are normalized before matching', () => {
+  const sig = parseReviewerQuotaExhaustion({
+    stderr: '\u001b[31mRESOURCE_EXHAUSTED\u001b[0m retryDelay: 5s',
+    nowMs: NOW,
+  });
+  assert.equal(sig.exhausted, true);
+  assert.equal(sig.retryAfterMs, 5000);
+  assert.equal(sig.source, 'antigravity-429');
+});
+
+test('primitive string errors contribute quota diagnostic text', () => {
+  const sig = parseReviewerQuotaExhaustion({
+    error: 'HTTP 429 RESOURCE_EXHAUSTED retryDelay: 7s',
+    nowMs: NOW,
+  });
+  assert.equal(sig.exhausted, true);
+  assert.equal(sig.retryAfterMs, 7000);
+  assert.equal(sig.source, 'antigravity-429');
+});
+
 test('standalone PR number 429 does not trigger quota fallback', () => {
   const sig = parseReviewerQuotaExhaustion({
     stdout: 'Checking out PR 429\nFixes #429\nWrote 429 bytes',
@@ -154,6 +185,8 @@ test('parseDurationToMs handles s/ms/m and bare seconds', () => {
   assert.equal(parseDurationToMs('42'), 42000); // bare number = seconds
   assert.equal(parseDurationToMs(''), null);
   assert.equal(parseDurationToMs('nonsense'), null);
+  assert.equal(parseDurationToMs(['42']), null);
+  assert.equal(parseDurationToMs(true), null);
 });
 
 test('stringified epoch reset timestamp is parsed through epoch heuristic', () => {
@@ -182,6 +215,21 @@ test('nested response data error objects contribute reset and retry delay fields
   assert.equal(sig.exhausted, true);
   assert.equal(sig.resetAt, '2026-07-07T01:00:00.000Z');
   assert.equal(sig.retryAfterMs, 120000);
+});
+
+test('non-scalar structured retry fields are ignored', () => {
+  const sig = parseReviewerQuotaExhaustion({
+    brokerBody: {
+      reason: 'no-credit',
+      retryAfter: ['30s'],
+      retryAfterMs: true,
+    },
+    nowMs: NOW,
+  });
+  assert.equal(sig.exhausted, true);
+  assert.equal(sig.retryAfterMs, null);
+  assert.equal(sig.resetAt, null);
+  assert.equal(sig.source, 'cqp-broker');
 });
 
 test('message-only structured quota bodies are detected without text fallback', () => {

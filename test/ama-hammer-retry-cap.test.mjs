@@ -669,6 +669,12 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
   assert.equal(audit.closureAuthority, 'ham-terminal-remediation');
   assert.equal(audit.closedBy, 'hammer');
   assert.match(audit.closeTrailers, /Closed-By: hammer \(adversarial-pipe-mode\)/);
+  const dispatchRecord = readAmaCloserDispatchRecord(successRoot, {
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: REVIEWED_HEAD,
+  });
+  assert.equal(dispatchRecord.closureAuthority, 'ham-terminal-remediation');
 });
 
 test('same-head terminal HAM remediation records merged audit before nonfatal cleanup failure', async (t) => {

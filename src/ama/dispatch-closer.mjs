@@ -2212,6 +2212,7 @@ export async function maybeDispatchAmaCloser({
             lastObservedStatus: status,
             lastObservedAt: dispatchContext.dispatchedAt,
             lastError: null,
+            closureAuthority: 'ham-terminal-remediation',
           }));
           await recordAmaCloserReviewerPassTokens({
             rootDir,

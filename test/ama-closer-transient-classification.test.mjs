@@ -197,3 +197,33 @@ test('a genuine (non-transient) hammer-dispatch failure DOES consume the budget'
   assert.equal(record.retryCount, 1, 'genuine failure increments retryCount toward the bound');
   assert.equal(record.state, 'dispatch-failed');
 });
+
+test('maybeDispatchAmaCloser refuses invalid PR numbers before dispatch setup', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-invalid-pr-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const { reviewState, prMetadata, cfg, dispatchContext } = eligibleInputs(rootDir);
+  let execCalls = 0;
+  let templateReads = 0;
+
+  const result = await maybeDispatchAmaCloser({
+    reviewState,
+    prMetadata: { ...prMetadata, prNumber: 'not-a-number' },
+    cfg,
+    dispatchContext,
+    execFileImpl: async () => {
+      execCalls += 1;
+      return { stdout: '{"dispatchId":"dispatch_unexpected"}', stderr: '' };
+    },
+    writeFileImpl: () => {},
+    readTemplateImpl: () => {
+      templateReads += 1;
+      return readFileSync(HAMMER_TEMPLATE_PATH, 'utf8');
+    },
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.skipMergeAgent, true);
+  assert.equal(result.reason, 'invalid-pr-number');
+  assert.equal(execCalls, 0);
+  assert.equal(templateReads, 0);
+});

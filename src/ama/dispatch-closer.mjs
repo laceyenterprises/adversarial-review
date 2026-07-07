@@ -985,7 +985,7 @@ export function samePrHammerHolderWorktreePaths(errOrText, prNumber, hqRoot) {
     // fatal: '<branch>' is already used by worktree at '<PATH>'
     /already used by worktree at\s+(['"])([^'"\n]+)\1/g,
     // [hq] refusing grace-waived git worktree holder drop for branch '<b>': ...: <PATH>
-    /refusing grace-waived git worktree holder drop[^\n]*?:\s*(\/[^\s'"]+\/agent-os)/g,
+    /refusing grace-waived git worktree holder drop[^\n]*?:\s*(\/[^\n'"]+\/agent-os)/g,
   ];
   for (const pattern of holderPatterns) {
     for (const match of text.matchAll(pattern)) {
@@ -1567,6 +1567,15 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
+  const prNumber = Number(prMetadata?.prNumber);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return noAmaDispatch({
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'invalid-pr-number',
+    });
+  }
+
   // The eligibility predicate is the second gate.
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, options);
   let forceHammerTerminalRemediationPrompt = false;
@@ -1647,7 +1656,6 @@ export async function maybeDispatchAmaCloser({
     : readFileSync(templatePath, 'utf8');
 
   const repo = dispatchContext.repo;
-  const prNumber = Number(prMetadata?.prNumber);
   const reviewedSha = dispatchContext.reviewedSha;
   const targetRemediationSha = dispatchContext.targetRemediationSha || reviewedSha;
   const dispatchRecordHeadSha = dispatchContext.dispatchRecordHeadSha || targetRemediationSha;

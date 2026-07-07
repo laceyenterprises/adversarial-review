@@ -64,6 +64,16 @@ test('does not reap nested worker paths under hqRoot', () => {
   assert.deepEqual(paths, [], `nested worker paths should be rejected, got ${JSON.stringify(paths)}`);
 });
 
+test('reaps grace-waived holder paths whose worker id contains spaces', () => {
+  const err = {
+    stderr: [
+      "[hq] refusing grace-waived git worktree holder drop for branch 'feature/x': holder has unrecovered local state: /Users/airlock/agent-os-hq/workers/codex branch holder/agent-os",
+    ].join('\n'),
+  };
+  const paths = samePrHammerHolderWorktreePaths(err, 999, HQ_ROOT);
+  assert.deepEqual(paths, ['/Users/airlock/agent-os-hq/workers/codex branch holder/agent-os']);
+});
+
 test('does not reap legacy hammer-ama paths outside hqRoot when hqRoot is known', () => {
   const err = {
     stderr: 'branch-holder-blocked at /tmp/workers/hammer-ama-pr-3064-live/agent-os',

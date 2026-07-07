@@ -434,6 +434,18 @@ function schemaV1() {
                 __min: 0.5,
                 __max: 600.0,
               },
+              confirm_ticks: {
+                __type: TYPE_INT,
+                __default: 3,
+                __min: 1,
+                __max: 100,
+              },
+              recovery_confirm_ticks: {
+                __type: TYPE_INT,
+                __default: 2,
+                __min: 1,
+                __max: 100,
+              },
               recovery_action_timeout_seconds: {
                 __type: TYPE_FLOAT,
                 __default: 20.0,

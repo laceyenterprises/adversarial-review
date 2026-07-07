@@ -227,6 +227,7 @@ async function suppressHammerRetryCapExhaustion({
   jobKey,
   headSha,
   attemptCount,
+  cap,
   lifetime = false,
   workerClass,
   existingRecord,
@@ -243,26 +244,33 @@ async function suppressHammerRetryCapExhaustion({
     ? HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE
     : HAMMER_RETRY_CAP_SUPPRESSION_STATE;
   const eventName = lifetime
-    ? 'ama_closer.hammer_retry_cap_lifetime_exhausted'
+    ? 'hammer_lifetime_ceiling_reached'
     : 'ama_closer.hammer_retry_cap_exhausted';
-  logAmaCloserDispatchEvent(logger, eventName, {
-    repo,
-    prNumber,
-    headSha,
-    jobKey,
-    attemptCount: attemptTotal,
-    cap: HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
-    suppressionState,
-    message:
-      `${suppressionReason}; PR not closing — operator intervention required; `
-      + 'further hammer dispatch suppressed to protect quota',
-  });
+  const effectiveCap = Number.isFinite(Number(cap)) ? Number(cap) : HAMMER_RETRY_CAP_TOTAL_DISPATCHES;
+  const alertSeriesKey = lifetime
+    ? `${repo}\0${prNumber}\0lifetime`
+    : `${repo}\0${prNumber}\0${jobKey || ''}`;
+  const shouldEmitExhaustionEvent =
+    !alertAlreadyEmitted && !HAMMER_RETRY_CAP_ALERTED_SERIES.has(alertSeriesKey);
+  if (shouldEmitExhaustionEvent) {
+    logAmaCloserDispatchEvent(logger, eventName, {
+      repo,
+      prNumber,
+      headSha,
+      jobKey,
+      attemptCount: attemptTotal,
+      cap: effectiveCap,
+      suppressionState,
+      message:
+        `${suppressionReason}; PR not closing — operator intervention required; `
+        + 'further hammer dispatch suppressed to protect quota',
+    });
+  }
 
   // Only page the operator ON THE TRANSITION (first exhaustion) or when a prior
   // suppressed tick failed to deliver the alert. Repeated suppressed ticks must
   // not re-page — debounced by the persisted `alertedAt` (cross-restart) AND an
   // in-memory series guard (survives a persistently-failing ledger write).
-  const alertSeriesKey = `${repo}\0${prNumber}\0${jobKey || ''}`;
   let alertEmitted = alertAlreadyEmitted;
   if (
     !alertAlreadyEmitted
@@ -271,11 +279,10 @@ async function suppressHammerRetryCapExhaustion({
   ) {
     const shortHead = String(headSha || 'unknown').slice(0, 12);
     const text =
-      `Adversarial-review hammer retry cap exhausted for ${repo}#${prNumber} `
-      + `(head ${shortHead}, ${attemptTotal} hammer dispatches). `
+      `Adversarial-review hammer lifetime ceiling reached for ${repo}#${prNumber} `
+      + `(head ${shortHead}, ${attemptTotal}/${effectiveCap} hammer terminal-remediation dispatches). `
       + 'PR not closing — operator intervention required; further hammer dispatch '
-      + 'suppressed to protect quota. (Re-hammer loop guard; see the 2026-07-05 '
-      + '189-hammer / codex-quota-burn incident, e.g. #3116 hammered ×10.)';
+      + 'suppressed to protect quota.';
     try {
       await deliverAlertImpl(text, {
         event: eventName,
@@ -285,7 +292,7 @@ async function suppressHammerRetryCapExhaustion({
           headSha,
           jobKey,
           attemptCount: attemptTotal,
-          cap: HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
+          cap: effectiveCap,
           suppressionState,
         },
       });
@@ -2137,6 +2144,13 @@ export async function maybeDispatchAmaCloser({
     const hammerLifetimeDispatchCeiling = normalizeHammerLifetimeDispatchCeiling(
       cfg?.hammerLifetimeDispatchCeiling,
     );
+    if (hammerLifetimeDispatchCeiling === 0) {
+      return noAmaDispatch({
+        dispatched: false,
+        skipMergeAgent: false,
+        reason: 'hammer-disabled',
+      });
+    }
     // The per-PR counter increments only on the CONFIRMED-launch path below (not
     // pre-exec like the per-head record), so an interrupted-in-flight dispatch
     // never bumped it — there is no phantom increment to reclaim here. A deploy
@@ -2154,7 +2168,12 @@ export async function maybeDispatchAmaCloser({
         prNumber,
         jobKey: reviewedSha,
         headSha: targetRemediationSha,
-        attemptCount: hammerRetryCapDecision.priorAttemptCount,
+        attemptCount: hammerRetryCapDecision.lifetimeCapExhausted
+          ? hammerRetryCapDecision.priorLifetimeCount
+          : hammerRetryCapDecision.priorAttemptCount,
+        cap: hammerRetryCapDecision.lifetimeCapExhausted
+          ? hammerLifetimeDispatchCeiling
+          : HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
         lifetime: hammerRetryCapDecision.lifetimeCapExhausted,
         workerClass,
         existingRecord,

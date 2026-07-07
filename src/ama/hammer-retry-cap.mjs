@@ -1,4 +1,4 @@
-// Hammer retry cap — a hard, per-PR ceiling on hammer re-dispatch.
+// Hammer lifetime cap — a hard, per-PR ceiling on hammer re-dispatch.
 //
 // Why this exists (confirmed incident, 2026-07-05):
 //   The AMA closer re-dispatched a terminal-remediation *hammer* on the SAME
@@ -16,17 +16,11 @@
 // the independent safety cap so a future regression can never silently burn quota
 // again.
 //
-// The fix: a per-PR attempt ledger keyed on `(repo, prNumber)` — NOT the head —
-// with a stable *job key* (the reviewed head sha) so the counter survives the
-// head churn a hammer causes. A hammer that moves the head keeps the same job key
-// (no fresh adversarial review posted while the cycle is exhausted), so it can't
-// reset its own counter. A genuinely fresh review head (a human push that earns a
-// new adversarial review) advances the job key and legitimately resets the count.
-//
-// Cap = ONE retry: the initial hammer + at most 1 re-dispatch = 2 total hammer
-// dispatches for a given PR. On the 2nd failing outcome the closer stops, fails
-// loud via a GBI operator alert, and marks the PR suppressed so the watcher stops
-// re-dispatching.
+// The fix: a per-PR attempt ledger keyed on `(repo, prNumber)` — NOT the head.
+// The lifetime counter survives both the head churn a hammer causes and fresh
+// adversarial-review resets. On the first tick after the configured lifetime
+// ceiling is consumed, the closer stops, fails loud via an operator alert, and
+// marks the PR suppressed so the watcher stops re-dispatching.
 
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -56,9 +50,9 @@ export const HAMMER_RETRY_CAP_EXHAUSTED_REASON = 'hammer-retry-cap-exhausted';
 // for the PR across ALL series and NEVER resets on a jobKey change, so the loop
 // is bounded regardless of review-head churn. Set above the per-series cap so a
 // legitimate fresh-review-then-remediate cycle still has room before it trips.
-export const HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES = 2;
-export const HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE = 'hammer-retry-cap-lifetime-exhausted-needs-operator';
-export const HAMMER_RETRY_CAP_LIFETIME_EXHAUSTED_REASON = 'hammer-retry-cap-lifetime-exhausted';
+export const HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES = 6;
+export const HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE = 'hammer-lifetime-ceiling-reached-needs-operator';
+export const HAMMER_RETRY_CAP_LIFETIME_EXHAUSTED_REASON = 'hammer-lifetime-ceiling-reached';
 
 const HAMMER_RETRY_CAP_SCHEMA_VERSION = 1;
 
@@ -150,7 +144,7 @@ export function normalizeHammerLifetimeDispatchCeiling(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES;
   const int = Math.trunc(n);
-  return int >= 1 ? int : HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES;
+  return int >= 0 ? int : HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES;
 }
 
 function sanitizeLifetimeCount(rawValue, ceiling = HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES) {
@@ -217,9 +211,7 @@ export function evaluateHammerRetryCap(ledger, {
   const lifetimeAlreadySuppressed = Boolean(ledger?.lifetimeSuppressed);
   const lifetimeCapExhausted = lifetimeAlreadySuppressed
     || nextLifetimeCount > lifetimeCeiling;
-  const capExhausted = alreadySuppressed
-    || nextAttemptCount > HAMMER_RETRY_CAP_TOTAL_DISPATCHES
-    || lifetimeCapExhausted;
+  const capExhausted = alreadySuppressed || lifetimeCapExhausted;
   return {
     jobKeyChanged,
     priorAttemptCount,

@@ -3938,7 +3938,7 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
             enabled: false
             autonomous_merge_execution_enabled: false
             strict_mode: false
-            hammer_lifetime_dispatch_ceiling: 3
+            hammer_lifetime_ceiling: 3
             worker_class: codex
             merge_method: squash
             strict_non_blocking_remediation: false
@@ -3957,7 +3957,7 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
     assert.equal(cfg.get('roles.adversarial.merge_authority.enabled'), false);
     assert.equal(cfg.get('roles.adversarial.merge_authority.autonomous_merge_execution_enabled'), false);
     assert.equal(cfg.get('roles.adversarial.merge_authority.strict_mode'), false);
-    assert.equal(cfg.get('roles.adversarial.merge_authority.hammer_lifetime_dispatch_ceiling'), 3);
+    assert.equal(cfg.get('roles.adversarial.merge_authority.hammer_lifetime_ceiling'), 3);
     assert.equal(cfg.get('roles.adversarial.merge_authority.worker_class'), 'codex');
     assert.equal(cfg.get('roles.adversarial.merge_authority.merge_method'), 'squash');
     assert.equal(cfg.get('roles.adversarial.merge_authority.strict_non_blocking_remediation'), false);
@@ -4012,14 +4012,37 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
     const envCeilingCfg = loadConfig({
       topPath: top,
       env: {
-        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_HAMMER_LIFETIME_DISPATCH_CEILING: '1',
+        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_HAMMER_LIFETIME_CEILING: '1',
       },
     });
     assert.equal(
-      envCeilingCfg.get('roles.adversarial.merge_authority.hammer_lifetime_dispatch_ceiling'),
+      envCeilingCfg.get('roles.adversarial.merge_authority.hammer_lifetime_ceiling'),
       1,
     );
     assert.equal(envCeilingCfg.getMergeAuthorityConfig().hammerLifetimeDispatchCeiling, 1);
+
+    const envAliasCeilingCfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_HAMMER_LIFETIME_DISPATCH_CEILING: '2',
+      },
+    });
+    assert.equal(
+      envAliasCeilingCfg.get('roles.adversarial.merge_authority.hammer_lifetime_ceiling'),
+      2,
+    );
+    assert.equal(envAliasCeilingCfg.getMergeAuthorityConfig().hammerLifetimeDispatchCeiling, 2);
+
+    const legacyTop = join(tmp, 'legacy-config.yaml');
+    writeFile(legacyTop, `
+      version: 1
+      roles:
+        adversarial:
+          merge_authority:
+            hammer_lifetime_dispatch_ceiling: 4
+    `);
+    const legacyCfg = loadConfig({ topPath: legacyTop, env: {} });
+    assert.equal(legacyCfg.getMergeAuthorityConfig().hammerLifetimeDispatchCeiling, 4);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -4033,8 +4056,8 @@ test('AMA merge_authority worker class defaults to hammer in Node loader', () =>
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('roles.adversarial.merge_authority.worker_class'), 'hammer');
     assert.equal(cfg.getMergeAuthorityConfig().workerClass, 'hammer');
-    assert.equal(cfg.get('roles.adversarial.merge_authority.hammer_lifetime_dispatch_ceiling'), 2);
-    assert.equal(cfg.getMergeAuthorityConfig().hammerLifetimeDispatchCeiling, 2);
+    assert.equal(cfg.get('roles.adversarial.merge_authority.hammer_lifetime_ceiling'), 6);
+    assert.equal(cfg.getMergeAuthorityConfig().hammerLifetimeDispatchCeiling, 6);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

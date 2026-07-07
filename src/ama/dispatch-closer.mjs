@@ -913,7 +913,28 @@ function isProvisionBranchHolderBlocked(errOrText) {
   return hasWorktreeCollision && hasBranchHolderContext;
 }
 
-function samePrHammerHolderWorktreePaths(errOrText, prNumber) {
+// Worktrees to reap when a hammer provision hits a branch-holder collision.
+//
+// The provision needs to check out the PR head branch, but git refuses because
+// that branch is already checked out in another worktree. There are two holder
+// classes, and BOTH must be reaped or the hammer deadlocks:
+//
+//   1. A prior `hammer-ama-pr-<PR>` worktree from an earlier close attempt
+//      (self-cleanup). Matched by name.
+//   2. The ORIGINAL coding worker's worktree (e.g. `.../workers/codex-mcmo-01/
+//      agent-os`, `.../workers/claude-code-tct-04/agent-os`) that opened the PR
+//      and was never torn down. This is the COMMON case and is NOT named
+//      `hammer-ama-pr-*`, so the historical name-only matcher missed it —
+//      leaving the block permanent (the PR never merges, so the coding worker
+//      never tears down, so the branch stays held: a deadlock). Git names this
+//      holder verbatim in the provision error; we reap whatever it names,
+//      scoped to `<hqRoot>/workers/*/agent-os` so an unrelated path echoed
+//      elsewhere in the error text is never torn down.
+//
+// The reaped worktree's PR content is safe on `origin` (the PR is open and under
+// review), so `hq worker tear-down --force` salvages/archives any local tip and
+// preserves the remote branch — the hammer then re-provisions from origin HEAD.
+export function samePrHammerHolderWorktreePaths(errOrText, prNumber, hqRoot) {
   const detail = typeof errOrText === 'string'
     ? errOrText
     : [
@@ -922,22 +943,59 @@ function samePrHammerHolderWorktreePaths(errOrText, prNumber) {
       errOrText?.stderr,
       errOrText?.stdout,
     ].filter(Boolean).join('\n');
-  const normalizedPr = String(prNumber || '').trim();
-  if (!/^[0-9]+$/.test(normalizedPr)) return [];
-  const escapedPr = normalizedPr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(
-    `(['"]?)(/[^'"\n]*?/workers/hammer-ama-pr-${escapedPr}(?:-[^/'"\n]+)?/agent-os)\\1`,
-    'g',
-  );
+  const text = String(detail || '');
   const paths = [];
   const seen = new Set();
-  for (const match of String(detail || '').matchAll(pattern)) {
-    const path = match[2];
-    if (!seen.has(path)) {
+  const pushPath = (candidate) => {
+    const path = String(candidate || '').trim();
+    if (path && !seen.has(path)) {
       seen.add(path);
       paths.push(path);
     }
+  };
+  const workersPrefix = typeof hqRoot === 'string' && hqRoot.trim()
+    ? join(hqRoot, 'workers') + '/'
+    : null;
+  const isCanonicalWorkerWorktreePath = (candidate) => /\/workers\/[^/]+\/agent-os$/.test(candidate);
+  const isReapableHolderPath = (candidate) => {
+    if (!candidate || !candidate.endsWith('/agent-os')) return false;
+    if (!isCanonicalWorkerWorktreePath(candidate)) return false;
+    if (workersPrefix) return candidate.startsWith(workersPrefix);
+    return true;
+  };
+
+  // (1) Prior hammer-ama worktrees for THIS pr.
+  const normalizedPr = String(prNumber || '').trim();
+  if (/^[0-9]+$/.test(normalizedPr)) {
+    const escapedPr = normalizedPr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const hammerPattern = new RegExp(
+      `(['"]?)(/[^'"\n]*?/workers/hammer-ama-pr-${escapedPr}(?:-[^/'"\n]+)?/agent-os)\\1`,
+      'g',
+    );
+    for (const match of text.matchAll(hammerPattern)) {
+      const candidate = (match[2] ?? '').trim();
+      if (isReapableHolderPath(candidate)) {
+        pushPath(candidate);
+      }
+    }
   }
+
+  // (2) The actual branch holder named by git, scoped to the HQ workers dir.
+  const holderPatterns = [
+    // fatal: '<branch>' is already used by worktree at '<PATH>'
+    /already used by worktree at\s+(['"])([^'"\n]+)\1/g,
+    // [hq] refusing grace-waived git worktree holder drop for branch '<b>': ...: <PATH>
+    /refusing grace-waived git worktree holder drop[^\n]*?:\s*(\/[^\n'"]+\/agent-os)/g,
+  ];
+  for (const pattern of holderPatterns) {
+    for (const match of text.matchAll(pattern)) {
+      const candidate = (match[2] ?? match[1] ?? '').trim();
+      if (isReapableHolderPath(candidate)) {
+        pushPath(candidate);
+      }
+    }
+  }
+
   return paths;
 }
 
@@ -949,7 +1007,7 @@ async function teardownSamePrHammerHolder({
   execFileImpl,
   logger = console,
 }) {
-  const worktreePaths = samePrHammerHolderWorktreePaths(err, prNumber);
+  const worktreePaths = samePrHammerHolderWorktreePaths(err, prNumber, hqRoot);
   if (!worktreePaths.length) {
     return { attempted: false, ok: false, worktreePaths: [] };
   }
@@ -1013,6 +1071,10 @@ async function teardownSamePrHammerHolder({
   }));
   return { attempted: true, ok, worktreePaths, attempts };
 }
+
+export const __testables__ = Object.freeze({
+  teardownSamePrHammerHolder,
+});
 
 function sleep(ms) {
   if (!ms) return Promise.resolve();
@@ -1505,6 +1567,15 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
+  const prNumber = Number(prMetadata?.prNumber);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return noAmaDispatch({
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'invalid-pr-number',
+    });
+  }
+
   // The eligibility predicate is the second gate.
   const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, options);
   let forceHammerTerminalRemediationPrompt = false;
@@ -1585,7 +1656,6 @@ export async function maybeDispatchAmaCloser({
     : readFileSync(templatePath, 'utf8');
 
   const repo = dispatchContext.repo;
-  const prNumber = Number(prMetadata?.prNumber);
   const reviewedSha = dispatchContext.reviewedSha;
   const targetRemediationSha = dispatchContext.targetRemediationSha || reviewedSha;
   const dispatchRecordHeadSha = dispatchContext.dispatchRecordHeadSha || targetRemediationSha;

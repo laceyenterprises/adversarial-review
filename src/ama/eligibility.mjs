@@ -799,6 +799,18 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const operatorOverride = hasOperatorApprovedOverride(reviewState, prMetadata);
   const reviewedHead = String(reviewState?.headSha || '');
   const currentHead = String(prMetadata?.headSha || '');
+  const blockingFindings = classifyBlockingFindings(reviewState);
+  const nonBlockingFindings = classifyNonBlockingFindings(reviewState);
+  const hamTerminalRemediation = validateHamTerminalRemediationEvidence(
+    options?.hamTerminalRemediation || null,
+    {
+      reviewedHead,
+      currentHead,
+      verifiedCommit: options?.hamTerminalRemediationGroundTruth?.commit || null,
+      verifiedAuditComment: options?.hamTerminalRemediationGroundTruth?.auditComment || null,
+      blockingFindings,
+    },
+  );
   const rebaseReviewCoverage = validateRebaseReviewCoverageEvidence(
     options?.rebaseReviewCoverage || null,
     { reviewedHead, currentHead },
@@ -806,11 +818,10 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   const headMatchOk =
     operatorOverride
     || (reviewedHead && reviewedHead === currentHead)
+    || hamTerminalRemediation.ok === true
     || rebaseReviewCoverage.ok;
   if (!headMatchOk) reasons.push('stale-review-head');
 
-  const blockingFindings = classifyBlockingFindings(reviewState);
-  const nonBlockingFindings = classifyNonBlockingFindings(reviewState);
   const remediationStateKnown = typeof reviewState?.remediationPending === 'boolean';
   const remediationPending = reviewState?.remediationPending === true;
   const strictNonBlockingRemediation = cfg?.strictNonBlockingRemediation !== false;
@@ -936,16 +947,6 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     reasons.push('fast-merge-state-unsupported');
   }
 
-  const hamTerminalRemediation = validateHamTerminalRemediationEvidence(
-    options?.hamTerminalRemediation || null,
-    {
-      reviewedHead,
-      currentHead,
-      verifiedCommit: options?.hamTerminalRemediationGroundTruth?.commit || null,
-      verifiedAuditComment: options?.hamTerminalRemediationGroundTruth?.auditComment || null,
-      blockingFindings,
-    },
-  );
   const reviewCycleExhausted = reviewState?.reviewCycleExhausted === true;
   const riskClassFinalHammerWaivable =
     (hamTerminalRemediation.ok === true && reviewCycleExhausted) ||
@@ -1195,6 +1196,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       reviewed: reviewedHead,
       current: currentHead,
       ok: headMatchOk,
+      hamTerminalRemediation: hamTerminalRemediation.ok === true,
       rebaseReviewCoverage,
     },
     remediation: { pending: remediationPending, known: remediationStateKnown },

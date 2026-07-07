@@ -250,8 +250,8 @@ async function suppressHammerRetryCapExhaustion({
   const alertSeriesKey = lifetime
     ? `${repo}\0${prNumber}\0lifetime`
     : `${repo}\0${prNumber}\0${jobKey || ''}`;
-  const shouldEmitExhaustionEvent = !lifetime
-    || (!alertAlreadyEmitted && !HAMMER_RETRY_CAP_ALERTED_SERIES.has(alertSeriesKey));
+  const shouldEmitExhaustionEvent =
+    !alertAlreadyEmitted && !HAMMER_RETRY_CAP_ALERTED_SERIES.has(alertSeriesKey);
   if (shouldEmitExhaustionEvent) {
     logAmaCloserDispatchEvent(logger, eventName, {
       repo,
@@ -2172,7 +2172,7 @@ export async function maybeDispatchAmaCloser({
           ? hammerRetryCapDecision.priorLifetimeCount
           : hammerRetryCapDecision.priorAttemptCount,
         cap: hammerRetryCapDecision.lifetimeCapExhausted
-          ? hammerRetryCapDecision.lifetimeDispatchCeiling
+          ? hammerLifetimeDispatchCeiling
           : HAMMER_RETRY_CAP_TOTAL_DISPATCHES,
         lifetime: hammerRetryCapDecision.lifetimeCapExhausted,
         workerClass,

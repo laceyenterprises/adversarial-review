@@ -666,7 +666,9 @@ test('maybeDispatchAmaCloser suppresses after lifetime ceiling and emits operato
   });
 
   const result = await maybeDispatchAmaCloser({
-    ...hammerDispatchArgs(rootDir),
+    ...hammerDispatchArgs(rootDir, {
+      cfg: { hammerLifetimeDispatchCeiling: 3 },
+    }),
     ...deps,
   });
 
@@ -678,9 +680,15 @@ test('maybeDispatchAmaCloser suppresses after lifetime ceiling and emits operato
   assert.equal(deps.execCalls.length, 0, 'suppression must happen before hq dispatch');
   assert.equal(alertCalls.length, 1);
   assert.equal(alertCalls[0].opts.event, 'hammer_lifetime_ceiling_reached');
+  assert.match(alertCalls[0].text, /6\/3 hammer terminal-remediation dispatches/);
+  assert.equal(alertCalls[0].opts.payload.cap, 3);
   assert.equal(
     infoLogs.filter((entry) => entry.event === 'hammer_lifetime_ceiling_reached').length,
     1,
+  );
+  assert.equal(
+    infoLogs.find((entry) => entry.event === 'hammer_lifetime_ceiling_reached')?.cap,
+    3,
   );
   const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
   assert.equal(ledger.suppressed, true);

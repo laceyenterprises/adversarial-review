@@ -38,8 +38,9 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, realpathSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, openSync, readSync, closeSync, realpathSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import {
   buildInheritedPath,
@@ -65,7 +66,7 @@ function whichInPath(executable, path) {
   return null;
 }
 
-function deriveCodexMachOPath(codexEntrypoint) {
+export function deriveCodexMachOPath(codexEntrypoint) {
   if (!codexEntrypoint || !existsSync(codexEntrypoint)) {
     return {
       ok: false,
@@ -82,33 +83,74 @@ function deriveCodexMachOPath(codexEntrypoint) {
     return { ok: false, reason: `readlink failed for ${codexEntrypoint}: ${err.message}` };
   }
 
-  // The user-facing `codex` symlink resolves to a node script that
-  // spawns the real Mach-O binary buried inside the platform sub-package.
-  // The script's bin/ dir is sibling to node_modules/, so go up one level
-  // and into the platform sub-package's vendor tree.
+  // Two install forms, resolved in order:
+  //  1. npm package form: the user-facing `codex` symlink resolves to a node
+  //     script whose bin/ dir is sibling to node_modules/; the real Mach-O is
+  //     buried in the platform sub-package's vendor tree (the join below).
+  //  2. Homebrew CASK form (default since the 2026-07 migration): the symlink
+  //     resolves DIRECTLY to the native Mach-O binary (e.g.
+  //     /opt/homebrew/Caskroom/codex/<version>/codex-aarch64-apple-darwin) —
+  //     there is no node_modules/vendor tree, so `realScript` is itself the
+  //     binary. We fall back to that when the npm vendor path is absent.
   const arm = process.arch === 'arm64';
   const triple = arm ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
   const subPkg = arm ? 'codex-darwin-arm64' : 'codex-darwin-x64';
-  const machO = join(
-    dirname(realScript),
-    '..',
-    'node_modules',
-    '@openai',
-    subPkg,
-    'vendor',
-    triple,
-    'codex',
-    'codex'
-  );
+  const candidateRoots = codexNpmNodeModulesRoots(realScript);
+  const machO = candidateRoots
+    .map((root) => join(root, '@openai', subPkg, 'vendor', triple, 'codex', 'codex'))
+    .find((candidate) => existsSync(candidate));
 
-  if (!existsSync(machO)) {
+  if (machO) {
+    return { ok: true, scriptEntrypoint: realScript, machO: resolve(machO) };
+  }
+
+  // Cask form: no vendor tree, so the resolved entrypoint IS the Mach-O.
+  // npm wrappers are scripts, not Mach-O binaries; fail closed instead of
+  // handing TCC/codesign tooling a JavaScript launcher.
+  if (!isMachOBinary(realScript)) {
     return {
       ok: false,
-      reason: `expected Mach-O missing at ${machO} (codex package layout may have changed)`,
+      reason:
+        `codex vendor Mach-O not found for ${realScript}, and resolved entrypoint ` +
+        `is not a native Mach-O binary`,
     };
   }
 
-  return { ok: true, scriptEntrypoint: realScript, machO: resolve(machO) };
+  return { ok: true, scriptEntrypoint: realScript, machO: resolve(realScript) };
+}
+
+function codexNpmNodeModulesRoots(realScript) {
+  const scriptDir = dirname(realScript);
+  const packageRoot = dirname(scriptDir);
+  const roots = [];
+  if (basename(dirname(packageRoot)) === 'node_modules') {
+    roots.push(dirname(packageRoot));
+  }
+  roots.push(join(packageRoot, 'node_modules'));
+  return [...new Set(roots.map((root) => resolve(root)))];
+}
+
+function isMachOBinary(path) {
+  let fd;
+  try {
+    fd = openSync(path, 'r');
+    const buf = Buffer.alloc(4);
+    if (readSync(fd, buf, 0, 4, 0) !== 4) return false;
+    return [
+      'feedface',
+      'cefaedfe',
+      'feedfacf',
+      'cffaedfe',
+      'cafebabe',
+      'bebafeca',
+      'cafebabf',
+      'bfbafeca',
+    ].includes(buf.toString('hex'));
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 function resolveClaudeMachOPath(claudeEntrypoint) {
@@ -286,4 +328,8 @@ function main() {
   }
 }
 
-main();
+// Run as a script, but stay importable for tests (which exercise
+// deriveCodexMachOPath directly without triggering the TCC probe/exit).
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}

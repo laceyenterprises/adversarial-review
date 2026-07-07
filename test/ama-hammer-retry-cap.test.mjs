@@ -503,9 +503,15 @@ test('terminal-remediation success finalizes lease and failure redispatches repl
     }),
   });
   assert.equal(successProbe.reason, 'current-head-hammer-already-ran-needs-operator');
+  assert.equal(successProbe.needsOperator, true);
+  // The hammer dispatch reached a terminal-HOLD status but produced NO merged
+  // signal — so the closer parks the PR for the operator. The lease must stay
+  // non-terminal: a false terminal 'succeeded' would falsify the §4.4 audit
+  // trail, and any non-null terminalOutcome hides the still-open PR from
+  // review-pipeline-health / recovery-reaper.
   assert.equal(
     readAmaCloserLease(successRoot, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }).terminalOutcome,
-    'succeeded',
+    null,
   );
 
   const failureDeps = hammerDispatchDeps();

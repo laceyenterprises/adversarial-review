@@ -1879,15 +1879,11 @@ export async function maybeDispatchAmaCloser({
         AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
       ) {
         const reason = 'current-head-hammer-already-ran-needs-operator';
-        finalizeAmaCloserLeaseBestEffort({
-          rootDir,
-          leaseIdentity,
-          terminalOutcome: 'succeeded',
-          now: dispatchContext.dispatchedAt,
-          logger,
-          repo,
-          prNumber,
-        });
+        // The hammer's final terminal remediation ran but produced NO merged
+        // signal (mergedSignalUnknown). Do not stamp a terminal lease outcome:
+        // 'succeeded' would falsify the §4.4 audit trail, and any non-null
+        // terminalOutcome hides the still-open PR from review-pipeline-health /
+        // recovery-reaper. Leave the dispatched lease reclaimable.
         logger?.error?.(JSON.stringify({
           event: 'ama_closer.current_head_hammer_stuck',
           repo,

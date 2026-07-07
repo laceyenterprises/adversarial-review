@@ -3,16 +3,20 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const DEFAULT_AGENT_OS_ROOT = resolve(new URL('..', import.meta.url).pathname, '..', 'agent-os');
-const AGENT_OS_ROOT = process.env.AGENT_OS_ROOT || DEFAULT_AGENT_OS_ROOT;
+// Only run this cross-repo docs contract against an EXPLICITLY provided agent-os
+// checkout (AGENT_OS_ROOT). Auto-resolving a sibling `../agent-os` is unreliable:
+// in the submodule layout it points at a non-existent `tools/agent-os`, and in a
+// multi-worktree dev box it can latch onto a stale, unrelated checkout and
+// produce a false failure. Standalone CI (no AGENT_OS_ROOT) skips cleanly.
+const AGENT_OS_ROOT = process.env.AGENT_OS_ROOT || null;
 
 function readAgentOsDoc(relativePath) {
   return readFileSync(resolve(AGENT_OS_ROOT, relativePath), 'utf8');
 }
 
 test('MSM-05 docs no longer describe an agent spawned solely to click merge', (t) => {
-  if (!existsSync(resolve(AGENT_OS_ROOT, 'CLAUDE.md'))) {
-    t.skip('Agent OS checkout unavailable; set AGENT_OS_ROOT to run the cross-repo docs contract');
+  if (!AGENT_OS_ROOT || !existsSync(resolve(AGENT_OS_ROOT, 'CLAUDE.md'))) {
+    t.skip('Set AGENT_OS_ROOT to a current agent-os checkout to run the cross-repo docs contract');
     return;
   }
 

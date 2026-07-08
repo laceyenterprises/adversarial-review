@@ -44,6 +44,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path';
 import {
   listInProgressFollowUpJobs,
   markFollowUpJobStopped,
+  requeueInProgressFollowUpJobForRetry,
   writeFollowUpJob,
 } from './follow-up-jobs.mjs';
 import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
@@ -90,8 +91,23 @@ function isDirtyMergeState(lifecycle) {
   return String(lifecycle?.mergeStateStatus || lifecycle?.mergeableState || '').trim().toUpperCase() === 'DIRTY';
 }
 
-function isTransientDirtyPushError(err) {
-  const text = `${err?.message || ''}\n${err?.stderr || ''}\n${err?.stdout || ''}`.toLowerCase();
+function dirtyErrorText(err) {
+  return `${err?.message || ''}\n${err?.stderr || ''}\n${err?.stdout || ''}`.toLowerCase();
+}
+
+function markDirtyTransientExhausted(err, phase, attempts) {
+  err.dirtyTransientExhausted = true;
+  err.dirtyTransientPhase = phase;
+  err.dirtyTransientAttempts = attempts;
+  return err;
+}
+
+function isDirtyMergeTransientExhaustedError(err) {
+  return err?.dirtyTransientExhausted === true;
+}
+
+function isTransientDirtyNetworkError(err) {
+  const text = dirtyErrorText(err);
   return [
     'tls handshake timeout',
     'connection reset',
@@ -102,8 +118,31 @@ function isTransientDirtyPushError(err) {
     'temporary failure',
     '503',
     '502',
+    '504',
     'github unavailable',
     'the remote end hung up unexpectedly',
+    'unable to access',
+    'could not read from remote repository',
+    'failed to connect',
+    "couldn't connect",
+    'connection refused',
+    'network is unreachable',
+    'could not resolve host',
+  ].some((needle) => text.includes(needle));
+}
+
+function isTransientDirtyPushError(err) {
+  return isTransientDirtyNetworkError(err);
+}
+
+function isTransientDirtyFetchError(err) {
+  if (isTransientDirtyNetworkError(err)) return true;
+  const text = dirtyErrorText(err);
+  return [
+    'index.lock',
+    'unable to create',
+    'another git process',
+    'lock file exists',
   ].some((needle) => text.includes(needle));
 }
 
@@ -117,7 +156,7 @@ function isDirtyMergeConflictError(err) {
 }
 
 function isTransientDirtyMergeError(err) {
-  const text = `${err?.message || ''}\n${err?.stderr || ''}\n${err?.stdout || ''}`.toLowerCase();
+  const text = dirtyErrorText(err);
   return [
     'index.lock',
     'unable to create',
@@ -150,6 +189,9 @@ async function pushDirtyMergeWithRetry({
       lastError = err;
       if (!isTransientDirtyPushError(err) || attempt === delays.length - 1) {
         err.dirtyPushAttempts = attempt + 1;
+        if (isTransientDirtyPushError(err)) {
+          markDirtyTransientExhausted(err, 'push', attempt + 1);
+        }
         throw err;
       }
     }
@@ -178,8 +220,40 @@ async function fetchDirtyMergeRefsWithRetry({
       return { fetched: true, attempts: attempt + 1, result };
     } catch (err) {
       lastError = err;
-      if (!isTransientDirtyPushError(err) || attempt === delays.length - 1) {
+      if (!isTransientDirtyFetchError(err) || attempt === delays.length - 1) {
         err.dirtyFetchAttempts = attempt + 1;
+        if (isTransientDirtyFetchError(err)) {
+          markDirtyTransientExhausted(err, 'fetch', attempt + 1);
+        }
+        throw err;
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function addDirtyMergeWorktreeWithRetry({
+  workspaceDir,
+  worktreeDir,
+  branch,
+  execFileImpl,
+  retryDelaysMs = DIRTY_MERGE_PUSH_RETRY_DELAYS_MS,
+}) {
+  const args = ['-C', workspaceDir, 'worktree', 'add', '--detach', worktreeDir, `origin/${branch}`];
+  const delays = [0, ...retryDelaysMs];
+  let lastError = null;
+  for (let attempt = 0; attempt < delays.length; attempt += 1) {
+    if (delays[attempt] > 0) await sleep(delays[attempt]);
+    try {
+      const result = await execFileImpl('git', args, { maxBuffer: 10 * 1024 * 1024 });
+      return { added: true, attempts: attempt + 1, result };
+    } catch (err) {
+      lastError = err;
+      if (!isTransientDirtyMergeError(err) || attempt === delays.length - 1) {
+        err.dirtyWorktreeAddAttempts = attempt + 1;
+        if (isTransientDirtyMergeError(err)) {
+          markDirtyTransientExhausted(err, 'worktree-add', attempt + 1);
+        }
         throw err;
       }
     }
@@ -209,11 +283,53 @@ async function mergeDirtyBaseWithRetry({
       }
       if (!isTransientDirtyMergeError(err) || attempt === delays.length - 1) {
         err.dirtyMergeAttempts = attempt + 1;
+        if (isTransientDirtyMergeError(err)) {
+          markDirtyTransientExhausted(err, 'merge', attempt + 1);
+        }
         throw err;
       }
     }
   }
   throw lastError;
+}
+
+async function removeDirtyMergeWorktreeSafely({
+  workspaceDir,
+  worktreeDir,
+  worktreeParent,
+  execFileImpl,
+  retryDelaysMs = DIRTY_MERGE_PUSH_RETRY_DELAYS_MS,
+}) {
+  const args = ['-C', workspaceDir, 'worktree', 'remove', '--force', worktreeDir];
+  const delays = [0, ...retryDelaysMs];
+  let removedGitWorktree = false;
+  let lastError = null;
+  try {
+    for (let attempt = 0; attempt < delays.length; attempt += 1) {
+      if (delays[attempt] > 0) await sleep(delays[attempt]);
+      try {
+        await execFileImpl('git', args, { maxBuffer: 10 * 1024 * 1024 });
+        removedGitWorktree = true;
+        break;
+      } catch (err) {
+        lastError = err;
+        if (!isTransientDirtyMergeError(err) || attempt === delays.length - 1) {
+          err.dirtyWorktreeCleanupFailed = true;
+          err.dirtyWorktreeRemoveAttempts = attempt + 1;
+          if (isTransientDirtyMergeError(err)) {
+            markDirtyTransientExhausted(err, 'worktree-remove', attempt + 1);
+          }
+          throw err;
+        }
+      }
+    }
+  } finally {
+    if (removedGitWorktree) {
+      rmSync(worktreeParent, { recursive: true, force: true });
+    }
+  }
+  if (!removedGitWorktree && lastError) throw lastError;
+  return { removed: true };
 }
 
 async function attemptDirtyMerge({
@@ -240,10 +356,16 @@ async function attemptDirtyMerge({
   });
   const worktreeParent = mkdtempSync(join(tmpdir(), 'dirty-pr-merge-'));
   const worktreeDir = join(worktreeParent, 'worktree');
+  let worktreeAdded = false;
+  let worktreeAdd = null;
   try {
-    await execFileImpl('git', ['-C', workspaceDir, 'worktree', 'add', '--detach', worktreeDir, `origin/${resolvedBranch}`], {
-      maxBuffer: 10 * 1024 * 1024,
+    worktreeAdd = await addDirtyMergeWorktreeWithRetry({
+      workspaceDir,
+      worktreeDir,
+      branch: resolvedBranch,
+      execFileImpl,
     });
+    worktreeAdded = true;
     const merge = await mergeDirtyBaseWithRetry({
       worktreeDir,
       baseBranch: resolvedBase,
@@ -255,22 +377,27 @@ async function attemptDirtyMerge({
         branch: resolvedBranch,
         execFileImpl,
       });
-      return { outcome: 'clean-merged', fetch, merge, push };
+      return { outcome: 'clean-merged', fetch, worktreeAdd, merge, push };
     } catch (err) {
-      err.dirtyMergeWorktreeCleaned = true;
       throw err;
     }
   } catch (err) {
     if (isDirtyMergeConflictError(err)) {
       const conflictedFiles = await listConflictedFiles({ workspaceDir: worktreeDir, execFileImpl });
-      return { outcome: 'conflict', error: err, conflictedFiles };
+      return { outcome: 'conflict', fetch, worktreeAdd, error: err, conflictedFiles };
     }
     throw err;
   } finally {
-    await execFileImpl('git', ['-C', workspaceDir, 'worktree', 'remove', '--force', worktreeDir], {
-      maxBuffer: 10 * 1024 * 1024,
-    }).catch(() => {});
-    rmSync(worktreeParent, { recursive: true, force: true });
+    if (worktreeAdded) {
+      await removeDirtyMergeWorktreeSafely({
+        workspaceDir,
+        worktreeDir,
+        worktreeParent,
+        execFileImpl,
+      });
+    } else if (!existsSync(worktreeDir)) {
+      rmSync(worktreeParent, { recursive: true, force: true });
+    }
   }
 }
 
@@ -422,7 +549,12 @@ async function resolveDirtyConflictSpecContext({
   const missing = [];
   const seen = new Set();
   const addEntry = (entry) => {
-    if (!entry || !entry.path || seen.has(entry.path) || entries.length >= cap) return;
+    if (!entry || !entry.path || seen.has(entry.path)) return;
+    if (entries.length >= cap) {
+      seen.add(entry.path);
+      missing.push(`${entry.kind} ${entry.path} omitted by DIRTY conflict spec cap (${cap})`);
+      return;
+    }
     seen.add(entry.path);
     entries.push(entry);
   };
@@ -685,6 +817,44 @@ async function applyPreSpawnLifecycleGate({
         execFileImpl,
       });
     } catch (err) {
+      if (isDirtyMergeTransientExhaustedError(err)) {
+        const requeuedAtMs = Date.parse(nowIso);
+        const retryAfter = new Date((Number.isFinite(requeuedAtMs) ? requeuedAtMs : Date.now()) + 60_000).toISOString();
+        const phase = err?.dirtyTransientPhase || 'unknown';
+        const attempts = err?.dirtyTransientAttempts
+          || err?.dirtyFetchAttempts
+          || err?.dirtyWorktreeAddAttempts
+          || err?.dirtyMergeAttempts
+          || err?.dirtyPushAttempts
+          || err?.dirtyWorktreeRemoveAttempts
+          || null;
+        const retryReason = `DIRTY pre-spawn merge resolution hit transient ${phase} failure after ${attempts || 'unknown'} attempt(s): ${err?.message || err}`;
+        const requeued = requeueInProgressFollowUpJobForRetry({
+          rootDir,
+          jobPath,
+          requeuedAt: nowIso,
+          retryReason,
+          retryMetadata: {
+            code: 'dirty-merge-transient',
+            recoverable: true,
+            phase,
+            attempts,
+            dirtyMergeResolution: {
+              outcome: 'transient-failed',
+              error: err?.message || String(err),
+              phase,
+              attempts,
+            },
+          },
+          allowDirectWorkerRetry: true,
+          retryAfterOverride: retryAfter,
+        });
+        log.warn?.(
+          `[follow-up-remediation ${nowIso}] dirty-pr-transient-requeued jobId=${job?.jobId} ` +
+          `phase=${phase} attempts=${attempts || 'unknown'} retryAfter=${retryAfter}`
+        );
+        return { action: 'requeued', job: requeued.job, jobPath: requeued.jobPath, reason: 'dirty-merge-transient-failed' };
+      }
       const stopped = markFollowUpJobStopped({
         rootDir,
         jobPath,

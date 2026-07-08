@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { __testables__, samePrHammerHolderWorktreePaths } from '../src/ama/dispatch-closer.mjs';
 
@@ -108,43 +111,194 @@ test('returns [] for empty / non-collision error', () => {
 });
 
 test('teardown passes hqRoot through to parser and cleanup commands', async () => {
+  const hqRoot = join(tmpdir(), `agent-os-hq-pass-through-${Date.now()}`);
+  const codingWorkerId = 'claude-code-tct-04';
+  writeBranchHolderWorker({ hqRoot, workerId: codingWorkerId, launchRequestId: 'lrq_pass_through' });
+  const err = {
+    stderr: [
+      `[hq] creating worktree at ${hqRoot}/workers/hammer-ama-pr-3219/agent-os (tracking origin/claude-code-tct-04/TCT-04)`,
+      `fatal: 'claude-code-tct-04/TCT-04' is already used by worktree at '${hqRoot}/workers/${codingWorkerId}/agent-os'`,
+    ].join('\n'),
+  };
   const calls = [];
   const result = await __testables__.teardownSamePrHammerHolder({
-    err: TCT04_PROVISION_ERROR,
+    err,
     prNumber: 3219,
     hqPath: '/opt/hq/bin/hq',
-    hqRoot: HQ_ROOT,
+    hqRoot,
     execFileImpl: async (cmd, args) => {
       calls.push({ cmd, args });
       return { stdout: '', stderr: '' };
     },
+    readLatestWorkerRunStatusImpl: ({ launchRequestId }) => ({
+      ok: true,
+      row: {
+        launch_request_id: launchRequestId,
+        run_id: 'run-terminal',
+        status: 'succeeded',
+      },
+    }),
     logger: { warn() {} },
   });
 
   assert.equal(result.ok, true);
   assert.deepEqual(result.worktreePaths, [
-    '/Users/airlock/agent-os-hq/workers/hammer-ama-pr-3219/agent-os',
-    '/Users/airlock/agent-os-hq/workers/claude-code-tct-04/agent-os',
+    `${hqRoot}/workers/hammer-ama-pr-3219/agent-os`,
+    `${hqRoot}/workers/${codingWorkerId}/agent-os`,
   ]);
   assert.deepEqual(calls.map(call => call.cmd), ['git', '/opt/hq/bin/hq', 'git', '/opt/hq/bin/hq']);
-  assert.equal(calls[0].args[1], '/Users/airlock/agent-os-hq/repos/agent-os');
+  assert.equal(calls[0].args[1], `${hqRoot}/repos/agent-os`);
   assert.deepEqual(calls[1].args, [
     'worker',
     'tear-down',
     'hammer-ama-pr-3219',
     '--force',
     '--root',
-    HQ_ROOT,
+    hqRoot,
   ]);
-  assert.equal(calls[2].args[1], '/Users/airlock/agent-os-hq/repos/agent-os');
+  assert.equal(calls[2].args[1], `${hqRoot}/repos/agent-os`);
   assert.deepEqual(calls[3].args, [
     'worker',
     'tear-down',
-    'claude-code-tct-04',
+    codingWorkerId,
     '--force',
     '--root',
-    HQ_ROOT,
+    hqRoot,
   ]);
+});
+
+function writeBranchHolderWorker({ hqRoot, workerId, launchRequestId }) {
+  const workerDir = join(hqRoot, 'workers', workerId);
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId,
+    launchRequestId,
+  }));
+  writeFileSync(join(workerDir, 'run.json'), JSON.stringify({
+    runId: `run-${workerId}`,
+  }));
+}
+
+test('terminal coding branch-holder is torn down and emits release telemetry', async () => {
+  const hqRoot = join(tmpdir(), `agent-os-hq-terminal-${Date.now()}`);
+  const workerId = 'codex-lsh-03-terminal';
+  const launchRequestId = 'lrq_terminal_holder';
+  writeBranchHolderWorker({ hqRoot, workerId, launchRequestId });
+  const err = {
+    stderr: `fatal: 'codex-lsh-03-terminal/LSH-03' is already used by worktree at '${hqRoot}/workers/${workerId}/agent-os'`,
+  };
+  const calls = [];
+  const logs = [];
+
+  const result = await __testables__.teardownSamePrHammerHolder({
+    err,
+    prNumber: 777,
+    repo: 'agent-os',
+    headSha: 'abc123',
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    readLatestWorkerRunStatusImpl: ({ launchRequestId: actual }) => {
+      assert.equal(actual, launchRequestId);
+      return {
+        ok: true,
+        row: {
+          launch_request_id: launchRequestId,
+          run_id: `run-${workerId}`,
+          status: 'failed',
+        },
+      };
+    },
+    logger: { warn(line) { logs.push(JSON.parse(line)); } },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls.map(call => call.cmd), ['git', '/opt/hq/bin/hq']);
+  assert.deepEqual(calls[1].args, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot]);
+  assert.equal(logs.some(log => (
+    log.event === 'branch_holder_deadlock_released'
+    && log.workerId === workerId
+    && log.workerStatus === 'failed'
+    && log.launchRequestId === launchRequestId
+  )), true);
+});
+
+test('live coding branch-holder is not torn down and falls back to branch-holder backoff', async () => {
+  const hqRoot = join(tmpdir(), `agent-os-hq-live-${Date.now()}`);
+  const workerId = 'codex-lsh-03-live';
+  writeBranchHolderWorker({ hqRoot, workerId, launchRequestId: 'lrq_live_holder' });
+  const err = {
+    stderr: `fatal: 'codex-lsh-03-live/LSH-03' is already used by worktree at '${hqRoot}/workers/${workerId}/agent-os'`,
+  };
+  const calls = [];
+
+  const result = await __testables__.teardownSamePrHammerHolder({
+    err,
+    prNumber: 778,
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      throw new Error('execFileImpl must not run for a non-terminal holder');
+    },
+    readLatestWorkerRunStatusImpl: () => ({
+      ok: true,
+      row: {
+        launch_request_id: 'lrq_live_holder',
+        run_id: `run-${workerId}`,
+        status: 'running',
+      },
+    }),
+    logger: { warn() {} },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(calls.length, 0);
+  assert.equal(result.attempts[0].action, 'terminal-branch-holder-preflight');
+  assert.equal(result.attempts[0].skipped, true);
+  assert.equal(result.attempts[0].reason, 'worker-run-status-running');
+});
+
+test('terminal coding branch-holder teardown failure returns fallback result without crashing', async () => {
+  const hqRoot = join(tmpdir(), `agent-os-hq-teardown-fails-${Date.now()}`);
+  const workerId = 'codex-lsh-03-teardown-fails';
+  writeBranchHolderWorker({ hqRoot, workerId, launchRequestId: 'lrq_teardown_fails' });
+  const err = {
+    stderr: `fatal: 'codex-lsh-03-teardown-fails/LSH-03' is already used by worktree at '${hqRoot}/workers/${workerId}/agent-os'`,
+  };
+
+  const result = await __testables__.teardownSamePrHammerHolder({
+    err,
+    prNumber: 779,
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot,
+    execFileImpl: async (cmd) => {
+      if (cmd === 'git') return { stdout: '', stderr: '' };
+      const failure = new Error('teardown failed');
+      failure.stderr = 'boom';
+      throw failure;
+    },
+    readLatestWorkerRunStatusImpl: () => ({
+      ok: true,
+      row: {
+        launch_request_id: 'lrq_teardown_fails',
+        run_id: `run-${workerId}`,
+        status: 'cancelled',
+      },
+    }),
+    logger: { warn() {} },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.attempts.some(attempt => (
+    attempt.action === 'hq-worker-tear-down'
+    && attempt.workerId === workerId
+    && attempt.ok === false
+    && attempt.error === 'boom'
+  )), true);
 });
 
 test('pre-provision reclaim tears down stale self-owned hammer worktree and emits audit', async () => {

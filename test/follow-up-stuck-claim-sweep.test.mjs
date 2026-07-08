@@ -7,7 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -21,7 +21,10 @@ import {
   IN_PROGRESS_STUCK_THRESHOLD_MS_ENV,
   STALE_HEARTBEAT_STOP_CODE,
   applyPreSpawnLifecycleGate,
+  attemptDirtyMerge,
   emitHeartbeatsForActiveJobs,
+  pushDirtyMergeWithRetry,
+  resolveDirtyConflictSpecContext,
   resolveInProgressStuckThresholdMs,
   sweepStuckInProgressClaims,
 } from '../src/follow-up-stuck-claim-sweep.mjs';
@@ -440,4 +443,537 @@ test('applyPreSpawnLifecycleGate: unresolved lifecycle still falls through to co
   assert.equal(result.reason, 'pr-open');
   assert.equal(existsSync(jobPath), true);
   assert.match(logs[0], /PR lifecycle resolve threw/);
+});
+
+test('applyPreSpawnLifecycleGate: DIRTY clean auto-merge pushes and lets remediation proceed', async () => {
+  const rootDir = makeRoot();
+  const workspaceDir = path.join(rootDir, 'workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const { job, jobPath } = seedInProgressJob(rootDir, {
+    jobId: 'laceyenterprises__agent-os-pr-1232-dirty-clean',
+    prNumber: 1232,
+    lastHeartbeatAt: '2026-06-01T05:35:00.000Z',
+  });
+  const result = await applyPreSpawnLifecycleGate({
+    rootDir,
+    job: { ...job, baseBranch: 'main', branch: 'feature/dirty-clean' },
+    jobPath,
+    workspaceDir,
+    baseBranch: 'main',
+    resolvePRLifecycleImpl: async () => ({
+      source: 'live',
+      prState: 'open',
+      mergeStateStatus: 'DIRTY',
+    }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    dirtyMergeImpl: async (args) => {
+      assert.equal(args.workspaceDir, workspaceDir);
+      assert.equal(args.baseBranch, 'main');
+      assert.equal(args.branch, 'feature/dirty-clean');
+      return { outcome: 'clean-merged', push: { attempts: 2 } };
+    },
+    now: () => '2026-06-01T05:02:00.000Z',
+  });
+
+  assert.equal(result.action, 'continue');
+  assert.equal(result.reason, 'dirty-clean-merged');
+  assert.equal(existsSync(jobPath), true);
+  const persisted = readJobAtPath(jobPath);
+  assert.equal(persisted.remediationWorker?.dirtyMergeResolution?.outcome, 'clean-merged');
+  assert.equal(persisted.remediationWorker?.dirtyMergeResolution?.pushAttempts, 2);
+});
+
+test('applyPreSpawnLifecycleGate: exhausted transient DIRTY setup requeues instead of stopping', async () => {
+  const rootDir = makeRoot();
+  const workspaceDir = path.join(rootDir, 'workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const { job, jobPath } = seedInProgressJob(rootDir, {
+    jobId: 'laceyenterprises__agent-os-pr-1232-dirty-transient',
+    prNumber: 1232,
+    lastHeartbeatAt: '2026-06-01T05:35:00.000Z',
+  });
+  const logs = [];
+  const transient = Object.assign(new Error('fatal: unable to access https://github.com/laceyenterprises/agent-os.git'), {
+    dirtyTransientExhausted: true,
+    dirtyTransientPhase: 'fetch',
+    dirtyTransientAttempts: 4,
+    dirtyFetchAttempts: 4,
+  });
+
+  const result = await applyPreSpawnLifecycleGate({
+    rootDir,
+    job: { ...job, baseBranch: 'main', branch: 'feature/transient-dirty' },
+    jobPath,
+    workspaceDir,
+    baseBranch: 'main',
+    resolvePRLifecycleImpl: async () => ({
+      source: 'live',
+      prState: 'open',
+      mergeStateStatus: 'DIRTY',
+    }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    dirtyMergeImpl: async () => {
+      throw transient;
+    },
+    now: () => '2026-06-01T05:02:00.000Z',
+    log: { warn: (msg) => logs.push(msg) },
+  });
+
+  assert.equal(result.action, 'requeued');
+  assert.equal(result.reason, 'dirty-merge-transient-failed');
+  assert.equal(existsSync(jobPath), false);
+  const pendingPath = path.join(getFollowUpJobDir(rootDir, 'pending'), path.basename(jobPath));
+  assert.equal(existsSync(pendingPath), true);
+  assert.equal(existsSync(path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath))), false);
+  const pending = readJobAtPath(pendingPath);
+  assert.equal(pending.status, 'pending');
+  assert.equal(pending.remediationWorker, null);
+  assert.equal(pending.remediationPlan?.transientRetries, 1);
+  assert.equal(pending.remediationPlan?.retryAfter, '2026-06-01T05:03:00.000Z');
+  assert.equal(pending.remediationPlan?.retryHistory?.[0]?.retryMetadata?.code, 'dirty-merge-transient');
+  assert.equal(pending.remediationPlan?.retryHistory?.[0]?.retryMetadata?.phase, 'fetch');
+  assert.equal(pending.remediationPlan?.retryHistory?.[0]?.retryMetadata?.dirtyMergeResolution?.outcome, 'transient-failed');
+  assert.match(logs[0], /dirty-pr-transient-requeued/);
+});
+
+test('applyPreSpawnLifecycleGate: DIRTY conflict writes spec-guided hammer prompt', async () => {
+  const rootDir = makeRoot();
+  const workspaceDir = path.join(rootDir, 'workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  mkdirSync(path.join(workspaceDir, 'projects', 'pipeline-stall-hardening'), { recursive: true });
+  mkdirSync(path.join(workspaceDir, 'modules', 'worker-pool'), { recursive: true });
+  writeFileSync(
+    path.join(workspaceDir, 'projects', 'pipeline-stall-hardening', 'SPEC.md'),
+    '# Pipeline Stall Hardening\n\n## Acceptance Criteria\n- DIRTY conflicts use spec-guided hammer remediation.\n',
+    'utf8'
+  );
+  writeFileSync(
+    path.join(workspaceDir, 'modules', 'worker-pool', 'AGENTS.md'),
+    '# Worker Pool Agents\n\nFollow worker-pool dispatch ownership rules.\n',
+    'utf8'
+  );
+  writeFileSync(
+    path.join(workspaceDir, 'modules', 'worker-pool', 'SPEC.md'),
+    '# Worker Pool Spec\n\n## Acceptance Criteria\n- Dispatch workers recreate branch state in isolated workspaces.\n',
+    'utf8'
+  );
+  const promptPath = path.join(rootDir, 'prompt.md');
+  writeFileSync(promptPath, 'original prompt\n', 'utf8');
+  const { job, jobPath } = seedInProgressJob(rootDir, {
+    jobId: 'laceyenterprises__agent-os-pr-1233-dirty-conflict',
+    prNumber: 1233,
+    lastHeartbeatAt: '2026-06-01T05:35:00.000Z',
+  });
+  const callOrder = [];
+
+  const result = await applyPreSpawnLifecycleGate({
+    rootDir,
+    job: {
+      ...job,
+      baseBranch: 'main',
+      branch: 'feature/conflict',
+      specRef: 'pipeline-stall-hardening@1fa49446d3b0',
+    },
+    jobPath,
+    workspaceDir,
+    promptPath,
+    baseBranch: 'main',
+    resolvePRLifecycleImpl: async () => ({
+      source: 'live',
+      prState: 'open',
+      mergeStateStatus: 'DIRTY',
+    }),
+    execFileImpl: async (cmd, args) => {
+      callOrder.push(['exec', cmd, ...args]);
+      return { stdout: '', stderr: '' };
+    },
+    dirtyMergeImpl: async () => ({
+      outcome: 'conflict',
+      error: Object.assign(new Error('Automatic merge failed'), { stderr: 'CONFLICT (content): modules/worker-pool/lib/python/cwp_dispatch/goal_lineage.py' }),
+      conflictedFiles: ['modules/worker-pool/lib/python/cwp_dispatch/goal_lineage.py'],
+    }),
+    listConflictedFilesImpl: async () => {
+      callOrder.push(['list-conflicts']);
+      return ['modules/worker-pool/lib/python/cwp_dispatch/goal_lineage.py'];
+    },
+    now: () => '2026-06-01T05:02:00.000Z',
+  });
+
+  assert.equal(result.action, 'continue');
+  assert.equal(result.reason, 'dirty-conflict-hammer');
+  assert.deepEqual(callOrder, []);
+  const prompt = readFileSync(promptPath, 'utf8');
+  assert.match(prompt, /DIRTY PR Conflict Remediation HAMMER/);
+  assert.match(prompt, /git merge origin\/main/);
+  assert.match(prompt, /Never use `-X ours`/);
+  assert.match(prompt, /projects\/pipeline-stall-hardening\/SPEC\.md/);
+  assert.match(prompt, /modules\/worker-pool\/AGENTS\.md/);
+  assert.match(prompt, /modules\/worker-pool\/SPEC\.md/);
+  assert.match(prompt, /recreate the conflicted working tree first/);
+  const persisted = readJobAtPath(jobPath);
+  assert.equal(persisted.remediationWorker?.dirtyMergeResolution?.outcome, 'conflict-hammer-dispatch');
+  assert.deepEqual(persisted.remediationWorker?.dirtyMergeResolution?.specsConsulted.sort(), [
+    'modules/worker-pool/AGENTS.md',
+    'modules/worker-pool/SPEC.md',
+    'projects/pipeline-stall-hardening/SPEC.md',
+  ].sort());
+});
+
+test('applyPreSpawnLifecycleGate: DIRTY conflict with missing specs escalates without prompt overwrite', async () => {
+  const rootDir = makeRoot();
+  const workspaceDir = path.join(rootDir, 'workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const promptPath = path.join(rootDir, 'prompt.md');
+  writeFileSync(promptPath, 'original prompt\n', 'utf8');
+  const { job, jobPath } = seedInProgressJob(rootDir, {
+    jobId: 'laceyenterprises__agent-os-pr-1234-dirty-missing-spec',
+    prNumber: 1234,
+    lastHeartbeatAt: '2026-06-01T05:35:00.000Z',
+  });
+
+  const result = await applyPreSpawnLifecycleGate({
+    rootDir,
+    job: { ...job, baseBranch: 'main', branch: 'feature/conflict', specRef: 'missing-project@abc123' },
+    jobPath,
+    workspaceDir,
+    promptPath,
+    baseBranch: 'main',
+    resolvePRLifecycleImpl: async () => ({
+      source: 'live',
+      prState: 'open',
+      mergeStateStatus: 'DIRTY',
+    }),
+    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    dirtyMergeImpl: async () => ({
+      outcome: 'conflict',
+      error: Object.assign(new Error('Automatic merge failed'), { stderr: 'CONFLICT (content)' }),
+      conflictedFiles: ['modules/unknown/lib/file.py'],
+    }),
+    listConflictedFilesImpl: async () => ['modules/unknown/lib/file.py'],
+    now: () => '2026-06-01T05:02:00.000Z',
+  });
+
+  assert.equal(result.action, 'stopped');
+  assert.equal(result.reason, 'dirty-conflict-spec-context-missing');
+  assert.equal(readFileSync(promptPath, 'utf8'), 'original prompt\n');
+  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
+  const stoppedJob = readJobAtPath(stoppedPath);
+  assert.equal(stoppedJob.remediationPlan?.stop?.code, 'dirty-conflict-spec-context-missing');
+  assert.equal(stoppedJob.remediationWorker?.dirtyMergeResolution?.outcome, 'conflict-spec-context-missing');
+  assert.equal(stoppedJob.remediationWorker?.dirtyMergeResolution?.specsConsulted.length, 0);
+});
+
+test('attemptDirtyMerge retries transient fetch failures before merging and pushing', async () => {
+  const rootDir = makeRoot();
+  const workspaceDir = path.join(rootDir, 'workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const calls = [];
+
+  const result = await attemptDirtyMerge({
+    workspaceDir,
+    baseBranch: 'main',
+    branch: 'feature/retry-fetch',
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args.includes('fetch') && calls.filter((call) => call.args.includes('fetch')).length === 1) {
+        const err = new Error('TLS handshake timeout');
+        err.stderr = 'TLS handshake timeout';
+        throw err;
+      }
+      return { stdout: 'ok', stderr: '' };
+    },
+  });
+
+  assert.equal(result.outcome, 'clean-merged');
+  assert.equal(result.fetch.attempts, 2);
+  assert.deepEqual(calls.map((call) => call.args[2]), [
+    'fetch',
+    'fetch',
+    'worktree',
+    'merge',
+    'push',
+    'worktree',
+  ]);
+  const fetchArgs = calls[1].args;
+  assert.ok(fetchArgs.some((arg) => arg.includes('refs/heads/main')));
+  assert.ok(fetchArgs.some((arg) => arg.includes('refs/heads/feature/retry-fetch')));
+  const worktreeAdd = calls.find((call) => call.args[2] === 'worktree' && call.args.includes('add'));
+  assert.ok(worktreeAdd.args.includes('--detach'));
+  assert.ok(worktreeAdd.args.includes('origin/feature/retry-fetch'));
+  const pushCall = calls.find((call) => call.args[2] === 'push');
+  assert.notEqual(pushCall.args[1], workspaceDir, 'push runs from isolated worktree, not daemon checkout');
+  assert.ok(calls.some((call) => call.args[2] === 'worktree' && call.args.includes('remove')));
+});
+
+test('attemptDirtyMerge retries fetch failures from unable-to-access and lock errors', async () => {
+  const cases = [
+    ['unable-access', 'fatal: unable to access https://github.com/laceyenterprises/agent-os.git: Could not resolve host: github.com'],
+    ['index-lock', 'fatal: Unable to create .git/index.lock: File exists.'],
+  ];
+
+  for (const [name, stderr] of cases) {
+    const rootDir = makeRoot();
+    const workspaceDir = path.join(rootDir, 'workspace');
+    mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+    const calls = [];
+
+    const result = await attemptDirtyMerge({
+      workspaceDir,
+      baseBranch: 'main',
+      branch: `feature/retry-fetch-${name}`,
+      execFileImpl: async (cmd, args) => {
+        calls.push({ cmd, args });
+        if (args.includes('fetch') && calls.filter((call) => call.args.includes('fetch')).length === 1) {
+          const err = new Error(stderr);
+          err.stderr = stderr;
+          throw err;
+        }
+        return { stdout: 'ok', stderr: '' };
+      },
+    });
+
+    assert.equal(result.outcome, 'clean-merged');
+    assert.equal(result.fetch.attempts, 2);
+    assert.equal(calls.filter((call) => call.args.includes('fetch')).length, 2);
+  }
+});
+
+test('attemptDirtyMerge retries transient worktree add failures before merging', async () => {
+  const rootDir = makeRoot();
+  const workspaceDir = path.join(rootDir, 'workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const calls = [];
+
+  const result = await attemptDirtyMerge({
+    workspaceDir,
+    baseBranch: 'main',
+    branch: 'feature/retry-worktree-add',
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args[2] === 'worktree' && args.includes('add') && calls.filter((call) => call.args[2] === 'worktree' && call.args.includes('add')).length === 1) {
+        const err = new Error('Unable to create .git/index.lock');
+        err.stderr = 'fatal: Unable to create .git/index.lock: File exists.';
+        throw err;
+      }
+      return { stdout: 'ok', stderr: '' };
+    },
+  });
+
+  assert.equal(result.outcome, 'clean-merged');
+  assert.equal(result.worktreeAdd.attempts, 2);
+  assert.equal(calls.filter((call) => call.args[2] === 'worktree' && call.args.includes('add')).length, 2);
+});
+
+test('attemptDirtyMerge preserves physical worktree when git worktree remove fails', async () => {
+  const rootDir = makeRoot();
+  const workspaceDir = path.join(rootDir, 'workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  let worktreeDir = null;
+
+  await assert.rejects(
+    attemptDirtyMerge({
+      workspaceDir,
+      baseBranch: 'main',
+      branch: 'feature/cleanup-failure',
+      execFileImpl: async (cmd, args) => {
+        if (args[2] === 'worktree' && args.includes('add')) {
+          worktreeDir = args[5];
+          mkdirSync(worktreeDir, { recursive: true });
+          writeFileSync(path.join(worktreeDir, '.git'), 'gitdir: ../.git/worktrees/cleanup-failure\n', 'utf8');
+          return { stdout: 'ok', stderr: '' };
+        }
+        if (args[2] === 'worktree' && args.includes('remove')) {
+          const err = new Error('permission denied removing worktree');
+          err.stderr = 'fatal: validation failed, cannot remove worktree';
+          throw err;
+        }
+        return { stdout: 'ok', stderr: '' };
+      },
+    }),
+    /permission denied removing worktree/
+  );
+
+  assert.ok(worktreeDir, 'captured worktree dir');
+  assert.equal(existsSync(path.dirname(worktreeDir)), true, 'parent temp dir is preserved for git metadata-safe cleanup');
+  rmSync(path.dirname(worktreeDir), { recursive: true, force: true });
+});
+
+test('attemptDirtyMerge captures conflicts from isolated worktree and removes it', async () => {
+  const rootDir = makeRoot();
+  const workspaceDir = path.join(rootDir, 'workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const calls = [];
+
+  const result = await attemptDirtyMerge({
+    workspaceDir,
+    baseBranch: 'main',
+    branch: 'feature/conflict',
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args[2] === 'merge') {
+        const err = new Error('Automatic merge failed');
+        err.stderr = 'CONFLICT (content): Merge conflict in modules/worker-pool/index.js';
+        throw err;
+      }
+      if (args[2] === 'diff') {
+        return { stdout: 'modules/worker-pool/index.js\n', stderr: '' };
+      }
+      return { stdout: 'ok', stderr: '' };
+    },
+  });
+
+  assert.equal(result.outcome, 'conflict');
+  assert.deepEqual(result.conflictedFiles, ['modules/worker-pool/index.js']);
+  assert.ok(calls.some((call) => call.args[2] === 'worktree' && call.args.includes('add')));
+  assert.ok(calls.some((call) => call.args[2] === 'diff'));
+  assert.ok(calls.some((call) => call.args[2] === 'worktree' && call.args.includes('remove')));
+});
+
+test('attemptDirtyMerge retries transient local merge lock failures', async () => {
+  const rootDir = makeRoot();
+  const workspaceDir = path.join(rootDir, 'workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const calls = [];
+
+  const result = await attemptDirtyMerge({
+    workspaceDir,
+    baseBranch: 'main',
+    branch: 'feature/retry-merge',
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args[2] === 'merge' && calls.filter((call) => call.args[2] === 'merge').length === 1) {
+        const err = new Error('Unable to create .git/index.lock');
+        err.stderr = 'fatal: Unable to create .git/index.lock: File exists.';
+        throw err;
+      }
+      return { stdout: 'ok', stderr: '' };
+    },
+  });
+
+  assert.equal(result.outcome, 'clean-merged');
+  assert.equal(result.merge.attempts, 2);
+  assert.equal(calls.filter((call) => call.args[2] === 'merge').length, 2);
+});
+
+test('attemptDirtyMerge does not classify branch-name conflict text as a merge conflict', async () => {
+  const rootDir = makeRoot();
+  const workspaceDir = path.join(rootDir, 'workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const calls = [];
+
+  const result = await attemptDirtyMerge({
+    workspaceDir,
+    baseBranch: 'main',
+    branch: 'feature/conflict-retry-merge',
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args[2] === 'merge' && calls.filter((call) => call.args[2] === 'merge').length === 1) {
+        const err = new Error("Command failed: git merge origin/main on feature/conflict-retry-merge");
+        err.stderr = 'fatal: Unable to create .git/index.lock: File exists.';
+        throw err;
+      }
+      return { stdout: 'ok', stderr: '' };
+    },
+  });
+
+  assert.equal(result.outcome, 'clean-merged');
+  assert.equal(result.merge.attempts, 2);
+  assert.equal(calls.filter((call) => call.args[2] === 'merge').length, 2);
+});
+
+test('resolveDirtyConflictSpecContext skips malformed project plans while finding later module specs', async () => {
+  const repoRoot = makeRoot();
+  mkdirSync(path.join(repoRoot, 'projects', 'aaa-bad'), { recursive: true });
+  writeFileSync(path.join(repoRoot, 'projects', 'aaa-bad', 'plan.json'), '{not-json', 'utf8');
+  mkdirSync(path.join(repoRoot, 'projects', 'zzz-worker-domain'), { recursive: true });
+  writeFileSync(
+    path.join(repoRoot, 'projects', 'zzz-worker-domain', 'plan.json'),
+    JSON.stringify({ notes: ['covers modules/worker-pool runtime'] }),
+    'utf8'
+  );
+  writeFileSync(
+    path.join(repoRoot, 'projects', 'zzz-worker-domain', 'SPEC.md'),
+    '# Worker Domain Spec\n',
+    'utf8'
+  );
+
+  const context = await resolveDirtyConflictSpecContext({
+    repoRoot,
+    job: {},
+    conflictedFiles: ['modules/worker-pool/lib/python/cwp_dispatch/goal_lineage.py'],
+  });
+
+  assert.deepEqual(context.missing, ['PR specRef']);
+  assert.deepEqual(context.entries.map((entry) => entry.path), ['projects/zzz-worker-domain/SPEC.md']);
+});
+
+test('resolveDirtyConflictSpecContext reports entries omitted by the spec cap', async () => {
+  const repoRoot = makeRoot();
+  mkdirSync(path.join(repoRoot, 'projects', 'pipeline-stall-hardening'), { recursive: true });
+  writeFileSync(
+    path.join(repoRoot, 'projects', 'pipeline-stall-hardening', 'SPEC.md'),
+    '# Pipeline Stall Hardening\n',
+    'utf8'
+  );
+  mkdirSync(path.join(repoRoot, 'modules', 'worker-pool'), { recursive: true });
+  writeFileSync(
+    path.join(repoRoot, 'modules', 'worker-pool', 'AGENTS.md'),
+    '# Worker Pool Agents\n',
+    'utf8'
+  );
+  writeFileSync(
+    path.join(repoRoot, 'modules', 'worker-pool', 'SPEC.md'),
+    '# Worker Pool Spec\n',
+    'utf8'
+  );
+
+  const context = await resolveDirtyConflictSpecContext({
+    repoRoot,
+    job: { specRef: 'pipeline-stall-hardening@abc123' },
+    conflictedFiles: ['modules/worker-pool/lib/python/cwp_dispatch/goal_lineage.py'],
+    cap: 1,
+  });
+
+  assert.equal(context.ok, false);
+  assert.deepEqual(context.entries.map((entry) => entry.path), ['projects/pipeline-stall-hardening/SPEC.md']);
+  assert.match(context.missing.join('\n'), /module-agents modules\/worker-pool\/AGENTS\.md omitted by DIRTY conflict spec cap \(1\)/);
+  assert.match(context.missing.join('\n'), /module-spec modules\/worker-pool\/SPEC\.md omitted by DIRTY conflict spec cap \(1\)/);
+});
+
+test('pushDirtyMergeWithRetry retries transient push failures but fails terminal auth errors', async () => {
+  const calls = [];
+  const transientResult = await pushDirtyMergeWithRetry({
+    workspaceDir: '/tmp/workspace',
+    branch: 'feature/retry',
+    retryDelaysMs: [1, 1],
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (calls.length === 1) {
+        const err = new Error('TLS handshake timeout');
+        err.stderr = 'TLS handshake timeout';
+        throw err;
+      }
+      return { stdout: 'ok', stderr: '' };
+    },
+  });
+  assert.equal(transientResult.attempts, 2);
+  assert.equal(calls.length, 2);
+
+  let terminalErr = null;
+  try {
+    await pushDirtyMergeWithRetry({
+      workspaceDir: '/tmp/workspace',
+      branch: 'feature/retry',
+      retryDelaysMs: [1, 1],
+      execFileImpl: async () => {
+        const err = new Error('Permission denied');
+        err.stderr = 'ERROR: Permission to repo denied';
+        throw err;
+      },
+    });
+  } catch (err) {
+    terminalErr = err;
+  }
+  assert.match(terminalErr?.message, /Permission denied/);
+  assert.equal(terminalErr?.dirtyPushAttempts, 1);
 });

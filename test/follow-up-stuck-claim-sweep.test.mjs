@@ -21,8 +21,10 @@ import {
   IN_PROGRESS_STUCK_THRESHOLD_MS_ENV,
   STALE_HEARTBEAT_STOP_CODE,
   applyPreSpawnLifecycleGate,
+  attemptDirtyMerge,
   emitHeartbeatsForActiveJobs,
   pushDirtyMergeWithRetry,
+  resolveDirtyConflictSpecContext,
   resolveInProgressStuckThresholdMs,
   sweepStuckInProgressClaims,
 } from '../src/follow-up-stuck-claim-sweep.mjs';
@@ -593,6 +595,58 @@ test('applyPreSpawnLifecycleGate: DIRTY conflict with missing specs escalates wi
   assert.equal(stoppedJob.remediationPlan?.stop?.code, 'dirty-conflict-spec-context-missing');
   assert.equal(stoppedJob.remediationWorker?.dirtyMergeResolution?.outcome, 'conflict-spec-context-missing');
   assert.equal(stoppedJob.remediationWorker?.dirtyMergeResolution?.specsConsulted.length, 0);
+});
+
+test('attemptDirtyMerge retries transient fetch failures before merging and pushing', async () => {
+  const rootDir = makeRoot();
+  const workspaceDir = path.join(rootDir, 'workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const calls = [];
+
+  const result = await attemptDirtyMerge({
+    workspaceDir,
+    baseBranch: 'main',
+    branch: 'feature/retry-fetch',
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args.includes('fetch') && calls.filter((call) => call.args.includes('fetch')).length === 1) {
+        const err = new Error('TLS handshake timeout');
+        err.stderr = 'TLS handshake timeout';
+        throw err;
+      }
+      return { stdout: 'ok', stderr: '' };
+    },
+  });
+
+  assert.equal(result.outcome, 'clean-merged');
+  assert.equal(result.fetch.attempts, 2);
+  assert.deepEqual(calls.map((call) => call.args[2]), ['fetch', 'fetch', 'merge', 'push']);
+});
+
+test('resolveDirtyConflictSpecContext skips malformed project plans while finding later module specs', () => {
+  const repoRoot = makeRoot();
+  mkdirSync(path.join(repoRoot, 'projects', 'aaa-bad'), { recursive: true });
+  writeFileSync(path.join(repoRoot, 'projects', 'aaa-bad', 'plan.json'), '{not-json', 'utf8');
+  mkdirSync(path.join(repoRoot, 'projects', 'zzz-worker-domain'), { recursive: true });
+  writeFileSync(
+    path.join(repoRoot, 'projects', 'zzz-worker-domain', 'plan.json'),
+    JSON.stringify({ notes: ['covers modules/worker-pool runtime'] }),
+    'utf8'
+  );
+  writeFileSync(
+    path.join(repoRoot, 'projects', 'zzz-worker-domain', 'SPEC.md'),
+    '# Worker Domain Spec\n',
+    'utf8'
+  );
+
+  const context = resolveDirtyConflictSpecContext({
+    repoRoot,
+    job: {},
+    conflictedFiles: ['modules/worker-pool/lib/python/cwp_dispatch/goal_lineage.py'],
+  });
+
+  assert.deepEqual(context.missing, ['PR specRef']);
+  assert.deepEqual(context.entries.map((entry) => entry.path), ['projects/zzz-worker-domain/SPEC.md']);
 });
 
 test('pushDirtyMergeWithRetry retries transient push failures but fails terminal auth errors', async () => {

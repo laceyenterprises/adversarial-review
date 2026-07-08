@@ -135,6 +135,31 @@ async function pushDirtyMergeWithRetry({
   throw lastError;
 }
 
+async function fetchDirtyMergeBaseWithRetry({
+  workspaceDir,
+  baseBranch,
+  execFileImpl,
+  retryDelaysMs = DIRTY_MERGE_PUSH_RETRY_DELAYS_MS,
+}) {
+  const args = ['-C', workspaceDir, 'fetch', '--prune', 'origin', baseBranch];
+  const delays = [0, ...retryDelaysMs];
+  let lastError = null;
+  for (let attempt = 0; attempt < delays.length; attempt += 1) {
+    if (delays[attempt] > 0) await sleep(delays[attempt]);
+    try {
+      const result = await execFileImpl('git', args, { maxBuffer: 10 * 1024 * 1024 });
+      return { fetched: true, attempts: attempt + 1, result };
+    } catch (err) {
+      lastError = err;
+      if (!isTransientDirtyPushError(err) || attempt === delays.length - 1) {
+        err.dirtyFetchAttempts = attempt + 1;
+        throw err;
+      }
+    }
+  }
+  throw lastError;
+}
+
 async function attemptDirtyMerge({
   workspaceDir,
   baseBranch,
@@ -148,8 +173,10 @@ async function attemptDirtyMerge({
   if (!resolvedBase) {
     throw new Error('DIRTY pre-spawn gate requires baseBranch');
   }
-  await execFileImpl('git', ['-C', workspaceDir, 'fetch', '--prune', 'origin', resolvedBase], {
-    maxBuffer: 10 * 1024 * 1024,
+  const fetch = await fetchDirtyMergeBaseWithRetry({
+    workspaceDir,
+    baseBranch: resolvedBase,
+    execFileImpl,
   });
   try {
     await execFileImpl('git', ['-C', workspaceDir, 'merge', `origin/${resolvedBase}`], {
@@ -160,7 +187,7 @@ async function attemptDirtyMerge({
       branch,
       execFileImpl,
     });
-    return { outcome: 'clean-merged', push };
+    return { outcome: 'clean-merged', fetch, push };
   } catch (err) {
     const text = `${err?.message || ''}\n${err?.stderr || ''}\n${err?.stdout || ''}`.toLowerCase();
     if (text.includes('conflict') || text.includes('merge failed') || text.includes('automatic merge failed')) {
@@ -170,7 +197,7 @@ async function attemptDirtyMerge({
   }
 }
 
-async function listConflictedFiles({ workspaceDir, execFileImpl }) {
+async function listConflictedFiles({ workspaceDir, execFileImpl, log = console }) {
   try {
     const { stdout } = await execFileImpl('git', [
       '-C',
@@ -180,7 +207,8 @@ async function listConflictedFiles({ workspaceDir, execFileImpl }) {
       '--diff-filter=U',
     ], { maxBuffer: 10 * 1024 * 1024 });
     return String(stdout || '').split('\n').map((line) => line.trim()).filter(Boolean);
-  } catch {
+  } catch (err) {
+    log?.warn?.(`[follow-up-remediation] failed to list conflicted files: ${err?.message || err}`);
     return [];
   }
 }
@@ -279,7 +307,12 @@ function resolveModuleSpecPath(repoRoot, moduleRoot) {
     for (const projectName of readdirSync(projectsDir)) {
       const planPath = join(projectsDir, projectName, 'plan.json');
       if (!existsSync(planPath)) continue;
-      const parsed = JSON.parse(readFileSync(planPath, 'utf8'));
+      let parsed;
+      try {
+        parsed = JSON.parse(readFileSync(planPath, 'utf8'));
+      } catch {
+        continue;
+      }
       const text = JSON.stringify(parsed);
       if (text.includes(moduleRoot) || text.includes(moduleName)) {
         const specPath = join(projectsDir, projectName, 'SPEC.md');

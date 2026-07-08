@@ -20,8 +20,11 @@ test('hammer prompt enforces the PSH-05 lease guarded local and remote CI merge 
   assert.match(HAMMER_PROMPT, /transient GitHub gate read failure/);
   assert.match(HAMMER_PROMPT, /github-gate-red/);
   assert.match(HAMMER_PROMPT, /github-gate-timeout/);
+  assert.doesNotMatch(HAMMER_PROMPT, /\|\s*IN\(/);
+  assert.match(HAMMER_PROMPT, /index\(\$conclusion\)/);
   assert.match(HAMMER_PROMPT, /HAM_PPH_FILES=\(\)/);
-  assert.match(HAMMER_PROMPT, /--files "\$\{HAM_PPH_FILES\[@\]\}"/);
+  assert.match(HAMMER_PROMPT, /if \[ "\$\{#HAM_PPH_FILES\[@\]\}" -gt 0 \]; then/);
+  assert.match(HAMMER_PROMPT, /HAM_PPH_CI_ARGS\+=\(--files "\$\{HAM_PPH_FILES\[@\]\}"\)/);
   assert.doesNotMatch(HAMMER_PROMPT, /tr '\\n' ' '/);
   assert.doesNotMatch(HAMMER_PROMPT, /--files \$HAM_PPH_FILES/);
   assert.match(HAMMER_PROMPT, /--match-head-commit "\$POST_REMEDIATION_SHA"/);

@@ -881,8 +881,8 @@ ham_required_gate_red() {
     (.badChecks // []) | any(
       ((.conclusion // "") | ascii_upcase) as $conclusion |
       ((.status // .state // "") | ascii_upcase) as $status |
-      ($conclusion | IN("FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED")) or
-      (.__typename == "StatusContext" and ($status | IN("ERROR", "FAILURE")))
+      ((["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"] | index($conclusion)) != null) or
+      (.__typename == "StatusContext" and ((["ERROR", "FAILURE"] | index($status)) != null))
     )
   ' "$HAM_GATE_JSON" >/dev/null
 }
@@ -964,7 +964,11 @@ ham_run_pph_ci_mirror_with_timeout() {
     while IFS= read -r HAM_PPH_FILE; do
       [ -n "$HAM_PPH_FILE" ] && HAM_PPH_FILES+=("$HAM_PPH_FILE")
     done < <(ham_changed_files_for_local_ci)
-    perl -e 'alarm shift; exec @ARGV' "${HAM_LOCAL_CI_TIMEOUT_SECONDS:-3600}" python3 scripts/ci-mirror/run-ci-mirror.py --repo-root . --match-head-commit "$POST_REMEDIATION_SHA" --files "${HAM_PPH_FILES[@]}"
+    HAM_PPH_CI_ARGS=(python3 scripts/ci-mirror/run-ci-mirror.py --repo-root . --match-head-commit "$POST_REMEDIATION_SHA")
+    if [ "${#HAM_PPH_FILES[@]}" -gt 0 ]; then
+      HAM_PPH_CI_ARGS+=(--files "${HAM_PPH_FILES[@]}")
+    fi
+    perl -e 'alarm shift; exec @ARGV' "${HAM_LOCAL_CI_TIMEOUT_SECONDS:-3600}" "${HAM_PPH_CI_ARGS[@]}"
     HAM_PPH_EXIT=$?
   fi
   rm -f "$HAM_PPH_STDIN"

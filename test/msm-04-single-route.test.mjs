@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
-import { maybeDispatchAmaCloser, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
+import { __testables__, maybeDispatchAmaCloser, updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import { maybeDispatchAmaClosureFor } from '../src/watcher.mjs';
 
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
@@ -179,6 +179,67 @@ test('DCR-02: default live probe treats git ls-remote exit 2 as pruned branch', 
   assert.equal(result.dispatched, false);
   assert.equal(result.reason, 'live-head-branch-missing');
   assert.deepEqual(calls.map((call) => call.cmd), ['gh', 'git']);
+});
+
+test('DCR-02: default live probe retries transient gh and git failures', async () => {
+  const calls = [];
+  const sleeps = [];
+
+  const result = await __testables__.defaultAmaLivePrProbe({
+    repo: 'acme/repo',
+    prNumber: 404,
+    retryDelaysMs: [1, 2],
+    sleepImpl: async (ms) => {
+      sleeps.push(ms);
+    },
+    execFileImpl: async (cmd) => {
+      calls.push(cmd);
+      if (cmd === 'gh' && calls.filter(call => call === 'gh').length === 1) {
+        throw Object.assign(new Error('TLS handshake timeout'), { code: 'ETIMEDOUT' });
+      }
+      if (cmd === 'gh') {
+        return { stdout: JSON.stringify({ state: 'OPEN', headRefName: 'codex/live', headRefOid: HEAD }), stderr: '' };
+      }
+      if (cmd === 'git' && calls.filter(call => call === 'git').length === 1) {
+        throw Object.assign(new Error('resource temporarily unavailable'), { code: 'EIO' });
+      }
+      if (cmd === 'git') {
+        return { stdout: `${HEAD}\trefs/heads/codex/live\n`, stderr: '' };
+      }
+      assert.fail(`unexpected command: ${cmd}`);
+    },
+  });
+
+  assert.equal(result.state, 'OPEN');
+  assert.equal(result.headBranchExists, true);
+  assert.deepEqual(calls, ['gh', 'gh', 'git', 'git']);
+  assert.deepEqual(sleeps, [1, 1]);
+});
+
+test('DCR-02: default live probe preserves PR state when branch probe cannot recover', async () => {
+  let gitAttempts = 0;
+
+  const result = await __testables__.defaultAmaLivePrProbe({
+    repo: 'acme/repo',
+    prNumber: 404,
+    retryDelaysMs: [1, 2],
+    sleepImpl: async () => {},
+    execFileImpl: async (cmd) => {
+      if (cmd === 'gh') {
+        return { stdout: JSON.stringify({ state: 'OPEN', headRefName: 'codex/live', headRefOid: HEAD }), stderr: '' };
+      }
+      if (cmd === 'git') {
+        gitAttempts += 1;
+        throw Object.assign(new Error('TLS handshake timeout'), { code: 'ETIMEDOUT' });
+      }
+      assert.fail(`unexpected command: ${cmd}`);
+    },
+  });
+
+  assert.equal(result.state, 'OPEN');
+  assert.equal(result.headBranchExists, null);
+  assert.equal(result.headBranchProbeError, 'TLS handshake timeout');
+  assert.equal(gitAttempts, 3);
 });
 
 test('MSM-04: no source path still uses the standalone closer prompt for dispatch', () => {

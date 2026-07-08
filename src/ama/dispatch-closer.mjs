@@ -93,6 +93,7 @@ const AGENT_OS_TOOLING_REPO = 'agent-os';
 const ADVERSARIAL_REVIEW_REPO = 'adversarial-review';
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
 const AMA_LIVE_PR_PROBE_TIMEOUT_MS = 30_000;
+const AMA_LIVE_PR_PROBE_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000];
 const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
   'blocking-findings-present',
   'blocking-findings-unknown',
@@ -222,6 +223,7 @@ function normalizeAmaLivePrProbeResult(raw) {
     headBranchExists: headBranchExists === true ? true : headBranchExists === false ? false : null,
     headRefName: typeof raw.headRefName === 'string' ? raw.headRefName : null,
     headRefOid: typeof raw.headRefOid === 'string' ? raw.headRefOid : null,
+    ...(raw.headBranchProbeError ? { headBranchProbeError: String(raw.headBranchProbeError) } : {}),
   };
 }
 
@@ -231,12 +233,36 @@ function githubRepoHttpUrl(repo) {
   return `https://github.com/${slug}.git`;
 }
 
+async function execAmaLivePrProbeCommandWithTransientRetry(
+  execFileImpl,
+  cmd,
+  args,
+  options,
+  {
+    sleepImpl = sleep,
+    retryDelaysMs = AMA_LIVE_PR_PROBE_TRANSIENT_RETRY_DELAYS_MS,
+  } = {},
+) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await execFileImpl(cmd, args, options);
+    } catch (err) {
+      if (attempt >= retryDelaysMs.length || !isTransientHqDispatchError(err)) {
+        throw err;
+      }
+      await sleepImpl(Number(retryDelaysMs[attempt]) || 0);
+    }
+  }
+}
+
 async function defaultAmaLivePrProbe({
   execFileImpl,
   repo,
   prNumber,
+  sleepImpl,
+  retryDelaysMs,
 }) {
-  const { stdout } = await execFileImpl('gh', [
+  const { stdout } = await execAmaLivePrProbeCommandWithTransientRetry(execFileImpl, 'gh', [
     'pr',
     'view',
     String(prNumber),
@@ -248,15 +274,19 @@ async function defaultAmaLivePrProbe({
     env: process.env,
     timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS,
     maxBuffer: 1024 * 1024,
+  }, {
+    sleepImpl,
+    retryDelaysMs,
   });
   const payload = JSON.parse(stdout || '{}');
   const state = String(payload?.state || '').trim().toUpperCase();
   let headBranchExists = null;
+  let headBranchProbeError = null;
   const headRefName = String(payload?.headRefName || '').trim();
   const repoUrl = githubRepoHttpUrl(repo);
   if (state === 'OPEN' && headRefName && repoUrl) {
     try {
-      const probe = await execFileImpl('git', [
+      const probe = await execAmaLivePrProbeCommandWithTransientRetry(execFileImpl, 'git', [
         'ls-remote',
         '--exit-code',
         '--heads',
@@ -266,13 +296,17 @@ async function defaultAmaLivePrProbe({
         env: process.env,
         timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS,
         maxBuffer: 1024 * 1024,
+      }, {
+        sleepImpl,
+        retryDelaysMs,
       });
       headBranchExists = String(probe?.stdout || '').trim().length > 0;
     } catch (err) {
       if (Number(err?.code) === 2) {
         headBranchExists = false;
       } else {
-        throw err;
+        headBranchExists = null;
+        headBranchProbeError = String(err?.message || err);
       }
     }
   }
@@ -281,6 +315,7 @@ async function defaultAmaLivePrProbe({
     headRefName,
     headRefOid: typeof payload?.headRefOid === 'string' ? payload.headRefOid : null,
     headBranchExists,
+    headBranchProbeError,
   });
 }
 
@@ -1140,6 +1175,8 @@ export function isTransientHqDispatchError(err) {
   if (isGithubRateLimitOrBrokerThrottle(err)) return true;
   const detail = errDetailText(err);
   return /\b(etimedout|econnreset|econnrefused|ehostunreach|eagain|epipe|eio)\b/.test(detail)
+    || detail.includes('tls handshake')
+    || detail.includes('timeout')
     || detail.includes('database is locked')
     || detail.includes('sqlite_busy')
     || detail.includes('resource temporarily unavailable')
@@ -1628,6 +1665,7 @@ export const __testables__ = Object.freeze({
   teardownSamePrHammerHolder,
   resolveTerminalCodingBranchHolder,
   isTerminalBranchHolderWorkerRunStatus,
+  defaultAmaLivePrProbe,
   normalizeAmaLivePrProbeResult,
 });
 

@@ -1460,3 +1460,187 @@ test('retry-cap alert is debounced in-process when suppression ledger write fail
   assert.equal(second.reason, 'hammer-lifetime-ceiling-reached');
   assert.equal(alertCalls.length, 1, 'in-process debounce prevents re-page storms when ledger writes fail');
 });
+
+// A hq dispatch that SPAWNED a worker (hq emitted an lrq/dispatchId) but then
+// surfaced as an error — the `worker_killed`-shortly-after-spawn shape that
+// re-fired 8× on agent-os#3319 on 2026-07-08.
+function spawnThenDieDeps(overrides = {}) {
+  const execCalls = [];
+  return {
+    execCalls,
+    execFileImpl: async (cmd, args) => {
+      execCalls.push({ cmd, args });
+      const err = new Error('worker_killed ~36s into planning');
+      // hq already emitted the launch identifiers before the worker died — this is
+      // what makes the closer treat it as an ambiguous (spawned) launch.
+      err.stdout = JSON.stringify({ dispatchId: 'dispatch_hammer', launchRequestId: 'lrq_hammer' });
+      err.stderr = 'worker_killed';
+      throw err;
+    },
+    readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
+    writeFileImpl: () => {},
+    resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+    readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
+    logger: { log() {}, info() {}, warn() {}, error() {} },
+    ...overrides,
+  };
+}
+
+test('auto-hammer spawn-then-die counts toward the per-PR firing ceiling and stops the 8x runaway', async (t) => {
+  // Reproduces the 2026-07-08 #3319 runaway END TO END on the auto-hammer
+  // eligibility-miss path: a hammer worker SPAWNS then dies ~36s into planning
+  // (hq surfaces an lrq + error), and each failed attempt earns a fresh review on
+  // a new head (reviewedSha churn). Before the fix the spawned-then-died dispatch
+  // returned before the retry-cap record, so the count stayed 0 and auto-hammer
+  // re-fired unbounded (8×). Now every spawned worker counts and, because the
+  // lifetime ledger is keyed per-(repo,PR) and immune to reviewedSha churn, the
+  // PR suppresses at the ceiling.
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-spawn-then-die-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  _resetHammerRetryCapAlertDebounceForTests();
+  const alertCalls = [];
+  const deps = spawnThenDieDeps({
+    deliverAlertImpl: async (text, opts) => {
+      alertCalls.push({ text, opts });
+    },
+  });
+
+  // Each dispatch spawns-then-dies on a DISTINCT reviewedSha (head churn) — proving
+  // the per-PR count does NOT reset per new review head.
+  for (let i = 1; i <= HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES; i += 1) {
+    const result = await maybeDispatchAmaCloser({
+      ...hammerDispatchArgs(rootDir, {
+        reviewState: { reviewCycleExhausted: true, headSha: `job-${i}` },
+        prMetadata: { headSha: `head-${i}`, mergeableState: 'DIRTY' },
+        dispatchContext: {
+          reviewedSha: `job-${i}`,
+          targetRemediationSha: `head-${i}`,
+          dispatchRecordHeadSha: `job-${i}`,
+          allowStaleReviewHeadHammerResume: true,
+          dispatchedAt: `2026-07-08T09:${String(i).padStart(2, '0')}:00Z`,
+        },
+      }),
+      ...deps,
+    });
+    assert.equal(result.dispatched, false, `dispatch ${i} spawns then dies`);
+    assert.equal(result.reason, 'dispatch-response-ambiguous', `dispatch ${i} is an ambiguous (spawned) launch`);
+    const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
+    assert.equal(ledger.lifetimeAttemptCount, i, `spawned-then-died dispatch ${i} MUST count`);
+  }
+
+  // The (ceiling+1)th attempt — what would have been the 7th/8th fire — is now
+  // suppressed instead of re-firing.
+  const blocked = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true, headSha: 'job-final' },
+      prMetadata: { headSha: 'head-final', mergeableState: 'DIRTY' },
+      dispatchContext: {
+        reviewedSha: 'job-final',
+        targetRemediationSha: 'head-final',
+        dispatchRecordHeadSha: 'job-final',
+        allowStaleReviewHeadHammerResume: true,
+        dispatchedAt: '2026-07-08T09:07:00Z',
+      },
+    }),
+    ...deps,
+  });
+
+  assert.equal(blocked.dispatched, false);
+  assert.equal(blocked.reason, 'hammer-lifetime-ceiling-reached');
+  assert.equal(blocked.suppressionState, HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE);
+  // hq was invoked exactly ceiling times — the suppressed tick never reached exec.
+  assert.equal(deps.execCalls.length, HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES);
+  assert.equal(alertCalls.length, 1, 'operator paged once on ceiling exhaustion');
+  assert.equal(alertCalls[0].opts.event, 'hammer_lifetime_ceiling_reached');
+  const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
+  assert.equal(ledger.lifetimeAttemptCount, HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES);
+  assert.equal(ledger.suppressionState, HAMMER_RETRY_CAP_LIFETIME_SUPPRESSION_STATE);
+});
+
+test('a configured small ceiling stops spawn-then-die auto-hammer after N fires', async (t) => {
+  // The firing ceiling is configurable; with ceiling=2 a repeatedly-dying hammer
+  // must suppress after exactly 2 spawns, not loop.
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-spawn-then-die-ceiling2-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  _resetHammerRetryCapAlertDebounceForTests();
+  const alertCalls = [];
+  const deps = spawnThenDieDeps({
+    deliverAlertImpl: async (text, opts) => { alertCalls.push({ text, opts }); },
+  });
+  const tick = (i) => ({
+    ...hammerDispatchArgs(rootDir, {
+      cfg: { hammerLifetimeDispatchCeiling: 2 },
+      reviewState: { reviewCycleExhausted: true, headSha: `job-${i}` },
+      prMetadata: { headSha: `head-${i}`, mergeableState: 'DIRTY' },
+      dispatchContext: {
+        reviewedSha: `job-${i}`,
+        targetRemediationSha: `head-${i}`,
+        dispatchRecordHeadSha: `job-${i}`,
+        allowStaleReviewHeadHammerResume: true,
+        dispatchedAt: `2026-07-08T10:0${i}:00Z`,
+      },
+    }),
+    ...deps,
+  });
+
+  const first = await maybeDispatchAmaCloser(tick(1));
+  const second = await maybeDispatchAmaCloser(tick(2));
+  const third = await maybeDispatchAmaCloser(tick(3));
+
+  assert.equal(first.reason, 'dispatch-response-ambiguous');
+  assert.equal(second.reason, 'dispatch-response-ambiguous');
+  assert.equal(third.reason, 'hammer-lifetime-ceiling-reached');
+  assert.equal(deps.execCalls.length, 2, 'exactly 2 hammer spawns before suppression');
+  assert.equal(alertCalls.length, 1);
+});
+
+test('a never-spawned dispatch (admit refusal, no lrq) does NOT count toward the firing ceiling', async (t) => {
+  // The fail-safe: a dispatch that never actually spawned a worker (deploy bounce
+  // mid-launch / admit refusal — no lrq emitted) must NOT count, so a PR that never
+  // got a hammer is never falsely suppressed. Distinct from spawn-then-die above.
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-cap-never-spawned-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  _resetHammerRetryCapAlertDebounceForTests();
+  const alertCalls = [];
+  const neverSpawnedDeps = () => ({
+    execFileImpl: async () => {
+      const err = new Error('admit refusal: worker not admitted');
+      // No stdout identifiers → hq never spawned a worker.
+      err.stderr = 'admit refusal: worker not admitted';
+      throw err;
+    },
+    readTemplateImpl: () => 'hammer prompt <<PR_URL>> <<REVIEWED_SHA>> <<TARGET_REMEDIATION_SHA>> <<AMA_TRAILERS>>',
+    writeFileImpl: () => {},
+    resolveCloserDispatchHarnessImpl: async ({ workerClass }) => ({ workerClass, fellBack: false }),
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+    readBuildCompletionProducerEvidenceImpl: () => ({ ok: false, reason: 'missing-build-completion-producer-evidence' }),
+    deliverAlertImpl: async (text, opts) => { alertCalls.push({ text, opts }); },
+    logger: { log() {}, info() {}, warn() {}, error() {} },
+  });
+
+  // Well beyond the ceiling: each on a fresh head so the per-head bound never trips.
+  for (let i = 1; i <= HAMMER_RETRY_CAP_LIFETIME_TOTAL_DISPATCHES + 4; i += 1) {
+    const result = await maybeDispatchAmaCloser({
+      ...hammerDispatchArgs(rootDir, {
+        reviewState: { reviewCycleExhausted: true, headSha: `job-${i}` },
+        prMetadata: { headSha: `head-${i}`, mergeableState: 'DIRTY' },
+        dispatchContext: {
+          reviewedSha: `job-${i}`,
+          targetRemediationSha: `head-${i}`,
+          dispatchRecordHeadSha: `job-${i}`,
+          allowStaleReviewHeadHammerResume: true,
+          dispatchedAt: `2026-07-08T11:${String(i).padStart(2, '0')}:00Z`,
+        },
+      }),
+      ...neverSpawnedDeps(),
+    });
+    assert.equal(result.dispatched, false, `dispatch ${i} failed to spawn`);
+    assert.equal(result.reason, 'dispatch-failed', `dispatch ${i} never spawned a worker`);
+  }
+
+  // Never spawned → the firing ledger was never even created, so no false suppression.
+  const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
+  assert.equal(ledger, null, 'never-spawned dispatches leave the firing ledger untouched');
+  assert.equal(alertCalls.length, 0, 'no operator page for a PR that never got a hammer');
+});

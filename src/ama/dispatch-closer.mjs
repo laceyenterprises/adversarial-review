@@ -3330,6 +3330,40 @@ export async function maybeDispatchAmaCloser({
     logger,
   });
 
+  // Count a hammer launch against the per-PR firing ceiling. Called from BOTH the
+  // confirmed-launch path (exec returned cleanly) AND the ambiguous-launch path
+  // (exec threw but hq had already emitted an lrq/dispatchId — the worker DID
+  // spawn and then died/was-killed early, e.g. `worker_killed` ~36s into
+  // planning). A worker that spawns MUST count even if it later dies, otherwise a
+  // repeatedly-dying hammer re-fires forever without ever tripping the ceiling
+  // (the 2026-07-08 8× runaway on #3319). Keyed on the stable reviewed-head job
+  // key inside the per-(repo,PR) ledger, so head churn from a hammer that moves
+  // the head cannot reset the lifetime count. A genuinely never-spawned dispatch
+  // (deploy bounce / branch-holder / transient / admit refusal) does NOT call
+  // this — that fail-safe is preserved.
+  const recordHammerLaunchAgainstCap = (spawnPath) => {
+    if (workerClass !== 'hammer') return;
+    try {
+      recordHammerRetryDispatch(rootDir, { repo, prNumber }, {
+        jobKey: reviewedSha,
+        headSha: targetRemediationSha,
+        lifetimeDispatchCeiling: normalizeHammerLifetimeDispatchCeiling(
+          cfg?.hammerLifetimeDispatchCeiling,
+        ),
+        now: dispatchContext.dispatchedAt,
+      });
+    } catch (capErr) {
+      // Best-effort: a ledger write failure must never undo a live dispatch.
+      logger?.error?.(JSON.stringify({
+        event: 'ama_closer.hammer_retry_cap_record_failed',
+        repo,
+        prNumber,
+        spawnPath,
+        error: capErr?.message || String(capErr),
+      }));
+    }
+  };
+
   let execResult;
   let transientRetryIndex = 0;
   let samePrHammerHolderRetryUsed = false;
@@ -3429,6 +3463,14 @@ export async function maybeDispatchAmaCloser({
       });
       const branchHolderBlockExhausted = branchHolderBlocked
         && Number(updatedDispatchRecord?.branchHolderBlockCount || 0) >= AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND;
+      // A worker DID spawn (hq emitted an lrq/dispatchId) even though the launch
+      // call surfaced as an error — the classic `worker_killed`-shortly-after-spawn
+      // shape. Count it against the per-PR firing ceiling so a hammer that spawns
+      // then dies early cannot re-fire forever. Branch-holder / transient / plain
+      // dispatch-failed never spawned a worker and are intentionally NOT counted.
+      if (ambiguousLaunch) {
+        recordHammerLaunchAgainstCap('ambiguous-launch-spawned');
+      }
       let releasedPendingLease = false;
       let releasePendingLeaseError = null;
       if (!ambiguousLaunch) {
@@ -3534,30 +3576,10 @@ export async function maybeDispatchAmaCloser({
   // Count this genuine hammer launch against the per-PR retry cap ledger. Keyed on
   // the stable reviewed-head job key so the count accumulates across the head
   // churn a hammer causes (the per-head dispatch record resets on every head move;
-  // this does not). Placed on the confirmed-launch path only: lease-held /
-  // dispatch-failed / merged-signal / interrupted-mid-launch returns never reach
-  // here, so only real hammer workers that then fail to close accumulate toward
-  // the cap.
-  if (workerClass === 'hammer') {
-    try {
-      recordHammerRetryDispatch(rootDir, { repo, prNumber }, {
-        jobKey: reviewedSha,
-        headSha: targetRemediationSha,
-        lifetimeDispatchCeiling: normalizeHammerLifetimeDispatchCeiling(
-          cfg?.hammerLifetimeDispatchCeiling,
-        ),
-        now: dispatchContext.dispatchedAt,
-      });
-    } catch (capErr) {
-      // Best-effort: a ledger write failure must never undo a live dispatch.
-      logger?.error?.(JSON.stringify({
-        event: 'ama_closer.hammer_retry_cap_record_failed',
-        repo,
-        prNumber,
-        error: capErr?.message || String(capErr),
-      }));
-    }
-  }
+  // this does not). The ambiguous-launch path above ALSO counts (a worker that
+  // spawned then died early); only genuinely never-spawned returns (lease-held /
+  // dispatch-failed / branch-holder / transient / merged-signal) escape the count.
+  recordHammerLaunchAgainstCap('confirmed-launch');
 
   return {
     dispatched: true,

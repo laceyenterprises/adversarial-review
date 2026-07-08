@@ -38,7 +38,8 @@
 // interval (120s) so a temporarily-slow tick doesn't reclaim a healthy
 // worker.
 
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, promises as fsPromises, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import {
   listInProgressFollowUpJobs,
@@ -106,6 +107,23 @@ function isTransientDirtyPushError(err) {
   ].some((needle) => text.includes(needle));
 }
 
+function isDirtyMergeConflictError(err) {
+  const text = `${err?.message || ''}\n${err?.stderr || ''}\n${err?.stdout || ''}`.toLowerCase();
+  return text.includes('conflict') || text.includes('merge failed') || text.includes('automatic merge failed');
+}
+
+function isTransientDirtyMergeError(err) {
+  const text = `${err?.message || ''}\n${err?.stderr || ''}\n${err?.stdout || ''}`.toLowerCase();
+  return [
+    'index.lock',
+    'unable to create',
+    'resource temporarily unavailable',
+    'temporarily unavailable',
+    'input/output error',
+    ' eio',
+  ].some((needle) => text.includes(needle));
+}
+
 async function pushDirtyMergeWithRetry({
   workspaceDir,
   branch,
@@ -135,13 +153,18 @@ async function pushDirtyMergeWithRetry({
   throw lastError;
 }
 
-async function fetchDirtyMergeBaseWithRetry({
+async function fetchDirtyMergeRefsWithRetry({
   workspaceDir,
-  baseBranch,
+  refs,
   execFileImpl,
   retryDelaysMs = DIRTY_MERGE_PUSH_RETRY_DELAYS_MS,
 }) {
-  const args = ['-C', workspaceDir, 'fetch', '--prune', 'origin', baseBranch];
+  const normalizedRefs = [...new Set((refs || []).map(normalizeBranchName).filter(Boolean))];
+  if (normalizedRefs.length === 0) {
+    throw new Error('DIRTY pre-spawn gate requires at least one git ref to fetch');
+  }
+  const refspecs = normalizedRefs.map((ref) => `+refs/heads/${ref}:refs/remotes/origin/${ref}`);
+  const args = ['-C', workspaceDir, 'fetch', '--prune', 'origin', ...refspecs];
   const delays = [0, ...retryDelaysMs];
   let lastError = null;
   for (let attempt = 0; attempt < delays.length; attempt += 1) {
@@ -153,6 +176,35 @@ async function fetchDirtyMergeBaseWithRetry({
       lastError = err;
       if (!isTransientDirtyPushError(err) || attempt === delays.length - 1) {
         err.dirtyFetchAttempts = attempt + 1;
+        throw err;
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function mergeDirtyBaseWithRetry({
+  worktreeDir,
+  baseBranch,
+  execFileImpl,
+  retryDelaysMs = DIRTY_MERGE_PUSH_RETRY_DELAYS_MS,
+}) {
+  const args = ['-C', worktreeDir, 'merge', '--no-edit', `origin/${baseBranch}`];
+  const delays = [0, ...retryDelaysMs];
+  let lastError = null;
+  for (let attempt = 0; attempt < delays.length; attempt += 1) {
+    if (delays[attempt] > 0) await sleep(delays[attempt]);
+    try {
+      const result = await execFileImpl('git', args, { maxBuffer: 10 * 1024 * 1024 });
+      return { merged: true, attempts: attempt + 1, result };
+    } catch (err) {
+      lastError = err;
+      if (isDirtyMergeConflictError(err)) {
+        err.dirtyMergeAttempts = attempt + 1;
+        throw err;
+      }
+      if (!isTransientDirtyMergeError(err) || attempt === delays.length - 1) {
+        err.dirtyMergeAttempts = attempt + 1;
         throw err;
       }
     }
@@ -173,27 +225,48 @@ async function attemptDirtyMerge({
   if (!resolvedBase) {
     throw new Error('DIRTY pre-spawn gate requires baseBranch');
   }
-  const fetch = await fetchDirtyMergeBaseWithRetry({
+  const resolvedBranch = normalizeBranchName(branch);
+  if (!resolvedBranch) {
+    throw new Error('DIRTY pre-spawn gate requires a PR branch name');
+  }
+  const fetch = await fetchDirtyMergeRefsWithRetry({
     workspaceDir,
-    baseBranch: resolvedBase,
+    refs: [resolvedBase, resolvedBranch],
     execFileImpl,
   });
+  const worktreeParent = mkdtempSync(join(tmpdir(), 'dirty-pr-merge-'));
+  const worktreeDir = join(worktreeParent, 'worktree');
   try {
-    await execFileImpl('git', ['-C', workspaceDir, 'merge', `origin/${resolvedBase}`], {
+    await execFileImpl('git', ['-C', workspaceDir, 'worktree', 'add', '--detach', worktreeDir, `origin/${resolvedBranch}`], {
       maxBuffer: 10 * 1024 * 1024,
     });
-    const push = await pushDirtyMergeWithRetry({
-      workspaceDir,
-      branch,
+    const merge = await mergeDirtyBaseWithRetry({
+      worktreeDir,
+      baseBranch: resolvedBase,
       execFileImpl,
     });
-    return { outcome: 'clean-merged', fetch, push };
+    try {
+      const push = await pushDirtyMergeWithRetry({
+        workspaceDir: worktreeDir,
+        branch: resolvedBranch,
+        execFileImpl,
+      });
+      return { outcome: 'clean-merged', fetch, merge, push };
+    } catch (err) {
+      err.dirtyMergeWorktreeCleaned = true;
+      throw err;
+    }
   } catch (err) {
-    const text = `${err?.message || ''}\n${err?.stderr || ''}\n${err?.stdout || ''}`.toLowerCase();
-    if (text.includes('conflict') || text.includes('merge failed') || text.includes('automatic merge failed')) {
-      return { outcome: 'conflict', error: err };
+    if (isDirtyMergeConflictError(err)) {
+      const conflictedFiles = await listConflictedFiles({ workspaceDir: worktreeDir, execFileImpl });
+      return { outcome: 'conflict', error: err, conflictedFiles };
     }
     throw err;
+  } finally {
+    await execFileImpl('git', ['-C', workspaceDir, 'worktree', 'remove', '--force', worktreeDir], {
+      maxBuffer: 10 * 1024 * 1024,
+    }).catch(() => {});
+    rmSync(worktreeParent, { recursive: true, force: true });
   }
 }
 
@@ -291,7 +364,7 @@ function owningModuleRoot(filePath) {
   return match ? `${match[1]}/${match[2]}` : null;
 }
 
-function resolveModuleSpecPath(repoRoot, moduleRoot) {
+async function resolveModuleSpecPath(repoRoot, moduleRoot) {
   if (!moduleRoot) return null;
   const localSpec = join(repoRoot, moduleRoot, 'SPEC.md');
   if (existsSync(localSpec)) return localSpec;
@@ -304,12 +377,12 @@ function resolveModuleSpecPath(repoRoot, moduleRoot) {
 
   const projectsDir = join(repoRoot, 'projects');
   try {
-    for (const projectName of readdirSync(projectsDir)) {
+    for (const projectName of await fsPromises.readdir(projectsDir)) {
       const planPath = join(projectsDir, projectName, 'plan.json');
       if (!existsSync(planPath)) continue;
       let parsed;
       try {
-        parsed = JSON.parse(readFileSync(planPath, 'utf8'));
+        parsed = JSON.parse(await fsPromises.readFile(planPath, 'utf8'));
       } catch {
         continue;
       }
@@ -335,7 +408,7 @@ function makeSpecEvidenceEntry({ kind, path: absPath, repoRoot }) {
   };
 }
 
-function resolveDirtyConflictSpecContext({
+async function resolveDirtyConflictSpecContext({
   repoRoot,
   job,
   conflictedFiles,
@@ -364,7 +437,7 @@ function resolveDirtyConflictSpecContext({
     if (existsSync(agentsPath)) {
       addEntry(makeSpecEvidenceEntry({ kind: 'module-agents', path: agentsPath, repoRoot }));
     }
-    const specPath = resolveModuleSpecPath(repoRoot, moduleRoot);
+    const specPath = await resolveModuleSpecPath(repoRoot, moduleRoot);
     if (specPath) {
       addEntry(makeSpecEvidenceEntry({ kind: 'module-spec', path: specPath, repoRoot }));
     } else {
@@ -656,12 +729,14 @@ async function applyPreSpawnLifecycleGate({
     }
 
     if (dirtyMerge?.outcome === 'conflict') {
-      const conflictedFiles = await listConflictedFilesImpl({ workspaceDir, execFileImpl });
+      const conflictedFiles = Array.isArray(dirtyMerge.conflictedFiles)
+        ? dirtyMerge.conflictedFiles
+        : await listConflictedFilesImpl({ workspaceDir, execFileImpl });
       await execFileImpl('git', ['-C', workspaceDir, 'merge', '--abort'], {
         maxBuffer: 10 * 1024 * 1024,
       }).catch(() => {});
       const repoRoot = workspaceDir ? resolve(workspaceDir) : resolve(rootDir || '.');
-      const specContext = resolveDirtyConflictSpecContextImpl({
+      const specContext = await resolveDirtyConflictSpecContextImpl({
         repoRoot,
         job,
         conflictedFiles,

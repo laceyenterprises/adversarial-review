@@ -631,10 +631,83 @@ test('attemptDirtyMerge retries transient fetch failures before merging and push
 
   assert.equal(result.outcome, 'clean-merged');
   assert.equal(result.fetch.attempts, 2);
-  assert.deepEqual(calls.map((call) => call.args[2]), ['fetch', 'fetch', 'merge', 'push']);
+  assert.deepEqual(calls.map((call) => call.args[2]), [
+    'fetch',
+    'fetch',
+    'worktree',
+    'merge',
+    'push',
+    'worktree',
+  ]);
+  const fetchArgs = calls[1].args;
+  assert.ok(fetchArgs.some((arg) => arg.includes('refs/heads/main')));
+  assert.ok(fetchArgs.some((arg) => arg.includes('refs/heads/feature/retry-fetch')));
+  const worktreeAdd = calls.find((call) => call.args[2] === 'worktree' && call.args.includes('add'));
+  assert.ok(worktreeAdd.args.includes('--detach'));
+  assert.ok(worktreeAdd.args.includes('origin/feature/retry-fetch'));
+  const pushCall = calls.find((call) => call.args[2] === 'push');
+  assert.notEqual(pushCall.args[1], workspaceDir, 'push runs from isolated worktree, not daemon checkout');
+  assert.ok(calls.some((call) => call.args[2] === 'worktree' && call.args.includes('remove')));
 });
 
-test('resolveDirtyConflictSpecContext skips malformed project plans while finding later module specs', () => {
+test('attemptDirtyMerge captures conflicts from isolated worktree and removes it', async () => {
+  const rootDir = makeRoot();
+  const workspaceDir = path.join(rootDir, 'workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const calls = [];
+
+  const result = await attemptDirtyMerge({
+    workspaceDir,
+    baseBranch: 'main',
+    branch: 'feature/conflict',
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args[2] === 'merge') {
+        const err = new Error('Automatic merge failed');
+        err.stderr = 'CONFLICT (content): Merge conflict in modules/worker-pool/index.js';
+        throw err;
+      }
+      if (args[2] === 'diff') {
+        return { stdout: 'modules/worker-pool/index.js\n', stderr: '' };
+      }
+      return { stdout: 'ok', stderr: '' };
+    },
+  });
+
+  assert.equal(result.outcome, 'conflict');
+  assert.deepEqual(result.conflictedFiles, ['modules/worker-pool/index.js']);
+  assert.ok(calls.some((call) => call.args[2] === 'worktree' && call.args.includes('add')));
+  assert.ok(calls.some((call) => call.args[2] === 'diff'));
+  assert.ok(calls.some((call) => call.args[2] === 'worktree' && call.args.includes('remove')));
+});
+
+test('attemptDirtyMerge retries transient local merge lock failures', async () => {
+  const rootDir = makeRoot();
+  const workspaceDir = path.join(rootDir, 'workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const calls = [];
+
+  const result = await attemptDirtyMerge({
+    workspaceDir,
+    baseBranch: 'main',
+    branch: 'feature/retry-merge',
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args[2] === 'merge' && calls.filter((call) => call.args[2] === 'merge').length === 1) {
+        const err = new Error('Unable to create .git/index.lock');
+        err.stderr = 'fatal: Unable to create .git/index.lock: File exists.';
+        throw err;
+      }
+      return { stdout: 'ok', stderr: '' };
+    },
+  });
+
+  assert.equal(result.outcome, 'clean-merged');
+  assert.equal(result.merge.attempts, 2);
+  assert.equal(calls.filter((call) => call.args[2] === 'merge').length, 2);
+});
+
+test('resolveDirtyConflictSpecContext skips malformed project plans while finding later module specs', async () => {
   const repoRoot = makeRoot();
   mkdirSync(path.join(repoRoot, 'projects', 'aaa-bad'), { recursive: true });
   writeFileSync(path.join(repoRoot, 'projects', 'aaa-bad', 'plan.json'), '{not-json', 'utf8');
@@ -650,7 +723,7 @@ test('resolveDirtyConflictSpecContext skips malformed project plans while findin
     'utf8'
   );
 
-  const context = resolveDirtyConflictSpecContext({
+  const context = await resolveDirtyConflictSpecContext({
     repoRoot,
     job: {},
     conflictedFiles: ['modules/worker-pool/lib/python/cwp_dispatch/goal_lineage.py'],

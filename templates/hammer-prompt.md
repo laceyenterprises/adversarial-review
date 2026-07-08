@@ -964,7 +964,7 @@ ham_run_pph_ci_mirror_with_timeout() {
     while IFS= read -r HAM_PPH_FILE; do
       [ -n "$HAM_PPH_FILE" ] && HAM_PPH_FILES+=("$HAM_PPH_FILE")
     done < <(ham_changed_files_for_local_ci)
-    perl -e 'alarm shift; exec @ARGV' "${HAM_LOCAL_CI_TIMEOUT_SECONDS:-3600}" python3 scripts/ci-mirror/run-ci-mirror.py --repo-root . --files "${HAM_PPH_FILES[@]}"
+    perl -e 'alarm shift; exec @ARGV' "${HAM_LOCAL_CI_TIMEOUT_SECONDS:-3600}" python3 scripts/ci-mirror/run-ci-mirror.py --repo-root . --match-head-commit "$POST_REMEDIATION_SHA" --files "${HAM_PPH_FILES[@]}"
     HAM_PPH_EXIT=$?
   fi
   rm -f "$HAM_PPH_STDIN"

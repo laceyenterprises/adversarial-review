@@ -181,6 +181,77 @@ test('DCR-02: default live probe treats git ls-remote exit 2 as pruned branch', 
   assert.deepEqual(calls.map((call) => call.cmd), ['gh', 'git']);
 });
 
+test('DCR-02: default live probe checks fork head repository branches', async () => {
+  const calls = [];
+
+  const result = await __testables__.defaultAmaLivePrProbe({
+    repo: 'acme/repo',
+    prNumber: 404,
+    retryDelaysMs: [],
+    sleepImpl: async () => {},
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === 'gh') {
+        return {
+          stdout: JSON.stringify({
+            state: 'OPEN',
+            headRefName: 'codex/live',
+            headRefOid: HEAD,
+            headRepository: { nameWithOwner: 'contributor/repo' },
+          }),
+          stderr: '',
+        };
+      }
+      if (cmd === 'git') {
+        return { stdout: `${HEAD}\trefs/heads/codex/live\n`, stderr: '' };
+      }
+      assert.fail(`unexpected command: ${cmd}`);
+    },
+  });
+
+  assert.equal(result.state, 'OPEN');
+  assert.equal(result.headBranchExists, true);
+  assert.deepEqual(calls.map((call) => call.cmd), ['gh', 'git']);
+  assert.ok(calls[0].args.includes('state,headRefName,headRefOid,headRepository'));
+  assert.deepEqual(calls[1].args, [
+    'ls-remote',
+    '--exit-code',
+    '--heads',
+    'https://github.com/contributor/repo.git',
+    'codex/live',
+  ]);
+});
+
+test('DCR-02: default live probe treats missing head repository as missing branch', async () => {
+  const calls = [];
+
+  const result = await __testables__.defaultAmaLivePrProbe({
+    repo: 'acme/repo',
+    prNumber: 404,
+    retryDelaysMs: [],
+    sleepImpl: async () => {},
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === 'gh') {
+        return {
+          stdout: JSON.stringify({
+            state: 'OPEN',
+            headRefName: 'codex/deleted-fork',
+            headRefOid: HEAD,
+            headRepository: null,
+          }),
+          stderr: '',
+        };
+      }
+      assert.fail(`unexpected command: ${cmd}`);
+    },
+  });
+
+  assert.equal(result.state, 'OPEN');
+  assert.equal(result.headBranchExists, false);
+  assert.deepEqual(calls.map((call) => call.cmd), ['gh']);
+});
+
 test('DCR-02: default live probe retries transient gh and git failures', async () => {
   const calls = [];
   const sleeps = [];

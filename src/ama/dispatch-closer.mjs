@@ -233,6 +233,25 @@ function githubRepoHttpUrl(repo) {
   return `https://github.com/${slug}.git`;
 }
 
+function githubHeadRepositoryHttpUrl(headRepository) {
+  if (typeof headRepository === 'string') {
+    const value = headRepository.trim();
+    if (/^https?:\/\//u.test(value)) return value;
+    return githubRepoHttpUrl(value);
+  }
+  if (!headRepository || typeof headRepository !== 'object') return null;
+  const httpUrl = String(headRepository.url || '').trim();
+  if (httpUrl) return httpUrl;
+  const nameWithOwner = String(headRepository.nameWithOwner || '').trim();
+  if (nameWithOwner) return githubRepoHttpUrl(nameWithOwner);
+  const name = String(headRepository.name || '').trim();
+  const owner = typeof headRepository.owner === 'object' && headRepository.owner
+    ? String(headRepository.owner.login || headRepository.owner.name || '').trim()
+    : '';
+  if (owner && name) return githubRepoHttpUrl(`${owner}/${name}`);
+  return null;
+}
+
 async function execAmaLivePrProbeCommandWithTransientRetry(
   execFileImpl,
   cmd,
@@ -269,7 +288,7 @@ async function defaultAmaLivePrProbe({
     '--repo',
     repo,
     '--json',
-    'state,headRefName,headRefOid',
+    'state,headRefName,headRefOid,headRepository',
   ], {
     env: process.env,
     timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS,
@@ -283,8 +302,12 @@ async function defaultAmaLivePrProbe({
   let headBranchExists = null;
   let headBranchProbeError = null;
   const headRefName = String(payload?.headRefName || '').trim();
-  const repoUrl = githubRepoHttpUrl(repo);
-  if (state === 'OPEN' && headRefName && repoUrl) {
+  const hasHeadRepository = Object.prototype.hasOwnProperty.call(payload || {}, 'headRepository');
+  const repoUrl = githubHeadRepositoryHttpUrl(payload?.headRepository)
+    || (!hasHeadRepository ? githubRepoHttpUrl(repo) : null);
+  if (state === 'OPEN' && headRefName && hasHeadRepository && payload?.headRepository === null) {
+    headBranchExists = false;
+  } else if (state === 'OPEN' && headRefName && repoUrl) {
     try {
       const probe = await execAmaLivePrProbeCommandWithTransientRetry(execFileImpl, 'git', [
         'ls-remote',

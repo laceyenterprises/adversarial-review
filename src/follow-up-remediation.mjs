@@ -6336,6 +6336,9 @@ async function consumeNextFollowUpJob({
       rootDir,
       job: claimed.job,
       jobPath: claimed.jobPath,
+      workspaceDir,
+      promptPath,
+      baseBranch: claimed.job.baseBranch,
       resolvePRLifecycleImpl,
       execFileImpl,
       stopConsumedJobWithCommentImpl: stopConsumedJobWithComment,
@@ -6350,6 +6353,9 @@ async function consumeNextFollowUpJob({
         job: prTerminalCheck.job,
         jobPath: prTerminalCheck.jobPath,
       };
+    }
+    if (prTerminalCheck.job) {
+      claimed.job = prTerminalCheck.job;
     }
 
     const worker = hqDispatchEnabled
@@ -6386,6 +6392,7 @@ async function consumeNextFollowUpJob({
       spawnedAt: now(),
       worker: {
         ...worker,
+        dirtyMergeResolution: claimed.job?.remediationWorker?.dirtyMergeResolution || null,
         pushTokenCapability: workflowPushPreflight?.capability
           ? {
               source: workflowPushPreflight.capability.source,

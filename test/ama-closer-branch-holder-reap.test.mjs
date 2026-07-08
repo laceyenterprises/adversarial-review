@@ -146,8 +146,9 @@ test('teardown passes hqRoot through to parser and cleanup commands', async () =
     `${hqRoot}/workers/hammer-ama-pr-3219/agent-os`,
     `${hqRoot}/workers/${codingWorkerId}/agent-os`,
   ]);
-  assert.deepEqual(calls.map(call => call.cmd), ['/opt/hq/bin/hq', 'git', '/opt/hq/bin/hq', 'git']);
-  assert.deepEqual(calls[0].args, [
+  assert.deepEqual(calls.map(call => call.cmd), ['git', '/opt/hq/bin/hq', 'git', '/opt/hq/bin/hq']);
+  assert.equal(calls[0].args[1], `${hqRoot}/repos/agent-os`);
+  assert.deepEqual(calls[1].args, [
     'worker',
     'tear-down',
     'hammer-ama-pr-3219',
@@ -155,8 +156,8 @@ test('teardown passes hqRoot through to parser and cleanup commands', async () =
     '--root',
     hqRoot,
   ]);
-  assert.equal(calls[1].args[1], `${hqRoot}/repos/agent-os`);
-  assert.deepEqual(calls[2].args, [
+  assert.equal(calls[2].args[1], `${hqRoot}/repos/agent-os`);
+  assert.deepEqual(calls[3].args, [
     'worker',
     'tear-down',
     codingWorkerId,
@@ -164,7 +165,6 @@ test('teardown passes hqRoot through to parser and cleanup commands', async () =
     '--root',
     hqRoot,
   ]);
-  assert.equal(calls[3].args[1], `${hqRoot}/repos/agent-os`);
 });
 
 function writeBranchHolderWorker({ hqRoot, workerId, launchRequestId }) {
@@ -216,8 +216,8 @@ test('terminal coding branch-holder is torn down and emits release telemetry', a
   });
 
   assert.equal(result.ok, true);
-  assert.deepEqual(calls.map(call => call.cmd), ['/opt/hq/bin/hq', 'git']);
-  assert.deepEqual(calls[0].args, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot]);
+  assert.deepEqual(calls.map(call => call.cmd), ['git', '/opt/hq/bin/hq']);
+  assert.deepEqual(calls[1].args, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot]);
   assert.equal(logs.some(log => (
     log.event === 'branch_holder_deadlock_released'
     && log.workerId === workerId
@@ -299,7 +299,51 @@ test('terminal coding branch-holder teardown failure returns fallback result wit
     && attempt.ok === false
     && attempt.error === 'boom'
   )), true);
-  assert.equal(result.attempts.some(attempt => attempt.action === 'git-worktree-remove'), false);
+  assert.equal(result.attempts.some(attempt => (
+    attempt.action === 'git-worktree-remove'
+    && attempt.ok === true
+  )), true);
+});
+
+test('terminal coding branch-holder git cleanup failure preserves worker metadata for retry', async () => {
+  const hqRoot = join(tmpdir(), `agent-os-hq-git-cleanup-fails-${Date.now()}`);
+  const workerId = 'codex-lsh-03-git-cleanup-fails';
+  writeBranchHolderWorker({ hqRoot, workerId, launchRequestId: 'lrq_git_cleanup_fails' });
+  const err = {
+    stderr: `fatal: 'codex-lsh-03-git-cleanup-fails/LSH-03' is already used by worktree at '${hqRoot}/workers/${workerId}/agent-os'`,
+  };
+  const calls = [];
+
+  const result = await __testables__.teardownSamePrHammerHolder({
+    err,
+    prNumber: 780,
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      const failure = new Error('git cleanup failed');
+      failure.stderr = 'fatal: worktree remove failed';
+      throw failure;
+    },
+    readLatestWorkerRunStatusImpl: async () => ({
+      ok: true,
+      row: {
+        launch_request_id: 'lrq_git_cleanup_fails',
+        run_id: `run-${workerId}`,
+        status: 'failed',
+      },
+    }),
+    logger: { warn() {} },
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(calls.map(call => call.cmd), ['git']);
+  assert.equal(result.attempts.some(attempt => (
+    attempt.action === 'git-worktree-remove'
+    && attempt.ok === false
+    && attempt.error === 'fatal: worktree remove failed'
+  )), true);
+  assert.equal(result.attempts.some(attempt => attempt.action === 'hq-worker-tear-down'), false);
 });
 
 test('missing branch-holder metadata files are treated as unresolved state', async () => {

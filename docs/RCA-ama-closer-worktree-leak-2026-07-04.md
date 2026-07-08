@@ -34,7 +34,7 @@ This change adds a closer-worktree reaper to the long-lived follow-up daemon tic
 
 The reaper is bounded per tick, fail-open, and logs a summary as `closer-worktree-reap: scanned=... reaped=... skipped=...`. It does not run broad `git worktree prune`.
 
-The AMA closer provision path now also handles same-PR hammer collisions directly. If a branch-holder failure points at `hammer-ama-pr-<samePR>-*`, the closer attempts targeted `git worktree remove --force <path>` and `hq worker tear-down --force`, then retries dispatch once. If that cleanup cannot clear the holder, the existing branch-holder debt accounting remains in force.
+The AMA closer provision path now also handles same-PR hammer collisions directly. If a branch-holder failure points at a same-PR `hammer-ama-pr-<samePR>-*` holder or a terminal coding-worker holder, the closer first attempts targeted `git worktree remove --force <path>` against that worker's `agent-os` checkout, then runs `hq worker tear-down --force` only after the git removal succeeds, and finally retries dispatch once. Keeping git cleanup first leaves `workspace.json` and run metadata available for the next preflight if git removal fails; if cleanup cannot clear the holder, the existing branch-holder debt accounting remains in force.
 
 ## Regression Coverage
 

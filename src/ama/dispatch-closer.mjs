@@ -1330,7 +1330,35 @@ async function teardownSamePrHammerHolder({
       });
     }
 
-    let tearDownOk = false;
+    try {
+      await execFileImpl('git', [
+        '-C',
+        join(hqRoot, 'repos', AGENT_OS_TOOLING_REPO),
+        'worktree',
+        'remove',
+        '--force',
+        worktreePath,
+      ], {
+        env,
+        maxBuffer: 1024 * 1024,
+        timeout: 60_000,
+        killSignal: 'SIGTERM',
+      });
+      attempts.push({
+        worktreePath,
+        action: 'git-worktree-remove',
+        ok: true,
+      });
+    } catch (removeErr) {
+      attempts.push({
+        worktreePath,
+        action: 'git-worktree-remove',
+        ok: false,
+        error: String(removeErr?.stderr || removeErr?.message || removeErr),
+      });
+      continue;
+    }
+
     try {
       await execFileImpl(hqPath, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot], {
         env,
@@ -1338,7 +1366,6 @@ async function teardownSamePrHammerHolder({
         timeout: 60_000,
         killSignal: 'SIGTERM',
       });
-      tearDownOk = true;
       attempts.push({ worktreePath, workerId, action: 'hq-worker-tear-down', ok: true });
       if (!isSamePrHammerCloserWorkerId(workerId, prNumber)) {
         logBranchHolderDeadlockReleased({
@@ -1355,7 +1382,6 @@ async function teardownSamePrHammerHolder({
     } catch (tearDownErr) {
       const detail = String(tearDownErr?.stderr || tearDownErr?.message || tearDownErr);
       const absent = isWorkerTearDownNotFoundError(detail);
-      tearDownOk = absent;
       attempts.push({
         worktreePath,
         workerId,
@@ -1376,33 +1402,6 @@ async function teardownSamePrHammerHolder({
           releaseAction: 'hq-worker-tear-down-force-already-absent',
         });
       }
-    }
-    if (!tearDownOk) {
-      continue;
-    }
-
-    try {
-      await execFileImpl('git', [
-        '-C',
-        join(hqRoot, 'repos', AGENT_OS_TOOLING_REPO),
-        'worktree',
-        'remove',
-        '--force',
-        worktreePath,
-      ], {
-        env,
-        maxBuffer: 1024 * 1024,
-        timeout: 60_000,
-        killSignal: 'SIGTERM',
-      });
-      attempts.push({ worktreePath, action: 'git-worktree-remove', ok: true });
-    } catch (removeErr) {
-      attempts.push({
-        worktreePath,
-        action: 'git-worktree-remove',
-        ok: false,
-        error: String(removeErr?.stderr || removeErr?.message || removeErr),
-      });
     }
   }
 

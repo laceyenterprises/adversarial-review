@@ -258,6 +258,45 @@ test('pre-provision reclaim does not retry non-transient teardown failures and l
   }]);
 });
 
+test('pre-provision reclaim logs exhausted transient retries before provisioning', async () => {
+  const calls = [];
+  const sleeps = [];
+  const warnings = [];
+  const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    repo: 'owner/agent-os',
+    prNumber: 3312,
+    workerClass: 'hammer',
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot: HQ_ROOT,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      const err = new Error('spawn ETIMEDOUT');
+      err.code = 'ETIMEDOUT';
+      throw err;
+    },
+    existsSyncImpl: (path) => path === '/Users/airlock/agent-os-hq/workers/hammer-ama-pr-3312/agent-os',
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    logger: { info() {}, warn(line) { warnings.push(JSON.parse(line)); } },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(sleeps, [250, 1000]);
+  assert.deepEqual(warnings, [{
+    event: 'closer_provision_collision_reclaim_failed',
+    repo: 'owner/agent-os',
+    prNumber: 3312,
+    workerId: 'hammer-ama-pr-3312',
+    worktreePath: '/Users/airlock/agent-os-hq/workers/hammer-ama-pr-3312/agent-os',
+    action: 'hq-worker-tear-down',
+    force: true,
+    status: 'failed',
+    error: 'spawn ETIMEDOUT',
+    transient: true,
+    attempts: 3,
+  }]);
+});
+
 test('pre-provision reclaim reports missing hqRoot separately from invalid worker id', async () => {
   const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
     repo: 'owner/agent-os',

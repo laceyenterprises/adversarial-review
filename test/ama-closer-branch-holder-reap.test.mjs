@@ -305,6 +305,101 @@ test('terminal coding branch-holder teardown failure returns fallback result wit
   )), true);
 });
 
+test('terminal coding branch-holder retries transient worker teardown before succeeding', async () => {
+  const hqRoot = join(tmpdir(), `agent-os-hq-teardown-retry-${Date.now()}`);
+  const workerId = 'codex-lsh-03-teardown-retry';
+  writeBranchHolderWorker({ hqRoot, workerId, launchRequestId: 'lrq_teardown_retry' });
+  const err = {
+    stderr: `fatal: 'codex-lsh-03-teardown-retry/LSH-03' is already used by worktree at '${hqRoot}/workers/${workerId}/agent-os'`,
+  };
+  const calls = [];
+  const sleeps = [];
+
+  const result = await __testables__.teardownSamePrHammerHolder({
+    err,
+    prNumber: 781,
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === 'git') return { stdout: '', stderr: '' };
+      if (calls.filter(call => call.cmd === '/opt/hq/bin/hq').length < 3) {
+        const failure = new Error('database is locked');
+        failure.stderr = 'database is locked';
+        throw failure;
+      }
+      return { stdout: '', stderr: '' };
+    },
+    readLatestWorkerRunStatusImpl: async () => ({
+      ok: true,
+      row: {
+        launch_request_id: 'lrq_teardown_retry',
+        run_id: `run-${workerId}`,
+        status: 'cancelled',
+      },
+    }),
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    logger: { warn() {} },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls.map(call => call.cmd), ['git', '/opt/hq/bin/hq', '/opt/hq/bin/hq', '/opt/hq/bin/hq']);
+  assert.deepEqual(sleeps, [250, 1000]);
+  assert.equal(result.attempts.some(attempt => (
+    attempt.action === 'hq-worker-tear-down'
+    && attempt.workerId === workerId
+    && attempt.ok === true
+    && attempt.attempts === 3
+  )), true);
+});
+
+test('terminal coding branch-holder exhausts transient worker teardown retries', async () => {
+  const hqRoot = join(tmpdir(), `agent-os-hq-teardown-exhausted-${Date.now()}`);
+  const workerId = 'codex-lsh-03-teardown-exhausted';
+  writeBranchHolderWorker({ hqRoot, workerId, launchRequestId: 'lrq_teardown_exhausted' });
+  const err = {
+    stderr: `fatal: 'codex-lsh-03-teardown-exhausted/LSH-03' is already used by worktree at '${hqRoot}/workers/${workerId}/agent-os'`,
+  };
+  const calls = [];
+  const sleeps = [];
+
+  const result = await __testables__.teardownSamePrHammerHolder({
+    err,
+    prNumber: 782,
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === 'git') return { stdout: '', stderr: '' };
+      const failure = new Error('resource temporarily unavailable');
+      failure.stderr = 'resource temporarily unavailable';
+      throw failure;
+    },
+    readLatestWorkerRunStatusImpl: async () => ({
+      ok: true,
+      row: {
+        launch_request_id: 'lrq_teardown_exhausted',
+        run_id: `run-${workerId}`,
+        status: 'failed',
+      },
+    }),
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    logger: { warn() {} },
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(calls.map(call => call.cmd), ['git', '/opt/hq/bin/hq', '/opt/hq/bin/hq', '/opt/hq/bin/hq']);
+  assert.deepEqual(sleeps, [250, 1000]);
+  assert.equal(result.attempts.some(attempt => (
+    attempt.action === 'hq-worker-tear-down'
+    && attempt.workerId === workerId
+    && attempt.ok === false
+    && attempt.transient === true
+    && attempt.attempts === 3
+    && attempt.error === 'resource temporarily unavailable'
+  )), true);
+});
+
 test('terminal coding branch-holder git cleanup failure preserves worker metadata for retry', async () => {
   const hqRoot = join(tmpdir(), `agent-os-hq-git-cleanup-fails-${Date.now()}`);
   const workerId = 'codex-lsh-03-git-cleanup-fails';

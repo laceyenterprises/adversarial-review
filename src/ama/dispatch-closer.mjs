@@ -1287,6 +1287,7 @@ async function teardownSamePrHammerHolder({
   ledgerDbPath = null,
   env = process.env,
   readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
+  sleepImpl = sleep,
 }) {
   const worktreePaths = samePrHammerHolderWorktreePaths(err, prNumber, hqRoot);
   if (!worktreePaths.length) {
@@ -1359,49 +1360,73 @@ async function teardownSamePrHammerHolder({
       continue;
     }
 
-    try {
-      await execFileImpl(hqPath, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot], {
-        env,
-        maxBuffer: 1024 * 1024,
-        timeout: 60_000,
-        killSignal: 'SIGTERM',
-      });
-      attempts.push({ worktreePath, workerId, action: 'hq-worker-tear-down', ok: true });
-      if (!isSamePrHammerCloserWorkerId(workerId, prNumber)) {
-        logBranchHolderDeadlockReleased({
-          logger,
-          repo,
-          prNumber,
-          headSha,
-          workerId,
-          worktreePath,
-          terminality,
-          releaseAction: 'hq-worker-tear-down-force',
+    const tearDownArgs = ['worker', 'tear-down', workerId, '--force', '--root', hqRoot];
+    let releaseAction = null;
+    for (
+      let tearDownAttempt = 0;
+      tearDownAttempt <= AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS.length;
+      tearDownAttempt += 1
+    ) {
+      try {
+        await execFileImpl(hqPath, tearDownArgs, {
+          env,
+          maxBuffer: 1024 * 1024,
+          timeout: 60_000,
+          killSignal: 'SIGTERM',
         });
+        attempts.push({
+          worktreePath,
+          workerId,
+          action: 'hq-worker-tear-down',
+          ok: true,
+          attempts: tearDownAttempt + 1,
+        });
+        releaseAction = 'hq-worker-tear-down-force';
+        break;
+      } catch (tearDownErr) {
+        const detail = String(tearDownErr?.stderr || tearDownErr?.message || tearDownErr);
+        const absent = isWorkerTearDownNotFoundError(detail);
+        if (absent) {
+          attempts.push({
+            worktreePath,
+            workerId,
+            action: 'hq-worker-tear-down',
+            ok: true,
+            alreadyAbsent: true,
+            attempts: tearDownAttempt + 1,
+            error: detail,
+          });
+          releaseAction = 'hq-worker-tear-down-force-already-absent';
+          break;
+        }
+        const transient = isTransientHqDispatchError(tearDownErr);
+        if (transient && tearDownAttempt < AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS.length) {
+          await sleepImpl(AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS[tearDownAttempt]);
+          continue;
+        }
+        attempts.push({
+          worktreePath,
+          workerId,
+          action: 'hq-worker-tear-down',
+          ok: false,
+          transient,
+          attempts: tearDownAttempt + 1,
+          error: detail,
+        });
+        break;
       }
-    } catch (tearDownErr) {
-      const detail = String(tearDownErr?.stderr || tearDownErr?.message || tearDownErr);
-      const absent = isWorkerTearDownNotFoundError(detail);
-      attempts.push({
-        worktreePath,
+    }
+    if (releaseAction && !isSamePrHammerCloserWorkerId(workerId, prNumber)) {
+      logBranchHolderDeadlockReleased({
+        logger,
+        repo,
+        prNumber,
+        headSha,
         workerId,
-        action: 'hq-worker-tear-down',
-        ok: absent,
-        alreadyAbsent: absent,
-        error: detail,
+        worktreePath,
+        terminality,
+        releaseAction,
       });
-      if (absent && !isSamePrHammerCloserWorkerId(workerId, prNumber)) {
-        logBranchHolderDeadlockReleased({
-          logger,
-          repo,
-          prNumber,
-          headSha,
-          workerId,
-          worktreePath,
-          terminality,
-          releaseAction: 'hq-worker-tear-down-force-already-absent',
-        });
-      }
     }
   }
 

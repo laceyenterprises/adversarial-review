@@ -657,6 +657,9 @@ async function applyPreSpawnLifecycleGate({
 
     if (dirtyMerge?.outcome === 'conflict') {
       const conflictedFiles = await listConflictedFilesImpl({ workspaceDir, execFileImpl });
+      await execFileImpl('git', ['-C', workspaceDir, 'merge', '--abort'], {
+        maxBuffer: 10 * 1024 * 1024,
+      }).catch(() => {});
       const repoRoot = workspaceDir ? resolve(workspaceDir) : resolve(rootDir || '.');
       const specContext = resolveDirtyConflictSpecContextImpl({
         repoRoot,

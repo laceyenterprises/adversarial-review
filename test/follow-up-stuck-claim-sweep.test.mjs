@@ -511,6 +511,7 @@ test('applyPreSpawnLifecycleGate: DIRTY conflict writes spec-guided hammer promp
     prNumber: 1233,
     lastHeartbeatAt: '2026-06-01T05:35:00.000Z',
   });
+  const callOrder = [];
 
   const result = await applyPreSpawnLifecycleGate({
     rootDir,
@@ -529,17 +530,27 @@ test('applyPreSpawnLifecycleGate: DIRTY conflict writes spec-guided hammer promp
       prState: 'open',
       mergeStateStatus: 'DIRTY',
     }),
-    execFileImpl: async () => ({ stdout: '', stderr: '' }),
+    execFileImpl: async (cmd, args) => {
+      callOrder.push(['exec', cmd, ...args]);
+      return { stdout: '', stderr: '' };
+    },
     dirtyMergeImpl: async () => ({
       outcome: 'conflict',
       error: Object.assign(new Error('Automatic merge failed'), { stderr: 'CONFLICT (content): modules/worker-pool/lib/python/cwp_dispatch/goal_lineage.py' }),
     }),
-    listConflictedFilesImpl: async () => ['modules/worker-pool/lib/python/cwp_dispatch/goal_lineage.py'],
+    listConflictedFilesImpl: async () => {
+      callOrder.push(['list-conflicts']);
+      return ['modules/worker-pool/lib/python/cwp_dispatch/goal_lineage.py'];
+    },
     now: () => '2026-06-01T05:02:00.000Z',
   });
 
   assert.equal(result.action, 'continue');
   assert.equal(result.reason, 'dirty-conflict-hammer');
+  assert.deepEqual(callOrder.slice(0, 2), [
+    ['list-conflicts'],
+    ['exec', 'git', '-C', workspaceDir, 'merge', '--abort'],
+  ]);
   const prompt = readFileSync(promptPath, 'utf8');
   assert.match(prompt, /DIRTY PR Conflict Remediation HAMMER/);
   assert.match(prompt, /git merge origin\/main/);

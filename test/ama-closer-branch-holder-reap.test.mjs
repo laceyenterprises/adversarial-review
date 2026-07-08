@@ -185,6 +185,96 @@ test('pre-provision reclaim tears down stale self-owned hammer worktree and emit
   }]);
 });
 
+test('pre-provision reclaim retries transient teardown failures before provisioning', async () => {
+  const calls = [];
+  const sleeps = [];
+  const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    repo: 'owner/agent-os',
+    prNumber: 3312,
+    workerClass: 'hammer',
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot: `${HQ_ROOT}  `,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (calls.length < 3) {
+        const err = new Error('resource temporarily unavailable');
+        err.code = 'EAGAIN';
+        throw err;
+      }
+      return { stdout: '', stderr: '' };
+    },
+    existsSyncImpl: (path) => path === '/Users/airlock/agent-os-hq/workers/hammer-ama-pr-3312/agent-os',
+    statSyncImpl: () => ({ mtimeMs: 0 }),
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(sleeps, [250, 1000]);
+  assert.deepEqual(calls.map(call => call.args), [
+    ['worker', 'tear-down', 'hammer-ama-pr-3312', '--force', '--root', HQ_ROOT],
+    ['worker', 'tear-down', 'hammer-ama-pr-3312', '--force', '--root', HQ_ROOT],
+    ['worker', 'tear-down', 'hammer-ama-pr-3312', '--force', '--root', HQ_ROOT],
+  ]);
+});
+
+test('pre-provision reclaim does not retry non-transient teardown failures and logs structured warning', async () => {
+  const calls = [];
+  const sleeps = [];
+  const warnings = [];
+  const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    repo: 'owner/agent-os',
+    prNumber: 3312,
+    workerClass: 'hammer',
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot: HQ_ROOT,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      const err = new Error('fatal: unrecoverable teardown error');
+      err.stderr = 'fatal: unrecoverable teardown error';
+      throw err;
+    },
+    existsSyncImpl: (path) => path === '/Users/airlock/agent-os-hq/workers/hammer-ama-pr-3312/agent-os',
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    logger: { info() {}, warn(line) { warnings.push(JSON.parse(line)); } },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(sleeps, []);
+  assert.deepEqual(warnings, [{
+    event: 'closer_provision_collision_reclaim_failed',
+    repo: 'owner/agent-os',
+    prNumber: 3312,
+    workerId: 'hammer-ama-pr-3312',
+    worktreePath: '/Users/airlock/agent-os-hq/workers/hammer-ama-pr-3312/agent-os',
+    action: 'hq-worker-tear-down',
+    force: true,
+    status: 'failed',
+    error: 'fatal: unrecoverable teardown error',
+    transient: false,
+    attempts: 1,
+  }]);
+});
+
+test('pre-provision reclaim reports missing hqRoot separately from invalid worker id', async () => {
+  const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    repo: 'owner/agent-os',
+    prNumber: 3312,
+    workerClass: 'hammer',
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot: '   ',
+    execFileImpl: async () => assert.fail('must not tear down without hqRoot'),
+    existsSyncImpl: () => true,
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.equal(result.attempted, false);
+  assert.equal(result.reason, 'invalid-hq-root');
+  assert.equal(result.workerId, 'hammer-ama-pr-3312');
+});
+
 test('pre-provision reclaim is unchanged when no self-owned stale worktree exists', async () => {
   const calls = [];
   const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({

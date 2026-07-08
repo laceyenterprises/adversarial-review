@@ -3443,6 +3443,47 @@ async function resetOssReadinessWorkspace({ workspaceDir, execFileImpl = execFil
   });
 }
 
+async function rollbackOssReadinessLocalCommit({
+  workspaceDir,
+  commitSha,
+  execFileImpl = execFileAsync,
+} = {}) {
+  const evidence = {
+    attempted: true,
+    ok: false,
+    commitSha: commitSha || null,
+  };
+  try {
+    const { stdout: headOut } = await execFileImpl('git', ['-C', workspaceDir, 'rev-parse', 'HEAD'], {
+      maxBuffer: 1 * 1024 * 1024,
+    });
+    const headSha = String(headOut || '').trim();
+    evidence.headBeforeRollback = headSha || null;
+    if (commitSha && headSha && headSha !== commitSha) {
+      return {
+        ...evidence,
+        attempted: false,
+        reason: 'head-mismatch',
+      };
+    }
+    await execFileImpl('git', ['-C', workspaceDir, 'reset', '--hard', 'HEAD~1'], {
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    await execFileImpl('git', ['-C', workspaceDir, 'clean', '-fd'], {
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return {
+      ...evidence,
+      ok: true,
+    };
+  } catch (err) {
+    return {
+      ...evidence,
+      error: err?.message || String(err),
+    };
+  }
+}
+
 async function runOssReadinessAuditGate({ workspaceDir, scriptPath, execFileImpl = execFileAsync } = {}) {
   try {
     const result = await execFileImpl(scriptPath, [], {
@@ -3618,6 +3659,11 @@ async function pushOssReadinessRemediationCommit({
       },
     }
   );
+  return {
+    ok: true,
+    remote: pushTarget.remote,
+    refspec: pushTarget.refspec,
+  };
 }
 
 function buildRemediationPrompt(job, {
@@ -6643,6 +6689,15 @@ async function consumeNextFollowUpJob({
     resetWorkspaceDir(artifactDir);
     mkdirSync(artifactDir, { recursive: true });
     let ossReadinessApply = { attempted: false, reason: 'no-oss-readiness-audit-failure' };
+    const ossReadinessApplyEvidencePath = join(artifactDir, 'oss-readiness-apply.json');
+    const writeOssReadinessApplyEvidence = () => {
+      if (!ossReadinessApply.attempted) return;
+      writeFileSync(
+        ossReadinessApplyEvidencePath,
+        `${JSON.stringify(ossReadinessApply, null, 2)}\n`,
+        'utf8'
+      );
+    };
     if (!hqDispatchEnabled || shouldApplyOssReadinessBeforeSpawn) {
       ossReadinessApply = await applyOssReadinessRemediation({
         rootDir,
@@ -6653,20 +6708,39 @@ async function consumeNextFollowUpJob({
         execFileImpl,
         now,
       });
-      if (ossReadinessApply.attempted) {
-        writeFileSync(
-          join(artifactDir, 'oss-readiness-apply.json'),
-          `${JSON.stringify(ossReadinessApply, null, 2)}\n`,
-          'utf8'
-        );
-      }
+      writeOssReadinessApplyEvidence();
       if (hqDispatchEnabled && ossReadinessApply.commitSha) {
-        await pushOssReadinessRemediationCommit({
-          workspaceDir,
-          branch: claimed.job.branch,
-          env: process.env,
-          execFileImpl,
-        });
+        try {
+          const push = await pushOssReadinessRemediationCommit({
+            workspaceDir,
+            branch: claimed.job.branch,
+            env: process.env,
+            execFileImpl,
+          });
+          ossReadinessApply.push = push;
+          writeOssReadinessApplyEvidence();
+        } catch (err) {
+          const rollback = await rollbackOssReadinessLocalCommit({
+            workspaceDir,
+            commitSha: ossReadinessApply.commitSha,
+            execFileImpl,
+          });
+          ossReadinessApply = {
+            ...ossReadinessApply,
+            ok: false,
+            push: {
+              ok: false,
+              error: err?.message || String(err),
+            },
+            pushRollback: rollback,
+            needsOperatorApproval: false,
+          };
+          writeOssReadinessApplyEvidence();
+          err.code = 'oss-readiness-push-failed';
+          err.isOssReadinessApplyError = true;
+          err.ossReadinessApply = ossReadinessApply;
+          throw err;
+        }
       }
     }
     const replyTarget = resolveRemediationReplyTarget(process.env, { requireExists: true });

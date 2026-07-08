@@ -537,6 +537,7 @@ test('applyPreSpawnLifecycleGate: DIRTY conflict writes spec-guided hammer promp
     dirtyMergeImpl: async () => ({
       outcome: 'conflict',
       error: Object.assign(new Error('Automatic merge failed'), { stderr: 'CONFLICT (content): modules/worker-pool/lib/python/cwp_dispatch/goal_lineage.py' }),
+      conflictedFiles: ['modules/worker-pool/lib/python/cwp_dispatch/goal_lineage.py'],
     }),
     listConflictedFilesImpl: async () => {
       callOrder.push(['list-conflicts']);
@@ -547,10 +548,7 @@ test('applyPreSpawnLifecycleGate: DIRTY conflict writes spec-guided hammer promp
 
   assert.equal(result.action, 'continue');
   assert.equal(result.reason, 'dirty-conflict-hammer');
-  assert.deepEqual(callOrder.slice(0, 2), [
-    ['list-conflicts'],
-    ['exec', 'git', '-C', workspaceDir, 'merge', '--abort'],
-  ]);
+  assert.deepEqual(callOrder, []);
   const prompt = readFileSync(promptPath, 'utf8');
   assert.match(prompt, /DIRTY PR Conflict Remediation HAMMER/);
   assert.match(prompt, /git merge origin\/main/);
@@ -593,7 +591,11 @@ test('applyPreSpawnLifecycleGate: DIRTY conflict with missing specs escalates wi
       mergeStateStatus: 'DIRTY',
     }),
     execFileImpl: async () => ({ stdout: '', stderr: '' }),
-    dirtyMergeImpl: async () => ({ outcome: 'conflict', error: new Error('CONFLICT') }),
+    dirtyMergeImpl: async () => ({
+      outcome: 'conflict',
+      error: Object.assign(new Error('Automatic merge failed'), { stderr: 'CONFLICT (content)' }),
+      conflictedFiles: ['modules/unknown/lib/file.py'],
+    }),
     listConflictedFilesImpl: async () => ['modules/unknown/lib/file.py'],
     now: () => '2026-06-01T05:02:00.000Z',
   });
@@ -695,6 +697,32 @@ test('attemptDirtyMerge retries transient local merge lock failures', async () =
       calls.push({ cmd, args });
       if (args[2] === 'merge' && calls.filter((call) => call.args[2] === 'merge').length === 1) {
         const err = new Error('Unable to create .git/index.lock');
+        err.stderr = 'fatal: Unable to create .git/index.lock: File exists.';
+        throw err;
+      }
+      return { stdout: 'ok', stderr: '' };
+    },
+  });
+
+  assert.equal(result.outcome, 'clean-merged');
+  assert.equal(result.merge.attempts, 2);
+  assert.equal(calls.filter((call) => call.args[2] === 'merge').length, 2);
+});
+
+test('attemptDirtyMerge does not classify branch-name conflict text as a merge conflict', async () => {
+  const rootDir = makeRoot();
+  const workspaceDir = path.join(rootDir, 'workspace');
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const calls = [];
+
+  const result = await attemptDirtyMerge({
+    workspaceDir,
+    baseBranch: 'main',
+    branch: 'feature/conflict-retry-merge',
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args[2] === 'merge' && calls.filter((call) => call.args[2] === 'merge').length === 1) {
+        const err = new Error("Command failed: git merge origin/main on feature/conflict-retry-merge");
         err.stderr = 'fatal: Unable to create .git/index.lock: File exists.';
         throw err;
       }

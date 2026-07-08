@@ -108,8 +108,12 @@ function isTransientDirtyPushError(err) {
 }
 
 function isDirtyMergeConflictError(err) {
-  const text = `${err?.message || ''}\n${err?.stderr || ''}\n${err?.stdout || ''}`.toLowerCase();
-  return text.includes('conflict') || text.includes('merge failed') || text.includes('automatic merge failed');
+  const text = `${err?.stderr || ''}\n${err?.stdout || ''}`.toLowerCase();
+  return [
+    'conflict (',
+    'automatic merge failed',
+    'merge failed',
+  ].some((needle) => text.includes(needle));
 }
 
 function isTransientDirtyMergeError(err) {
@@ -657,7 +661,6 @@ async function applyPreSpawnLifecycleGate({
   stopConsumedJobWithCommentImpl = null,
   postCommentImpl,
   dirtyMergeImpl = attemptDirtyMerge,
-  listConflictedFilesImpl = listConflictedFiles,
   resolveDirtyConflictSpecContextImpl = resolveDirtyConflictSpecContext,
   now = () => new Date().toISOString(),
   log = console,
@@ -731,10 +734,7 @@ async function applyPreSpawnLifecycleGate({
     if (dirtyMerge?.outcome === 'conflict') {
       const conflictedFiles = Array.isArray(dirtyMerge.conflictedFiles)
         ? dirtyMerge.conflictedFiles
-        : await listConflictedFilesImpl({ workspaceDir, execFileImpl });
-      await execFileImpl('git', ['-C', workspaceDir, 'merge', '--abort'], {
-        maxBuffer: 10 * 1024 * 1024,
-      }).catch(() => {});
+        : [];
       const repoRoot = workspaceDir ? resolve(workspaceDir) : resolve(rootDir || '.');
       const specContext = await resolveDirtyConflictSpecContextImpl({
         repoRoot,

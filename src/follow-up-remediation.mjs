@@ -79,6 +79,14 @@ const WORKSPACE_GIT_RETRY_DELAYS_MS = [250, 750];
 const WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS = [250, 1000];
 const QUOTA_HOLD_REVALIDATION_TTL_MS = 60 * 1000;
 const QUOTA_HOLD_REVALIDATION_TIMEOUT_MS = 10_000;
+const OSS_READINESS_AUDIT_CHECK_NAME = 'oss-readiness-audit';
+const OSS_READINESS_BASELINE_PATH = 'scripts/oss-readiness-category-baseline.json';
+const OSS_READINESS_APPLY_SCRIPT_ENV = 'OSS_READINESS_APPLY_SCRIPT';
+const OSS_READINESS_APPLY_SCRIPT_CANDIDATES = [
+  ['agent-os', 'scripts', 'audit-oss-readiness-hardcodes.py'],
+  ['..', 'agent-os', 'scripts', 'audit-oss-readiness-hardcodes.py'],
+  ['..', '..', 'agent-os', 'scripts', 'audit-oss-readiness-hardcodes.py'],
+];
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
@@ -3270,6 +3278,216 @@ async function auditWorkspaceForContamination({
   }
 }
 
+function collectOssReadinessEvidenceStrings(value, depth = 0) {
+  if (value === null || value === undefined || depth > 8) return [];
+  if (typeof value === 'string') return [value];
+  if (typeof value === 'number' || typeof value === 'boolean') return [String(value)];
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => collectOssReadinessEvidenceStrings(entry, depth + 1));
+  }
+  if (typeof value === 'object') {
+    return Object.entries(value).flatMap(([key, entry]) => [
+      String(key),
+      ...collectOssReadinessEvidenceStrings(entry, depth + 1),
+    ]);
+  }
+  return [];
+}
+
+function jobHasOssReadinessAuditFailure(job) {
+  const haystack = [
+    job?.reviewSummary,
+    job?.reviewBody,
+    job?.ciFailureSummary,
+    job?.ciFailures,
+    job?.statusCheckRollup,
+    job?.checkRuns,
+    job?.checks,
+    job?.workflowFailures,
+    job?.failingChecks,
+    job?.gateFailures,
+  ].flatMap((entry) => collectOssReadinessEvidenceStrings(entry));
+  return haystack.some((entry) => String(entry || '').includes(OSS_READINESS_AUDIT_CHECK_NAME));
+}
+
+function resolveOssReadinessApplyScript({ rootDir = ROOT, env = process.env } = {}) {
+  const override = typeof env?.[OSS_READINESS_APPLY_SCRIPT_ENV] === 'string'
+    ? env[OSS_READINESS_APPLY_SCRIPT_ENV].trim()
+    : '';
+  if (override) {
+    return isAbsolute(override) ? override : resolve(rootDir, override);
+  }
+
+  const hqRoot = typeof env?.HQ_ROOT === 'string' && env.HQ_ROOT.trim()
+    ? env.HQ_ROOT.trim()
+    : null;
+  const candidates = [
+    ...(hqRoot ? [join(hqRoot, 'agent-os', 'scripts', 'audit-oss-readiness-hardcodes.py')] : []),
+    ...OSS_READINESS_APPLY_SCRIPT_CANDIDATES.map((parts) => resolve(rootDir, ...parts)),
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) || candidates[0];
+}
+
+function ossReadinessNeedsOperatorMessage(result) {
+  const text = [
+    result?.stdout,
+    result?.stderr,
+    result?.error,
+  ].filter(Boolean).join('\n');
+  if (/baseline/i.test(text) && /bump|update|ratchet|required|needed/i.test(text)) {
+    return 'oss-readiness --apply reported that a ratchet baseline bump is required; operator approval is required.';
+  }
+  return null;
+}
+
+async function collectOssReadinessWorkspaceDiff({ workspaceDir, execFileImpl = execFileAsync } = {}) {
+  const [{ stdout: status }, { stdout: diff }] = await Promise.all([
+    execFileImpl('git', ['-C', workspaceDir, 'status', '--porcelain', '--untracked-files=all'], { maxBuffer: 2 * 1024 * 1024 }),
+    execFileImpl('git', ['-C', workspaceDir, 'diff', '--'], { maxBuffer: 20 * 1024 * 1024 }),
+  ]);
+  const changedFiles = String(status || '').split('\n').map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return null;
+    const renameSep = trimmed.indexOf(' -> ');
+    const pathText = renameSep >= 0 ? trimmed.slice(renameSep + 4) : trimmed.slice(2).trim();
+    return pathText || null;
+  }).filter(Boolean);
+  return {
+    changedFiles,
+    diff: String(diff || ''),
+  };
+}
+
+async function runOssReadinessAuditGate({ workspaceDir, scriptPath, execFileImpl = execFileAsync } = {}) {
+  try {
+    const result = await execFileImpl(scriptPath, [], {
+      cwd: workspaceDir,
+      maxBuffer: 20 * 1024 * 1024,
+    });
+    return {
+      ok: true,
+      stdout: String(result?.stdout || ''),
+      stderr: String(result?.stderr || ''),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      stdout: String(err?.stdout || ''),
+      stderr: String(err?.stderr || ''),
+      error: err?.message || String(err),
+    };
+  }
+}
+
+async function applyOssReadinessRemediation({
+  rootDir = ROOT,
+  job,
+  workspaceDir,
+  workerTrailerClass = REMEDIATION_WORKER_TRAILER_CLASS,
+  env = process.env,
+  execFileImpl = execFileAsync,
+  now = () => new Date().toISOString(),
+} = {}) {
+  if (!jobHasOssReadinessAuditFailure(job)) {
+    return { attempted: false, reason: 'no-oss-readiness-audit-failure' };
+  }
+  if (!workspaceDir || typeof workspaceDir !== 'string') {
+    throw new Error('workspaceDir is required for oss-readiness --apply remediation');
+  }
+
+  const scriptPath = resolveOssReadinessApplyScript({ rootDir, env });
+  const startedAt = now();
+  let applyResult;
+  try {
+    applyResult = await execFileImpl(scriptPath, ['--apply'], {
+      cwd: workspaceDir,
+      maxBuffer: 20 * 1024 * 1024,
+    });
+  } catch (err) {
+    const failed = {
+      attempted: true,
+      ok: false,
+      scriptPath,
+      startedAt,
+      finishedAt: now(),
+      stdout: String(err?.stdout || ''),
+      stderr: String(err?.stderr || ''),
+      error: err?.message || String(err),
+    };
+    const needsOperator = ossReadinessNeedsOperatorMessage(failed);
+    const out = new Error(needsOperator || `oss-readiness --apply failed: ${failed.error}`);
+    out.code = needsOperator ? 'oss-readiness-baseline-operator-required' : 'oss-readiness-apply-failed';
+    out.isOssReadinessApplyError = true;
+    out.ossReadinessApply = { ...failed, needsOperatorApproval: Boolean(needsOperator) };
+    throw out;
+  }
+
+  const diff = await collectOssReadinessWorkspaceDiff({ workspaceDir, execFileImpl });
+  if (diff.changedFiles.includes(OSS_READINESS_BASELINE_PATH)) {
+    const out = new Error('oss-readiness --apply attempted to modify scripts/oss-readiness-category-baseline.json; operator approval is required for ratchet baseline changes.');
+    out.code = 'oss-readiness-baseline-modified';
+    out.isOssReadinessApplyError = true;
+    out.ossReadinessApply = {
+      attempted: true,
+      ok: false,
+      scriptPath,
+      startedAt,
+      finishedAt: now(),
+      stdout: String(applyResult?.stdout || ''),
+      stderr: String(applyResult?.stderr || ''),
+      changedFiles: diff.changedFiles,
+      diff: diff.diff,
+      needsOperatorApproval: true,
+    };
+    throw out;
+  }
+
+  const gate = await runOssReadinessAuditGate({ workspaceDir, scriptPath, execFileImpl });
+  const evidence = {
+    attempted: true,
+    ok: gate.ok,
+    scriptPath,
+    startedAt,
+    finishedAt: now(),
+    stdout: String(applyResult?.stdout || ''),
+    stderr: String(applyResult?.stderr || ''),
+    changedFiles: diff.changedFiles,
+    diff: diff.diff,
+    gate,
+  };
+  if (!gate.ok) {
+    const needsOperator = ossReadinessNeedsOperatorMessage(gate);
+    const out = new Error(needsOperator || 'oss-readiness --apply completed but oss-readiness-audit still fails.');
+    out.code = needsOperator ? 'oss-readiness-baseline-operator-required' : 'oss-readiness-apply-unresolved';
+    out.isOssReadinessApplyError = true;
+    out.ossReadinessApply = { ...evidence, needsOperatorApproval: Boolean(needsOperator) };
+    throw out;
+  }
+
+  if (diff.changedFiles.length > 0) {
+    await execFileImpl('git', ['-C', workspaceDir, 'add', '--', ...diff.changedFiles], {
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    await execFileImpl('git', ['-C', workspaceDir, 'commit', '-m', 'Apply oss-readiness remediation'], {
+      maxBuffer: 10 * 1024 * 1024,
+      env: {
+        ...env,
+        WORKER_CLASS: workerTrailerClass,
+        WORKER_JOB_ID: job?.jobId || '',
+        WORKER_RUN_AT: now(),
+      },
+    });
+    const { stdout: commitSha } = await execFileImpl('git', ['-C', workspaceDir, 'rev-parse', 'HEAD'], {
+      maxBuffer: 1 * 1024 * 1024,
+    });
+    evidence.commitSha = String(commitSha || '').trim() || null;
+  } else {
+    evidence.commitSha = null;
+  }
+
+  return evidence;
+}
+
 function buildRemediationPrompt(job, {
   template,
   remediationReplyPath = job?.remediationReply?.path || null,
@@ -6289,6 +6507,25 @@ async function consumeNextFollowUpJob({
     const artifactDir = join(workspaceDir, '.adversarial-follow-up');
     resetWorkspaceDir(artifactDir);
     mkdirSync(artifactDir, { recursive: true });
+    let ossReadinessApply = { attempted: false, reason: 'hq-dispatch-managed-workspace' };
+    if (!hqDispatchEnabled) {
+      ossReadinessApply = await applyOssReadinessRemediation({
+        rootDir,
+        job: claimed.job,
+        workspaceDir,
+        workerTrailerClass: remediationWorkerTrailerClass(workerClass),
+        env: process.env,
+        execFileImpl,
+        now,
+      });
+      if (ossReadinessApply.attempted) {
+        writeFileSync(
+          join(artifactDir, 'oss-readiness-apply.json'),
+          `${JSON.stringify(ossReadinessApply, null, 2)}\n`,
+          'utf8'
+        );
+      }
+    }
     const replyTarget = resolveRemediationReplyTarget(process.env, { requireExists: true });
     const hqRoot = replyTarget.mode === 'hq' ? replyTarget.root : null;
     const replyStorageKey = resolveReplyStorageKey(claimed.job);
@@ -6417,6 +6654,17 @@ async function consumeNextFollowUpJob({
         outputPath: worker.outputPath ? serializeWorkerPath(rootDir, worker.outputPath) : null,
         logPath: worker.logPath ? serializeWorkerPath(rootDir, worker.logPath) : null,
         replyPath,
+        ossReadinessApply: ossReadinessApply.attempted
+          ? {
+              ok: ossReadinessApply.ok,
+              scriptPath: ossReadinessApply.scriptPath,
+              startedAt: ossReadinessApply.startedAt,
+              finishedAt: ossReadinessApply.finishedAt,
+              changedFiles: ossReadinessApply.changedFiles || [],
+              commitSha: ossReadinessApply.commitSha || null,
+              evidencePath: serializeWorkerPath(rootDir, join(artifactDir, 'oss-readiness-apply.json')),
+            }
+          : null,
       },
     });
     spawnAttempted = true;
@@ -6515,6 +6763,16 @@ async function consumeNextFollowUpJob({
           repo: claimed.job?.repo || null,
           prNumber: claimed.job?.prNumber || null,
           reason: err.message,
+        },
+      };
+    } else if (err.isOssReadinessApplyError) {
+      failureCode = err.code || 'oss-readiness-apply-failed';
+      failure = {
+        needsOperator: Boolean(err.ossReadinessApply?.needsOperatorApproval),
+        ossReadinessApply: err.ossReadinessApply || {
+          attempted: true,
+          ok: false,
+          error: err.message,
         },
       };
     } else if (err.isPolicyViolation) {
@@ -6838,8 +7096,13 @@ export {
   OAUTH_ENV_STRIP_LIST,
   REMEDIATION_MAX_CONCURRENT_JOBS_ENV,
   WORKER_PROVENANCE_HOOK_SRC,
+  OSS_READINESS_APPLY_SCRIPT_ENV,
+  OSS_READINESS_AUDIT_CHECK_NAME,
   installWorkerProvenanceHook,
   auditWorkspaceForContamination,
+  applyOssReadinessRemediation,
+  jobHasOssReadinessAuditFailure,
+  resolveOssReadinessApplyScript,
   OAuthError,
   StartupContractError,
   assertCodexOAuth,

@@ -1298,7 +1298,7 @@ async function teardownSamePrHammerHolder({
     const workerId = basename(dirname(worktreePath));
     let terminality = { terminal: true, reason: 'self-owned-hammer-holder' };
     if (!isSamePrHammerCloserWorkerId(workerId, prNumber)) {
-      terminality = resolveTerminalCodingBranchHolder({
+      terminality = await resolveTerminalCodingBranchHolder({
         workerId,
         hqRoot,
         ledgerTarget,
@@ -1330,6 +1330,57 @@ async function teardownSamePrHammerHolder({
       });
     }
 
+    let tearDownOk = false;
+    try {
+      await execFileImpl(hqPath, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot], {
+        env,
+        maxBuffer: 1024 * 1024,
+        timeout: 60_000,
+        killSignal: 'SIGTERM',
+      });
+      tearDownOk = true;
+      attempts.push({ worktreePath, workerId, action: 'hq-worker-tear-down', ok: true });
+      if (!isSamePrHammerCloserWorkerId(workerId, prNumber)) {
+        logBranchHolderDeadlockReleased({
+          logger,
+          repo,
+          prNumber,
+          headSha,
+          workerId,
+          worktreePath,
+          terminality,
+          releaseAction: 'hq-worker-tear-down-force',
+        });
+      }
+    } catch (tearDownErr) {
+      const detail = String(tearDownErr?.stderr || tearDownErr?.message || tearDownErr);
+      const absent = isWorkerTearDownNotFoundError(detail);
+      tearDownOk = absent;
+      attempts.push({
+        worktreePath,
+        workerId,
+        action: 'hq-worker-tear-down',
+        ok: absent,
+        alreadyAbsent: absent,
+        error: detail,
+      });
+      if (absent && !isSamePrHammerCloserWorkerId(workerId, prNumber)) {
+        logBranchHolderDeadlockReleased({
+          logger,
+          repo,
+          prNumber,
+          headSha,
+          workerId,
+          worktreePath,
+          terminality,
+          releaseAction: 'hq-worker-tear-down-force-already-absent',
+        });
+      }
+    }
+    if (!tearDownOk) {
+      continue;
+    }
+
     try {
       await execFileImpl('git', [
         '-C',
@@ -1352,51 +1403,6 @@ async function teardownSamePrHammerHolder({
         ok: false,
         error: String(removeErr?.stderr || removeErr?.message || removeErr),
       });
-    }
-
-    try {
-      await execFileImpl(hqPath, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot], {
-        env,
-        maxBuffer: 1024 * 1024,
-        timeout: 60_000,
-        killSignal: 'SIGTERM',
-      });
-      attempts.push({ worktreePath, workerId, action: 'hq-worker-tear-down', ok: true });
-      if (!isSamePrHammerCloserWorkerId(workerId, prNumber)) {
-        logBranchHolderDeadlockReleased({
-          logger,
-          repo,
-          prNumber,
-          headSha,
-          workerId,
-          worktreePath,
-          terminality,
-          releaseAction: 'hq-worker-tear-down-force',
-        });
-      }
-    } catch (tearDownErr) {
-      const detail = String(tearDownErr?.stderr || tearDownErr?.message || tearDownErr);
-      const absent = isWorkerTearDownNotFoundError(detail);
-      attempts.push({
-        worktreePath,
-        workerId,
-        action: 'hq-worker-tear-down',
-        ok: absent,
-        alreadyAbsent: absent,
-        error: detail,
-      });
-      if (absent && !isSamePrHammerCloserWorkerId(workerId, prNumber)) {
-        logBranchHolderDeadlockReleased({
-          logger,
-          repo,
-          prNumber,
-          headSha,
-          workerId,
-          worktreePath,
-          terminality,
-          releaseAction: 'hq-worker-tear-down-force-already-absent',
-        });
-      }
     }
   }
 
@@ -1434,7 +1440,7 @@ function logBranchHolderDeadlockReleased({
   }));
 }
 
-function resolveTerminalCodingBranchHolder({
+async function resolveTerminalCodingBranchHolder({
   workerId,
   hqRoot,
   ledgerTarget = null,
@@ -1460,7 +1466,7 @@ function resolveTerminalCodingBranchHolder({
     };
   }
 
-  const result = readLatestWorkerRunStatusImpl({
+  const result = await readLatestWorkerRunStatusImpl({
     launchRequestId,
     ledgerTarget,
     ledgerDbPath,

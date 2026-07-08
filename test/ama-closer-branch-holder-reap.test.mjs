@@ -130,7 +130,7 @@ test('teardown passes hqRoot through to parser and cleanup commands', async () =
       calls.push({ cmd, args });
       return { stdout: '', stderr: '' };
     },
-    readLatestWorkerRunStatusImpl: ({ launchRequestId }) => ({
+    readLatestWorkerRunStatusImpl: async ({ launchRequestId }) => ({
       ok: true,
       row: {
         launch_request_id: launchRequestId,
@@ -146,9 +146,8 @@ test('teardown passes hqRoot through to parser and cleanup commands', async () =
     `${hqRoot}/workers/hammer-ama-pr-3219/agent-os`,
     `${hqRoot}/workers/${codingWorkerId}/agent-os`,
   ]);
-  assert.deepEqual(calls.map(call => call.cmd), ['git', '/opt/hq/bin/hq', 'git', '/opt/hq/bin/hq']);
-  assert.equal(calls[0].args[1], `${hqRoot}/repos/agent-os`);
-  assert.deepEqual(calls[1].args, [
+  assert.deepEqual(calls.map(call => call.cmd), ['/opt/hq/bin/hq', 'git', '/opt/hq/bin/hq', 'git']);
+  assert.deepEqual(calls[0].args, [
     'worker',
     'tear-down',
     'hammer-ama-pr-3219',
@@ -156,8 +155,8 @@ test('teardown passes hqRoot through to parser and cleanup commands', async () =
     '--root',
     hqRoot,
   ]);
-  assert.equal(calls[2].args[1], `${hqRoot}/repos/agent-os`);
-  assert.deepEqual(calls[3].args, [
+  assert.equal(calls[1].args[1], `${hqRoot}/repos/agent-os`);
+  assert.deepEqual(calls[2].args, [
     'worker',
     'tear-down',
     codingWorkerId,
@@ -165,6 +164,7 @@ test('teardown passes hqRoot through to parser and cleanup commands', async () =
     '--root',
     hqRoot,
   ]);
+  assert.equal(calls[3].args[1], `${hqRoot}/repos/agent-os`);
 });
 
 function writeBranchHolderWorker({ hqRoot, workerId, launchRequestId }) {
@@ -201,7 +201,7 @@ test('terminal coding branch-holder is torn down and emits release telemetry', a
       calls.push({ cmd, args });
       return { stdout: '', stderr: '' };
     },
-    readLatestWorkerRunStatusImpl: ({ launchRequestId: actual }) => {
+    readLatestWorkerRunStatusImpl: async ({ launchRequestId: actual }) => {
       assert.equal(actual, launchRequestId);
       return {
         ok: true,
@@ -216,8 +216,8 @@ test('terminal coding branch-holder is torn down and emits release telemetry', a
   });
 
   assert.equal(result.ok, true);
-  assert.deepEqual(calls.map(call => call.cmd), ['git', '/opt/hq/bin/hq']);
-  assert.deepEqual(calls[1].args, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot]);
+  assert.deepEqual(calls.map(call => call.cmd), ['/opt/hq/bin/hq', 'git']);
+  assert.deepEqual(calls[0].args, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot]);
   assert.equal(logs.some(log => (
     log.event === 'branch_holder_deadlock_released'
     && log.workerId === workerId
@@ -244,7 +244,7 @@ test('live coding branch-holder is not torn down and falls back to branch-holder
       calls.push({ cmd, args });
       throw new Error('execFileImpl must not run for a non-terminal holder');
     },
-    readLatestWorkerRunStatusImpl: () => ({
+    readLatestWorkerRunStatusImpl: async () => ({
       ok: true,
       row: {
         launch_request_id: 'lrq_live_holder',
@@ -281,7 +281,7 @@ test('terminal coding branch-holder teardown failure returns fallback result wit
       failure.stderr = 'boom';
       throw failure;
     },
-    readLatestWorkerRunStatusImpl: () => ({
+    readLatestWorkerRunStatusImpl: async () => ({
       ok: true,
       row: {
         launch_request_id: 'lrq_teardown_fails',
@@ -299,6 +299,27 @@ test('terminal coding branch-holder teardown failure returns fallback result wit
     && attempt.ok === false
     && attempt.error === 'boom'
   )), true);
+  assert.equal(result.attempts.some(attempt => attempt.action === 'git-worktree-remove'), false);
+});
+
+test('missing branch-holder metadata files are treated as unresolved state', async () => {
+  const hqRoot = join(tmpdir(), `agent-os-hq-missing-metadata-${Date.now()}`);
+  const workerId = 'codex-lsh-03-missing-metadata';
+  mkdirSync(join(hqRoot, 'workers', workerId), { recursive: true });
+
+  const result = await __testables__.resolveTerminalCodingBranchHolder({
+    workerId,
+    hqRoot,
+    readLatestWorkerRunStatusImpl: async () => {
+      throw new Error('ledger lookup should not run without a launchRequestId');
+    },
+  });
+
+  assert.deepEqual(result, {
+    terminal: false,
+    reason: 'missing-launch-request-id',
+    runId: null,
+  });
 });
 
 test('pre-provision reclaim tears down stale self-owned hammer worktree and emits audit', async () => {

@@ -3341,21 +3341,42 @@ function ossReadinessNeedsOperatorMessage(result) {
 }
 
 async function collectOssReadinessWorkspaceDiff({ workspaceDir, execFileImpl = execFileAsync } = {}) {
-  const [{ stdout: status }, { stdout: diff }] = await Promise.all([
-    execFileImpl('git', ['-C', workspaceDir, 'status', '--porcelain', '--untracked-files=all'], { maxBuffer: 2 * 1024 * 1024 }),
-    execFileImpl('git', ['-C', workspaceDir, 'diff', '--'], { maxBuffer: 20 * 1024 * 1024 }),
-  ]);
-  const changedFiles = String(status || '').split('\n').map((line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return null;
-    const renameSep = trimmed.indexOf(' -> ');
-    const pathText = renameSep >= 0 ? trimmed.slice(renameSep + 4) : trimmed.slice(2).trim();
-    return pathText || null;
-  }).filter(Boolean);
+  const { stdout: status } = await execFileImpl(
+    'git',
+    ['-C', workspaceDir, 'status', '--porcelain', '-z', '--untracked-files=all'],
+    { maxBuffer: 2 * 1024 * 1024 }
+  );
+  const records = String(status || '').split('\0').filter(Boolean);
+  const changedFiles = [];
+  for (let i = 0; i < records.length; i += 1) {
+    const record = records[i];
+    if (record.length < 4) continue;
+    const statusCode = record.slice(0, 2);
+    const pathText = record.slice(3);
+    if (pathText) changedFiles.push(pathText);
+    if (statusCode[0] === 'R' || statusCode[1] === 'R' || statusCode[0] === 'C' || statusCode[1] === 'C') {
+      i += 1;
+    }
+  }
+  await execFileImpl('git', ['-C', workspaceDir, 'add', '--intent-to-add', '--all'], {
+    maxBuffer: 2 * 1024 * 1024,
+  });
+  const { stdout: diff } = await execFileImpl('git', ['-C', workspaceDir, 'diff', 'HEAD', '--'], {
+    maxBuffer: 20 * 1024 * 1024,
+  });
   return {
     changedFiles,
     diff: String(diff || ''),
   };
+}
+
+async function resetOssReadinessWorkspace({ workspaceDir, execFileImpl = execFileAsync } = {}) {
+  await execFileImpl('git', ['-C', workspaceDir, 'reset', '--hard'], {
+    maxBuffer: 2 * 1024 * 1024,
+  });
+  await execFileImpl('git', ['-C', workspaceDir, 'clean', '-fd'], {
+    maxBuffer: 2 * 1024 * 1024,
+  });
 }
 
 async function runOssReadinessAuditGate({ workspaceDir, scriptPath, execFileImpl = execFileAsync } = {}) {
@@ -3422,14 +3443,31 @@ async function applyOssReadinessRemediation({
     throw out;
   }
 
-  const diff = await collectOssReadinessWorkspaceDiff({ workspaceDir, execFileImpl });
-  if (diff.changedFiles.includes(OSS_READINESS_BASELINE_PATH)) {
-    const out = new Error('oss-readiness --apply attempted to modify scripts/oss-readiness-category-baseline.json; operator approval is required for ratchet baseline changes.');
-    out.code = 'oss-readiness-baseline-modified';
-    out.isOssReadinessApplyError = true;
-    out.ossReadinessApply = {
+  try {
+    const diff = await collectOssReadinessWorkspaceDiff({ workspaceDir, execFileImpl });
+    if (diff.changedFiles.includes(OSS_READINESS_BASELINE_PATH)) {
+      const out = new Error('oss-readiness --apply attempted to modify scripts/oss-readiness-category-baseline.json; operator approval is required for ratchet baseline changes.');
+      out.code = 'oss-readiness-baseline-modified';
+      out.isOssReadinessApplyError = true;
+      out.ossReadinessApply = {
+        attempted: true,
+        ok: false,
+        scriptPath,
+        startedAt,
+        finishedAt: now(),
+        stdout: String(applyResult?.stdout || ''),
+        stderr: String(applyResult?.stderr || ''),
+        changedFiles: diff.changedFiles,
+        diff: diff.diff,
+        needsOperatorApproval: true,
+      };
+      throw out;
+    }
+
+    const gate = await runOssReadinessAuditGate({ workspaceDir, scriptPath, execFileImpl });
+    const evidence = {
       attempted: true,
-      ok: false,
+      ok: gate.ok,
       scriptPath,
       startedAt,
       finishedAt: now(),
@@ -3437,55 +3475,49 @@ async function applyOssReadinessRemediation({
       stderr: String(applyResult?.stderr || ''),
       changedFiles: diff.changedFiles,
       diff: diff.diff,
-      needsOperatorApproval: true,
+      gate,
     };
-    throw out;
-  }
+    if (!gate.ok) {
+      const needsOperator = ossReadinessNeedsOperatorMessage(gate);
+      const out = new Error(needsOperator || 'oss-readiness --apply completed but oss-readiness-audit still fails.');
+      out.code = needsOperator ? 'oss-readiness-baseline-operator-required' : 'oss-readiness-apply-unresolved';
+      out.isOssReadinessApplyError = true;
+      out.ossReadinessApply = { ...evidence, needsOperatorApproval: Boolean(needsOperator) };
+      throw out;
+    }
 
-  const gate = await runOssReadinessAuditGate({ workspaceDir, scriptPath, execFileImpl });
-  const evidence = {
-    attempted: true,
-    ok: gate.ok,
-    scriptPath,
-    startedAt,
-    finishedAt: now(),
-    stdout: String(applyResult?.stdout || ''),
-    stderr: String(applyResult?.stderr || ''),
-    changedFiles: diff.changedFiles,
-    diff: diff.diff,
-    gate,
-  };
-  if (!gate.ok) {
-    const needsOperator = ossReadinessNeedsOperatorMessage(gate);
-    const out = new Error(needsOperator || 'oss-readiness --apply completed but oss-readiness-audit still fails.');
-    out.code = needsOperator ? 'oss-readiness-baseline-operator-required' : 'oss-readiness-apply-unresolved';
-    out.isOssReadinessApplyError = true;
-    out.ossReadinessApply = { ...evidence, needsOperatorApproval: Boolean(needsOperator) };
-    throw out;
-  }
+    if (diff.changedFiles.length > 0) {
+      await execFileImpl('git', ['-C', workspaceDir, 'add', '--all'], {
+        maxBuffer: 2 * 1024 * 1024,
+      });
+      await execFileImpl('git', ['-C', workspaceDir, 'commit', '-m', 'Apply oss-readiness remediation'], {
+        maxBuffer: 10 * 1024 * 1024,
+        env: {
+          ...env,
+          WORKER_CLASS: workerTrailerClass,
+          WORKER_JOB_ID: job?.jobId || '',
+          WORKER_RUN_AT: now(),
+        },
+      });
+      const { stdout: commitSha } = await execFileImpl('git', ['-C', workspaceDir, 'rev-parse', 'HEAD'], {
+        maxBuffer: 1 * 1024 * 1024,
+      });
+      evidence.commitSha = String(commitSha || '').trim() || null;
+    } else {
+      evidence.commitSha = null;
+    }
 
-  if (diff.changedFiles.length > 0) {
-    await execFileImpl('git', ['-C', workspaceDir, 'add', '--', ...diff.changedFiles], {
-      maxBuffer: 2 * 1024 * 1024,
-    });
-    await execFileImpl('git', ['-C', workspaceDir, 'commit', '-m', 'Apply oss-readiness remediation'], {
-      maxBuffer: 10 * 1024 * 1024,
-      env: {
-        ...env,
-        WORKER_CLASS: workerTrailerClass,
-        WORKER_JOB_ID: job?.jobId || '',
-        WORKER_RUN_AT: now(),
-      },
-    });
-    const { stdout: commitSha } = await execFileImpl('git', ['-C', workspaceDir, 'rev-parse', 'HEAD'], {
-      maxBuffer: 1 * 1024 * 1024,
-    });
-    evidence.commitSha = String(commitSha || '').trim() || null;
-  } else {
-    evidence.commitSha = null;
+    return evidence;
+  } catch (err) {
+    try {
+      await resetOssReadinessWorkspace({ workspaceDir, execFileImpl });
+      err.ossReadinessWorkspaceReset = true;
+    } catch (resetErr) {
+      err.ossReadinessWorkspaceReset = false;
+      err.ossReadinessWorkspaceResetError = resetErr?.message || String(resetErr);
+    }
+    throw err;
   }
-
-  return evidence;
 }
 
 function buildRemediationPrompt(job, {

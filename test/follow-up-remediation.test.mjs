@@ -5070,10 +5070,10 @@ test('consumeNextFollowUpJob invokes oss-readiness --apply once, commits the mec
             return { stdout: 'oss-readiness-audit passed\n', stderr: '' };
           }
           if (command === 'git' && args[2] === 'status') {
-            return { stdout: committed ? '' : ' M src/config.mjs\n', stderr: '' };
+            return { stdout: committed ? '' : ' M src/config with space.mjs\0?? docs/new generated file.md\0', stderr: '' };
           }
           if (command === 'git' && args[2] === 'diff') {
-            return { stdout: committed ? '' : 'diff --git a/src/config.mjs b/src/config.mjs\n+CFG key\n', stderr: '' };
+            return { stdout: committed ? '' : 'diff --git a/src/config with space.mjs b/src/config with space.mjs\n+CFG key\ndiff --git a/docs/new generated file.md b/docs/new generated file.md\n+new file\n', stderr: '' };
           }
           if (command === 'git' && args[2] === 'commit') {
             committed = true;
@@ -5094,13 +5094,18 @@ test('consumeNextFollowUpJob invokes oss-readiness --apply once, commits the mec
       assert.equal(committed, true);
       assert.equal(capturedCommitEnv.WORKER_JOB_ID, created.job.jobId);
       assert.equal(result.job.remediationWorker.ossReadinessApply.ok, true);
-      assert.deepEqual(result.job.remediationWorker.ossReadinessApply.changedFiles, ['src/config.mjs']);
+      assert.deepEqual(result.job.remediationWorker.ossReadinessApply.changedFiles, [
+        'src/config with space.mjs',
+        'docs/new generated file.md',
+      ]);
       assert.equal(result.job.remediationWorker.ossReadinessApply.commitSha, 'abc123');
       const evidencePath = path.join(rootDir, result.job.remediationWorker.ossReadinessApply.evidencePath);
       const evidence = JSON.parse(readFileSync(evidencePath, 'utf8'));
       assert.match(evidence.diff, /CFG key/);
       assert.equal(evidence.gate.ok, true);
       assert.ok(calls.some((call) => call[0] === scriptPath && call[1] === '--apply'));
+      assert.ok(calls.some((call) => call[0] === 'git' && call[3] === 'add' && call[4] === '--intent-to-add' && call[5] === '--all'));
+      assert.ok(calls.some((call) => call[0] === 'git' && call[3] === 'add' && call[4] === '--all'));
     });
   } finally {
     if (previousScript === undefined) delete process.env[OSS_READINESS_APPLY_SCRIPT_ENV];
@@ -5130,12 +5135,14 @@ test('consumeNextFollowUpJob surfaces unfixable oss-readiness baseline bumps wit
 
     await withOAuthTestEnv(rootDir, async () => {
       let spawned = false;
+      const calls = [];
       await assert.rejects(
         () => consumeNextFollowUpJob({
           rootDir,
           promptTemplate: 'You are a remediation worker.',
           now: () => '2026-06-20T10:10:00.000Z',
           execFileImpl: async (command, args) => {
+            calls.push([command, ...args]);
             if (command === 'git' && args[0] === 'clone') {
               mkdirSync(path.join(args[2], '.git', 'info'), { recursive: true });
               return { stdout: '', stderr: '' };
@@ -5156,7 +5163,7 @@ test('consumeNextFollowUpJob surfaces unfixable oss-readiness baseline bumps wit
               return { stdout: 'apply could not fix without ratchet baseline bump\n', stderr: '' };
             }
             if (command === 'git' && args[2] === 'status') {
-              return { stdout: ' M scripts/oss-readiness-category-baseline.json\n', stderr: '' };
+              return { stdout: ' M scripts/oss-readiness-category-baseline.json\0', stderr: '' };
             }
             if (command === 'git' && args[2] === 'diff') {
               return { stdout: 'diff --git a/scripts/oss-readiness-category-baseline.json b/scripts/oss-readiness-category-baseline.json\n', stderr: '' };
@@ -5179,6 +5186,8 @@ test('consumeNextFollowUpJob surfaces unfixable oss-readiness baseline bumps wit
       assert.equal(failed.failure.code, 'oss-readiness-baseline-modified');
       assert.equal(failed.failure.needsOperator, true);
       assert.deepEqual(failed.failure.ossReadinessApply.changedFiles, ['scripts/oss-readiness-category-baseline.json']);
+      assert.ok(calls.some((call) => call[0] === 'git' && call[3] === 'reset' && call[4] === '--hard'));
+      assert.ok(calls.some((call) => call[0] === 'git' && call[3] === 'clean' && call[4] === '-fd'));
     });
   } finally {
     if (previousScript === undefined) delete process.env[OSS_READINESS_APPLY_SCRIPT_ENV];

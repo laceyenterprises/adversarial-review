@@ -35,6 +35,7 @@ import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs'
 import {
   readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPr,
+  readLatestWorkerRunStatusFromLedger,
 } from '../session-ledger-read-adapter.mjs';
 import { fetchPullRequestRollup } from '../github-api.mjs';
 import {
@@ -463,6 +464,27 @@ function isWorkerTearDownNotFoundError(err) {
     || detail.includes('no such process');
 }
 
+function normalizeWorkerRunStatus(status) {
+  return String(status || '').trim().toLowerCase();
+}
+
+function isTerminalBranchHolderWorkerRunStatus(status) {
+  const normalized = normalizeWorkerRunStatus(status);
+  return Boolean(normalized) && BRANCH_HOLDER_TERMINAL_WORKER_RUN_STATUSES.has(normalized);
+}
+
+function isSamePrHammerCloserWorkerId(workerId, prNumber) {
+  return String(workerId || '') === hammerCloserWorkerId(prNumber);
+}
+
+function isRecognizedCodingBranchHolderWorkerId(workerId) {
+  const normalized = String(workerId || '').trim();
+  return BRANCH_HOLDER_WORKER_ID_PATTERN.test(normalized)
+    && CODING_BRANCH_HOLDER_PREFIXES.some((prefix) => (
+      normalized === prefix || normalized.startsWith(`${prefix}-`)
+    ));
+}
+
 function assertHammerCleanupSucceeded(hammerCleanup) {
   if (!hammerCleanup || hammerCleanup.ok === true) return;
   throw new Error(
@@ -624,6 +646,18 @@ export const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND = 3;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
 const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
+const BRANCH_HOLDER_TERMINAL_WORKER_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled']);
+const BRANCH_HOLDER_WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const CODING_BRANCH_HOLDER_PREFIXES = [
+  'claude-code',
+  'clio-agent',
+  'codex',
+  'gemini',
+  'pi',
+  'opencode',
+  'hermes',
+  'stub',
+];
 const AMA_CLOSER_RETRYABLE_STATUSES = new Set([
   'failed',
   'cancelled',
@@ -1055,27 +1089,25 @@ function isProvisionBranchHolderBlocked(errOrText) {
   return hasWorktreeCollision && hasBranchHolderContext;
 }
 
-// Worktrees to reap when a hammer provision hits a branch-holder collision.
+// Worktrees to inspect when a hammer provision hits a branch-holder collision.
 //
 // The provision needs to check out the PR head branch, but git refuses because
 // that branch is already checked out in another worktree. There are two holder
-// classes, and BOTH must be reaped or the hammer deadlocks:
+// classes:
 //
 //   1. A prior `hammer-ama-pr-<PR>` worktree from an earlier close attempt
 //      (self-cleanup). Matched by name.
 //   2. The ORIGINAL coding worker's worktree (e.g. `.../workers/codex-mcmo-01/
 //      agent-os`, `.../workers/claude-code-tct-04/agent-os`) that opened the PR
 //      and was never torn down. This is the COMMON case and is NOT named
-//      `hammer-ama-pr-*`, so the historical name-only matcher missed it —
-//      leaving the block permanent (the PR never merges, so the coding worker
-//      never tears down, so the branch stays held: a deadlock). Git names this
-//      holder verbatim in the provision error; we reap whatever it names,
-//      scoped to `<hqRoot>/workers/*/agent-os` so an unrelated path echoed
+//      `hammer-ama-pr-*`, so the historical name-only matcher missed it.
+//      Git names this holder verbatim in the provision error; we parse only
+//      canonical `<hqRoot>/workers/*/agent-os` paths so an unrelated path echoed
 //      elsewhere in the error text is never torn down.
 //
-// The reaped worktree's PR content is safe on `origin` (the PR is open and under
-// review), so `hq worker tear-down --force` salvages/archives any local tip and
-// preserves the remote branch — the hammer then re-provisions from origin HEAD.
+// Self-owned hammer holders are reclaimed immediately. Coding holders are only
+// force-torn-down after the session ledger proves their worker run is terminal;
+// live/non-terminal holders fall through to the existing bounded backoff.
 export function samePrHammerHolderWorktreePaths(errOrText, prNumber, hqRoot) {
   const detail = typeof errOrText === 'string'
     ? errOrText
@@ -1249,6 +1281,13 @@ async function teardownSamePrHammerHolder({
   hqRoot,
   execFileImpl,
   logger = console,
+  repo = null,
+  headSha = null,
+  ledgerTarget = null,
+  ledgerDbPath = null,
+  env = process.env,
+  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
+  sleepImpl = sleep,
 }) {
   const worktreePaths = samePrHammerHolderWorktreePaths(err, prNumber, hqRoot);
   if (!worktreePaths.length) {
@@ -1258,6 +1297,40 @@ async function teardownSamePrHammerHolder({
   const attempts = [];
   for (const worktreePath of worktreePaths) {
     const workerId = basename(dirname(worktreePath));
+    let terminality = { terminal: true, reason: 'self-owned-hammer-holder' };
+    if (!isSamePrHammerCloserWorkerId(workerId, prNumber)) {
+      terminality = await resolveTerminalCodingBranchHolder({
+        workerId,
+        hqRoot,
+        ledgerTarget,
+        ledgerDbPath,
+        env,
+        readLatestWorkerRunStatusImpl,
+      });
+      if (!terminality.terminal) {
+        attempts.push({
+          worktreePath,
+          workerId,
+          action: 'terminal-branch-holder-preflight',
+          ok: false,
+          skipped: true,
+          reason: terminality.reason,
+          workerStatus: terminality.workerStatus || null,
+          launchRequestId: terminality.launchRequestId || null,
+          detail: terminality.detail || null,
+        });
+        continue;
+      }
+      attempts.push({
+        worktreePath,
+        workerId,
+        action: 'terminal-branch-holder-preflight',
+        ok: true,
+        workerStatus: terminality.workerStatus || null,
+        launchRequestId: terminality.launchRequestId || null,
+      });
+    }
+
     try {
       await execFileImpl('git', [
         '-C',
@@ -1267,12 +1340,16 @@ async function teardownSamePrHammerHolder({
         '--force',
         worktreePath,
       ], {
-        env: process.env,
+        env,
         maxBuffer: 1024 * 1024,
         timeout: 60_000,
         killSignal: 'SIGTERM',
       });
-      attempts.push({ worktreePath, action: 'git-worktree-remove', ok: true });
+      attempts.push({
+        worktreePath,
+        action: 'git-worktree-remove',
+        ok: true,
+      });
     } catch (removeErr) {
       attempts.push({
         worktreePath,
@@ -1280,26 +1357,75 @@ async function teardownSamePrHammerHolder({
         ok: false,
         error: String(removeErr?.stderr || removeErr?.message || removeErr),
       });
+      continue;
     }
 
-    try {
-      await execFileImpl(hqPath, ['worker', 'tear-down', workerId, '--force', '--root', hqRoot], {
-        env: process.env,
-        maxBuffer: 1024 * 1024,
-        timeout: 60_000,
-        killSignal: 'SIGTERM',
-      });
-      attempts.push({ worktreePath, workerId, action: 'hq-worker-tear-down', ok: true });
-    } catch (tearDownErr) {
-      const detail = String(tearDownErr?.stderr || tearDownErr?.message || tearDownErr);
-      const absent = isWorkerTearDownNotFoundError(detail);
-      attempts.push({
-        worktreePath,
+    const tearDownArgs = ['worker', 'tear-down', workerId, '--force', '--root', hqRoot];
+    let releaseAction = null;
+    for (
+      let tearDownAttempt = 0;
+      tearDownAttempt <= AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS.length;
+      tearDownAttempt += 1
+    ) {
+      try {
+        await execFileImpl(hqPath, tearDownArgs, {
+          env,
+          maxBuffer: 1024 * 1024,
+          timeout: 60_000,
+          killSignal: 'SIGTERM',
+        });
+        attempts.push({
+          worktreePath,
+          workerId,
+          action: 'hq-worker-tear-down',
+          ok: true,
+          attempts: tearDownAttempt + 1,
+        });
+        releaseAction = 'hq-worker-tear-down-force';
+        break;
+      } catch (tearDownErr) {
+        const detail = String(tearDownErr?.stderr || tearDownErr?.message || tearDownErr);
+        const absent = isWorkerTearDownNotFoundError(detail);
+        if (absent) {
+          attempts.push({
+            worktreePath,
+            workerId,
+            action: 'hq-worker-tear-down',
+            ok: true,
+            alreadyAbsent: true,
+            attempts: tearDownAttempt + 1,
+            error: detail,
+          });
+          releaseAction = 'hq-worker-tear-down-force-already-absent';
+          break;
+        }
+        const transient = isTransientHqDispatchError(tearDownErr);
+        if (transient && tearDownAttempt < AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS.length) {
+          await sleepImpl(AMA_CLOSER_TEARDOWN_TRANSIENT_RETRY_DELAYS_MS[tearDownAttempt]);
+          continue;
+        }
+        attempts.push({
+          worktreePath,
+          workerId,
+          action: 'hq-worker-tear-down',
+          ok: false,
+          transient,
+          attempts: tearDownAttempt + 1,
+          error: detail,
+        });
+        break;
+      }
+    }
+    if (releaseAction && !isSamePrHammerCloserWorkerId(workerId, prNumber)) {
+      logBranchHolderDeadlockReleased({
+        logger,
+        repo,
+        prNumber,
+        headSha,
         workerId,
-        action: 'hq-worker-tear-down',
-        ok: absent,
-        alreadyAbsent: absent,
-        error: detail,
+        worktreePath,
+        terminality,
+        releaseAction,
       });
     }
   }
@@ -1315,10 +1441,91 @@ async function teardownSamePrHammerHolder({
   return { attempted: true, ok, worktreePaths, attempts };
 }
 
+function logBranchHolderDeadlockReleased({
+  logger,
+  repo,
+  prNumber,
+  headSha,
+  workerId,
+  worktreePath,
+  terminality,
+  releaseAction,
+}) {
+  logger?.warn?.(JSON.stringify({
+    event: 'branch_holder_deadlock_released',
+    repo,
+    prNumber,
+    headSha,
+    workerId,
+    worktreePath,
+    workerStatus: terminality?.workerStatus || null,
+    launchRequestId: terminality?.launchRequestId || null,
+    releaseAction,
+  }));
+}
+
+async function resolveTerminalCodingBranchHolder({
+  workerId,
+  hqRoot,
+  ledgerTarget = null,
+  ledgerDbPath = null,
+  env = process.env,
+  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
+} = {}) {
+  const normalizedWorkerId = String(workerId || '').trim();
+  if (!isRecognizedCodingBranchHolderWorkerId(normalizedWorkerId)) {
+    return { terminal: false, reason: 'unrecognized-worker-id-shape' };
+  }
+  const workerDir = hqRoot ? join(hqRoot, 'workers', normalizedWorkerId) : null;
+  const workspace = workerDir ? readJsonFile(join(workerDir, 'workspace.json')) : null;
+  const runRecord = workerDir ? readJsonFile(join(workerDir, 'run.json')) : null;
+  const launchRequestId = workspace?.launchRequestId || workspace?.lrq
+    || runRecord?.launchRequestId || runRecord?.lrq || null;
+  const runId = runRecord?.runId || null;
+  if (!launchRequestId) {
+    return {
+      terminal: false,
+      reason: 'missing-launch-request-id',
+      runId,
+    };
+  }
+
+  const result = await readLatestWorkerRunStatusImpl({
+    launchRequestId,
+    ledgerTarget,
+    ledgerDbPath,
+    env,
+    hqRoot,
+    rootDir: null,
+  });
+  if (!result?.ok) {
+    return {
+      terminal: false,
+      reason: result?.reason || 'worker-run-lookup-failed',
+      detail: result?.detail || null,
+      launchRequestId,
+      runId,
+    };
+  }
+
+  const workerStatus = normalizeWorkerRunStatus(result.row?.status);
+  return {
+    terminal: isTerminalBranchHolderWorkerRunStatus(workerStatus),
+    reason: isTerminalBranchHolderWorkerRunStatus(workerStatus)
+      ? 'terminal-worker-run'
+      : `worker-run-status-${workerStatus || 'unknown'}`,
+    workerStatus,
+    launchRequestId: result.row?.launch_request_id || launchRequestId,
+    runId: result.row?.run_id || runId,
+  };
+}
+
 export const __testables__ = Object.freeze({
   reclaimSelfOwnedHammerCloserWorktreeBeforeProvision,
   selfOwnedHammerCloserWorktreePath,
   teardownSamePrHammerHolder,
+  resolveTerminalCodingBranchHolder,
+  isTerminalBranchHolderWorkerRunStatus,
 });
 
 function sleep(ms) {
@@ -2941,6 +3148,11 @@ export async function maybeDispatchAmaCloser({
           hqRoot,
           execFileImpl,
           logger,
+          repo,
+          headSha: targetRemediationSha,
+          ledgerTarget: dispatchContext.ledgerTarget || null,
+          ledgerDbPath: dispatchContext.ledgerDbPath || null,
+          env: process.env,
         });
         if (samePrTeardown.ok) {
           continue;

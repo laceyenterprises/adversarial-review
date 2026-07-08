@@ -80,6 +80,17 @@ records/stops on `dispatch-branch-holder-block-exhausted` with
 `skipMergeAgent:true` so the daemon does not spin on every reconciliation tick
 against a persistent local-worktree blockage.
 
+When a same-PR branch-holder collision is recoverable, cleanup removes the git
+worktree entry before tearing down the worker. The targeted `git worktree remove
+--force <worker>/agent-os` step is scoped to the agent-os checkout and leaves
+worker metadata such as `workspace.json` available if git cleanup fails. Only
+after that git removal succeeds may the closer call `hq worker tear-down
+--force`, with bounded transient retries and missing-worker diagnostics treated
+as clean. A transient git failure remains retryable on the next watcher pass
+instead of destroying the metadata needed for terminal-worker preflight, while
+an exhausted worker teardown retry fails the current pass so the next poll can
+retry the remaining cleanup.
+
 When the review cycle is exhausted and the posted review head is stale, the
 watcher may authorize HAM terminal remediation against the current PR head
 without first requesting another adversarial review. In that lane the closer

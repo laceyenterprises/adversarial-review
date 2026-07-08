@@ -2114,9 +2114,10 @@ export async function maybeDispatchAmaCloser({
             liveGate: {
               candidateHead: prMetadata?.headSha || '',
               requiredChecks: Array.isArray(prMetadata?.statusCheckRollup) ? prMetadata.statusCheckRollup : [],
-              mergeable: prMetadata?.mergeableState,
+              mergeable: prMetadata?.mergeable || prMetadata?.mergeableState,
               mergeStateStatus: prMetadata?.mergeStateStatus,
-              prState: prMetadata?.isOpen === false ? 'CLOSED' : 'OPEN',
+              prState: String(prMetadata?.state || '').trim() || (prMetadata?.isOpen === false ? 'CLOSED' : 'OPEN'),
+              merged: String(prMetadata?.state || '').trim().toUpperCase() === 'MERGED',
             },
             mergeMethod,
             hqRoot,

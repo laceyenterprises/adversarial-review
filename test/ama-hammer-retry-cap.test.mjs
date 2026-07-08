@@ -677,6 +677,68 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
   assert.equal(dispatchRecord.closureAuthority, 'ham-terminal-remediation');
 });
 
+test('same-head terminal HAM remediation passes canonical live gate shape to daemon merge', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-live-gate-contract-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const first = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir),
+    ...hammerDispatchDeps(),
+  });
+  assert.equal(first.dispatched, true);
+
+  let observedLiveGate = null;
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true },
+      prMetadata: {
+        state: 'OPEN',
+        mergeable: 'UNKNOWN',
+        mergeableState: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+        ],
+      },
+      dispatchContext: {
+        baseBranch: 'main',
+        dispatchedAt: '2026-07-06T12:02:00Z',
+      },
+    }),
+    options: validHamTerminalRemediationOptions({
+      reviewedHead: REVIEWED_HEAD,
+      currentHead: REVIEWED_HEAD,
+    }),
+    ...hammerDispatchDeps({
+      execFileImpl: async (_cmd, args) => {
+        if (args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
+        }
+        if (args[0] === 'worker' && args[1] === 'tear-down') {
+          return { stdout: '', stderr: '' };
+        }
+        return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+      },
+      attemptDaemonCleanMergeImpl: async ({ liveGate }) => {
+        observedLiveGate = liveGate;
+        return { disposition: 'merged', reason: 'merged', merged: true };
+      },
+    }),
+  });
+
+  assert.equal(result.reason, 'current-head-hammer-terminal-remediation-merged');
+  assert.deepEqual(observedLiveGate, {
+    candidateHead: REVIEWED_HEAD,
+    requiredChecks: [
+      { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+    ],
+    mergeable: 'UNKNOWN',
+    mergeStateStatus: 'CLEAN',
+    prState: 'OPEN',
+    merged: false,
+  });
+});
+
 test('same-head terminal HAM remediation records merged audit before nonfatal cleanup failure', async (t) => {
   const cleanupRoot = mkdtempSync(join(tmpdir(), 'hammer-cleanup-nonfatal-'));
   t.after(() => rmSync(cleanupRoot, { recursive: true, force: true }));

@@ -405,6 +405,19 @@ test('≥1 blocking finding → daemon declines (not-taken), never touches lease
   assert.equal(h.calls.merge, 0);
 });
 
+test('HAM terminal remediation verdict may merge over remediated findings after structural gates pass', async () => {
+  const h = makeHarness({ mergeResults: [{ exitCode: 0 }] });
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    verdict: 'ham_terminal_remediation_validated',
+    reviewState: cleanReview({ blockingFindingCount: 1 }),
+    allowHamTerminalRemediation: true,
+  }));
+
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+  assert.equal(h.calls.merge, 1);
+  assert.equal(h.lastMergeCtx.head, HEAD);
+});
+
 test('≥1 non-blocking finding → daemon declines (not-taken) under strict mode', async () => {
   const h = makeHarness();
   const result = await attemptDaemonCleanMerge(

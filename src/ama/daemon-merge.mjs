@@ -321,6 +321,7 @@ export async function attemptDaemonCleanMerge({
   auditMetadata = {},
   flags = {},
   strictMode = flags.strictMode ?? true,
+  allowHamTerminalRemediation = false,
   fetchLiveGateImpl,
   acquireLeaseImpl,
   releaseLeaseImpl,
@@ -350,7 +351,11 @@ export async function attemptDaemonCleanMerge({
   // to the hammer. When strict mode is explicitly off, known non-blocking
   // findings may stay on the daemon path. No hammer is spawned here — the caller
   // falls through. ───────────────────────────────────────────────────────────
-  if (!isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
+  const hamTerminalVerdict = String(verdict || '').trim().toLowerCase() === 'ham_terminal_remediation_validated';
+  if (
+    !(allowHamTerminalRemediation === true && hamTerminalVerdict) &&
+    !isDaemonMergeReviewAllowed(reviewState, { strictMode })
+  ) {
     return notTaken(uncleanReason(reviewState, { strictMode }) || 'findings-unknown');
   }
 
@@ -426,9 +431,10 @@ export async function attemptDaemonCleanMerge({
     autonomousMergeExecutionEnabled: flags.autonomousMergeExecutionEnabled !== false,
     strictMode: strictMode !== false,
   };
+  const closureAuthority = auditMetadata.closureAuthority || DAEMON_MERGE_CLOSURE_AUTHORITY;
   const auditMetadataDoc = {
     ...auditMetadata,
-    closureAuthority: DAEMON_MERGE_CLOSURE_AUTHORITY,
+    closureAuthority,
     flagState,
   };
   try {
@@ -436,7 +442,7 @@ export async function attemptDaemonCleanMerge({
       ...auditKeys,
       attempt: {
         outcome: 'in_progress',
-        path: DAEMON_MERGE_CLOSURE_AUTHORITY,
+        path: closureAuthority,
         attemptPhase: 'daemon-pre-merge',
         validatedHead,
         mergeMethod,
@@ -581,7 +587,7 @@ export async function attemptDaemonCleanMerge({
         ...auditKeys,
         attempt: {
           outcome: 'succeeded',
-          path: DAEMON_MERGE_CLOSURE_AUTHORITY,
+          path: closureAuthority,
           attemptPhase: 'daemon-merged',
           reason: 'merged',
           validatedHead,
@@ -597,7 +603,7 @@ export async function attemptDaemonCleanMerge({
         ...auditKeys,
         attempt: {
           outcome: 'failed-without-merge',
-          path: DAEMON_MERGE_CLOSURE_AUTHORITY,
+          path: closureAuthority,
           attemptPhase: 'daemon-failed',
           reason: terminal.reason,
           permanent: Boolean(terminal.permanent),

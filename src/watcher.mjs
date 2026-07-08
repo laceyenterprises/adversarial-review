@@ -5831,6 +5831,7 @@ async function maybeDispatchAmaClosureFor({
     dispatchRecordHeadSha: reviewState.headSha,
     dispatchReason: reviewCycleExhausted ? 'exhausted-final-hammer' : null,
     allowStaleReviewHeadHammerResume,
+    baseBranch: candidate?.baseBranch || candidate?.baseRefName || null,
     riskClass: reviewState.riskClass,
     requiredGateContext: resolveGateStatusContext(),
     reviewedBy: reviewStateRow?.reviewer_login || '',

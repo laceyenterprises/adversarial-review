@@ -25,7 +25,7 @@
 
 import { execFile } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { userInfo } from 'node:os';
+import { hostname, userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -36,6 +36,7 @@ import {
   readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPr,
 } from '../session-ledger-read-adapter.mjs';
+import { fetchPullRequestRollup } from '../github-api.mjs';
 import {
   beginReviewerPass,
   completeReviewerPass,
@@ -56,7 +57,16 @@ import {
   updateAmaCloserLease,
 } from './closer-lease.mjs';
 import { isEligibleForAmaClosure } from './eligibility.mjs';
+import {
+  attemptDaemonCleanMerge,
+  classifyDaemonMergeError,
+  daemonMergeBackoffMs,
+  DAEMON_MERGE_DEFAULTS,
+  DAEMON_MERGE_DISPOSITION,
+  DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
+} from './daemon-merge.mjs';
 import { resolveCloserDispatchHarness } from './harness-fallback.mjs';
+import { acquireMergeLease, releaseMergeLease } from './merge-lease.mjs';
 import {
   HAMMER_RETRY_CAP_EXHAUSTED_REASON,
   HAMMER_RETRY_CAP_LIFETIME_EXHAUSTED_REASON,
@@ -123,6 +133,8 @@ const HAMMER_ROUTE_STRUCTURAL_BLOCK_REASONS = new Set([
   'branch-protection-missing-gate',
   'fast-merge-state-unsupported',
 ]);
+const AMA_CLOSER_MERGE_RETRY_CAP = DAEMON_MERGE_DEFAULTS.retryCap;
+const AMA_CLOSER_MERGE_BACKOFF_BASE_MS = 250;
 
 export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   if (!Array.isArray(reasons) || reasons.length === 0) return false;
@@ -457,6 +469,71 @@ function assertHammerCleanupSucceeded(hammerCleanup) {
     `AMA hammer worker teardown failed for ${hammerCleanup.workerId || 'unknown-worker'}: ` +
     `${hammerCleanup.error || 'unknown error'}`,
   );
+}
+
+function logHammerCleanupFailure(hammerCleanup, { logger = console, repo, prNumber, phase }) {
+  try {
+    assertHammerCleanupSucceeded(hammerCleanup);
+    return hammerCleanup;
+  } catch (err) {
+    const error = String(err?.message || err);
+    logger?.error?.(JSON.stringify({
+      event: 'ama_closer.hammer_worker_cleanup_nonfatal',
+      repo,
+      prNumber,
+      phase,
+      workerId: hammerCleanup?.workerId || null,
+      reason: hammerCleanup?.reason || null,
+      error,
+    }));
+    return {
+      ...(hammerCleanup || {}),
+      ok: false,
+      nonFatal: true,
+      assertionError: error,
+    };
+  }
+}
+
+async function runGhPrMergeWithTransientRetry({
+  execFileImpl,
+  args,
+  repo,
+  prNumber,
+  head,
+  logger = console,
+}) {
+  let lastFailure = null;
+  for (let attempt = 1; attempt <= AMA_CLOSER_MERGE_RETRY_CAP; attempt += 1) {
+    try {
+      const { stdout, stderr } = await execFileImpl('gh', args, {
+        maxBuffer: 5 * 1024 * 1024,
+        timeout: DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
+      });
+      return { exitCode: 0, stdout: String(stdout || ''), stderr: String(stderr || '') };
+    } catch (err) {
+      lastFailure = {
+        exitCode: Number.isInteger(err?.code) ? err.code : 1,
+        stdout: String(err?.stdout || ''),
+        stderr: String(err?.stderr || err?.message || ''),
+      };
+      const cls = classifyDaemonMergeError(`${lastFailure.stderr}\n${lastFailure.stdout}`);
+      if (cls !== 'retryable' || attempt >= AMA_CLOSER_MERGE_RETRY_CAP) {
+        return lastFailure;
+      }
+      logger?.warn?.(JSON.stringify({
+        event: 'ama_closer.gh_pr_merge_transient_retry',
+        repo,
+        prNumber,
+        head,
+        attempt,
+        retryCap: AMA_CLOSER_MERGE_RETRY_CAP,
+        error: lastFailure.stderr,
+      }));
+      await sleep(daemonMergeBackoffMs(attempt, { baseMs: AMA_CLOSER_MERGE_BACKOFF_BASE_MS }));
+    }
+  }
+  return lastFailure || { exitCode: 1, stdout: '', stderr: 'gh pr merge did not run' };
 }
 
 /**
@@ -1617,6 +1694,10 @@ export async function maybeDispatchAmaCloser({
   readBuildCompletionProducerEvidenceImpl = readBuildCompletionProducerEvidence,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
   resolveCloserDispatchHarnessImpl = resolveCloserDispatchHarness,
+  attemptDaemonCleanMergeImpl = attemptDaemonCleanMerge,
+  acquireMergeLeaseImpl = acquireMergeLease,
+  releaseMergeLeaseImpl = releaseMergeLease,
+  fetchPullRequestRollupImpl = fetchPullRequestRollup,
   deliverAlertImpl = deliverAlert,
   logger = console,
 }) {
@@ -1735,6 +1816,13 @@ export async function maybeDispatchAmaCloser({
   const dispatchReason = dispatchContext.dispatchReason || null;
   const mergeMethod = String(cfg.mergeMethod || 'squash').toLowerCase();
   const rootDir = dispatchContext.rootDir || SUBMODULE_ROOT;
+  const baseBranch = String(
+    dispatchContext.baseBranch ||
+    prMetadata?.baseBranch ||
+    prMetadata?.baseRefName ||
+    prMetadata?.baseRef?.name ||
+    '',
+  ).trim();
 
   const existingLeaseIdentity = { repo, prNumber, headSha: reviewedSha };
   const leaseIdentity = {
@@ -1911,17 +1999,6 @@ export async function maybeDispatchAmaCloser({
     ? targetHeadMergedSignal
     : reviewedHeadMergedSignal;
   if (mergedSignal?.ok) {
-    const hammerCleanup = await cleanupHammerCloserWorker({
-      prNumber,
-      workerClass,
-      existingRecord,
-      hqPath,
-      hqRoot,
-      execFileImpl,
-      logger,
-      reason: 'merged-signal-present',
-    });
-    assertHammerCleanupSucceeded(hammerCleanup);
     if (existingRecord?.launchRequestId || existingRecord?.dispatchId) {
       await recordAmaCloserReviewerPassTokens({
         rootDir,
@@ -1939,6 +2016,22 @@ export async function maybeDispatchAmaCloser({
         logger,
       });
     }
+    const rawHammerCleanup = await cleanupHammerCloserWorker({
+      prNumber,
+      workerClass,
+      existingRecord,
+      hqPath,
+      hqRoot,
+      execFileImpl,
+      logger,
+      reason: 'merged-signal-present',
+    });
+    const hammerCleanup = logHammerCleanupFailure(rawHammerCleanup, {
+      logger,
+      repo,
+      prNumber,
+      phase: 'merged-signal-present',
+    });
     return noAmaDispatch({
       dispatched: false,
       skipMergeAgent: true,
@@ -2006,22 +2099,183 @@ export async function maybeDispatchAmaCloser({
         AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
       ) {
         const reason = 'current-head-hammer-already-ran-needs-operator';
-        // The hammer's final terminal remediation ran but produced NO merged
-        // signal (mergedSignalUnknown). Do not stamp a terminal lease outcome:
-        // 'succeeded' would falsify the §4.4 audit trail, and any non-null
-        // terminalOutcome hides the still-open PR from review-pipeline-health /
-        // recovery-reaper. Leave the dispatched lease reclaimable.
+        let sameHeadHamMerge = null;
+        let sameHeadHamMergeReason = null;
+        if (!baseBranch) {
+          sameHeadHamMergeReason = 'base-branch-missing';
+        } else {
+          sameHeadHamMerge = await attemptDaemonCleanMergeImpl({
+            repo,
+            prNumber,
+            base: baseBranch,
+            validatedHead: reviewedSha,
+            verdict: 'ham_terminal_remediation_validated',
+            reviewState,
+            liveGate: {
+              candidateHead: prMetadata?.headSha || '',
+              requiredChecks: Array.isArray(prMetadata?.statusCheckRollup) ? prMetadata.statusCheckRollup : [],
+              mergeable: prMetadata?.mergeable || prMetadata?.mergeableState,
+              mergeStateStatus: prMetadata?.mergeStateStatus,
+              prState: String(prMetadata?.state || '').trim() || (prMetadata?.isOpen === false ? 'CLOSED' : 'OPEN'),
+              merged: String(prMetadata?.state || '').trim().toUpperCase() === 'MERGED',
+            },
+            mergeMethod,
+            hqRoot,
+            auditMetadata: {
+              reviewer: dispatchContext.reviewer || '',
+              reviewerFamily: dispatchContext.reviewedBy || '',
+              riskClass: dispatchContext.riskClass || 'unknown',
+              closureAuthority: 'ham-terminal-remediation',
+              closedBy: workerClass === 'hammer' ? 'hammer' : `${workerClass}-closer`,
+              closeTrailers: amaTrailers,
+            },
+            flags: {
+              autonomousMergeExecutionEnabled: cfg?.autonomousMergeExecutionEnabled !== false,
+              strictMode: cfg?.strictMode !== false,
+            },
+            allowHamTerminalRemediation: true,
+            fetchLiveGateImpl: async () => {
+              const rollup = await fetchPullRequestRollupImpl(repo, prNumber, { execFileImpl });
+              const state = String(rollup?.state || '');
+              return {
+                candidateHead: rollup?.headSha || rollup?.headRefOid || '',
+                requiredChecks: Array.isArray(rollup?.statusCheckRollup) ? rollup.statusCheckRollup : [],
+                mergeable: rollup?.mergeable,
+                mergeStateStatus: rollup?.mergeStateStatus,
+                prState: state,
+                merged: state.toUpperCase() === 'MERGED',
+              };
+            },
+            acquireLeaseImpl: () => {
+              const res = acquireMergeLeaseImpl({
+                rootDir,
+                repo,
+                base: baseBranch,
+                holderPr: prNumber,
+                holderHead: reviewedSha,
+                holderPid: process.pid,
+                holderHost: hostname(),
+                now: dispatchContext.dispatchedAt || new Date().toISOString(),
+              });
+              return { acquired: Boolean(res?.acquired), lease: res?.lease, existingLease: res?.existingLease };
+            },
+            releaseLeaseImpl: (lease) => {
+              releaseMergeLeaseImpl({
+                rootDir,
+                repo: lease.repo,
+                base: lease.base,
+                leaseId: lease.leaseId,
+                holderPr: lease.holderPr,
+                holderHead: lease.holderHead,
+                acquiredAt: lease.acquiredAt,
+              });
+            },
+            runMergeImpl: async ({ repo: mergeRepo, prNumber: mergePr, head, mergeMethod: method }) => {
+              const methodFlag = method === 'merge' ? '--merge' : '--squash';
+              const args = [
+                'pr',
+                'merge',
+                String(mergePr),
+                '--repo',
+                mergeRepo,
+                methodFlag,
+                '--match-head-commit',
+                head,
+                '--body',
+                amaTrailers,
+              ];
+              return runGhPrMergeWithTransientRetry({
+                execFileImpl,
+                args,
+                repo: mergeRepo,
+                prNumber: mergePr,
+                head,
+                logger,
+              });
+            },
+            now: () => dispatchContext.dispatchedAt || new Date().toISOString(),
+            logger,
+          });
+          sameHeadHamMergeReason = sameHeadHamMerge?.reason || null;
+        }
+        if (sameHeadHamMerge?.disposition === DAEMON_MERGE_DISPOSITION.MERGED) {
+          finalizeAmaCloserLeaseBestEffort({
+            rootDir,
+            leaseIdentity: existingRecordLeaseIdentity,
+            terminalOutcome: 'succeeded',
+            now: dispatchContext.dispatchedAt,
+            logger,
+            repo,
+            prNumber,
+          });
+          updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+            ...(current || existingRecord),
+            lastObservedStatus: status,
+            lastObservedAt: dispatchContext.dispatchedAt,
+            lastError: null,
+            closureAuthority: 'ham-terminal-remediation',
+          }));
+          await recordAmaCloserReviewerPassTokens({
+            rootDir,
+            hqRoot,
+            repo,
+            prNumber,
+            record: {
+              ...existingRecord,
+              lastObservedStatus: status,
+              lastObservedAt: dispatchContext.dispatchedAt,
+            },
+            status,
+            merged: true,
+            observedAt: dispatchContext.dispatchedAt,
+            ledgerTarget: dispatchContext.ledgerTarget || null,
+            ledgerDbPath: dispatchContext.ledgerDbPath || null,
+            env: process.env,
+            pollDelaysMs: dispatchContext.closerTokenRollupPollDelaysMs || undefined,
+            logger,
+          });
+          const rawHammerCleanup = await cleanupHammerCloserWorker({
+            prNumber,
+            workerClass,
+            existingRecord,
+            hqPath,
+            hqRoot,
+            execFileImpl,
+            logger,
+            reason: 'same-head-terminal-ham-merged',
+          });
+          const hammerCleanup = logHammerCleanupFailure(rawHammerCleanup, {
+            logger,
+            repo,
+            prNumber,
+            phase: 'same-head-terminal-ham-merged',
+          });
+          return noAmaDispatch({
+            dispatched: false,
+            skipMergeAgent: true,
+            reason: 'current-head-hammer-terminal-remediation-merged',
+            workerClass: existingRecord?.workerClass || workerClass,
+            dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+            launchRequestId: existingRecord.launchRequestId || null,
+            promptPath: existingRecord.promptPath || null,
+            daemonMerge: sameHeadHamMerge,
+            ...(hammerCleanup ? { hammerCleanup } : {}),
+          });
+        }
         logger?.error?.(JSON.stringify({
           event: 'ama_closer.current_head_hammer_stuck',
           repo,
           prNumber,
           headSha: reviewedSha,
           reason,
+          structuralMergeReason: sameHeadHamMergeReason,
+          structuralMergeDisposition: sameHeadHamMerge?.disposition || null,
+          structuralMergeReasons: sameHeadHamMerge?.reasons || [],
           launchRequestId: existingRecord.launchRequestId || null,
           dispatchId: existingRecord.dispatchId || null,
           status,
           message:
-            'Final HAM terminal remediation already completed for the current head, but no merged signal is present; refusing same-head re-dispatch',
+            'Final HAM terminal remediation already completed for the current head, but structural merge gates did not pass; refusing same-head re-dispatch',
         }));
         updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),

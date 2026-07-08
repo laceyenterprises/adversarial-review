@@ -5195,6 +5195,92 @@ test('consumeNextFollowUpJob surfaces unfixable oss-readiness baseline bumps wit
   }
 });
 
+test('consumeNextFollowUpJob rolls back workspace when oss-readiness apply crashes', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const scriptPath = path.join(rootDir, 'fixtures', 'audit-oss-readiness-hardcodes.py');
+  mkdirSync(path.dirname(scriptPath), { recursive: true });
+  writeFileSync(scriptPath, '#!/usr/bin/env python3\n', 'utf8');
+
+  const previousScript = process.env[OSS_READINESS_APPLY_SCRIPT_ENV];
+  process.env[OSS_READINESS_APPLY_SCRIPT_ENV] = scriptPath;
+  try {
+    const created = createFollowUpJob({
+      rootDir,
+      repo: 'laceyenterprises/clio',
+      prNumber: 76,
+      reviewerModel: 'claude',
+      linearTicketId: 'LAC-276',
+      reviewBody: [
+        '## Summary',
+        'CI failure: oss-readiness-audit failed because src/config.mjs hard-coded a category.',
+        '',
+        '## Verdict',
+        'Request changes',
+      ].join('\n'),
+      reviewPostedAt: '2026-06-20T08:20:00.000Z',
+      critical: true,
+    });
+
+    await withOAuthTestEnv(rootDir, async () => {
+      let spawned = false;
+      const calls = [];
+      await assert.rejects(
+        () => consumeNextFollowUpJob({
+          rootDir,
+          promptTemplate: 'You are a remediation worker.',
+          now: () => '2026-06-20T10:20:00.000Z',
+          execFileImpl: async (command, args) => {
+            calls.push([command, ...args]);
+            if (command === 'git' && args[0] === 'clone') {
+              mkdirSync(path.join(args[2], '.git', 'info'), { recursive: true });
+              return { stdout: '', stderr: '' };
+            }
+            if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+              return {
+                stdout: JSON.stringify({
+                  base: { ref: 'main' },
+                  head: { ref: 'codex/psh-03-apply-crash', repo: { full_name: 'laceyenterprises/clio' } },
+                }),
+                stderr: '',
+              };
+            }
+            if (command === 'git' && args[2] === 'rev-parse' && args[3] === '--git-path') {
+              return { stdout: '.git/info/exclude\n', stderr: '' };
+            }
+            if (command === scriptPath && args[0] === '--apply') {
+              const err = new Error('apply crashed after partial write');
+              err.stdout = 'Updated 5 files. Checking baseline... ok.\n';
+              err.stderr = 'Traceback: crash\n';
+              throw err;
+            }
+            return { stdout: '', stderr: '' };
+          },
+          spawnImpl: () => {
+            spawned = true;
+            return { pid: 7676, unref() {} };
+          },
+        }),
+        /oss-readiness --apply failed: apply crashed after partial write/
+      );
+
+      assert.equal(spawned, false);
+      const failedDir = getFollowUpJobDir(rootDir, 'failed');
+      const failedPath = path.join(failedDir, `${created.job.jobId}.json`);
+      const failed = readFollowUpJob(failedPath);
+      assert.equal(failed.status, 'failed');
+      assert.equal(failed.failure.code, 'oss-readiness-apply-failed');
+      assert.equal(failed.failure.needsOperator, false);
+      assert.equal(failed.failure.ossReadinessApply.ossReadinessWorkspaceReset, true);
+      assert.equal(failed.failure.ossReadinessApply.needsOperatorApproval, false);
+      assert.ok(calls.some((call) => call[0] === 'git' && call[3] === 'reset' && call[4] === '--hard'));
+      assert.ok(calls.some((call) => call[0] === 'git' && call[3] === 'clean' && call[4] === '-fd'));
+    });
+  } finally {
+    if (previousScript === undefined) delete process.env[OSS_READINESS_APPLY_SCRIPT_ENV];
+    else process.env[OSS_READINESS_APPLY_SCRIPT_ENV] = previousScript;
+  }
+});
+
 test('consumeNextFollowUpJob skips oss-readiness --apply when the audit did not fail', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const scriptPath = path.join(rootDir, 'fixtures', 'audit-oss-readiness-hardcodes.py');

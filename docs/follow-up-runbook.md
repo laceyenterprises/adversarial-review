@@ -380,7 +380,7 @@ What this does:
 - clones and refreshes same-repo PR branches with git smart-HTTP, fetching the head branch into `refs/remotes/origin/<headRef>` before `checkout -B`
 - uses `gh pr checkout` only for fork PR fallback, where the head branch is not on `origin`
 - writes worker artifacts under `<workspace>/.adversarial-follow-up/`
-- when the job is already blocked on `oss-readiness-audit`, first runs the mechanical `oss-readiness --apply` path before spawning the model worker. That path captures NUL-delimited git status, includes untracked files in the diff evidence with intent-to-add, stages successful fixes with `git add --all`, and rolls the workspace back with `git reset --hard` plus `git clean -fd` if post-apply validation or baseline guards fail.
+- when the job is already blocked on `oss-readiness-audit`, first runs the mechanical `oss-readiness --apply` path before spawning the model worker. That path captures NUL-delimited git status, includes untracked files in the diff evidence with intent-to-add, stages successful fixes with `git add --all`, and rolls the workspace back with `git reset --hard` plus `git clean -fd` if the apply script exits non-zero, post-apply validation fails, or baseline guards fail.
 - spawns a detached Codex remediation worker
 
 Launch artifacts written into the job record include:

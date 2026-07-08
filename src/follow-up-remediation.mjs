@@ -3334,7 +3334,11 @@ function ossReadinessNeedsOperatorMessage(result) {
     result?.stderr,
     result?.error,
   ].filter(Boolean).join('\n');
-  if (/baseline/i.test(text) && /bump|update|ratchet|required|needed/i.test(text)) {
+  if (
+    /\bratchet\s+baseline\s+bump(?:\s+is)?\s+(?:required|needed)\b/i.test(text)
+    || /\bbaseline\s+bump(?:\s+is)?\s+(?:required|needed)\b/i.test(text)
+    || /\brequires?\s+(?:a\s+)?(?:ratchet\s+)?baseline\s+bump\b/i.test(text)
+  ) {
     return 'oss-readiness --apply reported that a ratchet baseline bump is required; operator approval is required.';
   }
   return null;
@@ -3420,30 +3424,30 @@ async function applyOssReadinessRemediation({
   const startedAt = now();
   let applyResult;
   try {
-    applyResult = await execFileImpl(scriptPath, ['--apply'], {
-      cwd: workspaceDir,
-      maxBuffer: 20 * 1024 * 1024,
-    });
-  } catch (err) {
-    const failed = {
-      attempted: true,
-      ok: false,
-      scriptPath,
-      startedAt,
-      finishedAt: now(),
-      stdout: String(err?.stdout || ''),
-      stderr: String(err?.stderr || ''),
-      error: err?.message || String(err),
-    };
-    const needsOperator = ossReadinessNeedsOperatorMessage(failed);
-    const out = new Error(needsOperator || `oss-readiness --apply failed: ${failed.error}`);
-    out.code = needsOperator ? 'oss-readiness-baseline-operator-required' : 'oss-readiness-apply-failed';
-    out.isOssReadinessApplyError = true;
-    out.ossReadinessApply = { ...failed, needsOperatorApproval: Boolean(needsOperator) };
-    throw out;
-  }
+    try {
+      applyResult = await execFileImpl(scriptPath, ['--apply'], {
+        cwd: workspaceDir,
+        maxBuffer: 20 * 1024 * 1024,
+      });
+    } catch (err) {
+      const failed = {
+        attempted: true,
+        ok: false,
+        scriptPath,
+        startedAt,
+        finishedAt: now(),
+        stdout: String(err?.stdout || ''),
+        stderr: String(err?.stderr || ''),
+        error: err?.message || String(err),
+      };
+      const needsOperator = ossReadinessNeedsOperatorMessage(failed);
+      const out = new Error(needsOperator || `oss-readiness --apply failed: ${failed.error}`);
+      out.code = needsOperator ? 'oss-readiness-baseline-operator-required' : 'oss-readiness-apply-failed';
+      out.isOssReadinessApplyError = true;
+      out.ossReadinessApply = { ...failed, needsOperatorApproval: Boolean(needsOperator) };
+      throw out;
+    }
 
-  try {
     const diff = await collectOssReadinessWorkspaceDiff({ workspaceDir, execFileImpl });
     if (diff.changedFiles.includes(OSS_READINESS_BASELINE_PATH)) {
       const out = new Error('oss-readiness --apply attempted to modify scripts/oss-readiness-category-baseline.json; operator approval is required for ratchet baseline changes.');
@@ -3512,9 +3516,16 @@ async function applyOssReadinessRemediation({
     try {
       await resetOssReadinessWorkspace({ workspaceDir, execFileImpl });
       err.ossReadinessWorkspaceReset = true;
+      if (err.ossReadinessApply && typeof err.ossReadinessApply === 'object') {
+        err.ossReadinessApply.ossReadinessWorkspaceReset = true;
+      }
     } catch (resetErr) {
       err.ossReadinessWorkspaceReset = false;
       err.ossReadinessWorkspaceResetError = resetErr?.message || String(resetErr);
+      if (err.ossReadinessApply && typeof err.ossReadinessApply === 'object') {
+        err.ossReadinessApply.ossReadinessWorkspaceReset = false;
+        err.ossReadinessApply.ossReadinessWorkspaceResetError = err.ossReadinessWorkspaceResetError;
+      }
     }
     throw err;
   }

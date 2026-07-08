@@ -731,6 +731,7 @@ fi
 HAM_LOCAL_BATTERY_COMMAND="${HAM_LOCAL_BATTERY_COMMAND:-npm test}"
 HAM_REMOTE_CI_WAIT_SECONDS="${HAM_REMOTE_CI_WAIT_SECONDS:-900}"
 HAM_REMOTE_CI_POLL_SECONDS="${HAM_REMOTE_CI_POLL_SECONDS:-15}"
+HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT="${HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT:-3}"
 HAM_MERGE_RETRY_CAP="${HAM_MERGE_RETRY_CAP:-4}"
 HAM_MERGE_BACKOFF_BASE_SECONDS="${HAM_MERGE_BACKOFF_BASE_SECONDS:-2}"
 HAM_MERGE_TMP_PREFIX="${TMPDIR:-/tmp}/ham-<<PR_NUMBER>>-${HAM_MERGE_LEASE_ID:-no-lease}-$$"
@@ -959,8 +960,11 @@ ham_run_pph_ci_mirror_with_timeout() {
     perl -e 'alarm shift; exec @ARGV' "${HAM_LOCAL_CI_TIMEOUT_SECONDS:-3600}" .githooks/pre-push origin "git@github.com:<<REPO>>.git" < "$HAM_PPH_STDIN"
     HAM_PPH_EXIT=$?
   else
-    HAM_PPH_FILES=$(ham_changed_files_for_local_ci | tr '\n' ' ')
-    perl -e 'alarm shift; exec @ARGV' "${HAM_LOCAL_CI_TIMEOUT_SECONDS:-3600}" python3 scripts/ci-mirror/run-ci-mirror.py --repo-root . --files $HAM_PPH_FILES
+    HAM_PPH_FILES=()
+    while IFS= read -r HAM_PPH_FILE; do
+      [ -n "$HAM_PPH_FILE" ] && HAM_PPH_FILES+=("$HAM_PPH_FILE")
+    done < <(ham_changed_files_for_local_ci)
+    perl -e 'alarm shift; exec @ARGV' "${HAM_LOCAL_CI_TIMEOUT_SECONDS:-3600}" python3 scripts/ci-mirror/run-ci-mirror.py --repo-root . --files "${HAM_PPH_FILES[@]}"
     HAM_PPH_EXIT=$?
   fi
   rm -f "$HAM_PPH_STDIN"
@@ -990,15 +994,23 @@ HAM_LOCAL_CI_STATUS=local-ci-green
 
 HAM_REMOTE_CI_STATUS=waiting
 HAM_REMOTE_CI_DEADLINE=$(( $(date +%s) + HAM_REMOTE_CI_WAIT_SECONDS ))
+HAM_REMOTE_CI_GATE_READ_FAILURES=0
 HAM_ALREADY_MERGED_VALIDATED_HEAD=0
 while :; do
   if ! ham_refresh_github_gate; then
-    echo "HAM hard-blocker: unable to read GitHub gate through src/github-api.mjs adapter" >&2
-    HAM_REMOTE_CI_STATUS=gate-read-failed
-    ham_append_terminal_audit failed-without-merge github-gate-read-failed || true
-    ham_release_merge_lease
-    exit 1
+    HAM_REMOTE_CI_GATE_READ_FAILURES=$((HAM_REMOTE_CI_GATE_READ_FAILURES + 1))
+    HAM_REMOTE_CI_STATUS=gate-read-transient-failure
+    if [ "$HAM_REMOTE_CI_GATE_READ_FAILURES" -ge "$HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT" ] || [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
+      echo "HAM hard-blocker: unable to read GitHub gate through src/github-api.mjs adapter after ${HAM_REMOTE_CI_GATE_READ_FAILURES} consecutive failures" >&2
+      ham_append_terminal_audit failed-without-merge github-gate-read-failed || true
+      ham_release_merge_lease
+      exit 1
+    fi
+    echo "HAM remote CI: transient GitHub gate read failure ${HAM_REMOTE_CI_GATE_READ_FAILURES}/${HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT}; retrying within remote CI wait window" >&2
+    sleep "$HAM_REMOTE_CI_POLL_SECONDS"
+    continue
   fi
+  HAM_REMOTE_CI_GATE_READ_FAILURES=0
   if ham_already_merged_validated_head; then
     echo "HAM preflight: PR is already merged at validated head; proceeding to post-merge validation" >&2
     HAM_REMOTE_CI_STATUS=already-merged-at-validated-head

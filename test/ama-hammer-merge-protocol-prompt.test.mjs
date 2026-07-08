@@ -15,8 +15,15 @@ test('hammer prompt enforces the PSH-05 lease guarded local and remote CI merge 
   assert.match(HAMMER_PROMPT, /ham_run_pph_ci_mirror_with_timeout\(\)/);
   assert.match(HAMMER_PROMPT, /PPH pre-push CI mirror/);
   assert.match(HAMMER_PROMPT, /HAM_REMOTE_CI_WAIT_SECONDS="\$\{HAM_REMOTE_CI_WAIT_SECONDS:-900\}"/);
+  assert.match(HAMMER_PROMPT, /HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT="\$\{HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT:-3\}"/);
+  assert.match(HAMMER_PROMPT, /HAM_REMOTE_CI_GATE_READ_FAILURES=\$\(\(HAM_REMOTE_CI_GATE_READ_FAILURES \+ 1\)\)/);
+  assert.match(HAMMER_PROMPT, /transient GitHub gate read failure/);
   assert.match(HAMMER_PROMPT, /github-gate-red/);
   assert.match(HAMMER_PROMPT, /github-gate-timeout/);
+  assert.match(HAMMER_PROMPT, /HAM_PPH_FILES=\(\)/);
+  assert.match(HAMMER_PROMPT, /--files "\$\{HAM_PPH_FILES\[@\]\}"/);
+  assert.doesNotMatch(HAMMER_PROMPT, /tr '\\n' ' '/);
+  assert.doesNotMatch(HAMMER_PROMPT, /--files \$HAM_PPH_FILES/);
   assert.match(HAMMER_PROMPT, /--match-head-commit "\$POST_REMEDIATION_SHA"/);
   assert.match(HAMMER_PROMPT, /rebasedOntoBase: \$rebasedOntoBase/);
   assert.match(HAMMER_PROMPT, /localCiStatus: \$localCiStatus/);

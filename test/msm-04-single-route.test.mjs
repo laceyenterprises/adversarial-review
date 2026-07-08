@@ -218,7 +218,7 @@ test('DCR-02: default live probe checks fork head repository branches', async ()
     '--exit-code',
     '--heads',
     'https://github.com/contributor/repo.git',
-    'codex/live',
+    'refs/heads/codex/live',
   ]);
 });
 
@@ -263,15 +263,15 @@ test('DCR-02: default live probe retries transient gh and git failures', async (
     sleepImpl: async (ms) => {
       sleeps.push(ms);
     },
-    execFileImpl: async (cmd) => {
-      calls.push(cmd);
-      if (cmd === 'gh' && calls.filter(call => call === 'gh').length === 1) {
+    execFileImpl: async (cmd, args, options) => {
+      calls.push({ cmd, args, options });
+      if (cmd === 'gh' && calls.filter(call => call.cmd === 'gh').length === 1) {
         throw Object.assign(new Error('TLS handshake timeout'), { code: 'ETIMEDOUT' });
       }
       if (cmd === 'gh') {
         return { stdout: JSON.stringify({ state: 'OPEN', headRefName: 'codex/live', headRefOid: HEAD }), stderr: '' };
       }
-      if (cmd === 'git' && calls.filter(call => call === 'git').length === 1) {
+      if (cmd === 'git' && calls.filter(call => call.cmd === 'git').length === 1) {
         throw Object.assign(new Error('resource temporarily unavailable'), { code: 'EIO' });
       }
       if (cmd === 'git') {
@@ -283,7 +283,8 @@ test('DCR-02: default live probe retries transient gh and git failures', async (
 
   assert.equal(result.state, 'OPEN');
   assert.equal(result.headBranchExists, true);
-  assert.deepEqual(calls, ['gh', 'gh', 'git', 'git']);
+  assert.deepEqual(calls.map(call => call.cmd), ['gh', 'gh', 'git', 'git']);
+  assert.equal(calls.find(call => call.cmd === 'git')?.options?.env?.GIT_TERMINAL_PROMPT, '0');
   assert.deepEqual(sleeps, [1, 1]);
 });
 

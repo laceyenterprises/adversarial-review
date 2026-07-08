@@ -314,9 +314,9 @@ async function defaultAmaLivePrProbe({
         '--exit-code',
         '--heads',
         repoUrl,
-        headRefName,
+        `refs/heads/${headRefName}`,
       ], {
-        env: process.env,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
         timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS,
         maxBuffer: 1024 * 1024,
       }, {
@@ -1204,7 +1204,8 @@ export function isTransientHqDispatchError(err) {
     || detail.includes('sqlite_busy')
     || detail.includes('resource temporarily unavailable')
     || detail.includes('temporary failure')
-    || detail.includes('temporarily unavailable');
+    || detail.includes('temporarily unavailable')
+    || detail.includes('unable to access');
 }
 
 function isProvisionBranchHolderBlocked(errOrText) {

@@ -932,17 +932,13 @@ ham_run_local_battery_with_timeout() {
   ' "${HAM_LOCAL_BATTERY_TIMEOUT_SECONDS:-3600}" sh -lc "$HAM_LOCAL_BATTERY_COMMAND"
 }
 
-ham_changed_files_for_local_ci() {
-  if ham_is_full_sha "${HAM_REBASED_ONTO_BASE_SHA:-}"; then
-    git diff --name-only --diff-filter=ACMR "$HAM_REBASED_ONTO_BASE_SHA" "$POST_REMEDIATION_SHA" --
-  else
-    git diff --name-only --diff-filter=ACMR "origin/$BASE_BRANCH"... "$POST_REMEDIATION_SHA" --
-  fi
-}
-
 ham_run_pph_ci_mirror_with_timeout() {
   HAM_PPH_STDIN=$(mktemp "${HAM_MERGE_TMP_PREFIX}.pph-stdin.XXXXXX") || return 1
-  printf 'refs/heads/ham-<<PR_NUMBER>> %s refs/heads/%s %040d\n' "$POST_REMEDIATION_SHA" "$BASE_BRANCH" 0 > "$HAM_PPH_STDIN"
+  HAM_PPH_REMOTE_SHA=$(printf '%040d' 0)
+  if ham_is_full_sha "${HAM_REBASED_ONTO_BASE_SHA:-}"; then
+    HAM_PPH_REMOTE_SHA="$HAM_REBASED_ONTO_BASE_SHA"
+  fi
+  printf 'refs/heads/ham-<<PR_NUMBER>> %s refs/heads/%s %s\n' "$POST_REMEDIATION_SHA" "$BASE_BRANCH" "$HAM_PPH_REMOTE_SHA" > "$HAM_PPH_STDIN"
   if [ ! -f scripts/ci-mirror/run-ci-mirror.py ]; then
     echo "HAM hard-blocker: PPH CI-mirror runner missing at scripts/ci-mirror/run-ci-mirror.py" >&2
     rm -f "$HAM_PPH_STDIN"
@@ -960,15 +956,7 @@ ham_run_pph_ci_mirror_with_timeout() {
     perl -e 'alarm shift; exec @ARGV' "${HAM_LOCAL_CI_TIMEOUT_SECONDS:-3600}" .githooks/pre-push origin "git@github.com:<<REPO>>.git" < "$HAM_PPH_STDIN"
     HAM_PPH_EXIT=$?
   else
-    HAM_PPH_FILES=()
-    while IFS= read -r HAM_PPH_FILE; do
-      [ -n "$HAM_PPH_FILE" ] && HAM_PPH_FILES+=("$HAM_PPH_FILE")
-    done < <(ham_changed_files_for_local_ci)
-    HAM_PPH_CI_ARGS=(python3 scripts/ci-mirror/run-ci-mirror.py --repo-root . --match-head-commit "$POST_REMEDIATION_SHA")
-    if [ "${#HAM_PPH_FILES[@]}" -gt 0 ]; then
-      HAM_PPH_CI_ARGS+=(--files "${HAM_PPH_FILES[@]}")
-    fi
-    perl -e 'alarm shift; exec @ARGV' "${HAM_LOCAL_CI_TIMEOUT_SECONDS:-3600}" "${HAM_PPH_CI_ARGS[@]}"
+    perl -e 'alarm shift; exec @ARGV' "${HAM_LOCAL_CI_TIMEOUT_SECONDS:-3600}" python3 scripts/ci-mirror/run-ci-mirror.py --repo-root . --match-head-commit "$POST_REMEDIATION_SHA" --stdin < "$HAM_PPH_STDIN"
     HAM_PPH_EXIT=$?
   fi
   rm -f "$HAM_PPH_STDIN"

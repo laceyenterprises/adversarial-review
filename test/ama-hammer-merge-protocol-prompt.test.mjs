@@ -22,9 +22,12 @@ test('hammer prompt enforces the PSH-05 lease guarded local and remote CI merge 
   assert.match(HAMMER_PROMPT, /github-gate-timeout/);
   assert.doesNotMatch(HAMMER_PROMPT, /\|\s*IN\(/);
   assert.match(HAMMER_PROMPT, /index\(\$conclusion\)/);
-  assert.match(HAMMER_PROMPT, /HAM_PPH_FILES=\(\)/);
-  assert.match(HAMMER_PROMPT, /if \[ "\$\{#HAM_PPH_FILES\[@\]\}" -gt 0 \]; then/);
-  assert.match(HAMMER_PROMPT, /HAM_PPH_CI_ARGS\+=\(--files "\$\{HAM_PPH_FILES\[@\]\}"\)/);
+  assert.match(HAMMER_PROMPT, /HAM_PPH_REMOTE_SHA=\$\(printf '%040d' 0\)/);
+  assert.match(HAMMER_PROMPT, /HAM_PPH_REMOTE_SHA="\$HAM_REBASED_ONTO_BASE_SHA"/);
+  assert.match(HAMMER_PROMPT, /--match-head-commit "\$POST_REMEDIATION_SHA" --stdin < "\$HAM_PPH_STDIN"/);
+  assert.doesNotMatch(HAMMER_PROMPT, /HAM_PPH_FILES=\(\)/);
+  assert.doesNotMatch(HAMMER_PROMPT, /ham_changed_files_for_local_ci/);
+  assert.doesNotMatch(HAMMER_PROMPT, /HAM_PPH_CI_ARGS\+=\(--files/);
   assert.doesNotMatch(HAMMER_PROMPT, /tr '\\n' ' '/);
   assert.doesNotMatch(HAMMER_PROMPT, /--files \$HAM_PPH_FILES/);
   assert.match(HAMMER_PROMPT, /--match-head-commit "\$POST_REMEDIATION_SHA"/);

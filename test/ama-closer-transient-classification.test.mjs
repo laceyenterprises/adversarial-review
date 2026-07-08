@@ -63,6 +63,12 @@ test('isTransientHqDispatchError recognizes transient diagnostics after a non-ma
     isTransientHqDispatchError('Bad request.\nresource temporarily unavailable while tearing down worker'),
     true,
   );
+  assert.equal(
+    isTransientHqDispatchError({
+      stderr: 'fatal: unable to access https://github.com/acme/repo.git/: connection reset by peer',
+    }),
+    true,
+  );
 });
 
 test('isGithubRateLimitOrBrokerThrottle does NOT match unrelated bare 429 text', () => {

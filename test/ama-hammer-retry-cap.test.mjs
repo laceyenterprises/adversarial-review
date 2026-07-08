@@ -93,6 +93,7 @@ function hammerDispatchArgs(rootDir, overrides = {}) {
       hqOwnerUser: CURRENT_USER,
       currentUser: CURRENT_USER,
       dispatchedAt: '2026-07-06T12:00:00Z',
+      livePrProbeImpl: async () => ({ state: 'OPEN', headBranchExists: true, headRefName: 'hammer/live' }),
       ...overrides.dispatchContext,
     },
   };

@@ -92,6 +92,8 @@ const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const AGENT_OS_TOOLING_REPO = 'agent-os';
 const ADVERSARIAL_REVIEW_REPO = 'adversarial-review';
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
+const AMA_LIVE_PR_PROBE_TIMEOUT_MS = 30_000;
+const AMA_LIVE_PR_PROBE_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000];
 const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
   'blocking-findings-present',
   'blocking-findings-unknown',
@@ -203,6 +205,164 @@ function noAmaDispatch(result) {
     ...result,
     namedReason: result?.namedReason || namedAmaNoDispatchReason(reason, result?.reasons),
   };
+}
+
+function normalizeAmaLivePrProbeResult(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const state = String(raw.state || raw.prState || '').trim().toUpperCase();
+  if (!['OPEN', 'MERGED', 'CLOSED'].includes(state)) return null;
+  let headBranchExists = raw.headBranchExists;
+  if (headBranchExists !== true && headBranchExists !== false) {
+    headBranchExists = raw.headRefExists;
+  }
+  if (headBranchExists !== true && headBranchExists !== false) {
+    headBranchExists = raw.branchExists;
+  }
+  return {
+    state,
+    headBranchExists: headBranchExists === true ? true : headBranchExists === false ? false : null,
+    headRefName: typeof raw.headRefName === 'string' ? raw.headRefName : null,
+    headRefOid: typeof raw.headRefOid === 'string' ? raw.headRefOid : null,
+    ...(raw.headBranchProbeError ? { headBranchProbeError: String(raw.headBranchProbeError) } : {}),
+  };
+}
+
+function githubRepoHttpUrl(repo) {
+  const slug = String(repo || '').trim();
+  if (!slug || !slug.includes('/')) return null;
+  return `https://github.com/${slug}.git`;
+}
+
+function githubHeadRepositoryHttpUrl(headRepository) {
+  if (typeof headRepository === 'string') {
+    const value = headRepository.trim();
+    if (/^https?:\/\//u.test(value)) return value;
+    return githubRepoHttpUrl(value);
+  }
+  if (!headRepository || typeof headRepository !== 'object') return null;
+  const httpUrl = String(headRepository.url || '').trim();
+  if (httpUrl) return httpUrl;
+  const nameWithOwner = String(headRepository.nameWithOwner || '').trim();
+  if (nameWithOwner) return githubRepoHttpUrl(nameWithOwner);
+  const name = String(headRepository.name || '').trim();
+  const owner = typeof headRepository.owner === 'object' && headRepository.owner
+    ? String(headRepository.owner.login || headRepository.owner.name || '').trim()
+    : '';
+  if (owner && name) return githubRepoHttpUrl(`${owner}/${name}`);
+  return null;
+}
+
+async function execAmaLivePrProbeCommandWithTransientRetry(
+  execFileImpl,
+  cmd,
+  args,
+  options,
+  {
+    sleepImpl = sleep,
+    retryDelaysMs = AMA_LIVE_PR_PROBE_TRANSIENT_RETRY_DELAYS_MS,
+  } = {},
+) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await execFileImpl(cmd, args, options);
+    } catch (err) {
+      if (attempt >= retryDelaysMs.length || !isTransientHqDispatchError(err)) {
+        throw err;
+      }
+      await sleepImpl(Number(retryDelaysMs[attempt]) || 0);
+    }
+  }
+}
+
+async function defaultAmaLivePrProbe({
+  execFileImpl,
+  repo,
+  prNumber,
+  sleepImpl,
+  retryDelaysMs,
+}) {
+  const { stdout } = await execAmaLivePrProbeCommandWithTransientRetry(execFileImpl, 'gh', [
+    'pr',
+    'view',
+    String(prNumber),
+    '--repo',
+    repo,
+    '--json',
+    'state,headRefName,headRefOid,headRepository',
+  ], {
+    env: process.env,
+    timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS,
+    maxBuffer: 1024 * 1024,
+  }, {
+    sleepImpl,
+    retryDelaysMs,
+  });
+  const payload = JSON.parse(stdout || '{}');
+  const state = String(payload?.state || '').trim().toUpperCase();
+  let headBranchExists = null;
+  let headBranchProbeError = null;
+  const headRefName = String(payload?.headRefName || '').trim();
+  const hasHeadRepository = Object.prototype.hasOwnProperty.call(payload || {}, 'headRepository');
+  const repoUrl = githubHeadRepositoryHttpUrl(payload?.headRepository)
+    || (!hasHeadRepository ? githubRepoHttpUrl(repo) : null);
+  if (state === 'OPEN' && headRefName && hasHeadRepository && payload?.headRepository === null) {
+    headBranchExists = false;
+  } else if (state === 'OPEN' && headRefName && repoUrl) {
+    try {
+      const probe = await execAmaLivePrProbeCommandWithTransientRetry(execFileImpl, 'git', [
+        'ls-remote',
+        '--exit-code',
+        '--heads',
+        repoUrl,
+        `refs/heads/${headRefName}`,
+      ], {
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        timeout: AMA_LIVE_PR_PROBE_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+      }, {
+        sleepImpl,
+        retryDelaysMs,
+      });
+      headBranchExists = String(probe?.stdout || '').trim().length > 0;
+    } catch (err) {
+      if (Number(err?.code) === 2) {
+        headBranchExists = false;
+      } else {
+        headBranchExists = null;
+        headBranchProbeError = String(err?.message || err);
+      }
+    }
+  }
+  return normalizeAmaLivePrProbeResult({
+    state,
+    headRefName,
+    headRefOid: typeof payload?.headRefOid === 'string' ? payload.headRefOid : null,
+    headBranchExists,
+    headBranchProbeError,
+  });
+}
+
+async function probeAmaLivePrForMergeDispatch({
+  dispatchContext,
+  execFileImpl,
+  repo,
+  prNumber,
+}) {
+  const probeImpl = dispatchContext?.livePrProbeImpl || defaultAmaLivePrProbe;
+  try {
+    return normalizeAmaLivePrProbeResult(await probeImpl({
+      dispatchContext,
+      execFileImpl,
+      repo,
+      prNumber,
+    }));
+  } catch (err) {
+    return {
+      state: null,
+      headBranchExists: null,
+      error: String(err?.message || err),
+    };
+  }
 }
 
 // In-memory debounce for the exhaustion page, keyed on the stable suppression
@@ -1038,11 +1198,14 @@ export function isTransientHqDispatchError(err) {
   if (isGithubRateLimitOrBrokerThrottle(err)) return true;
   const detail = errDetailText(err);
   return /\b(etimedout|econnreset|econnrefused|ehostunreach|eagain|epipe|eio)\b/.test(detail)
+    || detail.includes('tls handshake')
+    || detail.includes('timeout')
     || detail.includes('database is locked')
     || detail.includes('sqlite_busy')
     || detail.includes('resource temporarily unavailable')
     || detail.includes('temporary failure')
-    || detail.includes('temporarily unavailable');
+    || detail.includes('temporarily unavailable')
+    || detail.includes('unable to access');
 }
 
 function isProvisionBranchHolderBlocked(errOrText) {
@@ -1526,6 +1689,8 @@ export const __testables__ = Object.freeze({
   teardownSamePrHammerHolder,
   resolveTerminalCodingBranchHolder,
   isTerminalBranchHolderWorkerRunStatus,
+  defaultAmaLivePrProbe,
+  normalizeAmaLivePrProbeResult,
 });
 
 function sleep(ms) {
@@ -3062,6 +3227,60 @@ export async function maybeDispatchAmaCloser({
       skipMergeAgent: true,
       reason: 'lease-held',
       existingLease: leaseResult.existingLease,
+    });
+  }
+
+  const livePrProbe = await probeAmaLivePrForMergeDispatch({
+    dispatchContext,
+    execFileImpl,
+    repo,
+    prNumber,
+  });
+  if (livePrProbe?.state === 'MERGED' || livePrProbe?.state === 'CLOSED') {
+    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => ({
+      ...(current || {}),
+      state: 'no-dispatch',
+      status: 'abandoned-pr-closed',
+      reason: 'live-pr-closed',
+      prState: livePrProbe.state,
+      headBranchExists: livePrProbe.headBranchExists,
+      observedAt: dispatchContext.dispatchedAt,
+      workerClass,
+      dispatchWorkerClass,
+    }));
+    deleteAmaCloserLease(rootDir, leaseIdentity);
+    logger.log?.(
+      `[ama-closer] no dispatch: PR ${repo}#${prNumber} is ${livePrProbe.state}; treating as already closed`
+    );
+    return noAmaDispatch({
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'live-pr-closed',
+      prState: livePrProbe.state,
+    });
+  }
+  if (livePrProbe?.state === 'OPEN' && livePrProbe?.headBranchExists === false) {
+    updateAmaCloserDispatchRecord(rootDir, targetDispatchIdentity, (current) => ({
+      ...(current || {}),
+      state: 'no-dispatch',
+      status: 'abandoned-pr-closed',
+      reason: 'live-head-branch-missing',
+      prState: livePrProbe.state,
+      headBranchExists: false,
+      headRefName: livePrProbe.headRefName || null,
+      observedAt: dispatchContext.dispatchedAt,
+      workerClass,
+      dispatchWorkerClass,
+    }));
+    deleteAmaCloserLease(rootDir, leaseIdentity);
+    logger.log?.(
+      `[ama-closer] no dispatch: PR ${repo}#${prNumber} head branch is missing; treating as already closed`
+    );
+    return noAmaDispatch({
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'live-head-branch-missing',
+      prState: livePrProbe.state,
     });
   }
 

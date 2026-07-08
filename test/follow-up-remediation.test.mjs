@@ -5039,6 +5039,8 @@ test('consumeNextFollowUpJob invokes oss-readiness --apply once, commits the mec
       let gateCalls = 0;
       let committed = false;
       let capturedCommitEnv = null;
+      let applyOptions = null;
+      let gateOptions = null;
       const result = await consumeNextFollowUpJob({
         rootDir,
         promptTemplate: 'You are a remediation worker.',
@@ -5063,10 +5065,12 @@ test('consumeNextFollowUpJob invokes oss-readiness --apply once, commits the mec
           }
           if (command === scriptPath && args[0] === '--apply') {
             applyCalls += 1;
+            applyOptions = options;
             return { stdout: 'CFG-ified src/config.mjs\n', stderr: '' };
           }
           if (command === scriptPath && args.length === 0) {
             gateCalls += 1;
+            gateOptions = options;
             return { stdout: 'oss-readiness-audit passed\n', stderr: '' };
           }
           if (command === 'git' && args[2] === 'status') {
@@ -5091,6 +5095,8 @@ test('consumeNextFollowUpJob invokes oss-readiness --apply once, commits the mec
       assert.equal(result.consumed, true);
       assert.equal(applyCalls, 1);
       assert.equal(gateCalls, 1);
+      assert.equal(applyOptions.timeout, 60 * 1000);
+      assert.equal(gateOptions.timeout, 60 * 1000);
       assert.equal(committed, true);
       assert.equal(capturedCommitEnv.WORKER_JOB_ID, created.job.jobId);
       assert.equal(result.job.remediationWorker.ossReadinessApply.ok, true);
@@ -5296,7 +5302,7 @@ test('consumeNextFollowUpJob skips oss-readiness --apply when the audit did not 
       prNumber: 76,
       reviewerModel: 'claude',
       linearTicketId: 'LAC-276',
-      reviewBody: '## Summary\nFix a normal reviewer finding.\n\n## Verdict\nRequest changes',
+      reviewBody: '## Summary\nGood job passing the oss-readiness-audit while fixing a normal reviewer finding.\n\n## Verdict\nRequest changes',
       reviewPostedAt: '2026-06-20T08:20:00.000Z',
       critical: true,
     });
@@ -5444,6 +5450,133 @@ test('consumeNextFollowUpJob dispatches remediation through hq branch-push when 
       assert.equal(dispatchRequest.body.branch, 'codex/fix-pr-71');
       const prompt = readFileSync(path.join(rootDir, result.job.remediationWorker.promptPath), 'utf8');
       assert.match(prompt, /WORKER_CLASS=codex-remediation/);
+    }));
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('consumeNextFollowUpJob applies and pushes oss-readiness remediation before hq dispatch', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const codexHome = path.join(rootDir, '.codex');
+  const authPath = path.join(codexHome, 'auth.json');
+  const scriptPath = path.join(rootDir, 'fixtures', 'audit-oss-readiness-hardcodes.py');
+  mkdirSync(codexHome, { recursive: true });
+  mkdirSync(path.dirname(scriptPath), { recursive: true });
+  writeFileSync(authPath, JSON.stringify({
+    auth_mode: 'chatgpt',
+    tokens: { access_token: 'a', refresh_token: 'b' },
+  }), 'utf8');
+  writeFileSync(scriptPath, '#!/usr/bin/env python3\n', 'utf8');
+
+  const previous = {
+    HOME: process.env.HOME,
+    CODEX_HOME: process.env.CODEX_HOME,
+    CODEX_AUTH_PATH: process.env.CODEX_AUTH_PATH,
+    CODEX_CLI_PATH: process.env.CODEX_CLI_PATH,
+    [OSS_READINESS_APPLY_SCRIPT_ENV]: process.env[OSS_READINESS_APPLY_SCRIPT_ENV],
+  };
+  process.env.HOME = rootDir;
+  process.env.CODEX_HOME = codexHome;
+  process.env.CODEX_AUTH_PATH = authPath;
+  process.env.CODEX_CLI_PATH = 'codex';
+  process.env[OSS_READINESS_APPLY_SCRIPT_ENV] = scriptPath;
+
+  try {
+    await withAppContractDispatchServer(async ({ requests }) => withHqDispatchEnv(rootDir, async () => {
+      createFollowUpJob({
+        rootDir,
+        repo: 'laceyenterprises/clio',
+        prNumber: 72,
+        reviewerModel: 'claude',
+        linearTicketId: 'LAC-272',
+        reviewBody: [
+          '## Summary',
+          'CI failure: oss-readiness-audit failed because src/config.mjs hard-coded a category.',
+          '',
+          '## Verdict',
+          'Request changes',
+        ].join('\n'),
+        reviewPostedAt: '2026-04-21T08:00:00.000Z',
+        critical: true,
+      });
+
+      const commands = [];
+      let committed = false;
+      const result = await consumeNextFollowUpJob({
+        rootDir,
+        promptTemplate: 'You are a remediation worker.',
+        now: () => '2026-04-21T10:00:00.000Z',
+        execFileImpl: async (command, args, options = {}) => {
+          commands.push([command, ...args]);
+          if (command === 'git' && args[0] === 'clone') {
+            mkdirSync(path.join(args[2], '.git', 'info'), { recursive: true });
+            return { stdout: '', stderr: '' };
+          }
+          if (command === 'gh' && args[0] === 'api' && /\/pulls\//.test(args[1])) {
+            return {
+              stdout: JSON.stringify({
+                base: { ref: 'main' },
+                head: { ref: 'codex/fix-pr-72', repo: { full_name: 'laceyenterprises/clio' } },
+              }),
+              stderr: '',
+            };
+          }
+          if (command === scriptPath && args[0] === '--apply') {
+            assert.equal(options.timeout, 60 * 1000);
+            return { stdout: 'CFG-ified src/config.mjs\n', stderr: '' };
+          }
+          if (command === scriptPath && args.length === 0) {
+            assert.equal(options.timeout, 60 * 1000);
+            return { stdout: 'oss-readiness-audit passed\n', stderr: '' };
+          }
+          if (command === 'git' && args[2] === 'rev-parse' && args[3] === '--git-path') {
+            return { stdout: '.git/info/exclude\n', stderr: '' };
+          }
+          if (command === 'git' && args[2] === 'status') {
+            return { stdout: committed ? '' : ' M src/config.mjs\0', stderr: '' };
+          }
+          if (command === 'git' && args[2] === 'diff') {
+            return { stdout: committed ? '' : 'diff --git a/src/config.mjs b/src/config.mjs\n+CFG key\n', stderr: '' };
+          }
+          if (command === 'git' && args[2] === 'commit') {
+            committed = true;
+            return { stdout: '[codex/fix-pr-72 abc123] Apply oss-readiness remediation\n', stderr: '' };
+          }
+          if (command === 'git' && args[2] === 'rev-parse' && args[3] === 'HEAD') {
+            return { stdout: 'abc123\n', stderr: '' };
+          }
+          if (command === 'git' && args[2] === 'symbolic-ref') {
+            return { stdout: 'fork-user-fix-pr-72\n', stderr: '' };
+          }
+          if (command === 'git' && args[2] === 'config' && args[3] === '--get' && args[4] === 'branch.fork-user-fix-pr-72.remote') {
+            return { stdout: 'fork-user\n', stderr: '' };
+          }
+          if (command === 'git' && args[2] === 'config' && args[3] === '--get' && args[4] === 'branch.fork-user-fix-pr-72.merge') {
+            return { stdout: 'refs/heads/codex/fix-pr-72\n', stderr: '' };
+          }
+          return { stdout: '', stderr: '' };
+        },
+        spawnImpl: () => {
+          throw new Error('legacy spawn path should not run when HQ dispatch is enabled');
+        },
+      });
+
+      const pushIndex = commands.findIndex((entry) => entry[0] === 'git' && entry[3] === 'push');
+      const dispatchIndex = requests.findIndex((entry) => entry.url === '/v1/dispatch');
+      assert.equal(result.consumed, true);
+      assert.equal(result.job.remediationWorker.dispatchMode, 'hq');
+      assert.equal(result.job.remediationWorker.ossReadinessApply.ok, true);
+      assert.equal(result.job.remediationWorker.ossReadinessApply.commitSha, 'abc123');
+      assert.ok(pushIndex >= 0, 'expected mechanical remediation push before HQ dispatch');
+      assert.deepEqual(commands[pushIndex].slice(0, 5), ['git', '-C', path.join(process.env.HQ_ROOT, 'adversarial-review', 'follow-up-workspaces', result.job.jobId), 'push', 'fork-user']);
+      assert.equal(commands[pushIndex][5], 'HEAD:refs/heads/codex/fix-pr-72');
+      assert.ok(dispatchIndex >= 0, 'expected app-sdk dispatch request');
+      assert.ok(pushIndex < commands.length, 'push command should be captured');
+      assert.equal(requests[dispatchIndex].body.branch, 'codex/fix-pr-72');
     }));
   } finally {
     for (const [key, value] of Object.entries(previous)) {

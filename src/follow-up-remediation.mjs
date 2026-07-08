@@ -82,6 +82,7 @@ const QUOTA_HOLD_REVALIDATION_TIMEOUT_MS = 10_000;
 const OSS_READINESS_AUDIT_CHECK_NAME = 'oss-readiness-audit';
 const OSS_READINESS_BASELINE_PATH = 'scripts/oss-readiness-category-baseline.json';
 const OSS_READINESS_APPLY_SCRIPT_ENV = 'OSS_READINESS_APPLY_SCRIPT';
+const OSS_READINESS_SCRIPT_TIMEOUT_MS = 60 * 1000;
 const OSS_READINESS_APPLY_SCRIPT_CANDIDATES = [
   ['agent-os', 'scripts', 'audit-oss-readiness-hardcodes.py'],
   ['..', 'agent-os', 'scripts', 'audit-oss-readiness-hardcodes.py'],
@@ -3295,10 +3296,7 @@ function collectOssReadinessEvidenceStrings(value, depth = 0) {
 }
 
 function jobHasOssReadinessAuditFailure(job) {
-  const haystack = [
-    job?.reviewSummary,
-    job?.reviewBody,
-    job?.ciFailureSummary,
+  const structuredHaystack = [
     job?.ciFailures,
     job?.statusCheckRollup,
     job?.checkRuns,
@@ -3307,7 +3305,69 @@ function jobHasOssReadinessAuditFailure(job) {
     job?.failingChecks,
     job?.gateFailures,
   ].flatMap((entry) => collectOssReadinessEvidenceStrings(entry));
-  return haystack.some((entry) => String(entry || '').includes(OSS_READINESS_AUDIT_CHECK_NAME));
+  if (structuredHaystack.some((entry) => String(entry || '').includes(OSS_READINESS_AUDIT_CHECK_NAME))) {
+    return true;
+  }
+
+  const failureLinePattern = new RegExp(
+    `\\b${OSS_READINESS_AUDIT_CHECK_NAME}\\b[^\\n]*(?:fail(?:ed|ure|ing)?|red|unsuccessful)|(?:fail(?:ed|ure|ing)?|red|unsuccessful)[^\\n]*\\b${OSS_READINESS_AUDIT_CHECK_NAME}\\b`,
+    'i'
+  );
+  return [
+    job?.ciFailureSummary,
+    job?.reviewSummary,
+    job?.reviewBody,
+  ].some((entry) => failureLinePattern.test(String(entry || '')));
+}
+
+async function resolveOssReadinessRemediationPushTarget({
+  workspaceDir,
+  branch,
+  execFileImpl = execFileAsync,
+} = {}) {
+  const fallbackBranch = String(branch || '').trim();
+  const { stdout: localBranchOut } = await execFileImpl(
+    'git',
+    ['-C', workspaceDir, 'symbolic-ref', '--quiet', '--short', 'HEAD'],
+    { maxBuffer: 1 * 1024 * 1024 }
+  );
+  const localBranch = String(localBranchOut || '').trim();
+  if (!localBranch) {
+    throw new Error('Cannot push oss-readiness remediation from a detached HEAD');
+  }
+
+  const { stdout: remoteOut } = await execFileImpl(
+    'git',
+    ['-C', workspaceDir, 'config', '--get', `branch.${localBranch}.remote`],
+    { maxBuffer: 1 * 1024 * 1024 }
+  );
+  const remote = String(remoteOut || '').trim();
+  if (!remote) {
+    throw new Error(`Cannot resolve tracking remote for ${localBranch}; refusing to push oss-readiness remediation`);
+  }
+
+  let mergeRef = '';
+  try {
+    const { stdout } = await execFileImpl(
+      'git',
+      ['-C', workspaceDir, 'config', '--get', `branch.${localBranch}.merge`],
+      { maxBuffer: 1 * 1024 * 1024 }
+    );
+    mergeRef = String(stdout || '').trim();
+  } catch {
+    mergeRef = '';
+  }
+
+  const remoteBranch = mergeRef.startsWith('refs/heads/')
+    ? mergeRef.slice('refs/heads/'.length)
+    : fallbackBranch;
+  if (!remoteBranch) {
+    throw new Error(`Cannot resolve tracking branch for ${localBranch}; refusing to push oss-readiness remediation`);
+  }
+  return {
+    remote,
+    refspec: `HEAD:refs/heads/${remoteBranch}`,
+  };
 }
 
 function resolveOssReadinessApplyScript({ rootDir = ROOT, env = process.env } = {}) {
@@ -3388,6 +3448,7 @@ async function runOssReadinessAuditGate({ workspaceDir, scriptPath, execFileImpl
     const result = await execFileImpl(scriptPath, [], {
       cwd: workspaceDir,
       maxBuffer: 20 * 1024 * 1024,
+      timeout: OSS_READINESS_SCRIPT_TIMEOUT_MS,
     });
     return {
       ok: true,
@@ -3428,6 +3489,7 @@ async function applyOssReadinessRemediation({
       applyResult = await execFileImpl(scriptPath, ['--apply'], {
         cwd: workspaceDir,
         maxBuffer: 20 * 1024 * 1024,
+        timeout: OSS_READINESS_SCRIPT_TIMEOUT_MS,
       });
     } catch (err) {
       const failed = {
@@ -3529,6 +3591,33 @@ async function applyOssReadinessRemediation({
     }
     throw err;
   }
+}
+
+async function pushOssReadinessRemediationCommit({
+  workspaceDir,
+  branch,
+  env = process.env,
+  execFileImpl = execFileAsync,
+} = {}) {
+  const targetBranch = String(branch || '').trim();
+  if (!targetBranch) {
+    throw new Error('PR head branch is required to push oss-readiness remediation before HQ dispatch');
+  }
+  const pushTarget = await resolveOssReadinessRemediationPushTarget({
+    workspaceDir,
+    branch: targetBranch,
+    execFileImpl,
+  });
+  await runWorkspaceGitWithTransientRetry(
+    ['-C', workspaceDir, 'push', pushTarget.remote, pushTarget.refspec],
+    {
+      execFileImpl,
+      options: {
+        maxBuffer: 10 * 1024 * 1024,
+        env: withGhGitCredentialEnv(env),
+      },
+    }
+  );
 }
 
 function buildRemediationPrompt(job, {
@@ -6529,6 +6618,7 @@ async function consumeNextFollowUpJob({
     if (!(hqDispatchEnabled && workerClass === 'gemini')) {
       await assertRemediationWorkerOAuth(workerClass, { execFileImpl });
     }
+    const shouldApplyOssReadinessBeforeSpawn = jobHasOssReadinessAuditFailure(claimed.job);
     const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env: process.env });
     const artifactWorkspaceDir = join(workspaceRootDir, claimed.job.jobId);
     let workspaceDir = artifactWorkspaceDir;
@@ -6536,22 +6626,24 @@ async function consumeNextFollowUpJob({
       action: hqDispatchEnabled ? 'hq-dispatch' : 'reused',
       reason: hqDispatchEnabled ? 'worker-pool-managed' : 'missing',
     };
-    if (!hqDispatchEnabled) {
+    if (!hqDispatchEnabled || shouldApplyOssReadinessBeforeSpawn) {
       const prepared = await prepareWorkspaceForJob({
         rootDir,
         job: claimed.job,
         execFileImpl,
       });
       workspaceDir = prepared.workspaceDir;
-      workspaceState = prepared.workspaceState;
+      workspaceState = hqDispatchEnabled
+        ? { action: 'hq-dispatch-prepared', reason: 'oss-readiness-preflight', prepared: prepared.workspaceState }
+        : prepared.workspaceState;
       await ensureWorkspaceArtifactExclude(workspaceDir, { execFileImpl });
     }
 
     const artifactDir = join(workspaceDir, '.adversarial-follow-up');
     resetWorkspaceDir(artifactDir);
     mkdirSync(artifactDir, { recursive: true });
-    let ossReadinessApply = { attempted: false, reason: 'hq-dispatch-managed-workspace' };
-    if (!hqDispatchEnabled) {
+    let ossReadinessApply = { attempted: false, reason: 'no-oss-readiness-audit-failure' };
+    if (!hqDispatchEnabled || shouldApplyOssReadinessBeforeSpawn) {
       ossReadinessApply = await applyOssReadinessRemediation({
         rootDir,
         job: claimed.job,
@@ -6567,6 +6659,14 @@ async function consumeNextFollowUpJob({
           `${JSON.stringify(ossReadinessApply, null, 2)}\n`,
           'utf8'
         );
+      }
+      if (hqDispatchEnabled && ossReadinessApply.commitSha) {
+        await pushOssReadinessRemediationCommit({
+          workspaceDir,
+          branch: claimed.job.branch,
+          env: process.env,
+          execFileImpl,
+        });
       }
     }
     const replyTarget = resolveRemediationReplyTarget(process.env, { requireExists: true });

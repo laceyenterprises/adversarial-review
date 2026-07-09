@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -139,7 +140,17 @@ test('handoff wake signaling delegates to the canonical owner instead of creatin
       assert.equal(args[4], process.execPath);
       assert.equal(args.at(-4), rootDir);
       assert.equal(args.at(-3), HANDOFF_WAKE_DAEMONS.followUp);
-      return { status: 0, stdout: join(rootDir, 'data', 'handoff-wake', 'follow-up.delegated.wake'), stderr: '' };
+      const delegated = spawnSync(args[4], args.slice(5), { encoding: 'utf8' });
+      assert.equal(delegated.status, 0, delegated.stderr);
+      assert.match(String(delegated.stdout || ''), /follow-up\..+\.wake$/);
+      const evalArgvDelegated = spawnSync(
+        args[4],
+        [...args.slice(5, 8), '[eval]', ...args.slice(8)],
+        { encoding: 'utf8' },
+      );
+      assert.equal(evalArgvDelegated.status, 0, evalArgvDelegated.stderr);
+      assert.match(String(evalArgvDelegated.stdout || ''), /follow-up\..+\.wake$/);
+      return delegated;
     }
     throw new Error(`unexpected command: ${command}`);
   };
@@ -152,7 +163,9 @@ test('handoff wake signaling delegates to the canonical owner instead of creatin
   assert.equal(signalResult.signaled, true);
   assert.equal(signalResult.ownerUser, 'daemon-owner');
   assert.equal(calls.length, 2);
-  assert.throws(() => readdirSync(join(rootDir, 'data', 'handoff-wake')), /ENOENT/);
+  const markers = readdirSync(join(rootDir, 'data', 'handoff-wake'));
+  assert.equal(markers.length, 2);
+  assert.ok(markers.every((marker) => /^follow-up\..+\.wake$/.test(marker)));
 });
 
 test('handoff wake signaling fails open when owner-routed signaling is unavailable', (t) => {
@@ -273,6 +286,40 @@ test('handoff wake ignores temporary marker files', async (t) => {
   );
 
   assert.equal(result.reason, 'timer');
+});
+
+test('handoff wake accepts renamed marker events even when mtime predates sleep', async (t) => {
+  const rootDir = makeTempRoot(t);
+  const now = Date.parse('2026-07-09T16:00:00.000Z');
+  let eventHandler = null;
+
+  const resultPromise = sleepUntilTimerOrHandoffWake(
+    rootDir,
+    HANDOFF_WAKE_DAEMONS.followUp,
+    10_000,
+    {
+      enabled: true,
+      nowMs: () => now,
+      watchImpl: (_dir, _options, onEvent) => {
+        eventHandler = onEvent;
+        const watcher = new EventEmitter();
+        watcher.close = () => {};
+        return watcher;
+      },
+    },
+  );
+
+  await new Promise((resolve) => setImmediate(resolve));
+  const wakeDir = join(rootDir, 'data', 'handoff-wake');
+  const marker = join(wakeDir, 'follow-up.old-mtime.wake');
+  writeFileSync(marker, 'wake\n');
+  const oldDate = new Date(now - 60_000);
+  utimesSync(marker, oldDate, oldDate);
+  eventHandler('rename', 'follow-up.old-mtime.wake');
+
+  const result = await resultPromise;
+  assert.equal(result.reason, 'wake');
+  assert.equal(result.path, marker);
 });
 
 test('handoff wake sleep sweeps for markers created during watcher setup', async (t) => {

@@ -24,7 +24,8 @@ export const HANDOFF_WAKE_DAEMONS = Object.freeze({
 const OWNER_SIGNAL_SCRIPT = `
 import { chmodSync, closeSync, mkdirSync, openSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-const [rootDir, daemon, nowRaw, pidRaw] = process.argv.slice(1);
+const signalArgs = process.argv[1] === '[eval]' ? process.argv.slice(2) : process.argv.slice(1);
+const [rootDir, daemon, nowRaw, pidRaw] = signalArgs;
 const name = String(daemon || '').trim();
 if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) throw new Error(\`invalid handoff wake daemon name: \${daemon}\`);
 const dir = join(rootDir, 'data', 'handoff-wake');
@@ -321,8 +322,6 @@ export async function sleepUntilTimerOrHandoffWake(
       const path = join(dir, String(filename));
       try {
         if (!existsSync(path)) return;
-        const st = statSync(path);
-        if (st.mtimeMs + 1 < startMs) return;
       } catch {
         return;
       }

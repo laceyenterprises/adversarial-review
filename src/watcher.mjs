@@ -1405,9 +1405,18 @@ const FLEET_WIDE_FALSE_DEFERRAL_DEGRADED_LOCK_FILE = 'degraded-alert-state.lock'
 const FLEET_WIDE_FALSE_DEFERRAL_LOCK_RETRY_MS = 10;
 const FLEET_WIDE_FALSE_DEFERRAL_LOCK_TIMEOUT_MS = 5_000;
 const FLEET_WIDE_FALSE_DEFERRAL_STALE_LOCK_MS = 2 * 60 * 1000;
+const HEAD_CLOSER_SUPPRESSION_RETRY_BACKOFF_MS = [250, 1000];
 
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function resolveHardReviewCeiling(maxRemediationRounds) {
+  if (maxRemediationRounds == null || maxRemediationRounds === '') return 4;
+  const numericRounds = Number(maxRemediationRounds);
+  return Number.isFinite(numericRounds)
+    ? Math.max(1, Math.floor(numericRounds)) + 1
+    : 4;
 }
 
 function readFleetWideFalseDeferralLock(lockPath) {
@@ -3794,6 +3803,37 @@ function createHeadCloserCommitSuppressionResolver(options = {}) {
     }
     return suppressionPromise;
   };
+}
+
+async function getHeadCloserCommitSuppressionWithBoundedRetry({
+  repoPath,
+  prNumber,
+  headSha,
+  getHeadCloserCommitSuppressionImpl = getHeadCloserCommitSuppression,
+  logger = console,
+  retryBackoffMs = HEAD_CLOSER_SUPPRESSION_RETRY_BACKOFF_MS,
+  sleepImpl = sleepMs,
+} = {}) {
+  const retryDelays = Array.isArray(retryBackoffMs) ? retryBackoffMs : [];
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await getHeadCloserCommitSuppressionImpl({
+        repoPath,
+        prNumber,
+        headSha,
+        logger,
+      });
+    } catch (err) {
+      if (!isTransientGhError(err) || attempt >= retryDelays.length) throw err;
+      const delayMs = Math.max(0, Number(retryDelays[attempt]) || 0);
+      logger?.warn?.(
+        `[watcher] closer commit suppression probe transient failure for ` +
+        `${repoPath}#${prNumber}; retrying ${attempt + 1}/${retryDelays.length} ` +
+        `after ${delayMs}ms: ${err?.message || err}`
+      );
+      if (delayMs > 0) await sleepImpl(delayMs);
+    }
+  }
 }
 
 function isExplicitOperatorReviewRetrigger(reviewRow = null) {
@@ -8091,18 +8131,12 @@ async function pollOnce(
             //     adversarial-review count is bounded even if (1) is bypassed.
             let skipReviewerSpawnReason = null;
             if (passKind === 'rereview') {
-              let closerHead = null;
-              try {
-                closerHead = await getHeadCloserCommitSuppression({
-                  repoPath,
-                  prNumber,
-                  headSha: reviewerHeadSha,
-                  logger: console,
-                });
-              } catch (err) {
-                if (isTransientGhError(err)) throw err;
-                throw err;
-              }
+              const closerHead = await getHeadCloserCommitSuppressionWithBoundedRetry({
+                repoPath,
+                prNumber,
+                headSha: reviewerHeadSha,
+                logger: console,
+              });
               if (closerHead?.suppressed) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: head ` +
@@ -8113,9 +8147,7 @@ async function pollOnce(
                 skipReviewerSpawnReason = 'terminal-closer-head';
               }
 
-              const hardReviewCeiling = Number.isFinite(Number(maxRemediationRounds))
-                ? Math.max(1, Math.floor(Number(maxRemediationRounds))) + 1
-                : 4;
+              const hardReviewCeiling = resolveHardReviewCeiling(maxRemediationRounds);
               const priorReviewAttempts = Number(current?.review_attempts || 0);
               if (!skipReviewerSpawnReason && priorReviewAttempts >= hardReviewCeiling) {
                 console.log(
@@ -8574,6 +8606,7 @@ export {
   getStalePostedReviewAutoRereviewSuppression,
   getStalePostedReviewBudgetSuppression,
   getHeadCloserCommitSuppression,
+  getHeadCloserCommitSuppressionWithBoundedRetry,
   handlePostedReviewRow,
   isExplicitOperatorReviewRetrigger,
   isTerminalCloserCommitIdentity,
@@ -8609,6 +8642,7 @@ export {
   resolveStuckDispatchAlertDebounceMs,
   resolveWatcherDrainMaxMs,
   resolveFirstPassReviewerPoolConfig,
+  resolveHardReviewCeiling,
   runFastMergeClosePathIsolated,
   runBoundedReviewerDispatchQueue,
   reserveReviewerMemoryAdmission,

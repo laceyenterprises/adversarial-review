@@ -1,4 +1,5 @@
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 export const HANDOFF_EVENTS = Object.freeze({
@@ -6,6 +7,7 @@ export const HANDOFF_EVENTS = Object.freeze({
   latency: 'handoff_latency_seconds',
   fallbackTickCatch: 'handoff_fallback_tick_catch',
   rateCapHit: 'handoff_rate_cap_hit',
+  budgetRefusal: 'handoff_budget_refusal',
 });
 
 const EVENT_SET = new Set(Object.values(HANDOFF_EVENTS));
@@ -22,6 +24,20 @@ const STEP_BASELINES = Object.freeze({
   'remediation-to-rereview': 300,
   'final-to-hammer': 300,
 });
+const OWNER_EVENT_SCRIPT = `
+import { appendFileSync, chmodSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+const eventArgs = process.argv[1] === '[eval]' ? process.argv.slice(2) : process.argv.slice(1);
+const [rootDir, rowRaw] = eventArgs;
+const row = JSON.parse(rowRaw);
+const filePath = join(rootDir, 'data', 'handoff-events', \`\${String(row.at).slice(0, 10)}.jsonl\`);
+const dir = dirname(filePath);
+mkdirSync(dir, { recursive: true, mode: 0o775 });
+try { chmodSync(dir, 0o775); } catch {}
+appendFileSync(filePath, \`\${JSON.stringify(row)}\\n\`, { encoding: 'utf8', mode: 0o664 });
+try { chmodSync(filePath, 0o664); } catch {}
+process.stdout.write(filePath);
+`;
 
 function normalizeText(value) {
   const text = String(value ?? '').trim();
@@ -62,6 +78,77 @@ export function handoffEventLogPath(rootDir, timestamp = new Date().toISOString(
   return join(handoffEventLogDir(rootDir), `${normalizeTimestamp(timestamp).slice(0, 10)}.jsonl`);
 }
 
+function currentUid() {
+  return typeof process.getuid === 'function' ? process.getuid() : null;
+}
+
+function resolveCanonicalEventOwnerUid(rootDir) {
+  const dir = handoffEventLogDir(rootDir);
+  try {
+    return statSync(dir).uid;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
+  try {
+    return statSync(join(rootDir, 'data')).uid;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
+  return statSync(rootDir).uid;
+}
+
+function resolveUsernameForUid(uid, { spawnSyncImpl = spawnSync } = {}) {
+  const result = spawnSyncImpl('id', ['-un', String(uid)], { encoding: 'utf8' });
+  if (result?.status !== 0) {
+    const detail = String(result?.stderr || result?.error?.message || '').trim();
+    throw new Error(`failed to resolve canonical handoff telemetry owner uid ${uid}${detail ? `: ${detail}` : ''}`);
+  }
+  const username = String(result.stdout || '').trim();
+  if (!username) throw new Error(`failed to resolve canonical handoff telemetry owner uid ${uid}: empty username`);
+  return username;
+}
+
+function appendHandoffEventNative(filePath, row) {
+  const dir = dirname(filePath);
+  mkdirSync(dir, { recursive: true, mode: HANDOFF_EVENT_DIR_MODE });
+  try {
+    chmodSync(dir, HANDOFF_EVENT_DIR_MODE);
+  } catch {
+    // Telemetry is best-effort; callers catch write failures on wake paths.
+  }
+  appendFileSync(filePath, `${JSON.stringify(row)}\n`, { encoding: 'utf8', mode: HANDOFF_EVENT_LOG_MODE });
+  try {
+    chmodSync(filePath, HANDOFF_EVENT_LOG_MODE);
+  } catch {
+    // Existing shared logs may be owned by another daemon user.
+  }
+}
+
+function appendHandoffEventAsOwner(rootDir, row, ownerUid, { spawnSyncImpl = spawnSync } = {}) {
+  const ownerUser = resolveUsernameForUid(ownerUid, { spawnSyncImpl });
+  const result = spawnSyncImpl(
+    'sudo',
+    [
+      '-A',
+      '-H',
+      '-u',
+      ownerUser,
+      process.execPath,
+      '--input-type=module',
+      '-e',
+      OWNER_EVENT_SCRIPT,
+      rootDir,
+      JSON.stringify(row),
+    ],
+    { encoding: 'utf8', maxBuffer: 1024 * 1024 },
+  );
+  if (result?.status !== 0) {
+    const detail = String(result?.stderr || result?.error?.message || '').trim();
+    throw new Error(`handoff telemetry owner append failed for ${ownerUser}${detail ? `: ${detail}` : ''}`);
+  }
+  return { ownerUser, filePath: String(result.stdout || '').trim() || handoffEventLogPath(rootDir, row.at) };
+}
+
 export function buildHandoffEvent({
   event,
   at = new Date().toISOString(),
@@ -99,23 +186,20 @@ export function buildHandoffEvent({
   return row;
 }
 
-export function recordHandoffEvent({ rootDir, ...event }) {
+export function recordHandoffEvent(
+  { rootDir, ...event },
+  { spawnSyncImpl = spawnSync, currentUidImpl = currentUid } = {},
+) {
   if (!rootDir) return null;
   const row = buildHandoffEvent(event);
   const filePath = handoffEventLogPath(rootDir, row.at);
-  const dir = dirname(filePath);
-  mkdirSync(dir, { recursive: true, mode: HANDOFF_EVENT_DIR_MODE });
-  try {
-    chmodSync(dir, HANDOFF_EVENT_DIR_MODE);
-  } catch {
-    // Telemetry is best-effort; callers catch write failures on wake paths.
+  const ownerUid = resolveCanonicalEventOwnerUid(rootDir);
+  const uid = currentUidImpl();
+  if (uid !== null && uid !== ownerUid) {
+    const delegated = appendHandoffEventAsOwner(rootDir, row, ownerUid, { spawnSyncImpl });
+    return { filePath: delegated.filePath, row, delegated: true, ownerUser: delegated.ownerUser };
   }
-  appendFileSync(filePath, `${JSON.stringify(row)}\n`, { encoding: 'utf8', mode: HANDOFF_EVENT_LOG_MODE });
-  try {
-    chmodSync(filePath, HANDOFF_EVENT_LOG_MODE);
-  } catch {
-    // Existing shared logs may be owned by another daemon user.
-  }
+  appendHandoffEventNative(filePath, row);
   return { filePath, row };
 }
 
@@ -239,7 +323,7 @@ export function collectHandoffStatus({
     medianLatencySeconds: percentile(latencies, 50),
     p95LatencySeconds: percentile(latencies, 95),
     fallbackTickCatches: events.filter((event) => event.event === HANDOFF_EVENTS.fallbackTickCatch).length,
-    budgetRefusalsPreserved: events.filter((event) => event.event === 'handoff_budget_refusal').length,
+    budgetRefusalsPreserved: events.filter((event) => event.event === HANDOFF_EVENTS.budgetRefusal).length,
     rateCapsHit: events.filter((event) => event.event === HANDOFF_EVENTS.rateCapHit).length,
     events,
   };

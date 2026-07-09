@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -60,6 +61,67 @@ test('handoff event shapes validate and rotate by UTC day', (t) => {
   assert.deepEqual(readJsonl(handoffEventLogPath(rootDir, row.at)), [row]);
   assert.equal(statSync(handoffEventLogDir(rootDir)).mode & 0o777, HANDOFF_EVENT_DIR_MODE);
   assert.equal(statSync(written.filePath).mode & 0o777, HANDOFF_EVENT_LOG_MODE);
+});
+
+test('handoff telemetry delegates cross-user writes to the canonical owner', (t) => {
+  const rootDir = makeRoot(t);
+  const ownerUid = statSync(rootDir).uid;
+  const calls = [];
+  const spawnSyncImpl = (command, args) => {
+    calls.push({ command, args });
+    if (command === 'id') {
+      assert.deepEqual(args, ['-un', String(ownerUid)]);
+      return { status: 0, stdout: 'daemon-owner\n', stderr: '' };
+    }
+    if (command === 'sudo') {
+      assert.deepEqual(args.slice(0, 4), ['-A', '-H', '-u', 'daemon-owner']);
+      assert.equal(args[4], process.execPath);
+      assert.equal(args.at(-2), rootDir);
+      assert.equal(JSON.parse(args.at(-1)).event, HANDOFF_EVENTS.fired);
+      const delegated = spawnSync(args[4], args.slice(5), { encoding: 'utf8' });
+      assert.equal(delegated.status, 0, delegated.stderr);
+      assert.match(String(delegated.stdout || ''), /2026-07-09\.jsonl$/);
+      return delegated;
+    }
+    throw new Error(`unexpected command: ${command}`);
+  };
+
+  const written = recordHandoffEvent({
+    rootDir,
+    event: HANDOFF_EVENTS.fired,
+    at: '2026-07-09T15:00:00.000Z',
+    step: 'review-to-remediation',
+    repo: 'agent-os',
+    prNumber: 3312,
+  }, {
+    currentUidImpl: () => ownerUid + 1,
+    spawnSyncImpl,
+  });
+
+  assert.equal(written.delegated, true);
+  assert.equal(written.ownerUser, 'daemon-owner');
+  assert.equal(calls.length, 2);
+  assert.deepEqual(readJsonl(handoffEventLogPath(rootDir, written.row.at)), [written.row]);
+});
+
+test('handoff budget refusal event is accepted by the telemetry layer', (t) => {
+  const rootDir = makeRoot(t);
+  recordHandoffEvent({
+    rootDir,
+    event: HANDOFF_EVENTS.budgetRefusal,
+    at: '2026-07-09T15:00:00.000Z',
+    step: 'remediation-to-rereview',
+    repo: 'agent-os',
+    prNumber: 3312,
+  });
+
+  const status = collectHandoffStatus({
+    rootDir,
+    repo: 'agent-os',
+    window: '24h',
+    now: () => new Date('2026-07-09T16:00:00.000Z'),
+  });
+  assert.equal(status.budgetRefusalsPreserved, 1);
 });
 
 test('handoff reader skips daily logs older than the requested window before opening', (t) => {

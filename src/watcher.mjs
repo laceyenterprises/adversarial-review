@@ -4498,10 +4498,11 @@ async function maybeInlineFinalHammerAfterReview({
     return { handled: false, reason: 'inline-final-hammer-failed', error: err };
   }
   try {
+    const now = new Date().toISOString();
     recordHandoffEventImpl({
       rootDir,
       event: HANDOFF_EVENTS.fired,
-      at: new Date().toISOString(),
+      at: now,
       step: 'final-to-hammer',
       repo: repoPath,
       prNumber,
@@ -4511,7 +4512,7 @@ async function maybeInlineFinalHammerAfterReview({
     recordHandoffEventImpl({
       rootDir,
       event: HANDOFF_EVENTS.latency,
-      at: new Date().toISOString(),
+      at: now,
       step: 'final-to-hammer',
       repo: repoPath,
       prNumber,

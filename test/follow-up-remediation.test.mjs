@@ -3897,6 +3897,13 @@ test('review-to-remediation wake lets daemon consume a queued job within five se
   assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter((name) => name.endsWith('.json')).length, 0);
 });
 
+test('follow-up daemon falls back to timer sleep when handoff wake watcher fails', () => {
+  const source = readFileSync(path.join(process.cwd(), 'scripts', 'adversarial-follow-up-daemon.mjs'), 'utf8');
+  assert.match(source, /handoff-wake[\s\S]*falling back to timer/);
+  assert.match(source, /await sleep\(TICK_INTERVAL_MS, undefined, \{ signal: ac\.signal \}\)/);
+  assert.match(source, /sleepErr\?\.name !== 'AbortError'/);
+});
+
 test('review-to-remediation consume wake preserves max-round refusal through claimNextFollowUpJob', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-handoff-budget-'));
   createPendingRemediationJob(rootDir, {

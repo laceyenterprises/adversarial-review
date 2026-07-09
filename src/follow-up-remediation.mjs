@@ -41,6 +41,7 @@ import { redactSensitiveText } from './adapters/comms/github-pr-comments/redacti
 import { deliverAlert } from './alert-delivery.mjs';
 import { captureRemediationBodyAfterPost } from './review-body-capture.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
+import { requestWatcherWake } from './watcher-wake.mjs';
 import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
 import { loadStagePrompt, pickRemediatorStage } from './kernel/prompt-stage.mjs';
 import { spawnDetachedCli } from './adapters/reviewer-runtime/cli-direct/process.mjs';
@@ -68,6 +69,31 @@ const REMEDIATION_LEGACY_UNSTAGE_COMMANDS = [
   'git rm --cached -r -- .adversarial-follow-up/ 2>/dev/null || true',
 ];
 const WORKSPACE_ARTIFACT_EXCLUDE_ENTRY = '.adversarial-follow-up/';
+
+function parseBooleanEnvFlag(value) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (normalized === '1' || normalized === 'true') return true;
+  if (normalized === '' || normalized === '0' || normalized === 'false') return false;
+  return null;
+}
+
+function isRemediationToRereviewHandoffEnabled(env = process.env, options = {}) {
+  const envValue = env.ADVERSARIAL_HANDOFF_REMEDIATION_TO_REREVIEW
+    ?? env.AGENT_OS_HANDOFF_REMEDIATION_TO_REREVIEW;
+  const parsedEnv = envValue === undefined ? null : parseBooleanEnvFlag(envValue);
+  if (parsedEnv !== null) return parsedEnv;
+  try {
+    return loadRoleConfig({
+      env,
+      topPath: options.topPath,
+      modulePaths: options.modulePaths,
+      loaderImpl: options.loaderImpl,
+      contextKey: 'handoff.remediation_to_rereview',
+    }).get('handoff.remediation_to_rereview', false) === true;
+  } catch {
+    return false;
+  }
+}
 const WORKER_PROVENANCE_HOOK_SRC = join(ROOT, 'hooks', 'worker-provenance-commit-msg');
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -4828,6 +4854,7 @@ async function reconcileFollowUpJob({
   isWorkerRunning = isWorkerProcessRunning,
   postCommentImpl = postRemediationOutcomeComment,
   requestReviewRereviewImpl = requestReviewRereview,
+  requestWatcherWakeImpl = requestWatcherWake,
   resolvePRLifecycleImpl = resolvePRLifecycle,
   auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
   execFileImpl = execFileAsync,
@@ -5594,6 +5621,37 @@ async function reconcileFollowUpJob({
     );
     const rereviewBlocked = rereview.requested && !rereviewAccepted;
 
+    if (
+      rereviewAccepted &&
+      rereview.triggered &&
+      isRemediationToRereviewHandoffEnabled()
+    ) {
+      try {
+        const wake = requestWatcherWakeImpl({
+          rootDir,
+          reason: 'remediation-to-rereview',
+          repo: job.repo,
+          prNumber: job.prNumber,
+          requestedAt: completedAt,
+        });
+        rereview.wake = {
+          requested: wake?.requested !== false,
+          reason: wake?.payload?.reason || 'remediation-to-rereview',
+          requestedAt: wake?.payload?.requested_at || completedAt,
+        };
+      } catch (err) {
+        rereview.wake = {
+          requested: false,
+          reason: 'wake-failed',
+          error: err?.message || String(err),
+        };
+        log.warn?.(
+          `[follow-up-remediation] watcher wake failed after re-review reset for ` +
+          `${job.repo}#${job.prNumber}: ${err?.message || err}`
+        );
+      }
+    }
+
     if (!rereview.requested) {
       const currentRound = Number(job?.remediationPlan?.currentRound || 0);
       const maxRounds = Number(job?.remediationPlan?.maxRounds || 0);
@@ -6160,6 +6218,7 @@ async function reconcileInProgressFollowUpJobs({
   isWorkerRunning = isWorkerProcessRunning,
   postCommentImpl = postRemediationOutcomeComment,
   requestReviewRereviewImpl = requestReviewRereview,
+  requestWatcherWakeImpl = requestWatcherWake,
   resolvePRLifecycleImpl = resolvePRLifecycle,
   execFileImpl = execFileAsync,
   log = console,
@@ -6231,6 +6290,7 @@ async function reconcileInProgressFollowUpJobs({
         isWorkerRunning,
         postCommentImpl,
         requestReviewRereviewImpl,
+        requestWatcherWakeImpl,
         resolvePRLifecycleImpl,
         execFileImpl,
         log,
@@ -6271,6 +6331,7 @@ async function handleRemediationTelemetryEvent({
   isWorkerRunning = isWorkerProcessRunning,
   postCommentImpl = postRemediationOutcomeComment,
   requestReviewRereviewImpl = requestReviewRereview,
+  requestWatcherWakeImpl = requestWatcherWake,
   resolvePRLifecycleImpl = resolvePRLifecycle,
   auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
   execFileImpl = execFileAsync,
@@ -6326,6 +6387,7 @@ async function handleRemediationTelemetryEvent({
       isWorkerRunning,
       postCommentImpl,
       requestReviewRereviewImpl,
+      requestWatcherWakeImpl,
       resolvePRLifecycleImpl,
       auditWorkspaceForContaminationImpl,
       execFileImpl,
@@ -6357,6 +6419,7 @@ function attachFollowUpTelemetryListeners({
   isWorkerRunning = isWorkerProcessRunning,
   postCommentImpl = postRemediationOutcomeComment,
   requestReviewRereviewImpl = requestReviewRereview,
+  requestWatcherWakeImpl = requestWatcherWake,
   resolvePRLifecycleImpl = resolvePRLifecycle,
   auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
   execFileImpl = execFileAsync,
@@ -6377,6 +6440,7 @@ function attachFollowUpTelemetryListeners({
       isWorkerRunning,
       postCommentImpl,
       requestReviewRereviewImpl,
+      requestWatcherWakeImpl,
       resolvePRLifecycleImpl,
       auditWorkspaceForContaminationImpl,
       execFileImpl,

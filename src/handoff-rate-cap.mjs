@@ -7,6 +7,7 @@ export const DEFAULT_HANDOFF_RATE_CAP_AUDIT_PATH_SEGMENTS = [
   'handoff-wake',
   'rate-cap-audit.jsonl',
 ];
+export const DEFAULT_HANDOFF_RATE_CAP_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 function normalizeText(value) {
   const text = String(value ?? '').trim();
@@ -19,13 +20,14 @@ function normalizePrNumber(value) {
 }
 
 function normalizeSubject(payload = {}) {
-  const repo = normalizeText(payload.repo);
-  const prNumber = normalizePrNumber(payload.prNumber ?? payload.pr_number);
+  const safePayload = payload && typeof payload === 'object' ? payload : {};
+  const repo = normalizeText(safePayload.repo);
+  const prNumber = normalizePrNumber(safePayload.prNumber ?? safePayload.pr_number);
   const headSha = normalizeText(
-    payload.headSha
-    ?? payload.head_sha
-    ?? payload.revisionRef
-    ?? payload.revision_ref
+    safePayload.headSha
+    ?? safePayload.head_sha
+    ?? safePayload.revisionRef
+    ?? safePayload.revision_ref
   );
   if (!repo || !prNumber || !headSha) return null;
   return { repo, prNumber, headSha };
@@ -41,8 +43,22 @@ export function normalizeHandoffMaxPerPrHead(value, fallback = 20) {
   return fallback;
 }
 
+function normalizeRetentionMs(value, fallback = DEFAULT_HANDOFF_RATE_CAP_RETENTION_MS) {
+  const parsed = Number(value);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  return fallback;
+}
+
+function normalizeTimestampMs(value) {
+  if (value instanceof Date) return value.getTime();
+  if (Number.isFinite(value)) return Number(value);
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
 export function createHandoffRateLimiter({
   maxPerPrHead = 20,
+  retentionMs = DEFAULT_HANDOFF_RATE_CAP_RETENTION_MS,
   rootDir = null,
   auditPath = rootDir ? handoffRateCapAuditPath(rootDir) : null,
   now = () => new Date().toISOString(),
@@ -50,6 +66,15 @@ export function createHandoffRateLimiter({
 } = {}) {
   const counts = new Map();
   let effectiveMax = normalizeHandoffMaxPerPrHead(maxPerPrHead);
+  let effectiveRetentionMs = normalizeRetentionMs(retentionMs);
+
+  function pruneCounts(nowMs) {
+    for (const [key, entry] of counts.entries()) {
+      if (nowMs - entry.lastSeenMs > effectiveRetentionMs) {
+        counts.delete(key);
+      }
+    }
+  }
 
   function writeAudit(entry) {
     const payload = `${JSON.stringify(entry)}\n`;
@@ -75,20 +100,27 @@ export function createHandoffRateLimiter({
       effectiveMax = normalizeHandoffMaxPerPrHead(value, effectiveMax);
       return effectiveMax;
     },
+    setRetentionMs(value) {
+      effectiveRetentionMs = normalizeRetentionMs(value, effectiveRetentionMs);
+      return effectiveRetentionMs;
+    },
     inspect(payload) {
+      const inspectedAt = now();
+      const inspectedAtMs = normalizeTimestampMs(inspectedAt);
+      pruneCounts(inspectedAtMs);
       const subject = normalizeSubject(payload);
       if (!subject) {
         return { accepted: true, reason: 'unkeyed-wake' };
       }
       const key = `${subject.repo}\0${subject.prNumber}\0${subject.headSha}`;
-      const count = (counts.get(key) || 0) + 1;
-      counts.set(key, count);
+      const count = (counts.get(key)?.count || 0) + 1;
+      counts.set(key, { count, lastSeenMs: inspectedAtMs });
       if (count <= effectiveMax) {
         return { accepted: true, reason: 'within-cap', count, maxPerPrHead: effectiveMax, subject };
       }
       const audit = {
         event: HANDOFF_RATE_CAP_AUDIT_EVENT,
-        at: now(),
+        at: inspectedAt,
         repo: subject.repo,
         pr_number: subject.prNumber,
         head_sha: subject.headSha,
@@ -106,7 +138,7 @@ export function createHandoffRateLimiter({
       };
     },
     snapshot() {
-      return new Map(counts);
+      return new Map([...counts.entries()].map(([key, entry]) => [key, entry.count]));
     },
   };
 }

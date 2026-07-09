@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, statSync, utimesSync } from 'node:fs';
+import { mkdtempSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -94,6 +94,59 @@ test('watcher wake dedupes by request_id instead of file mtime and size', async 
     assert.equal(result.woken, true);
     assert.equal(result.reason, 'wake-file');
     assert.equal(result.payload.request_id, 'wake-b');
+  } finally {
+    wakeSource.close();
+  }
+});
+
+test('watcher wake dedupes request_id-less payloads by content hash', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-wake-'));
+  const filePath = watcherWakePath(rootDir);
+  requestWatcherWake({
+    rootDir,
+    reason: 'remediation-to-rereview',
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    requestedAt: '2026-04-21T10:05:00.000Z',
+    requestId: 'wake-a',
+  });
+  const originalStat = statSync(filePath);
+  writeFileSync(
+    filePath,
+    JSON.stringify({
+      schema_version: 1,
+      requested_at: '2026-04-21T10:05:00.000Z',
+      reason: 'remediation-to-rereview',
+      repo: 'laceyenterprises/clio',
+      pr_number: 8,
+    }),
+    'utf8',
+  );
+  utimesSync(filePath, originalStat.atime, originalStat.mtime);
+  const wakeSource = createWatcherWakeSource({
+    rootDir,
+    logger: { warn() {} },
+    pollMs: 100,
+  });
+
+  try {
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        schema_version: 1,
+        requested_at: '2026-04-21T10:05:00.000Z',
+        reason: 'remediation-to-rereview',
+        repo: 'laceyenterprises/clio',
+        pr_number: 9,
+      }),
+      'utf8',
+    );
+    utimesSync(filePath, originalStat.atime, originalStat.mtime);
+
+    const result = await wakeSource.wait(50);
+    assert.equal(result.woken, true);
+    assert.equal(result.reason, 'wake-file');
+    assert.equal(result.payload.pr_number, 9);
   } finally {
     wakeSource.close();
   }

@@ -186,7 +186,7 @@ import {
   resolveReviewCycleCapConfig,
   shouldEscalateReviewCycle,
 } from './review-cycle-cap.mjs';
-import { extractReviewVerdict } from './review-verdict.mjs';
+import { extractReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 import { resolveAgyReviewerSubprocessTimeoutMs, resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { makeReviewPostedProbe, reconcileReviewerSessions, reviewerBotLogin } from './reviewer-reattach.mjs';
 import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-failed-recovery.mjs';
@@ -4164,6 +4164,89 @@ function recordSuccessfulReviewCycleVerdict({
     );
     return { recorded: false, error: err };
   }
+}
+
+function resolveFinalToHammerHandoffEnabled({
+  loadConfigImpl = loadConfigCached,
+  logger = console,
+} = {}) {
+  try {
+    return loadConfigImpl().get('handoff.final_to_hammer', false) === true;
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] handoff.final_to_hammer config load failed; keeping inline final hammer disabled: ${err?.message || err}`
+    );
+    return false;
+  }
+}
+
+function shouldInlineFinalHammerAfterReview({
+  handoffFinalToHammerEnabled = false,
+  passKind = null,
+  result = null,
+  completedRemediationRounds = 0,
+  maxRemediationRounds = 0,
+} = {}) {
+  if (handoffFinalToHammerEnabled !== true) return false;
+  if (passKind !== 'rereview') return false;
+  if (!result?.ok) return false;
+  if (normalizeReviewVerdict(extractReviewVerdict(result.reviewBody || '')) !== 'request-changes') return false;
+  const completed = Number(completedRemediationRounds);
+  const maxRounds = Number(maxRemediationRounds);
+  return Number.isFinite(completed) &&
+    Number.isFinite(maxRounds) &&
+    maxRounds >= 0 &&
+    completed >= maxRounds;
+}
+
+async function maybeInlineFinalHammerAfterReview({
+  rootDir = ROOT,
+  repoPath,
+  prNumber,
+  result,
+  passKind,
+  completedRemediationRounds,
+  maxRemediationRounds,
+  subjectRef = null,
+  currentRevisionRef = null,
+  labelNames = [],
+  projectGateStatusSafe,
+  execFileImpl = execFileAsync,
+  operatorSurface = null,
+  logger = console,
+  handoffFinalToHammerEnabled = resolveFinalToHammerHandoffEnabled({ logger }),
+  getReviewRowImpl = (repo, pr) => stmtGetReviewRow.get(repo, pr),
+  handlePostedReviewRowImpl = handlePostedReviewRow,
+} = {}) {
+  if (!shouldInlineFinalHammerAfterReview({
+    handoffFinalToHammerEnabled,
+    passKind,
+    result,
+    completedRemediationRounds,
+    maxRemediationRounds,
+  })) {
+    return { handled: false, reason: 'not-inline-final-hammer' };
+  }
+  const postedRow = getReviewRowImpl(repoPath, prNumber);
+  logger?.log?.(
+    `[watcher] HOM-04 inline final hammer handoff for ${repoPath}#${prNumber}: ` +
+      `final re-review posted Request changes after ` +
+      `${completedRemediationRounds}/${maxRemediationRounds} remediation rounds`
+  );
+  await handlePostedReviewRowImpl({
+    rootDir,
+    repoPath,
+    prNumber,
+    existing: postedRow,
+    subjectRef,
+    currentRevisionRef,
+    labelNames,
+    projectGateStatusSafe,
+    execFileImpl,
+    operatorSurface,
+    logger,
+  });
+  return { handled: true, reason: 'inline-final-hammer' };
 }
 
 // ── Org repo discovery ───────────────────────────────────────────────────────
@@ -8210,6 +8293,22 @@ async function pollOnce(
                 result,
                 maxRemediationRounds,
               });
+              await maybeInlineFinalHammerAfterReview({
+                rootDir: ROOT,
+                repoPath,
+                prNumber,
+                result,
+                passKind,
+                completedRemediationRounds,
+                maxRemediationRounds,
+                subjectRef: subject.ref,
+                currentRevisionRef: subject.ref.revisionRef,
+                labelNames: prLabelNames,
+                projectGateStatusSafe,
+                execFileImpl: execFileAsync,
+                operatorSurface,
+                logger: console,
+              });
             }
           } finally {
             reservation.release();
@@ -8638,6 +8737,7 @@ export {
   isTerminalCloserCommitIdentity,
   maybeDispatchReviewerTimeoutExhaustedMergeAgent,
   maybeDispatchAmaClosureFor,
+  maybeInlineFinalHammerAfterReview,
   runDaemonCleanMergeAttempt,
   writeAutonomousMergeDisabledAudit,
   resolveFirstPassReviewBudgetSuppression,
@@ -8665,10 +8765,12 @@ export {
   shouldClearReviewCycleCapForOverride,
   reviewBodyHasStandingBlockingFindings,
   recordSuccessfulReviewCycleVerdict,
+  resolveFinalToHammerHandoffEnabled,
   resolveStuckDispatchAlertDebounceMs,
   resolveWatcherDrainMaxMs,
   resolveFirstPassReviewerPoolConfig,
   resolveHardReviewCeiling,
+  shouldInlineFinalHammerAfterReview,
   runFastMergeClosePathIsolated,
   runBoundedReviewerDispatchQueue,
   reserveReviewerMemoryAdmission,

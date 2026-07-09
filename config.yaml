@@ -160,6 +160,9 @@ handoff:
   #   ADVERSARIAL_HANDOFF_REMEDIATION_TO_REREVIEW /
   #     AGENT_OS_HANDOFF_REMEDIATION_TO_REREVIEW
   remediation_to_rereview: false
+  # HOM-04 final handoff is intentionally default-off. Operators enable this
+  # last, after earlier handoffs prove safe.
+  final_to_hammer: false
 
 apps:
   adversarial-review:

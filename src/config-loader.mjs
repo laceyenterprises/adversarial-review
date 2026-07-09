@@ -1641,6 +1641,7 @@ function schemaV1() {
         __strict: true,
         __keys: {
           remediation_to_rereview: { __type: TYPE_BOOL, __default: false },
+          final_to_hammer: { __type: TYPE_BOOL, __default: false },
         },
       },
       // Module-internal sections used by tools/adversarial-review. These are
@@ -2517,6 +2518,10 @@ export const ENV_ALIASES = {
   'feature_flags.resume_context_envelope': {
     canonical: 'AGENT_OS_FEATURE_FLAGS_RESUME_CONTEXT_ENVELOPE',
     aliases: [],
+  },
+  'handoff.final_to_hammer': {
+    canonical: 'AGENT_OS_HANDOFF_FINAL_TO_HAMMER',
+    aliases: [['ADVERSARIAL_REVIEW_HANDOFF_FINAL_TO_HAMMER', identity]],
   },
 };
 

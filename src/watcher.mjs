@@ -2573,11 +2573,11 @@ const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
          failed_at = NULL,
          failure_message = NULL,
          quota_reset_at_utc = NULL,
-         infra_auto_recover_attempts = infra_auto_recover_attempts + 1
+         infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1
    WHERE repo = ?
      AND pr_number = ?
      AND review_status = 'failed'
-     AND infra_auto_recover_attempts < ?
+     AND COALESCE(infra_auto_recover_attempts, 0) < ?
      AND (
        (? = 'cascade' AND (
          lower(COALESCE(failure_message, '')) LIKE '[cascade]%' OR
@@ -2713,11 +2713,12 @@ const stmtMarkMalformed = db.prepare(
 // must never erase their failure evidence.
 //
 // Terminal statuses (`posted`, `malformed`) and the durable in-flight
-// states (`reviewing`, `failed-orphan`) are NOT reclaimable by this
-// CAS. `failed-orphan` recovery is operator-driven via
-// `npm run retrigger-review --allow-failed-reset` after verifying the
-// GitHub side; that path resets the row to `pending` and the CAS
-// then matches it on the next poll.
+// state (`reviewing`) is NOT reclaimable by this CAS. `failed-orphan`
+// rows use the bounded auto-reclaim pass below after lease/process
+// liveness guards pass, or the explicit operator recovery path
+// (`npm run retrigger-review --allow-failed-reset`) after manual
+// verification. Both reset the row to `pending`, and this CAS then
+// matches it on the next poll.
 //
 // Callers must check `result.changes === 1` before proceeding with
 // the spawn. A 0-changes result means another watcher (or a parallel
@@ -2806,10 +2807,52 @@ const stmtMarkCascadeFailed = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
 );
 const stmtMarkPendingUpstream = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
+  "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1 WHERE repo = ? AND pr_number = ?"
 );
 const stmtMarkReviewCycleCapPaused = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
+);
+const stmtListFailedOrphanAutoReclaimCandidates = db.prepare(
+  `SELECT repo, pr_number, pr_state, review_status, reviewer, review_attempts,
+          last_attempted_at, failed_at, failure_message, reviewer_session_uuid,
+          reviewer_pgid, reviewer_started_at, reviewer_head_sha, reviewer_timeout_ms,
+          reviewer_lease_expires_at, infra_auto_recover_attempts
+     FROM reviewed_prs
+    WHERE pr_state = 'open'
+      AND review_status = 'failed-orphan'
+      AND COALESCE(infra_auto_recover_attempts, 0) < ?
+    ORDER BY failed_at ASC, last_attempted_at ASC, id ASC
+    LIMIT ?`
+);
+const stmtAutoReclaimFailedOrphan = db.prepare(
+  `UPDATE reviewed_prs
+      SET review_status = 'pending',
+          review_attempts = 0,
+          last_attempted_at = NULL,
+          posted_at = NULL,
+          failed_at = ?,
+          failure_message = ?,
+          rereview_requested_at = ?,
+          rereview_reason = ?,
+          reviewer_session_uuid = NULL,
+          reviewer_pgid = NULL,
+          reviewer_started_at = NULL,
+          reviewer_head_sha = NULL,
+          reviewer_timeout_ms = NULL,
+          reviewer_lease_expires_at = NULL,
+          quota_reset_at_utc = NULL,
+          review_population_retry_attempts = 0,
+          review_population_retry_last_at = NULL,
+          review_population_retry_head_sha = NULL,
+          infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1
+    WHERE repo = ?
+      AND pr_number = ?
+      AND pr_state = 'open'
+      AND review_status = 'failed-orphan'
+      AND COALESCE(infra_auto_recover_attempts, 0) < ?
+      AND COALESCE(reviewer_session_uuid, '') = COALESCE(?, '')
+      AND COALESCE(reviewer_pgid, '') = COALESCE(?, '')
+      AND COALESCE(reviewer_lease_expires_at, '') = COALESCE(?, '')`
 );
 const stmtGetOpenPRs = db.prepare(
   "SELECT repo, pr_number, linear_ticket, labels_json FROM reviewed_prs WHERE pr_state = 'open'"
@@ -2921,6 +2964,192 @@ function settleDurableReviewerRunState({
     );
     return null;
   }
+}
+
+function probeReviewerProcessGroupAlive(pgid) {
+  const numericPgid = Number(pgid);
+  if (!Number.isInteger(numericPgid) || numericPgid <= 0) return false;
+  try {
+    process.kill(-numericPgid, 0);
+    return true;
+  } catch (err) {
+    if (err?.code === 'ESRCH') return false;
+    if (err?.code === 'EPERM') return true;
+    return false;
+  }
+}
+
+async function probeReviewerProcessSession({
+  pgid,
+  sessionUuid,
+  execFileImpl = execFileAsync,
+  probeGroupAliveImpl = probeReviewerProcessGroupAlive,
+} = {}) {
+  const alive = probeGroupAliveImpl(pgid);
+  if (!alive) return { alive: false, matched: false };
+
+  const numericPgid = Number(pgid);
+  if (!Number.isInteger(numericPgid) || numericPgid <= 0 || !sessionUuid) {
+    return { alive: true, matched: 'unknown' };
+  }
+
+  try {
+    const { stdout } = await execFileImpl('ps', ['-ww', '-p', String(numericPgid), '-o', 'command='], {
+      encoding: 'utf8',
+      timeout: 2_000,
+    });
+    return { alive: true, matched: stdout.includes(String(sessionUuid)) };
+  } catch {
+    return { alive: true, matched: 'unknown' };
+  }
+}
+
+async function failedOrphanAutoReclaimDecision(row, now = new Date(), {
+  cap = INFRA_AUTO_RECOVER_CAP,
+  probeSessionImpl = probeReviewerProcessSession,
+  reviewerTimeoutMs = resolveReviewerTimeoutMs(),
+} = {}) {
+  if (!row || row.review_status && row.review_status !== 'failed-orphan') {
+    return { reclaim: false, reason: 'not-failed-orphan' };
+  }
+  if (row.pr_state && row.pr_state !== 'open') {
+    return { reclaim: false, reason: 'pr-not-open' };
+  }
+  const attempts = Number(row.infra_auto_recover_attempts || 0);
+  if (attempts >= cap) {
+    return { reclaim: false, reason: 'cap-exhausted' };
+  }
+  if (!isReviewerLeaseExpired(row, now, { reviewerTimeoutMs })) {
+    return { reclaim: false, reason: 'lease-active' };
+  }
+
+  const sessionProbe = await probeSessionImpl({
+    pgid: row.reviewer_pgid,
+    sessionUuid: row.reviewer_session_uuid,
+  });
+  const alive = typeof sessionProbe === 'boolean' ? sessionProbe : sessionProbe?.alive === true;
+  const matched = typeof sessionProbe === 'boolean' ? sessionProbe : sessionProbe?.matched;
+  if (alive) {
+    if (matched === false) {
+      return { reclaim: true, reason: 'reviewer-session-mismatch' };
+    }
+    return {
+      reclaim: false,
+      reason: matched === true ? 'reviewer-live' : 'reviewer-liveness-unknown',
+    };
+  }
+
+  return { reclaim: true, reason: 'lease-expired-reviewer-dead' };
+}
+
+async function autoReclaimFailedOrphans({
+  now = new Date(),
+  cap = INFRA_AUTO_RECOVER_CAP,
+  maxRows = 20,
+  statements = {
+    listCandidates: stmtListFailedOrphanAutoReclaimCandidates,
+    reclaim: stmtAutoReclaimFailedOrphan,
+    markPosted: stmtMarkPosted,
+  },
+  probeSessionImpl = probeReviewerProcessSession,
+  findPostedReview = null,
+  settleRunRecord = ({ sessionUuid, settledAt }) => settleDurableReviewerRunState({
+    sessionUuid,
+    state: 'cancelled',
+    settledAt,
+  }),
+  log = console,
+} = {}) {
+  const limit = Number.isInteger(Number(maxRows)) && Number(maxRows) >= 0 ? Number(maxRows) : 20;
+  const reclaimedAt = now.toISOString();
+  const rows = statements.listCandidates.all(cap, limit);
+  let reclaimed = 0;
+  let skipped = 0;
+
+  for (const row of rows) {
+    const decision = await failedOrphanAutoReclaimDecision(row, now, {
+      cap,
+      probeSessionImpl,
+    });
+    if (!decision.reclaim) {
+      skipped += 1;
+      log.log?.(
+        `[watcher] failed_orphan_auto_reclaim_skipped repo=${row.repo} pr=${row.pr_number} ` +
+        `reason=${decision.reason} session=${row.reviewer_session_uuid || 'unknown'} ` +
+        `pgid=${row.reviewer_pgid || 'unknown'}`
+      );
+      continue;
+    }
+
+    if (typeof findPostedReview === 'function') {
+      try {
+        const postedReview = await findPostedReview(row, { refresh: true });
+        if (postedReview) {
+          skipped += 1;
+          const postedAt =
+            postedReview.submitted_at || postedReview.submittedAt || reclaimedAt;
+          const markPosted = statements.markPosted?.run;
+          if (typeof markPosted === 'function') {
+            const result = markPosted.call(statements.markPosted, postedAt, row.repo, row.pr_number);
+            log.warn?.(
+              `[watcher] failed_orphan_auto_reclaim_skipped repo=${row.repo} pr=${row.pr_number} ` +
+              `reason=posted-review-found-reconciled session=${row.reviewer_session_uuid || 'unknown'} ` +
+              `posted_at=${postedAt} mark_changes=${result?.changes ?? 'unknown'}`
+            );
+          } else {
+            log.warn?.(
+              `[watcher] failed_orphan_auto_reclaim_skipped repo=${row.repo} pr=${row.pr_number} ` +
+              `reason=posted-review-found-mark-posted-unavailable ` +
+              `session=${row.reviewer_session_uuid || 'unknown'} posted_at=${postedAt}`
+            );
+          }
+          continue;
+        }
+      } catch (err) {
+        skipped += 1;
+        log.warn?.(
+          `[watcher] failed_orphan_auto_reclaim_skipped repo=${row.repo} pr=${row.pr_number} ` +
+          `reason=posted-review-probe-failed session=${row.reviewer_session_uuid || 'unknown'} ` +
+          `error=${err?.message || err}`
+        );
+        continue;
+      }
+    }
+
+    const message =
+      `[failed-orphan-auto-reclaim] Lease expired and no live reviewer process group was found; ` +
+      `re-arming review automatically (infra_auto_recover_attempts ${Number(row.infra_auto_recover_attempts || 0) + 1}/${cap}).`;
+    const result = statements.reclaim.run(
+      reclaimedAt,
+      message,
+      reclaimedAt,
+      'auto-reclaim failed-orphan after expired lease and dead reviewer process',
+      row.repo,
+      row.pr_number,
+      cap,
+      row.reviewer_session_uuid || '',
+      row.reviewer_pgid ?? '',
+      row.reviewer_lease_expires_at || ''
+    );
+    if (result.changes !== 1) {
+      skipped += 1;
+      log.warn?.(
+        `[watcher] failed_orphan_auto_reclaim_cas_miss repo=${row.repo} pr=${row.pr_number} ` +
+        `session=${row.reviewer_session_uuid || 'unknown'} pgid=${row.reviewer_pgid || 'unknown'}`
+      );
+      continue;
+    }
+
+    reclaimed += 1;
+    settleRunRecord({ sessionUuid: row.reviewer_session_uuid, settledAt: reclaimedAt, row });
+    log.warn?.(
+      `[watcher] failed_orphan_auto_reclaimed repo=${row.repo} pr=${row.pr_number} ` +
+      `session=${row.reviewer_session_uuid || 'unknown'} pgid=${row.reviewer_pgid || 'unknown'} ` +
+      `attempt=${Number(row.infra_auto_recover_attempts || 0) + 1}/${cap}`
+    );
+  }
+
+  return { reclaimed, skipped };
 }
 
 function persistReviewerPgid({
@@ -3391,24 +3620,36 @@ function settleReviewerAttempt({
   const failureMessage = String(result.error || '').trim() || defaultFailureMessages[failureClass] || defaultFailureMessages.unknown;
   const classifiedMessage = `[${failureClass}] ${failureMessage}`;
   if (transientFailureClasses.has(failureClass)) {
+    if (typeof statements.getReviewRow?.get !== 'function') {
+      throw new Error('settleReviewerAttempt requires statements.getReviewRow.get for transient infra cap enforcement');
+    }
+    const currentRow = statements.getReviewRow.get(repoPath, prNumber);
+    const infraRecoverAttempts = Number(currentRow?.infra_auto_recover_attempts || 0);
     const cascadeState = recordCascadeFailure(rootDir, {
       repo: repoPath,
       prNumber,
       failedAt: failureAt,
       failureClass,
     });
-    if (cascadeState.consecutiveTransientFailures >= CASCADE_FAILURE_CAP) {
-      statements.markPendingUpstream.run(failureAt, classifiedMessage, repoPath, prNumber);
-      const breakdown = formatTransientFailureBreakdown(cascadeState.transientFailureBreakdown);
-      log.warn(
-        `[watcher] PR #${prNumber} marked pending-upstream after ${cascadeState.consecutiveTransientFailures} transient reviewer failures (${breakdown}); will resume when the reviewer lane recovers`
+    if (infraRecoverAttempts >= INFRA_AUTO_RECOVER_CAP) {
+      statements.markCascadeFailed.run(
+        failureAt,
+        `${classifiedMessage}; infra auto-recovery cap exhausted (${infraRecoverAttempts}/${INFRA_AUTO_RECOVER_CAP}).`,
+        repoPath,
+        prNumber
       );
-    } else {
-      const transientSettleStatement = leaseRecoveryEnabled
-        ? statements.releaseReviewLease
-        : statements.markCascadeFailed;
-      transientSettleStatement.run(failureAt, classifiedMessage, repoPath, prNumber);
+      log.warn(
+        `[watcher] Reviewer ${failureClass} failure on #${prNumber} exhausted infra auto-recovery cap ` +
+        `(${infraRecoverAttempts}/${INFRA_AUTO_RECOVER_CAP}); leaving terminal evidence for operator inspection`
+      );
+      return;
     }
+    statements.markPendingUpstream.run(failureAt, classifiedMessage, repoPath, prNumber);
+    const breakdown = formatTransientFailureBreakdown(cascadeState.transientFailureBreakdown);
+    log.warn(
+      `[watcher] PR #${prNumber} marked pending-upstream after ${cascadeState.consecutiveTransientFailures} transient reviewer failures (${breakdown}); ` +
+      `infra auto-recovery ${infraRecoverAttempts + 1}/${INFRA_AUTO_RECOVER_CAP}; will resume when the reviewer lane recovers`
+    );
     log.warn(
       `[watcher] Reviewer ${failureClass} failure on #${prNumber} (consecutiveTransient=${cascadeState.consecutiveTransientFailures}); backing off ${cascadeState.backoffMinutes}m`
     );
@@ -6836,6 +7077,16 @@ async function pollOnce(
       `[watcher] stale reviewer reattach capped: reconciled=${reattach.reconciled} skipped=${reattach.skipped}`
     );
   }
+  const orphanReclaim = await autoReclaimFailedOrphans({
+    maxRows: resolveStaleReviewerReconcilePerPoll(),
+    findPostedReview: makeReviewPostedProbe(octokit),
+    log: console,
+  });
+  if (orphanReclaim.skipped > 0) {
+    console.log(
+      `[watcher] failed-orphan auto-reclaim skipped=${orphanReclaim.skipped} reclaimed=${orphanReclaim.reclaimed}`
+    );
+  }
 
   await warnForMissingAdversarialGateBranchProtection(activeRepos, {
     checker: adversarialGateBranchProtectionChecker,
@@ -7028,11 +7279,10 @@ async function pollOnce(
         }
       }
 
-      // 'failed-orphan' is a sticky state reserved for legacy rows
-      // without a reviewer handle and true anomalies where GitHub shows
-      // a posted review but the reviewer process group is still alive.
-      // Auto-retrying that row would risk a duplicate review post; the
-      // operator must explicitly clear it via `npm run retrigger-review`.
+      // 'failed-orphan' is only eligible through the guarded auto-reclaim pass
+      // at the top of the tick (expired lease + no live reviewer process) or
+      // the explicit operator reset path. The generic PR dispatch loop must
+      // still skip any failed-orphan row that reaches this point.
       if (
         existing?.review_status === 'malformed' ||
         existing?.review_status === 'failed-orphan'
@@ -8762,6 +9012,9 @@ export {
   readWatcherDrainState,
   reconcilePendingDraftsBeforeSpawn,
   reconcileOrphanedReviewing,
+  autoReclaimFailedOrphans,
+  failedOrphanAutoReclaimDecision,
+  probeReviewerProcessSession,
   recoverFastMergeVetoes,
   runQueuedReviewAdoptionPhase,
   resolvePendingDraftRespawnAgeSeconds,

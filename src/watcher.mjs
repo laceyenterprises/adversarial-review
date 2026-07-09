@@ -8581,6 +8581,9 @@ async function main() {
           ? `wake pollOnce (${wake.payload?.reason || 'watcher-wake'})`
           : 'scheduled pollOnce';
         await runHeartbeatPoll(source);
+        if (wake.woken) {
+          nextStart = Date.now();
+        }
       } else {
         await new Promise((resolve) => setTimeout(resolve, sleepMs));
         await runHeartbeatPoll('scheduled pollOnce');

@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, statSync, watch, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdirSync, readFileSync, renameSync, watch, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 const WATCHER_WAKE_FILE = 'watcher-wake.json';
@@ -9,18 +9,23 @@ function watcherWakePath(rootDir) {
   return join(rootDir, 'data', WATCHER_WAKE_FILE);
 }
 
-function readWakeStat(filePath) {
+function readWakeSnapshot(filePath) {
   try {
-    const stat = statSync(filePath);
-    return `${stat.mtimeMs}:${stat.size}`;
-  } catch {
-    return null;
-  }
-}
-
-function readWatcherWake(filePath) {
-  try {
-    return JSON.parse(readFileSync(filePath, 'utf8'));
+    const raw = readFileSync(filePath, 'utf8');
+    try {
+      const payload = JSON.parse(raw);
+      const requestId = String(payload?.request_id || '').trim();
+      if (requestId) return { key: `request_id:${requestId}`, payload };
+      return {
+        key: `content:${createHash('sha256').update(raw).digest('hex')}`,
+        payload,
+      };
+    } catch {
+      return {
+        key: `content:${createHash('sha256').update(raw).digest('hex')}`,
+        payload: null,
+      };
+    }
   } catch {
     return null;
   }
@@ -65,15 +70,15 @@ function createWatcherWakeSource({
   const dirPath = dirname(filePath);
   mkdirSync(dirPath, { recursive: true });
 
-  let lastSeen = readWakeStat(filePath);
+  let lastSeen = readWakeSnapshot(filePath)?.key || null;
   let closed = false;
   const waiters = new Set();
 
   function consumeIfChanged() {
-    const nextSeen = readWakeStat(filePath);
-    if (!nextSeen || nextSeen === lastSeen) return null;
-    lastSeen = nextSeen;
-    return readWatcherWake(filePath) || { reason: 'unreadable-wake-file' };
+    const nextSeen = readWakeSnapshot(filePath);
+    if (!nextSeen || nextSeen.key === lastSeen) return null;
+    lastSeen = nextSeen.key;
+    return nextSeen.payload || { reason: 'unreadable-wake-file' };
   }
 
   function notifyIfChanged() {

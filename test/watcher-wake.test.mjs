@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, statSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -56,6 +56,44 @@ test('watcher wake wait preserves normal timeout path when no wake is written', 
   try {
     const result = await wakeSource.wait(20);
     assert.deepEqual(result, { woken: false, reason: 'timeout' });
+  } finally {
+    wakeSource.close();
+  }
+});
+
+test('watcher wake dedupes by request_id instead of file mtime and size', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-wake-'));
+  requestWatcherWake({
+    rootDir,
+    reason: 'remediation-to-rereview',
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    requestedAt: '2026-04-21T10:05:00.000Z',
+    requestId: 'wake-a',
+  });
+  const filePath = watcherWakePath(rootDir);
+  const originalStat = statSync(filePath);
+  const wakeSource = createWatcherWakeSource({
+    rootDir,
+    logger: { warn() {} },
+    pollMs: 100,
+  });
+
+  try {
+    requestWatcherWake({
+      rootDir,
+      reason: 'remediation-to-rereview',
+      repo: 'laceyenterprises/clio',
+      prNumber: 7,
+      requestedAt: '2026-04-21T10:05:00.000Z',
+      requestId: 'wake-b',
+    });
+    utimesSync(filePath, originalStat.atime, originalStat.mtime);
+
+    const result = await wakeSource.wait(50);
+    assert.equal(result.woken, true);
+    assert.equal(result.reason, 'wake-file');
+    assert.equal(result.payload.request_id, 'wake-b');
   } finally {
     wakeSource.close();
   }

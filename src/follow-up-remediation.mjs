@@ -5624,7 +5624,7 @@ async function reconcileFollowUpJob({
     if (
       rereviewAccepted &&
       rereview.triggered &&
-      isRemediationToRereviewHandoffEnabled()
+      isRemediationToRereviewHandoffEnabled(process.env, { topPath: join(rootDir, 'config.yaml') })
     ) {
       try {
         const wake = requestWatcherWakeImpl({

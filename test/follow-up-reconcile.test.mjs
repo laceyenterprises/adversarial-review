@@ -11,6 +11,7 @@ import {
 } from '../src/follow-up-jobs.mjs';
 import { reconcileFollowUpJob } from '../src/follow-up-reconcile.mjs';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import './helpers/role-config-cache-reset.mjs';
 
 let previousHqRoot;
 let previousHandoffEnv;
@@ -223,6 +224,86 @@ test('reconcileFollowUpJob resets watcher review state when remediation reply re
 test('reconcileFollowUpJob wakes watcher when handoff.remediation_to_rereview is enabled', async () => {
   process.env.ADVERSARIAL_HANDOFF_REMEDIATION_TO_REREVIEW = '1';
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  writeReviewRow(rootDir);
+  createFollowUpJob(makeJobInput(rootDir));
+  const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });
+  const workspaceDir = path.join(rootDir, 'data', 'follow-up-jobs', 'workspaces', claimed.job.jobId);
+  const artifactDir = path.join(workspaceDir, '.adversarial-follow-up');
+  mkdirSync(artifactDir, { recursive: true });
+  mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  const replyPath = hqReplyPathForJob(claimed.job);
+  writeFileSync(outputPath, 'Validation: npm test\nFiles changed: src/auth.mjs\n', 'utf8');
+  writeFileSync(replyPath, `${JSON.stringify({
+    kind: 'adversarial-review-remediation-reply',
+    schemaVersion: 1,
+    jobId: claimed.job.jobId,
+    repo: claimed.job.repo,
+    prNumber: claimed.job.prNumber,
+    outcome: 'completed',
+    summary: 'Applied the remediation changes.',
+    validation: ['npm test'],
+    blockers: [],
+    reReview: {
+      requested: true,
+      reason: 'Remediation landed and is ready for another adversarial pass.',
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const spawned = markFollowUpJobSpawned({
+    jobPath: claimed.jobPath,
+    spawnedAt: '2026-04-21T10:01:00.000Z',
+    worker: {
+      processId: 8123,
+      workspaceDir: path.relative(rootDir, workspaceDir),
+      outputPath: path.relative(rootDir, outputPath),
+      logPath: path.relative(rootDir, path.join(artifactDir, 'codex-worker.log')),
+      promptPath: path.relative(rootDir, path.join(artifactDir, 'prompt.md')),
+      replyPath,
+    },
+  });
+
+  const wakeCalls = [];
+  const reconciled = await reconcileFollowUpJob({
+    rootDir,
+    jobPath: spawned.jobPath,
+    now: () => '2026-04-21T10:05:00.000Z',
+    isProcessAliveImpl: () => false,
+    requestWatcherWakeImpl: (payload) => {
+      wakeCalls.push(payload);
+      return {
+        requested: true,
+        payload: {
+          reason: payload.reason,
+          requested_at: payload.requestedAt,
+        },
+      };
+    },
+    resolvePRLifecycleImpl: async () => null,
+    auditWorkspaceForContaminationImpl: async () => ({ suspect: [], error: null }),
+  });
+
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(reconciled.outcome, 'completed');
+  assert.equal(readReviewRow(rootDir).review_status, 'pending');
+  assert.equal(wakeCalls.length, 1);
+  assert.deepEqual(wakeCalls[0], {
+    rootDir,
+    reason: 'remediation-to-rereview',
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    requestedAt: '2026-04-21T10:05:00.000Z',
+  });
+  assert.deepEqual(reconciled.job.reReview.wake, {
+    requested: true,
+    reason: 'remediation-to-rereview',
+    requestedAt: '2026-04-21T10:05:00.000Z',
+  });
+});
+
+test('reconcileFollowUpJob loads handoff.remediation_to_rereview from the repo config root', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  writeFileSync(path.join(rootDir, 'config.yaml'), 'version: 1\nhandoff:\n  remediation_to_rereview: true\n', 'utf8');
   writeReviewRow(rootDir);
   createFollowUpJob(makeJobInput(rootDir));
   const claimed = claimNextFollowUpJob({ rootDir, claimedAt: '2026-04-21T10:00:00.000Z' });

@@ -102,6 +102,16 @@ test('hammer prompt emits merge signal before releasing successful merge lease',
   const prompt = readFileSync(new URL('../templates/hammer-prompt.md', import.meta.url), 'utf8');
   assert.match(prompt, /ham_emit_git_merge_signal\(\)/);
   assert.match(prompt, /EVENT_MERGE_SIGNAL/);
+  assert.match(prompt, /ham_mark_ama_closer_lease_succeeded\(\)/);
+  assert.match(prompt, /terminalOutcome: 'succeeded'/);
+  assert.ok(
+    prompt.indexOf('if ! ham_mark_ama_closer_lease_succeeded; then') > prompt.indexOf('ham_append_terminal_audit succeeded merged'),
+    'AMA closer lease should be terminalized after the merged audit append succeeds',
+  );
+  assert.ok(
+    prompt.indexOf('if ! ham_mark_ama_closer_lease_succeeded; then') < prompt.indexOf('if ! ham_emit_git_merge_signal; then'),
+    'AMA closer lease should be terminalized before merge signal emission',
+  );
   assert.ok(
     prompt.indexOf('if ! ham_emit_git_merge_signal; then') > prompt.indexOf('HAM_MERGE_COMMIT='),
     'merge signal should run after merge commit capture',
@@ -109,5 +119,9 @@ test('hammer prompt emits merge signal before releasing successful merge lease',
   assert.ok(
     prompt.indexOf('if ! ham_emit_git_merge_signal; then') < prompt.indexOf('  ham_release_merge_lease\nelse'),
     'successful merge lease release should wait for merge signal emission',
+  );
+  assert.doesNotMatch(
+    prompt,
+    /if ! ham_emit_git_merge_signal; then[\s\S]*?\n  fi\n  trap ham_release_merge_lease EXIT\n  ham_release_merge_lease/,
   );
 });

@@ -828,6 +828,36 @@ emit_git_event_best_effort(
 PYEOF
 }
 
+ham_mark_ama_closer_lease_succeeded() {
+  POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" node --input-type=module <<'NODE'
+import {
+  AMA_CLOSER_LEASE_STATUS,
+  readAmaCloserLease,
+  updateAmaCloserLease,
+} from '<<ROOT_DIR>>/src/ama/closer-lease.mjs';
+
+const rootDir = '<<ROOT_DIR>>';
+const identity = {
+  repo: '<<REPO>>',
+  prNumber: Number('<<PR_NUMBER>>'),
+  headSha: process.env.POST_REMEDIATION_SHA,
+};
+const existing = readAmaCloserLease(rootDir, identity);
+if (existing?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL) {
+  if (existing.terminalOutcome === 'succeeded') process.exit(0);
+  throw new Error(
+    `AMA closer lease is already terminal with outcome ${existing.terminalOutcome}`,
+  );
+}
+updateAmaCloserLease({
+  rootDir,
+  ...identity,
+  status: AMA_CLOSER_LEASE_STATUS.TERMINAL,
+  terminalOutcome: 'succeeded',
+});
+NODE
+}
+
 ham_refresh_github_gate_once() {
   POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" node --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchPullRequestRollup } from '<<ROOT_DIR>>/src/github-api.mjs';
@@ -1233,12 +1263,15 @@ if [ "$HAM_POST_STATE" = "MERGED" ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATION_S
     ham_release_merge_lease
     exit "$HAM_MERGED_AUDIT_APPEND_EXIT"
   fi
-  trap - EXIT
-  if ! ham_emit_git_merge_signal; then
-    echo "HAM hard-blocker: merge signal emission failed after confirmed merge; keeping lease for retry" >&2
+  if ! ham_mark_ama_closer_lease_succeeded; then
+    echo "HAM hard-blocker: failed to mark AMA closer lease succeeded after confirmed merge" >&2
     exit 1
   fi
-  trap ham_release_merge_lease EXIT
+  trap - EXIT
+  if ! ham_emit_git_merge_signal; then
+    echo "HAM hard-blocker: merge signal emission failed after confirmed merge; AMA closer lease is terminal for daemon recovery" >&2
+    exit 1
+  fi
   ham_release_merge_lease
 else
   echo "HAM hard-blocker: gh pr merge did not confirm merged validated head" >&2

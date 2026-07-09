@@ -1783,11 +1783,12 @@ matches the exact `(repo, pr, liveHead)` tuple with a latest
 configured HQ owner, must not be world-writable, and an `in_progress` audit is
 authoritative only while the matching AMA closer lease for `(repo, pr, liveHead)`
 is still `dispatched`; a `succeeded` audit is terminal authority. After a daemon
-or HAM terminal merge, the closer must emit `worker.git.merge_signal` before
-finalizing the AMA closer lease. Transient `gh pr view` failures while fetching
-the merge commit are retried with bounded backoff, and a failed signal emission
-leaves the lease unfinished so the next closer pass can retry the second step
-instead of releasing durable authority with a lost merge event. In the narrow
+or HAM terminal merge, the closer must append the succeeded AMA audit and
+finalize the AMA closer lease before emitting `worker.git.merge_signal`.
+Transient `gh pr view` failures while fetching the merge commit are retried with
+bounded backoff before finalization, and a failed signal emission leaves the
+terminal lease breadcrumb in place so daemon recovery can rediscover the merged
+state instead of ignoring a failed worker run. In the narrow
 strict-non-blocking lane, the eligibility predicate may also accept an active HAM
 closer session when the only HAM-waived reasons are
 `non-blocking-findings-present` or `non-blocking-findings-unknown` and the paired

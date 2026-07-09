@@ -1,17 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { handoffMain } from '../src/cli.mjs';
 import { createHandoffRateLimiter } from '../src/handoff-rate-cap.mjs';
 import {
+  HANDOFF_EVENT_DIR_MODE,
+  HANDOFF_EVENT_LOG_MODE,
   HANDOFF_EVENTS,
   buildHandoffEvent,
   collectHandoffStatus,
   collectHandoffTrace,
   handoffEventLogPath,
+  handoffEventLogDir,
   recordHandoffEvent,
   recordHandoffWakeEvents,
   renderHandoffStatus,
@@ -55,6 +58,32 @@ test('handoff event shapes validate and rotate by UTC day', (t) => {
   const written = recordHandoffEvent({ rootDir, ...row });
   assert.match(written.filePath, /2026-07-09\.jsonl$/);
   assert.deepEqual(readJsonl(handoffEventLogPath(rootDir, row.at)), [row]);
+  assert.equal(statSync(handoffEventLogDir(rootDir)).mode & 0o777, HANDOFF_EVENT_DIR_MODE);
+  assert.equal(statSync(written.filePath).mode & 0o777, HANDOFF_EVENT_LOG_MODE);
+});
+
+test('handoff reader skips daily logs older than the requested window before opening', (t) => {
+  const rootDir = makeRoot(t);
+  const dir = handoffEventLogDir(rootDir);
+  mkdirSync(dir, { recursive: true });
+  mkdirSync(path.join(dir, '2026-07-08.jsonl'));
+  recordHandoffEvent({
+    rootDir,
+    event: HANDOFF_EVENTS.fired,
+    at: '2026-07-09T00:00:00.000Z',
+    step: 'review-to-remediation',
+    repo: 'agent-os',
+    prNumber: 3312,
+  });
+
+  const status = collectHandoffStatus({
+    rootDir,
+    repo: 'agent-os',
+    window: '24h',
+    now: () => new Date('2026-07-10T00:00:00.000Z'),
+  });
+
+  assert.equal(status.handoffsFired, 1);
 });
 
 test('handoff status and trace match fired handoffs', (t) => {

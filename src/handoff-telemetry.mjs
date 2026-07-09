@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 export const HANDOFF_EVENTS = Object.freeze({
@@ -9,6 +9,8 @@ export const HANDOFF_EVENTS = Object.freeze({
 });
 
 const EVENT_SET = new Set(Object.values(HANDOFF_EVENTS));
+export const HANDOFF_EVENT_DIR_MODE = 0o775;
+export const HANDOFF_EVENT_LOG_MODE = 0o664;
 const STEP_ORDER = ['review-to-remediation', 'remediation-to-rereview', 'final-to-hammer'];
 const STEP_LABELS = Object.freeze({
   'review-to-remediation': 'review->remediation',
@@ -101,8 +103,19 @@ export function recordHandoffEvent({ rootDir, ...event }) {
   if (!rootDir) return null;
   const row = buildHandoffEvent(event);
   const filePath = handoffEventLogPath(rootDir, row.at);
-  mkdirSync(dirname(filePath), { recursive: true });
-  appendFileSync(filePath, `${JSON.stringify(row)}\n`, 'utf8');
+  const dir = dirname(filePath);
+  mkdirSync(dir, { recursive: true, mode: HANDOFF_EVENT_DIR_MODE });
+  try {
+    chmodSync(dir, HANDOFF_EVENT_DIR_MODE);
+  } catch {
+    // Telemetry is best-effort; callers catch write failures on wake paths.
+  }
+  appendFileSync(filePath, `${JSON.stringify(row)}\n`, { encoding: 'utf8', mode: HANDOFF_EVENT_LOG_MODE });
+  try {
+    chmodSync(filePath, HANDOFF_EVENT_LOG_MODE);
+  } catch {
+    // Existing shared logs may be owned by another daemon user.
+  }
   return { filePath, row };
 }
 
@@ -154,9 +167,11 @@ export function readHandoffEvents({
   const dir = handoffEventLogDir(rootDir);
   if (!existsSync(dir)) return [];
   const sinceMs = Date.parse(since);
+  const sinceDate = Number.isFinite(sinceMs) ? normalizeTimestamp(since).slice(0, 10) : null;
   const rows = [];
   for (const name of readdirSync(dir).sort()) {
     if (!/^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)) continue;
+    if (sinceDate && name.slice(0, 10) < sinceDate) continue;
     const filePath = join(dir, name);
     for (const line of readFileSync(filePath, 'utf8').split('\n')) {
       if (!line.trim()) continue;

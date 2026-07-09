@@ -80,6 +80,14 @@ roles:
   reviewer: adversarial             # enum: claude-code / codex / claude (legacy alias for claude-code) / gemini / adversarial
   remediator: adversarial           # enum: claude-code / codex / adversarial
   adversarial:
+    handoff:
+      # HOM-01 wake-the-loop primitive. Default off preserves the timer-only
+      # cadence; later HOM tickets enable each step independently.
+      enabled: false
+      review_to_remediation: false
+      remediation_to_rereview: false
+      final_to_hammer: false
+      max_per_pr_head: 20
     merge_authority:
       # MSM two-path autonomous merge execution. Set false as the hard cutover
       # kill switch: the watcher still evaluates/audits the merge decision, then

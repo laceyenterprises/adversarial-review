@@ -49,6 +49,7 @@ import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs'
 import { retryFailedCommentDeliveries } from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
 import { refreshReviewerBrokerTokens } from '../src/reviewer-broker-refresh.mjs';
 import { reapCloserHammerWorktrees } from '../src/ama/closer-worktree-reaper.mjs';
+import { loadConfigCached } from '../src/config-loader.mjs';
 import { archiveStoppedFollowUpJobs, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
 import {
   emitHeartbeatsForActiveJobs,
@@ -56,6 +57,10 @@ import {
   sweepStuckInProgressClaims,
 } from '../src/follow-up-stuck-claim-sweep.mjs';
 import { writeFileAtomic } from '../src/atomic-write.mjs';
+import {
+  HANDOFF_WAKE_DAEMONS,
+  sleepUntilTimerOrHandoffWake,
+} from '../src/handoff-wake.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -138,6 +143,15 @@ function reviewerTokenHandoffUnsafeRoles(summary = {}) {
 
 function shouldConsumeAfterReviewerTokenRefresh(summary = {}) {
   return reviewerTokenHandoffUnsafeRoles(summary).length === 0;
+}
+
+function resolveHandoffEnabled({ loadConfigImpl = loadConfigCached, env = process.env } = {}) {
+  try {
+    return loadConfigImpl({ env }).getHandoffConfig().enabled === true;
+  } catch (err) {
+    logError(`handoff config disabled for this tick: ${err?.message || err}`);
+    return false;
+  }
 }
 
 function describeUnsafeReviewerTokenHandoff(summary = {}) {
@@ -562,7 +576,19 @@ async function main() {
     process.once('SIGTERM', stopWatch);
     process.once('SIGINT', stopWatch);
     try {
-      await sleep(TICK_INTERVAL_MS, undefined, { signal: ac.signal });
+      if (resolveHandoffEnabled()) {
+        const sleepResult = await sleepUntilTimerOrHandoffWake(
+          ROOT,
+          HANDOFF_WAKE_DAEMONS.followUp,
+          TICK_INTERVAL_MS,
+          { enabled: true, signal: ac.signal },
+        );
+        if (sleepResult.reason === 'wake') {
+          logTick('tick', 'woken by handoff signal');
+        }
+      } else {
+        await sleep(TICK_INTERVAL_MS, undefined, { signal: ac.signal });
+      }
     } catch (err) {
       if (err?.name !== 'AbortError') throw err;
     } finally {
@@ -588,6 +614,7 @@ export {
   resolveTelemetryListenerStartTimeoutMs,
   normalizeMaintenanceSweepState,
   readMaintenanceSweepState,
+  resolveHandoffEnabled,
   reviewerTokenHandoffUnsafeRoles,
   runStoppedArchiveSweepIfDue,
   shouldConsumeAfterReviewerTokenRefresh,

@@ -550,6 +550,20 @@ function schemaV1() {
                 __min: 1,
                 __max: 1800,
               },
+              portforward_self_heal_max_cycles: {
+                __type: TYPE_INT,
+                __default: 3,
+                __min: 1,
+                __max: 100,
+              },
+              broker_standby_readyz_url: {
+                __type: TYPE_STRING,
+                __default: '',
+              },
+              broker_standby_container_name: {
+                __type: TYPE_STRING,
+                __default: 'litellm-oauth-broker-standby-1',
+              },
               critical_service_patterns: {
                 __type: TYPE_STRING,
                 __default:
@@ -2110,6 +2124,18 @@ export const ENV_ALIASES = {
   'roles.quota_probe.exhausted_unknown_tick_seconds': {
     canonical: 'AGENT_OS_ROLES_QUOTA_PROBE_EXHAUSTED_UNKNOWN_TICK_SECONDS',
     aliases: [],
+  },
+  'oauth_broker.watchdog.portforward_self_heal_max_cycles': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_PORTFORWARD_SELF_HEAL_MAX_CYCLES',
+    aliases: [['OAUTH_BROKER_WATCHDOG_PORTFORWARD_SELF_HEAL_MAX_CYCLES', identity]],
+  },
+  'oauth_broker.watchdog.broker_standby_readyz_url': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_STANDBY_READYZ_URL',
+    aliases: [['OAUTH_BROKER_WATCHDOG_STANDBY_READYZ_URL', identity]],
+  },
+  'oauth_broker.watchdog.broker_standby_container_name': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_STANDBY_CONTAINER_NAME',
+    aliases: [['OAUTH_BROKER_WATCHDOG_STANDBY_CONTAINER_NAME', identity]],
   },
   'policy.dedup.uncommitted_line_threshold': {
     canonical: 'AGENT_OS_POLICY_DEDUP_UNCOMMITTED_LINE_THRESHOLD',

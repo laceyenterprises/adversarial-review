@@ -2127,7 +2127,7 @@ export const ENV_ALIASES = {
   },
   'oauth_broker.watchdog.portforward_self_heal_max_cycles': {
     canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_PORTFORWARD_SELF_HEAL_MAX_CYCLES',
-    aliases: [['OAUTH_BROKER_WATCHDOG_PORTFORWARD_SELF_HEAL_MAX_CYCLES', identity]],
+    aliases: [['OAUTH_BROKER_WATCHDOG_PORTFORWARD_SELF_HEAL_MAX_CYCLES', Number]],
   },
   'oauth_broker.watchdog.broker_standby_readyz_url': {
     canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_STANDBY_READYZ_URL',

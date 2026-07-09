@@ -104,6 +104,14 @@ stale head may resume HAM only after the watcher proves the live head is a
 closer/HAM-authored commit, so a partial HAM failure can re-enter without
 opening a general stale-review-head re-hammer loop.
 
+When `handoff.final_to_hammer=true`, the watcher may invoke the posted-review
+HAM route inline immediately after recording the final exhausted `Request
+changes` rereview. This is a fast path, not the durable owner of recovery: if
+that inline handoff throws after the review row has been marked posted, the
+watcher must log the failure and leave the posted row available for the normal
+posted-review recovery pass to retry the same exhausted HAM route on a later
+poll.
+
 The merged-signal producer is outside this repository's write path: watcher
 lifecycle sync records owed
 `hq dag autowalk-on-merge --repo <repo> --pr <n>` work when it observes a PR

@@ -4190,7 +4190,7 @@ function shouldInlineFinalHammerAfterReview({
   if (handoffFinalToHammerEnabled !== true) return false;
   if (passKind !== 'rereview') return false;
   if (!result?.ok) return false;
-  if (normalizeReviewVerdict(extractReviewVerdict(result.reviewBody || '')) !== 'request-changes') return false;
+  if (normalizeReviewVerdict(extractReviewVerdict(result.reviewBody || '') || '') !== 'request-changes') return false;
   const completed = Number(completedRemediationRounds);
   const maxRounds = Number(maxRemediationRounds);
   return Number.isFinite(completed) &&
@@ -4233,19 +4233,27 @@ async function maybeInlineFinalHammerAfterReview({
       `final re-review posted Request changes after ` +
       `${completedRemediationRounds}/${maxRemediationRounds} remediation rounds`
   );
-  await handlePostedReviewRowImpl({
-    rootDir,
-    repoPath,
-    prNumber,
-    existing: postedRow,
-    subjectRef,
-    currentRevisionRef,
-    labelNames,
-    projectGateStatusSafe,
-    execFileImpl,
-    operatorSurface,
-    logger,
-  });
+  try {
+    await handlePostedReviewRowImpl({
+      rootDir,
+      repoPath,
+      prNumber,
+      existing: postedRow,
+      subjectRef,
+      currentRevisionRef,
+      labelNames,
+      projectGateStatusSafe,
+      execFileImpl,
+      operatorSurface,
+      logger,
+    });
+  } catch (err) {
+    logger?.error?.(
+      `[watcher] HOM-04 inline final hammer handoff failed for ${repoPath}#${prNumber}; ` +
+        `posted-review recovery will retry on a later poll: ${err?.message || err}`
+    );
+    return { handled: false, reason: 'inline-final-hammer-failed', error: err };
+  }
   return { handled: true, reason: 'inline-final-hammer' };
 }
 

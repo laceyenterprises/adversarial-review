@@ -1415,7 +1415,7 @@ function resolveHardReviewCeiling(maxRemediationRounds) {
   if (maxRemediationRounds == null || maxRemediationRounds === '') return 4;
   const numericRounds = Number(maxRemediationRounds);
   return Number.isFinite(numericRounds)
-    ? Math.max(1, Math.floor(numericRounds)) + 1
+    ? Math.max(0, Math.floor(numericRounds)) + 1
     : 4;
 }
 

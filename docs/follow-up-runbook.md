@@ -942,6 +942,14 @@ When the loop hits that cap, behavior is governed by the `MERGE_AGENT_FINAL_PASS
 
   If the posted review head is stale after the review cycle is already exhausted, the watcher may launch the HAM terminal-remediation lane against the current PR head instead of requesting a fresh review first. The dispatch context must preserve the posted review head as `reviewedSha` and pass the live head separately as `targetRemediationSha`. The AMA dispatch record under `data/follow-up-jobs/ama-closer-dispatches/` is keyed by the stable reviewed commit SHA; the exhausted-lane marker lives in `dispatchReason: "exhausted-final-hammer"`, not in any SHA field. A clean stale head is not re-hammered by default; it can resume HAM only when the watcher proves the live head is a closer/HAM-authored commit, which covers partial failures where HAM pushed a repair but exited before merging.
 
+  With `handoff.final_to_hammer=true`, the watcher also attempts this exhausted
+  HAM handoff inline in the same poll that posts the final `Request changes`
+  rereview. That inline attempt is opportunistic only: if the posted-review
+  handler or HAM dispatch path throws after the review row is already recorded,
+  the watcher logs `inline-final-hammer-failed`, leaves the posted row intact,
+  and relies on the normal posted-review recovery pass on a later poll to retry
+  the same HAM route.
+
   After HAM terminal remediation has been accepted and the daemon merge succeeds, the merge signal, reviewer-pass token recording, the succeeded AMA audit, and the terminal AMA closer lease are the critical state updates. The same-head daemon merge handoff must append the succeeded audit and mark the AMA closer lease `terminal` with `terminalOutcome="succeeded"` before emitting `worker.git.merge_signal`; if the signal cannot be emitted, the terminal lease breadcrumb lets the daemon rediscover the merged state instead of ignoring a failed HAM run. Transient merge-commit lookups are retried with bounded backoff before this terminalization point. Hammer worker teardown is still attempted with bounded transient retries, but a teardown failure is logged and returned as non-fatal cleanup debt instead of aborting those post-merge audit writes. The handoff must pass the canonical live-gate shape into the merge predicate: current head, required checks, canonical `mergeable`, `mergeStateStatus`, `prState`, and an explicit `merged` boolean so recovery can distinguish an already-merged head from an open clean head.
 
   For both merge-agent paths, the sub-worker only records two non-apply outcomes:

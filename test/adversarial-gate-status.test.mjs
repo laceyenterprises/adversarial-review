@@ -21,10 +21,13 @@ import {
 import {
   handlePostedReviewRow,
   maybeDispatchAmaClosureFor,
+  maybeInlineFinalHammerAfterReview,
   resolveMergeAgentCoexistenceForWatcher,
+  shouldInlineFinalHammerAfterReview,
 } from '../src/watcher.mjs';
 import { resetConfigCache } from '../src/config-loader.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
+import { normalizeReviewVerdict as normalizeReviewVerdictCompat } from '../src/review-verdict.mjs';
 
 // Pin AMA enabled/disabled for a test body regardless of the host's live
 // config.local.yaml (which may set roles.adversarial.merge_authority.enabled).
@@ -1566,4 +1569,177 @@ test('resolveMergeAgentCoexistenceForWatcher preserves await-operator with named
 
   assert.equal(decision.outcome, 'await-operator');
   assert.equal(decision.amaClosureResult.namedReason, 'not-eligible:blocking-findings-present');
+});
+
+test('HOM-04 inline final hammer predicate is flag-gated and requires exhausted Request-changes rereview', () => {
+  const requestChangesResult = {
+    ok: true,
+    reviewBody: '## Verdict\n\nRequest changes\n\n## Blocking issues\n\n- Still blocked\n',
+  };
+
+  assert.equal(shouldInlineFinalHammerAfterReview({
+    handoffFinalToHammerEnabled: false,
+    passKind: 'rereview',
+    result: requestChangesResult,
+    completedRemediationRounds: 2,
+    maxRemediationRounds: 2,
+  }), false);
+  assert.equal(shouldInlineFinalHammerAfterReview({
+    handoffFinalToHammerEnabled: true,
+    passKind: 'first-pass',
+    result: requestChangesResult,
+    completedRemediationRounds: 2,
+    maxRemediationRounds: 2,
+  }), false);
+  assert.equal(shouldInlineFinalHammerAfterReview({
+    handoffFinalToHammerEnabled: true,
+    passKind: 'rereview',
+    result: { ok: true, reviewBody: '## Verdict\n\nComment only\n' },
+    completedRemediationRounds: 2,
+    maxRemediationRounds: 2,
+  }), false);
+  assert.equal(shouldInlineFinalHammerAfterReview({
+    handoffFinalToHammerEnabled: true,
+    passKind: 'rereview',
+    result: requestChangesResult,
+    completedRemediationRounds: 1,
+    maxRemediationRounds: 2,
+  }), false);
+  assert.equal(shouldInlineFinalHammerAfterReview({
+    handoffFinalToHammerEnabled: true,
+    passKind: 'rereview',
+    result: requestChangesResult,
+    completedRemediationRounds: 2,
+    maxRemediationRounds: 2,
+  }), true);
+});
+
+test('HOM-04 inline final hammer predicate safely ignores reviews without a verdict', () => {
+  assert.equal(shouldInlineFinalHammerAfterReview({
+    handoffFinalToHammerEnabled: true,
+    passKind: 'rereview',
+    result: { ok: true, reviewBody: '## Summary\n\nNo verdict section here.\n' },
+    completedRemediationRounds: 2,
+    maxRemediationRounds: 2,
+  }), false);
+});
+
+test('watcher review-verdict compatibility module exports normalizeReviewVerdict', () => {
+  assert.equal(typeof normalizeReviewVerdictCompat, 'function');
+  assert.equal(normalizeReviewVerdictCompat('Request changes'), 'request-changes');
+});
+
+test('HOM-04 final_to_hammer=false leaves same-poll final Request-changes path unchanged', async () => {
+  let called = false;
+  const result = await maybeInlineFinalHammerAfterReview({
+    rootDir: '/tmp/hom-04-off',
+    repoPath: 'acme/repo',
+    prNumber: 77,
+    result: {
+      ok: true,
+      reviewBody: '## Verdict\n\nRequest changes\n\n## Blocking issues\n\n- Still blocked\n',
+    },
+    passKind: 'rereview',
+    completedRemediationRounds: 2,
+    maxRemediationRounds: 2,
+    handoffFinalToHammerEnabled: false,
+    getReviewRowImpl: () => {
+      throw new Error('must not read posted row when flag is off');
+    },
+    handlePostedReviewRowImpl: async () => {
+      called = true;
+    },
+  });
+
+  assert.equal(result.handled, false);
+  assert.equal(called, false);
+});
+
+test('HOM-04 exhausted final rereview calls posted-review AMA route inline within 5s', async () => {
+  const started = Date.now();
+  const calls = [];
+  const result = await maybeInlineFinalHammerAfterReview({
+    rootDir: '/tmp/hom-04-on',
+    repoPath: 'acme/repo',
+    prNumber: 78,
+    result: {
+      ok: true,
+      reviewBody: '## Verdict\n\nRequest changes\n\n## Blocking issues\n\n- Still blocked\n',
+    },
+    passKind: 'rereview',
+    completedRemediationRounds: 2,
+    maxRemediationRounds: 2,
+    subjectRef: {
+      domainId: 'code-pr',
+      subjectExternalId: 'acme/repo#78',
+      revisionRef: 'reviewed-head-78',
+    },
+    currentRevisionRef: 'reviewed-head-78',
+    labelNames: ['risk:low'],
+    handoffFinalToHammerEnabled: true,
+    getReviewRowImpl: (repo, prNumber) => ({
+      repo,
+      pr_number: prNumber,
+      review_status: 'posted',
+      reviewer_head_sha: 'reviewed-head-78',
+      review_body: '## Verdict\n\nRequest changes\n\n## Blocking issues\n\n- Still blocked\n',
+    }),
+    projectGateStatusSafe: async () => {},
+    handlePostedReviewRowImpl: async (payload) => {
+      calls.push(payload);
+      return { dispatched: true, dispatchReason: 'exhausted-final-hammer' };
+    },
+    logger: { log() {}, warn() {}, error() {} },
+  });
+  const elapsedMs = Date.now() - started;
+
+  assert.equal(result.handled, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].repoPath, 'acme/repo');
+  assert.equal(calls[0].existing.reviewer_head_sha, 'reviewed-head-78');
+  assert.ok(elapsedMs < 5000, `inline dispatch took ${elapsedMs}ms`);
+});
+
+test('HOM-04 inline final hammer handoff failure is retryable on later posted-review polls', async () => {
+  const errors = [];
+  const result = await maybeInlineFinalHammerAfterReview({
+    rootDir: '/tmp/hom-04-retryable',
+    repoPath: 'acme/repo',
+    prNumber: 79,
+    result: {
+      ok: true,
+      reviewBody: '## Verdict\n\nRequest changes\n\n## Blocking issues\n\n- Still blocked\n',
+    },
+    passKind: 'rereview',
+    completedRemediationRounds: 2,
+    maxRemediationRounds: 2,
+    subjectRef: {
+      domainId: 'code-pr',
+      subjectExternalId: 'acme/repo#79',
+      revisionRef: 'reviewed-head-79',
+    },
+    currentRevisionRef: 'reviewed-head-79',
+    handoffFinalToHammerEnabled: true,
+    getReviewRowImpl: (repo, prNumber) => ({
+      repo,
+      pr_number: prNumber,
+      review_status: 'posted',
+      reviewer_head_sha: 'reviewed-head-79',
+      review_body: '## Verdict\n\nRequest changes\n\n## Blocking issues\n\n- Still blocked\n',
+    }),
+    handlePostedReviewRowImpl: async () => {
+      throw new Error('transient gh failure');
+    },
+    logger: {
+      log() {},
+      warn() {},
+      error(message) {
+        errors.push(String(message));
+      },
+    },
+  });
+
+  assert.equal(result.handled, false);
+  assert.equal(result.reason, 'inline-final-hammer-failed');
+  assert.match(errors.join('\n'), /posted-review recovery will retry on a later poll/);
 });

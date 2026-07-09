@@ -4639,6 +4639,37 @@ test('resume_context_envelope mirrors default and env override', () => {
   }
 });
 
+test('handoff.final_to_hammer defaults off and has canonical plus legacy env aliases', () => {
+  const tmp = freshTmp();
+  try {
+    let cfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
+    assert.equal(cfg.get('handoff.final_to_hammer'), false);
+
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      handoff:
+        final_to_hammer: true
+    `);
+    cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('handoff.final_to_hammer'), true);
+
+    cfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_HANDOFF_FINAL_TO_HAMMER: 'false' },
+    });
+    assert.equal(cfg.get('handoff.final_to_hammer'), false);
+
+    cfg = loadConfig({
+      topPath: join(tmp, 'missing.yaml'),
+      env: { ADVERSARIAL_REVIEW_HANDOFF_FINAL_TO_HAMMER: 'true' },
+    });
+    assert.equal(cfg.get('handoff.final_to_hammer'), true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // -------- APC-01: apps.<id> keyed-map surface --------------------------------
 
 test('apps.<id> YAML entry resolves with full schema defaults', () => {

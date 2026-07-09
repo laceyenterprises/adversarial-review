@@ -9,6 +9,7 @@ import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import {
   autoReclaimFailedOrphans,
   failedOrphanAutoReclaimDecision,
+  probeReviewerProcessSession,
 } from '../src/watcher.mjs';
 
 const REPO = 'laceyenterprises/adversarial-review';
@@ -19,6 +20,42 @@ function setupDb() {
   mkdirSync(path.join(rootDir, 'data'), { recursive: true });
   const db = new Database(path.join(rootDir, 'data', 'reviews.db'));
   ensureReviewStateSchema(db);
+  return { rootDir, db };
+}
+
+function setupLegacyNullableCounterDb() {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'failed-orphan-reclaim-legacy-'));
+  mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+  const db = new Database(path.join(rootDir, 'data', 'reviews.db'));
+  db.prepare(
+    `CREATE TABLE reviewed_prs (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       repo TEXT NOT NULL,
+       pr_number INTEGER NOT NULL,
+       reviewed_at TEXT,
+       reviewer TEXT,
+       pr_state TEXT,
+       review_status TEXT,
+       review_attempts INTEGER,
+       last_attempted_at TEXT,
+       posted_at TEXT,
+       failed_at TEXT,
+       failure_message TEXT,
+       rereview_requested_at TEXT,
+       rereview_reason TEXT,
+       reviewer_session_uuid TEXT,
+       reviewer_pgid INTEGER,
+       reviewer_started_at TEXT,
+       reviewer_head_sha TEXT,
+       reviewer_timeout_ms INTEGER,
+       reviewer_lease_expires_at TEXT,
+       quota_reset_at_utc TEXT,
+       review_population_retry_attempts INTEGER,
+       review_population_retry_last_at TEXT,
+       review_population_retry_head_sha TEXT,
+       infra_auto_recover_attempts INTEGER
+     )`
+  ).run();
   return { rootDir, db };
 }
 
@@ -68,7 +105,7 @@ function statements(db) {
          FROM reviewed_prs
         WHERE pr_state = 'open'
           AND review_status = 'failed-orphan'
-          AND infra_auto_recover_attempts < ?
+          AND COALESCE(infra_auto_recover_attempts, 0) < ?
         ORDER BY failed_at ASC, last_attempted_at ASC, id ASC
         LIMIT ?`
     ),
@@ -92,12 +129,12 @@ function statements(db) {
               review_population_retry_attempts = 0,
               review_population_retry_last_at = NULL,
               review_population_retry_head_sha = NULL,
-              infra_auto_recover_attempts = infra_auto_recover_attempts + 1
+              infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1
         WHERE repo = ?
           AND pr_number = ?
           AND pr_state = 'open'
           AND review_status = 'failed-orphan'
-          AND infra_auto_recover_attempts < ?
+          AND COALESCE(infra_auto_recover_attempts, 0) < ?
           AND COALESCE(reviewer_session_uuid, '') = COALESCE(?, '')
           AND COALESCE(reviewer_pgid, '') = COALESCE(?, '')
           AND COALESCE(reviewer_lease_expires_at, '') = COALESCE(?, '')`
@@ -132,9 +169,9 @@ test('failed-orphan with expired lease and no live reviewer is auto-reset to pen
   }
 });
 
-test('failed-orphan is not reclaimed when lease is active or reviewer process is live', () => {
+test('failed-orphan is not reclaimed when lease is active or reviewer process is live', async () => {
   assert.equal(
-    failedOrphanAutoReclaimDecision({
+    (await failedOrphanAutoReclaimDecision({
       pr_state: 'open',
       review_status: 'failed-orphan',
       infra_auto_recover_attempts: 0,
@@ -143,12 +180,12 @@ test('failed-orphan is not reclaimed when lease is active or reviewer process is
       reviewer_started_at: '2026-07-09T21:45:00.000Z',
     }, NOW, {
       probeSessionImpl: () => ({ alive: false, matched: false }),
-    }).reason,
+    })).reason,
     'lease-active'
   );
 
   assert.equal(
-    failedOrphanAutoReclaimDecision({
+    (await failedOrphanAutoReclaimDecision({
       pr_state: 'open',
       review_status: 'failed-orphan',
       infra_auto_recover_attempts: 0,
@@ -157,9 +194,49 @@ test('failed-orphan is not reclaimed when lease is active or reviewer process is
       reviewer_session_uuid: 'session-orphan',
     }, NOW, {
       probeSessionImpl: () => ({ alive: true, matched: true }),
-    }).reason,
+    })).reason,
     'reviewer-live'
   );
+});
+
+test('failed-orphan auto-reclaim handles legacy NULL infra counter rows', async () => {
+  const { rootDir, db } = setupLegacyNullableCounterDb();
+  try {
+    insertRow(db, { infraAttempts: null });
+
+    const result = await autoReclaimFailedOrphans({
+      now: NOW,
+      statements: statements(db),
+      probeSessionImpl: () => ({ alive: false, matched: false }),
+      log: { log() {}, warn() {} },
+    });
+
+    assert.deepEqual(result, { reclaimed: 1, skipped: 0 });
+    const row = db.prepare('SELECT review_status, infra_auto_recover_attempts FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(REPO, 548);
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.infra_auto_recover_attempts, 1);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reviewer session probe uses non-blocking ps with unlimited command width', async () => {
+  const calls = [];
+  const result = await probeReviewerProcessSession({
+    pgid: 9001,
+    sessionUuid: 'session-width-test',
+    probeGroupAliveImpl: () => true,
+    execFileImpl: async (bin, argv, options) => {
+      calls.push({ bin, argv, options });
+      return { stdout: 'prefix session-width-test suffix' };
+    },
+  });
+
+  assert.deepEqual(result, { alive: true, matched: true });
+  assert.equal(calls[0].bin, 'ps');
+  assert.deepEqual(calls[0].argv, ['-ww', '-p', '9001', '-o', 'command=']);
+  assert.equal(calls[0].options.timeout, 2_000);
 });
 
 test('failed-orphan auto-reclaim is bounded by infra counter', async () => {

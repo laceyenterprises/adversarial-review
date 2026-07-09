@@ -62,11 +62,45 @@ function setupFixture() {
   return { rootDir, db };
 }
 
+function setupLegacyNullableCounterFixture() {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-cascade-legacy-null-'));
+  mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+  const db = new Database(path.join(rootDir, 'data', 'reviews.db'));
+  db.prepare(
+    `CREATE TABLE reviewed_prs (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       repo TEXT NOT NULL,
+       pr_number INTEGER NOT NULL,
+       reviewed_at TEXT,
+       reviewer TEXT,
+       pr_state TEXT,
+       review_status TEXT,
+       review_attempts INTEGER,
+       failed_at TEXT,
+       failure_message TEXT,
+       infra_auto_recover_attempts INTEGER
+     )`
+  ).run();
+  db.prepare(
+    'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts, infra_auto_recover_attempts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(
+    'laceyenterprises/adversarial-review',
+    195,
+    '2026-05-04T07:00:00.000Z',
+    'claude',
+    'open',
+    'reviewing',
+    0,
+    null
+  );
+  return { rootDir, db };
+}
+
 const stmtMarkCascadeFailed = (db) => db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ? WHERE repo = ? AND pr_number = ?"
 );
 const stmtMarkPendingUpstream = (db) => db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, infra_auto_recover_attempts = infra_auto_recover_attempts + 1 WHERE repo = ? AND pr_number = ?"
+  "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1 WHERE repo = ? AND pr_number = ?"
 );
 const stmtMarkBugFailed = (db) => db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
@@ -162,6 +196,88 @@ test('routing-tier probe failures settle through cascade backoff without burning
       prNumber: 195,
     });
     assert.equal(cascadeState?.consecutiveTransientFailures, 1);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('transient settlement requires getReviewRow so the infra cap cannot fail open', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    assert.throws(
+      () => settleReviewerAttempt({
+        rootDir,
+        repoPath: 'laceyenterprises/adversarial-review',
+        prNumber: 195,
+        result: {
+          ok: false,
+          failureClass: 'cascade',
+          error: 'Routing-tier readiness probe failed',
+        },
+        failureAt: '2026-05-04T07:10:00.000Z',
+        maxRemediationRounds: 2,
+        statements: {
+          markPosted: db.prepare(
+            "UPDATE reviewed_prs SET review_status = 'posted', reviewed_at = ? WHERE repo = ? AND pr_number = ?"
+          ),
+          markFailed: stmtMarkBugFailed(db),
+          releaseReviewLease: stmtMarkCascadeFailed(db),
+          markCascadeFailed: stmtMarkCascadeFailed(db),
+          markPendingUpstream: stmtMarkPendingUpstream(db),
+        },
+      }),
+      /getReviewRow/
+    );
+
+    const row = db.prepare(
+      'SELECT review_status, infra_auto_recover_attempts FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/adversarial-review', 195);
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.infra_auto_recover_attempts, 0);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('transient settlement increments legacy NULL infra counters', () => {
+  const { rootDir, db } = setupLegacyNullableCounterFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      result: {
+        ok: false,
+        failureClass: 'cascade',
+        error: 'Routing-tier readiness probe failed',
+      },
+      failureAt: '2026-05-04T07:10:00.000Z',
+      maxRemediationRounds: 2,
+      statements: {
+        markPosted: db.prepare(
+          "UPDATE reviewed_prs SET review_status = 'posted', reviewed_at = ? WHERE repo = ? AND pr_number = ?"
+        ),
+        markFailed: stmtMarkBugFailed(db),
+        releaseReviewLease: stmtMarkCascadeFailed(db),
+        markCascadeFailed: stmtMarkCascadeFailed(db),
+        markPendingUpstream: stmtMarkPendingUpstream(db),
+        getReviewRow: db.prepare(
+          'SELECT review_status, review_attempts, failed_at, failure_message, infra_auto_recover_attempts FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+        ),
+      },
+      log: { warn() {} },
+    });
+
+    const row = db.prepare(
+      'SELECT review_status, infra_auto_recover_attempts FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber);
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.equal(row.infra_auto_recover_attempts, 1);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

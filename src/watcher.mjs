@@ -4,7 +4,7 @@
  * Also tracks PR lifecycle (merged/closed) and syncs status to Linear automatically.
  */
 
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { homedir, hostname } from 'node:os';
 import { promisify } from 'node:util';
@@ -2573,11 +2573,11 @@ const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
          failed_at = NULL,
          failure_message = NULL,
          quota_reset_at_utc = NULL,
-         infra_auto_recover_attempts = infra_auto_recover_attempts + 1
+         infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1
    WHERE repo = ?
      AND pr_number = ?
      AND review_status = 'failed'
-     AND infra_auto_recover_attempts < ?
+     AND COALESCE(infra_auto_recover_attempts, 0) < ?
      AND (
        (? = 'cascade' AND (
          lower(COALESCE(failure_message, '')) LIKE '[cascade]%' OR
@@ -2807,7 +2807,7 @@ const stmtMarkCascadeFailed = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
 );
 const stmtMarkPendingUpstream = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = infra_auto_recover_attempts + 1 WHERE repo = ? AND pr_number = ?"
+  "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1 WHERE repo = ? AND pr_number = ?"
 );
 const stmtMarkReviewCycleCapPaused = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
@@ -2820,7 +2820,7 @@ const stmtListFailedOrphanAutoReclaimCandidates = db.prepare(
      FROM reviewed_prs
     WHERE pr_state = 'open'
       AND review_status = 'failed-orphan'
-      AND infra_auto_recover_attempts < ?
+      AND COALESCE(infra_auto_recover_attempts, 0) < ?
     ORDER BY failed_at ASC, last_attempted_at ASC, id ASC
     LIMIT ?`
 );
@@ -2844,12 +2844,12 @@ const stmtAutoReclaimFailedOrphan = db.prepare(
           review_population_retry_attempts = 0,
           review_population_retry_last_at = NULL,
           review_population_retry_head_sha = NULL,
-          infra_auto_recover_attempts = infra_auto_recover_attempts + 1
+          infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1
     WHERE repo = ?
       AND pr_number = ?
       AND pr_state = 'open'
       AND review_status = 'failed-orphan'
-      AND infra_auto_recover_attempts < ?
+      AND COALESCE(infra_auto_recover_attempts, 0) < ?
       AND COALESCE(reviewer_session_uuid, '') = COALESCE(?, '')
       AND COALESCE(reviewer_pgid, '') = COALESCE(?, '')
       AND COALESCE(reviewer_lease_expires_at, '') = COALESCE(?, '')`
@@ -2979,8 +2979,13 @@ function probeReviewerProcessGroupAlive(pgid) {
   }
 }
 
-function probeReviewerProcessSession({ pgid, sessionUuid } = {}) {
-  const alive = probeReviewerProcessGroupAlive(pgid);
+async function probeReviewerProcessSession({
+  pgid,
+  sessionUuid,
+  execFileImpl = execFileAsync,
+  probeGroupAliveImpl = probeReviewerProcessGroupAlive,
+} = {}) {
+  const alive = probeGroupAliveImpl(pgid);
   if (!alive) return { alive: false, matched: false };
 
   const numericPgid = Number(pgid);
@@ -2989,9 +2994,8 @@ function probeReviewerProcessSession({ pgid, sessionUuid } = {}) {
   }
 
   try {
-    const stdout = execFileSync('ps', ['-p', String(numericPgid), '-o', 'command='], {
+    const { stdout } = await execFileImpl('ps', ['-ww', '-p', String(numericPgid), '-o', 'command='], {
       encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 2_000,
     });
     return { alive: true, matched: stdout.includes(String(sessionUuid)) };
@@ -3000,7 +3004,7 @@ function probeReviewerProcessSession({ pgid, sessionUuid } = {}) {
   }
 }
 
-function failedOrphanAutoReclaimDecision(row, now = new Date(), {
+async function failedOrphanAutoReclaimDecision(row, now = new Date(), {
   cap = INFRA_AUTO_RECOVER_CAP,
   probeSessionImpl = probeReviewerProcessSession,
   reviewerTimeoutMs = resolveReviewerTimeoutMs(),
@@ -3019,7 +3023,7 @@ function failedOrphanAutoReclaimDecision(row, now = new Date(), {
     return { reclaim: false, reason: 'lease-active' };
   }
 
-  const sessionProbe = probeSessionImpl({
+  const sessionProbe = await probeSessionImpl({
     pgid: row.reviewer_pgid,
     sessionUuid: row.reviewer_session_uuid,
   });
@@ -3059,7 +3063,7 @@ async function autoReclaimFailedOrphans({
   let skipped = 0;
 
   for (const row of rows) {
-    const decision = failedOrphanAutoReclaimDecision(row, now, {
+    const decision = await failedOrphanAutoReclaimDecision(row, now, {
       cap,
       probeSessionImpl,
     });
@@ -3600,9 +3604,10 @@ function settleReviewerAttempt({
   const failureMessage = String(result.error || '').trim() || defaultFailureMessages[failureClass] || defaultFailureMessages.unknown;
   const classifiedMessage = `[${failureClass}] ${failureMessage}`;
   if (transientFailureClasses.has(failureClass)) {
-    const currentRow = typeof statements.getReviewRow?.get === 'function'
-      ? statements.getReviewRow.get(repoPath, prNumber)
-      : null;
+    if (typeof statements.getReviewRow?.get !== 'function') {
+      throw new Error('settleReviewerAttempt requires statements.getReviewRow.get for transient infra cap enforcement');
+    }
+    const currentRow = statements.getReviewRow.get(repoPath, prNumber);
     const infraRecoverAttempts = Number(currentRow?.infra_auto_recover_attempts || 0);
     const cascadeState = recordCascadeFailure(rootDir, {
       repo: repoPath,
@@ -8993,6 +8998,7 @@ export {
   reconcileOrphanedReviewing,
   autoReclaimFailedOrphans,
   failedOrphanAutoReclaimDecision,
+  probeReviewerProcessSession,
   recoverFastMergeVetoes,
   runQueuedReviewAdoptionPhase,
   resolvePendingDraftRespawnAgeSeconds,

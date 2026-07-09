@@ -52,11 +52,11 @@ const INFRA_RECOVERY_CLAIM_SQL = `UPDATE reviewed_prs
          failed_at = NULL,
          failure_message = NULL,
          quota_reset_at_utc = NULL,
-         infra_auto_recover_attempts = infra_auto_recover_attempts + 1
+         infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1
    WHERE repo = ?
      AND pr_number = ?
      AND review_status = 'failed'
-     AND infra_auto_recover_attempts < ?
+     AND COALESCE(infra_auto_recover_attempts, 0) < ?
      AND (
        (? = 'cascade' AND (
          lower(COALESCE(failure_message, '')) LIKE '[cascade]%' OR

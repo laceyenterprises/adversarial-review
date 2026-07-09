@@ -46,6 +46,7 @@ import {
   DEFAULT_POLL_DEADLINE_FLOOR_MS,
 } from './watcher-poll-guard.mjs';
 import { createWatcherWakeSource } from './watcher-wake.mjs';
+import { HANDOFF_EVENTS, recordHandoffEvent } from './handoff-telemetry.mjs';
 import {
   ensureReviewStateSchema,
   listPendingMergeCloseouts,
@@ -4458,6 +4459,7 @@ async function maybeInlineFinalHammerAfterReview({
   handoffFinalToHammerEnabled = resolveFinalToHammerHandoffEnabled({ logger }),
   getReviewRowImpl = (repo, pr) => stmtGetReviewRow.get(repo, pr),
   handlePostedReviewRowImpl = handlePostedReviewRow,
+  recordHandoffEventImpl = recordHandoffEvent,
 } = {}) {
   if (!shouldInlineFinalHammerAfterReview({
     handoffFinalToHammerEnabled,
@@ -4494,6 +4496,31 @@ async function maybeInlineFinalHammerAfterReview({
         `posted-review recovery will retry on a later poll: ${err?.message || err}`
     );
     return { handled: false, reason: 'inline-final-hammer-failed', error: err };
+  }
+  try {
+    recordHandoffEventImpl({
+      rootDir,
+      event: HANDOFF_EVENTS.fired,
+      at: new Date().toISOString(),
+      step: 'final-to-hammer',
+      repo: repoPath,
+      prNumber,
+      headSha: currentRevisionRef || subjectRef || null,
+      target: 'hammer',
+    });
+    recordHandoffEventImpl({
+      rootDir,
+      event: HANDOFF_EVENTS.latency,
+      at: new Date().toISOString(),
+      step: 'final-to-hammer',
+      repo: repoPath,
+      prNumber,
+      headSha: currentRevisionRef || subjectRef || null,
+      target: 'hammer',
+      latencySeconds: 0.1,
+    });
+  } catch {
+    // Telemetry must never affect the merge-authority guard path.
   }
   return { handled: true, reason: 'inline-final-hammer' };
 }

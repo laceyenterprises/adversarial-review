@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -15,6 +16,7 @@ import {
 import { join } from 'node:path';
 
 import { normalizeHandoffMaxPerPrHead } from './handoff-rate-cap.mjs';
+import { HANDOFF_EVENTS, recordHandoffEvent, recordHandoffWakeEvents } from './handoff-telemetry.mjs';
 
 export const HANDOFF_WAKE_DIR_MODE = 0o775;
 export const HANDOFF_WAKE_MARKER_MODE = 0o664;
@@ -328,6 +330,8 @@ export async function sleepUntilTimerOrHandoffWake(
     watchImpl = watch,
     nowMs = () => Date.now(),
     shouldAcceptWake = null,
+    recordHandoffWakeEventsImpl = recordHandoffWakeEvents,
+    recordHandoffEventImpl = recordHandoffEvent,
   } = {},
 ) {
   if (!enabled) {
@@ -355,6 +359,29 @@ export async function sleepUntilTimerOrHandoffWake(
     const startMs = nowMs();
     let settled = false;
     let watcher = null;
+    const recordFallbackTickCatch = () => {
+      if (!dir) return;
+      try {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          if (!entry.isFile() || !isWakeMarkerName(entry.name, daemon)) continue;
+          const path = join(dir, entry.name);
+          const payload = readWakeMarkerPayload(path) || {};
+          recordHandoffEventImpl({
+            rootDir,
+            event: HANDOFF_EVENTS.fallbackTickCatch,
+            at: new Date(nowMs()).toISOString(),
+            step: payload.reason || null,
+            repo: payload.repo || null,
+            prNumber: payload.pr_number ?? payload.prNumber ?? null,
+            headSha: payload.head_sha ?? payload.headSha ?? null,
+            target: daemon,
+            reason: 'timer',
+          });
+        }
+      } catch {
+        // Telemetry is best-effort; the timer remains the correctness path.
+      }
+    };
     const finish = (result) => {
       if (settled) return;
       settled = true;
@@ -364,6 +391,20 @@ export async function sleepUntilTimerOrHandoffWake(
         watcher?.close?.();
       } catch {
         // Closing a native watcher is best-effort during process shutdown.
+      }
+      if (result.reason === 'wake') {
+        try {
+          recordHandoffWakeEventsImpl({
+            rootDir,
+            payload: result.payload || {},
+            target: daemon,
+            wokeAt: new Date(nowMs()).toISOString(),
+          });
+        } catch {
+          // Handoff telemetry must never break the wake path.
+        }
+      } else if (result.reason === 'timer') {
+        recordFallbackTickCatch();
       }
       if (result.reason === 'wake' && dir) {
         cleanupDaemonMarkers(dir, daemon, { olderThanMs: Infinity });

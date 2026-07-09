@@ -801,6 +801,33 @@ ham_append_terminal_audit() {
   return "$ham_audit_append_exit"
 }
 
+ham_emit_git_merge_signal() {
+  [ -n "${HAM_MERGE_COMMIT:-}" ] || return 0
+  HAM_AGENT_OS_ROOT="${AGENT_OS_ROOT:-/Users/airlock/agent-os}"
+  [ -d "$HAM_AGENT_OS_ROOT/modules/worker-pool/lib/python" ] || return 0
+  [ -d "$HAM_AGENT_OS_ROOT/platform/session-ledger/src" ] || return 0
+  PYTHONPATH="$HAM_AGENT_OS_ROOT/modules/worker-pool/lib/python:$HAM_AGENT_OS_ROOT/platform/session-ledger/src${PYTHONPATH:+:$PYTHONPATH}" \
+    /usr/bin/perl -e 'alarm shift; exec @ARGV' 15 python3 - "<<HQ_ROOT>>" "<<PR_NUMBER>>" "$HAM_MERGE_COMMIT" "<<MERGE_METHOD>>" <<'PYEOF' >/dev/null 2>&1 || true
+import sys
+
+from cwp_dispatch.git_signal import EVENT_MERGE_SIGNAL, emit_git_event_best_effort, workspace_context
+
+hq_root, pr_number, merge_commit_sha, mode = sys.argv[1:]
+ctx = workspace_context()
+emit_git_event_best_effort(
+    hq_root=hq_root,
+    event_type=EVENT_MERGE_SIGNAL,
+    worker_run_id=ctx.worker_run_id,
+    launch_request_id=ctx.launch_request_id,
+    ticket_ref=ctx.ticket_ref,
+    pr_number=int(pr_number),
+    merge_commit_sha=merge_commit_sha,
+    merged_by=ctx.worker_class or "hammer",
+    mode=mode,
+)
+PYEOF
+}
+
 ham_refresh_github_gate_once() {
   POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" node --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchPullRequestRollup } from '<<ROOT_DIR>>/src/github-api.mjs';
@@ -1207,6 +1234,7 @@ if [ "$HAM_POST_STATE" = "MERGED" ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATION_S
     exit "$HAM_MERGED_AUDIT_APPEND_EXIT"
   fi
   ham_release_merge_lease
+  ham_emit_git_merge_signal
 else
   echo "HAM hard-blocker: gh pr merge did not confirm merged validated head" >&2
   cat "$HAM_POST_MERGE_JSON" >&2

@@ -85,6 +85,7 @@ import { deliverAlert } from '../alert-delivery.mjs';
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SUBMODULE_ROOT = resolve(__dirname, '..', '..');
+const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
 
 const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
@@ -716,6 +717,93 @@ async function runGhPrMergeWithTransientRetry({
     }
   }
   return lastFailure || { exitCode: 1, stdout: '', stderr: 'gh pr merge did not run' };
+}
+
+async function fetchMergeCommitShaBestEffort({
+  execFileImpl,
+  repo,
+  prNumber,
+  logger = console,
+}) {
+  try {
+    const { stdout } = await execFileImpl('gh', [
+      'pr',
+      'view',
+      String(prNumber),
+      '--repo',
+      repo,
+      '--json',
+      'mergeCommit',
+    ], {
+      maxBuffer: 1024 * 1024,
+      timeout: 15_000,
+    });
+    const parsed = JSON.parse(String(stdout || '{}'));
+    const oid = parsed?.mergeCommit?.oid;
+    return oid ? String(oid) : null;
+  } catch (err) {
+    logger?.warn?.(JSON.stringify({
+      event: 'ama_closer.merge_commit_lookup_nonfatal',
+      repo,
+      prNumber,
+      error: String(err?.message || err),
+    }));
+    return null;
+  }
+}
+
+async function emitWorkerGitMergeSignalBestEffort({
+  execFileImpl,
+  hqRoot,
+  repo,
+  prNumber,
+  launchRequestId = null,
+  ticketRef = null,
+  mergeCommitSha,
+  mergedBy,
+  mode,
+  logger = console,
+}) {
+  if (!hqRoot || !prNumber || !mergeCommitSha) return;
+  const pythonPath = [
+    join(AGENT_OS_ROOT, 'modules', 'worker-pool', 'lib', 'python'),
+    join(AGENT_OS_ROOT, 'platform', 'session-ledger', 'src'),
+    process.env.PYTHONPATH || '',
+  ].filter(Boolean).join(':');
+  const args = [
+    '-m',
+    'cwp_dispatch.git_signal',
+    'emit',
+    '--root',
+    hqRoot,
+    '--event-type',
+    'worker.git.merge_signal',
+    '--pr-number',
+    String(prNumber),
+    '--merge-commit-sha',
+    mergeCommitSha,
+    '--merged-by',
+    mergedBy || 'ama-closer',
+    '--mode',
+    mode || 'unknown',
+  ];
+  if (launchRequestId) args.push('--launch-request-id', String(launchRequestId));
+  if (ticketRef) args.push('--ticket-ref', String(ticketRef));
+  try {
+    await execFileImpl('python3', args, {
+      env: { ...process.env, PYTHONPATH: pythonPath },
+      maxBuffer: 1024 * 1024,
+      timeout: 15_000,
+    });
+  } catch (err) {
+    logger?.warn?.(JSON.stringify({
+      event: 'ama_closer.git_merge_signal_emit_nonfatal',
+      repo,
+      prNumber,
+      launchRequestId,
+      error: String(err?.message || err),
+    }));
+  }
 }
 
 /**
@@ -1691,6 +1779,8 @@ export const __testables__ = Object.freeze({
   isTerminalBranchHolderWorkerRunStatus,
   defaultAmaLivePrProbe,
   normalizeAmaLivePrProbeResult,
+  fetchMergeCommitShaBestEffort,
+  emitWorkerGitMergeSignalBestEffort,
 });
 
 function sleep(ms) {
@@ -2677,6 +2767,23 @@ export async function maybeDispatchAmaCloser({
           sameHeadHamMergeReason = sameHeadHamMerge?.reason || null;
         }
         if (sameHeadHamMerge?.disposition === DAEMON_MERGE_DISPOSITION.MERGED) {
+          const mergeCommitSha = sameHeadHamMerge.mergeCommitSha || await fetchMergeCommitShaBestEffort({
+            execFileImpl,
+            repo,
+            prNumber,
+            logger,
+          });
+          await emitWorkerGitMergeSignalBestEffort({
+            execFileImpl,
+            hqRoot,
+            repo,
+            prNumber,
+            launchRequestId: existingRecord?.launchRequestId || null,
+            mergeCommitSha,
+            mergedBy: existingRecord?.workerClass || workerClass || 'hammer',
+            mode: mergeMethod,
+            logger,
+          });
           finalizeAmaCloserLeaseBestEffort({
             rootDir,
             leaseIdentity: existingRecordLeaseIdentity,

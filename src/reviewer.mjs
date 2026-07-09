@@ -72,12 +72,17 @@ import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { extractReviewVerdict, looksLikeRuntimeJunk, normalizeEffectiveReviewVerdict, normalizeReviewVerdict, normalizeWhitespace, sanitizeCodexReviewPayload, sanitizeReviewPayloadBestEffort } from './kernel/verdict.mjs';
 import { loadStagePrompt, pickReviewerStage } from './kernel/prompt-stage.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
+import { getConfig } from './config-loader.mjs';
 import { parseCodexJsonTokenUsage } from './adapters/reviewer-runtime/cli-direct/index.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import {
   fetchPullRequestHeadAndState,
   fetchPullRequestReviewContext,
 } from './github-api.mjs';
+import {
+  resolveHandoffConfig,
+  signalFollowUpDaemonWake,
+} from './handoff-wake.mjs';
 import {
   adapterUnsupportedError,
   writeAdapterPullRequestReview,
@@ -1770,6 +1775,8 @@ function queueFollowUpForPostedReview({
   verdictMode = VERDICT_MODE_ENFORCE,
   summarizePRRemediationLedgerImpl = summarizePRRemediationLedger,
   createFollowUpJobImpl = createFollowUpJob,
+  resolveHandoffConfigImpl = () => resolveHandoffConfig({ getConfigImpl: getConfig }),
+  signalFollowUpDaemonWakeImpl = signalFollowUpDaemonWake,
   scopeViolationFinding = null,
 }) {
   const normalizedVerdictMode = normalizeVerdictMode(verdictMode);
@@ -1817,7 +1824,21 @@ function queueFollowUpForPostedReview({
     priorCompletedRounds: priorLedger.completedRoundsForPR,
     ...(elevatedPriorCap ? { maxRemediationRounds: elevatedPriorCap } : {}),
   });
-  return { queued: true, jobPath, verdictMode: normalizedVerdictMode };
+  let handoffWake = { attempted: false };
+  try {
+    const handoffConfig = resolveHandoffConfigImpl();
+    if (handoffConfig.enabled && handoffConfig.reviewToRemediation) {
+      const wake = signalFollowUpDaemonWakeImpl({ rootDir });
+      handoffWake = { attempted: true, ok: true, ...wake };
+    }
+  } catch (err) {
+    handoffWake = {
+      attempted: true,
+      ok: false,
+      error: err?.message || String(err),
+    };
+  }
+  return { queued: true, jobPath, verdictMode: normalizedVerdictMode, handoffWake };
 }
 
 // ── PR diff fetch ────────────────────────────────────────────────────────────

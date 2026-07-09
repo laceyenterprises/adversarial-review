@@ -601,8 +601,45 @@ test('request-changes and malformed verdicts still queue durable follow-up hando
 
   assert.equal(dirty.result.queued, true);
   assert.equal(dirty.created.length, 1);
+  assert.deepEqual(dirty.result.handoffWake, { attempted: false });
   assert.equal(malformed.result.queued, true);
   assert.equal(malformed.created.length, 1);
+});
+
+test('review-to-remediation handoff wakes follow-up daemon only when enabled', () => {
+  const disabled = queueWithFakes('## Summary\nFix it.\n\n## Verdict\nRequest changes', {
+    resolveHandoffConfigImpl: () => ({
+      enabled: false,
+      reviewToRemediation: true,
+    }),
+    signalFollowUpDaemonWakeImpl: () => {
+      throw new Error('disabled path should not wake');
+    },
+  });
+  assert.equal(disabled.result.queued, true);
+  assert.deepEqual(disabled.result.handoffWake, { attempted: false });
+
+  const wakeCalls = [];
+  const enabled = queueWithFakes('## Summary\nFix it.\n\n## Verdict\nRequest changes', {
+    rootDir: '/tmp/adversarial-review-handoff-test',
+    resolveHandoffConfigImpl: () => ({
+      enabled: true,
+      reviewToRemediation: true,
+    }),
+    signalFollowUpDaemonWakeImpl: (payload) => {
+      wakeCalls.push(payload);
+      return { target: 'follow-up-daemon', wakePath: '/tmp/wake' };
+    },
+  });
+
+  assert.equal(enabled.result.queued, true);
+  assert.deepEqual(wakeCalls, [{ rootDir: '/tmp/adversarial-review-handoff-test' }]);
+  assert.deepEqual(enabled.result.handoffWake, {
+    attempted: true,
+    ok: true,
+    target: 'follow-up-daemon',
+    wakePath: '/tmp/wake',
+  });
 });
 
 test('scope-violation finding suppresses automated remediation handoff', () => {

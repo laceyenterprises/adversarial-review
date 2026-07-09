@@ -384,3 +384,45 @@ export async function sleepUntilTimerOrHandoffWake(
     }
   });
 }
+
+export const FOLLOW_UP_DAEMON_WAKE_TARGET = HANDOFF_WAKE_DAEMONS.followUp;
+export const WATCHER_WAKE_TARGET = HANDOFF_WAKE_DAEMONS.watcher;
+
+export function signalFollowUpDaemonWake({ rootDir, ...options } = {}) {
+  const result = signalHandoffWake(rootDir, FOLLOW_UP_DAEMON_WAKE_TARGET, options);
+  return {
+    ...result,
+    target: FOLLOW_UP_DAEMON_WAKE_TARGET,
+    wakePath: result.path,
+  };
+}
+
+export async function waitForHandoffWake({
+  rootDir,
+  target,
+  timeoutMs,
+  signal = null,
+} = {}) {
+  const result = await sleepUntilTimerOrHandoffWake(rootDir, target, timeoutMs, {
+    enabled: true,
+    signal,
+  });
+  return {
+    woke: result.reason === 'wake',
+    target,
+    wakePath: result.path,
+    reason: result.reason === 'timer' ? 'timeout' : result.reason,
+  };
+}
+
+export function resolveHandoffConfig({ getConfigImpl } = {}) {
+  const getConfig = typeof getConfigImpl === 'function' ? getConfigImpl : null;
+  const read = (key, fallback) => (getConfig ? getConfig(key, fallback) : fallback);
+  return {
+    enabled: Boolean(read('roles.adversarial.handoff.enabled', false)),
+    reviewToRemediation: Boolean(read('roles.adversarial.handoff.review_to_remediation', false)),
+    remediationToRereview: Boolean(read('roles.adversarial.handoff.remediation_to_rereview', false)),
+    finalToHammer: Boolean(read('roles.adversarial.handoff.final_to_hammer', false)),
+    maxPerPrHead: Number(read('roles.adversarial.handoff.max_per_pr_head', 20)),
+  };
+}

@@ -263,6 +263,12 @@ export function inspectHandoffWakePermissions(rootDir) {
   }
 }
 
+function makeAbortError() {
+  const error = new Error('The operation was aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
 export async function sleepUntilTimerOrHandoffWake(
   rootDir,
   daemon,
@@ -277,7 +283,7 @@ export async function sleepUntilTimerOrHandoffWake(
   } = {},
 ) {
   if (!enabled) {
-    return new Promise((resolve, _reject) => {
+    return new Promise((resolve, reject) => {
       let settled = false;
       const done = (fn, value) => {
         if (settled) return;
@@ -286,17 +292,17 @@ export async function sleepUntilTimerOrHandoffWake(
         signal?.removeEventListener?.('abort', onAbort);
         fn(value);
       };
-      const onAbort = () => done(resolve, { reason: 'abort' });
+      const onAbort = () => done(reject, makeAbortError());
       const timeout = setTimeoutImpl(() => done(resolve, { reason: 'timer' }), delayMs);
       if (signal?.aborted) {
-        done(resolve, { reason: 'abort' });
+        done(reject, makeAbortError());
       } else {
         signal?.addEventListener?.('abort', onAbort, { once: true });
       }
     });
   }
 
-  return new Promise((resolve, _reject) => {
+  return new Promise((resolve, reject) => {
     let dir = null;
     const startMs = nowMs();
     let settled = false;
@@ -316,7 +322,18 @@ export async function sleepUntilTimerOrHandoffWake(
       }
       resolve(result);
     };
-    const onAbort = () => finish({ reason: 'abort' });
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeoutImpl(timeout);
+      signal?.removeEventListener?.('abort', onAbort);
+      try {
+        watcher?.close?.();
+      } catch {
+        // Closing a native watcher is best-effort during process shutdown.
+      }
+      reject(makeAbortError());
+    };
     const onWatchEvent = (_eventType, filename) => {
       if (settled || !filename || !isWakeMarkerName(filename, daemon)) return;
       const path = join(dir, String(filename));

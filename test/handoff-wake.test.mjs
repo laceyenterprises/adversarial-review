@@ -57,6 +57,21 @@ test('handoff wake with no listener is a harmless no-op for a later sleep', asyn
   assert.equal(result.reason, 'timer');
 });
 
+test('handoff wake sleep rejects with AbortError on shutdown signal', async (t) => {
+  const rootDir = makeTempRoot(t);
+  const ac = new AbortController();
+  const sleepPromise = sleepUntilTimerOrHandoffWake(
+    rootDir,
+    HANDOFF_WAKE_DAEMONS.followUp,
+    10_000,
+    { enabled: true, signal: ac.signal },
+  );
+
+  ac.abort();
+
+  await assert.rejects(sleepPromise, { name: 'AbortError' });
+});
+
 test('handoff wake directory and marker modes support a shared service group', (t) => {
   const rootDir = makeTempRoot(t);
   const info = inspectHandoffWakePermissions(rootDir);

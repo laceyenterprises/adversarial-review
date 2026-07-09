@@ -802,12 +802,12 @@ ham_append_terminal_audit() {
 }
 
 ham_emit_git_merge_signal() {
-  [ -n "${HAM_MERGE_COMMIT:-}" ] || return 0
+  [ -n "${HAM_MERGE_COMMIT:-}" ] || return 1
   HAM_AGENT_OS_ROOT="${AGENT_OS_ROOT:-/Users/airlock/agent-os}"
-  [ -d "$HAM_AGENT_OS_ROOT/modules/worker-pool/lib/python" ] || return 0
-  [ -d "$HAM_AGENT_OS_ROOT/platform/session-ledger/src" ] || return 0
+  [ -d "$HAM_AGENT_OS_ROOT/modules/worker-pool/lib/python" ] || return 1
+  [ -d "$HAM_AGENT_OS_ROOT/platform/session-ledger/src" ] || return 1
   PYTHONPATH="$HAM_AGENT_OS_ROOT/modules/worker-pool/lib/python:$HAM_AGENT_OS_ROOT/platform/session-ledger/src${PYTHONPATH:+:$PYTHONPATH}" \
-    /usr/bin/perl -e 'alarm shift; exec @ARGV' 15 python3 - "<<HQ_ROOT>>" "<<PR_NUMBER>>" "$HAM_MERGE_COMMIT" "<<MERGE_METHOD>>" <<'PYEOF' >/dev/null 2>&1 || true
+    /usr/bin/perl -e 'alarm shift; exec @ARGV' 15 python3 - "<<HQ_ROOT>>" "<<PR_NUMBER>>" "$HAM_MERGE_COMMIT" "<<MERGE_METHOD>>" <<'PYEOF' >/dev/null 2>&1
 import sys
 
 from cwp_dispatch.git_signal import EVENT_MERGE_SIGNAL, emit_git_event_best_effort, workspace_context
@@ -1233,8 +1233,13 @@ if [ "$HAM_POST_STATE" = "MERGED" ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATION_S
     ham_release_merge_lease
     exit "$HAM_MERGED_AUDIT_APPEND_EXIT"
   fi
+  trap - EXIT
+  if ! ham_emit_git_merge_signal; then
+    echo "HAM hard-blocker: merge signal emission failed after confirmed merge; keeping lease for retry" >&2
+    exit 1
+  fi
+  trap ham_release_merge_lease EXIT
   ham_release_merge_lease
-  ham_emit_git_merge_signal
 else
   echo "HAM hard-blocker: gh pr merge did not confirm merged validated head" >&2
   cat "$HAM_POST_MERGE_JSON" >&2
@@ -1244,8 +1249,8 @@ else
 fi
 ```
 
-After the merged audit append succeeds and the lease is released, post the
-CLOSING comment described above. If `gh pr merge` or the post-merge `gh pr view`
+After the merged audit append succeeds, emit the merge signal and then release
+the lease before posting the CLOSING comment described above. If `gh pr merge` or the post-merge `gh pr view`
 confirmation returns a retryable transport, TLS, DNS/socket, HTTP 5xx, or
 rate-limit/secondary-rate-limit failure, retry only inside the bounded budget
 above while holding the same lease. The merge retry loop must re-read the live

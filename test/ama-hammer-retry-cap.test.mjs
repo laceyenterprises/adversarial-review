@@ -642,6 +642,12 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
           }
           return { stdout: '', stderr: '' };
         }
+        if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+          return { stdout: JSON.stringify({ mergeCommit: { oid: 'c'.repeat(40) } }), stderr: '' };
+        }
+        if (cmd === 'python3') {
+          return { stdout: '', stderr: '' };
+        }
         if (args[0] === 'worker' && args[1] === 'tear-down') {
           return { stdout: '', stderr: '' };
         }
@@ -678,6 +684,81 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
   assert.equal(dispatchRecord.closureAuthority, 'ham-terminal-remediation');
 });
 
+test('same-head terminal HAM remediation keeps lease unfinished when merge signal emission fails', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-merge-signal-failed-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const first = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir),
+    ...hammerDispatchDeps(),
+  });
+  assert.equal(first.dispatched, true);
+
+  const calls = [];
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true },
+      prMetadata: {
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+        ],
+      },
+      dispatchContext: {
+        baseBranch: 'main',
+        dispatchedAt: '2026-07-06T12:02:00Z',
+      },
+    }),
+    options: validHamTerminalRemediationOptions({
+      reviewedHead: REVIEWED_HEAD,
+      currentHead: REVIEWED_HEAD,
+    }),
+    ...hammerDispatchDeps({
+      execFileImpl: async (cmd, args) => {
+        calls.push({ cmd, args });
+        if (args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
+        }
+        if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'merge') {
+          return { stdout: '', stderr: '' };
+        }
+        if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+          return { stdout: JSON.stringify({ mergeCommit: { oid: 'd'.repeat(40) } }), stderr: '' };
+        }
+        if (cmd === 'python3') {
+          throw new Error('database is locked');
+        }
+        if (args[0] === 'worker' && args[1] === 'tear-down') {
+          throw new Error('worker teardown should not run before merge signal succeeds');
+        }
+        return { stdout: JSON.stringify({ dispatchId: 'unexpected', launchRequestId: 'unexpected' }), stderr: '' };
+      },
+      fetchPullRequestRollupImpl: async () => ({
+        state: 'OPEN',
+        headSha: REVIEWED_HEAD,
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' },
+        ],
+      }),
+    }),
+  });
+
+  assert.equal(result.reason, 'existing-dispatch-succeeded');
+  assert.equal(
+    readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }).terminalOutcome,
+    null,
+  );
+  assert.equal(calls.some((call) => call.cmd === 'python3'), true);
+  const dispatchRecord = readAmaCloserDispatchRecord(rootDir, {
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: REVIEWED_HEAD,
+  });
+  assert.equal(dispatchRecord.lastError, 'git-merge-signal-emit-failed');
+  assert.equal(dispatchRecord.closureAuthority, 'ham-terminal-remediation');
+});
+
 test('same-head terminal HAM remediation passes canonical live gate shape to daemon merge', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-live-gate-contract-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -711,9 +792,12 @@ test('same-head terminal HAM remediation passes canonical live gate shape to dae
       currentHead: REVIEWED_HEAD,
     }),
     ...hammerDispatchDeps({
-      execFileImpl: async (_cmd, args) => {
+      execFileImpl: async (cmd, args) => {
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
+        }
+        if (cmd === 'python3') {
+          return { stdout: '', stderr: '' };
         }
         if (args[0] === 'worker' && args[1] === 'tear-down') {
           return { stdout: '', stderr: '' };
@@ -722,7 +806,7 @@ test('same-head terminal HAM remediation passes canonical live gate shape to dae
       },
       attemptDaemonCleanMergeImpl: async ({ liveGate }) => {
         observedLiveGate = liveGate;
-        return { disposition: 'merged', reason: 'merged', merged: true };
+        return { disposition: 'merged', reason: 'merged', merged: true, mergeCommitSha: 'e'.repeat(40) };
       },
     }),
   });
@@ -773,6 +857,12 @@ test('same-head terminal HAM remediation records merged audit before nonfatal cl
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
         if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'merge') {
+          return { stdout: '', stderr: '' };
+        }
+        if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+          return { stdout: JSON.stringify({ mergeCommit: { oid: 'f'.repeat(40) } }), stderr: '' };
+        }
+        if (cmd === 'python3') {
           return { stdout: '', stderr: '' };
         }
         if (args[0] === 'worker' && args[1] === 'tear-down') {

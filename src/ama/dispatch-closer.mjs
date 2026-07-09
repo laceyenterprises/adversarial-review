@@ -85,6 +85,7 @@ import { deliverAlert } from '../alert-delivery.mjs';
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SUBMODULE_ROOT = resolve(__dirname, '..', '..');
+const AGENT_OS_ROOT = resolve(SUBMODULE_ROOT, '..', '..');
 
 const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
@@ -716,6 +717,131 @@ async function runGhPrMergeWithTransientRetry({
     }
   }
   return lastFailure || { exitCode: 1, stdout: '', stderr: 'gh pr merge did not run' };
+}
+
+async function fetchMergeCommitShaBestEffort({
+  execFileImpl,
+  repo,
+  prNumber,
+  logger = console,
+}) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= AMA_CLOSER_MERGE_RETRY_CAP; attempt += 1) {
+    try {
+      const { stdout } = await execFileImpl('gh', [
+        'pr',
+        'view',
+        String(prNumber),
+        '--repo',
+        repo,
+        '--json',
+        'mergeCommit',
+      ], {
+        maxBuffer: 1024 * 1024,
+        timeout: 15_000,
+      });
+      const parsed = JSON.parse(String(stdout || '{}'));
+      const oid = parsed?.mergeCommit?.oid;
+      if (oid) return String(oid);
+      if (attempt >= AMA_CLOSER_MERGE_RETRY_CAP) return null;
+      logger?.warn?.(JSON.stringify({
+        event: 'ama_closer.merge_commit_lookup_transient_retry',
+        repo,
+        prNumber,
+        attempt,
+        retryCap: AMA_CLOSER_MERGE_RETRY_CAP,
+        error: 'mergeCommit.oid missing',
+      }));
+      await sleep(daemonMergeBackoffMs(attempt, { baseMs: AMA_CLOSER_MERGE_BACKOFF_BASE_MS }));
+    } catch (err) {
+      lastError = err;
+      const detail = `${String(err?.stderr || '')}\n${String(err?.stdout || '')}\n${String(err?.message || err)}`;
+      const cls = classifyDaemonMergeError(detail);
+      if (cls !== 'retryable' || attempt >= AMA_CLOSER_MERGE_RETRY_CAP) {
+        logger?.warn?.(JSON.stringify({
+          event: 'ama_closer.merge_commit_lookup_nonfatal',
+          repo,
+          prNumber,
+          attempt,
+          retryable: cls === 'retryable',
+          error: String(err?.message || err),
+        }));
+        return null;
+      }
+      logger?.warn?.(JSON.stringify({
+        event: 'ama_closer.merge_commit_lookup_transient_retry',
+        repo,
+        prNumber,
+        attempt,
+        retryCap: AMA_CLOSER_MERGE_RETRY_CAP,
+        error: String(err?.stderr || err?.message || err),
+      }));
+      await sleep(daemonMergeBackoffMs(attempt, { baseMs: AMA_CLOSER_MERGE_BACKOFF_BASE_MS }));
+    }
+  }
+  logger?.warn?.(JSON.stringify({
+    event: 'ama_closer.merge_commit_lookup_nonfatal',
+    repo,
+    prNumber,
+    error: String(lastError?.message || lastError || 'merge commit lookup did not run'),
+  }));
+  return null;
+}
+
+async function emitWorkerGitMergeSignalBestEffort({
+  execFileImpl,
+  hqRoot,
+  repo,
+  prNumber,
+  launchRequestId = null,
+  ticketRef = null,
+  mergeCommitSha,
+  mergedBy,
+  mode,
+  logger = console,
+}) {
+  if (!hqRoot || !prNumber || !mergeCommitSha) return false;
+  const pythonPath = [
+    join(AGENT_OS_ROOT, 'modules', 'worker-pool', 'lib', 'python'),
+    join(AGENT_OS_ROOT, 'platform', 'session-ledger', 'src'),
+    process.env.PYTHONPATH || '',
+  ].filter(Boolean).join(':');
+  const args = [
+    '-m',
+    'cwp_dispatch.git_signal',
+    'emit',
+    '--root',
+    hqRoot,
+    '--event-type',
+    'worker.git.merge_signal',
+    '--pr-number',
+    String(prNumber),
+    '--merge-commit-sha',
+    mergeCommitSha,
+    '--merged-by',
+    mergedBy || 'ama-closer',
+    '--mode',
+    mode || 'unknown',
+  ];
+  if (launchRequestId) args.push('--launch-request-id', String(launchRequestId));
+  if (ticketRef) args.push('--ticket-ref', String(ticketRef));
+  try {
+    await execFileImpl('python3', args, {
+      env: { ...process.env, PYTHONPATH: pythonPath },
+      maxBuffer: 1024 * 1024,
+      timeout: 15_000,
+    });
+    return true;
+  } catch (err) {
+    logger?.warn?.(JSON.stringify({
+      event: 'ama_closer.git_merge_signal_emit_nonfatal',
+      repo,
+      prNumber,
+      launchRequestId,
+      error: String(err?.message || err),
+    }));
+    return false;
+  }
 }
 
 /**
@@ -1691,6 +1817,8 @@ export const __testables__ = Object.freeze({
   isTerminalBranchHolderWorkerRunStatus,
   defaultAmaLivePrProbe,
   normalizeAmaLivePrProbeResult,
+  fetchMergeCommitShaBestEffort,
+  emitWorkerGitMergeSignalBestEffort,
 });
 
 function sleep(ms) {
@@ -2677,6 +2805,12 @@ export async function maybeDispatchAmaCloser({
           sameHeadHamMergeReason = sameHeadHamMerge?.reason || null;
         }
         if (sameHeadHamMerge?.disposition === DAEMON_MERGE_DISPOSITION.MERGED) {
+          const mergeCommitSha = sameHeadHamMerge.mergeCommitSha || await fetchMergeCommitShaBestEffort({
+            execFileImpl,
+            repo,
+            prNumber,
+            logger,
+          });
           finalizeAmaCloserLeaseBestEffort({
             rootDir,
             leaseIdentity: existingRecordLeaseIdentity,
@@ -2686,6 +2820,29 @@ export async function maybeDispatchAmaCloser({
             repo,
             prNumber,
           });
+          const mergeSignalEmitted = await emitWorkerGitMergeSignalBestEffort({
+            execFileImpl,
+            hqRoot,
+            repo,
+            prNumber,
+            launchRequestId: existingRecord?.launchRequestId || null,
+            mergeCommitSha,
+            mergedBy: existingRecord?.workerClass || workerClass || 'hammer',
+            mode: mergeMethod,
+            logger,
+          });
+          if (!mergeSignalEmitted) {
+            // The terminal lease is the breadcrumb that lets the next closer
+            // pass rediscover the merge and retry the missing signal.
+            updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+              ...(current || existingRecord),
+              lastObservedStatus: status,
+              lastObservedAt: dispatchContext.dispatchedAt,
+              lastError: 'git-merge-signal-emit-failed',
+              closureAuthority: 'ham-terminal-remediation',
+            }));
+            return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
+          }
           updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
             ...(current || existingRecord),
             lastObservedStatus: status,
@@ -2851,6 +3008,36 @@ export async function maybeDispatchAmaCloser({
       }
     }
     if (releaseUnprovenTerminalHold) {
+      if (auditTerminalOutcome === 'succeeded') {
+        const mergeCommitSha = await fetchMergeCommitShaBestEffort({
+          execFileImpl,
+          repo,
+          prNumber,
+          logger,
+        });
+        const mergeSignalEmitted = await emitWorkerGitMergeSignalBestEffort({
+          execFileImpl,
+          hqRoot,
+          repo,
+          prNumber,
+          launchRequestId: existingRecord?.launchRequestId || null,
+          mergeCommitSha,
+          mergedBy: existingRecord?.workerClass || workerClass || 'hammer',
+          mode: mergeMethod,
+          logger,
+        });
+        if (!mergeSignalEmitted) {
+          updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+            ...(current || existingRecord),
+            lastObservedStatus: status,
+            lastObservedAt: dispatchContext.dispatchedAt,
+            lastError: 'git-merge-signal-emit-failed',
+            closureAuthority: 'ham-terminal-remediation',
+          }));
+          return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
+        }
+        releaseUnprovenTerminalHoldError = null;
+      }
       const tokenRecord = {
         ...existingRecord,
         lastObservedStatus: existingDispatchStatus || status,
@@ -2877,6 +3064,34 @@ export async function maybeDispatchAmaCloser({
         lastObservedAt: dispatchContext.dispatchedAt,
         lastError: releaseUnprovenTerminalHoldError,
       }));
+      if (auditTerminalOutcome === 'succeeded') {
+        const rawHammerCleanup = await cleanupHammerCloserWorker({
+          prNumber,
+          workerClass,
+          existingRecord,
+          hqPath,
+          hqRoot,
+          execFileImpl,
+          logger,
+          reason: 'terminal-audit-merge-signal-recovered',
+        });
+        const hammerCleanup = logHammerCleanupFailure(rawHammerCleanup, {
+          logger,
+          repo,
+          prNumber,
+          phase: 'terminal-audit-merge-signal-recovered',
+        });
+        return noAmaDispatch({
+          dispatched: false,
+          skipMergeAgent: true,
+          reason: 'current-head-hammer-terminal-remediation-merged',
+          workerClass: existingRecord?.workerClass || workerClass,
+          dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+          launchRequestId: existingRecord.launchRequestId || null,
+          promptPath: existingRecord.promptPath || null,
+          ...(hammerCleanup ? { hammerCleanup } : {}),
+        });
+      }
     }
     if (status === 'unknown') {
       updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({

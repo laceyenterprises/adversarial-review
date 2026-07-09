@@ -801,6 +801,79 @@ ham_append_terminal_audit() {
   return "$ham_audit_append_exit"
 }
 
+ham_emit_git_merge_signal() {
+  [ -n "${HAM_MERGE_COMMIT:-}" ] || return 1
+  HAM_AGENT_OS_ROOT="${AGENT_OS_ROOT:-/Users/airlock/agent-os}"
+  [ -d "$HAM_AGENT_OS_ROOT/modules/worker-pool/lib/python" ] || return 1
+  [ -d "$HAM_AGENT_OS_ROOT/platform/session-ledger/src" ] || return 1
+  HAM_SIGNAL_ATTEMPTS=0
+  while [ "$HAM_SIGNAL_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
+    HAM_SIGNAL_ATTEMPTS=$((HAM_SIGNAL_ATTEMPTS + 1))
+    if PYTHONPATH="$HAM_AGENT_OS_ROOT/modules/worker-pool/lib/python:$HAM_AGENT_OS_ROOT/platform/session-ledger/src${PYTHONPATH:+:$PYTHONPATH}" \
+      /usr/bin/perl -e 'alarm shift; exec @ARGV' 15 python3 - "<<HQ_ROOT>>" "<<PR_NUMBER>>" "$HAM_MERGE_COMMIT" "<<MERGE_METHOD>>" <<'PYEOF' >/dev/null 2>&1
+import sys
+
+from cwp_dispatch.git_signal import EVENT_MERGE_SIGNAL, emit_git_event_best_effort, workspace_context
+
+hq_root, pr_number, merge_commit_sha, mode = sys.argv[1:]
+ctx = workspace_context()
+emit_git_event_best_effort(
+    hq_root=hq_root,
+    event_type=EVENT_MERGE_SIGNAL,
+    worker_run_id=ctx.worker_run_id,
+    launch_request_id=ctx.launch_request_id,
+    ticket_ref=ctx.ticket_ref,
+    pr_number=int(pr_number),
+    merge_commit_sha=merge_commit_sha,
+    merged_by=ctx.worker_class or "hammer",
+    mode=mode,
+)
+PYEOF
+    then
+      return 0
+    fi
+    if [ "$HAM_SIGNAL_ATTEMPTS" -ge "$HAM_MERGE_RETRY_CAP" ]; then
+      return 1
+    fi
+    HAM_SIGNAL_BACKOFF_MULTIPLIER=$((1 << (HAM_SIGNAL_ATTEMPTS - 1)))
+    HAM_SIGNAL_JITTER=$(awk 'BEGIN{srand(); print int(rand()*3)}')
+    HAM_SIGNAL_SLEEP=$((HAM_MERGE_BACKOFF_BASE_SECONDS * HAM_SIGNAL_BACKOFF_MULTIPLIER + HAM_SIGNAL_JITTER))
+    echo "HAM merge signal transient failure; retrying ${HAM_SIGNAL_ATTEMPTS}/${HAM_MERGE_RETRY_CAP} after ${HAM_SIGNAL_SLEEP}s" >&2
+    sleep "$HAM_SIGNAL_SLEEP"
+  done
+  return 1
+}
+
+ham_mark_ama_closer_lease_succeeded() {
+  POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" node --input-type=module <<'NODE'
+import {
+  AMA_CLOSER_LEASE_STATUS,
+  readAmaCloserLease,
+  updateAmaCloserLease,
+} from '<<ROOT_DIR>>/src/ama/closer-lease.mjs';
+
+const rootDir = '<<ROOT_DIR>>';
+const identity = {
+  repo: '<<REPO>>',
+  prNumber: Number('<<PR_NUMBER>>'),
+  headSha: process.env.POST_REMEDIATION_SHA,
+};
+const existing = readAmaCloserLease(rootDir, identity);
+if (existing?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL) {
+  if (existing.terminalOutcome === 'succeeded') process.exit(0);
+  throw new Error(
+    `AMA closer lease is already terminal with outcome ${existing.terminalOutcome}`,
+  );
+}
+updateAmaCloserLease({
+  rootDir,
+  ...identity,
+  status: AMA_CLOSER_LEASE_STATUS.TERMINAL,
+  terminalOutcome: 'succeeded',
+});
+NODE
+}
+
 ham_refresh_github_gate_once() {
   POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" node --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchPullRequestRollup } from '<<ROOT_DIR>>/src/github-api.mjs';
@@ -1206,6 +1279,16 @@ if [ "$HAM_POST_STATE" = "MERGED" ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATION_S
     ham_release_merge_lease
     exit "$HAM_MERGED_AUDIT_APPEND_EXIT"
   fi
+  if ! ham_mark_ama_closer_lease_succeeded; then
+    echo "HAM hard-blocker: failed to mark AMA closer lease succeeded after confirmed merge" >&2
+    exit 1
+  fi
+  trap - EXIT
+  if ! ham_emit_git_merge_signal; then
+    echo "HAM hard-blocker: merge signal emission failed after confirmed merge; AMA closer lease is terminal for daemon recovery" >&2
+    ham_release_merge_lease
+    exit 1
+  fi
   ham_release_merge_lease
 else
   echo "HAM hard-blocker: gh pr merge did not confirm merged validated head" >&2
@@ -1216,8 +1299,8 @@ else
 fi
 ```
 
-After the merged audit append succeeds and the lease is released, post the
-CLOSING comment described above. If `gh pr merge` or the post-merge `gh pr view`
+After the merged audit append succeeds, emit the merge signal and then release
+the lease before posting the CLOSING comment described above. If `gh pr merge` or the post-merge `gh pr view`
 confirmation returns a retryable transport, TLS, DNS/socket, HTTP 5xx, or
 rate-limit/secondary-rate-limit failure, retry only inside the bounded budget
 above while holding the same lease. The merge retry loop must re-read the live

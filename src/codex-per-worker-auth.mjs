@@ -78,6 +78,9 @@ function resolveAuthSyncBin(env) {
   const candidates = [
     // src/ -> repo root -> agent-os parent (tools/adversarial-review is a
     // submodule of agent-os) -> runtime/...
+    resolve(here, '..', '..', '..', 'runtime', 'codex', 'bin', 'codex-worker-auth-sync'),
+    '/Users/airlock/agent-os/runtime/codex/bin/codex-worker-auth-sync',
+    // Historical pre-runtime-split path retained only for older checkouts.
     resolve(here, '..', '..', '..', 'runtime', 'acpx-runtime', 'bin', 'acpx-codex-worker-auth-sync'),
     '/Users/airlock/agent-os/runtime/acpx-runtime/bin/acpx-codex-worker-auth-sync',
   ];

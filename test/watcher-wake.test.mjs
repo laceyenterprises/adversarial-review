@@ -8,6 +8,7 @@ import {
   requestWatcherWake,
   watcherWakePath,
 } from '../src/watcher-wake.mjs';
+import { createHandoffRateLimiter } from '../src/handoff-rate-cap.mjs';
 
 test('watcher wake interrupts scheduled wait in under five seconds', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-wake-'));
@@ -147,6 +148,60 @@ test('watcher wake dedupes request_id-less payloads by content hash', async () =
     assert.equal(result.woken, true);
     assert.equal(result.reason, 'wake-file');
     assert.equal(result.payload.pr_number, 9);
+  } finally {
+    wakeSource.close();
+  }
+});
+
+test('watcher wake caps one PR head without starving another PR head', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'watcher-wake-'));
+  const wakeSource = createWatcherWakeSource({
+    rootDir,
+    logger: { warn() {} },
+    pollMs: 100,
+    rateLimiter: createHandoffRateLimiter({
+      rootDir,
+      maxPerPrHead: 1,
+      logger: { warn() {} },
+    }),
+    loadConfigImpl: () => ({
+      getHandoffConfig: () => ({ enabled: true, maxPerPrHead: 1 }),
+    }),
+  });
+
+  try {
+    requestWatcherWake({
+      rootDir,
+      reason: 'remediation-to-rereview',
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 57,
+      headSha: 'head-a',
+      requestId: 'storm-a-1',
+    });
+    assert.equal((await wakeSource.wait(50)).woken, true);
+
+    requestWatcherWake({
+      rootDir,
+      reason: 'remediation-to-rereview',
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 57,
+      headSha: 'head-a',
+      requestId: 'storm-a-2',
+    });
+    assert.deepEqual(await wakeSource.wait(20), { woken: false, reason: 'timeout' });
+
+    requestWatcherWake({
+      rootDir,
+      reason: 'remediation-to-rereview',
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 58,
+      headSha: 'head-b',
+      requestId: 'first-pass-other-pr',
+    });
+    const other = await wakeSource.wait(50);
+    assert.equal(other.woken, true);
+    assert.equal(other.payload.pr_number, 58);
+    assert.equal(other.payload.head_sha, 'head-b');
   } finally {
     wakeSource.close();
   }

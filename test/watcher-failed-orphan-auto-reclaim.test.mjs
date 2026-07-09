@@ -1,0 +1,234 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import {
+  autoReclaimFailedOrphans,
+  failedOrphanAutoReclaimDecision,
+} from '../src/watcher.mjs';
+
+const REPO = 'laceyenterprises/adversarial-review';
+const NOW = new Date('2026-07-09T22:00:00.000Z');
+
+function setupDb() {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'failed-orphan-reclaim-'));
+  mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+  const db = new Database(path.join(rootDir, 'data', 'reviews.db'));
+  ensureReviewStateSchema(db);
+  return { rootDir, db };
+}
+
+function insertRow(db, {
+  prNumber = 548,
+  status = 'failed-orphan',
+  prState = 'open',
+  infraAttempts = 0,
+  leaseExpiresAt = '2026-07-09T21:50:00.000Z',
+  pgid = 9001,
+  sessionUuid = 'session-orphan',
+} = {}) {
+  db.prepare(
+    `INSERT INTO reviewed_prs (
+       repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+       review_attempts, failed_at, failure_message, reviewer_session_uuid,
+       reviewer_pgid, reviewer_started_at, reviewer_head_sha, reviewer_timeout_ms,
+       reviewer_lease_expires_at, infra_auto_recover_attempts
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    REPO,
+    prNumber,
+    '2026-07-09T21:00:00.000Z',
+    'codex',
+    prState,
+    status,
+    3,
+    '2026-07-09T21:10:00.000Z',
+    'Watcher restarted while review subprocess was in flight.',
+    sessionUuid,
+    pgid,
+    '2026-07-09T21:00:00.000Z',
+    'head-1',
+    20 * 60 * 1000,
+    leaseExpiresAt,
+    infraAttempts
+  );
+}
+
+function statements(db) {
+  return {
+    listCandidates: db.prepare(
+      `SELECT repo, pr_number, pr_state, review_status, reviewer, review_attempts,
+              last_attempted_at, failed_at, failure_message, reviewer_session_uuid,
+              reviewer_pgid, reviewer_started_at, reviewer_head_sha, reviewer_timeout_ms,
+              reviewer_lease_expires_at, infra_auto_recover_attempts
+         FROM reviewed_prs
+        WHERE pr_state = 'open'
+          AND review_status = 'failed-orphan'
+          AND infra_auto_recover_attempts < ?
+        ORDER BY failed_at ASC, last_attempted_at ASC, id ASC
+        LIMIT ?`
+    ),
+    reclaim: db.prepare(
+      `UPDATE reviewed_prs
+          SET review_status = 'pending',
+              review_attempts = 0,
+              last_attempted_at = NULL,
+              posted_at = NULL,
+              failed_at = ?,
+              failure_message = ?,
+              rereview_requested_at = ?,
+              rereview_reason = ?,
+              reviewer_session_uuid = NULL,
+              reviewer_pgid = NULL,
+              reviewer_started_at = NULL,
+              reviewer_head_sha = NULL,
+              reviewer_timeout_ms = NULL,
+              reviewer_lease_expires_at = NULL,
+              quota_reset_at_utc = NULL,
+              review_population_retry_attempts = 0,
+              review_population_retry_last_at = NULL,
+              review_population_retry_head_sha = NULL,
+              infra_auto_recover_attempts = infra_auto_recover_attempts + 1
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pr_state = 'open'
+          AND review_status = 'failed-orphan'
+          AND infra_auto_recover_attempts < ?
+          AND COALESCE(reviewer_session_uuid, '') = COALESCE(?, '')
+          AND COALESCE(reviewer_pgid, '') = COALESCE(?, '')
+          AND COALESCE(reviewer_lease_expires_at, '') = COALESCE(?, '')`
+    ),
+  };
+}
+
+test('failed-orphan with expired lease and no live reviewer is auto-reset to pending', async () => {
+  const { rootDir, db } = setupDb();
+  try {
+    insertRow(db);
+    const audit = [];
+    const result = await autoReclaimFailedOrphans({
+      now: NOW,
+      statements: statements(db),
+      probeSessionImpl: () => ({ alive: false, matched: false }),
+      settleRunRecord: ({ sessionUuid, settledAt }) => audit.push({ sessionUuid, settledAt }),
+      log: { log() {}, warn() {} },
+    });
+
+    assert.deepEqual(result, { reclaimed: 1, skipped: 0 });
+    const row = db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(REPO, 548);
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.review_attempts, 0);
+    assert.equal(row.reviewer_session_uuid, null);
+    assert.equal(row.infra_auto_recover_attempts, 1);
+    assert.match(row.failure_message, /^\[failed-orphan-auto-reclaim\]/);
+    assert.deepEqual(audit, [{ sessionUuid: 'session-orphan', settledAt: NOW.toISOString() }]);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('failed-orphan is not reclaimed when lease is active or reviewer process is live', () => {
+  assert.equal(
+    failedOrphanAutoReclaimDecision({
+      pr_state: 'open',
+      review_status: 'failed-orphan',
+      infra_auto_recover_attempts: 0,
+      reviewer_lease_expires_at: '2026-07-09T22:05:00.000Z',
+      reviewer_timeout_ms: 20 * 60 * 1000,
+      reviewer_started_at: '2026-07-09T21:45:00.000Z',
+    }, NOW, {
+      probeSessionImpl: () => ({ alive: false, matched: false }),
+    }).reason,
+    'lease-active'
+  );
+
+  assert.equal(
+    failedOrphanAutoReclaimDecision({
+      pr_state: 'open',
+      review_status: 'failed-orphan',
+      infra_auto_recover_attempts: 0,
+      reviewer_lease_expires_at: '2026-07-09T21:50:00.000Z',
+      reviewer_pgid: 9001,
+      reviewer_session_uuid: 'session-orphan',
+    }, NOW, {
+      probeSessionImpl: () => ({ alive: true, matched: true }),
+    }).reason,
+    'reviewer-live'
+  );
+});
+
+test('failed-orphan auto-reclaim is bounded by infra counter', async () => {
+  const { rootDir, db } = setupDb();
+  try {
+    insertRow(db, { infraAttempts: 3 });
+    const result = await autoReclaimFailedOrphans({
+      now: NOW,
+      cap: 3,
+      statements: statements(db),
+      probeSessionImpl: () => ({ alive: false, matched: false }),
+      log: { log() {}, warn() {} },
+    });
+
+    assert.deepEqual(result, { reclaimed: 0, skipped: 0 });
+    const row = db.prepare('SELECT review_status, infra_auto_recover_attempts FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(REPO, 548);
+    assert.equal(row.review_status, 'failed-orphan');
+    assert.equal(row.infra_auto_recover_attempts, 3);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('failed-orphan auto-reclaim leaves terminal and non-orphan failed rows untouched', async () => {
+  const { rootDir, db } = setupDb();
+  try {
+    insertRow(db, { prNumber: 1, status: 'posted' });
+    insertRow(db, { prNumber: 2, status: 'malformed' });
+    insertRow(db, { prNumber: 3, status: 'failed' });
+
+    const result = await autoReclaimFailedOrphans({
+      now: NOW,
+      statements: statements(db),
+      probeSessionImpl: () => ({ alive: false, matched: false }),
+      log: { log() {}, warn() {} },
+    });
+
+    assert.deepEqual(result, { reclaimed: 0, skipped: 0 });
+    const rows = db.prepare('SELECT pr_number, review_status FROM reviewed_prs ORDER BY pr_number').all();
+    assert.deepEqual(rows, [
+      { pr_number: 1, review_status: 'posted' },
+      { pr_number: 2, review_status: 'malformed' },
+      { pr_number: 3, review_status: 'failed' },
+    ]);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('failed-orphan auto-reclaim skips when a late reviewer post is found', async () => {
+  const { rootDir, db } = setupDb();
+  try {
+    insertRow(db);
+    const result = await autoReclaimFailedOrphans({
+      now: NOW,
+      statements: statements(db),
+      probeSessionImpl: () => ({ alive: false, matched: false }),
+      findPostedReview: async () => ({ submitted_at: '2026-07-09T21:55:00.000Z' }),
+      log: { log() {}, warn() {} },
+    });
+
+    assert.deepEqual(result, { reclaimed: 0, skipped: 1 });
+    const row = db.prepare('SELECT review_status, infra_auto_recover_attempts FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(REPO, 548);
+    assert.equal(row.review_status, 'failed-orphan');
+    assert.equal(row.infra_auto_recover_attempts, 0);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

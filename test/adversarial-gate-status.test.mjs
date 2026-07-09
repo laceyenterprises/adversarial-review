@@ -94,6 +94,27 @@ test('pickAdversarialGateStatus returns success for a settled non-blocking revie
   assert.equal(decision.reason, 'review-settled');
 });
 
+test('pickAdversarialGateStatus fails closed for unparseable verdicts', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    latestJob: makeJob({
+      reviewBody: [
+        '## Summary',
+        'The review body has no recognized verdict line.',
+        '',
+        '## Blocking issues',
+        '- None.',
+        '',
+        '## Verdict',
+        'Needs work',
+      ].join('\n'),
+    }),
+  });
+
+  assert.equal(decision.state, 'failure');
+  assert.equal(decision.reason, 'unknown-verdict');
+});
+
 test('pickAdversarialGateStatus holds a settled verdict pending when the live head moved past the reviewed head', () => {
   // Regression: a comment-only/approved verdict was reviewed at head A, then
   // the PR advanced to head B (remediation push / re-review still in flight).

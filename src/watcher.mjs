@@ -45,6 +45,7 @@ import {
   computeWorkloadAwarePollDeadlineMs,
   DEFAULT_POLL_DEADLINE_FLOOR_MS,
 } from './watcher-poll-guard.mjs';
+import { createWatcherWakeSource } from './watcher-wake.mjs';
 import {
   ensureReviewStateSchema,
   listPendingMergeCloseouts,
@@ -162,10 +163,6 @@ import {
   mergeAgentDispatchEnvForAction,
 } from './ama/coexistence.mjs';
 import { loadConfigCached } from './config-loader.mjs';
-import {
-  HANDOFF_WAKE_DAEMONS,
-  sleepUntilTimerOrHandoffWake,
-} from './handoff-wake.mjs';
 import { resolveGitHubAppBotLogin } from './github-app-identity.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
@@ -8551,6 +8548,10 @@ async function main() {
     onTimeout: exitForPollDeadline,
     deadlineMs: resolveDeadlineMsForCall,
   });
+  const watcherWakeSource = createWatcherWakeSource({
+    rootDir: ROOT,
+    logger: console,
+  });
   async function runHeartbeatPoll(source) {
     watcherHeartbeat.markPoll({ source });
     stallWatchdog.beginPoll();
@@ -8575,13 +8576,14 @@ async function main() {
       // The interval-sleep timer is the only handle keeping the
       // event loop alive between polls, so it MUST NOT be unref'd.
       if (resolveWatcherHandoffEnabled()) {
-        const sleepResult = await sleepUntilTimerOrHandoffWake(
-          ROOT,
-          HANDOFF_WAKE_DAEMONS.watcher,
-          sleepMs,
-          { enabled: true },
-        );
-        await runHeartbeatPoll(sleepResult.reason === 'wake' ? 'handoff wake pollOnce' : 'scheduled pollOnce');
+        const wake = await watcherWakeSource.wait(sleepMs);
+        const source = wake.woken
+          ? `wake pollOnce (${wake.payload?.reason || 'watcher-wake'})`
+          : 'scheduled pollOnce';
+        await runHeartbeatPoll(source);
+        if (wake.woken) {
+          nextStart = Date.now();
+        }
       } else {
         await new Promise((resolve) => setTimeout(resolve, sleepMs));
         await runHeartbeatPoll('scheduled pollOnce');

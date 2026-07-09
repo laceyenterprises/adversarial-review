@@ -1636,6 +1636,13 @@ function schemaV1() {
           resume_context_envelope: { __type: TYPE_BOOL, __default: true },
         },
       },
+      handoff: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          remediation_to_rereview: { __type: TYPE_BOOL, __default: false },
+        },
+      },
       // Module-internal sections used by tools/adversarial-review. These are
       // module-scoped knobs (no top-level canonical equivalent); declared here
       // so `tools/adversarial-review/config.yaml` parses against the strict

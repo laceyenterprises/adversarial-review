@@ -49,6 +49,7 @@ async function reconcileFollowUpJob({
   isProcessAliveImpl,
   postCommentImpl,
   requestReviewRereviewImpl,
+  requestWatcherWakeImpl,
   resolvePRLifecycleImpl,
   auditWorkspaceForContaminationImpl,
   execFileImpl,
@@ -66,6 +67,7 @@ async function reconcileFollowUpJob({
     isWorkerRunning: isProcessAliveImpl,
     postCommentImpl,
     requestReviewRereviewImpl,
+    requestWatcherWakeImpl,
     resolvePRLifecycleImpl,
     auditWorkspaceForContaminationImpl,
     execFileImpl,
@@ -80,6 +82,7 @@ async function reconcileInProgressFollowUpJobs({
   isProcessAliveImpl,
   postCommentImpl,
   requestReviewRereviewImpl,
+  requestWatcherWakeImpl,
   resolvePRLifecycleImpl,
   execFileImpl,
 } = {}) {
@@ -89,6 +92,7 @@ async function reconcileInProgressFollowUpJobs({
     isWorkerRunning: isProcessAliveImpl,
     postCommentImpl,
     requestReviewRereviewImpl,
+    requestWatcherWakeImpl,
     resolvePRLifecycleImpl,
     execFileImpl,
   });

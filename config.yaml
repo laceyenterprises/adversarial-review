@@ -153,6 +153,14 @@ feature_flags:
   # Motivation: adversarial-watcher degraded bring-up path / CFG-05.
   allow_missing_alert_to: false
 
+handoff:
+  # When a remediation reply successfully resets a review row to pending,
+  # wake the watcher immediately instead of waiting for the next scheduled poll.
+  # Env override:
+  #   ADVERSARIAL_HANDOFF_REMEDIATION_TO_REREVIEW /
+  #     AGENT_OS_HANDOFF_REMEDIATION_TO_REREVIEW
+  remediation_to_rereview: false
+
 apps:
   adversarial-review:
     subscribes:

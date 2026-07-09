@@ -3000,7 +3000,7 @@ async function probeReviewerProcessSession({
     });
     return { alive: true, matched: stdout.includes(String(sessionUuid)) };
   } catch {
-    return { alive: true, matched: false };
+    return { alive: true, matched: 'unknown' };
   }
 }
 
@@ -3028,11 +3028,14 @@ async function failedOrphanAutoReclaimDecision(row, now = new Date(), {
     sessionUuid: row.reviewer_session_uuid,
   });
   const alive = typeof sessionProbe === 'boolean' ? sessionProbe : sessionProbe?.alive === true;
-  const matched = typeof sessionProbe === 'boolean' ? sessionProbe : sessionProbe?.matched === true;
+  const matched = typeof sessionProbe === 'boolean' ? sessionProbe : sessionProbe?.matched;
   if (alive) {
+    if (matched === false) {
+      return { reclaim: true, reason: 'reviewer-session-mismatch' };
+    }
     return {
       reclaim: false,
-      reason: matched ? 'reviewer-live' : 'reviewer-live-session-mismatch',
+      reason: matched === true ? 'reviewer-live' : 'reviewer-liveness-unknown',
     };
   }
 

@@ -199,6 +199,42 @@ test('failed-orphan is not reclaimed when lease is active or reviewer process is
   );
 });
 
+test('failed-orphan with recycled reviewer pgid is reclaimed after lease expiry', async () => {
+  const result = await failedOrphanAutoReclaimDecision({
+    pr_state: 'open',
+    review_status: 'failed-orphan',
+    infra_auto_recover_attempts: 0,
+    reviewer_lease_expires_at: '2026-07-09T21:50:00.000Z',
+    reviewer_pgid: 9001,
+    reviewer_session_uuid: 'session-orphan',
+  }, NOW, {
+    probeSessionImpl: () => ({ alive: true, matched: false }),
+  });
+
+  assert.deepEqual(result, {
+    reclaim: true,
+    reason: 'reviewer-session-mismatch',
+  });
+});
+
+test('failed-orphan is not reclaimed when reviewer liveness probe is unknown', async () => {
+  const result = await failedOrphanAutoReclaimDecision({
+    pr_state: 'open',
+    review_status: 'failed-orphan',
+    infra_auto_recover_attempts: 0,
+    reviewer_lease_expires_at: '2026-07-09T21:50:00.000Z',
+    reviewer_pgid: 9001,
+    reviewer_session_uuid: 'session-orphan',
+  }, NOW, {
+    probeSessionImpl: () => ({ alive: true, matched: 'unknown' }),
+  });
+
+  assert.deepEqual(result, {
+    reclaim: false,
+    reason: 'reviewer-liveness-unknown',
+  });
+});
+
 test('failed-orphan auto-reclaim handles legacy NULL infra counter rows', async () => {
   const { rootDir, db } = setupLegacyNullableCounterDb();
   try {
@@ -237,6 +273,19 @@ test('reviewer session probe uses non-blocking ps with unlimited command width',
   assert.equal(calls[0].bin, 'ps');
   assert.deepEqual(calls[0].argv, ['-ww', '-p', '9001', '-o', 'command=']);
   assert.equal(calls[0].options.timeout, 2_000);
+});
+
+test('reviewer session probe reports unknown match on transient ps failure', async () => {
+  const result = await probeReviewerProcessSession({
+    pgid: 9001,
+    sessionUuid: 'session-width-test',
+    probeGroupAliveImpl: () => true,
+    execFileImpl: async () => {
+      throw new Error('fork failed');
+    },
+  });
+
+  assert.deepEqual(result, { alive: true, matched: 'unknown' });
 });
 
 test('failed-orphan auto-reclaim is bounded by infra counter', async () => {

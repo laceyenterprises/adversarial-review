@@ -1192,6 +1192,21 @@ function schemaV1() {
                 __default: 'native',
                 __enum: ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE,
               },
+              handoff: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  enabled: { __type: TYPE_BOOL, __default: false },
+                  review_to_remediation: { __type: TYPE_BOOL, __default: false },
+                  remediation_to_rereview: { __type: TYPE_BOOL, __default: false },
+                  final_to_hammer: { __type: TYPE_BOOL, __default: false },
+                  max_per_pr_head: {
+                    __type: TYPE_INT,
+                    __default: 20,
+                    __min: 1,
+                  },
+                },
+              },
               merge_authority: {
                 __type: TYPE_DICT,
                 __strict: true,
@@ -2114,6 +2129,26 @@ export const ENV_ALIASES = {
   },
   'roles.adversarial.orchestration_mode': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE',
+    aliases: [],
+  },
+  'roles.adversarial.handoff.enabled': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_ENABLED',
+    aliases: [],
+  },
+  'roles.adversarial.handoff.review_to_remediation': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_REVIEW_TO_REMEDIATION',
+    aliases: [],
+  },
+  'roles.adversarial.handoff.remediation_to_rereview': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_REMEDIATION_TO_REREVIEW',
+    aliases: [],
+  },
+  'roles.adversarial.handoff.final_to_hammer': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_FINAL_TO_HAMMER',
+    aliases: [],
+  },
+  'roles.adversarial.handoff.max_per_pr_head': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_MAX_PER_PR_HEAD',
     aliases: [],
   },
   ...buildRoleFallbackEnvAliases(),
@@ -3665,6 +3700,16 @@ export class AgentOSConfig {
 
   getOrchestrationMode() {
     return this.get('roles.adversarial.orchestration_mode');
+  }
+
+  getHandoffConfig() {
+    return {
+      enabled: this.get('roles.adversarial.handoff.enabled', false),
+      reviewToRemediation: this.get('roles.adversarial.handoff.review_to_remediation', false),
+      remediationToRereview: this.get('roles.adversarial.handoff.remediation_to_rereview', false),
+      finalToHammer: this.get('roles.adversarial.handoff.final_to_hammer', false),
+      maxPerPrHead: this.get('roles.adversarial.handoff.max_per_pr_head', 20),
+    };
   }
 }
 

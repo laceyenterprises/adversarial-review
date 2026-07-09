@@ -4048,6 +4048,66 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
   }
 });
 
+test('HOM handoff config defaults off and resolves env aliases through Node loader', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        adversarial:
+          handoff:
+            enabled: false
+            review_to_remediation: false
+            remediation_to_rereview: false
+            final_to_hammer: false
+            max_per_pr_head: 20
+    `);
+
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.getHandoffConfig(), {
+      enabled: false,
+      reviewToRemediation: false,
+      remediationToRereview: false,
+      finalToHammer: false,
+      maxPerPrHead: 20,
+    });
+
+    const missingCfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
+    assert.deepEqual(missingCfg.getHandoffConfig(), {
+      enabled: false,
+      reviewToRemediation: false,
+      remediationToRereview: false,
+      finalToHammer: false,
+      maxPerPrHead: 20,
+    });
+
+    const envCfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_ENABLED: 'true',
+        AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_REVIEW_TO_REMEDIATION: 'true',
+        AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_REMEDIATION_TO_REREVIEW: 'true',
+        AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_FINAL_TO_HAMMER: 'true',
+        AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_MAX_PER_PR_HEAD: '7',
+      },
+    });
+    assert.deepEqual(envCfg.getHandoffConfig(), {
+      enabled: true,
+      reviewToRemediation: true,
+      remediationToRereview: true,
+      finalToHammer: true,
+      maxPerPrHead: 7,
+    });
+    assert.equal(
+      envCfg.resolutionTrace('roles.adversarial.handoff.enabled').at(-1).source,
+      'env:AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_ENABLED',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('AMA merge_authority worker class defaults to hammer in Node loader', () => {
   const tmp = freshTmp();
   try {

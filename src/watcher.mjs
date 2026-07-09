@@ -162,6 +162,10 @@ import {
   mergeAgentDispatchEnvForAction,
 } from './ama/coexistence.mjs';
 import { loadConfigCached } from './config-loader.mjs';
+import {
+  HANDOFF_WAKE_DAEMONS,
+  sleepUntilTimerOrHandoffWake,
+} from './handoff-wake.mjs';
 import { resolveGitHubAppBotLogin } from './github-app-identity.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
@@ -8377,6 +8381,15 @@ function isProcessAlive(pid) {
   }
 }
 
+function resolveWatcherHandoffEnabled({ loadConfigImpl = loadConfigCached, env = process.env } = {}) {
+  try {
+    return loadConfigImpl({ env }).getHandoffConfig().enabled === true;
+  } catch (err) {
+    console.error(`[watcher] WARN handoff config disabled for this poll sleep: ${err?.message || err}`);
+    return false;
+  }
+}
+
 async function main() {
   requireEnv('GITHUB_TOKEN');
   process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = resolveRateLimitSharedStatePath(process.env, ROOT);
@@ -8561,8 +8574,18 @@ async function main() {
       const sleepMs = Math.max(0, nextStart - Date.now());
       // The interval-sleep timer is the only handle keeping the
       // event loop alive between polls, so it MUST NOT be unref'd.
-      await new Promise((resolve) => setTimeout(resolve, sleepMs));
-      await runHeartbeatPoll('scheduled pollOnce');
+      if (resolveWatcherHandoffEnabled()) {
+        const sleepResult = await sleepUntilTimerOrHandoffWake(
+          ROOT,
+          HANDOFF_WAKE_DAEMONS.watcher,
+          sleepMs,
+          { enabled: true },
+        );
+        await runHeartbeatPoll(sleepResult.reason === 'wake' ? 'handoff wake pollOnce' : 'scheduled pollOnce');
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, sleepMs));
+        await runHeartbeatPoll('scheduled pollOnce');
+      }
       nextStart += intervalMs;
     }
   })().catch((err) => {
@@ -8588,6 +8611,7 @@ export {
   createWatcherOctokit,
   createWatcherHeartbeat,
   createWatcherStallWatchdog,
+  resolveWatcherHandoffEnabled,
   attemptDagAutowalkOnMerge,
   cancelReviewerRuntimeSession,
   clearReviewCycleCapForOverride,

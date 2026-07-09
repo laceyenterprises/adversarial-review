@@ -1081,6 +1081,16 @@ provider window clears or the worker can produce a valid remediation reply, it
 must become terminal with `quota-exhausted-budget-exhausted` so operators see a
 loud stop instead of an endless suspended loop.
 
+Live wakeups between workers and daemons use marker files under
+`data/handoff-wake/` only as a latency optimization. The native marker writer
+must assert that the current UID is the canonical owner of the existing wake
+directory, or of the tool root before the wake directory exists. If a worker is
+running as a different UID, marker creation must be delegated with
+`sudo -A -H -u <owner>` so the wake directory and files remain owned by the
+daemon principal. Failure to resolve the owner or complete that delegated write
+is a missed wake, not a state mutation: the daemon remains correct by falling
+back to its scheduled timer.
+
 The recovery budget is lifecycle-scoped to the current failed-row incident, not
 PR-row lifetime state. The watcher atomically promotes an eligible failed row to
 `reviewing` and increments `infra_auto_recover_attempts` in the same SQL

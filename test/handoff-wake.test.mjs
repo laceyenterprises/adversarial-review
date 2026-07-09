@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -122,6 +122,78 @@ test('handoff wake signaling is best-effort when directory setup fails', (t) => 
 
   assert.equal(signalResult.signaled, false);
   assert.match(signalResult.error.message, /ENOTDIR|not a directory/i);
+});
+
+test('handoff wake signaling delegates to the canonical owner instead of creating state as a non-owner', (t) => {
+  const rootDir = makeTempRoot(t);
+  const ownerUid = statSync(rootDir).uid;
+  const calls = [];
+  const spawnSyncImpl = (command, args) => {
+    calls.push({ command, args });
+    if (command === 'id') {
+      assert.deepEqual(args, ['-un', String(ownerUid)]);
+      return { status: 0, stdout: 'daemon-owner\n', stderr: '' };
+    }
+    if (command === 'sudo') {
+      assert.deepEqual(args.slice(0, 4), ['-A', '-H', '-u', 'daemon-owner']);
+      assert.equal(args[4], process.execPath);
+      assert.equal(args.at(-4), rootDir);
+      assert.equal(args.at(-3), HANDOFF_WAKE_DAEMONS.followUp);
+      return { status: 0, stdout: join(rootDir, 'data', 'handoff-wake', 'follow-up.delegated.wake'), stderr: '' };
+    }
+    throw new Error(`unexpected command: ${command}`);
+  };
+
+  const signalResult = signalHandoffWake(rootDir, HANDOFF_WAKE_DAEMONS.followUp, {
+    currentUidImpl: () => ownerUid + 1,
+    spawnSyncImpl,
+  });
+
+  assert.equal(signalResult.signaled, true);
+  assert.equal(signalResult.ownerUser, 'daemon-owner');
+  assert.equal(calls.length, 2);
+  assert.throws(() => readdirSync(join(rootDir, 'data', 'handoff-wake')), /ENOENT/);
+});
+
+test('handoff wake signaling fails open when owner-routed signaling is unavailable', (t) => {
+  const rootDir = makeTempRoot(t);
+  const ownerUid = statSync(rootDir).uid;
+  const spawnSyncImpl = (command) => {
+    if (command === 'id') return { status: 0, stdout: 'daemon-owner\n', stderr: '' };
+    if (command === 'sudo') return { status: 1, stdout: '', stderr: 'sudo: no askpass program specified\n' };
+    throw new Error(`unexpected command: ${command}`);
+  };
+
+  const signalResult = signalHandoffWake(rootDir, HANDOFF_WAKE_DAEMONS.followUp, {
+    currentUidImpl: () => ownerUid + 1,
+    spawnSyncImpl,
+  });
+
+  assert.equal(signalResult.signaled, false);
+  assert.match(signalResult.error.message, /owner signal failed|askpass/i);
+  assert.throws(() => readdirSync(join(rootDir, 'data', 'handoff-wake')), /ENOENT/);
+});
+
+test('handoff wake signaling treats an existing data directory as the canonical owner anchor', (t) => {
+  const rootDir = makeTempRoot(t);
+  mkdirSync(join(rootDir, 'data'));
+  const dataUid = statSync(join(rootDir, 'data')).uid;
+  const spawnSyncImpl = (command, args) => {
+    if (command === 'id') {
+      assert.deepEqual(args, ['-un', String(dataUid)]);
+      return { status: 0, stdout: 'data-owner\n', stderr: '' };
+    }
+    if (command === 'sudo') return { status: 0, stdout: 'delegated.wake', stderr: '' };
+    throw new Error(`unexpected command: ${command}`);
+  };
+
+  const signalResult = signalHandoffWake(rootDir, HANDOFF_WAKE_DAEMONS.followUp, {
+    currentUidImpl: () => dataUid + 1,
+    spawnSyncImpl,
+  });
+
+  assert.equal(signalResult.signaled, true);
+  assert.equal(signalResult.ownerUser, 'data-owner');
 });
 
 test('handoff wake sleep falls back to timer when directory setup fails', async (t) => {

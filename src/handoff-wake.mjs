@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   closeSync,
@@ -19,6 +20,35 @@ export const HANDOFF_WAKE_DAEMONS = Object.freeze({
   followUp: 'follow-up',
   watcher: 'watcher',
 });
+
+const OWNER_SIGNAL_SCRIPT = `
+import { chmodSync, closeSync, mkdirSync, openSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const [rootDir, daemon, nowRaw, pidRaw] = process.argv.slice(1);
+const name = String(daemon || '').trim();
+if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) throw new Error(\`invalid handoff wake daemon name: \${daemon}\`);
+const dir = join(rootDir, 'data', 'handoff-wake');
+mkdirSync(dir, { recursive: true, mode: 0o775 });
+try { chmodSync(dir, 0o775); } catch {}
+const nowMs = Number(nowRaw);
+const nonce = \`\${nowMs}.\${pidRaw}.\${Math.random().toString(36).slice(2)}\`;
+const finalPath = join(dir, \`\${name}.\${nonce}.wake\`);
+const tmpPath = \`\${finalPath}.tmp\`;
+try {
+  const fd = openSync(tmpPath, 'wx', 0o664);
+  try {
+    writeFileSync(fd, \`\${new Date(nowMs).toISOString()}\\n\`);
+  } finally {
+    closeSync(fd);
+  }
+  try { chmodSync(tmpPath, 0o664); } catch {}
+  renameSync(tmpPath, finalPath);
+  process.stdout.write(finalPath);
+} catch (err) {
+  try { rmSync(tmpPath, { force: true }); } catch {}
+  throw err;
+}
+`;
 
 function sanitizeDaemonName(daemon) {
   const name = String(daemon || '').trim();
@@ -49,14 +79,99 @@ function markerPrefix(daemon) {
   return `${sanitizeDaemonName(daemon)}.`;
 }
 
+function currentUid() {
+  return typeof process.getuid === 'function' ? process.getuid() : null;
+}
+
+function resolveCanonicalOwnerUid(rootDir) {
+  const dir = resolveHandoffWakeDir(rootDir);
+  try {
+    return statSync(dir).uid;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
+  try {
+    return statSync(join(rootDir, 'data')).uid;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
+  return statSync(rootDir).uid;
+}
+
+function resolveUsernameForUid(uid, { spawnSyncImpl = spawnSync } = {}) {
+  const result = spawnSyncImpl('id', ['-un', String(uid)], { encoding: 'utf8' });
+  if (result?.status !== 0) {
+    const detail = String(result?.stderr || result?.error?.message || '').trim();
+    throw new Error(`failed to resolve canonical handoff wake owner uid ${uid}${detail ? `: ${detail}` : ''}`);
+  }
+  const username = String(result.stdout || '').trim();
+  if (!username) throw new Error(`failed to resolve canonical handoff wake owner uid ${uid}: empty username`);
+  return username;
+}
+
 function isWakeMarkerName(filename, daemon) {
   const name = String(filename || '');
   return name.startsWith(markerPrefix(daemon)) && name.endsWith('.wake');
 }
 
-function markerPath(rootDir, daemon, nowMs = Date.now(), pid = process.pid) {
+function markerPathInDir(dir, daemon, nowMs = Date.now(), pid = process.pid) {
   const nonce = `${nowMs}.${pid}.${Math.random().toString(36).slice(2)}`;
-  return join(ensureHandoffWakeDir(rootDir), `${markerPrefix(daemon)}${nonce}.wake`);
+  return join(dir, `${markerPrefix(daemon)}${nonce}.wake`);
+}
+
+function writeHandoffWakeMarkerNative(rootDir, daemon, nowMs) {
+  const dir = ensureHandoffWakeDir(rootDir);
+  const finalPath = markerPathInDir(dir, daemon, nowMs);
+  const tmpPath = `${finalPath}.tmp`;
+  try {
+    const fd = openSync(tmpPath, 'wx', HANDOFF_WAKE_MARKER_MODE);
+    try {
+      writeFileSync(fd, `${new Date(nowMs).toISOString()}\n`);
+    } finally {
+      closeSync(fd);
+    }
+    try {
+      chmodSync(tmpPath, HANDOFF_WAKE_MARKER_MODE);
+    } catch {
+      // Best effort; file creation mode plus service umask normally handles it.
+    }
+    renameSync(tmpPath, finalPath);
+  } catch (err) {
+    try {
+      rmSync(tmpPath, { force: true });
+    } catch {
+      // Nothing useful to do here; signaling is intentionally best-effort.
+    }
+    throw err;
+  }
+  return { finalPath, tmpPath };
+}
+
+function signalHandoffWakeAsOwner(rootDir, daemon, nowMs, ownerUid, { spawnSyncImpl = spawnSync } = {}) {
+  const ownerUser = resolveUsernameForUid(ownerUid, { spawnSyncImpl });
+  const result = spawnSyncImpl(
+    'sudo',
+    [
+      '-A',
+      '-H',
+      '-u',
+      ownerUser,
+      process.execPath,
+      '--input-type=module',
+      '-e',
+      OWNER_SIGNAL_SCRIPT,
+      rootDir,
+      sanitizeDaemonName(daemon),
+      String(nowMs),
+      String(process.pid),
+    ],
+    { encoding: 'utf8', maxBuffer: 1024 * 1024 },
+  );
+  if (result?.status !== 0) {
+    const detail = String(result?.stderr || result?.error?.message || '').trim();
+    throw new Error(`handoff wake owner signal failed for ${ownerUser}${detail ? `: ${detail}` : ''}`);
+  }
+  return { signaled: true, path: String(result.stdout || '').trim() || null, ownerUser };
 }
 
 function cleanupDaemonMarkers(dir, daemon, { olderThanMs = Infinity } = {}) {
@@ -89,24 +204,21 @@ function cleanupDaemonMarkers(dir, daemon, { olderThanMs = Infinity } = {}) {
   return { removed, failed };
 }
 
-export function signalHandoffWake(rootDir, daemon, { nowMs = Date.now() } = {}) {
-  let finalPath = null;
+export function signalHandoffWake(
+  rootDir,
+  daemon,
+  { nowMs = Date.now(), spawnSyncImpl = spawnSync, currentUidImpl = currentUid } = {},
+) {
   let tmpPath = null;
   try {
-    finalPath = markerPath(rootDir, daemon, nowMs);
-    tmpPath = `${finalPath}.tmp`;
-    const fd = openSync(tmpPath, 'wx', HANDOFF_WAKE_MARKER_MODE);
-    try {
-      writeFileSync(fd, `${new Date(nowMs).toISOString()}\n`);
-    } finally {
-      closeSync(fd);
+    sanitizeDaemonName(daemon);
+    const ownerUid = resolveCanonicalOwnerUid(rootDir);
+    const uid = currentUidImpl();
+    if (uid !== null && uid !== ownerUid) {
+      return signalHandoffWakeAsOwner(rootDir, daemon, nowMs, ownerUid, { spawnSyncImpl });
     }
-    try {
-      chmodSync(tmpPath, HANDOFF_WAKE_MARKER_MODE);
-    } catch {
-      // Best effort; file creation mode plus service umask normally handles it.
-    }
-    renameSync(tmpPath, finalPath);
+    const { finalPath, tmpPath: nativeTmpPath } = writeHandoffWakeMarkerNative(rootDir, daemon, nowMs);
+    tmpPath = nativeTmpPath;
     return { signaled: true, path: finalPath };
   } catch (err) {
     if (tmpPath) {
@@ -122,7 +234,7 @@ export function signalHandoffWake(rootDir, daemon, { nowMs = Date.now() } = {}) 
 
 export function inspectHandoffWakePermissions(rootDir) {
   const dir = ensureHandoffWakeDir(rootDir);
-  const marker = markerPath(rootDir, 'permission-probe');
+  const marker = markerPathInDir(dir, 'permission-probe');
   try {
     const fd = openSync(marker, 'w', HANDOFF_WAKE_MARKER_MODE);
     closeSync(fd);

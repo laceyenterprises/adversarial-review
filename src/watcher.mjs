@@ -1405,9 +1405,18 @@ const FLEET_WIDE_FALSE_DEFERRAL_DEGRADED_LOCK_FILE = 'degraded-alert-state.lock'
 const FLEET_WIDE_FALSE_DEFERRAL_LOCK_RETRY_MS = 10;
 const FLEET_WIDE_FALSE_DEFERRAL_LOCK_TIMEOUT_MS = 5_000;
 const FLEET_WIDE_FALSE_DEFERRAL_STALE_LOCK_MS = 2 * 60 * 1000;
+const HEAD_CLOSER_SUPPRESSION_RETRY_BACKOFF_MS = [250, 1000];
 
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function resolveHardReviewCeiling(maxRemediationRounds) {
+  if (maxRemediationRounds == null || maxRemediationRounds === '') return 4;
+  const numericRounds = Number(maxRemediationRounds);
+  return Number.isFinite(numericRounds)
+    ? Math.max(0, Math.floor(numericRounds)) + 1
+    : 4;
 }
 
 function readFleetWideFalseDeferralLock(lockPath) {
@@ -3794,6 +3803,37 @@ function createHeadCloserCommitSuppressionResolver(options = {}) {
     }
     return suppressionPromise;
   };
+}
+
+async function getHeadCloserCommitSuppressionWithBoundedRetry({
+  repoPath,
+  prNumber,
+  headSha,
+  getHeadCloserCommitSuppressionImpl = getHeadCloserCommitSuppression,
+  logger = console,
+  retryBackoffMs = HEAD_CLOSER_SUPPRESSION_RETRY_BACKOFF_MS,
+  sleepImpl = sleepMs,
+} = {}) {
+  const retryDelays = Array.isArray(retryBackoffMs) ? retryBackoffMs : [];
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await getHeadCloserCommitSuppressionImpl({
+        repoPath,
+        prNumber,
+        headSha,
+        logger,
+      });
+    } catch (err) {
+      if (!isTransientGhError(err) || attempt >= retryDelays.length) throw err;
+      const delayMs = Math.max(0, Number(retryDelays[attempt]) || 0);
+      logger?.warn?.(
+        `[watcher] closer commit suppression probe transient failure for ` +
+        `${repoPath}#${prNumber}; retrying ${attempt + 1}/${retryDelays.length} ` +
+        `after ${delayMs}ms: ${err?.message || err}`
+      );
+      if (delayMs > 0) await sleepImpl(delayMs);
+    }
+  }
 }
 
 function isExplicitOperatorReviewRetrigger(reviewRow = null) {
@@ -8072,48 +8112,104 @@ async function pollOnce(
               return;
             }
 
-            const result = await spawnReviewer({
-              repo: repoPath,
-              prNumber,
-              reviewerModel: route.reviewerModel,
-              botTokenEnv: route.botTokenEnv,
-              linearTicketId,
-              labels: Array.isArray(subject.labels) ? subject.labels : [],
-              builderTag: route.tag,
-              crossModelReviewWaived: Boolean(crossModelWaiverReason),
-              crossModelReviewWaiverReason: crossModelWaiverReason,
-              reviewerHeadSha,
-              reviewAttemptNumber,
-              reviewDbAttemptNumber,
-              completedRemediationRounds,
-              passKind,
-              maxRemediationRounds,
-              advisoryFindings: vocabularyFatigueFinding ? [vocabularyFatigueFinding] : [],
-              reviewerSessionUuid,
-              reviewerTimeoutMs,
-              workspacePath: null,
-              onReviewerPgid: ({ pgid, spawnedAt }) => {
-                persistReviewerPgid({
-                  pgid,
-                  reviewerSessionUuid,
-                  repoPath,
-                  prNumber,
-                  startedAt: spawnedAt,
-                  reviewerTimeoutMs,
-                });
-              },
-            });
-            if (result.ok) {
-              healthProbe?.recordSpawn?.(healthTick, { at: attemptAt });
+            // Standing policy: the hammer ALWAYS closes on exhaustion and must
+            // NEVER trigger a re-review. Two gates before spawning a reviewer on
+            // a re-review pass:
+            //
+            // (1) Terminal closer head — when the current PR head is a terminal
+            //     closer commit (Closed-By: hammer / closer identity), the
+            //     hammer's remediation IS terminal; do NOT re-review it.
+            //     Re-reviewing resets the remediation round counter, so
+            //     reviewState.reviewCycleExhausted never trips and the terminal
+            //     close (ham_terminal_remediation_validated, dispatch-closer.mjs)
+            //     never fires — the runaway remediate->review->remediate loop.
+            //     Skip the spawn (no attempt budget consumed); the tick falls
+            //     through to the merge/close path.
+            //
+            // (2) Hard review ceiling — independently, never review one PR more
+            //     than (round budget + 1) times regardless of head churn, so the
+            //     adversarial-review count is bounded even if (1) is bypassed.
+            let skipReviewerSpawnReason = null;
+            if (passKind === 'rereview') {
+              const closerHead = await getHeadCloserCommitSuppressionWithBoundedRetry({
+                repoPath,
+                prNumber,
+                headSha: reviewerHeadSha,
+                logger: console,
+              });
+              if (closerHead?.suppressed) {
+                console.log(
+                  `[watcher] Skipping re-review for ${repoPath}#${prNumber}: head ` +
+                  `${String(reviewerHeadSha || '').slice(0, 12)} is a terminal closer commit ` +
+                  `(${closerHead.reason}); hammer remediation is terminal — deferring to the ` +
+                  `close path. No attempt budget consumed.`,
+                );
+                skipReviewerSpawnReason = 'terminal-closer-head';
+              }
+
+              const hardReviewCeiling = resolveHardReviewCeiling(maxRemediationRounds);
+              const priorReviewAttempts = Number(current?.review_attempts || 0);
+              if (!skipReviewerSpawnReason && priorReviewAttempts >= hardReviewCeiling) {
+                console.log(
+                  `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
+                  `ceiling reached (${priorReviewAttempts} >= ${hardReviewCeiling}); adversarial ` +
+                  `reviews are capped per PR — deferring to the close path. ` +
+                  `No attempt budget consumed.`,
+                );
+                skipReviewerSpawnReason = 'hard-review-ceiling';
+              }
             }
 
-            settleReviewerAttempt({
-              rootDir: ROOT,
-              repoPath,
-              prNumber,
-              result,
-              maxRemediationRounds,
-            });
+            if (skipReviewerSpawnReason) {
+              stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+              console.log(
+                `[watcher] Released reviewer claim for ${repoPath}#${prNumber} after ` +
+                `${skipReviewerSpawnReason}; continuing to watcher close/maintenance path.`
+              );
+            } else {
+              const result = await spawnReviewer({
+                repo: repoPath,
+                prNumber,
+                reviewerModel: route.reviewerModel,
+                botTokenEnv: route.botTokenEnv,
+                linearTicketId,
+                labels: Array.isArray(subject.labels) ? subject.labels : [],
+                builderTag: route.tag,
+                crossModelReviewWaived: Boolean(crossModelWaiverReason),
+                crossModelReviewWaiverReason: crossModelWaiverReason,
+                reviewerHeadSha,
+                reviewAttemptNumber,
+                reviewDbAttemptNumber,
+                completedRemediationRounds,
+                passKind,
+                maxRemediationRounds,
+                advisoryFindings: vocabularyFatigueFinding ? [vocabularyFatigueFinding] : [],
+                reviewerSessionUuid,
+                reviewerTimeoutMs,
+                workspacePath: null,
+                onReviewerPgid: ({ pgid, spawnedAt }) => {
+                  persistReviewerPgid({
+                    pgid,
+                    reviewerSessionUuid,
+                    repoPath,
+                    prNumber,
+                    startedAt: spawnedAt,
+                    reviewerTimeoutMs,
+                  });
+                },
+              });
+              if (result.ok) {
+                healthProbe?.recordSpawn?.(healthTick, { at: attemptAt });
+              }
+
+              settleReviewerAttempt({
+                rootDir: ROOT,
+                repoPath,
+                prNumber,
+                result,
+                maxRemediationRounds,
+              });
+            }
           } finally {
             reservation.release();
           }
@@ -8510,6 +8606,7 @@ export {
   getStalePostedReviewAutoRereviewSuppression,
   getStalePostedReviewBudgetSuppression,
   getHeadCloserCommitSuppression,
+  getHeadCloserCommitSuppressionWithBoundedRetry,
   handlePostedReviewRow,
   isExplicitOperatorReviewRetrigger,
   isTerminalCloserCommitIdentity,
@@ -8545,6 +8642,7 @@ export {
   resolveStuckDispatchAlertDebounceMs,
   resolveWatcherDrainMaxMs,
   resolveFirstPassReviewerPoolConfig,
+  resolveHardReviewCeiling,
   runFastMergeClosePathIsolated,
   runBoundedReviewerDispatchQueue,
   reserveReviewerMemoryAdmission,

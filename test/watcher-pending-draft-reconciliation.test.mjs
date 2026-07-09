@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import {
   DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS,
   reconcilePendingDraftsBeforeSpawn,
+  resolveHardReviewCeiling,
   resolvePendingDraftRespawnAgeSeconds,
 } from '../src/watcher.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
@@ -169,6 +170,53 @@ test('watcher runs pending-draft reconciliation after claim and freshness re-che
   assert.ok(freshnessIndex > claimIndex, 'freshness re-check should happen after claim');
   assert.ok(reconcileIndex > freshnessIndex, 'reconciliation should happen after freshness re-check');
   assert.ok(releaseIndex > reconcileIndex, 'skip-spawn path should release the claim');
+});
+
+test('watcher terminal rereview skip releases claim and falls through to close path', () => {
+  const source = readFileSync(WATCHER_SOURCE, 'utf8');
+  const guardIndex = source.indexOf("let skipReviewerSpawnReason = null;");
+  const closerProbeIndex = source.indexOf("const closerHead = await getHeadCloserCommitSuppressionWithBoundedRetry({", guardIndex);
+  const closerSuppressedIndex = source.indexOf("if (closerHead?.suppressed) {", guardIndex);
+  const hardCeilingIndex = source.indexOf("const hardReviewCeiling =", guardIndex);
+  const hardSkipIndex = source.indexOf("if (!skipReviewerSpawnReason && priorReviewAttempts >= hardReviewCeiling) {", guardIndex);
+  const skipReleaseIndex = source.indexOf("if (skipReviewerSpawnReason) {", guardIndex);
+  const spawnIndex = source.indexOf("const result = await spawnReviewer({", guardIndex);
+  const adoptionIndex = source.indexOf("await runQueuedReviewAdoptionPhase({", spawnIndex);
+
+  assert.ok(guardIndex > 0, 'rereview skip guard should exist');
+  assert.ok(closerProbeIndex > guardIndex, 'closer-head probe should use bounded retry wrapper');
+  assert.ok(closerSuppressedIndex > closerProbeIndex, 'terminal closer-head check should follow the probe');
+  assert.equal(
+    source.slice(closerSuppressedIndex, hardCeilingIndex).includes("return;"),
+    false,
+    'terminal closer-head skip must not return before watcher close/maintenance work'
+  );
+  assert.equal(
+    source.slice(hardSkipIndex, skipReleaseIndex).includes("return;"),
+    false,
+    'hard review ceiling skip must not return before watcher close/maintenance work'
+  );
+  assert.ok(skipReleaseIndex > hardSkipIndex, 'skip branch should run after both rereview skip checks');
+  assert.ok(
+    source.indexOf("stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);", skipReleaseIndex) > skipReleaseIndex,
+    'skip branch should release the already-claimed reviewer row'
+  );
+  assert.ok(spawnIndex > skipReleaseIndex, 'spawnReviewer should be in the non-skip branch');
+  assert.ok(adoptionIndex > spawnIndex, 'watcher close/maintenance phase should remain after reviewer dispatch');
+});
+
+test('hard review ceiling defaults only for missing or invalid round budgets', () => {
+  assert.equal(resolveHardReviewCeiling(undefined), 4);
+  assert.equal(resolveHardReviewCeiling(null), 4);
+  assert.equal(resolveHardReviewCeiling(''), 4);
+  assert.equal(resolveHardReviewCeiling('not-a-number'), 4);
+  // ceiling = budget + 1 (floor at 0). A 0 budget → ceiling 1 (first-pass
+  // review, zero re-reviews), not 2.
+  assert.equal(resolveHardReviewCeiling(0), 1);
+  assert.equal(resolveHardReviewCeiling('0'), 1);
+  assert.equal(resolveHardReviewCeiling(-3), 1);
+  assert.equal(resolveHardReviewCeiling(3), 4);
+  assert.equal(resolveHardReviewCeiling('3.8'), 4);
 });
 
 test('watcher pre-spawn reconciliation retains a fresh current-head draft and skips this tick', async () => {

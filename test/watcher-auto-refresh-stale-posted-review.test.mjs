@@ -48,6 +48,7 @@ import {
   getStalePostedReviewAutoRereviewSuppression,
   getStalePostedReviewBudgetSuppression,
   getHeadCloserCommitSuppression,
+  getHeadCloserCommitSuppressionWithBoundedRetry,
   isExplicitOperatorReviewRetrigger,
   isTerminalCloserCommitIdentity,
   maybeDispatchAmaClosureFor,
@@ -990,6 +991,56 @@ test('watcher fails closed on non-transient closer identity probe errors', async
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /failing closed/);
   assert.doesNotMatch(warnings[0], /transient=/);
+});
+
+test('watcher spawn gate retries transient closer suppression failures before failing closed', async () => {
+  const warnings = [];
+  const sleeps = [];
+  let calls = 0;
+  const result = await getHeadCloserCommitSuppressionWithBoundedRetry({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2604,
+    headSha: 'def456',
+    getHeadCloserCommitSuppressionImpl: async () => {
+      calls += 1;
+      if (calls === 1) {
+        const err = new Error('TLS handshake timeout');
+        err.stderr = 'TLS handshake timeout';
+        throw err;
+      }
+      return { suppressed: true, reason: 'closer-commit-trailer' };
+    },
+    logger: { warn: (message) => warnings.push(message) },
+    retryBackoffMs: [25],
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+  });
+
+  assert.equal(calls, 2);
+  assert.deepEqual(sleeps, [25]);
+  assert.equal(result.suppressed, true);
+  assert.equal(result.reason, 'closer-commit-trailer');
+  assert.match(warnings[0], /transient failure/);
+});
+
+test('watcher spawn gate does not retry non-transient closer suppression failures', async () => {
+  let calls = 0;
+  await assert.rejects(
+    getHeadCloserCommitSuppressionWithBoundedRetry({
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 2604,
+      headSha: 'def456',
+      getHeadCloserCommitSuppressionImpl: async () => {
+        calls += 1;
+        const err = new Error('HTTP 404 Not Found');
+        err.stderr = 'HTTP 404 Not Found';
+        throw err;
+      },
+      retryBackoffMs: [25],
+      sleepImpl: async () => {},
+    }),
+    /HTTP 404 Not Found/
+  );
+  assert.equal(calls, 1);
 });
 
 test('watcher closer identity resolver reuses the same commit probe result', async () => {

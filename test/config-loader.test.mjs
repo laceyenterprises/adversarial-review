@@ -4808,7 +4808,7 @@ test('top-level config.yaml accepts mirrored oauth_broker watchdog BPR-05 keys',
     const envCfg = loadConfig({
       topPath: top,
       env: {
-        AGENT_OS_OAUTH_BROKER_WATCHDOG_PORTFORWARD_SELF_HEAL_MAX_CYCLES: '4',
+        OAUTH_BROKER_WATCHDOG_PORTFORWARD_SELF_HEAL_MAX_CYCLES: '4',
         OAUTH_BROKER_WATCHDOG_STANDBY_READYZ_URL: 'none',
         OAUTH_BROKER_WATCHDOG_STANDBY_CONTAINER_NAME: 'custom-standby-1',
       },

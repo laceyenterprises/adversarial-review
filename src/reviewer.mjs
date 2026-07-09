@@ -1828,7 +1828,13 @@ function queueFollowUpForPostedReview({
   try {
     const handoffConfig = resolveHandoffConfigImpl();
     if (handoffConfig.enabled && handoffConfig.reviewToRemediation) {
-      const wake = signalFollowUpDaemonWakeImpl({ rootDir });
+      const wake = signalFollowUpDaemonWakeImpl({
+        rootDir,
+        reason: 'review-to-remediation',
+        repo,
+        prNumber,
+        headSha: revisionRef,
+      });
       handoffWake = { attempted: true, ok: true, ...wake };
     }
   } catch (err) {

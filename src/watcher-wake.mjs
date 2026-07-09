@@ -2,6 +2,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, watch, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
+import { createHandoffRateLimiter, normalizeHandoffMaxPerPrHead } from './handoff-rate-cap.mjs';
+import { loadConfigCached } from './config-loader.mjs';
+
 const WATCHER_WAKE_FILE = 'watcher-wake.json';
 const DEFAULT_WAKE_POLL_MS = 1000;
 
@@ -36,6 +39,7 @@ function requestWatcherWake({
   reason = 'unspecified',
   repo = null,
   prNumber = null,
+  headSha = null,
   requestedAt = new Date().toISOString(),
   requestId = randomUUID(),
 } = {}) {
@@ -51,6 +55,7 @@ function requestWatcherWake({
     reason,
     repo,
     pr_number: prNumber,
+    ...(headSha ? { head_sha: headSha } : {}),
   };
   const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   writeFileSync(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
@@ -62,6 +67,9 @@ function createWatcherWakeSource({
   rootDir,
   logger = console,
   pollMs = DEFAULT_WAKE_POLL_MS,
+  rateLimiter = createHandoffRateLimiter({ rootDir, logger }),
+  loadConfigImpl = loadConfigCached,
+  env = process.env,
 } = {}) {
   if (!rootDir) {
     throw new Error('createWatcherWakeSource requires rootDir');
@@ -78,7 +86,18 @@ function createWatcherWakeSource({
     const nextSeen = readWakeSnapshot(filePath);
     if (!nextSeen || nextSeen.key === lastSeen) return null;
     lastSeen = nextSeen.key;
-    return nextSeen.payload || { reason: 'unreadable-wake-file' };
+    try {
+      const cfg = loadConfigImpl({ env }).getHandoffConfig();
+      rateLimiter?.setMaxPerPrHead?.(normalizeHandoffMaxPerPrHead(cfg.maxPerPrHead));
+    } catch (err) {
+      logger?.warn?.(`[watcher] handoff rate-cap config load failed; using current cap: ${err?.message || err}`);
+    }
+    const payload = nextSeen.payload || { reason: 'unreadable-wake-file' };
+    const cap = rateLimiter?.inspect?.(payload);
+    if (cap?.accepted === false) {
+      return null;
+    }
+    return payload;
   }
 
   function notifyIfChanged() {

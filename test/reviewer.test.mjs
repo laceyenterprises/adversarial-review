@@ -633,7 +633,13 @@ test('review-to-remediation handoff wakes follow-up daemon only when enabled', (
   });
 
   assert.equal(enabled.result.queued, true);
-  assert.deepEqual(wakeCalls, [{ rootDir: '/tmp/adversarial-review-handoff-test' }]);
+  assert.deepEqual(wakeCalls, [{
+    rootDir: '/tmp/adversarial-review-handoff-test',
+    reason: 'review-to-remediation',
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 57,
+    headSha: 'review-head-sha',
+  }]);
   assert.deepEqual(enabled.result.handoffWake, {
     attempted: true,
     ok: true,

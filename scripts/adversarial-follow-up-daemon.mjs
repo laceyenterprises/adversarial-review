@@ -61,6 +61,10 @@ import {
   HANDOFF_WAKE_DAEMONS,
   sleepUntilTimerOrHandoffWake,
 } from '../src/handoff-wake.mjs';
+import {
+  createHandoffRateLimiter,
+  normalizeHandoffMaxPerPrHead,
+} from '../src/handoff-rate-cap.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -151,6 +155,18 @@ function resolveHandoffEnabled({ loadConfigImpl = loadConfigCached, env = proces
   } catch (err) {
     logError(`handoff config disabled for this tick: ${err?.message || err}`);
     return false;
+  }
+}
+
+function resolveHandoffConfigForDaemon({ loadConfigImpl = loadConfigCached, env = process.env } = {}) {
+  try {
+    return loadConfigImpl({ env }).getHandoffConfig();
+  } catch (err) {
+    logError(`handoff config disabled for this tick: ${err?.message || err}`);
+    return {
+      enabled: false,
+      maxPerPrHead: 20,
+    };
   }
 }
 
@@ -424,6 +440,123 @@ function resolveTelemetryListenerStartTimeoutMs(env = process.env) {
     : TELEMETRY_LISTENER_START_TIMEOUT_DEFAULT_MS;
 }
 
+async function runFollowUpDaemonIteration({
+  env = process.env,
+  refreshReviewerBrokerTokensImpl = refreshReviewerBrokerTokens,
+  reconcileInProgressFollowUpJobsImpl = reconcileInProgressFollowUpJobs,
+  emitHeartbeatsForActiveJobsImpl = emitHeartbeatsForActiveJobs,
+  sweepStuckInProgressClaimsImpl = sweepStuckInProgressClaims,
+  consumeFollowUpJobsUntilCapacityImpl = consumeFollowUpJobsUntilCapacity,
+  reapCloserHammerWorktreesImpl = reapCloserHammerWorktrees,
+  retryFailedCommentDeliveriesImpl = retryFailedCommentDeliveries,
+  runStoppedArchiveSweepIfDueImpl = runStoppedArchiveSweepIfDue,
+  shouldStop = () => stopping,
+} = {}) {
+  let reviewerTokenRefreshSummary = null;
+  await runStep('reviewer-token-refresh', async () => {
+    reviewerTokenRefreshSummary = await refreshReviewerBrokerTokensImpl({
+      log: console,
+      minTokenLifetimeMs: resolveRemediationWorkerTokenMinLifetimeMs(env),
+    });
+  });
+  if (shouldStop()) return;
+  await runStep('reconcile', () => reconcileInProgressFollowUpJobsImpl());
+  if (shouldStop()) return;
+  await runStep('heartbeat', () => {
+    const result = emitHeartbeatsForActiveJobsImpl({
+      rootDir: ROOT,
+      isWorkerAlive: isWorkerProcessRunning,
+    });
+    logTick(
+      'heartbeat',
+      `scanned=${result.scanned} touched=${result.touched} skipped=${result.skipped}`
+    );
+  });
+  if (shouldStop()) return;
+  await runStep('stale-claim-sweep', () => {
+    const thresholdMs = resolveInProgressStuckThresholdMs(env);
+    const result = sweepStuckInProgressClaimsImpl({ rootDir: ROOT, thresholdMs });
+    logTick(
+      'stale-claim-sweep',
+      `scanned=${result.scanned} reclaimed=${result.reclaimed} skipped=${result.skipped} ` +
+      `thresholdMs=${result.thresholdMs}`
+    );
+  });
+  if (shouldStop()) return;
+  if (shouldConsumeAfterReviewerTokenRefresh(reviewerTokenRefreshSummary)) {
+    await runStep('consume', async () => {
+      const result = await consumeFollowUpJobsUntilCapacityImpl({
+        maxConcurrent: MAX_CONCURRENT_REMEDIATION_JOBS,
+        shouldStop,
+      });
+      logTick(
+        'consume',
+        `maxConcurrent=${result.maxConcurrent} activeAtStart=${result.activeAtStart} ` +
+        `availableAtStart=${result.availableAtStart} spawned=${result.spawned} ` +
+        `stopped=${result.stopped} deferredSamePR=${result.deferredSamePR} ` +
+        `capacityRemaining=${result.capacityRemaining}`
+      );
+    });
+  } else {
+    logTick(
+      'consume',
+      `skipped unsafe reviewer token handoff roles=${describeUnsafeReviewerTokenHandoff(reviewerTokenRefreshSummary)}`
+    );
+  }
+  if (shouldStop()) return;
+  await runStep('closer-worktree-reap', async () => {
+    const result = await reapCloserHammerWorktreesImpl({ logger: console });
+    logTick(
+      'closer-worktree-reap',
+      `scanned=${result.scanned} reaped=${result.reaped} skipped=${result.skipped} ` +
+      `terminal=${result.terminal} prunable=${result.prunable} ` +
+      `halfRegistered=${result.halfRegistered} open=${result.open} ` +
+      `unknown=${result.unknown} errors=${result.errors} limit=${result.limit}`
+    );
+  });
+  if (shouldStop()) return;
+  await runStep('retry-comments', () => retryFailedCommentDeliveriesImpl());
+  if (shouldStop()) return;
+  await runStoppedArchiveSweepIfDueImpl();
+}
+
+async function sleepForNextFollowUpDaemonIteration({
+  rootDir = ROOT,
+  intervalMs = TICK_INTERVAL_MS,
+  signal = null,
+  env = process.env,
+  loadConfigImpl = loadConfigCached,
+  sleepUntilTimerOrHandoffWakeImpl = sleepUntilTimerOrHandoffWake,
+  sleepImpl = sleep,
+  rateLimiter = createHandoffRateLimiter({ rootDir, logger: console }),
+} = {}) {
+  const handoffConfig = resolveHandoffConfigForDaemon({ loadConfigImpl, env });
+  rateLimiter?.setMaxPerPrHead?.(normalizeHandoffMaxPerPrHead(handoffConfig.maxPerPrHead));
+
+  if (handoffConfig.enabled === true) {
+    const sleepResult = await sleepUntilTimerOrHandoffWakeImpl(
+      rootDir,
+      HANDOFF_WAKE_DAEMONS.followUp,
+      intervalMs,
+      {
+        enabled: true,
+        signal,
+        shouldAcceptWake: ({ payload }) => {
+          const result = rateLimiter?.inspect?.(payload);
+          return result?.accepted !== false;
+        },
+      },
+    );
+    if (sleepResult.reason === 'wake') {
+      logTick('tick', 'woken by handoff signal');
+    }
+    return sleepResult;
+  }
+
+  await sleepImpl(intervalMs, undefined, { signal });
+  return { reason: 'timer', handoffEnabled: false };
+}
+
 async function startFollowUpTelemetryListener({
   rootDir = ROOT,
   env = process.env,
@@ -486,86 +619,9 @@ async function main() {
     `${REMEDIATION_MAX_CONCURRENT_JOBS_ENV}=${MAX_CONCURRENT_REMEDIATION_JOBS})`
   );
 
+  const handoffRateLimiter = createHandoffRateLimiter({ rootDir: ROOT, logger: console });
   while (!stopping) {
-    // Keep the broker-minted reviewer GitHub App tokens fresh BEFORE any step
-    // that touches GitHub. This long-lived daemon resolved GH_*_REVIEWER_TOKEN
-    // once at startup; App installation tokens expire ~1h, so without this the
-    // remediation reply-comment POSTs (and the tokens that spawned remediation
-    // workers inherit) start failing with HTTP 401 about an hour after each
-    // (re)start — the watcher got this fix in pollOnce, the follow-up daemon did
-    // not, so its comments silently stopped posting. TTL-gated + fail-safe (keeps
-    // the existing token on any broker error; never throws). Runs first so the
-    // same-tick `consume` (spawns workers that snapshot env) and `retry-comments`
-    // both see the refreshed token. The daemon passes an explicit remediation
-    // handoff floor instead of reusing the reviewer timeout default: detached
-    // remediation workers can validly outlive a reviewer subprocess and still
-    // need their inherited GitHub token for final fetch/push/comment operations.
-    let reviewerTokenRefreshSummary = null;
-    await runStep('reviewer-token-refresh', async () => {
-      reviewerTokenRefreshSummary = await refreshReviewerBrokerTokens({
-        log: console,
-        minTokenLifetimeMs: resolveRemediationWorkerTokenMinLifetimeMs(process.env),
-      });
-    });
-    if (stopping) break;
-    await runStep('reconcile', () => reconcileInProgressFollowUpJobs());
-    if (stopping) break;
-    await runStep('heartbeat', () => {
-      const result = emitHeartbeatsForActiveJobs({
-        rootDir: ROOT,
-        isWorkerAlive: isWorkerProcessRunning,
-      });
-      logTick(
-        'heartbeat',
-        `scanned=${result.scanned} touched=${result.touched} skipped=${result.skipped}`
-      );
-    });
-    if (stopping) break;
-    await runStep('stale-claim-sweep', () => {
-      const thresholdMs = resolveInProgressStuckThresholdMs(process.env);
-      const result = sweepStuckInProgressClaims({ rootDir: ROOT, thresholdMs });
-      logTick(
-        'stale-claim-sweep',
-        `scanned=${result.scanned} reclaimed=${result.reclaimed} skipped=${result.skipped} ` +
-        `thresholdMs=${result.thresholdMs}`
-      );
-    });
-    if (stopping) break;
-    if (shouldConsumeAfterReviewerTokenRefresh(reviewerTokenRefreshSummary)) {
-      await runStep('consume', async () => {
-        const result = await consumeFollowUpJobsUntilCapacity({
-          maxConcurrent: MAX_CONCURRENT_REMEDIATION_JOBS,
-          shouldStop: () => stopping,
-        });
-        logTick(
-          'consume',
-          `maxConcurrent=${result.maxConcurrent} activeAtStart=${result.activeAtStart} ` +
-          `availableAtStart=${result.availableAtStart} spawned=${result.spawned} ` +
-          `stopped=${result.stopped} deferredSamePR=${result.deferredSamePR} ` +
-          `capacityRemaining=${result.capacityRemaining}`
-        );
-      });
-    } else {
-      logTick(
-        'consume',
-        `skipped unsafe reviewer token handoff roles=${describeUnsafeReviewerTokenHandoff(reviewerTokenRefreshSummary)}`
-      );
-    }
-    if (stopping) break;
-    await runStep('closer-worktree-reap', async () => {
-      const result = await reapCloserHammerWorktrees({ logger: console });
-      logTick(
-        'closer-worktree-reap',
-        `scanned=${result.scanned} reaped=${result.reaped} skipped=${result.skipped} ` +
-        `terminal=${result.terminal} prunable=${result.prunable} ` +
-        `halfRegistered=${result.halfRegistered} open=${result.open} ` +
-        `unknown=${result.unknown} errors=${result.errors} limit=${result.limit}`
-      );
-    });
-    if (stopping) break;
-    await runStep('retry-comments', () => retryFailedCommentDeliveries());
-    if (stopping) break;
-    await runStoppedArchiveSweepIfDue();
+    await runFollowUpDaemonIteration();
     logTick('tick', `complete; sleeping ${TICK_INTERVAL_SECONDS}s`);
 
     if (stopping) break;
@@ -576,19 +632,10 @@ async function main() {
     process.once('SIGTERM', stopWatch);
     process.once('SIGINT', stopWatch);
     try {
-      if (resolveHandoffEnabled()) {
-        const sleepResult = await sleepUntilTimerOrHandoffWake(
-          ROOT,
-          HANDOFF_WAKE_DAEMONS.followUp,
-          TICK_INTERVAL_MS,
-          { enabled: true, signal: ac.signal },
-        );
-        if (sleepResult.reason === 'wake') {
-          logTick('tick', 'woken by handoff signal');
-        }
-      } else {
-        await sleep(TICK_INTERVAL_MS, undefined, { signal: ac.signal });
-      }
+      await sleepForNextFollowUpDaemonIteration({
+        signal: ac.signal,
+        rateLimiter: handoffRateLimiter,
+      });
     } catch (err) {
       if (err?.name !== 'AbortError') {
         logTick(
@@ -625,7 +672,10 @@ export {
   normalizeMaintenanceSweepState,
   readMaintenanceSweepState,
   resolveHandoffEnabled,
+  resolveHandoffConfigForDaemon,
   reviewerTokenHandoffUnsafeRoles,
+  runFollowUpDaemonIteration,
+  sleepForNextFollowUpDaemonIteration,
   runStoppedArchiveSweepIfDue,
   shouldConsumeAfterReviewerTokenRefresh,
   startFollowUpTelemetryListener,

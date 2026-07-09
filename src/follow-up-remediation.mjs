@@ -5632,6 +5632,7 @@ async function reconcileFollowUpJob({
           reason: 'remediation-to-rereview',
           repo: job.repo,
           prNumber: job.prNumber,
+          ...(job.revisionRef || job.headSha ? { headSha: job.revisionRef || job.headSha } : {}),
           requestedAt: completedAt,
         });
         rereview.wake = {

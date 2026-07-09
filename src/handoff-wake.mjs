@@ -14,6 +14,8 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 
+import { normalizeHandoffMaxPerPrHead } from './handoff-rate-cap.mjs';
+
 export const HANDOFF_WAKE_DIR_MODE = 0o775;
 export const HANDOFF_WAKE_MARKER_MODE = 0o664;
 export const HANDOFF_WAKE_DAEMONS = Object.freeze({
@@ -25,7 +27,7 @@ const OWNER_SIGNAL_SCRIPT = `
 import { chmodSync, closeSync, mkdirSync, openSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const signalArgs = process.argv[1] === '[eval]' ? process.argv.slice(2) : process.argv.slice(1);
-const [rootDir, daemon, nowRaw, pidRaw] = signalArgs;
+const [rootDir, daemon, nowRaw, pidRaw, payloadRaw] = signalArgs;
 const name = String(daemon || '').trim();
 if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) throw new Error(\`invalid handoff wake daemon name: \${daemon}\`);
 const dir = join(rootDir, 'data', 'handoff-wake');
@@ -38,7 +40,14 @@ const tmpPath = \`\${finalPath}.tmp\`;
 try {
   const fd = openSync(tmpPath, 'wx', 0o664);
   try {
-    writeFileSync(fd, \`\${new Date(nowMs).toISOString()}\\n\`);
+    let payload = null;
+    try {
+      payload = payloadRaw ? JSON.parse(payloadRaw) : null;
+    } catch {}
+    writeFileSync(fd, \`\${JSON.stringify(payload || {
+      schema_version: 1,
+      requested_at: new Date(nowMs).toISOString(),
+    }, null, 2)}\\n\`);
   } finally {
     closeSync(fd);
   }
@@ -120,14 +129,35 @@ function markerPathInDir(dir, daemon, nowMs = Date.now(), pid = process.pid) {
   return join(dir, `${markerPrefix(daemon)}${nonce}.wake`);
 }
 
-function writeHandoffWakeMarkerNative(rootDir, daemon, nowMs) {
+function buildWakeMarkerPayload({ nowMs, reason = null, repo = null, prNumber = null, headSha = null } = {}) {
+  return {
+    schema_version: 1,
+    requested_at: new Date(nowMs).toISOString(),
+    ...(reason ? { reason } : {}),
+    ...(repo ? { repo } : {}),
+    ...(prNumber ? { pr_number: prNumber } : {}),
+    ...(headSha ? { head_sha: headSha } : {}),
+  };
+}
+
+function readWakeMarkerPayload(path) {
+  try {
+    const raw = readFileSync(path, 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function writeHandoffWakeMarkerNative(rootDir, daemon, nowMs, payload = null) {
   const dir = ensureHandoffWakeDir(rootDir);
   const finalPath = markerPathInDir(dir, daemon, nowMs);
   const tmpPath = `${finalPath}.tmp`;
   try {
     const fd = openSync(tmpPath, 'wx', HANDOFF_WAKE_MARKER_MODE);
     try {
-      writeFileSync(fd, `${new Date(nowMs).toISOString()}\n`);
+      const markerPayload = payload || buildWakeMarkerPayload({ nowMs });
+      writeFileSync(fd, `${JSON.stringify(markerPayload, null, 2)}\n`);
     } finally {
       closeSync(fd);
     }
@@ -148,7 +178,7 @@ function writeHandoffWakeMarkerNative(rootDir, daemon, nowMs) {
   return { finalPath, tmpPath };
 }
 
-function signalHandoffWakeAsOwner(rootDir, daemon, nowMs, ownerUid, { spawnSyncImpl = spawnSync } = {}) {
+function signalHandoffWakeAsOwner(rootDir, daemon, nowMs, ownerUid, payload, { spawnSyncImpl = spawnSync } = {}) {
   const ownerUser = resolveUsernameForUid(ownerUid, { spawnSyncImpl });
   const result = spawnSyncImpl(
     'sudo',
@@ -165,6 +195,7 @@ function signalHandoffWakeAsOwner(rootDir, daemon, nowMs, ownerUid, { spawnSyncI
       sanitizeDaemonName(daemon),
       String(nowMs),
       String(process.pid),
+      JSON.stringify(payload || buildWakeMarkerPayload({ nowMs })),
     ],
     { encoding: 'utf8', maxBuffer: 1024 * 1024 },
   );
@@ -208,17 +239,33 @@ function cleanupDaemonMarkers(dir, daemon, { olderThanMs = Infinity } = {}) {
 export function signalHandoffWake(
   rootDir,
   daemon,
-  { nowMs = Date.now(), spawnSyncImpl = spawnSync, currentUidImpl = currentUid } = {},
+  {
+    nowMs = Date.now(),
+    spawnSyncImpl = spawnSync,
+    currentUidImpl = currentUid,
+    reason = null,
+    repo = null,
+    prNumber = null,
+    headSha = null,
+    revisionRef = null,
+  } = {},
 ) {
   let tmpPath = null;
   try {
     sanitizeDaemonName(daemon);
+    const payload = buildWakeMarkerPayload({
+      nowMs,
+      reason,
+      repo,
+      prNumber,
+      headSha: headSha || revisionRef,
+    });
     const ownerUid = resolveCanonicalOwnerUid(rootDir);
     const uid = currentUidImpl();
     if (uid !== null && uid !== ownerUid) {
-      return signalHandoffWakeAsOwner(rootDir, daemon, nowMs, ownerUid, { spawnSyncImpl });
+      return signalHandoffWakeAsOwner(rootDir, daemon, nowMs, ownerUid, payload, { spawnSyncImpl });
     }
-    const { finalPath, tmpPath: nativeTmpPath } = writeHandoffWakeMarkerNative(rootDir, daemon, nowMs);
+    const { finalPath, tmpPath: nativeTmpPath } = writeHandoffWakeMarkerNative(rootDir, daemon, nowMs, payload);
     tmpPath = nativeTmpPath;
     return { signaled: true, path: finalPath };
   } catch (err) {
@@ -280,6 +327,7 @@ export async function sleepUntilTimerOrHandoffWake(
     clearTimeoutImpl = clearTimeout,
     watchImpl = watch,
     nowMs = () => Date.now(),
+    shouldAcceptWake = null,
   } = {},
 ) {
   if (!enabled) {
@@ -342,7 +390,19 @@ export async function sleepUntilTimerOrHandoffWake(
       } catch {
         return;
       }
-      finish({ reason: 'wake', path });
+      const payload = readWakeMarkerPayload(path);
+      if (typeof shouldAcceptWake === 'function') {
+        const accepted = shouldAcceptWake({ path, payload });
+        if (accepted === false) {
+          try {
+            rmSync(path, { force: true });
+          } catch {
+            // Best effort. A dropped wake must not break the timer fallback.
+          }
+          return;
+        }
+      }
+      finish({ reason: 'wake', path, payload });
     };
     const timeout = setTimeoutImpl(() => finish({ reason: 'timer' }), delayMs);
     try {
@@ -423,6 +483,6 @@ export function resolveHandoffConfig({ getConfigImpl } = {}) {
     reviewToRemediation: Boolean(read('roles.adversarial.handoff.review_to_remediation', false)),
     remediationToRereview: Boolean(read('roles.adversarial.handoff.remediation_to_rereview', false)),
     finalToHammer: Boolean(read('roles.adversarial.handoff.final_to_hammer', false)),
-    maxPerPrHead: Number(read('roles.adversarial.handoff.max_per_pr_head', 20)),
+    maxPerPrHead: normalizeHandoffMaxPerPrHead(read('roles.adversarial.handoff.max_per_pr_head', 20)),
   };
 }

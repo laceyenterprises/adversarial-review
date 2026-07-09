@@ -9,14 +9,17 @@ import {
   REMEDIATION_WORKER_TOKEN_MIN_LIFETIME_MS_ENV,
   normalizeMaintenanceSweepState,
   readMaintenanceSweepState,
+  runFollowUpDaemonIteration,
   resolveRemediationWorkerTokenMinLifetimeMs,
   resolveTelemetryListenerStartTimeoutMs,
   reviewerTokenHandoffUnsafeRoles,
   runStoppedArchiveSweepIfDue,
   shouldConsumeAfterReviewerTokenRefresh,
+  sleepForNextFollowUpDaemonIteration,
   startFollowUpTelemetryListener,
   writeMaintenanceSweepState,
 } from '../scripts/adversarial-follow-up-daemon.mjs';
+import { createHandoffRateLimiter, HANDOFF_RATE_CAP_AUDIT_EVENT } from '../src/handoff-rate-cap.mjs';
 
 function makeTempDir(t) {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-daemon-'));
@@ -327,6 +330,167 @@ test('maintenance failed-step retry cooldown can be tuned by env', async (t) => 
   );
 });
 
+test('follow-up daemon drops and audits wakes beyond max_per_pr_head', async (t) => {
+  const rootDir = makeTempDir(t);
+  const auditPath = path.join(rootDir, 'data', 'handoff-wake', 'rate-cap-audit.jsonl');
+  const limiter = createHandoffRateLimiter({
+    rootDir,
+    auditPath,
+    maxPerPrHead: 2,
+    logger: { warn() {} },
+    now: () => '2026-07-09T12:00:00.000Z',
+  });
+  const accepted = [];
+
+  const result = await sleepForNextFollowUpDaemonIteration({
+    rootDir,
+    intervalMs: 10,
+    rateLimiter: limiter,
+    loadConfigImpl: () => ({
+      getHandoffConfig: () => ({ enabled: true, maxPerPrHead: 2 }),
+    }),
+    sleepUntilTimerOrHandoffWakeImpl: async (_root, _daemon, _delay, options) => {
+      const payload = {
+        repo: 'laceyenterprises/adversarial-review',
+        pr_number: 57,
+        head_sha: 'head-a',
+      };
+      accepted.push(options.shouldAcceptWake({ payload }));
+      accepted.push(options.shouldAcceptWake({ payload }));
+      accepted.push(options.shouldAcceptWake({ payload }));
+      return { reason: 'timer' };
+    },
+  });
+
+  assert.equal(result.reason, 'timer');
+  assert.deepEqual(accepted, [true, true, false]);
+  const audit = JSON.parse(readFileSync(auditPath, 'utf8').trim());
+  assert.equal(audit.event, HANDOFF_RATE_CAP_AUDIT_EVENT);
+  assert.equal(audit.repo, 'laceyenterprises/adversarial-review');
+  assert.equal(audit.pr_number, 57);
+  assert.equal(audit.head_sha, 'head-a');
+  assert.equal(audit.count, 3);
+  assert.equal(audit.max_per_pr_head, 2);
+});
+
+test('follow-up daemon kill-switch disabled uses timer sleep instead of wake wait', async (t) => {
+  const rootDir = makeTempDir(t);
+  let timerSleepMs = null;
+
+  const result = await sleepForNextFollowUpDaemonIteration({
+    rootDir,
+    intervalMs: 123,
+    loadConfigImpl: () => ({
+      getHandoffConfig: () => ({ enabled: false, maxPerPrHead: 2 }),
+    }),
+    sleepUntilTimerOrHandoffWakeImpl: async () => {
+      throw new Error('wake wait should not run when handoff is disabled');
+    },
+    sleepImpl: async (ms) => {
+      timerSleepMs = ms;
+    },
+  });
+
+  assert.deepEqual(result, { reason: 'timer', handoffEnabled: false });
+  assert.equal(timerSleepMs, 123);
+});
+
+test('follow-up daemon iteration preserves reconcile and closer reaper on wake-driven passes', async () => {
+  const calls = [];
+
+  await runFollowUpDaemonIteration({
+    refreshReviewerBrokerTokensImpl: async () => ({ handoffSafe: [] }),
+    reconcileInProgressFollowUpJobsImpl: async () => {
+      calls.push('reconcile');
+    },
+    emitHeartbeatsForActiveJobsImpl: () => {
+      calls.push('heartbeat');
+      return { scanned: 0, touched: 0, skipped: 0 };
+    },
+    sweepStuckInProgressClaimsImpl: () => {
+      calls.push('stale-claim-sweep');
+      return { scanned: 0, reclaimed: 0, skipped: 0, thresholdMs: 1 };
+    },
+    consumeFollowUpJobsUntilCapacityImpl: async () => {
+      calls.push('consume');
+      return {
+        maxConcurrent: 1,
+        activeAtStart: 0,
+        availableAtStart: 0,
+        spawned: 0,
+        stopped: 0,
+        deferredSamePR: 0,
+        capacityRemaining: 1,
+      };
+    },
+    reapCloserHammerWorktreesImpl: async () => {
+      calls.push('closer-worktree-reap');
+      return {
+        scanned: 0,
+        reaped: 0,
+        skipped: 0,
+        terminal: 0,
+        prunable: 0,
+        halfRegistered: 0,
+        open: 0,
+        unknown: 0,
+        errors: 0,
+        limit: 0,
+      };
+    },
+    retryFailedCommentDeliveriesImpl: () => {
+      calls.push('retry-comments');
+    },
+    runStoppedArchiveSweepIfDueImpl: async () => {
+      calls.push('maintenance-sweep');
+    },
+    shouldStop: () => false,
+  });
+
+  assert.ok(calls.indexOf('reconcile') > -1);
+  assert.ok(calls.indexOf('closer-worktree-reap') > calls.indexOf('consume'));
+  assert.ok(calls.indexOf('retry-comments') > calls.indexOf('closer-worktree-reap'));
+});
+
+test('follow-up wake storm on one head does not starve another PR head', async (t) => {
+  const rootDir = makeTempDir(t);
+  const limiter = createHandoffRateLimiter({
+    rootDir,
+    maxPerPrHead: 2,
+    logger: { warn() {} },
+  });
+  const accepted = [];
+
+  const result = await sleepForNextFollowUpDaemonIteration({
+    rootDir,
+    intervalMs: 10,
+    rateLimiter: limiter,
+    loadConfigImpl: () => ({
+      getHandoffConfig: () => ({ enabled: true, maxPerPrHead: 2 }),
+    }),
+    sleepUntilTimerOrHandoffWakeImpl: async (_root, _daemon, _delay, options) => {
+      const storm = {
+        repo: 'laceyenterprises/adversarial-review',
+        pr_number: 57,
+        head_sha: 'head-a',
+      };
+      const other = {
+        repo: 'laceyenterprises/adversarial-review',
+        pr_number: 58,
+        head_sha: 'head-b',
+      };
+      accepted.push(options.shouldAcceptWake({ payload: storm }));
+      accepted.push(options.shouldAcceptWake({ payload: storm }));
+      accepted.push(options.shouldAcceptWake({ payload: storm }));
+      accepted.push(options.shouldAcceptWake({ payload: other }));
+      return { reason: accepted.at(-1) ? 'wake' : 'timer', payload: other };
+    },
+  });
+
+  assert.deepEqual(accepted, [true, true, false, true]);
+  assert.equal(result.reason, 'wake');
+});
+
 // Regression guard for the per-tick reviewer-token refresh wiring. The tick
 // loop lives in main() (not exported), so we assert at the source level that
 // the refresh runs as the FIRST tick step — ahead of `consume` (which spawns
@@ -351,7 +515,7 @@ test('tick loop refreshes the reviewer broker token before any GitHub step', () 
   assert.ok(retryIdx > refreshIdx, 'refresh must run before retry-comments (direct post)');
   assert.match(
     src,
-    /minTokenLifetimeMs:\s*resolveRemediationWorkerTokenMinLifetimeMs\(process\.env\)/,
+    /minTokenLifetimeMs:\s*resolveRemediationWorkerTokenMinLifetimeMs\(env\)/,
     'daemon must pass an explicit remediation-worker handoff floor',
   );
 });

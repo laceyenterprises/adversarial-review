@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -39,6 +39,33 @@ test('handoff wake interrupts a listening sleep within two seconds', async (t) =
   const elapsedMs = Date.now() - started;
   assert.equal(result.reason, 'wake');
   assert.ok(elapsedMs < 2_000, `wake took ${elapsedMs}ms`);
+});
+
+test('handoff wake marker carries PR head metadata for rate limiting', async (t) => {
+  const rootDir = makeTempRoot(t);
+  const sleepPromise = sleepUntilTimerOrHandoffWake(
+    rootDir,
+    HANDOFF_WAKE_DAEMONS.followUp,
+    10_000,
+    { enabled: true },
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const signalResult = signalHandoffWake(rootDir, HANDOFF_WAKE_DAEMONS.followUp, {
+    reason: 'review-to-remediation',
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 57,
+    headSha: 'head-a',
+  });
+  assert.equal(signalResult.signaled, true);
+  const markerPayload = JSON.parse(readFileSync(signalResult.path, 'utf8'));
+  assert.equal(markerPayload.reason, 'review-to-remediation');
+  assert.equal(markerPayload.repo, 'laceyenterprises/adversarial-review');
+  assert.equal(markerPayload.pr_number, 57);
+  assert.equal(markerPayload.head_sha, 'head-a');
+
+  const result = await sleepPromise;
+  assert.equal(result.reason, 'wake');
 });
 
 test('handoff wake with no listener is a harmless no-op for a later sleep', async (t) => {
@@ -153,8 +180,9 @@ test('handoff wake signaling delegates to the canonical owner instead of creatin
     if (command === 'sudo') {
       assert.deepEqual(args.slice(0, 4), ['-A', '-H', '-u', 'daemon-owner']);
       assert.equal(args[4], process.execPath);
-      assert.equal(args.at(-4), rootDir);
-      assert.equal(args.at(-3), HANDOFF_WAKE_DAEMONS.followUp);
+      assert.equal(args.at(-5), rootDir);
+      assert.equal(args.at(-4), HANDOFF_WAKE_DAEMONS.followUp);
+      assert.equal(JSON.parse(args.at(-1)).schema_version, 1);
       const delegated = spawnSync(args[4], args.slice(5), { encoding: 'utf8' });
       assert.equal(delegated.status, 0, delegated.stderr);
       assert.match(String(delegated.stdout || ''), /follow-up\..+\.wake$/);

@@ -4401,6 +4401,34 @@ test('AMA getMergeAuthorityConfig reflects the canonical env override', () => {
   }
 });
 
+test('HOM handoff config defaults off and resolves env aliases', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const defaults = loadConfig({ topPath: top, env: {} });
+    assert.equal(defaults.get('roles.adversarial.handoff.enabled'), false);
+    assert.equal(defaults.get('roles.adversarial.handoff.review_to_remediation'), false);
+    assert.equal(defaults.get('roles.adversarial.handoff.remediation_to_rereview'), false);
+    assert.equal(defaults.get('roles.adversarial.handoff.final_to_hammer'), false);
+    assert.equal(defaults.get('roles.adversarial.handoff.max_per_pr_head'), 20);
+
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_ENABLED: 'true',
+        AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_REVIEW_TO_REMEDIATION: 'true',
+        AGENT_OS_ROLES_ADVERSARIAL_HANDOFF_MAX_PER_PR_HEAD: '9',
+      },
+    });
+    assert.equal(cfg.get('roles.adversarial.handoff.enabled'), true);
+    assert.equal(cfg.get('roles.adversarial.handoff.review_to_remediation'), true);
+    assert.equal(cfg.get('roles.adversarial.handoff.max_per_pr_head'), 9);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('AMA_ENABLED retired env var fails loud only for enabling values in Node loader', () => {
   const tmp = freshTmp();
   try {

@@ -245,6 +245,11 @@ import {
   summarizePRRemediationLedger,
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
+import {
+  FOLLOW_UP_DAEMON_WAKE_TARGET,
+  signalFollowUpDaemonWake,
+  waitForHandoffWake,
+} from '../src/handoff-wake.mjs';
 
 function makeJob(overrides = {}) {
   return {
@@ -3864,6 +3869,63 @@ function drainerTestOptions(rootDir, spawnCalls, overrides = {}) {
     ...overrides,
   };
 }
+
+test('review-to-remediation wake lets daemon consume a queued job within five seconds', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-handoff-'));
+  createPendingRemediationJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:00:00.000Z' });
+
+  const startedAt = Date.now();
+  const waitForWake = waitForHandoffWake({
+    rootDir,
+    target: FOLLOW_UP_DAEMON_WAKE_TARGET,
+    timeoutMs: 5000,
+  });
+  setTimeout(() => signalFollowUpDaemonWake({ rootDir }), 25);
+  const wakeResult = await waitForWake;
+  const wakeLatencyMs = Date.now() - startedAt;
+
+  assert.equal(wakeResult.woke, true);
+  assert.ok(wakeLatencyMs < 5000, `wake latency ${wakeLatencyMs}ms should be under 5s`);
+
+  const spawnCalls = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, spawnCalls, { maxConcurrent: 1 })
+  ));
+
+  assert.equal(result.spawned, 1);
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter((name) => name.endsWith('.json')).length, 0);
+});
+
+test('follow-up daemon falls back to timer sleep when handoff wake watcher fails', () => {
+  const source = readFileSync(path.join(process.cwd(), 'scripts', 'adversarial-follow-up-daemon.mjs'), 'utf8');
+  assert.match(source, /handoff-wake[\s\S]*falling back to timer/);
+  assert.match(source, /await sleep\(TICK_INTERVAL_MS, undefined, \{ signal: ac\.signal \}\)/);
+  assert.match(source, /sleepErr\?\.name !== 'AbortError'/);
+});
+
+test('review-to-remediation consume wake preserves max-round refusal through claimNextFollowUpJob', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-handoff-budget-'));
+  createPendingRemediationJob(rootDir, {
+    prNumber: 77,
+    priorCompletedRounds: 1,
+    maxRemediationRounds: 1,
+    critical: false,
+    riskClass: 'low',
+  });
+
+  const spawnCalls = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, spawnCalls, { maxConcurrent: 1 })
+  ));
+
+  assert.equal(result.stopped, 1);
+  assert.equal(result.spawned, 0);
+  assert.equal(spawnCalls.length, 0);
+  assert.equal(result.results[0]?.reason, 'max-rounds-reached');
+  assert.equal(result.results.some((entry) => entry.consumed === true), false);
+  assert.equal(readdirSync(getFollowUpJobDir(rootDir, 'stopped')).filter((name) => name.endsWith('.json')).length, 1);
+});
 
 test('consumeFollowUpJobsUntilCapacity with max concurrency 1 preserves one-job consume behavior', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));

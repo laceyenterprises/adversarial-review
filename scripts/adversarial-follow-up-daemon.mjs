@@ -590,7 +590,17 @@ async function main() {
         await sleep(TICK_INTERVAL_MS, undefined, { signal: ac.signal });
       }
     } catch (err) {
-      if (err?.name !== 'AbortError') throw err;
+      if (err?.name !== 'AbortError') {
+        logTick(
+          'handoff-wake',
+          `watch failed (${err?.code || err?.name || 'error'}: ${err?.message || err}); falling back to timer`
+        );
+        try {
+          await sleep(TICK_INTERVAL_MS, undefined, { signal: ac.signal });
+        } catch (sleepErr) {
+          if (sleepErr?.name !== 'AbortError') throw sleepErr;
+        }
+      }
     } finally {
       process.removeListener('SIGTERM', stopWatch);
       process.removeListener('SIGINT', stopWatch);

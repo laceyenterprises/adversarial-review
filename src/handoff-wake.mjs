@@ -49,6 +49,11 @@ function markerPrefix(daemon) {
   return `${sanitizeDaemonName(daemon)}.`;
 }
 
+function isWakeMarkerName(filename, daemon) {
+  const name = String(filename || '');
+  return name.startsWith(markerPrefix(daemon)) && name.endsWith('.wake');
+}
+
 function markerPath(rootDir, daemon, nowMs = Date.now(), pid = process.pid) {
   const nonce = `${nowMs}.${pid}.${Math.random().toString(36).slice(2)}`;
   return join(ensureHandoffWakeDir(rootDir), `${markerPrefix(daemon)}${nonce}.wake`);
@@ -65,7 +70,7 @@ function cleanupDaemonMarkers(dir, daemon, { olderThanMs = Infinity } = {}) {
     return { removed, failed: failed + 1 };
   }
   for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.startsWith(prefix)) continue;
+    if (!entry.isFile() || !entry.name.startsWith(prefix) || !entry.name.endsWith('.wake')) continue;
     const path = join(dir, entry.name);
     try {
       const st = statSync(path);
@@ -85,9 +90,11 @@ function cleanupDaemonMarkers(dir, daemon, { olderThanMs = Infinity } = {}) {
 }
 
 export function signalHandoffWake(rootDir, daemon, { nowMs = Date.now() } = {}) {
-  const finalPath = markerPath(rootDir, daemon, nowMs);
-  const tmpPath = `${finalPath}.tmp`;
+  let finalPath = null;
+  let tmpPath = null;
   try {
+    finalPath = markerPath(rootDir, daemon, nowMs);
+    tmpPath = `${finalPath}.tmp`;
     const fd = openSync(tmpPath, 'wx', HANDOFF_WAKE_MARKER_MODE);
     try {
       writeFileSync(fd, `${new Date(nowMs).toISOString()}\n`);
@@ -102,10 +109,12 @@ export function signalHandoffWake(rootDir, daemon, { nowMs = Date.now() } = {}) 
     renameSync(tmpPath, finalPath);
     return { signaled: true, path: finalPath };
   } catch (err) {
-    try {
-      rmSync(tmpPath, { force: true });
-    } catch {
-      // Nothing useful to do here; signaling is intentionally best-effort.
+    if (tmpPath) {
+      try {
+        rmSync(tmpPath, { force: true });
+      } catch {
+        // Nothing useful to do here; signaling is intentionally best-effort.
+      }
     }
     return { signaled: false, error: err };
   }
@@ -174,11 +183,9 @@ export async function sleepUntilTimerOrHandoffWake(
     });
   }
 
-  const dir = ensureHandoffWakeDir(rootDir);
-  const startMs = nowMs();
-  cleanupDaemonMarkers(dir, daemon, { olderThanMs: startMs - 1 });
-
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve, _reject) => {
+    let dir = null;
+    const startMs = nowMs();
     let settled = false;
     let watcher = null;
     const finish = (result) => {
@@ -191,14 +198,14 @@ export async function sleepUntilTimerOrHandoffWake(
       } catch {
         // Closing a native watcher is best-effort during process shutdown.
       }
-      if (result.reason === 'wake') {
+      if (result.reason === 'wake' && dir) {
         cleanupDaemonMarkers(dir, daemon, { olderThanMs: Infinity });
       }
       resolve(result);
     };
     const onAbort = () => finish({ reason: 'abort' });
     const onWatchEvent = (_eventType, filename) => {
-      if (settled || !filename || !String(filename).startsWith(markerPrefix(daemon))) return;
+      if (settled || !filename || !isWakeMarkerName(filename, daemon)) return;
       const path = join(dir, String(filename));
       try {
         if (!existsSync(path)) return;
@@ -211,14 +218,35 @@ export async function sleepUntilTimerOrHandoffWake(
     };
     const timeout = setTimeoutImpl(() => finish({ reason: 'timer' }), delayMs);
     try {
+      dir = ensureHandoffWakeDir(rootDir);
+      cleanupDaemonMarkers(dir, daemon, { olderThanMs: startMs - 1 });
       watcher = watchImpl(dir, { persistent: true }, onWatchEvent);
-      watcher.on?.('error', (err) => {
-        if (!settled) reject(err);
+      watcher.on?.('error', () => {
+        try {
+          watcher?.close?.();
+        } catch {
+          // The timer remains the correctness fallback after watcher failure.
+        }
+        watcher = null;
       });
-    } catch (err) {
-      clearTimeoutImpl(timeout);
-      signal?.removeEventListener?.('abort', onAbort);
-      reject(err);
+    } catch {
+      // Directory setup and watcher initialization are best-effort. Keep the
+      // scheduled timer active so the daemon loop degrades to its fallback.
+      dir = null;
+      watcher = null;
+    }
+    if (dir) {
+      try {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          if (!entry.isFile() || !isWakeMarkerName(entry.name, daemon)) continue;
+          onWatchEvent('rename', entry.name);
+          if (settled) break;
+        }
+      } catch {
+        // A failed sweep is equivalent to a missed handoff; the timer remains.
+      }
+    }
+    if (settled) {
       return;
     }
     if (signal?.aborted) {

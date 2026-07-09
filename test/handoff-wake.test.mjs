@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -111,4 +112,116 @@ test('disabled handoff sleep path does not create or watch the wake directory', 
   assert.equal(result.reason, 'timer');
   assert.equal(watched, false);
   assert.throws(() => readdirSync(join(rootDir, 'data', 'handoff-wake')), /ENOENT/);
+});
+
+test('handoff wake signaling is best-effort when directory setup fails', (t) => {
+  const rootDir = makeTempRoot(t);
+  writeFileSync(join(rootDir, 'data'), 'not a directory');
+
+  const signalResult = signalHandoffWake(rootDir, HANDOFF_WAKE_DAEMONS.followUp);
+
+  assert.equal(signalResult.signaled, false);
+  assert.match(signalResult.error.message, /ENOTDIR|not a directory/i);
+});
+
+test('handoff wake sleep falls back to timer when directory setup fails', async (t) => {
+  const rootDir = makeTempRoot(t);
+  writeFileSync(join(rootDir, 'data'), 'not a directory');
+
+  const result = await sleepUntilTimerOrHandoffWake(
+    rootDir,
+    HANDOFF_WAKE_DAEMONS.followUp,
+    5,
+    { enabled: true },
+  );
+
+  assert.equal(result.reason, 'timer');
+});
+
+test('handoff wake sleep falls back to timer when watcher setup fails', async (t) => {
+  const rootDir = makeTempRoot(t);
+
+  const result = await sleepUntilTimerOrHandoffWake(
+    rootDir,
+    HANDOFF_WAKE_DAEMONS.followUp,
+    5,
+    {
+      enabled: true,
+      watchImpl: () => {
+        throw new Error('too many watchers');
+      },
+    },
+  );
+
+  assert.equal(result.reason, 'timer');
+});
+
+test('handoff wake sleep falls back to timer when watcher emits an error', async (t) => {
+  const rootDir = makeTempRoot(t);
+  let closed = false;
+
+  const result = await sleepUntilTimerOrHandoffWake(
+    rootDir,
+    HANDOFF_WAKE_DAEMONS.followUp,
+    5,
+    {
+      enabled: true,
+      watchImpl: () => {
+        const watcher = new EventEmitter();
+        watcher.close = () => {
+          closed = true;
+        };
+        setTimeout(() => watcher.emit('error', new Error('watch failed')), 0);
+        return watcher;
+      },
+    },
+  );
+
+  assert.equal(result.reason, 'timer');
+  assert.equal(closed, true);
+});
+
+test('handoff wake ignores temporary marker files', async (t) => {
+  const rootDir = makeTempRoot(t);
+
+  const result = await sleepUntilTimerOrHandoffWake(
+    rootDir,
+    HANDOFF_WAKE_DAEMONS.followUp,
+    5,
+    {
+      enabled: true,
+      watchImpl: (_dir, _options, onEvent) => {
+        const watcher = new EventEmitter();
+        watcher.close = () => {};
+        onEvent('rename', 'follow-up.123.tmp');
+        onEvent('rename', 'follow-up.123.wake.tmp');
+        return watcher;
+      },
+    },
+  );
+
+  assert.equal(result.reason, 'timer');
+});
+
+test('handoff wake sleep sweeps for markers created during watcher setup', async (t) => {
+  const rootDir = makeTempRoot(t);
+
+  const result = await sleepUntilTimerOrHandoffWake(
+    rootDir,
+    HANDOFF_WAKE_DAEMONS.followUp,
+    10_000,
+    {
+      enabled: true,
+      watchImpl: () => {
+        const signalResult = signalHandoffWake(rootDir, HANDOFF_WAKE_DAEMONS.followUp);
+        assert.equal(signalResult.signaled, true);
+        const watcher = new EventEmitter();
+        watcher.close = () => {};
+        return watcher;
+      },
+    },
+  );
+
+  assert.equal(result.reason, 'wake');
+  assert.match(result.path, /\.wake$/);
 });

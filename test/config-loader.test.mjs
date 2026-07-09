@@ -4783,6 +4783,47 @@ test('apps.<id> env value change busts the config cache', () => {
   }
 });
 
+test('top-level config.yaml accepts mirrored oauth_broker watchdog BPR-05 keys', () => {
+  // BPR-05 is Python-owned, but the checked-in shared config.yaml carries this
+  // key and must parse under the watcher strict schema.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      oauth_broker:
+        watchdog:
+          portforward_self_heal_max_cycles: 3
+          broker_standby_readyz_url: ""
+          broker_standby_container_name: litellm-oauth-broker-standby-1
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('oauth_broker.watchdog.portforward_self_heal_max_cycles'), 3);
+    assert.equal(cfg.get('oauth_broker.watchdog.broker_standby_readyz_url'), '');
+    assert.equal(
+      cfg.get('oauth_broker.watchdog.broker_standby_container_name'),
+      'litellm-oauth-broker-standby-1',
+    );
+
+    const envCfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_OAUTH_BROKER_WATCHDOG_PORTFORWARD_SELF_HEAL_MAX_CYCLES: '4',
+        OAUTH_BROKER_WATCHDOG_STANDBY_READYZ_URL: 'none',
+        OAUTH_BROKER_WATCHDOG_STANDBY_CONTAINER_NAME: 'custom-standby-1',
+      },
+    });
+    assert.equal(envCfg.get('oauth_broker.watchdog.portforward_self_heal_max_cycles'), 4);
+    assert.equal(envCfg.get('oauth_broker.watchdog.broker_standby_readyz_url'), 'none');
+    assert.equal(
+      envCfg.get('oauth_broker.watchdog.broker_standby_container_name'),
+      'custom-standby-1',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // oauth_broker.merge_agent is a tolerate-only partial mirror: the watcher does
 // NOT consume these keys (the merge-agent App-installation-token auth is
 // resolved by modules/worker-pool/lib/hq-gh.sh; the authoritative CFG contract

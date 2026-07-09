@@ -210,8 +210,11 @@ test('hard review ceiling defaults only for missing or invalid round budgets', (
   assert.equal(resolveHardReviewCeiling(null), 4);
   assert.equal(resolveHardReviewCeiling(''), 4);
   assert.equal(resolveHardReviewCeiling('not-a-number'), 4);
-  assert.equal(resolveHardReviewCeiling(0), 2);
-  assert.equal(resolveHardReviewCeiling('0'), 2);
+  // ceiling = budget + 1 (floor at 0). A 0 budget → ceiling 1 (first-pass
+  // review, zero re-reviews), not 2.
+  assert.equal(resolveHardReviewCeiling(0), 1);
+  assert.equal(resolveHardReviewCeiling('0'), 1);
+  assert.equal(resolveHardReviewCeiling(-3), 1);
   assert.equal(resolveHardReviewCeiling(3), 4);
   assert.equal(resolveHardReviewCeiling('3.8'), 4);
 });

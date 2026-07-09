@@ -8089,6 +8089,7 @@ async function pollOnce(
             // (2) Hard review ceiling — independently, never review one PR more
             //     than (round budget + 1) times regardless of head churn, so the
             //     adversarial-review count is bounded even if (1) is bypassed.
+            let skipReviewerSpawnReason = null;
             if (passKind === 'rereview') {
               let closerHead = null;
               try {
@@ -8100,10 +8101,7 @@ async function pollOnce(
                 });
               } catch (err) {
                 if (isTransientGhError(err)) throw err;
-                console.warn(
-                  `[watcher] closer-head probe failed for ${repoPath}#${prNumber}; ` +
-                  `not skipping review: ${err?.message || err}`,
-                );
+                throw err;
               }
               if (closerHead?.suppressed) {
                 console.log(
@@ -8112,66 +8110,74 @@ async function pollOnce(
                   `(${closerHead.reason}); hammer remediation is terminal — deferring to the ` +
                   `close path. No attempt budget consumed.`,
                 );
-                return;
+                skipReviewerSpawnReason = 'terminal-closer-head';
               }
 
               const hardReviewCeiling = Number.isFinite(Number(maxRemediationRounds))
                 ? Math.max(1, Math.floor(Number(maxRemediationRounds))) + 1
                 : 4;
               const priorReviewAttempts = Number(current?.review_attempts || 0);
-              if (priorReviewAttempts >= hardReviewCeiling) {
+              if (!skipReviewerSpawnReason && priorReviewAttempts >= hardReviewCeiling) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
                   `ceiling reached (${priorReviewAttempts} >= ${hardReviewCeiling}); adversarial ` +
                   `reviews are capped per PR — deferring to the close path. ` +
                   `No attempt budget consumed.`,
                 );
-                return;
+                skipReviewerSpawnReason = 'hard-review-ceiling';
               }
             }
 
-            const result = await spawnReviewer({
-              repo: repoPath,
-              prNumber,
-              reviewerModel: route.reviewerModel,
-              botTokenEnv: route.botTokenEnv,
-              linearTicketId,
-              labels: Array.isArray(subject.labels) ? subject.labels : [],
-              builderTag: route.tag,
-              crossModelReviewWaived: Boolean(crossModelWaiverReason),
-              crossModelReviewWaiverReason: crossModelWaiverReason,
-              reviewerHeadSha,
-              reviewAttemptNumber,
-              reviewDbAttemptNumber,
-              completedRemediationRounds,
-              passKind,
-              maxRemediationRounds,
-              advisoryFindings: vocabularyFatigueFinding ? [vocabularyFatigueFinding] : [],
-              reviewerSessionUuid,
-              reviewerTimeoutMs,
-              workspacePath: null,
-              onReviewerPgid: ({ pgid, spawnedAt }) => {
-                persistReviewerPgid({
-                  pgid,
-                  reviewerSessionUuid,
-                  repoPath,
-                  prNumber,
-                  startedAt: spawnedAt,
-                  reviewerTimeoutMs,
-                });
-              },
-            });
-            if (result.ok) {
-              healthProbe?.recordSpawn?.(healthTick, { at: attemptAt });
-            }
+            if (skipReviewerSpawnReason) {
+              stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);
+              console.log(
+                `[watcher] Released reviewer claim for ${repoPath}#${prNumber} after ` +
+                `${skipReviewerSpawnReason}; continuing to watcher close/maintenance path.`
+              );
+            } else {
+              const result = await spawnReviewer({
+                repo: repoPath,
+                prNumber,
+                reviewerModel: route.reviewerModel,
+                botTokenEnv: route.botTokenEnv,
+                linearTicketId,
+                labels: Array.isArray(subject.labels) ? subject.labels : [],
+                builderTag: route.tag,
+                crossModelReviewWaived: Boolean(crossModelWaiverReason),
+                crossModelReviewWaiverReason: crossModelWaiverReason,
+                reviewerHeadSha,
+                reviewAttemptNumber,
+                reviewDbAttemptNumber,
+                completedRemediationRounds,
+                passKind,
+                maxRemediationRounds,
+                advisoryFindings: vocabularyFatigueFinding ? [vocabularyFatigueFinding] : [],
+                reviewerSessionUuid,
+                reviewerTimeoutMs,
+                workspacePath: null,
+                onReviewerPgid: ({ pgid, spawnedAt }) => {
+                  persistReviewerPgid({
+                    pgid,
+                    reviewerSessionUuid,
+                    repoPath,
+                    prNumber,
+                    startedAt: spawnedAt,
+                    reviewerTimeoutMs,
+                  });
+                },
+              });
+              if (result.ok) {
+                healthProbe?.recordSpawn?.(healthTick, { at: attemptAt });
+              }
 
-            settleReviewerAttempt({
-              rootDir: ROOT,
-              repoPath,
-              prNumber,
-              result,
-              maxRemediationRounds,
-            });
+              settleReviewerAttempt({
+                rootDir: ROOT,
+                repoPath,
+                prNumber,
+                result,
+                maxRemediationRounds,
+              });
+            }
           } finally {
             reservation.release();
           }

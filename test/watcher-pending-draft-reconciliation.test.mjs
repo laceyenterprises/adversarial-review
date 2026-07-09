@@ -171,6 +171,42 @@ test('watcher runs pending-draft reconciliation after claim and freshness re-che
   assert.ok(releaseIndex > reconcileIndex, 'skip-spawn path should release the claim');
 });
 
+test('watcher terminal rereview skip releases claim and falls through to close path', () => {
+  const source = readFileSync(WATCHER_SOURCE, 'utf8');
+  const guardIndex = source.indexOf("let skipReviewerSpawnReason = null;");
+  const closerCatchIndex = source.indexOf("if (isTransientGhError(err)) throw err;", guardIndex);
+  const closerSuppressedIndex = source.indexOf("if (closerHead?.suppressed) {", guardIndex);
+  const hardCeilingIndex = source.indexOf("const hardReviewCeiling =", guardIndex);
+  const hardSkipIndex = source.indexOf("if (!skipReviewerSpawnReason && priorReviewAttempts >= hardReviewCeiling) {", guardIndex);
+  const skipReleaseIndex = source.indexOf("if (skipReviewerSpawnReason) {", guardIndex);
+  const spawnIndex = source.indexOf("const result = await spawnReviewer({", guardIndex);
+  const adoptionIndex = source.indexOf("await runQueuedReviewAdoptionPhase({", spawnIndex);
+
+  assert.ok(guardIndex > 0, 'rereview skip guard should exist');
+  assert.ok(closerCatchIndex > guardIndex, 'closer-head probe should classify transient errors');
+  assert.ok(
+    source.slice(closerCatchIndex, closerSuppressedIndex).includes("throw err;"),
+    'non-transient closer-head probe failures should be rethrown instead of warned through'
+  );
+  assert.equal(
+    source.slice(closerSuppressedIndex, hardCeilingIndex).includes("return;"),
+    false,
+    'terminal closer-head skip must not return before watcher close/maintenance work'
+  );
+  assert.equal(
+    source.slice(hardSkipIndex, skipReleaseIndex).includes("return;"),
+    false,
+    'hard review ceiling skip must not return before watcher close/maintenance work'
+  );
+  assert.ok(skipReleaseIndex > hardSkipIndex, 'skip branch should run after both rereview skip checks');
+  assert.ok(
+    source.indexOf("stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);", skipReleaseIndex) > skipReleaseIndex,
+    'skip branch should release the already-claimed reviewer row'
+  );
+  assert.ok(spawnIndex > skipReleaseIndex, 'spawnReviewer should be in the non-skip branch');
+  assert.ok(adoptionIndex > spawnIndex, 'watcher close/maintenance phase should remain after reviewer dispatch');
+});
+
 test('watcher pre-spawn reconciliation retains a fresh current-head draft and skips this tick', async () => {
   const log = makeLog();
   const fetchImpl = async (url, opts = {}) => {

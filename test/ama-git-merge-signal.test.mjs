@@ -78,6 +78,27 @@ test('AMA closer merge commit lookup retries transient gh failures', async () =>
   assert.match(warnings.join('\n'), /merge_commit_lookup_transient_retry/);
 });
 
+test('AMA closer merge commit lookup retries missing merge commit oid', async () => {
+  const calls = [];
+  const warnings = [];
+  const sha = 'e'.repeat(40);
+  const result = await __testables__.fetchMergeCommitShaBestEffort({
+    execFileImpl: async () => {
+      calls.push(true);
+      if (calls.length === 1) return { stdout: JSON.stringify({ mergeCommit: null }), stderr: '' };
+      return { stdout: JSON.stringify({ mergeCommit: { oid: sha } }), stderr: '' };
+    },
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 3311,
+    logger: { warn: (msg) => warnings.push(msg) },
+  });
+
+  assert.equal(result, sha);
+  assert.equal(calls.length, 2);
+  assert.match(warnings.join('\n'), /merge_commit_lookup_transient_retry/);
+  assert.match(warnings.join('\n'), /mergeCommit\.oid missing/);
+});
+
 test('AMA closer merge commit lookup does not retry permanent gh failures', async () => {
   const calls = [];
   const warnings = [];
@@ -119,6 +140,16 @@ test('hammer prompt emits merge signal before releasing successful merge lease',
   assert.ok(
     prompt.indexOf('if ! ham_emit_git_merge_signal; then') < prompt.indexOf('  ham_release_merge_lease\nelse'),
     'successful merge lease release should wait for merge signal emission',
+  );
+  assert.match(
+    prompt,
+    /if ! ham_emit_git_merge_signal; then[\s\S]*?ham_release_merge_lease[\s\S]*?exit 1/,
+    'merge lease should be manually released before exiting on signal failure after trap removal',
+  );
+  assert.match(
+    prompt,
+    /while \[ "\$HAM_SIGNAL_ATTEMPTS" -lt "\$HAM_MERGE_RETRY_CAP" \]/,
+    'merge signal subprocess should have a bounded retry loop',
   );
   assert.doesNotMatch(
     prompt,

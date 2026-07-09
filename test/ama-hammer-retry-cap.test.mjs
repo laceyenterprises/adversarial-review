@@ -684,7 +684,7 @@ test('same-head terminal HAM remediation auto-merges when structural gates pass'
   assert.equal(dispatchRecord.closureAuthority, 'ham-terminal-remediation');
 });
 
-test('same-head terminal HAM remediation keeps lease unfinished when merge signal emission fails', async (t) => {
+test('same-head terminal HAM remediation leaves terminal breadcrumb when merge signal emission fails', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-merge-signal-failed-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -747,7 +747,7 @@ test('same-head terminal HAM remediation keeps lease unfinished when merge signa
   assert.equal(result.reason, 'existing-dispatch-succeeded');
   assert.equal(
     readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }).terminalOutcome,
-    null,
+    'succeeded',
   );
   assert.equal(calls.some((call) => call.cmd === 'python3'), true);
   const dispatchRecord = readAmaCloserDispatchRecord(rootDir, {

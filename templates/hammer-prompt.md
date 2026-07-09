@@ -806,8 +806,11 @@ ham_emit_git_merge_signal() {
   HAM_AGENT_OS_ROOT="${AGENT_OS_ROOT:-/Users/airlock/agent-os}"
   [ -d "$HAM_AGENT_OS_ROOT/modules/worker-pool/lib/python" ] || return 1
   [ -d "$HAM_AGENT_OS_ROOT/platform/session-ledger/src" ] || return 1
-  PYTHONPATH="$HAM_AGENT_OS_ROOT/modules/worker-pool/lib/python:$HAM_AGENT_OS_ROOT/platform/session-ledger/src${PYTHONPATH:+:$PYTHONPATH}" \
-    /usr/bin/perl -e 'alarm shift; exec @ARGV' 15 python3 - "<<HQ_ROOT>>" "<<PR_NUMBER>>" "$HAM_MERGE_COMMIT" "<<MERGE_METHOD>>" <<'PYEOF' >/dev/null 2>&1
+  HAM_SIGNAL_ATTEMPTS=0
+  while [ "$HAM_SIGNAL_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
+    HAM_SIGNAL_ATTEMPTS=$((HAM_SIGNAL_ATTEMPTS + 1))
+    if PYTHONPATH="$HAM_AGENT_OS_ROOT/modules/worker-pool/lib/python:$HAM_AGENT_OS_ROOT/platform/session-ledger/src${PYTHONPATH:+:$PYTHONPATH}" \
+      /usr/bin/perl -e 'alarm shift; exec @ARGV' 15 python3 - "<<HQ_ROOT>>" "<<PR_NUMBER>>" "$HAM_MERGE_COMMIT" "<<MERGE_METHOD>>" <<'PYEOF' >/dev/null 2>&1
 import sys
 
 from cwp_dispatch.git_signal import EVENT_MERGE_SIGNAL, emit_git_event_best_effort, workspace_context
@@ -826,6 +829,19 @@ emit_git_event_best_effort(
     mode=mode,
 )
 PYEOF
+    then
+      return 0
+    fi
+    if [ "$HAM_SIGNAL_ATTEMPTS" -ge "$HAM_MERGE_RETRY_CAP" ]; then
+      return 1
+    fi
+    HAM_SIGNAL_BACKOFF_MULTIPLIER=$((1 << (HAM_SIGNAL_ATTEMPTS - 1)))
+    HAM_SIGNAL_JITTER=$(awk 'BEGIN{srand(); print int(rand()*3)}')
+    HAM_SIGNAL_SLEEP=$((HAM_MERGE_BACKOFF_BASE_SECONDS * HAM_SIGNAL_BACKOFF_MULTIPLIER + HAM_SIGNAL_JITTER))
+    echo "HAM merge signal transient failure; retrying ${HAM_SIGNAL_ATTEMPTS}/${HAM_MERGE_RETRY_CAP} after ${HAM_SIGNAL_SLEEP}s" >&2
+    sleep "$HAM_SIGNAL_SLEEP"
+  done
+  return 1
 }
 
 ham_mark_ama_closer_lease_succeeded() {
@@ -1270,6 +1286,7 @@ if [ "$HAM_POST_STATE" = "MERGED" ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATION_S
   trap - EXIT
   if ! ham_emit_git_merge_signal; then
     echo "HAM hard-blocker: merge signal emission failed after confirmed merge; AMA closer lease is terminal for daemon recovery" >&2
+    ham_release_merge_lease
     exit 1
   fi
   ham_release_merge_lease

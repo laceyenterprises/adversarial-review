@@ -742,7 +742,17 @@ async function fetchMergeCommitShaBestEffort({
       });
       const parsed = JSON.parse(String(stdout || '{}'));
       const oid = parsed?.mergeCommit?.oid;
-      return oid ? String(oid) : null;
+      if (oid) return String(oid);
+      if (attempt >= AMA_CLOSER_MERGE_RETRY_CAP) return null;
+      logger?.warn?.(JSON.stringify({
+        event: 'ama_closer.merge_commit_lookup_transient_retry',
+        repo,
+        prNumber,
+        attempt,
+        retryCap: AMA_CLOSER_MERGE_RETRY_CAP,
+        error: 'mergeCommit.oid missing',
+      }));
+      await sleep(daemonMergeBackoffMs(attempt, { baseMs: AMA_CLOSER_MERGE_BACKOFF_BASE_MS }));
     } catch (err) {
       lastError = err;
       const detail = `${String(err?.stderr || '')}\n${String(err?.stdout || '')}\n${String(err?.message || err)}`;
@@ -2801,6 +2811,15 @@ export async function maybeDispatchAmaCloser({
             prNumber,
             logger,
           });
+          finalizeAmaCloserLeaseBestEffort({
+            rootDir,
+            leaseIdentity: existingRecordLeaseIdentity,
+            terminalOutcome: 'succeeded',
+            now: dispatchContext.dispatchedAt,
+            logger,
+            repo,
+            prNumber,
+          });
           const mergeSignalEmitted = await emitWorkerGitMergeSignalBestEffort({
             execFileImpl,
             hqRoot,
@@ -2813,8 +2832,8 @@ export async function maybeDispatchAmaCloser({
             logger,
           });
           if (!mergeSignalEmitted) {
-            // Keep the lease open so the next closer pass can retry the
-            // merge-signal emission instead of losing the post-merge event.
+            // The terminal lease is the breadcrumb that lets the next closer
+            // pass rediscover the merge and retry the missing signal.
             updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
               ...(current || existingRecord),
               lastObservedStatus: status,
@@ -2824,15 +2843,6 @@ export async function maybeDispatchAmaCloser({
             }));
             return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
           }
-          finalizeAmaCloserLeaseBestEffort({
-            rootDir,
-            leaseIdentity: existingRecordLeaseIdentity,
-            terminalOutcome: 'succeeded',
-            now: dispatchContext.dispatchedAt,
-            logger,
-            repo,
-            prNumber,
-          });
           updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
             ...(current || existingRecord),
             lastObservedStatus: status,
@@ -2998,6 +3008,36 @@ export async function maybeDispatchAmaCloser({
       }
     }
     if (releaseUnprovenTerminalHold) {
+      if (auditTerminalOutcome === 'succeeded') {
+        const mergeCommitSha = await fetchMergeCommitShaBestEffort({
+          execFileImpl,
+          repo,
+          prNumber,
+          logger,
+        });
+        const mergeSignalEmitted = await emitWorkerGitMergeSignalBestEffort({
+          execFileImpl,
+          hqRoot,
+          repo,
+          prNumber,
+          launchRequestId: existingRecord?.launchRequestId || null,
+          mergeCommitSha,
+          mergedBy: existingRecord?.workerClass || workerClass || 'hammer',
+          mode: mergeMethod,
+          logger,
+        });
+        if (!mergeSignalEmitted) {
+          updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+            ...(current || existingRecord),
+            lastObservedStatus: status,
+            lastObservedAt: dispatchContext.dispatchedAt,
+            lastError: 'git-merge-signal-emit-failed',
+            closureAuthority: 'ham-terminal-remediation',
+          }));
+          return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
+        }
+        releaseUnprovenTerminalHoldError = null;
+      }
       const tokenRecord = {
         ...existingRecord,
         lastObservedStatus: existingDispatchStatus || status,
@@ -3024,6 +3064,34 @@ export async function maybeDispatchAmaCloser({
         lastObservedAt: dispatchContext.dispatchedAt,
         lastError: releaseUnprovenTerminalHoldError,
       }));
+      if (auditTerminalOutcome === 'succeeded') {
+        const rawHammerCleanup = await cleanupHammerCloserWorker({
+          prNumber,
+          workerClass,
+          existingRecord,
+          hqPath,
+          hqRoot,
+          execFileImpl,
+          logger,
+          reason: 'terminal-audit-merge-signal-recovered',
+        });
+        const hammerCleanup = logHammerCleanupFailure(rawHammerCleanup, {
+          logger,
+          repo,
+          prNumber,
+          phase: 'terminal-audit-merge-signal-recovered',
+        });
+        return noAmaDispatch({
+          dispatched: false,
+          skipMergeAgent: true,
+          reason: 'current-head-hammer-terminal-remediation-merged',
+          workerClass: existingRecord?.workerClass || workerClass,
+          dispatchId: existingRecord.dispatchId || existingRecord.launchRequestId || null,
+          launchRequestId: existingRecord.launchRequestId || null,
+          promptPath: existingRecord.promptPath || null,
+          ...(hammerCleanup ? { hammerCleanup } : {}),
+        });
+      }
     }
     if (status === 'unknown') {
       updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({

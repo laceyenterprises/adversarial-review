@@ -139,6 +139,19 @@ function statements(db) {
           AND COALESCE(reviewer_pgid, '') = COALESCE(?, '')
           AND COALESCE(reviewer_lease_expires_at, '') = COALESCE(?, '')`
     ),
+    markPosted: db.prepare(
+      `UPDATE reviewed_prs
+          SET review_status = 'posted',
+              posted_at = ?,
+              failed_at = NULL,
+              failure_message = NULL,
+              quota_reset_at_utc = NULL,
+              review_attempts = review_attempts + 1,
+              reviewer_lease_expires_at = NULL,
+              infra_auto_recover_attempts = 0
+        WHERE repo = ?
+          AND pr_number = ?`
+    ),
   };
 }
 
@@ -288,6 +301,19 @@ test('reviewer session probe reports unknown match on transient ps failure', asy
   assert.deepEqual(result, { alive: true, matched: 'unknown' });
 });
 
+test('reviewer session probe reports unknown for live legacy pgid without session uuid', async () => {
+  const result = await probeReviewerProcessSession({
+    pgid: 4321,
+    sessionUuid: null,
+    probeGroupAliveImpl: () => true,
+    execFileImpl: async () => {
+      throw new Error('ps should not run when session uuid is missing');
+    },
+  });
+
+  assert.deepEqual(result, { alive: true, matched: 'unknown' });
+});
+
 test('failed-orphan auto-reclaim is bounded by infra counter', async () => {
   const { rootDir, db } = setupDb();
   try {
@@ -337,7 +363,7 @@ test('failed-orphan auto-reclaim leaves terminal and non-orphan failed rows unto
   }
 });
 
-test('failed-orphan auto-reclaim skips when a late reviewer post is found', async () => {
+test('failed-orphan auto-reclaim marks posted when a late reviewer post is found', async () => {
   const { rootDir, db } = setupDb();
   try {
     insertRow(db);
@@ -350,8 +376,9 @@ test('failed-orphan auto-reclaim skips when a late reviewer post is found', asyn
     });
 
     assert.deepEqual(result, { reclaimed: 0, skipped: 1 });
-    const row = db.prepare('SELECT review_status, infra_auto_recover_attempts FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(REPO, 548);
-    assert.equal(row.review_status, 'failed-orphan');
+    const row = db.prepare('SELECT review_status, posted_at, infra_auto_recover_attempts FROM reviewed_prs WHERE repo = ? AND pr_number = ?').get(REPO, 548);
+    assert.equal(row.review_status, 'posted');
+    assert.equal(row.posted_at, '2026-07-09T21:55:00.000Z');
     assert.equal(row.infra_auto_recover_attempts, 0);
   } finally {
     db.close();

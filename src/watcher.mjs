@@ -2990,7 +2990,7 @@ async function probeReviewerProcessSession({
 
   const numericPgid = Number(pgid);
   if (!Number.isInteger(numericPgid) || numericPgid <= 0 || !sessionUuid) {
-    return { alive: true, matched: false };
+    return { alive: true, matched: 'unknown' };
   }
 
   try {
@@ -3049,6 +3049,7 @@ async function autoReclaimFailedOrphans({
   statements = {
     listCandidates: stmtListFailedOrphanAutoReclaimCandidates,
     reclaim: stmtAutoReclaimFailedOrphan,
+    markPosted: stmtMarkPosted,
   },
   probeSessionImpl = probeReviewerProcessSession,
   findPostedReview = null,
@@ -3085,11 +3086,23 @@ async function autoReclaimFailedOrphans({
         const postedReview = await findPostedReview(row, { refresh: true });
         if (postedReview) {
           skipped += 1;
-          log.warn?.(
-            `[watcher] failed_orphan_auto_reclaim_skipped repo=${row.repo} pr=${row.pr_number} ` +
-            `reason=posted-review-found session=${row.reviewer_session_uuid || 'unknown'} ` +
-            `posted_at=${postedReview.submitted_at || 'unknown'}`
-          );
+          const postedAt =
+            postedReview.submitted_at || postedReview.submittedAt || reclaimedAt;
+          const markPosted = statements.markPosted?.run;
+          if (typeof markPosted === 'function') {
+            const result = markPosted.call(statements.markPosted, postedAt, row.repo, row.pr_number);
+            log.warn?.(
+              `[watcher] failed_orphan_auto_reclaim_skipped repo=${row.repo} pr=${row.pr_number} ` +
+              `reason=posted-review-found-reconciled session=${row.reviewer_session_uuid || 'unknown'} ` +
+              `posted_at=${postedAt} mark_changes=${result?.changes ?? 'unknown'}`
+            );
+          } else {
+            log.warn?.(
+              `[watcher] failed_orphan_auto_reclaim_skipped repo=${row.repo} pr=${row.pr_number} ` +
+              `reason=posted-review-found-mark-posted-unavailable ` +
+              `session=${row.reviewer_session_uuid || 'unknown'} posted_at=${postedAt}`
+            );
+          }
           continue;
         }
       } catch (err) {

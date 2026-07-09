@@ -8072,6 +8072,64 @@ async function pollOnce(
               return;
             }
 
+            // Standing policy: the hammer ALWAYS closes on exhaustion and must
+            // NEVER trigger a re-review. Two gates before spawning a reviewer on
+            // a re-review pass:
+            //
+            // (1) Terminal closer head — when the current PR head is a terminal
+            //     closer commit (Closed-By: hammer / closer identity), the
+            //     hammer's remediation IS terminal; do NOT re-review it.
+            //     Re-reviewing resets the remediation round counter, so
+            //     reviewState.reviewCycleExhausted never trips and the terminal
+            //     close (ham_terminal_remediation_validated, dispatch-closer.mjs)
+            //     never fires — the runaway remediate->review->remediate loop.
+            //     Skip the spawn (no attempt budget consumed); the tick falls
+            //     through to the merge/close path.
+            //
+            // (2) Hard review ceiling — independently, never review one PR more
+            //     than (round budget + 1) times regardless of head churn, so the
+            //     adversarial-review count is bounded even if (1) is bypassed.
+            if (passKind === 'rereview') {
+              let closerHead = null;
+              try {
+                closerHead = await getHeadCloserCommitSuppression({
+                  repoPath,
+                  prNumber,
+                  headSha: reviewerHeadSha,
+                  logger: console,
+                });
+              } catch (err) {
+                if (isTransientGhError(err)) throw err;
+                console.warn(
+                  `[watcher] closer-head probe failed for ${repoPath}#${prNumber}; ` +
+                  `not skipping review: ${err?.message || err}`,
+                );
+              }
+              if (closerHead?.suppressed) {
+                console.log(
+                  `[watcher] Skipping re-review for ${repoPath}#${prNumber}: head ` +
+                  `${String(reviewerHeadSha || '').slice(0, 12)} is a terminal closer commit ` +
+                  `(${closerHead.reason}); hammer remediation is terminal — deferring to the ` +
+                  `close path. No attempt budget consumed.`,
+                );
+                return;
+              }
+
+              const hardReviewCeiling = Number.isFinite(Number(maxRemediationRounds))
+                ? Math.max(1, Math.floor(Number(maxRemediationRounds))) + 1
+                : 4;
+              const priorReviewAttempts = Number(current?.review_attempts || 0);
+              if (priorReviewAttempts >= hardReviewCeiling) {
+                console.log(
+                  `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
+                  `ceiling reached (${priorReviewAttempts} >= ${hardReviewCeiling}); adversarial ` +
+                  `reviews are capped per PR — deferring to the close path. ` +
+                  `No attempt budget consumed.`,
+                );
+                return;
+              }
+            }
+
             const result = await spawnReviewer({
               repo: repoPath,
               prNumber,

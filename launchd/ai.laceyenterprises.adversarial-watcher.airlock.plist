@@ -107,6 +107,21 @@
         <string>true</string>
         <key>GEMINI_REVIEWER_AUTH_VIA_BROKER</key>
         <string>true</string>
+        <!--
+          Antigravity `agy` auth preflight is ~15x slower under launchd than in
+          a login shell: the per-user keyring token read takes ~12s in a
+          daemon with no interactive session (vs a fast fail-to-file-token in a
+          shell), so a full `agy models` probe runs ~30s. The module default
+          (DEFAULT_AGY_AUTH_PROBE_TIMEOUT_MS = 5000 in src/agy-reviewer-auth.mjs)
+          is fine for shells but far too short here, and a probe timeout is
+          mis-reported as `agy-probe-timeout` → "OAuth credentials unavailable"
+          → the reviewer STOPS. Pin a launchd-appropriate budget so the healthy-
+          but-slow keyring path completes. The 60s success cache means this is
+          paid at most once per minute, not per review. 2026-07-10; verified by
+          reviews reposting on #3377/#3380 after raising this at runtime.
+        -->
+        <key>AGY_AUTH_PROBE_TIMEOUT_MS</key>
+        <string>45000</string>
         <key>OAUTH_BROKER_SHARED_SECRET_FILE</key>
         <string>/Users/airlock/agent-os/.secrets/local/oauth-broker-shared-secret</string>
         <key>OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID</key>

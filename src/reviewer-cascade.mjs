@@ -1,3 +1,22 @@
+/**
+ * Per-PR transient-failure ("cascade") backoff state for reviewer spawns.
+ *
+ * "Cascade" is the LiteLLM/upstream-provider failure class ("all upstream
+ * attempts failed"); the module now tracks EVERY transient reviewer failure
+ * class (reviewer-timeout, launchctl-bootstrap, quota-exhausted,
+ * broker-unavailable, github-unavailable, deploy-wedge, provider-overloaded)
+ * under the original name. The contract that makes this state matter:
+ * transient failures must NOT burn `reviewed_prs.review_attempts` — the row
+ * settles to `pending-upstream` and this file-backed gate
+ * (`shouldBackoffReviewerSpawn`, consulted by pollOnce before the claim CAS)
+ * decides when the watcher may re-attempt.
+ *
+ * Why files under data/cascade-state/ and not SQLite or memory: the state
+ * must survive watcher restarts (a crash-looping watcher must not hammer a
+ * struggling provider from a fresh counter), and the atomic
+ * tmp+fsync+rename write below keeps a crashed writer from ever leaving a
+ * torn JSON that would (fail-closed) park the PR.
+ */
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -6,7 +25,19 @@ import {
   isReviewerSubprocessTimeout,
 } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 
+// Backoff schedule indexed by (consecutive transient failures - 1). Roughly
+// exponential but deliberately PLATEAUS at 15 minutes instead of doubling
+// unbounded: upstream provider outages resolve on the minutes-to-an-hour
+// scale, and an unbounded exponent would leave PRs parked for hours after
+// the provider recovered. The counter is clamped to CASCADE_FAILURE_CAP, so
+// the last entry is the permanent steady-state retry cadence.
 const CASCADE_BACKOFF_MINUTES = [1, 2, 4, 8, 15];
+// Clamp for consecutiveTransientFailures (keeps the counter from growing
+// unbounded across a long outage). Doubles as a threshold elsewhere: the
+// watcher's reviewer-timeout exhaustion handoff fires when the
+// `transientFailureBreakdown['reviewer-timeout']` count reaches this cap
+// (see isReviewerTimeoutExhaustedRow in watcher.mjs) — so raising it also
+// delays that escalation.
 const CASCADE_FAILURE_CAP = 5;
 const CASCADE_STATE_DIR = ['data', 'cascade-state'];
 
@@ -101,6 +132,14 @@ function recordCascadeFailure(rootDir, {
   nextRetryAfter = null,
 } = {}) {
   const previous = readCascadeState(rootDir, { repo, prNumber });
+  // SCHEMA SHIM — do not remove while any data/cascade-state/*.json written
+  // before the multi-class rename can still exist on a host. Older state
+  // files carry `consecutiveCascadeFailures` (cascade was the only tracked
+  // class); newer files carry `consecutiveTransientFailures` plus a per-class
+  // `transientFailureBreakdown`. Reading new-then-old here means an in-place
+  // watcher upgrade continues an in-progress backoff instead of resetting the
+  // counter to 0 mid-outage (which would collapse the backoff back to 1m and
+  // hammer the still-down provider).
   const previousCount = Number(
     previous?.consecutiveTransientFailures ?? previous?.consecutiveCascadeFailures ?? 0
   );
@@ -112,6 +151,10 @@ function recordCascadeFailure(rootDir, {
   const transientFailureBreakdown = previous?.transientFailureBreakdown
     ? { ...previous.transientFailureBreakdown }
     : {};
+  // Second half of the shim: fold a legacy cascade-only count into the
+  // breakdown map exactly once (only when no breakdown exists yet), so the
+  // per-class totals — including the reviewer-timeout count that gates the
+  // watcher's exhaustion handoff — stay monotonic across the schema change.
   if (!previous?.transientFailureBreakdown && Number(previous?.consecutiveCascadeFailures) > 0) {
     transientFailureBreakdown.cascade = Number(previous.consecutiveCascadeFailures);
   }

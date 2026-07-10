@@ -351,10 +351,12 @@ appropriate tag — the watcher routes off it:
 [claude-code] tighten verdict parser for blank Summary
 ```
 
-The repository CI workflow at
-`.github/workflows/pr-title-prefix-validation.yml` explicitly skips
-outside-contributor PRs (those with `author_association` below
-`COLLABORATOR`), so the prefix is not a barrier to entry.
+The prefix is enforced by the watcher's title guardrail and the
+canonical `npm run pr:create:tagged` helper, not by a CI workflow (the
+former `pr-title-prefix-validation.yml` GitHub Action was removed in
+#184 as redundant). Enforcement only applies to the maintainer's
+internal worker classes, so the prefix is not a barrier to entry for
+outside contributors.
 
 ### Scope
 

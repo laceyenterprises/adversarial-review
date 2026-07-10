@@ -331,6 +331,18 @@ function presentHardStopLabels(reviewState, prMetadata, recoveryEvidence, advers
  * `NEUTRAL`, `SKIPPED` accept set and its self-gate exclusion of the
  * adversarial-review pipeline's own status context.
  *
+ * FAIL-OPEN CAVEAT: that classifier maps an explicit EMPTY rollup to
+ * 'SUCCESS', so this eligibility gate reads green on a repo with no external
+ * CI — and also on a rollup fetched before GitHub registered the head's
+ * checks. This deliberately DIVERGES from the MSM merge predicate
+ * (`requiredChecksGreen` in `merge-eligibility.mjs`), which fails closed on
+ * an empty rollup at the actual merge decision. The residual risk on this
+ * path is bounded by the merge-time `--match-head-commit <reviewedSha>` pin
+ * (see the branch-protection gate note in `isEligibleForAmaClosure` below):
+ * a head that moved past the fail-open read cannot be merged. Keep the
+ * divergence; do not make this gate fail closed on empty (it would park
+ * every no-CI repo) and do not make the MSM predicate fail open.
+ *
  * @param {PrMetadata} prMetadata
  * @param {Object}     env
  * @returns {{ green: boolean, conclusion: string|null }}

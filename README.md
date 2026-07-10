@@ -271,65 +271,59 @@ daemons on the maintainer's host:
 ```
 
 When a remediation pass converges (reviewer flips to `Comment only`,
-or the round budget exhausts), the loop terminates and the PR returns
-to the operator for the final merge decision. The watcher projects the
-durable adversarial-review state onto the PR head SHA as a GitHub
-commit-status context — `agent-os/adversarial-gate` by default,
+or the round budget exhausts), the loop moves to closure. The watcher
+projects the durable adversarial-review state onto the PR head SHA as a
+GitHub commit-status context — `agent-os/adversarial-gate` by default,
 overridable per deployment via `ADV_GATE_STATUS_CONTEXT` — which can
 be required in branch protection if you want merge to depend on a
 passing verdict. Overrides are restricted to log-safe context names
 matching `[A-Za-z0-9._/-]+` with a 100-character maximum.
 
-On Agent OS hosts, a successful gate can also hand the PR to the
-`merge-agent` worker class. Before invoking `hq dispatch --worker-class
-merge-agent`, the watcher derives the original worker id from the PR head
-branch prefix (for example `codex-lac-660/...` -> `codex-lac-660`) and
-tears down that original worker only when `HQ_ROOT` is set, the watcher
-already owns that HQ root, and the worker's canonical session-ledger
-`worker_runs.status` is terminal (`succeeded`, `failed`, or `cancelled`),
-or the PR lifecycle is already terminal. Any other known or unknown status
-is treated as active/degraded and is not torn down. This frees the PR
-branch for the merge-agent worktree without using `git worktree add
---force` only when the recorded worker history says teardown is safe. If
-`HQ_ROOT` is unset, the HQ owner differs from the watcher runtime user,
-the derived branch prefix does not match the worker's `workspace.json`,
-`workspace.json` is missing while the worker directory still exists, the
-session-ledger row is missing while the worktree still exists, or the
-original worker is still active, the watcher logs a structured skip/defer
-event and leaves the existing dispatch path to retry or fail with its own
-diagnostics. Override labels such as `operator-approved` and
-`merge-agent-requested` do not bypass this liveness check; missing worker-run
-state still fails closed until the original worker is provably terminal.
-Branch prefixes that do not look like registered worker ids are
-ignored before any filesystem probe or `hq` invocation. Active original
-workers specifically emit `merge_agent.dispatch_deferred` and skip that tick;
-the next watcher tick retries. Successful cleanup logs
-`merge_agent.original_worker_torn_down` with the PR number, original worker
-id, and launch request id. The `hq worker tear-down` call is bounded to the
-watcher tick budget and logs `merge_agent.tear_down_timeout` on timeout.
+On Agent OS hosts with the Adversarial Merge Authority enabled
+(`roles.adversarial.merge_authority.enabled`), closure uses the **MSM
+two-path merge model** (operational reference:
+[`docs/RUNBOOK-ama-closure.md`](docs/RUNBOOK-ama-closure.md)):
 
-That merge path is watcher-owned, not an inline branch inside
-`src/follow-up-jobs.mjs`. For the current PR head, clean `Comment only` /
-`Approved` verdicts dispatch merge-agent immediately unless the latest
-structured `## Blocking issues` section still contains a real finding, in
-which case the watcher refuses with `skip-blockers-present` (the ARP-06 / #157
-safety gate). Successful launches are audited under
-`data/follow-up-jobs/merge-agent-dispatches/`, and duplicate same-head launches
-are suppressed by that ledger plus the live `merge-agent-dispatched` lifecycle
-state. A current-head scoped `merge-agent-requested` label is the operator's
-explicit recovery override, but it still does not bypass duplicate-dispatch
-protection or hard skip labels.
+- **Hammer — the common path.** When the final review carries findings
+  (blocking, or non-blocking under the default strict posture), the PR
+  needs a rebase, or CI needs repair, the watcher dispatches exactly one
+  hammer terminal-remediation worker (`templates/hammer-prompt.md`). The
+  hammer remediates the findings, rebases onto the current base, holds
+  the merge bar of required checks plus changed-surface tests, waits out
+  GitHub required checks on the exact post-remediation head within a
+  bounded remote-CI window, and merges under its own lease with
+  `--match-head-commit`.
+- **Daemon inline merge — the rare path.** When the final review is
+  fully clean (zero blocking AND zero non-blocking findings, both
+  classifications known), GitHub reports required checks green and the
+  PR mergeable, and the live head still matches the reviewed head, the
+  watcher daemon clicks merge inline through a bounded subprocess under
+  the shared merge lease (`src/ama/daemon-merge.mjs`) — no agent is
+  spawned. `strict_mode` defaults on; turning it off permits daemon
+  merge over *known non-blocking* findings only.
 
-Concrete example: if review round 2 posts `Comment only` for head `abc123`,
-the watcher dispatches merge-agent for `abc123` and records the handoff under
-`merge-agent-dispatches/`. If the operator had applied
-`merge-agent-requested` to the previous head `def456`, that label is stale and
-does not authorize the new head. If `abc123` already has a dispatch record or
-still carries a live `merge-agent-dispatched` handoff, the watcher returns
-`skip-already-dispatched` instead of launching a duplicate worker. If the same
-`Comment only` review body still lists a real blocking issue instead of
-`- None.`, the watcher returns `skip-blockers-present` and leaves the PR out of
-the merge path until a fresh clean review or a scoped operator override exists.
+There is no standing merge-agent in this model — no agent whose only job
+is to click merge — and both paths share one eligibility predicate
+(`src/ama/merge-eligibility.mjs`) that fails closed on empty required
+checks, non-mergeable state, and stale heads. The hard kill switch is
+`roles.adversarial.merge_authority.autonomous_merge_execution_enabled:
+false` followed by a watcher bounce: with it off, neither path executes;
+the watcher writes a fail-closed audit and leaves the PR for manual
+operator intervention.
+
+The older `merge-agent` worker class survives as the operator fallback
+lane: a fresh current-head `merge-agent-requested` label dispatches it
+with the AMA admit-gate bypass
+(`AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`), and it also serves hosts
+that have not enabled AMA. That lane's merge path is watcher-owned,
+not an inline branch inside `src/follow-up-jobs.mjs`: launches are audited
+under `data/follow-up-jobs/merge-agent-dispatches/`, duplicate same-head
+launches are suppressed by that ledger plus the live
+`merge-agent-dispatched` lifecycle state, and a review body whose
+structured `## Blocking issues` section still contains a real finding is
+refused with `skip-blockers-present` (the ARP-06 / #157 safety gate)
+regardless of labels. See the operator label reference in
+[`docs/RUNBOOK-ama-closure.md`](docs/RUNBOOK-ama-closure.md) §5.
 
 Operator surface, when something needs intervention:
 
@@ -393,7 +387,7 @@ adversarial-review/
 │   ├── INCIDENT-*.md
 │   └── internal/               ← historical specs (safe to skip)
 │
-└── .github/workflows/          ← CI: test matrix + PR title validation
+└── .github/workflows/          ← CI: test.yml (npm test on Node 20/22 + CDM audit)
 ```
 
 ---

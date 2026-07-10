@@ -66,6 +66,7 @@ data/reviews.db
 | review_status | Meaning |
 |---|---|
 | `pending` | eligible for watcher review / re-review |
+| `pending-upstream` | transient upstream/provider failure; parked behind the file-backed cascade backoff window, reclaimable by the normal claim once it expires (does not burn `review_attempts`) |
 | `reviewing` | reviewer subprocess in flight; durable claim before spawn |
 | `posted` | review posted successfully |
 | `failed` | review attempt failed; eligible rows are auto-retried by the normal dispatch path on a later poll |
@@ -294,6 +295,49 @@ Legacy durable jobs created before `baseBranch` was persisted are hydrated from 
 
 ---
 
+## MSM two-path merge authority (current)
+
+> **Status: current.** This is the live closure model on AMA-enabled hosts
+> (`roles.adversarial.merge_authority.enabled: true`). It supersedes the
+> standing merge-agent closure path for normal PRs; merge-agent survives only
+> as the operator-fallback lane (current-head `merge-agent-requested` label)
+> and for hosts without AMA. Operational runbook:
+> [`RUNBOOK-ama-closure.md`](RUNBOOK-ama-closure.md).
+
+Once a review settles on the current head, each watcher tick routes closure
+down exactly one of two paths:
+
+| Path | When | What happens |
+|---|---|---|
+| **Hammer (common)** | Final review carries findings (blocking, or non-blocking under the default strict posture), the PR needs a rebase, or CI needs repair | The watcher dispatches exactly one hammer terminal-remediation worker (`templates/hammer-prompt.md`, via `src/ama/dispatch-closer.mjs`). The hammer remediates, rebases onto the current base, holds the required-checks-plus-changed-surface-tests merge bar, waits out GitHub required checks on the exact post-remediation head inside a bounded remote-CI window, and merges under its own lease with `--match-head-commit`. |
+| **Daemon inline merge (rare)** | Final review is fully clean — zero blocking AND zero non-blocking findings, both classifications known — plus green required checks, a MERGEABLE PR, and a live head matching the reviewed head | The watcher daemon clicks merge inline through a bounded `gh pr merge --match-head-commit` subprocess under the shared merge lease (`src/ama/daemon-merge.mjs`). No agent is spawned. Dispositions: `merged`, `failed-closed` (no hammer spawned from this path), `deferred` (lease contention; retry next tick), `not-taken` (falls through to the hammer route). |
+
+Key control points:
+
+- **Shared predicate.** Both paths evaluate `evaluateMergeEligibility`
+  (`src/ama/merge-eligibility.mjs`), which fails closed on empty required
+  checks, non-mergeable/behind state, stale heads, and a missing lease — the
+  two paths cannot drift apart on "may this PR merge right now?".
+- **`strict_mode`** (default `true`): the daemon may inline-merge only
+  zero-finding reviews. Explicitly setting it `false` permits daemon merge
+  over *known non-blocking* findings only; blocking or unknown finding state
+  still routes to the hammer.
+- **`auto_hammer_on_eligibility_miss`** (default `false`): historical.
+  It gated the auto-hammer dispatch when it was introduced, but since MSM-04
+  the runtime no longer reads it — the hammer route keys on the configured
+  `worker_class`/review-cycle exhaustion plus the hammer-remediable
+  miss-reason classification. The key remains schema-accepted so existing
+  configs validate.
+- **Kill switch.** `autonomous_merge_execution_enabled: false` (followed by
+  an adversarial-watcher bounce) disables BOTH paths: the watcher writes a
+  fail-closed `autonomous-merge-execution-disabled` audit recording which
+  path would have run, and leaves the PR for manual operator intervention.
+- **No re-hammer loop.** A stale head does not spawn a second hammer chain;
+  the daemon records `stale-head` as permanent for that validated head and
+  the new head enters its own review lifecycle.
+
+---
+
 ## 3) Fast-merge skip lane
 
 Source of truth:
@@ -347,6 +391,13 @@ time remains in the audit entry as `authorized_at`; do not use `reviewed_at` as
 the operator-label timestamp.
 
 ### Merge-agent contract
+
+> **Historical naming note.** This subsection describes the fast-merge
+> bypass lane's close path only. It predates the MSM two-path merge
+> authority above and is NOT the normal-PR closure authority; under AMA,
+> an active fast-merge state on a PR is fail-closed for the MSM paths
+> (`fast-merge-state-unsupported`) and closes through this dedicated lane
+> instead. Kept as-is because the lane and its states remain live.
 
 `fast_merge_authorized_head_sha` is the commit the operator effectively approved
 for the bypass lane. The follow-up daemon now actively consumes

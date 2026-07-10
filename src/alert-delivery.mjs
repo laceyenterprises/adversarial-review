@@ -42,6 +42,28 @@ function resolveHooksTokenFileFromRoot(root, fsImpl = { existsSync }) {
   return fsImpl.existsSync(candidateTokenFile) ? candidateTokenFile : null;
 }
 
+// Alert config resolution — precedence chains are load-bearing; reordering
+// them changes which deployment wins silently. Ordering rationale:
+//   - Hooks URL: specific (AGENT_GATEWAY_AGENT_HOOKS_URL) over legacy spelling
+//     (OPENCLAW_AGENT_HOOKS_URL) over the localhost gateway default. Both env
+//     names must keep working — launchd plists on older hosts still export the
+//     legacy one.
+//   - Token FILE: explicit file overrides (OPENCLAW_HOOKS_TOKEN_FILE, then
+//     HOOKS_TOKEN_FILE) over secrets-root probing (ADV_SECRETS_ROOT before
+//     LITELLM_SECRETS_ROOT — the adversarial-specific root must beat the
+//     shared LiteLLM root when both are set) over the default/legacy paths.
+//     The root probes return a path only if the file EXISTS; the final
+//     default does NOT check existence, so a missing file surfaces later as a
+//     token-read failure rather than a confusing null config.
+//   - ALERT_TO is fail-loud (throw): a page with no recipient is a silent
+//     alert blackhole, which is the exact failure this daemon exists to page
+//     about.
+// Threat model: these are paging credentials for the watcher's health
+// alerts. The silent-misresolution failure mode is a STALE-but-present
+// source earlier in the chain (e.g. a generic HOOKS_TOKEN exported for some
+// other service) shadowing the intended one — resolution succeeds, delivery
+// 401s, and the operator never gets the page. When alerts auth-fail, audit
+// the full chain in this order before touching token files.
 function resolveAlertDefaults(env = process.env, { fsImpl = { existsSync } } = {}) {
   const alertTo = firstNonEmpty(env.ALERT_TO);
   if (!alertTo) {
@@ -65,6 +87,13 @@ function resolveAlertDefaults(env = process.env, { fsImpl = { existsSync } } = {
   };
 }
 
+// Token VALUE precedence: direct env tokens (GATEWAY_DELIVERY_TOKEN, then
+// the OPENCLAW_*/HOOKS_TOKEN legacy spellings) beat the file-sourced token.
+// Env-first lets a wrapper inject a freshly-minted token without touching
+// disk, but it is also the sharpest silent-misresolution edge: an exported
+// stale token wins over a rotated token file with no diagnostic. The file
+// read failing is deliberately swallowed (catch → null) so the env chain can
+// still satisfy delivery; only ALL sources empty throws.
 function readHooksToken({ env = process.env, fsImpl = { readFileSync } } = {}) {
   const config = resolveAlertDefaults(env, { fsImpl: { existsSync: fsImpl.existsSync || existsSync } });
   let tokenFromFile = null;

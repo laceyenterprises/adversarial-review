@@ -1243,14 +1243,42 @@ function schemaV1() {
                     __type: TYPE_BOOL,
                     __default: true,
                   },
+                  // MSM hard-cutover kill switch. false = NEITHER merge path
+                  // executes: the watcher writes a fail-closed
+                  // `autonomous-merge-execution-disabled` audit (path recorded
+                  // as would-be daemon-merge or hammer-merge) and leaves the PR
+                  // for manual operator intervention. Takes effect on the next
+                  // watcher tick after an adversarial-watcher bounce.
                   autonomous_merge_execution_enabled: {
                     __type: TYPE_BOOL,
                     __default: true,
                   },
+                  // MSM daemon clean-path strictness (distinct from
+                  // `strict_non_blocking_remediation`, which shapes the
+                  // ELIGIBILITY predicate). Consumed by the watcher as
+                  // `cfg.strictMode` and threaded into
+                  // `isDaemonMergeReviewAllowed` / `attemptDaemonCleanMerge`
+                  // (src/ama/daemon-merge.mjs): true (default) ⇒ the daemon may
+                  // inline-merge ONLY a zero-finding settled review (blocking
+                  // AND non-blocking both known-zero); anything else routes to
+                  // the hammer. false ⇒ the daemon may additionally merge over
+                  // KNOWN non-blocking findings; blocking or unknown finding
+                  // state still declines the daemon path.
                   strict_mode: {
                     __type: TYPE_BOOL,
                     __default: true,
                   },
+                  // HISTORICAL / schema-compat. Introduced by #357 as the gate
+                  // for auto-dispatching the hammer on a hammer-remediable
+                  // eligibility miss (false = misses park awaiting operator
+                  // action). MSM-04 (#516) removed the runtime read: the hammer
+                  // route in src/ama/dispatch-closer.mjs now keys on
+                  // `workerClass === 'hammer'` / review-cycle exhaustion plus
+                  // the hammer-remediable miss-reason classification, with no
+                  // reference to this flag. It is still loaded into
+                  // `getMergeAuthorityConfig()` and accepted by strict
+                  // validation so deployed configs that set it do not fail
+                  // loud, but flipping it changes nothing in this repo's code.
                   auto_hammer_on_eligibility_miss: {
                     __type: TYPE_BOOL,
                     __default: false,

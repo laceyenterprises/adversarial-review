@@ -27,6 +27,7 @@ import {
 } from '../src/watcher.mjs';
 import { resetConfigCache } from '../src/config-loader.mjs';
 import { isEligibleForAmaClosure } from '../src/ama/eligibility.mjs';
+import { HANDOFF_EVENTS } from '../src/handoff-telemetry.mjs';
 import { normalizeReviewVerdict as normalizeReviewVerdictCompat } from '../src/review-verdict.mjs';
 
 // Pin AMA enabled/disabled for a test body regardless of the host's live
@@ -1658,6 +1659,7 @@ test('HOM-04 final_to_hammer=false leaves same-poll final Request-changes path u
 test('HOM-04 exhausted final rereview calls posted-review AMA route inline within 5s', async () => {
   const started = Date.now();
   const calls = [];
+  const telemetry = [];
   const result = await maybeInlineFinalHammerAfterReview({
     rootDir: '/tmp/hom-04-on',
     repoPath: 'acme/repo',
@@ -1689,6 +1691,10 @@ test('HOM-04 exhausted final rereview calls posted-review AMA route inline withi
       calls.push(payload);
       return { dispatched: true, dispatchReason: 'exhausted-final-hammer' };
     },
+    recordHandoffEventImpl: (event) => {
+      telemetry.push(event);
+      return { row: event };
+    },
     logger: { log() {}, warn() {}, error() {} },
   });
   const elapsedMs = Date.now() - started;
@@ -1697,6 +1703,10 @@ test('HOM-04 exhausted final rereview calls posted-review AMA route inline withi
   assert.equal(calls.length, 1);
   assert.equal(calls[0].repoPath, 'acme/repo');
   assert.equal(calls[0].existing.reviewer_head_sha, 'reviewed-head-78');
+  assert.equal(telemetry.length, 2);
+  assert.equal(telemetry[0].event, HANDOFF_EVENTS.fired);
+  assert.equal(telemetry[1].event, HANDOFF_EVENTS.latency);
+  assert.equal(telemetry[0].at, telemetry[1].at);
   assert.ok(elapsedMs < 5000, `inline dispatch took ${elapsedMs}ms`);
 });
 

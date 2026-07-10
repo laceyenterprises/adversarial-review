@@ -1,6 +1,8 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
+import { HANDOFF_EVENTS, recordHandoffEvent } from './handoff-telemetry.mjs';
+
 export const HANDOFF_RATE_CAP_AUDIT_EVENT = 'handoff_rate_cap_hit';
 export const DEFAULT_HANDOFF_RATE_CAP_AUDIT_PATH_SEGMENTS = [
   'data',
@@ -63,6 +65,7 @@ export function createHandoffRateLimiter({
   auditPath = rootDir ? handoffRateCapAuditPath(rootDir) : null,
   now = () => new Date().toISOString(),
   logger = console,
+  recordHandoffEventImpl = recordHandoffEvent,
 } = {}) {
   const counts = new Map();
   let effectiveMax = normalizeHandoffMaxPerPrHead(maxPerPrHead);
@@ -128,6 +131,23 @@ export function createHandoffRateLimiter({
         max_per_pr_head: effectiveMax,
       };
       writeAudit(audit);
+      try {
+        recordHandoffEventImpl({
+          rootDir,
+          event: HANDOFF_EVENTS.rateCapHit,
+          at: inspectedAt,
+          step: safePayloadReason(payload),
+          repo: subject.repo,
+          prNumber: subject.prNumber,
+          headSha: subject.headSha,
+          extra: {
+            count,
+            max_per_pr_head: effectiveMax,
+          },
+        });
+      } catch {
+        // Rate-cap enforcement must not depend on telemetry writes.
+      }
       return {
         accepted: false,
         reason: HANDOFF_RATE_CAP_AUDIT_EVENT,
@@ -141,4 +161,8 @@ export function createHandoffRateLimiter({
       return new Map([...counts.entries()].map(([key, entry]) => [key, entry.count]));
     },
   };
+}
+
+function safePayloadReason(payload) {
+  return payload && typeof payload === 'object' ? payload.reason || null : null;
 }

@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 
 import { createHandoffRateLimiter, normalizeHandoffMaxPerPrHead } from './handoff-rate-cap.mjs';
 import { loadConfigCached } from './config-loader.mjs';
+import { recordHandoffWakeEvents } from './handoff-telemetry.mjs';
 
 const WATCHER_WAKE_FILE = 'watcher-wake.json';
 const DEFAULT_WAKE_POLL_MS = 1000;
@@ -70,6 +71,7 @@ function createWatcherWakeSource({
   rateLimiter = createHandoffRateLimiter({ rootDir, logger }),
   loadConfigImpl = loadConfigCached,
   env = process.env,
+  recordHandoffWakeEventsImpl = recordHandoffWakeEvents,
 } = {}) {
   if (!rootDir) {
     throw new Error('createWatcherWakeSource requires rootDir');
@@ -96,6 +98,16 @@ function createWatcherWakeSource({
     const cap = rateLimiter?.inspect?.(payload);
     if (cap?.accepted === false) {
       return null;
+    }
+    try {
+      recordHandoffWakeEventsImpl({
+        rootDir,
+        payload,
+        target: 'watcher',
+        wokeAt: new Date().toISOString(),
+      });
+    } catch {
+      // Telemetry is best-effort and must not block the watcher wake path.
     }
     return payload;
   }

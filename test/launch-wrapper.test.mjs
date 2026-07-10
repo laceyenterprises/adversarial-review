@@ -393,6 +393,26 @@ test('airlock reviewer daemon plists route GitHub tokens through the OAuth broke
   }
 });
 
+test('airlock watcher plist pins a launchd-appropriate agy auth probe timeout', () => {
+  // Antigravity `agy` auth is ~15x slower under launchd (a per-user keyring
+  // token read takes ~12s with no interactive session; a full `agy models`
+  // probe runs ~30s), so the module default of 5000ms times out and the
+  // reviewer STOPS with a mis-labeled "OAuth credentials unavailable". The
+  // airlock watcher must pin a budget that covers the observed ~30s cold probe.
+  const plist = readFileSync(
+    join(REPO_ROOT, 'launchd', 'ai.laceyenterprises.adversarial-watcher.airlock.plist'),
+    'utf8',
+  );
+  const match = plist.match(
+    /<key>AGY_AUTH_PROBE_TIMEOUT_MS<\/key>\s*<string>(\d+)<\/string>/,
+  );
+  assert.ok(match, 'airlock watcher plist missing AGY_AUTH_PROBE_TIMEOUT_MS pin');
+  assert.ok(
+    Number(match[1]) >= 30000,
+    `AGY_AUTH_PROBE_TIMEOUT_MS=${match[1]}ms is below the ~30s launchd cold-probe floor`,
+  );
+});
+
 test('maintainer watcher launchers resolve ALERT_TO through configured op ref', {
   skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
 }, async () => {

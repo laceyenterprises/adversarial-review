@@ -496,6 +496,14 @@ export async function attemptDaemonCleanMerge({
       merged = true;
       break;
     }
+    // MISSING head ≠ MOVED head — the two branches below must stay distinct.
+    // An empty candidateHead means the read itself was incomplete (GraphQL
+    // field blip, partial gh output): we know nothing new about the PR, so it
+    // is a TRANSIENT retry within the bounded budget, and we must never
+    // substitute the earlier validatedHead for the missing live value — that
+    // would let a merge proceed on a head nobody just observed. Exhaustion is
+    // fail-closed but NON-permanent ('gate-read-failed'): the next tick may
+    // re-attempt with fresh reads.
     if (!live.candidateHead) {
       if (attempts >= retryCap) {
         terminal = { reason: 'gate-read-failed', permanent: false };
@@ -505,6 +513,11 @@ export async function attemptDaemonCleanMerge({
       continue;
     }
     // Live head moved off the validated head → permanent for this head.
+    // This is POSITIVE evidence of head movement (someone pushed), which
+    // invalidates the review the merge authority rests on — no retry can fix
+    // it for THIS validatedHead. 'stale-head' is in PERMANENT_TERMINAL_REASONS
+    // so later ticks skip the daemon path for this head (Gate 3); the new head
+    // gets its own review/audit/lease lifecycle.
     if (live.candidateHead !== validatedHead) {
       terminal = { reason: 'stale-head', permanent: true };
       break;

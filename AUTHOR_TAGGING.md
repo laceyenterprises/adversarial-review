@@ -1,11 +1,13 @@
 # Author Tagging Convention — Agent-Built PRs
 
 > **For outside contributors:** you do not need to follow this convention.
-> The PR Title Prefix Validation workflow explicitly skips outside-contributor
-> PRs (see `.github/workflows/pr-title-prefix-validation.yml`). This document
-> describes the internal worker-class taxonomy the maintainer's deployment
-> uses to route reviewers automatically. Read it if you want to understand
-> how the running pipeline is wired; ignore it if you're just sending a PR.
+> Enforcement targets the maintainer's internal worker classes only, via the
+> watcher's title guardrail and the tagged PR-creation helper (the former
+> `pr-title-prefix-validation.yml` GitHub Action was removed as redundant in
+> #184). This document describes the internal worker-class taxonomy the
+> maintainer's deployment uses to route reviewers automatically. Read it if
+> you want to understand how the running pipeline is wired; ignore it if
+> you're just sending a PR.
 
 Inside the maintainer's deployment, every PR is opened by one of three
 known worker classes, and the watcher routes reviewer selection off the
@@ -39,8 +41,12 @@ Tag goes at the **start** of the PR title:
 
 ## Enforcement
 
-The prefix requirement is defended in four places, on purpose. Each layer
-catches a different class of mistake:
+The prefix requirement is defended in three places, on purpose. Each layer
+catches a different class of mistake. (A fourth layer — the repo-side
+`PR Title Prefix Validation` GitHub Action — used to exist but was removed
+in #184: the watcher guardrail plus the `hq pr open` dispatch path already
+enforced the prefix, so the CI copy was paying Actions budget for a
+redundancy.)
 
 - **Canonical helper path** (build-time / CLI-time): the canonical way
   to open an internal worker-class PR is
@@ -61,11 +67,6 @@ catches a different class of mistake:
   a comment, writing a terminal failure record, and refusing to start
   adversarial review. It does NOT retrigger on retitle, so the failure
   is durable until an operator intervenes.
-- **Repo-side validation check** (post-creation, GitHub-side): the
-  GitHub Action `PR Title Prefix Validation` fails the PR check when
-  an internal author opens a PR without a known prefix, and explains
-  the creation-time recovery path in the failure log.
-  Outside-contributor PRs are explicitly skipped.
 
 ## Reviewer Routing
 

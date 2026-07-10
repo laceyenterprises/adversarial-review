@@ -137,6 +137,26 @@ function sanitizeReviewPayloadBestEffort(reviewText) {
   }
 }
 
+// Extract the verdict line from the `## Verdict` section. Two-rule tiebreak,
+// in priority order, because reviewer models routinely emit multi-line Verdict
+// sections that mix prose with the decision:
+//
+//   1. If a request-changes line CO-OCCURS with a permissive line
+//      (comment-only / approved) anywhere in the section, request-changes wins
+//      (the LAST such line is returned). The gate must fail toward the
+//      stricter verdict on ambiguity — a reviewer that wrote both "Request
+//      changes" and "Comment only" cannot be scored permissive, or a blocking
+//      review silently converges.
+//   2. Otherwise, scan BOTTOM-UP for the last line that normalizes to a known
+//      verdict. Models put the final decision last after explanatory prose;
+//      top-down scanning would return prose that merely begins with a verdict
+//      keyword. Lines neutralized as resolved-history prose (see
+//      `isResolvedRequestChangesProse`) normalize to 'unknown' and are skipped.
+//
+// Fallback: the raw last line (callers normalize it to 'unknown').
+// Pinned by test/kernel-parsers.test.mjs ('ignores prose that starts with a
+// verdict keyword...' and 'keeps blocking negation over trailing permissive
+// prose').
 function extractReviewVerdict(reviewBody) {
   const text = String(reviewBody ?? '');
   const heading = text.match(/^##\s+Verdict\s*$/im);
@@ -285,6 +305,27 @@ function normalizeVerdictSectionLine(verdict) {
   return normalizeReviewVerdict(normalized);
 }
 
+// Heuristic that neutralizes a Verdict-section line which STARTS with
+// "request changes" but is actually prose ABOUT resolved history ("Request
+// changes from the prior round are now resolved."), so tiebreak rule 1 in
+// `extractReviewVerdict` does not score it as a live blocking verdict.
+//
+// Error-direction contract: a false NEGATIVE here (resolved prose kept as
+// request-changes) only makes the gate stricter — the PR stays blocked until
+// a cleaner review. A false POSITIVE (a real blocking line downgraded to
+// 'unknown') could let a blocking review converge, so the pattern is
+// deliberately conservative in three ways:
+//   1. It only fires on lines that BEGIN with "request changes";
+//   2. any blocking-context word (not/never/still/remains/must/needs/
+//      unresolved/failing/regression/blocker/"before merge"/...) vetoes the
+//      downgrade first, so negated resolutions like '...marked "now resolved"
+//      are NOT fixed' stay blocking;
+//   3. the resolution phrase must be a past/perfect "resolved/addressed/
+//      fixed/closed" within 160 chars of the keyword.
+// And the downgrade target is 'unknown' — never 'comment-only' — so the line
+// merely stops competing in the tiebreak instead of asserting a permissive
+// verdict. Pinned by test/kernel-parsers.test.mjs ('keeps blocking negation
+// over trailing permissive prose').
 function isResolvedRequestChangesProse(normalized) {
   if (!/^request changes\b/i.test(normalized)) return false;
 

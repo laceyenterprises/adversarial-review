@@ -2725,6 +2725,26 @@ const stmtMarkMalformed = db.prepare(
 // the spawn. A 0-changes result means another watcher (or a parallel
 // claim path) won the row, or the row's status moved to a state this
 // CAS does not match — log and skip.
+//
+// INVARIANT — do not widen the two-status WHERE list, and do not drop the
+// fields this claim stamps. This UPDATE is both:
+//   (a) THE single-claim concurrency guarantee: exactly one claimant can
+//       flip a row to 'reviewing', across processes, because SQLite executes
+//       the row UPDATE atomically and every other status is unmatched; and
+//   (b) the orphan-recovery anchor: the `reviewer_session_uuid`,
+//       `reviewer_head_sha`, `reviewer_timeout_ms`, and
+//       `reviewer_lease_expires_at` written here (plus `reviewer_pgid` via
+//       stmtMarkReviewerPgid after spawn) are the durable reviewer handle
+//       that `failedOrphanAutoReclaimDecision` / `probeReviewerProcessSession`
+//       use to prove lease expiry and process-group liveness/identity (the
+//       `ps` command-line must contain the session UUID — that is the
+//       recycled-PGID discriminator). A claim path that skips these stamps
+//       produces rows that can only ever fall to sticky failed-orphan.
+// Adding 'reviewing' to the WHERE re-opens the duplicate-spawn race; adding
+// 'failed' erases operator failure evidence; adding 'failed-orphan' bypasses
+// the lease/liveness guards. The CAS semantics are pinned by
+// test/watcher-atomic-claim.test.mjs (claim/refusal per status) and the
+// surrounding hot path by test/watcher-claim-loop.test.mjs.
 const stmtMarkAttemptStarted = db.prepare(
   `UPDATE reviewed_prs
      SET review_status = 'reviewing',
@@ -6175,6 +6195,23 @@ async function maybeDispatchAmaClosureFor({
     }
   }
 
+  // CI-SETTLEMENT MODEL — read this before hunting for a wait loop; there is
+  // no blocking wait for CI anywhere in this tick, by design. When required
+  // checks are PENDING (or not yet registered) on the candidate head:
+  //   - the eligibility predicate reads `ci-not-green` (SPEC §4.2 #5), and
+  //   - the daemon clean-path below returns disposition `not-taken`
+  //     (its shared MSM-02 predicate requires COMPLETED+SUCCESS checks),
+  // and the tick simply ends for this PR. The "settle loop" IS the watcher
+  // poll loop (`config.pollIntervalMs`, default 300000 ms in config.json):
+  // each tick re-fetches the rollup and re-runs this same function until the
+  // checks settle one way or the other. The one place that DOES wait on CI is
+  // the hammer worker itself — `ci-not-green` is a hammer-remediable miss, so
+  // a hammer may be dispatched while checks are still pending, and its prompt
+  // (templates/hammer-prompt.md, HAM remote-CI window) owns the bounded
+  // remote-CI wait on the exact post-remediation head. Do not add an inline
+  // CI wait here: a single tick must stay bounded or one slow PR head-blocks
+  // every other PR in the poll.
+  //
   // MSM-03 — daemon clean-path merge ("Path B"). Before the hammer
   // dispatch, attempt an inline daemon merge for a FULLY-CLEAN settled review
   // (zero blocking AND zero non-blocking findings) that GitHub reports green +

@@ -22,7 +22,7 @@ project.
 | `SPEC-original.md` | The original product spec, from the time the system was first designed. Useful for *why* the system exists and what its founding constraints were. Superseded by the current operator-facing docs in [`../`](../) for *how* the system is actually built today. |
 | `SPEC-durable-first-pass-review-jobs.md` | Design doc for the refactor of first-pass review from inline watcher execution into a durable job queue. The implementation has landed; this file documents the intent. |
 | `SPEC-org-rollout-pr-review-guardrails.md` | Operational rollout plan for the PR-title-prefix guardrails across the maintainer's repo fleet. Specific to the maintainer's environment. |
-| `SPEC-pr-review-trigger-guardrails.md` | The "why we need creation-time title prefixes" design spec. Implementation lives in `.github/workflows/pr-title-prefix-validation.yml` and the watcher's title-guardrail code. |
+| `SPEC-pr-review-trigger-guardrails.md` | The "why we need creation-time title prefixes" design spec. Implementation lives in the watcher's title-guardrail code (the companion `pr-title-prefix-validation.yml` GitHub Action was removed as redundant in #184). |
 
 ## Canonical doc locations
 

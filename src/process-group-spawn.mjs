@@ -80,6 +80,22 @@ function readTailText(filePath, maxBytes = DEFAULT_FAILURE_TAIL_BYTES) {
   }
 }
 
+// Signal the child's WHOLE process group, not just the child.
+// `process.kill(-pid, sig)` targets the group whose pgid === pid, which holds
+// because spawnCapturedProcessGroup always spawns `detached: true` (setsid):
+// the child becomes its own session/group leader, so its pid IS the pgid.
+// Group-targeting is the point — reviewer/remediator CLIs fork grandchildren
+// (language servers, gh subprocesses) that would survive a plain child.kill
+// and leak past timeouts.
+//
+// Fallback semantics: ESRCH (group already gone) returns false — nothing to
+// do, and retrying against a dead pid risks a RECYCLED pid that now belongs
+// to an unrelated process group; the kernel reusing the pid is exactly why we
+// never re-derive the group from anything but the live child handle. Any
+// other error (e.g. EPERM from a setuid grandchild in the group) falls back
+// to `child.kill(signal)`, which is safe because Node signals only the exact
+// child process it spawned and tracks its liveness — degraded (grandchildren
+// may survive) but never misdirected.
 function signalProcessGroup(child, signal) {
   if (!child?.pid) return false;
   try {
@@ -229,6 +245,15 @@ function spawnCapturedProcessGroup(command, args, options = {}) {
     child.on('spawn', () => {
       if (typeof onSpawn === 'function') {
         try {
+          // The pgid reported here is persisted by callers (the watcher's
+          // reviewed_prs.reviewer_pgid) and later used for liveness probes and
+          // group kills long after this process may have restarted. pgid=pid
+          // is ONLY true because the spawn is detached (setsid). If someone
+          // flips SPAWN_DETACHED, the child would share OUR process group and
+          // a stored "pgid" would (a) be wrong and (b) let a later
+          // kill(-pgid) — possibly against a since-RECYCLED pid — SIGKILL an
+          // unrelated group or the daemon's own. Fail the spawn loudly
+          // instead of reporting a fabricated group id.
           assert.equal(SPAWN_DETACHED, true, 'onSpawn pgid=pid assumes detached process groups');
           onSpawn({ pid: child.pid, pgid: child.pid });
         } catch (err) {

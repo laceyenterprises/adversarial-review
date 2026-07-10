@@ -8,6 +8,57 @@ import { CODE_PR_DOMAIN_ID, makeCodePrSubjectExternalId } from './identity-shape
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 import { ensureReviewCycleCapSchema } from './review-cycle-cap.mjs';
 
+/**
+ * AUTHORITATIVE `reviewed_prs.review_status` GRAPH (schema version 10).
+ * Derived from the WHERE clauses of the writer statements (watcher.mjs
+ * stmtMark* / this file's requestReviewRereview CAS) — those predicates, not
+ * prose, are the contract. Keep this block in sync with them and with
+ * docs/STATE-MACHINE.md §1.
+ *
+ *   pending ──────────────┐
+ *   pending-upstream ─────┴─► reviewing        (stmtMarkAttemptStarted CAS;
+ *                                               pending-upstream only after its
+ *                                               file-backed cascade backoff
+ *                                               window expires)
+ *   failed (infra classes only) ─► reviewing   (dedicated cap-checked CAS,
+ *                                               stmtMarkInfraAutoRecoveryAttemptStarted)
+ *   reviewing ─► posted                        (review landed; also a narrow
+ *                                               failed→posted reconcile CAS for
+ *                                               proven reviewer-command-failed
+ *                                               rows)
+ *   reviewing ─► failed | pending | pending-upstream
+ *                                              (terminal failure vs lease
+ *                                               release vs transient upstream)
+ *   reviewing ─► failed-orphan                 (watcher restart; safe recovery
+ *                                               unprovable)
+ *   failed-orphan ─► pending                   ONLY via the guarded
+ *                                              auto-reclaim (lease expired +
+ *                                              process group provably dead or
+ *                                              session-UUID mismatch + infra
+ *                                              cap room) or operator
+ *                                              retrigger-review. STICKY
+ *                                              otherwise — generic claims must
+ *                                              never match it.
+ *   posted ─► pending                          ONLY via requestReviewRereview's
+ *                                              CAS below (refuses 'reviewing',
+ *                                              'malformed', already-'pending';
+ *                                              requires an open pr_state).
+ *   malformed                                  TERMINAL by design (PR-title
+ *                                              worker-class guardrail). No CAS
+ *                                              matches it; recovery is a new
+ *                                              correctly-titled PR.
+ *
+ * (The fast-merge lane additionally parks review_status =
+ * 'fast_merge_skipped' for authorized bypass heads — see
+ * docs/STATE-MACHINE.md §3; it is outside the review loop above.)
+ *
+ * Invariants the graph encodes: 'reviewing' is a durable in-flight CLAIM, so
+ * nothing may reset it except its own settle path; non-infra 'failed' rows
+ * keep their evidence until a replacement claim wins; and every transition is
+ * a single-statement compare-and-swap so two processes can never both own a
+ * row. Pinned by test/watcher-atomic-claim.test.mjs,
+ * test/watcher-claim-loop.test.mjs, and test/review-state*.test.mjs.
+ */
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
 const REVIEW_STATE_SCHEMA_VERSION = 10;

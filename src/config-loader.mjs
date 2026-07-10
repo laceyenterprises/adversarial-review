@@ -1487,6 +1487,14 @@ function schemaV1() {
               },
             },
           },
+          post_merge_actions: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              pager_script: { __type: TYPE_STRING, __default: null, __nullable: true },
+              pager_node_bin: { __type: TYPE_STRING, __default: null, __nullable: true },
+            },
+          },
           memory: {
             __type: TYPE_DICT,
             __strict: true,
@@ -2054,6 +2062,14 @@ export const ENV_ALIASES = {
   'worker_pool.dispatch.goal_lineage.spec_excerpt_bytes': {
     canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_GOAL_LINEAGE_SPEC_EXCERPT_BYTES',
     aliases: [['HQ_GLN_LINEAGE_SPEC_EXCERPT_BYTES', identity]],
+  },
+  'worker_pool.post_merge_actions.pager_script': {
+    canonical: 'AGENT_OS_WORKER_POOL_POST_MERGE_ACTIONS_PAGER_SCRIPT',
+    aliases: [['POST_MERGE_ACTIONS_PAGER_SCRIPT', identity]],
+  },
+  'worker_pool.post_merge_actions.pager_node_bin': {
+    canonical: 'AGENT_OS_WORKER_POOL_POST_MERGE_ACTIONS_PAGER_NODE_BIN',
+    aliases: [['POST_MERGE_ACTIONS_PAGER_NODE_BIN', identity]],
   },
   'reviewer.gemini.mode': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_MODE',

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -983,14 +983,29 @@ test('daemon clean merge resolves worker identity from HQ launch provenance when
     writeFileSync(
       join(workerDir, 'launch-provenance.json'),
       JSON.stringify({
-        repo: 'repo',
-        prRepo: 'repo',
+        repo: 'acme/repo',
+        prRepo: 'acme/repo',
         branch: 'claude-code-hcc-02-14a16b9d/HCC-02',
         launchRequestId: 'lrq_8f7fc45e-3c3b-40f7-907d-9ab83635ed26',
         workerClass: 'claude-code',
         prHeadSha: 'superseded-worker-head',
       }),
     );
+    const collisionDir = join(rootDir, 'workers', 'cross-org-collision');
+    mkdirSync(collisionDir, { recursive: true });
+    const collisionPath = join(collisionDir, 'launch-provenance.json');
+    writeFileSync(
+      collisionPath,
+      JSON.stringify({
+        prRepo: 'malicious-org/repo',
+        branch: 'claude-code-hcc-02-14a16b9d/HCC-02',
+        launchRequestId: 'lrq_wrong_cross_org_identity',
+        workerClass: 'codex',
+      }),
+    );
+    const now = new Date();
+    utimesSync(join(workerDir, 'launch-provenance.json'), new Date(now.getTime() - 10_000), new Date(now.getTime() - 10_000));
+    utimesSync(collisionPath, now, now);
 
     let mergeAttempted = false;
     let capturedIdentity = null;

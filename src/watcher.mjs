@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { homedir, hostname } from 'node:os';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { readFile as readFileAsync } from 'node:fs/promises';
+import { readdir, readFile as readFileAsync, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
@@ -5888,7 +5888,7 @@ async function resolveDaemonWorkerIdentityForPr({
     };
   }
   if (!resolved?.ok) {
-    const launchProvenance = readDaemonWorkerLaunchProvenanceForPr({
+    const launchProvenance = await readDaemonWorkerLaunchProvenanceForPr({
       repo,
       prNumber,
       currentHeadSha: currentHead,
@@ -5937,17 +5937,11 @@ async function resolveDaemonWorkerIdentityForPr({
   };
 }
 
-function normalizeDaemonRepoName(repo) {
-  const text = String(repo || '').trim();
-  if (!text) return '';
-  return text.includes('/') ? text.split('/').pop() : text;
-}
-
 function daemonLaunchProvenanceRepoMatches(recordRepo, expectedRepo) {
-  const record = String(recordRepo || '').trim();
-  const expected = String(expectedRepo || '').trim();
+  const record = String(recordRepo || '').trim().toLowerCase();
+  const expected = String(expectedRepo || '').trim().toLowerCase();
   if (!record || !expected) return false;
-  return record === expected || normalizeDaemonRepoName(record) === normalizeDaemonRepoName(expected);
+  return record === expected;
 }
 
 function daemonLaunchProvenancePayload(doc) {
@@ -5956,33 +5950,53 @@ function daemonLaunchProvenancePayload(doc) {
     : doc;
 }
 
-function readJsonFileBestEffort(path) {
+async function readJsonFileBestEffort(path) {
   try {
-    return JSON.parse(readFileSync(path, 'utf8'));
+    return JSON.parse(await readFileAsync(path, 'utf8'));
   } catch {
     return null;
   }
 }
 
-function listDaemonWorkerLaunchProvenanceCandidates(hqRoot) {
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+  return results;
+}
+
+async function listDaemonWorkerLaunchProvenanceCandidates(hqRoot) {
   const workersDir = join(String(hqRoot || ''), 'workers');
+  let entries;
   try {
-    return readdirSync(workersDir, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .flatMap((entry) => [
-        join(workersDir, entry.name, 'launch-provenance.json'),
-        join(workersDir, entry.name, 'run.json'),
-        join(workersDir, entry.name, 'workspace.json'),
-      ])
-      .filter((path) => existsSync(path))
-      .map((path) => ({ path, mtimeMs: statSync(path).mtimeMs }))
-      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    entries = await readdir(workersDir, { withFileTypes: true });
   } catch {
     return [];
   }
+  const paths = entries
+    .filter((entry) => entry.isDirectory())
+    .flatMap((entry) => [
+      join(workersDir, entry.name, 'launch-provenance.json'),
+      join(workersDir, entry.name, 'run.json'),
+      join(workersDir, entry.name, 'workspace.json'),
+    ]);
+  const candidates = await mapWithConcurrency(paths, 32, async (path) => {
+    try {
+      return { path, mtimeMs: (await stat(path)).mtimeMs };
+    } catch {
+      return null;
+    }
+  });
+  return candidates.filter(Boolean).sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
-function readDaemonWorkerLaunchProvenanceForPr({
+async function readDaemonWorkerLaunchProvenanceForPr({
   repo,
   prNumber,
   currentHeadSha = '',
@@ -5999,9 +6013,11 @@ function readDaemonWorkerLaunchProvenanceForPr({
   if (!expectedBranch) {
     return { ok: false, reason: 'missing-pr-branch' };
   }
-  const candidates = listDaemonWorkerLaunchProvenanceCandidates(hqRoot).slice(0, 2000);
-  for (const candidate of candidates) {
-    const doc = readJsonFileBestEffort(candidate.path);
+  const candidates = (await listDaemonWorkerLaunchProvenanceCandidates(hqRoot)).slice(0, 2000);
+  const documents = await mapWithConcurrency(candidates, 32, (candidate) => readJsonFileBestEffort(candidate.path));
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+    const doc = documents[index];
     const payload = daemonLaunchProvenancePayload(doc);
     if (!payload || typeof payload !== 'object') continue;
     const recordRepo = payload.prRepo || payload.repo;

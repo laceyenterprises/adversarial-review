@@ -837,6 +837,7 @@ function schemaV1() {
           },
           snapshots: {
             __type: TYPE_DICT,
+            __default: {},
             __strict: true,
             __keys: {
               keep_count: { __type: TYPE_INT, __default: 3, __min: 1 },

@@ -1753,8 +1753,6 @@ test('retention full block accepts schema-default values', () => {
         surfaces:
           postgres_backups:
             policy: standard_backup
-        snapshots:
-          keep_count: 3
         ephemeral:
           worker_worktrees_keep_hours: 168
           worker_worktrees_per_run_limit: 200
@@ -2128,8 +2126,6 @@ test('retention full block resolves identically from config.yaml and config.loca
         surfaces:
           postgres_backups:
             policy: standard_backup
-        snapshots:
-          keep_count: 3
         ephemeral:
           worker_worktrees_keep_hours: 168
           worker_worktrees_per_run_limit: 200
@@ -2167,8 +2163,6 @@ test('retention full block resolves identically from config.yaml and config.loca
         surfaces:
           postgres_backups:
             policy: standard_backup
-        snapshots:
-          keep_count: 3
         ephemeral:
           worker_worktrees_keep_hours: 168
           worker_worktrees_per_run_limit: 200

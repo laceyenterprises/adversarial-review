@@ -1067,3 +1067,77 @@ test('daemon clean merge resolves worker identity from HQ launch provenance when
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+test('daemon clean merge launch provenance skips missing candidate files without aborting lookup', async () => {
+  const rootDir = tempRoot();
+  try {
+    const staleWorkerDir = join(rootDir, 'workers', 'stale-cleanup-race');
+    mkdirSync(staleWorkerDir, { recursive: true });
+    const workerDir = join(rootDir, 'workers', 'codex-valid-provenance');
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, 'launch-provenance.json'),
+      JSON.stringify({
+        prRepo: 'acme/repo',
+        branch: 'codex-valid-provenance/LAC-1572',
+        launchRequestId: 'lrq_valid_after_missing_candidates',
+        workerClass: 'codex',
+        prHeadSha: 'live-head',
+      }),
+    );
+
+    let capturedIdentity = null;
+    const result = await runDaemonCleanMergeAttempt({
+      rootDir,
+      cfg: {
+        mergeMethod: 'squash',
+        autonomousMergeExecutionEnabled: true,
+        strictMode: true,
+      },
+      repoPath: 'acme/repo',
+      prNumber: 1572,
+      candidate: {
+        baseBranch: 'main',
+        headSha: 'live-head',
+        headRefName: 'codex-valid-provenance/LAC-1572',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        prState: 'open',
+      },
+      gateSnapshot: {
+        reviewedHeadSha: 'live-head',
+        settledReview: { verdict: 'comment-only' },
+      },
+      mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviewState: {
+        blockingFindingCount: 0,
+        blockingFindingState: 'known',
+        nonBlockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+      },
+      currentPrHeadSha: 'live-head',
+      fetchRollupImpl: async () => ({
+        state: 'OPEN',
+        headSha: 'live-head',
+        headRefName: 'codex-valid-provenance/LAC-1572',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      }),
+      readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+      attemptDaemonCleanMergeImpl: async (attemptArgs) => {
+        capturedIdentity = attemptArgs.workerIdentity;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true };
+      },
+      logger: { warn() {}, log() {} },
+      env: { HQ_ROOT: rootDir },
+    });
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(capturedIdentity?.launchRequestId, 'lrq_valid_after_missing_candidates');
+    assert.equal(capturedIdentity?.workerClass, 'codex');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

@@ -3949,6 +3949,20 @@ function normalizeIdentityPart(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+const TERMINAL_CLOSER_BOT_IDENTITIES = new Set([
+  'merge-agent-lacey',
+  '282134940+merge-agent-lacey@users.noreply.github.com',
+  'merge agent worker',
+  'merge-agent worker',
+  'merge-agent@users.noreply.github.com',
+  'the-hammer-lacey[bot]',
+  '298977630+the-hammer-lacey[bot]@users.noreply.github.com',
+]);
+
+const TERMINAL_CLOSER_BOT_IDENTITY_PREFIXES = [
+  'merge-agent@',
+];
+
 function normalizeCommitTrailers(trailers) {
   if (!trailers || typeof trailers !== 'object') return {};
   if (!Array.isArray(trailers)) return trailers;
@@ -3984,19 +3998,13 @@ function isTerminalCloserCommitIdentity(commit = {}) {
 
   const candidates = [
     commit?.committer?.login,
-    commit?.author?.login,
     commit?.commit?.committer?.login,
-    commit?.commit?.author?.login,
     commit?.commit?.committer?.name,
     commit?.commit?.committer?.email,
   ].map(normalizeIdentityPart).filter(Boolean);
   const closerIdentity = candidates.find((candidate) => (
-    candidate === 'merge-agent-lacey' ||
-    candidate === '282134940+merge-agent-lacey@users.noreply.github.com' ||
-    candidate === 'merge agent worker' ||
-    candidate === 'merge-agent worker' ||
-    candidate === 'merge-agent@users.noreply.github.com' ||
-    candidate.startsWith('merge-agent@')
+    TERMINAL_CLOSER_BOT_IDENTITIES.has(candidate) ||
+    TERMINAL_CLOSER_BOT_IDENTITY_PREFIXES.some((prefix) => candidate.startsWith(prefix))
   ));
   if (closerIdentity) {
     return {

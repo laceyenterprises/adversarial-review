@@ -988,6 +988,17 @@ test('isDeterministicConvergenceTerminalEnabled defaults OFF and honors explicit
       }),
       true,
     );
+    assert.equal(
+      isDeterministicConvergenceTerminalEnabled({
+        env: {
+          AGENT_OS_FEATURE_FLAGS_MERGE_AGENT_DETERMINISTIC_CONVERGENCE_TERMINAL: 'true',
+        },
+        logger: silentLogger,
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      true,
+    );
 
     writeFileSync(
       modulePath,

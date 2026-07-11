@@ -71,6 +71,7 @@ function parseArgs(argv) {
 function main(argv = process.argv.slice(2), io = {}) {
   const stdout = io.stdout || process.stdout;
   const stderr = io.stderr || process.stderr;
+  const env = io.env || process.env;
   try {
     const args = parseArgs(argv);
     if (args.help) {
@@ -86,6 +87,7 @@ function main(argv = process.argv.slice(2), io = {}) {
       claudeSessionRoots: args.claudeSessionRoots,
       transcriptFallback: args.transcriptFallback,
       dryRun: args.dryRun,
+      env,
     });
     // Closer passes are recorded post-merge with only a brief ledger poll, so
     // slow rollups leave them null; the job-driven backfill above only heals
@@ -93,6 +95,7 @@ function main(argv = process.argv.slice(2), io = {}) {
     const closer = backfillCloserReviewerPasses(args.rootDir, {
       ledgerTarget: args.ledgerTarget,
       dryRun: args.dryRun,
+      env,
     });
     result.closer = closer;
     if (args.json) {

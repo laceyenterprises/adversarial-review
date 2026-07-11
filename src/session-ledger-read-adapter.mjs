@@ -101,6 +101,30 @@ function postgresTargetFromConfig({ cfg, env }) {
   };
 }
 
+function configuredSessionLedgerBackend({ env }) {
+  try {
+    const cfg = loadConfig({ env });
+    return normalizeText(cfg.get('session_ledger.backend'))?.toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+function failIfPostgresConfiguredSqliteResolved(result, { env }) {
+  if (!result.ok || result.target?.backend !== 'sqlite') return result;
+  const backend = configuredSessionLedgerBackend({ env });
+  if (backend !== 'postgres') return result;
+  const path = result.target.path || '(missing sqlite path)';
+  const source = result.target.source || '(unknown source)';
+  return {
+    ok: false,
+    reason: 'postgres-configured-but-sqlite-resolved',
+    detail: `session_ledger.backend=postgres is configured, but resolved sqlite session-ledger target ${path} from ${source}`,
+    configuredBackend: 'postgres',
+    target: result.target,
+  };
+}
+
 function normalizeExplicitLedgerTarget(ledgerTarget) {
   if (ledgerTarget && typeof ledgerTarget === 'object' && !Array.isArray(ledgerTarget)) {
     const backend = normalizeText(ledgerTarget.backend)?.toLowerCase();
@@ -235,7 +259,10 @@ export function resolveSessionLedgerReadTarget({
     return normalizeExplicitLedgerTarget(ledgerTarget);
   }
   if (ledgerDbPath) {
-    return sqliteTargetFromPath(ledgerDbPath, 'deprecated-ledger-db-path', { deprecatedAlias: true });
+    return failIfPostgresConfiguredSqliteResolved(
+      sqliteTargetFromPath(ledgerDbPath, 'deprecated-ledger-db-path', { deprecatedAlias: true }),
+      { env },
+    );
   }
   if (env.AGENT_OS_SESSION_LEDGER_TARGET) {
     const result = usableLedgerTargetFromEnvValue(
@@ -243,7 +270,9 @@ export function resolveSessionLedgerReadTarget({
       'env:AGENT_OS_SESSION_LEDGER_TARGET',
       requiredTables,
     );
-    if (result.ok || result.reason === 'malformed-ledger-target') return result;
+    if (result.ok || result.reason === 'malformed-ledger-target') {
+      return result;
+    }
   }
   if (env.AGENT_OS_SESSION_LEDGER_DB_PATH) {
     const result = usableSqliteTargetFromPath(
@@ -251,7 +280,9 @@ export function resolveSessionLedgerReadTarget({
       'env:AGENT_OS_SESSION_LEDGER_DB_PATH',
       { requiredTables },
     );
-    if (result.ok || result.reason === 'malformed-ledger-target') return result;
+    if (result.ok || result.reason === 'malformed-ledger-target') {
+      return failIfPostgresConfiguredSqliteResolved(result, { env });
+    }
   }
   if (env.SESSION_LEDGER_DB_PATH) {
     const result = usableSqliteTargetFromPath(
@@ -259,14 +290,18 @@ export function resolveSessionLedgerReadTarget({
       'env:SESSION_LEDGER_DB_PATH',
       { requiredTables },
     );
-    if (result.ok || result.reason === 'malformed-ledger-target') return result;
+    if (result.ok || result.reason === 'malformed-ledger-target') {
+      return failIfPostgresConfiguredSqliteResolved(result, { env });
+    }
   }
   const legacyHqLedgerDbPath = readLegacyHqLedgerDbPath(hqRoot || env.HQ_ROOT);
   if (legacyHqLedgerDbPath) {
     const result = usableSqliteTargetFromPath(legacyHqLedgerDbPath, 'legacy-hq-config', {
       requiredTables,
     });
-    if (result.ok || result.reason === 'malformed-ledger-target') return result;
+    if (result.ok || result.reason === 'malformed-ledger-target') {
+      return failIfPostgresConfiguredSqliteResolved(result, { env });
+    }
   }
   try {
     const cfg = loadConfig({ env });

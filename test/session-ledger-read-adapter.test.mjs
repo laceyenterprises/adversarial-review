@@ -24,6 +24,7 @@ function tempRoot() {
 test('resolveSessionLedgerReadTarget accepts backend-neutral explicit sqlite and postgres targets', () => {
   const sqlite = resolveSessionLedgerReadTarget({
     ledgerTarget: { backend: 'sqlite', path: '/tmp/ledger.db' },
+    env: HERMETIC_CONFIG_ENV,
   });
   const postgres = resolveSessionLedgerReadTarget({
     env: {
@@ -41,8 +42,73 @@ test('resolveSessionLedgerReadTarget accepts backend-neutral explicit sqlite and
   assert.equal(postgres.target.dsn, 'postgres://ledger.example/agent_os_ledger');
 });
 
+test('resolveSessionLedgerReadTarget lets an explicit sqlite target override postgres configuration', () => {
+  const result = resolveSessionLedgerReadTarget({
+    ledgerTarget: { backend: 'sqlite', path: '/tmp/manual-ledger.db' },
+    env: {
+      ...HERMETIC_CONFIG_ENV,
+      AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres',
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.target.backend, 'sqlite');
+  assert.match(result.target.path, /manual-ledger\.db$/);
+  assert.equal(result.target.source, 'explicit-ledger-target');
+});
+
+test('resolveSessionLedgerReadTarget lets the canonical target env override postgres configuration', () => {
+  const result = resolveSessionLedgerReadTarget({
+    env: {
+      ...HERMETIC_CONFIG_ENV,
+      AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres',
+      AGENT_OS_SESSION_LEDGER_TARGET: 'sqlite:///tmp/manual-ledger.db',
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.target.backend, 'sqlite');
+  assert.match(result.target.path, /manual-ledger\.db$/);
+});
+
 test('resolveSessionLedgerReadTarget keeps --ledger-db compatibility as a deprecated alias', () => {
-  const result = resolveSessionLedgerReadTarget({ ledgerDbPath: '/tmp/legacy-ledger.db' });
+  const result = resolveSessionLedgerReadTarget({
+    ledgerDbPath: '/tmp/legacy-ledger.db',
+    env: HERMETIC_CONFIG_ENV,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.target.backend, 'sqlite');
+  assert.equal(result.target.deprecatedAlias, true);
+  assert.match(result.target.path, /legacy-ledger\.db$/);
+});
+
+test('resolveSessionLedgerReadTarget fails loud when postgres config would resolve a sqlite alias', () => {
+  const result = resolveSessionLedgerReadTarget({
+    ledgerDbPath: '/tmp/legacy-ledger.db',
+    env: {
+      ...HERMETIC_CONFIG_ENV,
+      AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres',
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'postgres-configured-but-sqlite-resolved');
+  assert.equal(result.configuredBackend, 'postgres');
+  assert.equal(result.target.backend, 'sqlite');
+  assert.match(result.target.path, /legacy-ledger\.db$/);
+  assert.match(result.detail, /session_ledger\.backend=postgres/);
+  assert.match(result.detail, /legacy-ledger\.db/);
+});
+
+test('resolveSessionLedgerReadTarget preserves sqlite alias behavior when sqlite backend is configured', () => {
+  const result = resolveSessionLedgerReadTarget({
+    ledgerDbPath: '/tmp/legacy-ledger.db',
+    env: {
+      ...HERMETIC_CONFIG_ENV,
+      AGENT_OS_SESSION_LEDGER_BACKEND: 'sqlite',
+    },
+  });
+
   assert.equal(result.ok, true);
   assert.equal(result.target.backend, 'sqlite');
   assert.equal(result.target.deprecatedAlias, true);
@@ -184,6 +250,7 @@ test('readLatestWorkerRunStatusFromLedger keeps sqlite reads bounded to the newe
   const result = readLatestWorkerRunStatusFromLedger({
     launchRequestId: 'lrq_1',
     ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
   });
 
   assert.equal(result.ok, true);
@@ -209,6 +276,7 @@ test('readLatestWorkerRunStatusFromLedger breaks timestamp ties deterministicall
   const result = readLatestWorkerRunStatusFromLedger({
     launchRequestId: 'lrq_tie',
     ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
   });
 
   assert.equal(result.ok, true);
@@ -415,6 +483,7 @@ test('readBuildCompletionSignalForPr reads the newest merged signal for a PR', (
     prNumber: 1234,
     signalKind: 'merged',
     ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
   });
 
   assert.equal(result.ok, true);
@@ -427,6 +496,7 @@ test('readBuildCompletionSignalForPr reads the newest merged signal for a PR', (
     headSha: 'a'.repeat(40),
     signalKind: 'merged',
     ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
   });
 
   assert.equal(headScoped.ok, true);
@@ -438,6 +508,7 @@ test('readBuildCompletionSignalForPr reads the newest merged signal for a PR', (
     headSha: 'c'.repeat(40),
     signalKind: 'merged',
     ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
   });
 
   assert.equal(missingHead.ok, false);
@@ -485,6 +556,7 @@ test('readBuildCompletionProducerEvidence proves repo-level merged-signal produc
     repo: 'acme/myrepo',
     signalKind: 'merged',
     ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
   });
   assert.equal(present.ok, true);
   assert.equal(present.row.completion_id, 'bcmp_repo');
@@ -493,6 +565,7 @@ test('readBuildCompletionProducerEvidence proves repo-level merged-signal produc
     repo: 'acme/otherrepo',
     signalKind: 'merged',
     ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
   });
   assert.equal(absent.ok, false);
   assert.equal(absent.reason, 'missing-build-completion-producer-evidence');
@@ -553,6 +626,7 @@ test('readReviewerSessionUsageFromLedger keeps runtime_sessions lookups bounded 
     adapterSessionKey: 'session-1',
     workspacePath: '/tmp/review-workspace',
     ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
   });
 
   assert.equal(result.ok, true);
@@ -581,13 +655,18 @@ test('adapter exposes the same ledger target contract to worker-run and runtime-
   db.close();
 
   const ledgerTarget = { backend: 'sqlite', path: ledgerDb };
-  const workerUsage = readWorkerRunUsageFromLedger({ workerRunId: 'wr_1', ledgerTarget });
+  const workerUsage = readWorkerRunUsageFromLedger({
+    workerRunId: 'wr_1',
+    ledgerTarget,
+    env: HERMETIC_CONFIG_ENV,
+  });
   const sessionUsage = readReviewerSessionUsageFromLedger({
     adapterSessionKey: 'session-1',
     workspacePath: '/tmp/review-workspace',
     startedAt: '2026-06-04T00:00:00.000Z',
     endedAt: '2026-06-04T00:02:00.000Z',
     ledgerTarget,
+    env: HERMETIC_CONFIG_ENV,
   });
 
   assert.equal(workerUsage.ok, true);
@@ -638,6 +717,7 @@ test('readWorkerRunUsageFromLedger treats historical sqlite ledgers without guar
   const result = readWorkerRunUsageFromLedger({
     workerRunId: 'wr_old',
     ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
   });
 
   assert.equal(result.ok, true);

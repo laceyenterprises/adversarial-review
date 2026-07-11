@@ -17,6 +17,8 @@ import {
   backfillCloserReviewerPasses,
 } from '../src/reviewer-pass-tokens.mjs';
 
+const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
+
 function tempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'closer-backfill-'));
 }
@@ -57,7 +59,7 @@ test('backfillCloserReviewerPasses fills a null closer pass from the ledger', ()
 
   const result = backfillCloserReviewerPasses(rootDir, {
     ledgerTarget: { backend: 'sqlite', path: realLedger },
-    env: { HQ_ROOT: hqRoot },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: hqRoot },
   });
 
   assert.equal(result.considered, 1);
@@ -78,6 +80,7 @@ test('backfillCloserReviewerPasses dry-run reports but writes nothing', () => {
 
   const result = backfillCloserReviewerPasses(rootDir, {
     ledgerTarget: { backend: 'sqlite', path: realLedger },
+    env: HERMETIC_CONFIG_ENV,
     dryRun: true,
   });
   assert.equal(result.filled, 1);
@@ -93,6 +96,7 @@ test('backfillCloserReviewerPasses leaves a pass null when the ledger has no usa
 
   const result = backfillCloserReviewerPasses(rootDir, {
     ledgerTarget: { backend: 'sqlite', path: realLedger },
+    env: HERMETIC_CONFIG_ENV,
   });
   assert.equal(result.considered, 1);
   assert.equal(result.filled, 0);

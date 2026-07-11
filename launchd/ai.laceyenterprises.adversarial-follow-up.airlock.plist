@@ -27,6 +27,10 @@
 
     <key>EnvironmentVariables</key>
     <dict>
+        <key>AGENT_OS_SESSION_LEDGER_DSN</key>
+        <string>postgresql://airlock@127.0.0.1:6432/agent_os_ledger</string>
+        <key>AGENT_OS_SESSION_LEDGER_TARGET</key>
+        <string>postgresql://airlock@127.0.0.1:6432/agent_os_ledger</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>

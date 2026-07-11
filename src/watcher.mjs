@@ -5663,7 +5663,7 @@ async function runDaemonCleanMergeAttempt({
     : String(gateSnapshot?.settledReview?.verdict || '');
   const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
   const mergeMethod = cfg?.mergeMethod === 'merge' ? 'merge' : 'squash';
-  const workerIdentity = resolveDaemonWorkerIdentityForPr({
+  const workerIdentity = await resolveDaemonWorkerIdentityForPr({
     repo: repoPath,
     prNumber,
     currentHeadSha: currentPrHeadSha || candidate?.headSha || '',
@@ -5775,7 +5775,7 @@ async function runDaemonCleanMergeAttempt({
   });
 }
 
-function resolveDaemonWorkerIdentityForPr({
+async function resolveDaemonWorkerIdentityForPr({
   repo,
   prNumber,
   currentHeadSha = '',
@@ -5796,9 +5796,9 @@ function resolveDaemonWorkerIdentityForPr({
   let resolved;
   try {
     exact = currentHead
-      ? readBuildCompletionSignalForPrImpl({ ...baseArgs, headSha: currentHead })
+      ? await readBuildCompletionSignalForPrImpl({ ...baseArgs, headSha: currentHead })
       : null;
-    resolved = exact?.ok ? exact : readBuildCompletionSignalForPrImpl(baseArgs);
+    resolved = exact?.ok ? exact : await readBuildCompletionSignalForPrImpl(baseArgs);
   } catch (err) {
     return {
       ok: false,
@@ -5813,17 +5813,17 @@ function resolveDaemonWorkerIdentityForPr({
       exactHeadReason: exact && !exact.ok ? exact.reason : null,
     };
   }
-  const launchRequestId = String(resolved.row?.launch_request_id || resolved.row?.launchRequestId || '').trim();
-  const workerClass = String(resolved.row?.worker_class || resolved.row?.workerClass || '').trim();
+  const launchRequestId = String(resolved.row?.launch_request_id ?? resolved.row?.launchRequestId ?? '').trim();
+  const workerClass = String(resolved.row?.worker_class ?? resolved.row?.workerClass ?? '').trim();
   if (!launchRequestId || !workerClass) {
     return {
       ok: false,
       reason: !launchRequestId ? 'missing-launch-request-id' : 'missing-worker-class',
-      rowHeadSha: resolved.row?.head_sha || resolved.row?.headSha || null,
+      rowHeadSha: resolved.row?.head_sha ?? resolved.row?.headSha ?? null,
       exactHeadReason: exact && !exact.ok ? exact.reason : null,
     };
   }
-  const rowHeadSha = String(resolved.row?.head_sha || resolved.row?.headSha || '').trim();
+  const rowHeadSha = String(resolved.row?.head_sha ?? resolved.row?.headSha ?? '').trim();
   return {
     ok: true,
     launchRequestId,

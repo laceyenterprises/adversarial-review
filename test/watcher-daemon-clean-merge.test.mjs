@@ -632,6 +632,66 @@ test('daemon clean merge resolves worker identity by PR after head moves past bu
   }
 });
 
+test('daemon clean merge awaits async worker identity reads and preserves zero launch IDs', async () => {
+  const rootDir = tempRoot();
+  try {
+    let mergeAttempted = false;
+    const result = await runDaemonCleanMergeAttempt({
+      rootDir,
+      cfg: {
+        mergeMethod: 'squash',
+        autonomousMergeExecutionEnabled: true,
+        strictMode: true,
+      },
+      repoPath: 'acme/repo',
+      prNumber: 562,
+      candidate: {
+        baseBranch: 'main',
+        headSha: 'async-head',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        prState: 'open',
+      },
+      gateSnapshot: {
+        reviewedHeadSha: 'async-head',
+        settledReview: { verdict: 'comment-only' },
+      },
+      mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviewState: {
+        blockingFindingCount: 0,
+        blockingFindingState: 'known',
+        nonBlockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+      },
+      currentPrHeadSha: 'async-head',
+      readBuildCompletionSignalForPrImpl: async (args) => {
+        assert.equal(args.headSha, 'async-head');
+        return {
+          ok: true,
+          row: {
+            launch_request_id: 0,
+            worker_class: 'codex',
+            head_sha: 'async-head',
+          },
+        };
+      },
+      attemptDaemonCleanMergeImpl: async () => {
+        mergeAttempted = true;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true };
+      },
+      logger: { warn() {}, log() {} },
+      env: { HQ_ROOT: rootDir },
+    });
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(result.merged, true);
+    assert.equal(mergeAttempted, true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('daemon clean merge fail-closes when worker LRQ identity cannot be resolved', async () => {
   const rootDir = tempRoot();
   try {

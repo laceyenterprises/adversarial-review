@@ -271,7 +271,7 @@ export function resolveSessionLedgerReadTarget({
       requiredTables,
     );
     if (result.ok || result.reason === 'malformed-ledger-target') {
-      return failIfPostgresConfiguredSqliteResolved(result, { env });
+      return result;
     }
   }
   if (env.AGENT_OS_SESSION_LEDGER_DB_PATH) {

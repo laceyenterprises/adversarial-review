@@ -332,7 +332,8 @@ function selectLedgerTargetSource({
   if (ledgerTarget !== null && ledgerTarget !== undefined) return ledgerTarget;
   if (!ledgerDbPath) return null;
   const resolved = resolveSessionLedgerReadTarget({ ledgerDbPath, env });
-  return resolved.ok ? resolved.target : null;
+  if (!resolved.ok) throw new Error(resolved.detail || resolved.reason);
+  return resolved.target;
 }
 
 function warnTokenRollupDegraded(scope, result) {

@@ -188,6 +188,20 @@ test('worker-run and reviewer-session readers accept ledger target object, URI, 
   }
 });
 
+test('token reader fails loud when a legacy ledger path conflicts with postgres configuration', () => {
+  assert.throws(
+    () => readWorkerRunTokenUsage({
+      workerRunId: 'wr_1',
+      ledgerDbPath: '/tmp/legacy-ledger.db',
+      env: {
+        ...HERMETIC_CONFIG_ENV,
+        AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres',
+      },
+    }),
+    /session_ledger\.backend=postgres.*legacy-ledger\.db/,
+  );
+});
+
 test('reviewer session lookup skips empty HQ_ROOT ledger stubs', () => {
   const rootDir = tempRoot();
   const hqRoot = path.join(rootDir, 'agent-os-hq');

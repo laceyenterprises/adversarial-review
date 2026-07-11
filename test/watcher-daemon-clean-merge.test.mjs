@@ -1169,3 +1169,25 @@ test('resolveDaemonWorkerIdentityForPr scopes the pr_opened signal to the curren
   assert.ok(calls.length > 0 && calls.every((c) => c.signalKind === 'pr_opened'),
     `every build-completion read must use signalKind 'pr_opened'; got ${JSON.stringify(calls.map((c) => c.signalKind))}`);
 });
+
+test('resolveDaemonWorkerIdentityForPr fails closed when current head is missing', async () => {
+  const calls = [];
+  const result = await resolveDaemonWorkerIdentityForPr({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 3473,
+    currentHeadSha: '   ',
+    hqRoot: '/tmp/hq',
+    rootDir: '/tmp/root',
+    env: {},
+    readBuildCompletionSignalForPrImpl: async (args) => {
+      calls.push(args);
+      return {
+        ok: true,
+        row: { launch_request_id: 'lrq_stale', worker_class: 'codex', head_sha: 'oldhead' },
+      };
+    },
+  });
+
+  assert.deepEqual(result, { ok: false, reason: 'missing-current-head-sha' });
+  assert.equal(calls.length, 0, 'missing current head must not degrade into a PR-level provenance query');
+});

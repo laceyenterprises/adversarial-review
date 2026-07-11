@@ -5865,6 +5865,10 @@ async function resolveDaemonWorkerIdentityForPr({
   env = process.env,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
 } = {}) {
+  const currentHead = String(currentHeadSha || '').trim();
+  if (!currentHead) {
+    return { ok: false, reason: 'missing-current-head-sha' };
+  }
   const baseArgs = {
     repo,
     prNumber,
@@ -5878,12 +5882,11 @@ async function resolveDaemonWorkerIdentityForPr({
     // 'pr_opened' signal for the current head only: PR origin alone is not
     // sufficient provenance after another commit is pushed to the branch.
     signalKind: 'pr_opened',
-    headSha: String(currentHeadSha || '').trim() || null,
+    headSha: currentHead,
     hqRoot,
     rootDir,
     env,
   };
-  const currentHead = String(currentHeadSha || '').trim();
   let resolved;
   try {
     resolved = await readBuildCompletionSignalForPrImpl(baseArgs);
@@ -5918,7 +5921,6 @@ async function resolveDaemonWorkerIdentityForPr({
     return {
       ok: false,
       reason: resolved?.reason || 'missing-build-completion-signal',
-      exactHeadReason: resolved?.reason || null,
       launchProvenanceReason: launchProvenance.reason,
     };
   }
@@ -5929,7 +5931,6 @@ async function resolveDaemonWorkerIdentityForPr({
       ok: false,
       reason: !launchRequestId ? 'missing-launch-request-id' : 'missing-worker-class',
       rowHeadSha: resolved.row?.head_sha ?? resolved.row?.headSha ?? null,
-      exactHeadReason: resolved?.reason || null,
     };
   }
   const rowHeadSha = String(resolved.row?.head_sha ?? resolved.row?.headSha ?? '').trim();
@@ -5940,7 +5941,7 @@ async function resolveDaemonWorkerIdentityForPr({
     rowHeadSha: rowHeadSha || null,
     currentHeadSha: currentHead || null,
     resolvedBy: 'current-head',
-    headMovedAfterBuildCompletion: Boolean(rowHeadSha && currentHead && rowHeadSha !== currentHead),
+    headMovedAfterBuildCompletion: false,
   };
 }
 

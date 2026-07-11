@@ -224,10 +224,13 @@ function ensureReviewStateSchema(db) {
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_reasoning INTEGER`);
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_tool_context INTEGER`);
   // LAC-1559: head SHA a reviewer pass reviewed, so the completed-rereview
-  // budget counter can key per (repo, pr, head). Idempotent backstop for DBs
-  // that predate 20260711_reviewer_passes_head_sha.sql.
+  // budget counter can key per (repo, pr, head). Keep this in the idempotent
+  // schema-convergence path because SQLite has no ADD COLUMN IF NOT EXISTS.
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN head_sha TEXT`);
   db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_reviewer_passes_head
+      ON reviewer_passes(repo, pr_number, pass_kind, head_sha);
+
     CREATE UNIQUE INDEX IF NOT EXISTS reviewed_prs_identity_round_kind_unique
       ON reviewed_prs(domain_id, subject_external_id, revision_ref);
 

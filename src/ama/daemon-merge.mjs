@@ -593,6 +593,13 @@ export async function attemptDaemonCleanMerge({
   }
 
   // ── Finalize: append the terminal audit before the outer lease release. ────
+  // LAC-1559 Fix 2: a fail-closed daemon path is by construction a FULLY-CLEAN
+  // (zero-finding) settled review that could not be landed and has NO hammer
+  // fallback (the retry path never hammers). Mark that terminal park as an
+  // operator-visible "manual close required" signal so the superproject
+  // observability layer (ARR-02) can page on it instead of it being a silent
+  // failed-without-merge. This does NOT change the merge decision.
+  const cleanParkManualCloseRequired = !merged && isFullyCleanSettledReview(reviewState);
   let auditWritten = false;
   try {
     if (merged) {
@@ -624,6 +631,9 @@ export async function attemptDaemonCleanMerge({
           eligibilityReasons: terminal.reasons || [],
           flagState,
           ...(terminal.mergeDiagnostics ? { mergeDiagnostics: terminal.mergeDiagnostics } : {}),
+          ...(cleanParkManualCloseRequired
+            ? { manualCloseRequired: true, operatorAction: 'clean-pr-parked-manual-close-required' }
+            : {}),
           validatedHead,
           mergeMethod,
           attempts,
@@ -653,7 +663,9 @@ export async function attemptDaemonCleanMerge({
   }
   logger?.warn?.(
     `[daemon-merge] fail-closed for ${repo}#${prNumber}@${validatedHead}: ${terminal.reason} ` +
-      `(after ${attempts} attempt(s); no hammer spawned)` +
+      `(after ${attempts} attempt(s); no hammer spawned` +
+      (cleanParkManualCloseRequired ? '; clean PR parked — manual close required' : '') +
+      ')' +
       (terminal.mergeDiagnostics
         ? ` stderr=${JSON.stringify(terminal.mergeDiagnostics.stderr)} stdout=${JSON.stringify(terminal.mergeDiagnostics.stdout)}`
         : ''),
@@ -665,6 +677,7 @@ export async function attemptDaemonCleanMerge({
     attempts,
     leaseAcquired: true,
     auditWritten,
+    manualCloseRequired: cleanParkManualCloseRequired,
     ...(terminal.reasons ? { reasons: terminal.reasons } : {}),
   };
   } finally {

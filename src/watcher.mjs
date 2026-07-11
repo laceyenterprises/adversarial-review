@@ -3422,6 +3422,9 @@ async function spawnReviewer({
       passKind,
       workspacePath: workspacePath || ROOT,
       startedAt,
+      // LAC-1559: record the head this pass reviewed so the completed-rereview
+      // budget counter keys per (repo, pr, head) — a head move re-arms review.
+      headSha: reviewerHeadSha || null,
       metadata: {
         reviewerSessionUuid,
         reviewerModel,
@@ -3787,19 +3790,41 @@ function evaluateRoundBudgetForReview({
   };
 }
 
-function countCompletedReviewerRereviewRounds({ db: dbOverride = null, rootDir = ROOT, repoPath, prNumber } = {}) {
+// Count completed reviewer rereview passes for a PR.
+//
+// LAC-1559 — when `headSha` is supplied, count only rereviews of THAT head
+// (`head_sha = ?`), so a genuinely new head reads 0 completed rounds and the
+// per-risk round budget re-arms review for it, while same-head re-reviews stay
+// bounded. When `headSha` is omitted the count spans all heads for the PR
+// (per-PR), which the review-cycle-exhaustion convergence check relies on so
+// head-thrashing cannot dodge the final hammer forever. Legacy rows written
+// before the `head_sha` column exists carry NULL and simply do not match a
+// specific-head filter (fail-safe toward re-arming, self-healing as new passes
+// record their head).
+function countCompletedReviewerRereviewRounds({
+  db: dbOverride = null,
+  rootDir = ROOT,
+  repoPath,
+  prNumber,
+  headSha = null,
+} = {}) {
+  const normalizedHeadSha = typeof headSha === 'string' && headSha.trim() !== ''
+    ? headSha.trim()
+    : null;
   const ownedDb = dbOverride ? null : openReviewStateDb(rootDir);
   const readDb = dbOverride || ownedDb;
   try {
     if (!dbOverride) ensureReviewStateSchema(readDb);
-    const row = readDb.prepare(
+    const baseSql =
       `SELECT COUNT(*) AS count
          FROM reviewer_passes
         WHERE repo = ?
           AND pr_number = ?
           AND pass_kind = 'rereview'
-          AND status = 'completed'`
-    ).get(repoPath, prNumber);
+          AND status = 'completed'`;
+    const row = normalizedHeadSha === null
+      ? readDb.prepare(baseSql).get(repoPath, prNumber)
+      : readDb.prepare(`${baseSql}\n          AND head_sha = ?`).get(repoPath, prNumber, normalizedHeadSha);
     const count = Number(row?.count || 0);
     return Number.isFinite(count) && count > 0 ? count : 0;
   } finally {
@@ -3832,6 +3857,12 @@ function resolveFirstPassReviewBudgetSuppression({
     };
   }
 
+  // LAC-1559: the completed-rereview budget is keyed per (repo, pr, head). A
+  // head move re-arms review because the new head reads 0 completed rounds,
+  // while same-head re-reviews stay bounded by the per-risk round budget.
+  const suppliedCurrentHeadSha =
+    typeof currentHeadSha === 'string' && currentHeadSha.length > 0 ? currentHeadSha : null;
+
   let ledger;
   let resolution;
   let completedRereviewRounds = 0;
@@ -3842,6 +3873,7 @@ function resolveFirstPassReviewBudgetSuppression({
       rootDir,
       repoPath,
       prNumber,
+      headSha: suppliedCurrentHeadSha,
     });
     resolution = resolveRoundBudgetForJobImpl({
       linearTicketId,
@@ -3894,8 +3926,6 @@ function resolveFirstPassReviewBudgetSuppression({
   // over the remediation cap must keep using this owed-final-review signal;
   // otherwise a request-changes -> push-commit loop can bypass the remediation
   // round cap until only the absolute review-cycle cap remains.
-  const suppliedCurrentHeadSha =
-    typeof currentHeadSha === 'string' && currentHeadSha.length > 0 ? currentHeadSha : null;
   const reviewedHeadSha =
     typeof reviewRow?.reviewer_head_sha === 'string' && reviewRow.reviewer_head_sha.length > 0
       ? reviewRow.reviewer_head_sha
@@ -6275,11 +6305,39 @@ async function maybeDispatchAmaClosureFor({
     env,
   });
   if (daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
+    const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
     logger?.log?.(
       `[watcher] AMA daemon clean-merge ${daemonCleanMerge.disposition} for ${repoPath}#${prNumber}` +
-        `@${String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12)}: ${daemonCleanMerge.reason}` +
+        `@${daemonHeadShort}: ${daemonCleanMerge.reason}` +
         (daemonCleanMerge.attempts ? ` (attempts=${daemonCleanMerge.attempts})` : ''),
     );
+    // LAC-1559 Fix 2: the daemon parks a fully-clean PR that failed closed with
+    // no hammer fallback. Emit a distinct, queryable operator signal so the
+    // superproject observability layer (ARR-02) can page on it rather than the
+    // park being silent. The durable record is the daemon audit doc
+    // (`manualCloseRequired` on the terminal attempt); this is the pageable
+    // event. The merge decision is unchanged.
+    if (
+      daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.FAILED_CLOSED &&
+      daemonCleanMerge.manualCloseRequired
+    ) {
+      logger?.log?.(JSON.stringify({
+        schemaVersion: 1,
+        event: 'ama.daemon_clean_park.manual_close_required',
+        repo: repoPath,
+        pr: prNumber,
+        headSha: gateSnapshot?.reviewedHeadSha || null,
+        reason: daemonCleanMerge.reason,
+        attempts: daemonCleanMerge.attempts || 0,
+        hammerFallback: false,
+      }));
+      logger?.warn?.(
+        `[watcher] AMA daemon clean PR PARKED — manual close required for ` +
+          `${repoPath}#${prNumber}@${daemonHeadShort}: a zero-finding clean review ` +
+          `could not be landed (${daemonCleanMerge.reason}) and the retry path spawns ` +
+          `no hammer. Operator must close manually; see the daemon-merge audit record.`,
+      );
+    }
     // Daemon owns this tick — skip BOTH the hammer dispatch and the merge-agent
     // path. `skipMergeAgent` routes the coexistence decision to `ama-pending`
     // so the watcher returns without dispatching anything.

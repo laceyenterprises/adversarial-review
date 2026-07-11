@@ -331,17 +331,16 @@ function presentHardStopLabels(reviewState, prMetadata, recoveryEvidence, advers
  * `NEUTRAL`, `SKIPPED` accept set and its self-gate exclusion of the
  * adversarial-review pipeline's own status context.
  *
- * FAIL-OPEN CAVEAT: that classifier maps an explicit EMPTY rollup to
- * 'SUCCESS', so this eligibility gate reads green on a repo with no external
- * CI — and also on a rollup fetched before GitHub registered the head's
- * checks. This deliberately DIVERGES from the MSM merge predicate
- * (`requiredChecksGreen` in `merge-eligibility.mjs`), which fails closed on
- * an empty rollup at the actual merge decision. The residual risk on this
- * path is bounded by the merge-time `--match-head-commit <reviewedSha>` pin
- * (see the branch-protection gate note in `isEligibleForAmaClosure` below):
- * a head that moved past the fail-open read cannot be merged. Keep the
- * divergence; do not make this gate fail closed on empty (it would park
- * every no-CI repo) and do not make the MSM predicate fail open.
+ * FAIL-CLOSED (LAC-1559): that classifier maps an explicit EMPTY rollup to
+ * `null` (unknown), so this eligibility gate reads NOT green on a repo with no
+ * external CI — and on a rollup fetched before GitHub registered the head's
+ * checks. This now CONVERGES with the MSM merge predicate (`requiredChecksGreen`
+ * in `merge-eligibility.mjs`), which already fails closed on an empty rollup at
+ * the actual merge decision. A zero-external-check PR accrues `ci-not-green`
+ * here rather than auto-closing; the daemon clean-park path emits an
+ * operator-visible "manual close required" signal so a genuinely no-CI clean PR
+ * is observable rather than silently held (LAC-1559 Fix 2). The merge-time
+ * `--match-head-commit <reviewedSha>` pin remains the head-move backstop.
  *
  * @param {PrMetadata} prMetadata
  * @param {Object}     env
@@ -353,9 +352,9 @@ function classifyCiGreen(prMetadata, env) {
     { env },
   );
   return {
-    // `null` is unknown/fail-closed here: the merge-agent classifier uses
-    // it for missing or malformed rollups, while an explicit empty array
-    // already normalizes to `SUCCESS`.
+    // `null` is unknown/fail-closed here: the classifier returns it for
+    // missing, malformed, AND (since LAC-1559) explicit-empty rollups, so a
+    // PR with zero external checks reads NOT green.
     green: conclusion === 'SUCCESS',
     conclusion,
   };

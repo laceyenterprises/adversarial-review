@@ -371,6 +371,12 @@ test('retryable failures exhaust the bounded budget → fail closed (non-permane
   const doc = h.auditStore.get('o/r#7@' + HEAD);
   const terminal = doc.attempts[doc.attempts.length - 1];
   assert.equal(terminal.permanent, false, 'exhaustion is not a permanent terminal');
+  // LAC-1559 Fix 2: a fail-closed clean review is parked with no hammer
+  // fallback — the terminal audit carries an operator-visible manual-close
+  // marker so ARR-02 can page on it, and the disposition surfaces it too.
+  assert.equal(terminal.manualCloseRequired, true);
+  assert.equal(terminal.operatorAction, 'clean-pr-parked-manual-close-required');
+  assert.equal(result.manualCloseRequired, true);
 });
 
 test('prior permanent daemon terminal failure on head → declines (routes to hammer), no lease taken', async () => {

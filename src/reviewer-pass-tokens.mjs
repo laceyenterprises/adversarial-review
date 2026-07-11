@@ -90,18 +90,25 @@ function beginReviewerPass(rootDir, {
   workerRunId = null,
   workspacePath = null,
   startedAt = new Date().toISOString(),
+  headSha = null,
   metadata = {},
 } = {}) {
   const key = passKey({ repo, prNumber, attemptNumber, passKind });
   const model = normalizeReviewerModel(reviewerModel || reviewerClass);
+  // LAC-1559: the head SHA this pass reviewed, so the completed-rereview budget
+  // counter can key per (repo, pr, head). `null` when the caller does not know
+  // the head (legacy/backfill), which the counter treats as "unattributed".
+  const normalizedHeadSha = typeof headSha === 'string' && headSha.trim() !== ''
+    ? headSha.trim()
+    : null;
   const db = openReviewStateDb(rootDir);
   try {
     ensureReviewStateSchema(db);
     db.prepare(
       `INSERT OR IGNORE INTO reviewer_passes (
          repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind,
-         worker_run_id, workspace_path, started_at, status, metadata_json
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`
+         worker_run_id, workspace_path, started_at, status, head_sha, metadata_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`
     ).run(
       key.repo,
       key.prNumber,
@@ -112,6 +119,7 @@ function beginReviewerPass(rootDir, {
       workerRunId || null,
       workspacePath || null,
       startedAt,
+      normalizedHeadSha,
       metadataJson(metadata)
     );
     const existing = db.prepare(
@@ -128,6 +136,7 @@ function beginReviewerPass(rootDir, {
               reviewer_model = COALESCE(?, reviewer_model),
               worker_run_id = COALESCE(?, worker_run_id),
               workspace_path = COALESCE(?, workspace_path),
+              head_sha = COALESCE(?, head_sha),
               metadata_json = ?
         WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
     ).run(
@@ -135,6 +144,7 @@ function beginReviewerPass(rootDir, {
       model,
       workerRunId || null,
       workspacePath || null,
+      normalizedHeadSha,
       metadataJson(mergedMetadata),
       key.repo,
       key.prNumber,

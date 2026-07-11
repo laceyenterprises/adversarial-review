@@ -5790,7 +5790,6 @@ function resolveDaemonWorkerIdentityForPr({
   const baseArgs = {
     repo,
     prNumber,
-    signalKind: 'merged',
     hqRoot,
     rootDir,
     env,

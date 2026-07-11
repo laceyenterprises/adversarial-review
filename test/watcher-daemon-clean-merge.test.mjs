@@ -594,6 +594,7 @@ test('daemon clean merge resolves worker identity by PR after head moves past bu
       },
       readBuildCompletionSignalForPrImpl: (args) => {
         readCalls.push(args);
+        assert.equal(args.signalKind, undefined, 'open-PR identity lookup must accept pre-merge completion signals');
         if (args.headSha === 'head-after-remediation') {
           return { ok: false, reason: 'missing-build-completion-signal' };
         }

@@ -3803,7 +3803,7 @@ function countCompletedReviewerRereviewRounds({ db: dbOverride = null, rootDir =
     const count = Number(row?.count || 0);
     return Number.isFinite(count) && count > 0 ? count : 0;
   } finally {
-    if (ownedDb) ownedDb.close();
+    if (ownedDb && ownedDb !== db) ownedDb.close();
   }
 }
 

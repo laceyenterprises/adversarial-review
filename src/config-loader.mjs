@@ -835,6 +835,13 @@ function schemaV1() {
               },
             },
           },
+          snapshots: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              keep_count: { __type: TYPE_INT, __default: 3, __min: 1 },
+            },
+          },
           ephemeral: {
             __type: TYPE_DICT,
             __strict: true,

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -748,6 +748,14 @@ test('daemon clean merge awaits async worker identity reads and preserves zero l
           },
         };
       },
+      fetchRollupImpl: async () => ({
+        state: 'OPEN',
+        headSha: 'async-head',
+        headRefName: 'worker/async-head',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      }),
       attemptDaemonCleanMergeImpl: async () => {
         mergeAttempted = true;
         return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true };
@@ -799,6 +807,14 @@ test('daemon clean merge fail-closes when worker LRQ identity cannot be resolved
       },
       currentPrHeadSha: 'session-opened-head',
       readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+      fetchRollupImpl: async () => ({
+        state: 'OPEN',
+        headSha: 'session-opened-head',
+        headRefName: 'operator/session-opened',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      }),
       acquireMergeLeaseImpl: () => {
         leaseCalls += 1;
         return { acquired: true, lease: {} };
@@ -864,6 +880,14 @@ test('daemon clean merge strict mode declines a PR with a standing blocking find
           head_sha: 'finding-head',
         },
       }),
+      fetchRollupImpl: async () => ({
+        state: 'OPEN',
+        headSha: 'finding-head',
+        headRefName: 'worker/finding-head',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      }),
       acquireMergeLeaseImpl: () => {
         leaseCalls += 1;
         return { acquired: true, lease: {} };
@@ -881,6 +905,149 @@ test('daemon clean merge strict mode declines a PR with a standing blocking find
     assert.equal(result.reason, 'blocking-findings-present');
     assert.equal(leaseCalls, 0, 'strict-mode finding refusal must happen before the lease');
     assert.equal(mergeCalls, 0);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('daemon clean merge defers when the live PR head moved after the tick snapshot', async () => {
+  const rootDir = tempRoot();
+  try {
+    let identityReads = 0;
+    let mergeAttempted = false;
+    const result = await runDaemonCleanMergeAttempt({
+      rootDir,
+      cfg: {
+        mergeMethod: 'squash',
+        autonomousMergeExecutionEnabled: true,
+        strictMode: true,
+      },
+      repoPath: 'acme/repo',
+      prNumber: 564,
+      candidate: {
+        baseBranch: 'main',
+        headSha: 'stale-head',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        prState: 'open',
+      },
+      gateSnapshot: {
+        reviewedHeadSha: 'stale-head',
+        settledReview: { verdict: 'comment-only' },
+      },
+      mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviewState: {
+        blockingFindingCount: 0,
+        blockingFindingState: 'known',
+        nonBlockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+      },
+      currentPrHeadSha: 'stale-head',
+      fetchRollupImpl: async () => ({
+        state: 'OPEN',
+        headSha: 'live-head',
+        headRefName: 'worker/live-head',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      }),
+      readBuildCompletionSignalForPrImpl: () => {
+        identityReads += 1;
+        return { ok: false, reason: 'missing-build-completion-signal' };
+      },
+      attemptDaemonCleanMergeImpl: async () => {
+        mergeAttempted = true;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true };
+      },
+      logger: { warn() {}, log() {} },
+      env: { HQ_ROOT: rootDir },
+    });
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.DEFERRED);
+    assert.equal(result.reason, 'pr-head-moved');
+    assert.equal(result.snapshotHead, 'stale-head');
+    assert.equal(result.liveHead, 'live-head');
+    assert.equal(identityReads, 0, 'stale heads must not reach worker identity resolution');
+    assert.equal(mergeAttempted, false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('daemon clean merge resolves worker identity from HQ launch provenance when build completion is absent', async () => {
+  const rootDir = tempRoot();
+  try {
+    const workerDir = join(rootDir, 'workers', 'claude-code-hcc-02-14a16b9d');
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, 'launch-provenance.json'),
+      JSON.stringify({
+        repo: 'repo',
+        prRepo: 'repo',
+        branch: 'claude-code-hcc-02-14a16b9d/HCC-02',
+        launchRequestId: 'lrq_8f7fc45e-3c3b-40f7-907d-9ab83635ed26',
+        workerClass: 'claude-code',
+        prHeadSha: 'superseded-worker-head',
+      }),
+    );
+
+    let mergeAttempted = false;
+    let capturedIdentity = null;
+    const result = await runDaemonCleanMergeAttempt({
+      rootDir,
+      cfg: {
+        mergeMethod: 'squash',
+        autonomousMergeExecutionEnabled: true,
+        strictMode: true,
+      },
+      repoPath: 'acme/repo',
+      prNumber: 3464,
+      candidate: {
+        baseBranch: 'main',
+        headSha: 'live-head-after-force-push',
+        headRefName: 'claude-code-hcc-02-14a16b9d/HCC-02',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        prState: 'open',
+      },
+      gateSnapshot: {
+        reviewedHeadSha: 'live-head-after-force-push',
+        settledReview: { verdict: 'comment-only' },
+      },
+      mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviewState: {
+        blockingFindingCount: 0,
+        blockingFindingState: 'known',
+        nonBlockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+      },
+      currentPrHeadSha: 'live-head-after-force-push',
+      fetchRollupImpl: async () => ({
+        state: 'OPEN',
+        headSha: 'live-head-after-force-push',
+        headRefName: 'claude-code-hcc-02-14a16b9d/HCC-02',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      }),
+      readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+      attemptDaemonCleanMergeImpl: async (attemptArgs) => {
+        mergeAttempted = true;
+        capturedIdentity = attemptArgs.workerIdentity;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true };
+      },
+      logger: { warn() {}, log() {} },
+      env: { HQ_ROOT: rootDir },
+    });
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(mergeAttempted, true);
+    assert.equal(capturedIdentity?.resolvedBy, 'launch-provenance');
+    assert.equal(capturedIdentity?.launchRequestId, 'lrq_8f7fc45e-3c3b-40f7-907d-9ab83635ed26');
+    assert.equal(capturedIdentity?.workerClass, 'claude-code');
+    assert.equal(capturedIdentity?.buildCompletionReason, 'missing-build-completion-signal');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

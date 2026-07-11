@@ -5875,20 +5875,18 @@ async function resolveDaemonWorkerIdentityForPr({
     // NEVER resolves for an open worker PR, so every daemon-clean-merge
     // fail-closed with worker-identity-unresolved (2026-07-11: #3473/#3476/#3478
     // all had a 'pr_opened' row but zero 'merged' rows). Resolve against the
-    // 'pr_opened' signal, which is what proves the PR came from a worker.
+    // 'pr_opened' signal for the current head only: PR origin alone is not
+    // sufficient provenance after another commit is pushed to the branch.
     signalKind: 'pr_opened',
+    headSha: String(currentHeadSha || '').trim() || null,
     hqRoot,
     rootDir,
     env,
   };
   const currentHead = String(currentHeadSha || '').trim();
-  let exact = null;
   let resolved;
   try {
-    exact = currentHead
-      ? await readBuildCompletionSignalForPrImpl({ ...baseArgs, headSha: currentHead })
-      : null;
-    resolved = exact?.ok ? exact : await readBuildCompletionSignalForPrImpl(baseArgs);
+    resolved = await readBuildCompletionSignalForPrImpl(baseArgs);
   } catch (err) {
     return {
       ok: false,
@@ -5920,7 +5918,7 @@ async function resolveDaemonWorkerIdentityForPr({
     return {
       ok: false,
       reason: resolved?.reason || 'missing-build-completion-signal',
-      exactHeadReason: exact && !exact.ok ? exact.reason : null,
+      exactHeadReason: resolved?.reason || null,
       launchProvenanceReason: launchProvenance.reason,
     };
   }
@@ -5931,7 +5929,7 @@ async function resolveDaemonWorkerIdentityForPr({
       ok: false,
       reason: !launchRequestId ? 'missing-launch-request-id' : 'missing-worker-class',
       rowHeadSha: resolved.row?.head_sha ?? resolved.row?.headSha ?? null,
-      exactHeadReason: exact && !exact.ok ? exact.reason : null,
+      exactHeadReason: resolved?.reason || null,
     };
   }
   const rowHeadSha = String(resolved.row?.head_sha ?? resolved.row?.headSha ?? '').trim();
@@ -5941,7 +5939,7 @@ async function resolveDaemonWorkerIdentityForPr({
     workerClass,
     rowHeadSha: rowHeadSha || null,
     currentHeadSha: currentHead || null,
-    resolvedBy: exact?.ok ? 'current-head' : 'pr-number',
+    resolvedBy: 'current-head',
     headMovedAfterBuildCompletion: Boolean(rowHeadSha && currentHead && rowHeadSha !== currentHead),
   };
 }

@@ -614,7 +614,7 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
   }
 });
 
-test('daemon clean merge resolves worker identity by PR after head moves past build-completion head', async () => {
+test('daemon clean merge fail-closes when the head moved past worker build-completion provenance', async () => {
   const rootDir = tempRoot();
   try {
     const readCalls = [];
@@ -673,19 +673,9 @@ test('daemon clean merge resolves worker identity by PR after head moves past bu
       },
       readBuildCompletionSignalForPrImpl: (args) => {
         readCalls.push(args);
-        assert.equal(args.signalKind, undefined, 'open-PR identity lookup must accept pre-merge completion signals');
-        if (args.headSha === 'head-after-remediation') {
-          return { ok: false, reason: 'missing-build-completion-signal' };
-        }
-        assert.equal(args.headSha, undefined, 'fallback lookup must be PR-scoped, not per-head');
-        return {
-          ok: true,
-          row: {
-            launch_request_id: 'lrq_3743bbdf',
-            worker_class: 'codex',
-            head_sha: 'head-at-pr-open',
-          },
-        };
+        assert.equal(args.signalKind, 'pr_opened');
+        assert.equal(args.headSha, 'head-after-remediation');
+        return { ok: false, reason: 'missing-build-completion-signal' };
       },
       execFileImpl: async () => {
         mergeCalls += 1;
@@ -695,13 +685,13 @@ test('daemon clean merge resolves worker identity by PR after head moves past bu
       env: { HQ_ROOT: rootDir },
     });
 
-    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
-    assert.equal(result.merged, true);
-    assert.equal(mergeCalls, 1);
-    assert.equal(leaseReleased, true, 'daemon merge must still release its lease');
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+    assert.equal(result.merged, false);
+    assert.equal(mergeCalls, 0);
+    assert.equal(leaseReleased, false, 'identity must fail closed before taking the merge lease');
     assert.deepEqual(
       readCalls.map((call) => call.headSha || null),
-      ['head-after-remediation', null],
+      ['head-after-remediation'],
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -1146,7 +1136,7 @@ test('daemon clean merge launch provenance skips missing candidate files without
   }
 });
 
-test('resolveDaemonWorkerIdentityForPr queries the pr_opened signal, not merged (open PR has no merged row)', async () => {
+test('resolveDaemonWorkerIdentityForPr scopes the pr_opened signal to the current head', async () => {
   // 2026-07-11 root cause: the resolver queried signal_kind='merged' (the read
   // adapter default), but an OPEN worker PR only has a 'pr_opened' build-
   // completion row — the 'merged' row is written AFTER merge. So identity never
@@ -1155,9 +1145,9 @@ test('resolveDaemonWorkerIdentityForPr queries the pr_opened signal, not merged 
   const calls = [];
   const mockRead = async (args) => {
     calls.push(args);
-    // Emulate the ledger: a 'pr_opened' row exists; a 'merged' query finds nothing.
-    if (args.signalKind === 'pr_opened') {
-      return { ok: true, row: { launch_request_id: 'lrq_test', worker_class: 'codex', head_sha: args.headSha || 'abc123' } };
+    // Emulate the ledger: only the current head has worker provenance.
+    if (args.signalKind === 'pr_opened' && args.headSha === 'abc123') {
+      return { ok: true, row: { launch_request_id: 'lrq_test', worker_class: 'codex', head_sha: args.headSha } };
     }
     return { ok: false, reason: 'missing-build-completion-signal' };
   };
@@ -1173,6 +1163,9 @@ test('resolveDaemonWorkerIdentityForPr queries the pr_opened signal, not merged 
   assert.equal(result.ok, true, `identity must resolve from the pr_opened signal; got ${JSON.stringify(result)}`);
   assert.equal(result.launchRequestId, 'lrq_test');
   assert.equal(result.workerClass, 'codex');
+  assert.equal(result.resolvedBy, 'current-head');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].headSha, 'abc123');
   assert.ok(calls.length > 0 && calls.every((c) => c.signalKind === 'pr_opened'),
     `every build-completion read must use signalKind 'pr_opened'; got ${JSON.stringify(calls.map((c) => c.signalKind))}`);
 });

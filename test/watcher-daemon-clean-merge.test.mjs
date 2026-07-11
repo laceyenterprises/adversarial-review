@@ -4,7 +4,11 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { maybeDispatchAmaClosureFor, runDaemonCleanMergeAttempt } from '../src/watcher.mjs';
+import {
+  maybeDispatchAmaClosureFor,
+  runDaemonCleanMergeAttempt,
+  resolveDaemonWorkerIdentityForPr,
+} from '../src/watcher.mjs';
 import {
   DAEMON_MERGE_DISPOSITION,
   DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
@@ -1140,4 +1144,35 @@ test('daemon clean merge launch provenance skips missing candidate files without
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('resolveDaemonWorkerIdentityForPr queries the pr_opened signal, not merged (open PR has no merged row)', async () => {
+  // 2026-07-11 root cause: the resolver queried signal_kind='merged' (the read
+  // adapter default), but an OPEN worker PR only has a 'pr_opened' build-
+  // completion row — the 'merged' row is written AFTER merge. So identity never
+  // resolved pre-merge and every daemon-clean-merge fail-closed
+  // worker-identity-unresolved (#3473/#3476/#3478 all had pr_opened, zero merged).
+  const calls = [];
+  const mockRead = async (args) => {
+    calls.push(args);
+    // Emulate the ledger: a 'pr_opened' row exists; a 'merged' query finds nothing.
+    if (args.signalKind === 'pr_opened') {
+      return { ok: true, row: { launch_request_id: 'lrq_test', worker_class: 'codex', head_sha: args.headSha || 'abc123' } };
+    }
+    return { ok: false, reason: 'missing-build-completion-signal' };
+  };
+  const result = await resolveDaemonWorkerIdentityForPr({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 3473,
+    currentHeadSha: 'abc123',
+    hqRoot: '/tmp/hq',
+    rootDir: '/tmp/root',
+    env: {},
+    readBuildCompletionSignalForPrImpl: mockRead,
+  });
+  assert.equal(result.ok, true, `identity must resolve from the pr_opened signal; got ${JSON.stringify(result)}`);
+  assert.equal(result.launchRequestId, 'lrq_test');
+  assert.equal(result.workerClass, 'codex');
+  assert.ok(calls.length > 0 && calls.every((c) => c.signalKind === 'pr_opened'),
+    `every build-completion read must use signalKind 'pr_opened'; got ${JSON.stringify(calls.map((c) => c.signalKind))}`);
 });

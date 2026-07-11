@@ -5868,6 +5868,15 @@ async function resolveDaemonWorkerIdentityForPr({
   const baseArgs = {
     repo,
     prNumber,
+    // The daemon-clean-merge resolves the worker identity of a PR it is about
+    // to merge (pre-merge). readBuildCompletionSignalForPr defaults signalKind
+    // to 'merged', but the 'merged' signal is only recorded AFTER a PR merges —
+    // an open PR only has the 'pr_opened' signal. Querying 'merged' therefore
+    // NEVER resolves for an open worker PR, so every daemon-clean-merge
+    // fail-closed with worker-identity-unresolved (2026-07-11: #3473/#3476/#3478
+    // all had a 'pr_opened' row but zero 'merged' rows). Resolve against the
+    // 'pr_opened' signal, which is what proves the PR came from a worker.
+    signalKind: 'pr_opened',
     hqRoot,
     rootDir,
     env,
@@ -9382,6 +9391,7 @@ if (isMain) {
 
 export {
   amaAuthoritativeReviewerLoginsForModel,
+  resolveDaemonWorkerIdentityForPr,
   classifyReviewerFailure,
   createWatcherOctokit,
   createWatcherHeartbeat,

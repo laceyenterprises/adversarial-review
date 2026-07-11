@@ -852,6 +852,26 @@ test('watcher keeps remediation-worker rereview within the final-review allowanc
 
 test('watcher suppresses closer identity commits even when budget remains', async () => {
   assert.deepEqual(isTerminalCloserCommitIdentity({
+    commit: {
+      message: [
+        'HAM remediate final adversarial findings',
+        '',
+        'Worker-Class: hammer',
+        'Closed-By: hammer (adversarial-pipe-mode)',
+        'Remediated-Findings: 2 addressed (1 blocking, 1 non-blocking)',
+      ].join('\n'),
+      committer: {
+        name: 'Codex Remediation Worker',
+        email: 'codex-remediation-worker@example.com',
+      },
+    },
+  }), {
+    suppressed: true,
+    reason: 'closer-commit-trailer',
+    matched: 'Closed-By',
+  });
+
+  assert.deepEqual(isTerminalCloserCommitIdentity({
     message: 'Close resolved PR\n\nClosed-By: hammer (adversarial-pipe-mode)',
     commit: {
       committer: {
@@ -894,6 +914,45 @@ test('watcher suppresses closer identity commits even when budget remains', asyn
       },
     },
   }).reason, 'closer-commit-identity');
+
+  assert.equal(isTerminalCloserCommitIdentity({
+    message: 'HAM remediate final adversarial findings',
+    committer: { login: 'the-hammer-lacey[bot]' },
+  }).reason, 'closer-commit-identity');
+
+  for (const commit of [
+    {
+      message: 'HAM remediate final adversarial findings',
+      commit: { committer: { name: 'the-hammer-lacey[bot]' } },
+    },
+    {
+      message: 'HAM remediate final adversarial findings',
+      commit: {
+        committer: {
+          email: '298977630+the-hammer-lacey[bot]@users.noreply.github.com',
+        },
+      },
+    },
+  ]) {
+    assert.deepEqual(isTerminalCloserCommitIdentity(commit), {
+      suppressed: false,
+      reason: null,
+    });
+  }
+
+  assert.deepEqual(isTerminalCloserCommitIdentity({
+    message: 'Update implementation\n\nWorker-Class: codex',
+    committer: { login: 'codex-worker' },
+    commit: {
+      committer: {
+        name: 'codex-worker',
+        email: 'codex-worker@example.com',
+      },
+    },
+  }), {
+    suppressed: false,
+    reason: null,
+  });
 
   const viaProbe = await getHeadCloserCommitSuppression({
     repoPath: 'laceyenterprises/agent-os',

@@ -1088,7 +1088,17 @@ function schemaV1() {
             __default: null,
             __nullable: true,
           },
+          workstation_dns_name: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+          },
           daily_driver_ip: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+          },
+          daily_driver_dns_name: {
             __type: TYPE_STRING,
             __default: null,
             __nullable: true,
@@ -1098,7 +1108,17 @@ function schemaV1() {
             __default: null,
             __nullable: true,
           },
+          ipad_dns_name: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+          },
           iphone_ip: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+          },
+          iphone_dns_name: {
             __type: TYPE_STRING,
             __default: null,
             __nullable: true,
@@ -2467,16 +2487,32 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_TAILSCALE_WORKSTATION_IP',
     aliases: [],
   },
+  'tailscale.workstation_dns_name': {
+    canonical: 'AGENT_OS_TAILSCALE_WORKSTATION_DNS_NAME',
+    aliases: [],
+  },
   'tailscale.daily_driver_ip': {
     canonical: 'AGENT_OS_TAILSCALE_DAILY_DRIVER_IP',
+    aliases: [],
+  },
+  'tailscale.daily_driver_dns_name': {
+    canonical: 'AGENT_OS_TAILSCALE_DAILY_DRIVER_DNS_NAME',
     aliases: [],
   },
   'tailscale.ipad_ip': {
     canonical: 'AGENT_OS_TAILSCALE_IPAD_IP',
     aliases: [],
   },
+  'tailscale.ipad_dns_name': {
+    canonical: 'AGENT_OS_TAILSCALE_IPAD_DNS_NAME',
+    aliases: [],
+  },
   'tailscale.iphone_ip': {
     canonical: 'AGENT_OS_TAILSCALE_IPHONE_IP',
+    aliases: [],
+  },
+  'tailscale.iphone_dns_name': {
+    canonical: 'AGENT_OS_TAILSCALE_IPHONE_DNS_NAME',
     aliases: [],
   },
   'launchd.label_prefix': {

@@ -132,9 +132,13 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('host.name'), null);
     assert.equal(cfg.get('host.tailscale_hostname'), null);
     assert.equal(cfg.get('tailscale.workstation_ip'), null);
+    assert.equal(cfg.get('tailscale.workstation_dns_name'), null);
     assert.equal(cfg.get('tailscale.daily_driver_ip'), null);
+    assert.equal(cfg.get('tailscale.daily_driver_dns_name'), null);
     assert.equal(cfg.get('tailscale.ipad_ip'), null);
+    assert.equal(cfg.get('tailscale.ipad_dns_name'), null);
     assert.equal(cfg.get('tailscale.iphone_ip'), null);
+    assert.equal(cfg.get('tailscale.iphone_dns_name'), null);
     assert.equal(cfg.get('launchd.label_prefix'), 'ai.laceyenterprises');
     assert.equal(cfg.get('session_ledger.database_name'), 'agent_os_ledger');
     assert.equal(cfg.get('session_ledger.vdb.enabled'), true);
@@ -2272,17 +2276,25 @@ test('host and tailscale sections load through strict Node schema', () => {
         tailscale_hostname: laceyent-mbpro.tail7a19d9.ts.net
       tailscale:
         workstation_ip: 100.64.0.10
+        workstation_dns_name: workstation.tail7a19d9.ts.net
         daily_driver_ip: 100.64.0.11
+        daily_driver_dns_name: daily-driver.tail7a19d9.ts.net
         ipad_ip: 100.64.0.12
+        ipad_dns_name: ipad.tail7a19d9.ts.net
         iphone_ip: 100.64.0.13
+        iphone_dns_name: iphone.tail7a19d9.ts.net
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('host.name'), 'laceyent-mbpro');
     assert.equal(cfg.get('host.tailscale_hostname'), 'laceyent-mbpro.tail7a19d9.ts.net');
     assert.equal(cfg.get('tailscale.workstation_ip'), '100.64.0.10');
+    assert.equal(cfg.get('tailscale.workstation_dns_name'), 'workstation.tail7a19d9.ts.net');
     assert.equal(cfg.get('tailscale.daily_driver_ip'), '100.64.0.11');
+    assert.equal(cfg.get('tailscale.daily_driver_dns_name'), 'daily-driver.tail7a19d9.ts.net');
     assert.equal(cfg.get('tailscale.ipad_ip'), '100.64.0.12');
+    assert.equal(cfg.get('tailscale.ipad_dns_name'), 'ipad.tail7a19d9.ts.net');
     assert.equal(cfg.get('tailscale.iphone_ip'), '100.64.0.13');
+    assert.equal(cfg.get('tailscale.iphone_dns_name'), 'iphone.tail7a19d9.ts.net');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -2298,17 +2310,25 @@ test('host and tailscale canonical env aliases override defaults', () => {
         AGENT_OS_HOST_NAME: 'env-host',
         AGENT_OS_TAILSCALE_HOSTNAME: 'env-host.tailnet.example',
         AGENT_OS_TAILSCALE_WORKSTATION_IP: '100.64.1.10',
+        AGENT_OS_TAILSCALE_WORKSTATION_DNS_NAME: 'workstation.env.ts.net',
         AGENT_OS_TAILSCALE_DAILY_DRIVER_IP: '100.64.1.11',
+        AGENT_OS_TAILSCALE_DAILY_DRIVER_DNS_NAME: 'daily-driver.env.ts.net',
         AGENT_OS_TAILSCALE_IPAD_IP: '100.64.1.12',
+        AGENT_OS_TAILSCALE_IPAD_DNS_NAME: 'ipad.env.ts.net',
         AGENT_OS_TAILSCALE_IPHONE_IP: '100.64.1.13',
+        AGENT_OS_TAILSCALE_IPHONE_DNS_NAME: 'iphone.env.ts.net',
       },
     });
     assert.equal(cfg.get('host.name'), 'env-host');
     assert.equal(cfg.get('host.tailscale_hostname'), 'env-host.tailnet.example');
     assert.equal(cfg.get('tailscale.workstation_ip'), '100.64.1.10');
+    assert.equal(cfg.get('tailscale.workstation_dns_name'), 'workstation.env.ts.net');
     assert.equal(cfg.get('tailscale.daily_driver_ip'), '100.64.1.11');
+    assert.equal(cfg.get('tailscale.daily_driver_dns_name'), 'daily-driver.env.ts.net');
     assert.equal(cfg.get('tailscale.ipad_ip'), '100.64.1.12');
+    assert.equal(cfg.get('tailscale.ipad_dns_name'), 'ipad.env.ts.net');
     assert.equal(cfg.get('tailscale.iphone_ip'), '100.64.1.13');
+    assert.equal(cfg.get('tailscale.iphone_dns_name'), 'iphone.env.ts.net');
     assert.equal(
       cfg.resolutionTrace('host.name').at(-1).source,
       'env:AGENT_OS_HOST_NAME',

@@ -6014,10 +6014,8 @@ async function readDaemonWorkerLaunchProvenanceForPr({
     return { ok: false, reason: 'missing-pr-branch' };
   }
   const candidates = (await listDaemonWorkerLaunchProvenanceCandidates(hqRoot)).slice(0, 2000);
-  const documents = await mapWithConcurrency(candidates, 32, (candidate) => readJsonFileBestEffort(candidate.path));
-  for (let index = 0; index < candidates.length; index += 1) {
-    const candidate = candidates[index];
-    const doc = documents[index];
+  for (const candidate of candidates) {
+    const doc = await readJsonFileBestEffort(candidate.path);
     const payload = daemonLaunchProvenancePayload(doc);
     if (!payload || typeof payload !== 'object') continue;
     const recordRepo = payload.prRepo || payload.repo;

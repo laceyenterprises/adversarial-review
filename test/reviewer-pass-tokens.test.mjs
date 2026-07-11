@@ -27,6 +27,8 @@ import {
 } from '../src/reviewer-pass-tokens.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 
+const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
+
 function tempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 }
@@ -141,11 +143,13 @@ test('worker-run and reviewer-session readers accept ledger target object, URI, 
     const workerUsage = readWorkerRunTokenUsage({
       workerRunId: 'wr_1',
       rootDir,
+      env: HERMETIC_CONFIG_ENV,
       ...fixture.apply(),
     });
     const failedWorkerUsage = readWorkerRunTokenUsage({
       workerRunId: 'wr_2',
       rootDir,
+      env: HERMETIC_CONFIG_ENV,
       ...fixture.apply(),
     });
     const reviewerUsage = readReviewerSessionTokenUsage({
@@ -154,6 +158,7 @@ test('worker-run and reviewer-session readers accept ledger target object, URI, 
       startedAt: '2026-05-18T00:59:00.000Z',
       endedAt: '2026-05-18T01:03:00.000Z',
       rootDir,
+      env: HERMETIC_CONFIG_ENV,
       ...fixture.apply(),
     });
 
@@ -198,7 +203,7 @@ test('reviewer session lookup skips empty HQ_ROOT ledger stubs', () => {
     startedAt: '2026-05-18T00:59:00.000Z',
     endedAt: '2026-05-18T01:03:00.000Z',
     ledgerTarget: { backend: 'sqlite', path: realLedger },
-    env: { HQ_ROOT: hqRoot },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: hqRoot },
     rootDir,
   });
 
@@ -220,7 +225,7 @@ test('worker-run lookup skips empty HQ_ROOT ledger stubs', () => {
   const usage = readWorkerRunTokenUsage({
     workerRunId: 'wr_1',
     ledgerTarget: { backend: 'sqlite', path: realLedger },
-    env: { HQ_ROOT: hqRoot },
+    env: { ...HERMETIC_CONFIG_ENV, HQ_ROOT: hqRoot },
     rootDir,
   });
 
@@ -307,6 +312,7 @@ test('reviewer session lookup prefers adapter session keys over newer workspace 
     startedAt: '2026-05-18T00:59:00.000Z',
     endedAt: '2026-05-18T01:03:00.000Z',
     ledgerTarget: `sqlite://${ledgerDb}`,
+    env: HERMETIC_CONFIG_ENV,
     rootDir,
   });
 
@@ -324,6 +330,7 @@ test('worker-run lookup prefers explicit workerRunId over a newer launch request
     workerRunId: 'wr_1_shared',
     launchRequestId: 'shared-lrq',
     ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
     rootDir,
   });
 
@@ -429,7 +436,7 @@ test('backfill reviewer-pass CLI warns for deprecated --ledger-db and still read
     '--root-dir', rootDir,
     '--ledger-db', ledgerDb,
     '--dry-run',
-  ], { stdout, stderr });
+  ], { stdout, stderr, env: HERMETIC_CONFIG_ENV });
 
   assert.equal(rc, 0);
   assert.match(stderr.read(), /warning: --ledger-db is deprecated; use --ledger-target instead/);
@@ -462,8 +469,14 @@ test('backfill is idempotent for historical follow-up workspaces', () => {
     },
   }), 'utf8');
 
-  const first = backfillReviewerPasses(rootDir, { ledgerTarget: { backend: 'sqlite', path: ledgerDb } });
-  const second = backfillReviewerPasses(rootDir, { ledgerTarget: { backend: 'sqlite', path: ledgerDb } });
+  const first = backfillReviewerPasses(rootDir, {
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
+  });
+  const second = backfillReviewerPasses(rootDir, {
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
+  });
 
   assert.equal(first.considered, 1);
   assert.equal(second.considered, 1);
@@ -505,7 +518,11 @@ test('backfill dry-run reports eligible live-shaped jobs without writing reviewe
     },
   }), 'utf8');
 
-  const result = backfillReviewerPasses(rootDir, { ledgerTarget: { backend: 'sqlite', path: ledgerDb }, dryRun: true });
+  const result = backfillReviewerPasses(rootDir, {
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
+    dryRun: true,
+  });
 
   assert.equal(result.considered, 1);
   assert.equal(result.wouldInsertOrUpdate, 1);

@@ -327,10 +327,11 @@ const tokenRollupWarnings = new Set();
 function selectLedgerTargetSource({
   ledgerTarget = null,
   ledgerDbPath = null,
+  env = process.env,
 } = {}) {
   if (ledgerTarget !== null && ledgerTarget !== undefined) return ledgerTarget;
   if (!ledgerDbPath) return null;
-  const resolved = resolveSessionLedgerReadTarget({ ledgerDbPath });
+  const resolved = resolveSessionLedgerReadTarget({ ledgerDbPath, env });
   return resolved.ok ? resolved.target : null;
 }
 
@@ -355,7 +356,7 @@ function readReviewerSessionTokenUsage({
   env = process.env,
   rootDir = process.cwd(),
 } = {}) {
-  const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath });
+  const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath, env });
   const result = readReviewerSessionUsageFromLedger({
     adapterSessionKey,
     sessionKeys,
@@ -384,7 +385,7 @@ function readWorkerRunTokenUsageResult({
   rootDir = process.cwd(),
   hqRoot = null,
 } = {}) {
-  const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath });
+  const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath, env });
   const result = readWorkerRunUsageFromLedger({
     workerRunId,
     launchRequestId,
@@ -1093,9 +1094,10 @@ function backfillReviewerPasses(rootDir, {
   claudeSessionRoots = [],
   transcriptFallback = false,
   now = () => new Date().toISOString(),
+  env = process.env,
   dryRun = false,
 } = {}) {
-  const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath });
+  const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath, env });
   const jobs = readHistoricalFollowUpJobs(rootDir);
   let considered = 0;
   let insertedOrUpdated = 0;
@@ -1139,12 +1141,14 @@ function backfillReviewerPasses(rootDir, {
       workerRunId: worker.workerRunId || worker.runId || null,
       launchRequestId,
       ledgerTarget: selectedLedgerTarget,
+      env,
       rootDir,
     }) || readReviewerSessionTokenUsage({
       workspacePath,
       startedAt,
       endedAt,
       ledgerTarget: selectedLedgerTarget,
+      env,
       rootDir,
     }) || (transcriptFallback ? readTranscriptTokenUsageForModel({
       reviewerModel: worker.model || worker.workerClass,

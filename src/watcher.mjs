@@ -5830,6 +5830,32 @@ function writeAutonomousMergeDisabledAudit({
  * fetches in. That's intentional: AMA-03 lands the dispatch *path*;
  * AMA-06A/06N wire in the full snapshot in the cutover ticket.
  */
+
+/**
+ * A review cycle is exhausted when EITHER round budget is spent:
+ * remediation rounds (a review produced blocking findings and a remediation
+ * worker ran) OR re-review rounds (reviewers ran to their budget). A
+ * comment-only review — no blocking findings, so no remediation worker spawns —
+ * only ever advances the re-review counter, so keying exhaustion solely on
+ * remediation rounds parks CI-green/CLEAN PRs forever. Pure so it is unit
+ * testable without a ledger/DB fixture.
+ */
+function reviewCycleExhaustedFromRounds({
+  effectiveRoundBudget,
+  completedRemediationRounds,
+  completedRereviewRounds,
+}) {
+  if (!Number.isFinite(effectiveRoundBudget) || effectiveRoundBudget <= 0) {
+    return false;
+  }
+  const remediation = Number(completedRemediationRounds);
+  const rereview = Number(completedRereviewRounds);
+  return (
+    (Number.isFinite(remediation) && remediation >= effectiveRoundBudget) ||
+    (Number.isFinite(rereview) && rereview >= effectiveRoundBudget)
+  );
+}
+
 async function maybeDispatchAmaClosureFor({
   rootDir = ROOT,
   reviewStateRow,
@@ -5920,10 +5946,33 @@ async function maybeDispatchAmaClosureFor({
         Number.isInteger(latestMaxRounds) && latestMaxRounds > rbResolution.roundBudget
           ? latestMaxRounds
           : rbResolution.roundBudget;
-      reviewCycleExhausted =
-        Number.isFinite(effectiveRoundBudget) &&
-        effectiveRoundBudget > 0 &&
-        Number(remLedger.completedRoundsForPR) >= effectiveRoundBudget;
+      // A review cycle also exhausts when the REVIEW round budget is spent, not
+      // only the remediation round budget. A comment-only review (no blocking
+      // findings, so no remediation worker spawns) never increments
+      // completedRoundsForPR — so without this, a CI-green/CLEAN PR reviewed to
+      // its budget parks forever: the daemon clean-path declines on any
+      // non-blocking/unknown finding, and the final-hammer waivers (which
+      // require reviewCycleExhausted) never arm because remediation rounds stay
+      // 0. Count re-review rounds with the same helper evaluateRoundBudgetForReview
+      // uses to STOP re-reviews, so "reviewers won't run again" and "AMA cycle
+      // exhausted" agree. The final hammer still remediates-then-closes, so this
+      // never bypasses review — it only lets a budget-spent clean cycle finalize.
+      let completedRereviewRoundsForPR = 0;
+      try {
+        completedRereviewRoundsForPR = Number(
+          countCompletedReviewerRereviewRounds({ rootDir, repoPath, prNumber }),
+        );
+      } catch (rereviewErr) {
+        console.warn(
+          `[watcher] AMA final-hammer re-review-round probe failed for ${repoPath}#${prNumber}; ` +
+            `falling back to remediation-round exhaustion only: ${rereviewErr?.message || rereviewErr}`,
+        );
+      }
+      reviewCycleExhausted = reviewCycleExhaustedFromRounds({
+        effectiveRoundBudget,
+        completedRemediationRounds: remLedger.completedRoundsForPR,
+        completedRereviewRounds: completedRereviewRoundsForPR,
+      });
     }
   } catch (err) {
     console.warn(
@@ -9036,6 +9085,7 @@ export {
   computeVocabularyFatigueFindingForPR,
   detectCommitVocabularyFatigue,
   countCompletedReviewerRereviewRounds,
+  reviewCycleExhaustedFromRounds,
   createHeadCloserCommitSuppressionResolver,
   getStalePostedReviewAutoRereviewSuppression,
   getStalePostedReviewBudgetSuppression,

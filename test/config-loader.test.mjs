@@ -1816,6 +1816,25 @@ test('retention absent block materializes schema defaults', () => {
   }
 });
 
+test('retention snapshots default materializes when snapshots block is absent', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      retention:
+        policies:
+          standard_backup:
+            daily: 7
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.get('retention.snapshots'), { keep_count: 3 });
+    assert.equal(cfg.get('retention.snapshots.keep_count'), 3);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('sentinel routing-tier outage detector loads through strict Node schema', () => {
   const tmp = freshTmp();
   try {

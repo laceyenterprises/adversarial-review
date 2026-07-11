@@ -38,11 +38,19 @@ test('hammer prompt enforces the PSH-05 lease guarded local and remote CI merge 
 });
 
 test('hammer audit comment payload excludes prompt-only authoring instructions', () => {
-  const commentBody = HAMMER_PROMPT.match(
-    /HAM_AUDIT_COMMENT_BODY="\$\(cat <<EOF\n(?<body>[\s\S]*?)\nEOF\n\)"/,
+  const commentDetails = HAMMER_PROMPT.match(
+    /HAM_AUDIT_COMMENT_DETAILS="\$\(cat <<'EOF'\n(?<body>[\s\S]*?)\nEOF\n\)"/,
   )?.groups?.body;
 
-  assert.ok(commentBody, 'expected to find the hammer audit comment heredoc');
-  assert.doesNotMatch(commentBody, /optionally add/i);
+  assert.ok(commentDetails, 'expected to find the quoted hammer audit comment heredoc');
+  assert.doesNotMatch(commentDetails, /optionally add/i);
   assert.match(HAMMER_PROMPT, /When filling in the comment body below, optionally add/i);
+});
+
+test('hammer audit comment keeps model-authored markdown out of shell expansion', () => {
+  assert.match(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_DETAILS="\$\(cat <<'EOF'/);
+  assert.match(
+    HAMMER_PROMPT,
+    /HAM_AUDIT_COMMENT_BODY=\$\(printf[\s\S]*"\$HAM_AUDIT_COMMENT_DETAILS" "\$POST_REMEDIATION_SHA"\)/,
+  );
 });

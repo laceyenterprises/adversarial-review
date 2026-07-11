@@ -286,9 +286,7 @@ HAM_AUDIT_COMMENT_MARKER='<!-- hq:ham-terminal-remediation:audit -->'
 HAM_AUDIT_COMMENT_HEAD="HAM-Terminal-Remediation-Head: $POST_REMEDIATION_SHA"
 # When filling in the comment body below, optionally add one bullet each for
 # applicable test evidence and doc currency, using the same bulleted style.
-HAM_AUDIT_COMMENT_BODY="$(cat <<EOF
-$HAM_AUDIT_COMMENT_MARKER
-
+HAM_AUDIT_COMMENT_DETAILS="$(cat <<'EOF'
 ## 🔨 Hammer remediation audit
 
 Remediated **<n> findings** (<b> blocking, <nb> non-blocking) and landed the fix.
@@ -296,9 +294,10 @@ Remediated **<n> findings** (<b> blocking, <nb> non-blocking) and landed the fix
 **Findings addressed**
 - **<finding title>** (<blocking|non-blocking>) — <files changed and one-line fix summary>
 
-<sub>HAM-Terminal-Remediation-Head: $POST_REMEDIATION_SHA · Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking) · Closed-By: hammer (adversarial-pipe-mode)</sub>
 EOF
 )"
+HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>HAM-Terminal-Remediation-Head: %s · Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking) · Closed-By: hammer (adversarial-pipe-mode)</sub>' \
+  "$HAM_AUDIT_COMMENT_MARKER" "$HAM_AUDIT_COMMENT_DETAILS" "$POST_REMEDIATION_SHA")
 ham_existing_terminal_audit_comment_id() {
   HAM_AUDIT_COMMENTS_JSON=$(GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh api \
     --paginate \

@@ -284,6 +284,8 @@ if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
 fi
 HAM_AUDIT_COMMENT_MARKER='<!-- hq:ham-terminal-remediation:audit -->'
 HAM_AUDIT_COMMENT_HEAD="HAM-Terminal-Remediation-Head: $POST_REMEDIATION_SHA"
+# When filling in the comment body below, optionally add one bullet each for
+# applicable test evidence and doc currency, using the same bulleted style.
 HAM_AUDIT_COMMENT_BODY="$(cat <<EOF
 $HAM_AUDIT_COMMENT_MARKER
 
@@ -293,10 +295,6 @@ Remediated **<n> findings** (<b> blocking, <nb> non-blocking) and landed the fix
 
 **Findings addressed**
 - **<finding title>** (<blocking|non-blocking>) — <files changed and one-line fix summary>
-
-Optionally add, only when they apply, one bullet each for test evidence
-(<changed-surface tests + result>) and doc currency (<walkthrough/schema doc updated,
-or "not applicable">), in the same bulleted style so the comment stays scannable.
 
 <sub>HAM-Terminal-Remediation-Head: $POST_REMEDIATION_SHA · Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking) · Closed-By: hammer (adversarial-pipe-mode)</sub>
 EOF

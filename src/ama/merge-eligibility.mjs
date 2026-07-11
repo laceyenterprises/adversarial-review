@@ -97,14 +97,13 @@ function verdictEligible(verdict) {
  * an empty rollup fails closed. A boolean short-circuits to itself for callers
  * that already derived greenness.
  *
- * INVARIANT — empty rollup is NOT green here, on purpose. This deliberately
- * diverges from `summarizeChecksConclusion()` (`src/checks-summary.mjs`), which
- * maps an explicit empty rollup to 'SUCCESS' so repos with no external CI can
- * still classify. At the point of an actual merge decision, "no checks have
- * reported on this head" must read NOT green: a rollup fetched before GitHub
- * registers the head's checks would otherwise authorize a premature merge.
- * Do not "unify" this predicate with the fail-open classifier — the two sites
- * serve different threat models and must keep opposite empty-rollup behavior.
+ * INVARIANT — empty rollup is NOT green here. At the point of an actual merge
+ * decision, "no checks have reported on this head" must read NOT green: a rollup
+ * fetched before GitHub registers the head's checks would otherwise authorize a
+ * premature merge. As of LAC-1559, `summarizeChecksConclusion()`
+ * (`src/checks-summary.mjs`) also fails closed on an empty rollup (returns
+ * `null`), so this predicate and that classifier now AGREE on the empty case —
+ * a zero-external-check PR classifies green on neither surface.
  *
  * @param {Array|boolean|undefined} requiredChecks
  * @returns {boolean}

@@ -577,6 +577,103 @@ test('watcher suppresses completed auto-refresh rereviews at the budget without 
   }
 });
 
+test('watcher keys the completed-rereview budget per head so a moved head re-arms review (LAC-1559)', () => {
+  // Regression for the live stall: a PR whose rereview budget was consumed on
+  // one head stayed `posted` on a stale head after the head moved, because the
+  // per-PR rereview count stayed at/over budget and the auto-refresh was
+  // budget-suppressed — so close refused `stale-review-head` forever. LAC-1559
+  // keys the counter per (repo, pr, head): the new head reads 0 completed
+  // rounds and re-arms review, while the old head stays bounded.
+  const rootDir = makeTempRoot();
+  try {
+    const db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    const repoPath = 'laceyenterprises/agent-os';
+    const prNumber = 2650;
+    const headA = 'aaaaaaaaaaaa1111';
+    const headB = 'bbbbbbbbbbbb2222';
+    // Two completed rereviews landed on headA — its per-head budget is spent.
+    for (const attemptNumber of [1, 2]) {
+      db.prepare(
+        `INSERT INTO reviewer_passes (
+           repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind,
+           started_at, ended_at, status, head_sha, metadata_json
+         ) VALUES (?, ?, ?, 'codex', 'codex', 'rereview', ?, ?, 'completed', ?, '{}')`
+      ).run(
+        repoPath,
+        prNumber,
+        attemptNumber,
+        `2026-07-05T00:0${attemptNumber}:00.000Z`,
+        `2026-07-05T00:0${attemptNumber}:30.000Z`,
+        headA,
+      );
+    }
+
+    // Per-head counts: headA is at budget; the never-reviewed headB reads 0.
+    assert.equal(
+      countCompletedReviewerRereviewRounds({ db, rootDir, repoPath, prNumber, headSha: headA }),
+      2,
+    );
+    assert.equal(
+      countCompletedReviewerRereviewRounds({ db, rootDir, repoPath, prNumber, headSha: headB }),
+      0,
+    );
+    // Omitting the head still counts across all heads (per-PR), which the
+    // review-cycle-exhaustion convergence check relies on.
+    assert.equal(
+      countCompletedReviewerRereviewRounds({ db, rootDir, repoPath, prNumber }),
+      2,
+    );
+
+    const ledger = {
+      completedRoundsForPR: 0,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    };
+    const budget = { roundBudget: 2, riskClass: 'medium' };
+
+    // Moved-to headB (never reviewed) re-arms: not budget-suppressed.
+    const movedHead = resolveFirstPassReviewBudgetSuppression({
+      rootDir,
+      repoPath,
+      prNumber,
+      reviewRow: { review_status: 'posted', reviewer_head_sha: headA },
+      currentHeadSha: headB,
+      db,
+      summarizePRRemediationLedgerImpl: () => ({ ...ledger }),
+      resolveRoundBudgetForJobImpl: () => ({ ...budget }),
+    });
+    assert.deepEqual(movedHead, {
+      suppressed: false,
+      reason: null,
+      completedRoundsForPR: 0,
+      roundBudget: 2,
+      riskClass: 'medium',
+    });
+
+    // The same head that consumed its per-head budget stays suppressed.
+    const sameHead = resolveFirstPassReviewBudgetSuppression({
+      rootDir,
+      repoPath,
+      prNumber,
+      reviewRow: { review_status: 'posted', reviewer_head_sha: headA },
+      currentHeadSha: headA,
+      db,
+      summarizePRRemediationLedgerImpl: () => ({ ...ledger }),
+      resolveRoundBudgetForJobImpl: () => ({ ...budget }),
+    });
+    assert.deepEqual(sameHead, {
+      suppressed: true,
+      reason: 'remediation-round-budget-exhausted',
+      completedRoundsForPR: 2,
+      roundBudget: 2,
+      riskClass: 'medium',
+    });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('watcher allows the owed post-budget final review even when remediation rounds exceed budget', () => {
   const suppression = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',
@@ -718,13 +815,19 @@ test('watcher resumes round-budget suppression once the current head has been re
   });
 });
 
-test('watcher does not let a new head bypass a consumed standalone rereview budget', () => {
+test('watcher suppresses when the current head has itself consumed the standalone rereview budget', () => {
+  // LAC-1559: the injected `countCompletedReviewerRereviewRoundsImpl` now
+  // reports the CURRENT head's completed rereviews (the resolver passes
+  // `currentHeadSha` to the real counter's per-head filter). An at/over-budget
+  // per-head count stays suppressed. A genuinely-new head instead reads 0 and
+  // re-arms review — that per-head re-arm is proven end-to-end against the real
+  // DB counter in the 'keys the completed-rereview budget per head' test above.
   const suppression = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',
     prNumber: 3273,
     reviewRow: {
       review_status: 'posted',
-      reviewer_head_sha: 'oldhead',
+      reviewer_head_sha: 'newhead',
     },
     currentHeadSha: 'newhead',
     summarizePRRemediationLedgerImpl: () => ({
@@ -732,6 +835,7 @@ test('watcher does not let a new head bypass a consumed standalone rereview budg
       latestRiskClass: 'medium',
       latestMaxRounds: 2,
     }),
+    // Per-head count for the current head is at budget.
     countCompletedReviewerRereviewRoundsImpl: () => 2,
     resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
   });

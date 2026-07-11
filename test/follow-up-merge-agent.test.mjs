@@ -1225,10 +1225,15 @@ test('pickMergeAgentDispatch fails closed on unknown CI checks in the normal pat
   assert.equal(decision, 'skip-checks-unknown');
 });
 
-test('summarizeChecksConclusion distinguishes missing and empty status check rollups', () => {
+test('summarizeChecksConclusion fails closed on missing AND empty status check rollups (LAC-1559)', () => {
+  // LAC-1559 retired the fail-open empty→SUCCESS branch. A non-array rollup and
+  // an explicit empty rollup now both classify as `null` (unknown/fail-closed),
+  // so a PR with zero external checks can never read green on the two consumer
+  // paths (merge-agent dispatch, AMA eligibility). This converges with the MSM
+  // predicate's fail-closed-on-empty behavior (see ama-merge-eligibility.test).
   assert.equal(summarizeChecksConclusion(undefined), null);
   assert.equal(summarizeChecksConclusion({}), null);
-  assert.equal(summarizeChecksConclusion([]), 'SUCCESS');
+  assert.equal(summarizeChecksConclusion([]), null);
 });
 
 test('summarizeChecksConclusion ignores the adversarial-review pipeline\'s own gate check', () => {
@@ -1236,22 +1241,25 @@ test('summarizeChecksConclusion ignores the adversarial-review pipeline\'s own g
   // convergence check, and never treat it as a hard CI gate. The merge-agent
   // already has the verdict via job.lastVerdict; the gate-status is circular.
 
-  // A PR whose ONLY check is the adversarial gate (pending) → no external CI
-  // to wait on → SUCCESS (was PENDING before the fix → merge-agent stalled).
+  // A PR whose ONLY check is the adversarial gate → the gate is excluded, the
+  // relevant rollup is empty, and (LAC-1559) an empty rollup fails closed to
+  // `null`. The gate is still not treated as a hard CI gate — it is excluded,
+  // not evaluated — but "no external CI reported" is now unknown, not green.
   assert.equal(
     summarizeChecksConclusion([
       { __typename: 'StatusContext', context: 'agent-os/adversarial-gate', state: 'PENDING' },
     ]),
-    'SUCCESS'
+    null
   );
 
   // The adversarial gate reporting FAILURE/ERROR (e.g. a Request-changes
-  // verdict) must NOT hard-fail the merge gate.
+  // verdict) must NOT hard-fail the merge gate — it is excluded, leaving an
+  // empty rollup that (LAC-1559) reads `null`, never 'FAILURE'.
   assert.equal(
     summarizeChecksConclusion([
       { __typename: 'StatusContext', context: 'agent-os/adversarial-gate', state: 'FAILURE' },
     ]),
-    'SUCCESS'
+    null
   );
 
   // Real external CI still gates: a failing build alongside the (ignored)
@@ -1282,13 +1290,15 @@ test('summarizeChecksConclusion ignores the adversarial-review pipeline\'s own g
     'SUCCESS'
   );
 
-  // Honor a custom gate context via ADV_GATE_STATUS_CONTEXT-resolved env.
+  // Honor a custom gate context via ADV_GATE_STATUS_CONTEXT-resolved env: the
+  // custom self-gate is still excluded, leaving an empty rollup that (LAC-1559)
+  // reads `null` rather than 'SUCCESS'.
   assert.equal(
     summarizeChecksConclusion(
       [{ __typename: 'StatusContext', context: 'galileo/adversarial-gate', state: 'FAILURE' }],
       { env: { ADV_GATE_STATUS_CONTEXT: 'galileo/adversarial-gate' } }
     ),
-    'SUCCESS'
+    null
   );
 
   // A non-adversarial check named to merely contain "adversarial" elsewhere is
@@ -2278,24 +2288,30 @@ test('buildMergeAgentDispatchJob ignores stale active remediation on an older he
   assert.equal(pickMergeAgentDispatch(dispatchJob), 'dispatch');
 });
 
-test('pickMergeAgentDispatch can dispatch zero-check PRs from an explicit empty rollup', () => {
-  const dispatchJob = makeJob({
+test('pickMergeAgentDispatch skips zero-check PRs from an explicit empty rollup (LAC-1559 fail-closed)', () => {
+  // LAC-1559: an empty rollup now classifies `null`, so a zero-external-check PR
+  // is NOT dispatched — the merge-agent gate reads it as checks-unknown and
+  // holds. This matches the MSM merge predicate's fail-closed-on-empty behavior.
+  const skipJob = makeJob({
     checksConclusion: summarizeChecksConclusion([]),
   });
 
-  assert.equal(dispatchJob.checksConclusion, 'SUCCESS');
-  assert.equal(pickMergeAgentDispatch(dispatchJob), 'dispatch');
+  assert.equal(skipJob.checksConclusion, null);
+  assert.equal(pickMergeAgentDispatch(skipJob), 'skip-checks-unknown');
 });
 
-test('pickMergeAgentDispatch can dispatch when the rollup contains only the adversarial gate status', () => {
-  const dispatchJob = makeJob({
+test('pickMergeAgentDispatch skips when the rollup contains only the adversarial gate status (LAC-1559 fail-closed)', () => {
+  // The self-gate is excluded, leaving an empty rollup that (LAC-1559) reads
+  // `null`, so a PR with only the adversarial gate and no external CI holds
+  // rather than dispatching a merge-agent job.
+  const skipJob = makeJob({
     checksConclusion: summarizeChecksConclusion([
       { __typename: 'StatusContext', context: 'agent-os/adversarial-gate', state: 'PENDING' },
     ]),
   });
 
-  assert.equal(dispatchJob.checksConclusion, 'SUCCESS');
-  assert.equal(pickMergeAgentDispatch(dispatchJob), 'dispatch');
+  assert.equal(skipJob.checksConclusion, null);
+  assert.equal(pickMergeAgentDispatch(skipJob), 'skip-checks-unknown');
 });
 
 test('operator-approved remains scoped when review posts update the PR after labeling', () => {
@@ -5632,7 +5648,10 @@ test('fetchMergeAgentCandidate fetches operator label events in parallel', async
   }
 
   const candidate = await candidatePromise;
-  assert.equal(candidate.checksConclusion, 'SUCCESS');
+  // LAC-1559: an empty statusCheckRollup now classifies fail-closed as `null`
+  // (was 'SUCCESS'). This test's focus is parallel operator-event fetching; the
+  // conclusion value is incidental and just reflects the new fail-closed default.
+  assert.equal(candidate.checksConclusion, null);
   assert.equal(candidate.mergeStateStatus, null);
   assert.deepEqual(candidate.statusCheckRollup, []);
   assert.deepEqual(candidate.branchProtection.requiredContexts, ['agent-os/adversarial-gate']);

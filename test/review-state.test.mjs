@@ -72,6 +72,7 @@ test('openReviewStateDb applies a busy timeout and shared schema adds reviewer h
     assert.ok(passColumns.includes('body_md'));
     assert.ok(passColumns.includes('gh_comment_id'));
     assert.ok(passColumns.includes('body_captured_at'));
+    assert.ok(passColumns.includes('head_sha'));
     const closeoutColumns = tableInfoByName(db, 'pr_merge_closeouts');
     assert.equal(closeoutColumns.repo.type, 'TEXT');
     assert.equal(closeoutColumns.repo.pk, 1);
@@ -88,6 +89,7 @@ test('openReviewStateDb applies a busy timeout and shared schema adds reviewer h
     assert.equal(closeoutColumns.merged_at.type, 'TEXT');
     assert.equal(closeoutColumns.gh_artifact_refs.type, 'TEXT');
     assert.ok(indexNames(db, 'reviewer_passes').includes('idx_reviewer_passes_gh_comment_id'));
+    assert.ok(indexNames(db, 'reviewer_passes').includes('idx_reviewer_passes_head'));
     assert.ok(indexNames(db, 'pr_merge_closeouts').includes('idx_pr_merge_closeouts_scrape_pending'));
     assert.ok(indexNames(db, 'pr_merge_closeouts').includes('idx_pr_merge_closeouts_merged_at'));
     const migration = db.prepare('SELECT id FROM schema_migrations WHERE id = ?').get('20260518_reviewer_passes.sql');
@@ -135,6 +137,8 @@ test('review-state migrations upgrade old reviewer_passes schema idempotently', 
     assert.equal(passColumns.body_md.type, 'TEXT');
     assert.equal(passColumns.gh_comment_id.type, 'TEXT');
     assert.equal(passColumns.body_captured_at.type, 'TEXT');
+    assert.equal(passColumns.head_sha.type, 'TEXT');
+    assert.ok(indexNames(db, 'reviewer_passes').includes('idx_reviewer_passes_head'));
     assert.ok(tableInfoByName(db, 'pr_merge_closeouts').repo);
   } finally {
     db.close();

@@ -149,6 +149,78 @@ test('daemon fail-closed → skips closer dispatch; no hammer from the retry pat
   }
 });
 
+test('daemon clean-park fail-closed emits an operator-visible manual-close signal (LAC-1559)', async () => {
+  const rootDir = tempRoot();
+  try {
+    const logs = [];
+    const warns = [];
+    let closerCalls = 0;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      logger: { log: (m) => logs.push(String(m)), warn: (m) => warns.push(String(m)) },
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'merge-retry-budget-exhausted',
+        merged: false,
+        attempts: 4,
+        // The daemon only takes clean reviews, so a fail-closed park is a
+        // zero-finding clean PR that needs a manual close.
+        manualCloseRequired: true,
+      }),
+      maybeDispatchAmaCloserImpl: async () => {
+        closerCalls += 1;
+        return { dispatched: true };
+      },
+    });
+
+    // Decision is unchanged: still skip the closer/hammer and the merge-agent.
+    assert.equal(closerCalls, 0, 'a daemon fail-closed must NOT spawn a hammer');
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.reason, `daemon-${DAEMON_MERGE_DISPOSITION.FAILED_CLOSED}`);
+
+    // The park is now observable: a structured pageable event plus a human line.
+    const parkEvent = logs
+      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .find((doc) => doc?.event === 'ama.daemon_clean_park.manual_close_required');
+    assert.ok(parkEvent, 'a structured manual-close-required event must be emitted');
+    assert.equal(parkEvent.repo, 'acme/repo');
+    assert.equal(parkEvent.pr, 300);
+    assert.equal(parkEvent.reason, 'merge-retry-budget-exhausted');
+    assert.equal(parkEvent.hammerFallback, false);
+    assert.match(warns.join('\n'), /manual close required/i);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('daemon fail-closed with findings present does NOT emit the clean-park signal', async () => {
+  const rootDir = tempRoot();
+  try {
+    const logs = [];
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      logger: { log: (m) => logs.push(String(m)), warn() {} },
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'permanent-merge-rejection',
+        merged: false,
+        attempts: 1,
+        // Not a clean park (daemon reported it did not qualify as manual-close).
+        manualCloseRequired: false,
+      }),
+      maybeDispatchAmaCloserImpl: async () => ({ dispatched: true }),
+    });
+
+    assert.equal(result.skipMergeAgent, true);
+    const parkEvent = logs
+      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .find((doc) => doc?.event === 'ama.daemon_clean_park.manual_close_required');
+    assert.equal(parkEvent, undefined, 'no clean-park signal when manualCloseRequired is false');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('daemon deferred (lease contention) → skips closer dispatch this tick', async () => {
   const rootDir = tempRoot();
   try {

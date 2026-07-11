@@ -777,21 +777,28 @@ test('not eligible: malformed statusCheckRollup object fails closed as unknown C
   assert.equal(result.trace.ciGreen.conclusion, null);
 });
 
-test('eligible: only the adversarial-review self-gate is present → CI counts as green (no external checks)', () => {
-  // SPEC §4.2 #5 — the classifier excludes the adversarial-review pipeline's
-  // own status context to avoid circular gating. With only that context in
-  // the rollup, the classifier returns SUCCESS and AMA proceeds.
+test('not eligible: only the adversarial-review self-gate is present → CI fails closed (LAC-1559)', () => {
+  // SPEC §4.2 #5 — the classifier still excludes the adversarial-review
+  // pipeline's own status context to avoid circular gating. But LAC-1559
+  // retired the fail-open empty-rollup branch: once the self-gate is excluded
+  // the relevant rollup is empty, which now classifies `null` (unknown), so a
+  // PR with zero external checks is NOT eligible (accrues `ci-not-green`).
+  // This converges with the MSM merge predicate, which already failed closed
+  // on empty. The daemon clean-park path surfaces such a PR to operators
+  // (LAC-1559 Fix 2) rather than silently holding it.
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     prMetadata: {
       statusCheckRollup: [
-        // Adversarial-review's own gate, in the failing state — still must
-        // be excluded from the AMA classifier per SPEC §4.2 #5.
+        // Adversarial-review's own gate, in the failing state — still excluded
+        // from the AMA classifier per SPEC §4.2 #5, leaving an empty rollup.
         { __typename: 'StatusContext', context: GATE_CONTEXT, state: 'FAILURE' },
       ],
     },
   });
   const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
-  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('ci-not-green'));
+  assert.equal(result.trace.ciGreen.conclusion, null);
 });
 
 // ---------------------------------------------------------------------------

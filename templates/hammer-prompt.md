@@ -284,20 +284,46 @@ if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
 fi
 HAM_AUDIT_COMMENT_MARKER='<!-- hq:ham-terminal-remediation:audit -->'
 HAM_AUDIT_COMMENT_HEAD="HAM-Terminal-Remediation-Head: $POST_REMEDIATION_SHA"
+# Fill these with decimal integer counts before posting the audit comment.
+HAM_AUDIT_REMEDIATED_TOTAL='<n>'
+HAM_AUDIT_REMEDIATED_BLOCKING='<b>'
+HAM_AUDIT_REMEDIATED_NON_BLOCKING='<nb>'
+ham_audit_is_nonnegative_int() {
+  case "$1" in
+    ''|*[!0-9]*)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+if ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_TOTAL" ||
+  ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_BLOCKING" ||
+  ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_NON_BLOCKING"; then
+  echo "HAM hard-blocker: fill numeric Remediated-Findings counts before posting audit comment" >&2
+  ham_audit_cleanup_tmp_files
+  exit 1
+fi
 # When filling in the comment body below, optionally add one bullet each for
 # applicable test evidence and doc currency, using the same bulleted style.
 HAM_AUDIT_COMMENT_DETAILS="$(cat <<'EOF'
 ## 🔨 Hammer remediation audit
 
-Remediated **<n> findings** (<b> blocking, <nb> non-blocking) and landed the fix.
+Landed terminal remediation for the reviewed findings.
 
 **Findings addressed**
 - **<finding title>** (<blocking|non-blocking>) — <files changed and one-line fix summary>
 
 EOF
 )"
-HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>HAM-Terminal-Remediation-Head: %s · Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking) · Closed-By: hammer (adversarial-pipe-mode)</sub>' \
-  "$HAM_AUDIT_COMMENT_MARKER" "$HAM_AUDIT_COMMENT_DETAILS" "$POST_REMEDIATION_SHA")
+HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Head: %s\nRemediated-Findings: %s addressed (%s blocking, %s non-blocking)\nClosed-By: hammer (adversarial-pipe-mode)\n</sub>' \
+  "$HAM_AUDIT_COMMENT_MARKER" \
+  "$HAM_AUDIT_COMMENT_DETAILS" \
+  "$POST_REMEDIATION_SHA" \
+  "$HAM_AUDIT_REMEDIATED_TOTAL" \
+  "$HAM_AUDIT_REMEDIATED_BLOCKING" \
+  "$HAM_AUDIT_REMEDIATED_NON_BLOCKING")
 ham_existing_terminal_audit_comment_id() {
   HAM_AUDIT_COMMENTS_JSON=$(GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh api \
     --paginate \

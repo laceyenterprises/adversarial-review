@@ -51,6 +51,23 @@ test('hammer audit comment keeps model-authored markdown out of shell expansion'
   assert.match(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_DETAILS="\$\(cat <<'EOF'/);
   assert.match(
     HAMMER_PROMPT,
-    /HAM_AUDIT_COMMENT_BODY=\$\(printf[\s\S]*"\$HAM_AUDIT_COMMENT_DETAILS" "\$POST_REMEDIATION_SHA"\)/,
+    /HAM_AUDIT_COMMENT_BODY=\$\(printf[\s\S]*"\$HAM_AUDIT_COMMENT_DETAILS"[\s\S]*"\$POST_REMEDIATION_SHA"[\s\S]*"\$HAM_AUDIT_REMEDIATED_TOTAL"[\s\S]*"\$HAM_AUDIT_REMEDIATED_BLOCKING"[\s\S]*"\$HAM_AUDIT_REMEDIATED_NON_BLOCKING"\)/,
   );
+});
+
+test('hammer audit comment keeps parseable footer fields out of the editable heredoc', () => {
+  const bodyComposer = HAMMER_PROMPT.match(
+    /HAM_AUDIT_COMMENT_BODY=\$\(printf[\s\S]*?"\$HAM_AUDIT_REMEDIATED_NON_BLOCKING"\)/,
+  )?.[0];
+
+  assert.ok(bodyComposer, 'expected to find the hammer audit comment composer');
+  assert.doesNotMatch(bodyComposer, /<n>|<b>|<nb>/);
+  assert.match(
+    bodyComposer,
+    /<sub>\\nHAM-Terminal-Remediation-Head: %s\\nRemediated-Findings: %s addressed \(%s blocking, %s non-blocking\)\\nClosed-By: hammer \(adversarial-pipe-mode\)\\n<\/sub>/,
+  );
+  assert.match(HAMMER_PROMPT, /HAM_AUDIT_REMEDIATED_TOTAL='<n>'/);
+  assert.match(HAMMER_PROMPT, /HAM_AUDIT_REMEDIATED_BLOCKING='<b>'/);
+  assert.match(HAMMER_PROMPT, /HAM_AUDIT_REMEDIATED_NON_BLOCKING='<nb>'/);
+  assert.match(HAMMER_PROMPT, /ham_audit_is_nonnegative_int "\$HAM_AUDIT_REMEDIATED_TOTAL"/);
 });

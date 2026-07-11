@@ -256,7 +256,7 @@ export function resolveSessionLedgerReadTarget({
   hqRoot = null,
 } = {}) {
   if (ledgerTarget !== null && ledgerTarget !== undefined) {
-    return failIfPostgresConfiguredSqliteResolved(normalizeExplicitLedgerTarget(ledgerTarget), { env });
+    return normalizeExplicitLedgerTarget(ledgerTarget);
   }
   if (ledgerDbPath) {
     return failIfPostgresConfiguredSqliteResolved(

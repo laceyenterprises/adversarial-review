@@ -42,6 +42,21 @@ test('resolveSessionLedgerReadTarget accepts backend-neutral explicit sqlite and
   assert.equal(postgres.target.dsn, 'postgres://ledger.example/agent_os_ledger');
 });
 
+test('resolveSessionLedgerReadTarget lets an explicit sqlite target override postgres configuration', () => {
+  const result = resolveSessionLedgerReadTarget({
+    ledgerTarget: { backend: 'sqlite', path: '/tmp/manual-ledger.db' },
+    env: {
+      ...HERMETIC_CONFIG_ENV,
+      AGENT_OS_SESSION_LEDGER_BACKEND: 'postgres',
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.target.backend, 'sqlite');
+  assert.match(result.target.path, /manual-ledger\.db$/);
+  assert.equal(result.target.source, 'explicit-ledger-target');
+});
+
 test('resolveSessionLedgerReadTarget keeps --ledger-db compatibility as a deprecated alias', () => {
   const result = resolveSessionLedgerReadTarget({
     ledgerDbPath: '/tmp/legacy-ledger.db',

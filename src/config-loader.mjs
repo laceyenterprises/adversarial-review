@@ -857,6 +857,7 @@ function schemaV1() {
               openclaw_sessions_min_idle_minutes: { __type: TYPE_INT, __default: 60, __min: 0 },
               claude_code_sessions_keep_days: { __type: TYPE_INT, __default: 90, __min: 0 },
               dispatch_audit_keep_days: { __type: TYPE_INT, __default: 365, __min: 0 },
+              sentinel_audit_keep_days: { __type: TYPE_INT, __default: 14, __min: 0 },
             },
           },
           sentinel: {

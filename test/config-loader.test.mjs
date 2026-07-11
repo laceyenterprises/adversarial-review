@@ -68,6 +68,7 @@ const RETENTION_DEFAULTS = {
     openclaw_sessions_min_idle_minutes: 60,
     claude_code_sessions_keep_days: 90,
     dispatch_audit_keep_days: 365,
+    sentinel_audit_keep_days: 14,
   },
   sentinel: {
     disk_headroom: {
@@ -1764,6 +1765,7 @@ test('retention full block accepts schema-default values', () => {
           openclaw_sessions_min_idle_minutes: 60
           claude_code_sessions_keep_days: 90
           dispatch_audit_keep_days: 365
+          sentinel_audit_keep_days: 14
         sentinel:
           disk_headroom:
             threshold_pct: 85
@@ -2156,6 +2158,7 @@ test('retention full block resolves identically from config.yaml and config.loca
           openclaw_sessions_min_idle_minutes: 60
           claude_code_sessions_keep_days: 90
           dispatch_audit_keep_days: 365
+          sentinel_audit_keep_days: 14
         sentinel:
           disk_headroom:
             threshold_pct: 85
@@ -2193,6 +2196,7 @@ test('retention full block resolves identically from config.yaml and config.loca
           openclaw_sessions_min_idle_minutes: 60
           claude_code_sessions_keep_days: 90
           dispatch_audit_keep_days: 365
+          sentinel_audit_keep_days: 14
         sentinel:
           disk_headroom:
             threshold_pct: 85

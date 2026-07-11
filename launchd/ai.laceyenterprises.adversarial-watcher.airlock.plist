@@ -47,6 +47,8 @@
 
     <key>EnvironmentVariables</key>
     <dict>
+        <key>AGENT_OS_SESSION_LEDGER_DSN</key>
+        <string>postgresql://airlock@127.0.0.1:6432/agent_os_ledger</string>
         <key>ADVERSARIAL_REVIEW_WATCHER_PLIST_PATH</key>
         <string>/Users/airlock/agent-os/tools/adversarial-review/launchd/ai.laceyenterprises.adversarial-watcher.airlock.plist</string>
         <key>PATH</key>

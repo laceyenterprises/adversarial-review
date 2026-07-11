@@ -54,6 +54,9 @@ const RETENTION_DEFAULTS = {
       policy: 'standard_backup',
     },
   },
+  snapshots: {
+    keep_count: 3,
+  },
   ephemeral: {
     worker_worktrees_keep_hours: 168,
     worker_worktrees_per_run_limit: 200,
@@ -1808,6 +1811,25 @@ test('retention absent block materializes schema defaults', () => {
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.deepEqual(cfg.get('retention'), RETENTION_DEFAULTS);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('retention snapshots default materializes when snapshots block is absent', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      retention:
+        policies:
+          standard_backup:
+            daily: 7
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.get('retention.snapshots'), { keep_count: 3 });
+    assert.equal(cfg.get('retention.snapshots.keep_count'), 3);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

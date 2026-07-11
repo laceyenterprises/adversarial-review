@@ -512,6 +512,9 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
       }),
       attemptDaemonCleanMergeImpl: async (attemptArgs) => {
         capturedAttemptArgs = attemptArgs;
+        assert.deepEqual(attemptArgs.liveGate.requiredChecks, []);
+        const refreshedGate = await attemptArgs.fetchLiveGateImpl();
+        assert.deepEqual(refreshedGate.requiredChecks, []);
         return attemptArgs.runMergeImpl({
         repo: 'acme/repo',
         prNumber: 300,
@@ -553,7 +556,7 @@ test('daemon clean merge resolves worker identity by PR after head moves past bu
       candidate: {
         baseBranch: 'main',
         headSha: 'head-after-remediation',
-        statusCheckRollup: [],
+        statusCheckRollup: [{ __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' }],
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
         prState: 'open',
@@ -574,7 +577,7 @@ test('daemon clean merge resolves worker identity by PR after head moves past bu
       fetchRollupImpl: async () => ({
         state: 'OPEN',
         headSha: 'head-after-remediation',
-        statusCheckRollup: [],
+        statusCheckRollup: [{ __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' }],
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
       }),

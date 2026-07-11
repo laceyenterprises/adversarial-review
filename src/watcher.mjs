@@ -135,7 +135,6 @@ import {
 } from './adversarial-gate-status.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
-import { summarizeChecksConclusion } from './checks-summary.mjs';
 import { readBuildCompletionSignalForPr } from './session-ledger-read-adapter.mjs';
 // MSM-04 — the only agent dispatch left on the AMA surface is the hammer.
 // Fully clean PRs merge through the daemon path; dirty/conflicted/red-CI PRs
@@ -5685,8 +5684,6 @@ async function runDaemonCleanMergeAttempt({
       workerIdentity,
     };
   }
-  const initialChecksGreen = summarizeChecksConclusion(candidate?.statusCheckRollup, { env }) === 'SUCCESS';
-
   return attemptDaemonCleanMergeImpl({
     repo: repoPath,
     prNumber,
@@ -5702,7 +5699,7 @@ async function runDaemonCleanMergeAttempt({
     // Initial (pre-lease) GitHub gate snapshot from the live fetch this tick.
     liveGate: {
       candidateHead: currentPrHeadSha || candidate?.headSha || '',
-      requiredChecks: initialChecksGreen,
+      requiredChecks: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
       mergeable: mergeabilityForGate?.mergeable,
       mergeStateStatus: mergeabilityForGate?.mergeStateStatus,
       prState: String(candidate?.prState || 'open').toUpperCase(),
@@ -5723,7 +5720,7 @@ async function runDaemonCleanMergeAttempt({
       const state = String(rollup?.state || '');
       return {
         candidateHead: rollup?.headSha || rollup?.headRefOid || '',
-        requiredChecks: summarizeChecksConclusion(rollup?.statusCheckRollup, { env }) === 'SUCCESS',
+        requiredChecks: Array.isArray(rollup?.statusCheckRollup) ? rollup.statusCheckRollup : [],
         mergeable: rollup?.mergeable,
         mergeStateStatus: rollup?.mergeStateStatus,
         prState: state,

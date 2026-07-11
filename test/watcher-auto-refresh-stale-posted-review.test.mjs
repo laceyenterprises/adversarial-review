@@ -852,14 +852,14 @@ test('watcher keeps remediation-worker rereview within the final-review allowanc
 
 test('watcher suppresses closer identity commits even when budget remains', async () => {
   assert.deepEqual(isTerminalCloserCommitIdentity({
-    message: [
-      'HAM remediate final adversarial findings',
-      '',
-      'Worker-Class: hammer',
-      'Closed-By: hammer (adversarial-pipe-mode)',
-      'Remediated-Findings: 2 addressed (1 blocking, 1 non-blocking)',
-    ].join('\n'),
     commit: {
+      message: [
+        'HAM remediate final adversarial findings',
+        '',
+        'Worker-Class: hammer',
+        'Closed-By: hammer (adversarial-pipe-mode)',
+        'Remediated-Findings: 2 addressed (1 blocking, 1 non-blocking)',
+      ].join('\n'),
       committer: {
         name: 'Codex Remediation Worker',
         email: 'codex-remediation-worker@example.com',
@@ -915,11 +915,12 @@ test('watcher suppresses closer identity commits even when budget remains', asyn
     },
   }).reason, 'closer-commit-identity');
 
+  assert.equal(isTerminalCloserCommitIdentity({
+    message: 'HAM remediate final adversarial findings',
+    committer: { login: 'the-hammer-lacey[bot]' },
+  }).reason, 'closer-commit-identity');
+
   for (const commit of [
-    {
-      message: 'HAM remediate final adversarial findings',
-      committer: { login: 'the-hammer-lacey[bot]' },
-    },
     {
       message: 'HAM remediate final adversarial findings',
       commit: { committer: { name: 'the-hammer-lacey[bot]' } },
@@ -933,7 +934,10 @@ test('watcher suppresses closer identity commits even when budget remains', asyn
       },
     },
   ]) {
-    assert.equal(isTerminalCloserCommitIdentity(commit).reason, 'closer-commit-identity');
+    assert.deepEqual(isTerminalCloserCommitIdentity(commit), {
+      suppressed: false,
+      reason: null,
+    });
   }
 
   assert.deepEqual(isTerminalCloserCommitIdentity({

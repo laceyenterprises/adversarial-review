@@ -916,6 +916,7 @@ function readBestReviewerEvidenceTokenUsage({
   endedAt = null,
   ledgerTarget = null,
   ledgerDbPath = null,
+  env = process.env,
   rootDir = process.cwd(),
   reviewerModel = null,
   codexSessionRoots = null,
@@ -923,11 +924,12 @@ function readBestReviewerEvidenceTokenUsage({
   transcriptFallback = true,
   workerLogPath = null,
 } = {}) {
-  const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath });
+  const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath, env });
   const ledgerUsage = readWorkerRunTokenUsage({
     workerRunId,
     launchRequestId,
     ledgerTarget: selectedLedgerTarget,
+    env,
     rootDir,
   }) || readReviewerSessionTokenUsage({
     adapterSessionKey,
@@ -936,13 +938,14 @@ function readBestReviewerEvidenceTokenUsage({
     startedAt,
     endedAt,
     ledgerTarget: selectedLedgerTarget,
+    env,
     rootDir,
   });
   if (ledgerUsage) return ledgerUsage;
   if (transcriptFallback) {
     const shouldUseDefaults = shouldUseDefaultTranscriptRoots(rootDir);
-    const resolvedCodexSessionRoots = codexSessionRoots || (shouldUseDefaults ? defaultCodexSessionRoots() : []);
-    const resolvedClaudeSessionRoots = claudeSessionRoots || (shouldUseDefaults ? defaultClaudeSessionRoots() : []);
+    const resolvedCodexSessionRoots = codexSessionRoots || (shouldUseDefaults ? defaultCodexSessionRoots({ env }) : []);
+    const resolvedClaudeSessionRoots = claudeSessionRoots || (shouldUseDefaults ? defaultClaudeSessionRoots({ env }) : []);
     const transcriptReaders = normalizeReviewerClass(reviewerModel) === 'claude'
       ? [readClaudeTranscriptTokenUsage, readCodexTranscriptTokenUsage]
       : [readCodexTranscriptTokenUsage, readClaudeTranscriptTokenUsage];

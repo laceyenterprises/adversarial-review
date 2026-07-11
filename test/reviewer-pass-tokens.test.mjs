@@ -188,6 +188,26 @@ test('worker-run and reviewer-session readers accept ledger target object, URI, 
   }
 });
 
+test('best evidence reader forwards injected env to ledger readers', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  createSessionLedgerDb(ledgerDb);
+
+  const usage = readBestReviewerEvidenceTokenUsage({
+    workerRunId: 'wr_1',
+    rootDir,
+    env: {
+      ...HERMETIC_CONFIG_ENV,
+      AGENT_OS_SESSION_LEDGER_TARGET: `sqlite://${ledgerDb}`,
+    },
+    transcriptFallback: false,
+  });
+
+  assert.equal(usage.workerRunId, 'wr_1');
+  assert.equal(usage.input, 120);
+  assert.equal(usage.source, 'session-ledger');
+});
+
 test('token reader fails loud when a legacy ledger path conflicts with postgres configuration', () => {
   assert.throws(
     () => readWorkerRunTokenUsage({

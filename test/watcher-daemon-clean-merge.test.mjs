@@ -222,7 +222,7 @@ test('autonomous merge execution disabled → fail-closed audit; no daemon, clos
         audits.push(entry);
         return { written: true };
       },
-      env: { HQ_ROOT: '/tmp/hq-root-for-test' },
+      env: { HQ_ROOT: rootDir },
     });
 
     assert.equal(daemonCalls, 0, 'flag OFF must not execute daemon merge');
@@ -502,6 +502,14 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
         },
       }),
       releaseMergeLeaseImpl: () => {},
+      readBuildCompletionSignalForPrImpl: () => ({
+        ok: true,
+        row: {
+          launch_request_id: 'lrq_test_worker',
+          worker_class: 'codex',
+          head_sha: 'head-live',
+        },
+      }),
       attemptDaemonCleanMergeImpl: async (attemptArgs) => {
         capturedAttemptArgs = attemptArgs;
         return attemptArgs.runMergeImpl({
@@ -522,6 +530,221 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
       strictMode: false,
     });
     assert.equal(capturedAttemptArgs.retryCap, undefined);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('daemon clean merge resolves worker identity by PR after head moves past build-completion head', async () => {
+  const rootDir = tempRoot();
+  try {
+    const readCalls = [];
+    let mergeCalls = 0;
+    let leaseReleased = false;
+    const result = await runDaemonCleanMergeAttempt({
+      rootDir,
+      cfg: {
+        mergeMethod: 'squash',
+        autonomousMergeExecutionEnabled: true,
+        strictMode: true,
+      },
+      repoPath: 'acme/repo',
+      prNumber: 561,
+      candidate: {
+        baseBranch: 'main',
+        headSha: 'head-after-remediation',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        prState: 'open',
+      },
+      gateSnapshot: {
+        reviewedHeadSha: 'head-after-remediation',
+        settledReview: { verdict: 'comment-only' },
+      },
+      mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviewState: {
+        blockingFindingCount: 0,
+        blockingFindingState: 'known',
+        nonBlockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+      },
+      reviewStateRow: { reviewer: 'codex' },
+      currentPrHeadSha: 'head-after-remediation',
+      fetchRollupImpl: async () => ({
+        state: 'OPEN',
+        headSha: 'head-after-remediation',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      }),
+      acquireMergeLeaseImpl: () => ({
+        acquired: true,
+        lease: {
+          repo: 'acme/repo',
+          base: 'main',
+          leaseId: 'lease-head-after-remediation',
+          holderPr: 561,
+          holderHead: 'head-after-remediation',
+          acquiredAt: '2026-07-11T00:00:00.000Z',
+        },
+      }),
+      releaseMergeLeaseImpl: () => {
+        leaseReleased = true;
+      },
+      readBuildCompletionSignalForPrImpl: (args) => {
+        readCalls.push(args);
+        if (args.headSha === 'head-after-remediation') {
+          return { ok: false, reason: 'missing-build-completion-signal' };
+        }
+        assert.equal(args.headSha, undefined, 'fallback lookup must be PR-scoped, not per-head');
+        return {
+          ok: true,
+          row: {
+            launch_request_id: 'lrq_3743bbdf',
+            worker_class: 'codex',
+            head_sha: 'head-at-pr-open',
+          },
+        };
+      },
+      execFileImpl: async () => {
+        mergeCalls += 1;
+        return { stdout: '', stderr: '' };
+      },
+      logger: { warn() {}, log() {} },
+      env: { HQ_ROOT: rootDir },
+    });
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(result.merged, true);
+    assert.equal(mergeCalls, 1);
+    assert.equal(leaseReleased, true, 'daemon merge must still release its lease');
+    assert.deepEqual(
+      readCalls.map((call) => call.headSha || null),
+      ['head-after-remediation', null],
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('daemon clean merge fail-closes when worker LRQ identity cannot be resolved', async () => {
+  const rootDir = tempRoot();
+  try {
+    let leaseCalls = 0;
+    let mergeCalls = 0;
+    const result = await runDaemonCleanMergeAttempt({
+      rootDir,
+      cfg: {
+        mergeMethod: 'squash',
+        autonomousMergeExecutionEnabled: true,
+        strictMode: true,
+      },
+      repoPath: 'acme/repo',
+      prNumber: 562,
+      candidate: {
+        baseBranch: 'main',
+        headSha: 'session-opened-head',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        prState: 'open',
+      },
+      gateSnapshot: {
+        reviewedHeadSha: 'session-opened-head',
+        settledReview: { verdict: 'comment-only' },
+      },
+      mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviewState: {
+        blockingFindingCount: 0,
+        blockingFindingState: 'known',
+        nonBlockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+      },
+      currentPrHeadSha: 'session-opened-head',
+      readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+      acquireMergeLeaseImpl: () => {
+        leaseCalls += 1;
+        return { acquired: true, lease: {} };
+      },
+      releaseMergeLeaseImpl: () => {},
+      execFileImpl: async () => {
+        mergeCalls += 1;
+        return { stdout: '', stderr: '' };
+      },
+      logger: { warn() {}, log() {} },
+      env: { HQ_ROOT: '/tmp/hq-root-for-test' },
+    });
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+    assert.equal(result.reason, 'worker-identity-unresolved');
+    assert.equal(result.workerIdentity.reason, 'missing-build-completion-signal');
+    assert.equal(leaseCalls, 0, 'unidentified PRs must fail before acquiring a merge lease');
+    assert.equal(mergeCalls, 0);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('daemon clean merge strict mode declines a PR with a standing blocking finding', async () => {
+  const rootDir = tempRoot();
+  try {
+    let leaseCalls = 0;
+    let mergeCalls = 0;
+    const result = await runDaemonCleanMergeAttempt({
+      rootDir,
+      cfg: {
+        mergeMethod: 'squash',
+        autonomousMergeExecutionEnabled: true,
+        strictMode: true,
+      },
+      repoPath: 'acme/repo',
+      prNumber: 563,
+      candidate: {
+        baseBranch: 'main',
+        headSha: 'finding-head',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        prState: 'open',
+      },
+      gateSnapshot: {
+        reviewedHeadSha: 'finding-head',
+        settledReview: { verdict: 'comment-only' },
+      },
+      mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviewState: {
+        blockingFindingCount: 1,
+        blockingFindingState: 'known',
+        nonBlockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+      },
+      currentPrHeadSha: 'finding-head',
+      readBuildCompletionSignalForPrImpl: () => ({
+        ok: true,
+        row: {
+          launch_request_id: 'lrq_with_finding',
+          worker_class: 'codex',
+          head_sha: 'finding-head',
+        },
+      }),
+      acquireMergeLeaseImpl: () => {
+        leaseCalls += 1;
+        return { acquired: true, lease: {} };
+      },
+      releaseMergeLeaseImpl: () => {},
+      execFileImpl: async () => {
+        mergeCalls += 1;
+        return { stdout: '', stderr: '' };
+      },
+      logger: { warn() {}, log() {} },
+      env: { HQ_ROOT: '/tmp/hq-root-for-test' },
+    });
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(result.reason, 'blocking-findings-present');
+    assert.equal(leaseCalls, 0, 'strict-mode finding refusal must happen before the lease');
+    assert.equal(mergeCalls, 0);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

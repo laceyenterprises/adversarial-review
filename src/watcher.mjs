@@ -135,6 +135,8 @@ import {
 } from './adversarial-gate-status.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
+import { summarizeChecksConclusion } from './checks-summary.mjs';
+import { readBuildCompletionSignalForPr } from './session-ledger-read-adapter.mjs';
 // MSM-04 — the only agent dispatch left on the AMA surface is the hammer.
 // Fully clean PRs merge through the daemon path; dirty/conflicted/red-CI PRs
 // route here under the existing launch lease/idempotency machinery.
@@ -5645,6 +5647,7 @@ async function runDaemonCleanMergeAttempt({
   fetchRollupImpl = fetchPullRequestRollup,
   acquireMergeLeaseImpl = acquireMergeLease,
   releaseMergeLeaseImpl = releaseMergeLease,
+  readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
   env = process.env,
 } = {}) {
   const base = candidate?.baseBranch;
@@ -5661,6 +5664,28 @@ async function runDaemonCleanMergeAttempt({
     : String(gateSnapshot?.settledReview?.verdict || '');
   const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
   const mergeMethod = cfg?.mergeMethod === 'merge' ? 'merge' : 'squash';
+  const workerIdentity = resolveDaemonWorkerIdentityForPr({
+    repo: repoPath,
+    prNumber,
+    currentHeadSha: currentPrHeadSha || candidate?.headSha || '',
+    hqRoot,
+    rootDir,
+    env,
+    readBuildCompletionSignalForPrImpl,
+  });
+  if (!workerIdentity.ok) {
+    return {
+      disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+      reason: 'worker-identity-unresolved',
+      merged: false,
+      attempts: 0,
+      leaseAcquired: false,
+      auditWritten: false,
+      reasons: [workerIdentity.reason || 'worker-identity-unresolved'],
+      workerIdentity,
+    };
+  }
+  const initialChecksGreen = summarizeChecksConclusion(candidate?.statusCheckRollup, { env }) === 'SUCCESS';
 
   return attemptDaemonCleanMergeImpl({
     repo: repoPath,
@@ -5677,7 +5702,7 @@ async function runDaemonCleanMergeAttempt({
     // Initial (pre-lease) GitHub gate snapshot from the live fetch this tick.
     liveGate: {
       candidateHead: currentPrHeadSha || candidate?.headSha || '',
-      requiredChecks: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
+      requiredChecks: initialChecksGreen,
       mergeable: mergeabilityForGate?.mergeable,
       mergeStateStatus: mergeabilityForGate?.mergeStateStatus,
       prState: String(candidate?.prState || 'open').toUpperCase(),
@@ -5698,7 +5723,7 @@ async function runDaemonCleanMergeAttempt({
       const state = String(rollup?.state || '');
       return {
         candidateHead: rollup?.headSha || rollup?.headRefOid || '',
-        requiredChecks: Array.isArray(rollup?.statusCheckRollup) ? rollup.statusCheckRollup : [],
+        requiredChecks: summarizeChecksConclusion(rollup?.statusCheckRollup, { env }) === 'SUCCESS',
         mergeable: rollup?.mergeable,
         mergeStateStatus: rollup?.mergeStateStatus,
         prState: state,
@@ -5751,6 +5776,67 @@ async function runDaemonCleanMergeAttempt({
     },
     logger,
   });
+}
+
+function resolveDaemonWorkerIdentityForPr({
+  repo,
+  prNumber,
+  currentHeadSha = '',
+  hqRoot,
+  rootDir,
+  env = process.env,
+  readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
+} = {}) {
+  const baseArgs = {
+    repo,
+    prNumber,
+    signalKind: 'merged',
+    hqRoot,
+    rootDir,
+    env,
+  };
+  const currentHead = String(currentHeadSha || '').trim();
+  let exact = null;
+  let resolved;
+  try {
+    exact = currentHead
+      ? readBuildCompletionSignalForPrImpl({ ...baseArgs, headSha: currentHead })
+      : null;
+    resolved = exact?.ok ? exact : readBuildCompletionSignalForPrImpl(baseArgs);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'build-completion-read-failed',
+      error: String(err?.message || err),
+    };
+  }
+  if (!resolved?.ok) {
+    return {
+      ok: false,
+      reason: resolved?.reason || 'missing-build-completion-signal',
+      exactHeadReason: exact && !exact.ok ? exact.reason : null,
+    };
+  }
+  const launchRequestId = String(resolved.row?.launch_request_id || resolved.row?.launchRequestId || '').trim();
+  const workerClass = String(resolved.row?.worker_class || resolved.row?.workerClass || '').trim();
+  if (!launchRequestId || !workerClass) {
+    return {
+      ok: false,
+      reason: !launchRequestId ? 'missing-launch-request-id' : 'missing-worker-class',
+      rowHeadSha: resolved.row?.head_sha || resolved.row?.headSha || null,
+      exactHeadReason: exact && !exact.ok ? exact.reason : null,
+    };
+  }
+  const rowHeadSha = String(resolved.row?.head_sha || resolved.row?.headSha || '').trim();
+  return {
+    ok: true,
+    launchRequestId,
+    workerClass,
+    rowHeadSha: rowHeadSha || null,
+    currentHeadSha: currentHead || null,
+    resolvedBy: exact?.ok ? 'current-head' : 'pr-number',
+    headMovedAfterBuildCompletion: Boolean(rowHeadSha && currentHead && rowHeadSha !== currentHead),
+  };
 }
 
 function writeAutonomousMergeDisabledAudit({

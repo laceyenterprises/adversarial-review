@@ -148,6 +148,9 @@ feature_flags:
   # Default true because the legacy OFF behavior stranded PRs at the operator desk.
   # Motivation: PRs #426 and #504 convergence-loop deadlock notes in follow-up-merge-agent.mjs.
   merge_agent_final_pass_on_request_changes: true
+  # Makes the exhausted-budget terminal pass apply uniformly to Request changes,
+  # Comment only, and Approved verdicts. Default false until operator sign-off.
+  merge_agent_deterministic_convergence_terminal: false
   # Allows the watcher to start without ALERT_TO being provisioned.
   # Default false because degraded alert-free startup must be an explicit choice.
   # Motivation: adversarial-watcher degraded bring-up path / CFG-05.

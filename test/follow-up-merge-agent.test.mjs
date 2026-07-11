@@ -18,6 +18,7 @@ import {
   FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER,
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
+  DETERMINISTIC_CONVERGENCE_TERMINAL_ENV,
   HQ_DISPATCH_TIMEOUT_MS,
   HQ_WORKER_TEAR_DOWN_TIMEOUT_MS,
   MERGE_AGENT_WORKER_CLASS_ENV,
@@ -36,6 +37,7 @@ import {
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
   isFinalPassOnRequestChangesEnabled,
+  isDeterministicConvergenceTerminalEnabled,
   listMergeAgentDispatches,
   listMergeAgentLifecycleCleanups,
   listMergeAgentSkippedDispatches,
@@ -599,6 +601,89 @@ test('final-pass uses a distinct blocker-remediation trigger when standing block
   assert.equal(detail.trigger, FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER);
 });
 
+test('deterministic terminal flag turns cap-exhausted Comment only into one final terminal pass', () => {
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: 'Comment only',
+    remediationCurrentRound: 2,
+    remediationMaxRounds: 2,
+    blockingFindingCount: 0,
+  }), {
+    recentDispatches: [],
+    finalPassOnRequestChangesEnabled: false,
+    deterministicConvergenceTerminalEnabled: true,
+  });
+
+  assert.equal(detail.decision, 'dispatch');
+  assert.equal(detail.trigger, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER);
+});
+
+test('deterministic terminal flag turns cap-exhausted Approved into one final terminal pass', () => {
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: 'Approved',
+    remediationCurrentRound: 3,
+    remediationMaxRounds: 3,
+    blockingFindingCount: 0,
+  }), {
+    recentDispatches: [],
+    finalPassOnRequestChangesEnabled: false,
+    deterministicConvergenceTerminalEnabled: true,
+  });
+
+  assert.equal(detail.decision, 'dispatch');
+  assert.equal(detail.trigger, FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER);
+});
+
+test('deterministic terminal flag does not change in-budget Request changes remediation', () => {
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: 'Request changes',
+    remediationCurrentRound: 1,
+    remediationMaxRounds: 3,
+    blockingFindingCount: 1,
+  }), {
+    recentDispatches: [],
+    finalPassOnRequestChangesEnabled: false,
+    deterministicConvergenceTerminalEnabled: true,
+  });
+
+  assert.equal(detail.decision, 'skip-remediation-claimable');
+  assert.equal(detail.trigger, null);
+});
+
+test('deterministic terminal flag hands off standing blockers after the bounded final pass', () => {
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: 'Comment only',
+    remediationCurrentRound: 3,
+    remediationMaxRounds: 3,
+    blockingFindingCount: 1,
+    blockingFindingState: 'known',
+  }), {
+    recentDispatches: [],
+    finalPassOnRequestChangesEnabled: false,
+    deterministicConvergenceTerminalEnabled: true,
+    blockingFinalPassAttempted: true,
+  });
+
+  assert.equal(detail.decision, 'skip-blockers-present');
+  assert.equal(detail.trigger, null);
+  assert.equal(detail.handoffRequired, true);
+  assert.equal(detail.blockingFinalPassAttempted, true);
+});
+
+test('deterministic terminal fallback preserves legacy clean Comment only dispatch when flag is off', () => {
+  const detail = pickMergeAgentDispatchDetail(makeJob({
+    lastVerdict: 'Comment only',
+    remediationCurrentRound: 2,
+    remediationMaxRounds: 2,
+  }), {
+    recentDispatches: [],
+    finalPassOnRequestChangesEnabled: false,
+    deterministicConvergenceTerminalEnabled: false,
+  });
+
+  assert.equal(detail.decision, 'dispatch');
+  assert.equal(detail.trigger, null);
+});
+
 test('operator-approved overrides the blocking-findings gate (human accepts the blockers)', () => {
   // operator-approved is resolved BEFORE the final-pass branch, so a human can
   // still force a merge that accepts standing blockers.
@@ -871,6 +956,65 @@ test('isFinalPassOnRequestChangesEnabled defaults ON for unset/empty, off for ex
     assert.equal(relevant.length, 1);
     assert.match(relevant[0], /maybe/);
     assert.match(relevant[0], /falling back to OFF/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('isDeterministicConvergenceTerminalEnabled defaults OFF and honors explicit opt-in', () => {
+  const silentLogger = { warn: () => {} };
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+
+  try {
+    const topPath = path.join(rootDir, 'no-top.yaml');
+    const modulePath = path.join(rootDir, 'config.yaml');
+    writeFileSync(modulePath, 'feature_flags: {}\n', 'utf8');
+
+    assert.equal(
+      isDeterministicConvergenceTerminalEnabled({
+        env: {},
+        logger: silentLogger,
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      false,
+    );
+    assert.equal(
+      isDeterministicConvergenceTerminalEnabled({
+        env: { [DETERMINISTIC_CONVERGENCE_TERMINAL_ENV]: '1' },
+        logger: silentLogger,
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      true,
+    );
+
+    writeFileSync(
+      modulePath,
+      'feature_flags:\n  merge_agent_deterministic_convergence_terminal: true\n',
+      'utf8',
+    );
+    assert.equal(
+      isDeterministicConvergenceTerminalEnabled({
+        env: {},
+        logger: silentLogger,
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      true,
+    );
+
+    const warnings = [];
+    assert.equal(
+      isDeterministicConvergenceTerminalEnabled({
+        env: { [DETERMINISTIC_CONVERGENCE_TERMINAL_ENV]: 'maybe' },
+        logger: { warn: (msg) => warnings.push(msg) },
+        topPath,
+        modulePaths: [modulePath],
+      }),
+      false,
+    );
+    assert.ok(warnings.some((msg) => /falling back to OFF/.test(msg)));
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

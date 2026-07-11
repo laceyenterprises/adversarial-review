@@ -234,6 +234,7 @@ const FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER = 'final-pass-on-budget-exhausted';
 const FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER = 'final-pass-blocker-remediation';
 const REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER = 'reviewer-timeout-exhausted';
 const FINAL_PASS_ON_REQUEST_CHANGES_ENV = 'MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES';
+const DETERMINISTIC_CONVERGENCE_TERMINAL_ENV = 'MERGE_AGENT_DETERMINISTIC_CONVERGENCE_TERMINAL';
 const NORMAL_MERGE_AGENT_DISPATCH_PRIORITY = 'normal';
 const CRITICAL_MERGE_AGENT_DISPATCH_PRIORITY = 'critical';
 const PHANTOM_HANDOFF_COMMENT_TIMEOUT_MS = 10_000;
@@ -428,6 +429,53 @@ function isFinalPassOnRequestChangesEnabled({
       + 'is not a recognized boolean (use 1/true/yes or 0/false/no); '
       + 'falling back to OFF (legacy halt-at-max-rounds-reached behavior). '
       + 'Unset the env var to use the default-ON behavior.'
+    );
+  }
+  return false;
+}
+
+function isDeterministicConvergenceTerminalEnabled({
+  env = process.env,
+  logger = console,
+  topPath,
+  modulePaths,
+} = {}) {
+  const raw = env?.[DETERMINISTIC_CONVERGENCE_TERMINAL_ENV];
+  let effectiveRaw = raw;
+  if (effectiveRaw == null) {
+    const configEnv = env?.AGENT_OS_CONFIG_PATH == null
+      ? {}
+      : { AGENT_OS_CONFIG_PATH: env.AGENT_OS_CONFIG_PATH };
+    try {
+      effectiveRaw = loadConfigCached({
+        env: configEnv,
+        topPath,
+        modulePaths: modulePaths || [MODULE_CONFIG_PATH],
+      }).get('feature_flags.merge_agent_deterministic_convergence_terminal')
+        ? 'true'
+        : 'false';
+    } catch (err) {
+      if (logger && typeof logger.warn === 'function') {
+        logger.warn(
+          '[merge-agent] failed to load feature_flags.merge_agent_deterministic_convergence_terminal; '
+          + `falling back to default OFF. ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+      return false;
+    }
+  }
+  const normalized = String(effectiveRaw).trim().toLowerCase();
+  if (normalized === '') return false;
+  if (normalized === '0' || normalized === 'false' || normalized === 'no') {
+    return false;
+  }
+  if (normalized === '1' || normalized === 'true' || normalized === 'yes') {
+    return true;
+  }
+  if (logger && typeof logger.warn === 'function') {
+    logger.warn(
+      `[merge-agent] ${DETERMINISTIC_CONVERGENCE_TERMINAL_ENV}=${JSON.stringify(effectiveRaw)} `
+      + 'is not a recognized boolean (use 1/true/yes or 0/false/no); falling back to OFF.'
     );
   }
   return false;
@@ -2317,11 +2365,13 @@ function buildMergeAgentPrompt(job, { trigger = null } = {}) {
 function pickMergeAgentDispatch(job, {
   recentDispatches = [],
   finalPassOnRequestChangesEnabled = isFinalPassOnRequestChangesEnabled(),
+  deterministicConvergenceTerminalEnabled = isDeterministicConvergenceTerminalEnabled(),
   blockingFinalPassAttempted = false,
 } = {}) {
   return pickMergeAgentDispatchDetail(job, {
     recentDispatches,
     finalPassOnRequestChangesEnabled,
+    deterministicConvergenceTerminalEnabled,
     blockingFinalPassAttempted,
   }).decision;
 }
@@ -2329,6 +2379,7 @@ function pickMergeAgentDispatch(job, {
 function pickMergeAgentDispatchDetail(job, {
   recentDispatches = [],
   finalPassOnRequestChangesEnabled = isFinalPassOnRequestChangesEnabled(),
+  deterministicConvergenceTerminalEnabled = isDeterministicConvergenceTerminalEnabled(),
   blockingFinalPassAttempted = false,
 } = {}) {
   const normalizedVerdict = normalizeReviewVerdict(job?.lastVerdict);
@@ -2395,6 +2446,7 @@ function pickMergeAgentDispatchDetail(job, {
     operatorApproved,
     hasOperatorApprovedLabel,
     finalPassOnRequestChangesEnabled,
+    deterministicConvergenceTerminalEnabled,
     blockingFinalPassAttempted,
   });
   if (normalDecision.decision === 'dispatch') {
@@ -2487,6 +2539,7 @@ function pickNormalMergeAgentDispatchDetail({
   operatorApproved,
   hasOperatorApprovedLabel,
   finalPassOnRequestChangesEnabled = false,
+  deterministicConvergenceTerminalEnabled = false,
   blockingFinalPassAttempted = false,
 }) {
   if (shouldUseReviewerTimeoutExhaustedMergeGate(job)) {
@@ -2546,8 +2599,13 @@ function pickNormalMergeAgentDispatchDetail({
     && !operatorApproved
     && finalPassOnRequestChangesEnabled
   );
+  const deterministicTerminalCandidate = (
+    deterministicConvergenceTerminalEnabled
+    && !operatorApproved
+    && remediationCurrentRound >= remediationMaxRounds
+  );
 
-  if (!operatorApproved && blockingFindingCount > 0 && !finalPassRequestChangesCandidate) {
+  if (!operatorApproved && blockingFindingCount > 0 && !finalPassRequestChangesCandidate && !deterministicTerminalCandidate) {
     return { decision: 'skip-blockers-present', trigger: null };
   }
 
@@ -2583,9 +2641,8 @@ function pickNormalMergeAgentDispatchDetail({
   }
 
   if (
-    normalizedVerdict === 'request-changes'
-    && !operatorApproved
-    && finalPassOnRequestChangesEnabled
+    !operatorApproved
+    && (finalPassRequestChangesCandidate || deterministicTerminalCandidate)
   ) {
     // TERMINAL AUTONOMOUS CLOSE (supersedes the old PR #901 gate): a
     // budget-exhausted Request changes review may dispatch once even with
@@ -3816,6 +3873,7 @@ async function dispatchMergeAgentForPR({
     // with the rest of dispatchMergeAgentForPR (agent-os detection, parent
     // session, project) which already routes through runtimeEnv.
     finalPassOnRequestChangesEnabled: isFinalPassOnRequestChangesEnabled({ env: runtimeEnv }),
+    deterministicConvergenceTerminalEnabled: isDeterministicConvergenceTerminalEnabled({ env: runtimeEnv }),
     blockingFinalPassAttempted,
   });
   const { decision } = dispatchDecision;
@@ -5842,6 +5900,7 @@ export {
   FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER,
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
+  DETERMINISTIC_CONVERGENCE_TERMINAL_ENV,
   HQ_DISPATCH_TIMEOUT_MS,
   HQ_WORKER_TEAR_DOWN_TIMEOUT_MS,
   REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER,
@@ -5882,6 +5941,7 @@ export {
   fetchMergeAgentCandidate,
   findLatestFollowUpJobForPR,
   isFinalPassOnRequestChangesEnabled,
+  isDeterministicConvergenceTerminalEnabled,
   isScopedOperatorApproval,
   isScopedMergeAgentRequest,
   listMergeAgentDispatches,

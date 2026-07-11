@@ -5865,21 +5865,31 @@ async function resolveDaemonWorkerIdentityForPr({
   env = process.env,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
 } = {}) {
+  const currentHead = String(currentHeadSha || '').trim();
+  if (!currentHead) {
+    return { ok: false, reason: 'missing-current-head-sha' };
+  }
   const baseArgs = {
     repo,
     prNumber,
+    // The daemon-clean-merge resolves the worker identity of a PR it is about
+    // to merge (pre-merge). readBuildCompletionSignalForPr defaults signalKind
+    // to 'merged', but the 'merged' signal is only recorded AFTER a PR merges —
+    // an open PR only has the 'pr_opened' signal. Querying 'merged' therefore
+    // NEVER resolves for an open worker PR, so every daemon-clean-merge
+    // fail-closed with worker-identity-unresolved (2026-07-11: #3473/#3476/#3478
+    // all had a 'pr_opened' row but zero 'merged' rows). Resolve against the
+    // 'pr_opened' signal for the current head only: PR origin alone is not
+    // sufficient provenance after another commit is pushed to the branch.
+    signalKind: 'pr_opened',
+    headSha: currentHead,
     hqRoot,
     rootDir,
     env,
   };
-  const currentHead = String(currentHeadSha || '').trim();
-  let exact = null;
   let resolved;
   try {
-    exact = currentHead
-      ? await readBuildCompletionSignalForPrImpl({ ...baseArgs, headSha: currentHead })
-      : null;
-    resolved = exact?.ok ? exact : await readBuildCompletionSignalForPrImpl(baseArgs);
+    resolved = await readBuildCompletionSignalForPrImpl(baseArgs);
   } catch (err) {
     return {
       ok: false,
@@ -5911,7 +5921,6 @@ async function resolveDaemonWorkerIdentityForPr({
     return {
       ok: false,
       reason: resolved?.reason || 'missing-build-completion-signal',
-      exactHeadReason: exact && !exact.ok ? exact.reason : null,
       launchProvenanceReason: launchProvenance.reason,
     };
   }
@@ -5922,7 +5931,6 @@ async function resolveDaemonWorkerIdentityForPr({
       ok: false,
       reason: !launchRequestId ? 'missing-launch-request-id' : 'missing-worker-class',
       rowHeadSha: resolved.row?.head_sha ?? resolved.row?.headSha ?? null,
-      exactHeadReason: exact && !exact.ok ? exact.reason : null,
     };
   }
   const rowHeadSha = String(resolved.row?.head_sha ?? resolved.row?.headSha ?? '').trim();
@@ -5932,8 +5940,8 @@ async function resolveDaemonWorkerIdentityForPr({
     workerClass,
     rowHeadSha: rowHeadSha || null,
     currentHeadSha: currentHead || null,
-    resolvedBy: exact?.ok ? 'current-head' : 'pr-number',
-    headMovedAfterBuildCompletion: Boolean(rowHeadSha && currentHead && rowHeadSha !== currentHead),
+    resolvedBy: 'current-head',
+    headMovedAfterBuildCompletion: false,
   };
 }
 
@@ -9382,6 +9390,7 @@ if (isMain) {
 
 export {
   amaAuthoritativeReviewerLoginsForModel,
+  resolveDaemonWorkerIdentityForPr,
   classifyReviewerFailure,
   createWatcherOctokit,
   createWatcherHeartbeat,

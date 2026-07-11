@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { homedir, hostname } from 'node:os';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { readFile as readFileAsync } from 'node:fs/promises';
+import { readdir, readFile as readFileAsync, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
@@ -5685,6 +5685,52 @@ async function runDaemonCleanMergeAttempt({
   if (!base || !validatedHead) {
     return NOT_TAKEN('daemon-inputs-missing');
   }
+  let liveRollup = null;
+  try {
+    liveRollup = await fetchRollupImpl(repoPath, prNumber, { execFileImpl });
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] AMA daemon clean-merge live-head refresh failed for ${repoPath}#${prNumber}; ` +
+        `deferring this tick: ${err?.message || err}`,
+    );
+    return {
+      disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+      reason: 'live-head-refresh-failed',
+      merged: false,
+      attempts: 0,
+      leaseAcquired: false,
+      auditWritten: false,
+      error: String(err?.message || err),
+    };
+  }
+  const snapshotHead = String(currentPrHeadSha || candidate?.headSha || '').trim();
+  const liveHead = String(liveRollup?.headSha || liveRollup?.headRefOid || '').trim();
+  if (!liveHead) {
+    return {
+      disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+      reason: 'live-head-unresolved',
+      merged: false,
+      attempts: 0,
+      leaseAcquired: false,
+      auditWritten: false,
+    };
+  }
+  if (snapshotHead && liveHead !== snapshotHead) {
+    logger?.warn?.(
+      `[watcher] AMA daemon clean-merge head moved for ${repoPath}#${prNumber}: ` +
+        `snapshot=${snapshotHead.slice(0, 12)} live=${liveHead.slice(0, 12)}; deferring to re-queue`,
+    );
+    return {
+      disposition: DAEMON_MERGE_DISPOSITION.DEFERRED,
+      reason: 'pr-head-moved',
+      merged: false,
+      attempts: 0,
+      leaseAcquired: false,
+      auditWritten: false,
+      snapshotHead,
+      liveHead,
+    };
+  }
   // The MSM-02 predicate clears the verdict gate only for the normalized
   // `settled-success` token; a settled-success review verdict maps to it, and
   // anything else stays raw so the predicate refuses it.
@@ -5696,7 +5742,8 @@ async function runDaemonCleanMergeAttempt({
   const workerIdentity = await resolveDaemonWorkerIdentityForPr({
     repo: repoPath,
     prNumber,
-    currentHeadSha: currentPrHeadSha || candidate?.headSha || '',
+    currentHeadSha: liveHead,
+    currentBranch: liveRollup?.headRefName || candidate?.headRefName || candidate?.branch || '',
     hqRoot,
     rootDir,
     env,
@@ -5728,11 +5775,13 @@ async function runDaemonCleanMergeAttempt({
     },
     // Initial (pre-lease) GitHub gate snapshot from the live fetch this tick.
     liveGate: {
-      candidateHead: currentPrHeadSha || candidate?.headSha || '',
-      requiredChecks: Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : [],
-      mergeable: mergeabilityForGate?.mergeable,
-      mergeStateStatus: mergeabilityForGate?.mergeStateStatus,
-      prState: String(candidate?.prState || 'open').toUpperCase(),
+      candidateHead: liveHead,
+      requiredChecks: Array.isArray(liveRollup?.statusCheckRollup)
+        ? liveRollup.statusCheckRollup
+        : (Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : []),
+      mergeable: liveRollup?.mergeable ?? mergeabilityForGate?.mergeable,
+      mergeStateStatus: liveRollup?.mergeStateStatus ?? mergeabilityForGate?.mergeStateStatus,
+      prState: String(liveRollup?.state || candidate?.prState || 'open').toUpperCase(),
     },
     mergeMethod,
     hqRoot,
@@ -5740,6 +5789,7 @@ async function runDaemonCleanMergeAttempt({
       reviewer: reviewStateRow?.reviewer || '',
       riskClass: reviewState?.riskClass || 'unknown',
     },
+    workerIdentity,
     flags: {
       autonomousMergeExecutionEnabled: cfg?.autonomousMergeExecutionEnabled !== false,
       strictMode: cfg?.strictMode !== false,
@@ -5809,6 +5859,7 @@ async function resolveDaemonWorkerIdentityForPr({
   repo,
   prNumber,
   currentHeadSha = '',
+  currentBranch = '',
   hqRoot,
   rootDir,
   env = process.env,
@@ -5837,10 +5888,31 @@ async function resolveDaemonWorkerIdentityForPr({
     };
   }
   if (!resolved?.ok) {
+    const launchProvenance = await readDaemonWorkerLaunchProvenanceForPr({
+      repo,
+      prNumber,
+      currentHeadSha: currentHead,
+      currentBranch,
+      hqRoot,
+    });
+    if (launchProvenance.ok) {
+      return {
+        ok: true,
+        launchRequestId: launchProvenance.launchRequestId,
+        workerClass: launchProvenance.workerClass,
+        rowHeadSha: launchProvenance.headSha || null,
+        currentHeadSha: currentHead || null,
+        resolvedBy: 'launch-provenance',
+        headMovedAfterBuildCompletion: false,
+        buildCompletionReason: resolved?.reason || 'missing-build-completion-signal',
+        launchProvenancePath: launchProvenance.path,
+      };
+    }
     return {
       ok: false,
       reason: resolved?.reason || 'missing-build-completion-signal',
       exactHeadReason: exact && !exact.ok ? exact.reason : null,
+      launchProvenanceReason: launchProvenance.reason,
     };
   }
   const launchRequestId = String(resolved.row?.launch_request_id ?? resolved.row?.launchRequestId ?? '').trim();
@@ -5863,6 +5935,110 @@ async function resolveDaemonWorkerIdentityForPr({
     resolvedBy: exact?.ok ? 'current-head' : 'pr-number',
     headMovedAfterBuildCompletion: Boolean(rowHeadSha && currentHead && rowHeadSha !== currentHead),
   };
+}
+
+function daemonLaunchProvenanceRepoMatches(recordRepo, expectedRepo) {
+  const record = String(recordRepo || '').trim().toLowerCase();
+  const expected = String(expectedRepo || '').trim().toLowerCase();
+  if (!record || !expected) return false;
+  return record === expected;
+}
+
+function daemonLaunchProvenancePayload(doc) {
+  return doc?.launchProvenance && typeof doc.launchProvenance === 'object'
+    ? doc.launchProvenance
+    : doc;
+}
+
+async function readJsonFileBestEffort(path) {
+  try {
+    return JSON.parse(await readFileAsync(path, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+  return results;
+}
+
+async function listDaemonWorkerLaunchProvenanceCandidates(hqRoot) {
+  const workersDir = join(String(hqRoot || ''), 'workers');
+  let entries;
+  try {
+    entries = await readdir(workersDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const paths = entries
+    .filter((entry) => entry.isDirectory())
+    .flatMap((entry) => [
+      join(workersDir, entry.name, 'launch-provenance.json'),
+      join(workersDir, entry.name, 'run.json'),
+      join(workersDir, entry.name, 'workspace.json'),
+    ]);
+  const candidates = await mapWithConcurrency(paths, 32, async (path) => {
+    try {
+      return { path, mtimeMs: (await stat(path)).mtimeMs };
+    } catch {
+      return null;
+    }
+  });
+  return candidates.filter(Boolean).sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+async function readDaemonWorkerLaunchProvenanceForPr({
+  repo,
+  prNumber,
+  currentHeadSha = '',
+  currentBranch = '',
+  hqRoot,
+} = {}) {
+  const expectedRepo = String(repo || '').trim();
+  const expectedBranch = String(currentBranch || '').trim();
+  const expectedHead = String(currentHeadSha || '').trim();
+  const numericPrNumber = Number(prNumber);
+  if (!expectedRepo || !Number.isInteger(numericPrNumber) || numericPrNumber <= 0) {
+    return { ok: false, reason: 'missing-pr-identity' };
+  }
+  if (!expectedBranch) {
+    return { ok: false, reason: 'missing-pr-branch' };
+  }
+  const candidates = (await listDaemonWorkerLaunchProvenanceCandidates(hqRoot)).slice(0, 2000);
+  for (const candidate of candidates) {
+    const doc = await readJsonFileBestEffort(candidate.path);
+    const payload = daemonLaunchProvenancePayload(doc);
+    if (!payload || typeof payload !== 'object') continue;
+    const recordRepo = payload.prRepo || payload.repo;
+    const recordBranch = String(payload.branch || payload.headBranch || payload.prBranch || '').trim();
+    if (!daemonLaunchProvenanceRepoMatches(recordRepo, expectedRepo)) continue;
+    if (recordBranch !== expectedBranch) continue;
+    const launchRequestId = String(
+      payload.launchRequestId || payload.launch_request_id || doc?.launchRequestId || doc?.launch_request_id || '',
+    ).trim();
+    const workerClass = String(
+      payload.workerClass || payload.worker_class || payload.workerSpec?.workerClass || doc?.workerClass || '',
+    ).trim();
+    if (!launchRequestId || !workerClass) continue;
+    return {
+      ok: true,
+      launchRequestId,
+      workerClass,
+      headSha: String(payload.prHeadSha || payload.headSha || payload.head_sha || expectedHead || '').trim() || null,
+      branch: recordBranch,
+      path: candidate.path,
+    };
+  }
+  return { ok: false, reason: 'missing-launch-provenance' };
 }
 
 function writeAutonomousMergeDisabledAudit({

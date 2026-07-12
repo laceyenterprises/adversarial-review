@@ -1314,9 +1314,11 @@ test('resolveDaemonWorkerIdentityForPr resolves moved live head from produced at
     currentHeadSha: 'live-head-after-remediation',
     currentBranch: 'codex-lha-05/LHA-05',
     hqRoot: '/tmp/hq-root-unused',
-    env: {
-      AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_LHA_CONSUME_ATTESTATIONS: 'true',
-    },
+    env: {},
+    // LHA-06 remediation: consumption is enabled by the explicitly-resolved
+    // config flag that callers pass from the canonical AgentOSConfig (which
+    // honors YAML rollback), NOT a raw env var read inside the resolver.
+    consumeHeadAttestations: true,
     readBuildCompletionSignalForPrImpl: async () => {
       buildCompletionReads += 1;
       return { ok: false, reason: 'should-not-read-build-completion-after-attestation-hit' };

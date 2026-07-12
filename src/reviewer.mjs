@@ -52,7 +52,7 @@ import {
   fetchLinkedSpecContents,
   parseGitHubBlobPath,
 } from './prompt-context.mjs';
-import { captureReviewerBodyAfterPost, hasCapturedReviewerBody } from './review-body-capture.mjs';
+import { captureReviewerBodyAfterPost, findCapturedReviewerBody } from './review-body-capture.mjs';
 import { emitReviewedAttestation } from './reviewed-attestation.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
 import { preflightGeminiReviewerToken } from './gemini-reviewer-preflight.mjs';
@@ -4130,9 +4130,19 @@ async function postGitHubReviewWithCapture({
   reviewerIdentity = null,
   reviewerTokenFetchTimeoutMs = undefined,
 } = {}) {
-  const alreadyCaptured = hasCapturedReviewerBody(rootDir, {
-    repo, prNumber, attemptNumber, passKind, reviewBody,
-  });
+  const normalizedHeadSha = String(reviewerHeadSha || '').trim();
+  const capturedReviewBody = normalizedHeadSha
+    ? findCapturedReviewerBody(rootDir, {
+      repo,
+      prNumber,
+      attemptNumber,
+      passKind,
+      headSha: normalizedHeadSha,
+      reviewerModel,
+    })
+    : null;
+  const alreadyCaptured = capturedReviewBody !== null;
+  const effectiveReviewBody = capturedReviewBody ?? reviewBody;
   let initialToken = null;
   if (!alreadyCaptured) {
     // GMW-06: run the gemini-reviewer preflight before the generic env check so a
@@ -4166,7 +4176,7 @@ async function postGitHubReviewWithCapture({
   // does not abort the body-capture UPDATE when a reviewer goes off-script.
   // Losing the parsed-verdict shortcut is preferable to losing body capture
   // entirely; downstream consumers already treat NULL as "verdict unknown".
-  const normalizedVerdict = normalizeEffectiveReviewVerdict(reviewBody, {
+  const normalizedVerdict = normalizeEffectiveReviewVerdict(effectiveReviewBody, {
     log,
     context: `${repo}#${prNumber} attempt=${attemptNumber} reviewer=${reviewerModel}`,
   });
@@ -4187,7 +4197,7 @@ async function postGitHubReviewWithCapture({
     log,
   });
 
-  if (!String(reviewerHeadSha || '').trim()) {
+  if (!normalizedHeadSha) {
     log.warn?.(
       `[reviewer] reviewed attestation skipped for ${repo}#${prNumber}: reviewerHeadSha is unavailable`
     );
@@ -4197,13 +4207,13 @@ async function postGitHubReviewWithCapture({
   await emitReviewedAttestation({
     repo,
     prNumber,
-    headSha: reviewerHeadSha,
+    headSha: normalizedHeadSha,
     reviewerIdentity: resolveReviewerIdentityForBotTokenEnv(
       botTokenEnv,
       reviewerIdentity || reviewerModel
     ),
     verdict: normalizedVerdict,
-    reviewBody,
+    reviewBody: effectiveReviewBody,
     execFileImpl: attestExecFileImpl,
     env: process.env,
     log,

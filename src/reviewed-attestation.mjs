@@ -56,11 +56,29 @@ function buildReviewedAttestationPayload({
     parent_head_sha: null,
     kind: 'reviewed',
     producer_identity: normalizedReviewerIdentity,
-    reviewer_identity: normalizedReviewerIdentity,
     verdict: normalizedVerdict,
     findings_count: Number.isInteger(findingsCount) && findingsCount >= 0 ? findingsCount : null,
+    payload: { reviewer_identity: normalizedReviewerIdentity },
     ts,
   };
+}
+
+function reviewedAttestationSignArgs(payload) {
+  const args = [
+    'attest', 'sign',
+    '--repo', payload.repo,
+    '--pr', String(payload.pr_number),
+    '--head-sha', payload.head_sha,
+    '--kind', payload.kind,
+    '--verdict', payload.verdict,
+    '--payload-json', JSON.stringify(payload.payload || {}),
+    '--ts', payload.ts,
+  ];
+  if (payload.parent_head_sha) args.push('--parent-head-sha', payload.parent_head_sha);
+  if (payload.findings_count !== null) {
+    args.push('--findings-count', String(payload.findings_count));
+  }
+  return args;
 }
 
 async function signReviewedAttestation({
@@ -76,16 +94,14 @@ async function signReviewedAttestation({
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     throw new TypeError('payload object is required');
   }
-  const serialized = `${JSON.stringify(payload)}\n`;
   let stdout;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       ({ stdout } = await execFileImpl(
         hqPath,
-        ['attest', 'sign', '--payload', '-'],
+        reviewedAttestationSignArgs(payload),
         {
           env,
-          input: serialized,
           timeout: timeoutMs,
           maxBuffer: 1024 * 1024,
         }
@@ -102,7 +118,10 @@ async function signReviewedAttestation({
   try {
     signed = JSON.parse(trimmed);
   } catch (err) {
-    throw new Error(`hq attest sign returned invalid JSON: ${err.message}`, { cause: err });
+    throw new Error(
+      `hq attest sign returned invalid JSON: ${err.message}; stdout=${JSON.stringify(trimmed.slice(0, 500))}`,
+      { cause: err }
+    );
   }
   validateSignedReviewedAttestation(signed, payload);
   return signed;
@@ -113,16 +132,49 @@ function validateSignedReviewedAttestation(signed, payload) {
     throw new Error('signed attestation must be an object');
   }
   for (const [field, expected] of Object.entries(payload)) {
-    if (signed[field] !== expected) {
+    const matches = field === 'payload'
+      ? JSON.stringify(signed[field]) === JSON.stringify(expected)
+      : signed[field] === expected;
+    if (!matches) {
       throw new Error(`signed attestation ${field} mismatch: ${signed[field]}`);
     }
   }
   if (!signed.signature || signed.signature.verified !== true) {
     throw new Error('signed attestation signature missing or did not verify');
   }
+  const reviewerIdentity = payload.payload?.reviewer_identity;
   const signedSubject = signed.signature?.hcp_subject ?? signed.signature?.subject;
-  if (signedSubject !== undefined && signedSubject !== payload.reviewer_identity) {
+  if (signedSubject !== undefined && signedSubject !== reviewerIdentity) {
     throw new Error(`signed attestation HCP subject mismatch: ${signedSubject}`);
+  }
+}
+
+async function recordSignedReviewedAttestation({
+  signed,
+  hqPath = process.env.HQ_BIN || 'hq',
+  execFileImpl = execFileAsync,
+  env = process.env,
+  timeoutMs = REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS,
+} = {}) {
+  const { stdout } = await execFileImpl(
+    hqPath,
+    ['attest', 'record', '--payload', '-'],
+    {
+      env,
+      input: `${JSON.stringify(signed)}\n`,
+      timeout: timeoutMs,
+      maxBuffer: 1024 * 1024,
+    }
+  );
+  const trimmed = String(stdout || '').trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch (err) {
+    throw new Error(
+      `hq attest record returned invalid JSON: ${err.message}; stdout=${JSON.stringify(trimmed.slice(0, 500))}`,
+      { cause: err }
+    );
   }
 }
 
@@ -153,11 +205,17 @@ async function emitReviewedAttestation({
     execFileImpl,
     env,
   });
+  const recorded = await recordSignedReviewedAttestation({
+    signed,
+    hqPath,
+    execFileImpl,
+    env,
+  });
   log?.log?.(
     `[reviewer] reviewed attestation emitted for ${payload.repo}#${payload.pr_number}@${payload.head_sha.slice(0, 12)} ` +
       `verdict=${payload.verdict} findings_count=${payload.findings_count ?? 'unknown'}`
   );
-  return { payload, signed };
+  return { payload, signed, recorded };
 }
 
 export {
@@ -168,6 +226,8 @@ export {
   emitReviewedAttestation,
   normalizeFindingsCount,
   isTransientSignError,
+  recordSignedReviewedAttestation,
+  reviewedAttestationSignArgs,
   signReviewedAttestation,
   validateSignedReviewedAttestation,
 };

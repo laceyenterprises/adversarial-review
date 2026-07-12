@@ -226,8 +226,8 @@ function updateReviewerPassBodyCapture(rootDir, {
   }
 }
 
-function hasCapturedReviewerBody(rootDir, {
-  repo, prNumber, attemptNumber, passKind, reviewBody,
+function findCapturedReviewerBody(rootDir, {
+  repo, prNumber, attemptNumber, passKind, headSha, reviewerModel,
 } = {}) {
   const kind = resolvePassKindForReviewer(passKind, { attemptNumber });
   let db;
@@ -236,11 +236,19 @@ function hasCapturedReviewerBody(rootDir, {
     ensureReviewStateSchema(db);
     const row = db.prepare(
       `SELECT body_md FROM reviewer_passes
-        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
-    ).get(repo, Number(prNumber), Number(attemptNumber), kind);
-    return row?.body_md === reviewBody;
+        WHERE repo = ?
+          AND pr_number = ?
+          AND head_sha = ?
+          AND reviewer_model = ?
+          AND pass_kind = ?
+          AND body_md IS NOT NULL
+          AND body_captured_at IS NOT NULL
+        ORDER BY body_captured_at DESC, pass_id DESC
+        LIMIT 1`
+    ).get(repo, Number(prNumber), headSha, reviewerModel, kind);
+    return typeof row?.body_md === 'string' ? row.body_md : null;
   } catch {
-    return false;
+    return null;
   } finally {
     db?.close();
   }
@@ -379,7 +387,7 @@ export {
   REVIEW_LOOKUP_TIMEOUT_MS,
   captureRemediationBodyAfterPost,
   captureReviewerBodyAfterPost,
-  hasCapturedReviewerBody,
+  findCapturedReviewerBody,
   lookupRecentReviewArtifact,
   resolveReviewerBotLogin,
   updateReviewerPassBodyCapture,

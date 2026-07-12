@@ -32,6 +32,7 @@ function loadAmaEnabledConfig() {
         mergeMethod: 'squash',
         autonomousMergeExecutionEnabled: true,
         strictMode: true,
+        lha: { consumeAttestations: false },
       };
     },
     getOrchestrationMode() {
@@ -48,6 +49,7 @@ function loadAmaEnabledAutonomousDisabledConfig() {
         mergeMethod: 'squash',
         autonomousMergeExecutionEnabled: false,
         strictMode: true,
+        lha: { consumeAttestations: false },
       };
     },
     getOrchestrationMode() {
@@ -700,6 +702,86 @@ test('daemon clean merge fail-closes when the head moved past worker build-compl
   }
 });
 
+test('daemon clean merge with LHA enforcement blocks missing produced attestation at live head', async () => {
+  const rootDir = tempRoot();
+  try {
+    let buildCompletionReads = 0;
+    let mergeCalls = 0;
+    let leaseCalls = 0;
+    const result = await runDaemonCleanMergeAttempt({
+      rootDir,
+      cfg: {
+        mergeMethod: 'squash',
+        autonomousMergeExecutionEnabled: true,
+        strictMode: true,
+        lha: { consumeAttestations: true },
+      },
+      repoPath: 'acme/repo',
+      prNumber: 563,
+      candidate: {
+        baseBranch: 'main',
+        headSha: 'lha-live-head',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        prState: 'open',
+      },
+      gateSnapshot: {
+        reviewedHeadSha: 'lha-live-head',
+        settledReview: { verdict: 'comment-only' },
+      },
+      mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+      reviewState: {
+        blockingFindingCount: 0,
+        blockingFindingState: 'known',
+        nonBlockingFindingCount: 0,
+        nonBlockingFindingState: 'known',
+      },
+      currentPrHeadSha: 'lha-live-head',
+      fetchRollupImpl: async () => ({
+        state: 'OPEN',
+        headSha: 'lha-live-head',
+        headRefName: 'codex-lha-06/LHA-06',
+        statusCheckRollup: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      }),
+      readHeadAttestationChainForPrImpl: async () => [],
+      readBuildCompletionSignalForPrImpl: async () => {
+        buildCompletionReads += 1;
+        return {
+          ok: true,
+          row: {
+            launch_request_id: 'lrq_branch_only_guess',
+            worker_class: 'codex',
+            head_sha: 'lha-live-head',
+          },
+        };
+      },
+      acquireMergeLeaseImpl: () => {
+        leaseCalls += 1;
+        return { acquired: true, lease: {} };
+      },
+      releaseMergeLeaseImpl: () => {},
+      execFileImpl: async () => {
+        mergeCalls += 1;
+        return { stdout: '', stderr: '' };
+      },
+      logger: { warn() {}, log() {} },
+      env: { HQ_ROOT: rootDir },
+    });
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+    assert.equal(result.reason, 'worker-identity-unresolved');
+    assert.equal(result.workerIdentity.reason, 'missing-produced-head-attestation');
+    assert.equal(buildCompletionReads, 0, 'LHA enforcement must not fall back to pr_opened reconstruction');
+    assert.equal(leaseCalls, 0, 'missing attestation must block before acquiring a merge lease');
+    assert.equal(mergeCalls, 0);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('daemon clean merge awaits async worker identity reads and preserves zero launch IDs', async () => {
   const rootDir = tempRoot();
   try {
@@ -1160,6 +1242,7 @@ test('resolveDaemonWorkerIdentityForPr scopes the pr_opened signal to the curren
     hqRoot: '/tmp/hq',
     rootDir: '/tmp/root',
     env: {},
+    consumeHeadAttestations: false,
     readBuildCompletionSignalForPrImpl: mockRead,
   });
   assert.equal(result.ok, true, `identity must resolve from the pr_opened signal; got ${JSON.stringify(result)}`);
@@ -1204,6 +1287,7 @@ test('resolveDaemonWorkerIdentityForPr rejects a moved-head pr_opened row', asyn
     currentBranch: "codex-rrp-06/RRP-06",
     hqRoot: "/tmp/hq-root-nonexistent-daemon-headmove",
     env: {},
+    consumeHeadAttestations: false,
     readBuildCompletionSignalForPrImpl: async (args) => {
       seenHeadShas.push(args.headSha);
       assert.equal(args.signalKind, "pr_opened");
@@ -1270,7 +1354,7 @@ test('resolveDaemonWorkerIdentityForPr resolves moved live head from produced at
   assert.equal(buildCompletionReads, 0, 'attested live head should replace reconstruction reads');
 });
 
-test('LHA consumption falls back only when the live head has no produced attestation', async () => {
+test('LHA enforcement blocks when the live head has no produced attestation', async () => {
   let buildCompletionReads = 0;
   const result = await resolveDaemonWorkerIdentityForPr({
     repo: 'agent-os',
@@ -1278,6 +1362,34 @@ test('LHA consumption falls back only when the live head has no produced attesta
     currentHeadSha: 'live-head',
     consumeHeadAttestations: true,
     readHeadAttestationChainForPrImpl: async () => [],
+    readBuildCompletionSignalForPrImpl: async () => {
+      buildCompletionReads += 1;
+      return {
+        ok: true,
+        row: {
+          launch_request_id: 'lrq_legacy_rollout',
+          worker_class: 'codex',
+          head_sha: 'live-head',
+        },
+      };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'missing-produced-head-attestation');
+  assert.equal(buildCompletionReads, 0, 'LHA enforcement must not reach legacy provenance');
+});
+
+test('rollback flag restores current-head build-completion fallback when produced attestation is absent', async () => {
+  let buildCompletionReads = 0;
+  const result = await resolveDaemonWorkerIdentityForPr({
+    repo: 'agent-os',
+    prNumber: 3491,
+    currentHeadSha: 'live-head',
+    consumeHeadAttestations: false,
+    readHeadAttestationChainForPrImpl: async () => {
+      throw new Error('rollback must not read attestations');
+    },
     readBuildCompletionSignalForPrImpl: async () => {
       buildCompletionReads += 1;
       return {
@@ -1388,6 +1500,7 @@ test("resolveDaemonWorkerIdentityForPr still fails closed when no pr_opened row 
     currentHeadSha: "some-live-head",
     currentBranch: "codex-x/X-01",
     hqRoot: "/tmp/hq-root-nonexistent-daemon-headmove",
+    consumeHeadAttestations: false,
     readBuildCompletionSignalForPrImpl: async () => ({ ok: false, reason: "missing-build-completion-signal" }),
   });
   assert.equal(result.ok, false);

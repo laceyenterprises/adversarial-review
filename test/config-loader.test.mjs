@@ -4116,6 +4116,10 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
     assert.equal(envFlagCfg.get('roles.adversarial.merge_authority.lha.consume_attestations'), true);
     assert.equal(envFlagCfg.getMergeAuthorityConfig().lha.consumeAttestations, true);
 
+    const defaultLhaCfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
+    assert.equal(defaultLhaCfg.get('roles.adversarial.merge_authority.lha.consume_attestations'), true);
+    assert.equal(defaultLhaCfg.getMergeAuthorityConfig().lha.consumeAttestations, true);
+
     const envCeilingCfg = loadConfig({
       topPath: top,
       env: {

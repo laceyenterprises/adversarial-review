@@ -5767,6 +5767,7 @@ async function runDaemonCleanMergeAttempt({
   acquireMergeLeaseImpl = acquireMergeLease,
   releaseMergeLeaseImpl = releaseMergeLease,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
+  readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr,
   env = process.env,
 } = {}) {
   const base = candidate?.baseBranch;
@@ -5838,7 +5839,7 @@ async function runDaemonCleanMergeAttempt({
     rootDir,
     env,
     readBuildCompletionSignalForPrImpl,
-    readHeadAttestationChainForPrImpl: readHeadAttestationChainForPr,
+    readHeadAttestationChainForPrImpl,
     consumeHeadAttestations: cfg?.lha?.consumeAttestations === true,
   });
   if (!workerIdentity.ok) {
@@ -5976,9 +5977,7 @@ async function resolveDaemonWorkerIdentityForPr({
     if (attested.ok) {
       return attested;
     }
-    if (attested.reason !== 'missing-produced-head-attestation') {
-      return attested;
-    }
+    return attested;
   }
   const baseArgs = {
     repo,
@@ -6058,6 +6057,7 @@ async function resolveDaemonWorkerIdentityForPr({
 
 function mergeAuthorityConsumesLhaAttestations(env = process.env) {
   const raw = String(env.AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_LHA_CONSUME_ATTESTATIONS || '').trim().toLowerCase();
+  if (raw === '') return true;
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
 

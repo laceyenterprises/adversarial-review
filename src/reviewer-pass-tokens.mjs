@@ -315,17 +315,40 @@ function reviewerTokenUsageArtifactPath({
   prNumber,
   attemptNumber,
   passKind,
+  artifactRoot = null,
+  env = process.env,
 } = {}) {
   const workspace = workspacePath ? resolve(String(workspacePath)) : process.cwd();
+  const baseDir = resolveReviewerTokenUsageArtifactRoot({ workspacePath: workspace, artifactRoot, env });
   const repoSlug = String(repo || 'unknown').replace(/[^A-Za-z0-9_.-]+/g, '__');
   const pass = normalizePassKind(passKind || 'first-pass');
   const attempt = normalizeAttemptNumber(attemptNumber || 0);
   return join(
-    workspace,
-    '.adversarial-review',
-    'token-usage',
+    baseDir,
     `${repoSlug}__pr-${Number(prNumber) || 0}__attempt-${attempt}__${pass}.json`
   );
+}
+
+function resolveReviewerTokenUsageArtifactRoot({
+  workspacePath,
+  artifactRoot = null,
+  env = process.env,
+} = {}) {
+  if (artifactRoot) return resolve(String(artifactRoot));
+  const hqRoot = env?.HQ_ROOT || env?.AGENT_OS_HQ_ROOT || null;
+  if (hqRoot) return resolve(String(hqRoot), 'adversarial-review', 'token-usage');
+  const workspace = workspacePath ? resolve(String(workspacePath)) : process.cwd();
+  return join(workspace, '.adversarial-review', 'token-usage');
+}
+
+function nearestExistingPath(path) {
+  let current = resolve(String(path));
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) return current;
+    current = parent;
+  }
+  return current;
 }
 
 function writeReviewerTokenUsageArtifact({
@@ -342,20 +365,23 @@ function writeReviewerTokenUsageArtifact({
   tokenUsage,
   source = null,
   metadata = {},
+  artifactRoot = null,
+  env = process.env,
   currentUidImpl = () => (typeof process.getuid === 'function' ? process.getuid() : null),
   statSyncImpl = statSync,
 } = {}) {
   const usage = normalizeTokenUsage(tokenUsage);
   if (!usage) return null;
   const workspace = workspacePath ? resolve(String(workspacePath)) : process.cwd();
+  const artifactBase = resolveReviewerTokenUsageArtifactRoot({ workspacePath: workspace, artifactRoot, env });
   const callerUid = currentUidImpl();
   if (callerUid === null) {
-    throw new Error(`Cannot verify ownership of reviewer token usage workspace: ${workspace}`);
+    throw new Error(`Cannot verify ownership of reviewer token usage artifact root: ${artifactBase}`);
   }
-  const workspaceOwnerUid = statSyncImpl(workspace).uid;
-  if (workspaceOwnerUid !== callerUid) {
+  const artifactOwnerUid = statSyncImpl(nearestExistingPath(artifactBase)).uid;
+  if (artifactOwnerUid !== callerUid) {
     throw new Error(
-      `Refusing to write reviewer token usage artifact into workspace owned by uid ${workspaceOwnerUid} as uid ${callerUid}: ${workspace}`
+      `Refusing to write reviewer token usage artifact under root owned by uid ${artifactOwnerUid} as uid ${callerUid}: ${artifactBase}`
     );
   }
   const artifactPath = reviewerTokenUsageArtifactPath({
@@ -364,6 +390,8 @@ function writeReviewerTokenUsageArtifact({
     prNumber,
     attemptNumber,
     passKind,
+    artifactRoot,
+    env,
   });
   mkdirSync(dirname(artifactPath), { recursive: true, mode: 0o700 });
   const payload = {

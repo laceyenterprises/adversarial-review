@@ -61,6 +61,36 @@ function seedReviewing(db, overrides = {}) {
       : null,
     overrides.infraAutoRecoverAttempts ?? 0
   );
+
+  if (
+    Object.prototype.hasOwnProperty.call(overrides, 'reviewPopulationRetryAttempts') ||
+    Object.prototype.hasOwnProperty.call(overrides, 'reviewPopulationRetryLastAt') ||
+    Object.prototype.hasOwnProperty.call(overrides, 'reviewPopulationRetryHeadSha') ||
+    Object.prototype.hasOwnProperty.call(overrides, 'quotaResetAtUtc')
+  ) {
+    db.prepare(
+      `UPDATE reviewed_prs
+          SET review_population_retry_attempts = ?,
+              review_population_retry_last_at = ?,
+              review_population_retry_head_sha = ?,
+              quota_reset_at_utc = ?
+        WHERE repo = ?
+          AND pr_number = ?`
+    ).run(
+      overrides.reviewPopulationRetryAttempts ?? 0,
+      Object.prototype.hasOwnProperty.call(overrides, 'reviewPopulationRetryLastAt')
+        ? overrides.reviewPopulationRetryLastAt
+        : null,
+      Object.prototype.hasOwnProperty.call(overrides, 'reviewPopulationRetryHeadSha')
+        ? overrides.reviewPopulationRetryHeadSha
+        : null,
+      Object.prototype.hasOwnProperty.call(overrides, 'quotaResetAtUtc')
+        ? overrides.quotaResetAtUtc
+        : null,
+      overrides.repo || REPO,
+      overrides.prNumber || PR
+    );
+  }
 }
 
 function readRow(db, repo = REPO, prNumber = PR) {
@@ -159,11 +189,18 @@ test('reattach posted review resets infra auto-recovery attempts', async () => {
   assert.match(log.lines.join('\n'), /reviewer_reattach_recovered/);
 });
 
-test('invalidates an alive reviewer when the PR head sha changed', async () => {
+test('stale-head alive reviewer requeues current head and clears runtime poison', async () => {
   const db = setupDb();
-  seedReviewing(db);
+  seedReviewing(db, {
+    reviewPopulationRetryAttempts: 2,
+    reviewPopulationRetryLastAt: '2026-05-11T05:18:00.000Z',
+    reviewPopulationRetryHeadSha: HEAD_SHA,
+    quotaResetAtUtc: '2026-05-11T06:00:00.000Z',
+    infraAutoRecoverAttempts: 2,
+  });
   const killed = [];
   const log = makeLog();
+  const settled = [];
 
   await reconcileReviewerSessions({
     db,
@@ -173,14 +210,29 @@ test('invalidates an alive reviewer when the PR head sha changed', async () => {
     probeSession: () => ({ alive: true, matched: true }),
     killProcessGroup: (pgid, signal) => killed.push({ pgid, signal }),
     fetchHeadSha: async () => 'def456',
+    onTerminalDeadSession: async (event) => settled.push(event),
   });
 
   const row = readRow(db);
-  assert.equal(row.review_status, 'failed');
-  assert.notEqual(row.review_status, 'failed-orphan');
+  assert.equal(row.review_status, 'pending');
   assert.equal(row.review_attempts, 3);
+  assert.equal(row.reviewer_session_uuid, null);
+  assert.equal(row.reviewer_pgid, null);
+  assert.equal(row.reviewer_started_at, null);
+  assert.equal(row.reviewer_head_sha, null);
+  assert.equal(row.reviewer_timeout_ms, null);
+  assert.equal(row.reviewer_lease_expires_at, null);
+  assert.equal(row.quota_reset_at_utc, null);
+  assert.equal(row.infra_auto_recover_attempts, 0);
+  assert.equal(row.review_population_retry_attempts, 0);
+  assert.equal(row.review_population_retry_last_at, null);
+  assert.equal(row.review_population_retry_head_sha, null);
   assert.deepEqual(killed, [{ pgid: 9001, signal: 'SIGKILL' }]);
-  assert.match(row.failure_message, /PR head changed/);
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'cancelled', reason: 'stale-head-superseded' }]
+  );
+  assert.match(row.failure_message, /superseded: PR head changed/);
   assert.match(log.lines.join('\n'), /reviewer_reattach_invalidated/);
 });
 
@@ -515,13 +567,20 @@ test('review probe with no start time selects the newest bot review', async () =
   assert.equal(review.commit_id, HEAD_SHA);
 });
 
-test('dead reviewer with posted review is not recovered when PR head changed', async () => {
+test('dead stale-head reviewer is requeued without recovering stale posted review', async () => {
   const db = setupDb();
-  seedReviewing(db, { reviewer: 'codex' });
+  seedReviewing(db, {
+    reviewer: 'codex',
+    reviewPopulationRetryAttempts: 2,
+    reviewPopulationRetryLastAt: '2026-05-11T05:18:00.000Z',
+    reviewPopulationRetryHeadSha: HEAD_SHA,
+    infraAutoRecoverAttempts: 2,
+  });
   const octokit = makeOctokit([
     { user: { login: 'codex-reviewer-lacey' }, submitted_at: '2026-05-11T05:13:09.000Z' },
   ]);
   const log = makeLog();
+  const settled = [];
 
   await reconcileReviewerSessions({
     db,
@@ -530,13 +589,24 @@ test('dead reviewer with posted review is not recovered when PR head changed', a
     log,
     probeAlive: () => false,
     fetchHeadSha: async () => 'def456',
+    onTerminalDeadSession: async (event) => settled.push(event),
   });
 
   const row = readRow(db);
-  assert.equal(row.review_status, 'failed');
+  assert.equal(row.review_status, 'pending');
   assert.equal(row.posted_at, null);
+  assert.equal(row.reviewer_session_uuid, null);
+  assert.equal(row.reviewer_head_sha, null);
+  assert.equal(row.infra_auto_recover_attempts, 0);
+  assert.equal(row.review_population_retry_attempts, 0);
+  assert.equal(row.review_population_retry_last_at, null);
+  assert.equal(row.review_population_retry_head_sha, null);
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'cancelled', reason: 'stale-head-superseded' }]
+  );
   assert.equal(octokit.calls.length, 0, 'head mismatch must fail before review-list probing');
-  assert.match(row.failure_message, /PR head changed from abc123 to def456/);
+  assert.match(row.failure_message, /PR head changed from abc123 to def456; requeued current head/);
   assert.match(log.lines.join('\n'), /reviewer_reattach_invalidated/);
 });
 

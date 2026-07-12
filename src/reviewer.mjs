@@ -4139,10 +4139,6 @@ async function postGitHubReviewWithCapture({
   if (!initialToken) {
     throw new Error(`Missing env var: ${botTokenEnv}`);
   }
-  if (!String(reviewerHeadSha || '').trim()) {
-    throw new Error(`Cannot post reviewed attestation for ${repo}#${prNumber}: reviewerHeadSha is required`);
-  }
-
   await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
     rootDir,
     fetchImpl,
@@ -4184,6 +4180,13 @@ async function postGitHubReviewWithCapture({
     env: { ...process.env, [botTokenEnv]: process.env[botTokenEnv] || initialToken },
     log,
   });
+
+  if (!String(reviewerHeadSha || '').trim()) {
+    log.warn?.(
+      `[reviewer] reviewed attestation skipped for ${repo}#${prNumber}: reviewerHeadSha is unavailable`
+    );
+    return;
+  }
 
   await emitReviewedAttestation({
     repo,

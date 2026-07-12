@@ -218,7 +218,11 @@ function closerLeaseCursorPath(rootDir) {
 function readCloserLeaseCursor(rootDir, logger = console) {
   try {
     const parsed = JSON.parse(readFileSync(closerLeaseCursorPath(rootDir), 'utf8'));
-    if (parsed && typeof parsed === 'object' && typeof parsed.lastEntryName === 'string') {
+    if (
+      parsed
+      && typeof parsed === 'object'
+      && (typeof parsed.lastEntryName === 'string' || parsed.lastEntryName === null)
+    ) {
       const entriesSeen = Number(parsed.entriesSeen);
       return {
         lastEntryName: parsed.lastEntryName,
@@ -277,13 +281,43 @@ function persistCloserLeaseCursor(rootDir, { lastEntryName, entriesSeen }, logge
   }
 }
 
+function retainLexicallySmallest(names, name, limit) {
+  if (limit <= 0) return;
+  if (names.length < limit) {
+    names.push(name);
+    let index = names.length - 1;
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (names[parent] >= names[index]) break;
+      [names[parent], names[index]] = [names[index], names[parent]];
+      index = parent;
+    }
+    return;
+  }
+  if (name >= names[0]) return;
+  names[0] = name;
+  let index = 0;
+  while (true) {
+    const left = (index * 2) + 1;
+    const right = left + 1;
+    let largest = index;
+    if (left < names.length && names[left] > names[largest]) largest = left;
+    if (right < names.length && names[right] > names[largest]) largest = right;
+    if (largest === index) break;
+    [names[index], names[largest]] = [names[largest], names[index]];
+    index = largest;
+  }
+}
+
 function readDirectoryEntryNames(dir, {
   entryScanLimit = DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT,
   lastEntryName = null,
   opendirSyncImpl = opendirSync,
 } = {}) {
   const limit = Math.max(0, Number(entryScanLimit) || 0);
-  const allNames = [];
+  const namesAfterCursor = [];
+  const namesAtStart = [];
+  let skippedEntries = 0;
   let directoryReads = 0;
   let iterator = null;
   try {
@@ -306,22 +340,25 @@ function readDirectoryEntryNames(dir, {
       directoryReads += 1;
       const entry = iterator.readSync();
       if (!entry) break;
-      allNames.push(entry.name);
+      if (!lastEntryName || entry.name > lastEntryName) {
+        retainLexicallySmallest(namesAfterCursor, entry.name, limit);
+      } else {
+        skippedEntries += 1;
+      }
+      if (lastEntryName) {
+        retainLexicallySmallest(namesAtStart, entry.name, limit);
+      }
     }
   } finally {
     iterator.closeSync?.();
   }
-  allNames.sort();
-  let startOffset = lastEntryName
-    ? allNames.findIndex((name) => name > lastEntryName)
-    : 0;
-  const wrapped = Boolean(lastEntryName) && startOffset === -1;
-  if (wrapped) startOffset = 0;
-  const names = allNames.slice(startOffset, startOffset + limit);
+  const wrapped = Boolean(lastEntryName) && namesAfterCursor.length === 0;
+  const names = (wrapped ? namesAtStart : namesAfterCursor).sort();
+  const startOffset = wrapped ? 0 : skippedEntries;
   return {
     names,
     scannedEntries: names.length,
-    skippedEntries: startOffset,
+    skippedEntries: wrapped ? 0 : skippedEntries,
     directoryReads,
     startOffset,
     wrapped,
@@ -347,7 +384,6 @@ function readLeaseRecords(rootDir, {
   let lastEntryName = null;
   let lastSafeIndex = -1;
   let readLimitReached = false;
-  let cursorBlockedByReadFailure = false;
   const maxReads = Math.max(0, Number(readLimit) || 0);
   for (const [index, name] of names.entries()) {
     if (!name.endsWith('.json')) {
@@ -392,8 +428,11 @@ function readLeaseRecords(rootDir, {
         lastSafeIndex = index;
       } else {
         logger?.error?.(`[reaper] failed to read lease ${path}: ${err?.message || err}`);
-        cursorBlockedByReadFailure = true;
-        break;
+        // Advance past persistent read failures so one damaged lease cannot
+        // pin this lexical page forever. The next full cursor rotation retries
+        // it without starving healthy leases later in the directory.
+        lastEntryName = name;
+        lastSafeIndex = index;
       }
     }
   }
@@ -409,8 +448,7 @@ function readLeaseRecords(rootDir, {
     directoryReads: discovery.directoryReads,
     cursorEntriesSeen: entriesSeen,
     readRecords,
-    cursorCanAdvance: !cursorBlockedByReadFailure
-      && (readLimitReached || names.length > 0 || discovery.wrapped),
+    cursorCanAdvance: readLimitReached || names.length > 0 || discovery.wrapped,
     lastEntryName,
   };
 }
@@ -485,12 +523,10 @@ export function reapStaleCloserLeases({
   });
   let released = 0;
   let budgetsReset = 0;
-  let releaseFailed = false;
   for (const lease of releasable) {
     if (lease._isCorrupt !== true) {
       const resetStatus = resetTransientExhaustedCloserBudget(rootDir, lease, logger);
       if (resetStatus === 'failed') {
-        releaseFailed = true;
         continue;
       }
       if (resetStatus === 'reset') {
@@ -512,11 +548,10 @@ export function reapStaleCloserLeases({
         );
       }
     } catch (err) {
-      releaseFailed = true;
       logger?.error?.(`[reaper] failed to release lease ${lease._path}: ${err?.message || err}`);
     }
   }
-  const cursorPersisted = discovery.cursorCanAdvance && !releaseFailed
+  const cursorPersisted = discovery.cursorCanAdvance
     ? persistCloserLeaseCursor(rootDir, {
       lastEntryName: discovery.lastEntryName,
       entriesSeen: discovery.cursorEntriesSeen,

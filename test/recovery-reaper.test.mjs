@@ -357,8 +357,8 @@ test('reapStaleCloserLeases skips filesystem read errors instead of treating the
   assert.equal(result.released, 0);
   assert.equal(result.budgetsReset, 0);
   assert.equal(result.leases.length, 0);
-  assert.equal(result.cursorPersisted, false, 'read errors must remain retryable on the next pass');
-  assert.ok(errors.some((line) => line.includes('failed to read lease')), 'read failure logged for retry');
+  assert.equal(result.cursorPersisted, true, 'read errors cannot pin the current page forever');
+  assert.ok(errors.some((line) => line.includes('failed to read lease')), 'read failure logged for retry after wrap');
 });
 
 test('reapStaleCloserLeases keeps lease when transient budget reset cannot be persisted', async (t) => {
@@ -391,7 +391,7 @@ test('reapStaleCloserLeases keeps lease when transient budget reset cannot be pe
 
   assert.equal(result.released, 0, 'lease retained so reset can be retried on the next tick');
   assert.equal(result.budgetsReset, 0);
-  assert.equal(result.cursorPersisted, false, 'cursor stays put when a lease cannot be released');
+  assert.equal(result.cursorPersisted, true, 'a failed lease cannot pin healthy leases behind its page');
   assert.equal(existsSync(leasePath), true, 'failed reset does not remove the recovery trigger');
   assert.ok(errors.some((line) => line.includes('failed to reset transient-exhausted closer budget')));
 
@@ -401,7 +401,7 @@ test('reapStaleCloserLeases keeps lease when transient budget reset cannot be pe
     logger: { warn() {}, error() {} },
   });
   assert.equal(retry.released, 1, 'retained lease is retried on the next sweep');
-  assert.equal(retry.cursorPersisted, true, 'cursor advances only after the retry releases the lease');
+  assert.equal(retry.cursorPersisted, true, 'the single retained lease is retried after cursor wrap');
 });
 
 test('reapStaleCloserLeases processes more than two opendir pages across watcher restarts', async (t) => {
@@ -595,12 +595,13 @@ test('reapStaleCloserLeases resumes by saved position when the saved cursor targ
   assert.equal(existsSync(leasePaths[3]), false);
 });
 
-test('reapStaleCloserLeases sorts a complete snapshot but admits at most its entry budget', async (t) => {
+test('reapStaleCloserLeases retains only a bounded lexical page while scanning directory entries', async (t) => {
   const rootDir = tempRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
+  const leasePaths = [];
   for (let i = 1; i <= 5; i += 1) {
-    writeLease(rootDir, {
+    leasePaths.push(writeLease(rootDir, {
       repo: `acme/budget-00${i}`,
       prNumber: i,
       headSha: `budget${i}`,
@@ -609,15 +610,15 @@ test('reapStaleCloserLeases sorts a complete snapshot but admits at most its ent
       acquiredAt: hoursAgo(20),
       updatedAt: hoursAgo(20),
       watcherPid: 31337,
-    });
+    }));
   }
 
-  const sorted = [
-    'acme__budget-001-pr-1-budget1.json',
-    'acme__budget-002-pr-2-budget2.json',
-    'acme__budget-003-pr-3-budget3.json',
+  const listing = [
     'acme__budget-004-pr-4-budget4.json',
+    'acme__budget-002-pr-2-budget2.json',
     'acme__budget-005-pr-5-budget5.json',
+    'acme__budget-001-pr-1-budget1.json',
+    'acme__budget-003-pr-3-budget3.json',
   ];
   const counters = [];
   const result = await reapStaleCloserLeases({
@@ -626,15 +627,54 @@ test('reapStaleCloserLeases sorts a complete snapshot but admits at most its ent
     thresholdMs: 6 * 60 * 60 * 1000,
     entryScanLimit: 4,
     readLimit: 2,
-    opendirSyncImpl: makeOpendirSequence([sorted], counters),
+    opendirSyncImpl: makeOpendirSequence([listing], counters),
     logger: { warn() {}, error() {} },
   });
 
   assert.equal(result.scannedEntries, 4);
   assert.equal(result.readRecords, 2);
   assert.equal(result.released, 2, 'only read leases can be released in this pass');
+  assert.equal(existsSync(leasePaths[0]), false, 'the smallest name is retained from unordered discovery');
+  assert.equal(existsSync(leasePaths[1]), false, 'the next-smallest name is retained from unordered discovery');
+  assert.ok(leasePaths.slice(2).every((path) => existsSync(path)), 'later names wait for the next page');
   assert.equal(counters[0].reads, 6, 'the complete five-entry snapshot plus EOF is consumed');
   assert.equal(counters[0].closed, true);
+});
+
+test('reapStaleCloserLeases advances beyond a persistently unreadable page', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const dir = join(rootDir, 'data', 'ama-closer-leases');
+  mkdirSync(join(dir, 'acme__aaa-broken-pr-1-bad.json'), { recursive: true });
+  const freshPath = writeLease(rootDir, {
+    repo: 'acme/fresh-bbb', prNumber: 2, headSha: 'fresh', status: 'dispatched',
+    terminalOutcome: null, acquiredAt: hoursAgo(1), updatedAt: hoursAgo(1), watcherPid: 31337,
+  });
+  const stalePath = writeLease(rootDir, {
+    repo: 'acme/stale-ccc', prNumber: 3, headSha: 'stale', status: 'dispatched',
+    terminalOutcome: null, acquiredAt: hoursAgo(20), updatedAt: hoursAgo(20), watcherPid: 31337,
+  });
+  const listing = [
+    join(dir, 'acme__aaa-broken-pr-1-bad.json'), freshPath, stalePath,
+  ].map((path) => path.split('/').at(-1));
+  const errors = [];
+  const opts = {
+    rootDir, now: NOW, thresholdMs: 6 * 60 * 60 * 1000,
+    entryScanLimit: 2, readLimit: 2,
+    opendirSyncImpl: makeOpendirFromListing(() => listing),
+    logger: { warn() {}, error(message) { errors.push(String(message)); } },
+  };
+
+  const first = await reapStaleCloserLeases(opts);
+  const second = await reapStaleCloserLeases(opts);
+
+  assert.equal(first.released, 0);
+  assert.equal(first.cursorPersisted, true, 'the unreadable lease does not pin its page');
+  assert.equal(second.released, 1, 'a stale lease on the next page remains reachable');
+  assert.equal(existsSync(stalePath), false);
+  assert.equal(existsSync(freshPath), true);
+  assert.ok(errors.some((line) => line.includes('failed to read lease')));
 });
 
 test('reapStaleCloserLeases continues when a discovered lease completes concurrently', async (t) => {

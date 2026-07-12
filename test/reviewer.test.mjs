@@ -294,30 +294,35 @@ test('postGitHubReviewWithCapture propagates signing failure after posting for w
       passKind: 'first-pass',
     });
     let postCalls = 0;
+    const postAndFailSigning = () => postGitHubReviewWithCapture({
+      rootDir,
+      repo: 'laceyenterprises/demo',
+      prNumber: 42,
+      attemptNumber: 1,
+      reviewerModel: 'codex',
+      reviewerHeadSha: 'reviewed-head-sha',
+      reviewBody: '## Verdict\nComment only',
+      botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+      passKind: 'first-pass',
+      execFileImpl: async (command) => {
+        if (command === '/fixture/github-adapter') postCalls += 1;
+        return { stdout: '{}' };
+      },
+      attestExecFileImpl: async () => {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      },
+      prepareReviewWrite: async () => {},
+    });
     await withEnvAsync({
       GHA_ADAPTER_BIN: '/fixture/github-adapter',
       GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
     }, async () => {
-      const postAndFailSigning = () => postGitHubReviewWithCapture({
-          rootDir,
-          repo: 'laceyenterprises/demo',
-          prNumber: 42,
-          attemptNumber: 1,
-          reviewerModel: 'codex',
-          reviewerHeadSha: 'reviewed-head-sha',
-          reviewBody: '## Verdict\nComment only',
-          botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
-          passKind: 'first-pass',
-          execFileImpl: async (command) => {
-            if (command === '/fixture/github-adapter') postCalls += 1;
-            return { stdout: '{}' };
-          },
-          attestExecFileImpl: async () => {
-            throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
-          },
-          prepareReviewWrite: async () => {},
-        });
       await assert.rejects(postAndFailSigning(), /permission denied/);
+    });
+    await withEnvAsync({
+      GHA_ADAPTER_BIN: '/fixture/github-adapter',
+      GH_CODEX_REVIEWER_TOKEN: undefined,
+    }, async () => {
       await assert.rejects(postAndFailSigning(), /permission denied/);
     });
     assert.equal(postCalls, 1);

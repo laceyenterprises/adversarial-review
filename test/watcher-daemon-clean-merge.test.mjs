@@ -674,7 +674,7 @@ test('daemon clean merge fail-closes when the head moved past worker build-compl
       readBuildCompletionSignalForPrImpl: (args) => {
         readCalls.push(args);
         assert.equal(args.signalKind, 'pr_opened');
-        assert.equal(args.headSha, 'head-after-remediation');
+        assert.ok(args.headSha === 'head-after-remediation' || args.headSha === null);
         return { ok: false, reason: 'missing-build-completion-signal' };
       },
       execFileImpl: async () => {
@@ -691,7 +691,7 @@ test('daemon clean merge fail-closes when the head moved past worker build-compl
     assert.equal(leaseReleased, false, 'identity must fail closed before taking the merge lease');
     assert.deepEqual(
       readCalls.map((call) => call.headSha || null),
-      ['head-after-remediation'],
+      ['head-after-remediation', null],
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -1190,4 +1190,51 @@ test('resolveDaemonWorkerIdentityForPr fails closed when current head is missing
 
   assert.deepEqual(result, { ok: false, reason: 'missing-current-head-sha' });
   assert.equal(calls.length, 0, 'missing current head must not degrade into a PR-level provenance query');
+});
+
+test("resolveDaemonWorkerIdentityForPr resolves a moved-head PR via the any-head pr_opened row", async () => {
+  const seenHeadShas = [];
+  const result = await resolveDaemonWorkerIdentityForPr({
+    repo: "agent-os",
+    prNumber: 3491,
+    currentHeadSha: "live-head-after-remediation",
+    currentBranch: "codex-rrp-06/RRP-06",
+    hqRoot: "/tmp/hq-root-nonexistent-daemon-headmove",
+    readBuildCompletionSignalForPrImpl: async (args) => {
+      seenHeadShas.push(args.headSha);
+      assert.equal(args.signalKind, "pr_opened");
+      // Current-head lookup misses because the head moved after pr_opened;
+      // the any-head lookup (headSha=null) hits the original opener row.
+      if (args.headSha == null) {
+        return {
+          ok: true,
+          row: {
+            launch_request_id: "lrq_opener",
+            worker_class: "codex",
+            head_sha: "original-open-head",
+          },
+        };
+      }
+      return { ok: false, reason: "missing-build-completion-signal" };
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.resolvedBy, "pr-opened-any-head");
+  assert.equal(result.launchRequestId, "lrq_opener");
+  assert.equal(result.workerClass, "codex");
+  assert.equal(result.headMovedAfterBuildCompletion, true);
+  assert.ok(seenHeadShas.includes("live-head-after-remediation"), "must try current head first");
+  assert.ok(seenHeadShas.includes(null), "must fall back to any-head lookup");
+});
+
+test("resolveDaemonWorkerIdentityForPr still fails closed when no pr_opened row exists at any head", async () => {
+  const result = await resolveDaemonWorkerIdentityForPr({
+    repo: "agent-os",
+    prNumber: 9999,
+    currentHeadSha: "some-live-head",
+    currentBranch: "codex-x/X-01",
+    hqRoot: "/tmp/hq-root-nonexistent-daemon-headmove",
+    readBuildCompletionSignalForPrImpl: async () => ({ ok: false, reason: "missing-build-completion-signal" }),
+  });
+  assert.equal(result.ok, false);
 });

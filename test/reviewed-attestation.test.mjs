@@ -27,14 +27,14 @@ test('reviewed attestation payload binds reviewer identity, reviewed head, verdi
     parent_head_sha: null,
     kind: 'reviewed',
     producer_identity: 'gemini-reviewer-lacey',
-    reviewer_identity: 'gemini-reviewer-lacey',
     verdict: 'comment-only',
     findings_count: 0,
+    payload: { reviewer_identity: 'gemini-reviewer-lacey' },
     ts: '2026-07-12T00:00:00.000Z',
   });
 });
 
-test('reviewed attestation signing shells out to hq attest sign with JSON on stdin', async () => {
+test('reviewed attestation signing uses the shipped flag contract and records the signed result', async () => {
   const calls = [];
   const result = await emitReviewedAttestation({
     repo: 'laceyenterprises/agent-os',
@@ -52,13 +52,25 @@ test('reviewed attestation signing shells out to hq attest sign with JSON on std
     hqPath: '/tmp/hq',
     execFileImpl: async (cmd, args, options) => {
       calls.push({ cmd, args, options });
-      const payload = JSON.parse(options.input);
+      if (args[1] === 'record') {
+        return { stdout: JSON.stringify({ recorded: true }) };
+      }
       return {
         stdout: JSON.stringify({
-          ...payload,
+          schema_version: 1,
+          repo: 'laceyenterprises/agent-os',
+          pr_number: 3491,
+          head_sha: 'def456',
+          parent_head_sha: null,
+          kind: 'reviewed',
+          producer_identity: 'claude-reviewer-lacey',
+          verdict: 'request-changes',
+          findings_count: 1,
+          payload: { reviewer_identity: 'claude-reviewer-lacey' },
+          ts: resultTimestamp(args),
           signature: {
             verified: true,
-            hcp_subject: payload.reviewer_identity,
+            hcp_subject: 'claude-reviewer-lacey',
           },
         }),
       };
@@ -66,16 +78,24 @@ test('reviewed attestation signing shells out to hq attest sign with JSON on std
     log: { log() {} },
   });
 
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   assert.equal(calls[0].cmd, '/tmp/hq');
-  assert.deepEqual(calls[0].args, ['attest', 'sign', '--payload', '-']);
-  const signedInput = JSON.parse(calls[0].options.input);
+  assert.deepEqual(calls[0].args.slice(0, 10), [
+    'attest', 'sign', '--repo', 'laceyenterprises/agent-os', '--pr', '3491',
+    '--head-sha', 'def456', '--kind', 'reviewed',
+  ]);
+  assert.equal(calls[0].options.input, undefined);
+  assert.deepEqual(calls[1].args, ['attest', 'record', '--payload', '-']);
+  const signedInput = JSON.parse(calls[1].options.input);
   assert.equal(signedInput.kind, 'reviewed');
   assert.equal(signedInput.head_sha, 'def456');
-  assert.equal(signedInput.verdict, 'request-changes');
-  assert.equal(signedInput.findings_count, 1);
   assert.equal(result.signed.signature.hcp_subject, 'claude-reviewer-lacey');
+  assert.deepEqual(result.recorded, { recorded: true });
 });
+
+function resultTimestamp(args) {
+  return args[args.indexOf('--ts') + 1];
+}
 
 test('reviewed attestation signing rejects an explicit non-reviewer HCP subject', async () => {
   await assert.rejects(
@@ -86,8 +106,16 @@ test('reviewed attestation signing rejects an explicit non-reviewer HCP subject'
       reviewerIdentity: 'claude-reviewer-lacey',
       verdict: 'comment-only',
       reviewBody: '## Blocking issues\n- None.\n\n## Verdict\nComment only',
-      execFileImpl: async (_cmd, _args, options) => {
-        const payload = JSON.parse(options.input);
+      execFileImpl: async (_cmd, args) => {
+        const payload = buildReviewedAttestationPayload({
+          repo: 'laceyenterprises/agent-os',
+          prNumber: 3491,
+          headSha: 'def456',
+          reviewerIdentity: 'claude-reviewer-lacey',
+          verdict: 'comment-only',
+          findingsCount: 0,
+          ts: resultTimestamp(args),
+        });
         return {
           stdout: JSON.stringify({
             ...payload,
@@ -124,7 +152,7 @@ test('reviewed attestation signing retries transient subprocess failures with bo
       if (attempts < 3) throw Object.assign(new Error('resource temporarily unavailable'), { code: 'EAGAIN' });
       return { stdout: JSON.stringify({
         ...payload,
-        signature: { verified: true, hcp_subject: payload.reviewer_identity },
+        signature: { verified: true, hcp_subject: payload.payload.reviewer_identity },
       }) };
     },
   });

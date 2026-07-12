@@ -250,13 +250,27 @@ test('postGitHubReviewWithCapture emits a reviewed attestation for the reviewed 
         },
         attestExecFileImpl: async (command, args, options = {}) => {
           attestCalls.push({ command, args, options });
-          const payload = JSON.parse(options.input);
+          if (args[1] === 'record') return { stdout: '{"recorded":true}' };
+          const valueAfter = (name) => args[args.indexOf(name) + 1];
+          const payload = {
+            schema_version: 1,
+            repo: valueAfter('--repo'),
+            pr_number: Number(valueAfter('--pr')),
+            head_sha: valueAfter('--head-sha'),
+            parent_head_sha: null,
+            kind: valueAfter('--kind'),
+            producer_identity: 'codex-reviewer-lacey',
+            verdict: valueAfter('--verdict'),
+            findings_count: Number(valueAfter('--findings-count')),
+            payload: JSON.parse(valueAfter('--payload-json')),
+            ts: valueAfter('--ts'),
+          };
           return {
             stdout: JSON.stringify({
               ...payload,
               signature: {
                 verified: true,
-                hcp_subject: payload.reviewer_identity,
+                hcp_subject: payload.payload.reviewer_identity,
               },
             }),
           };
@@ -267,15 +281,13 @@ test('postGitHubReviewWithCapture emits a reviewed attestation for the reviewed 
       });
     });
 
-    assert.equal(attestCalls.length, 1);
+    assert.equal(attestCalls.length, 2);
     assert.equal(attestCalls[0].command, 'hq');
-    assert.deepEqual(attestCalls[0].args, ['attest', 'sign', '--payload', '-']);
-    const payload = JSON.parse(attestCalls[0].options.input);
-    assert.equal(payload.kind, 'reviewed');
-    assert.equal(payload.head_sha, 'reviewed-head-sha');
-    assert.equal(payload.verdict, 'request-changes');
-    assert.equal(payload.findings_count, 1);
-    assert.equal(payload.reviewer_identity, 'codex-reviewer-lacey');
+    assert.deepEqual(attestCalls[0].args.slice(0, 10), [
+      'attest', 'sign', '--repo', 'laceyenterprises/demo', '--pr', '42',
+      '--head-sha', 'reviewed-head-sha', '--kind', 'reviewed',
+    ]);
+    assert.deepEqual(attestCalls[1].args, ['attest', 'record', '--payload', '-']);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -292,16 +304,17 @@ test('postGitHubReviewWithCapture propagates signing failure after posting for w
       reviewerClass: 'codex',
       reviewerModel: 'codex',
       passKind: 'first-pass',
+      headSha: 'reviewed-head-sha',
     });
     let postCalls = 0;
-    const postAndFailSigning = () => postGitHubReviewWithCapture({
+    const postAndFailSigning = ({ attemptNumber = 1, reviewBody = '## Verdict\nComment only' } = {}) => postGitHubReviewWithCapture({
       rootDir,
       repo: 'laceyenterprises/demo',
       prNumber: 42,
-      attemptNumber: 1,
+      attemptNumber,
       reviewerModel: 'codex',
       reviewerHeadSha: 'reviewed-head-sha',
-      reviewBody: '## Verdict\nComment only',
+      reviewBody,
       botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
       passKind: 'first-pass',
       execFileImpl: async (command) => {
@@ -323,7 +336,13 @@ test('postGitHubReviewWithCapture propagates signing failure after posting for w
       GHA_ADAPTER_BIN: '/fixture/github-adapter',
       GH_CODEX_REVIEWER_TOKEN: undefined,
     }, async () => {
-      await assert.rejects(postAndFailSigning(), /permission denied/);
+      await assert.rejects(
+        postAndFailSigning({
+          attemptNumber: 2,
+          reviewBody: '## Summary\nNon-deterministic retry body\n\n## Verdict\nRequest changes',
+        }),
+        /permission denied/
+      );
     });
     assert.equal(postCalls, 1);
   } finally {

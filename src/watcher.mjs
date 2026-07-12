@@ -11,7 +11,7 @@ import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { readdir, readFile as readFileAsync, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { normalizeGithubMergeability, resolveMergeabilityWithSampling } from './github-mergeability.mjs';
 import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
@@ -5180,6 +5180,45 @@ function resolveDagAutowalkOnMergeTimeoutMs(env = process.env) {
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_DAG_AUTOWALK_ON_MERGE_TIMEOUT_MS;
 }
 
+function normalizeNonEmptyText(value) {
+  const text = String(value ?? '').trim();
+  return text || null;
+}
+
+function resolveDagAutowalkOnMergeRepoRoot({
+  env = process.env,
+  loadConfigImpl = loadConfigCached,
+  logger = console,
+} = {}) {
+  const envRoot = normalizeNonEmptyText(env.AGENT_OS_DEPLOY_CHECKOUT);
+  if (envRoot) {
+    if (isAbsolute(envRoot)) return envRoot;
+    logger.error?.(
+      '[watcher] dag autowalk-on-merge requires AGENT_OS_DEPLOY_CHECKOUT to be absolute; ' +
+      'continuing without --repo-root'
+    );
+    return null;
+  }
+
+  try {
+    const cfg = loadConfigImpl({ env });
+    const configRoot = normalizeNonEmptyText(cfg?.get?.('roots.deploy'));
+    if (!configRoot) return null;
+    if (isAbsolute(configRoot)) return configRoot;
+    logger.error?.(
+      '[watcher] dag autowalk-on-merge requires roots.deploy to be absolute; ' +
+      'continuing without --repo-root'
+    );
+    return null;
+  } catch (err) {
+    logger.error?.(
+      `[watcher] dag autowalk-on-merge could not resolve roots.deploy; ` +
+      `continuing without --repo-root: ${err?.message || err}`
+    );
+    return null;
+  }
+}
+
 function isMalformedDagAutowalkOnMergeRecord(record) {
   return !record?.repo || !record?.prNumber;
 }
@@ -5271,7 +5310,9 @@ async function attemptDagAutowalkOnMerge({
   rootDir = ROOT,
   record,
   execFileImpl = execFileAsync,
-  hqPath = process.env.HQ_BIN || 'hq',
+  env = process.env,
+  hqPath = env.HQ_BIN || 'hq',
+  loadConfigImpl = loadConfigCached,
   logger = console,
   now = new Date(),
   timeoutMs = resolveDagAutowalkOnMergeTimeoutMs(),
@@ -5292,7 +5333,10 @@ async function attemptDagAutowalkOnMerge({
   };
   writeDagAutowalkOnMergeRecord(rootDir, base);
 
-  const args = ['dag', 'autowalk-on-merge', '--repo', String(repo), '--pr', String(prNumber)];
+  const repoRoot = resolveDagAutowalkOnMergeRepoRoot({ env, loadConfigImpl, logger });
+  const args = ['dag', 'autowalk-on-merge'];
+  if (repoRoot) args.push('--repo-root', repoRoot);
+  args.push('--repo', String(repo), '--pr', String(prNumber));
   try {
     const result = await execFileImpl(hqPath, args, {
       timeout: timeoutMs,
@@ -5329,6 +5373,8 @@ async function attemptDagAutowalkOnMerge({
 async function retryPendingDagAutowalkOnMerge({
   rootDir = ROOT,
   execFileImpl = execFileAsync,
+  env = process.env,
+  loadConfigImpl = loadConfigCached,
   logger = console,
   nowMs = Date.now(),
   retryMs = resolveDagAutowalkOnMergeRetryMs(),
@@ -5357,6 +5403,8 @@ async function retryPendingDagAutowalkOnMerge({
       rootDir,
       record: item.record,
       execFileImpl,
+      env,
+      loadConfigImpl,
       logger,
       maxAttempts,
     });

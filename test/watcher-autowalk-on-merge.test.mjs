@@ -40,6 +40,8 @@ function makeLogger() {
   };
 }
 
+const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
+
 test('fireDagAutowalkOnMerge persists owed work before the command attempt', (t) => {
   const rootDir = makeRoot();
   t.after(() => cleanupRoot(rootDir));
@@ -76,6 +78,7 @@ test('retryPendingDagAutowalkOnMerge runs hq and clears the owed record only on 
   const result = await retryPendingDagAutowalkOnMerge({
     rootDir,
     execFileImpl,
+    env: HERMETIC_CONFIG_ENV,
     logger: makeLogger(),
     maxPerPoll: 1,
   });
@@ -88,6 +91,76 @@ test('retryPendingDagAutowalkOnMerge runs hq and clears the owed record only on 
   ]);
   assert.equal(calls[0].opts.stdio, undefined);
   assert.equal(existsSync(before.path), false);
+});
+
+test('retryPendingDagAutowalkOnMerge passes config-resolved repo root without overriding cwd', async (t) => {
+  const rootDir = makeRoot();
+  t.after(() => cleanupRoot(rootDir));
+  const deployRoot = join(rootDir, 'installed-agent-os');
+  const calls = [];
+  const execFileImpl = async (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    return { stdout: 'walked\n', stderr: '' };
+  };
+  const loadConfigImpl = () => ({
+    get(key) {
+      return key === 'roots.deploy' ? deployRoot : null;
+    },
+  });
+
+  fireDagAutowalkOnMerge({ rootDir, repo: 'laceyenterprises/agent-os', prNumber: 3565, logger: makeLogger() });
+  await retryPendingDagAutowalkOnMerge({
+    rootDir,
+    execFileImpl,
+    env: { ...HERMETIC_CONFIG_ENV, HQ_BIN: '/test/bin/hq' },
+    loadConfigImpl,
+    logger: makeLogger(),
+    maxPerPoll: 1,
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cmd, '/test/bin/hq');
+  assert.equal(calls[0].opts.cwd, undefined);
+  assert.deepEqual(calls[0].args, [
+    'dag', 'autowalk-on-merge',
+    '--repo-root', deployRoot,
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '3565',
+  ]);
+});
+
+test('retryPendingDagAutowalkOnMerge rejects a cwd-relative configured repo root', async (t) => {
+  const rootDir = makeRoot();
+  t.after(() => cleanupRoot(rootDir));
+  const calls = [];
+  const logger = makeLogger();
+  const execFileImpl = async (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    return { stdout: 'walked\n', stderr: '' };
+  };
+  const loadConfigImpl = () => ({
+    get(key) {
+      return key === 'roots.deploy' ? 'relative/agent-os' : null;
+    },
+  });
+
+  fireDagAutowalkOnMerge({ rootDir, repo: 'laceyenterprises/agent-os', prNumber: 3565, logger });
+  await retryPendingDagAutowalkOnMerge({
+    rootDir,
+    execFileImpl,
+    env: HERMETIC_CONFIG_ENV,
+    loadConfigImpl,
+    logger,
+    maxPerPoll: 1,
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, [
+    'dag', 'autowalk-on-merge',
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '3565',
+  ]);
+  assert.match(logger.errors[0], /roots\.deploy to be absolute/);
 });
 
 test('retryPendingDagAutowalkOnMerge captures nonzero output and retries later after merged state', async (t) => {
@@ -111,6 +184,7 @@ test('retryPendingDagAutowalkOnMerge captures nonzero output and retries later a
   await retryPendingDagAutowalkOnMerge({
     rootDir,
     execFileImpl,
+    env: HERMETIC_CONFIG_ENV,
     logger,
     retryMs: 0,
     maxAttempts: 2,
@@ -126,6 +200,7 @@ test('retryPendingDagAutowalkOnMerge captures nonzero output and retries later a
   await retryPendingDagAutowalkOnMerge({
     rootDir,
     execFileImpl,
+    env: HERMETIC_CONFIG_ENV,
     logger,
     retryMs: 0,
     maxAttempts: 2,
@@ -149,6 +224,7 @@ test('retryPendingDagAutowalkOnMerge keeps terminal diagnostics after max attemp
   await retryPendingDagAutowalkOnMerge({
     rootDir,
     execFileImpl,
+    env: HERMETIC_CONFIG_ENV,
     logger: makeLogger(),
     retryMs: 0,
     maxAttempts: 1,
@@ -194,6 +270,7 @@ test('retryPendingDagAutowalkOnMerge marks malformed records failed without cons
   const result = await retryPendingDagAutowalkOnMerge({
     rootDir,
     execFileImpl,
+    env: HERMETIC_CONFIG_ENV,
     logger,
     maxPerPoll: 1,
     maxAttempts: 3,

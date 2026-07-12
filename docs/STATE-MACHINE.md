@@ -451,8 +451,9 @@ skips the GitHub mutation, reuses the stored body rather than a newly generated
 body, and resumes the attestation path. Signing uses the shipped flag-based
 `hq attest sign` contract; the verified result is then persisted through the
 owner-context `hq attest record --payload -` bridge. Signer output is accepted
-only when every payload field is preserved and `signature.verified` is exactly
-`true`.
+only when the signed envelope preserves the payload exactly and binds
+`signature.subject` to the reviewer identity; cryptographic acceptance is
+delegated fail-closed to `hq attest record`.
 
 `pr_merge_closeouts` tracks the post-merge closeout scrape/post lifecycle for a
 single `(repo, pr_number)`:

@@ -279,52 +279,51 @@ function persistCloserLeaseCursor(rootDir, { lastEntryName, entriesSeen }, logge
 
 function readDirectoryEntryNames(dir, {
   entryScanLimit = DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT,
-  startOffset = 0,
+  lastEntryName = null,
   opendirSyncImpl = opendirSync,
 } = {}) {
   const limit = Math.max(0, Number(entryScanLimit) || 0);
-  const requestedOffset = Math.max(0, Math.floor(Number(startOffset) || 0));
-  const names = [];
-  let skippedEntries = 0;
+  const allNames = [];
   let directoryReads = 0;
-  let wrapped = false;
   let iterator = null;
   try {
     iterator = opendirSyncImpl(dir);
   } catch (err) {
     if (err?.code === 'ENOENT') {
-      return { names, scannedEntries: 0 };
+      return {
+        names: [],
+        scannedEntries: 0,
+        skippedEntries: 0,
+        directoryReads: 0,
+        startOffset: 0,
+        wrapped: false,
+      };
     }
     throw err;
   }
   try {
-    while (skippedEntries < requestedOffset) {
-      directoryReads += 1;
-      const entry = iterator.readSync();
-      if (!entry) {
-        iterator.closeSync?.();
-        iterator = opendirSyncImpl(dir);
-        skippedEntries = 0;
-        wrapped = true;
-        break;
-      }
-      skippedEntries += 1;
-    }
-    while (names.length < limit) {
+    while (true) {
       directoryReads += 1;
       const entry = iterator.readSync();
       if (!entry) break;
-      names.push(entry.name);
+      allNames.push(entry.name);
     }
   } finally {
     iterator.closeSync?.();
   }
+  allNames.sort();
+  let startOffset = lastEntryName
+    ? allNames.findIndex((name) => name > lastEntryName)
+    : 0;
+  const wrapped = Boolean(lastEntryName) && startOffset === -1;
+  if (wrapped) startOffset = 0;
+  const names = allNames.slice(startOffset, startOffset + limit);
   return {
     names,
     scannedEntries: names.length,
-    skippedEntries,
+    skippedEntries: startOffset,
     directoryReads,
-    startOffset: wrapped ? 0 : requestedOffset,
+    startOffset,
     wrapped,
   };
 }
@@ -339,7 +338,7 @@ function readLeaseRecords(rootDir, {
   const cursor = readCloserLeaseCursor(rootDir, logger);
   const discovery = readDirectoryEntryNames(dir, {
     entryScanLimit,
-    startOffset: cursor.entriesSeen,
+    lastEntryName: cursor.lastEntryName,
     opendirSyncImpl,
   });
   const names = discovery.names;
@@ -368,7 +367,13 @@ function readLeaseRecords(rootDir, {
       lastEntryName = name;
       lastSafeIndex = index;
     } catch (err) {
-      if (err instanceof SyntaxError) {
+      if (err?.code === 'ENOENT') {
+        // Normal concurrent completion: the owner removed this lease after
+        // directory discovery, so advance past it and keep scanning the page.
+        lastEntryName = name;
+        lastSafeIndex = index;
+        continue;
+      } else if (err instanceof SyntaxError) {
         let mtimeMs = null;
         try {
           mtimeMs = statSync(path).mtimeMs;
@@ -396,9 +401,7 @@ function readLeaseRecords(rootDir, {
     lastEntryName = null;
     lastSafeIndex = -1;
   }
-  const entriesSeen = lastSafeIndex >= 0
-    ? discovery.startOffset + lastSafeIndex + 1
-    : discovery.startOffset;
+  const entriesSeen = lastSafeIndex >= 0 ? lastSafeIndex + 1 : 0;
   const cursorPersisted = !cursorBlockedByReadFailure && (readLimitReached || names.length > 0 || discovery.wrapped)
     ? persistCloserLeaseCursor(rootDir, { lastEntryName, entriesSeen }, logger)
     : false;

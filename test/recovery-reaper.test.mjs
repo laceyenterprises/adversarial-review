@@ -480,7 +480,7 @@ test('reapStaleCloserLeases does not advance cursor past unread JSON when read l
   assert.equal(pass1.released, 2);
   assert.equal(pass1.cursorEntriesSeen, 2, 'cursor stops at last read JSON, not the scanned page end');
   assert.equal(pass2.released, 2, 'unread JSON leases from pass 1 are processed on the next pass');
-  assert.equal(pass2.cursorEntriesSeen, 4);
+  assert.equal(pass2.cursorEntriesSeen, 2);
   assert.equal(pass3.released, 1);
 });
 
@@ -534,16 +534,15 @@ test('reapStaleCloserLeases handles insertion and deletion around the saved curs
     .sort((a, b) => a.localeCompare(b));
 
   const pass2 = await reapStaleCloserLeases(opts);
-  assert.equal(pass2.released, 1, 'cursor position keeps moving after deletion before the cursor');
-  assert.equal(existsSync(paths.get('d')), true, 'shifted entry may wait for cursor wrap, but is not lost');
+  assert.equal(pass2.released, 2, 'deletion before the lexical cursor does not skip later entries');
+  assert.equal(existsSync(paths.get('d')), false, 'later entries remain immediately eligible after deletion');
 
-  listing = [insertedPath, paths.get('d')]
+  listing = [insertedPath]
     .map((path) => path.split('/').at(-1))
     .sort((a, b) => a.localeCompare(b));
   const pass3 = await reapStaleCloserLeases(opts);
-  assert.equal(pass3.released, 2, 'cursor wrap gives eventual coverage to inserted and shifted leases');
+  assert.equal(pass3.released, 1, 'cursor wrap gives coverage to names inserted before the cursor');
   assert.equal(existsSync(insertedPath), false);
-  assert.equal(existsSync(paths.get('d')), false);
 });
 
 test('reapStaleCloserLeases resumes by saved position when the saved cursor target is missing', async (t) => {
@@ -566,7 +565,7 @@ test('reapStaleCloserLeases resumes by saved position when the saved cursor targ
   const sorted = leasePaths.map((path) => path.split('/').at(-1)).sort((a, b) => a.localeCompare(b));
   writeCloserLeaseCursor(rootDir, {
     schemaVersion: 2,
-    lastEntryName: 'deleted-cursor-target.json',
+    lastEntryName: `${sorted[1]}~deleted-cursor-target`,
     entriesSeen: 2,
   });
 
@@ -587,7 +586,7 @@ test('reapStaleCloserLeases resumes by saved position when the saved cursor targ
   assert.equal(existsSync(leasePaths[3]), false);
 });
 
-test('reapStaleCloserLeases consumes at most its entry budget from the directory iterator', async (t) => {
+test('reapStaleCloserLeases sorts a complete snapshot but admits at most its entry budget', async (t) => {
   const rootDir = tempRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -625,8 +624,37 @@ test('reapStaleCloserLeases consumes at most its entry budget from the directory
   assert.equal(result.scannedEntries, 4);
   assert.equal(result.readRecords, 2);
   assert.equal(result.released, 2, 'only read leases can be released in this pass');
-  assert.equal(counters[0].reads, 4);
+  assert.equal(counters[0].reads, 6, 'the complete five-entry snapshot plus EOF is consumed');
   assert.equal(counters[0].closed, true);
+});
+
+test('reapStaleCloserLeases continues when a discovered lease completes concurrently', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const vanished = writeLease(rootDir, {
+    repo: 'acme/concurrent-a', prNumber: 1, headSha: 'gone', status: 'dispatched',
+    terminalOutcome: null, acquiredAt: hoursAgo(20), updatedAt: hoursAgo(20), watcherPid: 31337,
+  });
+  const remaining = writeLease(rootDir, {
+    repo: 'acme/concurrent-b', prNumber: 2, headSha: 'present', status: 'dispatched',
+    terminalOutcome: null, acquiredAt: hoursAgo(20), updatedAt: hoursAgo(20), watcherPid: 31337,
+  });
+  const listing = [vanished, remaining].map((path) => path.split('/').at(-1));
+  rmSync(vanished);
+
+  const errors = [];
+  const result = await reapStaleCloserLeases({
+    rootDir, now: NOW, thresholdMs: 6 * 60 * 60 * 1000,
+    entryScanLimit: 2, readLimit: 2,
+    opendirSyncImpl: makeOpendirFromListing(() => listing),
+    logger: { warn() {}, error(message) { errors.push(String(message)); } },
+  });
+
+  assert.equal(result.released, 1);
+  assert.equal(existsSync(remaining), false, 'later leases in the page are still recovered');
+  assert.equal(result.cursorPersisted, true);
+  assert.deepEqual(errors, []);
 });
 
 // ---------------------------------------------------------------------------

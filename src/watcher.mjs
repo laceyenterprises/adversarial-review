@@ -11,7 +11,7 @@ import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { readdir, readFile as readFileAsync, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { normalizeGithubMergeability, resolveMergeabilityWithSampling } from './github-mergeability.mjs';
 import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
@@ -5191,12 +5191,25 @@ function resolveDagAutowalkOnMergeRepoRoot({
   logger = console,
 } = {}) {
   const envRoot = normalizeNonEmptyText(env.AGENT_OS_DEPLOY_CHECKOUT);
-  if (envRoot) return resolve(envRoot);
+  if (envRoot) {
+    if (isAbsolute(envRoot)) return envRoot;
+    logger.error?.(
+      '[watcher] dag autowalk-on-merge requires AGENT_OS_DEPLOY_CHECKOUT to be absolute; ' +
+      'continuing without --repo-root'
+    );
+    return null;
+  }
 
   try {
     const cfg = loadConfigImpl({ env });
     const configRoot = normalizeNonEmptyText(cfg?.get?.('roots.deploy'));
-    return configRoot ? resolve(configRoot) : null;
+    if (!configRoot) return null;
+    if (isAbsolute(configRoot)) return configRoot;
+    logger.error?.(
+      '[watcher] dag autowalk-on-merge requires roots.deploy to be absolute; ' +
+      'continuing without --repo-root'
+    );
+    return null;
   } catch (err) {
     logger.error?.(
       `[watcher] dag autowalk-on-merge could not resolve roots.deploy; ` +
@@ -5297,8 +5310,8 @@ async function attemptDagAutowalkOnMerge({
   rootDir = ROOT,
   record,
   execFileImpl = execFileAsync,
-  hqPath = process.env.HQ_BIN || 'hq',
   env = process.env,
+  hqPath = env.HQ_BIN || 'hq',
   loadConfigImpl = loadConfigCached,
   logger = console,
   now = new Date(),

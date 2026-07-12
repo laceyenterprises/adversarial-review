@@ -10,7 +10,6 @@ const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
 const DEFAULT_REAP_LIMIT = 8;
 const DEFAULT_REAP_BUDGET_MS = 20_000;
-const DEFAULT_SCAN_LIMIT = 500;
 const HAMMER_WORKER_RE = /^hammer-ama-pr-(\d+)(?:-.+)?$/;
 
 function normalizePositiveInteger(value, fallback) {
@@ -57,29 +56,25 @@ function parseGitHubRepoFromRemote(remoteUrl) {
   return `${match[1]}/${match[2]}`;
 }
 
-async function listHqRepoPaths(hqRoot, { scanLimit = DEFAULT_SCAN_LIMIT } = {}) {
+async function listHqRepoPaths(hqRoot) {
   const reposDir = join(hqRoot, 'repos');
-  if (!existsSync(reposDir)) return [];
   const entries = await fsPromises.readdir(reposDir, { withFileTypes: true }).catch((err) => {
     if (err?.code === 'ENOENT') return [];
     throw err;
   });
   return entries
     .filter((entry) => entry.isDirectory())
-    .slice(0, scanLimit)
     .map((entry) => join(reposDir, entry.name));
 }
 
-async function listHammerWorkerDirs(hqRoot, { scanLimit = DEFAULT_SCAN_LIMIT } = {}) {
+async function listHammerWorkerDirs(hqRoot) {
   const workersDir = join(hqRoot, 'workers');
-  if (!existsSync(workersDir)) return [];
   const entries = await fsPromises.readdir(workersDir, { withFileTypes: true }).catch((err) => {
     if (err?.code === 'ENOENT') return [];
     throw err;
   });
   return entries
     .filter((entry) => entry.isDirectory() && HAMMER_WORKER_RE.test(entry.name))
-    .slice(0, scanLimit)
     .map((entry) => {
       const workerDir = join(workersDir, entry.name);
       const worktreePath = join(workerDir, 'agent-os');
@@ -224,20 +219,19 @@ async function reapCloserHammerWorktrees({
   hqPath = process.env.HQ_PATH || DEFAULT_HQ_PATH,
   limit = normalizePositiveInteger(process.env.AMA_CLOSER_WORKTREE_REAP_LIMIT, DEFAULT_REAP_LIMIT),
   budgetMs = normalizePositiveInteger(process.env.AMA_CLOSER_WORKTREE_REAP_BUDGET_MS, DEFAULT_REAP_BUDGET_MS),
-  scanLimit = normalizePositiveInteger(process.env.AMA_CLOSER_WORKTREE_SCAN_LIMIT, DEFAULT_SCAN_LIMIT),
   repoPaths = null,
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
   env = process.env,
   logger = console,
 } = {}) {
-  const effectiveRepoPaths = Array.isArray(repoPaths) ? repoPaths : await listHqRepoPaths(hqRoot, { scanLimit });
+  const effectiveRepoPaths = Array.isArray(repoPaths) ? repoPaths : await listHqRepoPaths(hqRoot);
   const registered = await registeredWorktreesByPath({
     repoPaths: effectiveRepoPaths,
     execFileImpl,
     logger,
   });
-  const diskEntries = await listHammerWorkerDirs(hqRoot, { scanLimit });
+  const diskEntries = await listHammerWorkerDirs(hqRoot);
   const entries = [];
   const seen = new Set();
 

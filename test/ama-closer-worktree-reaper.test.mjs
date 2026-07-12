@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, utimesSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -166,28 +166,37 @@ test('closer worktree reaper removes prunable worktrees regardless of PR state',
   assert.equal(result.prunable, 1);
 });
 
-test('closer worktree reaper applies scan limit after filtering worker directories', async (t) => {
+test('closer worktree reaper does not let active matching workers shield later stale workers', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-large-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const hqRoot = join(root, 'hq');
   const workersRoot = join(hqRoot, 'workers');
   const repoPath = join(hqRoot, 'repos', 'agent-os');
   mkdirSync(repoPath, { recursive: true });
-  for (let index = 0; index < 1_000; index += 1) {
-    mkdirSync(join(workersRoot, `stale-worker-${String(index).padStart(4, '0')}`), { recursive: true });
+  for (let index = 0; index < 100; index += 1) {
+    mkdirSync(
+      join(workersRoot, `hammer-ama-pr-${String(1_000 + index)}-active`, 'agent-os'),
+      { recursive: true },
+    );
   }
-  mkdirSync(join(workersRoot, 'hammer-ama-pr-3001-beyond-cap', 'agent-os'), { recursive: true });
-  const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-  utimesSync(join(workersRoot, 'hammer-ama-pr-3001-beyond-cap'), old, old);
+  mkdirSync(join(workersRoot, 'hammer-ama-pr-9999-stale', 'agent-os'), { recursive: true });
 
   const started = Date.now();
   const result = await reapCloserHammerWorktrees({
     hqRoot,
     hqPath: '/bin/hq',
     repoPaths: [repoPath],
-    scanLimit: 100,
     execFileImpl: async (cmd, args) => {
-      if (cmd === 'git' && args.includes('list')) return { stdout: '', stderr: '' };
+      if (cmd === 'git' && args.includes('list')) {
+        return {
+          stdout: Array.from({ length: 100 }, (_, index) => [
+            `worktree ${join(workersRoot, `hammer-ama-pr-${String(1_000 + index)}-active`, 'agent-os')}`,
+            `branch refs/heads/active-${index}`,
+            '',
+          ].join('\n')).join('\n'),
+          stderr: '',
+        };
+      }
       if (cmd === 'git' && args.includes('get-url')) return { stdout: 'https://github.com/x/y.git\n', stderr: '' };
       return { stdout: '{}', stderr: '' };
     },
@@ -198,7 +207,9 @@ test('closer worktree reaper applies scan limit after filtering worker directori
     logger: { info() {}, warn() {} },
   });
 
-  assert.equal(result.scanned, 1);
+  assert.equal(result.scanned, 101);
+  assert.equal(result.reaped, 1);
+  assert.equal(result.halfRegistered, 1);
   assert.ok(Date.now() - started < 1_000);
 });
 

@@ -152,7 +152,7 @@ test('reviewed attestation signing rejects non-JSON signer output', async () => 
       payload: { kind: 'reviewed' },
       execFileImpl: async () => ({ stdout: 'not-json' }),
     }),
-    /returned invalid JSON/
+    /returned invalid JSON: .*stdout="not-json"/
   );
 });
 

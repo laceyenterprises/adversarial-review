@@ -53,7 +53,7 @@ import {
   parseGitHubBlobPath,
 } from './prompt-context.mjs';
 import { captureReviewerBodyAfterPost } from './review-body-capture.mjs';
-import { emitReviewedAttestation } from './reviewed-attestation.mjs';
+import { emitReviewedAttestation, persistReviewedAttestation } from './reviewed-attestation.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
 import { preflightGeminiReviewerToken } from './gemini-reviewer-preflight.mjs';
@@ -4154,14 +4154,14 @@ async function postGitHubReviewWithCapture({
     throw new Error(`Cannot post reviewed attestation for ${repo}#${prNumber}: reviewerHeadSha is required`);
   }
 
-  const alreadyCaptured = shouldEmitReviewedAttestation && wasGitHubReviewCaptured(rootDir, {
+  const capturedReviewBody = shouldEmitReviewedAttestation && readCapturedGitHubReviewBody(rootDir, {
     repo,
     prNumber,
     headSha: attestationHeadSha,
-    reviewerModel,
     passKind,
-    reviewBody,
   });
+  const alreadyCaptured = typeof capturedReviewBody === 'string';
+  const effectiveReviewBody = alreadyCaptured ? capturedReviewBody : reviewBody;
 
   if (!alreadyCaptured) {
     await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
@@ -4188,7 +4188,7 @@ async function postGitHubReviewWithCapture({
   // does not abort the body-capture UPDATE when a reviewer goes off-script.
   // Losing the parsed-verdict shortcut is preferable to losing body capture
   // entirely; downstream consumers already treat NULL as "verdict unknown".
-  const normalizedVerdict = normalizeEffectiveReviewVerdict(reviewBody, {
+  const normalizedVerdict = normalizeEffectiveReviewVerdict(effectiveReviewBody, {
     log,
     context: `${repo}#${prNumber} attempt=${attemptNumber} reviewer=${reviewerModel}`,
   });
@@ -4210,7 +4210,7 @@ async function postGitHubReviewWithCapture({
   });
 
   if (shouldEmitReviewedAttestation) {
-    await emitReviewedAttestation({
+    const { payload, signed } = await emitReviewedAttestation({
       repo,
       prNumber,
       headSha: attestationHeadSha,
@@ -4219,37 +4219,43 @@ async function postGitHubReviewWithCapture({
         reviewerIdentity || reviewerModel
       ),
       verdict: normalizedVerdict,
-      reviewBody,
+      reviewBody: effectiveReviewBody,
       execFileImpl: attestExecFileImpl,
       env: process.env,
       log,
     });
+    const artifactPath = persistReviewedAttestation({
+      rootDir,
+      payload,
+      signed,
+      artifactDiscriminator: `${passKind}-attempt-${attemptNumber}`,
+    });
+    log.log?.(`[reviewer] persisted reviewed attestation to ${artifactPath}`);
   }
 }
 
-function wasGitHubReviewCaptured(rootDir, {
+function readCapturedGitHubReviewBody(rootDir, {
   repo,
   prNumber,
   headSha,
-  reviewerModel,
   passKind,
-  reviewBody,
 }) {
   const db = openReviewStateDb(rootDir);
   try {
     ensureReviewStateSchema(db);
-    return Boolean(db.prepare(
-      `SELECT 1
+    const row = db.prepare(
+      `SELECT body_md
          FROM reviewer_passes
         WHERE repo = ?
           AND pr_number = ?
           AND head_sha = ?
-          AND reviewer_model = ?
           AND pass_kind = ?
-          AND body_md = ?
           AND body_captured_at IS NOT NULL
+          AND body_md IS NOT NULL
+        ORDER BY body_captured_at DESC, pass_id DESC
         LIMIT 1`
-    ).get(repo, Number(prNumber), headSha, reviewerModel, passKind, reviewBody));
+    ).get(repo, Number(prNumber), headSha, passKind);
+    return typeof row?.body_md === 'string' ? row.body_md : null;
   } finally {
     db.close();
   }

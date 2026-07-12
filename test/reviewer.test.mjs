@@ -276,6 +276,18 @@ test('postGitHubReviewWithCapture emits a reviewed attestation for the reviewed 
     assert.equal(payload.verdict, 'request-changes');
     assert.equal(payload.findings_count, 1);
     assert.equal(payload.reviewer_identity, 'codex-reviewer-lacey');
+    const artifactPath = join(
+      rootDir,
+      'data',
+      'reviewed-attestations',
+      'laceyenterprises__demo',
+      'pr-42',
+      'reviewed-head-sha-first-pass-attempt-1-codex-reviewer-lacey.json'
+    );
+    assert.equal(existsSync(artifactPath), true);
+    const artifact = JSON.parse(readFileSync(artifactPath, 'utf8'));
+    assert.deepEqual(artifact.payload, payload);
+    assert.equal(artifact.signed.signature.verified, true);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -313,6 +325,15 @@ test('postGitHubReviewWithCapture resumes signing failure without posting a dupl
   try {
     let postCalls = 0;
     let attestCalls = 0;
+    let resumedPayload;
+    const originalReviewBody = [
+      '## Blocking issues',
+      '- **Regression**',
+      '  - **Problem:** unsafe',
+      '',
+      '## Verdict',
+      'Request changes',
+    ].join('\n');
     beginReviewerPass(rootDir, {
       repo: 'laceyenterprises/demo',
       prNumber: 42,
@@ -335,7 +356,7 @@ test('postGitHubReviewWithCapture resumes signing failure without posting a dupl
           attemptNumber: 1,
           reviewerModel: 'codex',
           reviewerHeadSha: 'reviewed-head-sha',
-          reviewBody: '## Verdict\nComment only',
+          reviewBody: originalReviewBody,
           botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
           passKind: 'first-pass',
           execFileImpl: async (command) => {
@@ -364,16 +385,17 @@ test('postGitHubReviewWithCapture resumes signing failure without posting a dupl
         attemptNumber: 2,
         reviewerModel: 'codex',
         reviewerHeadSha: 'reviewed-head-sha',
-        reviewBody: '## Verdict\nComment only',
+        reviewBody: '## Verdict\nComment only\n\nFresh non-deterministic retry output.',
         botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
         passKind: 'first-pass',
         execFileImpl: async () => {
           postCalls += 1;
           return { stdout: '{}' };
         },
-        attestExecFileImpl: async () => {
+        attestExecFileImpl: async (_command, _args, options) => {
           attestCalls += 1;
-          return { stdout: '{}' };
+          resumedPayload = JSON.parse(options.input);
+          return { stdout: JSON.stringify(resumedPayload) };
         },
         prepareReviewWrite: async () => {},
         log: { log() {}, warn() {} },
@@ -381,6 +403,8 @@ test('postGitHubReviewWithCapture resumes signing failure without posting a dupl
     });
     assert.equal(postCalls, 1);
     assert.equal(attestCalls, 2);
+    assert.equal(resumedPayload.verdict, 'request-changes');
+    assert.equal(resumedPayload.findings_count, 1);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

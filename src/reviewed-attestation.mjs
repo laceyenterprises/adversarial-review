@@ -1,6 +1,9 @@
 import { execFile } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 
+import { writeFileAtomic } from './atomic-write.mjs';
 import { classifyStructuredBlockingIssues } from './kernel/verdict.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -102,10 +105,25 @@ async function signReviewedAttestation({
   try {
     signed = JSON.parse(trimmed);
   } catch (err) {
-    throw new Error(`hq attest sign returned invalid JSON: ${err.message}`, { cause: err });
+    const diagnostic = trimmed.length > 500 ? `${trimmed.slice(0, 500)}...` : trimmed;
+    throw new Error(`hq attest sign returned invalid JSON: ${err.message}; stdout=${JSON.stringify(diagnostic)}`, { cause: err });
   }
   validateSignedReviewedAttestation(signed, payload);
   return signed;
+}
+
+function reviewedAttestationPath(rootDir, payload, artifactDiscriminator = 'review') {
+  const repoKey = payload.repo.replace(/[^A-Za-z0-9._-]+/g, '__');
+  const artifactKey = `${payload.head_sha}-${artifactDiscriminator}-${payload.reviewer_identity}`
+    .replace(/[^A-Za-z0-9._-]+/g, '_');
+  return join(rootDir, 'data', 'reviewed-attestations', repoKey, `pr-${payload.pr_number}`, `${artifactKey}.json`);
+}
+
+function persistReviewedAttestation({ rootDir, payload, signed, artifactDiscriminator, writeFileAtomicImpl = writeFileAtomic }) {
+  const artifactPath = reviewedAttestationPath(rootDir, payload, artifactDiscriminator);
+  mkdirSync(dirname(artifactPath), { recursive: true });
+  writeFileAtomicImpl(artifactPath, `${JSON.stringify({ payload, signed }, null, 2)}\n`);
+  return artifactPath;
 }
 
 function validateSignedReviewedAttestation(signed, payload) {
@@ -180,6 +198,8 @@ export {
   REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS,
   buildReviewedAttestationPayload,
   emitReviewedAttestation,
+  persistReviewedAttestation,
+  reviewedAttestationPath,
   normalizeFindingsCount,
   isTransientSignError,
   signReviewedAttestation,

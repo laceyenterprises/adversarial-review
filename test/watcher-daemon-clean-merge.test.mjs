@@ -674,7 +674,7 @@ test('daemon clean merge fail-closes when the head moved past worker build-compl
       readBuildCompletionSignalForPrImpl: (args) => {
         readCalls.push(args);
         assert.equal(args.signalKind, 'pr_opened');
-        assert.ok(args.headSha === 'head-after-remediation' || args.headSha === null);
+        assert.equal(args.headSha, 'head-after-remediation');
         return { ok: false, reason: 'missing-build-completion-signal' };
       },
       execFileImpl: async () => {
@@ -691,7 +691,7 @@ test('daemon clean merge fail-closes when the head moved past worker build-compl
     assert.equal(leaseReleased, false, 'identity must fail closed before taking the merge lease');
     assert.deepEqual(
       readCalls.map((call) => call.headSha || null),
-      ['head-after-remediation', null],
+      ['head-after-remediation'],
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -1192,7 +1192,7 @@ test('resolveDaemonWorkerIdentityForPr fails closed when current head is missing
   assert.equal(calls.length, 0, 'missing current head must not degrade into a PR-level provenance query');
 });
 
-test("resolveDaemonWorkerIdentityForPr resolves a moved-head PR via the any-head pr_opened row", async () => {
+test('resolveDaemonWorkerIdentityForPr rejects a moved-head pr_opened row', async () => {
   const seenHeadShas = [];
   const result = await resolveDaemonWorkerIdentityForPr({
     repo: "agent-os",
@@ -1203,28 +1203,14 @@ test("resolveDaemonWorkerIdentityForPr resolves a moved-head PR via the any-head
     readBuildCompletionSignalForPrImpl: async (args) => {
       seenHeadShas.push(args.headSha);
       assert.equal(args.signalKind, "pr_opened");
-      // Current-head lookup misses because the head moved after pr_opened;
-      // the any-head lookup (headSha=null) hits the original opener row.
-      if (args.headSha == null) {
-        return {
-          ok: true,
-          row: {
-            launch_request_id: "lrq_opener",
-            worker_class: "codex",
-            head_sha: "original-open-head",
-          },
-        };
-      }
+      // The opener's identity is not provenance for a later head. An unscoped
+      // lookup would find this stale row, so the resolver must never issue one.
       return { ok: false, reason: "missing-build-completion-signal" };
     },
   });
-  assert.equal(result.ok, true);
-  assert.equal(result.resolvedBy, "pr-opened-any-head");
-  assert.equal(result.launchRequestId, "lrq_opener");
-  assert.equal(result.workerClass, "codex");
-  assert.equal(result.headMovedAfterBuildCompletion, true);
-  assert.ok(seenHeadShas.includes("live-head-after-remediation"), "must try current head first");
-  assert.ok(seenHeadShas.includes(null), "must fall back to any-head lookup");
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'missing-build-completion-signal');
+  assert.deepEqual(seenHeadShas, ['live-head-after-remediation']);
 });
 
 test("resolveDaemonWorkerIdentityForPr still fails closed when no pr_opened row exists at any head", async () => {

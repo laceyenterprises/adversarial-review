@@ -5898,48 +5898,6 @@ async function resolveDaemonWorkerIdentityForPr({
     };
   }
   if (!resolved?.ok) {
-    // Moved-head resolution. The pr_opened row is pinned to the PR head at open
-    // time, so any remediation/rereview push moves the head and the current-head
-    // lookup above misses -- every such PR previously fail-closed
-    // worker-identity-unresolved and could never daemon-clean-merge (the
-    // 2026-07-11 backlog: #3494/#3491/#3487 each had a pr_opened row at their
-    // ORIGINAL head that no longer matched the live head). Resolve against the
-    // authoritative pr_opened row for this PR at ANY head. This relaxes the
-    // strict current-head requirement ONLY for the otherwise-fail-closed case
-    // and ONLY on the daemon-clean route, which merges content already vetted to
-    // ZERO adversarial findings at the live head; identity here drives merge
-    // attribution/lease, and attribution is to the PR opener (exactly one
-    // pr_opened row per PR). headMovedAfterBuildCompletion is set so the merge
-    // audit records that the live head differs from the build-completion head.
-    let anyHeadResolved = null;
-    try {
-      anyHeadResolved = await readBuildCompletionSignalForPrImpl({ ...baseArgs, headSha: null });
-    } catch {
-      anyHeadResolved = null;
-    }
-    if (anyHeadResolved?.ok) {
-      const anyHeadLaunchRequestId = String(
-        anyHeadResolved.row?.launch_request_id ?? anyHeadResolved.row?.launchRequestId ?? "",
-      ).trim();
-      const anyHeadWorkerClass = String(
-        anyHeadResolved.row?.worker_class ?? anyHeadResolved.row?.workerClass ?? "",
-      ).trim();
-      const anyHeadRowHeadSha = String(
-        anyHeadResolved.row?.head_sha ?? anyHeadResolved.row?.headSha ?? "",
-      ).trim();
-      if (anyHeadLaunchRequestId && anyHeadWorkerClass) {
-        return {
-          ok: true,
-          launchRequestId: anyHeadLaunchRequestId,
-          workerClass: anyHeadWorkerClass,
-          rowHeadSha: anyHeadRowHeadSha || null,
-          currentHeadSha: currentHead || null,
-          resolvedBy: "pr-opened-any-head",
-          headMovedAfterBuildCompletion:
-            anyHeadRowHeadSha !== "" && anyHeadRowHeadSha !== currentHead,
-        };
-      }
-    }
     const launchProvenance = await readDaemonWorkerLaunchProvenanceForPr({
       repo,
       prNumber,

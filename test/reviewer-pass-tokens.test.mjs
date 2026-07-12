@@ -182,6 +182,26 @@ test('gemini reviewer exact usage writes local artifact and owner fold-in withou
   assert.equal(row.token_source, 'gemini-json');
 });
 
+test('reviewer token usage artifact refuses to create directories in a cross-user workspace', () => {
+  const rootDir = tempRoot();
+  const workspace = path.join(rootDir, 'workspace');
+  mkdirSync(workspace);
+
+  assert.throws(() => writeReviewerTokenUsageArtifact({
+    workspacePath: workspace,
+    repo: 'lacey/repo',
+    prNumber: 55,
+    attemptNumber: 2,
+    passKind: 'first-pass',
+    reviewerClass: 'gemini',
+    tokenUsage: { input: 1, output: 1, source: 'gemini-json' },
+    currentUidImpl: () => 2000,
+    statSyncImpl: () => ({ uid: 1000 }),
+  }), /Refusing to write reviewer token usage artifact into workspace owned by uid 1000 as uid 2000/);
+
+  assert.equal(existsSync(path.join(workspace, '.adversarial-review')), false);
+});
+
 test('worker-run and reviewer-session readers accept ledger target object, URI, and --ledger-db alias', () => {
   const rootDir = tempRoot();
   for (const fixture of reviewerPassTokenReaderFixtures(rootDir)) {

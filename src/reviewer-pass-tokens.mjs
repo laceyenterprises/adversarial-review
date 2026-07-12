@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
@@ -342,11 +342,24 @@ function writeReviewerTokenUsageArtifact({
   tokenUsage,
   source = null,
   metadata = {},
+  currentUidImpl = () => (typeof process.getuid === 'function' ? process.getuid() : null),
+  statSyncImpl = statSync,
 } = {}) {
   const usage = normalizeTokenUsage(tokenUsage);
   if (!usage) return null;
+  const workspace = workspacePath ? resolve(String(workspacePath)) : process.cwd();
+  const callerUid = currentUidImpl();
+  if (callerUid === null) {
+    throw new Error(`Cannot verify ownership of reviewer token usage workspace: ${workspace}`);
+  }
+  const workspaceOwnerUid = statSyncImpl(workspace).uid;
+  if (workspaceOwnerUid !== callerUid) {
+    throw new Error(
+      `Refusing to write reviewer token usage artifact into workspace owned by uid ${workspaceOwnerUid} as uid ${callerUid}: ${workspace}`
+    );
+  }
   const artifactPath = reviewerTokenUsageArtifactPath({
-    workspacePath,
+    workspacePath: workspace,
     repo,
     prNumber,
     attemptNumber,

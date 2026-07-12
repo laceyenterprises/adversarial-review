@@ -3511,9 +3511,9 @@ async function spawnReviewer({
         reviewerModel,
         rootDir: ROOT,
       }), 'guardrail');
-      let tokenUsageArtifact = null;
+      let reviewerTokenUsageArtifact = null;
       if (tokenUsage) {
-        tokenUsageArtifact = writeReviewerTokenUsageArtifactBestEffort({
+        reviewerTokenUsageArtifact = writeReviewerTokenUsageArtifactBestEffort({
           workspacePath: workspacePath || ROOT,
           repo,
           prNumber,
@@ -3546,7 +3546,7 @@ async function spawnReviewer({
           reattachToken: result.reattachToken || null,
           failureClass: result.failureClass || null,
           tokenUsageNoUsageReason: result.tokenUsageNoUsageReason || null,
-          tokenUsageArtifact,
+          reviewerTokenUsageArtifact,
         },
       });
     } catch (err) {

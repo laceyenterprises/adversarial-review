@@ -167,6 +167,7 @@ test('gemini reviewer exact usage writes local artifact and owner fold-in withou
       total: 8210,
       source: 'gemini-json',
     },
+    metadata: { reviewerTokenUsageArtifact: '/tmp/untrusted-artifact.json' },
   });
 
   assert.ok(artifactPath.endsWith('.json'));
@@ -175,11 +176,13 @@ test('gemini reviewer exact usage writes local artifact and owner fold-in withou
   assert.equal(readReviewerTokenUsageArtifact(artifactPath).tokenUsage.source, 'gemini-json');
 
   const row = foldReviewerTokenUsageArtifact(rootDir, artifactPath);
+  const metadata = JSON.parse(row.metadata_json);
   assert.equal(row.token_input, 8000);
   assert.equal(row.token_output, 210);
   assert.equal(row.token_reasoning, 90);
   assert.equal(row.token_tool_context, 40);
   assert.equal(row.token_source, 'gemini-json');
+  assert.equal(metadata.reviewerTokenUsageArtifact, artifactPath);
 });
 
 test('reviewer token usage artifact refuses to create directories in a cross-user workspace', () => {

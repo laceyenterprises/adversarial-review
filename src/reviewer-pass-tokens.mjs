@@ -415,9 +415,9 @@ function foldReviewerTokenUsageArtifact(rootDir, artifactPath, { metadata = {} }
     workspacePath: artifact.metadata?.workspacePath || null,
     startedAt: artifact.startedAt || artifact.endedAt || new Date().toISOString(),
     metadata: {
-      reviewerTokenUsageArtifact: artifactPath,
       ...artifact.metadata,
       ...metadata,
+      reviewerTokenUsageArtifact: artifactPath,
     },
   });
   return completeReviewerPass(rootDir, {
@@ -430,9 +430,9 @@ function foldReviewerTokenUsageArtifact(rootDir, artifactPath, { metadata = {} }
     tokenUsage: artifact.tokenUsage,
     tokenSource: artifact.tokenUsage?.source || null,
     metadata: {
-      reviewerTokenUsageArtifact: artifactPath,
       ...artifact.metadata,
       ...metadata,
+      reviewerTokenUsageArtifact: artifactPath,
     },
   });
 }

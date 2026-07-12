@@ -247,8 +247,6 @@ function findCapturedReviewerBody(rootDir, {
         LIMIT 1`
     ).get(repo, Number(prNumber), headSha, reviewerModel, kind);
     return typeof row?.body_md === 'string' ? row.body_md : null;
-  } catch {
-    return null;
   } finally {
     db?.close();
   }

@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import {
   buildReviewedAttestationPayload,
   emitReviewedAttestation,
+  recordSignedReviewedAttestation,
   signReviewedAttestation,
 } from '../src/reviewed-attestation.mjs';
 
@@ -194,6 +195,40 @@ test('reviewed attestation signing does not retry permanent subprocess failures'
   await assert.rejects(
     signReviewedAttestation({
       payload: { kind: 'reviewed' },
+      execFileImpl: async () => {
+        attempts += 1;
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      },
+    }),
+    /permission denied/
+  );
+  assert.equal(attempts, 1);
+});
+
+test('reviewed attestation recording retries transient subprocess failures with bounded backoff', async () => {
+  const delays = [];
+  let attempts = 0;
+  const recorded = await recordSignedReviewedAttestation({
+    signed: { kind: 'reviewed', signature: { verified: true } },
+    retryDelayMs: 10,
+    delayImpl: async (ms) => delays.push(ms),
+    execFileImpl: async () => {
+      attempts += 1;
+      if (attempts < 3) throw Object.assign(new Error('I/O unavailable'), { code: 'EIO' });
+      return { stdout: JSON.stringify({ recorded: true }) };
+    },
+  });
+
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [10, 20]);
+  assert.deepEqual(recorded, { recorded: true });
+});
+
+test('reviewed attestation recording does not retry permanent subprocess failures', async () => {
+  let attempts = 0;
+  await assert.rejects(
+    recordSignedReviewedAttestation({
+      signed: { kind: 'reviewed' },
       execFileImpl: async () => {
         attempts += 1;
         throw Object.assign(new Error('permission denied'), { code: 'EACCES' });

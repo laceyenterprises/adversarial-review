@@ -21,6 +21,22 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function execFileWithTransientRetry(execFileImpl, command, args, options, {
+  maxAttempts,
+  retryDelayMs,
+  delayImpl,
+} = {}) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await execFileImpl(command, args, options);
+    } catch (err) {
+      if (attempt >= maxAttempts || !isTransientSignError(err)) throw err;
+      await delayImpl(retryDelayMs * attempt);
+    }
+  }
+  throw new Error('unreachable retry state');
+}
+
 function normalizeFindingsCount(reviewBody) {
   const blocking = classifyStructuredBlockingIssues(reviewBody || '');
   return blocking.state === 'known' ? blocking.count : null;
@@ -94,24 +110,13 @@ async function signReviewedAttestation({
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     throw new TypeError('payload object is required');
   }
-  let stdout;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      ({ stdout } = await execFileImpl(
-        hqPath,
-        reviewedAttestationSignArgs(payload),
-        {
-          env,
-          timeout: timeoutMs,
-          maxBuffer: 1024 * 1024,
-        }
-      ));
-      break;
-    } catch (err) {
-      if (attempt >= maxAttempts || !isTransientSignError(err)) throw err;
-      await delayImpl(retryDelayMs * attempt);
-    }
-  }
+  const { stdout } = await execFileWithTransientRetry(
+    execFileImpl,
+    hqPath,
+    reviewedAttestationSignArgs(payload),
+    { env, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
+    { maxAttempts, retryDelayMs, delayImpl }
+  );
   const trimmed = String(stdout || '').trim();
   if (!trimmed) throw new Error('hq attest sign returned empty output');
   let signed;
@@ -155,8 +160,12 @@ async function recordSignedReviewedAttestation({
   execFileImpl = execFileAsync,
   env = process.env,
   timeoutMs = REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS,
+  maxAttempts = REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS,
+  retryDelayMs = REVIEWED_ATTESTATION_SIGN_RETRY_DELAY_MS,
+  delayImpl = delay,
 } = {}) {
-  const { stdout } = await execFileImpl(
+  const { stdout } = await execFileWithTransientRetry(
+    execFileImpl,
     hqPath,
     ['attest', 'record', '--payload', '-'],
     {
@@ -164,7 +173,8 @@ async function recordSignedReviewedAttestation({
       input: `${JSON.stringify(signed)}\n`,
       timeout: timeoutMs,
       maxBuffer: 1024 * 1024,
-    }
+    },
+    { maxAttempts, retryDelayMs, delayImpl }
   );
   const trimmed = String(stdout || '').trim();
   if (!trimmed) return null;

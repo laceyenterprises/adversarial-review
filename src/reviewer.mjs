@@ -4135,7 +4135,7 @@ async function postGitHubReviewWithCapture({
     ? findCapturedReviewerBody(rootDir, {
       repo,
       prNumber,
-      attemptNumber,
+      attemptNumber: Number(attemptNumber),
       passKind,
       headSha: normalizedHeadSha,
       reviewerModel,

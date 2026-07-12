@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -9,7 +9,11 @@ import { postRemediationCommentWithCapture } from '../src/follow-up-remediation.
 import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { __test__ as reviewerTest } from '../src/reviewer.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
-import { captureRemediationBodyAfterPost, resolveReviewerBotLogin } from '../src/review-body-capture.mjs';
+import {
+  captureRemediationBodyAfterPost,
+  findCapturedReviewerBody,
+  resolveReviewerBotLogin,
+} from '../src/review-body-capture.mjs';
 
 const { postGitHubReviewWithCapture } = reviewerTest;
 
@@ -90,6 +94,19 @@ test('resolveReviewerBotLogin maps MHX-09 reviewer classes onto existing reviewe
   assert.equal(resolveReviewerBotLogin('pi'), 'lacey-codex-reviewer[bot]');
   assert.equal(resolveReviewerBotLogin('opencode'), 'lacey-codex-reviewer[bot]');
   assert.equal(resolveReviewerBotLogin('hermes'), 'lacey-codex-reviewer[bot]');
+});
+
+test('captured reviewer body lookup propagates database open errors', () => {
+  const rootDir = makeRootDir();
+  mkdirSync(path.join(rootDir, 'data', 'reviews.db'), { recursive: true });
+
+  assert.throws(() => findCapturedReviewerBody(rootDir, {
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 42,
+    attemptNumber: 1,
+    headSha: 'abc123',
+    reviewerModel: 'codex',
+  }));
 });
 
 test('reviewer happy path captures verdict, body, gh_comment_id, and timestamp', async () => {

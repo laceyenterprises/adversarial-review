@@ -298,6 +298,7 @@ test('postGitHubReviewWithCapture rejects a missing reviewed head before posting
           postCalls += 1;
           return { stdout: '{}' };
         },
+        attestExecFileImpl: async () => ({ stdout: '{}' }),
       }),
       /reviewerHeadSha is required/
     );

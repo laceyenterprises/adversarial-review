@@ -54,6 +54,7 @@ import {
 } from './prompt-context.mjs';
 import { captureReviewerBodyAfterPost } from './review-body-capture.mjs';
 import { emitReviewedAttestation } from './reviewed-attestation.mjs';
+import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
 import { preflightGeminiReviewerToken } from './gemini-reviewer-preflight.mjs';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
@@ -4121,7 +4122,7 @@ async function postGitHubReviewWithCapture({
   passKind,
   postedAt = null,
   execFileImpl = execFileAsync,
-  attestExecFileImpl = execFileImpl,
+  attestExecFileImpl = null,
   log = console,
   fetchImpl = globalThis.fetch,
   readFileImpl = undefined,
@@ -4139,7 +4140,17 @@ async function postGitHubReviewWithCapture({
   if (!initialToken) {
     throw new Error(`Missing env var: ${botTokenEnv}`);
   }
-  if (!String(reviewerHeadSha || '').trim()) {
+  const shouldEmitReviewedAttestation = typeof attestExecFileImpl === 'function';
+  const attestationHeadSha = shouldEmitReviewedAttestation
+    ? String(reviewerHeadSha || '').trim()
+      || readReviewerPassHeadShaForAttestation(rootDir, {
+        repo,
+        prNumber,
+        attemptNumber,
+        passKind,
+      })
+    : null;
+  if (shouldEmitReviewedAttestation && !attestationHeadSha) {
     throw new Error(`Cannot post reviewed attestation for ${repo}#${prNumber}: reviewerHeadSha is required`);
   }
 
@@ -4185,20 +4196,43 @@ async function postGitHubReviewWithCapture({
     log,
   });
 
-  await emitReviewedAttestation({
-    repo,
-    prNumber,
-    headSha: reviewerHeadSha,
-    reviewerIdentity: resolveReviewerIdentityForBotTokenEnv(
-      botTokenEnv,
-      reviewerIdentity || reviewerModel
-    ),
-    verdict: normalizedVerdict,
-    reviewBody,
-    execFileImpl: attestExecFileImpl,
-    env: process.env,
-    log,
-  });
+  if (shouldEmitReviewedAttestation) {
+    await emitReviewedAttestation({
+      repo,
+      prNumber,
+      headSha: attestationHeadSha,
+      reviewerIdentity: resolveReviewerIdentityForBotTokenEnv(
+        botTokenEnv,
+        reviewerIdentity || reviewerModel
+      ),
+      verdict: normalizedVerdict,
+      reviewBody,
+      execFileImpl: attestExecFileImpl,
+      env: process.env,
+      log,
+    });
+  }
+}
+
+function readReviewerPassHeadShaForAttestation(rootDir, {
+  repo,
+  prNumber,
+  attemptNumber,
+  passKind,
+}) {
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const row = db.prepare(
+      `SELECT head_sha
+         FROM reviewer_passes
+        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
+    ).get(repo, Number(prNumber), Number(attemptNumber), passKind);
+    const headSha = typeof row?.head_sha === 'string' ? row.head_sha.trim() : '';
+    return headSha || null;
+  } finally {
+    db.close();
+  }
 }
 
 // ── Clio alert (OAuth failure) ───────────────────────────────────────────────
@@ -4688,6 +4722,7 @@ async function main() {
         reviewerMetadata.reviewerIdentity
       ),
       execFileImpl: execFileAsync,
+      attestExecFileImpl: execFileAsync,
       log: console,
     });
     console.log(`[reviewer] Review posted to ${repo}#${prNumber}`);

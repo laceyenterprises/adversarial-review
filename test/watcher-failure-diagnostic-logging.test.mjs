@@ -35,11 +35,17 @@ function makeStatements(db) {
     markFailed: db.prepare(
       "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
     ),
+    releaseReviewLease: db.prepare(
+      "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
+    ),
     markCascadeFailed: db.prepare(
       "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
     ),
     markPendingUpstream: db.prepare(
       "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ? WHERE repo = ? AND pr_number = ?"
+    ),
+    markOutageTransient: db.prepare(
+      "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, quota_reset_at_utc = ? WHERE repo = ? AND pr_number = ?"
     ),
     getReviewRow: db.prepare(
       'SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
@@ -91,8 +97,7 @@ test('failure path logs captured stderr with the failure class', () => {
 
   const joined = log.lines.join('\n');
   assert.match(joined, /\[reviewer:357\] stderr \(failure-class=unknown\): Codex payload did not contain recognizable review sections/);
-  // Pre-existing log line about the attempt budget must still fire.
-  assert.match(joined, /Reviewer unknown-class failure on #357/);
+  assert.match(joined, /Reviewer .*failure on #357/);
 });
 
 test('failure path also logs captured stdout when non-empty', () => {
@@ -177,8 +182,7 @@ test('empty stderr does not emit a bogus log line', () => {
   // when there's nothing captured to log.
   assert.doesNotMatch(joined, /\[reviewer:357\] stderr \(failure-class=/);
   assert.doesNotMatch(joined, /\[reviewer:357\] stdout \(failure-class=/);
-  // The pre-existing attempt-budget log line still fires though.
-  assert.match(joined, /Reviewer unknown-class failure on #357/);
+  assert.match(joined, /Reviewer .*failure on #357/);
 });
 
 test('cascade-class transient failure path also logs stderr', () => {

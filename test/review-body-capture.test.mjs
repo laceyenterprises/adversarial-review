@@ -25,6 +25,7 @@ function seedPass(rootDir, {
   reviewerModel = reviewerClass,
   passKind = 'first-pass',
   startedAt = '2026-05-29T12:00:00.000Z',
+  headSha = 'review-head-sha',
 } = {}) {
   beginReviewerPass(rootDir, {
     repo,
@@ -34,8 +35,9 @@ function seedPass(rootDir, {
     reviewerModel,
     passKind,
     startedAt,
+    headSha,
   });
-  return { repo, prNumber, attemptNumber, passKind };
+  return { repo, prNumber, attemptNumber, passKind, headSha };
 }
 
 function readPass(rootDir, { repo, prNumber, attemptNumber, passKind }) {

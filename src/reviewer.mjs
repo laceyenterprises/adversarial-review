@@ -52,7 +52,7 @@ import {
   fetchLinkedSpecContents,
   parseGitHubBlobPath,
 } from './prompt-context.mjs';
-import { captureReviewerBodyAfterPost } from './review-body-capture.mjs';
+import { captureReviewerBodyAfterPost, hasCapturedReviewerBody } from './review-body-capture.mjs';
 import { emitReviewedAttestation } from './reviewed-attestation.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
 import { preflightGeminiReviewerToken } from './gemini-reviewer-preflight.mjs';
@@ -4139,7 +4139,10 @@ async function postGitHubReviewWithCapture({
   if (!initialToken) {
     throw new Error(`Missing env var: ${botTokenEnv}`);
   }
-  await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
+  const alreadyCaptured = hasCapturedReviewerBody(rootDir, {
+    repo, prNumber, attemptNumber, passKind, reviewBody,
+  });
+  if (!alreadyCaptured) await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
     rootDir,
     fetchImpl,
     readFileImpl,
@@ -4166,7 +4169,7 @@ async function postGitHubReviewWithCapture({
   });
   const persistedVerdict = normalizedVerdict === 'unknown' ? null : normalizedVerdict;
 
-  await captureReviewerBodyAfterPost(rootDir, {
+  if (!alreadyCaptured) await captureReviewerBodyAfterPost(rootDir, {
     repo,
     prNumber,
     attemptNumber: Number(attemptNumber),

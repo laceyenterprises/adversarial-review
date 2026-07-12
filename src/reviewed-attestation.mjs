@@ -109,30 +109,16 @@ async function signReviewedAttestation({
 }
 
 function validateSignedReviewedAttestation(signed, payload) {
-  if (!signed || typeof signed !== 'object' || Array.isArray(signed)) return;
-  if (signed.kind !== undefined && signed.kind !== payload.kind) {
-    throw new Error(`signed attestation kind mismatch: ${signed.kind}`);
+  if (!signed || typeof signed !== 'object' || Array.isArray(signed)) {
+    throw new Error('signed attestation must be an object');
   }
-  if (signed.head_sha !== undefined && signed.head_sha !== payload.head_sha) {
-    throw new Error(`signed attestation head_sha mismatch: ${signed.head_sha}`);
+  for (const [field, expected] of Object.entries(payload)) {
+    if (signed[field] !== expected) {
+      throw new Error(`signed attestation ${field} mismatch: ${signed[field]}`);
+    }
   }
-  if (signed.verdict !== undefined && signed.verdict !== payload.verdict) {
-    throw new Error(`signed attestation verdict mismatch: ${signed.verdict}`);
-  }
-  if (
-    signed.reviewer_identity !== undefined &&
-    signed.reviewer_identity !== payload.reviewer_identity
-  ) {
-    throw new Error(`signed attestation reviewer_identity mismatch: ${signed.reviewer_identity}`);
-  }
-  if (
-    signed.producer_identity !== undefined &&
-    signed.producer_identity !== payload.producer_identity
-  ) {
-    throw new Error(`signed attestation producer_identity mismatch: ${signed.producer_identity}`);
-  }
-  if (signed.signature?.verified === false) {
-    throw new Error('signed attestation signature did not verify');
+  if (!signed.signature || signed.signature.verified !== true) {
+    throw new Error('signed attestation signature missing or did not verify');
   }
   const signedSubject = signed.signature?.hcp_subject ?? signed.signature?.subject;
   if (signedSubject !== undefined && signedSubject !== payload.reviewer_identity) {

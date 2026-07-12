@@ -1,6 +1,6 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import {
   readReviewerSessionUsageFromLedger,
@@ -11,6 +11,7 @@ import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 
 const PASS_KINDS = new Set(['first-pass', 'remediation', 'rereview', 'closer']);
 const PASS_STATUSES = new Set(['running', 'completed', 'failed', 'cancelled']);
+const REVIEWER_USAGE_ARTIFACT_SCHEMA = 'adversarial-reviewer-token-usage/v1';
 
 function normalizeReviewerClass(value) {
   const text = String(value || '').toLowerCase();
@@ -306,6 +307,121 @@ function tagTokenUsage(tokenUsage, usageTag) {
     guardrail,
     usageTag: tag,
   };
+}
+
+function reviewerTokenUsageArtifactPath({
+  workspacePath,
+  repo,
+  prNumber,
+  attemptNumber,
+  passKind,
+} = {}) {
+  const workspace = workspacePath ? resolve(String(workspacePath)) : process.cwd();
+  const repoSlug = String(repo || 'unknown').replace(/[^A-Za-z0-9_.-]+/g, '__');
+  const pass = normalizePassKind(passKind || 'first-pass');
+  const attempt = normalizeAttemptNumber(attemptNumber || 0);
+  return join(
+    workspace,
+    '.adversarial-review',
+    'token-usage',
+    `${repoSlug}__pr-${Number(prNumber) || 0}__attempt-${attempt}__${pass}.json`
+  );
+}
+
+function writeReviewerTokenUsageArtifact({
+  workspacePath,
+  repo,
+  prNumber,
+  attemptNumber,
+  passKind,
+  reviewerClass,
+  reviewerModel = null,
+  status = 'completed',
+  startedAt = null,
+  endedAt = new Date().toISOString(),
+  tokenUsage,
+  source = null,
+  metadata = {},
+} = {}) {
+  const usage = normalizeTokenUsage(tokenUsage);
+  if (!usage) return null;
+  const artifactPath = reviewerTokenUsageArtifactPath({
+    workspacePath,
+    repo,
+    prNumber,
+    attemptNumber,
+    passKind,
+  });
+  mkdirSync(dirname(artifactPath), { recursive: true, mode: 0o700 });
+  const payload = {
+    schemaVersion: REVIEWER_USAGE_ARTIFACT_SCHEMA,
+    repo: String(repo || ''),
+    prNumber: Number(prNumber),
+    attemptNumber: normalizeAttemptNumber(attemptNumber || 0),
+    passKind: normalizePassKind(passKind || 'first-pass'),
+    reviewerClass: normalizeReviewerClass(reviewerClass || reviewerModel),
+    reviewerModel: normalizeReviewerModel(reviewerModel || reviewerClass),
+    status: normalizePassStatus(status),
+    startedAt,
+    endedAt,
+    tokenUsage: {
+      ...usage,
+      source: source || usage.source || 'reviewer-local-artifact',
+    },
+    metadata: metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {},
+  };
+  const tmp = `${artifactPath}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+  renameSync(tmp, artifactPath);
+  return artifactPath;
+}
+
+function readReviewerTokenUsageArtifact(artifactPath) {
+  const parsed = JSON.parse(readFileSync(artifactPath, 'utf8'));
+  if (parsed?.schemaVersion !== REVIEWER_USAGE_ARTIFACT_SCHEMA) {
+    throw new TypeError(`Invalid reviewer token usage artifact schema: ${parsed?.schemaVersion}`);
+  }
+  return {
+    ...parsed,
+    attemptNumber: normalizeAttemptNumber(parsed.attemptNumber),
+    passKind: normalizePassKind(parsed.passKind),
+    status: normalizePassStatus(parsed.status || 'completed'),
+    tokenUsage: normalizeTokenUsage(parsed.tokenUsage),
+  };
+}
+
+function foldReviewerTokenUsageArtifact(rootDir, artifactPath, { metadata = {} } = {}) {
+  const artifact = readReviewerTokenUsageArtifact(artifactPath);
+  beginReviewerPass(rootDir, {
+    repo: artifact.repo,
+    prNumber: artifact.prNumber,
+    attemptNumber: artifact.attemptNumber,
+    reviewerClass: artifact.reviewerClass,
+    reviewerModel: artifact.reviewerModel,
+    passKind: artifact.passKind,
+    workspacePath: artifact.metadata?.workspacePath || null,
+    startedAt: artifact.startedAt || artifact.endedAt || new Date().toISOString(),
+    metadata: {
+      reviewerTokenUsageArtifact: artifactPath,
+      ...artifact.metadata,
+      ...metadata,
+    },
+  });
+  return completeReviewerPass(rootDir, {
+    repo: artifact.repo,
+    prNumber: artifact.prNumber,
+    attemptNumber: artifact.attemptNumber,
+    passKind: artifact.passKind,
+    status: artifact.status,
+    endedAt: artifact.endedAt || new Date().toISOString(),
+    tokenUsage: artifact.tokenUsage,
+    tokenSource: artifact.tokenUsage?.source || null,
+    metadata: {
+      reviewerTokenUsageArtifact: artifactPath,
+      ...artifact.metadata,
+      ...metadata,
+    },
+  });
 }
 
 function coerceNonNegativeInt(value) {
@@ -1368,6 +1484,7 @@ export {
   backfillReviewerPasses,
   beginReviewerPass,
   completeReviewerPass,
+  foldReviewerTokenUsageArtifact,
   tagTokenUsage,
   normalizeReviewerClass,
   normalizeTokenUsage,
@@ -1376,8 +1493,11 @@ export {
   readClaudeTranscriptTokenUsage,
   readCodexTranscriptTokenUsage,
   readCodexWorkerLogTokenUsage,
+  readReviewerTokenUsageArtifact,
   readReviewerSessionTokenUsage,
   readWorkerRunTokenUsage,
   readWorkerRunTokenUsageResult,
+  reviewerTokenUsageArtifactPath,
   reviewerPassRows,
+  writeReviewerTokenUsageArtifact,
 };

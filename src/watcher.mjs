@@ -60,6 +60,7 @@ import {
   completeReviewerPass,
   readBestReviewerEvidenceTokenUsage,
   tagTokenUsage,
+  writeReviewerTokenUsageArtifact,
 } from './reviewer-pass-tokens.mjs';
 import {
   assertReviewDbWritesRoundTrip,
@@ -3492,6 +3493,24 @@ async function spawnReviewer({
         reviewerModel,
         rootDir: ROOT,
       }), 'guardrail');
+      const tokenUsageArtifact = tokenUsage ? writeReviewerTokenUsageArtifact({
+        workspacePath: workspacePath || ROOT,
+        repo,
+        prNumber,
+        attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
+        passKind,
+        reviewerClass: reviewerModel,
+        reviewerModel,
+        status: result.ok ? 'completed' : (result.failureClass === 'cancelled' ? 'cancelled' : 'failed'),
+        startedAt,
+        endedAt,
+        tokenUsage,
+        source: tokenUsage?.source || null,
+        metadata: {
+          reviewerSessionUuid,
+          reattachToken: result.reattachToken || null,
+        },
+      }) : null;
       completeReviewerPass(ROOT, {
         repo,
         prNumber,
@@ -3506,6 +3525,7 @@ async function spawnReviewer({
           reattachToken: result.reattachToken || null,
           failureClass: result.failureClass || null,
           tokenUsageNoUsageReason: result.tokenUsageNoUsageReason || null,
+          tokenUsageArtifact,
         },
       });
     } catch (err) {

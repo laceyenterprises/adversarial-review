@@ -1428,6 +1428,7 @@ const FLEET_WIDE_FALSE_DEFERRAL_LOCK_RETRY_MS = 10;
 const FLEET_WIDE_FALSE_DEFERRAL_LOCK_TIMEOUT_MS = 5_000;
 const FLEET_WIDE_FALSE_DEFERRAL_STALE_LOCK_MS = 2 * 60 * 1000;
 const HEAD_CLOSER_SUPPRESSION_RETRY_BACKOFF_MS = [250, 1000];
+const HEAD_ATTESTATION_CHAIN_RETRY_DELAYS_MS = [250, 1000];
 
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -5975,6 +5976,9 @@ async function resolveDaemonWorkerIdentityForPr({
     if (attested.ok) {
       return attested;
     }
+    if (attested.reason !== 'missing-produced-head-attestation') {
+      return attested;
+    }
   }
   const baseArgs = {
     repo,
@@ -6063,18 +6067,44 @@ async function readHeadAttestationChainForPr({
   hqRoot,
   env = process.env,
   execFileImpl = execFileAsync,
+  retryDelaysMs = HEAD_ATTESTATION_CHAIN_RETRY_DELAYS_MS,
+  sleepImpl = sleepMs,
+  logger = console,
 } = {}) {
   const args = ['attest', 'chain', '--repo', String(repo || ''), '--pr', String(prNumber), '--json'];
   if (hqRoot) {
     args.splice(2, 0, '--root', String(hqRoot));
   }
-  const { stdout } = await execFileImpl('hq', args, {
-    env,
-    maxBuffer: 5 * 1024 * 1024,
-    timeout: 30_000,
-  });
+  const delays = Array.isArray(retryDelaysMs) ? retryDelaysMs : [];
+  let stdout = '';
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      ({ stdout } = await execFileImpl('hq', args, {
+        env,
+        maxBuffer: 5 * 1024 * 1024,
+        timeout: 30_000,
+      }));
+      break;
+    } catch (err) {
+      if (!isTransientHeadAttestationReadError(err) || attempt >= delays.length) throw err;
+      const delayMs = Math.max(0, Number(delays[attempt]) || 0);
+      logger?.warn?.(
+        `[watcher] hq attest chain transient failure for ${repo}#${prNumber}; ` +
+        `retrying ${attempt + 1}/${delays.length} after ${delayMs}ms: ${err?.message || err}`
+      );
+      if (delayMs > 0) await sleepImpl(delayMs);
+    }
+  }
   const rows = JSON.parse(String(stdout || '[]'));
   return Array.isArray(rows) ? rows : [];
+}
+
+function isTransientHeadAttestationReadError(err) {
+  if (isTransientGhError(err)) return true;
+  const code = String(err?.code || '').toUpperCase();
+  if (['EAGAIN', 'EBUSY', 'EIO', 'EMFILE', 'ENFILE', 'ETIMEDOUT'].includes(code)) return true;
+  const detail = String(err?.stderr || err?.message || err || '');
+  return /database is locked|resource temporarily unavailable|socket hang up/i.test(detail);
 }
 
 async function resolveDaemonWorkerIdentityFromHeadAttestation({
@@ -6086,6 +6116,10 @@ async function resolveDaemonWorkerIdentityFromHeadAttestation({
   env = process.env,
   readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr,
 } = {}) {
+  const currentHead = String(currentHeadSha || '').trim();
+  if (!currentHead) {
+    return { ok: false, reason: 'missing-current-head-sha' };
+  }
   let rows;
   try {
     rows = await readHeadAttestationChainForPrImpl({ repo, prNumber, hqRoot, rootDir, env });
@@ -6096,14 +6130,17 @@ async function resolveDaemonWorkerIdentityFromHeadAttestation({
       error: String(err?.message || err),
     };
   }
-  const currentHead = String(currentHeadSha || '').trim();
   const produced = (Array.isArray(rows) ? rows : [])
     .filter((row) => (
       row?.kind === 'produced'
       && row?.valid === true
       && String(row?.head_sha || row?.headSha || '').trim() === currentHead
     ))
-    .sort((a, b) => String(a?.ts || '').localeCompare(String(b?.ts || '')))
+    .sort((a, b) => {
+      const left = String(a?.ts || '');
+      const right = String(b?.ts || '');
+      return left < right ? -1 : left > right ? 1 : 0;
+    })
     .at(-1);
   if (!produced) {
     return { ok: false, reason: 'missing-produced-head-attestation' };

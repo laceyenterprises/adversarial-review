@@ -444,6 +444,16 @@ Reviewer-pass body capture is additive state on `reviewer_passes`:
 | `gh_comment_id` | GitHub comment or review artifact identifier; non-null values are unique |
 | `body_captured_at` | Time the body scraper captured `body_md` for that pass |
 
+The review poster treats a captured body for the same repo, PR, reviewed head,
+reviewer model, and pass kind as its durable post checkpoint. If reviewed-
+attestation signing or recording fails after that checkpoint, a watcher retry
+skips the GitHub mutation, reuses the stored body rather than a newly generated
+body, and resumes the attestation path. Signing uses the shipped flag-based
+`hq attest sign` contract; the verified result is then persisted through the
+owner-context `hq attest record --payload -` bridge. Signer output is accepted
+only when every payload field is preserved and `signature.verified` is exactly
+`true`.
+
 `pr_merge_closeouts` tracks the post-merge closeout scrape/post lifecycle for a
 single `(repo, pr_number)`:
 

@@ -226,6 +226,32 @@ function updateReviewerPassBodyCapture(rootDir, {
   }
 }
 
+function findCapturedReviewerBody(rootDir, {
+  repo, prNumber, attemptNumber, passKind, headSha, reviewerModel,
+} = {}) {
+  const kind = resolvePassKindForReviewer(passKind, { attemptNumber });
+  let db;
+  try {
+    db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    const row = db.prepare(
+      `SELECT body_md FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND head_sha = ?
+          AND reviewer_model = ?
+          AND pass_kind = ?
+          AND body_md IS NOT NULL
+          AND body_captured_at IS NOT NULL
+        ORDER BY body_captured_at DESC, pass_id DESC
+        LIMIT 1`
+    ).get(repo, Number(prNumber), headSha, reviewerModel, kind);
+    return typeof row?.body_md === 'string' ? row.body_md : null;
+  } finally {
+    db?.close();
+  }
+}
+
 // Build the env override used for the lookup gh subprocess. If a token is
 // resolved (preferred reviewer-bot token, then inherited GH_TOKEN), set it
 // on the lookup env. If neither is present, omit GH_TOKEN entirely — the
@@ -359,6 +385,7 @@ export {
   REVIEW_LOOKUP_TIMEOUT_MS,
   captureRemediationBodyAfterPost,
   captureReviewerBodyAfterPost,
+  findCapturedReviewerBody,
   lookupRecentReviewArtifact,
   resolveReviewerBotLogin,
   updateReviewerPassBodyCapture,

@@ -52,7 +52,8 @@ import {
   fetchLinkedSpecContents,
   parseGitHubBlobPath,
 } from './prompt-context.mjs';
-import { captureReviewerBodyAfterPost } from './review-body-capture.mjs';
+import { captureReviewerBodyAfterPost, findCapturedReviewerBody } from './review-body-capture.mjs';
+import { emitReviewedAttestation } from './reviewed-attestation.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
 import { preflightGeminiReviewerToken } from './gemini-reviewer-preflight.mjs';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
@@ -4114,11 +4115,13 @@ async function postGitHubReviewWithCapture({
   prNumber,
   attemptNumber,
   reviewerModel,
+  reviewerHeadSha = null,
   reviewBody,
   botTokenEnv,
   passKind,
   postedAt = null,
   execFileImpl = execFileAsync,
+  attestExecFileImpl = execFileImpl,
   log = console,
   fetchImpl = globalThis.fetch,
   readFileImpl = undefined,
@@ -4127,26 +4130,41 @@ async function postGitHubReviewWithCapture({
   reviewerIdentity = null,
   reviewerTokenFetchTimeoutMs = undefined,
 } = {}) {
-  // GMW-06: run the gemini-reviewer preflight before the generic env check so a
-  // gemini post with an unresolved token fails with the legible runbook-naming
-  // error (and the legacy-conflict guard fires) rather than the bare
-  // "Missing env var" — and never falls through to another identity's token.
-  preflightGeminiReviewerToken({ env: process.env, botTokenEnv, reviewerIdentity });
-  const initialToken = process.env[botTokenEnv];
-  if (!initialToken) {
-    throw new Error(`Missing env var: ${botTokenEnv}`);
+  const normalizedHeadSha = String(reviewerHeadSha || '').trim();
+  const capturedReviewBody = normalizedHeadSha
+    ? findCapturedReviewerBody(rootDir, {
+      repo,
+      prNumber,
+      attemptNumber: Number(attemptNumber),
+      passKind,
+      headSha: normalizedHeadSha,
+      reviewerModel,
+    })
+    : null;
+  const alreadyCaptured = capturedReviewBody !== null;
+  const effectiveReviewBody = capturedReviewBody ?? reviewBody;
+  let initialToken = null;
+  if (!alreadyCaptured) {
+    // GMW-06: run the gemini-reviewer preflight before the generic env check so a
+    // gemini post with an unresolved token fails with the legible runbook-naming
+    // error (and the legacy-conflict guard fires) rather than the bare
+    // "Missing env var" — and never falls through to another identity's token.
+    preflightGeminiReviewerToken({ env: process.env, botTokenEnv, reviewerIdentity });
+    initialToken = process.env[botTokenEnv];
+    if (!initialToken) {
+      throw new Error(`Missing env var: ${botTokenEnv}`);
+    }
+    await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
+      rootDir,
+      fetchImpl,
+      readFileImpl,
+      log,
+      prepareReviewWrite,
+      reviewerSpawnToken,
+      reviewerIdentity,
+      reviewerTokenFetchTimeoutMs,
+    });
   }
-
-  await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
-    rootDir,
-    fetchImpl,
-    readFileImpl,
-    log,
-    prepareReviewWrite,
-    reviewerSpawnToken,
-    reviewerIdentity,
-    reviewerTokenFetchTimeoutMs,
-  });
 
   // Capture postedAt AFTER the gh post returns so the candidate window
   // bounds the artifact's GitHub-assigned timestamp, which is set during
@@ -4158,13 +4176,13 @@ async function postGitHubReviewWithCapture({
   // does not abort the body-capture UPDATE when a reviewer goes off-script.
   // Losing the parsed-verdict shortcut is preferable to losing body capture
   // entirely; downstream consumers already treat NULL as "verdict unknown".
-  const normalizedVerdict = normalizeEffectiveReviewVerdict(reviewBody, {
+  const normalizedVerdict = normalizeEffectiveReviewVerdict(effectiveReviewBody, {
     log,
     context: `${repo}#${prNumber} attempt=${attemptNumber} reviewer=${reviewerModel}`,
   });
   const persistedVerdict = normalizedVerdict === 'unknown' ? null : normalizedVerdict;
 
-  await captureReviewerBodyAfterPost(rootDir, {
+  if (!alreadyCaptured) await captureReviewerBodyAfterPost(rootDir, {
     repo,
     prNumber,
     attemptNumber: Number(attemptNumber),
@@ -4176,6 +4194,28 @@ async function postGitHubReviewWithCapture({
     postedAt: effectivePostedAt,
     execFileImpl,
     env: { ...process.env, [botTokenEnv]: process.env[botTokenEnv] || initialToken },
+    log,
+  });
+
+  if (!normalizedHeadSha) {
+    log.warn?.(
+      `[reviewer] reviewed attestation skipped for ${repo}#${prNumber}: reviewerHeadSha is unavailable`
+    );
+    return;
+  }
+
+  await emitReviewedAttestation({
+    repo,
+    prNumber,
+    headSha: normalizedHeadSha,
+    reviewerIdentity: resolveReviewerIdentityForBotTokenEnv(
+      botTokenEnv,
+      reviewerIdentity || reviewerModel
+    ),
+    verdict: normalizedVerdict,
+    reviewBody: effectiveReviewBody,
+    execFileImpl: attestExecFileImpl,
+    env: process.env,
     log,
   });
 }
@@ -4657,6 +4697,7 @@ async function main() {
       prNumber,
       attemptNumber: captureAttemptNumber,
       reviewerModel: effectiveModel,
+      reviewerHeadSha: reviewerHeadSha || null,
       reviewBody: fullComment,
       botTokenEnv: effectiveBotTokenEnv,
       passKind,

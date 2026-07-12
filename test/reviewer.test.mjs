@@ -7,6 +7,7 @@ import { CLAUDE_CLI, GEMINI_CLI, AGY_CLI, __test__ } from '../src/reviewer.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
+import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import {
   AGY_TRANSIENT_REMEDIATION,
   clearAgyReviewerAuthCache,
@@ -86,6 +87,7 @@ const {
   dispatchReviewerModel,
   formatAdvisoryFindingsContext,
   postGitHubReview,
+  postGitHubReviewWithCapture,
   LOCAL_REVIEW_SHADOW_LABEL,
   hasLocalReviewShadowLabel,
   evaluateLocalReviewShadowEligibility,
@@ -135,6 +137,20 @@ async function withEnvAsync(overrides, fn) {
       else process.env[key] = value;
     }
   }
+}
+
+function execFileResultWithStdin({ stdout = '', onInput = () => {} } = {}) {
+  let resolveExecution;
+  const execution = new Promise((resolve) => { resolveExecution = resolve; });
+  execution.child = {
+    stdin: {
+      end(input) {
+        onInput(input);
+        resolveExecution({ stdout, stderr: '' });
+      },
+    },
+  };
+  return execution;
 }
 
 test('postGitHubReview uses adapter mutation with the intended reviewer bot identity', async () => {
@@ -209,6 +225,151 @@ test('postGitHubReview uses adapter mutation with the intended reviewer bot iden
     '--expected-login',
     'lacey-codex-reviewer[bot]',
   ]);
+});
+
+test('postGitHubReviewWithCapture emits a reviewed attestation for the reviewed head and D3 verdict', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'review-post-attestation-'));
+  mkdirSync(join(rootDir, 'data'), { recursive: true });
+  try {
+    const attestCalls = [];
+    await withEnvAsync({
+      GHA_ADAPTER_BIN: '/fixture/github-adapter',
+      GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+    }, async () => {
+      await postGitHubReviewWithCapture({
+        rootDir,
+        repo: 'laceyenterprises/demo',
+        prNumber: 42,
+        attemptNumber: 1,
+        reviewerModel: 'codex',
+        reviewerHeadSha: 'reviewed-head-sha',
+        reviewBody: [
+          '## Summary',
+          'Blocking verdict.',
+          '',
+          '## Blocking issues',
+          '- **Regression**',
+          '  - **File:** src/demo.mjs',
+          '  - **Lines:** 1-2',
+          '  - **Problem:** The reviewed head is unsafe.',
+          '',
+          '## Verdict',
+          'Request changes',
+        ].join('\n'),
+        botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+        passKind: 'first-pass',
+        execFileImpl: async (command) => {
+          assert.equal(command, '/fixture/github-adapter');
+          return { stdout: JSON.stringify({ ok: true }) };
+        },
+        attestExecFileImpl: (command, args, options = {}) => {
+          attestCalls.push({ command, args, options });
+          if (args[1] === 'record') {
+            return execFileResultWithStdin({
+              stdout: '{"recorded":true}',
+              onInput: (input) => { attestCalls.at(-1).input = input; },
+            });
+          }
+          const valueAfter = (name) => args[args.indexOf(name) + 1];
+          const payload = {
+            schema_version: 1,
+            repo: valueAfter('--repo'),
+            pr_number: Number(valueAfter('--pr')),
+            head_sha: valueAfter('--head-sha'),
+            parent_head_sha: null,
+            kind: valueAfter('--kind'),
+            producer_identity: 'codex-reviewer-lacey',
+            verdict: valueAfter('--verdict'),
+            findings_count: Number(valueAfter('--findings-count')),
+            payload: JSON.parse(valueAfter('--payload-json')),
+            ts: valueAfter('--ts'),
+          };
+          return Promise.resolve({
+            stdout: JSON.stringify({
+              ...payload,
+              signature: {
+                algorithm: 'hcp-hmac-sha256:v1',
+                subject: payload.payload.reviewer_identity,
+                digest: `sha256:${'A'.repeat(43)}`,
+              },
+            }),
+          });
+        },
+        prepareReviewWrite: async () => {},
+        reviewerIdentity: 'codex-reviewer-lacey',
+        log: { log() {}, warn() {} },
+      });
+    });
+
+    assert.equal(attestCalls.length, 2);
+    assert.equal(attestCalls[0].command, 'hq');
+    assert.deepEqual(attestCalls[0].args.slice(0, 10), [
+      'attest', 'sign', '--repo', 'laceyenterprises/demo', '--pr', '42',
+      '--head-sha', 'reviewed-head-sha', '--kind', 'reviewed',
+    ]);
+    assert.deepEqual(attestCalls[1].args, ['attest', 'record', '--payload', '-']);
+    assert.equal(attestCalls[1].options.input, undefined);
+    assert.equal(JSON.parse(attestCalls[1].input).head_sha, 'reviewed-head-sha');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('postGitHubReviewWithCapture propagates signing failure after posting for watcher recovery', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'review-post-attestation-failure-'));
+  mkdirSync(join(rootDir, 'data'), { recursive: true });
+  try {
+    beginReviewerPass(rootDir, {
+      repo: 'laceyenterprises/demo',
+      prNumber: 42,
+      attemptNumber: 1,
+      reviewerClass: 'codex',
+      reviewerModel: 'codex',
+      passKind: 'first-pass',
+      headSha: 'reviewed-head-sha',
+    });
+    let postCalls = 0;
+    const postAndFailSigning = ({ attemptNumber = 1, reviewBody = '## Verdict\nComment only' } = {}) => postGitHubReviewWithCapture({
+      rootDir,
+      repo: 'laceyenterprises/demo',
+      prNumber: 42,
+      attemptNumber,
+      reviewerModel: 'codex',
+      reviewerHeadSha: 'reviewed-head-sha',
+      reviewBody,
+      botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+      passKind: 'first-pass',
+      execFileImpl: async (command) => {
+        if (command === '/fixture/github-adapter') postCalls += 1;
+        return { stdout: '{}' };
+      },
+      attestExecFileImpl: async () => {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      },
+      prepareReviewWrite: async () => {},
+    });
+    await withEnvAsync({
+      GHA_ADAPTER_BIN: '/fixture/github-adapter',
+      GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+    }, async () => {
+      await assert.rejects(postAndFailSigning(), /permission denied/);
+    });
+    await withEnvAsync({
+      GHA_ADAPTER_BIN: '/fixture/github-adapter',
+      GH_CODEX_REVIEWER_TOKEN: undefined,
+    }, async () => {
+      await assert.rejects(
+        postAndFailSigning({
+          attemptNumber: 2,
+          reviewBody: '## Summary\nNon-deterministic retry body\n\n## Verdict\nRequest changes',
+        }),
+        /permission denied/
+      );
+    });
+    assert.equal(postCalls, 1);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 function queueWithFakes(reviewText, overrides = {}) {

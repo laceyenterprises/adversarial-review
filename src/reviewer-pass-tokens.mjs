@@ -1134,9 +1134,9 @@ function shouldUseDefaultTranscriptRoots(rootDir) {
   if (process.env.ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK === '1') return true;
   if (process.env.ADV_REVIEW_TOKEN_TRANSCRIPT_FALLBACK === '0') return false;
   const resolved = resolve(String(rootDir || ''));
-  return resolved === '/Users/airlock/agent-os/tools/adversarial-review'
-    || resolved === '/Users/placey/agent-os-trees/codex/agent-os/tools/adversarial-review'
-    || resolved === '/Users/placey/agent-os-trees/claude-code/agent-os/tools/adversarial-review';
+  return resolved === '/Users/airlock/agent-os/tools/adversarial-review'  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
+    || resolved === '/Users/placey/agent-os-trees/codex/agent-os/tools/adversarial-review'  // cfg-allowlist(account-placey): oss-readiness-apply-reviewed
+    || resolved === '/Users/placey/agent-os-trees/claude-code/agent-os/tools/adversarial-review';  // cfg-allowlist(account-placey): oss-readiness-apply-reviewed
 }
 
 function timestampOverlapsWindow(startedAt, endedAt, windowStart, windowEnd) {

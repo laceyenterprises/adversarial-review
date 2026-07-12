@@ -47,7 +47,7 @@
 
 set -euo pipefail
 
-AGENT_OS_ROOT="${AGENT_OS_ROOT:-/Users/airlock/agent-os}"
+AGENT_OS_ROOT="${AGENT_OS_ROOT:-/Users/airlock/agent-os}"  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 WATCHER_DIR="$AGENT_OS_ROOT/tools/adversarial-review"
 TICK_INTERVAL_SECONDS="${TICK_INTERVAL_SECONDS:-120}"
 
@@ -182,10 +182,10 @@ _tick_op_read_reviewer_pat() {
     printf '%s' "$result"
     return 0
   fi
-  if [[ -r /Users/airlock/agent-os/.secrets/local/op-service-account.env ]]; then
+  if [[ -r /Users/airlock/agent-os/.secrets/local/op-service-account.env ]]; then  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
     local _fallback_token
     # shellcheck disable=SC1091
-    _fallback_token="$(. /Users/airlock/agent-os/.secrets/local/op-service-account.env >/dev/null 2>&1; printf '%s' "${OP_SERVICE_ACCOUNT_TOKEN:-}")"
+    _fallback_token="$(. /Users/airlock/agent-os/.secrets/local/op-service-account.env >/dev/null 2>&1; printf '%s' "${OP_SERVICE_ACCOUNT_TOKEN:-}")"  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
     if [[ -n "$_fallback_token" ]]; then
       result=$(OP_SERVICE_ACCOUNT_TOKEN="$_fallback_token" /opt/homebrew/bin/op read "$op_ref" 2>/dev/null || true)
       printf '%s' "$result"

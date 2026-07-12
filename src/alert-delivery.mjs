@@ -5,7 +5,7 @@ import http from 'node:http';
 import https from 'node:https';
 
 const DEFAULT_SECRETS_ROOT = join(homedir(), '.config', 'adversarial-review', 'secrets');
-const LEGACY_SECRETS_ROOT = '/Users/airlock/agent-os/agents/clio/credentials/local';
+const LEGACY_SECRETS_ROOT = '/Users/airlock/agent-os/agents/clio/credentials/local';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const DEFAULT_AGENT_GATEWAY_AGENT_HOOKS_URL = 'http://127.0.0.1:18799/hooks/agent';
 const DEFAULT_ALERT_AGENT_ID = 'main';
 const DEFAULT_ALERT_NAME = 'Adversarial Watcher Health';

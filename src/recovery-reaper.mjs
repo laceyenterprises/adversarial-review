@@ -215,27 +215,22 @@ function closerLeaseCursorPath(rootDir) {
   return join(rootDir, ...REAPER_STATE_DIR_SEGMENTS, CLOSER_LEASE_CURSOR_FILE);
 }
 
-function rotateAfterCursor(names, cursorName) {
-  if (names.length === 0) return [];
-  const sorted = [...names].sort((a, b) => a.localeCompare(b));
-  const cursor = typeof cursorName === 'string' ? cursorName : '';
-  const startIndex = sorted.findIndex((name) => name.localeCompare(cursor) > 0);
-  if (startIndex < 0) return sorted;
-  return sorted.slice(startIndex).concat(sorted.slice(0, startIndex));
-}
-
 function readCloserLeaseCursor(rootDir, logger = console) {
   try {
     const parsed = JSON.parse(readFileSync(closerLeaseCursorPath(rootDir), 'utf8'));
     if (parsed && typeof parsed === 'object' && typeof parsed.lastEntryName === 'string') {
-      return parsed.lastEntryName;
+      const entriesSeen = Number(parsed.entriesSeen);
+      return {
+        lastEntryName: parsed.lastEntryName,
+        entriesSeen: Number.isFinite(entriesSeen) && entriesSeen >= 0 ? Math.floor(entriesSeen) : 0,
+      };
     }
   } catch (err) {
     if (err?.code !== 'ENOENT' && !(err instanceof SyntaxError)) {
       logger?.error?.(`[reaper] failed to read closer lease cursor: ${err?.message || err}`);
     }
   }
-  return null;
+  return { lastEntryName: null, entriesSeen: 0 };
 }
 
 function writeJsonAtomic(filePath, value) {
@@ -266,12 +261,13 @@ function writeJsonAtomic(filePath, value) {
   }
 }
 
-function persistCloserLeaseCursor(rootDir, lastEntryName, logger = console) {
-  if (!lastEntryName) return false;
+function persistCloserLeaseCursor(rootDir, { lastEntryName, entriesSeen }, logger = console) {
+  if (!lastEntryName && !entriesSeen) return false;
   try {
     writeJsonAtomic(closerLeaseCursorPath(rootDir), {
-      schemaVersion: 1,
-      lastEntryName,
+      schemaVersion: 2,
+      lastEntryName: lastEntryName || null,
+      entriesSeen: Math.max(0, Math.floor(Number(entriesSeen) || 0)),
       updatedAt: new Date().toISOString(),
     });
     return true;
@@ -283,10 +279,15 @@ function persistCloserLeaseCursor(rootDir, lastEntryName, logger = console) {
 
 function readDirectoryEntryNames(dir, {
   entryScanLimit = DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT,
+  startOffset = 0,
   opendirSyncImpl = opendirSync,
 } = {}) {
   const limit = Math.max(0, Number(entryScanLimit) || 0);
+  const requestedOffset = Math.max(0, Math.floor(Number(startOffset) || 0));
   const names = [];
+  let skippedEntries = 0;
+  let directoryReads = 0;
+  let wrapped = false;
   let iterator = null;
   try {
     iterator = opendirSyncImpl(dir);
@@ -297,7 +298,20 @@ function readDirectoryEntryNames(dir, {
     throw err;
   }
   try {
+    while (skippedEntries < requestedOffset) {
+      directoryReads += 1;
+      const entry = iterator.readSync();
+      if (!entry) {
+        iterator.closeSync?.();
+        iterator = opendirSyncImpl(dir);
+        skippedEntries = 0;
+        wrapped = true;
+        break;
+      }
+      skippedEntries += 1;
+    }
     while (names.length < limit) {
+      directoryReads += 1;
       const entry = iterator.readSync();
       if (!entry) break;
       names.push(entry.name);
@@ -305,7 +319,14 @@ function readDirectoryEntryNames(dir, {
   } finally {
     iterator.closeSync?.();
   }
-  return { names, scannedEntries: names.length };
+  return {
+    names,
+    scannedEntries: names.length,
+    skippedEntries,
+    directoryReads,
+    startOffset: wrapped ? 0 : requestedOffset,
+    wrapped,
+  };
 }
 
 function readLeaseRecords(rootDir, {
@@ -315,18 +336,26 @@ function readLeaseRecords(rootDir, {
   opendirSyncImpl = opendirSync,
 } = {}) {
   const dir = leaseDirPath(rootDir);
-  const discovery = readDirectoryEntryNames(dir, { entryScanLimit, opendirSyncImpl });
-  const cursorName = readCloserLeaseCursor(rootDir, logger);
+  const cursor = readCloserLeaseCursor(rootDir, logger);
+  const discovery = readDirectoryEntryNames(dir, {
+    entryScanLimit,
+    startOffset: cursor.entriesSeen,
+    opendirSyncImpl,
+  });
   const names = discovery.names;
-  const rotatedNames = rotateAfterCursor(names, cursorName);
   const records = [];
   let readRecords = 0;
   let lastEntryName = null;
+  let lastSafeIndex = -1;
   let readLimitReached = false;
   let cursorBlockedByReadFailure = false;
   const maxReads = Math.max(0, Number(readLimit) || 0);
-  for (const name of rotatedNames) {
-    if (!name.endsWith('.json')) continue;
+  for (const [index, name] of names.entries()) {
+    if (!name.endsWith('.json')) {
+      lastEntryName = name;
+      lastSafeIndex = index;
+      continue;
+    }
     if (readRecords >= maxReads) {
       readLimitReached = true;
       break;
@@ -337,6 +366,7 @@ function readLeaseRecords(rootDir, {
       const lease = JSON.parse(readFileSync(path, 'utf8'));
       if (lease && typeof lease === 'object') records.push({ ...lease, _path: path });
       lastEntryName = name;
+      lastSafeIndex = index;
     } catch (err) {
       if (err instanceof SyntaxError) {
         let mtimeMs = null;
@@ -354,6 +384,7 @@ function readLeaseRecords(rootDir, {
           updatedAt: 0,
         });
         lastEntryName = name;
+        lastSafeIndex = index;
       } else {
         logger?.error?.(`[reaper] failed to read lease ${path}: ${err?.message || err}`);
         cursorBlockedByReadFailure = true;
@@ -361,13 +392,22 @@ function readLeaseRecords(rootDir, {
       }
     }
   }
-  if (!readLimitReached && !cursorBlockedByReadFailure && rotatedNames.length > 0) {
-    lastEntryName = rotatedNames.at(-1);
+  if (discovery.wrapped && names.length === 0) {
+    lastEntryName = null;
+    lastSafeIndex = -1;
   }
-  const cursorPersisted = persistCloserLeaseCursor(rootDir, lastEntryName, logger);
+  const entriesSeen = lastSafeIndex >= 0
+    ? discovery.startOffset + lastSafeIndex + 1
+    : discovery.startOffset;
+  const cursorPersisted = !cursorBlockedByReadFailure && (readLimitReached || names.length > 0 || discovery.wrapped)
+    ? persistCloserLeaseCursor(rootDir, { lastEntryName, entriesSeen }, logger)
+    : false;
   return {
     records,
     scannedEntries: discovery.scannedEntries,
+    skippedEntries: discovery.skippedEntries,
+    directoryReads: discovery.directoryReads,
+    cursorEntriesSeen: entriesSeen,
     readRecords,
     cursorPersisted,
     lastEntryName,
@@ -477,6 +517,9 @@ export function reapStaleCloserLeases({
     budgetsReset,
     leases: releasable,
     scannedEntries: discovery.scannedEntries,
+    skippedEntries: discovery.skippedEntries,
+    directoryReads: discovery.directoryReads,
+    cursorEntriesSeen: discovery.cursorEntriesSeen,
     readRecords: discovery.readRecords,
     cursorPersisted: discovery.cursorPersisted,
   };

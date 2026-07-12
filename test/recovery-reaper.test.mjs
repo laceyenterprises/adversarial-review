@@ -64,6 +64,33 @@ function makeOpendirSequence(pages, counters = []) {
   };
 }
 
+function makeOpendirFromListing(getNames, counters = []) {
+  return () => {
+    const page = [...getNames()];
+    let readIndex = 0;
+    const counter = { reads: 0, closed: false, page };
+    counters.push(counter);
+    return {
+      readSync() {
+        counter.reads += 1;
+        if (readIndex >= page.length) return null;
+        const name = page[readIndex];
+        readIndex += 1;
+        return { name };
+      },
+      closeSync() {
+        counter.closed = true;
+      },
+    };
+  };
+}
+
+function writeCloserLeaseCursor(rootDir, cursor) {
+  const path = join(rootDir, 'data', 'recovery-reaper', 'closer-lease-cursor.json');
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(cursor, null, 2)}\n`);
+}
+
 // ---------------------------------------------------------------------------
 // Config resolvers + env aliases
 // ---------------------------------------------------------------------------
@@ -368,12 +395,13 @@ test('reapStaleCloserLeases keeps lease when transient budget reset cannot be pe
   assert.ok(errors.some((line) => line.includes('failed to reset transient-exhausted closer budget')));
 });
 
-test('reapStaleCloserLeases processes all-json leases across bounded passes when entry scan exceeds read limit', async (t) => {
+test('reapStaleCloserLeases processes more than two opendir pages across watcher restarts', async (t) => {
   const rootDir = tempRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
   const leaseNames = [];
-  for (let i = 1; i <= 4; i += 1) {
+  const leasePaths = [];
+  for (let i = 1; i <= 7; i += 1) {
     const path = writeLease(rootDir, {
       repo: `acme/lease-00${i}`,
       prNumber: i,
@@ -385,51 +413,178 @@ test('reapStaleCloserLeases processes all-json leases across bounded passes when
       watcherPid: 31337,
     });
     leaseNames.push(path.split('/').at(-1));
+    leasePaths.push(path);
   }
-  const finalPath = writeLease(rootDir, {
-    repo: 'acme/lease-005',
-    prNumber: 5,
-    headSha: 'lease5',
-    status: 'dispatched',
-    terminalOutcome: null,
-    acquiredAt: hoursAgo(20),
-    updatedAt: hoursAgo(20),
-    watcherPid: 31337,
-  });
-  leaseNames.push(finalPath.split('/').at(-1));
 
   const sorted = [...leaseNames].sort((a, b) => a.localeCompare(b));
   const counters = [];
-  const opendirSyncImpl = makeOpendirSequence([
-    sorted.slice(0, 4),
-    sorted.slice(0, 4),
-    [sorted[4], ...sorted.slice(0, 3)],
-  ], counters);
+  const opendirSyncImpl = makeOpendirFromListing(() => sorted, counters);
 
+  const opts = {
+    rootDir,
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    entryScanLimit: 3,
+    readLimit: 3,
+    opendirSyncImpl,
+    logger: { warn() {}, error() {} },
+  };
+  const pass1 = await reapStaleCloserLeases(opts);
+  const pass2 = await reapStaleCloserLeases(opts);
+  const pass3 = await reapStaleCloserLeases(opts);
+  assert.equal(pass1.released, 3);
+  assert.equal(pass2.released, 3, 'cursor position resumes enumeration beyond the first opendir page');
+  assert.equal(pass3.released, 1, 'third bounded page is reached after restart-style fresh opendir');
+  assert.ok(leasePaths.every((path) => !existsSync(path)), 'all leases across three pages are eventually released');
+  for (const pass of [pass1, pass2, pass3]) {
+    assert.ok(pass.scannedEntries <= 3, 'entry scan stays capped per pass');
+    assert.ok(pass.readRecords <= 3, 'lease reads stay capped per pass');
+  }
+  assert.ok(counters.every((counter) => counter.closed), 'directory iterators are closed after bounded passes');
+});
+
+test('reapStaleCloserLeases does not advance cursor past unread JSON when read limit is lower than entry scan', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const leaseNames = [];
+  for (let i = 1; i <= 5; i += 1) {
+    const path = writeLease(rootDir, {
+      repo: `acme/read-boundary-00${i}`,
+      prNumber: i,
+      headSha: `boundary${i}`,
+      status: 'dispatched',
+      terminalOutcome: null,
+      acquiredAt: hoursAgo(20),
+      updatedAt: hoursAgo(20),
+      watcherPid: 31337,
+    });
+    leaseNames.push(path.split('/').at(-1));
+  }
+
+  const sorted = [...leaseNames].sort((a, b) => a.localeCompare(b));
   const opts = {
     rootDir,
     now: NOW,
     thresholdMs: 6 * 60 * 60 * 1000,
     entryScanLimit: 4,
     readLimit: 2,
+    opendirSyncImpl: makeOpendirFromListing(() => sorted),
+    logger: { warn() {}, error() {} },
+  };
+
+  const pass1 = await reapStaleCloserLeases(opts);
+  const pass2 = await reapStaleCloserLeases(opts);
+  const pass3 = await reapStaleCloserLeases(opts);
+
+  assert.equal(pass1.released, 2);
+  assert.equal(pass1.cursorEntriesSeen, 2, 'cursor stops at last read JSON, not the scanned page end');
+  assert.equal(pass2.released, 2, 'unread JSON leases from pass 1 are processed on the next pass');
+  assert.equal(pass2.cursorEntriesSeen, 4);
+  assert.equal(pass3.released, 1);
+});
+
+test('reapStaleCloserLeases handles insertion and deletion around the saved cursor', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const paths = new Map();
+  for (const [name, prNumber] of [['a', 1], ['b', 2], ['c', 3], ['d', 4], ['e', 5]]) {
+    const path = writeLease(rootDir, {
+      repo: `acme/mutate-${name}`,
+      prNumber,
+      headSha: `mutate${name}`,
+      status: 'dispatched',
+      terminalOutcome: null,
+      acquiredAt: hoursAgo(20),
+      updatedAt: hoursAgo(20),
+      watcherPid: 31337,
+    });
+    paths.set(name, path);
+  }
+
+  let listing = [...paths.values()].map((path) => path.split('/').at(-1)).sort((a, b) => a.localeCompare(b));
+  const opendirSyncImpl = makeOpendirFromListing(() => listing);
+  const opts = {
+    rootDir,
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    entryScanLimit: 2,
+    readLimit: 2,
     opendirSyncImpl,
     logger: { warn() {}, error() {} },
   };
-  const pass1 = await reapStaleCloserLeases(opts);
-  const pass2 = await reapStaleCloserLeases(opts);
-  assert.equal(pass1.released, 2);
-  assert.equal(pass2.released, 2, 'cursor did not advance past JSON leases skipped by the read limit');
-  assert.equal(existsSync(finalPath), true, 'lease outside the first bounded page is still pending');
 
+  const pass1 = await reapStaleCloserLeases(opts);
+  assert.equal(pass1.released, 2);
+
+  const insertedPath = writeLease(rootDir, {
+    repo: 'acme/mutate-aa',
+    prNumber: 6,
+    headSha: 'mutateaa',
+    status: 'dispatched',
+    terminalOutcome: null,
+    acquiredAt: hoursAgo(20),
+    updatedAt: hoursAgo(20),
+    watcherPid: 31337,
+  });
+  rmSync(paths.get('c'), { force: true });
+  listing = [insertedPath, paths.get('d'), paths.get('e')]
+    .map((path) => path.split('/').at(-1))
+    .sort((a, b) => a.localeCompare(b));
+
+  const pass2 = await reapStaleCloserLeases(opts);
+  assert.equal(pass2.released, 1, 'cursor position keeps moving after deletion before the cursor');
+  assert.equal(existsSync(paths.get('d')), true, 'shifted entry may wait for cursor wrap, but is not lost');
+
+  listing = [insertedPath, paths.get('d')]
+    .map((path) => path.split('/').at(-1))
+    .sort((a, b) => a.localeCompare(b));
   const pass3 = await reapStaleCloserLeases(opts);
-  assert.equal(pass3.released, 1);
-  assert.equal(existsSync(finalPath), false, 'cursor rotation eventually reaches the remaining lease');
-  for (const pass of [pass1, pass2, pass3]) {
-    assert.ok(pass.scannedEntries <= 4, 'entry scan stays capped per pass');
-    assert.ok(pass.readRecords <= 2, 'lease reads stay capped per pass');
+  assert.equal(pass3.released, 2, 'cursor wrap gives eventual coverage to inserted and shifted leases');
+  assert.equal(existsSync(insertedPath), false);
+  assert.equal(existsSync(paths.get('d')), false);
+});
+
+test('reapStaleCloserLeases resumes by saved position when the saved cursor target is missing', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const leasePaths = [];
+  for (let i = 1; i <= 4; i += 1) {
+    leasePaths.push(writeLease(rootDir, {
+      repo: `acme/missing-cursor-00${i}`,
+      prNumber: i,
+      headSha: `missing${i}`,
+      status: 'dispatched',
+      terminalOutcome: null,
+      acquiredAt: hoursAgo(20),
+      updatedAt: hoursAgo(20),
+      watcherPid: 31337,
+    }));
   }
-  assert.deepEqual(counters.map((counter) => counter.reads), [4, 4, 4]);
-  assert.ok(counters.every((counter) => counter.closed), 'directory iterators are closed after bounded passes');
+  const sorted = leasePaths.map((path) => path.split('/').at(-1)).sort((a, b) => a.localeCompare(b));
+  writeCloserLeaseCursor(rootDir, {
+    schemaVersion: 2,
+    lastEntryName: 'deleted-cursor-target.json',
+    entriesSeen: 2,
+  });
+
+  const result = await reapStaleCloserLeases({
+    rootDir,
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    entryScanLimit: 2,
+    readLimit: 2,
+    opendirSyncImpl: makeOpendirFromListing(() => sorted),
+    logger: { warn() {}, error() {} },
+  });
+
+  assert.equal(result.released, 2);
+  assert.equal(existsSync(leasePaths[0]), true, 'entries before the saved position wait for wrap');
+  assert.equal(existsSync(leasePaths[1]), true, 'entries before the saved position wait for wrap');
+  assert.equal(existsSync(leasePaths[2]), false);
+  assert.equal(existsSync(leasePaths[3]), false);
 });
 
 test('reapStaleCloserLeases consumes at most its entry budget from the directory iterator', async (t) => {

@@ -4139,6 +4139,9 @@ async function postGitHubReviewWithCapture({
   if (!initialToken) {
     throw new Error(`Missing env var: ${botTokenEnv}`);
   }
+  if (!String(reviewerHeadSha || '').trim()) {
+    throw new Error(`Cannot post reviewed attestation for ${repo}#${prNumber}: reviewerHeadSha is required`);
+  }
 
   await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
     rootDir,
@@ -4182,27 +4185,20 @@ async function postGitHubReviewWithCapture({
     log,
   });
 
-  try {
-    await emitReviewedAttestation({
-      repo,
-      prNumber,
-      headSha: reviewerHeadSha,
-      reviewerIdentity: resolveReviewerIdentityForBotTokenEnv(
-        botTokenEnv,
-        reviewerIdentity || reviewerModel
-      ),
-      verdict: normalizedVerdict,
-      reviewBody,
-      execFileImpl: attestExecFileImpl,
-      env: process.env,
-      log,
-    });
-  } catch (err) {
-    log.warn?.(
-      `[reviewer] reviewed attestation emission skipped for ${repo}#${prNumber}@${reviewerHeadSha || '<unknown-head>'}: ` +
-        `${err?.message || err}`
-    );
-  }
+  await emitReviewedAttestation({
+    repo,
+    prNumber,
+    headSha: reviewerHeadSha,
+    reviewerIdentity: resolveReviewerIdentityForBotTokenEnv(
+      botTokenEnv,
+      reviewerIdentity || reviewerModel
+    ),
+    verdict: normalizedVerdict,
+    reviewBody,
+    execFileImpl: attestExecFileImpl,
+    env: process.env,
+    log,
+  });
 }
 
 // ── Clio alert (OAuth failure) ───────────────────────────────────────────────

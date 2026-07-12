@@ -5,6 +5,21 @@ import { classifyStructuredBlockingIssues } from './kernel/verdict.mjs';
 
 const execFileAsync = promisify(execFile);
 const REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS = 15_000;
+const REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS = 3;
+const REVIEWED_ATTESTATION_SIGN_RETRY_DELAY_MS = 250;
+
+function isTransientSignError(err) {
+  const code = String(err?.code || '').toUpperCase();
+  if (['EAGAIN', 'EBUSY', 'ECONNRESET', 'EIO', 'EMFILE', 'ENFILE', 'ETIMEDOUT'].includes(code)) {
+    return true;
+  }
+  const message = String(err?.message || err || '').toLowerCase();
+  return /resource temporarily unavailable|timed? out|timeout|tls handshake|socket hang up/.test(message);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function normalizeFindingsCount(reviewBody) {
   const blocking = classifyStructuredBlockingIssues(reviewBody || '');
@@ -54,28 +69,40 @@ async function signReviewedAttestation({
   execFileImpl = execFileAsync,
   env = process.env,
   timeoutMs = REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS,
+  maxAttempts = REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS,
+  retryDelayMs = REVIEWED_ATTESTATION_SIGN_RETRY_DELAY_MS,
+  delayImpl = delay,
 } = {}) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     throw new TypeError('payload object is required');
   }
   const serialized = `${JSON.stringify(payload)}\n`;
-  const { stdout } = await execFileImpl(
-    hqPath,
-    ['attest', 'sign', '--payload', '-'],
-    {
-      env,
-      input: serialized,
-      timeout: timeoutMs,
-      maxBuffer: 1024 * 1024,
+  let stdout;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      ({ stdout } = await execFileImpl(
+        hqPath,
+        ['attest', 'sign', '--payload', '-'],
+        {
+          env,
+          input: serialized,
+          timeout: timeoutMs,
+          maxBuffer: 1024 * 1024,
+        }
+      ));
+      break;
+    } catch (err) {
+      if (attempt >= maxAttempts || !isTransientSignError(err)) throw err;
+      await delayImpl(retryDelayMs * attempt);
     }
-  );
+  }
   const trimmed = String(stdout || '').trim();
-  if (!trimmed) return null;
+  if (!trimmed) throw new Error('hq attest sign returned empty output');
   let signed;
   try {
     signed = JSON.parse(trimmed);
-  } catch {
-    return trimmed;
+  } catch (err) {
+    throw new Error(`hq attest sign returned invalid JSON: ${err.message}`, { cause: err });
   }
   validateSignedReviewedAttestation(signed, payload);
   return signed;
@@ -148,10 +175,13 @@ async function emitReviewedAttestation({
 }
 
 export {
+  REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS,
+  REVIEWED_ATTESTATION_SIGN_RETRY_DELAY_MS,
   REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS,
   buildReviewedAttestationPayload,
   emitReviewedAttestation,
   normalizeFindingsCount,
+  isTransientSignError,
   signReviewedAttestation,
   validateSignedReviewedAttestation,
 };

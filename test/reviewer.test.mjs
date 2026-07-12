@@ -7,6 +7,7 @@ import { CLAUDE_CLI, GEMINI_CLI, AGY_CLI, __test__ } from '../src/reviewer.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
+import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import {
   AGY_TRANSIENT_REMEDIATION,
   clearAgyReviewerAuthCache,
@@ -284,13 +285,20 @@ test('postGitHubReviewWithCapture propagates signing failure after posting for w
   const rootDir = mkdtempSync(join(tmpdir(), 'review-post-attestation-failure-'));
   mkdirSync(join(rootDir, 'data'), { recursive: true });
   try {
+    beginReviewerPass(rootDir, {
+      repo: 'laceyenterprises/demo',
+      prNumber: 42,
+      attemptNumber: 1,
+      reviewerClass: 'codex',
+      reviewerModel: 'codex',
+      passKind: 'first-pass',
+    });
     let postCalls = 0;
     await withEnvAsync({
       GHA_ADAPTER_BIN: '/fixture/github-adapter',
       GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
     }, async () => {
-      await assert.rejects(
-        postGitHubReviewWithCapture({
+      const postAndFailSigning = () => postGitHubReviewWithCapture({
           rootDir,
           repo: 'laceyenterprises/demo',
           prNumber: 42,
@@ -308,9 +316,9 @@ test('postGitHubReviewWithCapture propagates signing failure after posting for w
             throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
           },
           prepareReviewWrite: async () => {},
-        }),
-        /permission denied/
-      );
+        });
+      await assert.rejects(postAndFailSigning(), /permission denied/);
+      await assert.rejects(postAndFailSigning(), /permission denied/);
     });
     assert.equal(postCalls, 1);
   } finally {

@@ -122,13 +122,43 @@ test('reviewed attestation signing retries transient subprocess failures with bo
     execFileImpl: async () => {
       attempts += 1;
       if (attempts < 3) throw Object.assign(new Error('resource temporarily unavailable'), { code: 'EAGAIN' });
-      return { stdout: JSON.stringify(payload) };
+      return { stdout: JSON.stringify({
+        ...payload,
+        signature: { verified: true, hcp_subject: payload.reviewer_identity },
+      }) };
     },
   });
 
   assert.equal(attempts, 3);
   assert.deepEqual(delays, [10, 20]);
   assert.equal(signed.head_sha, payload.head_sha);
+});
+
+test('reviewed attestation signing rejects unsigned and incomplete signer output', async () => {
+  const payload = buildReviewedAttestationPayload({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 3491,
+    headSha: 'def456',
+    reviewerIdentity: 'codex-reviewer-lacey',
+    verdict: 'comment-only',
+  });
+  await assert.rejects(
+    signReviewedAttestation({
+      payload,
+      execFileImpl: async () => ({ stdout: JSON.stringify(payload) }),
+    }),
+    /signature missing or did not verify/
+  );
+  const { kind: _kind, ...withoutKind } = payload;
+  await assert.rejects(
+    signReviewedAttestation({
+      payload,
+      execFileImpl: async () => ({
+        stdout: JSON.stringify({ ...withoutKind, signature: { verified: true } }),
+      }),
+    }),
+    /kind mismatch/
+  );
 });
 
 test('reviewed attestation signing does not retry permanent subprocess failures', async () => {

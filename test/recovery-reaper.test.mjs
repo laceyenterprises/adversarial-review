@@ -391,8 +391,17 @@ test('reapStaleCloserLeases keeps lease when transient budget reset cannot be pe
 
   assert.equal(result.released, 0, 'lease retained so reset can be retried on the next tick');
   assert.equal(result.budgetsReset, 0);
+  assert.equal(result.cursorPersisted, false, 'cursor stays put when a lease cannot be released');
   assert.equal(existsSync(leasePath), true, 'failed reset does not remove the recovery trigger');
   assert.ok(errors.some((line) => line.includes('failed to reset transient-exhausted closer budget')));
+
+  chmodSync(dirname(recordPath), 0o755);
+  const retry = await reapStaleCloserLeases({
+    rootDir, now: NOW, thresholdMs: 6 * 60 * 60 * 1000,
+    logger: { warn() {}, error() {} },
+  });
+  assert.equal(retry.released, 1, 'retained lease is retried on the next sweep');
+  assert.equal(retry.cursorPersisted, true, 'cursor advances only after the retry releases the lease');
 });
 
 test('reapStaleCloserLeases processes more than two opendir pages across watcher restarts', async (t) => {

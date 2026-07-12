@@ -402,9 +402,6 @@ function readLeaseRecords(rootDir, {
     lastSafeIndex = -1;
   }
   const entriesSeen = lastSafeIndex >= 0 ? lastSafeIndex + 1 : 0;
-  const cursorPersisted = !cursorBlockedByReadFailure && (readLimitReached || names.length > 0 || discovery.wrapped)
-    ? persistCloserLeaseCursor(rootDir, { lastEntryName, entriesSeen }, logger)
-    : false;
   return {
     records,
     scannedEntries: discovery.scannedEntries,
@@ -412,7 +409,8 @@ function readLeaseRecords(rootDir, {
     directoryReads: discovery.directoryReads,
     cursorEntriesSeen: entriesSeen,
     readRecords,
-    cursorPersisted,
+    cursorCanAdvance: !cursorBlockedByReadFailure
+      && (readLimitReached || names.length > 0 || discovery.wrapped),
     lastEntryName,
   };
 }
@@ -487,10 +485,12 @@ export function reapStaleCloserLeases({
   });
   let released = 0;
   let budgetsReset = 0;
+  let releaseFailed = false;
   for (const lease of releasable) {
     if (lease._isCorrupt !== true) {
       const resetStatus = resetTransientExhaustedCloserBudget(rootDir, lease, logger);
       if (resetStatus === 'failed') {
+        releaseFailed = true;
         continue;
       }
       if (resetStatus === 'reset') {
@@ -512,9 +512,16 @@ export function reapStaleCloserLeases({
         );
       }
     } catch (err) {
+      releaseFailed = true;
       logger?.error?.(`[reaper] failed to release lease ${lease._path}: ${err?.message || err}`);
     }
   }
+  const cursorPersisted = discovery.cursorCanAdvance && !releaseFailed
+    ? persistCloserLeaseCursor(rootDir, {
+      lastEntryName: discovery.lastEntryName,
+      entriesSeen: discovery.cursorEntriesSeen,
+    }, logger)
+    : false;
   return {
     released,
     budgetsReset,
@@ -524,7 +531,7 @@ export function reapStaleCloserLeases({
     directoryReads: discovery.directoryReads,
     cursorEntriesSeen: discovery.cursorEntriesSeen,
     readRecords: discovery.readRecords,
-    cursorPersisted: discovery.cursorPersisted,
+    cursorPersisted,
   };
 }
 

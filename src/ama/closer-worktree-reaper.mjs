@@ -65,34 +65,21 @@ async function listHqRepoPaths(hqRoot, { scanLimit = DEFAULT_SCAN_LIMIT } = {}) 
     throw err;
   });
   return entries
-    .slice(0, scanLimit)
     .filter((entry) => entry.isDirectory())
+    .slice(0, scanLimit)
     .map((entry) => join(reposDir, entry.name));
 }
 
-async function listHammerWorkerDirs(hqRoot, { scanLimit = DEFAULT_SCAN_LIMIT, now = Date.now(), recencyMs = 14 * 24 * 60 * 60 * 1000 } = {}) {
+async function listHammerWorkerDirs(hqRoot, { scanLimit = DEFAULT_SCAN_LIMIT } = {}) {
   const workersDir = join(hqRoot, 'workers');
   if (!existsSync(workersDir)) return [];
   const entries = await fsPromises.readdir(workersDir, { withFileTypes: true }).catch((err) => {
     if (err?.code === 'ENOENT') return [];
     throw err;
   });
-  const cutoff = now - recencyMs;
-  const workerEntries = [];
-  for (const entry of entries.slice(0, scanLimit)) {
-    if (!entry.isDirectory() || !HAMMER_WORKER_RE.test(entry.name)) continue;
-    const workerDir = join(workersDir, entry.name);
-    try {
-      const stat = await fsPromises.stat(workerDir);
-      if (stat.mtimeMs < cutoff) continue;
-    } catch (err) {
-      if (err?.code === 'ENOENT') continue;
-      throw err;
-    }
-    workerEntries.push(entry);
-  }
-  return workerEntries
+  return entries
     .filter((entry) => entry.isDirectory() && HAMMER_WORKER_RE.test(entry.name))
+    .slice(0, scanLimit)
     .map((entry) => {
       const workerDir = join(workersDir, entry.name);
       const worktreePath = join(workerDir, 'agent-os');

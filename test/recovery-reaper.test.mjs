@@ -361,6 +361,36 @@ test('reapStaleCloserLeases skips filesystem read errors instead of treating the
   assert.ok(errors.some((line) => line.includes('failed to read lease')), 'read failure logged for retry after wrap');
 });
 
+test('reapStaleCloserLeases does not starve stale leases behind many active leases', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  for (let index = 0; index < 500; index += 1) {
+    writeLease(rootDir, {
+      repo: `aaa/active-${String(index).padStart(3, '0')}`,
+      prNumber: index + 1,
+      headSha: `active-${index}`,
+      status: 'dispatched',
+      terminalOutcome: null,
+      updatedAt: hoursAgo(1),
+    });
+  }
+  const stalePath = writeLease(rootDir, {
+    repo: 'zzz/stale', prNumber: 999, headSha: 'stale', status: 'dispatched',
+    terminalOutcome: null, updatedAt: hoursAgo(20),
+  });
+
+  const result = await reapStaleCloserLeases({
+    rootDir,
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    logger: { warn() {}, error() {} },
+  });
+
+  assert.equal(result.released, 1);
+  assert.equal(existsSync(stalePath), false);
+});
+
 test('reapStaleCloserLeases keeps lease when transient budget reset cannot be persisted', async (t) => {
   const rootDir = tempRoot();
   t.after(() => {

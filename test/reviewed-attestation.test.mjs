@@ -163,6 +163,41 @@ test('reviewed attestation signing retries transient subprocess failures with bo
   assert.equal(signed.head_sha, payload.head_sha);
 });
 
+test('reviewed attestation signing retries subprocesses killed by execFile timeout', async () => {
+  const delays = [];
+  let attempts = 0;
+  const payload = buildReviewedAttestationPayload({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 3491,
+    headSha: 'def456',
+    reviewerIdentity: 'codex-reviewer-lacey',
+    verdict: 'comment-only',
+  });
+
+  const signed = await signReviewedAttestation({
+    payload,
+    retryDelayMs: 10,
+    delayImpl: async (ms) => delays.push(ms),
+    execFileImpl: async () => {
+      attempts += 1;
+      if (attempts < 3) {
+        throw Object.assign(new Error('Command failed: hq attest sign'), {
+          killed: true,
+          signal: 'SIGTERM',
+        });
+      }
+      return { stdout: JSON.stringify({
+        ...payload,
+        signature: { verified: true, hcp_subject: payload.payload.reviewer_identity },
+      }) };
+    },
+  });
+
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [10, 20]);
+  assert.equal(signed.head_sha, payload.head_sha);
+});
+
 test('reviewed attestation signing rejects unsigned and incomplete signer output', async () => {
   const payload = buildReviewedAttestationPayload({
     repo: 'laceyenterprises/agent-os',

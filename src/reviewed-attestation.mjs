@@ -9,6 +9,7 @@ const REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS = 3;
 const REVIEWED_ATTESTATION_SIGN_RETRY_DELAY_MS = 250;
 
 function isTransientSignError(err) {
+  if (err?.killed === true) return true;
   const code = String(err?.code || '').toUpperCase();
   if (['EAGAIN', 'EBUSY', 'ECONNRESET', 'EIO', 'EMFILE', 'ENFILE', 'ETIMEDOUT'].includes(code)) {
     return true;

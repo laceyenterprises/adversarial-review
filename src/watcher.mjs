@@ -9294,7 +9294,7 @@ async function main() {
   // `pending|dispatched`/`terminalOutcome=null`. Age-gated reaping releases
   // both so PRs re-review and closers re-dispatch instead of wedging until a
   // manual rescue. Never throws — a reaper failure must not block polling.
-  runStartupStaleStateReaper({
+  await runStartupStaleStateReaper({
     rootDir: ROOT,
     db,
     env: process.env,

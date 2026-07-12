@@ -58,6 +58,7 @@ test('closer worktree reaper removes merged hammer worktrees and skips open regi
 
   const result = await reapCloserHammerWorktrees({
     hqRoot,
+    cursorPath: join(root, 'cursor.json'),
     hqPath: '/bin/hq',
     repoPaths: [repoPath],
     execFileImpl,
@@ -100,6 +101,7 @@ test('closer worktree reaper removes half-registered disk leftovers without quer
   const calls = [];
   const result = await reapCloserHammerWorktrees({
     hqRoot,
+    cursorPath: join(root, 'cursor.json'),
     hqPath: '/bin/hq',
     repoPaths: [repoPath],
     execFileImpl: async (cmd, args) => {
@@ -135,6 +137,7 @@ test('closer worktree reaper removes prunable worktrees regardless of PR state',
 
   const result = await reapCloserHammerWorktrees({
     hqRoot,
+    cursorPath: join(root, 'cursor.json'),
     hqPath: '/bin/hq',
     repoPaths: [repoPath],
     execFileImpl: async (cmd, args) => {
@@ -164,6 +167,83 @@ test('closer worktree reaper removes prunable worktrees regardless of PR state',
 
   assert.equal(result.reaped, 1);
   assert.equal(result.prunable, 1);
+});
+
+test('closer worktree reaper does not let active matching workers shield later stale workers', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-large-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const workersRoot = join(hqRoot, 'workers');
+  const repoPath = join(hqRoot, 'repos', 'agent-os');
+  mkdirSync(repoPath, { recursive: true });
+  for (let index = 0; index < 100; index += 1) {
+    mkdirSync(
+      join(workersRoot, `hammer-ama-pr-${String(1_000 + index)}-active`, 'agent-os'),
+      { recursive: true },
+    );
+  }
+  mkdirSync(join(workersRoot, 'hammer-ama-pr-9999-stale', 'agent-os'), { recursive: true });
+
+  const cursorPath = join(root, 'cursor.json');
+  const scanCounts = [];
+  let reaped = 0;
+  let halfRegistered = 0;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const result = await reapCloserHammerWorktrees({
+      hqRoot,
+      hqPath: '/bin/hq',
+      cursorPath,
+      repoPaths: [repoPath],
+      scanLimit: 50,
+      execFileImpl: async (cmd, args) => {
+        if (cmd === 'git' && args.includes('list')) {
+          return {
+            stdout: Array.from({ length: 100 }, (_, index) => [
+              `worktree ${join(workersRoot, `hammer-ama-pr-${String(1_000 + index)}-active`, 'agent-os')}`,
+              `branch refs/heads/active-${index}`,
+              '',
+            ].join('\n')).join('\n'),
+            stderr: '',
+          };
+        }
+        if (cmd === 'git' && args.includes('get-url')) return { stdout: 'https://github.com/x/y.git\n', stderr: '' };
+        return { stdout: '{}', stderr: '' };
+      },
+      execGhWithRetryImpl: async () => ({
+        stdout: JSON.stringify({ state: 'OPEN', mergedAt: null, closedAt: null }),
+      }),
+      limit: 10,
+      logger: { info() {}, warn() {} },
+    });
+    scanCounts.push(result.scanned);
+    reaped += result.reaped;
+    halfRegistered += result.halfRegistered;
+  }
+
+  assert.deepEqual(scanCounts, [50, 50, 1]);
+  assert.equal(reaped, 1);
+  assert.equal(halfRegistered, 1);
+});
+
+test('closer worktree discovery skips unreadable or non-directory roots', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-unreadable-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const warnings = [];
+  const result = await reapCloserHammerWorktrees({
+    hqRoot: join(root, 'hq'),
+    cursorPath: join(root, 'cursor.json'),
+    readdirImpl: async (path) => {
+      const err = new Error('unreadable');
+      err.code = path.endsWith('/repos') ? 'EACCES' : 'ENOTDIR';
+      throw err;
+    },
+    logger: { info() {}, warn(message) { warnings.push(message); } },
+  });
+
+  assert.equal(result.scanned, 0);
+  assert.equal(result.cursorPersisted, true);
+  assert.equal(warnings.some((message) => message.includes('code=EACCES')), true);
+  assert.equal(warnings.some((message) => message.includes('code=ENOTDIR')), true);
 });
 
 test('closer worktree parser handles porcelain and GitHub remote URLs', () => {

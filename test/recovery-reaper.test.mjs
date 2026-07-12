@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, promises as fsPromises, readFileSync, rmSync, utimesSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -147,7 +147,7 @@ test('selectStaleRunningReviewerPasses: only running + un-ended + aged rows', ()
 // DB driver: reapStaleRunningReviewerPasses
 // ---------------------------------------------------------------------------
 
-test('reapStaleRunningReviewerPasses marks aged running passes abandoned (re-review unblocked)', (t) => {
+test('reapStaleRunningReviewerPasses marks aged running passes abandoned (re-review unblocked)', async (t) => {
   const rootDir = tempRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const db = openReviewStateDb(rootDir);
@@ -359,6 +359,84 @@ test('reapStaleCloserLeases skips filesystem read errors instead of treating the
   assert.equal(result.leases.length, 0);
   assert.equal(result.cursorPersisted, true, 'read errors cannot pin the current page forever');
   assert.ok(errors.some((line) => line.includes('failed to read lease')), 'read failure logged for retry after wrap');
+});
+
+test('reapStaleCloserLeases does not starve stale leases behind many active leases', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  for (let index = 0; index < 500; index += 1) {
+    writeLease(rootDir, {
+      repo: `aaa/active-${String(index).padStart(3, '0')}`,
+      prNumber: index + 1,
+      headSha: `active-${index}`,
+      status: 'dispatched',
+      terminalOutcome: null,
+      updatedAt: hoursAgo(1),
+    });
+  }
+  const stalePath = writeLease(rootDir, {
+    repo: 'zzz/stale', prNumber: 999, headSha: 'stale', status: 'dispatched',
+    terminalOutcome: null, updatedAt: hoursAgo(20),
+  });
+
+  let released = 0;
+  for (let pass = 0; pass < 12 && released === 0; pass += 1) {
+    const result = await reapStaleCloserLeases({
+      rootDir,
+      now: NOW,
+      thresholdMs: 6 * 60 * 60 * 1000,
+      entryScanLimit: 50,
+      readLimit: 50,
+      logger: { warn() {}, error() {} },
+    });
+    assert.ok(result.scannedEntries <= 50);
+    assert.ok(result.readRecords <= 50);
+    released += result.released;
+  }
+
+  assert.equal(released, 1);
+  assert.equal(existsSync(stalePath), false);
+});
+
+test('reapStaleCloserLeases bounds concurrent lease reads', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  for (let index = 0; index < 6; index += 1) {
+    writeLease(rootDir, {
+      repo: `acme/concurrency-${index}`,
+      prNumber: index + 1,
+      headSha: `head-${index}`,
+      status: 'dispatched',
+      terminalOutcome: null,
+      updatedAt: hoursAgo(1),
+    });
+  }
+
+  let activeReads = 0;
+  let maxActiveReads = 0;
+  const result = await reapStaleCloserLeases({
+    rootDir,
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    entryScanLimit: 6,
+    readLimit: 6,
+    readConcurrency: 2,
+    readFileImpl: async (...args) => {
+      activeReads += 1;
+      maxActiveReads = Math.max(maxActiveReads, activeReads);
+      try {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+        return await fsPromises.readFile(...args);
+      } finally {
+        activeReads -= 1;
+      }
+    },
+    logger: { warn() {}, error() {} },
+  });
+
+  assert.equal(result.readRecords, 6);
+  assert.equal(maxActiveReads, 2);
 });
 
 test('reapStaleCloserLeases keeps lease when transient budget reset cannot be persisted', async (t) => {

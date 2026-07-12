@@ -31,10 +31,10 @@ import {
   mkdirSync,
   openSync,
   opendirSync,
+  promises as fsPromises,
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
@@ -47,7 +47,6 @@ import {
 } from './ama/dispatch-closer.mjs';
 
 const HOUR_MS = 60 * 60 * 1000;
-
 // Defaults are deliberately multi-hour: a healthy reviewer pass or closer
 // dispatch completes in minutes, so a 6h floor never races live work and still
 // recovers same-day after an outage.
@@ -365,11 +364,29 @@ function readDirectoryEntryNames(dir, {
   };
 }
 
-function readLeaseRecords(rootDir, {
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  const workerCount = Math.min(items.length, Math.max(1, Number(concurrency) || 1));
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
+
+async function readLeaseRecords(rootDir, {
   logger = console,
   entryScanLimit = DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT,
   readLimit = DEFAULT_CLOSER_LEASE_READ_LIMIT,
+  readConcurrency = 8,
   opendirSyncImpl = opendirSync,
+  readFileImpl = fsPromises.readFile,
+  statImpl = fsPromises.stat,
 } = {}) {
   const dir = leaseDirPath(rootDir);
   const cursor = readCloserLeaseCursor(rootDir, logger);
@@ -380,7 +397,7 @@ function readLeaseRecords(rootDir, {
   });
   const names = discovery.names;
   const records = [];
-  let readRecords = 0;
+  const candidates = [];
   let lastEntryName = null;
   let lastSafeIndex = -1;
   let readLimitReached = false;
@@ -391,50 +408,55 @@ function readLeaseRecords(rootDir, {
       lastSafeIndex = index;
       continue;
     }
-    if (readRecords >= maxReads) {
+    if (candidates.length >= maxReads) {
       readLimitReached = true;
       break;
     }
-    readRecords += 1;
-    const path = join(dir, name);
+    candidates.push({ index, name, path: join(dir, name) });
+  }
+  const outcomes = await mapWithConcurrency(candidates, readConcurrency, async ({ index, name, path }) => {
     try {
-      const lease = JSON.parse(readFileSync(path, 'utf8'));
-      if (lease && typeof lease === 'object') records.push({ ...lease, _path: path });
-      lastEntryName = name;
-      lastSafeIndex = index;
+      const lease = JSON.parse(await readFileImpl(path, 'utf8'));
+      return {
+        index,
+        name,
+        record: lease && typeof lease === 'object' ? { ...lease, _path: path } : null,
+      };
     } catch (err) {
       if (err?.code === 'ENOENT') {
-        // Normal concurrent completion: the owner removed this lease after
-        // directory discovery, so advance past it and keep scanning the page.
-        lastEntryName = name;
-        lastSafeIndex = index;
-        continue;
+        return { index, name, record: null };
       } else if (err instanceof SyntaxError) {
         let mtimeMs = null;
         try {
-          mtimeMs = statSync(path).mtimeMs;
+          mtimeMs = (await statImpl(path)).mtimeMs;
         } catch {
           mtimeMs = null;
         }
-        records.push({
-          _path: path,
-          _isCorrupt: true,
-          mtimeMs,
-          status: 'corrupt',
-          terminalOutcome: null,
-          updatedAt: 0,
-        });
-        lastEntryName = name;
-        lastSafeIndex = index;
-      } else {
-        logger?.error?.(`[reaper] failed to read lease ${path}: ${err?.message || err}`);
-        // Advance past persistent read failures so one damaged lease cannot
-        // pin this lexical page forever. The next full cursor rotation retries
-        // it without starving healthy leases later in the directory.
-        lastEntryName = name;
-        lastSafeIndex = index;
+        return {
+          index,
+          name,
+          record: {
+            _path: path,
+            _isCorrupt: true,
+            mtimeMs,
+            status: 'corrupt',
+            terminalOutcome: null,
+            updatedAt: 0,
+          },
+        };
       }
+      return { index, name, path, error: err, record: null };
     }
+  });
+  for (const outcome of outcomes) {
+    if (outcome.record) records.push(outcome.record);
+    if (outcome.error) {
+      logger?.error?.(`[reaper] failed to read lease ${outcome.path}: ${outcome.error?.message || outcome.error}`);
+    }
+    // All selected reads settled, so cursor advancement remains ordered even
+    // though I/O was concurrent. Persistent failures retry after one rotation.
+    lastEntryName = outcome.name;
+    lastSafeIndex = outcome.index;
   }
   if (discovery.wrapped && names.length === 0) {
     lastEntryName = null;
@@ -447,7 +469,7 @@ function readLeaseRecords(rootDir, {
     skippedEntries: discovery.skippedEntries,
     directoryReads: discovery.directoryReads,
     cursorEntriesSeen: entriesSeen,
-    readRecords,
+    readRecords: candidates.length,
     cursorCanAdvance: readLimitReached || names.length > 0 || discovery.wrapped,
     lastEntryName,
   };
@@ -501,22 +523,28 @@ function resetTransientExhaustedCloserBudget(rootDir, lease, logger) {
  *
  * @returns {{ released: number, budgetsReset: number, leases: Array<object>, scannedEntries: number, readRecords: number }}
  */
-export function reapStaleCloserLeases({
+export async function reapStaleCloserLeases({
   rootDir,
   now = new Date().toISOString(),
   thresholdMs = DEFAULT_STALE_CLOSER_LEASE_MS,
   livePid = (typeof process !== 'undefined' ? process.pid : null),
   entryScanLimit = DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT,
   readLimit = DEFAULT_CLOSER_LEASE_READ_LIMIT,
+  readConcurrency = 8,
   opendirSyncImpl = opendirSync,
+  readFileImpl = fsPromises.readFile,
+  statImpl = fsPromises.stat,
   logger = console,
 } = {}) {
   if (!rootDir) return { released: 0, budgetsReset: 0, leases: [], scannedEntries: 0, readRecords: 0 };
-  const discovery = readLeaseRecords(rootDir, {
+  const discovery = await readLeaseRecords(rootDir, {
     logger,
     entryScanLimit,
     readLimit,
+    readConcurrency,
     opendirSyncImpl,
+    readFileImpl,
+    statImpl,
   });
   const releasable = selectReleasableCloserLeases(discovery.records, {
     now, thresholdMs, livePid,
@@ -577,7 +605,7 @@ export function reapStaleCloserLeases({
  *
  * @returns {{ reviewerPasses: object, closerLeases: object }}
  */
-export function runStartupStaleStateReaper({
+export async function runStartupStaleStateReaper({
   rootDir,
   db,
   env = process.env,
@@ -599,7 +627,7 @@ export function runStartupStaleStateReaper({
     logger?.error?.(`[reaper] reviewer-pass sweep failed: ${err?.message || err}`);
   }
   try {
-    out.closerLeases = reapStaleCloserLeases({
+    out.closerLeases = await reapStaleCloserLeases({
       rootDir,
       now,
       thresholdMs: resolveStaleCloserLeaseMs(env),

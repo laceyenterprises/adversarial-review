@@ -1309,6 +1309,60 @@ test('top-level config.yaml accepts the mirrored main_catchup daemon keys', () =
   }
 });
 
+test('ci.hosting strict mirror preserves mandatory exclusions and mode env alias', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      ci:
+        hosting:
+          mode: github
+          runner_labels:
+            - agentos-ci-ubuntu
+          fallback_to_github: false
+          excluded_workflows:
+            - another-privileged-workflow.yml
+    `);
+    const cfg = loadConfig({
+      topPath: top,
+      env: { AGENT_OS_CI_HOSTING_MODE: 'self-hosted-container' },
+    });
+    assert.equal(cfg.get('ci.hosting.mode'), 'self-hosted-container');
+    assert.deepEqual(cfg.get('ci.hosting.runner_labels'), ['agentos-ci-ubuntu']);
+    assert.equal(cfg.get('ci.hosting.fallback_to_github'), false);
+    assert.deepEqual(cfg.get('ci.hosting.excluded_workflows'), [
+      'release-freeze-gate.yml',
+      'another-privileged-workflow.yml',
+    ]);
+    assert.equal(
+      cfg.resolutionTrace('ci.hosting.excluded_workflows').at(-1).source,
+      'security-invariant',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ci.hosting strict mirror rejects unknown modes', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      ci:
+        hosting:
+          mode: self-hosted-unknown
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: top, env: {} }),
+      (err) => err instanceof AgentOSConfigError && err.key === 'ci.hosting.mode',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('main_catchup mirrored defaults match the Python daemon constants', () => {
   const tmp = freshTmp();
   try {

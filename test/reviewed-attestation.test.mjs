@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { promisify } from 'node:util';
 
 import {
   buildReviewedAttestationPayload,
@@ -8,6 +10,33 @@ import {
   recordSignedReviewedAttestation,
   signReviewedAttestation,
 } from '../src/reviewed-attestation.mjs';
+
+const execFileAsync = promisify(execFile);
+const TEST_DIGEST = `sha256:${'A'.repeat(43)}`;
+
+function signatureFor(subject) {
+  return {
+    algorithm: 'hcp-hmac-sha256:v1',
+    subject,
+    digest: TEST_DIGEST,
+  };
+}
+
+function execFileResultWithStdin({ stdout = '', error = null, onInput = () => {} } = {}) {
+  let settle;
+  const execution = new Promise((resolve, reject) => {
+    settle = () => (error ? reject(error) : resolve({ stdout, stderr: '' }));
+  });
+  execution.child = {
+    stdin: {
+      end(input) {
+        onInput(input);
+        settle();
+      },
+    },
+  };
+  return execution;
+}
 
 test('reviewed attestation payload binds reviewer identity, reviewed head, verdict, and findings count', () => {
   const payload = buildReviewedAttestationPayload({
@@ -51,12 +80,15 @@ test('reviewed attestation signing uses the shipped flag contract and records th
       'Request changes',
     ].join('\n'),
     hqPath: '/tmp/hq',
-    execFileImpl: async (cmd, args, options) => {
+    execFileImpl: (cmd, args, options) => {
       calls.push({ cmd, args, options });
       if (args[1] === 'record') {
-        return { stdout: JSON.stringify({ recorded: true }) };
+        return execFileResultWithStdin({
+          stdout: JSON.stringify({ recorded: true }),
+          onInput: (input) => { calls.at(-1).input = input; },
+        });
       }
-      return {
+      return Promise.resolve({
         stdout: JSON.stringify({
           schema_version: 1,
           repo: 'laceyenterprises/agent-os',
@@ -69,12 +101,9 @@ test('reviewed attestation signing uses the shipped flag contract and records th
           findings_count: 1,
           payload: { reviewer_identity: 'claude-reviewer-lacey' },
           ts: resultTimestamp(args),
-          signature: {
-            verified: true,
-            hcp_subject: 'claude-reviewer-lacey',
-          },
+          signature: signatureFor('claude-reviewer-lacey'),
         }),
-      };
+      });
     },
     log: { log() {} },
   });
@@ -87,10 +116,11 @@ test('reviewed attestation signing uses the shipped flag contract and records th
   ]);
   assert.equal(calls[0].options.input, undefined);
   assert.deepEqual(calls[1].args, ['attest', 'record', '--payload', '-']);
-  const signedInput = JSON.parse(calls[1].options.input);
+  assert.equal(calls[1].options.input, undefined);
+  const signedInput = JSON.parse(calls[1].input);
   assert.equal(signedInput.kind, 'reviewed');
   assert.equal(signedInput.head_sha, 'def456');
-  assert.equal(result.signed.signature.hcp_subject, 'claude-reviewer-lacey');
+  assert.equal(result.signed.signature.subject, 'claude-reviewer-lacey');
   assert.deepEqual(result.recorded, { recorded: true });
 });
 
@@ -98,7 +128,7 @@ function resultTimestamp(args) {
   return args[args.indexOf('--ts') + 1];
 }
 
-test('reviewed attestation signing rejects an explicit non-reviewer HCP subject', async () => {
+test('reviewed attestation signing rejects an explicit non-reviewer signer subject', async () => {
   await assert.rejects(
     emitReviewedAttestation({
       repo: 'laceyenterprises/agent-os',
@@ -120,10 +150,7 @@ test('reviewed attestation signing rejects an explicit non-reviewer HCP subject'
         return {
           stdout: JSON.stringify({
             ...payload,
-            signature: {
-              verified: true,
-              hcp_subject: 'codex-reviewer-lacey',
-            },
+            signature: signatureFor('codex-reviewer-lacey'),
           }),
         };
       },
@@ -153,7 +180,7 @@ test('reviewed attestation signing retries transient subprocess failures with bo
       if (attempts < 3) throw Object.assign(new Error('resource temporarily unavailable'), { code: 'EAGAIN' });
       return { stdout: JSON.stringify({
         ...payload,
-        signature: { verified: true, hcp_subject: payload.payload.reviewer_identity },
+        signature: signatureFor(payload.payload.reviewer_identity),
       }) };
     },
   });
@@ -188,7 +215,7 @@ test('reviewed attestation signing retries subprocesses killed by execFile timeo
       }
       return { stdout: JSON.stringify({
         ...payload,
-        signature: { verified: true, hcp_subject: payload.payload.reviewer_identity },
+        signature: signatureFor(payload.payload.reviewer_identity),
       }) };
     },
   });
@@ -211,14 +238,14 @@ test('reviewed attestation signing rejects unsigned and incomplete signer output
       payload,
       execFileImpl: async () => ({ stdout: JSON.stringify(payload) }),
     }),
-    /signature missing or did not verify/
+    /signature is missing/
   );
   const { kind: _kind, ...withoutKind } = payload;
   await assert.rejects(
     signReviewedAttestation({
       payload,
       execFileImpl: async () => ({
-        stdout: JSON.stringify({ ...withoutKind, signature: { verified: true } }),
+        stdout: JSON.stringify({ ...withoutKind, signature: signatureFor('codex-reviewer-lacey') }),
       }),
     }),
     /kind mismatch/
@@ -247,10 +274,12 @@ test('reviewed attestation recording retries transient subprocess failures with 
     signed: { kind: 'reviewed', signature: { verified: true } },
     retryDelayMs: 10,
     delayImpl: async (ms) => delays.push(ms),
-    execFileImpl: async () => {
+    execFileImpl: () => {
       attempts += 1;
-      if (attempts < 3) throw Object.assign(new Error('I/O unavailable'), { code: 'EIO' });
-      return { stdout: JSON.stringify({ recorded: true }) };
+      return execFileResultWithStdin({
+        error: attempts < 3 ? Object.assign(new Error('I/O unavailable'), { code: 'EIO' }) : null,
+        stdout: JSON.stringify({ recorded: true }),
+      });
     },
   });
 
@@ -264,14 +293,32 @@ test('reviewed attestation recording does not retry permanent subprocess failure
   await assert.rejects(
     recordSignedReviewedAttestation({
       signed: { kind: 'reviewed' },
-      execFileImpl: async () => {
+      execFileImpl: () => {
         attempts += 1;
-        throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+        return execFileResultWithStdin({
+          error: Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+        });
       },
     }),
     /permission denied/
   );
   assert.equal(attempts, 1);
+});
+
+test('reviewed attestation recording writes payload to a real child stdin stream', async () => {
+  const signed = { kind: 'reviewed', signature: signatureFor('codex-reviewer-lacey') };
+  const recorded = await recordSignedReviewedAttestation({
+    signed,
+    hqPath: process.execPath,
+    execFileImpl: (_command, _args, options) => execFileAsync(process.execPath, [
+      '-e',
+      `let input = ''; process.stdin.setEncoding('utf8'); `
+        + `process.stdin.on('data', (chunk) => { input += chunk; }); `
+        + `process.stdin.on('end', () => process.stdout.write(JSON.stringify({ received: JSON.parse(input) })));`,
+    ], options),
+  });
+
+  assert.deepEqual(recorded.received, signed);
 });
 
 test('reviewed attestation signing rejects non-JSON signer output', async () => {

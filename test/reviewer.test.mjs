@@ -139,6 +139,20 @@ async function withEnvAsync(overrides, fn) {
   }
 }
 
+function execFileResultWithStdin({ stdout = '', onInput = () => {} } = {}) {
+  let resolveExecution;
+  const execution = new Promise((resolve) => { resolveExecution = resolve; });
+  execution.child = {
+    stdin: {
+      end(input) {
+        onInput(input);
+        resolveExecution({ stdout, stderr: '' });
+      },
+    },
+  };
+  return execution;
+}
+
 test('postGitHubReview uses adapter mutation with the intended reviewer bot identity', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'review-post-adapter-'));
   const calls = [];
@@ -248,9 +262,14 @@ test('postGitHubReviewWithCapture emits a reviewed attestation for the reviewed 
           assert.equal(command, '/fixture/github-adapter');
           return { stdout: JSON.stringify({ ok: true }) };
         },
-        attestExecFileImpl: async (command, args, options = {}) => {
+        attestExecFileImpl: (command, args, options = {}) => {
           attestCalls.push({ command, args, options });
-          if (args[1] === 'record') return { stdout: '{"recorded":true}' };
+          if (args[1] === 'record') {
+            return execFileResultWithStdin({
+              stdout: '{"recorded":true}',
+              onInput: (input) => { attestCalls.at(-1).input = input; },
+            });
+          }
           const valueAfter = (name) => args[args.indexOf(name) + 1];
           const payload = {
             schema_version: 1,
@@ -265,15 +284,16 @@ test('postGitHubReviewWithCapture emits a reviewed attestation for the reviewed 
             payload: JSON.parse(valueAfter('--payload-json')),
             ts: valueAfter('--ts'),
           };
-          return {
+          return Promise.resolve({
             stdout: JSON.stringify({
               ...payload,
               signature: {
-                verified: true,
-                hcp_subject: payload.payload.reviewer_identity,
+                algorithm: 'hcp-hmac-sha256:v1',
+                subject: payload.payload.reviewer_identity,
+                digest: `sha256:${'A'.repeat(43)}`,
               },
             }),
-          };
+          });
         },
         prepareReviewWrite: async () => {},
         reviewerIdentity: 'codex-reviewer-lacey',
@@ -288,6 +308,8 @@ test('postGitHubReviewWithCapture emits a reviewed attestation for the reviewed 
       '--head-sha', 'reviewed-head-sha', '--kind', 'reviewed',
     ]);
     assert.deepEqual(attestCalls[1].args, ['attest', 'record', '--payload', '-']);
+    assert.equal(attestCalls[1].options.input, undefined);
+    assert.equal(JSON.parse(attestCalls[1].input).head_sha, 'reviewed-head-sha');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

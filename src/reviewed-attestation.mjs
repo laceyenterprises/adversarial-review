@@ -7,6 +7,8 @@ const execFileAsync = promisify(execFile);
 const REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS = 15_000;
 const REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS = 3;
 const REVIEWED_ATTESTATION_SIGN_RETRY_DELAY_MS = 250;
+const REVIEWED_ATTESTATION_SIGNATURE_ALGORITHM = 'hcp-hmac-sha256:v1';
+const REVIEWED_ATTESTATION_DIGEST_RE = /^sha256:[A-Za-z0-9_-]{43}$/;
 
 function isTransientSignError(err) {
   if (err?.killed === true) return true;
@@ -36,6 +38,16 @@ async function execFileWithTransientRetry(execFileImpl, command, args, options, 
     }
   }
   throw new Error('unreachable retry state');
+}
+
+function execFileWithStdin(execFileImpl, command, args, options, input) {
+  const execution = execFileImpl(command, args, options);
+  const stdin = execution?.child?.stdin;
+  if (!stdin || typeof stdin.end !== 'function') {
+    throw new TypeError('async execFile implementation must expose child.stdin for payload delivery');
+  }
+  stdin.end(input);
+  return execution;
 }
 
 function normalizeFindingsCount(reviewBody) {
@@ -145,13 +157,20 @@ function validateSignedReviewedAttestation(signed, payload) {
       throw new Error(`signed attestation ${field} mismatch: ${signed[field]}`);
     }
   }
-  if (!signed.signature || signed.signature.verified !== true) {
-    throw new Error('signed attestation signature missing or did not verify');
+  const signature = signed.signature;
+  if (!signature || typeof signature !== 'object' || Array.isArray(signature)) {
+    throw new Error('signed attestation signature is missing');
+  }
+  if (signature.algorithm !== REVIEWED_ATTESTATION_SIGNATURE_ALGORITHM) {
+    throw new Error(`signed attestation signature algorithm mismatch: ${signature.algorithm}`);
   }
   const reviewerIdentity = payload.payload?.reviewer_identity;
-  const signedSubject = signed.signature?.hcp_subject ?? signed.signature?.subject;
-  if (signedSubject !== undefined && signedSubject !== reviewerIdentity) {
+  const signedSubject = String(signature.subject || '').trim();
+  if (!signedSubject || signedSubject !== reviewerIdentity) {
     throw new Error(`signed attestation HCP subject mismatch: ${signedSubject}`);
+  }
+  if (!REVIEWED_ATTESTATION_DIGEST_RE.test(String(signature.digest || ''))) {
+    throw new Error('signed attestation signature digest is malformed');
   }
 }
 
@@ -165,13 +184,19 @@ async function recordSignedReviewedAttestation({
   retryDelayMs = REVIEWED_ATTESTATION_SIGN_RETRY_DELAY_MS,
   delayImpl = delay,
 } = {}) {
+  const input = `${JSON.stringify(signed)}\n`;
   const { stdout } = await execFileWithTransientRetry(
-    execFileImpl,
+    (command, args, options) => execFileWithStdin(
+      execFileImpl,
+      command,
+      args,
+      options,
+      input
+    ),
     hqPath,
     ['attest', 'record', '--payload', '-'],
     {
       env,
-      input: `${JSON.stringify(signed)}\n`,
       timeout: timeoutMs,
       maxBuffer: 1024 * 1024,
     },
@@ -230,6 +255,7 @@ async function emitReviewedAttestation({
 }
 
 export {
+  REVIEWED_ATTESTATION_SIGNATURE_ALGORITHM,
   REVIEWED_ATTESTATION_SIGN_MAX_ATTEMPTS,
   REVIEWED_ATTESTATION_SIGN_RETRY_DELAY_MS,
   REVIEWED_ATTESTATION_SIGN_TIMEOUT_MS,

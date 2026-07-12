@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -18,12 +18,15 @@ import {
   backfillReviewerPasses,
   beginReviewerPass,
   completeReviewerPass,
+  foldReviewerTokenUsageArtifact,
   readBestReviewerEvidenceTokenUsage,
   readClaudeTranscriptTokenUsage,
   readCodexTranscriptTokenUsage,
+  readReviewerTokenUsageArtifact,
   readReviewerSessionTokenUsage,
   tagTokenUsage,
   readWorkerRunTokenUsage,
+  writeReviewerTokenUsageArtifact,
 } from '../src/reviewer-pass-tokens.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 
@@ -135,6 +138,71 @@ test('reviewer pass writer inserts running row, completes it, and unique key pre
   assert.equal(row.token_cost_usd, null);
   assert.equal(row.token_source, 'session-ledger');
   assert.equal(row.reviewer_model, 'claude-sonnet');
+});
+
+test('gemini reviewer exact usage writes local artifact and owner fold-in without opening ledger sqlite', () => {
+  const rootDir = tempRoot();
+  const workspace = path.join(rootDir, 'workspace');
+  mkdirSync(workspace, { recursive: true });
+  const ledgerDir = path.join(rootDir, '.agent-os', 'session-ledger');
+  mkdirSync(ledgerDir, { recursive: true });
+  const ledgerPath = path.join(ledgerDir, 'ledger.db');
+  createEmptySqliteDb(ledgerPath);
+
+  const artifactPath = writeReviewerTokenUsageArtifact({
+    workspacePath: workspace,
+    repo: 'lacey/repo',
+    prNumber: 55,
+    attemptNumber: 2,
+    passKind: 'first-pass',
+    reviewerClass: 'gemini',
+    reviewerModel: 'gemini',
+    status: 'completed',
+    tokenUsage: {
+      input: 8000,
+      output: 210,
+      reasoning: 90,
+      cacheRead: 2000,
+      toolContext: 40,
+      total: 8210,
+      source: 'gemini-json',
+    },
+    metadata: { reviewerTokenUsageArtifact: '/tmp/untrusted-artifact.json' },
+  });
+
+  assert.ok(artifactPath.endsWith('.json'));
+  assert.equal(existsSync(`${ledgerPath}-wal`), false, 'worker artifact write must not create ledger WAL');
+  assert.equal(existsSync(`${ledgerPath}-shm`), false, 'worker artifact write must not create ledger SHM');
+  assert.equal(readReviewerTokenUsageArtifact(artifactPath).tokenUsage.source, 'gemini-json');
+
+  const row = foldReviewerTokenUsageArtifact(rootDir, artifactPath);
+  const metadata = JSON.parse(row.metadata_json);
+  assert.equal(row.token_input, 8000);
+  assert.equal(row.token_output, 210);
+  assert.equal(row.token_reasoning, 90);
+  assert.equal(row.token_tool_context, 40);
+  assert.equal(row.token_source, 'gemini-json');
+  assert.equal(metadata.reviewerTokenUsageArtifact, artifactPath);
+});
+
+test('reviewer token usage artifact refuses to create directories in a cross-user workspace', () => {
+  const rootDir = tempRoot();
+  const workspace = path.join(rootDir, 'workspace');
+  mkdirSync(workspace);
+
+  assert.throws(() => writeReviewerTokenUsageArtifact({
+    workspacePath: workspace,
+    repo: 'lacey/repo',
+    prNumber: 55,
+    attemptNumber: 2,
+    passKind: 'first-pass',
+    reviewerClass: 'gemini',
+    tokenUsage: { input: 1, output: 1, source: 'gemini-json' },
+    currentUidImpl: () => 2000,
+    statSyncImpl: () => ({ uid: 1000 }),
+  }), /Refusing to write reviewer token usage artifact into workspace owned by uid 1000 as uid 2000/);
+
+  assert.equal(existsSync(path.join(workspace, '.adversarial-review')), false);
 });
 
 test('worker-run and reviewer-session readers accept ledger target object, URI, and --ledger-db alias', () => {

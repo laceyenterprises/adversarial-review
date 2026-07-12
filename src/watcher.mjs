@@ -60,6 +60,7 @@ import {
   completeReviewerPass,
   readBestReviewerEvidenceTokenUsage,
   tagTokenUsage,
+  writeReviewerTokenUsageArtifact,
 } from './reviewer-pass-tokens.mjs';
 import {
   assertReviewDbWritesRoundTrip,
@@ -272,6 +273,24 @@ const execFileAsync = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
+
+function writeReviewerTokenUsageArtifactBestEffort(options, {
+  repo,
+  prNumber,
+  reviewerSessionUuid,
+  writeImpl = writeReviewerTokenUsageArtifact,
+  warn = console.warn,
+} = {}) {
+  try {
+    return writeImpl(options);
+  } catch (err) {
+    warn(
+      `[watcher] reviewer_token_usage_artifact_write_failed repo=${repo} pr=${prNumber} ` +
+      `session=${reviewerSessionUuid}: ${err?.message || err}`
+    );
+    return null;
+  }
+}
 
 const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
 // Fail fast during watcher bootstrap; a bad gate-context override should not
@@ -3492,6 +3511,27 @@ async function spawnReviewer({
         reviewerModel,
         rootDir: ROOT,
       }), 'guardrail');
+      let reviewerTokenUsageArtifact = null;
+      if (tokenUsage) {
+        reviewerTokenUsageArtifact = writeReviewerTokenUsageArtifactBestEffort({
+          workspacePath: workspacePath || ROOT,
+          repo,
+          prNumber,
+          attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
+          passKind,
+          reviewerClass: reviewerModel,
+          reviewerModel,
+          status: result.ok ? 'completed' : (result.failureClass === 'cancelled' ? 'cancelled' : 'failed'),
+          startedAt,
+          endedAt,
+          tokenUsage,
+          source: tokenUsage?.source || null,
+          metadata: {
+            reviewerSessionUuid,
+            reattachToken: result.reattachToken || null,
+          },
+        }, { repo, prNumber, reviewerSessionUuid });
+      }
       completeReviewerPass(ROOT, {
         repo,
         prNumber,
@@ -3506,6 +3546,7 @@ async function spawnReviewer({
           reattachToken: result.reattachToken || null,
           failureClass: result.failureClass || null,
           tokenUsageNoUsageReason: result.tokenUsageNoUsageReason || null,
+          reviewerTokenUsageArtifact,
         },
       });
     } catch (err) {
@@ -9546,4 +9587,5 @@ export {
   waitForActiveReviewerFencesOnSigterm,
   warnIfAntigravityReviewerAuthUnavailable,
   writeFastMergeAuditEntry,
+  writeReviewerTokenUsageArtifactBestEffort,
 };

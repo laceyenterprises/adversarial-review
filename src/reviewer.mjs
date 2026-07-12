@@ -4130,28 +4130,31 @@ async function postGitHubReviewWithCapture({
   reviewerIdentity = null,
   reviewerTokenFetchTimeoutMs = undefined,
 } = {}) {
-  // GMW-06: run the gemini-reviewer preflight before the generic env check so a
-  // gemini post with an unresolved token fails with the legible runbook-naming
-  // error (and the legacy-conflict guard fires) rather than the bare
-  // "Missing env var" — and never falls through to another identity's token.
-  preflightGeminiReviewerToken({ env: process.env, botTokenEnv, reviewerIdentity });
-  const initialToken = process.env[botTokenEnv];
-  if (!initialToken) {
-    throw new Error(`Missing env var: ${botTokenEnv}`);
-  }
   const alreadyCaptured = hasCapturedReviewerBody(rootDir, {
     repo, prNumber, attemptNumber, passKind, reviewBody,
   });
-  if (!alreadyCaptured) await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
-    rootDir,
-    fetchImpl,
-    readFileImpl,
-    log,
-    prepareReviewWrite,
-    reviewerSpawnToken,
-    reviewerIdentity,
-    reviewerTokenFetchTimeoutMs,
-  });
+  let initialToken = null;
+  if (!alreadyCaptured) {
+    // GMW-06: run the gemini-reviewer preflight before the generic env check so a
+    // gemini post with an unresolved token fails with the legible runbook-naming
+    // error (and the legacy-conflict guard fires) rather than the bare
+    // "Missing env var" — and never falls through to another identity's token.
+    preflightGeminiReviewerToken({ env: process.env, botTokenEnv, reviewerIdentity });
+    initialToken = process.env[botTokenEnv];
+    if (!initialToken) {
+      throw new Error(`Missing env var: ${botTokenEnv}`);
+    }
+    await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
+      rootDir,
+      fetchImpl,
+      readFileImpl,
+      log,
+      prepareReviewWrite,
+      reviewerSpawnToken,
+      reviewerIdentity,
+      reviewerTokenFetchTimeoutMs,
+    });
+  }
 
   // Capture postedAt AFTER the gh post returns so the candidate window
   // bounds the artifact's GitHub-assigned timestamp, which is set during

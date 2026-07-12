@@ -47,7 +47,6 @@ import {
 } from './ama/dispatch-closer.mjs';
 
 const HOUR_MS = 60 * 60 * 1000;
-
 // Defaults are deliberately multi-hour: a healthy reviewer pass or closer
 // dispatch completes in minutes, so a 6h floor never races live work and still
 // recovers same-day after an outage.
@@ -501,7 +500,7 @@ function resetTransientExhaustedCloserBudget(rootDir, lease, logger) {
  *
  * @returns {{ released: number, budgetsReset: number, leases: Array<object>, scannedEntries: number, readRecords: number }}
  */
-export function reapStaleCloserLeases({
+export async function reapStaleCloserLeases({
   rootDir,
   now = new Date().toISOString(),
   thresholdMs = DEFAULT_STALE_CLOSER_LEASE_MS,
@@ -577,7 +576,7 @@ export function reapStaleCloserLeases({
  *
  * @returns {{ reviewerPasses: object, closerLeases: object }}
  */
-export function runStartupStaleStateReaper({
+export async function runStartupStaleStateReaper({
   rootDir,
   db,
   env = process.env,
@@ -599,7 +598,7 @@ export function runStartupStaleStateReaper({
     logger?.error?.(`[reaper] reviewer-pass sweep failed: ${err?.message || err}`);
   }
   try {
-    out.closerLeases = reapStaleCloserLeases({
+    out.closerLeases = await reapStaleCloserLeases({
       rootDir,
       now,
       thresholdMs: resolveStaleCloserLeaseMs(env),

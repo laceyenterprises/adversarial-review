@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, rmSync, statSync, promises as fsPromises } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -10,6 +10,7 @@ const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
 const DEFAULT_REAP_LIMIT = 8;
 const DEFAULT_REAP_BUDGET_MS = 20_000;
+const DEFAULT_SCAN_LIMIT = 500;
 const HAMMER_WORKER_RE = /^hammer-ama-pr-(\d+)(?:-.+)?$/;
 
 function normalizePositiveInteger(value, fallback) {
@@ -56,18 +57,41 @@ function parseGitHubRepoFromRemote(remoteUrl) {
   return `${match[1]}/${match[2]}`;
 }
 
-function listHqRepoPaths(hqRoot) {
+async function listHqRepoPaths(hqRoot, { scanLimit = DEFAULT_SCAN_LIMIT } = {}) {
   const reposDir = join(hqRoot, 'repos');
   if (!existsSync(reposDir)) return [];
-  return readdirSync(reposDir, { withFileTypes: true })
+  const entries = await fsPromises.readdir(reposDir, { withFileTypes: true }).catch((err) => {
+    if (err?.code === 'ENOENT') return [];
+    throw err;
+  });
+  return entries
+    .slice(0, scanLimit)
     .filter((entry) => entry.isDirectory())
     .map((entry) => join(reposDir, entry.name));
 }
 
-function listHammerWorkerDirs(hqRoot) {
+async function listHammerWorkerDirs(hqRoot, { scanLimit = DEFAULT_SCAN_LIMIT, now = Date.now(), recencyMs = 14 * 24 * 60 * 60 * 1000 } = {}) {
   const workersDir = join(hqRoot, 'workers');
   if (!existsSync(workersDir)) return [];
-  return readdirSync(workersDir, { withFileTypes: true })
+  const entries = await fsPromises.readdir(workersDir, { withFileTypes: true }).catch((err) => {
+    if (err?.code === 'ENOENT') return [];
+    throw err;
+  });
+  const cutoff = now - recencyMs;
+  const workerEntries = [];
+  for (const entry of entries.slice(0, scanLimit)) {
+    if (!entry.isDirectory() || !HAMMER_WORKER_RE.test(entry.name)) continue;
+    const workerDir = join(workersDir, entry.name);
+    try {
+      const stat = await fsPromises.stat(workerDir);
+      if (stat.mtimeMs < cutoff) continue;
+    } catch (err) {
+      if (err?.code === 'ENOENT') continue;
+      throw err;
+    }
+    workerEntries.push(entry);
+  }
+  return workerEntries
     .filter((entry) => entry.isDirectory() && HAMMER_WORKER_RE.test(entry.name))
     .map((entry) => {
       const workerDir = join(workersDir, entry.name);
@@ -213,19 +237,20 @@ async function reapCloserHammerWorktrees({
   hqPath = process.env.HQ_PATH || DEFAULT_HQ_PATH,
   limit = normalizePositiveInteger(process.env.AMA_CLOSER_WORKTREE_REAP_LIMIT, DEFAULT_REAP_LIMIT),
   budgetMs = normalizePositiveInteger(process.env.AMA_CLOSER_WORKTREE_REAP_BUDGET_MS, DEFAULT_REAP_BUDGET_MS),
+  scanLimit = normalizePositiveInteger(process.env.AMA_CLOSER_WORKTREE_SCAN_LIMIT, DEFAULT_SCAN_LIMIT),
   repoPaths = null,
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
   env = process.env,
   logger = console,
 } = {}) {
-  const effectiveRepoPaths = Array.isArray(repoPaths) ? repoPaths : listHqRepoPaths(hqRoot);
+  const effectiveRepoPaths = Array.isArray(repoPaths) ? repoPaths : await listHqRepoPaths(hqRoot, { scanLimit });
   const registered = await registeredWorktreesByPath({
     repoPaths: effectiveRepoPaths,
     execFileImpl,
     logger,
   });
-  const diskEntries = listHammerWorkerDirs(hqRoot);
+  const diskEntries = await listHammerWorkerDirs(hqRoot, { scanLimit });
   const entries = [];
   const seen = new Set();
 

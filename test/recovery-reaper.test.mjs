@@ -147,7 +147,7 @@ test('selectStaleRunningReviewerPasses: only running + un-ended + aged rows', ()
 // DB driver: reapStaleRunningReviewerPasses
 // ---------------------------------------------------------------------------
 
-test('reapStaleRunningReviewerPasses marks aged running passes abandoned (re-review unblocked)', (t) => {
+test('reapStaleRunningReviewerPasses marks aged running passes abandoned (re-review unblocked)', async (t) => {
   const rootDir = tempRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const db = openReviewStateDb(rootDir);

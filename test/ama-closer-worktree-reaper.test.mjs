@@ -166,6 +166,40 @@ test('closer worktree reaper removes prunable worktrees regardless of PR state',
   assert.equal(result.prunable, 1);
 });
 
+test('closer worktree reaper bounds large workers directory scans', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-large-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const workersRoot = join(hqRoot, 'workers');
+  const repoPath = join(hqRoot, 'repos', 'agent-os');
+  mkdirSync(repoPath, { recursive: true });
+  for (let index = 0; index < 1_000; index += 1) {
+    mkdirSync(join(workersRoot, `stale-worker-${String(index).padStart(4, '0')}`), { recursive: true });
+  }
+  mkdirSync(join(workersRoot, 'hammer-ama-pr-3001-beyond-cap', 'agent-os'), { recursive: true });
+
+  const started = Date.now();
+  const result = await reapCloserHammerWorktrees({
+    hqRoot,
+    hqPath: '/bin/hq',
+    repoPaths: [repoPath],
+    scanLimit: 100,
+    execFileImpl: async (cmd, args) => {
+      if (cmd === 'git' && args.includes('list')) return { stdout: '', stderr: '' };
+      if (cmd === 'git' && args.includes('get-url')) return { stdout: 'https://github.com/x/y.git\n', stderr: '' };
+      return { stdout: '{}', stderr: '' };
+    },
+    execGhWithRetryImpl: async () => {
+      throw new Error('PR state should not be queried for entries beyond scan cap');
+    },
+    limit: 10,
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.ok(result.scanned <= 1);
+  assert.ok(Date.now() - started < 1_000);
+});
+
 test('closer worktree parser handles porcelain and GitHub remote URLs', () => {
   assert.deepEqual(parseGitWorktreePorcelain('worktree /tmp/wt\nbranch refs/heads/x\nprunable stale\n\n'), [
     { path: '/tmp/wt', prunable: true, branch: 'refs/heads/x', prunableReason: 'stale' },

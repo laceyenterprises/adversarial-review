@@ -88,6 +88,35 @@ test('reviewed attestation accepts the real hq attest sign envelope contract', a
   assert.deepEqual(signed, signedFixture);
 });
 
+test('reviewed attestation accepts an equivalent nested payload with reordered keys', async () => {
+  const payload = buildReviewedAttestationPayload({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 3491,
+    headSha: 'abc123',
+    reviewerIdentity: 'gemini-reviewer-lacey',
+    verdict: 'comment-only',
+    findingsCount: 0,
+    ts: '2026-07-12T00:00:00.000Z',
+  });
+  payload.payload.review_model = 'gemini';
+
+  const signed = await signReviewedAttestation({
+    payload,
+    execFileImpl: async () => ({
+      stdout: JSON.stringify({
+        ...payload,
+        payload: {
+          review_model: 'gemini',
+          reviewer_identity: 'gemini-reviewer-lacey',
+        },
+        signature: signatureFor('gemini-reviewer-lacey'),
+      }),
+    }),
+  });
+
+  assert.deepEqual(signed.payload, payload.payload);
+});
+
 test('reviewed attestation signing uses the shipped flag contract and records the signed result', async () => {
   const calls = [];
   const result = await emitReviewedAttestation({

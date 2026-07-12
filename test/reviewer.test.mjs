@@ -86,6 +86,7 @@ const {
   dispatchReviewerModel,
   formatAdvisoryFindingsContext,
   postGitHubReview,
+  postGitHubReviewWithCapture,
   LOCAL_REVIEW_SHADOW_LABEL,
   hasLocalReviewShadowLabel,
   evaluateLocalReviewShadowEligibility,
@@ -209,6 +210,74 @@ test('postGitHubReview uses adapter mutation with the intended reviewer bot iden
     '--expected-login',
     'lacey-codex-reviewer[bot]',
   ]);
+});
+
+test('postGitHubReviewWithCapture emits a reviewed attestation for the reviewed head and D3 verdict', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'review-post-attestation-'));
+  mkdirSync(join(rootDir, 'data'), { recursive: true });
+  try {
+    const attestCalls = [];
+    await withEnvAsync({
+      GHA_ADAPTER_BIN: '/fixture/github-adapter',
+      GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+    }, async () => {
+      await postGitHubReviewWithCapture({
+        rootDir,
+        repo: 'laceyenterprises/demo',
+        prNumber: 42,
+        attemptNumber: 1,
+        reviewerModel: 'codex',
+        reviewerHeadSha: 'reviewed-head-sha',
+        reviewBody: [
+          '## Summary',
+          'Blocking verdict.',
+          '',
+          '## Blocking issues',
+          '- **Regression**',
+          '  - **File:** src/demo.mjs',
+          '  - **Lines:** 1-2',
+          '  - **Problem:** The reviewed head is unsafe.',
+          '',
+          '## Verdict',
+          'Request changes',
+        ].join('\n'),
+        botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+        passKind: 'first-pass',
+        execFileImpl: async (command) => {
+          assert.equal(command, '/fixture/github-adapter');
+          return { stdout: JSON.stringify({ ok: true }) };
+        },
+        attestExecFileImpl: async (command, args, options = {}) => {
+          attestCalls.push({ command, args, options });
+          const payload = JSON.parse(options.input);
+          return {
+            stdout: JSON.stringify({
+              ...payload,
+              signature: {
+                verified: true,
+                hcp_subject: payload.reviewer_identity,
+              },
+            }),
+          };
+        },
+        prepareReviewWrite: async () => {},
+        reviewerIdentity: 'codex-reviewer-lacey',
+        log: { log() {}, warn() {} },
+      });
+    });
+
+    assert.equal(attestCalls.length, 1);
+    assert.equal(attestCalls[0].command, 'hq');
+    assert.deepEqual(attestCalls[0].args, ['attest', 'sign', '--payload', '-']);
+    const payload = JSON.parse(attestCalls[0].options.input);
+    assert.equal(payload.kind, 'reviewed');
+    assert.equal(payload.head_sha, 'reviewed-head-sha');
+    assert.equal(payload.verdict, 'request-changes');
+    assert.equal(payload.findings_count, 1);
+    assert.equal(payload.reviewer_identity, 'codex-reviewer-lacey');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 function queueWithFakes(reviewText, overrides = {}) {

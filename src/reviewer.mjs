@@ -53,6 +53,7 @@ import {
   parseGitHubBlobPath,
 } from './prompt-context.mjs';
 import { captureReviewerBodyAfterPost } from './review-body-capture.mjs';
+import { emitReviewedAttestation } from './reviewed-attestation.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
 import { preflightGeminiReviewerToken } from './gemini-reviewer-preflight.mjs';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
@@ -4114,11 +4115,13 @@ async function postGitHubReviewWithCapture({
   prNumber,
   attemptNumber,
   reviewerModel,
+  reviewerHeadSha = null,
   reviewBody,
   botTokenEnv,
   passKind,
   postedAt = null,
   execFileImpl = execFileAsync,
+  attestExecFileImpl = execFileImpl,
   log = console,
   fetchImpl = globalThis.fetch,
   readFileImpl = undefined,
@@ -4178,6 +4181,28 @@ async function postGitHubReviewWithCapture({
     env: { ...process.env, [botTokenEnv]: process.env[botTokenEnv] || initialToken },
     log,
   });
+
+  try {
+    await emitReviewedAttestation({
+      repo,
+      prNumber,
+      headSha: reviewerHeadSha,
+      reviewerIdentity: resolveReviewerIdentityForBotTokenEnv(
+        botTokenEnv,
+        reviewerIdentity || reviewerModel
+      ),
+      verdict: normalizedVerdict,
+      reviewBody,
+      execFileImpl: attestExecFileImpl,
+      env: process.env,
+      log,
+    });
+  } catch (err) {
+    log.warn?.(
+      `[reviewer] reviewed attestation emission skipped for ${repo}#${prNumber}@${reviewerHeadSha || '<unknown-head>'}: ` +
+        `${err?.message || err}`
+    );
+  }
 }
 
 // ── Clio alert (OAuth failure) ───────────────────────────────────────────────
@@ -4657,6 +4682,7 @@ async function main() {
       prNumber,
       attemptNumber: captureAttemptNumber,
       reviewerModel: effectiveModel,
+      reviewerHeadSha: reviewerHeadSha || null,
       reviewBody: fullComment,
       botTokenEnv: effectiveBotTokenEnv,
       passKind,

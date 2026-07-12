@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -40,6 +40,8 @@ function makeLogger() {
   };
 }
 
+const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
+
 test('fireDagAutowalkOnMerge persists owed work before the command attempt', (t) => {
   const rootDir = makeRoot();
   t.after(() => cleanupRoot(rootDir));
@@ -76,6 +78,7 @@ test('retryPendingDagAutowalkOnMerge runs hq and clears the owed record only on 
   const result = await retryPendingDagAutowalkOnMerge({
     rootDir,
     execFileImpl,
+    env: HERMETIC_CONFIG_ENV,
     logger: makeLogger(),
     maxPerPoll: 1,
   });
@@ -88,6 +91,51 @@ test('retryPendingDagAutowalkOnMerge runs hq and clears the owed record only on 
   ]);
   assert.equal(calls[0].opts.stdio, undefined);
   assert.equal(existsSync(before.path), false);
+});
+
+test('retryPendingDagAutowalkOnMerge passes config-resolved repo root from distinct watcher cwd', async (t) => {
+  const rootDir = makeRoot();
+  t.after(() => cleanupRoot(rootDir));
+  const deployRoot = join(rootDir, 'installed-agent-os');
+  const watcherCwd = join(rootDir, 'watcher-checkout');
+  mkdirSync(deployRoot, { recursive: true });
+  mkdirSync(watcherCwd, { recursive: true });
+  const originalCwd = process.cwd();
+  const calls = [];
+  const execFileImpl = async (cmd, args, opts) => {
+    calls.push({ cmd, args, opts, cwd: process.cwd() });
+    return { stdout: 'walked\n', stderr: '' };
+  };
+  const loadConfigImpl = () => ({
+    get(key) {
+      return key === 'roots.deploy' ? deployRoot : null;
+    },
+  });
+
+  fireDagAutowalkOnMerge({ rootDir, repo: 'laceyenterprises/agent-os', prNumber: 3565, logger: makeLogger() });
+  try {
+    process.chdir(watcherCwd);
+    await retryPendingDagAutowalkOnMerge({
+      rootDir,
+      execFileImpl,
+      env: HERMETIC_CONFIG_ENV,
+      loadConfigImpl,
+      logger: makeLogger(),
+      maxPerPoll: 1,
+    });
+  } finally {
+    process.chdir(originalCwd);
+  }
+
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].cwd, /watcher-checkout$/);
+  assert.notEqual(calls[0].cwd, deployRoot);
+  assert.deepEqual(calls[0].args, [
+    'dag', 'autowalk-on-merge',
+    '--repo-root', deployRoot,
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '3565',
+  ]);
 });
 
 test('retryPendingDagAutowalkOnMerge captures nonzero output and retries later after merged state', async (t) => {
@@ -111,6 +159,7 @@ test('retryPendingDagAutowalkOnMerge captures nonzero output and retries later a
   await retryPendingDagAutowalkOnMerge({
     rootDir,
     execFileImpl,
+    env: HERMETIC_CONFIG_ENV,
     logger,
     retryMs: 0,
     maxAttempts: 2,
@@ -126,6 +175,7 @@ test('retryPendingDagAutowalkOnMerge captures nonzero output and retries later a
   await retryPendingDagAutowalkOnMerge({
     rootDir,
     execFileImpl,
+    env: HERMETIC_CONFIG_ENV,
     logger,
     retryMs: 0,
     maxAttempts: 2,
@@ -149,6 +199,7 @@ test('retryPendingDagAutowalkOnMerge keeps terminal diagnostics after max attemp
   await retryPendingDagAutowalkOnMerge({
     rootDir,
     execFileImpl,
+    env: HERMETIC_CONFIG_ENV,
     logger: makeLogger(),
     retryMs: 0,
     maxAttempts: 1,
@@ -194,6 +245,7 @@ test('retryPendingDagAutowalkOnMerge marks malformed records failed without cons
   const result = await retryPendingDagAutowalkOnMerge({
     rootDir,
     execFileImpl,
+    env: HERMETIC_CONFIG_ENV,
     logger,
     maxPerPoll: 1,
     maxAttempts: 3,

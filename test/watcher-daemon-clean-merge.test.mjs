@@ -1191,3 +1191,36 @@ test('resolveDaemonWorkerIdentityForPr fails closed when current head is missing
   assert.deepEqual(result, { ok: false, reason: 'missing-current-head-sha' });
   assert.equal(calls.length, 0, 'missing current head must not degrade into a PR-level provenance query');
 });
+
+test('resolveDaemonWorkerIdentityForPr rejects a moved-head pr_opened row', async () => {
+  const seenHeadShas = [];
+  const result = await resolveDaemonWorkerIdentityForPr({
+    repo: "agent-os",
+    prNumber: 3491,
+    currentHeadSha: "live-head-after-remediation",
+    currentBranch: "codex-rrp-06/RRP-06",
+    hqRoot: "/tmp/hq-root-nonexistent-daemon-headmove",
+    readBuildCompletionSignalForPrImpl: async (args) => {
+      seenHeadShas.push(args.headSha);
+      assert.equal(args.signalKind, "pr_opened");
+      // The opener's identity is not provenance for a later head. An unscoped
+      // lookup would find this stale row, so the resolver must never issue one.
+      return { ok: false, reason: "missing-build-completion-signal" };
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'missing-build-completion-signal');
+  assert.deepEqual(seenHeadShas, ['live-head-after-remediation']);
+});
+
+test("resolveDaemonWorkerIdentityForPr still fails closed when no pr_opened row exists at any head", async () => {
+  const result = await resolveDaemonWorkerIdentityForPr({
+    repo: "agent-os",
+    prNumber: 9999,
+    currentHeadSha: "some-live-head",
+    currentBranch: "codex-x/X-01",
+    hqRoot: "/tmp/hq-root-nonexistent-daemon-headmove",
+    readBuildCompletionSignalForPrImpl: async () => ({ ok: false, reason: "missing-build-completion-signal" }),
+  });
+  assert.equal(result.ok, false);
+});

@@ -215,7 +215,7 @@ test('stale-head alive reviewer requeues current head and clears runtime poison'
 
   const row = readRow(db);
   assert.equal(row.review_status, 'pending');
-  assert.equal(row.review_attempts, 3);
+  assert.equal(row.review_attempts, 2);
   assert.equal(row.reviewer_session_uuid, null);
   assert.equal(row.reviewer_pgid, null);
   assert.equal(row.reviewer_started_at, null);
@@ -232,7 +232,8 @@ test('stale-head alive reviewer requeues current head and clears runtime poison'
     settled.map(({ state, reason }) => ({ state, reason })),
     [{ state: 'cancelled', reason: 'stale-head-superseded' }]
   );
-  assert.match(row.failure_message, /superseded: PR head changed/);
+  assert.equal(row.failed_at, null);
+  assert.equal(row.failure_message, null);
   assert.match(log.lines.join('\n'), /reviewer_reattach_invalidated/);
 });
 
@@ -594,6 +595,7 @@ test('dead stale-head reviewer is requeued without recovering stale posted revie
 
   const row = readRow(db);
   assert.equal(row.review_status, 'pending');
+  assert.equal(row.review_attempts, 2);
   assert.equal(row.posted_at, null);
   assert.equal(row.reviewer_session_uuid, null);
   assert.equal(row.reviewer_head_sha, null);
@@ -606,7 +608,8 @@ test('dead stale-head reviewer is requeued without recovering stale posted revie
     [{ state: 'cancelled', reason: 'stale-head-superseded' }]
   );
   assert.equal(octokit.calls.length, 0, 'head mismatch must fail before review-list probing');
-  assert.match(row.failure_message, /PR head changed from abc123 to def456; requeued current head/);
+  assert.equal(row.failed_at, null);
+  assert.equal(row.failure_message, null);
   assert.match(log.lines.join('\n'), /reviewer_reattach_invalidated/);
 });
 

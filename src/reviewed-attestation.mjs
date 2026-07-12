@@ -123,11 +123,16 @@ async function signReviewedAttestation({
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     throw new TypeError('payload object is required');
   }
+  const reviewerSubject = String(payload.payload?.reviewer_identity || '').trim();
+  if (!reviewerSubject) {
+    throw new TypeError('payload.payload.reviewer_identity is required for HCP signing');
+  }
+  const signingEnv = { ...env, HCP_SUBJECT: reviewerSubject };
   const { stdout } = await execFileWithTransientRetry(
     execFileImpl,
     hqPath,
     reviewedAttestationSignArgs(payload),
-    { env, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
+    { env: signingEnv, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
     { maxAttempts, retryDelayMs, delayImpl }
   );
   const trimmed = String(stdout || '').trim();

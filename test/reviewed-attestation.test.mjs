@@ -13,6 +13,10 @@ import {
 
 const execFileAsync = promisify(execFile);
 const TEST_DIGEST = `sha256:${'A'.repeat(43)}`;
+const REAL_ENVELOPE_FIXTURE_URL = new URL(
+  './fixtures/reviewed-attestation/hq-attest-sign-real-envelope.json',
+  import.meta.url
+);
 
 function signatureFor(subject) {
   return {
@@ -36,6 +40,10 @@ function execFileResultWithStdin({ stdout = '', error = null, onInput = () => {}
     },
   };
   return execution;
+}
+
+function loadRealEnvelopeFixture() {
+  return JSON.parse(readFileSync(REAL_ENVELOPE_FIXTURE_URL, 'utf8'));
 }
 
 test('reviewed attestation payload binds reviewer identity, reviewed head, verdict, and findings count', () => {
@@ -62,6 +70,51 @@ test('reviewed attestation payload binds reviewer identity, reviewed head, verdi
     payload: { reviewer_identity: 'gemini-reviewer-lacey' },
     ts: '2026-07-12T00:00:00.000Z',
   });
+});
+
+test('reviewed attestation accepts the real hq attest sign envelope contract', async () => {
+  const signedFixture = loadRealEnvelopeFixture();
+  const { signature, ...payload } = signedFixture;
+
+  assert.deepEqual(Object.keys(signature).sort(), ['algorithm', 'digest', 'subject']);
+  assert.equal(Object.prototype.hasOwnProperty.call(signature, 'verified'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(signedFixture, 'hcp_subject'), false);
+
+  const signed = await signReviewedAttestation({
+    payload,
+    execFileImpl: async () => ({ stdout: readFileSync(REAL_ENVELOPE_FIXTURE_URL, 'utf8') }),
+  });
+
+  assert.deepEqual(signed, signedFixture);
+});
+
+test('reviewed attestation accepts an equivalent nested payload with reordered keys', async () => {
+  const payload = buildReviewedAttestationPayload({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 3491,
+    headSha: 'abc123',
+    reviewerIdentity: 'gemini-reviewer-lacey',
+    verdict: 'comment-only',
+    findingsCount: 0,
+    ts: '2026-07-12T00:00:00.000Z',
+  });
+  payload.payload.review_model = 'gemini';
+
+  const signed = await signReviewedAttestation({
+    payload,
+    execFileImpl: async () => ({
+      stdout: JSON.stringify({
+        ...payload,
+        payload: {
+          review_model: 'gemini',
+          reviewer_identity: 'gemini-reviewer-lacey',
+        },
+        signature: signatureFor('gemini-reviewer-lacey'),
+      }),
+    }),
+  });
+
+  assert.deepEqual(signed.payload, payload.payload);
 });
 
 test('reviewed attestation signing uses the shipped flag contract and records the signed result', async () => {
@@ -248,7 +301,89 @@ test('reviewed attestation signing rejects unsigned and incomplete signer output
         stdout: JSON.stringify({ ...withoutKind, signature: signatureFor('codex-reviewer-lacey') }),
       }),
     }),
-    /kind mismatch/
+    /payload keys mismatch/
+  );
+});
+
+test('reviewed attestation signing rejects malformed signature envelopes', async () => {
+  const payload = buildReviewedAttestationPayload({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 3491,
+    headSha: 'def456',
+    reviewerIdentity: 'codex-reviewer-lacey',
+    verdict: 'comment-only',
+  });
+
+  await assert.rejects(
+    signReviewedAttestation({
+      payload,
+      execFileImpl: async () => ({
+        stdout: JSON.stringify({
+          ...payload,
+          signature: {
+            algorithm: 'hcp-hmac-sha256:v1',
+            subject: payload.payload.reviewer_identity,
+            digest: 'not-a-sha256-digest',
+          },
+        }),
+      }),
+    }),
+    /signature digest is malformed/
+  );
+
+  await assert.rejects(
+    signReviewedAttestation({
+      payload,
+      execFileImpl: async () => ({
+        stdout: JSON.stringify({
+          ...payload,
+          signature: {
+            algorithm: 'fictional-local-signer',
+            subject: payload.payload.reviewer_identity,
+            digest: TEST_DIGEST,
+          },
+        }),
+      }),
+    }),
+    /signature algorithm mismatch/
+  );
+});
+
+test('reviewed attestation signing rejects payload mismatches and extra signed fields', async () => {
+  const payload = buildReviewedAttestationPayload({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 3491,
+    headSha: 'def456',
+    reviewerIdentity: 'codex-reviewer-lacey',
+    verdict: 'comment-only',
+  });
+
+  await assert.rejects(
+    signReviewedAttestation({
+      payload,
+      execFileImpl: async () => ({
+        stdout: JSON.stringify({
+          ...payload,
+          head_sha: 'mutated-head',
+          signature: signatureFor(payload.payload.reviewer_identity),
+        }),
+      }),
+    }),
+    /head_sha mismatch/
+  );
+
+  await assert.rejects(
+    signReviewedAttestation({
+      payload,
+      execFileImpl: async () => ({
+        stdout: JSON.stringify({
+          ...payload,
+          hcp_subject: payload.payload.reviewer_identity,
+          signature: signatureFor(payload.payload.reviewer_identity),
+        }),
+      }),
+    }),
+    /payload keys mismatch/
   );
 });
 
@@ -271,7 +406,7 @@ test('reviewed attestation recording retries transient subprocess failures with 
   const delays = [];
   let attempts = 0;
   const recorded = await recordSignedReviewedAttestation({
-    signed: { kind: 'reviewed', signature: { verified: true } },
+    signed: { kind: 'reviewed', signature: signatureFor('codex-reviewer-lacey') },
     retryDelayMs: 10,
     delayImpl: async (ms) => delays.push(ms),
     execFileImpl: () => {
@@ -286,6 +421,46 @@ test('reviewed attestation recording retries transient subprocess failures with 
   assert.equal(attempts, 3);
   assert.deepEqual(delays, [10, 20]);
   assert.deepEqual(recorded, { recorded: true });
+});
+
+test('reviewed attestation emit fails closed when hq attest record rejects the signed envelope', async () => {
+  const calls = [];
+  await assert.rejects(
+    emitReviewedAttestation({
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 3491,
+      headSha: 'def456',
+      reviewerIdentity: 'claude-reviewer-lacey',
+      verdict: 'comment-only',
+      reviewBody: '## Blocking issues\n- None.\n\n## Verdict\nComment only',
+      execFileImpl: (_cmd, args) => {
+        calls.push(args);
+        if (args[1] === 'record') {
+          return execFileResultWithStdin({
+            error: Object.assign(new Error('attestation verification failed'), { code: 'EACCES' }),
+          });
+        }
+        const payload = buildReviewedAttestationPayload({
+          repo: 'laceyenterprises/agent-os',
+          prNumber: 3491,
+          headSha: 'def456',
+          reviewerIdentity: 'claude-reviewer-lacey',
+          verdict: 'comment-only',
+          findingsCount: 0,
+          ts: resultTimestamp(args),
+        });
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            ...payload,
+            signature: signatureFor(payload.payload.reviewer_identity),
+          }),
+        });
+      },
+      log: { log() {} },
+    }),
+    /attestation verification failed/
+  );
+  assert.equal(calls.length, 2);
 });
 
 test('reviewed attestation recording does not retry permanent subprocess failures', async () => {

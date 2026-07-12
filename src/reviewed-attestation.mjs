@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { isDeepStrictEqual, promisify } from 'node:util';
 
 import { classifyStructuredBlockingIssues } from './kernel/verdict.mjs';
 
@@ -149,9 +149,16 @@ function validateSignedReviewedAttestation(signed, payload) {
   if (!signed || typeof signed !== 'object' || Array.isArray(signed)) {
     throw new Error('signed attestation must be an object');
   }
+  const signedPayloadKeys = Object.keys(signed).filter((field) => field !== 'signature').sort();
+  const expectedPayloadKeys = Object.keys(payload).sort();
+  if (JSON.stringify(signedPayloadKeys) !== JSON.stringify(expectedPayloadKeys)) {
+    throw new Error(
+      `signed attestation payload keys mismatch: ${signedPayloadKeys.join(',') || '(none)'}`
+    );
+  }
   for (const [field, expected] of Object.entries(payload)) {
     const matches = field === 'payload'
-      ? JSON.stringify(signed[field]) === JSON.stringify(expected)
+      ? isDeepStrictEqual(signed[field], expected)
       : signed[field] === expected;
     if (!matches) {
       throw new Error(`signed attestation ${field} mismatch: ${signed[field]}`);

@@ -1718,6 +1718,16 @@ Reviewer and follow-up worker children are bounce survivors. They must be spawne
 
 On watcher startup, `reconcileReviewerSessions` and `recoverReviewerRunRecords` must reconcile every recoverable reviewer-run record before any new reviewer claim can be admitted. Records in `spawned`, `heartbeating`, or `cancelled` state are all recoverable. For a live reviewer, adoption requires the durable `reviews.db` `reviewing` claim plus the recorded PGID and identity verification: the runtime run record's spawn token (`reviewer_session_uuid` / `reattachToken`) must still identify the process, and the PGID start time must match the recorded `spawnedAt` within the existing `verifyPgidIdentity` tolerance. A verified live child remains `reviewing` and must not be double-spawned or killed. A dead child with no posted review may be requeued through the existing retry path; ambiguous identity remains sticky rather than signalling an unrelated PGID.
 
+If the durable reviewer claim was spawned for an older PR head than the current
+head observed during startup reconciliation, the attempt is superseded rather
+than a substantive reviewer failure. The watcher must cancel/kill any matching
+live reviewer process group, settle the runtime record as cancelled, move the
+row back to `pending`, and clear reviewer runtime handles, lease metadata,
+quota reset state, and review-population retry counters so the current head can
+be claimed by the normal reviewer CAS in the same poll. Non-transient GitHub
+probe failures, corrupt metadata, unknown reviewer identity, and ambiguous PGID
+identity remain fail-closed/sticky operator states.
+
 Follow-up remediation workers use the same lifecycle shape through their job JSON: `remediationWorker.processGroupId`, `processId`, `spawnedAt`, and worker artifacts are the durable adoption/cancel handles. The follow-up daemon's ordinary SIGTERM path stops the daemon loop only; it does not stop spawned workers. Reconcile adopts by reading the in-progress job record and worker artifacts, and operator cancellation uses `src/follow-up-stop.mjs` / `src/follow-up-worker-cancel.mjs` with PGID plus start-time identity checks.
 
 The follow-up daemon also owns terminal workspace reaping for

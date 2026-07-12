@@ -204,7 +204,45 @@ function prepareStatements(db) {
       "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
     ),
     releasePending: db.prepare(
-      "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+      `UPDATE reviewed_prs
+          SET review_status = 'pending',
+              failed_at = ?,
+              failure_message = ?,
+              review_attempts = review_attempts + 1,
+              reviewer_session_uuid = NULL,
+              reviewer_pgid = NULL,
+              reviewer_started_at = NULL,
+              reviewer_head_sha = NULL,
+              reviewer_timeout_ms = NULL,
+              reviewer_lease_expires_at = NULL,
+              quota_reset_at_utc = NULL,
+              infra_auto_recover_attempts = 0,
+              review_population_retry_attempts = 0,
+              review_population_retry_last_at = NULL,
+              review_population_retry_head_sha = NULL
+        WHERE repo = ?
+          AND pr_number = ?
+          AND review_status = 'reviewing'`
+    ),
+    releaseSuperseded: db.prepare(
+      `UPDATE reviewed_prs
+          SET review_status = 'pending',
+              failed_at = NULL,
+              failure_message = NULL,
+              reviewer_session_uuid = NULL,
+              reviewer_pgid = NULL,
+              reviewer_started_at = NULL,
+              reviewer_head_sha = NULL,
+              reviewer_timeout_ms = NULL,
+              reviewer_lease_expires_at = NULL,
+              quota_reset_at_utc = NULL,
+              infra_auto_recover_attempts = 0,
+              review_population_retry_attempts = 0,
+              review_population_retry_last_at = NULL,
+              review_population_retry_head_sha = NULL
+        WHERE repo = ?
+          AND pr_number = ?
+          AND review_status = 'reviewing'`
     ),
     markPosted: db.prepare(
       "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
@@ -645,12 +683,13 @@ async function reconcileReviewerSessions({
 
       if (headChanged) {
         killProcessGroup(row.reviewer_pgid, 'SIGKILL');
-        statements.markFailed.run(
-          failureAt,
-          `Reviewer session ${row.reviewer_session_uuid} invalidated: PR head changed from ${row.reviewer_head_sha} to ${currentHeadSha}.`,
-          row.repo,
-          row.pr_number
-        );
+        await onTerminalDeadSession({
+          row,
+          state: 'cancelled',
+          settledAt: failureAt,
+          reason: 'stale-head-superseded',
+        });
+        statements.releaseSuperseded.run(row.repo, row.pr_number);
         log.warn(
           `[watcher] reviewer_reattach_invalidated repo=${row.repo} pr=${row.pr_number} ` +
           `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid} ` +
@@ -711,12 +750,13 @@ async function reconcileReviewerSessions({
     }
 
     if (headChanged) {
-      statements.markFailed.run(
-        failureAt,
-        `Reviewer session ${row.reviewer_session_uuid} invalidated: PR head changed from ${row.reviewer_head_sha} to ${currentHeadSha}.`,
-        row.repo,
-        row.pr_number
-      );
+      await onTerminalDeadSession({
+        row,
+        state: 'cancelled',
+        settledAt: failureAt,
+        reason: 'stale-head-superseded',
+      });
+      statements.releaseSuperseded.run(row.repo, row.pr_number);
       log.warn(
         `[watcher] reviewer_reattach_invalidated repo=${row.repo} pr=${row.pr_number} ` +
         `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid || 'unknown'} ` +

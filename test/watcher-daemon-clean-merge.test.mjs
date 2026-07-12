@@ -6,8 +6,10 @@ import { join } from 'node:path';
 
 import {
   maybeDispatchAmaClosureFor,
+  readHeadAttestationChainForPr,
   runDaemonCleanMergeAttempt,
   resolveDaemonWorkerIdentityForPr,
+  resolveDaemonWorkerIdentityFromHeadAttestation,
 } from '../src/watcher.mjs';
 import {
   DAEMON_MERGE_DISPOSITION,
@@ -1194,12 +1196,14 @@ test('resolveDaemonWorkerIdentityForPr fails closed when current head is missing
 
 test('resolveDaemonWorkerIdentityForPr rejects a moved-head pr_opened row', async () => {
   const seenHeadShas = [];
+  let chainReads = 0;
   const result = await resolveDaemonWorkerIdentityForPr({
     repo: "agent-os",
     prNumber: 3491,
     currentHeadSha: "live-head-after-remediation",
     currentBranch: "codex-rrp-06/RRP-06",
     hqRoot: "/tmp/hq-root-nonexistent-daemon-headmove",
+    env: {},
     readBuildCompletionSignalForPrImpl: async (args) => {
       seenHeadShas.push(args.headSha);
       assert.equal(args.signalKind, "pr_opened");
@@ -1207,10 +1211,174 @@ test('resolveDaemonWorkerIdentityForPr rejects a moved-head pr_opened row', asyn
       // lookup would find this stale row, so the resolver must never issue one.
       return { ok: false, reason: "missing-build-completion-signal" };
     },
+    readHeadAttestationChainForPrImpl: async () => {
+      chainReads += 1;
+      return [];
+    },
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'missing-build-completion-signal');
   assert.deepEqual(seenHeadShas, ['live-head-after-remediation']);
+  assert.equal(chainReads, 0, 'flag-off path must not read the attestation chain');
+});
+
+test('resolveDaemonWorkerIdentityForPr resolves moved live head from produced attestation when LHA consumption is enabled', async () => {
+  let buildCompletionReads = 0;
+  const result = await resolveDaemonWorkerIdentityForPr({
+    repo: 'agent-os',
+    prNumber: 3491,
+    currentHeadSha: 'live-head-after-remediation',
+    currentBranch: 'codex-lha-05/LHA-05',
+    hqRoot: '/tmp/hq-root-unused',
+    env: {
+      AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_LHA_CONSUME_ATTESTATIONS: 'true',
+    },
+    readBuildCompletionSignalForPrImpl: async () => {
+      buildCompletionReads += 1;
+      return { ok: false, reason: 'should-not-read-build-completion-after-attestation-hit' };
+    },
+    readHeadAttestationChainForPrImpl: async () => [
+      {
+        valid: true,
+        kind: 'produced',
+        head_sha: 'open-head-before-remediation',
+        parent_head_sha: null,
+        producer_identity: 'codex:worker:lha-02',
+        payload: { launch_request_id: 'lrq_old', worker_class: 'codex' },
+        ts: '2026-07-12T01:00:00Z',
+      },
+      {
+        valid: true,
+        kind: 'produced',
+        head_sha: 'live-head-after-remediation',
+        parent_head_sha: 'open-head-before-remediation',
+        producer_identity: 'codex:worker:lha-05',
+        payload: { launch_request_id: 'lrq_lha_05', worker_class: 'codex' },
+        attestation_id: 'lha_attest_live',
+        ts: '2026-07-12T02:00:00Z',
+      },
+    ],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.resolvedBy, 'head-attestation');
+  assert.equal(result.launchRequestId, 'lrq_lha_05');
+  assert.equal(result.workerClass, 'codex');
+  assert.equal(result.rowHeadSha, 'live-head-after-remediation');
+  assert.equal(result.headMovedAfterBuildCompletion, true);
+  assert.equal(result.attestationId, 'lha_attest_live');
+  assert.equal(buildCompletionReads, 0, 'attested live head should replace reconstruction reads');
+});
+
+test('LHA consumption falls back only when the live head has no produced attestation', async () => {
+  let buildCompletionReads = 0;
+  const result = await resolveDaemonWorkerIdentityForPr({
+    repo: 'agent-os',
+    prNumber: 3491,
+    currentHeadSha: 'live-head',
+    consumeHeadAttestations: true,
+    readHeadAttestationChainForPrImpl: async () => [],
+    readBuildCompletionSignalForPrImpl: async () => {
+      buildCompletionReads += 1;
+      return {
+        ok: true,
+        row: {
+          launch_request_id: 'lrq_legacy_rollout',
+          worker_class: 'codex',
+          head_sha: 'live-head',
+        },
+      };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.resolvedBy, 'current-head');
+  assert.equal(buildCompletionReads, 1);
+});
+
+test('LHA consumption fails closed on chain read errors instead of downgrading', async () => {
+  let buildCompletionReads = 0;
+  const result = await resolveDaemonWorkerIdentityForPr({
+    repo: 'agent-os',
+    prNumber: 3491,
+    currentHeadSha: 'live-head',
+    consumeHeadAttestations: true,
+    readHeadAttestationChainForPrImpl: async () => {
+      throw Object.assign(new Error('hq attest chain failed'), { code: 'ENOENT' });
+    },
+    readBuildCompletionSignalForPrImpl: async () => {
+      buildCompletionReads += 1;
+      return { ok: true, row: {} };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'head-attestation-chain-read-failed');
+  assert.equal(buildCompletionReads, 0, 'hard attestation errors must not reach legacy provenance');
+});
+
+test('LHA consumption fails closed on malformed produced provenance', async () => {
+  let buildCompletionReads = 0;
+  const result = await resolveDaemonWorkerIdentityForPr({
+    repo: 'agent-os',
+    prNumber: 3491,
+    currentHeadSha: 'live-head',
+    consumeHeadAttestations: true,
+    readHeadAttestationChainForPrImpl: async () => [{
+      valid: true,
+      kind: 'produced',
+      head_sha: 'live-head',
+      payload: { worker_class: 'codex' },
+      ts: '2026-07-12T02:00:00Z',
+    }],
+    readBuildCompletionSignalForPrImpl: async () => {
+      buildCompletionReads += 1;
+      return { ok: true, row: {} };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'missing-launch-request-id');
+  assert.equal(buildCompletionReads, 0, 'malformed attestations must not reach legacy provenance');
+});
+
+test('head attestation resolver rejects a missing current head before reading the chain', async () => {
+  let chainReads = 0;
+  const result = await resolveDaemonWorkerIdentityFromHeadAttestation({
+    repo: 'agent-os',
+    prNumber: 3491,
+    currentHeadSha: '  ',
+    readHeadAttestationChainForPrImpl: async () => {
+      chainReads += 1;
+      return [];
+    },
+  });
+
+  assert.deepEqual(result, { ok: false, reason: 'missing-current-head-sha' });
+  assert.equal(chainReads, 0);
+});
+
+test('head attestation chain read retries transient hq failures with bounded backoff', async () => {
+  let attempts = 0;
+  const delays = [];
+  const rows = await readHeadAttestationChainForPr({
+    repo: 'agent-os',
+    prNumber: 3491,
+    retryDelaysMs: [5, 10],
+    sleepImpl: async (ms) => delays.push(ms),
+    logger: { warn() {} },
+    execFileImpl: async () => {
+      attempts += 1;
+      if (attempts < 3) {
+        throw Object.assign(new Error('resource temporarily unavailable'), { code: 'EIO' });
+      }
+      return { stdout: '[{"kind":"produced"}]' };
+    },
+  });
+
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [5, 10]);
+  assert.deepEqual(rows, [{ kind: 'produced' }]);
 });
 
 test("resolveDaemonWorkerIdentityForPr still fails closed when no pr_opened row exists at any head", async () => {

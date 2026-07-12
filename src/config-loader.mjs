@@ -188,6 +188,8 @@ const ENUM_SESSION_LEDGER_DUAL_WRITE_MODE = [null, 'postgres', 'sqlite', 'off'];
 const ENUM_SESSION_LEDGER_SERVICE_LOG_LEVEL = ['CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG'];
 const ENUM_APP_MODE = ['agent-os', 'standalone'];
 const ENUM_UPDATE_CHANNEL = ['rolling', 'stable', 'pinned'];
+const ENUM_CI_HOSTING_MODE = ['github', 'self-hosted-container', 'self-hosted-native'];
+const MANDATORY_CI_HOSTING_EXCLUDED_WORKFLOWS = ['release-freeze-gate.yml'];
 const ENUM_WORKER_POOL_MEMORY_DYNAMIC_ADMIT_PERCENTILE = ['p50', 'p95', 'p99'];
 const ENUM_SENTINEL_PROFILE = ['strict', 'balanced', 'relaxed'];
 const PATTERN_LINEAR_ISSUE_PREFIX = '^[A-Z][A-Z0-9]{1,9}$';
@@ -1044,6 +1046,37 @@ function schemaV1() {
           },
         },
       },
+      // LCR-01 — strict Node mirror of the Agent OS Local CI Runner routing
+      // subtree. The watcher does not route CI itself, but every strict CFG
+      // consumer must accept the same checked-in surface.
+      ci: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          hosting: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              mode: {
+                __type: TYPE_STRING,
+                __default: 'github',
+                __enum: ENUM_CI_HOSTING_MODE,
+              },
+              runner_labels: {
+                __type: TYPE_LIST,
+                __item: { __type: TYPE_STRING },
+                __default: [],
+              },
+              fallback_to_github: { __type: TYPE_BOOL, __default: true },
+              excluded_workflows: {
+                __type: TYPE_LIST,
+                __item: { __type: TYPE_STRING },
+                __default: ['release-freeze-gate.yml'],
+              },
+            },
+          },
+        },
+      },
       // OSR-05 — operator identity. Parse-only for this package, but strict
       // Node CFG consumers must accept the parent Agent OS top-level config.
       operator: {
@@ -1296,6 +1329,20 @@ function schemaV1() {
                   strict_mode: {
                     __type: TYPE_BOOL,
                     __default: true,
+                  },
+                  lha: {
+                    __type: TYPE_DICT,
+                    __strict: true,
+                    __keys: {
+                      // LHA-05 dark-launch switch. false preserves the
+                      // reconstruction path exactly; true lets merge authority
+                      // consume live-head attestations as authoritative
+                      // producer/reviewer evidence.
+                      consume_attestations: {
+                        __type: TYPE_BOOL,
+                        __default: false,
+                      },
+                    },
                   },
                   // HISTORICAL / schema-compat. Introduced by #357 as the gate
                   // for auto-dispatching the hammer on a hammer-remediable
@@ -2006,6 +2053,10 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_UPDATE_CHANNEL',
     aliases: [],
   },
+  'ci.hosting.mode': {
+    canonical: 'AGENT_OS_CI_HOSTING_MODE',
+    aliases: [],
+  },
   'roles.reviewer': {
     canonical: 'AGENT_OS_ROLES_REVIEWER',
     aliases: [['ADVERSARIAL_REVIEW_DEFAULT_REVIEWER', identity]],
@@ -2183,6 +2234,10 @@ export const ENV_ALIASES = {
   },
   'roles.adversarial.merge_authority.strict_mode': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_STRICT_MODE',
+    aliases: [],
+  },
+  'roles.adversarial.merge_authority.lha.consume_attestations': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_LHA_CONSUME_ATTESTATIONS',
     aliases: [],
   },
   'roles.adversarial.merge_authority.hammer_lifetime_ceiling': {
@@ -3617,6 +3672,28 @@ function validateGoalLineageConfig(merged, trace) {
   );
 }
 
+function enforceCiHostingSecurityInvariants(merged, trace) {
+  const excluded = getLeaf(merged, 'ci.hosting.excluded_workflows');
+  if (!Array.isArray(excluded)) return;
+  const normalized = [
+    ...MANDATORY_CI_HOSTING_EXCLUDED_WORKFLOWS,
+    ...excluded.filter(
+      (workflow) => !MANDATORY_CI_HOSTING_EXCLUDED_WORKFLOWS.includes(workflow),
+    ),
+  ];
+  if (
+    normalized.length === excluded.length &&
+    normalized.every((workflow, index) => workflow === excluded[index])
+  ) return;
+  setLeaf(merged, 'ci.hosting.excluded_workflows', normalized);
+  const key = 'ci.hosting.excluded_workflows';
+  (trace[key] = trace[key] || []).push({
+    source: 'security-invariant',
+    value: normalized,
+    path: null,
+  });
+}
+
 // True iff `key` is a path the schema accepts. Walks like schemaLeaf, but
 // also accepts paths that descend into a non-strict dict (extension point,
 // e.g. `submodules.X.Y`) where no further leaf is declared. Used by
@@ -3754,6 +3831,12 @@ export class AgentOSConfig {
         'roles.adversarial.merge_authority.strict_mode',
         true,
       ),
+      lha: {
+        consumeAttestations: this.get(
+          'roles.adversarial.merge_authority.lha.consume_attestations',
+          false,
+        ),
+      },
       autoHammerOnEligibilityMiss: this.get(
         'roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss',
         false,
@@ -4027,6 +4110,7 @@ function loadConfigImpl({
   // env- and YAML-declared entries converge on the same defaulted shape.
   backfillExtraKeyEntryDefaults(merged, schema, envMaterializedAppIds, trace);
 
+  enforceCiHostingSecurityInvariants(merged, trace);
   validateGoalLineageConfig(merged, trace);
 
   const sources = {};

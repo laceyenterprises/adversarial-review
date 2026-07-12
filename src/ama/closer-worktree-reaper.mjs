@@ -1,15 +1,20 @@
 import { execFile } from 'node:child_process';
 import { existsSync, rmSync, statSync, promises as fsPromises } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { writeFileAtomic } from '../atomic-write.mjs';
 import { execGhWithRetry } from '../gh-cli.mjs';
 
 const execFileAsync = promisify(execFile);
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
 const DEFAULT_REAP_LIMIT = 8;
 const DEFAULT_REAP_BUDGET_MS = 20_000;
+const DEFAULT_SCAN_LIMIT = 64;
+const DEFAULT_CURSOR_PATH = join(ROOT, 'data', 'ama-closer-worktree-reaper-cursor.json');
 const HAMMER_WORKER_RE = /^hammer-ama-pr-(\d+)(?:-.+)?$/;
 
 function normalizePositiveInteger(value, fallback) {
@@ -56,36 +61,119 @@ function parseGitHubRepoFromRemote(remoteUrl) {
   return `${match[1]}/${match[2]}`;
 }
 
-async function listHqRepoPaths(hqRoot) {
-  const reposDir = join(hqRoot, 'repos');
-  const entries = await fsPromises.readdir(reposDir, { withFileTypes: true }).catch((err) => {
-    if (err?.code === 'ENOENT') return [];
-    throw err;
-  });
-  return entries
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => join(reposDir, entry.name));
+function pageAfterCursor(entries, lastName, limit, nameOf = (entry) => entry.name) {
+  const sorted = [...entries].sort((left, right) => nameOf(left).localeCompare(nameOf(right)));
+  const afterCursor = lastName
+    ? sorted.filter((entry) => nameOf(entry).localeCompare(lastName) > 0)
+    : sorted;
+  const wrapped = Boolean(lastName) && afterCursor.length === 0;
+  const page = (wrapped ? sorted : afterCursor).slice(0, limit);
+  return {
+    page,
+    nextCursor: page.length > 0 ? nameOf(page.at(-1)) : lastName || null,
+    wrapped,
+  };
 }
 
-async function listHammerWorkerDirs(hqRoot) {
-  const workersDir = join(hqRoot, 'workers');
-  const entries = await fsPromises.readdir(workersDir, { withFileTypes: true }).catch((err) => {
-    if (err?.code === 'ENOENT') return [];
+async function readScanCursor(cursorPath, logger = console) {
+  try {
+    const parsed = JSON.parse(await fsPromises.readFile(cursorPath, 'utf8'));
+    if (parsed && typeof parsed === 'object') {
+      return {
+        repo: typeof parsed.repo === 'string' ? parsed.repo : null,
+        worker: typeof parsed.worker === 'string' ? parsed.worker : null,
+        evaluation: typeof parsed.evaluation === 'string' ? parsed.evaluation : null,
+      };
+    }
+  } catch (err) {
+    if (err?.code !== 'ENOENT' && !(err instanceof SyntaxError)) {
+      logger?.warn?.(`[closer-worktree-reap] cursor-read-failed: ${err?.message || err}`);
+    }
+  }
+  return { repo: null, worker: null, evaluation: null };
+}
+
+function persistScanCursor(cursorPath, cursor, logger = console) {
+  try {
+    writeFileAtomic(cursorPath, `${JSON.stringify({
+      schemaVersion: 1,
+      ...cursor,
+      updatedAt: new Date().toISOString(),
+    }, null, 2)}\n`, { mode: 0o600 });
+    return true;
+  } catch (err) {
+    logger?.warn?.(`[closer-worktree-reap] cursor-write-failed: ${err?.message || err}`);
+    return false;
+  }
+}
+
+function recoverableDiscoveryError(err) {
+  return ['ENOENT', 'EACCES', 'ENOTDIR'].includes(String(err?.code || ''));
+}
+
+async function listHqRepoPaths(hqRoot, {
+  scanLimit,
+  lastName,
+  readdirImpl = fsPromises.readdir,
+  logger = console,
+} = {}) {
+  const reposDir = join(hqRoot, 'repos');
+  const entries = await readdirImpl(reposDir, { withFileTypes: true }).catch((err) => {
+    if (recoverableDiscoveryError(err)) {
+      if (err?.code !== 'ENOENT') {
+        logger?.warn?.(`[closer-worktree-reap] repo-discovery-skipped path=${reposDir} code=${err.code}`);
+      }
+      return [];
+    }
     throw err;
   });
-  return entries
-    .filter((entry) => entry.isDirectory() && HAMMER_WORKER_RE.test(entry.name))
-    .map((entry) => {
-      const workerDir = join(workersDir, entry.name);
-      const worktreePath = join(workerDir, 'agent-os');
-      return {
-        workerId: entry.name,
-        workerDir,
-        worktreePath,
-        prNumber: parseHammerPrNumber(entry.name),
-        diskPresent: existsSync(worktreePath),
-      };
-    });
+  const discovery = pageAfterCursor(
+    entries.filter((entry) => entry.isDirectory()),
+    lastName,
+    scanLimit,
+  );
+  return {
+    paths: discovery.page.map((entry) => join(reposDir, entry.name)),
+    nextCursor: discovery.nextCursor,
+  };
+}
+
+async function listHammerWorkerDirs(hqRoot, {
+  scanLimit,
+  lastName,
+  readdirImpl = fsPromises.readdir,
+  logger = console,
+} = {}) {
+  const workersDir = join(hqRoot, 'workers');
+  const entries = await readdirImpl(workersDir, { withFileTypes: true }).catch((err) => {
+    if (recoverableDiscoveryError(err)) {
+      if (err?.code !== 'ENOENT') {
+        logger?.warn?.(`[closer-worktree-reap] worker-discovery-skipped path=${workersDir} code=${err.code}`);
+      }
+      return [];
+    }
+    throw err;
+  });
+  const discovery = pageAfterCursor(
+    entries.filter((entry) => entry.isDirectory() && HAMMER_WORKER_RE.test(entry.name)),
+    lastName,
+    scanLimit,
+  );
+  return {
+    entries: discovery.page
+      .map((entry) => {
+        const workerDir = join(workersDir, entry.name);
+        const worktreePath = join(workerDir, 'agent-os');
+        return {
+          workerId: entry.name,
+          workerDir,
+          worktreePath,
+          prNumber: parseHammerPrNumber(entry.name),
+          diskPresent: existsSync(worktreePath),
+        };
+      }),
+    nextCursor: discovery.nextCursor,
+  };
 }
 
 async function execGit({ repoPath, args, execFileImpl = execFileAsync, timeout = 30_000 }) {
@@ -219,19 +307,37 @@ async function reapCloserHammerWorktrees({
   hqPath = process.env.HQ_PATH || DEFAULT_HQ_PATH,
   limit = normalizePositiveInteger(process.env.AMA_CLOSER_WORKTREE_REAP_LIMIT, DEFAULT_REAP_LIMIT),
   budgetMs = normalizePositiveInteger(process.env.AMA_CLOSER_WORKTREE_REAP_BUDGET_MS, DEFAULT_REAP_BUDGET_MS),
+  scanLimit = normalizePositiveInteger(process.env.AMA_CLOSER_WORKTREE_SCAN_LIMIT, DEFAULT_SCAN_LIMIT),
+  cursorPath = process.env.AMA_CLOSER_WORKTREE_CURSOR_PATH || DEFAULT_CURSOR_PATH,
   repoPaths = null,
+  readdirImpl = fsPromises.readdir,
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
   env = process.env,
   logger = console,
 } = {}) {
-  const effectiveRepoPaths = Array.isArray(repoPaths) ? repoPaths : await listHqRepoPaths(hqRoot);
+  const cursor = await readScanCursor(cursorPath, logger);
+  const repoDiscovery = Array.isArray(repoPaths)
+    ? { paths: repoPaths, nextCursor: cursor.repo }
+    : await listHqRepoPaths(hqRoot, {
+        scanLimit,
+        lastName: cursor.repo,
+        readdirImpl,
+        logger,
+      });
+  const effectiveRepoPaths = repoDiscovery.paths;
   const registered = await registeredWorktreesByPath({
     repoPaths: effectiveRepoPaths,
     execFileImpl,
     logger,
   });
-  const diskEntries = await listHammerWorkerDirs(hqRoot);
+  const workerDiscovery = await listHammerWorkerDirs(hqRoot, {
+    scanLimit,
+    lastName: cursor.worker,
+    readdirImpl,
+    logger,
+  });
+  const diskEntries = workerDiscovery.entries;
   const entries = [];
   const seen = new Set();
 
@@ -252,8 +358,10 @@ async function reapCloserHammerWorktrees({
     entries.push({ ...registeredEntry, diskPresent: existsSync(pathKey), halfRegistered: false });
   }
 
+  const evaluation = pageAfterCursor(entries, cursor.evaluation, scanLimit, (entry) => entry.workerId);
+  const evaluationEntries = evaluation.page;
   const summary = {
-    scanned: entries.length,
+    scanned: evaluationEntries.length,
     reaped: 0,
     skipped: 0,
     errors: 0,
@@ -263,13 +371,15 @@ async function reapCloserHammerWorktrees({
     open: 0,
     unknown: 0,
     limit,
+    scanLimit,
   };
 
   const prStateCache = new Map();
   const reapStartedAt = Date.now();
   summary.budgetMs = budgetMs;
   summary.budgetExceeded = false;
-  for (const entry of entries) {
+  let evaluationCursor = cursor.evaluation;
+  for (const entry of evaluationEntries) {
     if (Date.now() - reapStartedAt > budgetMs) {
       // Wall-clock budget: never let the reap phase monopolize the follow-up
       // tick and starve remediation `consume`. Remaining worktrees are
@@ -277,6 +387,7 @@ async function reapCloserHammerWorktrees({
       summary.budgetExceeded = true;
       break;
     }
+    evaluationCursor = entry.workerId;
     if (summary.reaped >= limit) {
       summary.skipped += 1;
       continue;
@@ -343,6 +454,12 @@ async function reapCloserHammerWorktrees({
       summary.errors += 1;
     }
   }
+
+  summary.cursorPersisted = persistScanCursor(cursorPath, {
+    repo: repoDiscovery.nextCursor,
+    worker: workerDiscovery.nextCursor,
+    evaluation: evaluationCursor,
+  }, logger);
 
   return summary;
 }

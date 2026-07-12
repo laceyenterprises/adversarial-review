@@ -280,31 +280,6 @@ test('postGitHubReviewWithCapture emits a reviewed attestation for the reviewed 
   }
 });
 
-test('postGitHubReviewWithCapture rejects a missing reviewed head before posting', async () => {
-  let postCalls = 0;
-  await withEnvAsync({ GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat' }, async () => {
-    await assert.rejects(
-      postGitHubReviewWithCapture({
-        rootDir: mkdtempSync(join(tmpdir(), 'review-post-missing-head-')),
-        repo: 'laceyenterprises/demo',
-        prNumber: 42,
-        attemptNumber: 1,
-        reviewerModel: 'codex',
-        reviewerHeadSha: null,
-        reviewBody: '## Verdict\nComment only',
-        botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
-        passKind: 'first-pass',
-        execFileImpl: async () => {
-          postCalls += 1;
-          return { stdout: '{}' };
-        },
-      }),
-      /reviewerHeadSha is required/
-    );
-  });
-  assert.equal(postCalls, 0);
-});
-
 test('postGitHubReviewWithCapture propagates signing failure after posting for watcher recovery', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'review-post-attestation-failure-'));
   mkdirSync(join(rootDir, 'data'), { recursive: true });

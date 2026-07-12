@@ -5,10 +5,14 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import {
+  DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT,
+  DEFAULT_CLOSER_LEASE_READ_LIMIT,
   DEFAULT_STALE_CLOSER_LEASE_MS,
   DEFAULT_STALE_RUNNING_REVIEWER_PASS_MS,
   reapStaleCloserLeases,
   reapStaleRunningReviewerPasses,
+  resolveCloserLeaseEntryScanLimit,
+  resolveCloserLeaseReadLimit,
   resolveStaleCloserLeaseMs,
   resolveStaleRunningReviewerPassMs,
   runStartupStaleStateReaper,
@@ -37,6 +41,56 @@ function writeLease(rootDir, lease) {
   return path;
 }
 
+function makeOpendirSequence(pages, counters = []) {
+  let callIndex = 0;
+  return () => {
+    const page = pages[Math.min(callIndex, pages.length - 1)] || [];
+    callIndex += 1;
+    let readIndex = 0;
+    const counter = { reads: 0, closed: false };
+    counters.push(counter);
+    return {
+      readSync() {
+        counter.reads += 1;
+        if (readIndex >= page.length) return null;
+        const name = page[readIndex];
+        readIndex += 1;
+        return { name };
+      },
+      closeSync() {
+        counter.closed = true;
+      },
+    };
+  };
+}
+
+function makeOpendirFromListing(getNames, counters = []) {
+  return () => {
+    const page = [...getNames()];
+    let readIndex = 0;
+    const counter = { reads: 0, closed: false, page };
+    counters.push(counter);
+    return {
+      readSync() {
+        counter.reads += 1;
+        if (readIndex >= page.length) return null;
+        const name = page[readIndex];
+        readIndex += 1;
+        return { name };
+      },
+      closeSync() {
+        counter.closed = true;
+      },
+    };
+  };
+}
+
+function writeCloserLeaseCursor(rootDir, cursor) {
+  const path = join(rootDir, 'data', 'recovery-reaper', 'closer-lease-cursor.json');
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(cursor, null, 2)}\n`);
+}
+
 // ---------------------------------------------------------------------------
 // Config resolvers + env aliases
 // ---------------------------------------------------------------------------
@@ -44,6 +98,8 @@ function writeLease(rootDir, lease) {
 test('config resolvers honor env aliases and fall back to defaults', () => {
   assert.equal(resolveStaleRunningReviewerPassMs({}), DEFAULT_STALE_RUNNING_REVIEWER_PASS_MS);
   assert.equal(resolveStaleCloserLeaseMs({}), DEFAULT_STALE_CLOSER_LEASE_MS);
+  assert.equal(resolveCloserLeaseEntryScanLimit({}), DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT);
+  assert.equal(resolveCloserLeaseReadLimit({}), DEFAULT_CLOSER_LEASE_READ_LIMIT);
   assert.equal(
     resolveStaleRunningReviewerPassMs({ ADVERSARIAL_STALE_RUNNING_REVIEWER_PASS_MS: '900000' }),
     900000,
@@ -60,6 +116,14 @@ test('config resolvers honor env aliases and fall back to defaults', () => {
   assert.equal(
     resolveStaleCloserLeaseMs({ ADVERSARIAL_STALE_CLOSER_LEASE_MS: '-5' }),
     DEFAULT_STALE_CLOSER_LEASE_MS,
+  );
+  assert.equal(
+    resolveCloserLeaseEntryScanLimit({ ADVERSARIAL_STALE_CLOSER_LEASE_ENTRY_SCAN_LIMIT: '7' }),
+    7,
+  );
+  assert.equal(
+    resolveCloserLeaseReadLimit({ ADVERSARIAL_STALE_CLOSER_LEASE_READ_LIMIT: '3' }),
+    3,
   );
 });
 
@@ -169,7 +233,7 @@ test('selectReleasableCloserLeases: corrupt lease records are age-gated by file 
 // FS driver: reapStaleCloserLeases + transient-exhausted budget reset
 // ---------------------------------------------------------------------------
 
-test('reapStaleCloserLeases releases stale lease AND resets transient-exhausted budget', (t) => {
+test('reapStaleCloserLeases releases stale lease AND resets transient-exhausted budget', async (t) => {
   const rootDir = tempRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -188,7 +252,7 @@ test('reapStaleCloserLeases releases stale lease AND resets transient-exhausted 
     lastError: 'gh: API rate limit exceeded (HTTP 403)',
   }, null, 2)}\n`);
 
-  const result = reapStaleCloserLeases({
+  const result = await reapStaleCloserLeases({
     rootDir, now: NOW, thresholdMs: 6 * 60 * 60 * 1000, logger: { warn() {}, error() {} },
   });
   assert.equal(result.released, 1);
@@ -199,7 +263,7 @@ test('reapStaleCloserLeases releases stale lease AND resets transient-exhausted 
   assert.equal(record.retryCount, 0, 'transient-exhausted budget reset to 0 on recovery');
 });
 
-test('reapStaleCloserLeases does NOT reset a budget exhausted by a genuine (non-transient) failure', (t) => {
+test('reapStaleCloserLeases does NOT reset a budget exhausted by a genuine (non-transient) failure', async (t) => {
   const rootDir = tempRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -216,7 +280,7 @@ test('reapStaleCloserLeases does NOT reset a budget exhausted by a genuine (non-
     lastError: 'fatal: worker provision failed: merge conflict in closer',
   }, null, 2)}\n`);
 
-  const result = reapStaleCloserLeases({
+  const result = await reapStaleCloserLeases({
     rootDir, now: NOW, thresholdMs: 6 * 60 * 60 * 1000, logger: { warn() {}, error() {} },
   });
   assert.equal(result.released, 1, 'lease is still released (re-dispatch can re-evaluate)');
@@ -225,7 +289,7 @@ test('reapStaleCloserLeases does NOT reset a budget exhausted by a genuine (non-
   assert.equal(record.retryCount, 2, 'genuine-failure budget NOT reset');
 });
 
-test('reapStaleCloserLeases unlinks corrupt lease files', (t) => {
+test('reapStaleCloserLeases unlinks corrupt lease files', async (t) => {
   const rootDir = tempRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -236,7 +300,7 @@ test('reapStaleCloserLeases unlinks corrupt lease files', (t) => {
   const stale = new Date(Date.parse(hoursAgo(20)));
   utimesSync(corruptPath, stale, stale);
 
-  const result = reapStaleCloserLeases({
+  const result = await reapStaleCloserLeases({
     rootDir,
     now: NOW,
     thresholdMs: 6 * 60 * 60 * 1000,
@@ -250,7 +314,7 @@ test('reapStaleCloserLeases unlinks corrupt lease files', (t) => {
   assert.equal(existsSync(corruptPath), false, 'corrupt lease deleted -> closer can re-dispatch');
 });
 
-test('reapStaleCloserLeases keeps fresh corrupt lease files for concurrent writers', (t) => {
+test('reapStaleCloserLeases keeps fresh corrupt lease files for concurrent writers', async (t) => {
   const rootDir = tempRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -261,7 +325,7 @@ test('reapStaleCloserLeases keeps fresh corrupt lease files for concurrent write
   const fresh = new Date(Date.parse(hoursAgo(1)));
   utimesSync(corruptPath, fresh, fresh);
 
-  const result = reapStaleCloserLeases({
+  const result = await reapStaleCloserLeases({
     rootDir,
     now: NOW,
     thresholdMs: 6 * 60 * 60 * 1000,
@@ -274,7 +338,7 @@ test('reapStaleCloserLeases keeps fresh corrupt lease files for concurrent write
   assert.equal(existsSync(corruptPath), true, 'fresh corrupt lease retained for writer to finish');
 });
 
-test('reapStaleCloserLeases skips filesystem read errors instead of treating them as corruption', (t) => {
+test('reapStaleCloserLeases skips filesystem read errors instead of treating them as corruption', async (t) => {
   const rootDir = tempRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -282,7 +346,7 @@ test('reapStaleCloserLeases skips filesystem read errors instead of treating the
   mkdirSync(join(dir, 'acme__repo-pr-100-deadbeef.json'), { recursive: true });
 
   const errors = [];
-  const result = reapStaleCloserLeases({
+  const result = await reapStaleCloserLeases({
     rootDir,
     now: NOW,
     thresholdMs: 6 * 60 * 60 * 1000,
@@ -293,10 +357,11 @@ test('reapStaleCloserLeases skips filesystem read errors instead of treating the
   assert.equal(result.released, 0);
   assert.equal(result.budgetsReset, 0);
   assert.equal(result.leases.length, 0);
-  assert.ok(errors.some((line) => line.includes('failed to read lease')), 'read failure logged for retry');
+  assert.equal(result.cursorPersisted, true, 'read errors cannot pin the current page forever');
+  assert.ok(errors.some((line) => line.includes('failed to read lease')), 'read failure logged for retry after wrap');
 });
 
-test('reapStaleCloserLeases keeps lease when transient budget reset cannot be persisted', (t) => {
+test('reapStaleCloserLeases keeps lease when transient budget reset cannot be persisted', async (t) => {
   const rootDir = tempRoot();
   t.after(() => {
     chmodSync(join(rootDir, 'data', 'follow-up-jobs', 'ama-closer-dispatches'), 0o755);
@@ -319,29 +384,340 @@ test('reapStaleCloserLeases keeps lease when transient budget reset cannot be pe
   chmodSync(dirname(recordPath), 0o555);
 
   const errors = [];
-  const result = reapStaleCloserLeases({
+  const result = await reapStaleCloserLeases({
     rootDir, now: NOW, thresholdMs: 6 * 60 * 60 * 1000,
     logger: { warn() {}, error(message) { errors.push(String(message)); } },
   });
 
   assert.equal(result.released, 0, 'lease retained so reset can be retried on the next tick');
   assert.equal(result.budgetsReset, 0);
+  assert.equal(result.cursorPersisted, true, 'a failed lease cannot pin healthy leases behind its page');
   assert.equal(existsSync(leasePath), true, 'failed reset does not remove the recovery trigger');
   assert.ok(errors.some((line) => line.includes('failed to reset transient-exhausted closer budget')));
+
+  chmodSync(dirname(recordPath), 0o755);
+  const retry = await reapStaleCloserLeases({
+    rootDir, now: NOW, thresholdMs: 6 * 60 * 60 * 1000,
+    logger: { warn() {}, error() {} },
+  });
+  assert.equal(retry.released, 1, 'retained lease is retried on the next sweep');
+  assert.equal(retry.cursorPersisted, true, 'the single retained lease is retried after cursor wrap');
+});
+
+test('reapStaleCloserLeases processes more than two opendir pages across watcher restarts', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const leaseNames = [];
+  const leasePaths = [];
+  for (let i = 1; i <= 7; i += 1) {
+    const path = writeLease(rootDir, {
+      repo: `acme/lease-00${i}`,
+      prNumber: i,
+      headSha: `lease${i}`,
+      status: 'dispatched',
+      terminalOutcome: null,
+      acquiredAt: hoursAgo(20),
+      updatedAt: hoursAgo(20),
+      watcherPid: 31337,
+    });
+    leaseNames.push(path.split('/').at(-1));
+    leasePaths.push(path);
+  }
+
+  const sorted = [...leaseNames].sort((a, b) => a.localeCompare(b));
+  const counters = [];
+  const opendirSyncImpl = makeOpendirFromListing(() => sorted, counters);
+
+  const opts = {
+    rootDir,
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    entryScanLimit: 3,
+    readLimit: 3,
+    opendirSyncImpl,
+    logger: { warn() {}, error() {} },
+  };
+  const pass1 = await reapStaleCloserLeases(opts);
+  const pass2 = await reapStaleCloserLeases(opts);
+  const pass3 = await reapStaleCloserLeases(opts);
+  assert.equal(pass1.released, 3);
+  assert.equal(pass2.released, 3, 'cursor position resumes enumeration beyond the first opendir page');
+  assert.equal(pass3.released, 1, 'third bounded page is reached after restart-style fresh opendir');
+  assert.ok(leasePaths.every((path) => !existsSync(path)), 'all leases across three pages are eventually released');
+  for (const pass of [pass1, pass2, pass3]) {
+    assert.ok(pass.scannedEntries <= 3, 'entry scan stays capped per pass');
+    assert.ok(pass.readRecords <= 3, 'lease reads stay capped per pass');
+  }
+  assert.ok(counters.every((counter) => counter.closed), 'directory iterators are closed after bounded passes');
+});
+
+test('reapStaleCloserLeases does not advance cursor past unread JSON when read limit is lower than entry scan', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const leaseNames = [];
+  for (let i = 1; i <= 5; i += 1) {
+    const path = writeLease(rootDir, {
+      repo: `acme/read-boundary-00${i}`,
+      prNumber: i,
+      headSha: `boundary${i}`,
+      status: 'dispatched',
+      terminalOutcome: null,
+      acquiredAt: hoursAgo(20),
+      updatedAt: hoursAgo(20),
+      watcherPid: 31337,
+    });
+    leaseNames.push(path.split('/').at(-1));
+  }
+
+  const sorted = [...leaseNames].sort((a, b) => a.localeCompare(b));
+  const opts = {
+    rootDir,
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    entryScanLimit: 4,
+    readLimit: 2,
+    opendirSyncImpl: makeOpendirFromListing(() => sorted),
+    logger: { warn() {}, error() {} },
+  };
+
+  const pass1 = await reapStaleCloserLeases(opts);
+  const pass2 = await reapStaleCloserLeases(opts);
+  const pass3 = await reapStaleCloserLeases(opts);
+
+  assert.equal(pass1.released, 2);
+  assert.equal(pass1.cursorEntriesSeen, 2, 'cursor stops at last read JSON, not the scanned page end');
+  assert.equal(pass2.released, 2, 'unread JSON leases from pass 1 are processed on the next pass');
+  assert.equal(pass2.cursorEntriesSeen, 2);
+  assert.equal(pass3.released, 1);
+});
+
+test('reapStaleCloserLeases handles insertion and deletion around the saved cursor', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const paths = new Map();
+  for (const [name, prNumber] of [['a', 1], ['b', 2], ['c', 3], ['d', 4], ['e', 5]]) {
+    const path = writeLease(rootDir, {
+      repo: `acme/mutate-${name}`,
+      prNumber,
+      headSha: `mutate${name}`,
+      status: 'dispatched',
+      terminalOutcome: null,
+      acquiredAt: hoursAgo(20),
+      updatedAt: hoursAgo(20),
+      watcherPid: 31337,
+    });
+    paths.set(name, path);
+  }
+
+  let listing = [...paths.values()].map((path) => path.split('/').at(-1)).sort((a, b) => a.localeCompare(b));
+  const opendirSyncImpl = makeOpendirFromListing(() => listing);
+  const opts = {
+    rootDir,
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    entryScanLimit: 2,
+    readLimit: 2,
+    opendirSyncImpl,
+    logger: { warn() {}, error() {} },
+  };
+
+  const pass1 = await reapStaleCloserLeases(opts);
+  assert.equal(pass1.released, 2);
+
+  const insertedPath = writeLease(rootDir, {
+    repo: 'acme/mutate-aa',
+    prNumber: 6,
+    headSha: 'mutateaa',
+    status: 'dispatched',
+    terminalOutcome: null,
+    acquiredAt: hoursAgo(20),
+    updatedAt: hoursAgo(20),
+    watcherPid: 31337,
+  });
+  rmSync(paths.get('c'), { force: true });
+  listing = [insertedPath, paths.get('d'), paths.get('e')]
+    .map((path) => path.split('/').at(-1))
+    .sort((a, b) => a.localeCompare(b));
+
+  const pass2 = await reapStaleCloserLeases(opts);
+  assert.equal(pass2.released, 2, 'deletion before the lexical cursor does not skip later entries');
+  assert.equal(existsSync(paths.get('d')), false, 'later entries remain immediately eligible after deletion');
+
+  listing = [insertedPath]
+    .map((path) => path.split('/').at(-1))
+    .sort((a, b) => a.localeCompare(b));
+  const pass3 = await reapStaleCloserLeases(opts);
+  assert.equal(pass3.released, 1, 'cursor wrap gives coverage to names inserted before the cursor');
+  assert.equal(existsSync(insertedPath), false);
+});
+
+test('reapStaleCloserLeases resumes by saved position when the saved cursor target is missing', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const leasePaths = [];
+  for (let i = 1; i <= 4; i += 1) {
+    leasePaths.push(writeLease(rootDir, {
+      repo: `acme/missing-cursor-00${i}`,
+      prNumber: i,
+      headSha: `missing${i}`,
+      status: 'dispatched',
+      terminalOutcome: null,
+      acquiredAt: hoursAgo(20),
+      updatedAt: hoursAgo(20),
+      watcherPid: 31337,
+    }));
+  }
+  const sorted = leasePaths.map((path) => path.split('/').at(-1)).sort((a, b) => a.localeCompare(b));
+  writeCloserLeaseCursor(rootDir, {
+    schemaVersion: 2,
+    lastEntryName: `${sorted[1]}~deleted-cursor-target`,
+    entriesSeen: 2,
+  });
+
+  const result = await reapStaleCloserLeases({
+    rootDir,
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    entryScanLimit: 2,
+    readLimit: 2,
+    opendirSyncImpl: makeOpendirFromListing(() => sorted),
+    logger: { warn() {}, error() {} },
+  });
+
+  assert.equal(result.released, 2);
+  assert.equal(existsSync(leasePaths[0]), true, 'entries before the saved position wait for wrap');
+  assert.equal(existsSync(leasePaths[1]), true, 'entries before the saved position wait for wrap');
+  assert.equal(existsSync(leasePaths[2]), false);
+  assert.equal(existsSync(leasePaths[3]), false);
+});
+
+test('reapStaleCloserLeases retains only a bounded lexical page while scanning directory entries', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const leasePaths = [];
+  for (let i = 1; i <= 5; i += 1) {
+    leasePaths.push(writeLease(rootDir, {
+      repo: `acme/budget-00${i}`,
+      prNumber: i,
+      headSha: `budget${i}`,
+      status: 'dispatched',
+      terminalOutcome: null,
+      acquiredAt: hoursAgo(20),
+      updatedAt: hoursAgo(20),
+      watcherPid: 31337,
+    }));
+  }
+
+  const listing = [
+    'acme__budget-004-pr-4-budget4.json',
+    'acme__budget-002-pr-2-budget2.json',
+    'acme__budget-005-pr-5-budget5.json',
+    'acme__budget-001-pr-1-budget1.json',
+    'acme__budget-003-pr-3-budget3.json',
+  ];
+  const counters = [];
+  const result = await reapStaleCloserLeases({
+    rootDir,
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    entryScanLimit: 4,
+    readLimit: 2,
+    opendirSyncImpl: makeOpendirSequence([listing], counters),
+    logger: { warn() {}, error() {} },
+  });
+
+  assert.equal(result.scannedEntries, 4);
+  assert.equal(result.readRecords, 2);
+  assert.equal(result.released, 2, 'only read leases can be released in this pass');
+  assert.equal(existsSync(leasePaths[0]), false, 'the smallest name is retained from unordered discovery');
+  assert.equal(existsSync(leasePaths[1]), false, 'the next-smallest name is retained from unordered discovery');
+  assert.ok(leasePaths.slice(2).every((path) => existsSync(path)), 'later names wait for the next page');
+  assert.equal(counters[0].reads, 6, 'the complete five-entry snapshot plus EOF is consumed');
+  assert.equal(counters[0].closed, true);
+});
+
+test('reapStaleCloserLeases advances beyond a persistently unreadable page', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const dir = join(rootDir, 'data', 'ama-closer-leases');
+  mkdirSync(join(dir, 'acme__aaa-broken-pr-1-bad.json'), { recursive: true });
+  const freshPath = writeLease(rootDir, {
+    repo: 'acme/fresh-bbb', prNumber: 2, headSha: 'fresh', status: 'dispatched',
+    terminalOutcome: null, acquiredAt: hoursAgo(1), updatedAt: hoursAgo(1), watcherPid: 31337,
+  });
+  const stalePath = writeLease(rootDir, {
+    repo: 'acme/stale-ccc', prNumber: 3, headSha: 'stale', status: 'dispatched',
+    terminalOutcome: null, acquiredAt: hoursAgo(20), updatedAt: hoursAgo(20), watcherPid: 31337,
+  });
+  const listing = [
+    join(dir, 'acme__aaa-broken-pr-1-bad.json'), freshPath, stalePath,
+  ].map((path) => path.split('/').at(-1));
+  const errors = [];
+  const opts = {
+    rootDir, now: NOW, thresholdMs: 6 * 60 * 60 * 1000,
+    entryScanLimit: 2, readLimit: 2,
+    opendirSyncImpl: makeOpendirFromListing(() => listing),
+    logger: { warn() {}, error(message) { errors.push(String(message)); } },
+  };
+
+  const first = await reapStaleCloserLeases(opts);
+  const second = await reapStaleCloserLeases(opts);
+
+  assert.equal(first.released, 0);
+  assert.equal(first.cursorPersisted, true, 'the unreadable lease does not pin its page');
+  assert.equal(second.released, 1, 'a stale lease on the next page remains reachable');
+  assert.equal(existsSync(stalePath), false);
+  assert.equal(existsSync(freshPath), true);
+  assert.ok(errors.some((line) => line.includes('failed to read lease')));
+});
+
+test('reapStaleCloserLeases continues when a discovered lease completes concurrently', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const vanished = writeLease(rootDir, {
+    repo: 'acme/concurrent-a', prNumber: 1, headSha: 'gone', status: 'dispatched',
+    terminalOutcome: null, acquiredAt: hoursAgo(20), updatedAt: hoursAgo(20), watcherPid: 31337,
+  });
+  const remaining = writeLease(rootDir, {
+    repo: 'acme/concurrent-b', prNumber: 2, headSha: 'present', status: 'dispatched',
+    terminalOutcome: null, acquiredAt: hoursAgo(20), updatedAt: hoursAgo(20), watcherPid: 31337,
+  });
+  const listing = [vanished, remaining].map((path) => path.split('/').at(-1));
+  rmSync(vanished);
+
+  const errors = [];
+  const result = await reapStaleCloserLeases({
+    rootDir, now: NOW, thresholdMs: 6 * 60 * 60 * 1000,
+    entryScanLimit: 2, readLimit: 2,
+    opendirSyncImpl: makeOpendirFromListing(() => listing),
+    logger: { warn() {}, error(message) { errors.push(String(message)); } },
+  });
+
+  assert.equal(result.released, 1);
+  assert.equal(existsSync(remaining), false, 'later leases in the page are still recovered');
+  assert.equal(result.cursorPersisted, true);
+  assert.deepEqual(errors, []);
 });
 
 // ---------------------------------------------------------------------------
 // Orchestrator never throws
 // ---------------------------------------------------------------------------
 
-test('runStartupStaleStateReaper is fail-safe and returns a summary', (t) => {
+test('runStartupStaleStateReaper is fail-safe and returns a summary', async (t) => {
   const rootDir = tempRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const db = openReviewStateDb(rootDir);
   ensureReviewStateSchema(db);
   t.after(() => db.close());
   // No leases dir, no passes -> must not throw.
-  const out = runStartupStaleStateReaper({ rootDir, db, env: {}, now: NOW, logger: { warn() {}, error() {}, log() {} } });
+  const out = await runStartupStaleStateReaper({ rootDir, db, env: {}, now: NOW, logger: { warn() {}, error() {}, log() {} } });
   assert.equal(out.reviewerPasses.reaped, 0);
   assert.equal(out.closerLeases.released, 0);
 });

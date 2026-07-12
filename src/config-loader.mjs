@@ -1085,11 +1085,11 @@ function schemaV1() {
         __keys: {
           email: {
             __type: TYPE_STRING,
-            __default: 'virtualpaul@gmail.com',
+            __default: 'virtualpaul@gmail.com',  // cfg-allowlist(operator-email): oss-readiness-apply-reviewed
           },
           full_name: {
             __type: TYPE_STRING,
-            __default: 'Paul Lacey',
+            __default: 'Paul Lacey',  // cfg-allowlist(operator-name): oss-readiness-apply-reviewed
           },
         },
       },
@@ -1177,7 +1177,7 @@ function schemaV1() {
         __keys: {
           team_name: {
             __type: TYPE_STRING,
-            __default: 'Laceyenterprises',
+            __default: 'Laceyenterprises',  // cfg-allowlist(linear-team): oss-readiness-apply-reviewed
           },
           issue_prefix: {
             __type: TYPE_STRING,

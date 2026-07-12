@@ -9,8 +9,8 @@ import { execGhWithRetry } from '../gh-cli.mjs';
 
 const execFileAsync = promisify(execFile);
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';
-const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';
+const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
+const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const DEFAULT_REAP_LIMIT = 8;
 const DEFAULT_REAP_BUDGET_MS = 20_000;
 const DEFAULT_SCAN_LIMIT = 64;

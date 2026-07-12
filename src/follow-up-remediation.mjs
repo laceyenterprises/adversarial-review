@@ -329,7 +329,7 @@ const TRANSIENT_HQ_DISPATCH_CODES = new Set([
   'supervisor_restart',
   'supervisor-restart',
 ]);
-const DEFAULT_DEPLOY_CHECKOUT = '/Users/airlock/agent-os';
+const DEFAULT_DEPLOY_CHECKOUT = '/Users/airlock/agent-os';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const HQ_REMEDIATION_WORKSPACE_SEGMENTS = ['adversarial-review', 'follow-up-workspaces'];
 
 // The Worker-Class trailer this pipeline stamps on commits via the

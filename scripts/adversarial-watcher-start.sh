@@ -17,7 +17,7 @@ set -euo pipefail
 # 1Password popup storm (every spawn triggers `op read` calls). Keep this
 # gate BEFORE any 1Password resolution so a broken native module produces
 # zero popups.
-WATCHER_DIR="/Users/airlock/agent-os/tools/adversarial-review"
+WATCHER_DIR="/Users/airlock/agent-os/tools/adversarial-review"  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 REPO_ROOT="${AGENT_OS_ROOT:-${WATCHER_DIR%/tools/adversarial-review}}"
 if [[ -f "$REPO_ROOT/modules/worker-pool/lib/agent-os-config-loader.sh" ]]; then
   source "$REPO_ROOT/modules/worker-pool/lib/agent-os-config-loader.sh"
@@ -155,7 +155,7 @@ if [[ -z "${GITHUB_TOKEN:-}" ]]; then
 fi
 
 # Force Codex CLI to use the shared OAuth auth file rather than airlock's default ~/.codex/auth.json
-export CODEX_AUTH_PATH=/Users/placey/.codex/auth.json
+export CODEX_AUTH_PATH=/Users/placey/.codex/auth.json  # cfg-allowlist(account-placey): oss-readiness-apply-reviewed
 
 ALERT_TO_OP_REF="${ADVERSARIAL_REVIEW_ALERT_TO_OP_REF:-${ALERT_TO_OP_REF:-}}"
 ALERT_TO_REF_LABEL="${ALERT_TO_OP_REF:-ADVERSARIAL_REVIEW_ALERT_TO_OP_REF/ALERT_TO_OP_REF}"
@@ -328,11 +328,11 @@ _try_resolve_reviewer_pat() {
   if resolve_and_export_required_op_secret "$target_env" "$op_ref"; then
     return 0
   fi
-  if [[ -r /Users/airlock/agent-os/.secrets/local/op-service-account.env ]]; then
+  if [[ -r /Users/airlock/agent-os/.secrets/local/op-service-account.env ]]; then  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
     echo "[adversarial-watcher] retrying ${target_env} read under canonical SA env file (watcher SA may lack Cliovault access)" >&2
     local _fallback_token
     # shellcheck disable=SC1091
-    _fallback_token="$(. /Users/airlock/agent-os/.secrets/local/op-service-account.env >/dev/null 2>&1; printf '%s' "${OP_SERVICE_ACCOUNT_TOKEN:-}")"
+    _fallback_token="$(. /Users/airlock/agent-os/.secrets/local/op-service-account.env >/dev/null 2>&1; printf '%s' "${OP_SERVICE_ACCOUNT_TOKEN:-}")"  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
     if [[ -n "$_fallback_token" ]]; then
       OP_SERVICE_ACCOUNT_TOKEN="$_fallback_token" \
         resolve_and_export_required_op_secret "$target_env" "$op_ref" && return 0
@@ -519,7 +519,7 @@ unset AWS_BEARER_TOKEN_BEDROCK
 # Preserve ANTHROPIC_AUTH_TOKEN: it may be the OAuth bearer.
 
 if command -v setsid >/dev/null 2>&1; then
-  exec setsid /opt/homebrew/bin/node /Users/airlock/agent-os/tools/adversarial-review/src/watcher.mjs
+  exec setsid /opt/homebrew/bin/node /Users/airlock/agent-os/tools/adversarial-review/src/watcher.mjs  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 fi
 
-exec /opt/homebrew/bin/node /Users/airlock/agent-os/tools/adversarial-review/src/watcher.mjs
+exec /opt/homebrew/bin/node /Users/airlock/agent-os/tools/adversarial-review/src/watcher.mjs  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed

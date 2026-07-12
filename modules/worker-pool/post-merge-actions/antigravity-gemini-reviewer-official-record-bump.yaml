@@ -6,21 +6,21 @@ actions:
     idempotent: true
     command: |
       set -euo pipefail
-      test -d /Users/airlock/agent-os  # cfg-allowlist: production-host-doc - production deploy checkout
-      test -x /Users/airlock/agent-os/scripts/build-pack-official-record-bump.sh  # cfg-allowlist: production-host-doc - production helper path
-      test -d /Users/airlock/agent-os/projects/antigravity-gemini-reviewer  # cfg-allowlist: production-host-doc - merged build-pack project
-      mkdir -p /Users/airlock/agent-os-hq/tmp  # cfg-allowlist: production-host-doc - post-merge scratch root
+      test -d /Users/airlock/agent-os  # cfg-allowlist: production-host-doc - production deploy checkout  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
+      test -x /Users/airlock/agent-os/scripts/build-pack-official-record-bump.sh  # cfg-allowlist: production-host-doc - production helper path  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
+      test -d /Users/airlock/agent-os/projects/antigravity-gemini-reviewer  # cfg-allowlist: production-host-doc - merged build-pack project  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
+      mkdir -p /Users/airlock/agent-os-hq/tmp  # cfg-allowlist: production-host-doc - post-merge scratch root  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
       # Reviewed-handoff routing: '[codex]' is the DELIBERATE prefix for this load-bearing auth/secrets bump PR.
       # It is a valid worker-class prefix that routes the bump PR through NORMAL adversarial review (this action is
       # NOT admin-merged; see description), and it matches the codex worker class that runs the bump. Same convention
       # as the PFW pack's official-record bump. Do not change without re-checking the reviewed-handoff routing intent.
-      /Users/airlock/agent-os/scripts/build-pack-official-record-bump.sh --project antigravity-gemini-reviewer --source-repo /Users/airlock/agent-os --scratch-root /Users/airlock/agent-os-hq/tmp --title-prefix '[codex]'  # cfg-allowlist: production-host-doc - post-merge-action runs as `user: airlock` on the production host
+      /Users/airlock/agent-os/scripts/build-pack-official-record-bump.sh --project antigravity-gemini-reviewer --source-repo /Users/airlock/agent-os --scratch-root /Users/airlock/agent-os-hq/tmp --title-prefix '[codex]'  # cfg-allowlist: production-host-doc - post-merge-action runs as `user: airlock` on the production host  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 catchup:
   catchup_timeout_s: 1800
   on_failure:
     diagnose:
-      - git -C /Users/airlock/agent-os log --oneline -1  # cfg-allowlist: production-host-doc
-      - test -x /Users/airlock/agent-os/scripts/build-pack-official-record-bump.sh  # cfg-allowlist: production-host-doc
-      - test -d /Users/airlock/agent-os/projects/antigravity-gemini-reviewer  # cfg-allowlist: production-host-doc
+      - git -C /Users/airlock/agent-os log --oneline -1  # cfg-allowlist: production-host-doc  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
+      - test -x /Users/airlock/agent-os/scripts/build-pack-official-record-bump.sh  # cfg-allowlist: production-host-doc  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
+      - test -d /Users/airlock/agent-os/projects/antigravity-gemini-reviewer  # cfg-allowlist: production-host-doc  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
       - launchctl print gui/$(id -u airlock)/ai.laceyenterprises.main-catchup  # cfg-allowlist: production-host-doc - launchd service label on the production host
 contact_on_failure: operator

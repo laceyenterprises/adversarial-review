@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import {
   buildReviewedAttestationPayload,
   emitReviewedAttestation,
+  signReviewedAttestation,
 } from '../src/reviewed-attestation.mjs';
 
 test('reviewed attestation payload binds reviewer identity, reviewed head, verdict, and findings count', () => {
@@ -100,6 +101,58 @@ test('reviewed attestation signing rejects an explicit non-reviewer HCP subject'
       log: { log() {} },
     }),
     /HCP subject mismatch/
+  );
+});
+
+test('reviewed attestation signing retries transient subprocess failures with bounded backoff', async () => {
+  const delays = [];
+  let attempts = 0;
+  const payload = buildReviewedAttestationPayload({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 3491,
+    headSha: 'def456',
+    reviewerIdentity: 'codex-reviewer-lacey',
+    verdict: 'comment-only',
+  });
+
+  const signed = await signReviewedAttestation({
+    payload,
+    retryDelayMs: 10,
+    delayImpl: async (ms) => delays.push(ms),
+    execFileImpl: async () => {
+      attempts += 1;
+      if (attempts < 3) throw Object.assign(new Error('resource temporarily unavailable'), { code: 'EAGAIN' });
+      return { stdout: JSON.stringify(payload) };
+    },
+  });
+
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [10, 20]);
+  assert.equal(signed.head_sha, payload.head_sha);
+});
+
+test('reviewed attestation signing does not retry permanent subprocess failures', async () => {
+  let attempts = 0;
+  await assert.rejects(
+    signReviewedAttestation({
+      payload: { kind: 'reviewed' },
+      execFileImpl: async () => {
+        attempts += 1;
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      },
+    }),
+    /permission denied/
+  );
+  assert.equal(attempts, 1);
+});
+
+test('reviewed attestation signing rejects non-JSON signer output', async () => {
+  await assert.rejects(
+    signReviewedAttestation({
+      payload: { kind: 'reviewed' },
+      execFileImpl: async () => ({ stdout: 'not-json' }),
+    }),
+    /returned invalid JSON/
   );
 });
 

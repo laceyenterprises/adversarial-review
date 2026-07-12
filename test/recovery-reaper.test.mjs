@@ -420,9 +420,28 @@ test('reapStaleCloserLeases honors separate entry and read budgets per pass', as
     logger: { warn() {}, error() {} },
   });
 
-  assert.equal(result.scannedEntries, 4);
+  assert.equal(result.scannedEntries, 2);
   assert.equal(result.readRecords, 2);
   assert.equal(result.released, 2, 'only read leases can be released in this pass');
+  const cursorPath = join(rootDir, 'data', 'recovery-reaper', 'closer-lease-cursor.json');
+  assert.equal(
+    JSON.parse(readFileSync(cursorPath, 'utf8')).lastEntryName,
+    'acme__budget-002-pr-2-budget2.json',
+  );
+
+  const nextResult = await reapStaleCloserLeases({
+    rootDir,
+    now: NOW,
+    thresholdMs: 6 * 60 * 60 * 1000,
+    entryScanLimit: 4,
+    readLimit: 2,
+    logger: { warn() {}, error() {} },
+  });
+  assert.equal(nextResult.released, 2, 'the next pass starts with the first unread lease');
+  assert.equal(
+    JSON.parse(readFileSync(cursorPath, 'utf8')).lastEntryName,
+    'acme__budget-004-pr-4-budget4.json',
+  );
 });
 
 // ---------------------------------------------------------------------------

@@ -290,11 +290,13 @@ async function readLeaseRecords(rootDir, {
   const boundedNames = rotatedNames.slice(0, Math.max(0, Number(entryScanLimit) || 0));
   const records = [];
   let readRecords = 0;
+  let scannedEntries = 0;
   let lastEntryName = null;
   for (const name of boundedNames) {
+    if (readRecords >= readLimit) break;
+    scannedEntries += 1;
     lastEntryName = name;
     if (!name.endsWith('.json')) continue;
-    if (readRecords >= readLimit) continue;
     readRecords += 1;
     const path = join(dir, name);
     try {
@@ -324,7 +326,7 @@ async function readLeaseRecords(rootDir, {
   const cursorPersisted = await persistCloserLeaseCursor(rootDir, lastEntryName, logger);
   return {
     records,
-    scannedEntries: boundedNames.length,
+    scannedEntries,
     readRecords,
     cursorPersisted,
     lastEntryName,

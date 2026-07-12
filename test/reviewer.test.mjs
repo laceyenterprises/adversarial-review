@@ -7,6 +7,7 @@ import { CLAUDE_CLI, GEMINI_CLI, AGY_CLI, __test__ } from '../src/reviewer.mjs';
 import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
+import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import {
   AGY_TRANSIENT_REMEDIATION,
   clearAgyReviewerAuthCache,
@@ -306,11 +307,22 @@ test('postGitHubReviewWithCapture rejects a missing reviewed head before posting
   assert.equal(postCalls, 0);
 });
 
-test('postGitHubReviewWithCapture propagates signing failure after posting for watcher recovery', async () => {
+test('postGitHubReviewWithCapture resumes signing failure without posting a duplicate review', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'review-post-attestation-failure-'));
   mkdirSync(join(rootDir, 'data'), { recursive: true });
   try {
     let postCalls = 0;
+    let attestCalls = 0;
+    beginReviewerPass(rootDir, {
+      repo: 'laceyenterprises/demo',
+      prNumber: 42,
+      attemptNumber: 1,
+      reviewerClass: 'codex',
+      reviewerModel: 'codex',
+      passKind: 'first-pass',
+      startedAt: '2026-07-12T00:00:00.000Z',
+      headSha: 'reviewed-head-sha',
+    });
     await withEnvAsync({
       GHA_ADAPTER_BIN: '/fixture/github-adapter',
       GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
@@ -331,6 +343,7 @@ test('postGitHubReviewWithCapture propagates signing failure after posting for w
             return { stdout: '{}' };
           },
           attestExecFileImpl: async () => {
+            attestCalls += 1;
             throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
           },
           prepareReviewWrite: async () => {},
@@ -339,6 +352,35 @@ test('postGitHubReviewWithCapture propagates signing failure after posting for w
       );
     });
     assert.equal(postCalls, 1);
+
+    await withEnvAsync({
+      GHA_ADAPTER_BIN: '/fixture/github-adapter',
+      GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+    }, async () => {
+      await postGitHubReviewWithCapture({
+        rootDir,
+        repo: 'laceyenterprises/demo',
+        prNumber: 42,
+        attemptNumber: 2,
+        reviewerModel: 'codex',
+        reviewerHeadSha: 'reviewed-head-sha',
+        reviewBody: '## Verdict\nComment only',
+        botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+        passKind: 'first-pass',
+        execFileImpl: async () => {
+          postCalls += 1;
+          return { stdout: '{}' };
+        },
+        attestExecFileImpl: async () => {
+          attestCalls += 1;
+          return { stdout: '{}' };
+        },
+        prepareReviewWrite: async () => {},
+        log: { log() {}, warn() {} },
+      });
+    });
+    assert.equal(postCalls, 1);
+    assert.equal(attestCalls, 2);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

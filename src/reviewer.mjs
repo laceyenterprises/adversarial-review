@@ -4154,16 +4154,29 @@ async function postGitHubReviewWithCapture({
     throw new Error(`Cannot post reviewed attestation for ${repo}#${prNumber}: reviewerHeadSha is required`);
   }
 
-  await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
-    rootDir,
-    fetchImpl,
-    readFileImpl,
-    log,
-    prepareReviewWrite,
-    reviewerSpawnToken,
-    reviewerIdentity,
-    reviewerTokenFetchTimeoutMs,
+  const alreadyCaptured = shouldEmitReviewedAttestation && wasGitHubReviewCaptured(rootDir, {
+    repo,
+    prNumber,
+    headSha: attestationHeadSha,
+    reviewerModel,
+    passKind,
+    reviewBody,
   });
+
+  if (!alreadyCaptured) {
+    await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
+      rootDir,
+      fetchImpl,
+      readFileImpl,
+      log,
+      prepareReviewWrite,
+      reviewerSpawnToken,
+      reviewerIdentity,
+      reviewerTokenFetchTimeoutMs,
+    });
+  } else {
+    log.log?.(`[reviewer] resuming reviewed attestation after captured GitHub review for ${repo}#${prNumber}`);
+  }
 
   // Capture postedAt AFTER the gh post returns so the candidate window
   // bounds the artifact's GitHub-assigned timestamp, which is set during
@@ -4181,7 +4194,7 @@ async function postGitHubReviewWithCapture({
   });
   const persistedVerdict = normalizedVerdict === 'unknown' ? null : normalizedVerdict;
 
-  await captureReviewerBodyAfterPost(rootDir, {
+  if (!alreadyCaptured) await captureReviewerBodyAfterPost(rootDir, {
     repo,
     prNumber,
     attemptNumber: Number(attemptNumber),
@@ -4211,6 +4224,34 @@ async function postGitHubReviewWithCapture({
       env: process.env,
       log,
     });
+  }
+}
+
+function wasGitHubReviewCaptured(rootDir, {
+  repo,
+  prNumber,
+  headSha,
+  reviewerModel,
+  passKind,
+  reviewBody,
+}) {
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    return Boolean(db.prepare(
+      `SELECT 1
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND head_sha = ?
+          AND reviewer_model = ?
+          AND pass_kind = ?
+          AND body_md = ?
+          AND body_captured_at IS NOT NULL
+        LIMIT 1`
+    ).get(repo, Number(prNumber), headSha, reviewerModel, passKind, reviewBody));
+  } finally {
+    db.close();
   }
 }
 

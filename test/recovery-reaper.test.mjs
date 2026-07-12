@@ -5,13 +5,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import {
-  DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT,
   DEFAULT_CLOSER_LEASE_READ_LIMIT,
   DEFAULT_STALE_CLOSER_LEASE_MS,
   DEFAULT_STALE_RUNNING_REVIEWER_PASS_MS,
   reapStaleCloserLeases,
   reapStaleRunningReviewerPasses,
-  resolveCloserLeaseEntryScanLimit,
   resolveCloserLeaseReadLimit,
   resolveStaleCloserLeaseMs,
   resolveStaleRunningReviewerPassMs,
@@ -41,29 +39,6 @@ function writeLease(rootDir, lease) {
   return path;
 }
 
-function makeOpendirSequence(pages, counters = []) {
-  let callIndex = 0;
-  return () => {
-    const page = pages[Math.min(callIndex, pages.length - 1)] || [];
-    callIndex += 1;
-    let readIndex = 0;
-    const counter = { reads: 0, closed: false };
-    counters.push(counter);
-    return {
-      readSync() {
-        counter.reads += 1;
-        if (readIndex >= page.length) return null;
-        const name = page[readIndex];
-        readIndex += 1;
-        return { name };
-      },
-      closeSync() {
-        counter.closed = true;
-      },
-    };
-  };
-}
-
 // ---------------------------------------------------------------------------
 // Config resolvers + env aliases
 // ---------------------------------------------------------------------------
@@ -71,7 +46,6 @@ function makeOpendirSequence(pages, counters = []) {
 test('config resolvers honor env aliases and fall back to defaults', () => {
   assert.equal(resolveStaleRunningReviewerPassMs({}), DEFAULT_STALE_RUNNING_REVIEWER_PASS_MS);
   assert.equal(resolveStaleCloserLeaseMs({}), DEFAULT_STALE_CLOSER_LEASE_MS);
-  assert.equal(resolveCloserLeaseEntryScanLimit({}), DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT);
   assert.equal(resolveCloserLeaseReadLimit({}), DEFAULT_CLOSER_LEASE_READ_LIMIT);
   assert.equal(
     resolveStaleRunningReviewerPassMs({ ADVERSARIAL_STALE_RUNNING_REVIEWER_PASS_MS: '900000' }),
@@ -89,10 +63,6 @@ test('config resolvers honor env aliases and fall back to defaults', () => {
   assert.equal(
     resolveStaleCloserLeaseMs({ ADVERSARIAL_STALE_CLOSER_LEASE_MS: '-5' }),
     DEFAULT_STALE_CLOSER_LEASE_MS,
-  );
-  assert.equal(
-    resolveCloserLeaseEntryScanLimit({ ADVERSARIAL_STALE_CLOSER_LEASE_ENTRY_SCAN_LIMIT: '7' }),
-    7,
   );
   assert.equal(
     resolveCloserLeaseReadLimit({ ADVERSARIAL_STALE_CLOSER_LEASE_READ_LIMIT: '3' }),
@@ -368,13 +338,12 @@ test('reapStaleCloserLeases keeps lease when transient budget reset cannot be pe
   assert.ok(errors.some((line) => line.includes('failed to reset transient-exhausted closer budget')));
 });
 
-test('reapStaleCloserLeases processes all-json leases across bounded passes when entry scan exceeds read limit', async (t) => {
+test('reapStaleCloserLeases processes the complete directory across read-bounded passes', async (t) => {
   const rootDir = tempRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const leaseNames = [];
   for (let i = 1; i <= 4; i += 1) {
-    const path = writeLease(rootDir, {
+    writeLease(rootDir, {
       repo: `acme/lease-00${i}`,
       prNumber: i,
       headSha: `lease${i}`,
@@ -384,7 +353,6 @@ test('reapStaleCloserLeases processes all-json leases across bounded passes when
       updatedAt: hoursAgo(20),
       watcherPid: 31337,
     });
-    leaseNames.push(path.split('/').at(-1));
   }
   const finalPath = writeLease(rootDir, {
     repo: 'acme/lease-005',
@@ -396,43 +364,29 @@ test('reapStaleCloserLeases processes all-json leases across bounded passes when
     updatedAt: hoursAgo(20),
     watcherPid: 31337,
   });
-  leaseNames.push(finalPath.split('/').at(-1));
-
-  const sorted = [...leaseNames].sort((a, b) => a.localeCompare(b));
-  const counters = [];
-  const opendirSyncImpl = makeOpendirSequence([
-    sorted.slice(0, 4),
-    sorted.slice(0, 4),
-    [sorted[4], ...sorted.slice(0, 3)],
-  ], counters);
-
   const opts = {
     rootDir,
     now: NOW,
     thresholdMs: 6 * 60 * 60 * 1000,
-    entryScanLimit: 4,
     readLimit: 2,
-    opendirSyncImpl,
     logger: { warn() {}, error() {} },
   };
   const pass1 = await reapStaleCloserLeases(opts);
   const pass2 = await reapStaleCloserLeases(opts);
   assert.equal(pass1.released, 2);
   assert.equal(pass2.released, 2, 'cursor did not advance past JSON leases skipped by the read limit');
-  assert.equal(existsSync(finalPath), true, 'lease outside the first bounded page is still pending');
+  assert.equal(existsSync(finalPath), true, 'read limit leaves later lease pending');
 
   const pass3 = await reapStaleCloserLeases(opts);
   assert.equal(pass3.released, 1);
   assert.equal(existsSync(finalPath), false, 'cursor rotation eventually reaches the remaining lease');
   for (const pass of [pass1, pass2, pass3]) {
-    assert.ok(pass.scannedEntries <= 4, 'entry scan stays capped per pass');
+    assert.ok(pass.scannedEntries <= 5, 'each pass observes the complete remaining directory');
     assert.ok(pass.readRecords <= 2, 'lease reads stay capped per pass');
   }
-  assert.deepEqual(counters.map((counter) => counter.reads), [4, 4, 4]);
-  assert.ok(counters.every((counter) => counter.closed), 'directory iterators are closed after bounded passes');
 });
 
-test('reapStaleCloserLeases consumes at most its entry budget from the directory iterator', async (t) => {
+test('reapStaleCloserLeases discovers names beyond the former entry scan bound', async (t) => {
   const rootDir = tempRoot();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -449,29 +403,56 @@ test('reapStaleCloserLeases consumes at most its entry budget from the directory
     });
   }
 
-  const sorted = [
+  const names = [
     'acme__budget-001-pr-1-budget1.json',
     'acme__budget-002-pr-2-budget2.json',
     'acme__budget-003-pr-3-budget3.json',
     'acme__budget-004-pr-4-budget4.json',
     'acme__budget-005-pr-5-budget5.json',
   ];
-  const counters = [];
   const result = await reapStaleCloserLeases({
     rootDir,
     now: NOW,
     thresholdMs: 6 * 60 * 60 * 1000,
-    entryScanLimit: 4,
-    readLimit: 2,
-    opendirSyncImpl: makeOpendirSequence([sorted], counters),
+    readLimit: 5,
+    readdirSyncImpl: () => names,
     logger: { warn() {}, error() {} },
   });
 
-  assert.equal(result.scannedEntries, 4);
+  assert.equal(result.scannedEntries, 5);
+  assert.equal(result.readRecords, 5);
+  assert.equal(result.released, 5, 'all discovered leases are eligible for bounded reads');
+});
+
+test('reapStaleCloserLeases continues after a lease is concurrently deleted', async (t) => {
+  const rootDir = tempRoot();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const firstPath = writeLease(rootDir, {
+    repo: 'acme/a', prNumber: 1, headSha: 'first', status: 'dispatched', terminalOutcome: null,
+    acquiredAt: hoursAgo(20), updatedAt: hoursAgo(20), watcherPid: 31337,
+  });
+  const secondPath = writeLease(rootDir, {
+    repo: 'acme/b', prNumber: 2, headSha: 'second', status: 'dispatched', terminalOutcome: null,
+    acquiredAt: hoursAgo(20), updatedAt: hoursAgo(20), watcherPid: 31337,
+  });
+  const readFileSyncImpl = (path, encoding) => {
+    if (path === firstPath) {
+      const err = new Error('lease disappeared');
+      err.code = 'ENOENT';
+      throw err;
+    }
+    return readFileSync(path, encoding);
+  };
+
+  const result = await reapStaleCloserLeases({
+    rootDir, now: NOW, thresholdMs: 6 * 60 * 60 * 1000, readFileSyncImpl,
+    logger: { warn() {}, error() {} },
+  });
+
   assert.equal(result.readRecords, 2);
-  assert.equal(result.released, 2, 'only read leases can be released in this pass');
-  assert.equal(counters[0].reads, 4);
-  assert.equal(counters[0].closed, true);
+  assert.equal(result.released, 1, 'the lease after the deletion race is still processed');
+  assert.equal(existsSync(secondPath), false);
+  assert.equal(result.cursorPersisted, true);
 });
 
 // ---------------------------------------------------------------------------

@@ -26,18 +26,12 @@
  */
 
 import {
-  closeSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  opendirSync,
   readFileSync,
-  renameSync,
+  readdirSync,
   rmSync,
   statSync,
-  writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { join } from 'node:path';
 
 import {
   AMA_CLOSER_REDISPATCH_BOUND,
@@ -45,6 +39,7 @@ import {
   readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord,
 } from './ama/dispatch-closer.mjs';
+import { writeFileAtomic } from './atomic-write.mjs';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -53,7 +48,6 @@ const HOUR_MS = 60 * 60 * 1000;
 // recovers same-day after an outage.
 export const DEFAULT_STALE_RUNNING_REVIEWER_PASS_MS = 6 * HOUR_MS;
 export const DEFAULT_STALE_CLOSER_LEASE_MS = 6 * HOUR_MS;
-export const DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT = 250;
 export const DEFAULT_CLOSER_LEASE_READ_LIMIT = 50;
 
 const LEASE_DIR_SEGMENTS = ['data', 'ama-closer-leases'];
@@ -87,13 +81,6 @@ export function resolveStaleCloserLeaseMs(env = process.env) {
   return resolvePositiveMs(
     env.ADVERSARIAL_STALE_CLOSER_LEASE_MS,
     DEFAULT_STALE_CLOSER_LEASE_MS,
-  );
-}
-
-export function resolveCloserLeaseEntryScanLimit(env = process.env) {
-  return resolvePositiveMs(
-    env.ADVERSARIAL_STALE_CLOSER_LEASE_ENTRY_SCAN_LIMIT,
-    DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT,
   );
 }
 
@@ -217,9 +204,10 @@ function closerLeaseCursorPath(rootDir) {
 
 function rotateAfterCursor(names, cursorName) {
   if (names.length === 0) return [];
-  const sorted = [...names].sort((a, b) => a.localeCompare(b));
+  const compareNames = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  const sorted = [...names].sort(compareNames);
   const cursor = typeof cursorName === 'string' ? cursorName : '';
-  const startIndex = sorted.findIndex((name) => name.localeCompare(cursor) > 0);
+  const startIndex = sorted.findIndex((name) => compareNames(name, cursor) > 0);
   if (startIndex < 0) return sorted;
   return sorted.slice(startIndex).concat(sorted.slice(0, startIndex));
 }
@@ -238,42 +226,14 @@ function readCloserLeaseCursor(rootDir, logger = console) {
   return null;
 }
 
-function writeJsonAtomic(filePath, value) {
-  const parentDir = dirname(filePath);
-  mkdirSync(parentDir, { recursive: true });
-  const tmpPath = join(
-    parentDir,
-    `.${basename(filePath)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`,
-  );
-  let fd = null;
-  try {
-    fd = openSync(tmpPath, 'wx', 0o640);
-    writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-    fsyncSync(fd);
-    closeSync(fd);
-    fd = null;
-    renameSync(tmpPath, filePath);
-  } catch (err) {
-    if (fd != null) {
-      try {
-        closeSync(fd);
-      } catch {}
-    }
-    try {
-      rmSync(tmpPath, { force: true });
-    } catch {}
-    throw err;
-  }
-}
-
 function persistCloserLeaseCursor(rootDir, lastEntryName, logger = console) {
   if (!lastEntryName) return false;
   try {
-    writeJsonAtomic(closerLeaseCursorPath(rootDir), {
+    writeFileAtomic(closerLeaseCursorPath(rootDir), `${JSON.stringify({
       schemaVersion: 1,
       lastEntryName,
       updatedAt: new Date().toISOString(),
-    });
+    }, null, 2)}\n`, { mode: 0o640 });
     return true;
   } catch (err) {
     logger?.error?.(`[reaper] failed to persist closer lease cursor: ${err?.message || err}`);
@@ -281,41 +241,26 @@ function persistCloserLeaseCursor(rootDir, lastEntryName, logger = console) {
   }
 }
 
-function readDirectoryEntryNames(dir, {
-  entryScanLimit = DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT,
-  opendirSyncImpl = opendirSync,
-} = {}) {
-  const limit = Math.max(0, Number(entryScanLimit) || 0);
-  const names = [];
-  let iterator = null;
+function readDirectoryEntryNames(dir, readdirSyncImpl = readdirSync) {
   try {
-    iterator = opendirSyncImpl(dir);
+    const names = readdirSyncImpl(dir);
+    return { names, scannedEntries: names.length };
   } catch (err) {
     if (err?.code === 'ENOENT') {
-      return { names, scannedEntries: 0 };
+      return { names: [], scannedEntries: 0 };
     }
     throw err;
   }
-  try {
-    while (names.length < limit) {
-      const entry = iterator.readSync();
-      if (!entry) break;
-      names.push(entry.name);
-    }
-  } finally {
-    iterator.closeSync?.();
-  }
-  return { names, scannedEntries: names.length };
 }
 
 function readLeaseRecords(rootDir, {
   logger = console,
-  entryScanLimit = DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT,
   readLimit = DEFAULT_CLOSER_LEASE_READ_LIMIT,
-  opendirSyncImpl = opendirSync,
+  readdirSyncImpl = readdirSync,
+  readFileSyncImpl = readFileSync,
 } = {}) {
   const dir = leaseDirPath(rootDir);
-  const discovery = readDirectoryEntryNames(dir, { entryScanLimit, opendirSyncImpl });
+  const discovery = readDirectoryEntryNames(dir, readdirSyncImpl);
   const cursorName = readCloserLeaseCursor(rootDir, logger);
   const names = discovery.names;
   const rotatedNames = rotateAfterCursor(names, cursorName);
@@ -334,10 +279,14 @@ function readLeaseRecords(rootDir, {
     readRecords += 1;
     const path = join(dir, name);
     try {
-      const lease = JSON.parse(readFileSync(path, 'utf8'));
+      const lease = JSON.parse(readFileSyncImpl(path, 'utf8'));
       if (lease && typeof lease === 'object') records.push({ ...lease, _path: path });
       lastEntryName = name;
     } catch (err) {
+      if (err?.code === 'ENOENT') {
+        lastEntryName = name;
+        continue;
+      }
       if (err instanceof SyntaxError) {
         let mtimeMs = null;
         try {
@@ -427,17 +376,17 @@ export function reapStaleCloserLeases({
   now = new Date().toISOString(),
   thresholdMs = DEFAULT_STALE_CLOSER_LEASE_MS,
   livePid = (typeof process !== 'undefined' ? process.pid : null),
-  entryScanLimit = DEFAULT_CLOSER_LEASE_ENTRY_SCAN_LIMIT,
   readLimit = DEFAULT_CLOSER_LEASE_READ_LIMIT,
-  opendirSyncImpl = opendirSync,
+  readdirSyncImpl = readdirSync,
+  readFileSyncImpl = readFileSync,
   logger = console,
 } = {}) {
   if (!rootDir) return { released: 0, budgetsReset: 0, leases: [], scannedEntries: 0, readRecords: 0 };
   const discovery = readLeaseRecords(rootDir, {
     logger,
-    entryScanLimit,
     readLimit,
-    opendirSyncImpl,
+    readdirSyncImpl,
+    readFileSyncImpl,
   });
   const releasable = selectReleasableCloserLeases(discovery.records, {
     now, thresholdMs, livePid,
@@ -515,7 +464,6 @@ export function runStartupStaleStateReaper({
       rootDir,
       now,
       thresholdMs: resolveStaleCloserLeaseMs(env),
-      entryScanLimit: resolveCloserLeaseEntryScanLimit(env),
       readLimit: resolveCloserLeaseReadLimit(env),
       logger,
     });

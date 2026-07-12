@@ -133,6 +133,7 @@ test('reviewed attestation signing uses the shipped flag contract and records th
       'Request changes',
     ].join('\n'),
     hqPath: '/tmp/hq',
+    env: { PATH: '/usr/bin', KEEP_ME: 'yes', HCP_SUBJECT: 'stale-global-subject' },
     execFileImpl: (cmd, args, options) => {
       calls.push({ cmd, args, options });
       if (args[1] === 'record') {
@@ -168,8 +169,18 @@ test('reviewed attestation signing uses the shipped flag contract and records th
     '--head-sha', 'def456', '--kind', 'reviewed',
   ]);
   assert.equal(calls[0].options.input, undefined);
+  assert.deepEqual(calls[0].options.env, {
+    PATH: '/usr/bin',
+    KEEP_ME: 'yes',
+    HCP_SUBJECT: 'claude-reviewer-lacey',
+  });
   assert.deepEqual(calls[1].args, ['attest', 'record', '--payload', '-']);
   assert.equal(calls[1].options.input, undefined);
+  assert.deepEqual(calls[1].options.env, {
+    PATH: '/usr/bin',
+    KEEP_ME: 'yes',
+    HCP_SUBJECT: 'stale-global-subject',
+  });
   const signedInput = JSON.parse(calls[1].input);
   assert.equal(signedInput.kind, 'reviewed');
   assert.equal(signedInput.head_sha, 'def456');
@@ -391,7 +402,10 @@ test('reviewed attestation signing does not retry permanent subprocess failures'
   let attempts = 0;
   await assert.rejects(
     signReviewedAttestation({
-      payload: { kind: 'reviewed' },
+      payload: {
+        kind: 'reviewed',
+        payload: { reviewer_identity: 'codex-reviewer-lacey' },
+      },
       execFileImpl: async () => {
         attempts += 1;
         throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
@@ -499,7 +513,10 @@ test('reviewed attestation recording writes payload to a real child stdin stream
 test('reviewed attestation signing rejects non-JSON signer output', async () => {
   await assert.rejects(
     signReviewedAttestation({
-      payload: { kind: 'reviewed' },
+      payload: {
+        kind: 'reviewed',
+        payload: { reviewer_identity: 'codex-reviewer-lacey' },
+      },
       execFileImpl: async () => ({ stdout: 'not-json' }),
     }),
     /returned invalid JSON/

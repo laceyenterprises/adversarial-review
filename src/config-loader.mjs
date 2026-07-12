@@ -1297,6 +1297,20 @@ function schemaV1() {
                     __type: TYPE_BOOL,
                     __default: true,
                   },
+                  lha: {
+                    __type: TYPE_DICT,
+                    __strict: true,
+                    __keys: {
+                      // LHA-05 dark-launch switch. false preserves the
+                      // reconstruction path exactly; true lets merge authority
+                      // consume live-head attestations as authoritative
+                      // producer/reviewer evidence.
+                      consume_attestations: {
+                        __type: TYPE_BOOL,
+                        __default: false,
+                      },
+                    },
+                  },
                   // HISTORICAL / schema-compat. Introduced by #357 as the gate
                   // for auto-dispatching the hammer on a hammer-remediable
                   // eligibility miss (false = misses park awaiting operator
@@ -2183,6 +2197,10 @@ export const ENV_ALIASES = {
   },
   'roles.adversarial.merge_authority.strict_mode': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_STRICT_MODE',
+    aliases: [],
+  },
+  'roles.adversarial.merge_authority.lha.consume_attestations': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_LHA_CONSUME_ATTESTATIONS',
     aliases: [],
   },
   'roles.adversarial.merge_authority.hammer_lifetime_ceiling': {
@@ -3754,6 +3772,12 @@ export class AgentOSConfig {
         'roles.adversarial.merge_authority.strict_mode',
         true,
       ),
+      lha: {
+        consumeAttestations: this.get(
+          'roles.adversarial.merge_authority.lha.consume_attestations',
+          false,
+        ),
+      },
       autoHammerOnEligibilityMiss: this.get(
         'roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss',
         false,

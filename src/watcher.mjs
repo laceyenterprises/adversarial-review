@@ -5837,6 +5837,8 @@ async function runDaemonCleanMergeAttempt({
     rootDir,
     env,
     readBuildCompletionSignalForPrImpl,
+    readHeadAttestationChainForPrImpl: readHeadAttestationChainForPr,
+    consumeHeadAttestations: cfg?.lha?.consumeAttestations === true,
   });
   if (!workerIdentity.ok) {
     return {
@@ -5953,10 +5955,26 @@ async function resolveDaemonWorkerIdentityForPr({
   rootDir,
   env = process.env,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
+  readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr,
+  consumeHeadAttestations = null,
 } = {}) {
   const currentHead = String(currentHeadSha || '').trim();
   if (!currentHead) {
     return { ok: false, reason: 'missing-current-head-sha' };
+  }
+  if (consumeHeadAttestations === true || (consumeHeadAttestations === null && mergeAuthorityConsumesLhaAttestations(env))) {
+    const attested = await resolveDaemonWorkerIdentityFromHeadAttestation({
+      repo,
+      prNumber,
+      currentHeadSha: currentHead,
+      hqRoot,
+      rootDir,
+      env,
+      readHeadAttestationChainForPrImpl,
+    });
+    if (attested.ok) {
+      return attested;
+    }
   }
   const baseArgs = {
     repo,
@@ -6031,6 +6049,90 @@ async function resolveDaemonWorkerIdentityForPr({
     currentHeadSha: currentHead || null,
     resolvedBy: 'current-head',
     headMovedAfterBuildCompletion: false,
+  };
+}
+
+function mergeAuthorityConsumesLhaAttestations(env = process.env) {
+  const raw = String(env.AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_LHA_CONSUME_ATTESTATIONS || '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
+async function readHeadAttestationChainForPr({
+  repo,
+  prNumber,
+  hqRoot,
+  env = process.env,
+  execFileImpl = execFileAsync,
+} = {}) {
+  const args = ['attest', 'chain', '--repo', String(repo || ''), '--pr', String(prNumber), '--json'];
+  if (hqRoot) {
+    args.splice(2, 0, '--root', String(hqRoot));
+  }
+  const { stdout } = await execFileImpl('hq', args, {
+    env,
+    maxBuffer: 5 * 1024 * 1024,
+    timeout: 30_000,
+  });
+  const rows = JSON.parse(String(stdout || '[]'));
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function resolveDaemonWorkerIdentityFromHeadAttestation({
+  repo,
+  prNumber,
+  currentHeadSha,
+  hqRoot,
+  rootDir,
+  env = process.env,
+  readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr,
+} = {}) {
+  let rows;
+  try {
+    rows = await readHeadAttestationChainForPrImpl({ repo, prNumber, hqRoot, rootDir, env });
+  } catch (err) {
+    return {
+      ok: false,
+      reason: 'head-attestation-chain-read-failed',
+      error: String(err?.message || err),
+    };
+  }
+  const currentHead = String(currentHeadSha || '').trim();
+  const produced = (Array.isArray(rows) ? rows : [])
+    .filter((row) => (
+      row?.kind === 'produced'
+      && row?.valid === true
+      && String(row?.head_sha || row?.headSha || '').trim() === currentHead
+    ))
+    .sort((a, b) => String(a?.ts || '').localeCompare(String(b?.ts || '')))
+    .at(-1);
+  if (!produced) {
+    return { ok: false, reason: 'missing-produced-head-attestation' };
+  }
+  const payload = produced.payload && typeof produced.payload === 'object' ? produced.payload : {};
+  const launchRequestId = String(
+    payload.launch_request_id || payload.launchRequestId || produced.launch_request_id || produced.launchRequestId || '',
+  ).trim();
+  const workerClass = String(
+    payload.worker_class || payload.workerClass || produced.worker_class || produced.workerClass || '',
+  ).trim();
+  if (!launchRequestId || !workerClass) {
+    return {
+      ok: false,
+      reason: !launchRequestId ? 'missing-launch-request-id' : 'missing-worker-class',
+      currentHeadSha: currentHead || null,
+      attestationId: produced.attestation_id || produced.attestationId || null,
+    };
+  }
+  return {
+    ok: true,
+    launchRequestId,
+    workerClass,
+    rowHeadSha: String(produced.head_sha || produced.headSha || '').trim() || null,
+    currentHeadSha: currentHead || null,
+    resolvedBy: 'head-attestation',
+    headMovedAfterBuildCompletion: Boolean(produced.parent_head_sha || produced.parentHeadSha),
+    attestationId: produced.attestation_id || produced.attestationId || null,
+    producerIdentity: produced.producer_identity || produced.producerIdentity || null,
   };
 }
 
@@ -9480,6 +9582,8 @@ if (isMain) {
 export {
   amaAuthoritativeReviewerLoginsForModel,
   resolveDaemonWorkerIdentityForPr,
+  resolveDaemonWorkerIdentityFromHeadAttestation,
+  readHeadAttestationChainForPr,
   classifyReviewerFailure,
   createWatcherOctokit,
   createWatcherHeartbeat,

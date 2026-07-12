@@ -5767,6 +5767,7 @@ async function runDaemonCleanMergeAttempt({
   acquireMergeLeaseImpl = acquireMergeLease,
   releaseMergeLeaseImpl = releaseMergeLease,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
+  readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr,
   env = process.env,
 } = {}) {
   const base = candidate?.baseBranch;
@@ -5838,7 +5839,7 @@ async function runDaemonCleanMergeAttempt({
     rootDir,
     env,
     readBuildCompletionSignalForPrImpl,
-    readHeadAttestationChainForPrImpl: readHeadAttestationChainForPr,
+    readHeadAttestationChainForPrImpl,
     consumeHeadAttestations: cfg?.lha?.consumeAttestations === true,
   });
   if (!workerIdentity.ok) {
@@ -5963,7 +5964,14 @@ async function resolveDaemonWorkerIdentityForPr({
   if (!currentHead) {
     return { ok: false, reason: 'missing-current-head-sha' };
   }
-  if (consumeHeadAttestations === true || (consumeHeadAttestations === null && mergeAuthorityConsumesLhaAttestations(env))) {
+  // LHA-06 remediation (gemini blocking): consume ONLY when the caller resolved
+  // the flag from the canonical AgentOSConfig (which layers YAML under env). The
+  // removed env-only fallback returned `true` on an unset env var, silently
+  // ignoring a YAML rollback (`consume_attestations: false`) on the default-param
+  // path — a split-brain that would keep enforcing LHA even after an operator
+  // disabled the cutover. Callers pass the resolved value; an unresolved value
+  // fails safe to NOT consuming (legacy path), never to enforcing.
+  if (consumeHeadAttestations === true) {
     const attested = await resolveDaemonWorkerIdentityFromHeadAttestation({
       repo,
       prNumber,
@@ -5976,9 +5984,7 @@ async function resolveDaemonWorkerIdentityForPr({
     if (attested.ok) {
       return attested;
     }
-    if (attested.reason !== 'missing-produced-head-attestation') {
-      return attested;
-    }
+    return attested;
   }
   const baseArgs = {
     repo,
@@ -6054,11 +6060,6 @@ async function resolveDaemonWorkerIdentityForPr({
     resolvedBy: 'current-head',
     headMovedAfterBuildCompletion: false,
   };
-}
-
-function mergeAuthorityConsumesLhaAttestations(env = process.env) {
-  const raw = String(env.AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_LHA_CONSUME_ATTESTATIONS || '').trim().toLowerCase();
-  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
 
 async function readHeadAttestationChainForPr({

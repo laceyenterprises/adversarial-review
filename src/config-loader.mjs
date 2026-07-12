@@ -1334,13 +1334,12 @@ function schemaV1() {
                     __type: TYPE_DICT,
                     __strict: true,
                     __keys: {
-                      // LHA-05 dark-launch switch. false preserves the
-                      // reconstruction path exactly; true lets merge authority
-                      // consume live-head attestations as authoritative
-                      // producer/reviewer evidence.
+                      // LHA-06 cutover switch. true makes merge authority
+                      // require live-head attestations; false is rollback to
+                      // legacy reconstruction.
                       consume_attestations: {
                         __type: TYPE_BOOL,
-                        __default: false,
+                        __default: true,
                       },
                     },
                   },
@@ -3834,7 +3833,7 @@ export class AgentOSConfig {
       lha: {
         consumeAttestations: this.get(
           'roles.adversarial.merge_authority.lha.consume_attestations',
-          false,
+          true,
         ),
       },
       autoHammerOnEligibilityMiss: this.get(

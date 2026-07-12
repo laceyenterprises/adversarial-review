@@ -14,3 +14,7 @@ data/
 # (e.g. PR #15 remediation-reply.json was carried as a tracked file
 # until PR #127's round-2 review flagged it as drift).
 .adversarial-follow-up/
+# Legacy reviewer runtime artifacts. New token-usage artifacts are written
+# under $HQ_ROOT/adversarial-review/token-usage, but this keeps old local
+# side-channel output from dirtying the owned submodule checkout.
+.adversarial-review/

@@ -24,6 +24,7 @@ import {
   readCodexTranscriptTokenUsage,
   readReviewerTokenUsageArtifact,
   readReviewerSessionTokenUsage,
+  reviewerTokenUsageArtifactPath,
   tagTokenUsage,
   readWorkerRunTokenUsage,
   writeReviewerTokenUsageArtifact,
@@ -168,6 +169,7 @@ test('gemini reviewer exact usage writes local artifact and owner fold-in withou
       source: 'gemini-json',
     },
     metadata: { reviewerTokenUsageArtifact: '/tmp/untrusted-artifact.json' },
+    env: {},
   });
 
   assert.ok(artifactPath.endsWith('.json'));
@@ -185,6 +187,42 @@ test('gemini reviewer exact usage writes local artifact and owner fold-in withou
   assert.equal(metadata.reviewerTokenUsageArtifact, artifactPath);
 });
 
+test('reviewer token usage artifact uses HQ root outside the review workspace when available', () => {
+  const rootDir = tempRoot();
+  const workspace = path.join(rootDir, 'workspace');
+  const hqRoot = path.join(rootDir, 'hq');
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(hqRoot, { recursive: true });
+
+  const artifactPath = writeReviewerTokenUsageArtifact({
+    workspacePath: workspace,
+    repo: 'lacey/repo',
+    prNumber: 55,
+    attemptNumber: 2,
+    passKind: 'first-pass',
+    reviewerClass: 'gemini',
+    tokenUsage: { input: 1, output: 1, source: 'gemini-json' },
+    env: { HQ_ROOT: hqRoot },
+  });
+
+  assert.equal(
+    artifactPath,
+    path.join(hqRoot, 'adversarial-review', 'token-usage', 'lacey__repo__pr-55__attempt-2__first-pass.json')
+  );
+  assert.equal(existsSync(path.join(workspace, '.adversarial-review')), false);
+  assert.equal(
+    reviewerTokenUsageArtifactPath({
+      workspacePath: workspace,
+      repo: 'lacey/repo',
+      prNumber: 55,
+      attemptNumber: 2,
+      passKind: 'first-pass',
+      env: { HQ_ROOT: hqRoot },
+    }),
+    artifactPath
+  );
+});
+
 test('reviewer token usage artifact refuses to create directories in a cross-user workspace', () => {
   const rootDir = tempRoot();
   const workspace = path.join(rootDir, 'workspace');
@@ -198,9 +236,10 @@ test('reviewer token usage artifact refuses to create directories in a cross-use
     passKind: 'first-pass',
     reviewerClass: 'gemini',
     tokenUsage: { input: 1, output: 1, source: 'gemini-json' },
+    env: {},
     currentUidImpl: () => 2000,
     statSyncImpl: () => ({ uid: 1000 }),
-  }), /Refusing to write reviewer token usage artifact into workspace owned by uid 1000 as uid 2000/);
+  }), /Refusing to write reviewer token usage artifact under root owned by uid 1000 as uid 2000/);
 
   assert.equal(existsSync(path.join(workspace, '.adversarial-review')), false);
 });

@@ -251,6 +251,7 @@ test('kills and fails (retryably) an overdue orphan only after proving exit and 
 
   await reconcileReviewerSessions({
     db,
+    leaseRecoveryEnabled: false, // exercise the explicit off-mode (default is now on)
     octokit: makeOctokit([]), // no posted review
     now: new Date('2026-05-11T05:45:00.000Z'),
     log,
@@ -646,6 +647,7 @@ test('reattach reconciliation can cap stale rows per poll', async () => {
 
   const result = await reconcileReviewerSessions({
     db,
+    leaseRecoveryEnabled: false, // exercise the explicit off-mode (default is now on)
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
@@ -660,6 +662,27 @@ test('reattach reconciliation can cap stale rows per poll', async () => {
   assert.equal(readRow(db, REPO, 71).review_status, 'reviewing');
 });
 
+test('requeues a dead reviewer to pending BY DEFAULT (lease recovery on) so a bounce does not orphan the ticket', async () => {
+  const db = setupDb();
+  seedReviewing(db, { reviewer: 'claude' });
+  const log = makeLog();
+  const settled = [];
+
+  // No leaseRecoveryEnabled option: exercises the graduated default (true).
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    onTerminalDeadSession: async (event) => settled.push(event),
+    probeAlive: () => false,
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'pending'); // reclaimable by the claim CAS, not sticky 'failed'
+});
+
 test('marks a dead reviewer without a GitHub review as retryable failed', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'claude' });
@@ -668,6 +691,7 @@ test('marks a dead reviewer without a GitHub review as retryable failed', async 
 
   await reconcileReviewerSessions({
     db,
+    leaseRecoveryEnabled: false, // exercise the explicit off-mode (default is now on)
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,

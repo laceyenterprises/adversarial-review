@@ -175,6 +175,9 @@ export async function load(url, context, nextLoad) {
       export async function fetchReviewBodiesForHead() {
         return [];
       }
+      export async function fetchSubmittedReviewsForHead() {
+        return [];
+      }
       export async function fetchPullRequestCommitSubjects() {
         return scenario.commitSubjects || [];
       }

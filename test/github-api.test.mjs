@@ -1373,6 +1373,91 @@ test('adapter-present empty review bodies fall back to legacy head filtering', a
   assert.deepEqual(bodies, ['## Verdict\n\nRequest changes']);
 });
 
+function makeReviewsListEnvelope(reviews) {
+  return {
+    stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${JSON.stringify(reviews)}`,
+  };
+}
+
+test('fetchSubmittedReviewsForHead returns id+commit_id descriptors for the head, newest-first', async () => {
+  const mod = await importGithubApiFresh();
+  const headSha = 'head-dedup-target';
+  const reviews = await mod.fetchSubmittedReviewsForHead(
+    async (command, args) => {
+      assert.equal(command, 'gh');
+      assert.equal(args[0], 'api');
+      return makeReviewsListEnvelope([
+        {
+          id: 9001,
+          user: { login: 'lacey-gemini-reviewer' },
+          body: '## Verdict\n\nRequest changes',
+          state: 'CHANGES_REQUESTED',
+          submitted_at: '2026-07-13T00:24:00.000Z',
+          commit_id: headSha,
+        },
+        {
+          id: 9002,
+          user: { login: 'lacey-gemini-reviewer' },
+          body: '## Verdict\n\nRequest changes (later, same head)',
+          state: 'CHANGES_REQUESTED',
+          submitted_at: '2026-07-13T00:29:00.000Z',
+          commit_id: headSha,
+        },
+        {
+          id: 9003,
+          user: { login: 'lacey-gemini-reviewer' },
+          body: '## Verdict\n\nStale head',
+          state: 'APPROVED',
+          submitted_at: '2026-07-13T00:40:00.000Z',
+          commit_id: 'other-head',
+        },
+      ]);
+    },
+    FIXTURE_REPO,
+    FIXTURE_PR,
+    headSha,
+    { authoritativeReviewerLogins: ['lacey-gemini-reviewer'] },
+  );
+  assert.deepEqual(reviews.map((r) => r.id), ['9002', '9001']);
+  assert.equal(reviews[0].commitId, headSha);
+});
+
+test('fetchSubmittedReviewsForHead filters out untrusted reviewer logins (anti-spoof)', async () => {
+  const mod = await importGithubApiFresh();
+  const headSha = 'head-spoof';
+  const reviews = await mod.fetchSubmittedReviewsForHead(
+    async () => makeReviewsListEnvelope([
+      {
+        id: 42,
+        user: { login: 'random-impostor' },
+        body: 'lgtm',
+        state: 'APPROVED',
+        submitted_at: '2026-07-13T00:24:00.000Z',
+        commit_id: headSha,
+      },
+    ]),
+    FIXTURE_REPO,
+    FIXTURE_PR,
+    headSha,
+    { authoritativeReviewerLogins: ['lacey-gemini-reviewer'] },
+  );
+  assert.deepEqual(reviews, []);
+});
+
+test('fetchSubmittedReviewsForHead with an empty trusted-login set fails closed', async () => {
+  const mod = await importGithubApiFresh();
+  let called = false;
+  const reviews = await mod.fetchSubmittedReviewsForHead(
+    async () => { called = true; return makeReviewsListEnvelope([]); },
+    FIXTURE_REPO,
+    FIXTURE_PR,
+    'head',
+    { authoritativeReviewerLogins: [] },
+  );
+  assert.deepEqual(reviews, []);
+  assert.equal(called, false);
+});
+
 function makeLargeExpectedRollup() {
   const base = makeExpectedRollup();
   return {
@@ -1655,7 +1740,7 @@ export async function load(url, context, nextLoad) {
     'fixture:atomic-write': "export function writeFileAtomic() {}",
     'fixture:gh-cli': "export const GH_LOOKUP_MAX_BUFFER = 26214400; export const GH_LOOKUP_TIMEOUT_MS = 30000; export function buildAllowlistedGhEnv(env = process.env) { return { ...env }; } export async function execGhWithRetry({ execFileImpl, args } = {}) { return execFileImpl('gh', args); } export function isTransientGhError() { return false; } export function parseDate(value) { return value ? new Date(value) : null; } export function parseJsonLines(stdout) { return String(stdout || '').split('\\\\n').filter(Boolean).map((line) => JSON.parse(line)); }",
     'fixture:ama-ham-provenance': "export const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set(); export function hamAuditCommentAuthorMatches() { return false; } export function parseCommitTrailers() { return {}; } export function parseRemediatedFindingsTrailer() { return null; }",
-    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { globalThis.__githubApiWatcherRollupCalls = (globalThis.__githubApiWatcherRollupCalls || 0) + 1; return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1; return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestMergeability() { return { mergeable: scenario.rollup.mergeable, mergeStateStatus: scenario.rollup.mergeStateStatus }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchPullRequestCommitSubjects() { return []; }",
+    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { globalThis.__githubApiWatcherRollupCalls = (globalThis.__githubApiWatcherRollupCalls || 0) + 1; return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1; return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestMergeability() { return { mergeable: scenario.rollup.mergeable, mergeStateStatus: scenario.rollup.mergeStateStatus }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchSubmittedReviewsForHead() { return []; } export async function fetchPullRequestCommitSubjects() { return []; }",
   };
 
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {

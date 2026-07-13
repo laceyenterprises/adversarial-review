@@ -1001,6 +1001,67 @@ async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
     .map((review) => review.body);
 }
 
+/**
+ * Fetch the authoritative submitted reviews whose per-review `commit_id` equals
+ * `headSha`, newest-first, returning full descriptors (crucially the review
+ * `id`) rather than bodies. This is the load-bearing signal for the
+ * reviewed-head dispatch dedup gate: a head is ALREADY-REVIEWED iff a completed
+ * review from a trusted reviewer login exists on that exact commit. Unlike
+ * `fetchReviewBodiesForHead` (which drops everything but the body), the dedup
+ * gate needs the review id for its skip-audit line, so this reads the canonical
+ * REST reviews list where `id` + `commit_id` are always present.
+ *
+ * The anti-spoof login filter mirrors `fetchReviewBodiesForHead`: an explicit
+ * reviewer-login set that is empty/unresolvable fails closed (returns `[]`),
+ * while `null`/undefined disables the filter. Throws on API failure so the
+ * caller can decide its own fail-open/closed policy.
+ *
+ * @returns {Promise<Array<{id, commitId, state, submittedAt, author, body}>>}
+ */
+async function fetchSubmittedReviewsForHead(execFileImpl, repo, prNumber, headSha, {
+  authoritativeReviewerLogins = null,
+  authoritativeReviewerLogin = null,
+} = {}) {
+  if (!headSha) return [];
+  const reviewerLoginCandidates = authoritativeReviewerLogins != null
+    ? authoritativeReviewerLogins
+    : authoritativeReviewerLogin == null
+      ? null
+      : [authoritativeReviewerLogin];
+  const loginList = Array.isArray(reviewerLoginCandidates)
+    ? reviewerLoginCandidates.map(normalizeLogin).filter(Boolean)
+    : [];
+  const expectedReviewerLoginSet = loginList.length ? new Set(loginList) : null;
+  if (reviewerLoginCandidates != null && !expectedReviewerLoginSet) return [];
+  const normalizedPrNumber = normalizePrNumber(prNumber);
+  const matchesHead = (review) => {
+    if (!review.submittedAt || !review.commitId || String(review.commitId) !== String(headSha)) {
+      return false;
+    }
+    if (!SUBMITTED_REVIEW_STATES.has(String(review.state || '').toUpperCase())) {
+      return false;
+    }
+    if (expectedReviewerLoginSet && !expectedReviewerLoginSet.has(normalizeLogin(review.author?.login))) {
+      return false;
+    }
+    return true;
+  };
+  const sortNewestSubmittedFirst = (a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt));
+  const reviews = await paginateRest(
+    execFileImpl,
+    `repos/${repo}/pulls/${normalizedPrNumber}/reviews`,
+    (data) => (Array.isArray(data) ? data : []).map((review) => ({
+      id: review?.id == null ? null : String(review.id),
+      author: normalizeAuthor(review?.user),
+      body: String(review?.body || ''),
+      state: review?.state || null,
+      submittedAt: review?.submitted_at || null,
+      commitId: review?.commit_id || null,
+    })),
+  );
+  return reviews.filter(matchesHead).sort(sortNewestSubmittedFirst);
+}
+
 async function fetchLegacyChecks(execFileImpl, repo, headRefOid) {
   if (!headRefOid) return [];
   const checkRuns = await paginateRestWithTotalCount(
@@ -1856,4 +1917,5 @@ export {
   fetchPullRequestReviewContext,
   fetchPullRequestRollup,
   fetchReviewBodiesForHead,
+  fetchSubmittedReviewsForHead,
 };

@@ -3975,6 +3975,15 @@ function resolveFirstPassReviewBudgetSuppression({
       : null;
   const currentHeadAlreadyReviewed =
     suppliedCurrentHeadSha !== null && reviewedHeadSha === suppliedCurrentHeadSha;
+  if (currentHeadAlreadyReviewed && !isExplicitOperatorReviewRetrigger(reviewRow)) {
+    return {
+      suppressed: true,
+      reason: 'same-head-already-reviewed',
+      completedRoundsForPR,
+      roundBudget,
+      riskClass: resolution.riskClass,
+    };
+  }
   const currentHeadOwesPostBudgetFinalReview =
     suppliedCurrentHeadSha !== null &&
     !currentHeadAlreadyReviewed &&

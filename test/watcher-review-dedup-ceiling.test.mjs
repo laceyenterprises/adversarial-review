@@ -14,7 +14,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.mjs';
-import { countDistinctReviewedHeadShas } from '../src/watcher.mjs';
+import {
+  countCompletedReviewerRereviewRounds,
+  countDistinctReviewedHeadShas,
+  countReviewCeilingUnits,
+} from '../src/watcher.mjs';
 
 function makeTempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'review-dedup-ceiling-'));
@@ -94,6 +98,174 @@ test('non-completed and null-head passes never count toward the distinct-head ce
       countDistinctReviewedHeadShas({ db, rootDir, repoPath, prNumber }),
       0,
       'a failed pass and a null-head legacy pass are not distinct reviewed heads',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('distinct-head counter owned-db path closes without ReferenceError', () => {
+  const rootDir = makeTempRoot();
+  try {
+    const db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    const repoPath = 'laceyenterprises/agent-os';
+    const prNumber = 3900;
+    insertPass(db, { repoPath, prNumber, attemptNumber: 1, passKind: 'first-pass', headSha: 'eeee5555' });
+    db.close();
+
+    assert.equal(
+      countDistinctReviewedHeadShas({ rootDir, repoPath, prNumber }),
+      1,
+      'owned-db cleanup must not reference an undefined injected db variable',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('completed-rereview counter owned-db path closes without ReferenceError', () => {
+  const rootDir = makeTempRoot();
+  try {
+    const db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    const repoPath = 'laceyenterprises/agent-os';
+    const prNumber = 3901;
+    insertPass(db, { repoPath, prNumber, attemptNumber: 1, passKind: 'rereview', headSha: 'ffff6666' });
+    db.close();
+
+    assert.equal(
+      countCompletedReviewerRereviewRounds({ rootDir, repoPath, prNumber }),
+      1,
+      'owned-db cleanup must not reference an undefined injected db variable',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('ceiling units collapse duplicate completions but count current-head failures', () => {
+  const rootDir = makeTempRoot();
+  try {
+    const db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    const repoPath = 'laceyenterprises/agent-os';
+    const prNumber = 3902;
+    const completedHead = '1111aaaa';
+    const failingHead = '2222bbbb';
+
+    insertPass(db, { repoPath, prNumber, attemptNumber: 1, passKind: 'rereview', headSha: completedHead });
+    insertPass(db, { repoPath, prNumber, attemptNumber: 2, passKind: 'rereview', headSha: completedHead });
+    insertPass(db, {
+      repoPath,
+      prNumber,
+      attemptNumber: 3,
+      passKind: 'rereview',
+      headSha: failingHead,
+      status: 'failed',
+    });
+    insertPass(db, {
+      repoPath,
+      prNumber,
+      attemptNumber: 4,
+      passKind: 'rereview',
+      headSha: failingHead,
+      status: 'failed',
+    });
+    insertPass(db, {
+      repoPath,
+      prNumber,
+      attemptNumber: 5,
+      passKind: 'rereview',
+      headSha: '3333cccc',
+      status: 'failed',
+    });
+
+    assert.equal(
+      countReviewCeilingUnits({
+        db,
+        rootDir,
+        repoPath,
+        prNumber,
+        currentHeadSha: failingHead,
+        fallbackReviewAttempts: 99,
+      }),
+      3,
+      'one completed head plus two failures on the current head; duplicate completion and old-head failure do not inflate it',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('ceiling units do not fall back to raw attempts for modern failed-only passes', () => {
+  const rootDir = makeTempRoot();
+  try {
+    const db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    const repoPath = 'laceyenterprises/agent-os';
+    const prNumber = 3903;
+    const failingHead = '4444dddd';
+
+    insertPass(db, {
+      repoPath,
+      prNumber,
+      attemptNumber: 1,
+      passKind: 'rereview',
+      headSha: failingHead,
+      status: 'failed',
+    });
+
+    assert.equal(
+      countReviewCeilingUnits({
+        db,
+        rootDir,
+        repoPath,
+        prNumber,
+        currentHeadSha: failingHead,
+        fallbackReviewAttempts: 7,
+      }),
+      1,
+      'a modern failed-only pass counts the current-head failure instead of treating distinct=0 as legacy',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('ceiling units preserve legacy null-head history and empty-ledger fallback', () => {
+  const rootDir = makeTempRoot();
+  try {
+    const db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    const repoPath = 'laceyenterprises/agent-os';
+    const prNumber = 3904;
+
+    insertPass(db, { repoPath, prNumber, attemptNumber: 1, passKind: 'rereview', headSha: null });
+    assert.equal(
+      countReviewCeilingUnits({
+        db,
+        rootDir,
+        repoPath,
+        prNumber,
+        currentHeadSha: '5555eeee',
+        fallbackReviewAttempts: 4,
+      }),
+      1,
+      'a legacy null-head pass still consumes one bounded ceiling unit',
+    );
+
+    assert.equal(
+      countReviewCeilingUnits({
+        db,
+        rootDir,
+        repoPath,
+        prNumber: 3905,
+        currentHeadSha: '6666ffff',
+        fallbackReviewAttempts: 4,
+      }),
+      4,
+      'an empty reviewer_passes ledger falls back to the durable reviewed_prs attempt counter',
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

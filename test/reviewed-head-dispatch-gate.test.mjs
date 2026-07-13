@@ -146,6 +146,24 @@ test('two pool workers racing the same (pr, head) produce exactly one dispatch',
   assert.equal(dispatches, 1, 'the second concurrent worker on the same head does not dispatch');
 });
 
+test('dispatch lease is reusable after a pre-dispatch exception', async () => {
+  const lease = createHeadDispatchLease();
+  const key = headDispatchLeaseKey({ repoPath: 'org/agent-os', prNumber: 3655, headSha: HEAD });
+
+  async function workerThatThrows() {
+    if (!lease.tryAcquire(key)) return;
+    try {
+      throw new Error('memory admission exploded before claim');
+    } finally {
+      lease.release(key);
+    }
+  }
+
+  await assert.rejects(workerThatThrows(), /memory admission exploded/);
+  assert.equal(lease.has(key), false);
+  assert.equal(lease.tryAcquire(key), true, 'the next tick can acquire the same head');
+});
+
 test('duplicate-skip audit carries pr, sha, and existing review id', () => {
   const line = buildDuplicateReviewSkipAudit({
     repoPath: 'org/agent-os',

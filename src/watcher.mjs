@@ -3878,7 +3878,7 @@ function countCompletedReviewerRereviewRounds({
     const count = Number(row?.count || 0);
     return Number.isFinite(count) && count > 0 ? count : 0;
   } finally {
-    if (ownedDb && ownedDb !== db) ownedDb.close();
+    closeOwnedReviewStateDb(ownedDb);
   }
 }
 
@@ -3914,7 +3914,72 @@ function countDistinctReviewedHeadShas({
     const count = Number(row?.count || 0);
     return Number.isFinite(count) && count > 0 ? count : 0;
   } finally {
-    if (ownedDb && ownedDb !== db) ownedDb.close();
+    closeOwnedReviewStateDb(ownedDb);
+  }
+}
+
+function closeOwnedReviewStateDb(ownedDb) {
+  if (!ownedDb || ownedDb === db) return;
+  ownedDb.close();
+}
+
+// REVIEW-DEDUP: the hard ceiling needs a bounded unit count, not a raw event
+// count. Completed modern heads collapse to one unit per head, failed attempts
+// on the current head still count so a broken head cannot retry forever, and
+// legacy null-head pass rows remain bounded because they cannot be de-duped.
+function countReviewCeilingUnits({
+  db: dbOverride = null,
+  rootDir = ROOT,
+  repoPath,
+  prNumber,
+  currentHeadSha = null,
+  fallbackReviewAttempts = 0,
+} = {}) {
+  const normalizedHeadSha = typeof currentHeadSha === 'string' && currentHeadSha.trim() !== ''
+    ? currentHeadSha.trim()
+    : null;
+  const ownedDb = dbOverride ? null : openReviewStateDb(rootDir);
+  const readDb = dbOverride || ownedDb;
+  try {
+    if (!dbOverride) ensureReviewStateSchema(readDb);
+    const row = readDb.prepare(
+      `SELECT COUNT(*) AS pass_count,
+              COUNT(DISTINCT CASE
+                WHEN status = 'completed'
+                 AND head_sha IS NOT NULL
+                 AND head_sha <> ''
+                THEN head_sha
+              END) AS distinct_completed_heads,
+              SUM(CASE
+                WHEN ? IS NOT NULL
+                 AND head_sha = ?
+                 AND status <> 'completed'
+                THEN 1 ELSE 0
+              END) AS current_head_noncompleted_attempts,
+              SUM(CASE
+                WHEN head_sha IS NULL OR head_sha = ''
+                THEN 1 ELSE 0
+              END) AS legacy_unknown_head_passes
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pass_kind IN ('first-pass', 'rereview')`
+    ).get(normalizedHeadSha, normalizedHeadSha, repoPath, prNumber);
+    const passCount = Number(row?.pass_count || 0);
+    if (!Number.isFinite(passCount) || passCount <= 0) {
+      const fallback = Number(fallbackReviewAttempts || 0);
+      return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
+    }
+    const distinctCompletedHeads = Number(row?.distinct_completed_heads || 0);
+    const currentHeadNonCompletedAttempts = Number(row?.current_head_noncompleted_attempts || 0);
+    const legacyUnknownHeadPasses = Number(row?.legacy_unknown_head_passes || 0);
+    return [
+      distinctCompletedHeads,
+      currentHeadNonCompletedAttempts,
+      legacyUnknownHeadPasses,
+    ].reduce((total, value) => total + (Number.isFinite(value) && value > 0 ? value : 0), 0);
+  } finally {
+    closeOwnedReviewStateDb(ownedDb);
   }
 }
 
@@ -8916,51 +8981,50 @@ async function pollOnce(
             return;
           }
 
-          // REVIEW-DEDUP (authoritative reviewed-head gate): never dispatch a
-          // review for a head that already has a completed review (GitHub
-          // per-review commit_id === head). This composes WITH — never replaces
-          // — attestation consumption, and runs before any claim/spawn so a
-          // duplicate consumes no attempt budget and no re-review ceiling.
-          const reviewedHeadDedup = await resolveAlreadyReviewedHeadDedup({
-            repoPath,
-            prNumber,
-            headSha: subject?.headSha || null,
-            reviewerLogins: amaAuthoritativeReviewerLoginsForModel(route.reviewerModel),
-            fetchReviewsForHeadImpl: fetchReviewsForHeadForDedup,
-            logger: console,
-          });
-          if (reviewedHeadDedup.alreadyReviewed) {
-            console.log(buildDuplicateReviewSkipAudit({
+          let reservation = null;
+          try {
+            // REVIEW-DEDUP (authoritative reviewed-head gate): never dispatch a
+            // review for a head that already has a completed review (GitHub
+            // per-review commit_id === head). This composes WITH — never replaces
+            // — attestation consumption, and runs before any claim/spawn so a
+            // duplicate consumes no attempt budget and no re-review ceiling.
+            const reviewedHeadDedup = await resolveAlreadyReviewedHeadDedup({
               repoPath,
               prNumber,
               headSha: subject?.headSha || null,
-              reviewId: reviewedHeadDedup.reviewId,
-            }));
-            reviewerHeadDispatchLease.release(dispatchLeaseKey);
-            return;
-          }
+              reviewerLogins: amaAuthoritativeReviewerLoginsForModel(route.reviewerModel),
+              fetchReviewsForHeadImpl: fetchReviewsForHeadForDedup,
+              logger: console,
+            });
+            if (reviewedHeadDedup.alreadyReviewed) {
+              console.log(buildDuplicateReviewSkipAudit({
+                repoPath,
+                prNumber,
+                headSha: subject?.headSha || null,
+                reviewId: reviewedHeadDedup.reviewId,
+              }));
+              return;
+            }
 
-          const reservation = await reserveReviewerMemoryAdmission({
-            reviewerModel: route.reviewerModel,
-            reservationState: reviewerMemoryReservationState,
-            getMemoryPressureSample: reviewerMemoryAdmissionSampleForTick,
-            memoryPressureConfig: reviewerMemoryPressureConfig,
-            logger: console,
-          });
-          const { estimatedReviewerRssMb, memoryDecision, reservedMbBeforeAdmission } = reservation;
-          if (!memoryDecision.admit) {
-            console.log(
-              `[watcher] Deferring reviewer for ${repoPath}#${prNumber}: ${memoryDecision.reason} ` +
-                `available=${memoryDecision.availableMb ?? 'unknown'}MB ` +
-                `reserved=${memoryDecision.reservedMb ?? reservedMbBeforeAdmission}MB ` +
-                `estimated=${memoryDecision.estimatedReviewerRssMb ?? estimatedReviewerRssMb}MB ` +
-                `projected=${memoryDecision.projectedHeadroomMb ?? 'unknown'}MB`
-            );
-            reviewerHeadDispatchLease.release(dispatchLeaseKey);
-            return;
-          }
+            reservation = await reserveReviewerMemoryAdmission({
+              reviewerModel: route.reviewerModel,
+              reservationState: reviewerMemoryReservationState,
+              getMemoryPressureSample: reviewerMemoryAdmissionSampleForTick,
+              memoryPressureConfig: reviewerMemoryPressureConfig,
+              logger: console,
+            });
+            const { estimatedReviewerRssMb, memoryDecision, reservedMbBeforeAdmission } = reservation;
+            if (!memoryDecision.admit) {
+              console.log(
+                `[watcher] Deferring reviewer for ${repoPath}#${prNumber}: ${memoryDecision.reason} ` +
+                  `available=${memoryDecision.availableMb ?? 'unknown'}MB ` +
+                  `reserved=${memoryDecision.reservedMb ?? reservedMbBeforeAdmission}MB ` +
+                  `estimated=${memoryDecision.estimatedReviewerRssMb ?? estimatedReviewerRssMb}MB ` +
+                  `projected=${memoryDecision.projectedHeadroomMb ?? 'unknown'}MB`
+              );
+              return;
+            }
 
-          try {
             const respawnAgeSeconds = resolvePendingDraftRespawnAgeSeconds();
             const attemptAt = new Date().toISOString();
             const reviewerSessionUuid = randomUUID();
@@ -9245,27 +9309,22 @@ async function pollOnce(
               }
 
               const hardReviewCeiling = resolveHardReviewCeiling(maxRemediationRounds);
-              // REVIEW-DEDUP: count DISTINCT reviewed head SHAs, not raw review
-              // events. `review_attempts` increments on duplicate reviews of an
-              // unchanged head (and on failed posts), so keying the ceiling on
-              // it let one real round plus its duplicates trip the cap and
-              // deadlock the PR. Distinct completed-pass heads bound genuine
-              // head churn while duplicates of one head cost nothing. Fall back
-              // to `review_attempts` only when no pass recorded a head_sha
-              // (legacy rows) so the safety cap never silently disengages.
-              const distinctReviewedHeadShas = countDistinctReviewedHeadShas({
+              // REVIEW-DEDUP: completed reviews are capped by distinct head,
+              // while failed attempts on this head still consume units so a
+              // broken reviewer path cannot retry forever. Legacy null-head
+              // rows count individually because their head cannot be de-duped.
+              const priorReviewCount = countReviewCeilingUnits({
                 db,
                 rootDir: ROOT,
                 repoPath,
                 prNumber,
+                currentHeadSha: reviewerHeadSha,
+                fallbackReviewAttempts: Number(current?.review_attempts || 0),
               });
-              const priorReviewCount = distinctReviewedHeadShas > 0
-                ? distinctReviewedHeadShas
-                : Number(current?.review_attempts || 0);
               if (!skipReviewerSpawnReason && priorReviewCount >= hardReviewCeiling) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
-                  `ceiling reached (${priorReviewCount} distinct reviewed heads >= ${hardReviewCeiling}); ` +
+                  `ceiling reached (${priorReviewCount} review ceiling units >= ${hardReviewCeiling}); ` +
                   `adversarial reviews are capped per PR — deferring to the close path. ` +
                   `No attempt budget consumed.`,
                 );
@@ -9340,7 +9399,7 @@ async function pollOnce(
               });
             }
           } finally {
-            reservation.release();
+            if (reservation) reservation.release();
             reviewerHeadDispatchLease.release(dispatchLeaseKey);
           }
         },
@@ -9761,6 +9820,7 @@ export {
   detectCommitVocabularyFatigue,
   countCompletedReviewerRereviewRounds,
   countDistinctReviewedHeadShas,
+  countReviewCeilingUnits,
   reviewCycleExhaustedFromRounds,
   createHeadCloserCommitSuppressionResolver,
   getStalePostedReviewAutoRereviewSuppression,

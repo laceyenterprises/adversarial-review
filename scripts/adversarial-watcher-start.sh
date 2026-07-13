@@ -25,6 +25,30 @@ if [[ -f "$REPO_ROOT/modules/worker-pool/lib/agent-os-config-loader.sh" ]]; then
   eval "$(agent_os_config_export)"
 fi
 
+# LHA head-attestation HMAC key: reviewers sign live-head attestations at their
+# HCP closeout via `hq attest sign`, which requires AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1
+# (>=32 bytes, read directly as the value by cwp_dispatch/hcp_worker_tokens.py).
+# Resolve it from a host-local secret file, generating one if absent, so a watcher
+# bounce or fresh host never restarts keyless — a keyless restart fails EVERY
+# reviewer pass at attest-sign, which silently freezes the review->remediate
+# pipeline (verdicts never record, remediation never enqueues; 2026-07-13 SEV).
+_LHA_HMAC_KEY_FILE="${AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE:-$REPO_ROOT/.secrets/local/head-attestation-hmac-key-v1}"
+if [[ -z "${AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1:-}" ]]; then
+  if [[ ! -s "$_LHA_HMAC_KEY_FILE" ]]; then
+    mkdir -p "${_LHA_HMAC_KEY_FILE%/*}" 2>/dev/null
+    if ( umask 077; openssl rand -hex 32 > "$_LHA_HMAC_KEY_FILE" ) 2>/dev/null; then
+      chmod 600 "$_LHA_HMAC_KEY_FILE" 2>/dev/null
+      echo "[adversarial-watcher] generated head-attestation HMAC key at $_LHA_HMAC_KEY_FILE" >&2
+    fi
+  fi
+  if [[ -s "$_LHA_HMAC_KEY_FILE" ]]; then
+    AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1="$(tr -d '\n' < "$_LHA_HMAC_KEY_FILE")"
+    export AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1
+  else
+    echo "[adversarial-watcher] WARNING: head-attestation HMAC key unresolved ($_LHA_HMAC_KEY_FILE); reviewer attest-sign will fail" >&2
+  fi
+fi
+
 # OPH-01: route `op read` through the repo-local shared helper so a
 # 1Password account-level quota exhaustion sleeps before exit instead
 # of tight-looping launchd respawns. Fail closed if the helper cannot

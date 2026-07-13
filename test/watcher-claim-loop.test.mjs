@@ -394,6 +394,124 @@ try {
 `;
 }
 
+function buildSameHeadRepeatRunnerSource() {
+  const watcherUrl = fileUrl('src', 'watcher.mjs');
+  return `
+import assert from 'node:assert/strict';
+
+const githubCalls = [];
+globalThis.fetch = async (...args) => {
+  throw new Error('unexpected fetch call from watcher same-head repeat test: ' + args.map(String).join(' '));
+};
+
+try {
+  const { pollOnce } = await import(${JSON.stringify(watcherUrl)});
+  const db = globalThis.__watcherClaimLoopDb;
+  assert.ok(db, 'watcher should have opened the synthetic in-memory DB');
+  db.prepare(
+    \`INSERT INTO reviewed_prs
+       (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts)
+     VALUES (?, ?, ?, ?, ?, ?, ?)\`
+  ).run(
+    'laceyenterprises/adversarial-review',
+    101,
+    '2026-07-12T18:00:00.000Z',
+    'claude',
+    'open',
+    'pending',
+    0
+  );
+
+  const octokit = {
+    paginate: async (_fn, params) => {
+      githubCalls.push({ kind: 'paginate', params });
+      return [{ name: 'adversarial-review', archived: false }];
+    },
+    rest: {
+      repos: {
+        listForOrg: async () => {
+          throw new Error('listForOrg should be reached through octokit.paginate only');
+        },
+      },
+      pulls: {
+        get: async (params) => {
+          githubCalls.push({ kind: 'pulls.get', params });
+          return {
+            data: {
+              number: params.pull_number,
+              state: 'open',
+              merged_at: null,
+              closed_at: null,
+              head: { sha: 'sha-happy-' + params.pull_number },
+            },
+          };
+        },
+        list: async (params) => {
+          githubCalls.push({ kind: 'pulls.list', params });
+          return { data: [] };
+        },
+      },
+      issues: new Proxy({}, {
+        get(_target, property) {
+          return async () => {
+            throw new Error('unexpected GitHub issues write: ' + String(property));
+          };
+        },
+      }),
+    },
+    request: async (...args) => {
+      throw new Error('unexpected octokit.request call: ' + args.map(String).join(' '));
+    },
+  };
+
+  const pollOptions = {
+    healthProbe: {
+      beginTick() { return {}; },
+      recordOpenPending() {},
+      recordSpawn() {},
+      async finishTick() {},
+    },
+  };
+
+  await pollOnce(octokit, pollOptions);
+  const afterFirst = db.prepare(
+    'SELECT review_status, reviewer_head_sha FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+  ).get('laceyenterprises/adversarial-review', 101);
+  assert.equal(afterFirst.review_status, 'posted');
+  assert.equal(afterFirst.reviewer_head_sha, 'sha-happy-101');
+
+  db.prepare(
+    \`UPDATE reviewed_prs
+        SET review_status = 'pending',
+            rereview_requested_at = NULL,
+            rereview_reason = NULL
+      WHERE repo = ? AND pr_number = ?\`
+  ).run('laceyenterprises/adversarial-review', 101);
+
+  await pollOnce(octokit, pollOptions);
+
+  const spawns = globalThis.__watcherClaimLoopReviewerSpawns || [];
+  console.log(${JSON.stringify(SUMMARY_MARKER)} + JSON.stringify({
+    spawns101: spawns.filter((spawn) => spawn?.subjectContext?.prNumber === 101),
+    allSpawns: spawns.map((spawn) => ({
+      prNumber: spawn?.subjectContext?.prNumber,
+      reviewerHeadSha: spawn?.subjectContext?.reviewerHeadSha,
+    })),
+    row101: db.prepare(
+      'SELECT review_status, reviewer_head_sha FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/adversarial-review', 101),
+    passRows101: db.prepare(
+      'SELECT pr_number, attempt_number, pass_kind, status FROM reviewer_passes WHERE repo = ? AND pr_number = ? ORDER BY pass_id'
+    ).all('laceyenterprises/adversarial-review', 101),
+    githubCalls,
+  }));
+} catch (err) {
+  console.error(err?.stack || err?.message || err);
+  process.exit(1);
+}
+`;
+}
+
 function buildRefreshRunnerSource() {
   const watcherUrl = fileUrl('src', 'watcher.mjs');
   return `
@@ -714,6 +832,48 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
       summary.reviewerPassRows.every((row) => row.workspace_path === REPO_ROOT),
       'reviewer pass rows should retain the tool root so transcript token fallback can match Claude sessions on disk'
     );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('watcher pollOnce does not dispatch a same-head already-reviewed row on later ticks', () => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'watcher-same-head-repeat-'));
+  const loaderPath = path.join(tmp, 'fixture-loader.mjs');
+  const registerPath = path.join(tmp, 'fixture-register.mjs');
+  const runnerPath = path.join(tmp, 'fixture-same-head-repeat-runner.mjs');
+  try {
+    writeFileSync(loaderPath, buildLoaderSource());
+    writeFileSync(registerPath, buildRegisterSource(loaderPath));
+    writeFileSync(runnerPath, buildSameHeadRepeatRunnerSource());
+
+    const result = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', pathToFileURL(registerPath).href, runnerPath],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: fixtureEnv(installGhFixture(tmp)),
+      }
+    );
+
+    const output = `${result.stdout || ''}${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const summaryLine = result.stdout
+      .split(/\r?\n/)
+      .find((line) => line.startsWith(SUMMARY_MARKER));
+    assert.ok(summaryLine, output);
+    const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
+
+    assert.equal(
+      summary.spawns101.length,
+      1,
+      'fixed head should be reviewed at most once without an explicit retrigger'
+    );
+    assert.equal(summary.spawns101[0].subjectContext.reviewerHeadSha, 'sha-happy-101');
+    assert.equal(summary.row101.review_status, 'posted');
+    assert.equal(summary.row101.reviewer_head_sha, 'sha-happy-101');
+    assert.equal(summary.passRows101.length, 1);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

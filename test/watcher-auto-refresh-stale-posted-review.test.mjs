@@ -651,7 +651,9 @@ test('watcher keys the completed-rereview budget per head so a moved head re-arm
       riskClass: 'medium',
     });
 
-    // The same head that consumed its per-head budget stays suppressed.
+    // The same head that already has a completed pass is suppressed before
+    // spending another ordinary re-review, even if its per-head count is also
+    // at budget.
     const sameHead = resolveFirstPassReviewBudgetSuppression({
       rootDir,
       repoPath,
@@ -664,7 +666,7 @@ test('watcher keys the completed-rereview budget per head so a moved head re-arm
     });
     assert.deepEqual(sameHead, {
       suppressed: true,
-      reason: 'remediation-round-budget-exhausted',
+      reason: 'same-head-already-reviewed',
       completedRoundsForPR: 2,
       roundBudget: 2,
       riskClass: 'medium',
@@ -787,7 +789,7 @@ test('watcher classifies a never-reviewed over-budget current head as the owed f
   });
 });
 
-test('watcher resumes round-budget suppression once the current head has been reviewed', () => {
+test('watcher reports same-head suppression once the current head has been reviewed', () => {
   const suppression = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',
     prNumber: 3272,
@@ -808,14 +810,14 @@ test('watcher resumes round-budget suppression once the current head has been re
 
   assert.deepEqual(suppression, {
     suppressed: true,
-    reason: 'remediation-round-budget-exhausted',
+    reason: 'same-head-already-reviewed',
     completedRoundsForPR: 2,
     roundBudget: 2,
     riskClass: 'medium',
   });
 });
 
-test('watcher suppresses when the current head has itself consumed the standalone rereview budget', () => {
+test('watcher reports same-head suppression before standalone rereview budget exhaustion', () => {
   // LAC-1559: the injected `countCompletedReviewerRereviewRoundsImpl` now
   // reports the CURRENT head's completed rereviews (the resolver passes
   // `currentHeadSha` to the real counter's per-head filter). An at/over-budget
@@ -842,9 +844,67 @@ test('watcher suppresses when the current head has itself consumed the standalon
 
   assert.deepEqual(suppression, {
     suppressed: true,
-    reason: 'remediation-round-budget-exhausted',
+    reason: 'same-head-already-reviewed',
     completedRoundsForPR: 2,
     roundBudget: 2,
+    riskClass: 'medium',
+  });
+});
+
+test('watcher suppresses an ordinary same-head repeat before the round budget is consumed', () => {
+  const suppression = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 3647,
+    reviewRow: {
+      review_status: 'pending',
+      reviewer_head_sha: 'stable-head',
+      rereview_requested_at: null,
+      rereview_reason: null,
+    },
+    currentHeadSha: 'stable-head',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 0,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 4,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 4, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: true,
+    reason: 'same-head-already-reviewed',
+    completedRoundsForPR: 0,
+    roundBudget: 4,
+    riskClass: 'medium',
+  });
+});
+
+test('watcher honors an explicit retrigger-review request on an already-reviewed same head', () => {
+  const suppression = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 3648,
+    reviewRow: {
+      review_status: 'pending',
+      reviewer_head_sha: 'stable-head',
+      rereview_requested_at: '2026-07-12T18:00:00.000Z',
+      rereview_reason: 'operator retrigger-review requested via label',
+    },
+    currentHeadSha: 'stable-head',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 0,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 4,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 4, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: false,
+    reason: null,
+    completedRoundsForPR: 0,
+    roundBudget: 4,
     riskClass: 'medium',
   });
 });

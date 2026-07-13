@@ -2823,6 +2823,21 @@ const stmtReleaseReviewerClaim = db.prepare(
 const stmtMarkPosted = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ?"
 );
+const stmtRestoreSameHeadSuppressedReviewPosted = db.prepare(
+  `UPDATE reviewed_prs
+      SET review_status = 'posted',
+          posted_at = COALESCE(posted_at, ?),
+          failed_at = NULL,
+          failure_message = NULL,
+          quota_reset_at_utc = NULL,
+          reviewer_lease_expires_at = NULL,
+          rereview_requested_at = NULL,
+          rereview_reason = NULL
+    WHERE repo = ?
+      AND pr_number = ?
+      AND review_status = 'pending'
+      AND reviewer_head_sha = ?`
+);
 // CAS variant for reviewer-command-failed posted-reconciliation (LAC-1359
 // follow-up). The reconcile path shells out to GitHub (async) BEFORE mutating
 // SQLite, so a generic repo+pr_number UPDATE could overwrite a row that moved on
@@ -4100,6 +4115,15 @@ function resolveFirstPassReviewBudgetSuppression({
       : null;
   const currentHeadAlreadyReviewed =
     suppliedCurrentHeadSha !== null && reviewedHeadSha === suppliedCurrentHeadSha;
+  if (currentHeadAlreadyReviewed && !isExplicitOperatorReviewRetrigger(reviewRow)) {
+    return {
+      suppressed: true,
+      reason: 'same-head-already-reviewed',
+      completedRoundsForPR,
+      roundBudget,
+      riskClass: resolution.riskClass,
+    };
+  }
   const currentHeadOwesPostBudgetFinalReview =
     suppliedCurrentHeadSha !== null &&
     !currentHeadAlreadyReviewed &&
@@ -8865,9 +8889,21 @@ async function pollOnce(
               ? ` (${firstPassBudgetSuppression.completedRoundsForPR}/${firstPassBudgetSuppression.roundBudget} rounds, ` +
                 `risk=${firstPassBudgetSuppression.riskClass || 'unknown'})`
               : '';
+          let rowActionDetail = 'leaving existing review row intact';
+          if (firstPassBudgetSuppression.reason === 'same-head-already-reviewed') {
+            const restored = stmtRestoreSameHeadSuppressedReviewPosted.run(
+              new Date().toISOString(),
+              repoPath,
+              prNumber,
+              subject.headSha
+            );
+            rowActionDetail = restored.changes === 1
+              ? "restored review_status='posted'"
+              : "same-head restore skipped by CAS";
+          }
           console.log(
             `[watcher] reviewer spawn SUPPRESSED for ${repoPath}#${prNumber}: ` +
-              `${firstPassBudgetSuppression.reason}${budgetDetail}; leaving existing review row intact`
+              `${firstPassBudgetSuppression.reason}${budgetDetail}; ${rowActionDetail}`
           );
           continue;
         }

@@ -56,6 +56,9 @@ async function runMaintainerWatcherLauncher(scriptName, {
   opMode = 'ok',
   requiredOpMode = 'ok',
   helperMode = 'healthy',
+  hmacGenerationMode = 'healthy',
+  initialHmacKey = null,
+  initialHmacKeyMode = null,
   extraEnv = {},
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'watcher-launch-wrapper-'));
@@ -73,9 +76,19 @@ async function runMaintainerWatcherLauncher(scriptName, {
   mkdirSync(fakeTmp, { recursive: true });
   mkdirSync(fakeHome, { recursive: true });
   mkdirSync(fakeZdotdir, { recursive: true });
+  const hmacKeyFile = extraEnv.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE
+    ? resolve(root, extraEnv.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE)
+    : join(root, 'agent-os', '.secrets', 'local', 'head-attestation-hmac-key-v1');
+  if (initialHmacKey !== null) {
+    mkdirSync(dirname(hmacKeyFile), { recursive: true });
+    writeFileSync(hmacKeyFile, initialHmacKey, 'utf8');
+    if (initialHmacKeyMode !== null) {
+      chmodSync(hmacKeyFile, initialHmacKeyMode);
+    }
+  }
   writeFileSync(
     join(fakeRepo, 'src', 'watcher.mjs'),
-    'console.log(JSON.stringify({linearApiKey: process.env.LINEAR_API_KEY || "", alertTo: process.env.ALERT_TO || "", githubToken: process.env.GITHUB_TOKEN || "", ghToken: process.env.GH_TOKEN || ""}));\n'
+    'console.log(JSON.stringify({linearApiKey: process.env.LINEAR_API_KEY || "", alertTo: process.env.ALERT_TO || "", githubToken: process.env.GITHUB_TOKEN || "", ghToken: process.env.GH_TOKEN || "", hmacKey: process.env.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1 || ""}));\n'
       + 'process.exit(0);\n',
     'utf8',
   );
@@ -98,7 +111,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
 	    '#!/bin/bash\n'
 	      + 'if [[ "$1" == "-e" ]]; then exit 0; fi\n'
 	      + 'if [[ "$1" == *"resolve-op-token-cli.mjs" ]]; then printf "op-token"; exit 0; fi\n'
-	      + 'if [[ "$1" == *"watcher.mjs" ]]; then printf "{\\"linearApiKey\\":\\"%s\\",\\"alertTo\\":\\"%s\\",\\"githubToken\\":\\"%s\\",\\"ghToken\\":\\"%s\\"}\\n" "${LINEAR_API_KEY:-}" "${ALERT_TO:-}" "${GITHUB_TOKEN:-}" "${GH_TOKEN:-}"; exit 0; fi\n'
+      + 'if [[ "$1" == *"watcher.mjs" ]]; then printf "{\\"linearApiKey\\":\\"%s\\",\\"alertTo\\":\\"%s\\",\\"githubToken\\":\\"%s\\",\\"ghToken\\":\\"%s\\",\\"hmacKey\\":\\"%s\\"}\\n" "${LINEAR_API_KEY:-}" "${ALERT_TO:-}" "${GITHUB_TOKEN:-}" "${GH_TOKEN:-}" "${AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1:-}"; exit 0; fi\n'
 	      + 'if [[ "$1" == *"adversarial-follow-up-daemon.mjs" ]]; then exit 0; fi\n'
 	      + 'exit 0\n',
 	  );
@@ -109,6 +122,12 @@ async function runMaintainerWatcherLauncher(scriptName, {
       + 'exit 1\n',
   );
   writeExecutable(join(fakeBin, 'sleep'), `#!/bin/bash\nprintf '%s\\n' "$1" >>"${sleepLog}"\nexit 0\n`);
+  writeExecutable(
+    join(fakeBin, 'openssl'),
+    hmacGenerationMode === 'fail-partial'
+      ? '#!/bin/bash\nprintf "truncated"\nexit 1\n'
+      : '#!/bin/bash\nprintf "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\\n"\n',
+  );
   const fakeOp = join(fakeBin, 'op');
   writeExecutable(
     fakeOp,
@@ -249,6 +268,8 @@ async function runMaintainerWatcherLauncher(scriptName, {
       stderr: result.stderr,
       opReadLog: existsSync(opReadLog) ? readFileSync(opReadLog, 'utf8') : '',
       sleepLog: existsSync(sleepLog) ? readFileSync(sleepLog, 'utf8') : '',
+      hmacKey: existsSync(hmacKeyFile) ? readFileSync(hmacKeyFile, 'utf8') : null,
+      hmacKeyMode: existsSync(hmacKeyFile) ? statSync(hmacKeyFile).mode & 0o777 : null,
     };
   } catch (error) {
     return {
@@ -257,6 +278,8 @@ async function runMaintainerWatcherLauncher(scriptName, {
       stderr: error.stderr ?? '',
       opReadLog: existsSync(opReadLog) ? readFileSync(opReadLog, 'utf8') : '',
       sleepLog: existsSync(sleepLog) ? readFileSync(sleepLog, 'utf8') : '',
+      hmacKey: existsSync(hmacKeyFile) ? readFileSync(hmacKeyFile, 'utf8') : null,
+      hmacKeyMode: existsSync(hmacKeyFile) ? statSync(hmacKeyFile).mode & 0o777 : null,
     };
   }
 }
@@ -371,6 +394,67 @@ test('airlock watcher launcher prefers local runtime secrets before 1Password re
   assert.match(script, /load_local_alert_to/);
   assert.match(script, /\$REPO_ROOT\/\.secrets\/local\/adversarial-watcher-alert-to/);
   assert.match(script, /load_local_alert_to \|\| true/);
+});
+
+test('airlock watcher launcher publishes generated HMAC keys atomically without rewriting directory permissions', () => {
+  const script = readScript('adversarial-watcher-start.sh');
+  assert.match(script, /mktemp "\$_LHA_HMAC_KEY_DIR\/\.head-attestation-hmac-key-v1\.tmp\.XXXXXX"/);
+  assert.match(script, /mv -f "\$_LHA_HMAC_KEY_TMP" "\$_LHA_HMAC_KEY_FILE"/);
+  assert.doesNotMatch(script, /openssl rand -hex 32 > "\$_LHA_HMAC_KEY_FILE"/);
+  assert.match(script, /mkdir -m 700 -p "\$_LHA_HMAC_KEY_DIR"/);
+  assert.doesNotMatch(script, /chmod 700 "\$_LHA_HMAC_KEY_DIR"/);
+});
+
+test('airlock watcher launcher replaces a truncated HMAC key before starting', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    initialHmacKey: 'truncated',
+    extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
+  });
+  assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
+  assert.equal(result.hmacKey?.trim().length, 64);
+});
+
+test('airlock watcher launcher tightens and normalizes existing HMAC keys', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const key = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    initialHmacKey: `${key}\r\n`,
+    initialHmacKeyMode: 0o644,
+    extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
+  });
+  assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
+  assert.equal(result.hmacKeyMode, 0o600);
+  const payload = JSON.parse(result.stdout.trim().split(/\n/).at(-1));
+  assert.equal(payload.hmacKey, key);
+});
+
+test('airlock watcher launcher supports a bare relative HMAC key filename', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    extraEnv: {
+      LINEAR_API_KEY: 'linear-test-token',
+      ...BROKER_MODE_TEST_ENV,
+      AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE: 'custom-key',
+    },
+  });
+  assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
+  assert.equal(result.hmacKey?.trim().length, 64);
+});
+
+test('airlock watcher launcher fails closed without publishing a partial HMAC key', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    hmacGenerationMode: 'fail-partial',
+    extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
+  });
+  assert.equal(result.code, 1, `stderr:\n${result.stderr}`);
+  assert.equal(result.hmacKey, null);
+  assert.match(result.stderr, /ERROR: head-attestation HMAC key unresolved or shorter than 32 bytes/);
 });
 
 test('airlock reviewer daemon plists route GitHub tokens through the OAuth broker', () => {

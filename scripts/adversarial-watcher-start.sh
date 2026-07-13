@@ -25,6 +25,87 @@ if [[ -f "$REPO_ROOT/modules/worker-pool/lib/agent-os-config-loader.sh" ]]; then
   eval "$(agent_os_config_export)"
 fi
 
+# LHA head-attestation HMAC key: reviewers sign live-head attestations at their
+# HCP closeout via `hq attest sign`, which requires AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1
+# (>=32 bytes, read directly as the value by cwp_dispatch/hcp_worker_tokens.py).
+# Resolve it from a host-local secret file, generating one if absent, so a watcher
+# bounce or fresh host never restarts keyless — a keyless restart fails EVERY
+# reviewer pass at attest-sign, which silently freezes the review->remediate
+# pipeline (verdicts never record, remediation never enqueues; 2026-07-13 SEV).
+_LHA_HMAC_KEY_FILE="${AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE:-$REPO_ROOT/.secrets/local/head-attestation-hmac-key-v1}"
+lha_hmac_key_mode() {
+  local key_file="$1"
+  local key_mode
+  key_mode="$(stat -f '%Lp' "$key_file" 2>/dev/null || true)"
+  if [[ "$key_mode" == <-> ]]; then
+    echo "$key_mode"
+    return 0
+  fi
+  stat -c '%a' "$key_file" 2>/dev/null || true
+}
+
+lha_hmac_key_is_private() {
+  local key_file="$1"
+  local key_mode
+  key_mode="$(lha_hmac_key_mode "$key_file")"
+  [[ -n "$key_mode" ]] || return 1
+  (( ( 8#$key_mode & 8#077 ) == 0 ))
+}
+
+lha_hmac_key_tighten_if_owned() {
+  local key_file="$1"
+  lha_hmac_key_is_private "$key_file" && return 0
+  if [[ -O "$key_file" ]] && chmod 600 "$key_file" 2>/dev/null; then
+    lha_hmac_key_is_private "$key_file"
+    return $?
+  fi
+  return 1
+}
+
+lha_hmac_key_read_if_private() {
+  local key_file="$1"
+  if lha_hmac_key_tighten_if_owned "$key_file"; then
+    tr -d '\r\n' < "$key_file" 2>/dev/null || true
+  else
+    echo "[adversarial-watcher] ERROR: head-attestation HMAC key permissions are too broad ($key_file); refusing to load" >&2
+    return 1
+  fi
+}
+
+if [[ -z "${AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1:-}" ]]; then
+  _LHA_HMAC_KEY=""
+  if [[ -r "$_LHA_HMAC_KEY_FILE" ]]; then
+    _LHA_HMAC_KEY="$(lha_hmac_key_read_if_private "$_LHA_HMAC_KEY_FILE" || true)"
+  fi
+  if (( ${#_LHA_HMAC_KEY} < 32 )); then
+    _LHA_HMAC_KEY_DIR="$(dirname "$_LHA_HMAC_KEY_FILE")"
+    _LHA_HMAC_KEY_TMP=""
+    mkdir -m 700 -p "$_LHA_HMAC_KEY_DIR" 2>/dev/null || true
+    if _LHA_HMAC_KEY_TMP="$(mktemp "$_LHA_HMAC_KEY_DIR/.head-attestation-hmac-key-v1.tmp.XXXXXX" 2>/dev/null)" \
+      && ( umask 077; openssl rand -hex 32 > "$_LHA_HMAC_KEY_TMP" ) 2>/dev/null \
+      && chmod 600 "$_LHA_HMAC_KEY_TMP" 2>/dev/null \
+      && mv -f "$_LHA_HMAC_KEY_TMP" "$_LHA_HMAC_KEY_FILE" 2>/dev/null; then
+      _LHA_HMAC_KEY_TMP=""
+      echo "[adversarial-watcher] generated head-attestation HMAC key at $_LHA_HMAC_KEY_FILE" >&2
+    fi
+    [[ -z "$_LHA_HMAC_KEY_TMP" ]] || rm -f "$_LHA_HMAC_KEY_TMP" 2>/dev/null || true
+    if [[ -r "$_LHA_HMAC_KEY_FILE" ]]; then
+      _LHA_HMAC_KEY="$(lha_hmac_key_read_if_private "$_LHA_HMAC_KEY_FILE" || true)"
+    fi
+  fi
+  if (( ${#_LHA_HMAC_KEY} >= 32 )); then
+    AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1="$_LHA_HMAC_KEY"
+    export AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1
+  else
+    echo "[adversarial-watcher] ERROR: head-attestation HMAC key unresolved or shorter than 32 bytes ($_LHA_HMAC_KEY_FILE); refusing to start" >&2
+    exit 1
+  fi
+fi
+if (( ${#AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1} < 32 )); then
+  echo "[adversarial-watcher] ERROR: AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1 is shorter than 32 bytes; refusing to start" >&2
+  exit 1
+fi
+
 # OPH-01: route `op read` through the repo-local shared helper so a
 # 1Password account-level quota exhaustion sleeps before exit instead
 # of tight-looping launchd respawns. Fail closed if the helper cannot

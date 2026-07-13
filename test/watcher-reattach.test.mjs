@@ -681,6 +681,38 @@ test('requeues a dead reviewer to pending BY DEFAULT (lease recovery on) so a bo
 
   const row = readRow(db);
   assert.equal(row.review_status, 'pending'); // reclaimable by the claim CAS, not sticky 'failed'
+  assert.equal(row.infra_auto_recover_attempts, 1);
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'cancelled', reason: 'dead-no-review' }]
+  );
+});
+
+test('quarantines a repeatedly crashing reviewer when the lease recovery cap is exhausted', async () => {
+  const db = setupDb();
+  seedReviewing(db, { reviewer: 'claude', infraAutoRecoverAttempts: 3 });
+  const log = makeLog();
+  const settled = [];
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    onTerminalDeadSession: async (event) => settled.push(event),
+    probeAlive: () => false,
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'failed');
+  assert.equal(row.infra_auto_recover_attempts, 3);
+  assert.match(row.failure_message, /^\[reviewer-lease-recovery-cap\]/);
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'failed', reason: 'dead-no-review' }]
+  );
+  assert.match(log.lines.join('\n'), /reviewer_lease_recovery_cap_exhausted/);
 });
 
 test('marks a dead reviewer without a GitHub review as retryable failed', async () => {
@@ -735,6 +767,7 @@ test('requeues a dead reviewer without a GitHub review when lease recovery is en
 
   const row = readRow(db);
   assert.equal(row.review_status, 'pending');
+  assert.equal(row.infra_auto_recover_attempts, 1);
   assert.equal(row.review_attempts, 3);
   assert.deepEqual(
     settled.map(({ state, reason }) => ({ state, reason })),

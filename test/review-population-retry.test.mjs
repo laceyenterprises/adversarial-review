@@ -101,6 +101,18 @@ test('non-population non-recoverable failures are not retried by population path
   );
 });
 
+test('lease recovery cap failures remain quarantined from population retries', () => {
+  const row = failedPopulationRow({
+    failure_message:
+      '[reviewer-lease-recovery-cap] Reviewer session abc123 is no longer alive and no GitHub review was found; cap exhausted.',
+  });
+  assert.equal(reviewPopulationFailureClass(row), null);
+  assert.equal(reviewPopulationRetryDecision(row, {
+    config: { maxAttempts: 1, backoffSeconds: 0 },
+    headSha: 'head-a',
+  }).action, 'not-population-failure');
+});
+
 test('review-population retry config resolves default, file, and env alias', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'review-population-retry-cfg-'));
   try {

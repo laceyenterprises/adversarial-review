@@ -6,6 +6,7 @@
 // orphans the ticket (rev=none forever). Override per-deploy with
 // ADVERSARIAL_REVIEWER_LEASE_RECOVERY_ENABLED / watcherConfig.
 const DEFAULT_REVIEWER_LEASE_RECOVERY_ENABLED = true;
+const DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS = 3;
 
 function parseBooleanFlag(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -70,6 +71,7 @@ function isReviewerLeaseExpired(row, now = new Date(), options = {}) {
 
 export {
   DEFAULT_REVIEWER_LEASE_RECOVERY_ENABLED,
+  DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
   computeReviewerLeaseExpiryAt,
   isReviewerLeaseExpired,
   resolveReviewerLeaseRecoveryEnabled,

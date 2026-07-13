@@ -436,14 +436,13 @@ try {
       pulls: {
         get: async (params) => {
           githubCalls.push({ kind: 'pulls.get', params });
-          if (params.pull_number === 103) return { data: null };
           return {
             data: {
               number: params.pull_number,
               state: 'open',
               merged_at: null,
               closed_at: null,
-              head: { sha: 'sha-detail-' + params.pull_number },
+              head: { sha: 'sha-happy-' + params.pull_number },
             },
           };
         },
@@ -872,6 +871,7 @@ test('watcher pollOnce does not dispatch a same-head already-reviewed row on lat
       'fixed head should be reviewed at most once without an explicit retrigger'
     );
     assert.equal(summary.spawns101[0].subjectContext.reviewerHeadSha, 'sha-happy-101');
+    assert.equal(summary.row101.review_status, 'posted');
     assert.equal(summary.row101.reviewer_head_sha, 'sha-happy-101');
     assert.equal(summary.passRows101.length, 1);
   } finally {

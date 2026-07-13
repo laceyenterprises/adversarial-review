@@ -33,10 +33,49 @@ fi
 # reviewer pass at attest-sign, which silently freezes the review->remediate
 # pipeline (verdicts never record, remediation never enqueues; 2026-07-13 SEV).
 _LHA_HMAC_KEY_FILE="${AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE:-$REPO_ROOT/.secrets/local/head-attestation-hmac-key-v1}"
+lha_hmac_key_mode() {
+  local key_file="$1"
+  local key_mode
+  key_mode="$(stat -f '%Lp' "$key_file" 2>/dev/null || true)"
+  if [[ "$key_mode" == <-> ]]; then
+    echo "$key_mode"
+    return 0
+  fi
+  stat -c '%a' "$key_file" 2>/dev/null || true
+}
+
+lha_hmac_key_is_private() {
+  local key_file="$1"
+  local key_mode
+  key_mode="$(lha_hmac_key_mode "$key_file")"
+  [[ -n "$key_mode" ]] || return 1
+  (( ( 8#$key_mode & 8#077 ) == 0 ))
+}
+
+lha_hmac_key_tighten_if_owned() {
+  local key_file="$1"
+  lha_hmac_key_is_private "$key_file" && return 0
+  if [[ -O "$key_file" ]] && chmod 600 "$key_file" 2>/dev/null; then
+    lha_hmac_key_is_private "$key_file"
+    return $?
+  fi
+  return 1
+}
+
+lha_hmac_key_read_if_private() {
+  local key_file="$1"
+  if lha_hmac_key_tighten_if_owned "$key_file"; then
+    tr -d '\r\n' < "$key_file" 2>/dev/null || true
+  else
+    echo "[adversarial-watcher] ERROR: head-attestation HMAC key permissions are too broad ($key_file); refusing to load" >&2
+    return 1
+  fi
+}
+
 if [[ -z "${AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1:-}" ]]; then
   _LHA_HMAC_KEY=""
   if [[ -r "$_LHA_HMAC_KEY_FILE" ]]; then
-    _LHA_HMAC_KEY="$(tr -d '\n' < "$_LHA_HMAC_KEY_FILE" 2>/dev/null || true)"
+    _LHA_HMAC_KEY="$(lha_hmac_key_read_if_private "$_LHA_HMAC_KEY_FILE" || true)"
   fi
   if (( ${#_LHA_HMAC_KEY} < 32 )); then
     _LHA_HMAC_KEY_DIR="$(dirname "$_LHA_HMAC_KEY_FILE")"
@@ -51,7 +90,7 @@ if [[ -z "${AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1:-}" ]]; then
     fi
     [[ -z "$_LHA_HMAC_KEY_TMP" ]] || rm -f "$_LHA_HMAC_KEY_TMP" 2>/dev/null || true
     if [[ -r "$_LHA_HMAC_KEY_FILE" ]]; then
-      _LHA_HMAC_KEY="$(tr -d '\n' < "$_LHA_HMAC_KEY_FILE" 2>/dev/null || true)"
+      _LHA_HMAC_KEY="$(lha_hmac_key_read_if_private "$_LHA_HMAC_KEY_FILE" || true)"
     fi
   fi
   if (( ${#_LHA_HMAC_KEY} >= 32 )); then

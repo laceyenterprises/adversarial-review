@@ -39,9 +39,9 @@ if [[ -z "${AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1:-}" ]]; then
     _LHA_HMAC_KEY="$(tr -d '\n' < "$_LHA_HMAC_KEY_FILE" 2>/dev/null || true)"
   fi
   if (( ${#_LHA_HMAC_KEY} < 32 )); then
-    _LHA_HMAC_KEY_DIR="${_LHA_HMAC_KEY_FILE%/*}"
+    _LHA_HMAC_KEY_DIR="$(dirname "$_LHA_HMAC_KEY_FILE")"
     _LHA_HMAC_KEY_TMP=""
-    mkdir -m 700 -p "$_LHA_HMAC_KEY_DIR" 2>/dev/null && chmod 700 "$_LHA_HMAC_KEY_DIR" 2>/dev/null || true
+    mkdir -m 700 -p "$_LHA_HMAC_KEY_DIR" 2>/dev/null || true
     if _LHA_HMAC_KEY_TMP="$(mktemp "$_LHA_HMAC_KEY_DIR/.head-attestation-hmac-key-v1.tmp.XXXXXX" 2>/dev/null)" \
       && ( umask 077; openssl rand -hex 32 > "$_LHA_HMAC_KEY_TMP" ) 2>/dev/null \
       && chmod 600 "$_LHA_HMAC_KEY_TMP" 2>/dev/null \

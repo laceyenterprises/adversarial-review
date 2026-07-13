@@ -75,7 +75,9 @@ async function runMaintainerWatcherLauncher(scriptName, {
   mkdirSync(fakeTmp, { recursive: true });
   mkdirSync(fakeHome, { recursive: true });
   mkdirSync(fakeZdotdir, { recursive: true });
-  const hmacKeyFile = join(root, 'agent-os', '.secrets', 'local', 'head-attestation-hmac-key-v1');
+  const hmacKeyFile = extraEnv.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE
+    ? resolve(root, extraEnv.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE)
+    : join(root, 'agent-os', '.secrets', 'local', 'head-attestation-hmac-key-v1');
   if (initialHmacKey !== null) {
     mkdirSync(dirname(hmacKeyFile), { recursive: true });
     writeFileSync(hmacKeyFile, initialHmacKey, 'utf8');
@@ -263,7 +265,6 @@ async function runMaintainerWatcherLauncher(scriptName, {
       opReadLog: existsSync(opReadLog) ? readFileSync(opReadLog, 'utf8') : '',
       sleepLog: existsSync(sleepLog) ? readFileSync(sleepLog, 'utf8') : '',
       hmacKey: existsSync(hmacKeyFile) ? readFileSync(hmacKeyFile, 'utf8') : null,
-      hmacDirMode: existsSync(dirname(hmacKeyFile)) ? statSync(dirname(hmacKeyFile)).mode & 0o777 : null,
     };
   } catch (error) {
     return {
@@ -273,7 +274,6 @@ async function runMaintainerWatcherLauncher(scriptName, {
       opReadLog: existsSync(opReadLog) ? readFileSync(opReadLog, 'utf8') : '',
       sleepLog: existsSync(sleepLog) ? readFileSync(sleepLog, 'utf8') : '',
       hmacKey: existsSync(hmacKeyFile) ? readFileSync(hmacKeyFile, 'utf8') : null,
-      hmacDirMode: existsSync(dirname(hmacKeyFile)) ? statSync(dirname(hmacKeyFile)).mode & 0o777 : null,
     };
   }
 }
@@ -390,13 +390,13 @@ test('airlock watcher launcher prefers local runtime secrets before 1Password re
   assert.match(script, /load_local_alert_to \|\| true/);
 });
 
-test('airlock watcher launcher publishes generated HMAC keys atomically and locks down the secret directory', () => {
+test('airlock watcher launcher publishes generated HMAC keys atomically without rewriting directory permissions', () => {
   const script = readScript('adversarial-watcher-start.sh');
   assert.match(script, /mktemp "\$_LHA_HMAC_KEY_DIR\/\.head-attestation-hmac-key-v1\.tmp\.XXXXXX"/);
   assert.match(script, /mv -f "\$_LHA_HMAC_KEY_TMP" "\$_LHA_HMAC_KEY_FILE"/);
   assert.doesNotMatch(script, /openssl rand -hex 32 > "\$_LHA_HMAC_KEY_FILE"/);
   assert.match(script, /mkdir -m 700 -p "\$_LHA_HMAC_KEY_DIR"/);
-  assert.match(script, /chmod 700 "\$_LHA_HMAC_KEY_DIR"/);
+  assert.doesNotMatch(script, /chmod 700 "\$_LHA_HMAC_KEY_DIR"/);
 });
 
 test('airlock watcher launcher replaces a truncated HMAC key before starting', {
@@ -408,7 +408,20 @@ test('airlock watcher launcher replaces a truncated HMAC key before starting', {
   });
   assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
   assert.equal(result.hmacKey?.trim().length, 64);
-  assert.equal(result.hmacDirMode, 0o700);
+});
+
+test('airlock watcher launcher supports a bare relative HMAC key filename', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    extraEnv: {
+      LINEAR_API_KEY: 'linear-test-token',
+      ...BROKER_MODE_TEST_ENV,
+      AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE: 'custom-key',
+    },
+  });
+  assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
+  assert.equal(result.hmacKey?.trim().length, 64);
 });
 
 test('airlock watcher launcher fails closed without publishing a partial HMAC key', {

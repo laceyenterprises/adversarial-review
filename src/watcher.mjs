@@ -224,7 +224,14 @@ import {
   fetchPullRequestMergeability,
   fetchPullRequestRollup,
   fetchReviewBodiesForHead,
+  fetchSubmittedReviewsForHead,
 } from './github-api.mjs';
+import {
+  buildDuplicateReviewSkipAudit,
+  createHeadDispatchLease,
+  headDispatchLeaseKey,
+  resolveAlreadyReviewedHeadDedup,
+} from './reviewed-head-dispatch-gate.mjs';
 import { parseCommitTrailers } from './ama/ham-provenance.mjs';
 import { clearPendingReviewsForSelf, reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
 import {
@@ -3873,6 +3880,59 @@ function countCompletedReviewerRereviewRounds({
   } finally {
     if (ownedDb && ownedDb !== db) ownedDb.close();
   }
+}
+
+// REVIEW-DEDUP: the hard re-review ceiling must count DISTINCT reviewed head
+// SHAs, not raw review events. `reviewed_prs.review_attempts` increments on
+// every attempt — including duplicate reviews of an unchanged head and failed
+// posts — so keying the ceiling on it let a single real round plus its
+// duplicates trip the cap and deadlock the PR. Counting distinct completed-pass
+// head SHAs makes duplicates of one head cost nothing against the ceiling while
+// still bounding genuine head churn. Legacy passes with a NULL head_sha are not
+// distinct-countable; callers fall back to `review_attempts` when this returns
+// 0 so the safety cap never silently disengages for pre-`head_sha` rows.
+function countDistinctReviewedHeadShas({
+  db: dbOverride = null,
+  rootDir = ROOT,
+  repoPath,
+  prNumber,
+} = {}) {
+  const ownedDb = dbOverride ? null : openReviewStateDb(rootDir);
+  const readDb = dbOverride || ownedDb;
+  try {
+    if (!dbOverride) ensureReviewStateSchema(readDb);
+    const row = readDb.prepare(
+      `SELECT COUNT(DISTINCT head_sha) AS count
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pass_kind IN ('first-pass', 'rereview')
+          AND status = 'completed'
+          AND head_sha IS NOT NULL
+          AND head_sha <> ''`
+    ).get(repoPath, prNumber);
+    const count = Number(row?.count || 0);
+    return Number.isFinite(count) && count > 0 ? count : 0;
+  } finally {
+    if (ownedDb && ownedDb !== db) ownedDb.close();
+  }
+}
+
+// REVIEW-DEDUP: in-process (pr, head_sha) lease shared across the tick's
+// reviewer-pool workers so two concurrent workers can't both dispatch a review
+// for the same head in one window. Cross-process double-dispatch is already
+// blocked by the durable `reviewing` claim CAS; this closes the intra-process
+// pool race that the CAS alone cannot (both workers read `pending`, both fetch,
+// both claim in sequence).
+const reviewerHeadDispatchLease = createHeadDispatchLease();
+
+// Adapt the GitHub reviews reader to the dedup gate's injectable shape. Keeps
+// the authoritative signal a live per-review `commit_id` lookup (never the
+// SQLite memo, never attestations, never a log grep).
+function fetchReviewsForHeadForDedup({ repoPath, prNumber, headSha, reviewerLogins } = {}) {
+  return fetchSubmittedReviewsForHead(execFileAsync, repoPath, prNumber, headSha, {
+    authoritativeReviewerLogins: reviewerLogins,
+  });
 }
 
 function resolveFirstPassReviewBudgetSuppression({
@@ -8839,6 +8899,47 @@ async function pollOnce(
         current,
         enqueuedAtMs: Date.now(),
         async run() {
+          // REVIEW-DEDUP (idempotency lease): one (pr, head) dispatch per
+          // window. A second pool worker racing the same head is turned away
+          // here before it can fetch, claim, or spawn.
+          const dispatchLeaseKey = headDispatchLeaseKey({
+            repoPath,
+            prNumber,
+            headSha: subject?.headSha,
+          });
+          if (!reviewerHeadDispatchLease.tryAcquire(dispatchLeaseKey)) {
+            console.log(
+              `[watcher] reviewer dispatch SKIPPED for ${repoPath}#${prNumber}: ` +
+                `(pr, head) dispatch lease already held this window (${dispatchLeaseKey}); ` +
+                `another pool worker owns this head`
+            );
+            return;
+          }
+
+          // REVIEW-DEDUP (authoritative reviewed-head gate): never dispatch a
+          // review for a head that already has a completed review (GitHub
+          // per-review commit_id === head). This composes WITH — never replaces
+          // — attestation consumption, and runs before any claim/spawn so a
+          // duplicate consumes no attempt budget and no re-review ceiling.
+          const reviewedHeadDedup = await resolveAlreadyReviewedHeadDedup({
+            repoPath,
+            prNumber,
+            headSha: subject?.headSha || null,
+            reviewerLogins: amaAuthoritativeReviewerLoginsForModel(route.reviewerModel),
+            fetchReviewsForHeadImpl: fetchReviewsForHeadForDedup,
+            logger: console,
+          });
+          if (reviewedHeadDedup.alreadyReviewed) {
+            console.log(buildDuplicateReviewSkipAudit({
+              repoPath,
+              prNumber,
+              headSha: subject?.headSha || null,
+              reviewId: reviewedHeadDedup.reviewId,
+            }));
+            reviewerHeadDispatchLease.release(dispatchLeaseKey);
+            return;
+          }
+
           const reservation = await reserveReviewerMemoryAdmission({
             reviewerModel: route.reviewerModel,
             reservationState: reviewerMemoryReservationState,
@@ -8855,6 +8956,7 @@ async function pollOnce(
                 `estimated=${memoryDecision.estimatedReviewerRssMb ?? estimatedReviewerRssMb}MB ` +
                 `projected=${memoryDecision.projectedHeadroomMb ?? 'unknown'}MB`
             );
+            reviewerHeadDispatchLease.release(dispatchLeaseKey);
             return;
           }
 
@@ -9143,12 +9245,28 @@ async function pollOnce(
               }
 
               const hardReviewCeiling = resolveHardReviewCeiling(maxRemediationRounds);
-              const priorReviewAttempts = Number(current?.review_attempts || 0);
-              if (!skipReviewerSpawnReason && priorReviewAttempts >= hardReviewCeiling) {
+              // REVIEW-DEDUP: count DISTINCT reviewed head SHAs, not raw review
+              // events. `review_attempts` increments on duplicate reviews of an
+              // unchanged head (and on failed posts), so keying the ceiling on
+              // it let one real round plus its duplicates trip the cap and
+              // deadlock the PR. Distinct completed-pass heads bound genuine
+              // head churn while duplicates of one head cost nothing. Fall back
+              // to `review_attempts` only when no pass recorded a head_sha
+              // (legacy rows) so the safety cap never silently disengages.
+              const distinctReviewedHeadShas = countDistinctReviewedHeadShas({
+                db,
+                rootDir: ROOT,
+                repoPath,
+                prNumber,
+              });
+              const priorReviewCount = distinctReviewedHeadShas > 0
+                ? distinctReviewedHeadShas
+                : Number(current?.review_attempts || 0);
+              if (!skipReviewerSpawnReason && priorReviewCount >= hardReviewCeiling) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
-                  `ceiling reached (${priorReviewAttempts} >= ${hardReviewCeiling}); adversarial ` +
-                  `reviews are capped per PR — deferring to the close path. ` +
+                  `ceiling reached (${priorReviewCount} distinct reviewed heads >= ${hardReviewCeiling}); ` +
+                  `adversarial reviews are capped per PR — deferring to the close path. ` +
                   `No attempt budget consumed.`,
                 );
                 skipReviewerSpawnReason = 'hard-review-ceiling';
@@ -9223,6 +9341,7 @@ async function pollOnce(
             }
           } finally {
             reservation.release();
+            reviewerHeadDispatchLease.release(dispatchLeaseKey);
           }
         },
       };
@@ -9641,6 +9760,7 @@ export {
   computeVocabularyFatigueFindingForPR,
   detectCommitVocabularyFatigue,
   countCompletedReviewerRereviewRounds,
+  countDistinctReviewedHeadShas,
   reviewCycleExhaustedFromRounds,
   createHeadCloserCommitSuppressionResolver,
   getStalePostedReviewAutoRereviewSuppression,

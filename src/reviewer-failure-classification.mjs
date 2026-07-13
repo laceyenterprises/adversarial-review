@@ -85,6 +85,7 @@ function unknownReviewerCommandFailureClass(reviewRow) {
 function reviewPopulationFailureClass(reviewRow) {
   const message = String(reviewRow?.failure_message || '').toLowerCase();
   if (!message) return null;
+  if (message.startsWith('[reviewer-lease-recovery-cap]')) return null;
   if (
     /reviewer session .+ is no longer alive/.test(message)
     && /no github review (?:was )?found/.test(message)

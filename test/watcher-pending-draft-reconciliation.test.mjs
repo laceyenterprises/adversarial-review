@@ -13,8 +13,23 @@ import { AgentOSConfigError } from '../src/config-loader.mjs';
 const WATCHER_SOURCE = new URL('../src/watcher.mjs', import.meta.url);
 
 async function withEnv(overrides, fn) {
+  const isolatedOverrides = {
+    CLAUDE_REVIEWER_AUTH_VIA_BROKER: undefined,
+    CODEX_REVIEWER_AUTH_VIA_BROKER: undefined,
+    GEMINI_REVIEWER_AUTH_VIA_BROKER: undefined,
+    GH_CLAUDE_REVIEWER_TOKEN_BROKER_PROVIDER: undefined,
+    GH_CODEX_REVIEWER_TOKEN_BROKER_PROVIDER: undefined,
+    GH_GEMINI_REVIEWER_TOKEN_BROKER_PROVIDER: undefined,
+    GH_CLAUDE_REVIEWER_TOKEN_SOURCE: undefined,
+    GH_CODEX_REVIEWER_TOKEN_SOURCE: undefined,
+    GH_GEMINI_REVIEWER_TOKEN_SOURCE: undefined,
+    OAUTH_BROKER_CLAUDE_REVIEWER_PROVIDER: undefined,
+    OAUTH_BROKER_CODEX_REVIEWER_PROVIDER: undefined,
+    OAUTH_BROKER_GEMINI_REVIEWER_PROVIDER: undefined,
+    ...overrides,
+  };
   const previous = {};
-  for (const [key, value] of Object.entries(overrides)) {
+  for (const [key, value] of Object.entries(isolatedOverrides)) {
     previous[key] = process.env[key];
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;

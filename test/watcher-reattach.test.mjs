@@ -251,6 +251,7 @@ test('kills and fails (retryably) an overdue orphan only after proving exit and 
 
   await reconcileReviewerSessions({
     db,
+    leaseRecoveryEnabled: false, // exercise the explicit off-mode (default is now on)
     octokit: makeOctokit([]), // no posted review
     now: new Date('2026-05-11T05:45:00.000Z'),
     log,
@@ -646,6 +647,7 @@ test('reattach reconciliation can cap stale rows per poll', async () => {
 
   const result = await reconcileReviewerSessions({
     db,
+    leaseRecoveryEnabled: false, // exercise the explicit off-mode (default is now on)
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
@@ -660,6 +662,59 @@ test('reattach reconciliation can cap stale rows per poll', async () => {
   assert.equal(readRow(db, REPO, 71).review_status, 'reviewing');
 });
 
+test('requeues a dead reviewer to pending BY DEFAULT (lease recovery on) so a bounce does not orphan the ticket', async () => {
+  const db = setupDb();
+  seedReviewing(db, { reviewer: 'claude' });
+  const log = makeLog();
+  const settled = [];
+
+  // No leaseRecoveryEnabled option: exercises the graduated default (true).
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    onTerminalDeadSession: async (event) => settled.push(event),
+    probeAlive: () => false,
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'pending'); // reclaimable by the claim CAS, not sticky 'failed'
+  assert.equal(row.infra_auto_recover_attempts, 1);
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'cancelled', reason: 'dead-no-review' }]
+  );
+});
+
+test('quarantines a repeatedly crashing reviewer when the lease recovery cap is exhausted', async () => {
+  const db = setupDb();
+  seedReviewing(db, { reviewer: 'claude', infraAutoRecoverAttempts: 3 });
+  const log = makeLog();
+  const settled = [];
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    onTerminalDeadSession: async (event) => settled.push(event),
+    probeAlive: () => false,
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'failed');
+  assert.equal(row.infra_auto_recover_attempts, 3);
+  assert.match(row.failure_message, /^\[reviewer-lease-recovery-cap\]/);
+  assert.deepEqual(
+    settled.map(({ state, reason }) => ({ state, reason })),
+    [{ state: 'failed', reason: 'dead-no-review' }]
+  );
+  assert.match(log.lines.join('\n'), /reviewer_lease_recovery_cap_exhausted/);
+});
+
 test('marks a dead reviewer without a GitHub review as retryable failed', async () => {
   const db = setupDb();
   seedReviewing(db, { reviewer: 'claude' });
@@ -668,6 +723,7 @@ test('marks a dead reviewer without a GitHub review as retryable failed', async 
 
   await reconcileReviewerSessions({
     db,
+    leaseRecoveryEnabled: false, // exercise the explicit off-mode (default is now on)
     octokit: makeOctokit([]),
     now: new Date(FAILURE_AT),
     log,
@@ -711,6 +767,7 @@ test('requeues a dead reviewer without a GitHub review when lease recovery is en
 
   const row = readRow(db);
   assert.equal(row.review_status, 'pending');
+  assert.equal(row.infra_auto_recover_attempts, 1);
   assert.equal(row.review_attempts, 3);
   assert.deepEqual(
     settled.map(({ state, reason }) => ({ state, reason })),
@@ -822,6 +879,26 @@ test('claimed rows with null pgid auto-rearm when no live run-state or GitHub re
     [{ state: 'cancelled', reason: 'missing-pgid-no-live-reviewer' }]
   );
   assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_requeued/);
+});
+
+test('claimed rows with null pgid use quarantine-only failure text when the recovery cap is exhausted', async () => {
+  const db = setupDb();
+  seedReviewing(db, { pgid: null, infraAutoRecoverAttempts: 3 });
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'failed');
+  assert.match(row.failure_message, /no live reviewer process group was found/);
+  assert.match(row.failure_message, /leaving the review failed for operator inspection/);
+  assert.doesNotMatch(row.failure_message, /re-arm/i);
 });
 
 test('claimed rows with null pgid stay reviewing while launch guard window is active', async () => {

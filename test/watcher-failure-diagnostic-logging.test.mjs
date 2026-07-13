@@ -35,6 +35,9 @@ function makeStatements(db) {
     markFailed: db.prepare(
       "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
     ),
+    releaseReviewLease: db.prepare(
+      "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+    ),
     markCascadeFailed: db.prepare(
       "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
     ),
@@ -53,7 +56,7 @@ function setupDb() {
   db.prepare(
     `INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, linear_ticket, review_status, review_attempts)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(REPO, PR, '2026-05-11T00:00:00.000Z', 'codex', 'open', null, 'pending', 0);
+  ).run(REPO, PR, '2026-05-11T00:00:00.000Z', 'codex', 'open', null, 'reviewing', 0);
   return db;
 }
 

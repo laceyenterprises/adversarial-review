@@ -1,7 +1,10 @@
 import { execFileSync } from 'node:child_process';
 
 import { readReviewerRunRecord } from './adapters/reviewer-runtime/run-state.mjs';
-import { resolveReviewerLeaseRecoveryEnabled } from './reviewer-lease.mjs';
+import {
+  DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
+  resolveReviewerLeaseRecoveryEnabled,
+} from './reviewer-lease.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 
 const LEGACY_ORPHAN_FAILURE_MESSAGE =
@@ -12,8 +15,10 @@ const LEGACY_ORPHAN_FAILURE_MESSAGE =
 const NULL_PGID_FAILURE_MESSAGE =
   'Reviewer session was claimed but its pgid was never persisted. ' +
   'The watcher likely died between the claim and spawn callback; operator must verify GitHub before clearing.';
+const NULL_PGID_DIAGNOSTIC_MESSAGE =
+  'Reviewer session was claimed but no live reviewer process group was found after watcher restart.';
 const NULL_PGID_REARM_MESSAGE =
-  'Reviewer session was claimed but no live reviewer process group was found after watcher restart; ' +
+  `${NULL_PGID_DIAGNOSTIC_MESSAGE} ` +
   'GitHub was checked for a completed review before automatically re-arming.';
 const UNKNOWN_REVIEWER_FAILURE_MESSAGE =
   'Reviewer session has an unknown reviewer value; operator must verify GitHub before retrying.';
@@ -27,6 +32,8 @@ const MISSING_TIMEOUT_FAILURE_MESSAGE =
   'Reviewer session launch timeout was not persisted on this row; refusing to auto-kill based on current watcher config.';
 const OVERDUE_RECOVERY_FAILURE_MESSAGE =
   'Overdue reviewer recovery could not prove the process exited cleanly without a late GitHub review; operator must verify before retrying.';
+const LEASE_RECOVERY_CAP_FAILURE_MESSAGE =
+  'Reviewer lease recovery cap exhausted; leaving the review failed for operator inspection.';
 
 const REVIEWER_BOT_LOGINS = new Map([
   ['claude', 'claude-reviewer-lacey'],
@@ -193,7 +200,8 @@ function prepareStatements(db) {
     listReviewing: db.prepare(
       `SELECT repo, pr_number, reviewer, review_attempts, last_attempted_at,
               reviewer_session_uuid, reviewer_pgid, reviewer_started_at,
-              reviewer_head_sha, reviewer_timeout_ms, reviewer_lease_expires_at
+              reviewer_head_sha, reviewer_timeout_ms, reviewer_lease_expires_at,
+              infra_auto_recover_attempts
          FROM reviewed_prs
         WHERE review_status = 'reviewing'`
     ),
@@ -216,7 +224,7 @@ function prepareStatements(db) {
               reviewer_timeout_ms = NULL,
               reviewer_lease_expires_at = NULL,
               quota_reset_at_utc = NULL,
-              infra_auto_recover_attempts = 0,
+              infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1,
               review_population_retry_attempts = 0,
               review_population_retry_last_at = NULL,
               review_population_retry_head_sha = NULL
@@ -319,6 +327,7 @@ async function reconcileReviewerSessions({
   maxRows = Number.POSITIVE_INFINITY,
   reviewerDeadlineMs = resolveReviewerTimeoutMs(),
   leaseRecoveryEnabled = resolveReviewerLeaseRecoveryEnabled(),
+  leaseRecoveryMaxAttempts = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   postKillReviewReprobeDelaysMs = [500, 1500, 3000],
 } = {}) {
@@ -330,6 +339,29 @@ async function reconcileReviewerSessions({
   if (rows.length === 0) return { reconciled: 0, skipped: matchingRows.length };
 
   const failureAt = now.toISOString();
+  const recoveryCap = Number.isInteger(Number(leaseRecoveryMaxAttempts)) && Number(leaseRecoveryMaxAttempts) > 0
+    ? Number(leaseRecoveryMaxAttempts)
+    : DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
+
+  function recoveryCapAvailable(row) {
+    return Number(row.infra_auto_recover_attempts || 0) < recoveryCap;
+  }
+
+  function markRecoveryCapFailed(row, message) {
+    const attempts = Number(row.infra_auto_recover_attempts || 0);
+    statements.markFailed.run(
+      failureAt,
+      `[reviewer-lease-recovery-cap] ${message} ${LEASE_RECOVERY_CAP_FAILURE_MESSAGE} ` +
+        `(${attempts}/${recoveryCap}).`,
+      row.repo,
+      row.pr_number
+    );
+    log.warn(
+      `[watcher] reviewer_lease_recovery_cap_exhausted repo=${row.repo} pr=${row.pr_number} ` +
+      `attempts=${attempts}/${recoveryCap}`
+    );
+  }
+
   for (const listedRow of rows) {
     let row = listedRow;
     if (!row.reviewer_session_uuid) {
@@ -460,22 +492,28 @@ async function reconcileReviewerSessions({
           continue;
         }
 
+        const canRecover = recoveryCapAvailable(row);
         await onTerminalDeadSession({
           row,
-          state: 'cancelled',
+          state: canRecover ? 'cancelled' : 'failed',
           settledAt: failureAt,
           reason: 'missing-pgid-no-live-reviewer',
         });
-        statements.releasePending.run(
-          failureAt,
-          NULL_PGID_REARM_MESSAGE,
-          row.repo,
-          row.pr_number
-        );
-        log.warn(
-          `[watcher] reviewer_reattach_null_pgid_requeued repo=${row.repo} pr=${row.pr_number} ` +
-          `session=${row.reviewer_session_uuid} current_head=${currentHeadSha || 'unknown'}`
-        );
+        if (canRecover) {
+          statements.releasePending.run(
+            failureAt,
+            NULL_PGID_REARM_MESSAGE,
+            row.repo,
+            row.pr_number
+          );
+          log.warn(
+            `[watcher] reviewer_reattach_null_pgid_requeued repo=${row.repo} pr=${row.pr_number} ` +
+            `session=${row.reviewer_session_uuid} current_head=${currentHeadSha || 'unknown'} ` +
+            `recovery_attempt=${Number(row.infra_auto_recover_attempts || 0) + 1}/${recoveryCap}`
+          );
+        } else {
+          markRecoveryCapFailed(row, NULL_PGID_DIAGNOSTIC_MESSAGE);
+        }
         continue;
       }
     }
@@ -615,9 +653,10 @@ async function reconcileReviewerSessions({
               return true;
             }
 
+            const canRecover = leaseRecoveryEnabled && recoveryCapAvailable(row);
             await onTerminalDeadSession({
               row,
-              state: leaseRecoveryEnabled ? 'cancelled' : 'failed',
+              state: canRecover ? 'cancelled' : 'failed',
               settledAt: failureAt,
               reason: 'deadline-exceeded',
             });
@@ -625,7 +664,7 @@ async function reconcileReviewerSessions({
               `Reviewer session ${row.reviewer_session_uuid} (pgid ${row.reviewer_pgid}) was orphaned by a ` +
               `supervisor restart, exceeded its persisted launch timeout (age ${orphanAgeMs}ms > ${launchTimeoutMs}ms), ` +
               `and was confirmed dead before automatic re-review.`;
-            if (leaseRecoveryEnabled) {
+            if (canRecover) {
               statements.releasePending.run(
                 failureAt,
                 `[reviewer-timeout] ${message}`,
@@ -635,15 +674,20 @@ async function reconcileReviewerSessions({
               log.warn(
                 `[watcher] reviewer_reattach_deadline_requeued repo=${row.repo} pr=${row.pr_number} ` +
                 `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid} age_ms=${orphanAgeMs} ` +
-                `deadline_ms=${launchTimeoutMs} final_signal=${signal}`
+                `deadline_ms=${launchTimeoutMs} final_signal=${signal} ` +
+                `recovery_attempt=${Number(row.infra_auto_recover_attempts || 0) + 1}/${recoveryCap}`
               );
             } else {
-              statements.markFailed.run(
-                failureAt,
-                message,
-                row.repo,
-                row.pr_number
-              );
+              if (leaseRecoveryEnabled) {
+                markRecoveryCapFailed(row, message);
+              } else {
+                statements.markFailed.run(
+                  failureAt,
+                  message,
+                  row.repo,
+                  row.pr_number
+                );
+              }
               log.warn(
                 `[watcher] reviewer_reattach_deadline_exceeded repo=${row.repo} pr=${row.pr_number} ` +
                 `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid} age_ms=${orphanAgeMs} ` +
@@ -782,16 +826,17 @@ async function reconcileReviewerSessions({
       continue;
     }
 
+    const canRecover = leaseRecoveryEnabled && recoveryCapAvailable(row);
     await onTerminalDeadSession({
       row,
-      state: leaseRecoveryEnabled ? 'cancelled' : 'failed',
+      state: canRecover ? 'cancelled' : 'failed',
       settledAt: failureAt,
       reason: 'dead-no-review',
     });
     const deadNoReviewMessage =
       `Reviewer session ${row.reviewer_session_uuid} is no longer alive and no GitHub review was found from ` +
       `${reviewerBotLogin(row.reviewer)} since ${row.reviewer_started_at || 'unknown start time'}.`;
-    if (leaseRecoveryEnabled) {
+    if (canRecover) {
       statements.releasePending.run(
         failureAt,
         deadNoReviewMessage,
@@ -800,15 +845,20 @@ async function reconcileReviewerSessions({
       );
       log.warn(
         `[watcher] reviewer_reattach_requeued repo=${row.repo} pr=${row.pr_number} ` +
-        `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid || 'unknown'}`
+        `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid || 'unknown'} ` +
+        `recovery_attempt=${Number(row.infra_auto_recover_attempts || 0) + 1}/${recoveryCap}`
       );
     } else {
-      statements.markFailed.run(
-        failureAt,
-        deadNoReviewMessage,
-        row.repo,
-        row.pr_number
-      );
+      if (leaseRecoveryEnabled) {
+        markRecoveryCapFailed(row, deadNoReviewMessage);
+      } else {
+        statements.markFailed.run(
+          failureAt,
+          deadNoReviewMessage,
+          row.repo,
+          row.pr_number
+        );
+      }
       log.warn(
         `[watcher] reviewer_reattach_dead repo=${row.repo} pr=${row.pr_number} ` +
         `session=${row.reviewer_session_uuid} pgid=${row.reviewer_pgid || 'unknown'}`

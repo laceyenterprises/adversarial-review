@@ -267,6 +267,7 @@ import {
   sortReviewerDispatchCandidates,
 } from './watcher-reviewer-pool.mjs';
 import {
+  DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS,
   computeReviewerLeaseExpiryAt,
   isReviewerLeaseExpired,
   resolveReviewerLeaseRecoveryEnabled,
@@ -2442,7 +2443,7 @@ const stmtGetPendingFastMergeAudits = db.prepare(
 // normal dispatch path rediscovers the PR and wins the atomic reviewing claim.
 // The counter below bounds those claim-path recoveries so a persistent infra
 // failure eventually remains terminal instead of retrying forever.
-const INFRA_AUTO_RECOVER_CAP = 3;
+const INFRA_AUTO_RECOVER_CAP = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
 const DEFAULT_REVIEW_UNKNOWN_FAILURE_MAX_RETRIES = 3;
 function resolveReviewUnknownFailureMaxRetries(env = process.env) {
   const raw = env.REVIEW_UNKNOWN_FAILURE_MAX_RETRIES;

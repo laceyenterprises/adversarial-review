@@ -232,8 +232,23 @@ test('consumeFollowUpJobsUntilCapacity prefetches quota holds before synchronous
 // import below auto-installs beforeEach + afterEach reset hooks for
 // the role-config cache.
 import './helpers/role-config-cache-reset.mjs';
-beforeEach(() => {
+beforeEach((context) => {
   resetOAuthPreflightCache();
+  const isolatedKeys = [
+    'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR',
+    'AGENT_OS_CONFIG_PATH',
+    'AGENT_OS_ROLES_REMEDIATOR',
+  ];
+  const previous = Object.fromEntries(isolatedKeys.map((key) => [key, process.env[key]]));
+  delete process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
+  process.env.AGENT_OS_CONFIG_PATH = '/dev/null';
+  delete process.env.AGENT_OS_ROLES_REMEDIATOR;
+  context.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
 });
 import { collectWorkspaceDocContext } from '../src/prompt-context.mjs';
 import {

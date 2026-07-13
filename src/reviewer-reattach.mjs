@@ -15,8 +15,10 @@ const LEGACY_ORPHAN_FAILURE_MESSAGE =
 const NULL_PGID_FAILURE_MESSAGE =
   'Reviewer session was claimed but its pgid was never persisted. ' +
   'The watcher likely died between the claim and spawn callback; operator must verify GitHub before clearing.';
+const NULL_PGID_DIAGNOSTIC_MESSAGE =
+  'Reviewer session was claimed but no live reviewer process group was found after watcher restart.';
 const NULL_PGID_REARM_MESSAGE =
-  'Reviewer session was claimed but no live reviewer process group was found after watcher restart; ' +
+  `${NULL_PGID_DIAGNOSTIC_MESSAGE} ` +
   'GitHub was checked for a completed review before automatically re-arming.';
 const UNKNOWN_REVIEWER_FAILURE_MESSAGE =
   'Reviewer session has an unknown reviewer value; operator must verify GitHub before retrying.';
@@ -510,7 +512,7 @@ async function reconcileReviewerSessions({
             `recovery_attempt=${Number(row.infra_auto_recover_attempts || 0) + 1}/${recoveryCap}`
           );
         } else {
-          markRecoveryCapFailed(row, NULL_PGID_REARM_MESSAGE);
+          markRecoveryCapFailed(row, NULL_PGID_DIAGNOSTIC_MESSAGE);
         }
         continue;
       }

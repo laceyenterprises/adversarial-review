@@ -881,6 +881,26 @@ test('claimed rows with null pgid auto-rearm when no live run-state or GitHub re
   assert.match(log.lines.join('\n'), /reviewer_reattach_null_pgid_requeued/);
 });
 
+test('claimed rows with null pgid use quarantine-only failure text when the recovery cap is exhausted', async () => {
+  const db = setupDb();
+  seedReviewing(db, { pgid: null, infraAutoRecoverAttempts: 3 });
+  const log = makeLog();
+
+  await reconcileReviewerSessions({
+    db,
+    octokit: makeOctokit([]),
+    now: new Date(FAILURE_AT),
+    log,
+    fetchHeadSha: async () => HEAD_SHA,
+  });
+
+  const row = readRow(db);
+  assert.equal(row.review_status, 'failed');
+  assert.match(row.failure_message, /no live reviewer process group was found/);
+  assert.match(row.failure_message, /leaving the review failed for operator inspection/);
+  assert.doesNotMatch(row.failure_message, /re-arm/i);
+});
+
 test('claimed rows with null pgid stay reviewing while launch guard window is active', async () => {
   const db = setupDb();
   seedReviewing(db, {

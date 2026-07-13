@@ -34,19 +34,37 @@ fi
 # pipeline (verdicts never record, remediation never enqueues; 2026-07-13 SEV).
 _LHA_HMAC_KEY_FILE="${AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE:-$REPO_ROOT/.secrets/local/head-attestation-hmac-key-v1}"
 if [[ -z "${AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1:-}" ]]; then
-  if [[ ! -s "$_LHA_HMAC_KEY_FILE" ]]; then
-    mkdir -p "${_LHA_HMAC_KEY_FILE%/*}" 2>/dev/null
-    if ( umask 077; openssl rand -hex 32 > "$_LHA_HMAC_KEY_FILE" ) 2>/dev/null; then
-      chmod 600 "$_LHA_HMAC_KEY_FILE" 2>/dev/null
+  _LHA_HMAC_KEY=""
+  if [[ -r "$_LHA_HMAC_KEY_FILE" ]]; then
+    _LHA_HMAC_KEY="$(tr -d '\n' < "$_LHA_HMAC_KEY_FILE" 2>/dev/null || true)"
+  fi
+  if (( ${#_LHA_HMAC_KEY} < 32 )); then
+    _LHA_HMAC_KEY_DIR="${_LHA_HMAC_KEY_FILE%/*}"
+    _LHA_HMAC_KEY_TMP=""
+    mkdir -m 700 -p "$_LHA_HMAC_KEY_DIR" 2>/dev/null && chmod 700 "$_LHA_HMAC_KEY_DIR" 2>/dev/null || true
+    if _LHA_HMAC_KEY_TMP="$(mktemp "$_LHA_HMAC_KEY_DIR/.head-attestation-hmac-key-v1.tmp.XXXXXX" 2>/dev/null)" \
+      && ( umask 077; openssl rand -hex 32 > "$_LHA_HMAC_KEY_TMP" ) 2>/dev/null \
+      && chmod 600 "$_LHA_HMAC_KEY_TMP" 2>/dev/null \
+      && mv -f "$_LHA_HMAC_KEY_TMP" "$_LHA_HMAC_KEY_FILE" 2>/dev/null; then
+      _LHA_HMAC_KEY_TMP=""
       echo "[adversarial-watcher] generated head-attestation HMAC key at $_LHA_HMAC_KEY_FILE" >&2
     fi
+    [[ -z "$_LHA_HMAC_KEY_TMP" ]] || rm -f "$_LHA_HMAC_KEY_TMP" 2>/dev/null || true
+    if [[ -r "$_LHA_HMAC_KEY_FILE" ]]; then
+      _LHA_HMAC_KEY="$(tr -d '\n' < "$_LHA_HMAC_KEY_FILE" 2>/dev/null || true)"
+    fi
   fi
-  if [[ -s "$_LHA_HMAC_KEY_FILE" ]]; then
-    AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1="$(tr -d '\n' < "$_LHA_HMAC_KEY_FILE")"
+  if (( ${#_LHA_HMAC_KEY} >= 32 )); then
+    AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1="$_LHA_HMAC_KEY"
     export AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1
   else
-    echo "[adversarial-watcher] WARNING: head-attestation HMAC key unresolved ($_LHA_HMAC_KEY_FILE); reviewer attest-sign will fail" >&2
+    echo "[adversarial-watcher] ERROR: head-attestation HMAC key unresolved or shorter than 32 bytes ($_LHA_HMAC_KEY_FILE); refusing to start" >&2
+    exit 1
   fi
+fi
+if (( ${#AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1} < 32 )); then
+  echo "[adversarial-watcher] ERROR: AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1 is shorter than 32 bytes; refusing to start" >&2
+  exit 1
 fi
 
 # OPH-01: route `op read` through the repo-local shared helper so a

@@ -4140,10 +4140,15 @@ function resolveFirstPassReviewBudgetSuppression({
   };
   const failedAtMs = parseReviewTimestamp(reviewRow?.failed_at);
   const postedAtMs = parseReviewTimestamp(reviewRow?.posted_at);
+  const reviewerLeaseExpiresAtMs = parseReviewTimestamp(reviewRow?.reviewer_lease_expires_at);
+  const currentHeadReviewLeaseValid =
+    Number.isFinite(reviewerLeaseExpiresAtMs) &&
+    reviewerLeaseExpiresAtMs > Date.now();
   const currentHeadReviewInFlight =
     suppliedCurrentHeadSha !== null &&
     reviewedHeadSha === suppliedCurrentHeadSha &&
-    reviewRow?.review_status === 'reviewing';
+    reviewRow?.review_status === 'reviewing' &&
+    currentHeadReviewLeaseValid;
   if (currentHeadReviewInFlight) {
     return {
       suppressed: true,
@@ -4156,10 +4161,14 @@ function resolveFirstPassReviewBudgetSuppression({
   const hasUnresolvedFailure =
     reviewRow?.review_status !== 'posted' &&
     Number.isFinite(failedAtMs) &&
-    (!Number.isFinite(postedAtMs) || failedAtMs > postedAtMs);
+    (!Number.isFinite(postedAtMs) || failedAtMs >= postedAtMs);
+  const hasExpiredOrMissingReviewLease =
+    reviewRow?.review_status === 'reviewing' &&
+    !currentHeadReviewLeaseValid;
   const currentHeadAlreadyReviewed =
     suppliedCurrentHeadSha !== null &&
     reviewedHeadSha === suppliedCurrentHeadSha &&
+    !hasExpiredOrMissingReviewLease &&
     !hasUnresolvedFailure;
   if (currentHeadAlreadyReviewed && !isExplicitOperatorReviewRetrigger(reviewRow)) {
     return {

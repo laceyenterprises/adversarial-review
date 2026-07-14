@@ -761,6 +761,32 @@ test('same-head failure resolution handles SQLite UTC timestamps and legacy or a
     reviewer_lease_expires_at: '2099-01-01T00:00:00.000Z',
   });
   assert.equal(activeRetry.reason, 'same-head-review-in-flight');
+
+  const expiredRetry = resolve({
+    review_status: 'reviewing',
+    failed_at: null,
+    posted_at: null,
+    reviewer_lease_expires_at: '2020-01-01 00:00:00',
+  });
+  assert.equal(expiredRetry.suppressed, false);
+  assert.notEqual(expiredRetry.reason, 'same-head-review-in-flight');
+  assert.notEqual(expiredRetry.reason, 'same-head-already-reviewed');
+
+  const missingLeaseRetry = resolve({
+    review_status: 'reviewing',
+    failed_at: null,
+    posted_at: null,
+    reviewer_lease_expires_at: null,
+  });
+  assert.equal(missingLeaseRetry.suppressed, false);
+
+  const sameSecondFailure = resolve({
+    review_status: 'pending',
+    failed_at: '2026-07-14 17:00:00',
+    posted_at: '2026-07-14 17:00:00',
+  });
+  assert.equal(sameSecondFailure.suppressed, false);
+  assert.notEqual(sameSecondFailure.reason, 'same-head-already-reviewed');
 });
 
 test('watcher allows the owed post-budget final review even when remediation rounds exceed budget', () => {

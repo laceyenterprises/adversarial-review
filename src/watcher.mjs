@@ -4131,10 +4131,32 @@ function resolveFirstPassReviewBudgetSuppression({
   // moved-head-then-refailed case (failed_at > posted_at) while preserving the
   // legitimate RRD-01 dedup — an ordinary already-reviewed same-head repeat has
   // no failure recorded and is still suppressed.
-  const failedAtMs = Date.parse(reviewRow?.failed_at ?? '');
-  const postedAtMs = Date.parse(reviewRow?.posted_at ?? '');
+  const parseReviewTimestamp = (value) => {
+    if (typeof value !== 'string' || value.length === 0) return Number.NaN;
+    const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
+      ? `${value.replace(' ', 'T')}Z`
+      : value;
+    return Date.parse(normalized);
+  };
+  const failedAtMs = parseReviewTimestamp(reviewRow?.failed_at);
+  const postedAtMs = parseReviewTimestamp(reviewRow?.posted_at);
+  const currentHeadReviewInFlight =
+    suppliedCurrentHeadSha !== null &&
+    reviewedHeadSha === suppliedCurrentHeadSha &&
+    reviewRow?.review_status === 'reviewing';
+  if (currentHeadReviewInFlight) {
+    return {
+      suppressed: true,
+      reason: 'same-head-review-in-flight',
+      completedRoundsForPR,
+      roundBudget,
+      riskClass: resolution.riskClass,
+    };
+  }
   const hasUnresolvedFailure =
-    Number.isFinite(failedAtMs) && (!Number.isFinite(postedAtMs) || failedAtMs > postedAtMs);
+    reviewRow?.review_status !== 'posted' &&
+    Number.isFinite(failedAtMs) &&
+    (!Number.isFinite(postedAtMs) || failedAtMs > postedAtMs);
   const currentHeadAlreadyReviewed =
     suppliedCurrentHeadSha !== null &&
     reviewedHeadSha === suppliedCurrentHeadSha &&

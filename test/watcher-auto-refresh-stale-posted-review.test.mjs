@@ -724,6 +724,45 @@ test('watcher does not treat a same-head review that FAILED before posting as al
   assert.equal(postedSameHead.reason, 'same-head-already-reviewed');
 });
 
+test('same-head failure resolution handles SQLite UTC timestamps and legacy or active rows', () => {
+  const resolve = (reviewRow) => resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 3713,
+    reviewRow: { reviewer_head_sha: 'deadbeefcafe', ...reviewRow },
+    currentHeadSha: 'deadbeefcafe',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 0,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+
+  const postedAfterFailure = resolve({
+    review_status: 'pending',
+    failed_at: '2026-07-14 17:00:00',
+    posted_at: '2026-07-14T17:30:00.000Z',
+  });
+  assert.equal(postedAfterFailure.reason, 'same-head-already-reviewed');
+
+  const legacyPosted = resolve({
+    review_status: 'posted',
+    failed_at: '2026-07-14 17:00:00',
+    posted_at: null,
+  });
+  assert.equal(legacyPosted.reason, 'same-head-already-reviewed');
+
+  const activeRetry = resolve({
+    review_status: 'reviewing',
+    failed_at: '2026-07-14 17:00:00',
+    posted_at: null,
+    reviewer_head_sha: 'deadbeefcafe',
+    reviewer_lease_expires_at: '2099-01-01T00:00:00.000Z',
+  });
+  assert.equal(activeRetry.reason, 'same-head-review-in-flight');
+});
+
 test('watcher allows the owed post-budget final review even when remediation rounds exceed budget', () => {
   const suppression = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',

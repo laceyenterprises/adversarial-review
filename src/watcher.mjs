@@ -4115,8 +4115,66 @@ function resolveFirstPassReviewBudgetSuppression({
     typeof reviewRow?.reviewer_head_sha === 'string' && reviewRow.reviewer_head_sha.length > 0
       ? reviewRow.reviewer_head_sha
       : null;
+  // `reviewer_head_sha` is set when the reviewer STARTS a head and survives a
+  // failed attempt: the failure paths (stmtReleaseReviewLease / stmtMarkFailed)
+  // record failed_at + failure_message but leave reviewer_head_sha intact. Keyed
+  // only on reviewer_head_sha, the watcher therefore treats a review that failed
+  // BEFORE posting to GitHub (e.g. a gemini exec SIGKILL / `[unknown] command
+  // failed` shape) as "already reviewed", so `same-head-already-reviewed`
+  // suppresses the retry and the caller fabricates a `posted` row (via
+  // stmtRestoreSameHeadSuppressedReviewPosted) for a review that never reached
+  // GitHub — the 2026-07-14 phantom-suppression bug that permanently blocked
+  // re-review + landing of otherwise-clean PRs. A same-head match therefore only
+  // counts as reviewed when the row carries NO unresolved failure: a failed_at
+  // that has not been superseded by a later posted_at means the last attempt on
+  // this head failed, so it stays retryable. This also covers the
+  // moved-head-then-refailed case (failed_at > posted_at) while preserving the
+  // legitimate RRD-01 dedup — an ordinary already-reviewed same-head repeat has
+  // no failure recorded and is still suppressed.
+  const parseReviewTimestamp = (value) => {
+    if (typeof value !== 'string' || value.length === 0) return Number.NaN;
+    // Normalize a timezone-less datetime to UTC before parsing. SQLite's
+    // CURRENT_TIMESTAMP uses a space separator ("YYYY-MM-DD HH:MM:SS"); accept a
+    // `T` separator too so a JS `.toISOString()` value that lost its trailing `Z`
+    // is still pinned to UTC instead of falling through to Date.parse's local-time
+    // interpretation (which would skew failure/lease ordering on a non-UTC host).
+    const normalized = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
+      ? `${value.replace(' ', 'T')}Z`
+      : value;
+    return Date.parse(normalized);
+  };
+  const failedAtMs = parseReviewTimestamp(reviewRow?.failed_at);
+  const postedAtMs = parseReviewTimestamp(reviewRow?.posted_at);
+  const reviewerLeaseExpiresAtMs = parseReviewTimestamp(reviewRow?.reviewer_lease_expires_at);
+  const currentHeadReviewLeaseValid =
+    Number.isFinite(reviewerLeaseExpiresAtMs) &&
+    reviewerLeaseExpiresAtMs > Date.now();
+  const currentHeadReviewInFlight =
+    suppliedCurrentHeadSha !== null &&
+    reviewedHeadSha === suppliedCurrentHeadSha &&
+    reviewRow?.review_status === 'reviewing' &&
+    currentHeadReviewLeaseValid;
+  if (currentHeadReviewInFlight) {
+    return {
+      suppressed: true,
+      reason: 'same-head-review-in-flight',
+      completedRoundsForPR,
+      roundBudget,
+      riskClass: resolution.riskClass,
+    };
+  }
+  const hasUnresolvedFailure =
+    reviewRow?.review_status !== 'posted' &&
+    Number.isFinite(failedAtMs) &&
+    (!Number.isFinite(postedAtMs) || failedAtMs >= postedAtMs);
+  const hasExpiredOrMissingReviewLease =
+    reviewRow?.review_status === 'reviewing' &&
+    !currentHeadReviewLeaseValid;
   const currentHeadAlreadyReviewed =
-    suppliedCurrentHeadSha !== null && reviewedHeadSha === suppliedCurrentHeadSha;
+    suppliedCurrentHeadSha !== null &&
+    reviewedHeadSha === suppliedCurrentHeadSha &&
+    !hasExpiredOrMissingReviewLease &&
+    !hasUnresolvedFailure;
   if (currentHeadAlreadyReviewed && !isExplicitOperatorReviewRetrigger(reviewRow)) {
     return {
       suppressed: true,

@@ -4133,7 +4133,12 @@ function resolveFirstPassReviewBudgetSuppression({
   // no failure recorded and is still suppressed.
   const parseReviewTimestamp = (value) => {
     if (typeof value !== 'string' || value.length === 0) return Number.NaN;
-    const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
+    // Normalize a timezone-less datetime to UTC before parsing. SQLite's
+    // CURRENT_TIMESTAMP uses a space separator ("YYYY-MM-DD HH:MM:SS"); accept a
+    // `T` separator too so a JS `.toISOString()` value that lost its trailing `Z`
+    // is still pinned to UTC instead of falling through to Date.parse's local-time
+    // interpretation (which would skew failure/lease ordering on a non-UTC host).
+    const normalized = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
       ? `${value.replace(' ', 'T')}Z`
       : value;
     return Date.parse(normalized);

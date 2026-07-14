@@ -4115,8 +4115,30 @@ function resolveFirstPassReviewBudgetSuppression({
     typeof reviewRow?.reviewer_head_sha === 'string' && reviewRow.reviewer_head_sha.length > 0
       ? reviewRow.reviewer_head_sha
       : null;
+  // `reviewer_head_sha` is set when the reviewer STARTS a head and survives a
+  // failed attempt: the failure paths (stmtReleaseReviewLease / stmtMarkFailed)
+  // record failed_at + failure_message but leave reviewer_head_sha intact. Keyed
+  // only on reviewer_head_sha, the watcher therefore treats a review that failed
+  // BEFORE posting to GitHub (e.g. a gemini exec SIGKILL / `[unknown] command
+  // failed` shape) as "already reviewed", so `same-head-already-reviewed`
+  // suppresses the retry and the caller fabricates a `posted` row (via
+  // stmtRestoreSameHeadSuppressedReviewPosted) for a review that never reached
+  // GitHub — the 2026-07-14 phantom-suppression bug that permanently blocked
+  // re-review + landing of otherwise-clean PRs. A same-head match therefore only
+  // counts as reviewed when the row carries NO unresolved failure: a failed_at
+  // that has not been superseded by a later posted_at means the last attempt on
+  // this head failed, so it stays retryable. This also covers the
+  // moved-head-then-refailed case (failed_at > posted_at) while preserving the
+  // legitimate RRD-01 dedup — an ordinary already-reviewed same-head repeat has
+  // no failure recorded and is still suppressed.
+  const failedAtMs = Date.parse(reviewRow?.failed_at ?? '');
+  const postedAtMs = Date.parse(reviewRow?.posted_at ?? '');
+  const hasUnresolvedFailure =
+    Number.isFinite(failedAtMs) && (!Number.isFinite(postedAtMs) || failedAtMs > postedAtMs);
   const currentHeadAlreadyReviewed =
-    suppliedCurrentHeadSha !== null && reviewedHeadSha === suppliedCurrentHeadSha;
+    suppliedCurrentHeadSha !== null &&
+    reviewedHeadSha === suppliedCurrentHeadSha &&
+    !hasUnresolvedFailure;
   if (currentHeadAlreadyReviewed && !isExplicitOperatorReviewRetrigger(reviewRow)) {
     return {
       suppressed: true,

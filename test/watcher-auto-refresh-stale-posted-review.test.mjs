@@ -676,6 +676,54 @@ test('watcher keys the completed-rereview budget per head so a moved head re-arm
   }
 });
 
+test('watcher does not treat a same-head review that FAILED before posting as already-reviewed (phantom-suppression regression)', () => {
+  // 2026-07-14 phantom-suppression bug: a review that fails mid-flight (e.g. a
+  // gemini exec SIGKILL / `[unknown] command failed` shape) leaves
+  // reviewer_head_sha = the current head but resets the row to a non-`posted`
+  // status. Keyed only on reviewer_head_sha, the watcher wrongly returned
+  // `same-head-already-reviewed`, and the caller fabricated a `posted` row for a
+  // review that never reached GitHub — permanently suppressing the retry. A
+  // failed same-head attempt must stay retryable.
+  const failedSameHead = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 3713,
+    reviewRow: {
+      review_status: 'pending',
+      reviewer_head_sha: 'deadbeefcafe',
+      failed_at: '2026-07-14T17:00:00.000Z',
+      failure_message:
+        '[unknown] command failed: Command failed with code null signal SIGKILL',
+    },
+    currentHeadSha: 'deadbeefcafe',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 0,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+  assert.equal(failedSameHead.suppressed, false);
+  assert.notEqual(failedSameHead.reason, 'same-head-already-reviewed');
+
+  // RRD-01 preserved: a genuinely `posted` same head is still suppressed.
+  const postedSameHead = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 3713,
+    reviewRow: { review_status: 'posted', reviewer_head_sha: 'deadbeefcafe' },
+    currentHeadSha: 'deadbeefcafe',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 0,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+  assert.equal(postedSameHead.suppressed, true);
+  assert.equal(postedSameHead.reason, 'same-head-already-reviewed');
+});
+
 test('watcher allows the owed post-budget final review even when remediation rounds exceed budget', () => {
   const suppression = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',

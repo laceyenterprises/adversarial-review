@@ -2390,13 +2390,29 @@ test('normal-size always-on gemini antigravity review stays on gemini', () => {
 });
 
 test('only agy available: oversized diff chunk fallback keeps each chunk under budget and merges findings', async () => {
+  const minimalDiff = [
+    'diff --git a/a.txt b/a.txt',
+    '--- a/a.txt',
+    '+++ b/a.txt',
+    `+line 0 ${'x'.repeat(20)}`,
+  ].join('\n');
   const diff = [
     'diff --git a/a.txt b/a.txt',
     '--- a/a.txt',
     '+++ b/a.txt',
     ...Array.from({ length: 12 }, (_, index) => `+line ${index} ${'x'.repeat(20)}`),
   ].join('\n');
-  const maxBytes = 16_000;
+  const minimalPromptBytes = agyPromptBytes(buildPromptForReviewerModel('gemini', minimalDiff, '', {
+    promptStage: 'first',
+    runtime: 'antigravity',
+  }));
+  const fullPromptBytes = agyPromptBytes(buildPromptForReviewerModel('gemini', diff, '', {
+    promptStage: 'first',
+    runtime: 'antigravity',
+  }));
+  const maxBytes = Math.floor((minimalPromptBytes + fullPromptBytes) / 2);
+  assert.ok(minimalPromptBytes <= maxBytes);
+  assert.ok(fullPromptBytes > maxBytes);
   const split = splitDiffForAgyChunks(diff, {
     extraContext: '',
     promptStage: 'first',

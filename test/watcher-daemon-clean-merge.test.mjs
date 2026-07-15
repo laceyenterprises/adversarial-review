@@ -618,12 +618,11 @@ test('daemon gh merge subprocess is bounded by the shared timeout', async () => 
   }
 });
 
-test('daemon clean merge fail-closes when the head moved past worker build-completion provenance', async () => {
+test('daemon clean merge resolves worker identity via head-independent pr_opened retry when the head moved', async () => {
   const rootDir = tempRoot();
   try {
     const readCalls = [];
     let mergeCalls = 0;
-    let leaseReleased = false;
     const result = await runDaemonCleanMergeAttempt({
       rootDir,
       cfg: {
@@ -672,14 +671,20 @@ test('daemon clean merge fail-closes when the head moved past worker build-compl
           acquiredAt: '2026-07-11T00:00:00.000Z',
         },
       }),
-      releaseMergeLeaseImpl: () => {
-        leaseReleased = true;
-      },
+      releaseMergeLeaseImpl: () => {},
       readBuildCompletionSignalForPrImpl: (args) => {
         readCalls.push(args);
         assert.equal(args.signalKind, 'pr_opened');
-        assert.equal(args.headSha, 'head-after-remediation');
-        return { ok: false, reason: 'missing-build-completion-signal' };
+        // The single pr_opened row is pinned to the OPEN head, so the strict
+        // current-head read misses after remediation; the head-independent
+        // retry (headSha null) recovers the worker identity.
+        if (args.headSha === 'head-after-remediation') {
+          return { ok: false, reason: 'missing-build-completion-signal' };
+        }
+        return {
+          ok: true,
+          row: { launch_request_id: 'lrq-opener', worker_class: 'codex', head_sha: 'head-at-open' },
+        };
       },
       execFileImpl: async () => {
         mergeCalls += 1;
@@ -689,17 +694,77 @@ test('daemon clean merge fail-closes when the head moved past worker build-compl
       env: { HQ_ROOT: rootDir },
     });
 
-    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
-    assert.equal(result.merged, false);
-    assert.equal(mergeCalls, 0);
-    assert.equal(leaseReleased, false, 'identity must fail closed before taking the merge lease');
+    assert.notEqual(
+      result.reason,
+      'worker-identity-unresolved',
+      'a moved head must resolve identity from the head-independent pr_opened row, not fail closed',
+    );
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(result.merged, true);
+    assert.ok(mergeCalls >= 1, 'the merge proceeds once identity resolves');
     assert.deepEqual(
-      readCalls.map((call) => call.headSha || null),
-      ['head-after-remediation'],
+      readCalls.map((call) => call.headSha ?? null),
+      ['head-after-remediation', null],
+      'strict current-head read first, then the head-independent retry',
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('resolveDaemonWorkerIdentityForPr resolves a moved head from the head-independent pr_opened row', async () => {
+  const readCalls = [];
+  const identity = await resolveDaemonWorkerIdentityForPr({
+    repo: 'acme/repo',
+    prNumber: 561,
+    currentHeadSha: 'head-after-remediation',
+    currentBranch: 'feature',
+    hqRoot: '/nonexistent-hq-root',
+    rootDir: '/nonexistent-root',
+    env: {},
+    consumeHeadAttestations: false,
+    readBuildCompletionSignalForPrImpl: (args) => {
+      readCalls.push(args.headSha ?? null);
+      if (args.headSha === 'head-after-remediation') {
+        return { ok: false, reason: 'missing-build-completion-signal' };
+      }
+      return {
+        ok: true,
+        row: { launch_request_id: 'lrq-opener', worker_class: 'codex', head_sha: 'head-at-open' },
+      };
+    },
+  });
+  assert.equal(identity.ok, true);
+  assert.equal(identity.launchRequestId, 'lrq-opener');
+  assert.equal(identity.workerClass, 'codex');
+  assert.equal(identity.resolvedBy, 'pr-opened-head-moved');
+  assert.equal(identity.headMovedAfterBuildCompletion, true);
+  assert.deepEqual(readCalls, ['head-after-remediation', null]);
+});
+
+test('resolveDaemonWorkerIdentityForPr keeps the current-head fast path when the head has not moved', async () => {
+  const readCalls = [];
+  const identity = await resolveDaemonWorkerIdentityForPr({
+    repo: 'acme/repo',
+    prNumber: 562,
+    currentHeadSha: 'head-at-open',
+    currentBranch: 'feature',
+    hqRoot: '/nonexistent-hq-root',
+    rootDir: '/nonexistent-root',
+    env: {},
+    consumeHeadAttestations: false,
+    readBuildCompletionSignalForPrImpl: (args) => {
+      readCalls.push(args.headSha ?? null);
+      return {
+        ok: true,
+        row: { launch_request_id: 'lrq-opener', worker_class: 'codex', head_sha: 'head-at-open' },
+      };
+    },
+  });
+  assert.equal(identity.ok, true);
+  assert.equal(identity.resolvedBy, 'current-head');
+  assert.equal(identity.headMovedAfterBuildCompletion, false);
+  assert.deepEqual(readCalls, ['head-at-open'], 'no head-independent retry when the strict read resolves');
 });
 
 test('daemon clean merge with LHA enforcement blocks missing produced attestation at live head', async () => {
@@ -1277,7 +1342,7 @@ test('resolveDaemonWorkerIdentityForPr fails closed when current head is missing
   assert.equal(calls.length, 0, 'missing current head must not degrade into a PR-level provenance query');
 });
 
-test('resolveDaemonWorkerIdentityForPr rejects a moved-head pr_opened row', async () => {
+test('resolveDaemonWorkerIdentityForPr fails closed only when no pr_opened row exists at any head', async () => {
   const seenHeadShas = [];
   let chainReads = 0;
   const result = await resolveDaemonWorkerIdentityForPr({
@@ -1289,10 +1354,13 @@ test('resolveDaemonWorkerIdentityForPr rejects a moved-head pr_opened row', asyn
     env: {},
     consumeHeadAttestations: false,
     readBuildCompletionSignalForPrImpl: async (args) => {
-      seenHeadShas.push(args.headSha);
+      seenHeadShas.push(args.headSha ?? null);
       assert.equal(args.signalKind, "pr_opened");
-      // The opener's identity is not provenance for a later head. An unscoped
-      // lookup would find this stale row, so the resolver must never issue one.
+      // Identity is a stable property of PR origin (WHICH worker opened it), so
+      // the resolver first reads the current-head row, then retries head-independent
+      // when the head moved. Authorization of the moved head is enforced downstream
+      // (verdict pinned to commit_id===head, CI-green, LHA), NOT by refusing identity.
+      // Here NO pr_opened row exists at any head → genuinely unresolved → fail closed.
       return { ok: false, reason: "missing-build-completion-signal" };
     },
     readHeadAttestationChainForPrImpl: async () => {
@@ -1302,7 +1370,7 @@ test('resolveDaemonWorkerIdentityForPr rejects a moved-head pr_opened row', asyn
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, 'missing-build-completion-signal');
-  assert.deepEqual(seenHeadShas, ['live-head-after-remediation']);
+  assert.deepEqual(seenHeadShas, ['live-head-after-remediation', null], 'strict current-head read, then the head-independent retry');
   assert.equal(chainReads, 0, 'flag-off path must not read the attestation chain');
 });
 

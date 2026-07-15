@@ -6195,18 +6195,28 @@ async function resolveDaemonWorkerIdentityForPr({
     }
     return attested;
   }
-  const baseArgs = {
+  // The daemon-clean-merge resolves the worker identity of a PR it is about to
+  // merge (pre-merge). readBuildCompletionSignalForPr defaults signalKind to
+  // 'merged', but the 'merged' signal is only recorded AFTER a PR merges — an
+  // open PR only has the 'pr_opened' signal (2026-07-11 #565: #3473/#3476/#3478
+  // all had a 'pr_opened' row but zero 'merged' rows).
+  //
+  // Identity is a STABLE property of PR origin — WHICH worker/launch opened the
+  // PR — recorded once in the single 'pr_opened' row; it does not change when a
+  // later commit is pushed. Pinning identity resolution to the CURRENT head
+  // (#565 added `headSha: currentHead`) re-introduced the head-move deadlock the
+  // resolver was meant to kill: the 'pr_opened' row stays pinned to the OPEN
+  // head, so after any remediation/CI/rebase commit the current head no longer
+  // matches → worker-identity-unresolved → BOTH merge routes fail-closed → every
+  // remediated PR parks for manual merge (2026-07-14: 571 distinct PRs, ~0
+  // autonomous merges). Fix: try the strict current-head row first (fast path,
+  // unmoved PRs), then fall back to the head-independent 'pr_opened' row and flag
+  // headMovedAfterBuildCompletion. Authorizing the moved head is NOT identity's
+  // job — the verdict pinned to commit_id===head, CI-green-at-head, the live-head
+  // re-read before merge, and the LHA attestation chain police it downstream.
+  const strictArgs = {
     repo,
     prNumber,
-    // The daemon-clean-merge resolves the worker identity of a PR it is about
-    // to merge (pre-merge). readBuildCompletionSignalForPr defaults signalKind
-    // to 'merged', but the 'merged' signal is only recorded AFTER a PR merges —
-    // an open PR only has the 'pr_opened' signal. Querying 'merged' therefore
-    // NEVER resolves for an open worker PR, so every daemon-clean-merge
-    // fail-closed with worker-identity-unresolved (2026-07-11: #3473/#3476/#3478
-    // all had a 'pr_opened' row but zero 'merged' rows). Resolve against the
-    // 'pr_opened' signal for the current head only: PR origin alone is not
-    // sufficient provenance after another commit is pushed to the branch.
     signalKind: 'pr_opened',
     headSha: currentHead,
     hqRoot,
@@ -6215,13 +6225,30 @@ async function resolveDaemonWorkerIdentityForPr({
   };
   let resolved;
   try {
-    resolved = await readBuildCompletionSignalForPrImpl(baseArgs);
+    resolved = await readBuildCompletionSignalForPrImpl(strictArgs);
   } catch (err) {
     return {
       ok: false,
       reason: 'build-completion-read-failed',
       error: String(err?.message || err),
     };
+  }
+  let resolvedBy = 'current-head';
+  if (!resolved?.ok) {
+    // Head-independent retry: resolve the single 'pr_opened' row by PR, ignoring
+    // head_sha (the reader matches any head when headSha is null/empty). Recovers
+    // identity for PRs whose head moved after opening — the common case once a
+    // PR is remediated. Kept distinct via resolvedBy so downstream sees it moved.
+    let byPr;
+    try {
+      byPr = await readBuildCompletionSignalForPrImpl({ ...strictArgs, headSha: null });
+    } catch (err) {
+      byPr = { ok: false, reason: 'build-completion-read-failed', error: String(err?.message || err) };
+    }
+    if (byPr?.ok) {
+      resolved = byPr;
+      resolvedBy = 'pr-opened-head-moved';
+    }
   }
   if (!resolved?.ok) {
     const launchProvenance = await readDaemonWorkerLaunchProvenanceForPr({
@@ -6266,8 +6293,8 @@ async function resolveDaemonWorkerIdentityForPr({
     workerClass,
     rowHeadSha: rowHeadSha || null,
     currentHeadSha: currentHead || null,
-    resolvedBy: 'current-head',
-    headMovedAfterBuildCompletion: false,
+    resolvedBy,
+    headMovedAfterBuildCompletion: Boolean(rowHeadSha && currentHead && rowHeadSha !== currentHead),
   };
 }
 

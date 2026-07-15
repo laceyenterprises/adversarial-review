@@ -6243,7 +6243,11 @@ async function resolveDaemonWorkerIdentityForPr({
     try {
       byPr = await readBuildCompletionSignalForPrImpl({ ...strictArgs, headSha: null });
     } catch (err) {
-      byPr = { ok: false, reason: 'build-completion-read-failed', error: String(err?.message || err) };
+      return {
+        ok: false,
+        reason: 'build-completion-read-failed',
+        error: String(err?.message || err),
+      };
     }
     if (byPr?.ok) {
       resolved = byPr;

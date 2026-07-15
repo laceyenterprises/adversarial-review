@@ -623,6 +623,7 @@ test('daemon clean merge resolves worker identity via head-independent pr_opened
   try {
     const readCalls = [];
     let mergeCalls = 0;
+    let leaseReleased = false;
     const result = await runDaemonCleanMergeAttempt({
       rootDir,
       cfg: {
@@ -671,7 +672,9 @@ test('daemon clean merge resolves worker identity via head-independent pr_opened
           acquiredAt: '2026-07-11T00:00:00.000Z',
         },
       }),
-      releaseMergeLeaseImpl: () => {},
+      releaseMergeLeaseImpl: () => {
+        leaseReleased = true;
+      },
       readBuildCompletionSignalForPrImpl: (args) => {
         readCalls.push(args);
         assert.equal(args.signalKind, 'pr_opened');
@@ -702,6 +705,7 @@ test('daemon clean merge resolves worker identity via head-independent pr_opened
     assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
     assert.equal(result.merged, true);
     assert.ok(mergeCalls >= 1, 'the merge proceeds once identity resolves');
+    assert.equal(leaseReleased, true);
     assert.deepEqual(
       readCalls.map((call) => call.headSha ?? null),
       ['head-after-remediation', null],
@@ -710,6 +714,33 @@ test('daemon clean merge resolves worker identity via head-independent pr_opened
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('resolveDaemonWorkerIdentityForPr surfaces a failed head-independent retry', async () => {
+  const readCalls = [];
+  const identity = await resolveDaemonWorkerIdentityForPr({
+    repo: 'acme/repo',
+    prNumber: 561,
+    currentHeadSha: 'head-after-remediation',
+    currentBranch: 'feature',
+    hqRoot: '/nonexistent-hq-root',
+    rootDir: '/nonexistent-root',
+    env: {},
+    consumeHeadAttestations: false,
+    readBuildCompletionSignalForPrImpl: (args) => {
+      readCalls.push(args.headSha ?? null);
+      if (args.headSha === 'head-after-remediation') {
+        return { ok: false, reason: 'missing-build-completion-signal' };
+      }
+      throw new Error('database unavailable');
+    },
+  });
+  assert.deepEqual(identity, {
+    ok: false,
+    reason: 'build-completion-read-failed',
+    error: 'database unavailable',
+  });
+  assert.deepEqual(readCalls, ['head-after-remediation', null]);
 });
 
 test('resolveDaemonWorkerIdentityForPr resolves a moved head from the head-independent pr_opened row', async () => {

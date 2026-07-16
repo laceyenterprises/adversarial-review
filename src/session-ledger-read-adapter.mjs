@@ -746,16 +746,32 @@ export function readLatestWorkerRunStatusFromLedger({
   if (!resolution.ok) return resolution;
   let queried;
   if (resolution.target.backend === 'sqlite') {
+    const hasWorkerProcesses = sessionLedgerDbHasTables(resolution.target.path, ['worker_processes']);
+    const processSelect = hasWorkerProcesses ? ', wp.pid AS pid, wp.process_status AS process_status' : '';
+    const processJoin = hasWorkerProcesses
+      ? `LEFT JOIN worker_processes wp
+           ON wp.worker_process_id = (
+             SELECT wp_latest.worker_process_id
+               FROM worker_processes wp_latest
+              WHERE wp_latest.launch_request_id = wr.launch_request_id
+              ORDER BY COALESCE(wp_latest.updated_at, wp_latest.exited_at, wp_latest.started_at, wp_latest.created_at, '') DESC,
+                       COALESCE(wp_latest.started_at, wp_latest.created_at, '') DESC,
+                       wp_latest.worker_process_id DESC
+              LIMIT 1
+           )`
+      : '';
     queried = querySqliteRows(
       resolution.target,
-      `SELECT run_id, launch_request_id, status, updated_at, ended_at, started_at
-         FROM worker_runs
-        WHERE launch_request_id = @launchRequestId
-        ORDER BY COALESCE(updated_at, ended_at, started_at, '') DESC,
-                 COALESCE(ended_at, started_at, '') DESC,
-                 COALESCE(started_at, '') DESC,
-                 run_id DESC,
-                 launch_request_id DESC
+      `SELECT wr.run_id, wr.launch_request_id, wr.status, wr.updated_at, wr.ended_at, wr.started_at
+              ${processSelect}
+         FROM worker_runs wr
+         ${processJoin}
+        WHERE wr.launch_request_id = @launchRequestId
+        ORDER BY COALESCE(wr.updated_at, wr.ended_at, wr.started_at, '') DESC,
+                 COALESCE(wr.ended_at, wr.started_at, '') DESC,
+                 COALESCE(wr.started_at, '') DESC,
+                 wr.run_id DESC,
+                 wr.launch_request_id DESC
         LIMIT 1`,
       { launchRequestId: normalizedLaunchRequestId },
     );
@@ -768,17 +784,29 @@ export function readLatestWorkerRunStatusFromLedger({
           'status', status,
           'updated_at', updated_at,
           'ended_at', ended_at,
-          'started_at', started_at
+          'started_at', started_at,
+          'pid', pid,
+          'process_status', process_status
         )
          FROM (
-           SELECT run_id, launch_request_id, status, updated_at, ended_at, started_at
-             FROM worker_runs
-            WHERE launch_request_id = :'lrq'
-            ORDER BY COALESCE(updated_at::text, ended_at::text, started_at::text, '') DESC,
-                     COALESCE(ended_at::text, started_at::text, '') DESC,
-                     COALESCE(started_at::text, '') DESC,
-                     run_id DESC,
-                     launch_request_id DESC
+           SELECT wr.run_id, wr.launch_request_id, wr.status, wr.updated_at, wr.ended_at, wr.started_at,
+                  wp.pid, wp.process_status
+             FROM worker_runs wr
+             LEFT JOIN LATERAL (
+               SELECT wp_latest.pid, wp_latest.process_status
+                 FROM worker_processes wp_latest
+                WHERE wp_latest.launch_request_id = wr.launch_request_id
+                ORDER BY COALESCE(wp_latest.updated_at::text, wp_latest.exited_at::text, wp_latest.started_at::text, wp_latest.created_at::text, '') DESC,
+                         COALESCE(wp_latest.started_at::text, wp_latest.created_at::text, '') DESC,
+                         wp_latest.worker_process_id DESC
+                LIMIT 1
+             ) wp ON true
+            WHERE wr.launch_request_id = :'lrq'
+            ORDER BY COALESCE(wr.updated_at::text, wr.ended_at::text, wr.started_at::text, '') DESC,
+                     COALESCE(wr.ended_at::text, wr.started_at::text, '') DESC,
+                     COALESCE(wr.started_at::text, '') DESC,
+                     wr.run_id DESC,
+                     wr.launch_request_id DESC
             LIMIT 1
          ) latest_worker_run`,
       {

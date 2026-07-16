@@ -382,6 +382,13 @@ test('maybeDispatchAmaCloser records confirmed hammer launches in the retry-cap 
 
   assert.equal(result.dispatched, true);
   assert.equal(deps.execCalls.length, 1);
+  assert.deepEqual(
+    deps.execCalls[0].args.slice(
+      deps.execCalls[0].args.indexOf('--worker-id'),
+      deps.execCalls[0].args.indexOf('--worker-id') + 2,
+    ),
+    ['--worker-id', `hammer-ama-pr-${PR_NUMBER}`],
+  );
   const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
   assert.equal(ledger.jobKey, REVIEWED_HEAD);
   assert.equal(ledger.attemptCount, 1);

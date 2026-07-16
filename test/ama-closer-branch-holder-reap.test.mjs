@@ -56,6 +56,30 @@ test('does not reap paths outside <hqRoot>/workers (scope guard)', () => {
   assert.deepEqual(paths, [], `no path outside hqRoot/workers should be reaped, got ${JSON.stringify(paths)}`);
 });
 
+test('detects active worker_runs rows whose recorded process is dead', () => {
+  const calls = [];
+  const processKillImpl = (pid, signal) => {
+    calls.push({ pid, signal });
+    const err = new Error('missing');
+    err.code = 'ESRCH';
+    throw err;
+  };
+
+  assert.equal(
+    __testables__.isPhantomActiveWorkerRun(
+      { status: 'running', pid: 4242 },
+      processKillImpl,
+    ),
+    true,
+  );
+  assert.deepEqual(calls, [{ pid: 4242, signal: 0 }]);
+});
+
+test('does not classify terminal or pid-less worker_runs rows as phantom live hammers', () => {
+  assert.equal(__testables__.isPhantomActiveWorkerRun({ status: 'failed', pid: 4242 }), false);
+  assert.equal(__testables__.isPhantomActiveWorkerRun({ status: 'running', pid: null }), false);
+});
+
 test('does not reap nested worker paths under hqRoot', () => {
   const err = {
     stderr: [

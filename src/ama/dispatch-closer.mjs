@@ -634,6 +634,13 @@ function isTerminalBranchHolderWorkerRunStatus(status) {
   return Boolean(normalized) && BRANCH_HOLDER_TERMINAL_WORKER_RUN_STATUSES.has(normalized);
 }
 
+function isPhantomActiveWorkerRun(row, processKillImpl = process.kill) {
+  const status = normalizeWorkerRunStatus(row?.status);
+  if (!AMA_CLOSER_ACTIVE_STATUSES.has(status)) return false;
+  const pid = row?.pid ?? row?.worker_process_pid;
+  return isPidAlive(pid, processKillImpl) === false;
+}
+
 function isSamePrHammerCloserWorkerId(workerId, prNumber) {
   return String(workerId || '') === hammerCloserWorkerId(prNumber);
 }
@@ -1815,6 +1822,7 @@ export const __testables__ = Object.freeze({
   teardownSamePrHammerHolder,
   resolveTerminalCodingBranchHolder,
   isTerminalBranchHolderWorkerRunStatus,
+  isPhantomActiveWorkerRun,
   defaultAmaLivePrProbe,
   normalizeAmaLivePrProbeResult,
   fetchMergeCommitShaBestEffort,
@@ -2675,8 +2683,53 @@ export async function maybeDispatchAmaCloser({
       execFileImpl,
       env: process.env,
     });
-    const status = statusProbe?.status || null;
+    let status = statusProbe?.status || null;
     existingDispatchStatus = status;
+    let phantomActiveWorkerRun = null;
+    if (AMA_CLOSER_ACTIVE_STATUSES.has(status)) {
+      const workerRunProbe = await readLatestWorkerRunStatusFromLedger({
+        launchRequestId: existingRecord.launchRequestId,
+        ledgerTarget: dispatchContext.ledgerTarget || null,
+        ledgerDbPath: dispatchContext.ledgerDbPath || null,
+        env: process.env,
+        hqRoot,
+        rootDir,
+      });
+      if (
+        workerRunProbe?.ok
+        && isPhantomActiveWorkerRun(workerRunProbe.row, processKillImpl)
+      ) {
+        const originalStatus = status;
+        phantomActiveWorkerRun = workerRunProbe.row;
+        status = 'failed';
+        existingDispatchStatus = status;
+        finalizeAmaCloserLeaseBestEffort({
+          rootDir,
+          leaseIdentity: existingRecordLeaseIdentity,
+          terminalOutcome: existingDispatchHeadAdvanced ? 'superseded' : 'failed-without-merge',
+          now: dispatchContext.dispatchedAt,
+          logger,
+          repo,
+          prNumber,
+        });
+        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+          ...(current || existingRecord),
+          lastObservedStatus: originalStatus,
+          lastObservedAt: dispatchContext.dispatchedAt,
+          lastError: `phantom-active-worker-run-pid-${phantomActiveWorkerRun.pid}`,
+        }));
+        logAmaCloserDispatchEvent(logger, 'ama_closer.phantom_active_worker_reaped', {
+          repo,
+          prNumber,
+          headSha: existingRecordLeaseIdentity.headSha,
+          launchRequestId: existingRecord.launchRequestId,
+          dispatchId: existingRecord.dispatchId || null,
+          workerRunId: phantomActiveWorkerRun.run_id || null,
+          workerRunStatus: phantomActiveWorkerRun.status || null,
+          pid: phantomActiveWorkerRun.pid || null,
+        }, { level: 'warn' });
+      }
+    }
     if (AMA_CLOSER_ACTIVE_STATUSES.has(status) || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
       if (
         existingDispatchHeadAdvanced &&
@@ -3515,6 +3568,7 @@ export async function maybeDispatchAmaCloser({
   //     accounting separate from the merge-agent stream.
   //   - `--ticket AMA-PR-<n>` so the launch is traceable per-PR.
   const repoBasename = repo.split('/')[1] || repo;
+  const workerId = workerClass === 'hammer' ? hammerCloserWorkerId(prNumber) : null;
   const args = [
     'dispatch',
     '--worker-class', dispatchWorkerClass,
@@ -3528,6 +3582,9 @@ export async function maybeDispatchAmaCloser({
     '--prompt', promptPath,
     '--root', hqRoot,
   ];
+  if (workerId) {
+    args.push('--worker-id', workerId);
+  }
   if (
     repoBasename !== AGENT_OS_TOOLING_REPO
     && repoBasename !== ADVERSARIAL_REVIEW_REPO

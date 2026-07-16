@@ -102,6 +102,23 @@ roles:
       # to 0 to disable the hammer path; daemon clean merges keep their own
       # retry budget.
       hammer_lifetime_ceiling: 6
+      lha:
+        # LHA-06 cutover switch (schema default: true). Explicitly held FALSE:
+        # the CONSUMING side (this daemon requiring a valid `produced` head
+        # attestation at the live head to resolve worker identity) must not be
+        # enabled until the PRODUCING side exists. As of 2026-07-16 the ledger
+        # has 0 `produced` head-attestation rows ever recorded (only reviewer
+        # `reviewed` rows) — workers do not emit produced attestations, so
+        # consuming them fail-closes EVERY worker PR with
+        # worker-identity-unresolved and zeroes autonomous merge fleet-wide. The
+        # daemon still binds the head downstream (verdict commit_id===head,
+        # CI-green-at-head, live-head re-read before the merge click) and
+        # resolves identity from the pr_opened build-completion ledger row.
+        # Re-enable ONLY after worker head-attestation production is wired and
+        # verified (produced rows appear at PR-open head), with the infra-degrade
+        # safety net (adversarial-review #604) merged so an attestation-infra
+        # outage degrades to pr_opened instead of re-parking the fleet.
+        consume_attestations: false
   merge-agent:
     fallback_path: none
   claude-reviewer-lacey:

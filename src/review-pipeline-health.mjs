@@ -1110,6 +1110,10 @@ function tailRecentLines(path, maxBytes = 64 * 1024) {
   };
 }
 
+function dispatchSpawnSuccessPattern() {
+  return /(spawn(?:ed)?[\s\S]{0,120}(hammer|closer|ama|merge-agent)[\s\S]{0,120}(success|succeeded|ok|complete|completed)|(hammer|closer|ama|merge-agent)[\s\S]{0,120}spawn(?:ed)?[\s\S]{0,120}(success|succeeded|ok|complete|completed))/i;
+}
+
 function dispatchSpawnFailurePattern() {
   return /(entitlement-auth|rate[- ]?limit|403|exit\s+65|spawn[\s\S]{0,120}(hammer|closer|ama|merge-agent)|(hammer|closer|ama|merge-agent)[\s\S]{0,120}(spawn|failed|exit))/i;
 }
@@ -1118,20 +1122,32 @@ function summarizeDispatchSpawnFailures(hqRoot, { nowMs, config }) {
   const logPath = join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
   const log = tailRecentLines(logPath);
   const pattern = dispatchSpawnFailurePattern();
+  const successPattern = dispatchSpawnSuccessPattern();
   const matches = [];
+  let successAfterLastFailure = false;
   if (log.exists) {
     for (const line of log.lines) {
-      if (!pattern.test(line)) continue;
-      matches.push(line.slice(0, 800));
+      if (matches.length > 0 && successPattern.test(line)) {
+        successAfterLastFailure = true;
+      } else if (pattern.test(line)) {
+        matches.push(line.slice(0, 800));
+        successAfterLastFailure = false;
+      }
     }
   }
   const logAgeMs = log.mtimeMs === null ? null : Math.max(0, nowMs - log.mtimeMs);
+  const activeMatches = logAgeMs !== null
+    && logAgeMs <= config.dispatchSpawnFailureWindowMs
+    && !successAfterLastFailure
+    ? matches.slice(-20)
+    : [];
   return {
     logPath,
     logExists: log.exists,
     logAgeMs,
     windowMs: config.dispatchSpawnFailureWindowMs,
-    matches: logAgeMs !== null && logAgeMs <= config.dispatchSpawnFailureWindowMs ? matches.slice(-20) : [],
+    successAfterLastFailure,
+    matches: activeMatches,
   };
 }
 

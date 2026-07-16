@@ -2697,6 +2697,9 @@ export async function maybeDispatchAmaCloser({
       });
       if (
         workerRunProbe?.ok
+        // Keep the caller-injected probe: maybeDispatchAmaCloser destructures
+        // processKillImpl above so tests and constrained runtimes do not have
+        // to signal the real process table while classifying phantom runs.
         && isPhantomActiveWorkerRun(workerRunProbe.row, processKillImpl)
       ) {
         const originalStatus = status;
@@ -3568,6 +3571,9 @@ export async function maybeDispatchAmaCloser({
   //     accounting separate from the merge-agent stream.
   //   - `--ticket AMA-PR-<n>` so the launch is traceable per-PR.
   const repoBasename = repo.split('/')[1] || repo;
+  // The stable worker identity belongs to the logical closer class. A quota
+  // fallback changes only the physical harness (dispatchWorkerClass), so it
+  // must not make a hammer retry lose its deterministic worker/worktree id.
   const workerId = workerClass === 'hammer' ? hammerCloserWorkerId(prNumber) : null;
   const args = [
     'dispatch',

@@ -1509,25 +1509,65 @@ test('rollback flag restores current-head build-completion fallback when produce
   assert.equal(buildCompletionReads, 1);
 });
 
-test('LHA consumption fails closed on chain read errors instead of downgrading', async () => {
+test('LHA consumption degrades to pr_opened on an attestation-INFRA (chain read) failure', async () => {
+  // HAMMER-CLOSE-MODEL (2026-07-16): an unprovisioned/short LHA HMAC key makes
+  // `hq attest chain` raise HCPHeadAttestationConfigurationError -> the chain
+  // read fails. Previously that parked the PR worker-identity-unresolved and
+  // zeroed autonomous merge fleet-wide (2026-07-15). It must now DEGRADE to the
+  // pr_opened ledger identity so the PR still lands, stamped + logged.
   let buildCompletionReads = 0;
+  const warnings = [];
   const result = await resolveDaemonWorkerIdentityForPr({
     repo: 'agent-os',
     prNumber: 3491,
     currentHeadSha: 'live-head',
     consumeHeadAttestations: true,
+    logger: { warn: (m) => warnings.push(String(m)), log() {} },
     readHeadAttestationChainForPrImpl: async () => {
       throw Object.assign(new Error('hq attest chain failed'), { code: 'ENOENT' });
     },
     readBuildCompletionSignalForPrImpl: async () => {
       buildCompletionReads += 1;
-      return { ok: true, row: {} };
+      return {
+        ok: true,
+        row: {
+          launch_request_id: 'lrq_degrade_recover',
+          worker_class: 'codex',
+          head_sha: 'live-head',
+        },
+      };
     },
   });
 
+  assert.equal(result.ok, true);
+  assert.equal(result.launchRequestId, 'lrq_degrade_recover');
+  assert.equal(result.workerClass, 'codex');
+  assert.equal(result.attestationDegraded, true);
+  assert.equal(result.attestationDegradeReason, 'head-attestation-chain-read-failed');
+  assert.equal(buildCompletionReads, 1, 'an attestation-infra failure MUST reach the pr_opened path');
+  assert.match(warnings.join('\n'), /attestation_degraded_to_pr_opened/);
+});
+
+test('LHA infra degrade cannot manufacture identity: fails closed (stamped) when no pr_opened row exists', async () => {
+  // The degrade is not a bypass. With the attestation layer down AND no ledger
+  // row, the resolver still fails closed — but records the degrade attempt so a
+  // systemic version is observable (GPR-01 Sentinel aggregates the reason).
+  const result = await resolveDaemonWorkerIdentityForPr({
+    repo: 'agent-os',
+    prNumber: 3491,
+    currentHeadSha: 'live-head',
+    currentBranch: '', // launch-provenance short-circuits on empty branch (hermetic)
+    consumeHeadAttestations: true,
+    logger: { warn() {}, log() {} },
+    readHeadAttestationChainForPrImpl: async () => {
+      throw Object.assign(new Error('hq attest chain failed'), { code: 'ENOENT' });
+    },
+    readBuildCompletionSignalForPrImpl: async () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+  });
+
   assert.equal(result.ok, false);
-  assert.equal(result.reason, 'head-attestation-chain-read-failed');
-  assert.equal(buildCompletionReads, 0, 'hard attestation errors must not reach legacy provenance');
+  assert.equal(result.attestationDegraded, true);
+  assert.equal(result.attestationDegradeReason, 'head-attestation-chain-read-failed');
 });
 
 test('LHA consumption fails closed on malformed produced provenance', async () => {

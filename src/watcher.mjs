@@ -6050,6 +6050,7 @@ async function runDaemonCleanMergeAttempt({
     readBuildCompletionSignalForPrImpl,
     readHeadAttestationChainForPrImpl,
     consumeHeadAttestations: cfg?.lha?.consumeAttestations === true,
+    logger,
   });
   if (!workerIdentity.ok) {
     return {
@@ -6157,6 +6158,15 @@ async function runDaemonCleanMergeAttempt({
   });
 }
 
+// Attestation-resolve failure reasons that mean the LHA layer is structurally
+// UNABLE to function (infra down) rather than healthily refusing a head. Only
+// these degrade daemon identity to the pr_opened path; every other reason (no
+// valid produced row, malformed attestation) fails closed to preserve the
+// head-binding security property. `head-attestation-chain-read-failed` is what
+// an unprovisioned/short HMAC key produces (the `hq attest chain` subprocess
+// raises HCPHeadAttestationConfigurationError) — the 2026-07-15 outage class.
+const ATTESTATION_INFRA_FAILURE_REASONS = new Set(['head-attestation-chain-read-failed']);
+
 async function resolveDaemonWorkerIdentityForPr({
   repo,
   prNumber,
@@ -6168,11 +6178,18 @@ async function resolveDaemonWorkerIdentityForPr({
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
   readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr,
   consumeHeadAttestations = null,
+  logger = console,
 } = {}) {
   const currentHead = String(currentHeadSha || '').trim();
   if (!currentHead) {
     return { ok: false, reason: 'missing-current-head-sha' };
   }
+  // Set when attestation consumption is ON but the attestation layer could not
+  // confirm identity and we degraded to the pr_opened path (see the block
+  // below). Spread into every downstream return so the disposition/telemetry
+  // records the degrade; null on the healthy path.
+  let attestationDegrade = null;
+  const stamp = (result) => (attestationDegrade ? { ...result, ...attestationDegrade } : result);
   // LHA-06 remediation (gemini blocking): consume ONLY when the caller resolved
   // the flag from the canonical AgentOSConfig (which layers YAML under env). The
   // removed env-only fallback returned `true` on an unset env var, silently
@@ -6193,7 +6210,46 @@ async function resolveDaemonWorkerIdentityForPr({
     if (attested.ok) {
       return attested;
     }
-    return attested;
+    // Durable degrade (2026-07-16, HAMMER-CLOSE-MODEL): degrade to the pr_opened
+    // path ONLY when the attestation layer is structurally UNABLE to function —
+    // an infra failure — never when it is healthy and actively refusing this
+    // head. The discriminator is the reason:
+    //   * `head-attestation-chain-read-failed` — `hq attest chain` errored. This
+    //     is exactly what an unprovisioned/short LHA HMAC key produces:
+    //     attest_verify -> _normalize_attestation_signing_key raises
+    //     HCPHeadAttestationConfigurationError (re-raised past the generic
+    //     catch), so the --json chain subprocess exits non-zero. It also covers
+    //     a locked/broken ledger read. This is the class that zeroed autonomous
+    //     merge fleet-wide on 2026-07-15 when the key went unprovisioned.
+    //   * `missing-produced-head-attestation` / `missing-launch-request-id` /
+    //     `missing-worker-class` — the chain READ fine but has no valid produced
+    //     row at head (a worker that genuinely did not attest, an attacker
+    //     suppressing one, or a signing-key MISMATCH that fails verification).
+    //     That is the security signal LHA exists to enforce; degrading here would
+    //     defeat the crypto, so we FAIL CLOSED (return the not-ok as before).
+    // Attestation is a HEAD-BINDING enhancement layered on the pr_opened ledger
+    // identity, not the sole identity authority — so on an infra failure we fall
+    // through to pr_opened rather than parking. This can never manufacture an
+    // identity absent from the ledger: if pr_opened ALSO fails to resolve, the
+    // resolver still returns not-ok (fail closed). Head-binding security holds
+    // downstream regardless — the verdict is pinned to commit_id===head, CI is
+    // green at head, and the live head is re-read before the merge click.
+    // Stamped + logged so a PERSISTENT degrade is an operator signal to
+    // reprovision the key (GPR-01 Sentinel can aggregate on the reason).
+    if (!ATTESTATION_INFRA_FAILURE_REASONS.has(attested.reason)) {
+      return attested;
+    }
+    attestationDegrade = {
+      attestationDegraded: true,
+      attestationDegradeReason: attested.reason || 'attestation-unresolved',
+    };
+    logger?.warn?.(JSON.stringify({
+      event: 'ama.identity.attestation_degraded_to_pr_opened',
+      repo: String(repo || ''),
+      pr: prNumber,
+      head: currentHead,
+      attestationReason: attestationDegrade.attestationDegradeReason,
+    }));
   }
   // The daemon-clean-merge resolves the worker identity of a PR it is about to
   // merge (pre-merge). readBuildCompletionSignalForPr defaults signalKind to
@@ -6227,11 +6283,11 @@ async function resolveDaemonWorkerIdentityForPr({
   try {
     resolved = await readBuildCompletionSignalForPrImpl(strictArgs);
   } catch (err) {
-    return {
+    return stamp({
       ok: false,
       reason: 'build-completion-read-failed',
       error: String(err?.message || err),
-    };
+    });
   }
   let resolvedBy = 'current-head';
   if (!resolved?.ok) {
@@ -6263,7 +6319,7 @@ async function resolveDaemonWorkerIdentityForPr({
       hqRoot,
     });
     if (launchProvenance.ok) {
-      return {
+      return stamp({
         ok: true,
         launchRequestId: launchProvenance.launchRequestId,
         workerClass: launchProvenance.workerClass,
@@ -6273,25 +6329,25 @@ async function resolveDaemonWorkerIdentityForPr({
         headMovedAfterBuildCompletion: false,
         buildCompletionReason: resolved?.reason || 'missing-build-completion-signal',
         launchProvenancePath: launchProvenance.path,
-      };
+      });
     }
-    return {
+    return stamp({
       ok: false,
       reason: resolved?.reason || 'missing-build-completion-signal',
       launchProvenanceReason: launchProvenance.reason,
-    };
+    });
   }
   const launchRequestId = String(resolved.row?.launch_request_id ?? resolved.row?.launchRequestId ?? '').trim();
   const workerClass = String(resolved.row?.worker_class ?? resolved.row?.workerClass ?? '').trim();
   if (!launchRequestId || !workerClass) {
-    return {
+    return stamp({
       ok: false,
       reason: !launchRequestId ? 'missing-launch-request-id' : 'missing-worker-class',
       rowHeadSha: resolved.row?.head_sha ?? resolved.row?.headSha ?? null,
-    };
+    });
   }
   const rowHeadSha = String(resolved.row?.head_sha ?? resolved.row?.headSha ?? '').trim();
-  return {
+  return stamp({
     ok: true,
     launchRequestId,
     workerClass,
@@ -6299,7 +6355,7 @@ async function resolveDaemonWorkerIdentityForPr({
     currentHeadSha: currentHead || null,
     resolvedBy,
     headMovedAfterBuildCompletion: Boolean(rowHeadSha && currentHead && rowHeadSha !== currentHead),
-  };
+  });
 }
 
 async function readHeadAttestationChainForPr({

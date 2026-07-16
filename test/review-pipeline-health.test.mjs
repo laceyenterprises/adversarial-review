@@ -8,6 +8,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -667,6 +668,47 @@ test('host checks are opt-in and report launchd, dispatch-log, and dag-autowalk 
   assert.ok(findingCodes(enabled).includes('review:dag_autowalk_launchd_unhealthy'));
   assert.equal(enabled.dispatchSpawnFailures.matches.length, 1);
   assert.equal(enabled.dagAutowalk.lastExitCode, 65);
+});
+
+test('dispatch spawn failure log lines are suppressed when stale or self-recovered', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(
+    dispatchLog,
+    [
+      'hammer spawn failed: entitlement-auth 403 exit 65',
+      'hammer spawned successfully after retry',
+      '',
+    ].join('\n'),
+  );
+  const execFileSyncImpl = () => 'state = running\nlast exit code = 0\n';
+
+  const recovered = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+  assert.ok(!findingCodes(recovered).includes('review:dispatch_spawn_failures'));
+  assert.equal(recovered.dispatchSpawnFailures.successAfterLastFailure, true);
+
+  const oldNow = new Date(Date.parse(NOW) + 2 * 60 * 60 * 1000).toISOString();
+  writeFileSync(dispatchLog, 'hammer spawn failed: entitlement-auth 403 exit 65\n');
+  const oldMtime = new Date(Date.parse(NOW));
+  utimesSync(dispatchLog, oldMtime, oldMtime);
+  const stale = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(oldNow),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    config: { dispatchSpawnFailureWindowMs: 1 },
+    execFileSyncImpl,
+  });
+  assert.ok(!findingCodes(stale).includes('review:dispatch_spawn_failures'));
+  assert.equal(stale.dispatchSpawnFailures.matches.length, 0);
 });
 
 test('collector surfaces active provider overload backoffs and quota holds', () => {

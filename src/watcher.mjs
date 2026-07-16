@@ -282,6 +282,18 @@ const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 
+// The adversarial-review config module. The node watcher normally reads config
+// from env vars exported by the shell `agent_os_config_export`, but that shell
+// exporter mis-resolves nested overrides (2026-07-16: it emits
+// AGENT_OS_CFG_..._LHA_CONSUME_ATTESTATIONS=true even when this file sets it
+// false, so the merge-authority daemon kept enforcing head-attestation
+// consumption and parked every worker PR worker-identity-unresolved). Loading
+// this file as a config MODULE makes the authoritative, reviewed config.yaml win
+// for the keys it sets (verified: consume_attestations flips to false while
+// env-sourced keys like `enabled` are preserved) — the right posture for the
+// security-critical merge-authority read.
+const WATCHER_MERGE_AUTHORITY_CONFIG_MODULES = Object.freeze([join(ROOT, 'config.yaml')]);
+
 function writeReviewerTokenUsageArtifactBestEffort(options, {
   repo,
   prNumber,
@@ -6703,7 +6715,10 @@ async function maybeDispatchAmaClosureFor({
   let cfg;
   let orchestrationMode;
   try {
-    const loadedConfig = loadConfigImpl();
+    // Load the adversarial config.yaml as a module so merge-authority values
+    // (notably lha.consume_attestations, which gates autonomous merge) come from
+    // the reviewed file, not the shell env export that mis-resolves nested keys.
+    const loadedConfig = loadConfigImpl({ modulePaths: WATCHER_MERGE_AUTHORITY_CONFIG_MODULES });
     cfg = loadedConfig.getMergeAuthorityConfig();
     orchestrationMode = resolveOrchestrationMode({
       loadedConfig,

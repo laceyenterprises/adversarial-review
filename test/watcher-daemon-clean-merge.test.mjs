@@ -131,6 +131,37 @@ test('daemon merges the clean tick → skips closer dispatch (no agent spawn)', 
   }
 });
 
+test('daemon loads merge-authority config with the adversarial config.yaml module (not shell-env-only)', async () => {
+  // Regression for the 2026-07-16 outage: the shell agent_os_config_export
+  // mis-resolves nested lha.consume_attestations (emits true even when
+  // config.yaml sets false), so the daemon must read merge-authority config
+  // from the reviewed config.yaml MODULE, not from the shell env alone.
+  const rootDir = tempRoot();
+  try {
+    let receivedArgs;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      loadConfigImpl: (args) => { receivedArgs = args; return loadAmaEnabledConfig(); },
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.MERGED,
+        reason: 'merged',
+        merged: true,
+        attempts: 1,
+      }),
+      maybeDispatchAmaCloserImpl: async () => ({ dispatched: true }),
+    });
+
+    assert.ok(receivedArgs?.modulePaths?.length, 'loadConfigImpl must be called with modulePaths');
+    assert.ok(
+      receivedArgs.modulePaths.some((p) => String(p).endsWith('/config.yaml')),
+      'modulePaths must include the adversarial config.yaml module',
+    );
+    assert.equal(result.amaEnabled, true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('daemon fail-closed → skips closer dispatch; no hammer from the retry path', async () => {
   const rootDir = tempRoot();
   try {

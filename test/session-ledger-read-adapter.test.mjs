@@ -284,6 +284,53 @@ test('readLatestWorkerRunStatusFromLedger breaks timestamp ties deterministicall
   assert.equal(result.row.status, 'succeeded');
 });
 
+test('readLatestWorkerRunStatusFromLedger includes the latest worker_process pid when available', () => {
+  const rootDir = tempRoot();
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  createSessionLedgerDb(ledgerDb, { runtimeSessions: [], workerRuns: [] });
+  const db = new Database(ledgerDb);
+  db.exec(`
+    CREATE TABLE worker_processes (
+      worker_process_id INTEGER PRIMARY KEY,
+      launch_request_id TEXT,
+      pid INTEGER,
+      process_status TEXT,
+      started_at TEXT,
+      exited_at TEXT,
+      created_at TEXT,
+      updated_at TEXT
+    );
+  `);
+  db.prepare(
+    `INSERT INTO worker_runs (
+       run_id, launch_request_id, session_id, status, token_usage_input, token_usage_output,
+       token_usage_cost_usd, token_usage_source, started_at, ended_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run('wr_live', 'lrq_pid', 'rs_pid', 'running', 1, 2, 0.1, 'session-ledger', '2026-06-04T00:00:00.000Z', null, '2026-06-04T00:03:00.000Z');
+  db.prepare(
+    `INSERT INTO worker_processes (
+       worker_process_id, launch_request_id, pid, process_status, started_at, exited_at, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(1, 'lrq_pid', 111, 'exited', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z', '2026-06-04T00:00:00.000Z', '2026-06-04T00:01:00.000Z');
+  db.prepare(
+    `INSERT INTO worker_processes (
+       worker_process_id, launch_request_id, pid, process_status, started_at, exited_at, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(2, 'lrq_pid', 4242, 'running', '2026-06-04T00:02:00.000Z', null, '2026-06-04T00:02:00.000Z', '2026-06-04T00:04:00.000Z');
+  db.close();
+
+  const result = readLatestWorkerRunStatusFromLedger({
+    launchRequestId: 'lrq_pid',
+    ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+    env: HERMETIC_CONFIG_ENV,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.row.status, 'running');
+  assert.equal(result.row.pid, 4242);
+  assert.equal(result.row.process_status, 'running');
+});
+
 test('readLatestWorkerRunStatusFromLedger uses the canonical postgres reader path with deterministic ordering', () => {
   const result = readLatestWorkerRunStatusFromLedger({
     launchRequestId: 'lrq_pg',
@@ -296,8 +343,10 @@ test('readLatestWorkerRunStatusFromLedger uses the canonical postgres reader pat
       const sql = String(options.input);
       assert.match(sql, /\\set lrq 'lrq_pg'/);
       assert.match(sql, /FROM worker_runs/);
-      assert.match(sql, /WHERE launch_request_id = :'lrq'/);
-      assert.match(sql, /ORDER BY COALESCE\(updated_at::text, ended_at::text, started_at::text, ''\) DESC/);
+      assert.match(sql, /WHERE wr\.launch_request_id = :'lrq'/);
+      assert.match(sql, /LEFT JOIN LATERAL/);
+      assert.match(sql, /wp_latest\.pid/);
+      assert.match(sql, /ORDER BY COALESCE\(wr\.updated_at::text, wr\.ended_at::text, wr\.started_at::text, ''\) DESC/);
       assert.equal(options.timeout, 30_000);
       assert.equal(options.killSignal, 'SIGKILL');
       return {

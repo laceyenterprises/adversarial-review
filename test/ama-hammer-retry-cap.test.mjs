@@ -382,6 +382,13 @@ test('maybeDispatchAmaCloser records confirmed hammer launches in the retry-cap 
 
   assert.equal(result.dispatched, true);
   assert.equal(deps.execCalls.length, 1);
+  assert.deepEqual(
+    deps.execCalls[0].args.slice(
+      deps.execCalls[0].args.indexOf('--worker-id'),
+      deps.execCalls[0].args.indexOf('--worker-id') + 2,
+    ),
+    ['--worker-id', `hammer-ama-pr-${PR_NUMBER}`],
+  );
   const ledger = readHammerRetryCapLedger(rootDir, { repo: REPO, prNumber: PR_NUMBER });
   assert.equal(ledger.jobKey, REVIEWED_HEAD);
   assert.equal(ledger.attemptCount, 1);
@@ -1009,6 +1016,7 @@ test('same-head terminal HAM remediation parks for operator on head mismatch wit
 
 test('terminal old-head hammer dispatch is superseded when remediation advanced the head', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-lease-head-advanced-'));
+  let launchedArgs = null;
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   acquireAmaCloserLease({
     rootDir,
@@ -1061,6 +1069,7 @@ test('terminal old-head hammer dispatch is superseded when remediation advanced 
         if (args[0] === 'dispatch' && args[1] === 'status') {
           return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
         }
+        launchedArgs = args;
         return { stdout: JSON.stringify({ dispatchId: 'dispatch_new_head', launchRequestId: 'lrq_new_head' }), stderr: '' };
       },
     }),
@@ -1068,6 +1077,10 @@ test('terminal old-head hammer dispatch is superseded when remediation advanced 
 
   assert.equal(result.dispatched, true);
   assert.equal(result.launchRequestId, 'lrq_new_head');
+  assert.deepEqual(
+    launchedArgs.slice(launchedArgs.indexOf('--worker-id'), launchedArgs.indexOf('--worker-id') + 2),
+    ['--worker-id', `hammer-ama-pr-${PR_NUMBER}`],
+  );
   const oldLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
   assert.equal(oldLease.status, AMA_CLOSER_LEASE_STATUS.TERMINAL);
   assert.equal(oldLease.terminalOutcome, 'superseded');

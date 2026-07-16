@@ -42,6 +42,11 @@ scans.
 
 ## Mandate
 
+0. If this PR already has a HAM-authored remediation commit, matching
+   provenance trailers, an audit comment, and a validated current head, do not
+   restart remediation. Refresh the live PR head, reacquire the merge lease,
+   rerun only the required fail-closed live-head validation described below, and
+   complete the merge/closing-comment sequence idempotently.
 1. Read the FINAL adversarial review on `<<REVIEWED_SHA>>`. These are the
    freshest findings.
 2. Remediate ALL final comments, blocking and non-blocking. Make real fixes for

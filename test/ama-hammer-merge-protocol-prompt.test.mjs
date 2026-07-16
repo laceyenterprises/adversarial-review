@@ -9,6 +9,8 @@ const REPO_ROOT = resolve(__dirname, '..');
 const HAMMER_PROMPT = readFileSync(join(REPO_ROOT, 'templates', 'hammer-prompt.md'), 'utf8');
 
 test('hammer prompt enforces the PSH-05 lease guarded local and remote CI merge protocol', () => {
+  assert.match(HAMMER_PROMPT, /do not\s+restart remediation/i);
+  assert.match(HAMMER_PROMPT, /complete the merge\/closing-comment sequence idempotently/);
   assert.match(HAMMER_PROMPT, /final rebase→local-CI→remote-CI→merge window/);
   assert.match(HAMMER_PROMPT, /HAM_MERGE_LEASE_WAIT_SECONDS="\$\{HAM_MERGE_LEASE_WAIT_SECONDS:-900\}"/);
   assert.match(HAMMER_PROMPT, /trap ham_release_merge_lease EXIT/);

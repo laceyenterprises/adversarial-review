@@ -86,9 +86,9 @@ import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import {
   createReviewerRuntimeAdapterByName,
   createReviewerRuntimeAdapterForDomain,
-  loadDomainConfig,
   recoverReviewerRunRecords,
 } from './adapters/reviewer-runtime/index.mjs';
+import { loadDomainConfig } from './domain-config.mjs';
 import { loadDomainRegistry } from './domain-registry.mjs';
 import {
   readReviewerRunRecord,
@@ -344,6 +344,7 @@ let reviewerRuntimeAdapter = createReviewerRuntimeAdapterForDomain({
   logger: console,
 });
 let reviewerRuntimeAdapterCache = null;
+const secondaryReviewerRuntimeAdapterCache = new Map();
 let lastKnownReviewerOrchestrationMode = 'native';
 let activeReviewerRuntimeOrchestrationMode = 'native';
 let reviewerRuntimeConfigFailureSignal = { key: null, count: 0 };
@@ -527,24 +528,34 @@ function reviewerRuntimeAdapterForRunRecord(record = null, {
 
 // ARC-03: resolve the reviewer-runtime adapter for a specific enabled domain.
 // The primary (github-pr) domain reuses the refreshed process-wide singleton;
-// any other enabled domain gets its own isolated adapter built from its domain
-// config, so per-domain runtime selection never bleeds across domains when the
-// poll loop pumps more than one enabled domain.
+// any other enabled domain gets its own isolated, mtime-refreshed cached adapter,
+// so per-domain runtime selection never bleeds across domains and poll ticks do
+// not discard adapter-owned pools, caches, or leases.
 function resolveReviewerRuntimeAdapterForDomainId(domainId, {
   rootDir = ROOT,
   logger = console,
+  loadDomainConfigImpl = loadDomainConfig,
+  createAdapterImpl = createReviewerRuntimeAdapterForDomain,
+  domainMtimeImpl = reviewerRuntimeDomainMtimeMs,
 } = {}) {
   if (!domainId || domainId === WATCHER_PRIMARY_DOMAIN_ID) {
     return reviewerRuntimeAdapter;
   }
-  const domainConfig = loadDomainConfig(rootDir, domainId);
-  return createReviewerRuntimeAdapterForDomain({
+  const cacheKey = `${rootDir}\0${domainId}`;
+  const domainMtimeMs = domainMtimeImpl(rootDir, domainId);
+  const cached = secondaryReviewerRuntimeAdapterCache.get(cacheKey);
+  if (cached?.domainMtimeMs === domainMtimeMs) return cached.adapter;
+
+  const domainConfig = loadDomainConfigImpl(rootDir, domainId);
+  const adapter = createAdapterImpl({
     rootDir,
     domainId,
     domainConfig,
     logger,
     orchestrationMode: activeReviewerRuntimeOrchestrationMode,
   });
+  secondaryReviewerRuntimeAdapterCache.set(cacheKey, { domainMtimeMs, adapter });
+  return adapter;
 }
 
 function refreshReviewerRuntimeAdapter({
@@ -10115,6 +10126,7 @@ export {
   writeAutonomousMergeDisabledAudit,
   resolveFirstPassReviewBudgetSuppression,
   refreshReviewerRuntimeAdapter,
+  resolveReviewerRuntimeAdapterForDomainId,
   reviewerRuntimeAdapterForRunRecord,
   resolveMergeAgentCoexistenceForWatcher,
   maybeFireFleetWideFalseDeferralAlert,

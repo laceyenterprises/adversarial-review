@@ -526,6 +526,7 @@ import path from 'node:path';
 const {
   cancelReviewerRuntimeSession,
   refreshReviewerRuntimeAdapter,
+  resolveReviewerRuntimeAdapterForDomainId,
   reviewerRuntimeAdapterForRunRecord,
 } = await import(${JSON.stringify(watcherUrl)});
 const calls = [];
@@ -660,6 +661,29 @@ const sixth = refreshReviewerRuntimeAdapter({
 });
 assert.notEqual(sixth, fifth);
 assert.deepEqual(calls, ['native', 'agentos', 'agentos', 'agentos', 'agentos', 'agentos', 'agentos']);
+
+const secondaryCreates = [];
+let secondaryMtime = 10;
+const secondaryOptions = {
+  rootDir: '/tmp/secondary-adapter-cache-test',
+  logger,
+  loadDomainConfigImpl: (_rootDir, domainId) => ({ id: domainId }),
+  createAdapterImpl: ({ domainId, domainConfig }) => {
+    const adapter = { domainId, domainConfig, sequence: secondaryCreates.length + 1 };
+    secondaryCreates.push(adapter);
+    return adapter;
+  },
+  domainMtimeImpl: () => secondaryMtime,
+};
+const secondaryFirst = resolveReviewerRuntimeAdapterForDomainId('secondary-domain', secondaryOptions);
+const secondarySecond = resolveReviewerRuntimeAdapterForDomainId('secondary-domain', secondaryOptions);
+assert.equal(secondarySecond, secondaryFirst);
+assert.equal(secondaryCreates.length, 1);
+
+secondaryMtime = 11;
+const secondaryRefreshed = resolveReviewerRuntimeAdapterForDomainId('secondary-domain', secondaryOptions);
+assert.notEqual(secondaryRefreshed, secondaryFirst);
+assert.equal(secondaryCreates.length, 2);
 
 const cancelled = [];
 const cancelLogs = [];

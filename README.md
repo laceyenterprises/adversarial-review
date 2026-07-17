@@ -126,8 +126,11 @@ mode-mismatch signal covers failures while rebuilding the runtime adapter
 itself. Most `agentos` deployment mistakes, such as a missing `HQ_ROOT`,
 `HQ_PARENT_SESSION`, `HQ_PROJECT`, or `hq` binary, are validated lazily at
 review spawn time and surface as reviewer dispatch failures until the
-watcher environment is fixed. The adapter is rebuilt only when the
-resolved mode or `domains/code-pr.json` mtime changes.
+watcher environment is fixed. The primary adapter is rebuilt only when the
+resolved mode or `domains/code-pr.json` mtime changes. Each enabled secondary
+domain likewise reuses its own reviewer-runtime adapter across poll ticks and
+rebuilds it only when that domain config's mtime changes, preserving
+adapter-owned pools, caches, and leases without mixing state between domains.
 
 ---
 

@@ -66,7 +66,7 @@ import {
   spawnClaudeCodeRemediationWorker,
   spawnCodexRemediationWorker,
   spawnGeminiRemediationWorker,
-  spawnRemediationWorker,
+  createRemediationRuntime,
   resolveGeminiRemediationModel,
   remediationWorkerTrailerClass,
   resolveRemediationPushTokenIdentity,
@@ -2632,10 +2632,11 @@ test('validateStartupRemediationConfig names orchestration_mode agentos in hq en
   );
 });
 
-test('spawnRemediationWorker dispatches "codex" to spawnCodexRemediationWorker', () => {
-  // Verify the dispatcher routes by class. Use a workspace minimal enough
-  // that the codex spawn would succeed if it ran — we set up auth-readable
-  // state and inject a spawnImpl that captures the call.
+test('remediation runtime local mode dispatches "codex" to spawnCodexRemediationWorker', async () => {
+  // ARC-08: the former `spawnRemediationWorker` switch is now the runtime
+  // facade's `local` mode. Verify it routes by class. Use a workspace minimal
+  // enough that the codex spawn would succeed if it ran — we set up
+  // auth-readable state and inject a spawnImpl that captures the call.
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const promptPath = path.join(workspaceDir, 'prompt.md');
   const outputPath = path.join(workspaceDir, 'last-msg.md');
@@ -2653,15 +2654,18 @@ test('spawnRemediationWorker dispatches "codex" to spawnCodexRemediationWorker',
 
   let invokedCli;
   try {
-    const result = spawnRemediationWorker('codex', {
-      workspaceDir, promptPath, outputPath, logPath,
-      ...testReplyContext(),
+    const handle = await createRemediationRuntime({
       spawnImpl: (cmd) => {
         invokedCli = cmd;
         return { pid: 111, unref() {} };
       },
+    }).run({
+      mode: 'local',
+      role: { workerClass: 'codex' },
+      workspaceDir, promptPath, outputPath, logPath,
+      ...testReplyContext(),
     });
-    assert.equal(result.model, 'codex');
+    assert.equal(handle.worker.model, 'codex');
   } finally {
     for (const k of ['HOME', 'CODEX_HOME', 'CODEX_AUTH_PATH']) {
       if (prev[k] === undefined) delete process.env[k];
@@ -2672,7 +2676,7 @@ test('spawnRemediationWorker dispatches "codex" to spawnCodexRemediationWorker',
   assert.match(invokedCli, /codex/);
 });
 
-test('spawnRemediationWorker dispatches "claude-code" to spawnClaudeCodeRemediationWorker', () => {
+test('remediation runtime local mode dispatches "claude-code" to spawnClaudeCodeRemediationWorker', async () => {
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const promptPath = path.join(workspaceDir, 'prompt.md');
   const outputPath = path.join(workspaceDir, 'last-msg.md');
@@ -2681,17 +2685,20 @@ test('spawnRemediationWorker dispatches "claude-code" to spawnClaudeCodeRemediat
 
   let invokedCli;
   let invokedArgs;
-  const result = spawnRemediationWorker('claude-code', {
-    workspaceDir, promptPath, outputPath, logPath,
-    ...testReplyContext(),
+  const handle = await createRemediationRuntime({
     spawnImpl: (cmd, args) => {
       invokedCli = cmd;
       invokedArgs = args;
       return { pid: 222, unref() {} };
     },
+  }).run({
+    mode: 'local',
+    role: { workerClass: 'claude-code' },
+    workspaceDir, promptPath, outputPath, logPath,
+    ...testReplyContext(),
   });
 
-  assert.equal(result.model, 'claude-code');
+  assert.equal(handle.worker.model, 'claude-code');
   assert.match(invokedCli, /claude/);
   // Claude Code is invoked in --print + acceptEdits + skip-permissions so
   // the worker can edit files AND run git/bash commands non-interactively.
@@ -2705,10 +2712,17 @@ test('spawnRemediationWorker dispatches "claude-code" to spawnClaudeCodeRemediat
   ]);
 });
 
-test('spawnRemediationWorker throws on unknown class', () => {
-  assert.throws(
-    () => spawnRemediationWorker('not-a-class', {}),
+test('remediation runtime local mode rejects an unknown worker class', async () => {
+  await assert.rejects(
+    () => createRemediationRuntime({}).run({ mode: 'local', role: { workerClass: 'not-a-class' } }),
     /unknown remediation worker class/
+  );
+});
+
+test('remediation runtime rejects an unknown mode', async () => {
+  await assert.rejects(
+    () => createRemediationRuntime({}).run({ mode: 'sideways', role: { workerClass: 'codex' } }),
+    /unknown remediation runtime mode/
   );
 });
 
@@ -2939,7 +2953,7 @@ test('spawnGeminiRemediationWorker scrubs Gemini API, ADC, and Vertex credential
   assert.equal(capturedEnv.GEMINI_HOME, path.join(workspaceDir, '.gemini'));
 });
 
-test('spawnRemediationWorker dispatches "gemini" to spawnGeminiRemediationWorker', () => {
+test('remediation runtime local mode dispatches "gemini" to spawnGeminiRemediationWorker', async () => {
   const { workspaceDir, promptPath, outputPath, logPath } = setupGeminiSpawn();
 
   const prevHome = process.env.HOME;
@@ -2949,18 +2963,21 @@ test('spawnRemediationWorker dispatches "gemini" to spawnGeminiRemediationWorker
   let invokedArgs;
   let result;
   try {
-    result = spawnRemediationWorker('gemini', {
-      workspaceDir,
-      promptPath,
-      outputPath,
-      logPath,
-      ...testReplyContext(),
+    result = (await createRemediationRuntime({
       spawnImpl: (cmd, args) => {
         invokedCli = cmd;
         invokedArgs = args;
         return { pid: 333, unref() {} };
       },
-    });
+    }).run({
+      mode: 'local',
+      role: { workerClass: 'gemini' },
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      ...testReplyContext(),
+    })).worker;
   } finally {
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;

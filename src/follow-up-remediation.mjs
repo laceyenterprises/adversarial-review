@@ -528,7 +528,13 @@ function resolveRemediationOrchestrationMode(env = process.env) {
   return cfg?.get?.('roles.adversarial.orchestration_mode', 'native') || 'native';
 }
 
-function shouldDispatchRemediationViaHq(env = process.env) {
+// ARC-08: whether this host is configured for agent-os/hq remediation dispatch.
+// This is NO LONGER the runtime fork — the health router owns os-vs-local
+// selection at dispatch time (see `resolveRemediationRuntimeMode`). The
+// predicate survives only as (a) the boot-time env-completeness check in
+// `validateStartupRemediationConfig` and (b) the router-absent fallback the
+// mode resolver defers to, preserving pre-router behavior.
+function _isAgentOsRemediationMode(env = process.env) {
   if (env.ADV_WITH_HQ_INTEGRATION === '1') return true;
   return resolveRemediationOrchestrationMode(env) === 'agentos';
 }
@@ -571,7 +577,10 @@ function normalizeHqDispatchRepo(repo) {
   return text.split('/').filter(Boolean).pop() || text;
 }
 
-function resolveRemediationDispatchPathForJob(job, env = process.env) {
+// The per-job "sticky" dispatch path: a job already dispatched (this round or a
+// prior one) must reconcile on the same path it was spawned on. Returns
+// 'hq' | 'bare', or null when the job carries no dispatch decision yet.
+function stickyRemediationDispatchPath(job) {
   const persisted = String(job?.remediationPlan?.dispatchPath || '').trim();
   if (persisted === 'hq' || persisted === 'bare') {
     return persisted;
@@ -591,7 +600,32 @@ function resolveRemediationDispatchPathForJob(job, env = process.env) {
   ) {
     return 'bare';
   }
-  return shouldDispatchRemediationViaHq(env) ? 'hq' : 'bare';
+  return null;
+}
+
+// The config-only dispatch-path view: sticky decision, else the env-configured
+// default. Production dispatch now routes through `resolveRemediationRuntimeMode`
+// (which layers the health router over exactly this fallback); this remains the
+// stable query for "what path would config alone pick for this job".
+function resolveRemediationDispatchPathForJob(job, env = process.env) {
+  return stickyRemediationDispatchPath(job)
+    ?? (_isAgentOsRemediationMode(env) ? 'hq' : 'bare');
+}
+
+// ARC-08: the health-router-driven remediation runtime selector that replaces
+// the old env-only fork. A job with a sticky dispatch path finishes in the mode
+// it started (SPEC §6.3 — no mid-flight migration); a fresh job takes the live
+// health-router mode ('os' healthy, 'local' after failover) so new remediations
+// spawn locally during an app-contract outage. With no router injected the
+// selection falls back to the config-derived path, preserving pre-router
+// dispatch-path (and thus round/budget) parity with v1.
+function resolveRemediationRuntimeMode(job, { healthRouter = null, env = process.env } = {}) {
+  const sticky = stickyRemediationDispatchPath(job);
+  if (sticky) return sticky === 'hq' ? 'os' : 'local';
+  if (healthRouter && typeof healthRouter.getMode === 'function') {
+    return healthRouter.getMode() === 'local' ? 'local' : 'os';
+  }
+  return _isAgentOsRemediationMode(env) ? 'os' : 'local';
 }
 
 function persistRemediationDispatchPath({ job, jobPath, dispatchPath } = {}) {
@@ -2452,7 +2486,7 @@ function validateStartupRemediationConfig(env = process.env, opts = {}) {
   validateStartupRoleConfig({ env, ...opts });
   defaultRemediatorWorkerClassFromEnv(env, opts);
   resolveRemediationMaxConcurrentJobs(env);
-  if (shouldDispatchRemediationViaHq(env)) {
+  if (_isAgentOsRemediationMode(env)) {
     resolveHqRoot(env, { requireExists: true });
     requireHqDispatchEnvValue(
       env,
@@ -2499,6 +2533,34 @@ function validateStartupRemediationConfig(env = process.env, opts = {}) {
 // material. Future: consider raising and routing the job to `pending` with
 // `lastConfigValidationFailure` (matches the bad-env contract) once
 // upstream missing-tag rate is measured.
+// ARC-08: the role-registry default remediator worker class (SPEC §5,
+// `roles.registry.remediator.workerClass`). ARC-12 lands the registry and its
+// config schema; until then the strict `roles` schema omits `roles.registry`,
+// so `.get` returns the documented fallback and no operator config trips schema
+// validation. This is the DEFAULT — domain routing (builder-tag) overrides it,
+// and an operator env pin overrides everything.
+function resolveRoleRegistryRemediator({ env = process.env, topPath, loaderImpl } = {}) {
+  try {
+    const cfg = loadRoleConfig({ env, topPath, loaderImpl, contextKey: 'roles.remediator' });
+    const value = normalizeRemediationWorkerClass(
+      cfg.get('roles.registry.remediator.workerClass', ''),
+    );
+    if (value) return value;
+  } catch {
+    // Registry key/schema not present yet (pre-ARC-12): fall through to the
+    // documented default rather than failing the dispatch.
+  }
+  return DEFAULT_REMEDIATION_WORKER_CLASS;
+}
+
+// Remediator worker-class selection (ARC-08): role-registry default with the
+// domain able to override. Precedence, highest first:
+//   1. operator env pin (`ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` / role-config)
+//   2. domain override — per-builder-tag cross-model routing
+//   3. role-registry default (`roles.registry.remediator.workerClass`)
+//   4. documented fallback `DEFAULT_REMEDIATION_WORKER_CLASS` (codex)
+// A missing/unknown builderTag falls through to the registry default, matching
+// the pre-ARC-08 degraded same-model-to-codex behavior (operator can pin).
 function pickRemediationWorkerClass(job, { env = process.env, topPath, loaderImpl } = {}) {
   const envOverride = defaultRemediatorWorkerClassFromEnv(env, { topPath, loaderImpl });
   if (envOverride) return envOverride;
@@ -2506,9 +2568,7 @@ function pickRemediationWorkerClass(job, { env = process.env, topPath, loaderImp
   if (builderTag && Object.prototype.hasOwnProperty.call(REMEDIATION_WORKER_BY_BUILDER_TAG, builderTag)) {
     return REMEDIATION_WORKER_BY_BUILDER_TAG[builderTag];
   }
-  // No usable builderTag — degraded same-model fallback to codex (per
-  // doc-block above). Operator can pin via env to bypass.
-  return DEFAULT_REMEDIATION_WORKER_CLASS;
+  return resolveRoleRegistryRemediator({ env, topPath, loaderImpl });
 }
 
 function requeueClaimedFollowUpJobAfterConfigFailure({
@@ -2571,14 +2631,95 @@ async function assertRemediationWorkerOAuth(workerClass, { execFileImpl } = {}) 
   }
 }
 
-function spawnRemediationWorker(workerClass, opts) {
-  switch (workerClass) {
-    case 'codex':       return spawnCodexRemediationWorker(opts);
-    case 'claude-code': return spawnClaudeCodeRemediationWorker(opts);
-    case 'gemini':      return spawnGeminiRemediationWorker(opts);
-    default:
-      throw new Error(`unknown remediation worker class: ${workerClass}`);
+// ARC-08: the remediation AgentRuntime facade. Collapses the former
+// self-spawn-vs-hq fork into one port-shaped `run(request)` whose mode the
+// health router selects (see `resolveRemediationRuntimeMode`). This is a
+// DISPATCH-only port surface: `run()` performs the spawn/dispatch and returns a
+// handle carrying the worker descriptor the rest of the pipeline persists via
+// `markFollowUpJobSpawned`. Terminal observation (polling the local process
+// group or the hq `dispatch_status`) stays with `reconcileFollowUpJob`, the
+// subject-adapter reconcile pass — so `await`/`reattach` here fail loud rather
+// than pretend to observe completion. `local` mode owns the model-specific CLI
+// spawns (the former `spawnRemediationWorker` switch); `os` mode owns the
+// app-contract / hq dispatch.
+function createRemediationRuntime({
+  execFileImpl = execFileAsync,
+  spawnImpl,
+  env = process.env,
+  now = () => new Date().toISOString(),
+} = {}) {
+  function spawnLocal(workerClass, opts) {
+    switch (workerClass) {
+      case 'codex':       return spawnCodexRemediationWorker(opts);
+      case 'claude-code': return spawnClaudeCodeRemediationWorker(opts);
+      case 'gemini':      return spawnGeminiRemediationWorker(opts);
+      default:
+        throw new Error(`unknown remediation worker class: ${workerClass}`);
+    }
   }
+
+  async function run(request = {}) {
+    const mode = request.mode;
+    const workerClass = request.role?.workerClass;
+    let worker;
+    if (mode === 'os') {
+      worker = await dispatchRemediationViaHq({
+        hqRoot: resolveHqRoot(env, { requireExists: true }),
+        workerClass,
+        repo: request.repo,
+        prNumber: request.prNumber,
+        branch: request.branch || null,
+        promptPath: request.promptPath,
+        replyPath: request.replyPath,
+        launchRequestId: request.launchRequestId,
+        jobId: request.jobId,
+        execFileImpl,
+        env,
+        now,
+      });
+    } else if (mode === 'local') {
+      // NB: do NOT thread `workerClass` into the spawn opts — each model spawn
+      // keeps its own default worker-class (e.g. claude stamps the
+      // `claude-code-remediation` provenance trailer, not `claude-code`), which
+      // the pre-collapse `spawnRemediationWorker` switch preserved by passing
+      // opts through untouched.
+      worker = spawnLocal(workerClass, {
+        workspaceDir: request.workspaceDir,
+        promptPath: request.promptPath,
+        outputPath: request.outputPath,
+        logPath: request.logPath,
+        replyPath: request.replyPath,
+        hqRoot: request.hqRoot,
+        launchRequestId: request.launchRequestId,
+        jobId: request.jobId,
+        spawnImpl,
+        now,
+      });
+    } else {
+      throw new Error(`unknown remediation runtime mode: ${JSON.stringify(mode)}`);
+    }
+    const runRef = String(
+      request.idempotencyKey || worker.launchRequestId || worker.processId || '',
+    );
+    const terminalOwnedByReconcile = () => {
+      throw new Error(
+        'remediation AgentRuntime is dispatch-only; reconcileFollowUpJob owns terminal observation',
+      );
+    };
+    return {
+      runRef,
+      mode,
+      worker,
+      await: terminalOwnedByReconcile,
+      reattach: terminalOwnedByReconcile,
+      // Cancellation of an in-flight remediation is owned by the reconcile /
+      // worker-cancel path (local pgid teardown, hq dispatch cancel); the
+      // dispatch handle does not duplicate it.
+      async cancel() {},
+    };
+  }
+
+  return { run };
 }
 
 function resolveAdversarialReviewAppSubscribes(env = process.env, options = {}) {
@@ -6526,6 +6667,7 @@ async function consumeNextFollowUpJob({
   onDelayedPendingJob = null,
   quotaHoldRevalidator = null,
   deliverAlertImpl = deliverAlert,
+  healthRouter = null,
   log = console,
 } = {}) {
   // CFG-09: per-job boundary for the role-config cascade cache. Match
@@ -6657,13 +6799,17 @@ async function consumeNextFollowUpJob({
 
   try {
     workerClass = pickRemediationWorkerClass(claimed.job);
-    const remediationDispatchPath = resolveRemediationDispatchPathForJob(claimed.job, process.env);
+    const remediationMode = resolveRemediationRuntimeMode(claimed.job, {
+      healthRouter,
+      env: process.env,
+    });
+    const remediationDispatchPath = remediationMode === 'os' ? 'hq' : 'bare';
     claimed.job = persistRemediationDispatchPath({
       job: claimed.job,
       jobPath: claimed.jobPath,
       dispatchPath: remediationDispatchPath,
     });
-    const hqDispatchEnabled = remediationDispatchPath === 'hq';
+    const hqDispatchEnabled = remediationMode === 'os';
     const branchReadyJob = await ensureJobBranchMetadata({
       job: claimed.job,
       jobPath: claimed.jobPath,
@@ -6889,32 +7035,35 @@ async function consumeNextFollowUpJob({
       claimed.job = prTerminalCheck.job;
     }
 
-    const worker = hqDispatchEnabled
-      ? await dispatchRemediationViaHq({
-          hqRoot: resolveHqRoot(process.env, { requireExists: true }),
-          workerClass,
-          repo: claimed.job.repo,
-          prNumber: claimed.job.prNumber,
-          branch: claimed.job.branch || null,
-          promptPath,
-          replyPath,
-          launchRequestId: replyStorageKey,
-          jobId: claimed.job.jobId,
-          execFileImpl,
-          now,
-        })
-      : spawnRemediationWorker(workerClass, {
-          workspaceDir,
-          promptPath,
-          outputPath,
-          logPath,
-          replyPath,
-          hqRoot,
-          launchRequestId: replyStorageKey,
-          jobId: claimed.job.jobId,
-          spawnImpl,
-          now,
-        });
+    // ARC-08: one AgentRuntime port call, routed by the health router. The
+    // runtime's `os` mode performs the app-contract / hq dispatch and `local`
+    // mode the model-specific CLI self-spawn; both return the same worker
+    // descriptor shape the reconcile pass reads. Workspace prep stayed with the
+    // subject adapter above (`prepareWorkspaceForJob`) — the runtime never
+    // touches git mechanics.
+    const remediationRuntime = createRemediationRuntime({
+      execFileImpl,
+      spawnImpl,
+      env: process.env,
+      now,
+    });
+    const runHandle = await remediationRuntime.run({
+      mode: remediationMode,
+      role: { kind: 'remediator', workerClass },
+      idempotencyKey: replyStorageKey,
+      repo: claimed.job.repo,
+      prNumber: claimed.job.prNumber,
+      branch: claimed.job.branch || null,
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      replyPath,
+      hqRoot,
+      launchRequestId: replyStorageKey,
+      jobId: claimed.job.jobId,
+    });
+    const worker = runHandle.worker;
     spawnedWorker = worker;
 
     const updated = markFollowUpJobSpawned({
@@ -7131,6 +7280,7 @@ async function consumeFollowUpJobsUntilCapacity({
   shouldStop = () => false,
   quotaHoldRevalidator = defaultQuotaHoldRevalidator,
   deliverAlertImpl = deliverAlert,
+  healthRouter = null,
   log = console,
 } = {}) {
   const concurrencyCap = normalizeMaxConcurrentFollowUpJobs(maxConcurrent);
@@ -7164,6 +7314,7 @@ async function consumeFollowUpJobsUntilCapacity({
         promptTemplate,
         resolvePRLifecycleImpl,
         postCommentImpl,
+        healthRouter,
         excludedRepoPrKeys: blockedRepoPrKeys,
         onExcludedRepoPrKey: (pendingPath) => {
           deferredSamePRPaths.add(String(pendingPath));
@@ -7436,8 +7587,9 @@ export {
   resolveRemediationReplyTarget,
   resolveRemediationWorkspaceRoot,
   resolveRemediationDispatchPathForJob,
+  resolveRemediationRuntimeMode,
+  createRemediationRuntime,
   resolveAdversarialReviewAppMode,
-  shouldDispatchRemediationViaHq,
   shouldUseHqIntegration,
   resolveJobRelativePath,
   resolveStoredWorkspaceRoot,
@@ -7450,7 +7602,6 @@ export {
   spawnCodexRemediationWorker,
   spawnClaudeCodeRemediationWorker,
   spawnGeminiRemediationWorker,
-  spawnRemediationWorker,
   assertClaudeCodeOAuth,
   assertGeminiOAuth,
   assertRemediationWorkerOAuth,
@@ -7465,6 +7616,7 @@ export {
   normalizeMaxConcurrentFollowUpJobs,
   normalizeRemediationWorkerClass,
   pickRemediationWorkerClass,
+  resolveRoleRegistryRemediator,
   assertWorkflowPushCapabilityForJob,
   extractChangedPathsFromJob,
   hasWorkflowGitHubAppPermission,

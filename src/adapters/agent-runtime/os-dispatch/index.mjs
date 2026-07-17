@@ -4,12 +4,12 @@
 // the app inherits admission, entitlements, model allowlists, sandboxing,
 // token budgets, and ledger telemetry from the worker pool.
 //
-// This is a REFACTOR of the vendored app-contract client
-// (`src/app-contract-dispatch.mjs`) behind the AgentRuntime port defined in
-// ARC-05 — NOT a rewrite, and NOT the published-SDK swap. The vendored client
-// is this repo's wire-contract reference; swapping it for the real
-// `@agent-os/app-sdk` is GAP-4 / ARC-24. Nothing here imports the agent-os
-// repo tree.
+// This routes through the published Agent OS app-contract SDK
+// (`@agent-os/app-sdk`, consumed as a `file:` tarball per the ARC-23 packaging
+// ADR) behind the AgentRuntime port defined in ARC-05. ARC-24 deleted this
+// repo's vendored dispatch client and swapped its connect helper for the SDK's
+// `connect(...)`; the session surface (`dispatch`, `dispatchStatus`) is
+// identical, so nothing else in this adapter changed.
 //
 // Wire mapping per the role registry (§5) and completion shapes (§4.3, §9):
 //   - reviewer   → task_kind 'review'      completion_shape 'decision-only'
@@ -21,7 +21,11 @@
 // `request_id`; the endpoint's (app_id, request_id) idempotency is the
 // server-side backstop that makes re-dispatch and reattach safe (§6.3).
 
-import { connectAppContract } from '../../../app-contract-dispatch.mjs';
+import { connect } from '@agent-os/app-sdk';
+import {
+  isTransientAppContractError,
+  withAppContractTransientRetry,
+} from '../../../app-contract-retry.mjs';
 import { validateReviewArtifact, ReviewArtifactSchemaError } from './review-artifact.mjs';
 
 const RUNTIME_ID = 'os-dispatch';
@@ -29,10 +33,6 @@ const RUNTIME_MODE = 'os';
 
 const DEFAULT_POLL_BASE_MS = 5_000;
 const DEFAULT_POLL_JITTER_MS = 1_000;
-const TRANSIENT_NETWORK_CODES = new Set([
-  'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH',
-  'ENOTFOUND', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET',
-]);
 
 // dispatch_status terminal-state mapping → AgentRunStatus. Non-terminal states
 // (queued/accepted/dispatching/running/heartbeating/…) keep the poll loop
@@ -226,14 +226,6 @@ function dispatchFailureResult(err) {
   };
 }
 
-function isTransientDispatchStatusError(err) {
-  if (err?.retryable === true) return true;
-  const code = String(err?.code ?? err?.cause?.code ?? '').toUpperCase();
-  if (TRANSIENT_NETWORK_CODES.has(code)) return true;
-  const status = Number(err?.status ?? err?.statusCode ?? err?.response?.status);
-  return status === 408 || status === 425 || status === 429 || status >= 500;
-}
-
 function settledHandle(runRef, result) {
   return {
     runRef,
@@ -250,7 +242,7 @@ function defaultJitter(maxMs) {
 
 function createOsDispatchAgentRuntime({
   session = null,
-  connectImpl = connectAppContract,
+  connectImpl = connect,
   connectOptions = {},
   buildPrompt = defaultBuildPrompt,
   pollBaseMs = DEFAULT_POLL_BASE_MS,
@@ -264,7 +256,7 @@ function createOsDispatchAgentRuntime({
 
   async function resolveSession() {
     if (!sessionPromise) {
-      sessionPromise = Promise.resolve().then(() => connectImpl(connectOptions)).catch((err) => {
+      sessionPromise = withAppContractTransientRetry(() => connectImpl(connectOptions), { sleepImpl }).catch((err) => {
         sessionPromise = null; // allow a later run to retry the connect
         throw err;
       });
@@ -314,15 +306,20 @@ function createOsDispatchAgentRuntime({
       }
       let statusPayload;
       try {
-        statusPayload = await activeSession.dispatchStatus(requestId);
+        statusPayload = await withAppContractTransientRetry(
+          () => activeSession.dispatchStatus(requestId),
+          { sleepImpl },
+        );
       } catch (err) {
-        if (!isTransientDispatchStatusError(err)) return dispatchFailureResult(err);
-        logger?.warn?.('[os-dispatch] transient dispatch status failure; polling will retry', {
-          requestId,
-          error: err?.message || String(err),
-        });
-        await sleepImpl(pollBaseMs + jitterImpl(pollJitterMs));
-        continue;
+        if (isTransientAppContractError(err)) {
+          logger?.warn?.('[os-dispatch] transient dispatch status failure; polling will continue', {
+            requestId,
+            error: err?.message || String(err),
+          });
+          await sleepImpl(pollBaseMs + jitterImpl(pollJitterMs));
+          continue;
+        }
+        return dispatchFailureResult(err);
       }
       const mapped = mapTerminalStatus(normalizeStatus(statusPayload?.status));
       if (mapped) {
@@ -357,7 +354,10 @@ function createOsDispatchAgentRuntime({
     let activeSession;
     try {
       activeSession = await resolveSession();
-      await activeSession.dispatch(buildDispatchPayload(request, buildPrompt));
+      await withAppContractTransientRetry(
+        () => activeSession.dispatch(buildDispatchPayload(request, buildPrompt)),
+        { sleepImpl },
+      );
     } catch (err) {
       return settledHandle(requestId, dispatchFailureResult(err));
     }

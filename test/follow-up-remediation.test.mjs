@@ -7091,6 +7091,33 @@ test('connectFollowUpTelemetryListener registers health.worker handlers for daem
   assert.equal(registrations[0].active, false);
 });
 
+test('connectFollowUpTelemetryListener retries a transient registration failure', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  let connectCalls = 0;
+  const listener = await connectFollowUpTelemetryListener({
+    rootDir,
+    env: {
+      ...process.env,
+      AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+      HQ_ROOT: path.join(rootDir, 'agent-os-hq'),
+    },
+    connectAppContractImpl: async () => {
+      connectCalls += 1;
+      if (connectCalls === 1) {
+        const error = new Error('app-contract 503 service unavailable');
+        error.status = 503;
+        throw error;
+      }
+      return { on() { return () => {}; } };
+    },
+    log: { log() {}, warn() {}, error() {} },
+  });
+
+  assert.equal(connectCalls, 2);
+  assert.deepEqual(listener.subscriptions, ['health.worker.*']);
+  listener.dispose();
+});
+
 test('attachFollowUpTelemetryListeners skips non-worker subscription topics', () => {
   const registrations = [];
   const listener = attachFollowUpTelemetryListeners({

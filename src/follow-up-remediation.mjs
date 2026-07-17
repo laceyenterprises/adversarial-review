@@ -5,7 +5,8 @@ import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { connectAppContract } from './app-contract-dispatch.mjs';
+import { connect } from '@agent-os/app-sdk';
+import { withAppContractTransientRetry } from './app-contract-retry.mjs';
 import {
   buildRemediationReply,
   claimNextFollowUpJob,
@@ -2777,13 +2778,13 @@ async function dispatchRemediationViaHq({
   });
   const ticket = appMode === 'agent-os'
     ? await (async () => {
-        const os = await connectAppContract({
+        const os = await withAppContractTransientRetry(() => connect({
           app_id: 'adversarial-review',
           mode: appMode,
           hqRoot,
           subscribes: resolveAdversarialReviewAppSubscribes(env),
-        });
-        return os.dispatch({
+        }));
+        return withAppContractTransientRetry(() => os.dispatch({
           request_id: requestId,
           ticket_ref: ticketRef,
           prompt: promptPath,
@@ -2800,7 +2801,7 @@ async function dispatchRemediationViaHq({
           hq_root: hqRoot,
           parent_session: parentSession,
           project,
-        });
+        }));
       })()
     : parseHqJsonObject(
         (await execFileImpl(hqBin, legacyHqArgs, { env, maxBuffer: 5 * 1024 * 1024 })).stdout,
@@ -6565,6 +6566,28 @@ function resolveFollowUpTelemetryTopics(subscribes = []) {
   return [...new Set(topics)];
 }
 
+// Bridge the app-contract session's on() delivery to the flat (event, topic)
+// shape handleRemediationTelemetryEvent expects. The published SDK calls the
+// handler with a single canonical frame { topic, payload, published_at }; older
+// / injected sessions call it with (event, topic). Detect the frame by its exact
+// shape so a plain telemetry event that merely carries a `topic` field is not
+// mistaken for a frame.
+function isCanonicalTopicFrame(value, maybeTopic) {
+  return maybeTopic === undefined
+    && value
+    && typeof value === 'object'
+    && typeof value.topic === 'string'
+    && Object.prototype.hasOwnProperty.call(value, 'payload')
+    && Object.prototype.hasOwnProperty.call(value, 'published_at');
+}
+
+function normalizeTelemetryDelivery(delivery, maybeTopic, topicPattern) {
+  if (isCanonicalTopicFrame(delivery, maybeTopic)) {
+    return { event: delivery.payload, topic: String(delivery.topic || topicPattern) };
+  }
+  return { event: delivery, topic: String(maybeTopic || topicPattern) };
+}
+
 function attachFollowUpTelemetryListeners({
   session,
   rootDir = ROOT,
@@ -6584,8 +6607,12 @@ function attachFollowUpTelemetryListeners({
     throw new Error('follow-up telemetry listener requires an App Contract session with on()');
   }
   const topics = resolveFollowUpTelemetryTopics(subscribes);
-  const unsubscribers = topics.map((topicPattern) => session.on(topicPattern, async (event, topic) => {
-    const deliveredTopic = String(topic || topicPattern);
+  const unsubscribers = topics.map((topicPattern) => session.on(topicPattern, async (delivery, maybeTopic) => {
+    // The published @agent-os/app-sdk delivers one canonical SSE frame
+    // ({ topic, payload, published_at }) to the handler; the legacy two-arg
+    // (event, topic) shape is still accepted so injected fakes keep working.
+    const { event, topic } = normalizeTelemetryDelivery(delivery, maybeTopic, topicPattern);
+    const deliveredTopic = topic;
     const result = await handleTelemetryEventImpl({
       rootDir,
       topic: deliveredTopic,
@@ -6618,7 +6645,7 @@ async function connectFollowUpTelemetryListener({
   rootDir = ROOT,
   env = process.env,
   hqRoot = env.HQ_ROOT,
-  connectAppContractImpl = connectAppContract,
+  connectAppContractImpl = connect,
   log = console,
   ...listenerOptions
 } = {}) {
@@ -6628,12 +6655,12 @@ async function connectFollowUpTelemetryListener({
     return { session: null, subscriptions: [], dispose: () => {} };
   }
   const mode = resolveAdversarialReviewAppMode(env);
-  const session = await connectAppContractImpl({
+  const session = await withAppContractTransientRetry(() => connectAppContractImpl({
     app_id: 'adversarial-review',
     mode,
     hqRoot,
     subscribes,
-  });
+  }));
   const listener = attachFollowUpTelemetryListeners({
     session,
     rootDir,

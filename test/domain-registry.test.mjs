@@ -40,10 +40,12 @@ function makeRoot(domains) {
   return root;
 }
 
-test('production domains/ registers all three, enables only code-pr', () => {
+test('production domains/ registers every config, enables only code-pr', () => {
   const registry = loadDomainRegistry(REPO_ROOT);
   const registered = registry.domains.map((d) => d.id).sort();
-  assert.deepEqual(registered, ['acpx-smoke', 'code-pr', 'research-finding']);
+  // code-pr-security (ARC-04) is registered but gated OFF: it must appear in the
+  // registered set yet stay out of the enabled (actively polled) set.
+  assert.deepEqual(registered, ['acpx-smoke', 'code-pr', 'code-pr-security', 'research-finding']);
   assert.deepEqual(resolveEnabledDomainIds(registry), ['code-pr']);
 });
 

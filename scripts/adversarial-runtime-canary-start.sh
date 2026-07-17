@@ -12,6 +12,13 @@ set -euo pipefail
 CANARY_DIR="${ADVERSARIAL_REVIEW_DIR:-/Users/airlock/agent-os/tools/adversarial-review}"  # cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 cd "$CANARY_DIR"
 
+ADVERSARIAL_REVIEW_NODE_BIN="${ADVERSARIAL_REVIEW_NODE_BIN:-/opt/homebrew/bin/node}"
+OP_SERVICE_ACCOUNT_TOKEN="$(env ADV_OP_TOKEN_TAG="runtime-canary" "$ADVERSARIAL_REVIEW_NODE_BIN" "$CANARY_DIR/src/secret-source/resolve-op-token-cli.mjs")" || {
+  print -u2 "runtime-canary: failed to resolve OP_SERVICE_ACCOUNT_TOKEN"
+  exit 78
+}
+export OP_SERVICE_ACCOUNT_TOKEN
+
 # Resolve ALERT_TO from the standing 1Password ref when present, mirroring the
 # watcher's alert contract. A failed secret read is retried and then fails the
 # wrapper loudly: running a canary that cannot page would create false safety.
@@ -40,4 +47,4 @@ fi
 # + verdict-parse + alerting path hermetically. Flip the plist argument to
 # `--live` once the real reviewer spawn is production-wired end to end (ARC-08+)
 # so the canary detects genuine lifeline rot.
-exec node "$CANARY_DIR/scripts/adversarial-runtime-canary.mjs" "$@"
+exec "$ADVERSARIAL_REVIEW_NODE_BIN" "$CANARY_DIR/scripts/adversarial-runtime-canary.mjs" "$@"

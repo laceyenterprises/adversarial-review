@@ -21,8 +21,16 @@ test('canary wrapper retries a transient op failure before launching node with t
   const binDir = join(rootDir, 'bin');
   try {
     mkdirSync(binDir);
-    executable(join(binDir, 'node'), '#!/bin/zsh\nprint -r -- "$ADVERSARIAL_REVIEW_ALERT_TO"\n');
+    executable(join(binDir, 'node'), `#!/bin/zsh
+if [[ "$1" == *"resolve-op-token-cli.mjs" ]]; then
+  print -r -- "op-token"
+  exit 0
+fi
+print -r -- "$ADVERSARIAL_REVIEW_ALERT_TO"
+`);
     executable(join(binDir, 'op'), `#!/bin/zsh
+[[ -n "\${OP_SERVICE_ACCOUNT_TOKEN:-}" ]] || { print -u2 'missing OP_SERVICE_ACCOUNT_TOKEN'; exit 42; }
+print -r -- "$OP_SERVICE_ACCOUNT_TOKEN" > "${rootDir}/op-token-seen"
 count_file="${rootDir}/attempts"
 count=0
 [[ -f "$count_file" ]] && count="$(<"$count_file")"
@@ -39,6 +47,7 @@ print -r -- 'operator@example.test'
         PATH: `${binDir}:/usr/bin:/bin`,
         ZDOTDIR: rootDir,
         ADVERSARIAL_REVIEW_DIR: rootDir,
+        ADVERSARIAL_REVIEW_NODE_BIN: join(binDir, 'node'),
         ADVERSARIAL_REVIEW_ALERT_TO: '',
         ADVERSARIAL_REVIEW_ALERT_TO_OP_REF: 'op://vault/item/field',
       },
@@ -46,6 +55,7 @@ print -r -- 'operator@example.test'
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.trim(), 'operator@example.test');
     assert.equal(readFileSync(join(rootDir, 'attempts'), 'utf8').trim(), '2');
+    assert.equal(readFileSync(join(rootDir, 'op-token-seen'), 'utf8').trim(), 'op-token');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

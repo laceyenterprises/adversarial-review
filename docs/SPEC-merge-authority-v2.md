@@ -82,12 +82,20 @@ Policy inputs, all explicit and versioned in config:
   via the autonomous path; they route to `remediate` — and the final
   remediation addresses **all** review comments, blocking and non-blocking,
   before merge (standing operator policy).
-- **Exhaustion always closes** (standing operator policy): when the last
-  stage's budget is exhausted without a clean, eligible result, the decision
-  is `close(budget-exhausted)`, never `finalize-now` or an indefinite `wait`.
-  Closing rejects the PR without merging it and records a `closed` event.
-  `halt` is reserved for operational impossibility (e.g. branch conflict the
-  remediator cannot resolve), and always pages.
+- **Exhaustion always closes by landing, never by abandoning** (standing
+  operator policy, 2026-07-02/2026-07-16): when the last stage's budget is
+  exhausted, the decision is `remediate(final)` followed by `finalize-now` —
+  never an indefinite `wait` and never a reject-without-merge. The **final
+  remediation is coverage-gated**: its structured reply must address **every**
+  outstanding review comment, blocking and non-blocking (validated against the
+  remediation-reply schema's per-finding coverage check), and no further
+  re-review gates the merge. This path cannot merge unaddressed blocking
+  findings: either the final remediation achieves validated full coverage and
+  `finalize-now` executes, or coverage is operationally impossible (e.g. a
+  branch conflict the remediator cannot resolve) and the decision is `halt`,
+  which always pages. `close(reason)` exists in the decision vocabulary for
+  **operator-override use only** (an `operator_override` event directing
+  rejection); the autonomous policy never emits it.
 - **Patience is bounded and explicit**: `checks_settled` requires required
   checks to be *present and completed* (a running check is not a conclusion).
   `wait(checks, deadline)` polls boundedly; deadline expiry becomes
@@ -120,10 +128,12 @@ Policy inputs, all explicit and versioned in config:
   stale rev is structurally impossible to issue.
 - **The hammer becomes a decision outcome, not an actor.** "Hammer" v2 = the
   remediation worker dispatched by a `remediate(final)` decision plus the
-  executor's subsequent `finalize-now` only after the resulting revision is
-  clean and eligible. If remediation instead exhausts its budget, the fold
-  emits `close(budget-exhausted)`. Its lifetime ceiling and retry cap are
-  policy inputs to the fold, not self-managed loops.
+  executor's subsequent `finalize-now`. The gate between the two is the
+  coverage-validated final-remediation reply (every blocking and non-blocking
+  comment addressed), not a further re-review round — per the standing
+  operator policy in §3. Failure to achieve coverage folds to `halt` (pages);
+  the autonomous fold never emits `close`. The hammer's lifetime ceiling and
+  retry cap are policy inputs to the fold, not self-managed loops.
 
 ## 5. Shadow-mode cutover
 

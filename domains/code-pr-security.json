@@ -1,0 +1,31 @@
+{
+  "id": "code-pr-security",
+  "enabled": false,
+  "subjectChannel": "github-pr",
+  "commsChannel": "github-pr-comments",
+  "reviewerRuntime": "cli-direct",
+  "operatorSurface": {
+    "controls": "github-pr-label-controls",
+    "triageSync": "linear"
+  },
+  "promptSet": "code-pr-security",
+  "riskClasses": {
+    "low": {
+      "maxRemediationRounds": 1
+    },
+    "medium": {
+      "maxRemediationRounds": 2
+    },
+    "high": {
+      "maxRemediationRounds": 3
+    },
+    "critical": {
+      "maxRemediationRounds": 4
+    }
+  },
+  "reviewerRouting": {
+    "codex": "claude-reviewer-lacey",
+    "claude-code": "codex-reviewer-lacey",
+    "clio-agent": "codex-reviewer-lacey"
+  }
+}

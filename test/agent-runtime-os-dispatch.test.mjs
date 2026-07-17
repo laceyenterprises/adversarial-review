@@ -341,6 +341,40 @@ test('run retries transient dispatch_status failures but fails fast on client er
   assert.equal(fatalSession.statusCalls.length, 1);
 });
 
+test('run keeps polling after transient dispatch_status retries are exhausted', async () => {
+  const transient = () => {
+    const error = new Error('connection reset');
+    error.code = 'ECONNRESET';
+    throw error;
+  };
+  const session = fakeSession({
+    statusSequence: [
+      transient,
+      transient,
+      transient,
+      { status: 'succeeded', artifact: reviewArtifact() },
+    ],
+  });
+  const sleeps = [];
+  const warnings = [];
+  const runtime = createOsDispatchAgentRuntime({
+    session,
+    pollBaseMs: 5_000,
+    pollJitterMs: 1_000,
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    jitterImpl: () => 250,
+    logger: { warn: (...args) => warnings.push(args) },
+  });
+
+  const result = await (await runtime.run(reviewerRequest())).await();
+
+  assert.equal(result.status, 'completed');
+  assert.equal(session.statusCalls.length, 4);
+  assert.deepEqual(sleeps, [50, 100, 5_250]);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0][0], /polling will continue/);
+});
+
 test('run retries transient connect and dispatch failures', async () => {
   const session = fakeSession({
     statusSequence: [{ status: 'succeeded', artifact: reviewArtifact() }],

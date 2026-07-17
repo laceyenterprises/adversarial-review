@@ -22,7 +22,10 @@
 // server-side backstop that makes re-dispatch and reattach safe (§6.3).
 
 import { connect } from '@agent-os/app-sdk';
-import { withAppContractTransientRetry } from '../../../app-contract-retry.mjs';
+import {
+  isTransientAppContractError,
+  withAppContractTransientRetry,
+} from '../../../app-contract-retry.mjs';
 import { validateReviewArtifact, ReviewArtifactSchemaError } from './review-artifact.mjs';
 
 const RUNTIME_ID = 'os-dispatch';
@@ -308,6 +311,14 @@ function createOsDispatchAgentRuntime({
           { sleepImpl },
         );
       } catch (err) {
+        if (isTransientAppContractError(err)) {
+          logger?.warn?.('[os-dispatch] transient dispatch status failure; polling will continue', {
+            requestId,
+            error: err?.message || String(err),
+          });
+          await sleepImpl(pollBaseMs + jitterImpl(pollJitterMs));
+          continue;
+        }
         return dispatchFailureResult(err);
       }
       const mapped = mapTerminalStatus(normalizeStatus(statusPayload?.status));

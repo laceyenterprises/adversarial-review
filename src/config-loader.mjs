@@ -4256,7 +4256,14 @@ function _ensureFreshConfig({ topPath, modulePaths, env } = {}) {
   const sig = _currentSignature({ topPath, modulePaths, env });
   const cached = _configCache.get(cacheKey);
   if (cached === undefined || _configSignatures.get(cacheKey) !== sig) {
-    const fresh = loadConfig({ topPath, modulePaths, env });
+    // Runtime-tolerant load: daemons must not crash when ANOTHER module adds
+    // a key to the shared top-level config.yaml (2026-07-17 watcher outage:
+    // main_catchup.pg_schema_gate_allow_destructive_revisions landed via the
+    // parent repo and every cached load — watcher, role-config, getConfig —
+    // fail-louded at startup for ~1h). Unknown nested keys under shared roots
+    // are warn-once dropped; the strict loadConfig() stays the contract for
+    // tests and validation tooling so genuine module-file drift still fails CI.
+    const fresh = loadConfigRuntime({ topPath, modulePaths, env });
     _configCache.set(cacheKey, fresh);
     _configSignatures.set(cacheKey, sig);
     _evictCacheLruIfNeeded();

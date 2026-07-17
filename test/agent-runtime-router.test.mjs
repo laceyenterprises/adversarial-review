@@ -242,17 +242,38 @@ test('resume does not retain completed keys when the OS runtime cannot reattach'
   assert.deepEqual(router.pendingOsKeys(), []);
 });
 
-test('runtime throws still consume a stashed dispatch classification', async () => {
+test('a thrown hard classification fails over to local instead of propagating', async () => {
+  // #620 review finding: a hard contract error that surfaces as a thrown
+  // exception (not just a failed handle) must trigger failover, not crash the
+  // caller. Classification is still consumed so it cannot leak to the next run.
   const taken = [];
+  const localRuntime = fakeLocalRuntime();
   const router = createHealthRouter({
-    localRuntime: fakeLocalRuntime(),
+    localRuntime,
     osRuntime: { async run() { throw new Error('runtime crashed'); } },
     takeClassification(key) { taken.push(key); return { kind: 'hard' }; },
     auditSink: capturingAuditSink(),
   });
 
+  const handle = await router.run(reviewerRequest('throwing-key'));
+  assert.equal(handle.mode, 'local');
+  assert.deepEqual(localRuntime.ran, ['throwing-key']);
+  assert.deepEqual(taken, ['throwing-key']);
+  assert.equal(router.getMode(), 'local');
+});
+
+test('a thrown non-hard error propagates and still consumes classification', async () => {
+  const taken = [];
+  const router = createHealthRouter({
+    localRuntime: fakeLocalRuntime(),
+    osRuntime: { async run() { throw new Error('runtime crashed'); } },
+    takeClassification(key) { taken.push(key); return { kind: 'soft' }; },
+    auditSink: capturingAuditSink(),
+  });
+
   await assert.rejects(router.run(reviewerRequest('throwing-key')), /runtime crashed/);
   assert.deepEqual(taken, ['throwing-key']);
+  assert.equal(router.getMode(), 'os');
 });
 
 test('healthz probes time out and feed a failed probe to the state machine', async () => {

@@ -129,7 +129,12 @@ function createHealthRouter({
     if (!osRuntime || typeof osRuntime.reattach !== 'function') return;
     pendingOsKeys.add(key);
     Promise.resolve()
+      // Await the reattach handle to completion: the OS runtime keeps the
+      // poll/stream channel open only while a caller is observing it, so a
+      // dropped handle silently ends the background re-poll (review finding
+      // on #620).
       .then(() => osRuntime.reattach({ idempotencyKey: key }))
+      .then((handle) => handle?.await?.())
       .catch((err) => logger?.warn?.('[health-router] background adopt re-poll failed', {
         key, error: err?.message || String(err),
       }))
@@ -208,11 +213,17 @@ function createHealthRouter({
     const key = String(request.idempotencyKey);
     let handle;
     let classification = null;
+    let runError = null;
+    // A hard contract error can surface EITHER as a thrown exception OR as a
+    // failed handle. The prior `try/finally` re-threw before the failover
+    // check, wedging the caller in OS mode instead of failing over (review
+    // finding on #620). Catch, classify once, and only then decide.
     try {
       handle = await osRuntime.run(request);
-    } finally {
-      classification = typeof takeClassification === 'function' ? takeClassification(key) : null;
+    } catch (err) {
+      runError = err;
     }
+    classification = typeof takeClassification === 'function' ? takeClassification(key) : null;
     if (config.enabled && classification && classification.kind === 'hard') {
       const transition = stateMachine.recordHardError({ detail: classification.detail, requestId: key });
       if (transition) await handleTransition(transition);
@@ -220,6 +231,9 @@ function createHealthRouter({
       // reissuing on local is not a mid-flight migration.
       return localRuntime.run(request);
     }
+    // A throw that was not a hard contract error (or failover disabled) is a
+    // genuine failure: propagate it rather than swallowing it.
+    if (runError) throw runError;
     pendingOsKeys.add(key);
     return trackedOsHandle(handle, key);
   }

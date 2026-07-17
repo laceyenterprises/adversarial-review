@@ -149,7 +149,13 @@ function createRouterStateMachine({
   // probe-failure counter (§6.2). Request-level 4xx errors do NOT reach here.
   function recordHardError({ detail = null, requestId = null } = {}) {
     if (state === ROUTER_STATES.LOCAL_FALLBACK) return null; // already local
-    return enterFallback('hard-contract-error', { detail, requestId });
+    // A hard error mid-resume is an aborted resume, not a fresh failover —
+    // emit the truthful transition kind so the audit trail is not a
+    // misleading resume_start→failover pair (review finding on #620).
+    const kind = state === ROUTER_STATES.OS_RESUMING
+      ? TRANSITION_KINDS.RESUME_ABORTED
+      : TRANSITION_KINDS.FAILOVER;
+    return enterFallback('hard-contract-error', { detail, requestId }, kind);
   }
 
   // Advance OS-RESUMING -> OS-HEALTHY once the router has finished reconciling

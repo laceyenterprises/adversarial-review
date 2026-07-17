@@ -74,18 +74,23 @@ that:
 
 ## 3. Architecture: five layers
 
-Strict downward-only dependencies. Each layer may only import the layer below.
+Dependencies point toward lower layers: a layer may import contracts from any
+lower layer, but lower layers never import higher-layer implementations. Layer
+5 is the composition root: it constructs infrastructure-backed implementations
+and injects them behind lower-layer ports. This keeps SDKs and delivery clients
+at the edge without preventing layers 3 and 4 from sharing foundational ports.
 
 ```text
 ┌────────────────────────────────────────────────────────────┐
-│ 5. OS integration      app-sdk · github-adapter · HCP/SSE  │
+│ 5. Composition + OS    app-sdk · runtime implementations · │
+│    integration         github-adapter · HCP/SSE              │
 ├────────────────────────────────────────────────────────────┤
 │ 4. Domain adapters     subject · comms · operator ·        │
 │                        finalization (NEW port)             │
 ├────────────────────────────────────────────────────────────┤
-│ 3. Agent runtime port  hybrid router: os-dispatch ⇄ local  │
+│ 3. Agent runtime port  opaque runs · hybrid routing policy   │
 ├────────────────────────────────────────────────────────────┤
-│ 2. Role registry       reviewer/remediator roster (config) │
+│ 2. Foundation          role registry · CredentialsProvider  │
 ├────────────────────────────────────────────────────────────┤
 │ 1. Kernel              pipeline state machine · budgets ·  │
 │                        verdict aggregation · contracts     │
@@ -211,6 +216,12 @@ roles:
 - Per-reviewer GitHub bot identity (`botTokenEnv` in v1 routing) moves into
   the comms adapter's delivery config, keyed by role id. The kernel and role
   registry never see tokens.
+- A foundational `CredentialsProvider` port supplies scoped, short-lived
+  credentials by capability (for example `branch-push` or `comms-delivery`).
+  Layer 5 injects its production secret-store implementation into both the
+  local runtime and comms adapters. Callers receive only the minimum credential
+  material for one operation; values are neither persisted in run records nor
+  exposed to the kernel or role registry.
 
 ---
 
@@ -221,19 +232,23 @@ roles:
 One interface, replacing the process-altitude "reviewer runtime" axis:
 
 ```
-AgentRuntime.run(request) → AgentRunHandle
+AgentRuntime.run(request) → AgentRunHandle<AppArtifact = JsonObject>
 request := { role, promptSet, promptStage, subjectContent, workspaceRef,
              idempotencyKey, budget, timeoutMs }
-AgentRunHandle := { runRef, mode: 'os'|'local',
-                    await(): RunResult, cancel(), reattach() }
-RunResult := { status: completed|failed|timeout|cancelled,
-               artifact?: ReviewArtifact | RemediationReply,
+AgentRunHandle<AppArtifact> := { runRef, mode: 'os'|'local',
+                    await(): RunResult<AppArtifact>, cancel(), reattach() }
+RunResult<AppArtifact> := { status: completed|failed|timeout|cancelled,
+               artifact?: AppArtifact,
                failureClass?, usage? }
 ```
 
-Two implementations plus a router:
+`AppArtifact` is an opaque JSON object at this boundary. The domain adapter
+validates and decodes it into `ReviewArtifact`, `RemediationReply`, or another
+domain type before handing it to the kernel.
 
-**`os-dispatch` (primary).** Dispatches through the app contract
+Two Layer 5 implementations are injected into the Layer 3 router:
+
+**`os-dispatch` (primary, Layer 5).** Dispatches through the app contract
 (`/v1/dispatch` via the real `@agent-os/app-sdk` — the vendored fork in
 `src/app-contract-dispatch.mjs` is deleted). Reviews dispatch with
 `--task-kind review --completion-shape decision-only`; the verdict comes back
@@ -242,7 +257,7 @@ through the artifact-handoff surface. Remediation dispatches with
 model allowlists, sandboxing, token budgets, and ledger telemetry from the
 worker pool — all of the machinery `reviewer.mjs` currently reimplements.
 
-**`local` (fallback, first-class).** Direct process spawn, descended from
+**`local` (fallback, first-class, Layer 5).** Direct process spawn, descended from
 today's `cli-direct` path: process-group isolation, forbidden-fallback env
 stripping, failure classification, cancellation, reattach-after-crash, atomic
 run records under `data/reviewer-runs/`. Because local mode bypasses OS
@@ -250,6 +265,10 @@ admission and budget enforcement, it keeps **its own conservative admission
 layer**: the existing memory-pressure gates, quota-exhaustion detection, and
 a local per-run token/time cap. Local mode is not a test shim — it is the
 production lifeline mode and is exercised continuously (§6.4).
+For a role whose completion requires an external write, such as the
+remediator's `branch-push`, it requests that capability from the injected
+Layer 2 `CredentialsProvider` immediately before spawn and passes the scoped
+credential only to that child process.
 
 ### 6.2 Health router — automatic failover, automatic resume
 
@@ -276,16 +295,30 @@ hysteresis `m=6` healthy probes over `w=5` minutes.
 
 ### 6.3 In-flight semantics across transitions
 
-- **A run finishes in the mode it started.** No mid-run migration. Failover
-  affects new runs only; a live OS dispatch that goes silent is handled by the
-  normal timeout/reattach path, not by re-running it locally.
+- **A responsive run finishes in the mode it started.** No mid-run migration.
+  OS runs must emit a heartbeat or observable `dispatch_status` progress within
+  a short, separately configured `osRunLivenessTimeoutMs` (default 90s). When
+  that deadline expires during `LOCAL-FALLBACK`, the router attempts
+  cancellation, marks the OS `runRef` superseded durably, and reissues the run
+  locally without waiting for the model execution timeout. Cancellation is
+  best-effort; active-run validation below is the correctness backstop.
 - **Idempotency keys prevent double work across the boundary.**
   `idempotencyKey = (domainId, subjectExternalId, revisionRef, stageId,
-  round)`. On resume, before dispatching anything, the router reconciles: for
-  every key it may have handed to the OS pre-failover, query
+  reviewerRole, round)`. On resume, before dispatching anything, the router
+  reconciles: for every key it may have handed to the OS pre-failover, query
   `dispatch_status`; an accepted-but-unobserved dispatch is adopted, not
-  re-issued. The app-contract endpoint's `(app_id, request_id)` idempotency is
-  the server-side backstop.
+  re-issued. If a transport failure leaves acceptance unknowable and policy
+  starts a local replacement, the durable active-run record is moved to the
+  local `runRef` first, superseding any delayed OS completion. The app-contract
+  endpoint's `(app_id, request_id)` idempotency is the server-side backstop.
+- **Only the active run may deliver an artifact.** Before an artifact handoff
+  mutates pipeline state, the receiving surface atomically compares its
+  `runRef` with the kernel's durable active-run record for
+  `(domainId, subjectExternalId, revisionRef, stageId, reviewerRole, round)`.
+  A handoff from a cancelled, orphaned, or superseded OS run is acknowledged
+  and discarded with an audit event; it must not append `panelVerdicts` or
+  trigger a state transition. The same compare-and-set makes repeated handoff
+  delivery idempotent.
 - **Local results are durable regardless of OS state.** The app's own store
   (`reviews.db`) remains the system of record for subject state; ledger
   enrichment is best-effort (§9).

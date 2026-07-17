@@ -1,5 +1,6 @@
 {
   "id": "code-pr",
+  "enabled": true,
   "subjectChannel": "github-pr",
   "commsChannel": "github-pr-comments",
   "reviewerRuntime": "cli-direct",

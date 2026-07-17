@@ -387,25 +387,36 @@ test('watcher does not suppress rereview for raw hold/stuck labels without curre
 });
 
 test('watcher allows stale-review auto-refresh for the post-budget final review', () => {
+  const observedIdentities = [];
   const suppression = getStalePostedReviewBudgetSuppression({
     rootDir: '/tmp/adversarial-review-test-root',
+    domainId: 'secondary-code-pr',
     repoPath: 'laceyenterprises/agent-os',
     prNumber: 2587,
     linearTicketId: 'ASB-09',
     reviewRow: { review_status: 'posted' },
-    summarizePRRemediationLedgerImpl: () => ({
-      completedRoundsForPR: 2,
-      latestRiskClass: 'medium',
-      latestMaxRounds: 2,
-    }),
+    summarizePRRemediationLedgerImpl: (_rootDir, identity) => {
+      observedIdentities.push(identity);
+      return {
+        completedRoundsForPR: 2,
+        latestRiskClass: 'medium',
+        latestMaxRounds: 2,
+      };
+    },
     resolveRoundBudgetForJobImpl: (job, { rootDir }) => {
       assert.equal(rootDir, '/tmp/adversarial-review-test-root');
       assert.equal(job.linearTicketId, 'ASB-09');
       assert.equal(job.riskClass, 'medium');
       return { roundBudget: 2, riskClass: 'medium' };
     },
-    countCompletedReviewerRereviewRoundsImpl: () => 0,
+    countCompletedReviewerRereviewRoundsImpl: (identity) => {
+      observedIdentities.push(identity);
+      return 0;
+    },
   });
+
+  assert.equal(observedIdentities[0].domainId, 'secondary-code-pr');
+  assert.equal(observedIdentities[1].domainId, 'secondary-code-pr');
 
   assert.deepEqual(suppression, {
     suppressed: false,

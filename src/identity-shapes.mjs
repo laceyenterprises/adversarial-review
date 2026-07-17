@@ -12,13 +12,28 @@ function makeCodePrSubjectExternalId(repo, prNumber) {
   return `${normalizedRepo}#${normalizedPrNumber}`;
 }
 
-function buildCodePrSubjectIdentity({ repo, prNumber, revisionRef = null } = {}) {
-  const subjectExternalId = makeCodePrSubjectExternalId(repo, prNumber);
+// Generic subject identity — no domain is assumed. A partial identity (missing
+// subjectExternalId or domainId) collapses domainId to null so downstream
+// identity/delivery keys stay well-formed. ARC-03: this primitive carries no
+// hardcoded `code-pr` fallback; callers thread the domain that owns the subject.
+function buildSubjectIdentity({ domainId = null, subjectExternalId = null, revisionRef = null } = {}) {
+  const normalizedSubjectExternalId = subjectExternalId || null;
   return {
-    domainId: subjectExternalId ? CODE_PR_DOMAIN_ID : null,
-    subjectExternalId,
+    domainId: normalizedSubjectExternalId && domainId ? domainId : null,
+    subjectExternalId: normalizedSubjectExternalId,
     revisionRef: revisionRef || null,
   };
+}
+
+// code-pr-scoped convenience over buildSubjectIdentity. The domain is an
+// explicit, overridable parameter (defaulting to the code-pr domain id for the
+// code-pr call sites) rather than a silent fallback baked into the generic path.
+function buildCodePrSubjectIdentity({ repo, prNumber, revisionRef = null, domainId = CODE_PR_DOMAIN_ID } = {}) {
+  return buildSubjectIdentity({
+    domainId,
+    subjectExternalId: makeCodePrSubjectExternalId(repo, prNumber),
+    revisionRef,
+  });
 }
 
 function buildDeliveryKey({
@@ -28,8 +43,9 @@ function buildDeliveryKey({
   round = null,
   kind,
   noticeRef = null,
+  domainId = CODE_PR_DOMAIN_ID,
 } = {}) {
-  const identity = buildCodePrSubjectIdentity({ repo, prNumber, revisionRef });
+  const identity = buildCodePrSubjectIdentity({ repo, prNumber, revisionRef, domainId });
   return {
     ...identity,
     round: Number.isInteger(Number(round)) && Number(round) >= 0 ? Number(round) : null,
@@ -42,5 +58,6 @@ export {
   CODE_PR_DOMAIN_ID,
   buildCodePrSubjectIdentity,
   buildDeliveryKey,
+  buildSubjectIdentity,
   makeCodePrSubjectExternalId,
 };

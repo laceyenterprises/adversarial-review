@@ -99,7 +99,7 @@ test('summarizePRRemediationLedger returns zero counts for a PR with no follow-u
   });
 });
 
-test('summarizePRRemediationLedger only counts terminal jobs and isolates by (repo, prNumber)', () => {
+test('summarizePRRemediationLedger only counts terminal jobs and isolates by (domainId, repo, prNumber)', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 
   // Different PR — must not be counted
@@ -138,6 +138,14 @@ test('summarizePRRemediationLedger only counts terminal jobs and isolates by (re
   });
   assert.equal(ledgerAfterOne.completedRoundsForPR, 1);
   assert.equal(ledgerAfterOne.latestMaxRounds, DEFAULT_MAX_REMEDIATION_ROUNDS);
+
+  const secondaryDomainLedger = summarizePRRemediationLedger(rootDir, {
+    domainId: 'secondary-code-pr',
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+  });
+  assert.equal(secondaryDomainLedger.completedRoundsForPR, 0);
+  assert.equal(secondaryDomainLedger.latestMaxRounds, null);
 });
 
 test('summarizePRRemediationLedger takes max(currentRound) across terminal jobs (currentRound is cumulative, not per-job)', () => {

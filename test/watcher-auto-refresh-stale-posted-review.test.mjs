@@ -1125,6 +1125,34 @@ test('watcher suppresses a hammer-moved head once the PR spent its post-budget f
   });
 });
 
+test('watcher suppresses a zero-budget PR after its single owed final review', () => {
+  const suppression = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 3818,
+    reviewRow: {
+      review_status: 'posted',
+      reviewer_head_sha: 'zero-budget-final-head',
+    },
+    currentHeadSha: 'later-hammer-head',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 0,
+      latestRiskClass: 'low',
+      latestMaxRounds: 0,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: ({ headSha }) =>
+      headSha === null ? 1 : 0,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 0, riskClass: 'low' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: true,
+    reason: 'post-budget-final-review-completed-for-pr',
+    completedRoundsForPR: 0,
+    roundBudget: 0,
+    riskClass: 'low',
+  });
+});
+
 test('watcher keeps remediation-worker rereview within the final-review allowance', () => {
   const withinBudget = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',

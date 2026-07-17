@@ -4233,7 +4233,8 @@ function resolveFirstPassReviewBudgetSuppression({
     roundBudget > 0;
   const remediationBudgetConsumed =
     Number.isFinite(completedRemediationRoundsForPR) &&
-    hasPositiveRoundBudget &&
+    Number.isFinite(roundBudget) &&
+    roundBudget >= 0 &&
     completedRemediationRoundsForPR >= roundBudget;
   const postBudgetFinalReviewCompleted =
     Number.isFinite(completedRereviewRounds) &&
@@ -4248,7 +4249,6 @@ function resolveFirstPassReviewBudgetSuppression({
   // remediation push and the PR never converged (#81 runaway-hammer loop).
   const postBudgetFinalReviewCompletedForPR =
     remediationBudgetConsumed &&
-    hasPositiveRoundBudget &&
     Number.isFinite(completedRereviewRoundsForPRTotal) &&
     completedRereviewRoundsForPRTotal > roundBudget;
   const rereviewBudgetConsumed =

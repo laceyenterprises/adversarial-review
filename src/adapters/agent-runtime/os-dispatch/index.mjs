@@ -21,7 +21,7 @@
 // `request_id`; the endpoint's (app_id, request_id) idempotency is the
 // server-side backstop that makes re-dispatch and reattach safe (§6.3).
 
-import { connect } from '@agent-os/app-sdk';
+import { loadAppSdkConnect } from '../../../app-sdk-loader.mjs';
 import {
   isTransientAppContractError,
   withAppContractTransientRetry,
@@ -242,7 +242,7 @@ function defaultJitter(maxMs) {
 
 function createOsDispatchAgentRuntime({
   session = null,
-  connectImpl = connect,
+  connectImpl = null,
   connectOptions = {},
   buildPrompt = defaultBuildPrompt,
   pollBaseMs = DEFAULT_POLL_BASE_MS,
@@ -256,7 +256,8 @@ function createOsDispatchAgentRuntime({
 
   async function resolveSession() {
     if (!sessionPromise) {
-      sessionPromise = withAppContractTransientRetry(() => connectImpl(connectOptions), { sleepImpl }).catch((err) => {
+      const doConnect = connectImpl ?? (await loadAppSdkConnect());
+      sessionPromise = withAppContractTransientRetry(() => doConnect(connectOptions), { sleepImpl }).catch((err) => {
         sessionPromise = null; // allow a later run to retry the connect
         throw err;
       });

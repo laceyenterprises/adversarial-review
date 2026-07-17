@@ -5,7 +5,7 @@ import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { connect } from '@agent-os/app-sdk';
+import { loadAppSdkConnect } from './app-sdk-loader.mjs';
 import { withAppContractTransientRetry } from './app-contract-retry.mjs';
 import {
   buildRemediationReply,
@@ -2778,6 +2778,7 @@ async function dispatchRemediationViaHq({
   });
   const ticket = appMode === 'agent-os'
     ? await (async () => {
+        const connect = await loadAppSdkConnect();
         const os = await withAppContractTransientRetry(() => connect({
           app_id: 'adversarial-review',
           mode: appMode,

@@ -24,34 +24,92 @@ const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
 function readAuditRows(rootDir) {
   const dir = routerAuditDir(rootDir);
   if (!existsSync(dir)) return [];
-  const rows = [];
-  for (const name of readdirSync(dir).sort()) {
-    if (!name.endsWith('.jsonl')) continue;
+  const selected = [];
+  let latestTransition = null;
+  let lastFailover = null;
+  let lastResumeComplete = null;
+  let lastResumeStart = null;
+  let resumeStartSearchDone = false;
+  let sequence = 0;
+
+  function addSelected(row, seq) {
+    if (selected.some((entry) => entry.row === row)) return;
+    selected.push({ row, seq, atMs: Date.parse(row?.at ?? '') });
+  }
+
+  function finish() {
+    return selected
+      .sort((a, b) => {
+        const am = Number.isFinite(a.atMs) ? a.atMs : 0;
+        const bm = Number.isFinite(b.atMs) ? b.atMs : 0;
+        return am - bm || b.seq - a.seq;
+      })
+      .map((entry) => entry.row);
+  }
+
+  for (const name of readdirSync(dir).filter((entry) => entry.endsWith('.jsonl')).sort().reverse()) {
     let raw;
     try {
       raw = readFileSync(join(dir, name), 'utf8');
     } catch {
       continue;
     }
-    for (const line of raw.split('\n')) {
+    const lines = raw.split('\n');
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const line = lines[i];
       const trimmed = line.trim();
       if (!trimmed) continue;
+      const seq = sequence;
+      sequence += 1;
+      let row;
       try {
-        rows.push(JSON.parse(trimmed));
+        row = JSON.parse(trimmed);
       } catch {
         // skip a torn line
+        continue;
+      }
+
+      if (!latestTransition) {
+        latestTransition = row;
+        addSelected(row, seq);
+      }
+      if (!lastFailover && row?.kind === 'failover') {
+        lastFailover = row;
+        addSelected(row, seq);
+      }
+      if (!lastResumeComplete && row?.kind === 'resume-complete') {
+        lastResumeComplete = row;
+        addSelected(row, seq);
+      } else if (lastResumeComplete && !lastResumeStart && !resumeStartSearchDone) {
+        const completeAtMs = Date.parse(lastResumeComplete?.at ?? '');
+        const rowAtMs = Date.parse(row?.at ?? '');
+        const isBeforeResumeComplete = !Number.isFinite(completeAtMs)
+          || !Number.isFinite(rowAtMs)
+          || rowAtMs <= completeAtMs;
+        if (row?.kind === 'resume-start' && isBeforeResumeComplete) {
+          lastResumeStart = row;
+          resumeStartSearchDone = true;
+          addSelected(row, seq);
+        } else if (
+          row !== lastResumeComplete
+          && isBeforeResumeComplete
+          && ['failover', 'resume-aborted', 'resume-complete'].includes(row?.kind)
+        ) {
+          resumeStartSearchDone = true;
+        }
+      }
+
+      if (
+        latestTransition
+        && lastFailover
+        && lastResumeComplete
+        && (lastResumeStart || resumeStartSearchDone)
+      ) {
+        return finish();
       }
     }
   }
-  // Stable chronological order (ties keep file order).
-  return rows
-    .map((row, index) => ({ row, index, atMs: Date.parse(row?.at ?? '') }))
-    .sort((a, b) => {
-      const am = Number.isFinite(a.atMs) ? a.atMs : 0;
-      const bm = Number.isFinite(b.atMs) ? b.atMs : 0;
-      return am - bm || a.index - b.index;
-    })
-    .map((entry) => entry.row);
+  return finish();
 }
 
 function lastWhere(rows, predicate) {

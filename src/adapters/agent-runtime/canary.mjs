@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { writeFileAtomic } from '../../atomic-write.mjs';
 import { deliverAlert } from '../../alert-delivery.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from '../../kernel/verdict.mjs';
+import { assertCanonicalOwner } from './append-only-owner.mjs';
 import { recordRuntimeRun } from './run-ledger.mjs';
 
 const CANARY_STATUS_SCHEMA_VERSION = 1;
@@ -59,7 +60,8 @@ function readCanaryStatus(rootDir) {
   }
 }
 
-function writeCanaryStatus(rootDir, status) {
+function writeCanaryStatus(rootDir, status, { ownerGuardOptions } = {}) {
+  assertCanonicalOwner(rootDir, canaryStatusPath(rootDir), ownerGuardOptions);
   writeFileAtomic(
     canaryStatusPath(rootDir),
     `${JSON.stringify(status, null, 2)}\n`,

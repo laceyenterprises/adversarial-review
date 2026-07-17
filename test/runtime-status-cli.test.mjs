@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { buildRuntimeStatus, renderRuntimeStatus } from '../src/runtime-status.mjs';
+import { buildRuntimeStatus, readAuditRows, renderRuntimeStatus } from '../src/runtime-status.mjs';
 import { runtimeMain } from '../src/runtime-status-cli.mjs';
 import { createRouterAuditSink } from '../src/adapters/agent-runtime/router/audit.mjs';
 import { writeRuntimeStatusSnapshot } from '../src/runtime-status-snapshot.mjs';
@@ -167,4 +167,64 @@ test('runtimeMain rejects an unknown subcommand and a bad flag', () => {
   err = '';
   assert.equal(runtimeMain(['status', '--nope'], io), 2);
   assert.match(err, /unknown argument/);
+});
+
+test('snapshot and canary status writers reject cross-user durable state writes', () => {
+  const owners = new Map([['/tool/data', 501]]);
+  const ownerGuardOptions = {
+    currentUid: () => 502,
+    exists: (path) => owners.has(path),
+    stat: (path) => ({ uid: owners.get(path) }),
+  };
+  assert.throws(
+    () => writeRuntimeStatusSnapshot('/tool', { mode: 'os' }, { ownerGuardOptions }),
+    /refusing cross-user durable state write/,
+  );
+  assert.throws(
+    () => writeCanaryStatus('/tool', { status: 'pass' }, { ownerGuardOptions }),
+    /refusing cross-user durable state write/,
+  );
+});
+
+test('readAuditRows bounds the newest-transition lookup once latest failover and resume are found', () => {
+  const rootDir = tmpRoot();
+  try {
+    const dir = join(rootDir, 'data', 'runtime-router-audit');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, '2026-05.jsonl'), [
+      JSON.stringify({ kind: 'failover', at: '2026-05-01T00:00:00.000Z', to_mode: 'local' }),
+      JSON.stringify({ kind: 'resume-complete', at: '2026-05-01T00:05:00.000Z', to_mode: 'os' }),
+      '',
+    ].join('\n'));
+    writeFileSync(join(dir, '2026-06.jsonl'), [
+      JSON.stringify({
+        kind: 'resume-start',
+        at: '2026-06-01T00:00:00.000Z',
+        to_mode: 'local',
+        healthy_probes: 6,
+        span_ms: 300_000,
+      }),
+      JSON.stringify({
+        kind: 'resume-complete',
+        at: '2026-06-01T00:05:00.000Z',
+        to_mode: 'os',
+        reconcile: { adopted: 1, duplicated: 0 },
+      }),
+      '',
+    ].join('\n'));
+    writeFileSync(join(dir, '2026-07.jsonl'), [
+      JSON.stringify({ kind: 'failover', at: '2026-07-01T00:00:00.000Z', to_mode: 'local' }),
+      '',
+    ].join('\n'));
+
+    const rows = readAuditRows(rootDir);
+    assert.deepEqual(rows.map((row) => row.at), [
+      '2026-06-01T00:00:00.000Z',
+      '2026-06-01T00:05:00.000Z',
+      '2026-07-01T00:00:00.000Z',
+    ]);
+    assert.deepEqual(rows.map((row) => row.kind), ['resume-start', 'resume-complete', 'failover']);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });

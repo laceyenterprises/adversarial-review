@@ -12,6 +12,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomic } from './atomic-write.mjs';
+import { assertCanonicalOwner } from './adapters/agent-runtime/append-only-owner.mjs';
 
 const SNAPSHOT_SCHEMA_VERSION = 1;
 const SNAPSHOT_FILE = ['data', 'runtime-status-snapshot.json'];
@@ -23,12 +24,13 @@ function runtimeStatusSnapshotPath(rootDir) {
 // Persist a router status snapshot. `status` is the object returned by
 // `router.status()` (ARC-07). `capturedAt` lets the CLI report snapshot
 // staleness independent of the fields inside `status`.
-function writeRuntimeStatusSnapshot(rootDir, status, { now = () => new Date() } = {}) {
+function writeRuntimeStatusSnapshot(rootDir, status, { now = () => new Date(), ownerGuardOptions } = {}) {
   const snapshot = {
     schema_version: SNAPSHOT_SCHEMA_VERSION,
     capturedAt: now().toISOString(),
     status: status ?? null,
   };
+  assertCanonicalOwner(rootDir, runtimeStatusSnapshotPath(rootDir), ownerGuardOptions);
   writeFileAtomic(
     runtimeStatusSnapshotPath(rootDir),
     `${JSON.stringify(snapshot, null, 2)}\n`,
@@ -50,11 +52,11 @@ function readRuntimeStatusSnapshot(rootDir) {
 }
 
 // Convenience for a router-owning loop: capture and persist in one call.
-function persistRouterStatus(rootDir, router, { now = () => new Date() } = {}) {
+function persistRouterStatus(rootDir, router, { now = () => new Date(), ownerGuardOptions } = {}) {
   if (!router || typeof router.status !== 'function') {
     throw new TypeError('persistRouterStatus requires a router exposing status()');
   }
-  return writeRuntimeStatusSnapshot(rootDir, router.status(), { now });
+  return writeRuntimeStatusSnapshot(rootDir, router.status(), { now, ownerGuardOptions });
 }
 
 export {

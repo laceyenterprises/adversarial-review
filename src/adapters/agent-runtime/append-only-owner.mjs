@@ -1,14 +1,18 @@
 import { existsSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
-function assertCanonicalAppendOwner(rootDir, targetDir, filePath, {
+function assertCanonicalOwner(rootDir, targetPath, {
+  targetDir = dirname(targetPath),
   currentUid = () => (typeof process.getuid === 'function' ? process.getuid() : null),
   exists = existsSync,
   stat = statSync,
+  cannotVerifyMessage = 'cannot verify durable state caller ownership',
+  crossUserMessage = 'refusing cross-user durable state write',
+  existingFileMessage = 'refusing write to non-canonical-owned durable state file',
 } = {}) {
   const callerUid = currentUid();
   if (!Number.isInteger(callerUid)) {
-    throw new Error('cannot verify append-only store caller ownership');
+    throw new Error(cannotVerifyMessage);
   }
 
   const anchor = exists(targetDir)
@@ -17,18 +21,28 @@ function assertCanonicalAppendOwner(rootDir, targetDir, filePath, {
   const ownerUid = stat(anchor).uid;
   if (callerUid !== ownerUid) {
     throw new Error(
-      `refusing cross-user append-only store write: caller uid ${callerUid}, canonical owner uid ${ownerUid}`,
+      `${crossUserMessage}: caller uid ${callerUid}, canonical owner uid ${ownerUid}`,
     );
   }
 
-  if (exists(filePath)) {
-    const fileUid = stat(filePath).uid;
+  if (exists(targetPath)) {
+    const fileUid = stat(targetPath).uid;
     if (fileUid !== ownerUid) {
       throw new Error(
-        `refusing append to non-canonical-owned store file: file uid ${fileUid}, canonical owner uid ${ownerUid}`,
+        `${existingFileMessage}: file uid ${fileUid}, canonical owner uid ${ownerUid}`,
       );
     }
   }
 }
 
-export { assertCanonicalAppendOwner };
+function assertCanonicalAppendOwner(rootDir, targetDir, filePath, options = {}) {
+  assertCanonicalOwner(rootDir, filePath, {
+    ...options,
+    targetDir,
+    cannotVerifyMessage: options.cannotVerifyMessage ?? 'cannot verify append-only store caller ownership',
+    crossUserMessage: options.crossUserMessage ?? 'refusing cross-user append-only store write',
+    existingFileMessage: options.existingFileMessage ?? 'refusing append to non-canonical-owned store file',
+  });
+}
+
+export { assertCanonicalAppendOwner, assertCanonicalOwner };

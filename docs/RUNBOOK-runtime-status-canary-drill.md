@@ -89,11 +89,11 @@ in-memory fake — so it is safe in CI. Pass `--root <dir>` to leave the audit
 trail + status snapshot behind, then run `runtime status --root <dir>` to see
 the failover/resume you just rehearsed.
 
-The transition audit and run-ledger enforce the canonical owner of their
-existing store directory (falling back to `data/`, then the tool root) before
-creating or appending a monthly JSONL file. Run manual tools as the service
-account when targeting the production root; a cross-user `--root` fails closed
-before it can create daemon-blocking files.
+The transition audit, run-ledger, status snapshot, and canary status enforce the
+canonical owner of their existing store directory (falling back to `data/`, then
+the tool root) before creating, appending, or overwriting durable state. Run
+manual tools as the service account when targeting the production root; a
+cross-user `--root` fails closed before it can create daemon-blocking files.
 
 Both the canary (fixture) and the drill run as CI gates in
 `.github/workflows/test.yml`, in addition to their unit tests

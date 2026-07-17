@@ -6,6 +6,15 @@
  */
 export type IsoTimestamp = string;
 
+/**
+ * Minimal JSON value/object aliases. The AgentRuntime port hands the app
+ * artifact back as an opaque JSON object at the runtime boundary; the domain
+ * adapter decodes it into a domain type (`Verdict`, `RemediationReply`, …)
+ * before the kernel sees it.
+ */
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+export type JsonObject = { [key: string]: JsonValue };
+
 export type RiskClass = 'low' | 'medium' | 'high' | 'critical';
 
 export type PromptStage = 'first' | 'middle' | 'last';
@@ -150,6 +159,7 @@ export interface SubjectContext {
   completedRemediationRounds?: number;
   maxRemediationRounds?: number;
   reviewerSessionUuid?: string;
+  agentRoleKind?: 'reviewer' | 'remediator';
   labels?: readonly (string | { name?: string | null })[];
   ticketPipelinePaused?: boolean;
   crossModelReviewWaived?: boolean;
@@ -287,8 +297,13 @@ export type ReviewerFailureClass =
   | 'daemon-bounce'
   | 'lease-expired'
   | 'launchctl-bootstrap'
+  | 'local-admission-refused'
   | 'bug'
   | 'unknown';
+
+export type AgentFailureClass =
+  | Exclude<ReviewerFailureClass, 'reviewer-timeout'>
+  | 'timeout';
 
 export interface AdapterCapabilities {
   processGroupIsolation: boolean;
@@ -328,6 +343,7 @@ export interface RemediatorRunRequest {
   timeoutMs: number;
   sessionUuid: string;
   forbiddenFallbacks: readonly string[];
+  tokenBudget?: number | string | null;
   workspacePath?: string;
 }
 
@@ -368,4 +384,103 @@ export interface ReviewerRuntimeAdapter {
   cancel(sessionUuid: string): Promise<void>;
   reattach(record: ReviewerRunRecord): Promise<ReviewerRunResult>;
   describe(): { id: string; modelFamily: string; capabilities: AdapterCapabilities };
+}
+
+// ---------------------------------------------------------------------------
+// AgentRuntime port (v2 app architecture §6.1)
+//
+// The altitude fix: `ReviewerRuntimeAdapter` above abstracts *process
+// supervision of a monolith* — which never captured "which agent runs". The
+// AgentRuntime port abstracts the agent run itself. Two Layer-5 impls plug in
+// behind it: `os-dispatch` (primary, through the app contract) and `local`
+// (the first-class outage-lifeline descended from cli-direct). Only the
+// `local` impl ships in ARC-05; the watcher is wired to the port in ARC-06/07.
+// ---------------------------------------------------------------------------
+
+export type RuntimeMode = 'os' | 'local';
+
+export type AgentRunStatus = 'completed' | 'failed' | 'timeout' | 'cancelled';
+
+export type AgentRoleKind = 'reviewer' | 'remediator';
+
+/**
+ * The agent role to run. `model` is the harness/worker-class string the local
+ * runtime spawns (`claude`, `codex`, `gemini`, …); `forbiddenFallbacks` are the
+ * additive OAuth-strip aliases beyond the canonical set (see the local
+ * runtime's env-strip enforcement).
+ */
+export interface AgentRole {
+  id: string;
+  kind: AgentRoleKind;
+  model: string;
+  forbiddenFallbacks?: readonly string[];
+}
+
+/**
+ * Per-run token/time cap the caller requests. The local runtime's admission
+ * layer refuses any request whose requested budget exceeds the conservative
+ * local cap, because local mode bypasses OS admission and budget enforcement.
+ */
+export interface AgentRunBudget {
+  maxTokens?: number | null;
+  maxWallMs?: number | null;
+}
+
+/**
+ * A prepared workspace for a write-capable role (e.g. the remediator's
+ * `branch-push`). Reviewers run without a workspace.
+ */
+export interface WorkspaceRef {
+  workspacePath: string;
+  revisionRef?: string;
+}
+
+export interface AgentUsage {
+  input?: number | null;
+  output?: number | null;
+  reasoning?: number | null;
+  cacheRead?: number | null;
+  cacheWrite?: number | null;
+  total?: number | null;
+  source?: string;
+  [key: string]: JsonValue | undefined;
+}
+
+export interface AgentRunRequest {
+  role: AgentRole;
+  promptSet: string;
+  promptStage: PromptStage;
+  subjectContent: SubjectContent;
+  workspaceRef?: WorkspaceRef;
+  idempotencyKey: string;
+  budget?: AgentRunBudget;
+  timeoutMs: number;
+}
+
+export interface RunResult<AppArtifact = JsonObject> {
+  status: AgentRunStatus;
+  artifact?: AppArtifact;
+  failureClass?: AgentFailureClass | null;
+  usage?: AgentUsage | null;
+  runtimeMode?: RuntimeMode;
+  // Human-readable failure/refusal detail (admission reason, stderr tail, …).
+  detail?: string | null;
+}
+
+/**
+ * A live (or settled) agent run. `await()` resolves the structured
+ * `RunResult`; `cancel()` requests best-effort termination; `reattach()`
+ * re-adopts the run from its durable record after a kernel restart.
+ */
+export interface AgentRunHandle<AppArtifact = JsonObject> {
+  runRef: string;
+  mode: RuntimeMode;
+  await(): Promise<RunResult<AppArtifact>>;
+  cancel(): Promise<void>;
+  reattach(): Promise<RunResult<AppArtifact>>;
+}
+
+export interface AgentRuntime<AppArtifact = JsonObject> {
+  run(request: AgentRunRequest): Promise<AgentRunHandle<AppArtifact>>;
+  describe(): { id: string; mode: RuntimeMode; capabilities: AdapterCapabilities };
 }

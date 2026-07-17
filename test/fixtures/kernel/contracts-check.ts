@@ -1,11 +1,15 @@
 import type {
+  AgentRunRequest,
+  AgentRuntime,
   CommsChannelAdapter,
   DeliveryKey,
   OperatorSurfaceAdapter,
   ReviewerRuntimeAdapter,
   RemediationCommitMetadata,
   RemediationReply,
+  RunResult,
   SubjectChannelAdapter,
+  SubjectContent,
   SubjectRef,
   Verdict,
 } from '../../../src/kernel/contracts.js';
@@ -238,6 +242,58 @@ const reviewerRuntime: ReviewerRuntimeAdapter = {
   },
 };
 
+const subjectContent: SubjectContent = {
+  ref,
+  representation: 'Reviewable content',
+  observedAt: '2026-05-10T00:00:00.000Z',
+};
+
+const agentRunRequest: AgentRunRequest = {
+  role: { id: 'reviewer:codex', kind: 'reviewer', model: 'codex', forbiddenFallbacks: ['api-key'] },
+  promptSet: 'code-pr',
+  promptStage: 'first',
+  subjectContent,
+  idempotencyKey: 'example-domain:subject-123:revision-abc:review:reviewer:1',
+  budget: { maxTokens: 500_000, maxWallMs: 900_000 },
+  timeoutMs: 1_000,
+};
+
+const agentRuntime: AgentRuntime = {
+  async run(request) {
+    const result: RunResult = {
+      status: 'completed',
+      artifact: { kind: 'review', body: `reviewed ${request.subjectContent.ref.domainId}` },
+      failureClass: null,
+      usage: { total: 1234, source: 'fixture' },
+      runtimeMode: 'local',
+    };
+    return {
+      runRef: request.idempotencyKey,
+      mode: 'local',
+      async await() {
+        return result;
+      },
+      async cancel() {},
+      async reattach() {
+        return result;
+      },
+    };
+  },
+  describe() {
+    return {
+      id: 'local',
+      mode: 'local',
+      capabilities: {
+        processGroupIsolation: true,
+        daemonBounceSafe: false,
+        heartbeatPersisted: false,
+        leaseManaged: false,
+        oauthStripEnforced: true,
+      },
+    };
+  },
+};
+
 await subjectAdapter.discoverSubjects();
 await commsAdapter.postRemediationReply(reply, { ...deliveryKey, kind: 'remediation-reply' });
 await operatorSurface.syncTriageStatus(ref, 'awaiting-rereview');
@@ -249,3 +305,17 @@ await reviewerRuntime.spawnReviewer({
   sessionUuid: 'session-123',
   forbiddenFallbacks: ['api-key'],
 });
+
+const agentRunHandle = await agentRuntime.run(agentRunRequest);
+const agentRunResult: RunResult = await agentRunHandle.await();
+const timeoutRunResult: RunResult = {
+  status: 'timeout',
+  failureClass: 'timeout',
+  usage: null,
+  runtimeMode: 'local',
+  detail: 'reviewer wall-clock exceeded',
+};
+void agentRunResult;
+void timeoutRunResult;
+void agentRuntime.describe();
+await agentRunHandle.cancel();

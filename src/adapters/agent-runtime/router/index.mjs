@@ -84,6 +84,8 @@ function createHealthRouter({
   emitTelemetryFn = null,
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
   logger = console,
 } = {}) {
   if (!localRuntime || typeof localRuntime.run !== 'function') {
@@ -118,6 +120,7 @@ function createHealthRouter({
   let lastReconcile = null;
   let lastTransitionAt = startedAt;
   let probeTimer = null;
+  let isTicking = false;
 
   function defaultAdopt(key) {
     // Re-observe the accepted dispatch in the background rather than re-issuing.
@@ -230,6 +233,8 @@ function createHealthRouter({
       sseLive: () => sse.live(),
       config,
       now,
+      setTimeoutFn,
+      clearTimeoutFn,
     });
     lastProbe = probe;
     const transition = stateMachine.recordProbe(probe);
@@ -240,9 +245,13 @@ function createHealthRouter({
   function start() {
     if (!config.enabled || probeTimer) return probeTimer;
     probeTimer = setIntervalFn(() => {
-      tick().catch((err) => logger?.error?.('[health-router] probe tick failed', {
-        error: err?.message || String(err),
-      }));
+      if (isTicking) return;
+      isTicking = true;
+      tick()
+        .catch((err) => logger?.error?.('[health-router] probe tick failed', {
+          error: err?.message || String(err),
+        }))
+        .finally(() => { isTicking = false; });
     }, config.probeCadenceMs);
     if (probeTimer && typeof probeTimer.unref === 'function') probeTimer.unref();
     return probeTimer;

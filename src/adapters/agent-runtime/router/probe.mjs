@@ -17,6 +17,8 @@ async function probeOnce({
   sseLive,
   config,
   now = () => Date.now(),
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
 } = {}) {
   const at = now();
 
@@ -24,7 +26,18 @@ async function probeOnce({
   let healthzDetail = null;
   if (typeof checkHealthz === 'function') {
     try {
-      healthzOk = coerceOk(await checkHealthz());
+      let timeout;
+      const timeoutPromise = new Promise((_resolve, reject) => {
+        timeout = setTimeoutFn(
+          () => reject(new Error(`healthz timed out after ${config.healthzTimeoutMs}ms`)),
+          config.healthzTimeoutMs,
+        );
+      });
+      try {
+        healthzOk = coerceOk(await Promise.race([checkHealthz(), timeoutPromise]));
+      } finally {
+        clearTimeoutFn(timeout);
+      }
     } catch (err) {
       healthzOk = false;
       healthzDetail = err?.message || String(err);

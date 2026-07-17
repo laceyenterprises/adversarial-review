@@ -200,6 +200,64 @@ test('probe-driven failover then resume reconciles pending OS keys, adopting wit
   assert.equal(router.getMode(), 'os');
 });
 
+test('healthz probes time out and feed a failed probe to the state machine', async () => {
+  let timeoutDelay = null;
+  const router = createHealthRouter({
+    localRuntime: fakeLocalRuntime(),
+    auditSink: capturingAuditSink(),
+    checkHealthz: () => new Promise(() => {}),
+    setTimeoutFn(callback, delay) {
+      timeoutDelay = delay;
+      queueMicrotask(callback);
+      return 17;
+    },
+    clearTimeoutFn() {},
+    config: resolveRouterConfig({}, {
+      healthzTimeoutMs: 25,
+      probeFailureThreshold: 1,
+    }),
+  });
+
+  const result = await router.tick();
+  assert.equal(timeoutDelay, 25);
+  assert.equal(result.probe.healthy, false);
+  assert.equal(result.probe.components.healthzOk, false);
+  assert.equal(result.probe.components.healthzDetail, 'healthz timed out after 25ms');
+  assert.equal(result.transition.kind, 'failover');
+});
+
+test('interval probing skips overlapping ticks while a probe is in flight', async () => {
+  let intervalCallback;
+  let healthzCalls = 0;
+  let resolveHealthz;
+  const healthz = new Promise((resolve) => { resolveHealthz = resolve; });
+  const router = createHealthRouter({
+    localRuntime: fakeLocalRuntime(),
+    auditSink: capturingAuditSink(),
+    checkHealthz() {
+      healthzCalls += 1;
+      return healthz;
+    },
+    setIntervalFn(callback) {
+      intervalCallback = callback;
+      return { unref() {} };
+    },
+    clearIntervalFn() {},
+    config: resolveRouterConfig({}, { healthzTimeoutMs: 60_000 }),
+  });
+
+  router.start();
+  intervalCallback();
+  intervalCallback();
+  assert.equal(healthzCalls, 1);
+
+  resolveHealthz(true);
+  await new Promise((resolve) => setImmediate(resolve));
+  intervalCallback();
+  assert.equal(healthzCalls, 2);
+  router.stop();
+});
+
 test('with automatic failover disabled, a hard error does not flip modes', async () => {
   const local = fakeLocalRuntime();
   const audit = capturingAuditSink();

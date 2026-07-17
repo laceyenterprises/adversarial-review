@@ -18,6 +18,7 @@
 import { createCliDirectReviewerRuntimeAdapter } from '../../reviewer-runtime/cli-direct/index.mjs';
 import { readReviewerRunRecord } from '../../reviewer-runtime/run-state.mjs';
 import { DEFAULT_LOCAL_RUN_CAP, evaluateLocalAdmission } from './admission.mjs';
+import { createHash } from 'node:crypto';
 
 const RUNTIME_ID = 'local';
 const RUNTIME_MODE = 'local';
@@ -31,7 +32,9 @@ function deriveSessionUuid(idempotencyKey) {
   if (!normalized) {
     throw new TypeError('AgentRunRequest.idempotencyKey is required');
   }
-  return normalized.replace(/[^A-Za-z0-9._-]+/g, '-');
+  const filesystemSafe = normalized.replace(/[^A-Za-z0-9._-]+/g, '-');
+  const digest = createHash('sha256').update(normalized).digest('hex').slice(0, 16);
+  return `${filesystemSafe}-${digest}`;
 }
 
 function validateRequest(request) {
@@ -89,6 +92,7 @@ function buildRemediatorReq(request, sessionUuid, buildPrompt) {
     timeoutMs: request.timeoutMs,
     sessionUuid,
     forbiddenFallbacks: request.role.forbiddenFallbacks || [],
+    tokenBudget: request.budget?.maxTokens ?? null,
     workspacePath: request.workspaceRef?.workspacePath,
   };
 }
@@ -108,12 +112,15 @@ function buildArtifact(role, raw, body) {
 // `cancelled` is tracked on the handle (cli-direct reports an abort as a plain
 // failure), so the port can report a truthful `cancelled` status.
 function toRunResult(raw, { role, cancelled } = {}) {
-  const body = role?.kind === 'remediator' ? raw?.remediationBody : raw?.reviewBody;
+  const effectiveRole = role?.kind
+    ? role
+    : { kind: raw?.remediationBody !== undefined ? 'remediator' : 'reviewer' };
+  const body = effectiveRole.kind === 'remediator' ? raw?.remediationBody : raw?.reviewBody;
   const usage = raw?.tokenUsage ?? null;
   if (raw?.ok) {
     return {
       status: 'completed',
-      artifact: buildArtifact(role, raw, body),
+      artifact: buildArtifact(effectiveRole, raw, body),
       failureClass: null,
       usage,
       runtimeMode: RUNTIME_MODE,
@@ -199,10 +206,26 @@ function createLocalAgentRuntime({
       return settledHandle(runRef, admissionRefusedResult(admission || {}));
     }
 
+    const effectiveBudget = admission.budget || {};
+    const capWallMs = effectiveBudget.requestedWallMs;
+    const requestedTimeoutMs = Number(request.timeoutMs);
+    const timeoutMs = Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
+      ? Math.min(requestedTimeoutMs, capWallMs ?? requestedTimeoutMs)
+      : capWallMs;
+    const admittedRequest = {
+      ...request,
+      timeoutMs,
+      budget: {
+        ...request.budget,
+        maxTokens: effectiveBudget.requestedTokens,
+        maxWallMs: capWallMs,
+      },
+    };
+
     const cancelled = { value: false };
     const spawn = role.kind === 'remediator'
-      ? inner.spawnRemediator(buildRemediatorReq(request, sessionUuid, buildPrompt))
-      : inner.spawnReviewer(buildReviewerReq(request, sessionUuid, buildPrompt));
+      ? inner.spawnRemediator(buildRemediatorReq(admittedRequest, sessionUuid, buildPrompt))
+      : inner.spawnReviewer(buildReviewerReq(admittedRequest, sessionUuid, buildPrompt));
     // cli-direct spawn impls resolve (never reject) with a structured result;
     // guard defensively so a programmer error in an injected impl still yields
     // a RunResult rather than an unhandled rejection.
@@ -245,9 +268,10 @@ function createLocalAgentRuntime({
   // The strict AgentRuntime port only exposes `reattach()` on a live handle;
   // this record-scoped entrypoint is the superset the crash-recovery path
   // (ARC-06/07) needs, since after a restart the caller holds a run record —
-  // read from `data/reviewer-runs/` — rather than a handle. `role.kind`
-  // defaults to `reviewer` because run records do not persist the role kind.
-  async function reattach(record, { role = { kind: 'reviewer' } } = {}) {
+  // read from `data/reviewer-runs/` — rather than a handle. When the durable
+  // record lacks a role, result payload shape preserves reviewer/remediator
+  // classification without discarding remediation output.
+  async function reattach(record, { role } = {}) {
     if (!record || typeof record !== 'object') {
       throw new TypeError('createLocalAgentRuntime.reattach requires a run record');
     }

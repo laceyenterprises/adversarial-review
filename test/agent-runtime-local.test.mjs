@@ -201,6 +201,49 @@ test('local runtime reattach round-trips an in-flight record into a completed Ru
   }
 });
 
+test('local runtime reattach infers remediator artifacts when the durable record has no role', async () => {
+  const runtime = createLocalAgentRuntime({
+    cliDirect: {
+      async reattach() { return { ok: true, remediationBody: 'fixed patch' }; },
+    },
+  });
+  const result = await runtime.reattach({ sessionUuid: 'remediator-after-bounce' });
+  assert.equal(result.status, 'completed');
+  assert.equal(result.artifact.kind, 'remediation');
+  assert.equal(result.artifact.body, 'fixed patch');
+});
+
+test('session UUIDs remain distinct when filesystem normalization collides', () => {
+  const slash = deriveSessionUuid('domain:pr-14:feature/x:review:reviewer:1');
+  const dash = deriveSessionUuid('domain:pr-14:feature-x:review:reviewer:1');
+  assert.notEqual(slash, dash);
+  assert.doesNotMatch(slash, /[\\/]/);
+  assert.doesNotMatch(dash, /[\\/]/);
+});
+
+test('local runtime applies default caps and forwards token budgets to both roles', async () => {
+  const calls = [];
+  const cliDirect = {
+    spawnReviewer(req) { calls.push(req); return Promise.resolve({ ok: true, reviewBody: 'ok' }); },
+    spawnRemediator(req) { calls.push(req); return Promise.resolve({ ok: true, remediationBody: 'fixed' }); },
+  };
+  const runtime = createLocalAgentRuntime({
+    cliDirect,
+    admissionContext: { memoryAdmission: { admit: true } },
+  });
+  await (await runtime.run(reviewerRequest({ budget: undefined, timeoutMs: undefined }))).await();
+  await (await runtime.run(reviewerRequest({
+    role: { kind: 'remediator', model: 'codex' },
+    idempotencyKey: 'remediator-budget-forwarding',
+    budget: { maxTokens: 1234, maxWallMs: 5678 },
+    timeoutMs: undefined,
+  }))).await();
+  assert.equal(calls[0].tokenBudget, DEFAULT_LOCAL_RUN_CAP.maxTokens);
+  assert.equal(calls[0].timeoutMs, DEFAULT_LOCAL_RUN_CAP.maxWallMs);
+  assert.equal(calls[1].tokenBudget, 1234);
+  assert.equal(calls[1].timeoutMs, 5678);
+});
+
 // -- admission refusals -------------------------------------------------------
 
 test('local runtime refuses admission under critical memory pressure', async () => {
@@ -297,8 +340,10 @@ test('evaluateBudgetCap enforces token and wall-time ceilings independently', ()
   assert.equal(evaluateBudgetCap({ maxTokens: 10 }, { maxTokens: 100 }).admit, true);
   assert.equal(evaluateBudgetCap({ maxTokens: 200 }, { maxTokens: 100 }).reason, 'budget_token_cap_exceeded');
   assert.equal(evaluateBudgetCap({ maxWallMs: 200 }, { maxWallMs: 100 }).reason, 'budget_time_cap_exceeded');
-  // No requested budget → admitted (nothing to bound).
-  assert.equal(evaluateBudgetCap({}, DEFAULT_LOCAL_RUN_CAP).admit, true);
+  const defaulted = evaluateBudgetCap({}, DEFAULT_LOCAL_RUN_CAP);
+  assert.equal(defaulted.admit, true);
+  assert.equal(defaulted.requestedTokens, DEFAULT_LOCAL_RUN_CAP.maxTokens);
+  assert.equal(defaulted.requestedWallMs, DEFAULT_LOCAL_RUN_CAP.maxWallMs);
 });
 
 test('evaluateQuotaHold releases once the provider reset has elapsed', () => {

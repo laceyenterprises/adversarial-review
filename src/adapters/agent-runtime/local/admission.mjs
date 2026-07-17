@@ -36,29 +36,37 @@ function toFiniteNumber(value) {
 
 // Layer 1: per-run token/time cap.
 function evaluateBudgetCap(budget = {}, cap = DEFAULT_LOCAL_RUN_CAP) {
-  const requestedTokens = toFiniteNumber(budget?.maxTokens);
+  const suppliedTokens = toFiniteNumber(budget?.maxTokens);
   const capTokens = toFiniteNumber(cap?.maxTokens);
-  if (requestedTokens !== null && capTokens !== null && requestedTokens > capTokens) {
+  if (suppliedTokens !== null && capTokens !== null && suppliedTokens > capTokens) {
     return {
       admit: false,
       reason: 'budget_token_cap_exceeded',
       layer: 'budget',
-      requestedTokens,
+      requestedTokens: suppliedTokens,
       capTokens,
     };
   }
-  const requestedWallMs = toFiniteNumber(budget?.maxWallMs);
+  const suppliedWallMs = toFiniteNumber(budget?.maxWallMs);
   const capWallMs = toFiniteNumber(cap?.maxWallMs);
-  if (requestedWallMs !== null && capWallMs !== null && requestedWallMs > capWallMs) {
+  if (suppliedWallMs !== null && capWallMs !== null && suppliedWallMs > capWallMs) {
     return {
       admit: false,
       reason: 'budget_time_cap_exceeded',
       layer: 'budget',
-      requestedWallMs,
+      requestedWallMs: suppliedWallMs,
       capWallMs,
     };
   }
-  return { admit: true, reason: null, layer: 'budget', requestedTokens, capTokens };
+  return {
+    admit: true,
+    reason: null,
+    layer: 'budget',
+    requestedTokens: suppliedTokens ?? capTokens,
+    capTokens,
+    requestedWallMs: suppliedWallMs ?? capWallMs,
+    capWallMs,
+  };
 }
 
 // Layer 2: quota-exhaustion hold. `quotaState` is a reviewed_prs-shaped row

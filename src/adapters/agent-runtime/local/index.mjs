@@ -223,13 +223,14 @@ function createLocalAgentRuntime({
     };
 
     const cancelled = { value: false };
-    const spawn = role.kind === 'remediator'
-      ? inner.spawnRemediator(buildRemediatorReq(admittedRequest, sessionUuid, buildPrompt))
-      : inner.spawnReviewer(buildReviewerReq(admittedRequest, sessionUuid, buildPrompt));
     // cli-direct spawn impls resolve (never reject) with a structured result;
     // guard defensively so a programmer error in an injected impl still yields
     // a RunResult rather than an unhandled rejection.
-    const guarded = Promise.resolve(spawn).catch((err) => ({
+    const guarded = Promise.resolve().then(() => (
+      role.kind === 'remediator'
+        ? inner.spawnRemediator(buildRemediatorReq(admittedRequest, sessionUuid, buildPrompt))
+        : inner.spawnReviewer(buildReviewerReq(admittedRequest, sessionUuid, buildPrompt))
+    )).catch((err) => ({
       ok: false,
       failureClass: 'bug',
       error: err?.message || String(err),
@@ -245,7 +246,9 @@ function createLocalAgentRuntime({
       },
       async cancel() {
         cancelled.value = true;
-        await inner.cancel(sessionUuid);
+        if (typeof inner.cancel === 'function') {
+          await inner.cancel(sessionUuid);
+        }
       },
       async reattach() {
         const record = readRunRecordImpl(rootDir, sessionUuid);

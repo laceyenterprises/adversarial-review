@@ -244,6 +244,39 @@ test('local runtime applies default caps and forwards token budgets to both role
   assert.equal(calls[1].timeoutMs, 5678);
 });
 
+test('local runtime maps synchronous spawn errors into failed RunResults', async () => {
+  for (const kind of ['reviewer', 'remediator']) {
+    const runtime = createLocalAgentRuntime({
+      cliDirect: {
+        spawnReviewer() { throw new Error('synchronous reviewer failure'); },
+        spawnRemediator() { throw new Error('synchronous remediator failure'); },
+      },
+      admissionContext: { memoryAdmission: { admit: true } },
+    });
+    const handle = await runtime.run(reviewerRequest({
+      role: { kind, model: 'codex' },
+      idempotencyKey: `synchronous-${kind}-failure`,
+    }));
+    const result = await handle.await();
+    assert.equal(result.status, 'failed');
+    assert.equal(result.failureClass, 'bug');
+    assert.equal(result.detail, `synchronous ${kind} failure`);
+  }
+});
+
+test('local runtime cancellation tolerates an injected adapter without cancel', async () => {
+  const runtime = createLocalAgentRuntime({
+    cliDirect: {
+      spawnReviewer() { return Promise.resolve({ ok: true, reviewBody: 'ok' }); },
+    },
+    admissionContext: { memoryAdmission: { admit: true } },
+  });
+  const handle = await runtime.run(reviewerRequest({ idempotencyKey: 'cancel-without-inner-method' }));
+  await handle.cancel();
+  const result = await handle.await();
+  assert.equal(result.status, 'completed');
+});
+
 // -- admission refusals -------------------------------------------------------
 
 test('local runtime refuses admission under critical memory pressure', async () => {

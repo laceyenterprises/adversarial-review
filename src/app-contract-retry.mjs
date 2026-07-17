@@ -21,11 +21,16 @@ function isTransientAppContractError(error) {
   if (status === 408 || status === 425 || status === 429 || status >= 500) return true;
 
   const message = String(error?.message || '');
-  if (/timed out|fetch failed|network|connection (?:refused|reset|timed out)/i.test(message)) return true;
+  if (/timeout|timed out|fetch failed|network|connection (?:refused|reset|timed out)/i.test(message)) return true;
   const statusMatch = message.match(/^app-contract (\d{3})\b/);
   if (statusMatch) {
     const messageStatus = Number(statusMatch[1]);
-    return messageStatus === 429 || messageStatus >= 500;
+    return (
+      messageStatus === 408 ||
+      messageStatus === 425 ||
+      messageStatus === 429 ||
+      messageStatus >= 500
+    );
   }
   const codeMatch = message.match(/^app-contract ([a-z0-9][a-z0-9_.-]*):/i);
   return Boolean(codeMatch && TRANSIENT_APP_CONTRACT_CODES.has(codeMatch[1].toLowerCase()));
@@ -35,6 +40,9 @@ async function withAppContractTransientRetry(operation, {
   maxAttempts = 3,
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
+  if (!Number.isInteger(maxAttempts) || maxAttempts <= 0) {
+    throw new TypeError(`withAppContractTransientRetry: maxAttempts must be a positive integer, got ${maxAttempts}`);
+  }
   let lastError;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {

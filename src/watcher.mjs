@@ -4020,6 +4020,34 @@ function countCompletedReviewerRereviewRounds({
   }
 }
 
+function hasCompletedReviewerRereviewAfter({
+  db: dbOverride = null,
+  rootDir = ROOT,
+  repoPath,
+  prNumber,
+  after,
+} = {}) {
+  if (typeof after !== 'string' || after.length === 0) return false;
+  const ownedDb = dbOverride ? null : openReviewStateDb(rootDir);
+  const readDb = dbOverride || ownedDb;
+  try {
+    if (!dbOverride) ensureReviewStateSchema(readDb);
+    const row = readDb.prepare(
+      `SELECT 1
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pass_kind = 'rereview'
+          AND status = 'completed'
+          AND started_at >= ?
+        LIMIT 1`
+    ).get(repoPath, prNumber, after);
+    return Boolean(row);
+  } finally {
+    closeOwnedReviewStateDb(ownedDb);
+  }
+}
+
 // REVIEW-DEDUP: the hard re-review ceiling must count DISTINCT reviewed head
 // SHAs, not raw review events. `reviewed_prs.review_attempts` increments on
 // every attempt — including duplicate reviews of an unchanged head and failed
@@ -4152,6 +4180,7 @@ function resolveFirstPassReviewBudgetSuppression({
   summarizePRRemediationLedgerImpl = summarizePRRemediationLedger,
   resolveRoundBudgetForJobImpl = resolveRoundBudgetForJob,
   countCompletedReviewerRereviewRoundsImpl = countCompletedReviewerRereviewRounds,
+  hasCompletedReviewerRereviewAfterImpl = hasCompletedReviewerRereviewAfter,
 } = {}) {
   const normalizedLabelNames = new Set(normalizeLabelNames(labelNames));
   if (
@@ -4173,14 +4202,6 @@ function resolveFirstPassReviewBudgetSuppression({
   let ledger;
   let resolution;
   let completedRereviewRounds = 0;
-  // #81 (runaway-hammer close-model): the PER-PR completed-rereview count (all
-  // heads). The per-head count below intentionally re-arms review on a head move
-  // (LAC-1559 / agent-os#3272), but that made the post-budget "owed final
-  // review" fire on EVERY hammer-moved head after exhaustion — each new head
-  // reads 0 per-head rounds — so an exhausted PR re-opened findings forever and
-  // the hammer never closed (#3817 had to be hand-merged). This per-PR total
-  // bounds the post-budget final review so the hammer closes on exhaustion.
-  let completedRereviewRoundsForPRTotal = 0;
   try {
     ledger = summarizePRRemediationLedgerImpl(rootDir, { domainId, repo: repoPath, prNumber });
     completedRereviewRounds = countCompletedReviewerRereviewRoundsImpl({
@@ -4190,14 +4211,6 @@ function resolveFirstPassReviewBudgetSuppression({
       repoPath,
       prNumber,
       headSha: suppliedCurrentHeadSha,
-    });
-    completedRereviewRoundsForPRTotal = countCompletedReviewerRereviewRoundsImpl({
-      db: dbOverride,
-      rootDir,
-      domainId,
-      repoPath,
-      prNumber,
-      headSha: null,
     });
     resolution = resolveRoundBudgetForJobImpl({
       linearTicketId,
@@ -4240,17 +4253,25 @@ function resolveFirstPassReviewBudgetSuppression({
     Number.isFinite(completedRereviewRounds) &&
     remediationBudgetConsumed &&
     completedRereviewRounds >= roundBudget;
-  // #81: per-PR ceiling on post-budget final reviews. `> roundBudget` still
-  // grants the FIRST owed final review for a genuinely-new over-budget head (the
-  // per-PR total is still at the budget then — agent-os#3272 intent preserved),
-  // and suppresses once that owed review has completed and a hammer moves the
-  // head yet again (per-PR total now exceeds the budget). Without this, the
-  // per-head owed-review re-armed a fresh gating review on every hammer
-  // remediation push and the PR never converged (#81 runaway-hammer loop).
+  const remediationBudgetConsumedAt = Array.isArray(ledger.completedRoundTimestamps)
+    ? ledger.completedRoundTimestamps
+        .filter(({ round, terminalAt }) => Number(round) >= roundBudget && typeof terminalAt === 'string')
+        .map(({ terminalAt }) => terminalAt)
+        .sort()[0] || null
+    : null;
+  // #81: prove the single owed final review independently of the author-push
+  // budget. Reviewers may coalesce intermediate pushes, so their lifetime
+  // rereview count is not comparable to the remediation round number.
   const postBudgetFinalReviewCompletedForPR =
     remediationBudgetConsumed &&
-    Number.isFinite(completedRereviewRoundsForPRTotal) &&
-    completedRereviewRoundsForPRTotal > roundBudget;
+    remediationBudgetConsumedAt !== null &&
+    hasCompletedReviewerRereviewAfterImpl({
+      db: dbOverride,
+      rootDir,
+      repoPath,
+      prNumber,
+      after: remediationBudgetConsumedAt,
+    });
   const rereviewBudgetConsumed =
     Number.isFinite(completedRereviewRounds) &&
     hasPositiveRoundBudget &&

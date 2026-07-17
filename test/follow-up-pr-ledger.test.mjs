@@ -96,6 +96,7 @@ test('summarizePRRemediationLedger returns zero counts for a PR with no follow-u
     latestMaxRounds: null,
     latestRiskClass: 'medium',
     latestJobId: null,
+    completedRoundTimestamps: [],
   });
 });
 

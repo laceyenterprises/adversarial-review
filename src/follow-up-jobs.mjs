@@ -1411,6 +1411,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
   }
 
   let completedRoundsForPR = 0;
+  const completedRoundTimestamps = [];
   let latestJob = null;
   let latestTimestamp = '';
 
@@ -1484,6 +1485,10 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
         );
         if (!neverSpawned) {
           const cur = Number(job?.remediationPlan?.currentRound || 0);
+          const terminalAt = job?.completedAt || job?.failedAt || job?.stoppedAt || null;
+          if (Number.isFinite(cur) && cur > 0 && terminalAt) {
+            completedRoundTimestamps.push({ round: cur, terminalAt });
+          }
           if (Number.isFinite(cur) && cur > completedRoundsForPR) {
             completedRoundsForPR = cur;
           }
@@ -1520,6 +1525,9 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
     latestMaxRounds,
     latestRiskClass,
     latestJobId: latestJob?.jobId || null,
+    // Consumers can identify events relative to budget exhaustion without
+    // comparing reviewer counts to author-remediation counts.
+    completedRoundTimestamps,
   };
 }
 

@@ -438,6 +438,7 @@ test('watcher allows stale-review auto-refresh when only in-budget rereviews are
       completedRoundsForPR: 2,
       latestRiskClass: 'medium',
       latestMaxRounds: 2,
+      completedRoundTimestamps: [{ round: 2, terminalAt: '2026-07-17T10:00:00.000Z' }],
     }),
     countCompletedReviewerRereviewRoundsImpl: () => 1,
     resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
@@ -1091,10 +1092,8 @@ test('watcher suppresses a hammer-moved head once the PR spent its post-budget f
   // per-head owed-review re-armed a gating review on EVERY hammer remediation
   // push (each new head reads 0 per-head rounds), so an exhausted PR re-opened
   // findings forever and the hammer never closed (#3817 had to be hand-merged).
-  // Once the PR's PER-PR completed-rereview total exceeds the round budget — the
-  // budget plus the one owed final review already spent — a further hammer-moved
-  // head is suppressed so the exhausted PR closes via the AMA exhaustion->merge
-  // path (operator AMA policy: hammer closes on exhaustion, no gating re-review).
+  // Once a completed rereview started after budget exhaustion, a further
+  // hammer-moved head is suppressed even if intermediate pushes were coalesced.
   const suppression = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',
     prNumber: 3817,
@@ -1107,12 +1106,12 @@ test('watcher suppresses a hammer-moved head once the PR spent its post-budget f
       completedRoundsForPR: 2,
       latestRiskClass: 'medium',
       latestMaxRounds: 2,
+      completedRoundTimestamps: [{ round: 2, terminalAt: '2026-07-17T10:00:00.000Z' }],
     }),
-    // Per-head count for the never-reviewed new head is 0 (which re-armed review
-    // under the old per-head-only logic); the PER-PR total is 3 — budget (2) plus
-    // the one owed final review already spent — so the per-PR ceiling suppresses.
-    countCompletedReviewerRereviewRoundsImpl: ({ headSha }) =>
-      headSha === null ? 3 : 0,
+    // Only one lifetime rereview completed because the reviewer coalesced the
+    // intermediate author pushes; its post-exhaustion timing is authoritative.
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
+    hasCompletedReviewerRereviewAfterImpl: () => true,
     resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
   });
 
@@ -1138,9 +1137,11 @@ test('watcher suppresses a zero-budget PR after its single owed final review', (
       completedRoundsForPR: 0,
       latestRiskClass: 'low',
       latestMaxRounds: 0,
+      completedRoundTimestamps: [{ round: 0, terminalAt: '2026-07-17T10:00:00.000Z' }],
     }),
     countCompletedReviewerRereviewRoundsImpl: ({ headSha }) =>
       headSha === null ? 1 : 0,
+    hasCompletedReviewerRereviewAfterImpl: () => true,
     resolveRoundBudgetForJobImpl: () => ({ roundBudget: 0, riskClass: 'low' }),
   });
 

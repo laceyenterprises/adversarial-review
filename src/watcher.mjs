@@ -4020,6 +4020,34 @@ function countCompletedReviewerRereviewRounds({
   }
 }
 
+function hasCompletedReviewerRereviewAfter({
+  db: dbOverride = null,
+  rootDir = ROOT,
+  repoPath,
+  prNumber,
+  after,
+} = {}) {
+  if (typeof after !== 'string' || after.length === 0) return false;
+  const ownedDb = dbOverride ? null : openReviewStateDb(rootDir);
+  const readDb = dbOverride || ownedDb;
+  try {
+    if (!dbOverride) ensureReviewStateSchema(readDb);
+    const row = readDb.prepare(
+      `SELECT 1
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pass_kind = 'rereview'
+          AND status = 'completed'
+          AND started_at >= ?
+        LIMIT 1`
+    ).get(repoPath, prNumber, after);
+    return Boolean(row);
+  } finally {
+    closeOwnedReviewStateDb(ownedDb);
+  }
+}
+
 // REVIEW-DEDUP: the hard re-review ceiling must count DISTINCT reviewed head
 // SHAs, not raw review events. `reviewed_prs.review_attempts` increments on
 // every attempt — including duplicate reviews of an unchanged head and failed
@@ -4152,6 +4180,7 @@ function resolveFirstPassReviewBudgetSuppression({
   summarizePRRemediationLedgerImpl = summarizePRRemediationLedger,
   resolveRoundBudgetForJobImpl = resolveRoundBudgetForJob,
   countCompletedReviewerRereviewRoundsImpl = countCompletedReviewerRereviewRounds,
+  hasCompletedReviewerRereviewAfterImpl = hasCompletedReviewerRereviewAfter,
 } = {}) {
   const normalizedLabelNames = new Set(normalizeLabelNames(labelNames));
   if (
@@ -4217,12 +4246,35 @@ function resolveFirstPassReviewBudgetSuppression({
     roundBudget > 0;
   const remediationBudgetConsumed =
     Number.isFinite(completedRemediationRoundsForPR) &&
-    hasPositiveRoundBudget &&
+    Number.isFinite(roundBudget) &&
+    roundBudget >= 0 &&
     completedRemediationRoundsForPR >= roundBudget;
   const postBudgetFinalReviewCompleted =
     Number.isFinite(completedRereviewRounds) &&
     remediationBudgetConsumed &&
     completedRereviewRounds >= roundBudget;
+  let remediationBudgetConsumedAt = Array.isArray(ledger.completedRoundTimestamps)
+    ? ledger.completedRoundTimestamps
+        .filter(({ round, terminalAt }) => Number(round) >= roundBudget && typeof terminalAt === 'string')
+        .map(({ terminalAt }) => terminalAt)
+        .sort()[0] || null
+    : null;
+  if (remediationBudgetConsumedAt === null && roundBudget === 0 && completedRemediationRoundsForPR === 0) {
+    remediationBudgetConsumedAt = '1970-01-01T00:00:00.000Z';
+  }
+  // #81: prove the single owed final review independently of the author-push
+  // budget. Reviewers may coalesce intermediate pushes, so their lifetime
+  // rereview count is not comparable to the remediation round number.
+  const postBudgetFinalReviewCompletedForPR =
+    remediationBudgetConsumed &&
+    remediationBudgetConsumedAt !== null &&
+    hasCompletedReviewerRereviewAfterImpl({
+      db: dbOverride,
+      rootDir,
+      repoPath,
+      prNumber,
+      after: remediationBudgetConsumedAt,
+    });
   const rereviewBudgetConsumed =
     Number.isFinite(completedRereviewRounds) &&
     hasPositiveRoundBudget &&
@@ -4310,11 +4362,26 @@ function resolveFirstPassReviewBudgetSuppression({
   const currentHeadOwesPostBudgetFinalReview =
     suppliedCurrentHeadSha !== null &&
     !currentHeadAlreadyReviewed &&
-    remediationBudgetConsumed;
+    remediationBudgetConsumed &&
+    !postBudgetFinalReviewCompletedForPR;
   if (currentHeadOwesPostBudgetFinalReview) {
     return {
       suppressed: false,
       reason: 'owed-post-budget-final-review',
+      completedRoundsForPR,
+      roundBudget,
+      riskClass: resolution.riskClass,
+    };
+  }
+  // #81: the PR already spent its post-budget final review and a hammer moved the
+  // head again — suppress the re-review so the exhausted PR closes via the AMA
+  // exhaustion->merge path (hammer terminal remediation) instead of re-opening
+  // findings on every remediation push. This is the operator AMA policy: the
+  // hammer closes on exhaustion, no gating re-review.
+  if (postBudgetFinalReviewCompletedForPR) {
+    return {
+      suppressed: true,
+      reason: 'post-budget-final-review-completed-for-pr',
       completedRoundsForPR,
       roundBudget,
       riskClass: resolution.riskClass,

@@ -438,8 +438,10 @@ test('watcher allows stale-review auto-refresh when only in-budget rereviews are
       completedRoundsForPR: 2,
       latestRiskClass: 'medium',
       latestMaxRounds: 2,
+      completedRoundTimestamps: [{ round: 2, terminalAt: '2026-07-17T10:00:00.000Z' }],
     }),
     countCompletedReviewerRereviewRoundsImpl: () => 1,
+    hasCompletedReviewerRereviewAfterImpl: () => false,
     resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
   });
 
@@ -1083,6 +1085,73 @@ test('watcher classifies a new head after the post-budget final review as owed f
     completedRoundsForPR: 2,
     roundBudget: 2,
     riskClass: 'medium',
+  });
+});
+
+test('watcher suppresses a hammer-moved head once the PR spent its post-budget final review (#81)', () => {
+  // Runaway-hammer close-model. After the remediation budget is exhausted, the
+  // per-head owed-review re-armed a gating review on EVERY hammer remediation
+  // push (each new head reads 0 per-head rounds), so an exhausted PR re-opened
+  // findings forever and the hammer never closed (#3817 had to be hand-merged).
+  // Once a completed rereview started after budget exhaustion, a further
+  // hammer-moved head is suppressed even if intermediate pushes were coalesced.
+  const suppression = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 3817,
+    reviewRow: {
+      review_status: 'posted',
+      reviewer_head_sha: 'priorhammerhead',
+    },
+    currentHeadSha: 'newhammerhead',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 2,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+      completedRoundTimestamps: [{ round: 2, terminalAt: '2026-07-17T10:00:00.000Z' }],
+    }),
+    // Only one lifetime rereview completed because the reviewer coalesced the
+    // intermediate author pushes; its post-exhaustion timing is authoritative.
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
+    hasCompletedReviewerRereviewAfterImpl: () => true,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: true,
+    reason: 'post-budget-final-review-completed-for-pr',
+    completedRoundsForPR: 2,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
+});
+
+test('watcher suppresses a zero-budget PR after its single owed final review', () => {
+  const suppression = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 3818,
+    reviewRow: {
+      review_status: 'posted',
+      reviewer_head_sha: 'zero-budget-final-head',
+    },
+    currentHeadSha: 'later-hammer-head',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 0,
+      latestRiskClass: 'low',
+      latestMaxRounds: 0,
+      completedRoundTimestamps: [],
+    }),
+    countCompletedReviewerRereviewRoundsImpl: ({ headSha }) =>
+      headSha === null ? 1 : 0,
+    hasCompletedReviewerRereviewAfterImpl: () => true,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 0, riskClass: 'low' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: true,
+    reason: 'post-budget-final-review-completed-for-pr',
+    completedRoundsForPR: 0,
+    roundBudget: 0,
+    riskClass: 'low',
   });
 });
 

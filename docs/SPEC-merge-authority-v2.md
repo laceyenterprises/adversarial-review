@@ -50,7 +50,8 @@ FinalizationLedger (per subject, append-only, in the app store):
          | remediation_concluded(rev, round, outcome)
          | budget_exhausted(stageId)
          | operator_override(kind, principal, reason)
-         | finalized(rev, method) | closed(reason) | halted(reason)
+         | finalized(rev, method) | closed(reason) | escalated(reason)
+         | halted(reason)
 ```
 
 - **Eligibility is a pure function** `eligible(fold(events), policy) →
@@ -109,9 +110,16 @@ Policy inputs, all explicit and versioned in config:
   producer failure at runtime. (LHA class eliminated by explicit failure
   handling rather than configuration alone.)
 - **Kill switch** carries over: autonomous execution disabled intercepts every
-  mutating decision before dispatch. Both `finalize-now` and `remediate(...)`
-  become `escalate` with a fail-closed audit row; no merge, worker dispatch,
-  commit, push, or other autonomous branch mutation may proceed.
+  mutating decision before dispatch. `finalize-now`, `remediate(...)`, and
+  `close(...)` all become `escalate` with a fail-closed audit row; no merge,
+  PR close, worker dispatch, commit, push, or other autonomous mutation may
+  proceed.
+- **Escalation is recorded and terminal.** Every `escalate(reason)` decision
+  the executor acts on writes an `escalated(reason)` event to the ledger. The
+  fold treats an unresolved `escalated` event as a terminal state — no further
+  execution and no re-paging for the same cause on subsequent evaluations or
+  restarts — until an `operator_override` event resumes or redirects the
+  subject.
 
 ## 4. Execution
 
@@ -121,7 +129,7 @@ Policy inputs, all explicit and versioned in config:
   adjudicate surface once it exists); `close` → github-adapter `pr-close`;
   `remediate` → agent-runtime port with the same idempotency-key scheme as
   reviews. The executor applies the kill-switch interception before invoking
-  either mutating adapter.
+  any mutating adapter (`pr-merge`, `pr-close`, or the agent-runtime port).
 - **Idempotent by construction:** before executing, the executor re-folds; if
   the world moved (new event since the decision), it discards and re-decides.
   Merge execution itself is guarded by the (subject, rev) pair — a merge of a

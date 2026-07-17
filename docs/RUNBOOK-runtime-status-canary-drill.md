@@ -68,6 +68,10 @@ Scheduled daily at 06:00 by
 plist argument from `--fixture` to `--live` once the real reviewer spawn is
 production-wired end to end (ARC-08+).
 
+The LaunchAgent wrapper retries a failed 1Password recipient lookup three
+times with bounded backoff. If lookup still fails, or `op` is unavailable, it
+exits non-zero instead of running a canary that cannot page.
+
 ## Failover drill
 
 `scripts/adversarial-runtime-failover-drill.mjs` exercises the **real ARC-07
@@ -84,6 +88,12 @@ health router** through a full cycle in an in-memory sandbox:
 in-memory fake — so it is safe in CI. Pass `--root <dir>` to leave the audit
 trail + status snapshot behind, then run `runtime status --root <dir>` to see
 the failover/resume you just rehearsed.
+
+The transition audit and run-ledger enforce the canonical owner of their
+existing store directory (falling back to `data/`, then the tool root) before
+creating or appending a monthly JSONL file. Run manual tools as the service
+account when targeting the production root; a cross-user `--root` fails closed
+before it can create daemon-blocking files.
 
 Both the canary (fixture) and the drill run as CI gates in
 `.github/workflows/test.yml`, in addition to their unit tests

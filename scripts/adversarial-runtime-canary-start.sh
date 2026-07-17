@@ -13,12 +13,26 @@ CANARY_DIR="${ADVERSARIAL_REVIEW_DIR:-/Users/airlock/agent-os/tools/adversarial-
 cd "$CANARY_DIR"
 
 # Resolve ALERT_TO from the standing 1Password ref when present, mirroring the
-# watcher's alert contract. Best-effort: the canary's alert path already logs
-# (rather than crashes) when no recipient resolves, but a resolved recipient is
-# what makes a failed canary actually page.
+# watcher's alert contract. A failed secret read is retried and then fails the
+# wrapper loudly: running a canary that cannot page would create false safety.
 if [[ -z "${ADVERSARIAL_REVIEW_ALERT_TO:-}" && -n "${ADVERSARIAL_REVIEW_ALERT_TO_OP_REF:-}" ]]; then
   if command -v op >/dev/null 2>&1; then
-    export ADVERSARIAL_REVIEW_ALERT_TO="$(op read "$ADVERSARIAL_REVIEW_ALERT_TO_OP_REF" 2>/dev/null || true)"
+    alert_to=""
+    for attempt in 1 2 3; do
+      if alert_to="$(op read "$ADVERSARIAL_REVIEW_ALERT_TO_OP_REF")"; then
+        export ADVERSARIAL_REVIEW_ALERT_TO="$alert_to"
+        break
+      fi
+      if (( attempt < 3 )); then
+        sleep "$attempt"
+      else
+        print -u2 "runtime-canary: failed to resolve alert recipient after 3 attempts"
+        exit 1
+      fi
+    done
+  else
+    print -u2 "runtime-canary: op CLI unavailable; cannot resolve alert recipient"
+    exit 1
   fi
 fi
 

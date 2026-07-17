@@ -25,6 +25,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { assertCanonicalAppendOwner } from './append-only-owner.mjs';
 
 const RUN_LEDGER_SCHEMA_VERSION = 1;
 const RUN_LEDGER_DIR = ['data', 'runtime-runs'];
@@ -74,10 +75,11 @@ function buildRow({
   };
 }
 
-function defaultAppendRow(rootDir, row, { fileMode = 0o640 } = {}) {
+function defaultAppendRow(rootDir, row, { fileMode = 0o640, ownerGuardOptions } = {}) {
   const dir = runLedgerDir(rootDir);
-  mkdirSync(dir, { recursive: true });
   const filePath = monthFilePath(rootDir, row.at);
+  assertCanonicalAppendOwner(rootDir, dir, filePath, ownerGuardOptions);
+  mkdirSync(dir, { recursive: true });
   const line = `${JSON.stringify(row)}\n`;
   const fd = openSync(filePath, 'a', fileMode);
   try {

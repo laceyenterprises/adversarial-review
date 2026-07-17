@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { main as pipelineHealthMain } from './review-pipeline-health-cli.mjs';
 import { main as resetPrMain } from './reset-pr.mjs';
 import { main as tokensMain } from './tokens-cli.mjs';
+import { runtimeMain } from './runtime-status-cli.mjs';
 import { reviewerRoster, formatReviewerRoster } from './adapters/subject/github-pr/routing.mjs';
 import { resolveGeminiReviewerMode } from './role-config.mjs';
 import { loadConfigCached } from './config-loader.mjs';
@@ -23,6 +24,7 @@ Usage:
   adversarial-review reviewer-roster [--json]
   adversarial-review handoff status [--repo <owner/repo>] [--window <24h>] [--root <dir>] [--json]
   adversarial-review handoff trace <owner/repo#pr> [--root <dir>] [--json]
+  adversarial-review runtime status [--root <dir>] [--window <24h>] [--json]
 `;
 
 // GMW-02 — reviewer-roster debug surface. Prints the effective default route
@@ -150,6 +152,9 @@ function main(argv, io = {}) {
   if (command === 'handoff') {
     return handoffMain(rest, io);
   }
+  if (command === 'runtime') {
+    return runtimeMain(rest, io);
+  }
 
   const stderr = io.stderr || process.stderr;
   stderr.write(`error: unknown command ${command || '<none>'}\n\n${USAGE}`);
@@ -160,4 +165,4 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   process.exitCode = main(process.argv.slice(2));
 }
 
-export { handoffMain, main, reviewerRosterMain };
+export { handoffMain, main, reviewerRosterMain, runtimeMain };

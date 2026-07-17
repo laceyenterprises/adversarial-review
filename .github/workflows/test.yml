@@ -100,3 +100,19 @@ jobs:
         # parser → JSONL transcript → re-review → convergence, and exits
         # non-zero on any invariant violation.
         run: bash demo/research-finding-walkthrough.sh
+
+      - name: Run fallback canary (fixture)
+        # ARC-09: drive a synthetic review through the `local` outage-lifeline
+        # runtime against a fixture reviewer. Proves the runtime port +
+        # admission + verdict-parse + status-file + alerting path all still
+        # work — a green canary here means the lifeline harness has not rotted.
+        # Hermetic: no CLI spawn, no network. The daily production canary
+        # (launchd) is the `--live` counterpart on the watcher host.
+        run: node scripts/adversarial-runtime-canary.mjs --root "$RUNNER_TEMP/canary" --fixture
+
+      - name: Run failover drill (sandboxed)
+        # ARC-09: exercise the ARC-07 health router through a full kill →
+        # failover → restore → resume → reconcile cycle in an in-memory fixture
+        # harness, asserting automatic failover, automatic resume, and ZERO
+        # duplicate dispatches on resume. NEVER contacts a live OS endpoint.
+        run: node scripts/adversarial-runtime-failover-drill.mjs --root "$RUNNER_TEMP/drill"

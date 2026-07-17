@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Per-user LaunchAgent for the adversarial-review fallback canary (ARC-09),
+  running as airlock.
+
+  What it does: once a day it drives a synthetic review through the `local`
+  outage-lifeline runtime, writes `data/runtime-canary-status.json` (surfaced by
+  `node src/cli.mjs runtime status`), records the run in the run-ledger, and
+  PAGES if the lifeline did not produce a healthy verdict. A fallback that only
+  runs during a real OS outage rots silently; this keeps it honest.
+
+  Schedule: StartCalendarInterval at 06:00 local, matching the SPEC §1 Win 1
+  mockup ("fallback canary: PASS 2026-07-17T06:00:12Z"). This is a one-shot per
+  fire (RunAtLoad false, no KeepAlive) — node runs the canary and exits.
+
+  Mode: the ProgramArguments pass `--fixture` (hermetic: proves the runtime
+  port + admission + verdict-parse + alerting path with no CLI spawn). Flip to
+  `--live` once the real reviewer spawn is production-wired end to end (ARC-08+)
+  so the canary detects genuine rot in the local runtime, not just its glue.
+
+  Filename convention mirrors the watcher plist: `.airlock.plist` is the
+  airlock-side variant. The `ADVERSARIAL_REVIEW_ALERT_TO_OP_REF` is the standing
+  paging recipient, resolved by the start wrapper via the service-account token.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.laceyenterprises.adversarial-runtime-canary.airlock</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>/Users/airlock/agent-os/tools/adversarial-review/scripts/adversarial-runtime-canary-start.sh</string>
+        <string>--fixture</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/airlock/agent-os/tools/adversarial-review</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ADVERSARIAL_REVIEW_DIR</key>
+        <string>/Users/airlock/agent-os/tools/adversarial-review</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/airlock</string>
+        <key>USER</key>
+        <string>airlock</string>
+        <key>LOGNAME</key>
+        <string>airlock</string>
+        <key>SHELL</key>
+        <string>/bin/zsh</string>
+
+        <!--
+          Standing paging recipient for a failed canary. Resolved by the start
+          wrapper via the service-account token. Operators who want to suppress
+          paging (dev hosts) drop this line; the canary still writes its status
+          file and exits non-zero on failure.
+        -->
+        <key>ADVERSARIAL_REVIEW_ALERT_TO_OP_REF</key>
+        <string>op://Cliovault/adversarial-watcher-alert-to/credential</string>
+    </dict>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>6</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/airlock/Library/Logs/adversarial-runtime-canary.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/airlock/Library/Logs/adversarial-runtime-canary.log</string>
+
+    <key>ExitTimeOut</key>
+    <integer>300</integer>
+</dict>
+</plist>

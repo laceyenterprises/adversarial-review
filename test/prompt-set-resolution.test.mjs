@@ -136,5 +136,8 @@ test('an unsafe promptSet segment is rejected before any disk access', () => {
 
 test('reviewer and remediator resolve the same code-pr prompt set the domain declares', async () => {
   const { REVIEWER_PROMPT_SET } = await import('../src/reviewer.mjs');
-  assert.equal(REVIEWER_PROMPT_SET, loadDomainConfig(ROOT, 'code-pr').promptSet);
+  const { REMEDIATOR_PROMPT_SET } = await import('../src/follow-up-remediation.mjs');
+  const declared = loadDomainConfig(ROOT, 'code-pr').promptSet;
+  assert.equal(REVIEWER_PROMPT_SET, declared);
+  assert.equal(REMEDIATOR_PROMPT_SET, declared);
 });

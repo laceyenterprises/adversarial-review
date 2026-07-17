@@ -13,7 +13,19 @@ import { join } from 'node:path';
  * @returns {object} parsed domain config
  */
 function loadDomainConfig(rootDir, domainId) {
-  return JSON.parse(readFileSync(join(rootDir, 'domains', `${domainId}.json`), 'utf8'));
+  let raw;
+  try {
+    raw = readFileSync(join(rootDir, 'domains', `${domainId}.json`), 'utf8');
+  } catch (err) {
+    if (err && err.code === 'ENOENT') {
+      // Let resolvePromptSet throw its classified missing-domain-config
+      // PromptSetResolutionError instead of a bare ENOENT (review finding
+      // on #614): the error-classification contract is the caller's.
+      return null;
+    }
+    throw err;
+  }
+  return JSON.parse(raw);
 }
 
 export { loadDomainConfig };

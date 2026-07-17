@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -20,6 +20,79 @@ import { join } from 'node:path';
 
 const STAGES = new Set(['first', 'middle', 'last']);
 const PROMPT_PATH_SEGMENT = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Classified failure raised when a domain's `promptSet` cannot be resolved.
+ *
+ * Carries a stable `class` tag (`prompt-set-resolution`) plus a `reason`
+ * discriminant so callers and audit surfaces can distinguish a missing config
+ * from a missing declaration from an unknown (non-existent) prompt set. Prompt
+ * selection MUST fail loud with this error — it must never silently fall back
+ * to `code-pr`.
+ */
+class PromptSetResolutionError extends Error {
+  constructor(message, { domainId = null, promptSet = null, reason = null } = {}) {
+    super(message);
+    this.name = 'PromptSetResolutionError';
+    this.class = 'prompt-set-resolution';
+    this.domainId = domainId;
+    this.promptSet = promptSet;
+    this.reason = reason;
+  }
+}
+
+/**
+ * Resolve the prompt set a domain declares, validating that it exists on disk.
+ *
+ * This is the single source of truth for the reviewer/remediator prompt set:
+ * the value comes from `domains/<id>.json` (`promptSet`), never a hardcoded
+ * constant. Any failure — missing config, missing/blank declaration, unsafe
+ * segment, or a declared set with no `prompts/<set>/` directory — throws a
+ * classified {@link PromptSetResolutionError}. There is deliberately no
+ * fallback path.
+ *
+ * @param {object} params
+ * @param {string} params.rootDir - repository root containing `prompts/`
+ * @param {object} params.domainConfig - parsed domain config document
+ * @param {string} [params.domainId] - domain id, for error context
+ * @returns {string} the validated prompt set id
+ */
+function resolvePromptSet({ rootDir, domainConfig, domainId } = {}) {
+  if (!rootDir) throw new Error('rootDir is required');
+  const id = domainId ?? domainConfig?.id ?? null;
+
+  if (!domainConfig || typeof domainConfig !== 'object') {
+    throw new PromptSetResolutionError(
+      `prompt-set resolution failed: no domain config for domain=${id ?? '<unknown>'}`,
+      { domainId: id, reason: 'missing-domain-config' },
+    );
+  }
+
+  const promptSet = domainConfig.promptSet;
+  if (typeof promptSet !== 'string' || promptSet.trim() === '') {
+    throw new PromptSetResolutionError(
+      `prompt-set resolution failed: domain=${id ?? '<unknown>'} declares no promptSet`,
+      { domainId: id, reason: 'missing-prompt-set' },
+    );
+  }
+
+  if (!PROMPT_PATH_SEGMENT.test(promptSet)) {
+    throw new PromptSetResolutionError(
+      `prompt-set resolution failed: promptSet ${JSON.stringify(promptSet)} for domain=${id ?? '<unknown>'} must match ${PROMPT_PATH_SEGMENT}`,
+      { domainId: id, promptSet, reason: 'invalid-prompt-set' },
+    );
+  }
+
+  const promptSetDir = join(rootDir, 'prompts', promptSet);
+  if (!existsSync(promptSetDir) || !statSync(promptSetDir).isDirectory()) {
+    throw new PromptSetResolutionError(
+      `prompt-set resolution failed: domain=${id ?? '<unknown>'} declares unknown promptSet ${JSON.stringify(promptSet)} (no prompts/${promptSet}/ directory)`,
+      { domainId: id, promptSet, reason: 'unknown-prompt-set' },
+    );
+  }
+
+  return promptSet;
+}
 
 function toPositiveNumber(value) {
   const number = Number(value);
@@ -106,7 +179,9 @@ function loadStagePrompt({
 }
 
 export {
+  PromptSetResolutionError,
   loadStagePrompt,
   pickReviewerStage,
   pickRemediatorStage,
+  resolvePromptSet,
 };

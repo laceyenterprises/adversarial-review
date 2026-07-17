@@ -1,15 +1,10 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { createAgentOsHqReviewerRuntimeAdapter } from './agent-os-hq/index.mjs';
 import { createAcpxReviewerRuntimeAdapter } from './acpx/index.mjs';
 import { createCliDirectReviewerRuntimeAdapter } from './cli-direct/index.mjs';
 import { createFixtureStubReviewerRuntimeAdapter } from './fixture-stub/index.mjs';
 import { pruneReviewerRunRecords, readRecoverableReviewerRunRecords } from './run-state.mjs';
 import { resolveReviewerLeaseRecoveryEnabled } from '../../reviewer-lease.mjs';
-
-function loadDomainConfig(rootDir, domainId) {
-  return JSON.parse(readFileSync(join(rootDir, 'domains', `${domainId}.json`), 'utf8'));
-}
+import { loadDomainConfig } from '../../domain-config.mjs';
 
 function resolveReviewerRuntimeName(domainConfig = {}, { orchestrationMode = 'native' } = {}) {
   if (orchestrationMode === 'agentos') {

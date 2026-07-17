@@ -71,7 +71,8 @@ import {
 } from './reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { extractReviewVerdict, looksLikeRuntimeJunk, normalizeEffectiveReviewVerdict, normalizeReviewVerdict, normalizeWhitespace, sanitizeCodexReviewPayload, sanitizeReviewPayloadBestEffort } from './kernel/verdict.mjs';
-import { loadStagePrompt, pickReviewerStage } from './kernel/prompt-stage.mjs';
+import { loadStagePrompt, pickReviewerStage, resolvePromptSet } from './kernel/prompt-stage.mjs';
+import { loadDomainConfig } from './domain-config.mjs';
 import { createLinearTriageAdapter } from './adapters/operator/linear-triage/index.mjs';
 import { getConfig } from './config-loader.mjs';
 import { parseCodexJsonTokenUsage } from './adapters/reviewer-runtime/cli-direct/index.mjs';
@@ -1551,7 +1552,18 @@ function isClaudeLoggedOutStatus(text) {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ROOT = join(__dirname, '..');
-const REVIEWER_PROMPT_SET = 'code-pr';
+// The reviewer's prompt set is sourced from the domain config
+// (`domains/<id>.json` → `promptSet`), never a hardcoded literal. Resolution
+// fails loud with a classified `PromptSetResolutionError` — there is no silent
+// fallback to code-pr. The active domain id remains fixed to `code-pr` here
+// (the sole registered reviewer domain); threading the domain id itself is a
+// separate work item.
+const REVIEWER_DOMAIN_ID = 'code-pr';
+const REVIEWER_PROMPT_SET = resolvePromptSet({
+  rootDir: ROOT,
+  domainConfig: loadDomainConfig(ROOT, REVIEWER_DOMAIN_ID),
+  domainId: REVIEWER_DOMAIN_ID,
+});
 const ADVERSARIAL_PROMPT = loadStagePrompt({
   rootDir: ROOT,
   promptSet: REVIEWER_PROMPT_SET,
@@ -4935,6 +4947,8 @@ export {
   clearPendingReviewsForSelf,
   ADVERSARIAL_PROMPT,
   ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM,
+  REVIEWER_DOMAIN_ID,
+  REVIEWER_PROMPT_SET,
   __test__,
 };
 

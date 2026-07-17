@@ -43,7 +43,8 @@ import { captureRemediationBodyAfterPost } from './review-body-capture.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
-import { loadStagePrompt, pickRemediatorStage } from './kernel/prompt-stage.mjs';
+import { loadStagePrompt, pickRemediatorStage, resolvePromptSet } from './kernel/prompt-stage.mjs';
+import { loadDomainConfig } from './domain-config.mjs';
 import { spawnDetachedCli } from './adapters/reviewer-runtime/cli-direct/process.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import {
@@ -62,7 +63,18 @@ const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const DEFAULT_REPLIES_ROOT = join(ROOT, 'data', 'replies');
-const REMEDIATOR_PROMPT_SET = 'code-pr';
+// The remediator's prompt set is sourced from the domain config
+// (`domains/<id>.json` → `promptSet`), never a hardcoded literal. Resolution
+// fails loud with a classified `PromptSetResolutionError` — there is no silent
+// fallback to code-pr. The active domain id remains fixed to `code-pr` here
+// (the sole registered remediation domain); threading the domain id itself is
+// a separate work item.
+const REMEDIATOR_DOMAIN_ID = 'code-pr';
+const REMEDIATOR_PROMPT_SET = resolvePromptSet({
+  rootDir: ROOT,
+  domainConfig: loadDomainConfig(ROOT, REMEDIATOR_DOMAIN_ID),
+  domainId: REMEDIATOR_DOMAIN_ID,
+});
 const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', REMEDIATOR_PROMPT_SET, 'remediator.first.md');
 const REMEDIATION_LEGACY_UNSTAGE_COMMANDS = [
   'git rm --cached -- .adversarial-follow-up/remediation-reply.json 2>/dev/null || true',
@@ -7370,6 +7382,7 @@ async function main() {
 }
 
 export {
+  REMEDIATOR_PROMPT_SET,
   FOLLOW_UP_PROMPT_PATH,
   DEFAULT_REMEDIATOR_ENV,
   REMEDIATION_WORKER_TRAILER_CLASS,

@@ -606,3 +606,103 @@ export interface AgentRuntime<AppArtifact = JsonObject> {
   run(request: AgentRunRequest): Promise<AgentRunHandle<AppArtifact>>;
   describe(): { id: string; mode: RuntimeMode; capabilities: AdapterCapabilities };
 }
+
+// ---------------------------------------------------------------------------
+// Finalization port (v2 app architecture Phase 3; merge-authority-v2 §3–4)
+//
+// The finalization port isolates "decide and act on finalization" behind one
+// seam so Merge Authority v2 (ARC-15/16) can be built and shadowed WITHOUT
+// touching frozen v1 merge authority (the ARC-01 freeze). `evaluate(subjectState)
+// → FinalizationDecision` is the pure decision over a subject's review outcome;
+// `execute(decision) → FinalizationOutcome` performs — or, for code-pr,
+// delegates to unchanged v1 AMA — the resulting action. Non-code domains get
+// trivial finalizers (`mark-terminal` / `archive`); code-pr is v1 AMA wrapped
+// UNCHANGED behind this port (wrapper only, zero behavior change).
+//
+// The decision vocabulary is the autonomous subset of merge-authority-v2 §3
+// (`docs/SPEC-merge-authority-v2.md`). `close(reason)` is intentionally absent:
+// the v2 policy reserves it for operator override, never emitting it from an
+// autonomous fold. MA-v2 (ARC-15) adds it to the ledger fold, not to this port.
+// ---------------------------------------------------------------------------
+
+/**
+ * The autonomous finalization decision vocabulary (merge-authority-v2 §3).
+ * - `finalize-now` — the subject is finalization-eligible; the executor performs
+ *   the terminal action (code-pr: merge; trivial domains: mark-terminal / archive).
+ * - `remediate`    — outstanding findings with remediation budget remaining (or
+ *   the exhaustion final round); dispatch a remediation round.
+ * - `wait`         — eligibility is not yet determinable (verdict/checks/
+ *   attestations pending); poll again, bounded by `deadline`.
+ * - `halt`         — finalization is blocked in a way that needs a human
+ *   (operator halt, or coverage operationally impossible); pages, never merges.
+ * - `escalate`     — fail-closed outcome (fold error, kill switch, deadline
+ *   expiry); recorded and terminal until an operator override.
+ */
+export type FinalizationDecisionKind =
+  | 'finalize-now'
+  | 'remediate'
+  | 'wait'
+  | 'halt'
+  | 'escalate';
+
+export interface FinalizationDecision {
+  kind: FinalizationDecisionKind;
+  /** The subject this decision concerns — provenance for the executor + shadow diff. */
+  subjectRef: SubjectRef;
+  /**
+   * The revision the decision was folded at (merge-authority-v2 §2: "verdict at
+   * head" is verified by construction). A decision is stale — and must be
+   * re-evaluated rather than executed — once the subject advances past it.
+   */
+  revisionRef: string;
+  /**
+   * Human/audit-facing reason. Populated for `wait` / `halt` / `escalate` (why
+   * the port is not finalizing); optional for `finalize-now` / `remediate`.
+   */
+  reason?: string;
+  /** `remediate`: the stage whose findings drive the round (panel attribution). */
+  stageId?: string;
+  /** `remediate`: the 1-based remediation round this decision dispatches. */
+  round?: number;
+  /** `wait`: the bounded deadline after which patience expires (→ `escalate`). */
+  deadline?: IsoTimestamp;
+  observedAt: IsoTimestamp;
+}
+
+/**
+ * The disposition of executing a decision. `execute` is idempotent
+ * (merge-authority-v2 §4): a decision whose action was already taken, or a
+ * subject that already moved, resolves to `skipped` rather than re-acting.
+ * - `executed` — the terminal/mutating action completed.
+ * - `deferred` — the action was declined for now (e.g. not yet merge-eligible);
+ *   re-evaluate on the next tick.
+ * - `skipped`  — no action was required (a non-mutating decision, or an
+ *   already-terminal subject).
+ * - `failed`   — the action was attempted and failed (fail-closed).
+ */
+export type FinalizationActionStatus = 'executed' | 'deferred' | 'skipped' | 'failed';
+
+export interface FinalizationOutcome {
+  decision: FinalizationDecision;
+  status: FinalizationActionStatus;
+  /**
+   * The concrete action taken or attempted: `merge`, `mark-terminal`,
+   * `archive`, `dispatch-remediation`, `escalate`, or `none`.
+   */
+  action: string;
+  detail?: string;
+  observedAt: IsoTimestamp;
+}
+
+/**
+ * The finalization port for one domain. `evaluate` is a pure decision over the
+ * subject's review outcome (no I/O, deterministic in `subjectState`); `execute`
+ * performs or delegates the action for a decision. Implementations:
+ * `createTrivialFinalizer` (non-code) and `createV1AmaFinalizationPort` (code-pr,
+ * wrapping unchanged v1 AMA).
+ */
+export interface FinalizationPort {
+  readonly domainId: string;
+  evaluate(subjectState: SubjectState): FinalizationDecision | Promise<FinalizationDecision>;
+  execute(decision: FinalizationDecision): FinalizationOutcome | Promise<FinalizationOutcome>;
+}

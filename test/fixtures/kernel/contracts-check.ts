@@ -4,6 +4,11 @@ import type {
   AggregationPolicy,
   CommsChannelAdapter,
   DeliveryKey,
+  FinalizationActionStatus,
+  FinalizationDecision,
+  FinalizationDecisionKind,
+  FinalizationOutcome,
+  FinalizationPort,
   OperatorSurfaceAdapter,
   RemediationBudgetPlan,
   ReviewPipeline,
@@ -372,6 +377,55 @@ const agentRuntime: AgentRuntime = {
     };
   },
 };
+
+// Finalization port (Phase 3 / ARC-14): `evaluate → FinalizationDecision`,
+// `execute → FinalizationOutcome`, one port per domain.
+const finalizeDecision: FinalizationDecision = {
+  kind: 'finalize-now',
+  subjectRef: ref,
+  revisionRef: ref.revisionRef,
+  observedAt: '2026-05-10T00:00:00.000Z',
+};
+const remediateDecision: FinalizationDecision = {
+  kind: 'remediate',
+  subjectRef: ref,
+  revisionRef: ref.revisionRef,
+  stageId: 'security',
+  round: 2,
+  observedAt: '2026-05-10T00:00:00.000Z',
+};
+const waitDecision: FinalizationDecision = {
+  kind: 'wait',
+  subjectRef: ref,
+  revisionRef: ref.revisionRef,
+  reason: 'required check missing',
+  deadline: '2026-05-10T01:00:00.000Z',
+  observedAt: '2026-05-10T00:00:00.000Z',
+};
+const decisionKinds: FinalizationDecisionKind[] = ['finalize-now', 'remediate', 'wait', 'halt', 'escalate'];
+const actionStatuses: FinalizationActionStatus[] = ['executed', 'deferred', 'skipped', 'failed'];
+void decisionKinds;
+void actionStatuses;
+void remediateDecision;
+void waitDecision;
+
+const finalizationPort: FinalizationPort = {
+  domainId: 'code-pr',
+  evaluate(subjectState: SubjectState): FinalizationDecision {
+    return { ...finalizeDecision, subjectRef: subjectState.ref, revisionRef: subjectState.ref.revisionRef };
+  },
+  async execute(decision: FinalizationDecision): Promise<FinalizationOutcome> {
+    return {
+      decision,
+      status: 'executed',
+      action: 'merge',
+      observedAt: decision.observedAt,
+    };
+  },
+};
+const finalizationDecision: FinalizationDecision = await finalizationPort.evaluate(pipelineState);
+const finalizationOutcome: FinalizationOutcome = await finalizationPort.execute(finalizationDecision);
+void finalizationOutcome.status;
 
 await subjectAdapter.discoverSubjects();
 await commsAdapter.postRemediationReply(reply, { ...deliveryKey, kind: 'remediation-reply' });

@@ -10,6 +10,18 @@ For the agent-os-side operator-facing summary (CLAUDE.md changes,
 dispatcher debugging), see
 [`docs/SPEC-adversarial-review-auto-remediation.md` §13](https://github.com/laceyenterprises/agent-os/blob/main/docs/SPEC-adversarial-review-auto-remediation.md#13-ama-closer-pipeline).
 
+> **⚠️ FREEZE — v1 merge authority is bug-fix-only.** The v1 merge authority
+> described by this runbook (`src/ama/*`, `src/follow-up-merge-agent.mjs`, and
+> the daemon clean-merge path) is **frozen**: bug fixes only, no new
+> capabilities, pending Merge Authority v2 shadow-mode promotion per
+> [`docs/SPEC-merge-authority-v2.md`](SPEC-merge-authority-v2.md). New
+> merge-authority capability work belongs in the v2 finalization port
+> (Phase 3 of
+> [`docs/SPEC-adversarial-review-v2-app-architecture.md`](SPEC-adversarial-review-v2-app-architecture.md)),
+> not in v1. See [`src/ama/FREEZE.md`](../src/ama/FREEZE.md) for the freeze
+> scope and [`docs/BASELINE-v1-snapshot.md`](BASELINE-v1-snapshot.md) for the
+> `v1-working-snapshot` rollback floor.
+
 ---
 
 ## Table of contents

@@ -488,6 +488,7 @@ function signalReviewerRuntimeDomainConfigFailure({
 function reviewerRuntimeAdapterForRunRecord(record = null, {
   rootDir = ROOT,
   logger = console,
+  resolveDomainAdapterImpl = resolveReviewerRuntimeAdapterForDomainId,
 } = {}) {
   const runtime = String(record?.runtime || '').trim();
   if (!runtime) return reviewerRuntimeAdapter;
@@ -495,6 +496,10 @@ function reviewerRuntimeAdapterForRunRecord(record = null, {
     return reviewerRuntimeAdapter;
   }
   const domainId = record?.domain || WATCHER_PRIMARY_DOMAIN_ID;
+  if (domainId !== WATCHER_PRIMARY_DOMAIN_ID) {
+    const domainAdapter = resolveDomainAdapterImpl(domainId, { rootDir, logger });
+    if (runtime === reviewerRuntimeAdapterId(domainAdapter)) return domainAdapter;
+  }
   let domainMtimeMs = null;
   try {
     domainMtimeMs = reviewerRuntimeDomainMtimeMs(rootDir, domainId);
@@ -544,7 +549,10 @@ function resolveReviewerRuntimeAdapterForDomainId(domainId, {
   const cacheKey = `${rootDir}\0${domainId}`;
   const domainMtimeMs = domainMtimeImpl(rootDir, domainId);
   const cached = secondaryReviewerRuntimeAdapterCache.get(cacheKey);
-  if (cached?.domainMtimeMs === domainMtimeMs) return cached.adapter;
+  if (
+    cached?.domainMtimeMs === domainMtimeMs &&
+    cached?.orchestrationMode === activeReviewerRuntimeOrchestrationMode
+  ) return cached.adapter;
 
   const domainConfig = loadDomainConfigImpl(rootDir, domainId);
   const adapter = createAdapterImpl({
@@ -554,7 +562,11 @@ function resolveReviewerRuntimeAdapterForDomainId(domainId, {
     logger,
     orchestrationMode: activeReviewerRuntimeOrchestrationMode,
   });
-  secondaryReviewerRuntimeAdapterCache.set(cacheKey, { domainMtimeMs, adapter });
+  secondaryReviewerRuntimeAdapterCache.set(cacheKey, {
+    domainMtimeMs,
+    orchestrationMode: activeReviewerRuntimeOrchestrationMode,
+    adapter,
+  });
   return adapter;
 }
 
@@ -4089,6 +4101,7 @@ function fetchReviewsForHeadForDedup({ repoPath, prNumber, headSha, reviewerLogi
 
 function resolveFirstPassReviewBudgetSuppression({
   rootDir = ROOT,
+  domainId = WATCHER_PRIMARY_DOMAIN_ID,
   repoPath,
   prNumber,
   linearTicketId = null,
@@ -4122,10 +4135,11 @@ function resolveFirstPassReviewBudgetSuppression({
   let resolution;
   let completedRereviewRounds = 0;
   try {
-    ledger = summarizePRRemediationLedgerImpl(rootDir, { repo: repoPath, prNumber });
+    ledger = summarizePRRemediationLedgerImpl(rootDir, { domainId, repo: repoPath, prNumber });
     completedRereviewRounds = countCompletedReviewerRereviewRoundsImpl({
       db: dbOverride,
       rootDir,
+      domainId,
       repoPath,
       prNumber,
       headSha: suppliedCurrentHeadSha,
@@ -9125,6 +9139,7 @@ async function pollOnce(
 
         const firstPassBudgetSuppression = resolveFirstPassReviewBudgetSuppression({
           rootDir: ROOT,
+          domainId,
           repoPath,
           prNumber,
           linearTicketId,

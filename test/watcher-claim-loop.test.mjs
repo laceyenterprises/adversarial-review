@@ -685,6 +685,28 @@ const secondaryRefreshed = resolveReviewerRuntimeAdapterForDomainId('secondary-d
 assert.notEqual(secondaryRefreshed, secondaryFirst);
 assert.equal(secondaryCreates.length, 2);
 
+mode = 'native';
+refreshReviewerRuntimeAdapter({
+  logger,
+  loadConfigImpl,
+  createAdapterImpl,
+  domainMtimeImpl: () => mtime,
+});
+const secondaryModeRefreshed = resolveReviewerRuntimeAdapterForDomainId('secondary-domain', secondaryOptions);
+assert.notEqual(secondaryModeRefreshed, secondaryRefreshed);
+assert.equal(secondaryCreates.length, 3);
+
+const secondaryRecordAdapter = {
+  describe: () => ({ id: 'secondary-record-runtime' }),
+};
+assert.equal(
+  reviewerRuntimeAdapterForRunRecord(
+    { runtime: 'secondary-record-runtime', domain: 'secondary-record-domain' },
+    { resolveDomainAdapterImpl: () => secondaryRecordAdapter }
+  ),
+  secondaryRecordAdapter,
+);
+
 const cancelled = [];
 const cancelLogs = [];
 await cancelReviewerRuntimeSession({

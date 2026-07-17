@@ -1402,7 +1402,8 @@ function reapTerminalFollowUpWorkspaces({
 // scanned directories must NOT silently zero out the directory's
 // contribution to the ledger for unrelated PRs. Errors are caught
 // per-file (logged + skipped), not per-directory.
-function summarizePRRemediationLedger(rootDir, { repo, prNumber }) {
+function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prNumber }) {
+  const targetDomainId = String(domainId || 'code-pr');
   const targetRepo = String(repo ?? '');
   const targetPr = Number(prNumber);
   if (!targetRepo || !Number.isFinite(targetPr)) {
@@ -1448,6 +1449,7 @@ function summarizePRRemediationLedger(rootDir, { repo, prNumber }) {
         continue;
       }
       if (!job) continue;
+      if (String(job.domainId || 'code-pr') !== targetDomainId) continue;
       if (job.repo !== targetRepo) continue;
       if (Number(job.prNumber) !== targetPr) continue;
 

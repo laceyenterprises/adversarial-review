@@ -129,7 +129,8 @@ review spawn time and surface as reviewer dispatch failures until the
 watcher environment is fixed. The primary adapter is rebuilt only when the
 resolved mode or `domains/code-pr.json` mtime changes. Each enabled secondary
 domain likewise reuses its own reviewer-runtime adapter across poll ticks and
-rebuilds it only when that domain config's mtime changes, preserving
+rebuilds it when that domain config's mtime or the process-wide orchestration
+mode changes, preserving
 adapter-owned pools, caches, and leases without mixing state between domains.
 
 ---

@@ -185,8 +185,9 @@ function summarizeRuntimeRuns(rootDir, { windowMs = DEFAULT_WINDOW_MS, now = () 
   };
 }
 
-// Decorate an AgentRuntime so every run() records to the ledger when it
-// settles. `mode`/`domainId` fallbacks fill in when a RunResult omits them
+// Decorate an AgentRuntime so every run() and runtime-level reattach() records
+// to the ledger when it settles. `mode`/`domainId` fallbacks fill in when a
+// RunResult omits them
 // (e.g. an admission refusal before a runtime mode is known). Recording is
 // best-effort: a ledger write failure NEVER fails the underlying run.
 function wrapRuntimeWithRunLedger(runtime, {
@@ -250,6 +251,13 @@ function wrapRuntimeWithRunLedger(runtime, {
     async run(request) {
       return decorateHandle(await runtime.run(request));
     },
+    ...(typeof runtime.reattach === 'function' ? {
+      async reattach(request) {
+        const result = await runtime.reattach(request);
+        record({ runRef: request?.idempotencyKey, mode: result?.runtimeMode }, result);
+        return result;
+      },
+    } : {}),
   };
 }
 

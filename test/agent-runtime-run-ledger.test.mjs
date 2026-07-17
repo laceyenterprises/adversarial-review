@@ -122,6 +122,31 @@ test('wrapRuntimeWithRunLedger records a run on await settle', async () => {
   }
 });
 
+test('wrapRuntimeWithRunLedger records a runtime-level reattach on settle', async () => {
+  const rootDir = tmpRoot();
+  try {
+    const now = () => new Date('2026-07-17T12:00:00.000Z');
+    const inner = {
+      async run() { throw new Error('not used'); },
+      async reattach(request) {
+        assert.equal(request.idempotencyKey, 'adopted-k1');
+        return { status: 'completed', runtimeMode: 'os', artifact: { kind: 'review' } };
+      },
+    };
+    const wrapped = wrapRuntimeWithRunLedger(inner, { rootDir, domainId: 'code-pr', now });
+    const result = await wrapped.reattach({ idempotencyKey: 'adopted-k1' });
+    assert.equal(result.status, 'completed');
+
+    const rows = readRuntimeRuns(rootDir, { now });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].mode, 'os');
+    assert.equal(rows[0].kind, 'review');
+    assert.equal(rows[0].idempotency_key, 'adopted-k1');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('a ledger write failure never fails the underlying run', async () => {
   const rootDir = tmpRoot();
   try {

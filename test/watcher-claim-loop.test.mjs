@@ -280,7 +280,7 @@ globalThis.fetch = async (...args) => {
 };
 function readRows(db) {
   const rows = db.prepare(
-    'SELECT repo, pr_number, review_status, reviewer_head_sha FROM reviewed_prs ORDER BY pr_number'
+    'SELECT repo, pr_number, domain_id, subject_external_id, revision_ref, review_status, reviewer_head_sha FROM reviewed_prs ORDER BY pr_number'
   ).all();
   return Object.fromEntries(rows.map((row) => [String(row.pr_number), row]));
 }
@@ -300,7 +300,7 @@ try {
        (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts)
      VALUES (?, ?, ?, ?, ?, ?, ?)\`
   );
-  for (const [prNumber, reviewer] of [[101, 'claude'], [102, 'claude']]) {
+  for (const [prNumber, reviewer] of [[102, 'claude']]) {
     insert.run(
       'laceyenterprises/adversarial-review',
       prNumber,
@@ -344,6 +344,12 @@ try {
       },
       issues: new Proxy({}, {
         get(_target, property) {
+          if (property === 'listLabelsOnIssue') {
+            return async (params) => {
+              githubCalls.push({ kind: 'issues.listLabelsOnIssue', params });
+              return { data: [] };
+            };
+          }
           return async (...args) => {
             githubWrites.push({ surface: 'issues', property: String(property), args });
             throw new Error('unexpected GitHub issues write');
@@ -840,6 +846,9 @@ test('watcher pollOnce claim loop records subject-state head SHAs and drives the
     const summary = JSON.parse(summaryLine.slice(SUMMARY_MARKER.length));
 
     assert.equal(summary.rows['101'].review_status, 'posted');
+    assert.equal(summary.rows['101'].domain_id, 'code-pr');
+    assert.equal(summary.rows['101'].subject_external_id, 'laceyenterprises/adversarial-review#101');
+    assert.equal(summary.rows['101'].revision_ref, 'sha-happy-101');
     assert.equal(summary.rows['101'].reviewer_head_sha, 'sha-happy-101');
     assert.equal(summary.rows['102'].review_status, 'posted');
     assert.equal(summary.rows['102'].reviewer_head_sha, null);

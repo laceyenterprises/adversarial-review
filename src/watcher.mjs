@@ -324,7 +324,21 @@ resolveGateStatusContext(process.env);
 // is the only `enabled` domain in production config; the poll loop pumps every
 // enabled domain through its own adapter set.
 const domainRegistry = loadDomainRegistry(ROOT);
-const ENABLED_DOMAINS = domainRegistry.enabledDomains;
+// ARC-03 review finding: the registry is re-read at each poll tick (see
+// refreshEnabledDomains) so enabling/adding a domain does not require a
+// daemon restart. Startup stays fail-loud; per-tick refresh fails soft and
+// keeps the last-known-good list.
+let ENABLED_DOMAINS = domainRegistry.enabledDomains;
+function refreshEnabledDomains({ logger = console } = {}) {
+  try {
+    const fresh = loadDomainRegistry(ROOT).enabledDomains;
+    if (fresh.length > 0) ENABLED_DOMAINS = fresh;
+    else logger.warn('[watcher] domain registry refresh yielded zero enabled domains; keeping previous list');
+  } catch (err) {
+    logger.warn(`[watcher] domain registry refresh failed; keeping previous list: ${err?.message || err}`);
+  }
+  return ENABLED_DOMAINS;
+}
 if (ENABLED_DOMAINS.length === 0) {
   throw new Error(
     '[watcher] domain registry has no enabled domains; refusing to start with nothing to review'
@@ -547,21 +561,37 @@ function resolveReviewerRuntimeAdapterForDomainId(domainId, {
     return reviewerRuntimeAdapter;
   }
   const cacheKey = `${rootDir}\0${domainId}`;
-  const domainMtimeMs = domainMtimeImpl(rootDir, domainId);
   const cached = secondaryReviewerRuntimeAdapterCache.get(cacheKey);
+  // A broken or mid-swap secondary domain config must never abort the whole
+  // poll tick (review finding on #615): keep serving the cached adapter and
+  // signal the failure instead. Only an uncached domain with a broken config
+  // yields null, and callers skip that domain for the tick.
+  let domainMtimeMs;
+  try {
+    domainMtimeMs = domainMtimeImpl(rootDir, domainId);
+  } catch (err) {
+    signalReviewerRuntimeDomainConfigFailure({ rootDir, domainId, err, phase: 'mtime', logger });
+    return cached ? cached.adapter : null;
+  }
   if (
     cached?.domainMtimeMs === domainMtimeMs &&
     cached?.orchestrationMode === activeReviewerRuntimeOrchestrationMode
   ) return cached.adapter;
 
-  const domainConfig = loadDomainConfigImpl(rootDir, domainId);
-  const adapter = createAdapterImpl({
-    rootDir,
-    domainId,
-    domainConfig,
-    logger,
-    orchestrationMode: activeReviewerRuntimeOrchestrationMode,
-  });
+  let adapter;
+  try {
+    const domainConfig = loadDomainConfigImpl(rootDir, domainId);
+    adapter = createAdapterImpl({
+      rootDir,
+      domainId,
+      domainConfig,
+      logger,
+      orchestrationMode: activeReviewerRuntimeOrchestrationMode,
+    });
+  } catch (err) {
+    signalReviewerRuntimeDomainConfigFailure({ rootDir, domainId, err, phase: 'load', logger });
+    return cached ? cached.adapter : null;
+  }
   secondaryReviewerRuntimeAdapterCache.set(cacheKey, {
     domainMtimeMs,
     orchestrationMode: activeReviewerRuntimeOrchestrationMode,
@@ -5800,9 +5830,13 @@ async function syncPRLifecycle(octokit, operatorSurface) {
       // pollOnce tick and picks up this freshly-merged row from the
       // pending list.
       deleteGateRecordsForPR(ROOT, { repo, prNumber });
+      // ARC-03 review finding: sync triage under the row's owning domain so a
+      // secondary domain's tracking ticket is finalized too, not just code-pr's.
+      const mergedRowDomainId =
+        stmtGetReviewRow.get(repo, prNumber)?.domain_id || WATCHER_PRIMARY_DOMAIN_ID;
       await operatorSurface.syncTriageStatus(
         subjectRefWithLinearTicket({
-          domainId: WATCHER_PRIMARY_DOMAIN_ID,
+          domainId: mergedRowDomainId,
           subjectExternalId: `${repo}#${prNumber}`,
           revisionRef: pr.headRefOid || null,
         }, linearTicketId, labelNames),
@@ -8208,6 +8242,7 @@ async function pollOnce(
   // work-list keeps the existing per-repo body intact while threading the
   // domain identity through it. code-pr is the only enabled domain in
   // production, so this iterates exactly the repos it did before.
+  refreshEnabledDomains({ logger: console });
   const domainAdapterSets = ENABLED_DOMAINS.map((domain) => ({
     domainId: domain.id,
     domainConfig: domain.config,
@@ -8215,6 +8250,12 @@ async function pollOnce(
   }));
   const domainRepoWork = [];
   for (const domainAdapterSet of domainAdapterSets) {
+    if (!domainAdapterSet.reviewerRuntimeAdapter) {
+      console.warn(
+        `[watcher] domain ${domainAdapterSet.domainId} has no usable reviewer-runtime adapter this tick; skipping`
+      );
+      continue;
+    }
     const domainRepos = domainAdapterSet.domainConfig.subjectChannel === 'github-pr'
       ? activeRepos
       : [];
@@ -8300,6 +8341,17 @@ async function pollOnce(
         continue;
       }
       let existing = cachedCurrent ?? stmtGetReviewRow.get(repoPath, prNumber);
+      // ARC-03 review finding: review rows are keyed (repo, pr) but carry a
+      // domain identity. Only the owning domain may process a row — without
+      // this guard, a second github-pr domain would drive another domain's
+      // record through its own handlers (gate/identity corruption, duplicate
+      // downstream actions). A non-owning domain skips the PR this tick.
+      if (
+        existing &&
+        String(existing.domain_id || WATCHER_PRIMARY_DOMAIN_ID) !== String(domainId)
+      ) {
+        continue;
+      }
       if (!subject.terminal && existing?.review_status === 'pending') {
         healthProbe?.recordOpenPending?.(healthTick, {
           repo: repoPath,

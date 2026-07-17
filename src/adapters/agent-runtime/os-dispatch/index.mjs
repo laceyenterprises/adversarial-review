@@ -4,12 +4,12 @@
 // the app inherits admission, entitlements, model allowlists, sandboxing,
 // token budgets, and ledger telemetry from the worker pool.
 //
-// This is a REFACTOR of the vendored app-contract client
-// (`src/app-contract-dispatch.mjs`) behind the AgentRuntime port defined in
-// ARC-05 — NOT a rewrite, and NOT the published-SDK swap. The vendored client
-// is this repo's wire-contract reference; swapping it for the real
-// `@agent-os/app-sdk` is GAP-4 / ARC-24. Nothing here imports the agent-os
-// repo tree.
+// This routes through the published Agent OS app-contract SDK
+// (`@agent-os/app-sdk`, consumed as a `file:` tarball per the ARC-23 packaging
+// ADR) behind the AgentRuntime port defined in ARC-05. ARC-24 deleted this
+// repo's vendored dispatch client and swapped its connect helper for the SDK's
+// `connect(...)`; the session surface (`dispatch`, `dispatchStatus`) is
+// identical, so nothing else in this adapter changed.
 //
 // Wire mapping per the role registry (§5) and completion shapes (§4.3, §9):
 //   - reviewer   → task_kind 'review'      completion_shape 'decision-only'
@@ -21,7 +21,7 @@
 // `request_id`; the endpoint's (app_id, request_id) idempotency is the
 // server-side backstop that makes re-dispatch and reattach safe (§6.3).
 
-import { connectAppContract } from '../../../app-contract-dispatch.mjs';
+import { connect } from '@agent-os/app-sdk';
 import { validateReviewArtifact, ReviewArtifactSchemaError } from './review-artifact.mjs';
 
 const RUNTIME_ID = 'os-dispatch';
@@ -250,7 +250,7 @@ function defaultJitter(maxMs) {
 
 function createOsDispatchAgentRuntime({
   session = null,
-  connectImpl = connectAppContract,
+  connectImpl = connect,
   connectOptions = {},
   buildPrompt = defaultBuildPrompt,
   pollBaseMs = DEFAULT_POLL_BASE_MS,

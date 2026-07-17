@@ -5,7 +5,7 @@ import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { connectAppContract } from './app-contract-dispatch.mjs';
+import { connect } from '@agent-os/app-sdk';
 import {
   buildRemediationReply,
   claimNextFollowUpJob,
@@ -341,6 +341,24 @@ const TRANSIENT_HQ_DISPATCH_CODES = new Set([
   'supervisor_restart',
   'supervisor-restart',
 ]);
+// Transient app-contract transport conditions (5xx-class) for the agent-os
+// dispatch lane. The published @agent-os/app-sdk surfaces the endpoint's string
+// error code in the thrown message but drops the numeric HTTP status, so this
+// lane classifies transient failures by code/message to preserve the retry
+// semantics the deleted vendored client used to provide internally (ARC-24).
+const TRANSIENT_APP_CONTRACT_DISPATCH_CODES = new Set([
+  'endpoint_restarting',
+  'endpoint-restarting',
+  'endpoint_unavailable',
+  'endpoint-unavailable',
+  'service_unavailable',
+  'service-unavailable',
+  ...TRANSIENT_HQ_DISPATCH_CODES,
+]);
+const TRANSIENT_APP_CONTRACT_NETWORK_CODES = new Set([
+  'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH', 'ENOTFOUND',
+]);
+const APP_CONTRACT_DISPATCH_MAX_ATTEMPTS = 3;
 const DEFAULT_DEPLOY_CHECKOUT = '/Users/airlock/agent-os';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const HQ_REMEDIATION_WORKSPACE_SEGMENTS = ['adversarial-review', 'follow-up-workspaces'];
 
@@ -2595,6 +2613,49 @@ function resolveAdversarialReviewAppSubscribes(env = process.env, options = {}) 
     : [];
 }
 
+// Mirror the deleted vendored client's transient-error policy against the
+// published SDK's error surface: retryable iff the failure is a network reset,
+// a request timeout, an HTTP 429/5xx, or a known transient endpoint error code.
+// Ordinary 4xx validation errors are not retried.
+function isTransientAppContractDispatchError(error) {
+  const networkCode = String(error?.cause?.code || error?.code || '').toUpperCase();
+  if (TRANSIENT_APP_CONTRACT_NETWORK_CODES.has(networkCode)) return true;
+  const message = String(error?.message || '');
+  if (/timed out|fetch failed|network|connection (?:refused|reset|timed out)/i.test(message)) return true;
+  const statusMatch = message.match(/^app-contract (\d{3})\b/);
+  if (statusMatch) {
+    const status = Number(statusMatch[1]);
+    return status === 429 || status >= 500;
+  }
+  const codeMatch = message.match(/^app-contract ([a-z0-9][a-z0-9_.-]*):/i);
+  if (codeMatch) {
+    return TRANSIENT_APP_CONTRACT_DISPATCH_CODES.has(codeMatch[1].toLowerCase());
+  }
+  return false;
+}
+
+// Retry an idempotent app-contract dispatch on transient failures. The
+// server-side (app_id, request_id) idempotency makes re-dispatch safe, so a
+// transient endpoint restart is absorbed rather than surfaced as a job failure.
+async function dispatchWithTransientRetry(dispatchOnce, {
+  maxAttempts = APP_CONTRACT_DISPATCH_MAX_ATTEMPTS,
+  sleepImpl = sleep,
+} = {}) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await dispatchOnce();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxAttempts || !isTransientAppContractDispatchError(error)) {
+        throw error;
+      }
+      await sleepImpl(Math.min(250, 50 * attempt));
+    }
+  }
+  throw lastError;
+}
+
 async function dispatchRemediationViaHq({
   hqRoot,
   workerClass,
@@ -2636,13 +2697,13 @@ async function dispatchRemediationViaHq({
   });
   const ticket = appMode === 'agent-os'
     ? await (async () => {
-        const os = await connectAppContract({
+        const os = await connect({
           app_id: 'adversarial-review',
           mode: appMode,
           hqRoot,
           subscribes: resolveAdversarialReviewAppSubscribes(env),
         });
-        return os.dispatch({
+        return dispatchWithTransientRetry(() => os.dispatch({
           request_id: requestId,
           ticket_ref: ticketRef,
           prompt: promptPath,
@@ -2659,7 +2720,7 @@ async function dispatchRemediationViaHq({
           hq_root: hqRoot,
           parent_session: parentSession,
           project,
-        });
+        }));
       })()
     : parseHqJsonObject(
         (await execFileImpl(hqBin, legacyHqArgs, { env, maxBuffer: 5 * 1024 * 1024 })).stdout,
@@ -6424,6 +6485,28 @@ function resolveFollowUpTelemetryTopics(subscribes = []) {
   return [...new Set(topics)];
 }
 
+// Bridge the app-contract session's on() delivery to the flat (event, topic)
+// shape handleRemediationTelemetryEvent expects. The published SDK calls the
+// handler with a single canonical frame { topic, payload, published_at }; older
+// / injected sessions call it with (event, topic). Detect the frame by its exact
+// shape so a plain telemetry event that merely carries a `topic` field is not
+// mistaken for a frame.
+function isCanonicalTopicFrame(value, maybeTopic) {
+  return maybeTopic === undefined
+    && value
+    && typeof value === 'object'
+    && typeof value.topic === 'string'
+    && Object.prototype.hasOwnProperty.call(value, 'payload')
+    && Object.prototype.hasOwnProperty.call(value, 'published_at');
+}
+
+function normalizeTelemetryDelivery(delivery, maybeTopic, topicPattern) {
+  if (isCanonicalTopicFrame(delivery, maybeTopic)) {
+    return { event: delivery.payload, topic: String(delivery.topic || topicPattern) };
+  }
+  return { event: delivery, topic: String(maybeTopic || topicPattern) };
+}
+
 function attachFollowUpTelemetryListeners({
   session,
   rootDir = ROOT,
@@ -6443,8 +6526,12 @@ function attachFollowUpTelemetryListeners({
     throw new Error('follow-up telemetry listener requires an App Contract session with on()');
   }
   const topics = resolveFollowUpTelemetryTopics(subscribes);
-  const unsubscribers = topics.map((topicPattern) => session.on(topicPattern, async (event, topic) => {
-    const deliveredTopic = String(topic || topicPattern);
+  const unsubscribers = topics.map((topicPattern) => session.on(topicPattern, async (delivery, maybeTopic) => {
+    // The published @agent-os/app-sdk delivers one canonical SSE frame
+    // ({ topic, payload, published_at }) to the handler; the legacy two-arg
+    // (event, topic) shape is still accepted so injected fakes keep working.
+    const { event, topic } = normalizeTelemetryDelivery(delivery, maybeTopic, topicPattern);
+    const deliveredTopic = topic;
     const result = await handleTelemetryEventImpl({
       rootDir,
       topic: deliveredTopic,
@@ -6477,7 +6564,7 @@ async function connectFollowUpTelemetryListener({
   rootDir = ROOT,
   env = process.env,
   hqRoot = env.HQ_ROOT,
-  connectAppContractImpl = connectAppContract,
+  connectAppContractImpl = connect,
   log = console,
   ...listenerOptions
 } = {}) {

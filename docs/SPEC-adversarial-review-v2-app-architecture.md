@@ -147,7 +147,11 @@ Rules pinned now:
 
 - `pipeline: { stageId, stageIndex, panelVerdicts: Verdict[] }[]` — replaces
   the single `latestVerdict` (kept as a deprecated alias during migration,
-  resolving to the newest verdict of the active stage).
+  resolving to the newest verdict of the furthest-progressed stage that has
+  evidence pinned to the subject's current revision). Stale stage verdicts are
+  excluded from active-stage resolution; when pipeline history exists but all
+  of it is stale, the alias resolves to no verdict rather than falling back to
+  stale legacy evidence.
 - `runtimeMode: 'os' | 'local'` on each recorded agent run (audit, §6.5).
 
 Lifecycle states are unchanged. The kernel remains the only writer of

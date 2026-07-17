@@ -386,18 +386,21 @@ export function planPipelineReReview({
 
 /**
  * The active stage of a subject's recorded pipeline: the furthest-progressed
- * stage that has produced any verdict. In the sequential gating model a later
- * stage only runs once the prior stage is clean, so the highest-index stage
- * with verdicts is the stage currently under evaluation.
+ * stage that has produced a verdict for the subject's current revision. In the
+ * sequential gating model a later stage only runs once the prior stage is
+ * clean, so the highest-index stage with current-revision verdicts is the stage
+ * currently under evaluation. Stale verdicts from prior revisions are never
+ * active review evidence.
  *
  * @param {SubjectState | null | undefined} subjectState
  * @returns {StageState | null}
  */
 export function resolveActiveStage(subjectState) {
   const pipeline = Array.isArray(subjectState?.pipeline) ? subjectState.pipeline : [];
+  const currentRevisionRef = subjectState?.ref?.revisionRef;
   let active = null;
   for (const stageState of pipeline) {
-    if (!stageState || !Array.isArray(stageState.panelVerdicts) || stageState.panelVerdicts.length === 0) {
+    if (stageVerdictsForRevision(stageState, currentRevisionRef).length === 0) {
       continue;
     }
     if (active === null || (stageState.stageIndex ?? 0) >= (active.stageIndex ?? 0)) {
@@ -409,9 +412,10 @@ export function resolveActiveStage(subjectState) {
 
 /**
  * Resolve the deprecated `latestVerdict` alias (§4.2): the newest verdict of
- * the active stage. Falls back to the legacy `SubjectState.latestVerdict` field
- * when the subject carries no pipeline (or no stage has verdicts yet), so every
- * existing consumer that reads `latestVerdict` stays green through migration.
+ * the active stage, restricted to the subject's current revision. Falls back
+ * to the legacy `SubjectState.latestVerdict` field when the subject carries no
+ * pipeline history. A populated pipeline containing only stale verdicts fails
+ * safe to `null` instead of resurrecting the legacy alias.
  *
  * @param {SubjectState | null | undefined} subjectState
  * @returns {Verdict | null}
@@ -419,8 +423,13 @@ export function resolveActiveStage(subjectState) {
 export function resolveLatestVerdict(subjectState) {
   const active = resolveActiveStage(subjectState);
   if (active) {
-    const newest = newestVerdict(active.panelVerdicts);
+    const newest = newestVerdict(stageVerdictsForRevision(active, subjectState?.ref?.revisionRef));
     if (newest) return newest;
   }
+  const pipeline = Array.isArray(subjectState?.pipeline) ? subjectState.pipeline : [];
+  const hasPipelineHistory = pipeline.some((stageState) => (
+    Array.isArray(stageState?.panelVerdicts) && stageState.panelVerdicts.length > 0
+  ));
+  if (hasPipelineHistory) return null;
   return subjectState?.latestVerdict ?? null;
 }

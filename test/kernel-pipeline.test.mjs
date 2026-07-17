@@ -420,7 +420,7 @@ test('planPipelineReReview carries the resolved budget plan and rejects an empty
 // latestVerdict alias compatibility
 // ---------------------------------------------------------------------------
 
-test('resolveLatestVerdict returns the newest verdict of the active (furthest) stage', () => {
+test('resolveLatestVerdict returns the newest current-revision verdict of the active (furthest) stage', () => {
   const subjectState = {
     ref: { domainId: 'd', subjectExternalId: 's', revisionRef: 'B' },
     lifecycle: 'review-in-progress',
@@ -433,14 +433,14 @@ test('resolveLatestVerdict returns the newest verdict of the active (furthest) s
       {
         stageId: 'code-quality',
         stageIndex: 0,
-        panelVerdicts: [verdict({ kind: 'approved', roleId: 'cq', observedAt: '2026-05-01T00:00:00.000Z' })],
+        panelVerdicts: [verdict({ kind: 'approved', roleId: 'cq', revisionRef: 'B', observedAt: '2026-05-01T00:00:00.000Z' })],
       },
       {
         stageId: 'security',
         stageIndex: 1,
         panelVerdicts: [
-          verdict({ kind: 'request-changes', roleId: 'sec', observedAt: '2026-05-02T00:00:00.000Z' }),
-          verdict({ kind: 'comment-only', roleId: 'sec', observedAt: '2026-05-03T00:00:00.000Z' }),
+          verdict({ kind: 'request-changes', roleId: 'sec', revisionRef: 'B', observedAt: '2026-05-02T00:00:00.000Z' }),
+          verdict({ kind: 'comment-only', roleId: 'sec', revisionRef: 'B', observedAt: '2026-05-03T00:00:00.000Z' }),
         ],
       },
     ],
@@ -450,6 +450,33 @@ test('resolveLatestVerdict returns the newest verdict of the active (furthest) s
   const latest = resolveLatestVerdict(subjectState);
   assert.equal(latest.kind, 'comment-only');
   assert.equal(latest.observedAt, '2026-05-03T00:00:00.000Z');
+});
+
+test('resolveLatestVerdict cannot bypass a current block with a stale downstream clean verdict', () => {
+  const staleClean = verdict({
+    kind: 'approved', roleId: 'sec', revisionRef: 'A', observedAt: '2026-05-03T00:00:00.000Z',
+  });
+  const currentBlock = verdict({
+    kind: 'request-changes', roleId: 'cq', revisionRef: 'B', observedAt: '2026-05-04T00:00:00.000Z',
+  });
+  const subjectState = {
+    ref: { domainId: 'd', subjectExternalId: 's', revisionRef: 'B' },
+    pipeline: [
+      { stageId: 'code-quality', stageIndex: 0, panelVerdicts: [currentBlock] },
+      { stageId: 'security', stageIndex: 1, panelVerdicts: [staleClean] },
+    ],
+    latestVerdict: staleClean,
+  };
+
+  assert.equal(resolveActiveStage(subjectState).stageId, 'code-quality');
+  assert.equal(resolveLatestVerdict(subjectState), currentBlock);
+
+  const staleOnly = {
+    ...subjectState,
+    pipeline: [{ stageId: 'security', stageIndex: 1, panelVerdicts: [staleClean] }],
+  };
+  assert.equal(resolveActiveStage(staleOnly), null);
+  assert.equal(resolveLatestVerdict(staleOnly), null);
 });
 
 test('resolveLatestVerdict falls back to the legacy latestVerdict field with no pipeline', () => {

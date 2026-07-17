@@ -248,9 +248,9 @@ export interface SubjectState {
   pipeline?: readonly StageState[];
   /**
    * @deprecated Superseded by `pipeline[]`. Kept as a compatibility alias that
-   * resolves to the newest verdict of the active stage (see
-   * `resolveLatestVerdict`). Existing consumers that read this field directly
-   * stay green; new code should read `pipeline[]`.
+   * resolves to the newest current-revision verdict of the active stage (see
+   * `resolveLatestVerdict`). A populated pipeline with only stale verdicts
+   * resolves to no verdict. New code should read `pipeline[]`.
    */
   latestVerdict?: Verdict;
   latestRemediationReply?: RemediationReply;

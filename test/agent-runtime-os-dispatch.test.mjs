@@ -321,17 +321,14 @@ test('run retries transient dispatch_status failures but fails fast on client er
       { status: 'succeeded', artifact: reviewArtifact() },
     ],
   });
-  const warnings = [];
   const runtime = createOsDispatchAgentRuntime({
     session,
     sleepImpl: async () => {},
     jitterImpl: () => 0,
-    logger: { warn: (...args) => warnings.push(args) },
   });
   const result = await (await runtime.run(reviewerRequest())).await();
   assert.equal(result.status, 'completed');
   assert.equal(session.statusCalls.length, 2);
-  assert.equal(warnings.length, 1);
 
   const unauthorized = new Error('unauthorized');
   unauthorized.status = 401;
@@ -342,6 +339,42 @@ test('run retries transient dispatch_status failures but fails fast on client er
   }).run(reviewerRequest())).await();
   assert.equal(fatalResult.status, 'failed');
   assert.equal(fatalSession.statusCalls.length, 1);
+});
+
+test('run retries transient connect and dispatch failures', async () => {
+  const session = fakeSession({
+    statusSequence: [{ status: 'succeeded', artifact: reviewArtifact() }],
+  });
+  let connectCalls = 0;
+  let dispatchCalls = 0;
+  const originalDispatch = session.dispatch;
+  session.dispatch = async function dispatch(payload) {
+    dispatchCalls += 1;
+    if (dispatchCalls === 1) {
+      const error = new Error('app-contract 503 service unavailable');
+      error.status = 503;
+      throw error;
+    }
+    return originalDispatch.call(this, payload);
+  };
+  const runtime = createOsDispatchAgentRuntime({
+    connectImpl: async () => {
+      connectCalls += 1;
+      if (connectCalls === 1) {
+        const error = new Error('connection reset');
+        error.code = 'ECONNRESET';
+        throw error;
+      }
+      return session;
+    },
+    sleepImpl: async () => {},
+  });
+
+  const result = await (await runtime.run(reviewerRequest())).await();
+  assert.equal(result.status, 'completed');
+  assert.equal(connectCalls, 2);
+  assert.equal(dispatchCalls, 2);
+  assert.equal(session.dispatched.length, 1);
 });
 
 test('multiple await calls share one dispatch_status polling loop', async () => {

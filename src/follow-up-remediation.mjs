@@ -6,6 +6,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { connect } from '@agent-os/app-sdk';
+import { withAppContractTransientRetry } from './app-contract-retry.mjs';
 import {
   buildRemediationReply,
   claimNextFollowUpJob,
@@ -341,24 +342,6 @@ const TRANSIENT_HQ_DISPATCH_CODES = new Set([
   'supervisor_restart',
   'supervisor-restart',
 ]);
-// Transient app-contract transport conditions (5xx-class) for the agent-os
-// dispatch lane. The published @agent-os/app-sdk surfaces the endpoint's string
-// error code in the thrown message but drops the numeric HTTP status, so this
-// lane classifies transient failures by code/message to preserve the retry
-// semantics the deleted vendored client used to provide internally (ARC-24).
-const TRANSIENT_APP_CONTRACT_DISPATCH_CODES = new Set([
-  'endpoint_restarting',
-  'endpoint-restarting',
-  'endpoint_unavailable',
-  'endpoint-unavailable',
-  'service_unavailable',
-  'service-unavailable',
-  ...TRANSIENT_HQ_DISPATCH_CODES,
-]);
-const TRANSIENT_APP_CONTRACT_NETWORK_CODES = new Set([
-  'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH', 'ENOTFOUND',
-]);
-const APP_CONTRACT_DISPATCH_MAX_ATTEMPTS = 3;
 const DEFAULT_DEPLOY_CHECKOUT = '/Users/airlock/agent-os';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const HQ_REMEDIATION_WORKSPACE_SEGMENTS = ['adversarial-review', 'follow-up-workspaces'];
 
@@ -2613,49 +2596,6 @@ function resolveAdversarialReviewAppSubscribes(env = process.env, options = {}) 
     : [];
 }
 
-// Mirror the deleted vendored client's transient-error policy against the
-// published SDK's error surface: retryable iff the failure is a network reset,
-// a request timeout, an HTTP 429/5xx, or a known transient endpoint error code.
-// Ordinary 4xx validation errors are not retried.
-function isTransientAppContractDispatchError(error) {
-  const networkCode = String(error?.cause?.code || error?.code || '').toUpperCase();
-  if (TRANSIENT_APP_CONTRACT_NETWORK_CODES.has(networkCode)) return true;
-  const message = String(error?.message || '');
-  if (/timed out|fetch failed|network|connection (?:refused|reset|timed out)/i.test(message)) return true;
-  const statusMatch = message.match(/^app-contract (\d{3})\b/);
-  if (statusMatch) {
-    const status = Number(statusMatch[1]);
-    return status === 429 || status >= 500;
-  }
-  const codeMatch = message.match(/^app-contract ([a-z0-9][a-z0-9_.-]*):/i);
-  if (codeMatch) {
-    return TRANSIENT_APP_CONTRACT_DISPATCH_CODES.has(codeMatch[1].toLowerCase());
-  }
-  return false;
-}
-
-// Retry an idempotent app-contract dispatch on transient failures. The
-// server-side (app_id, request_id) idempotency makes re-dispatch safe, so a
-// transient endpoint restart is absorbed rather than surfaced as a job failure.
-async function dispatchWithTransientRetry(dispatchOnce, {
-  maxAttempts = APP_CONTRACT_DISPATCH_MAX_ATTEMPTS,
-  sleepImpl = sleep,
-} = {}) {
-  let lastError = null;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      return await dispatchOnce();
-    } catch (error) {
-      lastError = error;
-      if (attempt >= maxAttempts || !isTransientAppContractDispatchError(error)) {
-        throw error;
-      }
-      await sleepImpl(Math.min(250, 50 * attempt));
-    }
-  }
-  throw lastError;
-}
-
 async function dispatchRemediationViaHq({
   hqRoot,
   workerClass,
@@ -2697,13 +2637,13 @@ async function dispatchRemediationViaHq({
   });
   const ticket = appMode === 'agent-os'
     ? await (async () => {
-        const os = await connect({
+        const os = await withAppContractTransientRetry(() => connect({
           app_id: 'adversarial-review',
           mode: appMode,
           hqRoot,
           subscribes: resolveAdversarialReviewAppSubscribes(env),
-        });
-        return dispatchWithTransientRetry(() => os.dispatch({
+        }));
+        return withAppContractTransientRetry(() => os.dispatch({
           request_id: requestId,
           ticket_ref: ticketRef,
           prompt: promptPath,
@@ -6574,12 +6514,12 @@ async function connectFollowUpTelemetryListener({
     return { session: null, subscriptions: [], dispose: () => {} };
   }
   const mode = resolveAdversarialReviewAppMode(env);
-  const session = await connectAppContractImpl({
+  const session = await withAppContractTransientRetry(() => connectAppContractImpl({
     app_id: 'adversarial-review',
     mode,
     hqRoot,
     subscribes,
-  });
+  }));
   const listener = attachFollowUpTelemetryListeners({
     session,
     rootDir,

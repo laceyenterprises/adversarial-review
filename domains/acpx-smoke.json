@@ -1,5 +1,6 @@
 {
   "id": "acpx-smoke",
+  "enabled": false,
   "subjectChannel": "markdown-file",
   "commsChannel": "slack-thread",
   "reviewerRuntime": "acpx",

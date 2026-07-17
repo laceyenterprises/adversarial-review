@@ -89,6 +89,7 @@ import {
   loadDomainConfig,
   recoverReviewerRunRecords,
 } from './adapters/reviewer-runtime/index.mjs';
+import { loadDomainRegistry } from './domain-registry.mjs';
 import {
   readReviewerRunRecord,
   settleReviewerRunRecord,
@@ -316,9 +317,30 @@ const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
 // Fail fast during watcher bootstrap; a bad gate-context override should not
 // leave reviews running while commit-status publication silently stops later.
 resolveGateStatusContext(process.env);
+
+// ARC-03: enumerate the domain registry instead of assuming a single hardcoded
+// `code-pr` domain. loadDomainRegistry is fail-loud, so a malformed domain
+// config aborts startup rather than silently stranding a subject type. code-pr
+// is the only `enabled` domain in production config; the poll loop pumps every
+// enabled domain through its own adapter set.
+const domainRegistry = loadDomainRegistry(ROOT);
+const ENABLED_DOMAINS = domainRegistry.enabledDomains;
+if (ENABLED_DOMAINS.length === 0) {
+  throw new Error(
+    '[watcher] domain registry has no enabled domains; refusing to start with nothing to review'
+  );
+}
+// The watcher's GitHub-PR poll path serves the `github-pr` subject channel.
+// Resolve that domain from the registry rather than hardcoding 'code-pr'; it is
+// also the reviewer-runtime singleton's domain and the default for identity
+// construction on the GitHub-PR paths.
+const WATCHER_PRIMARY_DOMAIN_ID = (
+  ENABLED_DOMAINS.find((domain) => domain.config.subjectChannel === 'github-pr') || ENABLED_DOMAINS[0]
+).id;
+
 let reviewerRuntimeAdapter = createReviewerRuntimeAdapterForDomain({
   rootDir: ROOT,
-  domainId: 'code-pr',
+  domainId: WATCHER_PRIMARY_DOMAIN_ID,
   logger: console,
 });
 let reviewerRuntimeAdapterCache = null;
@@ -402,7 +424,7 @@ async function resolveGeminiCredentialConcurrencyForDispatchCandidates(
   });
 }
 
-function reviewerRuntimeDomainMtimeMs(rootDir = ROOT, domainId = 'code-pr') {
+function reviewerRuntimeDomainMtimeMs(rootDir = ROOT, domainId = WATCHER_PRIMARY_DOMAIN_ID) {
   return statSync(join(rootDir, 'domains', `${domainId}.json`)).mtimeMs;
 }
 
@@ -445,7 +467,7 @@ function reviewerRuntimeAdapterId(adapter = reviewerRuntimeAdapter) {
 
 function signalReviewerRuntimeDomainConfigFailure({
   rootDir = ROOT,
-  domainId = 'code-pr',
+  domainId = WATCHER_PRIMARY_DOMAIN_ID,
   err,
   phase,
   logger = console,
@@ -471,7 +493,7 @@ function reviewerRuntimeAdapterForRunRecord(record = null, {
   if (runtime === reviewerRuntimeAdapterId(reviewerRuntimeAdapter)) {
     return reviewerRuntimeAdapter;
   }
-  const domainId = record?.domain || 'code-pr';
+  const domainId = record?.domain || WATCHER_PRIMARY_DOMAIN_ID;
   let domainMtimeMs = null;
   try {
     domainMtimeMs = reviewerRuntimeDomainMtimeMs(rootDir, domainId);
@@ -503,6 +525,28 @@ function reviewerRuntimeAdapterForRunRecord(record = null, {
   return domainCache.adaptersByRuntime.get(runtime);
 }
 
+// ARC-03: resolve the reviewer-runtime adapter for a specific enabled domain.
+// The primary (github-pr) domain reuses the refreshed process-wide singleton;
+// any other enabled domain gets its own isolated adapter built from its domain
+// config, so per-domain runtime selection never bleeds across domains when the
+// poll loop pumps more than one enabled domain.
+function resolveReviewerRuntimeAdapterForDomainId(domainId, {
+  rootDir = ROOT,
+  logger = console,
+} = {}) {
+  if (!domainId || domainId === WATCHER_PRIMARY_DOMAIN_ID) {
+    return reviewerRuntimeAdapter;
+  }
+  const domainConfig = loadDomainConfig(rootDir, domainId);
+  return createReviewerRuntimeAdapterForDomain({
+    rootDir,
+    domainId,
+    domainConfig,
+    logger,
+    orchestrationMode: activeReviewerRuntimeOrchestrationMode,
+  });
+}
+
 function refreshReviewerRuntimeAdapter({
   rootDir = ROOT,
   logger = console,
@@ -529,7 +573,7 @@ function refreshReviewerRuntimeAdapter({
 
   let domainMtimeMs = null;
   try {
-    domainMtimeMs = domainMtimeImpl(rootDir, 'code-pr');
+    domainMtimeMs = domainMtimeImpl(rootDir, WATCHER_PRIMARY_DOMAIN_ID);
     if (
       reviewerRuntimeAdapterCache?.adapter &&
       reviewerRuntimeAdapterCache.orchestrationMode === orchestrationMode &&
@@ -544,7 +588,7 @@ function refreshReviewerRuntimeAdapter({
 
     reviewerRuntimeAdapter = createAdapterImpl({
       rootDir,
-      domainId: 'code-pr',
+      domainId: WATCHER_PRIMARY_DOMAIN_ID,
       logger,
       orchestrationMode,
     });
@@ -3443,7 +3487,10 @@ async function spawnReviewer({
   crossModelReviewWaived = false,
   crossModelReviewWaiverReason = null,
   onReviewerPgid = () => {},
+  domainId = WATCHER_PRIMARY_DOMAIN_ID,
+  reviewerRuntimeAdapterOverride = null,
 }) {
+  const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeAdapter;
   const finalRound = (
     Number.isFinite(reviewAttemptNumber) &&
     Number.isFinite(maxRemediationRounds) &&
@@ -3503,11 +3550,11 @@ async function spawnReviewer({
       ? resolveAgyReviewerSubprocessTimeoutMs(process.env, { reviewerTimeoutMs })
       : reviewerTimeoutMs;
 
-    const result = await reviewerRuntimeAdapter.spawnReviewer({
+    const result = await activeReviewerRuntimeAdapter.spawnReviewer({
       model: reviewerModel,
       prompt: '',
       subjectContext: {
-        domainId: 'code-pr',
+        domainId,
         repo,
         prNumber,
         reviewerModel,
@@ -5730,7 +5777,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
       deleteGateRecordsForPR(ROOT, { repo, prNumber });
       await operatorSurface.syncTriageStatus(
         subjectRefWithLinearTicket({
-          domainId: 'code-pr',
+          domainId: WATCHER_PRIMARY_DOMAIN_ID,
           subjectExternalId: `${repo}#${prNumber}`,
           revisionRef: pr.headRefOid || null,
         }, linearTicketId, labelNames),
@@ -5745,7 +5792,7 @@ async function syncPRLifecycle(octokit, operatorSurface) {
       deleteGateRecordsForPR(ROOT, { repo, prNumber });
       await operatorSurface.syncTriageStatus(
         subjectRefWithLinearTicket({
-          domainId: 'code-pr',
+          domainId: WATCHER_PRIMARY_DOMAIN_ID,
           subjectExternalId: `${repo}#${prNumber}`,
           revisionRef: pr.headRefOid || null,
         }, linearTicketId, labelNames),
@@ -7310,6 +7357,7 @@ async function handlePostedReviewRow({
   latestPostedReviewBodyFinder = findLatestPostedReviewBody,
   reviewBodyHasScopeViolationFindingImpl = reviewBodyHasScopeViolationFinding,
   operatorSurface = null,
+  domainId = WATCHER_PRIMARY_DOMAIN_ID,
   logger = console,
 } = {}) {
   await projectGateStatusSafe(existing);
@@ -7334,7 +7382,7 @@ async function handlePostedReviewRow({
     let adversarialMergeRequestedEvent;
     if (operatorSurface) {
       const controlSubjectRef = subjectRef || {
-        domainId: 'code-pr',
+        domainId,
         subjectExternalId: `${repoPath}#${prNumber}`,
         revisionRef: currentRevisionRef || null,
       };
@@ -7645,6 +7693,7 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
   buildMergeAgentDispatchJobImpl = buildMergeAgentDispatchJob,
   dispatchMergeAgentForPRImpl = dispatchMergeAgentForPR,
   operatorSurface = null,
+  domainId = WATCHER_PRIMARY_DOMAIN_ID,
   logger = console,
 } = {}) {
   if (!isReviewerTimeoutExhaustedRow(rootDir, existing, {
@@ -7661,7 +7710,7 @@ async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
     let adversarialMergeRequestedEvent;
     if (operatorSurface) {
       const controlSubjectRef = subjectRef || {
-        domainId: 'code-pr',
+        domainId,
         subjectExternalId: `${repoPath}#${prNumber}`,
         revisionRef: currentRevisionRef || null,
       };
@@ -7934,6 +7983,7 @@ async function getStalePostedReviewAutoRereviewSuppression({
   currentHeadSha,
   labelNames = [],
   operatorSurface = null,
+  domainId = WATCHER_PRIMARY_DOMAIN_ID,
   execFileImpl = execFileAsync,
   env = process.env,
   logger = console,
@@ -7945,7 +7995,7 @@ async function getStalePostedReviewAutoRereviewSuppression({
       .filter(Boolean)
   );
   const controlSubjectRef = subjectRef || {
-    domainId: 'code-pr',
+    domainId,
     subjectExternalId: `${repoPath}#${prNumber}`,
     revisionRef: currentRevisionRef || currentHeadSha || null,
   };
@@ -8126,7 +8176,31 @@ async function pollOnce(
     }
   }
 
-  for (const repoPath of activeRepos) {
+  // ARC-03: pump every enabled domain through its own adapter set instead of
+  // assuming a single hardcoded `code-pr` domain. Each enabled domain resolves
+  // its own reviewer-runtime adapter (isolated from other domains); the primary
+  // github-pr domain owns the polled repos. Flattening domains × repos into one
+  // work-list keeps the existing per-repo body intact while threading the
+  // domain identity through it. code-pr is the only enabled domain in
+  // production, so this iterates exactly the repos it did before.
+  const domainAdapterSets = ENABLED_DOMAINS.map((domain) => ({
+    domainId: domain.id,
+    domainConfig: domain.config,
+    reviewerRuntimeAdapter: resolveReviewerRuntimeAdapterForDomainId(domain.id),
+  }));
+  const domainRepoWork = [];
+  for (const domainAdapterSet of domainAdapterSets) {
+    const domainRepos = domainAdapterSet.domainConfig.subjectChannel === 'github-pr'
+      ? activeRepos
+      : [];
+    for (const repoPath of domainRepos) {
+      domainRepoWork.push({ domainAdapterSet, repoPath });
+    }
+  }
+
+  for (const { domainAdapterSet, repoPath } of domainRepoWork) {
+    const domainId = domainAdapterSet.domainId;
+    const domainReviewerRuntimeAdapter = domainAdapterSet.reviewerRuntimeAdapter;
     const [owner, repo] = repoPath.split('/');
     const subjectAdapter = createGitHubPRSubjectAdapter({
       octokit,
@@ -8432,6 +8506,7 @@ async function pollOnce(
           currentHeadSha: subject.headSha,
           labelNames: prLabelNames,
           operatorSurface,
+          domainId,
           execFileImpl: execFileAsync,
           logger: console,
         })
@@ -8518,6 +8593,7 @@ async function pollOnce(
           projectGateStatusSafe,
           execFileImpl: execFileAsync,
           operatorSurface,
+          domainId,
         });
         postedReviewHandlers.push({
           repoPath,
@@ -8861,6 +8937,7 @@ async function pollOnce(
         labelNames: prLabelNames,
         execFileImpl: execFileAsync,
         operatorSurface,
+        domainId,
       });
       if (timeoutExhaustionHandoff.handled) {
         continue;
@@ -9558,6 +9635,8 @@ async function pollOnce(
                 reviewerSessionUuid,
                 reviewerTimeoutMs,
                 workspacePath: null,
+                domainId,
+                reviewerRuntimeAdapterOverride: domainReviewerRuntimeAdapter,
                 onReviewerPgid: ({ pgid, spawnedAt }) => {
                   persistReviewerPgid({
                     pgid,

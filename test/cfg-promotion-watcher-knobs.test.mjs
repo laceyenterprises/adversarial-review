@@ -141,18 +141,28 @@ test('promoted resolvers fail loud on canonical-vs-legacy env conflicts', () => 
       'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS_CEILING',
     ]
   );
-  assertEnvAliasConflict(
-    () => loadConfig({
-      env: {
-        AGENT_OS_REMEDIATION_RECONCILIATION_MAX_ACTIVE_AGE_MS_BEFORE_ABANDON: '21600000',
-        ADVERSARIAL_REMEDIATION_RECONCILIATION_MAX_ACTIVE_MS: '21600001',
-      },
-    }),
-    [
-      'AGENT_OS_REMEDIATION_RECONCILIATION_MAX_ACTIVE_AGE_MS_BEFORE_ABANDON',
-      'ADVERSARIAL_REMEDIATION_RECONCILIATION_MAX_ACTIVE_MS',
-    ]
-  );
+  // Pin an isolated top-level config: without it, loadConfig discovers the
+  // enclosing agent-os checkout's config.yaml, and a foreign sibling-module
+  // key there throws before env-conflict detection runs (2026-07-17 outage
+  // shape), turning this into a false failure in nested checkouts.
+  const isolatedTop = createTempConfig('version: 1\n');
+  try {
+    assertEnvAliasConflict(
+      () => loadConfig({
+        topPath: isolatedTop.configPath,
+        env: {
+          AGENT_OS_REMEDIATION_RECONCILIATION_MAX_ACTIVE_AGE_MS_BEFORE_ABANDON: '21600000',
+          ADVERSARIAL_REMEDIATION_RECONCILIATION_MAX_ACTIVE_MS: '21600001',
+        },
+      }),
+      [
+        'AGENT_OS_REMEDIATION_RECONCILIATION_MAX_ACTIVE_AGE_MS_BEFORE_ABANDON',
+        'ADVERSARIAL_REMEDIATION_RECONCILIATION_MAX_ACTIVE_MS',
+      ]
+    );
+  } finally {
+    isolatedTop.cleanup();
+  }
   assertEnvAliasConflict(
     () => resolveWatcherDrainMaxMs({
       AGENT_OS_WATCHER_MAX_DRAIN_WAIT_MS: '3600000',

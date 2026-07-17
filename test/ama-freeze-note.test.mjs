@@ -64,7 +64,18 @@ test('the v1-snapshot baseline doc records the tag, branch, and green baseline',
   assert.match(baseline, /v1-maintenance/, 'baseline doc must name the maintenance branch');
   // The snapshot commit SHA (40-hex) must be pinned so the rollback floor is unambiguous.
   assert.match(baseline, /\b[0-9a-f]{40}\b/, 'baseline doc must pin the snapshot commit SHA');
-  // Evidence the fixture-e2e suite was green at the tag.
-  assert.match(baseline, /npm test/, 'baseline doc must record the test command');
-  assert.match(baseline, /# fail 0|fail 0|0 fail/i, 'baseline doc must record a green (zero-failure) result');
+  // Evidence the fixture-e2e suite was green at the tag. Bind the
+  // zero-failure assertion to the fixture-e2e command row itself so an
+  // edit to that row cannot pass on a "fail 0" appearing anywhere else
+  // in the document (review finding on #613).
+  assert.match(baseline, /npm test/, 'baseline doc must record the full-suite command');
+  const fixtureRow = baseline
+    .split('\n')
+    .find((line) => line.includes('research-finding-end-to-end.test.mjs'));
+  assert.ok(fixtureRow, 'baseline doc must record the fixture-e2e command row');
+  assert.match(
+    fixtureRow,
+    /# fail 0/,
+    'the fixture-e2e row itself must record a zero-failure result',
+  );
 });

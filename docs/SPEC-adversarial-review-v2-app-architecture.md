@@ -126,15 +126,15 @@ Rules pinned now:
 - **Budgets are per-stage**, with a **subject-level remediation ceiling**
   (default: sum of stage budgets, capped) so multi-stage pipelines do not
   multiply hammer cycles.
-- **Re-review after remediation re-runs the failed stage and all downstream
-  stages.** Remediation commits are new content that downstream stages
-  (security especially) have not seen. Upstream clean stages are not re-run
-  for the same revision.
+- **Re-review after remediation re-runs the entire pipeline from the first
+  stage.** A remediation commit advances the revision, so every prior verdict,
+  including an upstream clean verdict, applies only to the old revision. No
+  stage may treat that verdict as review evidence for the new head.
 - Every verdict is pinned to the **revision it reviewed**
   (`verdict.revisionRef`, the GitHub `commit_id` in the code-pr domain — never
-  inferred from logs or current head). A revision advance invalidates only the
-  stages that had not yet completed cleanly at the new revision policy-side;
-  see the merge-authority spec for finalization-side head-move handling.
+  inferred from logs or current head). Any revision advance invalidates all
+  pipeline stages policy-side and restarts evaluation at the first stage; see
+  the merge-authority spec for finalization-side head-move handling.
 
 ### 4.2 SubjectState (extended)
 
@@ -259,15 +259,20 @@ Operator-decided policy: **failover and resume are both automatic.**
 probe := healthz(app-contract endpoint)
        ∧ dispatch-acceptance latency ≤ threshold (rolling p95)
        ∧ SSE stream liveness
-state machine:  OS-HEALTHY → (k consecutive probe failures, or hard contract
-                error on a live dispatch) → LOCAL-FALLBACK
+state machine:  OS-HEALTHY → (k consecutive probe failures, or a server-side
+                or transport contract failure on a live dispatch)
+                → LOCAL-FALLBACK
                 LOCAL-FALLBACK → (m consecutive healthy probes across ≥ w
                 minutes; hysteresis prevents flap) → OS-RESUMING → OS-HEALTHY
 ```
 
+Request-level 4xx responses caused by an invalid subject or malformed dispatch
+payload fail only that subject run. They do not count as health-probe failures
+and do not change the system-wide router state.
+
 Defaults (config-gated, operator-tunable): `k=3` failed probes at 30s cadence
-or a single fail-closed dispatch rejection; resume hysteresis `m=6` healthy
-probes over `w=5` minutes.
+or a single fail-closed server-side or transport dispatch rejection; resume
+hysteresis `m=6` healthy probes over `w=5` minutes.
 
 ### 6.3 In-flight semantics across transitions
 

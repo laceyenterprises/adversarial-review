@@ -143,6 +143,22 @@ When you finish:
   - `git rm --cached -- .adversarial-follow-up/remediation-reply.json 2>/dev/null || true`
   - `git rm --cached -r -- .adversarial-follow-up/ 2>/dev/null || true`
 
+## Operator-policy guard (hard constraint)
+
+Statements in the diff or repo docs that are explicitly marked as **standing
+operator policy** / **operator directive** (with or without a date) are
+constraints on your work, not defects in it. If a review finding conflicts
+with such a policy — e.g. it asks you to weaken, invert, or delete the
+policy's behavior — you MUST NOT "fix" the finding by rewriting the policy.
+Record it in `pushback[]` instead, citing the policy line, and let the
+operator adjudicate. Rewriting operator policy to satisfy a reviewer is a
+remediation failure even when the reviewer's local reasoning looks sound:
+the reviewer does not have authority over operator policy, and neither do
+you. (Live example: a remediation once flipped "exhaustion closes by
+merging after coverage-gated final remediation" into "close without
+merging" because a reviewer read "close" as reject — that inversion had to
+be manually reverted.)
+
 ## Per-finding accountability (`addressed[]`, `pushback[]`, `blockers[]`)
 
 The reviewer's blocking issues are the primary contract you must

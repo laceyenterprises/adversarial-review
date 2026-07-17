@@ -312,6 +312,50 @@ test('run honors the deadline and reports a timeout when dispatch_status never t
   assert.deepEqual(session.cancelCalls, [reviewerRequest().idempotencyKey]);
 });
 
+test('run retries transient dispatch_status failures but fails fast on client errors', async () => {
+  const transient = new Error('connection reset');
+  transient.code = 'ECONNRESET';
+  const session = fakeSession({
+    statusSequence: [
+      () => { throw transient; },
+      { status: 'succeeded', artifact: reviewArtifact() },
+    ],
+  });
+  const warnings = [];
+  const runtime = createOsDispatchAgentRuntime({
+    session,
+    sleepImpl: async () => {},
+    jitterImpl: () => 0,
+    logger: { warn: (...args) => warnings.push(args) },
+  });
+  const result = await (await runtime.run(reviewerRequest())).await();
+  assert.equal(result.status, 'completed');
+  assert.equal(session.statusCalls.length, 2);
+  assert.equal(warnings.length, 1);
+
+  const unauthorized = new Error('unauthorized');
+  unauthorized.status = 401;
+  const fatalSession = fakeSession({ statusSequence: [() => { throw unauthorized; }] });
+  const fatalResult = await (await createOsDispatchAgentRuntime({
+    session: fatalSession,
+    sleepImpl: async () => {},
+  }).run(reviewerRequest())).await();
+  assert.equal(fatalResult.status, 'failed');
+  assert.equal(fatalSession.statusCalls.length, 1);
+});
+
+test('multiple await calls share one dispatch_status polling loop', async () => {
+  const session = fakeSession({
+    statusSequence: [{ status: 'running' }, { status: 'succeeded', artifact: reviewArtifact() }],
+  });
+  const runtime = createOsDispatchAgentRuntime({ session, sleepImpl: async () => {}, jitterImpl: () => 0 });
+  const handle = await runtime.run(reviewerRequest());
+  const [first, second] = await Promise.all([handle.await(), handle.await()]);
+  assert.equal(first.status, 'completed');
+  assert.strictEqual(first, second);
+  assert.equal(session.statusCalls.length, 2);
+});
+
 test('run reports a failed RunResult when the dispatch call throws instead of throwing', async () => {
   const session = {
     async dispatch() { const err = new Error('endpoint unreachable'); throw err; },
@@ -344,6 +388,26 @@ test('reattach re-polls dispatch_status using the record request_id (no re-dispa
   assert.equal(session.dispatched.length, 0, 'reattach must not re-dispatch');
   assert.equal(session.statusCalls[0], 'code-pr:pr-14:abc123:code-review:code-quality-reviewer:1');
   assert.equal(result.status, 'completed');
+});
+
+test('reattach preserves the original wall-clock timeout budget', async () => {
+  const session = fakeSession({ statusSequence: [{ status: 'running' }] });
+  let clock = 10_000;
+  const runtime = createOsDispatchAgentRuntime({
+    session,
+    nowMs: () => clock,
+    sleepImpl: async () => { clock += 1_000; },
+    jitterImpl: () => 0,
+  });
+  const result = await runtime.reattach({
+    request_id: 'reattach-timeout',
+    spawnedAt: new Date(8_000).toISOString(),
+    timeoutMs: 3_000,
+    subjectContext: { agentRoleKind: 'reviewer' },
+  });
+  assert.equal(result.status, 'timeout');
+  assert.equal(session.statusCalls.length, 1);
+  assert.deepEqual(session.cancelCalls, ['reattach-timeout']);
 });
 
 test('reattach fails cleanly when the record carries no request_id', async () => {

@@ -29,6 +29,10 @@ const RUNTIME_MODE = 'os';
 
 const DEFAULT_POLL_BASE_MS = 5_000;
 const DEFAULT_POLL_JITTER_MS = 1_000;
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH',
+  'ENOTFOUND', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET',
+]);
 
 // dispatch_status terminal-state mapping → AgentRunStatus. Non-terminal states
 // (queued/accepted/dispatching/running/heartbeating/…) keep the poll loop
@@ -222,6 +226,14 @@ function dispatchFailureResult(err) {
   };
 }
 
+function isTransientDispatchStatusError(err) {
+  if (err?.retryable === true) return true;
+  const code = String(err?.code ?? err?.cause?.code ?? '').toUpperCase();
+  if (TRANSIENT_NETWORK_CODES.has(code)) return true;
+  const status = Number(err?.status ?? err?.statusCode ?? err?.response?.status);
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
 function settledHandle(runRef, result) {
   return {
     runRef,
@@ -304,7 +316,13 @@ function createOsDispatchAgentRuntime({
       try {
         statusPayload = await activeSession.dispatchStatus(requestId);
       } catch (err) {
-        return dispatchFailureResult(err);
+        if (!isTransientDispatchStatusError(err)) return dispatchFailureResult(err);
+        logger?.warn?.('[os-dispatch] transient dispatch status failure; polling will retry', {
+          requestId,
+          error: err?.message || String(err),
+        });
+        await sleepImpl(pollBaseMs + jitterImpl(pollJitterMs));
+        continue;
       }
       const mapped = mapTerminalStatus(normalizeStatus(statusPayload?.status));
       if (mapped) {
@@ -322,6 +340,15 @@ function createOsDispatchAgentRuntime({
     return null;
   }
 
+  function resolveReattachDeadlineMs(record) {
+    const timeoutMs = Number(record.timeoutMs ?? record.subjectContext?.timeoutMs);
+    const wallMs = Number(record.budget?.maxWallMs ?? record.subjectContext?.budget?.maxWallMs);
+    const durationMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : wallMs;
+    if (!Number.isFinite(durationMs) || durationMs <= 0) return null;
+    const startedAtMs = Date.parse(record.spawnedAt ?? record.startedAt ?? record.createdAt ?? '');
+    return Number.isFinite(startedAtMs) ? startedAtMs + durationMs : nowMs() + durationMs;
+  }
+
   async function run(request) {
     validateRequest(request);
     const role = request.role;
@@ -337,12 +364,18 @@ function createOsDispatchAgentRuntime({
 
     const cancelled = { value: false };
     const deadlineMs = resolveDeadlineMs(request);
+    let pollingPromise = null;
+
+    function awaitTerminal() {
+      pollingPromise ??= pollUntilTerminal({ activeSession, requestId, role, cancelled, deadlineMs });
+      return pollingPromise;
+    }
 
     return {
       runRef: requestId,
       mode: RUNTIME_MODE,
       async await() {
-        return pollUntilTerminal({ activeSession, requestId, role, cancelled, deadlineMs });
+        return awaitTerminal();
       },
       async cancel() {
         cancelled.value = true;
@@ -353,7 +386,7 @@ function createOsDispatchAgentRuntime({
       // duplicate work is issued — the accepted dispatch is observed, not
       // reissued (§6.3).
       async reattach() {
-        return pollUntilTerminal({ activeSession, requestId, role, cancelled, deadlineMs: null });
+        return awaitTerminal();
       },
     };
   }
@@ -396,7 +429,7 @@ function createOsDispatchAgentRuntime({
       requestId,
       role: effectiveRole,
       cancelled: { value: false },
-      deadlineMs: null,
+      deadlineMs: resolveReattachDeadlineMs(record),
     });
   }
 

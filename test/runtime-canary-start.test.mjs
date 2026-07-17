@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -12,7 +12,11 @@ function executable(path, body) {
   chmodSync(path, 0o755);
 }
 
-test('canary wrapper retries a transient op failure before launching node with the recipient', () => {
+test('canary wrapper retries a transient op failure before launching node with the recipient', (t) => {
+  if (!existsSync('/bin/zsh')) {
+    t.skip('/bin/zsh is unavailable on this runner');
+    return;
+  }
   const rootDir = mkdtempSync(join(tmpdir(), 'canary-wrapper-'));
   const binDir = join(rootDir, 'bin');
   try {

@@ -4173,6 +4173,14 @@ function resolveFirstPassReviewBudgetSuppression({
   let ledger;
   let resolution;
   let completedRereviewRounds = 0;
+  // #81 (runaway-hammer close-model): the PER-PR completed-rereview count (all
+  // heads). The per-head count below intentionally re-arms review on a head move
+  // (LAC-1559 / agent-os#3272), but that made the post-budget "owed final
+  // review" fire on EVERY hammer-moved head after exhaustion — each new head
+  // reads 0 per-head rounds — so an exhausted PR re-opened findings forever and
+  // the hammer never closed (#3817 had to be hand-merged). This per-PR total
+  // bounds the post-budget final review so the hammer closes on exhaustion.
+  let completedRereviewRoundsForPRTotal = 0;
   try {
     ledger = summarizePRRemediationLedgerImpl(rootDir, { domainId, repo: repoPath, prNumber });
     completedRereviewRounds = countCompletedReviewerRereviewRoundsImpl({
@@ -4182,6 +4190,14 @@ function resolveFirstPassReviewBudgetSuppression({
       repoPath,
       prNumber,
       headSha: suppliedCurrentHeadSha,
+    });
+    completedRereviewRoundsForPRTotal = countCompletedReviewerRereviewRoundsImpl({
+      db: dbOverride,
+      rootDir,
+      domainId,
+      repoPath,
+      prNumber,
+      headSha: null,
     });
     resolution = resolveRoundBudgetForJobImpl({
       linearTicketId,
@@ -4223,6 +4239,18 @@ function resolveFirstPassReviewBudgetSuppression({
     Number.isFinite(completedRereviewRounds) &&
     remediationBudgetConsumed &&
     completedRereviewRounds >= roundBudget;
+  // #81: per-PR ceiling on post-budget final reviews. `> roundBudget` still
+  // grants the FIRST owed final review for a genuinely-new over-budget head (the
+  // per-PR total is still at the budget then — agent-os#3272 intent preserved),
+  // and suppresses once that owed review has completed and a hammer moves the
+  // head yet again (per-PR total now exceeds the budget). Without this, the
+  // per-head owed-review re-armed a fresh gating review on every hammer
+  // remediation push and the PR never converged (#81 runaway-hammer loop).
+  const postBudgetFinalReviewCompletedForPR =
+    remediationBudgetConsumed &&
+    hasPositiveRoundBudget &&
+    Number.isFinite(completedRereviewRoundsForPRTotal) &&
+    completedRereviewRoundsForPRTotal > roundBudget;
   const rereviewBudgetConsumed =
     Number.isFinite(completedRereviewRounds) &&
     hasPositiveRoundBudget &&
@@ -4310,11 +4338,26 @@ function resolveFirstPassReviewBudgetSuppression({
   const currentHeadOwesPostBudgetFinalReview =
     suppliedCurrentHeadSha !== null &&
     !currentHeadAlreadyReviewed &&
-    remediationBudgetConsumed;
+    remediationBudgetConsumed &&
+    !postBudgetFinalReviewCompletedForPR;
   if (currentHeadOwesPostBudgetFinalReview) {
     return {
       suppressed: false,
       reason: 'owed-post-budget-final-review',
+      completedRoundsForPR,
+      roundBudget,
+      riskClass: resolution.riskClass,
+    };
+  }
+  // #81: the PR already spent its post-budget final review and a hammer moved the
+  // head again — suppress the re-review so the exhausted PR closes via the AMA
+  // exhaustion->merge path (hammer terminal remediation) instead of re-opening
+  // findings on every remediation push. This is the operator AMA policy: the
+  // hammer closes on exhaustion, no gating re-review.
+  if (postBudgetFinalReviewCompletedForPR) {
+    return {
+      suppressed: true,
+      reason: 'post-budget-final-review-completed-for-pr',
       completedRoundsForPR,
       roundBudget,
       riskClass: resolution.riskClass,

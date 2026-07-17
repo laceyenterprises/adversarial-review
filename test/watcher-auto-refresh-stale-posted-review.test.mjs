@@ -1086,6 +1086,45 @@ test('watcher classifies a new head after the post-budget final review as owed f
   });
 });
 
+test('watcher suppresses a hammer-moved head once the PR spent its post-budget final review (#81)', () => {
+  // Runaway-hammer close-model. After the remediation budget is exhausted, the
+  // per-head owed-review re-armed a gating review on EVERY hammer remediation
+  // push (each new head reads 0 per-head rounds), so an exhausted PR re-opened
+  // findings forever and the hammer never closed (#3817 had to be hand-merged).
+  // Once the PR's PER-PR completed-rereview total exceeds the round budget — the
+  // budget plus the one owed final review already spent — a further hammer-moved
+  // head is suppressed so the exhausted PR closes via the AMA exhaustion->merge
+  // path (operator AMA policy: hammer closes on exhaustion, no gating re-review).
+  const suppression = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 3817,
+    reviewRow: {
+      review_status: 'posted',
+      reviewer_head_sha: 'priorhammerhead',
+    },
+    currentHeadSha: 'newhammerhead',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 2,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    // Per-head count for the never-reviewed new head is 0 (which re-armed review
+    // under the old per-head-only logic); the PER-PR total is 3 — budget (2) plus
+    // the one owed final review already spent — so the per-PR ceiling suppresses.
+    countCompletedReviewerRereviewRoundsImpl: ({ headSha }) =>
+      headSha === null ? 3 : 0,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+
+  assert.deepEqual(suppression, {
+    suppressed: true,
+    reason: 'post-budget-final-review-completed-for-pr',
+    completedRoundsForPR: 2,
+    roundBudget: 2,
+    riskClass: 'medium',
+  });
+});
+
 test('watcher keeps remediation-worker rereview within the final-review allowance', () => {
   const withinBudget = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',

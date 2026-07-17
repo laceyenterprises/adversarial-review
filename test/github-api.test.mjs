@@ -1588,6 +1588,10 @@ export async function load(url, context, nextLoad) {
                 reviewed_at: row.reviewed_at || null,
                 reviewer: row.reviewer || null,
                 pr_state: row.pr_state || 'open',
+                domain_id: row.domain_id || null,
+                subject_external_id: row.subject_external_id || null,
+                revision_ref: row.revision_ref || null,
+                linear_ticket: row.linear_ticket || null,
                 review_status: row.review_status || 'posted',
                 review_attempts: row.review_attempts || 0,
                 labels_json: row.labels_json || '[]',
@@ -1599,6 +1603,14 @@ export async function load(url, context, nextLoad) {
               const normalized = String(sql || '').replace(/\\s+/g, ' ').trim();
               if (normalized.includes("FROM reviewed_prs") && normalized.includes("pr_state = 'open'")) {
                 return { all: () => rows.filter((row) => row.pr_state === 'open').map((row) => ({ ...row })) };
+              }
+              if (normalized === 'SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?') {
+                return {
+                  get: (repo, prNumber) => {
+                    const row = findRow(repo, prNumber);
+                    return row ? { ...row } : null;
+                  },
+                };
               }
               if (normalized.startsWith('INSERT OR IGNORE INTO watcher_db_canary')) {
                 return {
@@ -1759,20 +1771,22 @@ register(${JSON.stringify(pathToFileURL(loaderPath).href)}, import.meta.url);
 `;
 }
 
-function buildWatcherRunnerSource() {
+function buildWatcherRunnerSource(seedRow = {}) {
+  const row = {
+    repo: FIXTURE_REPO,
+    pr_number: FIXTURE_PR,
+    reviewed_at: '2026-06-06T08:01:00.000Z',
+    reviewer: 'claude',
+    pr_state: 'open',
+    review_status: 'posted',
+    labels_json: JSON.stringify(['automerge']),
+    ...seedRow,
+  };
   return `
 globalThis.__githubApiWatcherScenario = JSON.parse(process.env.GITHUB_API_WATCHER_SCENARIO || '{}');
 const { pollOnce } = await import(${JSON.stringify(fileUrl('src', 'watcher.mjs'))});
 const db = globalThis.__githubApiWatcherDb;
-db.seedRow({
-  repo: ${JSON.stringify(FIXTURE_REPO)},
-  pr_number: ${FIXTURE_PR},
-  reviewed_at: '2026-06-06T08:01:00.000Z',
-  reviewer: 'claude',
-  pr_state: 'open',
-  review_status: 'posted',
-  labels_json: JSON.stringify(['automerge']),
-});
+db.seedRow(${JSON.stringify(row)});
 const octokit = {
   paginate: async () => [],
   rest: {
@@ -1799,7 +1813,7 @@ console.log(${JSON.stringify(WATCHER_SUMMARY_MARKER)} + JSON.stringify({
 `;
 }
 
-function runWatcherScenario(rollup) {
+function runWatcherScenario(rollup, { seedRow = {} } = {}) {
   const tmp = mkdtempSync(path.join(tmpdir(), 'github-api-watcher-'));
   try {
     const loaderPath = path.join(tmp, 'loader.mjs');
@@ -1807,7 +1821,7 @@ function runWatcherScenario(rollup) {
     const runnerPath = path.join(tmp, 'runner.mjs');
     writeFileSync(loaderPath, buildWatcherLoaderSource({ rollup }), 'utf8');
     writeFileSync(registerPath, buildWatcherRegisterSource(loaderPath), 'utf8');
-    writeFileSync(runnerPath, buildWatcherRunnerSource(), 'utf8');
+    writeFileSync(runnerPath, buildWatcherRunnerSource(seedRow), 'utf8');
     const result = spawnSync(process.execPath, ['--import', registerPath, runnerPath], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
@@ -2803,9 +2817,47 @@ test('watcher tick downstream output is unchanged when PR fetches come from the 
       domainId: 'code-pr',
       subjectExternalId: `${FIXTURE_REPO}#${FIXTURE_PR}`,
       revisionRef: rollup.headRefOid,
+      linearTicketId: null,
       labels: ['automerge'],
     },
     state: 'finalized',
+  }]);
+  assert.equal(summary.headStateCalls, 1);
+  assert.equal(summary.rollupCalls, 0);
+});
+
+test('watcher lifecycle sync uses the owning domain when PRs close unmerged', () => {
+  const rollup = {
+    ...makeExpectedRollup(),
+    state: 'closed',
+    mergedAt: null,
+    closedAt: '2026-06-06T08:46:00.000Z',
+    labels: [{ name: 'operator-paused' }],
+  };
+  const summary = runWatcherScenario(rollup, {
+    seedRow: {
+      domain_id: 'security-pr',
+      subject_external_id: `${FIXTURE_REPO}#${FIXTURE_PR}`,
+      revision_ref: 'sha-before-close',
+    },
+  });
+
+  assert.deepEqual(summary.rows, [{
+    repo: FIXTURE_REPO,
+    pr_number: FIXTURE_PR,
+    pr_state: 'closed',
+    merged_at: null,
+    closed_at: '2026-06-06T08:46:00.000Z',
+  }]);
+  assert.deepEqual(summary.triage, [{
+    subjectRef: {
+      domainId: 'security-pr',
+      subjectExternalId: `${FIXTURE_REPO}#${FIXTURE_PR}`,
+      revisionRef: rollup.headRefOid,
+      linearTicketId: null,
+      labels: ['operator-paused'],
+    },
+    state: 'halted',
   }]);
   assert.equal(summary.headStateCalls, 1);
   assert.equal(summary.rollupCalls, 0);

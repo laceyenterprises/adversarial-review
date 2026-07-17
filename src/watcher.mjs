@@ -2530,10 +2530,19 @@ const stmtGetLatestPostedReviewBody = db.prepare(
     LIMIT 1`
 );
 const stmtCreateReviewRow = db.prepare(
-  'INSERT OR IGNORE INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, linear_ticket, review_status, review_attempts, labels_json) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)'
+  `INSERT OR IGNORE INTO reviewed_prs (
+     repo, pr_number, domain_id, subject_external_id, revision_ref,
+     reviewed_at, reviewer, pr_state, linear_ticket, review_status,
+     review_attempts, labels_json
+   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
 );
 const stmtCreateFastMergeSkippedReviewRow = db.prepare(
-  "INSERT OR IGNORE INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, linear_ticket, review_status, review_attempts, labels_json, fast_merge_authorized_head_sha, fast_merge_audit_status, fast_merge_audit_payload_json, fast_merge_audit_error) VALUES (?, ?, ?, ?, 'fast_merge_skipped', ?, 'fast_merge_skipped', 0, ?, ?, ?, ?, ?)"
+  `INSERT OR IGNORE INTO reviewed_prs (
+     repo, pr_number, domain_id, subject_external_id, revision_ref,
+     reviewed_at, reviewer, pr_state, linear_ticket, review_status,
+     review_attempts, labels_json, fast_merge_authorized_head_sha,
+     fast_merge_audit_status, fast_merge_audit_payload_json, fast_merge_audit_error
+   ) VALUES (?, ?, ?, ?, ?, ?, ?, 'fast_merge_skipped', ?, 'fast_merge_skipped', 0, ?, ?, ?, ?, ?)`
 );
 const stmtUpdateReviewRouting = db.prepare(
   'UPDATE reviewed_prs SET reviewer = ?, linear_ticket = COALESCE(?, linear_ticket) WHERE repo = ? AND pr_number = ?'
@@ -5849,9 +5858,11 @@ async function syncPRLifecycle(octokit, operatorSurface) {
       });
       stmtMarkClosed.run(pr.closedAt ?? new Date().toISOString(), repo, prNumber);
       deleteGateRecordsForPR(ROOT, { repo, prNumber });
+      const closedRowDomainId =
+        stmtGetReviewRow.get(repo, prNumber)?.domain_id || WATCHER_PRIMARY_DOMAIN_ID;
       await operatorSurface.syncTriageStatus(
         subjectRefWithLinearTicket({
-          domainId: WATCHER_PRIMARY_DOMAIN_ID,
+          domainId: closedRowDomainId,
           subjectExternalId: `${repo}#${prNumber}`,
           revisionRef: pr.headRefOid || null,
         }, linearTicketId, labelNames),
@@ -8598,6 +8609,7 @@ async function pollOnce(
           !stalePostedReviewCloserSuppression.suppressed
           ? getStalePostedReviewBudgetSuppression({
             rootDir: ROOT,
+            domainId,
             repoPath,
             prNumber,
             linearTicketId,
@@ -8710,6 +8722,9 @@ async function pollOnce(
           stmtCreateReviewRow.run(
             repoPath,
             prNumber,
+            domainId,
+            subject.ref.subjectExternalId,
+            subject.ref.revisionRef || subject.headSha || null,
             new Date().toISOString(),
             'malformed-title',
             'open',
@@ -8907,6 +8922,9 @@ async function pollOnce(
               stmtCreateFastMergeSkippedReviewRow.run(
                 repoPath,
                 prNumber,
+                domainId,
+                subject.ref.subjectExternalId,
+                authorizedHeadSha || subject.ref.revisionRef || subject.headSha || null,
                 skippedAt,
                 route.reviewerModel,
                 linearTicketId,
@@ -8967,6 +8985,9 @@ async function pollOnce(
         stmtCreateReviewRow.run(
           repoPath,
           prNumber,
+          domainId,
+          subject.ref.subjectExternalId,
+          subject.ref.revisionRef || subject.headSha || null,
           new Date().toISOString(),
           route.reviewerModel,
           'open',

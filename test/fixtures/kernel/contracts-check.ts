@@ -1,16 +1,22 @@
 import type {
   AgentRunRequest,
   AgentRuntime,
+  AggregationPolicy,
   CommsChannelAdapter,
   DeliveryKey,
   OperatorSurfaceAdapter,
+  RemediationBudgetPlan,
+  ReviewPipeline,
   ReviewerRuntimeAdapter,
   RemediationCommitMetadata,
   RemediationReply,
   RunResult,
+  Stage,
+  StageState,
   SubjectChannelAdapter,
   SubjectContent,
   SubjectRef,
+  SubjectState,
   Verdict,
 } from '../../../src/kernel/contracts.js';
 
@@ -55,6 +61,79 @@ const reply: RemediationReply = {
     reason: 'The blocking finding has been addressed.',
   },
 };
+
+// Review pipeline contract (§4.1–4.2): a sequential two-stage pipeline whose
+// first stage runs a two-role panel under a weighted policy and whose second
+// stage is a single-role blocking gate.
+const unanimousClean: AggregationPolicy = { kind: 'unanimous-clean' };
+const anyBlocking: AggregationPolicy = { kind: 'any-blocking-blocks' };
+const quorumPolicy: AggregationPolicy = { kind: 'quorum', quorum: 2 };
+const weightedPolicy: AggregationPolicy = {
+  kind: 'weighted',
+  weights: { 'code-quality:claude': 2, 'code-quality:codex': 1 },
+  threshold: 2,
+};
+void unanimousClean;
+void anyBlocking;
+void quorumPolicy;
+
+const pipeline: ReviewPipeline = [
+  {
+    id: 'code-quality',
+    panel: [
+      { id: 'code-quality:claude', model: 'claude' },
+      { id: 'code-quality:codex', model: 'codex' },
+    ],
+    aggregation: weightedPolicy,
+    roundBudgetByRisk: { low: 1, medium: 2, high: 3, critical: 4 },
+  },
+  {
+    id: 'security',
+    panel: [{ id: 'security:codex', model: 'codex' }],
+    aggregation: anyBlocking,
+    roundBudgetByRisk: { low: 1, medium: 1, high: 2, critical: 3 },
+  },
+];
+const firstStage: Stage = pipeline[0];
+void firstStage.panel.length;
+
+const pinnedVerdict: Verdict = {
+  kind: 'approved',
+  body: '## Verdict\nApprove',
+  revisionRef: 'revision-abc',
+  stageId: 'code-quality',
+  reviewerRoleId: 'code-quality:claude',
+};
+
+const stageStates: StageState[] = [
+  { stageId: 'code-quality', stageIndex: 0, panelVerdicts: [pinnedVerdict, verdict] },
+  { stageId: 'security', stageIndex: 1, panelVerdicts: [] },
+];
+
+const pipelineState: SubjectState = {
+  ref,
+  lifecycle: 'review-in-progress',
+  riskClass: 'high',
+  currentRound: 1,
+  completedRemediationRounds: 0,
+  maxRemediationRounds: 5,
+  pipeline: stageStates,
+  latestVerdict: pinnedVerdict,
+  terminal: false,
+  observedAt: '2026-05-10T00:00:00.000Z',
+};
+void pipelineState.pipeline?.length;
+
+const budgetPlan: RemediationBudgetPlan = {
+  riskClass: 'high',
+  perStage: [
+    { stageId: 'code-quality', roundBudget: 3 },
+    { stageId: 'security', roundBudget: 2 },
+  ],
+  ceiling: 5,
+  ceilingSource: 'sum-capped',
+};
+void budgetPlan.ceiling;
 
 const deliveryKey: DeliveryKey = {
   domainId: ref.domainId,

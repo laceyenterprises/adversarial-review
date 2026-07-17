@@ -34,6 +34,21 @@ export interface Verdict {
   summary?: string;
   blockingFindings?: readonly BlockingFinding[];
   observedAt?: IsoTimestamp;
+  /**
+   * Pipeline (§4.1): the revision this verdict reviewed — the GitHub
+   * `commit_id` in the code-pr domain, never inferred from logs or current
+   * head. A verdict is valid review evidence for a stage ONLY while its
+   * `revisionRef` equals the subject's current `revisionRef`; any revision
+   * advance invalidates it (see `stageVerdictAppliesToRevision`). Optional so
+   * legacy single-verdict `SubjectState`s keep parsing; a verdict with no
+   * `revisionRef` is treated as applying to no revision (fails safe toward
+   * re-review).
+   */
+  revisionRef?: string;
+  /** Pipeline: the stage that produced this verdict (panel attribution). */
+  stageId?: string;
+  /** Pipeline: the panel reviewer role that produced this verdict. */
+  reviewerRoleId?: string;
 }
 
 export interface RemediationReplyAddressed {
@@ -117,6 +132,101 @@ export type SubjectLifecycleState =
   | 'finalized'
   | 'terminal';
 
+// ---------------------------------------------------------------------------
+// Review pipeline contract (v2 app architecture §4.1–4.2)
+//
+// The single-verdict assumption is replaced by an ordered `Stage[]`. Each stage
+// runs a `panel` of reviewer roles and folds their verdicts through an
+// `AggregationPolicy`. Later stages gate on earlier ones: a stage runs only
+// when every prior stage is clean at the current revision. Panel size 1 with
+// `unanimous-clean` is behaviorally identical to the v1 single reviewer, so the
+// contract enables sequential stages now and parallel panels later with no
+// kernel rework. Only the contract + pure kernel logic land here (ARC-11);
+// production two-stage enablement is ARC-13.
+// ---------------------------------------------------------------------------
+
+/**
+ * How a stage folds its panel's verdicts into a single stage decision.
+ * - `unanimous-clean`  — the stage is clean only when EVERY panel role is
+ *   clean; any non-clean (blocking or indeterminate) role withholds the pass.
+ * - `any-blocking-blocks` — the stage blocks as soon as ANY role blocks;
+ *   indeterminate roles do not withhold the pass once every role has reported.
+ * - `quorum`           — the stage is clean once `quorum` roles are clean; it
+ *   blocks once a clean quorum is arithmetically unreachable.
+ * - `weighted`         — clean once the summed `weights` of clean roles reach
+ *   `threshold`; blocks once the reachable clean weight can no longer reach it.
+ */
+export type AggregationPolicyKind =
+  | 'unanimous-clean'
+  | 'any-blocking-blocks'
+  | 'quorum'
+  | 'weighted';
+
+export interface AggregationPolicy {
+  kind: AggregationPolicyKind;
+  /** `quorum` policy: number of clean panel verdicts required to pass. */
+  quorum?: number;
+  /** `weighted` policy: per-role clean weight, keyed by `ReviewerRole.id`. */
+  weights?: { [roleId: string]: number };
+  /** `weighted` policy: summed clean weight required to pass. */
+  threshold?: number;
+}
+
+/** Per-risk-class round budget for a single stage (one round = one review). */
+export type RoundBudgetByRisk = { readonly [K in RiskClass]: number };
+
+/**
+ * A reviewer seat in a stage's panel. `id` is the registry role id (stable,
+ * used for verdict attribution and `weighted` aggregation); `model` is the
+ * optional harness/worker-class hint the runtime spawns.
+ */
+export interface ReviewerRole {
+  id: string;
+  model?: string;
+}
+
+/**
+ * One ordered stage of the review pipeline. `panel` is the set of reviewer
+ * roles that weigh in; `aggregation` folds their verdicts; `roundBudgetByRisk`
+ * caps remediation rounds for THIS stage per the subject's risk class.
+ */
+export interface Stage {
+  id: string;
+  panel: readonly ReviewerRole[];
+  aggregation: AggregationPolicy;
+  roundBudgetByRisk: RoundBudgetByRisk;
+}
+
+/** An ordered review pipeline; later stages gate on earlier stages. */
+export type ReviewPipeline = readonly Stage[];
+
+/** The folded disposition of a single verdict or an aggregated stage. */
+export type PipelineDisposition = 'clean' | 'blocking' | 'pending';
+
+/**
+ * Recorded evaluation of one stage against the subject's verdict history.
+ * `panelVerdicts` holds every verdict observed for this stage (pinned to the
+ * revision each reviewed); `stageIndex` is the stage's 0-based position in the
+ * pipeline. Replaces the single `latestVerdict` on `SubjectState`.
+ */
+export interface StageState {
+  stageId: string;
+  stageIndex: number;
+  panelVerdicts: readonly Verdict[];
+}
+
+/**
+ * The subject-level remediation budget resolved from the pipeline and risk
+ * class. `perStage` is each stage's round budget; `ceiling` is the capped
+ * subject-level total so multi-stage pipelines do not multiply hammer cycles.
+ */
+export interface RemediationBudgetPlan {
+  riskClass: RiskClass;
+  perStage: readonly { stageId: string; roundBudget: number }[];
+  ceiling: number;
+  ceilingSource: 'sum-capped' | 'override';
+}
+
 export interface SubjectState {
   ref: SubjectRef;
   lifecycle: SubjectLifecycleState;
@@ -130,6 +240,18 @@ export interface SubjectState {
   currentRound: number;
   completedRemediationRounds: number;
   maxRemediationRounds: number;
+  /**
+   * Pipeline (§4.2): per-stage verdict history. Optional so legacy
+   * single-verdict states keep parsing during migration; when present it is
+   * the source of truth and `latestVerdict` is the deprecated alias below.
+   */
+  pipeline?: readonly StageState[];
+  /**
+   * @deprecated Superseded by `pipeline[]`. Kept as a compatibility alias that
+   * resolves to the newest verdict of the active stage (see
+   * `resolveLatestVerdict`). Existing consumers that read this field directly
+   * stay green; new code should read `pipeline[]`.
+   */
   latestVerdict?: Verdict;
   latestRemediationReply?: RemediationReply;
   terminal: boolean;

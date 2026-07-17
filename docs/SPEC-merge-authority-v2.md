@@ -50,7 +50,7 @@ FinalizationLedger (per subject, append-only, in the app store):
          | remediation_concluded(rev, round, outcome)
          | budget_exhausted(stageId)
          | operator_override(kind, principal, reason)
-         | finalized(rev, method) | halted(reason)
+         | finalized(rev, method) | closed(reason) | halted(reason)
 ```
 
 - **Eligibility is a pure function** `eligible(fold(events), policy) →
@@ -73,8 +73,8 @@ FinalizationLedger (per subject, append-only, in the app store):
 
 ## 3. Decision policy
 
-`Decision := finalize-now | remediate(stageId, round) | wait(reason, deadline)
-| halt(reason) | escalate(reason)`
+`Decision := finalize-now | remediate(stageId, round) | close(reason)
+| wait(reason, deadline) | halt(reason) | escalate(reason)`
 
 Policy inputs, all explicit and versioned in config:
 
@@ -83,38 +83,47 @@ Policy inputs, all explicit and versioned in config:
   remediation addresses **all** review comments, blocking and non-blocking,
   before merge (standing operator policy).
 - **Exhaustion always closes** (standing operator policy): when the last
-  stage's budget is exhausted, the decision is `remediate(final)` →
-  `finalize-now`, never an indefinite `wait`. `halt` is reserved for
-  operational impossibility (e.g. branch conflict the remediator cannot
-  resolve), and always pages.
+  stage's budget is exhausted without a clean, eligible result, the decision
+  is `close(budget-exhausted)`, never `finalize-now` or an indefinite `wait`.
+  Closing rejects the PR without merging it and records a `closed` event.
+  `halt` is reserved for operational impossibility (e.g. branch conflict the
+  remediator cannot resolve), and always pages.
 - **Patience is bounded and explicit**: `checks_settled` requires required
   checks to be *present and completed* (a running check is not a conclusion).
   `wait(checks, deadline)` polls boundedly; deadline expiry becomes
   `escalate`, never a merge.
-- **Attestations are data with a declared producer dependency.** The policy
-  key `consume_attestations` is only satisfiable when
-  `attestation_recorded(produced)` events exist for the revision; enabling
-  the consumer while the producer emits nothing is a **config-validation
-  error at load time**, not a silent zero-merge regime. (LHA class
-  eliminated at the config layer.)
-- **Kill switch** carries over: autonomous execution disabled → every
-  `finalize-now` becomes `escalate` with a fail-closed audit row.
+- **Attestations are data with both a declared producer dependency and bounded
+  runtime patience.** Config validation rejects `consume_attestations` when no
+  producer is configured. For each revision, a configured producer that has
+  not emitted the required `attestation_recorded(produced)` event yields
+  `wait(attestations, deadline)`; deadline expiry becomes `escalate`, never an
+  infinite stall or merge. This covers both cutover misconfiguration and
+  producer failure at runtime. (LHA class eliminated by explicit failure
+  handling rather than configuration alone.)
+- **Kill switch** carries over: autonomous execution disabled intercepts every
+  mutating decision before dispatch. Both `finalize-now` and `remediate(...)`
+  become `escalate` with a fail-closed audit row; no merge, worker dispatch,
+  commit, push, or other autonomous branch mutation may proceed.
 
 ## 4. Execution
 
 - **One executor.** A single finalization worker per subject, under a lease
   in the app store (not GitHub labels). It executes `Decision`s
   idempotently: `finalize-now` → github-adapter `pr-merge` (or GAP-1
-  adjudicate surface once it exists); `remediate` → agent-runtime port with
-  the same idempotency-key scheme as reviews.
+  adjudicate surface once it exists); `close` → github-adapter `pr-close`;
+  `remediate` → agent-runtime port with the same idempotency-key scheme as
+  reviews. The executor applies the kill-switch interception before invoking
+  either mutating adapter.
 - **Idempotent by construction:** before executing, the executor re-folds; if
   the world moved (new event since the decision), it discards and re-decides.
   Merge execution itself is guarded by the (subject, rev) pair — a merge of a
   stale rev is structurally impossible to issue.
 - **The hammer becomes a decision outcome, not an actor.** "Hammer" v2 = the
   remediation worker dispatched by a `remediate(final)` decision plus the
-  executor's subsequent `finalize-now`. Its lifetime ceiling and retry cap
-  are policy inputs to the fold, not self-managed loops.
+  executor's subsequent `finalize-now` only after the resulting revision is
+  clean and eligible. If remediation instead exhausts its budget, the fold
+  emits `close(budget-exhausted)`. Its lifetime ceiling and retry cap are
+  policy inputs to the fold, not self-managed loops.
 
 ## 5. Shadow-mode cutover
 

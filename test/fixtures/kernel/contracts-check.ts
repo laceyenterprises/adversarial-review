@@ -308,6 +308,14 @@ await reviewerRuntime.spawnReviewer({
 
 const agentRunHandle = await agentRuntime.run(agentRunRequest);
 const agentRunResult: RunResult = await agentRunHandle.await();
+const timeoutRunResult: RunResult = {
+  status: 'timeout',
+  failureClass: 'timeout',
+  usage: null,
+  runtimeMode: 'local',
+  detail: 'reviewer wall-clock exceeded',
+};
 void agentRunResult;
+void timeoutRunResult;
 void agentRuntime.describe();
 await agentRunHandle.cancel();

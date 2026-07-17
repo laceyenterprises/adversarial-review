@@ -30,6 +30,7 @@ const DEFAULT_LOCAL_RUN_CAP = Object.freeze({
 });
 
 function toFiniteNumber(value) {
+  if (value == null || value === '') return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }

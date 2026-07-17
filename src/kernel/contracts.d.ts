@@ -159,6 +159,7 @@ export interface SubjectContext {
   completedRemediationRounds?: number;
   maxRemediationRounds?: number;
   reviewerSessionUuid?: string;
+  agentRoleKind?: 'reviewer' | 'remediator';
   labels?: readonly (string | { name?: string | null })[];
   ticketPipelinePaused?: boolean;
   crossModelReviewWaived?: boolean;
@@ -300,6 +301,10 @@ export type ReviewerFailureClass =
   | 'bug'
   | 'unknown';
 
+export type AgentFailureClass =
+  | Exclude<ReviewerFailureClass, 'reviewer-timeout'>
+  | 'timeout';
+
 export interface AdapterCapabilities {
   processGroupIsolation: boolean;
   daemonBounceSafe: boolean;
@@ -338,6 +343,7 @@ export interface RemediatorRunRequest {
   timeoutMs: number;
   sessionUuid: string;
   forbiddenFallbacks: readonly string[];
+  tokenBudget?: number | string | null;
   workspacePath?: string;
 }
 
@@ -454,7 +460,7 @@ export interface AgentRunRequest {
 export interface RunResult<AppArtifact = JsonObject> {
   status: AgentRunStatus;
   artifact?: AppArtifact;
-  failureClass?: ReviewerFailureClass | null;
+  failureClass?: AgentFailureClass | null;
   usage?: AgentUsage | null;
   runtimeMode?: RuntimeMode;
   // Human-readable failure/refusal detail (admission reason, stderr tail, …).

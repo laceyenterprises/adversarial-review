@@ -8,6 +8,7 @@ import {
   DEFAULT_LOCAL_RUN_CAP,
   createLocalAgentRuntime,
   deriveSessionUuid,
+  toRunResult,
 } from '../src/adapters/agent-runtime/local/index.mjs';
 import {
   evaluateBudgetCap,
@@ -233,6 +234,11 @@ test('local runtime applies default caps and forwards token budgets to both role
   });
   await (await runtime.run(reviewerRequest({ budget: undefined, timeoutMs: undefined }))).await();
   await (await runtime.run(reviewerRequest({
+    idempotencyKey: 'explicit-null-budget-defaults-to-local-cap',
+    budget: { maxTokens: null, maxWallMs: null },
+    timeoutMs: undefined,
+  }))).await();
+  await (await runtime.run(reviewerRequest({
     role: { kind: 'remediator', model: 'codex' },
     idempotencyKey: 'remediator-budget-forwarding',
     budget: { maxTokens: 1234, maxWallMs: 5678 },
@@ -240,8 +246,39 @@ test('local runtime applies default caps and forwards token budgets to both role
   }))).await();
   assert.equal(calls[0].tokenBudget, DEFAULT_LOCAL_RUN_CAP.maxTokens);
   assert.equal(calls[0].timeoutMs, DEFAULT_LOCAL_RUN_CAP.maxWallMs);
-  assert.equal(calls[1].tokenBudget, 1234);
-  assert.equal(calls[1].timeoutMs, 5678);
+  assert.equal(calls[1].tokenBudget, DEFAULT_LOCAL_RUN_CAP.maxTokens);
+  assert.equal(calls[1].timeoutMs, DEFAULT_LOCAL_RUN_CAP.maxWallMs);
+  assert.equal(calls[2].tokenBudget, 1234);
+  assert.equal(calls[2].timeoutMs, 5678);
+  assert.equal(calls[2].subjectContext.agentRoleKind, 'remediator');
+});
+
+test('local runtime maps cli-direct reviewer timeout into AgentRuntime timeout class', () => {
+  const result = toRunResult({
+    ok: false,
+    failureClass: 'reviewer-timeout',
+    error: 'reviewer wall-clock exceeded',
+  });
+  assert.equal(result.status, 'timeout');
+  assert.equal(result.failureClass, 'timeout');
+  assert.equal(result.detail, 'reviewer wall-clock exceeded');
+});
+
+test('local runtime reattach uses durable role kind when result payload is ambiguous', async () => {
+  const runtime = createLocalAgentRuntime({
+    cliDirect: {
+      async reattach() {
+        return { ok: true, reviewBody: 'stale reviewer-shaped payload' };
+      },
+    },
+  });
+  const result = await runtime.reattach({
+    sessionUuid: 'ambiguous-remediator-after-bounce',
+    subjectContext: { agentRoleKind: 'remediator' },
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(result.artifact.kind, 'remediation');
+  assert.equal(result.artifact.body, null);
 });
 
 test('local runtime maps synchronous spawn errors into failed RunResults', async () => {

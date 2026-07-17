@@ -66,6 +66,7 @@ function subjectContextFromRequest(request) {
     domainId: ref.domainId || content.domainId || 'code-pr',
     subjectExternalId: ref.subjectExternalId,
     revisionRef: ref.revisionRef,
+    agentRoleKind: request.role?.kind,
     reviewerModel: request.role?.model,
     promptSet: request.promptSet,
     promptStage: request.promptStage,
@@ -108,13 +109,35 @@ function buildArtifact(role, raw, body) {
   };
 }
 
+function inferRoleFromSubjectContext(subjectContext) {
+  const kind = subjectContext?.agentRoleKind;
+  if (kind !== 'reviewer' && kind !== 'remediator') return null;
+  return {
+    kind,
+    model: subjectContext?.reviewerModel || subjectContext?.model || 'unknown',
+  };
+}
+
+function inferEffectiveRole(raw, { role, record } = {}) {
+  if (role?.kind) return role;
+  return (
+    inferRoleFromSubjectContext(raw?.subjectContext)
+    || inferRoleFromSubjectContext(record?.subjectContext)
+    || { kind: raw?.remediationBody !== undefined ? 'remediator' : 'reviewer' }
+  );
+}
+
+function normalizeRunFailureClass(failureClass) {
+  return failureClass === 'reviewer-timeout'
+    ? 'timeout'
+    : (failureClass ?? 'unknown');
+}
+
 // Map a cli-direct ReviewerRunResult/RemediatorRunResult into a RunResult.
 // `cancelled` is tracked on the handle (cli-direct reports an abort as a plain
 // failure), so the port can report a truthful `cancelled` status.
-function toRunResult(raw, { role, cancelled } = {}) {
-  const effectiveRole = role?.kind
-    ? role
-    : { kind: raw?.remediationBody !== undefined ? 'remediator' : 'reviewer' };
+function toRunResult(raw, { role, record, cancelled } = {}) {
+  const effectiveRole = inferEffectiveRole(raw, { role, record });
   const body = effectiveRole.kind === 'remediator' ? raw?.remediationBody : raw?.reviewBody;
   const usage = raw?.tokenUsage ?? null;
   if (raw?.ok) {
@@ -128,11 +151,12 @@ function toRunResult(raw, { role, cancelled } = {}) {
     };
   }
   let status = 'failed';
+  const failureClass = normalizeRunFailureClass(raw?.failureClass);
   if (cancelled) status = 'cancelled';
-  else if (raw?.failureClass === 'reviewer-timeout') status = 'timeout';
+  else if (failureClass === 'timeout') status = 'timeout';
   return {
     status,
-    failureClass: raw?.failureClass ?? 'unknown',
+    failureClass,
     usage,
     runtimeMode: RUNTIME_MODE,
     detail: raw?.error || raw?.stderrTail || null,
@@ -262,7 +286,7 @@ function createLocalAgentRuntime({
           };
         }
         const raw = await inner.reattach(record);
-        return toRunResult(raw, { role, cancelled: cancelled.value });
+        return toRunResult(raw, { role, record, cancelled: cancelled.value });
       },
     };
   }
@@ -279,7 +303,7 @@ function createLocalAgentRuntime({
       throw new TypeError('createLocalAgentRuntime.reattach requires a run record');
     }
     const raw = await inner.reattach(record);
-    return toRunResult(raw, { role });
+    return toRunResult(raw, { role, record });
   }
 
   function describe() {

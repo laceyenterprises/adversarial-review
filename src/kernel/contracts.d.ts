@@ -117,6 +117,83 @@ export type SubjectLifecycleState =
   | 'finalized'
   | 'terminal';
 
+/**
+ * Review pipeline contract (ARC-11).
+ *
+ * A review is an ordered list of stages; each stage runs a panel of one or
+ * more reviewer roles and aggregates their verdicts under a policy. A later
+ * stage runs only once every prior stage is clean at the current revision.
+ * The single-stage, single-reviewer configuration (`stages.length === 1`,
+ * `panel.length === 1`, `any-blocking-blocks`) is behaviourally identical to
+ * the pre-pipeline model, so existing consumers keep working through the
+ * `latestVerdict` alias. Production multi-stage enablement is ARC-13; this
+ * contract only defines the shape and the pure selection logic.
+ */
+
+/** A reviewer role id, resolved against the role registry (ARC-12). */
+export type ReviewerRole = string;
+
+/**
+ * How a stage folds its panel's verdicts into a single stage decision.
+ * - `unanimous-clean`: every collected verdict must be clean.
+ * - `any-blocking-blocks`: any blocking verdict blocks the stage (the default,
+ *   and the single-reviewer behaviour).
+ * - `quorum`: at least `n` collected verdicts must be clean.
+ * - `weighted`: the summed weight of clean verdicts must meet `threshold`.
+ */
+export type AggregationPolicy =
+  | 'unanimous-clean'
+  | 'any-blocking-blocks'
+  | { readonly kind: 'quorum'; readonly n: number }
+  | {
+      readonly kind: 'weighted';
+      readonly weights: { readonly [role: string]: number };
+      readonly threshold: number;
+    };
+
+/** Per-risk-class round budgets for a single stage. */
+export type StageRoundBudgetByRisk = { readonly [K in RiskClass]?: number };
+
+export interface ReviewStage {
+  readonly id: string;
+  readonly panel: readonly ReviewerRole[];
+  readonly aggregation: AggregationPolicy;
+  /**
+   * Per-stage remediation-round budget keyed by risk class. When a risk class
+   * is absent the resolver falls back to the domain-level `riskClasses`
+   * budget, then to 0.
+   */
+  readonly roundBudgetByRisk?: StageRoundBudgetByRisk;
+}
+
+export interface ReviewPipeline {
+  readonly stages: readonly ReviewStage[];
+  /**
+   * Optional subject-level remediation ceiling. When omitted the ceiling is
+   * the sum of the per-stage budgets for the subject's risk class; when set it
+   * caps that sum so a multi-stage pipeline can never multiply hammer cycles
+   * past the operator's tolerance.
+   */
+  readonly subjectRemediationCeiling?: number;
+}
+
+/** One reviewer's verdict within a stage panel, pinned to the reviewed revision. */
+export interface PanelVerdict {
+  readonly reviewerRole: ReviewerRole;
+  readonly verdict: Verdict;
+  /** The revision this verdict reviewed — never inferred from current head. */
+  readonly revisionRef: string;
+}
+
+export type StageDecision = 'clean' | 'blocked' | 'incomplete';
+
+/** Runtime state of one pipeline stage for a subject. */
+export interface PipelineStageState {
+  readonly stageId: string;
+  readonly stageIndex: number;
+  readonly panelVerdicts: readonly PanelVerdict[];
+}
+
 export interface SubjectState {
   ref: SubjectRef;
   lifecycle: SubjectLifecycleState;
@@ -130,6 +207,16 @@ export interface SubjectState {
   currentRound: number;
   completedRemediationRounds: number;
   maxRemediationRounds: number;
+  /**
+   * Per-stage panel state for the active pipeline. Absent for single-stage
+   * subjects that predate the pipeline contract.
+   */
+  pipeline?: readonly PipelineStageState[];
+  /**
+   * @deprecated Pipeline-aware consumers should read `pipeline[]`. Retained as
+   * a compatibility alias resolving to the newest verdict of the active stage;
+   * `deriveLatestVerdict` computes it from `pipeline` when present.
+   */
   latestVerdict?: Verdict;
   latestRemediationReply?: RemediationReply;
   terminal: boolean;

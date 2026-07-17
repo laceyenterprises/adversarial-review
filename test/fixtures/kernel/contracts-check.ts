@@ -319,3 +319,80 @@ void agentRunResult;
 void timeoutRunResult;
 void agentRuntime.describe();
 await agentRunHandle.cancel();
+
+// ARC-11 — review pipeline contract typecheck.
+import type {
+  AggregationPolicy,
+  PanelVerdict,
+  PipelineStageState,
+  ReviewPipeline,
+  ReviewStage,
+  ReviewerRole,
+  StageDecision,
+  StageRoundBudgetByRisk,
+  SubjectState,
+} from '../../../src/kernel/contracts.js';
+
+const codeQualityRole: ReviewerRole = 'code-quality-reviewer';
+const securityRole: ReviewerRole = 'security-reviewer';
+
+const unanimous: AggregationPolicy = 'unanimous-clean';
+const anyBlocking: AggregationPolicy = 'any-blocking-blocks';
+const quorum: AggregationPolicy = { kind: 'quorum', n: 2 };
+const weighted: AggregationPolicy = {
+  kind: 'weighted',
+  weights: { [codeQualityRole]: 1, [securityRole]: 2 },
+  threshold: 2,
+};
+void unanimous;
+void anyBlocking;
+void quorum;
+void weighted;
+
+const stageBudget: StageRoundBudgetByRisk = { low: 1, medium: 2, high: 3, critical: 4 };
+
+const codeQualityStage: ReviewStage = {
+  id: 'code-quality',
+  panel: [codeQualityRole],
+  aggregation: 'any-blocking-blocks',
+  roundBudgetByRisk: stageBudget,
+};
+const securityStage: ReviewStage = {
+  id: 'security',
+  panel: [securityRole],
+  aggregation: quorum,
+};
+
+const pipeline: ReviewPipeline = {
+  stages: [codeQualityStage, securityStage],
+  subjectRemediationCeiling: 5,
+};
+void pipeline;
+
+const panelVerdict: PanelVerdict = {
+  reviewerRole: securityRole,
+  verdict,
+  revisionRef: ref.revisionRef,
+};
+
+const stageState: PipelineStageState = {
+  stageId: 'security',
+  stageIndex: 1,
+  panelVerdicts: [panelVerdict],
+};
+
+const decision: StageDecision = 'blocked';
+void decision;
+
+const pipelineSubject: SubjectState = {
+  ref,
+  lifecycle: 'review-in-progress',
+  currentRound: 0,
+  completedRemediationRounds: 0,
+  maxRemediationRounds: 3,
+  pipeline: [stageState],
+  latestVerdict: verdict,
+  terminal: false,
+  observedAt: '2026-07-17T00:00:00Z',
+};
+void pipelineSubject;

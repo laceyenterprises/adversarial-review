@@ -4253,12 +4253,15 @@ function resolveFirstPassReviewBudgetSuppression({
     Number.isFinite(completedRereviewRounds) &&
     remediationBudgetConsumed &&
     completedRereviewRounds >= roundBudget;
-  const remediationBudgetConsumedAt = Array.isArray(ledger.completedRoundTimestamps)
+  let remediationBudgetConsumedAt = Array.isArray(ledger.completedRoundTimestamps)
     ? ledger.completedRoundTimestamps
         .filter(({ round, terminalAt }) => Number(round) >= roundBudget && typeof terminalAt === 'string')
         .map(({ terminalAt }) => terminalAt)
         .sort()[0] || null
     : null;
+  if (remediationBudgetConsumedAt === null && roundBudget === 0 && completedRemediationRoundsForPR === 0) {
+    remediationBudgetConsumedAt = '1970-01-01T00:00:00.000Z';
+  }
   // #81: prove the single owed final review independently of the author-push
   // budget. Reviewers may coalesce intermediate pushes, so their lifetime
   // rereview count is not comparable to the remediation round number.

@@ -441,6 +441,7 @@ test('watcher allows stale-review auto-refresh when only in-budget rereviews are
       completedRoundTimestamps: [{ round: 2, terminalAt: '2026-07-17T10:00:00.000Z' }],
     }),
     countCompletedReviewerRereviewRoundsImpl: () => 1,
+    hasCompletedReviewerRereviewAfterImpl: () => false,
     resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
   });
 
@@ -1137,7 +1138,7 @@ test('watcher suppresses a zero-budget PR after its single owed final review', (
       completedRoundsForPR: 0,
       latestRiskClass: 'low',
       latestMaxRounds: 0,
-      completedRoundTimestamps: [{ round: 0, terminalAt: '2026-07-17T10:00:00.000Z' }],
+      completedRoundTimestamps: [],
     }),
     countCompletedReviewerRereviewRoundsImpl: ({ headSha }) =>
       headSha === null ? 1 : 0,

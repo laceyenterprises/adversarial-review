@@ -1486,7 +1486,7 @@ function summarizePRRemediationLedger(rootDir, { domainId = 'code-pr', repo, prN
         if (!neverSpawned) {
           const cur = Number(job?.remediationPlan?.currentRound || 0);
           const terminalAt = job?.completedAt || job?.failedAt || job?.stoppedAt || null;
-          if (Number.isFinite(cur) && cur > 0 && terminalAt) {
+          if (Number.isFinite(cur) && cur >= 0 && terminalAt) {
             completedRoundTimestamps.push({ round: cur, terminalAt });
           }
           if (Number.isFinite(cur) && cur > completedRoundsForPR) {

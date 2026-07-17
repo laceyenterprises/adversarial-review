@@ -100,6 +100,39 @@ test('summarizePRRemediationLedger returns zero counts for a PR with no follow-u
   });
 });
 
+test('summarizePRRemediationLedger preserves terminal timestamps for round zero', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  ensureFollowUpJobDirs(rootDir);
+  const completedAt = '2026-07-17T10:00:00.000Z';
+  const pendingJob = buildFollowUpJob(makeJobInput(rootDir, {
+    reviewPostedAt: '2026-07-17T09:55:00.000Z',
+  }));
+  const terminalJob = {
+    ...pendingJob,
+    status: 'completed',
+    completedAt,
+    remediationPlan: {
+      ...pendingJob.remediationPlan,
+      currentRound: 0,
+    },
+    remediationWorker: {
+      state: 'completed',
+      outputPath: 'workspace/.adversarial-follow-up/codex-last-message.md',
+    },
+  };
+  writeFollowUpJob(
+    path.join(getFollowUpJobDir(rootDir, 'completed'), `${terminalJob.jobId}.json`),
+    terminalJob,
+  );
+
+  const ledger = summarizePRRemediationLedger(rootDir, {
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+  });
+  assert.equal(ledger.completedRoundsForPR, 0);
+  assert.deepEqual(ledger.completedRoundTimestamps, [{ round: 0, terminalAt: completedAt }]);
+});
+
 test('summarizePRRemediationLedger only counts terminal jobs and isolates by (domainId, repo, prNumber)', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
 

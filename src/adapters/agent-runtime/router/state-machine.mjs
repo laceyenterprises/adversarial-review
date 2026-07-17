@@ -26,6 +26,8 @@ const TRANSITION_KINDS = Object.freeze({
   RESUME_ABORTED: 'resume-aborted',
 });
 
+const MAX_HISTORY_LENGTH = 100;
+
 function modeForState(state) {
   // Only OS-HEALTHY dispatches to the OS. OS-RESUMING is treated as local so the
   // reconcile can adopt in-flight OS runs before any fresh OS dispatch races it.
@@ -73,6 +75,7 @@ function createRouterStateMachine({
     };
     lastTransition = descriptor;
     history.push(descriptor);
+    if (history.length > MAX_HISTORY_LENGTH) history.shift();
     return descriptor;
   }
 

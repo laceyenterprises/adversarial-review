@@ -126,15 +126,14 @@ function createHealthRouter({
     // Re-observe the accepted dispatch in the background rather than re-issuing.
     // The artifact-handoff active-run compare-and-set (§6.3) discards a late
     // completion for a superseded key, so best-effort re-poll is safe.
+    if (!osRuntime || typeof osRuntime.reattach !== 'function') return;
     pendingOsKeys.add(key);
-    if (osRuntime && typeof osRuntime.reattach === 'function') {
-      Promise.resolve()
-        .then(() => osRuntime.reattach({ idempotencyKey: key }))
-        .catch((err) => logger?.warn?.('[health-router] background adopt re-poll failed', {
-          key, error: err?.message || String(err),
-        }))
-        .finally(() => pendingOsKeys.delete(key));
-    }
+    Promise.resolve()
+      .then(() => osRuntime.reattach({ idempotencyKey: key }))
+      .catch((err) => logger?.warn?.('[health-router] background adopt re-poll failed', {
+        key, error: err?.message || String(err),
+      }))
+      .finally(() => pendingOsKeys.delete(key));
   }
 
   async function runReconcile() {
@@ -207,8 +206,13 @@ function createHealthRouter({
       throw new Error('health router selected OS mode but has no OS runtime configured');
     }
     const key = String(request.idempotencyKey);
-    const handle = await osRuntime.run(request);
-    const classification = typeof takeClassification === 'function' ? takeClassification(key) : null;
+    let handle;
+    let classification = null;
+    try {
+      handle = await osRuntime.run(request);
+    } finally {
+      classification = typeof takeClassification === 'function' ? takeClassification(key) : null;
+    }
     if (config.enabled && classification && classification.kind === 'hard') {
       const transition = stateMachine.recordHardError({ detail: classification.detail, requestId: key });
       if (transition) await handleTransition(transition);

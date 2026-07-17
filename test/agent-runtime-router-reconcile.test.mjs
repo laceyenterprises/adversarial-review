@@ -110,3 +110,21 @@ test('an adopt callback that throws does not abort reconcile or re-issue', async
   assert.equal(result.adoptedCount, 2);
   assert.equal(result.duplicatedCount, 0);
 });
+
+test('status queries start concurrently instead of serializing resume latency', async () => {
+  const resolvers = new Map();
+  const started = [];
+  const reconciliation = reconcileDispatches({
+    keys: ['k1', 'k2', 'k3'],
+    dispatchStatus: (key) => new Promise((resolve) => {
+      started.push(key);
+      resolvers.set(key, resolve);
+    }),
+  });
+
+  await Promise.resolve();
+  assert.deepEqual(started, ['k1', 'k2', 'k3']);
+  for (const resolve of resolvers.values()) resolve({ status: 'not_found' });
+  const result = await reconciliation;
+  assert.equal(result.notFoundCount, 3);
+});

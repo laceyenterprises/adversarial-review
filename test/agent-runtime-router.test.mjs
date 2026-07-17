@@ -200,6 +200,61 @@ test('probe-driven failover then resume reconciles pending OS keys, adopting wit
   assert.equal(router.getMode(), 'os');
 });
 
+test('resume does not retain completed keys when the OS runtime cannot reattach', async () => {
+  let clockMs = 1_000;
+  let healthzOk = true;
+  const osRuntime = {
+    async run(request) {
+      return {
+        runRef: `os:${request.idempotencyKey}`,
+        mode: 'os',
+        async await() { return { status: 'completed' }; },
+        async cancel() {},
+        async reattach() {},
+      };
+    },
+  };
+  const router = createHealthRouter({
+    localRuntime: fakeLocalRuntime(),
+    osRuntime,
+    dispatchStatus: async () => ({ status: 'succeeded' }),
+    auditSink: capturingAuditSink(),
+    now: () => clockMs,
+    checkHealthz: async () => healthzOk,
+    config: resolveRouterConfig({}, {
+      probeFailureThreshold: 1,
+      resumeHealthyProbes: 2,
+      resumeWindowMs: 1,
+    }),
+  });
+
+  const handle = await router.run(reviewerRequest('completed-before-resume'));
+  healthzOk = false;
+  await router.tick();
+  await handle.await();
+  assert.deepEqual(router.pendingOsKeys(), []);
+
+  healthzOk = true;
+  clockMs += 1;
+  await router.tick();
+  clockMs += 1;
+  await router.tick();
+  assert.deepEqual(router.pendingOsKeys(), []);
+});
+
+test('runtime throws still consume a stashed dispatch classification', async () => {
+  const taken = [];
+  const router = createHealthRouter({
+    localRuntime: fakeLocalRuntime(),
+    osRuntime: { async run() { throw new Error('runtime crashed'); } },
+    takeClassification(key) { taken.push(key); return { kind: 'hard' }; },
+    auditSink: capturingAuditSink(),
+  });
+
+  await assert.rejects(router.run(reviewerRequest('throwing-key')), /runtime crashed/);
+  assert.deepEqual(taken, ['throwing-key']);
+});
+
 test('healthz probes time out and feed a failed probe to the state machine', async () => {
   let timeoutDelay = null;
   const router = createHealthRouter({

@@ -172,3 +172,20 @@ test('hard error during OS-RESUMING also aborts to LOCAL-FALLBACK', () => {
   assert.ok(t);
   assert.equal(t.to, ROUTER_STATES.LOCAL_FALLBACK);
 });
+
+test('transition history retains only the most recent 100 entries', () => {
+  const h = machineWith({ probeFailureThreshold: 1, resumeHealthyProbes: 2, resumeWindowMs: 1 });
+  for (let cycle = 0; cycle < 40; cycle += 1) {
+    h.machine.recordProbe({ healthy: false, at: h.clock() });
+    h.advance(1);
+    h.machine.recordProbe({ healthy: true, at: h.clock() });
+    h.advance(1);
+    h.machine.recordProbe({ healthy: true, at: h.clock() });
+    h.machine.completeResume();
+  }
+
+  const history = h.machine.getHistory();
+  assert.equal(history.length, 100);
+  assert.equal(history.at(-1).kind, TRANSITION_KINDS.RESUME_COMPLETE);
+  assert.ok(history[0].atMs > 1_000, 'oldest transitions are pruned');
+});

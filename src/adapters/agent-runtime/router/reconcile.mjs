@@ -48,7 +48,7 @@ async function reconcileDispatches({ keys, dispatchStatus, adopt, logger = conso
   const notFound = [];
   const unknown = [];
 
-  for (const key of dedupeKeys(keys)) {
+  await Promise.all(dedupeKeys(keys).map(async (key) => {
     let statusPayload;
     try {
       statusPayload = await dispatchStatus(key);
@@ -57,7 +57,7 @@ async function reconcileDispatches({ keys, dispatchStatus, adopt, logger = conso
       // record supersede (§6.3) covers the local-replacement case; re-issuing
       // here is the one thing that could duplicate work.
       unknown.push({ key, error: err?.message || String(err) });
-      continue;
+      return;
     }
     if (isKnownDispatch(statusPayload)) {
       const status = normalizeStatus(statusPayload.status);
@@ -75,7 +75,7 @@ async function reconcileDispatches({ keys, dispatchStatus, adopt, logger = conso
     } else {
       notFound.push({ key, status: normalizeStatus(statusPayload?.status) || 'not_found' });
     }
-  }
+  }));
 
   return {
     adopted,

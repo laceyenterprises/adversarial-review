@@ -15,6 +15,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { deliverAlert } from '../../../alert-delivery.mjs';
+import { assertCanonicalAppendOwner } from '../append-only-owner.mjs';
 import { TRANSITION_KINDS } from './state-machine.mjs';
 
 const AUDIT_SCHEMA_VERSION = 1;
@@ -94,10 +95,11 @@ function buildNoticeText(row) {
 // Atomic-enough append: O_APPEND writes of a single JSON line are atomic for
 // sizes well under PIPE_BUF, and we fsync the fd so a crash can't lose an
 // acknowledged transition. Mirrors the operator-mutation-audit durability shape.
-function defaultAppendRow(rootDir, row, { fileMode = 0o640 } = {}) {
+function defaultAppendRow(rootDir, row, { fileMode = 0o640, ownerGuardOptions } = {}) {
   const dir = routerAuditDir(rootDir);
-  mkdirSync(dir, { recursive: true });
   const filePath = monthFilePath(rootDir, row.at);
+  assertCanonicalAppendOwner(rootDir, dir, filePath, ownerGuardOptions);
+  mkdirSync(dir, { recursive: true });
   const line = `${JSON.stringify(row)}\n`;
   const fd = openSync(filePath, 'a', fileMode);
   try {

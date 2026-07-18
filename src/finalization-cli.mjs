@@ -73,9 +73,13 @@ function finalizationMain(argv, io = {}) {
   let model;
   let store;
   try {
+    const nowMs = Date.parse(now);
+    if (!Number.isFinite(nowMs)) throw new TypeError('shadow-report requires a valid `now` ISO timestamp');
+    const from = new Date(nowMs - options.days * 24 * 60 * 60 * 1000).toISOString();
     store = openStore({ rootDir: options.rootDir });
-    const observations = store.read();
-    model = buildShadowReport({ observations, now, windowDays: options.days });
+    const observations = store.read({ from, to: now });
+    const coverage = typeof store.readCoverage === 'function' ? store.readCoverage() : null;
+    model = buildShadowReport({ observations, now, windowDays: options.days, coverage });
   } catch (err) {
     stderr.write(`error: could not build shadow report: ${err?.message || err}\n`);
     return 1;

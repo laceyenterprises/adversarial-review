@@ -105,6 +105,27 @@ test('organic promotion markers count across the full shadow period', () => {
   assert.equal(model.promotable, true);
 });
 
+test('buildShadowReport accepts SQL-derived coverage for windowed observations', () => {
+  const observations = [
+    obs({ subjectExternalId: 'owner/repo#700', observedAt: daysAgo(1), v1: 'merged', v2: 'finalize-now', relation: 'agree', direction: 'benign', cls: 'concur', disposition: 'resolved' }),
+  ];
+  const model = buildShadowReport({
+    observations,
+    now: NOW,
+    windowDays: 7,
+    coverage: {
+      earliestObservedAt: daysAgo(8),
+      organicHeadMoves: 1,
+      exhaustionCloses: 1,
+    },
+  });
+  assert.equal(model.shadowed, 1);
+  assert.equal(model.coverage.enoughDays, true);
+  assert.equal(model.organicHeadMoves, 1);
+  assert.equal(model.exhaustionCloses, 1);
+  assert.equal(model.promotable, true);
+});
+
 test('a human override supersedes the classifier proposal in the report', () => {
   const observations = seedNotPromotable();
   // Re-open the auto-attributed #612 v1-defect — the operator disagrees.
@@ -156,6 +177,39 @@ test('finalization shadow-report --json emits the full model', () => {
   assert.equal(model.diverge, 2);
   assert.equal(model.openDivergences, 1);
   assert.equal(model.windowDays, 7);
+});
+
+test('finalization shadow-report reads only the window and uses aggregate coverage', () => {
+  let readWindow = null;
+  let coverageRead = false;
+  let closed = false;
+  const store = {
+    read(window) {
+      readWindow = window;
+      return seedNotPromotable().filter((o) => Date.parse(o.observedAt) >= Date.parse(daysAgo(7)));
+    },
+    readCoverage() {
+      coverageRead = true;
+      return {
+        earliestObservedAt: daysAgo(8),
+        organicHeadMoves: 1,
+        exhaustionCloses: 1,
+      };
+    },
+    close() {
+      closed = true;
+    },
+  };
+  const { io, out } = fakeIo(store);
+  const code = finalizationMain(['shadow-report', '--json', '--days', '7'], io);
+  const model = JSON.parse(out.join(''));
+
+  assert.equal(code, 0);
+  assert.deepEqual(readWindow, { from: daysAgo(7), to: NOW });
+  assert.equal(coverageRead, true);
+  assert.equal(closed, true);
+  assert.equal(model.shadowed, 3);
+  assert.equal(model.coverage.enoughDays, true);
 });
 
 test('finalization shadow-report does not create a database or data directory', () => {

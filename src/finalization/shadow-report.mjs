@@ -66,10 +66,15 @@ function dispositionTag(observation) {
  *   observations: readonly ShadowObservation[],
  *   now: string,
  *   windowDays?: number,
+ *   coverage?: {
+ *     earliestObservedAt?: string | null,
+ *     organicHeadMoves?: number,
+ *     exhaustionCloses?: number,
+ *   } | null,
  * }} args
  * @returns {ShadowReportModel}
  */
-export function buildShadowReport({ observations, now, windowDays = 7 }) {
+export function buildShadowReport({ observations, now, windowDays = 7, coverage = null }) {
   const nowMs = Date.parse(now);
   if (!Number.isFinite(nowMs)) throw new TypeError('buildShadowReport requires a valid `now` ISO timestamp');
   const days = Number(windowDays) > 0 ? Number(windowDays) : 7;
@@ -78,18 +83,25 @@ export function buildShadowReport({ observations, now, windowDays = 7 }) {
 
   const all = observations ?? [];
   // Coverage is measured across ALL shadow data: has shadow been running ≥ N days?
-  let earliestMs = Infinity;
-  let organicHeadMoves = 0;
-  let exhaustionCloses = 0;
-  for (const o of all) {
-    const t = Date.parse(o.observedAt);
-    if (Number.isFinite(t) && t < earliestMs) earliestMs = t;
-    if (o.sawHeadMove) organicHeadMoves += 1;
-    if (o.sawExhaustion) exhaustionCloses += 1;
+  let earliestObservedAt = coverage?.earliestObservedAt ?? null;
+  let organicHeadMoves = Number(coverage?.organicHeadMoves ?? 0);
+  let exhaustionCloses = Number(coverage?.exhaustionCloses ?? 0);
+  if (!coverage) {
+    let earliestMsFallback = Infinity;
+    for (const o of all) {
+      const t = Date.parse(o.observedAt);
+      if (Number.isFinite(t) && t < earliestMsFallback) earliestMsFallback = t;
+      if (o.sawHeadMove) organicHeadMoves += 1;
+      if (o.sawExhaustion) exhaustionCloses += 1;
+    }
+    earliestObservedAt = Number.isFinite(earliestMsFallback)
+      ? new Date(earliestMsFallback).toISOString()
+      : null;
   }
-  const earliestObservedAt = Number.isFinite(earliestMs) ? new Date(earliestMs).toISOString() : null;
-  const coverageDays = Number.isFinite(earliestMs) ? Math.floor((nowMs - earliestMs) / MS_PER_DAY) : 0;
-  const enoughDays = Number.isFinite(earliestMs) && (nowMs - earliestMs) >= days * MS_PER_DAY;
+  const earliestMs = Date.parse(earliestObservedAt ?? '');
+  const hasEarliest = Number.isFinite(earliestMs);
+  const coverageDays = hasEarliest ? Math.floor((nowMs - earliestMs) / MS_PER_DAY) : 0;
+  const enoughDays = hasEarliest && (nowMs - earliestMs) >= days * MS_PER_DAY;
 
   // The report body is the observations whose tick time falls in the window.
   const windowed = all.filter((o) => {

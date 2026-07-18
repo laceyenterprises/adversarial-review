@@ -23,17 +23,20 @@ function memStore() {
   return openFinalizationShadowStore({ db: new Database(':memory:') });
 }
 
-function cleanObs(observedAt) {
-  return shadowObserve({
-    subject: REF,
-    events: [
-      revisionAdvanced(REF, { at: t(0), revisionRef: 'sha-A', sourceRef: 'push-A' }),
-      checksSettled(REF, { at: t(1), revisionRef: 'sha-A', conclusion: 'success', requiredChecksPresent: true, sourceRef: 'suite-A' }),
-      verdictRecorded(REF, { at: t(2), revisionRef: 'sha-A', stageId: 's', role: 'r', verdictKind: 'approved', sourceRef: 'rev-A' }),
-    ],
-    v1Action: 'merged',
-    observedAt,
-  });
+function cleanObs(observedAt, flags = {}) {
+  return {
+    ...shadowObserve({
+      subject: REF,
+      events: [
+        revisionAdvanced(REF, { at: t(0), revisionRef: 'sha-A', sourceRef: 'push-A' }),
+        checksSettled(REF, { at: t(1), revisionRef: 'sha-A', conclusion: 'success', requiredChecksPresent: true, sourceRef: 'suite-A' }),
+        verdictRecorded(REF, { at: t(2), revisionRef: 'sha-A', stageId: 's', role: 'r', verdictKind: 'approved', sourceRef: 'rev-A' }),
+      ],
+      v1Action: 'merged',
+      observedAt,
+    }),
+    ...flags,
+  };
 }
 
 test('append assigns an id and read round-trips the full observation', () => {
@@ -62,7 +65,23 @@ test('read windows observations by tick time', () => {
   assert.equal(windowed.length, 1);
   assert.equal(windowed[0].observedAt, t(100));
 
+  assert.deepEqual(store.read({ from: t(100) }).map((o) => o.observedAt), [t(100), t(200)]);
+  assert.deepEqual(store.read({ to: t(100) }).map((o) => o.observedAt), [t(0), t(100)]);
   assert.equal(store.read().length, 3, 'no window returns all');
+  store.close();
+});
+
+test('readCoverage aggregates the full table without materializing observations', () => {
+  const store = memStore();
+  store.append(cleanObs(t(0), { sawHeadMove: true }));
+  store.append(cleanObs(t(100)));
+  store.append(cleanObs(t(200), { sawExhaustion: true }));
+
+  assert.deepEqual(store.readCoverage(), {
+    earliestObservedAt: t(0),
+    organicHeadMoves: 1,
+    exhaustionCloses: 1,
+  });
   store.close();
 });
 
@@ -111,6 +130,26 @@ test('the reporting store reads through a query-only database handle', () => {
     () => reporting.db.prepare('DELETE FROM finalization_shadow').run(),
     /readonly|read-only/i,
   );
+  reporting.close();
+});
+
+test('the reporting store honors the same read window interface as the writable store', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'shadow-store-readonly-window-'));
+  const writable = openFinalizationShadowStore({ rootDir });
+  writable.append(cleanObs(t(0), { sawHeadMove: true }));
+  writable.append(cleanObs(t(100)));
+  writable.append(cleanObs(t(200), { sawExhaustion: true }));
+  writable.close();
+
+  const reporting = openReadOnlyFinalizationShadowStore({ rootDir });
+  assert.deepEqual(reporting.read({ from: t(100), to: t(150) }).map((o) => o.observedAt), [t(100)]);
+  assert.deepEqual(reporting.read({ from: t(100) }).map((o) => o.observedAt), [t(100), t(200)]);
+  assert.deepEqual(reporting.read({ to: t(100) }).map((o) => o.observedAt), [t(0), t(100)]);
+  assert.deepEqual(reporting.readCoverage(), {
+    earliestObservedAt: t(0),
+    organicHeadMoves: 1,
+    exhaustionCloses: 1,
+  });
   reporting.close();
 });
 

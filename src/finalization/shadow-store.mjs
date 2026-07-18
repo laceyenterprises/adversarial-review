@@ -165,8 +165,28 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
     ORDER BY observed_at ASC, id ASC
   `);
 
+  const selectFrom = database.prepare(`
+    SELECT * FROM finalization_shadow
+    WHERE observed_at >= ?
+    ORDER BY observed_at ASC, id ASC
+  `);
+
+  const selectTo = database.prepare(`
+    SELECT * FROM finalization_shadow
+    WHERE observed_at <= ?
+    ORDER BY observed_at ASC, id ASC
+  `);
+
   const selectAll = database.prepare(`
     SELECT * FROM finalization_shadow ORDER BY observed_at ASC, id ASC
+  `);
+
+  const selectCoverage = database.prepare(`
+    SELECT
+      MIN(observed_at) AS earliest_observed_at,
+      COALESCE(SUM(CASE WHEN saw_head_move = 1 THEN 1 ELSE 0 END), 0) AS organic_head_moves,
+      COALESCE(SUM(CASE WHEN saw_exhaustion = 1 THEN 1 ELSE 0 END), 0) AS exhaustion_closes
+    FROM finalization_shadow
   `);
 
   const updateOverride = database.prepare(`
@@ -193,10 +213,30 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
      * @param {{ from?: string, to?: string }} [window]
      */
     read({ from, to } = {}) {
-      const rows = (from != null || to != null)
-        ? selectWindow.all(from ?? '', to ?? '￿')
-        : selectAll.all();
+      let rows;
+      if (from != null && to != null) {
+        rows = selectWindow.all(from, to);
+      } else if (from != null) {
+        rows = selectFrom.all(from);
+      } else if (to != null) {
+        rows = selectTo.all(to);
+      } else {
+        rows = selectAll.all();
+      }
       return rows.map(rowToObservation);
+    },
+
+    /**
+     * Return full-table promotion coverage aggregates without materializing the
+     * whole shadow table in JavaScript.
+     */
+    readCoverage() {
+      const row = selectCoverage.get();
+      return {
+        earliestObservedAt: row?.earliest_observed_at ?? null,
+        organicHeadMoves: Number(row?.organic_head_moves ?? 0),
+        exhaustionCloses: Number(row?.exhaustion_closes ?? 0),
+      };
     },
 
     /**
@@ -231,10 +271,36 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
  */
 export function openReadOnlyFinalizationShadowStore({ rootDir, busyTimeoutMs } = {}) {
   const database = openReadOnlyDb(rootDir, { busyTimeoutMs });
+  let selectWindow;
+  let selectFrom;
+  let selectTo;
   let selectAll;
+  let selectCoverage;
   try {
+    selectWindow = database.prepare(`
+      SELECT * FROM finalization_shadow
+      WHERE observed_at >= ? AND observed_at <= ?
+      ORDER BY observed_at ASC, id ASC
+    `);
+    selectFrom = database.prepare(`
+      SELECT * FROM finalization_shadow
+      WHERE observed_at >= ?
+      ORDER BY observed_at ASC, id ASC
+    `);
+    selectTo = database.prepare(`
+      SELECT * FROM finalization_shadow
+      WHERE observed_at <= ?
+      ORDER BY observed_at ASC, id ASC
+    `);
     selectAll = database.prepare(`
       SELECT * FROM finalization_shadow ORDER BY observed_at ASC, id ASC
+    `);
+    selectCoverage = database.prepare(`
+      SELECT
+        MIN(observed_at) AS earliest_observed_at,
+        COALESCE(SUM(CASE WHEN saw_head_move = 1 THEN 1 ELSE 0 END), 0) AS organic_head_moves,
+        COALESCE(SUM(CASE WHEN saw_exhaustion = 1 THEN 1 ELSE 0 END), 0) AS exhaustion_closes
+      FROM finalization_shadow
     `);
   } catch (err) {
     database.close();
@@ -243,8 +309,26 @@ export function openReadOnlyFinalizationShadowStore({ rootDir, busyTimeoutMs } =
 
   return {
     db: database,
-    read() {
-      return selectAll.all().map(rowToObservation);
+    read({ from, to } = {}) {
+      let rows;
+      if (from != null && to != null) {
+        rows = selectWindow.all(from, to);
+      } else if (from != null) {
+        rows = selectFrom.all(from);
+      } else if (to != null) {
+        rows = selectTo.all(to);
+      } else {
+        rows = selectAll.all();
+      }
+      return rows.map(rowToObservation);
+    },
+    readCoverage() {
+      const row = selectCoverage.get();
+      return {
+        earliestObservedAt: row?.earliest_observed_at ?? null,
+        organicHeadMoves: Number(row?.organic_head_moves ?? 0),
+        exhaustionCloses: Number(row?.exhaustion_closes ?? 0),
+      };
     },
     close() {
       database.close();

@@ -206,8 +206,13 @@ async function withClaudeLaunchctlRetry(operation, {
   }
 }
 
-async function assertClaudeOAuth({ spawnClaudeImpl = spawnClaude, retryDelaysMs, sleepImpl } = {}) {
-  if (!existsSync(CLAUDE_CLI)) {
+async function assertClaudeOAuth({
+  spawnClaudeImpl = spawnClaude,
+  retryDelaysMs,
+  sleepImpl,
+  existsSyncImpl = existsSync,
+} = {}) {
+  if (spawnClaudeImpl === spawnClaude && !existsSyncImpl(CLAUDE_CLI)) {
     throw new OAuthError('claude', `claude CLI not found at ${CLAUDE_CLI}`);
   }
 

@@ -163,6 +163,28 @@ test('an unbound verdict role fails before entering delivery claim waiting', asy
   assert.equal(calls.length, 0);
 });
 
+test('remediation replies validate the role identity before failing closed', async () => {
+  const calls = [];
+  const adapter = makeAdapter(calls);
+  await assert.rejects(
+    () => adapter.deliverRemediationReply(
+      {
+        kind: 'adversarial-review-remediation-reply',
+        schemaVersion: 1,
+        jobId: 'job-1',
+        outcome: 'completed',
+        summary: 'ready',
+        validation: [],
+        blockers: [],
+        reReview: { requested: true, reason: 'ready' },
+      },
+      makeKey({ kind: 'remediation-reply', roleId: 'ghost-reviewer' }),
+    ),
+    (err) => err instanceof DeliveryIdentityError,
+  );
+  assert.equal(calls.length, 0);
+});
+
 test('without a role id or identity map the legacy worker-class routing is unchanged', async () => {
   const calls = [];
   const adapter = createGitHubPRCommentsAdapter({

@@ -309,6 +309,14 @@ function renderVerdictBody(verdict) {
   return String(verdict?.body ?? verdict?.summary ?? '');
 }
 
+function extractDeliveryRoleId(primary, deliveryKey) {
+  return primary?.reviewerRoleId
+    ?? primary?.roleId
+    ?? deliveryKey?.reviewerRoleId
+    ?? deliveryKey?.roleId
+    ?? null;
+}
+
 /**
  * @param {{
  *   octokit?: any,
@@ -534,12 +542,16 @@ function createGitHubPRCommentsAdapter({
     // ARC-12: the verdict's reviewer role id selects the posting bot identity
     // from the per-role delivery-identity map (when configured). A delivery key
     // may also carry the role id (e.g. operator-driven re-delivery).
-    const roleId = verdict?.reviewerRoleId ?? deliveryKey?.reviewerRoleId ?? deliveryKey?.roleId ?? null;
+    const roleId = extractDeliveryRoleId(verdict, deliveryKey);
     return postWithDedupe({ key, body: renderVerdictBody(verdict), roleId });
   }
 
-  async function postRemediationReply(_reply, deliveryKey) {
+  async function postRemediationReply(reply, deliveryKey) {
     normalizeDeliveryKey(deliveryKey);
+    const roleId = extractDeliveryRoleId(reply, deliveryKey);
+    if (deliveryIdentityByRole && roleId) {
+      resolveDeliveryIdentity(roleId, deliveryIdentityByRole);
+    }
     throw new Error(
       'GitHub PR comments adapter does not support remediation-reply delivery; use the hardened remediation comment pipeline instead'
     );

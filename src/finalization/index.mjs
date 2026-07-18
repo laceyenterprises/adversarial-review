@@ -24,3 +24,45 @@ export {
   mapDaemonMergeDisposition,
   projectReviewState,
 } from './v1-ama-wrapper.mjs';
+
+// Merge Authority v2 core (ARC-15): the append-only finalization event ledger,
+// its pure fold, and the pure eligibility decision. See
+// docs/SPEC-merge-authority-v2.md §2–3.
+export {
+  FINALIZATION_EVENT_TYPES,
+  REVISION_SCOPED_EVENT_TYPES,
+  TERMINAL_EVENT_TYPES,
+  attestationRecorded,
+  budgetExhausted,
+  checksSettled,
+  closed,
+  escalated,
+  finalized,
+  halted,
+  isFinalizationEvent,
+  isRevisionScopedEvent,
+  makeFinalizationEvent,
+  operatorOverride,
+  remediationConcluded,
+  remediationDispatched,
+  resolveSubjectKey,
+  revisionAdvanced,
+  verdictRecorded,
+} from './ledger-events.mjs';
+
+export { fold, foldFrom, initialLedgerState } from './ledger-fold.mjs';
+
+export {
+  DEFAULT_ELIGIBILITY_POLICY,
+  ELIGIBILITY_DECISION_KINDS,
+  eligible,
+  makeEligibilityDecision,
+  normalizePolicy,
+  validateEligibilityPolicy,
+} from './eligibility.mjs';
+
+export {
+  ensureFinalizationLedgerSchema,
+  openFinalizationLedgerStore,
+  rowToEvent,
+} from './ledger-store.mjs';

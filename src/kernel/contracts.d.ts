@@ -706,3 +706,178 @@ export interface FinalizationPort {
   evaluate(subjectState: SubjectState): FinalizationDecision | Promise<FinalizationDecision>;
   execute(decision: FinalizationDecision): FinalizationOutcome | Promise<FinalizationOutcome>;
 }
+
+// ---------------------------------------------------------------------------
+// Merge Authority v2 finalization ledger + eligibility fold (ARC-15;
+// docs/SPEC-merge-authority-v2.md §2–3)
+//
+// The six v1 merge-authority failure classes share one root: merge authority
+// distributed across cooperating actors whose shared state is implicit. v2
+// replaces that with ONE durable state machine per subject: an append-only
+// event ledger (`FinalizationEvent[]`) and a PURE fold. `eligible(fold(events),
+// policy) → EligibilityDecision`; no actor "decides to merge" — the fold does,
+// and actors only append observations. Head-move is an ordinary event; every
+// external fact carries its `sourceRef` provenance; time enters the fold only as
+// event `at`. Implemented in `src/finalization/ledger-events.mjs`,
+// `ledger-fold.mjs`, `eligibility.mjs`, `ledger-store.mjs`.
+// ---------------------------------------------------------------------------
+
+/** The subject identity every ledger row and fold projection is keyed on. */
+export interface SubjectKey {
+  domainId: string;
+  subjectExternalId: string;
+}
+
+/** The append-only event vocabulary (merge-authority-v2 §2). */
+export type FinalizationEventType =
+  | 'revision_advanced'
+  | 'verdict_recorded'
+  | 'checks_settled'
+  | 'attestation_recorded'
+  | 'remediation_dispatched'
+  | 'remediation_concluded'
+  | 'budget_exhausted'
+  | 'operator_override'
+  | 'finalized'
+  | 'closed'
+  | 'escalated'
+  | 'halted';
+
+/**
+ * One appended ledger observation. `at` is the event time (the ONLY way time
+ * enters the pure fold). External-fact events (`verdict_recorded`,
+ * `checks_settled`, `attestation_recorded`) carry a mandatory `sourceRef`
+ * provenance (review commit_id, check-run id, …). `seq` is assigned by the store
+ * on append and defines replay order; it is absent on freshly constructed events.
+ */
+export interface FinalizationEvent {
+  type: FinalizationEventType;
+  subjectKey: SubjectKey;
+  at: IsoTimestamp;
+  seq?: number;
+  /** Revision-scoped events pin their revision; subject-scoped events omit it. */
+  revisionRef?: string;
+  /** Provenance of an external fact (required on verdict/checks/attestation events). */
+  sourceRef?: string;
+  /** `verdict_recorded`. */
+  stageId?: string;
+  role?: string;
+  verdictKind?: ReviewVerdictKind;
+  /** `checks_settled`. */
+  conclusion?: string;
+  requiredChecksPresent?: boolean;
+  /** `attestation_recorded`. */
+  kind?: string;
+  principal?: string;
+  /** `remediation_dispatched` / `remediation_concluded`. */
+  round?: number;
+  idempotencyKey?: string;
+  outcome?: string;
+  final?: boolean;
+  /** `operator_override`. */
+  overrideKind?: string;
+  reason?: string;
+  roundCap?: number;
+  /** `finalized`. */
+  method?: string;
+}
+
+/** Per-revision projection the fold maintains. */
+export interface LedgerRevisionState {
+  verdicts: { stageId: string; role: string; verdictKind: ReviewVerdictKind; sourceRef: string; at: IsoTimestamp }[];
+  checks: { conclusion: string; requiredChecksPresent: boolean; sourceRef: string; at: IsoTimestamp } | null;
+  attestations: { kind: string; principal: string; sourceRef: string; at: IsoTimestamp }[];
+  revisionAdvancedAt: IsoTimestamp | null;
+}
+
+/** Per-stage projection: budget exhaustion + counted remediation rounds. */
+export interface LedgerStageState {
+  budgetExhausted: boolean;
+  budgetExhaustedAt: IsoTimestamp | null;
+  dispatchedRounds: number;
+  concludedRounds: number;
+}
+
+/** A terminal mark (finalized/closed/escalated/halted) in the projection. */
+export interface LedgerTerminalState {
+  kind: 'finalized' | 'closed' | 'escalated' | 'halted';
+  reason?: string;
+  method?: string;
+  revisionRef?: string;
+  at: IsoTimestamp;
+}
+
+/**
+ * The pure projection of a subject's ledger (`fold(events)`). Everything
+ * `eligible` needs: the current revision, per-revision verdicts/checks/
+ * attestations, per-stage budget, remediation history, operator overrides, and
+ * the terminal mark. `terminal` is the most recent UNRESOLVED mark (a resuming
+ * operator override clears escalated/halted); `finalized` is sticky.
+ */
+export interface LedgerState {
+  subjectKey: SubjectKey | null;
+  eventCount: number;
+  lastEventAt: IsoTimestamp | null;
+  currentRevision: string | null;
+  revisions: { [revisionRef: string]: LedgerRevisionState };
+  stages: { [stageId: string]: LedgerStageState };
+  remediation: {
+    dispatched: { revisionRef: string; round: number; idempotencyKey: string; stageId: string | null; final: boolean; at: IsoTimestamp }[];
+    concluded: { revisionRef: string; round: number; outcome: string; stageId: string | null; at: IsoTimestamp }[];
+  };
+  operatorOverrides: { overrideKind: string; principal: string; reason: string; roundCap: number | null; revisionRef: string | null; at: IsoTimestamp }[];
+  terminal: LedgerTerminalState | null;
+  finalized: LedgerTerminalState | null;
+}
+
+/** A configured attestation producer the fold waits on when consuming. */
+export interface AttestationProducer {
+  principal: string;
+  kind: string;
+}
+
+/**
+ * The versioned eligibility policy (merge-authority-v2 §3). Every input is
+ * explicit. `consumeAttestations` with an empty `attestationProducers` is a
+ * config-validation error at load (`normalizePolicy` throws).
+ */
+export interface EligibilityPolicy {
+  policyVersion: number;
+  strictMode: boolean;
+  exhaustionAlwaysCloses: boolean;
+  allCommentsBeforeMerge: boolean;
+  consumeAttestations: boolean;
+  attestationProducers: readonly AttestationProducer[];
+  checksPatienceMs: number;
+  verdictPatienceMs: number;
+  attestationPatienceMs: number;
+  /** Kill switch: autonomous execution disabled ⇒ every mutating decision escalates. */
+  autonomousExecutionDisabled: boolean;
+}
+
+/**
+ * The full merge-authority-v2 §3 decision vocabulary — the autonomous
+ * finalization port's five kinds PLUS `close`, which the fold emits ONLY on an
+ * `operator_override` directing rejection.
+ */
+export type EligibilityDecisionKind =
+  | 'finalize-now'
+  | 'remediate'
+  | 'close'
+  | 'wait'
+  | 'halt'
+  | 'escalate';
+
+/** The single decision `eligible` returns for the executor (ARC-17) to act on. */
+export interface EligibilityDecision {
+  kind: EligibilityDecisionKind;
+  subjectKey: SubjectKey | null;
+  revisionRef: string;
+  observedAt: IsoTimestamp | null;
+  reason?: string;
+  stageId?: string;
+  round?: number;
+  deadline?: IsoTimestamp;
+  /** `remediate`/`finalize-now`: this is the exhaustion final coverage-gated round. */
+  final?: boolean;
+}

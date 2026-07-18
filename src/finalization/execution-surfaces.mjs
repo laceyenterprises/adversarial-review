@@ -61,6 +61,10 @@ export function createGithubAdapterMergeSurface({
           deleteBranch: true,
         }, { execFileImpl, env, rootDir });
       } catch (err) {
+        const payload = adapterErrorPayload(err);
+        if (isAlreadyMergedAtRevision(payload, revisionRef)) {
+          return { ok: true, payload: { ...payload, merged: true, idempotent: true } };
+        }
         return { ok: false, reason: 'adapter-error', detail: err?.message || String(err) };
       }
       // A null return means the adapter binary was not resolvable — local mode is
@@ -76,6 +80,30 @@ export function createGithubAdapterMergeSurface({
       return { ok: true, payload };
     },
   };
+}
+
+function adapterErrorPayload(err) {
+  for (const value of [err?.stdout, err?.stderr]) {
+    const text = String(value ?? '').trim();
+    if (!text) continue;
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch {
+      // The adapter contract is JSON. Unstructured command output is not safe
+      // evidence for converting a failed mutation into success.
+    }
+  }
+  return null;
+}
+
+function isAlreadyMergedAtRevision(payload, revisionRef) {
+  if (!payload || typeof payload !== 'object') return false;
+  const message = [payload.message, payload.error, payload.reason, payload.detail]
+    .filter((value) => typeof value === 'string')
+    .join(' ');
+  const observedHead = payload.matchHeadCommit ?? payload.headRefOid ?? payload.headSha ?? payload.head_sha;
+  return /already merged/i.test(message) && observedHead === revisionRef;
 }
 
 /**

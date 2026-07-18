@@ -116,7 +116,11 @@ To roll back to frozen v1:
 Because the ledger is append-only and the executor is idempotent (re-fold guard
 + `matchHeadCommit` + terminal short-circuit), rolling back and forward is safe:
 a re-promoted executor folds the existing ledger and resumes; it never
-double-merges a subject already marked `finalized`.
+double-merges a subject already marked `finalized`. A crash or ledger failure
+after the remote merge but before that mark is also resumable: the local GitHub
+adapter fallback recognizes structured `already merged` evidence only when it
+names the decided revision, then the executor records the missing `finalized`
+event. A revision mismatch or unstructured refusal remains a failed attempt.
 
 If you need to stop mutations **without** ceding authority back to v1 (e.g. mid
 investigation), prefer the **kill switch** (§4) over rollback — it keeps the v2

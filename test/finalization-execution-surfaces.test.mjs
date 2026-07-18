@@ -60,6 +60,45 @@ test('github-adapter fallback fails closed when the merge is refused', async () 
   assert.equal(result.reason, 'merge-refused');
 });
 
+test('github-adapter fallback recovers an already-merged result at the decided revision', async () => {
+  const execFileImpl = async () => {
+    const err = new Error('adapter rejected repeated merge');
+    err.stderr = JSON.stringify({
+      error: 'Pull request is already merged',
+      matchHeadCommit: 'sha-A',
+    });
+    throw err;
+  };
+  const surface = createGithubAdapterMergeSurface({
+    execFileImpl,
+    env: { GHA_ADAPTER_BIN: '/fake/github-adapter' },
+  });
+  const result = await surface.merge({ subjectExternalId: 'owner/repo#17', revisionRef: 'sha-A' });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.payload.merged, true);
+  assert.equal(result.payload.idempotent, true);
+});
+
+test('github-adapter fallback rejects already-merged evidence for a different revision', async () => {
+  const execFileImpl = async () => {
+    const err = new Error('adapter rejected repeated merge');
+    err.stdout = JSON.stringify({
+      reason: 'Pull request is already merged',
+      headRefOid: 'sha-B',
+    });
+    throw err;
+  };
+  const surface = createGithubAdapterMergeSurface({
+    execFileImpl,
+    env: { GHA_ADAPTER_BIN: '/fake/github-adapter' },
+  });
+  const result = await surface.merge({ subjectExternalId: 'owner/repo#17', revisionRef: 'sha-A' });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'adapter-error');
+});
+
 test('github-adapter fallback refuses a merge without a decided revision', async () => {
   const surface = createGithubAdapterMergeSurface({ env: { GHA_ADAPTER_BIN: '/fake/github-adapter' } });
   const result = await surface.merge({ subjectExternalId: 'owner/repo#17', revisionRef: '' });

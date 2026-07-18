@@ -12,7 +12,7 @@ import {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-function role(id, { workerClass, persona, taskKind = 'review' } = {}) {
+function role(id, { workerClass, persona, taskKind = 'review', priority } = {}) {
   return {
     id,
     promptSet: 'code-pr',
@@ -20,6 +20,7 @@ function role(id, { workerClass, persona, taskKind = 'review' } = {}) {
     ...(persona ? { persona } : {}),
     taskKind,
     completionShape: taskKind === 'review' ? 'decision-only' : 'branch-push',
+    ...(priority !== undefined ? { priority } : {}),
   };
 }
 
@@ -158,6 +159,25 @@ test('selectEligibleReviewerRoles reads builderClass from a SubjectState or a ra
   const fromString = selectEligibleReviewerRoles({ registry, subject: 'codex' }).map((e) => e.roleId);
   assert.deepEqual(fromState, fromString);
   assert.ok(!fromState.includes('codex-reviewer'), 'codex reviewer excluded on a codex PR');
+});
+
+test('selectEligibleReviewerRoles sorts by explicit priority with registry-order ties', () => {
+  const priorityRegistry = {
+    roles: {
+      slow: role('slow', { workerClass: 'gemini', priority: 80 }),
+      fast: role('fast', { workerClass: 'claude-code', priority: 10 }),
+      tied: role('tied', { workerClass: 'codex', priority: 10 }),
+      implicit: role('implicit', { workerClass: 'merge-agent' }),
+    },
+    routing: { neverReviewOwnBuilderClass: true },
+  };
+
+  const eligible = selectEligibleReviewerRoles({
+    registry: priorityRegistry,
+    subject: { builderClass: 'builder' },
+  }).map((e) => e.roleId);
+
+  assert.deepEqual(eligible, ['fast', 'tied', 'slow', 'implicit']);
 });
 
 test('selectEligibleReviewerRoles honors a disabled constraint on the registry', () => {

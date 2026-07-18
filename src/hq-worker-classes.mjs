@@ -21,6 +21,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { assertCanonicalOwner } from './adapters/agent-runtime/append-only-owner.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -119,8 +120,17 @@ function readSnapshot(rootDir, { readFileImpl = readFileSync } = {}) {
   return { classes, capturedAt: doc.capturedAt || null, path };
 }
 
-function writeSnapshot(rootDir, classes, { now = () => new Date().toISOString() } = {}) {
+function writeSnapshot(rootDir, classes, {
+  now = () => new Date().toISOString(),
+  ownerGuardOptions = {},
+} = {}) {
   const path = snapshotPath(rootDir);
+  assertCanonicalOwner(rootDir, path, {
+    cannotVerifyMessage: 'cannot verify worker-class snapshot caller ownership',
+    crossUserMessage: 'refusing cross-user worker-class snapshot write',
+    existingFileMessage: 'refusing write to non-canonical-owned worker-class snapshot',
+    ...ownerGuardOptions,
+  });
   const body = {
     schemaVersion: SNAPSHOT_SCHEMA_VERSION,
     capturedAt: now(),
@@ -145,6 +155,7 @@ function writeSnapshot(rootDir, classes, { now = () => new Date().toISOString() 
  *   writeSnapshotImpl?: typeof writeSnapshot,
  *   readOnly?: boolean,
  *   now?: () => string,
+ *   ownerGuardOptions?: object,
  *   log?: Pick<Console, 'warn'>,
  * }} [options]
  * @returns {{ classes: readonly string[], source: 'published' | 'snapshot', path: string | null }}
@@ -157,6 +168,7 @@ export function resolvePublishedWorkerClasses({
   writeSnapshotImpl = writeSnapshot,
   readOnly = false,
   now = () => new Date().toISOString(),
+  ownerGuardOptions = {},
   log = console,
 } = {}) {
   let live = null;
@@ -172,7 +184,7 @@ export function resolvePublishedWorkerClasses({
   if (live) {
     if (!readOnly) {
       try {
-        writeSnapshotImpl(rootDir, live.classes, { now });
+        writeSnapshotImpl(rootDir, live.classes, { now, ownerGuardOptions });
       } catch (err) {
         log?.warn?.(
           `[hq-worker-classes] failed to refresh worker-class snapshot: ${err?.message || err}`,

@@ -1260,6 +1260,10 @@ function schemaV1() {
                 persona: { __type: TYPE_STRING, __default: '' },
                 taskKind: { __type: TYPE_STRING, __default: '' },
                 completionShape: { __type: TYPE_STRING, __default: '' },
+                // Optional reviewer fallback precedence. Lower priorities are
+                // considered first; equal or omitted priorities retain registry
+                // order in the pure routing kernel.
+                priority: { __type: TYPE_INT, __default: null, __nullable: true, __min: 0 },
               },
             },
           },

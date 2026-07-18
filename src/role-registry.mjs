@@ -9,6 +9,8 @@
 //   - exactly one of `workerClass` / `persona` is set.
 //   - `taskKind` ∈ {review, remediation}; `completionShape` ∈
 //     {decision-only, branch-push}.
+//   - optional `priority` is a non-negative integer for reviewer fallback
+//     precedence (lower first, equal/omitted keep registry order).
 //   - a `workerClass` MUST be a member of the hq-published worker-class roster
 //     (`hq-worker-classes.mjs`) — never a hardcoded list. An unknown class
 //     fails at load (SPEC §6 "two registries drift" mitigation).
@@ -98,6 +100,16 @@ export function validateRoleDefinition(roleId, raw, { workerClassSet = null } = 
     );
   }
 
+  const hasPriority = raw.priority !== undefined && raw.priority !== null;
+  const priority = raw.priority;
+  if (hasPriority && (!Number.isInteger(priority) || priority < 0)) {
+    throw configError(
+      `${base}.priority`,
+      `${base}.priority must be a non-negative integer; got ${JSON.stringify(raw.priority)}`,
+      { expected: 'non-negative integer', got: raw.priority ?? null },
+    );
+  }
+
   if (workerClass) {
     // The roster is required precisely when a role names a worker class. A
     // null set means the caller could not resolve the hq-published roster;
@@ -128,6 +140,7 @@ export function validateRoleDefinition(roleId, raw, { workerClassSet = null } = 
     ...(persona ? { persona } : {}),
     taskKind,
     completionShape,
+    ...(hasPriority ? { priority } : {}),
   };
 }
 

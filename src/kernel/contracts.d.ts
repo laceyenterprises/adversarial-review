@@ -229,7 +229,9 @@ export type RoleCompletionShape = 'decision-only' | 'branch-push';
  * One registry role. Exactly one of `workerClass` / `persona` is set:
  * `workerClass` is an OS worker-class name validated at load against the
  * hq-published class list; `persona` is a foundry persona id. No token, model
- * id, or CLI path ever appears here.
+ * id, or CLI path ever appears here. Optional `priority` controls reviewer
+ * fallback precedence: lower numbers run earlier, while equal or omitted
+ * priorities preserve registry order.
  */
 export interface RoleDefinition {
   id: string;
@@ -238,6 +240,7 @@ export interface RoleDefinition {
   persona?: string;
   taskKind: RoleTaskKind;
   completionShape: RoleCompletionShape;
+  priority?: number;
 }
 
 /** Registry routing constraints (builder-class exclusions only). */

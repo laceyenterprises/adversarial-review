@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -102,6 +102,25 @@ test('validateRoleDefinition enforces the taskKind and completionShape enums', (
   );
 });
 
+test('validateRoleDefinition accepts a non-negative reviewer priority', () => {
+  const def = validateRoleDefinition('r', { ...GOOD_ROLE, priority: 7 }, { workerClassSet: ROSTER });
+  assert.equal(def.priority, 7);
+});
+
+test('validateRoleDefinition rejects invalid reviewer priorities', () => {
+  assert.throws(
+    () => validateRoleDefinition('r', { ...GOOD_ROLE, priority: -1 }, { workerClassSet: ROSTER }),
+    (err) =>
+      err instanceof AgentOSConfigError &&
+      /priority must be a non-negative integer/.test(err.message) &&
+      err.key === 'roles.registry.r.priority',
+  );
+  assert.throws(
+    () => validateRoleDefinition('r', { ...GOOD_ROLE, priority: 1.5 }, { workerClassSet: ROSTER }),
+    /priority must be a non-negative integer/,
+  );
+});
+
 // This is the ticket's mandatory test: an unknown worker class fails at load.
 test('validateRoleDefinition rejects a worker class not in the hq-published roster', () => {
   assert.throws(
@@ -175,6 +194,7 @@ test('the config loader accepts the roles.registry subtree and routing flag', ()
       '      workerClass: claude-code',
       '      taskKind: review',
       '      completionShape: decision-only',
+      '      priority: 10',
       '  routing:',
       '    never-review-own-builder-class: false',
       '',
@@ -183,6 +203,7 @@ test('the config loader accepts the roles.registry subtree and routing flag', ()
   const cfg = loadConfig({ topPath, modulePaths: [modulePath], env: {} });
   const entry = cfg.get('roles.registry')['security-reviewer'];
   assert.equal(entry.workerClass, 'claude-code');
+  assert.equal(entry.priority, 10);
   assert.equal(cfg.get('roles.routing.never-review-own-builder-class'), false);
 });
 
@@ -297,6 +318,47 @@ test('resolvePublishedWorkerClasses read-only consumers do not refresh the share
 
   assert.equal(result.source, 'published');
   assert.equal(writes, 0);
+});
+
+test('writeSnapshot refuses callers that do not own the canonical snapshot root', () => {
+  const rootDir = tmp();
+  const dataDir = join(rootDir, 'data');
+  mkdirSync(dataDir, { recursive: true });
+
+  assert.throws(
+    () => hqTesting.writeSnapshot(rootDir, ['codex'], {
+      ownerGuardOptions: {
+        currentUid: () => 502,
+        exists: (path) => path === dataDir,
+        stat: () => ({ uid: 501 }),
+      },
+    }),
+    /refusing cross-user worker-class snapshot write/,
+  );
+  assert.equal(existsSync(hqTesting.snapshotPath(rootDir)), false);
+});
+
+test('writeSnapshot refuses to replace a snapshot owned by a non-canonical uid', () => {
+  const rootDir = tmp();
+  const snapshot = hqTesting.snapshotPath(rootDir);
+  const dataDir = dirname(snapshot);
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(snapshot, '{}\n', 'utf8');
+  const owners = new Map([
+    [dataDir, 501],
+    [snapshot, 502],
+  ]);
+
+  assert.throws(
+    () => hqTesting.writeSnapshot(rootDir, ['codex'], {
+      ownerGuardOptions: {
+        currentUid: () => 501,
+        exists: (path) => owners.has(path),
+        stat: (path) => ({ uid: owners.get(path) }),
+      },
+    }),
+    /refusing write to non-canonical-owned worker-class snapshot/,
+  );
 });
 
 test('resolvePublishedWorkerClasses throws when neither roster nor snapshot exists', () => {

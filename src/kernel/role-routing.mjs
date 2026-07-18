@@ -31,6 +31,7 @@
 const DEFAULT_FAMILY_ALIASES = Object.freeze({
   claude: 'claude-code',
 });
+const DEFAULT_REVIEW_ROLE_PRIORITY = 100;
 
 /**
  * Normalize a builder-class / worker-class token to a comparison family. Lower-
@@ -52,6 +53,11 @@ function resolveFamily(resolver, value) {
   const family = familyOf(value);
   const normalized = family == null ? '' : String(family).trim().toLowerCase();
   return normalized === '' ? null : normalized;
+}
+
+function reviewerRolePriority(role) {
+  const priority = role?.priority;
+  return Number.isInteger(priority) ? priority : DEFAULT_REVIEW_ROLE_PRIORITY;
 }
 
 /**
@@ -116,10 +122,12 @@ export function roleMayReviewSubject({
 }
 
 /**
- * The registry roles that may review the given subject, in registry order.
- * Filters to `taskKind: 'review'` roles first, then applies
- * {@link roleMayReviewSubject}. `subjectBuilderClass` is read from the passed
- * subject (either a raw builder-class string or a `SubjectState`).
+ * The registry roles that may review the given subject, in explicit priority
+ * order. Lower numeric `role.priority` values run first; omitted priorities
+ * default to 100; ties preserve registry order. Filters to `taskKind: 'review'`
+ * roles first, then applies {@link roleMayReviewSubject}. `subjectBuilderClass`
+ * is read from the passed subject (either a raw builder-class string or a
+ * `SubjectState`).
  *
  * @param {{
  *   registry: RoleRegistry,
@@ -138,7 +146,10 @@ export function selectEligibleReviewerRoles({ registry, subject, builderClassFam
     : (subject?.builderClass ?? null);
 
   const eligible = [];
+  let registryIndex = 0;
   for (const [roleId, role] of Object.entries(roles)) {
+    const currentIndex = registryIndex;
+    registryIndex += 1;
     if (role?.taskKind !== 'review') continue;
     const decision = roleMayReviewSubject({
       role,
@@ -147,8 +158,18 @@ export function selectEligibleReviewerRoles({ registry, subject, builderClassFam
       builderClassFamily,
     });
     if (decision.allowed) {
-      eligible.push({ roleId, role, decision });
+      eligible.push({ roleId, role, decision, registryIndex: currentIndex });
     }
   }
-  return eligible;
+  eligible.sort((a, b) => {
+    const aPriority = reviewerRolePriority(a.role);
+    const bPriority = reviewerRolePriority(b.role);
+    if (aPriority !== bPriority) return aPriority - bPriority;
+    return a.registryIndex - b.registryIndex;
+  });
+  return eligible.map((entry) => ({
+    roleId: entry.roleId,
+    role: entry.role,
+    decision: entry.decision,
+  }));
 }

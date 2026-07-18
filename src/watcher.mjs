@@ -370,17 +370,23 @@ const WATCHER_PRIMARY_DOMAIN_ID = (
   ENABLED_DOMAINS.find((domain) => domain.config.subjectChannel === 'github-pr') || ENABLED_DOMAINS[0]
 ).id;
 
-let reviewerRuntimeAdapter = createReviewerRuntimeAdapterForDomain({
-  rootDir: ROOT,
-  domainId: WATCHER_PRIMARY_DOMAIN_ID,
-  logger: console,
-});
-let reviewerRuntimeAdapterCache = null;
+// ARC-18: the reviewer-runtime mutable singletons (adapter, its refresh cache,
+// and the config/adapter failure-signal counters) are consolidated into one
+// state object so the reader/writer functions can take it as a parameter and
+// move to their own module. The binding stays const; only its properties mutate.
+const reviewerRuntimeState = {
+  adapter: createReviewerRuntimeAdapterForDomain({
+    rootDir: ROOT,
+    domainId: WATCHER_PRIMARY_DOMAIN_ID,
+    logger: console,
+  }),
+  adapterCache: null,
+  configFailureSignal: { key: null, count: 0 },
+  adapterFailureSignal: { key: null, count: 0 },
+};
 const secondaryReviewerRuntimeAdapterCache = new Map();
 let lastKnownReviewerOrchestrationMode = 'native';
 let activeReviewerRuntimeOrchestrationMode = 'native';
-let reviewerRuntimeConfigFailureSignal = { key: null, count: 0 };
-let reviewerRuntimeAdapterFailureSignal = { key: null, count: 0 };
 const reviewerRuntimeAdapterByNameCache = new Map();
 
 // DEFAULT_REVIEWER_BROKER_SECRET_CACHE_TTL_MS, the reviewerBrokerSharedSecretCache
@@ -399,8 +405,8 @@ function shouldEmitReviewerRuntimeFailureSignal(count) {
 
 function recordReviewerRuntimeFailureSignal({ kind, key, message, logger }) {
   const state = kind === 'config'
-    ? reviewerRuntimeConfigFailureSignal
-    : reviewerRuntimeAdapterFailureSignal;
+    ? reviewerRuntimeState.configFailureSignal
+    : reviewerRuntimeState.adapterFailureSignal;
   if (state.key === key) {
     state.count += 1;
   } else {
@@ -416,13 +422,13 @@ function recordReviewerRuntimeFailureSignal({ kind, key, message, logger }) {
 
 function clearReviewerRuntimeFailureSignal(kind) {
   if (kind === 'config') {
-    reviewerRuntimeConfigFailureSignal = { key: null, count: 0 };
+    reviewerRuntimeState.configFailureSignal = { key: null, count: 0 };
   } else {
-    reviewerRuntimeAdapterFailureSignal = { key: null, count: 0 };
+    reviewerRuntimeState.adapterFailureSignal = { key: null, count: 0 };
   }
 }
 
-function reviewerRuntimeAdapterId(adapter = reviewerRuntimeAdapter) {
+function reviewerRuntimeAdapterId(adapter = reviewerRuntimeState.adapter) {
   try {
     return adapter?.describe?.()?.id || null;
   } catch {
@@ -455,9 +461,9 @@ function reviewerRuntimeAdapterForRunRecord(record = null, {
   resolveDomainAdapterImpl = resolveReviewerRuntimeAdapterForDomainId,
 } = {}) {
   const runtime = String(record?.runtime || '').trim();
-  if (!runtime) return reviewerRuntimeAdapter;
-  if (runtime === reviewerRuntimeAdapterId(reviewerRuntimeAdapter)) {
-    return reviewerRuntimeAdapter;
+  if (!runtime) return reviewerRuntimeState.adapter;
+  if (runtime === reviewerRuntimeAdapterId(reviewerRuntimeState.adapter)) {
+    return reviewerRuntimeState.adapter;
   }
   const domainId = record?.domain || WATCHER_PRIMARY_DOMAIN_ID;
   if (domainId !== WATCHER_PRIMARY_DOMAIN_ID) {
@@ -508,7 +514,7 @@ function resolveReviewerRuntimeAdapterForDomainId(domainId, {
   domainMtimeImpl = reviewerRuntimeDomainMtimeMs,
 } = {}) {
   if (!domainId || domainId === WATCHER_PRIMARY_DOMAIN_ID) {
-    return reviewerRuntimeAdapter;
+    return reviewerRuntimeState.adapter;
   }
   const cacheKey = `${rootDir}\0${domainId}`;
   const cached = secondaryReviewerRuntimeAdapterCache.get(cacheKey);
@@ -578,25 +584,25 @@ function refreshReviewerRuntimeAdapter({
   try {
     domainMtimeMs = domainMtimeImpl(rootDir, WATCHER_PRIMARY_DOMAIN_ID);
     if (
-      reviewerRuntimeAdapterCache?.adapter &&
-      reviewerRuntimeAdapterCache.orchestrationMode === orchestrationMode &&
-      reviewerRuntimeAdapterCache.domainMtimeMs === domainMtimeMs
+      reviewerRuntimeState.adapterCache?.adapter &&
+      reviewerRuntimeState.adapterCache.orchestrationMode === orchestrationMode &&
+      reviewerRuntimeState.adapterCache.domainMtimeMs === domainMtimeMs
     ) {
       lastKnownReviewerOrchestrationMode = orchestrationMode;
       activeReviewerRuntimeOrchestrationMode = orchestrationMode;
-      reviewerRuntimeAdapter = reviewerRuntimeAdapterCache.adapter;
+      reviewerRuntimeState.adapter = reviewerRuntimeState.adapterCache.adapter;
       clearReviewerRuntimeFailureSignal('adapter');
-      return reviewerRuntimeAdapter;
+      return reviewerRuntimeState.adapter;
     }
 
-    reviewerRuntimeAdapter = createAdapterImpl({
+    reviewerRuntimeState.adapter = createAdapterImpl({
       rootDir,
       domainId: WATCHER_PRIMARY_DOMAIN_ID,
       logger,
       orchestrationMode,
     });
-    reviewerRuntimeAdapterCache = {
-      adapter: reviewerRuntimeAdapter,
+    reviewerRuntimeState.adapterCache = {
+      adapter: reviewerRuntimeState.adapter,
       domainMtimeMs,
       orchestrationMode,
     };
@@ -626,7 +632,7 @@ function refreshReviewerRuntimeAdapter({
       });
     }
   }
-  return reviewerRuntimeAdapter;
+  return reviewerRuntimeState.adapter;
 }
 
 // ── DB setup ────────────────────────────────────────────────────────────────
@@ -1155,7 +1161,7 @@ async function cancelReviewerRuntimeSession({
   logger = console,
   readRunRecord = readReviewerRunRecord,
   adapterForRecord = reviewerRuntimeAdapterForRunRecord,
-  defaultAdapter = reviewerRuntimeAdapter,
+  defaultAdapter = reviewerRuntimeState.adapter,
 } = {}) {
   let record = null;
   try {
@@ -2639,7 +2645,7 @@ async function spawnReviewer({
   domainId = WATCHER_PRIMARY_DOMAIN_ID,
   reviewerRuntimeAdapterOverride = null,
 }) {
-  const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeAdapter;
+  const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
   const finalRound = (
     Number.isFinite(reviewAttemptNumber) &&
     Number.isFinite(maxRemediationRounds) &&
@@ -9269,7 +9275,7 @@ async function main() {
   refreshReviewerRuntimeAdapter();
   await recoverReviewerRunRecords({
     rootDir: ROOT,
-    adapter: reviewerRuntimeAdapter,
+    adapter: reviewerRuntimeState.adapter,
     adapterForRecord: (record) => reviewerRuntimeAdapterForRunRecord(record, { rootDir: ROOT, logger: console }),
     db,
     log: console,

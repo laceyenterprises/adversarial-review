@@ -47,6 +47,13 @@ import {
   writeReviewerTokenUsageArtifactBestEffort,
 } from './reviewer-runtime-support.mjs';
 import {
+  initReviewerRuntime,
+  refreshReviewerRuntimeAdapter,
+  resolveReviewerRuntimeAdapterForDomainId,
+  reviewerRuntimeAdapterForRunRecord,
+  reviewerRuntimeState,
+} from './reviewer-runtime-adapter.mjs';
+import {
   defaultReviewerRouteFromEnv,
   applyEffectiveReviewerRoute,
   describeCrossModelReviewWaiver,
@@ -118,11 +125,8 @@ import {
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision, resolveQuotaResetIso } from './quota-exhaustion.mjs';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import {
-  createReviewerRuntimeAdapterByName,
-  createReviewerRuntimeAdapterForDomain,
   recoverReviewerRunRecords,
 } from './adapters/reviewer-runtime/index.mjs';
-import { loadDomainConfig } from './domain-config.mjs';
 import { loadDomainRegistry } from './domain-registry.mjs';
 import {
   readReviewerRunRecord,
@@ -370,270 +374,12 @@ const WATCHER_PRIMARY_DOMAIN_ID = (
   ENABLED_DOMAINS.find((domain) => domain.config.subjectChannel === 'github-pr') || ENABLED_DOMAINS[0]
 ).id;
 
-// ARC-18: the reviewer-runtime mutable singletons (adapter, its refresh cache,
-// and the config/adapter failure-signal counters) are consolidated into one
-// state object so the reader/writer functions can take it as a parameter and
-// move to their own module. The binding stays const; only its properties mutate.
-const reviewerRuntimeState = {
-  adapter: createReviewerRuntimeAdapterForDomain({
-    rootDir: ROOT,
-    domainId: WATCHER_PRIMARY_DOMAIN_ID,
-    logger: console,
-  }),
-  adapterCache: null,
-  configFailureSignal: { key: null, count: 0 },
-  adapterFailureSignal: { key: null, count: 0 },
-};
-const secondaryReviewerRuntimeAdapterCache = new Map();
-let lastKnownReviewerOrchestrationMode = 'native';
-let activeReviewerRuntimeOrchestrationMode = 'native';
-const reviewerRuntimeAdapterByNameCache = new Map();
-
-// DEFAULT_REVIEWER_BROKER_SECRET_CACHE_TTL_MS, the reviewerBrokerSharedSecretCache
-// singleton, readReviewerBrokerSharedSecretBestEffort, and
-// resolveGeminiCredentialConcurrencyForDispatchCandidates moved to
-// ./reviewer-runtime-support.mjs (ARC-18); the two functions are imported back
-// above (the cache was private to the broker-secret read, so it moved with it).
-
-function reviewerRuntimeDomainMtimeMs(rootDir = ROOT, domainId = WATCHER_PRIMARY_DOMAIN_ID) {
-  return statSync(join(rootDir, 'domains', `${domainId}.json`)).mtimeMs;
-}
-
-function shouldEmitReviewerRuntimeFailureSignal(count) {
-  return count <= 2 || count === 5 || count % 10 === 0;
-}
-
-function recordReviewerRuntimeFailureSignal({ kind, key, message, logger }) {
-  const state = kind === 'config'
-    ? reviewerRuntimeState.configFailureSignal
-    : reviewerRuntimeState.adapterFailureSignal;
-  if (state.key === key) {
-    state.count += 1;
-  } else {
-    state.key = key;
-    state.count = 1;
-  }
-  if (shouldEmitReviewerRuntimeFailureSignal(state.count)) {
-    logger?.error?.(
-      `[watcher] ALERT reviewer runtime ${kind} degraded consecutive=${state.count}: ${message}`
-    );
-  }
-}
-
-function clearReviewerRuntimeFailureSignal(kind) {
-  if (kind === 'config') {
-    reviewerRuntimeState.configFailureSignal = { key: null, count: 0 };
-  } else {
-    reviewerRuntimeState.adapterFailureSignal = { key: null, count: 0 };
-  }
-}
-
-function reviewerRuntimeAdapterId(adapter = reviewerRuntimeState.adapter) {
-  try {
-    return adapter?.describe?.()?.id || null;
-  } catch {
-    return null;
-  }
-}
-
-function signalReviewerRuntimeDomainConfigFailure({
-  rootDir = ROOT,
-  domainId = WATCHER_PRIMARY_DOMAIN_ID,
-  err,
-  phase,
-  logger = console,
-} = {}) {
-  const errorMessage = String(err?.message || err);
-  recordReviewerRuntimeFailureSignal({
-    kind: 'adapter',
-    key: `domain-config:${rootDir}:${domainId}:${phase}:${errorMessage}`,
-    logger,
-    message:
-      `domain=${domainId} reviewer runtime config unavailable during ${phase}; ` +
-      `per-record recovery/cancel will isolate affected records until the shared config is readable: ` +
-      errorMessage
-  });
-}
-
-function reviewerRuntimeAdapterForRunRecord(record = null, {
-  rootDir = ROOT,
-  logger = console,
-  resolveDomainAdapterImpl = resolveReviewerRuntimeAdapterForDomainId,
-} = {}) {
-  const runtime = String(record?.runtime || '').trim();
-  if (!runtime) return reviewerRuntimeState.adapter;
-  if (runtime === reviewerRuntimeAdapterId(reviewerRuntimeState.adapter)) {
-    return reviewerRuntimeState.adapter;
-  }
-  const domainId = record?.domain || WATCHER_PRIMARY_DOMAIN_ID;
-  if (domainId !== WATCHER_PRIMARY_DOMAIN_ID) {
-    const domainAdapter = resolveDomainAdapterImpl(domainId, { rootDir, logger });
-    if (runtime === reviewerRuntimeAdapterId(domainAdapter)) return domainAdapter;
-  }
-  let domainMtimeMs = null;
-  try {
-    domainMtimeMs = reviewerRuntimeDomainMtimeMs(rootDir, domainId);
-  } catch (err) {
-    signalReviewerRuntimeDomainConfigFailure({ rootDir, domainId, err, phase: 'mtime', logger });
-    throw err;
-  }
-
-  const domainCacheKey = `${rootDir}\0${domainId}`;
-  let domainCache = reviewerRuntimeAdapterByNameCache.get(domainCacheKey);
-  if (!domainCache || domainCache.domainMtimeMs !== domainMtimeMs) {
-    domainCache = { domainMtimeMs, adaptersByRuntime: new Map() };
-    reviewerRuntimeAdapterByNameCache.set(domainCacheKey, domainCache);
-  }
-  if (!domainCache.adaptersByRuntime.has(runtime)) {
-    let domainConfig = null;
-    try {
-      domainConfig = loadDomainConfig(rootDir, domainId);
-    } catch (err) {
-      signalReviewerRuntimeDomainConfigFailure({ rootDir, domainId, err, phase: 'load', logger });
-      throw err;
-    }
-    domainCache.adaptersByRuntime.set(runtime, createReviewerRuntimeAdapterByName(runtime, {
-      rootDir,
-      domainConfig,
-      logger,
-    }));
-  }
-  return domainCache.adaptersByRuntime.get(runtime);
-}
-
-// ARC-03: resolve the reviewer-runtime adapter for a specific enabled domain.
-// The primary (github-pr) domain reuses the refreshed process-wide singleton;
-// any other enabled domain gets its own isolated, mtime-refreshed cached adapter,
-// so per-domain runtime selection never bleeds across domains and poll ticks do
-// not discard adapter-owned pools, caches, or leases.
-function resolveReviewerRuntimeAdapterForDomainId(domainId, {
-  rootDir = ROOT,
-  logger = console,
-  loadDomainConfigImpl = loadDomainConfig,
-  createAdapterImpl = createReviewerRuntimeAdapterForDomain,
-  domainMtimeImpl = reviewerRuntimeDomainMtimeMs,
-} = {}) {
-  if (!domainId || domainId === WATCHER_PRIMARY_DOMAIN_ID) {
-    return reviewerRuntimeState.adapter;
-  }
-  const cacheKey = `${rootDir}\0${domainId}`;
-  const cached = secondaryReviewerRuntimeAdapterCache.get(cacheKey);
-  // A broken or mid-swap secondary domain config must never abort the whole
-  // poll tick (review finding on #615): keep serving the cached adapter and
-  // signal the failure instead. Only an uncached domain with a broken config
-  // yields null, and callers skip that domain for the tick.
-  let domainMtimeMs;
-  try {
-    domainMtimeMs = domainMtimeImpl(rootDir, domainId);
-  } catch (err) {
-    signalReviewerRuntimeDomainConfigFailure({ rootDir, domainId, err, phase: 'mtime', logger });
-    return cached ? cached.adapter : null;
-  }
-  if (
-    cached?.domainMtimeMs === domainMtimeMs &&
-    cached?.orchestrationMode === activeReviewerRuntimeOrchestrationMode
-  ) return cached.adapter;
-
-  let adapter;
-  try {
-    const domainConfig = loadDomainConfigImpl(rootDir, domainId);
-    adapter = createAdapterImpl({
-      rootDir,
-      domainId,
-      domainConfig,
-      logger,
-      orchestrationMode: activeReviewerRuntimeOrchestrationMode,
-    });
-  } catch (err) {
-    signalReviewerRuntimeDomainConfigFailure({ rootDir, domainId, err, phase: 'load', logger });
-    return cached ? cached.adapter : null;
-  }
-  secondaryReviewerRuntimeAdapterCache.set(cacheKey, {
-    domainMtimeMs,
-    orchestrationMode: activeReviewerRuntimeOrchestrationMode,
-    adapter,
-  });
-  return adapter;
-}
-
-function refreshReviewerRuntimeAdapter({
-  rootDir = ROOT,
-  logger = console,
-  loadConfigImpl = loadConfigCached,
-  createAdapterImpl = createReviewerRuntimeAdapterForDomain,
-  domainMtimeImpl = reviewerRuntimeDomainMtimeMs,
-} = {}) {
-  let orchestrationMode = lastKnownReviewerOrchestrationMode || 'native';
-  try {
-    orchestrationMode = loadConfigImpl().getOrchestrationMode();
-    clearReviewerRuntimeFailureSignal('config');
-  } catch (err) {
-    const errorMessage = String(err?.message || err);
-    recordReviewerRuntimeFailureSignal({
-      kind: 'config',
-      key: errorMessage,
-      logger,
-      message:
-        `config key=roles.adversarial.orchestration_mode failed (${errorMessage}); ` +
-        `keeping reviewer runtime orchestration_mode=${orchestrationMode}; ` +
-        `broker token refresh still runs, but later strict config reads may stall review work`
-    });
-  }
-
-  let domainMtimeMs = null;
-  try {
-    domainMtimeMs = domainMtimeImpl(rootDir, WATCHER_PRIMARY_DOMAIN_ID);
-    if (
-      reviewerRuntimeState.adapterCache?.adapter &&
-      reviewerRuntimeState.adapterCache.orchestrationMode === orchestrationMode &&
-      reviewerRuntimeState.adapterCache.domainMtimeMs === domainMtimeMs
-    ) {
-      lastKnownReviewerOrchestrationMode = orchestrationMode;
-      activeReviewerRuntimeOrchestrationMode = orchestrationMode;
-      reviewerRuntimeState.adapter = reviewerRuntimeState.adapterCache.adapter;
-      clearReviewerRuntimeFailureSignal('adapter');
-      return reviewerRuntimeState.adapter;
-    }
-
-    reviewerRuntimeState.adapter = createAdapterImpl({
-      rootDir,
-      domainId: WATCHER_PRIMARY_DOMAIN_ID,
-      logger,
-      orchestrationMode,
-    });
-    reviewerRuntimeState.adapterCache = {
-      adapter: reviewerRuntimeState.adapter,
-      domainMtimeMs,
-      orchestrationMode,
-    };
-    lastKnownReviewerOrchestrationMode = orchestrationMode;
-    activeReviewerRuntimeOrchestrationMode = orchestrationMode;
-    clearReviewerRuntimeFailureSignal('adapter');
-  } catch (err) {
-    const errorMessage = String(err?.message || err);
-    if (orchestrationMode !== activeReviewerRuntimeOrchestrationMode) {
-      recordReviewerRuntimeFailureSignal({
-        kind: 'adapter',
-        key: `${orchestrationMode}->${activeReviewerRuntimeOrchestrationMode}:${errorMessage}`,
-        logger,
-        message:
-          `requested orchestration_mode=${orchestrationMode} but active adapter remains ` +
-          `${activeReviewerRuntimeOrchestrationMode}; first-pass reviews continue through the ` +
-          `active adapter until refresh succeeds: ${errorMessage}`
-      });
-    } else {
-      recordReviewerRuntimeFailureSignal({
-        kind: 'adapter',
-        key: `${orchestrationMode}->${activeReviewerRuntimeOrchestrationMode}:${errorMessage}`,
-        logger,
-        message:
-          `orchestration_mode=${orchestrationMode} adapter refresh failed; keeping existing adapter: ` +
-          errorMessage
-      });
-    }
-  }
-  return reviewerRuntimeState.adapter;
-}
+// Reviewer-runtime adapter lifecycle (state + resolve/refresh/per-record
+// functions) moved to ./reviewer-runtime-adapter.mjs (ARC-18); the three
+// externally-called functions and the reviewerRuntimeState object are imported
+// back above. Initialize the process-wide adapter now that the primary domain
+// id is derived, before the poll loop or any reviewer lookup runs.
+initReviewerRuntime({ rootDir: ROOT, primaryDomainId: WATCHER_PRIMARY_DOMAIN_ID });
 
 // ── DB setup ────────────────────────────────────────────────────────────────
 

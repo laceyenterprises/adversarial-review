@@ -33,6 +33,11 @@ const FAST_MERGE_TIMELINE_MAX_PAGES = Math.max(
   Number.parseInt(process.env.FML_WATCHER_TIMELINE_MAX_PAGES || '3', 10) || 3,
 );
 
+const FAST_MERGE_CHANGED_FILES_MAX_PAGES = Math.max(
+  1,
+  Number.parseInt(process.env.FML_WATCHER_CHANGED_FILES_MAX_PAGES || '3', 10) || 3,
+);
+
 export const FAST_MERGE_VETO_LABEL = 'fast-merge-veto';
 export const FAST_MERGE_CATEGORY_BY_LABEL = Object.freeze({
   'fast-merge:spec-hash-rebind': 'spec-hash-rebind',
@@ -418,6 +423,40 @@ export async function fetchFastMergeAuthorizationFromTimeline(
   } catch (err) {
     logger.warn?.(
       `[watcher] fast-merge timeline fetch failed for ${owner}/${repo}#${prNumber}; using normal review path: ${err?.message || err}`
+    );
+    return null;
+  }
+}
+
+// The changed-files read threads the watcher's API throttle/telemetry wrapper
+// (recordApiCall + rate-limit observation) via the `withApiTelemetry` parameter,
+// because that seam is still watcher-owned. The single caller (pollOnce) passes
+// its module-level withApiTelemetry, preserving behavior exactly.
+export async function fetchFastMergeChangedFiles(
+  octokit,
+  { owner, repo, prNumber, logger = console, withApiTelemetry } = {},
+) {
+  try {
+    if (typeof octokit?.rest?.pulls?.listFiles !== 'function') {
+      throw new Error('octokit.rest.pulls.listFiles unavailable');
+    }
+    const params = {
+      owner,
+      repo,
+      pull_number: prNumber,
+      per_page: 100,
+    };
+    const files = [];
+    for (let page = 1; page <= FAST_MERGE_CHANGED_FILES_MAX_PAGES; page += 1) {
+      const response = await withApiTelemetry('files_list', { repo: `${owner}/${repo}`, prNumber }, () => octokit.rest.pulls.listFiles({ ...params, page }));
+      const pageFiles = Array.isArray(response?.data) ? response.data : [];
+      files.push(...pageFiles);
+      if (pageFiles.length < params.per_page) break;
+    }
+    return files;
+  } catch (err) {
+    logger.warn?.(
+      `[watcher] fast-merge changed-file fetch failed for ${owner}/${repo}#${prNumber}; using normal review path: ${err?.message || err}`
     );
     return null;
   }

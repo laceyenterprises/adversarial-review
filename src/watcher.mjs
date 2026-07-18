@@ -21,6 +21,7 @@ import {
   evaluateFastMergeDiffShape,
   fastMergeDecisionFromLabels,
   fetchFastMergeAuthorizationFromTimeline,
+  fetchFastMergeChangedFiles,
   fetchLivePRHeadSha,
   fetchLivePRLabels,
   writeFastMergeAuditEntry,
@@ -780,10 +781,6 @@ const FAST_MERGE_RECOVERY_PER_TICK = Math.max(
   1,
   Number.parseInt(process.env.FML_WATCHER_RECOVERY_PER_TICK || '50', 10) || 50,
 );
-const FAST_MERGE_CHANGED_FILES_MAX_PAGES = Math.max(
-  1,
-  Number.parseInt(process.env.FML_WATCHER_CHANGED_FILES_MAX_PAGES || '3', 10) || 3,
-);
 
 function resolveWatcherDrainMaxMs(env = process.env, options = {}) {
   const cfgValue = loadRoleConfig({
@@ -1029,32 +1026,10 @@ function maybeSweepConditionalRequestCache({
 // imported back above. fetchFastMergeChangedFiles (below) stays for now because it
 // threads watcher-owned API throttle/telemetry state (withApiTelemetry).
 
-async function fetchFastMergeChangedFiles(octokit, { owner, repo, prNumber, logger = console } = {}) {
-  try {
-    if (typeof octokit?.rest?.pulls?.listFiles !== 'function') {
-      throw new Error('octokit.rest.pulls.listFiles unavailable');
-    }
-    const params = {
-      owner,
-      repo,
-      pull_number: prNumber,
-      per_page: 100,
-    };
-    const files = [];
-    for (let page = 1; page <= FAST_MERGE_CHANGED_FILES_MAX_PAGES; page += 1) {
-      const response = await withApiTelemetry('files_list', { repo: `${owner}/${repo}`, prNumber }, () => octokit.rest.pulls.listFiles({ ...params, page }));
-      const pageFiles = Array.isArray(response?.data) ? response.data : [];
-      files.push(...pageFiles);
-      if (pageFiles.length < params.per_page) break;
-    }
-    return files;
-  } catch (err) {
-    logger.warn?.(
-      `[watcher] fast-merge changed-file fetch failed for ${owner}/${repo}#${prNumber}; using normal review path: ${err?.message || err}`
-    );
-    return null;
-  }
-}
+// fetchFastMergeChangedFiles (and FAST_MERGE_CHANGED_FILES_MAX_PAGES) moved to
+// ./adapters/subject/github-pr/fast-merge.mjs (ARC-18); imported back above. It
+// takes the watcher's withApiTelemetry as a parameter (passed at the pollOnce
+// call site) so the API throttle/telemetry seam stays watcher-owned for now.
 
 // normalizeChangedFile, isMarkdownOrDocsPath, isTestFixturePath,
 // isKnownSubmodulePath, fastMergeFileMatchesCategory, evaluateFastMergeDiffShape,
@@ -8658,6 +8633,7 @@ async function pollOnce(
                 owner,
                 repo,
                 prNumber,
+                withApiTelemetry,
               })
               : null;
             const shapeCheck = changedFiles

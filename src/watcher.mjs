@@ -192,7 +192,6 @@ import {
   buildMergeAgentDispatchJob,
   dispatchMergeAgentForPR,
   fetchMergeAgentCandidate,
-  isMergeAgentDispatchActiveForHead,
   pollFastMergeQueue,
   reconcileProactivePhantomHandoffs,
   resolveFastMergePerPollCap,
@@ -295,6 +294,7 @@ import {
   getStalePostedReviewBudgetSuppression,
   isExplicitOperatorReviewRetrigger,
 } from './first-pass-review-suppression.mjs';
+import { getStalePostedReviewAutoRereviewSuppression } from './stale-posted-review-rereview.mjs';
 import {
   resolveDaemonWorkerIdentityForPr,
   readHeadAttestationChainForPr,
@@ -4152,63 +4152,6 @@ async function recoverFastMergeVetoes(octokit, { logger = console } = {}) {
       `[watcher] fast-merge ${action} for ${row.repo}#${row.pr_number}: requeue ${requeueResult?.status || 'unknown'}`
     );
   }
-}
-
-async function getStalePostedReviewAutoRereviewSuppression({
-  rootDir = ROOT,
-  repoPath,
-  prNumber,
-  subjectRef,
-  currentRevisionRef,
-  currentHeadSha,
-  labelNames = [],
-  operatorSurface = null,
-  domainId = WATCHER_PRIMARY_DOMAIN_ID,
-  execFileImpl = execFileAsync,
-  env = process.env,
-  logger = console,
-  isMergeAgentDispatchActiveForHeadImpl = isMergeAgentDispatchActiveForHead,
-} = {}) {
-  const normalizedLabelNames = new Set(
-    (Array.isArray(labelNames) ? labelNames : [])
-      .map((label) => String(label || '').trim())
-      .filter(Boolean)
-  );
-  const controlSubjectRef = subjectRef || {
-    domainId,
-    subjectExternalId: `${repoPath}#${prNumber}`,
-    revisionRef: currentRevisionRef || currentHeadSha || null,
-  };
-  const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || currentHeadSha || null;
-
-  if (normalizedLabelNames.has(MERGE_AGENT_REQUESTED_LABEL) && operatorSurface) {
-    const mergeAgentRequest = await operatorSurface.observeMergeAgentOverride(
-      controlSubjectRef,
-      revisionRef,
-    );
-    if (mergeAgentRequest?.applied) {
-      return {
-        suppressed: true,
-        reason: 'scoped-current-head-merge-agent-requested',
-      };
-    }
-  }
-
-  if (normalizedLabelNames.has(MERGE_AGENT_DISPATCHED_LABEL)) {
-    const dispatch = await isMergeAgentDispatchActiveForHeadImpl(
-      rootDir,
-      { repo: repoPath, prNumber, headSha: currentHeadSha },
-      { execFileImpl, env, logger },
-    );
-    if (dispatch?.active) {
-      return {
-        suppressed: true,
-        reason: dispatch.reason || 'active-current-head-merge-agent-dispatch',
-      };
-    }
-  }
-
-  return { suppressed: false, reason: null };
 }
 
 /**

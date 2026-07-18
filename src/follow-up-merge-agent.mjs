@@ -178,7 +178,11 @@ function resolveMergeAgentWorkerClass(env = process.env, opts = {}) {
 function validateStartupMergeAgentConfig(env = process.env, opts = {}) {
   validateStartupRoleConfig({ env, ...opts });
   // ARC-12: role-registry boot validation (no-op while roles.registry is empty).
-  validateStartupRoleRegistry({ env, ...opts });
+  validateStartupRoleRegistry({
+    env,
+    ...opts,
+    workerClassOptions: { ...opts.workerClassOptions, readOnly: true },
+  });
   resolveMergeAgentWorkerClass(env, opts);
   resolveHqWorkerTearDownTimeoutMs(env, opts);
   resolveHqDispatchTimeoutMs(env, opts);

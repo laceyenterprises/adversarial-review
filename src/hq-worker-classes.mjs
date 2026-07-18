@@ -143,6 +143,7 @@ function writeSnapshot(rootDir, classes, { now = () => new Date().toISOString() 
  *   moduleRoot?: string,
  *   readFileImpl?: typeof readFileSync,
  *   writeSnapshotImpl?: typeof writeSnapshot,
+ *   readOnly?: boolean,
  *   now?: () => string,
  *   log?: Pick<Console, 'warn'>,
  * }} [options]
@@ -154,6 +155,7 @@ export function resolvePublishedWorkerClasses({
   moduleRoot = MODULE_ROOT,
   readFileImpl = readFileSync,
   writeSnapshotImpl = writeSnapshot,
+  readOnly = false,
   now = () => new Date().toISOString(),
   log = console,
 } = {}) {
@@ -168,12 +170,14 @@ export function resolvePublishedWorkerClasses({
   }
 
   if (live) {
-    try {
-      writeSnapshotImpl(rootDir, live.classes, { now });
-    } catch (err) {
-      log?.warn?.(
-        `[hq-worker-classes] failed to refresh worker-class snapshot: ${err?.message || err}`,
-      );
+    if (!readOnly) {
+      try {
+        writeSnapshotImpl(rootDir, live.classes, { now });
+      } catch (err) {
+        log?.warn?.(
+          `[hq-worker-classes] failed to refresh worker-class snapshot: ${err?.message || err}`,
+        );
+      }
     }
     return { classes: live.classes, source: 'published', path: live.path };
   }

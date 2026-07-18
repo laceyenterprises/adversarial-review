@@ -2488,7 +2488,11 @@ function validateStartupRemediationConfig(env = process.env, opts = {}) {
   validateStartupRoleConfig({ env, ...opts });
   // ARC-12: fail loud at boot on a malformed role registry or a workerClass
   // outside the hq-published roster (no-op while roles.registry is empty).
-  validateStartupRoleRegistry({ env, ...opts });
+  validateStartupRoleRegistry({
+    env,
+    ...opts,
+    workerClassOptions: { ...opts.workerClassOptions, readOnly: true },
+  });
   defaultRemediatorWorkerClassFromEnv(env, opts);
   resolveRemediationMaxConcurrentJobs(env);
   if (_isAgentOsRemediationMode(env)) {
@@ -6650,7 +6654,7 @@ async function connectFollowUpTelemetryListener({
   rootDir = ROOT,
   env = process.env,
   hqRoot = env.HQ_ROOT,
-  connectAppContractImpl = connect,
+  connectAppContractImpl = null,
   log = console,
   ...listenerOptions
 } = {}) {
@@ -6660,7 +6664,8 @@ async function connectFollowUpTelemetryListener({
     return { session: null, subscriptions: [], dispose: () => {} };
   }
   const mode = resolveAdversarialReviewAppMode(env);
-  const session = await withAppContractTransientRetry(() => connectAppContractImpl({
+  const connectImpl = connectAppContractImpl || await loadAppSdkConnect();
+  const session = await withAppContractTransientRetry(() => connectImpl({
     app_id: 'adversarial-review',
     mode,
     hqRoot,

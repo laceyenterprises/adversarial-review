@@ -149,6 +149,20 @@ test('an unbound verdict role fails delivery rather than posting under a default
   assert.equal(calls.length, 0);
 });
 
+test('an unbound verdict role fails before entering delivery claim waiting', async () => {
+  const calls = [];
+  const adapter = makeAdapter(calls, { rootDir: '/dev/null/not-a-delivery-root' });
+
+  await assert.rejects(
+    () => adapter.deliverReviewComment(
+      { body: 'x', reviewerRoleId: 'ghost-reviewer' },
+      makeKey({ revisionRef: 'sha-fail-fast' }),
+    ),
+    (err) => err instanceof DeliveryIdentityError,
+  );
+  assert.equal(calls.length, 0);
+});
+
 test('without a role id or identity map the legacy worker-class routing is unchanged', async () => {
   const calls = [];
   const adapter = createGitHubPRCommentsAdapter({

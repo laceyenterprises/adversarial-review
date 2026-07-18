@@ -282,6 +282,23 @@ test('resolvePublishedWorkerClasses reads the published roster and refreshes the
   assert.deepEqual([...degraded.classes].sort(), ['claude-code', 'codex', 'gemini']);
 });
 
+test('resolvePublishedWorkerClasses read-only consumers do not refresh the shared snapshot', () => {
+  const repoRoot = tmp();
+  seedRoster(repoRoot, ['codex', 'claude-code']);
+  let writes = 0;
+
+  const result = resolvePublishedWorkerClasses({
+    env: { AGENT_OS_REPO_ROOT: repoRoot },
+    rootDir: tmp(),
+    moduleRoot: tmp(),
+    readOnly: true,
+    writeSnapshotImpl: () => { writes += 1; },
+  });
+
+  assert.equal(result.source, 'published');
+  assert.equal(writes, 0);
+});
+
 test('resolvePublishedWorkerClasses throws when neither roster nor snapshot exists', () => {
   assert.throws(
     () => resolvePublishedWorkerClasses({ env: {}, rootDir: tmp(), moduleRoot: tmp() }),

@@ -442,6 +442,12 @@ function createGitHubPRCommentsAdapter({
   }
 
   async function postWithDedupe({ key, body, event = null, roleId = null }) {
+    // Validate deterministic role configuration before entering the claim-wait
+    // loop. A missing binding cannot become healthy while waiting for another
+    // delivery owner, so fail immediately without consuming the wait budget.
+    if (deliveryIdentityByRole && roleId) {
+      resolveDeliveryIdentity(roleId, deliveryIdentityByRole);
+    }
     const deadline = Date.now() + COMMENT_DELIVERY_CLAIM_WAIT_MS;
 
     while (true) {

@@ -21,6 +21,7 @@ import {
 } from './ledger-events.mjs';
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
+const FINALIZATION_EVENT_TYPE_SET = new Set(FINALIZATION_EVENT_TYPES);
 
 // The columns that live in dedicated table fields; everything else in an event
 // is carried in `payload_json`. Kept in sync with the migration.
@@ -77,7 +78,7 @@ function eventToColumns(event) {
   };
 }
 
-/** Reconstruct a validated `FinalizationEvent` (+ `seq`) from a ledger row. */
+/** Reconstruct a `FinalizationEvent` (+ `seq`) from a ledger row. */
 export function rowToEvent(row) {
   let payload = {};
   try {
@@ -92,11 +93,12 @@ export function rowToEvent(row) {
   if (row.revision_ref != null) fields.revisionRef = row.revision_ref;
   if (row.source_ref != null) fields.sourceRef = row.source_ref;
   if (row.idempotency_key != null) fields.idempotencyKey = row.idempotency_key;
-  const event = makeFinalizationEvent(
-    row.event_type,
-    { domainId: row.domain_id, subjectExternalId: row.subject_external_id },
-    fields,
-  );
+  const subjectKey = { domainId: row.domain_id, subjectExternalId: row.subject_external_id };
+  // Writes remain strict, but an older reader must preserve event types written
+  // by a newer producer so the fold can safely ignore their unknown semantics.
+  const event = FINALIZATION_EVENT_TYPE_SET.has(row.event_type)
+    ? makeFinalizationEvent(row.event_type, subjectKey, fields)
+    : { type: row.event_type, subjectKey, ...fields };
   event.seq = row.seq;
   return event;
 }

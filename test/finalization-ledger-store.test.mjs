@@ -98,6 +98,26 @@ test('rowToEvent reconstructs a validated event from a raw row', () => {
   assert.equal(event.seq, 12);
 });
 
+test('read preserves a newer event type so an older fold can safely ignore it', () => {
+  const store = memStore();
+  store.append(revisionAdvanced(REF, { at: t(0), revisionRef: 'sha-A' }));
+  store.db.prepare(`
+    INSERT INTO finalization_ledger
+      (domain_id, subject_external_id, event_type, revision_ref, at, payload_json)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(REF.domainId, REF.subjectExternalId, 'future_event_kind', 'sha-A', t(1), JSON.stringify({ futureField: 'kept' }));
+
+  const events = store.read(REF);
+  assert.equal(events[1].type, 'future_event_kind');
+  assert.equal(events[1].futureField, 'kept');
+  assert.equal(events[1].revisionRef, 'sha-A');
+  assert.equal(typeof events[1].seq, 'number');
+  assert.doesNotThrow(() => fold(events));
+  assert.equal(fold(events).currentRevision, 'sha-A');
+  assert.equal(fold(events).eventCount, 2);
+  store.close();
+});
+
 test('append re-validates at the write boundary and rejects a malformed event', () => {
   const store = memStore();
   assert.throws(

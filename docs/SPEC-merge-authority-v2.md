@@ -40,6 +40,10 @@ coordination problem instead.
 
 One subject, one durable state machine, one writer.
 
+Data-model contract: [`docs/data-model/finalization-ledger.md`](data-model/finalization-ledger.md)
+tracks the app-store schema introduced by
+[`migrations/20260717_finalization_ledger.sql`](../migrations/20260717_finalization_ledger.sql).
+
 ```
 FinalizationLedger (per subject, append-only, in the app store):
   Event := revision_advanced(rev)

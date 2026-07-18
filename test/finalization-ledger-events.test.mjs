@@ -85,6 +85,19 @@ test('remediation events require an integer round', () => {
   );
 });
 
+test('remediation_dispatched requires a boolean final when present', () => {
+  const e = remediationDispatched(REF, {
+    at: AT, revisionRef: 'sha-A', round: 2, idempotencyKey: 'k-2', final: false,
+  });
+  assert.equal(e.final, false);
+  assert.throws(
+    () => remediationDispatched(REF, {
+      at: AT, revisionRef: 'sha-A', round: 2, idempotencyKey: 'k-2', final: 'true',
+    }),
+    /boolean final/,
+  );
+});
+
 test('makeFinalizationEvent rejects an unknown type and a missing at', () => {
   assert.throws(() => makeFinalizationEvent('nope', REF, { at: AT }), /unknown finalization event type/);
   assert.throws(() => makeFinalizationEvent('halted', REF, { reason: 'x' }), /`at` ISO timestamp/);

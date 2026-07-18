@@ -50,12 +50,20 @@ function emptyStageState() {
 }
 
 function ensureRevision(state, rev) {
-  if (!state.revisions[rev]) state.revisions[rev] = emptyRevisionState();
+  if (!Object.hasOwn(state.revisions, rev)) {
+    Object.defineProperty(state.revisions, rev, {
+      value: emptyRevisionState(), enumerable: true, configurable: true, writable: true,
+    });
+  }
   return state.revisions[rev];
 }
 
 function ensureStage(state, stageId) {
-  if (!state.stages[stageId]) state.stages[stageId] = emptyStageState();
+  if (!Object.hasOwn(state.stages, stageId)) {
+    Object.defineProperty(state.stages, stageId, {
+      value: emptyStageState(), enumerable: true, configurable: true, writable: true,
+    });
+  }
   return state.stages[stageId];
 }
 

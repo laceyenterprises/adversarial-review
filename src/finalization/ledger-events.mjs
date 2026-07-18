@@ -123,6 +123,10 @@ function assertRequired(type, fields) {
   if (type === 'checks_settled' && typeof fields.requiredChecksPresent !== 'boolean') {
     throw new TypeError('finalization checks_settled event requires a boolean requiredChecksPresent');
   }
+  if (type === 'remediation_dispatched' && fields.final !== undefined
+    && typeof fields.final !== 'boolean') {
+    throw new TypeError('finalization remediation_dispatched event requires a boolean final');
+  }
   if ((type === 'remediation_dispatched' || type === 'remediation_concluded')
     && !Number.isInteger(fields.round)) {
     throw new TypeError(`finalization ${type} event requires an integer round`);

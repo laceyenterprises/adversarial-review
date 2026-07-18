@@ -132,6 +132,23 @@ test('foldFrom never mutates the snapshot it resumes from', () => {
   assert.deepEqual(snapshot, frozen, 'foldFrom must treat its snapshot as immutable');
 });
 
+test('fold treats prototype-named revision and stage keys as own ledger entries', () => {
+  const state = fold([
+    verdictRecorded(REF, {
+      at: '2026-07-17T00:00:00.000Z', revisionRef: '__proto__', stageId: 'security',
+      role: 'reviewer', verdictKind: 'approved', sourceRef: 'review-1',
+    }),
+    budgetExhausted(REF, { at: '2026-07-17T00:01:00.000Z', stageId: '__proto__' }),
+  ]);
+
+  assert.equal(Object.hasOwn(state.revisions, '__proto__'), true);
+  assert.equal(state.revisions.__proto__.verdicts.length, 1);
+  assert.equal(Object.hasOwn(state.stages, '__proto__'), true);
+  assert.equal(state.stages.__proto__.budgetExhausted, true);
+  assert.equal(Object.prototype.verdicts, undefined);
+  assert.equal(Object.prototype.budgetExhausted, undefined);
+});
+
 test('empty fold is the initial state; unknown event types are ignored', () => {
   assert.deepEqual(fold([]), initialLedgerState());
   const withUnknown = fold([

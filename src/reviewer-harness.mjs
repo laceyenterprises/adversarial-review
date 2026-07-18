@@ -190,7 +190,23 @@ function resolveAcpxCliPath({ env = process.env, preferLocalAcpx = false } = {})
  * IMPORTANT: strip ANTHROPIC_API_KEY from env before probing, otherwise
  * `claude auth status` may report API-key mode and mask the real login state.
  */
-async function assertClaudeOAuth() {
+const CLAUDE_LAUNCHCTL_RETRY_DELAYS_MS = [250, 750];
+
+async function withClaudeLaunchctlRetry(operation, {
+  retryDelaysMs = CLAUDE_LAUNCHCTL_RETRY_DELAYS_MS,
+  sleepImpl = sleep,
+} = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (err) {
+      if (!err?.isLaunchctlSessionError || attempt >= retryDelaysMs.length) throw err;
+      await sleepImpl(retryDelaysMs[attempt]);
+    }
+  }
+}
+
+async function assertClaudeOAuth({ spawnClaudeImpl = spawnClaude, retryDelaysMs, sleepImpl } = {}) {
   if (!existsSync(CLAUDE_CLI)) {
     throw new OAuthError('claude', `claude CLI not found at ${CLAUDE_CLI}`);
   }
@@ -200,9 +216,9 @@ async function assertClaudeOAuth() {
   let stdout = '';
   let stderr = '';
   try {
-    ({ stdout, stderr } = await spawnClaude(
-      ['auth', 'status'],
-      { env, timeout: resolveClaudeAuthProbeTimeoutMs(env) }
+    ({ stdout, stderr } = await withClaudeLaunchctlRetry(
+      () => spawnClaudeImpl(['auth', 'status'], { env, timeout: resolveClaudeAuthProbeTimeoutMs(env) }),
+      { retryDelaysMs, sleepImpl },
     ));
   } catch (err) {
     if (err?.isLaunchctlSessionError) {
@@ -496,8 +512,11 @@ function isClaudeLoggedOutStatus(text) {
  * uses its native OAuth path only. Preflight auth validation is aligned with
  * the broker/Keychain path used by the live stack.
  */
-async function reviewWithClaude(diff, extraContext = '', { promptStage = 'first' } = {}) {
-  await assertClaudeOAuth();
+async function reviewWithClaude(diff, extraContext = '', {
+  promptStage = 'first', assertClaudeOAuthImpl = assertClaudeOAuth,
+  spawnClaudeImpl = spawnClaude, launchctlRetryDelaysMs, sleepImpl,
+} = {}) {
+  await assertClaudeOAuthImpl();
 
   const promptPrefix = buildReviewerPromptPrefix({ stage: promptStage });
   const prompt = buildReviewerPrompt({ promptPrefix, extraContext, diff });
@@ -507,13 +526,13 @@ async function reviewWithClaude(diff, extraContext = '', { promptStage = 'first'
 
   let stdout, stderr;
   try {
-    ({ stdout, stderr } = await spawnClaude(
-      buildClaudeReviewArgs(prompt),
-      {
+    ({ stdout, stderr } = await withClaudeLaunchctlRetry(
+      () => spawnClaudeImpl(buildClaudeReviewArgs(prompt), {
         env,
         timeout: resolveReviewerTimeoutMs(env),
         maxBuffer: 10 * 1024 * 1024,
-      }
+      }),
+      { retryDelaysMs: launchctlRetryDelaysMs, sleepImpl },
     ));
   } catch (err) {
     if (err?.isLaunchctlSessionError) {
@@ -1396,6 +1415,7 @@ async function acquireGeminiFallbackLock({
   sleepImpl = sleep,
   writeFileSyncImpl = writeFileSync,
   readFileSyncImpl = readFileSync,
+  statSyncImpl = statSync,
   rmSyncImpl = rmSync,
   mkdirSyncImpl = mkdirSync,
   chmodSyncImpl = chmodSync,
@@ -1443,7 +1463,14 @@ async function acquireGeminiFallbackLock({
           continue;
         }
       } catch {
-        // Missing or malformed owner metadata is ambiguous; leave the lock in place.
+        try {
+          if (Date.now() - statSyncImpl(lockDir).mtimeMs >= 5_000) {
+            rmSyncImpl(lockDir, { recursive: true, force: true });
+            continue;
+          }
+        } catch {
+          // A concurrent owner may have completed or removed the lock.
+        }
       }
       if (Date.now() >= deadline) {
         throw new GeminiCredentialPoolUnavailableError('legacy fallback lock wait timed out');
@@ -1715,7 +1742,7 @@ async function spawnAgyReview({
   // The prompt MUST travel on argv (as the `--print` value) so `--model`
   // binds. Refuse if it would blow the argv budget rather than silently
   // reverting to stdin (which unbinds the model — the bug this fixes).
-  assertAgyPromptFitsArgv(prompt);
+  assertAgyPromptFitsArgv(prompt, { maxBytes: resolveAgyArgvMaxBytes(env) });
   return spawnWithInputImpl(
     agyCli,
     buildAgyReviewArgs({ model, prompt, printTimeoutMs }),

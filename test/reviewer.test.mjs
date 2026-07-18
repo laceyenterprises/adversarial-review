@@ -37,6 +37,8 @@ const {
   resolveVerdictModeForHead,
   spawnCodexReview,
   spawnClaude,
+  assertClaudeOAuth,
+  reviewWithClaude,
   resolveGeminiCliPath,
   resolveAgyCliPath,
   resolveGeminiOAuthCredsPath,
@@ -2136,6 +2138,46 @@ test('spawnClaude classifies launchctl session failures separately from oauth fa
   );
 });
 
+test('assertClaudeOAuth retries bounded launchctl session failures', async () => {
+  let attempts = 0;
+  const delays = [];
+  await assertClaudeOAuth({
+    spawnClaudeImpl: async () => {
+      attempts += 1;
+      if (attempts < 3) {
+        const err = new Error('launchctl settling');
+        err.isLaunchctlSessionError = true;
+        throw err;
+      }
+      return { stdout: '{"loggedIn":true}', stderr: '' };
+    },
+    retryDelaysMs: [1, 2],
+    sleepImpl: async (delay) => delays.push(delay),
+  });
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [1, 2]);
+});
+
+test('reviewWithClaude retries bounded launchctl session failures', async () => {
+  let attempts = 0;
+  const result = await reviewWithClaude('+diff\n', '', {
+    assertClaudeOAuthImpl: async () => {},
+    spawnClaudeImpl: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        const err = new Error('launchctl settling');
+        err.isLaunchctlSessionError = true;
+        throw err;
+      }
+      return { stdout: JSON.stringify({ result: '## Verdict\nComment only', usage: {} }), stderr: '' };
+    },
+    launchctlRetryDelaysMs: [1],
+    sleepImpl: async () => {},
+  });
+  assert.equal(attempts, 2);
+  assert.equal(result.reviewText, '## Verdict\nComment only');
+});
+
 // ── GMW-01: Gemini reviewer ───────────────────────────────────────────────────
 
 test('resolveGeminiReviewerModel returns the default and honors the override env', () => {
@@ -2314,6 +2356,17 @@ test('spawnAgyReview delivers the prompt on argv (as the --print value) so the m
   assert.deepEqual(
     { cwd: calls[0].options.cwd, timeout: calls[0].options.timeout, maxBuffer: calls[0].options.maxBuffer },
     { cwd: '/tmp/repo', timeout: 39_000, maxBuffer: 555 },
+  );
+});
+
+test('spawnAgyReview honors the argv budget from its custom env', async () => {
+  await assert.rejects(
+    () => spawnAgyReview({
+      prompt: 'oversized',
+      env: { AGY_ARGV_MAX_BYTES: '4' },
+      spawnWithInputImpl: async () => { throw new Error('must not spawn'); },
+    }),
+    /argv budget/,
   );
 });
 
@@ -3452,6 +3505,24 @@ test('acquireGeminiFallbackLock reaps orphaned dead-owner lock and reacquires', 
     assert.equal(owner.pid, process.pid);
     lock.release();
     assert.equal(existsSync(lockDir), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('acquireGeminiFallbackLock reaps stale lock missing owner metadata', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-lock-incomplete-'));
+  try {
+    const lockDir = join(root, '.gemini', 'reviewer-sessions', 'legacy-fallback.lock');
+    mkdirSync(lockDir, { recursive: true, mode: 0o700 });
+    const stale = new Date(Date.now() - 10_000);
+    utimesSync(lockDir, stale, stale);
+    const lock = await acquireGeminiFallbackLock({
+      env: { HOME: root },
+      sleepImpl: async () => { throw new Error('should not wait after recovery'); },
+    });
+    assert.equal(JSON.parse(readFileSync(join(lockDir, 'owner.json'), 'utf8')).pid, process.pid);
+    lock.release();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

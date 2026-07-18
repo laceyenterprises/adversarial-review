@@ -42,6 +42,11 @@ import {
   resolveStuckDispatchAlertDebounceMs,
 } from './merge-agent-stuck-alert.mjs';
 import {
+  readReviewerBrokerSharedSecretBestEffort,
+  resolveGeminiCredentialConcurrencyForDispatchCandidates,
+  writeReviewerTokenUsageArtifactBestEffort,
+} from './reviewer-runtime-support.mjs';
+import {
   defaultReviewerRouteFromEnv,
   applyEffectiveReviewerRoute,
   describeCrossModelReviewWaiver,
@@ -90,7 +95,6 @@ import {
   completeReviewerPass,
   readBestReviewerEvidenceTokenUsage,
   tagTokenUsage,
-  writeReviewerTokenUsageArtifact,
 } from './reviewer-pass-tokens.mjs';
 import {
   assertReviewDbWritesRoundTrip,
@@ -291,7 +295,6 @@ import {
   compareReviewerDispatchCandidates,
   createReviewerMemoryAdmissionSampler,
   reserveReviewerMemoryAdmission,
-  fetchGeminiCredentialConcurrency,
   resolveFirstPassReviewerPoolConfig,
   resolveReviewerMemoryPressureConfig,
   runBoundedReviewerDispatchQueue,
@@ -325,23 +328,8 @@ const ROOT = join(__dirname, '..');
 // security-critical merge-authority read.
 const WATCHER_MERGE_AUTHORITY_CONFIG_MODULES = Object.freeze([join(ROOT, 'config.yaml')]);
 
-function writeReviewerTokenUsageArtifactBestEffort(options, {
-  repo,
-  prNumber,
-  reviewerSessionUuid,
-  writeImpl = writeReviewerTokenUsageArtifact,
-  warn = console.warn,
-} = {}) {
-  try {
-    return writeImpl(options);
-  } catch (err) {
-    warn(
-      `[watcher] reviewer_token_usage_artifact_write_failed repo=${repo} pr=${prNumber} ` +
-      `session=${reviewerSessionUuid}: ${err?.message || err}`
-    );
-    return null;
-  }
-}
+// writeReviewerTokenUsageArtifactBestEffort moved to
+// ./reviewer-runtime-support.mjs (ARC-18); imported back above.
 
 const config = JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8'));
 // Fail fast during watcher bootstrap; a bad gate-context override should not
@@ -395,79 +383,11 @@ let reviewerRuntimeConfigFailureSignal = { key: null, count: 0 };
 let reviewerRuntimeAdapterFailureSignal = { key: null, count: 0 };
 const reviewerRuntimeAdapterByNameCache = new Map();
 
-const DEFAULT_REVIEWER_BROKER_SECRET_CACHE_TTL_MS = 5 * 60 * 1000;
-let reviewerBrokerSharedSecretCache = {
-  file: null,
-  value: '',
-  expiresAtMs: 0,
-};
-
-// Best-effort async read of the CQP/oauth broker shared secret for read-only
-// broker probes (e.g. the gemini credential-count fetch). Returns '' on any
-// miss; the caller fails open (no gemini cap) so a missing secret never wedges
-// dispatch. The read is TTL-cached because this helper can be reached from the
-// watcher's hot dispatch drain.
-async function readReviewerBrokerSharedSecretBestEffort(
-  env = process.env,
-  {
-    fsImpl = { readFile: readFileAsync },
-    now = Date.now,
-    ttlMs = DEFAULT_REVIEWER_BROKER_SECRET_CACHE_TTL_MS,
-    logger = console,
-  } = {}
-) {
-  const secretFile = env.CQP_BROKER_SHARED_SECRET_FILE || env.OAUTH_BROKER_SHARED_SECRET_FILE || '';
-  if (!secretFile) return '';
-  const resolvedNowMs = Number(now());
-  const nowMs = Number.isFinite(resolvedNowMs) ? resolvedNowMs : Date.now();
-  if (
-    reviewerBrokerSharedSecretCache.file === secretFile &&
-    reviewerBrokerSharedSecretCache.expiresAtMs > nowMs
-  ) {
-    return reviewerBrokerSharedSecretCache.value;
-  }
-  try {
-    const value = String(await fsImpl.readFile(secretFile, 'utf8') || '').trim();
-    reviewerBrokerSharedSecretCache = {
-      file: secretFile,
-      value,
-      expiresAtMs: nowMs + Math.max(0, Number(ttlMs) || 0),
-    };
-    return value;
-  } catch (err) {
-    reviewerBrokerSharedSecretCache = {
-      file: secretFile,
-      value: '',
-      expiresAtMs: nowMs + Math.max(0, Number(ttlMs) || 0),
-    };
-    if (err?.code !== 'ENOENT') {
-      logger?.warn?.(
-        `[watcher] failed to read reviewer broker shared secret file ${secretFile}: ${err?.code || err?.message || err}`
-      );
-    }
-    return '';
-  }
-}
-
-async function resolveGeminiCredentialConcurrencyForDispatchCandidates(
-  candidates,
-  {
-    env = process.env,
-    fetchCredentialConcurrency = fetchGeminiCredentialConcurrency,
-    readSharedSecret = readReviewerBrokerSharedSecretBestEffort,
-  } = {}
-) {
-  const hasGeminiCandidates = candidates.some(
-    (candidate) => String(candidate?.reviewerModel || '').toLowerCase() === 'gemini'
-  );
-  if (!hasGeminiCandidates) return null;
-
-  const brokerUrl = env.CQP_BROKER_URL || env.OAUTH_BROKER_URL || null;
-  return await fetchCredentialConcurrency({
-    brokerUrl,
-    secret: brokerUrl ? await readSharedSecret(env) : '',
-  });
-}
+// DEFAULT_REVIEWER_BROKER_SECRET_CACHE_TTL_MS, the reviewerBrokerSharedSecretCache
+// singleton, readReviewerBrokerSharedSecretBestEffort, and
+// resolveGeminiCredentialConcurrencyForDispatchCandidates moved to
+// ./reviewer-runtime-support.mjs (ARC-18); the two functions are imported back
+// above (the cache was private to the broker-secret read, so it moved with it).
 
 function reviewerRuntimeDomainMtimeMs(rootDir = ROOT, domainId = WATCHER_PRIMARY_DOMAIN_ID) {
   return statSync(join(rootDir, 'domains', `${domainId}.json`)).mtimeMs;

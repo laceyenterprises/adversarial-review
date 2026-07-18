@@ -57,7 +57,7 @@ function defaultStageDomainId(role) {
  *   riskClass?: string,
  *   budgetOverride?: number | null,
  *   observedAt?: string,
- *   spawnReviewer: (args: object) => Promise<{ ok: boolean, reviewBody: string|null }>,
+ *   spawnReviewer: (args: object) => Promise<{ ok: boolean, reviewBody: string|null, failureClass?: string|null }>,
  *   spawnReviewerArgs: object,
  *   comms?: { postPipelineRollup?: Function } | null,
  *   rollupDeliveryKey?: object | null,
@@ -90,6 +90,7 @@ export async function runGatedReviewPipeline({
   // Fresh review bodies per stage run this pass, keyed by stage id — used to
   // pick the deciding stage's body for the drop-in result.
   const stageBodies = new Map();
+  let stageFailureClass = null;
 
   const runStageReview = async ({ stage, roleId, model, revisionRef, round }) => {
     const role = rolesById[roleId] || {};
@@ -108,6 +109,7 @@ export async function runGatedReviewPipeline({
       reviewerSessionUuid: `${baseSessionUuid}:${stage.id}:r${round}`,
     });
     if (!result || !result.ok || !result.reviewBody) {
+      stageFailureClass = result?.failureClass || 'reviewer-output';
       return null; // reviewer failure / no body → stage pending (gate closes)
     }
     const body = String(result.reviewBody);
@@ -153,7 +155,7 @@ export async function runGatedReviewPipeline({
   const result = {
     ok,
     reviewBody: ok ? decidingBody : null,
-    failureClass: ok ? null : 'reviewer-output',
+    failureClass: ok ? null : (stageFailureClass || 'reviewer-output'),
     stderrTail: ok ? null : 'review pipeline produced no deciding verdict this pass',
     stdoutTail: null,
     exitCode: ok ? 0 : null,

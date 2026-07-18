@@ -129,7 +129,7 @@ test('gated hook: both stages clean → drop-in ok result with a clean verdict b
   assert.equal(result.pipeline.disposition, 'clean');
 });
 
-test('gated hook: a reviewer failure yields a not-ok drop-in result (watcher retries)', async () => {
+test('gated hook: a reviewer failure preserves its canonical failure class for watcher retry policy', async () => {
   const { spawnReviewer } = fakeSpawnReviewer({}); // every domain → ok:false
   const result = await runGatedReviewPipeline({
     resolvedPipeline: resolved(), currentRevisionRef: 'h4', riskClass: 'high', observedAt: '2026-07-17T00:00:00Z',
@@ -138,5 +138,16 @@ test('gated hook: a reviewer failure yields a not-ok drop-in result (watcher ret
   });
   assert.equal(result.ok, false);
   assert.equal(result.reviewBody, null);
+  assert.equal(result.failureClass, 'reviewer-timeout');
+});
+
+test('gated hook: a reviewer failure without a class falls back to reviewer-output', async () => {
+  const result = await runGatedReviewPipeline({
+    resolvedPipeline: resolved(), currentRevisionRef: 'h5', riskClass: 'high', observedAt: '2026-07-17T00:00:00Z',
+    spawnReviewer: async () => ({ ok: false, reviewBody: null }), spawnReviewerArgs: BASE_ARGS,
+    comms: fakeComms(),
+    rollupDeliveryKey: { domainId: 'code-pr', subjectExternalId: 'laceyenterprises/demo#7', revisionRef: 'h5', round: 1, kind: 'review' },
+  });
+  assert.equal(result.ok, false);
   assert.equal(result.failureClass, 'reviewer-output');
 });

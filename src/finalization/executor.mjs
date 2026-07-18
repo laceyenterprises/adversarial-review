@@ -141,6 +141,11 @@ export function createFinalizationExecutor({
         // Identity/attestation read-through (ARC-22), fail-closed.
         const idv = await checkIdentityAttestation(identitySurface, { subjectKey, revisionRef: rev, decision });
         if (!idv.ok) {
+          if (idv.surfaceError) {
+            return outcome(subjectKey, decision, {
+              status: 'failed', action: 'merge', observedAt, reason: idv.reason,
+            });
+          }
           ledgerStore.append(escalated(subject, { at: observedAt, reason: idv.reason }));
           return outcome(subjectKey, decision, {
             status: 'skipped', action: 'escalate', observedAt, reason: idv.reason,
@@ -162,6 +167,13 @@ export function createFinalizationExecutor({
           });
         }
         if (!result?.ok) {
+          if (result?.reason === 'adapter-unavailable') {
+            const reason = 'no merge surface available (fail-closed)';
+            ledgerStore.append(escalated(subject, { at: observedAt, reason }));
+            return outcome(subjectKey, decision, {
+              status: 'skipped', action: 'escalate', observedAt, reason, detail: result?.detail,
+            });
+          }
           // Fail-closed: a refused/failed merge does NOT append `finalized`; the
           // next tick re-folds and re-decides (a stale-head refusal self-heals).
           return outcome(subjectKey, decision, {

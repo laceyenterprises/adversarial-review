@@ -210,6 +210,41 @@ test('identity/attestation surface (ARC-22) fail-closed: a denied check blocks t
   assert.ok(ledgerStore.read(REF).some((e) => e.type === 'escalated'), 'the denial is recorded');
 });
 
+test('identity/attestation surface errors fail the tick without terminal escalation', async () => {
+  const { ledgerStore, leaseStore } = harness();
+  makeEligible(ledgerStore);
+  const merge = recordingMergeSurface();
+  const identitySurface = { check: async () => { throw new Error('surface unavailable'); } };
+  const exec = createFinalizationExecutor({
+    ledgerStore, leaseStore, adjudicateSurface: merge, identitySurface, enabled: true,
+  });
+
+  const out = await exec.tick(REF, { observedAt: t(10) });
+
+  assert.equal(out.status, 'failed');
+  assert.equal(out.action, 'merge');
+  assert.match(out.reason, /surface unavailable/);
+  assert.equal(merge.calls.length, 0, 'an unavailable identity surface blocks the merge');
+  assert.equal(ledgerStore.read(REF).some((e) => e.type === 'escalated'), false, 'transient errors remain retryable');
+});
+
+test('an unavailable local merge adapter records terminal escalation', async () => {
+  const { ledgerStore, leaseStore } = harness();
+  makeEligible(ledgerStore);
+  const unavailable = {
+    name: 'github-adapter (local fallback)',
+    merge: async () => ({ ok: false, reason: 'adapter-unavailable', detail: 'binary not resolvable' }),
+  };
+  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, mergeFallback: unavailable, enabled: true });
+
+  const out = await exec.tick(REF, { observedAt: t(10) });
+
+  assert.equal(out.status, 'skipped');
+  assert.equal(out.action, 'escalate');
+  assert.match(out.reason, /no merge surface available/);
+  assert.ok(ledgerStore.read(REF).some((e) => e.type === 'escalated'), 'missing adapter is recorded terminally');
+});
+
 test('remediate dispatches, and replaying the same decision is idempotent on the round key', async () => {
   const { ledgerStore, leaseStore } = harness();
   // A blocking verdict at the head → eligible returns remediate(round 1).

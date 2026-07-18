@@ -58,7 +58,9 @@ evidence of record.
       `finalize-now` fails closed to `escalate` — never a phantom merge.
 - [ ] The ARC-22 identity/attestation surface is wired (or you have accepted
       local-mode token identity, in which case a missing surface is `ok: true`,
-      `localMode: true`).
+      `localMode: true`). An explicit attestation denial records terminal
+      `escalated`; a surface exception fails only the current tick so transient
+      infrastructure errors can be retried.
 - [ ] The kill switch is reachable: `policy.autonomousExecutionDisabled = true`
       demonstrably intercepts a mutating decision (see §4).
 - [ ] An operator with merge authority approves (this is not an automated flip).

@@ -115,10 +115,12 @@ test('checkIdentityAttestation: absent surface is local mode (ok); present-and-d
   const deny = { check: async () => ({ ok: false, reason: 'no attestation' }) };
   const denied = await checkIdentityAttestation(deny, {});
   assert.equal(denied.ok, false);
+  assert.equal(denied.surfaceError, false);
   assert.match(denied.reason, /no attestation/);
 
   const thrower = { check: async () => { throw new Error('surface down'); } };
   const errored = await checkIdentityAttestation(thrower, {});
   assert.equal(errored.ok, false, 'a throwing surface fails closed');
+  assert.equal(errored.surfaceError, true);
   assert.match(errored.reason, /fail-closed/);
 });

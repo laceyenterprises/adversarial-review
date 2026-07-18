@@ -141,8 +141,13 @@ export async function checkIdentityAttestation(identitySurface, ctx) {
     return {
       ok: false,
       reason: verdict?.reason || 'identity/attestation check denied',
+      surfaceError: false,
     };
   } catch (err) {
-    return { ok: false, reason: `identity/attestation surface error (fail-closed): ${err?.message || err}` };
+    return {
+      ok: false,
+      reason: `identity/attestation surface error (fail-closed): ${err?.message || err}`,
+      surfaceError: true,
+    };
   }
 }

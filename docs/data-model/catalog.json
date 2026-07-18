@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "finalization-ledger",
+      "title": "Finalization Ledger",
+      "path": "docs/data-model/finalization-ledger.md",
+      "store": "data/reviews.db",
+      "schemaSurface": "migrations/20260717_finalization_ledger.sql",
+      "owner": "ARC-15 Merge Authority v2"
+    }
+  ]
+}

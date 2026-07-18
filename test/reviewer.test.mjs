@@ -3069,6 +3069,39 @@ test('materializeGeminiCheckoutSession writes isolated 0700 session dir and 0600
   }
 });
 
+test('materializeGeminiCheckoutSession uses injected filesystem operations throughout', () => {
+  const parent = '/virtual/reviewer-sessions';
+  const created = [];
+  const written = [];
+  const chmodded = [];
+  const removed = [];
+  const session = materializeGeminiCheckoutSession({
+    checkout: { checkoutId: 'co_mock', oauthCreds: { access_token: 'mock' } },
+    sessionParent: parent,
+    mkdirSyncImpl: (target, options) => created.push({ target, options }),
+    writeFileSyncImpl: (target, contents, options) => written.push({ target, contents, options }),
+    chmodSyncImpl: (target, mode) => chmodded.push({ target, mode }),
+    rmSyncImpl: (target, options) => removed.push({ target, options }),
+  });
+
+  assert.equal(created.length, 2);
+  assert.equal(created[0].target, parent);
+  assert.equal(created[1].target, session.sessionDir);
+  assert.deepEqual(written.map(({ target }) => target), [
+    join(session.sessionDir, 'owner.json'),
+    session.credsPath,
+  ]);
+  assert.deepEqual(chmodded, [
+    { target: parent, mode: 0o700 },
+    { target: session.sessionDir, mode: 0o700 },
+    { target: session.credsPath, mode: 0o600 },
+  ]);
+  session.cleanup();
+  assert.deepEqual(removed, [
+    { target: session.sessionDir, options: { recursive: true, force: true } },
+  ]);
+});
+
 test('purgeStaleGeminiReviewerSessionDirs removes only stale or dead-owner reviewer session dirs', () => {
   const root = mkdtempSync(join(tmpdir(), 'gemini-cqp-purge-'));
   try {

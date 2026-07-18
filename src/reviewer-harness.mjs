@@ -1366,17 +1366,27 @@ function materializeGeminiCheckoutSession({
   checkout,
   env = process.env,
   sessionParent = resolveGeminiReviewerSessionParent(env),
+  mkdirSyncImpl = mkdirSync,
   writeFileSyncImpl = writeFileSync,
+  chmodSyncImpl = chmodSync,
+  rmSyncImpl = rmSync,
 } = {}) {
-  const sessionDir = createGeminiReviewerSessionDir({ env, sessionParent });
+  const sessionDir = createGeminiReviewerSessionDir({
+    env,
+    sessionParent,
+    mkdirSyncImpl,
+    writeFileSyncImpl,
+    chmodSyncImpl,
+    rmSyncImpl,
+  });
   const credsPath = join(sessionDir, 'oauth_creds.json');
   try {
     writeFileSyncImpl(credsPath, `${JSON.stringify(checkout.oauthCreds, null, 2)}\n`, { mode: 0o600 });
-    chmodSync(credsPath, 0o600);
+    chmodSyncImpl(credsPath, 0o600);
   } catch (err) {
     // Roll back the freshly created session dir: the caller only learns the
     // dir path via the return value, so a write failure would otherwise orphan it.
-    rmSync(sessionDir, { recursive: true, force: true });
+    rmSyncImpl(sessionDir, { recursive: true, force: true });
     throw err;
   }
   return {
@@ -1388,7 +1398,7 @@ function materializeGeminiCheckoutSession({
       GEMINI_OAUTH_CREDS_PATH: credsPath,
     },
     cleanup() {
-      rmSync(sessionDir, { recursive: true, force: true });
+      rmSyncImpl(sessionDir, { recursive: true, force: true });
     },
   };
 }

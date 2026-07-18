@@ -229,11 +229,19 @@ export async function runReviewPipeline({
 
   const updatedStageStates = pipeline.map((stage, stageIndex) => {
     const state = stateById.get(stage.id) || { stageId: stage.id, stageIndex, panelVerdicts: [] };
-    return {
-      stageId: stage.id,
-      stageIndex,
-      panelVerdicts: [...state.panelVerdicts],
-    };
+    const verdicts = [...state.panelVerdicts];
+    // Persist the full markdown `body` only for the newest verdict per role;
+    // strip it from older ones so pipeline_stage_states_json does not
+    // accumulate tens of KB per push/round over a PR's lifetime — only the
+    // newest per-role verdict is needed for carry-forward extraction
+    // (review #634). Body is recoverable from the comms channel if ever needed.
+    const newestIndexByRole = new Map();
+    verdicts.forEach((v, i) => newestIndexByRole.set(v?.reviewerRoleId ?? '', i));
+    const panelVerdicts = verdicts.map((v, i) =>
+      newestIndexByRole.get(v?.reviewerRoleId ?? '') === i || v?.body === undefined
+        ? v
+        : { ...v, body: undefined });
+    return { stageId: stage.id, stageIndex, panelVerdicts };
   });
 
   const rollupBody = renderPipelineRollup({
@@ -246,7 +254,13 @@ export async function runReviewPipeline({
   });
 
   let rollupReceipt = null;
-  if (typeof postRollup === 'function') {
+  // Do NOT post a rollup for a `pending` disposition (a reviewer returned no
+  // verdict, e.g. a transient subprocess failure). A pending rollup would burn
+  // the revision+round delivery-dedupe slot, so the successful retry's real
+  // rollup (blocking/clean) is silently dropped as a duplicate and the PR is
+  // stranded showing "PENDING" (review #634). The next tick re-runs and posts
+  // the true verdict rollup.
+  if (typeof postRollup === 'function' && disposition !== 'pending') {
     rollupReceipt = await postRollup({ body: rollupBody, disposition, revisionRef, rows });
   }
 

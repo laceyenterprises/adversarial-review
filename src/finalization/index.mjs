@@ -66,3 +66,39 @@ export {
   openFinalizationLedgerStore,
   rowToEvent,
 } from './ledger-store.mjs';
+
+// Merge Authority v2 shadow mode (ARC-16): v2 ingests live events and LOGS
+// decisions without acting, next to what frozen v1 did; the divergence report
+// and its bidirectional triage feed the operator promotion gate. See
+// docs/SPEC-merge-authority-v2.md §5 and docs/finalization-shadow-divergence-triage.md.
+export {
+  V1_ACTION_KINDS,
+  normalizeV1Action,
+  v1ActionBucket,
+  v1ActionFromDaemonDisposition,
+  v2DecisionBucket,
+} from './shadow-actions.mjs';
+
+export {
+  DIVERGENCE_DIRECTIONS,
+  V1_DEFECT_CLASSES,
+  classifyDivergence,
+} from './divergence-classifier.mjs';
+
+export {
+  replayV1Trace,
+  shadowObserve,
+  shadowObserveFromStore,
+} from './shadow-recorder.mjs';
+
+export {
+  ensureFinalizationShadowSchema,
+  openFinalizationShadowStore,
+  rowToObservation,
+} from './shadow-store.mjs';
+
+export {
+  buildShadowReport,
+  effectiveDisposition,
+  renderShadowReport,
+} from './shadow-report.mjs';

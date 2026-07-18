@@ -881,3 +881,104 @@ export interface EligibilityDecision {
   /** `remediate`/`finalize-now`: this is the exhaustion final coverage-gated round. */
   final?: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Merge Authority v2 shadow mode (ARC-16; merge-authority-v2 §5). v2 ingests the
+// live ledger and LOGS decisions WITHOUT acting, next to what frozen v1 actually
+// did; every `(v1 action, v2 decision)` pair is recorded with a bidirectional
+// divergence classification that feeds the operator promotion gate.
+// ---------------------------------------------------------------------------
+
+/** The normalized vocabulary for what frozen v1 did on a finalization tick. */
+export type ShadowV1ActionKind =
+  | 'merged'
+  | 'hammer-dispatch'
+  | 'remediate'
+  | 'wait'
+  | 'close'
+  | 'escalate'
+  | 'halt'
+  | 'none';
+
+/** The v1 half of a shadow pair: what v1 did, plus optional provenance. */
+export interface ShadowV1Action {
+  kind: ShadowV1ActionKind;
+  detail?: string;
+  sourceRef?: string;
+}
+
+/**
+ * The bidirectional triage of a shadow pair. `relation` is whether the two
+ * systems concur. `direction` proposes attribution — `open` is the only one that
+ * blocks promotion; a human override in the store may supersede it. v1 is the
+ * known-buggy system, but a divergence is evidence, not an automatic v1 defect.
+ */
+export interface DivergenceClassification {
+  relation: 'agree' | 'diverge';
+  direction: 'v1-defect' | 'v2-suspect' | 'open' | 'benign';
+  /** e.g. 'ci-impatience', 'ceiling-head-move-deadlock', 'unclassified', 'fold-error'. */
+  class: string | null;
+  /** An external reference for a known v1 failure family (e.g. 'AR#550', 'HCM-01'). */
+  ref?: string | null;
+  disposition: 'resolved' | 'open';
+  reason: string;
+}
+
+/** A human's overriding triage disposition recorded on an observation (§5.2). */
+export interface ShadowDispositionOverride {
+  disposition: 'resolved' | 'open';
+  note?: string;
+  principal?: string;
+  at: IsoTimestamp;
+}
+
+/** One recorded shadow tick: the `(v1 action, v2 decision)` pair + its triage. */
+export interface ShadowObservation {
+  id?: number;
+  subjectKey: SubjectKey;
+  revisionRef: string;
+  /** Tick time the report windows on. The decision itself never reads a clock. */
+  observedAt: IsoTimestamp;
+  v1Action: ShadowV1Action;
+  v2Decision: EligibilityDecision;
+  classification: DivergenceClassification;
+  /** True when the fold errored / the ledger was unavailable — v2 failed closed to escalate. */
+  foldError: boolean;
+  /** Organic-observation markers the promotion gate (§5.3) counts. */
+  sawHeadMove: boolean;
+  sawExhaustion: boolean;
+  dispositionOverride?: ShadowDispositionOverride | null;
+}
+
+/** The model `finalization shadow-report` renders (SPEC §1 Win 3). */
+export interface ShadowReportModel {
+  now: IsoTimestamp;
+  windowDays: number;
+  window: { from: IsoTimestamp; to: IsoTimestamp };
+  shadowed: number;
+  agree: number;
+  diverge: number;
+  divergences: {
+    id: number | null;
+    subjectExternalId: string;
+    label: string;
+    revisionRef: string;
+    v1: ShadowV1ActionKind | string;
+    v1Detail: string | null;
+    v2: EligibilityDecisionKind | string;
+    v2Compact: string;
+    direction: DivergenceClassification['direction'];
+    class: string | null;
+    ref: string | null;
+    reason: string;
+    disposition: 'resolved' | 'open';
+    overridden: boolean;
+    tag: string;
+  }[];
+  organicHeadMoves: number;
+  exhaustionCloses: number;
+  coverage: { earliestObservedAt: IsoTimestamp | null; coverageDays: number; enoughDays: boolean };
+  openDivergences: number;
+  promotable: boolean;
+  blockers: string[];
+}

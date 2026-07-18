@@ -16,6 +16,15 @@ import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { normalizeGithubMergeability, resolveMergeabilityWithSampling } from './github-mergeability.mjs';
 import { createGitHubPRSubjectAdapter, parseSubjectExternalId } from './adapters/subject/github-pr/index.mjs';
 import {
+  FAST_MERGE_CATEGORY_BY_LABEL,
+  buildFastMergeAuditEntry,
+  evaluateFastMergeDiffShape,
+  fastMergeDecisionFromLabels,
+  latestTimelineFastMergeAuthorization,
+  writeFastMergeAuditEntry,
+  writeFastMergeAuditPayload,
+} from './adapters/subject/github-pr/fast-merge.mjs';
+import {
   defaultReviewerRouteFromEnv,
   applyEffectiveReviewerRoute,
   describeCrossModelReviewWaiver,
@@ -762,18 +771,9 @@ const STUCK_DISPATCH_ALERT_DEBOUNCE_MS = 60 * 60 * 1000;
 const STUCK_DISPATCH_ALERT_STATE_DIR = join(
   ROOT, 'data', 'follow-up-jobs', 'merge-agent-stuck-alerts',
 );
-const FAST_MERGE_VETO_LABEL = 'fast-merge-veto';
-const FAST_MERGE_CATEGORY_BY_LABEL = Object.freeze({
-  'fast-merge:spec-hash-rebind': 'spec-hash-rebind',
-  'fast-merge:docs': 'docs',
-  'fast-merge:test-fixtures': 'test-fixtures',
-  'fast-merge:submodule-bump': 'submodule-bump',
-});
-const DEFAULT_FAST_MERGE_OPERATOR_ACTORS = Object.freeze(['VirtualPaul']);
-const DEFAULT_FAST_MERGE_SUBMODULE_PATHS = Object.freeze([
-  'tools/adversarial-review',
-  'modules/agent-control/vendor/agent-control',
-]);
+// FAST_MERGE_* label/category/default-actor/submodule constants moved to
+// ./adapters/subject/github-pr/fast-merge.mjs (ARC-18); FAST_MERGE_CATEGORY_BY_LABEL
+// is imported back above for the inline pollOnce label-name membership check.
 const FAST_MERGE_RECOVERY_PER_TICK = Math.max(
   1,
   Number.parseInt(process.env.FML_WATCHER_RECOVERY_PER_TICK || '50', 10) || 50,
@@ -1001,26 +1001,8 @@ async function reconcilePendingDraftsBeforeSpawn({
   };
 }
 
-function normalizeLabelName(label) {
-  return String(typeof label === 'string' ? label : label?.name || '').trim();
-}
-
-function fastMergeDecisionFromLabels(labels) {
-  const labelNames = (Array.isArray(labels) ? labels : [])
-    .map(normalizeLabelName)
-    .filter(Boolean);
-  const categories = [...new Set(
-    labelNames
-      .map((name) => FAST_MERGE_CATEGORY_BY_LABEL[name])
-      .filter(Boolean)
-  )];
-  return {
-    hasFastMergeLabel: categories.length > 0,
-    hasVeto: labelNames.includes(FAST_MERGE_VETO_LABEL),
-    categories,
-    labelNames,
-  };
-}
+// normalizeLabelName + fastMergeDecisionFromLabels moved to
+// ./adapters/subject/github-pr/fast-merge.mjs (ARC-18).
 
 function maybeSweepConditionalRequestCache({
   rootDir = ROOT,
@@ -1091,138 +1073,13 @@ async function fetchLivePRHeadSha({ owner, repo, prNumber, fallbackHeadSha = nul
   }
 }
 
-function parseFastMergeEventTime(value) {
-  const ms = Date.parse(String(value || ''));
-  return Number.isFinite(ms) ? ms : null;
-}
-
-const FAST_MERGE_TIMELINE_HEAD_EVENT_NAMES = new Set([
-  'committed',
-  'head_ref_force_pushed',
-  'head_ref_restored',
-]);
-
-function parseFastMergeList(value, fallback = []) {
-  const raw = String(value || '').trim();
-  const source = raw ? raw.split(',') : fallback;
-  return new Set(
-    source
-      .map((item) => String(item || '').trim())
-      .filter(Boolean)
-  );
-}
-
-function fastMergeOperatorActorSet(env = process.env) {
-  return parseFastMergeList(env.FML_WATCHER_OPERATOR_ACTORS, DEFAULT_FAST_MERGE_OPERATOR_ACTORS);
-}
-
-function fastMergeSubmodulePathSet(env = process.env) {
-  return parseFastMergeList(env.FML_WATCHER_SUBMODULE_PATHS, DEFAULT_FAST_MERGE_SUBMODULE_PATHS);
-}
-
-function normalizeTimelineActor(actor) {
-  return String(actor?.login || actor?.name || actor || '').trim();
-}
-
-function isFastMergeOperatorActor(actor, env = process.env) {
-  const actorName = normalizeTimelineActor(actor);
-  if (!actorName) return false;
-  return fastMergeOperatorActorSet(env).has(actorName);
-}
-
-function fastMergeEventTimestamp(event) {
-  const eventName = String(event?.event || '').trim().toLowerCase();
-  return event?.created_at
-    || event?.createdAt
-    || (
-      eventName === 'committed'
-        ? event?.committer?.date
-          || event?.author?.date
-          || event?.commit?.committer?.date
-          || event?.commit?.author?.date
-        : null
-    );
-}
-
-function latestTimelineFastMergeAuthorization(
-  events,
-  allowedLabelNames,
-  { liveHeadSha = null, env = process.env } = {},
-) {
-  const allowed = new Set(
-    (Array.isArray(allowedLabelNames) ? allowedLabelNames : [])
-      .map((name) => normalizeLabelName(name).toLowerCase())
-      .filter(Boolean)
-  );
-  if (allowed.size === 0 || !Array.isArray(events)) return null;
-
-  const normalizedEvents = events
-    .map((event, index) => {
-      const createdAt = fastMergeEventTimestamp(event);
-      const createdAtMs = parseFastMergeEventTime(createdAt);
-      if (createdAtMs == null) return null;
-      return {
-        event,
-        index,
-        createdAt,
-        createdAtMs,
-      };
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.createdAtMs - b.createdAtMs || a.index - b.index);
-
-  let latestLabel = null;
-
-  for (const entry of normalizedEvents) {
-    const eventName = String(entry.event?.event || '').trim().toLowerCase();
-
-    if (eventName === 'labeled') {
-      const labelName = normalizeLabelName(
-        entry.event?.label?.name || entry.event?.label || entry.event?.name || ''
-      ).toLowerCase();
-      if (!allowed.has(labelName)) continue;
-      const actor = normalizeTimelineActor(entry.event?.actor);
-      if (!isFastMergeOperatorActor(actor, env)) continue;
-      if (
-        !latestLabel
-        || entry.createdAtMs > latestLabel.createdAtMs
-        || (entry.createdAtMs === latestLabel.createdAtMs && entry.index > latestLabel.index)
-      ) {
-        latestLabel = {
-          createdAt: entry.createdAt,
-          createdAtMs: entry.createdAtMs,
-          index: entry.index,
-          label: labelName,
-          actor,
-        };
-      }
-    }
-  }
-
-  if (!latestLabel) return null;
-
-  const latestHeadAdvanceAtOrAfterLabel = normalizedEvents.findLast((entry) => {
-    const eventName = String(entry.event?.event || '').trim().toLowerCase();
-    return FAST_MERGE_TIMELINE_HEAD_EVENT_NAMES.has(eventName)
-      && (
-        entry.createdAtMs > latestLabel.createdAtMs
-        || (entry.createdAtMs === latestLabel.createdAtMs && entry.index > latestLabel.index)
-      );
-  });
-  if (latestHeadAdvanceAtOrAfterLabel) {
-    return null;
-  }
-
-  const authorizedHeadSha = String(liveHeadSha || '').trim();
-  if (!authorizedHeadSha) return null;
-
-  return {
-    authorizedAt: latestLabel.createdAt,
-    label: latestLabel.label,
-    authorizedHeadSha,
-    actor: latestLabel.actor,
-  };
-}
+// parseFastMergeEventTime, FAST_MERGE_TIMELINE_HEAD_EVENT_NAMES, parseFastMergeList,
+// fastMergeOperatorActorSet, fastMergeSubmodulePathSet, normalizeTimelineActor,
+// isFastMergeOperatorActor, fastMergeEventTimestamp, and
+// latestTimelineFastMergeAuthorization moved to
+// ./adapters/subject/github-pr/fast-merge.mjs (ARC-18);
+// latestTimelineFastMergeAuthorization is imported back above for the
+// timeline-authorization fetch below.
 
 async function fetchFastMergeAuthorizationFromTimeline(
   octokit,
@@ -1294,132 +1151,12 @@ async function fetchFastMergeChangedFiles(octokit, { owner, repo, prNumber, logg
   }
 }
 
-function normalizeChangedFile(file) {
-  return {
-    filename: String(file?.filename || file?.path || '').trim(),
-    status: String(file?.status || '').trim().toLowerCase(),
-    additions: Number.isFinite(Number(file?.additions)) ? Number(file.additions) : 0,
-    deletions: Number.isFinite(Number(file?.deletions)) ? Number(file.deletions) : 0,
-  };
-}
-
-function isMarkdownOrDocsPath(filename) {
-  return /\.(adoc|md|mdx|rst|txt)$/i.test(filename);
-}
-
-function isTestFixturePath(filename) {
-  return /(^|\/)(fixtures?|testdata|snapshots?)(\/|$)/i.test(filename);
-}
-
-function isKnownSubmodulePath(filename) {
-  return fastMergeSubmodulePathSet().has(String(filename || '').trim());
-}
-
-function fastMergeFileMatchesCategory(file, category) {
-  const normalized = normalizeChangedFile(file);
-  if (!normalized.filename) return false;
-  if (category === 'docs') {
-    return isMarkdownOrDocsPath(normalized.filename);
-  }
-  if (category === 'test-fixtures') {
-    return normalized.deletions === 0 && isTestFixturePath(normalized.filename);
-  }
-  if (category === 'submodule-bump') {
-    return normalized.status === 'modified'
-      && normalized.additions <= 1
-      && normalized.deletions <= 1
-      && isKnownSubmodulePath(normalized.filename);
-  }
-  if (category === 'spec-hash-rebind') {
-    return normalized.additions <= 5
-      && normalized.deletions <= 5
-      && (
-        /(^|\/)SPEC[^/]*\.md$/i.test(normalized.filename)
-        || /(^|\/)spec-hash/i.test(normalized.filename)
-        || /(^|\/)spec-lock/i.test(normalized.filename)
-      );
-  }
-  return false;
-}
-
-function evaluateFastMergeDiffShape(files, categories) {
-  const normalizedFiles = (Array.isArray(files) ? files : [])
-    .map(normalizeChangedFile)
-    .filter((file) => file.filename);
-  const allowedCategories = Array.isArray(categories) ? categories.filter(Boolean) : [];
-  if (normalizedFiles.length === 0) {
-    return { ok: false, reason: 'changed-files-empty', files: normalizedFiles };
-  }
-  if (allowedCategories.length === 0) {
-    return { ok: false, reason: 'fast-merge-category-missing', files: normalizedFiles };
-  }
-  const mismatches = normalizedFiles.filter((file) => (
-    !allowedCategories.some((category) => fastMergeFileMatchesCategory(file, category))
-  ));
-  if (mismatches.length > 0) {
-    return {
-      ok: false,
-      reason: `shape-mismatch:${mismatches.map((file) => file.filename).join(',')}`,
-      files: normalizedFiles,
-      mismatches,
-    };
-  }
-  return { ok: true, reason: 'shape-ok', files: normalizedFiles };
-}
-
-function buildFastMergeAuditEntry({
-  action,
-  repo,
-  prNumber,
-  categories = [],
-  labels = [],
-  changedFiles = [],
-  shapeCheck = null,
-  authorizedHeadSha = null,
-  authorizedAt = new Date().toISOString(),
-  skippedAt = null,
-  vetoedAt = null,
-  requeueResult = null,
-}) {
-  const sessionUuid = `fast-merge-${action}-${randomUUID()}`;
-  const entry = {
-    kind: 'fast-merge-audit',
-    schemaVersion: 1,
-    auditType: 'fast-merge-skip',
-    sessionUuid,
-    fast_merge: true,
-    action,
-    categories,
-    repo,
-    pr_number: prNumber,
-    labels,
-    changed_files: changedFiles,
-    shape_check: shapeCheck,
-    authorized_at: authorizedAt,
-    skipped_at: skippedAt,
-    vetoed_at: vetoedAt,
-    fast_merge_authorized_head_sha: authorizedHeadSha,
-    authorizing_head_sha: authorizedHeadSha,
-    requeue_result: requeueResult,
-  };
-  return entry;
-}
-
-function writeFastMergeAuditPayload(rootDir, entry) {
-  const targetPath = fastMergeAuditPath(rootDir, {
-    repo: entry?.repo,
-    prNumber: entry?.pr_number,
-    action: entry?.action,
-    at: entry?.authorized_at,
-  });
-  mkdirSync(dirname(targetPath), { recursive: true });
-  writeFileAtomic(targetPath, `${JSON.stringify(entry, null, 2)}\n`, { overwrite: false });
-  return { entry, path: targetPath };
-}
-
-function writeFastMergeAuditEntry(rootDir, args) {
-  return writeFastMergeAuditPayload(rootDir, buildFastMergeAuditEntry(args));
-}
+// normalizeChangedFile, isMarkdownOrDocsPath, isTestFixturePath,
+// isKnownSubmodulePath, fastMergeFileMatchesCategory, evaluateFastMergeDiffShape,
+// buildFastMergeAuditEntry, writeFastMergeAuditPayload, and writeFastMergeAuditEntry
+// moved to ./adapters/subject/github-pr/fast-merge.mjs (ARC-18); the ones the
+// watcher still calls (evaluateFastMergeDiffShape, buildFastMergeAuditEntry,
+// writeFastMergeAuditPayload, writeFastMergeAuditEntry) are imported back above.
 
 async function maybeFireMergeAgentStuckAlert({
   rootDir,

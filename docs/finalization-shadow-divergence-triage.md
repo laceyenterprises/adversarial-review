@@ -102,6 +102,10 @@ escape hatch, and it re-blocks the gate.
 ## The promotion gate (§5.3)
 
 `node src/cli.mjs finalization shadow-report --days 7` prints the verdict.
+The report opens the existing app database read-only and never runs schema
+convergence, so it is safe to run under an operator account while the daemon
+owns the writable database. A missing database or shadow table fails loud; run
+the daemon-owned migration rather than creating it from the reporting command.
 `promotable` requires **all** of:
 
 1. **≥ N days of shadow coverage** (default 7) — the oldest observation is at

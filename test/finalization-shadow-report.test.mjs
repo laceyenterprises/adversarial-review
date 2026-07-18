@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import Database from 'better-sqlite3';
 
@@ -90,6 +93,18 @@ test('the promotion gate blocks on missing organic observations and thin coverag
   assert.ok(model.blockers.includes('no budget-exhaustion close observed in shadow'));
 });
 
+test('organic promotion markers count across the full shadow period', () => {
+  const observations = [
+    obs({ subjectExternalId: 'owner/repo#699', observedAt: daysAgo(8), v1: 'merged', v2: 'finalize-now', relation: 'agree', direction: 'benign', cls: 'concur', disposition: 'resolved', sawHeadMove: true, sawExhaustion: true }),
+    obs({ subjectExternalId: 'owner/repo#700', observedAt: daysAgo(1), v1: 'merged', v2: 'finalize-now', relation: 'agree', direction: 'benign', cls: 'concur', disposition: 'resolved' }),
+  ];
+  const model = buildShadowReport({ observations, now: NOW, windowDays: 7 });
+  assert.equal(model.shadowed, 1);
+  assert.equal(model.organicHeadMoves, 1);
+  assert.equal(model.exhaustionCloses, 1);
+  assert.equal(model.promotable, true);
+});
+
 test('a human override supersedes the classifier proposal in the report', () => {
   const observations = seedNotPromotable();
   // Re-open the auto-attributed #612 v1-defect — the operator disagrees.
@@ -141,6 +156,21 @@ test('finalization shadow-report --json emits the full model', () => {
   assert.equal(model.diverge, 2);
   assert.equal(model.openDivergences, 1);
   assert.equal(model.windowDays, 7);
+});
+
+test('finalization shadow-report does not create a database or data directory', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'shadow-report-readonly-'));
+  const out = [];
+  const err = [];
+  const code = finalizationMain(['shadow-report', '--root', rootDir], {
+    now: NOW,
+    stdout: { write: (s) => out.push(s) },
+    stderr: { write: (s) => err.push(s) },
+  });
+  assert.equal(code, 1);
+  assert.equal(out.length, 0);
+  assert.match(err.join(''), /could not build shadow report/);
+  assert.equal(existsSync(join(rootDir, 'data')), false);
 });
 
 test('an unknown finalization subcommand fails loud', () => {

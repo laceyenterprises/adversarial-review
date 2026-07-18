@@ -94,6 +94,7 @@ export {
 export {
   ensureFinalizationShadowSchema,
   openFinalizationShadowStore,
+  openReadOnlyFinalizationShadowStore,
   rowToObservation,
 } from './shadow-store.mjs';
 

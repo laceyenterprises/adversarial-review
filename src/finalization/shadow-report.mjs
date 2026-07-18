@@ -79,9 +79,13 @@ export function buildShadowReport({ observations, now, windowDays = 7 }) {
   const all = observations ?? [];
   // Coverage is measured across ALL shadow data: has shadow been running ≥ N days?
   let earliestMs = Infinity;
+  let organicHeadMoves = 0;
+  let exhaustionCloses = 0;
   for (const o of all) {
     const t = Date.parse(o.observedAt);
     if (Number.isFinite(t) && t < earliestMs) earliestMs = t;
+    if (o.sawHeadMove) organicHeadMoves += 1;
+    if (o.sawExhaustion) exhaustionCloses += 1;
   }
   const earliestObservedAt = Number.isFinite(earliestMs) ? new Date(earliestMs).toISOString() : null;
   const coverageDays = Number.isFinite(earliestMs) ? Math.floor((nowMs - earliestMs) / MS_PER_DAY) : 0;
@@ -95,12 +99,8 @@ export function buildShadowReport({ observations, now, windowDays = 7 }) {
 
   let agree = 0;
   let diverge = 0;
-  let organicHeadMoves = 0;
-  let exhaustionCloses = 0;
   const divergences = [];
   for (const o of windowed) {
-    if (o.sawHeadMove) organicHeadMoves += 1;
-    if (o.sawExhaustion) exhaustionCloses += 1;
     if (o.classification?.relation === 'diverge') {
       diverge += 1;
       const eff = effectiveDisposition(o);

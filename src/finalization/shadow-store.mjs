@@ -54,6 +54,13 @@ function openDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } = {}) {
   return db;
 }
 
+function openReadOnlyDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } = {}) {
+  const db = new Database(join(rootDir, 'data', 'reviews.db'), { readonly: true });
+  db.pragma(`busy_timeout = ${Math.max(0, Number(busyTimeoutMs) || 0)}`);
+  db.pragma('query_only = 1');
+  return db;
+}
+
 function observationToColumns(obs) {
   return {
     domain_id: obs.subjectKey.domainId,
@@ -195,6 +202,36 @@ export function openFinalizationShadowStore({ rootDir, db, busyTimeoutMs } = {})
 
     close() {
       if (ownDb) database.close();
+    },
+  };
+}
+
+/**
+ * Open the existing shadow table for operator reporting without creating
+ * directories, opening a writable SQLite handle, or converging the schema.
+ * The daemon-owned writable store/migration must create the table first.
+ *
+ * @param {{ rootDir: string, busyTimeoutMs?: number }} options
+ */
+export function openReadOnlyFinalizationShadowStore({ rootDir, busyTimeoutMs } = {}) {
+  const database = openReadOnlyDb(rootDir, { busyTimeoutMs });
+  let selectAll;
+  try {
+    selectAll = database.prepare(`
+      SELECT * FROM finalization_shadow ORDER BY observed_at ASC, id ASC
+    `);
+  } catch (err) {
+    database.close();
+    throw err;
+  }
+
+  return {
+    db: database,
+    read() {
+      return selectAll.all().map(rowToObservation);
+    },
+    close() {
+      database.close();
     },
   };
 }

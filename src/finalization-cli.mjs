@@ -9,7 +9,7 @@
 
 import { fileURLToPath } from 'node:url';
 
-import { openFinalizationShadowStore } from './finalization/shadow-store.mjs';
+import { openReadOnlyFinalizationShadowStore } from './finalization/shadow-store.mjs';
 import { buildShadowReport, renderShadowReport } from './finalization/shadow-report.mjs';
 
 const USAGE = `\
@@ -46,7 +46,7 @@ function finalizationMain(argv, io = {}) {
   const stdout = io.stdout || process.stdout;
   const stderr = io.stderr || process.stderr;
   const now = io.now || new Date().toISOString();
-  const openStore = io.openStore || openFinalizationShadowStore;
+  const openStore = io.openStore || openReadOnlyFinalizationShadowStore;
   const [subcommand, ...rest] = argv;
 
   if (subcommand === '--help' || subcommand === '-h' || subcommand === undefined) {

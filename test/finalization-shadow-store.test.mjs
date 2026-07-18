@@ -1,8 +1,14 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import Database from 'better-sqlite3';
 
-import { openFinalizationShadowStore } from '../src/finalization/shadow-store.mjs';
+import {
+  openFinalizationShadowStore,
+  openReadOnlyFinalizationShadowStore,
+} from '../src/finalization/shadow-store.mjs';
 import { shadowObserve } from '../src/finalization/shadow-recorder.mjs';
 import {
   checksSettled,
@@ -91,4 +97,19 @@ test('the shadow store is append-only telemetry — read preserves append order 
   const rows = store.read();
   assert.deepEqual(rows.map((r) => r.id), [a.id, b.id]);
   store.close();
+});
+
+test('the reporting store reads through a query-only database handle', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'shadow-store-readonly-'));
+  const writable = openFinalizationShadowStore({ rootDir });
+  writable.append(cleanObs(t(3)));
+  writable.close();
+
+  const reporting = openReadOnlyFinalizationShadowStore({ rootDir });
+  assert.equal(reporting.read().length, 1);
+  assert.throws(
+    () => reporting.db.prepare('DELETE FROM finalization_shadow').run(),
+    /readonly|read-only/i,
+  );
+  reporting.close();
 });

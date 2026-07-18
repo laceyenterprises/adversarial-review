@@ -7,6 +7,12 @@ import { resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import { isPgidAlive, verifyPgidIdentity } from '../../../process-group-identity.mjs';
 import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
+import {
+  parseCodexJsonTokenUsage,
+  parseCodexJsonTokenUsageFromFailureStdout,
+  isCodexModel,
+  isGeminiModel,
+} from '../../../reviewer-model-detection.mjs';
 
 const execFileAsync = promisify(execFile);
 import {
@@ -140,104 +146,6 @@ function emptyResult({
   };
 }
 
-function parseCodexJsonTokenUsage(stdout) {
-  let tokenUsage = null;
-  for (const line of String(stdout || '').split('\n')) {
-    if (
-      !line.trim() ||
-      (
-        !line.includes('token_count') &&
-        !line.includes('turn.completed') &&
-        !line.includes('reviewer.token_usage') &&
-        !line.includes('usageMetadata')
-      )
-    ) continue;
-    let item;
-    try {
-      item = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (!item || typeof item !== 'object') continue;
-    if (item.type === 'reviewer.token_usage' && item.tokenUsage) {
-      const hasExplicitGuardrail = Object.prototype.hasOwnProperty.call(item.tokenUsage, 'guardrail')
-        && item.tokenUsage.guardrail !== undefined;
-      tokenUsage = {
-        ...item.tokenUsage,
-        usageTag: item.tokenUsage.usageTag || 'guardrail',
-        guardrail: hasExplicitGuardrail
-          ? item.tokenUsage.guardrail
-          : (
-              item.tokenUsage.total ?? (
-                Number(item.tokenUsage.input || 0) + Number(item.tokenUsage.output || 0)
-              )
-            ),
-      };
-      continue;
-    }
-    // Gemini (usageMetadata shape, e.g. from gemini-cli -o json). candidates are
-    // the visible output; thoughts are reasoning (inclusive output = candidates
-    // + thoughts); cached maps to cacheRead; toolUse to tool context.
-    const gemini = item.usageMetadata ?? item.usage_metadata ?? item.payload?.usageMetadata;
-    if (gemini && typeof gemini === 'object') {
-      const num = (v) => (Number.isFinite(Number(v)) ? Math.trunc(Number(v)) : null);
-      const prompt = num(gemini.promptTokenCount);
-      const candidates = num(gemini.candidatesTokenCount);
-      const thoughts = num(gemini.thoughtsTokenCount);
-      const output = candidates === null && thoughts === null ? null : (candidates || 0) + (thoughts || 0);
-      tokenUsage = {
-        input: prompt,
-        output,
-        reasoning: thoughts,
-        cacheRead: num(gemini.cachedContentTokenCount),
-        cacheWrite: 0,
-        toolContext: num(gemini.toolUsePromptTokenCount),
-        total: num(gemini.totalTokenCount),
-        source: 'gemini-json',
-      };
-      continue;
-    }
-    const total = item.type === 'turn.completed'
-      ? item.usage
-      : (
-          item.type === 'event_msg' && item.payload?.type === 'token_count'
-            ? item.payload?.info?.total_token_usage
-            : null
-        );
-    if (!total || typeof total !== 'object') continue;
-    tokenUsage = {
-      input: Number.isFinite(Number(total.input_tokens)) ? Math.trunc(Number(total.input_tokens)) : null,
-      output: Number.isFinite(Number(total.output_tokens)) ? Math.trunc(Number(total.output_tokens)) : null,
-      // reasoning_output_tokens is part of codex's total_token_usage; capture it
-      // for full-fidelity parity (previously dropped). Codex folds tool tokens
-      // into output, so there is no separate tool-context dimension here.
-      reasoning: Number.isFinite(Number(total.reasoning_output_tokens)) ? Math.trunc(Number(total.reasoning_output_tokens)) : null,
-      cacheRead: Number.isFinite(Number(total.cached_input_tokens)) ? Math.trunc(Number(total.cached_input_tokens)) : null,
-      cacheWrite: 0,
-      total: Number.isFinite(Number(total.total_tokens)) ? Math.trunc(Number(total.total_tokens)) : null,
-      source: 'codex-json',
-      usageTag: 'guardrail',
-    };
-    tokenUsage.guardrail = tokenUsage.total ?? ((tokenUsage.input || 0) + (tokenUsage.output || 0));
-  }
-  return tokenUsage;
-}
-
-function parseCodexJsonTokenUsageFromFailureStdout(stdout) {
-  try {
-    const tokenUsage = parseCodexJsonTokenUsage(stdout);
-    return {
-      tokenUsage,
-      tokenUsageNoUsageReason: tokenUsage ? null : 'unparseable-stdout',
-    };
-  } catch {
-    return {
-      tokenUsage: null,
-      tokenUsageNoUsageReason: 'unparseable-stdout',
-    };
-  }
-}
-
 // CANONICAL_OAUTH_STRIP_ENV is the load-bearing set every adapter advertising
 // `oauthStripEnforced: true` MUST strip from the reviewer subprocess env.
 // Mirrors `ENV_CLEAR` in `modules/worker-pool/lib/adapters/claude-code.sh` and
@@ -310,15 +218,6 @@ function resolveProgressTimeoutForModel(model, env) {
   void model;
   void env;
   return 0;
-}
-
-function isCodexModel(model) {
-  return String(model || '').toLowerCase().includes('codex');
-}
-
-function isGeminiModel(model) {
-  const text = String(model || '').toLowerCase();
-  return text.includes('gemini') || text.includes('antigravity') || text.includes('agy');
 }
 
 // Reviewer stdout token usage is parsed for codex (native token_count/

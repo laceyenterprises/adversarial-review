@@ -160,6 +160,7 @@ function ensureReviewStateSchema(db) {
       review_population_retry_attempts INTEGER NOT NULL DEFAULT 0,
       review_population_retry_last_at TEXT,
       review_population_retry_head_sha TEXT,
+      pipeline_stage_states_json TEXT,
       UNIQUE(repo, pr_number)
     )
   `);
@@ -202,6 +203,7 @@ function ensureReviewStateSchema(db) {
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN domain_id TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN subject_external_id TEXT`);
   addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN revision_ref TEXT`);
+  addReviewedPRsColumnIfMissing(db, `ALTER TABLE reviewed_prs ADD COLUMN pipeline_stage_states_json TEXT`);
 
   backfillReviewedPRSubjectIdentity(db);
 

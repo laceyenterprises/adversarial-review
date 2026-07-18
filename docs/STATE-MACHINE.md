@@ -18,6 +18,14 @@ They interact, but they are not interchangeable.
 - SQLite answers: **can this PR be reviewed / re-reviewed?**
 - Queue files answer: **what remediation round is happening around the posted review?**
 
+For pipeline-enabled domains, the watcher row also stores
+`pipeline_stage_states_json`. This durable per-stage verdict history enables
+same-revision re-reviews to carry clean upstream stages forward and resume at
+the first non-clean stage. Verdicts stay pinned to `revision_ref`, so a changed
+head invalidates carry-forward and restarts at stage 1. The watcher rewrites
+the JSON state after every completed pipeline-driver pass, including a pending
+pass, before settling the overall review attempt.
+
 ---
 
 ## End-to-end flow

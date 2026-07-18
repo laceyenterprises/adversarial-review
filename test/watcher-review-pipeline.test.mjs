@@ -129,6 +129,23 @@ test('gated hook: both stages clean → drop-in ok result with a clean verdict b
   assert.equal(result.pipeline.disposition, 'clean');
 });
 
+test('gated hook: fully carried-forward clean pipeline uses the persisted deciding body', async () => {
+  const finalBody = cleanBody('persisted security');
+  const stageStates = [
+    { stageId: 'code-quality', stageIndex: 0, panelVerdicts: [{ kind: 'comment-only', body: cleanBody('persisted cq'), reviewerRoleId: 'code-quality-reviewer', revisionRef: 'h3-carry' }] },
+    { stageId: 'security', stageIndex: 1, panelVerdicts: [{ kind: 'comment-only', body: finalBody, reviewerRoleId: 'security-reviewer', revisionRef: 'h3-carry' }] },
+  ];
+  const { spawnReviewer, calls } = fakeSpawnReviewer({});
+  const result = await runGatedReviewPipeline({
+    resolvedPipeline: resolved(), stageStates, currentRevisionRef: 'h3-carry', riskClass: 'low',
+    observedAt: '2026-07-17T00:00:00Z', spawnReviewer, spawnReviewerArgs: BASE_ARGS,
+    comms: fakeComms(), rollupDeliveryKey: { domainId: 'code-pr', subjectExternalId: 'laceyenterprises/demo#7', revisionRef: 'h3-carry', round: 2, kind: 'review' },
+  });
+  assert.deepEqual(calls, []);
+  assert.equal(result.ok, true);
+  assert.equal(result.reviewBody, finalBody);
+});
+
 test('gated hook: a reviewer failure preserves its canonical failure class for watcher retry policy', async () => {
   const { spawnReviewer } = fakeSpawnReviewer({}); // every domain → ok:false
   const result = await runGatedReviewPipeline({

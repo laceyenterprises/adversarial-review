@@ -177,7 +177,8 @@ export async function runReviewPipeline({
     const seats = Array.isArray(stage.panel) && stage.panel.length > 0 ? stage.panel : [panelSeat];
     for (const seat of seats) {
       const seatRoleId = seat?.id ?? roleId;
-      const priorForRole = state.panelVerdicts.filter((v) => (v?.reviewerRoleId ?? roleId) === seatRoleId);
+      const priorForRole = state.panelVerdicts.filter((v) =>
+        (v?.reviewerRoleId ?? roleId) === seatRoleId && v?.revisionRef === revisionRef);
       const round = priorForRole.length + 1;
       const produced = await runStageReview({
         stage,
@@ -202,7 +203,8 @@ export async function runReviewPipeline({
     const currentAfter = stageVerdictsForRevision(state, revisionRef);
     const aggregatedAfter = aggregateStageVerdict(stage, currentAfter);
     const newest = newestVerdict(currentAfter);
-    const priorForPrimary = state.panelVerdicts.filter((v) => (v?.reviewerRoleId ?? roleId) === roleId);
+    const priorForPrimary = state.panelVerdicts.filter((v) =>
+      (v?.reviewerRoleId ?? roleId) === roleId && v?.revisionRef === revisionRef);
     rows.push({
       stageId: stage.id,
       roleId: newest?.reviewerRoleId ?? roleId,

@@ -2554,6 +2554,9 @@ const stmtUpdateReviewRouting = db.prepare(
 const stmtUpdateReviewLabels = db.prepare(
   'UPDATE reviewed_prs SET labels_json = ? WHERE repo = ? AND pr_number = ?'
 );
+const stmtUpdatePipelineStageStates = db.prepare(
+  'UPDATE reviewed_prs SET pipeline_stage_states_json = ? WHERE repo = ? AND pr_number = ?'
+);
 const stmtGetFastMergeSkippedPRs = db.prepare(
   "SELECT * FROM reviewed_prs WHERE pr_state = 'fast_merge_skipped' ORDER BY reviewed_at ASC, id ASC LIMIT ?"
 );
@@ -3761,6 +3764,7 @@ async function runWatcherGatedReviewPipeline({
   riskClass,
   reviewAttemptNumber,
   spawnReviewerArgs,
+  stageStates = [],
 }) {
   const roleRegistry = loadRoleRegistry({ env: process.env });
   const resolvedPipeline = resolveDomainPipeline(domainConfig, { roleRegistry });
@@ -3785,13 +3789,9 @@ async function runWatcherGatedReviewPipeline({
     // per-stage review deliveries the reviewer runtime records under `review`.
     kind: 'pipeline-rollup',
   };
-  return runGatedReviewPipeline({
+  const result = await runGatedReviewPipeline({
     resolvedPipeline,
-    // The watcher drives a fresh pass each invocation; a head-moved remediation
-    // advances the revision, so the kernel re-runs from stage 1 anyway. The
-    // same-revision downstream-only re-review (carry-forward) is exercised at
-    // the driver level with persisted stage state (see the fixture e2e).
-    stageStates: [],
+    stageStates,
     currentRevisionRef: reviewerHeadSha,
     riskClass,
     observedAt: new Date().toISOString(),
@@ -3800,6 +3800,22 @@ async function runWatcherGatedReviewPipeline({
     comms,
     rollupDeliveryKey,
   });
+  // Persist every completed driver pass, including pending ones, so retries at
+  // the same revision retain clean upstream verdicts and resume downstream.
+  stmtUpdatePipelineStageStates.run(
+    JSON.stringify(result.pipeline.stageStates), repoPath, prNumber,
+  );
+  return result;
+}
+
+function parsePipelineStageStates(value) {
+  if (typeof value !== 'string' || value.length === 0) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 function settleReviewerAttempt({
@@ -9891,6 +9907,7 @@ async function pollOnce(
                   riskClass: ledger.latestRiskClass,
                   reviewAttemptNumber,
                   spawnReviewerArgs,
+                  stageStates: parsePipelineStageStates(ledger.pipeline_stage_states_json),
                 })
                 : await spawnReviewer(spawnReviewerArgs);
               if (result.ok) {

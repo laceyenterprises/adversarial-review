@@ -29,6 +29,7 @@ test('fresh DB includes subject identity columns and current schema version', ()
     assert.ok(columns.includes('domain_id'));
     assert.ok(columns.includes('subject_external_id'));
     assert.ok(columns.includes('revision_ref'));
+    assert.ok(columns.includes('pipeline_stage_states_json'));
     const tableInfo = db.prepare('PRAGMA table_info(reviewed_prs)').all();
     const repoColumn = tableInfo.find((column) => column.name === 'repo');
     const prNumberColumn = tableInfo.find((column) => column.name === 'pr_number');

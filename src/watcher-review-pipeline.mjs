@@ -149,6 +149,14 @@ export async function runGatedReviewPipeline({
     decidingBody = stageBodies.get(blockingStageId) ?? null;
   } else if (ranStageIds.length > 0) {
     decidingBody = stageBodies.get(ranStageIds[ranStageIds.length - 1]) ?? null;
+  } else if (disposition === 'clean') {
+    // A fully carried-forward pass has no ephemeral stage body. Use the newest
+    // persisted verdict body from the final stage as the deciding clean review.
+    const finalState = pipelineResult.stageStates[pipelineResult.stageStates.length - 1];
+    const currentVerdicts = finalState
+      ? finalState.panelVerdicts.filter((verdict) => verdict?.revisionRef === currentRevisionRef)
+      : [];
+    decidingBody = newestBody(currentVerdicts);
   }
 
   const ok = disposition !== 'pending' && decidingBody != null;
@@ -168,6 +176,15 @@ export async function runGatedReviewPipeline({
     rollupBody,
   };
   return result;
+}
+
+function newestBody(verdicts) {
+  for (let index = verdicts.length - 1; index >= 0; index -= 1) {
+    if (typeof verdicts[index]?.body === 'string' && verdicts[index].body.length > 0) {
+      return verdicts[index].body;
+    }
+  }
+  return null;
 }
 
 export { defaultStageDomainId, defaultParseVerdict };

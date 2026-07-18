@@ -132,6 +132,7 @@ test('revision advance re-runs from stage 1 (stale verdicts do not carry across 
   assert.deepEqual(ran.map((r) => r.stageId), ['code-quality', 'security']);
   assert.deepEqual(res.carriedForwardStageIds, []);
   assert.equal(res.disposition, 'clean');
+  assert.equal(ran[0].round, 1, 'round numbering resets for the new revision');
 });
 
 // ── Rollup delivery + budget ─────────────────────────────────────────────────

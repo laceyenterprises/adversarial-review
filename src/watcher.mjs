@@ -20,7 +20,9 @@ import {
   buildFastMergeAuditEntry,
   evaluateFastMergeDiffShape,
   fastMergeDecisionFromLabels,
-  latestTimelineFastMergeAuthorization,
+  fetchFastMergeAuthorizationFromTimeline,
+  fetchLivePRHeadSha,
+  fetchLivePRLabels,
   writeFastMergeAuditEntry,
   writeFastMergeAuditPayload,
 } from './adapters/subject/github-pr/fast-merge.mjs';
@@ -778,10 +780,6 @@ const FAST_MERGE_RECOVERY_PER_TICK = Math.max(
   1,
   Number.parseInt(process.env.FML_WATCHER_RECOVERY_PER_TICK || '50', 10) || 50,
 );
-const FAST_MERGE_TIMELINE_MAX_PAGES = Math.max(
-  1,
-  Number.parseInt(process.env.FML_WATCHER_TIMELINE_MAX_PAGES || '3', 10) || 3,
-);
 const FAST_MERGE_CHANGED_FILES_MAX_PAGES = Math.max(
   1,
   Number.parseInt(process.env.FML_WATCHER_CHANGED_FILES_MAX_PAGES || '3', 10) || 3,
@@ -1025,104 +1023,11 @@ function maybeSweepConditionalRequestCache({
   }
 }
 
-async function fetchLivePRLabels(octokit, { owner, repo, prNumber, logger = console } = {}) {
-  try {
-    if (typeof octokit?.rest?.issues?.listLabelsOnIssue !== 'function') {
-      throw new Error('octokit.rest.issues.listLabelsOnIssue unavailable');
-    }
-    const params = {
-      owner,
-      repo,
-      issue_number: prNumber,
-      per_page: 100,
-    };
-    const { data } = await fetchConditionalRestPage({
-      category: 'labels_list',
-      endpoint: 'issues.labels',
-      repo: `${owner}/${repo}`,
-      prNumber,
-      rootDir: ROOT,
-      logger,
-      params: { per_page: params.per_page },
-      request: (requestParams) => octokit.rest.issues.listLabelsOnIssue({
-        ...params,
-        ...requestParams,
-      }),
-    });
-    return Array.isArray(data) ? data : [];
-  } catch (err) {
-    logger.warn?.(
-      `[watcher] fast-merge label fetch failed for ${owner}/${repo}#${prNumber}; using normal review path: ${err?.message || err}`
-    );
-    return null;
-  }
-}
-
-async function fetchLivePRHeadSha({ owner, repo, prNumber, fallbackHeadSha = null, logger = console } = {}) {
-  try {
-    const pr = await fetchPullRequestHeadAndState(`${owner}/${repo}`, prNumber, {
-      execFileImpl: execFileAsync,
-      withLabels: false,
-    });
-    return pr?.headRefOid ? String(pr.headRefOid) : fallbackHeadSha;
-  } catch (err) {
-    logger.warn?.(
-      `[watcher] fast-merge head SHA fetch failed for ${owner}/${repo}#${prNumber}; using normal review path: ${err?.message || err}`
-    );
-    return null;
-  }
-}
-
-// parseFastMergeEventTime, FAST_MERGE_TIMELINE_HEAD_EVENT_NAMES, parseFastMergeList,
-// fastMergeOperatorActorSet, fastMergeSubmodulePathSet, normalizeTimelineActor,
-// isFastMergeOperatorActor, fastMergeEventTimestamp, and
-// latestTimelineFastMergeAuthorization moved to
-// ./adapters/subject/github-pr/fast-merge.mjs (ARC-18);
-// latestTimelineFastMergeAuthorization is imported back above for the
-// timeline-authorization fetch below.
-
-async function fetchFastMergeAuthorizationFromTimeline(
-  octokit,
-  { owner, repo, prNumber, allowedLabelNames = [], liveHeadSha = null, logger = console } = {},
-) {
-  try {
-    if (typeof octokit?.rest?.issues?.listEventsForTimeline !== 'function') {
-      throw new Error('octokit.rest.issues.listEventsForTimeline unavailable');
-    }
-    const params = {
-      owner,
-      repo,
-      issue_number: prNumber,
-      per_page: 100,
-    };
-    const events = [];
-    for (let page = 1; page <= FAST_MERGE_TIMELINE_MAX_PAGES; page += 1) {
-      const response = await fetchConditionalRestPage({
-        category: 'timeline_events',
-        endpoint: 'issues.timeline',
-        repo: `${owner}/${repo}`,
-        prNumber,
-        rootDir: ROOT,
-        logger,
-        params: { page, per_page: params.per_page },
-        request: (requestParams) => octokit.rest.issues.listEventsForTimeline({
-          ...params,
-          ...requestParams,
-          page,
-        }),
-      });
-      const pageEvents = Array.isArray(response?.data) ? response.data : [];
-      events.push(...pageEvents);
-      if (pageEvents.length < params.per_page) break;
-    }
-    return latestTimelineFastMergeAuthorization(events, allowedLabelNames, { liveHeadSha });
-  } catch (err) {
-    logger.warn?.(
-      `[watcher] fast-merge timeline fetch failed for ${owner}/${repo}#${prNumber}; using normal review path: ${err?.message || err}`
-    );
-    return null;
-  }
-}
+// fetchLivePRLabels, fetchLivePRHeadSha, and fetchFastMergeAuthorizationFromTimeline
+// (plus the timeline/label/actor pure helpers and FAST_MERGE_TIMELINE_MAX_PAGES)
+// moved to ./adapters/subject/github-pr/fast-merge.mjs (ARC-18); all three are
+// imported back above. fetchFastMergeChangedFiles (below) stays for now because it
+// threads watcher-owned API throttle/telemetry state (withApiTelemetry).
 
 async function fetchFastMergeChangedFiles(octokit, { owner, repo, prNumber, logger = console } = {}) {
   try {

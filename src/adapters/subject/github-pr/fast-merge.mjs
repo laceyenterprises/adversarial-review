@@ -10,11 +10,28 @@
 // follow-up extraction commit; this module holds only the pure + filesystem
 // helpers they call.
 
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { writeFileAtomic } from '../../../atomic-write.mjs';
+import { fetchConditionalRestPage } from '../../../conditional-request.mjs';
 import { fastMergeAuditPath } from '../../../fast-merge-audit-storage.mjs';
+import { fetchPullRequestHeadAndState } from '../../../github-api.mjs';
+
+const execFileAsync = promisify(execFile);
+
+// Repo root, computed identically to watcher.mjs's ROOT (repo root), resolved
+// from this module's location so the conditional-request cache dir and audit
+// paths resolve to the exact same absolute path the watcher used inline.
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
+
+const FAST_MERGE_TIMELINE_MAX_PAGES = Math.max(
+  1,
+  Number.parseInt(process.env.FML_WATCHER_TIMELINE_MAX_PAGES || '3', 10) || 3,
+);
 
 export const FAST_MERGE_VETO_LABEL = 'fast-merge-veto';
 export const FAST_MERGE_CATEGORY_BY_LABEL = Object.freeze({
@@ -307,4 +324,101 @@ export function writeFastMergeAuditPayload(rootDir, entry) {
 
 export function writeFastMergeAuditEntry(rootDir, args) {
   return writeFastMergeAuditPayload(rootDir, buildFastMergeAuditEntry(args));
+}
+
+// Live GitHub reads used by the fast-merge authorization path. These do network
+// I/O through the conditional-request cache (labels, timeline) and the gh-cli
+// head/state helper (head SHA). fetchFastMergeChangedFiles remains in watcher.mjs
+// for now because it threads watcher-owned API throttle/telemetry state
+// (withApiTelemetry); it moves once that telemetry seam is extracted.
+
+export async function fetchLivePRLabels(octokit, { owner, repo, prNumber, logger = console } = {}) {
+  try {
+    if (typeof octokit?.rest?.issues?.listLabelsOnIssue !== 'function') {
+      throw new Error('octokit.rest.issues.listLabelsOnIssue unavailable');
+    }
+    const params = {
+      owner,
+      repo,
+      issue_number: prNumber,
+      per_page: 100,
+    };
+    const { data } = await fetchConditionalRestPage({
+      category: 'labels_list',
+      endpoint: 'issues.labels',
+      repo: `${owner}/${repo}`,
+      prNumber,
+      rootDir: ROOT,
+      logger,
+      params: { per_page: params.per_page },
+      request: (requestParams) => octokit.rest.issues.listLabelsOnIssue({
+        ...params,
+        ...requestParams,
+      }),
+    });
+    return Array.isArray(data) ? data : [];
+  } catch (err) {
+    logger.warn?.(
+      `[watcher] fast-merge label fetch failed for ${owner}/${repo}#${prNumber}; using normal review path: ${err?.message || err}`
+    );
+    return null;
+  }
+}
+
+export async function fetchLivePRHeadSha({ owner, repo, prNumber, fallbackHeadSha = null, logger = console } = {}) {
+  try {
+    const pr = await fetchPullRequestHeadAndState(`${owner}/${repo}`, prNumber, {
+      execFileImpl: execFileAsync,
+      withLabels: false,
+    });
+    return pr?.headRefOid ? String(pr.headRefOid) : fallbackHeadSha;
+  } catch (err) {
+    logger.warn?.(
+      `[watcher] fast-merge head SHA fetch failed for ${owner}/${repo}#${prNumber}; using normal review path: ${err?.message || err}`
+    );
+    return null;
+  }
+}
+
+export async function fetchFastMergeAuthorizationFromTimeline(
+  octokit,
+  { owner, repo, prNumber, allowedLabelNames = [], liveHeadSha = null, logger = console } = {},
+) {
+  try {
+    if (typeof octokit?.rest?.issues?.listEventsForTimeline !== 'function') {
+      throw new Error('octokit.rest.issues.listEventsForTimeline unavailable');
+    }
+    const params = {
+      owner,
+      repo,
+      issue_number: prNumber,
+      per_page: 100,
+    };
+    const events = [];
+    for (let page = 1; page <= FAST_MERGE_TIMELINE_MAX_PAGES; page += 1) {
+      const response = await fetchConditionalRestPage({
+        category: 'timeline_events',
+        endpoint: 'issues.timeline',
+        repo: `${owner}/${repo}`,
+        prNumber,
+        rootDir: ROOT,
+        logger,
+        params: { page, per_page: params.per_page },
+        request: (requestParams) => octokit.rest.issues.listEventsForTimeline({
+          ...params,
+          ...requestParams,
+          page,
+        }),
+      });
+      const pageEvents = Array.isArray(response?.data) ? response.data : [];
+      events.push(...pageEvents);
+      if (pageEvents.length < params.per_page) break;
+    }
+    return latestTimelineFastMergeAuthorization(events, allowedLabelNames, { liveHeadSha });
+  } catch (err) {
+    logger.warn?.(
+      `[watcher] fast-merge timeline fetch failed for ${owner}/${repo}#${prNumber}; using normal review path: ${err?.message || err}`
+    );
+    return null;
+  }
 }

@@ -113,3 +113,21 @@ test('the reporting store reads through a query-only database handle', () => {
   );
   reporting.close();
 });
+
+test('the writable store refuses a caller that does not own the canonical data directory', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'shadow-store-owner-'));
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'getuid');
+  const ownerUid = process.getuid();
+  Object.defineProperty(process, 'getuid', {
+    ...descriptor,
+    value: () => ownerUid + 1,
+  });
+  try {
+    assert.throws(
+      () => openFinalizationShadowStore({ rootDir }),
+      /refusing cross-user finalization shadow store write/,
+    );
+  } finally {
+    Object.defineProperty(process, 'getuid', descriptor);
+  }
+});

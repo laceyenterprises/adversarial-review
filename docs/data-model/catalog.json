@@ -8,6 +8,14 @@
       "store": "data/reviews.db",
       "schemaSurface": "migrations/20260717_finalization_ledger.sql",
       "owner": "ARC-15 Merge Authority v2"
+    },
+    {
+      "id": "finalization-shadow",
+      "title": "Finalization Shadow Observations",
+      "path": "docs/data-model/finalization-shadow.md",
+      "store": "data/reviews.db",
+      "schemaSurface": "migrations/20260718_finalization_shadow.sql",
+      "owner": "ARC-16 Merge Authority v2 shadow mode"
     }
   ]
 }

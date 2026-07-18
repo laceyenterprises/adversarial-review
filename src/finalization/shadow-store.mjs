@@ -11,7 +11,7 @@
 // in production, schema convergence that matches the 20260718 migration exactly.
 
 import Database from 'better-sqlite3';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
@@ -48,8 +48,24 @@ export function ensureFinalizationShadowSchema(db) {
 }
 
 function openDb(rootDir, { busyTimeoutMs = DEFAULT_BUSY_TIMEOUT_MS } = {}) {
-  mkdirSync(join(rootDir, 'data'), { recursive: true });
-  const db = new Database(join(rootDir, 'data', 'reviews.db'));
+  const dataDir = join(rootDir, 'data');
+  const dbPath = join(dataDir, 'reviews.db');
+  const callerUid = typeof process.getuid === 'function' ? process.getuid() : null;
+  if (!Number.isInteger(callerUid)) {
+    throw new Error('cannot verify finalization shadow store caller ownership');
+  }
+  const anchor = existsSync(dataDir) ? dataDir : rootDir;
+  const ownerUid = statSync(anchor).uid;
+  if (callerUid !== ownerUid) {
+    throw new Error(
+      `refusing cross-user finalization shadow store write: caller uid ${callerUid}, canonical owner uid ${ownerUid}`,
+    );
+  }
+  if (existsSync(dbPath) && statSync(dbPath).uid !== ownerUid) {
+    throw new Error('refusing write to non-canonical-owned reviews database');
+  }
+  mkdirSync(dataDir, { recursive: true });
+  const db = new Database(dbPath);
   db.pragma(`busy_timeout = ${Math.max(0, Number(busyTimeoutMs) || 0)}`);
   return db;
 }

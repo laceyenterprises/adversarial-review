@@ -82,10 +82,17 @@ bidirectional:
 ## How to disposition (recording the call)
 
 The classifier proposes; **you dispose**. Record a human override on the
-observation — it supersedes the classifier's proposal in the report:
+observation — it supersedes the classifier's proposal in the report. Run the
+annotation as the daemon user; opening `data/reviews.db` for this write under a
+different account can change SQLite WAL sidecar ownership and lock the daemon
+out. Replace `<daemon-user>` and `<tool-root>` with deployment values:
 
-```js
-import { openFinalizationShadowStore } from '../src/finalization/shadow-store.mjs';
+```sh
+cd <tool-root>
+sudo -A -H -u <daemon-user> node --input-type=module <<'NODE'
+import { openFinalizationShadowStore } from './src/finalization/shadow-store.mjs';
+const rootDir = process.cwd();
+const observationId = 123; // replace with the report observation id
 const store = openFinalizationShadowStore({ rootDir });
 store.annotate(observationId, {
   disposition: 'resolved',            // or 're-open a wrongly auto-resolved one: 'open'
@@ -93,7 +100,13 @@ store.annotate(observationId, {
   principal: 'operator',
   at: new Date().toISOString(),
 });
+store.close();
+NODE
 ```
+
+The writable store also verifies the caller against the canonical `data/`
+owner and fails before opening SQLite when they differ. Do not bypass that
+guard or change database/WAL ownership to make an operator account writable.
 
 Use `disposition: 'open'` to **re-open** a divergence the classifier
 auto-resolved if you disagree with the attribution — that is the bidirectional

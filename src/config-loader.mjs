@@ -1233,6 +1233,53 @@ function schemaV1() {
             __default: 'codex',
             __enum: ENUM_ROLES_BUILD_PACK_DEFAULT_WORKER_CLASS,
           },
+          // ARC-12 role registry (v2 app architecture §5). A keyed map of role
+          // id → role definition. The config loader validates STRUCTURE only
+          // (known entry keys, string types); the semantic contract —
+          // promptSet required, exactly-one-of workerClass/persona, taskKind /
+          // completionShape enums, and workerClass ∈ the hq-published class
+          // list — lives in `src/role-registry.mjs`, which reads this subtree
+          // and fails loud at load. NO token, model id, or CLI path is ever a
+          // valid key here: per-role GitHub bot identity is comms-adapter
+          // delivery config keyed by role id, so the kernel and registry never
+          // see tokens.
+          registry: {
+            __type: TYPE_DICT,
+            __strict: false,
+            __default: {},
+            __keys: {},
+            __extra_keys_schema: {
+              __type: TYPE_DICT,
+              __strict: true,
+              __keys: {
+                promptSet: { __type: TYPE_STRING, __default: '' },
+                // Exactly one of workerClass / persona is set (enforced in
+                // role-registry.mjs). workerClass is validated against the
+                // hq-published roster; persona is a foundry persona id.
+                workerClass: { __type: TYPE_STRING, __default: '' },
+                persona: { __type: TYPE_STRING, __default: '' },
+                taskKind: { __type: TYPE_STRING, __default: '' },
+                completionShape: { __type: TYPE_STRING, __default: '' },
+                // Optional reviewer fallback precedence. Lower priorities are
+                // considered first; equal or omitted priorities retain registry
+                // order in the pure routing kernel.
+                priority: { __type: TYPE_INT, __default: null, __nullable: true, __min: 0 },
+              },
+            },
+          },
+          // Registry routing constraints (builder-class exclusions only). The
+          // kernel evaluates `never-review-own-builder-class` against
+          // `SubjectState.builderClass` (see `kernel/role-routing.mjs`).
+          routing: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              'never-review-own-builder-class': {
+                __type: TYPE_BOOL,
+                __default: true,
+              },
+            },
+          },
           hermes: {
             // Mirrors the Python `roles.hermes.provider` schema so the
             // shared host config remains loadable by both CFG loaders.

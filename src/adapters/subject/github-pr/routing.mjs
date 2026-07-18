@@ -16,6 +16,15 @@ import {
 } from '../../../role-config.mjs';
 import { AgentOSConfigError, loadConfigCached } from '../../../config-loader.mjs';
 
+// ARC-12 note — `botTokenEnv` here is the FROZEN v1 identity surface. The v2
+// architecture moves per-role GitHub bot identity into the comms adapter's
+// delivery config, keyed by role id (see
+// `adapters/comms/github-pr-comments/delivery-identity.mjs`), so the kernel and
+// the role registry never see tokens. These entries are retained only because
+// the live v1 watcher→reviewer.mjs dispatch path still reads `route.botTokenEnv`
+// today; no v2 registry-driven dispatch consumes them yet (that lands in
+// ARC-13). The token fields are removed from this table when the v1 dispatch
+// path is decomposed (ARC-18/19) — not before, or the live reviewer breaks.
 const ROUTE_BY_BUILDER_CLASS = {
   codex: {
     reviewerModel: 'claude',

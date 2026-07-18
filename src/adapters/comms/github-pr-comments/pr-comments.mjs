@@ -21,7 +21,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { PUBLIC_REPLY_MAX_CHARS, detectPublicReplyNoiseSignal } from '../../../follow-up-jobs.mjs';
+import { PUBLIC_REPLY_MAX_CHARS, detectPublicReplyNoiseSignal } from '../../../kernel/remediation-reply.mjs';
 import { preflightGeminiReviewerToken } from '../../../gemini-reviewer-preflight.mjs';
 import {
   adapterUnsupportedError,

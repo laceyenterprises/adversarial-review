@@ -196,11 +196,13 @@ roles:
       workerClass: gemini               # OS worker class or foundry persona id
       taskKind: review
       completionShape: decision-only
+      priority: 10                      # lower first; ties/omissions keep order
     security-reviewer:
       promptSet: code-pr-security
       workerClass: claude-code
       taskKind: review
       completionShape: decision-only
+      priority: 20
     remediator:
       promptSet: code-pr
       workerClass: codex

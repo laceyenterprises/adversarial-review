@@ -24,6 +24,7 @@ import {
 import { CODE_PR_DOMAIN_ID } from '../../../identity-shapes.mjs';
 import { parseSubjectExternalId } from '../../subject/github-pr/index.mjs';
 import { parseCommentUrlFromStdout, resolveCommentBotTokenEnv } from './pr-comments.mjs';
+import { resolveDeliveryIdentity } from './delivery-identity.mjs';
 import { redactPublicSafeText } from './redaction.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -173,15 +174,26 @@ function resolveGhCommentAuth({
   resolveGhToken,
   key,
   event = null,
+  roleId = null,
+  deliveryIdentityByRole = null,
 }) {
   const explicit = typeof resolveGhToken === 'function'
-    ? resolveGhToken({ key, event })
+    ? resolveGhToken({ key, event, roleId })
     : null;
   const fallbackTokenEnvNames = Array.isArray(explicit?.fallbackTokenEnvNames)
     ? explicit.fallbackTokenEnvNames.filter(Boolean)
     : [];
   const allowGhAuthFallback = explicit?.allowGhAuthFallback === true;
+  // ARC-12: when a per-role delivery-identity map is configured and this
+  // delivery carries a reviewer role id, the bot identity is selected by ROLE
+  // ID (comms delivery config) rather than re-derived from the builder-class
+  // routing table. An explicit `resolveGhToken` override still wins; absent a
+  // role identity the legacy worker-class → token mapping is unchanged.
+  const roleIdentity = (deliveryIdentityByRole && roleId)
+    ? resolveDeliveryIdentity(roleId, deliveryIdentityByRole)
+    : null;
   const tokenEnvName = explicit?.tokenEnvName
+    || roleIdentity?.botTokenEnv
     || resolveCommentBotTokenEnv(explicit?.workerClass || workerClass);
   if (!tokenEnvName && !explicit?.token) {
     throw new Error(`No gh token routing configured for ${key.kind} delivery`);
@@ -297,6 +309,14 @@ function renderVerdictBody(verdict) {
   return String(verdict?.body ?? verdict?.summary ?? '');
 }
 
+function extractDeliveryRoleId(primary, deliveryKey) {
+  return primary?.reviewerRoleId
+    ?? primary?.roleId
+    ?? deliveryKey?.reviewerRoleId
+    ?? deliveryKey?.roleId
+    ?? null;
+}
+
 /**
  * @param {{
  *   octokit?: any,
@@ -324,10 +344,15 @@ function createGitHubPRCommentsAdapter({
   env = process.env,
   workerClass = null,
   resolveGhToken = null,
+  // ARC-12: per-role comms delivery identity, keyed by role id. When set, a
+  // review whose verdict carries `reviewerRoleId` posts under the bot identity
+  // this map binds to that role (see `delivery-identity.mjs`). The kernel and
+  // role registry never see tokens — only this comms-adapter config does.
+  deliveryIdentityByRole = null,
   now = () => new Date(),
   log = console,
 } = {}) {
-  async function postRawComment({ key, body, event = null }) {
+  async function postRawComment({ key, body, event = null, roleId = null }) {
     const { repo, prNumber } = parseSubjectExternalId(key.subjectExternalId);
     const safeBody = redactPublicSafeText(body, 60_000);
 
@@ -351,6 +376,8 @@ function createGitHubPRCommentsAdapter({
       resolveGhToken,
       key,
       event,
+      roleId,
+      deliveryIdentityByRole,
     });
 
     const result = await execFileImpl('gh', [
@@ -422,7 +449,13 @@ function createGitHubPRCommentsAdapter({
     }
   }
 
-  async function postWithDedupe({ key, body, event = null }) {
+  async function postWithDedupe({ key, body, event = null, roleId = null }) {
+    // Validate deterministic role configuration before entering the claim-wait
+    // loop. A missing binding cannot become healthy while waiting for another
+    // delivery owner, so fail immediately without consuming the wait budget.
+    if (deliveryIdentityByRole && roleId) {
+      resolveDeliveryIdentity(roleId, deliveryIdentityByRole);
+    }
     const deadline = Date.now() + COMMENT_DELIVERY_CLAIM_WAIT_MS;
 
     while (true) {
@@ -465,7 +498,7 @@ function createGitHubPRCommentsAdapter({
           };
         }
 
-        const posted = await postRawComment({ key, body, event });
+        const posted = await postRawComment({ key, body, event, roleId });
         const deliveredAt = isoString(now());
         db = openDeliveryDb(rootDir);
         if (db) {
@@ -506,11 +539,19 @@ function createGitHubPRCommentsAdapter({
 
   async function postReview(verdict, deliveryKey) {
     const key = normalizeDeliveryKey(deliveryKey);
-    return postWithDedupe({ key, body: renderVerdictBody(verdict) });
+    // ARC-12: the verdict's reviewer role id selects the posting bot identity
+    // from the per-role delivery-identity map (when configured). A delivery key
+    // may also carry the role id (e.g. operator-driven re-delivery).
+    const roleId = extractDeliveryRoleId(verdict, deliveryKey);
+    return postWithDedupe({ key, body: renderVerdictBody(verdict), roleId });
   }
 
-  async function postRemediationReply(_reply, deliveryKey) {
+  async function postRemediationReply(reply, deliveryKey) {
     normalizeDeliveryKey(deliveryKey);
+    const roleId = extractDeliveryRoleId(reply, deliveryKey);
+    if (deliveryIdentityByRole && roleId) {
+      resolveDeliveryIdentity(roleId, deliveryIdentityByRole);
+    }
     throw new Error(
       'GitHub PR comments adapter does not support remediation-reply delivery; use the hardened remediation comment pipeline instead'
     );

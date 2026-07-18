@@ -372,7 +372,11 @@ test('research-finding domain config mirrors code-pr domain shape', () => {
   const codePr = JSON.parse(readFileSync(join(ROOT, 'domains', 'code-pr.json'), 'utf8'));
   const researchFinding = JSON.parse(readFileSync(join(ROOT, 'domains', 'research-finding.json'), 'utf8'));
 
-  assert.deepEqual(Object.keys(researchFinding).sort(), Object.keys(codePr).sort());
+  // ARC-13 adds an (off-by-default) `pipeline` block to the code-pr domain that
+  // the single-stage research-finding domain does not carry; the two configs
+  // are otherwise structurally identical.
+  const codePrKeys = Object.keys(codePr).filter((key) => key !== 'pipeline').sort();
+  assert.deepEqual(Object.keys(researchFinding).sort(), codePrKeys);
   assert.equal(researchFinding.id, 'research-finding');
   assert.equal(researchFinding.subjectChannel, 'markdown-file');
   assert.equal(researchFinding.commsChannel, 'slack-thread');

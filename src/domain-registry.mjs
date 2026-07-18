@@ -65,6 +65,21 @@ function validateDomainConfig(id, config) {
       `[domain-registry] domain "${id}" has a non-object "riskClasses" field`
     );
   }
+  // ARC-13: the optional `pipeline` block is deep-validated (stages, panel
+  // roles) lazily by `resolveDomainPipeline` only when it is enabled; here we
+  // fail loud on a structurally wrong shape (non-object, or a non-boolean
+  // `enabled` gate) so a typo cannot silently disable the gate check.
+  if (config.pipeline !== undefined) {
+    if (config.pipeline === null || typeof config.pipeline !== 'object' || Array.isArray(config.pipeline)) {
+      throw new Error(`[domain-registry] domain "${id}" has a non-object "pipeline" field`);
+    }
+    if (config.pipeline.enabled !== undefined && typeof config.pipeline.enabled !== 'boolean') {
+      throw new Error(
+        `[domain-registry] domain "${id}" pipeline.enabled must be a boolean ` +
+        `(got ${JSON.stringify(config.pipeline.enabled)})`
+      );
+    }
+  }
 }
 
 // Enumerate + validate every domains/<id>.json. Returns:

@@ -79,6 +79,26 @@ reviewer:
 roles:
   reviewer: adversarial             # enum: claude-code / codex / claude (legacy alias for claude-code) / gemini / adversarial
   remediator: adversarial           # enum: claude-code / codex / adversarial
+  # ARC-12/13 role registry (v2 app architecture §5). Left EMPTY by default so
+  # boot never has to resolve the hq-published worker-class roster and the
+  # code-pr pipeline gate (domains/code-pr.json → pipeline.enabled) stays inert
+  # — gate-off behaviour is byte-identical to v1 single-stage review.
+  #
+  # To enable the sequential two-stage pipeline (SPEC §1 Win 2), flip
+  # domains/code-pr.json pipeline.enabled to true AND populate this registry so
+  # each stage's panel role resolves to a promptSet + worker class:
+  #
+  #   registry:
+  #     code-quality-reviewer:
+  #       promptSet: code-pr
+  #       workerClass: codex          # must be an hq-published worker class
+  #       taskKind: review
+  #       completionShape: decision-only
+  #     security-reviewer:
+  #       promptSet: code-pr-security
+  #       workerClass: codex
+  #       taskKind: review
+  #       completionShape: decision-only
   adversarial:
     handoff:
       # HOM-01 wake-the-loop primitive. Default off preserves the timer-only

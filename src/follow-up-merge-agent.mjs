@@ -51,6 +51,7 @@ import {
   MODULE_CONFIG_PATH,
   validateStartupRoleConfig,
 } from './role-config.mjs';
+import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE, loadConfigCached } from './config-loader.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import classifyMergeAgentRescue, { parseReviewBody as parseMergeAgentRescueReviewBody } from './merge-agent-rescue-classifier.mjs';
@@ -176,6 +177,8 @@ function resolveMergeAgentWorkerClass(env = process.env, opts = {}) {
 // of failing silently at the first merge-agent dispatch hours later.
 function validateStartupMergeAgentConfig(env = process.env, opts = {}) {
   validateStartupRoleConfig({ env, ...opts });
+  // ARC-12: role-registry boot validation (no-op while roles.registry is empty).
+  validateStartupRoleRegistry({ env, ...opts });
   resolveMergeAgentWorkerClass(env, opts);
   resolveHqWorkerTearDownTimeoutMs(env, opts);
   resolveHqDispatchTimeoutMs(env, opts);

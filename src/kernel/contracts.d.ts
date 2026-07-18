@@ -200,6 +200,57 @@ export interface Stage {
 /** An ordered review pipeline; later stages gate on earlier stages. */
 export type ReviewPipeline = readonly Stage[];
 
+// ---------------------------------------------------------------------------
+// Role registry (v2 app architecture §5, ARC-12). A config-owned roster of
+// reviewer / remediator roles that replaces the hardcoded `roles.reviewer`
+// enum and the GitHub-fused `reviewerRouting` in `domains/code-pr.json`.
+//
+// A role names a WORKER CLASS or FOUNDRY PERSONA — never a binary, model id,
+// CLI path, or token. Model resolution stays in the OS; per-role GitHub bot
+// identity lives in the comms adapter's delivery config keyed by role id (see
+// `adapters/comms/github-pr-comments/delivery-identity.mjs`). The kernel and
+// the registry never see tokens. The v1 "reviewer must differ from builder
+// class" rule survives as the `never-review-own-builder-class` routing
+// constraint, evaluated kernel-side against `SubjectState.builderClass`
+// (see `kernel/role-routing.mjs`).
+// ---------------------------------------------------------------------------
+
+/** What a role's agent run produces. */
+export type RoleTaskKind = 'review' | 'remediation';
+
+/**
+ * The completion shape a role's dispatch expects: `decision-only` returns a
+ * structured verdict artifact (reviews); `branch-push` writes a branch
+ * (remediation).
+ */
+export type RoleCompletionShape = 'decision-only' | 'branch-push';
+
+/**
+ * One registry role. Exactly one of `workerClass` / `persona` is set:
+ * `workerClass` is an OS worker-class name validated at load against the
+ * hq-published class list; `persona` is a foundry persona id. No token, model
+ * id, or CLI path ever appears here.
+ */
+export interface RoleDefinition {
+  id: string;
+  promptSet: string;
+  workerClass?: string;
+  persona?: string;
+  taskKind: RoleTaskKind;
+  completionShape: RoleCompletionShape;
+}
+
+/** Registry routing constraints (builder-class exclusions only). */
+export interface RoleRoutingPolicy {
+  neverReviewOwnBuilderClass: boolean;
+}
+
+/** The loaded, validated role registry. */
+export interface RoleRegistry {
+  roles: { readonly [roleId: string]: RoleDefinition };
+  routing: RoleRoutingPolicy;
+}
+
 /** The folded disposition of a single verdict or an aggregated stage. */
 export type PipelineDisposition = 'clean' | 'blocking' | 'pending';
 

@@ -30,6 +30,7 @@ import {
   resolveGeminiReviewerModeWithSource,
   resolveReviewPopulationRetryConfig,
 } from './role-config.mjs';
+import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
 import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
@@ -10030,6 +10031,11 @@ async function main() {
     // hours later at first merge-agent dispatch.
     validateDefaultReviewerRouteConfig(process.env);
     validateStartupMergeAgentConfig(process.env);
+    // ARC-12: the role registry (roles.registry) is validated at boot so a
+    // malformed role or a workerClass outside the hq-published roster fails
+    // loud here, not at first pipeline dispatch. Empty by default (no roles),
+    // so this is a no-op until a domain opts into the registry.
+    validateStartupRoleRegistry({ env: process.env });
     resolveWatcherDrainMaxMs(process.env);
     resolvePendingDraftRespawnAgeSeconds(process.env);
     resolveStuckDispatchAlertDebounceMs(process.env);

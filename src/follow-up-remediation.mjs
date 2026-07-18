@@ -54,6 +54,7 @@ import {
   resolveDefaultRemediator,
   validateStartupRoleConfig,
 } from './role-config.mjs';
+import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 import { detectQuotaExhaustion, parseQuotaResetAt } from './quota-exhaustion.mjs';
@@ -2485,6 +2486,9 @@ function validateStartupRemediationConfig(env = process.env, opts = {}) {
   // schema errors in any section (not just the role keys) fail loud at
   // boot, including the promoted remediation concurrency knobs.
   validateStartupRoleConfig({ env, ...opts });
+  // ARC-12: fail loud at boot on a malformed role registry or a workerClass
+  // outside the hq-published roster (no-op while roles.registry is empty).
+  validateStartupRoleRegistry({ env, ...opts });
   defaultRemediatorWorkerClassFromEnv(env, opts);
   resolveRemediationMaxConcurrentJobs(env);
   if (_isAgentOsRemediationMode(env)) {

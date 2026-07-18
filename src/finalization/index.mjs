@@ -103,3 +103,22 @@ export {
   effectiveDisposition,
   renderShadowReport,
 } from './shadow-report.mjs';
+
+// Merge Authority v2 leased executor (ARC-17): the single, leased, idempotent,
+// fail-closed finalization worker per subject that turns the pure `eligible(...)`
+// decision into an action. SHIPS GATED OFF — inert until an operator promotes it
+// on shadow evidence. See docs/SPEC-merge-authority-v2.md §4 and
+// docs/finalization-executor-promotion-runbook.md.
+export {
+  ensureFinalizationExecutorLeaseSchema,
+  openFinalizationExecutorLeaseStore,
+} from './executor-lease-store.mjs';
+
+export {
+  checkIdentityAttestation,
+  createGithubAdapterMergeSurface,
+  parseCodePrSubject,
+  resolveMergeSurface,
+} from './execution-surfaces.mjs';
+
+export { createFinalizationExecutor } from './executor.mjs';

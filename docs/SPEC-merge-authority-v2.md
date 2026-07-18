@@ -137,7 +137,11 @@ Policy inputs, all explicit and versioned in config:
 - **Idempotent by construction:** before executing, the executor re-folds; if
   the world moved (new event since the decision), it discards and re-decides.
   Merge execution itself is guarded by the (subject, rev) pair — a merge of a
-  stale rev is structurally impossible to issue.
+  stale rev is structurally impossible to issue. If the remote merge succeeds
+  but the local `finalized` append does not, a retry may accept the adapter's
+  structured `already merged` response as success only when that response
+  identifies the same guarded revision; the retry then appends the missing
+  terminal event. Unstructured or mismatched responses remain fail-closed.
 - **The hammer becomes a decision outcome, not an actor.** "Hammer" v2 = the
   remediation worker dispatched by a `remediate(final)` decision plus the
   executor's subsequent `finalize-now`. The gate between the two is the

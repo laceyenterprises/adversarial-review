@@ -16,6 +16,14 @@
       "store": "data/reviews.db",
       "schemaSurface": "migrations/20260718_finalization_shadow.sql",
       "owner": "ARC-16 Merge Authority v2 shadow mode"
+    },
+    {
+      "id": "finalization-executor-lease",
+      "title": "Finalization Executor Lease",
+      "path": "docs/data-model/finalization-executor-lease.md",
+      "store": "data/reviews.db",
+      "schemaSurface": "migrations/20260719_finalization_executor_lease.sql",
+      "owner": "ARC-17 Merge Authority v2 leased executor"
     }
   ]
 }

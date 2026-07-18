@@ -1036,3 +1036,94 @@ export interface ShadowReportModel {
   promotable: boolean;
   blockers: string[];
 }
+
+// ---------------------------------------------------------------------------
+// Merge Authority v2 leased executor (ARC-17; docs/SPEC-merge-authority-v2.md §4)
+//
+// The last piece of MA-v2: the single finalization worker per subject that turns
+// the pure `eligible(...)` decision into an action. It is leased (one writer per
+// subject, lease in the app store — never GitHub labels), idempotent (re-fold
+// guard + `matchHeadCommit` + terminal short-circuit), and fail-closed (kill
+// switch intercepts every mutating decision before any adapter and writes an
+// `escalated` audit event). It SHIPS GATED OFF (`enabled:false`) until an
+// operator promotes it on shadow evidence — see the promotion runbook.
+// Implemented in `src/finalization/executor-lease-store.mjs`,
+// `execution-surfaces.mjs`, and `executor.mjs`.
+// ---------------------------------------------------------------------------
+
+/** The app-store lease that serializes finalization execution to one writer per subject. */
+export interface FinalizationExecutorLease {
+  subjectKey: SubjectKey;
+  /** Opaque per-acquisition fence token; release/renew must present it exactly. */
+  leaseId: string;
+  /** Opaque holder identity (e.g. `pid@host` or a worker id) for diagnostics. */
+  holder: string;
+  /** The revision the holder acquired the lease to act on. */
+  revisionRef: string | null;
+  acquiredAt: IsoTimestamp;
+  /** After this, a contender may steal the lease (a live holder renews instead). */
+  deadline: IsoTimestamp;
+  updatedAt: IsoTimestamp;
+}
+
+/** The result of an acquire attempt: taken (fresh/stolen), or held by another. */
+export interface FinalizationLeaseAcquireResult {
+  acquired: boolean;
+  lease: FinalizationExecutorLease | null;
+  /** `inserted` | `stolen` when acquired; `held` when another holder is live. */
+  reason: string;
+  /** The live holder when `acquired:false`. */
+  existing: FinalizationExecutorLease | null;
+}
+
+/**
+ * The disposition of an executor tick / execute. Reuses the finalization port's
+ * status vocabulary: `executed` (the mutation completed), `deferred` (declined
+ * for now — lease contended, world moved, gated off, or a `wait`), `skipped` (no
+ * mutation required — already terminal, or a recorded escalate/halt), `failed`
+ * (attempted and failed, fail-closed).
+ */
+export interface FinalizationExecutionOutcome {
+  subjectKey: SubjectKey;
+  decision: EligibilityDecision;
+  status: FinalizationActionStatus;
+  /**
+   * The concrete action taken/attempted: `merge`, `dispatch-remediation`,
+   * `close`, `escalate`, `halt`, `re-decide`, `lease-contended`, `gated-off`,
+   * or `none`.
+   */
+  action: string;
+  reason?: string;
+  detail?: string;
+  /** True when the kill switch intercepted a mutating decision (fail-closed audit). */
+  killSwitch?: boolean;
+  observedAt: IsoTimestamp;
+}
+
+/**
+ * The merge seam the executor performs through: the ARC-20 adjudicate surface in
+ * production, with a github-adapter `pull-request-merge` local-mode fallback.
+ * `ok:false` fails closed (no `finalized` mark is written; the next tick retries).
+ */
+export interface FinalizationMergeSurface {
+  name?: string;
+  merge(args: {
+    subjectKey: SubjectKey;
+    subjectExternalId: string;
+    revisionRef: string;
+    mergeMethod: string;
+  }): Promise<{ ok: boolean; reason?: string; detail?: string; via?: string; payload?: unknown }>;
+}
+
+/**
+ * The identity/attestation seam (ARC-22), read-through and fail-closed. A present
+ * surface is authoritative — its `{ ok:false }` (or a throw) blocks the merge; its
+ * absence is local mode (the adapter enforces its own token identity).
+ */
+export interface FinalizationIdentitySurface {
+  check(ctx: {
+    subjectKey: SubjectKey;
+    revisionRef: string;
+    decision: EligibilityDecision;
+  }): Promise<{ ok: boolean; reason?: string }> | { ok: boolean; reason?: string };
+}

@@ -19,6 +19,10 @@ import {
   COMMENT_BOT_LOGIN_BY_TOKEN_ENV,
   resolveCommentBotTokenEnv,
 } from './pr-comments.mjs';
+import { loadRoleRegistry } from '../../../role-registry.mjs';
+import { loadRoleConfig } from '../../../role-config.mjs';
+
+const DELIVERY_IDENTITY_KEY = 'roles.delivery_identity';
 
 // Bot-login → token-env inverse of `COMMENT_BOT_LOGIN_BY_TOKEN_ENV`, so an
 // identity entry may be declared by either side and normalize to both.
@@ -141,3 +145,26 @@ export function validateDeliveryIdentityMap(identityByRole, { requireRoleIds = [
 }
 
 export const __testing = { TOKEN_ENV_BY_BOT_LOGIN };
+
+/**
+ * Boot-time validator for comms delivery identity (review #631). Loads the
+ * role registry to get its role ids and the `roles.delivery_identity` config
+ * map, then asserts (via `validateDeliveryIdentityMap`) that every registered
+ * role has a well-formed posting identity binding — so a registry role with no
+ * comms identity fails loud at startup, not after an expensive review runs and
+ * the daemon crashes at the final comment-delivery step. No-op when the
+ * registry is empty (production default). Lives here (comms layer) rather than
+ * in role-registry.mjs so the low-level registry never imports the comms
+ * adapter (which would create an import cycle).
+ *
+ * @param {object} [options] - forwarded to loadRoleRegistry/loadRoleConfig
+ */
+export function validateStartupDeliveryIdentity(options = {}) {
+  const { env = process.env, topPath, modulePaths, loaderImpl } = options;
+  const registry = loadRoleRegistry(options);
+  const roleIds = Object.keys(registry?.roles ?? {});
+  if (roleIds.length === 0) return; // nothing to bind
+  const cfg = loadRoleConfig({ env, topPath, modulePaths, loaderImpl, contextKey: DELIVERY_IDENTITY_KEY });
+  const identityByRole = cfg.get(DELIVERY_IDENTITY_KEY, {});
+  validateDeliveryIdentityMap(identityByRole, { requireRoleIds: roleIds });
+}

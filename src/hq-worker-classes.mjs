@@ -17,7 +17,7 @@
 // source. If a future `hq` subcommand enumerates classes, swap `readLiveRoster`
 // for the shell-out — the snapshot cache and validator above it are unchanged.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -125,6 +125,9 @@ function writeSnapshot(rootDir, classes, {
   ownerGuardOptions = {},
 } = {}) {
   const path = snapshotPath(rootDir);
+  // Ensure the snapshot's parent dir exists so a first-run write in an
+  // unseeded checkout succeeds instead of silently ENOENT-ing (review #631).
+  mkdirSync(dirname(path), { recursive: true });
   assertCanonicalOwner(rootDir, path, {
     cannotVerifyMessage: 'cannot verify worker-class snapshot caller ownership',
     crossUserMessage: 'refusing cross-user worker-class snapshot write',

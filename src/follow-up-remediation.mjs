@@ -55,6 +55,7 @@ import {
   validateStartupRoleConfig,
 } from './role-config.mjs';
 import { validateStartupRoleRegistry } from './role-registry.mjs';
+import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
 import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 import { detectQuotaExhaustion, parseQuotaResetAt } from './quota-exhaustion.mjs';
@@ -2489,6 +2490,12 @@ function validateStartupRemediationConfig(env = process.env, opts = {}) {
   // ARC-12: fail loud at boot on a malformed role registry or a workerClass
   // outside the hq-published roster (no-op while roles.registry is empty).
   validateStartupRoleRegistry({
+    env,
+    ...opts,
+    workerClassOptions: { ...opts.workerClassOptions, readOnly: true },
+  });
+  // ARC-12 (review #631): comms delivery identity binding for every role.
+  validateStartupDeliveryIdentity({
     env,
     ...opts,
     workerClassOptions: { ...opts.workerClassOptions, readOnly: true },

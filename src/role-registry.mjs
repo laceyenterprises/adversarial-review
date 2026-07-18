@@ -243,3 +243,11 @@ export function loadRoleRegistry({
 export function validateStartupRoleRegistry(options = {}) {
   loadRoleRegistry(options);
 }
+
+// The comms delivery-identity boot validator (review #631) lives in
+// adapters/comms/github-pr-comments/delivery-identity.mjs, NOT here: it needs
+// the comms adapter's validateDeliveryIdentityMap, and role-registry is a
+// low-level config module that must not import the comms adapter layer (doing
+// so creates a role-registry → delivery-identity → pr-comments → follow-up-jobs
+// → role-registry import cycle). The comms module imports loadRoleRegistry from
+// here, one direction.

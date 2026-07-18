@@ -27,5 +27,20 @@
     "codex": "claude-reviewer-lacey",
     "claude-code": "codex-reviewer-lacey",
     "clio-agent": "codex-reviewer-lacey"
+  },
+  "pipeline": {
+    "enabled": false,
+    "stages": [
+      {
+        "id": "code-quality",
+        "panel": ["code-quality-reviewer"],
+        "aggregation": { "kind": "unanimous-clean" }
+      },
+      {
+        "id": "security",
+        "panel": ["security-reviewer"],
+        "aggregation": { "kind": "unanimous-clean" }
+      }
+    ]
   }
 }

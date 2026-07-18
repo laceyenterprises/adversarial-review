@@ -30,8 +30,10 @@ import {
   resolveGeminiReviewerModeWithSource,
   resolveReviewPopulationRetryConfig,
 } from './role-config.mjs';
-import { validateStartupRoleRegistry } from './role-registry.mjs';
+import { loadRoleRegistry, validateStartupRoleRegistry } from './role-registry.mjs';
 import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
+import { isPipelineEnabled, resolveDomainPipeline } from './domain-pipeline.mjs';
+import { runGatedReviewPipeline } from './watcher-review-pipeline.mjs';
 import { checkAgyReviewerAuth } from './agy-reviewer-auth.mjs';
 import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
@@ -2552,6 +2554,9 @@ const stmtUpdateReviewRouting = db.prepare(
 const stmtUpdateReviewLabels = db.prepare(
   'UPDATE reviewed_prs SET labels_json = ? WHERE repo = ? AND pr_number = ?'
 );
+const stmtUpdatePipelineStageStates = db.prepare(
+  'UPDATE reviewed_prs SET pipeline_stage_states_json = ? WHERE repo = ? AND pr_number = ?'
+);
 const stmtGetFastMergeSkippedPRs = db.prepare(
   "SELECT * FROM reviewed_prs WHERE pr_state = 'fast_merge_skipped' ORDER BY reviewed_at ASC, id ASC LIMIT ?"
 );
@@ -3738,6 +3743,78 @@ async function spawnReviewer({
     inFlightReviewerSessions.delete(reviewerSessionUuid);
     activeReviewerSpawns.delete(reviewerSpawnToken);
     deleteSpawnRecord(ADVERSARIAL_REVIEW_STATE_DIR, reviewerSpawnToken);
+  }
+}
+
+// ARC-13: the gated two-stage pipeline entry point invoked from the review-drive
+// seam when `domains/<id>.json` sets `pipeline.enabled: true` (default OFF). It
+// loads the role registry (only reached on the enabled path — boot stays
+// roster-free otherwise), compiles the domain's pipeline, drives each stage
+// through the same `spawnReviewer` the v1 path uses (per-stage prompt set
+// selected by the stage role's `promptSet`-named domain), and posts the Win 2
+// rollup through a github-pr-comments adapter. It returns a `spawnReviewer`-
+// shaped result so the caller's unchanged settle/round-budget/hammer accounting
+// treats the pipeline pass exactly like a single review.
+async function runWatcherGatedReviewPipeline({
+  domainConfig,
+  domainId,
+  repoPath,
+  prNumber,
+  reviewerHeadSha,
+  riskClass,
+  reviewAttemptNumber,
+  spawnReviewerArgs,
+  stageStates = [],
+}) {
+  const roleRegistry = loadRoleRegistry({ env: process.env });
+  const resolvedPipeline = resolveDomainPipeline(domainConfig, { roleRegistry });
+  // Lazy-import the comms adapter: statically importing it at the top of
+  // watcher.mjs forms a module cycle (comms → pr-comments → follow-up-jobs →
+  // watcher) that breaks a named binding when the watcher loads first. This path
+  // only runs on the enabled gate, so a dynamic import here is free of that cost.
+  const { createGitHubPRCommentsAdapter } = await import('./adapters/comms/github-pr-comments/index.mjs');
+  const comms = createGitHubPRCommentsAdapter({
+    rootDir: ROOT,
+    env: process.env,
+    workerClass: spawnReviewerArgs.reviewerModel,
+    // Post the aggregate rollup under the reviewer's own bot identity.
+    resolveGhToken: () => ({ tokenEnvName: spawnReviewerArgs.botTokenEnv }),
+  });
+  const rollupDeliveryKey = {
+    domainId,
+    subjectExternalId: `${repoPath}#${prNumber}`,
+    revisionRef: reviewerHeadSha,
+    round: Number.isFinite(reviewAttemptNumber) ? reviewAttemptNumber : 0,
+    // A distinct delivery kind so the aggregate rollup never collides with the
+    // per-stage review deliveries the reviewer runtime records under `review`.
+    kind: 'pipeline-rollup',
+  };
+  const result = await runGatedReviewPipeline({
+    resolvedPipeline,
+    stageStates,
+    currentRevisionRef: reviewerHeadSha,
+    riskClass,
+    observedAt: new Date().toISOString(),
+    spawnReviewer,
+    spawnReviewerArgs,
+    comms,
+    rollupDeliveryKey,
+  });
+  // Persist every completed driver pass, including pending ones, so retries at
+  // the same revision retain clean upstream verdicts and resume downstream.
+  stmtUpdatePipelineStageStates.run(
+    JSON.stringify(result.pipeline.stageStates), repoPath, prNumber,
+  );
+  return result;
+}
+
+function parsePipelineStageStates(value) {
+  if (typeof value !== 'string' || value.length === 0) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
   }
 }
 
@@ -9783,7 +9860,7 @@ async function pollOnce(
                 `${skipReviewerSpawnReason}; continuing to watcher close/maintenance path.`
               );
             } else {
-              const result = await spawnReviewer({
+              const spawnReviewerArgs = {
                 repo: repoPath,
                 prNumber,
                 reviewerModel: route.reviewerModel,
@@ -9815,7 +9892,24 @@ async function pollOnce(
                     reviewerTimeoutMs,
                   });
                 },
-              });
+              };
+              // ARC-13: when the domain enables the sequential review pipeline
+              // (default OFF), drive the two-stage pipeline instead of a single
+              // review and post the Win 2 rollup. Gate-off is byte-identical:
+              // the else-branch is the unchanged v1 single `spawnReviewer` call.
+              const result = isPipelineEnabled(domainAdapterSet.domainConfig)
+                ? await runWatcherGatedReviewPipeline({
+                  domainConfig: domainAdapterSet.domainConfig,
+                  domainId,
+                  repoPath,
+                  prNumber,
+                  reviewerHeadSha,
+                  riskClass: ledger.latestRiskClass,
+                  reviewAttemptNumber,
+                  spawnReviewerArgs,
+                  stageStates: parsePipelineStageStates(ledger.pipeline_stage_states_json),
+                })
+                : await spawnReviewer(spawnReviewerArgs);
               if (result.ok) {
                 healthProbe?.recordSpawn?.(healthTick, { at: attemptAt });
               }

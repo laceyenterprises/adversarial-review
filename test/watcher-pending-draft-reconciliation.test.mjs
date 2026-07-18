@@ -195,7 +195,9 @@ test('watcher terminal rereview skip releases claim and falls through to close p
   const hardCeilingIndex = source.indexOf("const hardReviewCeiling =", guardIndex);
   const hardSkipIndex = source.indexOf("if (!skipReviewerSpawnReason && priorReviewAttempts >= hardReviewCeiling) {", guardIndex);
   const skipReleaseIndex = source.indexOf("if (skipReviewerSpawnReason) {", guardIndex);
-  const spawnIndex = source.indexOf("const result = await spawnReviewer({", guardIndex);
+  // ARC-13 hoisted the spawn args + added a gated pipeline ternary; the v1
+  // single-review call is the ternary's non-pipeline branch.
+  const spawnIndex = source.indexOf("await spawnReviewer(spawnReviewerArgs)", guardIndex);
   const adoptionIndex = source.indexOf("await runQueuedReviewAdoptionPhase({", spawnIndex);
 
   assert.ok(guardIndex > 0, 'rereview skip guard should exist');

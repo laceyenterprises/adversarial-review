@@ -562,14 +562,30 @@ function createGitHubPRCommentsAdapter({
     return postWithDedupe({ key, body, event });
   }
 
+  // ARC-13: post the two-stage pipeline rollup (SPEC §1 Win 2). The rollup is a
+  // pre-rendered markdown body (see `kernel/pipeline-rollup.mjs`) aggregating
+  // every stage's verdict for one review pass, so it posts under the default bot
+  // identity (no single reviewer role owns it) and dedupes per revision + round
+  // like any review delivery.
+  async function postPipelineRollup(rollup, deliveryKey) {
+    const key = normalizeDeliveryKey(deliveryKey);
+    const body = typeof rollup === 'string' ? rollup : String(rollup?.body ?? '');
+    if (!body.trim()) {
+      throw new TypeError('postPipelineRollup requires a rendered rollup body');
+    }
+    return postWithDedupe({ key, body });
+  }
+
   return {
     postReview,
     postRemediationReply,
     postOperatorNotice,
+    postPipelineRollup,
     lookupExistingDeliveries,
     deliverReviewComment: postReview,
     deliverRemediationReply: postRemediationReply,
     deliverOperatorNotice: postOperatorNotice,
+    deliverPipelineRollup: postPipelineRollup,
     loadPriorDeliveriesForSubject: lookupExistingDeliveries,
   };
 }

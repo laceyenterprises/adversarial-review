@@ -118,12 +118,12 @@ export function openFinalizationExecutorLeaseStore({ rootDir, db, busyTimeoutMs 
     SET lease_id = @lease_id, holder = @holder, revision_ref = @revision_ref,
         acquired_at = @acquired_at, deadline = @deadline, updated_at = @updated_at
     WHERE domain_id = @domain_id AND subject_external_id = @subject_external_id
-      AND lease_id = @prev_lease_id AND deadline <= @now
+      AND lease_id = @prev_lease_id AND julianday(deadline) <= julianday(@now)
   `);
 
   const renew = database.prepare(`
     UPDATE finalization_executor_lease
-    SET deadline = @deadline, updated_at = @updated_at, revision_ref = @revision_ref
+    SET deadline = @deadline, updated_at = @updated_at, revision_ref = COALESCE(@revision_ref, revision_ref)
     WHERE domain_id = @domain_id AND subject_external_id = @subject_external_id AND lease_id = @lease_id
   `);
 

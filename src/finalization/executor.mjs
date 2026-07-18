@@ -189,7 +189,6 @@ export function createFinalizationExecutor({
       }
 
       case 'remediate': {
-        if (killSwitchOn()) return recordKillSwitchEscalation(subject, decision, state, observedAt);
         const round = Number.isInteger(decision.round) ? decision.round : 1;
         // Same idempotency-key scheme as reviews: a replayed dispatch dedupes at
         // the ledger's partial-unique index (final rounds carry `final:true`).
@@ -203,6 +202,7 @@ export function createFinalizationExecutor({
             status: 'skipped', action: 'dispatch-remediation', observedAt, reason: 'round already dispatched',
           });
         }
+        if (killSwitchOn()) return recordKillSwitchEscalation(subject, decision, state, observedAt);
         if (remediationSurface && typeof remediationSurface.dispatch === 'function') {
           try {
             await remediationSurface.dispatch({
@@ -281,10 +281,9 @@ export function createFinalizationExecutor({
    * @param {import('../kernel/contracts.js').EligibilityDecision} decision
    * @param {{ subject: object, observedAt: string, basis?: { eventCount?: number } }} ctx
    */
-  async function execute(decision, { subject, observedAt, basis } = {}) {
+  async function execute(decision, { subject, observedAt, basis, foldedState = null } = {}) {
     const subjectKey = resolveSubjectKey(subject);
-    const events = ledgerStore.read(subject);
-    const state = fold(events);
+    const state = foldedState ?? fold(ledgerStore.read(subject));
 
     // Re-fold guard (§4): the world moved if the ledger grew since the decision
     // was folded, or the subject advanced past the decided revision.
@@ -325,7 +324,9 @@ export function createFinalizationExecutor({
 
     const myLeaseId = leaseId || generateLeaseId();
     const deadline = isoAdd(observedAt, leaseTtlMs);
-    const currentRev = fold(ledgerStore.read(subject)).currentRevision;
+    const events = ledgerStore.read(subject);
+    const state = fold(events);
+    const currentRev = state.currentRevision;
     const acq = leaseStore.acquire({
       subject, holder: holderId, leaseId: myLeaseId, revisionRef: currentRev, now: observedAt, deadline,
     });
@@ -338,12 +339,17 @@ export function createFinalizationExecutor({
     }
 
     try {
-      const events = ledgerStore.read(subject);
-      const state = fold(events);
-      const decision = eligible(state, policy, { observedAt });
-      // decide → execute back-to-back under the lease; the re-fold guard still
-      // runs (a concurrent observer may have appended between the two reads).
-      return await execute(decision, { subject, observedAt, basis: { eventCount: state.eventCount } });
+      const leasedEvents = ledgerStore.read(subject);
+      const leasedState = fold(leasedEvents);
+      const decision = eligible(leasedState, policy, { observedAt });
+      // decide → execute back-to-back under the lease; tick passes the
+      // post-acquire folded state so execute() does not perform a third fold.
+      return await execute(decision, {
+        subject,
+        observedAt,
+        basis: { eventCount: leasedState.eventCount },
+        foldedState: leasedState,
+      });
     } finally {
       leaseStore.release({ subject, leaseId: myLeaseId });
     }

@@ -82,6 +82,24 @@ test('finalize-now merges through the adjudicate surface and marks finalized', a
   assert.equal(leaseStore.read(REF), null, 'lease released after tick');
 });
 
+test('tick reuses the post-lease fold instead of folding a third time in execute', async () => {
+  const { ledgerStore, leaseStore } = harness();
+  makeEligible(ledgerStore);
+  let reads = 0;
+  const originalRead = ledgerStore.read.bind(ledgerStore);
+  ledgerStore.read = (subject) => {
+    reads += 1;
+    return originalRead(subject);
+  };
+  const merge = recordingMergeSurface();
+  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, adjudicateSurface: merge, enabled: true });
+
+  const out = await exec.tick(REF, { observedAt: t(10) });
+
+  assert.equal(out.status, 'executed');
+  assert.equal(reads, 2, 'tick folds once for the lease revision and once after acquiring the lease');
+});
+
 test('lease contention: a subject held by another executor is deferred, not acted', async () => {
   const { ledgerStore, leaseStore } = harness();
   makeEligible(ledgerStore);
@@ -254,7 +272,8 @@ test('remediate dispatches, and replaying the same decision is idempotent on the
 
   const dispatches = [];
   const remediationSurface = { dispatch: async (a) => { dispatches.push(a); } };
-  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, remediationSurface, enabled: true });
+  const policy = {};
+  const exec = createFinalizationExecutor({ ledgerStore, leaseStore, remediationSurface, enabled: true, policy });
 
   const decision = eligible(fold(ledgerStore.read(REF)), undefined, { observedAt: t(10) });
   assert.equal(decision.kind, 'remediate');
@@ -268,10 +287,16 @@ test('remediate dispatches, and replaying the same decision is idempotent on the
   assert.equal(dispatches.length, 1);
   assert.equal(dispatches[0].round, 1);
 
+  policy.autonomousExecutionDisabled = true;
   const replay = await exec.execute(decision, { subject: REF, observedAt: t(11) });
   assert.equal(replay.status, 'skipped');
   assert.match(replay.reason, /already dispatched/);
   assert.equal(dispatches.length, 1, 'a replayed round-1 decision does not re-dispatch');
+  assert.equal(
+    ledgerStore.read(REF).some((e) => e.type === 'escalated'),
+    false,
+    'kill switch does not convert an already-dispatched replay into terminal escalation',
+  );
 });
 
 test('merge surface failure fails closed: no finalized mark, retried next tick', async () => {

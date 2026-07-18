@@ -35,9 +35,12 @@ Primary key: `(domain_id, subject_external_id)` — one lease row per subject.
 
 - **Acquisition** is an atomic `INSERT ... ON CONFLICT DO NOTHING`; an expired
   lease is stolen by a compare-and-set `UPDATE` fenced on the observed
-  `lease_id` and `deadline <= now`, so two concurrent stealers cannot both win.
+  `lease_id` and parsed `deadline <= now`, so mixed ISO timestamp precision
+  cannot delay an exact-boundary steal and two concurrent stealers cannot both
+  win.
 - **Release and renewal are fenced on `lease_id`.** A stale holder can never
-  delete or extend a newer holder's lease.
+  delete or extend a newer holder's lease. Renewal preserves the existing
+  `revision_ref` unless the caller explicitly supplies a replacement.
 - **Time enters only as caller-supplied data** (`now`, `deadline`); the store
   reads no clock, so lease outcomes are deterministic and testable in-memory.
 - Writable opens must run as the canonical data-directory owner; the store

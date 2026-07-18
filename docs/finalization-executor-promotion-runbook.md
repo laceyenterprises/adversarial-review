@@ -90,6 +90,9 @@ executor. Setting `policy.autonomousExecutionDisabled = true`:
 - Intercepts **every** mutating decision (`finalize-now`, `remediate`, `close`)
   **before any adapter is called** — no merge, no PR close, no worker dispatch,
   no commit or push proceeds.
+- Preserves remediation idempotency: replaying a remediation round that is
+  already recorded as dispatched remains a no-op skip rather than becoming a
+  terminal escalation.
 - Writes a **fail-closed audit row**: an `escalated` finalization ledger event
   whose reason is `kill switch: <decision> intercepted (autonomous execution
   disabled)`. This is durable and inspectable by folding the subject's ledger.

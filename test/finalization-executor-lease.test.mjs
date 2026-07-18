@@ -80,3 +80,49 @@ test('renew extends the deadline under the fence; a stale renew is a no-op', () 
   assert.equal(steal.acquired, false, 'renew defeats the expiry steal');
   store.close();
 });
+
+test('renew preserves revisionRef when the caller omits it', () => {
+  const store = memStore();
+  store.acquire({
+    subject: REF,
+    holder: 'exec-A',
+    leaseId: 'lease-A',
+    revisionRef: 'sha-A',
+    now: t(0),
+    deadline: t(5),
+  });
+
+  assert.equal(store.renew({ subject: REF, leaseId: 'lease-A', deadline: t(10), now: t(1) }), true);
+  assert.equal(store.read(REF).revisionRef, 'sha-A', 'omitted revisionRef does not erase diagnostics');
+
+  assert.equal(
+    store.renew({ subject: REF, leaseId: 'lease-A', revisionRef: 'sha-B', deadline: t(20), now: t(2) }),
+    true,
+  );
+  assert.equal(store.read(REF).revisionRef, 'sha-B', 'explicit revisionRef still updates the lease');
+  store.close();
+});
+
+test('expiry steal handles mixed timestamp precision at the exact boundary', () => {
+  const store = memStore();
+  store.acquire({
+    subject: REF,
+    holder: 'exec-A',
+    leaseId: 'lease-A',
+    now: '2026-07-19T00:00:00.000Z',
+    deadline: '2026-07-19T00:05:00Z',
+  });
+
+  const steal = store.acquire({
+    subject: REF,
+    holder: 'exec-B',
+    leaseId: 'lease-B',
+    now: '2026-07-19T00:05:00.000Z',
+    deadline: '2026-07-19T00:10:00.000Z',
+  });
+
+  assert.equal(steal.acquired, true, 'same instant with different precision is stealable at the boundary');
+  assert.equal(steal.reason, 'stolen');
+  assert.equal(store.read(REF).leaseId, 'lease-B');
+  store.close();
+});

@@ -313,6 +313,18 @@ function schemaV1() {
             __default: 120,
             __min: 0,
           },
+          // Parent-repo main-catchup PG schema gate allowlist (TMP-UPSERT): the
+          // migration revision ids permitted to run destructive DDL. The
+          // adversarial-review watcher never reads it, but it is a legitimate
+          // checked-in key in the shared top-level config.yaml, so the strict
+          // schema must recognize it — otherwise loadConfig() fail-louds on the
+          // real config (2026-07-17 watcher outage class; runtime loader was
+          // already made tolerant in _ensureFreshConfig, strict was not).
+          pg_schema_gate_allow_destructive_revisions: {
+            __type: TYPE_LIST,
+            __item: { __type: TYPE_STRING },
+            __default: [],
+          },
         },
       },
       roots: {

@@ -338,6 +338,26 @@ test('writeSnapshot refuses callers that do not own the canonical snapshot root'
   assert.equal(existsSync(hqTesting.snapshotPath(rootDir)), false);
 });
 
+test('writeSnapshot refuses cross-user callers before creating a missing data dir', () => {
+  const rootDir = tmp();
+  const snapshot = hqTesting.snapshotPath(rootDir);
+  const dataDir = dirname(snapshot);
+  assert.equal(existsSync(dataDir), false);
+
+  assert.throws(
+    () => hqTesting.writeSnapshot(rootDir, ['codex'], {
+      ownerGuardOptions: {
+        currentUid: () => 502,
+        exists: (path) => path === rootDir,
+        stat: (path) => ({ uid: path === rootDir ? 501 : 502 }),
+      },
+    }),
+    /refusing cross-user worker-class snapshot write/,
+  );
+  assert.equal(existsSync(dataDir), false);
+  assert.equal(existsSync(snapshot), false);
+});
+
 test('writeSnapshot refuses to replace a snapshot owned by a non-canonical uid', () => {
   const rootDir = tmp();
   const snapshot = hqTesting.snapshotPath(rootDir);

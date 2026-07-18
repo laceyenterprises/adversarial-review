@@ -125,15 +125,15 @@ function writeSnapshot(rootDir, classes, {
   ownerGuardOptions = {},
 } = {}) {
   const path = snapshotPath(rootDir);
-  // Ensure the snapshot's parent dir exists so a first-run write in an
-  // unseeded checkout succeeds instead of silently ENOENT-ing (review #631).
-  mkdirSync(dirname(path), { recursive: true });
   assertCanonicalOwner(rootDir, path, {
     cannotVerifyMessage: 'cannot verify worker-class snapshot caller ownership',
     crossUserMessage: 'refusing cross-user worker-class snapshot write',
     existingFileMessage: 'refusing write to non-canonical-owned worker-class snapshot',
     ...ownerGuardOptions,
   });
+  // Ensure the snapshot's parent dir exists only after proving the canonical
+  // owner, so a cross-user caller cannot create a wrong-owned data/ directory.
+  mkdirSync(dirname(path), { recursive: true });
   const body = {
     schemaVersion: SNAPSHOT_SCHEMA_VERSION,
     capturedAt: now(),

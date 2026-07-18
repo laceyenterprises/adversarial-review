@@ -56,7 +56,6 @@ import {
   defaultReviewerRouteFromEnv,
   applyEffectiveReviewerRoute,
   describeCrossModelReviewWaiver,
-  isCrossModelReviewWaived,
   routeSubject,
   validateDefaultReviewerRouteConfig,
 } from './adapters/subject/github-pr/routing.mjs';
@@ -64,7 +63,6 @@ import {
   loadRoleConfig,
   resetRoleConfigCache,
   resolveGeminiRuntime,
-  resolveGeminiReviewerModeWithSource,
   resolveReviewPopulationRetryConfig,
 } from './role-config.mjs';
 import { loadRoleRegistry, validateStartupRoleRegistry } from './role-registry.mjs';
@@ -124,7 +122,6 @@ import {
 } from './reviewer-cascade.mjs';
 import {
   infraRecoverableFailureClass,
-  reviewPopulationFailureClass,
   reviewerFailureClassFromStoredRow,
   unknownReviewerCommandFailureClass,
 } from './reviewer-failure-classification.mjs';
@@ -285,6 +282,15 @@ import {
   resolveVocabularyFatigueConfig,
 } from './vocabulary-fatigue.mjs';
 import {
+  primaryReviewerQuotaCappedForRow,
+  resolveGeminiReviewerModeForWatcher,
+  resolveReviewerTimeoutFallbackThreshold,
+  resolveStaleReviewerReconcilePerPoll,
+  reviewPopulationRetryDecision,
+  selectReviewerRouteForAttempt,
+  shouldBypassPrimaryReviewerQuotaHold,
+} from './reviewer-route-selection.mjs';
+import {
   buildDuplicateReviewSkipAudit,
   createHeadDispatchLease,
   headDispatchLeaseKey,
@@ -441,20 +447,6 @@ const PENDING_DRAFT_RESPAWN_AGE_MIN_SECONDS_FENCE_ON = 60;
 const PENDING_DRAFT_RESPAWN_AGE_MIN_SECONDS_FENCE_OFF = 300;
 const PENDING_DRAFT_RESPAWN_AGE_MAX_SECONDS = 1800;
 const ETAG_CACHE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
-const REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL = {
-  claude: {
-    reviewerModel: 'claude',
-    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
-  },
-  codex: {
-    reviewerModel: 'codex',
-    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
-  },
-  gemini: {
-    reviewerModel: 'gemini',
-    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-  },
-};
 const REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV = Object.freeze({
   GH_CLAUDE_REVIEWER_TOKEN: 'claude-reviewer-lacey',
   GH_CODEX_REVIEWER_TOKEN: 'codex-reviewer-lacey',
@@ -3472,209 +3464,6 @@ let lastRepoRefresh = 0;
 const adversarialGateBranchProtectionChecker = createBranchProtectionChecker({
   execFileImpl: execFileAsync,
 });
-const DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL = 3;
-const DEFAULT_REVIEWER_TIMEOUT_FALLBACK_THRESHOLD = 2;
-
-function resolveReviewerTimeoutFallbackThreshold(env = process.env) {
-  const raw = env.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_THRESHOLD;
-  if (raw === undefined || raw === null || raw === '') return DEFAULT_REVIEWER_TIMEOUT_FALLBACK_THRESHOLD;
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < 0) return DEFAULT_REVIEWER_TIMEOUT_FALLBACK_THRESHOLD;
-  return parsed;
-}
-
-function resolveReviewerTimeoutFallbackModel(env = process.env) {
-  const raw = String(env.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL || 'off').trim().toLowerCase();
-  if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'none') return null;
-  if (raw === 'claude' || raw === 'codex') return raw;
-  return null;
-}
-
-function normalizeReviewerAttribution(value) {
-  return String(value || '').trim().toLowerCase();
-}
-
-function rowReviewerMatches(row, expectedReviewerModel) {
-  const expected = normalizeReviewerAttribution(expectedReviewerModel);
-  if (!expected) return true;
-  const candidates = [
-    row?.reviewer,
-    row?.reviewer_model,
-    row?.reviewerModel,
-    row?.reviewer_class,
-  ].map(normalizeReviewerAttribution).filter(Boolean);
-  return candidates.some((candidate) => candidate === expected);
-}
-
-// GMW-02 fallback signal. `reviewer.gemini.mode=fallback` selects gemini only
-// when the assigned primary reviewer is quota-capped. We reuse the HRR
-// quota-exhaustion signal, but only when the failed row is attributed to the
-// primary reviewer Gemini would replace. If Gemini already handled a retry and
-// then hit quota, the row must remain on the normal quota hold instead of
-// recursively selecting Gemini again.
-function primaryReviewerQuotaCappedForRow(row, { nowMs = null, expectedReviewerModel = null } = {}) {
-  if (!row || row.review_status !== 'failed') return false;
-  if (!rowReviewerMatches(row, expectedReviewerModel)) return false;
-  if (infraRecoverableFailureClass(row) !== QUOTA_EXHAUSTED_FAILURE_CLASS) return false;
-  return quotaHoldDecision(row, {
-    nowMs,
-    fallbackBackoffMs: QUOTA_EXHAUSTED_BACKOFF_MS,
-  }).hold;
-}
-
-function shouldBypassPrimaryReviewerQuotaHold(route, row = null) {
-  if (row && !rowReviewerMatches(row, route?.geminiReviewerSelection?.replacedReviewerModel)) {
-    return false;
-  }
-  const reason = route?.geminiReviewerSelection?.reason;
-  return (
-    route?.reviewerModel === 'gemini'
-    && route?.botTokenEnv === 'GH_GEMINI_REVIEWER_TOKEN'
-    && (
-      (
-        route?.geminiReviewerSelection?.mode === 'fallback'
-        && reason === 'primary-reviewer-quota-capped'
-      )
-      || (
-        route?.geminiReviewerSelection?.mode === 'always-on'
-        && reason === 'always-on-third-reviewer'
-      )
-    )
-  );
-}
-
-function reviewPopulationRetryDecision(row, {
-  config = DEFAULT_REVIEW_POPULATION_RETRY_CONFIG,
-  headSha = null,
-  nowMs = Date.now(),
-} = {}) {
-  const failureClass = reviewPopulationFailureClass(row);
-  if (!row || row.review_status !== 'failed' || !failureClass) {
-    return { matched: false, retryable: false, action: 'not-population-failure', failureClass: null };
-  }
-  const normalized = normalizeReviewPopulationRetryConfig(config);
-  const storedHead = row.review_population_retry_head_sha || null;
-  const sameHead = String(storedHead || '') === String(headSha || '');
-  const attempts = sameHead ? Number(row.review_population_retry_attempts || 0) : 0;
-  if (normalized.maxAttempts <= 0) {
-    return {
-      matched: true,
-      retryable: false,
-      action: 'exhausted',
-      failureClass,
-      attempts,
-      maxAttempts: normalized.maxAttempts,
-      backoffSeconds: normalized.backoffSeconds,
-    };
-  }
-  if (attempts >= normalized.maxAttempts) {
-    return {
-      matched: true,
-      retryable: false,
-      action: 'exhausted',
-      failureClass,
-      attempts,
-      maxAttempts: normalized.maxAttempts,
-      backoffSeconds: normalized.backoffSeconds,
-    };
-  }
-  const backoffMs = normalized.backoffSeconds * 1000;
-  const anchorMs = Date.parse(row.failed_at || row.last_attempted_at || '');
-  const waitUntilMs = Number.isFinite(anchorMs) ? anchorMs + backoffMs : nowMs;
-  if (backoffMs > 0 && waitUntilMs > nowMs) {
-    return {
-      matched: true,
-      retryable: false,
-      action: 'wait',
-      failureClass,
-      attempts,
-      maxAttempts: normalized.maxAttempts,
-      backoffSeconds: normalized.backoffSeconds,
-      waitUntilMs,
-    };
-  }
-  return {
-    matched: true,
-    retryable: true,
-    action: 'retry',
-    failureClass,
-    attempts,
-    maxAttempts: normalized.maxAttempts,
-    backoffSeconds: normalized.backoffSeconds,
-  };
-}
-
-function resolveGeminiReviewerModeForWatcher({
-  env = process.env,
-  resolver = resolveGeminiReviewerModeWithSource,
-} = {}) {
-  try {
-    const resolved = resolver({ env });
-    if (typeof resolved === 'string') {
-      return {
-        mode: resolved,
-        error: null,
-        source: 'unknown',
-        sourceDetail: null,
-        rawValue: resolved,
-        topPath: null,
-      };
-    }
-    return { ...resolved, error: null };
-  } catch (err) {
-    return {
-      mode: 'off',
-      error: err,
-      source: 'default',
-      sourceDetail: 'fail-closed',
-      rawValue: 'off',
-      topPath: null,
-    };
-  }
-}
-
-function selectReviewerRouteForAttempt({
-  subject,
-  baseRoute,
-  rootDir,
-  repoPath,
-  prNumber,
-  env = process.env,
-}) {
-  const threshold = resolveReviewerTimeoutFallbackThreshold(env);
-  if (threshold <= 0) return baseRoute;
-  const cascadeState = readCascadeState(rootDir, { repo: repoPath, prNumber });
-  const timeoutFailures = Number(cascadeState?.transientFailureBreakdown?.['reviewer-timeout'] || 0);
-  if (cascadeState?.lastFailureClass !== 'reviewer-timeout' || timeoutFailures < threshold) {
-    return baseRoute;
-  }
-  const fallbackModel = resolveReviewerTimeoutFallbackModel(env);
-  if (!fallbackModel || fallbackModel === baseRoute?.reviewerModel) return baseRoute;
-  const fallbackRoute = REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL[fallbackModel];
-  if (!fallbackRoute) return baseRoute;
-  const builderClass = subject?.builderClass || baseRoute.builderClass || null;
-  return {
-    ...baseRoute,
-    reviewerModel: fallbackRoute.reviewerModel,
-    botTokenEnv: fallbackRoute.botTokenEnv,
-    timeoutFallback: {
-      fromReviewerModel: baseRoute.reviewerModel,
-      toReviewerModel: fallbackRoute.reviewerModel,
-      timeoutFailures,
-      threshold,
-      builderClass,
-      sameModelAsBuilder: isCrossModelReviewWaived(builderClass, fallbackRoute.reviewerModel),
-    },
-  };
-}
-
-function resolveStaleReviewerReconcilePerPoll(env = process.env) {
-  const raw = env.ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL;
-  if (raw === undefined || raw === null || raw === '') return DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL;
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < 0) return DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL;
-  return parsed;
-}
 
 async function refreshOrgRepos(octokit) {
   if (!config.org) return;

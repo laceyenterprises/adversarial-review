@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { existsSync, rmSync, statSync, promises as fsPromises } from 'node:fs';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { existsSync, lstatSync, rmSync, statSync, promises as fsPromises } from 'node:fs';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -258,6 +258,31 @@ function pathIsStrictlyInside(parentPath, candidatePath) {
   return candidate.startsWith(`${parent}${sep}`);
 }
 
+function physicalRemovalRefusalReason(parentPath, candidatePath, lstatSyncImpl = lstatSync) {
+  const parent = resolve(parentPath);
+  const candidate = resolve(candidatePath);
+  if (!pathIsStrictlyInside(parent, candidate)) return 'outside-worker-dir';
+
+  let current = parent;
+  try {
+    const stat = lstatSyncImpl(current);
+    if (stat.isSymbolicLink()) return 'symlink-segment';
+  } catch (err) {
+    return `lstat:${err?.code || 'failed'}`;
+  }
+  for (const part of relative(parent, candidate).split(sep)) {
+    if (!part) continue;
+    current = join(current, part);
+    try {
+      const stat = lstatSyncImpl(current);
+      if (stat.isSymbolicLink()) return 'symlink-segment';
+    } catch (err) {
+      return `lstat:${err?.code || 'failed'}`;
+    }
+  }
+  return null;
+}
+
 async function removeHammerWorktree({
   entry,
   hqRoot,
@@ -302,9 +327,10 @@ async function removeHammerWorktree({
     let physicalRemovalSucceeded = true;
     if (removePhysicalInvalidTree && stalePhysicalPath) {
       const expectedWorkerDir = join(hqRoot, 'workers', entry.workerId);
-      if (!pathIsStrictlyInside(expectedWorkerDir, stalePhysicalPath)) {
+      const refusalReason = physicalRemovalRefusalReason(expectedWorkerDir, stalePhysicalPath);
+      if (refusalReason) {
         physicalRemovalSucceeded = false;
-        errors.push(`worktree-rm-refused:outside-worker-dir:${stalePhysicalPath}`);
+        errors.push(`worktree-rm-refused:${refusalReason}:${stalePhysicalPath}`);
       } else {
         try {
           rmSyncImpl(stalePhysicalPath, { recursive: true, force: true });

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -366,6 +366,76 @@ test('closer worktree reaper refuses invalid physical removal outside hq worker 
     false,
   );
   assert.equal(warnings.some((message) => message.includes('worktree-rm-refused:outside-worker-dir')), true);
+});
+
+test('closer worktree reaper refuses invalid physical removal through symlinked worker segment', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-symlink-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const repoPath = join(hqRoot, 'repos', 'agent-os');
+  const workerDir = join(hqRoot, 'workers', 'hammer-ama-pr-4247-symlink');
+  const outsideTarget = join(root, 'outside-target');
+  const worktreePath = join(workerDir, 'agent-os');
+  mkdirSync(workerDir, { recursive: true });
+  mkdirSync(outsideTarget, { recursive: true });
+  symlinkSync(outsideTarget, worktreePath, 'dir');
+
+  const calls = [];
+  const warnings = [];
+  const result = await reapCloserHammerWorktrees({
+    hqRoot,
+    cursorPath: join(root, 'cursor.json'),
+    hqPath: '/bin/hq',
+    repoPaths: [repoPath],
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      const joined = args.join(' ');
+      if (cmd === 'git' && joined.includes('remote get-url origin')) {
+        return { stdout: 'git@github.com:laceyenterprises/agent-os.git\n', stderr: '' };
+      }
+      if (cmd === 'git' && joined.includes('worktree list --porcelain')) {
+        return {
+          stdout: [
+            `worktree ${worktreePath}`,
+            'branch refs/heads/codex/symlink',
+            '',
+          ].join('\n'),
+          stderr: '',
+        };
+      }
+      if (cmd === 'git' && args.includes('remove')) {
+        const err = new Error('git worktree remove failed');
+        err.stderr = `fatal: '${worktreePath}' is not a working tree`;
+        throw err;
+      }
+      if (cmd === 'git' && args.includes('prune')) {
+        throw new Error('git worktree prune should not run after symlink refusal');
+      }
+      return { stdout: '{}', stderr: '' };
+    },
+    execGhWithRetryImpl: async () => ({
+      stdout: JSON.stringify({ state: 'MERGED', mergedAt: '2026-07-18T00:00:00Z', closedAt: '2026-07-18T00:00:00Z' }),
+    }),
+    rmSyncImpl: () => {
+      throw new Error('rmSyncImpl should not be called for a symlinked worktree path');
+    },
+    limit: 10,
+    logger: { info() {}, warn(message) { warnings.push(message); } },
+  });
+
+  assert.equal(result.reaped, 0);
+  assert.equal(result.errors, 1);
+  assert.equal(result.pruned, 0);
+  assert.equal(existsSync(outsideTarget), true);
+  assert.equal(
+    calls.some((call) => call.cmd === 'git' && call.args.includes('remove')),
+    true,
+  );
+  assert.equal(
+    calls.some((call) => call.cmd === 'git' && call.args.includes('prune')),
+    false,
+  );
+  assert.equal(warnings.some((message) => message.includes('worktree-rm-refused:symlink-segment')), true);
 });
 
 test('closer worktree reaper keeps git metadata when invalid physical dir removal fails', async (t) => {

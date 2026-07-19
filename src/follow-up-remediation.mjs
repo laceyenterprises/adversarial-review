@@ -133,6 +133,23 @@ import {
   runWorkspaceGitWithTransientRetry,
   runWorkspaceNetworkCommandWithTransientRetry,
 } from './remediation-git-pr-io.mjs';
+import {
+  cancelHqDispatch,
+  classifyHqDispatchFailure,
+  normalizeHqWorkspaceDir,
+  normalizeWorkerTerminalEvent,
+  parseHqJsonObject,
+  parseHqWorkerWorkspaceFromPayload,
+  resolveHqBin,
+  resolveHqWorkerWorkspace,
+  workerTerminalEventMatches,
+} from './remediation-hq-dispatch.mjs';
+import {
+  assessWorkerLiveness,
+  assessWorkerLivenessDetailed,
+  isWorkerProcessRunning,
+  killDetachedWorkerProcessGroup,
+} from './remediation-worker-liveness.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -171,13 +188,7 @@ function isRemediationToRereviewHandoffEnabled(env = process.env, options = {}) 
 const WORKER_PROVENANCE_HOOK_SRC = join(ROOT, 'hooks', 'worker-provenance-commit-msg');
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-const HQ_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'cancelled', 'superseded']);
 const HQ_SUCCESS_STATUSES = new Set(['succeeded']);
-const HQ_CANCEL_RETRY_DELAYS_MS = [250, 500];
-
-function sleep(ms) {
-  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
-}
 
 // Default identity each remediation-worker class commits under. Without
 // these, the workspace inherits the operator's global git config and every
@@ -233,20 +244,6 @@ const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURR
 const REMEDIATION_WORKSPACE_ROOT_ENV = 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT';
 const DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS = 1;
 const MAX_REMEDIATION_MAX_CONCURRENT_JOBS = 8;
-const TRANSIENT_HQ_DISPATCH_CODES = new Set([
-  'daemon_bounced',
-  'daemon-bounced',
-  'daemon_restart',
-  'daemon-restart',
-  'launch_refused_memory_pressure',
-  'launch-refused-memory-pressure',
-  'lease_lost',
-  'lease-lost',
-  'memory_pressure',
-  'memory-pressure',
-  'supervisor_restart',
-  'supervisor-restart',
-]);
 const DEFAULT_DEPLOY_CHECKOUT = '/Users/airlock/agent-os';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const HQ_REMEDIATION_WORKSPACE_SEGMENTS = ['adversarial-review', 'follow-up-workspaces'];
 
@@ -322,8 +319,6 @@ function remediationWorkerGitIdentity(workerClass, env = process.env) {
   }
   return { name, email };
 }
-
-const RECONCILIATION_MAX_ACTIVE_MS = 6 * 60 * 60 * 1000;
 
 function logRoundBudgetDecision(log, {
   riskClass,
@@ -520,14 +515,6 @@ function currentUsername(env = process.env) {
   return env.USER || env.LOGNAME || userInfo().username;
 }
 
-function resolveHqBin(env = process.env) {
-  const explicit = String(env.HQ_BIN || '').trim();
-  if (explicit) {
-    return explicit;
-  }
-  return 'hq';
-}
-
 function requireHqDispatchEnvValue(env, key, message) {
   const value = String(env?.[key] || '').trim();
   if (!value) {
@@ -558,235 +545,11 @@ function assertHqDispatchOwnerMatches(env = process.env) {
   return ownerUser;
 }
 
-function parseHqJsonObject(text, label) {
-  const raw = String(text || '').trim();
-  if (!raw) {
-    throw new Error(`${label} produced empty output`);
-  }
-  try {
-    return JSON.parse(raw);
-  } catch {
-    const start = raw.indexOf('{');
-    const end = raw.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      return JSON.parse(raw.slice(start, end + 1));
-    }
-    throw new Error(`${label} did not return JSON`);
-  }
-}
-
-function normalizeHqWorkspaceDir(value) {
-  const normalized = typeof value === 'string' ? value.trim() : '';
-  return normalized ? resolve(normalized) : null;
-}
-
-function parseHqWorkerWorkspaceFromPayload(payload) {
-  const direct = [
-    payload?.workspaceDir,
-    payload?.workspacePath,
-    payload?.worktreePath,
-    payload?.repoPath,
-    payload?.cwd,
-  ];
-  for (const candidate of direct) {
-    const resolvedPath = normalizeHqWorkspaceDir(candidate);
-    if (resolvedPath) return resolvedPath;
-  }
-  const nested = payload?.worker;
-  if (nested && typeof nested === 'object') {
-    return parseHqWorkerWorkspaceFromPayload(nested);
-  }
-  return null;
-}
-
-function parseHqDispatchStatus(stdout) {
-  const payload = parseHqJsonObject(stdout, 'hq dispatch status');
-  const status = String(payload?.status || '').trim().toLowerCase();
-  if (!status) {
-    throw new Error('hq dispatch status payload missing status');
-  }
-  return {
-    ...payload,
-    status,
-    health: String(payload?.health || '').trim().toLowerCase() || null,
-  };
-}
-
-function normalizeWorkerTerminalEvent(topic, event = {}) {
-  const normalizedTopic = String(topic || '').trim();
-  const match = normalizedTopic.match(/^health\.worker\.terminal\.([^.\s]+)$/);
-  const lrq = String(event?.lrq || event?.launch_request_id || event?.launchRequestId || match?.[1] || '').trim();
-  const status = String(event?.status || '').trim().toLowerCase();
-  if (!lrq || !status || !HQ_TERMINAL_STATUSES.has(status)) {
-    return null;
-  }
-  return {
-    ...event,
-    topic: normalizedTopic,
-    lrq,
-    status,
-    health: String(event?.health || '').trim().toLowerCase() || (status === 'succeeded' ? 'healthy' : 'failed'),
-  };
-}
-
-function workerTerminalEventMatches(worker, terminalEvent) {
-  if (!worker || !terminalEvent) return false;
-  const workerLrq = String(worker.launchRequestId || worker.launch_request_id || '').trim();
-  return Boolean(workerLrq && workerLrq === terminalEvent.lrq);
-}
-
-function workerTerminalEventToDispatchStatus(terminalEvent, worker = {}) {
-  return {
-    status: terminalEvent.status,
-    health: terminalEvent.health || (terminalEvent.status === 'succeeded' ? 'healthy' : 'failed'),
-    lrq: terminalEvent.lrq,
-    launch_request_id: terminalEvent.lrq,
-    failureClass: terminalEvent.failureClass || terminalEvent.failure_class || null,
-    failureDetail: terminalEvent.failureDetail || terminalEvent.failure_detail || null,
-    recoveryAttempt: terminalEvent.recoveryAttempt ?? terminalEvent.recovery_attempt ?? null,
-    workspacePath: terminalEvent.workspacePath || terminalEvent.workspaceDir || worker.workspaceDir || null,
-    source: 'app-contract-topic',
-    topic: terminalEvent.topic,
-  };
-}
-
-function parseHqDispatchWorkspaceStatus(stdout) {
-  const payload = parseHqDispatchStatus(stdout);
-  const workspaceDir = parseHqWorkerWorkspaceFromPayload(payload);
-  if (!workspaceDir) {
-    throw new Error('hq dispatch status payload missing workspaceDir/workspacePath/worktreePath');
-  }
-  return {
-    ...payload,
-    workspaceDir,
-  };
-}
-
-function classifyHqDispatchFailure(dispatchStatus = {}) {
-  const structuredValues = [
-    dispatchStatus?.failureClass,
-    dispatchStatus?.failureCode,
-    dispatchStatus?.failure_class,
-    dispatchStatus?.failure_code,
-    dispatchStatus?.code,
-    dispatchStatus?.reasonCode,
-    dispatchStatus?.statusCode,
-    dispatchStatus?.status,
-    dispatchStatus?.health,
-  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean);
-
-  if (structuredValues.some((value) => TRANSIENT_HQ_DISPATCH_CODES.has(value))) return 'transient';
-
-  const detail = String(dispatchStatus?.failureDetail || '').trim().toLowerCase();
-  if (!detail && structuredValues.length === 0) return 'terminal';
-  if (
-    /\bmemory pressure\b/.test(detail)
-    || /\blaunch[_ -]refused[_ -]memory[_ -]pressure\b/.test(detail)
-    || /\blease lost\b|\blost lease\b/.test(detail)
-  ) {
-    return 'transient';
-  }
-  return 'terminal';
-}
-
 // Fallback hold window for a quota-exhausted remediation worker when the
 // provider did not hand back a parseable reset time. Mirrors the reviewer
 // path's QUOTA_EXHAUSTED_BACKOFF_MS (15 min) so both worker classes degrade
 // the same way under a hard usage cap.
 const QUOTA_REMEDIATION_BACKOFF_MS = 15 * 60 * 1000;
-
-async function resolveHqWorkerWorkspace({
-  worker,
-  execFileImpl = execFileAsync,
-  env = process.env,
-} = {}) {
-  const persistedWorkspaceDir = normalizeHqWorkspaceDir(worker?.workspaceDir);
-  if (persistedWorkspaceDir && existsSync(join(persistedWorkspaceDir, '.git'))) {
-    return persistedWorkspaceDir;
-  }
-  const dispatchId = String(worker?.dispatchId || '').trim();
-  const hqRoot = worker?.hqRoot || resolveHqRoot(env, { requireExists: false });
-  if (!dispatchId || !hqRoot) {
-    return null;
-  }
-  const hqBin = resolveHqBin(env);
-  const { stdout } = await execFileImpl(hqBin, [
-    'dispatch',
-    'status',
-    dispatchId,
-    '--root',
-    hqRoot,
-  ], {
-    env: {
-      ...env,
-      HQ_ROOT: hqRoot,
-    },
-    maxBuffer: 5 * 1024 * 1024,
-  });
-  return parseHqDispatchWorkspaceStatus(stdout).workspaceDir;
-}
-
-function isHqCancelRetryable(err) {
-  const detail = [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
-  return /(?:^|[\s:])(EIO)(?:$|[\s:])|timed out|timeout/i.test(detail);
-}
-
-async function cancelHqDispatch({
-  worker,
-  execFileImpl = execFileAsync,
-  env = process.env,
-} = {}) {
-  const dispatchId = String(worker?.dispatchId || '').trim();
-  const hqRoot = worker?.hqRoot || resolveHqRoot(env, { requireExists: false });
-  if (!dispatchId || !hqRoot) {
-    return {
-      cancelled: false,
-      skipped: true,
-      reason: 'missing-hq-dispatch-handle',
-      attempts: 0,
-    };
-  }
-
-  const hqBin = resolveHqBin(env);
-  const retryDelaysMs = [0, ...HQ_CANCEL_RETRY_DELAYS_MS];
-  let lastError = null;
-  for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
-    if (retryDelaysMs[attempt] > 0) {
-      await sleep(retryDelaysMs[attempt]);
-    }
-    try {
-      const result = await execFileImpl(hqBin, ['dispatch', 'cancel', dispatchId, '--root', hqRoot], {
-        env: {
-          ...env,
-          HQ_ROOT: hqRoot,
-        },
-        maxBuffer: 5 * 1024 * 1024,
-      });
-      return {
-        cancelled: true,
-        attempts: attempt + 1,
-        exitCode: 0,
-        stdout: String(result?.stdout || '').trim() || null,
-        stderr: String(result?.stderr || '').trim() || null,
-      };
-    } catch (err) {
-      lastError = err;
-      if (!isHqCancelRetryable(err) || attempt === retryDelaysMs.length - 1) {
-        break;
-      }
-    }
-  }
-
-  return {
-    cancelled: false,
-    attempts: retryDelaysMs.length,
-    exitCode: Number.isInteger(lastError?.code) ? lastError.code : null,
-    stdout: String(lastError?.stdout || '').trim() || null,
-    stderr: String(lastError?.stderr || '').trim() || null,
-    error: lastError?.message || 'hq dispatch cancel failed',
-    retryable: isHqCancelRetryable(lastError),
-  };
-}
 
 function resolveCodexAuthPath() {
   if (process.env.CODEX_AUTH_PATH) {
@@ -2784,57 +2547,6 @@ function spawnCodexRemediationWorker({
   }
 }
 
-function isWorkerProcessRunning(processId) {
-  if (!Number.isInteger(processId) || processId <= 0) {
-    return false;
-  }
-
-  try {
-    process.kill(processId, 0);
-    return true;
-  } catch (err) {
-    if (err?.code === 'ESRCH') {
-      return false;
-    }
-    if (err?.code === 'EPERM') {
-      return true;
-    }
-    throw err;
-  }
-}
-
-function killDetachedWorkerProcessGroup(processId, signal = 'SIGKILL') {
-  if (!Number.isInteger(processId) || processId <= 0) {
-    return false;
-  }
-  if (processId === process.pid) {
-    console.error(
-      `[follow-up-remediation] refusing to kill daemon-owned process group for pid=${processId}`
-    );
-    return false;
-  }
-
-  try {
-    process.kill(-processId, signal);
-    return true;
-  } catch (err) {
-    if (err?.code === 'ESRCH') {
-      return false;
-    }
-    try {
-      process.kill(processId, signal);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-}
-
-function parseIsoTime(value) {
-  const timestamp = Date.parse(String(value ?? ''));
-  return Number.isFinite(timestamp) ? timestamp : null;
-}
-
 function resolveWorkerStoredPath(rootDir, storedPath, {
   label,
   allowMissing = true,
@@ -3017,112 +2729,6 @@ function buildRereviewResult({ requested, reason, outcome = null }) {
         }
       : null,
   };
-}
-
-function assessWorkerLiveness(job, { now = () => new Date().toISOString(), isWorkerRunning = isWorkerProcessRunning } = {}) {
-  const worker = job?.remediationWorker || {};
-  const nowAt = parseIsoTime(now());
-  const spawnedAt = parseIsoTime(worker.spawnedAt);
-  const ageMs = nowAt !== null && spawnedAt !== null ? nowAt - spawnedAt : null;
-  const processRunning = isWorkerRunning(worker.processId);
-
-  if (processRunning) {
-    if (ageMs !== null && ageMs > RECONCILIATION_MAX_ACTIVE_MS) {
-      return { state: 'manual-inspection', reason: 'pid-active-beyond-runtime-cap', ageMs };
-    }
-    return { state: 'active', reason: 'worker-still-running', ageMs };
-  }
-
-  return { state: 'exited', reason: 'worker-not-running', ageMs };
-}
-
-async function assessWorkerLivenessDetailed(job, {
-  now = () => new Date().toISOString(),
-  isWorkerRunning = isWorkerProcessRunning,
-  execFileImpl = execFileAsync,
-  env = process.env,
-  workerTerminalEvent = null,
-  workerTerminalReplyPath = null,
-} = {}) {
-  const worker = job?.remediationWorker || {};
-  if (
-    workerTerminalEvent?.status === 'succeeded'
-    && workerTerminalEventMatches(worker, workerTerminalEvent)
-    && workerTerminalReplyPath
-    && existsSync(workerTerminalReplyPath)
-  ) {
-    const nowAt = parseIsoTime(now());
-    const spawnedAt = parseIsoTime(worker.spawnedAt);
-    const ageMs = nowAt !== null && spawnedAt !== null ? nowAt - spawnedAt : null;
-    return {
-      state: 'exited',
-      reason: `health-worker-terminal-${workerTerminalEvent.status}`,
-      ageMs,
-      dispatchStatus: workerTerminalEventToDispatchStatus(workerTerminalEvent, worker),
-    };
-  }
-  if (!worker?.dispatchId || worker?.dispatchMode !== 'hq') {
-    return assessWorkerLiveness(job, { now, isWorkerRunning });
-  }
-
-  const nowAt = parseIsoTime(now());
-  const spawnedAt = parseIsoTime(worker.spawnedAt);
-  const ageMs = nowAt !== null && spawnedAt !== null ? nowAt - spawnedAt : null;
-  const hqRoot = worker.hqRoot || resolveHqRoot(env, { requireExists: false });
-  const hqBin = resolveHqBin(env);
-
-  try {
-    const { stdout } = await execFileImpl(hqBin, [
-      'dispatch',
-      'status',
-      worker.dispatchId,
-      '--root',
-      hqRoot,
-    ], {
-      env: {
-        ...env,
-        HQ_ROOT: hqRoot,
-      },
-      maxBuffer: 5 * 1024 * 1024,
-    });
-    const statusPayload = parseHqDispatchStatus(stdout);
-    if (HQ_TERMINAL_STATUSES.has(statusPayload.status)) {
-      return {
-        state: 'exited',
-        reason: `hq-dispatch-${statusPayload.status}`,
-        ageMs,
-        dispatchStatus: statusPayload,
-      };
-    }
-    return {
-      state: 'active',
-      reason: `hq-dispatch-${statusPayload.status}`,
-      ageMs,
-      dispatchStatus: statusPayload,
-    };
-  } catch (err) {
-    const detail = [err?.message, err?.stdout, err?.stderr].filter(Boolean).join('\n');
-    if (/no dispatch with id|not found/i.test(detail)) {
-      return {
-        state: 'exited',
-        reason: 'hq-dispatch-not-found',
-        ageMs,
-        dispatchStatus: {
-          status: 'not-found',
-          failureDetail: detail,
-        },
-      };
-    }
-    return {
-      state: 'active',
-      reason: 'hq-dispatch-status-unavailable',
-      ageMs,
-      dispatchStatus: {
-        status: 'unknown',
-        failureDetail: detail || err?.message || 'status probe failed',
-      },
-    };
-  }
 }
 
 // Resolve the worker class (codex / claude-code) for a reconcile-time

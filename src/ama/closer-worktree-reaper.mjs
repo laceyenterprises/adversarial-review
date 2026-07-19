@@ -248,15 +248,46 @@ async function fetchPrState({ repo, prNumber, execGhWithRetryImpl = execGhWithRe
   return JSON.parse(stdout || '{}');
 }
 
+function gitWorktreeRemoveIndicatesGone(detail) {
+  return /(?:is not a working tree|does not exist)\s*$/i.test(String(detail || '').trim());
+}
+
+function pathTextEquals(leftPath, rightPath) {
+  const left = resolve(leftPath);
+  const right = resolve(rightPath);
+  return process.platform === 'darwin' ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+function physicalRemovalTargetForEntry({ hqRoot, entry }) {
+  if (!HAMMER_WORKER_RE.test(String(entry?.workerId || ''))) return { refusalReason: 'invalid-worker-id' };
+
+  const expectedWorkerDir = join(hqRoot, 'workers', entry.workerId);
+  if (!entry.workerDir || !pathTextEquals(entry.workerDir, expectedWorkerDir)) {
+    return { refusalReason: 'outside-worker-dir', target: expectedWorkerDir };
+  }
+  return { refusalReason: null, target: expectedWorkerDir };
+}
+
 async function removeHammerWorktree({
   entry,
   hqRoot,
   hqPath,
   execFileImpl,
+  rmSyncImpl = rmSync,
   logger = console,
 }) {
   const errors = [];
-  if (entry.registered && entry.repoPath) {
+  let pruned = false;
+  // When the worktree directory is already physically gone, `git worktree
+  // remove` can only fail validation ("'.git' does not exist" / "is not a
+  // working tree") on every tick, leaving stale registry metadata behind that
+  // spams remove-incomplete and historically pinned branch-holder leases.
+  // Reconcile those with `git worktree prune` instead of erroring forever. A
+  // directory that is still present (e.g. "Directory not empty") is untouched
+  // and stays on the real teardown path below.
+  let treeAlreadyGone = Boolean(entry.registered && entry.repoPath && entry.diskPresent === false);
+  let removePhysicalInvalidTree = false;
+  if (entry.registered && entry.repoPath && !treeAlreadyGone) {
     try {
       await execGit({
         repoPath: entry.repoPath,
@@ -265,7 +296,45 @@ async function removeHammerWorktree({
         timeout: 60_000,
       });
     } catch (err) {
-      errors.push(`git-worktree-remove:${String(err?.stderr || err?.message || err)}`);
+      const detail = String(err?.stderr || err?.message || err);
+      if (gitWorktreeRemoveIndicatesGone(detail)) {
+        // The tree is already physically gone; prune the stale entry below.
+        treeAlreadyGone = true;
+        removePhysicalInvalidTree = entry.diskPresent !== false;
+      } else {
+        errors.push(`git-worktree-remove:${detail}`);
+      }
+    }
+  }
+
+  if (treeAlreadyGone) {
+    let physicalRemovalSucceeded = true;
+    if (removePhysicalInvalidTree) {
+      const { refusalReason, target } = physicalRemovalTargetForEntry({ hqRoot, entry });
+      if (refusalReason) {
+        physicalRemovalSucceeded = false;
+        errors.push(`worktree-rm-refused:${refusalReason}:${entry.worktreePath || entry.path || target}`);
+      } else {
+        try {
+          rmSyncImpl(target, { recursive: true, force: true });
+        } catch (err) {
+          physicalRemovalSucceeded = false;
+          errors.push(`worktree-rm:${String(err?.message || err)}`);
+        }
+      }
+    }
+    if (physicalRemovalSucceeded) {
+      try {
+        await execGit({
+          repoPath: entry.repoPath,
+          args: ['worktree', 'prune'],
+          execFileImpl,
+          timeout: 60_000,
+        });
+        pruned = true;
+      } catch (err) {
+        errors.push(`git-worktree-prune:${String(err?.stderr || err?.message || err)}`);
+      }
     }
   }
 
@@ -287,7 +356,7 @@ async function removeHammerWorktree({
     try {
       const stat = statSync(entry.workerDir);
       if (stat.isDirectory() && HAMMER_WORKER_RE.test(basename(entry.workerDir))) {
-        rmSync(entry.workerDir, { recursive: true, force: true });
+        rmSyncImpl(entry.workerDir, { recursive: true, force: true });
       }
     } catch (err) {
       errors.push(`disk-remove:${String(err?.message || err)}`);
@@ -299,7 +368,7 @@ async function removeHammerWorktree({
       `[closer-worktree-reap] remove-incomplete workerId=${entry.workerId} errors=${JSON.stringify(errors)}`
     );
   }
-  return { ok: errors.length === 0, errors };
+  return { ok: errors.length === 0, errors, pruned };
 }
 
 async function reapCloserHammerWorktrees({
@@ -313,6 +382,7 @@ async function reapCloserHammerWorktrees({
   readdirImpl = fsPromises.readdir,
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
+  rmSyncImpl = rmSync,
   env = process.env,
   logger = console,
 } = {}) {
@@ -363,6 +433,7 @@ async function reapCloserHammerWorktrees({
   const summary = {
     scanned: evaluationEntries.length,
     reaped: 0,
+    pruned: 0,
     skipped: 0,
     errors: 0,
     terminal: 0,
@@ -439,16 +510,19 @@ async function reapCloserHammerWorktrees({
       hqRoot,
       hqPath,
       execFileImpl,
+      rmSyncImpl,
       logger,
     });
     if (removal.ok) {
       summary.reaped += 1;
+      if (removal.pruned) summary.pruned += 1;
       logger?.info?.(JSON.stringify({
         event: 'closer_worktree_reap.reaped',
         workerId: entry.workerId,
         prNumber: entry.prNumber,
         repo: entry.githubRepo || null,
         reason: reapReason,
+        pruned: removal.pruned,
       }));
     } else {
       summary.errors += 1;

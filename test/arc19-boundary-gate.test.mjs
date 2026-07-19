@@ -189,7 +189,8 @@ const MONOLITH_CEILINGS = Object.freeze({
   // 6659 -> 6686: SEV0 2026-07-19 codex --model pin (resolveCodexRemediationModel); decomposition will reclaim.
   // 6686 -> 6140: ARC-19 wave3 extract workflow-push-capability preflight to src/remediation-workflow-push-capability.mjs.
   'follow-up-remediation.mjs': 6140,
-  'follow-up-merge-agent.mjs': 5485,
+  // 5485 -> 4262: ARC-19 wave3 extract fast-merge processing/orchestration to src/fast-merge-processing.mjs.
+  'follow-up-merge-agent.mjs': 4262,
 });
 
 for (const [name, ceiling] of Object.entries(MONOLITH_CEILINGS)) {

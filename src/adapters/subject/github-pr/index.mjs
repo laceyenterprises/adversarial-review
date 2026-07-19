@@ -13,7 +13,6 @@ import { execFile } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import { apiStatusFromError } from '../../../api-telemetry.mjs';
-import { prepareWorkspaceForJob as defaultPrepareWorkspaceForJob } from '../../../follow-up-remediation.mjs';
 import {
   readAdapterOpenPullRequests,
   readAdapterPullRequest,
@@ -387,7 +386,17 @@ function createGitHubPRSubjectAdapter({
 
     async prepareRemediationWorkspace(ref, jobId) {
       const snapshot = await fetchPRSnapshot(ref);
-      const prepareWorkspace = prepareWorkspaceForJobImpl || defaultPrepareWorkspaceForJob;
+      // ARC-19 boundary: the layer-4 subject adapter must not import the
+      // layer-5 follow-up-remediation orchestration module. The composition
+      // root (watcher.mjs) injects `prepareWorkspaceForJobImpl` behind this
+      // port; fail closed if a caller wires the adapter without it.
+      if (typeof prepareWorkspaceForJobImpl !== 'function') {
+        throw new Error(
+          'github-pr subject adapter: prepareWorkspaceForJobImpl must be injected by the composition root '
+          + '(ARC-19 import boundary — the adapter may not reach up into follow-up-remediation.mjs).',
+        );
+      }
+      const prepareWorkspace = prepareWorkspaceForJobImpl;
       const { workspaceDir } = await prepareWorkspace({
         rootDir,
         job: {

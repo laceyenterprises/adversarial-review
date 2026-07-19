@@ -248,6 +248,10 @@ async function fetchPrState({ repo, prNumber, execGhWithRetryImpl = execGhWithRe
   return JSON.parse(stdout || '{}');
 }
 
+function gitWorktreeRemoveIndicatesGone(detail) {
+  return /(?:is not a working tree|does not exist)\s*$/i.test(String(detail || '').trim());
+}
+
 async function removeHammerWorktree({
   entry,
   hqRoot,
@@ -265,6 +269,7 @@ async function removeHammerWorktree({
   // directory that is still present (e.g. "Directory not empty") is untouched
   // and stays on the real teardown path below.
   let treeAlreadyGone = Boolean(entry.registered && entry.repoPath && entry.diskPresent === false);
+  let removePhysicalInvalidTree = false;
   if (entry.registered && entry.repoPath && !treeAlreadyGone) {
     try {
       await execGit({
@@ -275,9 +280,10 @@ async function removeHammerWorktree({
       });
     } catch (err) {
       const detail = String(err?.stderr || err?.message || err);
-      if (/is not a working tree|does not exist/i.test(detail)) {
+      if (gitWorktreeRemoveIndicatesGone(detail)) {
         // The tree is already physically gone; prune the stale entry below.
         treeAlreadyGone = true;
+        removePhysicalInvalidTree = entry.diskPresent !== false;
       } else {
         errors.push(`git-worktree-remove:${detail}`);
       }
@@ -285,6 +291,14 @@ async function removeHammerWorktree({
   }
 
   if (treeAlreadyGone) {
+    const stalePhysicalPath = entry.worktreePath || entry.path;
+    if (removePhysicalInvalidTree && stalePhysicalPath) {
+      try {
+        rmSync(stalePhysicalPath, { recursive: true, force: true });
+      } catch (err) {
+        errors.push(`worktree-rm:${String(err?.message || err)}`);
+      }
+    }
     try {
       await execGit({
         repoPath: entry.repoPath,

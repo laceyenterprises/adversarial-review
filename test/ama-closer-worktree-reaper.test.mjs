@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -298,7 +298,64 @@ test('closer worktree reaper prunes when git worktree remove reports the tree is
     calls.some((call) => call.cmd === 'git' && call.args.includes('prune') && call.args.includes(repoPath)),
     true,
   );
+  assert.equal(existsSync(worktreePath), false);
   assert.equal(warnings.some((message) => message.includes('remove-incomplete')), false);
+});
+
+test('closer worktree reaper does not match injected gone text inside path', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-injected-path-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const repoPath = join(hqRoot, 'repos', 'agent-os');
+  const worktreePath = join(hqRoot, 'workers', 'hammer-ama-pr-4243-does-not-exist', 'agent-os');
+  mkdirSync(worktreePath, { recursive: true });
+
+  const calls = [];
+  const warnings = [];
+  const result = await reapCloserHammerWorktrees({
+    hqRoot,
+    cursorPath: join(root, 'cursor.json'),
+    hqPath: '/bin/hq',
+    repoPaths: [repoPath],
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      const joined = args.join(' ');
+      if (cmd === 'git' && joined.includes('remote get-url origin')) {
+        return { stdout: 'git@github.com:laceyenterprises/agent-os.git\n', stderr: '' };
+      }
+      if (cmd === 'git' && joined.includes('worktree list --porcelain')) {
+        return {
+          stdout: [
+            `worktree ${worktreePath}`,
+            'branch refs/heads/codex/busy',
+            '',
+          ].join('\n'),
+          stderr: '',
+        };
+      }
+      if (cmd === 'git' && args.includes('remove')) {
+        const err = new Error('git worktree remove failed');
+        err.stderr = `error: failed to delete '${worktreePath}': Directory not empty`;
+        throw err;
+      }
+      return { stdout: '{}', stderr: '' };
+    },
+    execGhWithRetryImpl: async () => ({
+      stdout: JSON.stringify({ state: 'MERGED', mergedAt: '2026-07-18T00:00:00Z', closedAt: '2026-07-18T00:00:00Z' }),
+    }),
+    limit: 10,
+    logger: { info() {}, warn(message) { warnings.push(message); } },
+  });
+
+  assert.equal(result.reaped, 0);
+  assert.equal(result.errors, 1);
+  assert.equal(result.pruned, 0);
+  assert.equal(existsSync(worktreePath), true);
+  assert.equal(
+    calls.some((call) => call.cmd === 'git' && call.args.includes('prune')),
+    false,
+  );
+  assert.equal(warnings.some((message) => message.includes('remove-incomplete')), true);
 });
 
 test('closer worktree reaper still errors when a present worktree dir cannot be removed', async (t) => {

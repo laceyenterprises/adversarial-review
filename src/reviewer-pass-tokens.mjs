@@ -275,7 +275,7 @@ function completeReviewerPass(rootDir, {
       usage?.reasoning ?? null,
       usage?.toolContext ?? null,
       usage?.total ?? null,
-      usage?.costUSD ?? derivedCost ?? null,
+      usage?.costUSD ?? derivedCost ?? existing?.token_cost_usd ?? null,
       tokenSource || usage?.source || null,
       metadataJson(mergedMetadata),
       key.repo,

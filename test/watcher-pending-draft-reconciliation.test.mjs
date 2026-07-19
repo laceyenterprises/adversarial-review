@@ -11,6 +11,11 @@ import {
 import { AgentOSConfigError } from '../src/config-loader.mjs';
 
 const WATCHER_SOURCE = new URL('../src/watcher.mjs', import.meta.url);
+// ARC-18: the per-PR claim/spawn body of pollOnce moved out of watcher.mjs into
+// processReviewSubject (src/pollonce-phases.mjs). Structural checks over that
+// body now read the phase module; pollOnce (watcher.mjs) still owns the
+// per-PR-phase → close/maintenance ordering.
+const POLLONCE_PHASES_SOURCE = new URL('../src/pollonce-phases.mjs', import.meta.url);
 
 async function withEnv(overrides, fn) {
   const isolatedOverrides = {
@@ -172,7 +177,7 @@ test('watcher app-token reconciliation derives bot login and never probes /user'
 });
 
 test('watcher runs pending-draft reconciliation after claim and freshness re-check', () => {
-  const source = readFileSync(WATCHER_SOURCE, 'utf8');
+  const source = readFileSync(POLLONCE_PHASES_SOURCE, 'utf8');
   const claimIndex = source.indexOf(': stmtMarkAttemptStarted.run(');
   const infraClaimIndex = source.indexOf('? stmtMarkInfraAutoRecoveryAttemptStarted.run(');
   const freshnessIndex = source.indexOf('Freshness re-check (2026-05-18)');
@@ -188,7 +193,11 @@ test('watcher runs pending-draft reconciliation after claim and freshness re-che
 });
 
 test('watcher terminal rereview skip releases claim and falls through to close path', () => {
-  const source = readFileSync(WATCHER_SOURCE, 'utf8');
+  // ARC-18: the per-PR skip/spawn body lives in processReviewSubject now, while
+  // pollOnce (watcher.mjs) still drives that per-PR phase before the
+  // close/maintenance adoption phase. Read the skip/spawn ordering from the
+  // phase module and the phase → adoption ordering from watcher.mjs.
+  const source = readFileSync(POLLONCE_PHASES_SOURCE, 'utf8');
   const guardIndex = source.indexOf("let skipReviewerSpawnReason = null;");
   const closerProbeIndex = source.indexOf("const closerHead = await getHeadCloserCommitSuppressionWithBoundedRetry({", guardIndex);
   const closerSuppressedIndex = source.indexOf("if (closerHead?.suppressed) {", guardIndex);
@@ -198,7 +207,6 @@ test('watcher terminal rereview skip releases claim and falls through to close p
   // ARC-13 hoisted the spawn args + added a gated pipeline ternary; the v1
   // single-review call is the ternary's non-pipeline branch.
   const spawnIndex = source.indexOf("await spawnReviewer(spawnReviewerArgs)", guardIndex);
-  const adoptionIndex = source.indexOf("await runQueuedReviewAdoptionPhase({", spawnIndex);
 
   assert.ok(guardIndex > 0, 'rereview skip guard should exist');
   assert.ok(closerProbeIndex > guardIndex, 'closer-head probe should use bounded retry wrapper');
@@ -219,7 +227,14 @@ test('watcher terminal rereview skip releases claim and falls through to close p
     'skip branch should release the already-claimed reviewer row'
   );
   assert.ok(spawnIndex > skipReleaseIndex, 'spawnReviewer should be in the non-skip branch');
-  assert.ok(adoptionIndex > spawnIndex, 'watcher close/maintenance phase should remain after reviewer dispatch');
+
+  // pollOnce still runs the per-PR phase (processReviewSubject, which drives
+  // spawnReviewer) before the close/maintenance adoption phase.
+  const watcherSource = readFileSync(WATCHER_SOURCE, 'utf8');
+  const dispatchPhaseIndex = watcherSource.indexOf("await processReviewSubject(subjectEntry, {");
+  const adoptionIndex = watcherSource.indexOf("await runQueuedReviewAdoptionPhase({", dispatchPhaseIndex);
+  assert.ok(dispatchPhaseIndex > 0, 'per-PR processing phase should be driven from pollOnce');
+  assert.ok(adoptionIndex > dispatchPhaseIndex, 'watcher close/maintenance phase should remain after reviewer dispatch');
 });
 
 test('hard review ceiling defaults only for missing or invalid round budgets', () => {

@@ -289,31 +289,64 @@ test('retryPendingDagAutowalkOnMerge marks malformed records failed without cons
 });
 
 test('pollOnce keeps dag autowalk-on-merge retry as a single poll-level pass', () => {
-  const source = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
-  const lifecycleStart = source.indexOf('async function syncPRLifecycle(');
-  const pollStart = source.indexOf('async function pollOnce(');
-  assert.notEqual(lifecycleStart, -1);
-  assert.notEqual(pollStart, -1);
+  const watcherSrc = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  // ARC-18: syncPRLifecycle moved to pr-lifecycle-sync.mjs and
+  // runQueuedReviewAdoptionPhase moved to posted-review-row.mjs. pollOnce stays
+  // in watcher.mjs and still delegates to the phase helper once per tick, so
+  // each slice below reads from the file that now owns that function.
+  const lifecycleSrc = readFileSync(new URL('../src/pr-lifecycle-sync.mjs', import.meta.url), 'utf8');
+  const phaseSrc = readFileSync(new URL('../src/posted-review-row.mjs', import.meta.url), 'utf8');
 
-  const lifecycleSource = source.slice(lifecycleStart, pollStart);
+  // Slice a top-level function body from `startAnchor` to the next top-level
+  // exported or unexported top-level function, or to end-of-file when it is the last
+  // function defined in the module.
+  const sliceTopLevelFn = (source, startAnchor) => {
+    const start = source.indexOf(startAnchor);
+    assert.notEqual(start, -1, `expected to find ${startAnchor}`);
+    const bodyStart = start + startAnchor.length;
+    const rest = source.slice(bodyStart);
+    const delimiters = [
+      '\nexport async function',
+      '\nexport function',
+      '\nasync function',
+      '\nfunction',
+    ]
+      .map((d) => rest.indexOf(d))
+      .filter((i) => i >= 0);
+    const end = delimiters.length ? bodyStart + Math.min(...delimiters) : source.length;
+    return source.slice(start, end);
+  };
+
+  const lifecycleSource = sliceTopLevelFn(lifecycleSrc, 'async function syncPRLifecycle(');
   assert.equal(
     lifecycleSource.includes('await retryPendingDagAutowalkOnMerge('),
     false,
     'syncPRLifecycle must enqueue owed work without running the global retry worker per merged PR'
   );
 
-  const pollSource = source.slice(pollStart, source.indexOf('async function main(', pollStart));
+  const mergedMark = lifecycleSource.indexOf('stmtMarkMerged.run(');
+  const mergedSync = lifecycleSource.indexOf("'finalized'");
+  const closedMark = lifecycleSource.indexOf('stmtMarkClosed.run(');
+  const closedSync = lifecycleSource.indexOf("'halted'");
+  // Guard against a false pass if any marker string is absent: indexOf returns
+  // -1, and `mark > -1` would be trivially true, so assert each exists first.
+  assert.notEqual(mergedMark, -1, 'syncPRLifecycle must call stmtMarkMerged.run(');
+  assert.notEqual(mergedSync, -1, "syncPRLifecycle must sync the 'finalized' triage state");
+  assert.notEqual(closedMark, -1, 'syncPRLifecycle must call stmtMarkClosed.run(');
+  assert.notEqual(closedSync, -1, "syncPRLifecycle must sync the 'halted' triage state");
+  assert.ok(mergedMark > mergedSync, 'merged lifecycle state must commit after triage sync');
+  assert.ok(closedMark > closedSync, 'closed lifecycle state must commit after triage sync');
+
+  const pollStart = watcherSrc.indexOf('async function pollOnce(');
+  assert.notEqual(pollStart, -1);
+  const pollSource = watcherSrc.slice(pollStart, watcherSrc.indexOf('async function main(', pollStart));
   assert.ok(
     pollSource.includes('await runQueuedReviewAdoptionPhase({'),
     'pollOnce should delegate the queued post-review phase once per tick'
   );
 
-  const phaseStart = source.indexOf('async function runQueuedReviewAdoptionPhase(');
-  const phaseSource = source.slice(
-    phaseStart,
-    source.indexOf('async function maybeDispatchReviewerTimeoutExhaustedMergeAgent(', phaseStart),
-  );
-  const syncIndex = phaseSource.indexOf('await syncPRLifecycleImpl(octokit, operatorSurface);');
+  const phaseSource = sliceTopLevelFn(phaseSrc, 'async function runQueuedReviewAdoptionPhase(');
+  const syncIndex = phaseSource.indexOf('await syncPRLifecycleImpl(octokit, operatorSurface, primaryDomainId);');
   const retryIndex = phaseSource.indexOf('await retryPendingDagAutowalkOnMergeImpl();');
   assert.ok(syncIndex >= 0);
   assert.ok(retryIndex > syncIndex, 'pollOnce phase should retry once after lifecycle sync sees new merges');

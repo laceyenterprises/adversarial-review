@@ -263,7 +263,9 @@ test('CFGDRIFT-01 watcher: gemini mode wrapper preserves source metadata', () =>
 });
 
 test('CFGDRIFT-01 watcher: selection source logging is present', () => {
-  const source = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  // ARC-18: the per-PR selection/logging block moved out of pollOnce into
+  // processReviewSubject (src/pollonce-phases.mjs); read from its new home.
+  const source = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
   assert.match(source, /gemini-mode resolved=\$\{geminiReviewerMode\} /);
   assert.match(source, /source=\$\{geminiModeResolution\.source \|\| 'unknown'\} /);
   assert.match(source, /topPath=\$\{geminiModeResolution\.topPath \|\| '<unknown>'\}/);
@@ -271,7 +273,9 @@ test('CFGDRIFT-01 watcher: selection source logging is present', () => {
 });
 
 test('GMW-02 watcher: existing-row routing updates happen only after spawn claim', () => {
-  const source = readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8');
+  // ARC-18: the per-PR claim/routing block moved out of pollOnce into
+  // processReviewSubject (src/pollonce-phases.mjs); read from its new home.
+  const source = readFileSync(new URL('../src/pollonce-phases.mjs', import.meta.url), 'utf8');
   const createRowStart = source.indexOf('if (!existing) {\n        stmtCreateReviewRow.run(');
   const currentRead = source.indexOf('const current = stmtGetReviewRow.get(repoPath, prNumber);', createRowStart);
   assert.notEqual(createRowStart, -1);

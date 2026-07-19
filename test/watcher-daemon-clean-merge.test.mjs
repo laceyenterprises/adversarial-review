@@ -1190,6 +1190,7 @@ test('daemon clean merge resolves worker identity from HQ launch provenance when
       JSON.stringify({
         repo: 'acme/repo',
         prRepo: 'acme/repo',
+        prNumber: 3464,
         branch: 'claude-code-hcc-02-14a16b9d/HCC-02',
         launchRequestId: 'lrq_8f7fc45e-3c3b-40f7-907d-9ab83635ed26',
         workerClass: 'claude-code',
@@ -1202,7 +1203,8 @@ test('daemon clean merge resolves worker identity from HQ launch provenance when
     writeFileSync(
       collisionPath,
       JSON.stringify({
-        prRepo: 'malicious-org/repo',
+        prRepo: 'acme/repo',
+        prNumber: 9999,
         branch: 'claude-code-hcc-02-14a16b9d/HCC-02',
         launchRequestId: 'lrq_wrong_cross_org_identity',
         workerClass: 'codex',
@@ -1284,6 +1286,7 @@ test('daemon clean merge launch provenance skips missing candidate files without
       join(workerDir, 'launch-provenance.json'),
       JSON.stringify({
         prRepo: 'acme/repo',
+        prNumber: 1572,
         branch: 'codex-valid-provenance/LAC-1572',
         launchRequestId: 'lrq_valid_after_missing_candidates',
         workerClass: 'codex',

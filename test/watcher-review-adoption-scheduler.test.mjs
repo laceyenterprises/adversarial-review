@@ -13,21 +13,46 @@ function watcherSource() {
   return readFileSync(path.join(ROOT, 'src', 'watcher.mjs'), 'utf8');
 }
 
+// ARC-18: runQueuedReviewAdoptionPhase and its internal drain/maintenance
+// ordering moved to src/posted-review-row.mjs. The reviewer/posted-review queue
+// initialization still lives in pollOnce (watcher.mjs), so the two halves of
+// this structural check now read from two different source files.
+function postedReviewRowSource() {
+  return readFileSync(path.join(ROOT, 'src', 'posted-review-row.mjs'), 'utf8');
+}
+
+// ARC-18: the per-PR loop body — which enqueues posted-review handoffs — moved
+// out of pollOnce into processReviewSubject (src/pollonce-phases.mjs). The queue
+// is still initialized in pollOnce (watcher.mjs) and threaded into that phase.
+function pollOncePhasesSource() {
+  return readFileSync(path.join(ROOT, 'src', 'pollonce-phases.mjs'), 'utf8');
+}
+
 test('watcher drains queued reviewer dispatches before merge-side handoffs', () => {
-  const source = watcherSource();
-  const candidateQueue = source.indexOf('const reviewerDispatchCandidates = [];');
-  const postedQueue = source.indexOf('const postedReviewHandlers = [];');
-  const postedEnqueue = source.indexOf('postedReviewHandlers.push({');
-  const phaseHelper = source.indexOf('async function runQueuedReviewAdoptionPhase');
-  const drainBeforeMaintenance = source.indexOf(
+  const watcher = watcherSource();
+  const phase = postedReviewRowSource();
+  const pollPhases = pollOncePhasesSource();
+
+  // Queue initialization is part of pollOnce and stays in watcher.mjs.
+  const candidateQueue = watcher.indexOf('const reviewerDispatchCandidates = [];');
+  const postedQueue = watcher.indexOf('const postedReviewHandlers = [];');
+  // pollOnce drives the per-PR processing phase, which is where the posted
+  // handoff is enqueued (ARC-18: the enqueue moved to pollonce-phases.mjs).
+  const perPrPhaseCall = watcher.indexOf('await processReviewSubject(subjectEntry, {');
+  const postedEnqueue = pollPhases.indexOf('postedReviewHandlers.push({');
+  // The executable phase ordering moved into the runQueuedReviewAdoptionPhase
+  // helper, now in posted-review-row.mjs.
+  const phaseHelper = phase.indexOf('async function runQueuedReviewAdoptionPhase');
+  const drainBeforeMaintenance = phase.indexOf(
     "await drainReviewerDispatchCandidates('posted-review handoffs and watcher maintenance');",
   );
-  const postedDrain = source.indexOf('for (const postedReviewHandler of postedReviewHandlers)');
-  const lifecycleCleanup = source.indexOf('await retryPendingMergeAgentLifecycleCleanupsImpl();');
-  const dagAutowalk = source.indexOf('await retryPendingDagAutowalkOnMergeImpl();');
+  const postedDrain = phase.indexOf('for (const postedReviewHandler of postedReviewHandlers)');
+  const lifecycleCleanup = phase.indexOf('await retryPendingMergeAgentLifecycleCleanupsImpl();');
+  const dagAutowalk = phase.indexOf('await retryPendingDagAutowalkOnMergeImpl();');
 
   assert.notEqual(candidateQueue, -1, 'reviewer dispatch candidate queue exists');
   assert.notEqual(postedQueue, -1, 'posted review handoffs are queued');
+  assert.notEqual(perPrPhaseCall, -1, 'pollOnce drives the per-PR processing phase');
   assert.notEqual(postedEnqueue, -1, 'posted review rows enqueue their handoff');
   assert.notEqual(phaseHelper, -1, 'post-review phase helper exists');
   assert.notEqual(drainBeforeMaintenance, -1, 'reviewer dispatch drain exists before maintenance');
@@ -36,7 +61,7 @@ test('watcher drains queued reviewer dispatches before merge-side handoffs', () 
   assert.notEqual(dagAutowalk, -1, 'dag autowalk retry still runs');
 
   assert.ok(candidateQueue < postedQueue, 'queues are initialized near the reviewer scheduler');
-  assert.ok(postedQueue < postedEnqueue, 'posted handler queue is initialized before use');
+  assert.ok(postedQueue < perPrPhaseCall, 'posted handler queue is initialized before the per-PR phase that enqueues into it');
   assert.ok(phaseHelper < drainBeforeMaintenance, 'ordering lives in the executable phase helper');
   assert.ok(drainBeforeMaintenance < postedDrain, 'reviewers drain before posted-review handoffs');
   assert.ok(postedDrain < lifecycleCleanup, 'posted-review handoffs run before lifecycle cleanup');

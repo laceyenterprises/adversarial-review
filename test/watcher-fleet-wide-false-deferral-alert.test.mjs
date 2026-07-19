@@ -537,7 +537,7 @@ test('fleet-wide alert delivery happens after releasing the detector state lock'
   }
 });
 
-test('corrupt state file fails closed and emits a degraded detector alert', async () => {
+test('corrupt state file is rebuilt from the current observation', async () => {
   const alertStateDir = tmpStateDir();
   try {
     const calls = [];
@@ -548,25 +548,30 @@ test('corrupt state file fails closed and emits a degraded detector alert', asyn
     const statePath = path.join(alertStateDir, 'fleet-state.json');
     writeFileSync(statePath, '{not-json\n');
 
-    await assert.rejects(
-      maybeFireFleetWideFalseDeferralAlert({
-        dispatched: buildDispatchedDeferred({ lrq: 'lrq-1' }),
-        repoPath: 'laceyenterprises/agent-os',
-        prNumber: 661,
-        deliverAlertFn: deliverFn,
-        logger: quietLogger(),
-        now: Date.parse('2026-05-18T03:30:00Z'),
-        alertStateDir,
-      }),
-      /fleet-wide false-deferral detector state read failed/
-    );
+    const warnings = [];
+    const logger = { ...quietLogger(), warn: (message) => warnings.push(message) };
+    const result = await maybeFireFleetWideFalseDeferralAlert({
+      dispatched: buildDispatchedDeferred({ lrq: 'lrq-1' }),
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 661,
+      deliverAlertFn: deliverFn,
+      logger,
+      now: Date.parse('2026-05-18T03:30:00Z'),
+      alertStateDir,
+    });
 
-    assert.strictEqual(calls.length, 1);
-    assert.strictEqual(
-      calls[0].structured?.event,
-      'merge_agent.fleet_wide_false_deferral_detector_degraded',
-    );
-    assert.strictEqual(calls[0].structured?.payload?.operation, 'read');
+    assert.strictEqual(result, false);
+    assert.strictEqual(calls.length, 0);
+    assert.deepStrictEqual(JSON.parse(readFileSync(statePath, 'utf8')), {
+      observations: [{
+        lrq: 'lrq-1',
+        observedAt: '2026-05-18T03:30:00.000Z',
+        repo: 'laceyenterprises/agent-os',
+        prNumber: 661,
+      }],
+      lastAlertedAt: null,
+    });
+    assert.ok(warnings.some((message) => message.includes('rebuilding empty state')));
   } finally {
     rmSync(alertStateDir, { recursive: true, force: true });
   }
@@ -580,6 +585,8 @@ test('state write failure fails closed and emits a degraded detector alert', asy
       calls.push({ text, structured });
       return { ok: true };
     };
+    const degradedStatePath = path.join(alertStateDir, 'degraded-alert-state.json');
+    writeFileSync(degradedStatePath, '{not-json\n');
 
     await assert.rejects(
       maybeFireFleetWideFalseDeferralAlert({
@@ -603,6 +610,8 @@ test('state write failure fails closed and emits a degraded detector alert', asy
       'merge_agent.fleet_wide_false_deferral_detector_degraded',
     );
     assert.strictEqual(calls[0].structured?.payload?.operation, 'write-observations');
+    const degradedState = JSON.parse(readFileSync(degradedStatePath, 'utf8'));
+    assert.strictEqual(Object.keys(degradedState).length, 1);
   } finally {
     rmSync(alertStateDir, { recursive: true, force: true });
   }

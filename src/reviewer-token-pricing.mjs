@@ -13,9 +13,10 @@
 // This module is a MINIMAL, self-contained port of the loader + pricing math in
 //   modules/agent-observability/runtime/scripts/model-pricing.mjs
 // (PricingTable / validatePricing / loadPricingTable). Behavior is intentionally
-// identical: rates are USD per 1M tokens, reasoning is billed at the output rate
-// and tool-context at the input rate, and a bad/missing pricing file degrades to
-// null (never throws) so the reviewer-pass rollup falls back to count-only.
+// identical except that reviewer usage treats reasoning tokens as already
+// included in output when output is present. Rates are USD per 1M tokens, and a
+// bad/missing pricing file degrades to null (never throws) so the reviewer-pass
+// rollup falls back to count-only.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -65,16 +66,20 @@ class PricingTable {
   }
 
   // deltas: {input, output, cache_read, cache_write, reasoning, tool}
-  // reasoning is billed at the output rate, tool at the input rate.
+  // reasoning is a diagnostic subset of output for reviewer captures. Bill it at
+  // the output rate only when output is absent, so reasoning-only rows still get
+  // a conservative estimate without double-charging inclusive output rows.
   costDetails(model, deltas = {}) {
     const rate = this.rateFor(model);
     const n = (v) => (isFiniteNumber(v) && v > 0 ? v : 0);
+    const outputTokens = n(deltas.output);
+    const standaloneReasoningTokens = outputTokens > 0 ? 0 : n(deltas.reasoning);
     const micros =
       n(deltas.input) * rate.input +
-      n(deltas.output) * rate.output +
+      outputTokens * rate.output +
       n(deltas.cache_read) * rate.cache_read +
       n(deltas.cache_write) * rate.cache_write +
-      n(deltas.reasoning) * rate.output +
+      standaloneReasoningTokens * rate.output +
       n(deltas.tool) * rate.input;
     return {
       costUSD: micros / 1_000_000,
@@ -139,12 +144,14 @@ function deriveReviewerTokenCost({ usage, model, pricingTable } = {}) {
     tool: usage.toolContext,
   };
   const positive = (v) => (isFiniteNumber(v) && v > 0 ? v : 0);
+  const outputTokens = positive(deltas.output);
+  const standaloneReasoningTokens = outputTokens > 0 ? 0 : positive(deltas.reasoning);
   const billableTokens =
     positive(deltas.input) +
-    positive(deltas.output) +
+    outputTokens +
     positive(deltas.cache_read) +
     positive(deltas.cache_write) +
-    positive(deltas.reasoning) +
+    standaloneReasoningTokens +
     positive(deltas.tool);
   if (billableTokens <= 0) return null;
   const details = pricingTable.costDetails(model, deltas);

@@ -189,7 +189,8 @@ const MONOLITH_CEILINGS = Object.freeze({
   // 6659 -> 6686: SEV0 2026-07-19 codex --model pin (resolveCodexRemediationModel); decomposition will reclaim.
   // 6686 -> 6140: ARC-19 wave3 extract workflow-push-capability preflight to src/remediation-workflow-push-capability.mjs.
   // 6140 -> 5820: ARC-19 wave3 extract git & PR I/O helpers to src/remediation-git-pr-io.mjs.
-  'follow-up-remediation.mjs': 5820,
+  // 5820 -> 5582: ARC-19 wave4 extract HQ dispatch status/cancel helpers to src/remediation-hq-dispatch.mjs.
+  'follow-up-remediation.mjs': 5582,
   // 5485 -> 4262: ARC-19 wave3 extract fast-merge processing/orchestration to src/fast-merge-processing.mjs.
   // 4262 -> 3742: ARC-19 wave3 extract merge-agent dispatch-decision policy to src/merge-agent-dispatch-decision.mjs.
   'follow-up-merge-agent.mjs': 3742,

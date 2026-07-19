@@ -56,14 +56,8 @@ import {
 } from './github-adapter-client.mjs';
 import { buildCodePrSubjectIdentity } from './identity-shapes.mjs';
 import {
-  getReviewRow,
-  openReviewStateDb,
   requestReviewRereview,
 } from './review-state.mjs';
-import {
-  CASCADE_FAILURE_CAP,
-  readCascadeState,
-} from './reviewer-cascade.mjs';
 import {
   loadRoleConfig,
   resolveDefaultMergeAgentWorkerClass,
@@ -73,15 +67,19 @@ import {
 import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE, loadConfigCached } from './config-loader.mjs';
-import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import classifyMergeAgentRescue, { parseReviewBody as parseMergeAgentRescueReviewBody } from './merge-agent-rescue-classifier.mjs';
+import {
+  classifyBlockingFindings,
+  classifyNonBlockingFindings,
+  readMergeAgentReviewFailureStateWithDb,
+} from './merge-agent-review-classification.mjs';
 import {
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
   FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER,
   REVIEWER_TIMEOUT_EXHAUSTED_TRIGGER,
   buildMergeAgentPrompt,
 } from './merge-agent-prompt.mjs';
-import { extractReviewVerdict, normalizeEffectiveReviewVerdict, normalizeReviewVerdict, sanitizeReviewPayloadBestEffort } from './review-verdict.mjs';
+import { extractReviewVerdict, normalizeEffectiveReviewVerdict, normalizeReviewVerdict } from './review-verdict.mjs';
 import {
   readLatestWorkerRunStatusFromLedger,
 } from './session-ledger-read-adapter.mjs';
@@ -3523,86 +3521,6 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
     operatorApprovalEvent: resolvedOperatorApprovalEvent,
     mergeAgentRequestEvent: resolvedMergeAgentRequestEvent,
   };
-}
-
-function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
-  // Defense-in-depth format-independence: canonicalize the posted body before
-  // parsing so a non-`##`-headed gemini/agy review (which reviewer-side
-  // sanitation now normalizes at post time, but which may already be posted
-  // un-canonicalized on an in-flight PR) still yields a parseable
-  // `## Blocking issues` section. Without this the closer resolves
-  // `state:'unknown'` on such bodies and REFUSES the budget-exhausted final
-  // pass, so the PR never closes and re-enters the review loop.
-  const parsed = parseMergeAgentRescueReviewBody(sanitizeReviewPayloadBestEffort(reviewBody));
-  const normalizedVerdict = normalizeReviewVerdict(lastVerdict);
-  const verdictKey = normalizedVerdict === 'unknown'
-    ? String(lastVerdict || '').trim().toLowerCase()
-    : normalizedVerdict;
-  if (parsed.blocking.missing) {
-    return verdictKey === 'request-changes'
-      ? { count: 0, state: 'unknown' }
-      : { count: 0, state: 'known' };
-  }
-  return { count: parsed.blocking.count, state: 'known' };
-}
-
-function classifyNonBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
-  if (!String(reviewBody ?? '').trim()) return { count: 0, state: 'unknown' };
-  const parsed = parseMergeAgentRescueReviewBody(sanitizeReviewPayloadBestEffort(reviewBody));
-  const normalizedVerdict = normalizeReviewVerdict(lastVerdict);
-  const verdictKey = normalizedVerdict === 'unknown'
-    ? String(lastVerdict || '').trim().toLowerCase()
-    : normalizedVerdict;
-  if (parsed.nonBlocking.missing) {
-    return verdictKey === 'approved' || verdictKey === 'comment-only'
-      ? { count: 0, state: 'known' }
-      : { count: 0, state: 'unknown' };
-  }
-  return { count: parsed.nonBlocking.count, state: 'known' };
-}
-
-function readMergeAgentReviewFailureState(rootDir, { repo, prNumber, headSha = null } = {}) {
-  return readMergeAgentReviewFailureStateWithDb(rootDir, null, { repo, prNumber, headSha });
-}
-
-function readMergeAgentReviewFailureStateWithDb(rootDir, reviewStateDb, { repo, prNumber, headSha = null } = {}) {
-  let db = null;
-  try {
-    db = reviewStateDb || openReviewStateDb(rootDir);
-    const row = getReviewRow(db, { repo, prNumber });
-    const reviewStatus = String(row?.review_status || '').trim().toLowerCase();
-    const failureClass = (reviewStatus === 'failed' || reviewStatus === 'pending-upstream')
-      ? reviewerFailureClassFromStoredRow(row)
-      : null;
-    const reviewedHeadSha = String(row?.reviewer_head_sha || '').trim();
-    const currentHeadSha = String(headSha || '').trim();
-    if (failureClass === 'reviewer-timeout' && reviewedHeadSha && currentHeadSha && reviewedHeadSha !== currentHeadSha) {
-      return {
-        reviewFailureClass: failureClass,
-        reviewFailureExhausted: false,
-        reviewStatus: row?.review_status || null,
-      };
-    }
-    const cascadeState = failureClass === 'reviewer-timeout'
-      ? readCascadeState(rootDir, { repo, prNumber })
-      : null;
-    const timeoutFailures = Number(cascadeState?.transientFailureBreakdown?.['reviewer-timeout'] || 0);
-    return {
-      reviewFailureClass: failureClass || null,
-      reviewFailureExhausted: failureClass === 'reviewer-timeout' && timeoutFailures >= CASCADE_FAILURE_CAP,
-      reviewStatus: row?.review_status || null,
-    };
-  } catch {
-    return {
-      reviewFailureClass: null,
-      reviewFailureExhausted: false,
-      reviewStatus: null,
-    };
-  } finally {
-    try {
-      if (!reviewStateDb) db?.close?.();
-    } catch {}
-  }
 }
 
 function buildMergeAgentDispatchJob(rootDir, candidate, { reviewStateDb = null } = {}) {

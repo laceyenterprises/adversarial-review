@@ -256,7 +256,16 @@ async function removeHammerWorktree({
   logger = console,
 }) {
   const errors = [];
-  if (entry.registered && entry.repoPath) {
+  let pruned = false;
+  // When the worktree directory is already physically gone, `git worktree
+  // remove` can only fail validation ("'.git' does not exist" / "is not a
+  // working tree") on every tick, leaving stale registry metadata behind that
+  // spams remove-incomplete and historically pinned branch-holder leases.
+  // Reconcile those with `git worktree prune` instead of erroring forever. A
+  // directory that is still present (e.g. "Directory not empty") is untouched
+  // and stays on the real teardown path below.
+  let treeAlreadyGone = Boolean(entry.registered && entry.repoPath && entry.diskPresent === false);
+  if (entry.registered && entry.repoPath && !treeAlreadyGone) {
     try {
       await execGit({
         repoPath: entry.repoPath,
@@ -265,7 +274,27 @@ async function removeHammerWorktree({
         timeout: 60_000,
       });
     } catch (err) {
-      errors.push(`git-worktree-remove:${String(err?.stderr || err?.message || err)}`);
+      const detail = String(err?.stderr || err?.message || err);
+      if (/is not a working tree|does not exist/i.test(detail)) {
+        // The tree is already physically gone; prune the stale entry below.
+        treeAlreadyGone = true;
+      } else {
+        errors.push(`git-worktree-remove:${detail}`);
+      }
+    }
+  }
+
+  if (treeAlreadyGone) {
+    try {
+      await execGit({
+        repoPath: entry.repoPath,
+        args: ['worktree', 'prune'],
+        execFileImpl,
+        timeout: 60_000,
+      });
+      pruned = true;
+    } catch (err) {
+      errors.push(`git-worktree-prune:${String(err?.stderr || err?.message || err)}`);
     }
   }
 
@@ -299,7 +328,7 @@ async function removeHammerWorktree({
       `[closer-worktree-reap] remove-incomplete workerId=${entry.workerId} errors=${JSON.stringify(errors)}`
     );
   }
-  return { ok: errors.length === 0, errors };
+  return { ok: errors.length === 0, errors, pruned };
 }
 
 async function reapCloserHammerWorktrees({
@@ -363,6 +392,7 @@ async function reapCloserHammerWorktrees({
   const summary = {
     scanned: evaluationEntries.length,
     reaped: 0,
+    pruned: 0,
     skipped: 0,
     errors: 0,
     terminal: 0,
@@ -443,12 +473,14 @@ async function reapCloserHammerWorktrees({
     });
     if (removal.ok) {
       summary.reaped += 1;
+      if (removal.pruned) summary.pruned += 1;
       logger?.info?.(JSON.stringify({
         event: 'closer_worktree_reap.reaped',
         workerId: entry.workerId,
         prNumber: entry.prNumber,
         repo: entry.githubRepo || null,
         reason: reapReason,
+        pruned: removal.pruned,
       }));
     } else {
       summary.errors += 1;

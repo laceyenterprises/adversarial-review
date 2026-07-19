@@ -266,7 +266,18 @@ export const stmtMarkAttemptStarted = db.prepare(
          quota_reset_at_utc = NULL
    WHERE repo = ?
      AND pr_number = ?
-     AND review_status IN ('pending', 'pending-upstream')`
+     AND review_status IN ('pending', 'pending-upstream')
+     -- SEV1 (2026-07-19): never (re)claim a review for a MERGED PR. Merged PRs
+     -- can be stuck at review_status='pending' (their cross-model review never
+     -- posted — high Gemini failure rate); without this guard the CAS re-claims
+     -- + re-spawns a reviewer for them every tick FOREVER (6,049 spawns / 2,482
+     -- merged-but-pending rows / ~5 Gemini procs on 0 open PRs). Guard on
+     -- 'merged' specifically (NOT all non-open): merged is permanent, so pr_state
+     -- can't be a stale value racing the post-claim lifecycle sync — whereas a
+     -- 'closed' PR can be reopened, and the claim runs before that tick's sync,
+     -- so blocking 'closed' here would wrongly defer a reopened PR by a tick.
+     -- COALESCE treats a NULL pr_state as open so a legitimate PR is never skipped.
+     AND COALESCE(pr_state, 'open') != 'merged'`
 );
 export const stmtMarkReviewerPgid = db.prepare(
   `UPDATE reviewed_prs

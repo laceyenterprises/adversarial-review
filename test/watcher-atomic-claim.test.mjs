@@ -35,7 +35,8 @@ const CLAIM_SQL = `UPDATE reviewed_prs
          END
    WHERE repo = ?
      AND pr_number = ?
-     AND review_status IN ('pending', 'pending-upstream')`;
+     AND review_status IN ('pending', 'pending-upstream')
+     AND COALESCE(pr_state, 'open') != 'merged'`;
 const RELEASE_TO_PENDING_SQL =
   "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'";
 const MARK_POSTED_SQL =
@@ -176,6 +177,7 @@ function setupDb() {
 
 function seedReviewRow(db, {
   reviewStatus,
+  prState = 'open',
   reviewAttempts = 0,
   lastAttemptedAt = null,
   failedAt = null,
@@ -192,7 +194,7 @@ function seedReviewRow(db, {
     PR,
     '2026-05-02T18:00:00.000Z',
     'claude',
-    'open',
+    prState,
     reviewStatus,
     reviewAttempts,
     lastAttemptedAt,
@@ -224,6 +226,31 @@ test('atomic claim succeeds for a pending row and flips status to reviewing', ()
   assert.equal(row.reviewer_pgid, null);
   assert.equal(row.failed_at, null);
   assert.equal(row.failure_message, null);
+});
+
+test('SEV1: atomic claim refuses a merged PR stuck at pending but still claims an open one', () => {
+  // A merged PR whose cross-model review never posted stays review_status
+  // 'pending'. Without the pr_state guard the CAS re-claimed + re-spawned a
+  // reviewer for it every tick forever (2026-07-19 SEV1: 6,049 spawns, 2,482
+  // merged-but-pending rows, ~5 Gemini procs on 0 open PRs).
+  const merged = setupDb();
+  seedReviewRow(merged, { reviewStatus: 'pending', prState: 'merged' });
+  assert.equal(
+    runClaim(merged, '2026-07-19T18:10:00.000Z').changes, 0,
+    'a merged PR must NOT be re-claimed for review',
+  );
+  assert.equal(
+    readRow(merged).review_status, 'pending',
+    'row stays pending, never flips to reviewing',
+  );
+
+  // Control: an open PR stuck pending still claims normally.
+  const open = setupDb();
+  seedReviewRow(open, { reviewStatus: 'pending', prState: 'open' });
+  assert.equal(
+    runClaim(open, '2026-07-19T18:10:00.000Z').changes, 1,
+    'an open PR still claims normally',
+  );
 });
 
 test('atomic claim refuses generic failed rows so failure evidence stays terminal', () => {

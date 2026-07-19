@@ -257,6 +257,7 @@ async function removeHammerWorktree({
   hqRoot,
   hqPath,
   execFileImpl,
+  rmSyncImpl = rmSync,
   logger = console,
 }) {
   const errors = [];
@@ -292,23 +293,27 @@ async function removeHammerWorktree({
 
   if (treeAlreadyGone) {
     const stalePhysicalPath = entry.worktreePath || entry.path;
+    let physicalRemovalSucceeded = true;
     if (removePhysicalInvalidTree && stalePhysicalPath) {
       try {
-        rmSync(stalePhysicalPath, { recursive: true, force: true });
+        rmSyncImpl(stalePhysicalPath, { recursive: true, force: true });
       } catch (err) {
+        physicalRemovalSucceeded = false;
         errors.push(`worktree-rm:${String(err?.message || err)}`);
       }
     }
-    try {
-      await execGit({
-        repoPath: entry.repoPath,
-        args: ['worktree', 'prune'],
-        execFileImpl,
-        timeout: 60_000,
-      });
-      pruned = true;
-    } catch (err) {
-      errors.push(`git-worktree-prune:${String(err?.stderr || err?.message || err)}`);
+    if (physicalRemovalSucceeded) {
+      try {
+        await execGit({
+          repoPath: entry.repoPath,
+          args: ['worktree', 'prune'],
+          execFileImpl,
+          timeout: 60_000,
+        });
+        pruned = true;
+      } catch (err) {
+        errors.push(`git-worktree-prune:${String(err?.stderr || err?.message || err)}`);
+      }
     }
   }
 
@@ -330,7 +335,7 @@ async function removeHammerWorktree({
     try {
       const stat = statSync(entry.workerDir);
       if (stat.isDirectory() && HAMMER_WORKER_RE.test(basename(entry.workerDir))) {
-        rmSync(entry.workerDir, { recursive: true, force: true });
+        rmSyncImpl(entry.workerDir, { recursive: true, force: true });
       }
     } catch (err) {
       errors.push(`disk-remove:${String(err?.message || err)}`);
@@ -356,6 +361,7 @@ async function reapCloserHammerWorktrees({
   readdirImpl = fsPromises.readdir,
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
+  rmSyncImpl = rmSync,
   env = process.env,
   logger = console,
 } = {}) {
@@ -483,6 +489,7 @@ async function reapCloserHammerWorktrees({
       hqRoot,
       hqPath,
       execFileImpl,
+      rmSyncImpl,
       logger,
     });
     if (removal.ok) {

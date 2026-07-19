@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, sep } from 'node:path';
+import { parse } from 'acorn';
 
 // ARC-19 import-boundary gate — the ratchet that keeps the v2 five-layer
 // architecture from regressing after the ARC pack closes.
@@ -60,21 +61,64 @@ function allMjs(dir, acc = []) {
   return acc;
 }
 
-// Extract every imported/re-exported module specifier: `import ... from 'x'`,
-// `export ... from 'x'`, bare `import 'x'`, and dynamic `import('x')`. Ignores
-// specifiers that appear only in comments/strings by requiring import/export
-// keyword context.
+function literalSpecifierValue(node) {
+  if (!node) return null;
+  if (node.type === 'Literal' && typeof node.value === 'string') return node.value;
+  if (
+    node.type === 'TemplateLiteral'
+    && node.expressions.length === 0
+    && node.quasis.length === 1
+  ) {
+    return node.quasis[0].value.cooked;
+  }
+  return null;
+}
+
+function walkAst(node, visit) {
+  if (!node || typeof node.type !== 'string') return;
+  visit(node);
+  for (const [key, value] of Object.entries(node)) {
+    if (
+      key === 'parent'
+      || key === 'start'
+      || key === 'end'
+      || key === 'loc'
+      || key === 'range'
+    ) {
+      continue;
+    }
+    if (Array.isArray(value)) {
+      for (const child of value) walkAst(child, visit);
+    } else if (value && typeof value.type === 'string') {
+      walkAst(value, visit);
+    }
+  }
+}
+
+// Extract every imported/re-exported module specifier with the parser rather
+// than regex: static imports, re-exports, bare side-effect imports, and literal
+// dynamic imports. Comments, strings, and template literals without import
+// expression semantics are ignored by construction.
 function importSpecifiers(source) {
   const specs = [];
-  for (const m of source.matchAll(/(?:^|[;\n])\s*(?:import|export)\b[^;]*?\bfrom\s*['"]([^'"]+)['"]/g)) {
-    specs.push(m[1]);
-  }
-  for (const m of source.matchAll(/(?:^|[;\n])\s*import\s+['"]([^'"]+)['"]/g)) {
-    specs.push(m[1]);
-  }
-  for (const m of source.matchAll(/\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g)) {
-    specs.push(m[1]);
-  }
+  const ast = parse(source, {
+    ecmaVersion: 'latest',
+    sourceType: 'module',
+    allowHashBang: true,
+  });
+  walkAst(ast, (node) => {
+    if (
+      node.type === 'ImportDeclaration'
+      || node.type === 'ExportNamedDeclaration'
+      || node.type === 'ExportAllDeclaration'
+    ) {
+      const spec = literalSpecifierValue(node.source);
+      if (spec) specs.push(spec);
+    } else if (node.type === 'ImportExpression') {
+      const spec = literalSpecifierValue(node.source);
+      if (spec) specs.push(spec);
+    }
+  });
   return specs;
 }
 
@@ -209,8 +253,12 @@ test('ARC-19 gate fixtures: importSpecifiers captures static, re-export, bare, a
     "} from './multiline-export.mjs';",
     "import './side-effect.mjs';",
     "const c = await import('./c.mjs');",
+    "const t = await import(`./template-dynamic.mjs`);",
     "const inline = true; import { d } from './inline.mjs';",
+    "/* block comment prefix */ import { e } from './block-comment-prefix.mjs';",
+    "import { f /* ; */ } from './inline-comment-semicolon.mjs';",
     "// import { fake } from './comment-only.mjs' -- must be ignored",
+    "const doc = `import { fake } from './template-string-only.mjs';`;",
   ].join('\n');
   const specs = importSpecifiers(src);
   assert.ok(specs.includes('./a.mjs'));
@@ -219,6 +267,10 @@ test('ARC-19 gate fixtures: importSpecifiers captures static, re-export, bare, a
   assert.ok(specs.includes('./multiline-export.mjs'));
   assert.ok(specs.includes('./side-effect.mjs'));
   assert.ok(specs.includes('./c.mjs'));
+  assert.ok(specs.includes('./template-dynamic.mjs'));
   assert.ok(specs.includes('./inline.mjs'));
+  assert.ok(specs.includes('./block-comment-prefix.mjs'));
+  assert.ok(specs.includes('./inline-comment-semicolon.mjs'));
   assert.ok(!specs.includes('./comment-only.mjs'), 'commented-out imports must not be captured');
+  assert.ok(!specs.includes('./template-string-only.mjs'), 'template-string text must not be captured');
 });

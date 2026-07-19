@@ -408,7 +408,9 @@ async function readDaemonWorkerLaunchProvenanceForPr({
     if (!payload || typeof payload !== 'object') continue;
     const recordRepo = payload.prRepo || payload.repo;
     const recordBranch = String(payload.branch || payload.headBranch || payload.prBranch || '').trim();
+    const recordPrNumber = Number(payload.prNumber || payload.pr_number || payload.pr);
     if (!daemonLaunchProvenanceRepoMatches(recordRepo, expectedRepo)) continue;
+    if (recordPrNumber !== numericPrNumber) continue;
     if (recordBranch !== expectedBranch) continue;
     const launchRequestId = String(
       payload.launchRequestId || payload.launch_request_id || doc?.launchRequestId || doc?.launch_request_id || '',

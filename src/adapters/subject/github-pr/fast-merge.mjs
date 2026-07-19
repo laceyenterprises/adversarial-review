@@ -400,6 +400,7 @@ export async function fetchFastMergeAuthorizationFromTimeline(
       per_page: 100,
     };
     const events = [];
+    let finalPageWasFull = false;
     for (let page = 1; page <= FAST_MERGE_TIMELINE_MAX_PAGES; page += 1) {
       const response = await fetchConditionalRestPage({
         category: 'timeline_events',
@@ -417,7 +418,14 @@ export async function fetchFastMergeAuthorizationFromTimeline(
       });
       const pageEvents = Array.isArray(response?.data) ? response.data : [];
       events.push(...pageEvents);
+      finalPageWasFull = pageEvents.length === params.per_page;
       if (pageEvents.length < params.per_page) break;
+    }
+    if (finalPageWasFull) {
+      logger.warn?.(
+        `[watcher] fast-merge timeline truncated for ${owner}/${repo}#${prNumber}; using normal review path`,
+      );
+      return null;
     }
     return latestTimelineFastMergeAuthorization(events, allowedLabelNames, { liveHeadSha });
   } catch (err) {

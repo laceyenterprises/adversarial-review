@@ -1260,6 +1260,12 @@ test('watcher suppresses closer identity commits even when budget remains', asyn
     suppressed: false,
     reason: null,
   });
+  assert.deepEqual(isTerminalCloserCommitIdentity({
+    message: 'Unreviewed change\n\nCloser: me',
+  }), {
+    suppressed: false,
+    reason: null,
+  });
 
   assert.equal(isTerminalCloserCommitIdentity({
     message: 'Finalize PR',

@@ -16,9 +16,14 @@ function normalizeIdentityPart(value) {
 }
 
 const TERMINAL_CLOSER_BOT_IDENTITIES = new Set([
+  'hammer',
   'merge-agent-lacey',
   'the-hammer-lacey[bot]',
 ]);
+
+function normalizeTrailerIdentity(value) {
+  return normalizeIdentityPart(value).replace(/\s+\(.*$/, '');
+}
 
 function normalizeCommitTrailers(trailers) {
   if (!trailers || typeof trailers !== 'object') return {};
@@ -45,11 +50,13 @@ export function isTerminalCloserCommitIdentity(commit = {}) {
   for (const [key, value] of Object.entries(trailers)) {
     normalizedTrailers[normalizeIdentityPart(key)] = String(value || '').trim();
   }
-  if (normalizedTrailers['closed-by'] || normalizedTrailers.closer) {
+  const trailerKey = normalizedTrailers['closed-by'] ? 'closed-by' : 'closer';
+  const trailerIdentity = normalizeTrailerIdentity(normalizedTrailers[trailerKey]);
+  if (TERMINAL_CLOSER_BOT_IDENTITIES.has(trailerIdentity)) {
     return {
       suppressed: true,
       reason: 'closer-commit-trailer',
-      matched: normalizedTrailers['closed-by'] ? 'Closed-By' : 'Closer',
+      matched: trailerKey === 'closed-by' ? 'Closed-By' : 'Closer',
     };
   }
 

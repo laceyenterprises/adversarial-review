@@ -1100,13 +1100,14 @@ async function refreshOrgRepos(octokit) {
         status: 200,
         durationMs: Date.now() - startedAt,
       });
-      all.push(...repos);
+      for (const repo of repos) all.push(repo);
     }
 
     const excluded = new Set(config.excludeRepos ?? []);
-    activeRepos = all
+    const discoveredRepos = all
       .filter((r) => !r.archived && !excluded.has(r.name) && !excluded.has(`${config.org}/${r.name}`))
       .map((r) => `${config.org}/${r.name}`);
+    activeRepos = [...new Set([...(config.repos || []), ...discoveredRepos])];
 
     console.log(`[watcher] Org repos refreshed — watching ${activeRepos.length} repos: ${activeRepos.join(', ')}`);
   } catch (err) {

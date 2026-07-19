@@ -66,6 +66,16 @@ import { extractReviewVerdict, normalizeEffectiveReviewVerdict, normalizeReviewV
 import {
   readLatestWorkerRunStatusFromLedger,
 } from './session-ledger-read-adapter.mjs';
+import {
+  TERMINAL_WORKER_RUN_STATUSES,
+  deriveOriginalWorkerIdFromBranch,
+  isRecognizedOriginalWorkerId,
+  isTerminalWorkerRunStatus,
+  lookupOriginalWorkerRunStatus,
+  readJsonFileDetailed,
+  readWorkerWorkspace,
+  validateWorkerWorkspaceForBranch,
+} from './merge-agent-original-worker.mjs';
 import { amaAuditFilePath, readAmaAuditEntry } from './ama/audit.mjs';
 import {
   AMA_CLOSER_LEASE_STATUS,
@@ -87,22 +97,6 @@ const HQ_WORKER_TEAR_DOWN_TIMEOUT_MS = 60_000;
 const HQ_DISPATCH_TIMEOUT_MS = 90_000;
 const HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
 const MERGE_CLASS_ORCHESTRATION_MODES = new Set(ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE);
-const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-const WORKER_ID_CLASS_PREFIXES = [
-  'claude-code',
-  'clio-agent',
-  'merge-agent',
-  'codex',
-  'gemini',
-  'pi',
-  'opencode',
-  'hermes',
-  'stub',
-];
-// Must stay aligned with platform/session-ledger/src/session_ledger/models.py
-// WORKER_RUN_TERMINAL_STATUSES. Merge-agent preflight may tear down the
-// original worker ONLY after the canonical ledger marks the run terminal.
-const TERMINAL_WORKER_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled']);
 const DEFERRED_LOOKUP_FAILURE_REASONS = new Set([
   'missing-ledger-db',
   'better-sqlite3-unavailable',
@@ -111,11 +105,6 @@ const DEFERRED_LOOKUP_FAILURE_REASONS = new Set([
   'missing-launch-request-id',
   'unsupported-ledger-backend',
   'malformed-ledger-target',
-]);
-const SESSION_LEDGER_LOOKUP_REASON_ALIASES = new Map([
-  ['missing-ledger-target', 'missing-ledger-db'],
-  ['ledger-read-failed', 'worker-run-lookup-failed'],
-  ['psql-not-installed', 'worker-run-lookup-failed'],
 ]);
 // `operator-approved` is a mobile-friendly override the operator can
 // apply from the GitHub iOS/Android app (or the web UI) to say
@@ -545,29 +534,6 @@ function resolveMergeClassDispatchRoute({
   return route;
 }
 
-function deriveOriginalWorkerIdFromBranch(branch) {
-  const normalized = String(branch || '').trim();
-  if (!normalized.includes('/')) return null;
-  const [workerId] = normalized.split('/');
-  return workerId || null;
-}
-
-function isRecognizedOriginalWorkerId(workerId) {
-  const normalized = String(workerId || '').trim();
-  return WORKER_ID_PATTERN.test(normalized)
-    && WORKER_ID_CLASS_PREFIXES.some((prefix) => (
-      normalized === prefix || normalized.startsWith(`${prefix}-`)
-    ));
-}
-
-function readJsonFileDetailed(filePath) {
-  try {
-    return { ok: true, value: JSON.parse(readFileSync(filePath, 'utf8')) };
-  } catch (err) {
-    return { ok: false, error: err };
-  }
-}
-
 function resolveHqRoot(env = {}) {
   const root = String(env.HQ_ROOT || '').trim();
   return root || null;
@@ -609,11 +575,6 @@ function currentUser(env = process.env) {
   } catch {
     return null;
   }
-}
-
-function isTerminalWorkerRunStatus(status) {
-  const normalized = normalizeWorkerRunStatus(status);
-  return Boolean(normalized) && TERMINAL_WORKER_RUN_STATUSES.has(normalized);
 }
 
 function formatExecFailure(command, err) {
@@ -676,98 +637,6 @@ function isExecTimeout(err) {
   return err?.code === 'ETIMEDOUT'
     || err?.killed === true
     || String(err?.message || '').toLowerCase().includes('timed out');
-}
-
-function readWorkerWorkspace(workerDir) {
-  const workspacePath = join(workerDir, 'workspace.json');
-  const workspace = readJsonFileDetailed(workspacePath);
-  if (workspace.ok) {
-    return { found: true, workspace: workspace.value };
-  }
-  if (workspace.error?.code === 'ENOENT') {
-    return { found: false, reason: 'workspace-missing' };
-  }
-  return {
-    found: false,
-    reason: 'workspace-read-failed',
-    detail: workspace.error?.message || String(workspace.error),
-    code: workspace.error?.code || null,
-  };
-}
-
-function validateWorkerWorkspaceForBranch(workspace, originalWorkerId, branch) {
-  const workspaceWorkerId = String(workspace?.workerId || '').trim();
-  if (!workspaceWorkerId) {
-    return { ok: false, reason: 'workspace-worker-id-missing', workspaceWorkerId: null };
-  }
-  if (workspaceWorkerId !== originalWorkerId) {
-    return { ok: false, reason: 'workspace-worker-id-mismatch', workspaceWorkerId };
-  }
-  const workspaceBranch = String(workspace?.branch || '').trim();
-  if (!workspaceBranch) {
-    return { ok: false, reason: 'workspace-branch-missing', workspaceWorkerId, workspaceBranch: null };
-  }
-  if (branch && workspaceBranch !== branch) {
-    return { ok: false, reason: 'workspace-branch-mismatch', workspaceWorkerId, workspaceBranch };
-  }
-  return { ok: true, workspaceWorkerId, workspaceBranch };
-}
-
-function normalizeWorkerRunStatus(status) {
-  return String(status || '').trim().toLowerCase();
-}
-
-function normalizeDeferredLookupFailureReason(reason) {
-  return SESSION_LEDGER_LOOKUP_REASON_ALIASES.get(reason) || reason;
-}
-
-async function lookupOriginalWorkerRunStatus({
-  workerDir,
-  hqRoot,
-  env,
-  ledgerTarget = null,
-  workspace = undefined,
-  runRecord = undefined,
-  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
-} = {}) {
-  const resolvedWorkspace = workspace === undefined
-    ? readWorkerWorkspace(workerDir).workspace || null
-    : workspace;
-  const resolvedRunRecord = runRecord === undefined
-    ? (() => {
-      const run = readJsonFileDetailed(join(workerDir, 'run.json'));
-      return run.ok ? run.value : null;
-    })()
-    : runRecord;
-  const launchRequestId = resolvedWorkspace?.launchRequestId || resolvedWorkspace?.lrq
-    || resolvedRunRecord?.launchRequestId || resolvedRunRecord?.lrq || null;
-  const runId = resolvedRunRecord?.runId || null;
-  if (!launchRequestId) {
-    return { found: false, reason: 'missing-launch-request-id' };
-  }
-
-  const result = readLatestWorkerRunStatusImpl({
-    launchRequestId,
-    ledgerTarget,
-    env,
-    hqRoot,
-    rootDir: null,
-  });
-  if (!result.ok) {
-    return {
-      found: false,
-      reason: normalizeDeferredLookupFailureReason(result.reason),
-      detail: result.detail || null,
-      launchRequestId,
-      runId,
-    };
-  }
-  return {
-    found: true,
-    status: normalizeWorkerRunStatus(result.row.status),
-    launchRequestId: result.row.launch_request_id || launchRequestId || null,
-    runId: result.row.run_id || runId || null,
-  };
 }
 
 async function prepareOriginalWorkerForMergeAgent({

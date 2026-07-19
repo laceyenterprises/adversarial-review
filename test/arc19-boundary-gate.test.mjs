@@ -187,7 +187,7 @@ test('ARC-19 R2: src/kernel/** and src/adapters/** never import the orchestratio
 // ── R3: monolith line-count ratchets (decrease-only) ─────────────────────────
 const MONOLITH_CEILINGS = Object.freeze({
   'follow-up-remediation.mjs': 6965,
-  'follow-up-merge-agent.mjs': 5741,
+  'follow-up-merge-agent.mjs': 5610,
 });
 
 for (const [name, ceiling] of Object.entries(MONOLITH_CEILINGS)) {

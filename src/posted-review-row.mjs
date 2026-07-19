@@ -173,14 +173,14 @@ export async function handlePostedReviewRow({
       logger,
     });
     if (coexistenceDecision.outcome === 'pr-terminal') {
-      // BUG-1: the live candidate read shows the PR already landed/closed. No
+      // BUG-1: the live candidate read shows the PR already merged. No
       // AMA/merge-agent action is possible — drop ownership instead of retaining
       // it and re-evaluating (and re-failing the daemon merge) every tick.
       logger.log(
         `[watcher] AMA/merge-agent skipped for ${repoPath}#${prNumber}: PR already ` +
         `${coexistenceDecision.terminalReason} — dropping ownership`
       );
-      return;
+      return { handled: true, dispatchJob, prTerminal: true };
     }
     if (coexistenceDecision.outcome === 'ama-dispatched') {
       const { amaClosureResult } = coexistenceDecision;

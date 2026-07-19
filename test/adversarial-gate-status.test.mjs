@@ -927,6 +927,53 @@ test('posted watcher rows project the adversarial gate before merge-agent dispat
   }
 });
 
+test('BUG-1: handlePostedReviewRow explicitly handles already-merged terminal PRs', async () => {
+  const repo = 'laceyenterprises/adversarial-review';
+  const prNumber = 639;
+  const logs = [];
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'posted-review-terminal-'));
+  try {
+    const result = await handlePostedReviewRow({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      existing: makeReviewRow({ repo, pr_number: prNumber }),
+      projectGateStatusSafe: async () => {},
+      latestFollowUpJobFinder: () => null,
+      latestPostedReviewBodyFinder: () => null,
+      reviewBodyHasScopeViolationFindingImpl: () => false,
+      fetchMergeAgentCandidateImpl: async () => ({
+        repo,
+        prNumber,
+        headSha: 'abc123',
+        prState: 'merged',
+        merged: true,
+      }),
+      buildMergeAgentDispatchJobImpl: (_rootDir, candidate) => ({
+        repo: candidate.repo,
+        prNumber: candidate.prNumber,
+        headSha: candidate.headSha,
+      }),
+      resolveMergeAgentCoexistenceForWatcherImpl: async () => ({
+        outcome: 'pr-terminal',
+        terminalReason: 'merged',
+      }),
+      logger: {
+        log(message) { logs.push(message); },
+        error() {},
+      },
+    });
+
+    assert.equal(result.handled, true);
+    assert.equal(result.prTerminal, true);
+    assert.equal(result.dispatchJob.prNumber, prNumber);
+    assert.match(logs.join('\n'), /already merged/);
+    assert.doesNotMatch(logs.join('\n'), /closed/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('projectAdversarialGateStatus posts the env-override context when ADV_GATE_STATUS_CONTEXT is set', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-gate-override-'));
   try {

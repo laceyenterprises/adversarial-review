@@ -185,6 +185,41 @@ test('a rate-limit hammer-dispatch failure does NOT burn the redispatch budget',
   assert.equal(record.lastFailureTransient, true);
 });
 
+test('BUG-2: an hq drain-in-effect hammer-dispatch refusal is transient (no merge-agent fallback, budget preserved)', () => {
+  const drainStderr =
+    "[hq] dispatch refused: drain in effect (epoch=515, started_at=2026-07-19T11:41:22Z, " +
+    "started_by=operator:airlock, reason='main-catchup pass for SHA ddcb9eaec732').";
+  assert.equal(isTransientHqDispatchError({ stderr: drainStderr }), true, 'drain refusal must be transient');
+  assert.equal(
+    isTransientHqDispatchError('hq dispatch failed\n' + drainStderr),
+    true,
+    'drain refusal transient even after a non-matching first line',
+  );
+});
+
+test('BUG-2: a drain-in-effect hammer-dispatch refusal defers (dispatch-deferred-transient) and does NOT burn the budget', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-drain-budget-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const identity = { repo: 'acme/myrepo', prNumber: 1234, headSha: 'abc12345abc12345abc12345abc12345abc12345' };
+
+  const { result } = await dispatchWithError(rootDir, () => {
+    const err = new Error('hq dispatch failed');
+    err.stderr =
+      "[hq] dispatch refused: drain in effect (epoch=515, started_by=operator:airlock, " +
+      "reason='main-catchup pass for SHA ddcb9eaec732'). Run `hq dispatch resume --epoch 515` after the bounce.";
+    return err;
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'dispatch-deferred-transient');
+  assert.equal(result.skipMergeAgent, true, 'drain keeps the hammer on the hook, suppresses merge-agent fallback');
+
+  const record = JSON.parse(readFileSync(amaCloserDispatchFilePath(rootDir, identity), 'utf8'));
+  assert.equal(record.retryCount, 0, 'drain refusal did not increment retryCount');
+  assert.equal(record.state, 'dispatch-deferred-transient');
+  assert.equal(record.lastFailureTransient, true);
+});
+
 test('a genuine (non-transient) hammer-dispatch failure DOES consume the budget', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-genuine-budget-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

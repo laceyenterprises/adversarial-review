@@ -8,7 +8,7 @@ import {
   resolveSessionLedgerReadTarget,
 } from './session-ledger-read-adapter.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
-import { deriveReviewerTokenCostUSD, loadReviewerPricingTable } from './reviewer-token-pricing.mjs';
+import { deriveReviewerTokenCost, loadReviewerPricingTable } from './reviewer-token-pricing.mjs';
 
 const PASS_KINDS = new Set(['first-pass', 'remediation', 'rereview', 'closer']);
 
@@ -209,21 +209,27 @@ function completeReviewerPass(rootDir, {
     // a re-complete with updated token counts keeps the rollup consistent.
     let derivedCost = null;
     let tokenCostSource;
+    let tokenCostEstimated;
     if (usage) {
       if (usage.costUSD != null) {
         tokenCostSource = 'ledger-authoritative';
+        tokenCostEstimated = false;
       } else {
         const existingMeta = parseMetadataJson(existing?.metadata_json);
         const mayDeriveCost = existing?.token_cost_usd == null
           || existingMeta.tokenCostSource === 'derived-pricing';
         if (mayDeriveCost) {
           const table = pricingTable !== undefined ? pricingTable : defaultReviewerPricingTable();
-          derivedCost = deriveReviewerTokenCostUSD({
+          const derived = deriveReviewerTokenCost({
             usage,
             model: existing?.reviewer_model || existing?.reviewer_class,
             pricingTable: table,
           });
-          if (derivedCost != null) tokenCostSource = 'derived-pricing';
+          if (derived != null) {
+            derivedCost = derived.costUSD;
+            tokenCostSource = 'derived-pricing';
+            tokenCostEstimated = derived.estimated;
+          }
         }
       }
     }
@@ -239,6 +245,7 @@ function completeReviewerPass(rootDir, {
       ...parseMetadataJson(existing?.metadata_json),
       ...tokenMetadata,
       ...(tokenCostSource ? { tokenCostSource } : {}),
+      ...(tokenCostEstimated !== undefined ? { tokenCostEstimated } : {}),
       ...metadata,
     };
     db.prepare(

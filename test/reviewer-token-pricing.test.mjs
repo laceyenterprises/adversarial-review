@@ -11,6 +11,7 @@ import path from 'node:path';
 
 import {
   loadReviewerPricingTable,
+  deriveReviewerTokenCost,
   deriveReviewerTokenCostUSD,
 } from '../src/reviewer-token-pricing.mjs';
 import {
@@ -48,22 +49,34 @@ test('pricing math: dated-snapshot suffix resolves to base model by prefix match
   const table = vendoredTable();
   // claude-opus-4-8 rates: input 5, output 25. A dated suffix resolves to the base.
   //   (100*5 + 10*25) / 1e6 = (500 + 250) / 1e6 = 750 / 1e6 = 0.00075
+  const details = deriveReviewerTokenCost({
+    usage: { input: 100, output: 10 },
+    model: 'claude-opus-4-8-20260101',
+    pricingTable: table,
+  });
   const cost = deriveReviewerTokenCostUSD({
     usage: { input: 100, output: 10 },
     model: 'claude-opus-4-8-20260101',
     pricingTable: table,
   });
+  assert.deepEqual(details, { costUSD: 0.00075, estimated: false });
   assert.equal(cost, 0.00075);
 });
 
 test('pricing math: unknown model falls back to the conservative-high fallback rate', () => {
   const table = vendoredTable();
   // fallback rates: input 5, output 25.  (10*5 + 4*25) / 1e6 = 150 / 1e6 = 0.00015
+  const details = deriveReviewerTokenCost({
+    usage: { input: 10, output: 4 },
+    model: 'totally-unknown-model',
+    pricingTable: table,
+  });
   const cost = deriveReviewerTokenCostUSD({
     usage: { input: 10, output: 4 },
     model: 'totally-unknown-model',
     pricingTable: table,
   });
+  assert.deepEqual(details, { costUSD: 0.00015, estimated: true });
   assert.equal(cost, 0.00015);
 });
 
@@ -127,6 +140,35 @@ test('completeReviewerPass derives cost when counts are present but no ledger co
   assert.equal(row.token_source, 'codex-transcript');
   const metadata = JSON.parse(row.metadata_json);
   assert.equal(metadata.tokenCostSource, 'derived-pricing');
+  assert.equal(metadata.tokenCostEstimated, true);
+});
+
+test('completeReviewerPass marks fallback-derived cost as estimated', () => {
+  const rootDir = tempRoot();
+  beginReviewerPass(rootDir, {
+    repo: 'lacey/repo',
+    prNumber: 104,
+    attemptNumber: 1,
+    reviewerClass: 'codex',
+    reviewerModel: 'totally-unknown-model',
+    passKind: 'first-pass',
+    startedAt: '2026-07-19T00:00:00.000Z',
+  });
+  const row = completeReviewerPass(rootDir, {
+    repo: 'lacey/repo',
+    prNumber: 104,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    // fallback rates: (10*5 + 4*25) / 1e6 = 0.00015
+    tokenUsage: { input: 10, output: 4, total: 14, source: 'codex-transcript' },
+    pricingTable: vendoredTable(),
+  });
+
+  assert.equal(row.token_cost_usd, 0.00015);
+  const metadata = JSON.parse(row.metadata_json);
+  assert.equal(metadata.tokenCostSource, 'derived-pricing');
+  assert.equal(metadata.tokenCostEstimated, true);
 });
 
 test('completeReviewerPass records ledger cost and never overwrites it with a derived one', () => {
@@ -150,7 +192,9 @@ test('completeReviewerPass records ledger cost and never overwrites it with a de
     pricingTable: vendoredTable(),
   });
   assert.equal(ledgerRow.token_cost_usd, 0.42);
-  assert.equal(JSON.parse(ledgerRow.metadata_json).tokenCostSource, 'ledger-authoritative');
+  const ledgerMetadata = JSON.parse(ledgerRow.metadata_json);
+  assert.equal(ledgerMetadata.tokenCostSource, 'ledger-authoritative');
+  assert.equal(ledgerMetadata.tokenCostEstimated, false);
 
   // A later re-complete carrying counts but no cost must NOT clobber 0.42.
   const reRow = completeReviewerPass(rootDir, {
@@ -202,7 +246,9 @@ test('completeReviewerPass recalculates previously derived cost on re-complete',
   assert.equal(reRow.token_input, 2000);
   assert.equal(reRow.token_output, 400);
   assert.equal(reRow.token_cost_usd, 0.0065, 'derived cost must track updated counts');
-  assert.equal(JSON.parse(reRow.metadata_json).tokenCostSource, 'derived-pricing');
+  const reMetadata = JSON.parse(reRow.metadata_json);
+  assert.equal(reMetadata.tokenCostSource, 'derived-pricing');
+  assert.equal(reMetadata.tokenCostEstimated, true);
 });
 
 test('completeReviewerPass degrades to count-only when the pricing table is unavailable', () => {
@@ -233,5 +279,7 @@ test('completeReviewerPass degrades to count-only when the pricing table is unav
   assert.equal(row.token_input, 1000);
   assert.equal(row.token_output, 200);
   assert.equal(row.token_cost_usd, null, 'no table -> cost stays null, counts still written');
-  assert.equal(Object.prototype.hasOwnProperty.call(JSON.parse(row.metadata_json), 'tokenCostSource'), false);
+  const metadata = JSON.parse(row.metadata_json);
+  assert.equal(Object.prototype.hasOwnProperty.call(metadata, 'tokenCostSource'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(metadata, 'tokenCostEstimated'), false);
 });

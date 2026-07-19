@@ -66,7 +66,7 @@ class PricingTable {
 
   // deltas: {input, output, cache_read, cache_write, reasoning, tool}
   // reasoning is billed at the output rate, tool at the input rate.
-  costUsd(model, deltas = {}) {
+  costDetails(model, deltas = {}) {
     const rate = this.rateFor(model);
     const n = (v) => (isFiniteNumber(v) && v > 0 ? v : 0);
     const micros =
@@ -76,7 +76,14 @@ class PricingTable {
       n(deltas.cache_write) * rate.cache_write +
       n(deltas.reasoning) * rate.output +
       n(deltas.tool) * rate.input;
-    return micros / 1_000_000;
+    return {
+      costUSD: micros / 1_000_000,
+      estimated: rate.estimated === true,
+    };
+  }
+
+  costUsd(model, deltas = {}) {
+    return this.costDetails(model, deltas).costUSD;
   }
 }
 
@@ -121,7 +128,7 @@ function loadReviewerPricingTable({ file = null, env = process.env } = {}) {
 //   {input, output, cacheRead, cacheWrite, reasoning, toolContext}
 // onto the pricing table's delta shape and return a non-negative USD cost, or
 // null when there is no pricing table or no positive billable tokens.
-function deriveReviewerTokenCostUSD({ usage, model, pricingTable } = {}) {
+function deriveReviewerTokenCost({ usage, model, pricingTable } = {}) {
   if (!pricingTable || !usage || typeof usage !== 'object') return null;
   const deltas = {
     input: usage.input,
@@ -140,14 +147,24 @@ function deriveReviewerTokenCostUSD({ usage, model, pricingTable } = {}) {
     positive(deltas.reasoning) +
     positive(deltas.tool);
   if (billableTokens <= 0) return null;
-  const cost = pricingTable.costUsd(model, deltas);
-  return isFiniteNumber(cost) && cost >= 0 ? cost : null;
+  const details = pricingTable.costDetails(model, deltas);
+  const cost = details?.costUSD;
+  if (!isFiniteNumber(cost) || cost < 0) return null;
+  return {
+    costUSD: cost,
+    estimated: details.estimated === true,
+  };
+}
+
+function deriveReviewerTokenCostUSD({ usage, model, pricingTable } = {}) {
+  return deriveReviewerTokenCost({ usage, model, pricingTable })?.costUSD ?? null;
 }
 
 export {
   PricingTable,
   validatePricing,
   loadReviewerPricingTable,
+  deriveReviewerTokenCost,
   deriveReviewerTokenCostUSD,
   VENDORED_PRICING_FILE,
 };

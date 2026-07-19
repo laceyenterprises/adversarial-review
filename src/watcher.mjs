@@ -53,6 +53,10 @@ import {
   reviewerRuntimeState,
 } from './reviewer-runtime-adapter.mjs';
 import {
+  inFlightReviewerSessions,
+  activeReviewerSpawns,
+} from './reviewer-session-registry.mjs';
+import {
   defaultReviewerRouteFromEnv,
   applyEffectiveReviewerRoute,
   describeCrossModelReviewWaiver,
@@ -916,12 +920,6 @@ function handlePollError(err, source = 'pollOnce') {
   console.error(`[watcher] Poll error (source=${source}):`, err);
 }
 
-// Track durable reviewer runtime session UUIDs for observability on exit.
-// Routine daemon bounces must not cancel these children: reviewer
-// subprocesses are launched as bounce survivors and startup reconciliation
-// re-adopts them via the durable review row plus PGID identity checks.
-const inFlightReviewerSessions = new Set();
-const activeReviewerSpawns = new Map();
 let exitInProgress = false;
 
 async function cancelInFlightReviewerRuntimeSessions(reason) {

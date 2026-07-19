@@ -20,6 +20,16 @@ import { writeFileAtomic } from './atomic-write.mjs';
 import { normalizeRequiredContexts } from './branch-protection.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import {
+  FAST_MERGE_GH_TIMEOUT_MS,
+  execFileFromGhClient,
+  isRetryableGhTransportError,
+  withGhRetry,
+  parseGhJson,
+  hasMatchingHamAuditComment,
+  fetchFastMergeHamCommit,
+  fetchFastMergeTimeline,
+} from './fast-merge-github-io.mjs';
+import {
   MERGE_AGENT_DISPATCHED_LABEL,
   MERGE_AGENT_RECOVERY_IN_FLIGHT_LABEL,
   MERGE_AGENT_REQUESTED_LABEL,
@@ -255,8 +265,6 @@ const FAST_MERGE_CLOSED_STATE = 'fast_merge_closed';
 const FAST_MERGE_BLOCKED_STATE = 'fast_merge_blocked';
 const FML_MERGE_AGENT_PER_POLL_CAP_ENV = 'FML_MERGE_AGENT_PER_POLL_CAP';
 const DEFAULT_FML_MERGE_AGENT_PER_POLL_CAP = 5;
-const FAST_MERGE_GH_RETRY_DELAYS_MS = [250, 1_000];
-const FAST_MERGE_GH_TIMEOUT_MS = 30_000;
 const FAST_MERGE_FAILURE_CONCLUSIONS = new Set(['failure', 'cancelled', 'timed_out', 'fail', 'cancel']);
 const FAST_MERGE_PENDING_STATES = new Set(['', 'pending', 'in_progress', 'queued', 'waiting', 'requested', 'expected']);
 const FAST_MERGE_SUCCESS_CONCLUSIONS = new Set(['success', 'neutral', 'skipped', 'pass', 'skipping']);
@@ -4086,139 +4094,6 @@ async function writeFastMergeAudit({
     });
     return false;
   }
-}
-
-function execFileFromGhClient(ghClient) {
-  if (typeof ghClient === 'function') return ghClient;
-  if (typeof ghClient?.execFile === 'function') return ghClient.execFile.bind(ghClient);
-  if (typeof ghClient?.execFileImpl === 'function') return ghClient.execFileImpl.bind(ghClient);
-  return execFileAsync;
-}
-
-function isRetryableGhTransportError(err) {
-  if (isExecTimeout(err)) return true;
-  const detail = [
-    err?.code,
-    err?.message,
-    err?.stderr,
-    err?.stdout,
-  ].filter(Boolean).join('\n').toLowerCase();
-  return /\b(etimedout|econnreset|econnrefused|ehostunreach|eai_again|enotfound|epipe|eagain)\b/.test(detail)
-    || detail.includes('timeout')
-    || detail.includes('timed out')
-    || detail.includes('temporary failure')
-    || detail.includes('temporarily unavailable')
-    || detail.includes('rate limit')
-    || detail.includes('secondary rate limit')
-    || detail.includes('502 bad gateway')
-    || detail.includes('503 service unavailable')
-    || detail.includes('504 gateway timeout');
-}
-
-async function withGhRetry(operation, {
-  retryDelaysMs = FAST_MERGE_GH_RETRY_DELAYS_MS,
-  isRetryable = isRetryableGhTransportError,
-} = {}) {
-  let lastErr = null;
-  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
-    try {
-      return await operation();
-    } catch (err) {
-      lastErr = err;
-      if (!isRetryable(err) || attempt >= retryDelaysMs.length) {
-        throw err;
-      }
-      await sleep(retryDelaysMs[attempt]);
-    }
-  }
-  throw lastErr;
-}
-
-function parseGhJson(stdout, fallback = {}) {
-  return JSON.parse(String(stdout || '').trim() || JSON.stringify(fallback));
-}
-
-function normalizeVerifiedHamCommit(commitJson = {}) {
-  const sha = String(commitJson?.sha || commitJson?.oid || '').trim();
-  const parentSha = String(
-    commitJson?.parents?.[0]?.sha
-      || commitJson?.parents?.nodes?.[0]?.oid
-      || commitJson?.parentSha
-      || '',
-  ).trim();
-  const message = commitJson?.commit?.message || commitJson?.message || '';
-  const changedFiles = Array.isArray(commitJson?.files)
-    ? commitJson.files
-      .map((file) => String(file?.filename || file?.path || '').trim())
-      .filter(Boolean)
-    : [];
-  return {
-    sha,
-    parentSha,
-    trailers: parseCommitTrailers(message),
-    author: commitJson?.author?.login || commitJson?.commit?.author?.login || null,
-    committer: commitJson?.committer?.login || commitJson?.commit?.committer?.login || null,
-    changedFiles,
-  };
-}
-
-function timelineCommentBody(event) {
-  if (!event || typeof event !== 'object') return '';
-  if (typeof event.body === 'string') return event.body;
-  if (typeof event.comment?.body === 'string') return event.comment.body;
-  return '';
-}
-
-function timelineCommentAuthor(event) {
-  return (
-    event?.user?.login
-    || event?.actor?.login
-    || event?.comment?.user?.login
-    || null
-  );
-}
-
-function hasMatchingHamAuditComment(timelineJson, verifiedCommit) {
-  const timeline = Array.isArray(timelineJson) ? timelineJson : [];
-  const remediatedFindings = String(verifiedCommit?.trailers?.['remediated-findings'] || '').trim();
-  return timeline.some((event) => {
-    const body = timelineCommentBody(event);
-    if (!body || !hamAuditCommentAuthorMatches(timelineCommentAuthor(event))) return false;
-    return body.includes('Closed-By: hammer (adversarial-pipe-mode)')
-      && (!remediatedFindings || body.includes(remediatedFindings));
-  });
-}
-
-function flattenGhPaginatedJson(parsed) {
-  if (!Array.isArray(parsed)) return [];
-  if (parsed.every((item) => Array.isArray(item))) return parsed.flat();
-  return parsed;
-}
-
-async function fetchFastMergeHamCommit({ ghClient, repo, headSha }) {
-  const execFileImpl = execFileFromGhClient(ghClient);
-  const { stdout } = await withGhRetry(() => execFileImpl('gh', [
-    'api',
-    `repos/${repo}/commits/${headSha}`,
-  ], {
-    maxBuffer: 5 * 1024 * 1024,
-    timeout: FAST_MERGE_GH_TIMEOUT_MS,
-  }));
-  return normalizeVerifiedHamCommit(parseGhJson(stdout));
-}
-
-async function fetchFastMergeTimeline({ ghClient, repo, prNumber }) {
-  const execFileImpl = execFileFromGhClient(ghClient);
-  const { stdout } = await withGhRetry(() => execFileImpl('gh', [
-    'api',
-    `repos/${repo}/issues/${prNumber}/timeline`,
-    '--paginate',
-    '--slurp',
-  ], {
-    maxBuffer: 5 * 1024 * 1024,
-    timeout: FAST_MERGE_GH_TIMEOUT_MS,
-  }));
-  return flattenGhPaginatedJson(parseGhJson(stdout, []));
 }
 
 function attemptHasHamAuthorizationMarker(attempt) {

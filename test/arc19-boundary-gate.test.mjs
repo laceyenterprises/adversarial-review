@@ -188,7 +188,7 @@ test('ARC-19 R2: src/kernel/** and src/adapters/** never import the orchestratio
 const MONOLITH_CEILINGS = Object.freeze({
   // 6659 -> 6686: SEV0 2026-07-19 codex --model pin (resolveCodexRemediationModel); decomposition will reclaim.
   'follow-up-remediation.mjs': 6686,
-  'follow-up-merge-agent.mjs': 5610,
+  'follow-up-merge-agent.mjs': 5485,
 });
 
 for (const [name, ceiling] of Object.entries(MONOLITH_CEILINGS)) {

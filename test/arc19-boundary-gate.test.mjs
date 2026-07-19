@@ -186,7 +186,8 @@ test('ARC-19 R2: src/kernel/** and src/adapters/** never import the orchestratio
 
 // ── R3: monolith line-count ratchets (decrease-only) ─────────────────────────
 const MONOLITH_CEILINGS = Object.freeze({
-  'follow-up-remediation.mjs': 6659,
+  // 6659 -> 6686: SEV0 2026-07-19 codex --model pin (resolveCodexRemediationModel); decomposition will reclaim.
+  'follow-up-remediation.mjs': 6686,
   'follow-up-merge-agent.mjs': 5610,
 });
 

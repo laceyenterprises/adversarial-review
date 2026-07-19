@@ -1878,6 +1878,27 @@ function resolveGeminiRemediationModel(env = process.env) {
   return pinned || DEFAULT_GEMINI_REMEDIATION_MODEL;
 }
 
+// SEV0 2026-07-19: the codex remediation worker MUST pin an explicit --model.
+// When it rode codex's server-default model, that default routed tool execution
+// through the `code_mode_only` path whose internal "code-mode host" times out at
+// handshake (`codex_core::tools::router: error=timed out negotiating with the
+// code-mode host`). The worker then cannot run a single shell command — no git
+// audit, no edits, no commit/push, and critically never writes its reply
+// artifact — so every remediation stops `no-progress` and the pipeline grounds
+// fleet-wide. gpt-5.5 (the codex worker-class default, and what the DAG pack
+// walkers pin) runs direct exec and is unaffected. Overridable via env so a
+// future model move does not require a code change.
+const DEFAULT_CODEX_REMEDIATION_MODEL = 'gpt-5.5';
+function resolveCodexRemediationModel(env = process.env) {
+  const pinned = String(
+    env.ADVERSARIAL_REMEDIATION_CODEX_MODEL
+      || env.CODEX_REMEDIATION_MODEL
+      || env.CODEX_MODEL_ID
+      || ''
+  ).trim();
+  return pinned || DEFAULT_CODEX_REMEDIATION_MODEL;
+}
+
 // Resolve the gemini OAuth credential path. The gemini CLI persists its
 // subscription OAuth at `~/.gemini/oauth_creds.json`; an operator can pin an
 // alternate home via GEMINI_HOME (mirroring CODEX_HOME) or point directly at
@@ -3572,12 +3593,15 @@ function spawnCodexRemediationWorker({
   const promptFd = openSync(promptPath, 'r');
   const stdoutFd = openSync(logPath, 'a');
   const stderrFd = openSync(logPath, 'a');
+  const codexModel = resolveCodexRemediationModel(env);
 
   try {
     const child = spawnDetachedCli(
       codexCli,
       [
         'exec',
+        '--model',
+        codexModel,
         '--dangerously-bypass-approvals-and-sandbox',
         '--ephemeral',
         '--json',
@@ -3609,6 +3633,8 @@ function spawnCodexRemediationWorker({
       command: [
         codexCli,
         'exec',
+        '--model',
+        codexModel,
         '--dangerously-bypass-approvals-and-sandbox',
         '--ephemeral',
         '--json',
@@ -6620,6 +6646,7 @@ export {
   prepareGeminiRemediationStartupEnv,
   resolveGeminiCliPath,
   resolveGeminiRemediationModel,
+  resolveCodexRemediationModel,
   remediationWorkerTrailerClass,
   GEMINI_REMEDIATION_WORKER_TRAILER_CLASS,
   defaultRemediatorWorkerClassFromEnv,

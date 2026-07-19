@@ -68,6 +68,7 @@ import {
   spawnGeminiRemediationWorker,
   createRemediationRuntime,
   resolveGeminiRemediationModel,
+  resolveCodexRemediationModel,
   remediationWorkerTrailerClass,
   resolveRemediationPushTokenIdentity,
   parseOAuthScopesFromGhAuthStatus,
@@ -3036,6 +3037,23 @@ test('resolveGeminiRemediationModel defaults to gemini-2.5-pro and honors overri
   );
 });
 
+test('SEV0: resolveCodexRemediationModel pins gpt-5.5 by default and honors overrides (never rides the codex server-default)', () => {
+  // Regression for the 2026-07-19 SEV0: riding codex's server-default model
+  // routed remediation through the code_mode_only tool-host that times out at
+  // handshake, so the worker could not run any command and never wrote its
+  // reply. Remediation MUST pin an explicit model.
+  assert.equal(resolveCodexRemediationModel({}), 'gpt-5.5');
+  assert.equal(resolveCodexRemediationModel({ CODEX_MODEL_ID: 'gpt-5.4' }), 'gpt-5.4');
+  // The remediation-specific pin wins over the generic CODEX_MODEL_ID.
+  assert.equal(
+    resolveCodexRemediationModel({
+      ADVERSARIAL_REMEDIATION_CODEX_MODEL: 'gpt-5.3-codex',
+      CODEX_MODEL_ID: 'gpt-5.4',
+    }),
+    'gpt-5.3-codex'
+  );
+});
+
 test('assertRemediationWorkerOAuth routes gemini to the gemini OAuth pre-flight', async () => {
   const { workspaceDir } = setupGeminiSpawn();
   const prevHome = process.env.HOME;
@@ -3345,12 +3363,18 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
   const originalPath = process.env.PATH;
   const originalHome = process.env.HOME;
   const originalOpenAiApiKey = process.env.OPENAI_API_KEY;
+  const originalAdversarialCodexModel = process.env.ADVERSARIAL_REMEDIATION_CODEX_MODEL;
+  const originalCodexRemediationModel = process.env.CODEX_REMEDIATION_MODEL;
+  const originalCodexModelId = process.env.CODEX_MODEL_ID;
   process.env.CODEX_AUTH_PATH = authPath;
   process.env.CODEX_CLI_PATH = '/tmp/codex';
   process.env.CODEX_HOME = codexHome;
   process.env.HOME = workspaceDir;
   process.env.OPENAI_API_KEY = 'sk-test';
   process.env.PATH = '/custom/bin';
+  process.env.ADVERSARIAL_REMEDIATION_CODEX_MODEL = 'gpt-5.5';
+  delete process.env.CODEX_REMEDIATION_MODEL;
+  delete process.env.CODEX_MODEL_ID;
 
   const spawnCalls = [];
   try {
@@ -3378,8 +3402,13 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
     assert.equal(worker.spawnedAt, '2026-05-24T00:00:00.000Z');
     assert.equal(worker.outputPath, outputPath);
     assert.equal(spawnCalls[0].command, '/tmp/codex');
+    // SEV0 2026-07-19: codex remediation MUST pin --model (never ride the codex
+    // server-default, which routed through the code_mode_only tool-host that
+    // times out and grounded remediation fleet-wide).
     assert.deepEqual(spawnCalls[0].args, [
       'exec',
+      '--model',
+      'gpt-5.5',
       '--dangerously-bypass-approvals-and-sandbox',
       '--ephemeral',
       '--json',
@@ -3436,6 +3465,21 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
       delete process.env.OPENAI_API_KEY;
     } else {
       process.env.OPENAI_API_KEY = originalOpenAiApiKey;
+    }
+    if (originalAdversarialCodexModel === undefined) {
+      delete process.env.ADVERSARIAL_REMEDIATION_CODEX_MODEL;
+    } else {
+      process.env.ADVERSARIAL_REMEDIATION_CODEX_MODEL = originalAdversarialCodexModel;
+    }
+    if (originalCodexRemediationModel === undefined) {
+      delete process.env.CODEX_REMEDIATION_MODEL;
+    } else {
+      process.env.CODEX_REMEDIATION_MODEL = originalCodexRemediationModel;
+    }
+    if (originalCodexModelId === undefined) {
+      delete process.env.CODEX_MODEL_ID;
+    } else {
+      process.env.CODEX_MODEL_ID = originalCodexModelId;
     }
   }
 });

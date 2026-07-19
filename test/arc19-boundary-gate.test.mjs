@@ -21,9 +21,9 @@ import { dirname, join, sep } from 'node:path';
 //                                      remediation-reply, prompt-stage)
 //
 // Enforced rules:
-//   R1  Kernel purity      — no src/kernel/** module imports (via a relative
-//                            path) anything OUTSIDE src/kernel/. The kernel is
-//                            layer 1 and imports nothing higher.
+//   R1  Kernel purity      — src/kernel/** may import only node: builtins and
+//                            relative modules inside src/kernel/. The kernel is
+//                            layer 1 and imports nothing higher or external.
 //   R2  No upward import    — neither src/kernel/** nor src/adapters/** imports
 //                            the layer-5 scheduler/orchestration monoliths
 //                            (watcher.mjs, follow-up-remediation.mjs,
@@ -66,10 +66,10 @@ function allMjs(dir, acc = []) {
 // keyword context.
 function importSpecifiers(source) {
   const specs = [];
-  for (const m of source.matchAll(/(?:^|\n)\s*(?:import|export)\b[^;]*?\bfrom\s*['"]([^'"]+)['"]/g)) {
+  for (const m of source.matchAll(/(?:^|[;\n])\s*(?:import|export)\b[^;]*?\bfrom\s*['"]([^'"]+)['"]/g)) {
     specs.push(m[1]);
   }
-  for (const m of source.matchAll(/(?:^|\n)\s*import\s+['"]([^'"]+)['"]/g)) {
+  for (const m of source.matchAll(/(?:^|[;\n])\s*import\s+['"]([^'"]+)['"]/g)) {
     specs.push(m[1]);
   }
   for (const m of source.matchAll(/\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g)) {
@@ -79,19 +79,22 @@ function importSpecifiers(source) {
 }
 
 // Resolve a relative specifier against the importing file's directory. Bare
-// specifiers (npm packages) and `node:` builtins return null — they are not
-// intra-repo layer imports.
+// specifiers and `node:` builtins return null — callers distinguish the
+// permitted builtins from forbidden external packages.
 function resolveRelative(fromFile, spec) {
   if (!spec.startsWith('.')) return null;
   return join(dirname(fromFile), spec);
 }
 
-// R1 predicate: relative imports from a kernel file that escape src/kernel/.
+// R1 predicate: imports other than node: builtins and intra-kernel relatives.
 function kernelPurityViolations(file, source) {
   const kernelPrefix = KERNEL + sep;
   return importSpecifiers(source)
     .map((spec) => ({ spec, resolved: resolveRelative(file, spec) }))
-    .filter(({ resolved }) => resolved !== null && !`${resolved}${sep}`.startsWith(kernelPrefix) && !resolved.startsWith(kernelPrefix))
+    .filter(({ spec, resolved }) => !spec.startsWith('node:') && (
+      resolved === null
+      || (!`${resolved}${sep}`.startsWith(kernelPrefix) && !resolved.startsWith(kernelPrefix))
+    ))
     .map(({ spec }) => spec);
 }
 
@@ -167,6 +170,11 @@ test('ARC-19 gate fixtures: kernel-purity predicate is red on escape, green on i
     kernelPurityViolations(kernelFile, "import { apiStatusFromError } from '../api-telemetry.mjs';\n"),
     ['../api-telemetry.mjs'],
   );
+  // RED — a third-party bare specifier is not a node: builtin.
+  assert.deepEqual(
+    kernelPurityViolations(kernelFile, "import lodash from 'lodash';\n"),
+    ['lodash'],
+  );
 });
 
 test('ARC-19 gate fixtures: orchestration-import predicate is red on monolith, green otherwise', () => {
@@ -201,6 +209,7 @@ test('ARC-19 gate fixtures: importSpecifiers captures static, re-export, bare, a
     "} from './multiline-export.mjs';",
     "import './side-effect.mjs';",
     "const c = await import('./c.mjs');",
+    "const inline = true; import { d } from './inline.mjs';",
     "// import { fake } from './comment-only.mjs' -- must be ignored",
   ].join('\n');
   const specs = importSpecifiers(src);
@@ -210,5 +219,6 @@ test('ARC-19 gate fixtures: importSpecifiers captures static, re-export, bare, a
   assert.ok(specs.includes('./multiline-export.mjs'));
   assert.ok(specs.includes('./side-effect.mjs'));
   assert.ok(specs.includes('./c.mjs'));
+  assert.ok(specs.includes('./inline.mjs'));
   assert.ok(!specs.includes('./comment-only.mjs'), 'commented-out imports must not be captured');
 });

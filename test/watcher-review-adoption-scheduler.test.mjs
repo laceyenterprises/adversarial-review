@@ -13,18 +13,31 @@ function watcherSource() {
   return readFileSync(path.join(ROOT, 'src', 'watcher.mjs'), 'utf8');
 }
 
+// ARC-18: runQueuedReviewAdoptionPhase and its internal drain/maintenance
+// ordering moved to src/posted-review-row.mjs. The reviewer/posted-review queue
+// initialization still lives in pollOnce (watcher.mjs), so the two halves of
+// this structural check now read from two different source files.
+function postedReviewRowSource() {
+  return readFileSync(path.join(ROOT, 'src', 'posted-review-row.mjs'), 'utf8');
+}
+
 test('watcher drains queued reviewer dispatches before merge-side handoffs', () => {
-  const source = watcherSource();
-  const candidateQueue = source.indexOf('const reviewerDispatchCandidates = [];');
-  const postedQueue = source.indexOf('const postedReviewHandlers = [];');
-  const postedEnqueue = source.indexOf('postedReviewHandlers.push({');
-  const phaseHelper = source.indexOf('async function runQueuedReviewAdoptionPhase');
-  const drainBeforeMaintenance = source.indexOf(
+  const watcher = watcherSource();
+  const phase = postedReviewRowSource();
+
+  // Queue initialization is part of pollOnce and stays in watcher.mjs.
+  const candidateQueue = watcher.indexOf('const reviewerDispatchCandidates = [];');
+  const postedQueue = watcher.indexOf('const postedReviewHandlers = [];');
+  const postedEnqueue = watcher.indexOf('postedReviewHandlers.push({');
+  // The executable phase ordering moved into the runQueuedReviewAdoptionPhase
+  // helper, now in posted-review-row.mjs.
+  const phaseHelper = phase.indexOf('async function runQueuedReviewAdoptionPhase');
+  const drainBeforeMaintenance = phase.indexOf(
     "await drainReviewerDispatchCandidates('posted-review handoffs and watcher maintenance');",
   );
-  const postedDrain = source.indexOf('for (const postedReviewHandler of postedReviewHandlers)');
-  const lifecycleCleanup = source.indexOf('await retryPendingMergeAgentLifecycleCleanupsImpl();');
-  const dagAutowalk = source.indexOf('await retryPendingDagAutowalkOnMergeImpl();');
+  const postedDrain = phase.indexOf('for (const postedReviewHandler of postedReviewHandlers)');
+  const lifecycleCleanup = phase.indexOf('await retryPendingMergeAgentLifecycleCleanupsImpl();');
+  const dagAutowalk = phase.indexOf('await retryPendingDagAutowalkOnMergeImpl();');
 
   assert.notEqual(candidateQueue, -1, 'reviewer dispatch candidate queue exists');
   assert.notEqual(postedQueue, -1, 'posted review handoffs are queued');

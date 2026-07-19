@@ -74,11 +74,9 @@ import { scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import { createCompositeOperatorSurface } from './adapters/operator/index.mjs';
 import {
   MERGE_AGENT_DISPATCHED_LABEL,
-  MERGE_AGENT_REQUESTED_LABEL,
   OPERATOR_APPROVED_LABEL,
   legacyLabelEventFromControlResult,
 } from './adapters/operator/github-pr-label-controls/index.mjs';
-import { ADVERSARIAL_MERGE_REQUESTED_LABEL } from './ama/labels.mjs';
 import {
   buildSafePollOnce,
   computeWorkloadAwarePollDeadlineMs,
@@ -123,12 +121,10 @@ import {
   stmtMarkReviewCycleCapPaused,
   stmtListFailedOrphanAutoReclaimCandidates,
   stmtAutoReclaimFailedOrphan,
-  stmtGetOpenPRs,
   stmtMarkMerged,
   stmtMarkClosed,
 } from './review-state-db.mjs';
 import {
-  resolveOrchestrationMode,
   retryPendingMergeCloseouts,
   runFastMergeClosePathIsolated,
 } from './pr-lifecycle-sync.mjs';
@@ -137,7 +133,13 @@ import {
   resolveMergeAgentCoexistenceForWatcher,
   writeAutonomousMergeDisabledAudit,
 } from './ama-closure-orchestration.mjs';
-import { handlePostedReviewRow } from './posted-review-row.mjs';
+import {
+  handlePostedReviewRow,
+  runQueuedReviewAdoptionPhase,
+} from './posted-review-row.mjs';
+import {
+  maybeDispatchReviewerTimeoutExhaustedMergeAgent,
+} from './reviewer-timeout-exhausted-dispatch.mjs';
 import {
   countCompletedReviewerRereviewRounds,
   countDistinctReviewedHeadShas,
@@ -158,16 +160,13 @@ import {
   isSqliteWriteCanaryError,
 } from './sqlite-orphan.mjs';
 import {
-  CASCADE_FAILURE_CAP,
   clearCascadeState,
   formatTransientFailureBreakdown,
-  readCascadeState,
   recordCascadeFailure,
   shouldBackoffReviewerSpawn,
 } from './reviewer-cascade.mjs';
 import {
   infraRecoverableFailureClass,
-  reviewerFailureClassFromStoredRow,
   unknownReviewerCommandFailureClass,
 } from './reviewer-failure-classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision, resolveQuotaResetIso } from './quota-exhaustion.mjs';
@@ -194,18 +193,13 @@ import {
   warnForMissingAdversarialGateBranchProtection,
 } from './branch-protection.mjs';
 import {
-  buildMergeAgentDispatchJob,
-  dispatchMergeAgentForPR,
-  fetchMergeAgentCandidate,
   pollFastMergeQueue,
   reconcileProactivePhantomHandoffs,
   resolveFastMergePerPollCap,
   scanStuckMergeAgentDispatches,
-  shouldUseReviewerTimeoutExhaustedMergeGate,
   validateStartupMergeAgentConfig,
 } from './follow-up-merge-agent.mjs';
 import {
-  queueAndAttemptMergeAgentLifecycleCleanup,
   resolveMergeAgentLifecycleCleanupPerPoll,
   resolveMergeAgentLifecycleCleanupRetryMs,
   retryPendingMergeAgentLifecycleCleanups,
@@ -225,7 +219,6 @@ import {
 import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
 import {
   buildAdversarialGateSnapshot,
-  deleteGateRecordsForPR,
   projectAdversarialGateStatus,
 } from './adversarial-gate-status.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
@@ -250,7 +243,6 @@ import { evaluateMergeEligibility } from './ama/merge-eligibility.mjs';
 import { writeAmaAuditEntry } from './ama/audit.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import {
-  COEXISTENCE_ACTION,
   decideMergeAgentCoexistence,
   isMergeAgentRequestedScoped,
   mergeAgentDispatchEnvForAction,
@@ -259,12 +251,10 @@ import { loadConfigCached } from './config-loader.mjs';
 import { resolveGitHubAppBotLogin } from './github-app-identity.mjs';
 import {
   RETRIGGER_REMEDIATION_LABEL,
-  retryPendingRetriggerAckComments,
   tryRetriggerRemediationFromLabel,
 } from './follow-up-retrigger-label.mjs';
 import {
   RETRIGGER_REVIEW_LABEL,
-  retryPendingRetriggerReviewAckComments,
   tryRetriggerReviewFromLabel,
 } from './follow-up-retrigger-review-label.mjs';
 import {
@@ -278,7 +268,6 @@ import {
 } from './review-cycle-cap.mjs';
 import {
   subjectRefWithLinearTicket,
-  normalizeLabelNames,
   addLabelToPRBestEffort,
   isReviewCycleCapFailedRow,
   isAutomaticReviewCycleCapPause,
@@ -2198,349 +2187,14 @@ async function refreshOrgRepos(octokit) {
   }
 }
 
-// ── Lifecycle sync: check open PRs for merge/close ──────────────────────────
-
-/**
- * For every PR we previously marked as "open", check if it has since been
- * merged or closed and update Linear accordingly.
- */
-async function syncPRLifecycle(octokit, operatorSurface) {
-  const openRows = stmtGetOpenPRs.all();
-  if (openRows.length === 0) return;
-
-  for (const row of openRows) {
-    const { repo, pr_number: prNumber, linear_ticket: linearTicketId } = row;
-
-    let pr;
-    let labelNames = [];
-    try {
-      const freshState = await fetchPullRequestHeadAndState(repo, prNumber, {
-        execFileImpl: execFileAsync,
-      });
-      labelNames = normalizeLabelNames(freshState.labels);
-      pr = {
-        ...freshState,
-        labels: freshState.labels,
-      };
-    } catch (err) {
-      console.error(`[watcher] Failed to fetch PR ${repo}#${prNumber}:`, err.message);
-      continue;
-    }
-
-    if (pr.mergedAt) {
-      console.log(`[watcher] PR ${repo}#${prNumber} was merged — syncing Linear`);
-      await queueAndAttemptMergeAgentLifecycleCleanup({
-        pr, repo, prNumber, transition: 'merged',
-      });
-      // Advance the merged PR's dag-run (AMA D5 gate). Persist the owed work
-      // before marking the lifecycle transition merged so a local state-write
-      // failure leaves this row eligible for the next watcher tick.
-      try {
-        fireDagAutowalkOnMerge({ repo, prNumber });
-      } catch (err) {
-        console.error(
-          `[watcher] dag autowalk-on-merge owed-record write failed for ${repo}#${prNumber}; ` +
-          `leaving lifecycle row open for retry: ${err?.message || err}`
-        );
-        continue;
-      }
-      stmtMarkMerged.run(pr.mergedAt, repo, prNumber);
-      // Closeout capture is intentionally NOT awaited inline here. The
-      // gh retry budget for a single scrape (~30–45s worst case) would
-      // otherwise stall the gates-deletion and Linear triage sync for
-      // every later PR on the open-list when two or more merge between
-      // polls. retryPendingMergeCloseouts runs later in the same
-      // pollOnce tick and picks up this freshly-merged row from the
-      // pending list.
-      deleteGateRecordsForPR(ROOT, { repo, prNumber });
-      // ARC-03 review finding: sync triage under the row's owning domain so a
-      // secondary domain's tracking ticket is finalized too, not just code-pr's.
-      const mergedRowDomainId =
-        stmtGetReviewRow.get(repo, prNumber)?.domain_id || WATCHER_PRIMARY_DOMAIN_ID;
-      await operatorSurface.syncTriageStatus(
-        subjectRefWithLinearTicket({
-          domainId: mergedRowDomainId,
-          subjectExternalId: `${repo}#${prNumber}`,
-          revisionRef: pr.headRefOid || null,
-        }, linearTicketId, labelNames),
-        'finalized'
-      );
-    } else if (pr.state === 'closed') {
-      console.log(`[watcher] PR ${repo}#${prNumber} was closed (unmerged) — syncing Linear`);
-      await queueAndAttemptMergeAgentLifecycleCleanup({
-        pr, repo, prNumber, transition: 'closed',
-      });
-      stmtMarkClosed.run(pr.closedAt ?? new Date().toISOString(), repo, prNumber);
-      deleteGateRecordsForPR(ROOT, { repo, prNumber });
-      const closedRowDomainId =
-        stmtGetReviewRow.get(repo, prNumber)?.domain_id || WATCHER_PRIMARY_DOMAIN_ID;
-      await operatorSurface.syncTriageStatus(
-        subjectRefWithLinearTicket({
-          domainId: closedRowDomainId,
-          subjectExternalId: `${repo}#${prNumber}`,
-          revisionRef: pr.headRefOid || null,
-        }, linearTicketId, labelNames),
-        'halted'
-      );
-    }
-    // Still open → nothing to do
-  }
-}
-
-// ── Poll loop (new PRs) ──────────────────────────────────────────────────────
-
-async function runQueuedReviewAdoptionPhase({
-  drainReviewerDispatchCandidates,
-  postedReviewHandlers = [],
-  postReviewMaintenanceHandlers = [],
-  octokit,
-  operatorSurface,
-  retryPendingMergeAgentLifecycleCleanupsImpl = retryPendingMergeAgentLifecycleCleanups,
-  syncPRLifecycleImpl = syncPRLifecycle,
-  retryPendingDagAutowalkOnMergeImpl = retryPendingDagAutowalkOnMerge,
-  retryPendingMergeCloseoutsImpl = retryPendingMergeCloseouts,
-  retryPendingRetriggerAckCommentsImpl = retryPendingRetriggerAckComments,
-  retryPendingRetriggerReviewAckCommentsImpl = retryPendingRetriggerReviewAckComments,
-  rootDir = ROOT,
-  execFileImpl = execFileAsync,
-  logger = console,
-} = {}) {
-  if (typeof drainReviewerDispatchCandidates !== 'function') {
-    throw new TypeError('runQueuedReviewAdoptionPhase requires drainReviewerDispatchCandidates');
-  }
-
-  await drainReviewerDispatchCandidates('posted-review handoffs and watcher maintenance');
-  for (const postedReviewHandler of postedReviewHandlers) {
-    try {
-      await postedReviewHandler.run();
-    } catch (err) {
-      logger.error(
-        `[watcher] posted-review handler failed for ${postedReviewHandler.repoPath}#${postedReviewHandler.prNumber}:`,
-        err?.message || err
-      );
-    }
-  }
-
-  await retryPendingMergeAgentLifecycleCleanupsImpl();
-
-  // Keep review adoption ahead of merge/autowalk maintenance. These tasks may
-  // shell out to HQ, GitHub, or DAG walkers; a slow or wedged child must not
-  // prevent already-queued pending PRs from being claimed into reviewer runs.
-  await syncPRLifecycleImpl(octokit, operatorSurface);
-  await retryPendingDagAutowalkOnMergeImpl();
-  await retryPendingMergeCloseoutsImpl({ octokit });
-
-  try {
-    const ackRetry = await retryPendingRetriggerAckCommentsImpl({
-      rootDir,
-      execFileImpl,
-    });
-    if (ackRetry.attempted > 0) {
-      logger.log(
-        `[watcher] retrigger-remediation ack retry: attempted=${ackRetry.attempted} posted=${ackRetry.posted}`
-      );
-    }
-  } catch (err) {
-    logger.error('[watcher] retrigger-remediation ack retry failed:', err?.message || err);
-  }
-
-  try {
-    const reviewAckRetry = await retryPendingRetriggerReviewAckCommentsImpl({
-      rootDir,
-      execFileImpl,
-    });
-    if (reviewAckRetry.attempted > 0) {
-      logger.log(
-        `[watcher] retrigger-review ack retry: attempted=${reviewAckRetry.attempted} posted=${reviewAckRetry.posted}`
-      );
-    }
-  } catch (err) {
-    logger.error('[watcher] retrigger-review ack retry failed:', err?.message || err);
-  }
-
-  for (const postReviewMaintenanceHandler of postReviewMaintenanceHandlers) {
-    try {
-      await postReviewMaintenanceHandler.run();
-    } catch (err) {
-      logger.error(
-        `[watcher] post-review maintenance failed for ${postReviewMaintenanceHandler.repoPath}:`,
-        err?.message || err
-      );
-    }
-  }
-}
-
-async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
-  rootDir = ROOT,
-  repoPath,
-  prNumber,
-  existing,
-  subjectRef,
-  currentRevisionRef,
-  labelNames = [],
-  execFileImpl = execFileAsync,
-  fetchMergeAgentCandidateImpl = fetchMergeAgentCandidate,
-  buildMergeAgentDispatchJobImpl = buildMergeAgentDispatchJob,
-  dispatchMergeAgentForPRImpl = dispatchMergeAgentForPR,
-  operatorSurface = null,
-  domainId = WATCHER_PRIMARY_DOMAIN_ID,
-  logger = console,
-} = {}) {
-  if (!isReviewerTimeoutExhaustedRow(rootDir, existing, {
-    repo: repoPath,
-    prNumber,
-    headSha: currentRevisionRef,
-  })) {
-    return { handled: false, reason: 'not-reviewer-timeout-exhausted' };
-  }
-
-  try {
-    let operatorApprovalEvent;
-    let mergeAgentRequestEvent;
-    let adversarialMergeRequestedEvent;
-    if (operatorSurface) {
-      const controlSubjectRef = subjectRef || {
-        domainId,
-        subjectExternalId: `${repoPath}#${prNumber}`,
-        revisionRef: currentRevisionRef || null,
-      };
-      const revisionRef = currentRevisionRef || controlSubjectRef.revisionRef || null;
-      const [operatorApproval, mergeAgentRequest, adversarialMergeRequest] = await Promise.all([
-        labelNames.includes(OPERATOR_APPROVED_LABEL)
-          ? operatorSurface.observeOperatorApproved(controlSubjectRef, revisionRef)
-          : null,
-        labelNames.includes(MERGE_AGENT_REQUESTED_LABEL)
-          ? operatorSurface.observeMergeAgentOverride(controlSubjectRef, revisionRef)
-          : null,
-        labelNames.includes(ADVERSARIAL_MERGE_REQUESTED_LABEL) &&
-          typeof operatorSurface.observeLabelControl === 'function'
-          ? operatorSurface.observeLabelControl(
-              controlSubjectRef,
-              revisionRef,
-              ADVERSARIAL_MERGE_REQUESTED_LABEL,
-            )
-          : null,
-      ]);
-      operatorApprovalEvent = legacyLabelEventFromControlResult(operatorApproval, OPERATOR_APPROVED_LABEL);
-      mergeAgentRequestEvent = legacyLabelEventFromControlResult(mergeAgentRequest, MERGE_AGENT_REQUESTED_LABEL);
-      adversarialMergeRequestedEvent = legacyLabelEventFromControlResult(
-        adversarialMergeRequest,
-        ADVERSARIAL_MERGE_REQUESTED_LABEL,
-      );
-    }
-    const candidate = await fetchMergeAgentCandidateImpl(repoPath, prNumber, {
-      execFileImpl,
-      operatorApprovalEvent,
-      mergeAgentRequestEvent,
-    });
-    const dispatchJob = buildMergeAgentDispatchJobImpl(rootDir, candidate, { reviewStateDb: db });
-    if (!shouldUseReviewerTimeoutExhaustedMergeGate(dispatchJob)) {
-      return { handled: false, dispatchJob };
-    }
-    const coexistenceDecision = await resolveMergeAgentCoexistenceForWatcher({
-      rootDir,
-      reviewStateRow: existing,
-      dispatchJob,
-      candidate,
-      labelNames,
-      operatorApprovalEvent,
-      mergeAgentRequestEvent,
-      adversarialMergeRequestedEvent,
-      repoPath,
-      prNumber,
-      currentRevisionRef,
-      logger,
-    });
-    if (coexistenceDecision.outcome === 'ama-dispatched') {
-      const { amaClosureResult } = coexistenceDecision;
-      logger.log(
-        `[watcher] reviewer-timeout exhaustion handed off to AMA hammer for ${repoPath}#${prNumber}: ` +
-        `lrq=${amaClosureResult.dispatchId || 'unknown'} workerClass=${amaClosureResult.workerClass || 'unknown'}`
-      );
-      return { handled: true, dispatchJob, amaClosureResult };
-    }
-    if (coexistenceDecision.outcome === 'ama-pending') {
-      const { amaClosureResult } = coexistenceDecision;
-      logger.log(
-        `[watcher] reviewer-timeout exhaustion awaiting AMA hammer for ${repoPath}#${prNumber}: ` +
-        `${amaClosureResult.reason || 'ama-dispatch-pending'} ` +
-        `lrq=${amaClosureResult.launchRequestId || amaClosureResult.dispatchId || 'unknown'} ` +
-        `workerClass=${amaClosureResult.workerClass || 'unknown'}`
-      );
-      return { handled: true, dispatchJob, amaClosureResult };
-    }
-    if (coexistenceDecision.outcome === 'await-operator') {
-      const { amaClosureResult } = coexistenceDecision;
-      const reasonsHint = Array.isArray(amaClosureResult?.reasons)
-        ? amaClosureResult.reasons.slice(0, 8).join(',')
-        : amaClosureResult?.reason || 'unknown';
-      logger.log(
-        `[watcher] reviewer-timeout exhaustion parked for ${repoPath}#${prNumber}: ` +
-        `AMA enabled but not eligible (reasons: ${reasonsHint}); awaiting operator action ` +
-        `(apply 'operator-approved'/'adversarial-merge-requested' to make AMA-eligible ` +
-        `OR 'merge-agent-requested' for the operator-fallback lane)`
-      );
-      return { handled: true, dispatchJob, amaClosureResult };
-    }
-    const orchestrationMode = resolveOrchestrationMode({
-      logger,
-      context: 'reviewer-timeout merge-agent handoff',
-    });
-    const { coexistence, dispatchEnv } = coexistenceDecision;
-    // AMA-06N: timeout-exhaustion path also honors triggerOverride on
-    // the operator-fallback lane, same rationale as the green-path
-    // dispatch above — env overlay alone is insufficient.
-    const operatorFallbackTriggerOverride =
-      coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK
-        ? 'merge-agent-requested'
-        : null;
-    if (coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_OPERATOR_FALLBACK) {
-      logger.log(
-        `[watcher] reviewer-timeout exhaustion using merge-agent operator-fallback lane for ${repoPath}#${prNumber}: ` +
-        `setting AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true + trigger=merge-agent-requested (AMA-06N → AMA-06A admit-gate bypass)`
-      );
-    } else if (coexistence?.action === COEXISTENCE_ACTION.MERGE_AGENT_RECOVERY_FALLBACK) {
-      logger.log(
-        `[watcher] reviewer-timeout exhaustion recovering via merge-agent for ${repoPath}#${prNumber}: ` +
-        `${coexistenceDecision?.amaClosureResult?.reason || 'ama-dispatch-failure'}; ` +
-        `setting AMA_OPERATOR_MERGE_AGENT_OVERRIDE=true`
-      );
-    }
-    const dispatched = await dispatchMergeAgentForPRImpl({
-      rootDir,
-      ...dispatchJob,
-      orchestrationMode,
-      ...(dispatchEnv ? { env: { ...process.env, ...dispatchEnv } } : {}),
-      ...(operatorFallbackTriggerOverride ? { triggerOverride: operatorFallbackTriggerOverride } : {}),
-    });
-    logger.log(
-      `[watcher] reviewer-timeout exhaustion handoff for ${repoPath}#${prNumber}: ${dispatched.decision}`
-    );
-    return { handled: true, dispatchJob, dispatched };
-  } catch (err) {
-    const detail = err?.message || String(err);
-    logger.error(
-      `[watcher] reviewer-timeout exhaustion handoff failed for ${repoPath}#${prNumber}: ${detail}`
-    );
-    return { handled: false, error: err };
-  }
-}
-
-function isReviewerTimeoutExhaustedRow(rootDir, reviewRow, { repo, prNumber, headSha = null } = {}) {
-  const status = String(reviewRow?.review_status || '').trim().toLowerCase();
-  if (status !== 'failed' && status !== 'pending-upstream') return false;
-  if (reviewerFailureClassFromStoredRow(reviewRow) !== 'reviewer-timeout') return false;
-  const reviewedHeadSha = String(reviewRow?.reviewer_head_sha || '').trim();
-  const currentHeadSha = String(headSha || '').trim();
-  if (reviewedHeadSha && currentHeadSha && reviewedHeadSha !== currentHeadSha) return false;
-  try {
-    const cascadeState = readCascadeState(rootDir, { repo, prNumber });
-    const timeoutFailures = Number(cascadeState?.transientFailureBreakdown?.['reviewer-timeout'] || 0);
-    return timeoutFailures >= CASCADE_FAILURE_CAP;
-  } catch {
-    return false;
-  }
-}
+// ── Lifecycle sync, post-review adoption phase, reviewer-timeout handoff ──────
+//
+// ARC-18: `syncPRLifecycle` moved to ./pr-lifecycle-sync.mjs;
+// `runQueuedReviewAdoptionPhase` moved to ./posted-review-row.mjs;
+// `maybeDispatchReviewerTimeoutExhaustedMergeAgent` + `isReviewerTimeoutExhaustedRow`
+// moved to ./reviewer-timeout-exhausted-dispatch.mjs. pollOnce imports the two it
+// calls (runQueuedReviewAdoptionPhase, maybeDispatchReviewerTimeoutExhaustedMergeAgent)
+// back (see imports above) and re-exports them.
 
 /**
  * Poll for reviewable subjects once.
@@ -4332,6 +3986,7 @@ async function pollOnce(
     postReviewMaintenanceHandlers,
     octokit,
     operatorSurface,
+    primaryDomainId: WATCHER_PRIMARY_DOMAIN_ID,
   });
   } finally {
     try {

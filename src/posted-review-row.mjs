@@ -3,9 +3,11 @@
 // ARC-18: extracted from watcher.mjs. `handlePostedReviewRow` is the per-row
 // dispatch hub run once per queued posted-review handoff; its two private
 // helpers (`extractReviewBodyFromRow`, `findLatestPostedReviewBody`, used only
-// here) move with it. `runQueuedReviewAdoptionPhase` and `pollOnce` stay in
-// watcher and import `handlePostedReviewRow` back. ROOT/execFileAsync are
-// re-derived; WATCHER_PRIMARY_DOMAIN_ID is threaded (see the `domainId` default).
+// here) move with it. `runQueuedReviewAdoptionPhase` — the once-per-tick phase
+// that drains reviewer dispatches then runs the merge/autowalk/closeout
+// maintenance sweep — also lives here; `pollOnce` stays in watcher and imports
+// both back. ROOT/execFileAsync are re-derived; WATCHER_PRIMARY_DOMAIN_ID is
+// threaded (see the `domainId`/`primaryDomainId` defaults).
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, join } from 'node:path';
@@ -29,7 +31,15 @@ import {
 } from './follow-up-merge-agent.mjs';
 import { maybeFireMergeAgentStuckAlert } from './merge-agent-stuck-alert.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
-import { resolveOrchestrationMode } from './pr-lifecycle-sync.mjs';
+import {
+  resolveOrchestrationMode,
+  retryPendingMergeCloseouts,
+  syncPRLifecycle,
+} from './pr-lifecycle-sync.mjs';
+import { retryPendingMergeAgentLifecycleCleanups } from './merge-agent-lifecycle-cleanup.mjs';
+import { retryPendingDagAutowalkOnMerge } from './dag-autowalk-on-merge.mjs';
+import { retryPendingRetriggerAckComments } from './follow-up-retrigger-label.mjs';
+import { retryPendingRetriggerReviewAckComments } from './follow-up-retrigger-review-label.mjs';
 import { db, stmtGetLatestPostedReviewBody } from './review-state-db.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 
@@ -319,5 +329,93 @@ export async function handlePostedReviewRow({
     logger.error(
       `[watcher] merge-agent dispatch check failed for ${repoPath}#${prNumber}:\n${detail}`
     );
+  }
+}
+
+// ── Poll loop: once-per-tick post-review adoption + maintenance phase ─────────
+
+export async function runQueuedReviewAdoptionPhase({
+  drainReviewerDispatchCandidates,
+  postedReviewHandlers = [],
+  postReviewMaintenanceHandlers = [],
+  octokit,
+  operatorSurface,
+  // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded through to
+  // syncPRLifecycle as the domain fallback. pollOnce passes it; the `null`
+  // default is only reached by a caller that omits it (e.g. a test overriding
+  // syncPRLifecycleImpl) and is not exercised in production.
+  primaryDomainId = null,
+  retryPendingMergeAgentLifecycleCleanupsImpl = retryPendingMergeAgentLifecycleCleanups,
+  syncPRLifecycleImpl = syncPRLifecycle,
+  retryPendingDagAutowalkOnMergeImpl = retryPendingDagAutowalkOnMerge,
+  retryPendingMergeCloseoutsImpl = retryPendingMergeCloseouts,
+  retryPendingRetriggerAckCommentsImpl = retryPendingRetriggerAckComments,
+  retryPendingRetriggerReviewAckCommentsImpl = retryPendingRetriggerReviewAckComments,
+  rootDir = ROOT,
+  execFileImpl = execFileAsync,
+  logger = console,
+} = {}) {
+  if (typeof drainReviewerDispatchCandidates !== 'function') {
+    throw new TypeError('runQueuedReviewAdoptionPhase requires drainReviewerDispatchCandidates');
+  }
+
+  await drainReviewerDispatchCandidates('posted-review handoffs and watcher maintenance');
+  for (const postedReviewHandler of postedReviewHandlers) {
+    try {
+      await postedReviewHandler.run();
+    } catch (err) {
+      logger.error(
+        `[watcher] posted-review handler failed for ${postedReviewHandler.repoPath}#${postedReviewHandler.prNumber}:`,
+        err?.message || err
+      );
+    }
+  }
+
+  await retryPendingMergeAgentLifecycleCleanupsImpl();
+
+  // Keep review adoption ahead of merge/autowalk maintenance. These tasks may
+  // shell out to HQ, GitHub, or DAG walkers; a slow or wedged child must not
+  // prevent already-queued pending PRs from being claimed into reviewer runs.
+  await syncPRLifecycleImpl(octokit, operatorSurface, primaryDomainId);
+  await retryPendingDagAutowalkOnMergeImpl();
+  await retryPendingMergeCloseoutsImpl({ octokit });
+
+  try {
+    const ackRetry = await retryPendingRetriggerAckCommentsImpl({
+      rootDir,
+      execFileImpl,
+    });
+    if (ackRetry.attempted > 0) {
+      logger.log(
+        `[watcher] retrigger-remediation ack retry: attempted=${ackRetry.attempted} posted=${ackRetry.posted}`
+      );
+    }
+  } catch (err) {
+    logger.error('[watcher] retrigger-remediation ack retry failed:', err?.message || err);
+  }
+
+  try {
+    const reviewAckRetry = await retryPendingRetriggerReviewAckCommentsImpl({
+      rootDir,
+      execFileImpl,
+    });
+    if (reviewAckRetry.attempted > 0) {
+      logger.log(
+        `[watcher] retrigger-review ack retry: attempted=${reviewAckRetry.attempted} posted=${reviewAckRetry.posted}`
+      );
+    }
+  } catch (err) {
+    logger.error('[watcher] retrigger-review ack retry failed:', err?.message || err);
+  }
+
+  for (const postReviewMaintenanceHandler of postReviewMaintenanceHandlers) {
+    try {
+      await postReviewMaintenanceHandler.run();
+    } catch (err) {
+      logger.error(
+        `[watcher] post-review maintenance failed for ${postReviewMaintenanceHandler.repoPath}:`,
+        err?.message || err
+      );
+    }
   }
 }

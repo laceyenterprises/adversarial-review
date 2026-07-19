@@ -112,11 +112,15 @@ function spawnClaudeCodeRemediationWorker({
   // spawnCodexRemediationWorker call. The per-job workspace is itself
   // the sandbox boundary — nothing in it can leak into the operator's
   // primary checkout.
-  const promptFd = openSync(promptPath, 'r');
-  const stdoutFd = openSync(outputPath, 'w');
-  const stderrFd = openSync(logPath, 'a');
+  let promptFd;
+  let stdoutFd;
+  let stderrFd;
 
   try {
+    promptFd = openSync(promptPath, 'r');
+    stdoutFd = openSync(outputPath, 'w');
+    stderrFd = openSync(logPath, 'a');
+
     const child = spawnDetachedCli(
       claudeCli,
       ['--print', '--permission-mode', 'acceptEdits', '--dangerously-skip-permissions'],
@@ -142,9 +146,9 @@ function spawnClaudeCodeRemediationWorker({
       command: [claudeCli, '--print', '--permission-mode', 'acceptEdits', '--dangerously-skip-permissions'],
     };
   } finally {
-    closeSync(promptFd);
-    closeSync(stdoutFd);
-    closeSync(stderrFd);
+    if (promptFd !== undefined) closeSync(promptFd);
+    if (stdoutFd !== undefined) closeSync(stdoutFd);
+    if (stderrFd !== undefined) closeSync(stderrFd);
   }
 }
 

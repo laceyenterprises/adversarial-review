@@ -927,6 +927,53 @@ test('posted watcher rows project the adversarial gate before merge-agent dispat
   }
 });
 
+test('BUG-1: handlePostedReviewRow explicitly handles already-merged terminal PRs', async () => {
+  const repo = 'laceyenterprises/adversarial-review';
+  const prNumber = 639;
+  const logs = [];
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'posted-review-terminal-'));
+  try {
+    const result = await handlePostedReviewRow({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      existing: makeReviewRow({ repo, pr_number: prNumber }),
+      projectGateStatusSafe: async () => {},
+      latestFollowUpJobFinder: () => null,
+      latestPostedReviewBodyFinder: () => null,
+      reviewBodyHasScopeViolationFindingImpl: () => false,
+      fetchMergeAgentCandidateImpl: async () => ({
+        repo,
+        prNumber,
+        headSha: 'abc123',
+        prState: 'merged',
+        merged: true,
+      }),
+      buildMergeAgentDispatchJobImpl: (_rootDir, candidate) => ({
+        repo: candidate.repo,
+        prNumber: candidate.prNumber,
+        headSha: candidate.headSha,
+      }),
+      resolveMergeAgentCoexistenceForWatcherImpl: async () => ({
+        outcome: 'pr-terminal',
+        terminalReason: 'merged',
+      }),
+      logger: {
+        log(message) { logs.push(message); },
+        error() {},
+      },
+    });
+
+    assert.equal(result.handled, true);
+    assert.equal(result.prTerminal, true);
+    assert.equal(result.dispatchJob.prNumber, prNumber);
+    assert.match(logs.join('\n'), /already merged/);
+    assert.doesNotMatch(logs.join('\n'), /closed/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('projectAdversarialGateStatus posts the env-override context when ADV_GATE_STATUS_CONTEXT is set', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-gate-override-'));
   try {
@@ -1537,6 +1584,77 @@ test('resolveMergeAgentCoexistenceForWatcher treats eligible clean AMA dispatch 
 
   assert.equal(decision.outcome, 'ama-dispatched');
   assert.notEqual(decision.outcome, 'await-operator');
+});
+
+test('BUG-1: resolveMergeAgentCoexistenceForWatcher drops ownership for an already-merged PR without invoking the AMA closer', async () => {
+  let amaClosureInvoked = false;
+  const decision = await resolveMergeAgentCoexistenceForWatcher({
+    reviewStateRow: makeReviewRow(),
+    dispatchJob: {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 639,
+      headSha: 'abc123',
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+    },
+    candidate: {
+      headSha: 'abc123',
+      prState: 'merged',
+      merged: true,
+      mergeStateStatus: 'CLEAN',
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+    },
+    labelNames: [],
+    mergeAgentRequestEvent: null,
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 639,
+    currentRevisionRef: 'abc123',
+    logger: { log() {}, warn() {}, error() {} },
+    // The guard must short-circuit BEFORE the closer runs; if this impl is
+    // called, the merged PR would flow into the daemon clean-merge attempt,
+    // fail closed, and retain ownership every tick (the original BUG-1).
+    maybeDispatchAmaClosureForImpl: async () => {
+      amaClosureInvoked = true;
+      return { amaEnabled: true, dispatched: false, skipMergeAgent: true, reason: 'daemon-failed-closed' };
+    },
+  });
+
+  assert.equal(decision.outcome, 'pr-terminal');
+  assert.equal(decision.terminalReason, 'merged');
+  assert.equal(amaClosureInvoked, false, 'AMA closer must not run for a terminal PR');
+});
+
+test('BUG-1: a closed (unmerged) PR is NOT terminal-dropped (merged-only guard; closed can reopen, per SEV1 #643 precedent)', async () => {
+  let amaClosureInvoked = false;
+  const decision = await resolveMergeAgentCoexistenceForWatcher({
+    reviewStateRow: makeReviewRow(),
+    dispatchJob: {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 640,
+      headSha: 'abc123',
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+    },
+    candidate: {
+      headSha: 'abc123',
+      prState: 'closed',
+      merged: false,
+      prUpdatedAt: '2026-05-07T12:05:00.000Z',
+    },
+    labelNames: [],
+    mergeAgentRequestEvent: null,
+    repoPath: 'laceyenterprises/adversarial-review',
+    prNumber: 640,
+    currentRevisionRef: 'abc123',
+    logger: { log() {}, warn() {}, error() {} },
+    // A closed PR is intentionally NOT short-circuited: it can reopen, so it
+    // stays on its existing eligibility path (the closer still runs).
+    maybeDispatchAmaClosureForImpl: async () => {
+      amaClosureInvoked = true;
+      return { amaEnabled: true, dispatched: false, skipMergeAgent: true, reason: 'not-eligible' };
+    },
+  });
+
+  assert.notEqual(decision.outcome, 'pr-terminal', 'closed PR must not be terminal-dropped');
+  assert.equal(amaClosureInvoked, true, 'closed PR is not short-circuited; the closer still runs');
 });
 
 test('resolveMergeAgentCoexistenceForWatcher preserves await-operator with named ineligible reason', async () => {

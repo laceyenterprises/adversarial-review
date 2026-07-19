@@ -1338,7 +1338,21 @@ export function isTransientHqDispatchError(err) {
     || detail.includes('resource temporarily unavailable')
     || detail.includes('temporary failure')
     || detail.includes('temporarily unavailable')
-    || detail.includes('unable to access');
+    || detail.includes('unable to access')
+    // BUG-2: an hq dispatch DRAIN (e.g. a main-catchup bounce sets a ~60s drain
+    // then auto-resumes) is transient, not a merits failure. Without this the
+    // drain refusal is classified `dispatch-failed`, which fires the watcher's
+    // merge-agent recovery fallback — and that merge-agent hits the same drain
+    // and its worker fails. Treating drain as transient keeps the hammer on the
+    // hook (dispatch-deferred-transient, budget preserved) to re-dispatch once
+    // the drain resumes, with no fallback.
+    || hqDispatchDrainRefusal(detail);
+}
+
+function hqDispatchDrainRefusal(detail) {
+  return String(detail || '').split(/\r?\n/).some((line) => (
+    /^\s*(?:(?:message|stderr|stdout):\s*)?\[hq\]\s+dispatch refused:\s+drain(?:\s+in\s+effect)?\b/i.test(line)
+  ));
 }
 
 function isProvisionBranchHolderBlocked(errOrText) {

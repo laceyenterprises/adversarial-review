@@ -513,6 +513,8 @@ function readReviewerSessionTokenUsage({
   ledgerDbPath = null,
   env = process.env,
   rootDir = process.cwd(),
+  // undefined lets the adapter's default (real spawnSync) engage; tests inject a stub.
+  spawnSyncImpl,
 } = {}) {
   const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath, env });
   const result = readReviewerSessionUsageFromLedger({
@@ -524,6 +526,7 @@ function readReviewerSessionTokenUsage({
     ledgerTarget: selectedLedgerTarget,
     env,
     rootDir,
+    spawnSyncImpl,
   });
   warnTokenRollupDegraded('reviewer-session', result);
   return result.ok ? tokenUsageFromRuntimeSession(result.row) : null;
@@ -542,6 +545,8 @@ function readWorkerRunTokenUsageResult({
   env = process.env,
   rootDir = process.cwd(),
   hqRoot = null,
+  // undefined lets the adapter's default (real spawnSync) engage; tests inject a stub.
+  spawnSyncImpl,
 } = {}) {
   const selectedLedgerTarget = selectLedgerTargetSource({ ledgerTarget, ledgerDbPath, env });
   const result = readWorkerRunUsageFromLedger({
@@ -551,6 +556,7 @@ function readWorkerRunTokenUsageResult({
     env,
     rootDir,
     hqRoot,
+    spawnSyncImpl,
   });
   warnTokenRollupDegraded('worker-run', result);
   return result.ok

@@ -481,34 +481,51 @@ test('worker-run lookup prefers explicit workerRunId over a newer launch request
   assert.equal(usage.output, 45);
 });
 
-test('token rollup logs unsupported postgres backend once per scope', () => {
+test('token rollup reads postgres worker-run and reviewer-session totals without an unsupported-backend warning', () => {
   const warnings = [];
   const originalWarn = console.warn;
   console.warn = (message) => warnings.push(String(message));
+  let workerUsage;
+  let reviewerUsage;
   try {
-    const workerUsage = readWorkerRunTokenUsage({
-      workerRunId: 'wr_1',
+    workerUsage = readWorkerRunTokenUsage({
+      workerRunId: 'wr_pg',
       ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
+      spawnSyncImpl: () => ({
+        status: 0,
+        stdout: '{"run_id":"wr_pg","launch_request_id":"lrq_pg","session_id":"rs_pg",'
+          + '"token_usage_input":120,"token_usage_output":45,"token_usage_guardrail":165,'
+          + '"token_usage_cost_usd":0.35,"token_usage_source":"session-ledger",'
+          + '"started_at":"2026-06-04T00:00:00.000Z","ended_at":"2026-06-04T00:02:00.000Z",'
+          + '"updated_at":"2026-06-04T00:02:00.000Z",'
+          + '"total_cache_read_tokens":11,"total_cache_write_tokens":7}\n',
+        stderr: '',
+      }),
     });
-    const workerUsageAgain = readWorkerRunTokenUsage({
-      workerRunId: 'wr_2',
-      ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
-    });
-    const reviewerUsage = readReviewerSessionTokenUsage({
+    reviewerUsage = readReviewerSessionTokenUsage({
       adapterSessionKey: 'session-1',
       ledgerTarget: { backend: 'postgres', databaseName: 'agent_os_ledger' },
+      spawnSyncImpl: () => ({
+        status: 0,
+        stdout: '{"session_id":"rs_pg","adapter_session_key":"session-1",'
+          + '"total_input_tokens":120,"total_output_tokens":45,'
+          + '"total_cache_read_tokens":11,"total_cache_write_tokens":7,"total_cost_usd":0.35,'
+          + '"source_path":"/tmp/review-workspace",'
+          + '"started_at":"2026-06-04T00:00:00.000Z","ended_at":"2026-06-04T00:02:00.000Z",'
+          + '"updated_at":"2026-06-04T00:02:00.000Z"}\n',
+        stderr: '',
+      }),
     });
-
-    assert.equal(workerUsage, null);
-    assert.equal(workerUsageAgain, null);
-    assert.equal(reviewerUsage, null);
   } finally {
     console.warn = originalWarn;
   }
 
-  assert.equal(warnings.length, 2);
-  assert.match(warnings[0], /unsupported-ledger-backend.*worker-run/);
-  assert.match(warnings[1], /unsupported-ledger-backend.*reviewer-session/);
+  assert.equal(workerUsage.input, 120);
+  assert.equal(workerUsage.output, 45);
+  assert.equal(workerUsage.guardrail, 165);
+  assert.equal(reviewerUsage.input, 120);
+  assert.equal(reviewerUsage.output, 45);
+  assert.deepEqual(warnings, []);
 });
 
 test('backfill reviewer-pass CLI accepts backend-neutral ledger targets', () => {

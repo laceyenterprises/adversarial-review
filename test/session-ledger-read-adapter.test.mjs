@@ -683,6 +683,112 @@ test('readReviewerSessionUsageFromLedger keeps runtime_sessions lookups bounded 
   assert.equal(result.row.total_input_tokens, 20);
 });
 
+test('readWorkerRunUsageFromLedger reads worker-run token rollups from the postgres backend', () => {
+  const result = readWorkerRunUsageFromLedger({
+    workerRunId: 'wr_pg',
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
+    spawnSyncImpl: (command, args, options) => {
+      assert.equal(command, 'psql');
+      assert.ok(args.includes('postgres://ledger.example/agent_os_ledger'));
+      assert.ok(args.includes('worker_run_id=wr_pg'));
+      const sql = String(options.input);
+      assert.match(sql, /\\set worker_run_id 'wr_pg'/);
+      assert.match(sql, /FROM worker_runs wr/);
+      assert.match(sql, /LEFT JOIN runtime_sessions rs ON rs\.session_id = wr\.session_id/);
+      assert.match(sql, /WHERE wr\.run_id = :'worker_run_id'/);
+      assert.match(sql, /'token_usage_guardrail', token_usage_guardrail/);
+      assert.equal(options.timeout, 30_000);
+      return {
+        status: 0,
+        stdout: '{"run_id":"wr_pg","launch_request_id":"lrq_pg","session_id":"rs_pg",'
+          + '"token_usage_input":120,"token_usage_output":45,"token_usage_guardrail":165,'
+          + '"token_usage_cost_usd":0.35,"token_usage_source":"session-ledger",'
+          + '"started_at":"2026-06-04T00:00:00.000Z","ended_at":"2026-06-04T00:02:00.000Z",'
+          + '"updated_at":"2026-06-04T00:02:00.000Z",'
+          + '"total_cache_read_tokens":11,"total_cache_write_tokens":7}\n',
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.target.backend, 'postgres');
+  assert.equal(result.row.run_id, 'wr_pg');
+  assert.equal(result.row.token_usage_input, 120);
+  assert.equal(result.row.token_usage_output, 45);
+  assert.equal(result.row.token_usage_guardrail, 165);
+  assert.equal(result.row.total_cache_read_tokens, 11);
+  assert.equal(result.row.total_cache_write_tokens, 7);
+});
+
+test('readWorkerRunUsageFromLedger falls back to the postgres launch-request selector', () => {
+  const selectors = [];
+  const result = readWorkerRunUsageFromLedger({
+    launchRequestId: 'lrq_pg',
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
+    spawnSyncImpl: (_command, _args, options) => {
+      const sql = String(options.input);
+      selectors.push(sql);
+      assert.match(sql, /\\set launch_request_id 'lrq_pg'/);
+      assert.match(sql, /WHERE wr\.launch_request_id = :'launch_request_id'/);
+      return {
+        status: 0,
+        stdout: '{"run_id":"wr_pg","launch_request_id":"lrq_pg","session_id":"rs_pg",'
+          + '"token_usage_input":10,"token_usage_output":4,"token_usage_guardrail":null,'
+          + '"token_usage_cost_usd":0.05,"token_usage_source":"session-ledger",'
+          + '"started_at":"2026-06-04T00:00:00.000Z","ended_at":"2026-06-04T00:01:00.000Z",'
+          + '"updated_at":"2026-06-04T00:01:00.000Z",'
+          + '"total_cache_read_tokens":null,"total_cache_write_tokens":null}\n',
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.row.launch_request_id, 'lrq_pg');
+  assert.equal(result.row.token_usage_input, 10);
+  assert.equal(result.row.token_usage_guardrail, null);
+  assert.equal(selectors.length, 1);
+});
+
+test('readReviewerSessionUsageFromLedger reads runtime-session token rollups from the postgres backend', () => {
+  const result = readReviewerSessionUsageFromLedger({
+    adapterSessionKey: 'session-1',
+    workspacePath: '/tmp/review-workspace',
+    startedAt: '2026-06-04T00:00:00.000Z',
+    endedAt: '2026-06-04T00:02:00.000Z',
+    ledgerTarget: { backend: 'postgres', dsn: 'postgres://ledger.example/agent_os_ledger' },
+    spawnSyncImpl: (command, _args, options) => {
+      assert.equal(command, 'psql');
+      const sql = String(options.input);
+      assert.match(sql, /\\set key0 'session-1'/);
+      assert.match(sql, /FROM runtime_sessions/);
+      assert.match(sql, /adapter_session_key IN \(:'key0'\)/);
+      // TIMESTAMPTZ-safe window bounds, never COALESCE(<timestamptz>, '').
+      assert.match(sql, /:'window_end'::timestamptz/);
+      assert.match(sql, /:'window_start'::timestamptz/);
+      assert.doesNotMatch(sql, /COALESCE\(started_at, ''\)/);
+      return {
+        status: 0,
+        stdout: '{"session_id":"rs_pg","adapter_session_key":"session-1",'
+          + '"total_input_tokens":120,"total_output_tokens":45,'
+          + '"total_cache_read_tokens":11,"total_cache_write_tokens":7,"total_cost_usd":0.35,'
+          + '"source_path":"/tmp/review-workspace",'
+          + '"started_at":"2026-06-04T00:00:00.000Z","ended_at":"2026-06-04T00:02:00.000Z",'
+          + '"updated_at":"2026-06-04T00:02:00.000Z"}\n',
+        stderr: '',
+      };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.target.backend, 'postgres');
+  assert.equal(result.row.session_id, 'rs_pg');
+  assert.equal(result.row.total_input_tokens, 120);
+  assert.equal(result.row.total_output_tokens, 45);
+  assert.equal(result.row.total_cache_read_tokens, 11);
+});
+
 test('adapter exposes the same ledger target contract to worker-run and runtime-session readers', () => {
   const rootDir = tempRoot();
   const ledgerDb = path.join(rootDir, 'ledger.db');

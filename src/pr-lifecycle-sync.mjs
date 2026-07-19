@@ -260,7 +260,6 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
         );
         continue;
       }
-      stmtMarkMerged.run(pr.mergedAt, repo, prNumber);
       // Closeout capture is intentionally NOT awaited inline here. The
       // gh retry budget for a single scrape (~30–45s worst case) would
       // otherwise stall the gates-deletion and Linear triage sync for
@@ -281,12 +280,12 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
         }, linearTicketId, labelNames),
         'finalized'
       );
+      stmtMarkMerged.run(pr.mergedAt, repo, prNumber);
     } else if (pr.state === 'closed') {
       console.log(`[watcher] PR ${repo}#${prNumber} was closed (unmerged) — syncing Linear`);
       await queueAndAttemptMergeAgentLifecycleCleanup({
         pr, repo, prNumber, transition: 'closed',
       });
-      stmtMarkClosed.run(pr.closedAt ?? new Date().toISOString(), repo, prNumber);
       deleteGateRecordsForPR(ROOT, { repo, prNumber });
       const closedRowDomainId =
         stmtGetReviewRow.get(repo, prNumber)?.domain_id || primaryDomainId;
@@ -298,6 +297,7 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
         }, linearTicketId, labelNames),
         'halted'
       );
+      stmtMarkClosed.run(pr.closedAt ?? new Date().toISOString(), repo, prNumber);
     }
     // Still open → nothing to do
   }

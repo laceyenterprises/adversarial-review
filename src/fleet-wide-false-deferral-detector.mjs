@@ -121,7 +121,12 @@ function readFleetWideFalseDeferralDegradedState({
   fsImpl,
 }) {
   if (!fsImpl.existsSync(degradedStatePath)) return {};
-  const doc = JSON.parse(fsImpl.readFileSync(degradedStatePath, 'utf8'));
+  let doc;
+  try {
+    doc = JSON.parse(fsImpl.readFileSync(degradedStatePath, 'utf8'));
+  } catch {
+    return {};
+  }
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return {};
   return doc;
 }
@@ -275,18 +280,11 @@ export async function maybeFireFleetWideFalseDeferralAlert({
           if (typeof doc?.lastAlertedAt === 'string') state.lastAlertedAt = doc.lastAlertedAt;
         }
       } catch (readErr) {
-        await failClosedFleetWideFalseDeferralDetector({
-          deliverAlertFn,
-          logger,
-          operation: 'read',
-          statePath,
-          repoPath,
-          prNumber,
-          lrq,
-          err: readErr,
-          now,
-          degradedAlertDebounceMs,
-        });
+        logger?.warn?.(
+          `[watcher] fleet-wide false-deferral detector state read failed at ${statePath}; ` +
+          `rebuilding empty state: ${readErr?.message || readErr}`
+        );
+        state = { observations: [], lastAlertedAt: null };
       }
 
       // Serialize the entire read-modify-write cycle so concurrent

@@ -298,14 +298,19 @@ test('pollOnce keeps dag autowalk-on-merge retry as a single poll-level pass', (
   const phaseSrc = readFileSync(new URL('../src/posted-review-row.mjs', import.meta.url), 'utf8');
 
   // Slice a top-level function body from `startAnchor` to the next top-level
-  // `\nasync function` / `\nfunction`, or to end-of-file when it is the last
+  // exported or unexported top-level function, or to end-of-file when it is the last
   // function defined in the module.
   const sliceTopLevelFn = (source, startAnchor) => {
     const start = source.indexOf(startAnchor);
     assert.notEqual(start, -1, `expected to find ${startAnchor}`);
     const bodyStart = start + startAnchor.length;
     const rest = source.slice(bodyStart);
-    const delimiters = ['\nasync function', '\nfunction']
+    const delimiters = [
+      '\nexport async function',
+      '\nexport function',
+      '\nasync function',
+      '\nfunction',
+    ]
       .map((d) => rest.indexOf(d))
       .filter((i) => i >= 0);
     const end = delimiters.length ? bodyStart + Math.min(...delimiters) : source.length;
@@ -318,6 +323,13 @@ test('pollOnce keeps dag autowalk-on-merge retry as a single poll-level pass', (
     false,
     'syncPRLifecycle must enqueue owed work without running the global retry worker per merged PR'
   );
+
+  const mergedMark = lifecycleSource.indexOf('stmtMarkMerged.run(');
+  const mergedSync = lifecycleSource.indexOf("'finalized'");
+  const closedMark = lifecycleSource.indexOf('stmtMarkClosed.run(');
+  const closedSync = lifecycleSource.indexOf("'halted'");
+  assert.ok(mergedMark > mergedSync, 'merged lifecycle state must commit after triage sync');
+  assert.ok(closedMark > closedSync, 'closed lifecycle state must commit after triage sync');
 
   const pollStart = watcherSrc.indexOf('async function pollOnce(');
   assert.notEqual(pollStart, -1);

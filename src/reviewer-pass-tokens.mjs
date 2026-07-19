@@ -8,8 +8,23 @@ import {
   resolveSessionLedgerReadTarget,
 } from './session-ledger-read-adapter.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
+import { deriveReviewerTokenCostUSD, loadReviewerPricingTable } from './reviewer-token-pricing.mjs';
 
 const PASS_KINDS = new Set(['first-pass', 'remediation', 'rereview', 'closer']);
+
+// Module-level lazily-loaded pricing table for cost-USD derivation. Loaded once
+// from process.env (ADVERSARIAL_REVIEW_MODEL_PRICING_FILE / AGENT_OS_MODEL_PRICING_FILE
+// / vendored fallback) and cached. A null result (missing/invalid file) degrades
+// the rollup to count-only. Tests inject a `pricingTable` override instead.
+let _reviewerPricingTableLoaded = false;
+let _reviewerPricingTable = null;
+function defaultReviewerPricingTable() {
+  if (!_reviewerPricingTableLoaded) {
+    _reviewerPricingTable = loadReviewerPricingTable({ env: process.env });
+    _reviewerPricingTableLoaded = true;
+  }
+  return _reviewerPricingTable;
+}
 const PASS_STATUSES = new Set(['running', 'completed', 'failed', 'cancelled']);
 const REVIEWER_USAGE_ARTIFACT_SCHEMA = 'adversarial-reviewer-token-usage/v1';
 
@@ -172,6 +187,10 @@ function completeReviewerPass(rootDir, {
   tokenUsage = null,
   tokenSource = null,
   metadata = {},
+  // Test/caller override for the pricing table used to derive cost-USD when the
+  // capture source carried token counts but no dollar cost. Left undefined in
+  // production so the module-level lazily-loaded table is used.
+  pricingTable,
 } = {}) {
   const key = passKey({ repo, prNumber, attemptNumber, passKind });
   const usage = normalizeTokenUsage(tokenUsage);
@@ -179,9 +198,29 @@ function completeReviewerPass(rootDir, {
   try {
     ensureReviewStateSchema(db);
     const existing = db.prepare(
-      `SELECT metadata_json FROM reviewer_passes
+      `SELECT metadata_json, reviewer_model, reviewer_class, token_cost_usd FROM reviewer_passes
         WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
     ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind);
+    // Cost-USD provenance. An authoritative ledger cost (usage.costUSD present)
+    // is always recorded and never overwritten by a derived value. When the
+    // capture source carried token counts but no dollar cost, and the row does
+    // not already hold a cost, derive one from the canonical model pricing so
+    // the reviewer-pass rollup is dollarized instead of NULL.
+    let derivedCost = null;
+    let tokenCostSource;
+    if (usage) {
+      if (usage.costUSD != null) {
+        tokenCostSource = 'ledger-authoritative';
+      } else if (existing?.token_cost_usd == null) {
+        const table = pricingTable !== undefined ? pricingTable : defaultReviewerPricingTable();
+        derivedCost = deriveReviewerTokenCostUSD({
+          usage,
+          model: existing?.reviewer_model || existing?.reviewer_class,
+          pricingTable: table,
+        });
+        if (derivedCost != null) tokenCostSource = 'derived-pricing';
+      }
+    }
     const tokenMetadata = usage?.usageTag
       ? {
           tokenUsageTag: usage.usageTag,
@@ -193,6 +232,7 @@ function completeReviewerPass(rootDir, {
     const mergedMetadata = {
       ...parseMetadataJson(existing?.metadata_json),
       ...tokenMetadata,
+      ...(tokenCostSource ? { tokenCostSource } : {}),
       ...metadata,
     };
     db.prepare(
@@ -222,7 +262,7 @@ function completeReviewerPass(rootDir, {
       usage?.reasoning ?? null,
       usage?.toolContext ?? null,
       usage?.total ?? null,
-      usage?.costUSD ?? null,
+      usage?.costUSD ?? derivedCost ?? null,
       tokenSource || usage?.source || null,
       metadataJson(mergedMetadata),
       key.repo,

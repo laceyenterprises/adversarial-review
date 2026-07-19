@@ -197,6 +197,23 @@ test('BUG-2: an hq drain-in-effect hammer-dispatch refusal is transient (no merg
   );
 });
 
+test('BUG-2: drain transient classifier is anchored to hq refusal lines', () => {
+  assert.equal(
+    isTransientHqDispatchError({
+      stderr: "worker branch 'feature/drain in effect' failed normal validation",
+    }),
+    false,
+    'user-controlled branch/path text must not trigger drain retry classification',
+  );
+  assert.equal(
+    isTransientHqDispatchError({
+      stderr: "payload said dispatch refused: drain in effect, but hq returned validation failure",
+    }),
+    false,
+    'unprefixed prose must not trigger drain retry classification',
+  );
+});
+
 test('BUG-2: a drain-in-effect hammer-dispatch refusal defers (dispatch-deferred-transient) and does NOT burn the budget', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-drain-budget-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

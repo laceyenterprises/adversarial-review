@@ -1346,8 +1346,13 @@ export function isTransientHqDispatchError(err) {
     // and its worker fails. Treating drain as transient keeps the hammer on the
     // hook (dispatch-deferred-transient, budget preserved) to re-dispatch once
     // the drain resumes, with no fallback.
-    || detail.includes('drain in effect')
-    || detail.includes('dispatch refused: drain');
+    || hqDispatchDrainRefusal(detail);
+}
+
+function hqDispatchDrainRefusal(detail) {
+  return String(detail || '').split(/\r?\n/).some((line) => (
+    /^\s*(?:(?:message|stderr|stdout):\s*)?\[hq\]\s+dispatch refused:\s+drain(?:\s+in\s+effect)?\b/i.test(line)
+  ));
 }
 
 function isProvisionBranchHolderBlocked(errOrText) {

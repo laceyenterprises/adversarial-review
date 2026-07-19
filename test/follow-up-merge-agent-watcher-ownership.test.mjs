@@ -94,6 +94,61 @@ test('watcher owns outcome: re-dispatches a died-without-handoff failed worker a
   );
   const records = listMergeAgentDispatches(rootDir);
   assert.equal(records[0].watcherReDispatchCount, 1, 're-dispatch increments the bounded budget');
+  assert.equal(records[0].hqOwnerUser, 'airlock', 'dispatch records must preserve the resolved HQ owner for later cleanup probes');
+});
+
+test('does NOT dispatch a merge agent for an already merged/closed PR (skip-pr-not-open)', async () => {
+  // Merge-agent hygiene: a PR that merged/closed while a review tick was in
+  // flight must never draw a merge-agent dispatch — it burns a worker and feeds
+  // the cancel-on-merged cleanup loop. The guard returns before any hq call.
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = makeHqRoot('airlock');
+  const dispatchCalls = [];
+  const statusCalls = [];
+  const ghCalls = [];
+  const lifecycleEvents = [];
+
+  const result = await dispatchMergeAgentForPR({
+    agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
+    prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
+    rootDir,
+    ...makeJob({ labels: [{ name: 'merge-agent-dispatched' }, { name: 'merge-agent-requested' }] }),
+    merged: true,
+    prState: 'closed',
+    env: baseEnv(hqRoot),
+    execFileImpl: async (cmd, args) => {
+      if (args[0] === 'dispatch' && args[1] === 'status') {
+        statusCalls.push(args);
+        return { stdout: '{}' };
+      }
+      dispatchCalls.push(args);
+      return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
+    },
+    ghExecFileImpl: async (cmd, args) => {
+      ghCalls.push([cmd, ...args]);
+      return { stdout: '', stderr: '' };
+    },
+    logger: {
+      info: (line) => lifecycleEvents.push(JSON.parse(line)),
+      warn: () => {},
+      error: () => {},
+    },
+    now: '2026-07-19T05:00:00.000Z',
+  });
+
+  assert.equal(result.decision, 'skip-pr-not-open', 'a merged/closed PR must not get a merge-agent dispatch');
+  assert.equal(result.dispatched, false);
+  assert.equal(dispatchCalls.length, 0, 'no hq dispatch for a merged/closed PR');
+  assert.equal(statusCalls.length, 0, 'the guard returns before any hq probe');
+  assert.equal(result.triggerLabelRemovals.length, 1);
+  assert.ok(
+    ghCalls.some((call) => call.includes('--remove-label') && call.includes('merge-agent-requested')),
+    'the closed-PR guard must consume the pending trigger label'
+  );
+  assert.ok(
+    lifecycleEvents.some((event) => event.event === 'merge_agent.dispatch_skipped_pr_not_open'),
+    'the closed-PR guard must log through the injected logger without a ReferenceError'
+  );
 });
 
 test('recovery-first within grace: does NOT re-dispatch or escalate while the handoff window is open', async () => {

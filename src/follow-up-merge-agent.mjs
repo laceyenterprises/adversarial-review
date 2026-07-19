@@ -1591,6 +1591,7 @@ async function probeDispatchStatusViaHq({
   execFileImpl = execFileAsync,
   env = {},
   logger = console,
+  throwOnError = false,
 } = {}) {
   if (!hqPath || !_isValidLrqId(lrq)) return null;
   // --as-owner makes the watcher's cross-account dispatch status visible (see
@@ -1618,6 +1619,9 @@ async function probeDispatchStatusViaHq({
       logger.warn(
         '[follow-up-merge-agent] refusing to classify dispatch status as not-found without a proven HQ owner; duplicate-dispatch protection stays active'
       );
+    }
+    if (throwOnError) {
+      throw err;
     }
     return null;
   }
@@ -2788,6 +2792,8 @@ function recordMergeAgentDispatch(rootDir, job, {
   priorityFlagSupported = true,
   labelRemoval = null,
   watcherReDispatchCount = 0,
+  hqRoot = null,
+  hqOwnerUser = null,
 } = {}) {
   const dir = mergeAgentDispatchDir(rootDir);
   mkdirSync(dir, { recursive: true });
@@ -2815,6 +2821,8 @@ function recordMergeAgentDispatch(rootDir, job, {
     phantomHandoffCommentDelivery: null,
     dispatchId,
     launchRequestId,
+    hqRoot,
+    hqOwnerUser,
     prompt,
   };
   writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
@@ -3485,6 +3493,15 @@ async function addMergeAgentDispatchedLabel({
   return result;
 }
 
+// Dispatch statuses that mean the merge-agent worker is gone/done, so the
+// cancel-on-merged cleanup can converge (remove the stale label, stop retrying)
+// even when `hq dispatch cancel` returned an unreadable error. `not-found` is
+// only ever produced by probeDispatchStatusViaHq under authoritative owner
+// visibility, so it cannot false-converge a still-live cross-account worker.
+const MERGE_AGENT_CANCEL_TERMINAL_DISPATCH_STATUSES = new Set([
+  'succeeded', 'failed', 'cancelled', 'canceled', 'superseded', 'not-found',
+]);
+
 // Best-effort: when the watcher sees a PR has been closed/merged while
 // the `merge-agent-dispatched` label is still set, look up the most
 // recent merge-agent dispatch record for that PR, call `hq dispatch
@@ -3505,6 +3522,7 @@ async function cancelMergeAgentDispatchOnMerge({
   hqExecFileImpl = ghExecFileImpl,
   now = isoNow(),
   listImpl = listMergeAgentDispatches,
+  env = process.env,
 } = {}) {
   const result = {
     attempted: true,
@@ -3518,6 +3536,7 @@ async function cancelMergeAgentDispatchOnMerge({
     labelRemovalError: null,
     cleanupComplete: false,
     retryable: false,
+    probeConfirmedTerminal: false,
   };
 
   // Find the most recent merge-agent dispatch record for this PR. If
@@ -3570,9 +3589,59 @@ async function cancelMergeAgentDispatchOnMerge({
     }
   }
 
+  // A cancel that failed with a reason the classifier can't read (e.g. a bare
+  // "Command failed" with no structured stdout) is ambiguous: the LRQ may
+  // already be terminal/gone (converge) OR the daemon may be transiently down
+  // (retry — see the "keeps the label when cancel fails transiently" contract).
+  // Disambiguate by probing the LRQ's real status with authoritative owner
+  // visibility: a terminal/not-found status means the worker is gone and the
+  // cleanup must converge; an inconclusive probe (daemon down, no owner, still
+  // running) stays retryable. Fixes the 2026-07-19 cancel-on-merged 30x-retry
+  // churn where an already-terminal LRQ's cancel logged retryable=true forever
+  // (#630/#3910/#3854/#3803/#3793).
+  if (
+    result.launchRequestId
+    && !result.cancelled
+    && !isTerminalMergeAgentCancelDetail({
+      cancelStdout: result.cancelStdout,
+      cancelError: result.cancelError,
+    })
+  ) {
+    const probeEnv = { ...process.env, ...env };
+    const probeOwner = String(latest.hqOwnerUser || '').trim()
+      || (latest.hqRoot ? resolveHqOwner(latest.hqRoot)?.ownerUser : null)
+      || null;
+    if (probeOwner) {
+      try {
+        const probed = await probeDispatchStatusViaHq({
+          hqPath,
+          lrq: result.launchRequestId,
+          asOwner: probeOwner,
+          execFileImpl: hqExecFileImpl,
+          env: probeEnv,
+          logger: console,
+          throwOnError: true,
+        });
+        const probedStatus = String(probed?.status || '').trim().toLowerCase();
+        if (probedStatus) {
+          result.probedDispatchStatus = probedStatus;
+          if (MERGE_AGENT_CANCEL_TERMINAL_DISPATCH_STATUSES.has(probedStatus)) {
+            result.probeConfirmedTerminal = true;
+          }
+        }
+      } catch (err) {
+        result.probeError = err?.message || String(err);
+        console.warn(
+          `[follow-up-merge-agent] best-effort status probe of merge-agent dispatch ${latest.launchRequestId} for ${repo}#${prNumber} failed: ${result.probeError}`
+        );
+      }
+    }
+  }
+
   const cancelReachedTerminalOutcome = (
     !result.launchRequestId
     || result.cancelled
+    || result.probeConfirmedTerminal
     || isTerminalMergeAgentCancelDetail({
       cancelStdout: result.cancelStdout,
       cancelError: result.cancelError,
@@ -3698,6 +3767,43 @@ async function dispatchMergeAgentForPR({
   triggerOverride = null,
   orchestrationMode = null,
 } = {}) {
+  // Merge-agent hygiene: never dispatch (or re-dispatch) a merge agent for a PR
+  // that is no longer open. A PR that merged/closed while a review tick was in
+  // flight has nothing to merge; dispatching burns a worker and feeds the
+  // cancel-on-merged cleanup path. Teardown of any already-in-flight dispatch is
+  // owned by the watcher's merged/closed handler (cancelMergeAgentDispatchOnMerge).
+  if (merged === true || (typeof prState === 'string' && prState.toLowerCase() !== 'open')) {
+    const triggerLabelRemovals = [];
+    for (const trigger of [MERGE_AGENT_REQUESTED_LABEL, OPERATOR_APPROVED_LABEL]) {
+      const labelRemoval = await removeConsumedTriggerLabel({
+        repo,
+        prNumber,
+        labels,
+        trigger,
+        ghExecFileImpl,
+        now,
+      });
+      if (labelRemoval.attempted) triggerLabelRemovals.push(labelRemoval);
+    }
+    mergeAgentLifecycleLog(logger, 'merge_agent.dispatch_skipped_pr_not_open', {
+      repo,
+      prNumber,
+      prState,
+      merged,
+      triggerLabelRemovals,
+    });
+    return {
+      decision: 'skip-pr-not-open',
+      dispatched: false,
+      skipped: 'pr-not-open',
+      repo,
+      prNumber,
+      prState,
+      merged,
+      stuckDetail: null,
+      triggerLabelRemovals,
+    };
+  }
   const runtimeEnv = { ...process.env, ...env };
   const job = {
     repo,
@@ -4276,6 +4382,8 @@ async function dispatchMergeAgentForPR({
     // dispatch). When this dispatch is a watcher-owned retry of a died-without-
     // handoff worker, watcherReDispatchCountForRecord is the incremented count.
     watcherReDispatchCount: watcherReDispatchCountForRecord ?? 0,
+    hqRoot: resolveHqRoot(runtimeEnv),
+    hqOwnerUser: statusProbeAsOwner,
   });
 
   const labelRemoval = await removeConsumedTriggerLabel({

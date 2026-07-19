@@ -76,10 +76,13 @@ export async function readReviewerBrokerSharedSecretBestEffort(
     };
     return value;
   } catch (err) {
+    // Do NOT cache an empty secret across the TTL on a transient read error
+    // (EACCES/EIO/etc). Caching empty would fail Gemini broker dispatch for the
+    // full TTL after a blip; expire immediately so the next call re-reads.
     reviewerBrokerSharedSecretCache = {
       file: secretFile,
       value: '',
-      expiresAtMs: nowMs + Math.max(0, Number(ttlMs) || 0),
+      expiresAtMs: 0,
     };
     if (err?.code !== 'ENOENT') {
       logger?.warn?.(

@@ -356,39 +356,54 @@ async function spawnReviewer({
     if (result.stderrTail) console.error(`[reviewer:${prNumber}] stderr: ${String(result.stderrTail).trim()}`);
     try {
       const endedAt = new Date().toISOString();
-      const tokenUsage = tagTokenUsage(result.tokenUsage || readBestReviewerEvidenceTokenUsage({
-        adapterSessionKey: result.reattachToken || reviewerSessionUuid,
-        sessionKeys: [
-          reviewerSessionUuid,
-          result.reattachToken,
-          result.sessionUuid,
-        ],
-        workspacePath: workspacePath || ROOT,
-        startedAt,
-        endedAt,
-        reviewerModel,
-        rootDir: ROOT,
-      }), 'guardrail');
+      // Read the reviewer token-usage evidence and persist the artifact in an
+      // ISOLATED try/catch. These read/write evidence files on disk and can
+      // throw; a failure here must NOT skip completeReviewerPass below, or the
+      // on-disk reviewer-pass artifact would stay stuck in 'running' forever.
+      // On failure we settle the pass with null token usage instead.
+      let tokenUsage = null;
       let reviewerTokenUsageArtifact = null;
-      if (tokenUsage) {
-        reviewerTokenUsageArtifact = writeReviewerTokenUsageArtifactBestEffort({
+      try {
+        tokenUsage = tagTokenUsage(result.tokenUsage || readBestReviewerEvidenceTokenUsage({
+          adapterSessionKey: result.reattachToken || reviewerSessionUuid,
+          sessionKeys: [
+            reviewerSessionUuid,
+            result.reattachToken,
+            result.sessionUuid,
+          ],
           workspacePath: workspacePath || ROOT,
-          repo,
-          prNumber,
-          attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
-          passKind,
-          reviewerClass: reviewerModel,
-          reviewerModel,
-          status: result.ok ? 'completed' : (result.failureClass === 'cancelled' ? 'cancelled' : 'failed'),
           startedAt,
           endedAt,
-          tokenUsage,
-          source: tokenUsage?.source || null,
-          metadata: {
-            reviewerSessionUuid,
-            reattachToken: result.reattachToken || null,
-          },
-        }, { repo, prNumber, reviewerSessionUuid });
+          reviewerModel,
+          rootDir: ROOT,
+        }), 'guardrail');
+        if (tokenUsage) {
+          reviewerTokenUsageArtifact = writeReviewerTokenUsageArtifactBestEffort({
+            workspacePath: workspacePath || ROOT,
+            repo,
+            prNumber,
+            attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
+            passKind,
+            reviewerClass: reviewerModel,
+            reviewerModel,
+            status: result.ok ? 'completed' : (result.failureClass === 'cancelled' ? 'cancelled' : 'failed'),
+            startedAt,
+            endedAt,
+            tokenUsage,
+            source: tokenUsage?.source || null,
+            metadata: {
+              reviewerSessionUuid,
+              reattachToken: result.reattachToken || null,
+            },
+          }, { repo, prNumber, reviewerSessionUuid });
+        }
+      } catch (tokenErr) {
+        console.warn(
+          `[watcher] reviewer_pass_token_read_failed repo=${repo} pr=${prNumber} ` +
+          `session=${reviewerSessionUuid}: ${tokenErr?.message || tokenErr}`
+        );
+        tokenUsage = null;
+        reviewerTokenUsageArtifact = null;
       }
       completeReviewerPass(ROOT, {
         repo,

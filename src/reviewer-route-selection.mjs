@@ -65,7 +65,7 @@ export function resolveReviewerTimeoutFallbackThreshold(env = process.env) {
 function resolveReviewerTimeoutFallbackModel(env = process.env) {
   const raw = String(env.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_MODEL || 'off').trim().toLowerCase();
   if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'none') return null;
-  if (raw === 'claude' || raw === 'codex') return raw;
+  if (raw === 'claude' || raw === 'codex' || raw === 'gemini') return raw;
   return null;
 }
 

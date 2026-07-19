@@ -328,6 +328,12 @@ test('pollOnce keeps dag autowalk-on-merge retry as a single poll-level pass', (
   const mergedSync = lifecycleSource.indexOf("'finalized'");
   const closedMark = lifecycleSource.indexOf('stmtMarkClosed.run(');
   const closedSync = lifecycleSource.indexOf("'halted'");
+  // Guard against a false pass if any marker string is absent: indexOf returns
+  // -1, and `mark > -1` would be trivially true, so assert each exists first.
+  assert.notEqual(mergedMark, -1, 'syncPRLifecycle must call stmtMarkMerged.run(');
+  assert.notEqual(mergedSync, -1, "syncPRLifecycle must sync the 'finalized' triage state");
+  assert.notEqual(closedMark, -1, 'syncPRLifecycle must call stmtMarkClosed.run(');
+  assert.notEqual(closedSync, -1, "syncPRLifecycle must sync the 'halted' triage state");
   assert.ok(mergedMark > mergedSync, 'merged lifecycle state must commit after triage sync');
   assert.ok(closedMark > closedSync, 'closed lifecycle state must commit after triage sync');
 

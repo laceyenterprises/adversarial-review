@@ -66,7 +66,7 @@ function allMjs(dir, acc = []) {
 // keyword context.
 function importSpecifiers(source) {
   const specs = [];
-  for (const m of source.matchAll(/(?:^|\n)\s*(?:import|export)\b[^;\n]*?\bfrom\s*['"]([^'"]+)['"]/g)) {
+  for (const m of source.matchAll(/(?:^|\n)\s*(?:import|export)\b[^;]*?\bfrom\s*['"]([^'"]+)['"]/g)) {
     specs.push(m[1]);
   }
   for (const m of source.matchAll(/(?:^|\n)\s*import\s+['"]([^'"]+)['"]/g)) {
@@ -193,6 +193,12 @@ test('ARC-19 gate fixtures: importSpecifiers captures static, re-export, bare, a
   const src = [
     "import a from './a.mjs';",
     "export { b } from './b.mjs';",
+    "import {",
+    "  multilineImport,",
+    "} from './multiline-import.mjs';",
+    "export {",
+    "  multilineExport,",
+    "} from './multiline-export.mjs';",
     "import './side-effect.mjs';",
     "const c = await import('./c.mjs');",
     "// import { fake } from './comment-only.mjs' -- must be ignored",
@@ -200,6 +206,8 @@ test('ARC-19 gate fixtures: importSpecifiers captures static, re-export, bare, a
   const specs = importSpecifiers(src);
   assert.ok(specs.includes('./a.mjs'));
   assert.ok(specs.includes('./b.mjs'));
+  assert.ok(specs.includes('./multiline-import.mjs'));
+  assert.ok(specs.includes('./multiline-export.mjs'));
   assert.ok(specs.includes('./side-effect.mjs'));
   assert.ok(specs.includes('./c.mjs'));
   assert.ok(!specs.includes('./comment-only.mjs'), 'commented-out imports must not be captured');

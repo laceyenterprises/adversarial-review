@@ -203,22 +203,28 @@ function completeReviewerPass(rootDir, {
     ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind);
     // Cost-USD provenance. An authoritative ledger cost (usage.costUSD present)
     // is always recorded and never overwritten by a derived value. When the
-    // capture source carried token counts but no dollar cost, and the row does
-    // not already hold a cost, derive one from the canonical model pricing so
-    // the reviewer-pass rollup is dollarized instead of NULL.
+    // capture source carried token counts but no dollar cost, derive one from
+    // the canonical model pricing unless the row already holds an authoritative
+    // or legacy/unattributed cost. Previously-derived costs are recalculated so
+    // a re-complete with updated token counts keeps the rollup consistent.
     let derivedCost = null;
     let tokenCostSource;
     if (usage) {
       if (usage.costUSD != null) {
         tokenCostSource = 'ledger-authoritative';
-      } else if (existing?.token_cost_usd == null) {
-        const table = pricingTable !== undefined ? pricingTable : defaultReviewerPricingTable();
-        derivedCost = deriveReviewerTokenCostUSD({
-          usage,
-          model: existing?.reviewer_model || existing?.reviewer_class,
-          pricingTable: table,
-        });
-        if (derivedCost != null) tokenCostSource = 'derived-pricing';
+      } else {
+        const existingMeta = parseMetadataJson(existing?.metadata_json);
+        const mayDeriveCost = existing?.token_cost_usd == null
+          || existingMeta.tokenCostSource === 'derived-pricing';
+        if (mayDeriveCost) {
+          const table = pricingTable !== undefined ? pricingTable : defaultReviewerPricingTable();
+          derivedCost = deriveReviewerTokenCostUSD({
+            usage,
+            model: existing?.reviewer_model || existing?.reviewer_class,
+            pricingTable: table,
+          });
+          if (derivedCost != null) tokenCostSource = 'derived-pricing';
+        }
       }
     }
     const tokenMetadata = usage?.usageTag

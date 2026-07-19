@@ -165,12 +165,8 @@ test('completeReviewerPass records ledger cost and never overwrites it with a de
   assert.equal(reRow.token_cost_usd, 0.42, 'authoritative ledger cost must be preserved');
 });
 
-test('completeReviewerPass degrades to count-only when the pricing table is unavailable', () => {
+test('completeReviewerPass recalculates previously derived cost on re-complete', () => {
   const rootDir = tempRoot();
-  const missingTable = loadReviewerPricingTable({
-    env: { ADVERSARIAL_REVIEW_MODEL_PRICING_FILE: '/no/such/pricing/file.json' },
-  });
-  assert.equal(missingTable, null);
   beginReviewerPass(rootDir, {
     repo: 'lacey/repo',
     prNumber: 102,
@@ -180,9 +176,53 @@ test('completeReviewerPass degrades to count-only when the pricing table is unav
     passKind: 'first-pass',
     startedAt: '2026-07-19T00:00:00.000Z',
   });
-  const row = completeReviewerPass(rootDir, {
+  const firstRow = completeReviewerPass(rootDir, {
     repo: 'lacey/repo',
     prNumber: 102,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    // gpt-5.2: (100*1.25 + 20*10) / 1e6 = 0.000325
+    tokenUsage: { input: 100, output: 20, total: 120, source: 'codex-transcript' },
+    pricingTable: vendoredTable(),
+  });
+  assert.equal(firstRow.token_cost_usd, 0.000325);
+  assert.equal(JSON.parse(firstRow.metadata_json).tokenCostSource, 'derived-pricing');
+
+  const reRow = completeReviewerPass(rootDir, {
+    repo: 'lacey/repo',
+    prNumber: 102,
+    attemptNumber: 1,
+    passKind: 'first-pass',
+    status: 'completed',
+    // gpt-5.2: (2000*1.25 + 400*10) / 1e6 = 0.0065
+    tokenUsage: { input: 2000, output: 400, total: 2400, source: 'codex-transcript' },
+    pricingTable: vendoredTable(),
+  });
+  assert.equal(reRow.token_input, 2000);
+  assert.equal(reRow.token_output, 400);
+  assert.equal(reRow.token_cost_usd, 0.0065, 'derived cost must track updated counts');
+  assert.equal(JSON.parse(reRow.metadata_json).tokenCostSource, 'derived-pricing');
+});
+
+test('completeReviewerPass degrades to count-only when the pricing table is unavailable', () => {
+  const rootDir = tempRoot();
+  const missingTable = loadReviewerPricingTable({
+    env: { ADVERSARIAL_REVIEW_MODEL_PRICING_FILE: '/no/such/pricing/file.json' },
+  });
+  assert.equal(missingTable, null);
+  beginReviewerPass(rootDir, {
+    repo: 'lacey/repo',
+    prNumber: 103,
+    attemptNumber: 1,
+    reviewerClass: 'codex',
+    reviewerModel: 'gpt-5.2',
+    passKind: 'first-pass',
+    startedAt: '2026-07-19T00:00:00.000Z',
+  });
+  const row = completeReviewerPass(rootDir, {
+    repo: 'lacey/repo',
+    prNumber: 103,
     attemptNumber: 1,
     passKind: 'first-pass',
     status: 'completed',

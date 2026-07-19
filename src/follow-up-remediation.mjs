@@ -82,12 +82,37 @@ import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comm
 import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 import { detectQuotaExhaustion, parseQuotaResetAt } from './quota-exhaustion.mjs';
+import {
+  DEFAULT_REPLIES_ROOT,
+  HQ_REMEDIATION_DISPATCH_TRIGGER,
+  digestWorkerFinalMessage,
+  prepareHqReplyLandingPad,
+  readWorkerFinalMessage,
+  requireWorkerReplyContext,
+  resolveHqReplyArtifactPath,
+  resolveHqReplyPath,
+  resolveHqRoot,
+  resolveJobRelativePath,
+  resolveLocalRepliesRoot,
+  resolveRealPath,
+  resolveRemediationReplyTarget,
+  resolveReplyStorageKey,
+  shouldUseHqIntegration,
+  summarizeWorkerFinalMessage,
+} from './remediation-reply-paths.mjs';
+import {
+  OSS_READINESS_APPLY_SCRIPT_ENV,
+  OSS_READINESS_AUDIT_CHECK_NAME,
+  applyOssReadinessRemediation,
+  jobHasOssReadinessAuditFailure,
+  resolveOssReadinessApplyScript,
+  rollbackOssReadinessLocalCommit,
+} from './remediation-oss-readiness.mjs';
 
 const execFileAsync = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
-const DEFAULT_REPLIES_ROOT = join(ROOT, 'data', 'replies');
 const REMEDIATION_LEGACY_UNSTAGE_COMMANDS = [
   'git rm --cached -- .adversarial-follow-up/remediation-reply.json 2>/dev/null || true',
   'git rm --cached -r -- .adversarial-follow-up/ 2>/dev/null || true',
@@ -121,21 +146,11 @@ function isRemediationToRereviewHandoffEnabled(env = process.env, options = {}) 
 const WORKER_PROVENANCE_HOOK_SRC = join(ROOT, 'hooks', 'worker-provenance-commit-msg');
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 const VALID_GITHUB_REPO_SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-const VALID_REPLY_STORAGE_KEY = /^[A-Za-z0-9._-]{1,128}$/;
 const HQ_TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'cancelled', 'superseded']);
 const HQ_SUCCESS_STATUSES = new Set(['succeeded']);
 const HQ_CANCEL_RETRY_DELAYS_MS = [250, 500];
 const WORKSPACE_GIT_RETRY_DELAYS_MS = [250, 750];
 const WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS = [250, 1000];
-const OSS_READINESS_AUDIT_CHECK_NAME = 'oss-readiness-audit';
-const OSS_READINESS_BASELINE_PATH = 'scripts/oss-readiness-category-baseline.json';
-const OSS_READINESS_APPLY_SCRIPT_ENV = 'OSS_READINESS_APPLY_SCRIPT';
-const OSS_READINESS_SCRIPT_TIMEOUT_MS = 60 * 1000;
-const OSS_READINESS_APPLY_SCRIPT_CANDIDATES = [
-  ['agent-os', 'scripts', 'audit-oss-readiness-hardcodes.py'],
-  ['..', 'agent-os', 'scripts', 'audit-oss-readiness-hardcodes.py'],
-  ['..', '..', 'agent-os', 'scripts', 'audit-oss-readiness-hardcodes.py'],
-];
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
@@ -427,7 +442,6 @@ function remediationWorkerGitIdentity(workerClass, env = process.env) {
 }
 
 const RECONCILIATION_MAX_ACTIVE_MS = 6 * 60 * 60 * 1000;
-const MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES = 4 * 1024 * 1024;
 
 function logRoundBudgetDecision(log, {
   riskClass,
@@ -473,23 +487,6 @@ function resolveCodexCliPath() {
   return process.env.CODEX_CLI_PATH || process.env.CODEX_CLI || 'codex';
 }
 
-function validateReplyStorageKey(key, label = 'replyStorageKey') {
-  const value = String(key ?? '').trim();
-  if (!value) {
-    throw new Error(`Cannot resolve remediation reply storage key: missing ${label}`);
-  }
-  if (!VALID_REPLY_STORAGE_KEY.test(value)) {
-    throw new Error(
-      `Invalid ${label}: ${JSON.stringify(value)} must match ${VALID_REPLY_STORAGE_KEY} ` +
-      'and cannot contain path separators or traversal segments'
-    );
-  }
-  return value;
-}
-
-const HQ_REMEDIATION_DISPATCH_TRIGGER =
-  'remediation dispatches via hq (orchestration_mode=agentos or --with-hq-integration)';
-
 function markRemediationConfigError(err, { configKey, requestedValue = null } = {}) {
   if (err && err.name === 'AgentOSConfigError') {
     err.isRemediationConfigError = true;
@@ -497,24 +494,6 @@ function markRemediationConfigError(err, { configKey, requestedValue = null } = 
     err.requestedValue = requestedValue;
   }
   return err;
-}
-
-function resolveHqRoot(env = process.env, { requireExists = false } = {}) {
-  if (!env.HQ_ROOT) {
-    throw new Error(`HQ_ROOT must be set when ${HQ_REMEDIATION_DISPATCH_TRIGGER}`);
-  }
-  const root = resolve(env.HQ_ROOT);
-  if (requireExists && !existsSync(root)) {
-    throw new Error(
-      `HQ remediation root does not exist: ${root}. ` +
-      `Set HQ_ROOT to an existing agent-os-hq checkout before consuming follow-up jobs when ${HQ_REMEDIATION_DISPATCH_TRIGGER}.`
-    );
-  }
-  return root;
-}
-
-function shouldUseHqIntegration(env = process.env) {
-  return env.ADV_WITH_HQ_INTEGRATION === '1' || Boolean(env.HQ_ROOT);
 }
 
 function resolveRemediationOrchestrationMode(env = process.env) {
@@ -1528,115 +1507,6 @@ async function cancelHqDispatch({
     error: lastError?.message || 'hq dispatch cancel failed',
     retryable: isHqCancelRetryable(lastError),
   };
-}
-
-function resolveLocalRepliesRoot(env = process.env, { requireExists = false } = {}) {
-  const root = resolve(env.ADV_REPLIES_ROOT || DEFAULT_REPLIES_ROOT);
-  if (requireExists && !existsSync(root)) {
-    throw new Error(`Local remediation replies root does not exist: ${root}`);
-  }
-  return root;
-}
-
-function resolveRemediationReplyTarget(env = process.env, { requireExists = false } = {}) {
-  if (shouldUseHqIntegration(env)) {
-    const hqRoot = resolveHqRoot(env, { requireExists });
-    return {
-      mode: 'hq',
-      root: hqRoot,
-      resolvePath: ({ launchRequestId }) => resolveHqReplyPath({ hqRoot, launchRequestId }),
-    };
-  }
-  const repliesRoot = resolveLocalRepliesRoot(env, { requireExists: false });
-  return {
-    mode: 'local',
-    root: repliesRoot,
-    resolvePath: ({ launchRequestId }) => {
-      const replyStorageKey = validateReplyStorageKey(launchRequestId, 'launchRequestId');
-      const replyPath = resolve(repliesRoot, replyStorageKey, 'remediation-reply.json');
-      const relativePath = relative(repliesRoot, replyPath);
-      if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
-        throw new Error(`Invalid local remediation reply path outside replies root: ${replyPath}`);
-      }
-      return { replyDir: dirname(replyPath), replyPath };
-    },
-  };
-}
-
-function resolveHqReplyPath({ hqRoot, launchRequestId }) {
-  const replyStorageKey = validateReplyStorageKey(launchRequestId, 'launchRequestId');
-  const replyPath = resolveHqReplyArtifactPath(
-    join(hqRoot, 'dispatch', 'remediation-replies', replyStorageKey, 'remediation-reply.json'),
-    { hqRoot }
-  );
-  return {
-    replyDir: dirname(replyPath),
-    replyPath,
-  };
-}
-
-function requireWorkerReplyContext({ replyPath = null, hqRoot = null, launchRequestId = null }) {
-  const normalizedReplyPath = String(replyPath ?? '').trim();
-  let resolvedReplyPath = normalizedReplyPath;
-  let resolvedReplyDir = normalizedReplyPath ? dirname(normalizedReplyPath) : null;
-
-  if (normalizedReplyPath) {
-    if (!isAbsolute(normalizedReplyPath)) {
-      throw new Error(`Invalid replyPath: expected absolute path, got ${JSON.stringify(normalizedReplyPath)}`);
-    }
-    resolvedReplyPath = resolve(normalizedReplyPath);
-    resolvedReplyDir = dirname(resolvedReplyPath);
-  } else {
-    const normalizedHqRoot = String(hqRoot ?? '').trim();
-    if (!normalizedHqRoot) {
-      throw new Error('Missing remediation reply path');
-    }
-    if (!isAbsolute(normalizedHqRoot)) {
-      throw new Error(`Invalid hqRoot: expected absolute path, got ${JSON.stringify(normalizedHqRoot)}`);
-    }
-    const normalizedLaunchRequestId = validateReplyStorageKey(launchRequestId, 'launchRequestId');
-    const hqReplyPath = resolveHqReplyPath({
-      hqRoot: resolve(normalizedHqRoot),
-      launchRequestId: normalizedLaunchRequestId,
-    });
-    resolvedReplyPath = hqReplyPath.replyPath;
-    resolvedReplyDir = hqReplyPath.replyDir;
-  }
-
-  const normalizedHqRoot = String(hqRoot ?? '').trim();
-  const normalizedLaunchRequestId = String(launchRequestId ?? '').trim();
-  return {
-    replyPath: resolvedReplyPath,
-    replyDir: resolvedReplyDir,
-    hqRoot: normalizedHqRoot
-      ? resolve(normalizedHqRoot)
-      : null,
-    launchRequestId: normalizedLaunchRequestId
-      ? validateReplyStorageKey(normalizedLaunchRequestId, 'launchRequestId')
-      : null,
-  };
-}
-
-function prepareHqReplyLandingPad({ hqRoot, launchRequestId }) {
-  const required = requireWorkerReplyContext({ hqRoot, launchRequestId });
-  const { replyDir, replyPath } = resolveHqReplyPath(required);
-  mkdirSync(replyDir, { recursive: true });
-  return { replyDir, replyPath };
-}
-
-function resolveReplyStorageKey(job) {
-  const persistedKey = typeof job?.replyStorageKey === 'string' && job.replyStorageKey.trim()
-    ? job.replyStorageKey.trim()
-    : typeof job?.launchRequestId === 'string' && job.launchRequestId.trim()
-      ? job.launchRequestId.trim()
-      : null;
-  if (persistedKey) {
-    return validateReplyStorageKey(persistedKey, 'replyStorageKey');
-  }
-  if (typeof job?.jobId === 'string' && job.jobId.trim()) {
-    return validateReplyStorageKey(job.jobId.trim(), 'jobId');
-  }
-  throw new Error('Cannot resolve remediation reply storage key: missing launchRequestId and jobId');
 }
 
 function resolveCodexAuthPath() {
@@ -3264,47 +3134,6 @@ async function auditWorkspaceForContamination({
   }
 }
 
-function collectOssReadinessEvidenceStrings(value, depth = 0) {
-  if (value === null || value === undefined || depth > 8) return [];
-  if (typeof value === 'string') return [value];
-  if (typeof value === 'number' || typeof value === 'boolean') return [String(value)];
-  if (Array.isArray(value)) {
-    return value.flatMap((entry) => collectOssReadinessEvidenceStrings(entry, depth + 1));
-  }
-  if (typeof value === 'object') {
-    return Object.entries(value).flatMap(([key, entry]) => [
-      String(key),
-      ...collectOssReadinessEvidenceStrings(entry, depth + 1),
-    ]);
-  }
-  return [];
-}
-
-function jobHasOssReadinessAuditFailure(job) {
-  const structuredHaystack = [
-    job?.ciFailures,
-    job?.statusCheckRollup,
-    job?.checkRuns,
-    job?.checks,
-    job?.workflowFailures,
-    job?.failingChecks,
-    job?.gateFailures,
-  ].flatMap((entry) => collectOssReadinessEvidenceStrings(entry));
-  if (structuredHaystack.some((entry) => String(entry || '').includes(OSS_READINESS_AUDIT_CHECK_NAME))) {
-    return true;
-  }
-
-  const failureLinePattern = new RegExp(
-    `\\b${OSS_READINESS_AUDIT_CHECK_NAME}\\b[^\\n]*(?:fail(?:ed|ure|ing)?|red|unsuccessful)|(?:fail(?:ed|ure|ing)?|red|unsuccessful)[^\\n]*\\b${OSS_READINESS_AUDIT_CHECK_NAME}\\b`,
-    'i'
-  );
-  return [
-    job?.ciFailureSummary,
-    job?.reviewSummary,
-    job?.reviewBody,
-  ].some((entry) => failureLinePattern.test(String(entry || '')));
-}
-
 async function resolveOssReadinessRemediationPushTarget({
   workspaceDir,
   branch,
@@ -3353,270 +3182,6 @@ async function resolveOssReadinessRemediationPushTarget({
     remote,
     refspec: `HEAD:refs/heads/${remoteBranch}`,
   };
-}
-
-function resolveOssReadinessApplyScript({ rootDir = ROOT, env = process.env } = {}) {
-  const override = typeof env?.[OSS_READINESS_APPLY_SCRIPT_ENV] === 'string'
-    ? env[OSS_READINESS_APPLY_SCRIPT_ENV].trim()
-    : '';
-  if (override) {
-    return isAbsolute(override) ? override : resolve(rootDir, override);
-  }
-
-  const hqRoot = typeof env?.HQ_ROOT === 'string' && env.HQ_ROOT.trim()
-    ? env.HQ_ROOT.trim()
-    : null;
-  const candidates = [
-    ...(hqRoot ? [join(hqRoot, 'agent-os', 'scripts', 'audit-oss-readiness-hardcodes.py')] : []),
-    ...OSS_READINESS_APPLY_SCRIPT_CANDIDATES.map((parts) => resolve(rootDir, ...parts)),
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) || candidates[0];
-}
-
-function ossReadinessNeedsOperatorMessage(result) {
-  const text = [
-    result?.stdout,
-    result?.stderr,
-    result?.error,
-  ].filter(Boolean).join('\n');
-  if (
-    /\bratchet\s+baseline\s+bump(?:\s+is)?\s+(?:required|needed)\b/i.test(text)
-    || /\bbaseline\s+bump(?:\s+is)?\s+(?:required|needed)\b/i.test(text)
-    || /\brequires?\s+(?:a\s+)?(?:ratchet\s+)?baseline\s+bump\b/i.test(text)
-  ) {
-    return 'oss-readiness --apply reported that a ratchet baseline bump is required; operator approval is required.';
-  }
-  return null;
-}
-
-async function collectOssReadinessWorkspaceDiff({ workspaceDir, execFileImpl = execFileAsync } = {}) {
-  const { stdout: status } = await execFileImpl(
-    'git',
-    ['-C', workspaceDir, 'status', '--porcelain', '-z', '--untracked-files=all'],
-    { maxBuffer: 2 * 1024 * 1024 }
-  );
-  const records = String(status || '').split('\0').filter(Boolean);
-  const changedFiles = [];
-  for (let i = 0; i < records.length; i += 1) {
-    const record = records[i];
-    if (record.length < 4) continue;
-    const statusCode = record.slice(0, 2);
-    const pathText = record.slice(3);
-    if (pathText) changedFiles.push(pathText);
-    if (statusCode[0] === 'R' || statusCode[1] === 'R' || statusCode[0] === 'C' || statusCode[1] === 'C') {
-      i += 1;
-    }
-  }
-  await execFileImpl('git', ['-C', workspaceDir, 'add', '--intent-to-add', '--all'], {
-    maxBuffer: 2 * 1024 * 1024,
-  });
-  const { stdout: diff } = await execFileImpl('git', ['-C', workspaceDir, 'diff', 'HEAD', '--'], {
-    maxBuffer: 20 * 1024 * 1024,
-  });
-  return {
-    changedFiles,
-    diff: String(diff || ''),
-  };
-}
-
-async function resetOssReadinessWorkspace({ workspaceDir, execFileImpl = execFileAsync } = {}) {
-  await execFileImpl('git', ['-C', workspaceDir, 'reset', '--hard'], {
-    maxBuffer: 2 * 1024 * 1024,
-  });
-  await execFileImpl('git', ['-C', workspaceDir, 'clean', '-fd'], {
-    maxBuffer: 2 * 1024 * 1024,
-  });
-}
-
-async function rollbackOssReadinessLocalCommit({
-  workspaceDir,
-  commitSha,
-  execFileImpl = execFileAsync,
-} = {}) {
-  const evidence = {
-    attempted: true,
-    ok: false,
-    commitSha: commitSha || null,
-  };
-  try {
-    const { stdout: headOut } = await execFileImpl('git', ['-C', workspaceDir, 'rev-parse', 'HEAD'], {
-      maxBuffer: 1 * 1024 * 1024,
-    });
-    const headSha = String(headOut || '').trim();
-    evidence.headBeforeRollback = headSha || null;
-    if (commitSha && headSha && headSha !== commitSha) {
-      return {
-        ...evidence,
-        attempted: false,
-        reason: 'head-mismatch',
-      };
-    }
-    await execFileImpl('git', ['-C', workspaceDir, 'reset', '--hard', 'HEAD~1'], {
-      maxBuffer: 2 * 1024 * 1024,
-    });
-    await execFileImpl('git', ['-C', workspaceDir, 'clean', '-fd'], {
-      maxBuffer: 2 * 1024 * 1024,
-    });
-    return {
-      ...evidence,
-      ok: true,
-    };
-  } catch (err) {
-    return {
-      ...evidence,
-      error: err?.message || String(err),
-    };
-  }
-}
-
-async function runOssReadinessAuditGate({ workspaceDir, scriptPath, execFileImpl = execFileAsync } = {}) {
-  try {
-    const result = await execFileImpl(scriptPath, [], {
-      cwd: workspaceDir,
-      maxBuffer: 20 * 1024 * 1024,
-      timeout: OSS_READINESS_SCRIPT_TIMEOUT_MS,
-    });
-    return {
-      ok: true,
-      stdout: String(result?.stdout || ''),
-      stderr: String(result?.stderr || ''),
-    };
-  } catch (err) {
-    return {
-      ok: false,
-      stdout: String(err?.stdout || ''),
-      stderr: String(err?.stderr || ''),
-      error: err?.message || String(err),
-    };
-  }
-}
-
-async function applyOssReadinessRemediation({
-  rootDir = ROOT,
-  job,
-  workspaceDir,
-  workerTrailerClass = REMEDIATION_WORKER_TRAILER_CLASS,
-  env = process.env,
-  execFileImpl = execFileAsync,
-  now = () => new Date().toISOString(),
-} = {}) {
-  if (!jobHasOssReadinessAuditFailure(job)) {
-    return { attempted: false, reason: 'no-oss-readiness-audit-failure' };
-  }
-  if (!workspaceDir || typeof workspaceDir !== 'string') {
-    throw new Error('workspaceDir is required for oss-readiness --apply remediation');
-  }
-
-  const scriptPath = resolveOssReadinessApplyScript({ rootDir, env });
-  const startedAt = now();
-  let applyResult;
-  try {
-    try {
-      applyResult = await execFileImpl(scriptPath, ['--apply'], {
-        cwd: workspaceDir,
-        maxBuffer: 20 * 1024 * 1024,
-        timeout: OSS_READINESS_SCRIPT_TIMEOUT_MS,
-      });
-    } catch (err) {
-      const failed = {
-        attempted: true,
-        ok: false,
-        scriptPath,
-        startedAt,
-        finishedAt: now(),
-        stdout: String(err?.stdout || ''),
-        stderr: String(err?.stderr || ''),
-        error: err?.message || String(err),
-      };
-      const needsOperator = ossReadinessNeedsOperatorMessage(failed);
-      const out = new Error(needsOperator || `oss-readiness --apply failed: ${failed.error}`);
-      out.code = needsOperator ? 'oss-readiness-baseline-operator-required' : 'oss-readiness-apply-failed';
-      out.isOssReadinessApplyError = true;
-      out.ossReadinessApply = { ...failed, needsOperatorApproval: Boolean(needsOperator) };
-      throw out;
-    }
-
-    const diff = await collectOssReadinessWorkspaceDiff({ workspaceDir, execFileImpl });
-    if (diff.changedFiles.includes(OSS_READINESS_BASELINE_PATH)) {
-      const out = new Error('oss-readiness --apply attempted to modify scripts/oss-readiness-category-baseline.json; operator approval is required for ratchet baseline changes.');
-      out.code = 'oss-readiness-baseline-modified';
-      out.isOssReadinessApplyError = true;
-      out.ossReadinessApply = {
-        attempted: true,
-        ok: false,
-        scriptPath,
-        startedAt,
-        finishedAt: now(),
-        stdout: String(applyResult?.stdout || ''),
-        stderr: String(applyResult?.stderr || ''),
-        changedFiles: diff.changedFiles,
-        diff: diff.diff,
-        needsOperatorApproval: true,
-      };
-      throw out;
-    }
-
-    const gate = await runOssReadinessAuditGate({ workspaceDir, scriptPath, execFileImpl });
-    const evidence = {
-      attempted: true,
-      ok: gate.ok,
-      scriptPath,
-      startedAt,
-      finishedAt: now(),
-      stdout: String(applyResult?.stdout || ''),
-      stderr: String(applyResult?.stderr || ''),
-      changedFiles: diff.changedFiles,
-      diff: diff.diff,
-      gate,
-    };
-    if (!gate.ok) {
-      const needsOperator = ossReadinessNeedsOperatorMessage(gate);
-      const out = new Error(needsOperator || 'oss-readiness --apply completed but oss-readiness-audit still fails.');
-      out.code = needsOperator ? 'oss-readiness-baseline-operator-required' : 'oss-readiness-apply-unresolved';
-      out.isOssReadinessApplyError = true;
-      out.ossReadinessApply = { ...evidence, needsOperatorApproval: Boolean(needsOperator) };
-      throw out;
-    }
-
-    if (diff.changedFiles.length > 0) {
-      await execFileImpl('git', ['-C', workspaceDir, 'add', '--all'], {
-        maxBuffer: 2 * 1024 * 1024,
-      });
-      await execFileImpl('git', ['-C', workspaceDir, 'commit', '-m', 'Apply oss-readiness remediation'], {
-        maxBuffer: 10 * 1024 * 1024,
-        env: {
-          ...env,
-          WORKER_CLASS: workerTrailerClass,
-          WORKER_JOB_ID: job?.jobId || '',
-          WORKER_RUN_AT: now(),
-        },
-      });
-      const { stdout: commitSha } = await execFileImpl('git', ['-C', workspaceDir, 'rev-parse', 'HEAD'], {
-        maxBuffer: 1 * 1024 * 1024,
-      });
-      evidence.commitSha = String(commitSha || '').trim() || null;
-    } else {
-      evidence.commitSha = null;
-    }
-
-    return evidence;
-  } catch (err) {
-    try {
-      await resetOssReadinessWorkspace({ workspaceDir, execFileImpl });
-      err.ossReadinessWorkspaceReset = true;
-      if (err.ossReadinessApply && typeof err.ossReadinessApply === 'object') {
-        err.ossReadinessApply.ossReadinessWorkspaceReset = true;
-      }
-    } catch (resetErr) {
-      err.ossReadinessWorkspaceReset = false;
-      err.ossReadinessWorkspaceResetError = resetErr?.message || String(resetErr);
-      if (err.ossReadinessApply && typeof err.ossReadinessApply === 'object') {
-        err.ossReadinessApply.ossReadinessWorkspaceReset = false;
-        err.ossReadinessApply.ossReadinessWorkspaceResetError = err.ossReadinessWorkspaceResetError;
-      }
-    }
-    throw err;
-  }
 }
 
 async function pushOssReadinessRemediationCommit({
@@ -4110,29 +3675,6 @@ function parseIsoTime(value) {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-function resolveJobRelativePath(rootDir, relativePath, { label, allowMissing = true } = {}) {
-  if (!relativePath) {
-    return null;
-  }
-
-  const value = String(relativePath);
-  if (isAbsolute(value)) {
-    throw new Error(`Invalid ${label}: absolute paths are not allowed`);
-  }
-
-  const absolutePath = resolve(rootDir, value);
-  const relativeToRoot = relative(rootDir, absolutePath);
-  if (relativeToRoot.startsWith('..') || relativeToRoot === '') {
-    throw new Error(`Invalid ${label}: path escapes follow-up job root`);
-  }
-
-  if (!allowMissing && !existsSync(absolutePath)) {
-    throw new Error(`Invalid ${label}: path does not exist`);
-  }
-
-  return absolutePath;
-}
-
 function resolveWorkerStoredPath(rootDir, storedPath, {
   label,
   allowMissing = true,
@@ -4183,79 +3725,6 @@ function resolveStoredWorkspaceRoot(rootDir, storedPath, {
     throw new Error('Invalid workspaceRoot: path does not exist');
   }
   return absolutePath;
-}
-
-function resolveHqReplyArtifactPath(replyPath, { hqRoot, allowMissing = true } = {}) {
-  if (!replyPath) {
-    return null;
-  }
-
-  const value = String(replyPath);
-  if (!isAbsolute(value)) {
-    throw new Error('Invalid replyPath: HQ remediation reply paths must be absolute');
-  }
-
-  const absolutePath = resolve(value);
-  const hqReplyRoot = join(resolve(hqRoot), 'dispatch', 'remediation-replies');
-  const relativeToReplyRoot = relative(hqReplyRoot, absolutePath);
-  if (
-    relativeToReplyRoot.startsWith('..')
-    || relativeToReplyRoot === ''
-    || isAbsolute(relativeToReplyRoot)
-  ) {
-    throw new Error('Invalid replyPath: path escapes HQ remediation reply root');
-  }
-
-  if (!allowMissing && !existsSync(absolutePath)) {
-    throw new Error('Invalid replyPath: path does not exist');
-  }
-
-  const replyDir = dirname(absolutePath);
-  if (existsSync(replyDir) && lstatSync(replyDir).isSymbolicLink()) {
-    throw new Error('Invalid replyPath: symbolic links are not allowed for reply directories');
-  }
-  if (existsSync(absolutePath) && lstatSync(absolutePath).isSymbolicLink()) {
-    throw new Error('Invalid replyPath: symbolic links are not allowed');
-  }
-
-  const realReplyRoot = resolveRealPath(hqReplyRoot);
-  const realReplyPath = resolveRealPath(absolutePath);
-  const realRelativeToReplyRoot = relative(realReplyRoot, realReplyPath);
-  if (
-    realRelativeToReplyRoot.startsWith('..')
-    || realRelativeToReplyRoot === ''
-    || isAbsolute(realRelativeToReplyRoot)
-  ) {
-    throw new Error('Invalid replyPath: resolved path escapes HQ remediation reply root');
-  }
-
-  return absolutePath;
-}
-
-// Resolve a path to its on-disk real path so symlinks cannot be used to
-// escape the workspace. When the leaf file is missing, we still walk up
-// to the longest existing ancestor and realpath that, then re-attach
-// the missing tail — that way a symlinked workspace or symlinked
-// .adversarial-follow-up/ is still caught even before the worker has
-// written its artifact.
-function resolveRealPath(candidate) {
-  if (existsSync(candidate)) {
-    return realpathSync.native?.(candidate) ?? realpathSync(candidate);
-  }
-
-  const tail = [];
-  let current = candidate;
-  while (!existsSync(current)) {
-    const parent = dirname(current);
-    if (parent === current) {
-      return candidate;
-    }
-    tail.unshift(basename(current));
-    current = parent;
-  }
-
-  const realParent = realpathSync.native?.(current) ?? realpathSync(current);
-  return join(realParent, ...tail);
 }
 
 async function ensureWorkspaceArtifactExclude(workspaceDir, {
@@ -4388,47 +3857,6 @@ function buildRereviewResult({ requested, reason, outcome = null }) {
         }
       : null,
   };
-}
-
-function readWorkerFinalMessage(outputPath) {
-  if (!outputPath || !existsSync(outputPath)) {
-    return { exists: false, text: '', bytes: 0 };
-  }
-
-  const text = readFileSync(outputPath, 'utf8');
-  return {
-    exists: true,
-    text,
-    bytes: Buffer.byteLength(text, 'utf8'),
-  };
-}
-
-function summarizeWorkerFinalMessage(text, limit = 400) {
-  // Worker output is untrusted; redactSensitiveText masks tokens / Bearer
-  // headers / private keys / labelled secrets the worker may have echoed
-  // from logs or environment. Whitespace is collapsed so a one-line
-  // preview fits in a digest field even if the worker dumped multi-line
-        // output. Centralized in the GitHub PR comments redaction adapter so PR comments and final-
-  // message previews share the same masking pipeline.
-  const collapsed = String(text ?? '').trim().replace(/\s+/g, ' ');
-  if (!collapsed) {
-    return '';
-  }
-  const redacted = redactSensitiveText(collapsed);
-  if (redacted.length <= limit) {
-    return redacted;
-  }
-  return `${redacted.slice(0, limit - 1)}…`;
-}
-
-function digestWorkerFinalMessage(text) {
-  const buffer = Buffer.from(String(text ?? ''), 'utf8');
-  const hash = createHash('sha256');
-  hash.update(buffer.subarray(0, MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES));
-  if (buffer.length > MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES) {
-    hash.update(Buffer.from(String(buffer.length), 'utf8'));
-  }
-  return hash.digest('hex');
 }
 
 function assessWorkerLiveness(job, { now = () => new Date().toISOString(), isWorkerRunning = isWorkerProcessRunning } = {}) {

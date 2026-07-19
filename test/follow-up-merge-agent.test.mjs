@@ -6628,6 +6628,35 @@ test('cancelMergeAgentDispatchOnMerge keeps cleanup retryable when the status pr
   assert.equal(result.labelRemoved, false);
 });
 
+test('cancelMergeAgentDispatchOnMerge keeps legacy records without hqRoot retryable', async () => {
+  const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, makeJob({ prNumber: 664 }), {
+    dispatchedAt: '2026-07-19T05:00:00.000Z',
+    prompt: 'p',
+    launchRequestId: 'lrq_legacy_without_hq_root',
+  });
+
+  let hqCallCount = 0;
+  const result = await cancelMergeAgentDispatchOnMerge({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 664,
+    hqPath: '/usr/local/bin/hq',
+    ghExecFileImpl: async () => ({ stdout: '', stderr: '' }),
+    hqExecFileImpl: async () => {
+      hqCallCount += 1;
+      throw new Error('unreadable cancel failure');
+    },
+    now: '2026-07-19T05:01:00.000Z',
+  });
+
+  assert.equal(hqCallCount, 1, 'no owner means the status probe is skipped');
+  assert.equal(result.cleanupComplete, false);
+  assert.equal(result.retryable, true);
+  assert.equal(result.labelRemoved, false);
+});
+
 test('cancelMergeAgentDispatchOnMerge removes label even when no dispatch record exists', async () => {
   // Edge case: dispatch record dir wiped, OR label applied by some
   // other tool. We still clean up the label so the watcher stops

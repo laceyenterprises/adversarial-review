@@ -3605,7 +3605,7 @@ async function cancelMergeAgentDispatchOnMerge({
   ) {
     const probeEnv = { ...process.env, ...env };
     const probeOwner = String(latest.hqOwnerUser || '').trim()
-      || resolveHqOwner(latest.hqRoot)?.ownerUser
+      || (latest.hqRoot ? resolveHqOwner(latest.hqRoot)?.ownerUser : null)
       || null;
     if (probeOwner) {
       try {
@@ -3768,11 +3768,24 @@ async function dispatchMergeAgentForPR({
   // cancel-on-merged cleanup path. Teardown of any already-in-flight dispatch is
   // owned by the watcher's merged/closed handler (cancelMergeAgentDispatchOnMerge).
   if (merged === true || (typeof prState === 'string' && prState.toLowerCase() !== 'open')) {
+    const triggerLabelRemovals = [];
+    for (const trigger of [MERGE_AGENT_REQUESTED_LABEL, OPERATOR_APPROVED_LABEL]) {
+      const labelRemoval = await removeConsumedTriggerLabel({
+        repo,
+        prNumber,
+        labels,
+        trigger,
+        ghExecFileImpl,
+        now,
+      });
+      if (labelRemoval.attempted) triggerLabelRemovals.push(labelRemoval);
+    }
     mergeAgentLifecycleLog(logger, 'merge_agent.dispatch_skipped_pr_not_open', {
       repo,
       prNumber,
       prState,
       merged,
+      triggerLabelRemovals,
     });
     return {
       decision: 'skip-pr-not-open',
@@ -3783,6 +3796,7 @@ async function dispatchMergeAgentForPR({
       prState,
       merged,
       stuckDetail: null,
+      triggerLabelRemovals,
     };
   }
   const runtimeEnv = { ...process.env, ...env };

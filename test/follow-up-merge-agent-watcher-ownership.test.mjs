@@ -104,12 +104,13 @@ test('does NOT dispatch a merge agent for an already merged/closed PR (skip-pr-n
   const hqRoot = makeHqRoot('airlock');
   const dispatchCalls = [];
   const statusCalls = [];
+  const ghCalls = [];
 
   const result = await dispatchMergeAgentForPR({
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
     prepareOriginalWorkerImpl: PROCEED_ORIGINAL_WORKER,
     rootDir,
-    ...makeJob({ labels: [{ name: 'merge-agent-dispatched' }] }),
+    ...makeJob({ labels: [{ name: 'merge-agent-dispatched' }, { name: 'merge-agent-requested' }] }),
     merged: true,
     prState: 'closed',
     env: baseEnv(hqRoot),
@@ -121,6 +122,10 @@ test('does NOT dispatch a merge agent for an already merged/closed PR (skip-pr-n
       dispatchCalls.push(args);
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
     },
+    ghExecFileImpl: async (cmd, args) => {
+      ghCalls.push([cmd, ...args]);
+      return { stdout: '', stderr: '' };
+    },
     now: '2026-07-19T05:00:00.000Z',
   });
 
@@ -128,6 +133,11 @@ test('does NOT dispatch a merge agent for an already merged/closed PR (skip-pr-n
   assert.equal(result.dispatched, false);
   assert.equal(dispatchCalls.length, 0, 'no hq dispatch for a merged/closed PR');
   assert.equal(statusCalls.length, 0, 'the guard returns before any hq probe');
+  assert.equal(result.triggerLabelRemovals.length, 1);
+  assert.ok(
+    ghCalls.some((call) => call.includes('--remove-label') && call.includes('merge-agent-requested')),
+    'the closed-PR guard must consume the pending trigger label'
+  );
 });
 
 test('recovery-first within grace: does NOT re-dispatch or escalate while the handoff window is open', async () => {

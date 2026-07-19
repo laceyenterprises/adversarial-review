@@ -6602,27 +6602,37 @@ test('cancelMergeAgentDispatchOnMerge keeps cleanup retryable when the status pr
   recordMergeAgentDispatch(rootDir, makeJob({ prNumber: 663 }), {
     dispatchedAt: '2026-07-19T05:00:00.000Z',
     prompt: 'p',
-    launchRequestId: 'lrq_transient_probe',
+    launchRequestId: 'lrq_22222222-2222-4222-8222-222222222222',
     hqRoot: '/cross-account/hq',
     hqOwnerUser: 'cross-account-owner',
   });
 
-  let hqCallCount = 0;
+  const hqCalls = [];
   const result = await cancelMergeAgentDispatchOnMerge({
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 663,
     hqPath: '/usr/local/bin/hq',
     ghExecFileImpl: async () => ({ stdout: '', stderr: '' }),
-    hqExecFileImpl: async () => {
-      hqCallCount += 1;
-      throw new Error(hqCallCount === 1 ? 'unreadable cancel failure' : 'Input/output error');
+    hqExecFileImpl: async (_bin, args) => {
+      hqCalls.push(args.join(' '));
+      if (args[1] === 'cancel') {
+        throw new Error('unreadable cancel failure');
+      }
+      if (args[1] === 'status') {
+        throw new Error('Input/output error');
+      }
+      throw new Error('unexpected hq call: ' + args.join(' '));
     },
     now: '2026-07-19T05:01:00.000Z',
   });
 
   assert.equal(result.probeConfirmedTerminal, false);
   assert.match(result.probeError, /Input\/output error/);
+  assert.deepEqual(hqCalls, [
+    'dispatch cancel lrq_22222222-2222-4222-8222-222222222222',
+    'dispatch status lrq_22222222-2222-4222-8222-222222222222 --as-owner cross-account-owner',
+  ]);
   assert.equal(result.cleanupComplete, false);
   assert.equal(result.retryable, true);
   assert.equal(result.labelRemoved, false);

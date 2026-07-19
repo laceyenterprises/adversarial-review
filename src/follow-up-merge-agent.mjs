@@ -1591,6 +1591,7 @@ async function probeDispatchStatusViaHq({
   execFileImpl = execFileAsync,
   env = {},
   logger = console,
+  throwOnError = false,
 } = {}) {
   if (!hqPath || !_isValidLrqId(lrq)) return null;
   // --as-owner makes the watcher's cross-account dispatch status visible (see
@@ -1618,6 +1619,9 @@ async function probeDispatchStatusViaHq({
       logger.warn(
         '[follow-up-merge-agent] refusing to classify dispatch status as not-found without a proven HQ owner; duplicate-dispatch protection stays active'
       );
+    }
+    if (throwOnError) {
+      throw err;
     }
     return null;
   }
@@ -3616,6 +3620,7 @@ async function cancelMergeAgentDispatchOnMerge({
           execFileImpl: hqExecFileImpl,
           env: probeEnv,
           logger: console,
+          throwOnError: true,
         });
         const probedStatus = String(probed?.status || '').trim().toLowerCase();
         if (probedStatus) {

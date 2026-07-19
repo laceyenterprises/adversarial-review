@@ -6530,6 +6530,57 @@ test('cancelMergeAgentDispatchOnMerge keeps the label when cancel fails transien
   assert.equal(result.retryable, true);
 });
 
+test('cancelMergeAgentDispatchOnMerge converges when an unreadable cancel failure is proven terminal by the status probe', async () => {
+  // 2026-07-19 regression: on already-merged PRs #630/#3910/#3854/#3803/#3793 the
+  // in-flight LRQ was already terminal, but `hq dispatch cancel` returned a bare
+  // "Command failed" with no structured reason the classifier could read, so the
+  // cleanup logged retryable=true and the watcher replayed it ~30x/PR forever.
+  // The fix probes the LRQ's real status after such a cancel and converges when
+  // the probe proves it terminal.
+  const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, makeJob({ prNumber: 662 }), {
+    dispatchedAt: '2026-07-19T05:00:00.000Z',
+    prompt: 'p',
+    dispatchId: 'disp_probe',
+    launchRequestId: 'lrq_b443972d-7bad-4ed0-9d7d-fc1092278f66',
+    trigger: null,
+  });
+
+  let ghCalled = false;
+  const hqCalls = [];
+  const result = await cancelMergeAgentDispatchOnMerge({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 662,
+    hqPath: '/usr/local/bin/hq',
+    ghExecFileImpl: async () => { ghCalled = true; return { stdout: '', stderr: '' }; },
+    hqExecFileImpl: async (_bin, args) => {
+      hqCalls.push(args.join(' '));
+      if (args[1] === 'cancel') {
+        const err = new Error('Command failed: hq dispatch cancel lrq_b443972d-7bad-4ed0-9d7d-fc1092278f66');
+        err.stdout = '';
+        err.stderr = '';
+        throw err;
+      }
+      if (args[1] === 'status') {
+        return { stdout: JSON.stringify({ status: 'failed' }), stderr: '' };
+      }
+      throw new Error('unexpected hq call: ' + args.join(' '));
+    },
+    now: '2026-07-19T05:01:00.000Z',
+  });
+
+  assert.equal(result.cancelled, false);
+  assert.equal(result.probeConfirmedTerminal, true, 'probe must confirm the LRQ is terminal');
+  assert.equal(result.probedDispatchStatus, 'failed');
+  assert.equal(result.cleanupComplete, true, 'must converge once the probe proves the LRQ terminal');
+  assert.equal(result.retryable, false, 'must NOT keep retrying a proven-terminal LRQ');
+  assert.equal(ghCalled, true, 'label removal must run once the cleanup converges');
+  assert.equal(result.labelRemoved, true);
+  assert.ok(hqCalls.some((c) => c.startsWith('dispatch status')), 'must probe the LRQ status after an unreadable cancel');
+});
+
 test('cancelMergeAgentDispatchOnMerge removes label even when no dispatch record exists', async () => {
   // Edge case: dispatch record dir wiped, OR label applied by some
   // other tool. We still clean up the label so the watcher stops

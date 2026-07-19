@@ -712,6 +712,24 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   logger,
   maybeDispatchAmaClosureForImpl = maybeDispatchAmaClosureFor,
 }) {
+  // BUG-1 dispatch-time terminal guard. `candidate` is the live PR read for
+  // this tick (fetchMergeAgentCandidate). An already-MERGED PR needs no
+  // AMA/merge-agent action. Without this, it flows into maybeDispatchAmaClosureFor
+  // → the daemon clean-merge attempt fails closed (cannot merge an already-merged
+  // PR) → `skipMergeAgent` → outcome `ama-pending`, so the watcher logs
+  // "AMA hammer route retained ownership ... daemon-failed-closed" every tick
+  // forever (observed on merged #639/#640/#642/#643/#3945). Drop ownership.
+  //
+  // MERGED-ONLY, deliberately not `closed`: this mirrors the SEV1 review-claim
+  // guard's hard-won precedent (#643/#3946) — a merged PR is permanently
+  // terminal, but a `closed` PR can be REOPENED, so treating closed as terminal
+  // risks dropping a PR that is about to come back. Merged is the observed
+  // retention case; a closed PR stays on its existing eligibility path.
+  const liveMerged =
+    candidate?.merged === true || String(candidate?.prState || '').toLowerCase() === 'merged';
+  if (liveMerged) {
+    return { outcome: 'pr-terminal', terminalReason: 'merged' };
+  }
   const amaClosureResult = await maybeDispatchAmaClosureForImpl({
     rootDir,
     reviewStateRow,

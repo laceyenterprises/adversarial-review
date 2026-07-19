@@ -115,6 +115,15 @@ export async function maybeDispatchReviewerTimeoutExhaustedMergeAgent({
       currentRevisionRef,
       logger,
     });
+    if (coexistenceDecision.outcome === 'pr-terminal') {
+      // BUG-1: the live candidate read shows the PR already landed/closed. No
+      // AMA/merge-agent action is possible — drop ownership rather than retain.
+      logger.log(
+        `[watcher] reviewer-timeout exhaustion skipped for ${repoPath}#${prNumber}: PR already ` +
+        `${coexistenceDecision.terminalReason} — dropping ownership`
+      );
+      return { handled: true, dispatchJob, prTerminal: true };
+    }
     if (coexistenceDecision.outcome === 'ama-dispatched') {
       const { amaClosureResult } = coexistenceDecision;
       logger.log(

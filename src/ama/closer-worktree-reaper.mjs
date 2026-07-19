@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { existsSync, lstatSync, rmSync, statSync, promises as fsPromises } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { existsSync, rmSync, statSync, promises as fsPromises } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -252,35 +252,20 @@ function gitWorktreeRemoveIndicatesGone(detail) {
   return /(?:is not a working tree|does not exist)\s*$/i.test(String(detail || '').trim());
 }
 
-function pathIsStrictlyInside(parentPath, candidatePath) {
-  const parent = resolve(parentPath);
-  const candidate = resolve(candidatePath);
-  return candidate.startsWith(`${parent}${sep}`);
+function pathTextEquals(leftPath, rightPath) {
+  const left = resolve(leftPath);
+  const right = resolve(rightPath);
+  return process.platform === 'darwin' ? left.toLowerCase() === right.toLowerCase() : left === right;
 }
 
-function physicalRemovalRefusalReason(parentPath, candidatePath, lstatSyncImpl = lstatSync) {
-  const parent = resolve(parentPath);
-  const candidate = resolve(candidatePath);
-  if (!pathIsStrictlyInside(parent, candidate)) return 'outside-worker-dir';
+function physicalRemovalTargetForEntry({ hqRoot, entry }) {
+  if (!HAMMER_WORKER_RE.test(String(entry?.workerId || ''))) return { refusalReason: 'invalid-worker-id' };
 
-  let current = parent;
-  try {
-    const stat = lstatSyncImpl(current);
-    if (stat.isSymbolicLink()) return 'symlink-segment';
-  } catch (err) {
-    return `lstat:${err?.code || 'failed'}`;
+  const expectedWorkerDir = join(hqRoot, 'workers', entry.workerId);
+  if (!entry.workerDir || !pathTextEquals(entry.workerDir, expectedWorkerDir)) {
+    return { refusalReason: 'outside-worker-dir', target: expectedWorkerDir };
   }
-  for (const part of relative(parent, candidate).split(sep)) {
-    if (!part) continue;
-    current = join(current, part);
-    try {
-      const stat = lstatSyncImpl(current);
-      if (stat.isSymbolicLink()) return 'symlink-segment';
-    } catch (err) {
-      return `lstat:${err?.code || 'failed'}`;
-    }
-  }
-  return null;
+  return { refusalReason: null, target: expectedWorkerDir };
 }
 
 async function removeHammerWorktree({
@@ -323,17 +308,15 @@ async function removeHammerWorktree({
   }
 
   if (treeAlreadyGone) {
-    const stalePhysicalPath = entry.worktreePath || entry.path;
     let physicalRemovalSucceeded = true;
-    if (removePhysicalInvalidTree && stalePhysicalPath) {
-      const expectedWorkerDir = join(hqRoot, 'workers', entry.workerId);
-      const refusalReason = physicalRemovalRefusalReason(expectedWorkerDir, stalePhysicalPath);
+    if (removePhysicalInvalidTree) {
+      const { refusalReason, target } = physicalRemovalTargetForEntry({ hqRoot, entry });
       if (refusalReason) {
         physicalRemovalSucceeded = false;
-        errors.push(`worktree-rm-refused:${refusalReason}:${stalePhysicalPath}`);
+        errors.push(`worktree-rm-refused:${refusalReason}:${entry.worktreePath || entry.path || target}`);
       } else {
         try {
-          rmSyncImpl(stalePhysicalPath, { recursive: true, force: true });
+          rmSyncImpl(target, { recursive: true, force: true });
         } catch (err) {
           physicalRemovalSucceeded = false;
           errors.push(`worktree-rm:${String(err?.message || err)}`);

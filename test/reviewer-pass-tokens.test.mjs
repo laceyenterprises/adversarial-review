@@ -136,7 +136,12 @@ test('reviewer pass writer inserts running row, completes it, and unique key pre
   assert.equal(row.token_output, 4);
   assert.equal(row.token_cache_read, 3);
   assert.equal(row.token_cache_write, 2);
-  assert.equal(row.token_cost_usd, null);
+  // The ledger source carried counts but no dollar cost, so the write path now
+  // derives cost from the canonical pricing table. 'claude-sonnet' has no exact
+  // or prefix match, so it prices at the conservative-high fallback rate:
+  //   (10*5 + 4*25 + 3*0.5 + 2*6.25) / 1e6 = 164 / 1e6 = 0.000164
+  assert.equal(row.token_cost_usd, 0.000164);
+  assert.equal(JSON.parse(row.metadata_json).tokenCostSource, 'derived-pricing');
   assert.equal(row.token_source, 'session-ledger');
   assert.equal(row.reviewer_model, 'claude-sonnet');
 });

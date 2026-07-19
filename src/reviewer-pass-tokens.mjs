@@ -8,8 +8,28 @@ import {
   resolveSessionLedgerReadTarget,
 } from './session-ledger-read-adapter.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
+import { deriveReviewerTokenCost, loadReviewerPricingTable } from './reviewer-token-pricing.mjs';
 
 const PASS_KINDS = new Set(['first-pass', 'remediation', 'rereview', 'closer']);
+
+// Module-level lazily-loaded pricing table for cost-USD derivation. Loaded once
+// from process.env (ADVERSARIAL_REVIEW_MODEL_PRICING_FILE / AGENT_OS_MODEL_PRICING_FILE
+// / vendored fallback) and cached after a successful load. A null result
+// (missing/invalid file) degrades that write to count-only and is retried on the
+// next write. Tests inject a `pricingTable` override instead.
+let _reviewerPricingTableLoaded = false;
+let _reviewerPricingTable = null;
+function defaultReviewerPricingTable() {
+  if (!_reviewerPricingTableLoaded) {
+    const table = loadReviewerPricingTable({ env: process.env });
+    if (table) {
+      _reviewerPricingTable = table;
+      _reviewerPricingTableLoaded = true;
+    }
+    return table;
+  }
+  return _reviewerPricingTable;
+}
 const PASS_STATUSES = new Set(['running', 'completed', 'failed', 'cancelled']);
 const REVIEWER_USAGE_ARTIFACT_SCHEMA = 'adversarial-reviewer-token-usage/v1';
 
@@ -172,6 +192,10 @@ function completeReviewerPass(rootDir, {
   tokenUsage = null,
   tokenSource = null,
   metadata = {},
+  // Test/caller override for the pricing table used to derive cost-USD when the
+  // capture source carried token counts but no dollar cost. Left undefined in
+  // production so the module-level lazily-loaded table is used.
+  pricingTable,
 } = {}) {
   const key = passKey({ repo, prNumber, attemptNumber, passKind });
   const usage = normalizeTokenUsage(tokenUsage);
@@ -179,9 +203,43 @@ function completeReviewerPass(rootDir, {
   try {
     ensureReviewStateSchema(db);
     const existing = db.prepare(
-      `SELECT metadata_json FROM reviewer_passes
+      `SELECT metadata_json, reviewer_model, reviewer_class, token_input, token_output,
+              token_cache_read, token_cache_write, token_reasoning, token_tool_context,
+              token_total, token_cost_usd, token_source
+         FROM reviewer_passes
         WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
     ).get(key.repo, key.prNumber, key.attemptNumber, key.passKind);
+    const existingMeta = parseMetadataJson(existing?.metadata_json);
+    // Cost-USD provenance. An authoritative ledger cost (usage.costUSD present)
+    // is always recorded. When usage carries counts but no dollar cost, keep the
+    // token/cost bundle atomic: reprice previously-derived or empty costs, but do
+    // not mix lower-fidelity counts into rows with authoritative or legacy costs.
+    let derivedCost = null;
+    let tokenCostSource;
+    let tokenCostEstimated;
+    const shouldWriteTokenUsage = Boolean(usage) && (
+      usage.costUSD != null
+      || existing?.token_cost_usd == null
+      || existingMeta.tokenCostSource === 'derived-pricing'
+    );
+    if (shouldWriteTokenUsage) {
+      if (usage.costUSD != null) {
+        tokenCostSource = 'ledger-authoritative';
+        tokenCostEstimated = false;
+      } else {
+        const table = pricingTable !== undefined ? pricingTable : defaultReviewerPricingTable();
+        const derived = deriveReviewerTokenCost({
+          usage,
+          model: existing?.reviewer_model || existing?.reviewer_class,
+          pricingTable: table,
+        });
+        if (derived != null) {
+          derivedCost = derived.costUSD;
+          tokenCostSource = 'derived-pricing';
+          tokenCostEstimated = derived.estimated;
+        }
+      }
+    }
     const tokenMetadata = usage?.usageTag
       ? {
           tokenUsageTag: usage.usageTag,
@@ -191,39 +249,63 @@ function completeReviewerPass(rootDir, {
         }
       : {};
     const mergedMetadata = {
-      ...parseMetadataJson(existing?.metadata_json),
+      ...existingMeta,
       ...tokenMetadata,
+      ...(tokenCostSource ? { tokenCostSource } : {}),
+      ...(tokenCostEstimated !== undefined ? { tokenCostEstimated } : {}),
       ...metadata,
     };
+    if (shouldWriteTokenUsage) {
+      if (!usage.usageTag) {
+        delete mergedMetadata.tokenUsageTag;
+        delete mergedMetadata.tokenUsageGuardrail;
+      }
+      if (!tokenCostSource) {
+        delete mergedMetadata.tokenCostSource;
+        delete mergedMetadata.tokenCostEstimated;
+      }
+    }
+    const writeTokenUsage = shouldWriteTokenUsage ? 1 : 0;
+    const tokenCostUSD = usage?.costUSD ?? derivedCost ?? null;
+    const nextTokenSource = tokenSource || usage?.source || null;
     db.prepare(
       `UPDATE reviewer_passes
           SET ended_at = ?,
               status = ?,
               worker_run_id = COALESCE(?, worker_run_id),
-              token_input = COALESCE(?, token_input),
-              token_output = COALESCE(?, token_output),
-              token_cache_read = COALESCE(?, token_cache_read),
-              token_cache_write = COALESCE(?, token_cache_write),
-              token_reasoning = COALESCE(?, token_reasoning),
-              token_tool_context = COALESCE(?, token_tool_context),
-              token_total = COALESCE(?, token_total),
-              token_cost_usd = COALESCE(?, token_cost_usd),
-              token_source = COALESCE(?, token_source),
+              token_input = CASE WHEN ? THEN ? ELSE token_input END,
+              token_output = CASE WHEN ? THEN ? ELSE token_output END,
+              token_cache_read = CASE WHEN ? THEN ? ELSE token_cache_read END,
+              token_cache_write = CASE WHEN ? THEN ? ELSE token_cache_write END,
+              token_reasoning = CASE WHEN ? THEN ? ELSE token_reasoning END,
+              token_tool_context = CASE WHEN ? THEN ? ELSE token_tool_context END,
+              token_total = CASE WHEN ? THEN ? ELSE token_total END,
+              token_cost_usd = CASE WHEN ? THEN ? ELSE token_cost_usd END,
+              token_source = CASE WHEN ? THEN ? ELSE token_source END,
               metadata_json = ?
         WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
     ).run(
       endedAt,
       normalizePassStatus(status),
       workerRunId || null,
+      writeTokenUsage,
       usage?.input ?? null,
+      writeTokenUsage,
       usage?.output ?? null,
+      writeTokenUsage,
       usage?.cacheRead ?? null,
+      writeTokenUsage,
       usage?.cacheWrite ?? null,
+      writeTokenUsage,
       usage?.reasoning ?? null,
+      writeTokenUsage,
       usage?.toolContext ?? null,
+      writeTokenUsage,
       usage?.total ?? null,
-      usage?.costUSD ?? null,
-      tokenSource || usage?.source || null,
+      writeTokenUsage,
+      tokenCostUSD,
+      writeTokenUsage,
+      nextTokenSource,
       metadataJson(mergedMetadata),
       key.repo,
       key.prNumber,

@@ -192,7 +192,8 @@ const MONOLITH_CEILINGS = Object.freeze({
   // 5820 -> 5582: ARC-19 wave4 extract HQ dispatch status/cancel helpers to src/remediation-hq-dispatch.mjs.
   // 5582 -> 5426: ARC-19 wave4 extract worker-process liveness helpers to src/remediation-worker-liveness.mjs.
   // 5426 -> 5289: ARC-19 wave5 extract remediation orchestration-mode & dispatch-path resolution to src/remediation-dispatch-mode.mjs.
-  'follow-up-remediation.mjs': 5289,
+  // 5289 -> 5167: ARC-19 wave5 extract remediation worker prompt builder to src/remediation-prompt-builder.mjs.
+  'follow-up-remediation.mjs': 5167,
   // 5485 -> 4262: ARC-19 wave3 extract fast-merge processing/orchestration to src/fast-merge-processing.mjs.
   // 4262 -> 3742: ARC-19 wave3 extract merge-agent dispatch-decision policy to src/merge-agent-dispatch-decision.mjs.
   // 3742 -> 3660: ARC-19 wave4 extract review-state classification to src/merge-agent-review-classification.mjs.

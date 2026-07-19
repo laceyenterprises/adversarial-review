@@ -211,7 +211,17 @@ export function evaluateHammerRetryCap(ledger, {
   const lifetimeAlreadySuppressed = Boolean(ledger?.lifetimeSuppressed);
   const lifetimeCapExhausted = lifetimeAlreadySuppressed
     || nextLifetimeCount > lifetimeCeiling;
-  const capExhausted = alreadySuppressed || lifetimeCapExhausted;
+  // Three independent stop conditions. The MIDDLE term — the per-series cap of
+  // HAMMER_RETRY_CAP_TOTAL_DISPATCHES (2, i.e. 1 hammer + 1 retry per reviewed
+  // head) — is load-bearing: without it a PR that never converges on a stable
+  // reviewed head (red CI / conflict / gate never green, so no fresh review
+  // posts to advance the jobKey) is re-hammered up to the lifetime ceiling of 6
+  // instead of 2 — a 3x over-dispatch and quota burn. It was dropped in #532
+  // (3514e00), which reintroduced the runaway; do NOT collapse this back to
+  // `alreadySuppressed || lifetimeCapExhausted`.
+  const capExhausted = alreadySuppressed
+    || nextAttemptCount > HAMMER_RETRY_CAP_TOTAL_DISPATCHES
+    || lifetimeCapExhausted;
   return {
     jobKeyChanged,
     priorAttemptCount,

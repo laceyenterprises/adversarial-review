@@ -56,6 +56,40 @@ test('recordApiCall writes one JSONL line with all required fields', () => {
   }
 });
 
+test('accepts the github-api GraphQL telemetry categories (pr_commits, pr_mergeability)', () => {
+  // Regression: github-api.mjs emits `pr_commits` (commit-subject GraphQL query)
+  // and `pr_mergeability` (mergeability adapter read), but both were missing from
+  // CATEGORY_ORDER, so the real recorder threw "Unsupported API telemetry
+  // category" in production — non-fatal, but every such telemetry row was
+  // silently dropped. The github-api tests mock the recorder, so only a
+  // real-recorder assertion catches this.
+  const rootDir = makeRootDir();
+  try {
+    const recorder = createApiCallRecorder({
+      rootDir,
+      nowMs: () => Date.parse('2026-07-19T04:45:00.000Z'),
+      timestampNow: () => '2026-07-19T04:45:00.000Z',
+    });
+    for (const category of ['pr_commits', 'pr_mergeability']) {
+      // Before the fix this call threw "Unsupported API telemetry category".
+      const filePath = recorder.recordApiCall({
+        category,
+        repo: 'laceyenterprises/adversarial-review',
+        prNumber: 637,
+        status: 200,
+        durationMs: 42,
+      });
+      recorder.flush();
+      assert.ok(
+        readJsonl(filePath).some((row) => row.category === category),
+        `expected a persisted ${category} telemetry row`,
+      );
+    }
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('daily rotation writes to a new UTC file after midnight', () => {
   const rootDir = makeRootDir();
   try {

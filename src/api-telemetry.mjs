@@ -25,6 +25,8 @@ const CATEGORY_ORDER = Object.freeze([
   'pr_view',
   'pr_review_context',
   'graphql_pr_rollup',
+  'pr_commits',
+  'pr_mergeability',
   'pr_head_state',
   'comments_list',
   'checks_list',

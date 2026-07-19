@@ -1100,6 +1100,15 @@ test('pickMergeAgentDispatch skips closed or merged PRs', () => {
   );
 });
 
+test('dispatchMergeAgentForPR accepts an uppercase OPEN state', async () => {
+  const result = await dispatchMergeAgentForPR({
+    ...makeJob({ prState: 'OPEN' }),
+    rootDir: mkdtempSync(path.join(tmpdir(), 'adversarial-review-')),
+    agentOsDetectImpl: () => ({ present: false, source: null }),
+  });
+  assert.notEqual(result.decision, 'skip-pr-not-open');
+});
+
 test('pickMergeAgentDispatch refuses dispatch while remediation is still active', () => {
   // A pending follow-up job on a request-changes verdict is genuine active
   // remediation — a worker will claim it and remediate. Block convergence.
@@ -6545,6 +6554,8 @@ test('cancelMergeAgentDispatchOnMerge converges when an unreadable cancel failur
     dispatchId: 'disp_probe',
     launchRequestId: 'lrq_b443972d-7bad-4ed0-9d7d-fc1092278f66',
     trigger: null,
+    hqRoot: '/cross-account/hq',
+    hqOwnerUser: 'cross-account-owner',
   });
 
   let ghCalled = false;
@@ -6579,6 +6590,42 @@ test('cancelMergeAgentDispatchOnMerge converges when an unreadable cancel failur
   assert.equal(ghCalled, true, 'label removal must run once the cleanup converges');
   assert.equal(result.labelRemoved, true);
   assert.ok(hqCalls.some((c) => c.startsWith('dispatch status')), 'must probe the LRQ status after an unreadable cancel');
+  assert.ok(
+    hqCalls.some((c) => c === 'dispatch status lrq_b443972d-7bad-4ed0-9d7d-fc1092278f66 --as-owner cross-account-owner'),
+    'must probe through the authoritative owner persisted with the dispatch'
+  );
+});
+
+test('cancelMergeAgentDispatchOnMerge keeps cleanup retryable when the status probe throws', async () => {
+  const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, makeJob({ prNumber: 663 }), {
+    dispatchedAt: '2026-07-19T05:00:00.000Z',
+    prompt: 'p',
+    launchRequestId: 'lrq_transient_probe',
+    hqRoot: '/cross-account/hq',
+    hqOwnerUser: 'cross-account-owner',
+  });
+
+  let hqCallCount = 0;
+  const result = await cancelMergeAgentDispatchOnMerge({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 663,
+    hqPath: '/usr/local/bin/hq',
+    ghExecFileImpl: async () => ({ stdout: '', stderr: '' }),
+    hqExecFileImpl: async () => {
+      hqCallCount += 1;
+      throw new Error(hqCallCount === 1 ? 'unreadable cancel failure' : 'Input/output error');
+    },
+    now: '2026-07-19T05:01:00.000Z',
+  });
+
+  assert.equal(result.probeConfirmedTerminal, false);
+  assert.match(result.probeError, /Input\/output error/);
+  assert.equal(result.cleanupComplete, false);
+  assert.equal(result.retryable, true);
+  assert.equal(result.labelRemoved, false);
 });
 
 test('cancelMergeAgentDispatchOnMerge removes label even when no dispatch record exists', async () => {

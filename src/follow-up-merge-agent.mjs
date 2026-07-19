@@ -2788,6 +2788,8 @@ function recordMergeAgentDispatch(rootDir, job, {
   priorityFlagSupported = true,
   labelRemoval = null,
   watcherReDispatchCount = 0,
+  hqRoot = null,
+  hqOwnerUser = null,
 } = {}) {
   const dir = mergeAgentDispatchDir(rootDir);
   mkdirSync(dir, { recursive: true });
@@ -2815,6 +2817,8 @@ function recordMergeAgentDispatch(rootDir, job, {
     phantomHandoffCommentDelivery: null,
     dispatchId,
     launchRequestId,
+    hqRoot,
+    hqOwnerUser,
     prompt,
   };
   writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`);
@@ -3600,20 +3604,31 @@ async function cancelMergeAgentDispatchOnMerge({
     })
   ) {
     const probeEnv = { ...process.env, ...env };
-    const probeOwner = resolveHqOwner(resolveHqRoot(probeEnv))?.ownerUser || null;
-    const probed = await probeDispatchStatusViaHq({
-      hqPath,
-      lrq: result.launchRequestId,
-      asOwner: probeOwner,
-      execFileImpl: hqExecFileImpl,
-      env: probeEnv,
-      logger: console,
-    });
-    const probedStatus = String(probed?.status || '').trim().toLowerCase();
-    if (probedStatus) {
-      result.probedDispatchStatus = probedStatus;
-      if (MERGE_AGENT_CANCEL_TERMINAL_DISPATCH_STATUSES.has(probedStatus)) {
-        result.probeConfirmedTerminal = true;
+    const probeOwner = String(latest.hqOwnerUser || '').trim()
+      || resolveHqOwner(latest.hqRoot)?.ownerUser
+      || null;
+    if (probeOwner) {
+      try {
+        const probed = await probeDispatchStatusViaHq({
+          hqPath,
+          lrq: result.launchRequestId,
+          asOwner: probeOwner,
+          execFileImpl: hqExecFileImpl,
+          env: probeEnv,
+          logger: console,
+        });
+        const probedStatus = String(probed?.status || '').trim().toLowerCase();
+        if (probedStatus) {
+          result.probedDispatchStatus = probedStatus;
+          if (MERGE_AGENT_CANCEL_TERMINAL_DISPATCH_STATUSES.has(probedStatus)) {
+            result.probeConfirmedTerminal = true;
+          }
+        }
+      } catch (err) {
+        result.probeError = err?.message || String(err);
+        console.warn(
+          `[follow-up-merge-agent] best-effort status probe of merge-agent dispatch ${latest.launchRequestId} for ${repo}#${prNumber} failed: ${result.probeError}`
+        );
       }
     }
   }
@@ -3752,7 +3767,7 @@ async function dispatchMergeAgentForPR({
   // flight has nothing to merge; dispatching burns a worker and feeds the
   // cancel-on-merged cleanup path. Teardown of any already-in-flight dispatch is
   // owned by the watcher's merged/closed handler (cancelMergeAgentDispatchOnMerge).
-  if (merged === true || (typeof prState === 'string' && prState !== 'open')) {
+  if (merged === true || (typeof prState === 'string' && prState.toLowerCase() !== 'open')) {
     mergeAgentLifecycleLog(logger, 'merge_agent.dispatch_skipped_pr_not_open', {
       repo,
       prNumber,
@@ -4348,6 +4363,8 @@ async function dispatchMergeAgentForPR({
     // dispatch). When this dispatch is a watcher-owned retry of a died-without-
     // handoff worker, watcherReDispatchCountForRecord is the incremented count.
     watcherReDispatchCount: watcherReDispatchCountForRecord ?? 0,
+    hqRoot: resolveHqRoot(runtimeEnv),
+    hqOwnerUser: statusProbeAsOwner,
   });
 
   const labelRemoval = await removeConsumedTriggerLabel({

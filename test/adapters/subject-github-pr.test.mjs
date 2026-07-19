@@ -634,6 +634,19 @@ test('github-pr subject adapter prepares remediation workspace shape', async () 
   assert.equal(workspace.preparedAt, '2026-05-10T21:32:00.000Z');
 });
 
+test('github-pr subject adapter requires remediation workspace injection', async () => {
+  const adapter = createGitHubPRSubjectAdapter({
+    octokit: makeOctokitSnapshot(),
+    repos: [fixture.repo],
+  });
+  const [ref] = await adapter.discoverSubjects();
+
+  await assert.rejects(
+    adapter.prepareRemediationWorkspace(ref, 'job-484'),
+    /prepareWorkspaceForJobImpl must be injected by the composition root/,
+  );
+});
+
 test('github-pr subject identity helpers round-trip repo and number', () => {
   const externalId = makeSubjectExternalId('laceyenterprises/clio', 12);
   assert.equal(externalId, 'laceyenterprises/clio#12');

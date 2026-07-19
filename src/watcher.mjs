@@ -1318,6 +1318,15 @@ async function pollOnce(
       rootDir: ROOT,
       execFileImpl: execFileAsync,
       recordApiCall,
+      // ARC-19: the scheduler is the composition root — it injects the layer-5
+      // remediation-workspace impl behind the layer-4 subject adapter's port so
+      // the adapter never imports the follow-up-remediation orchestration.
+      // Resolved lazily (loaded on first remediation-workspace prep, not on the
+      // poll path) so a stubbed subject adapter never drags the monolith in.
+      prepareWorkspaceForJobImpl: async (...args) => {
+        const { prepareWorkspaceForJob } = await import('./follow-up-remediation.mjs');
+        return prepareWorkspaceForJob(...args);
+      },
     });
 
     let subjectRefs;

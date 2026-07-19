@@ -10,11 +10,9 @@ import { withAppContractTransientRetry } from './app-contract-retry.mjs';
 import {
   buildRemediationReply,
   claimNextFollowUpJob,
-  DEFAULT_MAX_TRANSIENT_RETRIES,
   MAX_QUOTA_HOLD_WINDOW_MS,
   getFollowUpJobDir,
   listInProgressFollowUpJobs,
-  listPendingFollowUpJobs,
   markFollowUpJobCompleted,
   markFollowUpJobFailed,
   markFollowUpJobStopped,
@@ -27,6 +25,25 @@ import {
   resolveRoundBudgetForJob,
   writeFollowUpJob,
 } from './follow-up-jobs.mjs';
+import {
+  cleanupReconcileClaimArtifacts,
+  releaseFollowUpReconcileClaim,
+  tryAcquireFollowUpReconcileClaim,
+} from './remediation-reconcile-claim.mjs';
+import {
+  buildBackpressureLogLine,
+  buildDrainSummaryLogLine,
+  countPendingFollowUpJobsByRetryWindow,
+  createQuotaHoldRevalidator,
+  defaultQuotaHoldRevalidator,
+  isDrainQueueIdle,
+  readWorkerStderrLogSafe,
+  resolveMaxTransientRemediationRetries,
+} from './remediation-admission.mjs';
+import {
+  attachFollowUpTelemetryListeners,
+  resolveFollowUpTelemetryTopics,
+} from './remediation-telemetry.mjs';
 import {
   buildObviousDocsGuidance,
   collectWorkspaceDocContext,
@@ -44,8 +61,14 @@ import { captureRemediationBodyAfterPost } from './review-body-capture.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
 import { requestWatcherWake } from './watcher-wake.mjs';
 import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
-import { loadStagePrompt, pickRemediatorStage, resolvePromptSet } from './kernel/prompt-stage.mjs';
-import { loadDomainConfig } from './domain-config.mjs';
+import { pickRemediatorStage } from './kernel/prompt-stage.mjs';
+import {
+  FOLLOW_UP_PROMPT_PATH,
+  REMEDIATOR_PROMPT_SET,
+  followUpJobRepoPrKey,
+  formatFencedBlock,
+  loadFollowUpPromptTemplate,
+} from './remediation-prompt.mjs';
 import { spawnDetachedCli } from './adapters/reviewer-runtime/cli-direct/process.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import {
@@ -59,26 +82,12 @@ import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comm
 import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 import { detectQuotaExhaustion, parseQuotaResetAt } from './quota-exhaustion.mjs';
-import { quotaAvailableFromFleetStatus } from './fleet-quota-status.mjs';
 
 const execFileAsync = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const DEFAULT_REPLIES_ROOT = join(ROOT, 'data', 'replies');
-// The remediator's prompt set is sourced from the domain config
-// (`domains/<id>.json` → `promptSet`), never a hardcoded literal. Resolution
-// fails loud with a classified `PromptSetResolutionError` — there is no silent
-// fallback to code-pr. The active domain id remains fixed to `code-pr` here
-// (the sole registered remediation domain); threading the domain id itself is
-// a separate work item.
-const REMEDIATOR_DOMAIN_ID = 'code-pr';
-const REMEDIATOR_PROMPT_SET = resolvePromptSet({
-  rootDir: ROOT,
-  domainConfig: loadDomainConfig(ROOT, REMEDIATOR_DOMAIN_ID),
-  domainId: REMEDIATOR_DOMAIN_ID,
-});
-const FOLLOW_UP_PROMPT_PATH = join(ROOT, 'prompts', REMEDIATOR_PROMPT_SET, 'remediator.first.md');
 const REMEDIATION_LEGACY_UNSTAGE_COMMANDS = [
   'git rm --cached -- .adversarial-follow-up/remediation-reply.json 2>/dev/null || true',
   'git rm --cached -r -- .adversarial-follow-up/ 2>/dev/null || true',
@@ -118,8 +127,6 @@ const HQ_SUCCESS_STATUSES = new Set(['succeeded']);
 const HQ_CANCEL_RETRY_DELAYS_MS = [250, 500];
 const WORKSPACE_GIT_RETRY_DELAYS_MS = [250, 750];
 const WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS = [250, 1000];
-const QUOTA_HOLD_REVALIDATION_TTL_MS = 60 * 1000;
-const QUOTA_HOLD_REVALIDATION_TIMEOUT_MS = 10_000;
 const OSS_READINESS_AUDIT_CHECK_NAME = 'oss-readiness-audit';
 const OSS_READINESS_BASELINE_PATH = 'scripts/oss-readiness-category-baseline.json';
 const OSS_READINESS_APPLY_SCRIPT_ENV = 'OSS_READINESS_APPLY_SCRIPT';
@@ -326,7 +333,6 @@ const REMEDIATION_WORKER_BY_BUILDER_TAG = Object.freeze({
   'clio-agent': 'claude-code',
 });
 const REMEDIATION_MAX_CONCURRENT_JOBS_ENV = 'ADVERSARIAL_REMEDIATION_MAX_CONCURRENT_JOBS';
-const REMEDIATION_MAX_TRANSIENT_RETRIES_ENV = 'ADVERSARIAL_REMEDIATION_MAX_TRANSIENT_RETRIES';
 const REMEDIATION_WORKSPACE_ROOT_ENV = 'ADVERSARIAL_REMEDIATION_WORKSPACE_ROOT';
 const DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS = 1;
 const MAX_REMEDIATION_MAX_CONCURRENT_JOBS = 8;
@@ -421,7 +427,6 @@ function remediationWorkerGitIdentity(workerClass, env = process.env) {
 }
 
 const RECONCILIATION_MAX_ACTIVE_MS = 6 * 60 * 60 * 1000;
-const FOLLOW_UP_RECONCILE_CLAIM_STALE_MS = 60 * 60 * 1000;
 const MAX_FINAL_MESSAGE_DIGEST_PREVIEW_BYTES = 4 * 1024 * 1024;
 
 function logRoundBudgetDecision(log, {
@@ -823,199 +828,11 @@ function classifyHqDispatchFailure(dispatchStatus = {}) {
   return 'terminal';
 }
 
-function resolveMaxTransientRemediationRetries(env = process.env) {
-  const raw = env?.[REMEDIATION_MAX_TRANSIENT_RETRIES_ENV];
-  const parsed = Number.parseInt(String(raw ?? ''), 10);
-  return Number.isInteger(parsed) && parsed >= 0
-    ? parsed
-    : DEFAULT_MAX_TRANSIENT_RETRIES;
-}
-
 // Fallback hold window for a quota-exhausted remediation worker when the
 // provider did not hand back a parseable reset time. Mirrors the reviewer
 // path's QUOTA_EXHAUSTED_BACKOFF_MS (15 min) so both worker classes degrade
 // the same way under a hard usage cap.
 const QUOTA_REMEDIATION_BACKOFF_MS = 15 * 60 * 1000;
-
-// Fleet-quota provider-state parsing + harness→provider mapping now live in the
-// shared HHR classifier (src/fleet-quota-status.mjs) so the reviewer/remediator
-// quota-hold path and the AMA closer/hammer harness-fallback path classify caps
-// identically. `quotaAvailableFromFleetStatus` is imported above.
-
-function latestRetryHistoryEntry(job) {
-  const history = Array.isArray(job?.remediationPlan?.retryHistory)
-    ? job.remediationPlan.retryHistory
-    : [];
-  return history.length ? history[history.length - 1] : null;
-}
-
-function isQuotaExhaustedRetryHold(job) {
-  const latestRetry = latestRetryHistoryEntry(job);
-  if (latestRetry) {
-    return latestRetry?.retryMetadata?.code === 'quota-exhausted';
-  }
-  return job?.remediationPlan?.lastRetryMetadata?.code === 'quota-exhausted';
-}
-
-function quotaHoldHarness(job) {
-  const latestRetry = latestRetryHistoryEntry(job);
-  return String(
-    latestRetry?.retryMetadata?.harness
-    || job?.remediationPlan?.lastRetryMetadata?.harness
-    || ''
-  ).trim().toLowerCase() || 'unknown';
-}
-
-function quotaHoldHarnessesForPendingJobs(rootDir, { nowMs = Date.now() } = {}) {
-  const harnesses = new Set();
-  for (const { job } of listPendingFollowUpJobs(rootDir)) {
-    const retryAfterMs = Date.parse(job?.remediationPlan?.retryAfter || '');
-    if (!Number.isFinite(retryAfterMs) || retryAfterMs <= nowMs) continue;
-    if (!isQuotaExhaustedRetryHold(job)) continue;
-    harnesses.add(quotaHoldHarness(job));
-  }
-  return Array.from(harnesses);
-}
-
-function createQuotaHoldRevalidator({
-  execFileImpl = execFileAsync,
-  env = process.env,
-  nowMs: defaultNowMs = () => Date.now(),
-  ttlMs = QUOTA_HOLD_REVALIDATION_TTL_MS,
-  timeoutMs = QUOTA_HOLD_REVALIDATION_TIMEOUT_MS,
-} = {}) {
-  const cache = new Map();
-
-  function buildCachedDecision(decision, { now, checkedAtMs }) {
-    const checkedAt = typeof now === 'string' && now.trim() ? now : new Date(checkedAtMs).toISOString();
-    return {
-      ...decision,
-      checkedAt: decision.checkedAt || checkedAt,
-    };
-  }
-
-  function cachedDecisionFor(normalizedHarness, checkedAtMs) {
-    const cached = cache.get(normalizedHarness);
-    if (cached && checkedAtMs - cached.checkedAtMs < ttlMs) {
-      return cached.decision;
-    }
-    return null;
-  }
-
-  async function refreshHarness(normalizedHarness, { now, nowMs } = {}) {
-    const nowValueMs = Number(nowMs ?? defaultNowMs());
-    const checkedAtMs = Number.isFinite(nowValueMs) ? nowValueMs : Date.now();
-    const cached = cachedDecisionFor(normalizedHarness, checkedAtMs);
-    if (cached) return cached;
-    let decision;
-    try {
-      const hqBin = resolveHqBin(env);
-      const result = await execFileImpl(hqBin, ['fleet', 'quota', 'status', '--json'], {
-        env,
-        encoding: 'utf8',
-        maxBuffer: 5 * 1024 * 1024,
-        timeout: timeoutMs,
-      });
-      const stdout = typeof result === 'string' ? result : result?.stdout;
-      decision = quotaAvailableFromFleetStatus(stdout || '', { harness: normalizedHarness });
-    } catch (err) {
-      decision = {
-        available: false,
-        state: 'error',
-        source: 'hq-fleet-quota-status',
-        error: err?.message || String(err),
-      };
-    }
-    const cachedDecision = buildCachedDecision(decision, { now, checkedAtMs });
-    cache.set(normalizedHarness, {
-      checkedAtMs,
-      decision: cachedDecision,
-    });
-    return cachedDecision;
-  }
-
-  const revalidator = ({ harness, now, nowMs } = {}) => {
-    const normalizedHarness = String(harness || '').trim().toLowerCase() || 'unknown';
-    const nowValueMs = Number(nowMs ?? defaultNowMs());
-    const checkedAtMs = Number.isFinite(nowValueMs) ? nowValueMs : Date.now();
-    const cached = cachedDecisionFor(normalizedHarness, checkedAtMs);
-    if (cached) return cached;
-    return buildCachedDecision({
-      available: false,
-      state: 'not-prefetched',
-      source: 'hq-fleet-quota-status',
-    }, { now, checkedAtMs });
-  };
-
-  revalidator.prefetch = async ({ harnesses = [], rootDir = null, now, nowMs } = {}) => {
-    const nowValueMs = Number(nowMs ?? defaultNowMs());
-    const checkedAtMs = Number.isFinite(nowValueMs) ? nowValueMs : Date.now();
-    const pendingHarnesses = rootDir
-      ? quotaHoldHarnessesForPendingJobs(rootDir, { nowMs: checkedAtMs })
-      : [];
-    const normalizedHarnesses = new Set();
-    for (const harness of [...harnesses, ...pendingHarnesses]) {
-      normalizedHarnesses.add(String(harness || '').trim().toLowerCase() || 'unknown');
-    }
-    return Promise.all(Array.from(normalizedHarnesses, (harness) => refreshHarness(harness, { now, nowMs: checkedAtMs })));
-  };
-
-  return revalidator;
-}
-
-const defaultQuotaHoldRevalidator = createQuotaHoldRevalidator({
-  execFileImpl: execFileAsync,
-  env: process.env,
-});
-
-// Best-effort read of a remediation worker's stderr log. The direct-CLI worker
-// routes both stdout and stderr to this log (see spawnClaudeRemediationWorker /
-// spawnCodexRemediationWorker), so a hard provider usage-cap banner lands here.
-// Returns '' on any read failure — quota detection then simply does not fire.
-function readWorkerStderrLogSafe(logPath) {
-  if (!logPath || !existsSync(logPath)) return '';
-  try {
-    return readFileSync(logPath, 'utf8');
-  } catch {
-    return '';
-  }
-}
-
-function buildDrainSummaryLogLine(drain) {
-  return `[follow-up-remediation] Drain summary: maxConcurrent=${drain.maxConcurrent} activeAtStart=${drain.activeAtStart} `
-    + `availableAtStart=${drain.availableAtStart} spawned=${drain.spawned} stopped=${drain.stopped} `
-    + `deferredSamePR=${drain.deferredSamePR} capacityRemaining=${drain.capacityRemaining} `
-    + `pendingClaimable=${drain.pendingClaimable ?? 0} pendingRetryDelayed=${drain.pendingRetryDelayed ?? 0}`;
-}
-
-function buildBackpressureLogLine({ activeAtStart, pendingCount }) {
-  return `[follow-up-remediation] Backpressure: activeAtStart=${activeAtStart} pendingClaimable=${pendingCount}`;
-}
-
-function countPendingFollowUpJobsByRetryWindow(rootDir, now = new Date().toISOString()) {
-  const nowMs = Date.parse(String(now || ''));
-  const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
-  let claimable = 0;
-  let delayed = 0;
-  for (const { job } of listPendingFollowUpJobs(rootDir)) {
-    const retryAfterMs = Date.parse(String(job?.remediationPlan?.retryAfter || ''));
-    if (Number.isFinite(retryAfterMs) && retryAfterMs > effectiveNowMs) {
-      delayed += 1;
-    } else {
-      claimable += 1;
-    }
-  }
-  return { claimable, delayed };
-}
-
-function isDrainQueueIdle(drain) {
-  return drain.activeAtStart === 0
-    && drain.spawned === 0
-    && drain.stopped === 0
-    && drain.deferredSamePR === 0
-    && (drain.pendingClaimable ?? 0) === 0
-    && drain.results.every((result) => result.reason === 'no-pending-jobs');
-}
 
 async function resolveHqWorkerWorkspace({
   worker,
@@ -2932,34 +2749,6 @@ function resolveRemediationMaxConcurrentJobs(env = process.env, options = {}) {
     cfgValue,
     { ...options, env: options.env ?? env }
   );
-}
-
-function followUpJobRepoPrKey(job) {
-  return `${String(job?.repo || '').toLowerCase()}#${job?.prNumber || ''}`;
-}
-
-function loadFollowUpPromptTemplate(rootDir = ROOT, { stage = 'first' } = {}) {
-  return loadStagePrompt({
-    rootDir,
-    promptSet: REMEDIATOR_PROMPT_SET,
-    actor: 'remediator',
-    stage,
-  });
-}
-
-function buildMarkdownFence(text) {
-  const content = String(text ?? '');
-  let width = 3;
-  while (content.includes('`'.repeat(width))) {
-    width += 1;
-  }
-  return '`'.repeat(width);
-}
-
-function formatFencedBlock(text, language = 'text') {
-  const content = String(text ?? '').trim() || '(empty)';
-  const fence = buildMarkdownFence(content);
-  return `${fence}${language}\n${content}\n${fence}`;
 }
 
 function buildInheritedPath(currentPath = process.env.PATH || '') {
@@ -6218,171 +6007,6 @@ async function reconcileFollowUpJob({
   };
 }
 
-function reconcileClaimPath(jobPath) {
-  return `${jobPath}.reconcile.lock`;
-}
-
-function buildReconcileClaimOwnerToken({ ownerPid, claimedAt }) {
-  return `${ownerPid}:${claimedAt}:${Math.random().toString(16).slice(2)}`;
-}
-
-function writeReconcileClaimLock(lockPath, payload) {
-  const tmpPath = `${lockPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
-  try {
-    writeFileSync(tmpPath, payload, { encoding: 'utf8', flag: 'wx' });
-    linkSync(tmpPath, lockPath);
-    return true;
-  } catch (err) {
-    if (err?.code === 'EEXIST') {
-      return false;
-    }
-    throw err;
-  } finally {
-    rmSync(tmpPath, { force: true });
-  }
-}
-
-function readReconcileClaimLock(lockPath) {
-  try {
-    return JSON.parse(readFileSync(lockPath, 'utf8'));
-  } catch {
-    return null;
-  }
-}
-
-function tryAcquireFollowUpReconcileClaim({ jobPath, now = () => new Date().toISOString(), ownerPid = process.pid } = {}) {
-  const lockPath = reconcileClaimPath(jobPath);
-  const claimedAt = now();
-  const ownerToken = buildReconcileClaimOwnerToken({ ownerPid, claimedAt });
-  const payload = `${JSON.stringify({ claimedAt, ownerPid, ownerToken })}\n`;
-  if (writeReconcileClaimLock(lockPath, payload)) {
-    return { acquired: true, lockPath, claimedAt, ownerPid, ownerToken };
-  }
-
-  const existing = readReconcileClaimLock(lockPath);
-  const corruptOrInvalid = existing === null;
-  const claimedAtMs = Date.parse(existing?.claimedAt || '');
-  const nowMs = Date.parse(claimedAt);
-  const hasValidClaimedAt = Number.isFinite(claimedAtMs);
-  const stale = corruptOrInvalid
-    || !hasValidClaimedAt
-    || (Number.isFinite(nowMs) && nowMs - claimedAtMs > FOLLOW_UP_RECONCILE_CLAIM_STALE_MS);
-  if (!stale) {
-    return {
-      acquired: false,
-      lockPath,
-      claimedAt: existing?.claimedAt || null,
-      ownerPid: existing?.ownerPid || null,
-      ownerToken: existing?.ownerToken || null,
-    };
-  }
-
-  rmSync(lockPath, { force: true });
-  if (writeReconcileClaimLock(lockPath, payload)) {
-    return { acquired: true, lockPath, claimedAt, ownerPid, ownerToken, reclaimedStale: true };
-  }
-  return { acquired: false, lockPath, claimedAt: null, ownerPid: null };
-}
-
-function reconcileClaimMatchesOwner(existing, claim) {
-  if (!existing || !claim) return false;
-  if (claim.ownerToken) {
-    return existing.ownerToken === claim.ownerToken;
-  }
-  return existing.claimedAt === claim.claimedAt
-    && Number(existing.ownerPid) === Number(claim.ownerPid);
-}
-
-function releaseFollowUpReconcileClaim(claim) {
-  if (!claim?.acquired || !claim?.lockPath) return;
-  const existing = readReconcileClaimLock(claim.lockPath);
-  if (reconcileClaimMatchesOwner(existing, claim)) {
-    rmSync(claim.lockPath, { force: true });
-  }
-}
-
-function cleanupReconcileClaimArtifacts({
-  rootDir = ROOT,
-  nowMs = Date.now(),
-  staleMs = FOLLOW_UP_RECONCILE_CLAIM_STALE_MS,
-  log = console,
-} = {}) {
-  const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
-  let scanned = 0;
-  let removedTmp = 0;
-  let removedLocks = 0;
-  let skipped = 0;
-  let errors = 0;
-  let entries = [];
-  try {
-    entries = readdirSync(inProgressDir);
-  } catch (err) {
-    if (err?.code === 'ENOENT') {
-      return { scanned, removedTmp, removedLocks, skipped, errors };
-    }
-    throw err;
-  }
-
-  for (const entry of entries) {
-    const isTmpClaim = entry.includes('.reconcile.lock.') && entry.endsWith('.tmp');
-    const isClaimLock = entry.endsWith('.reconcile.lock');
-    if (!isTmpClaim && !isClaimLock) continue;
-    scanned += 1;
-    const entryPath = join(inProgressDir, entry);
-    let stat = null;
-    try {
-      stat = lstatSync(entryPath);
-    } catch (err) {
-      if (err?.code === 'ENOENT') {
-        skipped += 1;
-        continue;
-      }
-      errors += 1;
-      log.warn?.(`[follow-up-remediation] reconcile claim artifact stat failed for ${entryPath}: ${err?.message || err}`);
-      continue;
-    }
-    if (!stat.isFile()) {
-      skipped += 1;
-      continue;
-    }
-
-    const ageMs = nowMs - stat.mtimeMs;
-    if (isTmpClaim) {
-      if (ageMs <= staleMs) {
-        skipped += 1;
-        continue;
-      }
-      try {
-        rmSync(entryPath, { force: true });
-        removedTmp += 1;
-      } catch (err) {
-        errors += 1;
-        log.warn?.(`[follow-up-remediation] reconcile claim tmp cleanup failed for ${entryPath}: ${err?.message || err}`);
-      }
-      continue;
-    }
-
-    const existing = readReconcileClaimLock(entryPath);
-    const claimedAtMs = Date.parse(existing?.claimedAt || '');
-    const lockAgeMs = Number.isFinite(claimedAtMs) ? nowMs - claimedAtMs : ageMs;
-    const stale = existing === null
-      || !Number.isFinite(claimedAtMs)
-      || lockAgeMs > staleMs;
-    if (!stale) {
-      skipped += 1;
-      continue;
-    }
-    try {
-      rmSync(entryPath, { force: true });
-      removedLocks += 1;
-    } catch (err) {
-      errors += 1;
-      log.warn?.(`[follow-up-remediation] reconcile claim lock cleanup failed for ${entryPath}: ${err?.message || err}`);
-    }
-  }
-  return { scanned, removedTmp, removedLocks, skipped, errors };
-}
-
 async function reconcileInProgressFollowUpJobs({
   rootDir = ROOT,
   now = () => new Date().toISOString(),
@@ -6570,93 +6194,6 @@ async function handleRemediationTelemetryEvent({
   }
 }
 
-function resolveFollowUpTelemetryTopics(subscribes = []) {
-  const topics = [];
-  for (const topic of subscribes) {
-    const normalized = String(topic || '').trim();
-    if (!normalized) continue;
-    if (normalized === 'health.worker.*' || normalized.startsWith('health.worker.')) {
-      topics.push(normalized);
-    }
-  }
-  return [...new Set(topics)];
-}
-
-// Bridge the app-contract session's on() delivery to the flat (event, topic)
-// shape handleRemediationTelemetryEvent expects. The published SDK calls the
-// handler with a single canonical frame { topic, payload, published_at }; older
-// / injected sessions call it with (event, topic). Detect the frame by its exact
-// shape so a plain telemetry event that merely carries a `topic` field is not
-// mistaken for a frame.
-function isCanonicalTopicFrame(value, maybeTopic) {
-  return maybeTopic === undefined
-    && value
-    && typeof value === 'object'
-    && typeof value.topic === 'string'
-    && Object.prototype.hasOwnProperty.call(value, 'payload')
-    && Object.prototype.hasOwnProperty.call(value, 'published_at');
-}
-
-function normalizeTelemetryDelivery(delivery, maybeTopic, topicPattern) {
-  if (isCanonicalTopicFrame(delivery, maybeTopic)) {
-    return { event: delivery.payload, topic: String(delivery.topic || topicPattern) };
-  }
-  return { event: delivery, topic: String(maybeTopic || topicPattern) };
-}
-
-function attachFollowUpTelemetryListeners({
-  session,
-  rootDir = ROOT,
-  subscribes = ['health.worker.*'],
-  now = () => new Date().toISOString(),
-  isWorkerRunning = isWorkerProcessRunning,
-  postCommentImpl = postRemediationOutcomeComment,
-  requestReviewRereviewImpl = requestReviewRereview,
-  requestWatcherWakeImpl = requestWatcherWake,
-  resolvePRLifecycleImpl = resolvePRLifecycle,
-  auditWorkspaceForContaminationImpl = auditWorkspaceForContamination,
-  execFileImpl = execFileAsync,
-  handleTelemetryEventImpl = handleRemediationTelemetryEvent,
-  log = console,
-} = {}) {
-  if (!session || typeof session.on !== 'function') {
-    throw new Error('follow-up telemetry listener requires an App Contract session with on()');
-  }
-  const topics = resolveFollowUpTelemetryTopics(subscribes);
-  const unsubscribers = topics.map((topicPattern) => session.on(topicPattern, async (delivery, maybeTopic) => {
-    // The published @agent-os/app-sdk delivers one canonical SSE frame
-    // ({ topic, payload, published_at }) to the handler; the legacy two-arg
-    // (event, topic) shape is still accepted so injected fakes keep working.
-    const { event, topic } = normalizeTelemetryDelivery(delivery, maybeTopic, topicPattern);
-    const deliveredTopic = topic;
-    const result = await handleTelemetryEventImpl({
-      rootDir,
-      topic: deliveredTopic,
-      event,
-      now,
-      isWorkerRunning,
-      postCommentImpl,
-      requestReviewRereviewImpl,
-      requestWatcherWakeImpl,
-      resolvePRLifecycleImpl,
-      auditWorkspaceForContaminationImpl,
-      execFileImpl,
-      log,
-    });
-    if (!['ignored', 'skipped'].includes(result?.action)) {
-      log.log?.(`[follow-up-remediation] telemetry reconcile ${deliveredTopic}: ${result?.action || 'unknown'}`);
-    }
-    return result;
-  }));
-  return {
-    session,
-    subscriptions: topics,
-    dispose: () => {
-      for (const unsubscribe of unsubscribers) unsubscribe();
-    },
-  };
-}
-
 async function connectFollowUpTelemetryListener({
   rootDir = ROOT,
   env = process.env,
@@ -6682,6 +6219,9 @@ async function connectFollowUpTelemetryListener({
     session,
     rootDir,
     subscribes: topics,
+    // ARC-19: attachFollowUpTelemetryListeners is a leaf module and cannot
+    // reference the monolith's handler; inject it here from the composition root.
+    handleTelemetryEventImpl: handleRemediationTelemetryEvent,
     log,
     ...listenerOptions,
   });

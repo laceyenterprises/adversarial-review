@@ -3,40 +3,12 @@ import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import {
+  prepareMarkAttemptStarted,
+  prepareMarkMergedPendingReviewSkipped,
+} from '../src/review-state-statements.mjs';
 import { infraRecoverableFailureClass } from '../src/reviewer-failure-classification.mjs';
 
-// The atomic-claim SQL lives inline in src/watcher.mjs (it's bound to
-// the module's prepared-statement set there). The watcher module has
-// import-time side effects (opens reviews.db, registers process
-// handlers) that we don't want in unit tests, so we re-derive the same
-// SQL here and assert against it. If the watcher's SQL ever drifts
-// from this, both copies will fail their respective callers' tests
-// long before that drift can ship — keep them in sync.
-//
-// This is the cross-process layer of the duplicate-spawn guard. The
-// in-process layer is the watcher's self-scheduling pollOnce loop.
-// Together they close the duplicate-spawn vector at both layers.
-const CLAIM_SQL = `UPDATE reviewed_prs
-     SET review_status = 'reviewing',
-         last_attempted_at = ?,
-         reviewer_session_uuid = ?,
-         reviewer_started_at = NULL,
-         reviewer_head_sha = ?,
-         reviewer_timeout_ms = ?,
-         reviewer_lease_expires_at = ?,
-         reviewer_pgid = NULL,
-         failed_at = CASE
-           WHEN review_status = 'pending-upstream' THEN failed_at
-           ELSE NULL
-         END,
-         failure_message = CASE
-           WHEN review_status = 'pending-upstream' THEN failure_message
-           ELSE NULL
-         END
-   WHERE repo = ?
-     AND pr_number = ?
-     AND review_status IN ('pending', 'pending-upstream')
-     AND COALESCE(pr_state, 'open') != 'merged'`;
 const RELEASE_TO_PENDING_SQL =
   "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'";
 const MARK_POSTED_SQL =
@@ -112,12 +84,26 @@ function runClaim(db, attemptedAt, repo = REPO, prNumber = PR, {
   headSha = 'head-999',
   reviewerTimeoutMs = 20 * 60 * 1000,
 } = {}) {
-  return db.prepare(CLAIM_SQL).run(
+  return prepareMarkAttemptStarted(db).run(
     attemptedAt,
     sessionUuid,
     headSha,
     reviewerTimeoutMs,
     '2026-05-02T18:30:00.000Z',
+    repo,
+    prNumber
+  );
+}
+
+function markMergedPendingReviewSkipped(db, {
+  failureMessage = 'Skipped reviewer spawn because PR is already merged.',
+  mergedAt = '2026-07-19T18:00:00.000Z',
+  repo = REPO,
+  prNumber = PR,
+} = {}) {
+  return prepareMarkMergedPendingReviewSkipped(db).run(
+    failureMessage,
+    mergedAt,
     repo,
     prNumber
   );
@@ -228,7 +214,7 @@ test('atomic claim succeeds for a pending row and flips status to reviewing', ()
   assert.equal(row.failure_message, null);
 });
 
-test('SEV1: atomic claim refuses a merged PR stuck at pending but still claims an open one', () => {
+test('SEV1: merged PR stuck at pending is terminalized before future claim attempts', () => {
   // A merged PR whose cross-model review never posted stays review_status
   // 'pending'. Without the pr_state guard the CAS re-claimed + re-spawned a
   // reviewer for it every tick forever (2026-07-19 SEV1: 6,049 spawns, 2,482
@@ -240,8 +226,12 @@ test('SEV1: atomic claim refuses a merged PR stuck at pending but still claims a
     'a merged PR must NOT be re-claimed for review',
   );
   assert.equal(
-    readRow(merged).review_status, 'pending',
-    'row stays pending, never flips to reviewing',
+    markMergedPendingReviewSkipped(merged).changes, 1,
+    'watcher should terminalize merged pending rows instead of polling them forever',
+  );
+  assert.equal(
+    readRow(merged).review_status, 'skipped',
+    'row becomes terminal for reviewer dispatch',
   );
 
   // Control: an open PR stuck pending still claims normally.

@@ -102,6 +102,7 @@ import {
   stmtMarkInfraAutoRecoveryAttemptStarted,
   stmtMarkMalformed,
   stmtMarkMerged,
+  stmtMarkMergedPendingReviewSkipped,
   stmtMarkReviewCycleCapPaused,
   stmtMarkReviewPopulationRetryAttemptStarted,
   stmtMarkReviewerCommandFailedRecoveredPosted,
@@ -231,13 +232,6 @@ export async function processReviewSubject(entry, ctx) {
       ) {
         return;
       }
-      if (!subject.terminal && existing?.review_status === 'pending') {
-        healthProbe?.recordOpenPending?.(healthTick, {
-          repo: repoPath,
-          prNumber,
-        });
-      }
-
       async function projectGateStatusSafe(reviewRow) {
         if (!subject.headSha) return;
         try {
@@ -272,6 +266,40 @@ export async function processReviewSubject(entry, ctx) {
             err?.message || err
           );
         }
+      }
+
+      if (
+        existing?.pr_state === 'merged' &&
+        (
+          existing.review_status === 'pending' ||
+          existing.review_status === 'pending-upstream'
+        )
+      ) {
+        const settledAt = existing.merged_at || new Date().toISOString();
+        const result = stmtMarkMergedPendingReviewSkipped.run(
+          'Skipped reviewer spawn because PR is already merged.',
+          settledAt,
+          repoPath,
+          prNumber
+        );
+        if (result.changes === 1) {
+          console.log(
+            `[watcher] merged pending review for ${repoPath}#${prNumber} marked skipped; no reviewer spawn needed`
+          );
+          existing = stmtGetReviewRow.get(repoPath, prNumber);
+        }
+      }
+
+      if (existing?.pr_state === 'merged') {
+        await projectGateStatusSafe(existing);
+        return;
+      }
+
+      if (!subject.terminal && existing?.review_status === 'pending') {
+        healthProbe?.recordOpenPending?.(healthTick, {
+          repo: repoPath,
+          prNumber,
+        });
       }
 
       // 'failed-orphan' is only eligible through the guarded auto-reclaim pass

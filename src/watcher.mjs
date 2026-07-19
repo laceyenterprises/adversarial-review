@@ -966,15 +966,8 @@ function resolveReviewUnknownFailureMaxRetries(env = process.env) {
 }
 const REVIEW_UNKNOWN_FAILURE_MAX_RETRIES = resolveReviewUnknownFailureMaxRetries();
 // Quota-exhaustion (hard provider usage cap) graceful-degradation backoff.
-// When a reviewer CLI hits a hard usage cap, HRR's domain is "suspend until the
-// cap clears, then resume" — NOT "burn the infra auto-recover budget retrying a
-// cap that physically cannot lift yet". The reviewer runs the codex/claude CLI
-// directly (outside the dispatch daemon that owns HRR suspend/resume), so this
-// gate re-creates the same hold-until-reset behavior in the watcher: while the
-// provider-reported reset time (or, if unparseable, a fixed fallback window
-// since the last failure) has not elapsed, the row is skipped WITHOUT consuming
-// an infra_auto_recover attempt. Once the window clears, normal bounded
-// auto-recovery resumes and the cap (INFRA_AUTO_RECOVER_CAP) still applies.
+// Hold failed rows until the reported reset (or this fallback window) clears
+// without consuming the bounded infrastructure auto-recovery budget.
 const DEFAULT_QUOTA_EXHAUSTED_BACKOFF_MS = 15 * 60 * 1000;
 function resolveQuotaExhaustedBackoffMs(env = process.env) {
   const raw = env.ADVERSARIAL_QUOTA_EXHAUSTED_FALLBACK_BACKOFF_MS;
@@ -1115,7 +1108,6 @@ async function refreshOrgRepos(octokit) {
       .filter((r) => !r.archived && !excluded.has(r.name) && !excluded.has(`${config.org}/${r.name}`))
       .map((r) => `${config.org}/${r.name}`);
 
-    lastRepoRefresh = now;
     console.log(`[watcher] Org repos refreshed — watching ${activeRepos.length} repos: ${activeRepos.join(', ')}`);
   } catch (err) {
     recordApiCall({
@@ -1125,6 +1117,10 @@ async function refreshOrgRepos(octokit) {
       durationMs: null,
     });
     console.error(`[watcher] Failed to list org repos for ${config.org}:`, err.message);
+  } finally {
+    // Respect the refresh interval after failures too; retrying every poll tick
+    // amplifies outages and rate limiting into a tight API loop.
+    lastRepoRefresh = now;
   }
 }
 

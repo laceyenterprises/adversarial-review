@@ -12,6 +12,7 @@ import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { acquireMergeLease, releaseMergeLease } from './ama/merge-lease.mjs';
 import { readBuildCompletionSignalForPr } from './session-ledger-read-adapter.mjs';
 import { fetchPullRequestRollup } from './github-api.mjs';
+import { execGhWithRetry } from './gh-cli.mjs';
 import {
   resolveDaemonWorkerIdentityForPr,
   readHeadAttestationChainForPr,
@@ -111,6 +112,7 @@ export async function runDaemonCleanMergeAttempt({
   currentPrHeadSha,
   logger,
   execFileImpl = execFileAsync,
+  execGhWithRetryImpl = execGhWithRetry,
   attemptDaemonCleanMergeImpl = attemptDaemonCleanMerge,
   fetchRollupImpl = fetchPullRequestRollup,
   acquireMergeLeaseImpl = acquireMergeLease,
@@ -280,11 +282,11 @@ export async function runDaemonCleanMergeAttempt({
     runMergeImpl: async ({ repo, prNumber: pr, head, mergeMethod: method }) => {
       const methodFlag = method === 'merge' ? '--merge' : '--squash';
       try {
-        const { stdout, stderr } = await execFileImpl(
-          'gh',
-          ['pr', 'merge', String(pr), '--repo', repo, methodFlag, '--match-head-commit', head],
-          { maxBuffer: 5 * 1024 * 1024, timeout: DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS },
-        );
+        const { stdout, stderr } = await execGhWithRetryImpl({
+          execFileImpl,
+          args: ['pr', 'merge', String(pr), '--repo', repo, methodFlag, '--match-head-commit', head],
+          timeoutMs: DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
+        });
         return { exitCode: 0, stdout: String(stdout || ''), stderr: String(stderr || '') };
       } catch (err) {
         return {

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfigCached } from './config-loader.mjs';
@@ -38,6 +38,7 @@ function readDagAutowalkOnMergeRecord(recordPath) {
 }
 
 function writeDagAutowalkOnMergeRecord(rootDir, record) {
+  mkdirSync(dagAutowalkOnMergeDir(rootDir), { recursive: true });
   writeFileAtomic(
     dagAutowalkOnMergePath(rootDir, record),
     `${JSON.stringify(record, null, 2)}\n`

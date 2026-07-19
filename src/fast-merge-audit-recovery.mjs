@@ -73,9 +73,11 @@ export async function recoverFastMergeVetoes(octokit, { logger = console } = {})
     });
     if (!liveLabels) continue;
     const decision = fastMergeDecisionFromLabels(liveLabels);
-    stmtUpdateReviewLabels.run(JSON.stringify(liveLabels), row.repo, row.pr_number);
     const lostFastMergeAuthorization = !decision.hasFastMergeLabel || decision.hasVeto;
-    if (!lostFastMergeAuthorization) continue;
+    if (!lostFastMergeAuthorization) {
+      stmtUpdateReviewLabels.run(JSON.stringify(liveLabels), row.repo, row.pr_number);
+      continue;
+    }
 
     const requeuedAt = new Date().toISOString();
     const action = decision.hasVeto ? 'veto-requeued' : 'label-removed-requeued';
@@ -123,6 +125,11 @@ export async function recoverFastMergeVetoes(octokit, { logger = console } = {})
       );
       continue;
     }
+
+    // Preserve the skipped-label discovery state until the requeue is durable.
+    // Otherwise a transient requeue failure makes this row undiscoverable on
+    // the next recovery tick and permanently parks the PR.
+    stmtUpdateReviewLabels.run(JSON.stringify(liveLabels), row.repo, row.pr_number);
 
     auditEntry.requeue_result = {
       triggered: Boolean(requeueResult?.triggered),

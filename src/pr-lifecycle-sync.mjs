@@ -245,21 +245,14 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
 
     if (pr.mergedAt) {
       console.log(`[watcher] PR ${repo}#${prNumber} was merged — syncing Linear`);
-      await queueAndAttemptMergeAgentLifecycleCleanup({
-        pr, repo, prNumber, transition: 'merged',
-      });
+      try {
+        await queueAndAttemptMergeAgentLifecycleCleanup({
+          pr, repo, prNumber, transition: 'merged',
+        });
       // Advance the merged PR's dag-run (AMA D5 gate). Persist the owed work
       // before marking the lifecycle transition merged so a local state-write
       // failure leaves this row eligible for the next watcher tick.
-      try {
         fireDagAutowalkOnMerge({ repo, prNumber });
-      } catch (err) {
-        console.error(
-          `[watcher] dag autowalk-on-merge owed-record write failed for ${repo}#${prNumber}; ` +
-          `leaving lifecycle row open for retry: ${err?.message || err}`
-        );
-        continue;
-      }
       // Closeout capture is intentionally NOT awaited inline here. The
       // gh retry budget for a single scrape (~30–45s worst case) would
       // otherwise stall the gates-deletion and Linear triage sync for
@@ -281,11 +274,19 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
         'finalized'
       );
       stmtMarkMerged.run(pr.mergedAt, repo, prNumber);
+      } catch (err) {
+        console.error(
+          `[watcher] Failed to sync merged PR ${repo}#${prNumber}; leaving lifecycle row open for retry:`,
+          err?.message || err
+        );
+        continue;
+      }
     } else if (pr.state === 'closed') {
       console.log(`[watcher] PR ${repo}#${prNumber} was closed (unmerged) — syncing Linear`);
-      await queueAndAttemptMergeAgentLifecycleCleanup({
-        pr, repo, prNumber, transition: 'closed',
-      });
+      try {
+        await queueAndAttemptMergeAgentLifecycleCleanup({
+          pr, repo, prNumber, transition: 'closed',
+        });
       deleteGateRecordsForPR(ROOT, { repo, prNumber });
       const closedRowDomainId =
         stmtGetReviewRow.get(repo, prNumber)?.domain_id || primaryDomainId;
@@ -298,6 +299,13 @@ export async function syncPRLifecycle(octokit, operatorSurface, primaryDomainId 
         'halted'
       );
       stmtMarkClosed.run(pr.closedAt ?? new Date().toISOString(), repo, prNumber);
+      } catch (err) {
+        console.error(
+          `[watcher] Failed to sync closed PR ${repo}#${prNumber}; leaving lifecycle row open for retry:`,
+          err?.message || err
+        );
+        continue;
+      }
     }
     // Still open → nothing to do
   }

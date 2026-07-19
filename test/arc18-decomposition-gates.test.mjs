@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 
 // ARC-18 acceptance gates. These enforce that the watcher monolith stays
 // decomposed into a thin scheduler (watcher.mjs) plus leaf phase/orchestration
@@ -89,7 +89,7 @@ const RAW_SUBJECT_REST_CALLS = [
 
 test('ARC-18 gate: raw PR label/timeline/changed-files REST calls live only under src/adapters/', () => {
   for (const file of allSrcMjs()) {
-    if (file.includes(`${join(SRC, 'adapters')}`)) continue;
+    if (file.startsWith(`${join(SRC, 'adapters')}${sep}`)) continue;
     const src = readFileSync(file, 'utf8');
     for (const call of RAW_SUBJECT_REST_CALLS) {
       assert.ok(

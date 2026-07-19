@@ -94,6 +94,7 @@ test('watcher owns outcome: re-dispatches a died-without-handoff failed worker a
   );
   const records = listMergeAgentDispatches(rootDir);
   assert.equal(records[0].watcherReDispatchCount, 1, 're-dispatch increments the bounded budget');
+  assert.equal(records[0].hqOwnerUser, 'airlock', 'dispatch records must preserve the resolved HQ owner for later cleanup probes');
 });
 
 test('does NOT dispatch a merge agent for an already merged/closed PR (skip-pr-not-open)', async () => {
@@ -105,6 +106,7 @@ test('does NOT dispatch a merge agent for an already merged/closed PR (skip-pr-n
   const dispatchCalls = [];
   const statusCalls = [];
   const ghCalls = [];
+  const lifecycleEvents = [];
 
   const result = await dispatchMergeAgentForPR({
     agentOsDetectImpl: AGENT_OS_PRESENT_STUB,
@@ -126,6 +128,11 @@ test('does NOT dispatch a merge agent for an already merged/closed PR (skip-pr-n
       ghCalls.push([cmd, ...args]);
       return { stdout: '', stderr: '' };
     },
+    logger: {
+      info: (line) => lifecycleEvents.push(JSON.parse(line)),
+      warn: () => {},
+      error: () => {},
+    },
     now: '2026-07-19T05:00:00.000Z',
   });
 
@@ -137,6 +144,10 @@ test('does NOT dispatch a merge agent for an already merged/closed PR (skip-pr-n
   assert.ok(
     ghCalls.some((call) => call.includes('--remove-label') && call.includes('merge-agent-requested')),
     'the closed-PR guard must consume the pending trigger label'
+  );
+  assert.ok(
+    lifecycleEvents.some((event) => event.event === 'merge_agent.dispatch_skipped_pr_not_open'),
+    'the closed-PR guard must log through the injected logger without a ReferenceError'
   );
 });
 

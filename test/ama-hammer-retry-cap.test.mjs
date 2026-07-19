@@ -192,7 +192,11 @@ test('evaluateHammerRetryCap accumulates by logical review job key', () => {
     { jobKey: REVIEWED_HEAD, headSha: 'h3' },
   );
   assert.equal(third.nextAttemptCount, 3);
-  assert.equal(third.capExhausted, false);
+  // A 3rd dispatch on the SAME reviewed-head series exceeds the per-series cap
+  // of HAMMER_RETRY_CAP_TOTAL_DISPATCHES (2) and MUST be exhausted — this is the
+  // bound that stops a non-converging PR from being re-hammered up to the
+  // lifetime ceiling of 6. Regressed in #532 (3514e00); do not flip back.
+  assert.equal(third.capExhausted, true);
   assert.equal(HAMMER_RETRY_CAP_TOTAL_DISPATCHES, 2);
 });
 

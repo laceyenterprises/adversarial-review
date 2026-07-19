@@ -1043,6 +1043,61 @@ export function readBuildCompletionProducerEvidence({
   return { ok: true, row, target: queried.target };
 }
 
+function readWorkerRunUsageFromPostgres(target, {
+  workerRunId = null,
+  launchRequestId = null,
+  spawnSyncImpl = spawnSync,
+} = {}) {
+  // The live postgres ledger carries the current worker_runs schema, so the
+  // guardrail column always exists here (unlike historical sqlite ledgers,
+  // which the sqlite path probes for). Select the fixed column set, matching
+  // the sibling postgres readers in this file.
+  const jsonSelect = (whereClause, psqlVars) => queryPostgresRows(
+    target,
+    `SELECT json_build_object(
+        'run_id', run_id,
+        'launch_request_id', launch_request_id,
+        'session_id', session_id,
+        'token_usage_input', token_usage_input,
+        'token_usage_output', token_usage_output,
+        'token_usage_guardrail', token_usage_guardrail,
+        'token_usage_cost_usd', token_usage_cost_usd,
+        'token_usage_source', token_usage_source,
+        'started_at', started_at,
+        'ended_at', ended_at,
+        'updated_at', updated_at,
+        'total_cache_read_tokens', total_cache_read_tokens,
+        'total_cache_write_tokens', total_cache_write_tokens
+      )
+       FROM (
+         SELECT wr.run_id, wr.launch_request_id, wr.session_id,
+                wr.token_usage_input, wr.token_usage_output, wr.token_usage_guardrail,
+                wr.token_usage_cost_usd, wr.token_usage_source,
+                wr.started_at, wr.ended_at, wr.updated_at,
+                rs.total_cache_read_tokens, rs.total_cache_write_tokens
+           FROM worker_runs wr
+           LEFT JOIN runtime_sessions rs ON rs.session_id = wr.session_id
+          WHERE ${whereClause}
+          ORDER BY COALESCE(wr.updated_at::text, wr.ended_at::text, wr.started_at::text, '') DESC,
+                   wr.run_id DESC
+          LIMIT 1
+       ) worker_run_usage`,
+    { spawnSyncImpl, psqlVars },
+  );
+  if (workerRunId) {
+    const queried = jsonSelect(`wr.run_id = :'worker_run_id'`, [['worker_run_id', String(workerRunId)]]);
+    if (!queried.ok) return queried;
+    const [row] = queried.rows;
+    if (row) return { ok: true, row, target: queried.target };
+  }
+  const normalizedLaunchRequestId = normalizeText(launchRequestId);
+  if (!normalizedLaunchRequestId) return { ok: false, reason: 'missing-worker-run-selector', target };
+  const queried = jsonSelect(`wr.launch_request_id = :'launch_request_id'`, [['launch_request_id', normalizedLaunchRequestId]]);
+  if (!queried.ok) return queried;
+  const [row] = queried.rows;
+  return row ? { ok: true, row, target: queried.target } : { ok: false, reason: 'missing-worker-run-row', target: queried.target };
+}
+
 export function readWorkerRunUsageFromLedger({
   workerRunId = null,
   launchRequestId = null,
@@ -1051,6 +1106,7 @@ export function readWorkerRunUsageFromLedger({
   env = process.env,
   rootDir = process.cwd(),
   hqRoot = null,
+  spawnSyncImpl = spawnSync,
 } = {}) {
   const resolution = resolveSessionLedgerReadTarget({
     ledgerTarget,
@@ -1061,6 +1117,9 @@ export function readWorkerRunUsageFromLedger({
     hqRoot,
   });
   if (!resolution.ok) return resolution;
+  if (resolution.target.backend === 'postgres') {
+    return readWorkerRunUsageFromPostgres(resolution.target, { workerRunId, launchRequestId, spawnSyncImpl });
+  }
   if (resolution.target.backend !== 'sqlite') return unsupportedBackend(resolution.target);
   const guardrailColumn = sqliteTableHasColumn(resolution.target, 'worker_runs', 'token_usage_guardrail');
   if (!guardrailColumn.ok) return guardrailColumn;
@@ -1109,6 +1168,75 @@ export function readWorkerRunUsageFromLedger({
   return row ? { ok: true, row, target: queried.target } : { ok: false, reason: 'missing-worker-run-row', target: queried.target };
 }
 
+function readReviewerSessionUsageFromPostgres(target, {
+  adapterSessionKey = null,
+  sessionKeys = [],
+  workspacePath = null,
+  startedAt = null,
+  endedAt = null,
+  spawnSyncImpl = spawnSync,
+} = {}) {
+  // started_at / ended_at are TIMESTAMPTZ on the postgres backend, so the
+  // window bounds compare as timestamps (never `COALESCE(col, '')`, which is a
+  // hard error against a TIMESTAMPTZ column). NULL handling mirrors the sqlite
+  // COALESCE(..., '') sentinel: a NULL started_at still satisfies the upper
+  // bound, and a row with both timestamps NULL fails the lower bound.
+  const windowClauses = [];
+  const windowVars = [];
+  if (endedAt) {
+    windowClauses.push(`(started_at IS NULL OR started_at <= :'window_end'::timestamptz)`);
+    windowVars.push(['window_end', endedAt]);
+  }
+  if (startedAt) {
+    windowClauses.push(`COALESCE(ended_at, started_at) >= :'window_start'::timestamptz`);
+    windowVars.push(['window_start', startedAt]);
+  }
+  const windowSql = windowClauses.length ? `AND ${windowClauses.join(' AND ')}` : '';
+  const jsonSelect = (whereClause, psqlVars) => queryPostgresRows(
+    target,
+    `SELECT json_build_object(
+        'session_id', session_id,
+        'adapter_session_key', adapter_session_key,
+        'total_input_tokens', total_input_tokens,
+        'total_output_tokens', total_output_tokens,
+        'total_cache_read_tokens', total_cache_read_tokens,
+        'total_cache_write_tokens', total_cache_write_tokens,
+        'total_cost_usd', total_cost_usd,
+        'source_path', source_path,
+        'started_at', started_at,
+        'ended_at', ended_at,
+        'updated_at', updated_at
+      )
+       FROM (
+         SELECT session_id, adapter_session_key, total_input_tokens, total_output_tokens,
+                total_cache_read_tokens, total_cache_write_tokens, total_cost_usd,
+                source_path, started_at, ended_at, ended_at AS updated_at
+           FROM runtime_sessions
+          WHERE ${whereClause}
+            ${windowSql}
+          ORDER BY COALESCE(ended_at::text, started_at::text, '') DESC,
+                   session_id DESC
+          LIMIT 1
+       ) runtime_session_usage`,
+    { spawnSyncImpl, psqlVars },
+  );
+  const keys = [...new Set([adapterSessionKey, ...sessionKeys].filter(Boolean).map(String))];
+  if (keys.length > 0) {
+    const keyPlaceholders = keys.map((_, idx) => `:'key${idx}'`).join(', ');
+    const keyVars = keys.map((key, idx) => [`key${idx}`, key]);
+    const queried = jsonSelect(`adapter_session_key IN (${keyPlaceholders})`, [...keyVars, ...windowVars]);
+    if (!queried.ok) return queried;
+    const [row] = queried.rows;
+    if (row) return { ok: true, row, target: queried.target };
+  }
+  const normalizedWorkspacePath = normalizeText(workspacePath);
+  if (!normalizedWorkspacePath) return { ok: false, reason: 'missing-runtime-session-selector', target };
+  const queried = jsonSelect(`source_path = :'workspace_path'`, [['workspace_path', normalizedWorkspacePath], ...windowVars]);
+  if (!queried.ok) return queried;
+  const [row] = queried.rows;
+  return row ? { ok: true, row, target: queried.target } : { ok: false, reason: 'missing-runtime-session-row', target: queried.target };
+}
+
 export function readReviewerSessionUsageFromLedger({
   adapterSessionKey = null,
   sessionKeys = [],
@@ -1120,6 +1248,7 @@ export function readReviewerSessionUsageFromLedger({
   env = process.env,
   rootDir = process.cwd(),
   hqRoot = null,
+  spawnSyncImpl = spawnSync,
 } = {}) {
   const resolution = resolveSessionLedgerReadTarget({
     ledgerTarget,
@@ -1130,6 +1259,16 @@ export function readReviewerSessionUsageFromLedger({
     hqRoot,
   });
   if (!resolution.ok) return resolution;
+  if (resolution.target.backend === 'postgres') {
+    return readReviewerSessionUsageFromPostgres(resolution.target, {
+      adapterSessionKey,
+      sessionKeys,
+      workspacePath,
+      startedAt,
+      endedAt,
+      spawnSyncImpl,
+    });
+  }
   if (resolution.target.backend !== 'sqlite') return unsupportedBackend(resolution.target);
 
   const params = {};

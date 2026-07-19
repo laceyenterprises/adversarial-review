@@ -11,6 +11,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
+import {
+  prepareMarkAttemptStarted,
+  prepareMarkMergedPendingReviewSkipped,
+} from './review-state-statements.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -245,29 +249,8 @@ export const stmtMarkMalformed = db.prepare(
 // the lease/liveness guards. The CAS semantics are pinned by
 // test/watcher-atomic-claim.test.mjs (claim/refusal per status) and the
 // surrounding hot path by test/watcher-claim-loop.test.mjs.
-export const stmtMarkAttemptStarted = db.prepare(
-  `UPDATE reviewed_prs
-     SET review_status = 'reviewing',
-         last_attempted_at = ?,
-         reviewer_session_uuid = ?,
-         reviewer_started_at = NULL,
-         reviewer_head_sha = ?,
-         reviewer_timeout_ms = ?,
-         reviewer_lease_expires_at = ?,
-         reviewer_pgid = NULL,
-         failed_at = CASE
-           WHEN review_status = 'pending-upstream' THEN failed_at
-           ELSE NULL
-         END,
-         failure_message = CASE
-           WHEN review_status = 'pending-upstream' THEN failure_message
-           ELSE NULL
-         END,
-         quota_reset_at_utc = NULL
-   WHERE repo = ?
-     AND pr_number = ?
-     AND review_status IN ('pending', 'pending-upstream')`
-);
+export const stmtMarkAttemptStarted = prepareMarkAttemptStarted(db);
+export const stmtMarkMergedPendingReviewSkipped = prepareMarkMergedPendingReviewSkipped(db);
 export const stmtMarkReviewerPgid = db.prepare(
   `UPDATE reviewed_prs
       SET reviewer_pgid = ?,

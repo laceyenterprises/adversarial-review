@@ -1,5 +1,5 @@
 import { execFile, spawnSync } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
   constants as fsConstants,
   accessSync,
@@ -46,7 +46,6 @@ import {
   NO_MERGE_HOLD_LABEL,
   OPERATOR_APPROVED_LABEL,
 } from './adapters/operator/github-pr-label-controls/index.mjs';
-import { createGitHubPRCommentsAdapter } from './adapters/comms/github-pr-comments/index.mjs';
 import { getFollowUpJobDir, listFollowUpJobsInDir } from './follow-up-jobs.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import {
@@ -54,7 +53,10 @@ import {
   writeAdapterPullRequestLabel,
   writeAdapterPullRequestMerge,
 } from './github-adapter-client.mjs';
-import { buildCodePrSubjectIdentity } from './identity-shapes.mjs';
+import {
+  buildPendingPhantomHandoffCommentDelivery,
+  postPhantomHandoffEscalationComment,
+} from './merge-agent-phantom-handoff-comment.mjs';
 import {
   requestReviewRereview,
 } from './review-state.mjs';
@@ -246,8 +248,6 @@ function resolveHqDispatchTimeoutMs(env = process.env, options = {}) {
 
 const NORMAL_MERGE_AGENT_DISPATCH_PRIORITY = 'normal';
 const CRITICAL_MERGE_AGENT_DISPATCH_PRIORITY = 'critical';
-const PHANTOM_HANDOFF_COMMENT_TIMEOUT_MS = 10_000;
-const PHANTOM_HANDOFF_COMMENT_MARKER_PREFIX = 'adversarial-review-merge-agent-phantom-handoff';
 // Max times the watcher will auto-re-dispatch a merge-agent that died WITHOUT
 // handing off (terminal-failed but its own `merge-agent-dispatched` marker is
 // still set) for the same head SHA before handing the PR to the operator via
@@ -1836,54 +1836,6 @@ function updateRecordedMergeAgentDispatch(rootDir, job, mutate) {
   return next;
 }
 
-function buildPhantomHandoffCommentMarker(recordedDispatch) {
-  const key = [
-    String(recordedDispatch?.repo || ''),
-    String(recordedDispatch?.prNumber || ''),
-    String(recordedDispatch?.headSha || ''),
-    String(recordedDispatch?.launchRequestId || ''),
-  ].join(':');
-  const digest = createHash('sha256').update(key).digest('hex');
-  return `${PHANTOM_HANDOFF_COMMENT_MARKER_PREFIX}:${digest}`;
-}
-
-function buildPhantomHandoffEscalationCommentBody({ recordedDispatch, dispatchStatus } = {}) {
-  const lrq = recordedDispatch?.launchRequestId || 'unknown';
-  const marker = buildPhantomHandoffCommentMarker(recordedDispatch);
-  return [
-    `<!-- ${marker} -->`,
-    '🛑 **merge-agent escalation — phantom handoff**',
-    '',
-    `The merge-agent dispatch \`${lrq}\` for this PR is terminal (\`${dispatchStatus}\`), but its`,
-    '`merge-agent-dispatched` marker was cleared without a recovery worker taking ownership and',
-    'without a `merge-agent-stuck` hand-off. So the automated merge path believed recovery owned',
-    'this PR when nothing did, and it would otherwise sit behind `skip-already-dispatched`',
-    'indefinitely. It has now been labeled `merge-agent-stuck` so it surfaces for operator action.',
-    '',
-    'To proceed: clear any standing review blockers, then either remove `merge-agent-stuck` and add',
-    '`merge-agent-requested` to retry the merge-agent, or merge manually if the PR is safe.',
-  ].join('\n');
-}
-
-function buildPendingPhantomHandoffCommentDelivery({ recordedDispatch, dispatchStatus, attemptedAt = null } = {}) {
-  const body = buildPhantomHandoffEscalationCommentBody({ recordedDispatch, dispatchStatus });
-  return {
-    posted: false,
-    reason: 'pending',
-    attempts: 0,
-    marker: buildPhantomHandoffCommentMarker(recordedDispatch),
-    body,
-    context: {
-      repo: recordedDispatch?.repo || null,
-      prNumber: Number(recordedDispatch?.prNumber) || null,
-      revisionRef: recordedDispatch?.headSha || null,
-      launchRequestId: recordedDispatch?.launchRequestId || null,
-      dispatchStatus: dispatchStatus || null,
-    },
-    attemptedAt: attemptedAt || null,
-  };
-}
-
 function persistPendingPhantomHandoffCommentDelivery({
   rootDir,
   job,
@@ -1900,78 +1852,6 @@ function persistPendingPhantomHandoffCommentDelivery({
       attemptedAt,
     }),
   })) || recordedDispatch;
-}
-
-async function postPhantomHandoffEscalationComment({
-  rootDir,
-  recordedDispatch,
-  dispatchStatus,
-  execFileImpl = execFileAsync,
-  env = process.env,
-} = {}) {
-  const revisionRef = String(recordedDispatch?.headSha || '').trim();
-  if (!revisionRef) {
-    return {
-      posted: false,
-      reason: 'missing-revision-ref',
-      error: 'cannot post phantom-handoff escalation comment without a revisionRef',
-    };
-  }
-  const subjectIdentity = buildCodePrSubjectIdentity({
-    repo: recordedDispatch.repo,
-    prNumber: recordedDispatch.prNumber,
-    revisionRef,
-  });
-  const body = buildPhantomHandoffEscalationCommentBody({ recordedDispatch, dispatchStatus });
-  const adapter = createGitHubPRCommentsAdapter({
-    rootDir,
-    execFileImpl,
-    env,
-    commentTimeoutMs: PHANTOM_HANDOFF_COMMENT_TIMEOUT_MS,
-    resolveGhToken: () => ({
-      tokenEnvName: 'GITHUB_TOKEN',
-      fallbackTokenEnvNames: ['GH_TOKEN'],
-      allowGhAuthFallback: true,
-    }),
-  });
-  try {
-    const receipt = await adapter.postOperatorNotice(
-      {
-        type: 'merge-agent-phantom-handoff',
-        subjectRef: {
-          domainId: subjectIdentity.domainId,
-          subjectExternalId: subjectIdentity.subjectExternalId,
-          revisionRef: subjectIdentity.revisionRef,
-        },
-        revisionRef: subjectIdentity.revisionRef,
-        eventExternalId: buildPhantomHandoffCommentMarker(recordedDispatch),
-        observedAt: new Date().toISOString(),
-      },
-      body,
-      {
-        domainId: subjectIdentity.domainId,
-        subjectExternalId: subjectIdentity.subjectExternalId,
-        revisionRef: subjectIdentity.revisionRef,
-        round: 0,
-        kind: 'operator-notice',
-        noticeRef: buildPhantomHandoffCommentMarker(recordedDispatch),
-      }
-    );
-    return {
-      posted: true,
-      marker: buildPhantomHandoffCommentMarker(recordedDispatch),
-      commentId: receipt.deliveryExternalId,
-      body,
-    };
-  } catch (err) {
-    return {
-      posted: false,
-      reason: err?.killed === true ? 'gh-cli-timeout' : 'gh-cli-failure',
-      error: err?.message || String(err),
-      marker: buildPhantomHandoffCommentMarker(recordedDispatch),
-      body,
-    };
-  }
 }
 
 async function retryPendingPhantomHandoffComment({

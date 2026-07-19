@@ -196,7 +196,8 @@ const MONOLITH_CEILINGS = Object.freeze({
   // 5485 -> 4262: ARC-19 wave3 extract fast-merge processing/orchestration to src/fast-merge-processing.mjs.
   // 4262 -> 3742: ARC-19 wave3 extract merge-agent dispatch-decision policy to src/merge-agent-dispatch-decision.mjs.
   // 3742 -> 3660: ARC-19 wave4 extract review-state classification to src/merge-agent-review-classification.mjs.
-  'follow-up-merge-agent.mjs': 3660,
+  // 3660 -> 3540: ARC-19 wave5 extract phantom-handoff comment builders/poster to src/merge-agent-phantom-handoff-comment.mjs.
+  'follow-up-merge-agent.mjs': 3540,
 });
 
 for (const [name, ceiling] of Object.entries(MONOLITH_CEILINGS)) {

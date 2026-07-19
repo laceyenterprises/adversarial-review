@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, rmSync, statSync, promises as fsPromises } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -252,6 +252,12 @@ function gitWorktreeRemoveIndicatesGone(detail) {
   return /(?:is not a working tree|does not exist)\s*$/i.test(String(detail || '').trim());
 }
 
+function pathIsStrictlyInside(parentPath, candidatePath) {
+  const parent = resolve(parentPath);
+  const candidate = resolve(candidatePath);
+  return candidate.startsWith(`${parent}${sep}`);
+}
+
 async function removeHammerWorktree({
   entry,
   hqRoot,
@@ -295,11 +301,17 @@ async function removeHammerWorktree({
     const stalePhysicalPath = entry.worktreePath || entry.path;
     let physicalRemovalSucceeded = true;
     if (removePhysicalInvalidTree && stalePhysicalPath) {
-      try {
-        rmSyncImpl(stalePhysicalPath, { recursive: true, force: true });
-      } catch (err) {
+      const expectedWorkerDir = join(hqRoot, 'workers', entry.workerId);
+      if (!pathIsStrictlyInside(expectedWorkerDir, stalePhysicalPath)) {
         physicalRemovalSucceeded = false;
-        errors.push(`worktree-rm:${String(err?.message || err)}`);
+        errors.push(`worktree-rm-refused:outside-worker-dir:${stalePhysicalPath}`);
+      } else {
+        try {
+          rmSyncImpl(stalePhysicalPath, { recursive: true, force: true });
+        } catch (err) {
+          physicalRemovalSucceeded = false;
+          errors.push(`worktree-rm:${String(err?.message || err)}`);
+        }
       }
     }
     if (physicalRemovalSucceeded) {

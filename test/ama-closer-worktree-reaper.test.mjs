@@ -302,6 +302,72 @@ test('closer worktree reaper prunes when git worktree remove reports the tree is
   assert.equal(warnings.some((message) => message.includes('remove-incomplete')), false);
 });
 
+test('closer worktree reaper refuses invalid physical removal outside hq worker dir', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-outside-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const repoPath = join(hqRoot, 'repos', 'agent-os');
+  const outsideWorktreePath = join(root, 'outside', 'hammer-ama-pr-4246-outside', 'agent-os');
+  mkdirSync(outsideWorktreePath, { recursive: true });
+
+  const calls = [];
+  const warnings = [];
+  const result = await reapCloserHammerWorktrees({
+    hqRoot,
+    cursorPath: join(root, 'cursor.json'),
+    hqPath: '/bin/hq',
+    repoPaths: [repoPath],
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      const joined = args.join(' ');
+      if (cmd === 'git' && joined.includes('remote get-url origin')) {
+        return { stdout: 'git@github.com:laceyenterprises/agent-os.git\n', stderr: '' };
+      }
+      if (cmd === 'git' && joined.includes('worktree list --porcelain')) {
+        return {
+          stdout: [
+            `worktree ${outsideWorktreePath}`,
+            'branch refs/heads/codex/outside',
+            '',
+          ].join('\n'),
+          stderr: '',
+        };
+      }
+      if (cmd === 'git' && args.includes('remove')) {
+        const err = new Error('git worktree remove failed');
+        err.stderr = `fatal: '${outsideWorktreePath}' is not a working tree`;
+        throw err;
+      }
+      if (cmd === 'git' && args.includes('prune')) {
+        throw new Error('git worktree prune should not run after physical removal is refused');
+      }
+      return { stdout: '{}', stderr: '' };
+    },
+    execGhWithRetryImpl: async () => ({
+      stdout: JSON.stringify({ state: 'MERGED', mergedAt: '2026-07-18T00:00:00Z', closedAt: '2026-07-18T00:00:00Z' }),
+    }),
+    rmSyncImpl: () => {
+      throw new Error('rmSyncImpl should not be called for an out-of-bound worktree path');
+    },
+    limit: 10,
+    logger: { info() {}, warn(message) { warnings.push(message); } },
+  });
+
+  assert.equal(result.reaped, 0);
+  assert.equal(result.errors, 1);
+  assert.equal(result.pruned, 0);
+  assert.equal(existsSync(outsideWorktreePath), true);
+  assert.equal(
+    calls.some((call) => call.cmd === 'git' && call.args.includes('remove')),
+    true,
+  );
+  assert.equal(
+    calls.some((call) => call.cmd === 'git' && call.args.includes('prune')),
+    false,
+  );
+  assert.equal(warnings.some((message) => message.includes('worktree-rm-refused:outside-worker-dir')), true);
+});
+
 test('closer worktree reaper keeps git metadata when invalid physical dir removal fails', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-rmfail-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

@@ -3593,7 +3593,7 @@ function spawnCodexRemediationWorker({
   const promptFd = openSync(promptPath, 'r');
   const stdoutFd = openSync(logPath, 'a');
   const stderrFd = openSync(logPath, 'a');
-  const codexModel = resolveCodexRemediationModel(process.env);
+  const codexModel = resolveCodexRemediationModel(env);
 
   try {
     const child = spawnDetachedCli(

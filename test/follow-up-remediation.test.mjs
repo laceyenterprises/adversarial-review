@@ -3363,12 +3363,18 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
   const originalPath = process.env.PATH;
   const originalHome = process.env.HOME;
   const originalOpenAiApiKey = process.env.OPENAI_API_KEY;
+  const originalAdversarialCodexModel = process.env.ADVERSARIAL_REMEDIATION_CODEX_MODEL;
+  const originalCodexRemediationModel = process.env.CODEX_REMEDIATION_MODEL;
+  const originalCodexModelId = process.env.CODEX_MODEL_ID;
   process.env.CODEX_AUTH_PATH = authPath;
   process.env.CODEX_CLI_PATH = '/tmp/codex';
   process.env.CODEX_HOME = codexHome;
   process.env.HOME = workspaceDir;
   process.env.OPENAI_API_KEY = 'sk-test';
   process.env.PATH = '/custom/bin';
+  process.env.ADVERSARIAL_REMEDIATION_CODEX_MODEL = 'gpt-5.5';
+  delete process.env.CODEX_REMEDIATION_MODEL;
+  delete process.env.CODEX_MODEL_ID;
 
   const spawnCalls = [];
   try {
@@ -3459,6 +3465,21 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
       delete process.env.OPENAI_API_KEY;
     } else {
       process.env.OPENAI_API_KEY = originalOpenAiApiKey;
+    }
+    if (originalAdversarialCodexModel === undefined) {
+      delete process.env.ADVERSARIAL_REMEDIATION_CODEX_MODEL;
+    } else {
+      process.env.ADVERSARIAL_REMEDIATION_CODEX_MODEL = originalAdversarialCodexModel;
+    }
+    if (originalCodexRemediationModel === undefined) {
+      delete process.env.CODEX_REMEDIATION_MODEL;
+    } else {
+      process.env.CODEX_REMEDIATION_MODEL = originalCodexRemediationModel;
+    }
+    if (originalCodexModelId === undefined) {
+      delete process.env.CODEX_MODEL_ID;
+    } else {
+      process.env.CODEX_MODEL_ID = originalCodexModelId;
     }
   }
 });

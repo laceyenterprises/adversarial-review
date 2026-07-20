@@ -81,6 +81,7 @@ import {
   recordHammerRetryDispatch,
 } from './hammer-retry-cap.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
+import { isUnsupportedHqPriorityFlagError } from '../merge-agent-hq-exec.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -93,6 +94,40 @@ const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const AGENT_OS_TOOLING_REPO = 'agent-os';
 const ADVERSARIAL_REVIEW_REPO = 'adversarial-review';
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
+
+// AMA closer dispatch ADMISSION priority (agent-os worker-pool `hq dispatch
+// --priority`). This selects the admission LANE ONLY. It never affects merge
+// eligibility: a lane-bypassed hammer still runs the full merge-eligibility
+// predicate (verdict / CI-green-at-head / identity / mergeable / lease) before
+// it merges.
+//
+// Split by whether the closure has STANDING FINDINGS the hammer must remediate
+// in code (`amaClosureNeedsTerminalRemediation`):
+//
+//   - No standing findings — the daemon-fail-closed clean-review fallback and
+//     the mechanical-gate closers (wait on required CI, rebase/mergeability
+//     repair, then click merge). These are the pipeline-critical
+//     "validate-gate-and-click" merges. They ride the reserved critical
+//     admission lane (`admission.priority_lane`, default capacity 1) so a clean
+//     PR is not starved by the dynamic CPU-load dispatch cap — the same
+//     reserved lane the operator escape-hatch `merge-agent-requested`
+//     merge-agent dispatch already uses. The worker-pool grants the load-cap
+//     bypass to `critical` rows only (cwp_dispatch admit_pass
+//     `_priority_can_bypass_active_cap`).
+//
+//   - Standing findings present — the hammer spawns a coding session to
+//     remediate blocking/non-blocking findings on the reviewed head, pushing a
+//     non-empty HAM provenance commit; this is the longest-running close.
+//     Reserving the single critical slot for those would convert a per-PR delay
+//     into fleet-wide critical-lane starvation, so it stays `normal` (subject to
+//     the load cap like any other coding worker).
+//
+// NOTE: a fully-clean, eligible, green, mergeable PR is closed inline by the
+// daemon path BEFORE this dispatch surface is reached (`daemon-clean-route`), so
+// every dispatch here is either a findings remediation or a mechanical-gate
+// repair — there is no cheaper sub-class to carve out on the critical side.
+const CLOSER_VALIDATE_AND_CLICK_DISPATCH_PRIORITY = 'critical';
+const CLOSER_FINDINGS_REMEDIATION_DISPATCH_PRIORITY = 'normal';
 const AMA_LIVE_PR_PROBE_TIMEOUT_MS = 30_000;
 const AMA_LIVE_PR_PROBE_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000];
 const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
@@ -2421,10 +2456,18 @@ export async function maybeDispatchAmaCloser({
   // otherwise this route declines and lets the daemon clean path own the tick.
   // eligibility misses force the terminal prompt because that worker is being
   // launched to repair findings, mergeability, or CI before merge.
+  // Whether this closure has STANDING FINDINGS the hammer must remediate in code
+  // (blocking/non-blocking findings, HAM terminal-remediation evidence, or a
+  // final-hammer findings-gate waiver). Captured once and reused for both the
+  // prompt selection below and the dispatch-admission priority further down: a
+  // findings-remediation close is the heavy, minutes-long coding case that stays
+  // out of the reserved critical lane, while a no-findings mechanical-gate close
+  // (ci-wait / rebase / validate-gate-and-click) rides the lane.
+  const closureRemediatesFindings = amaClosureNeedsTerminalRemediation(verdict);
   const useHammerTerminalRemediationPrompt =
     workerClass === 'hammer' && (
       forceHammerTerminalRemediationPrompt ||
-      amaClosureNeedsTerminalRemediation(verdict)
+      closureRemediatesFindings
     );
   const currentHeadFinalHammerTerminalRemediation =
     useHammerTerminalRemediationPrompt &&
@@ -3656,12 +3699,23 @@ export async function maybeDispatchAmaCloser({
     }
   };
 
+  // Route the dispatch to the correct admission lane. A no-findings
+  // validate-gate-and-click / mechanical-gate close takes the reserved critical
+  // lane so a clean, pipeline-critical merge is not stalled by the dynamic
+  // CPU-load dispatch cap; a findings-remediation hammer stays `normal` so it
+  // cannot occupy the single reserved slot for the minutes it spends remediating
+  // findings. This is admission routing only — the eligibility gate is unchanged.
+  const dispatchPriority = closureRemediatesFindings
+    ? CLOSER_FINDINGS_REMEDIATION_DISPATCH_PRIORITY
+    : CLOSER_VALIDATE_AND_CLICK_DISPATCH_PRIORITY;
+  const argsWithPriority = ['dispatch', '--priority', dispatchPriority, ...args.slice(1)];
+  let activeArgs = argsWithPriority;
   let execResult;
   let transientRetryIndex = 0;
   let samePrHammerHolderRetryUsed = false;
   for (;;) {
     try {
-      execResult = await execFileImpl(hqPath, args, {
+      execResult = await execFileImpl(hqPath, activeArgs, {
         env: process.env,
         maxBuffer: 5 * 1024 * 1024,
         // CFG-knobbed (roles.adversarial.merge_authority.dispatch_timeout_ms,
@@ -3674,6 +3728,18 @@ export async function maybeDispatchAmaCloser({
       });
       break;
     } catch (err) {
+      // Older / forked `hq` that predates `--priority`: retry once without the
+      // flag so the closer still dispatches (degraded to default-`normal`
+      // admission) instead of failing outright. An arg-parse rejection happens
+      // before any launch, so no lrq was emitted and this cannot double-spawn.
+      // The deployed hq accepts `--priority` (the merge-agent dispatch already
+      // passes it); this is a fork/rollback safety net that mirrors the
+      // follow-up merge-agent path.
+      if (activeArgs === argsWithPriority && isUnsupportedHqPriorityFlagError(err)) {
+        activeArgs = args;
+        transientRetryIndex = 0;
+        continue;
+      }
       if (isTransientHqDispatchError(err) && transientRetryIndex < AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS.length) {
         const delayMs = Number(AMA_CLOSER_DISPATCH_TRANSIENT_RETRY_DELAYS_MS[transientRetryIndex]) || 0;
         transientRetryIndex += 1;

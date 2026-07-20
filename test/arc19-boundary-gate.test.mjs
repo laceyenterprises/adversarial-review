@@ -195,7 +195,8 @@ const MONOLITH_CEILINGS = Object.freeze({
   // 5289 -> 5167: ARC-19 wave5 extract remediation worker prompt builder to src/remediation-prompt-builder.mjs.
   // 5167 -> 5054: ARC-19 wave8 extract claude-code remediation worker spawn/env to src/remediation-claude-code-worker.mjs.
   // 5054 -> 4790: ARC-19 wave10 extract remediation OAuth pre-flight assertions to src/remediation-oauth-preflight.mjs.
-  'follow-up-remediation.mjs': 4790,
+  // 4790 -> 4640: ARC-19 wave12 extract worker commit-provenance (git identity + trailer class + commit-msg hook) to src/remediation-worker-provenance.mjs.
+  'follow-up-remediation.mjs': 4640,
   // 5485 -> 4262: ARC-19 wave3 extract fast-merge processing/orchestration to src/fast-merge-processing.mjs.
   // 4262 -> 3742: ARC-19 wave3 extract merge-agent dispatch-decision policy to src/merge-agent-dispatch-decision.mjs.
   // 3742 -> 3660: ARC-19 wave4 extract review-state classification to src/merge-agent-review-classification.mjs.

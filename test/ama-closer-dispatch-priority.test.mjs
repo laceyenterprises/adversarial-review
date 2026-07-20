@@ -13,11 +13,10 @@ import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 // merge is not stalled by the dynamic CPU-load dispatch cap. These tests pin the
 // routing predicate the closer uses when it builds `hq dispatch --priority`:
 //
-//   - a no-findings validate-gate-and-click / mechanical-gate close (the
-//     daemon-fail-closed clean-review fallback — e.g. clean review + a required
-//     check still pending) resolves to `critical` (lane-eligible);
-//   - a findings-remediation hammer (blocking/non-blocking findings the hammer
-//     must remediate in code) stays `normal` so it cannot hog the single
+//   - a no-terminal-remediation validate-gate-and-click / mechanical-gate close
+//     resolves to `critical` (lane-eligible);
+//   - a terminal-remediation hammer (blocking/non-blocking findings, forced red
+//     CI, or mergeability repair) stays `normal` so it cannot hog the single
 //     reserved slot for the minutes it spends remediating;
 //   - the `--priority` flag actually carries the resolved value on the dispatch;
 //   - an older/forked `hq` without `--priority` degrades cleanly (retry once
@@ -25,9 +24,9 @@ import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 //
 // A fully-clean, eligible, green, mergeable PR never reaches this dispatch
 // surface — the daemon clean-route closes it inline (`daemon-clean-route`) — so
-// every dispatch here is either a findings remediation (normal) or a
-// mechanical-gate repair (critical). This is admission routing ONLY: priority
-// never changes merge eligibility.
+// every dispatch here is either a terminal remediation (normal) or a
+// no-terminal-remediation mechanical-gate repair (critical). This is admission
+// routing ONLY: priority never changes merge eligibility.
 
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
 const HEAD = 'a'.repeat(40);
@@ -116,9 +115,9 @@ function findingsRemediationArgs(rootDir, overrides = {}) {
 }
 
 // A CLEAN review (zero findings) that still reaches the closer dispatch surface
-// because a required check is not green yet (the daemon-fail-closed clean-review
-// fallback). The hammer has no findings to remediate — it is the short
-// validate-gate-and-click close.
+// because a required check is not green yet. This forces the terminal-remediation
+// prompt even though no findings are standing, so it must stay out of the
+// reserved critical lane.
 function cleanValidateAndClickArgs(rootDir, overrides = {}) {
   return baseArgs(rootDir, {
     reviewState: {
@@ -165,7 +164,7 @@ test('LCR: findings-remediation hammer dispatches with --priority normal', async
   );
 });
 
-test('LCR: clean validate-gate-and-click closer dispatches with --priority critical', async (t) => {
+test('LCR: clean forced terminal-remediation closer dispatches with --priority normal', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-priority-clean-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const deps = testDeps();
@@ -179,8 +178,38 @@ test('LCR: clean validate-gate-and-click closer dispatches with --priority criti
   assert.equal(flagValue(args, '--task-kind'), 'merge');
   assert.equal(
     flagValue(args, '--priority'),
-    'critical',
-    'no-findings validate-gate-and-click closer must ride the reserved critical lane',
+    'normal',
+    'clean forced terminal-remediation closer must not take the reserved critical lane',
+  );
+});
+
+test('LCR: forced terminal-remediation prompt dispatches with --priority normal even with a clean verdict', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lcr-priority-forced-terminal-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+
+  const result = await maybeDispatchAmaCloser({
+    ...cleanValidateAndClickArgs(rootDir, {
+      prMetadata: {
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: REQUIRED_GATE, conclusion: 'SUCCESS' },
+          { __typename: 'CheckRun', name: 'ci/test', conclusion: 'FAILURE' },
+        ],
+        branchProtection: { requiredContexts: [REQUIRED_GATE, 'ci/test'] },
+      },
+    }),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, true, 'a clean verdict with red required CI should auto-hammer');
+  assert.equal(deps.calls.length, 1);
+  const args = deps.calls[0].args;
+  assert.equal(flagValue(args, '--completion-shape'), 'decision-only');
+  assert.equal(flagValue(args, '--task-kind'), 'merge');
+  assert.equal(
+    flagValue(args, '--priority'),
+    'normal',
+    'forced terminal-remediation prompt must not take the reserved critical lane',
   );
 });
 
@@ -194,7 +223,7 @@ test('LCR: --priority precedes the base dispatch args and is emitted exactly onc
   const args = deps.calls[0].args;
   assert.equal(args[0], 'dispatch');
   assert.equal(args.filter((a) => a === '--priority').length, 1, 'exactly one --priority flag');
-  assert.deepEqual(args.slice(0, 3), ['dispatch', '--priority', 'critical']);
+  assert.deepEqual(args.slice(0, 3), ['dispatch', '--priority', 'normal']);
 });
 
 test('LCR: unsupported --priority hq degrades to a flag-less retry (no dispatch regression)', async (t) => {

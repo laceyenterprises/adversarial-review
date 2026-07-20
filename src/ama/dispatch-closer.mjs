@@ -101,22 +101,22 @@ const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md
 // predicate (verdict / CI-green-at-head / identity / mergeable / lease) before
 // it merges.
 //
-// Split by whether the closure has STANDING FINDINGS the hammer must remediate
-// in code (`amaClosureNeedsTerminalRemediation`):
+// Split by whether the dispatch is actually using the heavy HAM
+// terminal-remediation prompt:
 //
-//   - No standing findings — the daemon-fail-closed clean-review fallback and
-//     the mechanical-gate closers (wait on required CI, rebase/mergeability
-//     repair, then click merge). These are the pipeline-critical
-//     "validate-gate-and-click" merges. They ride the reserved critical
-//     admission lane (`admission.priority_lane`, default capacity 1) so a clean
-//     PR is not starved by the dynamic CPU-load dispatch cap — the same
-//     reserved lane the operator escape-hatch `merge-agent-requested`
-//     merge-agent dispatch already uses. The worker-pool grants the load-cap
-//     bypass to `critical` rows only (cwp_dispatch admit_pass
+//   - No terminal-remediation prompt — the daemon-fail-closed clean-review
+//     fallback and the mechanical-gate closers (wait on required CI,
+//     rebase/mergeability repair, then click merge). These are the
+//     pipeline-critical "validate-gate-and-click" merges. They ride the reserved
+//     critical admission lane (`admission.priority_lane`, default capacity 1) so
+//     a clean PR is not starved by the dynamic CPU-load dispatch cap — the same
+//     reserved lane the operator escape-hatch `merge-agent-requested` merge-agent
+//     dispatch already uses. The worker-pool grants the load-cap bypass to
+//     `critical` rows only (cwp_dispatch admit_pass
 //     `_priority_can_bypass_active_cap`).
 //
-//   - Standing findings present — the hammer spawns a coding session to
-//     remediate blocking/non-blocking findings on the reviewed head, pushing a
+//   - Terminal-remediation prompt selected — the hammer spawns a coding session
+//     to remediate findings/checks/mergeability on the reviewed head, pushing a
 //     non-empty HAM provenance commit; this is the longest-running close.
 //     Reserving the single critical slot for those would convert a per-PR delay
 //     into fleet-wide critical-lane starvation, so it stays `normal` (subject to
@@ -2458,11 +2458,9 @@ export async function maybeDispatchAmaCloser({
   // launched to repair findings, mergeability, or CI before merge.
   // Whether this closure has STANDING FINDINGS the hammer must remediate in code
   // (blocking/non-blocking findings, HAM terminal-remediation evidence, or a
-  // final-hammer findings-gate waiver). Captured once and reused for both the
-  // prompt selection below and the dispatch-admission priority further down: a
-  // findings-remediation close is the heavy, minutes-long coding case that stays
-  // out of the reserved critical lane, while a no-findings mechanical-gate close
-  // (ci-wait / rebase / validate-gate-and-click) rides the lane.
+  // final-hammer findings-gate waiver). Forced eligibility misses also select
+  // the HAM terminal-remediation prompt, so dispatch priority below keys off the
+  // final prompt decision rather than this narrower finding-only predicate.
   const closureRemediatesFindings = amaClosureNeedsTerminalRemediation(verdict);
   const useHammerTerminalRemediationPrompt =
     workerClass === 'hammer' && (
@@ -3699,13 +3697,14 @@ export async function maybeDispatchAmaCloser({
     }
   };
 
-  // Route the dispatch to the correct admission lane. A no-findings
+  // Route the dispatch to the correct admission lane. A no-terminal-remediation
   // validate-gate-and-click / mechanical-gate close takes the reserved critical
   // lane so a clean, pipeline-critical merge is not stalled by the dynamic
-  // CPU-load dispatch cap; a findings-remediation hammer stays `normal` so it
+  // CPU-load dispatch cap; any terminal-remediation hammer stays `normal` so it
   // cannot occupy the single reserved slot for the minutes it spends remediating
-  // findings. This is admission routing only — the eligibility gate is unchanged.
-  const dispatchPriority = closureRemediatesFindings
+  // findings/checks/mergeability. This is admission routing only — the
+  // eligibility gate is unchanged.
+  const dispatchPriority = useHammerTerminalRemediationPrompt
     ? CLOSER_FINDINGS_REMEDIATION_DISPATCH_PRIORITY
     : CLOSER_VALIDATE_AND_CLICK_DISPATCH_PRIORITY;
   const argsWithPriority = ['dispatch', '--priority', dispatchPriority, ...args.slice(1)];

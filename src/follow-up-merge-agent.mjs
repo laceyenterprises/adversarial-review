@@ -13,7 +13,6 @@ import { promisify } from 'node:util';
 
 import { summarizeChecksConclusion } from './checks-summary.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
-import { normalizeRequiredContexts } from './branch-protection.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import {
   FAST_MERGE_GH_TIMEOUT_MS,
@@ -117,6 +116,10 @@ import {
   sleep,
   detectAgentOsPresence,
 } from './merge-agent-hq-exec.mjs';
+import {
+  extractOperatorNotes,
+  fetchMergeAgentCandidate,
+} from './merge-agent-candidate.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -476,16 +479,6 @@ function normalizeFollowUpJobStatus(status) {
   const text = String(status ?? '').trim().toLowerCase();
   if (text === 'in_progress') return 'in-progress';
   return text;
-}
-
-function extractOperatorNotes(prBody) {
-  const text = String(prBody ?? '').trim();
-  if (!text) return null;
-  return [
-    'BEGIN UNTRUSTED PR BODY NOTES',
-    text.slice(0, 2_000),
-    'END UNTRUSTED PR BODY NOTES',
-  ].join('\n');
 }
 
 function mergeAgentDispatchDir(rootDir) {
@@ -2875,79 +2868,6 @@ async function dispatchMergeAgentForPR({
     labelRemovalErrors: labelRemoval.labelRemovalErrors,
     dispatchedLabelAdded: dispatchedLabel.added,
     dispatchedLabelError: dispatchedLabel.error,
-  };
-}
-
-async function fetchMergeAgentCandidate(repo, prNumber, {
-  execFileImpl = execFileAsync,
-  operatorApprovalEvent = undefined,
-  mergeAgentRequestEvent = undefined,
-} = {}) {
-  const { stdout } = await execFileImpl(
-    'gh',
-    [
-      'pr',
-      'view',
-      String(prNumber),
-      '--repo',
-      repo,
-      '--json',
-      'mergeable,mergeStateStatus,headRefName,baseRefName,headRefOid,body,labels,statusCheckRollup,state,mergedAt,closedAt,updatedAt,author',
-    ],
-    { maxBuffer: 5 * 1024 * 1024 }
-  );
-  const parsed = JSON.parse(String(stdout || '{}'));
-  const labels = parsed.labels || [];
-  const normalizedLabels = normalizeLabelNames(labels);
-  const hasOperatorApproved = normalizedLabels.includes(OPERATOR_APPROVED_LABEL);
-  const hasMergeAgentRequested = normalizedLabels.includes(MERGE_AGENT_REQUESTED_LABEL);
-  const [resolvedOperatorApprovalEvent, resolvedMergeAgentRequestEvent] = await Promise.all([
-    hasOperatorApproved && operatorApprovalEvent === undefined
-      ? fetchLatestLabelEvent(repo, prNumber, OPERATOR_APPROVED_LABEL, { execFileImpl })
-      : operatorApprovalEvent ?? null,
-    hasMergeAgentRequested && mergeAgentRequestEvent === undefined
-      ? fetchLatestLabelEvent(repo, prNumber, MERGE_AGENT_REQUESTED_LABEL, { execFileImpl })
-      : mergeAgentRequestEvent ?? null,
-  ]);
-  let branchProtection = { requiredContexts: [] };
-  if (parsed.baseRefName) {
-    try {
-      const { stdout: protectionStdout } = await execFileImpl(
-        'gh',
-        [
-          'api',
-          `repos/${repo}/branches/${encodeURIComponent(parsed.baseRefName)}/protection`,
-        ],
-        { maxBuffer: 5 * 1024 * 1024 }
-      );
-      branchProtection = {
-        requiredContexts: normalizeRequiredContexts(JSON.parse(String(protectionStdout || '{}'))),
-      };
-    } catch {
-      branchProtection = { requiredContexts: [] };
-    }
-  }
-  return {
-    repo,
-    prNumber,
-    branch: parsed.headRefName,
-    baseBranch: parsed.baseRefName,
-    headSha: parsed.headRefOid || null,
-    mergeable: parsed.mergeable || 'UNKNOWN',
-    mergeStateStatus: parsed.mergeStateStatus || null,
-    checksConclusion: summarizeChecksConclusion(parsed.statusCheckRollup),
-    statusCheckRollup: Array.isArray(parsed.statusCheckRollup) ? parsed.statusCheckRollup : [],
-    branchProtection,
-    labels,
-    operatorNotes: extractOperatorNotes(parsed.body),
-    prState: parsed.mergedAt ? 'merged' : String(parsed.state || 'unknown').trim().toLowerCase(),
-    merged: Boolean(parsed.mergedAt),
-    prAuthor: parsed.author?.login || null,
-    closedAt: parsed.closedAt || null,
-    mergedAt: parsed.mergedAt || null,
-    prUpdatedAt: parsed.updatedAt || null,
-    operatorApprovalEvent: resolvedOperatorApprovalEvent,
-    mergeAgentRequestEvent: resolvedMergeAgentRequestEvent,
   };
 }
 

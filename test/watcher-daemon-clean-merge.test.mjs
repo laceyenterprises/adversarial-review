@@ -830,6 +830,92 @@ test('resolveDaemonWorkerIdentityForPr keeps the current-head fast path when the
   assert.deepEqual(readCalls, ['head-at-open'], 'no head-independent retry when the strict read resolves');
 });
 
+// Producer #665-remediation pairing: the producer now writes the owner-qualified
+// `<owner>/<name>` identity (repoFullName/prRepoFullName) ALONGSIDE the short
+// `repo`/`prRepo`. The resolver must match the full form exactly against the
+// live GitHub rollup, keep legacy short-form records fail-closed, and never
+// cross-match a same-name fork.
+async function resolveIdentityFromProvenanceRecord({ record, expectedRepo, prNumber, currentBranch }) {
+  const rootDir = tempRoot();
+  try {
+    const workerDir = join(rootDir, 'workers', 'provenance-under-test');
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, 'launch-provenance.json'), JSON.stringify(record));
+    return await resolveDaemonWorkerIdentityForPr({
+      repo: expectedRepo,
+      prNumber,
+      currentHeadSha: 'live-head-after-remediation',
+      currentBranch,
+      hqRoot: rootDir,
+      rootDir,
+      env: { HQ_ROOT: rootDir },
+      consumeHeadAttestations: false,
+      readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+    });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+}
+
+test('AMA identity fallback resolves via owner-qualified prRepoFullName against the full rollup repo', async () => {
+  const identity = await resolveIdentityFromProvenanceRecord({
+    expectedRepo: 'laceyenterprises/agent-os', // full form from the live GitHub rollup
+    prNumber: 4018,
+    currentBranch: 'claude-code/LAC-4018',
+    record: {
+      repo: 'agent-os', // short form preserved for existing consumers
+      prRepo: 'agent-os',
+      repoFullName: 'laceyenterprises/agent-os',
+      prRepoFullName: 'laceyenterprises/agent-os',
+      prNumber: 4018,
+      branch: 'claude-code/LAC-4018',
+      launchRequestId: 'lrq_full_identity',
+      workerClass: 'claude-code',
+      prHeadSha: 'head-at-open',
+    },
+  });
+  assert.equal(identity.ok, true);
+  assert.equal(identity.resolvedBy, 'launch-provenance');
+  assert.equal(identity.launchRequestId, 'lrq_full_identity');
+  assert.equal(identity.workerClass, 'claude-code');
+});
+
+test('AMA identity fallback keeps a legacy short-form-only provenance record fail-closed', async () => {
+  const identity = await resolveIdentityFromProvenanceRecord({
+    expectedRepo: 'laceyenterprises/agent-os',
+    prNumber: 4018,
+    currentBranch: 'claude-code/LAC-4018',
+    record: {
+      repo: 'agent-os',
+      prRepo: 'agent-os', // NO owner-qualified field (pre-fix record)
+      prNumber: 4018,
+      branch: 'claude-code/LAC-4018',
+      launchRequestId: 'lrq_legacy_short',
+      workerClass: 'claude-code',
+    },
+  });
+  assert.equal(identity.ok, false, 'short-form agent-os must not match laceyenterprises/agent-os');
+});
+
+test('AMA identity fallback never cross-matches a same-name different-owner fork', async () => {
+  const identity = await resolveIdentityFromProvenanceRecord({
+    expectedRepo: 'laceyenterprises/agent-os', // canonical repo PR
+    prNumber: 4018,
+    currentBranch: 'claude-code/LAC-4018',
+    record: {
+      repo: 'agent-os',
+      prRepo: 'agent-os',
+      repoFullName: 'attacker/agent-os',
+      prRepoFullName: 'attacker/agent-os', // fork: same name, different owner
+      prNumber: 4018,
+      branch: 'claude-code/LAC-4018',
+      launchRequestId: 'lrq_fork_spoof',
+      workerClass: 'claude-code',
+    },
+  });
+  assert.equal(identity.ok, false, 'a fork identity must never resolve the canonical repo PR');
+});
+
 test('daemon clean merge with LHA enforcement blocks missing produced attestation at live head', async () => {
   const rootDir = tempRoot();
   try {

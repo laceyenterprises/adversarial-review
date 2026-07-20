@@ -1351,14 +1351,11 @@ test('daemon clean merge launch provenance skips missing candidate files without
   }
 });
 
-test('resolveDaemonWorkerIdentityForPr resolves identity from launch provenance in the CANONICAL hq shape (short-form repo, no prNumber) when the pr_opened row is absent', async () => {
-  // Regression for the systemic worker-identity-unresolved park (2026-07-19).
-  // hq writes launch-provenance `repo`/`prRepo` in SHORT form (`agent-os`) and
-  // omits `prNumber` for ~95% of records, but the daemon resolves identity with
-  // the FULL `<owner>/<name>` form it reads from the live GitHub rollup. The old
-  // matcher required an exact repo-string match AND a prNumber match, so it
-  // matched ZERO real records — the fallback was dead, and every dispatched-worker
-  // PR whose pr_opened ledger row had not yet landed parked fail-closed each tick.
+test('resolveDaemonWorkerIdentityForPr rejects short-form launch provenance because repo owner is ambiguous across forks', async () => {
+  // Merge-authority identity must not bridge short `<name>` provenance to a live
+  // `<owner>/<name>` PR. A worker dispatched for attacker/agent-os and one
+  // dispatched for laceyenterprises/agent-os would both write `agent-os` in this
+  // legacy shape, so accepting it would allow cross-fork identity spoofing.
   const rootDir = tempRoot();
   try {
     const workerDir = join(rootDir, 'workers', 'codex-shw-05');
@@ -1385,11 +1382,9 @@ test('resolveDaemonWorkerIdentityForPr resolves identity from launch provenance 
       consumeHeadAttestations: false,
       readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
     });
-    assert.equal(identity.ok, true);
-    assert.equal(identity.resolvedBy, 'launch-provenance');
-    assert.equal(identity.launchRequestId, 'lrq_fdf9602a-60d2-4c5f-af77-bbb7bb6db2ab');
-    assert.equal(identity.workerClass, 'codex');
-    assert.equal(identity.buildCompletionReason, 'missing-build-completion-signal');
+    assert.equal(identity.ok, false);
+    assert.equal(identity.reason, 'missing-build-completion-signal');
+    assert.equal(identity.launchProvenanceReason, 'missing-launch-provenance');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -1466,10 +1461,9 @@ test('resolveDaemonWorkerIdentityForPr skips a launch-provenance record explicit
   }
 });
 
-test('resolveDaemonWorkerIdentityForPr repo-form bridge cannot cross repositories (short-form name must be the owner/name segment)', async () => {
-  // Provenance for a worker in a DIFFERENT repo that happens to share the branch
-  // name must never be attributed to an agent-os PR. The short<->full bridge only
-  // accepts `<name>` == the `<owner>/<name>` name segment, never a foreign name.
+test('resolveDaemonWorkerIdentityForPr launch provenance requires exact owner/name repo identity', async () => {
+  // Provenance for a worker in a DIFFERENT owner namespace that happens to share
+  // both repo name and branch must never be attributed to the upstream PR.
   const rootDir = tempRoot();
   try {
     const workerDir = join(rootDir, 'workers', 'codex-shared-branch');
@@ -1477,9 +1471,9 @@ test('resolveDaemonWorkerIdentityForPr repo-form bridge cannot cross repositorie
     writeFileSync(
       join(workerDir, 'launch-provenance.json'),
       JSON.stringify({
-        repo: 'adversarial-review',
+        repo: 'attacker/agent-os',
         branch: 'codex-shared/SHARED',
-        launchRequestId: 'lrq_other_repo',
+        launchRequestId: 'lrq_fork_spoof',
         workerClass: 'codex',
       }),
     );

@@ -329,24 +329,11 @@ function daemonLaunchProvenanceRepoMatches(recordRepo, expectedRepo) {
   const record = String(recordRepo || '').trim().toLowerCase();
   const expected = String(expectedRepo || '').trim().toLowerCase();
   if (!record || !expected) return false;
-  if (record === expected) return true;
-  // Representation bridge (NOT a security loosening): hq writes launch-provenance
-  // `repo`/`prRepo` in SHORT `<name>` form (e.g. `agent-os`), while the daemon
-  // resolves identity with the FULL `<owner>/<name>` form it reads from the live
-  // GitHub rollup (e.g. `laceyenterprises/agent-os`). An exact-equality-only check
-  // therefore matched ZERO real provenance records — every record on this host
-  // uses the short form — silently killing the entire launch-provenance fallback.
-  // Bridge the two representations by matching ONLY when the slash-less side is
-  // exactly the repo-name segment of the `<owner>/<name>` side: `agent-os` matches
-  // `laceyenterprises/agent-os` but never `laceyenterprises/other-repo`. Two
-  // distinct full forms, or two distinct short forms, still never match, so this
-  // can never bridge across different repositories.
-  const recordHasOwner = record.includes('/');
-  const expectedHasOwner = expected.includes('/');
-  if (recordHasOwner === expectedHasOwner) return false;
-  const [fullForm, shortName] = recordHasOwner ? [record, expected] : [expected, record];
-  if (shortName.includes('/')) return false;
-  return fullForm.endsWith(`/${shortName}`);
+  // Launch provenance is merge-authority identity, so the repo string must carry
+  // the same owner/name identity GitHub reports for the PR. A short `<name>`
+  // record is ambiguous across forks and must fail closed until the producer
+  // writes canonical `<owner>/<name>` provenance.
+  return record === expected;
 }
 
 function daemonLaunchProvenancePayload(doc) {

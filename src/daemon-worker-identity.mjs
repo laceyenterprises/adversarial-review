@@ -410,7 +410,15 @@ async function readDaemonWorkerLaunchProvenanceForPr({
     const doc = await readJsonFileBestEffort(candidate.path);
     const payload = daemonLaunchProvenancePayload(doc);
     if (!payload || typeof payload !== 'object') continue;
-    const recordRepo = payload.prRepo || payload.repo;
+    // Prefer the owner-qualified GitHub identity (producer #665 remediation:
+    // `<owner>/<name>`) so the exact-match against the full `expectedRepo` from
+    // the live GitHub rollup succeeds. The short `prRepo`/`repo` fields remain a
+    // fallback ONLY for their exact-match semantics — a short-form record like
+    // `agent-os` still fails closed against `laceyenterprises/agent-os`, and a
+    // same-name fork's `attacker/agent-os` still never matches. This is purely
+    // additive qualification; it never bridges short↔full or across owners.
+    const recordRepo =
+      payload.prRepoFullName || payload.repoFullName || payload.prRepo || payload.repo;
     const recordBranch = String(payload.branch || payload.headBranch || payload.prBranch || '').trim();
     const recordPrNumberRaw = payload.prNumber ?? payload.pr_number ?? payload.pr;
     const recordPrNumber = Number(recordPrNumberRaw);

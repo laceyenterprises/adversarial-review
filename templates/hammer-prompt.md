@@ -155,7 +155,7 @@ scans.
 5. Validate the exact post-remediation PR head. Refresh the PR head SHA after
    your commit. **Always rebase the PR onto the latest base (`main`) before
    merging — do not merge a branch that is behind — and CONFIRM THE REBASE
-   HOLDS.** Before entering the final rebase→local-CI→remote-CI→merge window,
+   HOLDS.** Before entering the final rebase→remote-CI→merge window,
    acquire the merge lease
    for `(<<REPO>>, base, PR <<PR_NUMBER>>)` with the blocking
    `bin/merge-lease.mjs acquire` command below. The acquire waits; do not poll.
@@ -171,19 +171,16 @@ scans.
    `merge-lease.mjs needs-revalidation ... --current-base <sha>`. Re-run the
    changed-surface tests (mandate step 2b) and required checks only when
    `needsRevalidation` is true; otherwise trust the parallel-phase validation.
-   Then, regardless of `needsRevalidation`, run LOCAL CI on the exact rebased
-   head via the PPH pre-push CI-mirror engine, which mirrors the same
-   path-conditional GitHub Actions checks locally before the remote wait.
+   GitHub required checks are the SOLE CI authority: the hammer does NOT run a
+   local test battery or the PPH pre-push CI mirror as a merge gate.
    `HAM_VALIDATION_BASE_SHA` must name the base SHA that the parallel-phase full
    suite actually validated. If that value is missing or malformed, force the
    full revalidation instead of deriving a post-hoc validation base.
-   Fix any local CI failure or test the rebase newly broke, commit it, publish
-   the new head, and re-enter this lease/gate flow from a fresh base fetch. If
-   you cannot make local CI green, release the lease, roll back any partial local
-   rebase state, emit one hard-blocker report, and stop. Re-run the closer
-   eligibility predicate in SPEC §1.1.1 HAM terminal-remediation mode for that
-   same live head. Only a rebased-onto-latest-main head whose local CI and remote
-   required check bars are green may proceed to merge while still holding the
+   Fix any changed-surface test the rebase newly broke, commit it, publish
+   the new head, and re-enter this lease/gate flow from a fresh base fetch. Re-run
+   the closer eligibility predicate in SPEC §1.1.1 HAM terminal-remediation mode
+   for that same live head. Only a rebased-onto-latest-main head whose GitHub
+   required check bar is green may proceed to merge while still holding the
    lease. For any blocking,
    stale-head, remediation-state, or bare verdict failure, the predicate must
    prove the HAM-authored remediation commit, provenance trailers, PR audit
@@ -204,7 +201,7 @@ scans.
 7. **Post a CLOSING comment after the merge confirms.** Once you have re-read
    GitHub and confirmed the PR is merged at the validated head, post one final
    comment on PR <<PR_URL>> that states: the merge lease was held and released,
-   the base SHA rebased onto, the local PPH CI-mirror result, the remote CI result
+   the base SHA rebased onto, the remote CI result
    for the exact head, the merged SHA, the merge method, the counts of findings
    remediated (blocking / non-blocking), the failing tests you fixed to keep
    `main` green (or "suite already green"), and the
@@ -614,12 +611,12 @@ fi
 # 2b) and required checks against THIS rebased $POST_REMEDIATION_SHA and fix anything
 # the rebase newly broke. If HAM_NEEDS_REVALIDATION is false, trust the
 # parallel-phase validation already performed for this head/base relationship
-# only for that parallel phase. The in-lease local CI phase below is still
-# mandatory for every rebased head. A rebase that turns local CI, changed-surface
-# tests, or required checks red must be fixed (and re-committed, which moves the
-# head and re-enters this validation), never merged. Do not proceed past this
-# point with a red applicable suite, a red required check, or a still-BEHIND
-# mergeStateStatus.
+# only for that parallel phase. GitHub required checks are the sole CI authority;
+# the hammer runs no local battery or pre-push CI mirror as a merge gate. A rebase
+# that turns changed-surface tests or required checks red must be fixed (and
+# re-committed, which moves the head and re-enters this validation), never merged.
+# Do not proceed past this point with a red applicable suite, a red required
+# check, or a still-BEHIND mergeStateStatus.
 ```
 
 ## Resolving merge conflicts
@@ -731,13 +728,6 @@ Do not merge unless all of these are true:
 - `POST_REMEDIATION_SHA` still equals the PR head.
 - The branch is rebased onto the latest `main` — `mergeStateStatus` is NOT
   `BEHIND` for `POST_REMEDIATION_SHA`.
-- LOCAL CI has passed for `POST_REMEDIATION_SHA` via the PPH pre-push CI-mirror
-  engine, followed by the repo's full local entrypoint (`npm test` here unless a
-  repo-controlled command overrides `HAM_LOCAL_BATTERY_COMMAND`). The CI mirror
-  is the same path-conditional GitHub Actions mirror used by the pre-push hook;
-  the full local battery is the broader correctness backstop. Fix anything red
-  locally, commit it, push the new head, and re-enter this lease/gate flow; do
-  not merge on a red or skipped local CI result.
 - GitHub's required checks are successful for `POST_REMEDIATION_SHA`, as read
   from `statusCheckRollup` through the existing `src/github-api.mjs` adapter, and
   no failed, missing, stale, pending, or unchecked required check exists.
@@ -760,7 +750,6 @@ if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ] || [ -z "${HAM_MERGE_LEASE_ID:-}" ]; t
   exit 1
 fi
 
-HAM_LOCAL_BATTERY_COMMAND="${HAM_LOCAL_BATTERY_COMMAND:-npm test}"
 HAM_REMOTE_CI_WAIT_SECONDS="${HAM_REMOTE_CI_WAIT_SECONDS:-900}"
 HAM_REMOTE_CI_POLL_SECONDS="${HAM_REMOTE_CI_POLL_SECONDS:-15}"
 HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT="${HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT:-3}"
@@ -1012,82 +1001,12 @@ ham_merge_error_permanent() {
   grep -Eiq 'match-head-commit|head.*(mismatch|changed|does not match)|not authorized|permission|authentication|forbidden|HTTP 401|HTTP 403|branch protection|ruleset|required check|status checks? (not|have not)|not mergeable|merge conflict|closed|pull request.*not open|draft' "$1"
 }
 
-ham_run_local_battery_with_timeout() {
-  perl -e '
-    use POSIX qw(setsid);
-    my $timeout = shift @ARGV;
-    my $pid = fork();
-    die "fork failed: $!" unless defined $pid;
-    if ($pid == 0) {
-      setsid() or die "setsid failed: $!";
-      exec @ARGV;
-      die "exec failed: $!";
-    }
-    local $SIG{ALRM} = sub {
-      kill "TERM", -$pid;
-      sleep 2;
-      kill "KILL", -$pid;
-      exit 124;
-    };
-    alarm $timeout;
-    waitpid($pid, 0);
-    my $status = $?;
-    alarm 0;
-    exit($status & 127 ? 128 + ($status & 127) : $status >> 8);
-  ' "${HAM_LOCAL_BATTERY_TIMEOUT_SECONDS:-3600}" sh -lc "$HAM_LOCAL_BATTERY_COMMAND"
-}
-
-ham_run_pph_ci_mirror_with_timeout() {
-  HAM_PPH_STDIN=$(mktemp "${HAM_MERGE_TMP_PREFIX}.pph-stdin.XXXXXX") || return 1
-  HAM_PPH_REMOTE_SHA=$(printf '%040d' 0)
-  if ham_is_full_sha "${HAM_REBASED_ONTO_BASE_SHA:-}"; then
-    HAM_PPH_REMOTE_SHA="$HAM_REBASED_ONTO_BASE_SHA"
-  fi
-  printf 'refs/heads/ham-<<PR_NUMBER>> %s refs/heads/%s %s\n' "$POST_REMEDIATION_SHA" "$BASE_BRANCH" "$HAM_PPH_REMOTE_SHA" > "$HAM_PPH_STDIN"
-  if [ ! -f scripts/ci-mirror/run-ci-mirror.py ]; then
-    echo "HAM hard-blocker: PPH CI-mirror runner missing at scripts/ci-mirror/run-ci-mirror.py" >&2
-    rm -f "$HAM_PPH_STDIN"
-    return 127
-  fi
-  if ! command -v python3 >/dev/null 2>&1; then
-    echo "HAM hard-blocker: python3 is required for the PPH CI-mirror runner" >&2
-    rm -f "$HAM_PPH_STDIN"
-    return 127
-  fi
-  if [ -x .git-hooks/pre-push ]; then
-    perl -e 'alarm shift; exec @ARGV' "${HAM_LOCAL_CI_TIMEOUT_SECONDS:-3600}" .git-hooks/pre-push origin "git@github.com:<<REPO>>.git" < "$HAM_PPH_STDIN"
-    HAM_PPH_EXIT=$?
-  elif [ -x .githooks/pre-push ]; then
-    perl -e 'alarm shift; exec @ARGV' "${HAM_LOCAL_CI_TIMEOUT_SECONDS:-3600}" .githooks/pre-push origin "git@github.com:<<REPO>>.git" < "$HAM_PPH_STDIN"
-    HAM_PPH_EXIT=$?
-  else
-    perl -e 'alarm shift; exec @ARGV' "${HAM_LOCAL_CI_TIMEOUT_SECONDS:-3600}" python3 scripts/ci-mirror/run-ci-mirror.py --repo-root . --match-head-commit "$POST_REMEDIATION_SHA" --stdin < "$HAM_PPH_STDIN"
-    HAM_PPH_EXIT=$?
-  fi
-  rm -f "$HAM_PPH_STDIN"
-  return "$HAM_PPH_EXIT"
-}
-
-HAM_LOCAL_CI_STATUS=running-pph-ci-mirror
-echo "HAM local CI: running PPH pre-push CI mirror for ${POST_REMEDIATION_SHA}" >&2
-if ! ham_run_pph_ci_mirror_with_timeout; then
-  echo "HAM hard-blocker: PPH pre-push CI mirror failed; fix locally before merge" >&2
-  HAM_LOCAL_CI_STATUS=pph-ci-mirror-red
-  ham_append_terminal_audit failed-without-merge local-ci-mirror-red || true
-  ham_release_merge_lease
-  exit 1
-fi
-HAM_LOCAL_CI_STATUS=pph-ci-mirror-green
-
-echo "HAM local battery: running ${HAM_LOCAL_BATTERY_COMMAND}" >&2
-if ! ham_run_local_battery_with_timeout; then
-  echo "HAM hard-blocker: full local test battery failed; fix locally before merge" >&2
-  HAM_LOCAL_CI_STATUS=local-battery-red
-  ham_append_terminal_audit failed-without-merge local-battery-red || true
-  ham_release_merge_lease
-  exit 1
-fi
-HAM_LOCAL_CI_STATUS=local-ci-green
+# The hammer does NOT run a local test battery or the PPH pre-push CI mirror as a
+# merge gate. GitHub required checks are the SOLE CI authority: the poll loop
+# below waits (bounded) for the required gate to go green on this exact head and
+# never merges a red or not-yet-green gate. Set the audit status once so the
+# localCiStatus audit-JSON sites populate an honest value.
+HAM_LOCAL_CI_STATUS=local-battery-skipped-github-required-gate-authoritative
 
 HAM_REMOTE_CI_STATUS=waiting
 HAM_REMOTE_CI_DEADLINE=$(( $(date +%s) + HAM_REMOTE_CI_WAIT_SECONDS ))
@@ -1311,16 +1230,15 @@ if [ "$HAM_POST_STATE" = "MERGED" ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATION_S
     ham_release_merge_lease
     exit "$HAM_MERGED_AUDIT_APPEND_EXIT"
   fi
+  if ! ham_emit_git_merge_signal; then
+    echo "HAM hard-blocker: merge signal emission failed after confirmed merge; AMA closer lease remains retryable" >&2
+    exit 1
+  fi
   if ! ham_mark_ama_closer_lease_succeeded; then
-    echo "HAM hard-blocker: failed to mark AMA closer lease succeeded after confirmed merge" >&2
+    echo "HAM hard-blocker: failed to mark AMA closer lease succeeded after confirmed merge signal" >&2
     exit 1
   fi
   trap - EXIT
-  if ! ham_emit_git_merge_signal; then
-    echo "HAM hard-blocker: merge signal emission failed after confirmed merge; AMA closer lease is terminal for daemon recovery" >&2
-    ham_release_merge_lease
-    exit 1
-  fi
   ham_release_merge_lease
 else
   echo "HAM hard-blocker: gh pr merge did not confirm merged validated head" >&2

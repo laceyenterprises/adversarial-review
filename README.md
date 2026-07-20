@@ -344,6 +344,29 @@ Living contract: [`docs/SPEC-adversarial-review-auto-remediation.md`](docs/SPEC-
 
 ---
 
+## Hammer merge logic
+
+When the hammer closes a PR (the common MSM path), it runs one linear flow
+(`templates/hammer-prompt.md`):
+
+1. **Acquire the merge lease** for `(repo, base, PR)` — no merge happens without it.
+2. **Remediate all adversarial findings** the final review raised — blocking and
+   non-blocking.
+3. **Rebase onto the base branch** if the head is behind, and confirm the rebased
+   head is content-equivalent to the reviewed head (or re-validate it).
+4. **Push the validated head.**
+5. **Wait (bounded) for GitHub required checks to go green** on that exact head —
+   never merge a red or not-yet-green gate.
+6. **`gh pr merge --match-head-commit <validated head>`** while holding the lease.
+7. **Release the lease and write the terminal audit.**
+
+The hammer does **not** run a local test battery or a pre-push CI mirror as a
+merge gate — GitHub required checks are the sole CI authority. This removes the
+original merge-agent state machine's fatal flaw of running heavy local suites
+inline before every merge.
+
+---
+
 ## Repository map
 
 ```

@@ -8,14 +8,22 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const HAMMER_PROMPT = readFileSync(join(REPO_ROOT, 'templates', 'hammer-prompt.md'), 'utf8');
 
-test('hammer prompt enforces the PSH-05 lease guarded local and remote CI merge protocol', () => {
+test('hammer prompt enforces the lease guarded GitHub-required-gate merge protocol (no local battery)', () => {
   assert.match(HAMMER_PROMPT, /do not\s+restart remediation/i);
   assert.match(HAMMER_PROMPT, /complete the merge\/closing-comment sequence idempotently/);
-  assert.match(HAMMER_PROMPT, /final rebase→local-CI→remote-CI→merge window/);
+  assert.match(HAMMER_PROMPT, /final rebase→remote-CI→merge window/);
   assert.match(HAMMER_PROMPT, /HAM_MERGE_LEASE_WAIT_SECONDS="\$\{HAM_MERGE_LEASE_WAIT_SECONDS:-900\}"/);
   assert.match(HAMMER_PROMPT, /trap ham_release_merge_lease EXIT/);
-  assert.match(HAMMER_PROMPT, /ham_run_pph_ci_mirror_with_timeout\(\)/);
-  assert.match(HAMMER_PROMPT, /PPH pre-push CI mirror/);
+  // SEV1: the hammer no longer runs a local test battery or the PPH pre-push CI
+  // mirror as a merge gate; GitHub required checks are the sole CI authority.
+  assert.doesNotMatch(HAMMER_PROMPT, /ham_run_pph_ci_mirror_with_timeout/);
+  assert.doesNotMatch(HAMMER_PROMPT, /ham_run_local_battery_with_timeout/);
+  assert.doesNotMatch(HAMMER_PROMPT, /HAM_LOCAL_BATTERY_COMMAND/);
+  assert.match(HAMMER_PROMPT, /GitHub required checks are the SOLE CI authority/);
+  assert.match(
+    HAMMER_PROMPT,
+    /HAM_LOCAL_CI_STATUS=local-battery-skipped-github-required-gate-authoritative/,
+  );
   assert.match(HAMMER_PROMPT, /HAM_REMOTE_CI_WAIT_SECONDS="\$\{HAM_REMOTE_CI_WAIT_SECONDS:-900\}"/);
   assert.match(HAMMER_PROMPT, /HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT="\$\{HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT:-3\}"/);
   assert.match(HAMMER_PROMPT, /HAM_REMOTE_CI_GATE_READ_FAILURES=\$\(\(HAM_REMOTE_CI_GATE_READ_FAILURES \+ 1\)\)/);
@@ -24,9 +32,9 @@ test('hammer prompt enforces the PSH-05 lease guarded local and remote CI merge 
   assert.match(HAMMER_PROMPT, /github-gate-timeout/);
   assert.doesNotMatch(HAMMER_PROMPT, /\|\s*IN\(/);
   assert.match(HAMMER_PROMPT, /index\(\$conclusion\)/);
-  assert.match(HAMMER_PROMPT, /HAM_PPH_REMOTE_SHA=\$\(printf '%040d' 0\)/);
-  assert.match(HAMMER_PROMPT, /HAM_PPH_REMOTE_SHA="\$HAM_REBASED_ONTO_BASE_SHA"/);
-  assert.match(HAMMER_PROMPT, /--match-head-commit "\$POST_REMEDIATION_SHA" --stdin < "\$HAM_PPH_STDIN"/);
+  assert.doesNotMatch(HAMMER_PROMPT, /HAM_PPH_REMOTE_SHA=\$\(printf '%040d' 0\)/);
+  assert.doesNotMatch(HAMMER_PROMPT, /HAM_PPH_REMOTE_SHA="\$HAM_REBASED_ONTO_BASE_SHA"/);
+  assert.doesNotMatch(HAMMER_PROMPT, /--stdin < "\$HAM_PPH_STDIN"/);
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_PPH_FILES=\(\)/);
   assert.doesNotMatch(HAMMER_PROMPT, /ham_changed_files_for_local_ci/);
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_PPH_CI_ARGS\+=\(--files/);

@@ -239,6 +239,10 @@ configured, NOT a hardcoded `codex`):
    matches `<configured-worker-class>`, `task-kind` is `merge`,
    `completion-shape` is `decision-only`, `project` is
    `adversarial-merge-authority`.
+   The dispatch args include `--priority critical` only for a finding-free
+   mechanical validate-gate-and-click close whose remaining gate is pending
+   required CI. HAM terminal-remediation closes for findings, red CI, or
+   mergeability repair dispatch with `--priority normal`.
    For a Gemini cutover, the validation is specifically
    `hq dispatch --worker-class gemini --task-kind merge --completion-shape decision-only ...`,
    and the closer provenance trailer below must read

@@ -115,9 +115,9 @@ function findingsRemediationArgs(rootDir, overrides = {}) {
 }
 
 // A CLEAN review (zero findings) that still reaches the closer dispatch surface
-// because a required check is not green yet. This forces the terminal-remediation
-// prompt even though no findings are standing, so it must stay out of the
-// reserved critical lane.
+// because a required check is still pending. This is a no-terminal-remediation
+// mechanical validate-gate-and-click close, so it rides the reserved critical
+// lane.
 function cleanValidateAndClickArgs(rootDir, overrides = {}) {
   return baseArgs(rootDir, {
     reviewState: {
@@ -164,7 +164,7 @@ test('LCR: findings-remediation hammer dispatches with --priority normal', async
   );
 });
 
-test('LCR: clean forced terminal-remediation closer dispatches with --priority normal', async (t) => {
+test('LCR: clean mechanical-gate closer dispatches with --priority critical', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-priority-clean-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   const deps = testDeps();
@@ -178,8 +178,8 @@ test('LCR: clean forced terminal-remediation closer dispatches with --priority n
   assert.equal(flagValue(args, '--task-kind'), 'merge');
   assert.equal(
     flagValue(args, '--priority'),
-    'normal',
-    'clean forced terminal-remediation closer must not take the reserved critical lane',
+    'critical',
+    'clean mechanical-gate closer must take the reserved critical lane',
   );
 });
 
@@ -223,7 +223,7 @@ test('LCR: --priority precedes the base dispatch args and is emitted exactly onc
   const args = deps.calls[0].args;
   assert.equal(args[0], 'dispatch');
   assert.equal(args.filter((a) => a === '--priority').length, 1, 'exactly one --priority flag');
-  assert.deepEqual(args.slice(0, 3), ['dispatch', '--priority', 'normal']);
+  assert.deepEqual(args.slice(0, 3), ['dispatch', '--priority', 'critical']);
 });
 
 test('LCR: unsupported --priority hq degrades to a flag-less retry (no dispatch regression)', async (t) => {

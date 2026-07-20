@@ -225,6 +225,13 @@ function isHammerRouteStructurallyBlocked(reasons) {
   ));
 }
 
+function isPendingCiMechanicalGateMiss(verdict, reasons) {
+  if (!Array.isArray(reasons) || reasons.length !== 1 || reasons[0] !== 'ci-not-green') {
+    return false;
+  }
+  return verdict?.trace?.ciGreen?.conclusion === 'PENDING';
+}
+
 export function namedAmaNoDispatchReason(reason, reasons = []) {
   if (reason === 'not-eligible') {
     const why = Array.isArray(reasons) && reasons.length
@@ -2397,11 +2404,12 @@ export async function maybeDispatchAmaCloser({
         needsOperator: true,
       });
     }
-    // MSM-04: the standalone AMA closer is gone. The only agent dispatch left
-    // on this surface is the HAM terminal-remediation worker. Fully clean PRs
-    // are handled by the daemon path before this function is called; dirty,
+    // MSM-04: the standalone AMA closer is gone. Fully green clean PRs are
+    // handled by the daemon path before this function is called; dirty,
     // conflicted/behind, or red-CI PRs get exactly one hammer under the existing
-    // dispatch lease/idempotency machinery. Structural hard-stops still block.
+    // dispatch lease/idempotency machinery. A finding-free PR whose only miss is
+    // pending required CI remains a mechanical validate-gate-and-click close, not
+    // terminal remediation. Structural hard-stops still block.
     const workerClassForMiss = String(cfg?.workerClass || 'hammer');
     const reviewCycleExhausted =
       reviewState?.reviewCycleExhausted === true ||
@@ -2415,7 +2423,9 @@ export async function maybeDispatchAmaCloser({
         reasons: routeReasons,
       });
     }
+    const pendingCiMechanicalGateMiss = isPendingCiMechanicalGateMiss(verdict, routeReasons);
     const autoHammer =
+      !pendingCiMechanicalGateMiss &&
       (workerClassForMiss === 'hammer' || reviewCycleExhausted)
       && (
         eligibleHammerRouteReasons.length > 0 ||
@@ -2428,21 +2438,30 @@ export async function maybeDispatchAmaCloser({
           dispatchContext?.allowStaleReviewHeadHammerResume === true,
       });
     if (!autoHammer) {
-      return noAmaDispatch({
-        dispatched: false,
-        skipMergeAgent: true,
-        reason: 'not-eligible',
-        reasons: routeReasons,
-      });
+      if (pendingCiMechanicalGateMiss) {
+        logger.log?.(
+          '[ama-closer] mechanical-gate close: dispatching validate-and-click closer ' +
+          'for pending required CI without terminal-remediation prompt'
+        );
+        // fall through to dispatch below (no terminal-remediation prompt)
+      } else {
+        return noAmaDispatch({
+          dispatched: false,
+          skipMergeAgent: true,
+          reason: 'not-eligible',
+          reasons: routeReasons,
+        });
+      }
+    } else {
+      forceHammerTerminalRemediationPrompt = true;
+      logger.log?.(
+        `[ama-closer] auto-hammer: dispatching terminal remediation for ineligible ` +
+        `PR (reasons: ${(routeReasons || []).join(',')}) — hammer will remediate ` +
+        `final findings/checks then re-validate the gate fail-closed`
+      );
+      // fall through to the dispatch below (hammer template, remediation mode)
+      forceHammerWorkerClass = true;
     }
-    forceHammerTerminalRemediationPrompt = true;
-    logger.log?.(
-      `[ama-closer] auto-hammer: dispatching terminal remediation for ineligible ` +
-      `PR (reasons: ${(routeReasons || []).join(',')}) — hammer will remediate ` +
-      `final findings/checks then re-validate the gate fail-closed`
-    );
-    // fall through to the dispatch below (hammer template, remediation mode)
-    forceHammerWorkerClass = true;
   }
 
   // Compose the prompt body. Template loaded from disk via DI so

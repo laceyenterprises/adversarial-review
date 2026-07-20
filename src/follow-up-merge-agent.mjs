@@ -83,14 +83,10 @@ import {
 } from './session-ledger-read-adapter.mjs';
 import {
   TERMINAL_WORKER_RUN_STATUSES,
-  deriveOriginalWorkerIdFromBranch,
-  isRecognizedOriginalWorkerId,
-  isTerminalWorkerRunStatus,
   lookupOriginalWorkerRunStatus,
   readJsonFileDetailed,
-  readWorkerWorkspace,
-  validateWorkerWorkspaceForBranch,
 } from './merge-agent-original-worker.mjs';
+import { prepareOriginalWorkerForMergeAgent } from './merge-agent-original-worker-teardown.mjs';
 import { amaAuditFilePath, readAmaAuditEntry } from './ama/audit.mjs';
 import {
   AMA_CLOSER_LEASE_STATUS,
@@ -115,12 +111,10 @@ import {
   buildScopedMergeAgentRequest,
 } from './merge-agent-dispatch-decision.mjs';
 import {
-  currentUser,
   formatExecFailure,
   isUnsupportedHqPriorityFlagError,
   isTransientHqDispatchError,
   sleep,
-  isExecTimeout,
   detectAgentOsPresence,
 } from './merge-agent-hq-exec.mjs';
 
@@ -134,15 +128,6 @@ const HQ_WORKER_TEAR_DOWN_TIMEOUT_MS = 60_000;
 const HQ_DISPATCH_TIMEOUT_MS = 90_000;
 const HQ_DISPATCH_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
 const MERGE_CLASS_ORCHESTRATION_MODES = new Set(ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE);
-const DEFERRED_LOOKUP_FAILURE_REASONS = new Set([
-  'missing-ledger-db',
-  'better-sqlite3-unavailable',
-  'worker-run-lookup-failed',
-  'worker-run-lookup-threw',
-  'missing-launch-request-id',
-  'unsupported-ledger-backend',
-  'malformed-ledger-target',
-]);
 // `operator-approved` is a mobile-friendly override the operator can
 // apply from the GitHub iOS/Android app (or the web UI) to say
 // "I approve merging this current PR head now; do not wait for the
@@ -452,285 +437,6 @@ function resolveHqOwner(hqRoot) {
     reason: null,
     detail: null,
     code: null,
-  };
-}
-
-async function prepareOriginalWorkerForMergeAgent({
-  job,
-  trigger = null,
-  hqPath,
-  execFileImpl = execFileAsync,
-  env = process.env,
-  now = isoNow(),
-  logger = console,
-  lookupRunStatusImpl = lookupOriginalWorkerRunStatus,
-  runtimeUserImpl = currentUser,
-} = {}) {
-  const originalWorkerId = deriveOriginalWorkerIdFromBranch(job?.branch);
-  if (!originalWorkerId) {
-    return { decision: 'ready', reason: 'no-derived-worker-id' };
-  }
-  if (!isRecognizedOriginalWorkerId(originalWorkerId)) {
-    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
-      original_worker_id: originalWorkerId,
-      pr_number: job?.prNumber ?? null,
-      reason: 'unrecognized-worker-id-shape',
-      at: now,
-    });
-    return {
-      decision: 'ready',
-      reason: 'unrecognized-worker-id-shape',
-      originalWorkerId,
-    };
-  }
-
-  const hqRoot = resolveHqRoot(env);
-  if (!hqRoot) {
-    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
-      original_worker_id: originalWorkerId,
-      pr_number: job?.prNumber ?? null,
-      reason: 'hq-root-unset',
-      at: now,
-    });
-    return {
-      decision: 'ready',
-      reason: 'hq-root-unset',
-      originalWorkerId,
-      hqRoot: null,
-    };
-  }
-  const workerDir = join(hqRoot, 'workers', originalWorkerId);
-  const workspaceState = readWorkerWorkspace(workerDir);
-  const workspace = workspaceState.workspace || null;
-  const workspacePath = workspace?.workspacePath || workspace?.worktreePath || null;
-  const run = readJsonFileDetailed(join(workerDir, 'run.json'));
-  const runRecord = run.ok ? run.value : null;
-
-  if (!existsSync(workerDir) || (workspaceState.found && workspacePath && !existsSync(workspacePath))) {
-    return {
-      decision: 'ready',
-      reason: 'original-worker-already-torn-down',
-      originalWorkerId,
-      hqRoot,
-    };
-  }
-  if (!workspaceState.found) {
-    const event = workspaceState.reason === 'workspace-missing'
-      ? 'merge_agent.workspace_missing'
-      : 'merge_agent.workspace_read_failed';
-    mergeAgentLifecycleLog(logger, event, {
-      original_worker_id: originalWorkerId,
-      pr_number: job?.prNumber ?? null,
-      reason: workspaceState.reason || 'workspace-read-failed',
-      detail: workspaceState.detail || null,
-      code: workspaceState.code || null,
-      at: now,
-    });
-    const reason = workspaceState.reason === 'workspace-missing'
-      ? 'workspace-json-missing-but-worker-dir-present'
-      : workspaceState.reason || 'workspace-read-failed';
-    return {
-      decision: 'deferred',
-      reason,
-      originalWorkerId,
-      hqRoot,
-    };
-  }
-  const workspaceValidation = validateWorkerWorkspaceForBranch(workspace, originalWorkerId, job?.branch);
-  if (!workspaceValidation.ok) {
-    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
-      original_worker_id: originalWorkerId,
-      workspace_worker_id: workspaceValidation.workspaceWorkerId || null,
-      workspace_branch: workspaceValidation.workspaceBranch || null,
-      pr_number: job?.prNumber ?? null,
-      reason: workspaceValidation.reason,
-      at: now,
-    });
-    return {
-      decision: 'ready',
-      reason: workspaceValidation.reason,
-      originalWorkerId,
-      hqRoot,
-    };
-  }
-
-  let runStatus;
-  try {
-    runStatus = await lookupRunStatusImpl({
-      workerDir,
-      hqRoot,
-      env,
-      job,
-      originalWorkerId,
-      workspace,
-      runRecord,
-    });
-  } catch (err) {
-    runStatus = {
-      found: false,
-      reason: 'worker-run-lookup-threw',
-      detail: err?.message || String(err),
-    };
-  }
-  if (!runStatus.found && DEFERRED_LOOKUP_FAILURE_REASONS.has(runStatus.reason)) {
-    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
-      lrq: runStatus.launchRequestId || null,
-      original_worker_id: originalWorkerId,
-      pr_number: job?.prNumber ?? null,
-      reason: runStatus.reason,
-      detail: runStatus.detail || null,
-      at: now,
-    });
-    if (runStatus.reason === 'better-sqlite3-unavailable' && logger && typeof logger.error === 'function') {
-      logger.error(
-        `[merge-agent] worker-run lookup dependency unavailable for ${originalWorkerId}; `
-        + 'install/rebuild better-sqlite3 in tools/adversarial-review to restore teardown preflight.'
-      );
-    }
-    return {
-      decision: 'skip',
-      reason: runStatus.reason,
-      originalWorkerId,
-      launchRequestId: runStatus.launchRequestId || null,
-      detail: runStatus.detail || null,
-    };
-  }
-  if (!runStatus.found && runStatus.reason === 'missing-worker-run-row') {
-    mergeAgentLifecycleLog(logger, 'merge_agent.dispatch_deferred', {
-      lrq: runStatus.launchRequestId || null,
-      original_worker_id: originalWorkerId,
-      pr_number: job?.prNumber ?? null,
-      reason: 'original-worker-run-row-missing-but-worktree-present',
-      worker_status: null,
-      at: now,
-    });
-    return {
-      decision: 'deferred',
-      reason: 'original-worker-run-row-missing-but-worktree-present',
-      originalWorkerId,
-      hqRoot,
-      launchRequestId: runStatus.launchRequestId || null,
-    };
-  }
-  const mayTearDown = runStatus.found && isTerminalWorkerRunStatus(runStatus.status);
-
-  if (!mayTearDown) {
-    const reason = runStatus.found
-      ? `worker-run-status-${runStatus.status || 'unknown'}`
-      : runStatus.reason || 'worker-run-status-unknown';
-    mergeAgentLifecycleLog(logger, 'merge_agent.dispatch_deferred', {
-      lrq: runStatus.launchRequestId || null,
-      original_worker_id: originalWorkerId,
-      pr_number: job?.prNumber ?? null,
-      reason,
-      worker_status: runStatus.status || null,
-      at: now,
-    });
-    return {
-      decision: 'deferred',
-      reason,
-      originalWorkerId,
-      workerStatus: runStatus.status || null,
-      launchRequestId: runStatus.launchRequestId || null,
-    };
-  }
-
-  const ownerResolution = resolveHqOwner(hqRoot);
-  const ownerUser = ownerResolution?.ownerUser || null;
-  const runtimeUser = runtimeUserImpl(env);
-  if (!ownerUser) {
-    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
-      lrq: runStatus.launchRequestId || null,
-      original_worker_id: originalWorkerId,
-      pr_number: job?.prNumber ?? null,
-      reason: ownerResolution?.reason || 'hq-owner-unknown',
-      hq_root: hqRoot,
-      detail: ownerResolution?.detail || null,
-      code: ownerResolution?.code || null,
-      at: now,
-    });
-    return {
-      decision: 'deferred',
-      reason: ownerResolution?.reason || 'hq-owner-unknown',
-      originalWorkerId,
-      workerStatus: runStatus.status || null,
-      launchRequestId: runStatus.launchRequestId || null,
-    };
-  }
-  if (!runtimeUser) {
-    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
-      lrq: runStatus.launchRequestId || null,
-      original_worker_id: originalWorkerId,
-      pr_number: job?.prNumber ?? null,
-      reason: 'hq-runtime-user-unknown',
-      hq_root: hqRoot,
-      hq_owner_user: ownerUser,
-      at: now,
-    });
-    return {
-      decision: 'deferred',
-      reason: 'hq-runtime-user-unknown',
-      originalWorkerId,
-      workerStatus: runStatus.status || null,
-      launchRequestId: runStatus.launchRequestId || null,
-    };
-  }
-  if (ownerUser !== runtimeUser) {
-    mergeAgentLifecycleLog(logger, 'merge_agent.tear_down_skipped', {
-      lrq: runStatus.launchRequestId || null,
-      original_worker_id: originalWorkerId,
-      pr_number: job?.prNumber ?? null,
-      reason: 'hq-owner-mismatch',
-      hq_root: hqRoot,
-      hq_owner_user: ownerUser,
-      runtime_user: runtimeUser,
-      at: now,
-    });
-    return {
-      decision: 'deferred',
-      reason: 'hq-owner-mismatch',
-      originalWorkerId,
-      workerStatus: runStatus.status || null,
-      launchRequestId: runStatus.launchRequestId || null,
-    };
-  }
-
-  const args = ['worker', 'tear-down', originalWorkerId, '--force', '--root', hqRoot];
-  const tearDownTimeoutMs = resolveHqWorkerTearDownTimeoutMs(env);
-  try {
-    await execFileImpl(hqPath, args, {
-      env,
-      maxBuffer: 5 * 1024 * 1024,
-      timeout: tearDownTimeoutMs,
-      killSignal: 'SIGTERM',
-    });
-  } catch (err) {
-    const timedOut = isExecTimeout(err);
-    mergeAgentLifecycleLog(logger, timedOut ? 'merge_agent.tear_down_timeout' : 'merge_agent.tear_down_failed', {
-      lrq: runStatus.launchRequestId || null,
-      original_worker_id: originalWorkerId,
-      pr_number: job?.prNumber ?? null,
-      reason: timedOut ? 'tear-down-timeout' : 'tear-down-command-failed',
-      worker_status: runStatus.status || null,
-      stderr: String(err?.stderr ?? '').trim() || null,
-      stdout: String(err?.stdout ?? '').trim() || null,
-      timeout_ms: timedOut ? tearDownTimeoutMs : null,
-      at: now,
-    });
-    throw formatExecFailure('hq worker tear-down', err);
-  }
-  mergeAgentLifecycleLog(logger, 'merge_agent.original_worker_torn_down', {
-    lrq: runStatus.launchRequestId || null,
-    original_worker_id: originalWorkerId,
-    pr_number: job?.prNumber ?? null,
-    worker_status: runStatus.status || null,
-    at: now,
-  });
-  return {
-    decision: 'torn-down',
-    originalWorkerId,
-    workerStatus: runStatus.status || null,
-    launchRequestId: runStatus.launchRequestId || null,
   };
 }
 

@@ -17,11 +17,90 @@ import {
   resolveDaemonWorkerIdentityForPr,
   readHeadAttestationChainForPr,
 } from './daemon-worker-identity.mjs';
+import {
+  MERGE_AGENT_REQUESTED_LABEL,
+  OPERATOR_APPROVED_LABEL,
+} from './adapters/operator/github-pr-label-controls/index.mjs';
 
 const execFileAsync = promisify(execFile);
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 export const AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS = [250, 1_000];
+
+// Deliverable 1 (operator-approval auto-close lane) — the operator labels whose
+// explicit, head-scoped application substitutes for hq-dispatched worker
+// identity on an un-attributed PR. Order is preference order: `operator-approved`
+// is the canonical operator override; `merge-agent-requested` is the documented
+// operator-fallback signal. Both are operator-controlled GitHub labels observed
+// with an attributable timeline actor (same trust model as the verdict-gate
+// `operator-approved` override in `src/ama/eligibility.mjs`).
+export const OPERATOR_MERGE_ACCOUNTABILITY_LABELS = Object.freeze([
+  OPERATOR_APPROVED_LABEL,
+  MERGE_AGENT_REQUESTED_LABEL,
+]);
+
+/**
+ * Deliverable 1 — resolve the operator accountability that substitutes for an
+ * unresolved hq-dispatched worker identity on an un-attributed PR.
+ *
+ * The daemon clean-merge path fails closed with `worker-identity-unresolved`
+ * when a PR carries no launch-provenance (operator/agent infra-fix PRs on
+ * `claude-code/*` branches, e.g. agent-os #4022/#4023/#4024). An operator's
+ * explicit, head-scoped label IS the accountability that stands in for the
+ * missing worker identity: the operator vouches for the merge on the record. It
+ * NEVER relaxes any other daemon gate — `attemptDaemonCleanMerge` still requires
+ * a settled-success verdict, a zero-finding (strict) review, green required
+ * checks, and a live head that matches the validated head, and merges only under
+ * the merge lease.
+ *
+ * HEAD-SCOPING (hard invariant): the label event MUST be pinned to the EXACT
+ * head the daemon is about to merge (`mergeHeadSha`). A label applied at an
+ * older head is a stale approval and is refused — there is no stale-approval
+ * carryover. Attributability + audit provenance (actor + event id + observed-at)
+ * are mandatory, mirroring `hasValidScopedOverrideEvidence` in eligibility.mjs.
+ *
+ * @param {object} args
+ * @param {object|null} [args.operatorApprovalEvent]  Legacy label-event for `operator-approved`.
+ * @param {object|null} [args.mergeAgentRequestEvent]  Legacy label-event for `merge-agent-requested`.
+ * @param {string} args.mergeHeadSha  The exact head the daemon will merge (live head).
+ * @returns {{label:string, actor:string, eventId:string, observedAt:string, headSha:string}|null}
+ */
+export function resolveOperatorMergeAccountability({
+  operatorApprovalEvent = null,
+  mergeAgentRequestEvent = null,
+  mergeHeadSha,
+} = {}) {
+  const head = String(mergeHeadSha || '').trim();
+  if (!head) return null;
+  const candidates = [
+    { label: OPERATOR_APPROVED_LABEL, event: operatorApprovalEvent },
+    { label: MERGE_AGENT_REQUESTED_LABEL, event: mergeAgentRequestEvent },
+  ];
+  for (const { label, event } of candidates) {
+    if (!event || typeof event !== 'object') continue;
+    const eventHead = String(
+      event.headSha || event.head_sha || event.observedRevisionRef || '',
+    ).trim();
+    // HEAD-SCOPED: exact-match the head being merged. No stale carryover.
+    if (!eventHead || eventHead !== head) continue;
+    const actor = String(event.actor || '').trim();
+    if (!actor || actor.toLowerCase() === 'unknown') continue;
+    const eventId =
+      event.id || event.nodeId || event.eventId || event.labelEventId || event.labelEventNodeId || null;
+    const observedAt = event.createdAt || event.created_at || event.observedAt || null;
+    // Audit provenance is mandatory — an approval with no event id / timestamp
+    // cannot be attributed on the record, so it fails closed.
+    if (!eventId || !observedAt) continue;
+    return {
+      label,
+      actor,
+      eventId: String(eventId),
+      observedAt: String(observedAt),
+      headSha: head,
+    };
+  }
+  return null;
+}
 
 /**
  * Resolve the required-checks array from a `fetchPullRequestRollup` result.
@@ -136,6 +215,8 @@ export async function runDaemonCleanMergeAttempt({
   reviewState,
   reviewStateRow,
   currentPrHeadSha,
+  operatorApprovalEvent = null,
+  mergeAgentRequestEvent = null,
   logger,
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
@@ -145,6 +226,7 @@ export async function runDaemonCleanMergeAttempt({
   releaseMergeLeaseImpl = releaseMergeLease,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
   readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr,
+  resolveOperatorMergeAccountabilityImpl = resolveOperatorMergeAccountability,
   env = process.env,
 } = {}) {
   const base = candidate?.baseBranch;
@@ -220,17 +302,51 @@ export async function runDaemonCleanMergeAttempt({
     consumeHeadAttestations: cfg?.lha?.consumeAttestations === true,
     logger,
   });
+  // Deliverable 1 — operator-approval auto-close lane. When no hq-dispatched
+  // worker identity resolves (un-attributed operator/agent infra-fix PRs), an
+  // explicit, head-scoped operator label IS the accountability that stands in
+  // for worker identity so the clean daemon merge can proceed under an
+  // operator-accountable lease instead of parking `worker-identity-unresolved`.
+  // Every other gate is UNCHANGED: `attemptDaemonCleanMerge` still requires a
+  // settled-success verdict, a strict zero-finding review, green required
+  // checks + a mergeable PR, and a live head that matches the validated head.
+  // The label must be pinned to the EXACT head being merged (`liveHead`).
+  let operatorMergeAccountability = null;
   if (!workerIdentity.ok) {
-    return {
-      disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
-      reason: 'worker-identity-unresolved',
-      merged: false,
-      attempts: 0,
-      leaseAcquired: false,
-      auditWritten: false,
-      reasons: [workerIdentity.reason || 'worker-identity-unresolved'],
-      workerIdentity,
-    };
+    operatorMergeAccountability = resolveOperatorMergeAccountabilityImpl({
+      operatorApprovalEvent,
+      mergeAgentRequestEvent,
+      mergeHeadSha: liveHead,
+    });
+    if (!operatorMergeAccountability) {
+      return {
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'worker-identity-unresolved',
+        merged: false,
+        attempts: 0,
+        leaseAcquired: false,
+        auditWritten: false,
+        reasons: [workerIdentity.reason || 'worker-identity-unresolved'],
+        workerIdentity,
+      };
+    }
+    logger?.log?.(JSON.stringify({
+      schemaVersion: 1,
+      event: 'ama.daemon_clean_merge.operator_accountability_substituted',
+      repo: repoPath,
+      pr: prNumber,
+      headSha: liveHead,
+      label: operatorMergeAccountability.label,
+      actor: operatorMergeAccountability.actor,
+      eventId: operatorMergeAccountability.eventId,
+      workerIdentityReason: workerIdentity.reason || 'worker-identity-unresolved',
+    }));
+    logger?.warn?.(
+      `[watcher] AMA daemon clean-merge: worker identity unresolved for ${repoPath}#${prNumber}` +
+        `@${String(liveHead).slice(0, 12)} (${workerIdentity.reason || 'worker-identity-unresolved'}) ` +
+        `but operator '${operatorMergeAccountability.actor}' applied '${operatorMergeAccountability.label}' ` +
+        `at this exact head — substituting operator accountability for the clean daemon merge under lease`,
+    );
   }
   return attemptDaemonCleanMergeImpl({
     repo: repoPath,
@@ -258,6 +374,12 @@ export async function runDaemonCleanMergeAttempt({
     auditMetadata: {
       reviewer: reviewStateRow?.reviewer || '',
       riskClass: reviewState?.riskClass || 'unknown',
+      // Record which accountability authorized the merge: hq-dispatched worker
+      // identity (the normal path) or an explicit head-scoped operator label
+      // (Deliverable 1 substitution). The audit doc thus always names WHO the
+      // merge authority rests on.
+      mergeAccountability: operatorMergeAccountability ? 'operator-approval' : 'worker-identity',
+      ...(operatorMergeAccountability ? { operatorApproval: operatorMergeAccountability } : {}),
     },
     workerIdentity,
     flags: {

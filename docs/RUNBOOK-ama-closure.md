@@ -494,12 +494,59 @@ jq '{status, attempts: (.attempts | map({attemptNumber, outcome, cliExitCode}))}
 
 ### `worker-identity-unresolved` on daemon clean-merge
 
-The daemon clean-merge path may fall back from the `pr_opened` ledger row to HQ
-worker `launch-provenance.json` only when the provenance carries the exact
-canonical repository identity GitHub reports for the PR: `<owner>/<name>`.
-Short-form `<name>` provenance is ambiguous across forks and intentionally fails
-closed; update the producer to write full repo identity rather than weakening
-the daemon matcher.
+The daemon clean-merge path resolves the identity of the worker that opened the
+PR (head-attestation → `pr_opened` ledger row → HQ worker
+`launch-provenance.json`) so the merge is attributable. The provenance fallback
+matches only when it carries the exact canonical repository identity GitHub
+reports for the PR: `<owner>/<name>`. Short-form `<name>` provenance is ambiguous
+across forks and intentionally fails closed; update the producer to write full
+repo identity rather than weakening the daemon matcher.
+
+**Un-attributed PRs (operator/agent infra-fix PRs).** A PR that no hq worker
+opened — an operator/agent infra-fix PR authored by the operator on a
+`claude-code/*` branch — carries no launch-provenance, so identity resolution
+correctly fails closed. These PRs do not park anymore: an explicit, **head-scoped
+operator label IS the accountability that substitutes for the missing worker
+identity** (the operator-approval auto-close lane). Apply either:
+
+- `operator-approved` — the canonical operator override, or
+- `merge-agent-requested` — the operator-fallback signal,
+
+**on the current head**. The daemon then merges the clean PR under an
+operator-accountable lease (the audit records `mergeAccountability:
+operator-approval` with the label, actor, and event id). This substitutes for
+worker identity ONLY: every other gate stays in force — the review must be
+settled-success and strict-clean (zero findings), required checks must be green,
+the PR mergeable, and the live head must match the reviewed head. A red gate
+never merges, and an approval applied at an older head (a stale approval) is
+refused — there is no carryover. Observability: the substitution emits an
+`ama.daemon_clean_merge.operator_accountability_substituted` event.
+
+### Daemon fail-closed on a hammer-remediable gate → capped hammer fallback
+
+When the daemon clean-path fails closed on a **remediable** gate for an
+**attributed** (identity-resolved) clean PR, the watcher no longer parks it for
+manual close — it hands the PR to the SAME capped hammer the common path uses.
+The hammer re-validates the required gate at the post-remediation head and merges
+under its own lease. Remediable gates:
+
+| Daemon fail-closed reason | Hammer action |
+|---|---|
+| `stale-head` | the reviewed head moved; a fresh review head gets its own hammer |
+| `gate-not-eligible` with `ci-not-green` | the hammer repairs the failing required checks, then merges |
+| `gate-not-eligible` with `pr-not-mergeable` | the hammer rebases onto base / resolves the conflict, then merges |
+
+Every hammer dispatch — including this fallback — is bounded by the per-PR
+hammer-retry-cap (per-reviewed-head 2, lifetime 6). At the ceiling the closer
+fails **loud** via a GBI operator alert and suppresses further dispatch; it is
+never an uncapped re-dispatch. The fallback emits an
+`ama.daemon_clean_fail_closed.hammer_fallback` event.
+
+**Non-remediable gates still park** (fail closed — no blind merge-clicker):
+`worker-identity-unresolved` (use the operator-approval lane above),
+`verdict-not-eligible`, and `lease-not-held`, plus permanent/unclassified merge
+rejections and transient budget/read exhaustion. A park emits the
+`ama.daemon_clean_park.manual_close_required` event as before.
 
 ### `merge-agent-skipped-ama-enabled`
 

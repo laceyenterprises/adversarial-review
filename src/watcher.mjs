@@ -139,6 +139,7 @@ import {
   runFastMergeClosePathIsolated,
 } from './pr-lifecycle-sync.mjs';
 import {
+  isDaemonFailClosedHammerRemediable,
   maybeDispatchAmaClosureFor,
   resolveMergeAgentCoexistenceForWatcher,
   writeAutonomousMergeDisabledAudit,
@@ -312,6 +313,7 @@ import {
 import {
   runDaemonCleanMergeAttempt,
   fetchLatestHeadReviewBodiesWithRetry,
+  resolveOperatorMergeAccountability,
   AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
 } from './daemon-clean-merge.mjs';
 import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
@@ -1842,7 +1844,9 @@ export {
   maybeDispatchReviewerTimeoutExhaustedMergeAgent,
   maybeDispatchAmaClosureFor,
   maybeInlineFinalHammerAfterReview,
+  isDaemonFailClosedHammerRemediable,
   runDaemonCleanMergeAttempt,
+  resolveOperatorMergeAccountability,
   writeAutonomousMergeDisabledAudit,
   resolveFirstPassReviewBudgetSuppression,
   refreshReviewerRuntimeAdapter,

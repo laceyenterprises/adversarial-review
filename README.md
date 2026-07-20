@@ -315,6 +315,36 @@ false` followed by a watcher bounce: with it off, neither path executes;
 the watcher writes a fail-closed audit and leaves the PR for manual
 operator intervention.
 
+Two autonomous-close lanes keep a fail-closed daemon attempt from parking
+for manual merge, without ever loosening a safety gate:
+
+- **Daemon-fail-closed hammer fallback (attributed PRs).** When the
+  daemon clean-path fails closed on a *remediable* gate — CI not green,
+  a conflict (`pr-not-mergeable`), or a moved head (`stale-head`) — on an
+  identity-resolved fleet-worker PR, the watcher hands it to the SAME
+  capped hammer instead of parking. The hammer re-validates the required
+  gate at the post-remediation head and merges under its own lease.
+  *Non-*remediable gates still fail closed (no blind merge-clicker):
+  `worker-identity-unresolved`, `verdict-not-eligible`, `lease-not-held`.
+  Every hammer dispatch, this fallback included, is bounded by the per-PR
+  hammer-retry-cap (per-head 2, lifetime 6) and fails loud with a GBI
+  operator alert at the ceiling.
+- **Operator-approval lane (un-attributed PRs).** An operator/agent
+  infra-fix PR that no hq worker opened has no launch-provenance, so the
+  daemon's worker-identity gate fails closed by design. An explicit,
+  *head-scoped* `operator-approved` (or `merge-agent-requested`) label IS
+  the accountability that substitutes for the missing worker identity:
+  the daemon then merges the clean PR under an operator-accountable lease.
+  It substitutes for identity ONLY — the settled-success verdict,
+  strict-clean review, green-checks, mergeable, and head-match gates all
+  still apply, a red gate never merges, and a stale-head approval is
+  refused. The accountability (label, actor, event id) is written to the
+  merge audit.
+
+Accountability is never absent from an autonomous merge: it comes from a
+resolved worker identity, a remediable-gate hammer under the cap, or an
+explicit operator approval at the exact head.
+
 The older `merge-agent` worker class survives as the operator fallback
 lane: a fresh current-head `merge-agent-requested` label dispatches it
 with the AMA admit-gate bypass

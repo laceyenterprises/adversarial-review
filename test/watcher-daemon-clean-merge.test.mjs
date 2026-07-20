@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  isDaemonFailClosedHammerRemediable,
   maybeDispatchAmaClosureFor,
   readHeadAttestationChainForPr,
+  resolveOperatorMergeAccountability,
   runDaemonCleanMergeAttempt,
   resolveDaemonWorkerIdentityForPr,
   resolveDaemonWorkerIdentityFromHeadAttestation,
@@ -2092,12 +2094,19 @@ test('resolveRollupRequiredChecks prefers `checks`, falls back to `statusCheckRo
   assert.strictEqual(resolveRollupRequiredChecks(null), null);
 });
 
-test('DCA-01: watcher park event + warn line surface the tripping gate reasons[]', async () => {
+test('Deliverable 2: daemon fail-closed on a REMEDIABLE gate (gate-not-eligible/ci-not-green) routes to the capped hammer, not a manual-close park', async () => {
+  // A `ci-not-green` daemon park used to emit the manual-close-required signal and
+  // stop. Deliverable 2 re-routes a hammer-remediable daemon fail-closed on an
+  // attributed (identity-resolved) clean PR to the SAME capped
+  // `maybeDispatchAmaCloser` hammer the not-taken path uses. The daemon layer test
+  // above still asserts the daemon itself fails closed with the surfaced reasons;
+  // this asserts the ORCHESTRATION now hands it to the hammer instead of parking.
   const rootDir = tempRoot();
   try {
     const logs = [];
     const warns = [];
-    await maybeDispatchAmaClosureFor({
+    let closerCalls = 0;
+    const result = await maybeDispatchAmaClosureFor({
       ...baseArgs(rootDir),
       logger: { log: (m) => logs.push(String(m)), warn: (m) => warns.push(String(m)) },
       runDaemonCleanMergeAttemptImpl: async () => ({
@@ -2108,17 +2117,395 @@ test('DCA-01: watcher park event + warn line surface the tripping gate reasons[]
         manualCloseRequired: true,
         reasons: ['ci-not-green'],
       }),
-      maybeDispatchAmaCloserImpl: async () => ({ dispatched: true }),
+      maybeDispatchAmaCloserImpl: async () => {
+        closerCalls += 1;
+        return { dispatched: true };
+      },
     });
 
-    const parkEvent = logs
-      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
-      .find((doc) => doc?.event === 'ama.daemon_clean_park.manual_close_required');
-    assert.ok(parkEvent, 'a structured manual-close-required event must be emitted');
-    assert.deepEqual(parkEvent.reasons, ['ci-not-green'], 'the exact gate reasons[] are in the pageable event');
-    assert.equal(parkEvent.reason, 'gate-not-eligible');
-    assert.match(warns.join('\n'), /gates=ci-not-green/, 'the human park line names the tripping gate');
+    // The capped hammer took over — the PR did NOT park.
+    assert.equal(closerCalls, 1, 'a remediable daemon fail-closed must fall through to the capped hammer');
+    assert.equal(result.dispatched, true);
+
+    const parsed = logs
+      .map((line) => { try { return JSON.parse(line); } catch { return null; } });
+    const parkEvent = parsed.find((doc) => doc?.event === 'ama.daemon_clean_park.manual_close_required');
+    assert.equal(parkEvent, undefined, 'a remediable fail-closed must NOT emit the manual-close park signal');
+    const fallbackEvent = parsed.find((doc) => doc?.event === 'ama.daemon_clean_fail_closed.hammer_fallback');
+    assert.ok(fallbackEvent, 'a structured hammer-fallback event must be emitted');
+    assert.deepEqual(fallbackEvent.reasons, ['ci-not-green'], 'the exact gate reasons[] are in the pageable event');
+    assert.equal(fallbackEvent.reason, 'gate-not-eligible');
+    assert.equal(fallbackEvent.hammerFallback, true);
+    assert.match(logs.join('\n'), /gates=ci-not-green/, 'the human fallback line names the tripping gate');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Deliverable 1 — operator-approval auto-close lane.
+//
+// An un-attributed PR (no hq-dispatched worker launch-provenance: operator/agent
+// infra-fix PRs on claude-code/* branches) fails the daemon worker-identity gate
+// with `worker-identity-unresolved`. An explicit, head-scoped operator label IS
+// the accountability that substitutes for worker identity so the CLEAN daemon
+// merge proceeds under an operator-accountable lease — while every other daemon
+// gate (settled-success verdict, strict zero-finding review, green required
+// checks, mergeable, head-match) stays in force.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function unattributedDaemonArgs({ rootDir, prNumber = 900, head = 'operator-pr-head', checks = [{ name: 'ci', conclusion: 'SUCCESS' }] }) {
+  return {
+    rootDir,
+    cfg: { mergeMethod: 'squash', autonomousMergeExecutionEnabled: true, strictMode: true },
+    repoPath: 'acme/repo',
+    prNumber,
+    candidate: {
+      baseBranch: 'main',
+      headSha: head,
+      statusCheckRollup: checks,
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN',
+      prState: 'open',
+      prAuthor: 'VirtualPaul',
+      headRefName: 'claude-code/infra-fix',
+    },
+    gateSnapshot: { reviewedHeadSha: head, settledReview: { verdict: 'comment-only' } },
+    mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+    reviewState: {
+      blockingFindingCount: 0, blockingFindingState: 'known',
+      nonBlockingFindingCount: 0, nonBlockingFindingState: 'known',
+      riskClass: 'low',
+    },
+    reviewStateRow: { reviewer: 'codex' },
+    currentPrHeadSha: head,
+    fetchRollupImpl: async () => ({
+      state: 'OPEN', headRefOid: head,
+      checks, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN',
+      headRefName: 'claude-code/infra-fix',
+    }),
+    // Identity resolution fails on every path: no build-completion signal, no head
+    // attestation, and an HQ_ROOT with no launch-provenance files.
+    readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+    readHeadAttestationChainForPrImpl: async () => [],
+    logger: { warn() {}, log() {} },
+    env: { HQ_ROOT: '/tmp/hq-root-nonexistent-operator-lane' },
+  };
+}
+
+function operatorApprovedEventAt(head, overrides = {}) {
+  return {
+    id: 'evt-op-approved-1',
+    nodeId: 'evt-op-approved-1',
+    label: 'operator-approved',
+    actor: 'VirtualPaul',
+    createdAt: '2026-07-20T00:00:00.000Z',
+    headSha: head,
+    ...overrides,
+  };
+}
+
+test('Deliverable 1: operator-approved at the current head substitutes for worker identity → clean daemon merge proceeds', async () => {
+  const rootDir = tempRoot();
+  try {
+    let mergeAttempted = false;
+    let seenAuditMetadata = null;
+    const logs = [];
+    const result = await runDaemonCleanMergeAttempt({
+      ...unattributedDaemonArgs({ rootDir, prNumber: 900, head: 'op-head-900' }),
+      logger: { warn() {}, log: (m) => logs.push(String(m)) },
+      operatorApprovalEvent: operatorApprovedEventAt('op-head-900'),
+      attemptDaemonCleanMergeImpl: async (args) => {
+        mergeAttempted = true;
+        seenAuditMetadata = args.auditMetadata;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true, attempts: 1 };
+      },
+    });
+
+    assert.equal(mergeAttempted, true, 'operator approval must let the clean daemon merge proceed');
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.notEqual(result.reason, 'worker-identity-unresolved');
+    // The audit records who the merge authority rested on.
+    assert.equal(seenAuditMetadata.mergeAccountability, 'operator-approval');
+    assert.equal(seenAuditMetadata.operatorApproval.label, 'operator-approved');
+    assert.equal(seenAuditMetadata.operatorApproval.actor, 'VirtualPaul');
+    assert.equal(seenAuditMetadata.operatorApproval.headSha, 'op-head-900');
+    // A structured substitution event is emitted for observability.
+    const evt = logs.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .find((d) => d?.event === 'ama.daemon_clean_merge.operator_accountability_substituted');
+    assert.ok(evt, 'a structured operator-accountability event is emitted');
+    assert.equal(evt.label, 'operator-approved');
+    assert.equal(evt.headSha, 'op-head-900');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('Deliverable 1: a STALE operator-approved (applied at an older head) does NOT substitute → still fails closed', async () => {
+  const rootDir = tempRoot();
+  try {
+    let mergeAttempted = false;
+    const result = await runDaemonCleanMergeAttempt({
+      ...unattributedDaemonArgs({ rootDir, prNumber: 901, head: 'live-head-901' }),
+      // Approval pinned to a prior head — no stale-approval carryover is allowed.
+      operatorApprovalEvent: operatorApprovedEventAt('OLD-head-901'),
+      attemptDaemonCleanMergeImpl: async () => {
+        mergeAttempted = true;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true };
+      },
+    });
+
+    assert.equal(mergeAttempted, false, 'a stale-head approval must never authorize a merge');
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+    assert.equal(result.reason, 'worker-identity-unresolved');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('Deliverable 1: merge-agent-requested at the current head also substitutes for worker identity', async () => {
+  const rootDir = tempRoot();
+  try {
+    let mergeAttempted = false;
+    let seenAuditMetadata = null;
+    const result = await runDaemonCleanMergeAttempt({
+      ...unattributedDaemonArgs({ rootDir, prNumber: 902, head: 'mar-head-902' }),
+      mergeAgentRequestEvent: {
+        id: 'evt-mar-1', nodeId: 'evt-mar-1', label: 'merge-agent-requested',
+        actor: 'VirtualPaul', createdAt: '2026-07-20T00:00:00.000Z', headSha: 'mar-head-902',
+      },
+      attemptDaemonCleanMergeImpl: async (args) => {
+        mergeAttempted = true;
+        seenAuditMetadata = args.auditMetadata;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true, attempts: 1 };
+      },
+    });
+
+    assert.equal(mergeAttempted, true);
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(seenAuditMetadata.operatorApproval.label, 'merge-agent-requested');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('Deliverable 1: operator-approved missing audit provenance (no event id) does NOT substitute', async () => {
+  const rootDir = tempRoot();
+  try {
+    let mergeAttempted = false;
+    const result = await runDaemonCleanMergeAttempt({
+      ...unattributedDaemonArgs({ rootDir, prNumber: 903, head: 'prov-head-903' }),
+      operatorApprovalEvent: operatorApprovedEventAt('prov-head-903', { id: null, nodeId: null }),
+      attemptDaemonCleanMergeImpl: async () => {
+        mergeAttempted = true;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true };
+      },
+    });
+
+    assert.equal(mergeAttempted, false, 'an unattributable approval cannot substitute for identity');
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+    assert.equal(result.reason, 'worker-identity-unresolved');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('Deliverable 1 SAFETY: operator approval substitutes for identity ONLY — a RED required gate still never merges', async () => {
+  const rootDir = tempRoot();
+  let mergeCalls = 0;
+  try {
+    // Identity fails, operator-approved is present at head — but CI is RED. The
+    // real attemptDaemonCleanMerge (not injected) must decline; the merge button
+    // is never clicked. Operator approval does not relax the CI gate.
+    const result = await runDaemonCleanMergeAttempt({
+      ...unattributedDaemonArgs({
+        rootDir, prNumber: 904, head: 'red-head-904',
+        checks: [{ name: 'ci', conclusion: 'FAILURE' }],
+      }),
+      operatorApprovalEvent: operatorApprovedEventAt('red-head-904'),
+      acquireMergeLeaseImpl: () => ({ acquired: true, lease: { repo: 'acme/repo', base: 'main', leaseId: 'l904', holderPr: 904, holderHead: 'red-head-904', acquiredAt: '2026-07-20T00:00:00.000Z' } }),
+      releaseMergeLeaseImpl: () => {},
+      execFileImpl: async () => { mergeCalls += 1; return { stdout: '', stderr: '' }; },
+    });
+
+    assert.notEqual(result.merged, true, 'a red required gate must NEVER merge, even with operator approval');
+    assert.equal(mergeCalls, 0, 'the merge button is never clicked on a red gate');
+    assert.deepEqual(result.reasons, ['ci-not-green'], 'the tripping gate is surfaced');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Deliverable 2 — hammer/daemon fallback for daemon-fail-closed clean PRs.
+//
+// A REMEDIABLE gate (ci-not-green / pr-not-mergeable / stale-head) on an
+// attributed (identity-resolved) clean PR routes to the SAME capped
+// `maybeDispatchAmaCloser` hammer the not-taken path uses instead of parking.
+// NON-remediable gates (worker-identity-unresolved, verdict-not-eligible,
+// lease-not-held) STILL park.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('Deliverable 2: daemon fail-closed stale-head routes to the capped hammer (fresh head gets its own hammer)', async () => {
+  const rootDir = tempRoot();
+  try {
+    let closerCalls = 0;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'stale-head', merged: false, attempts: 1,
+      }),
+      maybeDispatchAmaCloserImpl: async () => { closerCalls += 1; return { dispatched: true }; },
+    });
+    assert.equal(closerCalls, 1, 'a stale-head daemon fail-closed must fall through to the capped hammer');
+    assert.equal(result.dispatched, true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('Deliverable 2: daemon fail-closed pr-not-mergeable (conflict) routes to the capped hammer for rebase', async () => {
+  const rootDir = tempRoot();
+  try {
+    let closerCalls = 0;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'gate-not-eligible', reasons: ['pr-not-mergeable'], merged: false, attempts: 1, manualCloseRequired: true,
+      }),
+      maybeDispatchAmaCloserImpl: async () => { closerCalls += 1; return { dispatched: true }; },
+    });
+    assert.equal(closerCalls, 1);
+    assert.equal(result.dispatched, true);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('Deliverable 2: daemon fail-closed with a NON-remediable co-occurring gate (verdict-not-eligible) still parks', async () => {
+  const rootDir = tempRoot();
+  try {
+    const logs = [];
+    let closerCalls = 0;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      logger: { log: (m) => logs.push(String(m)), warn() {} },
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'gate-not-eligible', reasons: ['ci-not-green', 'verdict-not-eligible'],
+        merged: false, attempts: 1, manualCloseRequired: true,
+      }),
+      maybeDispatchAmaCloserImpl: async () => { closerCalls += 1; return { dispatched: true }; },
+    });
+    assert.equal(closerCalls, 0, 'a co-occurring non-remediable gate must park, not hammer');
+    assert.equal(result.skipMergeAgent, true);
+    const parsed = logs.map((l) => { try { return JSON.parse(l); } catch { return null; } });
+    assert.equal(parsed.find((d) => d?.event === 'ama.daemon_clean_fail_closed.hammer_fallback'), undefined);
+    assert.ok(parsed.find((d) => d?.event === 'ama.daemon_clean_park.manual_close_required'), 'a park signal fires');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('Deliverable 2: worker-identity-unresolved fail-closed is NOT hammer-remediable → parks (no merge-clicker for un-attributed PRs)', async () => {
+  const rootDir = tempRoot();
+  try {
+    const logs = [];
+    let closerCalls = 0;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      logger: { log: (m) => logs.push(String(m)), warn() {} },
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'worker-identity-unresolved', reasons: ['missing-build-completion-signal'],
+        merged: false, attempts: 0,
+      }),
+      maybeDispatchAmaCloserImpl: async () => { closerCalls += 1; return { dispatched: true }; },
+    });
+    assert.equal(closerCalls, 0, 'un-attributed PRs never get a blind merge-clicker hammer');
+    assert.equal(result.skipMergeAgent, true);
+    const parsed = logs.map((l) => { try { return JSON.parse(l); } catch { return null; } });
+    assert.equal(parsed.find((d) => d?.event === 'ama.daemon_clean_fail_closed.hammer_fallback'), undefined);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('Deliverable 2: the hammer fallback is bounded by the SAME per-PR cap — a cap-exhausted closer parks without re-dispatch', async () => {
+  const rootDir = tempRoot();
+  try {
+    let closerCalls = 0;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'gate-not-eligible', reasons: ['ci-not-green'], merged: false, attempts: 1,
+      }),
+      // The real maybeDispatchAmaCloser routes every hammer dispatch through the
+      // per-PR hammer-retry-cap; at the ceiling it fails loud (GBI alert) and
+      // suppresses with skipMergeAgent. The fallback calls it exactly once/tick.
+      maybeDispatchAmaCloserImpl: async () => {
+        closerCalls += 1;
+        return { dispatched: false, skipMergeAgent: true, reason: 'hammer-lifetime-ceiling-reached', needsOperator: true };
+      },
+    });
+    assert.equal(closerCalls, 1, 'the fallback calls the capped closer exactly once per tick — never an uncapped loop');
+    assert.equal(result.dispatched, false);
+    assert.equal(result.skipMergeAgent, true);
+    assert.equal(result.reason, 'hammer-lifetime-ceiling-reached');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+// ── Unit tests for the two pure classifiers ──────────────────────────────────
+
+test('isDaemonFailClosedHammerRemediable classifies remediable vs non-remediable daemon fail-closed reasons', () => {
+  const fc = (reason, reasons) => ({
+    disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+    reason,
+    ...(reasons ? { reasons } : {}),
+  });
+  // Remediable
+  assert.equal(isDaemonFailClosedHammerRemediable(fc('stale-head')), true);
+  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['ci-not-green'])), true);
+  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['pr-not-mergeable'])), true);
+  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['ci-not-green', 'pr-not-mergeable', 'stale-head'])), true);
+  // Non-remediable
+  assert.equal(isDaemonFailClosedHammerRemediable(fc('worker-identity-unresolved', ['missing-build-completion-signal'])), false);
+  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['ci-not-green', 'verdict-not-eligible'])), false);
+  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['lease-not-held'])), false);
+  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', [])), false);
+  assert.equal(isDaemonFailClosedHammerRemediable(fc('permanent-merge-rejection')), false);
+  assert.equal(isDaemonFailClosedHammerRemediable(fc('unclassified-merge-failure')), false);
+  assert.equal(isDaemonFailClosedHammerRemediable(fc('merge-retry-budget-exhausted')), false);
+  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-read-failed')), false);
+  // Wrong disposition / degenerate
+  assert.equal(isDaemonFailClosedHammerRemediable({ disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN, reason: 'gate-not-eligible', reasons: ['ci-not-green'] }), false);
+  assert.equal(isDaemonFailClosedHammerRemediable(null), false);
+});
+
+test('resolveOperatorMergeAccountability requires a head-scoped, attributable, provenanced operator label', () => {
+  const head = 'live-head-xyz';
+  const approved = { id: 'e1', label: 'operator-approved', actor: 'VirtualPaul', createdAt: 't', headSha: head };
+  // Happy path
+  assert.equal(resolveOperatorMergeAccountability({ operatorApprovalEvent: approved, mergeHeadSha: head }).label, 'operator-approved');
+  // Stale head → null (no carryover)
+  assert.equal(resolveOperatorMergeAccountability({ operatorApprovalEvent: { ...approved, headSha: 'other' }, mergeHeadSha: head }), null);
+  // Non-attributable → null
+  assert.equal(resolveOperatorMergeAccountability({ operatorApprovalEvent: { ...approved, actor: '' }, mergeHeadSha: head }), null);
+  assert.equal(resolveOperatorMergeAccountability({ operatorApprovalEvent: { ...approved, actor: 'unknown' }, mergeHeadSha: head }), null);
+  // Missing provenance → null
+  assert.equal(resolveOperatorMergeAccountability({ operatorApprovalEvent: { ...approved, id: null, nodeId: null }, mergeHeadSha: head }), null);
+  assert.equal(resolveOperatorMergeAccountability({ operatorApprovalEvent: { ...approved, createdAt: null }, mergeHeadSha: head }), null);
+  // merge-agent-requested accepted
+  const mar = { id: 'e2', label: 'merge-agent-requested', actor: 'VirtualPaul', createdAt: 't', headSha: head };
+  assert.equal(resolveOperatorMergeAccountability({ mergeAgentRequestEvent: mar, mergeHeadSha: head }).label, 'merge-agent-requested');
+  // operator-approved preferred over merge-agent-requested when both present
+  assert.equal(resolveOperatorMergeAccountability({ operatorApprovalEvent: approved, mergeAgentRequestEvent: mar, mergeHeadSha: head }).label, 'operator-approved');
+  // No events / empty head → null
+  assert.equal(resolveOperatorMergeAccountability({ mergeHeadSha: head }), null);
+  assert.equal(resolveOperatorMergeAccountability({ operatorApprovalEvent: approved, mergeHeadSha: '' }), null);
 });

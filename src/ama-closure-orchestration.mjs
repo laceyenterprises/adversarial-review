@@ -71,6 +71,59 @@ const MERGEABILITY_SAMPLE_DELAY_MS = Math.max(
   Number.parseInt(process.env.ADVERSARIAL_MERGEABILITY_SAMPLE_DELAY_MS || '', 10) || 2500,
 );
 
+// Deliverable 2 — daemon-fail-closed hammer fallback classification.
+//
+// When the daemon clean-path fails closed on a REMEDIABLE gate, a fleet-worker
+// (identity-resolved) clean PR should be handed to the SAME capped hammer the
+// `not-taken` path already uses — the hammer re-validates the required gate at
+// the post-remediation head and merges under its own lease — instead of parking
+// for manual close. NON-remediable gates still fail closed (no blind
+// merge-clicker): worker-identity is Deliverable 1's operator-approval lane, and
+// verdict/lease misses are not something a hammer can repair into a merge.
+const DAEMON_HAMMER_REMEDIABLE_GATE_REASONS = new Set([
+  'ci-not-green',
+  'pr-not-mergeable',
+  'stale-head',
+]);
+const DAEMON_HAMMER_NONREMEDIABLE_GATE_REASONS = new Set([
+  'verdict-not-eligible',
+  'lease-not-held',
+]);
+
+/**
+ * Is this daemon `failed-closed` result one a single capped hammer can plausibly
+ * remediate into a merge? True ONLY for a remediable gate on a PR that already
+ * cleared the daemon's worker-identity gate (so it is an attributed fleet-worker
+ * PR). Worker-identity, permanent/unclassified merge rejections, and transient
+ * budget/read exhaustion are NOT hammer-remediable here.
+ *
+ * @param {object} daemonCleanMerge  The `runDaemonCleanMergeAttempt` result.
+ * @returns {boolean}
+ */
+export function isDaemonFailClosedHammerRemediable(daemonCleanMerge) {
+  if (!daemonCleanMerge || daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.FAILED_CLOSED) {
+    return false;
+  }
+  const reason = String(daemonCleanMerge.reason || '');
+  // Worker-identity-unresolved is NOT hammer-remediable — that PR is un-attributed
+  // and closes (if at all) via Deliverable 1's operator-approval lane on the
+  // daemon path, never a spawned merge-clicker.
+  if (reason === 'worker-identity-unresolved') return false;
+  // The daemon's own stale-head terminal: the reviewed head moved, so a fresh
+  // review head gets its own hammer under the per-PR cap.
+  if (reason === 'stale-head') return true;
+  // A `gate-not-eligible` terminal carries the exact failing eligibility gates.
+  if (reason !== 'gate-not-eligible') return false;
+  const reasons = Array.isArray(daemonCleanMerge.reasons)
+    ? daemonCleanMerge.reasons.map((r) => String(r))
+    : [];
+  if (reasons.length === 0) return false;
+  // Any non-remediable gate co-occurring → park (fail closed).
+  if (reasons.some((r) => DAEMON_HAMMER_NONREMEDIABLE_GATE_REASONS.has(r))) return false;
+  // EVERY gate must be hammer-remediable.
+  return reasons.every((r) => DAEMON_HAMMER_REMEDIABLE_GATE_REASONS.has(r));
+}
+
 function withAmaDispatchMetadata(result, { amaEnabled }) {
   if (!result || typeof result !== 'object') return result;
   const wrapped = {
@@ -171,6 +224,7 @@ export async function maybeDispatchAmaClosureFor({
   candidate,
   labelNames,
   operatorApprovalEvent,
+  mergeAgentRequestEvent,
   adversarialMergeRequestedEvent,
   repoPath,
   prNumber,
@@ -582,6 +636,11 @@ export async function maybeDispatchAmaClosureFor({
     reviewState,
     reviewStateRow,
     currentPrHeadSha,
+    // Deliverable 1 — the head-scoped operator labels that substitute for an
+    // unresolved worker identity so a clean un-attributed PR closes under an
+    // operator-accountable lease instead of parking `worker-identity-unresolved`.
+    operatorApprovalEvent,
+    mergeAgentRequestEvent,
     logger,
     env,
   });
@@ -592,54 +651,88 @@ export async function maybeDispatchAmaClosureFor({
         `@${daemonHeadShort}: ${daemonCleanMerge.reason}` +
         (daemonCleanMerge.attempts ? ` (attempts=${daemonCleanMerge.attempts})` : ''),
     );
-    // LAC-1559 Fix 2: the daemon parks a fully-clean PR that failed closed with
-    // no hammer fallback. Emit a distinct, queryable operator signal so the
-    // superproject observability layer (ARR-02) can page on it rather than the
-    // park being silent. The durable record is the daemon audit doc
-    // (`manualCloseRequired` on the terminal attempt); this is the pageable
-    // event. The merge decision is unchanged.
-    if (
-      daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.FAILED_CLOSED &&
-      daemonCleanMerge.manualCloseRequired
-    ) {
-      // Surface the exact eligibility gate(s) that tripped (a stable subset of
-      // {verdict-not-eligible|ci-not-green|pr-not-mergeable|stale-head|
-      // lease-not-held}) so the operator page names WHY the clean PR could not
-      // land instead of only the generic terminal `reason`. The daemon threads
-      // these up on the fail-closed result; default to [] when absent.
-      const parkReasons = Array.isArray(daemonCleanMerge.reasons) ? daemonCleanMerge.reasons : [];
+    // Deliverable 2 — daemon-fail-closed hammer fallback. When the daemon
+    // clean-path fails closed on a REMEDIABLE gate (ci-not-green, pr-not-mergeable
+    // conflict, or stale-head) for an attributed fleet-worker PR, DO NOT park:
+    // fall through to the SAME capped `maybeDispatchAmaCloser` hammer dispatch the
+    // `not-taken` path uses. That hammer re-validates the required gate at the
+    // post-remediation head and merges under its own lease, and every hammer
+    // dispatch is bounded by the per-PR hammer-retry-cap (loud GBI operator alert
+    // at the ceiling — never an uncapped re-dispatch). NON-remediable gates
+    // (worker-identity-unresolved, verdict-not-eligible, lease-not-held) and
+    // permanent/transient merge failures still park below.
+    const daemonFailedClosed =
+      daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.FAILED_CLOSED;
+    const hammerRemediableFallback =
+      daemonFailedClosed && isDaemonFailClosedHammerRemediable(daemonCleanMerge);
+    if (hammerRemediableFallback) {
+      const fallbackReasons = Array.isArray(daemonCleanMerge.reasons) ? daemonCleanMerge.reasons : [];
       logger?.log?.(JSON.stringify({
         schemaVersion: 1,
-        event: 'ama.daemon_clean_park.manual_close_required',
+        event: 'ama.daemon_clean_fail_closed.hammer_fallback',
         repo: repoPath,
         pr: prNumber,
         headSha: gateSnapshot?.reviewedHeadSha || null,
         reason: daemonCleanMerge.reason,
-        reasons: parkReasons,
+        reasons: fallbackReasons,
         attempts: daemonCleanMerge.attempts || 0,
-        hammerFallback: false,
+        hammerFallback: true,
       }));
-      logger?.warn?.(
-        `[watcher] AMA daemon clean PR PARKED — manual close required for ` +
-          `${repoPath}#${prNumber}@${daemonHeadShort}: a zero-finding clean review ` +
-          `could not be landed (${daemonCleanMerge.reason}` +
-          (parkReasons.length ? `; gates=${parkReasons.join(',')}` : '') +
-          `) and the retry path spawns ` +
-          `no hammer. Operator must close manually; see the daemon-merge audit record.`,
+      logger?.log?.(
+        `[watcher] AMA daemon clean-merge fail-closed on a hammer-remediable gate for ` +
+          `${repoPath}#${prNumber}@${daemonHeadShort} (${daemonCleanMerge.reason}` +
+          (fallbackReasons.length ? `; gates=${fallbackReasons.join(',')}` : '') +
+          `); routing to the capped hammer (re-validates the gate at head + merges ` +
+          `under its own lease) instead of parking for manual close`,
+      );
+      // Fall through to the hammer dispatch below. Do NOT return here.
+    } else {
+      // LAC-1559 Fix 2: the daemon parks a fully-clean PR that failed closed with
+      // no hammer fallback. Emit a distinct, queryable operator signal so the
+      // superproject observability layer (ARR-02) can page on it rather than the
+      // park being silent. The durable record is the daemon audit doc
+      // (`manualCloseRequired` on the terminal attempt); this is the pageable
+      // event. The merge decision is unchanged.
+      if (daemonFailedClosed && daemonCleanMerge.manualCloseRequired) {
+        // Surface the exact eligibility gate(s) that tripped (a stable subset of
+        // {verdict-not-eligible|ci-not-green|pr-not-mergeable|stale-head|
+        // lease-not-held}) so the operator page names WHY the clean PR could not
+        // land instead of only the generic terminal `reason`. The daemon threads
+        // these up on the fail-closed result; default to [] when absent.
+        const parkReasons = Array.isArray(daemonCleanMerge.reasons) ? daemonCleanMerge.reasons : [];
+        logger?.log?.(JSON.stringify({
+          schemaVersion: 1,
+          event: 'ama.daemon_clean_park.manual_close_required',
+          repo: repoPath,
+          pr: prNumber,
+          headSha: gateSnapshot?.reviewedHeadSha || null,
+          reason: daemonCleanMerge.reason,
+          reasons: parkReasons,
+          attempts: daemonCleanMerge.attempts || 0,
+          hammerFallback: false,
+        }));
+        logger?.warn?.(
+          `[watcher] AMA daemon clean PR PARKED — manual close required for ` +
+            `${repoPath}#${prNumber}@${daemonHeadShort}: a zero-finding clean review ` +
+            `could not be landed (${daemonCleanMerge.reason}` +
+            (parkReasons.length ? `; gates=${parkReasons.join(',')}` : '') +
+            `) and this terminal is not hammer-remediable. Operator must close ` +
+            `manually; see the daemon-merge audit record.`,
+        );
+      }
+      // Daemon owns this tick — skip BOTH the hammer dispatch and the merge-agent
+      // path. `skipMergeAgent` routes the coexistence decision to `ama-pending`
+      // so the watcher returns without dispatching anything.
+      return withAmaDispatchMetadata(
+        {
+          dispatched: false,
+          skipMergeAgent: true,
+          reason: `daemon-${daemonCleanMerge.disposition}`,
+          daemonCleanMerge,
+        },
+        { amaEnabled: true },
       );
     }
-    // Daemon owns this tick — skip BOTH the hammer dispatch and the merge-agent
-    // path. `skipMergeAgent` routes the coexistence decision to `ama-pending`
-    // so the watcher returns without dispatching anything.
-    return withAmaDispatchMetadata(
-      {
-        dispatched: false,
-        skipMergeAgent: true,
-        reason: `daemon-${daemonCleanMerge.disposition}`,
-        daemonCleanMerge,
-      },
-      { amaEnabled: true },
-    );
   }
 
   const [owner, name] = repoPath.split('/');
@@ -746,6 +839,10 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     candidate,
     labelNames,
     operatorApprovalEvent,
+    // Deliverable 1 — thread the operator merge-agent-requested label event into
+    // the closure dispatch so the daemon path can substitute it for an unresolved
+    // worker identity (head-scoped) instead of parking.
+    mergeAgentRequestEvent,
     adversarialMergeRequestedEvent,
     repoPath,
     prNumber,

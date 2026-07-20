@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 
 import { summarizeChecksConclusion } from './checks-summary.mjs';
 import { normalizeRequiredContexts } from './branch-protection.mjs';
+import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import {
   MERGE_AGENT_REQUESTED_LABEL,
@@ -10,6 +11,9 @@ import {
 } from './adapters/operator/github-pr-label-controls/index.mjs';
 
 const execFileAsync = promisify(execFile);
+const OPERATOR_NOTES_BEGIN_DELIMITER = 'BEGIN UNTRUSTED PR BODY NOTES';
+const OPERATOR_NOTES_END_DELIMITER = 'END UNTRUSTED PR BODY NOTES';
+const OPERATOR_NOTES_ESCAPED_END_DELIMITER = 'END_UNTRUSTED_PR_BODY_NOTES';
 
 // Behavior-preserving private copy of the trivial label-normalization
 // primitive (per the ARC-19 leaf-extraction precedent already used in
@@ -28,23 +32,51 @@ function normalizeLabelNames(labels) {
 }
 
 function extractOperatorNotes(prBody) {
-  const text = String(prBody ?? '').trim();
+  const text = String(prBody ?? '')
+    .replaceAll(OPERATOR_NOTES_END_DELIMITER, OPERATOR_NOTES_ESCAPED_END_DELIMITER)
+    .trim();
   if (!text) return null;
   return [
-    'BEGIN UNTRUSTED PR BODY NOTES',
+    OPERATOR_NOTES_BEGIN_DELIMITER,
     text.slice(0, 2_000),
-    'END UNTRUSTED PR BODY NOTES',
+    OPERATOR_NOTES_END_DELIMITER,
   ].join('\n');
+}
+
+function isBranchProtectionNotConfiguredError(err) {
+  const detail = [err?.message, err?.stderr, err?.stdout]
+    .filter(Boolean)
+    .join('\n');
+  return /\bHTTP\s+404\b/i.test(detail)
+    || /\b404\s+Not\s+Found\b/i.test(detail)
+    || /Branch not protected/i.test(detail)
+    || /Branch Protection Rules? not found/i.test(detail);
+}
+
+async function execGhJson({
+  args,
+  execFileImpl,
+  ghRetryOptions,
+}) {
+  return execGhWithRetry({
+    execFileImpl,
+    args,
+    retries: 2,
+    backoffMs: 250,
+    ...ghRetryOptions,
+  });
 }
 
 async function fetchMergeAgentCandidate(repo, prNumber, {
   execFileImpl = execFileAsync,
+  ghRetryOptions = undefined,
   operatorApprovalEvent = undefined,
   mergeAgentRequestEvent = undefined,
 } = {}) {
-  const { stdout } = await execFileImpl(
-    'gh',
-    [
+  const { stdout } = await execGhJson({
+    execFileImpl,
+    ghRetryOptions,
+    args: [
       'pr',
       'view',
       String(prNumber),
@@ -53,8 +85,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
       '--json',
       'mergeable,mergeStateStatus,headRefName,baseRefName,headRefOid,body,labels,statusCheckRollup,state,mergedAt,closedAt,updatedAt,author',
     ],
-    { maxBuffer: 5 * 1024 * 1024 }
-  );
+  });
   const parsed = JSON.parse(String(stdout || '{}'));
   const labels = parsed.labels || [];
   const normalizedLabels = normalizeLabelNames(labels);
@@ -71,18 +102,20 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
   let branchProtection = { requiredContexts: [] };
   if (parsed.baseRefName) {
     try {
-      const { stdout: protectionStdout } = await execFileImpl(
-        'gh',
-        [
+      const { stdout: protectionStdout } = await execGhJson({
+        execFileImpl,
+        ghRetryOptions,
+        args: [
           'api',
           `repos/${repo}/branches/${encodeURIComponent(parsed.baseRefName)}/protection`,
         ],
-        { maxBuffer: 5 * 1024 * 1024 }
-      );
+      });
       branchProtection = {
         requiredContexts: normalizeRequiredContexts(JSON.parse(String(protectionStdout || '{}'))),
       };
-    } catch {
+    } catch (err) {
+      if (isTransientGhError(err)) throw err;
+      if (!isBranchProtectionNotConfiguredError(err)) throw err;
       branchProtection = { requiredContexts: [] };
     }
   }

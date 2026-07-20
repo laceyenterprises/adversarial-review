@@ -14,9 +14,11 @@
  *   - **No local CI.** The daemon has no local environment and must NEVER run a
  *     local test battery — that was the original merge-agent state machine's
  *     fatal flaw. The daemon trusts GitHub's required checks + `mergeable` for
- *     the zero-findings case (the full local battery is the hammer's job,
- *     MSM-01). This module reads GitHub state and calls `gh pr merge`; it has no
- *     local-CI seam and injects none.
+ *     the zero-findings case. Both the daemon and the hammer now trust GitHub's
+ *     required checks as the sole CI authority (MSM-01); the hammer additionally
+ *     remediates findings and rebases before merge, but it too runs no local
+ *     test battery. This module reads GitHub state and calls `gh pr merge`; it
+ *     has no local-CI seam and injects none.
  *   - **Clean-only by default (STRICT).** With strict mode on, the daemon is
  *     never allowed to merge a PR that carries ANY finding — blocking OR
  *     non-blocking — in the final review. Any finding (or an unknown finding

@@ -602,6 +602,12 @@ export async function maybeDispatchAmaClosureFor({
       daemonCleanMerge.disposition === DAEMON_MERGE_DISPOSITION.FAILED_CLOSED &&
       daemonCleanMerge.manualCloseRequired
     ) {
+      // Surface the exact eligibility gate(s) that tripped (a stable subset of
+      // {verdict-not-eligible|ci-not-green|pr-not-mergeable|stale-head|
+      // lease-not-held}) so the operator page names WHY the clean PR could not
+      // land instead of only the generic terminal `reason`. The daemon threads
+      // these up on the fail-closed result; default to [] when absent.
+      const parkReasons = Array.isArray(daemonCleanMerge.reasons) ? daemonCleanMerge.reasons : [];
       logger?.log?.(JSON.stringify({
         schemaVersion: 1,
         event: 'ama.daemon_clean_park.manual_close_required',
@@ -609,13 +615,16 @@ export async function maybeDispatchAmaClosureFor({
         pr: prNumber,
         headSha: gateSnapshot?.reviewedHeadSha || null,
         reason: daemonCleanMerge.reason,
+        reasons: parkReasons,
         attempts: daemonCleanMerge.attempts || 0,
         hammerFallback: false,
       }));
       logger?.warn?.(
         `[watcher] AMA daemon clean PR PARKED — manual close required for ` +
           `${repoPath}#${prNumber}@${daemonHeadShort}: a zero-finding clean review ` +
-          `could not be landed (${daemonCleanMerge.reason}) and the retry path spawns ` +
+          `could not be landed (${daemonCleanMerge.reason}` +
+          (parkReasons.length ? `; gates=${parkReasons.join(',')}` : '') +
+          `) and the retry path spawns ` +
           `no hammer. Operator must close manually; see the daemon-merge audit record.`,
       );
     }

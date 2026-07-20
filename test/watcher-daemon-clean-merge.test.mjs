@@ -15,6 +15,7 @@ import {
   DAEMON_MERGE_DISPOSITION,
   DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
 } from '../src/ama/daemon-merge.mjs';
+import { __testables__ as daemonCleanMergeTestables } from '../src/daemon-clean-merge.mjs';
 
 // Integration test for the MSM-03 wiring seam in `maybeDispatchAmaClosureFor`:
 // the daemon clean-merge attempt runs BEFORE the AMA closer dispatch, and any
@@ -1679,4 +1680,215 @@ test("resolveDaemonWorkerIdentityForPr still fails closed when no pr_opened row 
     readBuildCompletionSignalForPrImpl: async () => ({ ok: false, reason: "missing-build-completion-signal" }),
   });
   assert.equal(result.ok, false);
+});
+
+// ── DCA-01: `fetchPullRequestRollup` field-contract regression ───────────────
+// `fetchPullRequestRollup` (src/github-api.mjs) normalizes checks onto `checks`
+// and the head onto `headRefOid` — NOT `statusCheckRollup`/`headSha`. The daemon
+// clean-route used to read `rollup.statusCheckRollup`, which was always
+// `undefined` → an empty required-checks array → a spurious `ci-not-green` that
+// parked EVERY zero-finding clean PR on the in-loop re-fetch. These tests pin
+// the real fetch contract so the field name cannot silently drift again.
+
+function realRollupHelpers({ rootDir, prNumber = 700, head = 'clean-head' }) {
+  return {
+    rootDir,
+    cfg: {
+      mergeMethod: 'squash',
+      autonomousMergeExecutionEnabled: true,
+      strictMode: true,
+    },
+    repoPath: 'acme/repo',
+    prNumber,
+    // The watcher candidate snapshot uses the raw `gh pr view --json
+    // statusCheckRollup` name and is deliberately EMPTY here, so the pre-lease
+    // gate cannot pass by falling back to a candidate green rollup — the fix
+    // must resolve greenness from the live `checks` field itself.
+    candidate: {
+      baseBranch: 'main',
+      headSha: head,
+      statusCheckRollup: [],
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN',
+      prState: 'open',
+    },
+    gateSnapshot: {
+      reviewedHeadSha: head,
+      settledReview: { verdict: 'comment-only' },
+    },
+    mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
+    reviewState: {
+      blockingFindingCount: 0,
+      blockingFindingState: 'known',
+      nonBlockingFindingCount: 0,
+      nonBlockingFindingState: 'known',
+    },
+    reviewStateRow: { reviewer: 'codex' },
+    currentPrHeadSha: head,
+    acquireMergeLeaseImpl: () => ({
+      acquired: true,
+      lease: {
+        repo: 'acme/repo',
+        base: 'main',
+        leaseId: `lease-${prNumber}`,
+        holderPr: prNumber,
+        holderHead: head,
+        acquiredAt: '2026-07-19T00:00:00.000Z',
+      },
+    }),
+    releaseMergeLeaseImpl: () => {},
+    readBuildCompletionSignalForPrImpl: () => ({
+      ok: true,
+      row: { launch_request_id: 'lrq-clean', worker_class: 'codex', head_sha: head },
+    }),
+    logger: { warn() {}, log() {} },
+    env: { HQ_ROOT: rootDir },
+  };
+}
+
+test('DCA-01: clean PR with real-contract `checks` rollup now MERGES (was parked ci-not-green)', async () => {
+  const rootDir = tempRoot();
+  let mergeCalls = 0;
+  try {
+    const result = await runDaemonCleanMergeAttempt({
+      ...realRollupHelpers({ rootDir, prNumber: 700, head: 'clean-head' }),
+      // The authentic fetchPullRequestRollup contract: `checks` + `headRefOid`,
+      // NO `statusCheckRollup`, NO `headSha`. Pre-fix this read as zero checks.
+      fetchRollupImpl: async () => ({
+        state: 'OPEN',
+        headRefOid: 'clean-head',
+        checks: [
+          { name: 'repo-guards', conclusion: 'SUCCESS' },
+          { name: 'shellcheck', conclusion: 'SUCCESS' },
+        ],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      }),
+      execFileImpl: async () => {
+        mergeCalls += 1;
+        return { stdout: '', stderr: '' };
+      },
+    });
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(result.merged, true);
+    assert.ok(mergeCalls >= 1, 'the merge button is actually clicked once eligible');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('DCA-01: a check that goes RED between pre-lease and the in-loop re-fetch parks (never merges) with ci-not-green + surfaced reasons', async () => {
+  const rootDir = tempRoot();
+  let mergeCalls = 0;
+  let fetchCalls = 0;
+  try {
+    const result = await runDaemonCleanMergeAttempt({
+      ...realRollupHelpers({ rootDir, prNumber: 701, head: 'flip-head' }),
+      // Green on the first (pre-lease) fetch, red on the in-loop re-read — the
+      // exact production park shape (in-loop `gate-not-eligible`).
+      fetchRollupImpl: async () => {
+        fetchCalls += 1;
+        const conclusion = fetchCalls === 1 ? 'SUCCESS' : 'FAILURE';
+        return {
+          state: 'OPEN',
+          headRefOid: 'flip-head',
+          checks: [{ name: 'repo-guards', conclusion }],
+          mergeable: 'MERGEABLE',
+          mergeStateStatus: 'CLEAN',
+        };
+      },
+      execFileImpl: async () => {
+        mergeCalls += 1;
+        return { stdout: '', stderr: '' };
+      },
+    });
+    assert.equal(result.merged, false, 'a red gate must NEVER merge');
+    assert.equal(mergeCalls, 0, 'the merge button is never clicked on a red gate');
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+    assert.equal(result.reason, 'gate-not-eligible');
+    assert.equal(result.manualCloseRequired, true, 'a zero-finding clean park needs a manual-close signal');
+    assert.deepEqual(result.reasons, ['ci-not-green'], 'the exact tripping gate is surfaced on the result');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('DCA-01: a live rollup with ZERO checks never merges (LAC-1559 empty-rollup invariant preserved)', async () => {
+  const rootDir = tempRoot();
+  let mergeCalls = 0;
+  try {
+    const result = await runDaemonCleanMergeAttempt({
+      ...realRollupHelpers({ rootDir, prNumber: 702, head: 'nocheck-head' }),
+      fetchRollupImpl: async () => ({
+        state: 'OPEN',
+        headRefOid: 'nocheck-head',
+        checks: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      }),
+      execFileImpl: async () => {
+        mergeCalls += 1;
+        return { stdout: '', stderr: '' };
+      },
+    });
+    assert.equal(result.merged, false, 'no checks reported is not green — must not merge');
+    assert.equal(mergeCalls, 0, 'the merge button is never clicked with zero checks');
+    // Empty live checks are caught at the pre-lease gate (declines cleanly to the
+    // hammer route) rather than reaching the in-loop park.
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(result.reason, 'not-eligible');
+    assert.deepEqual(result.reasons, ['ci-not-green']);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('resolveRollupRequiredChecks prefers `checks`, falls back to `statusCheckRollup`, and returns null when neither is present', () => {
+  const { resolveRollupRequiredChecks } = daemonCleanMergeTestables;
+  const checks = [{ name: 'ci', conclusion: 'SUCCESS' }];
+  const legacy = [{ __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' }];
+  // Authentic fetchPullRequestRollup contract wins.
+  assert.strictEqual(resolveRollupRequiredChecks({ checks }), checks);
+  // An empty live `checks` array is returned as-is (never masked) so an empty
+  // live head reads NOT green.
+  const empty = [];
+  assert.strictEqual(resolveRollupRequiredChecks({ checks: empty }), empty);
+  // `checks` wins even when a legacy field is also present.
+  assert.strictEqual(resolveRollupRequiredChecks({ checks, statusCheckRollup: legacy }), checks);
+  // Back-compat: snapshot/mocks that only carry the raw name still resolve.
+  assert.strictEqual(resolveRollupRequiredChecks({ statusCheckRollup: legacy }), legacy);
+  // Neither field present → null so the caller applies its own default.
+  assert.strictEqual(resolveRollupRequiredChecks({}), null);
+  assert.strictEqual(resolveRollupRequiredChecks(null), null);
+});
+
+test('DCA-01: watcher park event + warn line surface the tripping gate reasons[]', async () => {
+  const rootDir = tempRoot();
+  try {
+    const logs = [];
+    const warns = [];
+    await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      logger: { log: (m) => logs.push(String(m)), warn: (m) => warns.push(String(m)) },
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'gate-not-eligible',
+        merged: false,
+        attempts: 1,
+        manualCloseRequired: true,
+        reasons: ['ci-not-green'],
+      }),
+      maybeDispatchAmaCloserImpl: async () => ({ dispatched: true }),
+    });
+
+    const parkEvent = logs
+      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+      .find((doc) => doc?.event === 'ama.daemon_clean_park.manual_close_required');
+    assert.ok(parkEvent, 'a structured manual-close-required event must be emitted');
+    assert.deepEqual(parkEvent.reasons, ['ci-not-green'], 'the exact gate reasons[] are in the pageable event');
+    assert.equal(parkEvent.reason, 'gate-not-eligible');
+    assert.match(warns.join('\n'), /gates=ci-not-green/, 'the human park line names the tripping gate');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });

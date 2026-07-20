@@ -329,7 +329,24 @@ function daemonLaunchProvenanceRepoMatches(recordRepo, expectedRepo) {
   const record = String(recordRepo || '').trim().toLowerCase();
   const expected = String(expectedRepo || '').trim().toLowerCase();
   if (!record || !expected) return false;
-  return record === expected;
+  if (record === expected) return true;
+  // Representation bridge (NOT a security loosening): hq writes launch-provenance
+  // `repo`/`prRepo` in SHORT `<name>` form (e.g. `agent-os`), while the daemon
+  // resolves identity with the FULL `<owner>/<name>` form it reads from the live
+  // GitHub rollup (e.g. `laceyenterprises/agent-os`). An exact-equality-only check
+  // therefore matched ZERO real provenance records — every record on this host
+  // uses the short form — silently killing the entire launch-provenance fallback.
+  // Bridge the two representations by matching ONLY when the slash-less side is
+  // exactly the repo-name segment of the `<owner>/<name>` side: `agent-os` matches
+  // `laceyenterprises/agent-os` but never `laceyenterprises/other-repo`. Two
+  // distinct full forms, or two distinct short forms, still never match, so this
+  // can never bridge across different repositories.
+  const recordHasOwner = record.includes('/');
+  const expectedHasOwner = expected.includes('/');
+  if (recordHasOwner === expectedHasOwner) return false;
+  const [fullForm, shortName] = recordHasOwner ? [record, expected] : [expected, record];
+  if (shortName.includes('/')) return false;
+  return fullForm.endsWith(`/${shortName}`);
 }
 
 function daemonLaunchProvenancePayload(doc) {
@@ -408,9 +425,23 @@ async function readDaemonWorkerLaunchProvenanceForPr({
     if (!payload || typeof payload !== 'object') continue;
     const recordRepo = payload.prRepo || payload.repo;
     const recordBranch = String(payload.branch || payload.headBranch || payload.prBranch || '').trim();
-    const recordPrNumber = Number(payload.prNumber || payload.pr_number || payload.pr);
+    const recordPrNumberRaw = payload.prNumber ?? payload.pr_number ?? payload.pr;
+    const recordPrNumber = Number(recordPrNumberRaw);
+    const recordHasPrNumber = recordPrNumberRaw != null
+      && recordPrNumberRaw !== ''
+      && Number.isInteger(recordPrNumber)
+      && recordPrNumber > 0;
     if (!daemonLaunchProvenanceRepoMatches(recordRepo, expectedRepo)) continue;
-    if (recordPrNumber !== numericPrNumber) continue;
+    // Identity is anchored on repo + the PR's LIVE head branch: the branch hq
+    // dispatched this worker to build is the same branch GitHub reports as the PR
+    // head, so a repo-scoped exact branch match attributes the merge to the
+    // launching worker exactly as the pr_opened ledger row would. PR number is an
+    // OPTIONAL secondary check — hq's canonical launch-provenance seed omits it for
+    // the overwhelming majority of records (only ~5% on this host carry one), so
+    // REQUIRING it fail-closed the fallback for every normal worker. When a record
+    // DOES carry a PR number we still enforce it, so a record explicitly tagged to
+    // a different PR can never be misattributed to this one.
+    if (recordHasPrNumber && recordPrNumber !== numericPrNumber) continue;
     if (recordBranch !== expectedBranch) continue;
     const launchRequestId = String(
       payload.launchRequestId || payload.launch_request_id || doc?.launchRequestId || doc?.launch_request_id || '',

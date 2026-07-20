@@ -1351,6 +1351,156 @@ test('daemon clean merge launch provenance skips missing candidate files without
   }
 });
 
+test('resolveDaemonWorkerIdentityForPr resolves identity from launch provenance in the CANONICAL hq shape (short-form repo, no prNumber) when the pr_opened row is absent', async () => {
+  // Regression for the systemic worker-identity-unresolved park (2026-07-19).
+  // hq writes launch-provenance `repo`/`prRepo` in SHORT form (`agent-os`) and
+  // omits `prNumber` for ~95% of records, but the daemon resolves identity with
+  // the FULL `<owner>/<name>` form it reads from the live GitHub rollup. The old
+  // matcher required an exact repo-string match AND a prNumber match, so it
+  // matched ZERO real records — the fallback was dead, and every dispatched-worker
+  // PR whose pr_opened ledger row had not yet landed parked fail-closed each tick.
+  const rootDir = tempRoot();
+  try {
+    const workerDir = join(rootDir, 'workers', 'codex-shw-05');
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, 'launch-provenance.json'),
+      JSON.stringify({
+        repo: 'agent-os',
+        prRepo: 'agent-os',
+        branch: 'codex-shw-05/SHW-05',
+        launchRequestId: 'lrq_fdf9602a-60d2-4c5f-af77-bbb7bb6db2ab',
+        workerClass: 'codex',
+        prHeadSha: 'head-at-dispatch',
+      }),
+    );
+    const identity = await resolveDaemonWorkerIdentityForPr({
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 4011,
+      currentHeadSha: 'live-head-after-remediation',
+      currentBranch: 'codex-shw-05/SHW-05',
+      hqRoot: rootDir,
+      rootDir: '/nonexistent-root',
+      env: {},
+      consumeHeadAttestations: false,
+      readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+    });
+    assert.equal(identity.ok, true);
+    assert.equal(identity.resolvedBy, 'launch-provenance');
+    assert.equal(identity.launchRequestId, 'lrq_fdf9602a-60d2-4c5f-af77-bbb7bb6db2ab');
+    assert.equal(identity.workerClass, 'codex');
+    assert.equal(identity.buildCompletionReason, 'missing-build-completion-signal');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('resolveDaemonWorkerIdentityForPr still fails closed for a PR whose live branch matches NO launch provenance (operator-opened PR — security preserved)', async () => {
+  // A dispatched worker for a DIFFERENT branch exists on disk, but the PR under
+  // evaluation was opened by hand on a branch no worker was dispatched to build.
+  // Identity must NOT resolve: the gate exists so every autonomous merge is
+  // attributable to a launching worker. The repo/prNumber relaxations must not
+  // manufacture identity for an unattributable PR.
+  const rootDir = tempRoot();
+  try {
+    const workerDir = join(rootDir, 'workers', 'codex-shw-05');
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, 'launch-provenance.json'),
+      JSON.stringify({
+        repo: 'agent-os',
+        branch: 'codex-shw-05/SHW-05',
+        launchRequestId: 'lrq_dispatched_worker',
+        workerClass: 'codex',
+      }),
+    );
+    const identity = await resolveDaemonWorkerIdentityForPr({
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 4012,
+      currentHeadSha: 'live-head',
+      currentBranch: 'claude-code/op-read-reject-empty-live',
+      hqRoot: rootDir,
+      rootDir: '/nonexistent-root',
+      env: {},
+      consumeHeadAttestations: false,
+      readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+    });
+    assert.equal(identity.ok, false);
+    assert.equal(identity.reason, 'missing-build-completion-signal');
+    assert.equal(identity.launchProvenanceReason, 'missing-launch-provenance');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('resolveDaemonWorkerIdentityForPr skips a launch-provenance record explicitly tagged to a DIFFERENT pr number even when repo+branch match (no cross-PR misattribution)', async () => {
+  const rootDir = tempRoot();
+  try {
+    const workerDir = join(rootDir, 'workers', 'codex-shw-05');
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, 'launch-provenance.json'),
+      JSON.stringify({
+        repo: 'agent-os',
+        branch: 'codex-shw-05/SHW-05',
+        prNumber: 9999,
+        launchRequestId: 'lrq_other_pr',
+        workerClass: 'codex',
+      }),
+    );
+    const identity = await resolveDaemonWorkerIdentityForPr({
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 4011,
+      currentHeadSha: 'live-head',
+      currentBranch: 'codex-shw-05/SHW-05',
+      hqRoot: rootDir,
+      rootDir: '/nonexistent-root',
+      env: {},
+      consumeHeadAttestations: false,
+      readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+    });
+    assert.equal(identity.ok, false);
+    assert.equal(identity.launchProvenanceReason, 'missing-launch-provenance');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('resolveDaemonWorkerIdentityForPr repo-form bridge cannot cross repositories (short-form name must be the owner/name segment)', async () => {
+  // Provenance for a worker in a DIFFERENT repo that happens to share the branch
+  // name must never be attributed to an agent-os PR. The short<->full bridge only
+  // accepts `<name>` == the `<owner>/<name>` name segment, never a foreign name.
+  const rootDir = tempRoot();
+  try {
+    const workerDir = join(rootDir, 'workers', 'codex-shared-branch');
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, 'launch-provenance.json'),
+      JSON.stringify({
+        repo: 'adversarial-review',
+        branch: 'codex-shared/SHARED',
+        launchRequestId: 'lrq_other_repo',
+        workerClass: 'codex',
+      }),
+    );
+    const identity = await resolveDaemonWorkerIdentityForPr({
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 4011,
+      currentHeadSha: 'live-head',
+      currentBranch: 'codex-shared/SHARED',
+      hqRoot: rootDir,
+      rootDir: '/nonexistent-root',
+      env: {},
+      consumeHeadAttestations: false,
+      readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+    });
+    assert.equal(identity.ok, false);
+    assert.equal(identity.launchProvenanceReason, 'missing-launch-provenance');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('resolveDaemonWorkerIdentityForPr scopes the pr_opened signal to the current head', async () => {
   // 2026-07-11 root cause: the resolver queried signal_kind='merged' (the read
   // adapter default), but an OPEN worker PR only has a 'pr_opened' build-

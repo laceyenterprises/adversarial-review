@@ -23,6 +23,32 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 export const AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS = [250, 1_000];
 
+/**
+ * Resolve the required-checks array from a `fetchPullRequestRollup` result.
+ *
+ * `fetchPullRequestRollup` (src/github-api.mjs) normalizes the head commit's
+ * status-check rollup onto the `checks` field — NOT `statusCheckRollup`, and the
+ * head SHA onto `headRefOid` — NOT `headSha`. Reading the wrong key silently
+ * yielded `undefined` → an empty required-checks array → `requiredChecksGreen([])`
+ * → a spurious `ci-not-green`, so EVERY zero-finding clean PR fail-closed parked
+ * on the in-loop re-fetch. The pre-lease gate only escaped it because it falls
+ * back to the watcher `candidate.statusCheckRollup` snapshot (which carries the
+ * raw `gh pr view --json statusCheckRollup` array), while the in-loop re-fetch
+ * had no such fallback and hardcoded `[]`.
+ *
+ * Prefer the normalized `checks` field; fall back to `statusCheckRollup` for any
+ * snapshot/mock source that still uses the raw name. Returns `null` only when
+ * NEITHER field is present, so the caller can apply its own default (e.g. the
+ * watcher candidate snapshot) — an EMPTY `checks` array is returned as-is so a
+ * live head with no reported checks still reads NOT green (LAC-1559 invariant),
+ * never masked by a stale candidate.
+ */
+function resolveRollupRequiredChecks(rollup) {
+  if (Array.isArray(rollup?.checks)) return rollup.checks;
+  if (Array.isArray(rollup?.statusCheckRollup)) return rollup.statusCheckRollup;
+  return null;
+}
+
 // ── MSM-04: daemon-or-hammer merge route ─────────────────────────────────────
 
 function isTransientAmaLiveReviewLookupError(err) {
@@ -221,9 +247,8 @@ export async function runDaemonCleanMergeAttempt({
     // Initial (pre-lease) GitHub gate snapshot from the live fetch this tick.
     liveGate: {
       candidateHead: liveHead,
-      requiredChecks: Array.isArray(liveRollup?.statusCheckRollup)
-        ? liveRollup.statusCheckRollup
-        : (Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : []),
+      requiredChecks: resolveRollupRequiredChecks(liveRollup)
+        ?? (Array.isArray(candidate?.statusCheckRollup) ? candidate.statusCheckRollup : []),
       mergeable: liveRollup?.mergeable ?? mergeabilityForGate?.mergeable,
       mergeStateStatus: liveRollup?.mergeStateStatus ?? mergeabilityForGate?.mergeStateStatus,
       prState: String(liveRollup?.state || candidate?.prState || 'open').toUpperCase(),
@@ -245,7 +270,7 @@ export async function runDaemonCleanMergeAttempt({
       const state = String(rollup?.state || '');
       return {
         candidateHead: rollup?.headSha || rollup?.headRefOid || '',
-        requiredChecks: Array.isArray(rollup?.statusCheckRollup) ? rollup.statusCheckRollup : [],
+        requiredChecks: resolveRollupRequiredChecks(rollup) ?? [],
         mergeable: rollup?.mergeable,
         mergeStateStatus: rollup?.mergeStateStatus,
         prState: state,
@@ -299,3 +324,8 @@ export async function runDaemonCleanMergeAttempt({
     logger,
   });
 }
+
+// Internal helpers exposed for unit tests.
+export const __testables__ = Object.freeze({
+  resolveRollupRequiredChecks,
+});

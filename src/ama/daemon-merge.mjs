@@ -665,6 +665,9 @@ export async function attemptDaemonCleanMerge({
   }
   logger?.warn?.(
     `[daemon-merge] fail-closed for ${repo}#${prNumber}@${validatedHead}: ${terminal.reason} ` +
+      // Name the exact eligibility gate(s) behind a generic `gate-not-eligible`
+      // (e.g. ci-not-green) so the operator log is self-diagnosing.
+      (terminal.reasons?.length ? `gates=${terminal.reasons.join(',')} ` : '') +
       `(after ${attempts} attempt(s); no hammer spawned` +
       (cleanParkManualCloseRequired ? '; clean PR parked — manual close required' : '') +
       ')' +

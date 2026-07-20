@@ -272,3 +272,37 @@ test('classifier mirrors the hammer inline check rules', () => {
     'a SUCCESS StatusContext is green',
   );
 });
+
+// The daemon clean-merge route now feeds `fetchPullRequestRollup`'s NORMALIZED
+// `checks` field into this classifier. Those objects are flattened to
+// `{ name, conclusion, completedAt }` — no `__typename`, no `status`/`state` —
+// so greenness must resolve purely from `conclusion`. Guards the field-contract
+// fix that stopped clean PRs parking on a spurious `ci-not-green`.
+test('classifier accepts the normalized fetchPullRequestRollup `checks` shape', () => {
+  const { requiredChecksGreen } = __testables__;
+  assert.equal(
+    requiredChecksGreen([{ name: 'repo-guards', conclusion: 'SUCCESS' }]),
+    true,
+    'a normalized SUCCESS check (no __typename/status) is green',
+  );
+  assert.equal(
+    requiredChecksGreen([
+      { name: 'repo-guards', conclusion: 'SUCCESS' },
+      { name: 'shellcheck', conclusion: 'SUCCESS' },
+    ]),
+    true,
+    'all-green normalized checks are green',
+  );
+  assert.equal(
+    requiredChecksGreen([{ name: 'ci', conclusion: 'FAILURE' }]),
+    false,
+    'a normalized FAILURE check is not green',
+  );
+  assert.equal(
+    // A pending check-run flattens to conclusion = its status ('IN_PROGRESS').
+    requiredChecksGreen([{ name: 'ci', conclusion: 'IN_PROGRESS' }]),
+    false,
+    'a normalized pending check is not green',
+  );
+  assert.equal(requiredChecksGreen([]), false, 'no checks is still not green');
+});

@@ -1230,16 +1230,15 @@ if [ "$HAM_POST_STATE" = "MERGED" ] && [ "$HAM_POST_HEAD" = "$POST_REMEDIATION_S
     ham_release_merge_lease
     exit "$HAM_MERGED_AUDIT_APPEND_EXIT"
   fi
+  if ! ham_emit_git_merge_signal; then
+    echo "HAM hard-blocker: merge signal emission failed after confirmed merge; AMA closer lease remains retryable" >&2
+    exit 1
+  fi
   if ! ham_mark_ama_closer_lease_succeeded; then
-    echo "HAM hard-blocker: failed to mark AMA closer lease succeeded after confirmed merge" >&2
+    echo "HAM hard-blocker: failed to mark AMA closer lease succeeded after confirmed merge signal" >&2
     exit 1
   fi
   trap - EXIT
-  if ! ham_emit_git_merge_signal; then
-    echo "HAM hard-blocker: merge signal emission failed after confirmed merge; AMA closer lease is terminal for daemon recovery" >&2
-    ham_release_merge_lease
-    exit 1
-  fi
   ham_release_merge_lease
 else
   echo "HAM hard-blocker: gh pr merge did not confirm merged validated head" >&2

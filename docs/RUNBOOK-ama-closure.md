@@ -470,7 +470,11 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    PR is already `MERGED` at the validated HAM head during preflight, or a merge
    retry receives an `already merged` response after a dropped/ambiguous merge
    request, HAM skips another merge attempt and proceeds to the same post-merge
-   confirmation path that records the merge commit and releases the lease.
+   confirmation path that records the merge commit and releases the lease. That
+   post-merge path emits the session-ledger merge signal before marking the AMA
+   closer lease terminal `succeeded`, so a signal failure leaves the lease
+   retryable instead of stranding a completed lease without durable merge
+   evidence.
 6. **Merge-agent identity.** The hammer commits/comments/merges under the
    merge-agent app identity (see the worker-pool hammer identity + token wiring),
    so the close is attributable to the merge-agent bot, not a generic worker.

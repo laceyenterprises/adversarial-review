@@ -130,21 +130,21 @@ test('hammer prompt emits merge signal before releasing successful merge lease',
     'AMA closer lease should be terminalized after the merged audit append succeeds',
   );
   assert.ok(
-    prompt.indexOf('if ! ham_mark_ama_closer_lease_succeeded; then') < prompt.indexOf('if ! ham_emit_git_merge_signal; then'),
-    'AMA closer lease should be terminalized before merge signal emission',
+    prompt.indexOf('if ! ham_emit_git_merge_signal; then') < prompt.indexOf('if ! ham_mark_ama_closer_lease_succeeded; then'),
+    'merge signal emission should happen before the AMA closer lease is terminalized',
   );
   assert.ok(
     prompt.indexOf('if ! ham_emit_git_merge_signal; then') > prompt.indexOf('HAM_MERGE_COMMIT='),
     'merge signal should run after merge commit capture',
   );
   assert.ok(
-    prompt.indexOf('if ! ham_emit_git_merge_signal; then') < prompt.indexOf('  ham_release_merge_lease\nelse'),
-    'successful merge lease release should wait for merge signal emission',
+    prompt.indexOf('if ! ham_mark_ama_closer_lease_succeeded; then') < prompt.indexOf('  ham_release_merge_lease\nelse'),
+    'successful merge lease release should wait for signal emission and lease terminalization',
   );
   assert.match(
     prompt,
-    /if ! ham_emit_git_merge_signal; then[\s\S]*?ham_release_merge_lease[\s\S]*?exit 1/,
-    'merge lease should be manually released before exiting on signal failure after trap removal',
+    /if ! ham_emit_git_merge_signal; then[\s\S]*?AMA closer lease remains retryable[\s\S]*?exit 1/,
+    'signal failure should leave AMA closer lease non-terminal so daemon recovery can retry',
   );
   assert.match(
     prompt,

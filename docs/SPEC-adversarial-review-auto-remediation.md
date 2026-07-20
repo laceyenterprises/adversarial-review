@@ -1893,6 +1893,15 @@ Merge-agent priority is narrower than merge-agent triggering:
 
 That split is intentional. `merge-agent-requested` is the operator's explicit stuck-branch escape hatch, and the observed 2026-05-19 outage was exactly that path getting wedged behind `refuse_admit_memory_pressure`. By contrast, clean-verdict and final-pass merge-agents can run for minutes, push commits, and wait on checks; sending every one of those to the single reserved critical lane would turn a PR-local admission problem into fleet-wide starvation of genuinely urgent critical work.
 
+AMA closer dispatch priority is selected by terminal-remediation shape, not by
+worker class alone. Finding-free mechanical validate-gate-and-click closes whose
+only miss is pending required CI dispatch with `--priority critical`, so a clean
+pipeline-critical close is not starved by the dynamic load cap while it waits for
+CI to finish and clicks merge. HAM terminal-remediation closes stay
+`--priority normal` when they are remediating findings, red CI, or mergeability
+because those coding sessions can occupy the worker for minutes and must not
+monopolize the single reserved lane.
+
 The worker-pool priority lane is governed by `HQ_PRIORITY_LANE_CAPACITY` (default `1`). When that env var is `0`, the reserved lane is disabled and a `critical` dispatch no longer bypasses memory-pressure refusal; it degrades to ordinary high-priority admission. Operators investigating contention should check `hq priority-lane status --root /Users/airlock/agent-os-hq` alongside the recorded dispatch JSON and the individual LRQ state from `hq dispatch status <dispatchId>`.
 
 Because watcher and worker-pool can roll out independently, `src/follow-up-merge-agent.mjs::dispatchMergeAgentForPR` must treat an explicit CLI rejection of `--priority` as a compatibility downgrade, not a hard dispatch failure. The watcher first tries the flagged invocation, then retries once without `--priority` only for the specific unknown-argument / unrecognized-argument class of error. Any other `hq dispatch` failure still aborts the launch normally.

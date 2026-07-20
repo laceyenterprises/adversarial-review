@@ -329,6 +329,10 @@ function daemonLaunchProvenanceRepoMatches(recordRepo, expectedRepo) {
   const record = String(recordRepo || '').trim().toLowerCase();
   const expected = String(expectedRepo || '').trim().toLowerCase();
   if (!record || !expected) return false;
+  // Launch provenance is merge-authority identity, so the repo string must carry
+  // the same owner/name identity GitHub reports for the PR. A short `<name>`
+  // record is ambiguous across forks and must fail closed until the producer
+  // writes canonical `<owner>/<name>` provenance.
   return record === expected;
 }
 
@@ -408,9 +412,23 @@ async function readDaemonWorkerLaunchProvenanceForPr({
     if (!payload || typeof payload !== 'object') continue;
     const recordRepo = payload.prRepo || payload.repo;
     const recordBranch = String(payload.branch || payload.headBranch || payload.prBranch || '').trim();
-    const recordPrNumber = Number(payload.prNumber || payload.pr_number || payload.pr);
+    const recordPrNumberRaw = payload.prNumber ?? payload.pr_number ?? payload.pr;
+    const recordPrNumber = Number(recordPrNumberRaw);
+    const recordHasPrNumber = recordPrNumberRaw != null
+      && recordPrNumberRaw !== ''
+      && Number.isInteger(recordPrNumber)
+      && recordPrNumber > 0;
     if (!daemonLaunchProvenanceRepoMatches(recordRepo, expectedRepo)) continue;
-    if (recordPrNumber !== numericPrNumber) continue;
+    // Identity is anchored on repo + the PR's LIVE head branch: the branch hq
+    // dispatched this worker to build is the same branch GitHub reports as the PR
+    // head, so a repo-scoped exact branch match attributes the merge to the
+    // launching worker exactly as the pr_opened ledger row would. PR number is an
+    // OPTIONAL secondary check — hq's canonical launch-provenance seed omits it for
+    // the overwhelming majority of records (only ~5% on this host carry one), so
+    // REQUIRING it fail-closed the fallback for every normal worker. When a record
+    // DOES carry a PR number we still enforce it, so a record explicitly tagged to
+    // a different PR can never be misattributed to this one.
+    if (recordHasPrNumber && recordPrNumber !== numericPrNumber) continue;
     if (recordBranch !== expectedBranch) continue;
     const launchRequestId = String(
       payload.launchRequestId || payload.launch_request_id || doc?.launchRequestId || doc?.launch_request_id || '',

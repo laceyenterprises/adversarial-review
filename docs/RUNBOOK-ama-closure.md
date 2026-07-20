@@ -492,6 +492,15 @@ jq '{status, attempts: (.attempts | map({attemptNumber, outcome, cliExitCode}))}
 
 ## 7. Common refusal classes
 
+### `worker-identity-unresolved` on daemon clean-merge
+
+The daemon clean-merge path may fall back from the `pr_opened` ledger row to HQ
+worker `launch-provenance.json` only when the provenance carries the exact
+canonical repository identity GitHub reports for the PR: `<owner>/<name>`.
+Short-form `<name>` provenance is ambiguous across forks and intentionally fails
+closed; update the producer to write full repo identity rather than weakening
+the daemon matcher.
+
 ### `merge-agent-skipped-ama-enabled`
 
 Agent-os dispatcher refusal (AMA-06A). Fires when AMA is enabled and a

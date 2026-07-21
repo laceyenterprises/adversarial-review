@@ -98,7 +98,7 @@
           `docs/follow-up-runbook.md`.
         -->
         <key>ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR</key>
-        <string>codex</string>
+        <string>claude-code</string>
         <!--
           Resolve reviewer GitHub credentials through the local OAuth
           broker instead of per-role 1Password PAT reads. The expected

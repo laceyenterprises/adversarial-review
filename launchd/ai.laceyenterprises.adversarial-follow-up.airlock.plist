@@ -84,7 +84,7 @@
           env knobs documented in `docs/follow-up-runbook.md`.
         -->
         <key>ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR</key>
-        <string>codex</string>
+        <string>claude-code</string>
         <!--
           Match the watcher LaunchAgent: follow-up comment posting uses the
           same reviewer identities and should mint reviewer GitHub tokens

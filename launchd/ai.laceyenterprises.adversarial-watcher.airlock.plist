@@ -92,13 +92,18 @@
           adversarial in config.local.yaml — restoring the cross-model
           claude<->codex builder-never-reviews routing. This env pin (Layer 5)
           was overriding the yaml (Layer 4), so it had to be removed for the
-          flip to take effect. The remediator pin stays `codex` (unchanged).
+          flip to take effect.
+
+          2026-07-21: remediator env pin REMOVED too (operator: "codex quota
+          is back on — this should be config not in the plist"). The remediator
+          role now resolves from config — roles.remediator: codex in
+          config.local.yaml (Layer 4) — so no launchd env pin (Layer 5)
+          overrides it. This reverts #672, which had pinned the remediator to
+          claude-code in this template during the codex quota outage.
 
           See LAC-893 + the role-pin env knobs documented in
           `docs/follow-up-runbook.md`.
         -->
-        <key>ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR</key>
-        <string>claude-code</string>
         <!--
           Resolve reviewer GitHub credentials through the local OAuth
           broker instead of per-role 1Password PAT reads. The expected

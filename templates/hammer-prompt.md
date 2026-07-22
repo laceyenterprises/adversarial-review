@@ -285,7 +285,6 @@ if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
   exit 1
 fi
 HAM_AUDIT_COMMENT_MARKER='<!-- hq:ham-terminal-remediation:audit -->'
-HAM_AUDIT_COMMENT_HEAD="HAM-Terminal-Remediation-Head: $POST_REMEDIATION_SHA"
 # Fill these with decimal integer counts before posting the audit comment.
 HAM_AUDIT_REMEDIATED_TOTAL='<n>'
 HAM_AUDIT_REMEDIATED_BLOCKING='<b>'
@@ -331,9 +330,14 @@ ham_existing_terminal_audit_comment_id() {
     --paginate \
     "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments" \
     -q '.[] | {id: .id, body: .body}' 2> "$HAM_AUDIT_COMMENT_LOOKUP_STDERR") || return 1
+  # Dedup on the STABLE marker alone, NOT the per-rebase head sha. A hammer that
+  # rebases the same terminal remediation onto an advancing `main` several times
+  # before the merge window holds must refresh ONE audit — keying on the head sha
+  # made every rebase miss the prior audit and post a look-alike, so a single
+  # hammer's rebases read as several hammers (agent-os#4090).
   printf '%s\n' "$HAM_AUDIT_COMMENTS_JSON" |
-    jq -r --arg marker "$HAM_AUDIT_COMMENT_MARKER" --arg head "$HAM_AUDIT_COMMENT_HEAD" \
-      'select(((.body // "") | contains($marker)) and ((.body // "") | contains($head))) | .id' |
+    jq -r --arg marker "$HAM_AUDIT_COMMENT_MARKER" \
+      'select((.body // "") | contains($marker)) | .id' |
     head -n 1
 }
 if [ -z "${MERGE_AGENT_GH_TOKEN:-}" ]; then
@@ -353,9 +357,28 @@ for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
     continue
   fi
   if [ -n "$HAM_EXISTING_AUDIT_COMMENT_ID" ]; then
-    HAM_AUDIT_COMMENT_POSTED=1
-    echo "hammer audit comment already exists for $POST_REMEDIATION_SHA: $HAM_EXISTING_AUDIT_COMMENT_ID" >&2
-    break
+    # A terminal-remediation audit from an earlier rebase attempt already exists.
+    # REFRESH it in place (new head trailer / findings) instead of skipping or
+    # duplicating, so the single audit tracks the merged head and a hammer's
+    # rebases never read as several hammers (agent-os#4090).
+    if GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh api --method PATCH \
+      "repos/<<REPO>>/issues/comments/$HAM_EXISTING_AUDIT_COMMENT_ID" \
+      -f body="$HAM_AUDIT_COMMENT_BODY" > /dev/null 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
+      HAM_AUDIT_COMMENT_POSTED=1
+      echo "hammer audit comment refreshed in place ($HAM_EXISTING_AUDIT_COMMENT_ID) → $POST_REMEDIATION_SHA" >&2
+      break
+    fi
+    HAM_AUDIT_COMMENT_POST_EXIT=$?
+    if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_POST_STDERR"; then
+      cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
+      echo "hammer audit comment edit failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; not retrying" >&2
+      ham_audit_cleanup_tmp_files
+      exit "$HAM_AUDIT_COMMENT_POST_EXIT"
+    fi
+    cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
+    echo "hammer audit comment edit failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
+    sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
+    continue
   fi
   if GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh pr comment <<PR_URL>> --body "$HAM_AUDIT_COMMENT_BODY" 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
     HAM_AUDIT_COMMENT_POSTED=1

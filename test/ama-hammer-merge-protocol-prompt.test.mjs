@@ -81,3 +81,22 @@ test('hammer audit comment keeps parseable footer fields out of the editable her
   assert.match(HAMMER_PROMPT, /HAM_AUDIT_REMEDIATED_NON_BLOCKING='<nb>'/);
   assert.match(HAMMER_PROMPT, /ham_audit_is_nonnegative_int "\$HAM_AUDIT_REMEDIATED_TOTAL"/);
 });
+
+test('hammer audit is deduped by marker and refreshed in place across rebases (agent-os#4090)', () => {
+  // A single hammer that rebases the same terminal remediation onto an advancing
+  // main must refresh ONE audit comment, not post a look-alike per rebase — which
+  // read as several separate hammers. The dedup lookup keys on the STABLE marker
+  // alone, never the per-rebase head sha.
+  const lookup = HAMMER_PROMPT.match(
+    /ham_existing_terminal_audit_comment_id\(\)\s*\{[\s\S]*?\n\}/,
+  )?.[0];
+  assert.ok(lookup, 'expected the audit-comment lookup function');
+  assert.match(lookup, /contains\(\$marker\)/);
+  // No longer keyed on the per-rebase head sha (that caused the duplicate posts):
+  assert.doesNotMatch(lookup, /\$head/);
+  assert.doesNotMatch(HAMMER_PROMPT, /HAM_AUDIT_COMMENT_HEAD=/);
+  // An existing audit is refreshed IN PLACE (PATCH edit), not skipped or duplicated:
+  assert.match(HAMMER_PROMPT, /gh api --method PATCH/);
+  assert.match(HAMMER_PROMPT, /issues\/comments\/\$HAM_EXISTING_AUDIT_COMMENT_ID/);
+  assert.match(HAMMER_PROMPT, /hammer audit comment refreshed in place/);
+});

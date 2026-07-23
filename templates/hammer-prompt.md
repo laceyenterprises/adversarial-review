@@ -699,7 +699,31 @@ ham_audit_cleanup_tmp_files
 gh pr view <<PR_URL>> --json reviews > /tmp/ham-<<PR_NUMBER>>-reviews.json
 
 base_enc=$(printf '%s' "$(jq -r '.baseRefName' /tmp/ham-<<PR_NUMBER>>-pr-after.json)" | jq -sRr @uri)
-gh api "repos/<<REPO>>/branches/$base_enc/protection" > /tmp/ham-<<PR_NUMBER>>-protection.json
+protection_err="/tmp/ham-<<PR_NUMBER>>-protection.stderr"
+trap 'rm -f "$protection_err"' EXIT
+protection_plan_unavailable_re='branch protection.*(not available|upgrade|plan)|upgrade.*branch protection|protected branches.*(not available|upgrade|plan)'
+protection_transient_re='timed? out|timeout|TLS handshake timeout|connection (reset|refused|aborted)|temporary failure|network is unreachable|rate limit|secondary rate limit|HTTP[ /]5[0-9][0-9]|(^|[^0-9])(500|502|503|504)([^0-9]|$)|bad gateway|service unavailable|gateway timeout|server error'
+protection_attempt=1
+protection_max_attempts=3
+while true; do
+  : > "$protection_err"
+  if gh api "repos/<<REPO>>/branches/$base_enc/protection" > /tmp/ham-<<PR_NUMBER>>-protection.json 2> "$protection_err"; then
+    break
+  fi
+  if grep -Eiq "$protection_plan_unavailable_re" "$protection_err"; then
+    jq -n '{ branchProtectionUnavailable: true, reason: "github_plan" }' > /tmp/ham-<<PR_NUMBER>>-protection.json
+    break
+  fi
+  if [ "$protection_attempt" -lt "$protection_max_attempts" ] && grep -Eiq "$protection_transient_re" "$protection_err"; then
+    echo "branch protection fetch transient failure (attempt $protection_attempt/$protection_max_attempts); retrying" >&2
+    cat "$protection_err" >&2
+    sleep "$protection_attempt"
+    protection_attempt=$((protection_attempt + 1))
+    continue
+  fi
+  cat "$protection_err" >&2
+  exit 1
+done
 gh api "repos/<<REPO>>/issues/<<PR_NUMBER>>/timeline" --paginate > /tmp/ham-<<PR_NUMBER>>-timeline.json
 gh api "repos/<<REPO>>/commits/$POST_REMEDIATION_SHA" > /tmp/ham-<<PR_NUMBER>>-commit.json
 ```

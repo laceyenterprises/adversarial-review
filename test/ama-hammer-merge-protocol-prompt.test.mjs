@@ -30,6 +30,10 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /transient GitHub gate read failure/);
   assert.match(HAMMER_PROMPT, /github-gate-red/);
   assert.match(HAMMER_PROMPT, /github-gate-timeout/);
+  assert.match(HAMMER_PROMPT, /protection_plan_unavailable_re=/);
+  assert.match(HAMMER_PROMPT, /branchProtectionUnavailable: true, reason: "github_plan"/);
+  assert.match(HAMMER_PROMPT, /2> "\$protection_err"/);
+  assert.match(HAMMER_PROMPT, /trap 'rm -f "\$protection_err"' EXIT/);
   assert.doesNotMatch(HAMMER_PROMPT, /\|\s*IN\(/);
   assert.match(HAMMER_PROMPT, /index\(\$conclusion\)/);
   assert.doesNotMatch(HAMMER_PROMPT, /HAM_PPH_REMOTE_SHA=\$\(printf '%040d' 0\)/);

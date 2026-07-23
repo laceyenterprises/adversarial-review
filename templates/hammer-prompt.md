@@ -148,10 +148,15 @@ scans.
    Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)
    ```
 
-4. Comment on PR <<PR_URL>> with an audit note that maps each final finding to
-   the files/changes that addressed it. Include counts for blocking and
-   non-blocking findings. The predicate accepts only a matched timeline comment
-   whose author is the verified HAM commit author or an allowlisted hammer bot.
+4. Prepare the audit note that maps each final finding to the files/changes that
+   addressed it, with counts for blocking and non-blocking findings. Do NOT post
+   it here: the audit is written in step 5 **under the merge lease, at the
+   settled post-rebase head, immediately before the predicate**, so it names the
+   exact head that merges. Posting it before the rebase window re-staled it on
+   every rebase and made one hammer re-post a fresh audit per rebase (a single
+   hammer read as several — agent-os#4090). The predicate accepts only a matched
+   timeline comment whose author is the verified HAM commit author or an
+   allowlisted hammer bot.
 5. Validate the exact post-remediation PR head. Refresh the PR head SHA after
    your commit. **Always rebase the PR onto the latest base (`main`) before
    merging — do not merge a branch that is behind — and CONFIRM THE REBASE
@@ -177,7 +182,11 @@ scans.
    suite actually validated. If that value is missing or malformed, force the
    full revalidation instead of deriving a post-hoc validation base.
    Fix any changed-surface test the rebase newly broke, commit it, publish
-   the new head, and re-enter this lease/gate flow from a fresh base fetch. Re-run
+   the new head, and re-enter this lease/gate flow from a fresh base fetch. Once
+   the rebase holds and required checks are green on the settled head, post the
+   step-4 audit note WHILE STILL HOLDING THE LEASE (idempotently — the audit
+   block refreshes the single marker comment in place, so re-entries never
+   duplicate it), so it names this exact head, THEN re-run
    the closer eligibility predicate in SPEC §1.1.1 HAM terminal-remediation mode
    for that same live head. Only a rebased-onto-latest-main head whose GitHub
    required check bar is green may proceed to merge while still holding the
@@ -233,174 +242,6 @@ git commit -m "HAM remediate final adversarial findings" \
   -m "Reviewed-Head: <<REVIEWED_SHA>>" \
   -m "Closed-By: hammer (adversarial-pipe-mode)" \
   -m "Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)"
-```
-
-Post the PR audit comment. It must list every final finding, whether it was
-blocking or non-blocking, and the file paths changed for that finding. The
-comment is HAM-authored terminal-remediation output: post it with the entitled
-hammer GitHub token from `MERGE_AGENT_GH_TOKEN`, not an ambient `GH_TOKEN` or
-`GITHUB_TOKEN`.
-
-```bash
-ham_audit_comment_transient() {
-  grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
-}
-
-ham_audit_cleanup_tmp_files() {
-  if [ -n "${HAM_AUDIT_PR_VIEW_STDERR:-}" ]; then
-    rm -f "$HAM_AUDIT_PR_VIEW_STDERR"
-  fi
-  if [ -n "${HAM_AUDIT_COMMENT_LOOKUP_STDERR:-}" ]; then
-    rm -f "$HAM_AUDIT_COMMENT_LOOKUP_STDERR"
-  fi
-  if [ -n "${HAM_AUDIT_COMMENT_POST_STDERR:-}" ]; then
-    rm -f "$HAM_AUDIT_COMMENT_POST_STDERR"
-  fi
-}
-HAM_AUDIT_PR_VIEW_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-pr-view.XXXXXX") || exit 1
-HAM_AUDIT_COMMENT_LOOKUP_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-comment-lookup.XXXXXX") || {
-  ham_audit_cleanup_tmp_files
-  exit 1
-}
-HAM_AUDIT_COMMENT_POST_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-comment-post.XXXXXX") || {
-  ham_audit_cleanup_tmp_files
-  exit 1
-}
-
-POST_REMEDIATION_SHA=""
-for HAM_AUDIT_SHA_ATTEMPT in 1 2 3; do
-  if POST_REMEDIATION_SHA=$(gh pr view <<PR_URL>> --json headRefOid --jq '.headRefOid' 2> "$HAM_AUDIT_PR_VIEW_STDERR") &&
-    ham_is_full_sha "$POST_REMEDIATION_SHA"; then
-    break
-  fi
-  if [ "$HAM_AUDIT_SHA_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_PR_VIEW_STDERR"; then
-    break
-  fi
-  echo "hammer audit head lookup failed on attempt $HAM_AUDIT_SHA_ATTEMPT/3; retrying" >&2
-  sleep $((HAM_AUDIT_SHA_ATTEMPT * 2))
-done
-if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
-  echo "HAM hard-blocker: unable to resolve post-remediation head before audit comment" >&2
-  ham_audit_cleanup_tmp_files
-  exit 1
-fi
-HAM_AUDIT_COMMENT_MARKER='<!-- hq:ham-terminal-remediation:audit -->'
-# Fill these with decimal integer counts before posting the audit comment.
-HAM_AUDIT_REMEDIATED_TOTAL='<n>'
-HAM_AUDIT_REMEDIATED_BLOCKING='<b>'
-HAM_AUDIT_REMEDIATED_NON_BLOCKING='<nb>'
-ham_audit_is_nonnegative_int() {
-  case "$1" in
-    ''|*[!0-9]*)
-      return 1
-      ;;
-    *)
-      return 0
-      ;;
-  esac
-}
-if ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_TOTAL" ||
-  ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_BLOCKING" ||
-  ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_NON_BLOCKING"; then
-  echo "HAM hard-blocker: fill numeric Remediated-Findings counts before posting audit comment" >&2
-  ham_audit_cleanup_tmp_files
-  exit 1
-fi
-# When filling in the comment body below, optionally add one bullet each for
-# applicable test evidence and doc currency, using the same bulleted style.
-HAM_AUDIT_COMMENT_DETAILS="$(cat <<'EOF'
-## 🔨 Hammer remediation audit
-
-Landed terminal remediation for the reviewed findings.
-
-**Findings addressed**
-- **<finding title>** (<blocking|non-blocking>) — <files changed and one-line fix summary>
-
-EOF
-)"
-HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Head: %s\nRemediated-Findings: %s addressed (%s blocking, %s non-blocking)\nClosed-By: hammer (adversarial-pipe-mode)\n</sub>' \
-  "$HAM_AUDIT_COMMENT_MARKER" \
-  "$HAM_AUDIT_COMMENT_DETAILS" \
-  "$POST_REMEDIATION_SHA" \
-  "$HAM_AUDIT_REMEDIATED_TOTAL" \
-  "$HAM_AUDIT_REMEDIATED_BLOCKING" \
-  "$HAM_AUDIT_REMEDIATED_NON_BLOCKING")
-ham_existing_terminal_audit_comment_id() {
-  HAM_AUDIT_COMMENTS_JSON=$(GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh api \
-    --paginate \
-    "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments" \
-    -q '.[] | {id: .id, body: .body}' 2> "$HAM_AUDIT_COMMENT_LOOKUP_STDERR") || return 1
-  # Dedup on the STABLE marker alone, NOT the per-rebase head sha. A hammer that
-  # rebases the same terminal remediation onto an advancing `main` several times
-  # before the merge window holds must refresh ONE audit — keying on the head sha
-  # made every rebase miss the prior audit and post a look-alike, so a single
-  # hammer's rebases read as several hammers (agent-os#4090).
-  printf '%s\n' "$HAM_AUDIT_COMMENTS_JSON" |
-    jq -r --arg marker "$HAM_AUDIT_COMMENT_MARKER" \
-      'select((.body // "") | contains($marker)) | .id' |
-    head -n 1
-}
-if [ -z "${MERGE_AGENT_GH_TOKEN:-}" ]; then
-  echo "HAM hard-blocker: MERGE_AGENT_GH_TOKEN is required for hammer audit comment identity" >&2
-  ham_audit_cleanup_tmp_files
-  exit 1
-fi
-HAM_AUDIT_COMMENT_POSTED=0
-for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
-  if ! HAM_EXISTING_AUDIT_COMMENT_ID=$(ham_existing_terminal_audit_comment_id); then
-    if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_LOOKUP_STDERR"; then
-      echo "hammer audit comment lookup failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3" >&2
-      break
-    fi
-    echo "hammer audit comment lookup failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
-    sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
-    continue
-  fi
-  if [ -n "$HAM_EXISTING_AUDIT_COMMENT_ID" ]; then
-    # A terminal-remediation audit from an earlier rebase attempt already exists.
-    # REFRESH it in place (new head trailer / findings) instead of skipping or
-    # duplicating, so the single audit tracks the merged head and a hammer's
-    # rebases never read as several hammers (agent-os#4090).
-    if GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh api --method PATCH \
-      "repos/<<REPO>>/issues/comments/$HAM_EXISTING_AUDIT_COMMENT_ID" \
-      -f body="$HAM_AUDIT_COMMENT_BODY" > /dev/null 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
-      HAM_AUDIT_COMMENT_POSTED=1
-      echo "hammer audit comment refreshed in place ($HAM_EXISTING_AUDIT_COMMENT_ID) → $POST_REMEDIATION_SHA" >&2
-      break
-    fi
-    HAM_AUDIT_COMMENT_POST_EXIT=$?
-    if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_POST_STDERR"; then
-      cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
-      echo "hammer audit comment edit failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; not retrying" >&2
-      ham_audit_cleanup_tmp_files
-      exit "$HAM_AUDIT_COMMENT_POST_EXIT"
-    fi
-    cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
-    echo "hammer audit comment edit failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
-    sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
-    continue
-  fi
-  if GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh pr comment <<PR_URL>> --body "$HAM_AUDIT_COMMENT_BODY" 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
-    HAM_AUDIT_COMMENT_POSTED=1
-    break
-  fi
-  HAM_AUDIT_COMMENT_POST_EXIT=$?
-  if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_POST_STDERR"; then
-    cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
-    echo "hammer audit comment post failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; not retrying" >&2
-    ham_audit_cleanup_tmp_files
-    exit "$HAM_AUDIT_COMMENT_POST_EXIT"
-  fi
-  cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
-  echo "hammer audit comment post failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
-  sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
-done
-if [ "$HAM_AUDIT_COMMENT_POSTED" -ne 1 ]; then
-  echo "HAM hard-blocker: hammer audit comment post failed after 3 attempts" >&2
-  ham_audit_cleanup_tmp_files
-  exit 1
-fi
-ham_audit_cleanup_tmp_files
 ```
 
 Refresh and validate the live head:
@@ -676,6 +517,183 @@ git push --force-with-lease
 After resolving, the head has moved — re-run changed-surface tests (mandate 2b)
 and required checks on the new head before re-acquiring the merge lease and
 merging, exactly as for any parallel-phase validation.
+
+Post the PR audit comment. It must list every final finding, whether it was
+blocking or non-blocking, and the file paths changed for that finding. The
+comment is HAM-authored terminal-remediation output: post it with the entitled
+hammer GitHub token from `MERGE_AGENT_GH_TOKEN`, not an ambient `GH_TOKEN` or
+`GITHUB_TOKEN`.
+
+```bash
+# agent-os#4090: the terminal-remediation audit is written HERE — under the
+# merge lease, at the settled post-rebase head, immediately before the
+# ama-check predicate. Writing it before the rebase window let each re-entry
+# post a fresh audit at a new head (a single hammer read as several). Refuse
+# to write the audit unless the merge lease is currently held.
+if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
+  echo "HAM hard-blocker: terminal-remediation audit must be written while holding the merge lease (after the rebase settles, before the merge predicate)" >&2
+  exit 1
+fi
+ham_audit_comment_transient() {
+  grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
+}
+
+ham_audit_cleanup_tmp_files() {
+  if [ -n "${HAM_AUDIT_PR_VIEW_STDERR:-}" ]; then
+    rm -f "$HAM_AUDIT_PR_VIEW_STDERR"
+  fi
+  if [ -n "${HAM_AUDIT_COMMENT_LOOKUP_STDERR:-}" ]; then
+    rm -f "$HAM_AUDIT_COMMENT_LOOKUP_STDERR"
+  fi
+  if [ -n "${HAM_AUDIT_COMMENT_POST_STDERR:-}" ]; then
+    rm -f "$HAM_AUDIT_COMMENT_POST_STDERR"
+  fi
+}
+HAM_AUDIT_PR_VIEW_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-pr-view.XXXXXX") || exit 1
+HAM_AUDIT_COMMENT_LOOKUP_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-comment-lookup.XXXXXX") || {
+  ham_audit_cleanup_tmp_files
+  exit 1
+}
+HAM_AUDIT_COMMENT_POST_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-comment-post.XXXXXX") || {
+  ham_audit_cleanup_tmp_files
+  exit 1
+}
+
+POST_REMEDIATION_SHA=""
+for HAM_AUDIT_SHA_ATTEMPT in 1 2 3; do
+  if POST_REMEDIATION_SHA=$(gh pr view <<PR_URL>> --json headRefOid --jq '.headRefOid' 2> "$HAM_AUDIT_PR_VIEW_STDERR") &&
+    ham_is_full_sha "$POST_REMEDIATION_SHA"; then
+    break
+  fi
+  if [ "$HAM_AUDIT_SHA_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_PR_VIEW_STDERR"; then
+    break
+  fi
+  echo "hammer audit head lookup failed on attempt $HAM_AUDIT_SHA_ATTEMPT/3; retrying" >&2
+  sleep $((HAM_AUDIT_SHA_ATTEMPT * 2))
+done
+if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
+  echo "HAM hard-blocker: unable to resolve post-remediation head before audit comment" >&2
+  ham_audit_cleanup_tmp_files
+  exit 1
+fi
+HAM_AUDIT_COMMENT_MARKER='<!-- hq:ham-terminal-remediation:audit -->'
+# Fill these with decimal integer counts before posting the audit comment.
+HAM_AUDIT_REMEDIATED_TOTAL='<n>'
+HAM_AUDIT_REMEDIATED_BLOCKING='<b>'
+HAM_AUDIT_REMEDIATED_NON_BLOCKING='<nb>'
+ham_audit_is_nonnegative_int() {
+  case "$1" in
+    ''|*[!0-9]*)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+if ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_TOTAL" ||
+  ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_BLOCKING" ||
+  ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_NON_BLOCKING"; then
+  echo "HAM hard-blocker: fill numeric Remediated-Findings counts before posting audit comment" >&2
+  ham_audit_cleanup_tmp_files
+  exit 1
+fi
+# When filling in the comment body below, optionally add one bullet each for
+# applicable test evidence and doc currency, using the same bulleted style.
+HAM_AUDIT_COMMENT_DETAILS="$(cat <<'EOF'
+## 🔨 Hammer remediation audit
+
+Landed terminal remediation for the reviewed findings.
+
+**Findings addressed**
+- **<finding title>** (<blocking|non-blocking>) — <files changed and one-line fix summary>
+
+EOF
+)"
+HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Head: %s\nRemediated-Findings: %s addressed (%s blocking, %s non-blocking)\nClosed-By: hammer (adversarial-pipe-mode)\n</sub>' \
+  "$HAM_AUDIT_COMMENT_MARKER" \
+  "$HAM_AUDIT_COMMENT_DETAILS" \
+  "$POST_REMEDIATION_SHA" \
+  "$HAM_AUDIT_REMEDIATED_TOTAL" \
+  "$HAM_AUDIT_REMEDIATED_BLOCKING" \
+  "$HAM_AUDIT_REMEDIATED_NON_BLOCKING")
+ham_existing_terminal_audit_comment_id() {
+  HAM_AUDIT_COMMENTS_JSON=$(GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh api \
+    --paginate \
+    "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments" \
+    -q '.[] | {id: .id, body: .body}' 2> "$HAM_AUDIT_COMMENT_LOOKUP_STDERR") || return 1
+  # Dedup on the STABLE marker alone, NOT the per-rebase head sha. A hammer that
+  # rebases the same terminal remediation onto an advancing `main` several times
+  # before the merge window holds must refresh ONE audit — keying on the head sha
+  # made every rebase miss the prior audit and post a look-alike, so a single
+  # hammer's rebases read as several hammers (agent-os#4090).
+  printf '%s\n' "$HAM_AUDIT_COMMENTS_JSON" |
+    jq -r --arg marker "$HAM_AUDIT_COMMENT_MARKER" \
+      'select((.body // "") | contains($marker)) | .id' |
+    head -n 1
+}
+if [ -z "${MERGE_AGENT_GH_TOKEN:-}" ]; then
+  echo "HAM hard-blocker: MERGE_AGENT_GH_TOKEN is required for hammer audit comment identity" >&2
+  ham_audit_cleanup_tmp_files
+  exit 1
+fi
+HAM_AUDIT_COMMENT_POSTED=0
+for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
+  if ! HAM_EXISTING_AUDIT_COMMENT_ID=$(ham_existing_terminal_audit_comment_id); then
+    if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_LOOKUP_STDERR"; then
+      echo "hammer audit comment lookup failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3" >&2
+      break
+    fi
+    echo "hammer audit comment lookup failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
+    sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
+    continue
+  fi
+  if [ -n "$HAM_EXISTING_AUDIT_COMMENT_ID" ]; then
+    # A terminal-remediation audit from an earlier rebase attempt already exists.
+    # REFRESH it in place (new head trailer / findings) instead of skipping or
+    # duplicating, so the single audit tracks the merged head and a hammer's
+    # rebases never read as several hammers (agent-os#4090).
+    if GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh api --method PATCH \
+      "repos/<<REPO>>/issues/comments/$HAM_EXISTING_AUDIT_COMMENT_ID" \
+      -f body="$HAM_AUDIT_COMMENT_BODY" > /dev/null 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
+      HAM_AUDIT_COMMENT_POSTED=1
+      echo "hammer audit comment refreshed in place ($HAM_EXISTING_AUDIT_COMMENT_ID) → $POST_REMEDIATION_SHA" >&2
+      break
+    fi
+    HAM_AUDIT_COMMENT_POST_EXIT=$?
+    if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_POST_STDERR"; then
+      cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
+      echo "hammer audit comment edit failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; not retrying" >&2
+      ham_audit_cleanup_tmp_files
+      exit "$HAM_AUDIT_COMMENT_POST_EXIT"
+    fi
+    cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
+    echo "hammer audit comment edit failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
+    sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
+    continue
+  fi
+  if GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh pr comment <<PR_URL>> --body "$HAM_AUDIT_COMMENT_BODY" 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
+    HAM_AUDIT_COMMENT_POSTED=1
+    break
+  fi
+  HAM_AUDIT_COMMENT_POST_EXIT=$?
+  if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_POST_STDERR"; then
+    cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
+    echo "hammer audit comment post failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; not retrying" >&2
+    ham_audit_cleanup_tmp_files
+    exit "$HAM_AUDIT_COMMENT_POST_EXIT"
+  fi
+  cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
+  echo "hammer audit comment post failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
+  sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
+done
+if [ "$HAM_AUDIT_COMMENT_POSTED" -ne 1 ]; then
+  echo "HAM hard-blocker: hammer audit comment post failed after 3 attempts" >&2
+  ham_audit_cleanup_tmp_files
+  exit 1
+fi
+ham_audit_cleanup_tmp_files
+```
 
 ```bash
 gh pr view <<PR_URL>> --json reviews > /tmp/ham-<<PR_NUMBER>>-reviews.json

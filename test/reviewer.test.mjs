@@ -33,6 +33,7 @@ const {
   buildReviewCommentBody,
   classifyReviewCommentHeader,
   startsWithReviewCommentHeader,
+  buildReviewerExtraContext,
   fetchCurrentHeadVerdictMode,
   resolveVerdictModeForHead,
   spawnCodexReview,
@@ -4176,6 +4177,73 @@ test('vocabulary fatigue finding is rendered through advisory prompt context', a
   assert.match(contexts[0], /remediation-vocabulary-fatigue/);
   assert.match(contexts[0], /"stem": "harden"/);
   assert.match(contexts[0], /Do not place them in `## Blocking Issues`/);
+});
+
+test('reviewer extra context appends hardening-ledger contract review dimensions', async () => {
+  const calls = [];
+  const context = await buildReviewerExtraContext({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 123,
+    prContext: { baseRefName: 'main' },
+    diff: [
+      'diff --git a/platform/session-ledger/src/session_ledger/db_dual_write.py b/platform/session-ledger/src/session_ledger/db_dual_write.py',
+      'index 1111111..2222222 100644',
+      '--- a/platform/session-ledger/src/session_ledger/db_dual_write.py',
+      '+++ b/platform/session-ledger/src/session_ledger/db_dual_write.py',
+      '@@ -1 +1 @@',
+      '-old',
+      '+new',
+      '',
+    ].join('\n'),
+    advisoryFindings: [{
+      kind: 'test-advisory',
+      severity: 'info',
+      blocking: false,
+      detail: 'watch this separately',
+    }],
+    repoRoot: '/repo/root',
+    fetchLinkedSpecContentsImpl: async (repo, prNumber, options) => {
+      calls.push({ kind: 'linked', repo, prNumber, prContext: options.prContext });
+      return 'Linked spec context\n';
+    },
+    buildHardeningReviewContextImpl: async (diff, options) => {
+      calls.push({ kind: 'hardening', diff, repoRoot: options.repoRoot, hasLogger: Boolean(options.logger) });
+      return [
+        '',
+        '',
+        '---',
+        '',
+        'Hardening Ledger contract context:',
+        '',
+        'A changed registered contract has prior hardening records.',
+        '',
+        '### session-ledger.dual-write-refused-under-test',
+        'Exposure: low/no exposure snapshot present - apply harsher review; scars may be under-exercised.',
+        '',
+        'Failure modes to review against:',
+        '- Test-mode dual-write silently accepted a production DSN and wrote outside isolation.',
+      ].join('\n');
+    },
+    log: null,
+  });
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0], {
+    kind: 'linked',
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 123,
+    prContext: { baseRefName: 'main' },
+  });
+  assert.equal(calls[1].kind, 'hardening');
+  assert.equal(calls[1].repoRoot, '/repo/root');
+  assert.match(calls[1].diff, /db_dual_write\.py/);
+  assert.match(context, /Linked spec context/);
+  assert.match(context, /Watcher Advisory Findings/);
+  assert.match(context, /test-advisory/);
+  assert.match(context, /Hardening Ledger contract context/);
+  assert.match(context, /session-ledger\.dual-write-refused-under-test/);
+  assert.match(context, /apply harsher review/);
+  assert.match(context, /silently accepted a production DSN/);
 });
 
 test('assertGeminiOAuth accepts a valid creds file and rejects a missing/invalid one', async () => {

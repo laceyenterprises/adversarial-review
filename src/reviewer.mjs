@@ -631,6 +631,57 @@ function formatAdvisoryFindingsContext(advisoryFindings = []) {
   ].join('\n');
 }
 
+async function buildReviewerExtraContext({
+  repo,
+  prNumber,
+  prContext = null,
+  diff = '',
+  advisoryFindings = [],
+  repoRoot = join(ROOT, '..', '..'),
+  fetchLinkedSpecContentsImpl = fetchLinkedSpecContents,
+  buildHardeningReviewContextImpl = buildHardeningReviewContext,
+  fetchPRContextImpl = fetchPRContext,
+  execFileImpl = execFileAsync,
+  log = console,
+} = {}) {
+  let extraContext = buildObviousDocsGuidance();
+  try {
+    const linkedContext = await fetchLinkedSpecContentsImpl(repo, prNumber, {
+      prContext,
+      fetchPRContextImpl,
+      execFileImpl,
+    });
+    if (linkedContext) {
+      extraContext = `${linkedContext}${buildObviousDocsGuidance({ repoRootRelative: true, includeSelfContainedHint: true })}`;
+      log?.error?.(`[reviewer] DEBUG: fetched linked PR context (${linkedContext.length} bytes)`);
+    } else {
+      log?.error?.('[reviewer] DEBUG: no linked PR context found; using obvious-docs fallback guidance');
+    }
+  } catch (err) {
+    log?.error?.(`[reviewer] WARN: failed to fetch linked PR context: ${err.message}`);
+  }
+
+  const advisoryContext = formatAdvisoryFindingsContext(advisoryFindings);
+  if (advisoryContext) {
+    extraContext = `${extraContext}${advisoryContext}`;
+  }
+
+  try {
+    const hardeningContext = await buildHardeningReviewContextImpl(diff, {
+      repoRoot,
+      logger: log,
+    });
+    if (hardeningContext) {
+      extraContext = `${extraContext}${hardeningContext}`;
+      log?.error?.(`[reviewer] DEBUG: added hardening-ledger context (${hardeningContext.length} bytes)`);
+    }
+  } catch (err) {
+    log?.error?.(`[reviewer] WARN: failed to build hardening-ledger review context: ${err.message}`);
+  }
+
+  return extraContext;
+}
+
 function formatLocalReviewShadowArtifact({ request, reviewText, status = 'completed', reason = null }) {
   const provenance = [
     '# Local OSS Model Shadow Review (Non-Gating)',
@@ -1971,7 +2022,6 @@ async function main() {
     process.exit(0);
   }
 
-  let extraContext = buildObviousDocsGuidance();
   let prContext;
   try {
     prContext = await fetchPRContext(repo, prNumber);
@@ -1980,37 +2030,15 @@ async function main() {
     process.exit(1);
   }
 
-  try {
-    const linkedContext = await fetchLinkedSpecContents(repo, prNumber, {
-      prContext,
-      fetchPRContextImpl: fetchPRContext,
-      execFileImpl: execFileAsync,
-    });
-    if (linkedContext) {
-      extraContext = `${linkedContext}${buildObviousDocsGuidance({ repoRootRelative: true, includeSelfContainedHint: true })}`;
-      console.error(`[reviewer] DEBUG: fetched linked PR context (${linkedContext.length} bytes)`);
-    } else {
-      console.error('[reviewer] DEBUG: no linked PR context found; using obvious-docs fallback guidance');
-    }
-  } catch (err) {
-    console.error(`[reviewer] WARN: failed to fetch linked PR context: ${err.message}`);
-  }
-  const advisoryContext = formatAdvisoryFindingsContext(advisoryFindings);
-  if (advisoryContext) {
-    extraContext = `${extraContext}${advisoryContext}`;
-  }
-  try {
-    const hardeningContext = await buildHardeningReviewContext(diff, {
-      repoRoot: join(ROOT, '..', '..'),
-      logger: console,
-    });
-    if (hardeningContext) {
-      extraContext = `${extraContext}${hardeningContext}`;
-      console.error(`[reviewer] DEBUG: added hardening-ledger context (${hardeningContext.length} bytes)`);
-    }
-  } catch (err) {
-    console.error(`[reviewer] WARN: failed to build hardening-ledger review context: ${err.message}`);
-  }
+  const extraContext = await buildReviewerExtraContext({
+    repo,
+    prNumber,
+    prContext,
+    diff,
+    advisoryFindings,
+    repoRoot: join(ROOT, '..', '..'),
+    log: console,
+  });
 
   // 2. Run adversarial review (OAuth only — no API key fallback)
   let effectiveModel = reviewerModel;
@@ -2399,6 +2427,7 @@ const __test__ = {
   alertClioOversizedAgyFailure,
   buildReviewCommentBody,
   buildReviewCommentHeader,
+  buildReviewerExtraContext,
   classifyReviewCommentHeader,
   completeLocalReviewShadowRequest,
   ensureLocalReviewShadowWritable,

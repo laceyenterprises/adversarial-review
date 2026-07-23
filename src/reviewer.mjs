@@ -41,6 +41,7 @@ import {
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
 import { buildObviousDocsGuidance, fetchLinkedSpecContents } from './prompt-context.mjs';
+import { buildHardeningReviewContext } from './hardening-ledger-context.mjs';
 import { captureReviewerBodyAfterPost, findCapturedReviewerBody } from './review-body-capture.mjs';
 import { emitReviewedAttestation } from './reviewed-attestation.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
@@ -1997,6 +1998,18 @@ async function main() {
   const advisoryContext = formatAdvisoryFindingsContext(advisoryFindings);
   if (advisoryContext) {
     extraContext = `${extraContext}${advisoryContext}`;
+  }
+  try {
+    const hardeningContext = await buildHardeningReviewContext(diff, {
+      repoRoot: join(ROOT, '..', '..'),
+      logger: console,
+    });
+    if (hardeningContext) {
+      extraContext = `${extraContext}${hardeningContext}`;
+      console.error(`[reviewer] DEBUG: added hardening-ledger context (${hardeningContext.length} bytes)`);
+    }
+  } catch (err) {
+    console.error(`[reviewer] WARN: failed to build hardening-ledger review context: ${err.message}`);
   }
 
   // 2. Run adversarial review (OAuth only — no API key fallback)

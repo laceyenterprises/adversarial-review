@@ -44,7 +44,7 @@ const VERB = 'hq.adversarial.retrigger-review';
 
 export const RETRIGGER_REVIEW_LABEL = 'retrigger-review';
 
-const DEFAULT_REASON = 'retrigger-review label applied; re-review requested on current HEAD.';
+const DEFAULT_REASON = 'retrigger-review: label applied; re-review requested on current HEAD.';
 const ACK_COMMENT_TIMEOUT_MS = 10_000;
 const ACK_COMMENT_LOOKUP_TIMEOUT_MS = 15_000;
 const ACK_COMMENT_RETRY_BUDGET_PER_TICK = 5;

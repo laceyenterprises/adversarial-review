@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { CODE_PR_DOMAIN_ID, makeCodePrSubjectExternalId } from './identity-shapes.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 import { ensureReviewCycleCapSchema } from './review-cycle-cap.mjs';
+import { isExplicitOperatorRetriggerReason } from './retrigger-review-reason.mjs';
 
 /**
  * AUTHORITATIVE `reviewed_prs.review_status` GRAPH (schema version 10).
@@ -61,7 +62,6 @@ import { ensureReviewCycleCapSchema } from './review-cycle-cap.mjs';
  */
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
-const EXPLICIT_OPERATOR_RETRIGGER_REASON_PREFIX = 'retrigger-review:';
 const REVIEW_STATE_SCHEMA_VERSION = 10;
 const REVIEW_STATE_MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 const execFileAsyncDefault = promisify(execFile);
@@ -1010,10 +1010,7 @@ function requestReviewRereview({
     }
     if (reviewRow.review_status === 'pending') {
       const normalizedReason = reason || 'Re-review requested from remediation reply.';
-      const explicitOperatorRetrigger = String(normalizedReason)
-        .trim()
-        .toLowerCase()
-        .startsWith(EXPLICIT_OPERATOR_RETRIGGER_REASON_PREFIX);
+      const explicitOperatorRetrigger = isExplicitOperatorRetriggerReason(normalizedReason);
       if (explicitOperatorRetrigger) {
         db.prepare(
           `UPDATE reviewed_prs

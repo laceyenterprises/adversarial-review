@@ -176,6 +176,10 @@ scans.
    `merge-lease.mjs needs-revalidation ... --current-base <sha>`. Re-run the
    changed-surface tests (mandate step 2b) and required checks only when
    `needsRevalidation` is true; otherwise trust the parallel-phase validation.
+   Do not parse this boolean with a jq fallback such as
+   `.needsRevalidation // true`: jq treats JSON `false` as fallback-worthy, so
+   that expression converts a safe `needsRevalidation:false` decision into a
+   false revalidation blocker. Use the exact boolean parser in the shell block.
    GitHub required checks are the SOLE CI authority: the hammer does NOT run a
    local test battery or the PPH pre-push CI mirror as a merge gate.
    `HAM_VALIDATION_BASE_SHA` must name the base SHA that the parallel-phase full
@@ -458,6 +462,9 @@ else
     --current-base "$HAM_CURRENT_BASE_SHA" \
     --changed-files-from "$POST_REMEDIATION_SHA" \
     > /tmp/ham-<<PR_NUMBER>>-merge-lease-revalidation.json; then
+    # Preserve JSON false exactly. Never use `.needsRevalidation // true` here:
+    # jq's alternative operator treats false like null and would force a spurious
+    # revalidation blocker on a clean `needsRevalidation:false` decision.
     HAM_NEEDS_REVALIDATION=$(jq -er 'if (.needsRevalidation | type) == "boolean" then .needsRevalidation else true end' /tmp/ham-<<PR_NUMBER>>-merge-lease-revalidation.json 2> /tmp/ham-<<PR_NUMBER>>-merge-lease-revalidation-jq.stderr || true)
     if [ "$HAM_NEEDS_REVALIDATION" != "true" ] && [ "$HAM_NEEDS_REVALIDATION" != "false" ]; then
       printf '{"needsRevalidation":true,"reason":"needs-revalidation-output-invalid"}\n' > /tmp/ham-<<PR_NUMBER>>-merge-lease-revalidation.json

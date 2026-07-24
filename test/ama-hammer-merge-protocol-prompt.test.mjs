@@ -30,6 +30,15 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /transient GitHub gate read failure/);
   assert.match(HAMMER_PROMPT, /github-gate-red/);
   assert.match(HAMMER_PROMPT, /github-gate-timeout/);
+  assert.match(
+    HAMMER_PROMPT,
+    /Do not parse this boolean with a jq fallback such as[\s\S]*\.needsRevalidation \/\/ true/,
+  );
+  assert.match(
+    HAMMER_PROMPT,
+    /jq -er 'if \(\.needsRevalidation \| type\) == "boolean" then \.needsRevalidation else true end'/,
+  );
+  assert.doesNotMatch(HAMMER_PROMPT, /jq[^\n]*\.needsRevalidation\s*\/\/\s*true/);
   assert.match(HAMMER_PROMPT, /protection_plan_unavailable_re=/);
   assert.match(HAMMER_PROMPT, /branchProtectionUnavailable: true, reason: "github_plan"/);
   assert.match(HAMMER_PROMPT, /2> "\$protection_err"/);

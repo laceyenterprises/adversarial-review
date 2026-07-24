@@ -123,6 +123,36 @@ finally:
   return Array.isArray(parsed) ? parsed : [];
 }
 
+async function getExposureRollupFromPython(contractId, {
+  repoRoot = DEFAULT_AGENT_OS_ROOT,
+  ledgerTarget = null,
+  execFileImpl = execFileAsync,
+  env = process.env,
+} = {}) {
+  const script = `
+import json
+import os
+import sys
+from session_ledger.db import LedgerDatabase
+
+contract_id = sys.argv[1]
+target = os.environ.get("HLG_LEDGER_TARGET") or None
+db = LedgerDatabase(target)
+try:
+    print(json.dumps(db.get_exposure_rollup(contract_id=contract_id), sort_keys=True))
+finally:
+    db.close()
+`.trim();
+  const childEnv = pythonEnv(repoRoot, env);
+  if (ledgerTarget) childEnv.HLG_LEDGER_TARGET = String(ledgerTarget);
+  const { stdout } = await execFileImpl('python3', ['-c', script, contractId], {
+    env: childEnv,
+    maxBuffer: 1024 * 1024,
+  });
+  const parsed = JSON.parse(stdout || 'null');
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+}
+
 function isLowOrNoExposure(exposure) {
   if (!exposure || typeof exposure !== 'object' || Array.isArray(exposure)) return true;
   const haystack = [
@@ -144,7 +174,24 @@ function isLowOrNoExposure(exposure) {
   return false;
 }
 
-function summarizeExposure(records) {
+function isLowExposureRollup(rollup) {
+  if (!rollup || typeof rollup !== 'object' || Array.isArray(rollup)) return false;
+  const score = Number(rollup.exposure_score);
+  if (!Number.isFinite(score)) return false;
+  return score < 25;
+}
+
+function summarizeExposure(records, rollup = null) {
+  if (rollup && typeof rollup === 'object') {
+    const score = Number(rollup.exposure_score);
+    const label = Number.isFinite(score)
+      ? `live exposure_score=${score}`
+      : 'live exposure rollup present';
+    return {
+      harsherReview: isLowExposureRollup(rollup),
+      label,
+    };
+  }
   if (!records.length) return { harsherReview: true, label: 'no exposure snapshot' };
   const low = records.some((record) => isLowOrNoExposure(record?.exposure));
   return {
@@ -154,11 +201,11 @@ function summarizeExposure(records) {
 }
 
 function formatHardeningReviewContext(entries) {
-  const sections = entries.filter((entry) => entry.records.length > 0);
+  const sections = entries.filter((entry) => entry.records.length > 0 || isLowExposureRollup(entry.exposureRollup));
   if (sections.length === 0) return '';
 
   const body = sections.map((entry) => {
-    const exposure = summarizeExposure(entry.records);
+    const exposure = summarizeExposure(entry.records, entry.exposureRollup);
     const failureModes = uniqueStrings(entry.records.map((record) => record.failure_mode));
     const tests = uniqueStrings(entry.records.map((record) => record.regression_test_ref));
     const incidentRefs = uniqueStrings(entry.records.map((record) => record.incident_ref));
@@ -168,7 +215,7 @@ function formatHardeningReviewContext(entries) {
       `Exposure: ${exposure.label}${exposure.harsherReview ? ' - apply harsher review; scars may be under-exercised.' : '.'}`,
       '',
       'Failure modes to review against:',
-      ...failureModes.map((mode) => `- ${mode}`),
+      ...(failureModes.length > 0 ? failureModes.map((mode) => `- ${mode}`) : ['- No hardening scars recorded yet; review the contract as under-exposed.']),
     ];
     if (tests.length > 0) {
       lines.push('', 'Traveling regression refs:', ...tests.map((testRef) => `- ${testRef}`));
@@ -188,6 +235,7 @@ async function buildHardeningReviewContext(diffText, {
   limit = DEFAULT_RECORD_LIMIT,
   loadContracts = loadContractsFromPython,
   listRecords = listHardeningRecordsFromPython,
+  getExposureRollup = getExposureRollupFromPython,
   logger = console,
 } = {}) {
   const changedPaths = changedPathsFromDiff(diffText);
@@ -206,9 +254,17 @@ async function buildHardeningReviewContext(diffText, {
 
   const entries = [];
   for (const contract of touched) {
+    let exposureRollup = null;
+    try {
+      exposureRollup = await getExposureRollup(contract.contract_id, { repoRoot, ledgerTarget });
+    } catch (err) {
+      logger?.warn?.(
+        `[reviewer] WARN: failed to load exposure rollup for ${contract.contract_id}: ${err?.message || err}`
+      );
+    }
     try {
       const records = await listRecords(contract.contract_id, { repoRoot, ledgerTarget, limit });
-      entries.push({ contract, records: Array.isArray(records) ? records : [] });
+      entries.push({ contract, records: Array.isArray(records) ? records : [], exposureRollup });
     } catch (err) {
       logger?.warn?.(
         `[reviewer] WARN: failed to load hardening records for ${contract.contract_id}: ${err?.message || err}`
@@ -228,4 +284,6 @@ export {
   buildHardeningReviewContext,
   loadContractsFromPython,
   listHardeningRecordsFromPython,
+  getExposureRollupFromPython,
+  isLowExposureRollup,
 };

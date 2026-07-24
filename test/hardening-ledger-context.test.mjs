@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   buildHardeningReviewContext,
   changedPathsFromDiff,
+  isLowExposureRollup,
   isLowOrNoExposure,
   touchedContractsForPaths,
 } from '../src/hardening-ledger-context.mjs';
@@ -74,6 +75,7 @@ test('diff touching a registered contract pulls that contract failure modes into
           },
         ];
       },
+      getExposureRollup: async () => null,
       logger: null,
     },
   );
@@ -92,6 +94,7 @@ test('diff touching no registered contract leaves review input unchanged', async
       recordReads += 1;
       return [];
     },
+    getExposureRollup: async () => null,
     logger: null,
   });
 
@@ -103,9 +106,12 @@ test('low or missing exposure flags a contract for harsher review', async () => 
   assert.equal(isLowOrNoExposure({ level: 'low' }), true);
   assert.equal(isLowOrNoExposure({ samples: 0 }), true);
   assert.equal(isLowOrNoExposure({ level: 'normal', samples: 2 }), false);
+  assert.equal(isLowExposureRollup({ exposure_score: 0 }), true);
+  assert.equal(isLowExposureRollup({ exposure_score: 80 }), false);
 
   const context = await buildHardeningReviewContext(diffFor('RUNBOOK-deploy-checkout.md'), {
     loadContracts: async () => CONTRACTS,
+    getExposureRollup: async () => null,
     listRecords: async () => [
       {
         incident_ref: 'POSTMORTEM-2026-05-30',
@@ -120,4 +126,58 @@ test('low or missing exposure flags a contract for harsher review', async () => 
   assert.match(context, /apply harsher review/);
   assert.match(context, /under-exercised/);
   assert.match(context, /missed push or branch-switch paths/);
+});
+
+test('live low exposure rollup raises review tier for touched contracts', async () => {
+  const context = await buildHardeningReviewContext(diffFor('RUNBOOK-deploy-checkout.md'), {
+    loadContracts: async () => CONTRACTS,
+    getExposureRollup: async () => ({
+      contract_id: 'worker-pool.deploy-checkout-tripwire',
+      stood_up: false,
+      smoked: false,
+      hammered: false,
+      operated_count: 0,
+      last_exercised_at: null,
+      exposure_score: 0,
+    }),
+    listRecords: async () => [
+      {
+        incident_ref: 'POSTMORTEM-2026-05-30',
+        failure_mode: 'Deploy checkout tripwire missed one mutation path.',
+        regression_test_ref: 'RUNBOOK-deploy-checkout.md',
+        exposure: { level: 'normal', samples: 5 },
+      },
+    ],
+    logger: null,
+  });
+
+  assert.match(context, /live exposure_score=0/);
+  assert.match(context, /apply harsher review/);
+});
+
+test('live well-exposed rollup leaves review tier unchanged', async () => {
+  const context = await buildHardeningReviewContext(diffFor('RUNBOOK-deploy-checkout.md'), {
+    loadContracts: async () => CONTRACTS,
+    getExposureRollup: async () => ({
+      contract_id: 'worker-pool.deploy-checkout-tripwire',
+      stood_up: true,
+      smoked: true,
+      hammered: true,
+      operated_count: 8,
+      last_exercised_at: '2026-07-24T18:00:00.000000Z',
+      exposure_score: 85,
+    }),
+    listRecords: async () => [
+      {
+        incident_ref: 'POSTMORTEM-2026-05-30',
+        failure_mode: 'Deploy checkout tripwire missed one mutation path.',
+        regression_test_ref: 'RUNBOOK-deploy-checkout.md',
+        exposure: { level: 'low' },
+      },
+    ],
+    logger: null,
+  });
+
+  assert.match(context, /live exposure_score=85\./);
+  assert.doesNotMatch(context, /apply harsher review/);
 });

@@ -124,21 +124,18 @@ function closeOwnedReviewStateDb(ownedDb) {
   ownedDb.close();
 }
 
-// REVIEW-DEDUP: the hard ceiling needs a bounded unit count, not a raw event
-// count. Completed modern heads collapse to one unit per head, failed attempts
-// on the current head still count so a broken head cannot retry forever, and
-// legacy null-head pass rows remain bounded because they cannot be de-duped.
+// REVIEW-DEDUP: the hard ceiling needs a bounded landed-review count, not a raw
+// event count. Completed modern heads collapse to one unit per head; failed or
+// running attempts are attempt evidence, but they are not reviews and must not
+// burn the final review a PR is owed. Legacy completed null-head pass rows
+// remain bounded because their head cannot be de-duped.
 export function countReviewCeilingUnits({
   db: dbOverride = null,
   rootDir = ROOT,
   repoPath,
   prNumber,
-  currentHeadSha = null,
   fallbackReviewAttempts = 0,
 } = {}) {
-  const normalizedHeadSha = typeof currentHeadSha === 'string' && currentHeadSha.trim() !== ''
-    ? currentHeadSha.trim()
-    : null;
   const ownedDb = dbOverride ? null : openReviewStateDb(rootDir);
   const readDb = dbOverride || ownedDb;
   try {
@@ -152,33 +149,55 @@ export function countReviewCeilingUnits({
                 THEN head_sha
               END) AS distinct_completed_heads,
               SUM(CASE
-                WHEN ? IS NOT NULL
-                 AND head_sha = ?
-                 AND status <> 'completed'
-                THEN 1 ELSE 0
-              END) AS current_head_noncompleted_attempts,
-              SUM(CASE
-                WHEN head_sha IS NULL OR head_sha = ''
+                WHEN status = 'completed'
+                 AND (head_sha IS NULL OR head_sha = '')
                 THEN 1 ELSE 0
               END) AS legacy_unknown_head_passes
          FROM reviewer_passes
         WHERE repo = ?
           AND pr_number = ?
           AND pass_kind IN ('first-pass', 'rereview')`
-    ).get(normalizedHeadSha, normalizedHeadSha, repoPath, prNumber);
+    ).get(repoPath, prNumber);
     const passCount = Number(row?.pass_count || 0);
     if (!Number.isFinite(passCount) || passCount <= 0) {
       const fallback = Number(fallbackReviewAttempts || 0);
       return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
     }
     const distinctCompletedHeads = Number(row?.distinct_completed_heads || 0);
-    const currentHeadNonCompletedAttempts = Number(row?.current_head_noncompleted_attempts || 0);
     const legacyUnknownHeadPasses = Number(row?.legacy_unknown_head_passes || 0);
     return [
       distinctCompletedHeads,
-      currentHeadNonCompletedAttempts,
       legacyUnknownHeadPasses,
     ].reduce((total, value) => total + (Number.isFinite(value) && value > 0 ? value : 0), 0);
+  } finally {
+    closeOwnedReviewStateDb(ownedDb);
+  }
+}
+
+// Failed/running attempts are not reviews, but they still need an independent
+// fuse so a deterministically broken reviewer path cannot respawn forever.
+export function countReviewCeilingAttempts({
+  db: dbOverride = null,
+  rootDir = ROOT,
+  repoPath,
+  prNumber,
+  fallbackReviewAttempts = 0,
+} = {}) {
+  const ownedDb = dbOverride ? null : openReviewStateDb(rootDir);
+  const readDb = dbOverride || ownedDb;
+  try {
+    if (!dbOverride) ensureReviewStateSchema(readDb);
+    const row = readDb.prepare(
+      `SELECT COUNT(*) AS pass_count
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pass_kind IN ('first-pass', 'rereview')`
+    ).get(repoPath, prNumber);
+    const passCount = Number(row?.pass_count || 0);
+    if (Number.isFinite(passCount) && passCount > 0) return passCount;
+    const fallback = Number(fallbackReviewAttempts || 0);
+    return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
   } finally {
     closeOwnedReviewStateDb(ownedDb);
   }

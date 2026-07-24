@@ -73,7 +73,10 @@ import {
   QUOTA_EXHAUSTED_FAILURE_CLASS,
   quotaHoldDecision,
 } from './quota-exhaustion.mjs';
-import { countReviewCeilingUnits } from './review-ceiling-metrics.mjs';
+import {
+  countReviewCeilingAttempts,
+  countReviewCeilingUnits,
+} from './review-ceiling-metrics.mjs';
 import {
   addLabelToPRBestEffort,
   clearReviewCycleCapForOverride,
@@ -189,6 +192,7 @@ export async function processReviewSubject(entry, ctx) {
     handlePollError,
     markWatcherReviewHeartbeat,
     resolveHardReviewCeiling,
+    resolveHardReviewAttemptCeiling,
     reconcilePendingDraftsBeforeSpawn,
     resolvePendingDraftRespawnAgeSeconds,
     isFastMergeSkipEnabled,
@@ -1559,9 +1563,13 @@ export async function processReviewSubject(entry, ctx) {
             //     Skip the spawn (no attempt budget consumed); the tick falls
             //     through to the merge/close path.
             //
-            // (2) Hard review ceiling — independently, never review one PR more
-            //     than (round budget + 1) times regardless of head churn, so the
-            //     adversarial-review count is bounded even if (1) is bypassed.
+            // (2) Hard review ceiling — independently, never land more than
+            //     (round budget + 1) reviews for one PR, so the adversarial
+            //     review count is bounded even if (1) is bypassed.
+            //
+            // (3) Hard attempt ceiling — failed/running attempts are not
+            //     reviews and must not spend (2), but they still need their own
+            //     larger fuse so a broken reviewer path cannot retry forever.
             let skipReviewerSpawnReason = null;
             if (passKind === 'rereview') {
               const closerHead = await getHeadCloserCommitSuppressionWithBoundedRetry({
@@ -1581,16 +1589,17 @@ export async function processReviewSubject(entry, ctx) {
               }
 
               const hardReviewCeiling = resolveHardReviewCeiling(maxRemediationRounds);
-              // REVIEW-DEDUP: completed reviews are capped by distinct head,
-              // while failed attempts on this head still consume units so a
-              // broken reviewer path cannot retry forever. Legacy null-head
-              // rows count individually because their head cannot be de-duped.
+              const hardReviewAttemptCeiling = resolveHardReviewAttemptCeiling(maxRemediationRounds);
+              // REVIEW-DEDUP: landed reviews are capped by distinct completed
+              // head. Failed/running attempts are retry evidence, not reviews,
+              // and must not spend the final review owed to a PR. Legacy
+              // completed null-head rows count individually because their head
+              // cannot be de-duped.
               const priorReviewCount = countReviewCeilingUnits({
                 db,
                 rootDir: ROOT,
                 repoPath,
                 prNumber,
-                currentHeadSha: reviewerHeadSha,
                 fallbackReviewAttempts: Number(current?.review_attempts || 0),
               });
               if (!skipReviewerSpawnReason && priorReviewCount >= hardReviewCeiling) {
@@ -1601,6 +1610,25 @@ export async function processReviewSubject(entry, ctx) {
                   `No attempt budget consumed.`,
                 );
                 skipReviewerSpawnReason = 'hard-review-ceiling';
+              }
+              const priorReviewAttemptCount = countReviewCeilingAttempts({
+                db,
+                rootDir: ROOT,
+                repoPath,
+                prNumber,
+                fallbackReviewAttempts: Number(current?.review_attempts || 0),
+              });
+              if (
+                !skipReviewerSpawnReason
+                && priorReviewAttemptCount >= hardReviewAttemptCeiling
+              ) {
+                console.log(
+                  `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
+                  `attempt ceiling reached (${priorReviewAttemptCount} reviewer attempts >= ` +
+                  `${hardReviewAttemptCeiling}); failed/running attempts are capped separately ` +
+                  `from landed reviews — deferring to the close path. No attempt budget consumed.`,
+                );
+                skipReviewerSpawnReason = 'hard-review-attempt-ceiling';
               }
             }
 

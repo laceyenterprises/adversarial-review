@@ -74,6 +74,41 @@ function seedCompletedJob(root, { repo = 'laceyenterprises/agent-os', prNumber =
   );
 }
 
+function seedReviewerPass(root, fields = {}) {
+  const db = openReviewStateDb(root);
+  try {
+    ensureReviewStateSchema(db);
+    const merged = {
+      repo: 'laceyenterprises/agent-os',
+      pr_number: 1000,
+      attempt_number: 1,
+      reviewer_class: 'gemini',
+      reviewer_model: 'gemini',
+      pass_kind: 'rereview',
+      started_at: '2026-05-29T22:01:00.000Z',
+      ended_at: '2026-05-29T22:02:00.000Z',
+      status: 'completed',
+      head_sha: 'sha-reviewed-1234',
+      verdict: 'comment-only',
+      body_md: 'landed review body',
+      gh_comment_id: 'IC_fixture',
+      metadata_json: '{}',
+      ...fields,
+    };
+    db.prepare(
+      `INSERT INTO reviewer_passes (
+         repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind,
+         started_at, ended_at, status, head_sha, verdict, body_md, gh_comment_id, metadata_json
+       ) VALUES (
+         @repo, @pr_number, @attempt_number, @reviewer_class, @reviewer_model, @pass_kind,
+         @started_at, @ended_at, @status, @head_sha, @verdict, @body_md, @gh_comment_id, @metadata_json
+       )`
+    ).run(merged);
+  } finally {
+    db.close();
+  }
+}
+
 async function runDiagnose(root, ...extraArgs) {
   try {
     const { stdout, stderr } = await execFileAsync('node', [SCRIPT, '--root-dir', root, '--json', ...extraArgs]);
@@ -93,18 +128,59 @@ test('not stuck when no rereview_requested_at is set', async (t) => {
   assert.equal(payload.totalCandidates, 0); // SQL filter excludes null rereview_requested_at
 });
 
-test('not stuck when last_attempted_at >= rereview_requested_at (spawn already happened)', async (t) => {
+test('not stuck when last_attempted_at >= rereview_requested_at and a review landed', async (t) => {
   const root = makeRoot(t);
   seedReviewedPRsRow(root, {
     rereview_requested_at: '2026-05-29T22:00:00.000Z',
     last_attempted_at: '2026-05-29T22:01:00.000Z',
+  });
+  seedReviewerPass(root, {
+    started_at: '2026-05-29T22:01:00.000Z',
+    ended_at: '2026-05-29T22:02:00.000Z',
+    status: 'completed',
+    gh_comment_id: 'IC_landed',
   });
   const result = await runDiagnose(root);
   assert.equal(result.code, 0);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.stuckCount, 0);
   assert.equal(payload.totalCandidates, 1);
-  assert.match(payload.rows[0].classification.reason, /spawn already happened/);
+  assert.match(payload.rows[0].classification.reason, /review pass landed/);
+});
+
+test('stuck when a reviewer attempt happened but no review landed', async (t) => {
+  const root = makeRoot(t);
+  const requestedAt = '2026-05-29T22:00:00.000Z';
+  seedReviewedPRsRow(root, {
+    rereview_requested_at: requestedAt,
+    last_attempted_at: '2026-05-29T22:01:00.000Z',
+    reviewer_head_sha: '38a76e7-failed-head',
+  });
+  seedCompletedJob(root, { completedAt: requestedAt, reReviewRequested: true });
+  seedReviewerPass(root, {
+    attempt_number: 2,
+    started_at: '2026-05-29T22:01:00.000Z',
+    ended_at: '2026-05-29T22:02:00.000Z',
+    status: 'failed',
+    head_sha: '38a76e7-failed-head',
+    verdict: null,
+    body_md: null,
+    gh_comment_id: null,
+  });
+
+  const result = await runDiagnose(root, '--threshold-minutes', '5');
+  assert.equal(result.code, 4, `expected exit 4 (stuck found); got ${result.code}\nstderr:\n${result.stderr}`);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.stuckCount, 1);
+  assert.equal(payload.rows[0].reviewPassInfo.landedAfterRereview, 0);
+  assert.equal(payload.rows[0].reviewPassInfo.latestPass.status, 'failed');
+  assert.ok(
+    payload.rows[0].classification.hints.some((hint) => (
+      hint.includes('no completed GitHub review pass landed')
+      && hint.includes('latest reviewer pass status=failed')
+    )),
+    'diagnostic should explain that the attempted reviewer pass never landed a review',
+  );
 });
 
 test('not stuck when rereview is younger than threshold', async (t) => {

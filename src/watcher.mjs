@@ -154,6 +154,7 @@ import {
 import {
   countCompletedReviewerRereviewRounds,
   countDistinctReviewedHeadShas,
+  countReviewCeilingAttempts,
   countReviewCeilingUnits,
   reviewCycleExhaustedFromRounds,
 } from './review-ceiling-metrics.mjs';
@@ -755,6 +756,10 @@ function resolveHardReviewCeiling(maxRemediationRounds) {
   return Number.isFinite(numericRounds)
     ? Math.max(0, Math.floor(numericRounds)) + 1
     : 4;
+}
+
+function resolveHardReviewAttemptCeiling(maxRemediationRounds) {
+  return resolveHardReviewCeiling(maxRemediationRounds) + 2;
 }
 
 // The fleet-wide false-deferral detector (lock helpers, degraded-alert
@@ -1405,6 +1410,7 @@ async function pollOnce(
         handlePollError,
         markWatcherReviewHeartbeat,
         resolveHardReviewCeiling,
+        resolveHardReviewAttemptCeiling,
         reconcilePendingDraftsBeforeSpawn,
         resolvePendingDraftRespawnAgeSeconds,
         isFastMergeSkipEnabled,
@@ -1831,6 +1837,7 @@ export {
   detectCommitVocabularyFatigue,
   countCompletedReviewerRereviewRounds,
   countDistinctReviewedHeadShas,
+  countReviewCeilingAttempts,
   countReviewCeilingUnits,
   reviewCycleExhaustedFromRounds,
   createHeadCloserCommitSuppressionResolver,
@@ -1882,6 +1889,7 @@ export {
   resolveWatcherDrainMaxMs,
   resolveFirstPassReviewerPoolConfig,
   resolveHardReviewCeiling,
+  resolveHardReviewAttemptCeiling,
   shouldInlineFinalHammerAfterReview,
   runFastMergeClosePathIsolated,
   runBoundedReviewerDispatchQueue,

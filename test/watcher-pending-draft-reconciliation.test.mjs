@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import {
   DEFAULT_PENDING_DRAFT_RESPAWN_AGE_SECONDS,
   reconcilePendingDraftsBeforeSpawn,
+  resolveHardReviewAttemptCeiling,
   resolveHardReviewCeiling,
   resolvePendingDraftRespawnAgeSeconds,
 } from '../src/watcher.mjs';
@@ -202,7 +203,9 @@ test('watcher terminal rereview skip releases claim and falls through to close p
   const closerProbeIndex = source.indexOf("const closerHead = await getHeadCloserCommitSuppressionWithBoundedRetry({", guardIndex);
   const closerSuppressedIndex = source.indexOf("if (closerHead?.suppressed) {", guardIndex);
   const hardCeilingIndex = source.indexOf("const hardReviewCeiling =", guardIndex);
-  const hardSkipIndex = source.indexOf("if (!skipReviewerSpawnReason && priorReviewAttempts >= hardReviewCeiling) {", guardIndex);
+  const hardSkipIndex = source.indexOf("if (!skipReviewerSpawnReason && priorReviewCount >= hardReviewCeiling) {", guardIndex);
+  const attemptCeilingIndex = source.indexOf("const priorReviewAttemptCount = countReviewCeilingAttempts({", hardSkipIndex);
+  const attemptSkipIndex = source.indexOf("priorReviewAttemptCount >= hardReviewAttemptCeiling", attemptCeilingIndex);
   const skipReleaseIndex = source.indexOf("if (skipReviewerSpawnReason) {", guardIndex);
   // ARC-13 hoisted the spawn args + added a gated pipeline ternary; the v1
   // single-review call is the ternary's non-pipeline branch.
@@ -221,7 +224,13 @@ test('watcher terminal rereview skip releases claim and falls through to close p
     false,
     'hard review ceiling skip must not return before watcher close/maintenance work'
   );
-  assert.ok(skipReleaseIndex > hardSkipIndex, 'skip branch should run after both rereview skip checks');
+  assert.equal(
+    source.slice(attemptSkipIndex, skipReleaseIndex).includes("return;"),
+    false,
+    'hard review attempt ceiling skip must not return before watcher close/maintenance work'
+  );
+  assert.ok(attemptCeilingIndex > hardSkipIndex, 'attempt ceiling should be checked after landed-review ceiling');
+  assert.ok(skipReleaseIndex > attemptSkipIndex, 'skip branch should run after all rereview skip checks');
   assert.ok(
     source.indexOf("stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);", skipReleaseIndex) > skipReleaseIndex,
     'skip branch should release the already-claimed reviewer row'
@@ -249,6 +258,18 @@ test('hard review ceiling defaults only for missing or invalid round budgets', (
   assert.equal(resolveHardReviewCeiling(-3), 1);
   assert.equal(resolveHardReviewCeiling(3), 4);
   assert.equal(resolveHardReviewCeiling('3.8'), 4);
+});
+
+test('hard review attempt ceiling is wider than landed-review ceiling', () => {
+  assert.equal(resolveHardReviewAttemptCeiling(undefined), 6);
+  assert.equal(resolveHardReviewAttemptCeiling(null), 6);
+  assert.equal(resolveHardReviewAttemptCeiling(''), 6);
+  assert.equal(resolveHardReviewAttemptCeiling('not-a-number'), 6);
+  assert.equal(resolveHardReviewAttemptCeiling(0), 3);
+  assert.equal(resolveHardReviewAttemptCeiling('0'), 3);
+  assert.equal(resolveHardReviewAttemptCeiling(-3), 3);
+  assert.equal(resolveHardReviewAttemptCeiling(3), 6);
+  assert.equal(resolveHardReviewAttemptCeiling('3.8'), 6);
 });
 
 test('watcher pre-spawn reconciliation retains a fresh current-head draft and skips this tick', async () => {

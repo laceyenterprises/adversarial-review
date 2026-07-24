@@ -235,6 +235,19 @@ test('postGitHubReviewWithCapture emits a reviewed attestation for the reviewed 
   mkdirSync(join(rootDir, 'data'), { recursive: true });
   try {
     const attestCalls = [];
+    const reviewBody = [
+      '## Summary',
+      'Blocking verdict.',
+      '',
+      '## Blocking issues',
+      '- **Regression**',
+      '  - **File:** src/demo.mjs',
+      '  - **Lines:** 1-2',
+      '  - **Problem:** The reviewed head is unsafe.',
+      '',
+      '## Verdict',
+      'Request changes',
+    ].join('\n');
     await withEnvAsync({
       GHA_ADAPTER_BIN: '/fixture/github-adapter',
       GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
@@ -246,22 +259,22 @@ test('postGitHubReviewWithCapture emits a reviewed attestation for the reviewed 
         attemptNumber: 1,
         reviewerModel: 'codex',
         reviewerHeadSha: 'reviewed-head-sha',
-        reviewBody: [
-          '## Summary',
-          'Blocking verdict.',
-          '',
-          '## Blocking issues',
-          '- **Regression**',
-          '  - **File:** src/demo.mjs',
-          '  - **Lines:** 1-2',
-          '  - **Problem:** The reviewed head is unsafe.',
-          '',
-          '## Verdict',
-          'Request changes',
-        ].join('\n'),
+        reviewBody,
         botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
         passKind: 'first-pass',
-        execFileImpl: async (command) => {
+        postedAt: '2026-05-29T12:01:00.000Z',
+        execFileImpl: async (command, args) => {
+          if (command === 'gh' && args[0] === 'api') {
+            return {
+              stdout: `${JSON.stringify({
+                id: 4242,
+                login: 'codex-reviewer-lacey',
+                commit_id: 'reviewed-head-sha',
+                created_at: '2026-05-29T12:00:30.000Z',
+                body: reviewBody,
+              })}\n`,
+            };
+          }
           assert.equal(command, '/fixture/github-adapter');
           return { stdout: JSON.stringify({ ok: true }) };
         },
@@ -342,8 +355,20 @@ test('postGitHubReviewWithCapture propagates signing failure after posting for w
       reviewBody,
       botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
       passKind: 'first-pass',
-      execFileImpl: async (command) => {
+      postedAt: '2026-05-29T12:01:00.000Z',
+      execFileImpl: async (command, args) => {
         if (command === '/fixture/github-adapter') postCalls += 1;
+        if (command === 'gh' && args[0] === 'api') {
+          return {
+            stdout: `${JSON.stringify({
+              id: 4243,
+              login: 'lacey-codex-reviewer[bot]',
+              commit_id: 'reviewed-head-sha',
+              created_at: '2026-05-29T12:00:30.000Z',
+              body: reviewBody,
+            })}\n`,
+          };
+        }
         return { stdout: '{}' };
       },
       attestExecFileImpl: async () => {

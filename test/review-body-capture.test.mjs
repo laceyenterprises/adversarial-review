@@ -144,6 +144,50 @@ test('reviewer happy path captures verdict, body, gh_comment_id, and timestamp',
   assert.equal(calls[1][1], 'api');
 });
 
+test('reviewer capture fails closed when the posted review is not visible on the reviewed head', async () => {
+  const rootDir = makeRootDir();
+  const pass = seedPass(rootDir, { passKind: 'first-pass', reviewerClass: 'codex' });
+  const reviewBody = '## Verdict\n\nRequest changes\n\nBody text';
+  const calls = [];
+
+  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, async () => {
+    await assert.rejects(
+      postGitHubReviewWithCapture({
+        rootDir,
+        repo: pass.repo,
+        prNumber: pass.prNumber,
+        attemptNumber: pass.attemptNumber,
+        reviewerModel: 'codex',
+        reviewerHeadSha: 'reviewed-head-sha',
+        reviewBody,
+        botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+        passKind: 'first-pass',
+        postedAt: '2026-05-29T12:01:00.000Z',
+        execFileImpl: async (_command, args) => {
+          calls.push(args[0]);
+          if (args[0] === 'pr' && args[1] === 'review') return { stdout: '', stderr: '' };
+          return {
+            stdout: `${JSON.stringify({
+              id: 503,
+              login: 'lacey-codex-reviewer[bot]',
+              commit_id: 'stale-head-sha',
+              created_at: '2026-05-29T12:00:30.000Z',
+              body: reviewBody,
+            })}\n`,
+            stderr: '',
+          };
+        },
+      }),
+      /could not find a recent submitted GitHub review .* on head reviewed-head-sha/
+    );
+  });
+
+  const row = readPass(rootDir, pass);
+  assert.equal(row.body_md, null);
+  assert.equal(row.gh_comment_id, null);
+  assert.deepEqual(calls, ['pr', 'api']);
+});
+
 test('reviewer capture accepts legacy PAT-backed reviewer login aliases', async () => {
   const rootDir = makeRootDir();
   const pass = seedPass(rootDir, { passKind: 'first-pass', reviewerClass: 'codex' });
@@ -483,7 +527,7 @@ test('reviewer capture does NOT fall back to non-exact body matches', async () =
   const row = readPass(rootDir, pass);
   assert.equal(row.body_md, reviewBody);
   assert.equal(row.gh_comment_id, null);
-  assert.match(log.warnings.join('\n'), /could not find recent GitHub review id/);
+  assert.match(log.warnings.join('\n'), /could not find a recent submitted GitHub review/);
 });
 
 test('reviewer capture matches bodies after CRLF→LF normalization', async () => {

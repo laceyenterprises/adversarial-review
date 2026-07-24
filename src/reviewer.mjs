@@ -1806,6 +1806,7 @@ async function postGitHubReviewWithCapture({
     prNumber,
     attemptNumber: Number(attemptNumber),
     reviewerModel,
+    reviewerHeadSha: normalizedHeadSha,
     botTokenEnv,
     reviewBody,
     verdict: persistedVerdict,
@@ -1813,6 +1814,7 @@ async function postGitHubReviewWithCapture({
     postedAt: effectivePostedAt,
     execFileImpl,
     env: { ...process.env, [botTokenEnv]: process.env[botTokenEnv] || initialToken },
+    requireGitHubArtifact: Boolean(normalizedHeadSha),
     log,
   });
 

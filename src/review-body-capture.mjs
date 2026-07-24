@@ -124,6 +124,7 @@ async function lookupRecentReviewArtifact({
   prNumber,
   endpoint,
   login,
+  headSha = null,
   postedAt,
   body,
   execFileImpl = execFileAsync,
@@ -150,7 +151,7 @@ async function lookupRecentReviewArtifact({
       '-f',
       'per_page=100',
       '-q',
-      '.[] | {id: .id, body: .body, login: .user.login, created_at: (.submitted_at // .created_at // null)}',
+      '.[] | {id: .id, body: .body, login: .user.login, commit_id: (.commit_id // null), created_at: (.submitted_at // .created_at // null)}',
     ],
     {
       env,
@@ -162,6 +163,7 @@ async function lookupRecentReviewArtifact({
   const loginAliases = Array.isArray(login) ? login : [login];
   const candidates = parseJsonLines(stdout)
     .filter((item) => loginAliases.some((alias) => loginsMatch(item?.login, alias)))
+    .filter((item) => !headSha || String(item?.commit_id || '') === String(headSha))
     .filter((item) => withinCaptureWindow(item?.created_at, postedAt));
   return pickBestBodyMatch(candidates, body, 'created_at');
 }
@@ -279,6 +281,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
   prNumber,
   attemptNumber,
   reviewerModel,
+  reviewerHeadSha = null,
   botTokenEnv,
   reviewBody,
   verdict,
@@ -287,10 +290,11 @@ async function captureReviewerBodyAfterPost(rootDir, {
   execFileImpl = execFileAsync,
   env = process.env,
   log = console,
+  requireGitHubArtifact = false,
 } = {}) {
+  let ghCommentId = null;
   try {
     const logins = resolveReviewerBotLoginAliases(botTokenEnv || reviewerModel);
-    let ghCommentId = null;
     if (logins.length > 0) {
       try {
         const lookupEnv = buildLookupEnv(env, botTokenEnv ? env?.[botTokenEnv] : null);
@@ -299,6 +303,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
           prNumber,
           endpoint: `repos/${repo}/pulls/${encodeURIComponent(prNumber)}/reviews`,
           login: logins,
+          headSha: reviewerHeadSha,
           postedAt,
           body: reviewBody,
           execFileImpl,
@@ -306,11 +311,19 @@ async function captureReviewerBodyAfterPost(rootDir, {
         });
         ghCommentId = artifact?.id ?? null;
         if (!artifact) {
-          log.warn?.(`[reviewer] review body capture could not find recent GitHub review id for ${repo}#${prNumber}; storing body without gh_comment_id`);
+          const detail = reviewerHeadSha
+            ? ` on head ${reviewerHeadSha}`
+            : '';
+          const message = `review body capture could not find a recent submitted GitHub review for ${repo}#${prNumber}${detail}`;
+          if (requireGitHubArtifact) throw new Error(message);
+          log.warn?.(`[reviewer] ${message}; storing body without gh_comment_id`);
         }
       } catch (err) {
+        if (requireGitHubArtifact) throw err;
         log.warn?.(`[reviewer] review body capture review-id lookup failed for ${repo}#${prNumber}: ${err.message}`);
       }
+    } else if (requireGitHubArtifact) {
+      throw new Error(`review body capture has no trusted reviewer login aliases for ${repo}#${prNumber}`);
     }
     updateReviewerPassBodyCapture(rootDir, {
       repo,
@@ -323,8 +336,11 @@ async function captureReviewerBodyAfterPost(rootDir, {
       capturedAt: postedAt,
       log,
     });
+    return { ghCommentId, verifiedGitHubArtifact: ghCommentId !== null };
   } catch (err) {
+    if (requireGitHubArtifact) throw err;
     log.warn?.(`[reviewer] review body capture failed for ${repo}#${prNumber}: ${err.message}`);
+    return { ghCommentId: null, verifiedGitHubArtifact: false };
   }
 }
 

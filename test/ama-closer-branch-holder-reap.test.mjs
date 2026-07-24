@@ -24,12 +24,36 @@ const TCT04_PROVISION_ERROR = {
   ].join('\n'),
 };
 
+// Live agent-os PR #4129 failure shape: newer HQ versions include an
+// actionable holder hint instead of the raw git fatal. The holder path appears
+// in parentheses and again in backticks, so the parser must treat either as the
+// same canonical branch-holder worktree.
+const PR4129_ACTIONABLE_HQ_PROVISION_ERROR = {
+  stderr: [
+    '[hq] dispatch failed: ProvisionError',
+    'cause: worker provision failed',
+    "[hq] PR branch 'codex-exl-03/EXL-03' is already checked out by another worker worktree (/Users/airlock/agent-os-hq/workers/codex-exl-03/agent-os). Dispatch could not safely reuse or drop it automatically; run `hq worker tear-down codex-exl-03 --root /Users/airlock/agent-os-hq` or inspect holder worktree `/Users/airlock/agent-os-hq/workers/codex-exl-03/agent-os`.",
+  ].join('\n'),
+};
+
 test('reaps the original coding worker worktree that holds the PR head branch', () => {
   const paths = samePrHammerHolderWorktreePaths(TCT04_PROVISION_ERROR, 3219, HQ_ROOT);
   assert.ok(
     paths.includes('/Users/airlock/agent-os-hq/workers/claude-code-tct-04/agent-os'),
     `expected the coding-worker holder to be reaped, got ${JSON.stringify(paths)}`,
   );
+});
+
+test('classifies the PR #4129 actionable HQ hint as branch-holder blocked', () => {
+  assert.equal(
+    __testables__.isProvisionBranchHolderBlocked(PR4129_ACTIONABLE_HQ_PROVISION_ERROR),
+    true,
+  );
+});
+
+test('reaps the PR #4129 actionable HQ hint holder worktree', () => {
+  const paths = samePrHammerHolderWorktreePaths(PR4129_ACTIONABLE_HQ_PROVISION_ERROR, 4129, HQ_ROOT);
+  assert.deepEqual(paths, ['/Users/airlock/agent-os-hq/workers/codex-exl-03/agent-os']);
 });
 
 test('reaps BOTH a prior hammer-ama worktree and the original coding holder', () => {

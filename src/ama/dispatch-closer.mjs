@@ -1431,6 +1431,8 @@ function isProvisionBranchHolderBlocked(errOrText) {
   const hasBranchHolderContext = (
     normalized.includes('branch holder') ||
     normalized.includes('branch-holder') ||
+    normalized.includes('holder worktree') ||
+    normalized.includes('another worker worktree') ||
     normalized.includes('git worktree holder') ||
     normalized.includes('worker provision failed') ||
     normalized.includes('refusing grace-waived git worktree holder drop') ||
@@ -1510,6 +1512,10 @@ export function samePrHammerHolderWorktreePaths(errOrText, prNumber, hqRoot) {
   const holderPatterns = [
     // fatal: '<branch>' is already used by worktree at '<PATH>'
     /already used by worktree at\s+(['"])([^'"\n]+)\1/g,
+    // [hq] PR branch '<branch>' is already checked out by another worker worktree (<PATH>).
+    /\balready checked out by another worker worktree\s+\((\/[^\n)]+\/agent-os)\)/gi,
+    // ... or inspect holder worktree `<PATH>`.
+    /\binspect holder worktree\s+`([^`\n]+\/agent-os)`/gi,
     // [hq] refusing grace-waived git worktree holder drop for branch '<b>': ...: <PATH>
     /refusing grace-waived git worktree holder drop[^\n]*?:\s*(\/[^\n'"]+\/agent-os)/g,
   ];
@@ -1875,6 +1881,7 @@ async function resolveTerminalCodingBranchHolder({
 export const __testables__ = Object.freeze({
   reclaimSelfOwnedHammerCloserWorktreeBeforeProvision,
   selfOwnedHammerCloserWorktreePath,
+  isProvisionBranchHolderBlocked,
   teardownSamePrHammerHolder,
   resolveTerminalCodingBranchHolder,
   isTerminalBranchHolderWorkerRunStatus,

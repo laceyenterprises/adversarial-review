@@ -174,6 +174,35 @@ export function countReviewCeilingUnits({
   }
 }
 
+// Failed/running attempts are not reviews, but they still need an independent
+// fuse so a deterministically broken reviewer path cannot respawn forever.
+export function countReviewCeilingAttempts({
+  db: dbOverride = null,
+  rootDir = ROOT,
+  repoPath,
+  prNumber,
+  fallbackReviewAttempts = 0,
+} = {}) {
+  const ownedDb = dbOverride ? null : openReviewStateDb(rootDir);
+  const readDb = dbOverride || ownedDb;
+  try {
+    if (!dbOverride) ensureReviewStateSchema(readDb);
+    const row = readDb.prepare(
+      `SELECT COUNT(*) AS pass_count
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pass_kind IN ('first-pass', 'rereview')`
+    ).get(repoPath, prNumber);
+    const passCount = Number(row?.pass_count || 0);
+    if (Number.isFinite(passCount) && passCount > 0) return passCount;
+    const fallback = Number(fallbackReviewAttempts || 0);
+    return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
+  } finally {
+    closeOwnedReviewStateDb(ownedDb);
+  }
+}
+
 /**
  * A review cycle is exhausted when EITHER round budget is spent:
  * remediation rounds (a review produced blocking findings and a remediation

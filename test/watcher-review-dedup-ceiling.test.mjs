@@ -17,6 +17,7 @@ import { openReviewStateDb, ensureReviewStateSchema } from '../src/review-state.
 import {
   countCompletedReviewerRereviewRounds,
   countDistinctReviewedHeadShas,
+  countReviewCeilingAttempts,
   countReviewCeilingUnits,
 } from '../src/watcher.mjs';
 
@@ -187,11 +188,21 @@ test('ceiling units collapse duplicate completions and ignore non-landed failure
         rootDir,
         repoPath,
         prNumber,
-        currentHeadSha: failingHead,
         fallbackReviewAttempts: 99,
       }),
       1,
       'one completed head is one landed review; failed passes are attempt evidence but not reviews',
+    );
+    assert.equal(
+      countReviewCeilingAttempts({
+        db,
+        rootDir,
+        repoPath,
+        prNumber,
+        fallbackReviewAttempts: 99,
+      }),
+      5,
+      'the independent attempt fuse still counts failed and duplicate reviewer attempts',
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -222,11 +233,21 @@ test('ceiling units do not fall back to raw attempts for modern failed-only pass
         rootDir,
         repoPath,
         prNumber,
-        currentHeadSha: failingHead,
         fallbackReviewAttempts: 7,
       }),
       0,
       'a modern failed-only pass is attempt evidence, not a landed review',
+    );
+    assert.equal(
+      countReviewCeilingAttempts({
+        db,
+        rootDir,
+        repoPath,
+        prNumber,
+        fallbackReviewAttempts: 7,
+      }),
+      1,
+      'the independent attempt fuse still sees modern failed-only attempts',
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -248,7 +269,6 @@ test('ceiling units preserve legacy null-head history and empty-ledger fallback'
         rootDir,
         repoPath,
         prNumber,
-        currentHeadSha: '5555eeee',
         fallbackReviewAttempts: 4,
       }),
       1,
@@ -261,11 +281,21 @@ test('ceiling units preserve legacy null-head history and empty-ledger fallback'
         rootDir,
         repoPath,
         prNumber: 3905,
-        currentHeadSha: '6666ffff',
         fallbackReviewAttempts: 4,
       }),
       4,
       'an empty reviewer_passes ledger falls back to the durable reviewed_prs attempt counter',
+    );
+    assert.equal(
+      countReviewCeilingAttempts({
+        db,
+        rootDir,
+        repoPath,
+        prNumber: 3905,
+        fallbackReviewAttempts: 4,
+      }),
+      4,
+      'empty attempt ledgers also fall back to the durable reviewed_prs attempt counter',
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

@@ -26,6 +26,7 @@ const EXIT_BLOCKED = 1;
 const EXIT_USAGE = 2;
 const EXIT_REASON_INPUT = 3;
 const EXIT_RUNTIME = 4;
+const RETRIGGER_REVIEW_REASON_MARKER = 'retrigger-review';
 
 const USAGE = `\
 Usage:
@@ -133,6 +134,19 @@ function readReasonFromSource(values, reasonSource, { stdinReader = readStdinSyn
 
 function readStdinSync() {
   return readFileSync(0, 'utf8');
+}
+
+function normalizeOperatorRetriggerReason(reason) {
+  const trimmed = String(reason || '').trim();
+  const markerPrefix = `${RETRIGGER_REVIEW_REASON_MARKER}:`;
+  if (!trimmed) {
+    return `${markerPrefix} operator requested re-review`;
+  }
+  if (trimmed.toLowerCase().startsWith(markerPrefix)) {
+    const suffix = trimmed.slice(markerPrefix.length).trim();
+    return `${markerPrefix} ${suffix || 'operator requested re-review'}`;
+  }
+  return `${markerPrefix} ${trimmed}`;
 }
 
 function readReviewRowSafely({ rootDir, repo, prNumber }) {
@@ -291,6 +305,7 @@ function main(argv, {
     stderr.write('error: --reason is required and must not be empty\n');
     return EXIT_REASON_INPUT;
   }
+  reason = normalizeOperatorRetriggerReason(reason);
 
   const rootDir = values['root-dir'] ? resolve(values['root-dir']) : DEFAULT_ROOT_DIR;
   let auditRootDir;
@@ -410,25 +425,6 @@ function main(argv, {
     }
   }
 
-  if (reviewRow?.review_status === 'pending') {
-    const row = makeAuditRow({
-      ...baseAudit,
-      priorMaxRounds: budgetResult?.priorMaxRounds ?? latestJob?.job?.remediationPlan?.maxRounds ?? null,
-      newMaxRounds: budgetResult?.newMaxRounds ?? latestJob?.job?.remediationPlan?.maxRounds ?? null,
-      outcome: buildReviewAuditOutcome({
-        reviewStatus: 'already-pending',
-        budgetResult,
-        bumpRequested: !values['no-bump-budget'],
-        latestJob,
-      }),
-    });
-    if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
-      return EXIT_RUNTIME;
-    }
-    emit(stdout, `${JSON.stringify(row)}\n`, values.quiet);
-    return 0;
-  }
-
   let result;
   try {
     result = rereview({
@@ -474,7 +470,15 @@ function main(argv, {
   return 0;
 }
 
-export { UsageError, USAGE, main, parseArgs, readReasonFromSource, readReviewRowSafely };
+export {
+  UsageError,
+  USAGE,
+  main,
+  normalizeOperatorRetriggerReason,
+  parseArgs,
+  readReasonFromSource,
+  readReviewRowSafely,
+};
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   process.exit(main(process.argv.slice(2)));

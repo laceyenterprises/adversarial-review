@@ -61,6 +61,7 @@ import { ensureReviewCycleCapSchema } from './review-cycle-cap.mjs';
  */
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const DEFAULT_LIVE_PR_LOOKUP_TIMEOUT_MS = 15_000;
+const EXPLICIT_OPERATOR_RETRIGGER_REASON_PREFIX = 'retrigger-review:';
 const REVIEW_STATE_SCHEMA_VERSION = 10;
 const REVIEW_STATE_MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 const execFileAsyncDefault = promisify(execFile);
@@ -994,7 +995,7 @@ function requestReviewRereview({
     // of the checks below mirrors the pre-CAS implementation so
     // reasons stay backward-compatible with existing callers
     // (reconcile path, retrigger-review CLI, comment renderer).
-    const reviewRow = getReviewRow(db, { repo, prNumber });
+    let reviewRow = getReviewRow(db, { repo, prNumber });
     if (!reviewRow) {
       return buildBlockedRereviewResult('review-row-missing');
     }
@@ -1008,6 +1009,28 @@ function requestReviewRereview({
       return buildBlockedRereviewResult('pr-not-open', reviewRow);
     }
     if (reviewRow.review_status === 'pending') {
+      const normalizedReason = reason || 'Re-review requested from remediation reply.';
+      const explicitOperatorRetrigger = String(normalizedReason)
+        .trim()
+        .toLowerCase()
+        .startsWith(EXPLICIT_OPERATOR_RETRIGGER_REASON_PREFIX);
+      if (explicitOperatorRetrigger) {
+        db.prepare(
+          `UPDATE reviewed_prs
+              SET rereview_requested_at = ?,
+                  rereview_reason = ?
+            WHERE repo = ?
+              AND pr_number = ?
+              AND pr_state = 'open'
+              AND review_status = 'pending'`
+        ).run(
+          requestedAt,
+          normalizedReason,
+          repo,
+          prNumber
+        );
+        reviewRow = getReviewRow(db, { repo, prNumber });
+      }
       return {
         triggered: false,
         status: 'already-pending',

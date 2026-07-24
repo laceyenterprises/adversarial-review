@@ -4,9 +4,10 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { main, parseArgs } from '../src/retrigger-review.mjs';
+import { main, normalizeOperatorRetriggerReason, parseArgs } from '../src/retrigger-review.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import { createFollowUpJob, getFollowUpJobDir, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
+import { isExplicitOperatorReviewRetrigger } from '../src/first-pass-review-suppression.mjs';
 
 function makeCaptureStream() {
   const chunks = [];
@@ -83,6 +84,29 @@ test('parseArgs accepts audit-root-dir and allow-failed-reset', () => {
   assert.equal(values['allow-failed-reset'], true);
 });
 
+test('normalizeOperatorRetriggerReason stores a canonical prefix', () => {
+  assert.equal(
+    normalizeOperatorRetriggerReason('retry after remediation'),
+    'retrigger-review: retry after remediation',
+  );
+  assert.equal(
+    normalizeOperatorRetriggerReason('ReTrigger-Review: retry after remediation'),
+    'retrigger-review: retry after remediation',
+  );
+  assert.equal(
+    normalizeOperatorRetriggerReason('Please retrigger-review after remediation'),
+    'retrigger-review: Please retrigger-review after remediation',
+  );
+  assert.equal(
+    normalizeOperatorRetriggerReason(''),
+    'retrigger-review: operator requested re-review',
+  );
+  assert.equal(
+    normalizeOperatorRetriggerReason('retrigger-review:   '),
+    'retrigger-review: operator requested re-review',
+  );
+});
+
 test('retrigger-review rejects legacy --hq-root', () => {
   const err = makeCaptureStream();
   const rc = main([
@@ -152,6 +176,61 @@ test('retrigger-review treats pending review rows as already-pending success and
   assert.equal(JSON.parse(out.text()).outcome, 'already-pending+bumped');
   const job = JSON.parse(readFileSync(jobPath, 'utf8'));
   assert.equal(job.remediationPlan.maxRounds, 2);
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare(
+      'SELECT review_status, rereview_requested_at, rereview_reason FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/agent-os', 238);
+    assert.equal(row.review_status, 'pending');
+    assert.match(row.rereview_reason, /^retrigger-review: retry$/);
+    assert.equal(isExplicitOperatorReviewRetrigger(row), true);
+  } finally {
+    db.close();
+  }
+});
+
+test('retrigger-review bumps pending timestamp even when explicit reason is unchanged', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, { reviewStatus: 'pending' });
+  const previousRequestedAt = '2026-05-05T04:00:00.000Z';
+  const db = openReviewStateDb(rootDir);
+  try {
+    db.prepare(
+      `UPDATE reviewed_prs
+          SET rereview_requested_at = ?,
+              rereview_reason = ?
+        WHERE repo = ?
+          AND pr_number = ?`
+    ).run(
+      previousRequestedAt,
+      'retrigger-review: retry',
+      'laceyenterprises/agent-os',
+      238,
+    );
+  } finally {
+    db.close();
+  }
+
+  const rc = main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--root-dir', rootDir,
+    '--no-bump-budget',
+  ], { stdout: makeCaptureStream(), stderr: makeCaptureStream() });
+
+  assert.equal(rc, 0);
+  const readDb = openReviewStateDb(rootDir);
+  try {
+    const row = readDb.prepare(
+      'SELECT rereview_requested_at, rereview_reason FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/agent-os', 238);
+    assert.notEqual(row.rereview_requested_at, previousRequestedAt);
+    assert.equal(row.rereview_reason, 'retrigger-review: retry');
+    assert.equal(isExplicitOperatorReviewRetrigger(row), true);
+  } finally {
+    readDb.close();
+  }
 });
 
 test('retrigger-review bumps the terminal job budget and resets review status', () => {
@@ -175,9 +254,13 @@ test('retrigger-review bumps the terminal job budget and resets review status', 
   assert.equal(rc, 0);
   const db = openReviewStateDb(rootDir);
   try {
-    const row = db.prepare('SELECT review_status FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
+    const row = db.prepare(
+      'SELECT review_status, rereview_requested_at, rereview_reason FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    )
       .get('laceyenterprises/agent-os', 238);
     assert.equal(row.review_status, 'pending');
+    assert.match(row.rereview_reason, /^retrigger-review: substantially rewritten$/);
+    assert.equal(isExplicitOperatorReviewRetrigger(row), true);
   } finally {
     db.close();
   }
@@ -392,7 +475,7 @@ test('retrigger-review reads reason from file', () => {
   ], { stdout: out, stderr: makeCaptureStream() });
 
   assert.equal(rc, 0);
-  assert.equal(JSON.parse(out.text()).reason, 'from file\n');
+  assert.equal(JSON.parse(out.text()).reason, 'retrigger-review: from file');
 });
 
 test('retrigger-review reads --reason-stdin via injected reader', () => {
@@ -412,7 +495,7 @@ test('retrigger-review reads --reason-stdin via injected reader', () => {
   });
 
   assert.equal(rc, 0);
-  assert.equal(JSON.parse(out.text()).reason, 'from stdin\n');
+  assert.equal(JSON.parse(out.text()).reason, 'retrigger-review: from stdin');
 });
 
 test('retrigger-review --quiet suppresses informational output', () => {

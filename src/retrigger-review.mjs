@@ -19,6 +19,7 @@ import {
   resolveIdempotencyKey,
 } from './operator-mutation-audit.mjs';
 import { buildCodePrSubjectIdentity } from './identity-shapes.mjs';
+import { normalizeOperatorRetriggerReason } from './retrigger-review-reason.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT_DIR = resolve(__dirname, '..');
@@ -291,6 +292,7 @@ function main(argv, {
     stderr.write('error: --reason is required and must not be empty\n');
     return EXIT_REASON_INPUT;
   }
+  reason = normalizeOperatorRetriggerReason(reason);
 
   const rootDir = values['root-dir'] ? resolve(values['root-dir']) : DEFAULT_ROOT_DIR;
   let auditRootDir;
@@ -410,25 +412,6 @@ function main(argv, {
     }
   }
 
-  if (reviewRow?.review_status === 'pending') {
-    const row = makeAuditRow({
-      ...baseAudit,
-      priorMaxRounds: budgetResult?.priorMaxRounds ?? latestJob?.job?.remediationPlan?.maxRounds ?? null,
-      newMaxRounds: budgetResult?.newMaxRounds ?? latestJob?.job?.remediationPlan?.maxRounds ?? null,
-      outcome: buildReviewAuditOutcome({
-        reviewStatus: 'already-pending',
-        budgetResult,
-        bumpRequested: !values['no-bump-budget'],
-        latestJob,
-      }),
-    });
-    if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
-      return EXIT_RUNTIME;
-    }
-    emit(stdout, `${JSON.stringify(row)}\n`, values.quiet);
-    return 0;
-  }
-
   let result;
   try {
     result = rereview({
@@ -474,7 +457,15 @@ function main(argv, {
   return 0;
 }
 
-export { UsageError, USAGE, main, parseArgs, readReasonFromSource, readReviewRowSafely };
+export {
+  UsageError,
+  USAGE,
+  main,
+  normalizeOperatorRetriggerReason,
+  parseArgs,
+  readReasonFromSource,
+  readReviewRowSafely,
+};
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   process.exit(main(process.argv.slice(2)));

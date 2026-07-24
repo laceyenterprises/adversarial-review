@@ -10,6 +10,7 @@ import {
 } from './review-ceiling-metrics.mjs';
 import { REVIEWER_CYCLE_CAP_REACHED_LABEL } from './review-cycle-cap.mjs';
 import { isAutomaticReviewCycleCapPause, normalizeLabelNames } from './review-cycle-cap-actions.mjs';
+import { isExplicitOperatorRetriggerReason } from './retrigger-review-reason.mjs';
 import {
   stmtMarkFailed,
   stmtReleaseReviewLease,
@@ -280,6 +281,8 @@ export function resolveFirstPassReviewBudgetSuppression({
 export const getStalePostedReviewBudgetSuppression = resolveFirstPassReviewBudgetSuppression;
 
 export function isExplicitOperatorReviewRetrigger(reviewRow = null) {
-  const reason = String(reviewRow?.rereview_reason || '').toLowerCase();
-  return Boolean(reviewRow?.rereview_requested_at && reason.includes('retrigger-review'));
+  return Boolean(
+    reviewRow?.rereview_requested_at
+    && isExplicitOperatorRetriggerReason(reviewRow.rereview_reason)
+  );
 }

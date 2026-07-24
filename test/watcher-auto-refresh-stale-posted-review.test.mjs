@@ -509,7 +509,7 @@ test('watcher allows exactly one post-budget stale-head final review, then suppr
 test('watcher identifies explicit operator review retrigger rows', () => {
   assert.equal(isExplicitOperatorReviewRetrigger({
     rereview_requested_at: '2026-07-03T12:00:00.000Z',
-    rereview_reason: 'retrigger-review label applied; re-review requested on current HEAD.',
+    rereview_reason: 'retrigger-review: label applied; re-review requested on current HEAD.',
   }), true);
 });
 
@@ -1014,7 +1014,7 @@ test('watcher honors an explicit retrigger-review request on an already-reviewed
       review_status: 'pending',
       reviewer_head_sha: 'stable-head',
       rereview_requested_at: '2026-07-12T18:00:00.000Z',
-      rereview_reason: 'operator retrigger-review requested via label',
+      rereview_reason: 'retrigger-review: operator requested via label',
     },
     currentHeadSha: 'stable-head',
     summarizePRRemediationLedgerImpl: () => ({
@@ -1496,8 +1496,12 @@ test('watcher closer identity resolver reuses the same commit probe result', asy
 test('watcher recognizes explicit operator retrigger-review override marker', () => {
   assert.equal(isExplicitOperatorReviewRetrigger({
     rereview_requested_at: '2026-07-01T12:00:00.000Z',
-    rereview_reason: 'retrigger-review label applied; re-review requested on current HEAD.',
+    rereview_reason: 'retrigger-review: label applied; re-review requested on current HEAD.',
   }), true);
+  assert.equal(isExplicitOperatorReviewRetrigger({
+    rereview_requested_at: '2026-07-01T12:00:00.000Z',
+    rereview_reason: 'The retrigger-review command failed',
+  }), false);
   assert.equal(isExplicitOperatorReviewRetrigger({
     rereview_requested_at: '2026-07-01T12:00:00.000Z',
     rereview_reason: 'auto-refresh: posted review on stale head aaa; current head is bbb',

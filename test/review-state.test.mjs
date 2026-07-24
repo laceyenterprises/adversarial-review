@@ -861,3 +861,54 @@ test("requestReviewRereview returns already-pending when row is already 'pending
   assert.equal(result.triggered, false);
   assert.equal(result.status, 'already-pending');
 });
+
+test("requestReviewRereview does not treat incidental retrigger-review prose as explicit pending-row override", () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'pending',
+    postedAt: null,
+  });
+
+  const result = requestReviewRereview({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 10,
+    requestedAt: '2026-04-24T12:10:00.000Z',
+    reason: 'The retrigger-review command failed before posting a review.',
+  });
+
+  assert.equal(result.triggered, false);
+  assert.equal(result.status, 'already-pending');
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare(
+      'SELECT rereview_requested_at, rereview_reason FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/adversarial-review', 10);
+    assert.equal(row.rereview_requested_at, null);
+    assert.equal(row.rereview_reason, null);
+  } finally {
+    db.close();
+  }
+});
+
+test("requestReviewRereview bumps pending rows only for canonical retrigger-review reasons", () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'pending',
+    postedAt: null,
+  });
+
+  const result = requestReviewRereview({
+    rootDir,
+    repo: 'laceyenterprises/adversarial-review',
+    prNumber: 10,
+    requestedAt: '2026-04-24T12:10:00.000Z',
+    reason: 'retrigger-review: retry current head',
+  });
+
+  assert.equal(result.triggered, false);
+  assert.equal(result.status, 'already-pending');
+  assert.equal(result.reviewRow.rereview_requested_at, '2026-04-24T12:10:00.000Z');
+  assert.equal(result.reviewRow.rereview_reason, 'retrigger-review: retry current head');
+});

@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { CODE_PR_DOMAIN_ID, makeCodePrSubjectExternalId } from './identity-shapes.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 import { ensureReviewCycleCapSchema } from './review-cycle-cap.mjs';
+import { isExplicitOperatorRetriggerReason } from './retrigger-review-reason.mjs';
 
 /**
  * AUTHORITATIVE `reviewed_prs.review_status` GRAPH (schema version 10).
@@ -994,7 +995,7 @@ function requestReviewRereview({
     // of the checks below mirrors the pre-CAS implementation so
     // reasons stay backward-compatible with existing callers
     // (reconcile path, retrigger-review CLI, comment renderer).
-    const reviewRow = getReviewRow(db, { repo, prNumber });
+    let reviewRow = getReviewRow(db, { repo, prNumber });
     if (!reviewRow) {
       return buildBlockedRereviewResult('review-row-missing');
     }
@@ -1008,6 +1009,25 @@ function requestReviewRereview({
       return buildBlockedRereviewResult('pr-not-open', reviewRow);
     }
     if (reviewRow.review_status === 'pending') {
+      const normalizedReason = reason || 'Re-review requested from remediation reply.';
+      const explicitOperatorRetrigger = isExplicitOperatorRetriggerReason(normalizedReason);
+      if (explicitOperatorRetrigger) {
+        db.prepare(
+          `UPDATE reviewed_prs
+              SET rereview_requested_at = ?,
+                  rereview_reason = ?
+            WHERE repo = ?
+              AND pr_number = ?
+              AND pr_state = 'open'
+              AND review_status = 'pending'`
+        ).run(
+          requestedAt,
+          normalizedReason,
+          repo,
+          prNumber
+        );
+        reviewRow = getReviewRow(db, { repo, prNumber });
+      }
       return {
         triggered: false,
         status: 'already-pending',

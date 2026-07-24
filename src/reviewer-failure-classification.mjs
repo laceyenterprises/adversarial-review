@@ -1,5 +1,6 @@
 import {
   PROVIDER_OVERLOADED_FAILURE_CLASS,
+  REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   classifyReviewerFailure,
 } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from './quota-exhaustion.mjs';
@@ -7,7 +8,9 @@ import { QUOTA_EXHAUSTED_FAILURE_CLASS } from './quota-exhaustion.mjs';
 function reviewerFailureClassFromStoredRow(reviewRow) {
   const rawMessage = String(reviewRow?.failure_message || '');
   const message = rawMessage.toLowerCase();
-  const tagMatch = message.match(/^\[(reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded)\]/);
+  const tagMatch = message.match(
+    /^\[(reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output)\]/
+  );
   if (tagMatch) return tagMatch[1];
   const legacyClass = classifyReviewerFailure(rawMessage, null);
   if (
@@ -16,6 +19,7 @@ function reviewerFailureClassFromStoredRow(reviewRow) {
     || legacyClass === 'launchctl-bootstrap'
     || legacyClass === QUOTA_EXHAUSTED_FAILURE_CLASS
     || legacyClass === PROVIDER_OVERLOADED_FAILURE_CLASS
+    || legacyClass === REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS
   ) {
     return legacyClass;
   }

@@ -10,6 +10,7 @@ import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import {
   CASCADE_FAILURE_CAP,
   PROVIDER_OVERLOADED_FAILURE_CLASS,
+  REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   classifyReviewerFailure,
   clearCascadeState,
   getCascadeStatePath,
@@ -1300,6 +1301,57 @@ test('settleReviewerAttempt records provider overload without burning attempts',
     assert.equal(state.lastFailureClass, PROVIDER_OVERLOADED_FAILURE_CLASS);
     assert.deepEqual(state.transientFailureBreakdown, { [PROVIDER_OVERLOADED_FAILURE_CLASS]: 1 });
     assert.match(warnings.join('\n'), /Reviewer provider-overloaded failure/);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('settleReviewerAttempt records reviewer empty output without burning attempts', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    const warnings = [];
+    const statements = {
+      markPosted: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      ),
+      markFailed: stmtMarkBugFailed(db),
+      releaseReviewLease: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+      ),
+      markCascadeFailed: stmtMarkCascadeFailed(db),
+      markPendingUpstream: stmtMarkPendingUpstream(db),
+      getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
+    };
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      result: {
+        ok: false,
+        error: 'Gemini returned empty output.',
+        failureClass: REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
+      },
+      failureAt: '2026-07-24T20:10:18.541Z',
+      maxRemediationRounds: 1,
+      statements,
+      log: { warn: (line) => warnings.push(line) },
+    });
+
+    const row = db.prepare(
+      'SELECT review_status, review_attempts, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber);
+    const state = readCascadeState(rootDir, { repo, prNumber });
+
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.equal(row.review_attempts, 0);
+    assert.match(row.failure_message, new RegExp(`^\\[${REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS}\\]`));
+    assert.equal(state.lastFailureClass, REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS);
+    assert.deepEqual(state.transientFailureBreakdown, { [REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS]: 1 });
+    assert.match(warnings.join('\n'), /Reviewer reviewer-empty-output failure/);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

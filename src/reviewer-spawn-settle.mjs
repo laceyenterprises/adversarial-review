@@ -69,7 +69,10 @@ import {
   formatTransientFailureBreakdown,
   recordCascadeFailure,
 } from './reviewer-cascade.mjs';
-import { PROVIDER_OVERLOADED_FAILURE_CLASS } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
+import {
+  PROVIDER_OVERLOADED_FAILURE_CLASS,
+  REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
+} from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, resolveQuotaResetIso } from './quota-exhaustion.mjs';
 import {
   resolveRoundBudgetForJob,
@@ -621,10 +624,12 @@ function settleReviewerAttempt({
     'launchctl-bootstrap',
     'daemon-bounce',
     PROVIDER_OVERLOADED_FAILURE_CLASS,
+    REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   ]);
   const defaultFailureMessages = {
     cascade: 'Reviewer hit a LiteLLM/upstream cascade failure; watcher backoff engaged.',
     [PROVIDER_OVERLOADED_FAILURE_CLASS]: 'Reviewer hit a provider/backend overload (HTTP 529 or capacity signal); watcher backoff engaged.',
+    [REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS]: 'Reviewer runtime returned empty output before posting; watcher backoff engaged.',
     'quota-exhausted': 'Reviewer hit a hard provider usage cap; holding until the cap window clears (HRR graceful degradation).',
     'reviewer-timeout': 'Reviewer command timed out before posting; watcher backoff engaged.',
     'launchctl-bootstrap': 'Claude launchctl session bootstrap failed; watcher backoff engaged.',

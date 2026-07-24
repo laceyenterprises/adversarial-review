@@ -9,6 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PROVIDER_OVERLOADED_FAILURE_CLASS,
+  REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   classifyReviewerFailure,
   hasProviderOverloadedSignal,
 } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
@@ -94,6 +95,21 @@ test('provider overload signal requires close provider context', () => {
   assert.equal(
     hasProviderOverloadedSignal('anthropic provider diagnostics\nupstream queue overloaded; retry later'),
     true
+  );
+});
+
+test('reviewer empty output classifies as transient runtime degradation', () => {
+  const stderr = `[reviewer] DEBUG: starting gemini review...
+[reviewWithGemini] gemini returned stdout length=0; stderr length=0
+[reviewer] AI review failed for laceyenterprises/agent-os#4144: Gemini returned empty output.
+Error: Gemini returned empty output.`;
+  assert.equal(
+    classifyReviewerFailure(stderr, 1),
+    REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS
+  );
+  assert.equal(
+    classifyReviewerFailure('Antigravity agy returned empty output', 1),
+    REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS
   );
 });
 

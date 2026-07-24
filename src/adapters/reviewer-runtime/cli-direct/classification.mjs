@@ -7,10 +7,12 @@ import {
 const BUG_ERROR_CODES = new Set(['ENOENT', 'EACCES', 'EPERM']);
 const CASCADE_ERROR_CODES = new Set(['ETIMEDOUT']);
 const PROVIDER_OVERLOADED_FAILURE_CLASS = 'provider-overloaded';
+const REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS = 'reviewer-empty-output';
 const REVIEWER_TIMEOUT_MESSAGE_RE = /command timed out after \d+ms/;
 const REVIEWER_PROGRESS_TIMEOUT_MESSAGE_RE = new RegExp(
   `command ${escapeRegExp(PROGRESS_TIMEOUT_REASON_PREFIX)} \\d+ms`
 );
+const REVIEWER_EMPTY_OUTPUT_RE = /\b(?:returned|produced)\s+empty output\b/;
 const LAUNCHCTL_BOOTSTRAP_ERROR_RE =
   /bootstrap failed|could not find domain|input\/output error|not privileged to set domain/;
 const PROVIDER_CONTEXT_RE =
@@ -76,6 +78,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     /\b429\b|too many requests|http\s*429|rate_limit_exceeded|ratelimiterror|quota/.test(lower);
   const mentionsRateLimit = /rate.?limit/.test(lower);
   const mentionsProviderOverloaded = hasProviderOverloadedSignal(lower);
+  const mentionsReviewerEmptyOutput = REVIEWER_EMPTY_OUTPUT_RE.test(lower);
   // Routing-tier unavailability: the LiteLLM proxy on 127.0.0.1:4000 is the
   // single bottleneck every Claude/Codex CLI reviewer goes through. When the
   // proxy bounces (os-restart, main-catchup classification, post-reboot
@@ -184,6 +187,14 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
     return PROVIDER_OVERLOADED_FAILURE_CLASS;
   }
 
+  // A reviewer process that returns no review body posted no verdict. Treat it
+  // as runtime/provider degradation so the watcher backs off without consuming
+  // the normal review-attempt budget. Persistent empty-output loops still stop
+  // at the infra auto-recovery cap and leave terminal operator evidence.
+  if (mentionsReviewerEmptyOutput) {
+    return REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS;
+  }
+
   // Cascade wins over both wall-timeout and progress-timeout markers. Once the
   // run has clear upstream-cascade evidence, operators should treat the timeout
   // text as a symptom of the exhausted upstream path rather than the primary
@@ -219,6 +230,7 @@ function classifyReviewerFailure(stderr, exitCode, errorCode = null, details = {
 
 export {
   PROVIDER_OVERLOADED_FAILURE_CLASS,
+  REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   classifyReviewerFailure,
   hasProviderOverloadedSignal,
   isReviewerSubprocessTimeout,

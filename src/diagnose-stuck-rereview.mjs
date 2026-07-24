@@ -108,29 +108,72 @@ function readJobsForPR({ rootDir, repo, prNumber }) {
   return result;
 }
 
-function classifyRow(row, { now, thresholdMs, jobInfo }) {
-  if (row.review_status !== 'pending') {
-    return { stuck: false, reason: `review_status=${row.review_status} (not pending)` };
-  }
-  const rereviewAtMs = parseTimestamp(row.rereview_requested_at);
-  if (rereviewAtMs == null) {
-    return { stuck: false, reason: 'no rereview_requested_at; row is fresh-pending awaiting first-pass claim' };
-  }
-  const lastAttemptedMs = parseTimestamp(row.last_attempted_at);
-  if (lastAttemptedMs != null && lastAttemptedMs >= rereviewAtMs) {
-    return { stuck: false, reason: 'last_attempted_at >= rereview_requested_at; spawn already happened' };
-  }
-  const ageMs = now - rereviewAtMs;
-  if (ageMs < thresholdMs) {
-    const remainingMs = thresholdMs - ageMs;
+function readReviewPassInfoAfterRereview({ db, repo, prNumber, after }) {
+  const empty = {
+    landedAfterRereview: 0,
+    completedAfterRereview: 0,
+    nonLandedAfterRereview: 0,
+    latestPass: null,
+    error: null,
+  };
+  if (parseTimestamp(after) == null) return empty;
+  try {
+    const rows = db.prepare(
+      `SELECT pass_kind AS passKind,
+              status,
+              started_at AS startedAt,
+              ended_at AS endedAt,
+              head_sha AS headSha,
+              verdict,
+              gh_comment_id AS ghCommentId,
+              CASE
+                WHEN status = 'completed'
+                 AND (
+                   (gh_comment_id IS NOT NULL AND gh_comment_id <> '')
+                   OR (verdict IS NOT NULL AND verdict <> '')
+                   OR (body_md IS NOT NULL AND body_md <> '')
+                 )
+                THEN 1 ELSE 0
+              END AS landed
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pass_kind IN ('first-pass', 'rereview')
+          AND (
+            (started_at IS NOT NULL AND started_at >= ?)
+            OR (ended_at IS NOT NULL AND ended_at >= ?)
+          )
+        ORDER BY COALESCE(ended_at, started_at, '') DESC, pass_id DESC
+        LIMIT 20`
+    ).all(repo, prNumber, after, after);
+    const landedAfterRereview = rows.filter((row) => Number(row.landed) === 1).length;
+    const completedAfterRereview = rows.filter((row) => row.status === 'completed').length;
     return {
-      stuck: false,
-      reason: `rereview is ${Math.round(ageMs/60_000)}min old; threshold is ${Math.round(thresholdMs/60_000)}min — give the watcher more cycles before flagging`,
-      ageMinutes: minutesBetween(now, rereviewAtMs),
+      landedAfterRereview,
+      completedAfterRereview,
+      nonLandedAfterRereview: rows.length - landedAfterRereview,
+      latestPass: rows[0] ? {
+        passKind: rows[0].passKind,
+        status: rows[0].status,
+        startedAt: rows[0].startedAt,
+        endedAt: rows[0].endedAt,
+        headSha: rows[0].headSha,
+        verdict: rows[0].verdict,
+        ghCommentId: rows[0].ghCommentId,
+      } : null,
+      error: null,
+    };
+  } catch (err) {
+    return {
+      ...empty,
+      error: err?.message || String(err),
     };
   }
-  const latestJob = jobInfo.latestJob;
+}
+
+function buildStuckHints(row, { jobInfo, reviewPassInfo }) {
   const hints = [];
+  const latestJob = jobInfo.latestJob;
   if (!latestJob) {
     hints.push('no follow-up job records found for this PR; check data/follow-up-jobs/ buckets manually');
   } else {
@@ -144,15 +187,68 @@ function classifyRow(row, { now, thresholdMs, jobInfo }) {
   if (row.posted_at) {
     hints.push(`posted_at=${row.posted_at} but review_status=pending; row may not have been reset cleanly by requestReviewRereview`);
   }
+  if (reviewPassInfo?.error) {
+    hints.push(`could not inspect reviewer_passes: ${reviewPassInfo.error}`);
+  } else if (reviewPassInfo && reviewPassInfo.landedAfterRereview <= 0) {
+    let detail = 'no completed GitHub review pass landed since rereview_requested_at';
+    if (reviewPassInfo.latestPass) {
+      const latest = reviewPassInfo.latestPass;
+      const head = latest.headSha ? ` head=${String(latest.headSha).slice(0, 12)}` : '';
+      detail += `; latest reviewer pass status=${latest.status || '(unknown)'}${head}`;
+    }
+    hints.push(detail);
+  }
+  return hints;
+}
+
+function classifyRow(row, { now, thresholdMs, jobInfo, reviewPassInfo }) {
+  if (row.review_status !== 'pending') {
+    return { stuck: false, reason: `review_status=${row.review_status} (not pending)` };
+  }
+  const rereviewAtMs = parseTimestamp(row.rereview_requested_at);
+  if (rereviewAtMs == null) {
+    return { stuck: false, reason: 'no rereview_requested_at; row is fresh-pending awaiting first-pass claim' };
+  }
+  const lastAttemptedMs = parseTimestamp(row.last_attempted_at);
+  if (lastAttemptedMs != null && lastAttemptedMs >= rereviewAtMs) {
+    if (reviewPassInfo?.landedAfterRereview > 0) {
+      return {
+        stuck: false,
+        reason: 'completed GitHub review pass landed after rereview_requested_at',
+      };
+    }
+    const ageMs = now - rereviewAtMs;
+    if (ageMs < thresholdMs) {
+      return {
+        stuck: false,
+        reason: `rereview attempt is ${Math.round(ageMs/60_000)}min old with no landed review yet; threshold is ${Math.round(thresholdMs/60_000)}min`,
+        ageMinutes: minutesBetween(now, rereviewAtMs),
+      };
+    }
+    return {
+      stuck: true,
+      ageMinutes: minutesBetween(now, rereviewAtMs),
+      hints: buildStuckHints(row, { jobInfo, reviewPassInfo }),
+      suggestedAction: `npm run retrigger-review -- --repo ${row.repo} --pr ${row.pr_number} --reason "stuck rereview detected by diagnose-stuck-rereview"`,
+    };
+  }
+  const ageMs = now - rereviewAtMs;
+  if (ageMs < thresholdMs) {
+    return {
+      stuck: false,
+      reason: `rereview is ${Math.round(ageMs/60_000)}min old; threshold is ${Math.round(thresholdMs/60_000)}min — give the watcher more cycles before flagging`,
+      ageMinutes: minutesBetween(now, rereviewAtMs),
+    };
+  }
   return {
     stuck: true,
     ageMinutes: minutesBetween(now, rereviewAtMs),
-    hints,
+    hints: buildStuckHints(row, { jobInfo, reviewPassInfo }),
     suggestedAction: `npm run retrigger-review -- --repo ${row.repo} --pr ${row.pr_number} --reason "stuck rereview detected by diagnose-stuck-rereview"`,
   };
 }
 
-function formatHumanRow({ row, classification, jobInfo }) {
+function formatHumanRow({ row, classification, jobInfo, reviewPassInfo }) {
   const lines = [];
   lines.push(`${row.repo}#${row.pr_number}`);
   lines.push(`  review_status         : ${row.review_status}`);
@@ -170,6 +266,18 @@ function formatHumanRow({ row, classification, jobInfo }) {
     lines.push(`    reReview.requested  : ${j.reReviewRequested}`);
   } else {
     lines.push(`  latestJob             : (none found)`);
+  }
+  if (reviewPassInfo?.latestPass) {
+    const pass = reviewPassInfo.latestPass;
+    lines.push(`  latestReviewerPass    : ${pass.passKind || '(unknown)'} / ${pass.status || '(unknown)'}`);
+    lines.push(`    startedAt           : ${pass.startedAt || '(null)'}`);
+    lines.push(`    endedAt             : ${pass.endedAt || '(null)'}`);
+    lines.push(`    headSha             : ${pass.headSha ? String(pass.headSha).slice(0, 12) : '(null)'}`);
+    lines.push(`    ghCommentId         : ${pass.ghCommentId || '(null)'}`);
+    lines.push(`    verdict             : ${pass.verdict || '(null)'}`);
+    lines.push(`    landedSinceRequest  : ${reviewPassInfo.landedAfterRereview}`);
+  } else {
+    lines.push(`  latestReviewerPass    : (none found since rereview request)`);
   }
   if (classification.stuck) {
     lines.push(`  *** STUCK *** age=${classification.ageMinutes}min`);
@@ -298,8 +406,14 @@ function main() {
     const report = [];
     for (const row of rows) {
       const jobInfo = readJobsForPR({ rootDir, repo: row.repo, prNumber: row.pr_number });
-      const classification = classifyRow(row, { now, thresholdMs, jobInfo });
-      report.push({ row, classification, jobInfo });
+      const reviewPassInfo = readReviewPassInfoAfterRereview({
+        db,
+        repo: row.repo,
+        prNumber: row.pr_number,
+        after: row.rereview_requested_at,
+      });
+      const classification = classifyRow(row, { now, thresholdMs, jobInfo, reviewPassInfo });
+      report.push({ row, classification, jobInfo, reviewPassInfo });
     }
     const stuck = report.filter((r) => r.classification.stuck);
     if (args.json) {

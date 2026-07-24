@@ -202,7 +202,7 @@ test('watcher terminal rereview skip releases claim and falls through to close p
   const closerProbeIndex = source.indexOf("const closerHead = await getHeadCloserCommitSuppressionWithBoundedRetry({", guardIndex);
   const closerSuppressedIndex = source.indexOf("if (closerHead?.suppressed) {", guardIndex);
   const hardCeilingIndex = source.indexOf("const hardReviewCeiling =", guardIndex);
-  const hardSkipIndex = source.indexOf("if (!skipReviewerSpawnReason && priorReviewAttempts >= hardReviewCeiling) {", guardIndex);
+  const hardSkipIndex = source.indexOf("if (!skipReviewerSpawnReason && priorReviewCount >= hardReviewCeiling) {", guardIndex);
   const skipReleaseIndex = source.indexOf("if (skipReviewerSpawnReason) {", guardIndex);
   // ARC-13 hoisted the spawn args + added a gated pipeline ternary; the v1
   // single-review call is the ternary's non-pipeline branch.

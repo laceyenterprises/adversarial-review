@@ -144,7 +144,7 @@ test('completed-rereview counter owned-db path closes without ReferenceError', (
   }
 });
 
-test('ceiling units collapse duplicate completions but count current-head failures', () => {
+test('ceiling units collapse duplicate completions and ignore non-landed failures', () => {
   const rootDir = makeTempRoot();
   try {
     const db = openReviewStateDb(rootDir);
@@ -190,8 +190,8 @@ test('ceiling units collapse duplicate completions but count current-head failur
         currentHeadSha: failingHead,
         fallbackReviewAttempts: 99,
       }),
-      3,
-      'one completed head plus two failures on the current head; duplicate completion and old-head failure do not inflate it',
+      1,
+      'one completed head is one landed review; failed passes are attempt evidence but not reviews',
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -225,8 +225,8 @@ test('ceiling units do not fall back to raw attempts for modern failed-only pass
         currentHeadSha: failingHead,
         fallbackReviewAttempts: 7,
       }),
-      1,
-      'a modern failed-only pass counts the current-head failure instead of treating distinct=0 as legacy',
+      0,
+      'a modern failed-only pass is attempt evidence, not a landed review',
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

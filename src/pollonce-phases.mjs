@@ -1581,10 +1581,11 @@ export async function processReviewSubject(entry, ctx) {
               }
 
               const hardReviewCeiling = resolveHardReviewCeiling(maxRemediationRounds);
-              // REVIEW-DEDUP: completed reviews are capped by distinct head,
-              // while failed attempts on this head still consume units so a
-              // broken reviewer path cannot retry forever. Legacy null-head
-              // rows count individually because their head cannot be de-duped.
+              // REVIEW-DEDUP: landed reviews are capped by distinct completed
+              // head. Failed/running attempts are retry evidence, not reviews,
+              // and must not spend the final review owed to a PR. Legacy
+              // completed null-head rows count individually because their head
+              // cannot be de-duped.
               const priorReviewCount = countReviewCeilingUnits({
                 db,
                 rootDir: ROOT,

@@ -14,6 +14,7 @@ import {
 } from '../src/reviewer-failure-classification.mjs';
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from '../src/reviewer-cascade.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from '../src/quota-exhaustion.mjs';
+import { REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 
 test('oauth-broken spawn failure is infra-recoverable (the 2026-06-13 incident shape)', () => {
   const row = {
@@ -46,6 +47,10 @@ test('cascade / reviewer-timeout / launchctl-bootstrap / provider degradation re
   assert.equal(
     infraRecoverableFailureClass({ failure_message: '[quota-exhausted] usage limit; try again later' }),
     QUOTA_EXHAUSTED_FAILURE_CLASS
+  );
+  assert.equal(
+    infraRecoverableFailureClass({ failure_message: '[reviewer-empty-output] Gemini returned empty output.' }),
+    REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS
   );
 });
 

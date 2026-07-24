@@ -4,8 +4,8 @@
  * "Cascade" is the LiteLLM/upstream-provider failure class ("all upstream
  * attempts failed"); the module now tracks EVERY transient reviewer failure
  * class (reviewer-timeout, launchctl-bootstrap, quota-exhausted,
- * broker-unavailable, github-unavailable, deploy-wedge, provider-overloaded)
- * under the original name. The contract that makes this state matter:
+ * broker-unavailable, github-unavailable, deploy-wedge, provider-overloaded,
+ * reviewer-empty-output) under the original name. The contract that makes this state matter:
  * transient failures must NOT burn `reviewed_prs.review_attempts` — the row
  * settles to `pending-upstream` and this file-backed gate
  * (`shouldBackoffReviewerSpawn`, consulted by pollOnce before the claim CAS)
@@ -21,6 +21,7 @@ import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rm
 import { join } from 'node:path';
 import {
   PROVIDER_OVERLOADED_FAILURE_CLASS,
+  REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   classifyReviewerFailure,
   isReviewerSubprocessTimeout,
 } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
@@ -109,6 +110,7 @@ function normalizeTransientFailureClass(failureClass) {
     value === 'broker-unavailable' ||
     value === 'github-unavailable' ||
     value === 'deploy-wedge' ||
+    value === REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS ||
     value === PROVIDER_OVERLOADED_FAILURE_CLASS
   ) {
     return value;
@@ -193,6 +195,7 @@ function shouldBackoffReviewerSpawn(rootDir, { repo, prNumber, now = new Date().
 export {
   CASCADE_FAILURE_CAP,
   PROVIDER_OVERLOADED_FAILURE_CLASS,
+  REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS,
   classifyReviewerFailure,
   clearCascadeState,
   formatTransientFailureBreakdown,

@@ -42,7 +42,11 @@ import {
 } from './follow-up-jobs.mjs';
 import { buildObviousDocsGuidance, fetchLinkedSpecContents } from './prompt-context.mjs';
 import { buildHardeningReviewContext } from './hardening-ledger-context.mjs';
-import { captureReviewerBodyAfterPost, findCapturedReviewerBody } from './review-body-capture.mjs';
+import {
+  captureReviewerBodyAfterPost,
+  findCapturedReviewerBody,
+  findPendingReviewerBodyCapture,
+} from './review-body-capture.mjs';
 import { emitReviewedAttestation } from './reviewed-attestation.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
 import { preflightGeminiReviewerToken } from './gemini-reviewer-preflight.mjs';
@@ -1748,10 +1752,29 @@ async function postGitHubReviewWithCapture({
   reviewerSpawnToken = null,
   reviewerIdentity = null,
   reviewerTokenFetchTimeoutMs = undefined,
+  lookupRetryBackoffMs = undefined,
+  sleepImpl = undefined,
+  emitReviewedAttestationImpl = emitReviewedAttestation,
 } = {}) {
   const normalizedHeadSha = String(reviewerHeadSha || '').trim();
-  const capturedReviewBody = normalizedHeadSha
-    ? findCapturedReviewerBody(rootDir, {
+  let capturedReviewBody = null;
+  try {
+    capturedReviewBody = findCapturedReviewerBody(rootDir, {
+      repo,
+      prNumber,
+      attemptNumber: Number(attemptNumber),
+      passKind,
+      headSha: normalizedHeadSha || null,
+      reviewerModel,
+    });
+  } catch (err) {
+    log.warn?.(
+      `[reviewer] captured review lookup failed for ${repo}#${prNumber}; ` +
+      `continuing to post review: ${err?.message || err}`
+    );
+  }
+  const pendingCapture = !capturedReviewBody && normalizedHeadSha
+    ? findPendingReviewerBodyCapture(rootDir, {
       repo,
       prNumber,
       attemptNumber: Number(attemptNumber),
@@ -1761,7 +1784,8 @@ async function postGitHubReviewWithCapture({
     })
     : null;
   const alreadyCaptured = capturedReviewBody !== null;
-  const effectiveReviewBody = capturedReviewBody ?? reviewBody;
+  const recoveringPendingCapture = pendingCapture !== null;
+  const effectiveReviewBody = capturedReviewBody ?? pendingCapture?.bodyMd ?? reviewBody;
   let initialToken = null;
   if (!alreadyCaptured) {
     // GMW-06: run the gemini-reviewer preflight before the generic env check so a
@@ -1773,7 +1797,7 @@ async function postGitHubReviewWithCapture({
     if (!initialToken) {
       throw new Error(`Missing env var: ${botTokenEnv}`);
     }
-    await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
+    if (!recoveringPendingCapture) await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
       rootDir,
       fetchImpl,
       readFileImpl,
@@ -1788,7 +1812,7 @@ async function postGitHubReviewWithCapture({
   // Capture postedAt AFTER the gh post returns so the candidate window
   // bounds the artifact's GitHub-assigned timestamp, which is set during
   // post handling — not before the request leaves.
-  const effectivePostedAt = postedAt || new Date().toISOString();
+  const effectivePostedAt = postedAt || pendingCapture?.postedAt || new Date().toISOString();
 
   // Normalize 'unknown' to null so the reviewer_passes.verdict CHECK
   // constraint (approved / comment-only / request-changes / dismissed / NULL)
@@ -1806,13 +1830,18 @@ async function postGitHubReviewWithCapture({
     prNumber,
     attemptNumber: Number(attemptNumber),
     reviewerModel,
+    reviewerHeadSha: normalizedHeadSha,
     botTokenEnv,
-    reviewBody,
+    reviewBody: effectiveReviewBody,
     verdict: persistedVerdict,
     passKind,
     postedAt: effectivePostedAt,
     execFileImpl,
     env: { ...process.env, [botTokenEnv]: process.env[botTokenEnv] || initialToken },
+    requireGitHubArtifact: Boolean(normalizedHeadSha),
+    lookupRetryBackoffMs,
+    sleepImpl,
+    allowExistingBodyUpdate: recoveringPendingCapture,
     log,
   });
 
@@ -1823,7 +1852,7 @@ async function postGitHubReviewWithCapture({
     return;
   }
 
-  await emitReviewedAttestation({
+  await emitReviewedAttestationImpl({
     repo,
     prNumber,
     headSha: normalizedHeadSha,

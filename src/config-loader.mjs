@@ -927,6 +927,14 @@ function schemaV1() {
               allowCanonicalFallback: { __type: TYPE_BOOL, __default: false },
             },
           },
+          exposure: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              score_half_life_days: { __type: TYPE_FLOAT, __default: 30.0, __min: 1.0, __max: 3660.0 },
+              quarantine_threshold: { __type: TYPE_FLOAT, __default: 25.0, __min: 0.0, __max: 100.0 },
+            },
+          },
           // CFG-04 dual-write nested block — mirrors agent_os_config
           // `_schema_v1()` (Python loader, line ~276). Added 2026-06-02
           // after operator's config.local.yaml set `session_ledger.dual_write.mode`
@@ -2559,6 +2567,14 @@ export const ENV_ALIASES = {
   },
   'session_ledger.vdb.allowCanonicalFallback': {
     canonical: 'AGENT_OS_SESSION_LEDGER_VDB_ALLOW_CANONICAL_FALLBACK',
+    aliases: [],
+  },
+  'session_ledger.exposure.score_half_life_days': {
+    canonical: 'AGENT_OS_SESSION_LEDGER_EXPOSURE_SCORE_HALF_LIFE_DAYS',
+    aliases: [],
+  },
+  'session_ledger.exposure.quarantine_threshold': {
+    canonical: 'AGENT_OS_SESSION_LEDGER_EXPOSURE_QUARANTINE_THRESHOLD',
     aliases: [],
   },
   'operator.email': {

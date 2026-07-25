@@ -102,16 +102,32 @@ async function listHardeningRecordsFromPython(contractId, {
 import json
 import os
 import sys
-from session_ledger.db import LedgerDatabase
+from session_ledger.db_runtime import open_ledger_for_runtime_readonly
+from session_ledger.db_stores.hardening_records import hardening_record_row_to_dict
+from session_ledger.hardening_contracts import require_contract_identity
 
 contract_id = sys.argv[1]
 limit = int(sys.argv[2])
 target = os.environ.get("HLG_LEDGER_TARGET") or None
-db = LedgerDatabase(target)
+require_contract_identity(contract_id)
+conn = open_ledger_for_runtime_readonly(target, timeout=10.0)
 try:
-    print(json.dumps(db.list_hardening_records(contract_id=contract_id, limit=limit), sort_keys=True))
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM hardening_records
+        WHERE contract_id = ?
+        ORDER BY created_at DESC, recorded_at DESC, record_id DESC
+        LIMIT ?
+        """,
+        (contract_id, limit),
+    ).fetchall()
+    print(json.dumps([
+        hardening_record_row_to_dict(row)
+        for row in rows
+    ], sort_keys=True))
 finally:
-    db.close()
+    conn.close()
 `.trim();
   const childEnv = pythonEnv(repoRoot, env);
   if (ledgerTarget) childEnv.HLG_LEDGER_TARGET = String(ledgerTarget);
@@ -133,15 +149,32 @@ async function getExposureRollupFromPython(contractId, {
 import json
 import os
 import sys
-from session_ledger.db import LedgerDatabase
+from session_ledger.db_runtime import open_ledger_for_runtime_readonly
+from session_ledger.db_stores.exposure_events import empty_exposure_rollup
+from session_ledger.db_stores.exposure_events import exposure_rollup_row_to_dict
+from session_ledger.hardening_contracts import require_contract_identity
 
 contract_id = sys.argv[1]
 target = os.environ.get("HLG_LEDGER_TARGET") or None
-db = LedgerDatabase(target)
+require_contract_identity(contract_id)
+conn = open_ledger_for_runtime_readonly(target, timeout=10.0)
 try:
-    print(json.dumps(db.get_exposure_rollup(contract_id=contract_id), sort_keys=True))
+    row = conn.execute(
+        """
+        SELECT *
+        FROM exposure_rollups
+        WHERE contract_id = ?
+        """,
+        (contract_id,),
+    ).fetchone()
+    rollup = (
+        empty_exposure_rollup(contract_id)
+        if row is None
+        else exposure_rollup_row_to_dict(row, now=None)
+    )
+    print(json.dumps(rollup, sort_keys=True))
 finally:
-    db.close()
+    conn.close()
 `.trim();
   const childEnv = pythonEnv(repoRoot, env);
   if (ledgerTarget) childEnv.HLG_LEDGER_TARGET = String(ledgerTarget);
@@ -177,7 +210,7 @@ function isLowOrNoExposure(exposure) {
 function isLowExposureRollup(rollup) {
   if (!rollup || typeof rollup !== 'object' || Array.isArray(rollup)) return false;
   const score = Number(rollup.exposure_score);
-  if (!Number.isFinite(score)) return false;
+  if (!Number.isFinite(score)) return true;
   return score < 25;
 }
 
@@ -186,7 +219,7 @@ function summarizeExposure(records, rollup = null) {
     const score = Number(rollup.exposure_score);
     const label = Number.isFinite(score)
       ? `live exposure_score=${score}`
-      : 'live exposure rollup present';
+      : 'live exposure_score unavailable';
     return {
       harsherReview: isLowExposureRollup(rollup),
       label,
@@ -269,6 +302,7 @@ async function buildHardeningReviewContext(diffText, {
       logger?.warn?.(
         `[reviewer] WARN: failed to load hardening records for ${contract.contract_id}: ${err?.message || err}`
       );
+      entries.push({ contract, records: [], exposureRollup });
     }
   }
 

@@ -751,6 +751,8 @@ test('reviewer lookup paginates through busy PR history and still finds the matc
 
   const row = readPass(rootDir, pass);
   assert.equal(row.gh_comment_id, '999');
+  assert.equal(apiArgs[0][0], 'api');
+  assert.equal(apiArgs[0][1], `repos/${pass.repo}/pulls/${encodeURIComponent(pass.prNumber)}/reviews`);
   assert.ok(apiArgs[0].includes('--paginate'));
 });
 

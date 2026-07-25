@@ -194,10 +194,10 @@ async function lookupRecentReviewArtifact({
     'gh',
     [
       'api',
+      endpoint,
       '--paginate',
       '-X',
       'GET',
-      endpoint,
       '-f',
       'per_page=100',
       '-q',

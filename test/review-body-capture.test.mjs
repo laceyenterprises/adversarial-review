@@ -388,6 +388,70 @@ test('pending reviewer capture reattaches a landed review without double-posting
   assert.deepEqual(calls, ['pr', 'api', 'api']);
 });
 
+test('pending reviewer capture does not leak across attempt boundaries', async () => {
+  const rootDir = makeRootDir();
+  const previousPass = seedPass(rootDir, {
+    attemptNumber: 1,
+    passKind: 'rereview',
+    reviewerClass: 'codex',
+    headSha: 'reviewed-head-sha',
+  });
+  const currentPass = seedPass(rootDir, {
+    repo: previousPass.repo,
+    prNumber: previousPass.prNumber,
+    attemptNumber: 2,
+    passKind: 'rereview',
+    reviewerClass: 'codex',
+    headSha: 'reviewed-head-sha',
+  });
+  const oldBody = '## Verdict\n\nRequest changes\n\nOld pending body';
+  const newBody = '## Verdict\n\nComment only\n\nFresh attempt body';
+  writeLegacyUnverifiedCapture(rootDir, {
+    ...previousPass,
+    bodyMd: oldBody,
+    capturedAt: '2026-05-29T12:01:00.000Z',
+  });
+  const calls = [];
+
+  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => postGitHubReviewWithCapture({
+    rootDir,
+    repo: currentPass.repo,
+    prNumber: currentPass.prNumber,
+    attemptNumber: currentPass.attemptNumber,
+    reviewerModel: 'codex',
+    reviewerHeadSha: 'reviewed-head-sha',
+    reviewBody: newBody,
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    passKind: 'rereview',
+    postedAt: '2026-05-29T12:03:00.000Z',
+    lookupRetryBackoffMs: [],
+    emitReviewedAttestationImpl: async () => ({}),
+    execFileImpl: async (_command, args) => {
+      calls.push(args[0]);
+      if (args[0] === 'pr' && args[1] === 'review') return { stdout: '', stderr: '' };
+      return {
+        stdout: `${JSON.stringify({
+          id: 508,
+          login: 'lacey-codex-reviewer[bot]',
+          commit_id: 'reviewed-head-sha',
+          created_at: '2026-05-29T12:03:03.000Z',
+          body: newBody,
+        })}\n`,
+        stderr: '',
+      };
+    },
+  }));
+
+  const oldRow = readPass(rootDir, previousPass);
+  assert.equal(oldRow.body_md, oldBody);
+  assert.equal(oldRow.gh_comment_id, null);
+
+  const newRow = readPass(rootDir, currentPass);
+  assert.equal(newRow.body_md, newBody);
+  assert.equal(newRow.gh_comment_id, '508');
+  assert.deepEqual(calls, ['pr', 'api']);
+});
+
 test('legacy unverified reviewer capture is recovered before another review post', async () => {
   const rootDir = makeRootDir();
   const pass = seedPass(rootDir, {
@@ -658,6 +722,7 @@ test('reviewer lookup paginates through busy PR history and still finds the matc
   const rootDir = makeRootDir();
   const pass = seedPass(rootDir, { reviewerClass: 'codex' });
   const reviewBody = '## Verdict\n\nComment only\n\nBuried review';
+  const apiArgs = [];
   const noise = Array.from({ length: 105 }, (_, index) => JSON.stringify({
     id: index + 1,
     login: index < 5 ? 'lacey-codex-reviewer[bot]' : 'human-reviewer',
@@ -675,15 +740,18 @@ test('reviewer lookup paginates through busy PR history and still finds the matc
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
     passKind: 'first-pass',
     postedAt: '2026-05-29T12:01:00.000Z',
-    execFileImpl: async (_command, args) => (
-      args[0] === 'pr'
-        ? { stdout: '', stderr: '' }
-        : { stdout: `${noise}\n${JSON.stringify({ id: 999, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:00:45.000Z', body: reviewBody })}\n` }
-    ),
+    execFileImpl: async (_command, args) => {
+      if (args[0] === 'pr') return { stdout: '', stderr: '' };
+      apiArgs.push(args);
+      return {
+        stdout: `${noise}\n${JSON.stringify({ id: 999, login: 'lacey-codex-reviewer[bot]', created_at: '2026-05-29T12:00:45.000Z', body: reviewBody })}\n`,
+      };
+    },
   }));
 
   const row = readPass(rootDir, pass);
   assert.equal(row.gh_comment_id, '999');
+  assert.ok(apiArgs[0].includes('--paginate'));
 });
 
 test('sqlite write failure does not block gh review posting', async () => {

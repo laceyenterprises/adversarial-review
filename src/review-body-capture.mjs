@@ -381,6 +381,7 @@ function findPendingReviewerBodyCapture(rootDir, {
          FROM reviewer_passes
         WHERE repo = ?
           AND pr_number = ?
+          AND attempt_number = ?
           AND head_sha = ?
           AND reviewer_model = ?
           AND pass_kind = ?
@@ -389,7 +390,7 @@ function findPendingReviewerBodyCapture(rootDir, {
           AND body_captured_at IS NOT NULL
         ORDER BY body_captured_at DESC, pass_id DESC
         LIMIT 5`
-    ).all(repo, Number(prNumber), headSha, reviewerModel, kind);
+    ).all(repo, Number(prNumber), Number(attemptNumber), headSha, reviewerModel, kind);
     const row = rows.find((candidate) => {
       const status = parseMetadataJson(candidate?.metadata_json).reviewBodyCapture?.status;
       return !status || status === REVIEW_BODY_CAPTURE_STATUS_PENDING;

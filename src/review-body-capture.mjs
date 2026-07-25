@@ -16,6 +16,8 @@ const REVIEW_CAPTURE_LOOKBACK_MS = 2 * 60 * 1000;
 const REVIEW_CAPTURE_FORWARD_MS = 5 * 60 * 1000;
 const REVIEW_LOOKUP_TIMEOUT_MS = 8_000;
 const REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS = Object.freeze([1_000, 2_000, 4_000, 8_000]);
+const REVIEW_BODY_CAPTURE_STATUS_PENDING = 'pending-github-artifact';
+const REVIEW_BODY_CAPTURE_STATUS_VERIFIED = 'verified-github-artifact';
 // The reviewers post via GitHub Apps now (broker provider=github-app-*-reviewer),
 // so the canonical review author login is `lacey-<model>-reviewer[bot]`. Keep
 // the legacy PAT user `<model>-reviewer-lacey` as a lookup alias while mixed
@@ -106,6 +108,43 @@ function parseJsonLines(stdout) {
     .filter(Boolean);
 }
 
+function parseMetadataJson(raw) {
+  try {
+    const parsed = JSON.parse(raw || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function mergeCaptureMetadata(existingMetadata, patch = {}) {
+  const existing = existingMetadata && typeof existingMetadata === 'object'
+    ? existingMetadata
+    : {};
+  const existingCapture = existing.reviewBodyCapture && typeof existing.reviewBodyCapture === 'object'
+    ? existing.reviewBodyCapture
+    : {};
+  const patchCapture = patch.reviewBodyCapture && typeof patch.reviewBodyCapture === 'object'
+    ? patch.reviewBodyCapture
+    : {};
+  const merged = {
+    ...existing,
+    ...patch,
+    reviewBodyCapture: {
+      ...existingCapture,
+      ...patchCapture,
+    },
+  };
+  if (Object.keys(merged.reviewBodyCapture).length === 0) {
+    delete merged.reviewBodyCapture;
+  }
+  return merged;
+}
+
+function stringifyMetadataJson(metadata) {
+  return JSON.stringify(metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {});
+}
+
 function sortNewestFirst(items, timestampField) {
   return [...items].sort((left, right) => {
     const leftMs = toEpochMs(left?.[timestampField]) ?? -Infinity;
@@ -191,7 +230,7 @@ async function lookupRecentReviewArtifactWithRetry(lookupArgs, {
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       const artifact = await lookupRecentReviewArtifact(lookupArgs);
-      if (artifact) return artifact;
+      if (artifact) return { artifact, attempts: attempt };
       lastTransientError = null;
       if (attempt < maxAttempts) {
         const delayMs = Number(delays[attempt - 1]) || 0;
@@ -202,11 +241,14 @@ async function lookupRecentReviewArtifactWithRetry(lookupArgs, {
         if (delayMs > 0) await sleepImpl(delayMs);
         continue;
       }
-      return null;
+      return { artifact: null, attempts: attempt };
     } catch (err) {
       if (!isTransientReviewArtifactLookupError(err)) throw err;
       lastTransientError = err;
-      if (attempt >= maxAttempts) throw err;
+      if (attempt >= maxAttempts) {
+        err.reviewLookupAttempts = attempt;
+        throw err;
+      }
       const delayMs = Number(delays[attempt - 1]) || 0;
       log.warn?.(
         `[reviewer] review body capture review-id lookup transient failure ` +
@@ -229,6 +271,8 @@ function updateReviewerPassBodyCapture(rootDir, {
   bodyMd,
   ghCommentId = null,
   capturedAt = new Date().toISOString(),
+  metadataPatch = null,
+  allowExistingBodyUpdate = false,
   log = console,
 } = {}) {
   if (!repo || !Number.isInteger(Number(prNumber)) || !Number.isInteger(Number(attemptNumber)) || !bodyMd) {
@@ -240,27 +284,43 @@ function updateReviewerPassBodyCapture(rootDir, {
   const db = openReviewStateDb(rootDir);
   try {
     ensureReviewStateSchema(db);
-    const result = db.prepare(
-      `UPDATE reviewer_passes
-          SET verdict = ?,
-              body_md = ?,
-              gh_comment_id = ?,
-              body_captured_at = ?
+    const row = db.prepare(
+      `SELECT pass_id, body_md, metadata_json
+         FROM reviewer_passes
         WHERE repo = ?
           AND pr_number = ?
           AND attempt_number = ?
-          AND pass_kind = ?
-          AND body_md IS NULL`
-    ).run(
-      verdict,
-      bodyMd,
-      ghCommentId === null || ghCommentId === undefined ? null : String(ghCommentId),
-      capturedAt,
-      repo,
-      Number(prNumber),
-      Number(attemptNumber),
-      kind,
-    );
+          AND pass_kind = ?`
+    ).get(repo, Number(prNumber), Number(attemptNumber), kind);
+    let result = { changes: 0 };
+    if (row && (
+      row.body_md === null ||
+      row.body_md === undefined ||
+      (
+        allowExistingBodyUpdate &&
+        normalizeBodyForMatch(row.body_md) === normalizeBodyForMatch(bodyMd)
+      )
+    )) {
+      const metadata = metadataPatch
+        ? mergeCaptureMetadata(parseMetadataJson(row.metadata_json), metadataPatch)
+        : parseMetadataJson(row.metadata_json);
+      result = db.prepare(
+        `UPDATE reviewer_passes
+            SET verdict = ?,
+                body_md = ?,
+                gh_comment_id = ?,
+                body_captured_at = ?,
+                metadata_json = ?
+          WHERE pass_id = ?`
+      ).run(
+        verdict,
+        bodyMd,
+        ghCommentId === null || ghCommentId === undefined ? null : String(ghCommentId),
+        capturedAt,
+        stringifyMetadataJson(metadata),
+        row.pass_id,
+      );
+    }
     // Surface silent misses: a 0-row UPDATE means the row we expected to
     // stamp (created by beginReviewerPass / recordRemediationPassStartedSafe)
     // does not exist for this (repo, pr, attempt, pass_kind). The GitHub
@@ -296,11 +356,50 @@ function findCapturedReviewerBody(rootDir, {
           AND reviewer_model = ?
           AND pass_kind = ?
           AND body_md IS NOT NULL
+          AND gh_comment_id IS NOT NULL
+          AND gh_comment_id <> ''
           AND body_captured_at IS NOT NULL
         ORDER BY body_captured_at DESC, pass_id DESC
         LIMIT 1`
     ).get(repo, Number(prNumber), headSha, reviewerModel, kind);
     return typeof row?.body_md === 'string' ? row.body_md : null;
+  } finally {
+    db?.close();
+  }
+}
+
+function findPendingReviewerBodyCapture(rootDir, {
+  repo, prNumber, attemptNumber, passKind, headSha, reviewerModel,
+} = {}) {
+  const kind = resolvePassKindForReviewer(passKind, { attemptNumber });
+  let db;
+  try {
+    db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    const rows = db.prepare(
+      `SELECT body_md, body_captured_at, metadata_json
+         FROM reviewer_passes
+        WHERE repo = ?
+          AND pr_number = ?
+          AND head_sha = ?
+          AND reviewer_model = ?
+          AND pass_kind = ?
+          AND body_md IS NOT NULL
+          AND (gh_comment_id IS NULL OR gh_comment_id = '')
+          AND body_captured_at IS NOT NULL
+        ORDER BY body_captured_at DESC, pass_id DESC
+        LIMIT 5`
+    ).all(repo, Number(prNumber), headSha, reviewerModel, kind);
+    const row = rows.find((candidate) => {
+      const status = parseMetadataJson(candidate?.metadata_json).reviewBodyCapture?.status;
+      return !status || status === REVIEW_BODY_CAPTURE_STATUS_PENDING;
+    });
+    if (!row) return null;
+    return {
+      bodyMd: row.body_md,
+      postedAt: row.body_captured_at,
+      metadata: parseMetadataJson(row.metadata_json),
+    };
   } finally {
     db?.close();
   }
@@ -345,6 +444,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
   requireGitHubArtifact = false,
   lookupRetryBackoffMs = REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS,
   sleepImpl = sleep,
+  allowExistingBodyUpdate = false,
 } = {}) {
   let ghCommentId = null;
   try {
@@ -367,21 +467,76 @@ async function captureReviewerBodyAfterPost(rootDir, {
           ? ` on head ${reviewerHeadSha}`
           : '';
         const message = `review body capture could not find a recent submitted GitHub review for ${repo}#${prNumber}${detail}`;
-        const artifact = requireGitHubArtifact
+        const lookup = requireGitHubArtifact
           ? await lookupRecentReviewArtifactWithRetry(lookupArgs, {
             backoffMs: lookupRetryBackoffMs,
             sleepImpl,
             log,
             notFoundMessage: message,
           })
-          : await lookupRecentReviewArtifact(lookupArgs);
+          : { artifact: await lookupRecentReviewArtifact(lookupArgs), attempts: 1 };
+        const artifact = lookup.artifact;
         ghCommentId = artifact?.id ?? null;
         if (!artifact) {
-          if (requireGitHubArtifact) throw new Error(message);
+          if (requireGitHubArtifact) {
+            updateReviewerPassBodyCapture(rootDir, {
+              repo,
+              prNumber,
+              attemptNumber: Number(attemptNumber),
+              passKind: resolvePassKindForReviewer(passKind, { attemptNumber }),
+              verdict,
+              bodyMd: reviewBody,
+              ghCommentId: null,
+              capturedAt: postedAt,
+              allowExistingBodyUpdate: true,
+              metadataPatch: {
+                reviewBodyCapture: {
+                  status: REVIEW_BODY_CAPTURE_STATUS_PENDING,
+                  githubArtifactRequired: true,
+                  reviewerHeadSha: reviewerHeadSha || null,
+                  lookupAttempts: lookup.attempts,
+                  lastLookupError: null,
+                  pendingSince: postedAt,
+                },
+              },
+              log,
+            });
+            const missingArtifactError = new Error(
+              `generated-but-not-posted: ${message}; no GitHub review was found ` +
+              `after ${lookup.attempts} lookup attempt(s)`
+            );
+            missingArtifactError.reviewBodyCaptureRecorded = true;
+            throw missingArtifactError;
+          }
           log.warn?.(`[reviewer] ${message}; storing body without gh_comment_id`);
         }
       } catch (err) {
-        if (requireGitHubArtifact) throw err;
+        if (requireGitHubArtifact && err?.reviewBodyCaptureRecorded) throw err;
+        if (requireGitHubArtifact) {
+          updateReviewerPassBodyCapture(rootDir, {
+            repo,
+            prNumber,
+            attemptNumber: Number(attemptNumber),
+            passKind: resolvePassKindForReviewer(passKind, { attemptNumber }),
+            verdict,
+            bodyMd: reviewBody,
+            ghCommentId: null,
+            capturedAt: postedAt,
+            allowExistingBodyUpdate: true,
+            metadataPatch: {
+              reviewBodyCapture: {
+                status: REVIEW_BODY_CAPTURE_STATUS_PENDING,
+                githubArtifactRequired: true,
+                reviewerHeadSha: reviewerHeadSha || null,
+                lookupAttempts: Number(err?.reviewLookupAttempts || 1),
+                lastLookupError: err?.message || String(err),
+                pendingSince: postedAt,
+              },
+            },
+            log,
+          });
+          throw err;
+        }
         log.warn?.(`[reviewer] review body capture review-id lookup failed for ${repo}#${prNumber}: ${err.message}`);
       }
     } else if (requireGitHubArtifact) {
@@ -396,6 +551,17 @@ async function captureReviewerBodyAfterPost(rootDir, {
       bodyMd: reviewBody,
       ghCommentId,
       capturedAt: postedAt,
+      allowExistingBodyUpdate,
+      metadataPatch: requireGitHubArtifact
+        ? {
+            reviewBodyCapture: {
+              status: REVIEW_BODY_CAPTURE_STATUS_VERIFIED,
+              githubArtifactRequired: true,
+              reviewerHeadSha: reviewerHeadSha || null,
+              verifiedAt: new Date().toISOString(),
+            },
+          }
+        : null,
       log,
     });
     return { ghCommentId, verifiedGitHubArtifact: ghCommentId !== null };
@@ -461,10 +627,13 @@ export {
   REVIEW_CAPTURE_FORWARD_MS,
   REVIEW_CAPTURE_LOOKBACK_MS,
   REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS,
+  REVIEW_BODY_CAPTURE_STATUS_PENDING,
+  REVIEW_BODY_CAPTURE_STATUS_VERIFIED,
   REVIEW_LOOKUP_TIMEOUT_MS,
   captureRemediationBodyAfterPost,
   captureReviewerBodyAfterPost,
   findCapturedReviewerBody,
+  findPendingReviewerBodyCapture,
   isTransientReviewArtifactLookupError,
   lookupRecentReviewArtifact,
   resolveReviewerBotLogin,

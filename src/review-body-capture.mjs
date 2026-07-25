@@ -344,6 +344,7 @@ function findCapturedReviewerBody(rootDir, {
   repo, prNumber, attemptNumber, passKind, headSha, reviewerModel,
 } = {}) {
   const kind = resolvePassKindForReviewer(passKind, { attemptNumber });
+  const normalizedHeadSha = String(headSha ?? '').trim() || null;
   let db;
   try {
     db = openReviewStateDb(rootDir);
@@ -352,7 +353,10 @@ function findCapturedReviewerBody(rootDir, {
       `SELECT body_md FROM reviewer_passes
         WHERE repo = ?
           AND pr_number = ?
-          AND head_sha = ?
+          AND (
+            (? IS NULL AND head_sha IS NULL)
+            OR head_sha = ?
+          )
           AND reviewer_model = ?
           AND pass_kind = ?
           AND body_md IS NOT NULL
@@ -361,7 +365,7 @@ function findCapturedReviewerBody(rootDir, {
           AND body_captured_at IS NOT NULL
         ORDER BY body_captured_at DESC, pass_id DESC
         LIMIT 1`
-    ).get(repo, Number(prNumber), headSha, reviewerModel, kind);
+    ).get(repo, Number(prNumber), normalizedHeadSha, normalizedHeadSha, reviewerModel, kind);
     return typeof row?.body_md === 'string' ? row.body_md : null;
   } finally {
     db?.close();

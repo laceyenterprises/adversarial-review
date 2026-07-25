@@ -1757,16 +1757,22 @@ async function postGitHubReviewWithCapture({
   emitReviewedAttestationImpl = emitReviewedAttestation,
 } = {}) {
   const normalizedHeadSha = String(reviewerHeadSha || '').trim();
-  const capturedReviewBody = normalizedHeadSha
-    ? findCapturedReviewerBody(rootDir, {
+  let capturedReviewBody = null;
+  try {
+    capturedReviewBody = findCapturedReviewerBody(rootDir, {
       repo,
       prNumber,
       attemptNumber: Number(attemptNumber),
       passKind,
-      headSha: normalizedHeadSha,
+      headSha: normalizedHeadSha || null,
       reviewerModel,
-    })
-    : null;
+    });
+  } catch (err) {
+    log.warn?.(
+      `[reviewer] captured review lookup failed for ${repo}#${prNumber}; ` +
+      `continuing to post review: ${err?.message || err}`
+    );
+  }
   const pendingCapture = !capturedReviewBody && normalizedHeadSha
     ? findPendingReviewerBodyCapture(rootDir, {
       repo,

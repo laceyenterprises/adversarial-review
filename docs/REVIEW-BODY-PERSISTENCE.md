@@ -17,6 +17,16 @@
 
 Remediation verdicts stay `NULL` by design. Only `pass_kind IN ('first-pass', 'rereview')` rows carry a normalized reviewer verdict. `pass_kind = 'remediation'` rows capture the public reply body and GitHub artifact id, but `verdict IS NULL`.
 
+For reviewer posts tied to a specific reviewed head SHA, capture is strict:
+the watcher polls the GitHub reviews endpoint with bounded backoff until it
+finds the exact body, reviewer login alias, and `commit_id` match. Transient
+`gh api` failures such as timeouts, TLS handshake drops, and temporary resource
+errors are retried in the same bounded window. If the artifact is still absent
+or the lookup fails with a non-transient error after posting, the pass is not
+stamped; the failure remains loud rather than storing an unverifiable
+`gh_comment_id`. Unheaded reviewer posts and remediation comments keep the
+best-effort behavior and may store `body_md` with `gh_comment_id = NULL`.
+
 Join merged PRs to closeouts with:
 
 ```sql

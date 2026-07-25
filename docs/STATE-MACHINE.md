@@ -464,6 +464,14 @@ only when the signed envelope preserves the payload exactly and binds
 `signature.subject` to the reviewer identity; cryptographic acceptance is
 delegated fail-closed to `hq attest record`.
 
+For reviews bound to a concrete head SHA, the post-publish capture path must
+verify the matching GitHub review artifact before stamping `body_md`. That
+verification retries bounded transient `gh api` failures and bounded
+read-after-write misses before failing closed, so a temporary lookup outage or
+GitHub list-endpoint lag does not immediately create a posted-but-uncaptured
+review state. Reviews without a reviewed-head binding remain best-effort and
+may store the body without `gh_comment_id`.
+
 `pr_merge_closeouts` tracks the post-merge closeout scrape/post lifecycle for a
 single `(repo, pr_number)`:
 

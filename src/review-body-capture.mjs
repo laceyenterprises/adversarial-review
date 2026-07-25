@@ -1,5 +1,6 @@
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import { openReviewStateDb, ensureReviewStateSchema } from './review-state.mjs';
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
@@ -14,6 +15,7 @@ const REVIEW_CAPTURE_LOOKBACK_MS = 2 * 60 * 1000;
 // most of this window is unused on normal latency.
 const REVIEW_CAPTURE_FORWARD_MS = 5 * 60 * 1000;
 const REVIEW_LOOKUP_TIMEOUT_MS = 8_000;
+const REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS = Object.freeze([1_000, 2_000, 4_000, 8_000]);
 // The reviewers post via GitHub Apps now (broker provider=github-app-*-reviewer),
 // so the canonical review author login is `lacey-<model>-reviewer[bot]`. Keep
 // the legacy PAT user `<model>-reviewer-lacey` as a lookup alias while mixed
@@ -119,6 +121,15 @@ function pickBestBodyMatch(items, body, timestampField) {
   return sortNewestFirst(exactMatches, timestampField)[0] || null;
 }
 
+function isTransientReviewArtifactLookupError(err) {
+  const code = String(err?.code || '').toUpperCase();
+  if (['EAGAIN', 'EBUSY', 'ECONNRESET', 'ECONNREFUSED', 'EIO', 'EMFILE', 'ENFILE', 'ENETUNREACH', 'ETIMEDOUT'].includes(code)) {
+    return true;
+  }
+  const detail = `${err?.message || ''}\n${err?.stderr || ''}\n${err?.stdout || ''}`.toLowerCase();
+  return /timed?\s*out|timeout|tls handshake|socket hang up|connection (?:reset|refused|aborted|timed out)|temporary failure|temporarily unavailable|resource temporarily unavailable|try again|eai_again|bad gateway|service unavailable|gateway timeout|http[ /]5\d\d/.test(detail);
+}
+
 async function lookupRecentReviewArtifact({
   repo,
   prNumber,
@@ -164,8 +175,49 @@ async function lookupRecentReviewArtifact({
   const candidates = parseJsonLines(stdout)
     .filter((item) => loginAliases.some((alias) => loginsMatch(item?.login, alias)))
     .filter((item) => !headSha || String(item?.commit_id || '') === String(headSha))
-    .filter((item) => withinCaptureWindow(item?.created_at, postedAt));
-  return pickBestBodyMatch(candidates, body, 'created_at');
+    .filter((item) => withinCaptureWindow(item?.[timestampField], postedAt));
+  return pickBestBodyMatch(candidates, body, timestampField);
+}
+
+async function lookupRecentReviewArtifactWithRetry(lookupArgs, {
+  backoffMs = REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS,
+  sleepImpl = sleep,
+  log = console,
+  notFoundMessage,
+} = {}) {
+  const delays = Array.isArray(backoffMs) ? backoffMs : [];
+  const maxAttempts = delays.length + 1;
+  let lastTransientError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const artifact = await lookupRecentReviewArtifact(lookupArgs);
+      if (artifact) return artifact;
+      lastTransientError = null;
+      if (attempt < maxAttempts) {
+        const delayMs = Number(delays[attempt - 1]) || 0;
+        log.warn?.(
+          `[reviewer] ${notFoundMessage}; retrying artifact lookup ` +
+          `(${attempt}/${maxAttempts}) in ${delayMs}ms`
+        );
+        if (delayMs > 0) await sleepImpl(delayMs);
+        continue;
+      }
+      return null;
+    } catch (err) {
+      if (!isTransientReviewArtifactLookupError(err)) throw err;
+      lastTransientError = err;
+      if (attempt >= maxAttempts) throw err;
+      const delayMs = Number(delays[attempt - 1]) || 0;
+      log.warn?.(
+        `[reviewer] review body capture review-id lookup transient failure ` +
+        `(${attempt}/${maxAttempts}) for ${lookupArgs?.repo}#${lookupArgs?.prNumber}; ` +
+        `retrying in ${delayMs}ms: ${err?.message || err}`
+      );
+      if (delayMs > 0) await sleepImpl(delayMs);
+    }
+  }
+  if (lastTransientError) throw lastTransientError;
+  return null;
 }
 
 function updateReviewerPassBodyCapture(rootDir, {
@@ -291,6 +343,8 @@ async function captureReviewerBodyAfterPost(rootDir, {
   env = process.env,
   log = console,
   requireGitHubArtifact = false,
+  lookupRetryBackoffMs = REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS,
+  sleepImpl = sleep,
 } = {}) {
   let ghCommentId = null;
   try {
@@ -298,7 +352,7 @@ async function captureReviewerBodyAfterPost(rootDir, {
     if (logins.length > 0) {
       try {
         const lookupEnv = buildLookupEnv(env, botTokenEnv ? env?.[botTokenEnv] : null);
-        const artifact = await lookupRecentReviewArtifact({
+        const lookupArgs = {
           repo,
           prNumber,
           endpoint: `repos/${repo}/pulls/${encodeURIComponent(prNumber)}/reviews`,
@@ -308,13 +362,21 @@ async function captureReviewerBodyAfterPost(rootDir, {
           body: reviewBody,
           execFileImpl,
           env: lookupEnv,
-        });
+        };
+        const detail = reviewerHeadSha
+          ? ` on head ${reviewerHeadSha}`
+          : '';
+        const message = `review body capture could not find a recent submitted GitHub review for ${repo}#${prNumber}${detail}`;
+        const artifact = requireGitHubArtifact
+          ? await lookupRecentReviewArtifactWithRetry(lookupArgs, {
+            backoffMs: lookupRetryBackoffMs,
+            sleepImpl,
+            log,
+            notFoundMessage: message,
+          })
+          : await lookupRecentReviewArtifact(lookupArgs);
         ghCommentId = artifact?.id ?? null;
         if (!artifact) {
-          const detail = reviewerHeadSha
-            ? ` on head ${reviewerHeadSha}`
-            : '';
-          const message = `review body capture could not find a recent submitted GitHub review for ${repo}#${prNumber}${detail}`;
           if (requireGitHubArtifact) throw new Error(message);
           log.warn?.(`[reviewer] ${message}; storing body without gh_comment_id`);
         }
@@ -398,10 +460,12 @@ async function captureRemediationBodyAfterPost(rootDir, {
 export {
   REVIEW_CAPTURE_FORWARD_MS,
   REVIEW_CAPTURE_LOOKBACK_MS,
+  REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS,
   REVIEW_LOOKUP_TIMEOUT_MS,
   captureRemediationBodyAfterPost,
   captureReviewerBodyAfterPost,
   findCapturedReviewerBody,
+  isTransientReviewArtifactLookupError,
   lookupRecentReviewArtifact,
   resolveReviewerBotLogin,
   updateReviewerPassBodyCapture,

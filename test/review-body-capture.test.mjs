@@ -10,6 +10,7 @@ import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
 import { __test__ as reviewerTest } from '../src/reviewer.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 import {
+  captureReviewerBodyAfterPost,
   captureRemediationBodyAfterPost,
   findCapturedReviewerBody,
   resolveReviewerBotLogin,
@@ -163,6 +164,8 @@ test('reviewer capture fails closed when the posted review is not visible on the
         botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
         passKind: 'first-pass',
         postedAt: '2026-05-29T12:01:00.000Z',
+        lookupRetryBackoffMs: [0, 0],
+        sleepImpl: async () => {},
         execFileImpl: async (_command, args) => {
           calls.push(args[0]);
           if (args[0] === 'pr' && args[1] === 'review') return { stdout: '', stderr: '' };
@@ -185,7 +188,102 @@ test('reviewer capture fails closed when the posted review is not visible on the
   const row = readPass(rootDir, pass);
   assert.equal(row.body_md, null);
   assert.equal(row.gh_comment_id, null);
-  assert.deepEqual(calls, ['pr', 'api']);
+  assert.deepEqual(calls, ['pr', 'api', 'api', 'api']);
+});
+
+test('strict reviewer capture retries until GitHub exposes the reviewed-head artifact', async () => {
+  const rootDir = makeRootDir();
+  const pass = seedPass(rootDir, { passKind: 'first-pass', reviewerClass: 'codex' });
+  const reviewBody = '## Verdict\n\nComment only\n\nEventually visible body';
+  const apiCalls = [];
+  const sleeps = [];
+
+  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => captureReviewerBodyAfterPost(rootDir, {
+    repo: pass.repo,
+    prNumber: pass.prNumber,
+    attemptNumber: pass.attemptNumber,
+    reviewerModel: 'codex',
+    reviewerHeadSha: 'reviewed-head-sha',
+    reviewBody,
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    verdict: 'comment-only',
+    passKind: 'first-pass',
+    postedAt: '2026-05-29T12:01:00.000Z',
+    env: process.env,
+    requireGitHubArtifact: true,
+    lookupRetryBackoffMs: [25, 50],
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    execFileImpl: async (_command, args) => {
+      apiCalls.push(args);
+      if (apiCalls.length < 3) return { stdout: '', stderr: '' };
+      return {
+        stdout: `${JSON.stringify({
+          id: 504,
+          login: 'lacey-codex-reviewer[bot]',
+          commit_id: 'reviewed-head-sha',
+          created_at: '2026-05-29T12:01:12.000Z',
+          body: reviewBody,
+        })}\n`,
+        stderr: '',
+      };
+    },
+  }));
+
+  const row = readPass(rootDir, pass);
+  assert.equal(row.body_md, reviewBody);
+  assert.equal(row.gh_comment_id, '504');
+  assert.equal(apiCalls.length, 3);
+  assert.deepEqual(sleeps, [25, 50]);
+});
+
+test('strict reviewer capture retries transient gh api lookup failures before stamping the pass', async () => {
+  const rootDir = makeRootDir();
+  const pass = seedPass(rootDir, { passKind: 'first-pass', reviewerClass: 'codex' });
+  const reviewBody = '## Verdict\n\nComment only\n\nTransient lookup body';
+  const sleeps = [];
+  let apiCalls = 0;
+
+  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => captureReviewerBodyAfterPost(rootDir, {
+    repo: pass.repo,
+    prNumber: pass.prNumber,
+    attemptNumber: pass.attemptNumber,
+    reviewerModel: 'codex',
+    reviewerHeadSha: 'reviewed-head-sha',
+    reviewBody,
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    verdict: 'comment-only',
+    passKind: 'first-pass',
+    postedAt: '2026-05-29T12:01:00.000Z',
+    env: process.env,
+    requireGitHubArtifact: true,
+    lookupRetryBackoffMs: [10],
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    execFileImpl: async (_command, args) => {
+      apiCalls += 1;
+      if (apiCalls === 1) {
+        const err = new Error('Post "https://api.github.com": net/http: TLS handshake timeout');
+        err.code = 'ETIMEDOUT';
+        err.stderr = 'TLS handshake timeout';
+        throw err;
+      }
+      return {
+        stdout: `${JSON.stringify({
+          id: 505,
+          login: 'lacey-codex-reviewer[bot]',
+          commit_id: 'reviewed-head-sha',
+          created_at: '2026-05-29T12:01:05.000Z',
+          body: reviewBody,
+        })}\n`,
+        stderr: '',
+      };
+    },
+  }));
+
+  const row = readPass(rootDir, pass);
+  assert.equal(row.body_md, reviewBody);
+  assert.equal(row.gh_comment_id, '505');
+  assert.equal(apiCalls, 2);
+  assert.deepEqual(sleeps, [10]);
 });
 
 test('reviewer capture accepts legacy PAT-backed reviewer login aliases', async () => {

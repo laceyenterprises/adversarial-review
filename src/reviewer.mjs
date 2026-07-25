@@ -1748,6 +1748,8 @@ async function postGitHubReviewWithCapture({
   reviewerSpawnToken = null,
   reviewerIdentity = null,
   reviewerTokenFetchTimeoutMs = undefined,
+  lookupRetryBackoffMs = undefined,
+  sleepImpl = undefined,
 } = {}) {
   const normalizedHeadSha = String(reviewerHeadSha || '').trim();
   const capturedReviewBody = normalizedHeadSha
@@ -1815,6 +1817,8 @@ async function postGitHubReviewWithCapture({
     execFileImpl,
     env: { ...process.env, [botTokenEnv]: process.env[botTokenEnv] || initialToken },
     requireGitHubArtifact: Boolean(normalizedHeadSha),
+    lookupRetryBackoffMs,
+    sleepImpl,
     log,
   });
 

@@ -4,8 +4,10 @@ import assert from 'node:assert/strict';
 import {
   buildHardeningReviewContext,
   changedPathsFromDiff,
+  getExposureRollupFromPython,
   isLowExposureRollup,
   isLowOrNoExposure,
+  listHardeningRecordsFromPython,
   touchedContractsForPaths,
 } from '../src/hardening-ledger-context.mjs';
 
@@ -108,6 +110,7 @@ test('low or missing exposure flags a contract for harsher review', async () => 
   assert.equal(isLowOrNoExposure({ level: 'normal', samples: 2 }), false);
   assert.equal(isLowExposureRollup({ exposure_score: 0 }), true);
   assert.equal(isLowExposureRollup({ exposure_score: 80 }), false);
+  assert.equal(isLowExposureRollup({ exposure_score: 'not-a-number' }), true);
 
   const context = await buildHardeningReviewContext(diffFor('RUNBOOK-deploy-checkout.md'), {
     loadContracts: async () => CONTRACTS,
@@ -126,6 +129,52 @@ test('low or missing exposure flags a contract for harsher review', async () => 
   assert.match(context, /apply harsher review/);
   assert.match(context, /under-exercised/);
   assert.match(context, /missed push or branch-switch paths/);
+});
+
+test('python ledger readers use runtime read-only opens', async () => {
+  const calls = [];
+  const execFileImpl = async (cmd, args, options) => {
+    calls.push({ cmd, args, options });
+    assert.equal(cmd, 'python3');
+    assert.equal(options.env.HLG_LEDGER_TARGET, '/tmp/session-ledger.sqlite3');
+    assert.match(options.env.PYTHONPATH, /\/agent-os\/platform\/session-ledger\/src/);
+    if (args.length === 4) return { stdout: '[]' };
+    return {
+      stdout: JSON.stringify({
+        contract_id: 'worker-pool.deploy-checkout-tripwire',
+        exposure_score: 0,
+      }),
+    };
+  };
+
+  assert.deepEqual(
+    await listHardeningRecordsFromPython('worker-pool.deploy-checkout-tripwire', {
+      repoRoot: '/agent-os',
+      ledgerTarget: '/tmp/session-ledger.sqlite3',
+      execFileImpl,
+      env: {},
+    }),
+    [],
+  );
+  assert.deepEqual(
+    await getExposureRollupFromPython('worker-pool.deploy-checkout-tripwire', {
+      repoRoot: '/agent-os',
+      ledgerTarget: '/tmp/session-ledger.sqlite3',
+      execFileImpl,
+      env: {},
+    }),
+    {
+      contract_id: 'worker-pool.deploy-checkout-tripwire',
+      exposure_score: 0,
+    },
+  );
+
+  const scripts = calls.map((call) => call.args[1]).join('\n---\n');
+  assert.match(scripts, /open_ledger_for_runtime_readonly/);
+  assert.doesNotMatch(scripts, /LedgerDatabase/);
+  assert.doesNotMatch(scripts, /_empty_exposure_rollup/);
+  assert.doesNotMatch(scripts, /_exposure_rollup_row_to_dict/);
+  assert.doesNotMatch(scripts, /_hardening_record_row_to_dict/);
 });
 
 test('live low exposure rollup raises review tier for touched contracts', async () => {
@@ -180,4 +229,41 @@ test('live well-exposed rollup leaves review tier unchanged', async () => {
 
   assert.match(context, /live exposure_score=85\./);
   assert.doesNotMatch(context, /apply harsher review/);
+});
+
+test('malformed live exposure score fails closed for harsher review', async () => {
+  const context = await buildHardeningReviewContext(diffFor('RUNBOOK-deploy-checkout.md'), {
+    loadContracts: async () => CONTRACTS,
+    getExposureRollup: async () => ({
+      contract_id: 'worker-pool.deploy-checkout-tripwire',
+      exposure_score: 'unknown',
+    }),
+    listRecords: async () => [],
+    logger: null,
+  });
+
+  assert.match(context, /live exposure_score unavailable/);
+  assert.match(context, /apply harsher review/);
+  assert.match(context, /No hardening scars recorded yet/);
+});
+
+test('live exposure rollup survives hardening record read failure', async () => {
+  const warnings = [];
+  const context = await buildHardeningReviewContext(diffFor('RUNBOOK-deploy-checkout.md'), {
+    loadContracts: async () => CONTRACTS,
+    getExposureRollup: async () => ({
+      contract_id: 'worker-pool.deploy-checkout-tripwire',
+      exposure_score: 0,
+    }),
+    listRecords: async () => {
+      throw new Error('ledger temporarily unavailable');
+    },
+    logger: { warn: (message) => warnings.push(message) },
+  });
+
+  assert.match(context, /live exposure_score=0/);
+  assert.match(context, /apply harsher review/);
+  assert.match(context, /No hardening scars recorded yet/);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /failed to load hardening records/);
 });

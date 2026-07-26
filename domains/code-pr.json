@@ -8,6 +8,9 @@
     "controls": "github-pr-label-controls",
     "triageSync": "linear"
   },
+  "sorGate": {
+    "provider": "github-commit-status"
+  },
   "promptSet": "code-pr",
   "riskClasses": {
     "low": {

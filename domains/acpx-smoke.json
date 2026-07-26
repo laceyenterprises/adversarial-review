@@ -7,6 +7,10 @@
   "operatorSurface": {
     "triageSync": "linear"
   },
+  "sorGate": {
+    "provider": "attestation-log",
+    "principal": "research-finding-attestor"
+  },
   "promptSet": "research-finding",
   "riskClasses": {
     "low": {

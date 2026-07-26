@@ -692,6 +692,7 @@ async function projectAdversarialGateStatus(rootDir, {
   fetchLatestLabelEventImpl,
   operatorApprovalEvent = undefined,
   env = process.env,
+  gateProvider = null,
 } = {}) {
   const snapshot = await buildAdversarialGateSnapshot(rootDir, {
     repo,
@@ -707,14 +708,27 @@ async function projectAdversarialGateStatus(rootDir, {
     operatorApprovalEvent,
   });
   const decision = pickAdversarialGateStatus({ ...snapshot, env });
-  const publish = await publishAdversarialGateStatus(rootDir, {
-    repo,
-    prNumber,
-    headSha,
-    decision,
-    execFileImpl,
-    env,
-  });
+  const provider = gateProvider ?? {
+    providerId: 'github-commit-status',
+    gate: async (subject, revisionRef, durableDecision) => {
+      const publish = await publishAdversarialGateStatus(rootDir, {
+        repo: subject.repo,
+        prNumber: subject.prNumber,
+        headSha: revisionRef,
+        decision: durableDecision,
+        execFileImpl,
+        env,
+      });
+      return {
+        gated: publish.posted === true || publish.reason === 'unchanged',
+        providerId: 'github-commit-status',
+        revisionRef,
+        publish,
+      };
+    },
+  };
+  const gate = await provider.gate({ domainId: 'code-pr', repo, prNumber }, headSha, decision);
+  const publish = gate.publish ?? gate;
   return { decision, publish, snapshot };
 }
 

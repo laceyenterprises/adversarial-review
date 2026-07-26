@@ -20,6 +20,11 @@ export {
 export { TRIVIAL_FINALIZER_MODES, createTrivialFinalizer } from './trivial-finalizer.mjs';
 
 export {
+  createAttestationLogGateProvider,
+  createGithubCommitStatusGateProvider,
+} from '../adapters/sor/index.mjs';
+
+export {
   createV1AmaFinalizationPort,
   mapDaemonMergeDisposition,
   projectReviewState,

@@ -52,6 +52,7 @@ import {
   summarizeChecksConclusion,
 } from '../src/follow-up-merge-agent.mjs';
 import { resolveSessionLedgerReadTarget } from '../src/session-ledger-read-adapter.mjs';
+import { execHqDispatchCancel } from '../src/merge-agent-hq-exec.mjs';
 // CFG-09 (2026-05-30, round-2): role-config cascade caches by
 // (topPath, modulePaths) — not env. Tests in this file rotate env
 // between cases (codex vs claude-code vs merge-agent vs invalid)
@@ -6437,6 +6438,36 @@ test('cancelMergeAgentDispatchOnMerge honors an explicit HQ_PARENT_SESSION from 
   });
 
   assert.equal(hqCalls[0].opts.env.HQ_PARENT_SESSION, 'session:custom:abc');
+});
+
+test('execHqDispatchCancel preserves env HQ_PARENT_SESSION when parentSession is omitted', async () => {
+  const calls = [];
+  await execHqDispatchCancel({
+    hqPath: '/usr/local/bin/hq',
+    hqExecFileImpl: async (cmd, args, opts) => {
+      calls.push({ cmd, args, opts });
+      return { stdout: 'cancelled\n', stderr: '' };
+    },
+    launchRequestId: 'lrq_direct',
+    env: { HQ_PARENT_SESSION: 'session:direct:abc', PATH: '/usr/bin' },
+    retryDelaysMs: [],
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, ['dispatch', 'cancel', 'lrq_direct']);
+  assert.equal(calls[0].opts.env.HQ_PARENT_SESSION, 'session:direct:abc');
+  assert.equal(calls[0].opts.env.PATH, '/usr/bin');
+});
+
+test('execHqDispatchCancel validates the hq runner dependency', async () => {
+  await assert.rejects(
+    () => execHqDispatchCancel({
+      hqPath: '/usr/local/bin/hq',
+      launchRequestId: 'lrq_missing_runner',
+      retryDelaysMs: [],
+    }),
+    { name: 'TypeError', message: 'execHqDispatchCancel requires hqExecFileImpl' }
+  );
 });
 
 test('cancelMergeAgentDispatchOnMerge retries transient hq cancel failures', async () => {

@@ -2727,13 +2727,14 @@ test('acpx spawnReviewer maps OAuth probe failures to oauth-broken with layer-sp
 test('acpx remediator records enrich subjectContext consistently with reviewer records', async () => {
   const rootDir = makeRoot();
   try {
+    const remediatorPgid = process.pid + 1000;
     const adapter = createAcpxReviewerRuntimeAdapter({
       rootDir,
       domainConfig: { id: 'acpx-smoke' },
       resolveAcpxCliImpl: async () => '/opt/acpx/bin/acpx',
       execFileImpl: async () => ({ stdout: '[]\n', stderr: '' }),
       spawnCapturedImpl: async (_command, args, options) => {
-        options.onSpawn({ pgid: 6464 });
+        options.onSpawn({ pgid: remediatorPgid });
         writeFileSync(args[4], 'patched remediation\n', 'utf8');
         return { stdout: 'ok\n', stderr: '' };
       },

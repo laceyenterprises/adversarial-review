@@ -163,12 +163,13 @@ export function resolveFirstPassReviewBudgetSuppression({
   // stmtRestoreSameHeadSuppressedReviewPosted) for a review that never reached
   // GitHub — the 2026-07-14 phantom-suppression bug that permanently blocked
   // re-review + landing of otherwise-clean PRs. A same-head match therefore only
-  // counts as reviewed when the row carries NO unresolved failure: a failed_at
-  // that has not been superseded by a later posted_at means the last attempt on
-  // this head failed, so it stays retryable. This also covers the
-  // moved-head-then-refailed case (failed_at > posted_at) while preserving the
-  // legitimate RRD-01 dedup — an ordinary already-reviewed same-head repeat has
-  // no failure recorded and is still suppressed.
+  // counts as reviewed when the row carries posted evidence and NO unresolved
+  // failure: a failed_at that has not been superseded by a later posted_at means
+  // the last attempt on this head failed, so it stays retryable. This also
+  // covers operator resets that leave reviewer_head_sha behind on a pending row
+  // with neither posted_at nor failed_at, while preserving the legitimate RRD-01
+  // dedup — an ordinary already-reviewed same-head repeat has posted evidence
+  // and is still suppressed.
   const parseReviewTimestamp = (value) => {
     if (typeof value !== 'string' || value.length === 0) return Number.NaN;
     // Normalize a timezone-less datetime to UTC before parsing. SQLite's
@@ -208,9 +209,13 @@ export function resolveFirstPassReviewBudgetSuppression({
   const hasExpiredOrMissingReviewLease =
     reviewRow?.review_status === 'reviewing' &&
     !currentHeadReviewLeaseValid;
+  const hasPostedReviewEvidence =
+    reviewRow?.review_status === 'posted' ||
+    Number.isFinite(postedAtMs);
   const currentHeadAlreadyReviewed =
     suppliedCurrentHeadSha !== null &&
     reviewedHeadSha === suppliedCurrentHeadSha &&
+    hasPostedReviewEvidence &&
     !hasExpiredOrMissingReviewLease &&
     !hasUnresolvedFailure;
   if (currentHeadAlreadyReviewed && !isExplicitOperatorReviewRetrigger(reviewRow)) {

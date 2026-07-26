@@ -112,6 +112,28 @@ test('agent-runtime reviewer adapter returns the legacy spawnReviewer result sha
   }
 });
 
+test('agent-runtime reviewer idempotency keys include flat request revisions', () => {
+  const base = {
+    model: 'claude-code',
+    repo: 'laceyenterprises/demo',
+    prNumber: 42,
+    reviewAttemptNumber: 1,
+  };
+
+  const first = reviewIdempotencyKey(
+    { ...base, reviewerHeadSha: 'head-one' },
+    { roleId: 'reviewer:claude-code' },
+  );
+  const second = reviewIdempotencyKey(
+    { ...base, reviewerHeadSha: 'head-two' },
+    { roleId: 'reviewer:claude-code' },
+  );
+
+  assert.match(first, /:head-one:/);
+  assert.match(second, /:head-two:/);
+  assert.notEqual(first, second);
+});
+
 test('agent-runtime reviewer adapter reattaches an in-flight dispatch without issuing a duplicate run', async () => {
   const rootDir = makeRoot();
   const calls = { run: 0, reattach: 0 };
@@ -222,6 +244,68 @@ test('agent-runtime reviewer adapter reattaches a held active lease instead of d
   }
 });
 
+test('agent-runtime reviewer adapter settles failed when runtime run throws', async () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createAgentRuntimeReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'code-pr' },
+      agentRuntime: {
+        async run() {
+          throw new Error('spawn failed before handle');
+        },
+        describe() {
+          return { id: 'fixture-agent-runtime', mode: 'os', capabilities: {} };
+        },
+      },
+    });
+
+    await assert.rejects(
+      adapter.spawnReviewer(reviewerReq({ sessionUuid: 'watcher-session-run-throws' })),
+      /spawn failed before handle/,
+    );
+    assert.equal(readReviewerRunRecord(rootDir, 'watcher-session-run-throws').state, 'failed');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('agent-runtime reviewer adapter settles failed when handle await throws', async () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createAgentRuntimeReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'code-pr' },
+      agentRuntime: {
+        async run(request) {
+          return {
+            runRef: request.idempotencyKey,
+            mode: 'os',
+            async await() {
+              throw new Error('await failed after spawn');
+            },
+            async cancel() {},
+            async reattach() {
+              throw new Error('reattach should not be used');
+            },
+          };
+        },
+        describe() {
+          return { id: 'fixture-agent-runtime', mode: 'os', capabilities: {} };
+        },
+      },
+    });
+
+    await assert.rejects(
+      adapter.spawnReviewer(reviewerReq({ sessionUuid: 'watcher-session-await-throws' })),
+      /await failed after spawn/,
+    );
+    assert.equal(readReviewerRunRecord(rootDir, 'watcher-session-await-throws').state, 'failed');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('agent-runtime reviewer adapter fails closed when a completed run has no review body', async () => {
   const rootDir = makeRoot();
   try {
@@ -236,6 +320,48 @@ test('agent-runtime reviewer adapter fails closed when a completed run has no re
     assert.equal(result.reviewBody, null);
     assert.equal(result.failureClass, 'reviewer-output');
     assert.equal(readReviewerRunRecord(rootDir, 'watcher-session-empty').state, 'failed');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('agent-runtime reviewer adapter settles cancelled even when handle cancel throws', async () => {
+  const rootDir = makeRoot();
+  const logger = { warn() {} };
+  try {
+    const adapter = createAgentRuntimeReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'code-pr' },
+      logger,
+      agentRuntime: {
+        async run(request) {
+          return {
+            runRef: request.idempotencyKey,
+            mode: 'os',
+            async await() {
+              return new Promise(() => {});
+            },
+            async cancel() {
+              throw new Error('cancel transport failed');
+            },
+            async reattach() {
+              throw new Error('reattach should not be used');
+            },
+          };
+        },
+        describe() {
+          return { id: 'fixture-agent-runtime', mode: 'os', capabilities: {} };
+        },
+      },
+    });
+
+    const pending = adapter.spawnReviewer(
+      reviewerReq({ sessionUuid: 'watcher-session-cancel-throws' }),
+    );
+    pending.catch(() => {});
+    await new Promise((resolve) => setImmediate(resolve));
+    await adapter.cancel('watcher-session-cancel-throws');
+    assert.equal(readReviewerRunRecord(rootDir, 'watcher-session-cancel-throws').state, 'cancelled');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

@@ -251,11 +251,29 @@ function createHealthRouter({
 
   async function reattach(record, { role } = {}) {
     const mode = String(record?.subjectContext?.agentRuntimeMode || record?.runtimeMode || '').trim();
-    if (mode === 'local' && typeof localRuntime.reattach === 'function') {
-      return localRuntime.reattach(withAgentRuntimeSessionUuid(record), { role });
+    if (mode === 'local') {
+      if (typeof localRuntime.reattach === 'function') {
+        return localRuntime.reattach(withAgentRuntimeSessionUuid(record), { role });
+      }
+      return {
+        status: 'failed',
+        failureClass: 'daemon-bounce',
+        usage: null,
+        runtimeMode: mode,
+        detail: 'health router cannot reattach explicit local-mode run record: local runtime does not support reattach',
+      };
     }
-    if (mode === 'os' && osRuntime && typeof osRuntime.reattach === 'function') {
-      return osRuntime.reattach(withAgentRuntimeSessionUuid(record), { role });
+    if (mode === 'os') {
+      if (osRuntime && typeof osRuntime.reattach === 'function') {
+        return osRuntime.reattach(withAgentRuntimeSessionUuid(record), { role });
+      }
+      return {
+        status: 'failed',
+        failureClass: 'daemon-bounce',
+        usage: null,
+        runtimeMode: mode,
+        detail: 'health router cannot reattach explicit os-mode run record: OS runtime does not support reattach',
+      };
     }
     if (osRuntime && typeof osRuntime.reattach === 'function') {
       const osResult = await osRuntime.reattach(withAgentRuntimeSessionUuid(record), { role });

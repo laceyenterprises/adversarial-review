@@ -32,11 +32,12 @@ function roleIdFor(kind, req) {
 }
 
 function reviewIdempotencyKey(req, { roleId }) {
-  const domainId = String(req.subjectContext?.domainId || 'code-pr').trim();
-  const externalId = subjectExternalId(req.subjectContext || req);
-  const revisionRef = String(req.subjectContext?.reviewerHeadSha || req.subjectContext?.revisionRef || '').trim();
-  const stageId = String(req.subjectContext?.stageId || 'review').trim();
-  const round = Number(req.subjectContext?.reviewAttemptNumber ?? req.subjectContext?.reviewDbAttemptNumber ?? 1);
+  const ctx = req.subjectContext || req;
+  const domainId = String(ctx.domainId || 'code-pr').trim();
+  const externalId = subjectExternalId(ctx);
+  const revisionRef = String(ctx.reviewerHeadSha || ctx.revisionRef || '').trim();
+  const stageId = String(ctx.stageId || 'review').trim();
+  const round = Number(ctx.reviewAttemptNumber ?? ctx.reviewDbAttemptNumber ?? 1);
   return [
     domainId,
     externalId,
@@ -265,7 +266,27 @@ function createAgentRuntimeReviewerRuntimeAdapter({
       return { result, idempotencyKey: agentRequest.idempotencyKey };
     }
 
-    const handle = await runtime.run(agentRequest);
+    function settleFailed(err) {
+      try {
+        settleReviewerRunRecord(rootDir, sessionUuid, {
+          state: 'failed',
+          settledAt: now().toISOString(),
+        });
+      } catch (settleErr) {
+        logger.warn?.(`${RUNTIME_ID} ${kind} run failed-state settle failed`, {
+          sessionUuid,
+          error: settleErr?.message || String(settleErr),
+        });
+      }
+      throw err;
+    }
+
+    let handle;
+    try {
+      handle = await runtime.run(agentRequest);
+    } catch (err) {
+      settleFailed(err);
+    }
     try {
       activeHandles.set(sessionUuid, handle);
       updateReviewerRunRecord(rootDir, claimed.record || record, {
@@ -298,6 +319,8 @@ function createAgentRuntimeReviewerRuntimeAdapter({
         settledAt: now().toISOString(),
       });
       return { result, idempotencyKey: handle.runRef };
+    } catch (err) {
+      settleFailed(err);
     } finally {
       activeHandles.delete(sessionUuid);
     }
@@ -317,11 +340,20 @@ function createAgentRuntimeReviewerRuntimeAdapter({
 
   async function cancel(sessionUuid) {
     const handle = activeHandles.get(sessionUuid);
-    if (handle) await handle.cancel();
-    settleReviewerRunRecord(rootDir, sessionUuid, {
-      state: 'cancelled',
-      settledAt: now().toISOString(),
-    });
+    try {
+      if (handle) await handle.cancel();
+    } catch (err) {
+      logger.warn?.(`${RUNTIME_ID} cancel failed`, {
+        sessionUuid,
+        error: err?.message || String(err),
+      });
+    } finally {
+      activeHandles.delete(sessionUuid);
+      settleReviewerRunRecord(rootDir, sessionUuid, {
+        state: 'cancelled',
+        settledAt: now().toISOString(),
+      });
+    }
   }
 
   async function reattach(record) {

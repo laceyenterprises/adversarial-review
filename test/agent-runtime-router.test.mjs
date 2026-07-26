@@ -272,6 +272,41 @@ test('os-mode reattach uses the inner Agent Runtime session UUID', async () => {
   assert.equal(reattached[0].sessionUuid, 'agent-runtime-session-1');
 });
 
+test('explicit os-mode reattach fails fast when OS runtime lacks reattach', async () => {
+  const calls = { localReattach: 0 };
+  const router = createHealthRouter({
+    localRuntime: {
+      async run() {
+        throw new Error('test only exercises reattach');
+      },
+      async reattach() {
+        calls.localReattach += 1;
+        return { status: 'completed', runtimeMode: 'local' };
+      },
+    },
+    osRuntime: {
+      async run() {
+        throw new Error('test only exercises reattach');
+      },
+    },
+    auditSink: capturingAuditSink(),
+  });
+
+  const result = await router.reattach({
+    sessionUuid: 'watcher-session-1',
+    runtimeMode: 'os',
+    subjectContext: {
+      agentRuntimeMode: 'os',
+      agentRuntimeSessionUuid: 'agent-runtime-session-1',
+    },
+  });
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.runtimeMode, 'os');
+  assert.match(result.detail, /explicit os-mode/);
+  assert.equal(calls.localReattach, 0);
+});
+
 test('a thrown hard classification fails over to local instead of propagating', async () => {
   // #620 review finding: a hard contract error that surfaces as a thrown
   // exception (not just a failed handle) must trigger failover, not crash the

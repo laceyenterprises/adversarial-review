@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { createHealthRouter } from '../src/adapters/agent-runtime/router/index.mjs';
 import { classifyDispatchError } from '../src/adapters/agent-runtime/router/dispatch-error.mjs';
 import { resolveRouterConfig } from '../src/adapters/agent-runtime/router/config.mjs';
+import { toAppContractRequestId } from '../src/adapters/agent-runtime/os-dispatch/index.mjs';
 
 // A local AgentRuntime stand-in: records which requests it ran and returns a
 // completed local handle.
@@ -120,6 +121,26 @@ test('a hard contract error on a live dispatch fails over and reissues locally (
   assert.equal(audit.transitions.length, 1);
   assert.equal(audit.transitions[0].kind, 'failover');
   assert.equal(audit.transitions[0].reason, 'hard-contract-error');
+});
+
+test('a hard contract error on a normalized OS request id still fails over', async () => {
+  const local = fakeLocalRuntime();
+  const audit = capturingAuditSink();
+  const rawKey = 'code-pr:laceyenterprises/agent-os#4284:abc123:review:reviewer:gemini:1';
+  const expectedRequestId = toAppContractRequestId(rawKey);
+  const session = fakeSession({
+    dispatchImpl: () => { const e = new Error('service unavailable'); e.status = 503; throw e; },
+  });
+  const router = createHealthRouter({ localRuntime: local, session, auditSink: audit });
+
+  const handle = await router.run(reviewerRequest(rawKey));
+
+  assert.equal(handle.mode, 'local');
+  assert.equal(session.dispatched[0].request_id, expectedRequestId);
+  assert.deepEqual(local.ran, [rawKey]);
+  assert.equal(router.getMode(), 'local');
+  assert.equal(audit.transitions.length, 1);
+  assert.equal(audit.transitions[0].requestId, expectedRequestId);
 });
 
 test('a per-subject 4xx fails only that run and does NOT change router state', async () => {

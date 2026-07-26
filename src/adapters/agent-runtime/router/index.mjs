@@ -11,7 +11,7 @@
 //     dispatches, never re-issuing them;
 //   - emits an operator notice + audit row + best-effort telemetry per transition.
 
-import { createOsDispatchAgentRuntime } from '../os-dispatch/index.mjs';
+import { createOsDispatchAgentRuntime, toAppContractRequestId } from '../os-dispatch/index.mjs';
 import { resolveRouterConfig } from './config.mjs';
 import { createRouterStateMachine, TRANSITION_KINDS } from './state-machine.mjs';
 import { createLatencyWindow } from './latency-window.mjs';
@@ -210,7 +210,7 @@ function createHealthRouter({
     if (!osRuntime || typeof osRuntime.run !== 'function') {
       throw new Error('health router selected OS mode but has no OS runtime configured');
     }
-    const key = String(request.idempotencyKey);
+    const key = toAppContractRequestId(request.idempotencyKey);
     let handle;
     let classification = null;
     let runError = null;

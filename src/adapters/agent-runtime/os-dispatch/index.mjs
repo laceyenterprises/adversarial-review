@@ -12,9 +12,9 @@
 // identical, so nothing else in this adapter changed.
 //
 // Wire mapping per the role registry (§5) and completion shapes (§4.3, §9):
-//   - reviewer   → task_kind 'review'      completion_shape 'decision-only'
+//   - reviewer   → task_kind 'analysis'    completion_shape 'decision-only'
 //                  → verdict returns as a structured ReviewArtifact (v2).
-//   - remediator → task_kind 'remediation' completion_shape 'branch-push'
+//   - remediator → task_kind 'coding'      completion_shape 'branch-push'
 //                  → opaque app artifact (domain adapter decodes it).
 //
 // The AgentRunRequest.idempotencyKey is deterministically mapped to an
@@ -51,10 +51,17 @@ const TIMEOUT_STATUSES = new Set(['timeout', 'timed_out', 'timedout', 'expired',
 // Role → dispatch task_kind / completion_shape. A role may override either
 // explicitly; otherwise the kind decides (reviewer=decision-only,
 // remediator=branch-push).
+function toHqTaskKind(taskKind) {
+  const normalized = String(taskKind || '').trim();
+  if (normalized === 'review') return 'analysis';
+  if (normalized === 'remediation') return 'coding';
+  return normalized;
+}
+
 function resolveTaskKind(role) {
   const explicit = String(role?.taskKind || '').trim();
-  if (explicit) return explicit;
-  return role?.kind === 'remediator' ? 'remediation' : 'review';
+  if (explicit) return toHqTaskKind(explicit);
+  return role?.kind === 'remediator' ? 'coding' : 'analysis';
 }
 
 function resolveCompletionShape(role) {
@@ -502,5 +509,6 @@ export {
   mapTerminalStatus,
   resolveCompletionShape,
   resolveTaskKind,
+  toHqTaskKind,
   toAppContractRequestId,
 };

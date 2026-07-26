@@ -9,6 +9,7 @@ import {
   mapTerminalStatus,
   resolveCompletionShape,
   resolveTaskKind,
+  toHqTaskKind,
   toAppContractRequestId,
 } from '../src/adapters/agent-runtime/os-dispatch/index.mjs';
 import {
@@ -154,14 +155,21 @@ test('validateReviewArtifact rejects a non-array findings list', () => {
 
 // -- task_kind / completion_shape derivation ---------------------------------
 
-test('reviewer derives review + decision-only, remediator derives remediation + branch-push', () => {
-  assert.equal(resolveTaskKind({ kind: 'reviewer' }), 'review');
+test('reviewer derives analysis + decision-only, remediator derives coding + branch-push', () => {
+  assert.equal(resolveTaskKind({ kind: 'reviewer' }), 'analysis');
   assert.equal(resolveCompletionShape({ kind: 'reviewer' }), 'decision-only');
-  assert.equal(resolveTaskKind({ kind: 'remediator' }), 'remediation');
+  assert.equal(resolveTaskKind({ kind: 'remediator' }), 'coding');
   assert.equal(resolveCompletionShape({ kind: 'remediator' }), 'branch-push');
   // explicit overrides win
   assert.equal(resolveTaskKind({ kind: 'reviewer', taskKind: 'analysis' }), 'analysis');
   assert.equal(resolveCompletionShape({ kind: 'reviewer', completionShape: 'artifact' }), 'artifact');
+});
+
+test('legacy app role task kinds map to HQ task kinds before dispatch', () => {
+  assert.equal(toHqTaskKind('review'), 'analysis');
+  assert.equal(toHqTaskKind('remediation'), 'coding');
+  assert.equal(resolveTaskKind({ kind: 'reviewer', taskKind: 'review' }), 'analysis');
+  assert.equal(resolveTaskKind({ kind: 'remediator', taskKind: 'remediation' }), 'coding');
 });
 
 test('mapTerminalStatus maps each terminal family and leaves in-progress states pending', () => {
@@ -180,7 +188,7 @@ test('mapTerminalStatus maps each terminal family and leaves in-progress states 
 test('buildDispatchPayload propagates the idempotency key as request_id and maps the review contract', () => {
   const payload = buildDispatchPayload(reviewerRequest(), (r) => r.subjectContent.representation);
   assert.equal(payload.request_id, 'code-pr:pr-14:abc123:code-review:code-quality-reviewer:1');
-  assert.equal(payload.task_kind, 'review');
+  assert.equal(payload.task_kind, 'analysis');
   assert.equal(payload.completion_shape, 'decision-only');
   assert.equal(payload.worker_class, 'claude-code');
   assert.equal(payload.domain_id, 'code-pr');
@@ -312,7 +320,7 @@ test('remediator run returns the branch-push artifact opaquely without verdict v
     workspaceRef: { workspacePath: '/tmp/ws' },
   });
   const handle = await runtime.run(req);
-  assert.equal(session.dispatched[0].task_kind, 'remediation');
+  assert.equal(session.dispatched[0].task_kind, 'coding');
   assert.equal(session.dispatched[0].completion_shape, 'branch-push');
   assert.equal(session.dispatched[0].workspace_ref, '/tmp/ws');
   const result = await handle.await();
@@ -638,7 +646,7 @@ test('stub-endpoint round-trip: dispatch → poll → validated verdict artifact
 
     const dispatch = requests.find((entry) => entry.url === '/v1/dispatch');
     assert.equal(dispatch.body.request_id, req.idempotencyKey);
-    assert.equal(dispatch.body.task_kind, 'review');
+    assert.equal(dispatch.body.task_kind, 'analysis');
     assert.equal(dispatch.body.completion_shape, 'decision-only');
     const statusReqs = requests.filter((entry) => entry.url === '/v1/dispatch_status');
     assert.ok(statusReqs.length >= 2, 'should have polled dispatch_status at least twice');

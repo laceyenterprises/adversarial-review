@@ -719,6 +719,27 @@ test('watcher does not treat a same-head review that FAILED before posting as al
   assert.equal(failedSameHead.suppressed, false);
   assert.notEqual(failedSameHead.reason, 'same-head-already-reviewed');
 
+  const resetSameHead = resolveFirstPassReviewBudgetSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 3713,
+    reviewRow: {
+      review_status: 'pending',
+      reviewer_head_sha: 'deadbeefcafe',
+      failed_at: null,
+      posted_at: null,
+    },
+    currentHeadSha: 'deadbeefcafe',
+    summarizePRRemediationLedgerImpl: () => ({
+      completedRoundsForPR: 0,
+      latestRiskClass: 'medium',
+      latestMaxRounds: 2,
+    }),
+    countCompletedReviewerRereviewRoundsImpl: () => 0,
+    resolveRoundBudgetForJobImpl: () => ({ roundBudget: 2, riskClass: 'medium' }),
+  });
+  assert.equal(resetSameHead.suppressed, false);
+  assert.notEqual(resetSameHead.reason, 'same-head-already-reviewed');
+
   // RRD-01 preserved: a genuinely `posted` same head is still suppressed.
   const postedSameHead = resolveFirstPassReviewBudgetSuppression({
     repoPath: 'laceyenterprises/agent-os',
@@ -983,6 +1004,7 @@ test('watcher suppresses an ordinary same-head repeat before the round budget is
     prNumber: 3647,
     reviewRow: {
       review_status: 'pending',
+      posted_at: '2026-07-12T17:30:00.000Z',
       reviewer_head_sha: 'stable-head',
       rereview_requested_at: null,
       rereview_reason: null,
@@ -1012,6 +1034,7 @@ test('watcher honors an explicit retrigger-review request on an already-reviewed
     prNumber: 3648,
     reviewRow: {
       review_status: 'pending',
+      posted_at: '2026-07-12T17:30:00.000Z',
       reviewer_head_sha: 'stable-head',
       rereview_requested_at: '2026-07-12T18:00:00.000Z',
       rereview_reason: 'retrigger-review: operator requested via label',

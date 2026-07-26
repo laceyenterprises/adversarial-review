@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
   createAgentRuntimeReviewerRuntimeAdapter,
   reviewIdempotencyKey,
+  toAgentRequest,
 } from '../src/adapters/reviewer-runtime/agent-runtime/index.mjs';
 import {
   readReviewerRunRecord,
@@ -235,6 +236,71 @@ test('agent-runtime reviewer adapter fails closed when a completed run has no re
     assert.equal(result.reviewBody, null);
     assert.equal(result.failureClass, 'reviewer-output');
     assert.equal(readReviewerRunRecord(rootDir, 'watcher-session-empty').state, 'failed');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('agent-runtime remediator request uses the next remediation round when omitted', () => {
+  const req = {
+    model: 'codex',
+    prompt: 'fix it',
+    repo: 'laceyenterprises/demo',
+    prNumber: 42,
+    reviewerHeadSha: 'def456',
+    completedRemediationRounds: 1,
+    maxRemediationRounds: 3,
+    sessionUuid: 'remediator-session-1',
+  };
+
+  const agentRequest = toAgentRequest(req, { kind: 'remediator' });
+
+  assert.equal(
+    agentRequest.idempotencyKey,
+    'code-pr:laceyenterprises/demo#42:def456:remediation:remediator:codex:2',
+  );
+  assert.equal(agentRequest.promptStage, 'middle');
+  assert.equal(agentRequest.subjectContent.ref.subjectExternalId, 'laceyenterprises/demo#42');
+});
+
+test('agent-runtime reviewer adapter cancels spawned handle when run-state update fails', async () => {
+  const rootDir = makeRoot();
+  const calls = { cancel: 0, await: 0 };
+  try {
+    const adapter = createAgentRuntimeReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'code-pr' },
+      agentRuntime: {
+        async run(request) {
+          const stateDir = join(rootDir, 'data', 'reviewer-runs');
+          rmSync(stateDir, { recursive: true, force: true });
+          writeFileSync(stateDir, 'not a directory');
+          return {
+            runRef: request.idempotencyKey,
+            mode: 'os',
+            async await() {
+              calls.await += 1;
+              throw new Error('leaked handle should not be awaited');
+            },
+            async cancel() {
+              calls.cancel += 1;
+            },
+            async reattach() {
+              throw new Error('reattach should not be used');
+            },
+          };
+        },
+        describe() {
+          return { id: 'fixture-agent-runtime', mode: 'os', capabilities: {} };
+        },
+      },
+    });
+
+    await assert.rejects(
+      adapter.spawnReviewer(reviewerReq({ sessionUuid: 'watcher-session-update-fails' })),
+      { code: 'EEXIST' },
+    );
+    assert.deepEqual(calls, { cancel: 1, await: 0 });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

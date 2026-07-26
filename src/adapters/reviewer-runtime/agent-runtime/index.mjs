@@ -47,12 +47,20 @@ function reviewIdempotencyKey(req, { roleId }) {
   ].join(':');
 }
 
+function remediationRoundFromContext(ctx = {}) {
+  const explicit = Number(ctx.remediationRound);
+  if (Number.isFinite(explicit) && explicit > 0) return Math.floor(explicit);
+  const completed = Number(ctx.completedRemediationRounds);
+  if (Number.isFinite(completed) && completed >= 0) return Math.floor(completed) + 1;
+  return 1;
+}
+
 function remediatorIdempotencyKey(req, { roleId }) {
-  const ctx = req.subjectContext || {};
+  const ctx = req.subjectContext || req;
   const domainId = String(ctx.domainId || 'code-pr').trim();
   const externalId = subjectExternalId(ctx);
   const revisionRef = String(ctx.reviewerHeadSha || ctx.revisionRef || '').trim();
-  const round = Number(ctx.remediationRound ?? ctx.completedRemediationRounds ?? 1);
+  const round = remediationRoundFromContext(ctx);
   return [
     domainId,
     externalId,
@@ -64,7 +72,7 @@ function remediatorIdempotencyKey(req, { roleId }) {
 }
 
 function subjectContentFrom(req, { domainId }) {
-  const ctx = req.subjectContext || {};
+  const ctx = req.subjectContext || req;
   const externalId = subjectExternalId(ctx);
   const revisionRef = String(ctx.reviewerHeadSha || ctx.revisionRef || '').trim();
   return {
@@ -89,13 +97,13 @@ function reviewPromptStage(ctx = {}) {
 
 function remediatorPromptStage(ctx = {}) {
   return pickRemediatorStage({
-    remediationRound: ctx.remediationRound ?? ctx.completedRemediationRounds,
+    remediationRound: remediationRoundFromContext(ctx),
     maxRemediationRounds: ctx.maxRemediationRounds,
   });
 }
 
 function toAgentRequest(req, { kind }) {
-  const ctx = req.subjectContext || {};
+  const ctx = req.subjectContext || req;
   const domainId = String(ctx.domainId || 'code-pr').trim();
   const roleId = roleIdFor(kind, req);
   const idempotencyKey = kind === 'remediator'
@@ -258,14 +266,27 @@ function createAgentRuntimeReviewerRuntimeAdapter({
     }
 
     const handle = await runtime.run(agentRequest);
-    activeHandles.set(sessionUuid, handle);
-    updateReviewerRunRecord(rootDir, claimed.record || record, {
-      reattachToken: handle.runRef,
-      subjectContext: {
-        ...record.subjectContext,
-        agentRuntimeMode: handle.mode,
-      },
-    });
+    try {
+      activeHandles.set(sessionUuid, handle);
+      updateReviewerRunRecord(rootDir, claimed.record || record, {
+        reattachToken: handle.runRef,
+        subjectContext: {
+          ...record.subjectContext,
+          agentRuntimeMode: handle.mode,
+        },
+      });
+    } catch (err) {
+      activeHandles.delete(sessionUuid);
+      try {
+        await handle.cancel();
+      } catch (cancelErr) {
+        logger.warn?.(`${RUNTIME_ID} ${kind} run rollback cancel failed`, {
+          sessionUuid,
+          error: cancelErr?.message || String(cancelErr),
+        });
+      }
+      throw err;
+    }
     try {
       const result = await handle.await();
       const artifactBody = result?.artifact?.body;

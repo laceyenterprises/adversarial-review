@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -16,7 +16,22 @@ import {
 import { loadDomainConfig } from '../src/domain-config.mjs';
 
 function makeRoot() {
-  return mkdtempSync(join(tmpdir(), 'agent-runtime-reviewer-adapter-'));
+  const rootDir = mkdtempSync(join(tmpdir(), 'agent-runtime-reviewer-adapter-'));
+  mkdirSync(join(rootDir, 'domains'), { recursive: true });
+  mkdirSync(join(rootDir, 'prompts', 'code-pr'), { recursive: true });
+  writeFileSync(
+    join(rootDir, 'domains', 'code-pr.json'),
+    JSON.stringify({ id: 'code-pr', promptSet: 'code-pr' }),
+  );
+  for (const actor of ['reviewer', 'remediator']) {
+    for (const stage of ['first', 'middle', 'last']) {
+      writeFileSync(
+        join(rootDir, 'prompts', 'code-pr', `${actor}.${stage}.md`),
+        `fixture ${actor} ${stage} prompt`,
+      );
+    }
+  }
+  return rootDir;
 }
 
 function reviewerReq(overrides = {}) {
@@ -96,6 +111,7 @@ test('agent-runtime reviewer adapter returns the legacy spawnReviewer result sha
     assert.equal(calls[0].role.model, 'claude-code');
     assert.equal(calls[0].promptSet, 'code-pr');
     assert.equal(calls[0].promptStage, 'middle');
+    assert.equal(calls[0].subjectContent.representation, 'fixture reviewer middle prompt');
     assert.equal(calls[0].subjectContent.ref.subjectExternalId, 'laceyenterprises/demo#42');
     assert.equal(
       calls[0].idempotencyKey,
@@ -110,6 +126,35 @@ test('agent-runtime reviewer adapter returns the legacy spawnReviewer result sha
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('agent-runtime reviewer adapter preserves an explicit caller prompt', async () => {
+  const rootDir = makeRoot();
+  const calls = [];
+  try {
+    const adapter = createAgentRuntimeReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'code-pr' },
+      agentRuntime: completedRuntime({ calls }),
+    });
+
+    const result = await adapter.spawnReviewer(reviewerReq({
+      prompt: 'explicit reviewer prompt',
+      sessionUuid: 'watcher-session-explicit-prompt',
+    }));
+
+    assert.equal(result.ok, true);
+    assert.equal(calls[0].subjectContent.representation, 'explicit reviewer prompt');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('agent-runtime reviewer request falls back to a non-empty app-contract prompt without a rootDir', () => {
+  const agentRequest = toAgentRequest(reviewerReq(), { kind: 'reviewer' });
+
+  assert.match(agentRequest.subjectContent.representation, /^Agent OS reviewer dispatch/);
+  assert.match(agentRequest.subjectContent.representation, /Subject: laceyenterprises\/demo#42/);
 });
 
 test('agent-runtime reviewer idempotency keys include flat request revisions', () => {

@@ -114,8 +114,7 @@ import {
   formatExecFailure,
   isUnsupportedHqPriorityFlagError,
   isTransientHqDispatchError,
-  sleep,
-  detectAgentOsPresence,
+  sleep, execHqDispatchCancel, detectAgentOsPresence,
 } from './merge-agent-hq-exec.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -1947,7 +1946,7 @@ async function cancelMergeAgentDispatchOnMerge({
   hqExecFileImpl = ghExecFileImpl,
   now = isoNow(),
   listImpl = listMergeAgentDispatches,
-  env = process.env,
+  env = process.env, cancelRetryDelaysMs,
 } = {}) {
   const result = {
     attempted: true,
@@ -1982,9 +1981,11 @@ async function cancelMergeAgentDispatchOnMerge({
     result.launchRequestId = latest.launchRequestId;
     if (hqPath) {
       try {
-        await hqExecFileImpl(hqPath, ['dispatch', 'cancel', latest.launchRequestId], {
-          maxBuffer: 5 * 1024 * 1024,
-          env: { ...env, HQ_PARENT_SESSION: resolveMergeAgentParentSession(env) },
+        await execHqDispatchCancel({
+          hqPath, hqExecFileImpl, env,
+          retryDelaysMs: cancelRetryDelaysMs,
+          launchRequestId: latest.launchRequestId,
+          parentSession: resolveMergeAgentParentSession(env),
         });
         result.cancelled = true;
       } catch (err) {

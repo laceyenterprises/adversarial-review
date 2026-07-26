@@ -6406,6 +6406,8 @@ test('cancelMergeAgentDispatchOnMerge self-authenticates the cancel with HQ_PARE
   assert.equal(hqCalls.length, 1);
   assert.deepEqual(hqCalls[0].args, ['dispatch', 'cancel', 'lrq_a']);
   assert.equal(hqCalls[0].opts.env.HQ_PARENT_SESSION, 'session:adversarial-review:watcher');
+  assert.equal(hqCalls[0].opts.env.PATH, '/usr/bin');
+  assert.equal(hqCalls[0].opts.env.HOME, process.env.HOME);
 });
 
 test('cancelMergeAgentDispatchOnMerge honors an explicit HQ_PARENT_SESSION from the env', async () => {
@@ -6435,6 +6437,41 @@ test('cancelMergeAgentDispatchOnMerge honors an explicit HQ_PARENT_SESSION from 
   });
 
   assert.equal(hqCalls[0].opts.env.HQ_PARENT_SESSION, 'session:custom:abc');
+});
+
+test('cancelMergeAgentDispatchOnMerge retries transient hq cancel failures', async () => {
+  const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, makeJob({ prNumber: 664 }), {
+    dispatchedAt: '2026-07-26T12:00:00.000Z',
+    prompt: 'p',
+    dispatchId: 'disp_c',
+    launchRequestId: 'lrq_c',
+    trigger: null,
+  });
+
+  let hqAttempts = 0;
+  const result = await cancelMergeAgentDispatchOnMerge({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 664,
+    hqPath: '/usr/local/bin/hq',
+    ghExecFileImpl: async () => ({ stdout: '', stderr: '' }),
+    hqExecFileImpl: async () => {
+      hqAttempts += 1;
+      if (hqAttempts === 1) {
+        const err = new Error('temporary failure: daemon unavailable');
+        err.stderr = 'database is locked';
+        throw err;
+      }
+      return { stdout: 'cancelled\n', stderr: '' };
+    },
+    cancelRetryDelaysMs: [0],
+    now: '2026-07-26T13:00:00.000Z',
+  });
+
+  assert.equal(result.cancelled, true);
+  assert.equal(hqAttempts, 2);
 });
 
 test('cancelMergeAgentDispatchOnMerge filters dispatch records by repo and PR before selecting LRQ', async () => {
@@ -6594,6 +6631,7 @@ test('cancelMergeAgentDispatchOnMerge keeps the label when cancel fails transien
     hqExecFileImpl: async () => {
       throw new Error('hq: dispatch cancel failed — daemon unavailable');
     },
+    cancelRetryDelaysMs: [],
     now: '2026-05-18T13:00:00.000Z',
   });
 

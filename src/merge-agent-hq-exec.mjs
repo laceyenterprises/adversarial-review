@@ -24,6 +24,7 @@ import { userInfo } from 'node:os';
 import { delimiter, join } from 'node:path';
 
 const DEFAULT_HQ_PATH = 'hq';
+const HQ_DISPATCH_CANCEL_TRANSIENT_RETRY_DELAYS_MS = [1_000, 5_000];
 
 function currentUser(env = process.env) {
   const explicit = String(env.USER || env.LOGNAME || '').trim();
@@ -89,6 +90,39 @@ function isTransientHqDispatchError(err) {
 function sleep(ms) {
   if (!ms) return Promise.resolve();
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function execHqDispatchCancel({
+  hqPath,
+  hqExecFileImpl,
+  launchRequestId,
+  env = process.env,
+  parentSession,
+  retryDelaysMs = HQ_DISPATCH_CANCEL_TRANSIENT_RETRY_DELAYS_MS,
+} = {}) {
+  const cancelEnv = {
+    ...process.env,
+    ...env,
+    HQ_PARENT_SESSION: parentSession,
+  };
+  const cancelArgs = ['dispatch', 'cancel', launchRequestId];
+  let transientRetryIndex = 0;
+  for (;;) {
+    try {
+      return await hqExecFileImpl(hqPath, cancelArgs, {
+        maxBuffer: 5 * 1024 * 1024,
+        env: cancelEnv,
+      });
+    } catch (err) {
+      if (isTransientHqDispatchError(err) && transientRetryIndex < retryDelaysMs.length) {
+        const delayMs = Number(retryDelaysMs[transientRetryIndex]) || 0;
+        transientRetryIndex += 1;
+        await sleep(delayMs);
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 function isExecTimeout(err) {
@@ -195,6 +229,7 @@ export {
   isUnsupportedHqPriorityFlagError,
   isTransientHqDispatchError,
   sleep,
+  execHqDispatchCancel,
   isExecTimeout,
   isExecutableFile,
   resolveExecutableOnPath,

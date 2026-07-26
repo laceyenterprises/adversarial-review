@@ -9,6 +9,7 @@ import {
   mapTerminalStatus,
   resolveCompletionShape,
   resolveTaskKind,
+  toAppContractRequestId,
 } from '../src/adapters/agent-runtime/os-dispatch/index.mjs';
 import {
   REVIEW_ARTIFACT_KIND,
@@ -190,6 +191,17 @@ test('buildDispatchPayload propagates the idempotency key as request_id and maps
   assert.equal(payload.prompt, 'diff --git a b');
 });
 
+test('toAppContractRequestId preserves valid keys and normalizes PR refs with a hash suffix', () => {
+  assert.equal(toAppContractRequestId('req-valid:/._-09'), 'req-valid:/._-09');
+
+  const raw = 'code-pr:laceyenterprises/agent-os#4284:abc123:review:reviewer:gemini:1';
+  const safe = toAppContractRequestId(raw);
+  assert.notEqual(safe, raw);
+  assert.match(safe, /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/);
+  assert.match(safe, /^code-pr:laceyenterprises\/agent-os-4284:abc123:review:reviewer:gemini:1-[a-f0-9]{16}$/);
+  assert.equal(toAppContractRequestId(raw), safe, 'normalization must be stable for retries');
+});
+
 test('run propagates the idempotency key to dispatch and every dispatch_status poll', async () => {
   const session = fakeSession({
     statusSequence: [
@@ -211,6 +223,27 @@ test('run propagates the idempotency key to dispatch and every dispatch_status p
   assert.equal(result.status, 'completed');
   assert.deepEqual(session.statusCalls, [req.idempotencyKey, req.idempotencyKey, req.idempotencyKey]);
   assert.equal(result.usage.total, 4242);
+});
+
+test('run uses an app-contract-safe request id for dispatch and status polling', async () => {
+  const session = fakeSession({
+    statusSequence: [
+      { status: 'running' },
+      { status: 'succeeded', artifact: reviewArtifact(), usage: { total: 99 } },
+    ],
+  });
+  const rawKey = 'code-pr:laceyenterprises/agent-os#4284:abc123:review:reviewer:gemini:1';
+  const expectedRequestId = toAppContractRequestId(rawKey);
+  const runtime = createOsDispatchAgentRuntime({ session, sleepImpl: async () => {}, jitterImpl: () => 0 });
+  const handle = await runtime.run(reviewerRequest({ idempotencyKey: rawKey }));
+
+  assert.equal(handle.runRef, expectedRequestId);
+  assert.equal(session.dispatched.length, 1);
+  assert.equal(session.dispatched[0].request_id, expectedRequestId);
+
+  const result = await handle.await();
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(session.statusCalls, [expectedRequestId, expectedRequestId]);
 });
 
 // -- dispatch_status polling with terminal-state mapping ----------------------
@@ -496,6 +529,19 @@ test('reattach re-polls dispatch_status using the record request_id (no re-dispa
   );
   assert.equal(session.dispatched.length, 0, 'reattach must not re-dispatch');
   assert.equal(session.statusCalls[0], 'code-pr:pr-14:abc123:code-review:code-quality-reviewer:1');
+  assert.equal(result.status, 'completed');
+});
+
+test('reattach normalizes a legacy raw idempotency key before polling dispatch_status', async () => {
+  const session = fakeSession({ statusSequence: [{ status: 'succeeded', artifact: reviewArtifact() }] });
+  const runtime = createOsDispatchAgentRuntime({ session, sleepImpl: async () => {} });
+  const rawKey = 'code-pr:laceyenterprises/agent-os#4284:abc123:review:reviewer:gemini:1';
+  const expectedRequestId = toAppContractRequestId(rawKey);
+  const result = await runtime.reattach(
+    { request_id: rawKey, subjectContext: { agentRoleKind: 'reviewer' } },
+  );
+  assert.equal(session.dispatched.length, 0, 'reattach must not re-dispatch');
+  assert.deepEqual(session.statusCalls, [expectedRequestId]);
   assert.equal(result.status, 'completed');
 });
 

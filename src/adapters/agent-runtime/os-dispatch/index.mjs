@@ -17,10 +17,12 @@
 //   - remediator → task_kind 'remediation' completion_shape 'branch-push'
 //                  → opaque app artifact (domain adapter decodes it).
 //
-// The AgentRunRequest.idempotencyKey is propagated verbatim as the app-contract
-// `request_id`; the endpoint's (app_id, request_id) idempotency is the
-// server-side backstop that makes re-dispatch and reattach safe (§6.3).
+// The AgentRunRequest.idempotencyKey is deterministically mapped to an
+// app-contract-safe `request_id`; the endpoint's (app_id, request_id)
+// idempotency is the server-side backstop that makes re-dispatch and reattach
+// safe (§6.3).
 
+import { createHash } from 'node:crypto';
 import { loadAppSdkConnect } from '../../../app-sdk-loader.mjs';
 import {
   isTransientAppContractError,
@@ -31,6 +33,8 @@ import { validateReviewArtifact, ReviewArtifactSchemaError } from './review-arti
 const RUNTIME_ID = 'os-dispatch';
 const RUNTIME_MODE = 'os';
 const DEFAULT_APP_CONTRACT_APP_ID = 'adversarial-review';
+const APP_CONTRACT_REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
+const APP_CONTRACT_REQUEST_ID_DIGEST_LENGTH = 16;
 
 const DEFAULT_POLL_BASE_MS = 5_000;
 const DEFAULT_POLL_JITTER_MS = 1_000;
@@ -98,14 +102,34 @@ function toTokenBudget(budget) {
   return Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : undefined;
 }
 
-// Build the app-contract /v1/dispatch payload. `request_id` IS the
-// idempotency key — the server-side (app_id, request_id) idempotency is the
-// backstop that dedupes retries and reattach.
+function toAppContractRequestId(idempotencyKey) {
+  const normalized = String(idempotencyKey ?? '').trim();
+  if (!normalized) {
+    throw new TypeError('AgentRunRequest.idempotencyKey is required');
+  }
+  if (APP_CONTRACT_REQUEST_ID_RE.test(normalized)) return normalized;
+
+  const digest = createHash('sha256')
+    .update(normalized)
+    .digest('hex')
+    .slice(0, APP_CONTRACT_REQUEST_ID_DIGEST_LENGTH);
+  const safeStem = normalized
+    .replace(/[^A-Za-z0-9._:/-]+/g, '-')
+    .replace(/^[^A-Za-z0-9]+/, 'r-') || 'request';
+  const maxStemLength = 255 - digest.length - 1;
+  const stem = safeStem.slice(0, maxStemLength) || 'request';
+  return `${stem}-${digest}`;
+}
+
+// Build the app-contract /v1/dispatch payload. `request_id` is the
+// app-contract-safe derivative of the idempotency key — the server-side
+// (app_id, request_id) idempotency is the backstop that dedupes retries and
+// reattach.
 function buildDispatchPayload(request, buildPrompt) {
   const role = request.role;
   const ref = request.subjectContent?.ref || {};
   return {
-    request_id: request.idempotencyKey,
+    request_id: toAppContractRequestId(request.idempotencyKey),
     task_kind: resolveTaskKind(role),
     completion_shape: resolveCompletionShape(role),
     worker_class: role.model,
@@ -360,13 +384,14 @@ function createOsDispatchAgentRuntime({
   async function run(request) {
     validateRequest(request);
     const role = request.role;
-    const requestId = request.idempotencyKey;
+    const payload = buildDispatchPayload(request, buildPrompt);
+    const requestId = payload.request_id;
 
     let activeSession;
     try {
       activeSession = await resolveSession();
       await withAppContractTransientRetry(
-        () => activeSession.dispatch(buildDispatchPayload(request, buildPrompt)),
+        () => activeSession.dispatch(payload),
         { sleepImpl },
       );
     } catch (err) {
@@ -404,20 +429,21 @@ function createOsDispatchAgentRuntime({
 
   // Record-scoped reattach superset (parity with the local runtime): after a
   // restart the caller holds a durable run record rather than a live handle.
-  // The record's `reattachToken`/`idempotencyKey`/`request_id` is the
-  // app-contract request_id, so reattach is a plain re-poll.
+  // The record's `reattachToken`/`idempotencyKey`/`request_id` should be the
+  // app-contract request_id. Normalize as a compatibility backstop for older
+  // records that still carried the raw idempotency key.
   async function reattach(record, { role } = {}) {
     if (!record || typeof record !== 'object') {
       throw new TypeError('createOsDispatchAgentRuntime.reattach requires a run record');
     }
-    const requestId = String(
+    const rawRequestId = String(
       record.idempotencyKey
       ?? record.request_id
       ?? record.requestId
       ?? record.reattachToken
       ?? '',
     ).trim();
-    if (!requestId) {
+    if (!rawRequestId) {
       return {
         status: 'failed',
         failureClass: 'daemon-bounce',
@@ -426,6 +452,7 @@ function createOsDispatchAgentRuntime({
         detail: 'os-dispatch run record has no request_id to reattach',
       };
     }
+    const requestId = toAppContractRequestId(rawRequestId);
     const effectiveRole = role
       || record.role
       || { kind: record.subjectContext?.agentRoleKind === 'remediator' ? 'remediator' : 'reviewer' };
@@ -475,4 +502,5 @@ export {
   mapTerminalStatus,
   resolveCompletionShape,
   resolveTaskKind,
+  toAppContractRequestId,
 };

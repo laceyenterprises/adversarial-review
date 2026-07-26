@@ -30,6 +30,7 @@ import { validateReviewArtifact, ReviewArtifactSchemaError } from './review-arti
 
 const RUNTIME_ID = 'os-dispatch';
 const RUNTIME_MODE = 'os';
+const DEFAULT_APP_CONTRACT_APP_ID = 'adversarial-review';
 
 const DEFAULT_POLL_BASE_MS = 5_000;
 const DEFAULT_POLL_JITTER_MS = 1_000;
@@ -240,6 +241,14 @@ function defaultJitter(maxMs) {
   return Math.floor(Math.random() * Math.max(0, maxMs + 1));
 }
 
+function withDefaultConnectOptions(connectOptions = {}) {
+  const options = { ...connectOptions };
+  if (!options.app_id && !options.appId) {
+    options.app_id = DEFAULT_APP_CONTRACT_APP_ID;
+  }
+  return options;
+}
+
 function createOsDispatchAgentRuntime({
   session = null,
   connectImpl = null,
@@ -257,7 +266,8 @@ function createOsDispatchAgentRuntime({
   async function resolveSession() {
     if (!sessionPromise) {
       const doConnect = connectImpl ?? (await loadAppSdkConnect());
-      sessionPromise = withAppContractTransientRetry(() => doConnect(connectOptions), { sleepImpl }).catch((err) => {
+      const resolvedConnectOptions = withDefaultConnectOptions(connectOptions);
+      sessionPromise = withAppContractTransientRetry(() => doConnect(resolvedConnectOptions), { sleepImpl }).catch((err) => {
         sessionPromise = null; // allow a later run to retry the connect
         throw err;
       });
@@ -456,6 +466,7 @@ function createOsDispatchAgentRuntime({
 }
 
 export {
+  DEFAULT_APP_CONTRACT_APP_ID,
   RUNTIME_ID,
   RUNTIME_MODE,
   buildDispatchPayload,

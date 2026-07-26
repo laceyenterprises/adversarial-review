@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 
 import {
+  DEFAULT_APP_CONTRACT_APP_ID,
   buildDispatchPayload,
   createOsDispatchAgentRuntime,
   mapTerminalStatus,
@@ -409,6 +410,47 @@ test('run retries transient connect and dispatch failures', async () => {
   assert.equal(connectCalls, 2);
   assert.equal(dispatchCalls, 2);
   assert.equal(session.dispatched.length, 1);
+});
+
+test('run supplies the adversarial-review app id when connecting to the App SDK', async () => {
+  const session = fakeSession({
+    statusSequence: [{ status: 'succeeded', artifact: reviewArtifact() }],
+  });
+  const connectCalls = [];
+  const runtime = createOsDispatchAgentRuntime({
+    connectImpl: async (options) => {
+      connectCalls.push(options);
+      return session;
+    },
+    sleepImpl: async () => {},
+  });
+
+  const result = await (await runtime.run(reviewerRequest())).await();
+
+  assert.equal(result.status, 'completed');
+  assert.equal(connectCalls.length, 1);
+  assert.equal(connectCalls[0].app_id, DEFAULT_APP_CONTRACT_APP_ID);
+});
+
+test('explicit App SDK identity still wins over the os-dispatch default', async () => {
+  const session = fakeSession({
+    statusSequence: [{ status: 'succeeded', artifact: reviewArtifact() }],
+  });
+  const connectCalls = [];
+  const runtime = createOsDispatchAgentRuntime({
+    connectOptions: { app_id: 'fixture-app', mode: 'standalone' },
+    connectImpl: async (options) => {
+      connectCalls.push(options);
+      return session;
+    },
+    sleepImpl: async () => {},
+  });
+
+  const result = await (await runtime.run(reviewerRequest())).await();
+
+  assert.equal(result.status, 'completed');
+  assert.equal(connectCalls[0].app_id, 'fixture-app');
+  assert.equal(connectCalls[0].mode, 'standalone');
 });
 
 test('multiple await calls share one dispatch_status polling loop', async () => {

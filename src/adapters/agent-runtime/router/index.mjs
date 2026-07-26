@@ -242,6 +242,55 @@ function createHealthRouter({
     return stateMachine.getMode() === 'os' ? runOs(request) : localRuntime.run(request);
   }
 
+  function withAgentRuntimeSessionUuid(record) {
+    return {
+      ...record,
+      sessionUuid: record?.subjectContext?.agentRuntimeSessionUuid || record?.sessionUuid,
+    };
+  }
+
+  async function reattach(record, { role } = {}) {
+    const mode = String(record?.subjectContext?.agentRuntimeMode || record?.runtimeMode || '').trim();
+    if (mode === 'local') {
+      if (typeof localRuntime.reattach === 'function') {
+        return localRuntime.reattach(withAgentRuntimeSessionUuid(record), { role });
+      }
+      return {
+        status: 'failed',
+        failureClass: 'daemon-bounce',
+        usage: null,
+        runtimeMode: mode,
+        detail: 'health router cannot reattach explicit local-mode run record: local runtime does not support reattach',
+      };
+    }
+    if (mode === 'os') {
+      if (osRuntime && typeof osRuntime.reattach === 'function') {
+        return osRuntime.reattach(withAgentRuntimeSessionUuid(record), { role });
+      }
+      return {
+        status: 'failed',
+        failureClass: 'daemon-bounce',
+        usage: null,
+        runtimeMode: mode,
+        detail: 'health router cannot reattach explicit os-mode run record: OS runtime does not support reattach',
+      };
+    }
+    if (osRuntime && typeof osRuntime.reattach === 'function') {
+      const osResult = await osRuntime.reattach(withAgentRuntimeSessionUuid(record), { role });
+      if (osResult?.failureClass !== 'daemon-bounce') return osResult;
+    }
+    if (typeof localRuntime.reattach === 'function') {
+      return localRuntime.reattach(withAgentRuntimeSessionUuid(record), { role });
+    }
+    return {
+      status: 'failed',
+      failureClass: 'daemon-bounce',
+      usage: null,
+      runtimeMode: mode || stateMachine.getMode(),
+      detail: 'health router has no runtime that can reattach this run record',
+    };
+  }
+
   // One probe cycle: sample the three signals, feed the machine, react to any
   // transition. Exposed for deterministic tests as well as the interval loop.
   async function tick() {
@@ -341,6 +390,7 @@ function createHealthRouter({
 
   return {
     run,
+    reattach,
     tick,
     start,
     stop,

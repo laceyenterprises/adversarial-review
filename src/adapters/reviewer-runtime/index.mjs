@@ -1,4 +1,5 @@
 import { createAgentOsHqReviewerRuntimeAdapter } from './agent-os-hq/index.mjs';
+import { createAgentRuntimeReviewerRuntimeAdapter } from './agent-runtime/index.mjs';
 import { createAcpxReviewerRuntimeAdapter } from './acpx/index.mjs';
 import { createCliDirectReviewerRuntimeAdapter } from './cli-direct/index.mjs';
 import { createFixtureStubReviewerRuntimeAdapter } from './fixture-stub/index.mjs';
@@ -15,6 +16,8 @@ function resolveReviewerRuntimeName(domainConfig = {}, { orchestrationMode = 'na
 
 function createReviewerRuntimeAdapterByName(name = 'cli-direct', options = {}) {
   switch (name) {
+    case 'agent-runtime':
+      return createAgentRuntimeReviewerRuntimeAdapter(options);
     case 'acpx':
       return createAcpxReviewerRuntimeAdapter(options);
     case 'cli-direct':
@@ -98,6 +101,7 @@ async function recoverReviewerRunRecords({
 
 export {
   createAgentOsHqReviewerRuntimeAdapter,
+  createAgentRuntimeReviewerRuntimeAdapter,
   createReviewerRuntimeAdapterByName,
   createReviewerRuntimeAdapterForDomain,
   loadDomainConfig,

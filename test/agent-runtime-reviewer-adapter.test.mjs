@@ -1,0 +1,438 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import {
+  createAgentRuntimeReviewerRuntimeAdapter,
+  reviewIdempotencyKey,
+  toAgentRequest,
+} from '../src/adapters/reviewer-runtime/agent-runtime/index.mjs';
+import {
+  readReviewerRunRecord,
+  writeReviewerRunRecord,
+} from '../src/adapters/reviewer-runtime/run-state.mjs';
+import { loadDomainConfig } from '../src/domain-config.mjs';
+
+function makeRoot() {
+  return mkdtempSync(join(tmpdir(), 'agent-runtime-reviewer-adapter-'));
+}
+
+function reviewerReq(overrides = {}) {
+  return {
+    model: 'claude-code',
+    prompt: '',
+    subjectContext: {
+      domainId: 'code-pr',
+      repo: 'laceyenterprises/demo',
+      prNumber: 42,
+      reviewerHeadSha: 'abc123',
+      reviewAttemptNumber: 2,
+      reviewDbAttemptNumber: 2,
+      completedRemediationRounds: 1,
+      maxRemediationRounds: 3,
+      linearTicketId: 'PRD-01',
+    },
+    timeoutMs: 600_000,
+    sessionUuid: 'watcher-session-1',
+    forbiddenFallbacks: ['api-key'],
+    ...overrides,
+  };
+}
+
+function completedRuntime({ calls = [], body = '## Verdict\nComment only' } = {}) {
+  return {
+    async run(request) {
+      calls.push(request);
+      return {
+        runRef: request.idempotencyKey,
+        mode: 'os',
+        async await() {
+          return {
+            status: 'completed',
+            artifact: {
+              kind: 'review',
+              body,
+              reattachToken: request.idempotencyKey,
+            },
+            failureClass: null,
+            usage: { total: 123 },
+            runtimeMode: 'os',
+          };
+        },
+        async cancel() {},
+        async reattach() {
+          throw new Error('live handle reattach should not be used after completion');
+        },
+      };
+    },
+    describe() {
+      return { id: 'fixture-agent-runtime', mode: 'os', capabilities: {} };
+    },
+  };
+}
+
+test('agent-runtime reviewer adapter returns the legacy spawnReviewer result shape', async () => {
+  const rootDir = makeRoot();
+  const calls = [];
+  try {
+    const adapter = createAgentRuntimeReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'code-pr' },
+      agentRuntime: completedRuntime({ calls }),
+      now: () => new Date('2026-07-26T10:00:00.000Z'),
+    });
+    const req = reviewerReq();
+    const result = await adapter.spawnReviewer(req);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.reviewBody, '## Verdict\nComment only');
+    assert.equal(result.failureClass, null);
+    assert.equal(result.reattachToken, calls[0].idempotencyKey);
+    assert.equal(result.tokenUsage.total, 123);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].role.kind, 'reviewer');
+    assert.equal(calls[0].role.model, 'claude-code');
+    assert.equal(calls[0].promptSet, 'code-pr');
+    assert.equal(calls[0].promptStage, 'middle');
+    assert.equal(calls[0].subjectContent.ref.subjectExternalId, 'laceyenterprises/demo#42');
+    assert.equal(
+      calls[0].idempotencyKey,
+      reviewIdempotencyKey(req, { roleId: 'reviewer:claude-code' }),
+    );
+
+    const record = readReviewerRunRecord(rootDir, 'watcher-session-1');
+    assert.equal(record.state, 'completed');
+    assert.equal(record.runtime, 'agent-runtime');
+    assert.equal(record.reattachToken, calls[0].idempotencyKey);
+    assert.equal(record.subjectContext.agentRuntimeMode, 'os');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('agent-runtime reviewer idempotency keys include flat request revisions', () => {
+  const base = {
+    model: 'claude-code',
+    repo: 'laceyenterprises/demo',
+    prNumber: 42,
+    reviewAttemptNumber: 1,
+  };
+
+  const first = reviewIdempotencyKey(
+    { ...base, reviewerHeadSha: 'head-one' },
+    { roleId: 'reviewer:claude-code' },
+  );
+  const second = reviewIdempotencyKey(
+    { ...base, reviewerHeadSha: 'head-two' },
+    { roleId: 'reviewer:claude-code' },
+  );
+
+  assert.match(first, /:head-one:/);
+  assert.match(second, /:head-two:/);
+  assert.notEqual(first, second);
+});
+
+test('agent-runtime reviewer adapter reattaches an in-flight dispatch without issuing a duplicate run', async () => {
+  const rootDir = makeRoot();
+  const calls = { run: 0, reattach: 0 };
+  try {
+    const adapter = createAgentRuntimeReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'code-pr' },
+      agentRuntime: {
+        async run() {
+          calls.run += 1;
+          throw new Error('reattach must not dispatch a new run');
+        },
+        async reattach(record) {
+          calls.reattach += 1;
+          assert.equal(record.reattachToken, 'code-pr:laceyenterprises/demo#42:abc123:review:reviewer:claude-code:2');
+          return {
+            status: 'completed',
+            artifact: { kind: 'review', body: '## Verdict\nApprove' },
+            failureClass: null,
+            usage: null,
+            runtimeMode: 'os',
+          };
+        },
+        describe() {
+          return { id: 'fixture-agent-runtime', mode: 'os', capabilities: {} };
+        },
+      },
+    });
+    const record = {
+      sessionUuid: 'watcher-session-2',
+      domain: 'code-pr',
+      runtime: 'agent-runtime',
+      state: 'heartbeating',
+      pgid: null,
+      spawnedAt: '2026-07-26T10:00:00.000Z',
+      lastHeartbeatAt: '2026-07-26T10:01:00.000Z',
+      reattachToken: 'code-pr:laceyenterprises/demo#42:abc123:review:reviewer:claude-code:2',
+      subjectContext: {
+        agentRoleKind: 'reviewer',
+        reviewerModel: 'claude-code',
+        agentRuntimeMode: 'os',
+      },
+    };
+
+    const result = await adapter.reattach(record);
+    assert.equal(result.ok, true);
+    assert.equal(result.reviewBody, '## Verdict\nApprove');
+    assert.deepEqual(calls, { run: 0, reattach: 1 });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('agent-runtime reviewer adapter reattaches a held active lease instead of dispatching again', async () => {
+  const rootDir = makeRoot();
+  const calls = { run: 0, reattach: 0 };
+  const req = reviewerReq({ sessionUuid: 'watcher-session-held' });
+  const idempotencyKey = reviewIdempotencyKey(req, { roleId: 'reviewer:claude-code' });
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: req.sessionUuid,
+      domain: 'code-pr',
+      runtime: 'agent-runtime',
+      state: 'heartbeating',
+      pgid: null,
+      spawnedAt: '2026-07-26T10:00:00.000Z',
+      lastHeartbeatAt: '2026-07-26T10:01:00.000Z',
+      reattachToken: idempotencyKey,
+      subjectContext: {
+        agentRoleKind: 'reviewer',
+        reviewerModel: 'claude-code',
+        agentRuntimeMode: 'os',
+      },
+    });
+
+    const adapter = createAgentRuntimeReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'code-pr' },
+      agentRuntime: {
+        async run() {
+          calls.run += 1;
+          throw new Error('held lease must not dispatch a duplicate run');
+        },
+        async reattach(record) {
+          calls.reattach += 1;
+          assert.equal(record.sessionUuid, 'watcher-session-held');
+          assert.equal(record.reattachToken, idempotencyKey);
+          return {
+            status: 'completed',
+            artifact: { kind: 'review', body: '## Verdict\nComment only' },
+            failureClass: null,
+            usage: null,
+            runtimeMode: 'os',
+          };
+        },
+        describe() {
+          return { id: 'fixture-agent-runtime', mode: 'os', capabilities: {} };
+        },
+      },
+    });
+
+    const result = await adapter.spawnReviewer(req);
+    assert.equal(result.ok, true);
+    assert.equal(result.reviewBody, '## Verdict\nComment only');
+    assert.deepEqual(calls, { run: 0, reattach: 1 });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('agent-runtime reviewer adapter settles failed when runtime run throws', async () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createAgentRuntimeReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'code-pr' },
+      agentRuntime: {
+        async run() {
+          throw new Error('spawn failed before handle');
+        },
+        describe() {
+          return { id: 'fixture-agent-runtime', mode: 'os', capabilities: {} };
+        },
+      },
+    });
+
+    await assert.rejects(
+      adapter.spawnReviewer(reviewerReq({ sessionUuid: 'watcher-session-run-throws' })),
+      /spawn failed before handle/,
+    );
+    assert.equal(readReviewerRunRecord(rootDir, 'watcher-session-run-throws').state, 'failed');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('agent-runtime reviewer adapter settles failed when handle await throws', async () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createAgentRuntimeReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'code-pr' },
+      agentRuntime: {
+        async run(request) {
+          return {
+            runRef: request.idempotencyKey,
+            mode: 'os',
+            async await() {
+              throw new Error('await failed after spawn');
+            },
+            async cancel() {},
+            async reattach() {
+              throw new Error('reattach should not be used');
+            },
+          };
+        },
+        describe() {
+          return { id: 'fixture-agent-runtime', mode: 'os', capabilities: {} };
+        },
+      },
+    });
+
+    await assert.rejects(
+      adapter.spawnReviewer(reviewerReq({ sessionUuid: 'watcher-session-await-throws' })),
+      /await failed after spawn/,
+    );
+    assert.equal(readReviewerRunRecord(rootDir, 'watcher-session-await-throws').state, 'failed');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('agent-runtime reviewer adapter fails closed when a completed run has no review body', async () => {
+  const rootDir = makeRoot();
+  try {
+    const adapter = createAgentRuntimeReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'code-pr' },
+      agentRuntime: completedRuntime({ body: '' }),
+    });
+
+    const result = await adapter.spawnReviewer(reviewerReq({ sessionUuid: 'watcher-session-empty' }));
+    assert.equal(result.ok, false);
+    assert.equal(result.reviewBody, null);
+    assert.equal(result.failureClass, 'reviewer-output');
+    assert.equal(readReviewerRunRecord(rootDir, 'watcher-session-empty').state, 'failed');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('agent-runtime reviewer adapter settles cancelled even when handle cancel throws', async () => {
+  const rootDir = makeRoot();
+  const logger = { warn() {} };
+  try {
+    const adapter = createAgentRuntimeReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'code-pr' },
+      logger,
+      agentRuntime: {
+        async run(request) {
+          return {
+            runRef: request.idempotencyKey,
+            mode: 'os',
+            async await() {
+              return new Promise(() => {});
+            },
+            async cancel() {
+              throw new Error('cancel transport failed');
+            },
+            async reattach() {
+              throw new Error('reattach should not be used');
+            },
+          };
+        },
+        describe() {
+          return { id: 'fixture-agent-runtime', mode: 'os', capabilities: {} };
+        },
+      },
+    });
+
+    const pending = adapter.spawnReviewer(
+      reviewerReq({ sessionUuid: 'watcher-session-cancel-throws' }),
+    );
+    pending.catch(() => {});
+    await new Promise((resolve) => setImmediate(resolve));
+    await adapter.cancel('watcher-session-cancel-throws');
+    assert.equal(readReviewerRunRecord(rootDir, 'watcher-session-cancel-throws').state, 'cancelled');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('agent-runtime remediator request uses the next remediation round when omitted', () => {
+  const req = {
+    model: 'codex',
+    prompt: 'fix it',
+    repo: 'laceyenterprises/demo',
+    prNumber: 42,
+    reviewerHeadSha: 'def456',
+    completedRemediationRounds: 1,
+    maxRemediationRounds: 3,
+    sessionUuid: 'remediator-session-1',
+  };
+
+  const agentRequest = toAgentRequest(req, { kind: 'remediator' });
+
+  assert.equal(
+    agentRequest.idempotencyKey,
+    'code-pr:laceyenterprises/demo#42:def456:remediation:remediator:codex:2',
+  );
+  assert.equal(agentRequest.promptStage, 'middle');
+  assert.equal(agentRequest.subjectContent.ref.subjectExternalId, 'laceyenterprises/demo#42');
+});
+
+test('agent-runtime reviewer adapter cancels spawned handle when run-state update fails', async () => {
+  const rootDir = makeRoot();
+  const calls = { cancel: 0, await: 0 };
+  try {
+    const adapter = createAgentRuntimeReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'code-pr' },
+      agentRuntime: {
+        async run(request) {
+          const stateDir = join(rootDir, 'data', 'reviewer-runs');
+          rmSync(stateDir, { recursive: true, force: true });
+          writeFileSync(stateDir, 'not a directory');
+          return {
+            runRef: request.idempotencyKey,
+            mode: 'os',
+            async await() {
+              calls.await += 1;
+              throw new Error('leaked handle should not be awaited');
+            },
+            async cancel() {
+              calls.cancel += 1;
+            },
+            async reattach() {
+              throw new Error('reattach should not be used');
+            },
+          };
+        },
+        describe() {
+          return { id: 'fixture-agent-runtime', mode: 'os', capabilities: {} };
+        },
+      },
+    });
+
+    await assert.rejects(
+      adapter.spawnReviewer(reviewerReq({ sessionUuid: 'watcher-session-update-fails' })),
+      { code: 'EEXIST' },
+    );
+    assert.deepEqual(calls, { cancel: 1, await: 0 });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('production code-pr domain is wired to the AgentRuntime port', () => {
+  const config = loadDomainConfig(process.cwd(), 'code-pr');
+  assert.equal(config.reviewerRuntime, 'agent-runtime');
+});

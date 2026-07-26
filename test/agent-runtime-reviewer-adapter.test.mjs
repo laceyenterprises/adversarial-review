@@ -8,7 +8,10 @@ import {
   createAgentRuntimeReviewerRuntimeAdapter,
   reviewIdempotencyKey,
 } from '../src/adapters/reviewer-runtime/agent-runtime/index.mjs';
-import { readReviewerRunRecord } from '../src/adapters/reviewer-runtime/run-state.mjs';
+import {
+  readReviewerRunRecord,
+  writeReviewerRunRecord,
+} from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { loadDomainConfig } from '../src/domain-config.mjs';
 
 function makeRoot() {
@@ -155,6 +158,63 @@ test('agent-runtime reviewer adapter reattaches an in-flight dispatch without is
     const result = await adapter.reattach(record);
     assert.equal(result.ok, true);
     assert.equal(result.reviewBody, '## Verdict\nApprove');
+    assert.deepEqual(calls, { run: 0, reattach: 1 });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('agent-runtime reviewer adapter reattaches a held active lease instead of dispatching again', async () => {
+  const rootDir = makeRoot();
+  const calls = { run: 0, reattach: 0 };
+  const req = reviewerReq({ sessionUuid: 'watcher-session-held' });
+  const idempotencyKey = reviewIdempotencyKey(req, { roleId: 'reviewer:claude-code' });
+  try {
+    writeReviewerRunRecord(rootDir, {
+      sessionUuid: req.sessionUuid,
+      domain: 'code-pr',
+      runtime: 'agent-runtime',
+      state: 'heartbeating',
+      pgid: null,
+      spawnedAt: '2026-07-26T10:00:00.000Z',
+      lastHeartbeatAt: '2026-07-26T10:01:00.000Z',
+      reattachToken: idempotencyKey,
+      subjectContext: {
+        agentRoleKind: 'reviewer',
+        reviewerModel: 'claude-code',
+        agentRuntimeMode: 'os',
+      },
+    });
+
+    const adapter = createAgentRuntimeReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'code-pr' },
+      agentRuntime: {
+        async run() {
+          calls.run += 1;
+          throw new Error('held lease must not dispatch a duplicate run');
+        },
+        async reattach(record) {
+          calls.reattach += 1;
+          assert.equal(record.sessionUuid, 'watcher-session-held');
+          assert.equal(record.reattachToken, idempotencyKey);
+          return {
+            status: 'completed',
+            artifact: { kind: 'review', body: '## Verdict\nComment only' },
+            failureClass: null,
+            usage: null,
+            runtimeMode: 'os',
+          };
+        },
+        describe() {
+          return { id: 'fixture-agent-runtime', mode: 'os', capabilities: {} };
+        },
+      },
+    });
+
+    const result = await adapter.spawnReviewer(req);
+    assert.equal(result.ok, true);
+    assert.equal(result.reviewBody, '## Verdict\nComment only');
     assert.deepEqual(calls, { run: 0, reattach: 1 });
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

@@ -242,6 +242,36 @@ test('resume does not retain completed keys when the OS runtime cannot reattach'
   assert.deepEqual(router.pendingOsKeys(), []);
 });
 
+test('os-mode reattach uses the inner Agent Runtime session UUID', async () => {
+  const reattached = [];
+  const router = createHealthRouter({
+    localRuntime: fakeLocalRuntime(),
+    osRuntime: {
+      async run() {
+        throw new Error('test only exercises reattach');
+      },
+      async reattach(record) {
+        reattached.push(record);
+        return { status: 'completed', runtimeMode: 'os' };
+      },
+    },
+    auditSink: capturingAuditSink(),
+  });
+
+  const result = await router.reattach({
+    sessionUuid: 'watcher-session-1',
+    runtimeMode: 'os',
+    subjectContext: {
+      agentRuntimeMode: 'os',
+      agentRuntimeSessionUuid: 'agent-runtime-session-1',
+    },
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.equal(reattached.length, 1);
+  assert.equal(reattached[0].sessionUuid, 'agent-runtime-session-1');
+});
+
 test('a thrown hard classification fails over to local instead of propagating', async () => {
   // #620 review finding: a hard contract error that surfaces as a thrown
   // exception (not just a failed handle) must trigger failover, not crash the

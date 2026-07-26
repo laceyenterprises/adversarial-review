@@ -242,26 +242,27 @@ function createHealthRouter({
     return stateMachine.getMode() === 'os' ? runOs(request) : localRuntime.run(request);
   }
 
+  function withAgentRuntimeSessionUuid(record) {
+    return {
+      ...record,
+      sessionUuid: record?.subjectContext?.agentRuntimeSessionUuid || record?.sessionUuid,
+    };
+  }
+
   async function reattach(record, { role } = {}) {
     const mode = String(record?.subjectContext?.agentRuntimeMode || record?.runtimeMode || '').trim();
     if (mode === 'local' && typeof localRuntime.reattach === 'function') {
-      return localRuntime.reattach({
-        ...record,
-        sessionUuid: record?.subjectContext?.agentRuntimeSessionUuid || record?.sessionUuid,
-      }, { role });
+      return localRuntime.reattach(withAgentRuntimeSessionUuid(record), { role });
     }
     if (mode === 'os' && osRuntime && typeof osRuntime.reattach === 'function') {
-      return osRuntime.reattach(record, { role });
+      return osRuntime.reattach(withAgentRuntimeSessionUuid(record), { role });
     }
     if (osRuntime && typeof osRuntime.reattach === 'function') {
-      const osResult = await osRuntime.reattach(record, { role });
+      const osResult = await osRuntime.reattach(withAgentRuntimeSessionUuid(record), { role });
       if (osResult?.failureClass !== 'daemon-bounce') return osResult;
     }
     if (typeof localRuntime.reattach === 'function') {
-      return localRuntime.reattach({
-        ...record,
-        sessionUuid: record?.subjectContext?.agentRuntimeSessionUuid || record?.sessionUuid,
-      }, { role });
+      return localRuntime.reattach(withAgentRuntimeSessionUuid(record), { role });
     }
     return {
       status: 'failed',

@@ -249,7 +249,10 @@ function createAgentRuntimeReviewerRuntimeAdapter({
       const result = await activeHandles.get(sessionUuid).reattach();
       return { result, idempotencyKey: agentRequest.idempotencyKey };
     }
-    if (!claimed.claimed && claimed.record?.state && !['spawned', 'heartbeating'].includes(claimed.record.state)) {
+    if (!claimed.claimed) {
+      if (typeof runtime.reattach !== 'function') {
+        throw new Error(`${RUNTIME_ID} ${kind} run lease is already held and runtime cannot reattach`);
+      }
       const result = await runtime.reattach?.(claimed.record, { role: agentRequest.role });
       return { result, idempotencyKey: agentRequest.idempotencyKey };
     }

@@ -1982,21 +1982,7 @@ async function cancelMergeAgentDispatchOnMerge({
     result.launchRequestId = latest.launchRequestId;
     if (hqPath) {
       try {
-        // `hq dispatch cancel` requires an authenticated actor identity
-        // (cwp_dispatch/cli_watch.py::_resolve_cancel_actor): absent
-        // HQ_OPERATOR_PRINCIPAL / HQ_PARENT_SESSION / *_SESSION_ID in the child
-        // env it returns None and rejects the cancel with "cancel requires
-        // authenticated actor identity". execFile inherits process.env, and the
-        // daemon plists set none of those — which deadlocked every hammer-route
-        // cancel (2026-07-26: 21772 loop failures, remediation PRs stuck).
-        // Self-authenticate by exporting the resolved parent session (default
-        // session:adversarial-review:watcher) so the cancel works regardless of
-        // the daemon's ambient env.
-        await hqExecFileImpl(hqPath, [
-          'dispatch',
-          'cancel',
-          latest.launchRequestId,
-        ], {
+        await hqExecFileImpl(hqPath, ['dispatch', 'cancel', latest.launchRequestId], {
           maxBuffer: 5 * 1024 * 1024,
           env: { ...env, HQ_PARENT_SESSION: resolveMergeAgentParentSession(env) },
         });

@@ -8,9 +8,12 @@ import {
   updateReviewerRunRecord,
 } from '../run-state.mjs';
 import {
+  loadStagePrompt,
   pickRemediatorStage,
   pickReviewerStage,
+  resolvePromptSet,
 } from '../../../kernel/prompt-stage.mjs';
+import { loadDomainConfig } from '../../../domain-config.mjs';
 
 const RUNTIME_ID = 'agent-runtime';
 const DEFAULT_REVIEW_BUDGET = Object.freeze({
@@ -72,7 +75,75 @@ function remediatorIdempotencyKey(req, { roleId }) {
   ].join(':');
 }
 
-function subjectContentFrom(req, { domainId }) {
+function explicitPromptFrom(req, ctx) {
+  const prompt = req.prompt ?? ctx.prompt;
+  const text = String(prompt ?? '');
+  return text.trim() ? text : '';
+}
+
+function fallbackPromptFromContext({ kind, domainId, promptSet, promptStage, ctx }) {
+  const role = kind === 'remediator' ? 'remediator' : 'reviewer';
+  const externalId = subjectExternalId(ctx);
+  const revisionRef = String(ctx.reviewerHeadSha || ctx.revisionRef || '').trim();
+  const action = kind === 'remediator'
+    ? 'Produce the branch-push remediation artifact for the referenced subject.'
+    : 'Produce the decision-only adversarial-review artifact for the referenced subject.';
+  return [
+    `Agent OS ${role} dispatch`,
+    '',
+    action,
+    `Domain: ${domainId}`,
+    `Subject: ${externalId}`,
+    `Revision: ${revisionRef || 'unknown-revision'}`,
+    `Prompt set: ${promptSet}`,
+    `Prompt stage: ${promptStage}`,
+  ].join('\n');
+}
+
+function domainConfigForRequest({ rootDir, domainConfig, domainId }) {
+  if (domainConfig?.promptSet) return domainConfig;
+  if (!rootDir) return domainConfig || null;
+  return loadDomainConfig(rootDir, domainId);
+}
+
+function promptRepresentationFrom(req, {
+  kind,
+  rootDir,
+  domainConfig,
+  domainId,
+  promptSet,
+  promptStage,
+}) {
+  const ctx = req.subjectContext || req;
+  const explicitPrompt = explicitPromptFrom(req, ctx);
+  if (explicitPrompt) return explicitPrompt;
+
+  if (rootDir) {
+    const resolvedDomainConfig = domainConfigForRequest({ rootDir, domainConfig, domainId });
+    const resolvedPromptSet = resolvedDomainConfig
+      ? resolvePromptSet({ rootDir, domainConfig: resolvedDomainConfig, domainId })
+      : promptSet;
+    if (resolvedPromptSet) {
+      return loadStagePrompt({
+        rootDir,
+        promptSet: resolvedPromptSet,
+        actor: kind === 'remediator' ? 'remediator' : 'reviewer',
+        stage: promptStage,
+      });
+    }
+  }
+
+  return fallbackPromptFromContext({ kind, domainId, promptSet, promptStage, ctx });
+}
+
+function subjectContentFrom(req, {
+  kind,
+  rootDir,
+  domainConfig,
+  domainId,
+  promptSet,
+  promptStage,
+}) {
   const ctx = req.subjectContext || req;
   const externalId = subjectExternalId(ctx);
   const revisionRef = String(ctx.reviewerHeadSha || ctx.revisionRef || '').trim();
@@ -83,7 +154,14 @@ function subjectContentFrom(req, { domainId }) {
       revisionRef,
       linearTicketId: ctx.linearTicketId,
     },
-    representation: String(req.prompt || ctx.prompt || ''),
+    representation: promptRepresentationFrom(req, {
+      kind,
+      rootDir,
+      domainConfig,
+      domainId,
+      promptSet,
+      promptStage,
+    }),
     observedAt: new Date().toISOString(),
   };
 }
@@ -103,13 +181,15 @@ function remediatorPromptStage(ctx = {}) {
   });
 }
 
-function toAgentRequest(req, { kind }) {
+function toAgentRequest(req, { kind, rootDir = null, domainConfig = null }) {
   const ctx = req.subjectContext || req;
   const domainId = String(ctx.domainId || 'code-pr').trim();
   const roleId = roleIdFor(kind, req);
   const idempotencyKey = kind === 'remediator'
     ? remediatorIdempotencyKey(req, { roleId })
     : reviewIdempotencyKey(req, { roleId });
+  const promptSet = String(req.promptSet || ctx.promptSet || domainId);
+  const promptStage = kind === 'remediator' ? remediatorPromptStage(ctx) : reviewPromptStage(ctx);
   return {
     role: {
       id: roleId,
@@ -117,9 +197,16 @@ function toAgentRequest(req, { kind }) {
       model: String(req.model || '').trim(),
       forbiddenFallbacks: req.forbiddenFallbacks || [],
     },
-    promptSet: String(req.promptSet || ctx.promptSet || domainId),
-    promptStage: kind === 'remediator' ? remediatorPromptStage(ctx) : reviewPromptStage(ctx),
-    subjectContent: subjectContentFrom(req, { domainId }),
+    promptSet,
+    promptStage,
+    subjectContent: subjectContentFrom(req, {
+      kind,
+      rootDir,
+      domainConfig,
+      domainId,
+      promptSet,
+      promptStage,
+    }),
     ...(req.workspacePath ? { workspaceRef: { workspacePath: req.workspacePath } } : {}),
     idempotencyKey,
     budget: {
@@ -327,13 +414,13 @@ function createAgentRuntimeReviewerRuntimeAdapter({
   }
 
   async function spawnReviewer(req = {}) {
-    const agentRequest = toAgentRequest(req, { kind: 'reviewer' });
+    const agentRequest = toAgentRequest(req, { kind: 'reviewer', rootDir, domainConfig });
     const { result, idempotencyKey } = await runWithRecord(agentRequest, req, { kind: 'reviewer' });
     return toReviewerResult(result, { idempotencyKey });
   }
 
   async function spawnRemediator(req = {}) {
-    const agentRequest = toAgentRequest(req, { kind: 'remediator' });
+    const agentRequest = toAgentRequest(req, { kind: 'remediator', rootDir, domainConfig });
     const { result, idempotencyKey } = await runWithRecord(agentRequest, req, { kind: 'remediator' });
     return toRemediatorResult(result, { idempotencyKey });
   }

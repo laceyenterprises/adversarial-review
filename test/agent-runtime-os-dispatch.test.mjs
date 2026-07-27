@@ -311,6 +311,29 @@ test('run downgrades a completed run with a malformed artifact to reviewer-outpu
   assert.match(result.detail, /kind must be/);
 });
 
+test('run treats succeeded dead-health dispatch without an artifact as infrastructure failure', async () => {
+  const session = fakeSession({
+    statusSequence: [{
+      status: 'succeeded',
+      health: 'dead',
+      lastProgressSummary: 'dispatch-daemon: adapter spawn failed',
+      live_status: {
+        health: 'dead',
+        diagnostics: [{
+          severity: 'error',
+          violationType: 'adapter_spawn_timeout',
+          reason: 'adapter spawn failed before the worker wrote a review artifact',
+        }],
+      },
+    }],
+  });
+  const runtime = createOsDispatchAgentRuntime({ session, sleepImpl: async () => {} });
+  const result = await (await runtime.run(reviewerRequest())).await();
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureClass, 'adapter_spawn_timeout');
+  assert.match(result.detail, /adapter spawn failed/);
+});
+
 test('remediator run returns the branch-push artifact opaquely without verdict validation', async () => {
   const branchPushArtifact = { kind: 'adversarial-review-remediation-reply', schemaVersion: 1, outcome: 'completed' };
   const session = fakeSession({ statusSequence: [{ status: 'succeeded', artifact: branchPushArtifact }] });

@@ -10,7 +10,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -125,24 +125,11 @@ test('resolveRoleRegistryRemediator: reads the registry default, falls back to c
   assert.equal(observedTopPath, DEFAULT_ROLE_TOP_PATH);
 });
 
-test('pickRemediationWorkerClass: registry fallback uses the job domain id', () => {
+test('pickRemediationWorkerClass: explicit config topPath keeps domain lookup on bundled root', () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'arc-08-domain-remediator-'));
   try {
-    mkdirSync(join(rootDir, 'domains'), { recursive: true });
-    writeFileSync(
-      join(rootDir, 'domains', 'security-pr.json'),
-      JSON.stringify({
-        id: 'security-pr',
-        roleRegistry: {
-          remediator: {
-            promptSet: 'security-pr',
-            workerClass: 'gemini',
-            taskKind: 'remediation',
-            completionShape: 'branch-push',
-          },
-        },
-      }),
-    );
+    const topPath = join(rootDir, 'config.yaml');
+    writeFileSync(topPath, 'version: 1\n', 'utf8');
     const registryLoader = () => ({
       get: (key, def) => (key === 'roles.remediator' ? 'adversarial' : def),
       getOrchestrationMode: () => 'native',
@@ -150,10 +137,10 @@ test('pickRemediationWorkerClass: registry fallback uses the job domain id', () 
 
     assert.equal(
       remediation.pickRemediationWorkerClass(
-        { domainId: 'security-pr' },
-        { env: {}, topPath: rootDir, loaderImpl: registryLoader },
+        { domainId: 'code-pr' },
+        { env: {}, topPath, loaderImpl: registryLoader },
       ),
-      'gemini',
+      'codex',
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

@@ -716,7 +716,7 @@ function resolveRoleRegistryRemediator({ env = process.env, topPath, loaderImpl,
     // documented default rather than failing the dispatch.
   }
   const domainValue = normalizeRemediationWorkerClass(
-    resolveRemediatorWorkerClassFromDomain(loadDomainConfig(topPath || ROOT, domainId || 'code-pr')),
+    resolveRemediatorWorkerClassFromDomain(loadDomainConfig(ROOT, domainId || 'code-pr')),
   );
   if (domainValue) return domainValue;
   return DEFAULT_REMEDIATION_WORKER_CLASS;

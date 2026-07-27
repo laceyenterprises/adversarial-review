@@ -73,6 +73,30 @@ function matchesPublishedDecision(record, decision) {
   );
 }
 
+function isoString(value) {
+  if (value instanceof Date) return value.toISOString();
+  return String(value || new Date().toISOString());
+}
+
+function durableGateDecision(decision, {
+  repo,
+  prNumber,
+  headSha,
+  env,
+  now = () => new Date(),
+} = {}) {
+  const observedAt = decision?.observedAt ?? decision?.postedAt ?? isoString(now());
+  const sourceRef = decision?.sourceRef
+    ?? decision?.source?.sourceRef
+    ?? `adversarial-gate:${repo}#${normalizePrNumber(prNumber)}:${headSha}`;
+  return {
+    ...decision,
+    context: decision?.context || resolveGateStatusContext(env),
+    observedAt,
+    sourceRef,
+  };
+}
+
 function gateRecordPrefix({ repo, prNumber }) {
   const safeRepo = sanitizePathSegment(String(repo ?? '').replace(/\//g, '__'));
   return `${safeRepo}-pr-${normalizePrNumber(prNumber)}-`;
@@ -692,6 +716,9 @@ async function projectAdversarialGateStatus(rootDir, {
   fetchLatestLabelEventImpl,
   operatorApprovalEvent = undefined,
   env = process.env,
+  gateProvider = null,
+  domainId = 'code-pr',
+  now = () => new Date(),
 } = {}) {
   const snapshot = await buildAdversarialGateSnapshot(rootDir, {
     repo,
@@ -707,15 +734,35 @@ async function projectAdversarialGateStatus(rootDir, {
     operatorApprovalEvent,
   });
   const decision = pickAdversarialGateStatus({ ...snapshot, env });
-  const publish = await publishAdversarialGateStatus(rootDir, {
+  const durableDecision = durableGateDecision(decision, {
     repo,
     prNumber,
     headSha,
-    decision,
-    execFileImpl,
     env,
+    now,
   });
-  return { decision, publish, snapshot };
+  const provider = gateProvider ?? {
+    providerId: 'github-commit-status',
+    gate: async (subject, revisionRef, durableDecision) => {
+      const publish = await publishAdversarialGateStatus(rootDir, {
+        repo: subject.repo,
+        prNumber: subject.prNumber,
+        headSha: revisionRef,
+        decision: durableDecision,
+        execFileImpl,
+        env,
+      });
+      return {
+        gated: publish.posted === true || publish.reason === 'unchanged',
+        providerId: 'github-commit-status',
+        revisionRef,
+        publish,
+      };
+    },
+  };
+  const gate = await provider.gate({ domainId, repo, prNumber }, headSha, durableDecision);
+  const publish = gate.publish ?? gate;
+  return { decision: durableDecision, publish, snapshot };
 }
 
 export {

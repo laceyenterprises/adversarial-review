@@ -1020,6 +1020,58 @@ test('projectAdversarialGateStatus posts the env-override context when ADV_GATE_
   }
 });
 
+test('projectAdversarialGateStatus passes durable decision fields and domainId to generic providers', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-gate-generic-'));
+  try {
+    const observed = [];
+    const repo = 'galileo/example';
+    const prNumber = 88;
+    const headSha = 'genericheadsha';
+    const reviewRow = makeReviewRow({
+      repo,
+      pr_number: prNumber,
+      reviewer_head_sha: headSha,
+      review_body: '## Summary\nClean.\n## Verdict\nComment only',
+    });
+
+    const result = await projectAdversarialGateStatus(rootDir, {
+      repo,
+      prNumber,
+      headSha,
+      domainId: 'research-finding',
+      reviewRow,
+      now: () => new Date('2026-07-27T15:00:00.000Z'),
+      gateProvider: {
+        providerId: 'fixture-gate',
+        async gate(subject, revisionRef, decision) {
+          observed.push({ subject, revisionRef, decision });
+          return { gated: true, providerId: 'fixture-gate', revisionRef };
+        },
+      },
+      env: {
+        PATH: '/usr/bin:/bin',
+        HOME: '/tmp/test-home',
+        GITHUB_TOKEN: 'token-123',
+      },
+    });
+
+    assert.equal(observed.length, 1);
+    assert.deepEqual(observed[0].subject, {
+      domainId: 'research-finding',
+      repo,
+      prNumber,
+    });
+    assert.equal(observed[0].revisionRef, headSha);
+    assert.equal(observed[0].decision.observedAt, '2026-07-27T15:00:00.000Z');
+    assert.equal(observed[0].decision.sourceRef, `adversarial-gate:${repo}#${prNumber}:${headSha}`);
+    assert.equal(observed[0].decision.context, DEFAULT_ADVERSARIAL_GATE_CONTEXT);
+    assert.equal(result.decision.observedAt, '2026-07-27T15:00:00.000Z');
+    assert.equal(result.publish.providerId, 'fixture-gate');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('maybeDispatchAmaClosureFor passes the canonical blocker and CI snapshot into AMA eligibility', async () => {
   let observed = null;
   const result = await maybeDispatchAmaClosureFor({

@@ -73,6 +73,7 @@ const REVIEW_STATE_TABLE_NAMES = new Set([
   'review_cycle_verdicts',
   'review_cycle_counters',
   'watcher_db_canary',
+  'worker_completion_webhook_receipts',
 ]);
 
 const REVIEWED_PRS_HEAD_SHA_COLUMNS = Object.freeze([
@@ -215,6 +216,14 @@ function ensureReviewStateSchema(db) {
       id         TEXT PRIMARY KEY,
       token      TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    )
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS worker_completion_webhook_receipts (
+      launch_request_id TEXT PRIMARY KEY,
+      received_at TEXT NOT NULL,
+      auth_subject TEXT NOT NULL,
+      payload_json TEXT NOT NULL
     )
   `);
   // Handles DBs that briefly saw the inline reviewer_passes schema before the

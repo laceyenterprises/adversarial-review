@@ -27,6 +27,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAppSdkConnect } from '../../../app-sdk-loader.mjs';
 import {
+  isExpiredAppContractSessionError,
   isTransientAppContractError,
   withAppContractTransientRetry,
 } from '../../../app-contract-retry.mjs';
@@ -64,6 +65,17 @@ const SUCCESS_STATUSES = new Set(['succeeded', 'success', 'completed', 'complete
 const FAILED_STATUSES = new Set(['failed', 'failure', 'error', 'errored', 'rejected']);
 const CANCELLED_STATUSES = new Set(['canceled', 'cancelled', 'superseded', 'aborted']);
 const TIMEOUT_STATUSES = new Set(['timeout', 'timed_out', 'timedout', 'expired', 'deadline_exceeded']);
+const EXECUTION_ACTIVE_STATUSES = new Set(['running', 'heartbeating']);
+const EXECUTION_START_FIELDS = [
+  'running_at',
+  'runningAt',
+  'started_at',
+  'startedAt',
+  'worker_started_at',
+  'workerStartedAt',
+  'spawned_at',
+  'spawnedAt',
+];
 
 // Role → dispatch task_kind / completion_shape. A role may override either
 // explicitly; otherwise the kind decides (reviewer=decision-only,
@@ -296,6 +308,28 @@ function liveStatusOf(statusPayload) {
   return liveStatus && typeof liveStatus === 'object' ? liveStatus : statusPayload;
 }
 
+function parseIsoMs(value) {
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function startTimeFromObject(value) {
+  if (!value || typeof value !== 'object') return null;
+  for (const field of EXECUTION_START_FIELDS) {
+    const parsed = parseIsoMs(value[field]);
+    if (parsed !== null) return parsed;
+  }
+  return null;
+}
+
+function executionStartedAtMs(statusPayload, observedAtMs) {
+  const liveStatus = liveStatusOf(statusPayload);
+  const explicit = startTimeFromObject(statusPayload) ?? startTimeFromObject(liveStatus);
+  if (explicit !== null) return explicit;
+  const status = normalizeStatus(statusPayload?.status ?? liveStatus?.status);
+  return EXECUTION_ACTIVE_STATUSES.has(status) ? observedAtMs : null;
+}
+
 function launchRequestIdOf(statusPayload) {
   const liveStatus = liveStatusOf(statusPayload);
   return statusPayload?.launch_request_id
@@ -526,6 +560,30 @@ function createOsDispatchAgentRuntime({
     return sessionPromise;
   }
 
+  function clearCachedSession() {
+    sessionPromise = null;
+  }
+
+  async function withFreshSessionOnExpiry(operation) {
+    let activeSession = await resolveSession();
+    try {
+      const value = await withAppContractTransientRetry(
+        () => operation(activeSession),
+        { sleepImpl },
+      );
+      return { activeSession, value };
+    } catch (err) {
+      if (!isExpiredAppContractSessionError(err)) throw err;
+      clearCachedSession();
+      activeSession = await resolveSession();
+      const value = await withAppContractTransientRetry(
+        () => operation(activeSession),
+        { sleepImpl },
+      );
+      return { activeSession, value };
+    }
+  }
+
   async function bestEffortCancel(activeSession, requestId) {
     if (typeof activeSession?.dispatchCancel !== 'function') return;
     try {
@@ -539,13 +597,26 @@ function createOsDispatchAgentRuntime({
   }
 
   // Poll dispatch_status until a terminal state, mapping it to a RunResult.
-  // `deadlineMs` bounds the loop with the request's timeout; a cancel request
-  // (flag flipped by the handle) short-circuits with a best-effort server-side
-  // cancel. `request_id` idempotency makes this loop safe to (re)enter on
-  // reattach.
+  // Reviewer timeout is an execution budget, not an admission budget: an LRQ can
+  // wait behind older work without spending the model's wall-clock allowance.
+  // Once dispatch_status proves the worker is actually running, the client
+  // deadline is anchored to that start time. A cancel request (flag flipped by
+  // the handle) short-circuits with a best-effort server-side cancel.
+  // `request_id` idempotency makes this loop safe to (re)enter on reattach.
   async function pollUntilTerminal({
-    activeSession, requestId, role, cancelled, deadlineMs, artifactContext = null,
+    activeSession,
+    requestId,
+    role,
+    cancelled,
+    timeoutDurationMs,
+    initialExecutionStartedAtMs = null,
+    artifactContext = null,
   }) {
+    const boundedDurationMs = Number(timeoutDurationMs);
+    let deadlineMs = Number.isFinite(boundedDurationMs) && boundedDurationMs > 0
+      && Number.isFinite(initialExecutionStartedAtMs)
+      ? initialExecutionStartedAtMs + boundedDurationMs
+      : null;
     while (true) {
       if (cancelled.value) {
         // handle.cancel() already issued the best-effort server-side cancel
@@ -570,10 +641,11 @@ function createOsDispatchAgentRuntime({
       }
       let statusPayload;
       try {
-        statusPayload = await withAppContractTransientRetry(
-          () => activeSession.dispatchStatus(requestId),
-          { sleepImpl },
+        const refreshed = await withFreshSessionOnExpiry(
+          (sessionForCall) => sessionForCall.dispatchStatus(requestId),
         );
+        activeSession = refreshed.activeSession;
+        statusPayload = refreshed.value;
       } catch (err) {
         if (isTransientAppContractError(err)) {
           logger?.warn?.('[os-dispatch] transient dispatch status failure; polling will continue', {
@@ -593,25 +665,50 @@ function createOsDispatchAgentRuntime({
           readFileSyncImpl,
         });
       }
+      if (deadlineMs === null && Number.isFinite(boundedDurationMs) && boundedDurationMs > 0) {
+        const startedAtMs = executionStartedAtMs(statusPayload, nowMs());
+        if (Number.isFinite(startedAtMs)) {
+          deadlineMs = startedAtMs + boundedDurationMs;
+        }
+      }
+      if (deadlineMs != null && nowMs() >= deadlineMs) {
+        await bestEffortCancel(activeSession, requestId);
+        return {
+          status: 'timeout',
+          failureClass: 'timeout',
+          usage: null,
+          runtimeMode: RUNTIME_MODE,
+          detail: `os-dispatch run ${requestId} exceeded its execution timeout and was cancelled`,
+        };
+      }
       await sleepImpl(pollBaseMs + jitterImpl(pollJitterMs));
     }
   }
 
-  function resolveDeadlineMs(request) {
+  function resolveTimeoutDurationMs(request) {
     const timeoutMs = Number(request.timeoutMs);
-    if (Number.isFinite(timeoutMs) && timeoutMs > 0) return nowMs() + timeoutMs;
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) return Math.floor(timeoutMs);
     const wallMs = Number(request.budget?.maxWallMs);
-    if (Number.isFinite(wallMs) && wallMs > 0) return nowMs() + wallMs;
+    if (Number.isFinite(wallMs) && wallMs > 0) return Math.floor(wallMs);
     return null;
   }
 
-  function resolveReattachDeadlineMs(record) {
+  function resolveReattachTimeoutDurationMs(record) {
     const timeoutMs = Number(record.timeoutMs ?? record.subjectContext?.timeoutMs);
     const wallMs = Number(record.budget?.maxWallMs ?? record.subjectContext?.budget?.maxWallMs);
     const durationMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : wallMs;
-    if (!Number.isFinite(durationMs) || durationMs <= 0) return null;
-    const startedAtMs = Date.parse(record.spawnedAt ?? record.startedAt ?? record.createdAt ?? '');
-    return Number.isFinite(startedAtMs) ? startedAtMs + durationMs : nowMs() + durationMs;
+    return Number.isFinite(durationMs) && durationMs > 0 ? Math.floor(durationMs) : null;
+  }
+
+  function resolveReattachExecutionStartedAtMs(record) {
+    return startTimeFromObject({
+      running_at: record?.running_at,
+      runningAt: record?.runningAt,
+      worker_started_at: record?.worker_started_at,
+      workerStartedAt: record?.workerStartedAt,
+      started_at: record?.execution_started_at,
+      startedAt: record?.executionStartedAt,
+    });
   }
 
   async function run(request) {
@@ -623,17 +720,16 @@ function createOsDispatchAgentRuntime({
 
     let activeSession;
     try {
-      activeSession = await resolveSession();
-      await withAppContractTransientRetry(
-        () => activeSession.dispatch(payload),
-        { sleepImpl },
+      const dispatched = await withFreshSessionOnExpiry(
+        (sessionForCall) => sessionForCall.dispatch(payload),
       );
+      activeSession = dispatched.activeSession;
     } catch (err) {
       return settledHandle(requestId, dispatchFailureResult(err));
     }
 
     const cancelled = { value: false };
-    const deadlineMs = resolveDeadlineMs(request);
+    const timeoutDurationMs = resolveTimeoutDurationMs(request);
     let pollingPromise = null;
 
     function awaitTerminal() {
@@ -642,7 +738,7 @@ function createOsDispatchAgentRuntime({
         requestId,
         role,
         cancelled,
-        deadlineMs,
+        timeoutDurationMs,
         artifactContext,
       });
       return pollingPromise;
@@ -715,7 +811,8 @@ function createOsDispatchAgentRuntime({
       requestId,
       role: effectiveRole,
       cancelled: { value: false },
-      deadlineMs: resolveReattachDeadlineMs(record),
+      timeoutDurationMs: resolveReattachTimeoutDurationMs(record),
+      initialExecutionStartedAtMs: resolveReattachExecutionStartedAtMs(record),
       artifactContext,
     });
   }

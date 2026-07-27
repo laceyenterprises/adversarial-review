@@ -89,6 +89,8 @@ import {
 } from './remediation-prompt.mjs';
 import { spawnDetachedCli } from './adapters/reviewer-runtime/cli-direct/process.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
+import { loadDomainConfig } from './domain-config.mjs';
+import { resolveRemediatorWorkerClassFromDomain } from './domain-policy.mjs';
 import {
   loadRoleConfig,
   resetRoleConfigCache,
@@ -721,6 +723,10 @@ function resolveRoleRegistryRemediator({ env = process.env, topPath, loaderImpl 
     // Registry key/schema not present yet (pre-ARC-12): fall through to the
     // documented default rather than failing the dispatch.
   }
+  const domainValue = normalizeRemediationWorkerClass(
+    resolveRemediatorWorkerClassFromDomain(loadDomainConfig(ROOT, 'code-pr')),
+  );
+  if (domainValue) return domainValue;
   return DEFAULT_REMEDIATION_WORKER_CLASS;
 }
 

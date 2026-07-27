@@ -15,6 +15,12 @@ import {
   resolveGeminiReviewerMode as resolveGeminiReviewerModeFromConfig,
 } from '../../../role-config.mjs';
 import { AgentOSConfigError, loadConfigCached } from '../../../config-loader.mjs';
+import { loadDomainConfig } from '../../../domain-config.mjs';
+import { resolveReviewerRouteTableFromDomain } from '../../../domain-policy.mjs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
 // ARC-12 note — `botTokenEnv` here is the FROZEN v1 identity surface. The v2
 // architecture moves per-role GitHub bot identity into the comms adapter's
@@ -25,7 +31,7 @@ import { AgentOSConfigError, loadConfigCached } from '../../../config-loader.mjs
 // today; no v2 registry-driven dispatch consumes them yet (that lands in
 // ARC-13). The token fields are removed from this table when the v1 dispatch
 // path is decomposed (ARC-18/19) — not before, or the live reviewer breaks.
-const ROUTE_BY_BUILDER_CLASS = {
+const DEFAULT_ROUTE_BY_BUILDER_CLASS = {
   codex: {
     reviewerModel: 'claude',
     botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
@@ -59,6 +65,10 @@ const ROUTE_BY_BUILDER_CLASS = {
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
   },
 };
+const ROUTE_BY_BUILDER_CLASS = resolveReviewerRouteTableFromDomain(
+  loadDomainConfig(ROOT, 'code-pr'),
+  { fallbackRouteByBuilderClass: DEFAULT_ROUTE_BY_BUILDER_CLASS },
+);
 
 const DEFAULT_REVIEWER_ENV = 'ADVERSARIAL_REVIEW_DEFAULT_REVIEWER';
 

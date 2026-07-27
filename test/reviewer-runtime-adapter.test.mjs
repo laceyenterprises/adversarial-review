@@ -580,6 +580,48 @@ test('agent-os-hq sustained lease_expired is surfaced with trace guidance', asyn
   }
 });
 
+test('agent-os-hq recovers a valid review from durable dispatch stdout when artifact is missing', async () => {
+  const rootDir = makeRoot();
+  const hqRoot = makeHqRoot(process.env.USER || 'test-user');
+  try {
+    const adapter = createAgentOsHqReviewerRuntimeAdapter({
+      rootDir,
+      hqBin: '/bin/hq',
+      env: makeHqEnv(hqRoot),
+      execFileImpl: async (_command, args) => {
+        if (args[0] === 'dispatch' && args[1] !== 'status') {
+          mkdirSync(join(hqRoot, 'dispatch', 'lrq_stdout_fallback'), { recursive: true });
+          writeFileSync(
+            join(hqRoot, 'dispatch', 'lrq_stdout_fallback', 'stdout.log'),
+            validReviewBody('Comment only'),
+          );
+          return { stdout: JSON.stringify({ launchRequestId: 'lrq_stdout_fallback' }), stderr: '' };
+        }
+        return { stdout: JSON.stringify({ status: 'succeeded', health: 'ok' }), stderr: '' };
+      },
+    });
+
+    const result = await adapter.spawnReviewer({
+      model: 'gemini',
+      prompt: 'Review the PR.',
+      subjectContext: { domainId: 'code-pr', repo: 'lacey/repo', prNumber: 14, linearTicketId: 'LAC-566' },
+      timeoutMs: 100,
+      sessionUuid: 'agent-hq-stdout-fallback',
+      forbiddenFallbacks: ['api-key'],
+    });
+
+    assert.equal(result.ok, true);
+    assert.match(result.reviewBody, /^## Verdict\nComment only/m);
+    assert.equal(
+      existsSync(join(rootDir, 'data', 'reviewer-runs', 'agent-hq-stdout-fallback.agent-os-hq.review.md')),
+      false,
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
+});
+
 test('agent-os-hq validates missing and malformed artifacts', async () => {
   const rootDir = makeRoot();
   const hqRoot = makeHqRoot(process.env.USER || 'test-user');

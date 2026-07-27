@@ -2503,6 +2503,7 @@ export {
   isFinalReviewRound,
   detectSpecTouchViolations,
   clearPendingReviewsForSelf,
+  postGitHubReviewWithCapture,
   ADVERSARIAL_PROMPT,
   ADVERSARIAL_PROMPT_FINAL_ROUND_ADDENDUM,
   REVIEWER_DOMAIN_ID,

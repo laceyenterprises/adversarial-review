@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { userInfo } from 'node:os';
 import { promisify } from 'node:util';
 import { writeFileAtomic } from '../../../atomic-write.mjs';
@@ -25,6 +25,7 @@ const DEFAULT_WORKER_CLASS_BY_MODEL = new Map([
   ['claude', 'claude-code'],
   ['claude-code', 'claude-code'],
   ['codex', 'codex'],
+  ['gemini', 'gemini'],
 ]);
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'canceled', 'cancelled', 'superseded']);
 const SUCCESS_STATUSES = new Set(['succeeded']);
@@ -48,6 +49,7 @@ function tailText(value, maxBytes = 8 * 1024) {
 function result({
   ok,
   reviewBody = null,
+  reviewBodyDelivery = null,
   failureClass = null,
   stderrTail = null,
   stdoutTail = null,
@@ -62,6 +64,7 @@ function result({
   return {
     ok,
     reviewBody,
+    reviewBodyDelivery,
     failureClass,
     stderrTail,
     stdoutTail,
@@ -200,6 +203,10 @@ function hqReviewArtifactPath(rootDir, sessionUuid) {
   return join(hqArtifactDir(rootDir), `${sessionUuid}.agent-os-hq.review.md`);
 }
 
+function hqDispatchStdoutPath(hqRoot, dispatchId) {
+  return join(hqRoot, 'dispatch', dispatchId, 'stdout.log');
+}
+
 function buildReviewerPrompt(req, artifactPath) {
   const subjectContext = req.subjectContext || {};
   const repo = subjectContext.repo || subjectContext.subjectExternalId || 'unknown-repo';
@@ -239,6 +246,22 @@ function readValidatedArtifact(artifactPath) {
     throw new Error(`review artifact missing at ${artifactPath}`);
   }
   return validateReviewArtifact(readFileSync(artifactPath, 'utf8'));
+}
+
+function readValidatedReviewOutput({ artifactPath, hqRoot, dispatchId }) {
+  try {
+    return readValidatedArtifact(artifactPath);
+  } catch (artifactErr) {
+    const stdoutPath = dispatchId && hqRoot ? hqDispatchStdoutPath(hqRoot, dispatchId) : null;
+    if (!stdoutPath || !existsSync(stdoutPath)) throw artifactErr;
+    try {
+      return validateReviewArtifact(readFileSync(stdoutPath, 'utf8'));
+    } catch (stdoutErr) {
+      throw new Error(
+        `${artifactErr.message}; stdout fallback at ${stdoutPath} was not a valid review artifact: ${stdoutErr.message}`
+      );
+    }
+  }
 }
 
 function sleep(ms) {
@@ -458,7 +481,11 @@ function createAgentOsHqReviewerRuntimeAdapter({
       if (TERMINAL_STATUSES.has(status)) {
         if (SUCCESS_STATUSES.has(status)) {
           try {
-            const reviewBody = readValidatedArtifact(artifactPath);
+            const reviewBody = readValidatedReviewOutput({
+              artifactPath,
+              hqRoot: resolvedHqRoot,
+              dispatchId,
+            });
             record = updateReviewerRunRecord(rootDir, record, {
               state: 'completed',
               lastHeartbeatAt: now(),
@@ -466,6 +493,7 @@ function createAgentOsHqReviewerRuntimeAdapter({
             return result({
               ok: true,
               reviewBody,
+              reviewBodyDelivery: 'caller-post',
               stdoutTail: tailText(stdout),
               exitCode: 0,
               spawnedAt,
@@ -784,5 +812,7 @@ export {
   DEFAULT_FORBIDDEN_FALLBACKS,
   buildDispatchArgs,
   createAgentOsHqReviewerRuntimeAdapter,
+  hqDispatchStdoutPath,
+  readValidatedReviewOutput,
   validateReviewArtifact,
 };

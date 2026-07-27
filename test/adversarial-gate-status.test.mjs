@@ -1227,24 +1227,21 @@ test('maybeDispatchAmaClosureFor resolves risk class from the remediation ledger
   assert.notEqual(observed.reviewState.riskClass, 'unknown');
 
   // (2) Full eligibility result: feeding the resolved reviewState through the
-  // real predicate under the all-classes config, the risk gate does NOT refuse
-  // this no-explicit-risk PR. Before the fix it resolved to 'unknown' ->
-  // always-two-key -> `risk-class-not-permitted` (the gate that made AMA close
-  // 0 PRs); now it resolves to the ledger default 'medium' and passes the risk
-  // gate. (Other structural gates here belong to the fixture, not this change.)
+  // real predicate proves the class is no longer `unknown`. The domain policy
+  // is authoritative over the fallback config, so `medium` can still be refused
+  // by the code-pr allowlist without regressing the risk-class resolution.
   const eligibility = isEligibleForAmaClosure(
     observed.reviewState,
     observed.prMetadata,
     observed.cfg,
     observed.options,
   );
-  assert.equal(
-    eligibility.reasons.includes('risk-class-not-permitted'),
-    false,
-    `unexpected risk-class refusal: ${JSON.stringify(eligibility.reasons)}`,
-  );
   assert.equal(eligibility.trace.riskClass.resolved, 'medium');
   assert.equal(eligibility.trace.riskClass.requiresTwoKey, false);
+  assert.ok(
+    eligibility.reasons.includes('risk-class-not-permitted'),
+    'medium should remain subject to the domain risk allowlist',
+  );
 });
 
 test('maybeDispatchAmaClosureFor carries stale reviewed head into AMA instead of current PR head', async () => {

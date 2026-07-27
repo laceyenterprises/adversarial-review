@@ -33,7 +33,7 @@ export function resolveReviewerRouteTableFromDomain(domainConfig, {
 } = {}) {
   const routing = objectOrNull(domainConfig?.reviewerRouting);
   if (!routing) return { ...fallbackRouteByBuilderClass };
-  const resolved = {};
+  const resolved = { ...fallbackRouteByBuilderClass };
   for (const [builderClass, roleId] of Object.entries(routing)) {
     const route = resolveLegacyReviewerRouteByRoleId(roleId);
     if (!route) {
@@ -73,8 +73,8 @@ function mergeArrayOverride(base = [], override = undefined) {
 }
 
 function preferredScalar(fallbackValue, domainValue) {
-  if (fallbackValue !== undefined && fallbackValue !== null) return fallbackValue;
-  return domainValue;
+  if (domainValue !== undefined && domainValue !== null) return domainValue;
+  return fallbackValue;
 }
 
 export function resolveMergeAuthorityConfigFromDomain(domainConfig, fallbackCfg = {}) {
@@ -95,9 +95,7 @@ export function resolveMergeAuthorityConfigFromDomain(domainConfig, fallbackCfg 
     ...fallbackCfg,
     enabled: preferredScalar(fallbackCfg.enabled, policy.enabled),
     workerClass: preferredScalar(fallbackCfg.workerClass, str(policy.workerClass) || undefined),
-    workerClassFallback: (fallbackCfg.workerClassFallback || []).length > 0
-      ? [...fallbackCfg.workerClassFallback]
-      : mergeArrayOverride([], policy.workerClassFallback),
+    workerClassFallback: mergeArrayOverride(fallbackCfg.workerClassFallback, policy.workerClassFallback),
     mergeMethod: preferredScalar(fallbackCfg.mergeMethod, str(policy.mergeMethod) || undefined),
     strictNonBlockingRemediation:
       preferredScalar(fallbackCfg.strictNonBlockingRemediation, policy.strictNonBlockingRemediation),
@@ -116,12 +114,8 @@ export function resolveMergeAuthorityConfigFromDomain(domainConfig, fallbackCfg 
     dispatchTimeoutMs: preferredScalar(fallbackCfg.dispatchTimeoutMs, policy.dispatchTimeoutMs),
     eligibility: {
       ...(fallbackCfg?.eligibility || {}),
-      riskClasses: (fallbackCfg?.eligibility?.riskClasses || []).length > 0
-        ? [...fallbackCfg.eligibility.riskClasses]
-        : mergeArrayOverride([], policy?.eligibility?.riskClasses),
-      fastMergeLabels: (fallbackCfg?.eligibility?.fastMergeLabels || []).length > 0
-        ? [...fallbackCfg.eligibility.fastMergeLabels]
-        : mergeArrayOverride([], policy?.eligibility?.fastMergeLabels),
+      riskClasses: mergeArrayOverride(fallbackCfg?.eligibility?.riskClasses, policy?.eligibility?.riskClasses),
+      fastMergeLabels: mergeArrayOverride(fallbackCfg?.eligibility?.fastMergeLabels, policy?.eligibility?.fastMergeLabels),
       highRiskRequiresTwoKey:
         preferredScalar(fallbackCfg?.eligibility?.highRiskRequiresTwoKey, policy?.eligibility?.highRiskRequiresTwoKey),
     },

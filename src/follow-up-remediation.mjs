@@ -695,17 +695,9 @@ function validateStartupRemediationConfig(env = process.env, opts = {}) {
 // The env override provides the same operator escape hatch in either
 // direction.
 //
-// Fallback semantics: when `builderTag` is missing or unknown
-// (job-schema-migration field loss, hand-edited triage records), the
-// derivation falls through to `DEFAULT_REMEDIATION_WORKER_CLASS = 'codex'`.
-// Under cross-model, a `[codex]` PR with a corrupted builderTag would
-// silently route to codex remediation — same-model in disguise. This is an
-// operator-acceptable degraded path: it preserves "something runs" over
-// "nothing runs", and the operator can pin via
-// `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR` if the missing-tag rate becomes
-// material. Future: consider raising and routing the job to `pending` with
-// `lastConfigValidationFailure` (matches the bad-env contract) once
-// upstream missing-tag rate is measured.
+// Fallback semantics: when `builderTag` is missing or unknown, derivation falls
+// through to `DEFAULT_REMEDIATION_WORKER_CLASS = 'codex'`. This preserves
+// "something runs"; operators can pin via `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR`.
 // ARC-08: the role-registry default remediator worker class (SPEC §5,
 // `roles.registry.remediator.workerClass`). ARC-12 lands the registry and its
 // config schema; until then the strict `roles` schema omits `roles.registry`,
@@ -724,7 +716,7 @@ function resolveRoleRegistryRemediator({ env = process.env, topPath, loaderImpl 
     // documented default rather than failing the dispatch.
   }
   const domainValue = normalizeRemediationWorkerClass(
-    resolveRemediatorWorkerClassFromDomain(loadDomainConfig(ROOT, 'code-pr')),
+    resolveRemediatorWorkerClassFromDomain(loadDomainConfig(topPath || ROOT, 'code-pr')),
   );
   if (domainValue) return domainValue;
   return DEFAULT_REMEDIATION_WORKER_CLASS;

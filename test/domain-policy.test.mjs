@@ -26,6 +26,34 @@ test('code-pr reviewer routing is sourced from the domain config', () => {
   assert.equal(resolveLegacyReviewerRouteByRoleId('codex-reviewer-lacey').reviewerModel, 'codex');
 });
 
+test('domain reviewer routing preserves un-overridden fallback routes', () => {
+  const routes = resolveReviewerRouteTableFromDomain({
+    id: 'partial-domain',
+    reviewerRouting: {
+      codex: 'gemini-reviewer-lacey',
+    },
+  }, {
+    fallbackRouteByBuilderClass: {
+      codex: {
+        reviewerModel: 'claude',
+        botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+      },
+      hammer: {
+        reviewerModel: 'codex',
+        botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+      },
+    },
+  });
+  assert.deepEqual(routes.codex, {
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+  });
+  assert.deepEqual(routes.hammer, {
+    reviewerModel: 'codex',
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+  });
+});
+
 test('code-pr remediator default is declared in the domain role registry', () => {
   const domainConfig = loadDomainConfig(ROOT, 'code-pr');
   assert.equal(resolveRemediatorWorkerClassFromDomain(domainConfig), 'codex');
@@ -36,7 +64,7 @@ test('code-pr remediator default is declared in the domain role registry', () =>
   assert.equal(registry.roles['security-reviewer'].promptSet, 'code-pr-security');
 });
 
-test('domain merge-authority policy only fills missing values', () => {
+test('domain merge-authority policy overrides fallback defaults', () => {
   const domainConfig = loadDomainConfig(ROOT, 'code-pr');
   const cfg = resolveMergeAuthorityConfigFromDomain(domainConfig, {
     enabled: true,
@@ -57,9 +85,13 @@ test('domain merge-authority policy only fills missing values', () => {
     },
     branchProtection: { required: false },
   });
-  assert.equal(cfg.autonomousMergeExecutionEnabled, false);
-  assert.equal(cfg.lha.consumeAttestations, false);
-  assert.deepEqual(cfg.eligibility.riskClasses, ['medium']);
+  assert.equal(cfg.autonomousMergeExecutionEnabled, true);
+  assert.equal(cfg.lha.consumeAttestations, true);
+  assert.equal(cfg.strictMode, true);
+  assert.deepEqual(cfg.workerClassFallback, ['claude-code']);
+  assert.deepEqual(cfg.eligibility.riskClasses, ['low']);
+  assert.deepEqual(cfg.eligibility.fastMergeLabels, ['fast-merge:test-fixtures', 'fast-merge:docs']);
+  assert.equal(cfg.branchProtection.required, true);
 
   const sparse = resolveMergeAuthorityConfigFromDomain(domainConfig, {
     eligibility: {},

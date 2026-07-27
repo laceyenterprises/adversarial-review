@@ -20,7 +20,7 @@ import { resolveReviewerRouteTableFromDomain } from '../../../domain-policy.mjs'
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 
 // ARC-12 note — `botTokenEnv` here is the FROZEN v1 identity surface. The v2
 // architecture moves per-role GitHub bot identity into the comms adapter's

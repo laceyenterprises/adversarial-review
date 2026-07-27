@@ -3,7 +3,7 @@
   "enabled": true,
   "subjectChannel": "github-pr",
   "commsChannel": "github-pr-comments",
-  "reviewerRuntime": "cli-direct",
+  "reviewerRuntime": "agent-runtime",
   "operatorSurface": {
     "controls": "github-pr-label-controls",
     "triageSync": "linear"
@@ -26,7 +26,7 @@
   "reviewerRouting": {
     "codex": "claude-reviewer-lacey",
     "claude-code": "codex-reviewer-lacey",
-    "clio-agent": "codex-reviewer-lacey"
+    "clio-agent": "claude-reviewer-lacey"
   },
   "roleRegistry": {
     "remediator": {

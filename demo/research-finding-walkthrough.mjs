@@ -120,6 +120,11 @@ const subject = createMarkdownFileSubjectAdapter({
 });
 const comms = createSlackThreadCommsAdapter({
   rootDir,
+  slackClient: {
+    async postMessage(message) {
+      return { deliveryExternalId: deliveryExternalIdForKey(message.key) };
+    },
+  },
   now: () => new Date(NOW),
 });
 const operator = createLinearTriageAdapter({

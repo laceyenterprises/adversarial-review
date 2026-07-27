@@ -119,6 +119,11 @@ async function runResearchFindingFixtureKernel({ rootDir }) {
   });
   const comms = createSlackThreadCommsAdapter({
     rootDir,
+    slackClient: {
+      async postMessage(message) {
+        return { deliveryExternalId: deliveryExternalIdForKey(message.key) };
+      },
+    },
     now: () => new Date('2026-05-11T19:00:00.000Z'),
   });
   const operator = createLinearTriageAdapter({

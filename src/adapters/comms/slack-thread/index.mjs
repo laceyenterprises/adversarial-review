@@ -1,5 +1,5 @@
 /**
- * Slack-thread JSONL fixture implementation of the comms-channel adapter.
+ * Slack-thread implementation of the comms-channel adapter.
  *
  * @typedef {import('../../../kernel/contracts.d.ts').CommsChannelAdapter} CommsChannelAdapter
  * @typedef {import('../../../kernel/contracts.d.ts').DeliveryKey} DeliveryKey
@@ -13,11 +13,14 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
+import { redactPublicSafeText } from '../github-pr-comments/redaction.mjs';
 
 const DEFAULT_TRANSCRIPT_FILE = 'slack-thread.jsonl';
 const DEFAULT_TRANSCRIPT_DIR = '.slack-thread-transcripts';
 const LOCK_RETRY_MS = 10;
 const LOCK_TIMEOUT_MS = 5000;
+const DEFAULT_SLACK_POST_TIMEOUT_MS = 15000;
+const SLACK_API_URL = 'https://slack.com/api/chat.postMessage';
 
 function isoString(value) {
   if (value instanceof Date) return value.toISOString();
@@ -105,10 +108,10 @@ function lineToDeliveryRecord(line) {
 }
 
 function sleepMs(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
-function acquireLock(lockPath) {
+async function acquireLock(lockPath) {
   const startedAt = Date.now();
   while (true) {
     try {
@@ -118,19 +121,56 @@ function acquireLock(lockPath) {
       if (err?.code !== 'EEXIST') {
         throw err;
       }
+      if (breakStaleLock(lockPath)) {
+        continue;
+      }
       if ((Date.now() - startedAt) >= LOCK_TIMEOUT_MS) {
         throw new Error(`Timed out waiting for slack-thread lock: ${lockPath}`);
       }
-      sleepMs(LOCK_RETRY_MS);
+      await sleepMs(LOCK_RETRY_MS);
     }
   }
 }
 
-function withExclusiveLock(lockPath, callback) {
-  mkdirSync(dirname(lockPath), { recursive: true });
-  acquireLock(lockPath);
+function readLockPid(lockPath) {
   try {
-    return callback();
+    const raw = readFileSync(lockPath, 'utf8').trim();
+    const [pidText] = raw.split(/\s+/u);
+    const pid = Number.parseInt(pidText, 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch (err) {
+    if (err?.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === 'EPERM';
+  }
+}
+
+function breakStaleLock(lockPath) {
+  const pid = readLockPid(lockPath);
+  if (pid === null) {
+    rmSync(lockPath, { force: true });
+    return true;
+  }
+  if (pid === process.pid || isPidAlive(pid)) {
+    return false;
+  }
+  rmSync(lockPath, { force: true });
+  return true;
+}
+
+async function withExclusiveLock(lockPath, callback) {
+  mkdirSync(dirname(lockPath), { recursive: true });
+  await acquireLock(lockPath);
+  try {
+    return await callback();
   } finally {
     rmSync(lockPath, { force: true });
   }
@@ -151,11 +191,140 @@ function deliveryExternalIdForKey(key) {
   return `comms-slack-thread:${digest}`;
 }
 
+function resolveSlackConfig({ channelId, threadTs, token, env }) {
+  return {
+    channelId: String(channelId ?? env?.ADVERSARIAL_REVIEW_SLACK_CHANNEL_ID ?? '').trim(),
+    threadTs: String(threadTs ?? env?.ADVERSARIAL_REVIEW_SLACK_THREAD_TS ?? '').trim(),
+    token: String(token ?? env?.SLACK_BOT_TOKEN ?? env?.ADVERSARIAL_REVIEW_SLACK_BOT_TOKEN ?? '').trim(),
+  };
+}
+
+function createSlackWebApiClient({
+  token,
+  channelId,
+  threadTs,
+  fetchImpl = globalThis.fetch,
+  apiUrl = SLACK_API_URL,
+  postTimeoutMs = DEFAULT_SLACK_POST_TIMEOUT_MS,
+} = {}) {
+  if (typeof fetchImpl !== 'function') {
+    throw new Error('slack-thread comms adapter requires fetch or a slackClient');
+  }
+  if (!token) {
+    throw new Error('slack-thread comms adapter requires SLACK_BOT_TOKEN or ADVERSARIAL_REVIEW_SLACK_BOT_TOKEN');
+  }
+  if (!channelId) {
+    throw new Error('slack-thread comms adapter requires ADVERSARIAL_REVIEW_SLACK_CHANNEL_ID');
+  }
+  const normalizedPostTimeoutMs = normalizeSlackPostTimeoutMs(postTimeoutMs);
+
+  return {
+    async postMessage({ text }) {
+      const controller = new AbortController();
+      const timeout = setTimeout(
+        () => controller.abort(new Error(`Slack chat.postMessage timed out after ${normalizedPostTimeoutMs}ms`)),
+        normalizedPostTimeoutMs,
+      );
+      let response;
+      try {
+        response = await fetchImpl(apiUrl, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json; charset=utf-8',
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            channel: channelId,
+            text,
+            ...(threadTs ? { thread_ts: threadTs } : {}),
+            unfurl_links: false,
+            unfurl_media: false,
+          }),
+        });
+      } catch (err) {
+        if (controller.signal.aborted) {
+          throw new Error(`Slack chat.postMessage timed out after ${normalizedPostTimeoutMs}ms`, { cause: err });
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeout);
+      }
+      let data = null;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok || data?.ok !== true) {
+        const reason = data?.error || `${response.status} ${response.statusText}`.trim();
+        throw new Error(`Slack chat.postMessage failed: ${reason}`);
+      }
+      const ts = data?.ts ? String(data.ts) : '';
+      const channel = data?.channel ? String(data.channel) : channelId;
+      return {
+        deliveryExternalId: ts ? `slack:${channel}:${ts}` : `slack:${channel}`,
+      };
+    },
+  };
+}
+
+function normalizeSlackPostTimeoutMs(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SLACK_POST_TIMEOUT_MS;
+}
+
+function renderReviewMessage(verdict) {
+  return redactPublicSafeText(String(verdict?.body ?? verdict?.summary ?? ''), 40_000);
+}
+
+function redactJsonValue(value, limit = 2000) {
+  if (typeof value === 'string') return redactPublicSafeText(value, limit);
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((item) => redactJsonValue(item, limit));
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, entryValue]) => entryValue !== undefined)
+      .map(([key, entryValue]) => [key, redactJsonValue(entryValue, limit)]),
+  );
+}
+
+function normalizeRemediationReplyForDelivery(reply) {
+  return redactJsonValue({
+    kind: reply?.kind,
+    schemaVersion: reply?.schemaVersion,
+    jobId: reply?.jobId,
+    outcome: reply?.outcome,
+    summary: reply?.summary,
+    validation: reply?.validation,
+    addressed: reply?.addressed,
+    nonBlocking: reply?.nonBlocking,
+    pushback: reply?.pushback,
+    blockers: reply?.blockers,
+    operationalBlockers: reply?.operationalBlockers,
+    reReview: reply?.reReview,
+  });
+}
+
+function renderOperatorNoticeMessage({ event, body }) {
+  return redactPublicSafeText(stableStringify({
+    type: 'operator-notice',
+    event: redactJsonValue(event),
+    body: String(body || ''),
+  }), 40_000);
+}
+
 /**
  * @param {{
  *   rootDir?: string,
  *   transcriptPath?: string,
  *   transcriptFile?: string,
+ *   slackClient?: { postMessage: (message: { key: DeliveryKey, text: string, payload: unknown }) => Promise<{ deliveryExternalId?: string, ts?: string, channel?: string } | string> },
+ *   token?: string,
+ *   channelId?: string,
+ *   threadTs?: string,
+ *   fetchImpl?: typeof fetch,
+ *   env?: NodeJS.ProcessEnv,
  *   now?: () => Date | string,
  * }} options
  * @returns {CommsChannelAdapter}
@@ -164,9 +333,20 @@ function createSlackThreadCommsAdapter({
   rootDir,
   transcriptPath = null,
   transcriptFile = DEFAULT_TRANSCRIPT_FILE,
+  slackClient = null,
+  token = null,
+  channelId = null,
+  threadTs = null,
+  fetchImpl = globalThis.fetch,
+  env = process.env,
   now = () => new Date(),
 } = {}) {
   const root = assertRootDir(rootDir);
+  const slackConfig = resolveSlackConfig({ channelId, threadTs, token, env });
+  const client = slackClient || createSlackWebApiClient({
+    ...slackConfig,
+    fetchImpl,
+  });
 
   function transcriptPathForKey(key) {
     if (transcriptPath) {
@@ -183,9 +363,17 @@ function createSlackThreadCommsAdapter({
     return `${transcriptPathValue}.lock`;
   }
 
-  function appendDelivery({ key, payload }) {
+  async function deliverToSlack({ key, text, payload }) {
+    const result = await client.postMessage({ key, text, payload });
+    if (typeof result === 'string') return result;
+    if (result?.deliveryExternalId) return String(result.deliveryExternalId);
+    if (result?.ts) return `slack:${result.channel || slackConfig.channelId}:${result.ts}`;
+    return deliveryExternalIdForKey(key);
+  }
+
+  async function appendDelivery({ key, payload, text }) {
     const resolvedTranscriptPath = transcriptPathForKey(key);
-    return withExclusiveLock(lockPathForTranscript(resolvedTranscriptPath), () => {
+    return withExclusiveLock(lockPathForTranscript(resolvedTranscriptPath), async () => {
       mkdirSync(dirname(resolvedTranscriptPath), { recursive: true });
       const existing = readTranscriptLines(resolvedTranscriptPath)
         .map(lineToDeliveryRecord)
@@ -199,11 +387,12 @@ function createSlackThreadCommsAdapter({
         };
       }
 
+      const attemptedAt = isoString(now());
+      const deliveryExternalId = await deliverToSlack({ key, text, payload });
       const deliveredAt = isoString(now());
-      const deliveryExternalId = deliveryExternalIdForKey(key);
       const record = {
         adapter: 'comms-slack-thread',
-        attemptedAt: deliveredAt,
+        attemptedAt,
         delivered: true,
         deliveredAt,
         deliveryExternalId,
@@ -221,23 +410,31 @@ function createSlackThreadCommsAdapter({
 
   async function postReview(verdict, deliveryKey) {
     const key = normalizeDeliveryKey(deliveryKey);
+    const safeVerdict = redactJsonValue({
+      ...verdict,
+      body: renderReviewMessage(verdict),
+      ...(verdict?.summary !== undefined ? { summary: redactPublicSafeText(verdict.summary, 2000) } : {}),
+    });
     return appendDelivery({
       key,
       payload: {
         type: 'reviewer-verdict',
-        verdict,
+        verdict: safeVerdict,
       },
+      text: renderReviewMessage(verdict),
     });
   }
 
   async function postRemediationReply(reply, deliveryKey) {
     const key = normalizeDeliveryKey(deliveryKey);
+    const safeReply = normalizeRemediationReplyForDelivery(reply);
     return appendDelivery({
       key,
       payload: {
         type: 'remediation-reply',
-        reply,
+        reply: safeReply,
       },
+      text: redactPublicSafeText(stableStringify(safeReply), 40_000),
     });
   }
 
@@ -247,9 +444,10 @@ function createSlackThreadCommsAdapter({
       key,
       payload: {
         type: 'operator-notice',
-        event,
-        body: String(body || ''),
+        event: redactJsonValue(event),
+        body: redactPublicSafeText(String(body || ''), 40_000),
       },
+      text: renderOperatorNoticeMessage({ event, body }),
     });
   }
 
@@ -271,7 +469,9 @@ function createSlackThreadCommsAdapter({
 
 export {
   DEFAULT_TRANSCRIPT_FILE,
+  createSlackWebApiClient,
   createSlackThreadCommsAdapter,
+  deliveryExternalIdForKey,
   normalizeDeliveryKey,
   stableStringify,
 };

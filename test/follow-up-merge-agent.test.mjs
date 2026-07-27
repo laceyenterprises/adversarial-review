@@ -52,6 +52,7 @@ import {
   summarizeChecksConclusion,
 } from '../src/follow-up-merge-agent.mjs';
 import { resolveSessionLedgerReadTarget } from '../src/session-ledger-read-adapter.mjs';
+import { execHqDispatchCancel } from '../src/merge-agent-hq-exec.mjs';
 // CFG-09 (2026-05-30, round-2): role-config cascade caches by
 // (topPath, modulePaths) — not env. Tests in this file rotate env
 // between cases (codex vs claude-code vs merge-agent vs invalid)
@@ -6371,6 +6372,139 @@ test('cancelMergeAgentDispatchOnMerge cancels the latest dispatch + removes the 
   ]);
 });
 
+test('cancelMergeAgentDispatchOnMerge self-authenticates the cancel with HQ_PARENT_SESSION (2026-07-26 cancel-auth deadlock fix)', async () => {
+  // `hq dispatch cancel` rejects with "cancel requires authenticated actor
+  // identity" unless an actor is in the child env. execFile inherits
+  // process.env, and the daemon plists set none — which deadlocked every
+  // hammer-route cancel. The cancel must self-authenticate via the resolved
+  // parent-session default even when the ambient env carries no actor.
+  const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, makeJob({ prNumber: 662 }), {
+    dispatchedAt: '2026-07-26T12:00:00.000Z',
+    prompt: 'p',
+    dispatchId: 'disp_a',
+    launchRequestId: 'lrq_a',
+    trigger: null,
+  });
+
+  const hqCalls = [];
+  const result = await cancelMergeAgentDispatchOnMerge({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 662,
+    hqPath: '/usr/local/bin/hq',
+    ghExecFileImpl: async () => ({ stdout: '', stderr: '' }),
+    hqExecFileImpl: async (cmd, args, opts) => {
+      hqCalls.push({ cmd, args, opts });
+      return { stdout: 'cancelled\n', stderr: '' };
+    },
+    env: { PATH: '/usr/bin' }, // no actor identity in the ambient env
+    now: '2026-07-26T13:00:00.000Z',
+  });
+
+  assert.equal(result.cancelled, true);
+  assert.equal(hqCalls.length, 1);
+  assert.deepEqual(hqCalls[0].args, ['dispatch', 'cancel', 'lrq_a']);
+  assert.equal(hqCalls[0].opts.env.HQ_PARENT_SESSION, 'session:adversarial-review:watcher');
+  assert.equal(hqCalls[0].opts.env.PATH, '/usr/bin');
+  assert.equal(hqCalls[0].opts.env.HOME, process.env.HOME);
+});
+
+test('cancelMergeAgentDispatchOnMerge honors an explicit HQ_PARENT_SESSION from the env', async () => {
+  const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, makeJob({ prNumber: 663 }), {
+    dispatchedAt: '2026-07-26T12:00:00.000Z',
+    prompt: 'p',
+    dispatchId: 'disp_b',
+    launchRequestId: 'lrq_b',
+    trigger: null,
+  });
+
+  const hqCalls = [];
+  await cancelMergeAgentDispatchOnMerge({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 663,
+    hqPath: '/usr/local/bin/hq',
+    ghExecFileImpl: async () => ({ stdout: '', stderr: '' }),
+    hqExecFileImpl: async (cmd, args, opts) => {
+      hqCalls.push({ cmd, args, opts });
+      return { stdout: 'cancelled\n', stderr: '' };
+    },
+    env: { HQ_PARENT_SESSION: 'session:custom:abc', PATH: '/usr/bin' },
+    now: '2026-07-26T13:00:00.000Z',
+  });
+
+  assert.equal(hqCalls[0].opts.env.HQ_PARENT_SESSION, 'session:custom:abc');
+});
+
+test('execHqDispatchCancel preserves env HQ_PARENT_SESSION when parentSession is omitted', async () => {
+  const calls = [];
+  await execHqDispatchCancel({
+    hqPath: '/usr/local/bin/hq',
+    hqExecFileImpl: async (cmd, args, opts) => {
+      calls.push({ cmd, args, opts });
+      return { stdout: 'cancelled\n', stderr: '' };
+    },
+    launchRequestId: 'lrq_direct',
+    env: { HQ_PARENT_SESSION: 'session:direct:abc', PATH: '/usr/bin' },
+    retryDelaysMs: [],
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, ['dispatch', 'cancel', 'lrq_direct']);
+  assert.equal(calls[0].opts.env.HQ_PARENT_SESSION, 'session:direct:abc');
+  assert.equal(calls[0].opts.env.PATH, '/usr/bin');
+});
+
+test('execHqDispatchCancel validates the hq runner dependency', async () => {
+  await assert.rejects(
+    () => execHqDispatchCancel({
+      hqPath: '/usr/local/bin/hq',
+      launchRequestId: 'lrq_missing_runner',
+      retryDelaysMs: [],
+    }),
+    { name: 'TypeError', message: 'execHqDispatchCancel requires hqExecFileImpl' }
+  );
+});
+
+test('cancelMergeAgentDispatchOnMerge retries transient hq cancel failures', async () => {
+  const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, makeJob({ prNumber: 664 }), {
+    dispatchedAt: '2026-07-26T12:00:00.000Z',
+    prompt: 'p',
+    dispatchId: 'disp_c',
+    launchRequestId: 'lrq_c',
+    trigger: null,
+  });
+
+  let hqAttempts = 0;
+  const result = await cancelMergeAgentDispatchOnMerge({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 664,
+    hqPath: '/usr/local/bin/hq',
+    ghExecFileImpl: async () => ({ stdout: '', stderr: '' }),
+    hqExecFileImpl: async () => {
+      hqAttempts += 1;
+      if (hqAttempts === 1) {
+        const err = new Error('temporary failure: daemon unavailable');
+        err.stderr = 'database is locked';
+        throw err;
+      }
+      return { stdout: 'cancelled\n', stderr: '' };
+    },
+    cancelRetryDelaysMs: [0],
+    now: '2026-07-26T13:00:00.000Z',
+  });
+
+  assert.equal(result.cancelled, true);
+  assert.equal(hqAttempts, 2);
+});
+
 test('cancelMergeAgentDispatchOnMerge filters dispatch records by repo and PR before selecting LRQ', async () => {
   const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
@@ -6528,6 +6662,7 @@ test('cancelMergeAgentDispatchOnMerge keeps the label when cancel fails transien
     hqExecFileImpl: async () => {
       throw new Error('hq: dispatch cancel failed — daemon unavailable');
     },
+    cancelRetryDelaysMs: [],
     now: '2026-05-18T13:00:00.000Z',
   });
 

@@ -105,6 +105,40 @@ function baseArgs(rootDir) {
   };
 }
 
+test('AMA closure loads merge-authority policy for the supplied domain id', async () => {
+  const rootDir = tempRoot();
+  try {
+    mkdirSync(join(rootDir, 'domains'), { recursive: true });
+    writeFileSync(
+      join(rootDir, 'domains', 'security-pr.json'),
+      JSON.stringify({
+        id: 'security-pr',
+        mergeAuthority: { enabled: false },
+      }),
+    );
+
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      domainId: 'security-pr',
+      runDaemonCleanMergeAttemptImpl: async () => {
+        throw new Error('domain-disabled AMA must short-circuit before daemon merge');
+      },
+      maybeDispatchAmaCloserImpl: async () => {
+        throw new Error('domain-disabled AMA must not dispatch a closer');
+      },
+    });
+
+    assert.deepEqual(result, {
+      dispatched: false,
+      reason: 'ama-disabled',
+      amaEnabled: false,
+      namedReason: 'ama-disabled',
+    });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('daemon merges the clean tick → skips closer dispatch (no agent spawn)', async () => {
   const rootDir = tempRoot();
   try {

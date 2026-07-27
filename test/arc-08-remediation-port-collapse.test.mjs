@@ -10,7 +10,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import * as remediation from '../src/follow-up-remediation.mjs';
@@ -115,6 +117,41 @@ test('resolveRoleRegistryRemediator: reads the registry default, falls back to c
     resolveRoleRegistryRemediator({ env: {}, loaderImpl: registryLoader }),
     'gemini',
   );
+});
+
+test('pickRemediationWorkerClass: registry fallback uses the job domain id', () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'arc-08-domain-remediator-'));
+  try {
+    mkdirSync(join(rootDir, 'domains'), { recursive: true });
+    writeFileSync(
+      join(rootDir, 'domains', 'security-pr.json'),
+      JSON.stringify({
+        id: 'security-pr',
+        roleRegistry: {
+          remediator: {
+            promptSet: 'security-pr',
+            workerClass: 'gemini',
+            taskKind: 'remediation',
+            completionShape: 'branch-push',
+          },
+        },
+      }),
+    );
+    const registryLoader = () => ({
+      get: (key, def) => (key === 'roles.remediator' ? 'adversarial' : def),
+      getOrchestrationMode: () => 'native',
+    });
+
+    assert.equal(
+      remediation.pickRemediationWorkerClass(
+        { domainId: 'security-pr' },
+        { env: {}, topPath: rootDir, loaderImpl: registryLoader },
+      ),
+      'gemini',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('pickRemediationWorkerClass: builder-tag domain override beats the registry default', () => {

@@ -65,10 +65,7 @@ const DEFAULT_ROUTE_BY_BUILDER_CLASS = {
     botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
   },
 };
-const ROUTE_BY_BUILDER_CLASS = resolveReviewerRouteTableFromDomain(
-  loadDomainConfig(ROOT, 'code-pr'),
-  { fallbackRouteByBuilderClass: DEFAULT_ROUTE_BY_BUILDER_CLASS },
-);
+const ROUTE_BY_BUILDER_CLASS = Object.freeze({ ...DEFAULT_ROUTE_BY_BUILDER_CLASS });
 
 const DEFAULT_REVIEWER_ENV = 'ADVERSARIAL_REVIEW_DEFAULT_REVIEWER';
 
@@ -128,9 +125,23 @@ const REVIEWER_FAMILY_BY_BUILDER_CLASS = {
   hermes: 'hermes',
 };
 
-function normalizeBuilderClass(builderClassInput) {
+function getReviewerRouteTable({
+  rootDir = ROOT,
+  domainId = 'code-pr',
+  domainConfig = null,
+  routeTable = null,
+  loadDomainConfigImpl = loadDomainConfig,
+} = {}) {
+  if (routeTable) return routeTable;
+  const resolvedDomainConfig = domainConfig || loadDomainConfigImpl(rootDir, domainId || 'code-pr');
+  return resolveReviewerRouteTableFromDomain(resolvedDomainConfig, {
+    fallbackRouteByBuilderClass: DEFAULT_ROUTE_BY_BUILDER_CLASS,
+  });
+}
+
+function normalizeBuilderClass(builderClassInput, routeTable = ROUTE_BY_BUILDER_CLASS) {
   const builderClass = String(builderClassInput || '').trim().toLowerCase();
-  return Object.prototype.hasOwnProperty.call(ROUTE_BY_BUILDER_CLASS, builderClass)
+  return Object.prototype.hasOwnProperty.call(routeTable || {}, builderClass)
     ? builderClass
     : null;
 }
@@ -237,8 +248,8 @@ function resolveGeminiReviewerModeForRoute({
 // its own family (a `[gemini]`-built PR). Unknown builder classes are not
 // gemini-reviewable (fail-closed). This is the single source of truth the
 // routing layer and tests assert against.
-function geminiMayReviewBuilder(builderClassInput) {
-  const builderClass = normalizeBuilderClass(builderClassInput);
+function geminiMayReviewBuilder(builderClassInput, routeTable = ROUTE_BY_BUILDER_CLASS) {
+  const builderClass = normalizeBuilderClass(builderClassInput, routeTable);
   if (!builderClass) return false;
   return REVIEWER_FAMILY_BY_BUILDER_CLASS[builderClass] !== 'gemini';
 }
@@ -260,16 +271,17 @@ function applyGeminiReviewerRoute({
   baseRoute,
   mode,
   primaryReviewerQuotaCapped = false,
+  routeTable = ROUTE_BY_BUILDER_CLASS,
 } = {}) {
   if (!baseRoute || baseRoute.configBroken) return baseRoute;
   const normalizedBuilder =
-    normalizeBuilderClass(builderClass) || normalizeBuilderClass(baseRoute.builderClass);
+    normalizeBuilderClass(builderClass, routeTable) || normalizeBuilderClass(baseRoute.builderClass, routeTable);
   const baseIsGemini = normalizeReviewerModel(baseRoute.reviewerModel) === 'gemini';
 
   // Hard guard: gemini must NEVER review a gemini-built PR, no matter how the
   // gemini reviewer was selected. Fall back to the per-tag cross-model route.
-  if (baseIsGemini && normalizedBuilder && !geminiMayReviewBuilder(normalizedBuilder)) {
-    const crossModel = ROUTE_BY_BUILDER_CLASS[normalizedBuilder];
+  if (baseIsGemini && normalizedBuilder && !geminiMayReviewBuilder(normalizedBuilder, routeTable)) {
+    const crossModel = routeTable[normalizedBuilder];
     return {
       ...baseRoute,
       reviewerModel: crossModel.reviewerModel,
@@ -290,7 +302,7 @@ function applyGeminiReviewerRoute({
   // Explicit operator reviewer pins are stronger than the Gemini default layer.
   // The Gemini-on-Gemini hard guard above still applies to a Gemini pin.
   if (baseRoute.operatorPinnedReviewer) return baseRoute;
-  if (!normalizedBuilder || !geminiMayReviewBuilder(normalizedBuilder)) return baseRoute;
+  if (!normalizedBuilder || !geminiMayReviewBuilder(normalizedBuilder, routeTable)) return baseRoute;
   if (!GEMINI_REVIEWABLE_BUILDER_CLASSES.includes(normalizedBuilder)) return baseRoute;
   if (normalizedMode === 'fallback' && !primaryReviewerQuotaCapped) return baseRoute;
 
@@ -313,11 +325,12 @@ function applyEffectiveReviewerRoute(options = {}) {
   return applyGeminiReviewerRoute(options);
 }
 
-function applyGeminiIntegrityGuard(route) {
+function applyGeminiIntegrityGuard(route, routeTable = ROUTE_BY_BUILDER_CLASS) {
   return applyGeminiReviewerRoute({
     builderClass: route?.builderClass,
     baseRoute: route,
     mode: 'off',
+    routeTable,
   });
 }
 
@@ -326,7 +339,6 @@ function applyGeminiIntegrityGuard(route) {
 // eligibility matrix. The default matrix is computed through
 // `applyEffectiveReviewerRoute` so operator-facing output cannot drift from
 // routePR()/watcher dispatch semantics.
-const ROSTER_BUILDER_CLASSES = Object.freeze(Object.keys(ROUTE_BY_BUILDER_CLASS));
 const ROSTER_REVIEWER_MODELS = Object.freeze(['claude', 'codex', 'gemini']);
 const REVIEWER_MODEL_FAMILY = Object.freeze({ claude: 'claude', codex: 'codex', gemini: 'gemini' });
 
@@ -343,18 +355,22 @@ function geminiRosterNote(mode) {
   }
 }
 
-function reviewerRoster({ mode = DEFAULT_GEMINI_REVIEWER_MODE } = {}) {
+function reviewerRoster({
+  mode = DEFAULT_GEMINI_REVIEWER_MODE,
+  routeTable = ROUTE_BY_BUILDER_CLASS,
+} = {}) {
   const normalizedMode = normalizeGeminiReviewerMode(mode);
+  const builderClasses = Object.keys(routeTable);
   return ROSTER_REVIEWER_MODELS.map((reviewerModel) => {
     const family = REVIEWER_MODEL_FAMILY[reviewerModel];
-    const eligibleBuilderClasses = ROSTER_BUILDER_CLASSES.filter((builderClass) => {
+    const eligibleBuilderClasses = builderClasses.filter((builderClass) => {
       if (reviewerModel === 'gemini') {
         return GEMINI_REVIEWABLE_BUILDER_CLASSES.includes(builderClass);
       }
       return REVIEWER_FAMILY_BY_BUILDER_CLASS[builderClass] !== family;
     });
-    const defaultBuilderClasses = ROSTER_BUILDER_CLASSES.filter((builderClass) => {
-      const crossModelRoute = ROUTE_BY_BUILDER_CLASS[builderClass];
+    const defaultBuilderClasses = builderClasses.filter((builderClass) => {
+      const crossModelRoute = routeTable[builderClass];
       const route = applyEffectiveReviewerRoute({
         builderClass,
         baseRoute: {
@@ -364,6 +380,7 @@ function reviewerRoster({ mode = DEFAULT_GEMINI_REVIEWER_MODE } = {}) {
           botTokenEnv: crossModelRoute.botTokenEnv,
         },
         mode: normalizedMode,
+        routeTable,
       });
       return route?.reviewerModel === reviewerModel;
     });
@@ -400,28 +417,40 @@ function configBrokenRoute(builderClass, err) {
   };
 }
 
-function baseRouteForSubject(builderClass, { env, topPath, modulePaths, loaderImpl } = {}) {
+function baseRouteForSubject(builderClass, {
+  env,
+  topPath,
+  modulePaths,
+  loaderImpl,
+  routeTable = ROUTE_BY_BUILDER_CLASS,
+} = {}) {
   let route;
   let operatorPinnedReviewer = false;
   try {
     const pinnedRoute = defaultReviewerRouteFromEnv(env, { topPath, modulePaths, loaderImpl });
     operatorPinnedReviewer = Boolean(pinnedRoute);
-    route = pinnedRoute || ROUTE_BY_BUILDER_CLASS[builderClass];
+    route = pinnedRoute || routeTable[builderClass];
   } catch (err) {
     if (err && err.name === 'AgentOSConfigError') {
       return configBrokenRoute(builderClass, err);
     }
     throw err;
   }
-  return markOperatorPinnedRoute(
+  const resolvedRoute = markOperatorPinnedRoute(
     applyGeminiIntegrityGuard({
       builderClass,
       tag: tagFromBuilderClass(builderClass),
       reviewerModel: route.reviewerModel,
       botTokenEnv: route.botTokenEnv,
-    }),
+    }, routeTable),
     operatorPinnedReviewer,
   );
+  Object.defineProperty(resolvedRoute, 'routeTable', {
+    value: routeTable,
+    enumerable: false,
+    configurable: true,
+  });
+  return resolvedRoute;
 }
 
 // CFG-02 round-1 review B3 fix (2026-05-30): catch AgentOSConfigError
@@ -440,10 +469,22 @@ function routeSubject(subject, {
   geminiReviewerMode,
   primaryReviewerQuotaCapped = false,
   applyGeminiReviewerMode = true,
+  domainId = subject?.ref?.domainId || subject?.domainId || 'code-pr',
+  rootDir = ROOT,
+  domainConfig = null,
+  routeTable: suppliedRouteTable = null,
+  loadDomainConfigImpl = loadDomainConfig,
 } = {}) {
-  const builderClass = normalizeBuilderClass(subject?.builderClass);
+  const routeTable = getReviewerRouteTable({
+    rootDir,
+    domainId,
+    domainConfig,
+    routeTable: suppliedRouteTable,
+    loadDomainConfigImpl,
+  });
+  const builderClass = normalizeBuilderClass(subject?.builderClass, routeTable);
   if (!builderClass) return null;
-  const baseRoute = baseRouteForSubject(builderClass, { env, topPath, modulePaths, loaderImpl });
+  const baseRoute = baseRouteForSubject(builderClass, { env, topPath, modulePaths, loaderImpl, routeTable });
   if (baseRoute?.configBroken || !applyGeminiReviewerMode) return baseRoute;
   try {
     const mode = resolveGeminiReviewerModeForRoute({
@@ -458,6 +499,7 @@ function routeSubject(subject, {
       baseRoute,
       mode,
       primaryReviewerQuotaCapped,
+      routeTable,
     });
   } catch (err) {
     if (err && err.name === 'AgentOSConfigError') {
@@ -492,11 +534,19 @@ function extractLinearTicketId(title, options = {}) {
 }
 
 function routePR(prTitle, subject = null, options = {}) {
+  const routeTable = getReviewerRouteTable({
+    rootDir: options.rootDir || ROOT,
+    domainId: options.domainId || subject?.ref?.domainId || subject?.domainId || 'code-pr',
+    domainConfig: options.domainConfig || null,
+    routeTable: options.routeTable || null,
+    loadDomainConfigImpl: options.loadDomainConfigImpl || loadDomainConfig,
+  });
   const builderClass = normalizeBuilderClass(
-    subject?.builderClass || builderClassFromTitle(prTitle)
+    subject?.builderClass || builderClassFromTitle(prTitle),
+    routeTable,
   );
   if (!builderClass) return null;
-  const route = routeSubject({ builderClass }, options);
+  const route = routeSubject({ ...subject, builderClass }, options);
   if (!route) return null;
   // CFG-02 round-1 review B3 fix: propagate the config-broken sentinel
   // so the caller can route to a dedicated disposition instead of
@@ -535,6 +585,7 @@ export {
   defaultReviewerRouteFromEnv,
   formatReviewerRoster,
   geminiMayReviewBuilder,
+  getReviewerRouteTable,
   isCrossModelReviewWaived,
   normalizeBuilderClass,
   normalizeGeminiReviewerMode,

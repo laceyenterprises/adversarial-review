@@ -24,6 +24,24 @@ function objectOrNull(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
 }
 
+function mergeRoleRegistryRoles(fallbackRoleRegistry, rawRegistry) {
+  const fallbackRoles = objectOrNull(fallbackRoleRegistry?.roles) || {};
+  const merged = {};
+  for (const [roleId, roleDef] of Object.entries(fallbackRoles)) {
+    merged[roleId] = { ...roleDef };
+  }
+  for (const [roleId, roleDef] of Object.entries(rawRegistry || {})) {
+    const domainRoleDef = objectOrNull(roleDef);
+    merged[roleId] = domainRoleDef
+      ? {
+          ...(objectOrNull(merged[roleId]) || {}),
+          ...domainRoleDef,
+        }
+      : roleDef;
+  }
+  return merged;
+}
+
 export function resolveLegacyReviewerRouteByRoleId(roleId) {
   return LEGACY_REVIEWER_ROUTE_BY_ROLE_ID[str(roleId)] || null;
 }
@@ -54,12 +72,15 @@ export function resolveRoleRegistryFromDomain(domainConfig, {
 } = {}) {
   const rawRegistry = objectOrNull(domainConfig?.roleRegistry);
   if (!rawRegistry) return fallbackRoleRegistry;
+  const mergedRegistry = mergeRoleRegistryRoles(fallbackRoleRegistry, rawRegistry);
   const workerClassSet = workerClasses instanceof Set
     ? workerClasses
     : Array.isArray(workerClasses)
       ? new Set(workerClasses)
       : publishedWorkerClassSet(workerClassOptions);
-  return validateRoleRegistry(rawRegistry, {
+  return validateRoleRegistry(mergedRegistry, {
+    neverReviewOwnBuilderClass:
+      fallbackRoleRegistry?.routing?.neverReviewOwnBuilderClass !== false,
     workerClassSet,
   });
 }

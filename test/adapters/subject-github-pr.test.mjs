@@ -100,6 +100,27 @@ test('github-pr subject adapter discovers GitHub PR subjects with normalized bui
   });
 });
 
+test('github-pr routing resolves reviewer routes from the subject domain at call time', () => {
+  assert.deepEqual(routeSubject({
+    ref: { domainId: 'security-pr' },
+    builderClass: 'codex',
+  }, {
+    env: HERMETIC_CONFIG_ENV,
+    geminiReviewerMode: 'off',
+    domainConfig: {
+      id: 'security-pr',
+      reviewerRouting: {
+        codex: 'gemini-reviewer-lacey',
+      },
+    },
+  }), {
+    builderClass: 'codex',
+    tag: 'codex',
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+  });
+});
+
 test('github-pr routing can force the default reviewer from env', () => {
   const env = { ...HERMETIC_CONFIG_ENV, ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'codex' };
 

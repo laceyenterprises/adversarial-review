@@ -170,6 +170,7 @@ export async function handlePostedReviewRow({
       repoPath,
       prNumber,
       currentRevisionRef,
+      domainId,
       logger,
     });
     if (coexistenceDecision.outcome === 'pr-terminal') {

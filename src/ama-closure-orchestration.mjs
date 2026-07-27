@@ -231,6 +231,7 @@ export async function maybeDispatchAmaClosureFor({
   repoPath,
   prNumber,
   currentRevisionRef,
+  domainId = 'code-pr',
   logger,
   loadConfigImpl = loadConfigCached,
   maybeDispatchAmaCloserImpl = maybeDispatchAmaCloser,
@@ -251,7 +252,7 @@ export async function maybeDispatchAmaClosureFor({
     // the reviewed file, not the shell env export that mis-resolves nested keys.
     const loadedConfig = loadConfigImpl({ modulePaths: WATCHER_MERGE_AUTHORITY_CONFIG_MODULES });
     cfg = resolveMergeAuthorityConfigFromDomain(
-      loadDomainConfig(rootDir, 'code-pr'),
+      loadDomainConfig(rootDir, domainId || 'code-pr'),
       loadedConfig.getMergeAuthorityConfig(),
     );
     orchestrationMode = resolveOrchestrationMode({
@@ -816,6 +817,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   repoPath,
   prNumber,
   currentRevisionRef,
+  domainId = 'code-pr',
   logger,
   maybeDispatchAmaClosureForImpl = maybeDispatchAmaClosureFor,
 }) {
@@ -852,6 +854,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     repoPath,
     prNumber,
     currentRevisionRef,
+    domainId,
     logger,
   });
   if (amaClosureResult?.dispatched) {

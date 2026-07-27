@@ -600,7 +600,10 @@ export async function processReviewSubject(entry, ctx) {
       }
 
       let crossModelWaiverReason = null;
-      const baseRoute = routeSubject(subject, { geminiReviewerMode: 'off' });
+      const baseRoute = routeSubject(subject, {
+        domainId,
+        geminiReviewerMode: 'off',
+      });
       // CFG-02 round-1 review B3 fix (2026-05-30): routeSubject can now
       // return a tagged `configBroken: true` sentinel when a runtime
       // edit to config.yaml violates the strict schema (instead of
@@ -690,6 +693,7 @@ export async function processReviewSubject(entry, ctx) {
                 expectedReviewerModel: baseRoute.reviewerModel,
               })
             : false,
+        routeTable: baseRoute.routeTable,
       });
       if (geminiBaseRoute.geminiReviewerSelection) {
         console.log(

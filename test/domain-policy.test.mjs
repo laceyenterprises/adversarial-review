@@ -64,6 +64,40 @@ test('code-pr remediator default is declared in the domain role registry', () =>
   assert.equal(registry.roles['security-reviewer'].promptSet, 'code-pr-security');
 });
 
+test('domain role registry overrides merge over fallback roles', () => {
+  const registry = resolveRoleRegistryFromDomain({
+    id: 'partial-domain',
+    roleRegistry: {
+      remediator: {
+        promptSet: 'partial-domain',
+      },
+    },
+  }, {
+    fallbackRoleRegistry: {
+      roles: {
+        remediator: {
+          promptSet: 'code-pr',
+          workerClass: 'codex',
+          taskKind: 'remediation',
+          completionShape: 'branch-push',
+        },
+        'merge-reviewer': {
+          promptSet: 'code-pr',
+          workerClass: 'gemini',
+          taskKind: 'review',
+          completionShape: 'decision-only',
+        },
+      },
+      routing: { neverReviewOwnBuilderClass: true },
+    },
+    workerClasses: ['codex', 'gemini', 'claude-code'],
+  });
+
+  assert.equal(registry.roles.remediator.promptSet, 'partial-domain');
+  assert.equal(registry.roles.remediator.workerClass, 'codex');
+  assert.equal(registry.roles['merge-reviewer'].workerClass, 'gemini');
+});
+
 test('domain merge-authority policy overrides fallback defaults', () => {
   const domainConfig = loadDomainConfig(ROOT, 'code-pr');
   const cfg = resolveMergeAuthorityConfigFromDomain(domainConfig, {

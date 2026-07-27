@@ -704,7 +704,7 @@ function validateStartupRemediationConfig(env = process.env, opts = {}) {
 // so `.get` returns the documented fallback and no operator config trips schema
 // validation. This is the DEFAULT — domain routing (builder-tag) overrides it,
 // and an operator env pin overrides everything.
-function resolveRoleRegistryRemediator({ env = process.env, topPath, loaderImpl } = {}) {
+function resolveRoleRegistryRemediator({ env = process.env, topPath, loaderImpl, domainId = 'code-pr' } = {}) {
   try {
     const cfg = loadRoleConfig({ env, topPath, loaderImpl, contextKey: 'roles.remediator' });
     const value = normalizeRemediationWorkerClass(
@@ -716,7 +716,7 @@ function resolveRoleRegistryRemediator({ env = process.env, topPath, loaderImpl 
     // documented default rather than failing the dispatch.
   }
   const domainValue = normalizeRemediationWorkerClass(
-    resolveRemediatorWorkerClassFromDomain(loadDomainConfig(topPath || ROOT, 'code-pr')),
+    resolveRemediatorWorkerClassFromDomain(loadDomainConfig(topPath || ROOT, domainId || 'code-pr')),
   );
   if (domainValue) return domainValue;
   return DEFAULT_REMEDIATION_WORKER_CLASS;
@@ -737,7 +737,7 @@ function pickRemediationWorkerClass(job, { env = process.env, topPath, loaderImp
   if (builderTag && Object.prototype.hasOwnProperty.call(REMEDIATION_WORKER_BY_BUILDER_TAG, builderTag)) {
     return REMEDIATION_WORKER_BY_BUILDER_TAG[builderTag];
   }
-  return resolveRoleRegistryRemediator({ env, topPath, loaderImpl });
+  return resolveRoleRegistryRemediator({ env, topPath, loaderImpl, domainId: job?.domainId || 'code-pr' });
 }
 
 function requeueClaimedFollowUpJobAfterConfigFailure({

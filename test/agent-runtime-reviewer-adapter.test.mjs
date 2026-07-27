@@ -506,7 +506,11 @@ test('agent-runtime reviewer adapter cancels spawned handle when run-state updat
   }
 });
 
-test('production code-pr domain is wired to the AgentRuntime port', () => {
+test('production code-pr domain is wired to the standalone cli-direct reviewer runtime', () => {
   const config = loadDomainConfig(process.cwd(), 'code-pr');
-  assert.equal(config.reviewerRuntime, 'agent-runtime');
+  // RC-1 revert: the SDK/agent-runtime reviewer cutover was reverted to the
+  // native standalone cli-direct runtime — the os-dispatch path dropped the
+  // follow-up-job enqueue (remediators stopped firing) and raced on workspace
+  // provisioning. Re-attempt the SDK cutover later behind a real smoke harness.
+  assert.equal(config.reviewerRuntime, 'cli-direct');
 });

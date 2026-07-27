@@ -130,6 +130,21 @@ test('validateDomainConfig rejects a non-object riskClasses', () => {
   );
 });
 
+test('validateDomainConfig rejects non-object reviewerRouting/roleRegistry/mergeAuthority', () => {
+  assert.throws(
+    () => validateDomainConfig('domain-a', baseConfig('domain-a', { reviewerRouting: 'bad' })),
+    /non-object "reviewerRouting" field/,
+  );
+  assert.throws(
+    () => validateDomainConfig('domain-a', baseConfig('domain-a', { roleRegistry: 'bad' })),
+    /non-object "roleRegistry" field/,
+  );
+  assert.throws(
+    () => validateDomainConfig('domain-a', baseConfig('domain-a', { mergeAuthority: 'bad' })),
+    /non-object "mergeAuthority" field/,
+  );
+});
+
 test('two-domain run pumps each domain through its own isolated adapter set', () => {
   // Two enabled domains declaring different reviewer runtimes must resolve to
   // distinct, config-driven adapter instances — the precondition for the poll

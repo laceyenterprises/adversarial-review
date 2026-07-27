@@ -3,7 +3,7 @@
   "enabled": true,
   "subjectChannel": "github-pr",
   "commsChannel": "github-pr-comments",
-  "reviewerRuntime": "cli-direct",
+  "reviewerRuntime": "agent-runtime",
   "operatorSurface": {
     "controls": "github-pr-label-controls",
     "triageSync": "linear"
@@ -29,7 +29,47 @@
   "reviewerRouting": {
     "codex": "claude-reviewer-lacey",
     "claude-code": "codex-reviewer-lacey",
-    "clio-agent": "codex-reviewer-lacey"
+    "clio-agent": "claude-reviewer-lacey"
+  },
+  "roleRegistry": {
+    "remediator": {
+      "promptSet": "code-pr",
+      "workerClass": "codex",
+      "taskKind": "remediation",
+      "completionShape": "branch-push"
+    },
+    "code-quality-reviewer": {
+      "promptSet": "code-pr",
+      "workerClass": "codex",
+      "taskKind": "review",
+      "completionShape": "decision-only"
+    },
+    "security-reviewer": {
+      "promptSet": "code-pr-security",
+      "workerClass": "codex",
+      "taskKind": "review",
+      "completionShape": "decision-only"
+    }
+  },
+  "mergeAuthority": {
+    "autonomousMergeExecutionEnabled": true,
+    "strictMode": true,
+    "strictNonBlockingRemediation": true,
+    "workerClass": "hammer",
+    "workerClassFallback": ["claude-code"],
+    "mergeMethod": "squash",
+    "hammerLifetimeDispatchCeiling": 6,
+    "lha": {
+      "consumeAttestations": true
+    },
+    "eligibility": {
+      "riskClasses": ["low"],
+      "fastMergeLabels": ["fast-merge:test-fixtures", "fast-merge:docs"],
+      "highRiskRequiresTwoKey": true
+    },
+    "branchProtection": {
+      "required": true
+    }
   },
   "pipeline": {
     "enabled": false,

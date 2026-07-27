@@ -65,6 +65,18 @@ function validateDomainConfig(id, config) {
       `[domain-registry] domain "${id}" has a non-object "riskClasses" field`
     );
   }
+  if (config.reviewerRouting !== undefined
+    && (config.reviewerRouting === null || typeof config.reviewerRouting !== 'object' || Array.isArray(config.reviewerRouting))) {
+    throw new Error(
+      `[domain-registry] domain "${id}" has a non-object "reviewerRouting" field`
+    );
+  }
+  if (config.roleRegistry !== undefined
+    && (config.roleRegistry === null || typeof config.roleRegistry !== 'object' || Array.isArray(config.roleRegistry))) {
+    throw new Error(
+      `[domain-registry] domain "${id}" has a non-object "roleRegistry" field`
+    );
+  }
   // ARC-13: the optional `pipeline` block is deep-validated (stages, panel
   // roles) lazily by `resolveDomainPipeline` only when it is enabled; here we
   // fail loud on a structurally wrong shape (non-object, or a non-boolean
@@ -79,6 +91,12 @@ function validateDomainConfig(id, config) {
         `(got ${JSON.stringify(config.pipeline.enabled)})`
       );
     }
+  }
+  if (config.mergeAuthority !== undefined
+    && (config.mergeAuthority === null || typeof config.mergeAuthority !== 'object' || Array.isArray(config.mergeAuthority))) {
+    throw new Error(
+      `[domain-registry] domain "${id}" has a non-object "mergeAuthority" field`
+    );
   }
 }
 

@@ -46,6 +46,7 @@ import {
   upsertSpawnRecord,
 } from './reviewer-fence.mjs';
 import { loadRoleRegistry } from './role-registry.mjs';
+import { resolveRoleRegistryFromDomain } from './domain-policy.mjs';
 import { resolveDomainPipeline } from './domain-pipeline.mjs';
 import { runGatedReviewPipeline } from './watcher-review-pipeline.mjs';
 import {
@@ -544,7 +545,9 @@ async function runWatcherGatedReviewPipeline({
   spawnReviewerArgs,
   stageStates = [],
 }) {
-  const roleRegistry = loadRoleRegistry({ env: process.env });
+  const roleRegistry = resolveRoleRegistryFromDomain(domainConfig, {
+    fallbackRoleRegistry: loadRoleRegistry({ env: process.env }),
+  });
   const resolvedPipeline = resolveDomainPipeline(domainConfig, { roleRegistry });
   // Lazy-import the comms adapter: statically importing it at the top of
   // watcher.mjs forms a module cycle (comms → pr-comments → follow-up-jobs →

@@ -27,6 +27,8 @@ import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { evaluateMergeEligibility } from './ama/merge-eligibility.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import { loadConfigCached } from './config-loader.mjs';
+import { loadDomainConfig } from './domain-config.mjs';
+import { resolveMergeAuthorityConfigFromDomain } from './domain-policy.mjs';
 import {
   AMA_LIVE_REVIEW_LOOKUP_RETRY_DELAYS_MS,
   fetchLatestHeadReviewBodiesWithRetry,
@@ -229,6 +231,7 @@ export async function maybeDispatchAmaClosureFor({
   repoPath,
   prNumber,
   currentRevisionRef,
+  domainId = 'code-pr',
   logger,
   loadConfigImpl = loadConfigCached,
   maybeDispatchAmaCloserImpl = maybeDispatchAmaCloser,
@@ -248,7 +251,10 @@ export async function maybeDispatchAmaClosureFor({
     // (notably lha.consume_attestations, which gates autonomous merge) come from
     // the reviewed file, not the shell env export that mis-resolves nested keys.
     const loadedConfig = loadConfigImpl({ modulePaths: WATCHER_MERGE_AUTHORITY_CONFIG_MODULES });
-    cfg = loadedConfig.getMergeAuthorityConfig();
+    cfg = resolveMergeAuthorityConfigFromDomain(
+      loadDomainConfig(rootDir, domainId || 'code-pr'),
+      loadedConfig.getMergeAuthorityConfig(),
+    );
     orchestrationMode = resolveOrchestrationMode({
       loadedConfig,
       logger,
@@ -811,6 +817,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
   repoPath,
   prNumber,
   currentRevisionRef,
+  domainId = 'code-pr',
   logger,
   maybeDispatchAmaClosureForImpl = maybeDispatchAmaClosureFor,
 }) {
@@ -847,6 +854,7 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     repoPath,
     prNumber,
     currentRevisionRef,
+    domainId,
     logger,
   });
   if (amaClosureResult?.dispatched) {

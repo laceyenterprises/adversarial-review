@@ -704,7 +704,7 @@ function validateStartupRemediationConfig(env = process.env, opts = {}) {
 // so `.get` returns the documented fallback and no operator config trips schema
 // validation. This is the DEFAULT — domain routing (builder-tag) overrides it,
 // and an operator env pin overrides everything.
-function resolveRoleRegistryRemediator({ env = process.env, topPath = ROOT, loaderImpl, domainId = 'code-pr' } = {}) {
+function resolveRoleRegistryRemediator({ env = process.env, topPath, loaderImpl, domainId = 'code-pr' } = {}) {
   try {
     const cfg = loadRoleConfig({ env, topPath, loaderImpl, contextKey: 'roles.remediator' });
     const value = normalizeRemediationWorkerClass(
@@ -716,7 +716,7 @@ function resolveRoleRegistryRemediator({ env = process.env, topPath = ROOT, load
     // documented default rather than failing the dispatch.
   }
   const domainValue = normalizeRemediationWorkerClass(
-    resolveRemediatorWorkerClassFromDomain(loadDomainConfig(topPath, domainId || 'code-pr')),
+    resolveRemediatorWorkerClassFromDomain(loadDomainConfig(ROOT, domainId || 'code-pr')),
   );
   if (domainValue) return domainValue;
   return DEFAULT_REMEDIATION_WORKER_CLASS;

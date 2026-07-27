@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  isExpiredAppContractSessionError,
   isTransientAppContractError,
   withAppContractTransientRetry,
 } from '../src/app-contract-retry.mjs';
@@ -29,6 +30,14 @@ test('bare "timeout" messages are transient again (regex regression fix)', () =>
   assert.equal(isTransientAppContractError({ message: 'Request timeout' }), true);
   assert.equal(isTransientAppContractError({ message: 'operation timed out' }), true);
   assert.equal(isTransientAppContractError({ message: 'totally unrelated failure' }), false);
+});
+
+test('expired app-contract session tokens are refreshable but not generic transient retries', () => {
+  const expired = new Error('app-contract expired_session_token: session token has expired');
+  assert.equal(isExpiredAppContractSessionError(expired), true);
+  assert.equal(isExpiredAppContractSessionError(new Error('app-contract 401: session token has expired')), true);
+  assert.equal(isExpiredAppContractSessionError(new Error('app-contract invalid_session_token: no')), false);
+  assert.equal(isTransientAppContractError(expired), false);
 });
 
 test('withAppContractTransientRetry rejects a non-positive maxAttempts loudly', async () => {

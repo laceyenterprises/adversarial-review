@@ -36,6 +36,13 @@ function isTransientAppContractError(error) {
   return Boolean(codeMatch && TRANSIENT_APP_CONTRACT_CODES.has(codeMatch[1].toLowerCase()));
 }
 
+function isExpiredAppContractSessionError(error) {
+  const message = String(error?.message || '');
+  if (/^app-contract expired_session_token:/i.test(message)) return true;
+  if (/^app-contract 401\b/i.test(message) && /session token has expired/i.test(message)) return true;
+  return false;
+}
+
 async function withAppContractTransientRetry(operation, {
   maxAttempts = 3,
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -56,4 +63,8 @@ async function withAppContractTransientRetry(operation, {
   throw lastError;
 }
 
-export { isTransientAppContractError, withAppContractTransientRetry };
+export {
+  isExpiredAppContractSessionError,
+  isTransientAppContractError,
+  withAppContractTransientRetry,
+};

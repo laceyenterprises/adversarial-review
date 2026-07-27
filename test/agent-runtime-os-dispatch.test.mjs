@@ -665,6 +665,67 @@ test('run retries transient connect and dispatch failures', async () => {
   assert.equal(session.dispatched.length, 1);
 });
 
+test('run refreshes the app-contract session when dispatch sees an expired bearer', async () => {
+  const staleSession = fakeSession();
+  let staleDispatchCalls = 0;
+  staleSession.dispatch = async function dispatch() {
+    staleDispatchCalls += 1;
+    throw new Error('app-contract expired_session_token: session token has expired');
+  };
+  const freshSession = fakeSession({
+    statusSequence: [{ status: 'succeeded', artifact: reviewArtifact() }],
+  });
+  const sessions = [staleSession, freshSession];
+  let connectCalls = 0;
+  const runtime = createOsDispatchAgentRuntime({
+    connectImpl: async () => {
+      const next = sessions[connectCalls];
+      connectCalls += 1;
+      return next;
+    },
+    sleepImpl: async () => {},
+  });
+
+  const result = await (await runtime.run(reviewerRequest())).await();
+
+  assert.equal(result.status, 'completed');
+  assert.equal(connectCalls, 2);
+  assert.equal(staleDispatchCalls, 1);
+  assert.equal(freshSession.dispatched.length, 1);
+});
+
+test('run refreshes the app-contract session when dispatch_status sees an expired bearer', async () => {
+  const staleSession = fakeSession();
+  staleSession.dispatchStatus = async function dispatchStatus(requestId) {
+    this.statusCalls.push(requestId);
+    throw new Error('app-contract expired_session_token: session token has expired');
+  };
+  const freshSession = fakeSession({
+    statusSequence: [{ status: 'succeeded', artifact: reviewArtifact() }],
+  });
+  const sessions = [staleSession, freshSession];
+  let connectCalls = 0;
+  const runtime = createOsDispatchAgentRuntime({
+    connectImpl: async () => {
+      const next = sessions[connectCalls];
+      connectCalls += 1;
+      return next;
+    },
+    sleepImpl: async () => {},
+  });
+  const request = reviewerRequest();
+  const handle = await runtime.run(request);
+
+  const result = await handle.await();
+
+  assert.equal(result.status, 'completed');
+  assert.equal(connectCalls, 2);
+  assert.equal(staleSession.dispatched.length, 1);
+  assert.equal(freshSession.dispatched.length, 0);
+  assert.deepEqual(staleSession.statusCalls, [request.idempotencyKey]);
+  assert.deepEqual(freshSession.statusCalls, [request.idempotencyKey]);
+});
+
 test('run supplies the adversarial-review app id when connecting to the App SDK', async () => {
   const session = fakeSession({
     statusSequence: [{ status: 'succeeded', artifact: reviewArtifact() }],

@@ -27,6 +27,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAppSdkConnect } from '../../../app-sdk-loader.mjs';
 import {
+  isExpiredAppContractSessionError,
   isTransientAppContractError,
   withAppContractTransientRetry,
 } from '../../../app-contract-retry.mjs';
@@ -559,6 +560,30 @@ function createOsDispatchAgentRuntime({
     return sessionPromise;
   }
 
+  function clearCachedSession() {
+    sessionPromise = null;
+  }
+
+  async function withFreshSessionOnExpiry(operation) {
+    let activeSession = await resolveSession();
+    try {
+      const value = await withAppContractTransientRetry(
+        () => operation(activeSession),
+        { sleepImpl },
+      );
+      return { activeSession, value };
+    } catch (err) {
+      if (!isExpiredAppContractSessionError(err)) throw err;
+      clearCachedSession();
+      activeSession = await resolveSession();
+      const value = await withAppContractTransientRetry(
+        () => operation(activeSession),
+        { sleepImpl },
+      );
+      return { activeSession, value };
+    }
+  }
+
   async function bestEffortCancel(activeSession, requestId) {
     if (typeof activeSession?.dispatchCancel !== 'function') return;
     try {
@@ -616,10 +641,11 @@ function createOsDispatchAgentRuntime({
       }
       let statusPayload;
       try {
-        statusPayload = await withAppContractTransientRetry(
-          () => activeSession.dispatchStatus(requestId),
-          { sleepImpl },
+        const refreshed = await withFreshSessionOnExpiry(
+          (sessionForCall) => sessionForCall.dispatchStatus(requestId),
         );
+        activeSession = refreshed.activeSession;
+        statusPayload = refreshed.value;
       } catch (err) {
         if (isTransientAppContractError(err)) {
           logger?.warn?.('[os-dispatch] transient dispatch status failure; polling will continue', {
@@ -694,11 +720,10 @@ function createOsDispatchAgentRuntime({
 
     let activeSession;
     try {
-      activeSession = await resolveSession();
-      await withAppContractTransientRetry(
-        () => activeSession.dispatch(payload),
-        { sleepImpl },
+      const dispatched = await withFreshSessionOnExpiry(
+        (sessionForCall) => sessionForCall.dispatch(payload),
       );
+      activeSession = dispatched.activeSession;
     } catch (err) {
       return settledHandle(requestId, dispatchFailureResult(err));
     }

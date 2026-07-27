@@ -399,7 +399,7 @@ export const stmtAllPostedReviewAt = db.prepare(
 );
 const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "SELECT COUNT(*) AS n FROM reviewed_prs " +
-  "WHERE pr_state = 'open' AND review_status IN ('pending', 'reviewing', 'pending-upstream')";
+  "WHERE pr_state = 'open' AND posted_at IS NULL";
 export const stmtCountOpenPrsAwaitingFirstPassReview = db.prepare(
   SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW
 );
@@ -435,9 +435,11 @@ export function latestPostedReviewAtMs(handle = db) {
   return maxMs;
 }
 
-// Count of currently-open PRs still awaiting (or mid-) first-pass review. Scoped
-// to pr_state='open' so a stale closed/merged row can never hold the count above
-// zero and make the freshness pager cry wolf during a quiet posting lull.
+// Count of currently-open PRs with no genuine posted review. Keying off
+// posted_at keeps the freshness pager unmaskable: a stale/mistaken per-PR
+// review_status='posted' cannot hide a PR that never actually received a
+// published review. Scoped to pr_state='open' so a stale closed/merged row can
+// never hold the count above zero during a quiet posting lull.
 export function countOpenPrsAwaitingFirstPassReview(handle = db) {
   const stmt =
     handle === db

@@ -1,7 +1,7 @@
 // Wiring for the review-freshness liveness pager (watcher.mjs tick-end): the DB
 // reads that feed maybeFireReviewStalledAlert. RCA: reviewer dispatch can
 // succeed while no review lands, so the watcher must page off the REAL
-// MAX(posted_at) and a genuinely-open awaiting-review count — never a maskable
+// MAX(posted_at) and a genuinely-open/not-yet-posted count — never a maskable
 // per-PR status.
 
 import test from 'node:test';
@@ -68,16 +68,17 @@ test('latestPostedReviewAtMs returns the freshest posted_at, ignoring never-post
   });
 });
 
-test('countOpenPrsAwaitingFirstPassReview counts only genuinely-open, not-yet-posted PRs', () => {
+test('countOpenPrsAwaitingFirstPassReview counts genuinely-open PRs with no posted review', () => {
   withTempDb((db) => {
     assert.equal(countOpenPrsAwaitingFirstPassReview(db), 0);
     seed(db, { prState: 'open', reviewStatus: 'pending' }); // counts
     seed(db, { prState: 'open', reviewStatus: 'reviewing' }); // counts
     seed(db, { prState: 'open', reviewStatus: 'pending-upstream' }); // counts (transient hold)
     seed(db, { prState: 'open', reviewStatus: 'posted', postedAt: '2026-07-27T03:00:00.000Z' }); // done
-    seed(db, { prState: 'open', reviewStatus: 'failed' }); // terminal-ambiguous, not counted
+    seed(db, { prState: 'open', reviewStatus: 'posted' }); // masked status flip without real post still counts
+    seed(db, { prState: 'open', reviewStatus: 'failed' }); // failed pre-post still has no posted_at, so counts
     seed(db, { prState: 'closed', reviewStatus: 'pending' }); // stale closed row must NOT cry wolf
     seed(db, { prState: 'merged', reviewStatus: 'reviewing' }); // merged row excluded
-    assert.equal(countOpenPrsAwaitingFirstPassReview(db), 3);
+    assert.equal(countOpenPrsAwaitingFirstPassReview(db), 5);
   });
 });

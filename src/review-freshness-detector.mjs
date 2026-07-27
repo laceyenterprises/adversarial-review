@@ -8,9 +8,11 @@
 // failed reviewer spawn as review_status='posted' (same-head-already-reviewed),
 // so nothing external detected the stall — the fleet looked "all green" while no
 // review had landed. This detector is the pipeline's own truthful liveness
-// signal. It keys on the ACTUAL last-posted-review timestamp — recorded only
-// when a real review lands via recordPostedReview() — never the maskable
-// per-PR status, so a masking bug can never suppress the page.
+// signal. In watcher wiring, the primary baseline is the review DB's ACTUAL
+// last-posted-review timestamp (MAX posted_at after timestamp normalization).
+// The filesystem record written by recordPostedReview() is only the cold-start
+// fallback/injected-test baseline. Neither path keys on the maskable per-PR
+// status, so a masking bug can never suppress the page.
 //
 // Fully dependency-injected (deliverAlertFn, fsImpl, now) and debounced (one
 // page per window). Fail-OPEN on state-store errors: a state read/write glitch
@@ -54,9 +56,11 @@ function _writeMs(stateDir, file, atMs, fsImpl) {
   );
 }
 
-// Called by the watcher whenever a review ACTUALLY posts (a real published
-// review, not an internal status flip). This is the only writer of the
-// freshness baseline, so no masking of failed dispatches can advance it.
+// Called when a review ACTUALLY posts (a real published review, not an internal
+// status flip) to maintain the filesystem fallback baseline. Watcher production
+// wiring uses the review DB's posted_at values as the primary baseline, and this
+// fallback is consulted only when no primary timestamp is supplied/available. A
+// maskable per-PR status flip advances neither baseline.
 export function recordPostedReview(
   atMs = Date.now(),
   { stateDir = REVIEW_FRESHNESS_STATE_DIR, fsImpl = defaultFs } = {},
@@ -96,6 +100,8 @@ export async function maybeFireReviewStalledAlert({
   if (!(Number.isFinite(pendingReviewCount) && pendingReviewCount > 0)) {
     return { fired: false, reason: 'no PRs awaiting first-pass review' };
   }
+  // Watcher passes the DB-derived primary baseline. The filesystem file is the
+  // cold-start/test fallback only, so stale per-PR statuses never mask a stall.
   const lastPosted = Number.isFinite(lastPostedReviewMs)
     ? lastPostedReviewMs
     : _readMs(stateDir, LAST_POSTED_FILE, fsImpl);

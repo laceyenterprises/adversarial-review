@@ -24,6 +24,14 @@
       "store": "data/reviews.db",
       "schemaSurface": "migrations/20260719_finalization_executor_lease.sql",
       "owner": "ARC-17 Merge Authority v2 leased executor"
+    },
+    {
+      "id": "review-freshness-state",
+      "title": "Review Freshness State",
+      "path": "docs/data-model/review-freshness-state.md",
+      "store": "data/review-freshness/",
+      "schemaSurface": "src/review-freshness-detector.mjs",
+      "owner": "review-freshness liveness alert"
     }
   ]
 }

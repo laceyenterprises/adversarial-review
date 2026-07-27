@@ -133,7 +133,7 @@ const operator = createLinearTriageAdapter({
 });
 const reviewer = makeReviewerStub();
 
-marker(`fixture -> created temporary domain fixture at ${rootDir}`);
+marker('fixture -> created deterministic offline domain fixture');
 
 const [initialRef] = await subject.discoverSubjects();
 assert.ok(initialRef, 'expected markdown-file subject discovery to find subject.md');
@@ -336,4 +336,4 @@ assert.deepEqual(transcriptLines, [
   }),
 ]);
 marker(`converge -> terminal state reached with ${transcriptLines.length} byte-stable transcript deliveries`);
-marker(`done -> transcript fixture: ${transcriptPath}`);
+marker('done -> transcript fixture written under the deterministic offline fixture root');

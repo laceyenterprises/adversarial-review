@@ -546,7 +546,7 @@ function routePR(prTitle, subject = null, options = {}) {
     routeTable,
   );
   if (!builderClass) return null;
-  const route = routeSubject({ ...subject, builderClass }, options);
+  const route = routeSubject({ ...subject, builderClass }, { ...options, routeTable });
   if (!route) return null;
   // CFG-02 round-1 review B3 fix: propagate the config-broken sentinel
   // so the caller can route to a dedicated disposition instead of

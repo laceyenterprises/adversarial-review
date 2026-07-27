@@ -121,6 +121,27 @@ test('github-pr routing resolves reviewer routes from the subject domain at call
   });
 });
 
+test('github-pr routePR reuses its resolved route table', () => {
+  let loadCount = 0;
+  const route = routePR('[codex] LAC-484 reuse route table', { ref: { domainId: 'code-pr' } }, {
+    env: HERMETIC_CONFIG_ENV,
+    geminiReviewerMode: 'off',
+    loadDomainConfigImpl: () => {
+      loadCount += 1;
+      return { id: 'code-pr' };
+    },
+  });
+
+  assert.equal(loadCount, 1);
+  assert.deepEqual(route, {
+    builderClass: 'codex',
+    tag: 'codex',
+    reviewerModel: 'claude',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-484',
+  });
+});
+
 test('github-pr routing can force the default reviewer from env', () => {
   const env = { ...HERMETIC_CONFIG_ENV, ADVERSARIAL_REVIEW_DEFAULT_REVIEWER: 'codex' };
 

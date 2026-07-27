@@ -60,6 +60,37 @@ test('attestation-log provider gates an accepted decision on the exact revisionR
   store.close();
 });
 
+test('attestation-log provider retries transient hq signer failures before appending', async () => {
+  const store = memStore();
+  const calls = [];
+  const provider = createAttestationLogGateProvider({
+    ledgerStore: store,
+    hqAttestSubject: { repo: 'laceyenterprises/research-finding', prNumber: 7 },
+    hqRetryDelaysMs: [0],
+    execFileImpl: async (bin, args) => {
+      calls.push({ bin, args });
+      if (calls.length === 1) {
+        const err = new Error('temporarily unavailable');
+        err.code = 'EIO';
+        throw err;
+      }
+      return { stdout: '{"signature":"sig-retry"}\n' };
+    },
+  });
+
+  const result = await provider.gate(REF, 'sha256:current', {
+    kind: 'finalize-now',
+    observedAt: OBSERVED,
+    sourceRef: 'slack-review:review-retry',
+  });
+
+  assert.equal(result.gated, true);
+  assert.equal(result.signed.signature, 'sig-retry');
+  assert.equal(calls.length, 2);
+  assert.equal(store.read(REF).length, 1);
+  store.close();
+});
+
 test('attestation-log provider refuses to gate a stale revisionRef', async () => {
   const store = memStore();
   const provider = createAttestationLogGateProvider({ ledgerStore: store });

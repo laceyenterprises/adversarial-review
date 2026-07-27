@@ -3,6 +3,18 @@ import { openFinalizationLedgerStore } from '../../../finalization/ledger-store.
 
 const DEFAULT_ATTESTATION_KIND = 'produced';
 const DEFAULT_PRINCIPAL = 'research-finding-attestor';
+const DEFAULT_HQ_RETRY_DELAYS_MS = [100, 250, 500];
+const TRANSIENT_HQ_ERROR_CODES = new Set([
+  'EAGAIN',
+  'EAI_AGAIN',
+  'EBUSY',
+  'ECONNRESET',
+  'EIO',
+  'ENETDOWN',
+  'ENETRESET',
+  'ENETUNREACH',
+  'ETIMEDOUT',
+]);
 
 function nonEmptyString(value) {
   return typeof value === 'string' && value !== '';
@@ -37,6 +49,38 @@ function maybeParseJson(value) {
   }
 }
 
+function sleepMs(ms) {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+function normalizeRetryDelays(delays) {
+  if (!Array.isArray(delays)) return DEFAULT_HQ_RETRY_DELAYS_MS;
+  return delays
+    .map((delay) => Number(delay))
+    .filter((delay) => Number.isFinite(delay) && delay >= 0);
+}
+
+function isTransientHqError(err) {
+  const code = String(err?.code ?? err?.errno ?? '').toUpperCase();
+  if (TRANSIENT_HQ_ERROR_CODES.has(code)) return true;
+  const text = `${err?.message ?? ''}\n${err?.stderr ?? ''}`.toLowerCase();
+  return /\b(eio|eagain|timeout|timed out|temporarily unavailable|resource busy|connection reset)\b/u.test(text);
+}
+
+async function execHqAttestSignWithRetry(execFileImpl, hqBin, args, retryDelaysMs) {
+  const delays = normalizeRetryDelays(retryDelaysMs);
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await execFileImpl(hqBin, args);
+    } catch (err) {
+      if (!isTransientHqError(err) || attempt >= delays.length) {
+        throw err;
+      }
+      await sleepMs(delays[attempt]);
+    }
+  }
+}
+
 /**
  * Non-GitHub SoR gate provider for research-finding style subjects.
  *
@@ -52,6 +96,7 @@ export function createAttestationLogGateProvider({
   hqBin = 'hq',
   hqRoot = null,
   hqAttestSubject = null,
+  hqRetryDelaysMs = DEFAULT_HQ_RETRY_DELAYS_MS,
   principal = DEFAULT_PRINCIPAL,
   kind = DEFAULT_ATTESTATION_KIND,
 } = {}) {
@@ -135,7 +180,7 @@ export function createAttestationLogGateProvider({
           JSON.stringify(payload),
         ];
         if (hqRoot) args.push('--root', hqRoot);
-        const result = await execFileImpl(hqBin, args);
+        const result = await execHqAttestSignWithRetry(execFileImpl, hqBin, args, hqRetryDelaysMs);
         signed = maybeParseJson(result?.stdout) ?? { stdout: String(result?.stdout ?? '') };
       }
 

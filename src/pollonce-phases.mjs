@@ -259,6 +259,7 @@ export async function processReviewSubject(entry, ctx) {
             reviewRow,
             execFileImpl: execFileAsync,
             operatorApprovalEvent,
+            domainId,
           });
           console.log(
             `[watcher] adversarial gate for ${repoPath}#${prNumber}: ${projected.decision.state}` +

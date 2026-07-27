@@ -169,6 +169,11 @@ function extractUsage(statusPayload) {
   return usage && typeof usage === 'object' ? usage : null;
 }
 
+function liveStatusOf(statusPayload) {
+  const liveStatus = statusPayload?.live_status ?? statusPayload?.liveStatus;
+  return liveStatus && typeof liveStatus === 'object' ? liveStatus : statusPayload;
+}
+
 function failureDetail(statusPayload) {
   return (
     statusPayload?.failure_detail
@@ -183,6 +188,46 @@ function failureClassOf(statusPayload, fallback) {
   return statusPayload?.failure_class ?? statusPayload?.failureClass ?? fallback;
 }
 
+function diagnosticFailure(statusPayload) {
+  const diagnostics = Array.isArray(statusPayload?.diagnostics) ? statusPayload.diagnostics : [];
+  return diagnostics.find((diagnostic) => {
+    const severity = normalizeStatus(diagnostic?.severity);
+    return severity === 'error' || severity === 'fatal';
+  }) ?? null;
+}
+
+function nonZeroExitCode(statusPayload) {
+  const raw = statusPayload?.effectiveExitCode ?? statusPayload?.exitCode;
+  if (raw == null) return null;
+  const code = Number(raw);
+  return Number.isFinite(code) && code !== 0 ? code : null;
+}
+
+function dispatchFailureEvidence(statusPayload) {
+  const liveStatus = liveStatusOf(statusPayload);
+  const diagnostic = diagnosticFailure(statusPayload) ?? diagnosticFailure(liveStatus);
+  const exitCode = nonZeroExitCode(statusPayload) ?? nonZeroExitCode(liveStatus);
+  const health = normalizeStatus(statusPayload?.health ?? liveStatus?.health);
+  const failureClass = failureClassOf(statusPayload, null)
+    ?? failureClassOf(liveStatus, null)
+    ?? diagnostic?.violationType
+    ?? diagnostic?.gate
+    ?? (exitCode == null ? null : 'dispatch-failed')
+    ?? (health && health !== 'healthy' ? 'dispatch-failed' : null);
+  const detail = failureDetail(statusPayload)
+    ?? failureDetail(liveStatus)
+    ?? statusPayload?.lastProgressSummary
+    ?? liveStatus?.lastProgressSummary
+    ?? diagnostic?.reason
+    ?? (exitCode == null ? null : `dispatch exited with code ${exitCode}`)
+    ?? (health && health !== 'healthy' ? `dispatch health is ${health}` : null);
+  if (!failureClass && !detail) return null;
+  return {
+    failureClass: failureClass || 'dispatch-failed',
+    detail,
+  };
+}
+
 // Map a terminal dispatch_status payload into a RunResult. On `completed`, a
 // reviewer run's artifact is validated against the ReviewArtifact v2 schema; a
 // malformed handoff downgrades the run to `failed` (failureClass
@@ -192,6 +237,18 @@ function buildTerminalResult(mappedStatus, statusPayload, role) {
   const usage = extractUsage(statusPayload);
   if (mappedStatus === 'completed') {
     const artifact = extractArtifact(statusPayload);
+    const dispatchFailure = artifact === undefined
+      ? dispatchFailureEvidence(statusPayload)
+      : null;
+    if (dispatchFailure) {
+      return {
+        status: 'failed',
+        failureClass: dispatchFailure.failureClass,
+        usage,
+        runtimeMode: RUNTIME_MODE,
+        detail: dispatchFailure.detail,
+      };
+    }
     if (role.kind === 'remediator') {
       return {
         status: 'completed',

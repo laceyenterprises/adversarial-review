@@ -133,6 +133,8 @@ import {
   stmtAutoReclaimFailedOrphan,
   stmtMarkMerged,
   stmtMarkClosed,
+  latestPostedReviewAtMs,
+  countOpenPrsAwaitingFirstPassReview,
 } from './review-state-db.mjs';
 import {
   retryPendingMergeCloseouts,
@@ -216,6 +218,7 @@ import {
   isTerminalCloserCommitIdentity,
 } from './head-closer-commit-suppression.mjs';
 import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
+import { maybeFireReviewStalledAlert } from './review-freshness-detector.mjs';
 import {
   buildAdversarialGateSnapshot,
   projectAdversarialGateStatus,
@@ -1509,6 +1512,25 @@ async function pollOnce(
       await healthProbe?.finishTick?.(healthTick);
     } catch (err) {
       console.error('[watcher] health probe finalize failed:', err?.message || err);
+    }
+    // Review-freshness liveness pager. RCA: the 2026-07-14 and 2026-07-26/27
+    // review stalls both read as "green" because reviewer dispatch succeeded
+    // while no review actually landed. This pages the pipeline's own alert
+    // channel keyed on the real MAX(posted_at) in SQLite — never a maskable
+    // per-PR status — whenever no review has posted within the freshness window
+    // while open PRs still await one. Fail-open: a pager fault never breaks the
+    // tick.
+    try {
+      await maybeFireReviewStalledAlert({
+        deliverAlertFn: defaultDeliverAlert,
+        pendingReviewCount: countOpenPrsAwaitingFirstPassReview(),
+        lastPostedReviewMs: latestPostedReviewAtMs(),
+        logger: console,
+      });
+    } catch (freshnessErr) {
+      console.error(
+        `[watcher] review-freshness pager raised: ${freshnessErr?.message || freshnessErr}`
+      );
     }
   }
 }

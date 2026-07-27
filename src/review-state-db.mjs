@@ -382,3 +382,67 @@ export const stmtMarkMerged = db.prepare(
 export const stmtMarkClosed = db.prepare(
   "UPDATE reviewed_prs SET pr_state = 'closed', closed_at = ? WHERE repo = ? AND pr_number = ?"
 );
+
+// ── Review-freshness liveness (watcher self-pages when reviews stall) ─────────
+// RCA: the 2026-07-14 and 2026-07-26/27 review stalls both read as "green"
+// because reviewer dispatch succeeded while no review actually landed. These two
+// reads feed the watcher's freshness pager (see review-freshness-detector.mjs),
+// keyed on the real MAX(posted_at) — never a maskable per-PR status.
+// NOTE: deliberately NOT `SELECT MAX(posted_at)`. posted_at is stored in mixed
+// shapes across rows (ISO-8601 `…Z` from toISOString() vs space-separated tz-less
+// from SQLite CURRENT_TIMESTAMP), and a lexical SQL MAX orders a space-separated
+// value BEFORE a `T`-separated one (' ' < 'T'), so it can return an OLDER time and
+// make the freshness pager cry wolf. Fetch the candidates and take the max in JS
+// over parsePostedAtMs-normalized values instead.
+export const stmtAllPostedReviewAt = db.prepare(
+  'SELECT posted_at FROM reviewed_prs WHERE posted_at IS NOT NULL'
+);
+const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
+  "SELECT COUNT(*) AS n FROM reviewed_prs " +
+  "WHERE pr_state = 'open' AND review_status IN ('pending', 'reviewing', 'pending-upstream')";
+export const stmtCountOpenPrsAwaitingFirstPassReview = db.prepare(
+  SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW
+);
+
+// Normalize a reviewed_prs timestamp to epoch ms. SQLite CURRENT_TIMESTAMP is
+// space-separated and tz-less, and a JS toISOString() value may have lost its
+// trailing `Z`; pin any tz-less value to UTC so freshness math never falls
+// through to Date.parse's local-time interpretation. Mirrors
+// first-pass-review-suppression.mjs's parseReviewTimestamp so the two agree on
+// the same host. Returns null for empty/unparseable input.
+export function parsePostedAtMs(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(raw)
+    ? `${raw.replace(' ', 'T')}Z`
+    : raw;
+  const ms = Date.parse(normalized);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+// Freshest genuine posted-review time across all rows (epoch ms), or null if no
+// review has ever posted. posted_at is written ONLY by markPosted on a real
+// GitHub post (#696 keeps a failed pre-post attempt from fabricating it), so this
+// is a mask-proof reviewer-liveness signal. `handle` defaults to the shared db;
+// tests pass a temp handle.
+export function latestPostedReviewAtMs(handle = db) {
+  const stmt =
+    handle === db ? stmtAllPostedReviewAt : handle.prepare(stmtAllPostedReviewAt.source);
+  let maxMs = null;
+  for (const row of stmt.all()) {
+    const ms = parsePostedAtMs(row?.posted_at);
+    if (ms != null && (maxMs == null || ms > maxMs)) maxMs = ms;
+  }
+  return maxMs;
+}
+
+// Count of currently-open PRs still awaiting (or mid-) first-pass review. Scoped
+// to pr_state='open' so a stale closed/merged row can never hold the count above
+// zero and make the freshness pager cry wolf during a quiet posting lull.
+export function countOpenPrsAwaitingFirstPassReview(handle = db) {
+  const stmt =
+    handle === db
+      ? stmtCountOpenPrsAwaitingFirstPassReview
+      : handle.prepare(SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW);
+  const n = stmt.get()?.n;
+  return Number.isFinite(n) ? n : 0;
+}

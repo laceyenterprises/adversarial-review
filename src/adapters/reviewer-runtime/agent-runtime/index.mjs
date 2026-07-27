@@ -40,7 +40,7 @@ function reviewIdempotencyKey(req, { roleId }) {
   const externalId = subjectExternalId(ctx);
   const revisionRef = String(ctx.reviewerHeadSha || ctx.revisionRef || '').trim();
   const stageId = String(ctx.stageId || 'review').trim();
-  const round = Number(ctx.reviewAttemptNumber ?? ctx.reviewDbAttemptNumber ?? 1);
+  const round = Number(ctx.reviewDbAttemptNumber ?? ctx.reviewAttemptNumber ?? 1);
   return [
     domainId,
     externalId,

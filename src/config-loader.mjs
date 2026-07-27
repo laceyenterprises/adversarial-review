@@ -1987,6 +1987,11 @@ function schemaV1() {
             __default: 900,
             __min: 60,
           },
+          running_pass_timeout_seconds: {
+            __type: TYPE_INT,
+            __default: 3600,
+            __min: 1,
+          },
           // Debounce window for the stuck-dispatch alert. Default 1h: a
           // stuck dispatch only fires the alert at most once per hour, even
           // if every poll still sees the same stuck state.
@@ -2253,6 +2258,10 @@ export const ENV_ALIASES = {
   'watcher.pending_draft_review_respawn_age_seconds': {
     canonical: 'AGENT_OS_WATCHER_PENDING_DRAFT_REVIEW_RESPAWN_AGE_SECONDS',
     aliases: [['ADVERSARIAL_REVIEW_PENDING_DRAFT_RESPAWN_AGE_SECONDS', identity]],
+  },
+  'watcher.running_pass_timeout_seconds': {
+    canonical: 'AGENT_OS_REVIEWER_RUNNING_PASS_TIMEOUT_SECONDS',
+    aliases: [['ADVERSARIAL_REVIEW_RUNNING_PASS_TIMEOUT_SECONDS', identity]],
   },
   'watcher.stuck_dispatch_alert_debounce_ms': {
     canonical: 'AGENT_OS_WATCHER_STUCK_DISPATCH_ALERT_DEBOUNCE_MS',

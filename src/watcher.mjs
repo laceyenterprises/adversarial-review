@@ -373,6 +373,7 @@ import {
   resolveAlreadyReviewedHeadDedup,
 } from './reviewed-head-dispatch-gate.mjs';
 import { reconcilePendingReviewsForSelf } from './reviewer-pre-write.mjs';
+import { reapRunningReviewerPasses } from './watcher-reaper.mjs';
 import {
   inspectWatcherExitTimeout,
   resolveAdversarialReviewStateDir,
@@ -1185,6 +1186,7 @@ async function pollOnce(
   const healthTick = healthProbe?.beginTick?.();
   try {
     maybeSweepConditionalRequestCache({ rootDir: ROOT, logger: console });
+    reapRunningReviewerPasses(ROOT, console, process.env);
     const operatorSurface = createWatcherOperatorSurface();
     await refreshOrgRepos(octokit);
     const reattach = await reconcileReviewerSessions({

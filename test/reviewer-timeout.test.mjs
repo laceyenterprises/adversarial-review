@@ -103,3 +103,82 @@ test('agy reviewer subprocess timeout is never shorter than agy print timeout', 
     DEFAULT_REVIEWER_TIMEOUT_MS,
   );
 });
+
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { beginReviewerPass, reviewerPassRows, completeReviewerPass } from '../src/reviewer-pass-tokens.mjs';
+import { reapRunningReviewerPasses, resolveRunningPassTimeoutSeconds } from '../src/watcher-reaper.mjs';
+
+test('resolveRunningPassTimeoutSeconds honors env overrides', () => {
+  assert.equal(resolveRunningPassTimeoutSeconds({}), 3600);
+  assert.equal(resolveRunningPassTimeoutSeconds({ AGENT_OS_REVIEWER_RUNNING_PASS_TIMEOUT_SECONDS: '1800' }), 1800);
+  assert.equal(resolveRunningPassTimeoutSeconds({ ADVERSARIAL_REVIEW_RUNNING_PASS_TIMEOUT_SECONDS: '7200' }), 7200);
+  assert.throws(() => resolveRunningPassTimeoutSeconds({ AGENT_OS_REVIEWER_RUNNING_PASS_TIMEOUT_SECONDS: 'invalid' }));
+});
+
+test('reapRunningReviewerPasses transitions old running passes to failed', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'reaper-test-'));
+  try {
+    const now = Date.now();
+    const oldDate = new Date(now - 4000 * 1000).toISOString();
+    const recentDate = new Date(now - 1000 * 1000).toISOString();
+
+    beginReviewerPass(rootDir, {
+      repo: 'org/repo1',
+      prNumber: 1,
+      attemptNumber: 1,
+      reviewerClass: 'codex',
+      passKind: 'first-pass',
+      startedAt: oldDate,
+    });
+    beginReviewerPass(rootDir, {
+      repo: 'org/repo2',
+      prNumber: 2,
+      attemptNumber: 1,
+      reviewerClass: 'codex',
+      passKind: 'first-pass',
+      startedAt: recentDate,
+    });
+    // Add an already-completed old pass to ensure it is not touched
+    beginReviewerPass(rootDir, {
+      repo: 'org/repo3',
+      prNumber: 3,
+      attemptNumber: 1,
+      reviewerClass: 'codex',
+      passKind: 'first-pass',
+      startedAt: oldDate,
+    });
+    completeReviewerPass(rootDir, {
+      repo: 'org/repo3',
+      prNumber: 3,
+      attemptNumber: 1,
+      passKind: 'first-pass',
+      status: 'completed',
+    });
+
+    const env = { AGENT_OS_REVIEWER_RUNNING_PASS_TIMEOUT_SECONDS: '3600' };
+    const logs = [];
+    const logger = { log: (msg) => logs.push(msg) };
+
+    const reaped = reapRunningReviewerPasses(rootDir, logger, env);
+    assert.equal(reaped, 1);
+
+    const rows = reviewerPassRows(rootDir);
+    assert.equal(rows.length, 3);
+    const oldRow = rows.find(r => r.pr_number === 1);
+    const newRow = rows.find(r => r.pr_number === 2);
+    const completedRow = rows.find(r => r.pr_number === 3);
+
+    assert.equal(oldRow.status, 'failed');
+    assert.ok(oldRow.metadata_json.includes('running-pass-timeout'));
+    assert.ok(oldRow.ended_at !== null); // completed correctly
+
+    assert.equal(newRow.status, 'running');
+    assert.equal(completedRow.status, 'completed');
+
+    assert.ok(logs.some(l => l.includes('status running->failed reason=running-pass-timeout')));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

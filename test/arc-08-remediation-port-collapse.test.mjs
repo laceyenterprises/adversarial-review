@@ -22,6 +22,7 @@ import {
   resolveRemediationDispatchPathForJob,
   resolveRoleRegistryRemediator,
 } from '../src/follow-up-remediation.mjs';
+import { DEFAULT_ROLE_TOP_PATH } from '../src/role-config.mjs';
 
 const SRC_PATH = fileURLToPath(new URL('../src/follow-up-remediation.mjs', import.meta.url));
 const SRC = readFileSync(SRC_PATH, 'utf8');
@@ -110,13 +111,18 @@ test('resolveRoleRegistryRemediator: reads the registry default, falls back to c
   );
 
   // Registry present → the pinned class is honored (and normalized).
-  const registryLoader = () => ({
-    get: (key, def) => (key === 'roles.registry.remediator.workerClass' ? 'gemini' : def),
-  });
+  let observedTopPath = null;
+  const registryLoader = ({ topPath } = {}) => {
+    observedTopPath = topPath;
+    return {
+      get: (key, def) => (key === 'roles.registry.remediator.workerClass' ? 'gemini' : def),
+    };
+  };
   assert.equal(
     resolveRoleRegistryRemediator({ env: {}, loaderImpl: registryLoader }),
     'gemini',
   );
+  assert.equal(observedTopPath, DEFAULT_ROLE_TOP_PATH);
 });
 
 test('pickRemediationWorkerClass: registry fallback uses the job domain id', () => {

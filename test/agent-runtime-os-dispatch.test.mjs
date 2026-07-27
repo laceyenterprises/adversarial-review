@@ -313,8 +313,13 @@ test('run downgrades a completed run with a malformed artifact to reviewer-outpu
 
 test('run synthesizes a review artifact from healthy terminal markdown summary', async () => {
   const body = [
+    '## Summary',
+    'The registry contract needs documentation.',
+    '',
+    '## Blocking issues',
     '- **Missing registry documentation**',
     '  - **File:** `projects/worker-pool/SPEC.md`',
+    '  - **Lines:** 12-18',
     '  - **Problem:** New public contract is not documented.',
     '',
     '## Non-blocking issues',
@@ -337,15 +342,74 @@ test('run synthesizes a review artifact from healthy terminal markdown summary',
     }],
   });
   const runtime = createOsDispatchAgentRuntime({ session, sleepImpl: async () => {} });
-  const result = await (await runtime.run(reviewerRequest({ idempotencyKey: requestId }))).await();
+  const result = await (await runtime.run(reviewerRequest({
+    idempotencyKey: requestId,
+    role: { id: 'reviewer:gemini', kind: 'reviewer', model: 'gemini' },
+    subjectContent: {
+      ...reviewerRequest().subjectContent,
+      ref: {
+        domainId: 'code-pr',
+        subjectExternalId: 'laceyenterprises/agent-os#4304',
+        revisionRef: 'b5c8668631dac2d4e274536bfaa3fc4551919f57',
+      },
+    },
+  }))).await();
   assert.equal(result.status, 'completed');
   assert.equal(result.failureClass, null);
-  assert.equal(result.artifact.body, body);
+  assert.equal(result.artifact.body, body.trim());
   assert.equal(result.artifact.verdict.kind, 'request-changes');
   assert.equal(result.artifact.domainId, 'code-pr');
-  assert.equal(result.artifact.subjectExternalId, 'laceyenterprises/agent-os-4304');
+  assert.equal(result.artifact.subjectExternalId, 'laceyenterprises/agent-os#4304');
+  assert.equal(result.artifact.revisionRef, 'b5c8668631dac2d4e274536bfaa3fc4551919f57');
   assert.equal(result.artifact.reviewerRole, 'reviewer:gemini');
   assert.equal(result.artifact.reviewerRunRef, 'lrq_summary_body');
+  assert.deepEqual(result.artifact.verdict.blockingFindings, [{
+    title: 'Missing registry documentation',
+    file: '`projects/worker-pool/SPEC.md`',
+    lines: '12-18',
+    problem: 'New public contract is not documented.',
+  }]);
+  assert.deepEqual(result.artifact.verdict.nonBlockingFindings, []);
+});
+
+test('run keeps terminal summary request-changes fail-closed when findings are unparseable', async () => {
+  const body = [
+    '## Summary',
+    'The model reported a blocking verdict but omitted the canonical blocking section.',
+    '',
+    '## Verdict',
+    'Request changes',
+    '',
+  ].join('\n');
+  const requestId = 'code-pr:laceyenterprises/agent-os-4304:b5c866:review:reviewer:gemini:1-0e570173e3a5b97a';
+  const session = fakeSession({
+    statusSequence: [{
+      status: 'succeeded',
+      health: 'healthy',
+      request_id: requestId,
+      launch_request_id: 'lrq_summary_unparseable',
+      lastProgressSummary: body,
+      artifact: null,
+      result: null,
+    }],
+  });
+  const runtime = createOsDispatchAgentRuntime({ session, sleepImpl: async () => {} });
+  const result = await (await runtime.run(reviewerRequest({
+    idempotencyKey: requestId,
+    role: { id: 'reviewer:gemini', kind: 'reviewer', model: 'gemini' },
+    subjectContent: {
+      ...reviewerRequest().subjectContent,
+      ref: {
+        domainId: 'code-pr',
+        subjectExternalId: 'laceyenterprises/agent-os#4304',
+        revisionRef: 'b5c8668631dac2d4e274536bfaa3fc4551919f57',
+      },
+    },
+  }))).await();
+  assert.equal(result.status, 'completed');
+  assert.equal(result.artifact.verdict.kind, 'request-changes');
+  assert.equal(result.artifact.verdict.blockingFindings.length, 1);
+  assert.match(result.artifact.verdict.blockingFindings[0].problem, /did not expose parseable blocking findings/);
 });
 
 test('run treats succeeded dead-health dispatch without an artifact as infrastructure failure', async () => {

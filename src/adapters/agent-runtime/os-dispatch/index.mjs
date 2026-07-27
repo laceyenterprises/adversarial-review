@@ -34,6 +34,15 @@ import {
   validateReviewArtifact,
   ReviewArtifactSchemaError,
 } from './review-artifact.mjs';
+import {
+  extractReviewVerdict,
+  normalizeReviewVerdict,
+  sanitizeReviewPayloadBestEffort,
+} from '../../../kernel/verdict.mjs';
+import {
+  parseBlockingFindingsSection,
+  parseNonBlockingFindingsSection,
+} from '../../../kernel/remediation-reply.mjs';
 
 const RUNTIME_ID = 'os-dispatch';
 const RUNTIME_MODE = 'os';
@@ -187,21 +196,65 @@ function parseRequestArtifactContext(requestId) {
   };
 }
 
+function artifactContextFromRequest(request, statusPayload) {
+  const parsed = parseRequestArtifactContext(
+    request?.idempotencyKey
+      ?? statusPayload?.request_id
+      ?? statusPayload?.requestId,
+  );
+  const ref = request?.subjectContent?.ref || {};
+  return {
+    domainId: ref.domainId ?? parsed.domainId,
+    subjectExternalId: ref.subjectExternalId ?? parsed.subjectExternalId,
+    revisionRef: ref.revisionRef ?? parsed.revisionRef,
+    stageId: parsed.stageId,
+    reviewerRole: request?.role?.id ?? parsed.reviewerRole,
+  };
+}
+
 function extractVerdictPhrase(body) {
   const text = String(body || '');
-  const heading = text.match(/^##\s*Verdict\s*\n+([^\n#]+)/imu);
-  if (heading?.[1]) return heading[1].trim();
+  const extracted = extractReviewVerdict(text);
+  if (extracted) return extracted;
   const inline = text.match(/\bVerdict\s*:?\s*(Request changes|Comment-only|Comment only|Approved|Unknown)\b/imu);
   return inline?.[1]?.trim() || null;
 }
 
-function extractSummaryArtifact(statusPayload, role) {
+function normalizeFindingForArtifact(finding) {
+  if (typeof finding === 'string') return { problem: finding };
+  if (!finding || typeof finding !== 'object' || Array.isArray(finding)) return null;
+  const normalized = {};
+  for (const key of ['title', 'file', 'lines', 'problem']) {
+    const value = finding[key];
+    if (typeof value === 'string' && value.trim() !== '') normalized[key] = value;
+  }
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function parsedFindingsForArtifact(body, parser) {
+  const parsed = parser(body);
+  if (!Array.isArray(parsed)) return null;
+  return parsed.map(normalizeFindingForArtifact).filter(Boolean);
+}
+
+function fallbackRequestChangesFinding() {
+  return {
+    problem: 'Request changes review body did not expose parseable blocking findings.',
+  };
+}
+
+function extractSummaryArtifact(statusPayload, role, artifactContext = null) {
   if (role?.kind !== 'reviewer') return undefined;
-  const body = statusPayload?.lastProgressSummary ?? liveStatusOf(statusPayload)?.lastProgressSummary;
-  if (typeof body !== 'string' || body.trim() === '') return undefined;
+  const rawBody = statusPayload?.lastProgressSummary ?? liveStatusOf(statusPayload)?.lastProgressSummary;
+  if (typeof rawBody !== 'string' || rawBody.trim() === '') return undefined;
+  const body = sanitizeReviewPayloadBestEffort(rawBody);
   const verdict = extractVerdictPhrase(body);
   if (!verdict) return undefined;
-  const context = parseRequestArtifactContext(statusPayload?.request_id ?? statusPayload?.requestId);
+  const verdictKind = normalizeReviewVerdict(verdict);
+  const blockingFindings = parsedFindingsForArtifact(body, parseBlockingFindingsSection);
+  const nonBlockingFindings = parsedFindingsForArtifact(body, parseNonBlockingFindingsSection);
+  const context = artifactContext
+    ?? artifactContextFromRequest(null, statusPayload);
   return {
     kind: REVIEW_ARTIFACT_KIND,
     schemaVersion: REVIEW_ARTIFACT_SCHEMA_VERSION,
@@ -212,8 +265,10 @@ function extractSummaryArtifact(statusPayload, role) {
     verdict: {
       kind: verdict,
       summary: '',
-      blockingFindings: [],
-      nonBlockingFindings: [],
+      blockingFindings: verdictKind === 'request-changes' && (!blockingFindings || blockingFindings.length === 0)
+        ? [fallbackRequestChangesFinding()]
+        : (blockingFindings ?? []),
+      nonBlockingFindings: nonBlockingFindings ?? [],
     },
     body,
   };
@@ -288,10 +343,10 @@ function dispatchFailureEvidence(statusPayload) {
 // malformed handoff downgrades the run to `failed` (failureClass
 // 'reviewer-output') rather than reporting a junk verdict. A remediator's
 // branch-push artifact is opaque here — the domain adapter decodes it.
-function buildTerminalResult(mappedStatus, statusPayload, role) {
+function buildTerminalResult(mappedStatus, statusPayload, role, artifactContext = null) {
   const usage = extractUsage(statusPayload);
   if (mappedStatus === 'completed') {
-    const artifact = extractArtifact(statusPayload) ?? extractSummaryArtifact(statusPayload, role);
+    const artifact = extractArtifact(statusPayload) ?? extractSummaryArtifact(statusPayload, role, artifactContext);
     const dispatchFailure = artifact === undefined
       ? dispatchFailureEvidence(statusPayload)
       : null;
@@ -439,7 +494,9 @@ function createOsDispatchAgentRuntime({
   // (flag flipped by the handle) short-circuits with a best-effort server-side
   // cancel. `request_id` idempotency makes this loop safe to (re)enter on
   // reattach.
-  async function pollUntilTerminal({ activeSession, requestId, role, cancelled, deadlineMs }) {
+  async function pollUntilTerminal({
+    activeSession, requestId, role, cancelled, deadlineMs, artifactContext = null,
+  }) {
     while (true) {
       if (cancelled.value) {
         // handle.cancel() already issued the best-effort server-side cancel
@@ -481,7 +538,7 @@ function createOsDispatchAgentRuntime({
       }
       const mapped = mapTerminalStatus(normalizeStatus(statusPayload?.status));
       if (mapped) {
-        return buildTerminalResult(mapped, statusPayload, role);
+        return buildTerminalResult(mapped, statusPayload, role, artifactContext);
       }
       await sleepImpl(pollBaseMs + jitterImpl(pollJitterMs));
     }
@@ -509,6 +566,7 @@ function createOsDispatchAgentRuntime({
     const role = request.role;
     const payload = buildDispatchPayload(request, buildPrompt);
     const requestId = payload.request_id;
+    const artifactContext = artifactContextFromRequest(request, null);
 
     let activeSession;
     try {
@@ -526,7 +584,14 @@ function createOsDispatchAgentRuntime({
     let pollingPromise = null;
 
     function awaitTerminal() {
-      pollingPromise ??= pollUntilTerminal({ activeSession, requestId, role, cancelled, deadlineMs });
+      pollingPromise ??= pollUntilTerminal({
+        activeSession,
+        requestId,
+        role,
+        cancelled,
+        deadlineMs,
+        artifactContext,
+      });
       return pollingPromise;
     }
 
@@ -579,6 +644,13 @@ function createOsDispatchAgentRuntime({
     const effectiveRole = role
       || record.role
       || { kind: record.subjectContext?.agentRoleKind === 'remediator' ? 'remediator' : 'reviewer' };
+    const artifactContext = {
+      ...parseRequestArtifactContext(rawRequestId),
+      ...(record.subjectContext?.domainId ? { domainId: record.subjectContext.domainId } : {}),
+      ...(record.subjectContext?.subjectExternalId ? { subjectExternalId: record.subjectContext.subjectExternalId } : {}),
+      ...(record.subjectContext?.revisionRef ? { revisionRef: record.subjectContext.revisionRef } : {}),
+      ...(effectiveRole?.id ? { reviewerRole: effectiveRole.id } : {}),
+    };
     let activeSession;
     try {
       activeSession = await resolveSession();
@@ -591,6 +663,7 @@ function createOsDispatchAgentRuntime({
       role: effectiveRole,
       cancelled: { value: false },
       deadlineMs: resolveReattachDeadlineMs(record),
+      artifactContext,
     });
   }
 

@@ -19,6 +19,7 @@ const DEFAULT_TRANSCRIPT_FILE = 'slack-thread.jsonl';
 const DEFAULT_TRANSCRIPT_DIR = '.slack-thread-transcripts';
 const LOCK_RETRY_MS = 10;
 const LOCK_TIMEOUT_MS = 5000;
+const DEFAULT_SLACK_POST_TIMEOUT_MS = 15000;
 const SLACK_API_URL = 'https://slack.com/api/chat.postMessage';
 
 function isoString(value) {
@@ -120,12 +121,49 @@ async function acquireLock(lockPath) {
       if (err?.code !== 'EEXIST') {
         throw err;
       }
+      if (breakStaleLock(lockPath)) {
+        continue;
+      }
       if ((Date.now() - startedAt) >= LOCK_TIMEOUT_MS) {
         throw new Error(`Timed out waiting for slack-thread lock: ${lockPath}`);
       }
       await sleepMs(LOCK_RETRY_MS);
     }
   }
+}
+
+function readLockPid(lockPath) {
+  try {
+    const raw = readFileSync(lockPath, 'utf8').trim();
+    const [pidText] = raw.split(/\s+/u);
+    const pid = Number.parseInt(pidText, 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch (err) {
+    if (err?.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === 'EPERM';
+  }
+}
+
+function breakStaleLock(lockPath) {
+  const pid = readLockPid(lockPath);
+  if (pid === null) {
+    rmSync(lockPath, { force: true });
+    return true;
+  }
+  if (pid === process.pid || isPidAlive(pid)) {
+    return false;
+  }
+  rmSync(lockPath, { force: true });
+  return true;
 }
 
 async function withExclusiveLock(lockPath, callback) {
@@ -167,6 +205,7 @@ function createSlackWebApiClient({
   threadTs,
   fetchImpl = globalThis.fetch,
   apiUrl = SLACK_API_URL,
+  postTimeoutMs = DEFAULT_SLACK_POST_TIMEOUT_MS,
 } = {}) {
   if (typeof fetchImpl !== 'function') {
     throw new Error('slack-thread comms adapter requires fetch or a slackClient');
@@ -177,23 +216,40 @@ function createSlackWebApiClient({
   if (!channelId) {
     throw new Error('slack-thread comms adapter requires ADVERSARIAL_REVIEW_SLACK_CHANNEL_ID');
   }
+  const normalizedPostTimeoutMs = normalizeSlackPostTimeoutMs(postTimeoutMs);
 
   return {
     async postMessage({ text }) {
-      const response = await fetchImpl(apiUrl, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json; charset=utf-8',
-        },
-        body: JSON.stringify({
-          channel: channelId,
-          text,
-          ...(threadTs ? { thread_ts: threadTs } : {}),
-          unfurl_links: false,
-          unfurl_media: false,
-        }),
-      });
+      const controller = new AbortController();
+      const timeout = setTimeout(
+        () => controller.abort(new Error(`Slack chat.postMessage timed out after ${normalizedPostTimeoutMs}ms`)),
+        normalizedPostTimeoutMs,
+      );
+      let response;
+      try {
+        response = await fetchImpl(apiUrl, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json; charset=utf-8',
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            channel: channelId,
+            text,
+            ...(threadTs ? { thread_ts: threadTs } : {}),
+            unfurl_links: false,
+            unfurl_media: false,
+          }),
+        });
+      } catch (err) {
+        if (controller.signal.aborted) {
+          throw new Error(`Slack chat.postMessage timed out after ${normalizedPostTimeoutMs}ms`, { cause: err });
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeout);
+      }
       let data = null;
       try {
         data = await response.json();
@@ -211,6 +267,11 @@ function createSlackWebApiClient({
       };
     },
   };
+}
+
+function normalizeSlackPostTimeoutMs(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SLACK_POST_TIMEOUT_MS;
 }
 
 function renderReviewMessage(verdict) {
@@ -349,15 +410,16 @@ function createSlackThreadCommsAdapter({
 
   async function postReview(verdict, deliveryKey) {
     const key = normalizeDeliveryKey(deliveryKey);
+    const safeVerdict = redactJsonValue({
+      ...verdict,
+      body: renderReviewMessage(verdict),
+      ...(verdict?.summary !== undefined ? { summary: redactPublicSafeText(verdict.summary, 2000) } : {}),
+    });
     return appendDelivery({
       key,
       payload: {
         type: 'reviewer-verdict',
-        verdict: {
-          ...verdict,
-          body: renderReviewMessage(verdict),
-          ...(verdict?.summary !== undefined ? { summary: redactPublicSafeText(verdict.summary, 2000) } : {}),
-        },
+        verdict: safeVerdict,
       },
       text: renderReviewMessage(verdict),
     });

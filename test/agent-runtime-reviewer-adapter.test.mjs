@@ -506,7 +506,7 @@ test('agent-runtime reviewer adapter cancels spawned handle when run-state updat
   }
 });
 
-test('production code-pr domain is wired to the AgentRuntime port', () => {
+test('production code-pr domain stays on the cli-direct rollback runtime', () => {
   const config = loadDomainConfig(process.cwd(), 'code-pr');
-  assert.equal(config.reviewerRuntime, 'agent-runtime');
+  assert.equal(config.reviewerRuntime, 'cli-direct');
 });

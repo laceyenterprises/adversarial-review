@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
+  createSlackWebApiClient,
   createSlackThreadCommsAdapter,
   stableStringify,
 } from '../../src/adapters/comms/slack-thread/index.mjs';
@@ -182,18 +183,71 @@ test('slack-thread comms adapter redacts secrets and host paths before Slack wri
     kind: 'request-changes',
     body: 'Failure used Bearer abc.def-ghi at /Users/airlock/agent-os-hq/secret.txt and sk-testsecret123',
     summary: 'api_key=supersecret123 at /private/var/folders/zz/cache/output.log',
+    rationale: 'Auxiliary rationale copied sk-auxiliary123 from /Users/placey/agent-os/debug.log',
+    context: {
+      traces: ['Bearer nested.token-value in /private/var/folders/zz/cache/nested.log'],
+    },
   };
 
   await adapter.postReview(verdict, makeKey());
 
   assert.equal(slackMessages.length, 1);
   assert.doesNotMatch(slackMessages[0].text, /abc\.def-ghi|airlock|agent-os-hq|sk-testsecret123/);
+  assert.doesNotMatch(stableStringify(slackMessages[0].payload), /sk-auxiliary123|placey|nested\.token-value/);
   assert.match(slackMessages[0].text, /Bearer \[REDACTED\]/);
   assert.match(slackMessages[0].text, /<path-redacted>\/secret\.txt/);
   const transcript = readFileSync(path.join(rootDir, '.slack-thread-transcripts', 'subject.md', 'slack-thread.jsonl'), 'utf8');
-  assert.doesNotMatch(transcript, /abc\.def-ghi|airlock|agent-os-hq|sk-testsecret123|supersecret123/);
+  assert.doesNotMatch(transcript, /abc\.def-ghi|airlock|agent-os-hq|sk-testsecret123|supersecret123|sk-auxiliary123|placey|nested\.token-value/);
   assert.match(transcript, /\[REDACTED_OPENAI_TOKEN\]/);
   assert.match(transcript, /<path-redacted>\/output\.log/);
+});
+
+test('slack-thread comms adapter recovers an orphaned pid lock before delivery', async () => {
+  const rootDir = makeRootDir();
+  const lockPath = path.join(rootDir, '.slack-thread-transcripts', 'subject.md', 'slack-thread.jsonl.lock');
+  mkdirSync(path.dirname(lockPath), { recursive: true });
+  writeFileSync(lockPath, '999999999\n', 'utf8');
+  const slackMessages = [];
+  const adapter = createSlackThreadCommsAdapter({
+    rootDir,
+    slackClient: {
+      async postMessage(message) {
+        slackMessages.push(message);
+        return { deliveryExternalId: 'slack:C123:1715451000.000005' };
+      },
+    },
+    now: () => new Date('2026-05-11T18:10:00.000Z'),
+  });
+
+  const receipt = await adapter.postReview({
+    kind: 'request-changes',
+    body: '## Summary\nRecovered stale lock.\n\n## Verdict\nRequest changes',
+  }, makeKey());
+
+  assert.equal(slackMessages.length, 1);
+  assert.equal(receipt.deliveryExternalId, 'slack:C123:1715451000.000005');
+  assert.equal(existsSync(lockPath), false);
+});
+
+test('slack web api client aborts a hung chat.postMessage request', async () => {
+  let observedSignal = null;
+  const client = createSlackWebApiClient({
+    token: 'xoxb-test-token',
+    channelId: 'C123',
+    postTimeoutMs: 5,
+    fetchImpl: async (_url, options) => {
+      observedSignal = options.signal;
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+      });
+    },
+  });
+
+  await assert.rejects(
+    () => client.postMessage({ text: 'hello' }),
+    /Slack chat\.postMessage timed out after 5ms/,
+  );
+  assert.equal(observedSignal.aborted, true);
 });
 
 test('slack-thread comms adapter requires stable operator notice identity', async () => {

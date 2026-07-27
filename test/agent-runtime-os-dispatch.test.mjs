@@ -540,6 +540,32 @@ test('run honors the deadline and reports a timeout when dispatch_status never t
   assert.deepEqual(session.cancelCalls, [reviewerRequest().idempotencyKey]);
 });
 
+test('run does not spend execution timeout while dispatch is only queued', async () => {
+  const session = fakeSession({
+    statusSequence: [
+      { status: 'queued' },
+      { status: 'running' },
+      { status: 'succeeded', artifact: reviewArtifact() },
+    ],
+  });
+  const sleeps = [6_000, 1_000];
+  let clock = 1_000;
+  const runtime = createOsDispatchAgentRuntime({
+    session,
+    sleepImpl: async () => { clock += sleeps.shift() ?? 1_000; },
+    jitterImpl: () => 0,
+    nowMs: () => clock,
+  });
+  const result = await (await runtime.run(reviewerRequest({ timeoutMs: 5_000 }))).await();
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(session.cancelCalls, []);
+  assert.deepEqual(session.statusCalls, [
+    reviewerRequest().idempotencyKey,
+    reviewerRequest().idempotencyKey,
+    reviewerRequest().idempotencyKey,
+  ]);
+});
+
 test('run retries transient dispatch_status failures but fails fast on client errors', async () => {
   const transient = new Error('connection reset');
   transient.code = 'ECONNRESET';
@@ -765,7 +791,7 @@ test('reattach normalizes a legacy raw idempotency key before polling dispatch_s
   assert.equal(result.status, 'completed');
 });
 
-test('reattach preserves the original wall-clock timeout budget', async () => {
+test('reattach preserves the original execution timeout budget', async () => {
   const session = fakeSession({ statusSequence: [{ status: 'running' }] });
   let clock = 10_000;
   const runtime = createOsDispatchAgentRuntime({
@@ -776,7 +802,7 @@ test('reattach preserves the original wall-clock timeout budget', async () => {
   });
   const result = await runtime.reattach({
     request_id: 'reattach-timeout',
-    spawnedAt: new Date(8_000).toISOString(),
+    runningAt: new Date(8_000).toISOString(),
     timeoutMs: 3_000,
     subjectContext: { agentRoleKind: 'reviewer' },
   });

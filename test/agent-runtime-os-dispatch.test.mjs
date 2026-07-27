@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   DEFAULT_APP_CONTRACT_APP_ID,
@@ -370,6 +373,64 @@ test('run synthesizes a review artifact from healthy terminal markdown summary',
     problem: 'New public contract is not documented.',
   }]);
   assert.deepEqual(result.artifact.verdict.nonBlockingFindings, []);
+});
+
+test('run synthesizes a review artifact from durable HQ stdout when terminal summary is telemetry', async () => {
+  const hqRoot = mkdtempSync(join(tmpdir(), 'os-dispatch-hq-'));
+  const body = [
+    '## Summary',
+    'Documentation-only change.',
+    '',
+    '## Blocking issues',
+    '- None.',
+    '',
+    '## Non-blocking issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Comment only',
+    '',
+  ].join('\n');
+  try {
+    mkdirSync(join(hqRoot, 'dispatch', 'lrq_stdout_body'), { recursive: true });
+    writeFileSync(join(hqRoot, 'dispatch', 'lrq_stdout_body', 'stdout.log'), body);
+    const requestId = 'code-pr:laceyenterprises/agent-os-4311:e62047:review:reviewer:gemini:1-35e83a86f9eb844e';
+    const session = fakeSession({
+      statusSequence: [{
+        status: 'succeeded',
+        health: 'healthy',
+        request_id: requestId,
+        launch_request_id: 'lrq_stdout_body',
+        lastProgressSummary: 'budget enforcement degraded: missing live token usage events',
+        artifact: null,
+        result: null,
+      }],
+    });
+    const runtime = createOsDispatchAgentRuntime({
+      session,
+      sleepImpl: async () => {},
+      env: { HQ_ROOT: hqRoot },
+    });
+    const result = await (await runtime.run(reviewerRequest({
+      idempotencyKey: requestId,
+      role: { id: 'reviewer:gemini', kind: 'reviewer', model: 'gemini' },
+      subjectContent: {
+        ...reviewerRequest().subjectContent,
+        ref: {
+          domainId: 'code-pr',
+          subjectExternalId: 'laceyenterprises/agent-os#4311',
+          revisionRef: 'e620478a0d75f4afd6d2f052b00e22d8c950906c',
+        },
+      },
+    }))).await();
+    assert.equal(result.status, 'completed');
+    assert.equal(result.failureClass, null);
+    assert.equal(result.artifact.body, body.trim());
+    assert.equal(result.artifact.verdict.kind, 'comment-only');
+    assert.equal(result.artifact.reviewerRunRef, 'lrq_stdout_body');
+  } finally {
+    rmSync(hqRoot, { recursive: true, force: true });
+  }
 });
 
 test('run keeps terminal summary request-changes fail-closed when findings are unparseable', async () => {

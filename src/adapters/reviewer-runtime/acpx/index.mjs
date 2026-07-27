@@ -57,6 +57,7 @@ function tailText(value, maxBytes = DEFAULT_TAIL_BYTES) {
 function emptyReviewerResult({
   ok,
   reviewBody = null,
+  reviewBodyDelivery = null,
   spawnedAt,
   failureClass = null,
   stderrTail = null,
@@ -70,6 +71,7 @@ function emptyReviewerResult({
   return {
     ok,
     reviewBody,
+    reviewBodyDelivery,
     failureClass,
     stderrTail,
     stdoutTail,
@@ -533,6 +535,7 @@ function createAcpxReviewerRuntimeAdapter({
       makeSuccess: (result) => emptyReviewerResult({
         ...result,
         reviewBody: result.body,
+        reviewBodyDelivery: 'caller-post',
       }),
       makeFailure: emptyReviewerResult,
     });

@@ -247,6 +247,7 @@ function toReviewerResult(result, { idempotencyKey }) {
   return {
     ok,
     reviewBody: ok ? body : null,
+    reviewBodyDelivery: ok ? 'caller-post' : null,
     ...baseResult(result),
     failureClass: ok ? null : (result?.status === 'completed' ? 'reviewer-output' : mapFailureClass(result)),
     reattachToken: result?.artifact?.reattachToken || idempotencyKey,

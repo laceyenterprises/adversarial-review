@@ -112,6 +112,15 @@ function resolveReviewerIdentity({ reviewerModel, botTokenEnv } = {}) {
   return 'claude-reviewer-lacey';
 }
 
+async function defaultPostGitHubReviewWithCapture(args) {
+  const { postGitHubReviewWithCapture } = await import('./reviewer.mjs');
+  return postGitHubReviewWithCapture(args);
+}
+
+function shouldPostAdapterReviewBody(result) {
+  return result?.reviewBodyDelivery === 'caller-post';
+}
+
 // ARC-18: QUOTA_EXHAUSTED_BACKOFF_MS stays in watcher (used at the pollOnce
 // quota-hold path) and is exported; re-derived here as a byte-identical copy for
 // resolveReviewerOutageSignal + settleReviewerAttempt.
@@ -137,6 +146,21 @@ function previewLogText(text, { head = 400, tail = 400 } = {}) {
   if (normalized.length <= head + tail) return normalized;
   const elided = normalized.length - head - tail;
   return `${normalized.slice(0, head)} …<truncated ${elided} chars>… ${normalized.slice(-tail)}`;
+}
+
+function resultWithGitHubPostFailure(result, err) {
+  const detail = [err?.message, err?.stdout, err?.stderr]
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+  return {
+    ...result,
+    ok: false,
+    failureClass: 'review-post',
+    stderrTail: previewLogText([result?.stderrTail, detail].filter(Boolean).join('\n')),
+    stdoutTail: result?.stdoutTail || null,
+    error: detail || err?.message || String(err),
+  };
 }
 
 function readJsonFile(path) {
@@ -266,6 +290,7 @@ async function spawnReviewer({
   onReviewerPgid = () => {},
   domainId = null, // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded by callers (pollOnce always passes domainId in spawnReviewerArgs). Default is never read.
   reviewerRuntimeAdapterOverride = null,
+  postGitHubReviewWithCaptureImpl = defaultPostGitHubReviewWithCapture,
 }) {
   const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
   const finalRound = (
@@ -327,7 +352,7 @@ async function spawnReviewer({
       ? resolveAgyReviewerSubprocessTimeoutMs(process.env, { reviewerTimeoutMs })
       : reviewerTimeoutMs;
 
-    const result = await activeReviewerRuntimeAdapter.spawnReviewer({
+    let result = await activeReviewerRuntimeAdapter.spawnReviewer({
       model: reviewerModel,
       prompt: '',
       subjectContext: {
@@ -355,6 +380,36 @@ async function spawnReviewer({
       forbiddenFallbacks: ['api-key', 'anthropic-api-key'],
       onReviewerPgid,
     });
+    if (
+      result.ok &&
+      shouldPostAdapterReviewBody(result) &&
+      typeof result.reviewBody === 'string' &&
+      result.reviewBody.trim()
+    ) {
+      try {
+        const captureAttemptNumber = Number.isFinite(Number(reviewDbAttemptNumber))
+          ? Number(reviewDbAttemptNumber)
+          : Number(reviewAttemptNumber);
+        await postGitHubReviewWithCaptureImpl({
+          rootDir: ROOT,
+          repo,
+          prNumber,
+          attemptNumber: captureAttemptNumber,
+          reviewerModel,
+          reviewerHeadSha: reviewerHeadSha || null,
+          reviewBody: result.reviewBody,
+          botTokenEnv,
+          passKind,
+          reviewerSpawnToken,
+          reviewerIdentity,
+          log: console,
+        });
+        console.log(`[reviewer] Review posted to ${repo}#${prNumber}`);
+      } catch (err) {
+        console.error(`[reviewer] GITHUB POST FAILED for ${repo}#${prNumber}:`, err?.message || err);
+        result = resultWithGitHubPostFailure(result, err);
+      }
+    }
     if (result.stdoutTail) console.log(`[reviewer:${prNumber}] ${String(result.stdoutTail).trim()}`);
     if (result.stderrTail) console.error(`[reviewer:${prNumber}] stderr: ${String(result.stderrTail).trim()}`);
     try {

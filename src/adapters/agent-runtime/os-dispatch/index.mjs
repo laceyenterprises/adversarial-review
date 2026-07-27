@@ -23,6 +23,8 @@
 // safe (§6.3).
 
 import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { loadAppSdkConnect } from '../../../app-sdk-loader.mjs';
 import {
   isTransientAppContractError,
@@ -243,13 +245,25 @@ function fallbackRequestChangesFinding() {
   };
 }
 
-function extractSummaryArtifact(statusPayload, role, artifactContext = null) {
+function extractSummaryArtifact(statusPayload, role, artifactContext = null, options = {}) {
   if (role?.kind !== 'reviewer') return undefined;
-  const rawBody = statusPayload?.lastProgressSummary ?? liveStatusOf(statusPayload)?.lastProgressSummary;
-  if (typeof rawBody !== 'string' || rawBody.trim() === '') return undefined;
-  const body = sanitizeReviewPayloadBestEffort(rawBody);
-  const verdict = extractVerdictPhrase(body);
-  if (!verdict) return undefined;
+  const rawBodyCandidates = [
+    readDurableDispatchStdout(statusPayload, options),
+    statusPayload?.lastProgressSummary,
+    liveStatusOf(statusPayload)?.lastProgressSummary,
+  ];
+  let body = null;
+  let verdict = null;
+  for (const rawBody of rawBodyCandidates) {
+    if (typeof rawBody !== 'string' || rawBody.trim() === '') continue;
+    const candidateBody = sanitizeReviewPayloadBestEffort(rawBody);
+    const candidateVerdict = extractVerdictPhrase(candidateBody);
+    if (!candidateVerdict) continue;
+    body = candidateBody;
+    verdict = candidateVerdict;
+    break;
+  }
+  if (!body || !verdict) return undefined;
   const verdictKind = normalizeReviewVerdict(verdict);
   const blockingFindings = parsedFindingsForArtifact(body, parseBlockingFindingsSection);
   const nonBlockingFindings = parsedFindingsForArtifact(body, parseNonBlockingFindingsSection);
@@ -259,9 +273,7 @@ function extractSummaryArtifact(statusPayload, role, artifactContext = null) {
     kind: REVIEW_ARTIFACT_KIND,
     schemaVersion: REVIEW_ARTIFACT_SCHEMA_VERSION,
     ...context,
-    reviewerRunRef: statusPayload?.launch_request_id
-      ?? statusPayload?.launchRequestId
-      ?? liveStatusOf(statusPayload)?.launchRequestId,
+    reviewerRunRef: launchRequestIdOf(statusPayload),
     verdict: {
       kind: verdict,
       summary: '',
@@ -282,6 +294,40 @@ function extractUsage(statusPayload) {
 function liveStatusOf(statusPayload) {
   const liveStatus = statusPayload?.live_status ?? statusPayload?.liveStatus;
   return liveStatus && typeof liveStatus === 'object' ? liveStatus : statusPayload;
+}
+
+function launchRequestIdOf(statusPayload) {
+  const liveStatus = liveStatusOf(statusPayload);
+  return statusPayload?.launch_request_id
+    ?? statusPayload?.launchRequestId
+    ?? statusPayload?.dispatchId
+    ?? liveStatus?.launch_request_id
+    ?? liveStatus?.launchRequestId
+    ?? liveStatus?.dispatchId
+    ?? null;
+}
+
+function resolveHqRoot(env = process.env) {
+  const explicit = String(env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || '').trim();
+  return explicit || null;
+}
+
+function readDurableDispatchStdout(statusPayload, {
+  env = process.env,
+  existsSyncImpl = existsSync,
+  readFileSyncImpl = readFileSync,
+} = {}) {
+  const hqRoot = resolveHqRoot(env);
+  const launchRequestId = String(launchRequestIdOf(statusPayload) || '').trim();
+  if (!hqRoot || !launchRequestId) return null;
+  const stdoutPath = join(hqRoot, 'dispatch', launchRequestId, 'stdout.log');
+  try {
+    if (!existsSyncImpl(stdoutPath)) return null;
+    const stdout = readFileSyncImpl(stdoutPath, 'utf8');
+    return typeof stdout === 'string' && stdout.trim() ? stdout : null;
+  } catch {
+    return null;
+  }
 }
 
 function failureDetail(statusPayload) {
@@ -343,10 +389,10 @@ function dispatchFailureEvidence(statusPayload) {
 // malformed handoff downgrades the run to `failed` (failureClass
 // 'reviewer-output') rather than reporting a junk verdict. A remediator's
 // branch-push artifact is opaque here — the domain adapter decodes it.
-function buildTerminalResult(mappedStatus, statusPayload, role, artifactContext = null) {
+function buildTerminalResult(mappedStatus, statusPayload, role, artifactContext = null, options = {}) {
   const usage = extractUsage(statusPayload);
   if (mappedStatus === 'completed') {
-    const artifact = extractArtifact(statusPayload) ?? extractSummaryArtifact(statusPayload, role, artifactContext);
+    const artifact = extractArtifact(statusPayload) ?? extractSummaryArtifact(statusPayload, role, artifactContext, options);
     const dispatchFailure = artifact === undefined
       ? dispatchFailureEvidence(statusPayload)
       : null;
@@ -462,6 +508,9 @@ function createOsDispatchAgentRuntime({
   jitterImpl = defaultJitter,
   nowMs = () => Date.now(),
   logger = console,
+  env = process.env,
+  existsSyncImpl = existsSync,
+  readFileSyncImpl = readFileSync,
 } = {}) {
   let sessionPromise = session ? Promise.resolve(session) : null;
 
@@ -538,7 +587,11 @@ function createOsDispatchAgentRuntime({
       }
       const mapped = mapTerminalStatus(normalizeStatus(statusPayload?.status));
       if (mapped) {
-        return buildTerminalResult(mapped, statusPayload, role, artifactContext);
+        return buildTerminalResult(mapped, statusPayload, role, artifactContext, {
+          env,
+          existsSyncImpl,
+          readFileSyncImpl,
+        });
       }
       await sleepImpl(pollBaseMs + jitterImpl(pollJitterMs));
     }

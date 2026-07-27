@@ -311,6 +311,43 @@ test('run downgrades a completed run with a malformed artifact to reviewer-outpu
   assert.match(result.detail, /kind must be/);
 });
 
+test('run synthesizes a review artifact from healthy terminal markdown summary', async () => {
+  const body = [
+    '- **Missing registry documentation**',
+    '  - **File:** `projects/worker-pool/SPEC.md`',
+    '  - **Problem:** New public contract is not documented.',
+    '',
+    '## Non-blocking issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Request changes',
+    '',
+  ].join('\n');
+  const requestId = 'code-pr:laceyenterprises/agent-os-4304:b5c866:review:reviewer:gemini:1-0e570173e3a5b97a';
+  const session = fakeSession({
+    statusSequence: [{
+      status: 'succeeded',
+      health: 'healthy',
+      request_id: requestId,
+      launch_request_id: 'lrq_summary_body',
+      lastProgressSummary: body,
+      artifact: null,
+      result: null,
+    }],
+  });
+  const runtime = createOsDispatchAgentRuntime({ session, sleepImpl: async () => {} });
+  const result = await (await runtime.run(reviewerRequest({ idempotencyKey: requestId }))).await();
+  assert.equal(result.status, 'completed');
+  assert.equal(result.failureClass, null);
+  assert.equal(result.artifact.body, body);
+  assert.equal(result.artifact.verdict.kind, 'request-changes');
+  assert.equal(result.artifact.domainId, 'code-pr');
+  assert.equal(result.artifact.subjectExternalId, 'laceyenterprises/agent-os-4304');
+  assert.equal(result.artifact.reviewerRole, 'reviewer:gemini');
+  assert.equal(result.artifact.reviewerRunRef, 'lrq_summary_body');
+});
+
 test('run treats succeeded dead-health dispatch without an artifact as infrastructure failure', async () => {
   const session = fakeSession({
     statusSequence: [{

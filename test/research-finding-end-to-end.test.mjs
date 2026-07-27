@@ -30,6 +30,7 @@ import { ROUND_BUDGET_BY_RISK_CLASS } from '../src/follow-up-jobs.mjs';
 import { createReviewerRuntimeAdapterForDomain } from '../src/adapters/reviewer-runtime/index.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const NOW = '2026-05-11T19:00:00.000Z';
 
 function makeFixtureRoot() {
   const rootDir = mkdtempSync(join(tmpdir(), 'research-finding-e2e-'));
@@ -115,7 +116,7 @@ async function runResearchFindingFixtureKernel({ rootDir }) {
   const maxRemediationRounds = domain.riskClasses.medium.maxRemediationRounds;
   const subject = createMarkdownFileSubjectAdapter({
     rootDir,
-    now: () => new Date('2026-05-11T19:00:00.000Z'),
+    now: () => new Date(NOW),
   });
   const comms = createSlackThreadCommsAdapter({
     rootDir,
@@ -124,7 +125,7 @@ async function runResearchFindingFixtureKernel({ rootDir }) {
         return { deliveryExternalId: deliveryExternalIdForKey(message.key) };
       },
     },
-    now: () => new Date('2026-05-11T19:00:00.000Z'),
+    now: () => new Date(NOW),
   });
   const operator = createLinearTriageAdapter({
     linearClientProvider: async () => null,
@@ -138,6 +139,7 @@ async function runResearchFindingFixtureKernel({ rootDir }) {
     domainId: domain.id,
     domainConfig: domain,
     reviewerBodies,
+    now: () => new Date(NOW),
   });
 
   const [initialRef] = await subject.discoverSubjects();
@@ -172,7 +174,7 @@ async function runResearchFindingFixtureKernel({ rootDir }) {
   const firstVerdict = {
     kind: normalizeReviewVerdict(extractReviewVerdict(firstReviewBody)),
     body: firstReviewBody,
-    observedAt: '2026-05-11T19:00:00.000Z',
+    observedAt: NOW,
   };
   assert.equal(firstVerdict.kind, 'request-changes');
   await comms.postReview(firstVerdict, {
@@ -227,8 +229,8 @@ async function runResearchFindingFixtureKernel({ rootDir }) {
     domainId: initialRef.domainId,
     subjectExternalId: initialRef.subjectExternalId,
     revisionRef: initialRef.revisionRef,
-      round: 1,
-      kind: 'remediation-reply',
+    round: 1,
+    kind: 'remediation-reply',
   });
   const remediatedMarkdown = [
     '# Trial retention finding',
@@ -280,7 +282,7 @@ async function runResearchFindingFixtureKernel({ rootDir }) {
   const rereviewVerdict = {
     kind: normalizeReviewVerdict(extractReviewVerdict(rereviewBody)),
     body: rereviewBody,
-    observedAt: '2026-05-11T19:00:00.000Z',
+    observedAt: NOW,
   };
   assert.equal(rereviewVerdict.kind, 'comment-only');
   await comms.postReview(rereviewVerdict, {
@@ -301,6 +303,7 @@ async function runResearchFindingFixtureKernel({ rootDir }) {
     remediatedRef: remediatedState.ref,
     rereviewVerdict,
     finalState,
+    transcriptBytes: readFileSync(join(rootDir, '.slack-thread-transcripts', 'subject.md', 'slack-thread.jsonl'), 'utf8'),
   };
 }
 
@@ -336,9 +339,9 @@ test('research-finding fixture runs review remediation rereview terminal without
   assert.deepEqual(lines, [
     stableStringify({
       adapter: 'comms-slack-thread',
-      attemptedAt: '2026-05-11T19:00:00.000Z',
+      attemptedAt: NOW,
       delivered: true,
-      deliveredAt: '2026-05-11T19:00:00.000Z',
+      deliveredAt: NOW,
       deliveryExternalId: deliveryExternalIdForKey(firstReviewKey),
       key: firstReviewKey,
       payload: {
@@ -348,9 +351,9 @@ test('research-finding fixture runs review remediation rereview terminal without
     }),
     stableStringify({
       adapter: 'comms-slack-thread',
-      attemptedAt: '2026-05-11T19:00:00.000Z',
+      attemptedAt: NOW,
       delivered: true,
-      deliveredAt: '2026-05-11T19:00:00.000Z',
+      deliveredAt: NOW,
       deliveryExternalId: deliveryExternalIdForKey(remediationReplyKey),
       key: remediationReplyKey,
       payload: {
@@ -360,9 +363,9 @@ test('research-finding fixture runs review remediation rereview terminal without
     }),
     stableStringify({
       adapter: 'comms-slack-thread',
-      attemptedAt: '2026-05-11T19:00:00.000Z',
+      attemptedAt: NOW,
       delivered: true,
-      deliveredAt: '2026-05-11T19:00:00.000Z',
+      deliveredAt: NOW,
       deliveryExternalId: deliveryExternalIdForKey(rereviewKey),
       key: rereviewKey,
       payload: {
@@ -371,6 +374,17 @@ test('research-finding fixture runs review remediation rereview terminal without
       },
     }),
   ]);
+});
+
+test('research-finding offline transcript is byte-identical across runs', async () => {
+  const first = await runResearchFindingFixtureKernel({ rootDir: makeFixtureRoot() });
+  const second = await runResearchFindingFixtureKernel({ rootDir: makeFixtureRoot() });
+
+  assert.equal(first.transcriptBytes, second.transcriptBytes);
+  assert.doesNotMatch(first.transcriptBytes, /research-finding-e2e-|\/Users\/|\/var\/|\/tmp\/|[A-Za-z]:\\/);
+  assert.doesNotMatch(first.transcriptBytes, /fixture-review-[0-9a-f]{8,}|Math\.random|Date\.now/);
+  assert.match(first.transcriptBytes, /"revisionRef":"sha256:[0-9a-f]{64}"/);
+  assert.match(first.transcriptBytes, /"deliveredAt":"2026-05-11T19:00:00\.000Z"/);
 });
 
 test('research-finding domain config mirrors code-pr domain shape', () => {

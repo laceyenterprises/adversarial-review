@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 
 import {
   DEFAULT_APP_CONTRACT_APP_ID,
+  DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS,
   buildDispatchPayload,
   createOsDispatchAgentRuntime,
   mapTerminalStatus,
@@ -471,6 +472,7 @@ test('run supplies the adversarial-review app id when connecting to the App SDK'
   assert.equal(result.status, 'completed');
   assert.equal(connectCalls.length, 1);
   assert.equal(connectCalls[0].app_id, DEFAULT_APP_CONTRACT_APP_ID);
+  assert.equal(connectCalls[0].request_timeout_ms, DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS);
 });
 
 test('explicit App SDK identity still wins over the os-dispatch default', async () => {
@@ -492,6 +494,31 @@ test('explicit App SDK identity still wins over the os-dispatch default', async 
   assert.equal(result.status, 'completed');
   assert.equal(connectCalls[0].app_id, 'fixture-app');
   assert.equal(connectCalls[0].mode, 'standalone');
+  assert.equal(connectCalls[0].request_timeout_ms, DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS);
+});
+
+test('explicit App SDK request timeout wins over the os-dispatch default', async () => {
+  const session = fakeSession({
+    statusSequence: [{ status: 'succeeded', artifact: reviewArtifact() }],
+  });
+  const connectCalls = [];
+  const runtime = createOsDispatchAgentRuntime({
+    connectOptions: {
+      app_id: 'fixture-app',
+      requestTimeoutMs: 12_345,
+    },
+    connectImpl: async (options) => {
+      connectCalls.push(options);
+      return session;
+    },
+    sleepImpl: async () => {},
+  });
+
+  const result = await (await runtime.run(reviewerRequest())).await();
+
+  assert.equal(result.status, 'completed');
+  assert.equal(connectCalls[0].requestTimeoutMs, 12_345);
+  assert.equal(connectCalls[0].request_timeout_ms, undefined);
 });
 
 test('multiple await calls share one dispatch_status polling loop', async () => {

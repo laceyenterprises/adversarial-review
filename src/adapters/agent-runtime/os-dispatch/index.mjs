@@ -33,6 +33,7 @@ import { validateReviewArtifact, ReviewArtifactSchemaError } from './review-arti
 const RUNTIME_ID = 'os-dispatch';
 const RUNTIME_MODE = 'os';
 const DEFAULT_APP_CONTRACT_APP_ID = 'adversarial-review';
+const DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS = 75_000;
 const APP_CONTRACT_REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
 const APP_CONTRACT_REQUEST_ID_DIGEST_LENGTH = 16;
 
@@ -277,6 +278,9 @@ function withDefaultConnectOptions(connectOptions = {}) {
   if (!options.app_id && !options.appId) {
     options.app_id = DEFAULT_APP_CONTRACT_APP_ID;
   }
+  if (options.request_timeout_ms == null && options.requestTimeoutMs == null) {
+    options.request_timeout_ms = DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS;
+  }
   return options;
 }
 
@@ -501,6 +505,7 @@ function createOsDispatchAgentRuntime({
 
 export {
   DEFAULT_APP_CONTRACT_APP_ID,
+  DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS,
   RUNTIME_ID,
   RUNTIME_MODE,
   buildDispatchPayload,

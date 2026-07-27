@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 
 import { AgentOSConfigError, loadConfigCached } from '../../../config-loader.mjs';
 import { resolveProgressTimeoutMs, resolveReviewerTimeoutMs } from '../../../reviewer-timeout.mjs';
-import { MODULE_CONFIG_PATH } from '../../../role-config.mjs';
+import { MODULE_CONFIG_PATH, projectGeminiRuntimeEnv } from '../../../role-config.mjs';
 import { spawnCapturedProcessGroup } from '../../../process-group-spawn.mjs';
 import { domainRequiresMcpOAuth } from '../domain-mcp-oauth.mjs';
 import {
@@ -397,10 +397,10 @@ function createAcpxReviewerRuntimeAdapter({
       activeRuns.set(sessionUuid, activeRun);
       tmpDir = mkdtempImpl(join(tmpdir(), `adversarial-review-acpx-${sessionUuid}-`));
       outputPath = join(tmpDir, 'last-message.txt');
-      const reviewerEnv = {
+      const reviewerEnv = projectGeminiRuntimeEnv({
         ...process.env,
         REVIEWER_SESSION_UUID: sessionUuid,
-      };
+      });
       const stripped = stripForbiddenFallbackEnv(reviewerEnv, req.forbiddenFallbacks);
       const acpxCli = await resolveAcpxCliImpl({ env: reviewerEnv, execFileImpl });
       await assertCodexOAuthLayers({ env: reviewerEnv, domainConfig, execFileImpl, acpxCli });

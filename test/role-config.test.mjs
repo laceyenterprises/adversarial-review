@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import {
   DEFAULT_ROLE_TOP_PATH,
   loadRoleConfig,
+  projectGeminiRuntimeEnv,
   resolveDefaultMergeAgentWorkerClass,
   resolveDefaultRemediator,
   resolveDefaultReviewer,
@@ -520,6 +521,46 @@ test('CFGDRIFT-01 gemini mode env alias still overrides file and reports env sou
     assert.equal(resolved.sourceDetail, 'env:AGENT_OS_REVIEWER_GEMINI_MODE');
     assert.equal(resolved.path, null);
     assert.equal(resolved.topPath, topPath);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('INV-RR1 reviewer runtime env projection follows config and rejects manual GEMINI_RUNTIME drift', () => {
+  const tmp = makeTmp();
+  try {
+    const topPath = join(tmp, 'config.yaml');
+    const modulePath = join(tmp, 'module.yaml');
+    writeYaml(topPath, 'version: 1\n');
+    writeYaml(modulePath, 'reviewer:\n  gemini:\n    runtime: antigravity\n');
+
+    const projected = projectGeminiRuntimeEnv(
+      {
+        HOME: tmp,
+        PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+        AGENT_OS_CONFIG_PATH: topPath,
+      },
+      { topPath, modulePaths: [modulePath] },
+    );
+    assert.equal(projected.GEMINI_RUNTIME, 'antigravity');
+
+    assert.throws(
+      () => projectGeminiRuntimeEnv(
+        {
+          HOME: tmp,
+          PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+          AGENT_OS_CONFIG_PATH: topPath,
+          GEMINI_RUNTIME: 'cli',
+        },
+        { topPath, modulePaths: [modulePath] },
+      ),
+      (err) => {
+        assert.match(err.message, /parity check failed/i);
+        assert.match(err.message, /Do not hand-project GEMINI_RUNTIME/);
+        assert.equal(err.key, 'reviewer.gemini.runtime');
+        return true;
+      },
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

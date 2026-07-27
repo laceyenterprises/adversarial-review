@@ -2659,6 +2659,47 @@ test('acpx spawnReviewer fails when ACPX exits 0 without a review body', async (
   }
 });
 
+test('acpx spawnReviewer projects config-driven GEMINI_RUNTIME into watcher-owned reviewer spawns', async () => {
+  const rootDir = makeRoot();
+  const previousRuntime = process.env.AGENT_OS_REVIEWER_GEMINI_RUNTIME;
+  try {
+    process.env.AGENT_OS_REVIEWER_GEMINI_RUNTIME = 'antigravity';
+    let spawnedEnv = null;
+    const adapter = createAcpxReviewerRuntimeAdapter({
+      rootDir,
+      domainConfig: { id: 'acpx-smoke' },
+      resolveAcpxCliImpl: async () => '/opt/acpx/bin/acpx',
+      execFileImpl: async () => ({ stdout: '[]\n', stderr: '' }),
+      spawnCapturedImpl: async (_command, args, options) => {
+        spawnedEnv = options.env;
+        options.onSpawn({ pgid: process.pid + 2000 });
+        writeFileSync(args[args.indexOf('--output-last-message') + 1], validReviewBody('Comment only'));
+        return { stdout: 'ok\n', stderr: '' };
+      },
+      now: () => '2026-07-27T01:00:00.000Z',
+    });
+
+    const result = await adapter.spawnReviewer({
+      model: 'codex',
+      prompt: 'review',
+      subjectContext: { domainId: 'acpx-smoke', repo: 'lacey/repo', prNumber: 16 },
+      timeoutMs: 100,
+      sessionUuid: 'acpx-gemini-runtime-projection-session',
+      forbiddenFallbacks: ['api-key'],
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(spawnedEnv.GEMINI_RUNTIME, 'antigravity');
+  } finally {
+    if (previousRuntime === undefined) {
+      delete process.env.AGENT_OS_REVIEWER_GEMINI_RUNTIME;
+    } else {
+      process.env.AGENT_OS_REVIEWER_GEMINI_RUNTIME = previousRuntime;
+    }
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('acpx spawnReviewer releases the active claim when tmpdir allocation throws', async () => {
   const rootDir = makeRoot();
   let attempts = 0;

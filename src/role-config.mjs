@@ -439,6 +439,43 @@ export function resolveGeminiRuntime({
   return cfg.get('reviewer.gemini.runtime', 'cli');
 }
 
+export function projectGeminiRuntimeEnv(
+  env = process.env,
+  {
+    topPath,
+    modulePaths,
+    loaderImpl,
+  } = {},
+) {
+  const runtime = resolveGeminiRuntime({
+    env,
+    topPath,
+    modulePaths,
+    loaderImpl,
+  });
+  const inherited = typeof env?.GEMINI_RUNTIME === 'string'
+    ? env.GEMINI_RUNTIME.trim()
+    : '';
+  if (inherited && inherited !== runtime) {
+    throw new AgentOSConfigError(
+      `reviewer.gemini.runtime parity check failed: config resolved ${JSON.stringify(runtime)} ` +
+      `but inherited GEMINI_RUNTIME=${JSON.stringify(inherited)}. ` +
+      'Do not hand-project GEMINI_RUNTIME per plist; set reviewer.gemini.runtime ' +
+      'or worker_pool.gemini.runtime and let the runtime derive it.',
+      {
+        key: 'reviewer.gemini.runtime',
+        expected: `resolved runtime ${JSON.stringify(runtime)}`,
+        got: inherited,
+        source: 'env:GEMINI_RUNTIME',
+      },
+    );
+  }
+  return {
+    ...env,
+    GEMINI_RUNTIME: runtime,
+  };
+}
+
 // resolveGeminiAntigravityModel — returns the agy/antigravity reviewer model
 // token through the same file→env cascade as `resolveGeminiRuntime`. This is
 // the model passed to `agy --model <token>` and is DISTINCT from the

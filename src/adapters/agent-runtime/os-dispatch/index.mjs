@@ -28,7 +28,12 @@ import {
   isTransientAppContractError,
   withAppContractTransientRetry,
 } from '../../../app-contract-retry.mjs';
-import { validateReviewArtifact, ReviewArtifactSchemaError } from './review-artifact.mjs';
+import {
+  REVIEW_ARTIFACT_KIND,
+  REVIEW_ARTIFACT_SCHEMA_VERSION,
+  validateReviewArtifact,
+  ReviewArtifactSchemaError,
+} from './review-artifact.mjs';
 
 const RUNTIME_ID = 'os-dispatch';
 const RUNTIME_MODE = 'os';
@@ -164,6 +169,56 @@ function extractArtifact(statusPayload) {
   return undefined;
 }
 
+function parseRequestArtifactContext(requestId) {
+  const parts = String(requestId || '').split(':');
+  if (parts.length < 4) {
+    return {
+      domainId: 'unknown',
+      subjectExternalId: 'unknown',
+      revisionRef: 'unknown',
+    };
+  }
+  return {
+    domainId: parts[0] || 'unknown',
+    subjectExternalId: parts[1] || 'unknown',
+    revisionRef: parts[2] || 'unknown',
+    stageId: parts[3] || undefined,
+    reviewerRole: parts.length > 5 ? parts.slice(4, -1).join(':') : parts[4],
+  };
+}
+
+function extractVerdictPhrase(body) {
+  const text = String(body || '');
+  const heading = text.match(/^##\s*Verdict\s*\n+([^\n#]+)/imu);
+  if (heading?.[1]) return heading[1].trim();
+  const inline = text.match(/\bVerdict\s*:?\s*(Request changes|Comment-only|Comment only|Approved|Unknown)\b/imu);
+  return inline?.[1]?.trim() || null;
+}
+
+function extractSummaryArtifact(statusPayload, role) {
+  if (role?.kind !== 'reviewer') return undefined;
+  const body = statusPayload?.lastProgressSummary ?? liveStatusOf(statusPayload)?.lastProgressSummary;
+  if (typeof body !== 'string' || body.trim() === '') return undefined;
+  const verdict = extractVerdictPhrase(body);
+  if (!verdict) return undefined;
+  const context = parseRequestArtifactContext(statusPayload?.request_id ?? statusPayload?.requestId);
+  return {
+    kind: REVIEW_ARTIFACT_KIND,
+    schemaVersion: REVIEW_ARTIFACT_SCHEMA_VERSION,
+    ...context,
+    reviewerRunRef: statusPayload?.launch_request_id
+      ?? statusPayload?.launchRequestId
+      ?? liveStatusOf(statusPayload)?.launchRequestId,
+    verdict: {
+      kind: verdict,
+      summary: '',
+      blockingFindings: [],
+      nonBlockingFindings: [],
+    },
+    body,
+  };
+}
+
 function extractUsage(statusPayload) {
   const usage = statusPayload?.usage;
   return usage && typeof usage === 'object' ? usage : null;
@@ -236,7 +291,7 @@ function dispatchFailureEvidence(statusPayload) {
 function buildTerminalResult(mappedStatus, statusPayload, role) {
   const usage = extractUsage(statusPayload);
   if (mappedStatus === 'completed') {
-    const artifact = extractArtifact(statusPayload);
+    const artifact = extractArtifact(statusPayload) ?? extractSummaryArtifact(statusPayload, role);
     const dispatchFailure = artifact === undefined
       ? dispatchFailureEvidence(statusPayload)
       : null;

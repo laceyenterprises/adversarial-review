@@ -179,6 +179,35 @@ test('agent-runtime reviewer idempotency keys include flat request revisions', (
   assert.notEqual(first, second);
 });
 
+test('agent-runtime reviewer idempotency keys advance with physical retry attempts', () => {
+  const base = {
+    model: 'gemini',
+    repo: 'laceyenterprises/podium',
+    prNumber: 11,
+    reviewerHeadSha: '2ba80c216ebb81150ecb7926adb5d1486f7f95c4',
+    reviewAttemptNumber: 1,
+  };
+
+  const first = reviewIdempotencyKey(
+    { ...base, reviewDbAttemptNumber: 1 },
+    { roleId: 'reviewer:gemini' },
+  );
+  const retry = reviewIdempotencyKey(
+    { ...base, reviewDbAttemptNumber: 2 },
+    { roleId: 'reviewer:gemini' },
+  );
+
+  assert.equal(
+    first,
+    'code-pr:laceyenterprises/podium#11:2ba80c216ebb81150ecb7926adb5d1486f7f95c4:review:reviewer:gemini:1',
+  );
+  assert.equal(
+    retry,
+    'code-pr:laceyenterprises/podium#11:2ba80c216ebb81150ecb7926adb5d1486f7f95c4:review:reviewer:gemini:2',
+  );
+  assert.notEqual(first, retry);
+});
+
 test('agent-runtime reviewer adapter reattaches an in-flight dispatch without issuing a duplicate run', async () => {
   const rootDir = makeRoot();
   const calls = { run: 0, reattach: 0 };

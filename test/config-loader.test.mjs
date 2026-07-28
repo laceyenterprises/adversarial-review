@@ -977,6 +977,36 @@ test('top-level config.yaml accepts mirrored worker_pool.dispatch.goal_lineage k
   }
 });
 
+test('top-level config.yaml accepts mirrored worker_pool.dispatch.fleet_launch_health keys', () => {
+  // Fleet-launch-health is Python-owned, but these checked-in keys live in
+  // shared config.yaml and must parse under the watcher strict schema.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        dispatch:
+          fleet_launch_health:
+            enabled: true
+            window_seconds: 1200
+            min_samples: 6
+            unhealthy_fraction: 0.75
+            backoff_seconds: 420
+            canary_interval_seconds: 90
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.dispatch.fleet_launch_health.enabled'), true);
+    assert.equal(cfg.get('worker_pool.dispatch.fleet_launch_health.window_seconds'), 1200);
+    assert.equal(cfg.get('worker_pool.dispatch.fleet_launch_health.min_samples'), 6);
+    assert.equal(cfg.get('worker_pool.dispatch.fleet_launch_health.unhealthy_fraction'), 0.75);
+    assert.equal(cfg.get('worker_pool.dispatch.fleet_launch_health.backoff_seconds'), 420);
+    assert.equal(cfg.get('worker_pool.dispatch.fleet_launch_health.canary_interval_seconds'), 90);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('top-level config.yaml accepts mirrored worker_pool.dispatch.codex_exec_mode key', () => {
   // CXD-07 is Python-owned, but the shared checked-in config must parse under
   // the watcher strict schema.
@@ -1077,6 +1107,37 @@ test('worker_pool.comms.responder rejects out-of-range values', () => {
         assert.equal(err.key, 'worker_pool.comms.responder.session_ttl_hours');
         return true;
       },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('worker_pool.dispatch.fleet_launch_health legacy env aliases resolve through Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        HQ_FLEET_LAUNCH_HEALTH_ENABLED: 'false',
+        HQ_FLEET_LAUNCH_HEALTH_WINDOW_SECONDS: '1800',
+        HQ_FLEET_LAUNCH_HEALTH_MIN_SAMPLES: '8',
+        HQ_FLEET_LAUNCH_HEALTH_UNHEALTHY_FRACTION: '0.6',
+        HQ_FLEET_LAUNCH_HEALTH_BACKOFF_SECONDS: '600',
+        HQ_FLEET_LAUNCH_HEALTH_CANARY_INTERVAL_SECONDS: '180',
+      },
+    });
+    assert.equal(cfg.get('worker_pool.dispatch.fleet_launch_health.enabled'), false);
+    assert.equal(cfg.get('worker_pool.dispatch.fleet_launch_health.window_seconds'), 1800);
+    assert.equal(cfg.get('worker_pool.dispatch.fleet_launch_health.min_samples'), 8);
+    assert.equal(cfg.get('worker_pool.dispatch.fleet_launch_health.unhealthy_fraction'), 0.6);
+    assert.equal(cfg.get('worker_pool.dispatch.fleet_launch_health.backoff_seconds'), 600);
+    assert.equal(cfg.get('worker_pool.dispatch.fleet_launch_health.canary_interval_seconds'), 180);
+    assert.equal(
+      cfg.resolutionTrace('worker_pool.dispatch.fleet_launch_health.canary_interval_seconds').at(-1).source,
+      'env:HQ_FLEET_LAUNCH_HEALTH_CANARY_INTERVAL_SECONDS',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

@@ -292,6 +292,8 @@ async function spawnReviewer({
   domainId = null, // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded by callers (pollOnce always passes domainId in spawnReviewerArgs). Default is never read.
   reviewerRuntimeAdapterOverride = null,
   postGitHubReviewWithCaptureImpl = defaultPostGitHubReviewWithCapture,
+  readBestReviewerEvidenceTokenUsageImpl = readBestReviewerEvidenceTokenUsage,
+  completeReviewerPassImpl = completeReviewerPass,
 }) {
   const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
   const finalRound = (
@@ -422,8 +424,18 @@ async function spawnReviewer({
       // On failure we settle the pass with null token usage instead.
       let tokenUsage = null;
       let reviewerTokenUsageArtifact = null;
+      // WCW attribution: the reviewer worker's real ledger run_id, captured from
+      // the RAW token usage before tagTokenUsage()/normalizeTokenUsage() drops it
+      // (the normalized token-usage shape intentionally carries only counters,
+      // not attribution). Populates reviewer_passes.worker_run_id at settle.
+      let resolvedWorkerRunId = null;
       try {
-        tokenUsage = tagTokenUsage(result.tokenUsage || readBestReviewerEvidenceTokenUsage({
+        const rawTokenUsage = result.tokenUsage || readBestReviewerEvidenceTokenUsageImpl({
+          // The SDK-dispatch adapter surfaces the reviewer worker's dispatch id
+          // (ticket.launchRequestId) as result.reattachToken. Threading it as
+          // launchRequestId lets the ledger read resolve the worker_runs row
+          // (WHERE launch_request_id = ?) and return its real run_id.
+          launchRequestId: result.reattachToken || null,
           adapterSessionKey: result.reattachToken || reviewerSessionUuid,
           sessionKeys: [
             reviewerSessionUuid,
@@ -435,7 +447,9 @@ async function spawnReviewer({
           endedAt,
           reviewerModel,
           rootDir: ROOT,
-        }), 'guardrail');
+        });
+        resolvedWorkerRunId = rawTokenUsage?.workerRunId || null;
+        tokenUsage = tagTokenUsage(rawTokenUsage, 'guardrail');
         if (tokenUsage) {
           reviewerTokenUsageArtifact = writeReviewerTokenUsageArtifactBestEffort({
             workspacePath: workspacePath || ROOT,
@@ -463,8 +477,9 @@ async function spawnReviewer({
         );
         tokenUsage = null;
         reviewerTokenUsageArtifact = null;
+        resolvedWorkerRunId = null;
       }
-      completeReviewerPass(ROOT, {
+      completeReviewerPassImpl(ROOT, {
         repo,
         prNumber,
         attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
@@ -473,6 +488,11 @@ async function spawnReviewer({
         endedAt,
         tokenUsage,
         tokenSource: tokenUsage?.source || 'unknown',
+        // WCW attribution: persist the reviewer worker's real ledger run_id
+        // (resolved from launchRequestId above). Null on the cli-direct path
+        // (no worker run) and when the ledger read cannot resolve — COALESCE in
+        // the writer keeps the column honest rather than storing a wrong id.
+        workerRunId: resolvedWorkerRunId,
         metadata: {
           reviewerSessionUuid,
           reattachToken: result.reattachToken || null,
@@ -490,10 +510,13 @@ async function spawnReviewer({
     return result;
   } catch (err) {
     try {
-      const tokenUsage = err?.tokenUsage && typeof err.tokenUsage === 'object'
-        ? tagTokenUsage(err.tokenUsage, 'guardrail')
+      const rawErrTokenUsage = err?.tokenUsage && typeof err.tokenUsage === 'object'
+        ? err.tokenUsage
         : null;
-      completeReviewerPass(ROOT, {
+      const tokenUsage = rawErrTokenUsage
+        ? tagTokenUsage(rawErrTokenUsage, 'guardrail')
+        : null;
+      completeReviewerPassImpl(ROOT, {
         repo,
         prNumber,
         attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
@@ -502,6 +525,9 @@ async function spawnReviewer({
         endedAt: new Date().toISOString(),
         tokenUsage,
         tokenSource: tokenUsage?.source || null,
+        // WCW attribution: read the run_id from the raw error token usage before
+        // tagTokenUsage() normalization drops it (usually null on this path).
+        workerRunId: rawErrTokenUsage?.workerRunId || null,
         metadata: {
           reviewerSessionUuid,
           reviewerModel,

@@ -7,7 +7,35 @@ import { pruneReviewerRunRecords, readRecoverableReviewerRunRecords } from './ru
 import { resolveReviewerLeaseRecoveryEnabled } from '../../reviewer-lease.mjs';
 import { loadDomainConfig } from '../../domain-config.mjs';
 
-function resolveReviewerRuntimeName(domainConfig = {}, { orchestrationMode = 'native' } = {}) {
+const KNOWN_REVIEWER_RUNTIME_NAMES = new Set([
+  'agent-runtime',
+  'acpx',
+  'cli-direct',
+  'fixture-stub',
+  'agent-os-hq',
+]);
+
+function resolveReviewerRuntimeName(
+  domainConfig = {},
+  { orchestrationMode = 'native', env = process.env } = {},
+) {
+  // RPR-01 emergency operator kill-switch: force a reviewer runtime WITHOUT
+  // editing (and re-deploying) the tracked domain config. This exists because a
+  // build pack (PRD-01 #687) silently flipped code-pr from cli-direct to
+  // agent-runtime with no settle smoke; the pipeline broke for days and there
+  // was no fast lever to override the runtime live. Only a known adapter name is
+  // honored — an unknown value is ignored (not thrown) so a typo in the env can
+  // never wedge the reviewer.
+  const forced = String(env?.ADVERSARIAL_REVIEWER_RUNTIME || '').trim();
+  if (forced) {
+    if (KNOWN_REVIEWER_RUNTIME_NAMES.has(forced)) {
+      return forced;
+    }
+    console.warn(
+      `[reviewer-runtime] ignoring ADVERSARIAL_REVIEWER_RUNTIME='${forced}' — not a known adapter ` +
+        `(${[...KNOWN_REVIEWER_RUNTIME_NAMES].join(', ')}); falling through to domain config`,
+    );
+  }
   if (orchestrationMode === 'agentos') {
     return 'agent-os-hq';
   }

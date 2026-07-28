@@ -1719,6 +1719,45 @@ function schemaV1() {
               },
             },
           },
+          secrets: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              // SSR-01 parse-only mirror. The dispatch daemon consumes these
+              // Python-owned knobs, but shared top-level config must remain
+              // startup-safe for the adversarial watcher.
+              prewarm: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __default: {},
+                __keys: {
+                  enabled: { __type: TYPE_BOOL, __default: true },
+                  min_interval_seconds: {
+                    __type: TYPE_INT,
+                    __default: 300,
+                    __min: 0,
+                    __max: 86400,
+                  },
+                  targets: {
+                    __type: TYPE_LIST,
+                    __default: [],
+                    __item: {
+                      __type: TYPE_DICT,
+                      __strict: true,
+                      __keys: {
+                        worker_class: { __type: TYPE_STRING },
+                        refs: {
+                          __type: TYPE_LIST,
+                          __default: [],
+                          __item: { __type: TYPE_STRING },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
         },
       },
       // Sentinel detector knobs. The Python sibling at
@@ -2291,6 +2330,14 @@ export const ENV_ALIASES = {
   'worker_pool.dispatch.goal_lineage.spec_excerpt_bytes': {
     canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_GOAL_LINEAGE_SPEC_EXCERPT_BYTES',
     aliases: [['HQ_GLN_LINEAGE_SPEC_EXCERPT_BYTES', identity]],
+  },
+  'worker_pool.secrets.prewarm.enabled': {
+    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_PREWARM_ENABLED',
+    aliases: [],
+  },
+  'worker_pool.secrets.prewarm.min_interval_seconds': {
+    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_PREWARM_MIN_INTERVAL_SECONDS',
+    aliases: [],
   },
   'reviewer.gemini.mode': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_MODE',

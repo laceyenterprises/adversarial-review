@@ -3,7 +3,7 @@
   "enabled": true,
   "subjectChannel": "github-pr",
   "commsChannel": "github-pr-comments",
-  "reviewerRuntime": "agent-runtime",
+  "reviewerRuntime": "cli-direct",
   "operatorSurface": {
     "controls": "github-pr-label-controls",
     "triageSync": "linear"

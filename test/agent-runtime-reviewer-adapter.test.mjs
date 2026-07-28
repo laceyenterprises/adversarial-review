@@ -506,7 +506,13 @@ test('agent-runtime reviewer adapter cancels spawned handle when run-state updat
   }
 });
 
-test('production code-pr domain uses the configured agent-runtime reviewer path', () => {
+test('production code-pr domain uses the settle-proven cli-direct reviewer path (RPR-01)', () => {
+  // RPR-01: code-pr was flipped to agent-runtime with no settle smoke (PRD-01
+  // #687). The agent-runtime path produced artifactless dispatches whose reviews
+  // never settled and the pipeline broke for days. The production domain must
+  // stay on the settle-proven cli-direct runtime until agent-runtime has a
+  // passing end-to-end settle smoke; the opt-in gate lives in
+  // test/code-pr-reviewer-runtime-guard.test.mjs.
   const config = loadDomainConfig(process.cwd(), 'code-pr');
-  assert.equal(config.reviewerRuntime, 'agent-runtime');
+  assert.equal(config.reviewerRuntime, 'cli-direct');
 });

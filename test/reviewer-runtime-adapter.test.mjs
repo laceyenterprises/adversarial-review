@@ -151,6 +151,44 @@ test('resolveReviewerRuntimeName forces agent-os-hq only in agentos mode', () =>
   );
 });
 
+test('ADVERSARIAL_REVIEWER_RUNTIME env kill-switch overrides domain + orchestration (RPR-01)', () => {
+  // A known adapter name in the env wins over the domain config...
+  assert.equal(
+    resolveReviewerRuntimeName(
+      { reviewerRuntime: 'agent-runtime' },
+      { env: { ADVERSARIAL_REVIEWER_RUNTIME: 'cli-direct' } },
+    ),
+    'cli-direct',
+  );
+  // ...and over agentos orchestration mode (it is an operator emergency lever).
+  assert.equal(
+    resolveReviewerRuntimeName(
+      { reviewerRuntime: 'agent-runtime' },
+      { orchestrationMode: 'agentos', env: { ADVERSARIAL_REVIEWER_RUNTIME: 'cli-direct' } },
+    ),
+    'cli-direct',
+  );
+});
+
+test('ADVERSARIAL_REVIEWER_RUNTIME ignores unknown/blank values instead of wedging (RPR-01)', () => {
+  // Unknown value: ignored, falls through to domain config (no throw).
+  assert.equal(
+    resolveReviewerRuntimeName(
+      { reviewerRuntime: 'acpx' },
+      { env: { ADVERSARIAL_REVIEWER_RUNTIME: 'not-a-real-adapter' } },
+    ),
+    'acpx',
+  );
+  // Blank/whitespace: ignored, normal resolution applies.
+  assert.equal(
+    resolveReviewerRuntimeName(
+      { reviewerRuntime: 'cli-direct' },
+      { env: { ADVERSARIAL_REVIEWER_RUNTIME: '   ' } },
+    ),
+    'cli-direct',
+  );
+});
+
 test('createReviewerRuntimeAdapterForDomain applies orchestration override without mutating domain JSON', () => {
   const rootDir = makeRoot();
   const domainPath = join(rootDir, 'domains', 'code-pr.json');

@@ -1582,6 +1582,7 @@ function schemaV1() {
       // worker_pool.comms.responder.*,
       // worker_pool.dag.autowalk.deep_reconcile,
       // worker_pool.dispatch.codex_exec_mode,
+      // worker_pool.dispatch.fleet_launch_health.*,
       // worker_pool.dispatch.goal_lineage.*, and
       // worker_pool.memory.dynamic.* — Python-owned (canonical schema at
       // platform/agent-os-config). PARTIAL mirror, same rationale as the
@@ -1637,6 +1638,43 @@ function schemaV1() {
             __strict: true,
             __keys: {
               codex_exec_mode: { __type: TYPE_BOOL, __default: false },
+              fleet_launch_health: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  enabled: { __type: TYPE_BOOL, __default: true },
+                  window_seconds: {
+                    __type: TYPE_INT,
+                    __default: 900,
+                    __min: 60,
+                    __max: 86400,
+                  },
+                  min_samples: {
+                    __type: TYPE_INT,
+                    __default: 5,
+                    __min: 1,
+                    __max: 100000,
+                  },
+                  unhealthy_fraction: {
+                    __type: TYPE_FLOAT,
+                    __default: 0.5,
+                    __min: 0.01,
+                    __max: 1.0,
+                  },
+                  backoff_seconds: {
+                    __type: TYPE_INT,
+                    __default: 300,
+                    __min: 30,
+                    __max: 3600,
+                  },
+                  canary_interval_seconds: {
+                    __type: TYPE_INT,
+                    __default: 120,
+                    __min: 10,
+                    __max: 3600,
+                  },
+                },
+              },
               goal_lineage: {
                 __type: TYPE_DICT,
                 __strict: true,
@@ -2217,6 +2255,30 @@ export const ENV_ALIASES = {
   'worker_pool.dispatch.codex_exec_mode': {
     canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_CODEX_EXEC_MODE',
     aliases: [['HQ_CODEX_EXEC_MODE', identity]],
+  },
+  'worker_pool.dispatch.fleet_launch_health.enabled': {
+    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_FLEET_LAUNCH_HEALTH_ENABLED',
+    aliases: [['HQ_FLEET_LAUNCH_HEALTH_ENABLED', identity]],
+  },
+  'worker_pool.dispatch.fleet_launch_health.window_seconds': {
+    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_FLEET_LAUNCH_HEALTH_WINDOW_SECONDS',
+    aliases: [['HQ_FLEET_LAUNCH_HEALTH_WINDOW_SECONDS', identity]],
+  },
+  'worker_pool.dispatch.fleet_launch_health.min_samples': {
+    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_FLEET_LAUNCH_HEALTH_MIN_SAMPLES',
+    aliases: [['HQ_FLEET_LAUNCH_HEALTH_MIN_SAMPLES', identity]],
+  },
+  'worker_pool.dispatch.fleet_launch_health.unhealthy_fraction': {
+    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_FLEET_LAUNCH_HEALTH_UNHEALTHY_FRACTION',
+    aliases: [['HQ_FLEET_LAUNCH_HEALTH_UNHEALTHY_FRACTION', identity]],
+  },
+  'worker_pool.dispatch.fleet_launch_health.backoff_seconds': {
+    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_FLEET_LAUNCH_HEALTH_BACKOFF_SECONDS',
+    aliases: [['HQ_FLEET_LAUNCH_HEALTH_BACKOFF_SECONDS', identity]],
+  },
+  'worker_pool.dispatch.fleet_launch_health.canary_interval_seconds': {
+    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_FLEET_LAUNCH_HEALTH_CANARY_INTERVAL_SECONDS',
+    aliases: [['HQ_FLEET_LAUNCH_HEALTH_CANARY_INTERVAL_SECONDS', identity]],
   },
   'worker_pool.dispatch.goal_lineage.enabled': {
     canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_GOAL_LINEAGE_ENABLED',

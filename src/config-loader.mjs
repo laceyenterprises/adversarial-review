@@ -1583,7 +1583,8 @@ function schemaV1() {
       // worker_pool.dag.autowalk.deep_reconcile,
       // worker_pool.dispatch.codex_exec_mode,
       // worker_pool.dispatch.fleet_launch_health.*,
-      // worker_pool.dispatch.goal_lineage.*, and
+      // worker_pool.dispatch.goal_lineage.*,
+      // worker_pool.dispatch.substrate.*, and
       // worker_pool.memory.dynamic.* — Python-owned (canonical schema at
       // platform/agent-os-config). PARTIAL mirror, same rationale as the
       // sentinel block below: this Node reader does not consume the values, but
@@ -1690,6 +1691,19 @@ function schemaV1() {
                     __type: TYPE_INT,
                     __default: 400,
                     __min: 0,
+                  },
+                },
+              },
+              substrate: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  swap_crit_requires_pressure: { __type: TYPE_BOOL, __default: true },
+                  mem_pressure_crit_level: {
+                    __type: TYPE_INT,
+                    __default: 2,
+                    __min: 1,
+                    __max: 4,
                   },
                 },
               },
@@ -2330,6 +2344,14 @@ export const ENV_ALIASES = {
   'worker_pool.dispatch.goal_lineage.spec_excerpt_bytes': {
     canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_GOAL_LINEAGE_SPEC_EXCERPT_BYTES',
     aliases: [['HQ_GLN_LINEAGE_SPEC_EXCERPT_BYTES', identity]],
+  },
+  'worker_pool.dispatch.substrate.swap_crit_requires_pressure': {
+    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_SUBSTRATE_SWAP_CRIT_REQUIRES_PRESSURE',
+    aliases: [['SUBSTRATE_SWAP_CRIT_REQUIRES_PRESSURE', identity]],
+  },
+  'worker_pool.dispatch.substrate.mem_pressure_crit_level': {
+    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_SUBSTRATE_MEM_PRESSURE_CRIT_LEVEL',
+    aliases: [['SUBSTRATE_MEM_PRESSURE_CRIT_LEVEL', identity]],
   },
   'worker_pool.secrets.prewarm.enabled': {
     canonical: 'AGENT_OS_WORKER_POOL_SECRETS_PREWARM_ENABLED',

@@ -1007,6 +1007,28 @@ test('top-level config.yaml accepts mirrored worker_pool.dispatch.fleet_launch_h
   }
 });
 
+test('top-level config.yaml accepts mirrored worker_pool.dispatch.substrate keys', () => {
+  // Substrate distress knobs are Python-owned, but these checked-in keys live
+  // in shared config.yaml and must parse under the watcher strict schema.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        dispatch:
+          substrate:
+            swap_crit_requires_pressure: false
+            mem_pressure_crit_level: 4
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.dispatch.substrate.swap_crit_requires_pressure'), false);
+    assert.equal(cfg.get('worker_pool.dispatch.substrate.mem_pressure_crit_level'), 4);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('top-level config.yaml accepts mirrored worker_pool.dispatch.codex_exec_mode key', () => {
   // CXD-07 is Python-owned, but the shared checked-in config must parse under
   // the watcher strict schema.
@@ -1239,6 +1261,29 @@ test('worker_pool.dispatch.goal_lineage legacy env aliases resolve through Node 
     assert.equal(
       cfg.resolutionTrace('worker_pool.dispatch.goal_lineage.spec_excerpt_bytes').at(-1).source,
       'env:HQ_GLN_LINEAGE_SPEC_EXCERPT_BYTES',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('worker_pool.dispatch.substrate legacy env aliases resolve through Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        SUBSTRATE_SWAP_CRIT_REQUIRES_PRESSURE: 'false',
+        AGENT_OS_WORKER_POOL_DISPATCH_SUBSTRATE_MEM_PRESSURE_CRIT_LEVEL: '3',
+      },
+    });
+    assert.equal(cfg.get('worker_pool.dispatch.substrate.swap_crit_requires_pressure'), false);
+    assert.equal(cfg.get('worker_pool.dispatch.substrate.mem_pressure_crit_level'), 3);
+    assert.equal(
+      cfg.resolutionTrace('worker_pool.dispatch.substrate.mem_pressure_crit_level').at(-1).source,
+      'env:AGENT_OS_WORKER_POOL_DISPATCH_SUBSTRATE_MEM_PRESSURE_CRIT_LEVEL',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });

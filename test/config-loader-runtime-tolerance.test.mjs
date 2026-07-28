@@ -6,18 +6,15 @@ import { test } from 'node:test';
 
 import {
   loadConfig,
-  loadConfigCached,
+  loadConfigRuntime,
   resetConfigCache,
+  resetRuntimeUnknownWarningCacheForTests,
 } from '../src/config-loader.mjs';
 
-// Regression for the 2026-07-17 watcher outage: a sibling module (main-catchup)
-// added `main_catchup.pg_schema_gate_allow_destructive_revisions` to the shared
-// top-level agent-os config.yaml. This module's strict validator whitelists the
-// main_catchup keys it consumes, so every daemon-path load (all of which flow
-// through loadConfigCached/_ensureFreshConfig) fail-louded at startup and the
-// watcher crash-looped for ~1h. The daemon path must tolerate foreign NESTED
-// keys under shared roots (warn-once + drop); the strict public loadConfig()
-// keeps failing loud so CI still catches genuine schema drift.
+// Regression coverage for CFT-02: runtime callers must tolerate checked-in
+// config.yaml keys that are newer than this loader, warn once per config
+// file/key, and drop the unknown key. The strict public loadConfig() entrypoint
+// must keep failing loud so CI and authoring paths still catch schema drift.
 
 function withTempTopConfig(contents, fn) {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'cfg-runtime-tolerance-'));
@@ -31,28 +28,121 @@ function withTempTopConfig(contents, fn) {
   }
 }
 
-const FOREIGN_NESTED_KEY_DOC = `version: 1
+function withTempConfigPair({ topContents = 'version: 1\n', moduleContents = null }, fn) {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'cfg-runtime-tolerance-'));
+  const topPath = path.join(rootDir, 'config.yaml');
+  const modulePath = path.join(rootDir, 'module.yaml');
+  writeFileSync(topPath, topContents, 'utf8');
+  if (moduleContents !== null) {
+    writeFileSync(modulePath, moduleContents, 'utf8');
+  }
+  try {
+    return fn({ topPath, modulePath });
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+    resetConfigCache();
+    resetRuntimeUnknownWarningCacheForTests();
+  }
+}
+
+function captureWarns(fn) {
+  const prior = console.warn;
+  const warnings = [];
+  console.warn = (...args) => {
+    warnings.push(args.map((arg) => String(arg)).join(' '));
+  };
+  try {
+    fn();
+  } finally {
+    console.warn = prior;
+  }
+  return warnings;
+}
+
+test('runtime load tolerates an unknown checked-in top-level key and strict load still rejects it', () => {
+  withTempTopConfig(
+    `version: 1
+roots:
+  hq: /from-top
+  future_runtime_home: /newer-than-loader
+`,
+    (topPath) => {
+      resetRuntimeUnknownWarningCacheForTests();
+      const warnings = captureWarns(() => {
+        const first = loadConfigRuntime({ topPath, modulePaths: [], env: {} });
+        const second = loadConfigRuntime({ topPath, modulePaths: [], env: {} });
+        assert.equal(first.get('roots.hq'), '/from-top');
+        assert.equal(second.get('roots.hq'), '/from-top');
+        assert.equal(first.get('roots.future_runtime_home', null), null);
+        assert.deepEqual(first.runtimeDroppedUnknownKeys, [
+          {
+            key: 'roots.future_runtime_home',
+            source: topPath,
+            hint: 'did you mean roots."runtime_home"?',
+          },
+        ]);
+      });
+      assert.equal(warnings.filter((line) => line.includes('roots.future_runtime_home')).length, 1);
+
+      assert.throws(
+        () => loadConfig({ topPath, modulePaths: [], env: {} }),
+        (err) => {
+          assert.match(String(err.message), /unknown key \(strict schema\)/);
+          assert.match(String(err.message), /roots\.future_runtime_home/);
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test('runtime load tolerates an unknown checked-in module key and warns once per file/key', () => {
+  withTempConfigPair(
+    {
+      topContents: 'version: 1\n',
+      moduleContents: `roles:
+  reviewer: codex
+  future_worker_role: fast-lane
+`,
+    },
+    ({ topPath, modulePath }) => {
+      resetRuntimeUnknownWarningCacheForTests();
+      const warnings = captureWarns(() => {
+        const first = loadConfigRuntime({ topPath, modulePaths: [modulePath], env: {} });
+        const second = loadConfigRuntime({ topPath, modulePaths: [modulePath], env: {} });
+        assert.equal(first.get('roles.reviewer'), 'codex');
+        assert.equal(second.get('roles.reviewer'), 'codex');
+        assert.equal(first.get('roles.future_worker_role', null), null);
+        assert.deepEqual(first.runtimeDroppedUnknownKeys, [
+          {
+            key: 'roles.future_worker_role',
+            source: modulePath,
+            hint: '',
+          },
+        ]);
+      });
+      assert.equal(warnings.filter((line) => line.includes('roles.future_worker_role')).length, 1);
+
+      assert.throws(
+        () => loadConfig({ topPath, modulePaths: [modulePath], env: {} }),
+        (err) => {
+          assert.match(String(err.message), /unknown key \(strict schema\)/);
+          assert.match(String(err.message), /roles\.future_worker_role/);
+          return true;
+        },
+      );
+    },
+  );
+});
+
+test('strict loadConfig still fails loud on a foreign nested key under a shared root', () => {
+  withTempTopConfig(
+    `version: 1
 main_catchup:
   poll_interval_seconds: 300
   some_future_sibling_module_key: true
-`;
-
-test('loadConfigCached tolerates foreign nested keys under shared roots in the top-level file', () => {
-  withTempTopConfig(FOREIGN_NESTED_KEY_DOC, (topPath) => {
-    resetConfigCache();
-    const cfg = loadConfigCached({ topPath, modulePaths: [], env: {} });
-    // The key this module consumes still resolves from the same section.
-    assert.equal(cfg.get('main_catchup.poll_interval_seconds'), 300);
-    // The foreign key is dropped, not resolved and not fatal.
-    assert.equal(
-      cfg.get('main_catchup.some_future_sibling_module_key', null),
-      null,
-    );
-  });
-});
-
-test('strict loadConfig still fails loud on the same foreign nested key', () => {
-  withTempTopConfig(FOREIGN_NESTED_KEY_DOC, (topPath) => {
+`,
+    (topPath) => {
     assert.throws(
       () => loadConfig({ topPath, modulePaths: [], env: {} }),
       (err) => {
@@ -64,5 +154,6 @@ test('strict loadConfig still fails loud on the same foreign nested key', () => 
         return true;
       },
     );
-  });
+    },
+  );
 });

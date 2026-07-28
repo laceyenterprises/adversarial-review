@@ -1048,6 +1048,61 @@ test('top-level config.yaml accepts mirrored worker_pool.comms.responder keys', 
   }
 });
 
+test('top-level config.yaml accepts mirrored worker_pool.secrets.prewarm keys', () => {
+  // SSR-01 is Python-owned, but checked-in prewarm keys may live in shared
+  // config.yaml and must parse under the watcher strict schema.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        secrets:
+          prewarm:
+            enabled: true
+            min_interval_seconds: 120
+            targets:
+              - worker_class: service-launcher
+                refs:
+                  - op://Cliovault/agent-gateway/token
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.secrets.prewarm.enabled'), true);
+    assert.equal(cfg.get('worker_pool.secrets.prewarm.min_interval_seconds'), 120);
+    assert.deepEqual(cfg.get('worker_pool.secrets.prewarm.targets'), [
+      {
+        worker_class: 'service-launcher',
+        refs: ['op://Cliovault/agent-gateway/token'],
+      },
+    ]);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('worker_pool.secrets.prewarm canonical env aliases resolve through Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_WORKER_POOL_SECRETS_PREWARM_ENABLED: 'false',
+        AGENT_OS_WORKER_POOL_SECRETS_PREWARM_MIN_INTERVAL_SECONDS: '600',
+      },
+    });
+    assert.equal(cfg.get('worker_pool.secrets.prewarm.enabled'), false);
+    assert.equal(cfg.get('worker_pool.secrets.prewarm.min_interval_seconds'), 600);
+    assert.equal(
+      cfg.resolutionTrace('worker_pool.secrets.prewarm.min_interval_seconds').at(-1).source,
+      'env:AGENT_OS_WORKER_POOL_SECRETS_PREWARM_MIN_INTERVAL_SECONDS',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('worker_pool.comms.responder canonical env aliases resolve through Node schema', () => {
   const tmp = freshTmp();
   try {

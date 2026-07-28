@@ -477,7 +477,11 @@ async function spawnReviewer({
         );
         tokenUsage = null;
         reviewerTokenUsageArtifact = null;
-        resolvedWorkerRunId = null;
+        // NOTE: deliberately do NOT reset resolvedWorkerRunId here. It is
+        // extracted from the raw token usage BEFORE tagTokenUsage()/the artifact
+        // write, so if only those later steps throw (e.g. malformed token
+        // counts) the run_id is already valid — discarding it would lose WCW
+        // attribution for no reason. If the read itself threw, it stays null.
       }
       completeReviewerPassImpl(ROOT, {
         repo,
@@ -513,9 +517,16 @@ async function spawnReviewer({
       const rawErrTokenUsage = err?.tokenUsage && typeof err.tokenUsage === 'object'
         ? err.tokenUsage
         : null;
-      const tokenUsage = rawErrTokenUsage
-        ? tagTokenUsage(rawErrTokenUsage, 'guardrail')
-        : null;
+      // Isolate tagTokenUsage exactly as the success path does: a failure on
+      // malformed token counts must NOT skip completeReviewerPassImpl below, or
+      // the reviewer pass would stay stuck in 'running' forever. The raw run_id
+      // (read directly below) is unaffected by a normalization failure.
+      let tokenUsage = null;
+      try {
+        tokenUsage = rawErrTokenUsage ? tagTokenUsage(rawErrTokenUsage, 'guardrail') : null;
+      } catch (tagErr) {
+        tokenUsage = null;
+      }
       completeReviewerPassImpl(ROOT, {
         repo,
         prNumber,

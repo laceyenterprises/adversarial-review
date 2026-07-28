@@ -176,3 +176,44 @@ test('spawnReviewer settles worker_run_id null when no worker run resolves (cli-
   assert.equal(settled.length, 1);
   assert.equal(settled[0].workerRunId, null);
 });
+
+test('spawnReviewer preserves worker run_id when the adapter throws (error-path attribution)', async () => {
+  const settled = [];
+  // spawnReviewer settles the failed pass and re-throws; the attribution run_id
+  // surfaced on err.tokenUsage must survive onto the settled pass.
+  await assert.rejects(
+    spawnReviewer({
+      repo: 'laceyenterprises/demo',
+      prNumber: 23,
+      reviewerModel: 'gemini',
+      botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+      linearTicketId: 'LAC-566',
+      labels: [],
+      builderTag: 'codex',
+      reviewerHeadSha: 'sha23',
+      reviewAttemptNumber: 1,
+      reviewDbAttemptNumber: 2,
+      completedRemediationRounds: 0,
+      passKind: 'first-pass',
+      maxRemediationRounds: 2,
+      reviewerSessionUuid: 'spawn-settle-wcw-error-path',
+      reviewerRuntimeAdapterOverride: {
+        async spawnReviewer() {
+          // Worker crashed mid-run but surfaced its ledger run_id on the error.
+          throw Object.assign(new Error('reviewer worker crashed'), {
+            tokenUsage: { workerRunId: 'run_wcw_error_path', input: 3, output: 4, source: 'worker-run' },
+          });
+        },
+      },
+      postGitHubReviewWithCaptureImpl: async () => {},
+      completeReviewerPassImpl: (_root, payload) => {
+        settled.push(payload);
+      },
+    }),
+    /reviewer worker crashed/,
+  );
+
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].status, 'failed');
+  assert.equal(settled[0].workerRunId, 'run_wcw_error_path');
+});

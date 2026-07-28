@@ -84,3 +84,136 @@ test('spawnReviewer does not post unmarked adapter review bodies', async () => {
   assert.equal(result.ok, true);
   assert.deepEqual(posted, []);
 });
+
+test('spawnReviewer threads the reviewer worker run_id into the settled pass (WCW attribution)', async () => {
+  let readBestArgs = null;
+  const settled = [];
+  const result = await spawnReviewer({
+    repo: 'laceyenterprises/demo',
+    prNumber: 21,
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-566',
+    labels: [],
+    builderTag: 'codex',
+    reviewerHeadSha: 'sha21',
+    reviewAttemptNumber: 1,
+    reviewDbAttemptNumber: 2,
+    completedRemediationRounds: 0,
+    passKind: 'first-pass',
+    maxRemediationRounds: 2,
+    reviewerSessionUuid: 'spawn-settle-wcw-attribution',
+    reviewerRuntimeAdapterOverride: {
+      async spawnReviewer() {
+        return {
+          ok: true,
+          reviewBody: '## Summary\nLooks good.\n\n## Verdict\nComment only',
+          reviewBodyDelivery: 'caller-post',
+          // SDK-dispatch adapter surfaces the worker's dispatch id here.
+          reattachToken: 'lrq_wcw_attribution',
+          spawnedAt: '2026-07-28T03:00:00.000Z',
+        };
+      },
+    },
+    postGitHubReviewWithCaptureImpl: async () => {},
+    readBestReviewerEvidenceTokenUsageImpl: (args) => {
+      readBestArgs = args;
+      // Mimic the ledger resolving a worker_runs row from launch_request_id:
+      // raw token usage carries workerRunId (before normalization strips it).
+      return { workerRunId: 'run_wcw_attribution_123', input: 10, output: 20, source: 'worker-run' };
+    },
+    completeReviewerPassImpl: (_root, payload) => {
+      settled.push(payload);
+    },
+  });
+
+  assert.equal(result.ok, true);
+  // The reviewer worker's dispatch id (reattachToken) must be threaded as
+  // launchRequestId so the ledger read can resolve the worker_runs row.
+  assert.equal(readBestArgs?.launchRequestId, 'lrq_wcw_attribution');
+  // The resolved ledger run_id must be persisted to reviewer_passes.worker_run_id,
+  // surviving tagTokenUsage()/normalizeTokenUsage() (which drop attribution).
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].workerRunId, 'run_wcw_attribution_123');
+});
+
+test('spawnReviewer settles worker_run_id null when no worker run resolves (cli-direct path)', async () => {
+  const settled = [];
+  const result = await spawnReviewer({
+    repo: 'laceyenterprises/demo',
+    prNumber: 22,
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-566',
+    labels: [],
+    builderTag: 'codex',
+    reviewerHeadSha: 'sha22',
+    reviewAttemptNumber: 1,
+    reviewDbAttemptNumber: 2,
+    completedRemediationRounds: 0,
+    passKind: 'first-pass',
+    maxRemediationRounds: 2,
+    reviewerSessionUuid: 'spawn-settle-wcw-null',
+    reviewerRuntimeAdapterOverride: {
+      async spawnReviewer() {
+        return {
+          ok: true,
+          reviewBody: '## Summary\nLooks good.\n\n## Verdict\nComment only',
+          reviewBodyDelivery: 'caller-post',
+          reattachToken: 'lrq_wcw_null',
+          spawnedAt: '2026-07-28T03:00:00.000Z',
+        };
+      },
+    },
+    postGitHubReviewWithCaptureImpl: async () => {},
+    readBestReviewerEvidenceTokenUsageImpl: () => null, // ledger cannot resolve a worker run
+    completeReviewerPassImpl: (_root, payload) => {
+      settled.push(payload);
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].workerRunId, null);
+});
+
+test('spawnReviewer preserves worker run_id when the adapter throws (error-path attribution)', async () => {
+  const settled = [];
+  // spawnReviewer settles the failed pass and re-throws; the attribution run_id
+  // surfaced on err.tokenUsage must survive onto the settled pass.
+  await assert.rejects(
+    spawnReviewer({
+      repo: 'laceyenterprises/demo',
+      prNumber: 23,
+      reviewerModel: 'gemini',
+      botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+      linearTicketId: 'LAC-566',
+      labels: [],
+      builderTag: 'codex',
+      reviewerHeadSha: 'sha23',
+      reviewAttemptNumber: 1,
+      reviewDbAttemptNumber: 2,
+      completedRemediationRounds: 0,
+      passKind: 'first-pass',
+      maxRemediationRounds: 2,
+      reviewerSessionUuid: 'spawn-settle-wcw-error-path',
+      reviewerRuntimeAdapterOverride: {
+        async spawnReviewer() {
+          // Worker crashed mid-run but surfaced its ledger run_id on the error.
+          throw Object.assign(new Error('reviewer worker crashed'), {
+            tokenUsage: { workerRunId: 'run_wcw_error_path', input: 3, output: 4, source: 'worker-run' },
+          });
+        },
+      },
+      postGitHubReviewWithCaptureImpl: async () => {},
+      completeReviewerPassImpl: (_root, payload) => {
+        settled.push(payload);
+      },
+    }),
+    /reviewer worker crashed/,
+  );
+
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].status, 'failed');
+  assert.equal(settled[0].workerRunId, 'run_wcw_error_path');
+});

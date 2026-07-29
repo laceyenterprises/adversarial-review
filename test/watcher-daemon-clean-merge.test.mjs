@@ -199,6 +199,105 @@ test('daemon loads merge-authority config with the adversarial config.yaml modul
   }
 });
 
+test('AMA closure preserves local merge-authority overrides over domain defaults', async () => {
+  const rootDir = tempRoot();
+  try {
+    mkdirSync(join(rootDir, 'domains'), { recursive: true });
+    writeFileSync(
+      join(rootDir, 'domains', 'code-pr.json'),
+      JSON.stringify({
+        id: 'code-pr',
+        mergeAuthority: {
+          autonomousMergeExecutionEnabled: true,
+          strictMode: true,
+          strictNonBlockingRemediation: true,
+          workerClass: 'hammer',
+          workerClassFallback: ['claude-code'],
+          mergeMethod: 'squash',
+          lha: { consumeAttestations: true },
+          autoHammerOnEligibilityMiss: false,
+          eligibility: {
+            riskClasses: ['low'],
+            fastMergeLabels: ['fast-merge:test-fixtures'],
+            highRiskRequiresTwoKey: true,
+          },
+          branchProtection: { required: true },
+        },
+      }),
+    );
+
+    const localSource = 'local:/Users/airlock/agent-os/config.local.yaml';
+    let daemonCfg = null;
+    let closerCfg = null;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      candidate: {
+        ...baseArgs(rootDir).candidate,
+        riskClass: 'medium',
+        branchProtection: { requiredContexts: [] },
+      },
+      loadConfigImpl: () => ({
+        sources: {
+          'roles.adversarial.merge_authority.lha.consume_attestations': localSource,
+          'roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss': localSource,
+          'roles.adversarial.merge_authority.eligibility.risk_classes': localSource,
+          'roles.adversarial.merge_authority.eligibility.high_risk_requires_two_key': localSource,
+          'roles.adversarial.merge_authority.branch_protection.required': localSource,
+        },
+        getMergeAuthorityConfig() {
+          return {
+            enabled: true,
+            mergeMethod: 'squash',
+            autonomousMergeExecutionEnabled: true,
+            strictMode: true,
+            strictNonBlockingRemediation: true,
+            workerClass: 'hammer',
+            workerClassFallback: ['claude-code'],
+            lha: { consumeAttestations: false },
+            autoHammerOnEligibilityMiss: true,
+            eligibility: {
+              riskClasses: ['low', 'medium', 'high', 'critical'],
+              fastMergeLabels: ['fast-merge:custom'],
+              highRiskRequiresTwoKey: false,
+            },
+            branchProtection: { required: false },
+          };
+        },
+        getOrchestrationMode() {
+          return 'native';
+        },
+      }),
+      runDaemonCleanMergeAttemptImpl: async ({ cfg }) => {
+        daemonCfg = cfg;
+        return {
+          disposition: DAEMON_MERGE_DISPOSITION.NOT_TAKEN,
+          reason: 'non-blocking-findings-present',
+        };
+      },
+      maybeDispatchAmaCloserImpl: async ({ cfg }) => {
+        closerCfg = cfg;
+        return { dispatched: false, reason: 'diagnostic' };
+      },
+    });
+
+    assert.equal(result.amaEnabled, true);
+    for (const cfg of [daemonCfg, closerCfg]) {
+      assert.equal(cfg.lha.consumeAttestations, false);
+      assert.equal(cfg.autoHammerOnEligibilityMiss, true);
+      assert.deepEqual(cfg.eligibility.riskClasses, ['low', 'medium', 'high', 'critical']);
+      assert.equal(cfg.eligibility.highRiskRequiresTwoKey, false);
+      assert.equal(cfg.branchProtection.required, false);
+      assert.deepEqual(
+        cfg.eligibility.fastMergeLabels,
+        ['fast-merge:test-fixtures'],
+        'domain default still wins when no local source is present for this leaf',
+      );
+    }
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('daemon fail-closed → skips closer dispatch; no hammer from the retry path', async () => {
   const rootDir = tempRoot();
   try {

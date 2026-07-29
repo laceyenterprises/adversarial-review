@@ -89,16 +89,52 @@ export function resolveRemediatorWorkerClassFromDomain(domainConfig) {
   return str(domainConfig?.roleRegistry?.remediator?.workerClass) || null;
 }
 
-function mergeArrayOverride(base = [], override = undefined) {
+function fallbackSourceIsOperatorOverride(source) {
+  const normalized = str(source);
+  return normalized === 'cli'
+    || normalized.startsWith('env:')
+    || normalized.startsWith('local:');
+}
+
+function fallbackHasOperatorOverride(fallbackSources, dottedKey) {
+  if (!fallbackSources || typeof fallbackSources !== 'object') return false;
+  return fallbackSourceIsOperatorOverride(fallbackSources[dottedKey]);
+}
+
+function mergeArrayOverride(base = [], override = undefined, dottedKey = null, options = {}) {
+  if (dottedKey && fallbackHasOperatorOverride(options.fallbackSources, dottedKey)) {
+    return Array.isArray(base) ? [...base] : [];
+  }
   return Array.isArray(override) ? [...override] : [...base];
 }
 
-function preferredScalar(fallbackValue, domainValue) {
+function preferredScalar(fallbackValue, domainValue, dottedKey = null, options = {}) {
+  if (dottedKey && fallbackHasOperatorOverride(options.fallbackSources, dottedKey)) {
+    return fallbackValue;
+  }
   if (domainValue !== undefined && domainValue !== null) return domainValue;
   return fallbackValue;
 }
 
-export function resolveMergeAuthorityConfigFromDomain(domainConfig, fallbackCfg = {}) {
+const MERGE_AUTHORITY_KEYS = Object.freeze({
+  enabled: 'roles.adversarial.merge_authority.enabled',
+  workerClass: 'roles.adversarial.merge_authority.worker_class',
+  workerClassFallback: 'roles.adversarial.merge_authority.worker_class_fallback',
+  mergeMethod: 'roles.adversarial.merge_authority.merge_method',
+  strictNonBlockingRemediation: 'roles.adversarial.merge_authority.strict_non_blocking_remediation',
+  autonomousMergeExecutionEnabled: 'roles.adversarial.merge_authority.autonomous_merge_execution_enabled',
+  strictMode: 'roles.adversarial.merge_authority.strict_mode',
+  lhaConsumeAttestations: 'roles.adversarial.merge_authority.lha.consume_attestations',
+  autoHammerOnEligibilityMiss: 'roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss',
+  hammerLifetimeDispatchCeiling: 'roles.adversarial.merge_authority.hammer_lifetime_ceiling',
+  dispatchTimeoutMs: 'roles.adversarial.merge_authority.dispatch_timeout_ms',
+  riskClasses: 'roles.adversarial.merge_authority.eligibility.risk_classes',
+  fastMergeLabels: 'roles.adversarial.merge_authority.eligibility.fast_merge_labels',
+  highRiskRequiresTwoKey: 'roles.adversarial.merge_authority.eligibility.high_risk_requires_two_key',
+  branchProtectionRequired: 'roles.adversarial.merge_authority.branch_protection.required',
+});
+
+export function resolveMergeAuthorityConfigFromDomain(domainConfig, fallbackCfg = {}, options = {}) {
   const policy = objectOrNull(domainConfig?.mergeAuthority);
   if (!policy) return {
     ...fallbackCfg,
@@ -114,35 +150,105 @@ export function resolveMergeAuthorityConfigFromDomain(domainConfig, fallbackCfg 
   };
   return {
     ...fallbackCfg,
-    enabled: preferredScalar(fallbackCfg.enabled, policy.enabled),
-    workerClass: preferredScalar(fallbackCfg.workerClass, str(policy.workerClass) || undefined),
-    workerClassFallback: mergeArrayOverride(fallbackCfg.workerClassFallback, policy.workerClassFallback),
-    mergeMethod: preferredScalar(fallbackCfg.mergeMethod, str(policy.mergeMethod) || undefined),
+    enabled: preferredScalar(fallbackCfg.enabled, policy.enabled, MERGE_AUTHORITY_KEYS.enabled, options),
+    workerClass: preferredScalar(
+      fallbackCfg.workerClass,
+      str(policy.workerClass) || undefined,
+      MERGE_AUTHORITY_KEYS.workerClass,
+      options,
+    ),
+    workerClassFallback: mergeArrayOverride(
+      fallbackCfg.workerClassFallback,
+      policy.workerClassFallback,
+      MERGE_AUTHORITY_KEYS.workerClassFallback,
+      options,
+    ),
+    mergeMethod: preferredScalar(
+      fallbackCfg.mergeMethod,
+      str(policy.mergeMethod) || undefined,
+      MERGE_AUTHORITY_KEYS.mergeMethod,
+      options,
+    ),
     strictNonBlockingRemediation:
-      preferredScalar(fallbackCfg.strictNonBlockingRemediation, policy.strictNonBlockingRemediation),
+      preferredScalar(
+        fallbackCfg.strictNonBlockingRemediation,
+        policy.strictNonBlockingRemediation,
+        MERGE_AUTHORITY_KEYS.strictNonBlockingRemediation,
+        options,
+      ),
     autonomousMergeExecutionEnabled:
-      preferredScalar(fallbackCfg.autonomousMergeExecutionEnabled, policy.autonomousMergeExecutionEnabled),
-    strictMode: preferredScalar(fallbackCfg.strictMode, policy.strictMode),
+      preferredScalar(
+        fallbackCfg.autonomousMergeExecutionEnabled,
+        policy.autonomousMergeExecutionEnabled,
+        MERGE_AUTHORITY_KEYS.autonomousMergeExecutionEnabled,
+        options,
+      ),
+    strictMode: preferredScalar(
+      fallbackCfg.strictMode,
+      policy.strictMode,
+      MERGE_AUTHORITY_KEYS.strictMode,
+      options,
+    ),
     lha: {
       ...(fallbackCfg?.lha || {}),
       consumeAttestations:
-        preferredScalar(fallbackCfg?.lha?.consumeAttestations, policy?.lha?.consumeAttestations),
+        preferredScalar(
+          fallbackCfg?.lha?.consumeAttestations,
+          policy?.lha?.consumeAttestations,
+          MERGE_AUTHORITY_KEYS.lhaConsumeAttestations,
+          options,
+        ),
     },
     autoHammerOnEligibilityMiss:
-      preferredScalar(fallbackCfg.autoHammerOnEligibilityMiss, policy.autoHammerOnEligibilityMiss),
+      preferredScalar(
+        fallbackCfg.autoHammerOnEligibilityMiss,
+        policy.autoHammerOnEligibilityMiss,
+        MERGE_AUTHORITY_KEYS.autoHammerOnEligibilityMiss,
+        options,
+      ),
     hammerLifetimeDispatchCeiling:
-      preferredScalar(fallbackCfg.hammerLifetimeDispatchCeiling, policy.hammerLifetimeDispatchCeiling),
-    dispatchTimeoutMs: preferredScalar(fallbackCfg.dispatchTimeoutMs, policy.dispatchTimeoutMs),
+      preferredScalar(
+        fallbackCfg.hammerLifetimeDispatchCeiling,
+        policy.hammerLifetimeDispatchCeiling,
+        MERGE_AUTHORITY_KEYS.hammerLifetimeDispatchCeiling,
+        options,
+      ),
+    dispatchTimeoutMs: preferredScalar(
+      fallbackCfg.dispatchTimeoutMs,
+      policy.dispatchTimeoutMs,
+      MERGE_AUTHORITY_KEYS.dispatchTimeoutMs,
+      options,
+    ),
     eligibility: {
       ...(fallbackCfg?.eligibility || {}),
-      riskClasses: mergeArrayOverride(fallbackCfg?.eligibility?.riskClasses, policy?.eligibility?.riskClasses),
-      fastMergeLabels: mergeArrayOverride(fallbackCfg?.eligibility?.fastMergeLabels, policy?.eligibility?.fastMergeLabels),
+      riskClasses: mergeArrayOverride(
+        fallbackCfg?.eligibility?.riskClasses,
+        policy?.eligibility?.riskClasses,
+        MERGE_AUTHORITY_KEYS.riskClasses,
+        options,
+      ),
+      fastMergeLabels: mergeArrayOverride(
+        fallbackCfg?.eligibility?.fastMergeLabels,
+        policy?.eligibility?.fastMergeLabels,
+        MERGE_AUTHORITY_KEYS.fastMergeLabels,
+        options,
+      ),
       highRiskRequiresTwoKey:
-        preferredScalar(fallbackCfg?.eligibility?.highRiskRequiresTwoKey, policy?.eligibility?.highRiskRequiresTwoKey),
+        preferredScalar(
+          fallbackCfg?.eligibility?.highRiskRequiresTwoKey,
+          policy?.eligibility?.highRiskRequiresTwoKey,
+          MERGE_AUTHORITY_KEYS.highRiskRequiresTwoKey,
+          options,
+        ),
     },
     branchProtection: {
       ...(fallbackCfg?.branchProtection || {}),
-      required: preferredScalar(fallbackCfg?.branchProtection?.required, policy?.branchProtection?.required),
+      required: preferredScalar(
+        fallbackCfg?.branchProtection?.required,
+        policy?.branchProtection?.required,
+        MERGE_AUTHORITY_KEYS.branchProtectionRequired,
+        options,
+      ),
     },
   };
 }

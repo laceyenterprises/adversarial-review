@@ -136,3 +136,51 @@ test('domain merge-authority policy overrides fallback defaults', () => {
   assert.deepEqual(sparse.eligibility.fastMergeLabels, ['fast-merge:test-fixtures', 'fast-merge:docs']);
   assert.equal(sparse.branchProtection.required, true);
 });
+
+test('domain merge-authority policy preserves explicit operator overrides', () => {
+  const domainConfig = loadDomainConfig(ROOT, 'code-pr');
+  const cfg = resolveMergeAuthorityConfigFromDomain(domainConfig, {
+    enabled: true,
+    workerClass: 'hammer',
+    workerClassFallback: ['claude-code'],
+    mergeMethod: 'squash',
+    strictNonBlockingRemediation: true,
+    autonomousMergeExecutionEnabled: true,
+    strictMode: false,
+    lha: { consumeAttestations: false },
+    autoHammerOnEligibilityMiss: true,
+    hammerLifetimeDispatchCeiling: 6,
+    dispatchTimeoutMs: 123,
+    eligibility: {
+      riskClasses: ['low', 'medium', 'high', 'critical'],
+      fastMergeLabels: ['fast-merge:custom'],
+      highRiskRequiresTwoKey: false,
+    },
+    branchProtection: { required: false },
+  }, {
+    fallbackSources: {
+      'roles.adversarial.merge_authority.lha.consume_attestations':
+        'local:/Users/airlock/agent-os/config.local.yaml',
+      'roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss':
+        'local:/Users/airlock/agent-os/config.local.yaml',
+      'roles.adversarial.merge_authority.eligibility.risk_classes':
+        'local:/Users/airlock/agent-os/config.local.yaml',
+      'roles.adversarial.merge_authority.eligibility.high_risk_requires_two_key':
+        'env:AGENT_OS_CFG_ROLES_ADVERSARIAL_MERGE_AUTHORITY_ELIGIBILITY_HIGH_RISK_REQUIRES_TWO_KEY',
+      'roles.adversarial.merge_authority.branch_protection.required':
+        'local:/Users/airlock/agent-os/config.local.yaml',
+    },
+  });
+
+  assert.equal(cfg.lha.consumeAttestations, false);
+  assert.equal(cfg.autoHammerOnEligibilityMiss, true);
+  assert.deepEqual(cfg.eligibility.riskClasses, ['low', 'medium', 'high', 'critical']);
+  assert.equal(cfg.eligibility.highRiskRequiresTwoKey, false);
+  assert.equal(cfg.branchProtection.required, false);
+  assert.equal(cfg.strictMode, true, 'domain value still wins without an operator override source');
+  assert.deepEqual(
+    cfg.eligibility.fastMergeLabels,
+    ['fast-merge:test-fixtures', 'fast-merge:docs'],
+    'domain arrays still win without an operator override source',
+  );
+});

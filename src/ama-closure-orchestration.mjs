@@ -35,7 +35,6 @@ import {
   runDaemonCleanMergeAttempt,
 } from './daemon-clean-merge.mjs';
 import { resolveRoundBudgetForJob, summarizePRRemediationLedger } from './follow-up-jobs.mjs';
-import { fetchMergeAgentCandidate } from './follow-up-merge-agent.mjs';
 import { isTransientGhError } from './gh-cli.mjs';
 import { fetchPullRequestMergeability, fetchReviewBodiesForHead } from './github-api.mjs';
 import { normalizeGithubMergeability, resolveMergeabilityWithSampling } from './github-mergeability.mjs';
@@ -254,6 +253,7 @@ export async function maybeDispatchAmaClosureFor({
     cfg = resolveMergeAuthorityConfigFromDomain(
       loadDomainConfig(rootDir, domainId || 'code-pr'),
       loadedConfig.getMergeAuthorityConfig(),
+      { fallbackSources: loadedConfig.sources || {} },
     );
     orchestrationMode = resolveOrchestrationMode({
       loadedConfig,

@@ -1166,9 +1166,11 @@ test('daemon clean merge fail-closes when worker LRQ identity cannot be resolved
   }
 });
 
-test('daemon clean merge strict mode declines a PR with a standing blocking finding', async () => {
+test('daemon clean merge strict mode declines non-blocking findings before identity reads', async () => {
   const rootDir = tempRoot();
   try {
+    let identityReads = 0;
+    let liveFetches = 0;
     let leaseCalls = 0;
     let mergeCalls = 0;
     const result = await runDaemonCleanMergeAttempt({
@@ -1194,28 +1196,34 @@ test('daemon clean merge strict mode declines a PR with a standing blocking find
       },
       mergeabilityForGate: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' },
       reviewState: {
-        blockingFindingCount: 1,
+        blockingFindingCount: 0,
         blockingFindingState: 'known',
-        nonBlockingFindingCount: 0,
+        nonBlockingFindingCount: 1,
         nonBlockingFindingState: 'known',
       },
       currentPrHeadSha: 'finding-head',
-      readBuildCompletionSignalForPrImpl: () => ({
-        ok: true,
-        row: {
-          launch_request_id: 'lrq_with_finding',
-          worker_class: 'codex',
-          head_sha: 'finding-head',
-        },
-      }),
-      fetchRollupImpl: async () => ({
-        state: 'OPEN',
-        headSha: 'finding-head',
-        headRefName: 'worker/finding-head',
-        statusCheckRollup: [],
-        mergeable: 'MERGEABLE',
-        mergeStateStatus: 'CLEAN',
-      }),
+      readBuildCompletionSignalForPrImpl: () => {
+        identityReads += 1;
+        return {
+          ok: true,
+          row: {
+            launch_request_id: 'lrq_with_finding',
+            worker_class: 'codex',
+            head_sha: 'finding-head',
+          },
+        };
+      },
+      fetchRollupImpl: async () => {
+        liveFetches += 1;
+        return {
+          state: 'OPEN',
+          headSha: 'finding-head',
+          headRefName: 'worker/finding-head',
+          statusCheckRollup: [],
+          mergeable: 'MERGEABLE',
+          mergeStateStatus: 'CLEAN',
+        };
+      },
       acquireMergeLeaseImpl: () => {
         leaseCalls += 1;
         return { acquired: true, lease: {} };
@@ -1230,7 +1238,9 @@ test('daemon clean merge strict mode declines a PR with a standing blocking find
     });
 
     assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
-    assert.equal(result.reason, 'blocking-findings-present');
+    assert.equal(result.reason, 'non-blocking-findings-present');
+    assert.equal(identityReads, 0, 'findings-present PRs must fall through to hammer without daemon identity reads');
+    assert.equal(liveFetches, 0, 'findings-present PRs must not spend a daemon live-head refresh');
     assert.equal(leaseCalls, 0, 'strict-mode finding refusal must happen before the lease');
     assert.equal(mergeCalls, 0);
   } finally {

@@ -7,6 +7,8 @@ import {
   attemptDaemonCleanMerge,
   DAEMON_MERGE_SUBPROCESS_TIMEOUT_MS,
   DAEMON_MERGE_DISPOSITION,
+  isDaemonMergeReviewAllowed,
+  resolveDaemonMergeUncleanReason,
 } from './ama/daemon-merge.mjs';
 import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { acquireMergeLease, releaseMergeLease } from './ama/merge-lease.mjs';
@@ -235,6 +237,18 @@ export async function runDaemonCleanMergeAttempt({
   if (!base || !validatedHead) {
     return NOT_TAKEN('daemon-inputs-missing');
   }
+  const strictMode = cfg?.strictMode !== false;
+  // The daemon path is a strict clean-merge shortcut. If the current review is
+  // not daemon-clean, it must decline before spending any worker-identity reads:
+  // the caller will fall through to the capped hammer, which owns final
+  // remediation/merge for findings-present PRs. Resolving identity first made a
+  // transient/opaque identity miss park HAM entirely even when the daemon would
+  // have returned not-taken for findings.
+  if (!isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
+    const reason =
+      resolveDaemonMergeUncleanReason(reviewState, { strictMode }) || 'findings-unknown';
+    return NOT_TAKEN(reason);
+  }
   let liveRollup = null;
   try {
     liveRollup = await fetchRollupImpl(repoPath, prNumber, { execFileImpl });
@@ -384,7 +398,7 @@ export async function runDaemonCleanMergeAttempt({
     workerIdentity,
     flags: {
       autonomousMergeExecutionEnabled: cfg?.autonomousMergeExecutionEnabled !== false,
-      strictMode: cfg?.strictMode !== false,
+      strictMode,
     },
     // Re-read the LIVE head + gate before each merge attempt (retry included).
     fetchLiveGateImpl: async () => {

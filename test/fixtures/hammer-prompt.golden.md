@@ -890,7 +890,7 @@ PYEOF
 }
 
 ham_mark_ama_closer_lease_succeeded() {
-  POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" node --input-type=module <<'NODE'
+  TARGET_REMEDIATION_SHA="reviewed-sha" node --input-type=module <<'NODE'
 import {
   AMA_CLOSER_LEASE_STATUS,
   readAmaCloserLease,
@@ -901,7 +901,7 @@ const rootDir = '/tmp/ama-test-root';
 const identity = {
   repo: 'acme/myrepo',
   prNumber: Number('1234'),
-  headSha: process.env.POST_REMEDIATION_SHA,
+  headSha: process.env.TARGET_REMEDIATION_SHA,
 };
 const existing = readAmaCloserLease(rootDir, identity);
 if (existing?.status === AMA_CLOSER_LEASE_STATUS.TERMINAL) {

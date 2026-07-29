@@ -125,6 +125,16 @@ test('hammer prompt emits merge signal before releasing successful merge lease',
   assert.match(prompt, /EVENT_MERGE_SIGNAL/);
   assert.match(prompt, /ham_mark_ama_closer_lease_succeeded\(\)/);
   assert.match(prompt, /terminalOutcome: 'succeeded'/);
+  assert.match(
+    prompt,
+    /headSha: process\.env\.TARGET_REMEDIATION_SHA/,
+    'HAM should terminalize the dispatch-time closer lease, not the post-remediation head',
+  );
+  assert.doesNotMatch(
+    prompt,
+    /headSha: process\.env\.POST_REMEDIATION_SHA/,
+    'post-remediation heads do not have AMA closer leases',
+  );
   assert.ok(
     prompt.indexOf('if ! ham_mark_ama_closer_lease_succeeded; then') > prompt.indexOf('ham_append_terminal_audit succeeded merged'),
     'AMA closer lease should be terminalized after the merged audit append succeeds',

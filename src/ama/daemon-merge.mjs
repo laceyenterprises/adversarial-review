@@ -150,7 +150,7 @@ export function isDaemonMergeReviewAllowed(reviewState = {}, { strictMode = true
  * The precise reason a review is NOT daemon-clean, for surfacing to the caller.
  * `null` when the review IS fully clean.
  */
-function uncleanReason(reviewState = {}, { strictMode = true } = {}) {
+export function resolveDaemonMergeUncleanReason(reviewState = {}, { strictMode = true } = {}) {
   const blockingState = String(reviewState.blockingFindingState || '').trim().toLowerCase();
   const nonBlockingState = String(reviewState.nonBlockingFindingState || '').trim().toLowerCase();
   if (blockingState !== 'known' || nonBlockingState !== 'known') return 'findings-unknown';
@@ -160,6 +160,10 @@ function uncleanReason(reviewState = {}, { strictMode = true } = {}) {
   if (blockingCount !== 0) return 'blocking-findings-present';
   if (strictMode !== false && nonBlockingCount !== 0) return 'non-blocking-findings-present';
   return null;
+}
+
+function uncleanReason(reviewState = {}, { strictMode = true } = {}) {
+  return resolveDaemonMergeUncleanReason(reviewState, { strictMode });
 }
 
 function normalizeFindingCount(value) {

@@ -22,6 +22,40 @@ const HEAD_ATTESTATION_CHAIN_RETRY_DELAYS_MS = [250, 1000];
 // raises HCPHeadAttestationConfigurationError) — the 2026-07-15 outage class.
 const ATTESTATION_INFRA_FAILURE_REASONS = new Set(['head-attestation-chain-read-failed']);
 
+// 2026-07-29: The daemon identity reader MUST bind the Postgres ledger. In the
+// long-running watcher, resolveSessionLedgerReadTarget's env/root sqlite fallback
+// could resolve a stale sqlite target on a Postgres deploy
+// (`postgres-configured-but-sqlite-resolved`) — the reader never queried
+// Postgres, found no `pr_opened` row, and `worker-identity-unresolved`
+// fail-closed EVERY clean daemon merge (fresh #4395 with a valid current-head
+// pr_opened row still parked). Build an explicit Postgres ledger target from the
+// environment (the same AGENT_OS_SESSION_LEDGER_DSN the read adapter itself
+// prefers) so the reader binds Postgres directly (resolveSessionLedgerReadTarget
+// honors an explicit target first). Env-derived — NOT via loadConfig — to avoid a
+// config-loader import cycle that breaks module init in the full suite. Returns
+// null for non-Postgres/unconfigured deploys, preserving the reader's own
+// auto-resolution (e.g. sqlite dev).
+export function postgresLedgerTargetFromEnv(env = {}) {
+  const dsn = String(
+    env.AGENT_OS_SESSION_LEDGER_DSN
+      || env.AGENT_OS_CFG_SESSION_LEDGER_DSN
+      || env.AGENT_OS_SESSION_LEDGER_TARGET
+      || '',
+  ).trim();
+  const databaseName =
+    String(env.AGENT_OS_CFG_SESSION_LEDGER_DATABASE_NAME || '').trim() || null;
+  if (/^postgres(ql)?:\/\//i.test(dsn)) {
+    return { backend: 'postgres', dsn, databaseName, source: 'daemon-identity:env-dsn' };
+  }
+  const backend = String(
+    env.AGENT_OS_CFG_SESSION_LEDGER_BACKEND || env.AGENT_OS_SESSION_LEDGER_BACKEND || '',
+  ).toLowerCase();
+  if (backend === 'postgres' && databaseName) {
+    return { backend: 'postgres', dsn: null, databaseName, source: 'daemon-identity:env-dbname' };
+  }
+  return null;
+}
+
 export async function resolveDaemonWorkerIdentityForPr({
   repo,
   prNumber,
@@ -30,6 +64,7 @@ export async function resolveDaemonWorkerIdentityForPr({
   hqRoot,
   rootDir,
   env = process.env,
+  ledgerTarget = null,
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
   readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr,
   consumeHeadAttestations = null,
@@ -125,6 +160,7 @@ export async function resolveDaemonWorkerIdentityForPr({
   // headMovedAfterBuildCompletion. Authorizing the moved head is NOT identity's
   // job — the verdict pinned to commit_id===head, CI-green-at-head, the live-head
   // re-read before merge, and the LHA attestation chain police it downstream.
+  const resolvedLedgerTarget = ledgerTarget || postgresLedgerTargetFromEnv(env);
   const strictArgs = {
     repo,
     prNumber,
@@ -133,6 +169,7 @@ export async function resolveDaemonWorkerIdentityForPr({
     hqRoot,
     rootDir,
     env,
+    ledgerTarget: resolvedLedgerTarget,
   };
   let resolved;
   try {

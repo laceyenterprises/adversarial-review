@@ -1,7 +1,9 @@
 import { execFile } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { readdir, readFile as readFileAsync, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
+import * as yaml from 'js-yaml';
 import { readBuildCompletionSignalForPr } from './session-ledger-read-adapter.mjs';
 import { isTransientGhError } from './gh-cli.mjs';
 
@@ -28,13 +30,13 @@ const ATTESTATION_INFRA_FAILURE_REASONS = new Set(['head-attestation-chain-read-
 // (`postgres-configured-but-sqlite-resolved`) — the reader never queried
 // Postgres, found no `pr_opened` row, and `worker-identity-unresolved`
 // fail-closed EVERY clean daemon merge (fresh #4395 with a valid current-head
-// pr_opened row still parked). Build an explicit Postgres ledger target from the
-// environment (the same AGENT_OS_SESSION_LEDGER_DSN the read adapter itself
-// prefers) so the reader binds Postgres directly (resolveSessionLedgerReadTarget
-// honors an explicit target first). Env-derived — NOT via loadConfig — to avoid a
-// config-loader import cycle that breaks module init in the full suite. Returns
-// null for non-Postgres/unconfigured deploys, preserving the reader's own
-// auto-resolution (e.g. sqlite dev).
+// pr_opened row still parked). Build an explicit Postgres ledger target before
+// calling the reader so resolveSessionLedgerReadTarget honors it first. This is
+// deliberately NOT implemented by importing loadConfig: config-loader imports
+// watcher-adjacent modules in enough tests that doing so creates an init cycle.
+// Env wins; Agent OS YAML config is the owner-lane fallback when launchd/sudo
+// gives the resolver a scrubbed env. Non-Postgres/unconfigured deploys return
+// null and keep the reader's auto-resolution (e.g. sqlite dev).
 export function postgresLedgerTargetFromEnv(env = {}) {
   const dsn = String(
     env.AGENT_OS_SESSION_LEDGER_DSN
@@ -54,6 +56,90 @@ export function postgresLedgerTargetFromEnv(env = {}) {
     return { backend: 'postgres', dsn: null, databaseName, source: 'daemon-identity:env-dbname' };
   }
   return null;
+}
+
+function localYamlSibling(path) {
+  const dir = dirname(path);
+  const name = basename(path);
+  if (name.endsWith('.yaml')) return join(dir, `${name.slice(0, -'.yaml'.length)}.local.yaml`);
+  if (name.endsWith('.yml')) return join(dir, `${name.slice(0, -'.yml'.length)}.local.yml`);
+  return null;
+}
+
+function readYamlObject(path) {
+  try {
+    if (!path || !existsSync(path)) return null;
+    const doc = yaml.load(readFileSync(path, 'utf8'));
+    return doc && typeof doc === 'object' && !Array.isArray(doc) ? doc : null;
+  } catch {
+    return null;
+  }
+}
+
+function sessionLedgerConfigFromTopPath(topPath) {
+  const merged = {};
+  for (const path of [topPath, localYamlSibling(topPath)]) {
+    const doc = readYamlObject(path);
+    const section = doc?.session_ledger;
+    if (!section || typeof section !== 'object' || Array.isArray(section)) continue;
+    if (Object.hasOwn(section, 'backend')) merged.backend = section.backend;
+    if (Object.hasOwn(section, 'dsn')) merged.dsn = section.dsn;
+    if (Object.hasOwn(section, 'database_name')) merged.databaseName = section.database_name;
+  }
+  return Object.keys(merged).length > 0 ? merged : null;
+}
+
+function uniquePaths(paths) {
+  return [...new Set(paths.filter(Boolean))];
+}
+
+function agentOsConfigPathCandidates({ env = {}, rootDir = null } = {}) {
+  const explicitConfigPath = String(env.AGENT_OS_CONFIG_PATH || '').trim();
+  if (explicitConfigPath) return [resolve(explicitConfigPath)];
+
+  const candidates = [];
+  const deployCheckout = String(env.AGENT_OS_DEPLOY_CHECKOUT || env.AGENT_OS_ROOT || '').trim();
+  if (deployCheckout) candidates.push(resolve(deployCheckout, 'config.yaml'));
+
+  const resolvedRoot = String(rootDir || '').trim() ? resolve(String(rootDir)) : '';
+  if (resolvedRoot) {
+    candidates.push(resolve(resolvedRoot, 'config.yaml'));
+    const suffix = `${sep}tools${sep}adversarial-review`;
+    if (resolvedRoot.endsWith(suffix)) {
+      candidates.push(resolve(resolvedRoot, '..', '..', 'config.yaml'));
+    }
+  }
+
+  const home = String(env.HOME || '').trim();
+  if (home) candidates.push(resolve(home, 'agent-os', 'config.yaml'));
+  return uniquePaths(candidates);
+}
+
+export function postgresLedgerTargetFromAgentOsConfig({ env = {}, rootDir = null } = {}) {
+  for (const path of agentOsConfigPathCandidates({ env, rootDir })) {
+    const cfg = sessionLedgerConfigFromTopPath(path);
+    if (!cfg) continue;
+
+    const dsn = String(cfg.dsn || '').trim();
+    const databaseName = String(cfg.databaseName || '').trim() || null;
+    const backend = String(cfg.backend || '').trim().toLowerCase();
+    if (/^postgres(ql)?:\/\//i.test(dsn)) {
+      return { backend: 'postgres', dsn, databaseName, source: 'daemon-identity:config-dsn' };
+    }
+    if (backend === 'postgres' && databaseName) {
+      return {
+        backend: 'postgres',
+        dsn: null,
+        databaseName,
+        source: 'daemon-identity:config-dbname',
+      };
+    }
+  }
+  return null;
+}
+
+export function postgresLedgerTargetForDaemon({ env = {}, rootDir = null } = {}) {
+  return postgresLedgerTargetFromEnv(env) || postgresLedgerTargetFromAgentOsConfig({ env, rootDir });
 }
 
 export async function resolveDaemonWorkerIdentityForPr({
@@ -160,7 +246,7 @@ export async function resolveDaemonWorkerIdentityForPr({
   // headMovedAfterBuildCompletion. Authorizing the moved head is NOT identity's
   // job — the verdict pinned to commit_id===head, CI-green-at-head, the live-head
   // re-read before merge, and the LHA attestation chain police it downstream.
-  const resolvedLedgerTarget = ledgerTarget || postgresLedgerTargetFromEnv(env);
+  const resolvedLedgerTarget = ledgerTarget || postgresLedgerTargetForDaemon({ env, rootDir });
   const strictArgs = {
     repo,
     prNumber,

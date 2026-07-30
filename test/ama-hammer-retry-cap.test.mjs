@@ -1234,6 +1234,7 @@ test('terminal current-head hammer dispatch is not superseded after remediation 
         dispatchedAt: '2026-07-06T12:02:00Z',
       },
     }),
+    options: validHamTerminalRemediationOptions(),
     ...hammerDispatchDeps({
       execFileImpl: async (_cmd, args) => {
         if (args[0] === 'dispatch' && args[1] === 'status') {
@@ -1245,7 +1246,7 @@ test('terminal current-head hammer dispatch is not superseded after remediation 
   });
 
   assert.equal(result.dispatched, false);
-  assert.equal(result.reason, 'current-head-hammer-already-ran-needs-operator');
+  assert.equal(result.reason, 'current-head-ham-terminal-remediation-needs-operator');
   assert.equal(result.needsOperator, true);
   const currentLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD });
   assert.equal(currentLease.status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
@@ -1255,7 +1256,277 @@ test('terminal current-head hammer dispatch is not superseded after remediation 
     { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD },
     (record) => record,
   );
-  assert.equal(currentRecord.lastError, 'current-head-hammer-already-ran-needs-operator');
+  assert.equal(currentRecord.lastError, undefined);
+});
+
+test('fresh succeeded current-head hammer without HAM evidence waits for audit', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-success-audit-grace-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const hqRoot = join(rootDir, 'hq-root');
+  acquireAmaCloserLease({
+    rootDir,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    now: '2026-07-06T12:00:00Z',
+  });
+  updateAmaCloserLease({
+    rootDir,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    status: AMA_CLOSER_LEASE_STATUS.DISPATCHED,
+    lrqId: 'lrq_current_head',
+    now: '2026-07-06T12:00:00Z',
+  });
+  updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD }, () => ({
+    schemaVersion: 1,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    reviewedSha: REVIEWED_HEAD,
+    targetRemediationSha: ADVANCED_HEAD,
+    workerClass: 'hammer',
+    dispatchWorkerClass: 'hammer',
+    promptPath: '/tmp/current-prompt.md',
+    promptDir: '/tmp',
+    hqRoot,
+    launchRequestId: 'lrq_current_head',
+    dispatchId: 'dispatch_current_head',
+    retryCount: 1,
+    state: 'dispatched',
+    lastObservedStatus: 'starting',
+  }));
+  const execCalls = [];
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true },
+      prMetadata: { headSha: ADVANCED_HEAD },
+      dispatchContext: {
+        hqRoot,
+        targetRemediationSha: ADVANCED_HEAD,
+        allowStaleReviewHeadHammerResume: true,
+        dispatchedAt: '2026-07-06T12:02:00Z',
+      },
+    }),
+    attemptDaemonCleanMergeImpl: async () => {
+      throw new Error('unexpected daemon merge without verified HAM evidence');
+    },
+    ...hammerDispatchDeps({
+      execFileImpl: async (cmd, args) => {
+        execCalls.push({ cmd, args });
+        if (args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
+        }
+        return { stdout: JSON.stringify({ dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
+      },
+    }),
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'existing-dispatch-succeeded');
+  assert.equal(result.launchRequestId, 'lrq_current_head');
+  const statusCall = execCalls.find((call) => call.args[0] === 'dispatch' && call.args[1] === 'status');
+  assert.ok(statusCall, 'existing dispatch status must be probed');
+  assert.ok(statusCall.args.includes('--json'), 'status probe must request machine-readable output');
+  assert.equal(execCalls.filter((call) => call.args[0] === 'dispatch').length, 1);
+  const currentLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD });
+  assert.equal(currentLease.status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
+  assert.equal(currentLease.lrqId, 'lrq_current_head');
+  const currentRecord = readAmaCloserDispatchRecord(
+    rootDir,
+    { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD },
+  );
+  assert.equal(currentRecord.launchRequestId, 'lrq_current_head');
+  assert.equal(currentRecord.retryCount, 1);
+  assert.equal(currentRecord.lastObservedStatus, 'succeeded');
+  assert.equal(currentRecord.lastError, 'terminal-success-awaiting-audit-or-merged-signal');
+});
+
+test('fresh succeeded current-head hammer releases hold when merged-signal read is known', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-success-known-signal-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const hqRoot = join(rootDir, 'hq-root');
+  acquireAmaCloserLease({
+    rootDir,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    now: '2026-07-06T12:00:00Z',
+  });
+  updateAmaCloserLease({
+    rootDir,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    status: AMA_CLOSER_LEASE_STATUS.DISPATCHED,
+    lrqId: 'lrq_current_head',
+    now: '2026-07-06T12:00:00Z',
+  });
+  updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD }, () => ({
+    schemaVersion: 1,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    reviewedSha: REVIEWED_HEAD,
+    targetRemediationSha: ADVANCED_HEAD,
+    workerClass: 'hammer',
+    dispatchWorkerClass: 'hammer',
+    promptPath: '/tmp/current-prompt.md',
+    promptDir: '/tmp',
+    hqRoot,
+    launchRequestId: 'lrq_current_head',
+    dispatchId: 'dispatch_current_head',
+    retryCount: 1,
+    state: 'dispatched',
+    lastObservedStatus: 'starting',
+  }));
+  const execCalls = [];
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true },
+      prMetadata: { headSha: ADVANCED_HEAD },
+      dispatchContext: {
+        hqRoot,
+        targetRemediationSha: ADVANCED_HEAD,
+        allowStaleReviewHeadHammerResume: true,
+        dispatchedAt: '2026-07-06T12:02:00Z',
+      },
+    }),
+    attemptDaemonCleanMergeImpl: async () => {
+      throw new Error('unexpected daemon merge while releasing unproven terminal hold');
+    },
+    ...hammerDispatchDeps({
+      execFileImpl: async (cmd, args) => {
+        execCalls.push({ cmd, args });
+        if (args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
+        }
+        return { stdout: JSON.stringify({ dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
+      },
+      readBuildCompletionSignalForPrImpl: () => ({ ok: false, reason: 'missing-build-completion-signal' }),
+      readBuildCompletionProducerEvidenceImpl: () => ({
+        ok: true,
+        row: { signal_kind: 'merged', head_sha: ADVANCED_HEAD },
+        target: 'ledger',
+      }),
+    }),
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'current-head-hammer-terminal-remediation-merged');
+  assert.equal(result.dispatchId, 'dispatch_current_head');
+  assert.equal(result.launchRequestId, 'lrq_current_head');
+  const statusCall = execCalls.find((call) => call.args[0] === 'dispatch' && call.args[1] === 'status');
+  assert.ok(statusCall, 'existing dispatch status must be probed');
+  assert.ok(statusCall.args.includes('--json'), 'status probe must request machine-readable output');
+  assert.equal(execCalls.filter((call) => call.args[0] === 'dispatch').length, 1);
+  const currentLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD });
+  assert.equal(currentLease.status, AMA_CLOSER_LEASE_STATUS.TERMINAL);
+  assert.equal(currentLease.terminalOutcome, 'succeeded');
+  assert.equal(currentLease.lrqId, 'lrq_current_head');
+  const currentRecord = readAmaCloserDispatchRecord(
+    rootDir,
+    { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD },
+  );
+  assert.equal(currentRecord.launchRequestId, 'lrq_current_head');
+  assert.equal(currentRecord.retryCount, 1);
+  assert.equal(currentRecord.lastObservedStatus, 'succeeded');
+  assert.equal(currentRecord.lastError, null);
+});
+
+test('terminal failed current-head hammer without HAM evidence is redispatched', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-terminal-failed-no-evidence-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const hqRoot = join(rootDir, 'hq-root');
+  acquireAmaCloserLease({
+    rootDir,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    now: '2026-07-06T12:00:00Z',
+  });
+  updateAmaCloserLease({
+    rootDir,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    status: AMA_CLOSER_LEASE_STATUS.DISPATCHED,
+    lrqId: 'lrq_current_head',
+    now: '2026-07-06T12:00:00Z',
+  });
+  updateAmaCloserLease({
+    rootDir,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    status: AMA_CLOSER_LEASE_STATUS.TERMINAL,
+    terminalOutcome: 'failed-without-merge',
+    now: '2026-07-06T12:31:00Z',
+  });
+  assert.equal(
+    readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD }).terminalOutcome,
+    'failed-without-merge',
+  );
+  updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD }, () => ({
+    schemaVersion: 1,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    reviewedSha: REVIEWED_HEAD,
+    targetRemediationSha: ADVANCED_HEAD,
+    workerClass: 'hammer',
+    dispatchWorkerClass: 'hammer',
+    promptPath: '/tmp/current-prompt.md',
+    promptDir: '/tmp',
+    hqRoot,
+    launchRequestId: 'lrq_current_head',
+    dispatchId: 'dispatch_current_head',
+    retryCount: 1,
+    state: 'dispatched',
+    lastObservedStatus: 'unknown',
+  }));
+  const execCalls = [];
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true },
+      prMetadata: { headSha: ADVANCED_HEAD },
+      dispatchContext: {
+        hqRoot,
+        targetRemediationSha: ADVANCED_HEAD,
+        allowStaleReviewHeadHammerResume: true,
+        dispatchedAt: '2026-07-06T13:05:00Z',
+      },
+    }),
+    attemptDaemonCleanMergeImpl: async () => {
+      throw new Error('unexpected daemon merge without verified HAM evidence');
+    },
+    ...hammerDispatchDeps({
+      execFileImpl: async (cmd, args) => {
+        execCalls.push({ cmd, args });
+        if (args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
+        }
+        return { stdout: JSON.stringify({ dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
+      },
+    }),
+  });
+
+  assert.equal(result.dispatched, true);
+  assert.equal(result.launchRequestId, 'lrq_retry');
+  const statusCall = execCalls.find((call) => call.args[0] === 'dispatch' && call.args[1] === 'status');
+  assert.ok(statusCall, 'existing dispatch status must be probed');
+  assert.ok(statusCall.args.includes('--json'), 'status probe must request machine-readable output');
+  const currentLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD });
+  assert.equal(currentLease.status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
+  assert.equal(currentLease.lrqId, 'lrq_retry');
+  const currentRecord = readAmaCloserDispatchRecord(
+    rootDir,
+    { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD },
+  );
+  assert.equal(currentRecord.launchRequestId, 'lrq_retry');
+  assert.equal(currentRecord.retryCount, 2);
+  assert.equal(currentRecord.lastObservedStatus, 'starting');
 });
 
 test('current-head hammer dispatch ignores old-head audit terminal outcome while audit is pending', async (t) => {

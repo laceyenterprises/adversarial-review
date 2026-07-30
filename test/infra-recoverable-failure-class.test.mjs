@@ -21,10 +21,17 @@ test('oauth-broken spawn failure is infra-recoverable (the 2026-06-13 incident s
     failure_message:
       '[oauth-broken] Command failed with code 2\nstdout tail:\n[reviewer] Starting review: laceyenterprises/agent-os#1727 model=codex (OAuth-only mode; prompt stage=first)',
   };
-  // The narrow stored-row classifier does NOT recover oauth-broken...
-  assert.equal(reviewerFailureClassFromStoredRow(row), null);
-  // ...but the infra-recoverable superset does.
+  // The stored-row classifier recognizes the persisted oauth-broken tag...
+  assert.equal(reviewerFailureClassFromStoredRow(row), 'oauth-broken');
+  // ...and the infra-recoverable superset preserves that classification.
   assert.equal(infraRecoverableFailureClass(row), 'oauth-broken');
+});
+
+test('stored-row classifier reads pass metadata when failure_message is absent', () => {
+  const row = {
+    metadata_json: JSON.stringify({ failureClass: 'dispatch-failed' }),
+  };
+  assert.equal(reviewerFailureClassFromStoredRow(row), 'dispatch-failed');
 });
 
 test('cascade / reviewer-timeout / launchctl-bootstrap / provider degradation remain infra-recoverable', () => {

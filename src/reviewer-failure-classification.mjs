@@ -5,11 +5,38 @@ import {
 } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS } from './quota-exhaustion.mjs';
 
+function parseStoredRowMetadata(reviewRow) {
+  const rawMetadata = reviewRow?.metadata_json;
+  if (typeof rawMetadata !== 'string' || rawMetadata.trim() === '') return {};
+  try {
+    const parsed = JSON.parse(rawMetadata);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function storedRowFailureSignal(reviewRow) {
+  const rawMessage = String(reviewRow?.failure_message || '').trim();
+  if (rawMessage) return rawMessage;
+  const metadata = parseStoredRowMetadata(reviewRow);
+  const taggedClass = [
+    reviewRow?.failureClass,
+    reviewRow?.failure_class,
+    metadata.failureClass,
+    metadata.failure_class,
+    metadata.errorClass,
+    metadata.error_class,
+  ].find((value) => typeof value === 'string' && value.trim() !== '');
+  if (taggedClass) return `[${taggedClass.trim()}]`;
+  return '';
+}
+
 function reviewerFailureClassFromStoredRow(reviewRow) {
-  const rawMessage = String(reviewRow?.failure_message || '');
+  const rawMessage = storedRowFailureSignal(reviewRow);
   const message = rawMessage.toLowerCase();
   const tagMatch = message.match(
-    /^\[(reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output)\]/
+    /^\[(reviewer-timeout|launchctl-bootstrap|cascade|quota-exhausted|provider-overloaded|reviewer-empty-output|oauth-broken|dispatch-failed|adapter_spawn_timeout)\]/
   );
   if (tagMatch) return tagMatch[1];
   const legacyClass = classifyReviewerFailure(rawMessage, null);
@@ -17,12 +44,14 @@ function reviewerFailureClassFromStoredRow(reviewRow) {
     legacyClass === 'cascade'
     || legacyClass === 'reviewer-timeout'
     || legacyClass === 'launchctl-bootstrap'
+    || legacyClass === 'oauth-broken'
     || legacyClass === QUOTA_EXHAUSTED_FAILURE_CLASS
     || legacyClass === PROVIDER_OVERLOADED_FAILURE_CLASS
     || legacyClass === REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS
   ) {
     return legacyClass;
   }
+  if (message.includes('[oauth-broken]')) return 'oauth-broken';
   if (message.includes('claude launchctl session bootstrap failed') || message.includes('launchctlsessionerror')) {
     return 'launchctl-bootstrap';
   }

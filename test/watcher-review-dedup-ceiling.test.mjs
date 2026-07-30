@@ -25,7 +25,10 @@ function makeTempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'review-dedup-ceiling-'));
 }
 
-function insertPass(db, { repoPath, prNumber, attemptNumber, passKind, headSha, status = 'completed' }) {
+function insertPass(
+  db,
+  { repoPath, prNumber, attemptNumber, passKind, headSha, status = 'completed', metadata = {} }
+) {
   db.prepare(
     `INSERT INTO reviewer_passes (
        repo, pr_number, attempt_number, reviewer_class, reviewer_model, pass_kind,
@@ -40,6 +43,20 @@ function insertPass(db, { repoPath, prNumber, attemptNumber, passKind, headSha, 
     `2026-07-13T00:0${attemptNumber}:30.000Z`,
     status,
     headSha,
+  );
+  db.prepare(
+    `UPDATE reviewer_passes
+        SET metadata_json = ?
+      WHERE repo = ?
+        AND pr_number = ?
+        AND attempt_number = ?
+        AND pass_kind = ?`
+  ).run(
+    JSON.stringify(metadata),
+    repoPath,
+    prNumber,
+    attemptNumber,
+    passKind,
   );
 }
 
@@ -296,6 +313,117 @@ test('ceiling units preserve legacy null-head history and empty-ledger fallback'
       }),
       4,
       'empty attempt ledgers also fall back to the durable reviewed_prs attempt counter',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('transient fleet-infra failures do not consume the review-attempt ceiling', () => {
+  const rootDir = makeTempRoot();
+  try {
+    const db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    const repoPath = 'laceyenterprises/agent-os';
+    const prNumber = 4313;
+
+    for (const [attemptNumber, failureClass] of [
+      [1, 'adapter_spawn_timeout'],
+      [2, 'dispatch-failed'],
+      [3, 'launchctl-bootstrap'],
+      [4, 'oauth-broken'],
+    ]) {
+      insertPass(db, {
+        repoPath,
+        prNumber,
+        attemptNumber,
+        passKind: 'rereview',
+        headSha: `infra-${attemptNumber}`,
+        status: 'failed',
+        metadata: { failureClass },
+      });
+    }
+
+    assert.equal(
+      countReviewCeilingAttempts({
+        db,
+        rootDir,
+        repoPath,
+        prNumber,
+        fallbackReviewAttempts: 99,
+      }),
+      0,
+      'outage retries are not review attempts and must not ceiling-freeze the PR',
+    );
+
+    insertPass(db, {
+      repoPath,
+      prNumber,
+      attemptNumber: 5,
+      passKind: 'rereview',
+      headSha: 'recovered-head',
+      status: 'completed',
+    });
+    assert.equal(
+      countReviewCeilingAttempts({
+        db,
+        rootDir,
+        repoPath,
+        prNumber,
+        fallbackReviewAttempts: 99,
+      }),
+      1,
+      'the next real review still runs once the fleet recovers',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('deterministic crash, timeout, and genuine review failures still consume the attempt fuse', () => {
+  const rootDir = makeTempRoot();
+  try {
+    const db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    const repoPath = 'laceyenterprises/agent-os';
+    const prNumber = 4314;
+
+    insertPass(db, {
+      repoPath,
+      prNumber,
+      attemptNumber: 1,
+      passKind: 'first-pass',
+      headSha: 'worker-crash',
+      status: 'failed',
+      metadata: { failureClass: 'worker_crashed' },
+    });
+    insertPass(db, {
+      repoPath,
+      prNumber,
+      attemptNumber: 2,
+      passKind: 'rereview',
+      headSha: 'timeout-head',
+      status: 'failed',
+      metadata: { failureClass: 'reviewer-timeout' },
+    });
+    insertPass(db, {
+      repoPath,
+      prNumber,
+      attemptNumber: 3,
+      passKind: 'rereview',
+      headSha: 'request-changes-head',
+      status: 'completed',
+    });
+
+    assert.equal(
+      countReviewCeilingAttempts({
+        db,
+        rootDir,
+        repoPath,
+        prNumber,
+      }),
+      3,
+      'deterministic per-PR failures and genuine review attempts must still trip the fuse',
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

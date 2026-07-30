@@ -1,5 +1,6 @@
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -187,15 +188,27 @@ export function countReviewCeilingAttempts({
   const readDb = dbOverride || ownedDb;
   try {
     if (!dbOverride) ensureReviewStateSchema(readDb);
-    const row = readDb.prepare(
-      `SELECT COUNT(*) AS pass_count
+    const rows = readDb.prepare(
+      `SELECT status, metadata_json
          FROM reviewer_passes
         WHERE repo = ?
           AND pr_number = ?
           AND pass_kind IN ('first-pass', 'rereview')`
-    ).get(repoPath, prNumber);
-    const passCount = Number(row?.pass_count || 0);
-    if (Number.isFinite(passCount) && passCount > 0) return passCount;
+    ).all(repoPath, prNumber);
+    if (rows.length > 0) {
+      const transientFleetInfraClasses = new Set([
+        'adapter_spawn_timeout',
+        'dispatch-failed',
+        'launchctl-bootstrap',
+        'oauth-broken',
+      ]);
+      return rows.reduce((count, row) => {
+        if (row?.status !== 'failed') return count + 1;
+        const failureClass = reviewerFailureClassFromStoredRow(row);
+        if (transientFleetInfraClasses.has(failureClass)) return count;
+        return count + 1;
+      }, 0);
+    }
     const fallback = Number(fallbackReviewAttempts || 0);
     return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
   } finally {

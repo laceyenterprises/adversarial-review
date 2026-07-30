@@ -9,7 +9,9 @@ import {
   AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS,
   AMA_CLOSER_REDISPATCH_BOUND,
   amaCloserDispatchFilePath,
+  isActiveAmaCloserDispatchRecord,
   isReclaimableDispatchedAmaCloserLease,
+  listActiveAmaCloserDispatches,
   maybeDispatchAmaCloser,
   readAmaCloserDispatchRecord,
   updateAmaCloserDispatchRecord,
@@ -1412,6 +1414,129 @@ test('stale dispatched/null closer lease is terminalized instead of held forever
   const lease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD });
   assert.equal(lease.status, AMA_CLOSER_LEASE_STATUS.TERMINAL);
   assert.equal(lease.terminalOutcome, 'failed-without-merge');
+});
+
+test('active AMA closer dispatches reserve their repo PR until terminal status', (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-active-dispatches-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: REVIEWED_HEAD }, () => ({
+    schemaVersion: 1,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: REVIEWED_HEAD,
+    state: 'dispatched',
+    launchRequestId: 'lrq_active',
+    dispatchId: 'dispatch-active',
+    lastObservedStatus: 'starting',
+    lastObservedAt: '2026-07-06T12:00:00Z',
+    dispatchedAt: '2026-07-06T12:00:00Z',
+  }));
+  writeFileSync(
+    join(dirname(amaCloserDispatchFilePath(rootDir, {
+      repo: REPO,
+      prNumber: PR_NUMBER,
+      headSha: REVIEWED_HEAD,
+    })), 'malformed-dispatch.json'),
+    '{',
+  );
+  updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER + 1, headSha: ADVANCED_HEAD }, () => ({
+    schemaVersion: 1,
+    repo: REPO,
+    prNumber: PR_NUMBER + 1,
+    headSha: ADVANCED_HEAD,
+    state: 'dispatched',
+    launchRequestId: 'lrq_failed',
+    dispatchId: 'dispatch-failed',
+    lastObservedStatus: 'failed',
+    lastObservedAt: '2026-07-06T12:01:00Z',
+    dispatchedAt: '2026-07-06T12:00:00Z',
+  }));
+  updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER + 2, headSha: ADVANCED_HEAD }, () => ({
+    schemaVersion: 1,
+    repo: REPO,
+    prNumber: PR_NUMBER + 2,
+    headSha: ADVANCED_HEAD,
+    state: 'dispatched',
+    launchRequestId: 'lrq_succeeded',
+    dispatchId: 'dispatch-succeeded',
+    lastObservedStatus: 'succeeded',
+    lastObservedAt: '2026-07-06T12:01:00Z',
+    dispatchedAt: '2026-07-06T12:00:00Z',
+  }));
+  updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER + 3, headSha: ADVANCED_HEAD }, () => ({
+    schemaVersion: 1,
+    repo: REPO,
+    prNumber: PR_NUMBER + 3,
+    headSha: ADVANCED_HEAD,
+    state: 'no-dispatch',
+    reason: 'not-eligible',
+  }));
+
+  const active = listActiveAmaCloserDispatches(rootDir, { now: '2026-07-06T12:02:00Z' });
+
+  assert.deepEqual(
+    active.map((record) => ({
+      repo: record.repo,
+      prNumber: record.prNumber,
+      headSha: record.headSha,
+      launchRequestId: record.launchRequestId,
+    })),
+    [{
+      repo: REPO,
+      prNumber: PR_NUMBER,
+      headSha: REVIEWED_HEAD,
+      launchRequestId: 'lrq_active',
+    }],
+  );
+});
+
+test('active AMA closer dispatch classification releases stale launch-only records', () => {
+  assert.equal(
+    isActiveAmaCloserDispatchRecord(
+      {
+        repo: REPO,
+        prNumber: PR_NUMBER,
+        state: 'dispatching',
+        lastAttemptedAt: '2026-07-06T12:00:00Z',
+      },
+      { now: '2026-07-06T12:01:00Z' },
+    ),
+    true,
+  );
+  assert.equal(
+    isActiveAmaCloserDispatchRecord(
+      {
+        repo: REPO,
+        prNumber: PR_NUMBER,
+        state: 'dispatching',
+        lastAttemptedAt: '2026-07-06T12:00:00Z',
+      },
+      { now: '2026-07-06T18:00:00Z' },
+    ),
+    false,
+  );
+  assert.equal(
+    isActiveAmaCloserDispatchRecord(
+      {
+        repo: REPO,
+        prNumber: PR_NUMBER,
+        state: 'dispatching',
+        lastAttemptedAt: 'not-a-date',
+      },
+      { now: '2026-07-06T12:01:00Z' },
+    ),
+    false,
+  );
+  assert.equal(
+    isActiveAmaCloserDispatchRecord({
+      repo: REPO,
+      prNumber: PR_NUMBER,
+      state: 'dispatched',
+      lastObservedStatus: 'unknown',
+    }),
+    true,
+  );
 });
 
 test('maybeDispatchAmaCloser suppresses after lifetime ceiling and emits operator alert once', async (t) => {

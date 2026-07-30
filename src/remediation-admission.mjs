@@ -8,8 +8,14 @@
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { promisify } from 'node:util';
-import { DEFAULT_MAX_TRANSIENT_RETRIES, listPendingFollowUpJobs } from './follow-up-jobs.mjs';
+import {
+  DEFAULT_MAX_TRANSIENT_RETRIES,
+  listInProgressFollowUpJobs,
+  listPendingFollowUpJobs,
+} from './follow-up-jobs.mjs';
 import { quotaAvailableFromFleetStatus } from './fleet-quota-status.mjs';
+import { followUpJobRepoPrKey } from './remediation-prompt.mjs';
+import { listActiveAmaCloserDispatches } from './ama/dispatch-closer.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -184,6 +190,19 @@ function buildBackpressureLogLine({ activeAtStart, pendingCount }) {
   return `[follow-up-remediation] Backpressure: activeAtStart=${activeAtStart} pendingClaimable=${pendingCount}`;
 }
 
+function buildFollowUpClaimReservations({ rootDir, now = new Date().toISOString(), log = console } = {}) {
+  const activeJobs = listInProgressFollowUpJobs(rootDir);
+  const blockedRepoPrKeys = new Set(activeJobs.map(({ job }) => followUpJobRepoPrKey(job)));
+  try {
+    for (const dispatch of listActiveAmaCloserDispatches(rootDir, { now, log })) {
+      blockedRepoPrKeys.add(followUpJobRepoPrKey(dispatch));
+    }
+  } catch (err) {
+    log.warn?.(`[follow-up-remediation] skipped AMA closer reservation scan: ${err?.message || err}`);
+  }
+  return { activeJobs, blockedRepoPrKeys };
+}
+
 function countPendingFollowUpJobsByRetryWindow(rootDir, now = new Date().toISOString()) {
   const nowMs = Date.parse(String(now || ''));
   const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
@@ -216,6 +235,7 @@ export {
   readWorkerStderrLogSafe,
   buildDrainSummaryLogLine,
   buildBackpressureLogLine,
+  buildFollowUpClaimReservations,
   countPendingFollowUpJobsByRetryWindow,
   isDrainQueueIdle,
 };

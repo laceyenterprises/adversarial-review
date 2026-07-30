@@ -24,7 +24,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { hostname, userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -980,6 +980,17 @@ const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 export const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND = 3;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
+const AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES = new Set([
+  'succeeded',
+  'completed',
+  'failed-without-merge',
+  'failed',
+  'cancelled',
+  'canceled',
+  'superseded',
+  'not-found',
+  'unverified-terminal-success',
+]);
 const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
 const BRANCH_HOLDER_TERMINAL_WORKER_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled']);
 const BRANCH_HOLDER_WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -1161,6 +1172,64 @@ function readJsonFile(filePath) {
 
 export function readAmaCloserDispatchRecord(rootDir, identity) {
   return readJsonFile(amaCloserDispatchFilePath(rootDir, identity));
+}
+
+function isStaleDispatchingAmaCloserRecord(record, { now = null } = {}) {
+  const lastTouchedAtMs = parseTimeMs(
+    record?.lastAttemptedAt
+    || record?.dispatchedAt
+    || record?.lastObservedAt
+    || record?.createdAt
+  );
+  const nowMs = parseTimeMs(now || new Date().toISOString());
+  if (lastTouchedAtMs === null) return true;
+  return lastTouchedAtMs !== null
+    && nowMs !== null
+    && nowMs - lastTouchedAtMs >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
+}
+
+export function isActiveAmaCloserDispatchRecord(record, options = {}) {
+  if (!record || typeof record !== 'object') return false;
+  const state = String(record.state || '').trim().toLowerCase();
+  if (state === 'dispatching') {
+    return !isStaleDispatchingAmaCloserRecord(record, options);
+  }
+  if (state !== 'dispatched') return false;
+
+  const status = normalizeWorkerRunStatus(record.lastObservedStatus);
+  if (AMA_CLOSER_ACTIVE_STATUSES.has(status)) return true;
+  return !AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(status);
+}
+
+export function listActiveAmaCloserDispatches(rootDir, options = {}) {
+  const dir = amaCloserDispatchDir(rootDir);
+  const log = options?.log || options?.logger || null;
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const activeDispatches = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    const dispatchPath = join(dir, entry.name);
+    try {
+      const record = readJsonFile(dispatchPath);
+      if (!isActiveAmaCloserDispatchRecord(record, options)) continue;
+      const prNumber = Number(record?.prNumber);
+      if (!record?.repo || !Number.isInteger(prNumber) || prNumber <= 0) continue;
+      activeDispatches.push({
+        ...record,
+        prNumber,
+        dispatchPath,
+      });
+    } catch (err) {
+      log?.warn?.(`[ama-closer] skipped dispatch record ${dispatchPath}: ${err?.message || err}`);
+    }
+  }
+  return activeDispatches;
 }
 
 function writeAmaCloserDispatchRecord(rootDir, identity, doc) {

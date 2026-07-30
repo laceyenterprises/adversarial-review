@@ -3156,6 +3156,7 @@ export async function maybeDispatchAmaCloser({
       if (
         !advancedTerminalDispatchSuperseded
         && !existingDispatchHeadAdvanced
+        && mergedSignalUnknown
         && AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
         && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
         && !isReclaimableDispatchedAmaCloserLease(existingLeaseBeforeDispatch, {

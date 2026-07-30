@@ -261,6 +261,7 @@ import {
   summarizePRRemediationLedger,
   writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
+import { updateAmaCloserDispatchRecord } from '../src/ama/dispatch-closer.mjs';
 import {
   FOLLOW_UP_DAEMON_WAKE_TARGET,
   signalFollowUpDaemonWake,
@@ -4263,6 +4264,40 @@ test('classifyHqDispatchFailure prefers structured transient codes and bounded d
 test('consumeFollowUpJobsUntilCapacity defers a pending job for a PR with active remediation', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   markActiveInProgressJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:00:00.000Z' });
+  createPendingRemediationJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:01:00.000Z' });
+  createPendingRemediationJob(rootDir, { prNumber: 8, reviewPostedAt: '2026-04-21T08:02:00.000Z' });
+
+  const spawnCalls = [];
+  const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity(
+    drainerTestOptions(rootDir, spawnCalls, { maxConcurrent: 2 })
+  ));
+
+  assert.equal(result.spawned, 1);
+  assert.equal(result.deferredSamePR, 1);
+  assert.equal(spawnCalls.length, 1);
+  assert.deepEqual(result.results.filter((entry) => entry.consumed).map((entry) => entry.job.prNumber), [8]);
+
+  const pendingJobs = readdirSync(getFollowUpJobDir(rootDir, 'pending')).filter((name) => name.endsWith('.json'));
+  assert.equal(pendingJobs.length, 1);
+  assert.match(pendingJobs[0], /pr-7-/);
+});
+
+test('consumeFollowUpJobsUntilCapacity defers a pending job for a PR with an active AMA closer', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  updateAmaCloserDispatchRecord(rootDir, {
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    headSha: 'abc123',
+  }, () => ({
+    schemaVersion: 1,
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    headSha: 'abc123',
+    state: 'dispatched',
+    launchRequestId: 'lrq_hammer_active',
+    lastObservedStatus: 'starting',
+    dispatchedAt: '2026-04-21T10:20:00.000Z',
+  }));
   createPendingRemediationJob(rootDir, { prNumber: 7, reviewPostedAt: '2026-04-21T08:01:00.000Z' });
   createPendingRemediationJob(rootDir, { prNumber: 8, reviewPostedAt: '2026-04-21T08:02:00.000Z' });
 

@@ -40,6 +40,7 @@ import {
 } from './remediation-reconcile-claim.mjs';
 import {
   buildBackpressureLogLine,
+  buildFollowUpClaimReservations,
   buildDrainSummaryLogLine,
   countPendingFollowUpJobsByRetryWindow,
   createQuotaHoldRevalidator,
@@ -4274,8 +4275,7 @@ async function consumeFollowUpJobsUntilCapacity({
   log = console,
 } = {}) {
   const concurrencyCap = normalizeMaxConcurrentFollowUpJobs(maxConcurrent);
-  const activeJobs = listInProgressFollowUpJobs(rootDir);
-  const blockedRepoPrKeys = new Set(activeJobs.map(({ job }) => followUpJobRepoPrKey(job)));
+  const { activeJobs, blockedRepoPrKeys } = buildFollowUpClaimReservations({ rootDir, now, log });
   const results = [];
   let spawned = 0;
   let stopped = 0;

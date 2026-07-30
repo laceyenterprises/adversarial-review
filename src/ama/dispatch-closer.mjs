@@ -24,7 +24,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { hostname, userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1161,6 +1161,57 @@ function readJsonFile(filePath) {
 
 export function readAmaCloserDispatchRecord(rootDir, identity) {
   return readJsonFile(amaCloserDispatchFilePath(rootDir, identity));
+}
+
+function isStaleDispatchingAmaCloserRecord(record, { now = null } = {}) {
+  const lastTouchedAtMs = parseTimeMs(
+    record?.lastAttemptedAt
+    || record?.dispatchedAt
+    || record?.lastObservedAt
+    || record?.createdAt
+  );
+  const nowMs = parseTimeMs(now || new Date().toISOString());
+  return lastTouchedAtMs !== null
+    && nowMs !== null
+    && nowMs - lastTouchedAtMs >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
+}
+
+export function isActiveAmaCloserDispatchRecord(record, options = {}) {
+  if (!record || typeof record !== 'object') return false;
+  const state = String(record.state || '').trim().toLowerCase();
+  if (state === 'dispatching') {
+    return !isStaleDispatchingAmaCloserRecord(record, options);
+  }
+  if (state !== 'dispatched') return false;
+
+  const status = normalizeWorkerRunStatus(record.lastObservedStatus);
+  return !AMA_CLOSER_RETRYABLE_STATUSES.has(status);
+}
+
+export function listActiveAmaCloserDispatches(rootDir, options = {}) {
+  const dir = amaCloserDispatchDir(rootDir);
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const activeDispatches = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    const dispatchPath = join(dir, entry.name);
+    const record = readJsonFile(dispatchPath);
+    if (!isActiveAmaCloserDispatchRecord(record, options)) continue;
+    const prNumber = Number(record?.prNumber);
+    if (!record?.repo || !Number.isInteger(prNumber) || prNumber <= 0) continue;
+    activeDispatches.push({
+      ...record,
+      prNumber,
+      dispatchPath,
+    });
+  }
+  return activeDispatches;
 }
 
 function writeAmaCloserDispatchRecord(rootDir, identity, doc) {

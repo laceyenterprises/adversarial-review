@@ -1111,17 +1111,22 @@ function tailRecentLines(path, maxBytes = 64 * 1024) {
 }
 
 function dispatchSpawnSuccessPattern() {
-  return /(spawn(?:ed)?[\s\S]{0,120}(hammer|closer|ama|merge-agent)[\s\S]{0,120}(success|succeeded|ok|complete|completed)|(hammer|closer|ama|merge-agent)[\s\S]{0,120}spawn(?:ed)?[\s\S]{0,120}(success|succeeded|ok|complete|completed))/i;
+  return /(\bcwp\.daemon spawned\b|spawn(?:ed)?[\s\S]{0,120}(hammer|closer|ama|merge-agent)[\s\S]{0,120}(success|succeeded|ok|complete|completed)|(hammer|closer|ama|merge-agent)[\s\S]{0,120}spawn(?:ed)?[\s\S]{0,120}(success|succeeded|ok|complete|completed))/i;
 }
 
-function dispatchSpawnFailurePattern() {
-  return /(entitlement-auth|rate[- ]?limit|403|exit\s+65|spawn[\s\S]{0,120}(hammer|closer|ama|merge-agent)|(hammer|closer|ama|merge-agent)[\s\S]{0,120}(spawn|failed|exit))/i;
+function dispatchSpawnFailurePatterns() {
+  return [
+    /\b(failed to spawn|spawn(?:ing)? failed|spawn failure|spawn failed)\b/i,
+    /\b(?:spawn|provision|admit)[\s\S]{0,160}\b(?:entitlement-auth|403|exit\s+65)\b/i,
+    /\b(?:entitlement-auth|403|exit\s+65)\b[\s\S]{0,160}\b(?:spawn|provision|admit|hammer|closer|ama|merge-agent)\b/i,
+    /\b(?:hammer|closer|ama|merge-agent)\b[\s\S]{0,160}\b(?:failed to spawn|spawn(?:ing)? failed|spawn failure|exit\s+65)\b/i,
+  ];
 }
 
 function summarizeDispatchSpawnFailures(hqRoot, { nowMs, config }) {
   const logPath = join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
   const log = tailRecentLines(logPath);
-  const pattern = dispatchSpawnFailurePattern();
+  const patterns = dispatchSpawnFailurePatterns();
   const successPattern = dispatchSpawnSuccessPattern();
   const matches = [];
   let successAfterLastFailure = false;
@@ -1129,7 +1134,7 @@ function summarizeDispatchSpawnFailures(hqRoot, { nowMs, config }) {
     for (const line of log.lines) {
       if (matches.length > 0 && successPattern.test(line)) {
         successAfterLastFailure = true;
-      } else if (pattern.test(line)) {
+      } else if (patterns.some((pattern) => pattern.test(line))) {
         matches.push(line.slice(0, 800));
         successAfterLastFailure = false;
       }

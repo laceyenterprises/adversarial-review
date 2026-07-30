@@ -711,6 +711,34 @@ test('dispatch spawn failure log lines are suppressed when stale or self-recover
   assert.equal(stale.dispatchSpawnFailures.matches.length, 0);
 });
 
+test('dispatch spawn classifier ignores op cache backoff and successful daemon spawns', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(
+    dispatchLog,
+    [
+      '2026-07-29 16:20:21,403 WARNING node_id=laceyent cwp_dispatch.op_adapter op_owner_cache_stale_served age_seconds=348218 reason=rate_limit_backoff',
+      '2026-07-29 16:36:45,764 INFO node_id=laceyent cwp.daemon spawned lrq_ba30778a-1f5b-4e6a-a127-1525d4aa4437 pid=62951 worker_class=hammer worker_id=hammer-ama-pr-4406',
+      '2026-07-29 16:46:19,403 INFO node_id=laceyent cwp.daemon spawned lrq_3ba418e0-0fc2-4460-a36a-d30aa060ec01 pid=26261 worker_class=codex worker_id=codex-sbh-03-36e93ca1',
+      '',
+    ].join('\n'),
+  );
+  const execFileSyncImpl = () => 'state = running\nlast exit code = 0\n';
+
+  const healthy = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.ok(!findingCodes(healthy).includes('review:dispatch_spawn_failures'));
+  assert.equal(healthy.dispatchSpawnFailures.matches.length, 0);
+});
+
 test('collector surfaces active provider overload backoffs and quota holds', () => {
   const rootDir = tempRoot();
   const overloadedPr = 960;

@@ -2028,8 +2028,8 @@ async function probeAmaCloserDispatchStatus({
 } = {}) {
   if (!hqPath || !launchRequestId) return null;
   const args = asOwner
-    ? ['dispatch', 'status', launchRequestId, '--as-owner', asOwner]
-    : ['dispatch', 'status', launchRequestId];
+    ? ['dispatch', 'status', launchRequestId, '--as-owner', asOwner, '--json']
+    : ['dispatch', 'status', launchRequestId, '--json'];
   for (let attempt = 0; attempt <= AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
     try {
       const { stdout } = await execFileImpl(hqPath, args, {
@@ -2566,6 +2566,8 @@ export async function maybeDispatchAmaCloser({
     useHammerTerminalRemediationPrompt &&
     workerClass === 'hammer' &&
     reviewState?.reviewCycleExhausted === true;
+  const validatedHamTerminalRemediation =
+    verdict?.trace?.hamTerminalRemediation?.ok === true;
   const templatePath = dispatchContext.templatePath || HAMMER_TEMPLATE_PATH;
   const templateBody = readTemplateImpl
     ? readTemplateImpl(templatePath)
@@ -2907,6 +2909,7 @@ export async function maybeDispatchAmaCloser({
         }));
       } else if (
         currentHeadFinalHammerTerminalRemediation &&
+        validatedHamTerminalRemediation &&
         mergedSignalUnknown &&
         AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
       ) {
@@ -3140,13 +3143,30 @@ export async function maybeDispatchAmaCloser({
         && !existingDispatchHeadAdvanced
         &&
         mergedSignalUnknown
-        && (auditTerminalOutcome === 'succeeded' || AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status))
+        && auditTerminalOutcome === 'succeeded'
       ) {
         updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
           ...(current || existingRecord),
           lastObservedStatus: status,
           lastObservedAt: dispatchContext.dispatchedAt,
           lastError: `merged-signal-read-${mergedSignal.reason || 'unknown'}`,
+        }));
+        return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
+      }
+      if (
+        !advancedTerminalDispatchSuperseded
+        && !existingDispatchHeadAdvanced
+        && AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
+        && existingLeaseBeforeDispatch?.status === AMA_CLOSER_LEASE_STATUS.DISPATCHED
+        && !isReclaimableDispatchedAmaCloserLease(existingLeaseBeforeDispatch, {
+          now: dispatchContext.dispatchedAt,
+        })
+      ) {
+        updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+          ...(current || existingRecord),
+          lastObservedStatus: status,
+          lastObservedAt: dispatchContext.dispatchedAt,
+          lastError: 'terminal-success-awaiting-audit-or-merged-signal',
         }));
         return retainExistingAmaCloserDispatch(existingRecord, workerClass, status);
       }
@@ -3183,13 +3203,15 @@ export async function maybeDispatchAmaCloser({
           prNumber,
         });
       } else if (!advancedTerminalDispatchSuperseded && AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)) {
-        existingDispatchStatus = 'unverified-terminal-success';
+        existingDispatchStatus = 'failed';
         releaseUnprovenTerminalHold = true;
         releaseUnprovenTerminalHoldError = 'terminal-success-status-without-audit-or-merged-signal';
+        // `failed-without-merge` is a canonical AMA closer lease terminal
+        // outcome; use it when a completed worker produced no merge/audit proof.
         finalizeAmaCloserLeaseBestEffort({
           rootDir,
           leaseIdentity: existingRecordLeaseIdentity,
-          terminalOutcome: 'succeeded',
+          terminalOutcome: 'failed-without-merge',
           now: dispatchContext.dispatchedAt,
           logger,
           repo,

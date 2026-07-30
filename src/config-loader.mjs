@@ -1579,6 +1579,7 @@ function schemaV1() {
           },
         },
       },
+      // worker_pool.budget_burn.attribution.*,
       // worker_pool.comms.responder.*,
       // worker_pool.dag.autowalk.deep_reconcile,
       // worker_pool.dispatch.codex_exec_mode,
@@ -1597,6 +1598,104 @@ function schemaV1() {
         __type: TYPE_DICT,
         __strict: true,
         __keys: {
+          budget_burn: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              attribution: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  unknown_oauth_account_label: {
+                    __type: TYPE_STRING,
+                    __default: 'unknown',
+                    __nullable: false,
+                  },
+                  unattributed_user_label: {
+                    __type: TYPE_STRING,
+                    __default: 'unattributed',
+                    __nullable: false,
+                  },
+                  oauth_account_map: {
+                    __type: TYPE_DICT,
+                    __strict: false,
+                    __default: {
+                      'openai-codex': { label: 'Codex OAuth', estimate_only: false },
+                      anthropic: { label: 'Claude OAuth', estimate_only: false },
+                      google: { label: 'Google OAuth', estimate_only: false },
+                      'gemini-antigravity-estimate': {
+                        label: 'Antigravity (estimate-only)',
+                        estimate_only: true,
+                      },
+                      api: { label: 'API', estimate_only: false },
+                      mixed: { label: 'Mixed billing', estimate_only: false },
+                    },
+                    __extra_keys_schema: {
+                      __type: TYPE_DICT,
+                      __strict: true,
+                      __default: {},
+                      __keys: {
+                        label: {
+                          __type: TYPE_STRING,
+                          __default: '',
+                          __nullable: false,
+                        },
+                        estimate_only: { __type: TYPE_BOOL, __default: false },
+                      },
+                    },
+                  },
+                  oauth_signal_aliases: {
+                    __type: TYPE_DICT,
+                    __strict: false,
+                    __default: {
+                      'codex-jsonl': 'openai-codex',
+                      'claude-code-jsonl': 'anthropic',
+                      'openclaw-transcript-entries': 'anthropic',
+                      'litellm-spend-logs': 'api',
+                      'session-ledger+pricing-table-synthetic': 'openai-codex',
+                      'gemini-antigravity-estimate': 'gemini-antigravity-estimate',
+                    },
+                    __extra_keys_schema: {
+                      __type: TYPE_STRING,
+                      __default: '',
+                      __nullable: false,
+                    },
+                  },
+                  user_aliases: {
+                    __type: TYPE_DICT,
+                    __strict: false,
+                    __default: {},
+                    __extra_keys_schema: {
+                      __type: TYPE_STRING,
+                      __default: '',
+                      __nullable: false,
+                    },
+                  },
+                  source_path_user_fallbacks: {
+                    __type: TYPE_LIST,
+                    __default: [],
+                    __item: {
+                      __type: TYPE_DICT,
+                      __strict: true,
+                      __default: {},
+                      __keys: {
+                        path_prefix: {
+                          __type: TYPE_STRING,
+                          __default: '',
+                          __nullable: false,
+                        },
+                        user: {
+                          __type: TYPE_STRING,
+                          __default: '',
+                          __nullable: false,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
           comms: {
             __type: TYPE_DICT,
             __strict: true,

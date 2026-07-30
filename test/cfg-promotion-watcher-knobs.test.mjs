@@ -233,6 +233,49 @@ test('schema defaults resolve to documented values when nothing is overridden', 
   }
 });
 
+test('worker_pool budget_burn attribution mirror accepts checked-in config shape', () => {
+  const isolatedTop = createTempConfig(`
+version: 1
+worker_pool:
+  budget_burn:
+    attribution:
+      unknown_oauth_account_label: unknown-oauth
+      unattributed_user_label: no-user
+      oauth_account_map:
+        openai-codex:
+          label: Codex OAuth
+          estimate_only: false
+        gemini-antigravity-estimate:
+          label: Antigravity estimate
+          estimate_only: true
+      oauth_signal_aliases:
+        codex-jsonl: openai-codex
+        gemini-antigravity-estimate: gemini-antigravity-estimate
+      user_aliases:
+        svc-airlock: airlock
+      source_path_user_fallbacks:
+        - path_prefix: /Users/airlock/
+          user: svc-airlock
+`);
+  try {
+    const cfg = loadConfig({ topPath: isolatedTop.configPath, env: {} });
+    assert.strictEqual(
+      cfg.get('worker_pool.budget_burn.attribution.unknown_oauth_account_label'),
+      'unknown-oauth'
+    );
+    assert.strictEqual(
+      cfg.get('worker_pool.budget_burn.attribution.oauth_account_map.gemini-antigravity-estimate.estimate_only'),
+      true
+    );
+    assert.strictEqual(
+      cfg.get('worker_pool.budget_burn.attribution.source_path_user_fallbacks.0.user'),
+      'svc-airlock'
+    );
+  } finally {
+    isolatedTop.cleanup();
+  }
+});
+
 test('reviewer.timeout_ms: legacy ADVERSARIAL_REVIEWER_TIMEOUT_MS env still wins', () => {
   const env = { ADVERSARIAL_REVIEWER_TIMEOUT_MS: '600000' };
   assert.strictEqual(resolveReviewerTimeoutMs(env), 600_000);

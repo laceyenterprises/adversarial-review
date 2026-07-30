@@ -99,6 +99,20 @@ function resolveCompletionShape(role) {
   return role?.kind === 'remediator' ? 'branch-push' : 'decision-only';
 }
 
+const REVIEWER_WORKER_CLASS_BY_MODEL = {
+  claude: 'claude-reviewer',
+  'claude-code': 'claude-reviewer',
+  codex: 'codex-reviewer',
+  gemini: 'gemini-reviewer',
+};
+
+function resolveWorkerClass(role) {
+  if (role?.kind === 'reviewer') {
+    return REVIEWER_WORKER_CLASS_BY_MODEL[role.model] || role.model;
+  }
+  return role.model;
+}
+
 function normalizeStatus(status) {
   return String(status || '').trim().toLowerCase();
 }
@@ -168,7 +182,7 @@ function buildDispatchPayload(request, buildPrompt) {
     request_id: toAppContractRequestId(request.idempotencyKey),
     task_kind: resolveTaskKind(role),
     completion_shape: resolveCompletionShape(role),
-    worker_class: role.model,
+    worker_class: resolveWorkerClass(role),
     role_id: role.id,
     domain_id: ref.domainId,
     subject_external_id: ref.subjectExternalId,
@@ -849,6 +863,7 @@ export {
   mapTerminalStatus,
   resolveCompletionShape,
   resolveTaskKind,
+  resolveWorkerClass,
   toHqTaskKind,
   toAppContractRequestId,
 };

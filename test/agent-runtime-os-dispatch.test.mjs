@@ -13,6 +13,7 @@ import {
   mapTerminalStatus,
   resolveCompletionShape,
   resolveTaskKind,
+  resolveWorkerClass,
   toHqTaskKind,
   toAppContractRequestId,
 } from '../src/adapters/agent-runtime/os-dispatch/index.mjs';
@@ -194,13 +195,21 @@ test('buildDispatchPayload propagates the idempotency key as request_id and maps
   assert.equal(payload.request_id, 'code-pr:pr-14:abc123:code-review:code-quality-reviewer:1');
   assert.equal(payload.task_kind, 'analysis');
   assert.equal(payload.completion_shape, 'decision-only');
-  assert.equal(payload.worker_class, 'claude-code');
+  assert.equal(payload.worker_class, 'claude-reviewer');
   assert.equal(payload.domain_id, 'code-pr');
   assert.equal(payload.subject_external_id, 'pr-14');
   assert.equal(payload.revision_ref, 'abc123');
   assert.equal(payload.ticket_ref, 'ARC-06');
   assert.equal(payload.token_budget, 500_000);
   assert.equal(payload.prompt, 'diff --git a b');
+});
+
+test('resolveWorkerClass maps reviewer families to governed reviewer worker classes', () => {
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'claude-code' }), 'claude-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'claude' }), 'claude-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'codex' }), 'codex-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'gemini' }), 'gemini-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'remediator', model: 'codex' }), 'codex');
 });
 
 test('toAppContractRequestId preserves valid keys and normalizes PR refs with a hash suffix', () => {

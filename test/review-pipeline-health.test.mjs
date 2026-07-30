@@ -739,6 +739,61 @@ test('dispatch spawn classifier ignores op cache backoff and successful daemon s
   assert.equal(healthy.dispatchSpawnFailures.matches.length, 0);
 });
 
+test('dispatch spawn classifier catches bounded rate-limit spawn failures', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(
+    dispatchLog,
+    [
+      '2026-07-29 16:31:11,001 ERROR node_id=laceyent worker_class=hammer failed to admit: secondary rate limit from GitHub',
+      '2026-07-29 16:32:12,001 ERROR node_id=laceyent AWS rate-limit while trying to provision worker_class=closer',
+      '',
+    ].join('\n'),
+  );
+  const execFileSyncImpl = () => 'state = running\nlast exit code = 0\n';
+
+  const unhealthy = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.ok(findingCodes(unhealthy).includes('review:dispatch_spawn_failures'));
+  assert.equal(unhealthy.dispatchSpawnFailures.matches.length, 2);
+});
+
+test('dispatch spawn classifier catches failure text before monitored worker class', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(
+    dispatchLog,
+    [
+      '2026-07-29 16:31:11,001 ERROR node_id=laceyent failed to spawn hammer: image missing',
+      '2026-07-29 16:32:12,001 ERROR node_id=laceyent spawn failed for worker_class=ama',
+      '2026-07-29 16:33:13,001 ERROR node_id=laceyent spawn failure: closer',
+      '',
+    ].join('\n'),
+  );
+  const execFileSyncImpl = () => 'state = running\nlast exit code = 0\n';
+
+  const unhealthy = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.ok(findingCodes(unhealthy).includes('review:dispatch_spawn_failures'));
+  assert.equal(unhealthy.dispatchSpawnFailures.matches.length, 3);
+});
+
 test('dispatch spawn classifier does not let unrelated successes recover monitored failures', () => {
   const rootDir = tempRoot();
   const hqRoot = tempRoot();
@@ -777,6 +832,33 @@ test('dispatch spawn classifier ignores unmonitored worker spawn failures', () =
     [
       '2026-07-29 16:31:11,001 ERROR node_id=laceyent worker_class=codex failed to spawn: image missing',
       '2026-07-29 16:33:12,001 ERROR node_id=laceyent worker_class=search-indexer spawn failed: local cache unavailable',
+      '',
+    ].join('\n'),
+  );
+  const execFileSyncImpl = () => 'state = running\nlast exit code = 0\n';
+
+  const healthy = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.ok(!findingCodes(healthy).includes('review:dispatch_spawn_failures'));
+  assert.equal(healthy.dispatchSpawnFailures.matches.length, 0);
+});
+
+test('dispatch spawn classifier does not match monitored names inside worker ids', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(
+    dispatchLog,
+    [
+      '2026-07-29 16:31:11,001 ERROR node_id=laceyent worker_id=codex-ama-123 failed to spawn: image missing',
+      '2026-07-29 16:32:12,001 ERROR node_id=laceyent failed to spawn worker_id=codex-closer-456',
       '',
     ].join('\n'),
   );

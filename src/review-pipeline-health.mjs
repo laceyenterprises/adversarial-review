@@ -1115,10 +1115,14 @@ function dispatchSpawnSuccessPattern() {
 }
 
 function dispatchSpawnFailurePatterns() {
+  const workerClass = String.raw`(?<![A-Za-z0-9-])(?:hammer|closer|ama|merge-agent)(?![A-Za-z0-9-])`;
+  const spawnFailure = String.raw`(?:failed to spawn|spawn(?:ing)? failed|spawn failure|exit\s+65)`;
+  const authOrLimitFailure = String.raw`(?:entitlement-auth|403|rate[- ]?limit|exit\s+65)`;
   return [
-    /\b(?:spawn|provision|admit)[\s\S]{0,160}\b(?:entitlement-auth|403|exit\s+65)\b/i,
-    /\b(?:entitlement-auth|403|exit\s+65)\b[\s\S]{0,160}\b(?:spawn|provision|admit|hammer|closer|ama|merge-agent)\b/i,
-    /\b(?:hammer|closer|ama|merge-agent)\b[\s\S]{0,160}\b(?:failed to spawn|spawn(?:ing)? failed|spawn failure|exit\s+65)\b/i,
+    new RegExp(String.raw`\b(?:spawn|provision|admit)[\s\S]{0,160}\b${authOrLimitFailure}\b`, 'i'),
+    new RegExp(String.raw`\b${authOrLimitFailure}\b[\s\S]{0,160}\b(?:spawn|provision|admit|${workerClass})\b`, 'i'),
+    new RegExp(String.raw`${workerClass}[\s\S]{0,160}\b${spawnFailure}\b`, 'i'),
+    new RegExp(String.raw`\b${spawnFailure}\b[\s\S]{0,160}${workerClass}`, 'i'),
   ];
 }
 

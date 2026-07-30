@@ -1435,6 +1435,98 @@ test('fresh succeeded current-head hammer releases hold when merged-signal read 
   assert.equal(currentRecord.lastError, null);
 });
 
+test('fresh succeeded current-head hammer releases hold when direct PR merged-signal is known', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'hammer-success-direct-signal-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const hqRoot = join(rootDir, 'hq-root');
+  acquireAmaCloserLease({
+    rootDir,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    now: '2026-07-06T12:00:00Z',
+  });
+  updateAmaCloserLease({
+    rootDir,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    status: AMA_CLOSER_LEASE_STATUS.DISPATCHED,
+    lrqId: 'lrq_current_head',
+    now: '2026-07-06T12:00:00Z',
+  });
+  updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD }, () => ({
+    schemaVersion: 1,
+    repo: REPO,
+    prNumber: PR_NUMBER,
+    headSha: ADVANCED_HEAD,
+    reviewedSha: REVIEWED_HEAD,
+    targetRemediationSha: ADVANCED_HEAD,
+    workerClass: 'hammer',
+    dispatchWorkerClass: 'hammer',
+    promptPath: '/tmp/current-prompt.md',
+    promptDir: '/tmp',
+    hqRoot,
+    launchRequestId: 'lrq_current_head',
+    dispatchId: 'dispatch_current_head',
+    retryCount: 1,
+    state: 'dispatched',
+    lastObservedStatus: 'starting',
+  }));
+  const execCalls = [];
+  const result = await maybeDispatchAmaCloser({
+    ...hammerDispatchArgs(rootDir, {
+      reviewState: { reviewCycleExhausted: true },
+      prMetadata: { headSha: ADVANCED_HEAD },
+      dispatchContext: {
+        hqRoot,
+        targetRemediationSha: ADVANCED_HEAD,
+        allowStaleReviewHeadHammerResume: true,
+        dispatchedAt: '2026-07-06T12:02:00Z',
+      },
+    }),
+    attemptDaemonCleanMergeImpl: async () => {
+      throw new Error('unexpected daemon merge while releasing direct merged-signal hold');
+    },
+    ...hammerDispatchDeps({
+      execFileImpl: async (cmd, args) => {
+        execCalls.push({ cmd, args });
+        if (args[0] === 'dispatch' && args[1] === 'status') {
+          return { stdout: JSON.stringify({ status: 'succeeded' }), stderr: '' };
+        }
+        return { stdout: JSON.stringify({ dispatchId: 'dispatch_retry', launchRequestId: 'lrq_retry' }), stderr: '' };
+      },
+      readBuildCompletionSignalForPrImpl: () => ({
+        ok: true,
+        row: { signal_kind: 'merged', head_sha: ADVANCED_HEAD },
+        target: { repo: REPO, prNumber: PR_NUMBER },
+      }),
+      readBuildCompletionProducerEvidenceImpl: () => ({
+        ok: false,
+        reason: 'missing-build-completion-producer-evidence',
+      }),
+    }),
+  });
+
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'merged-signal-present');
+  assert.equal(result.dispatchId, 'dispatch_current_head');
+  assert.equal(result.launchRequestId, 'lrq_current_head');
+  assert.equal(execCalls.filter((call) => call.args[0] === 'dispatch').length, 0);
+  const currentLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD });
+  assert.equal(currentLease.status, AMA_CLOSER_LEASE_STATUS.TERMINAL);
+  assert.equal(currentLease.terminalOutcome, 'succeeded');
+  assert.equal(currentLease.lrqId, 'lrq_current_head');
+  const currentRecord = readAmaCloserDispatchRecord(
+    rootDir,
+    { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD },
+  );
+  assert.equal(currentRecord.launchRequestId, 'lrq_current_head');
+  assert.equal(currentRecord.retryCount, 1);
+  assert.equal(currentRecord.lastObservedStatus, 'succeeded');
+  assert.equal(currentRecord.lastError, null);
+});
+
 test('terminal failed current-head hammer without HAM evidence is redispatched', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-terminal-failed-no-evidence-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

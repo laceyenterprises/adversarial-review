@@ -711,6 +711,227 @@ test('dispatch spawn failure log lines are suppressed when stale or self-recover
   assert.equal(stale.dispatchSpawnFailures.matches.length, 0);
 });
 
+test('dispatch spawn classifier ignores op cache backoff and successful daemon spawns', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(
+    dispatchLog,
+    [
+      '2026-07-29 16:20:21,403 WARNING node_id=laceyent cwp_dispatch.op_adapter op_owner_cache_stale_served age_seconds=348218 reason=rate_limit_backoff',
+      '2026-07-29 16:36:45,764 INFO node_id=laceyent cwp.daemon spawned lrq_ba30778a-1f5b-4e6a-a127-1525d4aa4437 pid=62951 worker_class=hammer worker_id=hammer-ama-pr-4406',
+      '2026-07-29 16:46:19,403 INFO node_id=laceyent cwp.daemon spawned lrq_3ba418e0-0fc2-4460-a36a-d30aa060ec01 pid=26261 worker_class=codex worker_id=codex-sbh-03-36e93ca1',
+      '',
+    ].join('\n'),
+  );
+  const execFileSyncImpl = () => 'state = running\nlast exit code = 0\n';
+
+  const healthy = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.ok(!findingCodes(healthy).includes('review:dispatch_spawn_failures'));
+  assert.equal(healthy.dispatchSpawnFailures.matches.length, 0);
+});
+
+test('dispatch spawn classifier catches bounded rate-limit spawn failures', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(
+    dispatchLog,
+    [
+      '2026-07-29 16:31:11,001 ERROR node_id=laceyent worker_class=hammer failed to admit: secondary rate limit from GitHub',
+      '2026-07-29 16:32:12,001 ERROR node_id=laceyent AWS rate-limit while trying to provision worker_class=closer',
+      '',
+    ].join('\n'),
+  );
+  const execFileSyncImpl = () => 'state = running\nlast exit code = 0\n';
+
+  const unhealthy = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.ok(findingCodes(unhealthy).includes('review:dispatch_spawn_failures'));
+  assert.equal(unhealthy.dispatchSpawnFailures.matches.length, 2);
+});
+
+test('dispatch spawn classifier catches auth failures with monitored worker class first', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(
+    dispatchLog,
+    [
+      '2026-07-29 16:31:11,001 ERROR node_id=laceyent worker_class=hammer failed due to 403',
+      '',
+    ].join('\n'),
+  );
+  const execFileSyncImpl = () => 'state = running\nlast exit code = 0\n';
+
+  const unhealthy = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.ok(findingCodes(unhealthy).includes('review:dispatch_spawn_failures'));
+  assert.equal(unhealthy.dispatchSpawnFailures.matches.length, 1);
+});
+
+test('dispatch spawn classifier catches failure text before monitored worker class', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(
+    dispatchLog,
+    [
+      '2026-07-29 16:31:11,001 ERROR node_id=laceyent failed to spawn hammer: image missing',
+      '2026-07-29 16:32:12,001 ERROR node_id=laceyent spawn failed for worker_class=ama',
+      '2026-07-29 16:33:13,001 ERROR node_id=laceyent spawn failure: closer',
+      '',
+    ].join('\n'),
+  );
+  const execFileSyncImpl = () => 'state = running\nlast exit code = 0\n';
+
+  const unhealthy = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.ok(findingCodes(unhealthy).includes('review:dispatch_spawn_failures'));
+  assert.equal(unhealthy.dispatchSpawnFailures.matches.length, 3);
+});
+
+test('dispatch spawn classifier does not let unrelated successes recover monitored failures', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(
+    dispatchLog,
+    [
+      '2026-07-29 16:31:11,001 ERROR node_id=laceyent worker_class=hammer failed to spawn: image missing',
+      '2026-07-29 16:46:19,403 INFO node_id=laceyent cwp.daemon spawned lrq_3ba418e0-0fc2-4460-a36a-d30aa060ec01 pid=26261 worker_class=codex worker_id=codex-sbh-03-36e93ca1',
+      '',
+    ].join('\n'),
+  );
+  const execFileSyncImpl = () => 'state = running\nlast exit code = 0\n';
+
+  const unhealthy = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.ok(findingCodes(unhealthy).includes('review:dispatch_spawn_failures'));
+  assert.equal(unhealthy.dispatchSpawnFailures.matches.length, 1);
+  assert.equal(unhealthy.dispatchSpawnFailures.successAfterLastFailure, false);
+});
+
+test('dispatch spawn classifier does not let worker-id embedded successes recover failures', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(
+    dispatchLog,
+    [
+      '2026-07-29 16:31:11,001 ERROR node_id=laceyent worker_class=hammer failed to spawn: image missing',
+      '2026-07-29 16:46:19,403 INFO node_id=laceyent cwp.daemon spawned lrq_3ba418e0-0fc2-4460-a36a-d30aa060ec01 pid=26261 worker_class=codex worker_id=codex-hammer-123',
+      '',
+    ].join('\n'),
+  );
+  const execFileSyncImpl = () => 'state = running\nlast exit code = 0\n';
+
+  const unhealthy = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.ok(findingCodes(unhealthy).includes('review:dispatch_spawn_failures'));
+  assert.equal(unhealthy.dispatchSpawnFailures.matches.length, 1);
+  assert.equal(unhealthy.dispatchSpawnFailures.successAfterLastFailure, false);
+});
+
+test('dispatch spawn classifier ignores unmonitored worker spawn failures', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(
+    dispatchLog,
+    [
+      '2026-07-29 16:31:11,001 ERROR node_id=laceyent worker_class=codex failed to spawn: image missing',
+      '2026-07-29 16:33:12,001 ERROR node_id=laceyent worker_class=search-indexer spawn failed: local cache unavailable',
+      '2026-07-29 16:34:12,001 ERROR node_id=laceyent worker_class=codex failed to admit: secondary rate limit from GitHub',
+      '2026-07-29 16:35:12,001 ERROR node_id=laceyent admit failed: secondary rate limit for worker_class=search-indexer',
+      '',
+    ].join('\n'),
+  );
+  const execFileSyncImpl = () => 'state = running\nlast exit code = 0\n';
+
+  const healthy = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.ok(!findingCodes(healthy).includes('review:dispatch_spawn_failures'));
+  assert.equal(healthy.dispatchSpawnFailures.matches.length, 0);
+});
+
+test('dispatch spawn classifier does not match monitored names inside worker ids', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(
+    dispatchLog,
+    [
+      '2026-07-29 16:31:11,001 ERROR node_id=laceyent worker_id=codex-ama-123 failed to spawn: image missing',
+      '2026-07-29 16:32:12,001 ERROR node_id=laceyent failed to spawn worker_id=codex-closer-456',
+      '',
+    ].join('\n'),
+  );
+  const execFileSyncImpl = () => 'state = running\nlast exit code = 0\n';
+
+  const healthy = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.ok(!findingCodes(healthy).includes('review:dispatch_spawn_failures'));
+  assert.equal(healthy.dispatchSpawnFailures.matches.length, 0);
+});
+
 test('collector surfaces active provider overload backoffs and quota holds', () => {
   const rootDir = tempRoot();
   const overloadedPr = 960;

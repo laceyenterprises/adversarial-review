@@ -13,6 +13,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative } from 'node:path';
 
+import { loadAppSdkConnect } from '../src/app-sdk-loader.mjs';
 import { attachFollowUpTelemetryListeners } from '../src/follow-up-remediation.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -71,6 +72,11 @@ test('package.json declares @agent-os/app-sdk as a file: tarball dependency (Rec
 test('the published SDK actually resolves and exposes connect()', async () => {
   const sdk = await import('@agent-os/app-sdk');
   assert.equal(typeof sdk.connect, 'function', '@agent-os/app-sdk must export connect()');
+});
+
+test('the lazy SDK loader resolves a callable connect export', async () => {
+  const connect = await loadAppSdkConnect();
+  assert.equal(typeof connect, 'function', 'loadAppSdkConnect() must return the published SDK connect() export');
 });
 
 // -- 3. SDK frame → telemetry listener bridge ---------------------------------

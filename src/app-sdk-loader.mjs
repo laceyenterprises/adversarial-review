@@ -24,7 +24,12 @@ let _connectPromise = null;
 export async function loadAppSdkConnect() {
   if (!_connectPromise) {
     _connectPromise = import('@agent-os/app-sdk')
-      .then((mod) => mod.connect)
+      .then((mod) => {
+        if (typeof mod?.connect !== 'function') {
+          throw new TypeError('@agent-os/app-sdk does not export connect()');
+        }
+        return mod.connect;
+      })
       .catch((err) => {
         _connectPromise = null; // allow a later call to retry the import
         throw err;

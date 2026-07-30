@@ -382,7 +382,7 @@ These components are deliberately review-agnostic and constitute the reusable
 | Component | Review-specific? | Notes |
 |---|---|---|
 | App registration + bootstrap token handling | no | thin wrapper over app-sdk `connect` |
-| Hybrid runtime router (§6.2–6.4) | no | candidate for upstreaming into app-sdk as `mode: hybrid` |
+| Hybrid runtime router (§6.2–6.4) | no | upstreamed in app-sdk `mode: hybrid`; this app still owns its probe/audit policy |
 | Idempotent dispatch + reconcile-on-resume | no | keyed dispatch + `dispatch_status` adoption |
 | Local admission layer (memory/quota caps) | no | any app spawning local processes needs this |
 | Degraded-mode dependency table (§9) | pattern | every app should publish one |
@@ -409,7 +409,7 @@ and useful beyond this app.
 | **Merge execution** | **none** (`hq adjudicate merge` is shell-only) | github-adapter `pr-merge` | **GAP-1: adjudicate-merge app surface** (HCP route or app-contract workflow action) |
 | **Ledger notes/events (write)** | **none** (loopback-internal only) | queue locally, flush on resume | **GAP-2: app-facing ledger notes API** |
 | Worker identity / attestations | direct ledger SQLite read (unsanctioned) | policy-declared bypass + audit | **GAP-3: attestation read surface** (replaces `session-ledger-read-adapter.mjs` direct reads) |
-| SDK hybrid mode | app-sdk is agent-os/standalone only | — | **GAP-4: upstream `mode: hybrid` + real SSE `on()` into app-sdk**; delete the vendored client fork |
+| SDK hybrid mode | `@agent-os/app-sdk` provides `mode: hybrid` + real SSE `on()` | this app can still keep its own health-router probe policy | — |
 
 Until a GAP surface ships, the interim is an explicitly-marked shim module
 (one file, named `os-shim-<gap>.mjs`) so the debt is greppable and the removal

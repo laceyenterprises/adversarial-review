@@ -58,3 +58,10 @@ test('buildDeliveryKey stays byte-identical for default code-pr callers', () => 
     'code-pr-security',
   );
 });
+
+test('buildDeliveryKey preserves the distinct pipeline-rollup kind', () => {
+  assert.equal(
+    buildDeliveryKey({ repo: 'org/repo', prNumber: 12, revisionRef: 'sha', round: 1, kind: 'pipeline-rollup' }).kind,
+    'pipeline-rollup',
+  );
+});

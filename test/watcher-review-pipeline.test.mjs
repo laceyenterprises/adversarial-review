@@ -77,7 +77,7 @@ test('gated hook drives both stages under their own prompt-set domains and posts
     spawnReviewer,
     spawnReviewerArgs: BASE_ARGS,
     comms,
-    rollupDeliveryKey: { domainId: 'code-pr', subjectExternalId: 'laceyenterprises/demo#7', revisionRef: 'headsha1', round: 1, kind: 'review' },
+    rollupDeliveryKey: { domainId: 'code-pr', subjectExternalId: 'laceyenterprises/demo#7', revisionRef: 'headsha1', round: 1, kind: 'pipeline-rollup' },
   });
 
   // Each stage reviewed under its own prompt-set domain, in order.
@@ -106,7 +106,7 @@ test('gated hook: stage 1 blocks → stage 2 never spawns; drop-in body carries 
   const result = await runGatedReviewPipeline({
     resolvedPipeline: resolved(), currentRevisionRef: 'h2', riskClass: 'medium', observedAt: '2026-07-17T00:00:00Z',
     spawnReviewer, spawnReviewerArgs: BASE_ARGS, comms: fakeComms(),
-    rollupDeliveryKey: { domainId: 'code-pr', subjectExternalId: 'laceyenterprises/demo#7', revisionRef: 'h2', round: 1, kind: 'review' },
+    rollupDeliveryKey: { domainId: 'code-pr', subjectExternalId: 'laceyenterprises/demo#7', revisionRef: 'h2', round: 1, kind: 'pipeline-rollup' },
   });
   assert.deepEqual(calls.map((c) => c.domainId), ['code-pr'], 'security stage never spawned');
   assert.equal(result.ok, true);
@@ -122,7 +122,7 @@ test('gated hook: both stages clean → drop-in ok result with a clean verdict b
   const result = await runGatedReviewPipeline({
     resolvedPipeline: resolved(), currentRevisionRef: 'h3', riskClass: 'low', observedAt: '2026-07-17T00:00:00Z',
     spawnReviewer, spawnReviewerArgs: BASE_ARGS, comms: fakeComms(),
-    rollupDeliveryKey: { domainId: 'code-pr', subjectExternalId: 'laceyenterprises/demo#7', revisionRef: 'h3', round: 1, kind: 'review' },
+    rollupDeliveryKey: { domainId: 'code-pr', subjectExternalId: 'laceyenterprises/demo#7', revisionRef: 'h3', round: 1, kind: 'pipeline-rollup' },
   });
   assert.equal(result.ok, true);
   assert.match(result.reviewBody, /Comment only/);
@@ -139,7 +139,7 @@ test('gated hook: fully carried-forward clean pipeline uses the persisted decidi
   const result = await runGatedReviewPipeline({
     resolvedPipeline: resolved(), stageStates, currentRevisionRef: 'h3-carry', riskClass: 'low',
     observedAt: '2026-07-17T00:00:00Z', spawnReviewer, spawnReviewerArgs: BASE_ARGS,
-    comms: fakeComms(), rollupDeliveryKey: { domainId: 'code-pr', subjectExternalId: 'laceyenterprises/demo#7', revisionRef: 'h3-carry', round: 2, kind: 'review' },
+    comms: fakeComms(), rollupDeliveryKey: { domainId: 'code-pr', subjectExternalId: 'laceyenterprises/demo#7', revisionRef: 'h3-carry', round: 2, kind: 'pipeline-rollup' },
   });
   assert.deepEqual(calls, []);
   assert.equal(result.ok, true);
@@ -151,7 +151,7 @@ test('gated hook: a reviewer failure preserves its canonical failure class for w
   const result = await runGatedReviewPipeline({
     resolvedPipeline: resolved(), currentRevisionRef: 'h4', riskClass: 'high', observedAt: '2026-07-17T00:00:00Z',
     spawnReviewer, spawnReviewerArgs: BASE_ARGS, comms: fakeComms(),
-    rollupDeliveryKey: { domainId: 'code-pr', subjectExternalId: 'laceyenterprises/demo#7', revisionRef: 'h4', round: 1, kind: 'review' },
+    rollupDeliveryKey: { domainId: 'code-pr', subjectExternalId: 'laceyenterprises/demo#7', revisionRef: 'h4', round: 1, kind: 'pipeline-rollup' },
   });
   assert.equal(result.ok, false);
   assert.equal(result.reviewBody, null);
@@ -163,7 +163,7 @@ test('gated hook: a reviewer failure without a class falls back to reviewer-outp
     resolvedPipeline: resolved(), currentRevisionRef: 'h5', riskClass: 'high', observedAt: '2026-07-17T00:00:00Z',
     spawnReviewer: async () => ({ ok: false, reviewBody: null }), spawnReviewerArgs: BASE_ARGS,
     comms: fakeComms(),
-    rollupDeliveryKey: { domainId: 'code-pr', subjectExternalId: 'laceyenterprises/demo#7', revisionRef: 'h5', round: 1, kind: 'review' },
+    rollupDeliveryKey: { domainId: 'code-pr', subjectExternalId: 'laceyenterprises/demo#7', revisionRef: 'h5', round: 1, kind: 'pipeline-rollup' },
   });
   assert.equal(result.ok, false);
   assert.equal(result.failureClass, 'reviewer-output');

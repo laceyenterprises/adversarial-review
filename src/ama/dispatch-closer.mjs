@@ -2827,6 +2827,7 @@ export async function maybeDispatchAmaCloser({
   if (existingRecord?.launchRequestId) {
     let releaseUnprovenTerminalHold = false;
     let releaseUnprovenTerminalHoldError = null;
+    let releaseUnprovenTerminalHoldMerged = false;
     let advancedTerminalDispatchSuperseded = false;
     const statusProbe = await probeAmaCloserDispatchStatus({
       hqPath,
@@ -3175,6 +3176,26 @@ export async function maybeDispatchAmaCloser({
         existingDispatchStatus = 'unverified-terminal-success';
         releaseUnprovenTerminalHold = true;
         releaseUnprovenTerminalHoldError = 'audit-succeeded-without-merged-signal';
+        releaseUnprovenTerminalHoldMerged = true;
+        finalizeAmaCloserLeaseBestEffort({
+          rootDir,
+          leaseIdentity: existingRecordLeaseIdentity,
+          terminalOutcome: 'succeeded',
+          now: dispatchContext.dispatchedAt,
+          logger,
+          repo,
+          prNumber,
+        });
+      } else if (
+        !advancedTerminalDispatchSuperseded
+        && !mergedSignalUnknown
+        && mergedSignal?.producerEvidence
+        && AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
+      ) {
+        existingDispatchStatus = 'unverified-terminal-success';
+        releaseUnprovenTerminalHold = true;
+        releaseUnprovenTerminalHoldError = null;
+        releaseUnprovenTerminalHoldMerged = true;
         finalizeAmaCloserLeaseBestEffort({
           rootDir,
           leaseIdentity: existingRecordLeaseIdentity,
@@ -3279,7 +3300,7 @@ export async function maybeDispatchAmaCloser({
         prNumber,
         record: tokenRecord,
         status: existingDispatchStatus || status,
-        merged: auditTerminalOutcome === 'succeeded',
+        merged: releaseUnprovenTerminalHoldMerged,
         observedAt: dispatchContext.dispatchedAt,
         ledgerTarget: dispatchContext.ledgerTarget || null,
         ledgerDbPath: dispatchContext.ledgerDbPath || null,
@@ -3293,7 +3314,7 @@ export async function maybeDispatchAmaCloser({
         lastObservedAt: dispatchContext.dispatchedAt,
         lastError: releaseUnprovenTerminalHoldError,
       }));
-      if (auditTerminalOutcome === 'succeeded') {
+      if (releaseUnprovenTerminalHoldMerged) {
         const rawHammerCleanup = await cleanupHammerCloserWorker({
           prNumber,
           workerClass,
@@ -3302,13 +3323,17 @@ export async function maybeDispatchAmaCloser({
           hqRoot,
           execFileImpl,
           logger,
-          reason: 'terminal-audit-merge-signal-recovered',
+          reason: auditTerminalOutcome === 'succeeded'
+            ? 'terminal-audit-merge-signal-recovered'
+            : 'terminal-merged-producer-evidence-recovered',
         });
         const hammerCleanup = logHammerCleanupFailure(rawHammerCleanup, {
           logger,
           repo,
           prNumber,
-          phase: 'terminal-audit-merge-signal-recovered',
+          phase: auditTerminalOutcome === 'succeeded'
+            ? 'terminal-audit-merge-signal-recovered'
+            : 'terminal-merged-producer-evidence-recovered',
         });
         return noAmaDispatch({
           dispatched: false,

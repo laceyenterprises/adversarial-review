@@ -1413,21 +1413,26 @@ test('fresh succeeded current-head hammer releases hold when merged-signal read 
     }),
   });
 
-  assert.equal(result.dispatched, true);
-  assert.equal(result.dispatchId, 'dispatch_retry');
-  assert.equal(result.launchRequestId, 'lrq_retry');
+  assert.equal(result.dispatched, false);
+  assert.equal(result.reason, 'current-head-hammer-terminal-remediation-merged');
+  assert.equal(result.dispatchId, 'dispatch_current_head');
+  assert.equal(result.launchRequestId, 'lrq_current_head');
   const statusCall = execCalls.find((call) => call.args[0] === 'dispatch' && call.args[1] === 'status');
   assert.ok(statusCall, 'existing dispatch status must be probed');
   assert.ok(statusCall.args.includes('--json'), 'status probe must request machine-readable output');
+  assert.equal(execCalls.filter((call) => call.args[0] === 'dispatch').length, 1);
   const currentLease = readAmaCloserLease(rootDir, { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD });
-  assert.equal(currentLease.status, AMA_CLOSER_LEASE_STATUS.DISPATCHED);
-  assert.equal(currentLease.lrqId, 'lrq_retry');
+  assert.equal(currentLease.status, AMA_CLOSER_LEASE_STATUS.TERMINAL);
+  assert.equal(currentLease.terminalOutcome, 'succeeded');
+  assert.equal(currentLease.lrqId, 'lrq_current_head');
   const currentRecord = readAmaCloserDispatchRecord(
     rootDir,
     { repo: REPO, prNumber: PR_NUMBER, headSha: ADVANCED_HEAD },
   );
-  assert.equal(currentRecord.launchRequestId, 'lrq_retry');
-  assert.equal(currentRecord.retryCount, 2);
+  assert.equal(currentRecord.launchRequestId, 'lrq_current_head');
+  assert.equal(currentRecord.retryCount, 1);
+  assert.equal(currentRecord.lastObservedStatus, 'succeeded');
+  assert.equal(currentRecord.lastError, null);
 });
 
 test('terminal failed current-head hammer without HAM evidence is redispatched', async (t) => {

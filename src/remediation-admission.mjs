@@ -194,7 +194,7 @@ function buildFollowUpClaimReservations({ rootDir, now = new Date().toISOString(
   const activeJobs = listInProgressFollowUpJobs(rootDir);
   const blockedRepoPrKeys = new Set(activeJobs.map(({ job }) => followUpJobRepoPrKey(job)));
   try {
-    for (const dispatch of listActiveAmaCloserDispatches(rootDir, { now })) {
+    for (const dispatch of listActiveAmaCloserDispatches(rootDir, { now, log })) {
       blockedRepoPrKeys.add(followUpJobRepoPrKey(dispatch));
     }
   } catch (err) {

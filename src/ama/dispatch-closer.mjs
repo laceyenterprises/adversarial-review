@@ -1203,6 +1203,7 @@ export function isActiveAmaCloserDispatchRecord(record, options = {}) {
 
 export function listActiveAmaCloserDispatches(rootDir, options = {}) {
   const dir = amaCloserDispatchDir(rootDir);
+  const log = options?.log || options?.logger || null;
   let entries;
   try {
     entries = readdirSync(dir, { withFileTypes: true });
@@ -1214,15 +1215,19 @@ export function listActiveAmaCloserDispatches(rootDir, options = {}) {
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
     const dispatchPath = join(dir, entry.name);
-    const record = readJsonFile(dispatchPath);
-    if (!isActiveAmaCloserDispatchRecord(record, options)) continue;
-    const prNumber = Number(record?.prNumber);
-    if (!record?.repo || !Number.isInteger(prNumber) || prNumber <= 0) continue;
-    activeDispatches.push({
-      ...record,
-      prNumber,
-      dispatchPath,
-    });
+    try {
+      const record = readJsonFile(dispatchPath);
+      if (!isActiveAmaCloserDispatchRecord(record, options)) continue;
+      const prNumber = Number(record?.prNumber);
+      if (!record?.repo || !Number.isInteger(prNumber) || prNumber <= 0) continue;
+      activeDispatches.push({
+        ...record,
+        prNumber,
+        dispatchPath,
+      });
+    } catch (err) {
+      log?.warn?.(`[ama-closer] skipped dispatch record ${dispatchPath}: ${err?.message || err}`);
+    }
   }
   return activeDispatches;
 }

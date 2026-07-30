@@ -187,6 +187,29 @@ test('missing file returns defaults', () => {
     ]);
     assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_window_commits'), 5);
     assert.equal(cfg.get('agent_control.codex_runaway_guardrails.vocabulary_fatigue_min_repeats'), 3);
+    assert.equal(cfg.get('post_deploy_verify.enabled'), false);
+    assert.equal(cfg.get('post_deploy_verify.spawn_timeout_seconds'), 180);
+    assert.equal(cfg.get('post_deploy_verify.boot_window_seconds'), 300);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('post_deploy_verify loads through strict Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      post_deploy_verify:
+        enabled: true
+        spawn_timeout_seconds: 45
+        boot_window_seconds: 12
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('post_deploy_verify.enabled'), true);
+    assert.equal(cfg.get('post_deploy_verify.spawn_timeout_seconds'), 45);
+    assert.equal(cfg.get('post_deploy_verify.boot_window_seconds'), 12);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

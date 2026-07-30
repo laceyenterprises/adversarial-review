@@ -1579,6 +1579,29 @@ function schemaV1() {
           },
         },
       },
+      // PMV-01 — Python-owned main-catchup post-deploy verification knobs.
+      // Parse-only mirror so the adversarial watcher accepts shared checked-in
+      // config.yaml files without treating this top-level section as unknown
+      // during strict startup validation.
+      post_deploy_verify: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          enabled: { __type: TYPE_BOOL, __default: false },
+          spawn_timeout_seconds: {
+            __type: TYPE_INT,
+            __default: 180,
+            __min: 10,
+            __max: 900,
+          },
+          boot_window_seconds: {
+            __type: TYPE_INT,
+            __default: 300,
+            __min: 0,
+            __max: 3600,
+          },
+        },
+      },
       // worker_pool.comms.responder.*,
       // worker_pool.dag.autowalk.deep_reconcile,
       // worker_pool.dispatch.codex_exec_mode,

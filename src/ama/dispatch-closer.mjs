@@ -2766,6 +2766,21 @@ export async function maybeDispatchAmaCloser({
     : reviewedHeadMergedSignal;
   if (mergedSignal?.ok) {
     if (existingRecord?.launchRequestId || existingRecord?.dispatchId) {
+      finalizeAmaCloserLeaseBestEffort({
+        rootDir,
+        leaseIdentity: existingRecordLeaseIdentity,
+        terminalOutcome: 'succeeded',
+        now: dispatchContext.dispatchedAt,
+        logger,
+        repo,
+        prNumber,
+      });
+      updateAmaCloserDispatchRecord(rootDir, existingDispatchIdentity, (current) => ({
+        ...(current || existingRecord),
+        lastObservedStatus: 'succeeded',
+        lastObservedAt: dispatchContext.dispatchedAt,
+        lastError: null,
+      }));
       await recordAmaCloserReviewerPassTokens({
         rootDir,
         hqRoot,
@@ -3189,7 +3204,6 @@ export async function maybeDispatchAmaCloser({
       } else if (
         !advancedTerminalDispatchSuperseded
         && !mergedSignalUnknown
-        && mergedSignal?.producerEvidence
         && AMA_CLOSER_TERMINAL_HOLD_STATUSES.has(status)
       ) {
         existingDispatchStatus = 'unverified-terminal-success';

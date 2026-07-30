@@ -739,6 +739,61 @@ test('dispatch spawn classifier ignores op cache backoff and successful daemon s
   assert.equal(healthy.dispatchSpawnFailures.matches.length, 0);
 });
 
+test('dispatch spawn classifier does not let unrelated successes recover monitored failures', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(
+    dispatchLog,
+    [
+      '2026-07-29 16:31:11,001 ERROR node_id=laceyent worker_class=hammer failed to spawn: image missing',
+      '2026-07-29 16:46:19,403 INFO node_id=laceyent cwp.daemon spawned lrq_3ba418e0-0fc2-4460-a36a-d30aa060ec01 pid=26261 worker_class=codex worker_id=codex-sbh-03-36e93ca1',
+      '',
+    ].join('\n'),
+  );
+  const execFileSyncImpl = () => 'state = running\nlast exit code = 0\n';
+
+  const unhealthy = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.ok(findingCodes(unhealthy).includes('review:dispatch_spawn_failures'));
+  assert.equal(unhealthy.dispatchSpawnFailures.matches.length, 1);
+  assert.equal(unhealthy.dispatchSpawnFailures.successAfterLastFailure, false);
+});
+
+test('dispatch spawn classifier ignores unmonitored worker spawn failures', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dispatchLog = path.join(hqRoot, 'dispatch', '_daemon', 'daemon.err.log');
+  mkdirSync(path.dirname(dispatchLog), { recursive: true });
+  writeFileSync(
+    dispatchLog,
+    [
+      '2026-07-29 16:31:11,001 ERROR node_id=laceyent worker_class=codex failed to spawn: image missing',
+      '2026-07-29 16:33:12,001 ERROR node_id=laceyent worker_class=search-indexer spawn failed: local cache unavailable',
+      '',
+    ].join('\n'),
+  );
+  const execFileSyncImpl = () => 'state = running\nlast exit code = 0\n';
+
+  const healthy = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.ok(!findingCodes(healthy).includes('review:dispatch_spawn_failures'));
+  assert.equal(healthy.dispatchSpawnFailures.matches.length, 0);
+});
+
 test('collector surfaces active provider overload backoffs and quota holds', () => {
   const rootDir = tempRoot();
   const overloadedPr = 960;

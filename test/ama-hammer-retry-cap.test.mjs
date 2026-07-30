@@ -1416,7 +1416,7 @@ test('stale dispatched/null closer lease is terminalized instead of held forever
   assert.equal(lease.terminalOutcome, 'failed-without-merge');
 });
 
-test('active AMA closer dispatches reserve their repo PR until retryable terminal status', (t) => {
+test('active AMA closer dispatches reserve their repo PR until terminal status', (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'hammer-active-dispatches-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
@@ -1432,6 +1432,14 @@ test('active AMA closer dispatches reserve their repo PR until retryable termina
     lastObservedAt: '2026-07-06T12:00:00Z',
     dispatchedAt: '2026-07-06T12:00:00Z',
   }));
+  writeFileSync(
+    join(dirname(amaCloserDispatchFilePath(rootDir, {
+      repo: REPO,
+      prNumber: PR_NUMBER,
+      headSha: REVIEWED_HEAD,
+    })), 'malformed-dispatch.json'),
+    '{',
+  );
   updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER + 1, headSha: ADVANCED_HEAD }, () => ({
     schemaVersion: 1,
     repo: REPO,
@@ -1448,6 +1456,18 @@ test('active AMA closer dispatches reserve their repo PR until retryable termina
     schemaVersion: 1,
     repo: REPO,
     prNumber: PR_NUMBER + 2,
+    headSha: ADVANCED_HEAD,
+    state: 'dispatched',
+    launchRequestId: 'lrq_succeeded',
+    dispatchId: 'dispatch-succeeded',
+    lastObservedStatus: 'succeeded',
+    lastObservedAt: '2026-07-06T12:01:00Z',
+    dispatchedAt: '2026-07-06T12:00:00Z',
+  }));
+  updateAmaCloserDispatchRecord(rootDir, { repo: REPO, prNumber: PR_NUMBER + 3, headSha: ADVANCED_HEAD }, () => ({
+    schemaVersion: 1,
+    repo: REPO,
+    prNumber: PR_NUMBER + 3,
     headSha: ADVANCED_HEAD,
     state: 'no-dispatch',
     reason: 'not-eligible',
@@ -1493,6 +1513,18 @@ test('active AMA closer dispatch classification releases stale launch-only recor
         lastAttemptedAt: '2026-07-06T12:00:00Z',
       },
       { now: '2026-07-06T18:00:00Z' },
+    ),
+    false,
+  );
+  assert.equal(
+    isActiveAmaCloserDispatchRecord(
+      {
+        repo: REPO,
+        prNumber: PR_NUMBER,
+        state: 'dispatching',
+        lastAttemptedAt: 'not-a-date',
+      },
+      { now: '2026-07-06T12:01:00Z' },
     ),
     false,
   );

@@ -980,6 +980,17 @@ const AMA_CLOSER_STATUS_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000, 5_000];
 export const AMA_CLOSER_REDISPATCH_BOUND = 2;
 const AMA_CLOSER_BRANCH_HOLDER_BLOCK_BOUND = 3;
 const AMA_CLOSER_ACTIVE_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
+const AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES = new Set([
+  'succeeded',
+  'completed',
+  'failed-without-merge',
+  'failed',
+  'cancelled',
+  'canceled',
+  'superseded',
+  'not-found',
+  'unverified-terminal-success',
+]);
 const AMA_CLOSER_TERMINAL_HOLD_STATUSES = new Set(['succeeded']);
 const BRANCH_HOLDER_TERMINAL_WORKER_RUN_STATUSES = new Set(['succeeded', 'failed', 'cancelled']);
 const BRANCH_HOLDER_WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -1171,6 +1182,7 @@ function isStaleDispatchingAmaCloserRecord(record, { now = null } = {}) {
     || record?.createdAt
   );
   const nowMs = parseTimeMs(now || new Date().toISOString());
+  if (lastTouchedAtMs === null) return true;
   return lastTouchedAtMs !== null
     && nowMs !== null
     && nowMs - lastTouchedAtMs >= AMA_CLOSER_PENDING_LEASE_RECLAIM_AGE_MS;
@@ -1185,7 +1197,8 @@ export function isActiveAmaCloserDispatchRecord(record, options = {}) {
   if (state !== 'dispatched') return false;
 
   const status = normalizeWorkerRunStatus(record.lastObservedStatus);
-  return !AMA_CLOSER_RETRYABLE_STATUSES.has(status);
+  if (AMA_CLOSER_ACTIVE_STATUSES.has(status)) return true;
+  return !AMA_CLOSER_DISPATCH_RECORD_TERMINAL_STATUSES.has(status);
 }
 
 export function listActiveAmaCloserDispatches(rootDir, options = {}) {

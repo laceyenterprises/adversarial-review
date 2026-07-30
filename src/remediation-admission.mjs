@@ -190,11 +190,11 @@ function buildBackpressureLogLine({ activeAtStart, pendingCount }) {
   return `[follow-up-remediation] Backpressure: activeAtStart=${activeAtStart} pendingClaimable=${pendingCount}`;
 }
 
-function buildFollowUpClaimReservations({ rootDir, now = () => new Date().toISOString(), log = console } = {}) {
+function buildFollowUpClaimReservations({ rootDir, now = new Date().toISOString(), log = console } = {}) {
   const activeJobs = listInProgressFollowUpJobs(rootDir);
   const blockedRepoPrKeys = new Set(activeJobs.map(({ job }) => followUpJobRepoPrKey(job)));
   try {
-    for (const dispatch of listActiveAmaCloserDispatches(rootDir, { now: now() })) {
+    for (const dispatch of listActiveAmaCloserDispatches(rootDir, { now })) {
       blockedRepoPrKeys.add(followUpJobRepoPrKey(dispatch));
     }
   } catch (err) {

@@ -4275,7 +4275,7 @@ async function consumeFollowUpJobsUntilCapacity({
   log = console,
 } = {}) {
   const concurrencyCap = normalizeMaxConcurrentFollowUpJobs(maxConcurrent);
-  const { activeJobs, blockedRepoPrKeys } = buildFollowUpClaimReservations({ rootDir, now, log });
+  const { activeJobs, blockedRepoPrKeys } = buildFollowUpClaimReservations({ rootDir, now: now(), log });
   const results = [];
   let spawned = 0;
   let stopped = 0;
@@ -4546,6 +4546,7 @@ export {
   assertValidRepoSlug,
   buildRemediationPrompt,
   buildInheritedPath,
+  buildFollowUpClaimReservations,
   consumeFollowUpJobsUntilCapacity,
   consumeNextFollowUpJob,
   attachFollowUpTelemetryListeners,

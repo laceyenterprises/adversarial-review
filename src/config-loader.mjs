@@ -327,6 +327,32 @@ function schemaV1() {
           },
         },
       },
+      // PMV-01 report-only post-deploy verification. Python/main-catchup
+      // consume the values, but the checked-in top-level config.yaml must load
+      // under this strict Node reader during watcher startup.
+      post_deploy_verify: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __default: {},
+        __keys: {
+          enabled: {
+            __type: TYPE_BOOL,
+            __default: false,
+          },
+          spawn_timeout_seconds: {
+            __type: TYPE_INT,
+            __default: 180,
+            __min: 10,
+            __max: 900,
+          },
+          boot_window_seconds: {
+            __type: TYPE_INT,
+            __default: 300,
+            __min: 0,
+            __max: 3600,
+          },
+        },
+      },
       roots: {
         __type: TYPE_DICT,
         __strict: true,
@@ -1585,8 +1611,9 @@ function schemaV1() {
       // worker_pool.dispatch.fleet_launch_health.*,
       // worker_pool.dispatch.goal_lineage.*,
       // worker_pool.dispatch.substrate.*, and
-      // worker_pool.memory.dynamic.* — Python-owned (canonical schema at
-      // platform/agent-os-config). PARTIAL mirror, same rationale as the
+      // worker_pool.memory.dynamic.*, and worker_pool.secrets_bus.* —
+      // Python-owned (canonical schema at platform/agent-os-config).
+      // PARTIAL mirror, same rationale as the
       // sentinel block below: this Node reader does not consume the values, but
       // it must not crash-loop if these checked-in keys reach the shared
       // canonical config.yaml (CFG-01 strict-schema parity). Worker-pool tuning
@@ -1769,6 +1796,32 @@ function schemaV1() {
                     },
                   },
                 },
+              },
+            },
+          },
+          secrets_bus: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __default: {},
+            __keys: {
+              op_timeout_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 10.0,
+                __min: 1.0,
+                __max: 60.0,
+              },
+              cache_ttl_seconds: {
+                __type: TYPE_INT,
+                __default: 1800,
+                __min: 0,
+                __max: 86400,
+              },
+              cache_grace_seconds: {
+                __type: TYPE_INT,
+                __default: null,
+                __nullable: true,
+                __min: 0,
+                __max: 86400,
               },
             },
           },
@@ -2360,6 +2413,30 @@ export const ENV_ALIASES = {
   'worker_pool.secrets.prewarm.min_interval_seconds': {
     canonical: 'AGENT_OS_WORKER_POOL_SECRETS_PREWARM_MIN_INTERVAL_SECONDS',
     aliases: [],
+  },
+  'worker_pool.secrets_bus.op_timeout_seconds': {
+    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_BUS_OP_TIMEOUT_SECONDS',
+    aliases: [],
+  },
+  'worker_pool.secrets_bus.cache_ttl_seconds': {
+    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_BUS_CACHE_TTL_SECONDS',
+    aliases: [],
+  },
+  'worker_pool.secrets_bus.cache_grace_seconds': {
+    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_BUS_CACHE_GRACE_SECONDS',
+    aliases: [],
+  },
+  'post_deploy_verify.enabled': {
+    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_ENABLED',
+    aliases: [['HQ_POST_DEPLOY_VERIFY_ENABLED', identity]],
+  },
+  'post_deploy_verify.spawn_timeout_seconds': {
+    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS',
+    aliases: [['HQ_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS', identity]],
+  },
+  'post_deploy_verify.boot_window_seconds': {
+    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS',
+    aliases: [['HQ_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS', identity]],
   },
   'reviewer.gemini.mode': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_MODE',

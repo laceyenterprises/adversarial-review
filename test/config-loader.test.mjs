@@ -1102,6 +1102,29 @@ test('top-level config.yaml accepts mirrored worker_pool.secrets.prewarm keys', 
   }
 });
 
+test('top-level config.yaml accepts mirrored worker_pool.secrets_bus keys', () => {
+  // SEV0 secrets-bus tuning is Python-owned, but shared config.yaml must parse
+  // under the watcher strict schema to preserve CFG multi-loader parity.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        secrets_bus:
+          op_timeout_seconds: 15.5
+          cache_ttl_seconds: 900
+          cache_grace_seconds: 3600
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.secrets_bus.op_timeout_seconds'), 15.5);
+    assert.equal(cfg.get('worker_pool.secrets_bus.cache_ttl_seconds'), 900);
+    assert.equal(cfg.get('worker_pool.secrets_bus.cache_grace_seconds'), 3600);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('worker_pool.secrets.prewarm canonical env aliases resolve through Node schema', () => {
   const tmp = freshTmp();
   try {
@@ -1119,6 +1142,31 @@ test('worker_pool.secrets.prewarm canonical env aliases resolve through Node sch
     assert.equal(
       cfg.resolutionTrace('worker_pool.secrets.prewarm.min_interval_seconds').at(-1).source,
       'env:AGENT_OS_WORKER_POOL_SECRETS_PREWARM_MIN_INTERVAL_SECONDS',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('worker_pool.secrets_bus canonical env aliases resolve through Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_WORKER_POOL_SECRETS_BUS_OP_TIMEOUT_SECONDS: '12.5',
+        AGENT_OS_WORKER_POOL_SECRETS_BUS_CACHE_TTL_SECONDS: '1200',
+        AGENT_OS_WORKER_POOL_SECRETS_BUS_CACHE_GRACE_SECONDS: '2400',
+      },
+    });
+    assert.equal(cfg.get('worker_pool.secrets_bus.op_timeout_seconds'), 12.5);
+    assert.equal(cfg.get('worker_pool.secrets_bus.cache_ttl_seconds'), 1200);
+    assert.equal(cfg.get('worker_pool.secrets_bus.cache_grace_seconds'), 2400);
+    assert.equal(
+      cfg.resolutionTrace('worker_pool.secrets_bus.op_timeout_seconds').at(-1).source,
+      'env:AGENT_OS_WORKER_POOL_SECRETS_BUS_OP_TIMEOUT_SECONDS',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -1540,6 +1588,67 @@ test('main_catchup mirrored defaults match the Python daemon constants', () => {
     assert.equal(cfg.get('main_catchup.bounce_throttle_interval_seconds'), 300);
     assert.equal(cfg.get('main_catchup.adversarial_review_drain_timeout_seconds'), 180);
     assert.equal(cfg.get('main_catchup.adversarial_watcher_drain_bounce_slack_seconds'), 120);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('post_deploy_verify mirror loads through strict Node schema and env aliases', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      post_deploy_verify:
+        enabled: false
+        spawn_timeout_seconds: 180
+        boot_window_seconds: 300
+    `);
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_POST_DEPLOY_VERIFY_ENABLED: 'true',
+        HQ_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS: '240',
+        AGENT_OS_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS: '600',
+      },
+    });
+    assert.equal(cfg.get('post_deploy_verify.enabled'), true);
+    assert.equal(cfg.get('post_deploy_verify.spawn_timeout_seconds'), 240);
+    assert.equal(cfg.get('post_deploy_verify.boot_window_seconds'), 600);
+    assert.equal(
+      cfg.resolutionTrace('post_deploy_verify.spawn_timeout_seconds').at(-1).source,
+      'env:HQ_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('config.local.yaml tolerates unknown nested post_deploy_verify keys and reads mirrored ones', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(local, `
+      roots:
+        hq: /from-local
+      post_deploy_verify:
+        future_python_only_key: ignored
+        enabled: true
+        spawn_timeout_seconds: 240
+        boot_window_seconds: 600
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roots.hq'), '/from-local');
+    assert.equal(cfg.get('post_deploy_verify.future_python_only_key'), null);
+    assert.equal(cfg.get('post_deploy_verify.enabled'), true);
+    assert.equal(cfg.get('post_deploy_verify.spawn_timeout_seconds'), 240);
+    assert.equal(cfg.get('post_deploy_verify.boot_window_seconds'), 600);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -2159,6 +2268,15 @@ test('checked-in top-level sentinel detector config loads through strict Node sc
     },
   });
   assert.equal(legacyEnvCfg.get('sentinel.codex_compaction.rate_alarm_per_hour'), 7);
+});
+
+test('checked-in post_deploy_verify defaults load through strict Node schema', () => {
+  const top = join(REPO_ROOT, '..', '..', 'config.yaml');
+  const cfg = loadConfig({ topPath: top, env: {} });
+
+  assert.equal(cfg.get('post_deploy_verify.enabled'), false);
+  assert.equal(cfg.get('post_deploy_verify.spawn_timeout_seconds'), 180);
+  assert.equal(cfg.get('post_deploy_verify.boot_window_seconds'), 300);
 });
 
 test('sentinel quiet_window accepts numeric YAML and string env values', () => {
@@ -3532,6 +3650,9 @@ test('validateSchema tolerates unknown nested worker_pool keys in local files an
           pressure: { projected_headroom_floor_mb: 4096 },
           dynamic: { enabled: true },
         },
+        secrets_bus: {
+          op_timeout_seconds: 20.0,
+        },
       },
     },
     {
@@ -3545,6 +3666,7 @@ test('validateSchema tolerates unknown nested worker_pool keys in local files an
   assert.equal(out.worker_pool?.dag?.autowalk?.deep_reconcile, true);
   assert.equal(out.worker_pool?.memory?.pressure, undefined, 'unknown sibling subtree dropped');
   assert.equal(out.worker_pool?.memory?.dynamic?.enabled, true);
+  assert.equal(out.worker_pool?.secrets_bus?.op_timeout_seconds, 20.0);
 });
 
 test('validateSchema rejects unknown nested main_catchup keys unless nested-local tolerance is explicit', () => {
@@ -3599,6 +3721,45 @@ test('validateSchema tolerates unknown nested main_catchup keys in local files a
   assert.equal(out.main_catchup?.poll_interval_seconds, 300);
   assert.equal(out.main_catchup?.adversarial_review_drain_timeout_seconds, 240);
   assert.equal(out.main_catchup?.adversarial_watcher_drain_bounce_slack_seconds, 45);
+});
+
+test('validateSchema rejects unknown nested post_deploy_verify keys unless nested-local tolerance is explicit', () => {
+  assert.throws(
+    () => validateSchema(
+      { version: 1, post_deploy_verify: { future_python_only_key: true } },
+      { source: '/tmp/config.local.yaml' },
+    ),
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError);
+      assert.match(err.message, /post_deploy_verify\.future_python_only_key/);
+      assert.match(err.message, /unknown key/);
+      return true;
+    },
+  );
+});
+
+test('validateSchema tolerates unknown nested post_deploy_verify keys in local files and keeps mirrored PMV keys', () => {
+  const out = validateSchema(
+    {
+      version: 1,
+      post_deploy_verify: {
+        future_python_only_key: true,
+        enabled: true,
+        spawn_timeout_seconds: 240,
+        boot_window_seconds: 600,
+      },
+    },
+    {
+      source: '/tmp/config.local.yaml',
+      tolerateForeignTopLevelSections: true,
+      tolerateNestedUnknownLocalKeys: true,
+    },
+  );
+  assert.equal(out.version, 1);
+  assert.equal(out.post_deploy_verify?.future_python_only_key, undefined, 'unknown nested key dropped');
+  assert.equal(out.post_deploy_verify?.enabled, true);
+  assert.equal(out.post_deploy_verify?.spawn_timeout_seconds, 240);
+  assert.equal(out.post_deploy_verify?.boot_window_seconds, 600);
 });
 
 test('validateSchema rejects unknown nested op keys unless nested-local tolerance is explicit', () => {

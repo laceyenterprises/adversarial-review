@@ -57,22 +57,30 @@ unallowlisted root keys, or nested keys.
 
 The adversarial-review Node loader treats `worker_pool` as a known partial
 schema root, not as a foreign top-level local section. Python remains canonical
-for the worker-pool schema, but the Node loader mirrors
-`worker_pool.dag.autowalk.deep_reconcile` so the shared checked-in
-`config.yaml` can carry that cross-reader knob without crash-looping the
-adversarial-review watcher.
+for the worker-pool schema, but the Node loader mirrors checked-in cross-reader
+knobs so the shared `config.yaml` can carry them without crash-looping the
+adversarial-review watcher:
 
-Checked-in `config.yaml` accepts only the mirrored
-`worker_pool.dag.autowalk.deep_reconcile` subtree. Any other checked-in
-`worker_pool.*` key is an unknown nested key under a known strict root and must
-fail loud.
+- `worker_pool.comms.responder.alert_lookback_hours`
+- `worker_pool.comms.responder.session_ttl_hours`
+- `worker_pool.dag.autowalk.deep_reconcile`
+- `worker_pool.dispatch.codex_exec_mode`
+- `worker_pool.dispatch.fleet_launch_health.*`
+- `worker_pool.dispatch.goal_lineage.*`
+- `worker_pool.dispatch.substrate.*`
+- `worker_pool.memory.dynamic.*`
+- `worker_pool.secrets.prewarm.*`
+- `worker_pool.secrets_bus.*`
+
+Checked-in `config.yaml` accepts only those mirrored `worker_pool` subtrees. Any
+other checked-in `worker_pool.*` key is an unknown nested key under a known
+strict root and must fail loud.
 
 Layer-4 `config.local.yaml` siblings may drop other nested `worker_pool.*` keys
 only when nested-local tolerance is enabled by the local-sibling layer or by an
 explicit `tolerateNestedUnknownLocalKeys` validator option. Those tolerated
 unknown nested keys are omitted from resolved values and provenance. The
-mirrored `worker_pool.dag.autowalk.deep_reconcile` key is validated and exposed
-normally when present.
+mirrored `worker_pool` keys are validated and exposed normally when present.
 
 Direct `validateSchema` callers do not get this local tolerance from the
 filename alone. A direct call with `source: "/tmp/config.local.yaml"` remains
@@ -111,6 +119,28 @@ Direct `validateSchema` callers do not get this local tolerance from the
 filename alone. A direct call with `source: "/tmp/config.local.yaml"` remains
 strict unless it explicitly opts into `tolerateNestedUnknownLocalKeys`; enabling
 foreign top-level tolerance does not make `main_catchup` foreign.
+
+## `post_deploy_verify` Node mirror
+
+The adversarial-review Node loader treats `post_deploy_verify` as a known schema
+root because the parent Agent OS checked-in `config.yaml` carries the
+report-only PMV section. Python/main-catchup remain canonical for consuming
+these values, but the Node loader mirrors:
+
+- `post_deploy_verify.enabled`
+- `post_deploy_verify.spawn_timeout_seconds`
+- `post_deploy_verify.boot_window_seconds`
+
+Checked-in `config.yaml` accepts only those mirrored `post_deploy_verify` keys.
+Any other checked-in `post_deploy_verify.*` key is an unknown nested key under a
+known strict root and must fail loud.
+
+Layer-4 `config.local.yaml` siblings may drop other nested
+`post_deploy_verify.*` keys only when nested-local tolerance is enabled by the
+local-sibling layer or by an explicit `tolerateNestedUnknownLocalKeys` validator
+option. Those tolerated unknown nested keys are omitted from resolved values and
+provenance. The mirrored PMV keys are validated and exposed normally when
+present.
 
 ## `op` Node mirror
 
@@ -171,19 +201,22 @@ prototype-bearing segments such as `__proto__`, `prototype`, or `constructor`.
 Python, Node, and shell CFG loaders must agree on this surface:
 
 - checked-in config files reject unknown keys at every strict section
-- checked-in `worker_pool` accepts only
-  `worker_pool.dag.autowalk.deep_reconcile`; all other checked-in
-  `worker_pool.*` keys fail as nested unknown keys
+- checked-in `worker_pool` accepts only the mirrored cross-reader subtrees; all
+  other checked-in `worker_pool.*` keys fail as nested unknown keys
 - checked-in `main_catchup` accepts only the mirrored daemon keys; all other
   checked-in `main_catchup.*` keys fail as nested unknown keys
+- checked-in `post_deploy_verify` accepts only the mirrored PMV keys; all other
+  checked-in `post_deploy_verify.*` keys fail as nested unknown keys
 - direct validator calls remain strict even when `source` names a `.local.yaml`
   file
 - Layer-4 local siblings may drop nested unknown keys under owned roots
 - Layer-4 local siblings may drop non-mirrored nested `worker_pool.*` keys only
-  through nested-local tolerance, while preserving the mirrored
-  `worker_pool.dag.autowalk.deep_reconcile` value
+  through nested-local tolerance, while preserving mirrored `worker_pool` values
 - Layer-4 local siblings may drop non-mirrored nested `main_catchup.*` keys only
   through nested-local tolerance, while preserving the mirrored daemon keys
+- Layer-4 local siblings may drop non-mirrored nested `post_deploy_verify.*`
+  keys only through nested-local tolerance, while preserving the mirrored PMV
+  keys
 - Layer-4 local siblings still reject arbitrary unknown top-level typo roots
 - tolerated unknown keys are omitted from resolved values and provenance
 - env-materialized `apps.<id>` entries receive the same schema defaults as

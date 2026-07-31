@@ -548,6 +548,53 @@ test('merge-lease release with matching lease id releases holder', async () => {
   }
 });
 
+test('merge-lease release retryable-abort clears matching gate attempt', async () => {
+  const rootDir = freshRoot();
+  try {
+    const held = acquireFixture(rootDir, { holderPr: 309, holderHead: 'retryable-abort-head' });
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      repo: REPO,
+      base: BASE,
+      pr: 309,
+      head: 'retryable-abort-head',
+      now: '2026-06-20T18:00:10.000Z',
+      maxAttempts: 5,
+    });
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      repo: REPO,
+      base: BASE,
+      pr: 310,
+      head: 'other-head',
+      now: '2026-06-20T18:00:11.000Z',
+      maxAttempts: 5,
+    });
+
+    const { code, io } = await runCli(rootDir, [
+      'release',
+      '--repo', REPO,
+      '--base', BASE,
+      '--pr', '309',
+      '--lease-id', held.lease.leaseId,
+      '--retryable-abort', 'merge-retry-budget-exhausted',
+    ]);
+    const out = jsonOutput(io);
+    assert.equal(code, 0);
+    assert.equal(out.released, true);
+    assert.equal(out.retryableAbort, true);
+    assert.equal(out.retryableAbortReason, 'merge-retry-budget-exhausted');
+    assert.equal(out.attemptPrune.removed, true);
+    assert.deepEqual(
+      readMergeLeaseAttempts(rootDir, { repo: REPO, base: BASE }).map((attempt) => `${attempt.pr}:${attempt.head}`),
+      ['310:other-head'],
+    );
+    assert.equal(existsSync(held.leasePath), false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('merge-lease release with stale lease id does not delete current holder', async () => {
   const rootDir = freshRoot();
   try {

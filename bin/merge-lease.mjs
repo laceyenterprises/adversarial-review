@@ -25,6 +25,7 @@ import {
   reconcileMergeLeases,
   readMergeLeaseWaiters,
   releaseMergeLease,
+  releaseMergeLeaseForRetryableAbort,
   removeMergeLeaseWaiter,
 } from '../src/ama/merge-lease.mjs';
 
@@ -44,7 +45,8 @@ Usage:
                       --owner-pid <pid> [--owner-pgid <pgid>] --wait <seconds>
                       [--root-dir <path>]
   merge-lease release --repo <owner/name> --base <branch> --pr <n>
-                      --lease-id <id> [--root-dir <path>]
+                      --lease-id <id> [--retryable-abort <reason>]
+                      [--root-dir <path>]
   merge-lease reconcile --repo <owner/name> --base <branch> [--root-dir <path>]
   merge-lease status  --repo <owner/name> --base <branch> [--root-dir <path>]
   merge-lease list    --repo <owner/name> --base <branch> [--root-dir <path>]
@@ -463,6 +465,7 @@ async function runRelease(argv, deps) {
   const { values } = parseCommon(argv, {
     pr: { type: 'string' },
     'lease-id': { type: 'string' },
+    'retryable-abort': { type: 'string' },
   });
   if (values.help) {
     deps.stdout.write(USAGE);
@@ -474,6 +477,7 @@ async function runRelease(argv, deps) {
   const base = requireBaseName(values);
   const pr = parsePositiveInteger(values.pr, 'pr');
   const leaseId = requireString(values, 'lease-id');
+  const retryableAbortReason = String(values['retryable-abort'] ?? '').trim();
   const startedMs = deps.nowMs();
   const deadlineMs = startedMs + DEFAULT_RELEASE_RETRY_MS;
 
@@ -497,7 +501,7 @@ async function runRelease(argv, deps) {
       return 0;
     }
 
-    const result = releaseMergeLease({
+    const releaseArgs = {
       rootDir,
       repo,
       base,
@@ -505,7 +509,14 @@ async function runRelease(argv, deps) {
       holderPr: current.holderPr,
       holderHead: current.holderHead,
       acquiredAt: current.acquiredAt,
-    });
+    };
+    const result = retryableAbortReason
+      ? releaseMergeLeaseForRetryableAbort({
+        ...releaseArgs,
+        retryableAbortReason,
+        now: deps.nowIso(),
+      })
+      : releaseMergeLease(releaseArgs);
     if (!result.released && result.reason === 'mutation-lock-busy') {
       if (deps.nowMs() >= deadlineMs) {
         jsonLine(deps.stdout, retryableReleaseJson({
@@ -525,6 +536,8 @@ async function runRelease(argv, deps) {
       key: deriveLeaseKey({ repo, base }).key,
       leaseId,
       ...(result.reason ? { reason: result.reason } : {}),
+      ...(result.retryableAbort ? { retryableAbort: true, retryableAbortReason: result.retryableAbortReason } : {}),
+      ...(result.attemptPrune ? { attemptPrune: result.attemptPrune } : {}),
       existingLease: result.released ? null : result.existingLease,
     });
     return 0;

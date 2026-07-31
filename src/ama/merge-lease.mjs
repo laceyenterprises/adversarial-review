@@ -888,6 +888,60 @@ export function releaseMergeLease({
   return locked.value;
 }
 
+export function releaseMergeLeaseForRetryableAbort({
+  rootDir,
+  repo,
+  base,
+  leaseId: id,
+  holderPr,
+  holderHead,
+  acquiredAt,
+  retryableAbortReason = 'retryable-abort',
+  now,
+  _afterFenceRead,
+} = {}) {
+  validateIdentity({ rootDir, repo, base });
+  const leasePath = mergeLeaseFilePath(rootDir, { repo, base });
+  const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, { repo, base });
+  const lease = readJsonFile(leasePath, null);
+  const matched = holderMatches(lease, { leaseId: id, holderPr, holderHead, acquiredAt });
+  if (!matched) {
+    return { released: false, leasePath, existingLease: lease };
+  }
+  // Test-only race injection hook used to prove the second fence read below.
+  if (typeof _afterFenceRead === 'function') _afterFenceRead({ leasePath, lease });
+  const locked = withMutationLock(leasePath, () => {
+    const currentLease = readJsonFile(leasePath, null);
+    const currentMatched = holderMatches(currentLease, {
+      leaseId: id,
+      holderPr,
+      holderHead,
+      acquiredAt,
+    });
+    if (!currentMatched) {
+      return { released: false, leasePath, existingLease: currentLease };
+    }
+    const attemptPrune = removeAttemptRecordsUnlocked(attemptsPath, {
+      pr: currentLease.holderPr,
+      head: currentLease.holderHead,
+      now: now || isoNow(),
+    });
+    rmSync(leasePath, { force: true });
+    return {
+      released: true,
+      leasePath,
+      lease: currentLease,
+      retryableAbort: true,
+      retryableAbortReason,
+      attemptPrune,
+    };
+  });
+  if (!locked.acquired) {
+    return { released: false, leasePath, existingLease: readJsonFile(leasePath, null), reason: 'mutation-lock-busy' };
+  }
+  return locked.value;
+}
+
 export function renewMergeLease({
   rootDir,
   repo,

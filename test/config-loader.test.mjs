@@ -1624,6 +1624,36 @@ test('post_deploy_verify mirror loads through strict Node schema and env aliases
   }
 });
 
+test('config.local.yaml tolerates unknown nested post_deploy_verify keys and reads mirrored ones', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    const local = join(tmp, 'config.local.yaml');
+    writeFile(top, `
+      version: 1
+      roots:
+        hq: /from-top
+    `);
+    writeFile(local, `
+      roots:
+        hq: /from-local
+      post_deploy_verify:
+        future_python_only_key: ignored
+        enabled: true
+        spawn_timeout_seconds: 240
+        boot_window_seconds: 600
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roots.hq'), '/from-local');
+    assert.equal(cfg.get('post_deploy_verify.future_python_only_key'), null);
+    assert.equal(cfg.get('post_deploy_verify.enabled'), true);
+    assert.equal(cfg.get('post_deploy_verify.spawn_timeout_seconds'), 240);
+    assert.equal(cfg.get('post_deploy_verify.boot_window_seconds'), 600);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('config.local.yaml tolerates unknown nested main_catchup keys and reads mirrored ones', () => {
   const tmp = freshTmp();
   try {
@@ -2216,9 +2246,6 @@ test('checked-in top-level sentinel detector config loads through strict Node sc
   assert.equal(cfg.get('sentinel.spec_drift.cycle_interval_seconds'), 86400);
   assert.equal(cfg.get('sentinel.deploy_checkout.repo_path'), '/Users/airlock/agent-os');
   assert.equal(cfg.get('sentinel.deploy_checkout.worker_identity_emails'), null);
-  assert.equal(cfg.get('post_deploy_verify.enabled'), false);
-  assert.equal(cfg.get('post_deploy_verify.spawn_timeout_seconds'), 180);
-  assert.equal(cfg.get('post_deploy_verify.boot_window_seconds'), 300);
   assert.equal(cfg.get('sentinel.codex_compaction.rate_alarm_per_hour'), 3);
   assert.deepEqual(cfg.get('sentinel.convergence_stall.observed_worker_classes'), [
     'codex',
@@ -2241,6 +2268,15 @@ test('checked-in top-level sentinel detector config loads through strict Node sc
     },
   });
   assert.equal(legacyEnvCfg.get('sentinel.codex_compaction.rate_alarm_per_hour'), 7);
+});
+
+test('checked-in post_deploy_verify defaults load through strict Node schema', () => {
+  const top = join(REPO_ROOT, '..', '..', 'config.yaml');
+  const cfg = loadConfig({ topPath: top, env: {} });
+
+  assert.equal(cfg.get('post_deploy_verify.enabled'), false);
+  assert.equal(cfg.get('post_deploy_verify.spawn_timeout_seconds'), 180);
+  assert.equal(cfg.get('post_deploy_verify.boot_window_seconds'), 300);
 });
 
 test('sentinel quiet_window accepts numeric YAML and string env values', () => {
@@ -3685,6 +3721,45 @@ test('validateSchema tolerates unknown nested main_catchup keys in local files a
   assert.equal(out.main_catchup?.poll_interval_seconds, 300);
   assert.equal(out.main_catchup?.adversarial_review_drain_timeout_seconds, 240);
   assert.equal(out.main_catchup?.adversarial_watcher_drain_bounce_slack_seconds, 45);
+});
+
+test('validateSchema rejects unknown nested post_deploy_verify keys unless nested-local tolerance is explicit', () => {
+  assert.throws(
+    () => validateSchema(
+      { version: 1, post_deploy_verify: { future_python_only_key: true } },
+      { source: '/tmp/config.local.yaml' },
+    ),
+    (err) => {
+      assert.ok(err instanceof AgentOSConfigError);
+      assert.match(err.message, /post_deploy_verify\.future_python_only_key/);
+      assert.match(err.message, /unknown key/);
+      return true;
+    },
+  );
+});
+
+test('validateSchema tolerates unknown nested post_deploy_verify keys in local files and keeps mirrored PMV keys', () => {
+  const out = validateSchema(
+    {
+      version: 1,
+      post_deploy_verify: {
+        future_python_only_key: true,
+        enabled: true,
+        spawn_timeout_seconds: 240,
+        boot_window_seconds: 600,
+      },
+    },
+    {
+      source: '/tmp/config.local.yaml',
+      tolerateForeignTopLevelSections: true,
+      tolerateNestedUnknownLocalKeys: true,
+    },
+  );
+  assert.equal(out.version, 1);
+  assert.equal(out.post_deploy_verify?.future_python_only_key, undefined, 'unknown nested key dropped');
+  assert.equal(out.post_deploy_verify?.enabled, true);
+  assert.equal(out.post_deploy_verify?.spawn_timeout_seconds, 240);
+  assert.equal(out.post_deploy_verify?.boot_window_seconds, 600);
 });
 
 test('validateSchema rejects unknown nested op keys unless nested-local tolerance is explicit', () => {

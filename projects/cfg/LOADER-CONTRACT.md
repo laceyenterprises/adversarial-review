@@ -135,6 +135,13 @@ Checked-in `config.yaml` accepts only those mirrored `post_deploy_verify` keys.
 Any other checked-in `post_deploy_verify.*` key is an unknown nested key under a
 known strict root and must fail loud.
 
+Layer-4 `config.local.yaml` siblings may drop other nested
+`post_deploy_verify.*` keys only when nested-local tolerance is enabled by the
+local-sibling layer or by an explicit `tolerateNestedUnknownLocalKeys` validator
+option. Those tolerated unknown nested keys are omitted from resolved values and
+provenance. The mirrored PMV keys are validated and exposed normally when
+present.
+
 ## `op` Node mirror
 
 The adversarial-review Node loader treats `op` as a known schema root, not as a
@@ -207,6 +214,9 @@ Python, Node, and shell CFG loaders must agree on this surface:
   through nested-local tolerance, while preserving mirrored `worker_pool` values
 - Layer-4 local siblings may drop non-mirrored nested `main_catchup.*` keys only
   through nested-local tolerance, while preserving the mirrored daemon keys
+- Layer-4 local siblings may drop non-mirrored nested `post_deploy_verify.*`
+  keys only through nested-local tolerance, while preserving the mirrored PMV
+  keys
 - Layer-4 local siblings still reject arbitrary unknown top-level typo roots
 - tolerated unknown keys are omitted from resolved values and provenance
 - env-materialized `apps.<id>` entries receive the same schema defaults as

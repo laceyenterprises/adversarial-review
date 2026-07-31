@@ -1135,16 +1135,27 @@ export async function reconcileMergeLeases({
     holderHead: lease.holderHead,
     acquiredAt: lease.acquiredAt,
   });
-  const attemptPrune = released.released
-    ? withAttemptMutationLock({ rootDir, repo, base }, () => removeAttemptRecordsUnlocked(
-      mergeLeaseAttemptsFilePath(rootDir, { repo, base }),
-      {
-        pr: lease.holderPr,
-        head: lease.holderHead,
-        now: now || isoNow(),
-      },
-    ))
-    : null;
+  let attemptPrune = null;
+  if (released.released) {
+    try {
+      attemptPrune = withAttemptMutationLock({ rootDir, repo, base }, () => removeAttemptRecordsUnlocked(
+        mergeLeaseAttemptsFilePath(rootDir, { repo, base }),
+        {
+          pr: lease.holderPr,
+          head: lease.holderHead,
+          now: now || isoNow(),
+        },
+      ));
+    } catch (err) {
+      if (!isMutationLockBusyError(err)) throw err;
+      attemptPrune = {
+        removed: false,
+        skipped: true,
+        reason: 'attempt-mutation-lock-busy',
+        error: String(err?.message || err),
+      };
+    }
+  }
   return {
     reconciled: released.released,
     released: released.released,

@@ -708,6 +708,56 @@ test('reconcileMergeLeases releases a holder whose PR is already merged', async 
   }
 });
 
+test('reconcileMergeLeases keeps going when attempt prune lock is busy after release', async () => {
+  const rootDir = freshRoot();
+  try {
+    acquire(rootDir, { holderPid: 99995, holderHost: 'test-host' });
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      ...IDENTITY,
+      pr: 101,
+      head: 'abc123',
+      now: '2026-06-20T18:00:10Z',
+      maxAttempts: 5,
+    });
+    const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, IDENTITY);
+    writeFileSync(`${attemptsPath}.mutation.lock`, `${JSON.stringify({
+      schemaVersion: 1,
+      lockId: 'test-held-attempts-lock',
+      holderPid: process.pid,
+      holderHost: hostname(),
+      acquiredAt: new Date().toISOString(),
+    }, null, 2)}\n`);
+
+    const reconciled = await reconcileMergeLeases({
+      rootDir,
+      ...IDENTITY,
+      host: 'test-host',
+      now: '2026-06-20T18:01:00Z',
+      pidAliveFn: () => true,
+      execFileImpl: (file, args, options, callback) => {
+        assert.equal(file, 'gh');
+        assert.deepEqual(args, ['pr', 'view', '101', '--repo', 'owner/name', '--json', 'state']);
+        assert.equal(options.timeout, 30000);
+        assert.equal(options.maxBuffer, 10 * 1024 * 1024);
+        callback(null, '{"state":"MERGED"}\n', '');
+      },
+    });
+
+    assert.equal(reconciled.released, true);
+    assert.equal(reconciled.reason, 'holder-pr-merged');
+    assert.equal(reconciled.attemptPrune.skipped, true);
+    assert.equal(reconciled.attemptPrune.reason, 'attempt-mutation-lock-busy');
+    assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).exists, false);
+    assert.deepEqual(
+      readMergeLeaseAttempts(rootDir, IDENTITY).map((attempt) => `${attempt.pr}:${attempt.head}`),
+      ['101:abc123'],
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('reconcileMergeLeases stale identity does not delete a newer holder', async () => {
   const rootDir = freshRoot();
   try {

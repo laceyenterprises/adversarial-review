@@ -284,7 +284,7 @@ ham_mark_merge_lease_retryable_abort() {
 
 ham_release_merge_lease() {
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ] && [ -n "${HAM_MERGE_LEASE_ID:-}" ]; then
-    ham_release_retryable_args=()
+    local ham_release_retryable_args=()
     if [ "${HAM_MERGE_LEASE_RETRYABLE_ABORT:-0}" -eq 1 ]; then
       ham_release_retryable_args=(--retryable-abort "${HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON:-retryable-abort}")
     fi

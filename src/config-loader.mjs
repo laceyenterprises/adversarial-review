@@ -327,6 +327,28 @@ function schemaV1() {
           },
         },
       },
+      // Python-owned post-deploy verification controls. The watcher does not
+      // consume them, but they are checked-in top-level config and must parse
+      // under the strict Node schema.
+      post_deploy_verify: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          enabled: { __type: TYPE_BOOL, __default: false },
+          spawn_timeout_seconds: {
+            __type: TYPE_INT,
+            __default: 180,
+            __min: 10,
+            __max: 900,
+          },
+          boot_window_seconds: {
+            __type: TYPE_INT,
+            __default: 300,
+            __min: 0,
+            __max: 3600,
+          },
+        },
+      },
       roots: {
         __type: TYPE_DICT,
         __strict: true,
@@ -1585,6 +1607,7 @@ function schemaV1() {
       // worker_pool.dispatch.fleet_launch_health.*,
       // worker_pool.dispatch.goal_lineage.*,
       // worker_pool.dispatch.substrate.*, and
+      // worker_pool.secrets_bus.*,
       // worker_pool.memory.dynamic.* — Python-owned (canonical schema at
       // platform/agent-os-config). PARTIAL mirror, same rationale as the
       // sentinel block below: this Node reader does not consume the values, but
@@ -1730,6 +1753,35 @@ function schemaV1() {
                   snapshot_stale_seconds: { __type: TYPE_INT, __default: 60, __min: 0 },
                   require_pressure_normal: { __type: TYPE_BOOL, __default: true },
                 },
+              },
+            },
+          },
+          secrets_bus: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __default: {},
+            __keys: {
+              // Parse-only mirror for the dispatch daemon's 1Password
+              // secrets-bus tuning. Node does not consume these values, but
+              // the shared config must remain startup-safe for the watcher.
+              op_timeout_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 10.0,
+                __min: 1.0,
+                __max: 60.0,
+              },
+              cache_ttl_seconds: {
+                __type: TYPE_INT,
+                __default: 1800,
+                __min: 0,
+                __max: 86400,
+              },
+              cache_grace_seconds: {
+                __type: TYPE_INT,
+                __default: null,
+                __nullable: true,
+                __min: 0,
+                __max: 86400,
               },
             },
           },
@@ -2210,6 +2262,18 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_UPDATE_CHANNEL',
     aliases: [],
   },
+  'post_deploy_verify.enabled': {
+    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_ENABLED',
+    aliases: [['HQ_POST_DEPLOY_VERIFY_ENABLED', identity]],
+  },
+  'post_deploy_verify.spawn_timeout_seconds': {
+    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS',
+    aliases: [['HQ_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS', identity]],
+  },
+  'post_deploy_verify.boot_window_seconds': {
+    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS',
+    aliases: [['HQ_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS', identity]],
+  },
   'ci.hosting.mode': {
     canonical: 'AGENT_OS_CI_HOSTING_MODE',
     aliases: [],
@@ -2352,6 +2416,18 @@ export const ENV_ALIASES = {
   'worker_pool.dispatch.substrate.mem_pressure_crit_level': {
     canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_SUBSTRATE_MEM_PRESSURE_CRIT_LEVEL',
     aliases: [['SUBSTRATE_MEM_PRESSURE_CRIT_LEVEL', identity]],
+  },
+  'worker_pool.secrets_bus.op_timeout_seconds': {
+    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_BUS_OP_TIMEOUT_SECONDS',
+    aliases: [],
+  },
+  'worker_pool.secrets_bus.cache_ttl_seconds': {
+    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_BUS_CACHE_TTL_SECONDS',
+    aliases: [],
+  },
+  'worker_pool.secrets_bus.cache_grace_seconds': {
+    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_BUS_CACHE_GRACE_SECONDS',
+    aliases: [],
   },
   'worker_pool.secrets.prewarm.enabled': {
     canonical: 'AGENT_OS_WORKER_POOL_SECRETS_PREWARM_ENABLED',

@@ -1048,6 +1048,54 @@ test('top-level config.yaml accepts mirrored worker_pool.dispatch.codex_exec_mod
   }
 });
 
+test('top-level config.yaml accepts mirrored worker_pool.secrets_bus keys', () => {
+  // The secrets bus is Python-owned dispatch substrate, but operators may tune
+  // it in the shared config.yaml; the watcher must parse the subtree safely.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        secrets_bus:
+          op_timeout_seconds: 12.5
+          cache_ttl_seconds: 2400
+          cache_grace_seconds: 3600
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.secrets_bus.op_timeout_seconds'), 12.5);
+    assert.equal(cfg.get('worker_pool.secrets_bus.cache_ttl_seconds'), 2400);
+    assert.equal(cfg.get('worker_pool.secrets_bus.cache_grace_seconds'), 3600);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('worker_pool.secrets_bus canonical env aliases resolve through Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_WORKER_POOL_SECRETS_BUS_OP_TIMEOUT_SECONDS: '11.5',
+        AGENT_OS_WORKER_POOL_SECRETS_BUS_CACHE_TTL_SECONDS: '2100',
+        AGENT_OS_WORKER_POOL_SECRETS_BUS_CACHE_GRACE_SECONDS: '4200',
+      },
+    });
+    assert.equal(cfg.get('worker_pool.secrets_bus.op_timeout_seconds'), 11.5);
+    assert.equal(cfg.get('worker_pool.secrets_bus.cache_ttl_seconds'), 2100);
+    assert.equal(cfg.get('worker_pool.secrets_bus.cache_grace_seconds'), 4200);
+    assert.equal(
+      cfg.resolutionTrace('worker_pool.secrets_bus.op_timeout_seconds').at(-1).source,
+      'env:AGENT_OS_WORKER_POOL_SECRETS_BUS_OP_TIMEOUT_SECONDS',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('top-level config.yaml accepts mirrored worker_pool.comms.responder keys', () => {
   // IRC-05 is Python-owned, but the worker-pool module config is part of the
   // shared CFG wire format and must parse under the watcher strict schema.
@@ -1465,6 +1513,37 @@ test('top-level config.yaml accepts the mirrored main_catchup daemon keys', () =
     assert.equal(cfg.get('main_catchup.bounce_throttle_interval_seconds'), 302);
     assert.equal(cfg.get('main_catchup.adversarial_review_drain_timeout_seconds'), 240);
     assert.equal(cfg.get('main_catchup.adversarial_watcher_drain_bounce_slack_seconds'), 45);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('top-level config.yaml accepts mirrored post_deploy_verify keys and env aliases', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      post_deploy_verify:
+        enabled: false
+        spawn_timeout_seconds: 180
+        boot_window_seconds: 300
+    `);
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_POST_DEPLOY_VERIFY_ENABLED: 'true',
+        HQ_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS: '240',
+        AGENT_OS_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS: '360',
+      },
+    });
+    assert.equal(cfg.get('post_deploy_verify.enabled'), true);
+    assert.equal(cfg.get('post_deploy_verify.spawn_timeout_seconds'), 240);
+    assert.equal(cfg.get('post_deploy_verify.boot_window_seconds'), 360);
+    assert.equal(
+      cfg.resolutionTrace('post_deploy_verify.spawn_timeout_seconds').at(-1).source,
+      'env:HQ_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS',
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

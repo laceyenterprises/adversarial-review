@@ -102,6 +102,7 @@ import {
   DEFAULT_POLL_DEADLINE_FLOOR_MS,
 } from './watcher-poll-guard.mjs';
 import { createWatcherWakeSource } from './watcher-wake.mjs';
+import { reapRunningPassTimeouts } from './reviewer-pass-reaper.mjs';
 import {
   ensureReviewStateSchema,
   listPendingMergeCloseouts,
@@ -174,7 +175,7 @@ import {
   infraRecoverableFailureClass,
   unknownReviewerCommandFailureClass,
 } from './reviewer-failure-classification.mjs';
-import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaustion.mjs';
+import { quotaHoldDecision } from './quota-exhaustion.mjs';
 import { isTransientGhError } from './gh-cli.mjs';
 import {
   recoverReviewerRunRecords,
@@ -1214,6 +1215,11 @@ async function pollOnce(
     console.log(
       `[watcher] failed-orphan auto-reclaim skipped=${orphanReclaim.skipped} reclaimed=${orphanReclaim.reclaimed}`
     );
+  }
+
+  const passReaper = reapRunningPassTimeouts({ db, rootDir: ROOT, log: console });
+  if (passReaper.reaped > 0) {
+    console.log(`[watcher] reaped ${passReaper.reaped} stuck reviewer_passes`);
   }
 
   await warnForMissingAdversarialGateBranchProtection(activeRepos, {

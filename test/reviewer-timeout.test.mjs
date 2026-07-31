@@ -103,3 +103,99 @@ test('agy reviewer subprocess timeout is never shorter than agy print timeout', 
     DEFAULT_REVIEWER_TIMEOUT_MS,
   );
 });
+
+import Database from 'better-sqlite3';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import { reapRunningPassTimeouts } from '../src/reviewer-pass-reaper.mjs';
+
+function setupDb() {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'reviewer-timeout-'));
+  mkdirSync(path.join(rootDir, 'data'), { recursive: true });
+  const db = new Database(path.join(rootDir, 'data', 'reviews.db'));
+  ensureReviewStateSchema(db);
+  return { rootDir, db };
+}
+
+test('reapRunningPassTimeouts reaps a stuck running pass older than threshold', () => {
+  const { rootDir, db } = setupDb();
+  try {
+    db.prepare(
+      `INSERT INTO reviewer_passes (
+         repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status
+       ) VALUES (?, ?, ?, ?, ?, datetime('now', '-3605 seconds'), 'running')`
+    ).run('laceyenterprises/agent-os', 123, 1, 'codex', 'first-pass');
+
+    const result = reapRunningPassTimeouts({ db, rootDir });
+    assert.equal(result.reaped, 1);
+
+    const row = db.prepare(`SELECT status, metadata_json, ended_at FROM reviewer_passes WHERE pr_number = 123`).get();
+    assert.equal(row.status, 'failed');
+    assert.ok(row.ended_at);
+    const metadata = JSON.parse(row.metadata_json);
+    assert.equal(metadata.failureClass, 'quota-exhausted');
+    assert.equal(metadata.failureReason, 'running-pass-timeout');
+    assert.equal(metadata.timeoutThresholdSeconds, 3600);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reapRunningPassTimeouts leaves fresh running pass untouched', () => {
+  const { rootDir, db } = setupDb();
+  try {
+    db.prepare(
+      `INSERT INTO reviewer_passes (
+         repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status
+       ) VALUES (?, ?, ?, ?, ?, datetime('now', '-3500 seconds'), 'running')`
+    ).run('laceyenterprises/agent-os', 124, 1, 'codex', 'first-pass');
+
+    const result = reapRunningPassTimeouts({ db, rootDir });
+    assert.equal(result.reaped, 0);
+
+    const row = db.prepare(`SELECT status FROM reviewer_passes WHERE pr_number = 124`).get();
+    assert.equal(row.status, 'running');
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reapRunningPassTimeouts honors custom threshold via env', () => {
+  const { rootDir, db } = setupDb();
+  const oldEnv = process.env.AGENT_OS_REVIEWER_RUNNING_PASS_TIMEOUT_SECONDS;
+  try {
+    process.env.AGENT_OS_REVIEWER_RUNNING_PASS_TIMEOUT_SECONDS = '7200';
+    db.prepare(
+      `INSERT INTO reviewer_passes (
+         repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status
+       ) VALUES (?, ?, ?, ?, ?, datetime('now', '-3700 seconds'), 'running')`
+    ).run('laceyenterprises/agent-os', 125, 1, 'codex', 'first-pass');
+
+    const result = reapRunningPassTimeouts({ db, rootDir });
+    assert.equal(result.reaped, 0); // 3700s < 7200s, so untouched
+
+    db.prepare(
+      `INSERT INTO reviewer_passes (
+         repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status
+       ) VALUES (?, ?, ?, ?, ?, datetime('now', '-7300 seconds'), 'running')`
+    ).run('laceyenterprises/agent-os', 126, 1, 'codex', 'first-pass');
+
+    const result2 = reapRunningPassTimeouts({ db, rootDir });
+    assert.equal(result2.reaped, 1); // 7300s > 7200s, reaped
+
+    const row = db.prepare(`SELECT status FROM reviewer_passes WHERE pr_number = 126`).get();
+    assert.equal(row.status, 'failed');
+  } finally {
+    if (oldEnv === undefined) {
+      delete process.env.AGENT_OS_REVIEWER_RUNNING_PASS_TIMEOUT_SECONDS;
+    } else {
+      process.env.AGENT_OS_REVIEWER_RUNNING_PASS_TIMEOUT_SECONDS = oldEnv;
+    }
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

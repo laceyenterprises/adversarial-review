@@ -333,6 +333,7 @@ function schemaV1() {
       post_deploy_verify: {
         __type: TYPE_DICT,
         __strict: true,
+        __default: {},
         __keys: {
           enabled: {
             __type: TYPE_BOOL,

@@ -251,6 +251,15 @@ function withWaiterMutationLock({ rootDir, repo, base }, fn) {
   return locked.value;
 }
 
+function withAttemptMutationLock({ rootDir, repo, base }, fn) {
+  const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, { repo, base });
+  const locked = withMutationLock(attemptsPath, fn);
+  if (!locked.acquired) {
+    throw new Error(`merge lease: mutation lock busy while updating attempts for ${repo}::${base}`);
+  }
+  return locked.value;
+}
+
 function isMutationLockBusyError(err) {
   return /\bmutation lock busy\b/.test(String(err?.message || ''));
 }
@@ -600,7 +609,7 @@ export function recordMergeLeaseGateAttempt({
   validateIdentity({ rootDir, repo, base });
   const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, { repo, base });
   const updatedAt = now || isoNow();
-  return withWaiterMutationLock({ rootDir, repo, base }, () => {
+  return withAttemptMutationLock({ rootDir, repo, base }, () => {
     const doc = readAttemptDoc(attemptsPath);
     const normalizedPr = normalizeHolderPr(pr, 'pr');
     const normalizedHead = String(head || '');
@@ -888,6 +897,63 @@ export function releaseMergeLease({
   return locked.value;
 }
 
+export function releaseMergeLeaseForRetryableAbort({
+  rootDir,
+  repo,
+  base,
+  leaseId: id,
+  holderPr,
+  holderHead,
+  acquiredAt,
+  retryableAbortReason = 'retryable-abort',
+  now,
+  _afterFenceRead,
+} = {}) {
+  validateIdentity({ rootDir, repo, base });
+  const leasePath = mergeLeaseFilePath(rootDir, { repo, base });
+  const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, { repo, base });
+  const lease = readJsonFile(leasePath, null);
+  const matched = holderMatches(lease, { leaseId: id, holderPr, holderHead, acquiredAt });
+  if (!matched) {
+    return { released: false, leasePath, existingLease: lease };
+  }
+  // Test-only race injection hook used to prove the second fence read below.
+  if (typeof _afterFenceRead === 'function') _afterFenceRead({ leasePath, lease });
+  const locked = withMutationLock(leasePath, () => {
+    const currentLease = readJsonFile(leasePath, null);
+    const currentMatched = holderMatches(currentLease, {
+      leaseId: id,
+      holderPr,
+      holderHead,
+      acquiredAt,
+    });
+    if (!currentMatched) {
+      return { released: false, leasePath, existingLease: currentLease };
+    }
+    const attemptLock = withMutationLock(attemptsPath, () => removeAttemptRecordsUnlocked(attemptsPath, {
+      pr: currentLease.holderPr,
+      head: currentLease.holderHead,
+      now: now || isoNow(),
+    }));
+    if (!attemptLock.acquired) {
+      return { released: false, leasePath, existingLease: currentLease, reason: 'mutation-lock-busy' };
+    }
+    rmSync(leasePath, { force: true });
+    return {
+      released: true,
+      leasePath,
+      lease: currentLease,
+      retryableAbort: true,
+      retryableAbortReason,
+      attemptPrune: attemptLock.value,
+    };
+  });
+  if (!locked.acquired) {
+    return { released: false, leasePath, existingLease: readJsonFile(leasePath, null), reason: 'mutation-lock-busy' };
+  }
+  return locked.value;
+}
+
 export function renewMergeLease({
   rootDir,
   repo,
@@ -1069,16 +1135,27 @@ export async function reconcileMergeLeases({
     holderHead: lease.holderHead,
     acquiredAt: lease.acquiredAt,
   });
-  const attemptPrune = released.released
-    ? withWaiterMutationLock({ rootDir, repo, base }, () => removeAttemptRecordsUnlocked(
-      mergeLeaseAttemptsFilePath(rootDir, { repo, base }),
-      {
-        pr: lease.holderPr,
-        head: lease.holderHead,
-        now: now || isoNow(),
-      },
-    ))
-    : null;
+  let attemptPrune = null;
+  if (released.released) {
+    try {
+      attemptPrune = withAttemptMutationLock({ rootDir, repo, base }, () => removeAttemptRecordsUnlocked(
+        mergeLeaseAttemptsFilePath(rootDir, { repo, base }),
+        {
+          pr: lease.holderPr,
+          head: lease.holderHead,
+          now: now || isoNow(),
+        },
+      ));
+    } catch (err) {
+      if (!isMutationLockBusyError(err)) throw err;
+      attemptPrune = {
+        removed: false,
+        skipped: true,
+        reason: 'attempt-mutation-lock-busy',
+        error: String(err?.message || err),
+      };
+    }
+  }
   return {
     reconciled: released.released,
     released: released.released,

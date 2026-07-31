@@ -8,6 +8,7 @@ import {
   acquireMergeLease,
   deriveLeaseKey,
   inspectMergeLease,
+  mergeLeaseAttemptsFilePath,
   mergeLeaseFilePath,
   mergeLeaseWaitersFilePath,
   readMergeLeaseAttempts,
@@ -16,6 +17,7 @@ import {
   reconcileMergeLeases,
   reclaimIfStale,
   releaseMergeLease,
+  releaseMergeLeaseForRetryableAbort,
   removeMergeLeaseWaiter,
   renewMergeLease,
   upsertMergeLeaseWaiter,
@@ -268,6 +270,99 @@ test('release with matching lease identity preserves gate attempts for retry cap
     assert.deepEqual(
       readMergeLeaseAttempts(rootDir, IDENTITY).map((attempt) => `${attempt.pr}:${attempt.head}`),
       ['101:attempt-head', '999:other-head'],
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('retryable-abort release prunes only the matching holder gate attempt', () => {
+  const rootDir = freshRoot();
+  try {
+    const first = acquire(rootDir, {
+      holderHead: 'transient-head',
+    });
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      ...IDENTITY,
+      pr: first.lease.holderPr,
+      head: first.lease.holderHead,
+      now: '2026-06-20T18:00:10Z',
+      maxAttempts: 5,
+    });
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      ...IDENTITY,
+      pr: 999,
+      head: 'other-head',
+      now: '2026-06-20T18:00:11Z',
+      maxAttempts: 5,
+    });
+
+    const released = releaseMergeLeaseForRetryableAbort({
+      rootDir,
+      ...IDENTITY,
+      leaseId: first.lease.leaseId,
+      holderPr: first.lease.holderPr,
+      holderHead: first.lease.holderHead,
+      acquiredAt: first.lease.acquiredAt,
+      retryableAbortReason: 'github-gate-read-failed',
+      now: '2026-06-20T18:00:12Z',
+    });
+
+    assert.equal(released.released, true);
+    assert.equal(released.retryableAbort, true);
+    assert.equal(released.retryableAbortReason, 'github-gate-read-failed');
+    assert.equal(released.attemptPrune.removed, true);
+    assert.deepEqual(
+      readMergeLeaseAttempts(rootDir, IDENTITY).map((attempt) => `${attempt.pr}:${attempt.head}`),
+      ['999:other-head'],
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('retryable-abort release does not mutate attempts or drop lease when attempts lock is busy', () => {
+  const rootDir = freshRoot();
+  try {
+    const first = acquire(rootDir, {
+      holderHead: 'transient-head',
+    });
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      ...IDENTITY,
+      pr: first.lease.holderPr,
+      head: first.lease.holderHead,
+      now: '2026-06-20T18:00:10Z',
+      maxAttempts: 5,
+    });
+    const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, IDENTITY);
+    writeFileSync(`${attemptsPath}.mutation.lock`, `${JSON.stringify({
+      schemaVersion: 1,
+      lockId: 'test-held-attempts-lock',
+      holderPid: process.pid,
+      holderHost: hostname(),
+      acquiredAt: new Date().toISOString(),
+    }, null, 2)}\n`);
+
+    const released = releaseMergeLeaseForRetryableAbort({
+      rootDir,
+      ...IDENTITY,
+      leaseId: first.lease.leaseId,
+      holderPr: first.lease.holderPr,
+      holderHead: first.lease.holderHead,
+      acquiredAt: first.lease.acquiredAt,
+      retryableAbortReason: 'github-gate-read-failed',
+      now: '2026-06-20T18:00:12Z',
+    });
+
+    assert.equal(released.released, false);
+    assert.equal(released.reason, 'mutation-lock-busy');
+    assert.equal(existsSync(mergeLeaseFilePath(rootDir, IDENTITY)), true);
+    assert.deepEqual(
+      readMergeLeaseAttempts(rootDir, IDENTITY).map((attempt) => `${attempt.pr}:${attempt.head}`),
+      ['101:transient-head'],
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -608,6 +703,56 @@ test('reconcileMergeLeases releases a holder whose PR is already merged', async 
     assert.equal(reconciled.released, true);
     assert.equal(reconciled.reason, 'holder-pr-merged');
     assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).exists, false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reconcileMergeLeases keeps going when attempt prune lock is busy after release', async () => {
+  const rootDir = freshRoot();
+  try {
+    acquire(rootDir, { holderPid: 99995, holderHost: 'test-host' });
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      ...IDENTITY,
+      pr: 101,
+      head: 'abc123',
+      now: '2026-06-20T18:00:10Z',
+      maxAttempts: 5,
+    });
+    const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, IDENTITY);
+    writeFileSync(`${attemptsPath}.mutation.lock`, `${JSON.stringify({
+      schemaVersion: 1,
+      lockId: 'test-held-attempts-lock',
+      holderPid: process.pid,
+      holderHost: hostname(),
+      acquiredAt: new Date().toISOString(),
+    }, null, 2)}\n`);
+
+    const reconciled = await reconcileMergeLeases({
+      rootDir,
+      ...IDENTITY,
+      host: 'test-host',
+      now: '2026-06-20T18:01:00Z',
+      pidAliveFn: () => true,
+      execFileImpl: (file, args, options, callback) => {
+        assert.equal(file, 'gh');
+        assert.deepEqual(args, ['pr', 'view', '101', '--repo', 'owner/name', '--json', 'state']);
+        assert.equal(options.timeout, 30000);
+        assert.equal(options.maxBuffer, 10 * 1024 * 1024);
+        callback(null, '{"state":"MERGED"}\n', '');
+      },
+    });
+
+    assert.equal(reconciled.released, true);
+    assert.equal(reconciled.reason, 'holder-pr-merged');
+    assert.equal(reconciled.attemptPrune.skipped, true);
+    assert.equal(reconciled.attemptPrune.reason, 'attempt-mutation-lock-busy');
+    assert.equal(inspectMergeLease({ rootDir, ...IDENTITY }).exists, false);
+    assert.deepEqual(
+      readMergeLeaseAttempts(rootDir, IDENTITY).map((attempt) => `${attempt.pr}:${attempt.head}`),
+      ['101:abc123'],
+    );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

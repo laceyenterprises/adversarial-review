@@ -263,19 +263,44 @@ HAM_MERGE_LEASE_WAIT_SECONDS="${HAM_MERGE_LEASE_WAIT_SECONDS:-900}"
 HAM_MERGE_LEASE_RELEASE_RETRY_CAP="${HAM_MERGE_LEASE_RELEASE_RETRY_CAP:-3}"
 HAM_MERGE_LEASE_ID=""
 HAM_MERGE_LEASE_HELD=0
+HAM_MERGE_LEASE_RETRYABLE_ABORT=0
+HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON=""
+HAM_NODE_BIN="${HAM_NODE_BIN:-$(command -v node 2>/dev/null || true)}"
+if [ -z "$HAM_NODE_BIN" ] && [ -x /opt/homebrew/bin/node ]; then
+  HAM_NODE_BIN="/opt/homebrew/bin/node"
+fi
+if [ -z "$HAM_NODE_BIN" ] && [ -x /usr/local/bin/node ]; then
+  HAM_NODE_BIN="/usr/local/bin/node"
+fi
+if [ -z "$HAM_NODE_BIN" ]; then
+  echo "HAM hard-blocker: node runtime not found; cannot run AMA lease, predicate, or audit helpers" >&2
+  exit 1
+fi
+
+ham_mark_merge_lease_retryable_abort() {
+  HAM_MERGE_LEASE_RETRYABLE_ABORT=1
+  HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON="${1:-retryable-abort}"
+}
 
 ham_release_merge_lease() {
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ] && [ -n "${HAM_MERGE_LEASE_ID:-}" ]; then
+    local ham_release_retryable_args=()
+    if [ "${HAM_MERGE_LEASE_RETRYABLE_ABORT:-0}" -eq 1 ]; then
+      ham_release_retryable_args=(--retryable-abort "${HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON:-retryable-abort}")
+    fi
     ham_release_attempt=1
     while [ "$ham_release_attempt" -le "$HAM_MERGE_LEASE_RELEASE_RETRY_CAP" ]; do
-      if node <<ROOT_DIR>>/bin/merge-lease.mjs release \
+      if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs release \
         --repo <<REPO>> \
         --base "$BASE_BRANCH" \
         --pr <<PR_NUMBER>> \
         --lease-id "$HAM_MERGE_LEASE_ID" \
+        "${ham_release_retryable_args[@]+"${ham_release_retryable_args[@]}"}" \
         > /tmp/ham-<<PR_NUMBER>>-merge-lease-release.json; then
         HAM_MERGE_LEASE_HELD=0
         HAM_MERGE_LEASE_ID=""
+        HAM_MERGE_LEASE_RETRYABLE_ABORT=0
+        HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON=""
         trap - EXIT
         return 0
       else
@@ -295,7 +320,7 @@ ham_release_merge_lease() {
 }
 
 ham_acquire_merge_lease() {
-  if node <<ROOT_DIR>>/bin/merge-lease.mjs acquire \
+  if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs acquire \
     --repo <<REPO>> \
     --base "$BASE_BRANCH" \
     --pr <<PR_NUMBER>> \
@@ -455,7 +480,7 @@ if [ "$HAM_FORCE_REVALIDATION" -eq 1 ]; then
   printf '{"needsRevalidation":true,"reason":"validation-base-unavailable"}\n' > /tmp/ham-<<PR_NUMBER>>-merge-lease-revalidation.json
   HAM_NEEDS_REVALIDATION=true
 else
-  if node <<ROOT_DIR>>/bin/merge-lease.mjs needs-revalidation \
+  if "$HAM_NODE_BIN" <<ROOT_DIR>>/bin/merge-lease.mjs needs-revalidation \
     --repo-path . \
     --base "$BASE_BRANCH" \
     --validation-base "$HAM_VALIDATION_BASE_SHA" \
@@ -774,7 +799,7 @@ match `<<REVIEWED_SHA>>`. The JSON claim alone does not satisfy the predicate.
 Run the predicate against the live post-remediation head:
 
 ```bash
-node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
+"$HAM_NODE_BIN" /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
   --pr /tmp/ham-<<PR_NUMBER>>-pr-after.json \
   --reviews /tmp/ham-<<PR_NUMBER>>-reviews.json \
   --protection /tmp/ham-<<PR_NUMBER>>-protection.json \
@@ -877,7 +902,7 @@ ham_append_terminal_audit() {
       eligibilityTrace: $eligibilityTrace,
       githubGate: $githubGate
     }' > "$ham_audit_attempt_json"
-  node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
+  "$HAM_NODE_BIN" /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
     --hq-root <<HQ_ROOT>> \
     --repo <<REPO>> \
     --pr <<PR_NUMBER>> \
@@ -938,7 +963,7 @@ PYEOF
 }
 
 ham_mark_ama_closer_lease_succeeded() {
-  TARGET_REMEDIATION_SHA="<<TARGET_REMEDIATION_SHA>>" node --input-type=module <<'NODE'
+  TARGET_REMEDIATION_SHA="<<TARGET_REMEDIATION_SHA>>" "$HAM_NODE_BIN" --input-type=module <<'NODE'
 import {
   AMA_CLOSER_LEASE_STATUS,
   readAmaCloserLease,
@@ -968,7 +993,7 @@ NODE
 }
 
 ham_refresh_github_gate_once() {
-  POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" node --input-type=module <<'NODE' > "$HAM_GATE_JSON"
+  POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" "$HAM_NODE_BIN" --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchPullRequestRollup } from '<<ROOT_DIR>>/src/github-api.mjs';
 import { evaluateMergeEligibility } from '<<ROOT_DIR>>/src/ama/merge-eligibility.mjs';
 
@@ -1091,6 +1116,7 @@ while :; do
     if [ "$HAM_REMOTE_CI_GATE_READ_FAILURES" -ge "$HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT" ] || [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
       echo "HAM hard-blocker: unable to read GitHub gate through src/github-api.mjs adapter after ${HAM_REMOTE_CI_GATE_READ_FAILURES} consecutive failures" >&2
       ham_append_terminal_audit failed-without-merge github-gate-read-failed || true
+      ham_mark_merge_lease_retryable_abort github-gate-read-failed
       ham_release_merge_lease
       exit 1
     fi
@@ -1172,7 +1198,7 @@ else
       eligibilityTrace: $eligibilityTrace,
       githubGate: $githubGate
     }' > "$HAM_PRE_MERGE_ATTEMPT_FILE"
-  node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
+  "$HAM_NODE_BIN" /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
     --hq-root <<HQ_ROOT>> \
     --repo <<REPO>> \
     --pr <<PR_NUMBER>> \
@@ -1186,6 +1212,7 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
   if ! ham_refresh_github_gate; then
     echo "HAM merge retry ${HAM_MERGE_ATTEMPTS}/${HAM_MERGE_RETRY_CAP}: gate read failed after bounded retries" >&2
     ham_append_terminal_audit failed-without-merge github-gate-read-failed || true
+    ham_mark_merge_lease_retryable_abort github-gate-read-failed
     ham_release_merge_lease
     exit 1
   fi
@@ -1241,6 +1268,7 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
     cat "$HAM_MERGE_STDERR" >&2 || true
     echo "HAM hard-blocker: retryable gh pr merge failures exhausted bounded budget" >&2
     ham_append_terminal_audit failed-without-merge merge-retry-budget-exhausted || true
+    ham_mark_merge_lease_retryable_abort merge-retry-budget-exhausted
     ham_release_merge_lease
     exit 1
   fi
@@ -1325,11 +1353,16 @@ After the merged audit append succeeds, emit the merge signal and then release
 the lease before posting the CLOSING comment described above. If `gh pr merge` or the post-merge `gh pr view`
 confirmation returns a retryable transport, TLS, DNS/socket, HTTP 5xx, or
 rate-limit/secondary-rate-limit failure, retry only inside the bounded budget
-above while holding the same lease. The merge retry loop must re-read the live
-head before each attempt; if that pre-flight observes the PR already `MERGED` at
-`POST_REMEDIATION_SHA`, proceed to the post-merge validation instead of
-recording a failed gate. Permanent head/protection/auth/check/closed or
-unmergeable failures fail closed immediately with a non-merged audit reason.
+above while holding the same lease. When that bounded budget is exhausted before
+a confirmed merge, release with `--retryable-abort <reason>` so the exact PR/head
+gate attempt is cleared for another dispatch. Never use retryable-abort for red
+required checks, live-head movement, permanent GitHub rejections, unclassified
+merge failures, or any path where the merge may already have been accepted. The
+merge retry loop must re-read the live head before each attempt; if that
+pre-flight observes the PR already `MERGED` at `POST_REMEDIATION_SHA`, proceed
+to the post-merge validation instead of recording a failed gate. Permanent
+head/protection/auth/check/closed or unmergeable failures fail closed
+immediately with a non-merged audit reason.
 
 If the head moved, a required check failed or is unchecked, HAM evidence is
 missing, the predicate fails for the exact live SHA, the PR is closed/draft, or

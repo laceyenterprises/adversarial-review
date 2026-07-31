@@ -251,6 +251,15 @@ function withWaiterMutationLock({ rootDir, repo, base }, fn) {
   return locked.value;
 }
 
+function withAttemptMutationLock({ rootDir, repo, base }, fn) {
+  const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, { repo, base });
+  const locked = withMutationLock(attemptsPath, fn);
+  if (!locked.acquired) {
+    throw new Error(`merge lease: mutation lock busy while updating attempts for ${repo}::${base}`);
+  }
+  return locked.value;
+}
+
 function isMutationLockBusyError(err) {
   return /\bmutation lock busy\b/.test(String(err?.message || ''));
 }
@@ -600,7 +609,7 @@ export function recordMergeLeaseGateAttempt({
   validateIdentity({ rootDir, repo, base });
   const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, { repo, base });
   const updatedAt = now || isoNow();
-  return withWaiterMutationLock({ rootDir, repo, base }, () => {
+  return withAttemptMutationLock({ rootDir, repo, base }, () => {
     const doc = readAttemptDoc(attemptsPath);
     const normalizedPr = normalizeHolderPr(pr, 'pr');
     const normalizedHead = String(head || '');
@@ -921,11 +930,14 @@ export function releaseMergeLeaseForRetryableAbort({
     if (!currentMatched) {
       return { released: false, leasePath, existingLease: currentLease };
     }
-    const attemptPrune = removeAttemptRecordsUnlocked(attemptsPath, {
+    const attemptLock = withMutationLock(attemptsPath, () => removeAttemptRecordsUnlocked(attemptsPath, {
       pr: currentLease.holderPr,
       head: currentLease.holderHead,
       now: now || isoNow(),
-    });
+    }));
+    if (!attemptLock.acquired) {
+      return { released: false, leasePath, existingLease: currentLease, reason: 'mutation-lock-busy' };
+    }
     rmSync(leasePath, { force: true });
     return {
       released: true,
@@ -933,7 +945,7 @@ export function releaseMergeLeaseForRetryableAbort({
       lease: currentLease,
       retryableAbort: true,
       retryableAbortReason,
-      attemptPrune,
+      attemptPrune: attemptLock.value,
     };
   });
   if (!locked.acquired) {
@@ -1124,7 +1136,7 @@ export async function reconcileMergeLeases({
     acquiredAt: lease.acquiredAt,
   });
   const attemptPrune = released.released
-    ? withWaiterMutationLock({ rootDir, repo, base }, () => removeAttemptRecordsUnlocked(
+    ? withAttemptMutationLock({ rootDir, repo, base }, () => removeAttemptRecordsUnlocked(
       mergeLeaseAttemptsFilePath(rootDir, { repo, base }),
       {
         pr: lease.holderPr,

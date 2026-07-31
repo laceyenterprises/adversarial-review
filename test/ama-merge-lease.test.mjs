@@ -8,6 +8,7 @@ import {
   acquireMergeLease,
   deriveLeaseKey,
   inspectMergeLease,
+  mergeLeaseAttemptsFilePath,
   mergeLeaseFilePath,
   mergeLeaseWaitersFilePath,
   readMergeLeaseAttempts,
@@ -316,6 +317,52 @@ test('retryable-abort release prunes only the matching holder gate attempt', () 
     assert.deepEqual(
       readMergeLeaseAttempts(rootDir, IDENTITY).map((attempt) => `${attempt.pr}:${attempt.head}`),
       ['999:other-head'],
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('retryable-abort release does not mutate attempts or drop lease when attempts lock is busy', () => {
+  const rootDir = freshRoot();
+  try {
+    const first = acquire(rootDir, {
+      holderHead: 'transient-head',
+    });
+    recordMergeLeaseGateAttempt({
+      rootDir,
+      ...IDENTITY,
+      pr: first.lease.holderPr,
+      head: first.lease.holderHead,
+      now: '2026-06-20T18:00:10Z',
+      maxAttempts: 5,
+    });
+    const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, IDENTITY);
+    writeFileSync(`${attemptsPath}.mutation.lock`, `${JSON.stringify({
+      schemaVersion: 1,
+      lockId: 'test-held-attempts-lock',
+      holderPid: process.pid,
+      holderHost: hostname(),
+      acquiredAt: new Date().toISOString(),
+    }, null, 2)}\n`);
+
+    const released = releaseMergeLeaseForRetryableAbort({
+      rootDir,
+      ...IDENTITY,
+      leaseId: first.lease.leaseId,
+      holderPr: first.lease.holderPr,
+      holderHead: first.lease.holderHead,
+      acquiredAt: first.lease.acquiredAt,
+      retryableAbortReason: 'github-gate-read-failed',
+      now: '2026-06-20T18:00:12Z',
+    });
+
+    assert.equal(released.released, false);
+    assert.equal(released.reason, 'mutation-lock-busy');
+    assert.equal(existsSync(mergeLeaseFilePath(rootDir, IDENTITY)), true);
+    assert.deepEqual(
+      readMergeLeaseAttempts(rootDir, IDENTITY).map((attempt) => `${attempt.pr}:${attempt.head}`),
+      ['101:transient-head'],
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

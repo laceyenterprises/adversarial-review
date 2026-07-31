@@ -295,7 +295,7 @@ ham_release_merge_lease() {
         --base "$BASE_BRANCH" \
         --pr <<PR_NUMBER>> \
         --lease-id "$HAM_MERGE_LEASE_ID" \
-        "${ham_release_retryable_args[@]}" \
+        "${ham_release_retryable_args[@]+"${ham_release_retryable_args[@]}"}" \
         > /tmp/ham-<<PR_NUMBER>>-merge-lease-release.json; then
         HAM_MERGE_LEASE_HELD=0
         HAM_MERGE_LEASE_ID=""
@@ -1298,7 +1298,6 @@ while [ "$HAM_POST_VIEW_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
       ham_append_terminal_audit deferred merge-confirmation-read-failed-after-merge-accepted || true
     else
       ham_append_terminal_audit failed-without-merge merge-confirmation-read-failed || true
-      ham_mark_merge_lease_retryable_abort merge-confirmation-read-failed
     fi
     ham_release_merge_lease
     exit 1
@@ -1310,7 +1309,6 @@ while [ "$HAM_POST_VIEW_ATTEMPTS" -lt "$HAM_MERGE_RETRY_CAP" ]; do
       ham_append_terminal_audit deferred merge-confirmation-read-failed-after-merge-accepted || true
     else
       ham_append_terminal_audit failed-without-merge merge-confirmation-read-failed || true
-      ham_mark_merge_lease_retryable_abort merge-confirmation-read-failed
     fi
     ham_release_merge_lease
     exit 1

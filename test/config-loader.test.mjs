@@ -1102,6 +1102,29 @@ test('top-level config.yaml accepts mirrored worker_pool.secrets.prewarm keys', 
   }
 });
 
+test('top-level config.yaml accepts mirrored worker_pool.secrets_bus keys', () => {
+  // SEV0 secrets-bus tuning is Python-owned, but shared config.yaml must parse
+  // under the watcher strict schema to preserve CFG multi-loader parity.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        secrets_bus:
+          op_timeout_seconds: 15.5
+          cache_ttl_seconds: 900
+          cache_grace_seconds: 3600
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.secrets_bus.op_timeout_seconds'), 15.5);
+    assert.equal(cfg.get('worker_pool.secrets_bus.cache_ttl_seconds'), 900);
+    assert.equal(cfg.get('worker_pool.secrets_bus.cache_grace_seconds'), 3600);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('worker_pool.secrets.prewarm canonical env aliases resolve through Node schema', () => {
   const tmp = freshTmp();
   try {
@@ -1119,6 +1142,31 @@ test('worker_pool.secrets.prewarm canonical env aliases resolve through Node sch
     assert.equal(
       cfg.resolutionTrace('worker_pool.secrets.prewarm.min_interval_seconds').at(-1).source,
       'env:AGENT_OS_WORKER_POOL_SECRETS_PREWARM_MIN_INTERVAL_SECONDS',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('worker_pool.secrets_bus canonical env aliases resolve through Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, 'version: 1\n');
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_WORKER_POOL_SECRETS_BUS_OP_TIMEOUT_SECONDS: '12.5',
+        AGENT_OS_WORKER_POOL_SECRETS_BUS_CACHE_TTL_SECONDS: '1200',
+        AGENT_OS_WORKER_POOL_SECRETS_BUS_CACHE_GRACE_SECONDS: '2400',
+      },
+    });
+    assert.equal(cfg.get('worker_pool.secrets_bus.op_timeout_seconds'), 12.5);
+    assert.equal(cfg.get('worker_pool.secrets_bus.cache_ttl_seconds'), 1200);
+    assert.equal(cfg.get('worker_pool.secrets_bus.cache_grace_seconds'), 2400);
+    assert.equal(
+      cfg.resolutionTrace('worker_pool.secrets_bus.op_timeout_seconds').at(-1).source,
+      'env:AGENT_OS_WORKER_POOL_SECRETS_BUS_OP_TIMEOUT_SECONDS',
     );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -1540,6 +1588,37 @@ test('main_catchup mirrored defaults match the Python daemon constants', () => {
     assert.equal(cfg.get('main_catchup.bounce_throttle_interval_seconds'), 300);
     assert.equal(cfg.get('main_catchup.adversarial_review_drain_timeout_seconds'), 180);
     assert.equal(cfg.get('main_catchup.adversarial_watcher_drain_bounce_slack_seconds'), 120);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('post_deploy_verify mirror loads through strict Node schema and env aliases', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      post_deploy_verify:
+        enabled: false
+        spawn_timeout_seconds: 180
+        boot_window_seconds: 300
+    `);
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        AGENT_OS_POST_DEPLOY_VERIFY_ENABLED: 'true',
+        HQ_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS: '240',
+        AGENT_OS_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS: '600',
+      },
+    });
+    assert.equal(cfg.get('post_deploy_verify.enabled'), true);
+    assert.equal(cfg.get('post_deploy_verify.spawn_timeout_seconds'), 240);
+    assert.equal(cfg.get('post_deploy_verify.boot_window_seconds'), 600);
+    assert.equal(
+      cfg.resolutionTrace('post_deploy_verify.spawn_timeout_seconds').at(-1).source,
+      'env:HQ_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS',
+    );
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -2137,6 +2216,9 @@ test('checked-in top-level sentinel detector config loads through strict Node sc
   assert.equal(cfg.get('sentinel.spec_drift.cycle_interval_seconds'), 86400);
   assert.equal(cfg.get('sentinel.deploy_checkout.repo_path'), '/Users/airlock/agent-os');
   assert.equal(cfg.get('sentinel.deploy_checkout.worker_identity_emails'), null);
+  assert.equal(cfg.get('post_deploy_verify.enabled'), false);
+  assert.equal(cfg.get('post_deploy_verify.spawn_timeout_seconds'), 180);
+  assert.equal(cfg.get('post_deploy_verify.boot_window_seconds'), 300);
   assert.equal(cfg.get('sentinel.codex_compaction.rate_alarm_per_hour'), 3);
   assert.deepEqual(cfg.get('sentinel.convergence_stall.observed_worker_classes'), [
     'codex',
@@ -3532,6 +3614,9 @@ test('validateSchema tolerates unknown nested worker_pool keys in local files an
           pressure: { projected_headroom_floor_mb: 4096 },
           dynamic: { enabled: true },
         },
+        secrets_bus: {
+          op_timeout_seconds: 20.0,
+        },
       },
     },
     {
@@ -3545,6 +3630,7 @@ test('validateSchema tolerates unknown nested worker_pool keys in local files an
   assert.equal(out.worker_pool?.dag?.autowalk?.deep_reconcile, true);
   assert.equal(out.worker_pool?.memory?.pressure, undefined, 'unknown sibling subtree dropped');
   assert.equal(out.worker_pool?.memory?.dynamic?.enabled, true);
+  assert.equal(out.worker_pool?.secrets_bus?.op_timeout_seconds, 20.0);
 });
 
 test('validateSchema rejects unknown nested main_catchup keys unless nested-local tolerance is explicit', () => {

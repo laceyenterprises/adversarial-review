@@ -320,7 +320,6 @@ function createHealthRouter({
     lastProbe = probe;
     const transition = stateMachine.recordProbe(probe);
     if (transition) await handleTransition(transition);
-    else recordStatusSnapshot();
     return { probe, transition };
   }
 

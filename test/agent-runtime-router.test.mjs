@@ -388,6 +388,28 @@ test('healthz probes time out and feed a failed probe to the state machine', asy
   assert.equal(result.transition.kind, 'failover');
 });
 
+test('runtime status snapshots are emitted only for probe transitions', async () => {
+  let healthzOk = true;
+  const snapshots = [];
+  const router = createHealthRouter({
+    localRuntime: fakeLocalRuntime(),
+    auditSink: capturingAuditSink(),
+    checkHealthz: () => healthzOk,
+    onStatusSnapshot: (snapshot) => snapshots.push(snapshot),
+    config: resolveRouterConfig({}, { probeFailureThreshold: 1 }),
+  });
+
+  const idle = await router.tick();
+  assert.equal(idle.transition, null);
+  assert.equal(snapshots.length, 0);
+
+  healthzOk = false;
+  const failover = await router.tick();
+  assert.equal(failover.transition.kind, 'failover');
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0].mode, 'local');
+});
+
 test('interval probing skips overlapping ticks while a probe is in flight', async () => {
   let intervalCallback;
   let healthzCalls = 0;

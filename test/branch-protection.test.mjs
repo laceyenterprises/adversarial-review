@@ -55,6 +55,42 @@ test('fetchAdversarialGateBranchProtection succeeds when required context is pre
   assert.deepEqual(Object.keys(calls[0].options.env).sort(), ['GH_TOKEN', 'HOME', 'PATH']);
 });
 
+test('fetchAdversarialGateBranchProtection retries transient gh failures before succeeding', async () => {
+  let calls = 0;
+  const result = await fetchAdversarialGateBranchProtection({
+    repoPath: 'laceyenterprises/adversarial-review',
+    baseBranch: 'main',
+    env: {
+      GITHUB_TOKEN: 'token-123',
+      PATH: '/usr/bin:/bin',
+      HOME: '/tmp/test-home',
+    },
+    retryOptions: {
+      retryDelayMs: 0,
+      sleepImpl: async () => {},
+    },
+    execFileImpl: async () => {
+      calls += 1;
+      if (calls === 1) {
+        const err = new Error('TLS handshake timeout');
+        err.stderr = 'TLS handshake timeout';
+        throw err;
+      }
+      return {
+        stdout: JSON.stringify({
+          required_status_checks: {
+            contexts: [ADVERSARIAL_GATE_CONTEXT],
+          },
+        }),
+      };
+    },
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(result.ok, true);
+  assert.equal(result.reason, 'required-context-present');
+});
+
 test('fetchAdversarialGateBranchProtection returns a structured failure for invalid status-context config', async () => {
   let called = false;
   const result = await fetchAdversarialGateBranchProtection({

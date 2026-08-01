@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -183,6 +183,43 @@ test('--json creates a missing evidence directory before writing audit records',
     assert.equal(existsSync(evidenceDir), true);
     const payload = JSON.parse(stdout.toString());
     assert.equal(existsSync(payload.results[0].evidencePath), true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('default shared evidence directory refuses writes from a mismatched uid', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'branch-protection-cli-owner-guard-'));
+  try {
+    const configPath = writeConfig(tmp, {
+      repos: ['laceyenterprises/adversarial-review'],
+    });
+    const stdout = makeWritable();
+    const stderr = makeWritable();
+    const checkoutOwnerUid = statSync(REPO_ROOT).uid;
+    const code = await main(
+      ['--config', configPath, '--json'],
+      {
+        stdout,
+        stderr,
+        env: {
+          GITHUB_TOKEN: 'token-123',
+          PATH: '/usr/bin:/bin',
+          HOME: tmp,
+        },
+        processImpl: {
+          getuid: () => checkoutOwnerUid + 1,
+        },
+        execFileImpl: async () => {
+          throw new Error('gh api should not run after owner guard refusal');
+        },
+      },
+    );
+
+    assert.equal(code, 4);
+    assert.equal(stdout.toString(), '');
+    assert.match(stderr.toString(), /refusing to write shared branch-protection audit state/);
+    assert.match(stderr.toString(), /data\/branch-protection-audits/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

@@ -209,6 +209,7 @@ function isBranchProtectionUnavailableSentinel(value) {
 function classifyProtectionFixtureReason(value, requiredContexts) {
   if (isBranchProtectionUnavailableSentinel(value)) return 'branch-protection-unavailable-github-plan';
   if (String(value?.status || '').trim() === '404') return 'branch-protection-missing';
+  if (String(value?.status || '').trim() === '403') return 'branch-protection-forbidden';
   return requiredContexts.includes(resolveGateStatusContext(process.env))
     ? 'required-context-present'
     : 'required-context-missing';

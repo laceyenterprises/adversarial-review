@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -36,6 +36,33 @@ override with --evidence-dir <path>.
 
 function readConfig(configPath) {
   return JSON.parse(readFileSync(configPath, 'utf8'));
+}
+
+function nearestExistingPath(path) {
+  let current = resolve(path);
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+  return current;
+}
+
+function assertSharedEvidenceOwner(evidenceDir, { processImpl = process } = {}) {
+  const resolvedEvidenceDir = resolve(evidenceDir);
+  if (resolvedEvidenceDir !== resolve(branchProtectionAuditDirPath(ROOT))) return;
+  if (typeof processImpl.getuid !== 'function') return;
+  const currentUid = processImpl.getuid();
+  const existingPath = nearestExistingPath(resolvedEvidenceDir);
+  if (!existingPath) return;
+  const existingStats = statSync(existingPath);
+  if (typeof existingStats.uid === 'number' && existingStats.uid !== currentUid) {
+    const rel = relative(ROOT, resolvedEvidenceDir) || '.';
+    throw new Error(
+      `refusing to write shared branch-protection audit state at ${rel} as uid ${currentUid}; `
+      + `existing owner uid is ${existingStats.uid}. Re-run as that owner or pass --evidence-dir.`,
+    );
+  }
 }
 
 async function listOrgRepos(org, { execFileImpl = execFileAsync, env = process.env } = {}) {
@@ -76,6 +103,7 @@ async function main(argv = process.argv.slice(2), {
   execFileImpl = execFileAsync,
   env = process.env,
   now = () => new Date().toISOString(),
+  processImpl = process,
 } = {}) {
   const parsed = parseArgs({
     args: argv,
@@ -105,7 +133,14 @@ async function main(argv = process.argv.slice(2), {
   const evidenceDir = parsed.values['evidence-dir']
     ? resolve(parsed.values['evidence-dir'])
     : branchProtectionAuditDirPath(ROOT);
-  mkdirSync(evidenceDir, { recursive: true });
+  try {
+    assertSharedEvidenceOwner(evidenceDir, { processImpl });
+    mkdirSync(evidenceDir, { recursive: true });
+    assertSharedEvidenceOwner(evidenceDir, { processImpl });
+  } catch (err) {
+    stderr.write(`error: ${err?.message || err}\n`);
+    return 4;
+  }
   const config = readConfig(configPath);
   const repos = await resolveRepos({
     repo: parsed.values.repo,

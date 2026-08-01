@@ -854,6 +854,27 @@ test('ama-check accepts unavailable 404-style protection input when branch prote
   }
 });
 
+test('ama-check maps 403 protection fixtures to canonical forbidden reason', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-403-protection-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody: '{ "message": "Resource not accessible by integration", "status": "403" }\n',
+      prPatch: {
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, false, JSON.stringify(verdict, null, 2));
+    assert.equal(verdict.trace.branchProtection.observedReason, 'branch-protection-forbidden');
+    assert.ok(verdict.reasons.includes('branch-protection-missing-gate'));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('ama-check accepts ordinary protection JSON when branch protection is waived', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ama-check-waived-protection-json-'));
   try {

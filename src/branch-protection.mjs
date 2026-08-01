@@ -283,6 +283,7 @@ async function fetchAdversarialGateBranchProtection({
   baseBranch = DEFAULT_BASE_BRANCH,
   execFileImpl = execFileAsync,
   env = process.env,
+  retryOptions = {},
 } = {}) {
   const { owner, repo } = parseRepoSlug(repoPath);
   const branch = String(baseBranch || DEFAULT_BASE_BRANCH);
@@ -302,13 +303,14 @@ async function fetchAdversarialGateBranchProtection({
   }
   let stdout;
   try {
-    ({ stdout } = await execFileImpl(
-      'gh',
+    ({ stdout } = await execGhApiWithTransientRetry(
+      execFileImpl,
       ['api', `repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}/protection`],
       {
         env: allowlistedGhEnv(env),
         maxBuffer: 2 * 1024 * 1024,
-      }
+      },
+      retryOptions,
     ));
   } catch (err) {
     return {

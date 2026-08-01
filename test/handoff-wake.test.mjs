@@ -365,6 +365,42 @@ test('handoff wake accepts renamed marker events even when mtime predates sleep'
   assert.equal(result.path, marker);
 });
 
+test('handoff wake preserves legacy dependency option names when polling is omitted', async (t) => {
+  const rootDir = makeTempRoot(t);
+  let eventHandler = null;
+  let intervalCalls = 0;
+
+  const resultPromise = sleepUntilTimerOrHandoffWake(
+    rootDir,
+    HANDOFF_WAKE_DAEMONS.followUp,
+    10_000,
+    {
+      enabled: true,
+      watchImpl: (_dir, _options, onEvent) => {
+        eventHandler = onEvent;
+        const watcher = new EventEmitter();
+        watcher.close = () => {};
+        return watcher;
+      },
+      nowMs: () => Date.parse('2026-07-09T16:00:00.000Z'),
+      setIntervalImpl: () => {
+        intervalCalls += 1;
+        return { unref() {} };
+      },
+      clearIntervalImpl: () => {},
+      pollIntervalMs: 0,
+    },
+  );
+
+  await new Promise((resolve) => setImmediate(resolve));
+  const signalResult = signalHandoffWake(rootDir, HANDOFF_WAKE_DAEMONS.followUp);
+  eventHandler('rename', signalResult.path.split('/').pop());
+
+  const result = await resultPromise;
+  assert.equal(result.reason, 'wake');
+  assert.equal(intervalCalls, 0);
+});
+
 test('handoff wake sleep sweeps for markers created during watcher setup', async (t) => {
   const rootDir = makeTempRoot(t);
 
@@ -386,4 +422,66 @@ test('handoff wake sleep sweeps for markers created during watcher setup', async
 
   assert.equal(result.reason, 'wake');
   assert.match(result.path, /\.wake$/);
+});
+
+test('handoff wake polling sweep uses async reads without overlapping intervals', async (t) => {
+  const rootDir = makeTempRoot(t);
+  let intervalHandler = null;
+  let releaseRead = null;
+  let readCalls = 0;
+  let inFlightReads = 0;
+  let maxInFlightReads = 0;
+
+  const resultPromise = sleepUntilTimerOrHandoffWake(
+    rootDir,
+    HANDOFF_WAKE_DAEMONS.followUp,
+    10_000,
+    {
+      enabled: true,
+      watchImpl: () => {
+        const watcher = new EventEmitter();
+        watcher.close = () => {};
+        return watcher;
+      },
+      readdirImpl: async () => {
+        readCalls += 1;
+        inFlightReads += 1;
+        maxInFlightReads = Math.max(maxInFlightReads, inFlightReads);
+        await new Promise((resolve) => {
+          releaseRead = resolve;
+        });
+        inFlightReads -= 1;
+        return [
+          {
+            name: 'follow-up.async.wake',
+            isFile: () => true,
+          },
+        ];
+      },
+      setIntervalImpl: (handler) => {
+        intervalHandler = handler;
+        return { unref() {} };
+      },
+      clearIntervalImpl: () => {},
+    },
+  );
+
+  while (!releaseRead || !intervalHandler) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  intervalHandler();
+  intervalHandler();
+  assert.equal(readCalls, 1);
+  assert.equal(maxInFlightReads, 1);
+
+  const marker = join(rootDir, 'data', 'handoff-wake', 'follow-up.async.wake');
+  writeFileSync(marker, 'wake\n');
+  releaseRead();
+
+  const result = await resultPromise;
+  assert.equal(result.reason, 'wake');
+  assert.equal(result.path, marker);
+  assert.equal(readCalls, 1);
+  assert.equal(maxInFlightReads, 1);
 });

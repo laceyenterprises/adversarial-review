@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -100,11 +100,12 @@ async function main(argv = process.argv.slice(2), {
     : resolve(ROOT, 'config.json');
   const relativeToRoot = (path) => {
     const rel = relative(ROOT, path);
-    return rel && !rel.startsWith('..') ? rel : path;
+    return rel === '' ? '.' : rel && !rel.startsWith('..') ? rel : path;
   };
   const evidenceDir = parsed.values['evidence-dir']
     ? resolve(parsed.values['evidence-dir'])
     : branchProtectionAuditDirPath(ROOT);
+  mkdirSync(evidenceDir, { recursive: true });
   const config = readConfig(configPath);
   const repos = await resolveRepos({
     repo: parsed.values.repo,

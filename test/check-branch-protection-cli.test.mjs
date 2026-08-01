@@ -1,10 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { main } from '../src/check-branch-protection.mjs';
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 function makeWritable() {
   let text = '';
@@ -147,6 +150,73 @@ test('--apply adds the missing required context and exits clean when the patch s
     const record = JSON.parse(readFileSync(payload.results[0].evidencePath, 'utf8'));
     assert.equal(record.applied, true);
     assert.equal(record.action, 'applied-required-context');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('--json creates a missing evidence directory before writing audit records', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'branch-protection-cli-missing-dir-'));
+  try {
+    const evidenceDir = join(tmp, 'missing', 'audits');
+    const configPath = writeConfig(tmp, {
+      repos: ['laceyenterprises/adversarial-review'],
+    });
+    const stdout = makeWritable();
+    const code = await main(
+      ['--config', configPath, '--json', '--evidence-dir', evidenceDir],
+      {
+        stdout,
+        env: {
+          GITHUB_TOKEN: 'token-123',
+          PATH: '/usr/bin:/bin',
+          HOME: tmp,
+        },
+        now: () => '2026-08-01T12:00:00.000Z',
+        execFileImpl: async () => ({
+          stdout: JSON.stringify({ required_status_checks: { contexts: ['ci/test'] } }),
+        }),
+      },
+    );
+
+    assert.equal(code, 1);
+    assert.equal(existsSync(evidenceDir), true);
+    const payload = JSON.parse(stdout.toString());
+    assert.equal(existsSync(payload.results[0].evidencePath), true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('--json renders repo-root evidence directory as a stable relative dot path', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'branch-protection-cli-root-dir-'));
+  try {
+    const configPath = writeConfig(tmp, {
+      repos: ['laceyenterprises/adversarial-review'],
+    });
+    const stdout = makeWritable();
+    const code = await main(
+      ['--config', configPath, '--json', '--evidence-dir', REPO_ROOT],
+      {
+        stdout,
+        env: {
+          GITHUB_TOKEN: 'token-123',
+          PATH: '/usr/bin:/bin',
+          HOME: tmp,
+        },
+        execFileImpl: async () => ({
+          stdout: JSON.stringify({
+            required_status_checks: {
+              contexts: ['agent-os/adversarial-gate'],
+            },
+          }),
+        }),
+      },
+    );
+
+    assert.equal(code, 0);
+    const payload = JSON.parse(stdout.toString());
+    assert.equal(payload.evidenceDir, '.');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

@@ -58,7 +58,7 @@ function isTransientGhProtectionError(err) {
     err?.stdout,
     err?.message,
   ].map((value) => String(value || '')).join('\n');
-  return /(?:TLS handshake|timed? out|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ECONNABORTED|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EIO|temporary failure|network is unreachable|socket hang up|rate limit|secondary rate limit|HTTP[ /]5[0-9][0-9]|(?:^|[^0-9])(?:500|502|503|504)(?:[^0-9]|$)|bad gateway|service unavailable|gateway timeout|server error)/i.test(text);
+  return /(?:TLS handshake|timed? out|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ECONNABORTED|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EIO|temporary failure|network is unreachable|socket hang up|rate limit|secondary rate limit|HTTP(?:\/[0-9.]+)?[ /]+50[0234]|bad gateway|service unavailable|gateway timeout|server error)/i.test(text);
 }
 
 function sleep(ms) {

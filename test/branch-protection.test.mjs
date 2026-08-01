@@ -135,6 +135,34 @@ test('addRequiredStatusCheckContext does not retry non-transient gh failures', a
   assert.equal(calls, 1);
 });
 
+test('addRequiredStatusCheckContext does not retry branch names that look like 5xx codes', async () => {
+  let calls = 0;
+  await assert.rejects(
+    addRequiredStatusCheckContext({
+      repoPath: 'laceyenterprises/adversarial-review',
+      baseBranch: '502',
+      context: ADVERSARIAL_GATE_CONTEXT,
+      env: {
+        GITHUB_TOKEN: 'token-123',
+        PATH: '/usr/bin:/bin',
+        HOME: '/tmp/test-home',
+      },
+      retryOptions: {
+        retryDelayMs: 0,
+        sleepImpl: async () => {},
+      },
+      execFileImpl: async () => {
+        calls += 1;
+        const err = new Error('HTTP 404 Not Found for branch 502');
+        err.stderr = 'HTTP 404 Not Found for branch 502';
+        throw err;
+      },
+    }),
+    /HTTP 404 Not Found/,
+  );
+  assert.equal(calls, 1);
+});
+
 test('warnForMissingAdversarialGateBranchProtection logs structured warnings for missing context', async () => {
   const warnings = [];
   const result = await warnForMissingAdversarialGateBranchProtection(

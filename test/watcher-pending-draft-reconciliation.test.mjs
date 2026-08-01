@@ -210,6 +210,7 @@ test('watcher terminal rereview skip releases claim and falls through to close p
   const hardSkipIndex = source.indexOf("!explicitOperatorReviewRetrigger", hardCeilingIndex);
   const attemptCeilingIndex = source.indexOf("const priorReviewAttemptCount = countReviewCeilingAttempts({", hardSkipIndex);
   const attemptSkipIndex = source.indexOf("priorReviewAttemptCount >= hardReviewAttemptCeiling", attemptCeilingIndex);
+  const attemptOperatorOverrideIndex = source.indexOf("!explicitOperatorReviewRetrigger", attemptSkipIndex);
   const skipReleaseIndex = source.indexOf("if (skipReviewerSpawnReason) {", guardIndex);
   // ARC-13 hoisted the spawn args + added a gated pipeline ternary; the v1
   // single-review call is the ternary's non-pipeline branch.
@@ -238,6 +239,10 @@ test('watcher terminal rereview skip releases claim and falls through to close p
     'hard review attempt ceiling skip must not return before watcher close/maintenance work'
   );
   assert.ok(attemptCeilingIndex > hardSkipIndex, 'attempt ceiling should be checked after landed-review ceiling');
+  assert.ok(
+    attemptOperatorOverrideIndex > attemptSkipIndex && attemptOperatorOverrideIndex < skipReleaseIndex,
+    'explicit operator retrigger should also bypass the hard attempt ceiling'
+  );
   assert.ok(skipReleaseIndex > attemptSkipIndex, 'skip branch should run after all rereview skip checks');
   assert.ok(
     source.indexOf("stmtReleaseReviewerClaim.run(reviewerSessionUuid, repoPath, prNumber);", skipReleaseIndex) > skipReleaseIndex,

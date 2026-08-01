@@ -1637,6 +1637,7 @@ export async function processReviewSubject(entry, ctx) {
               if (
                 !skipReviewerSpawnReason
                 && priorReviewAttemptCount >= hardReviewAttemptCeiling
+                && !explicitOperatorReviewRetrigger
               ) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
@@ -1645,6 +1646,12 @@ export async function processReviewSubject(entry, ctx) {
                   `from landed reviews — deferring to the close path. No attempt budget consumed.`,
                 );
                 skipReviewerSpawnReason = 'hard-review-attempt-ceiling';
+              } else if (!skipReviewerSpawnReason && priorReviewAttemptCount >= hardReviewAttemptCeiling) {
+                console.log(
+                  `[watcher] Allowing explicit operator re-review for ${repoPath}#${prNumber}: ` +
+                  `hard review attempt ceiling reached (${priorReviewAttemptCount} reviewer attempts >= ` +
+                  `${hardReviewAttemptCeiling}), but rereview_reason is an operator retrigger marker.`
+                );
               }
             }
 

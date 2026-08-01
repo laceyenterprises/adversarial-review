@@ -462,7 +462,7 @@ export async function sleepUntilTimerOrHandoffWake(
       try {
         for (const entry of readdirSync(dir, { withFileTypes: true })) {
           if (!entry.isFile() || !isWakeMarkerName(entry.name, daemon)) continue;
-          onWatchEvent('poll', entry.name);
+          onWatchEvent('rename', entry.name);
           if (settled) break;
         }
       } catch {

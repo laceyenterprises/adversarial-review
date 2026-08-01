@@ -2924,12 +2924,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
         requiredContext: protection?.context || null,
       };
     } catch {
-      branchProtection = {
-        requiredContexts: [],
-        ok: false,
-        reason: 'branch-protection-check-failed',
-        requiredContext: null,
-      };
+      branchProtection = { requiredContexts: [], ok: false, reason: 'branch-protection-check-failed', requiredContext: null };
     }
   }
   return {

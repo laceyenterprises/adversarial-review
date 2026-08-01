@@ -369,6 +369,36 @@ test('retryable-abort release does not mutate attempts or drop lease when attemp
   }
 });
 
+test('recordMergeLeaseGateAttempt honors legacy waiter mutation lock during rollout', () => {
+  const rootDir = freshRoot();
+  try {
+    acquire(rootDir);
+    const leasePath = mergeLeaseFilePath(rootDir, IDENTITY);
+    writeFileSync(`${leasePath}.mutation.lock`, `${JSON.stringify({
+      schemaVersion: 1,
+      lockId: 'test-held-legacy-waiter-lock',
+      holderPid: process.pid,
+      holderHost: hostname(),
+      acquiredAt: new Date().toISOString(),
+    }, null, 2)}\n`);
+
+    assert.throws(
+      () => recordMergeLeaseGateAttempt({
+        rootDir,
+        ...IDENTITY,
+        pr: 501,
+        head: 'rollout-head',
+        now: '2026-06-20T18:00:00Z',
+        maxAttempts: 5,
+      }),
+      /mutation lock busy while updating waiters/,
+    );
+    assert.deepEqual(readMergeLeaseAttempts(rootDir, IDENTITY), []);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('recordMergeLeaseGateAttempt prunes expired attempt records before counting', () => {
   const rootDir = freshRoot();
   try {

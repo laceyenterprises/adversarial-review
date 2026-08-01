@@ -10,13 +10,15 @@
 // the in-progress JSON to stopped/.
 //
 // Recovery contract (the three primitives in this file):
-//   1. Heartbeat: the daemon touches `lastHeartbeatAt` on each
-//      in-progress JSON whose worker process is still alive. The
-//      workers themselves are external CLIs (codex / claude) so they
-//      cannot self-heartbeat; the daemon's per-tick liveness probe
-//      stands in for them. Newly-spawned jobs are seeded with
-//      `lastHeartbeatAt = spawnedAt` by `markFollowUpJobSpawned` so
-//      the very first sweep pass after spawn sees a fresh timestamp.
+//   1. Heartbeat: the daemon touches `lastHeartbeatAt` only when an
+//      alive worker also advances one of its durable artifacts
+//      (`codex-worker.log`, `codex-last-message.md`, or
+//      `remediation-reply.json`). The workers themselves are external
+//      CLIs (codex / claude) so they cannot self-heartbeat; artifact
+//      progress is the closest durable no-output watchdog signal.
+//      Newly-spawned jobs are seeded with `lastHeartbeatAt = spawnedAt`
+//      by `markFollowUpJobSpawned` so the first sweep pass has a
+//      baseline.
 //   2. Sweep: after the daemon's live-worker heartbeat pass, any
 //      in-progress claim whose `lastHeartbeatAt` is
 //      older than the stuck threshold (default 10m) is moved to
@@ -36,11 +38,11 @@
 // reconcile expects, OR the worker is "alive" by PID but wedged. The
 // stale-heartbeat threshold (10m) is much larger than the tick
 // interval (120s) so a temporarily-slow tick doesn't reclaim a healthy
-// worker.
+// worker that is still producing artifacts.
 
 import { existsSync, mkdtempSync, promises as fsPromises, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   listInProgressFollowUpJobs,
   markFollowUpJobStopped,
@@ -76,6 +78,47 @@ function resolveInProgressStuckThresholdMs(env = process.env) {
     return DEFAULT_IN_PROGRESS_STUCK_THRESHOLD_MS;
   }
   return parsed;
+}
+
+function normalizeWorkerArtifactProgressMs(ms) {
+  return Number.isFinite(ms) ? Math.floor(ms) : null;
+}
+
+function isoFromMs(ms) {
+  const normalizedMs = normalizeWorkerArtifactProgressMs(ms);
+  return normalizedMs === null ? null : new Date(normalizedMs).toISOString();
+}
+
+function resolveStoredWorkerPath(rootDir, value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return null;
+  return isAbsolute(trimmed) ? trimmed : resolve(rootDir, trimmed);
+}
+
+function workerArtifactCandidates(rootDir, job) {
+  const worker = job?.remediationWorker || {};
+  return [
+    { label: 'remediationWorker.logPath', path: resolveStoredWorkerPath(rootDir, worker.logPath) },
+    { label: 'remediationWorker.outputPath', path: resolveStoredWorkerPath(rootDir, worker.outputPath) },
+    { label: 'remediationWorker.replyPath', path: resolveStoredWorkerPath(rootDir, worker.replyPath) },
+    { label: 'remediationReply.path', path: resolveStoredWorkerPath(rootDir, job?.remediationReply?.path) },
+  ].filter((candidate) => candidate.path);
+}
+
+function resolveWorkerArtifactProgressMs(rootDir, job) {
+  let newest = null;
+  for (const candidate of workerArtifactCandidates(rootDir, job)) {
+    try {
+      const st = statSync(candidate.path);
+      if (!st.isFile() || st.size <= 0) continue;
+      if (newest === null || st.mtimeMs > newest.sourceMs) {
+        newest = { sourceMs: st.mtimeMs, source: candidate.label };
+      }
+    } catch {
+      // Missing artifacts are normal while a worker is starting up.
+    }
+  }
+  return newest || { sourceMs: null, source: 'unavailable' };
 }
 
 function sleep(ms) {
@@ -645,6 +688,10 @@ ${formatDirtyConflictSpecContext(specContext)}
 // Preference order is documented inline; the fallback to file mtime
 // keeps pre-heartbeat / hand-edited records reclaimable.
 function resolveLastObservedAtMs(job, jobPath) {
+  const artifactProgressMs = parseTimestampMs(job?.lastWorkerArtifactProgressAt);
+  if (artifactProgressMs !== null) {
+    return { sourceMs: artifactProgressMs, source: 'lastWorkerArtifactProgressAt' };
+  }
   const heartbeatMs = parseTimestampMs(job?.lastHeartbeatAt);
   if (heartbeatMs !== null) {
     return { sourceMs: heartbeatMs, source: 'lastHeartbeatAt' };
@@ -725,10 +772,11 @@ function sweepStuckInProgressClaims({
 }
 
 // Emit a heartbeat (`lastHeartbeatAt = now`) on every in-progress job
-// whose worker process is still alive. Called once per tick from the
-// daemon. Skips entries with no PID handle (HQ-dispatched jobs whose
-// liveness is tracked by HQ, not by the daemon). Errors on individual
-// records are swallowed so one bad JSON can't stop the rest.
+// whose worker process is still alive and whose artifacts have advanced
+// since the last observed worker progress. Called once per tick from
+// the daemon. Skips entries with no PID handle (HQ-dispatched jobs
+// whose liveness is tracked by HQ, not by the daemon). Errors on
+// individual records are swallowed so one bad JSON can't stop the rest.
 function emitHeartbeatsForActiveJobs({
   rootDir,
   nowMs = Date.now(),
@@ -765,8 +813,24 @@ function emitHeartbeatsForActiveJobs({
       skipped += 1;
       continue;
     }
+    const progress = resolveWorkerArtifactProgressMs(rootDir, job);
+    const progressMs = normalizeWorkerArtifactProgressMs(progress.sourceMs);
+    const lastProgressMs =
+      parseTimestampMs(job?.lastWorkerArtifactProgressAt)
+      ?? parseTimestampMs(worker.spawnedAt)
+      ?? parseTimestampMs(job?.claimedAt)
+      ?? 0;
+    if (progressMs === null || progressMs <= lastProgressMs) {
+      skipped += 1;
+      continue;
+    }
     try {
-      writeFollowUpJob(jobPath, { ...job, lastHeartbeatAt: heartbeatAt });
+      writeFollowUpJob(jobPath, {
+        ...job,
+        lastHeartbeatAt: heartbeatAt,
+        lastWorkerArtifactProgressAt: isoFromMs(progressMs),
+        lastWorkerArtifactProgressSource: progress.source,
+      });
       touched += 1;
     } catch (err) {
       log.warn?.(
@@ -1050,5 +1114,7 @@ export {
   resolveDirtyConflictSpecContext,
   resolveInProgressStuckThresholdMs,
   resolveLastObservedAtMs,
+  normalizeWorkerArtifactProgressMs,
+  resolveWorkerArtifactProgressMs,
   sweepStuckInProgressClaims,
 };

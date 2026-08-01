@@ -23,9 +23,11 @@ import {
   applyPreSpawnLifecycleGate,
   attemptDirtyMerge,
   emitHeartbeatsForActiveJobs,
+  normalizeWorkerArtifactProgressMs,
   pushDirtyMergeWithRetry,
   resolveDirtyConflictSpecContext,
   resolveInProgressStuckThresholdMs,
+  resolveWorkerArtifactProgressMs,
   sweepStuckInProgressClaims,
 } from '../src/follow-up-stuck-claim-sweep.mjs';
 
@@ -41,6 +43,7 @@ function seedInProgressJob(rootDir, {
   claimedAt,
   spawnedAt,
   mtimeIso,
+  worker = {},
 } = {}) {
   const inProgressDir = getFollowUpJobDir(rootDir, 'inProgress');
   mkdirSync(inProgressDir, { recursive: true });
@@ -64,6 +67,7 @@ function seedInProgressJob(rootDir, {
       state: 'spawned',
       spawnedAt: spawnedAt ?? '2026-06-01T05:01:31.000Z',
       processId: 99999,
+      ...worker,
     },
   };
   if (lastHeartbeatAt !== undefined) {
@@ -185,10 +189,19 @@ test('sweepStuckInProgressClaims: missing lastHeartbeatAt falls back to file mti
 
 test('emitHeartbeatsForActiveJobs before sweep preserves a live detached worker after daemon downtime', () => {
   const rootDir = makeRoot();
+  const artifactDir = path.join(rootDir, 'artifacts');
+  mkdirSync(artifactDir, { recursive: true });
+  const logPath = path.join(artifactDir, 'codex-worker.log');
+  writeFileSync(logPath, 'still making progress\n', 'utf8');
+  const progressTime = new Date('2026-06-01T05:34:30.000Z');
+  utimesSync(logPath, progressTime, progressTime);
   const { jobPath } = seedInProgressJob(rootDir, {
     jobId: 'laceyenterprises__agent-os-pr-1227-bounce-survivor',
     prNumber: 1227,
     lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
+    worker: {
+      logPath: path.relative(rootDir, logPath),
+    },
   });
   const heartbeatMs = Date.parse('2026-06-01T05:34:59.000Z');
   const sweepMs = Date.parse('2026-06-01T05:35:00.000Z');
@@ -205,6 +218,97 @@ test('emitHeartbeatsForActiveJobs before sweep preserves a live detached worker 
   assert.equal(existsSync(jobPath), true, 'live worker must remain claimable after restart');
   const job = readJobAtPath(jobPath);
   assert.equal(job.lastHeartbeatAt, '2026-06-01T05:34:59.000Z');
+  assert.equal(job.lastWorkerArtifactProgressAt, '2026-06-01T05:34:30.000Z');
+  assert.equal(job.lastWorkerArtifactProgressSource, 'remediationWorker.logPath');
+});
+
+test('emitHeartbeatsForActiveJobs does not refresh a silent alive worker with empty artifacts', () => {
+  const rootDir = makeRoot();
+  const artifactDir = path.join(rootDir, 'artifacts');
+  mkdirSync(artifactDir, { recursive: true });
+  const logPath = path.join(artifactDir, 'codex-worker.log');
+  writeFileSync(logPath, '', 'utf8');
+  const logMtime = new Date('2026-06-01T05:34:30.000Z');
+  utimesSync(logPath, logMtime, logMtime);
+  const { jobPath } = seedInProgressJob(rootDir, {
+    jobId: 'laceyenterprises__agent-os-pr-1227-silent-worker',
+    prNumber: 1227,
+    spawnedAt: '2026-06-01T05:00:00.000Z',
+    lastHeartbeatAt: '2026-06-01T05:00:00.000Z',
+    worker: {
+      logPath: path.relative(rootDir, logPath),
+    },
+  });
+
+  const heartbeatResult = emitHeartbeatsForActiveJobs({
+    rootDir,
+    nowMs: Date.parse('2026-06-01T05:34:59.000Z'),
+    isWorkerAlive: (pid) => pid === 99999,
+  });
+  const sweepResult = sweepStuckInProgressClaims({
+    rootDir,
+    nowMs: Date.parse('2026-06-01T05:35:00.000Z'),
+  });
+
+  assert.equal(heartbeatResult.touched, 0);
+  assert.equal(sweepResult.reclaimed, 1);
+  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
+  const stoppedJob = readJobAtPath(stoppedPath);
+  assert.equal(stoppedJob.remediationWorker?.reclaimSource, 'lastHeartbeatAt');
+});
+
+test('sweepStuckInProgressClaims prefers artifact progress over synthetic heartbeat freshness', () => {
+  const rootDir = makeRoot();
+  const { jobPath } = seedInProgressJob(rootDir, {
+    jobId: 'laceyenterprises__agent-os-pr-1227-stale-artifact-progress',
+    prNumber: 1227,
+    lastHeartbeatAt: '2026-06-01T05:34:59.000Z',
+  });
+  const job = readJobAtPath(jobPath);
+  writeFollowUpJob(jobPath, {
+    ...job,
+    lastWorkerArtifactProgressAt: '2026-06-01T05:00:00.000Z',
+  });
+
+  const result = sweepStuckInProgressClaims({
+    rootDir,
+    nowMs: Date.parse('2026-06-01T05:35:00.000Z'),
+  });
+
+  assert.equal(result.reclaimed, 1);
+  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(jobPath));
+  const stoppedJob = readJobAtPath(stoppedPath);
+  assert.equal(stoppedJob.remediationWorker?.reclaimSource, 'lastWorkerArtifactProgressAt');
+});
+
+test('resolveWorkerArtifactProgressMs ignores empty artifacts', () => {
+  const rootDir = makeRoot();
+  const artifactDir = path.join(rootDir, 'artifacts');
+  mkdirSync(artifactDir, { recursive: true });
+  const emptyLogPath = path.join(artifactDir, 'codex-worker.log');
+  const outputPath = path.join(artifactDir, 'codex-last-message.md');
+  writeFileSync(emptyLogPath, '', 'utf8');
+  writeFileSync(outputPath, 'done\n', 'utf8');
+  const emptyMtime = new Date('2026-06-01T05:34:30.000Z');
+  const outputMtime = new Date('2026-06-01T05:34:00.000Z');
+  utimesSync(emptyLogPath, emptyMtime, emptyMtime);
+  utimesSync(outputPath, outputMtime, outputMtime);
+  const { job } = seedInProgressJob(rootDir, {
+    worker: {
+      logPath: path.relative(rootDir, emptyLogPath),
+      outputPath,
+    },
+  });
+
+  const progress = resolveWorkerArtifactProgressMs(rootDir, job);
+
+  assert.equal(progress.source, 'remediationWorker.outputPath');
+  assert.equal(new Date(progress.sourceMs).toISOString(), '2026-06-01T05:34:00.000Z');
+});
+
+test('normalizeWorkerArtifactProgressMs floors fractional stat timestamps', () => {
+  assert.equal(normalizeWorkerArtifactProgressMs(1_717_238_070_123.987), 1_717_238_070_123);
+  assert.equal(normalizeWorkerArtifactProgressMs(Number.NaN), null);
 });
 
 test('sweepStuckInProgressClaims: env var threshold is honored', () => {

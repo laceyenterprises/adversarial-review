@@ -6,10 +6,11 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  statSync,
   writeSync,
 } from 'node:fs';
 import { hostname } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import fsExt from 'fs-ext';
 import { resolveAdversarialReviewStateDir } from './reviewer-fence.mjs';
 
@@ -25,6 +26,7 @@ const {
 const DAEMON_SINGLETON_SCHEMA_VERSION = 1;
 const DAEMON_SINGLETON_DIR_NAME = 'daemon-singletons';
 const DAEMON_SINGLETON_HELD_CODE = 'ADVERSARIAL_DAEMON_SINGLETON_HELD';
+const DAEMON_SINGLETON_OWNER_MISMATCH_CODE = 'ADVERSARIAL_DAEMON_SINGLETON_OWNER_MISMATCH';
 
 class DaemonSingletonLockHeldError extends Error {
   constructor({ daemonName, lockPath, holder }) {
@@ -49,10 +51,58 @@ function normalizeDaemonName(daemonName) {
   return normalized;
 }
 
+function currentProcessUid(getUidImpl = process.getuid) {
+  if (typeof getUidImpl !== 'function') return null;
+  const uid = Number(getUidImpl());
+  return Number.isInteger(uid) && uid >= 0 ? uid : null;
+}
+
+function nearestExistingPath(path, { existsSyncImpl = existsSync } = {}) {
+  let current = path;
+  while (current && !existsSyncImpl(current)) {
+    const parent = dirname(current);
+    if (parent === current) return parent;
+    current = parent;
+  }
+  return current || path;
+}
+
+function assertDaemonSingletonOwnerCompatible(
+  path,
+  {
+    getUidImpl = process.getuid,
+    existsSyncImpl = existsSync,
+    statSyncImpl = statSync,
+  } = {}
+) {
+  const uid = currentProcessUid(getUidImpl);
+  if (uid === null) return { checked: false, reason: 'uid-unavailable' };
+
+  const ownerPath = nearestExistingPath(path, { existsSyncImpl });
+  const stat = statSyncImpl(ownerPath);
+  if (Number(stat.uid) !== uid) {
+    const err = new Error(
+      `refusing daemon singleton write under ${path}: ${ownerPath} is owned by uid ${stat.uid}, ` +
+      `but current process uid is ${uid}`
+    );
+    err.code = DAEMON_SINGLETON_OWNER_MISMATCH_CODE;
+    err.path = path;
+    err.ownerPath = ownerPath;
+    err.ownerUid = stat.uid;
+    err.processUid = uid;
+    throw err;
+  }
+  return { checked: true, ownerPath, uid };
+}
+
 function resolveDaemonSingletonDir(rootDir, env = process.env) {
   const stateDir = resolveAdversarialReviewStateDir(rootDir, env);
+  assertDaemonSingletonOwnerCompatible(stateDir);
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const lockDir = join(stateDir, DAEMON_SINGLETON_DIR_NAME);
+  assertDaemonSingletonOwnerCompatible(lockDir);
   mkdirSync(lockDir, { recursive: true, mode: 0o700 });
+  assertDaemonSingletonOwnerCompatible(lockDir);
   return lockDir;
 }
 
@@ -158,9 +208,11 @@ function acquireDaemonSingleton({
 
 export {
   DAEMON_SINGLETON_HELD_CODE,
+  DAEMON_SINGLETON_OWNER_MISMATCH_CODE,
   DAEMON_SINGLETON_SCHEMA_VERSION,
   DaemonSingletonLockHeldError,
   acquireDaemonSingleton,
+  assertDaemonSingletonOwnerCompatible,
   buildDaemonSingletonRecord,
   formatDaemonSingletonHolder,
   readDaemonSingletonHolder,

@@ -9,7 +9,9 @@ import test from 'node:test';
 
 import {
   DAEMON_SINGLETON_HELD_CODE,
+  DAEMON_SINGLETON_OWNER_MISMATCH_CODE,
   acquireDaemonSingleton,
+  assertDaemonSingletonOwnerCompatible,
   readDaemonSingletonHolder,
   resolveDaemonSingletonLockPath,
 } from '../src/daemon-singleton.mjs';
@@ -110,4 +112,25 @@ test('acquireDaemonSingleton rejects a second process for the same daemon', asyn
     rmSync(rootDir, { recursive: true, force: true });
   }
   assert.equal(stderr, '');
+});
+
+test('assertDaemonSingletonOwnerCompatible rejects cross-user state writes', () => {
+  assert.throws(
+    () => assertDaemonSingletonOwnerCompatible('/state/daemon-singletons', {
+      getUidImpl: () => 501,
+      existsSyncImpl: (path) => path === '/state',
+      statSyncImpl: (path) => {
+        assert.equal(path, '/state');
+        return { uid: 502 };
+      },
+    }),
+    (err) => {
+      assert.equal(err.code, DAEMON_SINGLETON_OWNER_MISMATCH_CODE);
+      assert.equal(err.path, '/state/daemon-singletons');
+      assert.equal(err.ownerPath, '/state');
+      assert.equal(err.ownerUid, 502);
+      assert.equal(err.processUid, 501);
+      return true;
+    }
+  );
 });

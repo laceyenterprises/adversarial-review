@@ -55,7 +55,10 @@ The Grafana dashboard lives at
 - `review_pipeline_stale_ama_closer_leases`: AMA closer leases in
   `pending`/`dispatched` with no terminal outcome past the age threshold.
 - `review_pipeline_zombie_reviewer_passes`: `reviewer_passes` rows still
-  `running` past the age threshold.
+  `running` past the health age threshold. The watcher poll timeout sweep
+  separately fails parseably aged running rows after
+  `reviewer.running_pass_timeout_seconds` with
+  `failureClass='reviewer-timeout'` / `failureReason='running-pass-timeout'`.
 - `review_pipeline_round_budget_anomalies`: follow-up jobs whose remediation
   rounds exceed the risk-class budget, or final-pass jobs stuck
   `awaiting-rereview` after the budget is exhausted.
@@ -82,7 +85,7 @@ The Grafana dashboard lives at
 | `review:remediation_backlog` | `follow-up-jobs/pending` has >5 jobs | ticket | pending job count returns to threshold or below |
 | `review:merge_stalled` | a `stopped:review-settled` job remains open for >3 watcher ticks | page | the PR is merged/closed or the settled job is no longer past threshold |
 | `review:ama_closer_lease_stale` | AMA closer lease is `pending`/`dispatched`, `terminalOutcome=null`, and older than 30m | page | the lease reaches terminal state or falls below the age threshold |
-| `review:reviewer_pass_zombie` | `reviewer_passes.status='running'` row is older than 30m | page | no running reviewer pass exceeds the age threshold |
+| `review:reviewer_pass_zombie` | `reviewer_passes.status='running'` row is older than 30m | page | no running reviewer pass exceeds the age threshold; the watcher timeout sweep should settle parseably aged rows as `failed` / `reviewer-timeout` |
 | `review:round_budget_anomaly` | remediation round count exceeds the risk-class budget, or a final-pass job remains `awaiting-rereview` after budget exhaustion | page | no follow-up job violates the risk-class round budget |
 | `review:daemon_liveness` | required local pipeline LaunchAgent is not loaded | page | adversarial watcher, adversarial follow-up, and dispatch daemon labels are loaded |
 | `review:dispatch_spawn_failures` | dispatch daemon stderr has recent closer/hammer spawn-failure signals over 1h | page | no matching recent dispatch daemon stderr lines remain |

@@ -135,9 +135,54 @@ test('reapRunningPassTimeouts reaps a stuck running pass older than threshold', 
     assert.equal(row.status, 'failed');
     assert.ok(row.ended_at);
     const metadata = JSON.parse(row.metadata_json);
-    assert.equal(metadata.failureClass, 'quota-exhausted');
+    assert.equal(metadata.failureClass, 'reviewer-timeout');
     assert.equal(metadata.failureReason, 'running-pass-timeout');
     assert.equal(metadata.timeoutThresholdSeconds, 3600);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reapRunningPassTimeouts does not overwrite a settled pass', () => {
+  const { rootDir, db } = setupDb();
+  try {
+    db.prepare(
+      `INSERT INTO reviewer_passes (
+         repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, ended_at, status, metadata_json
+       ) VALUES (?, ?, ?, ?, ?, datetime('now', '-7200 seconds'), datetime('now', '-60 seconds'), 'completed', ?)`
+    ).run('laceyenterprises/agent-os', 127, 1, 'codex', 'first-pass', JSON.stringify({ verdict: 'comment-only' }));
+
+    const result = reapRunningPassTimeouts({ db, rootDir });
+    assert.equal(result.reaped, 0);
+
+    const row = db.prepare(
+      `SELECT status, metadata_json, ended_at FROM reviewer_passes WHERE pr_number = 127`
+    ).get();
+    assert.equal(row.status, 'completed');
+    assert.ok(row.ended_at);
+    assert.deepEqual(JSON.parse(row.metadata_json), { verdict: 'comment-only' });
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reapRunningPassTimeouts skips running passes with unparsable started_at', () => {
+  const { rootDir, db } = setupDb();
+  try {
+    db.prepare(
+      `INSERT INTO reviewer_passes (
+         repo, pr_number, attempt_number, reviewer_class, pass_kind, started_at, status
+       ) VALUES (?, ?, ?, ?, ?, ?, 'running')`
+    ).run('laceyenterprises/agent-os', 128, 1, 'codex', 'first-pass', 'not-a-timestamp');
+
+    const result = reapRunningPassTimeouts({ db, rootDir });
+    assert.equal(result.reaped, 0);
+
+    const row = db.prepare(`SELECT status, ended_at FROM reviewer_passes WHERE pr_number = 128`).get();
+    assert.equal(row.status, 'running');
+    assert.equal(row.ended_at, null);
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

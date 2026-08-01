@@ -1,8 +1,24 @@
 import { loadRoleConfig } from './role-config.mjs';
-import { completeReviewerPass } from './reviewer-pass-tokens.mjs';
-import { QUOTA_EXHAUSTED_FAILURE_CLASS } from './quota-exhaustion.mjs';
 
 const DEFAULT_RUNNING_PASS_TIMEOUT_SECONDS = 3600;
+const RUNNING_PASS_TIMEOUT_FAILURE_CLASS = 'reviewer-timeout';
+const RUNNING_PASS_TIMEOUT_FAILURE_REASON = 'running-pass-timeout';
+
+function parseMetadataJson(raw) {
+  try {
+    const parsed = JSON.parse(raw || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function parseTimestampMs(value) {
+  if (!value) return null;
+  const text = String(value);
+  const ms = Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(text) ? text : `${text}Z`);
+  return Number.isFinite(ms) ? ms : null;
+}
 
 function resolveRunningPassTimeoutSeconds(env = process.env, options = {}) {
   const raw = loadRoleConfig({
@@ -22,34 +38,44 @@ function resolveRunningPassTimeoutSeconds(env = process.env, options = {}) {
   return parsed;
 }
 
-function reapRunningPassTimeouts({ db, rootDir, log = console } = {}) {
+function reapRunningPassTimeouts({ db, log = console } = {}) {
   const thresholdSeconds = resolveRunningPassTimeoutSeconds();
   const rows = db.prepare(
-    `SELECT pass_id, repo, pr_number, attempt_number, pass_kind, reviewer_class, reviewer_model, started_at
+    `SELECT pass_id, repo, pr_number, attempt_number, pass_kind, reviewer_class, reviewer_model, started_at, metadata_json
        FROM reviewer_passes
       WHERE status = 'running'
+        AND ended_at IS NULL
         AND datetime(started_at) < datetime('now', '-' || ? || ' seconds')`
   ).all(thresholdSeconds);
+
+  const update = db.prepare(
+    `UPDATE reviewer_passes
+        SET ended_at = ?,
+            status = 'failed',
+            metadata_json = ?
+      WHERE pass_id = ?
+        AND status = 'running'
+        AND ended_at IS NULL`
+  );
 
   let reaped = 0;
   for (const row of rows) {
     try {
-      completeReviewerPass(rootDir, {
-        repo: row.repo,
-        prNumber: row.pr_number,
-        attemptNumber: row.attempt_number,
-        passKind: row.pass_kind,
-        status: 'failed',
-        metadata: {
-          failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
-          failureReason: 'running-pass-timeout',
-          timeoutThresholdSeconds: thresholdSeconds,
-        },
-      });
-      const ageSeconds = Math.floor((Date.now() - new Date(`${row.started_at}Z`).getTime()) / 1000);
+      const startedMs = parseTimestampMs(row.started_at);
+      if (startedMs == null) continue;
+      const endedAt = new Date().toISOString();
+      const metadata = {
+        ...parseMetadataJson(row.metadata_json),
+        failureClass: RUNNING_PASS_TIMEOUT_FAILURE_CLASS,
+        failureReason: RUNNING_PASS_TIMEOUT_FAILURE_REASON,
+        timeoutThresholdSeconds: thresholdSeconds,
+      };
+      const result = update.run(endedAt, JSON.stringify(metadata), row.pass_id);
+      if (result.changes === 0) continue;
+      const ageSeconds = Math.floor((Date.now() - startedMs) / 1000);
       log.log(
         `[watcher] reviewer-pass reaper: pr=${row.repo}#${row.pr_number} reviewer=${row.reviewer_model || row.reviewer_class}\n` +
-        `          pass_id=${row.pass_id} status running->failed reason=running-pass-timeout\n` +
+        `          pass_id=${row.pass_id} status running->failed reason=${RUNNING_PASS_TIMEOUT_FAILURE_REASON}\n` +
         `          age=${ageSeconds}s threshold=${thresholdSeconds}s`
       );
       reaped++;

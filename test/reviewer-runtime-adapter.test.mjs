@@ -22,6 +22,8 @@ import {
   recoverReviewerRunRecords,
   resolveReviewerRuntimeName,
 } from '../src/adapters/reviewer-runtime/index.mjs';
+import { writeRuntimeStatusSnapshot } from '../src/runtime-status-snapshot.mjs';
+import { writeCanaryStatus } from '../src/adapters/agent-runtime/canary.mjs';
 import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 import {
   CANONICAL_OAUTH_STRIP_ENV as CLI_DIRECT_CANONICAL_OAUTH_STRIP_ENV,
@@ -102,6 +104,35 @@ function validReviewBody(verdict = 'Comment only') {
   ].join('\n');
 }
 
+function fixtureAgentRuntime() {
+  return {
+    async run(request) {
+      return {
+        runRef: request.idempotencyKey,
+        mode: 'os',
+        async await() {
+          return {
+            status: 'completed',
+            artifact: { kind: 'review', body: '## Verdict\nComment only' },
+            runtimeMode: 'os',
+          };
+        },
+        async cancel() {},
+        async reattach() {
+          return {
+            status: 'completed',
+            artifact: { kind: 'review', body: '## Verdict\nComment only' },
+            runtimeMode: 'os',
+          };
+        },
+      };
+    },
+    describe() {
+      return { id: 'fixture-agent-runtime', mode: 'os', capabilities: {} };
+    },
+  };
+}
+
 test('loads reviewer runtime by name from domain config with cli-direct default', () => {
   assert.equal(resolveReviewerRuntimeName({}), 'cli-direct');
   assert.equal(resolveReviewerRuntimeName({ reviewerRuntime: 'fixture-stub' }), 'fixture-stub');
@@ -130,14 +161,25 @@ test('loads reviewer runtime by name from domain config with cli-direct default'
   }
 });
 
-test('resolveReviewerRuntimeName forces agent-os-hq only in agentos mode', () => {
-  assert.equal(
-    resolveReviewerRuntimeName(
-      { reviewerRuntime: 'cli-direct' },
-      { orchestrationMode: 'agentos' },
-    ),
-    'agent-os-hq',
-  );
+test('resolveReviewerRuntimeName selects agent-runtime only when agentos cutover is ready', () => {
+  const rootDir = makeRoot();
+  try {
+    writeRuntimeStatusSnapshot(rootDir, {
+      mode: 'os',
+      probe: { healthy: true, components: {} },
+      config: { enabled: true },
+    });
+    writeCanaryStatus(rootDir, { status: 'pass' });
+    assert.equal(
+      resolveReviewerRuntimeName(
+        { id: 'code-pr', reviewerRuntime: 'agent-runtime', agentRuntimeSettleSmokeVerified: true },
+        { rootDir, orchestrationMode: 'agentos' },
+      ),
+      'agent-runtime',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
   assert.equal(
     resolveReviewerRuntimeName({}, { orchestrationMode: 'native' }),
     'cli-direct',
@@ -189,23 +231,29 @@ test('ADVERSARIAL_REVIEWER_RUNTIME ignores unknown/blank values instead of wedgi
   );
 });
 
-test('createReviewerRuntimeAdapterForDomain applies orchestration override without mutating domain JSON', () => {
+test('createReviewerRuntimeAdapterForDomain applies readiness-gated orchestration override without mutating domain JSON', () => {
   const rootDir = makeRoot();
   const domainPath = join(rootDir, 'domains', 'code-pr.json');
   const domainBody = JSON.stringify({
     id: 'code-pr',
-    reviewerRuntime: 'cli-direct',
+    reviewerRuntime: 'agent-runtime',
+    agentRuntimeSettleSmokeVerified: true,
   }, null, 2);
   writeFileSync(domainPath, `${domainBody}\n`);
   try {
-    const agentOsAdapter = createReviewerRuntimeAdapterForDomain({
+    writeRuntimeStatusSnapshot(rootDir, {
+      mode: 'os',
+      probe: { healthy: true, components: {} },
+      config: { enabled: true },
+    });
+    writeCanaryStatus(rootDir, { status: 'pass' });
+    const agentRuntimeAdapter = createReviewerRuntimeAdapterForDomain({
       rootDir,
       domainId: 'code-pr',
       orchestrationMode: 'agentos',
-      env: { HQ_ROOT: rootDir, USER: process.env.USER || 'test-user' },
-      hqBin: '/bin/hq',
+      agentRuntime: fixtureAgentRuntime(),
     });
-    assert.equal(agentOsAdapter.describe().id, 'agent-os-hq');
+    assert.equal(agentRuntimeAdapter.describe().id, 'agent-runtime');
 
     const nativeAdapter = createReviewerRuntimeAdapterForDomain({
       rootDir,
@@ -230,6 +278,54 @@ test('createReviewerRuntimeAdapterForDomain preserves explicit native non-defaul
       env: { CODEX_HOME: rootDir },
     });
     assert.equal(adapter.describe().id, 'acpx');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('resolveReviewerRuntimeName falls back to cli-direct when agent-runtime readiness is degraded', () => {
+  const rootDir = makeRoot();
+  try {
+    writeRuntimeStatusSnapshot(rootDir, {
+      mode: 'local',
+      probe: { healthy: false, components: { healthzOk: false } },
+      config: { enabled: true },
+    });
+    writeCanaryStatus(rootDir, { status: 'fail' });
+
+    assert.equal(
+      resolveReviewerRuntimeName(
+        { id: 'code-pr', reviewerRuntime: 'agent-runtime', agentRuntimeSettleSmokeVerified: true },
+        { rootDir, orchestrationMode: 'agentos' },
+      ),
+      'cli-direct',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('createReviewerRuntimeAdapterForDomain kill-switches back to standalone cli-direct immediately', () => {
+  const rootDir = makeRoot();
+  try {
+    writeRuntimeStatusSnapshot(rootDir, {
+      mode: 'os',
+      probe: { healthy: true, components: {} },
+      config: { enabled: true },
+    });
+    writeCanaryStatus(rootDir, { status: 'pass' });
+    const adapter = createReviewerRuntimeAdapterForDomain({
+      rootDir,
+      domainId: 'code-pr',
+      domainConfig: {
+        id: 'code-pr',
+        reviewerRuntime: 'agent-runtime',
+        agentRuntimeSettleSmokeVerified: true,
+      },
+      orchestrationMode: 'agentos',
+      env: { ADVERSARIAL_REVIEWER_RUNTIME: 'cli-direct' },
+    });
+    assert.equal(adapter.describe().id, 'cli-direct');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

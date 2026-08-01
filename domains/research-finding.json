@@ -4,6 +4,7 @@
   "subjectChannel": "markdown-file",
   "commsChannel": "slack-thread",
   "reviewerRuntime": "fixture-stub",
+  "agentRuntimeSettleSmokeVerified": false,
   "operatorSurface": {
     "triageSync": "linear"
   },

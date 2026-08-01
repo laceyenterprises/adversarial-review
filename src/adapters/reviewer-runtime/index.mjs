@@ -6,18 +6,16 @@ import { createFixtureStubReviewerRuntimeAdapter } from './fixture-stub/index.mj
 import { pruneReviewerRunRecords, readRecoverableReviewerRunRecords } from './run-state.mjs';
 import { resolveReviewerLeaseRecoveryEnabled } from '../../reviewer-lease.mjs';
 import { loadDomainConfig } from '../../domain-config.mjs';
-
-const KNOWN_REVIEWER_RUNTIME_NAMES = new Set([
-  'agent-runtime',
-  'acpx',
-  'cli-direct',
-  'fixture-stub',
-  'agent-os-hq',
-]);
+import {
+  KNOWN_REVIEWER_RUNTIME_NAMES,
+  requestedReviewerRuntime,
+  resolveReviewerRuntimeCutover,
+  trimEnvOverride,
+} from '../../reviewer-runtime-cutover.mjs';
 
 function resolveReviewerRuntimeName(
   domainConfig = {},
-  { orchestrationMode = 'native', env = process.env } = {},
+  { rootDir = null, orchestrationMode = 'native', env = process.env, now, readSnapshotImpl, readCanaryImpl } = {},
 ) {
   // RPR-01 emergency operator kill-switch: force a reviewer runtime WITHOUT
   // editing (and re-deploying) the tracked domain config. This exists because a
@@ -26,7 +24,7 @@ function resolveReviewerRuntimeName(
   // was no fast lever to override the runtime live. Only a known adapter name is
   // honored — an unknown value is ignored (not thrown) so a typo in the env can
   // never wedge the reviewer.
-  const forced = String(env?.ADVERSARIAL_REVIEWER_RUNTIME || '').trim();
+  const forced = trimEnvOverride(env);
   if (forced) {
     if (KNOWN_REVIEWER_RUNTIME_NAMES.has(forced)) {
       return forced;
@@ -36,10 +34,20 @@ function resolveReviewerRuntimeName(
         `(${[...KNOWN_REVIEWER_RUNTIME_NAMES].join(', ')}); falling through to domain config`,
     );
   }
-  if (orchestrationMode === 'agentos') {
-    return 'agent-os-hq';
+
+  const requestedRuntime = requestedReviewerRuntime(domainConfig);
+  if (requestedRuntime === 'agent-runtime') {
+    return resolveReviewerRuntimeCutover({
+      rootDir,
+      domainConfig,
+      orchestrationMode,
+      env: {},
+      now,
+      readSnapshotImpl,
+      readCanaryImpl,
+    }).selectedRuntime;
   }
-  return domainConfig.reviewerRuntime || 'cli-direct';
+  return requestedRuntime;
 }
 
 function createReviewerRuntimeAdapterByName(name = 'cli-direct', options = {}) {
@@ -66,7 +74,7 @@ function createReviewerRuntimeAdapterForDomain({
   orchestrationMode = 'native',
   ...options
 }) {
-  const runtimeName = resolveReviewerRuntimeName(domainConfig, { orchestrationMode });
+  const runtimeName = resolveReviewerRuntimeName(domainConfig, { rootDir, orchestrationMode, env: options.env });
   return createReviewerRuntimeAdapterByName(runtimeName, {
     rootDir,
     domainConfig,

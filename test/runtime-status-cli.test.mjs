@@ -88,6 +88,7 @@ test('renders the SPEC Win 1 status block from durable artifacts', async () => {
       'last resume:   2026-07-17T09:12:04.000Z -> os     (6 healthy probes / 5m)',
       'runs (24h): os=41 local=7   reconciled-on-resume: 2 adopted, 0 duplicated',
       'fallback canary: PASS 2026-07-17T06:00:12.000Z (local fixture review, verdict=comment-only, 94s)',
+      'reviewer cutover: not requested',
     ].join('\n'));
 
     // JSON model carries the same facts for tooling.
@@ -97,6 +98,7 @@ test('renders the SPEC Win 1 status block from durable artifacts', async () => {
     assert.equal(model.reconcile.adopted, 2);
     assert.equal(model.reconcile.duplicated, 0);
     assert.equal(model.canary.status, 'pass');
+    assert.equal(model.reviewerCutover, null);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -114,6 +116,7 @@ test('degrades gracefully with no artifacts: unknown probe, none/never lines, os
     assert.equal(lines[3], 'last resume:   none');
     assert.match(lines[4], /^runs \(24h\): os=0 local=0\s+reconciled-on-resume: n\/a$/);
     assert.equal(lines[5], 'fallback canary: never run');
+    assert.equal(lines[6], 'reviewer cutover: not requested');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -153,6 +156,36 @@ test('runtimeMain prints the block and returns 0; --json returns the model', () 
     const parsed = JSON.parse(out);
     assert.equal(parsed.mode, 'os');
     assert.equal(parsed.runs.total, 0);
+    assert.equal(parsed.reviewerCutover, null);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('runtime status surfaces reviewer cutover refusal reasons for code-pr', () => {
+  const rootDir = tmpRoot();
+  try {
+    mkdirSync(join(rootDir, 'domains'), { recursive: true });
+    writeFileSync(join(rootDir, 'domains', 'code-pr.json'), JSON.stringify({
+      id: 'code-pr',
+      reviewerRuntime: 'agent-runtime',
+      agentRuntimeSettleSmokeVerified: true,
+    }));
+    writeRuntimeStatusSnapshot(rootDir, {
+      mode: 'local',
+      probe: { healthy: false, components: { healthzOk: false } },
+      config: { enabled: true },
+    });
+    writeCanaryStatus(rootDir, { status: 'fail', at: '2026-07-17T06:00:12.000Z', durationMs: 94_000 });
+    const model = buildRuntimeStatus(rootDir, {
+      now: () => new Date('2026-07-17T12:00:00.000Z'),
+      env: { AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos' },
+    });
+    const line = renderRuntimeStatus(model).split('\n')[6];
+    assert.equal(model.reviewerCutover.selectedRuntime, 'cli-direct');
+    assert.equal(model.reviewerCutover.state, 'refused');
+    assert.match(line, /reviewer cutover: REFUSED cli-direct/);
+    assert.match(line, /runtime-not-os-healthy/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

@@ -110,6 +110,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { reapRunningPassTimeouts } from '../src/reviewer-pass-reaper.mjs';
+import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from '../src/reviewer-lease.mjs';
 
 function setupDb() {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'reviewer-timeout-'));
@@ -204,6 +205,125 @@ test('reapRunningPassTimeouts releases matching reviewed_prs claim for retry', (
     assert.match(review.failure_message, /^\[reviewer-timeout\]/);
     assert.equal(review.reviewer_lease_expires_at, null);
     assert.equal(review.infra_auto_recover_attempts, 1);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reapRunningPassTimeouts fails cap-exhausted claim when pass lacks session metadata', () => {
+  const { rootDir, db } = setupDb();
+  try {
+    const claimStartedAt = new Date(Date.now() - 3_607_000).toISOString();
+    const passStartedAt = new Date(Date.now() - 3_605_000).toISOString();
+    db.prepare(
+      `INSERT INTO reviewed_prs (
+         repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+         reviewer_session_uuid,
+         reviewer_started_at, reviewer_head_sha, reviewer_lease_expires_at,
+         infra_auto_recover_attempts
+       ) VALUES (?, ?, ?, ?, 'open', 'reviewing', ?, ?, ?, ?, ?)`
+    ).run(
+      'laceyenterprises/agent-os',
+      131,
+      claimStartedAt,
+      'codex',
+      'session-131',
+      claimStartedAt,
+      'abc123',
+      new Date(Date.now() - 1_000).toISOString(),
+      DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS
+    );
+    db.prepare(
+      `INSERT INTO reviewer_passes (
+         repo, pr_number, attempt_number, reviewer_class, pass_kind,
+         started_at, status, head_sha, metadata_json
+       ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)`
+    ).run(
+      'laceyenterprises/agent-os',
+      131,
+      1,
+      'codex',
+      'first-pass',
+      passStartedAt,
+      'abc123',
+      JSON.stringify({})
+    );
+
+    const result = reapRunningPassTimeouts({ db, rootDir, log: { log() {}, warn() {}, error() {} } });
+    assert.equal(result.reaped, 1);
+    assert.equal(result.reviewClaimsReleased, 0);
+    assert.equal(result.reviewClaimsFailed, 1);
+
+    const pass = db.prepare(
+      `SELECT status, metadata_json, ended_at FROM reviewer_passes WHERE pr_number = 131`
+    ).get();
+    assert.equal(pass.status, 'failed');
+    assert.ok(pass.ended_at);
+    assert.equal(JSON.parse(pass.metadata_json).failureClass, 'reviewer-timeout');
+
+    const review = db.prepare(
+      `SELECT review_status, failed_at, failure_message, reviewer_lease_expires_at,
+              infra_auto_recover_attempts
+         FROM reviewed_prs
+        WHERE pr_number = 131`
+    ).get();
+    assert.equal(review.review_status, 'failed');
+    assert.ok(review.failed_at);
+    assert.match(review.failure_message, /infra auto-recovery cap exhausted/);
+    assert.equal(review.reviewer_lease_expires_at, null);
+    assert.equal(review.infra_auto_recover_attempts, DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('reapRunningPassTimeouts does not fall back when pass session metadata conflicts', () => {
+  const { rootDir, db } = setupDb();
+  try {
+    const startedAt = new Date(Date.now() - 3_605_000).toISOString();
+    db.prepare(
+      `INSERT INTO reviewed_prs (
+         repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+         reviewer_session_uuid, reviewer_started_at, reviewer_head_sha,
+         infra_auto_recover_attempts
+       ) VALUES (?, ?, ?, ?, 'open', 'reviewing', ?, ?, ?, 0)`
+    ).run(
+      'laceyenterprises/agent-os',
+      132,
+      startedAt,
+      'codex',
+      'active-session',
+      startedAt,
+      'abc123'
+    );
+    db.prepare(
+      `INSERT INTO reviewer_passes (
+         repo, pr_number, attempt_number, reviewer_class, pass_kind,
+         started_at, status, head_sha, metadata_json
+       ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)`
+    ).run(
+      'laceyenterprises/agent-os',
+      132,
+      1,
+      'codex',
+      'first-pass',
+      startedAt,
+      'abc123',
+      JSON.stringify({ reviewerSessionUuid: 'stale-session' })
+    );
+
+    const result = reapRunningPassTimeouts({ db, rootDir, log: { log() {}, warn() {}, error() {} } });
+    assert.equal(result.reaped, 0);
+    assert.equal(result.reviewClaimsReleased, 0);
+    assert.equal(result.reviewClaimsFailed, 0);
+
+    const pass = db.prepare(`SELECT status, ended_at FROM reviewer_passes WHERE pr_number = 132`).get();
+    assert.equal(pass.status, 'running');
+    assert.equal(pass.ended_at, null);
+    const review = db.prepare(`SELECT review_status FROM reviewed_prs WHERE pr_number = 132`).get();
+    assert.equal(review.review_status, 'reviewing');
   } finally {
     db.close();
     rmSync(rootDir, { recursive: true, force: true });

@@ -60,7 +60,9 @@ The Grafana dashboard lives at
   `reviewer.running_pass_timeout_seconds` with
   `failureClass='reviewer-timeout'` / `failureReason='running-pass-timeout'`
   and releases a still-matching `reviewed_prs.reviewing` claim through the
-  transient `pending-upstream` timeout path.
+  transient `pending-upstream` timeout path. Matching prefers pass metadata
+  `reviewerSessionUuid`; legacy pass rows missing that field can match by same
+  head plus a pass start at or after the durable claim start.
 - `review_pipeline_round_budget_anomalies`: follow-up jobs whose remediation
   rounds exceed the risk-class budget, or final-pass jobs stuck
   `awaiting-rereview` after the budget is exhausted.

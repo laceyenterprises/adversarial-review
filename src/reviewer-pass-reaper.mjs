@@ -47,6 +47,17 @@ function resolveRunningPassTimeoutSeconds(env = process.env, options = {}) {
   return parsed;
 }
 
+const ACTIVE_REVIEW_CLAIM_PREDICATE = `(
+          (? IS NOT NULL AND reviewer_session_uuid = ?) OR
+          (
+            ? IS NULL AND
+            reviewer_started_at IS NOT NULL AND
+            ? IS NOT NULL AND
+            julianday(?) >= julianday(reviewer_started_at) AND
+            (? IS NULL OR reviewer_head_sha IS NULL OR reviewer_head_sha = ?)
+          )
+        )`;
+
 function buildTimeoutFailureMessage({ thresholdSeconds, ageSeconds, capExhausted = false } = {}) {
   const suffix = capExhausted
     ? `; infra auto-recovery cap exhausted`
@@ -83,13 +94,7 @@ function reapRunningPassTimeouts({ db, rootDir = process.cwd(), log = console } 
       WHERE repo = ?
         AND pr_number = ?
         AND review_status = 'reviewing'
-        AND (
-          (? IS NOT NULL AND reviewer_session_uuid = ?) OR
-          (
-            COALESCE(reviewer_started_at, '') = COALESCE(?, '') AND
-            (? IS NULL OR reviewer_head_sha IS NULL OR reviewer_head_sha = ?)
-          )
-        )
+        AND ${ACTIVE_REVIEW_CLAIM_PREDICATE}
         AND COALESCE(infra_auto_recover_attempts, 0) < ?`
   );
   const failReviewClaimAtCap = db.prepare(
@@ -101,13 +106,7 @@ function reapRunningPassTimeouts({ db, rootDir = process.cwd(), log = console } 
       WHERE repo = ?
         AND pr_number = ?
         AND review_status = 'reviewing'
-        AND (
-          (? IS NOT NULL AND reviewer_session_uuid = ?) OR
-          (
-            COALESCE(reviewer_started_at, '') = COALESCE(?, '') AND
-            (? IS NULL OR reviewer_head_sha IS NULL OR reviewer_head_sha = ?)
-          )
-        )
+        AND ${ACTIVE_REVIEW_CLAIM_PREDICATE}
         AND COALESCE(infra_auto_recover_attempts, 0) >= ?`
   );
   const updatePass = db.prepare(
@@ -135,6 +134,8 @@ function reapRunningPassTimeouts({ db, rootDir = process.cwd(), log = console } 
         row.pr_number,
         reviewerSessionUuid,
         reviewerSessionUuid,
+        reviewerSessionUuid,
+        row.started_at,
         row.started_at,
         row.head_sha || null,
         row.head_sha || null,

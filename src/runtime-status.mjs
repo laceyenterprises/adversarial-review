@@ -18,6 +18,8 @@ import { routerAuditDir } from './adapters/agent-runtime/router/audit.mjs';
 import { summarizeRuntimeRuns } from './adapters/agent-runtime/run-ledger.mjs';
 import { readRuntimeStatusSnapshot } from './runtime-status-snapshot.mjs';
 import { readCanaryStatus } from './adapters/agent-runtime/canary.mjs';
+import { loadDomainConfig } from './domain-config.mjs';
+import { resolveReviewerRuntimeCutover } from './reviewer-runtime-cutover.mjs';
 
 const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -128,6 +130,8 @@ function buildRuntimeStatus(rootDir, {
   readAuditRowsImpl = readAuditRows,
   summarizeRunsImpl = summarizeRuntimeRuns,
   readCanaryImpl = readCanaryStatus,
+  loadDomainConfigImpl = loadDomainConfig,
+  env = process.env,
 } = {}) {
   const snapshot = readSnapshotImpl(rootDir);
   const snapStatus = snapshot?.status || null;
@@ -165,6 +169,35 @@ function buildRuntimeStatus(rootDir, {
 
   const runs = summarizeRunsImpl(rootDir, { windowMs, now });
   const canary = readCanaryImpl(rootDir);
+  let reviewerCutover = null;
+  try {
+    const codePrDomain = loadDomainConfigImpl(rootDir, 'code-pr');
+    if (codePrDomain) {
+      reviewerCutover = resolveReviewerRuntimeCutover({
+        rootDir,
+        domainConfig: codePrDomain,
+        orchestrationMode: env?.AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE || 'native',
+        env,
+        now,
+        readSnapshotImpl,
+        readCanaryImpl,
+      });
+    }
+  } catch {
+    if (String(env?.ADVERSARIAL_REVIEWER_RUNTIME || '').trim()) {
+      reviewerCutover = resolveReviewerRuntimeCutover({
+        rootDir,
+        domainConfig: { id: 'code-pr' },
+        orchestrationMode: env?.AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE || 'native',
+        env,
+        now,
+        readSnapshotImpl,
+        readCanaryImpl,
+      });
+    } else {
+      reviewerCutover = null;
+    }
+  }
 
   return {
     generatedAt: now().toISOString(),
@@ -180,6 +213,7 @@ function buildRuntimeStatus(rootDir, {
     reconcile: lastResume?.reconcile || snapStatus?.reconciled || null,
     runs,
     canary: canary || null,
+    reviewerCutover,
   };
 }
 
@@ -252,6 +286,18 @@ function renderCanaryLine(canary) {
   return `fallback canary: ${verdict} ${canary.at} (${detail}, ${durationS})`;
 }
 
+function renderReviewerCutoverLine(cutover) {
+  if (!cutover || (cutover.requestedRuntime !== 'agent-runtime' && cutover.state !== 'forced')) {
+    return 'reviewer cutover: not requested';
+  }
+  const state = String(cutover.state || 'unknown').toUpperCase();
+  if (cutover.state === 'ready') {
+    return `reviewer cutover: ${state} ${cutover.selectedRuntime} (${cutover.domainId})`;
+  }
+  const reason = cutover.reasons?.[0]?.code || 'unknown';
+  return `reviewer cutover: ${state} ${cutover.selectedRuntime} (${cutover.domainId}; ${reason})`;
+}
+
 // Render the model to the SPEC §1 Win 1 text block.
 function renderRuntimeStatus(model) {
   const lines = [];
@@ -261,6 +307,7 @@ function renderRuntimeStatus(model) {
   lines.push(renderResumeLine(model.lastResume));
   lines.push(renderRunsLine(model.runs, model.reconcile));
   lines.push(renderCanaryLine(model.canary));
+  lines.push(renderReviewerCutoverLine(model.reviewerCutover));
   return lines.join('\n');
 }
 

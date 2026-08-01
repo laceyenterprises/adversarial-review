@@ -601,6 +601,19 @@ test('buildRemediationPrompt uses the job base branch in the rebase and contamin
   assert.doesNotMatch(prompt, /git rebase origin\/main/);
 });
 
+test('buildRemediationPrompt retries transient GitHub base-fetch failures before operator handoff', () => {
+  const prompt = buildRemediationPrompt(makeJob(), {
+    template: 'You are a remediation worker.',
+    ...testReplyContext(),
+  });
+
+  assert.match(prompt, /git fetch --prune origin main/);
+  assert.match(prompt, /Recv failure: Operation timed out/);
+  assert.match(prompt, /retry the same exact fetch up to three total attempts/);
+  assert.match(prompt, /Do not retry permanent auth, permission, repository-not-found, or missing-ref errors/);
+  assert.match(prompt, /operationalBlockers\[\]` entry titled `fetch-origin-main`/);
+});
+
 test('remediator stage prompt snippets abort on unresolved rebase conflicts', () => {
   for (const file of [
     'prompts/code-pr/remediator.first.md',

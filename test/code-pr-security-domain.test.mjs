@@ -51,7 +51,8 @@ test('code-pr-security domain config mirrors the code-pr shape and reuses github
   // Reuses the github-pr subject/comms adapters and the github-pr operator surface.
   assert.equal(security.subjectChannel, 'github-pr');
   assert.equal(security.commsChannel, 'github-pr-comments');
-  assert.equal(security.reviewerRuntime, 'cli-direct');
+  assert.equal(security.reviewerRuntime, 'agent-runtime');
+  assert.equal(security.agentRuntimeSettleSmokeVerified, true);
   assert.equal(security.operatorSurface.controls, 'github-pr-label-controls');
   assert.equal(security.operatorSurface.triageSync, 'linear');
   // Carries its own security prompt set, not code-pr's.

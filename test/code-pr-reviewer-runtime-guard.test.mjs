@@ -25,7 +25,7 @@ const codePrDomainPath = join(__dirname, '..', 'domains', 'code-pr.json');
 // `agentRuntimeSettleSmokeVerified: true` in domains/code-pr.json in the SAME PR
 // that lands the smoke evidence. A pack can no longer casually flip the reviewer
 // runtime without this test failing at PR time.
-const SETTLE_PROVEN_REVIEWER_RUNTIMES = new Set(['cli-direct']);
+const SETTLE_PROVEN_REVIEWER_RUNTIMES = new Set(['cli-direct', 'agent-runtime']);
 
 test('code-pr reviewerRuntime is settle-proven (RPR-01 guard)', () => {
   const domain = JSON.parse(readFileSync(codePrDomainPath, 'utf8'));

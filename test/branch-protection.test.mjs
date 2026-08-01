@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-context.mjs';
 import {
+  addRequiredStatusCheckContext,
   createBranchProtectionChecker,
   fetchAdversarialGateBranchProtection,
   formatBranchProtectionWarning,
@@ -74,6 +75,64 @@ test('fetchAdversarialGateBranchProtection returns a structured failure for inva
   assert.equal(result.reason, 'invalid-status-context-config');
   assert.equal(result.context, 'invalid-status-context-config');
   assert.match(result.error, /ADV_GATE_STATUS_CONTEXT must not contain CR or LF/);
+});
+
+test('addRequiredStatusCheckContext retries transient gh failures before succeeding', async () => {
+  const calls = [];
+  const requiredContexts = await addRequiredStatusCheckContext({
+    repoPath: 'laceyenterprises/adversarial-review',
+    baseBranch: 'main',
+    context: ADVERSARIAL_GATE_CONTEXT,
+    env: {
+      GITHUB_TOKEN: 'token-123',
+      PATH: '/usr/bin:/bin',
+      HOME: '/tmp/test-home',
+    },
+    retryOptions: {
+      retryDelayMs: 0,
+      sleepImpl: async () => {},
+    },
+    execFileImpl: async (command, args, options) => {
+      calls.push({ command, args, options });
+      if (calls.length === 1) {
+        const err = new Error('TLS handshake timeout');
+        err.stderr = 'TLS handshake timeout';
+        throw err;
+      }
+      return { stdout: JSON.stringify(['ci/test', ADVERSARIAL_GATE_CONTEXT]) };
+    },
+  });
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(requiredContexts, [ADVERSARIAL_GATE_CONTEXT, 'ci/test']);
+});
+
+test('addRequiredStatusCheckContext does not retry non-transient gh failures', async () => {
+  let calls = 0;
+  await assert.rejects(
+    addRequiredStatusCheckContext({
+      repoPath: 'laceyenterprises/adversarial-review',
+      baseBranch: 'main',
+      context: ADVERSARIAL_GATE_CONTEXT,
+      env: {
+        GITHUB_TOKEN: 'token-123',
+        PATH: '/usr/bin:/bin',
+        HOME: '/tmp/test-home',
+      },
+      retryOptions: {
+        retryDelayMs: 0,
+        sleepImpl: async () => {},
+      },
+      execFileImpl: async () => {
+        calls += 1;
+        const err = new Error('HTTP 403 Forbidden');
+        err.stderr = 'HTTP 403 Forbidden';
+        throw err;
+      },
+    }),
+    /HTTP 403 Forbidden/,
+  );
+  assert.equal(calls, 1);
 });
 
 test('warnForMissingAdversarialGateBranchProtection logs structured warnings for missing context', async () => {

@@ -35,6 +35,7 @@ import {
 import { normalizeGithubMergeability } from '../src/github-mergeability.mjs';
 import { extractNonBlockingFindingIdentities } from '../src/kernel/remediation-reply.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from '../src/ama/reviewer-authority.mjs';
+import { resolveGateStatusContext } from '../src/adversarial-gate-context.mjs';
 import { extractReviewVerdict, normalizeReviewVerdict } from '../src/kernel/verdict.mjs';
 
 // Blocking-finding state for a head with NO authoritative review body to
@@ -208,7 +209,7 @@ function isBranchProtectionUnavailableSentinel(value) {
 function classifyProtectionFixtureReason(value, requiredContexts) {
   if (isBranchProtectionUnavailableSentinel(value)) return 'branch-protection-unavailable-github-plan';
   if (String(value?.status || '').trim() === '404') return 'branch-protection-missing';
-  return requiredContexts.includes('agent-os/adversarial-gate')
+  return requiredContexts.includes(resolveGateStatusContext(process.env))
     ? 'required-context-present'
     : 'required-context-missing';
 }

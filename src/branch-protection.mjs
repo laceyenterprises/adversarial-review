@@ -50,6 +50,44 @@ function classifyGhProtectionError(err) {
   return 'branch-protection-check-failed';
 }
 
+function isTransientGhProtectionError(err) {
+  const text = [
+    err?.code,
+    err?.signal,
+    err?.stderr,
+    err?.stdout,
+    err?.message,
+  ].map((value) => String(value || '')).join('\n');
+  return /(?:TLS handshake|timed? out|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ECONNABORTED|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EIO|temporary failure|network is unreachable|socket hang up|rate limit|secondary rate limit|HTTP[ /]5[0-9][0-9]|(?:^|[^0-9])(?:500|502|503|504)(?:[^0-9]|$)|bad gateway|service unavailable|gateway timeout|server error)/i.test(text);
+}
+
+function sleep(ms) {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+async function execGhApiWithTransientRetry(command, args, options, {
+  maxAttempts = 3,
+  retryDelayMs = 250,
+  sleepImpl = sleep,
+} = {}) {
+  const attempts = Math.max(1, Number(maxAttempts) || 1);
+  let delayMs = Math.max(0, Number(retryDelayMs) || 0);
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await command('gh', args, options);
+    } catch (err) {
+      if (attempt >= attempts || !isTransientGhProtectionError(err)) {
+        throw err;
+      }
+      if (delayMs > 0) {
+        await sleepImpl(delayMs);
+        delayMs *= 2;
+      }
+    }
+  }
+  throw new Error('unreachable branch-protection gh retry state');
+}
+
 function sanitizePathFragment(value) {
   return String(value || '').replaceAll('/', '__').replace(/[^A-Za-z0-9._-]/g, '_');
 }
@@ -176,6 +214,7 @@ async function addRequiredStatusCheckContext({
   context,
   execFileImpl = execFileAsync,
   env = process.env,
+  retryOptions = {},
 } = {}) {
   const { owner, repo } = parseRepoSlug(repoPath);
   const branch = String(baseBranch || DEFAULT_BASE_BRANCH);
@@ -188,10 +227,15 @@ async function addRequiredStatusCheckContext({
     '-f',
     `contexts[]=${desiredContext}`,
   ];
-  const { stdout } = await execFileImpl('gh', args, {
-    env: allowlistedGhEnv(env),
-    maxBuffer: 2 * 1024 * 1024,
-  });
+  const { stdout } = await execGhApiWithTransientRetry(
+    execFileImpl,
+    args,
+    {
+      env: allowlistedGhEnv(env),
+      maxBuffer: 2 * 1024 * 1024,
+    },
+    retryOptions,
+  );
   const parsed = JSON.parse(String(stdout || '[]'));
   return Array.isArray(parsed)
     ? [...new Set(parsed.map((item) => String(item)).filter(Boolean))].sort()

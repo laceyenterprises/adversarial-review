@@ -1,0 +1,663 @@
+{
+  "planSchemaVersion": 2,
+  "planId": "adversarial-review-core-v1",
+  "specRef": "adversarial-review-core@2c2af26f2eda",
+  "parentTicket": null,
+  "linearTeam": "Laceyenterprises",
+  "tracking": "linear",
+  "defaults": {
+    "workerSpec": {
+      "workerClass": "claude-code",
+      "tools": [
+        "read",
+        "write",
+        "bash:git-safe"
+      ],
+      "commsAllowance": "none",
+      "budgetEnforcement": "best-effort",
+      "retryPolicy": {
+        "backoffSeconds": 0
+      }
+    }
+  },
+  "postMergeActions": {
+    "planPath": "modules/worker-pool/post-merge-actions/adversarial-review-core-official-record-bump.yaml",
+    "dispatchGate": {
+      "kind": "official-record-bump",
+      "completedSpecRef": "adversarial-review-core@2c2af26f2eda"
+    }
+  },
+  "linearProject": "Adversarial Review Core (ARC)",
+  "tickets": [
+    {
+      "id": "ARC-01",
+      "title": "v1 snapshot, maintenance branch, AMA freeze marker",
+      "scope": "Tag the adversarial-review repo HEAD as v1-working-snapshot, cut a v1-maintenance branch from it, record the fixture-e2e baseline (all existing domain fixture tests green at the tag, with the command list and results committed as docs/BASELINE-v1-snapshot.md), and add a FREEZE note to src/ama/ (README or header comment block) plus a cross-reference in docs stating v1 merge authority is bug-fix-only pending MA-v2 shadow promotion per docs/SPEC-merge-authority-v2.md. Tests: baseline fixture suite green at the tag; a grep-based freeze-note lint added to the repo test suite.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [],
+      "expectedDurationHours": 3,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-01-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-02",
+      "title": "Thread promptSet from domain config through reviewer and remediator",
+      "scope": "Replace the hardcoded REVIEWER_PROMPT_SET (src/reviewer.mjs:1554) and REMEDIATOR_PROMPT_SET (src/follow-up-remediation.mjs:65) constants with the domain's declared promptSet from domains/<id>.json, threaded through the existing kernel prompt-stage.mjs promptSet parameter. Prompt-set resolution failures fail loud at selection time, never silently fall back to code-pr. Tests: code-pr fixture parity proving byte-identical prompt assembly for the code-pr domain; research-finding fixture selects its own prompt set; unknown promptSet fails loud with a classified error.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-01"
+      ],
+      "expectedDurationHours": 5,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-02-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-03",
+      "title": "De-hardcode domainId; watcher iterates the domain registry",
+      "scope": "Remove the ~12 hardcoded domainId: 'code-pr' sites in src/watcher.mjs and the CODE_PR_DOMAIN_ID fallback in src/identity-shapes.mjs; introduce a domain registry loader that enumerates domains/*.json with an explicit registered/enabled flag, and make the watcher poll loop pump each registered domain through its own adapter set. code-pr remains the only enabled production domain after this ticket. Tests: code-pr behavior parity on fixtures; a two-domain fixture run proving per-domain adapter isolation (no cross-domain state bleed); registry loader validation failures fail loud.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-01"
+      ],
+      "expectedDurationHours": 8,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-03-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-04",
+      "title": "Security review domain (code-pr-security)",
+      "scope": "Add domains/code-pr-security.json and prompts/code-pr-security/ (reviewer + remediator, first/middle/last stages) carrying a security-review rubric (injection, authz, secret handling, supply chain, unsafe deserialization, SSRF), registered behind a config gate defaulting off. Reuses the github-pr subject/comms adapters. Tests: fixture e2e review -> remediation -> re-review -> converge on the new domain; prompt-set selection assertions; gate-off means the domain is not polled.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-02",
+        "ARC-03"
+      ],
+      "expectedDurationHours": 6,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-04-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-05",
+      "title": "AgentRuntime port contract + local runtime implementation",
+      "scope": "Define the AgentRuntime port in kernel contracts: run(request{role, promptSet, promptStage, subjectContent, workspaceRef, idempotencyKey, budget, timeoutMs}) -> handle{runRef, mode, await(), cancel(), reattach()} returning a structured RunResult{status, artifact?, failureClass?, usage?}. Implement the 'local' runtime as a refactor of the cli-direct path behind the port, preserving process-group isolation, forbidden-fallback env stripping, failure classification, atomic run records under data/reviewer-runs/, and adding a local admission layer composed of the existing memory-pressure gates, quota-exhaustion detection, and a per-run token/time cap. Tests: port contract typecheck under tsconfig.contracts.json; local runtime fixture spawn/cancel/reattach round-trips; admission refusal paths for memory pressure and quota exhaustion.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-01"
+      ],
+      "expectedDurationHours": 10,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-05-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-06",
+      "title": "os-dispatch runtime implementation (app-contract dispatch)",
+      "scope": "Implement the AgentRuntime port against the app-contract endpoint: reviews dispatch with task-kind review and completion-shape decision-only, returning the verdict as a structured ReviewArtifact (schemaVersion 2, per SPEC-adversarial-review-v2-app-architecture section 4.3); remediation dispatches with completion-shape branch-push. Builds on the AOM agent-os-hq seam; the existing vendored app-contract client is refactored INTO this adapter (published-SDK swap happens in ARC-24). Propagate idempotency keys as the app-contract request_id. Tests: stub-endpoint round-trip returning a verdict artifact; artifact schema validation (valid, missing-field, wrong-kind); idempotency-key propagation assertions; dispatch_status polling with terminal-state mapping.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-05"
+      ],
+      "expectedDurationHours": 10,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-06-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-07",
+      "title": "Health router: automatic failover and automatic resume",
+      "scope": "Implement the hybrid runtime router: probe = app-contract healthz AND rolling dispatch-acceptance latency p95 AND SSE liveness; OS-HEALTHY -> LOCAL-FALLBACK on 3 consecutive probe failures or a single hard contract error on a live dispatch; LOCAL-FALLBACK -> OS-RESUMING -> OS-HEALTHY on 6 consecutive healthy probes spanning at least 5 minutes (hysteresis, all thresholds config-tunable). Runs finish in the mode they started; on resume, reconcile every idempotency key possibly handed to the OS pre-failover via dispatch_status and ADOPT accepted-but-unobserved dispatches, never re-issue. Every transition emits an operator notice, an audit row in the app store, and a best-effort telemetry event. Tests: router state-machine unit tests including flap resistance and the hard-error fast path; reconcile-adopts fixture; audit-row and notice emission assertions.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-06"
+      ],
+      "expectedDurationHours": 10,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-07-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-08",
+      "title": "Unify remediation dispatch through the AgentRuntime port",
+      "scope": "Collapse the two forked remediation paths in src/follow-up-remediation.mjs (self-spawn via spawnDetachedCli vs legacy hq-dispatch via shouldDispatchRemediationViaHq) into AgentRuntime port calls routed by the health router; remediator role/worker-class selection moves to the role-registry default with the domain able to override. The workspace-prep responsibilities stay with the subject adapter. Tests: remediation fixture e2e through both runtimes (os stub + local); the forked-path functions are deleted and a grep gate proves absence; round/budget accounting parity with v1 fixtures.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-07"
+      ],
+      "expectedDurationHours": 8,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-08-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-09",
+      "title": "Fallback canary + failover drill + runtime status CLI",
+      "scope": "Add a daily scheduled synthetic review through the local runtime on a fixture domain that alerts on failure (the fallback must not rot); a drill script that kills OS endpoint connectivity in a sandboxed fixture harness, asserts automatic failover, restores connectivity, and asserts automatic resume with zero duplicate dispatches; and the 'runtime status' CLI surface from SPEC section 1 Win 1 (mode, probe detail, last failover/resume, 24h run counts by mode, reconcile stats, canary status). Tests: canary run wired into CI against fixtures; drill script asserting the full failover/resume cycle; status CLI snapshot tests.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-07"
+      ],
+      "expectedDurationHours": 6,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-09-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-10",
+      "title": "Delete bespoke harness code from reviewer.mjs and cli-direct",
+      "scope": "Remove the spawnClaude / spawnCodexReview / spawnGeminiReview / spawnAgyReview families from src/reviewer.mjs and both duplicated copies of model detection and token-usage parsing (reviewer.mjs and adapters/reviewer-runtime/cli-direct); reviewer.mjs shrinks to prompt assembly + artifact emission invoked by the runtimes. Any residual per-harness knowledge must live in OS worker classes, not this repo. Tests: fixture parity for review outputs across the local runtime; dead-code grep gate for the removed spawn family names; a line-count ratchet on reviewer.mjs enforced in CI.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-08"
+      ],
+      "expectedDurationHours": 8,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-10-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-11",
+      "title": "Kernel pipeline contract: stages, panels, aggregation",
+      "scope": "Introduce the review pipeline contract in kernel contracts: ordered Stage[] each with a panel of reviewer roles and an AggregationPolicy (unanimous-clean, any-blocking-blocks, quorum(n), weighted); per-stage round budgets by risk class plus a subject-level remediation ceiling; re-review after remediation re-runs the failed stage plus all downstream stages; every verdict pinned to the revisionRef it reviewed. SubjectState gains pipeline[] with panelVerdicts; latestVerdict becomes a deprecated alias resolving to the newest verdict of the active stage. Tests: contract typecheck; budget/ceiling unit matrix across risk classes; stage-invalidation semantics on revision advance; alias-compatibility fixtures.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-03"
+      ],
+      "expectedDurationHours": 8,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-11-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-12",
+      "title": "Role registry + comms identity binding",
+      "scope": "Add the roles.registry config shape (role id -> promptSet, workerClass or persona, taskKind, completionShape) with load-time validation of worker classes against the hq-published class list; implement the never-review-own-builder-class routing constraint kernel-side against SubjectState.builderClass; move per-role GitHub bot identity (botTokenEnv) out of adapters/subject/github-pr/routing.mjs into comms-adapter delivery config keyed by role id so the kernel and registry never see tokens. Tests: registry validation (unknown worker class fails at load); routing-constraint fixtures; comms delivery fixtures asserting per-role identity selection.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-11"
+      ],
+      "expectedDurationHours": 8,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-12-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-13",
+      "title": "Sequential two-stage pipeline live (code-quality -> security)",
+      "scope": "Wire the code-pr domain to a two-stage pipeline [code-quality, security] behind a config gate defaulting off; later stages run only when all prior stages are clean at the current revision; post the pipeline rollup comment (SPEC section 1 Win 2) through the comms adapter; prove downstream re-review semantics (remediation from stage-2 findings re-runs stage 2 at the same revision, not stage 1). Tests: fixture e2e covering both stages; downstream re-review fixture; gate-off preserves v1 single-stage behavior byte-for-byte; rollup rendering snapshots.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-04",
+        "ARC-12"
+      ],
+      "expectedDurationHours": 8,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-13-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-14",
+      "title": "Finalization port + v1 AMA wrapped unchanged",
+      "scope": "Define the finalization port in kernel contracts: evaluate(subjectState) -> FinalizationDecision (finalize-now | remediate | wait | halt | escalate) and execute(decision); implement trivial finalizers for non-code domains (mark-terminal, archive); wrap v1 AMA UNCHANGED behind the port for code-pr — wrapper only, zero behavior change, the freeze from ARC-01 holds. Tests: port typecheck; trivial-impl fixtures; v1-wrapper parity fixtures proving identical decisions/actions on recorded scenarios.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-11"
+      ],
+      "expectedDurationHours": 8,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-14-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-15",
+      "title": "MA-v2 finalization ledger + eligibility fold",
+      "scope": "Implement the merge-authority v2 core per docs/SPEC-merge-authority-v2.md sections 2-3: an append-only per-subject finalization event ledger in the app store (revision_advanced, verdict_recorded, checks_settled, attestation_recorded, remediation_dispatched/concluded, budget_exhausted, operator_override, finalized, halted), and a pure eligibility fold eligible(fold(events), policy) -> Decision. Head-move is an ordinary event; every external fact carries provenance (review commit_id, check-run id); strict_mode, exhaustion-always-closes, and all-comments-before-merge are explicit policy inputs; consume_attestations without recorded producers is a config-validation error at load. Tests: fold determinism property tests; replay-resume equivalence; regression fixtures for the six v1 failure classes (phantom die-before-merge, identity head-pin, ceiling+head-move deadlock, LHA premature cutover, CI impatience, verdict-at-wrong-head) each producing a safe decision.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-14"
+      ],
+      "expectedDurationHours": 10,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-15-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-16",
+      "title": "MA-v2 shadow mode + divergence telemetry",
+      "scope": "Run MA-v2 in shadow: ingest live events, log Decisions without acting; record every (v1 action, v2 decision) pair; implement the shadow-report CLI (SPEC section 1 Win 3) with divergence classification; write the bidirectional triage doc (a divergence is evidence about EITHER system — v1 is the known-buggy one). Fold errors or ledger unavailability emit escalate, never a guess. Tests: shadow harness replaying recorded v1 traces; divergence classifier fixtures; report CLI snapshots; fail-closed fold-error path.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-15"
+      ],
+      "expectedDurationHours": 8,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-16-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-17",
+      "title": "MA-v2 leased executor + promotion runbook (ships gated off)",
+      "scope": "Implement the single leased executor per subject: leases live in the app store (not GitHub labels); execute is idempotent with a re-fold guard (if the world moved since the decision, discard and re-decide); merge executes through the ARC-20 adjudicate surface with github-adapter pr-merge as the local-mode fallback; identity/attestation checks read through the ARC-22 surface. Ships GATED OFF — promotion is an operator action after the shadow gate clears; deliver the promotion runbook (gate criteria, one-flag rollback, kill-switch fail-closed audit). Tests: lease contention; re-fold discard on world-move; execute idempotency under repeat; kill-switch fail-closed audit row.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-16",
+        "ARC-20",
+        "ARC-22"
+      ],
+      "expectedDurationHours": 10,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-17-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-18",
+      "title": "Watcher decomposition to scheduler + kernel effects",
+      "scope": "Reduce src/watcher.mjs to a scheduler loop that pumps subjects through the kernel state machine and executes kernel-emitted effects through the adapter layers; move the inline GitHub mechanics (fast-merge diff-shape evaluation, live label/head-SHA reads, timeline scraping) behind the subject/comms adapters. Tests: full fixture e2e parity across all registered domains; line-count ratchet on watcher.mjs (< 2000 lines); lint asserting no direct GitHub/API imports outside adapters.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-10",
+        "ARC-13"
+      ],
+      "expectedDurationHours": 12,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-18-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-19",
+      "title": "Fold remaining monoliths + import-boundary lint gate",
+      "scope": "Fold the remaining orchestration logic in follow-up-remediation.mjs and follow-up-merge-agent.mjs into kernel effects + adapters (the AMA v1 actor code stays frozen behind the finalization port until MA-v2 promotion, then is deleted outside this pack); add the CI import-boundary lint: kernel imports nothing from layers 3-5, adapter/OS-integration layers never import review vocabulary upward. Tests: boundary lint red/green fixtures; all v1 e2e fixtures pass unmodified; monolith line-count ratchets.",
+      "targetRepo": "adversarial-review",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-18",
+        "ARC-16"
+      ],
+      "expectedDurationHours": 10,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-19-prompt.md",
+      "additionalRepos": [
+        "agent-os"
+      ]
+    },
+    {
+      "id": "ARC-20",
+      "title": "Adjudicate-merge app surface (GAP-1)",
+      "scope": "Expose merge adjudication through a sanctioned app surface: either wire the app-contract endpoint workflow_action backend to a real adjudicate operation or add an HCP route — the implementer records the choice in a short ADR committed with the change. The surface wraps the existing worker-pool adjudicate semantics (modules/worker-pool/lib/hq-adjudicate-merge.sh), is fail-closed, audited, idempotent on (app_id, request_id), and never widens merge authority (same checks the shell verb enforces). Tests: surface contract tests; denied-without-entitlement; idempotent repeat returns the original outcome; audit rows.",
+      "targetRepo": "agent-os",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [],
+      "expectedDurationHours": 10,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-20-prompt.md"
+    },
+    {
+      "id": "ARC-21",
+      "title": "App-facing ledger notes API (GAP-2)",
+      "scope": "Add a minimal append-only notes/events write surface for registered apps on the app-contract endpoint (platform/app-contract-endpoint): schema-validated note kinds, quota-bounded per app, session-token-authenticated, landing in a session-ledger app-notes table via the ledger's sanctioned write path; document local-queue-and-flush client semantics for apps in degraded mode. Tests: endpoint contract tests (accept, schema-reject, quota refusal); replay dedupe on (app_id, note_id); ledger row landing assertions against the disposable-Postgres harness.",
+      "targetRepo": "agent-os",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [],
+      "expectedDurationHours": 8,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-21-prompt.md"
+    },
+    {
+      "id": "ARC-22",
+      "title": "Attestation read surface (GAP-3)",
+      "scope": "Add a sanctioned read API for reviewed/produced head attestations and worker build-completion signals, replacing direct ledger SQLite/Postgres reads by apps (target consumer: adversarial-review's session-ledger-read-adapter.mjs). Home is platform/ or the app-contract endpoint — implementer records an ADR. Read-only, session-token-authenticated for apps plus loopback for OS daemons. Tests: contract tests; parity fixtures comparing surface results against direct-read results on seeded ledgers; auth refusal paths.",
+      "targetRepo": "agent-os",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [],
+      "expectedDurationHours": 8,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-22-prompt.md"
+    },
+    {
+      "id": "ARC-23",
+      "title": "app-sdk hybrid mode + real SSE on() (GAP-4)",
+      "scope": "Add mode: 'hybrid' to both app-sdk clients (platform/app-sdk node + python): probe/failover/resume semantics matching the ARC-07 router contract (thresholds injectable), a working on(topic, cb) implementation in agent-os mode backed by the SSE endpoint, and packaging so external repos can consume the Node SDK (published tarball or git-subtree recipe — implementer ADR; adversarial-review is the first consumer in ARC-24). Tests: SDK contract tests in both languages; hybrid-mode state machine unit tests; SSE on() integration test against the stub endpoint.",
+      "targetRepo": "agent-os",
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [],
+      "expectedDurationHours": 10,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-23-prompt.md"
+    },
+    {
+      "id": "ARC-24",
+      "title": "Consume published app-sdk; delete vendored fork",
+      "scope": "Swap adversarial-review's vendored app-contract client (src/app-contract-dispatch.mjs) for the published app-sdk inside the os-dispatch runtime and anywhere else the fork is imported; delete the fork; the health router keeps its own probe policy but may delegate transport to the SDK hybrid mode where contracts align. Tests: os-dispatch fixtures green on the SDK client; fork-file absence grep gate; dependency declared in package.json per the ARC-23 packaging recipe.",
+      "targetRepo": "adversarial-review",
+      "additionalRepos": [
+        "agent-os"
+      ],
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-23",
+        "ARC-07"
+      ],
+      "expectedDurationHours": 5,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-24-prompt.md"
+    },
+    {
+      "id": "ARC-25",
+      "title": "Runtime default cutover gate",
+      "scope": "Replace the remaining cli-direct production reviewer default with agent-runtime only behind a truthful readiness gate: domain config, orchestrationMode=agentos, runtime status, canary, and the ADVERSARIAL_REVIEWER_RUNTIME kill switch all agree. The gate must refuse full cutover when hybrid fallback is degraded, and it must record why. Tests: runtime-selection unit matrix; code-pr/code-pr-security domain fixtures; settle smoke for agent-runtime; kill-switch rollback fixture.",
+      "targetRepo": "adversarial-review",
+      "additionalRepos": [
+        "agent-os"
+      ],
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-24"
+      ],
+      "expectedDurationHours": 6,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-25-prompt.md",
+      "workerSpec": {
+        "workerClass": "codex",
+        "tools": [
+          "read",
+          "write",
+          "bash:git-safe"
+        ],
+        "commsAllowance": "none",
+        "budgetEnforcement": "best-effort",
+        "retryPolicy": {
+          "backoffSeconds": 0
+        }
+      }
+    },
+    {
+      "id": "ARC-26",
+      "title": "Remediation AgentRuntime parity",
+      "scope": "Finish the ARC-08 promise for every remediator path, including the extracted Claude Code leaf and the Codex and Gemini spawns still in follow-up-remediation.mjs: remediation requests go through AgentRuntime branch-push handles with local fallback, preserving reply landing pads, commit trailers, round accounting, OAuth stripping, and reattach/cancel behavior. Tests: branch-push fixture through OS stub and local runtime; grep gate proving direct spawnDetachedCli is absent from remediation surfaces; v1 parity fixtures for budgets and replies.",
+      "targetRepo": "adversarial-review",
+      "additionalRepos": [
+        "agent-os"
+      ],
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-08",
+        "ARC-24"
+      ],
+      "expectedDurationHours": 8,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-26-prompt.md",
+      "workerSpec": {
+        "workerClass": "codex",
+        "tools": [
+          "read",
+          "write",
+          "bash:git-safe"
+        ],
+        "commsAllowance": "none",
+        "budgetEnforcement": "best-effort",
+        "retryPolicy": {
+          "backoffSeconds": 0
+        }
+      }
+    },
+    {
+      "id": "ARC-27",
+      "title": "Verdict and follow-up fidelity",
+      "scope": "Make comment-only or approved reviews with zero blocking findings settle cleanly: they must not create critical follow-up jobs, critical Linear flags, high-priority recommended actions, or misleading critical review findings prompt text. Blocking findings still open remediation under the same strict posture. Tests: comment-only/findings_count=0 fixture; request-changes/blocking fixture; Linear triage adapter fixture; regression for current clean review on agent-os#4562.",
+      "targetRepo": "adversarial-review",
+      "additionalRepos": [
+        "agent-os"
+      ],
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [],
+      "expectedDurationHours": 5,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-27-prompt.md",
+      "workerSpec": {
+        "workerClass": "codex",
+        "tools": [
+          "read",
+          "write",
+          "bash:git-safe"
+        ],
+        "commsAllowance": "none",
+        "budgetEnforcement": "best-effort",
+        "retryPolicy": {
+          "backoffSeconds": 0
+        }
+      }
+    },
+    {
+      "id": "ARC-28",
+      "title": "Alert sink durability",
+      "scope": "Replace single-shot local HTTP alert delivery with a durable, observable alert sink: delivery uses the Agent OS alert bus config, records success/failure receipts, retries or queues locally when 127.0.0.1:18799 is unavailable, and exposes a health/readiness signal that fails before a page is silently lost. Tests: unavailable bus queues receipt; recovered bus drains exactly once; config precedence for agent_gateway.alert_bus_url; no-progress and hammer-cap alerts share the same sink.",
+      "targetRepo": "adversarial-review",
+      "additionalRepos": [
+        "agent-os"
+      ],
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [],
+      "expectedDurationHours": 6,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-28-prompt.md",
+      "workerSpec": {
+        "workerClass": "codex",
+        "tools": [
+          "read",
+          "write",
+          "bash:git-safe"
+        ],
+        "commsAllowance": "none",
+        "budgetEnforcement": "best-effort",
+        "retryPolicy": {
+          "backoffSeconds": 0
+        }
+      }
+    },
+    {
+      "id": "ARC-29",
+      "title": "Branch-protection closeout",
+      "scope": "Turn agent-os/adversarial-gate warnings into an operator-closeable contract: audit all watched repos, apply or prepare the required branch-protection context where credentials allow it, persist forbidden/missing evidence per repo, and make autonomous merge refuse the protected path when the configured domain requires branch protection but the gate is not actually required. Tests: check-branch-protection --json; missing/forbidden fixtures; AMA eligibility refusal; runbook for repos needing manual GitHub admin action.",
+      "targetRepo": "adversarial-review",
+      "additionalRepos": [
+        "agent-os"
+      ],
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [],
+      "expectedDurationHours": 6,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-29-prompt.md",
+      "workerSpec": {
+        "workerClass": "codex",
+        "tools": [
+          "read",
+          "write",
+          "bash:git-safe"
+        ],
+        "commsAllowance": "none",
+        "budgetEnforcement": "best-effort",
+        "retryPolicy": {
+          "backoffSeconds": 0
+        }
+      }
+    },
+    {
+      "id": "ARC-30",
+      "title": "Dispatch no-progress and latency SLO",
+      "scope": "Add first-class dispatch acceptance latency and watcher no-progress SLOs for adversarial review: receipt-to-spawn timing is recorded from HQ, p95 feeds the hybrid-router probe, open pending PRs cannot sit past the SLO without a durable alert, and post-merge/main-catchup wake hints reduce the several-minute idle window. Tests: seeded dispatch ledger p95; watcher no-progress alert receipt; main-catchup wake hint fixture; drain-status remains read-only and bounded.",
+      "targetRepo": "agent-os",
+      "additionalRepos": [
+        "adversarial-review"
+      ],
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [],
+      "expectedDurationHours": 7,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-30-prompt.md",
+      "workerSpec": {
+        "workerClass": "codex",
+        "tools": [
+          "read",
+          "write",
+          "bash:git-safe"
+        ],
+        "commsAllowance": "none",
+        "budgetEnforcement": "best-effort",
+        "retryPolicy": {
+          "backoffSeconds": 0
+        }
+      }
+    },
+    {
+      "id": "ARC-31",
+      "title": "Operator final re-review recovery",
+      "scope": "Provide one audited operator surface for review this exact head now that clears stale terminal state, honors current-head idempotency, can intentionally bypass hard review ceiling once, refuses active reviewers unless explicitly cancelled, and never requires manual budget hacks or SQLite edits. Tests: hard-ceiling bypass fixture; active-review refusal; stale follow-up stop and requeue fixture; audit ledger idempotency.",
+      "targetRepo": "adversarial-review",
+      "additionalRepos": [
+        "agent-os"
+      ],
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [],
+      "expectedDurationHours": 5,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-31-prompt.md",
+      "workerSpec": {
+        "workerClass": "codex",
+        "tools": [
+          "read",
+          "write",
+          "bash:git-safe"
+        ],
+        "commsAllowance": "none",
+        "budgetEnforcement": "best-effort",
+        "retryPolicy": {
+          "backoffSeconds": 0
+        }
+      }
+    },
+    {
+      "id": "ARC-32",
+      "title": "End-to-end cutover drill and readiness report",
+      "scope": "Ship the final operator command and report that proves ARC can cut over: runtime default, SDK/hybrid fallback, remediation branch-push, alert delivery, branch protection, dispatch SLO, verdict fidelity, standalone fallback drill, and live clean-PR closure are all checked in one bounded run. Tests: fixture drill; JSON report schema; failure matrix for every ARC-25..31 gate; runbook update declaring full SDK cutover blocked until this command returns READY.",
+      "targetRepo": "agent-os",
+      "additionalRepos": [
+        "adversarial-review"
+      ],
+      "targetBranch": "main",
+      "expectedCompletionShape": "pr",
+      "dependencies": [
+        "ARC-25",
+        "ARC-26",
+        "ARC-27",
+        "ARC-28",
+        "ARC-29",
+        "ARC-30",
+        "ARC-31"
+      ],
+      "expectedDurationHours": 8,
+      "taskKind": "coding",
+      "promptPath": "projects/adversarial-review-core/prompts/arc-32-prompt.md",
+      "workerSpec": {
+        "workerClass": "codex",
+        "tools": [
+          "read",
+          "write",
+          "bash:git-safe"
+        ],
+        "commsAllowance": "none",
+        "budgetEnforcement": "best-effort",
+        "retryPolicy": {
+          "backoffSeconds": 0
+        }
+      }
+    }
+  ]
+}

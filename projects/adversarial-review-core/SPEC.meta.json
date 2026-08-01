@@ -1,0 +1,37 @@
+{
+  "specId": "adversarial-review-core",
+  "version": "0.2.0",
+  "taskKind": "coding",
+  "riskClass": "high",
+  "decisionPolicyRef": "standard",
+  "targetRepos": ["agent-os", "adversarial-review"],
+  "deletionReviewDue": "2027-07-16",
+  "acceptanceCriteria": [
+    "v1 tagged + maintenance branch exists; AMA freeze note in place (ARC-01)",
+    "Prompt set + domainId are domain-config-driven; zero hardcoded 'code-pr' in orchestration paths (ARC-02, ARC-03)",
+    "A security-review domain reviews a fixture subject end-to-end with its own prompts (ARC-04)",
+    "Reviews and remediations dispatch through the OS by default and return structured artifacts; bespoke CLI spawn families deleted (ARC-05, ARC-06, ARC-08, ARC-10)",
+    "Killing OS endpoints fails over automatically; restoring resumes automatically with zero duplicated dispatches; runtime status reports truthfully (ARC-07, ARC-09)",
+    "Two-stage sequential pipeline converges on a fixture PR with correct budgets and downstream re-review (ARC-11, ARC-12, ARC-13)",
+    "v1 merge authority runs unchanged behind the finalization port; MA-v2 produces shadow decisions and a divergence report; executor gated off with promotion runbook (ARC-14, ARC-15, ARC-16, ARC-17)",
+    "watcher.mjs under 2000 lines; import-boundary lint enforced in CI; all v1 fixtures pass unmodified (ARC-18, ARC-19)",
+    "All four OS surfaces live with contract tests; adversarial-review consumes the published SDK and attestation surface instead of internal reaches (ARC-20, ARC-21, ARC-22, ARC-23, ARC-24)",
+    "Production reviewer runtime selects agent-runtime only when SDK/hybrid readiness and standalone fallback are healthy (ARC-25)",
+    "All remediation dispatch uses AgentRuntime branch-push handles with no direct detached CLI remediation spawns (ARC-26)",
+    "Clean comment-only or approved reviews with zero blocking findings do not create critical follow-up work (ARC-27)",
+    "Adversarial-review alerts have durable receipts, retry/queue behavior, and health reporting when the alert bus is unavailable (ARC-28)",
+    "Watched repos either require agent-os/adversarial-gate or carry explicit forbidden/missing evidence that blocks autonomous merge where policy requires the gate (ARC-29)",
+    "Dispatch acceptance latency and watcher no-progress are SLO-governed with durable alerts and wake hints (ARC-30)",
+    "Operators have one audited final current-head re-review recovery command that does not require budget hacks or state-file edits (ARC-31)",
+    "The SDK cutover check returns READY only after SDK operation, standalone fallback, observability, branch protection, verdict fidelity, and dispatch latency all pass (ARC-32)"
+  ],
+  "outOfScope": [
+    "Changing review semantics (verdict grammar, reply schema, risk budgets)",
+    "Promoting MA-v2 to executing authority (operator action post-shadow-gate)",
+    "Parallel reviewer panels in production",
+    "Multi-host review fleets; non-GitHub subject domains beyond fixtures and the security domain",
+    "Rewriting ARR watchdog/canary work or the AOM mode switch",
+    "Making GitHub branch-protection changes without repo-admin credentials",
+    "Promoting full SDK cutover before ARC-32 returns READY on the deploy host"
+  ]
+}

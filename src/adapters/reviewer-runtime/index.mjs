@@ -36,7 +36,7 @@ function resolveReviewerRuntimeName(
   }
 
   const requestedRuntime = requestedReviewerRuntime(domainConfig);
-  if (requestedRuntime === 'agent-runtime') {
+  if (requestedRuntime === 'agent-runtime' || orchestrationMode === 'agentos') {
     return resolveReviewerRuntimeCutover({
       rootDir,
       domainConfig,

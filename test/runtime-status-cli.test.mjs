@@ -182,9 +182,9 @@ test('runtime status surfaces reviewer cutover refusal reasons for code-pr', () 
       env: { AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos' },
     });
     const line = renderRuntimeStatus(model).split('\n')[6];
-    assert.equal(model.reviewerCutover.selectedRuntime, 'cli-direct');
+    assert.equal(model.reviewerCutover.selectedRuntime, 'agent-os-hq');
     assert.equal(model.reviewerCutover.state, 'refused');
-    assert.match(line, /reviewer cutover: REFUSED cli-direct/);
+    assert.match(line, /reviewer cutover: REFUSED agent-os-hq/);
     assert.match(line, /runtime-not-os-healthy/);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

@@ -185,6 +185,17 @@ test('resolveReviewerRuntimeName selects agent-runtime only when agentos cutover
     'cli-direct',
   );
   assert.equal(
+    resolveReviewerRuntimeName({}, { orchestrationMode: 'agentos' }),
+    'agent-os-hq',
+  );
+  assert.equal(
+    resolveReviewerRuntimeName(
+      { reviewerRuntime: 'fixture-stub' },
+      { orchestrationMode: 'agentos' },
+    ),
+    'agent-os-hq',
+  );
+  assert.equal(
     resolveReviewerRuntimeName(
       { reviewerRuntime: 'acpx' },
       { orchestrationMode: 'native' },
@@ -283,7 +294,7 @@ test('createReviewerRuntimeAdapterForDomain preserves explicit native non-defaul
   }
 });
 
-test('resolveReviewerRuntimeName falls back to cli-direct when agent-runtime readiness is degraded', () => {
+test('resolveReviewerRuntimeName falls back to agent-os-hq when agentos agent-runtime readiness is degraded', () => {
   const rootDir = makeRoot();
   try {
     writeRuntimeStatusSnapshot(rootDir, {
@@ -298,7 +309,7 @@ test('resolveReviewerRuntimeName falls back to cli-direct when agent-runtime rea
         { id: 'code-pr', reviewerRuntime: 'agent-runtime', agentRuntimeSettleSmokeVerified: true },
         { rootDir, orchestrationMode: 'agentos' },
       ),
-      'cli-direct',
+      'agent-os-hq',
     );
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

@@ -2,6 +2,7 @@ import { readCanaryStatus } from './adapters/agent-runtime/canary.mjs';
 import { readRuntimeStatusSnapshot } from './runtime-status-snapshot.mjs';
 
 const DEFAULT_RUNTIME = 'cli-direct';
+const AGENTOS_FALLBACK_RUNTIME = 'agent-os-hq';
 const CUTOVER_RUNTIME = 'agent-runtime';
 const KNOWN_REVIEWER_RUNTIME_NAMES = new Set([
   'agent-runtime',
@@ -23,6 +24,20 @@ function requestedReviewerRuntime(domainConfig = {}) {
   return String(domainConfig?.reviewerRuntime || DEFAULT_RUNTIME).trim() || DEFAULT_RUNTIME;
 }
 
+function isAgentOsOrchestrationMode(orchestrationMode) {
+  return String(orchestrationMode || '').trim().toLowerCase() === 'agentos';
+}
+
+function fallbackRuntimeForOrchestrationMode(orchestrationMode = 'native') {
+  return isAgentOsOrchestrationMode(orchestrationMode) ? AGENTOS_FALLBACK_RUNTIME : DEFAULT_RUNTIME;
+}
+
+function selectedRuntimeForNonCutover(requestedRuntime, orchestrationMode = 'native') {
+  return isAgentOsOrchestrationMode(orchestrationMode)
+    ? AGENTOS_FALLBACK_RUNTIME
+    : requestedRuntime;
+}
+
 function evaluateAgentRuntimeCutoverReadiness({
   rootDir,
   domainConfig = {},
@@ -41,7 +56,7 @@ function evaluateAgentRuntimeCutoverReadiness({
     return {
       domainId,
       requestedRuntime,
-      selectedRuntime: requestedRuntime,
+      selectedRuntime: selectedRuntimeForNonCutover(requestedRuntime, orchestrationMode),
       ready: false,
       state: 'not-requested',
       reasons: [],
@@ -99,7 +114,7 @@ function evaluateAgentRuntimeCutoverReadiness({
   return {
     domainId,
     requestedRuntime,
-    selectedRuntime: ready ? CUTOVER_RUNTIME : DEFAULT_RUNTIME,
+    selectedRuntime: ready ? CUTOVER_RUNTIME : fallbackRuntimeForOrchestrationMode(orchestrationMode),
     ready,
     state: ready ? 'ready' : 'refused',
     reasons,
@@ -145,9 +160,11 @@ function resolveReviewerRuntimeCutover({
 }
 
 export {
+  AGENTOS_FALLBACK_RUNTIME,
   CUTOVER_RUNTIME,
   DEFAULT_RUNTIME,
   evaluateAgentRuntimeCutoverReadiness,
+  fallbackRuntimeForOrchestrationMode,
   KNOWN_REVIEWER_RUNTIME_NAMES,
   requestedReviewerRuntime,
   resolveReviewerRuntimeCutover,

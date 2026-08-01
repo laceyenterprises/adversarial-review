@@ -2,9 +2,10 @@
 
 This directory is the tracked closeout snapshot for `ARC-29`.
 
-- `summary.json` is the aggregated `check-branch-protection --json --apply` result captured on August 1, 2026.
+- `summary.json` is the aggregated `check-branch-protection --json --apply` result captured on August 1, 2026 at `2026-08-01T16:22:40.077Z`.
 - `laceyenterprises__*.json` files are the per-repo audit records emitted by the same command.
 - Every unresolved repo in this snapshot reported `reason=branch-protection-missing`, so the operator follow-up is the bootstrap command embedded in each JSON record's `manualCommand`.
+- This live closeout run used the worker's provisioned `GH_TOKEN`. For this token on August 1, 2026, the GitHub API returned `404`/missing branch-protection state for every watched repo, including `laceyenterprises/adversarial-review` and `laceyenterprises/agent-os`; it did not return any `branch-protection-forbidden` rows.
 
 Regenerate with:
 

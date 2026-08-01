@@ -2057,6 +2057,11 @@ function schemaV1() {
             __default: 900000,
             __min: 1000,
           },
+          running_pass_timeout_seconds: {
+            __type: TYPE_INT,
+            __default: 3600,
+            __min: 1,
+          },
           fallback_threshold: { __type: TYPE_INT, __default: 2 },
           review_population_retry: {
             __type: TYPE_DICT,
@@ -2293,6 +2298,10 @@ export const ENV_ALIASES = {
   'reviewer.no_progress_timeout_ms': {
     canonical: 'AGENT_OS_REVIEWER_NO_PROGRESS_TIMEOUT_MS',
     aliases: [['ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS', identity]],
+  },
+  'reviewer.running_pass_timeout_seconds': {
+    canonical: 'AGENT_OS_REVIEWER_RUNNING_PASS_TIMEOUT_SECONDS',
+    aliases: [['ADVERSARIAL_REVIEW_RUNNING_PASS_TIMEOUT_SECONDS', identity]],
   },
   'reviewer.memory.pressure.projected_headroom_floor_mb': {
     canonical: 'AGENT_OS_REVIEWER_MEMORY_PRESSURE_PROJECTED_HEADROOM_FLOOR_MB',

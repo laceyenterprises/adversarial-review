@@ -156,6 +156,19 @@ new PR
   an intentional re-review re-arm. `forbidden-fallback`, `failed-orphan`,
   `malformed`, inactive repos, closed/merged PRs, undiscovered PRs, active
   watcher drain, and active follow-up jobs are not auto-recovered by this path.
+- The poll-time reviewer-pass timeout sweep is a recovery path for aged
+  `reviewer_passes.status='running'` rows, not just a metric cleanup. When the
+  matching `reviewed_prs` row is still `reviewing`, the sweep releases the
+  durable claim only if the row still matches the pass's reviewer
+  session/start/head evidence, then records the same `reviewer-timeout`
+  `pending-upstream` shape and `infra_auto_recover_attempts` accounting as the
+  normal transient failure path. A pass metadata `reviewerSessionUuid` must
+  match when present; older pass rows without that metadata can match by same
+  head plus a pass start at or after the durable claim start. If the infra cap
+  is already exhausted, the matching `reviewing` row is marked `failed` with
+  timeout evidence instead of being re-armed. A stale pass whose PR row no
+  longer matches the active claim is left running so the mismatch remains
+  visible and cannot mask a newer in-flight reviewer.
 - **Quota re-arm surface (`bin/quota-rearm.mjs`).** Operators can run
   `npm run quota-rearm -- --repo <slug> --pr <n>` to release a stuck
   `quota-exhausted` failed row after verifying the provider window is clear. A

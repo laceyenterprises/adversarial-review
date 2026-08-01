@@ -5737,6 +5737,7 @@ test('fetchMergeAgentCandidate fetches operator label events in parallel', async
   const eventResolvers = [];
   let eventFetchesStarted = 0;
   const candidatePromise = fetchMergeAgentCandidate('laceyenterprises/agent-os', 401, {
+    env: { GITHUB_TOKEN: 'test-token' },
     execFileImpl: async (_cmd, args) => {
       if (args[0] === 'pr') {
         return {
@@ -5827,6 +5828,7 @@ test('fetchMergeAgentCandidate fetches operator label events in parallel', async
 test('fetchMergeAgentCandidate returns raw AMA gate fields needed by watcher dispatch', async () => {
   const calls = [];
   const candidate = await fetchMergeAgentCandidate('laceyenterprises/agent-os', 401, {
+    env: { GITHUB_TOKEN: 'test-token' },
     execFileImpl: async (_cmd, args) => {
       calls.push(args);
       if (args[0] === 'pr') {

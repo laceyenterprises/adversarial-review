@@ -2878,7 +2878,7 @@ async function dispatchMergeAgentForPR({
 }
 
 async function fetchMergeAgentCandidate(repo, prNumber, {
-  execFileImpl = execFileAsync,
+  execFileImpl = execFileAsync, env = process.env,
   operatorApprovalEvent = undefined,
   mergeAgentRequestEvent = undefined,
 } = {}) {
@@ -2915,7 +2915,7 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
         repoPath: repo,
         baseBranch: parsed.baseRefName,
         execFileImpl,
-        env: process.env,
+        env,
       });
       branchProtection = {
         requiredContexts: Array.isArray(protection?.requiredContexts) ? protection.requiredContexts : [],

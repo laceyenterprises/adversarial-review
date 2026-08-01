@@ -824,6 +824,22 @@ test('not eligible: branch protection has no required contexts at all', () => {
   assert.ok(result.reasons.includes('branch-protection-missing-gate'));
 });
 
+test('not eligible: forbidden branch-protection evidence still fails closed and stays explicit in trace', () => {
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    prMetadata: {
+      branchProtection: {
+        requiredContexts: [],
+        reason: 'branch-protection-forbidden',
+      },
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, { env: ENV });
+  assert.equal(result.eligible, false);
+  assert.ok(result.reasons.includes('branch-protection-missing-gate'));
+  assert.equal(result.trace.branchProtection.observedReason, 'branch-protection-forbidden');
+  assert.deepEqual(result.trace.branchProtection.requiredContexts, []);
+});
+
 test('eligible: branch_protection.required=false drops ONLY the gate requirement (plan without branch protection)', () => {
   // Simulates a repo whose GitHub plan offers no branch protection: the
   // gate context can never be present, so the operator opts out via

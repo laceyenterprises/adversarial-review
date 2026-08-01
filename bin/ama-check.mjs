@@ -205,6 +205,14 @@ function isBranchProtectionUnavailableSentinel(value) {
   return value?.branchProtectionUnavailable === true && value?.reason === 'github_plan';
 }
 
+function classifyProtectionFixtureReason(value, requiredContexts) {
+  if (isBranchProtectionUnavailableSentinel(value)) return 'branch-protection-unavailable-github-plan';
+  if (String(value?.status || '').trim() === '404') return 'branch-protection-missing';
+  return requiredContexts.includes('agent-os/adversarial-gate')
+    ? 'required-context-present'
+    : 'required-context-missing';
+}
+
 function loadProtectionJson(path, cfg) {
   const parsed = loadJson(path);
   if (cfg?.branchProtection?.required === false) {
@@ -382,7 +390,10 @@ function buildPrMetadata({ prJson, protectionJson }) {
       ? prJson.labels.map((l) => String(l?.name || l)).filter(Boolean)
       : [],
     statusCheckRollup: Array.isArray(prJson?.statusCheckRollup) ? prJson.statusCheckRollup : [],
-    branchProtection: { requiredContexts },
+    branchProtection: {
+      requiredContexts,
+      reason: classifyProtectionFixtureReason(protectionJson, requiredContexts),
+    },
     author: prJson?.author?.login || null,
   };
 }

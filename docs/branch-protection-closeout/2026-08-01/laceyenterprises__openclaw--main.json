@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-08-01T15:58:11.237Z",
+  "repo": "laceyenterprises/openclaw",
+  "baseBranch": "main",
+  "context": "agent-os/adversarial-gate",
+  "ok": false,
+  "reason": "branch-protection-missing",
+  "requiredContexts": [],
+  "action": "bootstrap-branch-protection",
+  "applied": false,
+  "manualCommand": "base=\"main\"\nbase_enc=$(printf '%s' \"$base\" | jq -sRr @uri)\ngh api -X PUT \"repos/laceyenterprises/openclaw/branches/$base_enc/protection\" --input - <<'JSON'\n{\"required_status_checks\":{\"strict\":true,\"contexts\":[\"agent-os/adversarial-gate\"]},\"enforce_admins\":false,\"required_pull_request_reviews\":null,\"restrictions\":null}\nJSON"
+}

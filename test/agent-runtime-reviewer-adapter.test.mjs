@@ -6,6 +6,7 @@ import { join } from 'node:path';
 
 import {
   createAgentRuntimeReviewerRuntimeAdapter,
+  createDefaultAgentRuntime,
   reviewIdempotencyKey,
   toAgentRequest,
 } from '../src/adapters/reviewer-runtime/agent-runtime/index.mjs';
@@ -14,6 +15,7 @@ import {
   writeReviewerRunRecord,
 } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { loadDomainConfig } from '../src/domain-config.mjs';
+import { readRuntimeStatusSnapshot } from '../src/runtime-status-snapshot.mjs';
 
 function makeRoot() {
   const rootDir = mkdtempSync(join(tmpdir(), 'agent-runtime-reviewer-adapter-'));
@@ -88,6 +90,44 @@ function completedRuntime({ calls = [], body = '## Verdict\nComment only' } = {}
   };
 }
 
+function silentLogger() {
+  return {
+    log() {},
+    warn() {},
+    error() {},
+  };
+}
+
+function completedCliDirect({ calls = [] } = {}) {
+  return {
+    async spawnReviewer(request) {
+      calls.push(request);
+      return {
+        ok: true,
+        reviewBody: '## Verdict\nComment only',
+        tokenUsage: { total: 7 },
+        reattachToken: request.sessionUuid,
+      };
+    },
+    async spawnRemediator(request) {
+      calls.push(request);
+      return {
+        ok: true,
+        remediationBody: '{"addressed":[],"pushback":[],"blockers":[],"reReview":false}',
+        tokenUsage: { total: 7 },
+        reattachToken: request.sessionUuid,
+      };
+    },
+    async cancel() {},
+    async reattach() {
+      throw new Error('test does not exercise local reattach');
+    },
+    describe() {
+      return { id: 'fixture-cli-direct', capabilities: {} };
+    },
+  };
+}
+
 test('agent-runtime reviewer adapter returns the legacy spawnReviewer result shape', async () => {
   const rootDir = makeRoot();
   const calls = [];
@@ -123,6 +163,77 @@ test('agent-runtime reviewer adapter returns the legacy spawnReviewer result sha
     assert.equal(record.runtime, 'agent-runtime');
     assert.equal(record.reattachToken, calls[0].idempotencyKey);
     assert.equal(record.subjectContext.agentRuntimeMode, 'os');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('default agent runtime fails over app-contract hard dispatch errors to local and snapshots status', async () => {
+  const rootDir = makeRoot();
+  const localCalls = [];
+  const transitions = [];
+  const dispatchAttempts = [];
+  try {
+    const runtime = createDefaultAgentRuntime({
+      rootDir,
+      domainConfig: { id: 'code-pr', promptSet: 'code-pr' },
+      logger: silentLogger(),
+      localRuntimeOptions: {
+        cliDirect: completedCliDirect({ calls: localCalls }),
+        admissionImpl: async () => ({
+          admit: true,
+          budget: { requestedTokens: 500, requestedWallMs: 30_000 },
+        }),
+      },
+      osRuntimeOptions: {
+        connectImpl: async () => ({
+          async dispatch(payload) {
+            dispatchAttempts.push(payload.request_id);
+            throw new Error('app-contract 503: unavailable');
+          },
+          async dispatchStatus() {
+            return { status: 'not_found' };
+          },
+          on() {
+            return () => {};
+          },
+          sseLive() {
+            return true;
+          },
+          close() {},
+        }),
+        sleepImpl: async () => {},
+      },
+      routerOptions: {
+        autoStart: false,
+        auditSink: {
+          async recordTransition(transition) {
+            transitions.push(transition);
+            return { auditWritten: true, noticeDelivered: true };
+          },
+        },
+      },
+    });
+    const request = toAgentRequest(reviewerReq(), {
+      kind: 'reviewer',
+      rootDir,
+      domainConfig: loadDomainConfig(rootDir, 'code-pr'),
+    });
+
+    const handle = await runtime.run(request);
+    const result = await handle.await();
+
+    assert.equal(handle.mode, 'local');
+    assert.equal(result.status, 'completed');
+    assert.equal(runtime.getMode(), 'local');
+    assert.equal(localCalls.length, 1);
+    assert.ok(dispatchAttempts.length >= 1, 'OS dispatch should be attempted before failover');
+    assert.equal(transitions.length, 1);
+    assert.equal(transitions[0].kind, 'failover');
+    assert.equal(transitions[0].reason, 'hard-contract-error');
+    const snapshot = readRuntimeStatusSnapshot(rootDir);
+    assert.equal(snapshot?.status?.mode, 'local');
+    assert.equal(snapshot?.status?.lastFailover?.reason, 'hard-contract-error');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

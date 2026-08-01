@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import {
   DEFAULT_BASE_BRANCH,
   branchProtectionAuditDirPath,
+  deleteBranchProtectionAuditRecord,
   ensureAdversarialGateRequiredContext,
   fetchAdversarialGateBranchProtection,
   formatBranchProtectionWarning,
@@ -29,9 +30,9 @@ context in branch protection. Defaults to "agent-os/adversarial-gate"; override
 with the ADV_GATE_STATUS_CONTEXT environment variable.
 
 When --apply is set, readable branch protection that is missing only the
-required context is updated in place. Every non-OK result also persists a
-machine-readable audit record under data/branch-protection-audits by default;
-override with --evidence-dir <path>.
+required context is updated in place. With --json, every non-OK result also
+persists a machine-readable audit record under data/branch-protection-audits by
+default; override with --evidence-dir <path>.
 `;
 
 function readConfig(configPath) {
@@ -133,13 +134,16 @@ async function main(argv = process.argv.slice(2), {
   const evidenceDir = parsed.values['evidence-dir']
     ? resolve(parsed.values['evidence-dir'])
     : branchProtectionAuditDirPath(ROOT);
-  try {
-    assertSharedEvidenceOwner(evidenceDir, { processImpl });
-    mkdirSync(evidenceDir, { recursive: true });
-    assertSharedEvidenceOwner(evidenceDir, { processImpl });
-  } catch (err) {
-    stderr.write(`error: ${err?.message || err}\n`);
-    return 4;
+  const shouldPersistEvidence = parsed.values.json === true;
+  if (shouldPersistEvidence) {
+    try {
+      assertSharedEvidenceOwner(evidenceDir, { processImpl });
+      mkdirSync(evidenceDir, { recursive: true });
+      assertSharedEvidenceOwner(evidenceDir, { processImpl });
+    } catch (err) {
+      stderr.write(`error: ${err?.message || err}\n`);
+      return 4;
+    }
   }
   const config = readConfig(configPath);
   const repos = await resolveRepos({
@@ -174,12 +178,16 @@ async function main(argv = process.argv.slice(2), {
         env,
       })
       : initial;
-    if (!result.ok || result.applied === true) {
+    if (shouldPersistEvidence && (!result.ok || result.applied === true)) {
       const { filePath } = writeBranchProtectionAuditRecord(ROOT, result, {
         directoryPath: evidenceDir,
         now: now(),
       });
       result.evidencePath = relativeToRoot(filePath);
+    } else if (shouldPersistEvidence && result.ok === true && result.applied !== true) {
+      deleteBranchProtectionAuditRecord(ROOT, result, {
+        directoryPath: evidenceDir,
+      });
     }
     results.push(result);
   }

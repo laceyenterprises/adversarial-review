@@ -5867,6 +5867,39 @@ test('fetchMergeAgentCandidate returns raw AMA gate fields needed by watcher dis
   assert.ok(calls.some((args) => args[0] === 'api' && String(args[1]).includes('/branches/main/protection')));
 });
 
+test('fetchMergeAgentCandidate preserves branch protection shape when protection fetch fails', async () => {
+  const candidate = await fetchMergeAgentCandidate('invalid-repo-slug', 401, {
+    env: { PATH: '/usr/bin:/bin' },
+    execFileImpl: async (_cmd, args) => {
+      if (args[0] === 'pr') {
+        return {
+          stdout: JSON.stringify({
+            mergeable: 'MERGEABLE',
+            mergeStateStatus: 'CLEAN',
+            headRefName: 'feature/pr-401',
+            baseRefName: 'main',
+            headRefOid: 'abc123',
+            body: '',
+            labels: [],
+            statusCheckRollup: [],
+            state: 'OPEN',
+            updatedAt: '2026-05-07T12:00:00.000Z',
+            author: { login: 'builder-bot' },
+          }),
+        };
+      }
+      throw new Error(`unexpected args: ${args.join(' ')}`);
+    },
+  });
+
+  assert.deepEqual(candidate.branchProtection, {
+    requiredContexts: [],
+    ok: false,
+    reason: 'branch-protection-check-failed',
+    requiredContext: null,
+  });
+});
+
 test('dispatchMergeAgentForPR does not mutate the caller job fields while recording trigger', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const input = makeJob({

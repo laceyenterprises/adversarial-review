@@ -103,6 +103,78 @@ test('--json emits machine-readable results and persists missing/forbidden evide
   }
 });
 
+test('--json removes stale evidence when a repo is now compliant', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'branch-protection-cli-cleanup-'));
+  try {
+    const configPath = writeConfig(tmp, {
+      repos: ['laceyenterprises/foundry'],
+    });
+    const stalePath = join(tmp, 'laceyenterprises__foundry--main.json');
+    writeFileSync(stalePath, '{"ok":false}\n');
+    const stdout = makeWritable();
+    const code = await main(
+      ['--config', configPath, '--json', '--evidence-dir', tmp],
+      {
+        stdout,
+        env: {
+          GITHUB_TOKEN: 'token-123',
+          PATH: '/usr/bin:/bin',
+          HOME: tmp,
+        },
+        execFileImpl: async () => ({
+          stdout: JSON.stringify({
+            required_status_checks: {
+              contexts: ['agent-os/adversarial-gate'],
+            },
+          }),
+        }),
+      },
+    );
+
+    assert.equal(code, 0);
+    const payload = JSON.parse(stdout.toString());
+    assert.equal(payload.results[0].ok, true);
+    assert.equal(payload.results[0].evidencePath, undefined);
+    assert.equal(existsSync(stalePath), false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('text mode does not write audit evidence', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'branch-protection-cli-text-'));
+  try {
+    const configPath = writeConfig(tmp, {
+      repos: ['laceyenterprises/adversarial-review'],
+    });
+    const stdout = makeWritable();
+    const stderr = makeWritable();
+    const code = await main(
+      ['--config', configPath, '--evidence-dir', tmp],
+      {
+        stdout,
+        stderr,
+        env: {
+          GITHUB_TOKEN: 'token-123',
+          PATH: '/usr/bin:/bin',
+          HOME: tmp,
+        },
+        execFileImpl: async () => ({
+          stdout: JSON.stringify({ required_status_checks: { contexts: ['ci/test'] } }),
+        }),
+      },
+    );
+
+    assert.equal(code, 1);
+    assert.equal(stdout.toString(), '');
+    assert.match(stderr.toString(), /required-context-missing/);
+    assert.doesNotMatch(stderr.toString(), /\[branch-protection\] evidence/);
+    assert.equal(existsSync(join(tmp, 'laceyenterprises__adversarial-review--main.json')), false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('--apply adds the missing required context and exits clean when the patch succeeds', async () => {
   const tmp = mkdtempSync(join(tmpdir(), 'branch-protection-cli-apply-'));
   try {

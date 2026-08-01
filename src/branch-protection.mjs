@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -101,6 +102,11 @@ function branchProtectionAuditFilePath(rootDir, repoPath, baseBranch) {
     branchProtectionAuditDirPath(rootDir),
     `${sanitizePathFragment(repoPath)}--${sanitizePathFragment(baseBranch || DEFAULT_BASE_BRANCH)}.json`,
   );
+}
+
+function resolveBranchProtectionAuditRecordPath(rootDir, result, { directoryPath = null } = {}) {
+  const fileName = `${sanitizePathFragment(result.repo)}--${sanitizePathFragment(result.baseBranch || DEFAULT_BASE_BRANCH)}.json`;
+  return directoryPath ? join(directoryPath, fileName) : branchProtectionAuditFilePath(rootDir, result.repo, result.baseBranch);
 }
 
 function classifyBranchProtectionAction(result) {
@@ -208,10 +214,23 @@ function writeBranchProtectionAuditRecord(
   if (result?.error) record.error = String(result.error);
   if (result?.applyError) record.applyError = String(result.applyError);
   const filePath = directoryPath
-    ? join(directoryPath, `${sanitizePathFragment(result.repo)}--${sanitizePathFragment(result.baseBranch || DEFAULT_BASE_BRANCH)}.json`)
+    ? resolveBranchProtectionAuditRecordPath(rootDir, result, { directoryPath })
     : branchProtectionAuditFilePath(rootDir, result.repo, result.baseBranch);
   writeFileImpl(filePath, `${JSON.stringify(record, null, 2)}\n`);
   return { filePath, record };
+}
+
+function deleteBranchProtectionAuditRecord(
+  rootDir,
+  result,
+  {
+    directoryPath = null,
+    rmSyncImpl = rmSync,
+  } = {},
+) {
+  const filePath = resolveBranchProtectionAuditRecordPath(rootDir, result, { directoryPath });
+  rmSyncImpl(filePath, { force: true });
+  return { filePath };
 }
 
 async function addRequiredStatusCheckContext({
@@ -438,6 +457,7 @@ export {
   branchProtectionAuditFilePath,
   buildManualCommand,
   createBranchProtectionChecker,
+  deleteBranchProtectionAuditRecord,
   ensureAdversarialGateRequiredContext,
   fetchAdversarialGateBranchProtection,
   formatBranchProtectionWarning,

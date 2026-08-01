@@ -58,7 +58,9 @@ The Grafana dashboard lives at
   `running` past the health age threshold. The watcher poll timeout sweep
   separately fails parseably aged running rows after
   `reviewer.running_pass_timeout_seconds` with
-  `failureClass='reviewer-timeout'` / `failureReason='running-pass-timeout'`.
+  `failureClass='reviewer-timeout'` / `failureReason='running-pass-timeout'`
+  and releases a still-matching `reviewed_prs.reviewing` claim through the
+  transient `pending-upstream` timeout path.
 - `review_pipeline_round_budget_anomalies`: follow-up jobs whose remediation
   rounds exceed the risk-class budget, or final-pass jobs stuck
   `awaiting-rereview` after the budget is exhausted.

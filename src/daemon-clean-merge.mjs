@@ -23,6 +23,7 @@ import {
   MERGE_AGENT_REQUESTED_LABEL,
   OPERATOR_APPROVED_LABEL,
 } from './adapters/operator/github-pr-label-controls/index.mjs';
+import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
 
 const execFileAsync = promisify(execFile);
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -238,6 +239,11 @@ export async function runDaemonCleanMergeAttempt({
     return NOT_TAKEN('daemon-inputs-missing');
   }
   const strictMode = cfg?.strictMode !== false;
+  const branchProtectionRequired = cfg?.branchProtection?.required !== false;
+  const requiredGateContext = resolveGateStatusContext(env);
+  const branchProtectionRequiredContexts = Array.isArray(candidate?.branchProtection?.requiredContexts)
+    ? candidate.branchProtection.requiredContexts
+    : [];
   // The daemon path is a strict clean-merge shortcut. If the current review is
   // not daemon-clean, it must decline before spending any worker-identity reads:
   // the caller will fall through to the capped hammer, which owns final
@@ -374,6 +380,9 @@ export async function runDaemonCleanMergeAttempt({
       nonBlockingFindingCount: reviewState?.nonBlockingFindingCount,
       nonBlockingFindingState: reviewState?.nonBlockingFindingState,
     },
+    branchProtectionRequired,
+    requiredGateContext,
+    branchProtectionRequiredContexts,
     // Initial (pre-lease) GitHub gate snapshot from the live fetch this tick.
     liveGate: {
       candidateHead: liveHead,
@@ -382,6 +391,7 @@ export async function runDaemonCleanMergeAttempt({
       mergeable: liveRollup?.mergeable ?? mergeabilityForGate?.mergeable,
       mergeStateStatus: liveRollup?.mergeStateStatus ?? mergeabilityForGate?.mergeStateStatus,
       prState: String(liveRollup?.state || candidate?.prState || 'open').toUpperCase(),
+      branchProtectionRequiredContexts,
     },
     mergeMethod,
     hqRoot,
@@ -411,6 +421,7 @@ export async function runDaemonCleanMergeAttempt({
         mergeStateStatus: rollup?.mergeStateStatus,
         prState: state,
         merged: state.toUpperCase() === 'MERGED',
+        branchProtectionRequiredContexts,
       };
     },
     // Non-blocking single-shot acquire: contention defers this tick (the watcher

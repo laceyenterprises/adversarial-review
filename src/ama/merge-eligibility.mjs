@@ -44,6 +44,7 @@ export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
   'verdict-not-eligible',
   'ci-not-green',
   'pr-not-mergeable',
+  'branch-protection-missing-gate',
   'stale-head',
   'lease-not-held',
 ]);
@@ -72,6 +73,19 @@ export const MERGE_ELIGIBILITY_REASONS = Object.freeze([
  * @property {string=}  prState         GitHub PR `state`. When supplied it must be
  *                                      `OPEN`; a closed/merged PR → `pr-not-mergeable`.
  *                                      Omit to skip the open check.
+ * @property {boolean=} branchProtectionRequired
+ *                                      Whether the domain policy requires branch
+ *                                      protection to enforce the adversarial-gate
+ *                                      context. Defaults to `true`.
+ * @property {string=}  requiredGateContext
+ *                                      The resolved adversarial-gate status
+ *                                      context that branch protection must require
+ *                                      when `branchProtectionRequired !== false`.
+ * @property {string[]=} branchProtectionRequiredContexts
+ *                                      Observed required status-check contexts from
+ *                                      GitHub branch protection for the target
+ *                                      branch. Missing/empty fails closed when the
+ *                                      policy requires branch protection.
  * @property {string=}  candidateHead   The live PR head SHA being considered.
  * @property {string=}  validatedHead   The head SHA that was validated (reviewed /
  *                                      post-remediation). Mismatch → `stale-head`.
@@ -142,6 +156,21 @@ function prMergeable(state) {
   return true;
 }
 
+function branchProtectionRequiresGate(state) {
+  if (state?.branchProtectionRequired === false) return true;
+  const requiredContext = String(state?.requiredGateContext ?? '').trim().toLowerCase();
+  if (!requiredContext) return false;
+  const requiredContexts = Array.isArray(state?.branchProtectionRequiredContexts)
+    ? state.branchProtectionRequiredContexts
+    : [];
+  const normalized = new Set(
+    requiredContexts
+      .map((context) => String(context ?? '').trim().toLowerCase())
+      .filter(Boolean),
+  );
+  return normalized.has(requiredContext);
+}
+
 /**
  * The validated head still matches the live candidate head. Fails closed on any
  * empty/missing SHA so a caller that forgot to populate one cannot merge a head
@@ -173,6 +202,7 @@ export function evaluateMergeEligibility(state = {}) {
   if (!verdictEligible(state?.verdict)) reasons.push('verdict-not-eligible');
   if (!requiredChecksGreen(state?.requiredChecks)) reasons.push('ci-not-green');
   if (!prMergeable(state)) reasons.push('pr-not-mergeable');
+  if (!branchProtectionRequiresGate(state)) reasons.push('branch-protection-missing-gate');
   if (!headMatches(state)) reasons.push('stale-head');
   if (state?.leaseHeld !== true) reasons.push('lease-not-held');
 
@@ -185,5 +215,6 @@ export const __testables__ = Object.freeze({
   verdictEligible,
   requiredChecksGreen,
   prMergeable,
+  branchProtectionRequiresGate,
   headMatches,
 });

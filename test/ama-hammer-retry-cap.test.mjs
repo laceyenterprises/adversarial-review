@@ -834,6 +834,7 @@ test('same-head terminal HAM remediation passes canonical live gate shape to dae
     mergeStateStatus: 'CLEAN',
     prState: 'OPEN',
     merged: false,
+    branchProtectionRequiredContexts: [],
   });
 });
 

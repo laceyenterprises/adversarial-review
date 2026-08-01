@@ -514,6 +514,11 @@ export async function maybeDispatchAmaClosureFor({
 
   const strictMode = cfg?.strictMode !== false;
   const autonomousMergeExecutionEnabled = cfg?.autonomousMergeExecutionEnabled !== false;
+  const branchProtectionRequired = cfg?.branchProtection?.required !== false;
+  const requiredGateContext = resolveGateStatusContext(env);
+  const branchProtectionRequiredContexts = Array.isArray(candidate?.branchProtection?.requiredContexts)
+    ? candidate.branchProtection.requiredContexts
+    : [];
   const autonomousFlagState = {
     autonomousMergeExecutionEnabled,
     strictMode,
@@ -529,6 +534,9 @@ export async function maybeDispatchAmaClosureFor({
     mergeable: mergeabilityForGate?.mergeable,
     mergeStateStatus: mergeabilityForGate?.mergeStateStatus,
     prState: String(candidate?.prState || 'open').toUpperCase(),
+    branchProtectionRequired,
+    requiredGateContext,
+    branchProtectionRequiredContexts,
     candidateHead: currentPrHeadSha || candidate?.headSha || '',
     validatedHead: reviewState.headSha,
   });
@@ -753,7 +761,7 @@ export async function maybeDispatchAmaClosureFor({
     allowStaleReviewHeadHammerResume,
     baseBranch: candidate?.baseBranch || candidate?.baseRefName || null,
     riskClass: reviewState.riskClass,
-    requiredGateContext: resolveGateStatusContext(),
+    requiredGateContext,
     reviewedBy: reviewStateRow?.reviewer_login || '',
     reviewer: reviewStateRow?.reviewer || '',
     parentSession: process.env.HQ_PARENT_SESSION || 'session:unknown:airlock+watcher',

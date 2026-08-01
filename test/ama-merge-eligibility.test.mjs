@@ -23,6 +23,9 @@ function eligibleState(overrides = {}) {
     mergeable: 'MERGEABLE',
     mergeStateStatus: 'CLEAN',
     prState: 'OPEN',
+    branchProtectionRequired: true,
+    requiredGateContext: 'agent-os/adversarial-gate',
+    branchProtectionRequiredContexts: ['agent-os/adversarial-gate'],
     candidateHead: HEAD,
     validatedHead: HEAD,
     leaseHeld: true,
@@ -110,6 +113,11 @@ const SINGLE_MISS_CASES = [
     reason: 'pr-not-mergeable',
   },
   {
+    name: 'required branch protection missing the gate → branch-protection-missing-gate',
+    overrides: { branchProtectionRequiredContexts: ['ci/test'] },
+    reason: 'branch-protection-missing-gate',
+  },
+  {
     name: 'candidate head drifted off validated head → stale-head',
     overrides: { candidateHead: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' },
     reason: 'stale-head',
@@ -185,6 +193,14 @@ test('mergeable accepts a boolean', () => {
   );
 });
 
+test('branchProtectionRequired=false waives ONLY the branch-protection gate', () => {
+  const result = evaluateMergeEligibility(eligibleState({
+    branchProtectionRequired: false,
+    branchProtectionRequiredContexts: [],
+  }));
+  assert.deepEqual(result, { eligible: true, reasons: [] });
+});
+
 test('omitted prState skips the open check (mergeable flag alone governs)', () => {
   const result = evaluateMergeEligibility(eligibleState({ prState: undefined }));
   assert.equal(result.eligible, true);
@@ -240,6 +256,7 @@ test('exported vocabulary is stable and frozen', () => {
     'verdict-not-eligible',
     'ci-not-green',
     'pr-not-mergeable',
+    'branch-protection-missing-gate',
     'stale-head',
     'lease-not-held',
   ]);

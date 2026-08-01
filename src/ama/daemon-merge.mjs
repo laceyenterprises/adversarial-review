@@ -240,6 +240,13 @@ function normalizeGateState(live = {}) {
     mergeStateStatus: live.mergeStateStatus,
     prState: String(live.prState ?? live.state ?? '').trim().toUpperCase(),
     merged: Boolean(live.merged) || String(live.prState ?? live.state ?? '').toUpperCase() === 'MERGED',
+    branchProtectionRequired: live.branchProtectionRequired,
+    requiredGateContext: live.requiredGateContext,
+    branchProtectionRequiredContexts: Array.isArray(live.branchProtectionRequiredContexts)
+      ? live.branchProtectionRequiredContexts
+      : Array.isArray(live.branchProtection?.requiredContexts)
+        ? live.branchProtection.requiredContexts
+        : [],
   };
 }
 
@@ -293,6 +300,9 @@ function priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, va
  *                                       verdict gate).
  * @param {object} args.reviewState      Finding counts/states (clean gate input).
  * @param {object} args.liveGate         Initial fetched GitHub gate snapshot.
+ * @param {boolean=} [args.branchProtectionRequired]
+ * @param {string=} [args.requiredGateContext]
+ * @param {string[]=} [args.branchProtectionRequiredContexts]
  * @param {string} [args.mergeMethod]    `squash` (default) | `merge`.
  * @param {string} args.hqRoot          HQ root for the audit doc.
  * @param {object} [args.auditMetadata] Extra top-level audit fields (reviewer, risk).
@@ -322,6 +332,9 @@ export async function attemptDaemonCleanMerge({
   verdict,
   reviewState = {},
   liveGate = {},
+  branchProtectionRequired = true,
+  requiredGateContext = '',
+  branchProtectionRequiredContexts = [],
   mergeMethod = 'squash',
   hqRoot,
   auditMetadata = {},
@@ -376,6 +389,12 @@ export async function attemptDaemonCleanMerge({
     mergeable: preLease.mergeable,
     mergeStateStatus: preLease.mergeStateStatus,
     prState: preLease.prState,
+    branchProtectionRequired,
+    requiredGateContext,
+    branchProtectionRequiredContexts:
+      preLease.branchProtectionRequiredContexts?.length > 0
+        ? preLease.branchProtectionRequiredContexts
+        : branchProtectionRequiredContexts,
     candidateHead: preLease.candidateHead,
     validatedHead,
   });
@@ -537,6 +556,12 @@ export async function attemptDaemonCleanMerge({
       mergeable: live.mergeable,
       mergeStateStatus: live.mergeStateStatus,
       prState: live.prState,
+      branchProtectionRequired,
+      requiredGateContext,
+      branchProtectionRequiredContexts:
+        live.branchProtectionRequiredContexts?.length > 0
+          ? live.branchProtectionRequiredContexts
+          : branchProtectionRequiredContexts,
       candidateHead: live.candidateHead,
       validatedHead,
     });

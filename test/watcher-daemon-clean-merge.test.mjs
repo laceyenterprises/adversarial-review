@@ -92,7 +92,7 @@ function baseArgs(rootDir) {
       mergeable: 'MERGEABLE',
       mergeStateStatus: 'CLEAN',
       statusCheckRollup: [],
-      branchProtection: { requiredContexts: [] },
+      branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
       prAuthor: 'builder',
     },
     labelNames: [],
@@ -807,6 +807,7 @@ test('daemon clean merge resolves worker identity via head-independent pr_opened
         mergeable: 'MERGEABLE',
         mergeStateStatus: 'CLEAN',
         prState: 'open',
+        branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
       },
       gateSnapshot: {
         reviewedHeadSha: 'head-after-remediation',
@@ -2086,6 +2087,7 @@ function realRollupHelpers({ rootDir, prNumber = 700, head = 'clean-head' }) {
       mergeable: 'MERGEABLE',
       mergeStateStatus: 'CLEAN',
       prState: 'open',
+      branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
     },
     gateSnapshot: {
       reviewedHeadSha: head,
@@ -2310,6 +2312,7 @@ function unattributedDaemonArgs({ rootDir, prNumber = 900, head = 'operator-pr-h
       mergeable: 'MERGEABLE',
       mergeStateStatus: 'CLEAN',
       prState: 'open',
+      branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
       prAuthor: 'VirtualPaul',
       headRefName: 'claude-code/infra-fix',
     },
@@ -2552,6 +2555,40 @@ test('Deliverable 2: daemon fail-closed with a NON-remediable co-occurring gate 
   }
 });
 
+test('daemon fail-closed on branch-protection-missing-gate parks for operator closeout', async () => {
+  const rootDir = tempRoot();
+  try {
+    const logs = [];
+    let closerCalls = 0;
+    const result = await maybeDispatchAmaClosureFor({
+      ...baseArgs(rootDir),
+      candidate: {
+        ...baseArgs(rootDir).candidate,
+        branchProtection: { requiredContexts: [] },
+      },
+      logger: { log: (m) => logs.push(String(m)), warn: (m) => logs.push(String(m)) },
+      runDaemonCleanMergeAttemptImpl: async () => ({
+        disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
+        reason: 'gate-not-eligible',
+        reasons: ['branch-protection-missing-gate'],
+        merged: false,
+        attempts: 1,
+        manualCloseRequired: true,
+      }),
+      maybeDispatchAmaCloserImpl: async () => { closerCalls += 1; return { dispatched: true }; },
+    });
+
+    assert.equal(closerCalls, 0, 'missing branch protection must park, not hammer');
+    assert.equal(result.skipMergeAgent, true);
+    const parsed = logs.map((l) => { try { return JSON.parse(l); } catch { return null; } });
+    const parkEvent = parsed.find((d) => d?.event === 'ama.daemon_clean_park.manual_close_required');
+    assert.ok(parkEvent);
+    assert.deepEqual(parkEvent.reasons, ['branch-protection-missing-gate']);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('Deliverable 2: worker-identity-unresolved fail-closed is NOT hammer-remediable → parks (no merge-clicker for un-attributed PRs)', async () => {
   const rootDir = tempRoot();
   try {
@@ -2619,6 +2656,7 @@ test('isDaemonFailClosedHammerRemediable classifies remediable vs non-remediable
   // Non-remediable
   assert.equal(isDaemonFailClosedHammerRemediable(fc('worker-identity-unresolved', ['missing-build-completion-signal'])), false);
   assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['ci-not-green', 'verdict-not-eligible'])), false);
+  assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['branch-protection-missing-gate'])), false);
   assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', ['lease-not-held'])), false);
   assert.equal(isDaemonFailClosedHammerRemediable(fc('gate-not-eligible', [])), false);
   assert.equal(isDaemonFailClosedHammerRemediable(fc('permanent-merge-rejection')), false);

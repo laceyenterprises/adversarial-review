@@ -28,6 +28,7 @@ function greenGate(overrides = {}) {
     mergeStateStatus: 'CLEAN',
     prState: 'OPEN',
     merged: false,
+    branchProtectionRequiredContexts: ['agent-os/adversarial-gate'],
     ...overrides,
   };
 }
@@ -144,6 +145,9 @@ function baseArgs(harness, overrides = {}) {
     verdict: 'settled-success',
     reviewState: cleanReview(),
     liveGate: greenGate(),
+    branchProtectionRequired: true,
+    requiredGateContext: 'agent-os/adversarial-gate',
+    branchProtectionRequiredContexts: ['agent-os/adversarial-gate'],
     mergeMethod: 'squash',
     hqRoot: '/hq',
     auditMetadata: { reviewer: 'codex', riskClass: 'low' },
@@ -254,6 +258,19 @@ test('clean + eligible → daemon merges inline; daemon-merge audit; no local CI
   // The merge used --match-head-commit semantics on the validated head.
   assert.equal(h.lastMergeCtx.head, HEAD);
   assert.equal(h.lastMergeCtx.mergeMethod, 'squash');
+});
+
+test('required branch protection missing the gate → daemon declines before lease', async () => {
+  const h = makeHarness();
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    branchProtectionRequiredContexts: ['ci/test'],
+    liveGate: greenGate({ branchProtectionRequiredContexts: ['ci/test'] }),
+  }));
+
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+  assert.equal(result.reason, 'not-eligible');
+  assert.deepEqual(result.reasons, ['branch-protection-missing-gate']);
+  assert.equal(h.calls.acquire, 0, 'branch-protection miss must fail before lease acquisition');
 });
 
 // ── Mandatory scenario 2: transient then success → retries, exactly one audit ─

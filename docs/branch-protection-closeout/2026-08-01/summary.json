@@ -1,0 +1,181 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-01T16:22:40.077Z",
+  "configPath": "config.json",
+  "evidenceDir": "docs/branch-protection-closeout/2026-08-01",
+  "applyRequested": true,
+  "summary": {
+    "total": 18,
+    "ok": 0,
+    "applied": 0,
+    "requiredContextMissing": 0,
+    "protectionMissing": 18,
+    "forbidden": 0,
+    "failed": 0,
+    "exitCode": 1
+  },
+  "results": [
+    {
+      "repo": "laceyenterprises/clio",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__clio--main.json"
+    },
+    {
+      "repo": "laceyenterprises/lacey-projects",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__lacey-projects--main.json"
+    },
+    {
+      "repo": "laceyenterprises/adversarial-review",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__adversarial-review--main.json"
+    },
+    {
+      "repo": "laceyenterprises/collect-session",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__collect-session--main.json"
+    },
+    {
+      "repo": "laceyenterprises/placey.kb",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__placey.kb--main.json"
+    },
+    {
+      "repo": "laceyenterprises/claude-agent.kb",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__claude-agent.kb--main.json"
+    },
+    {
+      "repo": "laceyenterprises/agents.kb",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__agents.kb--main.json"
+    },
+    {
+      "repo": "laceyenterprises/agent-os",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__agent-os--main.json"
+    },
+    {
+      "repo": "laceyenterprises/style.kb",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__style.kb--main.json"
+    },
+    {
+      "repo": "laceyenterprises/azra.kb",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__azra.kb--main.json"
+    },
+    {
+      "repo": "laceyenterprises/lacey.kb",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__lacey.kb--main.json"
+    },
+    {
+      "repo": "laceyenterprises/memory-os.kb",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__memory-os.kb--main.json"
+    },
+    {
+      "repo": "laceyenterprises/openclaw",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__openclaw--main.json"
+    },
+    {
+      "repo": "laceyenterprises/foundry",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__foundry--main.json"
+    },
+    {
+      "repo": "laceyenterprises/podium",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__podium--main.json"
+    },
+    {
+      "repo": "laceyenterprises/observatory",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__observatory--main.json"
+    },
+    {
+      "repo": "laceyenterprises/agent-os.kb",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__agent-os.kb--main.json"
+    },
+    {
+      "repo": "laceyenterprises/library",
+      "baseBranch": "main",
+      "context": "agent-os/adversarial-gate",
+      "ok": false,
+      "reason": "branch-protection-missing",
+      "requiredContexts": [],
+      "evidencePath": "docs/branch-protection-closeout/2026-08-01/laceyenterprises__library--main.json"
+    }
+  ]
+}

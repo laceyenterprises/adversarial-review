@@ -1,8 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-context.mjs';
 import {
+  addRequiredStatusCheckContext,
+  buildManualCommand,
   createBranchProtectionChecker,
   fetchAdversarialGateBranchProtection,
   formatBranchProtectionWarning,
@@ -54,6 +60,42 @@ test('fetchAdversarialGateBranchProtection succeeds when required context is pre
   assert.deepEqual(Object.keys(calls[0].options.env).sort(), ['GH_TOKEN', 'HOME', 'PATH']);
 });
 
+test('fetchAdversarialGateBranchProtection retries transient gh failures before succeeding', async () => {
+  let calls = 0;
+  const result = await fetchAdversarialGateBranchProtection({
+    repoPath: 'laceyenterprises/adversarial-review',
+    baseBranch: 'main',
+    env: {
+      GITHUB_TOKEN: 'token-123',
+      PATH: '/usr/bin:/bin',
+      HOME: '/tmp/test-home',
+    },
+    retryOptions: {
+      retryDelayMs: 0,
+      sleepImpl: async () => {},
+    },
+    execFileImpl: async () => {
+      calls += 1;
+      if (calls === 1) {
+        const err = new Error('TLS handshake timeout');
+        err.stderr = 'TLS handshake timeout';
+        throw err;
+      }
+      return {
+        stdout: JSON.stringify({
+          required_status_checks: {
+            contexts: [ADVERSARIAL_GATE_CONTEXT],
+          },
+        }),
+      };
+    },
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(result.ok, true);
+  assert.equal(result.reason, 'required-context-present');
+});
+
 test('fetchAdversarialGateBranchProtection returns a structured failure for invalid status-context config', async () => {
   let called = false;
   const result = await fetchAdversarialGateBranchProtection({
@@ -74,6 +116,92 @@ test('fetchAdversarialGateBranchProtection returns a structured failure for inva
   assert.equal(result.reason, 'invalid-status-context-config');
   assert.equal(result.context, 'invalid-status-context-config');
   assert.match(result.error, /ADV_GATE_STATUS_CONTEXT must not contain CR or LF/);
+});
+
+test('addRequiredStatusCheckContext retries transient gh failures before succeeding', async () => {
+  const calls = [];
+  const requiredContexts = await addRequiredStatusCheckContext({
+    repoPath: 'laceyenterprises/adversarial-review',
+    baseBranch: 'main',
+    context: ADVERSARIAL_GATE_CONTEXT,
+    env: {
+      GITHUB_TOKEN: 'token-123',
+      PATH: '/usr/bin:/bin',
+      HOME: '/tmp/test-home',
+    },
+    retryOptions: {
+      retryDelayMs: 0,
+      sleepImpl: async () => {},
+    },
+    execFileImpl: async (command, args, options) => {
+      calls.push({ command, args, options });
+      if (calls.length === 1) {
+        const err = new Error('TLS handshake timeout');
+        err.stderr = 'TLS handshake timeout';
+        throw err;
+      }
+      return { stdout: JSON.stringify(['ci/test', ADVERSARIAL_GATE_CONTEXT]) };
+    },
+  });
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(requiredContexts, [ADVERSARIAL_GATE_CONTEXT, 'ci/test']);
+});
+
+test('addRequiredStatusCheckContext does not retry non-transient gh failures', async () => {
+  let calls = 0;
+  await assert.rejects(
+    addRequiredStatusCheckContext({
+      repoPath: 'laceyenterprises/adversarial-review',
+      baseBranch: 'main',
+      context: ADVERSARIAL_GATE_CONTEXT,
+      env: {
+        GITHUB_TOKEN: 'token-123',
+        PATH: '/usr/bin:/bin',
+        HOME: '/tmp/test-home',
+      },
+      retryOptions: {
+        retryDelayMs: 0,
+        sleepImpl: async () => {},
+      },
+      execFileImpl: async () => {
+        calls += 1;
+        const err = new Error('HTTP 403 Forbidden');
+        err.stderr = 'HTTP 403 Forbidden';
+        throw err;
+      },
+    }),
+    /HTTP 403 Forbidden/,
+  );
+  assert.equal(calls, 1);
+});
+
+test('addRequiredStatusCheckContext does not retry branch names that look like 5xx codes', async () => {
+  let calls = 0;
+  await assert.rejects(
+    addRequiredStatusCheckContext({
+      repoPath: 'laceyenterprises/adversarial-review',
+      baseBranch: '502',
+      context: ADVERSARIAL_GATE_CONTEXT,
+      env: {
+        GITHUB_TOKEN: 'token-123',
+        PATH: '/usr/bin:/bin',
+        HOME: '/tmp/test-home',
+      },
+      retryOptions: {
+        retryDelayMs: 0,
+        sleepImpl: async () => {},
+      },
+      execFileImpl: async () => {
+        calls += 1;
+        const err = new Error('HTTP 404 Not Found for branch 502');
+        err.stderr = 'HTTP 404 Not Found for branch 502';
+        throw err;
+      },
+    }),
+    /HTTP 404 Not Found/,
+  );
+  assert.equal(calls, 1);
 });
 
 test('warnForMissingAdversarialGateBranchProtection logs structured warnings for missing context', async () => {
@@ -198,4 +326,37 @@ test('formatBranchProtectionWarning includes empty-context diagnostics', () => {
     requiredContexts: [],
   });
   assert.match(warning, /required_contexts=none/);
+});
+
+test('buildManualCommand shell-quotes operator repair inputs', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'branch-protection-manual-command-'));
+  try {
+    const marker = join(tmp, 'injected');
+    const bin = join(tmp, 'bin');
+    const pathEnv = `${bin}:${process.env.PATH || '/usr/bin:/bin'}`;
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'jq'), '#!/bin/sh\ncat >/dev/null\nprintf main\n');
+    writeFileSync(join(bin, 'gh'), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(bin, 'jq'), 0o755);
+    chmodSync(join(bin, 'gh'), 0o755);
+
+    for (const reason of ['required-context-missing', 'branch-protection-missing']) {
+      const script = join(tmp, `${reason}.sh`);
+      writeFileSync(script, buildManualCommand({
+        repo: `laceyenterprises/repo$(touch ${marker})`,
+        baseBranch: `main$(touch ${marker})`,
+        context: `agent-os/adversarial-gate'$(touch ${marker})`,
+        ok: false,
+        reason,
+        requiredContexts: [],
+      }));
+      execFileSync('bash', [script], {
+        env: { ...process.env, PATH: pathEnv },
+      });
+    }
+
+    assert.equal(existsSync(marker), false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });

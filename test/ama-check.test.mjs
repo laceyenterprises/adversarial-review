@@ -257,6 +257,7 @@ function runAmaCheck(tmp, {
   rebaseAssessment = null,
   reviewCycleExhausted = null,
   rootDir = null,
+  env = {},
 }) {
   const paths = writeFixtureFiles(tmp, { protectionBody, prPatch, reviews });
   const configPath = writeConfig(tmp, { branchProtectionRequired, strictNonBlockingRemediation });
@@ -322,6 +323,7 @@ function runAmaCheck(tmp, {
       encoding: 'utf8',
       env: {
         ...process.env,
+        ...env,
         AGENT_OS_CONFIG_PATH: configPath,
       },
     },
@@ -852,6 +854,27 @@ test('ama-check accepts unavailable 404-style protection input when branch prote
   }
 });
 
+test('ama-check maps 403 protection fixtures to canonical forbidden reason', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-403-protection-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody: '{ "message": "Resource not accessible by integration", "status": "403" }\n',
+      prPatch: {
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, false, JSON.stringify(verdict, null, 2));
+    assert.equal(verdict.trace.branchProtection.observedReason, 'branch-protection-forbidden');
+    assert.ok(verdict.reasons.includes('branch-protection-missing-gate'));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('ama-check accepts ordinary protection JSON when branch protection is waived', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'ama-check-waived-protection-json-'));
   try {
@@ -912,6 +935,27 @@ test('ama-check keeps branch protection enforced when required=true and the gate
     assert.equal(verdict.trace.branchProtection.required, true);
     assert.equal(verdict.trace.branchProtection.ok, false);
     assert.equal(verdict.trace.branchProtection.auditReason, null);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('ama-check classifies protection fixtures with the configured gate context override', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'ama-check-required-custom-gate-'));
+  try {
+    const result = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody: '{ "required_status_checks": { "contexts": ["galileo/adversarial-gate"] } }\n',
+      env: {
+        ADV_GATE_STATUS_CONTEXT: 'galileo/adversarial-gate',
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(result.stdout);
+    assert.equal(verdict.eligible, true, JSON.stringify(verdict, null, 2));
+    assert.ok(!verdict.reasons.includes('branch-protection-missing-gate'));
+    assert.equal(verdict.trace.branchProtection.ok, true);
+    assert.equal(verdict.trace.branchProtection.observedReason, 'required-context-present');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

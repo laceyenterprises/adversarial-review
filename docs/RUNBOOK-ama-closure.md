@@ -89,6 +89,41 @@ dispatcher debugging), see
   `required: true`, an ordinary empty protection snapshot fails closed as
   `branch-protection-missing-gate`.
 
+  The repo-wide closeout/audit helper is:
+
+  ```bash
+  npm run check-branch-protection -- --json
+  npm run check-branch-protection -- --json --apply
+  ```
+
+  `--json` writes one audit record per unresolved repo under
+  `data/branch-protection-audits/` and exits `1` until every watched repo is
+  either protected or explicitly waived by policy. `--apply` performs only the
+  safe in-place repair: add the resolved adversarial gate context to an already
+  readable branch-protection object. It does not invent a full branch-protection
+  policy for 404/missing repos and it does not waive 403/forbidden repos.
+
+  For a `branch-protection-forbidden` audit record, use a repo-admin credential
+  and run the exact add-context mutation manually:
+
+  ```bash
+  base=$(gh api "repos/<owner>/<repo>" --jq .default_branch)
+  base_enc=$(printf '%s' "$base" | jq -sRr @uri)
+  gh api -X POST "repos/<owner>/<repo>/branches/$base_enc/protection/required_status_checks/contexts" \
+    -f "contexts[]=agent-os/adversarial-gate"
+  ```
+
+  For a `branch-protection-missing` audit record, bootstrap the minimum branch
+  protection explicitly, then rerun the audit:
+
+  ```bash
+  base=$(gh api "repos/<owner>/<repo>" --jq .default_branch)
+  base_enc=$(printf '%s' "$base" | jq -sRr @uri)
+  gh api -X PUT "repos/<owner>/<repo>/branches/$base_enc/protection" --input - <<'JSON'
+  {"required_status_checks":{"strict":true,"contexts":["agent-os/adversarial-gate"]},"enforce_admins":false,"required_pull_request_reviews":null,"restrictions":null}
+  JSON
+  ```
+
 ---
 
 ## 2. Enabling AMA on this host

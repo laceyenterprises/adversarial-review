@@ -13,7 +13,7 @@ import { promisify } from 'node:util';
 
 import { summarizeChecksConclusion } from './checks-summary.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
-import { normalizeRequiredContexts } from './branch-protection.mjs';
+import { fetchAdversarialGateBranchProtection } from './branch-protection.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import {
   FAST_MERGE_GH_TIMEOUT_MS,
@@ -430,8 +430,7 @@ function resolveHqOwner(hqRoot) {
       detail: 'ownerUser missing from .hq/config.json',
       code: null,
     };
-  }
-  return {
+  } return {
     ownerUser,
     reason: null,
     detail: null,
@@ -2879,7 +2878,7 @@ async function dispatchMergeAgentForPR({
 }
 
 async function fetchMergeAgentCandidate(repo, prNumber, {
-  execFileImpl = execFileAsync,
+  execFileImpl = execFileAsync, env = process.env,
   operatorApprovalEvent = undefined,
   mergeAgentRequestEvent = undefined,
 } = {}) {
@@ -2909,22 +2908,23 @@ async function fetchMergeAgentCandidate(repo, prNumber, {
       ? fetchLatestLabelEvent(repo, prNumber, MERGE_AGENT_REQUESTED_LABEL, { execFileImpl })
       : mergeAgentRequestEvent ?? null,
   ]);
-  let branchProtection = { requiredContexts: [] };
+  let branchProtection = { requiredContexts: [], ok: false, reason: 'branch-protection-check-failed' };
   if (parsed.baseRefName) {
     try {
-      const { stdout: protectionStdout } = await execFileImpl(
-        'gh',
-        [
-          'api',
-          `repos/${repo}/branches/${encodeURIComponent(parsed.baseRefName)}/protection`,
-        ],
-        { maxBuffer: 5 * 1024 * 1024 }
-      );
+      const protection = await fetchAdversarialGateBranchProtection({
+        repoPath: repo,
+        baseBranch: parsed.baseRefName,
+        execFileImpl,
+        env,
+      });
       branchProtection = {
-        requiredContexts: normalizeRequiredContexts(JSON.parse(String(protectionStdout || '{}'))),
+        requiredContexts: Array.isArray(protection?.requiredContexts) ? protection.requiredContexts : [],
+        ok: protection?.ok === true,
+        reason: protection?.reason || 'branch-protection-check-failed',
+        requiredContext: protection?.context || null,
       };
     } catch {
-      branchProtection = { requiredContexts: [] };
+      branchProtection = { requiredContexts: [], ok: false, reason: 'branch-protection-check-failed', requiredContext: null };
     }
   }
   return {

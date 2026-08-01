@@ -2942,6 +2942,11 @@ export async function maybeDispatchAmaCloser({
             validatedHead: reviewedSha,
             verdict: 'ham_terminal_remediation_validated',
             reviewState,
+            branchProtectionRequired: cfg?.branchProtection?.required !== false,
+            requiredGateContext: dispatchContext.requiredGateContext || '',
+            branchProtectionRequiredContexts: Array.isArray(prMetadata?.branchProtection?.requiredContexts)
+              ? prMetadata.branchProtection.requiredContexts
+              : [],
             liveGate: {
               candidateHead: prMetadata?.headSha || '',
               requiredChecks: Array.isArray(prMetadata?.statusCheckRollup) ? prMetadata.statusCheckRollup : [],
@@ -2949,6 +2954,9 @@ export async function maybeDispatchAmaCloser({
               mergeStateStatus: prMetadata?.mergeStateStatus,
               prState: String(prMetadata?.state || '').trim() || (prMetadata?.isOpen === false ? 'CLOSED' : 'OPEN'),
               merged: String(prMetadata?.state || '').trim().toUpperCase() === 'MERGED',
+              branchProtectionRequiredContexts: Array.isArray(prMetadata?.branchProtection?.requiredContexts)
+                ? prMetadata.branchProtection.requiredContexts
+                : [],
             },
             mergeMethod,
             hqRoot,
@@ -2975,6 +2983,9 @@ export async function maybeDispatchAmaCloser({
                 mergeStateStatus: rollup?.mergeStateStatus,
                 prState: state,
                 merged: state.toUpperCase() === 'MERGED',
+                branchProtectionRequiredContexts: Array.isArray(prMetadata?.branchProtection?.requiredContexts)
+                  ? prMetadata.branchProtection.requiredContexts
+                  : [],
               };
             },
             acquireLeaseImpl: () => {

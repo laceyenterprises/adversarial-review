@@ -1198,6 +1198,10 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       requiredContext,
       ok: protectionOk,
       waived: branchProtectionWaived,
+      observedReason: prMetadata?.branchProtection?.reason || null,
+      requiredContexts: Array.isArray(prMetadata?.branchProtection?.requiredContexts)
+        ? prMetadata.branchProtection.requiredContexts
+        : [],
       auditReason: branchProtectionWaived ? 'branch_protection_requirement_waived' : null,
     },
     blockLabels: blockingLabels,

@@ -122,7 +122,26 @@ The old table (`low/medium=1`, `high/critical=3`) no longer applies to new jobs:
 
 Before enabling GitHub-native merge or auto-merge for this repo, require `agent-os/adversarial-gate` in branch protection. That status is the GitHub-facing projection of the adversarial-review ledger; without making it required, GitHub can merge a PR even when the durable review/remediation loop is still pending or blocked. If you intentionally rename the gate with `ADV_GATE_STATUS_CONTEXT`, use a value matching `[A-Za-z0-9._/-]+` with a 100-character maximum, then update branch protection and every watcher/probe deployment to the same override before trusting the new check.
 
-The watcher now checks that protection on a cached interval and logs `branch-protection-warning` for any watched repo/base branch where the required context is absent, unreadable, or configured with an invalid `ADV_GATE_STATUS_CONTEXT`. Run `npm run check-branch-protection` for an operator-side audit; pass `-- --repo <owner/repo>` or `-- --base <branch>` to narrow the probe.
+The watcher now checks that protection on a cached interval and logs `branch-protection-warning` for any watched repo/base branch where the required context is absent, unreadable, or configured with an invalid `ADV_GATE_STATUS_CONTEXT`. Run `npm run check-branch-protection` for an operator-side audit; pass `-- --repo <owner/repo>` or `-- --base <branch>` to narrow the probe. `-- --json` emits a machine-readable summary, persists one JSON record per non-OK repo under `data/branch-protection-audits/` by default, and exits `1` when any watched repo still lacks the gate. `-- --apply` adds the missing required-status-check context in place only for repos where branch protection was readable and the gate was the only missing piece; 403/404/unreadable repos stay fail-closed and keep their audit record.
+
+When the audit record says `reason=branch-protection-forbidden`, rerun the add-context step with a repo-admin credential instead of waiving the gate:
+
+```bash
+base=$(gh api "repos/<owner>/<repo>" --jq .default_branch)
+base_enc=$(printf '%s' "$base" | jq -sRr @uri)
+gh api -X POST "repos/<owner>/<repo>/branches/$base_enc/protection/required_status_checks/contexts" \
+  -f "contexts[]=agent-os/adversarial-gate"
+```
+
+When the audit record says `reason=branch-protection-missing`, the branch has no protection object yet. Bootstrap the minimum required-check protection first, then rerun the audit:
+
+```bash
+base=$(gh api "repos/<owner>/<repo>" --jq .default_branch)
+base_enc=$(printf '%s' "$base" | jq -sRr @uri)
+gh api -X PUT "repos/<owner>/<repo>/branches/$base_enc/protection" --input - <<'JSON'
+{"required_status_checks":{"strict":true,"contexts":["agent-os/adversarial-gate"]},"enforce_admins":false,"required_pull_request_reviews":null,"restrictions":null}
+JSON
+```
 
 `operator-approved` is the operator's current-head merge approval. It is accepted only from an attributable GitHub `labeled` event that appears in the PR timeline after the code event for the current head SHA; GitHub issue comments, review posts, and other non-code PR updates do not make that approval stale. A PR author cannot approve their own PR with this label. When scoped, it bypasses review/remediation state gates so the operator can merge during a pending review or stuck remediation loop. It still requires an open, mergeable PR with known successful checks and no explicit skip label.
 

@@ -22,7 +22,11 @@ function insertReviewRow(rootDir, overrides = {}) {
   try {
     ensureReviewStateSchema(db);
     db.prepare(
-      'INSERT INTO reviewed_prs (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts, posted_at, failed_at, failure_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      `INSERT INTO reviewed_prs (
+        repo, pr_number, reviewed_at, reviewer, pr_state, review_status, review_attempts,
+        posted_at, failed_at, failure_message, revision_ref, reviewer_session_uuid,
+        reviewer_pgid, reviewer_started_at, reviewer_head_sha
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       overrides.repo || 'laceyenterprises/agent-os',
       overrides.prNumber || 238,
@@ -34,6 +38,11 @@ function insertReviewRow(rootDir, overrides = {}) {
       '2026-05-05T04:00:00.000Z',
       overrides.failedAt || null,
       overrides.failureMessage || null,
+      overrides.revisionRef || 'head-current-238',
+      overrides.reviewerSessionUuid || null,
+      overrides.reviewerPgid ?? null,
+      overrides.reviewerStartedAt || null,
+      overrides.reviewerHeadSha || null,
     );
   } finally {
     db.close();
@@ -63,7 +72,7 @@ function makeJob(rootDir, overrides = {}) {
   return { jobPath: result.jobPath, job };
 }
 
-test('parseArgs defaults --bump-budget to 1', () => {
+test('parseArgs defaults --bump-budget to 1', async () => {
   const { values } = parseArgs([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
@@ -72,7 +81,7 @@ test('parseArgs defaults --bump-budget to 1', () => {
   assert.equal(values.bumpBudget, 1);
 });
 
-test('parseArgs accepts audit-root-dir and allow-failed-reset', () => {
+test('parseArgs accepts audit-root-dir and allow-failed-reset', async () => {
   const { values } = parseArgs([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
@@ -84,7 +93,31 @@ test('parseArgs accepts audit-root-dir and allow-failed-reset', () => {
   assert.equal(values['allow-failed-reset'], true);
 });
 
-test('normalizeOperatorRetriggerReason stores a canonical prefix', () => {
+test('parseArgs accepts exact-head recovery flags', async () => {
+  const { values } = parseArgs([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--exact-head-now',
+    '--cancel-active-review',
+  ]);
+  assert.equal(values['exact-head-now'], true);
+  assert.equal(values['cancel-active-review'], true);
+});
+
+test('parseArgs rejects active-review recovery flags without exact-head-now', async () => {
+  assert.throws(
+    () => parseArgs([
+      '--repo', 'laceyenterprises/agent-os',
+      '--pr', '238',
+      '--reason', 'retry',
+      '--cancel-active-review',
+    ]),
+    /require --exact-head-now/
+  );
+});
+
+test('normalizeOperatorRetriggerReason stores a canonical prefix', async () => {
   assert.equal(
     normalizeOperatorRetriggerReason('retry after remediation'),
     'retrigger-review: retry after remediation',
@@ -107,9 +140,9 @@ test('normalizeOperatorRetriggerReason stores a canonical prefix', () => {
   );
 });
 
-test('retrigger-review rejects legacy --hq-root', () => {
+test('retrigger-review rejects legacy --hq-root', async () => {
   const err = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -120,7 +153,7 @@ test('retrigger-review rejects legacy --hq-root', () => {
   assert.match(err.text(), /--hq-root is no longer supported/);
 });
 
-test('parseArgs rejects mutually exclusive budget flags', () => {
+test('parseArgs rejects mutually exclusive budget flags', async () => {
   assert.throws(
     () => parseArgs([
       '--repo', 'laceyenterprises/agent-os',
@@ -133,7 +166,7 @@ test('parseArgs rejects mutually exclusive budget flags', () => {
   );
 });
 
-test('parseArgs rejects missing reason source', () => {
+test('parseArgs rejects missing reason source', async () => {
   assert.throws(
     () => parseArgs([
       '--repo', 'laceyenterprises/agent-os',
@@ -143,7 +176,7 @@ test('parseArgs rejects missing reason source', () => {
   );
 });
 
-test('parseArgs rejects non-positive bump budgets', () => {
+test('parseArgs rejects non-positive bump budgets', async () => {
   assert.throws(
     () => parseArgs([
       '--repo', 'laceyenterprises/agent-os',
@@ -155,7 +188,7 @@ test('parseArgs rejects non-positive bump budgets', () => {
   );
 });
 
-test('retrigger-review treats pending review rows as already-pending success and still bumps budget', () => {
+test('retrigger-review treats pending review rows as already-pending success and still bumps budget', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'pending' });
   const { jobPath } = makeJob(rootDir, {
@@ -165,7 +198,7 @@ test('retrigger-review treats pending review rows as already-pending success and
   });
 
   const out = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -189,7 +222,7 @@ test('retrigger-review treats pending review rows as already-pending success and
   }
 });
 
-test('retrigger-review bumps pending timestamp even when explicit reason is unchanged', () => {
+test('retrigger-review bumps pending timestamp even when explicit reason is unchanged', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'pending' });
   const previousRequestedAt = '2026-05-05T04:00:00.000Z';
@@ -211,7 +244,7 @@ test('retrigger-review bumps pending timestamp even when explicit reason is unch
     db.close();
   }
 
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -233,7 +266,7 @@ test('retrigger-review bumps pending timestamp even when explicit reason is unch
   }
 });
 
-test('retrigger-review bumps the terminal job budget and resets review status', () => {
+test('retrigger-review bumps the terminal job budget and resets review status', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'posted' });
   const { jobPath } = makeJob(rootDir, {
@@ -243,7 +276,7 @@ test('retrigger-review bumps the terminal job budget and resets review status', 
   });
 
   const out = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'substantially rewritten',
@@ -270,13 +303,43 @@ test('retrigger-review bumps the terminal job budget and resets review status', 
   assert.equal(JSON.parse(out.text()).outcome, 'triggered+bumped');
 });
 
-test('retrigger-review refuses active follow-up jobs when bumping is enabled', () => {
+test('retrigger-review exact-head-now leaves the explicit operator marker used for one-shot hard-review-ceiling bypass', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, { reviewStatus: 'posted' });
+
+  const out = makeCaptureStream();
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'final exact-head recovery',
+    '--exact-head-now',
+    '--no-bump-budget',
+    '--root-dir', rootDir,
+  ], { stdout: out, stderr: makeCaptureStream() });
+
+  assert.equal(rc, 0);
+  const auditRow = JSON.parse(out.text());
+  assert.equal(auditRow.exactHeadNow, true);
+  assert.equal(auditRow.outcome, 'triggered');
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare(
+      'SELECT review_status, rereview_reason FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/agent-os', 238);
+    assert.equal(row.review_status, 'pending');
+    assert.match(row.rereview_reason, /^retrigger-review: final exact-head recovery$/);
+  } finally {
+    db.close();
+  }
+});
+
+test('retrigger-review refuses active follow-up jobs when bumping is enabled', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'posted' });
   makeJob(rootDir, { status: 'pending' });
 
   const err = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -288,7 +351,7 @@ test('retrigger-review refuses active follow-up jobs when bumping is enabled', (
   assert.match(err.text(), /refused:job-active/);
 });
 
-test('retrigger-review preserves failed-review evidence unless allow-failed-reset is set', () => {
+test('retrigger-review preserves failed-review evidence unless allow-failed-reset is set', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, {
     reviewStatus: 'failed',
@@ -297,7 +360,7 @@ test('retrigger-review preserves failed-review evidence unless allow-failed-rese
   });
 
   const err = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -309,7 +372,7 @@ test('retrigger-review preserves failed-review evidence unless allow-failed-rese
   assert.match(err.text(), /--allow-failed-reset/);
 });
 
-test('retrigger-review allows failed reset when explicitly requested', () => {
+test('retrigger-review allows failed reset when explicitly requested', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, {
     reviewStatus: 'failed',
@@ -318,7 +381,7 @@ test('retrigger-review allows failed reset when explicitly requested', () => {
   });
 
   const out = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -330,7 +393,7 @@ test('retrigger-review allows failed reset when explicitly requested', () => {
   assert.equal(JSON.parse(out.text()).outcome, 'triggered:no-job');
 });
 
-test('retrigger-review allows failed-orphan reset when explicitly requested', () => {
+test('retrigger-review allows failed-orphan reset when explicitly requested', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, {
     reviewStatus: 'failed-orphan',
@@ -339,7 +402,7 @@ test('retrigger-review allows failed-orphan reset when explicitly requested', ()
   });
 
   const err = makeCaptureStream();
-  const blocked = main([
+  const blocked = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'verified no orphan review posted',
@@ -350,7 +413,7 @@ test('retrigger-review allows failed-orphan reset when explicitly requested', ()
   assert.match(err.text(), /failed-orphan/);
 
   const out = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'verified no orphan review posted',
@@ -373,12 +436,12 @@ test('retrigger-review allows failed-orphan reset when explicitly requested', ()
   }
 });
 
-test('retrigger-review explains reviewing recovery path', () => {
+test('retrigger-review explains reviewing recovery path', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'reviewing' });
 
   const err = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -387,14 +450,147 @@ test('retrigger-review explains reviewing recovery path', () => {
 
   assert.equal(rc, 1);
   assert.match(err.text(), /duplicate GitHub review/i);
-  assert.match(err.text(), /reconcileOrphanedReviewing/);
+  assert.match(err.text(), /--exact-head-now --cancel-active-review/);
 });
 
-test('retrigger-review returns runtime exit code when a refusal-path audit append fails', () => {
+test('retrigger-review exact-head-now still refuses active reviewers by default', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'reviewing',
+    reviewerSessionUuid: 'sess-238',
+    reviewerPgid: 8123,
+    reviewerStartedAt: '2026-05-05T04:01:00.000Z',
+    reviewerHeadSha: 'head-current-238',
+  });
+
+  const err = makeCaptureStream();
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--exact-head-now',
+    '--root-dir', rootDir,
+  ], { stdout: makeCaptureStream(), stderr: err });
+
+  assert.equal(rc, 1);
+  assert.match(err.text(), /refused:not-eligible: laceyenterprises\/agent-os#238 \(reviewing\)/);
+});
+
+test('retrigger-review exact-head-now can cancel and reset an active reviewer', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'reviewing',
+    reviewerSessionUuid: 'sess-238',
+    reviewerPgid: 8123,
+    reviewerStartedAt: '2026-05-05T04:01:00.000Z',
+    reviewerHeadSha: 'head-current-238',
+  });
+
+  const out = makeCaptureStream();
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--exact-head-now',
+    '--cancel-active-review',
+    '--no-bump-budget',
+    '--root-dir', rootDir,
+  ], {
+    stdout: out,
+    stderr: makeCaptureStream(),
+    cancelActiveReviewImpl: async () => ({
+      signalled: true,
+      target: { kind: 'process-group', id: 8123 },
+      error: null,
+    }),
+    waitForReviewerExitImpl: async () => ({ checked: true, exited: true, pgid: 8123 }),
+  });
+
+  assert.equal(rc, 0);
+  const row = JSON.parse(out.text());
+  assert.equal(row.outcome, 'already-pending');
+  assert.equal(row.exactHeadNow, true);
+  assert.equal(row.activeReviewReset, 'cancelled');
+  const db = openReviewStateDb(rootDir);
+  try {
+    const refreshed = db.prepare(
+      'SELECT review_status, reviewer_pgid, reviewer_session_uuid, rereview_reason FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/agent-os', 238);
+    assert.equal(refreshed.review_status, 'pending');
+    assert.equal(refreshed.reviewer_pgid, null);
+    assert.equal(refreshed.reviewer_session_uuid, null);
+    assert.equal(refreshed.rereview_reason, 'retrigger-review: retry');
+  } finally {
+    db.close();
+  }
+});
+
+test('retrigger-review exact-head-now stops a stale active follow-up before re-arming review', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'posted',
+    revisionRef: 'head-current-238',
+  });
+  makeJob(rootDir, {
+    status: 'in_progress',
+    revisionRef: 'head-stale-237',
+    claimedAt: '2026-05-05T04:05:00.000Z',
+    remediationWorker: { state: 'spawned' },
+  });
+
+  const out = makeCaptureStream();
+  const stopped = [];
+  let latestJobCalls = 0;
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--exact-head-now',
+    '--no-bump-budget',
+    '--root-dir', rootDir,
+  ], {
+    stdout: out,
+    stderr: makeCaptureStream(),
+    readReviewRow: () => ({
+      repo: 'laceyenterprises/agent-os',
+      pr_number: 238,
+      pr_state: 'open',
+      review_status: 'posted',
+      revision_ref: 'head-current-238',
+    }),
+    latestJobFinder: () => {
+      latestJobCalls += 1;
+      if (latestJobCalls <= 2) {
+        return {
+          jobPath: path.join(rootDir, 'data', 'follow-up-jobs', 'in-progress', 'job.json'),
+          job: {
+            jobId: 'job-238',
+            status: 'in_progress',
+            revisionRef: 'head-stale-237',
+            remediationPlan: { maxRounds: 1 },
+          },
+        };
+      }
+      return null;
+    },
+    stopFollowUpJobImpl: async (args) => {
+      stopped.push(args);
+      return { job: { status: 'stopped' } };
+    },
+  });
+
+  assert.equal(rc, 0);
+  const row = JSON.parse(out.text());
+  assert.equal(row.staleFollowUpStopped, true);
+  assert.equal(stopped.length, 1);
+  assert.match(stopped[0].reason, /Superseded by operator exact-head re-review request/);
+});
+
+test('retrigger-review returns runtime exit code when a refusal-path audit append fails', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'reviewing' });
   const err = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -412,12 +608,12 @@ test('retrigger-review returns runtime exit code when a refusal-path audit appen
   assert.doesNotMatch(err.text(), /\n\s+at\s/);
 });
 
-test('retrigger-review keeps reviewing rows blocked even with --allow-failed-reset', () => {
+test('retrigger-review keeps reviewing rows blocked even with --allow-failed-reset', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'reviewing' });
 
   const err = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -429,13 +625,13 @@ test('retrigger-review keeps reviewing rows blocked even with --allow-failed-res
   assert.match(err.text(), /reviewing/);
 });
 
-test('retrigger-review skips the budget bump when no follow-up job exists', () => {
+test('retrigger-review skips the budget bump when no follow-up job exists', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'posted' });
   mkdirSync(getFollowUpJobDir(rootDir, 'pending'), { recursive: true });
 
   const out = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -450,8 +646,8 @@ test('retrigger-review skips the budget bump when no follow-up job exists', () =
   assert.equal(row.newMaxRounds, null);
 });
 
-test('retrigger-review returns reason-input exit code for missing reason content', () => {
-  const rc = main([
+test('retrigger-review returns reason-input exit code for missing reason content', async () => {
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', '   ',
@@ -460,14 +656,14 @@ test('retrigger-review returns reason-input exit code for missing reason content
   assert.equal(rc, 3);
 });
 
-test('retrigger-review reads reason from file', () => {
+test('retrigger-review reads reason from file', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'posted' });
   const reasonFile = path.join(rootDir, 'reason.txt');
   writeFileSync(reasonFile, 'from file\n', 'utf8');
 
   const out = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason-file', reasonFile,
@@ -478,12 +674,12 @@ test('retrigger-review reads reason from file', () => {
   assert.equal(JSON.parse(out.text()).reason, 'retrigger-review: from file');
 });
 
-test('retrigger-review reads --reason-stdin via injected reader', () => {
+test('retrigger-review reads --reason-stdin via injected reader', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'posted' });
 
   const out = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason-stdin',
@@ -498,12 +694,12 @@ test('retrigger-review reads --reason-stdin via injected reader', () => {
   assert.equal(JSON.parse(out.text()).reason, 'retrigger-review: from stdin');
 });
 
-test('retrigger-review --quiet suppresses informational output', () => {
+test('retrigger-review --quiet suppresses informational output', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'posted' });
 
   const out = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -515,11 +711,11 @@ test('retrigger-review --quiet suppresses informational output', () => {
   assert.equal(out.text(), '');
 });
 
-test('retrigger-review writes the audit ledger under data/operator-mutations by default', () => {
+test('retrigger-review writes the audit ledger under data/operator-mutations by default', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'posted' });
 
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -530,7 +726,7 @@ test('retrigger-review writes the audit ledger under data/operator-mutations by 
   assert.equal(existsSync(path.join(rootDir, 'data', 'operator-mutations')), true);
 });
 
-test('retrigger-review re-evaluates retries after a refused row with the same idempotency key', () => {
+test('retrigger-review re-evaluates retries after a refused row with the same idempotency key', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'reviewing' });
   const args = [
@@ -542,7 +738,7 @@ test('retrigger-review re-evaluates retries after a refused row with the same id
   ];
 
   const firstErr = makeCaptureStream();
-  assert.equal(main(args, { stdout: makeCaptureStream(), stderr: firstErr }), 1);
+  assert.equal(await main(args, { stdout: makeCaptureStream(), stderr: firstErr }), 1);
   assert.match(firstErr.text(), /reviewing/);
 
   const db = openReviewStateDb(rootDir);
@@ -554,14 +750,14 @@ test('retrigger-review re-evaluates retries after a refused row with the same id
   }
 
   const out = makeCaptureStream();
-  const secondRc = main(args, { stdout: out, stderr: makeCaptureStream() });
+  const secondRc = await main(args, { stdout: out, stderr: makeCaptureStream() });
   assert.equal(secondRc, 0);
   assert.equal(JSON.parse(out.text()).outcome, 'triggered:no-job');
 });
 
-test('retrigger-review returns runtime exit code with concise stderr when rereview throws', () => {
+test('retrigger-review returns runtime exit code with concise stderr when rereview throws', async () => {
   const err = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -585,12 +781,12 @@ test('retrigger-review returns runtime exit code with concise stderr when rerevi
   assert.doesNotMatch(err.text(), /\n\s+at\s/);
 });
 
-test('retrigger-review returns runtime exit code with concise stderr when terminal audit append fails after rereview succeeds', () => {
+test('retrigger-review returns runtime exit code with concise stderr when terminal audit append fails after rereview succeeds', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'posted' });
 
   const err = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -617,10 +813,10 @@ test('retrigger-review returns runtime exit code with concise stderr when termin
   assert.doesNotMatch(err.text(), /\n\s+at\s/);
 });
 
-test('retrigger-review maps idempotency mismatches to usage and writes a refusal row', () => {
+test('retrigger-review maps idempotency mismatches to usage and writes a refusal row', async () => {
   const rows = [];
   const err = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -645,9 +841,9 @@ test('retrigger-review maps idempotency mismatches to usage and writes a refusal
   assert.equal(rows.at(-1)?.outcome, 'refused:idempotency-mismatch');
 });
 
-test('retrigger-review returns runtime exit code when readReviewRow throws', () => {
+test('retrigger-review returns runtime exit code when readReviewRow throws', async () => {
   const err = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -663,9 +859,9 @@ test('retrigger-review returns runtime exit code when readReviewRow throws', () 
   assert.match(err.text(), /could not read review state: db unavailable/);
 });
 
-test('retrigger-review returns runtime exit code with broken root-dir', () => {
+test('retrigger-review returns runtime exit code with broken root-dir', async () => {
   const err = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',
@@ -680,9 +876,9 @@ test('retrigger-review returns runtime exit code with broken root-dir', () => {
   assert.doesNotMatch(err.text(), /\n\s+at\s/);
 });
 
-test('retrigger-review help documents structured usage and exit codes', () => {
+test('retrigger-review help documents structured usage and exit codes', async () => {
   const out = makeCaptureStream();
-  const rc = main(['--help'], {
+  const rc = await main(['--help'], {
     stdout: out,
     stderr: makeCaptureStream(),
   });
@@ -694,9 +890,9 @@ test('retrigger-review help documents structured usage and exit codes', () => {
   assert.match(out.text(), /--allow-failed-reset/);
 });
 
-test('retrigger-review refuses unknown review statuses by default', () => {
+test('retrigger-review refuses unknown review statuses by default', async () => {
   const err = makeCaptureStream();
-  const rc = main([
+  const rc = await main([
     '--repo', 'laceyenterprises/agent-os',
     '--pr', '238',
     '--reason', 'retry',

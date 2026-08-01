@@ -203,7 +203,11 @@ test('watcher terminal rereview skip releases claim and falls through to close p
   const closerProbeIndex = source.indexOf("const closerHead = await getHeadCloserCommitSuppressionWithBoundedRetry({", guardIndex);
   const closerSuppressedIndex = source.indexOf("if (closerHead?.suppressed) {", guardIndex);
   const hardCeilingIndex = source.indexOf("const hardReviewCeiling =", guardIndex);
-  const hardSkipIndex = source.indexOf("if (!skipReviewerSpawnReason && priorReviewCount >= hardReviewCeiling) {", guardIndex);
+  const operatorRetriggerIndex = source.indexOf(
+    "const explicitOperatorReviewRetrigger = isExplicitOperatorReviewRetrigger(current);",
+    hardCeilingIndex
+  );
+  const hardSkipIndex = source.indexOf("!explicitOperatorReviewRetrigger", hardCeilingIndex);
   const attemptCeilingIndex = source.indexOf("const priorReviewAttemptCount = countReviewCeilingAttempts({", hardSkipIndex);
   const attemptSkipIndex = source.indexOf("priorReviewAttemptCount >= hardReviewAttemptCeiling", attemptCeilingIndex);
   const skipReleaseIndex = source.indexOf("if (skipReviewerSpawnReason) {", guardIndex);
@@ -218,6 +222,10 @@ test('watcher terminal rereview skip releases claim and falls through to close p
     source.slice(closerSuppressedIndex, hardCeilingIndex).includes("return;"),
     false,
     'terminal closer-head skip must not return before watcher close/maintenance work'
+  );
+  assert.ok(
+    operatorRetriggerIndex > hardCeilingIndex && operatorRetriggerIndex < hardSkipIndex,
+    'explicit operator retrigger should be resolved before the hard landed-review ceiling'
   );
   assert.equal(
     source.slice(hardSkipIndex, skipReleaseIndex).includes("return;"),

@@ -332,6 +332,9 @@ export async function sleepUntilTimerOrHandoffWake(
     shouldAcceptWake = null,
     recordHandoffWakeEventsImpl = recordHandoffWakeEvents,
     recordHandoffEventImpl = recordHandoffEvent,
+    setIntervalImpl = setInterval,
+    clearIntervalImpl = clearInterval,
+    pollIntervalMs = 250,
   } = {},
 ) {
   if (!enabled) {
@@ -359,6 +362,7 @@ export async function sleepUntilTimerOrHandoffWake(
     const startMs = nowMs();
     let settled = false;
     let watcher = null;
+    let pollTimer = null;
     const recordFallbackTickCatch = () => {
       if (!dir) return;
       try {
@@ -386,6 +390,10 @@ export async function sleepUntilTimerOrHandoffWake(
       if (settled) return;
       settled = true;
       clearTimeoutImpl(timeout);
+      if (pollTimer) {
+        clearIntervalImpl(pollTimer);
+        pollTimer = null;
+      }
       signal?.removeEventListener?.('abort', onAbort);
       try {
         watcher?.close?.();
@@ -415,6 +423,10 @@ export async function sleepUntilTimerOrHandoffWake(
       if (settled) return;
       settled = true;
       clearTimeoutImpl(timeout);
+      if (pollTimer) {
+        clearIntervalImpl(pollTimer);
+        pollTimer = null;
+      }
       signal?.removeEventListener?.('abort', onAbort);
       try {
         watcher?.close?.();
@@ -445,6 +457,19 @@ export async function sleepUntilTimerOrHandoffWake(
       }
       finish({ reason: 'wake', path, payload });
     };
+    const scanForWakeMarkers = () => {
+      if (settled || !dir) return;
+      try {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          if (!entry.isFile() || !isWakeMarkerName(entry.name, daemon)) continue;
+          onWatchEvent('poll', entry.name);
+          if (settled) break;
+        }
+      } catch {
+        // Polling is a latency assist for hosts where fs.watch drops events.
+        // The timer remains the correctness fallback if the directory cannot be scanned.
+      }
+    };
     const timeout = setTimeoutImpl(() => finish({ reason: 'timer' }), delayMs);
     try {
       dir = ensureHandoffWakeDir(rootDir);
@@ -465,14 +490,11 @@ export async function sleepUntilTimerOrHandoffWake(
       watcher = null;
     }
     if (dir) {
-      try {
-        for (const entry of readdirSync(dir, { withFileTypes: true })) {
-          if (!entry.isFile() || !isWakeMarkerName(entry.name, daemon)) continue;
-          onWatchEvent('rename', entry.name);
-          if (settled) break;
-        }
-      } catch {
-        // A failed sweep is equivalent to a missed handoff; the timer remains.
+      scanForWakeMarkers();
+      const intervalMs = Number(pollIntervalMs);
+      if (!settled && Number.isFinite(intervalMs) && intervalMs > 0) {
+        pollTimer = setIntervalImpl(scanForWakeMarkers, intervalMs);
+        pollTimer?.unref?.();
       }
     }
     if (settled) {

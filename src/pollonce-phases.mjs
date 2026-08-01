@@ -1595,6 +1595,7 @@ export async function processReviewSubject(entry, ctx) {
 
               const hardReviewCeiling = resolveHardReviewCeiling(maxRemediationRounds);
               const hardReviewAttemptCeiling = resolveHardReviewAttemptCeiling(maxRemediationRounds);
+              const explicitOperatorReviewRetrigger = isExplicitOperatorReviewRetrigger(current);
               // REVIEW-DEDUP: landed reviews are capped by distinct completed
               // head. Failed/running attempts are retry evidence, not reviews,
               // and must not spend the final review owed to a PR. Legacy
@@ -1607,7 +1608,11 @@ export async function processReviewSubject(entry, ctx) {
                 prNumber,
                 fallbackReviewAttempts: Number(current?.review_attempts || 0),
               });
-              if (!skipReviewerSpawnReason && priorReviewCount >= hardReviewCeiling) {
+              if (
+                !skipReviewerSpawnReason &&
+                priorReviewCount >= hardReviewCeiling &&
+                !explicitOperatorReviewRetrigger
+              ) {
                 console.log(
                   `[watcher] Skipping re-review for ${repoPath}#${prNumber}: hard review ` +
                   `ceiling reached (${priorReviewCount} review ceiling units >= ${hardReviewCeiling}); ` +
@@ -1615,6 +1620,12 @@ export async function processReviewSubject(entry, ctx) {
                   `No attempt budget consumed.`,
                 );
                 skipReviewerSpawnReason = 'hard-review-ceiling';
+              } else if (!skipReviewerSpawnReason && priorReviewCount >= hardReviewCeiling) {
+                console.log(
+                  `[watcher] Allowing explicit operator re-review for ${repoPath}#${prNumber}: ` +
+                  `hard review ceiling reached (${priorReviewCount} review ceiling units >= ` +
+                  `${hardReviewCeiling}), but rereview_reason is an operator retrigger marker.`
+                );
               }
               const priorReviewAttemptCount = countReviewCeilingAttempts({
                 db,

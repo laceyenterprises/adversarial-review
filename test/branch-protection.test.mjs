@@ -1,9 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { DEFAULT_ADVERSARIAL_GATE_CONTEXT } from '../src/adversarial-gate-context.mjs';
 import {
   addRequiredStatusCheckContext,
+  buildManualCommand,
   createBranchProtectionChecker,
   fetchAdversarialGateBranchProtection,
   formatBranchProtectionWarning,
@@ -321,4 +326,37 @@ test('formatBranchProtectionWarning includes empty-context diagnostics', () => {
     requiredContexts: [],
   });
   assert.match(warning, /required_contexts=none/);
+});
+
+test('buildManualCommand shell-quotes operator repair inputs', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'branch-protection-manual-command-'));
+  try {
+    const marker = join(tmp, 'injected');
+    const bin = join(tmp, 'bin');
+    const pathEnv = `${bin}:${process.env.PATH || '/usr/bin:/bin'}`;
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'jq'), '#!/bin/sh\ncat >/dev/null\nprintf main\n');
+    writeFileSync(join(bin, 'gh'), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(bin, 'jq'), 0o755);
+    chmodSync(join(bin, 'gh'), 0o755);
+
+    for (const reason of ['required-context-missing', 'branch-protection-missing']) {
+      const script = join(tmp, `${reason}.sh`);
+      writeFileSync(script, buildManualCommand({
+        repo: `laceyenterprises/repo$(touch ${marker})`,
+        baseBranch: `main$(touch ${marker})`,
+        context: `agent-os/adversarial-gate'$(touch ${marker})`,
+        ok: false,
+        reason,
+        requiredContexts: [],
+      }));
+      execFileSync('bash', [script], {
+        env: { ...process.env, PATH: pathEnv },
+      });
+    }
+
+    assert.equal(existsSync(marker), false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });

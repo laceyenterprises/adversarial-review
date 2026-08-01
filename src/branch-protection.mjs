@@ -112,19 +112,25 @@ function classifyBranchProtectionAction(result) {
   return 'manual-investigation-required';
 }
 
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
 function buildAddContextCommand(repoPath, baseBranch, context) {
   return [
-    `base=${JSON.stringify(String(baseBranch || DEFAULT_BASE_BRANCH))}`,
+    `repo=${shellQuote(repoPath)}`,
+    `base=${shellQuote(String(baseBranch || DEFAULT_BASE_BRANCH))}`,
     'base_enc=$(printf \'%s\' "$base" | jq -sRr @uri)',
-    `gh api -X POST "repos/${repoPath}/branches/$base_enc/protection/required_status_checks/contexts" -f ${JSON.stringify(`contexts[]=${context}`)}`,
+    `gh api -X POST "repos/$repo/branches/$base_enc/protection/required_status_checks/contexts" -f ${shellQuote(`contexts[]=${context}`)}`,
   ].join('\n');
 }
 
 function buildBootstrapProtectionCommand(repoPath, baseBranch, context) {
   return [
-    `base=${JSON.stringify(String(baseBranch || DEFAULT_BASE_BRANCH))}`,
+    `repo=${shellQuote(repoPath)}`,
+    `base=${shellQuote(String(baseBranch || DEFAULT_BASE_BRANCH))}`,
     'base_enc=$(printf \'%s\' "$base" | jq -sRr @uri)',
-    'gh api -X PUT "repos/' + repoPath + '/branches/$base_enc/protection" --input - <<\'JSON\'',
+    'gh api -X PUT "repos/$repo/branches/$base_enc/protection" --input - <<\'JSON\'',
     JSON.stringify({
       required_status_checks: {
         strict: true,

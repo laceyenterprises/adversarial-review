@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import {
   createAgentRuntimeReviewerRuntimeAdapter,
   createDefaultAgentRuntime,
+  createLazyAppContractSession,
   reviewIdempotencyKey,
   toAgentRequest,
 } from '../src/adapters/reviewer-runtime/agent-runtime/index.mjs';
@@ -127,6 +128,53 @@ function completedCliDirect({ calls = [] } = {}) {
     },
   };
 }
+
+test('lazy app-contract session reattaches active SSE subscriptions after close reconnect', async () => {
+  const sessions = [];
+  const lazy = createLazyAppContractSession({
+    connectImpl: async () => {
+      const listeners = [];
+      const session = {
+        listeners,
+        dispatchCalls: 0,
+        closeCalls: 0,
+        async dispatch() {
+          this.dispatchCalls += 1;
+          return { ok: true };
+        },
+        on(topic, cb) {
+          const listener = { topic, cb, active: true };
+          listeners.push(listener);
+          return () => {
+            listener.active = false;
+          };
+        },
+        close() {
+          this.closeCalls += 1;
+        },
+      };
+      sessions.push(session);
+      return session;
+    },
+    logger: silentLogger(),
+  });
+
+  const dispose = lazy.on('health.worker.*', () => {});
+  await lazy.dispatch({ requestId: 'first' });
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].listeners.length, 1);
+
+  lazy.close();
+  await lazy.dispatch({ requestId: 'second' });
+
+  assert.equal(sessions.length, 2);
+  assert.equal(sessions[0].closeCalls, 1);
+  assert.equal(sessions[1].listeners.length, 1);
+  assert.equal(sessions[1].listeners[0].topic, 'health.worker.*');
+
+  dispose();
+  assert.equal(sessions[1].listeners[0].active, false);
+});
 
 test('agent-runtime reviewer adapter returns the legacy spawnReviewer result shape', async () => {
   const rootDir = makeRoot();

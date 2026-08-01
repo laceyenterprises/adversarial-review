@@ -157,6 +157,9 @@ function createLazyAppContractSession({
     close() {
       session?.close?.();
       session = null;
+      for (const subscription of subscriptions) {
+        subscription.unsubscribe = null;
+      }
     },
   };
 }
@@ -661,6 +664,7 @@ export {
   RUNTIME_ID,
   createAgentRuntimeReviewerRuntimeAdapter,
   createDefaultAgentRuntime,
+  createLazyAppContractSession,
   reviewIdempotencyKey,
   toAgentRequest,
   toReviewerResult,

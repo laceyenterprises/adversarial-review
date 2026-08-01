@@ -13,6 +13,7 @@ import {
   watch,
   writeFileSync,
 } from 'node:fs';
+import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { normalizeHandoffMaxPerPrHead } from './handoff-rate-cap.mjs';
@@ -335,6 +336,7 @@ export async function sleepUntilTimerOrHandoffWake(
     setIntervalImpl = setInterval,
     clearIntervalImpl = clearInterval,
     pollIntervalMs = 250,
+    readdirImpl = readdir,
   } = {},
 ) {
   if (!enabled) {
@@ -457,10 +459,14 @@ export async function sleepUntilTimerOrHandoffWake(
       }
       finish({ reason: 'wake', path, payload });
     };
-    const scanForWakeMarkers = () => {
-      if (settled || !dir) return;
+    let scanInFlight = false;
+    const scanForWakeMarkers = async () => {
+      if (settled || !dir || scanInFlight) return;
+      scanInFlight = true;
       try {
-        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const entries = await readdirImpl(dir, { withFileTypes: true });
+        if (settled || !dir) return;
+        for (const entry of entries) {
           if (!entry.isFile() || !isWakeMarkerName(entry.name, daemon)) continue;
           onWatchEvent('rename', entry.name);
           if (settled) break;
@@ -468,6 +474,8 @@ export async function sleepUntilTimerOrHandoffWake(
       } catch {
         // Polling is a latency assist for hosts where fs.watch drops events.
         // The timer remains the correctness fallback if the directory cannot be scanned.
+      } finally {
+        scanInFlight = false;
       }
     };
     const timeout = setTimeoutImpl(() => finish({ reason: 'timer' }), delayMs);
@@ -490,10 +498,12 @@ export async function sleepUntilTimerOrHandoffWake(
       watcher = null;
     }
     if (dir) {
-      scanForWakeMarkers();
+      void scanForWakeMarkers();
       const intervalMs = Number(pollIntervalMs);
       if (!settled && Number.isFinite(intervalMs) && intervalMs > 0) {
-        pollTimer = setIntervalImpl(scanForWakeMarkers, intervalMs);
+        pollTimer = setIntervalImpl(() => {
+          void scanForWakeMarkers();
+        }, intervalMs);
         pollTimer?.unref?.();
       }
     }

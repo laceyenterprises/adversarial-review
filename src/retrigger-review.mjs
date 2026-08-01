@@ -10,6 +10,8 @@ import {
   requestReviewRereview,
 } from './review-state.mjs';
 import { bumpRemediationBudget, findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
+import { cancelActiveReview } from './review-cancel.mjs';
+import { stopFollowUpJob, isActiveFollowUpJobStatus } from './follow-up-jobs.mjs';
 import {
   EX_DATAERR,
   appendOperatorMutationAuditRow,
@@ -46,6 +48,9 @@ Optional:
   --no-bump-budget               Retrigger review without changing remediation budget
   --idempotency-key <key>        Stable replay key for retry-safe operator calls
   --allow-failed-reset           Permit manual reset of failed / failed-orphan review rows
+  --clear-stale-terminal         Alias for --allow-failed-reset that also stops active follow-up jobs
+  --cancel-active-reviewer       Explicitly cancel an active reviewer process
+  --bypass-hard-ceiling          Intentionally bypass the hard review ceiling once
   --root-dir <path>              Tool root containing data/reviews.db
   --audit-root-dir <path>        Root that owns data/operator-mutations/
   --quiet                        Suppress JSON success output
@@ -79,6 +84,9 @@ function parseArgs(argv) {
         'audit-root-dir': { type: 'string' },
         'hq-root': { type: 'string' },
         'allow-failed-reset': { type: 'boolean', default: false },
+        'cancel-active-reviewer': { type: 'boolean', default: false },
+        'clear-stale-terminal': { type: 'boolean', default: false },
+        'bypass-hard-ceiling': { type: 'boolean', default: false },
         quiet: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
@@ -256,7 +264,7 @@ function writeReviewRefusal(stderr, { repo, pr, refusalReason }) {
   stderr.write(`refused:not-eligible: ${repo}#${pr} (${refusalReason})\n`);
 }
 
-function main(argv, {
+async function main(argv, {
   stdout = process.stdout,
   stderr = process.stderr,
   stdinReader = readStdinSync,
@@ -266,6 +274,8 @@ function main(argv, {
   bumpBudgetImpl = bumpRemediationBudget,
   findAuditRow = findOperatorMutationAuditRow,
   appendAuditRow = appendOperatorMutationAuditRow,
+  cancelReviewImpl = cancelActiveReview,
+  stopJobImpl = stopFollowUpJob,
 } = {}) {
   let parsed;
   try {
@@ -355,11 +365,40 @@ function main(argv, {
     return EXIT_RUNTIME;
   }
 
-  const latestJob = latestJobFinder(rootDir, { repo: values.repo, prNumber: values.pr });
+  let latestJob = latestJobFinder(rootDir, { repo: values.repo, prNumber: values.pr });
+  if (values['clear-stale-terminal'] && latestJob && isActiveFollowUpJobStatus(latestJob.job.status)) {
+    try {
+      stopJobImpl({
+        rootDir,
+        jobPath: latestJob.jobPath,
+        reason: reason,
+      });
+      latestJob = latestJobFinder(rootDir, { repo: values.repo, prNumber: values.pr });
+    } catch (err) {
+      stderr.write(`error: failed to stop active job: ${err.message}\n`);
+      return EXIT_RUNTIME;
+    }
+  }
   baseAudit.jobKey = latestJob?.job?.jobId || null;
 
+  if (values['cancel-active-reviewer'] && reviewRow?.review_status === 'reviewing') {
+    try {
+      await cancelReviewImpl({
+        rootDir,
+        repo: values.repo,
+        prNumber: values.pr,
+        reason,
+        allowStatus: new Set(['reviewing']),
+      });
+      reviewRow = readReviewRow({ rootDir, repo: values.repo, prNumber: values.pr });
+    } catch (err) {
+      stderr.write(`error: failed to cancel active reviewer: ${err.message}\n`);
+      return EXIT_RUNTIME;
+    }
+  }
+
   const refusalReason = refuseReasonForReviewRow(reviewRow, {
-    allowFailedReset: values['allow-failed-reset'],
+    allowFailedReset: values['allow-failed-reset'] || values['clear-stale-terminal'],
   });
   if (refusalReason) {
     const row = makeAuditRow({
@@ -414,11 +453,14 @@ function main(argv, {
 
   let result;
   try {
+    const effectiveReason = values['bypass-hard-ceiling']
+      ? `${reason} [bypass-hard-review-ceiling]`
+      : reason;
     result = rereview({
       rootDir,
       repo: values.repo,
       prNumber: values.pr,
-      reason,
+      reason: effectiveReason,
     });
   } catch (err) {
     stderr.write(`error: rereview failed: ${err.message}\n`);
@@ -468,5 +510,5 @@ export {
 };
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  process.exit(main(process.argv.slice(2)));
+  main(process.argv.slice(2)).then((rc) => process.exit(rc));
 }

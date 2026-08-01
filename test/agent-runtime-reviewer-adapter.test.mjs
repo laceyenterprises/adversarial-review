@@ -6,6 +6,8 @@ import { join } from 'node:path';
 
 import {
   createAgentRuntimeReviewerRuntimeAdapter,
+  createDefaultAgentRuntime,
+  createLazyAppContractSession,
   reviewIdempotencyKey,
   toAgentRequest,
 } from '../src/adapters/reviewer-runtime/agent-runtime/index.mjs';
@@ -14,6 +16,7 @@ import {
   writeReviewerRunRecord,
 } from '../src/adapters/reviewer-runtime/run-state.mjs';
 import { loadDomainConfig } from '../src/domain-config.mjs';
+import { readRuntimeStatusSnapshot } from '../src/runtime-status-snapshot.mjs';
 
 function makeRoot() {
   const rootDir = mkdtempSync(join(tmpdir(), 'agent-runtime-reviewer-adapter-'));
@@ -88,6 +91,339 @@ function completedRuntime({ calls = [], body = '## Verdict\nComment only' } = {}
   };
 }
 
+function silentLogger() {
+  return {
+    log() {},
+    warn() {},
+    error() {},
+  };
+}
+
+function completedCliDirect({ calls = [] } = {}) {
+  return {
+    async spawnReviewer(request) {
+      calls.push(request);
+      return {
+        ok: true,
+        reviewBody: '## Verdict\nComment only',
+        tokenUsage: { total: 7 },
+        reattachToken: request.sessionUuid,
+      };
+    },
+    async spawnRemediator(request) {
+      calls.push(request);
+      return {
+        ok: true,
+        remediationBody: '{"addressed":[],"pushback":[],"blockers":[],"reReview":false}',
+        tokenUsage: { total: 7 },
+        reattachToken: request.sessionUuid,
+      };
+    },
+    async cancel() {},
+    async reattach() {
+      throw new Error('test does not exercise local reattach');
+    },
+    describe() {
+      return { id: 'fixture-cli-direct', capabilities: {} };
+    },
+  };
+}
+
+test('lazy app-contract session reattaches active SSE subscriptions after close reconnect', async () => {
+  const sessions = [];
+  const lazy = createLazyAppContractSession({
+    connectImpl: async () => {
+      const listeners = [];
+      const session = {
+        listeners,
+        dispatchCalls: 0,
+        closeCalls: 0,
+        async dispatch() {
+          this.dispatchCalls += 1;
+          return { ok: true };
+        },
+        on(topic, cb) {
+          const listener = { topic, cb, active: true };
+          listeners.push(listener);
+          return () => {
+            listener.active = false;
+          };
+        },
+        close() {
+          this.closeCalls += 1;
+        },
+      };
+      sessions.push(session);
+      return session;
+    },
+    logger: silentLogger(),
+  });
+
+  const dispose = lazy.on('health.worker.*', () => {});
+  await lazy.dispatch({ requestId: 'first' });
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].listeners.length, 1);
+
+  lazy.close();
+  await lazy.dispatch({ requestId: 'second' });
+
+  assert.equal(sessions.length, 2);
+  assert.equal(sessions[0].closeCalls, 1);
+  assert.equal(sessions[1].listeners.length, 1);
+  assert.equal(sessions[1].listeners[0].topic, 'health.worker.*');
+
+  dispose();
+  assert.equal(sessions[1].listeners[0].active, false);
+});
+
+test('lazy app-contract session closes an in-flight connection after caller close', async () => {
+  let resolveConnect;
+  const sessions = [];
+  const lazy = createLazyAppContractSession({
+    connectImpl: async () => new Promise((resolve) => {
+      resolveConnect = resolve;
+    }),
+    logger: silentLogger(),
+  });
+
+  const pending = lazy.dispatch({ requestId: 'closing' });
+  pending.catch(() => {});
+  await new Promise((resolve) => setImmediate(resolve));
+
+  lazy.close();
+  const session = {
+    closeCalls: 0,
+    async dispatch() {
+      throw new Error('stale closed session must not dispatch');
+    },
+    close() {
+      this.closeCalls += 1;
+    },
+  };
+  sessions.push(session);
+  resolveConnect(session);
+
+  await assert.rejects(pending, /closed while connection was pending/);
+  assert.equal(session.closeCalls, 1);
+});
+
+test('lazy app-contract session closes and unwires a partially wired connection failure', async () => {
+  const sessions = [];
+  let failSecondListener = true;
+  const lazy = createLazyAppContractSession({
+    connectImpl: async () => {
+      const listeners = [];
+      const session = {
+        listeners,
+        closeCalls: 0,
+        async dispatch() {
+          return { ok: true };
+        },
+        on(topic, cb) {
+          if (failSecondListener && topic === 'token.*') {
+            throw new Error('subscription wiring failed');
+          }
+          const listener = { topic, cb, active: true };
+          listeners.push(listener);
+          return () => {
+            listener.active = false;
+          };
+        },
+        close() {
+          this.closeCalls += 1;
+        },
+      };
+      sessions.push(session);
+      return session;
+    },
+    logger: silentLogger(),
+  });
+
+  lazy.on('health.worker.*', () => {});
+  lazy.on('token.*', () => {});
+
+  await assert.rejects(lazy.dispatch({ requestId: 'first' }), /subscription wiring failed/);
+  assert.equal(sessions[0].closeCalls, 1);
+  assert.equal(sessions[0].listeners.length, 1);
+  assert.equal(sessions[0].listeners[0].active, false);
+
+  failSecondListener = false;
+  await lazy.dispatch({ requestId: 'second' });
+
+  assert.equal(sessions.length, 2);
+  assert.deepEqual(
+    sessions[1].listeners.map((listener) => listener.topic),
+    ['health.worker.*', 'token.*'],
+  );
+});
+
+test('default agent runtime removes injected session health listener on stop', () => {
+  const rootDir = makeRoot();
+  const listeners = [];
+  try {
+    const runtime = createDefaultAgentRuntime({
+      rootDir,
+      domainConfig: { id: 'code-pr', promptSet: 'code-pr' },
+      logger: silentLogger(),
+      localRuntimeOptions: {
+        cliDirect: completedCliDirect(),
+        admissionImpl: async () => ({
+          admit: true,
+          budget: { requestedTokens: 500, requestedWallMs: 30_000 },
+        }),
+      },
+      osRuntimeOptions: {
+        session: {
+          async dispatch() {
+            return { ok: true };
+          },
+          async dispatchStatus() {
+            return { status: 'not_found' };
+          },
+          on(topic, cb) {
+            const listener = { topic, cb, active: true };
+            listeners.push(listener);
+            return () => {
+              listener.active = false;
+            };
+          },
+          sseLive() {
+            return true;
+          },
+        },
+      },
+      routerOptions: { autoStart: false },
+    });
+
+    assert.equal(listeners.length, 1);
+    assert.equal(listeners[0].topic, 'health.worker.*');
+    runtime.stop();
+    runtime.stop();
+    assert.equal(listeners[0].active, false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('default agent runtime closes owned lazy app-contract session on stop', async () => {
+  const rootDir = makeRoot();
+  const listeners = [];
+  const sessions = [];
+  try {
+    const runtime = createDefaultAgentRuntime({
+      rootDir,
+      domainConfig: { id: 'code-pr', promptSet: 'code-pr' },
+      logger: silentLogger(),
+      localRuntimeOptions: {
+        cliDirect: completedCliDirect(),
+        admissionImpl: async () => ({
+          admit: true,
+          budget: { requestedTokens: 500, requestedWallMs: 30_000 },
+        }),
+      },
+      osRuntimeOptions: {
+        connectImpl: async () => {
+          const session = {
+            closeCalls: 0,
+            async dispatch() {
+              return { ok: true };
+            },
+            async dispatchStatus() {
+              return { status: 'not_found' };
+            },
+            on(topic, cb) {
+              const listener = { topic, cb, active: true };
+              listeners.push(listener);
+              return () => {
+                listener.active = false;
+              };
+            },
+            sseLive() {
+              return true;
+            },
+            close() {
+              this.closeCalls += 1;
+            },
+          };
+          sessions.push(session);
+          return session;
+        },
+      },
+      routerOptions: { autoStart: false },
+    });
+    const request = toAgentRequest(reviewerReq(), {
+      kind: 'reviewer',
+      rootDir,
+      domainConfig: loadDomainConfig(rootDir, 'code-pr'),
+    });
+
+    await runtime.run(request);
+    assert.equal(sessions.length, 1);
+    assert.equal(listeners.length, 1);
+    assert.equal(listeners[0].topic, 'health.worker.*');
+
+    runtime.stop();
+    runtime.stop();
+
+    assert.equal(listeners[0].active, false);
+    assert.equal(sessions[0].closeCalls, 1);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('default agent runtime falls back from empty endpoint URL to default healthz URL', async () => {
+  const rootDir = makeRoot();
+  const urls = [];
+  try {
+    const runtime = createDefaultAgentRuntime({
+      rootDir,
+      domainConfig: { id: 'code-pr', promptSet: 'code-pr' },
+      logger: silentLogger(),
+      localRuntimeOptions: {
+        cliDirect: completedCliDirect(),
+        admissionImpl: async () => ({
+          admit: true,
+          budget: { requestedTokens: 500, requestedWallMs: 30_000 },
+        }),
+      },
+      osRuntimeOptions: {
+        session: {
+          async dispatch() {
+            return { ok: true };
+          },
+          async dispatchStatus() {
+            return { status: 'not_found' };
+          },
+          on() {
+            return () => {};
+          },
+          sseLive() {
+            return true;
+          },
+        },
+        connectOptions: { endpoint_url: '' },
+        fetchImpl: async (url) => {
+          urls.push(url);
+          return {
+            ok: true,
+            async text() {
+              return '';
+            },
+          };
+        },
+      },
+      routerOptions: { autoStart: false },
+    });
+
+    await runtime.tick();
+
+    assert.equal(urls[0], 'http://127.0.0.1:8003/healthz');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('agent-runtime reviewer adapter returns the legacy spawnReviewer result shape', async () => {
   const rootDir = makeRoot();
   const calls = [];
@@ -123,6 +459,77 @@ test('agent-runtime reviewer adapter returns the legacy spawnReviewer result sha
     assert.equal(record.runtime, 'agent-runtime');
     assert.equal(record.reattachToken, calls[0].idempotencyKey);
     assert.equal(record.subjectContext.agentRuntimeMode, 'os');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('default agent runtime fails over app-contract hard dispatch errors to local and snapshots status', async () => {
+  const rootDir = makeRoot();
+  const localCalls = [];
+  const transitions = [];
+  const dispatchAttempts = [];
+  try {
+    const runtime = createDefaultAgentRuntime({
+      rootDir,
+      domainConfig: { id: 'code-pr', promptSet: 'code-pr' },
+      logger: silentLogger(),
+      localRuntimeOptions: {
+        cliDirect: completedCliDirect({ calls: localCalls }),
+        admissionImpl: async () => ({
+          admit: true,
+          budget: { requestedTokens: 500, requestedWallMs: 30_000 },
+        }),
+      },
+      osRuntimeOptions: {
+        connectImpl: async () => ({
+          async dispatch(payload) {
+            dispatchAttempts.push(payload.request_id);
+            throw new Error('app-contract 503: unavailable');
+          },
+          async dispatchStatus() {
+            return { status: 'not_found' };
+          },
+          on() {
+            return () => {};
+          },
+          sseLive() {
+            return true;
+          },
+          close() {},
+        }),
+        sleepImpl: async () => {},
+      },
+      routerOptions: {
+        autoStart: false,
+        auditSink: {
+          async recordTransition(transition) {
+            transitions.push(transition);
+            return { auditWritten: true, noticeDelivered: true };
+          },
+        },
+      },
+    });
+    const request = toAgentRequest(reviewerReq(), {
+      kind: 'reviewer',
+      rootDir,
+      domainConfig: loadDomainConfig(rootDir, 'code-pr'),
+    });
+
+    const handle = await runtime.run(request);
+    const result = await handle.await();
+
+    assert.equal(handle.mode, 'local');
+    assert.equal(result.status, 'completed');
+    assert.equal(runtime.getMode(), 'local');
+    assert.equal(localCalls.length, 1);
+    assert.ok(dispatchAttempts.length >= 1, 'OS dispatch should be attempted before failover');
+    assert.equal(transitions.length, 1);
+    assert.equal(transitions[0].kind, 'failover');
+    assert.equal(transitions[0].reason, 'hard-contract-error');
+    const snapshot = readRuntimeStatusSnapshot(rootDir);
+    assert.equal(snapshot?.status?.mode, 'local');
+    assert.equal(snapshot?.status?.lastFailover?.reason, 'hard-contract-error');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

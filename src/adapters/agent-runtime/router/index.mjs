@@ -82,6 +82,8 @@ function createHealthRouter({
   sseTracker = null,
   adopt = null,
   emitTelemetryFn = null,
+  onStatusSnapshot = null,
+  osRuntimeOptions = {},
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
   setTimeoutFn = setTimeout,
@@ -95,7 +97,7 @@ function createHealthRouter({
   // Build the OS runtime over an instrumented session when one wasn't injected.
   if (!osRuntime && session) {
     const instrumented = instrumentSession(session, { latencyWindow, now });
-    osRuntime = createOsDispatchAgentRuntime({ session: instrumented, logger });
+    osRuntime = createOsDispatchAgentRuntime({ ...osRuntimeOptions, session: instrumented, logger });
     takeClassification = instrumented.takeClassification;
     dispatchStatus = dispatchStatus || ((key) => instrumented.dispatchStatus(key));
   } else if (session && !dispatchStatus && typeof session.dispatchStatus === 'function') {
@@ -121,6 +123,17 @@ function createHealthRouter({
   let lastTransitionAt = startedAt;
   let probeTimer = null;
   let isTicking = false;
+
+  function recordStatusSnapshot() {
+    if (typeof onStatusSnapshot !== 'function') return;
+    try {
+      onStatusSnapshot(status());
+    } catch (err) {
+      logger?.warn?.('[health-router] runtime status snapshot failed', {
+        error: err?.message || String(err),
+      });
+    }
+  }
 
   function defaultAdopt(key) {
     // Re-observe the accepted dispatch in the background rather than re-issuing.
@@ -179,6 +192,7 @@ function createHealthRouter({
       lastResume = transition;
       reconcileCandidates = new Set(); // consumed by the reconcile above
     }
+    recordStatusSnapshot();
   }
 
   function trackedOsHandle(handle, key) {

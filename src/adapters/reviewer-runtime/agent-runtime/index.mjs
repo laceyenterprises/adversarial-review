@@ -36,9 +36,9 @@ function trimTrailingSlash(value) {
 function resolveAppContractEndpointUrl(options = {}, env = process.env) {
   return trimTrailingSlash(
     options.endpoint_url
-      ?? options.endpointUrl
-      ?? env.APP_CONTRACT_ENDPOINT_URL
-      ?? DEFAULT_APP_CONTRACT_ENDPOINT_URL,
+      || options.endpointUrl
+      || env.APP_CONTRACT_ENDPOINT_URL
+      || DEFAULT_APP_CONTRACT_ENDPOINT_URL,
   );
 }
 
@@ -94,45 +94,84 @@ function createLazyAppContractSession({
 } = {}) {
   let session = null;
   let sessionPromise = null;
+  let generation = 0;
   const subscriptions = new Set();
 
   async function resolveSession() {
     if (session) return session;
     if (!sessionPromise) {
-      sessionPromise = Promise.resolve()
+      const connectGeneration = generation;
+      let promise;
+      promise = Promise.resolve()
         .then(async () => {
           const connect = connectImpl || await loadAppSdkConnect();
           return connect(withDefaultAppContractConnectOptions(connectOptions));
         })
         .then((resolved) => {
-          session = resolved;
-          for (const subscription of subscriptions) {
-            wireSubscription(subscription);
+          if (generation !== connectGeneration) {
+            resolved?.close?.();
+            return null;
           }
-          return resolved;
+          const wired = [];
+          try {
+            session = resolved;
+            for (const subscription of subscriptions) {
+              if (wireSubscription(subscription, resolved)) wired.push(subscription);
+            }
+            return resolved;
+          } catch (err) {
+            for (const subscription of wired) {
+              clearSubscription(subscription);
+            }
+            if (session === resolved) session = null;
+            resolved?.close?.();
+            throw err;
+          }
         })
         .catch((err) => {
-          session = null;
+          if (generation === connectGeneration) session = null;
           throw err;
         })
         .finally(() => {
-          sessionPromise = null;
+          if (sessionPromise === promise) sessionPromise = null;
         });
+      sessionPromise = promise;
     }
     return sessionPromise;
   }
 
-  function wireSubscription(subscription) {
-    if (subscription.unsubscribe || !session || typeof session.on !== 'function') return;
-    subscription.unsubscribe = session.on(subscription.topic, subscription.cb);
+  function wireSubscription(subscription, targetSession = session) {
+    if (subscription.unsubscribe || !targetSession || typeof targetSession.on !== 'function') return false;
+    const unsubscribe = targetSession.on(subscription.topic, subscription.cb);
+    subscription.unsubscribe = typeof unsubscribe === 'function' ? unsubscribe : null;
+    return Boolean(subscription.unsubscribe);
+  }
+
+  function clearSubscription(subscription) {
+    const unsubscribe = subscription.unsubscribe;
+    subscription.unsubscribe = null;
+    try {
+      unsubscribe?.();
+    } catch (err) {
+      logger?.warn?.('[agent-runtime] app-contract SSE unsubscribe failed', {
+        topic: subscription.topic,
+        error: err?.message || String(err),
+      });
+    }
+  }
+
+  async function requireSession() {
+    const resolved = await resolveSession();
+    if (!resolved) throw new Error('app-contract session closed while connection was pending');
+    return resolved;
   }
 
   return {
     async dispatch(payload) {
-      return (await resolveSession()).dispatch(payload);
+      return (await requireSession()).dispatch(payload);
     },
     async dispatchStatus(requestId) {
-      return (await resolveSession()).dispatchStatus(requestId);
+      return (await requireSession()).dispatchStatus(requestId);
     },
     on(topic, cb) {
       const subscription = { topic, cb, unsubscribe: null };
@@ -148,18 +187,21 @@ function createLazyAppContractSession({
       }
       return () => {
         subscriptions.delete(subscription);
-        subscription.unsubscribe?.();
+        clearSubscription(subscription);
       };
     },
     sseLive() {
       return typeof session?.sseLive === 'function' ? session.sseLive() : null;
     },
     close() {
-      session?.close?.();
+      generation += 1;
+      const currentSession = session;
       session = null;
+      sessionPromise = null;
       for (const subscription of subscriptions) {
-        subscription.unsubscribe = null;
+        clearSubscription(subscription);
       }
+      currentSession?.close?.();
     },
   };
 }
@@ -464,7 +506,16 @@ function createDefaultAgentRuntime({
     logger,
     ...healthRouterOptions,
   });
-  osSession.on?.('health.worker.*', () => router.markSseEvent());
+  const unsubscribeHealthWorker = osSession.on?.('health.worker.*', () => router.markSseEvent());
+  const stopRouter = router.stop;
+  let healthWorkerUnsubscribed = false;
+  router.stop = () => {
+    stopRouter?.();
+    if (!healthWorkerUnsubscribed && typeof unsubscribeHealthWorker === 'function') {
+      healthWorkerUnsubscribed = true;
+      unsubscribeHealthWorker();
+    }
+  };
   if (autoStart) router.start();
   return router;
 }

@@ -176,6 +176,187 @@ test('lazy app-contract session reattaches active SSE subscriptions after close 
   assert.equal(sessions[1].listeners[0].active, false);
 });
 
+test('lazy app-contract session closes an in-flight connection after caller close', async () => {
+  let resolveConnect;
+  const sessions = [];
+  const lazy = createLazyAppContractSession({
+    connectImpl: async () => new Promise((resolve) => {
+      resolveConnect = resolve;
+    }),
+    logger: silentLogger(),
+  });
+
+  const pending = lazy.dispatch({ requestId: 'closing' });
+  pending.catch(() => {});
+  await new Promise((resolve) => setImmediate(resolve));
+
+  lazy.close();
+  const session = {
+    closeCalls: 0,
+    async dispatch() {
+      throw new Error('stale closed session must not dispatch');
+    },
+    close() {
+      this.closeCalls += 1;
+    },
+  };
+  sessions.push(session);
+  resolveConnect(session);
+
+  await assert.rejects(pending, /closed while connection was pending/);
+  assert.equal(session.closeCalls, 1);
+});
+
+test('lazy app-contract session closes and unwires a partially wired connection failure', async () => {
+  const sessions = [];
+  let failSecondListener = true;
+  const lazy = createLazyAppContractSession({
+    connectImpl: async () => {
+      const listeners = [];
+      const session = {
+        listeners,
+        closeCalls: 0,
+        async dispatch() {
+          return { ok: true };
+        },
+        on(topic, cb) {
+          if (failSecondListener && topic === 'token.*') {
+            throw new Error('subscription wiring failed');
+          }
+          const listener = { topic, cb, active: true };
+          listeners.push(listener);
+          return () => {
+            listener.active = false;
+          };
+        },
+        close() {
+          this.closeCalls += 1;
+        },
+      };
+      sessions.push(session);
+      return session;
+    },
+    logger: silentLogger(),
+  });
+
+  lazy.on('health.worker.*', () => {});
+  lazy.on('token.*', () => {});
+
+  await assert.rejects(lazy.dispatch({ requestId: 'first' }), /subscription wiring failed/);
+  assert.equal(sessions[0].closeCalls, 1);
+  assert.equal(sessions[0].listeners.length, 1);
+  assert.equal(sessions[0].listeners[0].active, false);
+
+  failSecondListener = false;
+  await lazy.dispatch({ requestId: 'second' });
+
+  assert.equal(sessions.length, 2);
+  assert.deepEqual(
+    sessions[1].listeners.map((listener) => listener.topic),
+    ['health.worker.*', 'token.*'],
+  );
+});
+
+test('default agent runtime removes injected session health listener on stop', () => {
+  const rootDir = makeRoot();
+  const listeners = [];
+  try {
+    const runtime = createDefaultAgentRuntime({
+      rootDir,
+      domainConfig: { id: 'code-pr', promptSet: 'code-pr' },
+      logger: silentLogger(),
+      localRuntimeOptions: {
+        cliDirect: completedCliDirect(),
+        admissionImpl: async () => ({
+          admit: true,
+          budget: { requestedTokens: 500, requestedWallMs: 30_000 },
+        }),
+      },
+      osRuntimeOptions: {
+        session: {
+          async dispatch() {
+            return { ok: true };
+          },
+          async dispatchStatus() {
+            return { status: 'not_found' };
+          },
+          on(topic, cb) {
+            const listener = { topic, cb, active: true };
+            listeners.push(listener);
+            return () => {
+              listener.active = false;
+            };
+          },
+          sseLive() {
+            return true;
+          },
+        },
+      },
+      routerOptions: { autoStart: false },
+    });
+
+    assert.equal(listeners.length, 1);
+    assert.equal(listeners[0].topic, 'health.worker.*');
+    runtime.stop();
+    runtime.stop();
+    assert.equal(listeners[0].active, false);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('default agent runtime falls back from empty endpoint URL to default healthz URL', async () => {
+  const rootDir = makeRoot();
+  const urls = [];
+  try {
+    const runtime = createDefaultAgentRuntime({
+      rootDir,
+      domainConfig: { id: 'code-pr', promptSet: 'code-pr' },
+      logger: silentLogger(),
+      localRuntimeOptions: {
+        cliDirect: completedCliDirect(),
+        admissionImpl: async () => ({
+          admit: true,
+          budget: { requestedTokens: 500, requestedWallMs: 30_000 },
+        }),
+      },
+      osRuntimeOptions: {
+        session: {
+          async dispatch() {
+            return { ok: true };
+          },
+          async dispatchStatus() {
+            return { status: 'not_found' };
+          },
+          on() {
+            return () => {};
+          },
+          sseLive() {
+            return true;
+          },
+        },
+        connectOptions: { endpoint_url: '' },
+        fetchImpl: async (url) => {
+          urls.push(url);
+          return {
+            ok: true,
+            async text() {
+              return '';
+            },
+          };
+        },
+      },
+      routerOptions: { autoStart: false },
+    });
+
+    await runtime.tick();
+
+    assert.equal(urls[0], 'http://127.0.0.1:8003/healthz');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('agent-runtime reviewer adapter returns the legacy spawnReviewer result shape', async () => {
   const rootDir = makeRoot();
   const calls = [];

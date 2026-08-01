@@ -251,13 +251,20 @@ function withWaiterMutationLock({ rootDir, repo, base }, fn) {
   return locked.value;
 }
 
-function withAttemptMutationLock({ rootDir, repo, base }, fn) {
+function withAttemptMutationLockOnly({ rootDir, repo, base }, fn) {
   const attemptsPath = mergeLeaseAttemptsFilePath(rootDir, { repo, base });
   const locked = withMutationLock(attemptsPath, fn);
   if (!locked.acquired) {
     throw new Error(`merge lease: mutation lock busy while updating attempts for ${repo}::${base}`);
   }
   return locked.value;
+}
+
+function withAttemptMutationLock({ rootDir, repo, base }, fn) {
+  return withWaiterMutationLock(
+    { rootDir, repo, base },
+    () => withAttemptMutationLockOnly({ rootDir, repo, base }, fn),
+  );
 }
 
 function isMutationLockBusyError(err) {
@@ -930,12 +937,18 @@ export function releaseMergeLeaseForRetryableAbort({
     if (!currentMatched) {
       return { released: false, leasePath, existingLease: currentLease };
     }
-    const attemptLock = withMutationLock(attemptsPath, () => removeAttemptRecordsUnlocked(attemptsPath, {
-      pr: currentLease.holderPr,
-      head: currentLease.holderHead,
-      now: now || isoNow(),
-    }));
-    if (!attemptLock.acquired) {
+    let attemptPrune;
+    try {
+      attemptPrune = withAttemptMutationLockOnly(
+        { rootDir, repo, base },
+        () => removeAttemptRecordsUnlocked(attemptsPath, {
+          pr: currentLease.holderPr,
+          head: currentLease.holderHead,
+          now: now || isoNow(),
+        }),
+      );
+    } catch (err) {
+      if (!isMutationLockBusyError(err)) throw err;
       return { released: false, leasePath, existingLease: currentLease, reason: 'mutation-lock-busy' };
     }
     rmSync(leasePath, { force: true });
@@ -945,7 +958,7 @@ export function releaseMergeLeaseForRetryableAbort({
       lease: currentLease,
       retryableAbort: true,
       retryableAbortReason,
-      attemptPrune: attemptLock.value,
+      attemptPrune,
     };
   });
   if (!locked.acquired) {

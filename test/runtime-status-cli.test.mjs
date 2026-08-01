@@ -191,6 +191,47 @@ test('runtime status surfaces reviewer cutover refusal reasons for code-pr', () 
   }
 });
 
+test('runtime status surfaces reviewer runtime kill-switch before not-requested shortcut', () => {
+  const rootDir = tmpRoot();
+  try {
+    mkdirSync(join(rootDir, 'domains'), { recursive: true });
+    writeFileSync(join(rootDir, 'domains', 'code-pr.json'), JSON.stringify({
+      id: 'code-pr',
+      reviewerRuntime: 'cli-direct',
+    }));
+    const model = buildRuntimeStatus(rootDir, {
+      now: () => new Date('2026-07-17T12:00:00.000Z'),
+      env: { ADVERSARIAL_REVIEWER_RUNTIME: 'agent-runtime' },
+    });
+    const line = renderRuntimeStatus(model).split('\n')[6];
+    assert.equal(model.reviewerCutover.state, 'forced');
+    assert.equal(model.reviewerCutover.selectedRuntime, 'agent-runtime');
+    assert.match(line, /reviewer cutover: FORCED agent-runtime/);
+    assert.match(line, /env-kill-switch/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('runtime status surfaces reviewer runtime kill-switch when code-pr config is unreadable', () => {
+  const rootDir = tmpRoot();
+  try {
+    mkdirSync(join(rootDir, 'domains'), { recursive: true });
+    writeFileSync(join(rootDir, 'domains', 'code-pr.json'), '{not valid json');
+    const model = buildRuntimeStatus(rootDir, {
+      now: () => new Date('2026-07-17T12:00:00.000Z'),
+      env: { ADVERSARIAL_REVIEWER_RUNTIME: 'cli-direct' },
+    });
+    const line = renderRuntimeStatus(model).split('\n')[6];
+    assert.equal(model.reviewerCutover.state, 'forced');
+    assert.equal(model.reviewerCutover.selectedRuntime, 'cli-direct');
+    assert.match(line, /reviewer cutover: FORCED cli-direct/);
+    assert.match(line, /env-kill-switch/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('runtimeMain rejects an unknown subcommand and a bad flag', () => {
   let err = '';
   const io = { stdout: { write() {} }, stderr: { write: (s) => { err += s; } } };

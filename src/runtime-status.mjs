@@ -184,7 +184,19 @@ function buildRuntimeStatus(rootDir, {
       });
     }
   } catch {
-    reviewerCutover = null;
+    if (String(env?.ADVERSARIAL_REVIEWER_RUNTIME || '').trim()) {
+      reviewerCutover = resolveReviewerRuntimeCutover({
+        rootDir,
+        domainConfig: { id: 'code-pr' },
+        orchestrationMode: env?.AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE || 'native',
+        env,
+        now,
+        readSnapshotImpl,
+        readCanaryImpl,
+      });
+    } else {
+      reviewerCutover = null;
+    }
   }
 
   return {
@@ -275,7 +287,7 @@ function renderCanaryLine(canary) {
 }
 
 function renderReviewerCutoverLine(cutover) {
-  if (!cutover || cutover.requestedRuntime !== 'agent-runtime') {
+  if (!cutover || (cutover.requestedRuntime !== 'agent-runtime' && cutover.state !== 'forced')) {
     return 'reviewer cutover: not requested';
   }
   const state = String(cutover.state || 'unknown').toUpperCase();

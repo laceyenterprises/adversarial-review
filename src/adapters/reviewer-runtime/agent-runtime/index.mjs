@@ -486,6 +486,7 @@ function createDefaultAgentRuntime({
     connectOptions: resolvedConnectOptions,
     logger,
   });
+  const ownsOsSession = !session;
   const endpointUrl = resolveAppContractEndpointUrl(resolvedConnectOptions);
   const requestTimeoutMs = resolveRequestTimeoutMs(resolvedConnectOptions);
   const healthz = routerCheckHealthz || checkHealthz || createAppContractHealthzCheck({
@@ -510,10 +511,13 @@ function createDefaultAgentRuntime({
   const stopRouter = router.stop;
   let healthWorkerUnsubscribed = false;
   router.stop = () => {
-    stopRouter?.();
+    stopRouter?.call(router);
     if (!healthWorkerUnsubscribed && typeof unsubscribeHealthWorker === 'function') {
       healthWorkerUnsubscribed = true;
       unsubscribeHealthWorker();
+    }
+    if (ownsOsSession && typeof osSession.close === 'function') {
+      osSession.close();
     }
   };
   if (autoStart) router.start();

@@ -305,6 +305,73 @@ test('default agent runtime removes injected session health listener on stop', (
   }
 });
 
+test('default agent runtime closes owned lazy app-contract session on stop', async () => {
+  const rootDir = makeRoot();
+  const listeners = [];
+  const sessions = [];
+  try {
+    const runtime = createDefaultAgentRuntime({
+      rootDir,
+      domainConfig: { id: 'code-pr', promptSet: 'code-pr' },
+      logger: silentLogger(),
+      localRuntimeOptions: {
+        cliDirect: completedCliDirect(),
+        admissionImpl: async () => ({
+          admit: true,
+          budget: { requestedTokens: 500, requestedWallMs: 30_000 },
+        }),
+      },
+      osRuntimeOptions: {
+        connectImpl: async () => {
+          const session = {
+            closeCalls: 0,
+            async dispatch() {
+              return { ok: true };
+            },
+            async dispatchStatus() {
+              return { status: 'not_found' };
+            },
+            on(topic, cb) {
+              const listener = { topic, cb, active: true };
+              listeners.push(listener);
+              return () => {
+                listener.active = false;
+              };
+            },
+            sseLive() {
+              return true;
+            },
+            close() {
+              this.closeCalls += 1;
+            },
+          };
+          sessions.push(session);
+          return session;
+        },
+      },
+      routerOptions: { autoStart: false },
+    });
+    const request = toAgentRequest(reviewerReq(), {
+      kind: 'reviewer',
+      rootDir,
+      domainConfig: loadDomainConfig(rootDir, 'code-pr'),
+    });
+
+    await runtime.run(request);
+    assert.equal(sessions.length, 1);
+    assert.equal(listeners.length, 1);
+    assert.equal(listeners[0].topic, 'health.worker.*');
+
+    runtime.stop();
+    runtime.stop();
+
+    assert.equal(listeners[0].active, false);
+    assert.equal(sessions[0].closeCalls, 1);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('default agent runtime falls back from empty endpoint URL to default healthz URL', async () => {
   const rootDir = makeRoot();
   const urls = [];

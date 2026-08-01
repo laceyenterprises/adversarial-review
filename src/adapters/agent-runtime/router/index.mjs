@@ -97,7 +97,7 @@ function createHealthRouter({
   // Build the OS runtime over an instrumented session when one wasn't injected.
   if (!osRuntime && session) {
     const instrumented = instrumentSession(session, { latencyWindow, now });
-    osRuntime = createOsDispatchAgentRuntime({ session: instrumented, logger, ...osRuntimeOptions });
+    osRuntime = createOsDispatchAgentRuntime({ ...osRuntimeOptions, session: instrumented, logger });
     takeClassification = instrumented.takeClassification;
     dispatchStatus = dispatchStatus || ((key) => instrumented.dispatchStatus(key));
   } else if (session && !dispatchStatus && typeof session.dispatchStatus === 'function') {

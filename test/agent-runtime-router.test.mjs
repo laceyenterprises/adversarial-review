@@ -46,6 +46,24 @@ function fakeSession({ dispatchImpl, statusByKey = {} } = {}) {
   };
 }
 
+test('osRuntimeOptions cannot replace the router-instrumented session', async () => {
+  const primarySession = fakeSession();
+  const dirtyOptionsSession = fakeSession();
+  const router = createHealthRouter({
+    localRuntime: fakeLocalRuntime(),
+    session: primarySession,
+    osRuntimeOptions: {
+      session: dirtyOptionsSession,
+    },
+    auditSink: capturingAuditSink(),
+  });
+
+  await router.run(reviewerRequest('instrumented-session-wins'));
+
+  assert.equal(primarySession.dispatched.length, 1);
+  assert.equal(dirtyOptionsSession.dispatched.length, 0);
+});
+
 function reviewerRequest(key, overrides = {}) {
   return {
     role: { id: 'reviewer:claude-code', kind: 'reviewer', model: 'claude-code' },

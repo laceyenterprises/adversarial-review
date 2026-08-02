@@ -110,6 +110,33 @@ test('MSM-04: settled review with findings dispatches exactly one hammer', async
   assert.equal(deps.calls[0].args[deps.calls[0].args.indexOf('--task-kind') + 1], 'merge');
 });
 
+test('MSM-04: agent-os hammer dispatch declares adversarial-review workspace scope', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'msm-04-agent-os-scope-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+
+  const result = await maybeDispatchAmaCloser({
+    ...baseHammerArgs(rootDir, {
+      dispatchContext: {
+        repo: 'laceyenterprises/agent-os',
+        prUrl: 'https://github.com/laceyenterprises/agent-os/pull/4641',
+      },
+    }),
+    ...deps,
+  });
+
+  assert.equal(result.dispatched, true);
+  const dispatchArgs = deps.calls[0].args;
+  const additionalRepos = dispatchArgs.flatMap((arg, index, args) => (
+    arg === '--additional-repo' ? [args[index + 1]] : []
+  ));
+  assert.deepEqual(additionalRepos, ['adversarial-review']);
+  assert.deepEqual(
+    dispatchArgs.slice(dispatchArgs.indexOf('--worker-id'), dispatchArgs.indexOf('--worker-id') + 2),
+    ['--worker-id', 'hammer-ama-pr-404'],
+  );
+});
+
 test('DCR-02: merged PR does not dispatch hammer merge task', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'dcr-02-merged-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

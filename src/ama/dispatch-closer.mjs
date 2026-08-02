@@ -3814,10 +3814,9 @@ export async function maybeDispatchAmaCloser({
   if (workerId) {
     args.push('--worker-id', workerId);
   }
-  if (
-    repoBasename !== AGENT_OS_TOOLING_REPO
-    && repoBasename !== ADVERSARIAL_REVIEW_REPO
-  ) {
+  if (repoBasename === AGENT_OS_TOOLING_REPO) {
+    args.push('--additional-repo', ADVERSARIAL_REVIEW_REPO);
+  } else if (repoBasename !== ADVERSARIAL_REVIEW_REPO) {
     args.push('--additional-repo', AGENT_OS_TOOLING_REPO);
   }
 

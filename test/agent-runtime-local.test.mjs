@@ -421,7 +421,7 @@ test('local remediation completion accepts canonical reply artifacts without std
   }
 });
 
-test('codex remediation startup evidence uses camelCase policyViolations', () => {
+test('codex remediation startup evidence preserves policy_violations schema', () => {
   const rootDir = makeRoot();
   const codexHome = join(rootDir, 'codex-home');
   const codexAuthDir = join(codexHome, '.codex');
@@ -432,8 +432,8 @@ test('codex remediation startup evidence uses camelCase policyViolations', () =>
       CODEX_HOME: codexAuthDir,
       HOME: codexHome,
     }, () => prepareCodexRemediationStartupEnv());
-    assert.deepEqual(startupEvidence.policyViolations, []);
-    assert.equal(Object.hasOwn(startupEvidence, 'policy_violations'), false);
+    assert.deepEqual(startupEvidence.policy_violations, []);
+    assert.equal(Object.hasOwn(startupEvidence, 'policyViolations'), false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

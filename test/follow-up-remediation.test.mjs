@@ -3722,8 +3722,8 @@ test('spawnCodexRemediationWorker fails closed on conflicting inherited local OA
       (error) => {
         assert.equal(error.name, 'StartupContractError');
         assert.equal(error.violationType, 'conflicting-env-contract-breach');
-        assert.equal(error.startupEvidence.policyViolations[0].requested_value, authRoot);
-        assert.equal(error.startupEvidence.policyViolations[0].resolved_value, process.env.HOME);
+        assert.equal(error.startupEvidence.policy_violations[0].requested_value, authRoot);
+        assert.equal(error.startupEvidence.policy_violations[0].resolved_value, process.env.HOME);
         return true;
       }
     );

@@ -166,7 +166,7 @@ function prepareClaudeCodeRemediationStartupEnv() {
         strippedEnv: stripped,
         preservedForOAuth: env.ANTHROPIC_AUTH_TOKEN ? ['ANTHROPIC_AUTH_TOKEN'] : [],
       },
-      policyViolations: [],
+      policy_violations: [],
     },
   };
 }
@@ -213,7 +213,7 @@ function prepareGeminiRemediationStartupEnv({ gitIdentity = null } = {}) {
         gitIdentityOverrides: overriddenGitEnv,
       },
       gitIdentity: gitIdentity ? { name: gitIdentity.name, email: gitIdentity.email } : null,
-      policyViolations: [],
+      policy_violations: [],
     },
   };
 }
@@ -280,7 +280,7 @@ function prepareCodexRemediationStartupEnv({ gitIdentity = null, perWorkerKey = 
       gitIdentityOverrides: overriddenGitEnv,
     },
     gitIdentity: gitIdentity ? { name: gitIdentity.name, email: gitIdentity.email } : null,
-    policyViolations,
+    policy_violations: policyViolations,
   };
 
   if (policyViolations.length) {

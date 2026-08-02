@@ -18,6 +18,7 @@ import { routerAuditDir } from './adapters/agent-runtime/router/audit.mjs';
 import { summarizeRuntimeRuns } from './adapters/agent-runtime/run-ledger.mjs';
 import { readRuntimeStatusSnapshot } from './runtime-status-snapshot.mjs';
 import { readCanaryStatus } from './adapters/agent-runtime/canary.mjs';
+import { evaluateSettleSmokeResult } from './adapters/agent-runtime/settle-smoke.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
 import { resolveReviewerRuntimeCutover } from './reviewer-runtime-cutover.mjs';
 
@@ -130,6 +131,7 @@ function buildRuntimeStatus(rootDir, {
   readAuditRowsImpl = readAuditRows,
   summarizeRunsImpl = summarizeRuntimeRuns,
   readCanaryImpl = readCanaryStatus,
+  evaluateSettleSmokeImpl = evaluateSettleSmokeResult,
   loadDomainConfigImpl = loadDomainConfig,
   env = process.env,
 } = {}) {
@@ -169,6 +171,7 @@ function buildRuntimeStatus(rootDir, {
 
   const runs = summarizeRunsImpl(rootDir, { windowMs, now });
   const canary = readCanaryImpl(rootDir);
+  const settleSmoke = evaluateSettleSmokeImpl(rootDir, { runtime: 'agent-runtime', now });
   let reviewerCutover = null;
   try {
     const codePrDomain = loadDomainConfigImpl(rootDir, 'code-pr');
@@ -181,6 +184,7 @@ function buildRuntimeStatus(rootDir, {
         now,
         readSnapshotImpl,
         readCanaryImpl,
+        evaluateSettleSmokeImpl,
       });
     }
   } catch {
@@ -193,6 +197,7 @@ function buildRuntimeStatus(rootDir, {
         now,
         readSnapshotImpl,
         readCanaryImpl,
+        evaluateSettleSmokeImpl,
       });
     } else {
       reviewerCutover = null;
@@ -213,6 +218,7 @@ function buildRuntimeStatus(rootDir, {
     reconcile: lastResume?.reconcile || snapStatus?.reconciled || null,
     runs,
     canary: canary || null,
+    settleSmoke,
     reviewerCutover,
   };
 }
@@ -286,6 +292,17 @@ function renderCanaryLine(canary) {
   return `fallback canary: ${verdict} ${canary.at} (${detail}, ${durationS})`;
 }
 
+function renderSettleSmokeLine(settleSmoke) {
+  if (!settleSmoke) return 'settle smoke: not evaluated';
+  const verdict = settleSmoke.ok
+    ? 'PASS'
+    : String(settleSmoke.reason || 'unknown').toUpperCase();
+  const runtime = settleSmoke.runtime || 'agent-runtime';
+  const at = settleSmoke.result?.at ? ` ${settleSmoke.result.at}` : '';
+  const detail = settleSmoke.ok ? 'fresh' : (settleSmoke.reason || 'unknown');
+  return `settle smoke: ${verdict} ${runtime}${at} (${detail})`;
+}
+
 function renderReviewerCutoverLine(cutover) {
   if (!cutover || (cutover.requestedRuntime !== 'agent-runtime' && cutover.state !== 'forced')) {
     return 'reviewer cutover: not requested';
@@ -307,6 +324,7 @@ function renderRuntimeStatus(model) {
   lines.push(renderResumeLine(model.lastResume));
   lines.push(renderRunsLine(model.runs, model.reconcile));
   lines.push(renderCanaryLine(model.canary));
+  lines.push(renderSettleSmokeLine(model.settleSmoke));
   lines.push(renderReviewerCutoverLine(model.reviewerCutover));
   return lines.join('\n');
 }

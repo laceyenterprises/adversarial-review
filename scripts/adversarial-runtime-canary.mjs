@@ -27,15 +27,40 @@ import {
   runFallbackCanary,
   DEFAULT_CANARY_DOMAIN_ID,
 } from '../src/adapters/agent-runtime/canary.mjs';
+import { runRuntimeSettleSmoke } from '../src/runtime-settle-smoke-cli.mjs';
+
+const SCHEDULED_HARD_EXIT_MS = 660_000;
+
+function armScheduledHardExit({
+  timeoutMs = SCHEDULED_HARD_EXIT_MS,
+  setTimeoutImpl = setTimeout,
+  exitImpl = process.exit,
+  getExitCode = () => process.exitCode,
+  stderr = process.stderr,
+} = {}) {
+  const timer = setTimeoutImpl(() => {
+    stderr.write(`scheduled runtime canary exceeded hard deadline (${timeoutMs}ms); forcing exit\n`);
+    exitImpl(getExitCode() || 1);
+  }, timeoutMs);
+  timer?.unref?.();
+  return timer;
+}
 
 function parseArgs(argv) {
-  const options = { rootDir: process.cwd(), domainId: DEFAULT_CANARY_DOMAIN_ID, live: false, json: false };
+  const options = {
+    rootDir: process.cwd(),
+    domainId: DEFAULT_CANARY_DOMAIN_ID,
+    live: false,
+    json: false,
+    settleSmoke: false,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--root') options.rootDir = argv[++i];
     else if (arg === '--domain') options.domainId = argv[++i];
     else if (arg === '--live') options.live = true;
     else if (arg === '--fixture') options.live = false;
+    else if (arg === '--settle-smoke') options.settleSmoke = true;
     else if (arg === '--json') options.json = true;
     else if (arg === '--help' || arg === '-h') options.help = true;
     else throw new Error(`unknown argument: ${arg}`);
@@ -43,16 +68,22 @@ function parseArgs(argv) {
   return options;
 }
 
-async function main(argv) {
+async function main(argv, dependencies = {}) {
+  const createLocalRuntimeImpl = dependencies.createLocalRuntimeImpl || createLocalAgentRuntime;
+  const createFixtureReviewerImpl = dependencies.createFixtureReviewerImpl || createFixtureReviewerInner;
+  const runFallbackCanaryImpl = dependencies.runFallbackCanaryImpl || runFallbackCanary;
+  const runSettleSmokeImpl = dependencies.runSettleSmokeImpl || runRuntimeSettleSmoke;
+  const stdout = dependencies.stdout || process.stdout;
+  const stderr = dependencies.stderr || process.stderr;
   let options;
   try {
     options = parseArgs(argv);
   } catch (err) {
-    process.stderr.write(`error: ${err?.message || err}\n`);
+    stderr.write(`error: ${err?.message || err}\n`);
     return 2;
   }
   if (options.help) {
-    process.stdout.write('Usage: adversarial-runtime-canary [--root <dir>] [--domain <id>] [--live|--fixture] [--json]\n');
+    stdout.write('Usage: adversarial-runtime-canary [--root <dir>] [--domain <id>] [--live|--fixture] [--settle-smoke] [--json]\n');
     return 0;
   }
 
@@ -61,10 +92,10 @@ async function main(argv) {
   // deterministic on purpose: a canned reviewer AND a permissive admission, so a
   // loaded CI runner's memory-pressure reading can't spuriously fail the canary.
   const localRuntime = options.live
-    ? createLocalAgentRuntime({ rootDir: options.rootDir })
-    : createLocalAgentRuntime({
+    ? createLocalRuntimeImpl({ rootDir: options.rootDir })
+    : createLocalRuntimeImpl({
       rootDir: options.rootDir,
-      cliDirect: createFixtureReviewerInner(),
+      cliDirect: createFixtureReviewerImpl(),
       admissionImpl: async ({ budget = {} } = {}) => ({
         admit: true,
         budget: {
@@ -74,25 +105,51 @@ async function main(argv) {
       }),
     });
 
-  const outcome = await runFallbackCanary({
+  const outcome = await runFallbackCanaryImpl({
     rootDir: options.rootDir,
     localRuntime,
     domainId: options.domainId,
   });
+  const settleOutcome = options.settleSmoke
+    ? await runSettleSmokeImpl({
+      rootDir: options.rootDir,
+      runtime: 'agent-runtime',
+    })
+    : null;
 
   if (options.json) {
-    process.stdout.write(`${JSON.stringify(outcome.status, null, 2)}\n`);
+    const payload = settleOutcome
+      ? { fallbackCanary: outcome.status, settleSmoke: settleOutcome.smoke }
+      : outcome.status;
+    stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
   } else {
     const verdict = outcome.ok ? 'PASS' : 'FAIL';
-    process.stdout.write(
+    stdout.write(
       `fallback canary: ${verdict} (${outcome.status.detail}, ${Math.round(outcome.durationMs / 1000)}s)\n`,
     );
+    if (settleOutcome) {
+      stdout.write(
+        `agent-runtime settle smoke: ${settleOutcome.ok ? 'PASS' : 'FAIL'} (${settleOutcome.smoke.detail})\n`,
+      );
+    }
   }
-  return outcome.ok ? 0 : 1;
+  return outcome.ok && (!settleOutcome || settleOutcome.ok) ? 0 : 1;
+}
+
+function reportScheduledFailure(err, { stderr = process.stderr } = {}) {
+  stderr.write(`error: ${err?.message || err}\n`);
+  return 1;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main(process.argv.slice(2)).then((code) => { process.exitCode = code; });
+  // ExitTimeOut only bounds launchd's stop grace; it does not bound a
+  // StartCalendarInterval job. Keep this timer unref'd so it does not delay a
+  // clean process, while still forcing an exit if an unexpected handle keeps
+  // the event loop alive or either scheduled check never resolves.
+  armScheduledHardExit();
+  main(process.argv.slice(2))
+    .then((code) => { process.exitCode = code; })
+    .catch((err) => { process.exitCode = reportScheduledFailure(err); });
 }
 
-export { main };
+export { SCHEDULED_HARD_EXIT_MS, armScheduledHardExit, main, reportScheduledFailure };

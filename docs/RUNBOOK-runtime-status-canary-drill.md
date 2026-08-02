@@ -9,7 +9,9 @@ observable:
 1. **`runtime status` CLI** — the operator's truthful view of the runtime.
 2. **Fallback canary** — a scheduled synthetic review through the `local`
    runtime that pages if the lifeline has rotted.
-3. **Failover drill** — a sandboxed rehearsal of the full failover/resume cycle
+3. **Agent-runtime settle smoke** — a scheduled real dispatch that must settle
+   with `worker_run_id` attribution before the runtime cutover remains eligible.
+4. **Failover drill** — a sandboxed rehearsal of the full failover/resume cycle
    that proves zero duplicate dispatches.
 
 ## `runtime status`
@@ -36,6 +38,7 @@ process (it never reaches into the daemon's memory):
 | last failover / resume / reconcile | `data/runtime-router-audit/YYYY-MM.jsonl` (ARC-07 transition audit) |
 | runs (24h) by mode | `data/runtime-runs/YYYY-MM.jsonl` (run-ledger) |
 | fallback canary | `data/runtime-canary-status.json` (canary) |
+| settle smoke | `data/runtime-settle-smoke/agent-runtime.json` (settle-smoke runner) |
 
 Missing artifacts degrade gracefully: no snapshot → `probe: unknown`, no
 transitions → `none`, no canary → `never run`. The surface never asserts state
@@ -64,13 +67,24 @@ status file, records the run, and **pages on failure**
   canary detects genuine rot. Requires a host with the reviewer CLI authed.
 
 Scheduled daily at 06:00 by
-`launchd/ai.laceyenterprises.adversarial-runtime-canary.airlock.plist`. Flip the
-plist argument from `--fixture` to `--live` once the real reviewer spawn is
-production-wired end to end (ARC-08+).
+`launchd/ai.laceyenterprises.adversarial-runtime-canary.airlock.plist`. The
+plist also passes `--settle-smoke`, which runs a real `agent-runtime` dispatch
+and refreshes the seven-day cutover-readiness artifact every day. Either check
+failing makes the one-shot exit non-zero. Flip the plist argument from
+`--fixture` to `--live` once the real reviewer spawn is production-wired end to
+end (ARC-08+).
 
 The LaunchAgent wrapper retries a failed 1Password recipient lookup three
 times with bounded backoff. If lookup still fails, or `op` is unavailable, it
 exits non-zero instead of running a canary that cannot page.
+
+The CLI entry point deliberately uses `process.exitCode` after awaiting both
+checks so stdout, stderr, and durable result writes can flush normally. It also
+arms an unreferenced 660-second hard-exit timer before starting either check. If
+a check never resolves or an unexpected handle keeps the event loop alive, the
+timer forces a non-zero exit. The plist's `ExitTimeOut` only bounds launchd's
+grace period after launchd explicitly stops the job; it is not an execution
+deadline.
 
 ## Failover drill
 

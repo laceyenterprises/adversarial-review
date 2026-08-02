@@ -5382,6 +5382,46 @@ test('top-level config.yaml accepts mirrored oauth_broker watchdog BPR-05 keys',
   }
 });
 
+test('top-level config.yaml accepts mirrored oauth_broker watchdog credential decay keys', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      oauth_broker:
+        watchdog:
+          credential_decay_warn_after_seconds: 120
+          credential_decay_crit_after_seconds: 1800
+          credential_decay_last_good_crit_expiry_margin_seconds: 900
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('oauth_broker.watchdog.credential_decay_warn_after_seconds'), 120);
+    assert.equal(cfg.get('oauth_broker.watchdog.credential_decay_crit_after_seconds'), 1800);
+    assert.equal(
+      cfg.get('oauth_broker.watchdog.credential_decay_last_good_crit_expiry_margin_seconds'),
+      900,
+    );
+
+    const envCfg = loadConfig({
+      topPath: top,
+      env: {
+        OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_WARN_AFTER_SECONDS: '60',
+        AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_CRIT_AFTER_SECONDS: '2400',
+        AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS:
+          '600',
+      },
+    });
+    assert.equal(envCfg.get('oauth_broker.watchdog.credential_decay_warn_after_seconds'), 60);
+    assert.equal(envCfg.get('oauth_broker.watchdog.credential_decay_crit_after_seconds'), 2400);
+    assert.equal(
+      envCfg.get('oauth_broker.watchdog.credential_decay_last_good_crit_expiry_margin_seconds'),
+      600,
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // oauth_broker.merge_agent is a tolerate-only partial mirror: the watcher does
 // NOT consume these keys (the merge-agent App-installation-token auth is
 // resolved by modules/worker-pool/lib/hq-gh.sh; the authoritative CFG contract

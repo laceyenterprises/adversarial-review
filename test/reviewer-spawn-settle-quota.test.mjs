@@ -25,7 +25,7 @@ function spawnArgs({ env, capture }) {
   return {
     repo: 'laceyenterprises/demo',
     prNumber: 99,
-    reviewerModel: 'claude',
+    reviewerModel: 'claude-code',
     botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
     reviewerHeadSha: 'deadbeef',
     reviewerSessionUuid: randomUUID(),
@@ -68,6 +68,8 @@ test('known-exhausted reviewer skips spawn and records a terminal quota pass', a
 
     assert.equal(capture.spawnCalls, 0);
     assert.equal(capture.begun.length, 1);
+    assert.equal(capture.begun[0].reviewerClass, 'claude');
+    assert.equal(capture.begun[0].reviewerModel, 'claude-code');
     assert.equal(capture.completed.length, 1);
     assert.equal(capture.completed[0].status, 'skipped');
     assert.equal(capture.completed[0].metadata.failureClass, 'quota-exhausted');
@@ -88,6 +90,8 @@ test('healthy reviewer status dispatches normally', async () => {
     }));
     assert.equal(capture.spawnCalls, 1);
     assert.equal(result.ok, true);
+    assert.equal(capture.begun[0].reviewerClass, 'claude');
+    assert.equal(capture.begun[0].reviewerModel, 'claude-code');
     assert.equal(capture.completed[0].status, 'completed');
   });
 });

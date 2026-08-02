@@ -41,6 +41,7 @@ import {
 import {
   beginReviewerPass,
   completeReviewerPass,
+  normalizeReviewerClass,
   readBestReviewerEvidenceTokenUsage,
   tagTokenUsage,
 } from './reviewer-pass-tokens.mjs';
@@ -419,6 +420,7 @@ async function spawnReviewer({
   completeReviewerPassImpl = completeReviewerPass,
 }) {
   const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
+  const normalizedReviewerClass = normalizeReviewerClass(reviewerModel);
   const finalRound = (
     Number.isFinite(reviewAttemptNumber) &&
     Number.isFinite(maxRemediationRounds) &&
@@ -461,7 +463,7 @@ async function spawnReviewer({
       repo,
       prNumber,
       attemptNumber,
-      reviewerClass: reviewerModel,
+      reviewerClass: normalizedReviewerClass,
       reviewerModel,
       passKind,
       workspacePath: workspacePath || ROOT,
@@ -512,7 +514,7 @@ async function spawnReviewer({
       repo,
       prNumber,
       attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
-      reviewerClass: reviewerModel,
+      reviewerClass: normalizedReviewerClass,
       reviewerModel,
       passKind,
       workspacePath: workspacePath || ROOT,
@@ -698,7 +700,7 @@ async function spawnReviewer({
             prNumber,
             attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
             passKind,
-            reviewerClass: reviewerModel,
+            reviewerClass: normalizedReviewerClass,
             reviewerModel,
             status: result.ok ? 'completed' : (result.failureClass === 'cancelled' ? 'cancelled' : 'failed'),
             startedAt,

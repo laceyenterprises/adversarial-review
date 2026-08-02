@@ -143,11 +143,155 @@ test('spawnReviewer resolves worker_run_id from os-dispatch launch_request_id wh
   // launch_request_id surfaced by os-dispatch.
   assert.equal(readBestArgs?.launchRequestId, 'lrq_wcw_attribution');
   assert.equal(readBestArgs?.adapterSessionKey, 'code-pr:pr-21:sha21:review:reviewer:gemini:2');
+  assert.deepEqual(readBestArgs?.sessionKeys, [
+    'spawn-settle-wcw-attribution',
+    'code-pr:pr-21:sha21:review:reviewer:gemini:2',
+  ]);
   // The resolved ledger run_id must be persisted to reviewer_passes.worker_run_id,
   // surviving tagTokenUsage()/normalizeTokenUsage() (which drop attribution).
   assert.equal(settled.length, 1);
   assert.equal(settled[0].workerRunId, 'run_wcw_attribution_123');
   assert.equal(settled[0].metadata.launchRequestId, 'lrq_wcw_attribution');
+});
+
+test('spawnReviewer enriches adapter token usage with ledger worker_run_id without replacing counters', async () => {
+  const settled = [];
+  const result = await spawnReviewer({
+    repo: 'laceyenterprises/demo',
+    prNumber: 24,
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-566',
+    labels: [],
+    builderTag: 'codex',
+    reviewerHeadSha: 'sha24',
+    reviewAttemptNumber: 1,
+    reviewDbAttemptNumber: 2,
+    completedRemediationRounds: 0,
+    passKind: 'first-pass',
+    maxRemediationRounds: 2,
+    reviewerSessionUuid: 'spawn-settle-preserves-adapter-usage',
+    reviewerRuntimeAdapterOverride: {
+      async spawnReviewer() {
+        return {
+          ok: true,
+          reviewBody: '## Summary\nLooks good.\n\n## Verdict\nComment only',
+          reviewBodyDelivery: 'caller-post',
+          reattachToken: 'sdk-request-id-24',
+          launchRequestId: 'lrq_sdk_24',
+          tokenUsage: {
+            input: 100,
+            output: 50,
+            cacheRead: 11,
+            cacheWrite: 7,
+            reasoning: 9,
+            toolContext: 5,
+            total: 182,
+            costUSD: 0.25,
+            source: 'adapter',
+          },
+          spawnedAt: '2026-07-28T03:00:00.000Z',
+        };
+      },
+    },
+    postGitHubReviewWithCaptureImpl: async () => {},
+    readBestReviewerEvidenceTokenUsageImpl: () => ({
+      workerRunId: 'wr_sdk_24',
+      input: 1,
+      output: 2,
+      total: 3,
+      costUSD: 0.01,
+      source: 'session-ledger',
+    }),
+    completeReviewerPassImpl: (_root, payload) => {
+      settled.push(payload);
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].workerRunId, 'wr_sdk_24');
+  assert.deepEqual(settled[0].tokenUsage, {
+    input: 100,
+    output: 50,
+    cacheRead: 11,
+    cacheWrite: 7,
+    reasoning: 9,
+    toolContext: 5,
+    total: 182,
+    guardrail: 182,
+    costUSD: 0.25,
+    usageTag: 'guardrail',
+    source: 'adapter',
+  });
+});
+
+test('spawnReviewer preserves adapter token usage when optional ledger lookup fails', async () => {
+  const settled = [];
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  try {
+    const result = await spawnReviewer({
+      repo: 'laceyenterprises/demo',
+      prNumber: 25,
+      reviewerModel: 'gemini',
+      botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+      linearTicketId: 'LAC-566',
+      labels: [],
+      builderTag: 'codex',
+      reviewerHeadSha: 'sha25',
+      reviewAttemptNumber: 1,
+      reviewDbAttemptNumber: 2,
+      completedRemediationRounds: 0,
+      passKind: 'first-pass',
+      maxRemediationRounds: 2,
+      reviewerSessionUuid: 'spawn-settle-ledger-fail-open',
+      reviewerRuntimeAdapterOverride: {
+        async spawnReviewer() {
+          return {
+            ok: true,
+            reviewBody: '## Summary\nLooks good.\n\n## Verdict\nComment only',
+            reviewBodyDelivery: 'caller-post',
+            reattachToken: 'sdk-request-id-25',
+            launchRequestId: 'lrq_sdk_25',
+            tokenUsage: { input: 8, output: 13, total: 21, source: 'adapter' },
+            spawnedAt: '2026-07-28T03:00:00.000Z',
+          };
+        },
+      },
+      postGitHubReviewWithCaptureImpl: async () => {},
+      readBestReviewerEvidenceTokenUsageImpl: () => {
+        throw new Error('SQLITE_BUSY');
+      },
+      completeReviewerPassImpl: (_root, payload) => {
+        settled.push(payload);
+      },
+    });
+
+    assert.equal(result.ok, true);
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].workerRunId, null);
+  assert.deepEqual(settled[0].tokenUsage, {
+    input: 8,
+    output: 13,
+    cacheRead: null,
+    cacheWrite: null,
+    reasoning: null,
+    toolContext: null,
+    total: 21,
+    guardrail: 21,
+    costUSD: null,
+    usageTag: 'guardrail',
+    source: 'adapter',
+  });
+  assert.equal(settled[0].tokenSource, 'adapter');
+  assert.match(warnings[0] || '', /reviewer_pass_token_ledger_lookup_failed/);
+  assert.match(warnings[0] || '', /SQLITE_BUSY/);
 });
 
 test('spawnReviewer persists worker_run_id onto reviewer_passes for SDK-dispatched settles', async () => {

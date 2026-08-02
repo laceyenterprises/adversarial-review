@@ -425,6 +425,7 @@ async function spawnReviewer({
       let tokenUsage = null;
       let reviewerTokenUsageArtifact = null;
       const launchRequestId = result.launchRequestId || result.reattachToken || null;
+      const metadataLaunchRequestId = result.launchRequestId || null;
       // WCW attribution: the reviewer worker's real ledger run_id, captured from
       // the RAW token usage before tagTokenUsage()/normalizeTokenUsage() drops it
       // (the normalized token-usage shape intentionally carries only counters,
@@ -433,25 +434,41 @@ async function spawnReviewer({
       try {
         let rawTokenUsage = result.tokenUsage || null;
         if (!rawTokenUsage?.workerRunId) {
-          const ledgerTokenUsage = readBestReviewerEvidenceTokenUsageImpl({
-            // SDK/os-dispatch reattaches by app-contract request_id, but the
-            // session ledger attributes worker_runs by launch_request_id. Prefer
-            // the surfaced launchRequestId when present; cli-direct keeps null.
-            launchRequestId,
-            adapterSessionKey: result.reattachToken || reviewerSessionUuid,
-            sessionKeys: [
-              reviewerSessionUuid,
-              result.reattachToken,
-              result.launchRequestId,
-              result.sessionUuid,
-            ],
-            workspacePath: workspacePath || ROOT,
-            startedAt,
-            endedAt,
-            reviewerModel,
-            rootDir: ROOT,
-          });
-          rawTokenUsage = ledgerTokenUsage || rawTokenUsage;
+          let ledgerTokenUsage = null;
+          try {
+            ledgerTokenUsage = readBestReviewerEvidenceTokenUsageImpl({
+              // SDK/os-dispatch reattaches by app-contract request_id, but the
+              // session ledger attributes worker_runs by launch_request_id.
+              // Older adapters surfaced that launch id as the reattach token, so
+              // keep the lookup fallback while leaving metadata explicit below.
+              launchRequestId,
+              adapterSessionKey: result.reattachToken || reviewerSessionUuid,
+              sessionKeys: [
+                reviewerSessionUuid,
+                result.reattachToken,
+                result.sessionUuid,
+              ].filter(Boolean),
+              workspacePath: workspacePath || ROOT,
+              startedAt,
+              endedAt,
+              reviewerModel,
+              rootDir: ROOT,
+            });
+          } catch (ledgerErr) {
+            console.warn(
+              `[watcher] reviewer_pass_token_ledger_lookup_failed repo=${repo} pr=${prNumber} ` +
+              `session=${reviewerSessionUuid}: ${ledgerErr?.message || ledgerErr}`
+            );
+          }
+          if (ledgerTokenUsage) {
+            rawTokenUsage = rawTokenUsage
+              ? {
+                  ...rawTokenUsage,
+                  workerRunId: rawTokenUsage.workerRunId || ledgerTokenUsage.workerRunId || null,
+                  launchRequestId: rawTokenUsage.launchRequestId || ledgerTokenUsage.launchRequestId || null,
+                }
+              : ledgerTokenUsage;
+          }
         }
         resolvedWorkerRunId = rawTokenUsage?.workerRunId || null;
         tokenUsage = tagTokenUsage(rawTokenUsage, 'guardrail');
@@ -504,7 +521,7 @@ async function spawnReviewer({
         workerRunId: resolvedWorkerRunId,
         metadata: {
           reviewerSessionUuid,
-          launchRequestId,
+          launchRequestId: metadataLaunchRequestId,
           reattachToken: result.reattachToken || null,
           failureClass: result.failureClass || null,
           tokenUsageNoUsageReason: result.tokenUsageNoUsageReason || null,

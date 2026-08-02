@@ -14,6 +14,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readFileSync as readTextFileSync } from 'node:fs';
 
 import * as remediation from '../src/follow-up-remediation.mjs';
 import {
@@ -26,6 +27,8 @@ import { DEFAULT_ROLE_TOP_PATH } from '../src/role-config.mjs';
 
 const SRC_PATH = fileURLToPath(new URL('../src/follow-up-remediation.mjs', import.meta.url));
 const SRC = readFileSync(SRC_PATH, 'utf8');
+const CLAUDE_LEAF_PATH = fileURLToPath(new URL('../src/remediation-claude-code-worker.mjs', import.meta.url));
+const CLAUDE_LEAF_SRC = readTextFileSync(CLAUDE_LEAF_PATH, 'utf8');
 
 // ── 1. Grep gate: the forked-path selectors are deleted ────────────────────
 
@@ -47,6 +50,11 @@ test('grep gate: consume dispatches through one port call, not the hq-vs-spawn f
   // The collapse routes every remediation through the runtime facade.
   assert.match(SRC, /remediationRuntime\.run\(/);
   assert.equal(typeof createRemediationRuntime, 'function');
+});
+
+test('grep gate: remediation surfaces no longer import direct spawnDetachedCli', () => {
+  assert.doesNotMatch(SRC, /\bspawnDetachedCli\b/);
+  assert.doesNotMatch(CLAUDE_LEAF_SRC, /\bspawnDetachedCli\b/);
 });
 
 // ── 2. Health-router-driven mode selection + stickiness ────────────────────

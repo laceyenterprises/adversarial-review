@@ -12,7 +12,9 @@ import {
   buildDuplicateReviewSkipAudit,
   createHeadDispatchLease,
   headDispatchLeaseKey,
+  restorePendingReviewedHeadDedupRow,
   resolveAlreadyReviewedHeadDedup,
+  selectExistingReviewForHead,
   selectExistingReviewIdForHead,
 } from '../src/reviewed-head-dispatch-gate.mjs';
 
@@ -55,11 +57,42 @@ test('lease never blocks a key with no head SHA (cannot dedup)', () => {
   assert.equal(lease.has(key), false);
 });
 
+test('selectExistingReviewForHead returns newest review descriptor or null', () => {
+  assert.equal(selectExistingReviewForHead([]), null);
+  assert.deepEqual(selectExistingReviewForHead([{ id: '99', commitId: HEAD }]), {
+    id: '99',
+    commitId: HEAD,
+  });
+  assert.deepEqual(
+    selectExistingReviewForHead([
+      { commitId: HEAD, submittedAt: '2026-07-13T00:00:00Z' },
+      { id: '100', commitId: HEAD, submittedAt: '2026-07-13T00:01:00Z' },
+    ]),
+    { id: '100', commitId: HEAD, submittedAt: '2026-07-13T00:01:00Z' },
+  );
+});
+
 test('selectExistingReviewIdForHead returns newest review id or null', () => {
   assert.equal(selectExistingReviewIdForHead([]), null);
   assert.equal(selectExistingReviewIdForHead([{ id: '99', commitId: HEAD }]), '99');
   // Non-empty but id-less still counts as reviewed upstream; we just can't name it.
   assert.equal(selectExistingReviewIdForHead([{ commitId: HEAD }]), null);
+  assert.equal(selectExistingReviewIdForHead([{ commitId: HEAD }, { id: '100', commitId: HEAD }]), '100');
+});
+
+test('dedup review id and timestamp come from the same review descriptor', async () => {
+  const result = await resolveAlreadyReviewedHeadDedup({
+    repoPath: 'org/agent-os',
+    prNumber: 3655,
+    headSha: HEAD,
+    reviewerLogins: ['lacey-gemini-reviewer'],
+    fetchReviewsForHeadImpl: async () => [
+      { commitId: HEAD, state: 'COMMENTED', submittedAt: '2026-07-13T00:00:00Z' },
+      { id: '4242', commitId: HEAD, state: 'COMMENTED', submittedAt: '2026-07-13T00:01:00Z' },
+    ],
+  });
+  assert.equal(result.reviewId, '4242');
+  assert.equal(result.reviewSubmittedAt, '2026-07-13T00:01:00Z');
 });
 
 test('dedup: an existing completed review on the head is already-reviewed', async () => {
@@ -72,7 +105,12 @@ test('dedup: an existing completed review on the head is already-reviewed', asyn
       { id: '4242', commitId: HEAD, state: 'CHANGES_REQUESTED', submittedAt: '2026-07-13T00:24:00Z' },
     ],
   });
-  assert.deepEqual(result, { alreadyReviewed: true, reviewId: '4242', reason: 'commit-id-match' });
+  assert.deepEqual(result, {
+    alreadyReviewed: true,
+    reviewId: '4242',
+    reviewSubmittedAt: '2026-07-13T00:24:00Z',
+    reason: 'commit-id-match',
+  });
 });
 
 test('dedup: no review on the head permits dispatch', async () => {
@@ -83,7 +121,50 @@ test('dedup: no review on the head permits dispatch', async () => {
     reviewerLogins: ['lacey-gemini-reviewer'],
     fetchReviewsForHeadImpl: async () => [],
   });
-  assert.deepEqual(result, { alreadyReviewed: false, reviewId: null, reason: null });
+  assert.deepEqual(result, {
+    alreadyReviewed: false,
+    reviewId: null,
+    reviewSubmittedAt: null,
+    reason: null,
+  });
+});
+
+test('dedup row repair restores a pending row from the proven GitHub review timestamp', () => {
+  const calls = [];
+  const restore = restorePendingReviewedHeadDedupRow({
+    restoreStatement: {
+      run: (...args) => {
+        calls.push(args);
+        return { changes: 1 };
+      },
+    },
+    repoPath: 'org/agent-os',
+    prNumber: 3655,
+    headSha: HEAD,
+    reviewSubmittedAt: '2026-07-13T00:24:00Z',
+  });
+
+  assert.deepEqual(calls, [['2026-07-13T00:24:00Z', HEAD, 'org/agent-os', 3655, HEAD]]);
+  assert.deepEqual(restore, {
+    attempted: true,
+    restored: true,
+    postedAt: '2026-07-13T00:24:00Z',
+  });
+});
+
+test('dedup row repair skips when the current head cannot be proven', () => {
+  const restore = restorePendingReviewedHeadDedupRow({
+    restoreStatement: {
+      run: () => {
+        throw new Error('must not mutate without a head');
+      },
+    },
+    repoPath: 'org/agent-os',
+    prNumber: 3655,
+    headSha: '',
+  });
+
+  assert.deepEqual(restore, { attempted: false, restored: false, reason: 'not-restorable' });
 });
 
 test('dedup: missing head SHA fails open (no probe)', async () => {

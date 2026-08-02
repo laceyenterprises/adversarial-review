@@ -75,6 +75,7 @@ import {
   parseOAuthScopesFromGhAuthStatus,
   validateStartupRemediationConfig,
 } from '../src/follow-up-remediation.mjs';
+import { cancelLocalRemediationWorker } from '../src/adapters/agent-runtime/local/remediation.mjs';
 
 test('createQuotaHoldRevalidator caches hq quota status failures for the TTL window', async () => {
   let calls = 0;
@@ -2648,7 +2649,7 @@ test('validateStartupRemediationConfig names orchestration_mode agentos in hq en
   );
 });
 
-test('remediation runtime local mode dispatches "codex" to spawnCodexRemediationWorker', async () => {
+test('remediation runtime local mode binds the default execFile implementation and dispatches codex', async () => {
   // ARC-08: the former `spawnRemediationWorker` switch is now the runtime
   // facade's `local` mode. Verify it routes by class. Use a workspace minimal
   // enough that the codex spawn would succeed if it ran — we set up
@@ -2682,6 +2683,7 @@ test('remediation runtime local mode dispatches "codex" to spawnCodexRemediation
       ...testReplyContext(),
     });
     assert.equal(handle.worker.model, 'codex');
+    assert.equal(typeof handle.cancel, 'function');
   } finally {
     for (const k of ['HOME', 'CODEX_HOME', 'CODEX_AUTH_PATH']) {
       if (prev[k] === undefined) delete process.env[k];
@@ -2692,7 +2694,7 @@ test('remediation runtime local mode dispatches "codex" to spawnCodexRemediation
   assert.match(invokedCli, /codex/);
 });
 
-test('remediation runtime local mode dispatches "claude-code" to spawnClaudeCodeRemediationWorker', async () => {
+test('remediation runtime local mode preserves the claude-code-remediation provenance class', async () => {
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const promptPath = path.join(workspaceDir, 'prompt.md');
   const outputPath = path.join(workspaceDir, 'last-msg.md');
@@ -2701,10 +2703,12 @@ test('remediation runtime local mode dispatches "claude-code" to spawnClaudeCode
 
   let invokedCli;
   let invokedArgs;
+  let invokedEnv;
   const handle = await createRemediationRuntime({
-    spawnImpl: (cmd, args) => {
+    spawnImpl: (cmd, args, options) => {
       invokedCli = cmd;
       invokedArgs = args;
+      invokedEnv = options.env;
       return { pid: 222, unref() {} };
     },
   }).run({
@@ -2716,6 +2720,7 @@ test('remediation runtime local mode dispatches "claude-code" to spawnClaudeCode
 
   assert.equal(handle.worker.model, 'claude-code');
   assert.match(invokedCli, /claude/);
+  assert.equal(invokedEnv.WORKER_CLASS, 'claude-code-remediation');
   // Claude Code is invoked in --print + acceptEdits + skip-permissions so
   // the worker can edit files AND run git/bash commands non-interactively.
   // Without --dangerously-skip-permissions, shell commands gate on an
@@ -2725,6 +2730,77 @@ test('remediation runtime local mode dispatches "claude-code" to spawnClaudeCode
     '--permission-mode',
     'acceptEdits',
     '--dangerously-skip-permissions',
+  ]);
+});
+
+test('remediation runtime local handle reattach waits on the spawned remediation worker', async () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const promptPath = path.join(workspaceDir, 'prompt.md');
+  const outputPath = path.join(workspaceDir, 'last-msg.md');
+  const logPath = path.join(workspaceDir, 'log');
+  writeFileSync(promptPath, 'fix it.\n', 'utf8');
+
+  const handle = await createRemediationRuntime({
+    spawnImpl: () => ({ pid: 901, unref() {} }),
+    waitForExitImpl: async (worker) => ({
+      status: 'completed',
+      runtimeMode: 'local',
+      failureClass: null,
+      usage: null,
+      detail: null,
+      artifact: { kind: 'remediation', body: `done:${worker.model}` },
+    }),
+  }).run({
+    mode: 'local',
+    role: { workerClass: 'claude-code' },
+    workspaceDir, promptPath, outputPath, logPath,
+    ...testReplyContext(),
+  });
+
+  const result = await handle.reattach();
+  assert.equal(result.status, 'completed');
+  assert.equal(result.artifact.body, 'done:claude-code');
+});
+
+test('remediation runtime local handle cancel signals the remediation process group and returns cancelled', async () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const promptPath = path.join(workspaceDir, 'prompt.md');
+  const outputPath = path.join(workspaceDir, 'last-msg.md');
+  const logPath = path.join(workspaceDir, 'log');
+  writeFileSync(promptPath, 'fix it.\n', 'utf8');
+
+  const signals = [];
+  const handle = await createRemediationRuntime({
+    spawnImpl: () => ({ pid: 902, unref() {} }),
+    now: () => '2026-05-24T14:55:00.000Z',
+    processKillImpl: (pid, signal) => {
+      signals.push({ pid, signal });
+      return true;
+    },
+    execFileImpl: async () => ({ stdout: `${new Date('2026-05-24T14:55:00.000Z').toString()}\n` }),
+    waitForExitImpl: async (_worker, { cancelledRef }) => ({
+      status: cancelledRef.value ? 'cancelled' : 'completed',
+      runtimeMode: 'local',
+      failureClass: null,
+      usage: null,
+      detail: cancelledRef.value ? 'cancelled by test' : null,
+    }),
+  }).run({
+    mode: 'local',
+    role: { workerClass: 'claude-code' },
+    workspaceDir,
+    promptPath,
+    outputPath,
+    logPath,
+    ...testReplyContext(),
+  });
+
+  await handle.cancel();
+  const result = await handle.await();
+  assert.equal(result.status, 'cancelled');
+  assert.deepEqual(signals, [
+    { pid: -902, signal: 0 },
+    { pid: -902, signal: 'SIGTERM' },
   ]);
 });
 
@@ -2806,6 +2882,11 @@ test('spawnGeminiRemediationWorker builds the gemini headless argv and never emb
   ]);
   assert.equal(result.model, 'gemini');
   assert.equal(result.workerClass, 'gemini');
+  assert.equal(result.launchRequestId, TEST_LAUNCH_REQUEST_ID);
+  assert.equal(
+    result.replyPath,
+    resolveHqReplyPath({ hqRoot: TEST_HQ_ROOT, launchRequestId: TEST_LAUNCH_REQUEST_ID }).replyPath
+  );
   assert.deepEqual(result.command, [
     'gemini',
     '--approval-mode',
@@ -2820,6 +2901,36 @@ test('spawnGeminiRemediationWorker builds the gemini headless argv and never emb
   assert.equal(joinedArgs.includes('SENSITIVE-DIFF-BODY-MARKER'), false);
   assert.equal(joinedArgs.includes(promptBody.trim()), false);
   assert.equal(capturedArgs.includes(promptPath), false);
+});
+
+test('spawnGeminiRemediationWorker closes an already-open descriptor when a later open fails', () => {
+  const { workspaceDir, promptPath, outputPath, logPath } = setupGeminiSpawn();
+  const previousHome = process.env.HOME;
+  process.env.HOME = workspaceDir;
+  const closed = [];
+  let opens = 0;
+  try {
+    assert.throws(
+      () => spawnGeminiRemediationWorker({
+        workspaceDir,
+        promptPath,
+        outputPath,
+        logPath,
+        ...testReplyContext(),
+        openSyncImpl: () => {
+          opens += 1;
+          if (opens === 2) throw Object.assign(new Error('output open failed'), { code: 'EACCES' });
+          return 41;
+        },
+        closeSyncImpl: (fd) => closed.push(fd),
+      }),
+      /output open failed/
+    );
+    assert.deepEqual(closed, [41]);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+  }
 });
 
 test('spawnGeminiRemediationWorker honors a pinned gemini model in argv', () => {
@@ -3173,6 +3284,11 @@ test('spawnClaudeCodeRemediationWorker sets WORKER_CLASS to claude-code-remediat
   assert.equal(capturedEnv.WORKER_RUN_AT, '2026-05-01T21:00:00Z');
   assert.equal(worker.processGroupId, 333);
   assert.equal(worker.spawnedAt, '2026-05-01T21:00:00Z');
+  assert.equal(worker.launchRequestId, TEST_LAUNCH_REQUEST_ID);
+  assert.equal(
+    worker.replyPath,
+    resolveHqReplyPath({ hqRoot: TEST_HQ_ROOT, launchRequestId: TEST_LAUNCH_REQUEST_ID }).replyPath
+  );
 });
 
 // ── Claude Code auth pre-flight (`claude auth status --json`) ─────────────
@@ -3416,6 +3532,11 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
     assert.equal(worker.processGroupId, 8123);
     assert.equal(worker.spawnedAt, '2026-05-24T00:00:00.000Z');
     assert.equal(worker.outputPath, outputPath);
+    assert.equal(worker.launchRequestId, TEST_LAUNCH_REQUEST_ID);
+    assert.equal(
+      worker.replyPath,
+      resolveHqReplyPath({ hqRoot: TEST_HQ_ROOT, launchRequestId: TEST_LAUNCH_REQUEST_ID }).replyPath
+    );
     assert.equal(spawnCalls[0].command, '/tmp/codex');
     // SEV0 2026-07-19: codex remediation MUST pin --model (never ride the codex
     // server-default, which routed through the code_mode_only tool-host that
@@ -3496,6 +3617,74 @@ test('spawnCodexRemediationWorker launches detached codex exec with stdin prompt
     } else {
       process.env.CODEX_MODEL_ID = originalCodexModelId;
     }
+  }
+});
+
+test('spawnCodexRemediationWorker closes an already-open descriptor when a later open fails', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const promptPath = path.join(workspaceDir, 'prompt.md');
+  const outputPath = path.join(workspaceDir, 'codex-last-message.md');
+  const logPath = path.join(workspaceDir, 'codex.log');
+  const codexHome = path.join(workspaceDir, '.codex');
+  const authPath = path.join(codexHome, 'auth.json');
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(promptPath, 'Fix the bug.\n', 'utf8');
+  writeFileSync(authPath, JSON.stringify({ auth_mode: 'chatgpt' }), 'utf8');
+
+  const previous = {
+    HOME: process.env.HOME,
+    CODEX_HOME: process.env.CODEX_HOME,
+    CODEX_AUTH_PATH: process.env.CODEX_AUTH_PATH,
+  };
+  process.env.HOME = workspaceDir;
+  process.env.CODEX_HOME = codexHome;
+  process.env.CODEX_AUTH_PATH = authPath;
+  const closed = [];
+  let opens = 0;
+  try {
+    assert.throws(
+      () => spawnCodexRemediationWorker({
+        workspaceDir,
+        promptPath,
+        outputPath,
+        logPath,
+        ...testReplyContext(),
+        openSyncImpl: () => {
+          opens += 1;
+          if (opens === 2) throw Object.assign(new Error('log open failed'), { code: 'EACCES' });
+          return 51;
+        },
+        closeSyncImpl: (fd) => closed.push(fd),
+      }),
+      /log open failed/
+    );
+    assert.deepEqual(closed, [51]);
+  } finally {
+    for (const key of Object.keys(previous)) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});
+
+test('cancelLocalRemediationWorker tolerates exit and permission races after identity verification', async () => {
+  const worker = {
+    processGroupId: 4242,
+    spawnedAt: '2026-08-02T17:00:00.000Z',
+  };
+  for (const code of ['ESRCH', 'EPERM']) {
+    let probes = 0;
+    await cancelLocalRemediationWorker(worker, {
+      execFileImpl: async () => ({ stdout: '2026-08-02T17:00:00.000Z\n', stderr: '' }),
+      processKillImpl: (_target, signal) => {
+        if (signal === 0) {
+          probes += 1;
+          return;
+        }
+        throw Object.assign(new Error(`signal race: ${code}`), { code });
+      },
+    });
+    assert.equal(probes, 1);
   }
 });
 

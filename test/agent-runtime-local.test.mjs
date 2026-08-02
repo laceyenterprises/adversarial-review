@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -16,6 +16,14 @@ import {
   evaluateQuotaHold,
 } from '../src/adapters/agent-runtime/local/admission.mjs';
 import {
+  cancelLocalRemediationWorker,
+  prepareCodexRemediationStartupEnv,
+  spawnClaudeCodeRemediationWorker,
+  spawnCodexRemediationWorker,
+  spawnGeminiRemediationWorker,
+  waitForLocalRemediationExit,
+} from '../src/adapters/agent-runtime/local/remediation.mjs';
+import {
   readReviewerRunRecord,
   writeReviewerRunRecord,
 } from '../src/adapters/reviewer-runtime/run-state.mjs';
@@ -28,6 +36,31 @@ const noopPreflight = async ({ model }) => (
 
 function makeRoot() {
   return mkdtempSync(join(tmpdir(), 'agent-runtime-local-'));
+}
+
+function withEnv(overrides, fn) {
+  const prior = new Map();
+  for (const key of Object.keys(overrides)) {
+    prior.set(key, process.env[key]);
+    if (overrides[key] === undefined) delete process.env[key];
+    else process.env[key] = overrides[key];
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of prior) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+function countOpenFds() {
+  try {
+    return readdirSync('/dev/fd').length;
+  } catch {
+    return null;
+  }
 }
 
 function reviewerRequest(overrides = {}) {
@@ -312,6 +345,256 @@ test('local runtime cancellation tolerates an injected adapter without cancel', 
   await handle.cancel();
   const result = await handle.await();
   assert.equal(result.status, 'completed');
+});
+
+test('local remediation spawners retain reply bookkeeping on worker records', () => {
+  const rootDir = makeRoot();
+  const promptPath = join(rootDir, 'prompt.md');
+  const outputPath = join(rootDir, 'out.txt');
+  const logPath = join(rootDir, 'worker.log');
+  const replyPath = join(rootDir, 'reply.json');
+  writeFileSync(promptPath, 'fix the PR', 'utf8');
+  const spawnImpl = () => ({ pid: 4141, unref() {} });
+  try {
+    const shared = {
+      workspaceDir: rootDir,
+      promptPath,
+      outputPath,
+      logPath,
+      replyPath,
+      launchRequestId: 'lrq_local_reply_state',
+      spawnImpl,
+      now: () => '2026-08-02T17:10:00.000Z',
+    };
+
+    const claude = spawnClaudeCodeRemediationWorker(shared);
+    assert.equal(claude.replyPath, replyPath);
+    assert.equal(claude.launchRequestId, 'lrq_local_reply_state');
+
+    const gemini = spawnGeminiRemediationWorker(shared);
+    assert.equal(gemini.replyPath, replyPath);
+    assert.equal(gemini.launchRequestId, 'lrq_local_reply_state');
+
+    const codexHome = join(rootDir, 'codex-home');
+    const codexAuthDir = join(codexHome, '.codex');
+    mkdirSync(codexAuthDir, { recursive: true });
+    const codex = withEnv({
+      CODEX_AUTH_PATH: join(codexAuthDir, 'auth.json'),
+      CODEX_HOME: codexAuthDir,
+      HOME: codexHome,
+    }, () => spawnCodexRemediationWorker(shared));
+    assert.equal(codex.replyPath, replyPath);
+    assert.equal(codex.launchRequestId, 'lrq_local_reply_state');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('local remediation completion accepts canonical reply artifacts without stdout body', async () => {
+  const rootDir = makeRoot();
+  const outputPath = join(rootDir, 'empty-output.txt');
+  const logPath = join(rootDir, 'worker.log');
+  const replyPath = join(rootDir, 'reply.json');
+  try {
+    writeFileSync(outputPath, '', 'utf8');
+    writeFileSync(logPath, 'worker log', 'utf8');
+    writeFileSync(replyPath, '{"kind":"adversarial-review-remediation-reply"}', 'utf8');
+    const result = await waitForLocalRemediationExit({
+      processId: 5151,
+      processGroupId: 5151,
+      outputPath,
+      logPath,
+      replyPath,
+      launchRequestId: 'lrq_artifact_only',
+    }, {
+      processKillImpl: () => {
+        const err = new Error('not alive');
+        err.code = 'ESRCH';
+        throw err;
+      },
+    });
+    assert.equal(result.status, 'completed');
+    assert.equal(result.artifact.body, null);
+    assert.equal(result.artifact.reattachToken, 'lrq_artifact_only');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('codex remediation startup evidence preserves policy violation schema aliases', () => {
+  const rootDir = makeRoot();
+  const codexHome = join(rootDir, 'codex-home');
+  const codexAuthDir = join(codexHome, '.codex');
+  mkdirSync(codexAuthDir, { recursive: true });
+  try {
+    const { startupEvidence } = withEnv({
+      CODEX_AUTH_PATH: join(codexAuthDir, 'auth.json'),
+      CODEX_HOME: codexAuthDir,
+      HOME: codexHome,
+    }, () => prepareCodexRemediationStartupEnv());
+    assert.deepEqual(startupEvidence.policy_violations, []);
+    assert.equal(startupEvidence.policyViolations, startupEvidence.policy_violations);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('codex remediation startup evidence resolves auth owner on Linux home paths', () => {
+  const rootDir = makeRoot();
+  const linuxHome = join(rootDir, 'home', 'runner');
+  const codexAuthDir = join(linuxHome, '.codex');
+  mkdirSync(codexAuthDir, { recursive: true });
+  try {
+    const { startupEvidence } = withEnv({
+      CODEX_AUTH_PATH: join(codexAuthDir, 'auth.json'),
+      CODEX_HOME: codexAuthDir,
+      HOME: linuxHome,
+    }, () => prepareCodexRemediationStartupEnv());
+    assert.equal(startupEvidence.resolvedStartup.resolvedAuthOwner, 'runner');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('local remediation cancel ignores process exit races after identity verification', async () => {
+  for (const code of ['ESRCH', 'EPERM']) {
+    const signals = [];
+    await cancelLocalRemediationWorker({
+      processId: 6262,
+      processGroupId: 6262,
+      spawnedAt: '2026-08-02T17:10:00.000Z',
+    }, {
+      execFileImpl: async () => {
+        const err = new Error('operation not permitted');
+        err.code = 'EPERM';
+        throw err;
+      },
+      processKillImpl: (target, signal) => {
+        signals.push([target, signal]);
+        if (signal === 0) return true;
+        const err = new Error('race during signal');
+        err.code = code;
+        throw err;
+      },
+    });
+    assert.deepEqual(signals, [[-6262, 0], [-6262, 'SIGTERM']]);
+  }
+});
+
+test('local remediation cancel succeeds when the identity probe shows the worker is already gone', async () => {
+  for (const probeResult of [
+    { stdout: '', stderr: '' },
+    Object.assign(new Error('process not found'), { code: 'ESRCH' }),
+  ]) {
+    const signals = [];
+    await cancelLocalRemediationWorker({
+      processId: 6263,
+      processGroupId: 6263,
+      spawnedAt: '2026-08-02T17:10:00.000Z',
+    }, {
+      execFileImpl: async () => {
+        if (probeResult instanceof Error) throw probeResult;
+        return probeResult;
+      },
+      processKillImpl: (target, signal) => {
+        signals.push([target, signal]);
+        return true;
+      },
+    });
+    assert.deepEqual(signals, [[-6263, 0]]);
+  }
+});
+
+test('local remediation cancel retries transient process identity probe failures', async () => {
+  const calls = [];
+  const sleeps = [];
+  let probes = 0;
+  await cancelLocalRemediationWorker({
+    processId: 6363,
+    processGroupId: 6363,
+    spawnedAt: '2026-08-02T17:10:00.000Z',
+  }, {
+    execFileImpl: async () => {
+      calls.push('ps');
+      probes += 1;
+      if (probes < 3) {
+        const err = new Error('resource temporarily unavailable');
+        err.code = 'EAGAIN';
+        throw err;
+      }
+      return { stdout: '2026-08-02T17:10:00.000Z\n', stderr: '' };
+    },
+    processKillImpl: (target, signal) => calls.push(`${target}:${signal}`),
+    sleepImpl: async (ms) => sleeps.push(ms),
+  });
+
+  assert.deepEqual(sleeps, [50, 100]);
+  assert.deepEqual(calls, ['-6363:0', 'ps', 'ps', 'ps', '-6363:SIGTERM']);
+});
+
+test('local remediation cancel bounds persistent transient identity probe failures', async () => {
+  let probes = 0;
+  const sleeps = [];
+  await assert.rejects(
+    cancelLocalRemediationWorker({
+      processId: 6464,
+      processGroupId: 6464,
+      spawnedAt: '2026-08-02T17:10:00.000Z',
+    }, {
+      execFileImpl: async () => {
+        probes += 1;
+        const err = new Error('input/output error');
+        err.code = 'EIO';
+        throw err;
+      },
+      processKillImpl: () => true,
+      sleepImpl: async (ms) => sleeps.push(ms),
+    }),
+    /refusing to cancel remediation worker with unconfirmed identity/,
+  );
+  assert.equal(probes, 4);
+  assert.deepEqual(sleeps, [50, 100, 200]);
+});
+
+test('gemini and codex remediation spawners close earlier fds when later sync open fails', () => {
+  const rootDir = makeRoot();
+  const promptPath = join(rootDir, 'prompt.md');
+  const missingOutputPath = join(rootDir, 'missing', 'out.txt');
+  const logPath = join(rootDir, 'worker.log');
+  const missingLogPath = join(rootDir, 'missing', 'worker.log');
+  writeFileSync(promptPath, 'fix the PR', 'utf8');
+  try {
+    for (const [name, spawnWorker, paths] of [
+      ['gemini', spawnGeminiRemediationWorker, { outputPath: missingOutputPath, logPath }],
+      ['codex', (opts) => {
+        const codexHome = join(rootDir, 'codex-home');
+        const codexAuthDir = join(codexHome, '.codex');
+        mkdirSync(codexAuthDir, { recursive: true });
+        return withEnv({
+          CODEX_AUTH_PATH: join(codexAuthDir, 'auth.json'),
+          CODEX_HOME: codexAuthDir,
+          HOME: codexHome,
+        }, () => spawnCodexRemediationWorker(opts));
+      }, { outputPath: join(rootDir, 'codex-output.txt'), logPath: missingLogPath }],
+    ]) {
+      const before = countOpenFds();
+      assert.throws(() => spawnWorker({
+        workspaceDir: rootDir,
+        promptPath,
+        outputPath: paths.outputPath,
+        logPath: paths.logPath,
+        replyPath: join(rootDir, `${name}-reply.json`),
+        launchRequestId: `lrq_${name}`,
+        spawnImpl: () => ({ pid: 7373, unref() {} }),
+      }), /ENOENT/);
+      const after = countOpenFds();
+      if (before !== null && after !== null) {
+        assert.equal(after, before, `${name} failed spawn must not leak file descriptors`);
+      }
+    }
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 // -- admission refusals -------------------------------------------------------

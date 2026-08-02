@@ -73,7 +73,10 @@ import {
   prepareClaudeCodeRemediationStartupEnv,
   resolveClaudeCodeCliPath,
   spawnClaudeCodeRemediationWorker,
-} from './remediation-claude-code-worker.mjs';
+  spawnCodexRemediationWorker,
+  spawnGeminiRemediationWorker,
+  createLocalRemediationHandle,
+} from './adapters/agent-runtime/local/remediation.mjs';
 import {
   OAuthError,
   assertClaudeCodeOAuth,
@@ -88,7 +91,6 @@ import {
   followUpJobRepoPrKey,
   loadFollowUpPromptTemplate,
 } from './remediation-prompt.mjs';
-import { spawnDetachedCli } from './adapters/reviewer-runtime/cli-direct/process.mjs';
 import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
 import { resolveRemediatorWorkerClassFromDomain } from './domain-policy.mjs';
@@ -494,94 +496,8 @@ function prepareGeminiRemediationStartupEnv({ gitIdentity = null } = {}) {
   return { env, startupEvidence };
 }
 
-function spawnGeminiRemediationWorker({
-  workspaceDir,
-  promptPath,
-  outputPath,
-  logPath,
-  replyPath = null,
-  hqRoot,
-  launchRequestId,
-  jobId = null,
-  spawnImpl,
-  now = () => new Date().toISOString(),
-}) {
-  const geminiCli = resolveGeminiCliPath();
-  const gitIdentity = remediationWorkerGitIdentity('gemini');
-  const { env: baseEnv, startupEvidence } = prepareGeminiRemediationStartupEnv({ gitIdentity });
-  const replyContext = requireWorkerReplyContext({ replyPath, hqRoot, launchRequestId });
-
-  // Worker-provenance env. The commit-msg hook installed by
-  // prepareWorkspaceForJob reads these and appends matching trailers. Trailer
-  // class is fixed (GEMINI_REMEDIATION_WORKER_TRAILER_CLASS) so the audit
-  // signature distinguishes Gemini remediation work from a Gemini-built PR's
-  // own commits — disambiguation of which job lives in WORKER_JOB_ID.
-  const env = {
-    ...baseEnv,
-    WORKER_CLASS: GEMINI_REMEDIATION_WORKER_TRAILER_CLASS,
-    WORKER_RUN_AT: now(),
-    ADV_REPLY_DIR: replyContext.replyDir,
-    REMEDIATION_REPLY_PATH: replyContext.replyPath,
-  };
-  if (replyContext.hqRoot) env.HQ_ROOT = replyContext.hqRoot;
-  else delete env.HQ_ROOT;
-  if (replyContext.launchRequestId) env.LRQ_ID = replyContext.launchRequestId;
-  else delete env.LRQ_ID;
-  delete env.WORKER_JOB_ID;
-  if (jobId) env.WORKER_JOB_ID = jobId;
-  else delete env.WORKER_JOB_ID;
-
-  const model = resolveGeminiRemediationModel(process.env);
-
-  // `--approval-mode yolo` is gemini's headless auto-approve, the analogue of
-  // codex's --dangerously-bypass-approvals-and-sandbox and claude's
-  // --dangerously-skip-permissions: in unattended mode there is no human to
-  // answer per-tool prompts, so the worker can edit AND run git/test commands
-  // non-interactively. `--skip-trust` keeps fresh per-job workspaces from
-  // blocking on folder-trust prompts. The full prompt body is delivered through
-  // stdin (promptFd) — NEVER on argv — so the diff and review context never
-  // land in the process table or the worker log.
-  const geminiArgs = ['--approval-mode', 'yolo', '--skip-trust', '-m', model];
-
-  // Gemini reads its prompt from stdin in non-interactive mode and writes the
-  // final assistant message to stdout. Capture stdout directly to outputPath
-  // (codex's --output-last-message equivalent) and route stderr to the log.
-  const promptFd = openSync(promptPath, 'r');
-  const stdoutFd = openSync(outputPath, 'w');
-  const stderrFd = openSync(logPath, 'a');
-
-  try {
-    const child = spawnDetachedCli(
-      geminiCli,
-      geminiArgs,
-      {
-        cwd: workspaceDir,
-        env,
-        stdio: [promptFd, stdoutFd, stderrFd],
-        spawnImpl,
-        now,
-      }
-    );
-
-    return {
-      model: 'gemini',
-      workerClass: 'gemini',
-      processId: child.pid,
-      processGroupId: child.pid,
-      spawnedAt: child.spawnedAt || now(),
-      workspaceDir,
-      promptPath,
-      outputPath,
-      logPath,
-      gitIdentity,
-      startupEvidence,
-      command: [geminiCli, ...geminiArgs],
-    };
-  } finally {
-    closeSync(promptFd);
-    closeSync(stdoutFd);
-    closeSync(stderrFd);
-  }
+function legacySpawnGeminiRemediationWorker(args) {
+  return spawnGeminiRemediationWorker(args);
 }
 
 // ── Worker-class dispatcher ────────────────────────────────────────────────
@@ -807,23 +723,16 @@ function createRemediationRuntime({
   spawnImpl,
   env = process.env,
   now = () => new Date().toISOString(),
+  processKillImpl = process.kill,
+  waitForExitImpl,
+  sleepImpl,
+  pollMs,
 } = {}) {
-  function spawnLocal(workerClass, opts) {
-    switch (workerClass) {
-      case 'codex':       return spawnCodexRemediationWorker(opts);
-      case 'claude-code': return spawnClaudeCodeRemediationWorker(opts);
-      case 'gemini':      return spawnGeminiRemediationWorker(opts);
-      default:
-        throw new Error(`unknown remediation worker class: ${workerClass}`);
-    }
-  }
-
   async function run(request = {}) {
     const mode = request.mode;
     const workerClass = request.role?.workerClass;
-    let worker;
     if (mode === 'os') {
-      worker = await dispatchRemediationViaHq({
+      const worker = await dispatchRemediationViaHq({
         hqRoot: resolveHqRoot(env, { requireExists: true }),
         workerClass,
         repo: request.repo,
@@ -837,13 +746,35 @@ function createRemediationRuntime({
         env,
         now,
       });
-    } else if (mode === 'local') {
-      // NB: do NOT thread `workerClass` into the spawn opts — each model spawn
-      // keeps its own default worker-class (e.g. claude stamps the
-      // `claude-code-remediation` provenance trailer, not `claude-code`), which
-      // the pre-collapse `spawnRemediationWorker` switch preserved by passing
-      // opts through untouched.
-      worker = spawnLocal(workerClass, {
+      const runRef = String(
+        request.idempotencyKey || worker.launchRequestId || worker.processId || '',
+      );
+      const terminalOwnedByReconcile = () => {
+        throw new Error(
+          'remediation AgentRuntime is dispatch-only; reconcileFollowUpJob owns terminal observation',
+        );
+      };
+      return {
+        runRef,
+        mode,
+        worker,
+        await: terminalOwnedByReconcile,
+        reattach: terminalOwnedByReconcile,
+        async cancel() {},
+      };
+    }
+    if (mode === 'local') {
+      const worker = (workerClass === 'codex'
+        ? spawnCodexRemediationWorker
+        : workerClass === 'claude-code'
+          ? spawnClaudeCodeRemediationWorker
+          : workerClass === 'gemini'
+            ? spawnGeminiRemediationWorker
+            : null);
+      if (!worker) {
+        throw new Error(`unknown remediation worker class: ${workerClass}`);
+      }
+      const spawnedWorker = worker({
         workspaceDir: request.workspaceDir,
         promptPath: request.promptPath,
         outputPath: request.outputPath,
@@ -855,28 +786,19 @@ function createRemediationRuntime({
         spawnImpl,
         now,
       });
-    } else {
-      throw new Error(`unknown remediation runtime mode: ${JSON.stringify(mode)}`);
+      return createLocalRemediationHandle({
+        runRef: String(
+          request.idempotencyKey || spawnedWorker.launchRequestId || spawnedWorker.processId || '',
+        ),
+        worker: spawnedWorker,
+        processKillImpl,
+        execFileImpl,
+        waitForExitImpl,
+        sleepImpl,
+        pollMs,
+      });
     }
-    const runRef = String(
-      request.idempotencyKey || worker.launchRequestId || worker.processId || '',
-    );
-    const terminalOwnedByReconcile = () => {
-      throw new Error(
-        'remediation AgentRuntime is dispatch-only; reconcileFollowUpJob owns terminal observation',
-      );
-    };
-    return {
-      runRef,
-      mode,
-      worker,
-      await: terminalOwnedByReconcile,
-      reattach: terminalOwnedByReconcile,
-      // Cancellation of an in-flight remediation is owned by the reconcile /
-      // worker-cancel path (local pgid teardown, hq dispatch cancel); the
-      // dispatch handle does not duplicate it.
-      async cancel() {},
-    };
+    throw new Error(`unknown remediation runtime mode: ${JSON.stringify(mode)}`);
   }
 
   return { run };
@@ -1655,109 +1577,8 @@ async function prepareWorkspaceForJob({
   };
 }
 
-function spawnCodexRemediationWorker({
-  workspaceDir,
-  promptPath,
-  outputPath,
-  logPath,
-  replyPath = null,
-  hqRoot,
-  launchRequestId,
-  workerClass = DEFAULT_REMEDIATION_WORKER_CLASS,
-  jobId = null,
-  spawnImpl,
-  now = () => new Date().toISOString(),
-}) {
-  const codexCli = resolveCodexCliPath();
-  const gitIdentity = remediationWorkerGitIdentity(workerClass);
-  const { env: baseEnv, startupEvidence } = prepareCodexRemediationStartupEnv({
-    gitIdentity,
-    perWorkerKey: jobId || launchRequestId || null,
-  });
-  const replyContext = requireWorkerReplyContext({ replyPath, hqRoot, launchRequestId });
-
-  // Worker-provenance env. The commit-msg hook installed by
-  // prepareWorkspaceForJob reads these at commit time and appends matching
-  // trailers to the immutable commit object. Hook is no-op when WORKER_CLASS
-  // is unset, so passing the env here is what activates the trailer write.
-  // Trailer class is fixed (REMEDIATION_WORKER_TRAILER_CLASS) so the audit
-  // signature stays stable across worker-model variants — disambiguation
-  // between codex / claude-code remediations lives in WORKER_JOB_ID and
-  // the workspace identity, not in the trailer class.
-  const env = {
-    ...baseEnv,
-    WORKER_CLASS: REMEDIATION_WORKER_TRAILER_CLASS,
-    WORKER_RUN_AT: now(),
-    ADV_REPLY_DIR: replyContext.replyDir,
-    REMEDIATION_REPLY_PATH: replyContext.replyPath,
-  };
-  if (replyContext.hqRoot) env.HQ_ROOT = replyContext.hqRoot;
-  else delete env.HQ_ROOT;
-  if (replyContext.launchRequestId) env.LRQ_ID = replyContext.launchRequestId;
-  else delete env.LRQ_ID;
-  delete env.WORKER_JOB_ID;
-  if (jobId) {
-    env.WORKER_JOB_ID = jobId;
-  } else delete env.WORKER_JOB_ID;
-
-  const promptFd = openSync(promptPath, 'r');
-  const stdoutFd = openSync(logPath, 'a');
-  const stderrFd = openSync(logPath, 'a');
-  const codexModel = resolveCodexRemediationModel(env);
-
-  try {
-    const child = spawnDetachedCli(
-      codexCli,
-      [
-        'exec',
-        '--model',
-        codexModel,
-        '--dangerously-bypass-approvals-and-sandbox',
-        '--ephemeral',
-        '--json',
-        '--output-last-message',
-        outputPath,
-        '-',
-      ],
-      {
-        cwd: workspaceDir,
-        env,
-        stdio: [promptFd, stdoutFd, stderrFd],
-        spawnImpl,
-        now,
-      }
-    );
-
-    return {
-      model: 'codex',
-      workerClass,
-      processId: child.pid,
-      processGroupId: child.pid,
-      spawnedAt: child.spawnedAt || now(),
-      workspaceDir,
-      promptPath,
-      outputPath,
-      logPath,
-      gitIdentity,
-      startupEvidence,
-      command: [
-        codexCli,
-        'exec',
-        '--model',
-        codexModel,
-        '--dangerously-bypass-approvals-and-sandbox',
-        '--ephemeral',
-        '--json',
-        '--output-last-message',
-        outputPath,
-        '-',
-      ],
-    };
-  } finally {
-    closeSync(promptFd);
-    closeSync(stdoutFd);
-    closeSync(stderrFd);
-  }
+function legacySpawnCodexRemediationWorker(args) {
+  return spawnCodexRemediationWorker(args);
 }
 
 function resolveWorkerStoredPath(rootDir, storedPath, {

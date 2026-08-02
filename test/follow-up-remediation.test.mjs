@@ -2728,6 +2728,77 @@ test('remediation runtime local mode dispatches "claude-code" to spawnClaudeCode
   ]);
 });
 
+test('remediation runtime local handle reattach waits on the spawned remediation worker', async () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const promptPath = path.join(workspaceDir, 'prompt.md');
+  const outputPath = path.join(workspaceDir, 'last-msg.md');
+  const logPath = path.join(workspaceDir, 'log');
+  writeFileSync(promptPath, 'fix it.\n', 'utf8');
+
+  const handle = await createRemediationRuntime({
+    spawnImpl: () => ({ pid: 901, unref() {} }),
+    waitForExitImpl: async (worker) => ({
+      status: 'completed',
+      runtimeMode: 'local',
+      failureClass: null,
+      usage: null,
+      detail: null,
+      artifact: { kind: 'remediation', body: `done:${worker.model}` },
+    }),
+  }).run({
+    mode: 'local',
+    role: { workerClass: 'claude-code' },
+    workspaceDir, promptPath, outputPath, logPath,
+    ...testReplyContext(),
+  });
+
+  const result = await handle.reattach();
+  assert.equal(result.status, 'completed');
+  assert.equal(result.artifact.body, 'done:claude-code');
+});
+
+test('remediation runtime local handle cancel signals the remediation process group and returns cancelled', async () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const promptPath = path.join(workspaceDir, 'prompt.md');
+  const outputPath = path.join(workspaceDir, 'last-msg.md');
+  const logPath = path.join(workspaceDir, 'log');
+  writeFileSync(promptPath, 'fix it.\n', 'utf8');
+
+  const signals = [];
+  const handle = await createRemediationRuntime({
+    spawnImpl: () => ({ pid: 902, unref() {} }),
+    now: () => '2026-05-24T14:55:00.000Z',
+    processKillImpl: (pid, signal) => {
+      signals.push({ pid, signal });
+      return true;
+    },
+    execFileImpl: async () => ({ stdout: `${new Date('2026-05-24T14:55:00.000Z').toString()}\n` }),
+    waitForExitImpl: async (_worker, { cancelledRef }) => ({
+      status: cancelledRef.value ? 'cancelled' : 'completed',
+      runtimeMode: 'local',
+      failureClass: null,
+      usage: null,
+      detail: cancelledRef.value ? 'cancelled by test' : null,
+    }),
+  }).run({
+    mode: 'local',
+    role: { workerClass: 'claude-code' },
+    workspaceDir,
+    promptPath,
+    outputPath,
+    logPath,
+    ...testReplyContext(),
+  });
+
+  await handle.cancel();
+  const result = await handle.await();
+  assert.equal(result.status, 'cancelled');
+  assert.deepEqual(signals, [
+    { pid: -902, signal: 0 },
+    { pid: -902, signal: 'SIGTERM' },
+  ]);
+});
+
 test('remediation runtime local mode rejects an unknown worker class', async () => {
   await assert.rejects(
     () => createRemediationRuntime({}).run({ mode: 'local', role: { workerClass: 'not-a-class' } }),

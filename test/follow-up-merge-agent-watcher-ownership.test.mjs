@@ -56,6 +56,7 @@ function seedRecord(rootDir, { watcherReDispatchCount = 0 } = {}) {
 function baseEnv(hqRoot) {
   return {
     HQ_ROOT: hqRoot,
+    GHA_ADAPTER_BIN: '/test/github-adapter',
     USER: 'airlock',
     MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
     MERGE_AGENT_HQ_PROJECT: 'merge-project',

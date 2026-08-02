@@ -525,7 +525,7 @@ test('reconcileProactivePhantomHandoffs can finish a phantom handoff after the l
       headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
       labels: [],
     }],
-    runtimeEnv: { HQ_ROOT: hqRoot },
+    runtimeEnv: { HQ_ROOT: hqRoot, GHA_ADAPTER_BIN: '/test/github-adapter' },
     hqPath: '/bin/hq-unused',
     execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed' }) }),
     ghExecFileImpl: async (cmd, args) => {

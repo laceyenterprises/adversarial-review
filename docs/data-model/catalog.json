@@ -32,6 +32,14 @@
       "store": "data/review-freshness/",
       "schemaSurface": "src/review-freshness-detector.mjs",
       "owner": "review-freshness liveness alert"
+    },
+    {
+      "id": "alert-delivery-state",
+      "title": "Alert Delivery State",
+      "path": "docs/data-model/alert-delivery-state.md",
+      "store": "data/alert-delivery/",
+      "schemaSurface": "src/alert-delivery.mjs",
+      "owner": "adversarial-review alert delivery"
     }
   ]
 }

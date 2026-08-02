@@ -219,7 +219,11 @@ import {
   getHeadCloserCommitSuppressionWithBoundedRetry,
   isTerminalCloserCommitIdentity,
 } from './head-closer-commit-suppression.mjs';
-import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
+import {
+  deliverAlert as defaultDeliverAlert,
+  readAlertSinkHealth,
+  scheduleAlertDrain,
+} from './alert-delivery.mjs';
 import { maybeFireReviewStalledAlert } from './review-freshness-detector.mjs';
 import {
   buildAdversarialGateSnapshot,
@@ -1793,10 +1797,33 @@ async function main() {
     rootDir: ROOT,
     logger: console,
   });
+  let lastAlertSinkDegradedFingerprint = null;
   async function runHeartbeatPoll(source) {
     watcherHeartbeat.markPoll({ source });
     stallWatchdog.beginPoll();
     try {
+      // Every tick sweeps the principal-owned queue, including startup recovery.
+      scheduleAlertDrain();
+      try {
+        const sinkHealth = readAlertSinkHealth();
+        const degradedFingerprint = sinkHealth.ready ? null : JSON.stringify({
+          pendingCount: sinkHealth.pendingCount,
+          inflightCount: sinkHealth.inflightCount,
+          quarantineCount: sinkHealth.quarantineCount,
+          deadLetterCount: sinkHealth.deadLetterCount,
+          lastFailureReason: sinkHealth.lastFailureReason,
+        });
+        if (degradedFingerprint && degradedFingerprint !== lastAlertSinkDegradedFingerprint) {
+          console.error(
+            `[watcher] alert delivery sink degraded: ${degradedFingerprint}`
+          );
+        } else if (!degradedFingerprint && lastAlertSinkDegradedFingerprint) {
+          console.log('[watcher] alert delivery sink recovered');
+        }
+        lastAlertSinkDegradedFingerprint = degradedFingerprint;
+      } catch (error) {
+        console.error(`[watcher] alert delivery sink health unavailable: ${error?.message || error}`);
+      }
       return await safePollOnce(source);
     } finally {
       stallWatchdog.endPoll();

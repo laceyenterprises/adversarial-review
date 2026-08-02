@@ -47,6 +47,10 @@ function firstNonEmpty(...values) {
   return null;
 }
 
+function isFalseLike(value) {
+  return ['0', 'false', 'no', 'off'].includes(String(value ?? '').trim().toLowerCase());
+}
+
 function repoRootFromHere() {
   return resolve(dirname(fileURLToPath(import.meta.url)), '..');
 }
@@ -155,6 +159,8 @@ function resolveGitHubAdapterBin({
 } = {}) {
   const explicit = firstNonEmpty(env.GHA_ADAPTER_BIN, env.AGENT_OS_GITHUB_ADAPTER_BIN);
   if (explicit) return explicit;
+  const autoDiscovery = firstNonEmpty(env.AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY);
+  if (isFalseLike(autoDiscovery)) return null;
   for (const candidate of candidateSuperprojectAdapterPaths(rootDir)) {
     if (existsImpl(candidate) && isTrustedAutoDiscoveredAdapterBin(candidate, {
       rootDir,

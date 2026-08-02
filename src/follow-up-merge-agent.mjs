@@ -1552,7 +1552,7 @@ async function reconcilePhantomHandoffEscalation({
     prNumber: job.prNumber,
     labels: currentLabelNames,
     ghExecFileImpl,
-    logger,
+    logger, env,
   });
   if (!appliedStuck) return latestRecordedDispatch;
   if (latestRecordedDispatch?.phantomHandoffCommentDelivery?.posted === false) {
@@ -1774,7 +1774,7 @@ async function applyMergeAgentStuckLabel({
   prNumber,
   labels = [],
   ghExecFileImpl = execFileAsync,
-  logger = console,
+  logger = console, env = process.env,
 } = {}) {
   if (normalizeLabelNames(labels).includes(MERGE_AGENT_STUCK_LABEL)) return false;
   try {
@@ -1783,7 +1783,7 @@ async function applyMergeAgentStuckLabel({
       prNumber,
       action: 'add',
       labelName: MERGE_AGENT_STUCK_LABEL,
-      execFileImpl: ghExecFileImpl,
+      execFileImpl: ghExecFileImpl, env,
     });
     if (!adapterHandled) {
       await ghExecFileImpl('gh', [
@@ -1811,7 +1811,7 @@ async function removeConsumedTriggerLabel({
   labels,
   trigger,
   ghExecFileImpl,
-  now,
+  now, env = process.env,
 } = {}) {
   const normalizedLabels = normalizeLabelNames(labels);
   const result = {
@@ -1832,7 +1832,7 @@ async function removeConsumedTriggerLabel({
       prNumber,
       action: 'remove',
       labelName: trigger,
-      execFileImpl: ghExecFileImpl,
+      execFileImpl: ghExecFileImpl, env,
     });
     if (!adapterHandled) {
       await ghExecFileImpl('gh', [
@@ -1878,7 +1878,7 @@ async function addMergeAgentDispatchedLabel({
   repo,
   prNumber,
   ghExecFileImpl,
-  now = isoNow(),
+  now = isoNow(), env = process.env,
 } = {}) {
   const result = {
     attempted: true,
@@ -1893,7 +1893,7 @@ async function addMergeAgentDispatchedLabel({
       prNumber,
       action: 'add',
       labelName: MERGE_AGENT_DISPATCHED_LABEL,
-      execFileImpl: ghExecFileImpl,
+      execFileImpl: ghExecFileImpl, env,
     });
     if (!adapterHandled) {
       await ghExecFileImpl('gh', [
@@ -2079,7 +2079,7 @@ async function cancelMergeAgentDispatchOnMerge({
         prNumber,
         action: 'remove',
         labelName: MERGE_AGENT_DISPATCHED_LABEL,
-        execFileImpl: ghExecFileImpl,
+        execFileImpl: ghExecFileImpl, env,
       });
       if (!adapterHandled) {
         await ghExecFileImpl('gh', [
@@ -2191,6 +2191,7 @@ async function dispatchMergeAgentForPR({
   triggerOverride = null,
   orchestrationMode = null,
 } = {}) {
+  const runtimeEnv = { ...process.env, ...env };
   // Merge-agent hygiene: never dispatch (or re-dispatch) a merge agent for a PR
   // that is no longer open. A PR that merged/closed while a review tick was in
   // flight has nothing to merge; dispatching burns a worker and feeds the
@@ -2205,7 +2206,7 @@ async function dispatchMergeAgentForPR({
         labels,
         trigger,
         ghExecFileImpl,
-        now,
+        now, env: runtimeEnv,
       });
       if (labelRemoval.attempted) triggerLabelRemovals.push(labelRemoval);
     }
@@ -2228,7 +2229,6 @@ async function dispatchMergeAgentForPR({
       triggerLabelRemovals,
     };
   }
-  const runtimeEnv = { ...process.env, ...env };
   const job = {
     repo,
     prNumber,
@@ -2289,7 +2289,7 @@ async function dispatchMergeAgentForPR({
         prNumber,
         labels: labelNames,
         ghExecFileImpl,
-        logger,
+        logger, env: runtimeEnv,
       });
     }
     if (stuckReady) {
@@ -2371,7 +2371,7 @@ async function dispatchMergeAgentForPR({
         prNumber,
         labels: labelNames,
         ghExecFileImpl,
-        logger,
+        logger, env: runtimeEnv,
       });
     } else if (
       !diedWithoutHandoff
@@ -2441,7 +2441,7 @@ async function dispatchMergeAgentForPR({
         labels,
         trigger: latestRecordedDispatch.trigger,
         ghExecFileImpl,
-        now,
+        now, env: runtimeEnv,
       });
       if (labelRemoval.attempted) {
         updateMergeAgentDispatchLabelRemoval(rootDir, job, {
@@ -2556,7 +2556,7 @@ async function dispatchMergeAgentForPR({
           prNumber,
           labels,
           ghExecFileImpl,
-          logger,
+          logger, env: runtimeEnv,
         });
       }
       mergeAgentLifecycleLog(logger, decision === 'skip-blocking-findings-unknown'
@@ -2630,7 +2630,7 @@ async function dispatchMergeAgentForPR({
       labels,
       trigger,
       ghExecFileImpl,
-      now,
+      now, env: runtimeEnv,
     });
     const skippedRecordPath = recordMergeAgentSkippedDispatch(rootDir, job, {
       skippedAt: now,
@@ -2816,7 +2816,7 @@ async function dispatchMergeAgentForPR({
     labels,
     trigger,
     ghExecFileImpl,
-    now,
+    now, env: runtimeEnv,
   });
   if (labelRemoval.attempted) {
     updateMergeAgentDispatchLabelRemoval(rootDir, job, {
@@ -2835,7 +2835,7 @@ async function dispatchMergeAgentForPR({
     repo,
     prNumber,
     ghExecFileImpl,
-    now,
+    now, env: runtimeEnv,
   });
   if (!dispatchedLabel.added) {
     upsertMergeAgentLifecycleCleanup(rootDir, {

@@ -25,6 +25,9 @@ import {
   tryAcquireDeliveryClaim,
 } from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
 import { postRemediationOutcomeComment } from '../src/adapters/comms/github-pr-comments/pr-comments.mjs';
+import './helpers/rate-limit-state-isolation.mjs';
+
+process.env.AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY = '0';
 
 async function makeFakeTerminalRecord(rootDir, dirKey, jobId, body, repo, prNumber, workerClass, postResult) {
   const dir = path.join(rootDir, 'data', 'follow-up-jobs', dirKey);

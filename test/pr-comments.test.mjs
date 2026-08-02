@@ -15,6 +15,9 @@ import {
   postRemediationOutcomeComment,
   resolveCommentBotTokenEnv,
 } from '../src/adapters/comms/github-pr-comments/pr-comments.mjs';
+import './helpers/rate-limit-state-isolation.mjs';
+
+process.env.AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY = '0';
 
 function makeJob(overrides = {}) {
   return {
@@ -581,6 +584,7 @@ test('postRemediationOutcomeComment forwards rootDir for adapter auto-discovery'
         GH_CODEX_REVIEWER_TOKEN: 'test-pat-codex',
         PATH: '/usr/bin',
         HOME: '/tmp/home',
+        AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY: '1',
       },
       findExistingImpl: async () => ({ found: false }),
       execFileImpl: async (cmd, args, options) => {
@@ -708,6 +712,7 @@ test('postRemediationOutcomeComment passes only an allowlisted env to gh', async
       SSL_CERT_FILE: '/tmp/corp-ca.pem',
       NODE_EXTRA_CA_CERTS: '/tmp/node-ca.pem',
       GH_CLAUDE_REVIEWER_TOKEN_SOURCE: '',
+      AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY: '0',
       // Other unrelated env that's still unnecessary:
       LINEAR_API_KEY: 'linear-pat-AAAAA',
     },
@@ -721,6 +726,7 @@ test('postRemediationOutcomeComment passes only an allowlisted env to gh', async
   assert.deepEqual(
     Object.keys(childEnv).sort(),
     [
+      'AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY',
       'GH_CLAUDE_REVIEWER_TOKEN',
       'GH_CLAUDE_REVIEWER_TOKEN_SOURCE',
       'GH_TOKEN',
@@ -736,6 +742,7 @@ test('postRemediationOutcomeComment passes only an allowlisted env to gh', async
   assert.equal(childEnv.GH_TOKEN, 'test-pat-claude');
   assert.equal(childEnv.GH_CLAUDE_REVIEWER_TOKEN, 'test-pat-claude');
   assert.equal(childEnv.GH_CLAUDE_REVIEWER_TOKEN_SOURCE, '');
+  assert.equal(childEnv.AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY, '0');
   assert.equal(childEnv.PATH, '/opt/homebrew/bin:/usr/bin');
   assert.equal(childEnv.HOME, '/Users/test');
   assert.equal(childEnv.LANG, 'en_US.UTF-8');

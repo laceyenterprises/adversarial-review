@@ -34,7 +34,7 @@ import {
   classifyBlockingFindings,
   classifyNonBlockingFindings,
   detectAgentOsPresence,
-  dispatchMergeAgentForPR,
+  dispatchMergeAgentForPR as dispatchMergeAgentForPRImpl,
   fetchMergeAgentCandidate,
   isFinalPassOnRequestChangesEnabled,
   isDeterministicConvergenceTerminalEnabled,
@@ -53,6 +53,7 @@ import {
 } from '../src/follow-up-merge-agent.mjs';
 import { resolveSessionLedgerReadTarget } from '../src/session-ledger-read-adapter.mjs';
 import { execHqDispatchCancel } from '../src/merge-agent-hq-exec.mjs';
+import './helpers/rate-limit-state-isolation.mjs';
 // CFG-09 (2026-05-30, round-2): role-config cascade caches by
 // (topPath, modulePaths) — not env. Tests in this file rotate env
 // between cases (codex vs claude-code vs merge-agent vs invalid)
@@ -62,12 +63,25 @@ import { execHqDispatchCancel } from '../src/merge-agent-hq-exec.mjs';
 // for this file — one line replaces the manual hook block.
 import './helpers/role-config-cache-reset.mjs';
 
+process.env.AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY = '0';
+
 // Existing dispatchMergeAgentForPR tests assume agent-os (the hq CLI
 // + merge-agent adapter) IS present on the host running the tests.
 // CI runners and OSS clones do not have hq, so we inject a presence
 // stub. New OSS-skip behavior is exercised by its own dedicated tests.
 const AGENT_OS_PRESENT_STUB = () => ({ present: true, source: 'test' });
 const HERMETIC_CONFIG_ENV = { AGENT_OS_CONFIG_PATH: '/dev/null' };
+
+async function defaultGhExecFileImpl() {
+  return { stdout: '', stderr: '' };
+}
+
+function dispatchMergeAgentForPR(options = {}) {
+  return dispatchMergeAgentForPRImpl({
+    ghExecFileImpl: defaultGhExecFileImpl,
+    ...options,
+  });
+}
 
 async function withProcessEnv(overrides, fn) {
   const previous = {};

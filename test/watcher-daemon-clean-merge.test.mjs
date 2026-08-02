@@ -61,24 +61,26 @@ function loadAmaEnabledAutonomousDisabledConfig() {
   };
 }
 
+const CLEAN_COMMENT_ONLY_REVIEW_BODY = [
+  '## Blocking Issues',
+  '',
+  '- None.',
+  '',
+  '## Non-blocking Issues',
+  '',
+  '- None.',
+  '',
+  '## Verdict',
+  '',
+  'Comment only',
+].join('\n');
+
 function baseArgs(rootDir) {
   return {
     rootDir,
     reviewStateRow: {
       review_status: 'posted',
-      review_body: [
-        '## Blocking Issues',
-        '',
-        '- None.',
-        '',
-        '## Non-blocking Issues',
-        '',
-        '- None.',
-        '',
-        '## Verdict',
-        '',
-        'Comment only',
-      ].join('\n'),
+      review_body: CLEAN_COMMENT_ONLY_REVIEW_BODY,
       reviewer_head_sha: 'head-live',
       reviewer: 'codex',
     },
@@ -100,6 +102,7 @@ function baseArgs(rootDir) {
     prNumber: 300,
     currentRevisionRef: 'head-live',
     loadConfigImpl: loadAmaEnabledConfig,
+    fetchLatestHeadReviewBodiesImpl: async () => [CLEAN_COMMENT_ONLY_REVIEW_BODY],
     liveReviewRetryDelaysMs: [0, 0],
     logger: { warn() {}, log() {} },
   };
@@ -477,13 +480,13 @@ test('autonomous merge execution disabled → fail-closed audit; no daemon, clos
     assert.equal(result.dispatched, false);
     assert.equal(result.skipMergeAgent, true);
     assert.equal(result.reason, 'autonomous-merge-execution-disabled');
-    assert.equal(result.autonomousMergeDisabled.path, 'hammer-merge');
+    assert.equal(result.autonomousMergeDisabled.path, 'daemon-merge');
     assert.deepEqual(result.autonomousMergeDisabled.flagState, {
       autonomousMergeExecutionEnabled: false,
       strictMode: true,
     });
     assert.equal(audits.length, 1);
-    assert.equal(audits[0].path, 'hammer-merge');
+    assert.equal(audits[0].path, 'daemon-merge');
     assert.equal(audits[0].flagState.autonomousMergeExecutionEnabled, false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

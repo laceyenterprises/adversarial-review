@@ -56,9 +56,49 @@ function seedRecord(rootDir, { watcherReDispatchCount = 0 } = {}) {
 function baseEnv(hqRoot) {
   return {
     HQ_ROOT: hqRoot,
+    GHA_ADAPTER_BIN: '/test/github-adapter',
     USER: 'airlock',
     MERGE_AGENT_PARENT_SESSION: 'session:test:merge-watcher',
     MERGE_AGENT_HQ_PROJECT: 'merge-project',
+  };
+}
+
+function isAdapterLabelWrite(call, { action, label }) {
+  return Array.isArray(call)
+    && call[0] === 'write'
+    && call.includes('--kind')
+    && call.includes('pull-request-label')
+    && call.includes('--action')
+    && call.includes(action)
+    && call.includes('--label')
+    && call.includes(label);
+}
+
+function didWriteLabel(calls, action, label) {
+  return calls.some((call) => isAdapterLabelWrite(call, { action, label }));
+}
+
+function adapterLabelWriteResult(label, action = 'add') {
+  return {
+    stdout: JSON.stringify({
+      pullRequestLabel: {
+        name: label,
+        action,
+      },
+    }),
+  };
+}
+
+function adapterAwareGhExecFile({ calls = [], failAdapterLabel = false } = {}) {
+  return async (cmd, args) => {
+    calls.push(args);
+    if (args[0] === 'write' && args.includes('--kind') && args.includes('pull-request-label')) {
+      if (failAdapterLabel) throw new Error('label add failed after ledger write');
+      const label = args[args.indexOf('--label') + 1];
+      const action = args[args.indexOf('--action') + 1];
+      return adapterLabelWriteResult(label, action);
+    }
+    return { stdout: '' };
   };
 }
 
@@ -126,6 +166,11 @@ test('does NOT dispatch a merge agent for an already merged/closed PR (skip-pr-n
     },
     ghExecFileImpl: async (cmd, args) => {
       ghCalls.push([cmd, ...args]);
+      if (args[0] === 'write' && args.includes('--kind') && args.includes('pull-request-label')) {
+        const label = args[args.indexOf('--label') + 1];
+        const action = args[args.indexOf('--action') + 1];
+        return adapterLabelWriteResult(label, action);
+      }
       return { stdout: '', stderr: '' };
     },
     logger: {
@@ -142,7 +187,7 @@ test('does NOT dispatch a merge agent for an already merged/closed PR (skip-pr-n
   assert.equal(statusCalls.length, 0, 'the guard returns before any hq probe');
   assert.equal(result.triggerLabelRemovals.length, 1);
   assert.ok(
-    ghCalls.some((call) => call.includes('--remove-label') && call.includes('merge-agent-requested')),
+    ghCalls.some((call) => isAdapterLabelWrite(call.slice(1), { action: 'remove', label: 'merge-agent-requested' })),
     'the closed-PR guard must consume the pending trigger label'
   );
   assert.ok(
@@ -171,10 +216,7 @@ test('recovery-first within grace: does NOT re-dispatch or escalate while the ha
       dispatchCalls.push(args);
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
     },
-    ghExecFileImpl: async (cmd, args) => {
-      ghCalls.push(args);
-      return { stdout: '' };
-    },
+    ghExecFileImpl: adapterAwareGhExecFile({ calls: ghCalls }),
     // 30 min after dispatch — inside the 60-min phantom-handoff grace window,
     // so a genuine in-flight recovery is never escalated out from under.
     now: '2026-05-24T00:30:00.000Z',
@@ -183,7 +225,7 @@ test('recovery-first within grace: does NOT re-dispatch or escalate while the ha
   assert.equal(result.decision, 'skip-already-dispatched', 'recovery owns it; watcher must not re-dispatch over the handoff');
   assert.equal(dispatchCalls.length, 0);
   assert.ok(
-    !ghCalls.some((a) => a.includes('--add-label') && a.includes('merge-agent-stuck')),
+    !didWriteLabel(ghCalls, 'add', 'merge-agent-stuck'),
     'within the grace window the watcher must NOT escalate to merge-agent-stuck',
   );
   assert.equal(
@@ -215,17 +257,14 @@ test('phantom handoff after grace: escalates an orphaned terminal-failed dispatc
       dispatchCalls.push(args);
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
     },
-    ghExecFileImpl: async (cmd, args) => {
-      ghCalls.push(args);
-      return { stdout: '' };
-    },
+    ghExecFileImpl: adapterAwareGhExecFile({ calls: ghCalls }),
     // First detection only starts the durable grace timer.
     now: '2026-05-24T04:00:00.000Z',
   });
 
   assert.equal(firstResult.decision, 'skip-already-dispatched');
   assert.ok(
-    !ghCalls.some((a) => a.includes('--add-label') && a.includes('merge-agent-stuck')),
+    !didWriteLabel(ghCalls, 'add', 'merge-agent-stuck'),
     'the first phantom-handoff observation must not escalate immediately just because the original dispatch is old',
   );
 
@@ -244,6 +283,11 @@ test('phantom handoff after grace: escalates an orphaned terminal-failed dispatc
     },
     ghExecFileImpl: async (cmd, args) => {
       ghCalls.push(args);
+      if (args[0] === 'write' && args.includes('--kind') && args.includes('pull-request-label')) {
+        const label = args[args.indexOf('--label') + 1];
+        const action = args[args.indexOf('--action') + 1];
+        return adapterLabelWriteResult(label, action);
+      }
       return { stdout: '' };
     },
     // More than 60 minutes after the first durable observation, still no recovery.
@@ -253,7 +297,7 @@ test('phantom handoff after grace: escalates an orphaned terminal-failed dispatc
   assert.equal(result.decision, 'skip-already-dispatched', 'escalation only — the watcher must NOT re-dispatch or merge an orphaned failed worker');
   assert.equal(dispatchCalls.length, 0, 'no re-dispatch: this is fail-loud escalation, not retry');
   assert.ok(
-    ghCalls.some((a) => a.includes('--add-label') && a.includes('merge-agent-stuck')),
+    didWriteLabel(ghCalls, 'add', 'merge-agent-stuck'),
     'a phantom-handoff orphan past grace must be labeled merge-agent-stuck for the operator',
   );
   assert.ok(
@@ -280,7 +324,7 @@ test('phantom handoff comment failure is recorded and retried on a later tick', 
       }
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
     },
-    ghExecFileImpl: async () => ({ stdout: '' }),
+    ghExecFileImpl: adapterAwareGhExecFile(),
     now: '2026-05-24T04:00:00.000Z',
   });
 
@@ -298,7 +342,11 @@ test('phantom handoff comment failure is recorded and retried on a later tick', 
     },
     ghExecFileImpl: async (cmd, args) => {
       if (args[0] === 'api') return { stdout: '' };
-      if (args[0] === 'pr' && args[1] === 'edit') return { stdout: '' };
+      if (args[0] === 'write' && args.includes('--kind') && args.includes('pull-request-label')) {
+        const label = args[args.indexOf('--label') + 1];
+        const action = args[args.indexOf('--action') + 1];
+        return adapterLabelWriteResult(label, action);
+      }
       if (args[0] === 'pr' && args[1] === 'comment') {
         commentAttempts += 1;
         throw new Error('transient gh failure');
@@ -369,7 +417,7 @@ test('phantom handoff persists owed comment before label add and later converges
       }
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
     },
-    ghExecFileImpl: async () => ({ stdout: '' }),
+    ghExecFileImpl: adapterAwareGhExecFile(),
     now: '2026-05-24T04:00:00.000Z',
   });
 
@@ -387,7 +435,7 @@ test('phantom handoff persists owed comment before label add and later converges
     },
     ghExecFileImpl: async (cmd, args) => {
       ghCalls.push(args);
-      if (args[0] === 'pr' && args[1] === 'edit') {
+      if (args[0] === 'write' && args.includes('--kind') && args.includes('pull-request-label')) {
         throw new Error('label add failed after ledger write');
       }
       return { stdout: '' };
@@ -399,7 +447,7 @@ test('phantom handoff persists owed comment before label add and later converges
   assert.equal(recorded.phantomHandoffCommentDelivery.posted, false);
   assert.equal(recorded.phantomHandoffCommentDelivery.attempts, 0);
   assert.ok(
-    ghCalls.some((a) => a.includes('--add-label') && a.includes('merge-agent-stuck')),
+    didWriteLabel(ghCalls, 'add', 'merge-agent-stuck'),
     'the watcher should still attempt the stuck label after writing the durable ledger'
   );
   assert.ok(
@@ -422,7 +470,11 @@ test('phantom handoff persists owed comment before label add and later converges
     ghExecFileImpl: async (cmd, args) => {
       ghCalls.push(args);
       if (args[0] === 'api') return { stdout: '' };
-      if (args[0] === 'pr' && args[1] === 'edit') return { stdout: '' };
+      if (args[0] === 'write' && args.includes('--kind') && args.includes('pull-request-label')) {
+        const label = args[args.indexOf('--label') + 1];
+        const action = args[args.indexOf('--action') + 1];
+        return adapterLabelWriteResult(label, action);
+      }
       if (args[0] === 'pr' && args[1] === 'comment') {
         return { stdout: 'https://github.com/owner/repo/issues/1#issuecomment-2\n' };
       }
@@ -459,10 +511,7 @@ test('phantom handoff is idempotent: does not re-escalate when merge-agent-stuck
       }
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
     },
-    ghExecFileImpl: async (cmd, args) => {
-      ghCalls.push(args);
-      return { stdout: '' };
-    },
+    ghExecFileImpl: adapterAwareGhExecFile({ calls: ghCalls }),
     now: '2026-05-24T04:00:00.000Z',
   });
 
@@ -493,17 +542,14 @@ test('bounded: at the re-dispatch bound, hands off to operator via merge-agent-s
       dispatchCalls.push(args);
       return { stdout: '{"dispatchId":"lrq_11111111-1111-1111-1111-111111111111","lrq":"lrq_11111111-1111-1111-1111-111111111111"}\n' };
     },
-    ghExecFileImpl: async (cmd, args) => {
-      ghCalls.push(args);
-      return { stdout: '' };
-    },
+    ghExecFileImpl: adapterAwareGhExecFile({ calls: ghCalls }),
     now: '2026-05-24T04:00:00.000Z',
   });
 
   assert.equal(result.decision, 'skip-already-dispatched', 'bound exhausted => no re-dispatch');
   assert.equal(dispatchCalls.length, 0);
   assert.ok(
-    ghCalls.some((a) => a.includes('--add-label') && a.includes('merge-agent-stuck')),
+    didWriteLabel(ghCalls, 'add', 'merge-agent-stuck'),
     'exhausting the bound must apply merge-agent-stuck for the operator'
   );
 });

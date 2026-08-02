@@ -103,6 +103,17 @@ function stubGhExecFileForLabelLookup({
   };
 }
 
+function adapterLabelWriteResult(label, action = 'add') {
+  return {
+    stdout: JSON.stringify({
+      pullRequestLabel: {
+        name: label,
+        action,
+      },
+    }),
+  };
+}
+
 function writeLifecycleCleanup(rootDir, {
   repo,
   prNumber,
@@ -514,14 +525,16 @@ test('reconcileProactivePhantomHandoffs can finish a phantom handoff after the l
       headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
       labels: [],
     }],
-    runtimeEnv: { HQ_ROOT: hqRoot },
+    runtimeEnv: { HQ_ROOT: hqRoot, GHA_ADAPTER_BIN: '/test/github-adapter' },
     hqPath: '/bin/hq-unused',
     execFileImpl: async () => ({ stdout: JSON.stringify({ status: 'failed' }) }),
     ghExecFileImpl: async (cmd, args) => {
       if (args[0] === 'api') return { stdout: '' };
-      if (args[0] === 'pr' && args[1] === 'edit') {
+      if (args[0] === 'write' && args.includes('--kind') && args.includes('pull-request-label')) {
         labelCalls += 1;
-        return { stdout: '' };
+        const label = args[args.indexOf('--label') + 1];
+        const action = args[args.indexOf('--action') + 1];
+        return adapterLabelWriteResult(label, action);
       }
       if (args[0] === 'pr' && args[1] === 'comment') {
         commentCalls += 1;

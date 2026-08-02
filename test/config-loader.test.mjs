@@ -59,6 +59,9 @@ const RETENTION_DEFAULTS = {
   },
   ephemeral: {
     worker_worktrees_keep_hours: 168,
+    worker_worktrees_keep_hours_under_pressure: 24,
+    disk_free_gb_floor: null,
+    gc_report_only: true,
     worker_worktrees_per_run_limit: 200,
     follow_up_workspaces_keep_hours: 72,
     acpx_sessions_keep_days: 30,
@@ -2084,6 +2087,9 @@ test('retention full block accepts schema-default values', () => {
             policy: standard_backup
         ephemeral:
           worker_worktrees_keep_hours: 168
+          worker_worktrees_keep_hours_under_pressure: 24
+          disk_free_gb_floor: null
+          gc_report_only: true
           worker_worktrees_per_run_limit: 200
           follow_up_workspaces_keep_hours: 72
           acpx_sessions_keep_days: 30

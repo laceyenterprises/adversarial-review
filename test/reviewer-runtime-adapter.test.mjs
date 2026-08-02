@@ -1303,10 +1303,23 @@ test('cli-direct writes atomic reviewer run records and refuses double-spawn for
 test('cli-direct preserves cancelled state across abort races', async () => {
   const rootDir = makeRoot();
   let release;
+  let pgidAlive = true;
   try {
     const adapter = createCliDirectReviewerRuntimeAdapter({
       rootDir,
       preflightImpl: noopPreflight,
+      processKillImpl: (pid, signal) => {
+        assert.equal(pid, -4243);
+        if (signal === 0) {
+          if (pgidAlive) return true;
+          const err = new Error('no such process group');
+          err.code = 'ESRCH';
+          throw err;
+        }
+        assert.equal(signal, 'SIGTERM');
+        pgidAlive = false;
+        return true;
+      },
       spawnCapturedImpl: async (_command, _args, options) => {
         options.onSpawn({ pgid: 4243 });
         await new Promise((resolve) => { release = resolve; });

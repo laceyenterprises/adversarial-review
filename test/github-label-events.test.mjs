@@ -104,36 +104,44 @@ test('fetchLatestLabelEvent scopes timeline labels with caller-provided current 
     'operator-approved',
     {
       currentHeadSha: 'reviewed-head',
-      execFileImpl: async () => ({
-        stdout: JSON.stringify({
-          data: {
-            repository: {
-              pullRequest: {
-                headRefOid: 'newer-live-head',
-                timelineItems: {
-                  nodes: [
-                    {
-                      __typename: 'PullRequestCommit',
-                      id: 'commit-reviewed',
-                      commit: {
-                        oid: 'reviewed-head',
-                        committedDate: '2026-06-19T08:00:00.000Z',
+      execFileImpl: async (command, args) => {
+        if (args?.[0] === 'read' && args.includes('latest-label-event')) {
+          const err = new Error('adapter does not own this fixture');
+          err.code = 78;
+          throw err;
+        }
+        assert.equal(command, 'gh');
+        return {
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: {
+                  headRefOid: 'newer-live-head',
+                  timelineItems: {
+                    nodes: [
+                      {
+                        __typename: 'PullRequestCommit',
+                        id: 'commit-reviewed',
+                        commit: {
+                          oid: 'reviewed-head',
+                          committedDate: '2026-06-19T08:00:00.000Z',
+                        },
                       },
-                    },
-                    {
-                      __typename: 'LabeledEvent',
-                      id: 'LE_reviewed',
-                      label: { name: 'operator-approved' },
-                      actor: { login: 'placey' },
-                      createdAt: '2026-06-19T08:01:00.000Z',
-                    },
-                  ],
+                      {
+                        __typename: 'LabeledEvent',
+                        id: 'LE_reviewed',
+                        label: { name: 'operator-approved' },
+                        actor: { login: 'placey' },
+                        createdAt: '2026-06-19T08:01:00.000Z',
+                      },
+                    ],
+                  },
                 },
               },
             },
-          },
-        }),
-      }),
+          }),
+        };
+      },
     }
   );
 

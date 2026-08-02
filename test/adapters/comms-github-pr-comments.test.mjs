@@ -14,6 +14,7 @@ import {
   ensureReviewStateSchema,
   openReviewStateDb,
 } from '../../src/review-state.mjs';
+import '../helpers/rate-limit-state-isolation.mjs';
 
 function makeRootDir() {
   return mkdtempSync(path.join(tmpdir(), 'comms-github-pr-comments-'));

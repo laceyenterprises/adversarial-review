@@ -280,7 +280,7 @@ function prepareCodexRemediationStartupEnv({ gitIdentity = null, perWorkerKey = 
       gitIdentityOverrides: overriddenGitEnv,
     },
     gitIdentity: gitIdentity ? { name: gitIdentity.name, email: gitIdentity.email } : null,
-    policy_violations: policyViolations,
+    policyViolations,
   };
 
   if (policyViolations.length) {
@@ -351,10 +351,12 @@ function spawnClaudeCodeRemediationWorker({
   workerClass = 'claude-code-remediation',
   spawnImpl,
   now = () => new Date().toISOString(),
+  openSyncImpl = openSync,
+  closeSyncImpl = closeSync,
 }) {
   const claudeCli = resolveClaudeCodeCliPath();
   const { env: baseEnv, startupEvidence } = prepareClaudeCodeRemediationStartupEnv();
-  const { env } = withReplyContext(baseEnv, {
+  const { env, replyContext } = withReplyContext(baseEnv, {
     replyPath,
     hqRoot,
     launchRequestId,
@@ -366,9 +368,9 @@ function spawnClaudeCodeRemediationWorker({
   let stdoutFd;
   let stderrFd;
   try {
-    promptFd = openSync(promptPath, 'r');
-    stdoutFd = openSync(outputPath, 'w');
-    stderrFd = openSync(logPath, 'a');
+    promptFd = openSyncImpl(promptPath, 'r');
+    stdoutFd = openSyncImpl(outputPath, 'w');
+    stderrFd = openSyncImpl(logPath, 'a');
     const child = spawnDetachedCli(
       claudeCli,
       ['--print', '--permission-mode', 'acceptEdits', '--dangerously-skip-permissions'],
@@ -389,14 +391,16 @@ function spawnClaudeCodeRemediationWorker({
       promptPath,
       outputPath,
       logPath,
+      replyPath: replyContext.replyPath,
+      launchRequestId: replyContext.launchRequestId,
       startupEvidence,
       command: [claudeCli, '--print', '--permission-mode', 'acceptEdits', '--dangerously-skip-permissions'],
       child,
     };
   } finally {
-    if (promptFd !== undefined) closeSync(promptFd);
-    if (stdoutFd !== undefined) closeSync(stdoutFd);
-    if (stderrFd !== undefined) closeSync(stderrFd);
+    if (promptFd !== undefined) closeSyncImpl(promptFd);
+    if (stdoutFd !== undefined) closeSyncImpl(stdoutFd);
+    if (stderrFd !== undefined) closeSyncImpl(stderrFd);
   }
 }
 
@@ -411,11 +415,13 @@ function spawnGeminiRemediationWorker({
   jobId = null,
   spawnImpl,
   now = () => new Date().toISOString(),
+  openSyncImpl = openSync,
+  closeSyncImpl = closeSync,
 }) {
   const geminiCli = resolveGeminiCliPath();
   const gitIdentity = remediationWorkerGitIdentity('gemini');
   const { env: baseEnv, startupEvidence } = prepareGeminiRemediationStartupEnv({ gitIdentity });
-  const { env } = withReplyContext(baseEnv, {
+  const { env, replyContext } = withReplyContext(baseEnv, {
     replyPath,
     hqRoot,
     launchRequestId,
@@ -424,10 +430,13 @@ function spawnGeminiRemediationWorker({
     jobId,
   });
   const model = resolveGeminiRemediationModel(process.env);
-  const promptFd = openSync(promptPath, 'r');
-  const stdoutFd = openSync(outputPath, 'w');
-  const stderrFd = openSync(logPath, 'a');
+  let promptFd;
+  let stdoutFd;
+  let stderrFd;
   try {
+    promptFd = openSyncImpl(promptPath, 'r');
+    stdoutFd = openSyncImpl(outputPath, 'w');
+    stderrFd = openSyncImpl(logPath, 'a');
     const child = spawnDetachedCli(
       geminiCli,
       ['--approval-mode', 'yolo', '--skip-trust', '-m', model],
@@ -449,15 +458,17 @@ function spawnGeminiRemediationWorker({
       promptPath,
       outputPath,
       logPath,
+      replyPath: replyContext.replyPath,
+      launchRequestId: replyContext.launchRequestId,
       gitIdentity,
       startupEvidence,
       command: [geminiCli, '--approval-mode', 'yolo', '--skip-trust', '-m', model],
       child,
     };
   } finally {
-    closeSync(promptFd);
-    closeSync(stdoutFd);
-    closeSync(stderrFd);
+    if (promptFd !== undefined) closeSyncImpl(promptFd);
+    if (stdoutFd !== undefined) closeSyncImpl(stdoutFd);
+    if (stderrFd !== undefined) closeSyncImpl(stderrFd);
   }
 }
 
@@ -473,6 +484,8 @@ function spawnCodexRemediationWorker({
   jobId = null,
   spawnImpl,
   now = () => new Date().toISOString(),
+  openSyncImpl = openSync,
+  closeSyncImpl = closeSync,
 }) {
   const codexCli = resolveCodexCliPath();
   const gitIdentity = remediationWorkerGitIdentity(workerClass);
@@ -480,7 +493,7 @@ function spawnCodexRemediationWorker({
     gitIdentity,
     perWorkerKey: jobId || launchRequestId || null,
   });
-  const { env } = withReplyContext(baseEnv, {
+  const { env, replyContext } = withReplyContext(baseEnv, {
     replyPath,
     hqRoot,
     launchRequestId,
@@ -488,11 +501,14 @@ function spawnCodexRemediationWorker({
     workerClass: REMEDIATION_WORKER_TRAILER_CLASS,
     jobId,
   });
-  const promptFd = openSync(promptPath, 'r');
-  const stdoutFd = openSync(logPath, 'a');
-  const stderrFd = openSync(logPath, 'a');
   const codexModel = resolveCodexRemediationModel(env);
+  let promptFd;
+  let stdoutFd;
+  let stderrFd;
   try {
+    promptFd = openSyncImpl(promptPath, 'r');
+    stdoutFd = openSyncImpl(logPath, 'a');
+    stderrFd = openSyncImpl(logPath, 'a');
     const child = spawnDetachedCli(
       codexCli,
       [
@@ -524,6 +540,8 @@ function spawnCodexRemediationWorker({
       promptPath,
       outputPath,
       logPath,
+      replyPath: replyContext.replyPath,
+      launchRequestId: replyContext.launchRequestId,
       gitIdentity,
       startupEvidence,
       command: [
@@ -541,9 +559,9 @@ function spawnCodexRemediationWorker({
       child,
     };
   } finally {
-    closeSync(promptFd);
-    closeSync(stdoutFd);
-    closeSync(stderrFd);
+    if (promptFd !== undefined) closeSyncImpl(promptFd);
+    if (stdoutFd !== undefined) closeSyncImpl(stdoutFd);
+    if (stderrFd !== undefined) closeSyncImpl(stderrFd);
   }
 }
 
@@ -630,7 +648,12 @@ async function cancelLocalRemediationWorker(worker, {
   if (!identity.match) {
     throw new Error(`refusing to cancel remediation worker with unconfirmed identity (${identity.reason || 'unknown'})`);
   }
-  processKillImpl(-pgid, 'SIGTERM');
+  try {
+    processKillImpl(-pgid, 'SIGTERM');
+  } catch (err) {
+    if (err?.code === 'ESRCH' || err?.code === 'EPERM') return;
+    throw err;
+  }
 }
 
 async function waitForLocalRemediationExit(worker, {

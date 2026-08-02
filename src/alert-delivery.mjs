@@ -41,6 +41,7 @@ const TEL_COMMS_TELEMETRY_URL = new URL(
 let telTelemetryPromise;
 let activeDrainPromise = null;
 let scheduledDrainTimer = null;
+let scheduledDrainAtMs = null;
 
 function firstNonEmpty(...values) {
   for (const value of values) {
@@ -52,6 +53,12 @@ function firstNonEmpty(...values) {
 function positiveInteger(value, fallback) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function finiteNonNegativeNumber(value, fallback) {
+  if (value === null || value === undefined || String(value).trim() === '') return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function resolveDefaultHooksTokenFile(fsImpl = { existsSync }) {
@@ -439,13 +446,13 @@ function resolveAlertTransportDefaults(env = process.env, {
       resolveHooksTokenFileFromRoot(env.LITELLM_SECRETS_ROOT, fsImpl) ||
       resolveDefaultHooksTokenFile(fsImpl),
     rootDir: resolveAlertSinkStateRoot(env, rootDir),
-    retryDelayMs: Math.max(
-      0,
-      Number(env.ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS || DEFAULT_RETRY_DELAY_MS)
+    retryDelayMs: finiteNonNegativeNumber(
+      env.ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS,
+      DEFAULT_RETRY_DELAY_MS
     ),
-    maxRetryDelayMs: Math.max(
-      0,
-      Number(env.ADVERSARIAL_ALERT_DELIVERY_MAX_RETRY_DELAY_MS || DEFAULT_MAX_RETRY_DELAY_MS)
+    maxRetryDelayMs: finiteNonNegativeNumber(
+      env.ADVERSARIAL_ALERT_DELIVERY_MAX_RETRY_DELAY_MS,
+      DEFAULT_MAX_RETRY_DELAY_MS
     ),
     maxAttempts: positiveInteger(
       env.ADVERSARIAL_ALERT_DELIVERY_MAX_ATTEMPTS,
@@ -982,9 +989,18 @@ function scheduleAlertDrain({
   fsImpl = { readFileSync, existsSync },
   loadConfigRuntimeImpl = null,
 } = {}) {
-  if (scheduledDrainTimer) return;
+  const normalizedDelayMs = finiteNonNegativeNumber(delayMs, 0);
+  const fireAtMs = Date.now() + normalizedDelayMs;
+  if (scheduledDrainTimer) {
+    if (scheduledDrainAtMs !== null && scheduledDrainAtMs <= fireAtMs) return;
+    clearTimeout(scheduledDrainTimer);
+    scheduledDrainTimer = null;
+    scheduledDrainAtMs = null;
+  }
+  scheduledDrainAtMs = fireAtMs;
   scheduledDrainTimer = setTimeout(() => {
     scheduledDrainTimer = null;
+    scheduledDrainAtMs = null;
     if (activeDrainPromise) return;
     activeDrainPromise = drainPendingAlerts({
       env,
@@ -996,30 +1012,31 @@ function scheduleAlertDrain({
       return { status: 'error', drained: 0, queued: 0, results: [], error: String(error?.message || error) };
     }).finally(() => {
       activeDrainPromise = null;
-      let rootDir;
-      let retryDelayMs = DEFAULT_RETRY_DELAY_MS;
       try {
         const config = resolveAlertTransportDefaults(env, {
           fsImpl: { existsSync: fsImpl.existsSync || existsSync },
           loadConfigRuntimeImpl,
         });
-        rootDir = config.rootDir;
-        retryDelayMs = config.retryDelayMs;
+        const pendingCount = countDirEntries(pendingDir(config.rootDir), {
+          readdirSyncImpl: fsImpl.readdirSync || readdirSync,
+        });
+        if (pendingCount > 0) {
+          scheduleAlertDrain({
+            env,
+            delayMs: config.retryDelayMs,
+            requestText,
+            fsImpl,
+            loadConfigRuntimeImpl,
+          });
+        }
       } catch (error) {
         console.error?.('[alert-delivery] scheduled drain reschedule check failed', error);
-        return;
       }
-      if (countDirEntries(pendingDir(rootDir)) > 0) {
-        scheduleAlertDrain({
-          env,
-          delayMs: retryDelayMs,
-          requestText,
-          fsImpl,
-          loadConfigRuntimeImpl,
-        });
-      }
+    }).catch((error) => {
+      console.error?.('[alert-delivery] scheduled drain completion failed', error);
+      return { status: 'error', drained: 0, queued: 0, results: [], error: String(error?.message || error) };
     });
-  }, delayMs);
+  }, normalizedDelayMs);
   scheduledDrainTimer.unref?.();
 }
 

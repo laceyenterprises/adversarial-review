@@ -401,6 +401,48 @@ test('permanent delivery failure reaches an operator-visible dead letter ceiling
   assert.match(health.lastFailureReason, /dead-lettered.*2 attempts.*HTTP 401/);
 });
 
+test('invalid retry delay configuration falls back without wedging an inflight alert', async (t) => {
+  const { env, rootDir } = makeEnv({
+    ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS: 'not-a-number',
+    ADVERSARIAL_ALERT_DELIVERY_MAX_RETRY_DELAY_MS: 'also-invalid',
+  });
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const pendingRoot = pendingDir(rootDir);
+  mkdirSync(pendingRoot, { recursive: true });
+  const doc = {
+    version: 1,
+    id: 'invalid-delay-recoverable',
+    createdAt: '2026-08-02T05:00:00.000Z',
+    text: 'must remain retryable',
+    attemptCount: 0,
+    nextAttemptAfter: '2026-08-02T05:00:00.000Z',
+    delivery: {
+      alertName: 'Adversarial Watcher Health Test',
+      alertAgentId: 'ops',
+      alertChannel: 'telegram',
+      alertTo: '123456',
+    },
+  };
+  writeFileSync(join(pendingRoot, `${doc.id}.json`), `${JSON.stringify(doc)}\n`);
+
+  const drained = await drainPendingAlerts({
+    env,
+    now: new Date('2026-08-02T05:01:00.000Z'),
+    fsImpl: {
+      readFileSync() { return 'hook-token'; },
+      existsSync() { return true; },
+    },
+    requestText: async () => { throw new Error('temporary bus outage'); },
+  });
+
+  assert.equal(drained.status, 'queued');
+  assert.equal(drained.results[0].status, 'queued');
+  assert.equal(readdirSync(sinkPath(rootDir, 'inflight')).length, 0);
+  assert.deepEqual(readdirSync(pendingRoot), [`${doc.id}.json`]);
+  const retryDoc = JSON.parse(readFileSync(join(pendingRoot, `${doc.id}.json`), 'utf8'));
+  assert.equal(retryDoc.nextAttemptAfter, '2026-08-02T05:01:05.000Z');
+});
+
 test('malformed pending alert is quarantined and later alerts still drain', async (t) => {
   const { env, rootDir } = makeEnv();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

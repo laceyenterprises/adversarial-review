@@ -203,6 +203,27 @@ test('classifyFollowUpCriticality keeps clean comment-only reviews out of critic
   assert.equal(result.verdict, 'comment-only');
 });
 
+test('classifyFollowUpCriticality canonicalizes mis-headed clean reviews once', () => {
+  const result = classifyFollowUpCriticality([
+    '### Summary',
+    'Clean follow-up from a reviewer family that emits h3 sections.',
+    '',
+    '### Blocking issues',
+    '- None.',
+    '',
+    '### Non-blocking issues',
+    '- None.',
+    '',
+    '### Verdict',
+    'Comment only',
+  ].join('\n'));
+
+  assert.equal(result.critical, false);
+  assert.equal(result.blockingFindingState, 'known');
+  assert.equal(result.blockingFindingCount, 0);
+  assert.equal(result.verdict, 'comment-only');
+});
+
 test('classifyFollowUpCriticality keeps blocking reviews on the strict high-priority path', () => {
   const result = classifyFollowUpCriticality([
     '## Summary',

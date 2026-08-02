@@ -23,7 +23,10 @@ import {
   detectPublicReplyNoiseSignal,
   validateRemediationReply as validateKernelRemediationReply,
 } from './kernel/remediation-reply.mjs';
-import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
+import {
+  normalizeEffectiveReviewVerdict,
+  sanitizeReviewPayloadBestEffort,
+} from './kernel/verdict.mjs';
 import { classifyBlockingFindings } from './merge-agent-review-classification.mjs';
 
 const MAX_CREATE_ATTEMPTS = 100;
@@ -362,8 +365,9 @@ function buildRecommendedFollowUpAction({ critical, settledClean = false }) {
 }
 
 function classifyFollowUpCriticality(reviewBody) {
-  const verdict = normalizeEffectiveReviewVerdict(reviewBody);
-  const blocking = classifyBlockingFindings(reviewBody, { lastVerdict: verdict });
+  const canonicalReviewBody = sanitizeReviewPayloadBestEffort(reviewBody);
+  const verdict = normalizeEffectiveReviewVerdict(canonicalReviewBody);
+  const blocking = classifyBlockingFindings(canonicalReviewBody, { lastVerdict: verdict });
   return {
     critical: blocking.state !== 'known' || blocking.count > 0,
     blockingFindingCount: blocking.count,

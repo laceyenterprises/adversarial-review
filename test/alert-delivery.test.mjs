@@ -1,56 +1,31 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { homedir } from 'node:os';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { deliverAlert, resolveAlertDefaults } from '../src/alert-delivery.mjs';
+import {
+  deliverAlert,
+  drainPendingAlerts,
+  pendingDir,
+  readAlertSinkHealth,
+  resolveAlertDefaults,
+} from '../src/alert-delivery.mjs';
 
-test('watcher alert delivery uses the litellm drift-watch ALERT env shape', async () => {
-  const calls = [];
+function makeEnv(overrides = {}) {
+  const rootDir = mkdtempSync(join(tmpdir(), 'alert-delivery-'));
   const env = {
-    AGENT_GATEWAY_AGENT_HOOKS_URL: 'http://127.0.0.1:19999/hooks/agent',
-    OPENCLAW_HOOKS_TOKEN_FILE: '/secrets/hooks.token',
     ALERT_TO: '123456',
     ALERT_AGENT_ID: 'ops',
     ALERT_NAME: 'Adversarial Watcher Health Test',
     ALERT_CHANNEL: 'telegram',
+    AGENT_OS_GBI_ALERT_BUS_URL: 'http://127.0.0.1:18799/hooks/wake',
+    OPENCLAW_HOOKS_TOKEN_FILE: '/secrets/hooks.token',
+    ADVERSARIAL_ALERT_DELIVERY_ROOT: rootDir,
+    ...overrides,
   };
-
-  await deliverAlert('watcher.no_progress text', {
-    event: 'watcher.no_progress',
-    payload: { openPendingPRs: 2 },
-    env,
-    fsImpl: {
-      readFileSync(filePath, encoding) {
-        assert.equal(filePath, '/secrets/hooks.token');
-        assert.equal(encoding, 'utf8');
-        return 'hook-token';
-      },
-    },
-    requestText: async (url, options) => {
-      calls.push({ url, options });
-      return 'ok';
-    },
-  });
-
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, 'http://127.0.0.1:19999/hooks/agent');
-  assert.equal(calls[0].options.method, 'POST');
-  assert.deepEqual(calls[0].options.headers, {
-    Authorization: 'Bearer hook-token',
-  });
-  assert.deepEqual(calls[0].options.body, {
-    message: 'watcher.no_progress text',
-    name: 'Adversarial Watcher Health Test',
-    agentId: 'ops',
-    wakeMode: 'now',
-    deliver: true,
-    channel: 'telegram',
-    to: '123456',
-    event: 'watcher.no_progress',
-    payload: { openPendingPRs: 2 },
-  });
-});
+  return { env, rootDir };
+}
 
 test('watcher alert defaults require an explicit recipient', () => {
   assert.throws(
@@ -59,104 +34,192 @@ test('watcher alert defaults require an explicit recipient', () => {
   );
 });
 
-test('watcher alert defaults use the operator Telegram route once ALERT_TO is configured', () => {
-  assert.deepEqual(
-    resolveAlertDefaults(
-      { ALERT_TO: '123456' },
-      { fsImpl: { existsSync: () => false } }
-    ),
-    {
-      openclawAgentHooksUrl: 'http://127.0.0.1:18799/hooks/agent',
-      hooksTokenFile: join(homedir(), '.config', 'adversarial-review', 'secrets', 'litellm-alert-bridge.token'),
-      alertChannel: 'telegram',
-      alertTo: '123456',
-      alertAgentId: 'main',
-      alertName: 'Adversarial Watcher Health',
-    }
+test('watcher alert defaults use the configured alert bus and token discovery chain', () => {
+  const tokenFile = join(homedir(), '.config', 'adversarial-review', 'secrets', 'litellm-alert-bridge.token');
+  const cfg = resolveAlertDefaults(
+    { ALERT_TO: '123456' },
+    { fsImpl: { existsSync: (filePath) => filePath === tokenFile } }
   );
+  assert.equal(cfg.alertBusUrl, 'http://host.docker.internal:18799/hooks/wake');
+  assert.equal(cfg.hooksTokenFile, tokenFile);
+  assert.equal(cfg.alertChannel, 'telegram');
+  assert.equal(cfg.alertTo, '123456');
 });
 
-test('watcher alert defaults ignore a missing ADV_SECRETS_ROOT token file and keep falling through', () => {
-  const defaultTokenFile = join(
-    homedir(),
-    '.config',
-    'adversarial-review',
-    'secrets',
-    'litellm-alert-bridge.token'
-  );
-
-  assert.deepEqual(
-    resolveAlertDefaults(
-      {
-        ALERT_TO: '123456',
-        ADV_SECRETS_ROOT: '/Users/airlock/agent-os/agents/clio/credentials/local',
+test('agent_gateway alert bus URL precedence honors config then canonical and legacy env aliases', () => {
+  const configOnly = resolveAlertDefaults(
+    { ALERT_TO: '123456' },
+    {
+      loadConfigRuntimeImpl() {
+        return { get: () => 'https://cfg.example.test/hooks/wake' };
       },
-      {
-        fsImpl: {
-          existsSync(filePath) {
-            return filePath === defaultTokenFile;
-          },
-        },
-      }
-    ),
-    {
-      openclawAgentHooksUrl: 'http://127.0.0.1:18799/hooks/agent',
-      hooksTokenFile: defaultTokenFile,
-      alertChannel: 'telegram',
-      alertTo: '123456',
-      alertAgentId: 'main',
-      alertName: 'Adversarial Watcher Health',
     }
   );
-});
+  assert.equal(configOnly.alertBusUrl, 'https://cfg.example.test/hooks/wake');
 
-test('watcher alert defaults still honor ADV_SECRETS_ROOT when its token file exists', () => {
-  const advTokenFile = '/tmp/override-secrets/litellm-alert-bridge.token';
-
-  assert.deepEqual(
-    resolveAlertDefaults(
-      {
-        ALERT_TO: '123456',
-        ADV_SECRETS_ROOT: '/tmp/override-secrets',
+  const canonicalEnv = resolveAlertDefaults(
+    {
+      ALERT_TO: '123456',
+      AGENT_OS_GBI_ALERT_BUS_URL: 'https://canonical.example.test/hooks/wake',
+    },
+    {
+      loadConfigRuntimeImpl() {
+        return { get: () => 'https://cfg.example.test/hooks/wake' };
       },
-      {
-        fsImpl: {
-          existsSync(filePath) {
-            return filePath === advTokenFile;
-          },
-        },
-      }
-    ),
-    {
-      openclawAgentHooksUrl: 'http://127.0.0.1:18799/hooks/agent',
-      hooksTokenFile: advTokenFile,
-      alertChannel: 'telegram',
-      alertTo: '123456',
-      alertAgentId: 'main',
-      alertName: 'Adversarial Watcher Health',
     }
   );
+  assert.equal(canonicalEnv.alertBusUrl, 'https://canonical.example.test/hooks/wake');
+
+  const legacyEnv = resolveAlertDefaults(
+    {
+      ALERT_TO: '123456',
+      AGENT_GATEWAY_ALERT_BUS_URL: 'https://legacy.example.test/hooks/wake',
+    },
+    {
+      loadConfigRuntimeImpl() {
+        return { get: () => 'https://cfg.example.test/hooks/wake' };
+      },
+    }
+  );
+  assert.equal(legacyEnv.alertBusUrl, 'https://legacy.example.test/hooks/wake');
 });
 
-test('watcher alert defaults fall back to the legacy secrets root when the new default token file is absent', () => {
-  assert.deepEqual(
-    resolveAlertDefaults(
-      { ALERT_TO: '123456' },
-      {
-        fsImpl: {
-          existsSync(filePath) {
-            return filePath === '/Users/airlock/agent-os/agents/clio/credentials/local/litellm-alert-bridge.token';
-          },
-        },
-      }
-    ),
-    {
-      openclawAgentHooksUrl: 'http://127.0.0.1:18799/hooks/agent',
-      hooksTokenFile: '/Users/airlock/agent-os/agents/clio/credentials/local/litellm-alert-bridge.token',
-      alertChannel: 'telegram',
-      alertTo: '123456',
-      alertAgentId: 'main',
-      alertName: 'Adversarial Watcher Health',
-    }
-  );
+test('unavailable bus queues a durable receipt instead of losing the alert', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const queued = await deliverAlert('watcher.no_progress text', {
+    event: 'watcher.no_progress',
+    payload: { openPendingPRs: 2 },
+    env,
+    fsImpl: {
+      readFileSync() {
+        return 'hook-token';
+      },
+      existsSync() {
+        return true;
+      },
+    },
+    requestText: async () => {
+      throw new Error('ECONNREFUSED');
+    },
+  });
+
+  assert.equal(queued.status, 'queued');
+  assert.equal(queued.queued, true);
+  assert.equal(readAlertSinkHealth({ env }).pendingCount, 1);
+
+  await drainPendingAlerts({
+    env,
+    fsImpl: {
+      readFileSync() {
+        return 'hook-token';
+      },
+      existsSync() {
+        return true;
+      },
+    },
+    requestText: async () => {
+      throw new Error('ECONNREFUSED');
+    },
+  });
+
+  const health = readAlertSinkHealth({ env });
+  assert.equal(health.ready, false);
+  assert.equal(health.pendingCount, 1);
+  assert.match(String(health.lastFailureReason), /ECONNREFUSED/);
+
+  const queueEntries = pendingDir(rootDir);
+  const queuedDoc = JSON.parse(readFileSync(join(queueEntries, `${queued.id}.json`), 'utf8'));
+  assert.equal(queuedDoc.event, 'watcher.no_progress');
+  assert.equal(queuedDoc.attemptCount, 1);
+});
+
+test('recovered bus drains the queued receipt exactly once', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const queued = await deliverAlert('hammer cap text', {
+    event: 'hammer_lifetime_ceiling_reached',
+    payload: { cap: 3 },
+    env,
+    fsImpl: {
+      readFileSync() {
+        return 'hook-token';
+      },
+      existsSync() {
+        return true;
+      },
+    },
+    requestText: async () => {
+      throw new Error('ECONNREFUSED');
+    },
+  });
+
+  await drainPendingAlerts({
+    env,
+    fsImpl: {
+      readFileSync() {
+        return 'hook-token';
+      },
+      existsSync() {
+        return true;
+      },
+    },
+    requestText: async () => {
+      throw new Error('ECONNREFUSED');
+    },
+  });
+
+  const calls = [];
+  const drained = await drainPendingAlerts({
+    env,
+    now: new Date(Date.now() + 6_000),
+    fsImpl: {
+      readFileSync() {
+        return 'hook-token';
+      },
+      existsSync() {
+        return true;
+      },
+    },
+    requestText: async (url, options) => {
+      calls.push({ url, options });
+      return 'ok';
+    },
+  });
+
+  assert.equal(drained.drained, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'http://127.0.0.1:18799/hooks/wake');
+  assert.equal(calls[0].options.body.metadata.alertId, queued.id);
+  assert.equal(readAlertSinkHealth({ env }).ready, true);
+  assert.equal(readAlertSinkHealth({ env }).pendingCount, 0);
+
+  const secondDrain = await drainPendingAlerts({
+    env,
+    now: new Date(Date.now() + 12_000),
+    fsImpl: {
+      readFileSync() {
+        return 'hook-token';
+      },
+      existsSync() {
+        return true;
+      },
+    },
+    requestText: async () => {
+      calls.push('unexpected-second-send');
+      return 'ok';
+    },
+  });
+  assert.equal(secondDrain.drained, 0);
+  assert.deepEqual(calls, [calls[0]]);
+});
+
+test('health-probe and hammer-cap callers both resolve through the shared alert sink module', async () => {
+  const healthProbeSource = readFileSync(new URL('../src/health-probe.mjs', import.meta.url), 'utf8');
+  const hammerSource = readFileSync(new URL('../src/ama/dispatch-closer.mjs', import.meta.url), 'utf8');
+
+  assert.match(healthProbeSource, /import \{ deliverAlert as defaultDeliverAlert \} from '\.\/alert-delivery\.mjs';/);
+  assert.match(hammerSource, /import \{ deliverAlert \} from '\.\.\/alert-delivery\.mjs';/);
 });

@@ -173,9 +173,8 @@ test('disabled health probe emits no events and sends no alerts', async () => {
   assert.equal(probe.getConfig().enabled, false);
 });
 
-test('health alerts do not block poll completion while delivery is still pending', async () => {
+test('health alerts complete once the durable sink has queued the alert', async () => {
   const events = [];
-  let releaseAlert;
   const probe = createWatcherHealthProbe({
     env: DEFAULT_ENV,
     pid: 12345,
@@ -188,9 +187,7 @@ test('health alerts do not block poll completion while delivery is still pending
       error() {},
     },
     deliverAlertFn: async () => {
-      await new Promise((resolve) => {
-        releaseAlert = resolve;
-      });
+      return { status: 'queued', queued: true };
     },
   });
 
@@ -203,13 +200,11 @@ test('health alerts do not block poll completion while delivery is still pending
 
   let settled = false;
   void thirdTick.then(() => {
-    settled = true;
+      settled = true;
   });
   await Promise.resolve();
-  assert.equal(settled, false, 'finishTick waits for alert delivery');
-
-  releaseAlert();
   await thirdTick;
+  assert.equal(settled, true, 'finishTick should settle once the alert is durably queued');
 });
 
 test('health alert delivery rejection is logged and does not reject finishTick', async () => {

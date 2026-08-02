@@ -1,15 +1,32 @@
-import { existsSync, readFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
+import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
+import { writeFileAtomic } from './atomic-write.mjs';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const DEFAULT_TOP_LEVEL_PATH = join(homedir(), 'agent-os/config.yaml');
 const DEFAULT_SECRETS_ROOT = join(homedir(), '.config', 'adversarial-review', 'secrets');
 const LEGACY_SECRETS_ROOT = '/Users/airlock/agent-os/agents/clio/credentials/local';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
-const DEFAULT_AGENT_GATEWAY_AGENT_HOOKS_URL = 'http://127.0.0.1:18799/hooks/agent';
-const DEFAULT_ALERT_AGENT_ID = 'main';
+const DEFAULT_ALERT_BUS_URL = 'http://host.docker.internal:18799/hooks/wake';
 const DEFAULT_ALERT_NAME = 'Adversarial Watcher Health';
+const DEFAULT_ALERT_AGENT_ID = 'main';
+const DEFAULT_ALERT_CHANNEL = 'telegram';
 const DEFAULT_HTTP_TIMEOUT_MS = 5_000;
+const DEFAULT_RETRY_DELAY_MS = 5_000;
+const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
+const DEFAULT_STALE_INFLIGHT_AGE_MS = 120_000;
 const HTTP_TIMEOUT_MS = Number(
   process.env.ALERT_HTTP_TIMEOUT_MS || process.env.HTTP_TIMEOUT_MS || DEFAULT_HTTP_TIMEOUT_MS
 );
@@ -19,6 +36,8 @@ const TEL_COMMS_TELEMETRY_URL = new URL(
 );
 
 let telTelemetryPromise;
+let activeDrainPromise = null;
+let scheduledDrainTimer = null;
 
 function firstNonEmpty(...values) {
   for (const value of values) {
@@ -42,60 +61,252 @@ function resolveHooksTokenFileFromRoot(root, fsImpl = { existsSync }) {
   return fsImpl.existsSync(candidateTokenFile) ? candidateTokenFile : null;
 }
 
-// Alert config resolution — precedence chains are load-bearing; reordering
-// them changes which deployment wins silently. Ordering rationale:
-//   - Hooks URL: specific (AGENT_GATEWAY_AGENT_HOOKS_URL) over legacy spelling
-//     (OPENCLAW_AGENT_HOOKS_URL) over the localhost gateway default. Both env
-//     names must keep working — launchd plists on older hosts still export the
-//     legacy one.
-//   - Token FILE: explicit file overrides (OPENCLAW_HOOKS_TOKEN_FILE, then
-//     HOOKS_TOKEN_FILE) over secrets-root probing (ADV_SECRETS_ROOT before
-//     LITELLM_SECRETS_ROOT — the adversarial-specific root must beat the
-//     shared LiteLLM root when both are set) over the default/legacy paths.
-//     The root probes return a path only if the file EXISTS; the final
-//     default does NOT check existence, so a missing file surfaces later as a
-//     token-read failure rather than a confusing null config.
-//   - ALERT_TO is fail-loud (throw): a page with no recipient is a silent
-//     alert blackhole, which is the exact failure this daemon exists to page
-//     about.
-// Threat model: these are paging credentials for the watcher's health
-// alerts. The silent-misresolution failure mode is a STALE-but-present
-// source earlier in the chain (e.g. a generic HOOKS_TOKEN exported for some
-// other service) shadowing the intended one — resolution succeeds, delivery
-// 401s, and the operator never gets the page. When alerts auth-fail, audit
-// the full chain in this order before touching token files.
-function resolveAlertDefaults(env = process.env, { fsImpl = { existsSync } } = {}) {
+function legacyAgentHooksUrlToWake(url) {
+  const trimmed = typeof url === 'string' ? url.trim() : '';
+  if (!trimmed) return null;
+  return trimmed.replace(/\/hooks\/agent\/?$/u, '/hooks/wake');
+}
+
+function parseYamlStringValue(raw) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return null;
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function readAlertBusUrlFromConfig(env = process.env, fsImpl = { readFileSync }) {
+  const topPath = env.AGENT_OS_CONFIG_PATH || DEFAULT_TOP_LEVEL_PATH;
+  let raw = null;
+  try {
+    raw = fsImpl.readFileSync(topPath, 'utf8');
+  } catch {
+    return null;
+  }
+  const lines = String(raw).split(/\r?\n/u);
+  let inAgentGateway = false;
+  for (const line of lines) {
+    if (!inAgentGateway) {
+      if (/^\s*agent_gateway:\s*(?:#.*)?$/u.test(line)) {
+        inAgentGateway = true;
+      }
+      continue;
+    }
+    if (/^\S/u.test(line)) break;
+    const keyMatch = line.match(/^\s+alert_bus_url:\s*([^\n#]+?)\s*$/u);
+    if (keyMatch?.[1]) return parseYamlStringValue(keyMatch[1]);
+  }
+  return null;
+}
+
+function resolveAlertBusUrl(env, {
+  loadConfigRuntimeImpl = null,
+  fsImpl = { readFileSync },
+} = {}) {
+  const envUrl = firstNonEmpty(
+    env.AGENT_OS_GBI_ALERT_BUS_URL,
+    env.AGENT_OS_AGENT_GATEWAY_ALERT_BUS_URL,
+    env.AGENT_GATEWAY_ALERT_BUS_URL,
+    legacyAgentHooksUrlToWake(env.AGENT_GATEWAY_AGENT_HOOKS_URL),
+    legacyAgentHooksUrlToWake(env.OPENCLAW_AGENT_HOOKS_URL)
+  );
+  if (envUrl) return envUrl;
+  if (typeof loadConfigRuntimeImpl === 'function') {
+    try {
+      const cfg = loadConfigRuntimeImpl({ env });
+      return cfg.get('agent_gateway.alert_bus_url', DEFAULT_ALERT_BUS_URL);
+    } catch {
+      return DEFAULT_ALERT_BUS_URL;
+    }
+  }
+  return readAlertBusUrlFromConfig(env, fsImpl) || DEFAULT_ALERT_BUS_URL;
+}
+
+function alertSinkRoot(rootDir = ROOT) {
+  const normalized = String(rootDir || '');
+  return normalized.endsWith('/data/alert-delivery')
+    ? normalized
+    : join(normalized, 'data', 'alert-delivery');
+}
+
+function pendingDir(rootDir = ROOT) {
+  return join(alertSinkRoot(rootDir), 'pending');
+}
+
+function inflightDir(rootDir = ROOT) {
+  return join(alertSinkRoot(rootDir), 'inflight');
+}
+
+function deliveredDir(rootDir = ROOT) {
+  return join(alertSinkRoot(rootDir), 'delivered');
+}
+
+function receiptDir(rootDir = ROOT) {
+  return join(alertSinkRoot(rootDir), 'receipts');
+}
+
+function healthPath(rootDir = ROOT) {
+  return join(alertSinkRoot(rootDir), 'health.json');
+}
+
+function ensureAlertSinkDirs(rootDir = ROOT) {
+  mkdirSync(pendingDir(rootDir), { recursive: true });
+  mkdirSync(inflightDir(rootDir), { recursive: true });
+  mkdirSync(deliveredDir(rootDir), { recursive: true });
+  mkdirSync(receiptDir(rootDir), { recursive: true });
+}
+
+function makeAlertId(now = new Date()) {
+  const stamp = (now instanceof Date ? now : new Date(now)).toISOString().replace(/[:.]/gu, '-');
+  return `alert-${stamp}-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+function alertDocPath(rootDir, state, id) {
+  return join(
+    state === 'pending' ? pendingDir(rootDir)
+      : state === 'inflight' ? inflightDir(rootDir)
+        : deliveredDir(rootDir),
+    `${id}.json`
+  );
+}
+
+function receiptPath(rootDir, id, phase, at, attempt = 0) {
+  const base = `${String(at).replace(/[:.]/gu, '-')}-${id}-${phase}`;
+  return join(receiptDir(rootDir), attempt === 0 ? `${base}.json` : `${base}-${attempt}.json`);
+}
+
+function writeReceipt(rootDir, doc, phase, at, extra = {}) {
+  const stamp = typeof at === 'string' ? at : new Date(at).toISOString();
+  for (let attempt = 0; attempt < 1000; attempt += 1) {
+    const filePath = receiptPath(rootDir, doc.id, phase, stamp, attempt);
+    try {
+      writeFileAtomic(filePath, `${JSON.stringify({
+        id: doc.id,
+        phase,
+        at: stamp,
+        event: doc.event || null,
+        text: doc.text,
+        attemptCount: doc.attemptCount || 0,
+        createdAt: doc.createdAt,
+        ...extra,
+      }, null, 2)}\n`, { overwrite: false });
+      return filePath;
+    } catch (err) {
+      if (err?.code !== 'EEXIST') throw err;
+    }
+  }
+  throw new Error(`Unable to allocate alert receipt path for ${doc.id}`);
+}
+
+function readHealth(rootDir = ROOT) {
+  try {
+    return JSON.parse(readFileSync(healthPath(rootDir), 'utf8'));
+  } catch {
+    return {
+      ready: true,
+      pendingCount: 0,
+      lastQueuedAt: null,
+      lastDeliveredAt: null,
+      lastFailureAt: null,
+      lastFailureReason: null,
+      lastQueuedEvent: null,
+    };
+  }
+}
+
+function writeHealth(rootDir, next) {
+  writeFileAtomic(healthPath(rootDir), `${JSON.stringify(next, null, 2)}\n`);
+  return next;
+}
+
+function countDirEntries(dirPath) {
+  try {
+    return readdirSync(dirPath).filter((name) => name.endsWith('.json')).length;
+  } catch {
+    return 0;
+  }
+}
+
+function setHealthQueued(rootDir, doc) {
+  const prior = readHealth(rootDir);
+  return writeHealth(rootDir, {
+    ...prior,
+    ready: false,
+    pendingCount: countDirEntries(pendingDir(rootDir)),
+    lastQueuedAt: doc.createdAt,
+    lastQueuedEvent: doc.event || null,
+  });
+}
+
+function setHealthFailed(rootDir, doc, error, failedAt) {
+  const prior = readHealth(rootDir);
+  return writeHealth(rootDir, {
+    ...prior,
+    ready: false,
+    pendingCount: countDirEntries(pendingDir(rootDir)),
+    lastFailureAt: failedAt,
+    lastFailureReason: String(error?.message || error),
+    lastQueuedEvent: doc.event || null,
+  });
+}
+
+function setHealthDelivered(rootDir, deliveredAt) {
+  const pendingCount = countDirEntries(pendingDir(rootDir));
+  const prior = readHealth(rootDir);
+  return writeHealth(rootDir, {
+    ...prior,
+    ready: pendingCount === 0,
+    pendingCount,
+    lastDeliveredAt: deliveredAt,
+    lastFailureReason: pendingCount === 0 ? null : prior.lastFailureReason,
+    lastFailureAt: pendingCount === 0 ? null : prior.lastFailureAt,
+  });
+}
+
+function resolveAlertDefaults(env = process.env, {
+  fsImpl = { existsSync },
+  loadConfigRuntimeImpl = null,
+  rootDir = ROOT,
+} = {}) {
   const alertTo = firstNonEmpty(env.ALERT_TO);
   if (!alertTo) {
     throw new Error('ALERT_TO must be configured for alert delivery');
   }
   return {
-    openclawAgentHooksUrl:
-      env.AGENT_GATEWAY_AGENT_HOOKS_URL ||
-      env.OPENCLAW_AGENT_HOOKS_URL ||
-      DEFAULT_AGENT_GATEWAY_AGENT_HOOKS_URL,
+    alertBusUrl: resolveAlertBusUrl(env, {
+      loadConfigRuntimeImpl,
+      fsImpl: { readFileSync: fsImpl.readFileSync || readFileSync },
+    }),
     hooksTokenFile:
       env.OPENCLAW_HOOKS_TOKEN_FILE ||
       env.HOOKS_TOKEN_FILE ||
       resolveHooksTokenFileFromRoot(env.ADV_SECRETS_ROOT, fsImpl) ||
       resolveHooksTokenFileFromRoot(env.LITELLM_SECRETS_ROOT, fsImpl) ||
       resolveDefaultHooksTokenFile(fsImpl),
-    alertChannel: env.ALERT_CHANNEL || 'telegram',
+    alertChannel: env.ALERT_CHANNEL || DEFAULT_ALERT_CHANNEL,
     alertTo,
     alertAgentId: env.ALERT_AGENT_ID || DEFAULT_ALERT_AGENT_ID,
     alertName: env.ALERT_NAME || DEFAULT_ALERT_NAME,
+    rootDir:
+      firstNonEmpty(env.ADVERSARIAL_ALERT_DELIVERY_ROOT, env.AGENT_OS_ALERT_DELIVERY_STATE_DIR)
+      || alertSinkRoot(rootDir),
+    retryDelayMs: Math.max(
+      0,
+      Number(env.ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS || DEFAULT_RETRY_DELAY_MS)
+    ),
+    maxRetryDelayMs: Math.max(
+      0,
+      Number(env.ADVERSARIAL_ALERT_DELIVERY_MAX_RETRY_DELAY_MS || DEFAULT_MAX_RETRY_DELAY_MS)
+    ),
   };
 }
 
-// Token VALUE precedence: direct env tokens (GATEWAY_DELIVERY_TOKEN, then
-// the OPENCLAW_*/HOOKS_TOKEN legacy spellings) beat the file-sourced token.
-// Env-first lets a wrapper inject a freshly-minted token without touching
-// disk, but it is also the sharpest silent-misresolution edge: an exported
-// stale token wins over a rotated token file with no diagnostic. The file
-// read failing is deliberately swallowed (catch → null) so the env chain can
-// still satisfy delivery; only ALL sources empty throws.
-function readHooksToken({ env = process.env, fsImpl = { readFileSync } } = {}) {
-  const config = resolveAlertDefaults(env, { fsImpl: { existsSync: fsImpl.existsSync || existsSync } });
+function readHooksToken({ env = process.env, fsImpl = { readFileSync, existsSync }, loadConfigRuntimeImpl = null } = {}) {
+  const config = resolveAlertDefaults(env, {
+    fsImpl: { existsSync: fsImpl.existsSync || existsSync },
+    loadConfigRuntimeImpl,
+  });
   let tokenFromFile = null;
   try {
     tokenFromFile = fsImpl.readFileSync(config.hooksTokenFile, 'utf8');
@@ -136,7 +347,12 @@ async function emitNotificationBusDeliverSpan(attrs) {
   telemetry?.emitNotificationBusDeliverSpan?.(attrs);
 }
 
-function httpRequestText(urlString, { method = 'GET', headers = {}, body, timeoutMs = HTTP_TIMEOUT_MS } = {}) {
+function httpRequestText(urlString, {
+  method = 'GET',
+  headers = {},
+  body,
+  timeoutMs = HTTP_TIMEOUT_MS,
+} = {}) {
   const url = new URL(urlString);
   const payload = body != null ? JSON.stringify(body) : null;
 
@@ -183,44 +399,331 @@ function httpRequestText(urlString, { method = 'GET', headers = {}, body, timeou
   });
 }
 
+function buildQueuedAlertDoc(text, { event, payload, config, now }) {
+  const createdAt = (now instanceof Date ? now : new Date(now)).toISOString();
+  return {
+    version: 1,
+    id: makeAlertId(now),
+    createdAt,
+    event: event || null,
+    payload: payload || null,
+    text,
+    attemptCount: 0,
+    lastAttemptAt: null,
+    nextAttemptAfter: createdAt,
+    delivery: {
+      alertName: config.alertName,
+      alertAgentId: config.alertAgentId,
+      alertChannel: config.alertChannel,
+      alertTo: config.alertTo,
+    },
+  };
+}
+
+function queueAlertDoc(rootDir, doc) {
+  ensureAlertSinkDirs(rootDir);
+  const filePath = alertDocPath(rootDir, 'pending', doc.id);
+  writeFileAtomic(filePath, `${JSON.stringify(doc, null, 2)}\n`, { overwrite: false });
+  const receipt = writeReceipt(rootDir, doc, 'queued', doc.createdAt, { state: 'pending' });
+  setHealthQueued(rootDir, doc);
+  return { filePath, receipt };
+}
+
+function readAlertDoc(filePath) {
+  return JSON.parse(readFileSync(filePath, 'utf8'));
+}
+
+function listPendingAlertPaths(rootDir = ROOT) {
+  try {
+    return readdirSync(pendingDir(rootDir))
+      .filter((name) => name.endsWith('.json'))
+      .sort()
+      .map((name) => join(pendingDir(rootDir), name));
+  } catch {
+    return [];
+  }
+}
+
+function listInflightAlertPaths(rootDir = ROOT) {
+  try {
+    return readdirSync(inflightDir(rootDir))
+      .filter((name) => name.endsWith('.json'))
+      .sort()
+      .map((name) => join(inflightDir(rootDir), name));
+  } catch {
+    return [];
+  }
+}
+
+function isDueForRetry(doc, nowMs) {
+  const nextAttemptMs = Date.parse(doc?.nextAttemptAfter || '');
+  return !Number.isFinite(nextAttemptMs) || nextAttemptMs <= nowMs;
+}
+
+function recoverStaleInflightAlerts(rootDir, {
+  now = new Date(),
+  staleInflightAgeMs = DEFAULT_STALE_INFLIGHT_AGE_MS,
+} = {}) {
+  const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  for (const filePath of listInflightAlertPaths(rootDir)) {
+    const doc = readAlertDoc(filePath);
+    const lastAttemptMs = Date.parse(doc?.lastAttemptAt || doc?.createdAt || '');
+    if (Number.isFinite(lastAttemptMs) && nowMs - lastAttemptMs < staleInflightAgeMs) continue;
+    const pendingPath = alertDocPath(rootDir, 'pending', doc.id);
+    writeFileAtomic(pendingPath, `${JSON.stringify({
+      ...doc,
+      state: 'pending',
+    }, null, 2)}\n`);
+    rmSync(filePath, { force: true });
+  }
+}
+
+function movePendingToInflight(rootDir, doc) {
+  const src = alertDocPath(rootDir, 'pending', doc.id);
+  const dest = alertDocPath(rootDir, 'inflight', doc.id);
+  renameSync(src, dest);
+  return dest;
+}
+
+function returnInflightToPending(rootDir, doc) {
+  const pendingPath = alertDocPath(rootDir, 'pending', doc.id);
+  writeFileAtomic(pendingPath, `${JSON.stringify(doc, null, 2)}\n`);
+  rmSync(alertDocPath(rootDir, 'inflight', doc.id), { force: true });
+  return pendingPath;
+}
+
+function markInflightDelivered(rootDir, doc) {
+  const deliveredPath = alertDocPath(rootDir, 'delivered', doc.id);
+  writeFileAtomic(deliveredPath, `${JSON.stringify(doc, null, 2)}\n`);
+  rmSync(alertDocPath(rootDir, 'inflight', doc.id), { force: true });
+  return deliveredPath;
+}
+
+async function postAlertDoc(doc, {
+  env = process.env,
+  requestText = httpRequestText,
+  fsImpl = { readFileSync, existsSync },
+  loadConfigRuntimeImpl = null,
+} = {}) {
+  const config = resolveAlertDefaults(env, {
+    fsImpl: { existsSync: fsImpl.existsSync || existsSync },
+    loadConfigRuntimeImpl,
+  });
+  const token = readHooksToken({ env, fsImpl, loadConfigRuntimeImpl });
+  return requestText(config.alertBusUrl, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: {
+      text: doc.text,
+      message: doc.text,
+      mode: 'now',
+      wakeMode: 'now',
+      deliver: true,
+      channel: doc.delivery.alertChannel,
+      to: doc.delivery.alertTo,
+      name: doc.delivery.alertName,
+      agentId: doc.delivery.alertAgentId,
+      event: doc.event || undefined,
+      payload: doc.payload || undefined,
+      severity: 'critical',
+      source: 'adversarial-review',
+      metadata: {
+        alertId: doc.id,
+        event: doc.event || null,
+      },
+    },
+  });
+}
+
+async function drainSingleAlert(filePath, {
+  env = process.env,
+  now = new Date(),
+  requestText = httpRequestText,
+  fsImpl = { readFileSync, existsSync },
+  loadConfigRuntimeImpl = null,
+} = {}) {
+  const rootDir = ROOT;
+  const config = resolveAlertDefaults(env, {
+    fsImpl: { existsSync: fsImpl.existsSync || existsSync },
+    loadConfigRuntimeImpl,
+    rootDir,
+  });
+  const alertRoot = config.rootDir;
+  const hookPath = notificationHookPath(config.alertBusUrl);
+  const producer = 'adversarial-review';
+  const prior = readAlertDoc(filePath);
+  if (!isDueForRetry(prior, now instanceof Date ? now.getTime() : new Date(now).getTime())) {
+    return { status: 'skipped', reason: 'backoff-not-elapsed', id: prior.id };
+  }
+  const inflightPath = movePendingToInflight(alertRoot, prior);
+  const attemptAt = (now instanceof Date ? now : new Date(now)).toISOString();
+  const doc = {
+    ...prior,
+    attemptCount: Number(prior.attemptCount || 0) + 1,
+    lastAttemptAt: attemptAt,
+    state: 'inflight',
+  };
+  writeFileAtomic(inflightPath, `${JSON.stringify(doc, null, 2)}\n`);
+
+  try {
+    await postAlertDoc(doc, { env, requestText, fsImpl, loadConfigRuntimeImpl });
+    const deliveredAt = (now instanceof Date ? now : new Date(now)).toISOString();
+    const delivered = {
+      ...doc,
+      state: 'delivered',
+      deliveredAt,
+    };
+    markInflightDelivered(alertRoot, delivered);
+    writeReceipt(alertRoot, delivered, 'delivered', deliveredAt, { state: 'delivered' });
+    setHealthDelivered(alertRoot, deliveredAt);
+    await emitNotificationBusDeliverSpan({ hookPath, producer, outcome: 'success' });
+    return { status: 'delivered', id: delivered.id, attemptCount: delivered.attemptCount };
+  } catch (error) {
+    const nextAttemptAfter = new Date(
+      (now instanceof Date ? now.getTime() : new Date(now).getTime())
+      + Math.min(
+        config.maxRetryDelayMs,
+        config.retryDelayMs * (2 ** Math.max(0, doc.attemptCount - 1))
+      )
+    ).toISOString();
+    const retryDoc = {
+      ...doc,
+      state: 'pending',
+      nextAttemptAfter,
+      lastError: String(error?.message || error),
+    };
+    returnInflightToPending(alertRoot, retryDoc);
+    writeReceipt(alertRoot, retryDoc, 'failed', attemptAt, {
+      state: 'pending',
+      error: retryDoc.lastError,
+      nextAttemptAfter,
+    });
+    setHealthFailed(alertRoot, retryDoc, error, attemptAt);
+    await emitNotificationBusDeliverSpan({ hookPath, producer, outcome: 'error' });
+    return { status: 'queued', id: retryDoc.id, attemptCount: retryDoc.attemptCount, error: retryDoc.lastError };
+  }
+}
+
+async function drainPendingAlerts({
+  env = process.env,
+  now = new Date(),
+  requestText = httpRequestText,
+  fsImpl = { readFileSync, existsSync },
+  loadConfigRuntimeImpl = null,
+  maxItems = Infinity,
+} = {}) {
+  const config = resolveAlertDefaults(env, {
+    fsImpl: { existsSync: fsImpl.existsSync || existsSync },
+    loadConfigRuntimeImpl,
+  });
+  const rootDir = config.rootDir;
+  ensureAlertSinkDirs(rootDir);
+  recoverStaleInflightAlerts(rootDir, { now });
+  const pending = listPendingAlertPaths(rootDir);
+  const results = [];
+  for (const filePath of pending.slice(0, maxItems)) {
+    results.push(await drainSingleAlert(filePath, {
+      env,
+      now,
+      requestText,
+      fsImpl,
+      loadConfigRuntimeImpl,
+    }));
+  }
+  return {
+    status: results.some((entry) => entry.status === 'queued') ? 'queued' : 'ok',
+    drained: results.filter((entry) => entry.status === 'delivered').length,
+    queued: countDirEntries(pendingDir(rootDir)),
+    results,
+  };
+}
+
+function scheduleAlertDrain({
+  env = process.env,
+  delayMs = 0,
+  requestText = httpRequestText,
+  fsImpl = { readFileSync, existsSync },
+  loadConfigRuntimeImpl = null,
+} = {}) {
+  if (scheduledDrainTimer) return;
+  scheduledDrainTimer = setTimeout(() => {
+    scheduledDrainTimer = null;
+    if (activeDrainPromise) return;
+    activeDrainPromise = drainPendingAlerts({
+      env,
+      requestText,
+      fsImpl,
+      loadConfigRuntimeImpl,
+    }).finally(() => {
+      activeDrainPromise = null;
+      const config = resolveAlertDefaults(env, {
+        fsImpl: { existsSync: fsImpl.existsSync || existsSync },
+        loadConfigRuntimeImpl,
+      });
+      if (countDirEntries(pendingDir(config.rootDir)) > 0) {
+        scheduleAlertDrain({
+          env,
+          delayMs: config.retryDelayMs,
+          requestText,
+          fsImpl,
+          loadConfigRuntimeImpl,
+        });
+      }
+    });
+  }, delayMs);
+  scheduledDrainTimer.unref?.();
+}
+
+function readAlertSinkHealth({ env = process.env, loadConfigRuntimeImpl = null } = {}) {
+  const config = resolveAlertDefaults(env, { loadConfigRuntimeImpl });
+  const rootDir = config.rootDir;
+  const health = readHealth(rootDir);
+  return {
+    ...health,
+    rootDir,
+    pendingCount: countDirEntries(pendingDir(rootDir)),
+    inflightCount: countDirEntries(inflightDir(rootDir)),
+    deliveredCount: countDirEntries(deliveredDir(rootDir)),
+  };
+}
+
 async function deliverAlert(text, {
   event = null,
   payload = null,
   env = process.env,
-  fsImpl = { readFileSync },
+  fsImpl = { readFileSync, existsSync },
   requestText = httpRequestText,
+  now = new Date(),
+  loadConfigRuntimeImpl = null,
 } = {}) {
-  const config = resolveAlertDefaults(env);
-  const token = readHooksToken({ env, fsImpl });
-  const hookPath = notificationHookPath(config.openclawAgentHooksUrl);
-  const producer = 'adversarial-review';
-  try {
-    await requestText(config.openclawAgentHooksUrl, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: {
-        message: text,
-        name: config.alertName,
-        agentId: config.alertAgentId,
-        wakeMode: 'now',
-        deliver: true,
-        channel: config.alertChannel,
-        to: config.alertTo,
-        ...(event ? { event } : {}),
-        ...(payload ? { payload } : {}),
-      },
-    });
-    await emitNotificationBusDeliverSpan({ hookPath, producer, outcome: 'success' });
-  } catch (error) {
-    await emitNotificationBusDeliverSpan({ hookPath, producer, outcome: 'error' });
-    throw error;
-  }
+  const config = resolveAlertDefaults(env, {
+    fsImpl: { existsSync: fsImpl.existsSync || existsSync },
+    loadConfigRuntimeImpl,
+  });
+  const rootDir = config.rootDir;
+  const doc = buildQueuedAlertDoc(text, { event, payload, config, now });
+  const queued = queueAlertDoc(rootDir, doc);
+  scheduleAlertDrain({ env, requestText, fsImpl, loadConfigRuntimeImpl });
+  return {
+    status: 'queued',
+    queued: true,
+    id: doc.id,
+    queuePath: queued.filePath,
+    receiptPath: queued.receipt,
+  };
 }
 
 export {
+  DEFAULT_ALERT_BUS_URL,
+  alertSinkRoot,
   deliverAlert,
+  drainPendingAlerts,
   firstNonEmpty,
+  healthPath,
   httpRequestText,
+  pendingDir,
+  readAlertSinkHealth,
   readHooksToken,
   resolveAlertDefaults,
+  scheduleAlertDrain,
 };

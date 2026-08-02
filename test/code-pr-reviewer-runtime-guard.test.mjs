@@ -1,50 +1,118 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const codePrDomainPath = join(__dirname, '..', 'domains', 'code-pr.json');
+import { SETTLE_SMOKE_FRESHNESS_WINDOW_MS, writeSettleSmokeResult } from '../src/adapters/agent-runtime/settle-smoke.mjs';
+import { evaluateAgentRuntimeCutoverReadiness } from '../src/reviewer-runtime-cutover.mjs';
 
-// RPR-01 guard — the missing smoke gate.
-//
-// On 2026-07-26..28 a build pack (PRD-01 #687 "Drive code-pr via AgentRuntime
-// port") silently flipped the live code-pr `reviewerRuntime` from `cli-direct`
-// to `agent-runtime` with NO end-to-end settle smoke. The agent-runtime path
-// produced "artifactless dead dispatch" reviews (see #699/#703 hotfixes) whose
-// verdicts never settled, so the adversarial gate stayed `review-queued`
-// forever and ~15 landed packs were stranded. RC-1 (#706) reverted it, but a
-// later pack (PXT-02 #707) re-flipped it back to agent-runtime — again with no
-// gate to stop the silent flip.
-//
-// This test IS that gate: the live code-pr pipeline may only run on a
-// settle-proven reviewer runtime. `agent-runtime` (and any other unproven
-// runtime) stays quarantined until it has a passing end-to-end settle smoke.
-// Opting back in is deliberately made a visible, reviewed decision: set
-// `agentRuntimeSettleSmokeVerified: true` in domains/code-pr.json in the SAME PR
-// that lands the smoke evidence. A pack can no longer casually flip the reviewer
-// runtime without this test failing at PR time.
-const SETTLE_PROVEN_REVIEWER_RUNTIMES = new Set(['cli-direct', 'agent-runtime']);
+const SETTLE_PROVEN_REVIEWER_RUNTIMES = new Set(['cli-direct']);
 
-test('code-pr reviewerRuntime is settle-proven (RPR-01 guard)', () => {
-  const domain = JSON.parse(readFileSync(codePrDomainPath, 'utf8'));
-  const runtime = domain.reviewerRuntime || 'cli-direct';
+function makeRoot() {
+  return mkdtempSync(join(tmpdir(), 'code-pr-reviewer-runtime-guard-'));
+}
 
-  if (SETTLE_PROVEN_REVIEWER_RUNTIMES.has(runtime)) {
-    return;
+function writeCodePrDomain(rootDir, overrides = {}) {
+  mkdirSync(join(rootDir, 'domains'), { recursive: true });
+  writeFileSync(join(rootDir, 'domains', 'code-pr.json'), JSON.stringify({
+    id: 'code-pr',
+    reviewerRuntime: 'agent-runtime',
+    ...overrides,
+  }));
+}
+
+function readyReadiness(rootDir, now) {
+  return evaluateAgentRuntimeCutoverReadiness({
+    rootDir,
+    domainConfig: { id: 'code-pr', reviewerRuntime: 'agent-runtime' },
+    orchestrationMode: 'agentos',
+    now: () => new Date(now),
+    readSnapshotImpl: () => ({ status: { mode: 'os', config: { enabled: true }, probe: { healthy: true } } }),
+    readCanaryImpl: () => ({ status: 'pass', at: now }),
+  });
+}
+
+test('cli-direct remains settle-proven unconditionally', () => {
+  assert.equal(SETTLE_PROVEN_REVIEWER_RUNTIMES.has('cli-direct'), true);
+});
+
+test('agent-runtime is not settle-proven when the settle-smoke artifact is absent', () => {
+  const rootDir = makeRoot();
+  try {
+    writeCodePrDomain(rootDir);
+    const readiness = readyReadiness(rootDir, '2026-08-02T10:00:00.000Z');
+    assert.equal(readiness.ready, false);
+    assert.equal(readiness.selectedRuntime, 'agent-os-hq');
+    assert.equal(readiness.reasons[0].code, 'settle-smoke-missing');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
   }
+});
 
-  assert.equal(
-    domain.agentRuntimeSettleSmokeVerified,
-    true,
-    [
-      `code-pr reviewerRuntime='${runtime}' is NOT settle-proven.`,
-      `Only [${[...SETTLE_PROVEN_REVIEWER_RUNTIMES].join(', ')}] may run the live`,
-      `code-pr pipeline without proof. To use '${runtime}', land a passing`,
-      `end-to-end settle smoke and set "agentRuntimeSettleSmokeVerified": true in`,
-      `domains/code-pr.json in the same PR. See RPR-01 (reviewer pipeline outage:`,
-      `agent-runtime produced artifactless reviews that never settled).`,
-    ].join(' '),
-  );
+test('agent-runtime is not settle-proven when the settle-smoke artifact is stale', () => {
+  const rootDir = makeRoot();
+  try {
+    writeCodePrDomain(rootDir);
+    writeSettleSmokeResult(rootDir, 'agent-runtime', {
+      status: 'pass',
+      at: '2026-07-25T09:59:59.000Z',
+      dispatched: true,
+      settled: true,
+      attributed: true,
+      workerRunId: 'wr_stale',
+    });
+    const now = new Date('2026-08-02T10:00:00.000Z');
+    const readiness = readyReadiness(rootDir, now.toISOString());
+    assert.equal(readiness.ready, false);
+    assert.equal(readiness.reasons[0].code, 'settle-smoke-stale');
+    assert.ok(
+      now.getTime() - Date.parse('2026-07-25T09:59:59.000Z') > SETTLE_SMOKE_FRESHNESS_WINDOW_MS,
+      'fixture must be older than the freshness window',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('agent-runtime is not settle-proven when the settle-smoke artifact recorded FAIL', () => {
+  const rootDir = makeRoot();
+  try {
+    writeCodePrDomain(rootDir);
+    writeSettleSmokeResult(rootDir, 'agent-runtime', {
+      status: 'fail',
+      at: '2026-08-02T09:55:00.000Z',
+      dispatched: true,
+      settled: false,
+      attributed: false,
+      workerRunId: null,
+      detail: 'artifactless dispatch',
+    });
+    const readiness = readyReadiness(rootDir, '2026-08-02T10:00:00.000Z');
+    assert.equal(readiness.ready, false);
+    assert.equal(readiness.reasons[0].code, 'settle-smoke-failed');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('agent-runtime is settle-proven only when a fresh PASS artifact is present', () => {
+  const rootDir = makeRoot();
+  try {
+    writeCodePrDomain(rootDir);
+    writeSettleSmokeResult(rootDir, 'agent-runtime', {
+      status: 'pass',
+      at: '2026-08-02T09:55:00.000Z',
+      dispatched: true,
+      settled: true,
+      attributed: true,
+      workerRunId: 'wr_fresh',
+    });
+    const readiness = readyReadiness(rootDir, '2026-08-02T10:00:00.000Z');
+    assert.equal(readiness.ready, true);
+    assert.equal(readiness.selectedRuntime, 'agent-runtime');
+    assert.equal(readiness.settleSmoke.result.workerRunId, 'wr_fresh');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });

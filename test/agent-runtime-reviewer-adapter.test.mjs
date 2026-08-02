@@ -1090,11 +1090,9 @@ test('agent-runtime reviewer adapter cancels spawned handle when run-state updat
 test('production code-pr domain declares the settle-proven agent-runtime reviewer path', () => {
   const config = loadDomainConfig(process.cwd(), 'code-pr');
   assert.equal(config.reviewerRuntime, 'agent-runtime');
-  assert.equal(config.agentRuntimeSettleSmokeVerified, true);
 });
 
 test('production code-pr-security domain declares the settle-proven agent-runtime reviewer path', () => {
   const config = loadDomainConfig(process.cwd(), 'code-pr-security');
   assert.equal(config.reviewerRuntime, 'agent-runtime');
-  assert.equal(config.agentRuntimeSettleSmokeVerified, true);
 });

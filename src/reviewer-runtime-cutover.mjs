@@ -1,4 +1,8 @@
 import { readCanaryStatus } from './adapters/agent-runtime/canary.mjs';
+import {
+  SETTLE_SMOKE_FRESHNESS_WINDOW_MS,
+  evaluateSettleSmokeResult,
+} from './adapters/agent-runtime/settle-smoke.mjs';
 import { readRuntimeStatusSnapshot } from './runtime-status-snapshot.mjs';
 
 const DEFAULT_RUNTIME = 'cli-direct';
@@ -45,12 +49,14 @@ function evaluateAgentRuntimeCutoverReadiness({
   now = () => new Date(),
   readSnapshotImpl = readRuntimeStatusSnapshot,
   readCanaryImpl = readCanaryStatus,
+  evaluateSettleSmokeImpl = evaluateSettleSmokeResult,
 } = {}) {
   const requestedRuntime = requestedReviewerRuntime(domainConfig);
   const domainId = String(domainConfig?.id || 'unknown').trim() || 'unknown';
   const reasons = [];
   let snapshot = null;
   let canary = null;
+  let settleSmoke = null;
 
   if (requestedRuntime !== CUTOVER_RUNTIME) {
     return {
@@ -66,12 +72,6 @@ function evaluateAgentRuntimeCutoverReadiness({
     };
   }
 
-  if (domainConfig?.agentRuntimeSettleSmokeVerified !== true) {
-    reasons.push(detail(
-      'settle-smoke-unverified',
-      'domain config has not attested a passing agent-runtime settle smoke',
-    ));
-  }
   if (orchestrationMode !== 'agentos') {
     reasons.push(detail(
       'orchestration-mode-mismatch',
@@ -82,6 +82,17 @@ function evaluateAgentRuntimeCutoverReadiness({
   if (rootDir) {
     snapshot = readSnapshotImpl(rootDir);
     canary = readCanaryImpl(rootDir);
+    settleSmoke = evaluateSettleSmokeImpl(rootDir, { runtime: CUTOVER_RUNTIME, now });
+  }
+  if (!settleSmoke?.ok) {
+    const suffix = `freshness window ${Math.round(SETTLE_SMOKE_FRESHNESS_WINDOW_MS / (24 * 60 * 60 * 1000))}d`;
+    if (settleSmoke?.reason === 'stale') {
+      reasons.push(detail('settle-smoke-stale', `agent-runtime settle smoke PASS is stale (${suffix})`));
+    } else if (settleSmoke?.reason === 'fail') {
+      reasons.push(detail('settle-smoke-failed', 'agent-runtime settle smoke recorded FAIL'));
+    } else {
+      reasons.push(detail('settle-smoke-missing', `agent-runtime settle smoke PASS artifact is absent (${suffix})`));
+    }
   }
   const status = snapshot?.status || null;
   if (!status) {
@@ -120,6 +131,7 @@ function evaluateAgentRuntimeCutoverReadiness({
     reasons,
     snapshot,
     canary,
+    settleSmoke,
     evaluatedAt: now().toISOString(),
   };
 }
@@ -132,6 +144,7 @@ function resolveReviewerRuntimeCutover({
   now = () => new Date(),
   readSnapshotImpl = readRuntimeStatusSnapshot,
   readCanaryImpl = readCanaryStatus,
+  evaluateSettleSmokeImpl = evaluateSettleSmokeResult,
 } = {}) {
   const forced = trimEnvOverride(env);
   const readiness = evaluateAgentRuntimeCutoverReadiness({
@@ -141,6 +154,7 @@ function resolveReviewerRuntimeCutover({
     now,
     readSnapshotImpl,
     readCanaryImpl,
+    evaluateSettleSmokeImpl,
   });
   if (forced && KNOWN_REVIEWER_RUNTIME_NAMES.has(forced)) {
     return {

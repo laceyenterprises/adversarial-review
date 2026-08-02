@@ -137,7 +137,7 @@ function handoffMain(argv, io = {}) {
   return 2;
 }
 
-function main(argv, io = {}) {
+async function main(argv, io = {}) {
   const [command, ...rest] = argv;
   if (command === 'reset-pr') {
     return resetPrMain(rest, io);
@@ -167,7 +167,9 @@ function main(argv, io = {}) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  process.exitCode = main(process.argv.slice(2));
+  main(process.argv.slice(2)).then((code) => {
+    process.exitCode = code;
+  });
 }
 
 export { finalizationMain, handoffMain, main, reviewerRosterMain, runtimeMain };

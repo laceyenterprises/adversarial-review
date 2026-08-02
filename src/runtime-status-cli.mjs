@@ -5,10 +5,12 @@
 import { fileURLToPath } from 'node:url';
 
 import { buildRuntimeStatus, renderRuntimeStatus } from './runtime-status.mjs';
+import { runtimeSettleSmokeMain } from './runtime-settle-smoke-cli.mjs';
 
 const USAGE = `\
 Usage:
   adversarial-review runtime status [--root <dir>] [--window <24h>] [--json]
+  adversarial-review runtime settle-smoke --runtime agent-runtime [--root <dir>] [--json]
 `;
 
 const DURATION_UNITS = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
@@ -44,7 +46,7 @@ function parseArgs(argv) {
 
 // `runtime <subcommand>`. Only `status` exists today; unknown subcommands fail
 // loud with usage so a typo doesn't silently no-op.
-function runtimeMain(argv, io = {}) {
+async function runtimeMain(argv, io = {}) {
   const stdout = io.stdout || process.stdout;
   const stderr = io.stderr || process.stderr;
   const [subcommand, ...rest] = argv;
@@ -52,6 +54,9 @@ function runtimeMain(argv, io = {}) {
   if (subcommand === '--help' || subcommand === '-h' || subcommand === undefined) {
     stdout.write(USAGE);
     return subcommand === undefined ? 2 : 0;
+  }
+  if (subcommand === 'settle-smoke') {
+    return runtimeSettleSmokeMain(rest, io);
   }
   if (subcommand !== 'status') {
     stderr.write(`error: unknown runtime command ${subcommand}\n\n${USAGE}`);
@@ -87,7 +92,9 @@ function runtimeMain(argv, io = {}) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  process.exitCode = runtimeMain(process.argv.slice(2));
+  runtimeMain(process.argv.slice(2)).then((code) => {
+    process.exitCode = code;
+  });
 }
 
 export { parseWindowMs, runtimeMain };

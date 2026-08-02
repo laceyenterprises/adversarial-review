@@ -18,6 +18,7 @@ import { routerAuditDir } from './adapters/agent-runtime/router/audit.mjs';
 import { summarizeRuntimeRuns } from './adapters/agent-runtime/run-ledger.mjs';
 import { readRuntimeStatusSnapshot } from './runtime-status-snapshot.mjs';
 import { readCanaryStatus } from './adapters/agent-runtime/canary.mjs';
+import { evaluateSettleSmokeResult } from './adapters/agent-runtime/settle-smoke.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
 import { resolveReviewerRuntimeCutover } from './reviewer-runtime-cutover.mjs';
 
@@ -130,6 +131,7 @@ function buildRuntimeStatus(rootDir, {
   readAuditRowsImpl = readAuditRows,
   summarizeRunsImpl = summarizeRuntimeRuns,
   readCanaryImpl = readCanaryStatus,
+  evaluateSettleSmokeImpl = evaluateSettleSmokeResult,
   loadDomainConfigImpl = loadDomainConfig,
   env = process.env,
 } = {}) {
@@ -169,6 +171,7 @@ function buildRuntimeStatus(rootDir, {
 
   const runs = summarizeRunsImpl(rootDir, { windowMs, now });
   const canary = readCanaryImpl(rootDir);
+  const settleSmoke = evaluateSettleSmokeImpl(rootDir, { runtime: 'agent-runtime', now });
   let reviewerCutover = null;
   try {
     const codePrDomain = loadDomainConfigImpl(rootDir, 'code-pr');
@@ -181,6 +184,7 @@ function buildRuntimeStatus(rootDir, {
         now,
         readSnapshotImpl,
         readCanaryImpl,
+        evaluateSettleSmokeImpl,
       });
     }
   } catch {
@@ -193,6 +197,7 @@ function buildRuntimeStatus(rootDir, {
         now,
         readSnapshotImpl,
         readCanaryImpl,
+        evaluateSettleSmokeImpl,
       });
     } else {
       reviewerCutover = null;
@@ -213,6 +218,7 @@ function buildRuntimeStatus(rootDir, {
     reconcile: lastResume?.reconcile || snapStatus?.reconciled || null,
     runs,
     canary: canary || null,
+    settleSmoke,
     reviewerCutover,
   };
 }

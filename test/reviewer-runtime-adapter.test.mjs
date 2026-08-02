@@ -24,6 +24,7 @@ import {
 } from '../src/adapters/reviewer-runtime/index.mjs';
 import { writeRuntimeStatusSnapshot } from '../src/runtime-status-snapshot.mjs';
 import { writeCanaryStatus } from '../src/adapters/agent-runtime/canary.mjs';
+import { writeSettleSmokeResult } from '../src/adapters/agent-runtime/settle-smoke.mjs';
 import { createCliDirectReviewerRuntimeAdapter } from '../src/adapters/reviewer-runtime/cli-direct/index.mjs';
 import {
   CANONICAL_OAUTH_STRIP_ENV as CLI_DIRECT_CANONICAL_OAUTH_STRIP_ENV,
@@ -90,6 +91,17 @@ function makeHqEnv(hqRoot, overrides = {}) {
     USER: process.env.USER || 'test-user',
     ...overrides,
   };
+}
+
+function writeFreshSettleSmoke(rootDir, at = '2026-08-02T10:00:00.000Z') {
+  writeSettleSmokeResult(rootDir, 'agent-runtime', {
+    status: 'pass',
+    at,
+    dispatched: true,
+    settled: true,
+    attributed: true,
+    workerRunId: 'wr_ready',
+  });
 }
 
 function validReviewBody(verdict = 'Comment only') {
@@ -170,6 +182,7 @@ test('resolveReviewerRuntimeName selects agent-runtime only when agentos cutover
       config: { enabled: true },
     });
     writeCanaryStatus(rootDir, { status: 'pass' });
+    writeFreshSettleSmoke(rootDir);
     assert.equal(
       resolveReviewerRuntimeName(
         { id: 'code-pr', reviewerRuntime: 'agent-runtime', agentRuntimeSettleSmokeVerified: true },
@@ -258,6 +271,7 @@ test('createReviewerRuntimeAdapterForDomain applies readiness-gated orchestratio
       config: { enabled: true },
     });
     writeCanaryStatus(rootDir, { status: 'pass' });
+    writeFreshSettleSmoke(rootDir);
     const agentRuntimeAdapter = createReviewerRuntimeAdapterForDomain({
       rootDir,
       domainId: 'code-pr',
@@ -325,6 +339,7 @@ test('createReviewerRuntimeAdapterForDomain kill-switches back to standalone cli
       config: { enabled: true },
     });
     writeCanaryStatus(rootDir, { status: 'pass' });
+    writeFreshSettleSmoke(rootDir);
     const adapter = createReviewerRuntimeAdapterForDomain({
       rootDir,
       domainId: 'code-pr',

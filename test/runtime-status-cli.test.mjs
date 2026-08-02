@@ -10,6 +10,7 @@ import { createRouterAuditSink } from '../src/adapters/agent-runtime/router/audi
 import { writeRuntimeStatusSnapshot } from '../src/runtime-status-snapshot.mjs';
 import { writeCanaryStatus } from '../src/adapters/agent-runtime/canary.mjs';
 import { recordRuntimeRun } from '../src/adapters/agent-runtime/run-ledger.mjs';
+import { writeSettleSmokeResult } from '../src/adapters/agent-runtime/settle-smoke.mjs';
 
 function tmpRoot() {
   return mkdtempSync(join(tmpdir(), 'runtime-status-cli-'));
@@ -140,22 +141,23 @@ test('a degraded probe renders "degraded" with the failing component named', () 
   }
 });
 
-test('runtimeMain prints the block and returns 0; --json returns the model', () => {
+test('runtimeMain prints the block and returns 0; --json returns the model', async () => {
   const rootDir = tmpRoot();
   try {
     let out = '';
     const io = { stdout: { write: (s) => { out += s; } }, stderr: { write() {} } };
-    const code = runtimeMain(['status', '--root', rootDir], io);
+    const code = await runtimeMain(['status', '--root', rootDir], io);
     assert.equal(code, 0);
     assert.match(out, /^mode: os/);
     assert.match(out, /fallback canary: never run/);
 
     out = '';
-    const jsonCode = runtimeMain(['status', '--root', rootDir, '--json'], io);
+    const jsonCode = await runtimeMain(['status', '--root', rootDir, '--json'], io);
     assert.equal(jsonCode, 0);
     const parsed = JSON.parse(out);
     assert.equal(parsed.mode, 'os');
     assert.equal(parsed.runs.total, 0);
+    assert.equal(parsed.settleSmoke.reason, 'missing');
     assert.equal(parsed.reviewerCutover, null);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
@@ -177,6 +179,14 @@ test('runtime status surfaces reviewer cutover refusal reasons for code-pr', () 
       config: { enabled: true },
     });
     writeCanaryStatus(rootDir, { status: 'fail', at: '2026-07-17T06:00:12.000Z', durationMs: 94_000 });
+    writeSettleSmokeResult(rootDir, 'agent-runtime', {
+      status: 'pass',
+      at: '2026-07-17T10:00:00.000Z',
+      dispatched: true,
+      settled: true,
+      attributed: true,
+      workerRunId: 'wr_1',
+    });
     const model = buildRuntimeStatus(rootDir, {
       now: () => new Date('2026-07-17T12:00:00.000Z'),
       env: { AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos' },
@@ -232,15 +242,55 @@ test('runtime status surfaces reviewer runtime kill-switch when code-pr config i
   }
 });
 
-test('runtimeMain rejects an unknown subcommand and a bad flag', () => {
+test('runtimeMain rejects an unknown subcommand and a bad flag', async () => {
   let err = '';
   const io = { stdout: { write() {} }, stderr: { write: (s) => { err += s; } } };
-  assert.equal(runtimeMain(['bogus'], io), 2);
+  assert.equal(await runtimeMain(['bogus'], io), 2);
   assert.match(err, /unknown runtime command bogus/);
 
   err = '';
-  assert.equal(runtimeMain(['status', '--nope'], io), 2);
+  assert.equal(await runtimeMain(['status', '--nope'], io), 2);
   assert.match(err, /unknown argument/);
+});
+
+test('runtime settle-smoke persists a PASS artifact and prints JSON', async () => {
+  const rootDir = tmpRoot();
+  try {
+    let out = '';
+    const code = await runtimeMain(['settle-smoke', '--runtime', 'agent-runtime', '--root', rootDir, '--json'], {
+      stdout: { write: (s) => { out += s; } },
+      stderr: { write() {} },
+      now: () => new Date('2026-08-02T10:00:00.000Z'),
+      createRuntime: () => ({
+        async run() {
+          return {
+            runRef: 'smoke-req-1',
+            async await() {
+              return {
+                status: 'completed',
+                usage: { workerRunId: 'wr_smoke_1' },
+              };
+            },
+          };
+        },
+      }),
+    });
+    assert.equal(code, 0);
+    const parsed = JSON.parse(out);
+    assert.equal(parsed.status, 'pass');
+    assert.equal(parsed.dispatched, true);
+    assert.equal(parsed.settled, true);
+    assert.equal(parsed.attributed, true);
+    assert.equal(parsed.workerRunId, 'wr_smoke_1');
+
+    const status = buildRuntimeStatus(rootDir, {
+      now: () => new Date('2026-08-02T10:01:00.000Z'),
+    });
+    assert.equal(status.settleSmoke.ok, true);
+    assert.equal(status.settleSmoke.result.workerRunId, 'wr_smoke_1');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('snapshot and canary status writers reject cross-user durable state writes', () => {

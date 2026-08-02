@@ -1802,9 +1802,7 @@ async function main() {
     watcherHeartbeat.markPoll({ source });
     stallWatchdog.beginPoll();
     try {
-      // Startup and every periodic watcher tick sweep the principal-owned
-      // canonical alert queue. This recovers durable work after a process
-      // restart even when no new alert is enqueued to trigger a drain.
+      // Every tick sweeps the principal-owned queue, including startup recovery.
       scheduleAlertDrain();
       try {
         const sinkHealth = readAlertSinkHealth();

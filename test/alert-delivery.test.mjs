@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -11,6 +19,7 @@ import {
   pendingDir,
   readAlertSinkHealth,
   resolveAlertDefaults,
+  sweepAlertArchiveRetention,
 } from '../src/alert-delivery.mjs';
 
 function makeEnv(overrides = {}) {
@@ -37,6 +46,20 @@ test('watcher alert defaults require an explicit recipient', () => {
     () => resolveAlertDefaults({}),
     /ALERT_TO must be configured for alert delivery/
   );
+});
+
+test('alert sink health remains observable without an ALERT_TO recipient', () => {
+  const { env, rootDir } = makeEnv();
+  delete env.ALERT_TO;
+  const pendingRoot = pendingDir(rootDir);
+  mkdirSync(pendingRoot, { recursive: true });
+  writeFileSync(join(pendingRoot, 'owed.json'), '{}\n');
+
+  const health = readAlertSinkHealth({ env });
+
+  assert.equal(health.ready, false);
+  assert.equal(health.pendingCount, 1);
+  rmSync(rootDir, { recursive: true, force: true });
 });
 
 test('watcher alert defaults use the configured alert bus and token discovery chain', () => {
@@ -233,7 +256,25 @@ test('recovered bus drains the queued receipt exactly once', async (t) => {
   assert.equal(drained.drained, 1);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, 'http://127.0.0.1:18799/hooks/wake');
-  assert.equal(calls[0].options.body.metadata.alertId, queued.id);
+  assert.deepEqual(calls[0].options.body, {
+    text: 'hammer cap text',
+    message: 'hammer cap text',
+    mode: 'now',
+    wakeMode: 'now',
+    deliver: true,
+    channel: 'telegram',
+    to: '123456',
+    name: 'Adversarial Watcher Health Test',
+    agentId: 'ops',
+    event: 'hammer_lifetime_ceiling_reached',
+    payload: { cap: 3 },
+    severity: 'critical',
+    source: 'adversarial-review',
+    metadata: {
+      alertId: queued.id,
+      event: 'hammer_lifetime_ceiling_reached',
+    },
+  });
   assert.equal(readAlertSinkHealth({ env }).ready, true);
   assert.equal(readAlertSinkHealth({ env }).pendingCount, 0);
 
@@ -412,6 +453,33 @@ test('health readiness is derived from live pending and quarantine counts', asyn
   const health = readAlertSinkHealth({ env });
   assert.equal(health.ready, false);
   assert.equal(health.pendingCount, 1);
+});
+
+test('archive retention removes old delivered documents and receipts only', (t) => {
+  const { rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deliveredRoot = sinkPath(rootDir, 'delivered');
+  const receiptsRoot = sinkPath(rootDir, 'receipts');
+  mkdirSync(deliveredRoot, { recursive: true });
+  mkdirSync(receiptsRoot, { recursive: true });
+  const oldDelivered = join(deliveredRoot, 'old.json');
+  const oldReceipt = join(receiptsRoot, 'old.json');
+  const freshReceipt = join(receiptsRoot, 'fresh.json');
+  for (const filePath of [oldDelivered, oldReceipt, freshReceipt]) {
+    writeFileSync(filePath, '{}\n');
+  }
+  const oldAt = new Date('2026-06-01T00:00:00.000Z');
+  utimesSync(oldDelivered, oldAt, oldAt);
+  utimesSync(oldReceipt, oldAt, oldAt);
+
+  const removed = sweepAlertArchiveRetention(rootDir, {
+    now: new Date('2026-08-02T00:00:00.000Z'),
+    retentionDays: 30,
+  });
+
+  assert.equal(removed, 2);
+  assert.deepEqual(readdirSync(deliveredRoot), []);
+  assert.deepEqual(readdirSync(receiptsRoot), ['fresh.json']);
 });
 
 test('health-probe and hammer-cap callers both resolve through the shared alert sink module', async () => {

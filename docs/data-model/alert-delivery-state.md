@@ -25,10 +25,10 @@ Directory: `data/alert-delivery/`
 |---|---|---|
 | `pending/*.json` | Alert document | Durable work waiting for delivery or retry. Drainers process sorted files up to their item cap. |
 | `inflight/*.json` | Alert document | Claimed work being posted to the notification bus. Stale inflight files are recovered back to `pending/`. |
-| `delivered/*.json` | Alert document with `deliveredAt` | Successful delivery archive. |
+| `delivered/*.json` | Alert document with `deliveredAt` | Successful delivery archive, retained for 30 days by default. |
 | `quarantine/*.json` | Original unreadable file bytes | Files that cannot be parsed or read during pending drain or inflight recovery. Quarantining is fail-isolating: later alerts continue draining. |
 | `dead-letter/*.json` | Alert document with `deadLetteredAt` and `lastError` | Parseable alerts that exhausted the bounded transport-attempt ceiling. Dead letters are terminal and operator-actionable; they are not retried silently forever. |
-| `receipts/*.json` | Receipt document | Append-style audit receipts for queued, failed, and delivered phases. |
+| `receipts/*.json` | Receipt document | Append-style audit receipts for queued, failed, and delivered phases, retained for 30 days by default. |
 | `health.json` | Health snapshot | Last observed delivery health and live queue counters for probes and operators. |
 
 ## Health Snapshot
@@ -72,8 +72,21 @@ Directory: `data/alert-delivery/`
   delivery failures.
 - Quarantine is intentionally operator-visible. A non-empty quarantine directory
   keeps `readAlertSinkHealth().ready` false even when no pending alerts remain.
+- Sink health resolves only the principal-owned state root; it does not require
+  `ALERT_TO`. A missing recipient can therefore never hide already-owed work
+  from the watcher health log or an operator probe.
+- Each drain sweep removes `delivered/` documents and `receipts/` older than
+  `ADVERSARIAL_ALERT_DELIVERY_ARCHIVE_RETENTION_DAYS` (default 30). Health never
+  scans the delivered archive, so its cost is bounded by the live queue lanes.
 - The default URL is host-reachable `http://127.0.0.1:18799/hooks/wake`; container
   deployments must set the canonical config/env URL explicitly.
+- `/hooks/wake` receives the exact body pinned in
+  `test/alert-delivery.test.mjs`, including `mode: now`, `wakeMode: now`,
+  `deliver: true`, the configured destination fields, and
+  `metadata.alertId`. Because stale-inflight recovery is at-least-once, the
+  receiver must deduplicate on `metadata.alertId`; a crash after receiver
+  acceptance but before the delivered rename can otherwise produce one
+  duplicate operator page.
 - The state root is principal-owned. The writer verifies its effective UID
   before every queue-directory initialization and refuses cross-user writes,
   preventing shared-root WAL/rename ownership races. Different worker UIDs get

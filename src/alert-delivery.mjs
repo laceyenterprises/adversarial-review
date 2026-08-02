@@ -29,6 +29,7 @@ const DEFAULT_RETRY_DELAY_MS = 5_000;
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 const DEFAULT_STALE_INFLIGHT_AGE_MS = 120_000;
 const DEFAULT_MAX_DELIVERY_ATTEMPTS = 8;
+const DEFAULT_ARCHIVE_RETENTION_DAYS = 30;
 const HTTP_TIMEOUT_MS = Number(
   process.env.ALERT_HTTP_TIMEOUT_MS || process.env.HTTP_TIMEOUT_MS || DEFAULT_HTTP_TIMEOUT_MS
 );
@@ -136,6 +137,16 @@ function alertSinkRoot(rootDir = ROOT) {
   return normalized.endsWith('/data/alert-delivery')
     ? normalized
     : join(normalized, 'data', 'alert-delivery');
+}
+
+function resolveAlertSinkStateRoot(env = process.env, rootDir = ROOT) {
+  const defaultOwnerRoot = rootDir === ROOT
+    ? join(homedir(), '.config', 'adversarial-review')
+    : rootDir;
+  return firstNonEmpty(
+    env.ADVERSARIAL_ALERT_DELIVERY_ROOT,
+    env.AGENT_OS_ALERT_DELIVERY_STATE_DIR
+  ) || alertSinkRoot(defaultOwnerRoot);
 }
 
 function pendingDir(rootDir = ROOT) {
@@ -268,6 +279,37 @@ function countDirEntries(dirPath) {
   }
 }
 
+function sweepAlertArchiveRetention(rootDir, {
+  now = new Date(),
+  retentionDays = DEFAULT_ARCHIVE_RETENTION_DAYS,
+  statSyncImpl = statSync,
+  rmSyncImpl = rmSync,
+} = {}) {
+  const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  const cutoffMs = nowMs - (positiveInteger(retentionDays, DEFAULT_ARCHIVE_RETENTION_DAYS)
+    * 24 * 60 * 60 * 1000);
+  let removed = 0;
+  for (const directory of [deliveredDir(rootDir), receiptDir(rootDir)]) {
+    let names;
+    try {
+      names = readdirSync(directory).filter((name) => name.endsWith('.json'));
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      const filePath = join(directory, name);
+      try {
+        if (statSyncImpl(filePath).mtimeMs >= cutoffMs) continue;
+        rmSyncImpl(filePath, { force: true });
+        removed += 1;
+      } catch {
+        // Retention is best effort. Delivery and queue health remain authoritative.
+      }
+    }
+  }
+  return removed;
+}
+
 function setHealthQueued(rootDir, doc) {
   const prior = readHealth(rootDir);
   return writeHealth(rootDir, {
@@ -344,9 +386,6 @@ function resolveAlertDefaults(env = process.env, {
   loadConfigRuntimeImpl = null,
   rootDir = ROOT,
 } = {}) {
-  const defaultOwnerRoot = rootDir === ROOT
-    ? join(homedir(), '.config', 'adversarial-review')
-    : rootDir;
   const alertTo = firstNonEmpty(env.ALERT_TO);
   if (!alertTo) {
     throw new Error('ALERT_TO must be configured for alert delivery');
@@ -366,9 +405,7 @@ function resolveAlertDefaults(env = process.env, {
     alertTo,
     alertAgentId: env.ALERT_AGENT_ID || DEFAULT_ALERT_AGENT_ID,
     alertName: env.ALERT_NAME || DEFAULT_ALERT_NAME,
-    rootDir:
-      firstNonEmpty(env.ADVERSARIAL_ALERT_DELIVERY_ROOT, env.AGENT_OS_ALERT_DELIVERY_STATE_DIR)
-      || alertSinkRoot(defaultOwnerRoot),
+    rootDir: resolveAlertSinkStateRoot(env, rootDir),
     retryDelayMs: Math.max(
       0,
       Number(env.ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS || DEFAULT_RETRY_DELAY_MS)
@@ -380,6 +417,10 @@ function resolveAlertDefaults(env = process.env, {
     maxAttempts: positiveInteger(
       env.ADVERSARIAL_ALERT_DELIVERY_MAX_ATTEMPTS,
       DEFAULT_MAX_DELIVERY_ATTEMPTS
+    ),
+    archiveRetentionDays: positiveInteger(
+      env.ADVERSARIAL_ALERT_DELIVERY_ARCHIVE_RETENTION_DAYS,
+      DEFAULT_ARCHIVE_RETENTION_DAYS
     ),
   };
 }
@@ -806,6 +847,10 @@ async function drainPendingAlerts({
       }
     }
   }
+  const archiveRetentionRemoved = sweepAlertArchiveRetention(rootDir, {
+    now,
+    retentionDays: config.archiveRetentionDays,
+  });
   return {
     status: results.some((entry) => (
       entry.status === 'failed' || entry.status === 'dead-lettered'
@@ -814,6 +859,7 @@ async function drainPendingAlerts({
         : 'ok',
     drained: results.filter((entry) => entry.status === 'delivered').length,
     queued: countDirEntries(pendingDir(rootDir)),
+    archiveRetentionRemoved,
     results,
   };
 }
@@ -867,8 +913,8 @@ function scheduleAlertDrain({
 }
 
 function readAlertSinkHealth({ env = process.env, loadConfigRuntimeImpl = null } = {}) {
-  const config = resolveAlertDefaults(env, { loadConfigRuntimeImpl });
-  const rootDir = config.rootDir;
+  void loadConfigRuntimeImpl;
+  const rootDir = resolveAlertSinkStateRoot(env);
   const health = readHealth(rootDir);
   const pendingCount = countDirEntries(pendingDir(rootDir));
   const inflightCount = countDirEntries(inflightDir(rootDir));
@@ -881,7 +927,6 @@ function readAlertSinkHealth({ env = process.env, loadConfigRuntimeImpl = null }
       && deadLetterCount === 0,
     pendingCount,
     inflightCount,
-    deliveredCount: countDirEntries(deliveredDir(rootDir)),
     quarantineCount,
     deadLetterCount,
   };
@@ -927,4 +972,5 @@ export {
   readHooksToken,
   resolveAlertDefaults,
   scheduleAlertDrain,
+  sweepAlertArchiveRetention,
 };

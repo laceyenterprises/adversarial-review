@@ -28,6 +28,7 @@ import { hostname, homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
+import { reviewWithCodexOAuthResponses } from './codex-oauth-responses.mjs';
 import {
   resolveAgyPrintTimeoutMs,
   resolveAgyReviewerSubprocessTimeoutMs,
@@ -746,6 +747,11 @@ function estimateTokensFromText(text) {
   return Math.max(0, Math.round(s.length / 4));
 }
 
+function shouldRecoverCodexWithOAuth(err, modelProvider) {
+  const provider = String(modelProvider || '').trim().toLowerCase();
+  return Boolean(err?.progressTimedOut) && (!provider || provider === 'openai');
+}
+
 async function spawnCodexReview({
   codexCli = CODEX_CLI,
   outputPath,
@@ -816,20 +822,18 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
     let stderr = '';
     try {
       console.error('[reviewWithCodex] invoking native Codex CLI');
-      const result = await spawnCodexReview(
-        {
-          codexCli: CODEX_CLI,
-          outputPath,
-          prompt,
-          model: codexExecOverrides.model,
-          modelProvider: codexExecOverrides.modelProvider,
-          configOverrides: codexExecOverrides.configOverrides,
-          env,
-          cwd: process.cwd(),
-          timeout: resolveReviewerTimeoutMs(env),
-          maxBuffer: 10 * 1024 * 1024,
-        }
-      );
+      const result = await spawnCodexReview({
+        codexCli: CODEX_CLI,
+        outputPath,
+        prompt,
+        model: codexExecOverrides.model,
+        modelProvider: codexExecOverrides.modelProvider,
+        configOverrides: codexExecOverrides.configOverrides,
+        env,
+        cwd: process.cwd(),
+        timeout: resolveReviewerTimeoutMs(env),
+        maxBuffer: 10 * 1024 * 1024,
+      });
       stdout = result.stdout || '';
       stderr = result.stderr || '';
     } catch (err) {
@@ -838,6 +842,25 @@ async function reviewWithCodex(diff, extraContext = '', { promptStage = 'first' 
       const msg = `${err.message || ''}\n${stdout}\n${stderr}`;
       if (/401|unauthorized|oauth|login required|not logged in/i.test(msg)) {
         throw new OAuthError('codex', `CLI returned auth error: ${msg.substring(0, 200)}`);
+      }
+      if (shouldRecoverCodexWithOAuth(err, codexExecOverrides.modelProvider)) {
+        console.error('[reviewWithCodex] native CLI made no progress; retrying through OAuth Responses transport');
+        try {
+          const reasoningEffort = codexExecOverrides.configOverrides
+            .find((override) => override.key === 'model_reasoning_effort')?.value || 'high';
+          return await reviewWithCodexOAuthResponses(prompt, {
+            authPath: effectiveAuthPath,
+            model: codexExecOverrides.model || 'gpt-5.5',
+            reasoningEffort,
+            timeoutMs: resolveReviewerTimeoutMs(env),
+            idleTimeoutMs: Math.max(resolveProgressTimeoutMs(env), 3 * 60 * 1000),
+          });
+        } catch (fallbackErr) {
+          throw new Error(
+            `Native Codex made no progress and OAuth Responses recovery failed: `
+            + `${fallbackErr?.message || fallbackErr}`
+          );
+        }
       }
       throw new Error(`Native Codex exec failed: ${msg.substring(0, 800)}`);
     }
@@ -2555,6 +2578,7 @@ const __test__ = {
   reviewWithCodex,
   reviewWithGemini,
   sanitizeAgyReviewOutput,
+  shouldRecoverCodexWithOAuth,
   shouldPurgeGeminiReviewerSessionDir,
   spawnAgyReview,
   spawnCaptured,

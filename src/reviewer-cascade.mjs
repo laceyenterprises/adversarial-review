@@ -3,7 +3,7 @@
  *
  * "Cascade" is the LiteLLM/upstream-provider failure class ("all upstream
  * attempts failed"); the module now tracks EVERY transient reviewer failure
- * class (reviewer-timeout, launchctl-bootstrap, quota-exhausted,
+ * class (oauth-broken, reviewer-timeout, launchctl-bootstrap, quota-exhausted,
  * broker-unavailable, github-unavailable, deploy-wedge, provider-overloaded,
  * reviewer-empty-output) under the original name. The contract that makes this state matter:
  * transient failures must NOT burn `reviewed_prs.review_attempts` — the row
@@ -104,6 +104,7 @@ function normalizeTransientFailureClass(failureClass) {
   const value = String(failureClass || '').trim();
   if (
     value === 'cascade' ||
+    value === 'oauth-broken' ||
     value === 'reviewer-timeout' ||
     value === 'launchctl-bootstrap' ||
     value === 'quota-exhausted' ||

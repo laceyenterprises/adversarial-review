@@ -1256,6 +1256,57 @@ test('settleReviewerAttempt records reviewer timeout class without burning attem
   }
 });
 
+test('settleReviewerAttempt records oauth-broken without burning attempts', () => {
+  const { rootDir, db } = setupFixture();
+  try {
+    const repo = 'laceyenterprises/adversarial-review';
+    const prNumber = 195;
+    const warnings = [];
+    const statements = {
+      markPosted: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, review_attempts = review_attempts + 1 WHERE repo = ? AND pr_number = ?"
+      ),
+      markFailed: stmtMarkBugFailed(db),
+      releaseReviewLease: db.prepare(
+        "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+      ),
+      markCascadeFailed: stmtMarkCascadeFailed(db),
+      markPendingUpstream: stmtMarkPendingUpstream(db),
+      getReviewRow: db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'),
+    };
+
+    settleReviewerAttempt({
+      rootDir,
+      repoPath: repo,
+      prNumber,
+      result: {
+        ok: false,
+        error: 'Claude auth probe failed: Command timed out after 60000ms',
+        failureClass: 'oauth-broken',
+      },
+      failureAt: '2026-08-02T01:20:39.508Z',
+      maxRemediationRounds: 2,
+      statements,
+      log: { warn: (line) => warnings.push(line) },
+    });
+
+    const row = db.prepare(
+      'SELECT review_status, review_attempts, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get(repo, prNumber);
+    const state = readCascadeState(rootDir, { repo, prNumber });
+
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.equal(row.review_attempts, 0);
+    assert.match(row.failure_message, /^\[oauth-broken\]/);
+    assert.equal(state.lastFailureClass, 'oauth-broken');
+    assert.deepEqual(state.transientFailureBreakdown, { 'oauth-broken': 1 });
+    assert.match(warnings.join('\n'), /Reviewer oauth-broken failure/);
+  } finally {
+    db.close();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('settleReviewerAttempt records provider overload without burning attempts', () => {
   const { rootDir, db } = setupFixture();
   try {

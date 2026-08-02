@@ -604,6 +604,24 @@ function schemaV1() {
                 __type: TYPE_STRING,
                 __default: 'litellm-oauth-broker-standby-1',
               },
+              credential_decay_warn_after_seconds: {
+                __type: TYPE_INT,
+                __default: 300,
+                __min: 0,
+                __max: 86400,
+              },
+              credential_decay_crit_after_seconds: {
+                __type: TYPE_INT,
+                __default: 3600,
+                __min: 0,
+                __max: 604800,
+              },
+              credential_decay_last_good_crit_expiry_margin_seconds: {
+                __type: TYPE_INT,
+                __default: 1800,
+                __min: 0,
+                __max: 604800,
+              },
               critical_service_patterns: {
                 __type: TYPE_STRING,
                 __default:

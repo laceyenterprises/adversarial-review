@@ -1,6 +1,5 @@
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -62,7 +61,6 @@ import {
   postRemediationOutcomeComment,
 } from './adapters/comms/github-pr-comments/pr-comments.mjs';
 import { buildOwedDelivery, recordInitialCommentDelivery } from './adapters/comms/github-pr-comments/comment-delivery.mjs';
-import { redactSensitiveText } from './adapters/comms/github-pr-comments/redaction.mjs';
 import { deliverAlert } from './alert-delivery.mjs';
 import { captureRemediationBodyAfterPost } from './review-body-capture.mjs';
 import { resolvePRLifecycle, requestReviewRereview } from './review-state.mjs';
@@ -70,7 +68,10 @@ import { requestWatcherWake } from './watcher-wake.mjs';
 import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
 import { buildRemediationPrompt } from './remediation-prompt-builder.mjs';
 import {
+  applyMergeAgentBrokerEnv,
   prepareClaudeCodeRemediationStartupEnv,
+  prepareCodexRemediationStartupEnv,
+  prepareGeminiRemediationStartupEnv,
   resolveClaudeCodeCliPath,
   spawnClaudeCodeRemediationWorker,
   spawnCodexRemediationWorker,
@@ -91,7 +92,7 @@ import {
   followUpJobRepoPrKey,
   loadFollowUpPromptTemplate,
 } from './remediation-prompt.mjs';
-import { OAUTH_ENV_STRIP_LIST, scrubOAuthFallbackEnv } from './secret-source/env.mjs';
+import { OAUTH_ENV_STRIP_LIST } from './secret-source/env.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
 import { resolveRemediatorWorkerClassFromDomain } from './domain-policy.mjs';
 import {
@@ -103,7 +104,6 @@ import {
 import { validateStartupRoleRegistry } from './role-registry.mjs';
 import { validateStartupDeliveryIdentity } from './adapters/comms/github-pr-comments/delivery-identity.mjs';
 import { applyPreSpawnLifecycleGate } from './follow-up-stuck-claim-sweep.mjs';
-import { materializePerWorkerCodexAuth } from './codex-per-worker-auth.mjs';
 import { detectQuotaExhaustion, parseQuotaResetAt } from './quota-exhaustion.mjs';
 import {
   DEFAULT_REPLIES_ROOT,
@@ -111,7 +111,6 @@ import {
   digestWorkerFinalMessage,
   prepareHqReplyLandingPad,
   readWorkerFinalMessage,
-  requireWorkerReplyContext,
   resolveHqReplyArtifactPath,
   resolveHqReplyPath,
   resolveHqRoot,
@@ -361,16 +360,6 @@ function resolveGeminiCliPath() {
 // Shares the `gemini-2.5-pro` default GMW-01's reviewer model resolution uses,
 // so reviewer and remediator agree on the model family.
 const DEFAULT_GEMINI_REMEDIATION_MODEL = 'gemini-2.5-pro';
-const GEMINI_OAUTH_FALLBACK_ENV_STRIP_LIST = Object.freeze([
-  ...OAUTH_ENV_STRIP_LIST,
-  'GOOGLE_APPLICATION_CREDENTIALS',
-  'GOOGLE_GENAI_USE_VERTEXAI',
-  'GOOGLE_CLOUD_PROJECT',
-  'GOOGLE_CLOUD_LOCATION',
-  'GOOGLE_CLOUD_QUOTA_PROJECT',
-  'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE',
-]);
-
 function resolveGeminiRemediationModel(env = process.env) {
   const pinned = String(
     env.GEMINI_REMEDIATION_MODEL || env.GEMINI_MODEL || ''
@@ -403,103 +392,9 @@ function resolveCodexRemediationModel(env = process.env) {
 // subscription OAuth at `~/.gemini/oauth_creds.json`; an operator can pin an
 // alternate home via GEMINI_HOME (mirroring CODEX_HOME) or point directly at
 // the credential file via GEMINI_AUTH_PATH (mirroring CODEX_AUTH_PATH).
-function resolveGeminiAuthPath() {
-  if (process.env.GEMINI_AUTH_PATH) {
-    return process.env.GEMINI_AUTH_PATH;
-  }
-  const geminiHome = process.env.GEMINI_HOME || join(process.env.HOME || homedir(), '.gemini');
-  return join(geminiHome, 'oauth_creds.json');
-}
-
 // Derive the operator HOME that owns the gemini credential, mirroring
 // `resolveCodexAuthHome`: the CLI keys its OAuth off HOME, so a per-spawn
 // HOME must resolve back to the home that holds `.gemini/oauth_creds.json`.
-function resolveGeminiAuthHome(authPath) {
-  const normalizedAuthPath = resolve(authPath);
-  const segments = normalizedAuthPath.split('/').filter(Boolean);
-  if (segments[0] === 'Users' && segments[1]) {
-    return `/${segments[0]}/${segments[1]}`;
-  }
-  return dirname(dirname(normalizedAuthPath));
-}
-
-function scrubGeminiOAuthFallbackEnv(sourceEnv = process.env) {
-  const env = { ...sourceEnv };
-  const stripped = [];
-  for (const key of GEMINI_OAUTH_FALLBACK_ENV_STRIP_LIST) {
-    if (env[key] !== undefined) {
-      delete env[key];
-      stripped.push(key);
-    }
-  }
-  return { env, stripped };
-}
-
-function prepareGeminiRemediationStartupEnv({ gitIdentity = null } = {}) {
-  // Strip provider API credentials so the worker can never silently route
-  // through metered API keys or ADC/Vertex when the OAuth subscription is the
-  // expected billing path. Mirror the worker-pool Gemini adapter's forbidden
-  // fallback envelope for this direct CLI spawn path.
-  const { env, stripped } = scrubGeminiOAuthFallbackEnv(process.env);
-  env.PATH = buildInheritedPath(env.PATH || '');
-
-  // Per-spawn HOME/auth: pin HOME (and GEMINI_HOME) to the operator home that
-  // owns `.gemini/oauth_creds.json` so the detached worker resolves the same
-  // subscription credential regardless of any inherited HOME drift.
-  const authPath = resolveGeminiAuthPath();
-  const authHome = resolveGeminiAuthHome(authPath);
-  env.HOME = authHome;
-  env.GEMINI_HOME = dirname(authPath);
-
-  const overriddenGitEnv = [];
-  // Same belt-and-suspenders git identity override the codex spawn applies:
-  // git prefers GIT_AUTHOR_*/GIT_COMMITTER_* env over the workspace-local
-  // config, so set them explicitly to the gemini remediation identity. This
-  // keeps remediation commits attributed to the worker even if an operator's
-  // inherited GIT_* env would otherwise put their own identity on the commit.
-  if (gitIdentity) {
-    for (const [key, value] of [
-      ['GIT_AUTHOR_NAME', gitIdentity.name],
-      ['GIT_AUTHOR_EMAIL', gitIdentity.email],
-      ['GIT_COMMITTER_NAME', gitIdentity.name],
-      ['GIT_COMMITTER_EMAIL', gitIdentity.email],
-    ]) {
-      if (process.env[key] !== undefined && process.env[key] !== value) {
-        overriddenGitEnv.push(key);
-      }
-      env[key] = value;
-    }
-  }
-
-  const startupEvidence = {
-    stage: 'pre-side-effect-gate',
-    requestedContract: {
-      authMode: 'local-oauth',
-      authHome,
-      authPath,
-      forbiddenFallbacks: ['api-key', 'gemini-api-key', 'google-api-key', 'adc', 'vertex'],
-    },
-    resolvedStartup: {
-      resolvedAuthMode: 'local-oauth',
-      authHome,
-      authPath,
-      strippedEnv: stripped,
-    },
-    sanitizedEnv: {
-      stripped,
-      gitIdentityOverrides: overriddenGitEnv,
-    },
-    gitIdentity: gitIdentity ? { name: gitIdentity.name, email: gitIdentity.email } : null,
-    policyViolations: [],
-  };
-
-  return { env, startupEvidence };
-}
-
-function legacySpawnGeminiRemediationWorker(args) {
-  return spawnGeminiRemediationWorker(args);
-}
-
 // ── Worker-class dispatcher ────────────────────────────────────────────────
 
 function normalizeRemediationWorkerClass(workerClassInput) {
@@ -1007,245 +902,6 @@ function buildInheritedPath(currentPath = process.env.PATH || '') {
   return [...new Set(segments)].join(':');
 }
 
-function resolveCodexAuthHome(authPath) {
-  const normalizedAuthPath = resolve(authPath);
-  const segments = normalizedAuthPath.split('/').filter(Boolean);
-  if (segments[0] === 'Users' && segments[1]) {
-    return `/${segments[0]}/${segments[1]}`;
-  }
-  return dirname(dirname(normalizedAuthPath));
-}
-
-function resolveCodexAuthOwner(authPath) {
-  const homePath = resolveCodexAuthHome(authPath);
-  return homePath.split('/').filter(Boolean).at(-1) || null;
-}
-
-function buildCodexStartupPolicyViolation({ reason, requestedValue = null, resolvedValue = null }) {
-  return {
-    violation_type: 'conflicting-env-contract-breach',
-    reason,
-    requested_value: requestedValue,
-    resolved_value: resolvedValue,
-  };
-}
-
-const MERGE_AGENT_BROKER_TRUTHY = new Set(['1', 'true', 'yes', 'on']);
-const MERGE_AGENT_BROKER_FALSEY = new Set(['0', 'false', 'no', 'off']);
-const DEFAULT_OAUTH_BROKER_URL = 'http://127.0.0.1:4099';
-const DEFAULT_OAUTH_BROKER_STANDBY_URL = 'http://127.0.0.1:4097';
-const DEFAULT_MERGE_AGENT_BROKER_PROVIDER = 'github-app-merge-agent';
-
-function parseMergeAgentBrokerFlag(value) {
-  const raw = String(value ?? '').trim();
-  if (!raw) {
-    return { enabled: false, recognized: true, raw };
-  }
-  const normalized = raw.toLowerCase();
-  if (MERGE_AGENT_BROKER_TRUTHY.has(normalized)) {
-    return { enabled: true, recognized: true, raw };
-  }
-  if (MERGE_AGENT_BROKER_FALSEY.has(normalized)) {
-    return { enabled: false, recognized: true, raw };
-  }
-  return { enabled: false, recognized: false, raw };
-}
-
-function applyMergeAgentBrokerEnv(env, sourceEnv = process.env) {
-  const parsedFlag = parseMergeAgentBrokerFlag(sourceEnv.MERGE_AGENT_AUTH_VIA_BROKER);
-  const evidence = {
-    enabled: parsedFlag.enabled,
-    flagValue: parsedFlag.raw || null,
-    warning: parsedFlag.recognized
-      ? null
-      : 'MERGE_AGENT_AUTH_VIA_BROKER value not recognized; broker env not propagated',
-  };
-
-  if (!parsedFlag.enabled) {
-    return evidence;
-  }
-
-  const brokerUrl = sourceEnv.OAUTH_BROKER_URL || DEFAULT_OAUTH_BROKER_URL;
-  const standbyUrl = sourceEnv.OAUTH_BROKER_STANDBY_URL || DEFAULT_OAUTH_BROKER_STANDBY_URL;
-  const provider = sourceEnv.OAUTH_BROKER_MERGE_AGENT_PROVIDER || DEFAULT_MERGE_AGENT_BROKER_PROVIDER;
-
-  env.MERGE_AGENT_AUTH_VIA_BROKER = 'true';
-  env.OAUTH_BROKER_URL = brokerUrl;
-  env.OAUTH_BROKER_STANDBY_URL = standbyUrl;
-  env.OAUTH_BROKER_MERGE_AGENT_PROVIDER = provider;
-
-  if (sourceEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID) {
-    env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID =
-      sourceEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID;
-  }
-  if (sourceEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID) {
-    env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID =
-      sourceEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID;
-  }
-  if (sourceEnv.OAUTH_BROKER_SHARED_SECRET_FILE) {
-    env.OAUTH_BROKER_SHARED_SECRET_FILE = sourceEnv.OAUTH_BROKER_SHARED_SECRET_FILE;
-  }
-
-  return {
-    ...evidence,
-    brokerUrl,
-    standbyUrl,
-    provider,
-    providerOverridden: Boolean(sourceEnv.OAUTH_BROKER_MERGE_AGENT_PROVIDER),
-    expectedAppId: sourceEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID || null,
-    expectedInstallationId: sourceEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID || null,
-    sharedSecretFile: sourceEnv.OAUTH_BROKER_SHARED_SECRET_FILE || null,
-  };
-}
-
-function prepareCodexRemediationStartupEnv({ gitIdentity = null, perWorkerKey = null } = {}) {
-  const sharedAuthPath = resolveCodexAuthPath();
-  // Per-worker codex credential (burst OAuth-cascade fix). The remediation
-  // worker spawns `codex exec` against the shared ChatGPT OAuth credential;
-  // any refresh rotates-and-revokes it server-side and cascades across every
-  // concurrent codex worker on the host. Materialize a per-worker auth.json
-  // with a placeholder refresh_token so this worker can never rotate the shared
-  // token. The per-worker file is materialized UNDER the same operator home as
-  // the shared credential, so the HOME/owner contract below still resolves the
-  // same operator home (no policy violation). Fail-safe: null -> shared path.
-  // The detached worker reads its auth at startup; the file is reaped by the
-  // helper's stale-sweep (and overwritten on a same-job re-run), so we do NOT
-  // delete it here while the worker may still hold it open.
-  // Respect an explicitly pinned CODEX_AUTH_PATH (local mode / tests): the
-  // startup contract treats any resolved path that differs from the inherited
-  // pin as a violation, so we must not materialize away from an explicit pin.
-  const perWorkerAuth = process.env.CODEX_AUTH_PATH
-    ? null
-    : materializePerWorkerCodexAuth({
-        sharedAuthPath,
-        key: perWorkerKey ? `remediation-${perWorkerKey}` : `remediation-${process.pid}-${Date.now()}`,
-      });
-  const authPath = perWorkerAuth?.authPath || sharedAuthPath;
-  const authHome = resolveCodexAuthHome(authPath);
-  const authOwner = resolveCodexAuthOwner(authPath);
-  const codexHome = dirname(authPath);
-  const strippedEnv = [];
-  const overriddenGitEnv = [];
-  const policyViolations = [];
-
-  const scrubbed = scrubOAuthFallbackEnv(process.env);
-  strippedEnv.push(...scrubbed.stripped);
-
-  if (process.env.CODEX_AUTH_PATH && resolve(process.env.CODEX_AUTH_PATH) !== resolve(authPath)) {
-    policyViolations.push(
-      buildCodexStartupPolicyViolation({
-        reason: 'inherited CODEX_AUTH_PATH does not satisfy the requested local OAuth contract',
-        requestedValue: authPath,
-        resolvedValue: process.env.CODEX_AUTH_PATH,
-      })
-    );
-  }
-
-  if ((process.env.HOME || homedir()) && resolve(process.env.HOME || homedir()) !== resolve(authHome)) {
-    policyViolations.push(
-      buildCodexStartupPolicyViolation({
-        reason: 'inherited HOME does not satisfy the requested local OAuth owner contract',
-        requestedValue: authHome,
-        resolvedValue: process.env.HOME || homedir(),
-      })
-    );
-  }
-
-  if (process.env.CODEX_HOME && resolve(process.env.CODEX_HOME) !== resolve(codexHome)) {
-    policyViolations.push(
-      buildCodexStartupPolicyViolation({
-        reason: 'inherited CODEX_HOME does not satisfy the requested local OAuth contract',
-        requestedValue: codexHome,
-        resolvedValue: process.env.CODEX_HOME,
-      })
-    );
-  }
-
-  const startupEvidence = {
-    stage: 'pre-side-effect-gate',
-    requestedContract: {
-      authMode: 'local-oauth',
-      authOwnerUser: authOwner,
-      authHome,
-      authPath,
-      forbiddenFallbacks: ['api-key', 'openai-api-key'],
-      forbiddenCalls: ['authenticate'],
-    },
-    resolvedStartup: {
-      resolvedAuthMode: 'local-oauth',
-      resolvedAuthOwner: authOwner,
-      authHome,
-      authPath,
-      codexHome,
-    },
-    sanitizedEnv: {
-      stripped: strippedEnv,
-      gitIdentityOverrides: overriddenGitEnv,
-    },
-    gitIdentity: gitIdentity ? { name: gitIdentity.name, email: gitIdentity.email } : null,
-    policyViolations,
-  };
-
-  if (policyViolations.length) {
-    throw new StartupContractError(
-      policyViolations.map((item) => item.reason).join('; '),
-      {
-        requestedValue: policyViolations[0].requested_value,
-        resolvedValue: policyViolations[0].resolved_value,
-        startupEvidence,
-      }
-    );
-  }
-
-  const env = {
-    ...scrubbed.env,
-    PATH: buildInheritedPath(process.env.PATH),
-    CODEX_AUTH_PATH: authPath,
-    CODEX_HOME: codexHome,
-    HOME: authHome,
-  };
-  delete env.WORKER_CLASS;
-  delete env.WORKER_JOB_ID;
-  delete env.WORKER_RUN_AT;
-
-  // Belt-and-suspenders: even though `prepareWorkspaceForJob` writes
-  // `git config user.name/.email` locally to the workspace, git's documented
-  // precedence prefers `GIT_AUTHOR_*` / `GIT_COMMITTER_*` env vars over local
-  // config. Any inherited operator GIT_* env (from a launcher, shell profile,
-  // CI wrapper, etc.) would silently defeat that local config and put the
-  // operator's identity back on remediation commits. So when an identity is
-  // supplied we explicitly set those env vars to the worker identity for the
-  // spawned worker — which both (a) overrides any inherited operator value
-  // and (b) survives even if the worker's process tree calls git from a
-  // directory where the local config does not apply. We record the override
-  // in `startupEvidence.sanitizedEnv.gitIdentityOverrides` so any inherited
-  // value an operator had set is auditable rather than silently ignored.
-  if (gitIdentity) {
-    for (const [key, value] of [
-      ['GIT_AUTHOR_NAME', gitIdentity.name],
-      ['GIT_AUTHOR_EMAIL', gitIdentity.email],
-      ['GIT_COMMITTER_NAME', gitIdentity.name],
-      ['GIT_COMMITTER_EMAIL', gitIdentity.email],
-    ]) {
-      if (process.env[key] !== undefined && process.env[key] !== value) {
-        overriddenGitEnv.push(key);
-      }
-      env[key] = value;
-    }
-  }
-
-  // This spawn boundary is intentional: the Codex remediation worker can hand
-  // off final comment-only remediation through HQ/merge-agent, so the
-  // merge-agent broker contract must survive into that child environment.
-  startupEvidence.mergeAgentBroker = applyMergeAgentBrokerEnv(env);
-
-  return {
-    authPath,
-    env,
-    startupEvidence,
-  };
-}
-
 function assertValidRepoSlug(repo) {
   const value = String(repo ?? '').trim();
   if (!VALID_GITHUB_REPO_SLUG.test(value)) {
@@ -1577,10 +1233,6 @@ async function prepareWorkspaceForJob({
       ? { action: 'recloned', reason: workspaceState.reason }
       : { action: 'reused', reason: workspaceState.reason },
   };
-}
-
-function legacySpawnCodexRemediationWorker(args) {
-  return spawnCodexRemediationWorker(args);
 }
 
 function resolveWorkerStoredPath(rootDir, storedPath, {
@@ -4104,7 +3756,6 @@ async function consumeFollowUpJobsUntilCapacity({
   let stopped = 0;
   const deferredSamePRPaths = new Set();
   const delayedPendingPaths = new Set();
-  let pendingRetryDelayed = 0;
   const pendingCountsAtStart = countPendingFollowUpJobsByRetryWindow(rootDir, now());
   if (typeof quotaHoldRevalidator?.prefetch === 'function') {
     const prefetchNow = now();
@@ -4116,7 +3767,6 @@ async function consumeFollowUpJobsUntilCapacity({
   }
 
   while (!shouldStop() && (activeJobs.length + spawned) < concurrencyCap) {
-    /* eslint-disable no-await-in-loop */
     let result;
     try {
       result = await consumeNextFollowUpJob({
@@ -4134,7 +3784,6 @@ async function consumeFollowUpJobsUntilCapacity({
         },
         delayedPendingPaths,
         onDelayedPendingJob: () => {
-          pendingRetryDelayed += 1;
         },
         quotaHoldRevalidator,
         deliverAlertImpl,
@@ -4158,7 +3807,6 @@ async function consumeFollowUpJobsUntilCapacity({
       );
       continue;
     }
-    /* eslint-enable no-await-in-loop */
     results.push(result);
 
     if (result.consumed) {

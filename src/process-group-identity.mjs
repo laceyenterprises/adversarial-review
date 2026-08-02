@@ -43,7 +43,8 @@ async function verifyPgidIdentity(pgid, expectedSpawnedAt, {
         reason: `ps probe unavailable: ${message}; matched live process group only`,
       };
     }
-    return { match: false, reason: `ps probe failed: ${err?.message || err}` };
+    const code = err?.code ? ` (${err.code})` : '';
+    return { match: false, reason: `ps probe failed${code}: ${err?.message || err}` };
   }
   if (!lstart) {
     return { match: false, reason: 'ps returned no start time (pgid may have just exited)' };

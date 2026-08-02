@@ -464,6 +464,57 @@ test('local remediation cancel ignores process exit races after identity verific
   }
 });
 
+test('local remediation cancel retries transient process identity probe failures', async () => {
+  const calls = [];
+  const sleeps = [];
+  let probes = 0;
+  await cancelLocalRemediationWorker({
+    processId: 6363,
+    processGroupId: 6363,
+    spawnedAt: '2026-08-02T17:10:00.000Z',
+  }, {
+    execFileImpl: async () => {
+      calls.push('ps');
+      probes += 1;
+      if (probes < 3) {
+        const err = new Error('resource temporarily unavailable');
+        err.code = 'EAGAIN';
+        throw err;
+      }
+      return { stdout: '2026-08-02T17:10:00.000Z\n', stderr: '' };
+    },
+    processKillImpl: (target, signal) => calls.push(`${target}:${signal}`),
+    sleepImpl: async (ms) => sleeps.push(ms),
+  });
+
+  assert.deepEqual(sleeps, [50, 100]);
+  assert.deepEqual(calls, ['-6363:0', 'ps', 'ps', 'ps', '-6363:SIGTERM']);
+});
+
+test('local remediation cancel bounds persistent transient identity probe failures', async () => {
+  let probes = 0;
+  const sleeps = [];
+  await assert.rejects(
+    cancelLocalRemediationWorker({
+      processId: 6464,
+      processGroupId: 6464,
+      spawnedAt: '2026-08-02T17:10:00.000Z',
+    }, {
+      execFileImpl: async () => {
+        probes += 1;
+        const err = new Error('input/output error');
+        err.code = 'EIO';
+        throw err;
+      },
+      processKillImpl: () => true,
+      sleepImpl: async (ms) => sleeps.push(ms),
+    }),
+    /refusing to cancel remediation worker with unconfirmed identity/,
+  );
+  assert.equal(probes, 4);
+  assert.deepEqual(sleeps, [50, 100, 200]);
+});
+
 test('gemini and codex remediation spawners close earlier fds when later sync open fails', () => {
   const rootDir = makeRoot();
   const promptPath = join(rootDir, 'prompt.md');

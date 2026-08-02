@@ -264,11 +264,14 @@ test('runtime settle-smoke persists a PASS artifact and prints JSON', async () =
   const rootDir = tmpRoot();
   try {
     let out = '';
+    let createOptions = null;
     const code = await runtimeMain(['settle-smoke', '--runtime', 'agent-runtime', '--root', rootDir, '--json'], {
       stdout: { write: (s) => { out += s; } },
       stderr: { write() {} },
       now: () => new Date('2026-08-02T10:00:00.000Z'),
-      createRuntime: () => ({
+      createRuntime: (options) => {
+        createOptions = options;
+        return {
         async run() {
           return {
             runRef: 'smoke-req-1',
@@ -280,9 +283,11 @@ test('runtime settle-smoke persists a PASS artifact and prints JSON', async () =
             },
           };
         },
-      }),
+        };
+      },
     });
     assert.equal(code, 0);
+    assert.deepEqual(createOptions, { rootDir, runtime: 'agent-runtime' });
     const parsed = JSON.parse(out);
     assert.equal(parsed.status, 'pass');
     assert.equal(parsed.dispatched, true);

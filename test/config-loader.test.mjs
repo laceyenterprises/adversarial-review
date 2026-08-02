@@ -1627,6 +1627,38 @@ test('post_deploy_verify mirror loads through strict Node schema and env aliases
   }
 });
 
+test('post-merge activation rollout controls load through strict Node schema and env aliases', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      deploy:
+        post_merge_activation:
+          enabled: true
+          enforce: false
+          dispatch_on_fail: false
+    `);
+    const cfg = loadConfig({
+      topPath: top,
+      env: {
+        HQ_POST_MERGE_ACTIVATION_ENABLED: 'false',
+        AGENT_OS_POST_MERGE_ACTIVATION_ENFORCE: 'true',
+        HQ_POST_MERGE_ACTIVATION_DISPATCH_ON_FAIL: 'true',
+      },
+    });
+    assert.equal(cfg.get('deploy.post_merge_activation.enabled'), false);
+    assert.equal(cfg.get('deploy.post_merge_activation.enforce'), true);
+    assert.equal(cfg.get('deploy.post_merge_activation.dispatch_on_fail'), true);
+    assert.equal(
+      cfg.resolutionTrace('deploy.post_merge_activation.enforce').at(-1).source,
+      'env:AGENT_OS_POST_MERGE_ACTIVATION_ENFORCE',
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('config.local.yaml tolerates unknown nested post_deploy_verify keys and reads mirrored ones', () => {
   const tmp = freshTmp();
   try {

@@ -353,6 +353,33 @@ function schemaV1() {
           },
         },
       },
+      // PMA-07 post-merge activation rollout controls. Python/main-catchup
+      // owns the behavior, but adversarial-review loads the shared config under
+      // this strict schema and must accept the same operator-owned keys.
+      deploy: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          post_merge_activation: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              enabled: {
+                __type: TYPE_BOOL,
+                __default: true,
+              },
+              enforce: {
+                __type: TYPE_BOOL,
+                __default: false,
+              },
+              dispatch_on_fail: {
+                __type: TYPE_BOOL,
+                __default: false,
+              },
+            },
+          },
+        },
+      },
       roots: {
         __type: TYPE_DICT,
         __strict: true,
@@ -2485,6 +2512,18 @@ export const ENV_ALIASES = {
   'post_deploy_verify.boot_window_seconds': {
     canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS',
     aliases: [['HQ_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS', identity]],
+  },
+  'deploy.post_merge_activation.enabled': {
+    canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_ENABLED',
+    aliases: [['HQ_POST_MERGE_ACTIVATION_ENABLED', identity]],
+  },
+  'deploy.post_merge_activation.enforce': {
+    canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_ENFORCE',
+    aliases: [['HQ_POST_MERGE_ACTIVATION_ENFORCE', identity]],
+  },
+  'deploy.post_merge_activation.dispatch_on_fail': {
+    canonical: 'AGENT_OS_POST_MERGE_ACTIVATION_DISPATCH_ON_FAIL',
+    aliases: [['HQ_POST_MERGE_ACTIVATION_DISPATCH_ON_FAIL', identity]],
   },
   'reviewer.gemini.mode': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_MODE',

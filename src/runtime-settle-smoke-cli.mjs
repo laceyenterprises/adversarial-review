@@ -71,7 +71,7 @@ async function runRuntimeSettleSmoke({
   rootDir,
   runtime = DEFAULT_RUNTIME,
   now = () => new Date(),
-  createRuntime = () => createOsDispatchAgentRuntime(),
+  createRuntime = (options = {}) => createOsDispatchAgentRuntime(options),
   writeResultImpl = writeSettleSmokeResult,
 } = {}) {
   if (!rootDir) throw new TypeError('runRuntimeSettleSmoke requires rootDir');
@@ -81,7 +81,7 @@ async function runRuntimeSettleSmoke({
 
   const request = buildSettleSmokeRequest({ now });
   const startedAt = now().toISOString();
-  const runtimeAdapter = createRuntime({ runtime });
+  const runtimeAdapter = createRuntime({ rootDir, runtime });
   let handle = null;
   let result = null;
   let failure = null;

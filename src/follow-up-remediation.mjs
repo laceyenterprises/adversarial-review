@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { homedir, userInfo } from 'node:os';
+import { userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -73,6 +73,11 @@ import {
   prepareCodexRemediationStartupEnv,
   prepareGeminiRemediationStartupEnv,
   resolveClaudeCodeCliPath,
+  resolveCodexAuthPath,
+  resolveCodexCliPath,
+  resolveCodexRemediationModel,
+  resolveGeminiCliPath,
+  resolveGeminiRemediationModel,
   spawnClaudeCodeRemediationWorker,
   spawnCodexRemediationWorker,
   spawnGeminiRemediationWorker,
@@ -288,10 +293,6 @@ class StartupContractError extends Error {
   }
 }
 
-function resolveCodexCliPath() {
-  return process.env.CODEX_CLI_PATH || process.env.CODEX_CLI || 'codex';
-}
-
 function currentUsername(env = process.env) {
   return env.USER || env.LOGNAME || userInfo().username;
 }
@@ -332,69 +333,6 @@ function assertHqDispatchOwnerMatches(env = process.env) {
 // the same way under a hard usage cap.
 const QUOTA_REMEDIATION_BACKOFF_MS = 15 * 60 * 1000;
 
-function resolveCodexAuthPath() {
-  if (process.env.CODEX_AUTH_PATH) {
-    return process.env.CODEX_AUTH_PATH;
-  }
-
-  const codexHome = process.env.CODEX_HOME || join(process.env.HOME || homedir(), '.codex');
-  return join(codexHome, 'auth.json');
-}
-
-// ── Gemini remediation worker (third model; unfreezes single-provider caps) ─
-// Gemini is a first-class remediator alongside codex / claude-code: when an
-// operator pins `ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR=gemini` (or the
-// per-PR routing selects it), remediation runs on the native gemini CLI
-// headless instead of failing because the cross-model partner is quota-capped.
-// Mirrors `spawnCodexRemediationWorker`: scrubbed OAuth env, per-spawn
-// HOME/auth, the prompt delivered through stdin (never argv), and a fixed
-// `gemini-remediation` provenance trailer.
-
-function resolveGeminiCliPath() {
-  return process.env.GEMINI_CLI_PATH || process.env.GEMINI_CLI || 'gemini';
-}
-
-// Best available Gemini model for unattended remediation. Pinned to the
-// pro tier by default (matching the gemini coding worker's worker-classes.json
-// default); an operator can override per-host via env without a code change.
-// Shares the `gemini-2.5-pro` default GMW-01's reviewer model resolution uses,
-// so reviewer and remediator agree on the model family.
-const DEFAULT_GEMINI_REMEDIATION_MODEL = 'gemini-2.5-pro';
-function resolveGeminiRemediationModel(env = process.env) {
-  const pinned = String(
-    env.GEMINI_REMEDIATION_MODEL || env.GEMINI_MODEL || ''
-  ).trim();
-  return pinned || DEFAULT_GEMINI_REMEDIATION_MODEL;
-}
-
-// SEV0 2026-07-19: the codex remediation worker MUST pin an explicit --model.
-// When it rode codex's server-default model, that default routed tool execution
-// through the `code_mode_only` path whose internal "code-mode host" times out at
-// handshake (`codex_core::tools::router: error=timed out negotiating with the
-// code-mode host`). The worker then cannot run a single shell command — no git
-// audit, no edits, no commit/push, and critically never writes its reply
-// artifact — so every remediation stops `no-progress` and the pipeline grounds
-// fleet-wide. gpt-5.5 (the codex worker-class default, and what the DAG pack
-// walkers pin) runs direct exec and is unaffected. Overridable via env so a
-// future model move does not require a code change.
-const DEFAULT_CODEX_REMEDIATION_MODEL = 'gpt-5.5';
-function resolveCodexRemediationModel(env = process.env) {
-  const pinned = String(
-    env.ADVERSARIAL_REMEDIATION_CODEX_MODEL
-      || env.CODEX_REMEDIATION_MODEL
-      || env.CODEX_MODEL_ID
-      || ''
-  ).trim();
-  return pinned || DEFAULT_CODEX_REMEDIATION_MODEL;
-}
-
-// Resolve the gemini OAuth credential path. The gemini CLI persists its
-// subscription OAuth at `~/.gemini/oauth_creds.json`; an operator can pin an
-// alternate home via GEMINI_HOME (mirroring CODEX_HOME) or point directly at
-// the credential file via GEMINI_AUTH_PATH (mirroring CODEX_AUTH_PATH).
-// Derive the operator HOME that owns the gemini credential, mirroring
-// `resolveCodexAuthHome`: the CLI keys its OAuth off HOME, so a per-spawn
-// HOME must resolve back to the home that holds `.gemini/oauth_creds.json`.
 // ── Worker-class dispatcher ────────────────────────────────────────────────
 
 function normalizeRemediationWorkerClass(workerClassInput) {

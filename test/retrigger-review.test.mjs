@@ -525,6 +525,220 @@ test('retrigger-review exact-head-now can cancel and reset an active reviewer', 
   }
 });
 
+test('retrigger-review exact-head-now reports active-review cancellation refusal', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'reviewing',
+    reviewerSessionUuid: 'sess-238',
+    reviewerPgid: 8123,
+  });
+
+  const err = makeCaptureStream();
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--exact-head-now',
+    '--cancel-active-review',
+    '--root-dir', rootDir,
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: err,
+    cancelActiveReviewImpl: async () => ({
+      signalled: false,
+      target: { kind: 'process-group', id: 8123 },
+      error: 'identity-unconfirmed',
+    }),
+  });
+
+  assert.equal(rc, 1);
+  assert.match(err.text(), /refused:active-review-cancel-failed/);
+});
+
+test('retrigger-review exact-head-now refuses when cancelled reviewer remains alive', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'reviewing',
+    reviewerSessionUuid: 'sess-238',
+    reviewerPgid: 8123,
+  });
+
+  const err = makeCaptureStream();
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--exact-head-now',
+    '--cancel-active-review',
+    '--root-dir', rootDir,
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: err,
+    cancelActiveReviewImpl: async () => ({
+      signalled: true,
+      target: { kind: 'process-group', id: 8123 },
+      error: null,
+    }),
+    waitForReviewerExitImpl: async () => ({ checked: true, exited: false, pgid: 8123 }),
+  });
+
+  assert.equal(rc, 1);
+  assert.match(err.text(), /refused:active-review-still-running/);
+});
+
+test('retrigger-review keeps wait failures inside the runtime exit-code contract', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'reviewing',
+    reviewerSessionUuid: 'sess-238',
+    reviewerPgid: 8123,
+  });
+
+  const err = makeCaptureStream();
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--exact-head-now',
+    '--cancel-active-review',
+    '--root-dir', rootDir,
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: err,
+    cancelActiveReviewImpl: async () => ({
+      signalled: true,
+      target: { kind: 'process-group', id: 8123 },
+      error: null,
+    }),
+    waitForReviewerExitImpl: async () => { throw new Error('probe exploded'); },
+  });
+
+  assert.equal(rc, 4);
+  assert.match(err.text(), /could not confirm active reviewer exit: probe exploded/);
+  assert.doesNotMatch(err.text(), /\n\s+at\s/);
+});
+
+test('retrigger-review allow-active-review-reset refuses a live process group', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'reviewing',
+    reviewerSessionUuid: 'sess-238',
+    reviewerPgid: 8123,
+  });
+
+  const err = makeCaptureStream();
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--exact-head-now',
+    '--allow-active-review-reset',
+    '--root-dir', rootDir,
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: err,
+    isPgidAliveImpl: () => true,
+  });
+
+  assert.equal(rc, 1);
+  assert.match(err.text(), /refused:active-review-still-running/);
+});
+
+test('retrigger-review allow-active-review-reset resets a dead process group', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'reviewing',
+    reviewerSessionUuid: 'sess-238',
+    reviewerPgid: 8123,
+  });
+
+  const out = makeCaptureStream();
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--exact-head-now',
+    '--allow-active-review-reset',
+    '--no-bump-budget',
+    '--root-dir', rootDir,
+  ], {
+    stdout: out,
+    stderr: makeCaptureStream(),
+    isPgidAliveImpl: () => false,
+  });
+
+  assert.equal(rc, 0);
+  assert.equal(JSON.parse(out.text()).activeReviewReset, 'allowed');
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare(
+      'SELECT review_status, reviewer_pgid, reviewer_session_uuid FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/agent-os', 238);
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.reviewer_pgid, null);
+    assert.equal(row.reviewer_session_uuid, null);
+  } finally {
+    db.close();
+  }
+});
+
+test('retrigger-review cancel recovery tolerates watcher reconciliation to failed-orphan', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  let readCalls = 0;
+  let resetCalls = 0;
+  const out = makeCaptureStream();
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--exact-head-now',
+    '--cancel-active-review',
+    '--no-bump-budget',
+    '--root-dir', rootDir,
+  ], {
+    stdout: out,
+    stderr: makeCaptureStream(),
+    readReviewRow: () => {
+      readCalls += 1;
+      return {
+        repo: 'laceyenterprises/agent-os',
+        pr_number: 238,
+        pr_state: 'open',
+        review_status: readCalls === 1 ? 'reviewing' : 'failed-orphan',
+        revision_ref: 'head-current-238',
+        reviewer_session_uuid: readCalls === 1 ? 'sess-238' : null,
+        reviewer_pgid: readCalls === 1 ? 8123 : null,
+      };
+    },
+    cancelActiveReviewImpl: async () => ({
+      signalled: true,
+      target: { kind: 'process-group', id: 8123 },
+      error: null,
+    }),
+    waitForReviewerExitImpl: async () => ({ checked: true, exited: true, pgid: 8123 }),
+    forceResetReview: (args) => {
+      resetCalls += 1;
+      if (resetCalls === 1) return { reset: false, reviewRow: null };
+      assert.equal(args.expectedReviewStatus, 'failed-orphan');
+      return {
+        reset: true,
+        reviewRow: {
+          repo: 'laceyenterprises/agent-os',
+          pr_number: 238,
+          pr_state: 'open',
+          review_status: 'pending',
+          revision_ref: 'head-current-238',
+        },
+      };
+    },
+    rereview: () => ({ triggered: false, status: 'already-pending' }),
+  });
+
+  assert.equal(rc, 0);
+  assert.equal(resetCalls, 2);
+  assert.equal(JSON.parse(out.text()).activeReviewReset, 'cancelled');
+});
+
 test('retrigger-review exact-head-now stops a stale active follow-up before re-arming review', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, {

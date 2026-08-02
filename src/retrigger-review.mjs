@@ -334,6 +334,7 @@ async function main(argv, {
   stopFollowUpJobImpl = stopFollowUpJobWithWorkerCancel,
   cancelActiveReviewImpl = cancelActiveReview,
   waitForReviewerExitImpl = waitForReviewerExit,
+  isPgidAliveImpl = isPgidAlive,
 } = {}) {
   let parsed;
   try {
@@ -483,7 +484,13 @@ async function main(argv, {
         return EXIT_BLOCKED;
       }
 
-      const exitResult = await waitForReviewerExitImpl(cancelResult);
+      let exitResult;
+      try {
+        exitResult = await waitForReviewerExitImpl(cancelResult);
+      } catch (err) {
+        stderr.write(`error: could not confirm active reviewer exit: ${err.message}\n`);
+        return EXIT_RUNTIME;
+      }
       if (exitResult.checked && exitResult.exited === false) {
         const row = makeAuditRow({
           ...baseAudit,
@@ -501,18 +508,43 @@ async function main(argv, {
         return EXIT_BLOCKED;
       }
 
-      const resetResult = forceResetReview({
-        rootDir,
-        repo: values.repo,
-        prNumber: values.pr,
-        requestedAt: ts,
-        reason,
-        expectedReviewStatus: 'reviewing',
-        expectedReviewerSessionUuid: reviewRow.reviewer_session_uuid || null,
-        expectedReviewerPgid: Number.isInteger(Number(reviewRow.reviewer_pgid))
-          ? Number(reviewRow.reviewer_pgid)
-          : null,
-      });
+      let resetResult;
+      try {
+        resetResult = forceResetReview({
+          rootDir,
+          repo: values.repo,
+          prNumber: values.pr,
+          requestedAt: ts,
+          reason,
+          expectedReviewStatus: 'reviewing',
+          expectedReviewerSessionUuid: reviewRow.reviewer_session_uuid || null,
+          expectedReviewerPgid: Number.isInteger(Number(reviewRow.reviewer_pgid))
+            ? Number(reviewRow.reviewer_pgid)
+            : null,
+        });
+        if (!resetResult.reset) {
+          const refreshed = readReviewRow({ rootDir, repo: values.repo, prNumber: values.pr });
+          if (refreshed?.review_status === 'pending') {
+            resetResult = { reset: true, reviewRow: refreshed };
+          } else if (['failed', 'failed-orphan'].includes(refreshed?.review_status)) {
+            resetResult = forceResetReview({
+              rootDir,
+              repo: values.repo,
+              prNumber: values.pr,
+              requestedAt: ts,
+              reason,
+              expectedReviewStatus: refreshed.review_status,
+              expectedReviewerSessionUuid: refreshed.reviewer_session_uuid || null,
+              expectedReviewerPgid: Number.isInteger(Number(refreshed.reviewer_pgid))
+                ? Number(refreshed.reviewer_pgid)
+                : null,
+            });
+          }
+        }
+      } catch (err) {
+        stderr.write(`error: could not reset cancelled active review: ${err.message}\n`);
+        return EXIT_RUNTIME;
+      }
       if (!resetResult.reset) {
         stderr.write(`error: active review reset lost its guard for ${values.repo}#${values.pr}\n`);
         return EXIT_RUNTIME;
@@ -520,18 +552,48 @@ async function main(argv, {
       reviewRow = resetResult.reviewRow;
       activeReviewReset = 'cancelled';
     } else if (values['allow-active-review-reset']) {
-      const resetResult = forceResetReview({
-        rootDir,
-        repo: values.repo,
-        prNumber: values.pr,
-        requestedAt: ts,
-        reason,
-        expectedReviewStatus: 'reviewing',
-        expectedReviewerSessionUuid: reviewRow.reviewer_session_uuid || null,
-        expectedReviewerPgid: Number.isInteger(Number(reviewRow.reviewer_pgid))
-          ? Number(reviewRow.reviewer_pgid)
-          : null,
-      });
+      const reviewerPgid = Number(reviewRow.reviewer_pgid);
+      if (Number.isInteger(reviewerPgid) && reviewerPgid > 0) {
+        let reviewerAlive;
+        try {
+          reviewerAlive = isPgidAliveImpl(reviewerPgid);
+        } catch (err) {
+          stderr.write(`error: could not probe active reviewer process group: ${err.message}\n`);
+          return EXIT_RUNTIME;
+        }
+        if (reviewerAlive) {
+          const row = makeAuditRow({
+            ...baseAudit,
+            priorMaxRounds: latestJob?.job?.remediationPlan?.maxRounds ?? null,
+            newMaxRounds: latestJob?.job?.remediationPlan?.maxRounds ?? null,
+            outcome: 'refused:active-review-still-running',
+            exactHeadNow: true,
+            staleFollowUpStopped,
+            activeReviewReset: 'allow-refused-live',
+          });
+          if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+            return EXIT_RUNTIME;
+          }
+          stderr.write(`refused:active-review-still-running: ${values.repo}#${values.pr}\n`);
+          return EXIT_BLOCKED;
+        }
+      }
+      let resetResult;
+      try {
+        resetResult = forceResetReview({
+          rootDir,
+          repo: values.repo,
+          prNumber: values.pr,
+          requestedAt: ts,
+          reason,
+          expectedReviewStatus: 'reviewing',
+          expectedReviewerSessionUuid: reviewRow.reviewer_session_uuid || null,
+          expectedReviewerPgid: Number.isInteger(reviewerPgid) ? reviewerPgid : null,
+        });
+      } catch (err) {
+        stderr.write(`error: could not reset stale active review: ${err.message}\n`);
+        return EXIT_RUNTIME;
+      }
       if (!resetResult.reset) {
         stderr.write(`error: active review override reset lost its guard for ${values.repo}#${values.pr}\n`);
         return EXIT_RUNTIME;
@@ -668,5 +730,8 @@ export {
 if (import.meta.url === `file://${process.argv[1]}`) {
   main(process.argv.slice(2)).then((code) => {
     process.exit(code);
+  }).catch((err) => {
+    process.stderr.write(`error: ${err.message}\n`);
+    process.exit(EXIT_RUNTIME);
   });
 }

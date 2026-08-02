@@ -1,15 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   SETTLE_SMOKE_FRESHNESS_WINDOW_MS,
   settleSmokeResultPath,
   writeSettleSmokeResult,
 } from '../src/adapters/agent-runtime/settle-smoke.mjs';
-import { evaluateAgentRuntimeCutoverReadiness } from '../src/reviewer-runtime-cutover.mjs';
+import {
+  evaluateAgentRuntimeCutoverReadiness,
+  KNOWN_REVIEWER_RUNTIME_NAMES,
+} from '../src/reviewer-runtime-cutover.mjs';
+
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 function makeRoot() {
   return mkdtempSync(join(tmpdir(), 'code-pr-reviewer-runtime-guard-'));
@@ -34,6 +47,23 @@ function readyReadiness(rootDir, now) {
     readCanaryImpl: () => ({ status: 'pass', at: now }),
   });
 }
+
+test('checked-in domain configs only request known reviewer runtimes', () => {
+  const domainsDir = join(repoRoot, 'domains');
+  const domainFiles = readdirSync(domainsDir)
+    .filter((name) => name.endsWith('.json'))
+    .sort();
+  const knownRuntimeList = [...KNOWN_REVIEWER_RUNTIME_NAMES].sort().join(', ');
+
+  for (const fileName of domainFiles) {
+    const domain = JSON.parse(readFileSync(join(domainsDir, fileName), 'utf8'));
+    const runtime = String(domain.reviewerRuntime || 'cli-direct').trim() || 'cli-direct';
+    assert.ok(
+      KNOWN_REVIEWER_RUNTIME_NAMES.has(runtime),
+      `${fileName} reviewerRuntime='${runtime}' is not supported; use one of: ${knownRuntimeList}`,
+    );
+  }
+});
 
 test('agent-runtime is not settle-proven when the settle-smoke artifact is absent', () => {
   const rootDir = makeRoot();

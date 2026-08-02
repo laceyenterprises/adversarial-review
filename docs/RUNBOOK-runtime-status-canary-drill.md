@@ -79,9 +79,12 @@ times with bounded backoff. If lookup still fails, or `op` is unavailable, it
 exits non-zero instead of running a canary that cannot page.
 
 The CLI entry point deliberately uses `process.exitCode` after awaiting both
-checks so stdout, stderr, and durable result writes can flush normally. The
-LaunchAgent's 660-second `ExitTimeOut` provides the hard outer bound if an
-unexpected handle remains open.
+checks so stdout, stderr, and durable result writes can flush normally. It also
+arms an unreferenced 660-second hard-exit timer before starting either check. If
+a check never resolves or an unexpected handle keeps the event loop alive, the
+timer forces a non-zero exit. The plist's `ExitTimeOut` only bounds launchd's
+grace period after launchd explicitly stops the job; it is not an execution
+deadline.
 
 ## Failover drill
 

@@ -2,7 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { main } from '../scripts/adversarial-runtime-canary.mjs';
+import {
+  SCHEDULED_HARD_EXIT_MS,
+  armScheduledHardExit,
+  main,
+} from '../scripts/adversarial-runtime-canary.mjs';
 
 function passingFallback() {
   return {
@@ -60,7 +64,32 @@ test('scheduled canary fails when settle smoke does not pass', async () => {
   assert.equal(code, 1);
 });
 
-test('airlock LaunchAgent schedules daily settle-smoke renewal with a hard bound', () => {
+test('scheduled entry point arms an unreferenced hard-exit deadline', () => {
+  let callback;
+  let delay;
+  let unrefCalls = 0;
+  let exitCode = null;
+  let stderr = '';
+
+  armScheduledHardExit({
+    setTimeoutImpl: (fn, timeoutMs) => {
+      callback = fn;
+      delay = timeoutMs;
+      return { unref: () => { unrefCalls += 1; } };
+    },
+    exitImpl: (code) => { exitCode = code; },
+    getExitCode: () => 0,
+    stderr: { write: (value) => { stderr += value; } },
+  });
+
+  assert.equal(delay, SCHEDULED_HARD_EXIT_MS);
+  assert.equal(unrefCalls, 1);
+  callback();
+  assert.equal(exitCode, 1);
+  assert.match(stderr, /exceeded hard deadline/);
+});
+
+test('airlock LaunchAgent schedules daily settle-smoke renewal', () => {
   const plist = readFileSync(
     new URL('../launchd/ai.laceyenterprises.adversarial-runtime-canary.airlock.plist', import.meta.url),
     'utf8',
@@ -68,5 +97,4 @@ test('airlock LaunchAgent schedules daily settle-smoke renewal with a hard bound
 
   assert.match(plist, /<key>StartCalendarInterval<\/key>/);
   assert.match(plist, /<string>--settle-smoke<\/string>/);
-  assert.match(plist, /<key>ExitTimeOut<\/key>\s*<integer>660<\/integer>/);
 });

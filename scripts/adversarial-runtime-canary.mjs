@@ -29,6 +29,23 @@ import {
 } from '../src/adapters/agent-runtime/canary.mjs';
 import { runRuntimeSettleSmoke } from '../src/runtime-settle-smoke-cli.mjs';
 
+const SCHEDULED_HARD_EXIT_MS = 660_000;
+
+function armScheduledHardExit({
+  timeoutMs = SCHEDULED_HARD_EXIT_MS,
+  setTimeoutImpl = setTimeout,
+  exitImpl = process.exit,
+  getExitCode = () => process.exitCode,
+  stderr = process.stderr,
+} = {}) {
+  const timer = setTimeoutImpl(() => {
+    stderr.write(`scheduled runtime canary exceeded hard deadline (${timeoutMs}ms); forcing exit\n`);
+    exitImpl(getExitCode() || 1);
+  }, timeoutMs);
+  timer?.unref?.();
+  return timer;
+}
+
 function parseArgs(argv) {
   const options = {
     rootDir: process.cwd(),
@@ -120,7 +137,12 @@ async function main(argv, dependencies = {}) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  // ExitTimeOut only bounds launchd's stop grace; it does not bound a
+  // StartCalendarInterval job. Keep this timer unref'd so it does not delay a
+  // clean process, while still forcing an exit if an unexpected handle keeps
+  // the event loop alive or either scheduled check never resolves.
+  armScheduledHardExit();
   main(process.argv.slice(2)).then((code) => { process.exitCode = code; });
 }
 
-export { main };
+export { SCHEDULED_HARD_EXIT_MS, armScheduledHardExit, main };

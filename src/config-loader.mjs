@@ -605,22 +605,22 @@ function schemaV1() {
                 __default: 'litellm-oauth-broker-standby-1',
               },
               credential_decay_warn_after_seconds: {
-                __type: TYPE_INT,
-                __default: 300,
-                __min: 0,
-                __max: 86400,
+                __type: TYPE_FLOAT,
+                __default: 300.0,
+                __min: 0.0,
+                __max: 86400.0,
               },
               credential_decay_crit_after_seconds: {
-                __type: TYPE_INT,
-                __default: 3600,
-                __min: 0,
-                __max: 604800,
+                __type: TYPE_FLOAT,
+                __default: 3600.0,
+                __min: 0.0,
+                __max: 86400.0,
               },
               credential_decay_last_good_crit_expiry_margin_seconds: {
-                __type: TYPE_INT,
-                __default: 1800,
-                __min: 0,
-                __max: 604800,
+                __type: TYPE_FLOAT,
+                __default: 1800.0,
+                __min: 0.0,
+                __max: 86400.0,
               },
               critical_service_patterns: {
                 __type: TYPE_STRING,
@@ -2596,6 +2596,18 @@ export const ENV_ALIASES = {
   'oauth_broker.watchdog.broker_standby_container_name': {
     canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_STANDBY_CONTAINER_NAME',
     aliases: [['OAUTH_BROKER_WATCHDOG_STANDBY_CONTAINER_NAME', identity]],
+  },
+  'oauth_broker.watchdog.credential_decay_warn_after_seconds': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_WARN_AFTER_SECONDS',
+    aliases: [['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_WARN_AFTER_SECONDS', Number]],
+  },
+  'oauth_broker.watchdog.credential_decay_crit_after_seconds': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_CRIT_AFTER_SECONDS',
+    aliases: [['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_CRIT_AFTER_SECONDS', Number]],
+  },
+  'oauth_broker.watchdog.credential_decay_last_good_crit_expiry_margin_seconds': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS',
+    aliases: [['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS', Number]],
   },
   'policy.dedup.uncommitted_line_threshold': {
     canonical: 'AGENT_OS_POLICY_DEDUP_UNCOMMITTED_LINE_THRESHOLD',

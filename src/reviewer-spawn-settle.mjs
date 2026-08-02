@@ -138,12 +138,18 @@ async function readReviewerLedgerEvidenceWithRetry({
   delaysMs = REVIEWER_LEDGER_LOOKUP_DELAYS_MS,
 } = {}) {
   let lastError = null;
+  let lastUsage = null;
   let attempts = 0;
   for (let attempt = 0; attempt <= delaysMs.length; attempt += 1) {
     attempts += 1;
     try {
       const usage = await readImpl(args);
-      if (usage) return { usage, attempts, lastError: null };
+      if (usage) {
+        lastUsage = usage;
+        if (!args?.launchRequestId || usage.workerRunId) {
+          return { usage, attempts, lastError: null };
+        }
+      }
       lastError = 'worker-run-not-yet-visible';
     } catch (err) {
       lastError = classifyLedgerLookupError(err);
@@ -151,7 +157,7 @@ async function readReviewerLedgerEvidenceWithRetry({
     }
     if (attempt < delaysMs.length) await sleepImpl(delaysMs[attempt]);
   }
-  return { usage: null, attempts, lastError };
+  return { usage: lastUsage, attempts, lastError };
 }
 
 async function defaultPostGitHubReviewWithCapture(args) {

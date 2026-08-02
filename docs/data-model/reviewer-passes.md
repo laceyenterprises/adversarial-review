@@ -1,5 +1,7 @@
 # Reviewer passes
 
+**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `src/reviewer-pass-tokens.mjs`, and `src/reviewer-spawn-settle.mjs`
+
 ## Ownership
 
 - Store: `data/reviews.db`

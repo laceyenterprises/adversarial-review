@@ -306,6 +306,66 @@ test('spawnReviewer retries transient ledger contention and preserves adapter co
   });
 });
 
+test('spawnReviewer keeps retrying token-only evidence until worker attribution resolves', async () => {
+  const settled = [];
+  let lookupCalls = 0;
+  await spawnReviewer({
+    repo: 'laceyenterprises/demo',
+    prNumber: 251,
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-566',
+    labels: [],
+    builderTag: 'codex',
+    reviewerHeadSha: 'sha251',
+    reviewAttemptNumber: 1,
+    reviewDbAttemptNumber: 2,
+    completedRemediationRounds: 0,
+    passKind: 'first-pass',
+    maxRemediationRounds: 2,
+    reviewerSessionUuid: 'spawn-settle-token-before-worker-row',
+    reviewerRuntimeAdapterOverride: {
+      async spawnReviewer() {
+        return {
+          ok: true,
+          reviewBody: '## Summary\nLooks good.\n\n## Verdict\nComment only',
+          reviewBodyDelivery: 'caller-post',
+          reattachToken: 'sdk-request-id-251',
+          launchRequestId: 'lrq_sdk_251',
+          tokenUsage: { input: 8, output: 13, total: 21, source: 'adapter' },
+        };
+      },
+    },
+    postGitHubReviewWithCaptureImpl: async () => {},
+    readBestReviewerEvidenceTokenUsageImpl: () => {
+      lookupCalls += 1;
+      if (lookupCalls < 3) {
+        return { input: 1, output: 2, total: 3, source: 'session-ledger' };
+      }
+      return {
+        workerRunId: 'wr_sdk_251',
+        input: 1,
+        output: 2,
+        total: 3,
+        source: 'session-ledger',
+      };
+    },
+    ledgerLookupSleepImpl: async () => {},
+    completeReviewerPassImpl: (_root, payload) => settled.push(payload),
+  });
+
+  assert.equal(lookupCalls, 3);
+  assert.equal(settled[0].workerRunId, 'wr_sdk_251');
+  assert.deepEqual(settled[0].metadata.workerRunAttribution, {
+    state: 'resolved',
+    launchRequestId: 'lrq_sdk_251',
+    workerRunId: 'wr_sdk_251',
+    lookupAttempts: 3,
+    lastError: null,
+    retryable: false,
+  });
+});
+
 test('spawnReviewer leaves repairable attribution after bounded transient ledger failures', async () => {
   const settled = [];
   const warnings = [];

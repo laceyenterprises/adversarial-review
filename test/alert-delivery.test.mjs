@@ -5,6 +5,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  assertAlertSinkOwner,
   deliverAlert,
   drainPendingAlerts,
   pendingDir,
@@ -44,10 +45,46 @@ test('watcher alert defaults use the configured alert bus and token discovery ch
     { ALERT_TO: '123456' },
     { fsImpl: { existsSync: (filePath) => filePath === tokenFile } }
   );
-  assert.equal(cfg.alertBusUrl, 'http://host.docker.internal:18799/hooks/wake');
+  assert.equal(cfg.alertBusUrl, 'http://127.0.0.1:18799/hooks/wake');
   assert.equal(cfg.hooksTokenFile, tokenFile);
   assert.equal(cfg.alertChannel, 'telegram');
   assert.equal(cfg.alertTo, '123456');
+});
+
+test('config parser keeps the agent gateway block open across top-level comments', () => {
+  const cfg = resolveAlertDefaults(
+    { ALERT_TO: '123456', AGENT_OS_CONFIG_PATH: '/config.yaml' },
+    {
+      fsImpl: {
+        existsSync() {
+          return false;
+        },
+        readFileSync() {
+          return [
+            'agent_gateway:',
+            '# operator note between the section and key',
+            '  alert_bus_url: https://cfg.example.test/hooks/wake',
+          ].join('\n');
+        },
+      },
+    }
+  );
+
+  assert.equal(cfg.alertBusUrl, 'https://cfg.example.test/hooks/wake');
+});
+
+test('alert sink refuses a root owned by another effective uid', () => {
+  assert.throws(
+    () => assertAlertSinkOwner('/state', {
+      statSyncImpl() {
+        return { uid: 502 };
+      },
+      geteuidImpl() {
+        return 501;
+      },
+    }),
+    /refusing cross-user write/
+  );
 });
 
 test('agent_gateway alert bus URL precedence honors config then canonical and legacy env aliases', () => {
@@ -220,6 +257,56 @@ test('recovered bus drains the queued receipt exactly once', async (t) => {
   assert.deepEqual(calls, [calls[0]]);
 });
 
+test('permanent delivery failure reaches an operator-visible dead letter ceiling', async (t) => {
+  const { env, rootDir } = makeEnv({
+    ADVERSARIAL_ALERT_DELIVERY_MAX_ATTEMPTS: '2',
+    ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS: '0',
+  });
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  await deliverAlert('permanent failure', {
+    env,
+    fsImpl: {
+      readFileSync() {
+        return 'hook-token';
+      },
+      existsSync() {
+        return true;
+      },
+    },
+    requestText: async () => {
+      throw new Error('HTTP 401');
+    },
+  });
+
+  const drainOptions = {
+    env,
+    fsImpl: {
+      readFileSync() {
+        return 'hook-token';
+      },
+      existsSync() {
+        return true;
+      },
+    },
+    requestText: async () => {
+      throw new Error('HTTP 401');
+    },
+  };
+  const first = await drainPendingAlerts(drainOptions);
+  const second = await drainPendingAlerts(drainOptions);
+
+  assert.equal(first.status, 'queued');
+  assert.equal(second.status, 'error');
+  assert.equal(second.results[0].status, 'dead-lettered');
+  assert.equal(readdirSync(sinkPath(rootDir, 'dead-letter')).length, 1);
+  const health = readAlertSinkHealth({ env });
+  assert.equal(health.ready, false);
+  assert.equal(health.pendingCount, 0);
+  assert.equal(health.deadLetterCount, 1);
+  assert.match(health.lastFailureReason, /dead-lettered.*2 attempts.*HTTP 401/);
+});
+
 test('malformed pending alert is quarantined and later alerts still drain', async (t) => {
   const { env, rootDir } = makeEnv();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -333,4 +420,8 @@ test('health-probe and hammer-cap callers both resolve through the shared alert 
 
   assert.match(healthProbeSource, /import \{ deliverAlert as defaultDeliverAlert \} from '\.\/alert-delivery\.mjs';/);
   assert.match(hammerSource, /import \{ deliverAlert \} from '\.\.\/alert-delivery\.mjs';/);
+  assert.match(
+    readFileSync(new URL('../src/watcher.mjs', import.meta.url), 'utf8'),
+    /scheduleAlertDrain\(\);/
+  );
 });

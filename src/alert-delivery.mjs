@@ -5,6 +5,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -19,7 +20,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_TOP_LEVEL_PATH = join(homedir(), 'agent-os/config.yaml');
 const DEFAULT_SECRETS_ROOT = join(homedir(), '.config', 'adversarial-review', 'secrets');
 const LEGACY_SECRETS_ROOT = '/Users/airlock/agent-os/agents/clio/credentials/local';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
-const DEFAULT_ALERT_BUS_URL = 'http://host.docker.internal:18799/hooks/wake';
+const DEFAULT_ALERT_BUS_URL = 'http://127.0.0.1:18799/hooks/wake';
 const DEFAULT_ALERT_NAME = 'Adversarial Watcher Health';
 const DEFAULT_ALERT_AGENT_ID = 'main';
 const DEFAULT_ALERT_CHANNEL = 'telegram';
@@ -27,6 +28,7 @@ const DEFAULT_HTTP_TIMEOUT_MS = 5_000;
 const DEFAULT_RETRY_DELAY_MS = 5_000;
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 const DEFAULT_STALE_INFLIGHT_AGE_MS = 120_000;
+const DEFAULT_MAX_DELIVERY_ATTEMPTS = 8;
 const HTTP_TIMEOUT_MS = Number(
   process.env.ALERT_HTTP_TIMEOUT_MS || process.env.HTTP_TIMEOUT_MS || DEFAULT_HTTP_TIMEOUT_MS
 );
@@ -44,6 +46,11 @@ function firstNonEmpty(...values) {
     if (typeof value === 'string' && value.trim()) return value.trim();
   }
   return null;
+}
+
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function resolveDefaultHooksTokenFile(fsImpl = { existsSync }) {
@@ -93,6 +100,7 @@ function readAlertBusUrlFromConfig(env = process.env, fsImpl = { readFileSync })
       }
       continue;
     }
+    if (/^\s*(?:#.*)?$/u.test(line)) continue;
     if (/^\S/u.test(line)) break;
     const keyMatch = line.match(/^\s+alert_bus_url:\s*([^\n#]+?)\s*$/u);
     if (keyMatch?.[1]) return parseYamlStringValue(keyMatch[1]);
@@ -146,6 +154,10 @@ function quarantineDir(rootDir = ROOT) {
   return join(alertSinkRoot(rootDir), 'quarantine');
 }
 
+function deadLetterDir(rootDir = ROOT) {
+  return join(alertSinkRoot(rootDir), 'dead-letter');
+}
+
 function receiptDir(rootDir = ROOT) {
   return join(alertSinkRoot(rootDir), 'receipts');
 }
@@ -159,7 +171,23 @@ function ensureAlertSinkDirs(rootDir = ROOT) {
   mkdirSync(inflightDir(rootDir), { recursive: true });
   mkdirSync(deliveredDir(rootDir), { recursive: true });
   mkdirSync(quarantineDir(rootDir), { recursive: true });
+  mkdirSync(deadLetterDir(rootDir), { recursive: true });
   mkdirSync(receiptDir(rootDir), { recursive: true });
+  assertAlertSinkOwner(rootDir);
+}
+
+function assertAlertSinkOwner(rootDir = ROOT, {
+  statSyncImpl = statSync,
+  geteuidImpl = typeof process.geteuid === 'function' ? () => process.geteuid() : null,
+} = {}) {
+  if (typeof geteuidImpl !== 'function') return;
+  const sinkStat = statSyncImpl(alertSinkRoot(rootDir));
+  const effectiveUid = geteuidImpl();
+  if (Number.isInteger(sinkStat?.uid) && sinkStat.uid !== effectiveUid) {
+    throw new Error(
+      `Alert delivery state root is owned by uid ${sinkStat.uid}; refusing cross-user write as uid ${effectiveUid}`
+    );
+  }
 }
 
 function makeAlertId(now = new Date()) {
@@ -171,7 +199,8 @@ function alertDocPath(rootDir, state, id) {
   return join(
     state === 'pending' ? pendingDir(rootDir)
       : state === 'inflight' ? inflightDir(rootDir)
-        : deliveredDir(rootDir),
+        : state === 'dead-letter' ? deadLetterDir(rootDir)
+          : deliveredDir(rootDir),
     `${id}.json`
   );
 }
@@ -219,6 +248,9 @@ function readHealth(rootDir = ROOT) {
       lastQuarantinedAt: null,
       lastQuarantinedFile: null,
       quarantineCount: 0,
+      deadLetterCount: 0,
+      lastDeadLetteredAt: null,
+      lastDeadLetteredFile: null,
     };
   }
 }
@@ -273,17 +305,34 @@ function setHealthQuarantined(rootDir, filePath, error, quarantinedAt) {
   });
 }
 
+function setHealthDeadLettered(rootDir, doc, error, deadLetteredAt) {
+  const prior = readHealth(rootDir);
+  return writeHealth(rootDir, {
+    ...prior,
+    ready: false,
+    pendingCount: countDirEntries(pendingDir(rootDir)),
+    deadLetterCount: countDirEntries(deadLetterDir(rootDir)),
+    lastFailureAt: deadLetteredAt,
+    lastFailureReason: `dead-lettered ${doc.id} after ${doc.attemptCount} attempts: ${String(error?.message || error)}`,
+    lastDeadLetteredAt: deadLetteredAt,
+    lastDeadLetteredFile: `${doc.id}.json`,
+  });
+}
+
 function setHealthDelivered(rootDir, deliveredAt) {
   const pendingCount = countDirEntries(pendingDir(rootDir));
   const inflightCount = countDirEntries(inflightDir(rootDir));
   const quarantineCount = countDirEntries(quarantineDir(rootDir));
-  const ready = pendingCount === 0 && inflightCount === 0 && quarantineCount === 0;
+  const deadLetterCount = countDirEntries(deadLetterDir(rootDir));
+  const ready = pendingCount === 0 && inflightCount === 0 && quarantineCount === 0
+    && deadLetterCount === 0;
   const prior = readHealth(rootDir);
   return writeHealth(rootDir, {
     ...prior,
     ready,
     pendingCount,
     quarantineCount,
+    deadLetterCount,
     lastDeliveredAt: deliveredAt,
     lastFailureReason: ready ? null : prior.lastFailureReason,
     lastFailureAt: ready ? null : prior.lastFailureAt,
@@ -295,6 +344,9 @@ function resolveAlertDefaults(env = process.env, {
   loadConfigRuntimeImpl = null,
   rootDir = ROOT,
 } = {}) {
+  const defaultOwnerRoot = rootDir === ROOT
+    ? join(homedir(), '.config', 'adversarial-review')
+    : rootDir;
   const alertTo = firstNonEmpty(env.ALERT_TO);
   if (!alertTo) {
     throw new Error('ALERT_TO must be configured for alert delivery');
@@ -316,7 +368,7 @@ function resolveAlertDefaults(env = process.env, {
     alertName: env.ALERT_NAME || DEFAULT_ALERT_NAME,
     rootDir:
       firstNonEmpty(env.ADVERSARIAL_ALERT_DELIVERY_ROOT, env.AGENT_OS_ALERT_DELIVERY_STATE_DIR)
-      || alertSinkRoot(rootDir),
+      || alertSinkRoot(defaultOwnerRoot),
     retryDelayMs: Math.max(
       0,
       Number(env.ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS || DEFAULT_RETRY_DELAY_MS)
@@ -324,6 +376,10 @@ function resolveAlertDefaults(env = process.env, {
     maxRetryDelayMs: Math.max(
       0,
       Number(env.ADVERSARIAL_ALERT_DELIVERY_MAX_RETRY_DELAY_MS || DEFAULT_MAX_RETRY_DELAY_MS)
+    ),
+    maxAttempts: positiveInteger(
+      env.ADVERSARIAL_ALERT_DELIVERY_MAX_ATTEMPTS,
+      DEFAULT_MAX_DELIVERY_ATTEMPTS
     ),
   };
 }
@@ -571,6 +627,13 @@ function markInflightDelivered(rootDir, doc) {
   return deliveredPath;
 }
 
+function markInflightDeadLettered(rootDir, doc) {
+  const deadLetterPath = alertDocPath(rootDir, 'dead-letter', doc.id);
+  writeFileAtomic(deadLetterPath, `${JSON.stringify(doc, null, 2)}\n`);
+  rmSync(alertDocPath(rootDir, 'inflight', doc.id), { force: true });
+  return deadLetterPath;
+}
+
 async function postAlertDoc(doc, {
   env = process.env,
   requestText = httpRequestText,
@@ -651,6 +714,28 @@ async function drainSingleAlert(filePath, {
     await emitNotificationBusDeliverSpan({ hookPath, producer, outcome: 'success' });
     return { status: 'delivered', id: delivered.id, attemptCount: delivered.attemptCount };
   } catch (error) {
+    if (doc.attemptCount >= config.maxAttempts) {
+      const deadLetteredAt = attemptAt;
+      const deadLettered = {
+        ...doc,
+        state: 'dead-letter',
+        deadLetteredAt,
+        lastError: String(error?.message || error),
+      };
+      markInflightDeadLettered(alertRoot, deadLettered);
+      writeReceipt(alertRoot, deadLettered, 'dead-lettered', deadLetteredAt, {
+        state: 'dead-letter',
+        error: deadLettered.lastError,
+      });
+      setHealthDeadLettered(alertRoot, deadLettered, error, deadLetteredAt);
+      await emitNotificationBusDeliverSpan({ hookPath, producer, outcome: 'error' });
+      return {
+        status: 'dead-lettered',
+        id: deadLettered.id,
+        attemptCount: deadLettered.attemptCount,
+        error: deadLettered.lastError,
+      };
+    }
     const nextAttemptAfter = new Date(
       (now instanceof Date ? now.getTime() : new Date(now).getTime())
       + Math.min(
@@ -722,7 +807,9 @@ async function drainPendingAlerts({
     }
   }
   return {
-    status: results.some((entry) => entry.status === 'failed') ? 'error'
+    status: results.some((entry) => (
+      entry.status === 'failed' || entry.status === 'dead-lettered'
+    )) ? 'error'
       : results.some((entry) => entry.status === 'queued' || entry.status === 'quarantined') ? 'queued'
         : 'ok',
     drained: results.filter((entry) => entry.status === 'delivered').length,
@@ -786,14 +873,17 @@ function readAlertSinkHealth({ env = process.env, loadConfigRuntimeImpl = null }
   const pendingCount = countDirEntries(pendingDir(rootDir));
   const inflightCount = countDirEntries(inflightDir(rootDir));
   const quarantineCount = countDirEntries(quarantineDir(rootDir));
+  const deadLetterCount = countDirEntries(deadLetterDir(rootDir));
   return {
     ...health,
     rootDir,
-    ready: pendingCount === 0 && inflightCount === 0 && quarantineCount === 0,
+    ready: pendingCount === 0 && inflightCount === 0 && quarantineCount === 0
+      && deadLetterCount === 0,
     pendingCount,
     inflightCount,
     deliveredCount: countDirEntries(deliveredDir(rootDir)),
     quarantineCount,
+    deadLetterCount,
   };
 }
 
@@ -825,6 +915,7 @@ async function deliverAlert(text, {
 
 export {
   DEFAULT_ALERT_BUS_URL,
+  assertAlertSinkOwner,
   alertSinkRoot,
   deliverAlert,
   drainPendingAlerts,

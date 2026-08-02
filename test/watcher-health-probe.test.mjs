@@ -200,7 +200,7 @@ test('health alerts complete once the durable sink has queued the alert', async 
 
   let settled = false;
   void thirdTick.then(() => {
-      settled = true;
+    settled = true;
   });
   await Promise.resolve();
   await thirdTick;

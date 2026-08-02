@@ -1,13 +1,15 @@
 # Data Model - Alert Delivery State
 
 **Owner:** adversarial-review alert delivery
-**Store:** `data/alert-delivery/`
+**Store:** `~/.config/adversarial-review/data/alert-delivery/` by default, or the
+principal-owned `ADVERSARIAL_ALERT_DELIVERY_ROOT` /
+`AGENT_OS_ALERT_DELIVERY_STATE_DIR` override
 **Source of truth:** `src/alert-delivery.mjs`
 **Runtime surface:** `src/alert-delivery.mjs`, `src/health-probe.mjs`, `src/watcher.mjs`
 
 ## Purpose
 
-`data/alert-delivery/` is the durable alert sink used when watcher and merge
+The principal-owned `data/alert-delivery/` root is the durable alert sink used when watcher and merge
 authority paths need to page an operator. `deliverAlert` writes an alert
 document and receipt before returning; background drain work then moves the
 document through delivery states until the notification bus accepts it.
@@ -25,6 +27,7 @@ Directory: `data/alert-delivery/`
 | `inflight/*.json` | Alert document | Claimed work being posted to the notification bus. Stale inflight files are recovered back to `pending/`. |
 | `delivered/*.json` | Alert document with `deliveredAt` | Successful delivery archive. |
 | `quarantine/*.json` | Original unreadable file bytes | Files that cannot be parsed or read during pending drain or inflight recovery. Quarantining is fail-isolating: later alerts continue draining. |
+| `dead-letter/*.json` | Alert document with `deadLetteredAt` and `lastError` | Parseable alerts that exhausted the bounded transport-attempt ceiling. Dead letters are terminal and operator-actionable; they are not retried silently forever. |
 | `receipts/*.json` | Receipt document | Append-style audit receipts for queued, failed, and delivered phases. |
 | `health.json` | Health snapshot | Last observed delivery health and live queue counters for probes and operators. |
 
@@ -34,19 +37,23 @@ Directory: `data/alert-delivery/`
 
 | Field | Shape | Contract |
 |---|---|---|
-| `ready` | boolean | `true` only when live pending, inflight, and quarantine counts are all zero. |
+| `ready` | boolean | `true` only when live pending, inflight, quarantine, and dead-letter counts are all zero. |
 | `pendingCount` | number | Live count of `pending/*.json`; recomputed by `readAlertSinkHealth`. |
 | `quarantineCount` | number | Live count of `quarantine/*.json`; recomputed by `readAlertSinkHealth`. |
+| `deadLetterCount` | number | Live count of `dead-letter/*.json`; non-zero is an operator-pageable delivery failure. |
 | `lastQueuedAt` / `lastDeliveredAt` / `lastFailureAt` | string or null | ISO-8601 timestamps for the latest queue, delivery, and failure observations. |
 | `lastFailureReason` | string or null | Last transport or quarantine reason while the sink is not ready. |
 | `lastQueuedEvent` | string or null | Event name from the latest queued alert, when present. |
 | `lastQuarantinedAt` | string or null | ISO-8601 timestamp for the latest quarantine. |
 | `lastQuarantinedFile` | string or null | Basename of the latest quarantined file. |
+| `lastDeadLetteredAt` / `lastDeadLetteredFile` | string or null | Timestamp and basename for the latest alert that exhausted its attempt ceiling. |
 
 ## Operational Contract
 
 - `deliverAlert` is enqueue-first: once the pending document and queued receipt
-  are durable, callers receive `{ status: "queued" }`.
+  are durable, callers receive `{ status: "queued" }`. Callers intentionally
+  treat that durable enqueue as terminal for their own debounce; transport
+  delivery authority belongs to the sink health/receipt state.
 - The scheduled drain is best-effort fire-and-forget work. It must contain its
   own rejections so a drain failure cannot terminate the long-lived watcher
   daemon through Node's unhandled-rejection policy.
@@ -55,5 +62,19 @@ Directory: `data/alert-delivery/`
   remaining sorted pending files.
 - Stale inflight recovery uses the same quarantine behavior for unreadable
   `inflight/*.json` files before recovering later stale alerts.
+- The watcher invokes a drain sweep at startup and every poll, so durable work
+  survives a process restart even when no new alert arrives. The scheduled
+  retry loop continues between polls while pending work exists.
+- Parseable transport failures retry with bounded backoff and move to
+  `dead-letter/` after `ADVERSARIAL_ALERT_DELIVERY_MAX_ATTEMPTS` (default 8).
+  `readAlertSinkHealth()` stays not-ready until an operator resolves the dead
+  letter; this is the escalation path for permanent 401, bad URL, or similar
+  delivery failures.
 - Quarantine is intentionally operator-visible. A non-empty quarantine directory
   keeps `readAlertSinkHealth().ready` false even when no pending alerts remain.
+- The default URL is host-reachable `http://127.0.0.1:18799/hooks/wake`; container
+  deployments must set the canonical config/env URL explicitly.
+- The state root is principal-owned. The writer verifies its effective UID
+  before every queue-directory initialization and refuses cross-user writes,
+  preventing shared-root WAL/rename ownership races. Different worker UIDs get
+  distinct default roots under their own home directories.

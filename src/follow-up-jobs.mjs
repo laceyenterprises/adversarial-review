@@ -371,10 +371,16 @@ function classifyFollowUpCriticality(reviewBody) {
   const verdict = normalizeEffectiveReviewVerdict(canonicalReviewBody);
   const statedVerdict = normalizeReviewVerdict(extractReviewVerdict(canonicalReviewBody));
   const blocking = classifyBlockingFindings(canonicalReviewBody, { lastVerdict: verdict });
+  const criticalityReason = statedVerdict === 'request-changes'
+    ? 'request-changes-verdict'
+    : blocking.state !== 'known'
+    ? 'blocking-section-unparseable'
+    : blocking.count > 0
+    ? 'blocking-findings'
+    : null;
   return {
-    critical: statedVerdict === 'request-changes'
-      || blocking.state !== 'known'
-      || blocking.count > 0,
+    critical: criticalityReason !== null,
+    criticalityReason,
     blockingFindingCount: blocking.count,
     blockingFindingState: blocking.state,
     statedVerdict,

@@ -242,15 +242,23 @@ function criticalWordsInSummary(reviewSummary, criticalWords = DEFAULT_CRITICAL_
 function buildCriticalFlagComment(
   reviewSummary,
   criticalWords = DEFAULT_CRITICAL_WORDS,
-  { blockingFindingCount = null, blockingFindingState = null } = {}
+  {
+    blockingFindingCount = null,
+    blockingFindingState = null,
+    criticalityReason = null,
+  } = {}
 ) {
   const matches = criticalWordsInSummary(reviewSummary, criticalWords);
   let issueSummary = blockingFindingState === 'known'
     && Number.isInteger(blockingFindingCount)
     && blockingFindingCount > 0
     ? `${blockingFindingCount} blocking finding${blockingFindingCount === 1 ? '' : 's'}`
+    : criticalityReason === 'request-changes-verdict'
+    ? 'Request changes verdict'
+    : criticalityReason === 'blocking-section-unparseable'
+    ? 'blocking section missing or unparseable'
     : matches.join(', ');
-  if (!issueSummary) issueSummary = 'blocking findings present';
+  if (!issueSummary) issueSummary = 'critical review signal';
   return [
     '**Adversarial review flagged critical issues** - Paul, please review.',
     '',
@@ -364,6 +372,7 @@ function createLinearTriageAdapter({
         body: buildCriticalFlagComment(reviewSummary, criticalWords, {
           blockingFindingCount: criticality?.blockingFindingCount,
           blockingFindingState: criticality?.blockingFindingState,
+          criticalityReason: criticality?.criticalityReason,
         }),
       });
       logger.log?.(`[linear-triage] Linear ${ticketId} - critical flag comment added`);

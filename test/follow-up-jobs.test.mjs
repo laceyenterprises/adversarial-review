@@ -218,6 +218,7 @@ test('classifyFollowUpCriticality keeps clean comment-only reviews out of critic
   assert.equal(result.blockingFindingState, 'known');
   assert.equal(result.blockingFindingCount, 0);
   assert.equal(result.verdict, 'comment-only');
+  assert.equal(result.criticalityReason, null);
 });
 
 test('classifyFollowUpCriticality canonicalizes mis-headed clean reviews once', () => {
@@ -260,6 +261,7 @@ test('classifyFollowUpCriticality keeps blocking reviews on the strict high-prio
   assert.equal(result.blockingFindingState, 'known');
   assert.equal(result.blockingFindingCount, 1);
   assert.equal(result.verdict, 'request-changes');
+  assert.equal(result.criticalityReason, 'request-changes-verdict');
 });
 
 test('classifyFollowUpCriticality treats a contradictory request-changes verdict as critical', () => {
@@ -279,6 +281,7 @@ test('classifyFollowUpCriticality treats a contradictory request-changes verdict
   assert.equal(result.blockingFindingCount, 0);
   assert.equal(result.statedVerdict, 'request-changes');
   assert.equal(result.verdict, 'comment-only');
+  assert.equal(result.criticalityReason, 'request-changes-verdict');
 });
 
 test('classifyFollowUpCriticality fails closed when both blocking section and verdict are absent', () => {
@@ -291,6 +294,22 @@ test('classifyFollowUpCriticality fails closed when both blocking section and ve
   assert.equal(result.blockingFindingState, 'unknown');
   assert.equal(result.blockingFindingCount, 0);
   assert.equal(result.verdict, null);
+  assert.equal(result.criticalityReason, 'blocking-section-unparseable');
+});
+
+test('classifyFollowUpCriticality fails closed for a clean verdict without blocking section', () => {
+  const result = classifyFollowUpCriticality([
+    '## Summary',
+    'The review output was truncated before its structured finding sections.',
+    '',
+    '## Verdict',
+    'Approved',
+  ].join('\n'));
+
+  assert.equal(result.critical, true);
+  assert.equal(result.blockingFindingState, 'unknown');
+  assert.equal(result.blockingFindingCount, 0);
+  assert.equal(result.criticalityReason, 'blocking-section-unparseable');
 });
 
 test('buildFollowUpJob rejects advisory-only verdict mode', () => {
@@ -1461,7 +1480,7 @@ test('claimNextFollowUpJob logs and retries settled jobs when stopped-marking fa
   const settled = createFollowUpJob({
     ...makeJobInput(rootDir),
     critical: false,
-    reviewBody: '## Summary\nClean.\n\n## Verdict\nComment only',
+    reviewBody: '## Summary\nClean.\n\n## Blocking issues\n- None.\n\n## Verdict\nComment only',
   });
   createFollowUpJob({
     ...makeJobInput(rootDir),

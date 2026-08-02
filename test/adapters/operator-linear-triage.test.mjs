@@ -389,3 +389,20 @@ test('buildCriticalFlagComment prefers structured blocking count over critical w
   assert.match(body, /Issues detected: 3 blocking findings/);
   assert.doesNotMatch(body, /Issues detected: vulnerability, injection/);
 });
+
+test('buildCriticalFlagComment distinguishes verdict and parser-failure triggers', () => {
+  const verdictBody = buildCriticalFlagComment('No explicit blockers.', undefined, {
+    blockingFindingCount: 0,
+    blockingFindingState: 'known',
+    criticalityReason: 'request-changes-verdict',
+  });
+  assert.match(verdictBody, /Issues detected: Request changes verdict/);
+  assert.doesNotMatch(verdictBody, /blocking findings present/);
+
+  const parserBody = buildCriticalFlagComment('Review output truncated.', undefined, {
+    blockingFindingCount: 0,
+    blockingFindingState: 'unknown',
+    criticalityReason: 'blocking-section-unparseable',
+  });
+  assert.match(parserBody, /Issues detected: blocking section missing or unparseable/);
+});

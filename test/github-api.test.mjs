@@ -993,6 +993,18 @@ test('github adapter auto-discovery reaches the superproject path and ignores un
   );
   assert.equal(
     __test__.resolveGitHubAdapterBin({
+      env: {},
+      rootDir,
+      existsImpl: (candidate) => candidate === superprojectCandidate,
+      statImpl: safeStatFor,
+      lstatImpl: () => safeStat,
+      realpathImpl: (candidate) => candidate,
+    }),
+    superprojectCandidate,
+    'a curated env must not inherit the ambient auto-discovery kill switch',
+  );
+  assert.equal(
+    __test__.resolveGitHubAdapterBin({
       env: { AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY: '0' },
       rootDir,
       existsImpl: (candidate) => candidate === superprojectCandidate,

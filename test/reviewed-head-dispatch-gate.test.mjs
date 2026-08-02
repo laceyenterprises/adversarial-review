@@ -70,6 +70,7 @@ test('selectExistingReviewIdForHead returns newest review id or null', () => {
   assert.equal(selectExistingReviewIdForHead([{ id: '99', commitId: HEAD }]), '99');
   // Non-empty but id-less still counts as reviewed upstream; we just can't name it.
   assert.equal(selectExistingReviewIdForHead([{ commitId: HEAD }]), null);
+  assert.equal(selectExistingReviewIdForHead([{ commitId: HEAD }, { id: '100', commitId: HEAD }]), '100');
 });
 
 test('dedup: an existing completed review on the head is already-reviewed', async () => {

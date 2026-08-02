@@ -94,10 +94,11 @@ export function selectExistingReviewForHead(reviews) {
 }
 
 export function selectExistingReviewIdForHead(reviews) {
-  const existing = selectExistingReviewForHead(reviews);
+  if (!Array.isArray(reviews) || reviews.length === 0) return null;
+  const existing = reviews.find((review) => review && review.id != null && review.id !== '');
   // A matching review with no id still proves the head is reviewed (the caller
   // treats a non-empty array as already-reviewed); we just can't name its id.
-  return existing && existing.id != null && existing.id !== '' ? String(existing.id) : null;
+  return existing ? String(existing.id) : null;
 }
 
 export function restorePendingReviewedHeadDedupRow({

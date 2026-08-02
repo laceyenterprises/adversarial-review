@@ -11,6 +11,7 @@ import {
   reviewIdempotencyKey,
   toAgentRequest,
 } from '../src/adapters/reviewer-runtime/agent-runtime/index.mjs';
+import { resolveRouterConfig } from '../src/adapters/agent-runtime/router/config.mjs';
 import {
   readReviewerRunRecord,
   writeReviewerRunRecord,
@@ -530,6 +531,177 @@ test('default agent runtime fails over app-contract hard dispatch errors to loca
     const snapshot = readRuntimeStatusSnapshot(rootDir);
     assert.equal(snapshot?.status?.mode, 'local');
     assert.equal(snapshot?.status?.lastFailover?.reason, 'hard-contract-error');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('default agent runtime probe-down tick fails over and emits the failover event', async () => {
+  const rootDir = makeRoot();
+  const transitions = [];
+  try {
+    const runtime = createDefaultAgentRuntime({
+      rootDir,
+      domainConfig: { id: 'code-pr', promptSet: 'code-pr' },
+      logger: silentLogger(),
+      localRuntimeOptions: {
+        cliDirect: completedCliDirect(),
+        admissionImpl: async () => ({
+          admit: true,
+          budget: { requestedTokens: 500, requestedWallMs: 30_000 },
+        }),
+      },
+      osRuntimeOptions: {
+        session: {
+          async dispatch() {
+            return { ok: true };
+          },
+          async dispatchStatus() {
+            return { status: 'not_found' };
+          },
+          on() {
+            return () => {};
+          },
+          sseLive() {
+            return true;
+          },
+        },
+      },
+      routerOptions: {
+        autoStart: false,
+        checkHealthz: async () => false,
+        config: resolveRouterConfig({}, { probeFailureThreshold: 1 }),
+        auditSink: {
+          async recordTransition(transition) {
+            transitions.push(transition);
+            return {
+              event: 'runtime.router.failover',
+              auditWritten: true,
+              noticeDelivered: true,
+              telemetryEmitted: true,
+            };
+          },
+        },
+      },
+    });
+
+    const result = await runtime.tick();
+
+    assert.equal(result.transition?.kind, 'failover');
+    assert.equal(runtime.getMode(), 'local');
+    assert.equal(transitions.length, 1);
+    assert.equal(transitions[0].kind, 'failover');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('default agent runtime stays on SDK path when healthz is up and no hard error occurs', async () => {
+  const rootDir = makeRoot();
+  const transitions = [];
+  const dispatchAttempts = [];
+  try {
+    const runtime = createDefaultAgentRuntime({
+      rootDir,
+      domainConfig: { id: 'code-pr', promptSet: 'code-pr' },
+      logger: silentLogger(),
+      localRuntimeOptions: {
+        cliDirect: completedCliDirect(),
+        admissionImpl: async () => ({
+          admit: true,
+          budget: { requestedTokens: 500, requestedWallMs: 30_000 },
+        }),
+      },
+      osRuntimeOptions: {
+        session: {
+          async dispatch(payload) {
+            dispatchAttempts.push(payload.request_id);
+            return {
+              app_id: 'adversarial-review',
+              request_id: payload.request_id,
+              launch_request_id: `lrq_${payload.request_id}`,
+            };
+          },
+          async dispatchStatus() {
+            return { status: 'running' };
+          },
+          on() {
+            return () => {};
+          },
+          sseLive() {
+            return true;
+          },
+        },
+      },
+      routerOptions: {
+        autoStart: false,
+        checkHealthz: async () => true,
+        config: resolveRouterConfig({}, { probeFailureThreshold: 1 }),
+        auditSink: {
+          async recordTransition(transition) {
+            transitions.push(transition);
+            return { auditWritten: true, noticeDelivered: true };
+          },
+        },
+      },
+    });
+    const request = toAgentRequest(reviewerReq(), {
+      kind: 'reviewer',
+      rootDir,
+      domainConfig: loadDomainConfig(rootDir, 'code-pr'),
+    });
+
+    await runtime.run(request);
+    runtime.markSseEvent();
+    const tickResult = await runtime.tick();
+
+    assert.equal(runtime.getMode(), 'os');
+    assert.equal(dispatchAttempts.length, 1);
+    assert.equal(tickResult.transition, null);
+    assert.equal(transitions.length, 0);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('default agent runtime status reports live-wired classification and healthz hooks', () => {
+  const rootDir = makeRoot();
+  try {
+    const runtime = createDefaultAgentRuntime({
+      rootDir,
+      domainConfig: { id: 'code-pr', promptSet: 'code-pr' },
+      logger: silentLogger(),
+      localRuntimeOptions: {
+        cliDirect: completedCliDirect(),
+        admissionImpl: async () => ({
+          admit: true,
+          budget: { requestedTokens: 500, requestedWallMs: 30_000 },
+        }),
+      },
+      osRuntimeOptions: {
+        session: {
+          async dispatch() {
+            return { ok: true };
+          },
+          async dispatchStatus() {
+            return { status: 'not_found' };
+          },
+          on() {
+            return () => {};
+          },
+          sseLive() {
+            return true;
+          },
+        },
+      },
+      routerOptions: { autoStart: false },
+    });
+
+    const status = runtime.status();
+
+    assert.equal(status.wiring.takeClassification, true);
+    assert.equal(status.wiring.checkHealthz, true);
+    assert.equal(status.wiring.dispatchStatus, true);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

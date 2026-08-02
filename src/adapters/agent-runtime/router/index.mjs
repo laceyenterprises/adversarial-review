@@ -378,6 +378,11 @@ function createHealthRouter({
         }
         : null,
       pendingOsRuns: pendingOsKeys.size,
+      wiring: {
+        takeClassification: typeof takeClassification === 'function',
+        checkHealthz: typeof checkHealthz === 'function',
+        dispatchStatus: typeof dispatchStatus === 'function',
+      },
       config: {
         enabled: config.enabled,
         probeFailureThreshold: config.probeFailureThreshold,

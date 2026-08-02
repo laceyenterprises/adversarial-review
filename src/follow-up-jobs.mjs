@@ -388,9 +388,17 @@ function classifyFollowUpCriticality(reviewBody) {
   };
 }
 
-function resolveDurableFollowUpClassification(reviewBody, fallbackCritical) {
+function resolveDurableFollowUpClassification(reviewBody, _fallbackCritical) {
   if (!String(reviewBody || '').trim()) {
-    return { critical: Boolean(fallbackCritical), settledClean: false };
+    return {
+      critical: true,
+      criticalityReason: 'blocking-section-unparseable',
+      blockingFindingCount: 0,
+      blockingFindingState: 'unknown',
+      statedVerdict: null,
+      verdict: null,
+      settledClean: false,
+    };
   }
   const classification = classifyFollowUpCriticality(reviewBody);
   return {

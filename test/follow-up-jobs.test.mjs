@@ -182,7 +182,7 @@ test('buildFollowUpJob creates a pending durable handoff record', () => {
   assert.match(job.jobId, /^laceyenterprises__clio-pr-42-/);
 });
 
-test('buildFollowUpJob does not classify missing review body as settled clean', () => {
+test('buildFollowUpJob fails closed when the review body is missing', () => {
   const job = buildFollowUpJob({
     repo: 'laceyenterprises/clio',
     prNumber: 42,
@@ -193,9 +193,11 @@ test('buildFollowUpJob does not classify missing review body as settled clean', 
     critical: false,
   });
 
+  assert.equal(job.critical, true);
+  assert.equal(job.recommendedFollowUpAction.priority, 'high');
   assert.equal(
     job.recommendedFollowUpAction.summary,
-    'Start a follow-up coding session for this PR and address the adversarial review findings.'
+    'Start a follow-up coding session for this PR immediately and address the blocking review findings first.'
   );
 });
 

@@ -20,6 +20,7 @@ import {
   deliverAlert,
   drainPendingAlerts,
   ensureAlertSinkDirs,
+  nextAlertDrainDelayMs,
   pendingDir,
   readAlertSinkHealth,
   resolveAlertDefaults,
@@ -441,6 +442,11 @@ test('invalid retry delay configuration falls back without wedging an inflight a
   assert.deepEqual(readdirSync(pendingRoot), [`${doc.id}.json`]);
   const retryDoc = JSON.parse(readFileSync(join(pendingRoot, `${doc.id}.json`), 'utf8'));
   assert.equal(retryDoc.nextAttemptAfter, '2026-08-02T05:01:05.000Z');
+  assert.equal(drained.nextAttemptAtMs, Date.parse(retryDoc.nextAttemptAfter));
+  assert.equal(
+    nextAlertDrainDelayMs(drained, 5_000, Date.parse('2026-08-02T05:01:00.000Z')),
+    5_000
+  );
 });
 
 test('malformed pending alert is quarantined and later alerts still drain', async (t) => {
@@ -763,6 +769,50 @@ test('archive retention removes old delivered documents and receipts only', (t) 
   assert.equal(removed, 2);
   assert.deepEqual(readdirSync(deliveredRoot), []);
   assert.deepEqual(readdirSync(receiptsRoot), ['fresh.json']);
+});
+
+test('queue drains throttle archive retention sweeps to an hourly cadence', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deliveredRoot = sinkPath(rootDir, 'delivered');
+  mkdirSync(deliveredRoot, { recursive: true });
+  const firstOld = join(deliveredRoot, 'first-old.json');
+  writeFileSync(firstOld, '{}\n');
+  const oldAt = new Date('2026-06-01T00:00:00.000Z');
+  utimesSync(firstOld, oldAt, oldAt);
+
+  const first = await drainPendingAlerts({
+    env,
+    now: new Date('2026-08-02T00:00:00.000Z'),
+  });
+  assert.equal(first.archiveRetentionSwept, true);
+  assert.equal(first.archiveRetentionRemoved, 1);
+
+  const secondOld = join(deliveredRoot, 'second-old.json');
+  writeFileSync(secondOld, '{}\n');
+  utimesSync(secondOld, oldAt, oldAt);
+  const second = await drainPendingAlerts({
+    env,
+    now: new Date('2026-08-02T00:00:05.000Z'),
+  });
+  assert.equal(second.archiveRetentionSwept, false);
+  assert.equal(second.archiveRetentionRemoved, 0);
+  assert.deepEqual(readdirSync(deliveredRoot), ['second-old.json']);
+
+  const third = await drainPendingAlerts({
+    env,
+    now: new Date('2026-08-02T01:00:00.000Z'),
+  });
+  assert.equal(third.archiveRetentionSwept, true);
+  assert.equal(third.archiveRetentionRemoved, 1);
+});
+
+test('retry scheduling honors the nearest pending exponential backoff', () => {
+  const nowMs = Date.parse('2026-08-02T00:00:00.000Z');
+  assert.equal(
+    nextAlertDrainDelayMs({ nextAttemptAtMs: nowMs + 15 * 60_000 }, 5_000, nowMs),
+    15 * 60_000
+  );
 });
 
 test('health-probe and hammer-cap callers both resolve through the shared alert sink module', async () => {

@@ -30,6 +30,7 @@ const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 const DEFAULT_STALE_INFLIGHT_AGE_MS = 120_000;
 const DEFAULT_MAX_DELIVERY_ATTEMPTS = 8;
 const DEFAULT_ARCHIVE_RETENTION_DAYS = 30;
+const DEFAULT_ARCHIVE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const HTTP_TIMEOUT_MS = Number(
   process.env.ALERT_HTTP_TIMEOUT_MS || process.env.HTTP_TIMEOUT_MS || DEFAULT_HTTP_TIMEOUT_MS
 );
@@ -42,6 +43,7 @@ let telTelemetryPromise;
 let activeDrainPromise = null;
 let scheduledDrainTimer = null;
 let scheduledDrainAtMs = null;
+const archiveSweepAtByRoot = new Map();
 
 function firstNonEmpty(...values) {
   for (const value of values) {
@@ -847,7 +849,12 @@ async function drainSingleAlert(filePath, {
     validateAlertDocIdentity(filePath, readAlertDoc(filePath))
   );
   if (!isDueForRetry(prior, now instanceof Date ? now.getTime() : new Date(now).getTime())) {
-    return { status: 'skipped', reason: 'backoff-not-elapsed', id: prior.id };
+    return {
+      status: 'skipped',
+      reason: 'backoff-not-elapsed',
+      id: prior.id,
+      nextAttemptAfter: prior.nextAttemptAfter,
+    };
   }
   const inflightPath = movePendingToInflight(alertRoot, filePath, prior);
   const attemptAt = (now instanceof Date ? now : new Date(now)).toISOString();
@@ -916,7 +923,13 @@ async function drainSingleAlert(filePath, {
     });
     setHealthFailed(alertRoot, retryDoc, error, attemptAt);
     await emitNotificationBusDeliverSpan({ hookPath, producer, outcome: 'error' });
-    return { status: 'queued', id: retryDoc.id, attemptCount: retryDoc.attemptCount, error: retryDoc.lastError };
+    return {
+      status: 'queued',
+      id: retryDoc.id,
+      attemptCount: retryDoc.attemptCount,
+      error: retryDoc.lastError,
+      nextAttemptAfter,
+    };
   }
 }
 
@@ -927,6 +940,7 @@ async function drainPendingAlerts({
   fsImpl = { readFileSync, existsSync },
   loadConfigRuntimeImpl = null,
   maxItems = Infinity,
+  archiveSweepIntervalMs = DEFAULT_ARCHIVE_SWEEP_INTERVAL_MS,
 } = {}) {
   const config = resolveAlertTransportDefaults(env, {
     fsImpl: { existsSync: fsImpl.existsSync || existsSync },
@@ -965,10 +979,28 @@ async function drainPendingAlerts({
       }
     }
   }
-  const archiveRetentionRemoved = sweepAlertArchiveRetention(rootDir, {
-    now,
-    retentionDays: config.archiveRetentionDays,
-  });
+  const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  const priorArchiveSweepAtMs = archiveSweepAtByRoot.get(rootDir);
+  const normalizedArchiveSweepIntervalMs = finiteNonNegativeNumber(
+    archiveSweepIntervalMs,
+    DEFAULT_ARCHIVE_SWEEP_INTERVAL_MS
+  );
+  const archiveRetentionSwept = !Number.isFinite(priorArchiveSweepAtMs)
+    || nowMs - priorArchiveSweepAtMs >= normalizedArchiveSweepIntervalMs;
+  let archiveRetentionRemoved = 0;
+  if (archiveRetentionSwept) {
+    archiveRetentionRemoved = sweepAlertArchiveRetention(rootDir, {
+      now,
+      retentionDays: config.archiveRetentionDays,
+    });
+    archiveSweepAtByRoot.set(rootDir, nowMs);
+  }
+  const nextAttemptAtMs = results.reduce((nearest, entry) => {
+    const candidate = Date.parse(entry?.nextAttemptAfter || '');
+    return Number.isFinite(candidate) && (nearest === null || candidate < nearest)
+      ? candidate
+      : nearest;
+  }, null);
   return {
     status: results.some((entry) => (
       entry.status === 'failed' || entry.status === 'dead-lettered'
@@ -977,9 +1009,18 @@ async function drainPendingAlerts({
         : 'ok',
     drained: results.filter((entry) => entry.status === 'delivered').length,
     queued: countDirEntries(pendingDir(rootDir)),
+    nextAttemptAtMs,
     archiveRetentionRemoved,
+    archiveRetentionSwept,
     results,
   };
+}
+
+function nextAlertDrainDelayMs(drainResult, retryDelayMs, nowMs = Date.now()) {
+  const baseDelayMs = finiteNonNegativeNumber(retryDelayMs, DEFAULT_RETRY_DELAY_MS);
+  const nextAttemptAtMs = Number(drainResult?.nextAttemptAtMs);
+  if (!Number.isFinite(nextAttemptAtMs)) return baseDelayMs;
+  return Math.max(baseDelayMs, nextAttemptAtMs - nowMs);
 }
 
 function scheduleAlertDrain({
@@ -1007,9 +1048,14 @@ function scheduleAlertDrain({
       requestText,
       fsImpl,
       loadConfigRuntimeImpl,
-    }).catch((error) => {
+    });
+    let completedDrain = null;
+    activeDrainPromise = activeDrainPromise.catch((error) => {
       console.error?.('[alert-delivery] scheduled drain failed', error);
       return { status: 'error', drained: 0, queued: 0, results: [], error: String(error?.message || error) };
+    }).then((result) => {
+      completedDrain = result;
+      return result;
     }).finally(() => {
       activeDrainPromise = null;
       try {
@@ -1023,7 +1069,7 @@ function scheduleAlertDrain({
         if (pendingCount > 0) {
           scheduleAlertDrain({
             env,
-            delayMs: config.retryDelayMs,
+            delayMs: nextAlertDrainDelayMs(completedDrain, config.retryDelayMs),
             requestText,
             fsImpl,
             loadConfigRuntimeImpl,
@@ -1128,6 +1174,7 @@ export {
   firstNonEmpty,
   healthPath,
   httpRequestText,
+  nextAlertDrainDelayMs,
   pendingDir,
   readAlertSinkHealth,
   readHooksToken,

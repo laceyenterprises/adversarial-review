@@ -25,8 +25,8 @@ Directory: `data/alert-delivery/`
 
 | Path | Shape | Contract |
 |---|---|---|
-| `pending/*.json` | Alert document | Durable work waiting for delivery or retry. Drainers process sorted files up to their item cap. |
-| `inflight/*.json` | Alert document | Claimed work being posted to the notification bus. Stale inflight files are recovered back to `pending/`. |
+| `pending/*.json` | Alert document | Durable work waiting for delivery or retry. `id` is a safe filename token and must exactly match the file basename. Drainers process sorted files up to their item cap. |
+| `inflight/*.json` | Alert document | Claimed work being posted to the notification bus. The same ID/basename invariant applies. Stale inflight files are recovered back to `pending/`. |
 | `delivered/*.json` | Alert document with `deliveredAt` | Successful delivery archive, retained for 30 days by default. |
 | `quarantine/*.json` | Original unreadable file bytes | Files that cannot be parsed or read during pending drain or inflight recovery. Quarantining is fail-isolating: later alerts continue draining. |
 | `dead-letter/*.json` | Alert document with `deadLetteredAt` and `lastError` | Parseable alerts that exhausted the bounded transport-attempt ceiling. Dead letters are terminal and operator-actionable; they are not retried silently forever. |
@@ -40,9 +40,10 @@ Directory: `data/alert-delivery/`
 | Field | Shape | Contract |
 |---|---|---|
 | `ready` | boolean | `true` only when live pending, inflight, quarantine, and dead-letter counts are all zero. |
-| `pendingCount` | number | Live count of `pending/*.json`; recomputed by `readAlertSinkHealth`. |
-| `quarantineCount` | number | Live count of `quarantine/*.json`; recomputed by `readAlertSinkHealth`. |
-| `deadLetterCount` | number | Live count of `dead-letter/*.json`; non-zero is an operator-pageable delivery failure. |
+| `pendingCount` | number or null | Live count of `pending/*.json`; `null` when the lane cannot be safely inspected. |
+| `quarantineCount` | number or null | Live count of `quarantine/*.json`; `null` when the lane cannot be safely inspected. |
+| `deadLetterCount` | number or null | Live count of `dead-letter/*.json`; non-zero or unreadable is an operator-pageable delivery failure. |
+| `healthCheckError` | string or null | Actionable ownership, type, or read error. Any non-null value forces `ready: false`; only a genuine `ENOENT` lane is counted as zero. |
 | `lastQueuedAt` / `lastDeliveredAt` / `lastFailureAt` | string or null | ISO-8601 timestamps for the latest queue, delivery, and failure observations. |
 | `lastFailureReason` | string or null | Last transport or quarantine reason while the sink is not ready. |
 | `lastQueuedEvent` | string or null | Event name from the latest queued alert, when present. |
@@ -61,7 +62,10 @@ Directory: `data/alert-delivery/`
   daemon through Node's unhandled-rejection policy.
 - Each pending item is isolated. A malformed `pending/*.json` file is moved to
   `quarantine/`, health is marked not ready, and the drainer continues with the
-  remaining sorted pending files.
+  remaining sorted pending files. A parseable document whose ID is unsafe or
+  does not exactly match its own filename is malformed: the drainer quarantines
+  that source file before deriving any transition path, so it cannot rename or
+  overwrite a neighboring alert.
 - Stale inflight recovery uses the same quarantine behavior for unreadable
   `inflight/*.json` files before recovering later stale alerts. Recovery first
   checks for a matching terminal archive and cleans up the stale inflight copy
@@ -81,6 +85,10 @@ Directory: `data/alert-delivery/`
 - Sink health resolves only the principal-owned state root; it does not require
   `ALERT_TO`. A missing recipient can therefore never hide already-owed work
   from the watcher health log or an operator probe.
+- Queue-time configuration requires `ALERT_TO` and persists the complete
+  destination under `doc.delivery`. Drain-time transport resolution does not
+  consult current `ALERT_TO`; already-owed work continues to its persisted
+  recipient after a restart or recipient-env regression.
 - Each drain sweep removes `delivered/` documents and `receipts/` older than
   `ADVERSARIAL_ALERT_DELIVERY_ARCHIVE_RETENTION_DAYS` (default 30). Health never
   scans the delivered archive, so its cost is bounded by the live queue lanes.
@@ -95,7 +103,10 @@ Directory: `data/alert-delivery/`
   duplicate operator page.
 - The state root is principal-owned. Before creating a missing sink, the writer
   verifies the nearest existing parent against its effective UID; it then
-  verifies the new sink before creating queue children. This refuses cross-user
-  writes before they can leave wrong-UID subdirectories behind and prevents
-  shared-root WAL/rename ownership races. Different worker UIDs get distinct
-  default roots under their own home directories.
+  verifies the new sink and every existing/created lane directory. Health also
+  verifies ownership and actual readability of each live lane. Wrong-owner,
+  non-directory, `EACCES`, `EPERM`, and other read failures are degraded health,
+  never empty healthy queues. This refuses cross-user writes before they can
+  leave wrong-UID subdirectories behind and prevents shared-root WAL/rename
+  ownership races. Different worker UIDs get distinct default roots under their
+  own home directories.

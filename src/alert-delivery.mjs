@@ -192,7 +192,27 @@ function ensureAlertSinkDirs(rootDir = ROOT, {
   mkdirSyncImpl(sinkRoot, { recursive: true });
   assertAlertSinkOwner(rootDir, ownerOptions);
   for (const child of ['pending', 'inflight', 'delivered', 'quarantine', 'dead-letter', 'receipts']) {
-    mkdirSyncImpl(join(sinkRoot, child), { recursive: true });
+    const childPath = join(sinkRoot, child);
+    mkdirSyncImpl(childPath, { recursive: true });
+    assertOwnedAlertDirectory(childPath, ownerOptions);
+  }
+}
+
+function assertOwnedAlertDirectory(directoryPath, {
+  statSyncImpl = statSync,
+  geteuidImpl = typeof process.geteuid === 'function' ? () => process.geteuid() : null,
+} = {}) {
+  const directoryStat = statSyncImpl(directoryPath);
+  if (typeof directoryStat?.isDirectory === 'function' && !directoryStat.isDirectory()) {
+    throw new Error(`Alert delivery path ${directoryPath} is not a directory`);
+  }
+  if (typeof geteuidImpl !== 'function') return;
+  const effectiveUid = geteuidImpl();
+  if (Number.isInteger(directoryStat?.uid) && directoryStat.uid !== effectiveUid) {
+    throw new Error(
+      `Alert delivery directory ${directoryPath} is owned by uid ${directoryStat.uid}; `
+      + `refusing cross-user access as uid ${effectiveUid}`
+    );
   }
 }
 
@@ -209,6 +229,9 @@ function assertAlertSinkOwner(rootDir = ROOT, {
     ownerBoundary = parent;
   }
   const sinkStat = statSyncImpl(ownerBoundary);
+  if (typeof sinkStat?.isDirectory === 'function' && !sinkStat.isDirectory()) {
+    throw new Error(`Alert delivery owner boundary ${ownerBoundary} is not a directory`);
+  }
   const effectiveUid = geteuidImpl();
   if (Number.isInteger(sinkStat?.uid) && sinkStat.uid !== effectiveUid) {
     throw new Error(
@@ -288,11 +311,12 @@ function writeHealth(rootDir, next) {
   return next;
 }
 
-function countDirEntries(dirPath) {
+function countDirEntries(dirPath, { readdirSyncImpl = readdirSync } = {}) {
   try {
-    return readdirSync(dirPath).filter((name) => name.endsWith('.json')).length;
-  } catch {
-    return 0;
+    return readdirSyncImpl(dirPath).filter((name) => name.endsWith('.json')).length;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return 0;
+    throw error;
   }
 }
 
@@ -398,15 +422,11 @@ function setHealthDelivered(rootDir, deliveredAt) {
   });
 }
 
-function resolveAlertDefaults(env = process.env, {
+function resolveAlertTransportDefaults(env = process.env, {
   fsImpl = { existsSync },
   loadConfigRuntimeImpl = null,
   rootDir = ROOT,
 } = {}) {
-  const alertTo = firstNonEmpty(env.ALERT_TO);
-  if (!alertTo) {
-    throw new Error('ALERT_TO must be configured for alert delivery');
-  }
   return {
     alertBusUrl: resolveAlertBusUrl(env, {
       loadConfigRuntimeImpl,
@@ -418,10 +438,6 @@ function resolveAlertDefaults(env = process.env, {
       resolveHooksTokenFileFromRoot(env.ADV_SECRETS_ROOT, fsImpl) ||
       resolveHooksTokenFileFromRoot(env.LITELLM_SECRETS_ROOT, fsImpl) ||
       resolveDefaultHooksTokenFile(fsImpl),
-    alertChannel: env.ALERT_CHANNEL || DEFAULT_ALERT_CHANNEL,
-    alertTo,
-    alertAgentId: env.ALERT_AGENT_ID || DEFAULT_ALERT_AGENT_ID,
-    alertName: env.ALERT_NAME || DEFAULT_ALERT_NAME,
     rootDir: resolveAlertSinkStateRoot(env, rootDir),
     retryDelayMs: Math.max(
       0,
@@ -442,8 +458,22 @@ function resolveAlertDefaults(env = process.env, {
   };
 }
 
+function resolveAlertDefaults(env = process.env, options = {}) {
+  const alertTo = firstNonEmpty(env.ALERT_TO);
+  if (!alertTo) {
+    throw new Error('ALERT_TO must be configured for alert delivery');
+  }
+  return {
+    ...resolveAlertTransportDefaults(env, options),
+    alertChannel: env.ALERT_CHANNEL || DEFAULT_ALERT_CHANNEL,
+    alertTo,
+    alertAgentId: env.ALERT_AGENT_ID || DEFAULT_ALERT_AGENT_ID,
+    alertName: env.ALERT_NAME || DEFAULT_ALERT_NAME,
+  };
+}
+
 function readHooksToken({ env = process.env, fsImpl = { readFileSync, existsSync }, loadConfigRuntimeImpl = null } = {}) {
-  const config = resolveAlertDefaults(env, {
+  const config = resolveAlertTransportDefaults(env, {
     fsImpl: { existsSync: fsImpl.existsSync || existsSync },
     loadConfigRuntimeImpl,
   });
@@ -573,6 +603,33 @@ function readAlertDoc(filePath) {
   return JSON.parse(readFileSync(filePath, 'utf8'));
 }
 
+function validateAlertDocIdentity(filePath, doc) {
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+    throw new Error(`Alert document ${basename(filePath)} must be a JSON object`);
+  }
+  const id = typeof doc.id === 'string' ? doc.id.trim() : '';
+  if (doc.id !== id || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/u.test(id)) {
+    throw new Error(`Alert document ${basename(filePath)} has an unsafe id`);
+  }
+  const expectedName = `${id}.json`;
+  if (basename(filePath) !== expectedName) {
+    throw new Error(
+      `Alert document id ${id} does not match queue filename ${basename(filePath)}`
+    );
+  }
+  return doc;
+}
+
+function validateQueuedAlertDelivery(filePath, doc) {
+  const delivery = doc?.delivery;
+  for (const field of ['alertTo', 'alertChannel', 'alertName', 'alertAgentId']) {
+    if (typeof delivery?.[field] !== 'string' || !delivery[field].trim()) {
+      throw new Error(`Alert document ${basename(filePath)} is missing delivery.${field}`);
+    }
+  }
+  return doc;
+}
+
 function quarantineAlertFile(rootDir, filePath, error, now = new Date()) {
   ensureAlertSinkDirs(rootDir);
   const stamp = (now instanceof Date ? now : new Date(now)).toISOString().replace(/[:.]/gu, '-');
@@ -592,8 +649,9 @@ function listPendingAlertPaths(rootDir = ROOT) {
       .filter((name) => name.endsWith('.json'))
       .sort()
       .map((name) => join(pendingDir(rootDir), name));
-  } catch {
-    return [];
+  } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    throw error;
   }
 }
 
@@ -603,8 +661,9 @@ function listInflightAlertPaths(rootDir = ROOT) {
       .filter((name) => name.endsWith('.json'))
       .sort()
       .map((name) => join(inflightDir(rootDir), name));
-  } catch {
-    return [];
+  } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    throw error;
   }
 }
 
@@ -622,7 +681,7 @@ function recoverStaleInflightAlerts(rootDir, {
   for (const filePath of listInflightAlertPaths(rootDir)) {
     let doc;
     try {
-      doc = readAlertDoc(filePath);
+      doc = validateAlertDocIdentity(filePath, readAlertDoc(filePath));
     } catch (error) {
       try {
         const quarantinedPath = quarantineAlertFile(rootDir, filePath, error, now);
@@ -694,10 +753,9 @@ function recoverStaleInflightAlerts(rootDir, {
   return results;
 }
 
-function movePendingToInflight(rootDir, doc) {
-  const src = alertDocPath(rootDir, 'pending', doc.id);
+function movePendingToInflight(rootDir, filePath, doc) {
   const dest = alertDocPath(rootDir, 'inflight', doc.id);
-  renameSync(src, dest);
+  renameSync(filePath, dest);
   return dest;
 }
 
@@ -731,7 +789,7 @@ async function postAlertDoc(doc, {
   fsImpl = { readFileSync, existsSync },
   loadConfigRuntimeImpl = null,
 } = {}) {
-  const config = resolveAlertDefaults(env, {
+  const config = resolveAlertTransportDefaults(env, {
     fsImpl: { existsSync: fsImpl.existsSync || existsSync },
     loadConfigRuntimeImpl,
   });
@@ -769,7 +827,7 @@ async function drainSingleAlert(filePath, {
   loadConfigRuntimeImpl = null,
 } = {}) {
   const rootDir = ROOT;
-  const config = resolveAlertDefaults(env, {
+  const config = resolveAlertTransportDefaults(env, {
     fsImpl: { existsSync: fsImpl.existsSync || existsSync },
     loadConfigRuntimeImpl,
     rootDir,
@@ -777,11 +835,14 @@ async function drainSingleAlert(filePath, {
   const alertRoot = config.rootDir;
   const hookPath = notificationHookPath(config.alertBusUrl);
   const producer = 'adversarial-review';
-  const prior = readAlertDoc(filePath);
+  const prior = validateQueuedAlertDelivery(
+    filePath,
+    validateAlertDocIdentity(filePath, readAlertDoc(filePath))
+  );
   if (!isDueForRetry(prior, now instanceof Date ? now.getTime() : new Date(now).getTime())) {
     return { status: 'skipped', reason: 'backoff-not-elapsed', id: prior.id };
   }
-  const inflightPath = movePendingToInflight(alertRoot, prior);
+  const inflightPath = movePendingToInflight(alertRoot, filePath, prior);
   const attemptAt = (now instanceof Date ? now : new Date(now)).toISOString();
   const doc = {
     ...prior,
@@ -860,7 +921,7 @@ async function drainPendingAlerts({
   loadConfigRuntimeImpl = null,
   maxItems = Infinity,
 } = {}) {
-  const config = resolveAlertDefaults(env, {
+  const config = resolveAlertTransportDefaults(env, {
     fsImpl: { existsSync: fsImpl.existsSync || existsSync },
     loadConfigRuntimeImpl,
   });
@@ -938,7 +999,7 @@ function scheduleAlertDrain({
       let rootDir;
       let retryDelayMs = DEFAULT_RETRY_DELAY_MS;
       try {
-        const config = resolveAlertDefaults(env, {
+        const config = resolveAlertTransportDefaults(env, {
           fsImpl: { existsSync: fsImpl.existsSync || existsSync },
           loadConfigRuntimeImpl,
         });
@@ -962,24 +1023,56 @@ function scheduleAlertDrain({
   scheduledDrainTimer.unref?.();
 }
 
-function readAlertSinkHealth({ env = process.env, loadConfigRuntimeImpl = null } = {}) {
+function readAlertSinkHealth({
+  env = process.env,
+  loadConfigRuntimeImpl = null,
+  fsImpl = { existsSync, readFileSync, readdirSync, statSync },
+  geteuidImpl = typeof process.geteuid === 'function' ? () => process.geteuid() : null,
+} = {}) {
   void loadConfigRuntimeImpl;
   const rootDir = resolveAlertSinkStateRoot(env);
   const health = readHealth(rootDir);
-  const pendingCount = countDirEntries(pendingDir(rootDir));
-  const inflightCount = countDirEntries(inflightDir(rootDir));
-  const quarantineCount = countDirEntries(quarantineDir(rootDir));
-  const deadLetterCount = countDirEntries(deadLetterDir(rootDir));
-  return {
-    ...health,
-    rootDir,
-    ready: pendingCount === 0 && inflightCount === 0 && quarantineCount === 0
-      && deadLetterCount === 0,
-    pendingCount,
-    inflightCount,
-    quarantineCount,
-    deadLetterCount,
-  };
+  try {
+    const ownerOptions = {
+      existsSyncImpl: fsImpl.existsSync || existsSync,
+      statSyncImpl: fsImpl.statSync || statSync,
+      geteuidImpl,
+    };
+    assertAlertSinkOwner(rootDir, ownerOptions);
+    const counts = {};
+    for (const [field, directoryPath] of [
+      ['pendingCount', pendingDir(rootDir)],
+      ['inflightCount', inflightDir(rootDir)],
+      ['quarantineCount', quarantineDir(rootDir)],
+      ['deadLetterCount', deadLetterDir(rootDir)],
+    ]) {
+      if ((fsImpl.existsSync || existsSync)(directoryPath)) {
+        assertOwnedAlertDirectory(directoryPath, ownerOptions);
+      }
+      counts[field] = countDirEntries(directoryPath, {
+        readdirSyncImpl: fsImpl.readdirSync || readdirSync,
+      });
+    }
+    return {
+      ...health,
+      rootDir,
+      ready: Object.values(counts).every((count) => count === 0),
+      ...counts,
+      healthCheckError: null,
+    };
+  } catch (error) {
+    return {
+      ...health,
+      rootDir,
+      ready: false,
+      pendingCount: null,
+      inflightCount: null,
+      quarantineCount: null,
+      deadLetterCount: null,
+      healthCheckError: String(error?.message || error),
+      lastFailureReason: `alert sink health check failed: ${String(error?.message || error)}`,
+    };
+  }
 }
 
 async function deliverAlert(text, {
@@ -1022,6 +1115,7 @@ export {
   readAlertSinkHealth,
   readHooksToken,
   resolveAlertDefaults,
+  resolveAlertTransportDefaults,
   scheduleAlertDrain,
   sweepAlertArchiveRetention,
 };

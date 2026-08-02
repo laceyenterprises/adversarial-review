@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -132,6 +134,27 @@ test('alert sink validates the nearest existing owner boundary before creating c
     /owner boundary \/state.*refusing cross-user write/
   );
   assert.deepEqual(mkdirCalls, []);
+});
+
+test('alert sink validates every existing lane after creation', () => {
+  assert.throws(
+    () => ensureAlertSinkDirs('/state', {
+      existsSyncImpl() {
+        return true;
+      },
+      statSyncImpl(filePath) {
+        return {
+          uid: filePath.endsWith('/pending') ? 502 : 501,
+          isDirectory: () => true,
+        };
+      },
+      geteuidImpl() {
+        return 501;
+      },
+      mkdirSyncImpl() {},
+    }),
+    /directory \/state\/data\/alert-delivery\/pending is owned by uid 502/
+  );
 });
 
 test('alert sink root normalizes a final sink path with a trailing separator', () => {
@@ -438,6 +461,87 @@ test('malformed pending alert is quarantined and later alerts still drain', asyn
   assert.match(health.lastFailureReason, /quarantined 000-bad\.json/);
 });
 
+test('queued recipient survives current ALERT_TO removal and still drains', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const pendingRoot = pendingDir(rootDir);
+  mkdirSync(pendingRoot, { recursive: true });
+  const doc = {
+    version: 1,
+    id: 'persisted-recipient',
+    createdAt: '2026-08-02T05:00:00.000Z',
+    text: 'owed alert',
+    attemptCount: 0,
+    nextAttemptAfter: '2026-08-02T05:00:00.000Z',
+    delivery: {
+      alertName: 'Persisted name',
+      alertAgentId: 'ops',
+      alertChannel: 'telegram',
+      alertTo: 'persisted-recipient-id',
+    },
+  };
+  writeFileSync(join(pendingRoot, `${doc.id}.json`), `${JSON.stringify(doc)}\n`);
+  delete env.ALERT_TO;
+
+  const calls = [];
+  const drained = await drainPendingAlerts({
+    env,
+    now: new Date('2026-08-02T05:01:00.000Z'),
+    fsImpl: {
+      readFileSync() { return 'hook-token'; },
+      existsSync() { return true; },
+    },
+    requestText: async (_url, options) => { calls.push(options.body); return 'ok'; },
+  });
+
+  assert.equal(drained.drained, 1);
+  assert.equal(calls[0].to, 'persisted-recipient-id');
+});
+
+test('mismatched and traversal-like ids quarantine only their own queue files', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const pendingRoot = pendingDir(rootDir);
+  mkdirSync(pendingRoot, { recursive: true });
+  const delivery = {
+    alertName: 'Adversarial Watcher Health Test',
+    alertAgentId: 'ops',
+    alertChannel: 'telegram',
+    alertTo: '123456',
+  };
+  const docs = [
+    ['000-mismatch.json', { id: '001-good', text: 'must quarantine', delivery }],
+    ['002-traversal.json', { id: '../outside', text: 'must quarantine', delivery }],
+    ['003-whitespace.json', { id: '003-whitespace ', text: 'must quarantine', delivery }],
+    ['001-good.json', { id: '001-good', text: 'must deliver', delivery }],
+  ];
+  for (const [name, doc] of docs) {
+    writeFileSync(join(pendingRoot, name), `${JSON.stringify({
+      version: 1,
+      createdAt: '2026-08-02T05:00:00.000Z',
+      attemptCount: 0,
+      nextAttemptAfter: '2026-08-02T05:00:00.000Z',
+      ...doc,
+    })}\n`);
+  }
+  const calls = [];
+  const drained = await drainPendingAlerts({
+    env,
+    now: new Date('2026-08-02T05:01:00.000Z'),
+    fsImpl: {
+      readFileSync() { return 'hook-token'; },
+      existsSync() { return true; },
+    },
+    requestText: async (_url, options) => { calls.push(options.body.metadata.alertId); return 'ok'; },
+  });
+
+  assert.deepEqual(calls, ['001-good']);
+  assert.equal(drained.results.filter((entry) => entry.status === 'quarantined').length, 3);
+  assert.deepEqual(readdirSync(sinkPath(rootDir, 'delivered')), ['001-good.json']);
+  assert.equal(readdirSync(sinkPath(rootDir, 'quarantine')).length, 3);
+  assert.equal(existsSync(join(rootDir, 'outside.json')), false);
+});
+
 test('malformed inflight alert is quarantined during stale recovery', async (t) => {
   const { env, rootDir } = makeEnv();
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -542,6 +646,54 @@ test('health readiness is derived from live pending and quarantine counts', asyn
   const health = readAlertSinkHealth({ env });
   assert.equal(health.ready, false);
   assert.equal(health.pendingCount, 1);
+});
+
+test('health fails closed on a wrong-owner sink instead of reporting zero', (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  mkdirSync(pendingDir(rootDir), { recursive: true });
+
+  const health = readAlertSinkHealth({
+    env,
+    geteuidImpl: () => 501,
+    fsImpl: {
+      existsSync,
+      readdirSync,
+      statSync(filePath) {
+        const real = statSync(filePath);
+        return { ...real, uid: 502, isDirectory: () => real.isDirectory() };
+      },
+    },
+  });
+
+  assert.equal(health.ready, false);
+  assert.equal(health.pendingCount, null);
+  assert.match(health.healthCheckError, /owned by uid 502/);
+});
+
+test('health fails closed when a live lane is unreadable', (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const pendingRoot = pendingDir(rootDir);
+  mkdirSync(pendingRoot, { recursive: true });
+
+  const health = readAlertSinkHealth({
+    env,
+    fsImpl: {
+      existsSync,
+      statSync,
+      readdirSync(filePath) {
+        if (filePath === pendingRoot) {
+          throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+        }
+        return readdirSync(filePath);
+      },
+    },
+  });
+
+  assert.equal(health.ready, false);
+  assert.equal(health.pendingCount, null);
+  assert.match(health.healthCheckError, /permission denied/);
 });
 
 test('archive retention removes old delivered documents and receipts only', (t) => {

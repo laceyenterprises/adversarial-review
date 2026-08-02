@@ -6,11 +6,13 @@ import { fileURLToPath } from 'node:url';
 
 import { buildRuntimeStatus, renderRuntimeStatus } from './runtime-status.mjs';
 import { runtimeSettleSmokeMain } from './runtime-settle-smoke-cli.mjs';
+import { buildReadyzStatus, renderReadyzStatus } from './runtime-readyz.mjs';
 
 const USAGE = `\
 Usage:
   adversarial-review runtime status [--root <dir>] [--window <24h>] [--json]
   adversarial-review runtime settle-smoke --runtime agent-runtime [--root <dir>] [--json]
+  adversarial-review runtime readyz [--root <dir>] [--json]
 `;
 
 const DURATION_UNITS = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
@@ -58,7 +60,7 @@ async function runtimeMain(argv, io = {}) {
   if (subcommand === 'settle-smoke') {
     return runtimeSettleSmokeMain(rest, io);
   }
-  if (subcommand !== 'status') {
+  if (subcommand !== 'status' && subcommand !== 'readyz') {
     stderr.write(`error: unknown runtime command ${subcommand}\n\n${USAGE}`);
     return 2;
   }
@@ -73,6 +75,26 @@ async function runtimeMain(argv, io = {}) {
   if (options.help) {
     stdout.write(USAGE);
     return 0;
+  }
+
+  if (subcommand === 'readyz') {
+    let model;
+    try {
+      model = await buildReadyzStatus(options.rootDir);
+    } catch (err) {
+      stderr.write(`error: could not build readyz status: ${err?.message || err}\n`);
+      return 1;
+    }
+    
+    if (options.json) {
+      stdout.write(`${JSON.stringify(model, null, 2)}\n`);
+    } else {
+      stdout.write(`${renderReadyzStatus(model)}`);
+    }
+    
+    // In json mode, we still need to exit non-zero if not ready?
+    // "readyz returns GREEN/exit-0 only when all signals pass"
+    return model.overallReady ? 0 : 1;
   }
 
   let model;

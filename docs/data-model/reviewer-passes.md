@@ -33,6 +33,9 @@ The `metadata_json` object keeps two different identifiers separate:
   reviewer); reattach identity remains separate and no worker-run repair is
   attempted.
 
+Settle never uses `reattachToken` as a launch-request lookup key. It may use the
+token only as adapter-session evidence; that evidence cannot populate
+`worker_run_id` unless it independently returns a real worker run identifier.
 Settle retries transient SQLite contention before recording `pending`.
 `scripts/backfill-reviewer-passes.mjs` revisits only pending rows whose
 `workerRunAttribution.launchRequestId` exactly matches the real

@@ -466,11 +466,11 @@ async function spawnReviewer({
       // On failure we settle the pass with null token usage instead.
       let tokenUsage = null;
       let reviewerTokenUsageArtifact = null;
-      // `reattachToken` is an adapter/idempotency handle. It may historically
-      // resemble an LRQ, but it is not proof of a real worker launch. Keep it as
-      // a lookup fallback only and never persist it as metadata.launchRequestId.
+      // `reattachToken` is an adapter/idempotency handle. It may resemble an
+      // LRQ, but it is neither proof of a real worker launch nor a safe
+      // launch_request_id lookup key. Adapters that know a real launch id must
+      // surface it explicitly as result.launchRequestId.
       const launchRequestId = result.launchRequestId || null;
-      const ledgerLookupLaunchRequestId = launchRequestId || result.reattachToken || null;
       // WCW attribution: the reviewer worker's real ledger run_id, captured from
       // the RAW token usage before tagTokenUsage()/normalizeTokenUsage() drops it
       // (the normalized token-usage shape intentionally carries only counters,
@@ -486,10 +486,7 @@ async function spawnReviewer({
             args: {
               // SDK/os-dispatch reattaches by app-contract request_id, but the
               // session ledger attributes worker_runs by launch_request_id.
-              // Older adapters surfaced that launch id only as the reattach
-              // token, so use it for lookup compatibility without contaminating
-              // the durable launchRequestId field below.
-              launchRequestId: ledgerLookupLaunchRequestId,
+              launchRequestId,
               adapterSessionKey: result.reattachToken || reviewerSessionUuid,
               sessionKeys: [
                 reviewerSessionUuid,

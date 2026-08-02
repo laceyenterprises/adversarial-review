@@ -491,7 +491,11 @@ test('spawnReviewer settles worker_run_id null when no worker run resolves (cli-
     postGitHubReviewWithCaptureImpl: async () => {},
     readBestReviewerEvidenceTokenUsageImpl: ({ launchRequestId }) => {
       lookupLaunchRequestId = launchRequestId;
-      return null; // ledger cannot resolve a worker run
+      // A request-shaped reattach token may collide with a real worker launch.
+      // It must never be passed as the launch selector or persisted as a match.
+      return launchRequestId === 'lrq_wcw_null'
+        ? { workerRunId: 'wr_unrelated_collision', input: 99, output: 99 }
+        : null;
     },
     ledgerLookupSleepImpl: async () => {},
     completeReviewerPassImpl: (_root, payload) => {
@@ -501,7 +505,7 @@ test('spawnReviewer settles worker_run_id null when no worker run resolves (cli-
 
   assert.equal(result.ok, true);
   assert.equal(settled.length, 1);
-  assert.equal(lookupLaunchRequestId, 'lrq_wcw_null', 'legacy reattach token remains lookup-only');
+  assert.equal(lookupLaunchRequestId, null, 'reattach token is not a launch selector');
   assert.equal(settled[0].workerRunId, null);
   assert.equal(settled[0].metadata.launchRequestId, null);
   assert.equal(settled[0].metadata.reattachToken, 'lrq_wcw_null');

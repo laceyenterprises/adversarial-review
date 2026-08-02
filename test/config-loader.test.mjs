@@ -5354,9 +5354,9 @@ test('top-level config.yaml accepts mirrored oauth_broker watchdog BPR-05 keys',
           portforward_self_heal_max_cycles: 3
           broker_standby_readyz_url: ""
           broker_standby_container_name: litellm-oauth-broker-standby-1
-          credential_decay_warn_after_seconds: 300
-          credential_decay_crit_after_seconds: 3600
-          credential_decay_last_good_crit_expiry_margin_seconds: 1800
+          credential_decay_warn_after_seconds: 301
+          credential_decay_crit_after_seconds: 3601
+          credential_decay_last_good_crit_expiry_margin_seconds: 1801
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('oauth_broker.watchdog.portforward_self_heal_max_cycles'), 3);
@@ -5365,11 +5365,11 @@ test('top-level config.yaml accepts mirrored oauth_broker watchdog BPR-05 keys',
       cfg.get('oauth_broker.watchdog.broker_standby_container_name'),
       'litellm-oauth-broker-standby-1',
     );
-    assert.equal(cfg.get('oauth_broker.watchdog.credential_decay_warn_after_seconds'), 300);
-    assert.equal(cfg.get('oauth_broker.watchdog.credential_decay_crit_after_seconds'), 3600);
+    assert.equal(cfg.get('oauth_broker.watchdog.credential_decay_warn_after_seconds'), 301);
+    assert.equal(cfg.get('oauth_broker.watchdog.credential_decay_crit_after_seconds'), 3601);
     assert.equal(
       cfg.get('oauth_broker.watchdog.credential_decay_last_good_crit_expiry_margin_seconds'),
-      1800,
+      1801,
     );
 
     const credentialEnvCfg = loadConfig({

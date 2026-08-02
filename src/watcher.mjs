@@ -109,6 +109,7 @@ import {
   openReviewStateDb,
   requestReviewRereview,
 } from './review-state.mjs';
+import { acquireDaemonSingleton } from './daemon-singleton.mjs';
 // ARC-18: the review-state db handle and prepared statements were extracted to
 // ./review-state-db.mjs; import them back so pollOnce and the reviewer/merge
 // helpers keep referencing the same shared handles.
@@ -1613,6 +1614,13 @@ function resolveWatcherHandoffEnabled({ loadConfigImpl = loadConfigCached, env =
 }
 
 async function main() {
+  const singleton = acquireDaemonSingleton({
+    rootDir: ROOT,
+    daemonName: 'watcher',
+    logger: { log: (msg) => console.log(`[watcher] ${msg}`) },
+  });
+  process.once('exit', () => singleton.release());
+
   requireEnv('GITHUB_TOKEN');
   process.env.GHO_RATE_LIMIT_SHARED_STATE_PATH = resolveRateLimitSharedStatePath(process.env, ROOT);
   try {

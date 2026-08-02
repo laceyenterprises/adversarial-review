@@ -65,6 +65,7 @@ import {
   createHandoffRateLimiter,
   normalizeHandoffMaxPerPrHead,
 } from '../src/handoff-rate-cap.mjs';
+import { acquireDaemonSingleton } from '../src/daemon-singleton.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -609,6 +610,13 @@ async function startFollowUpTelemetryListener({
 }
 
 async function main() {
+  const singleton = acquireDaemonSingleton({
+    rootDir: ROOT,
+    daemonName: 'follow-up',
+    logger: { log: logInfo },
+  });
+  process.once('exit', () => singleton.release());
+
   if (process.argv.includes('--with-hq-integration')) {
     process.env.ADV_WITH_HQ_INTEGRATION = '1';
   }

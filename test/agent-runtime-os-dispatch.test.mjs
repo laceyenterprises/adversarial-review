@@ -375,6 +375,68 @@ test('run synthesizes a review artifact from healthy terminal markdown summary',
   assert.deepEqual(result.artifact.verdict.nonBlockingFindings, []);
 });
 
+test('run rejects a dispatchId-only status payload from reviewerRunRef (no launch-request contamination)', async () => {
+  // Regression: an os-dispatch status payload that carries only a dispatchId (the
+  // app-contract request/idempotency handle) and NO launch_request_id must not
+  // seed reviewerRunRef. Otherwise the request handle is promoted into durable
+  // metadata_json.launchRequestId and the attribution backfill resolves the wrong
+  // worker run. With reviewerRunRef null, downstream workerRunAttribution.state
+  // resolves to 'not-applicable' (reviewer-spawn-settle: launchRequestId ? pending
+  // : not-applicable). Mirrors the launch_request_id summary test above, but the
+  // payload carries only a dispatchId.
+  const body = [
+    '## Summary',
+    'The registry contract needs documentation.',
+    '',
+    '## Blocking issues',
+    '- **Missing registry documentation**',
+    '  - **File:** `projects/worker-pool/SPEC.md`',
+    '  - **Lines:** 12-18',
+    '  - **Problem:** New public contract is not documented.',
+    '',
+    '## Non-blocking issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Request changes',
+    '',
+  ].join('\n');
+  const requestId = 'code-pr:laceyenterprises/agent-os-4304:b5c866:review:reviewer:gemini:1-dispatchid-only';
+  const session = fakeSession({
+    statusSequence: [{
+      status: 'succeeded',
+      health: 'healthy',
+      request_id: requestId,
+      dispatchId: 'appcontract_req_7f3a2b',
+      lastProgressSummary: body,
+      artifact: null,
+      result: null,
+    }],
+  });
+  const runtime = createOsDispatchAgentRuntime({ session, sleepImpl: async () => {} });
+  const result = await (await runtime.run(reviewerRequest({
+    idempotencyKey: requestId,
+    role: { id: 'reviewer:gemini', kind: 'reviewer', model: 'gemini' },
+    subjectContent: {
+      ...reviewerRequest().subjectContent,
+      ref: {
+        domainId: 'code-pr',
+        subjectExternalId: 'laceyenterprises/agent-os#4304',
+        revisionRef: 'b5c8668631dac2d4e274536bfaa3fc4551919f57',
+      },
+    },
+  }))).await();
+  assert.equal(result.status, 'completed');
+  assert.equal(result.artifact.body, body.trim());
+  assert.equal(result.artifact.verdict.kind, 'request-changes');
+  // The app-contract dispatch handle must NOT become reviewerRunRef. The schema
+  // validator drops a null field, so the value is falsy (null/undefined) — the
+  // point is it is not the dispatchId. Downstream this yields
+  // launchRequestId = (reviewerRunRef || null) = null → attribution not-applicable.
+  assert.ok(!result.artifact.reviewerRunRef, 'reviewerRunRef must be falsy for a dispatchId-only payload');
+  assert.notEqual(result.artifact.reviewerRunRef, 'appcontract_req_7f3a2b');
+});
+
 test('run synthesizes a review artifact from durable HQ stdout when terminal summary is telemetry', async () => {
   const hqRoot = mkdtempSync(join(tmpdir(), 'os-dispatch-hq-'));
   const body = [

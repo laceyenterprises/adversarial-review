@@ -74,6 +74,7 @@ function completedRuntime({ calls = [], body = '## Verdict\nComment only' } = {}
               kind: 'review',
               body,
               reattachToken: request.idempotencyKey,
+              reviewerRunRef: 'lrq_123',
             },
             failureClass: null,
             usage: { total: 123 },
@@ -442,6 +443,7 @@ test('agent-runtime reviewer adapter returns the legacy spawnReviewer result sha
     assert.equal(result.reviewBody, '## Verdict\nComment only');
     assert.equal(result.failureClass, null);
     assert.equal(result.reattachToken, calls[0].idempotencyKey);
+    assert.equal(result.launchRequestId, 'lrq_123');
     assert.equal(result.tokenUsage.total, 123);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].role.kind, 'reviewer');

@@ -285,7 +285,10 @@ function extractSummaryArtifact(statusPayload, role, artifactContext = null, opt
     kind: REVIEW_ARTIFACT_KIND,
     schemaVersion: REVIEW_ARTIFACT_SCHEMA_VERSION,
     ...context,
-    reviewerRunRef: launchRequestIdOf(statusPayload),
+    // Strict provenance only: a dispatchId-only payload must NOT seed
+    // reviewerRunRef, or the app-contract request handle contaminates durable
+    // launchRequestId attribution (see launchRequestRefStrict).
+    reviewerRunRef: launchRequestRefStrict(statusPayload),
     verdict: {
       kind: verdict,
       summary: '',
@@ -338,6 +341,25 @@ function launchRequestIdOf(statusPayload) {
     ?? liveStatus?.launch_request_id
     ?? liveStatus?.launchRequestId
     ?? liveStatus?.dispatchId
+    ?? null;
+}
+
+// Strict launch-request provenance for durable attribution. Unlike
+// launchRequestIdOf — which falls back to dispatchId for best-effort
+// dispatch-directory lookups (e.g. reading stdout) — this NEVER accepts a
+// dispatchId. In the os-dispatch runtime a dispatchId is the app-contract
+// request/idempotency handle, not the worker-pool launch_request_id; promoting
+// it into the reviewer artifact's reviewerRunRef (and downstream into
+// metadata_json.launchRequestId) would contaminate reviewer-pass attribution and
+// make rows eligible for a backfill repair that resolves the WRONG worker run.
+// Returns null when only a dispatchId is present, so attribution stays
+// not-applicable rather than pointing at a request handle.
+function launchRequestRefStrict(statusPayload) {
+  const liveStatus = liveStatusOf(statusPayload);
+  return statusPayload?.launch_request_id
+    ?? statusPayload?.launchRequestId
+    ?? liveStatus?.launch_request_id
+    ?? liveStatus?.launchRequestId
     ?? null;
 }
 

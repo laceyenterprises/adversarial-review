@@ -1691,6 +1691,7 @@ export async function load(url, context, nextLoad) {
           return db;
         }
         export function ensureReviewStateSchema() {}
+        export function forceResetReviewToPending() { return { changes: 0 }; }
         export function listPendingMergeCloseouts() { return []; }
         export function readLatestCompletedReviewerPassEndedAt() { return null; }
         export function readReviewerPassLogins() { return []; }

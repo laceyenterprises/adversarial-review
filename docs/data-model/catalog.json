@@ -48,6 +48,14 @@
       "store": "data/alert-delivery/",
       "schemaSurface": "src/alert-delivery.mjs",
       "owner": "adversarial-review alert delivery"
+    },
+    {
+      "id": "runtime-settle-smoke",
+      "title": "Agent Runtime Settle Smoke",
+      "path": "docs/data-model/runtime-settle-smoke.md",
+      "store": "data/runtime-settle-smoke/agent-runtime.json",
+      "schemaSurface": "src/adapters/agent-runtime/settle-smoke.mjs",
+      "owner": "agent-runtime cutover readiness"
     }
   ]
 }

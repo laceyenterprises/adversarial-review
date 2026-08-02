@@ -199,6 +199,31 @@ test('buildFollowUpJob does not classify missing review body as settled clean', 
   );
 });
 
+test('buildFollowUpJob derives clean priority even when a legacy caller says critical', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 43,
+    revisionRef: 'review-head-sha',
+    reviewerModel: 'codex',
+    reviewBody: [
+      '## Summary',
+      'No remediation remains.',
+      '',
+      '## Blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n'),
+    reviewPostedAt: '2026-04-21T07:46:00.000Z',
+    critical: true,
+  });
+
+  assert.equal(job.critical, false);
+  assert.equal(job.recommendedFollowUpAction.priority, 'normal');
+  assert.match(job.recommendedFollowUpAction.summary, /settled cleanly/);
+});
+
 test('classifyFollowUpCriticality keeps clean comment-only reviews out of critical follow-up state', () => {
   const result = classifyFollowUpCriticality([
     '## Summary',
@@ -1154,6 +1179,47 @@ test('readFollowUpJob normalizes legacy v1 jobs into bounded remediation shape',
   assert.equal(normalized.remediationReply.kind, REMEDIATION_REPLY_KIND);
   assert.equal(normalized.remediationReply.state, 'awaiting-worker-write');
   assert.equal(normalized.remediationReply.path, null);
+});
+
+test('readFollowUpJob replaces stale historical critical priority with structured clean truth', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const jobPath = path.join(rootDir, 'legacy-clean.json');
+  const cleanJob = buildFollowUpJob({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 207,
+    reviewerModel: 'codex',
+    reviewBody: [
+      '## Summary',
+      'No remediation remains.',
+      '',
+      '## Blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n'),
+    reviewPostedAt: '2026-04-21T08:00:00.000Z',
+    critical: false,
+  });
+  writeFileSync(jobPath, `${JSON.stringify({
+    ...cleanJob,
+    critical: true,
+    recommendedFollowUpAction: {
+      ...cleanJob.recommendedFollowUpAction,
+      priority: 'high',
+      summary: 'Legacy critical remediation required immediately.',
+      operatorHint: 'preserve this non-derived field',
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const normalized = readFollowUpJob(jobPath);
+  assert.equal(normalized.critical, false);
+  assert.equal(normalized.recommendedFollowUpAction.priority, 'normal');
+  assert.match(normalized.recommendedFollowUpAction.summary, /settled cleanly/);
+  assert.equal(
+    normalized.recommendedFollowUpAction.operatorHint,
+    'preserve this non-derived field'
+  );
 });
 
 test('resolveRoundBudgetForJob maps each supported risk class to the expected round budget', () => {

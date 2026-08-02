@@ -388,12 +388,16 @@ function classifyFollowUpCriticality(reviewBody) {
   };
 }
 
-function shouldUseSettledCleanFollowUpText(reviewBody, critical) {
-  if (critical) return false;
-  if (!String(reviewBody || '').trim()) return false;
+function resolveDurableFollowUpClassification(reviewBody, fallbackCritical) {
+  if (!String(reviewBody || '').trim()) {
+    return { critical: Boolean(fallbackCritical), settledClean: false };
+  }
   const classification = classifyFollowUpCriticality(reviewBody);
-  return classification.critical === false
-    && (classification.verdict === 'comment-only' || classification.verdict === 'approved');
+  return {
+    ...classification,
+    settledClean: classification.critical === false
+      && (classification.verdict === 'comment-only' || classification.verdict === 'approved'),
+  };
 }
 
 function isSettledReviewJob(job) {
@@ -800,6 +804,11 @@ function normalizeFollowUpJob(job) {
     ? persistedRemediationReply.path
     : null;
   const normalizedRiskClass = normalizeRiskClass(job?.riskClass);
+  const classification = resolveDurableFollowUpClassification(job?.reviewBody, job?.critical);
+  const recommendedFollowUpAction = buildRecommendedFollowUpAction({
+    critical: classification.critical,
+    settledClean: classification.settledClean,
+  });
   const subjectIdentity = buildCodePrSubjectIdentity({
     repo: job?.repo,
     prNumber: job?.prNumber,
@@ -812,12 +821,12 @@ function normalizeFollowUpJob(job) {
     subjectExternalId: job?.subjectExternalId || subjectIdentity.subjectExternalId,
     revisionRef: job?.revisionRef || subjectIdentity.revisionRef,
     riskClass: normalizedRiskClass,
+    critical: classification.critical,
     recommendedFollowUpAction: {
-      ...buildRecommendedFollowUpAction({
-        critical: job.critical,
-        settledClean: shouldUseSettledCleanFollowUpText(job?.reviewBody, job?.critical),
-      }),
+      ...recommendedFollowUpAction,
       ...(job.recommendedFollowUpAction || {}),
+      priority: recommendedFollowUpAction.priority,
+      summary: recommendedFollowUpAction.summary,
       executionModel: 'bounded-manual-rounds',
       maxRounds: remediationPlan.maxRounds,
     },
@@ -1720,6 +1729,7 @@ function buildFollowUpJob({
       round: seededRounds + 1,
     },
   };
+  const classification = resolveDurableFollowUpClassification(reviewBody, critical);
 
   return {
     schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
@@ -1746,7 +1756,7 @@ function buildFollowUpJob({
     // reviewerModel='codex'. Persisting the tag at creation time keeps the
     // builder→remediator routing deterministic.
     builderTag: builderTag || null,
-    critical: Boolean(critical),
+    critical: classification.critical,
     reviewSummary: extractReviewSummary(reviewBody),
     reviewBody,
     // Advisory-only reviews short-circuit before job creation; persisted jobs
@@ -1755,8 +1765,8 @@ function buildFollowUpJob({
     verdict_mode: 'enforce',
     recommendedFollowUpAction: {
       ...buildRecommendedFollowUpAction({
-        critical,
-        settledClean: shouldUseSettledCleanFollowUpText(reviewBody, critical),
+        critical: classification.critical,
+        settledClean: classification.settledClean,
       }),
       maxRounds: remediationPlan.maxRounds,
     },

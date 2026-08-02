@@ -421,7 +421,7 @@ test('local remediation completion accepts canonical reply artifacts without std
   }
 });
 
-test('codex remediation startup evidence preserves policy_violations schema', () => {
+test('codex remediation startup evidence preserves policy violation schema aliases', () => {
   const rootDir = makeRoot();
   const codexHome = join(rootDir, 'codex-home');
   const codexAuthDir = join(codexHome, '.codex');
@@ -433,7 +433,24 @@ test('codex remediation startup evidence preserves policy_violations schema', ()
       HOME: codexHome,
     }, () => prepareCodexRemediationStartupEnv());
     assert.deepEqual(startupEvidence.policy_violations, []);
-    assert.equal(Object.hasOwn(startupEvidence, 'policyViolations'), false);
+    assert.equal(startupEvidence.policyViolations, startupEvidence.policy_violations);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('codex remediation startup evidence resolves auth owner on Linux home paths', () => {
+  const rootDir = makeRoot();
+  const linuxHome = join(rootDir, 'home', 'runner');
+  const codexAuthDir = join(linuxHome, '.codex');
+  mkdirSync(codexAuthDir, { recursive: true });
+  try {
+    const { startupEvidence } = withEnv({
+      CODEX_AUTH_PATH: join(codexAuthDir, 'auth.json'),
+      CODEX_HOME: codexAuthDir,
+      HOME: linuxHome,
+    }, () => prepareCodexRemediationStartupEnv());
+    assert.equal(startupEvidence.resolvedStartup.resolvedAuthOwner, 'runner');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

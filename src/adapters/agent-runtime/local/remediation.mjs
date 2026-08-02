@@ -80,7 +80,7 @@ function resolveCodexAuthHome(authPath) {
 function resolveCodexAuthOwner(authPath) {
   const homePath = resolveCodexAuthHome(authPath);
   const segments = homePath.split('/').filter(Boolean);
-  return segments[0] === 'Users' && segments[1] ? segments[1] : null;
+  return segments.at(-1) || null;
 }
 
 function buildCodexStartupPolicyViolation({ reason, requestedValue = null, resolvedValue = null }) {
@@ -201,6 +201,7 @@ function prepareClaudeCodeRemediationStartupEnv() {
         preservedForOAuth: env.ANTHROPIC_AUTH_TOKEN ? ['ANTHROPIC_AUTH_TOKEN'] : [],
       },
       policy_violations: [],
+      policyViolations: [],
     },
   };
 }
@@ -248,6 +249,7 @@ function prepareGeminiRemediationStartupEnv({ gitIdentity = null } = {}) {
       },
       gitIdentity: gitIdentity ? { name: gitIdentity.name, email: gitIdentity.email } : null,
       policy_violations: [],
+      policyViolations: [],
     },
   };
 }
@@ -315,6 +317,7 @@ function prepareCodexRemediationStartupEnv({ gitIdentity = null, perWorkerKey = 
     },
     gitIdentity: gitIdentity ? { name: gitIdentity.name, email: gitIdentity.email } : null,
     policy_violations: policyViolations,
+    policyViolations,
   };
 
   if (policyViolations.length) {

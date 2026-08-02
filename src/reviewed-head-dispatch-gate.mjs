@@ -90,15 +90,16 @@ export function buildDuplicateReviewSkipAudit({
  */
 export function selectExistingReviewForHead(reviews) {
   if (!Array.isArray(reviews) || reviews.length === 0) return null;
-  return reviews.find((review) => review) || null;
+  return reviews.find((review) => review && review.id != null && review.id !== '')
+    || reviews.find((review) => review)
+    || null;
 }
 
 export function selectExistingReviewIdForHead(reviews) {
-  if (!Array.isArray(reviews) || reviews.length === 0) return null;
-  const existing = reviews.find((review) => review && review.id != null && review.id !== '');
+  const existing = selectExistingReviewForHead(reviews);
   // A matching review with no id still proves the head is reviewed (the caller
   // treats a non-empty array as already-reviewed); we just can't name its id.
-  return existing ? String(existing.id) : null;
+  return existing?.id != null && existing.id !== '' ? String(existing.id) : null;
 }
 
 export function restorePendingReviewedHeadDedupRow({
@@ -169,7 +170,7 @@ export async function resolveAlreadyReviewedHeadDedup({
   const existing = selectExistingReviewForHead(reviews);
   return {
     alreadyReviewed: true,
-    reviewId: selectExistingReviewIdForHead(reviews),
+    reviewId: existing?.id != null && existing.id !== '' ? String(existing.id) : null,
     reviewSubmittedAt: existing?.submittedAt || null,
     reason: 'commit-id-match',
   };

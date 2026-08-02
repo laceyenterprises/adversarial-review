@@ -63,6 +63,13 @@ test('selectExistingReviewForHead returns newest review descriptor or null', () 
     id: '99',
     commitId: HEAD,
   });
+  assert.deepEqual(
+    selectExistingReviewForHead([
+      { commitId: HEAD, submittedAt: '2026-07-13T00:00:00Z' },
+      { id: '100', commitId: HEAD, submittedAt: '2026-07-13T00:01:00Z' },
+    ]),
+    { id: '100', commitId: HEAD, submittedAt: '2026-07-13T00:01:00Z' },
+  );
 });
 
 test('selectExistingReviewIdForHead returns newest review id or null', () => {
@@ -71,6 +78,21 @@ test('selectExistingReviewIdForHead returns newest review id or null', () => {
   // Non-empty but id-less still counts as reviewed upstream; we just can't name it.
   assert.equal(selectExistingReviewIdForHead([{ commitId: HEAD }]), null);
   assert.equal(selectExistingReviewIdForHead([{ commitId: HEAD }, { id: '100', commitId: HEAD }]), '100');
+});
+
+test('dedup review id and timestamp come from the same review descriptor', async () => {
+  const result = await resolveAlreadyReviewedHeadDedup({
+    repoPath: 'org/agent-os',
+    prNumber: 3655,
+    headSha: HEAD,
+    reviewerLogins: ['lacey-gemini-reviewer'],
+    fetchReviewsForHeadImpl: async () => [
+      { commitId: HEAD, state: 'COMMENTED', submittedAt: '2026-07-13T00:00:00Z' },
+      { id: '4242', commitId: HEAD, state: 'COMMENTED', submittedAt: '2026-07-13T00:01:00Z' },
+    ],
+  });
+  assert.equal(result.reviewId, '4242');
+  assert.equal(result.reviewSubmittedAt, '2026-07-13T00:01:00Z');
 });
 
 test('dedup: an existing completed review on the head is already-reviewed', async () => {

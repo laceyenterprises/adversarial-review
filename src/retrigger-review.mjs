@@ -23,7 +23,7 @@ import {
 import { buildCodePrSubjectIdentity } from './identity-shapes.mjs';
 import { normalizeOperatorRetriggerReason } from './retrigger-review-reason.mjs';
 import { stopFollowUpJobWithWorkerCancel } from './follow-up-stop.mjs';
-import { cancelActiveReview } from './review-cancel.mjs';
+import { cancelActiveReview, reviewerCancelHandle } from './review-cancel.mjs';
 import { isPgidAlive } from './process-group-identity.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -552,8 +552,8 @@ async function main(argv, {
       reviewRow = resetResult.reviewRow;
       activeReviewReset = 'cancelled';
     } else if (values['allow-active-review-reset']) {
-      const reviewerPgid = Number(reviewRow.reviewer_pgid);
-      if (Number.isInteger(reviewerPgid) && reviewerPgid > 0) {
+      const reviewerPgid = reviewerCancelHandle(reviewRow);
+      if (reviewerPgid !== null) {
         let reviewerAlive;
         try {
           reviewerAlive = isPgidAliveImpl(reviewerPgid);
@@ -588,7 +588,7 @@ async function main(argv, {
           reason,
           expectedReviewStatus: 'reviewing',
           expectedReviewerSessionUuid: reviewRow.reviewer_session_uuid || null,
-          expectedReviewerPgid: Number.isInteger(reviewerPgid) ? reviewerPgid : null,
+          expectedReviewerPgid: reviewerPgid,
         });
       } catch (err) {
         stderr.write(`error: could not reset stale active review: ${err.message}\n`);

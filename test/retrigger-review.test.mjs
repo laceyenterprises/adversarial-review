@@ -682,6 +682,44 @@ test('retrigger-review allow-active-review-reset resets a dead process group', a
   }
 });
 
+test('retrigger-review allow-active-review-reset preserves a null pgid guard', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'reviewing',
+    reviewerSessionUuid: 'sess-238',
+    reviewerPgid: null,
+  });
+
+  const out = makeCaptureStream();
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--exact-head-now',
+    '--allow-active-review-reset',
+    '--no-bump-budget',
+    '--root-dir', rootDir,
+  ], {
+    stdout: out,
+    stderr: makeCaptureStream(),
+    isPgidAliveImpl: () => { throw new Error('null pgid must not be probed'); },
+  });
+
+  assert.equal(rc, 0);
+  assert.equal(JSON.parse(out.text()).activeReviewReset, 'allowed');
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare(
+      'SELECT review_status, reviewer_pgid, reviewer_session_uuid FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/agent-os', 238);
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.reviewer_pgid, null);
+    assert.equal(row.reviewer_session_uuid, null);
+  } finally {
+    db.close();
+  }
+});
+
 test('retrigger-review cancel recovery tolerates watcher reconciliation to failed-orphan', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   let readCalls = 0;

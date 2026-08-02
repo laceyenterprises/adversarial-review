@@ -185,9 +185,10 @@ chasing diminishing returns. Spec-touch findings (contract drift)
 remain blocking even on the lenient round, because silent drift is the
 class of failure that round budgets are *not* designed to forgive.
 Follow-up priority is derived from the structured blocking-findings
-section and effective verdict, not from security-related keywords that
-may appear in summary or non-blocking prose. Unknown/unparseable blocking
-state still fails safe as critical.
+section and verdict, not from security-related keywords that may appear
+in summary or non-blocking prose. A stated `Request changes` is always
+critical even when its blocking section contradicts it; unknown or
+unparseable blocking state also fails safe as critical.
 
 **6. Delivery is byte-stable and idempotent.** Every reviewer verdict
 and remediation reply is written as a JSONL record with a stable

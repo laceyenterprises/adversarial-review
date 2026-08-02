@@ -262,6 +262,25 @@ test('classifyFollowUpCriticality keeps blocking reviews on the strict high-prio
   assert.equal(result.verdict, 'request-changes');
 });
 
+test('classifyFollowUpCriticality treats a contradictory request-changes verdict as critical', () => {
+  const result = classifyFollowUpCriticality([
+    '## Summary',
+    'The structured section is contradictory with the effective verdict.',
+    '',
+    '## Blocking issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n'));
+
+  assert.equal(result.critical, true);
+  assert.equal(result.blockingFindingState, 'known');
+  assert.equal(result.blockingFindingCount, 0);
+  assert.equal(result.statedVerdict, 'request-changes');
+  assert.equal(result.verdict, 'comment-only');
+});
+
 test('classifyFollowUpCriticality fails closed when both blocking section and verdict are absent', () => {
   const result = classifyFollowUpCriticality([
     'Reviewer output was truncated.',

@@ -24,7 +24,9 @@ import {
   validateRemediationReply as validateKernelRemediationReply,
 } from './kernel/remediation-reply.mjs';
 import {
+  extractReviewVerdict,
   normalizeEffectiveReviewVerdict,
+  normalizeReviewVerdict,
   sanitizeReviewPayloadBestEffort,
 } from './kernel/verdict.mjs';
 import { classifyBlockingFindings } from './merge-agent-review-classification.mjs';
@@ -367,11 +369,15 @@ function buildRecommendedFollowUpAction({ critical, settledClean = false }) {
 function classifyFollowUpCriticality(reviewBody) {
   const canonicalReviewBody = sanitizeReviewPayloadBestEffort(reviewBody);
   const verdict = normalizeEffectiveReviewVerdict(canonicalReviewBody);
+  const statedVerdict = normalizeReviewVerdict(extractReviewVerdict(canonicalReviewBody));
   const blocking = classifyBlockingFindings(canonicalReviewBody, { lastVerdict: verdict });
   return {
-    critical: blocking.state !== 'known' || blocking.count > 0,
+    critical: statedVerdict === 'request-changes'
+      || blocking.state !== 'known'
+      || blocking.count > 0,
     blockingFindingCount: blocking.count,
     blockingFindingState: blocking.state,
+    statedVerdict,
     verdict,
   };
 }
@@ -391,8 +397,9 @@ function isSettledReviewJob(job) {
   // proceed even if the stored review body is still Comment-only.
   if (nextAction?.operatorOverride === true) return false;
 
-  const verdict = normalizeEffectiveReviewVerdict(job?.reviewBody);
-  return verdict === 'comment-only' || verdict === 'approved';
+  const classification = classifyFollowUpCriticality(job?.reviewBody);
+  return classification.critical === false
+    && (classification.verdict === 'comment-only' || classification.verdict === 'approved');
 }
 
 function handleClaimedStopFailure({ pendingPath, inProgressPath, stopCode, err }) {

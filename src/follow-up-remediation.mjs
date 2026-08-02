@@ -719,6 +719,8 @@ function requeueClaimedFollowUpJobAfterConfigFailure({
 // spawns (the former `spawnRemediationWorker` switch); `os` mode owns the
 // app-contract / hq dispatch.
 function createRemediationRuntime({
+  // Bind the default in the factory scope: both the OS dispatch branch and the
+  // local handle below receive this concrete value without caller injection.
   execFileImpl = execFileAsync,
   spawnImpl,
   env = process.env,

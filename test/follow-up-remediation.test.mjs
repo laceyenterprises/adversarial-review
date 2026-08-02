@@ -2649,7 +2649,7 @@ test('validateStartupRemediationConfig names orchestration_mode agentos in hq en
   );
 });
 
-test('remediation runtime local mode dispatches "codex" to spawnCodexRemediationWorker', async () => {
+test('remediation runtime local mode binds the default execFile implementation and dispatches codex', async () => {
   // ARC-08: the former `spawnRemediationWorker` switch is now the runtime
   // facade's `local` mode. Verify it routes by class. Use a workspace minimal
   // enough that the codex spawn would succeed if it ran — we set up
@@ -2683,6 +2683,7 @@ test('remediation runtime local mode dispatches "codex" to spawnCodexRemediation
       ...testReplyContext(),
     });
     assert.equal(handle.worker.model, 'codex');
+    assert.equal(typeof handle.cancel, 'function');
   } finally {
     for (const k of ['HOME', 'CODEX_HOME', 'CODEX_AUTH_PATH']) {
       if (prev[k] === undefined) delete process.env[k];

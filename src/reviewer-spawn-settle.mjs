@@ -431,24 +431,28 @@ async function spawnReviewer({
       // not attribution). Populates reviewer_passes.worker_run_id at settle.
       let resolvedWorkerRunId = null;
       try {
-        const rawTokenUsage = result.tokenUsage || readBestReviewerEvidenceTokenUsageImpl({
-          // SDK/os-dispatch reattaches by app-contract request_id, but the
-          // session ledger attributes worker_runs by launch_request_id. Prefer
-          // the surfaced launchRequestId when present; cli-direct keeps null.
-          launchRequestId,
-          adapterSessionKey: result.reattachToken || reviewerSessionUuid,
-          sessionKeys: [
-            reviewerSessionUuid,
-            result.reattachToken,
-            result.launchRequestId,
-            result.sessionUuid,
-          ],
-          workspacePath: workspacePath || ROOT,
-          startedAt,
-          endedAt,
-          reviewerModel,
-          rootDir: ROOT,
-        });
+        let rawTokenUsage = result.tokenUsage || null;
+        if (!rawTokenUsage?.workerRunId) {
+          const ledgerTokenUsage = readBestReviewerEvidenceTokenUsageImpl({
+            // SDK/os-dispatch reattaches by app-contract request_id, but the
+            // session ledger attributes worker_runs by launch_request_id. Prefer
+            // the surfaced launchRequestId when present; cli-direct keeps null.
+            launchRequestId,
+            adapterSessionKey: result.reattachToken || reviewerSessionUuid,
+            sessionKeys: [
+              reviewerSessionUuid,
+              result.reattachToken,
+              result.launchRequestId,
+              result.sessionUuid,
+            ],
+            workspacePath: workspacePath || ROOT,
+            startedAt,
+            endedAt,
+            reviewerModel,
+            rootDir: ROOT,
+          });
+          rawTokenUsage = ledgerTokenUsage || rawTokenUsage;
+        }
         resolvedWorkerRunId = rawTokenUsage?.workerRunId || null;
         tokenUsage = tagTokenUsage(rawTokenUsage, 'guardrail');
         if (tokenUsage) {

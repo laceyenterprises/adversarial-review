@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -152,93 +152,98 @@ test('spawnReviewer resolves worker_run_id from os-dispatch launch_request_id wh
 
 test('spawnReviewer persists worker_run_id onto reviewer_passes for SDK-dispatched settles', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'spawn-settle-sdk-attribution-'));
-  const ledgerDb = path.join(rootDir, 'ledger.db');
-  let settledRow = null;
-  createSessionLedgerDb(ledgerDb, {
-    runtimeSessions: [
-      {
-        session_id: 'rs_sdk',
-        adapter_session_key: 'sdk-request-id-21',
-        total_input_tokens: 31,
-        total_output_tokens: 12,
-        total_cache_read_tokens: 0,
-        total_cache_write_tokens: 0,
-        total_cost_usd: 0.09,
-        source_path: rootDir,
-        started_at: '2026-07-28T03:00:00.000Z',
-        ended_at: '2026-07-28T03:02:00.000Z',
-      },
-    ],
-    workerRuns: [
-      {
-        run_id: 'wr_sdk_21',
-        launch_request_id: 'lrq_sdk_21',
-        session_id: 'rs_sdk',
-        status: 'succeeded',
-        token_usage_input: 31,
-        token_usage_output: 12,
-        token_usage_guardrail: 43,
-        token_usage_cost_usd: 0.09,
-        token_usage_source: 'session-ledger',
-        started_at: '2026-07-28T03:00:00.000Z',
-        ended_at: '2026-07-28T03:02:00.000Z',
-        updated_at: '2026-07-28T03:02:00.000Z',
-      },
-    ],
-  });
-  beginReviewerPass(rootDir, {
-    repo: 'laceyenterprises/demo',
-    prNumber: 121,
-    attemptNumber: 2,
-    reviewerClass: 'gemini',
-    reviewerModel: 'gemini',
-    passKind: 'first-pass',
-    startedAt: '2026-07-28T03:00:00.000Z',
-  });
+  try {
+    const ledgerDb = path.join(rootDir, 'ledger.db');
+    let settledRow = null;
+    createSessionLedgerDb(ledgerDb, {
+      runtimeSessions: [
+        {
+          session_id: 'rs_sdk',
+          adapter_session_key: 'sdk-request-id-21',
+          total_input_tokens: 31,
+          total_output_tokens: 12,
+          total_cache_read_tokens: 0,
+          total_cache_write_tokens: 0,
+          total_cost_usd: 0.09,
+          source_path: rootDir,
+          started_at: '2026-07-28T03:00:00.000Z',
+          ended_at: '2026-07-28T03:02:00.000Z',
+        },
+      ],
+      workerRuns: [
+        {
+          run_id: 'wr_sdk_21',
+          launch_request_id: 'lrq_sdk_21',
+          session_id: 'rs_sdk',
+          status: 'succeeded',
+          token_usage_input: 31,
+          token_usage_output: 12,
+          token_usage_guardrail: 43,
+          token_usage_cost_usd: 0.09,
+          token_usage_source: 'session-ledger',
+          started_at: '2026-07-28T03:00:00.000Z',
+          ended_at: '2026-07-28T03:02:00.000Z',
+          updated_at: '2026-07-28T03:02:00.000Z',
+        },
+      ],
+    });
+    beginReviewerPass(rootDir, {
+      repo: 'laceyenterprises/demo',
+      prNumber: 121,
+      attemptNumber: 2,
+      reviewerClass: 'gemini',
+      reviewerModel: 'gemini',
+      passKind: 'first-pass',
+      startedAt: '2026-07-28T03:00:00.000Z',
+    });
 
-  await spawnReviewer({
-    repo: 'laceyenterprises/demo',
-    prNumber: 121,
-    reviewerModel: 'gemini',
-    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
-    linearTicketId: 'LAC-566',
-    labels: [],
-    builderTag: 'codex',
-    reviewerHeadSha: 'sha121',
-    reviewAttemptNumber: 1,
-    reviewDbAttemptNumber: 2,
-    completedRemediationRounds: 0,
-    passKind: 'first-pass',
-    maxRemediationRounds: 2,
-    reviewerSessionUuid: 'spawn-settle-sdk-attribution',
-    reviewerRuntimeAdapterOverride: {
-      async spawnReviewer() {
-        return {
-          ok: true,
-          reviewBody: '## Summary\nLooks good.\n\n## Verdict\nComment only',
-          reviewBodyDelivery: 'caller-post',
-          reattachToken: 'sdk-request-id-21',
-          launchRequestId: 'lrq_sdk_21',
-          spawnedAt: '2026-07-28T03:00:00.000Z',
-        };
+    await spawnReviewer({
+      repo: 'laceyenterprises/demo',
+      prNumber: 121,
+      reviewerModel: 'gemini',
+      botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+      linearTicketId: 'LAC-566',
+      labels: [],
+      builderTag: 'codex',
+      reviewerHeadSha: 'sha121',
+      reviewAttemptNumber: 1,
+      reviewDbAttemptNumber: 2,
+      completedRemediationRounds: 0,
+      passKind: 'first-pass',
+      maxRemediationRounds: 2,
+      reviewerSessionUuid: 'spawn-settle-sdk-attribution',
+      reviewerRuntimeAdapterOverride: {
+        async spawnReviewer() {
+          return {
+            ok: true,
+            reviewBody: '## Summary\nLooks good.\n\n## Verdict\nComment only',
+            reviewBodyDelivery: 'caller-post',
+            reattachToken: 'sdk-request-id-21',
+            launchRequestId: 'lrq_sdk_21',
+            tokenUsage: { total: 123 },
+            spawnedAt: '2026-07-28T03:00:00.000Z',
+          };
+        },
       },
-    },
-    postGitHubReviewWithCaptureImpl: async () => {},
-    readBestReviewerEvidenceTokenUsageImpl: (args) => readBestReviewerEvidenceTokenUsage({
-      ...args,
-      ledgerTarget: { backend: 'sqlite', path: ledgerDb },
-      env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
-      rootDir,
-      transcriptFallback: false,
-    }),
-    completeReviewerPassImpl: (_root, payload) => {
-      settledRow = completeReviewerPass(rootDir, payload);
-      return settledRow;
-    },
-  });
+      postGitHubReviewWithCaptureImpl: async () => {},
+      readBestReviewerEvidenceTokenUsageImpl: (args) => readBestReviewerEvidenceTokenUsage({
+        ...args,
+        ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+        env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
+        rootDir,
+        transcriptFallback: false,
+      }),
+      completeReviewerPassImpl: (_root, payload) => {
+        settledRow = completeReviewerPass(rootDir, payload);
+        return settledRow;
+      },
+    });
 
-  assert.equal(settledRow?.worker_run_id, 'wr_sdk_21');
-  assert.equal(JSON.parse(settledRow?.metadata_json || '{}').launchRequestId, 'lrq_sdk_21');
+    assert.equal(settledRow?.worker_run_id, 'wr_sdk_21');
+    assert.equal(JSON.parse(settledRow?.metadata_json || '{}').launchRequestId, 'lrq_sdk_21');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('spawnReviewer settles worker_run_id null when no worker run resolves (cli-direct path)', async () => {

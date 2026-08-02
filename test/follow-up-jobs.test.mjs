@@ -245,6 +245,18 @@ test('classifyFollowUpCriticality keeps blocking reviews on the strict high-prio
   assert.equal(result.verdict, 'request-changes');
 });
 
+test('classifyFollowUpCriticality fails closed when both blocking section and verdict are absent', () => {
+  const result = classifyFollowUpCriticality([
+    'Reviewer output was truncated.',
+    'A security concern may remain, but no structured sections survived.',
+  ].join('\n'));
+
+  assert.equal(result.critical, true);
+  assert.equal(result.blockingFindingState, 'unknown');
+  assert.equal(result.blockingFindingCount, 0);
+  assert.equal(result.verdict, null);
+});
+
 test('buildFollowUpJob rejects advisory-only verdict mode', () => {
   assert.throws(
     () => buildFollowUpJob({

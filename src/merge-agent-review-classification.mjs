@@ -32,9 +32,9 @@ function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
     ? String(lastVerdict || '').trim().toLowerCase()
     : normalizedVerdict;
   if (parsed.blocking.missing) {
-    return verdictKey === 'request-changes'
-      ? { count: 0, state: 'unknown' }
-      : { count: 0, state: 'known' };
+    return verdictKey === 'approved' || verdictKey === 'comment-only'
+      ? { count: 0, state: 'known' }
+      : { count: 0, state: 'unknown' };
   }
   return { count: parsed.blocking.count, state: 'known' };
 }

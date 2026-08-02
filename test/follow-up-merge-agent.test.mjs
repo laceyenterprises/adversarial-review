@@ -182,6 +182,10 @@ test('classifyBlockingFindings fails closed without throwing on missing bodies',
     classifyBlockingFindings(undefined, { lastVerdict: 'request-changes' }),
     { count: 0, state: 'unknown' },
   );
+  assert.deepEqual(
+    classifyBlockingFindings('Reviewer output was truncated before structured sections.'),
+    { count: 0, state: 'unknown' },
+  );
 });
 
 test('classifyBlockingFindings settles blank approving review bodies', () => {

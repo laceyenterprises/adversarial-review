@@ -715,6 +715,7 @@ function settleReviewerAttempt({
 
   const transientFailureClasses = new Set([
     'cascade',
+    'oauth-broken',
     'reviewer-timeout',
     'launchctl-bootstrap',
     'daemon-bounce',
@@ -726,6 +727,7 @@ function settleReviewerAttempt({
     [PROVIDER_OVERLOADED_FAILURE_CLASS]: 'Reviewer hit a provider/backend overload (HTTP 529 or capacity signal); watcher backoff engaged.',
     [REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS]: 'Reviewer runtime returned empty output before posting; watcher backoff engaged.',
     'quota-exhausted': 'Reviewer hit a hard provider usage cap; holding until the cap window clears (HRR graceful degradation).',
+    'oauth-broken': 'Reviewer OAuth credentials are unavailable; watcher backoff engaged until credentials recover.',
     'reviewer-timeout': 'Reviewer command timed out before posting; watcher backoff engaged.',
     'launchctl-bootstrap': 'Claude launchctl session bootstrap failed; watcher backoff engaged.',
     'daemon-bounce': 'Reviewer runtime could not reattach after daemon bounce; watcher backoff engaged.',

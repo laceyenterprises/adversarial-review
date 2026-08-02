@@ -168,6 +168,13 @@ function readReviewRowSafely({ rootDir, repo, prNumber }) {
   }
 }
 
+function normalizeExpectedReviewerPgid(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string' && value.trim() === '') return null;
+  const normalized = Number(value);
+  return Number.isInteger(normalized) ? normalized : null;
+}
+
 function resolveAuditRootDir(values, rootDir) {
   if (values['hq-root']) {
     throw new UsageError('--hq-root is no longer supported; use --audit-root-dir');
@@ -523,9 +530,7 @@ async function main(argv, {
           reason,
           expectedReviewStatus: 'reviewing',
           expectedReviewerSessionUuid: reviewRow.reviewer_session_uuid || null,
-          expectedReviewerPgid: Number.isInteger(Number(reviewRow.reviewer_pgid))
-            ? Number(reviewRow.reviewer_pgid)
-            : null,
+          expectedReviewerPgid: normalizeExpectedReviewerPgid(reviewRow.reviewer_pgid),
         });
         if (!resetResult.reset) {
           const refreshed = readReviewRow({ rootDir, repo: values.repo, prNumber: values.pr });
@@ -540,9 +545,7 @@ async function main(argv, {
               reason,
               expectedReviewStatus: refreshed.review_status,
               expectedReviewerSessionUuid: refreshed.reviewer_session_uuid || null,
-              expectedReviewerPgid: Number.isInteger(Number(refreshed.reviewer_pgid))
-                ? Number(refreshed.reviewer_pgid)
-                : null,
+              expectedReviewerPgid: normalizeExpectedReviewerPgid(refreshed.reviewer_pgid),
             });
           }
         }
@@ -725,6 +728,7 @@ export {
   USAGE,
   main,
   normalizeOperatorRetriggerReason,
+  normalizeExpectedReviewerPgid,
   parseArgs,
   readReasonFromSource,
   readReviewRowSafely,

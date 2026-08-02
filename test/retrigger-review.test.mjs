@@ -5,7 +5,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { main, normalizeOperatorRetriggerReason, parseArgs } from '../src/retrigger-review.mjs';
-import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
+import {
+  ensureReviewStateSchema,
+  forceResetReviewToPending,
+  openReviewStateDb,
+} from '../src/review-state.mjs';
 import { createFollowUpJob, getFollowUpJobDir, writeFollowUpJob } from '../src/follow-up-jobs.mjs';
 import { isExplicitOperatorReviewRetrigger } from '../src/first-pass-review-suppression.mjs';
 
@@ -845,6 +849,73 @@ test('retrigger-review cancel recovery tolerates watcher reconciliation to faile
   assert.equal(rc, 0);
   assert.equal(resetCalls, 2);
   assert.equal(JSON.parse(out.text()).activeReviewReset, 'cancelled');
+});
+
+test('retrigger-review cancel recovery resets a real failed-orphan row with a null pgid guard', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'reviewing',
+    reviewerSessionUuid: 'sess-238',
+    reviewerPgid: 8123,
+  });
+  let resetCalls = 0;
+
+  const out = makeCaptureStream();
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--exact-head-now',
+    '--cancel-active-review',
+    '--no-bump-budget',
+    '--root-dir', rootDir,
+  ], {
+    stdout: out,
+    stderr: makeCaptureStream(),
+    cancelActiveReviewImpl: async () => ({
+      signalled: true,
+      target: { kind: 'process-group', id: 8123 },
+      error: null,
+    }),
+    waitForReviewerExitImpl: async () => ({ checked: true, exited: true, pgid: 8123 }),
+    forceResetReview: (args) => {
+      resetCalls += 1;
+      if (resetCalls === 1) {
+        const db = openReviewStateDb(rootDir);
+        try {
+          db.prepare(
+            `UPDATE reviewed_prs
+                SET review_status = 'failed-orphan',
+                    reviewer_session_uuid = NULL,
+                    reviewer_pgid = NULL
+              WHERE repo = ? AND pr_number = ?`
+          ).run('laceyenterprises/agent-os', 238);
+        } finally {
+          db.close();
+        }
+        return { reset: false, reviewRow: null };
+      }
+      assert.equal(args.expectedReviewStatus, 'failed-orphan');
+      assert.equal(args.expectedReviewerSessionUuid, null);
+      assert.equal(args.expectedReviewerPgid, null);
+      return forceResetReviewToPending(args);
+    },
+  });
+
+  assert.equal(rc, 0);
+  assert.equal(resetCalls, 2);
+  assert.equal(JSON.parse(out.text()).activeReviewReset, 'cancelled');
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare(
+      'SELECT review_status, reviewer_pgid, reviewer_session_uuid FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/agent-os', 238);
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.reviewer_pgid, null);
+    assert.equal(row.reviewer_session_uuid, null);
+  } finally {
+    db.close();
+  }
 });
 
 test('retrigger-review exact-head-now stops a stale active follow-up before re-arming review', async () => {

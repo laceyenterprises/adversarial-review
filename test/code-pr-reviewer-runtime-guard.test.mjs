@@ -115,6 +115,21 @@ test('agent-runtime reports a malformed settle-smoke artifact distinctly from mi
   }
 });
 
+test('agent-runtime reports invalid JSON settle-smoke artifacts distinctly from missing', () => {
+  const rootDir = makeRoot();
+  try {
+    writeCodePrDomain(rootDir);
+    mkdirSync(join(rootDir, 'data', 'runtime-settle-smoke'), { recursive: true });
+    writeFileSync(settleSmokeResultPath(rootDir, 'agent-runtime'), '{not-json');
+    const readiness = readyReadiness(rootDir, '2026-08-02T10:00:00.000Z');
+    assert.equal(readiness.ready, false);
+    assert.equal(readiness.reasons[0].code, 'settle-smoke-invalid');
+    assert.match(readiness.reasons[0].message, /malformed \(invalid-json\)/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('agent-runtime rejects an unsupported settle-smoke schema distinctly from missing', () => {
   const rootDir = makeRoot();
   try {

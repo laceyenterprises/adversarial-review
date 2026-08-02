@@ -10,6 +10,7 @@ Usage:
 
 const DEFAULT_RUNTIME = 'agent-runtime';
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+const SETTLE_SMOKE_MODEL = 'codex';
 
 function parseArgs(argv) {
   const options = { rootDir: process.cwd(), runtime: null, json: false, help: false };
@@ -35,7 +36,11 @@ function parseArgs(argv) {
 function buildSettleSmokeRequest({ now = () => new Date() } = {}) {
   const at = now().toISOString();
   return {
-    role: { id: 'reviewer:agent-runtime-settle-smoke', kind: 'reviewer', model: 'codex' },
+    role: {
+      id: 'reviewer:agent-runtime-settle-smoke',
+      kind: 'reviewer',
+      model: SETTLE_SMOKE_MODEL,
+    },
     promptSet: 'runtime-settle-smoke',
     promptStage: 'first',
     subjectContent: {
@@ -172,6 +177,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 }
 
 export {
+  SETTLE_SMOKE_MODEL,
   buildSettleSmokeRequest,
   runRuntimeSettleSmoke,
   runtimeSettleSmokeMain,

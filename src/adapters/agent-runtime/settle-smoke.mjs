@@ -18,7 +18,10 @@ function readSettleSmokeResult(rootDir, runtime = 'agent-runtime') {
     return parsed && typeof parsed === 'object' ? parsed : null;
   } catch (err) {
     if (err?.code === 'ENOENT') return null;
-    return null;
+    return {
+      runtime,
+      read_error: err instanceof SyntaxError ? 'invalid-json' : 'unreadable',
+    };
   }
 }
 
@@ -51,6 +54,18 @@ function evaluateSettleSmokeResult(rootDir, {
       ok: false,
       fresh: false,
       reason: 'missing',
+      evaluatedAt: now().toISOString(),
+      freshnessWindowMs,
+    };
+  }
+
+  if (result.read_error) {
+    return {
+      runtime,
+      result,
+      ok: false,
+      fresh: false,
+      reason: result.read_error,
       evaluatedAt: now().toISOString(),
       freshnessWindowMs,
     };

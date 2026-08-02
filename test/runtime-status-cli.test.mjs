@@ -11,7 +11,11 @@ import { writeRuntimeStatusSnapshot } from '../src/runtime-status-snapshot.mjs';
 import { writeCanaryStatus } from '../src/adapters/agent-runtime/canary.mjs';
 import { recordRuntimeRun } from '../src/adapters/agent-runtime/run-ledger.mjs';
 import { writeSettleSmokeResult } from '../src/adapters/agent-runtime/settle-smoke.mjs';
-import { runRuntimeSettleSmoke } from '../src/runtime-settle-smoke-cli.mjs';
+import {
+  SETTLE_SMOKE_MODEL,
+  buildSettleSmokeRequest,
+  runRuntimeSettleSmoke,
+} from '../src/runtime-settle-smoke-cli.mjs';
 
 function tmpRoot() {
   return mkdtempSync(join(tmpdir(), 'runtime-status-cli-'));
@@ -292,6 +296,15 @@ test('runtime settle-smoke persists a PASS artifact and prints JSON', async () =
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('runtime settle-smoke uses the named logical route constant', () => {
+  const request = buildSettleSmokeRequest({
+    now: () => new Date('2026-08-02T10:00:00.000Z'),
+  });
+
+  assert.equal(SETTLE_SMOKE_MODEL, 'codex');
+  assert.equal(request.role.model, SETTLE_SMOKE_MODEL);
 });
 
 test('runtime settle-smoke preserves its in-memory result when persistence read-back fails', async () => {

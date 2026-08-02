@@ -94,6 +94,8 @@ function evaluateAgentRuntimeCutoverReadiness({
       settleSmoke?.reason === 'invalid-status'
       || settleSmoke?.reason === 'invalid-at'
       || settleSmoke?.reason === 'unsupported-schema-version'
+      || settleSmoke?.reason === 'invalid-json'
+      || settleSmoke?.reason === 'unreadable'
     ) {
       reasons.push(detail(
         'settle-smoke-invalid',

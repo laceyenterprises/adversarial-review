@@ -1047,6 +1047,82 @@ function requestReviewRereview({
   }
 }
 
+function forceResetReviewToPending({
+  rootDir,
+  repo,
+  prNumber,
+  requestedAt = new Date().toISOString(),
+  reason = 'Explicit operator re-review reset.',
+  expectedReviewStatus = 'reviewing',
+  expectedReviewerSessionUuid = null,
+  expectedReviewerPgid = null,
+  db: dbOverride = null,
+} = {}) {
+  const db = dbOverride || openReviewStateDb(rootDir);
+  try {
+    if (!dbOverride) {
+      ensureReviewStateSchema(db);
+    }
+
+    const sessionGuard = expectedReviewerSessionUuid === null
+      ? 'reviewer_session_uuid IS NULL'
+      : 'reviewer_session_uuid = ?';
+    const pgidGuard = expectedReviewerPgid === null
+      ? 'reviewer_pgid IS NULL'
+      : 'reviewer_pgid = ?';
+    const params = [
+      requestedAt,
+      reason,
+      repo,
+      prNumber,
+      expectedReviewStatus,
+    ];
+    if (expectedReviewerSessionUuid !== null) {
+      params.push(expectedReviewerSessionUuid);
+    }
+    if (expectedReviewerPgid !== null) {
+      params.push(expectedReviewerPgid);
+    }
+
+    const updateResult = db.prepare(
+      `UPDATE reviewed_prs
+          SET pr_state = 'open',
+              ${buildReviewStateResetAssignments({
+                overrides: {
+                  review_attempts: 'review_attempts',
+                  last_attempted_at: 'last_attempted_at',
+                  rereview_requested_at: '?',
+                  rereview_reason: '?',
+                },
+              })}
+        WHERE repo = ?
+          AND pr_number = ?
+          AND pr_state = 'open'
+          AND review_status = ?
+          AND ${sessionGuard}
+          AND ${pgidGuard}`
+    ).run(...params);
+
+    if (updateResult.changes === 1) {
+      return {
+        reset: true,
+        reason: 'review-status-reset',
+        reviewRow: getReviewRow(db, { repo, prNumber }),
+      };
+    }
+
+    return {
+      reset: false,
+      reason: 'reset-guard-no-match',
+      reviewRow: getReviewRow(db, { repo, prNumber }),
+    };
+  } finally {
+    if (!dbOverride) {
+      db.close();
+    }
+  }
+}
+
 export {
   REVIEW_STATE_SCHEMA_VERSION,
   SETTLED_EMPTY_RESCRAPE_AFTER_MS,
@@ -1057,6 +1133,7 @@ export {
   readReviewerPassLogins,
   recordMergeCloseout,
   recordMergeCloseoutScrapeFailure,
+  forceResetReviewToPending,
   getReviewRow,
   getReviewRowBySubjectIdentity,
   lookupReviewRowDualRead,

@@ -4,7 +4,12 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { main, normalizeOperatorRetriggerReason, parseArgs } from '../src/retrigger-review.mjs';
+import {
+  main,
+  normalizeOperatorRetriggerReason,
+  parseArgs,
+  waitForReviewerExit,
+} from '../src/retrigger-review.mjs';
 import {
   ensureReviewStateSchema,
   forceResetReviewToPending,
@@ -20,6 +25,30 @@ function makeCaptureStream() {
     text() { return chunks.join(''); },
   };
 }
+
+test('reviewer exit wait probes through the injected process-kill seam', async () => {
+  const probes = [];
+  let alive = true;
+
+  const result = await waitForReviewerExit({ target: { id: 8123 } }, {
+    waitMs: 10,
+    pollMs: 1,
+    processKill: (pid, signal) => {
+      probes.push([pid, signal]);
+      if (alive) {
+        alive = false;
+        return;
+      }
+      const error = new Error('gone');
+      error.code = 'ESRCH';
+      throw error;
+    },
+    sleep: async () => {},
+  });
+
+  assert.deepEqual(probes, [[-8123, 0], [-8123, 0]]);
+  assert.deepEqual(result, { checked: true, exited: true, pgid: 8123 });
+});
 
 function insertReviewRow(rootDir, overrides = {}) {
   const db = openReviewStateDb(rootDir);

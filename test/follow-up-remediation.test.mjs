@@ -2694,7 +2694,7 @@ test('remediation runtime local mode binds the default execFile implementation a
   assert.match(invokedCli, /codex/);
 });
 
-test('remediation runtime local mode dispatches "claude-code" to spawnClaudeCodeRemediationWorker', async () => {
+test('remediation runtime local mode preserves the claude-code-remediation provenance class', async () => {
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const promptPath = path.join(workspaceDir, 'prompt.md');
   const outputPath = path.join(workspaceDir, 'last-msg.md');
@@ -2703,10 +2703,12 @@ test('remediation runtime local mode dispatches "claude-code" to spawnClaudeCode
 
   let invokedCli;
   let invokedArgs;
+  let invokedEnv;
   const handle = await createRemediationRuntime({
-    spawnImpl: (cmd, args) => {
+    spawnImpl: (cmd, args, options) => {
       invokedCli = cmd;
       invokedArgs = args;
+      invokedEnv = options.env;
       return { pid: 222, unref() {} };
     },
   }).run({
@@ -2718,6 +2720,7 @@ test('remediation runtime local mode dispatches "claude-code" to spawnClaudeCode
 
   assert.equal(handle.worker.model, 'claude-code');
   assert.match(invokedCli, /claude/);
+  assert.equal(invokedEnv.WORKER_CLASS, 'claude-code-remediation');
   // Claude Code is invoked in --print + acceptEdits + skip-permissions so
   // the worker can edit files AND run git/bash commands non-interactively.
   // Without --dangerously-skip-permissions, shell commands gate on an

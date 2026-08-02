@@ -429,7 +429,10 @@ function spawnGeminiRemediationWorker({
     workerClass: GEMINI_REMEDIATION_WORKER_TRAILER_CLASS,
     jobId,
   });
-  const model = resolveGeminiRemediationModel(process.env);
+  // Resolve from the exact sanitized environment handed to the child. This
+  // keeps model selection aligned with future per-worker env overrides rather
+  // than reaching back into ambient daemon state.
+  const model = resolveGeminiRemediationModel(env);
   let promptFd;
   let stdoutFd;
   let stderrFd;

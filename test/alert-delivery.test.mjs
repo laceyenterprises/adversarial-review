@@ -14,8 +14,10 @@ import { join } from 'node:path';
 
 import {
   assertAlertSinkOwner,
+  alertSinkRoot,
   deliverAlert,
   drainPendingAlerts,
+  ensureAlertSinkDirs,
   pendingDir,
   readAlertSinkHealth,
   resolveAlertDefaults,
@@ -108,6 +110,34 @@ test('alert sink refuses a root owned by another effective uid', () => {
     }),
     /refusing cross-user write/
   );
+});
+
+test('alert sink validates the nearest existing owner boundary before creating children', () => {
+  const mkdirCalls = [];
+  assert.throws(
+    () => ensureAlertSinkDirs('/state', {
+      existsSyncImpl(filePath) {
+        return filePath === '/state';
+      },
+      statSyncImpl() {
+        return { uid: 502 };
+      },
+      geteuidImpl() {
+        return 501;
+      },
+      mkdirSyncImpl(...args) {
+        mkdirCalls.push(args);
+      },
+    }),
+    /owner boundary \/state.*refusing cross-user write/
+  );
+  assert.deepEqual(mkdirCalls, []);
+});
+
+test('alert sink root normalizes a final sink path with a trailing separator', () => {
+  const finalRoot = '/state/data/alert-delivery';
+  assert.equal(alertSinkRoot(`${finalRoot}/`), finalRoot);
+  assert.equal(alertSinkRoot('/state'), finalRoot);
 });
 
 test('agent_gateway alert bus URL precedence honors config then canonical and legacy env aliases', () => {
@@ -440,6 +470,65 @@ test('malformed inflight alert is quarantined during stale recovery', async (t) 
   assert.equal(drained.results[0].status, 'quarantined');
   assert.equal(readdirSync(sinkPath(rootDir, 'quarantine')).length, 1);
   assert.equal(readAlertSinkHealth({ env }).quarantineCount, 1);
+});
+
+test('stale inflight recovery does not resurrect an alert with a delivered archive', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const doc = {
+    id: 'already-delivered',
+    state: 'inflight',
+    createdAt: '2026-08-02T04:00:00.000Z',
+    lastAttemptAt: '2026-08-02T04:00:00.000Z',
+  };
+  mkdirSync(sinkPath(rootDir, 'inflight'), { recursive: true });
+  mkdirSync(sinkPath(rootDir, 'delivered'), { recursive: true });
+  writeFileSync(sinkPath(rootDir, 'inflight', `${doc.id}.json`), `${JSON.stringify(doc)}\n`);
+  writeFileSync(
+    sinkPath(rootDir, 'delivered', `${doc.id}.json`),
+    `${JSON.stringify({ ...doc, state: 'delivered' })}\n`
+  );
+
+  const drained = await drainPendingAlerts({
+    env,
+    now: new Date('2026-08-02T05:00:00.000Z'),
+    requestText: async () => {
+      throw new Error('terminal alert must not be sent again');
+    },
+  });
+
+  assert.equal(drained.results[0].status, 'terminal-cleaned');
+  assert.equal(drained.results[0].state, 'delivered');
+  assert.deepEqual(readdirSync(sinkPath(rootDir, 'inflight')), []);
+  assert.deepEqual(readdirSync(sinkPath(rootDir, 'pending')), []);
+  assert.deepEqual(readdirSync(sinkPath(rootDir, 'delivered')), [`${doc.id}.json`]);
+});
+
+test('stale inflight recovery finalizes a terminal state after a pre-rename crash', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const doc = {
+    id: 'dead-letter-before-rename',
+    state: 'dead-letter',
+    createdAt: '2026-08-02T04:00:00.000Z',
+    lastAttemptAt: '2026-08-02T04:00:00.000Z',
+  };
+  mkdirSync(sinkPath(rootDir, 'inflight'), { recursive: true });
+  writeFileSync(sinkPath(rootDir, 'inflight', `${doc.id}.json`), `${JSON.stringify(doc)}\n`);
+
+  const drained = await drainPendingAlerts({
+    env,
+    now: new Date('2026-08-02T05:00:00.000Z'),
+    requestText: async () => {
+      throw new Error('terminal alert must not be sent again');
+    },
+  });
+
+  assert.equal(drained.results[0].status, 'terminal-finalized');
+  assert.equal(drained.results[0].state, 'dead-letter');
+  assert.deepEqual(readdirSync(sinkPath(rootDir, 'inflight')), []);
+  assert.deepEqual(readdirSync(sinkPath(rootDir, 'pending')), []);
+  assert.deepEqual(readdirSync(sinkPath(rootDir, 'dead-letter')), [`${doc.id}.json`]);
 });
 
 test('health readiness is derived from live pending and quarantine counts', async (t) => {

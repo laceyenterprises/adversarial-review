@@ -3,7 +3,9 @@
 **Owner:** adversarial-review alert delivery
 **Store:** `~/.config/adversarial-review/data/alert-delivery/` by default, or the
 principal-owned `ADVERSARIAL_ALERT_DELIVERY_ROOT` /
-`AGENT_OS_ALERT_DELIVERY_STATE_DIR` override
+`AGENT_OS_ALERT_DELIVERY_STATE_DIR` owner-root override. Overrides name the
+parent root; the sink appends `data/alert-delivery/`. A path already ending in
+`data/alert-delivery/` is accepted as the final sink path for compatibility.
 **Source of truth:** `src/alert-delivery.mjs`
 **Runtime surface:** `src/alert-delivery.mjs`, `src/health-probe.mjs`, `src/watcher.mjs`
 
@@ -61,7 +63,11 @@ Directory: `data/alert-delivery/`
   `quarantine/`, health is marked not ready, and the drainer continues with the
   remaining sorted pending files.
 - Stale inflight recovery uses the same quarantine behavior for unreadable
-  `inflight/*.json` files before recovering later stale alerts.
+  `inflight/*.json` files before recovering later stale alerts. Recovery first
+  checks for a matching terminal archive and cleans up the stale inflight copy
+  instead of resurrecting it. State transitions rewrite the authoritative
+  inflight record and rename it atomically into its destination, so a crash
+  before the rename can be completed safely on the next sweep.
 - The watcher invokes a drain sweep at startup and every poll, so durable work
   survives a process restart even when no new alert arrives. The scheduled
   retry loop continues between polls while pending work exists.
@@ -87,7 +93,9 @@ Directory: `data/alert-delivery/`
   receiver must deduplicate on `metadata.alertId`; a crash after receiver
   acceptance but before the delivered rename can otherwise produce one
   duplicate operator page.
-- The state root is principal-owned. The writer verifies its effective UID
-  before every queue-directory initialization and refuses cross-user writes,
-  preventing shared-root WAL/rename ownership races. Different worker UIDs get
-  distinct default roots under their own home directories.
+- The state root is principal-owned. Before creating a missing sink, the writer
+  verifies the nearest existing parent against its effective UID; it then
+  verifies the new sink before creating queue children. This refuses cross-user
+  writes before they can leave wrong-UID subdirectories behind and prevents
+  shared-root WAL/rename ownership races. Different worker UIDs get distinct
+  default roots under their own home directories.

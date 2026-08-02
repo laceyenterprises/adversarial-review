@@ -8,7 +8,7 @@ import {
   statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, normalize } from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
 import crypto from 'node:crypto';
@@ -133,10 +133,13 @@ function resolveAlertBusUrl(env, {
 }
 
 function alertSinkRoot(rootDir = ROOT) {
-  const normalized = String(rootDir || '');
-  return normalized.endsWith('/data/alert-delivery')
-    ? normalized
-    : join(normalized, 'data', 'alert-delivery');
+  const normalizedRoot = normalize(String(rootDir || ''));
+  const withoutTrailingSeparators = normalizedRoot.length > 1
+    ? normalizedRoot.replace(/[\\/]+$/gu, '')
+    : normalizedRoot;
+  return withoutTrailingSeparators.endsWith('/data/alert-delivery')
+    ? withoutTrailingSeparators
+    : join(withoutTrailingSeparators, 'data', 'alert-delivery');
 }
 
 function resolveAlertSinkStateRoot(env = process.env, rootDir = ROOT) {
@@ -177,26 +180,40 @@ function healthPath(rootDir = ROOT) {
   return join(alertSinkRoot(rootDir), 'health.json');
 }
 
-function ensureAlertSinkDirs(rootDir = ROOT) {
-  mkdirSync(pendingDir(rootDir), { recursive: true });
-  mkdirSync(inflightDir(rootDir), { recursive: true });
-  mkdirSync(deliveredDir(rootDir), { recursive: true });
-  mkdirSync(quarantineDir(rootDir), { recursive: true });
-  mkdirSync(deadLetterDir(rootDir), { recursive: true });
-  mkdirSync(receiptDir(rootDir), { recursive: true });
-  assertAlertSinkOwner(rootDir);
+function ensureAlertSinkDirs(rootDir = ROOT, {
+  existsSyncImpl = existsSync,
+  mkdirSyncImpl = mkdirSync,
+  statSyncImpl = statSync,
+  geteuidImpl = typeof process.geteuid === 'function' ? () => process.geteuid() : null,
+} = {}) {
+  const sinkRoot = alertSinkRoot(rootDir);
+  const ownerOptions = { existsSyncImpl, statSyncImpl, geteuidImpl };
+  assertAlertSinkOwner(rootDir, ownerOptions);
+  mkdirSyncImpl(sinkRoot, { recursive: true });
+  assertAlertSinkOwner(rootDir, ownerOptions);
+  for (const child of ['pending', 'inflight', 'delivered', 'quarantine', 'dead-letter', 'receipts']) {
+    mkdirSyncImpl(join(sinkRoot, child), { recursive: true });
+  }
 }
 
 function assertAlertSinkOwner(rootDir = ROOT, {
+  existsSyncImpl = existsSync,
   statSyncImpl = statSync,
   geteuidImpl = typeof process.geteuid === 'function' ? () => process.geteuid() : null,
 } = {}) {
   if (typeof geteuidImpl !== 'function') return;
-  const sinkStat = statSyncImpl(alertSinkRoot(rootDir));
+  let ownerBoundary = alertSinkRoot(rootDir);
+  while (!existsSyncImpl(ownerBoundary)) {
+    const parent = dirname(ownerBoundary);
+    if (parent === ownerBoundary) break;
+    ownerBoundary = parent;
+  }
+  const sinkStat = statSyncImpl(ownerBoundary);
   const effectiveUid = geteuidImpl();
   if (Number.isInteger(sinkStat?.uid) && sinkStat.uid !== effectiveUid) {
     throw new Error(
-      `Alert delivery state root is owned by uid ${sinkStat.uid}; refusing cross-user write as uid ${effectiveUid}`
+      `Alert delivery owner boundary ${ownerBoundary} is owned by uid ${sinkStat.uid}; `
+      + `refusing cross-user write as uid ${effectiveUid}`
     );
   }
 }
@@ -628,12 +645,42 @@ function recoverStaleInflightAlerts(rootDir, {
     const lastAttemptMs = Date.parse(doc?.lastAttemptAt || doc?.createdAt || '');
     if (Number.isFinite(lastAttemptMs) && nowMs - lastAttemptMs < staleInflightAgeMs) continue;
     try {
+      const terminalState = existsSync(alertDocPath(rootDir, 'delivered', doc.id))
+        ? 'delivered'
+        : existsSync(alertDocPath(rootDir, 'dead-letter', doc.id)) ? 'dead-letter' : null;
+      if (terminalState) {
+        rmSync(filePath, { force: true });
+        results.push({
+          status: 'terminal-cleaned',
+          state: terminalState,
+          id: doc.id,
+          filePath,
+        });
+        continue;
+      }
+      if (doc.state === 'delivered' || doc.state === 'dead-letter') {
+        const terminalPath = alertDocPath(rootDir, doc.state, doc.id);
+        renameSync(filePath, terminalPath);
+        results.push({
+          status: 'terminal-finalized',
+          state: doc.state,
+          id: doc.id,
+          filePath,
+          terminalPath,
+        });
+        continue;
+      }
       const pendingPath = alertDocPath(rootDir, 'pending', doc.id);
-      writeFileAtomic(pendingPath, `${JSON.stringify({
+      if (existsSync(pendingPath)) {
+        rmSync(filePath, { force: true });
+        results.push({ status: 'pending-duplicate-cleaned', id: doc.id, filePath, pendingPath });
+        continue;
+      }
+      writeFileAtomic(filePath, `${JSON.stringify({
         ...doc,
         state: 'pending',
       }, null, 2)}\n`);
-      rmSync(filePath, { force: true });
+      renameSync(filePath, pendingPath);
       results.push({ status: 'recovered', id: doc.id, filePath, pendingPath });
     } catch (error) {
       results.push({
@@ -655,23 +702,26 @@ function movePendingToInflight(rootDir, doc) {
 }
 
 function returnInflightToPending(rootDir, doc) {
+  const inflightPath = alertDocPath(rootDir, 'inflight', doc.id);
   const pendingPath = alertDocPath(rootDir, 'pending', doc.id);
-  writeFileAtomic(pendingPath, `${JSON.stringify(doc, null, 2)}\n`);
-  rmSync(alertDocPath(rootDir, 'inflight', doc.id), { force: true });
+  writeFileAtomic(inflightPath, `${JSON.stringify(doc, null, 2)}\n`);
+  renameSync(inflightPath, pendingPath);
   return pendingPath;
 }
 
 function markInflightDelivered(rootDir, doc) {
+  const inflightPath = alertDocPath(rootDir, 'inflight', doc.id);
   const deliveredPath = alertDocPath(rootDir, 'delivered', doc.id);
-  writeFileAtomic(deliveredPath, `${JSON.stringify(doc, null, 2)}\n`);
-  rmSync(alertDocPath(rootDir, 'inflight', doc.id), { force: true });
+  writeFileAtomic(inflightPath, `${JSON.stringify(doc, null, 2)}\n`);
+  renameSync(inflightPath, deliveredPath);
   return deliveredPath;
 }
 
 function markInflightDeadLettered(rootDir, doc) {
+  const inflightPath = alertDocPath(rootDir, 'inflight', doc.id);
   const deadLetterPath = alertDocPath(rootDir, 'dead-letter', doc.id);
-  writeFileAtomic(deadLetterPath, `${JSON.stringify(doc, null, 2)}\n`);
-  rmSync(alertDocPath(rootDir, 'inflight', doc.id), { force: true });
+  writeFileAtomic(inflightPath, `${JSON.stringify(doc, null, 2)}\n`);
+  renameSync(inflightPath, deadLetterPath);
   return deadLetterPath;
 }
 
@@ -964,6 +1014,7 @@ export {
   alertSinkRoot,
   deliverAlert,
   drainPendingAlerts,
+  ensureAlertSinkDirs,
   firstNonEmpty,
   healthPath,
   httpRequestText,

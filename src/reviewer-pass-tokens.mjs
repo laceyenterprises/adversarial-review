@@ -1543,6 +1543,55 @@ function historicalWorkerForJob(job) {
   };
 }
 
+function updateReviewerWorkerRunAttribution(rootDir, {
+  repo,
+  prNumber,
+  attemptNumber,
+  passKind,
+  launchRequestId,
+  workerRunId,
+  nextAttribution,
+}) {
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const current = db.prepare(
+      `SELECT worker_run_id AS workerRunId, metadata_json AS metadataJson
+         FROM reviewer_passes
+        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
+    ).get(repo, prNumber, attemptNumber, passKind);
+    if (current?.workerRunId) return false;
+    const currentMetadata = parseMetadataJson(current?.metadataJson);
+    if (
+      currentMetadata?.workerRunAttribution?.state !== 'pending'
+      || currentMetadata?.launchRequestId !== launchRequestId
+      || currentMetadata?.workerRunAttribution?.launchRequestId !== launchRequestId
+    ) {
+      return false;
+    }
+    const result = db.prepare(
+      `UPDATE reviewer_passes
+          SET worker_run_id = ?,
+              metadata_json = ?
+        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?
+          AND worker_run_id IS NULL`
+    ).run(
+      workerRunId || null,
+      metadataJson({
+        ...currentMetadata,
+        workerRunAttribution: nextAttribution,
+      }),
+      repo,
+      prNumber,
+      attemptNumber,
+      passKind,
+    );
+    return result.changes === 1;
+  } finally {
+    closeOwnedReviewDb(db);
+  }
+}
+
 // Reviewer settle is intentionally fail-open for token accounting: a worker
 // can finish while its session-ledger row is still rolling up or while SQLite
 // is briefly busy. Settle records an explicit pending attribution state keyed
@@ -1628,16 +1677,19 @@ function backfillReviewerWorkerRunAttribution(rootDir, {
           retryable: true,
         };
     if (!dryRun) {
-      completeReviewerPass(rootDir, {
+      const updated = updateReviewerWorkerRunAttribution(rootDir, {
         repo: row.repo,
         prNumber: row.prNumber,
         attemptNumber: row.attemptNumber,
         passKind: row.passKind,
-        status: PASS_STATUSES.has(row.status) ? row.status : 'completed',
-        endedAt: row.endedAt || new Date().toISOString(),
+        launchRequestId,
         workerRunId,
-        metadata: { workerRunAttribution: nextAttribution },
+        nextAttribution,
       });
+      if (!updated) {
+        skipped += 1;
+        continue;
+      }
     }
     if (workerRunId) resolved += 1;
     else stillPending += 1;

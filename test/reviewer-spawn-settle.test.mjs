@@ -400,7 +400,7 @@ test('spawnReviewer leaves repairable attribution after bounded transient ledger
       },
       readBestReviewerEvidenceTokenUsageImpl: () => {
         lookupCalls += 1;
-        throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+        throw Object.assign(new Error('database is locked'), { code: 'EIO' });
       },
       ledgerLookupSleepImpl: async () => {},
       completeReviewerPassImpl: (_root, payload) => settled.push(payload),

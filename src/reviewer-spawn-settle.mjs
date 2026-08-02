@@ -119,7 +119,7 @@ function sleepMs(ms) {
 }
 
 function classifyLedgerLookupError(err) {
-  const message = String(err?.code || err?.message || err || '').toLowerCase();
+  const message = `${String(err?.code || '')}\n${String(err?.message || err || '')}`.toLowerCase();
   if (message.includes('sqlite_busy') || message.includes('database is locked') || message.includes('database is busy')) {
     return 'sqlite-busy';
   }

@@ -113,6 +113,12 @@ test('backfillReviewerWorkerRunAttribution repairs an explicitly pending real la
   completeReviewerPass(rootDir, {
     repo: 'lacey/repo', prNumber: 8, attemptNumber: 2, passKind: 'first-pass',
     status: 'completed',
+    tokenUsage: {
+      input: 321,
+      output: 123,
+      total: 444,
+      source: 'codex-transcript',
+    },
     metadata: {
       launchRequestId: 'lrq_pending_8',
       reattachToken: 'request-id-8',
@@ -140,6 +146,10 @@ test('backfillReviewerWorkerRunAttribution repairs an explicitly pending real la
   assert.deepEqual(result, { considered: 1, resolved: 1, stillPending: 0, skipped: 0 });
   const row = readPass(rootDir, 'lacey/repo', 8);
   assert.equal(row.worker_run_id, 'wr_repaired_8');
+  assert.equal(row.token_input, 321);
+  assert.equal(row.token_output, 123);
+  assert.equal(row.token_source, 'codex-transcript');
+  assert.equal(row.status, 'completed');
   const metadata = JSON.parse(row.metadata_json);
   assert.equal(metadata.reattachToken, 'request-id-8');
   assert.deepEqual(metadata.workerRunAttribution, {

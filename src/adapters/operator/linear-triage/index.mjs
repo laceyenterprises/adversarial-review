@@ -245,10 +245,11 @@ function buildCriticalFlagComment(
   { blockingFindingCount = null, blockingFindingState = null } = {}
 ) {
   const matches = criticalWordsInSummary(reviewSummary, criticalWords);
-  let issueSummary = matches.join(', ');
-  if (!issueSummary && blockingFindingState === 'known' && Number.isInteger(blockingFindingCount) && blockingFindingCount > 0) {
-    issueSummary = `${blockingFindingCount} blocking finding${blockingFindingCount === 1 ? '' : 's'}`;
-  }
+  let issueSummary = blockingFindingState === 'known'
+    && Number.isInteger(blockingFindingCount)
+    && blockingFindingCount > 0
+    ? `${blockingFindingCount} blocking finding${blockingFindingCount === 1 ? '' : 's'}`
+    : matches.join(', ');
   if (!issueSummary) issueSummary = 'blocking findings present';
   return [
     '**Adversarial review flagged critical issues** - Paul, please review.',

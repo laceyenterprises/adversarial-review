@@ -182,6 +182,23 @@ test('buildFollowUpJob creates a pending durable handoff record', () => {
   assert.match(job.jobId, /^laceyenterprises__clio-pr-42-/);
 });
 
+test('buildFollowUpJob does not classify missing review body as settled clean', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 42,
+    revisionRef: 'review-head-sha',
+    reviewerModel: 'codex',
+    reviewBody: undefined,
+    reviewPostedAt: '2026-04-21T07:46:00.000Z',
+    critical: false,
+  });
+
+  assert.equal(
+    job.recommendedFollowUpAction.summary,
+    'Start a follow-up coding session for this PR and address the adversarial review findings.'
+  );
+});
+
 test('classifyFollowUpCriticality keeps clean comment-only reviews out of critical follow-up state', () => {
   const result = classifyFollowUpCriticality([
     '## Summary',

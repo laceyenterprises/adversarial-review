@@ -378,6 +378,7 @@ function classifyFollowUpCriticality(reviewBody) {
 
 function shouldUseSettledCleanFollowUpText(reviewBody, critical) {
   if (critical) return false;
+  if (!String(reviewBody || '').trim()) return false;
   const classification = classifyFollowUpCriticality(reviewBody);
   return classification.critical === false
     && (classification.verdict === 'comment-only' || classification.verdict === 'approved');

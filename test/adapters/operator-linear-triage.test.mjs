@@ -379,3 +379,13 @@ test('buildCriticalFlagComment includes matching critical words', () => {
 
   assert.match(body, /vulnerability, injection/);
 });
+
+test('buildCriticalFlagComment prefers structured blocking count over critical words', () => {
+  const body = buildCriticalFlagComment('Possible injection vulnerability.', undefined, {
+    blockingFindingCount: 3,
+    blockingFindingState: 'known',
+  });
+
+  assert.match(body, /Issues detected: 3 blocking findings/);
+  assert.doesNotMatch(body, /Issues detected: vulnerability, injection/);
+});

@@ -7,7 +7,7 @@ import {
   rmSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
 import crypto from 'node:crypto';
@@ -142,6 +142,10 @@ function deliveredDir(rootDir = ROOT) {
   return join(alertSinkRoot(rootDir), 'delivered');
 }
 
+function quarantineDir(rootDir = ROOT) {
+  return join(alertSinkRoot(rootDir), 'quarantine');
+}
+
 function receiptDir(rootDir = ROOT) {
   return join(alertSinkRoot(rootDir), 'receipts');
 }
@@ -154,6 +158,7 @@ function ensureAlertSinkDirs(rootDir = ROOT) {
   mkdirSync(pendingDir(rootDir), { recursive: true });
   mkdirSync(inflightDir(rootDir), { recursive: true });
   mkdirSync(deliveredDir(rootDir), { recursive: true });
+  mkdirSync(quarantineDir(rootDir), { recursive: true });
   mkdirSync(receiptDir(rootDir), { recursive: true });
 }
 
@@ -211,6 +216,9 @@ function readHealth(rootDir = ROOT) {
       lastFailureAt: null,
       lastFailureReason: null,
       lastQueuedEvent: null,
+      lastQuarantinedAt: null,
+      lastQuarantinedFile: null,
+      quarantineCount: 0,
     };
   }
 }
@@ -251,16 +259,34 @@ function setHealthFailed(rootDir, doc, error, failedAt) {
   });
 }
 
-function setHealthDelivered(rootDir, deliveredAt) {
-  const pendingCount = countDirEntries(pendingDir(rootDir));
+function setHealthQuarantined(rootDir, filePath, error, quarantinedAt) {
   const prior = readHealth(rootDir);
   return writeHealth(rootDir, {
     ...prior,
-    ready: pendingCount === 0,
+    ready: false,
+    pendingCount: countDirEntries(pendingDir(rootDir)),
+    quarantineCount: countDirEntries(quarantineDir(rootDir)),
+    lastFailureAt: quarantinedAt,
+    lastFailureReason: `quarantined ${basename(filePath)}: ${String(error?.message || error)}`,
+    lastQuarantinedAt: quarantinedAt,
+    lastQuarantinedFile: basename(filePath),
+  });
+}
+
+function setHealthDelivered(rootDir, deliveredAt) {
+  const pendingCount = countDirEntries(pendingDir(rootDir));
+  const inflightCount = countDirEntries(inflightDir(rootDir));
+  const quarantineCount = countDirEntries(quarantineDir(rootDir));
+  const ready = pendingCount === 0 && inflightCount === 0 && quarantineCount === 0;
+  const prior = readHealth(rootDir);
+  return writeHealth(rootDir, {
+    ...prior,
+    ready,
     pendingCount,
+    quarantineCount,
     lastDeliveredAt: deliveredAt,
-    lastFailureReason: pendingCount === 0 ? null : prior.lastFailureReason,
-    lastFailureAt: pendingCount === 0 ? null : prior.lastFailureAt,
+    lastFailureReason: ready ? null : prior.lastFailureReason,
+    lastFailureAt: ready ? null : prior.lastFailureAt,
   });
 }
 
@@ -433,6 +459,19 @@ function readAlertDoc(filePath) {
   return JSON.parse(readFileSync(filePath, 'utf8'));
 }
 
+function quarantineAlertFile(rootDir, filePath, error, now = new Date()) {
+  ensureAlertSinkDirs(rootDir);
+  const stamp = (now instanceof Date ? now : new Date(now)).toISOString().replace(/[:.]/gu, '-');
+  const originalName = basename(filePath);
+  let quarantinedPath = join(quarantineDir(rootDir), `${stamp}-${originalName}`);
+  for (let attempt = 0; existsSync(quarantinedPath) && attempt < 1000; attempt += 1) {
+    quarantinedPath = join(quarantineDir(rootDir), `${stamp}-${attempt}-${originalName}`);
+  }
+  renameSync(filePath, quarantinedPath);
+  setHealthQuarantined(rootDir, filePath, error, (now instanceof Date ? now : new Date(now)).toISOString());
+  return quarantinedPath;
+}
+
 function listPendingAlertPaths(rootDir = ROOT) {
   try {
     return readdirSync(pendingDir(rootDir))
@@ -465,17 +504,50 @@ function recoverStaleInflightAlerts(rootDir, {
   staleInflightAgeMs = DEFAULT_STALE_INFLIGHT_AGE_MS,
 } = {}) {
   const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  const results = [];
   for (const filePath of listInflightAlertPaths(rootDir)) {
-    const doc = readAlertDoc(filePath);
+    let doc;
+    try {
+      doc = readAlertDoc(filePath);
+    } catch (error) {
+      try {
+        const quarantinedPath = quarantineAlertFile(rootDir, filePath, error, now);
+        results.push({
+          status: 'quarantined',
+          filePath,
+          quarantinePath: quarantinedPath,
+          error: String(error?.message || error),
+        });
+      } catch (quarantineError) {
+        results.push({
+          status: 'failed',
+          filePath,
+          error: String(error?.message || error),
+          quarantineError: String(quarantineError?.message || quarantineError),
+        });
+      }
+      continue;
+    }
     const lastAttemptMs = Date.parse(doc?.lastAttemptAt || doc?.createdAt || '');
     if (Number.isFinite(lastAttemptMs) && nowMs - lastAttemptMs < staleInflightAgeMs) continue;
-    const pendingPath = alertDocPath(rootDir, 'pending', doc.id);
-    writeFileAtomic(pendingPath, `${JSON.stringify({
-      ...doc,
-      state: 'pending',
-    }, null, 2)}\n`);
-    rmSync(filePath, { force: true });
+    try {
+      const pendingPath = alertDocPath(rootDir, 'pending', doc.id);
+      writeFileAtomic(pendingPath, `${JSON.stringify({
+        ...doc,
+        state: 'pending',
+      }, null, 2)}\n`);
+      rmSync(filePath, { force: true });
+      results.push({ status: 'recovered', id: doc.id, filePath, pendingPath });
+    } catch (error) {
+      results.push({
+        status: 'failed',
+        id: doc.id,
+        filePath,
+        error: String(error?.message || error),
+      });
+    }
   }
+  return results;
 }
 
 function movePendingToInflight(rootDir, doc) {
@@ -618,20 +690,41 @@ async function drainPendingAlerts({
   });
   const rootDir = config.rootDir;
   ensureAlertSinkDirs(rootDir);
-  recoverStaleInflightAlerts(rootDir, { now });
+  const recoveredInflight = recoverStaleInflightAlerts(rootDir, { now });
   const pending = listPendingAlertPaths(rootDir);
-  const results = [];
+  const results = [...recoveredInflight];
   for (const filePath of pending.slice(0, maxItems)) {
-    results.push(await drainSingleAlert(filePath, {
-      env,
-      now,
-      requestText,
-      fsImpl,
-      loadConfigRuntimeImpl,
-    }));
+    try {
+      results.push(await drainSingleAlert(filePath, {
+        env,
+        now,
+        requestText,
+        fsImpl,
+        loadConfigRuntimeImpl,
+      }));
+    } catch (error) {
+      try {
+        const quarantinedPath = quarantineAlertFile(rootDir, filePath, error, now);
+        results.push({
+          status: 'quarantined',
+          filePath,
+          quarantinePath: quarantinedPath,
+          error: String(error?.message || error),
+        });
+      } catch (quarantineError) {
+        results.push({
+          status: 'failed',
+          filePath,
+          error: String(error?.message || error),
+          quarantineError: String(quarantineError?.message || quarantineError),
+        });
+      }
+    }
   }
   return {
-    status: results.some((entry) => entry.status === 'queued') ? 'queued' : 'ok',
+    status: results.some((entry) => entry.status === 'failed') ? 'error'
+      : results.some((entry) => entry.status === 'queued' || entry.status === 'quarantined') ? 'queued'
+        : 'ok',
     drained: results.filter((entry) => entry.status === 'delivered').length,
     queued: countDirEntries(pendingDir(rootDir)),
     results,
@@ -654,16 +747,28 @@ function scheduleAlertDrain({
       requestText,
       fsImpl,
       loadConfigRuntimeImpl,
+    }).catch((error) => {
+      console.error?.('[alert-delivery] scheduled drain failed', error);
+      return { status: 'error', drained: 0, queued: 0, results: [], error: String(error?.message || error) };
     }).finally(() => {
       activeDrainPromise = null;
-      const config = resolveAlertDefaults(env, {
-        fsImpl: { existsSync: fsImpl.existsSync || existsSync },
-        loadConfigRuntimeImpl,
-      });
-      if (countDirEntries(pendingDir(config.rootDir)) > 0) {
+      let rootDir;
+      let retryDelayMs = DEFAULT_RETRY_DELAY_MS;
+      try {
+        const config = resolveAlertDefaults(env, {
+          fsImpl: { existsSync: fsImpl.existsSync || existsSync },
+          loadConfigRuntimeImpl,
+        });
+        rootDir = config.rootDir;
+        retryDelayMs = config.retryDelayMs;
+      } catch (error) {
+        console.error?.('[alert-delivery] scheduled drain reschedule check failed', error);
+        return;
+      }
+      if (countDirEntries(pendingDir(rootDir)) > 0) {
         scheduleAlertDrain({
           env,
-          delayMs: config.retryDelayMs,
+          delayMs: retryDelayMs,
           requestText,
           fsImpl,
           loadConfigRuntimeImpl,
@@ -678,12 +783,17 @@ function readAlertSinkHealth({ env = process.env, loadConfigRuntimeImpl = null }
   const config = resolveAlertDefaults(env, { loadConfigRuntimeImpl });
   const rootDir = config.rootDir;
   const health = readHealth(rootDir);
+  const pendingCount = countDirEntries(pendingDir(rootDir));
+  const inflightCount = countDirEntries(inflightDir(rootDir));
+  const quarantineCount = countDirEntries(quarantineDir(rootDir));
   return {
     ...health,
     rootDir,
-    pendingCount: countDirEntries(pendingDir(rootDir)),
-    inflightCount: countDirEntries(inflightDir(rootDir)),
+    ready: pendingCount === 0 && inflightCount === 0 && quarantineCount === 0,
+    pendingCount,
+    inflightCount,
     deliveredCount: countDirEntries(deliveredDir(rootDir)),
+    quarantineCount,
   };
 }
 

@@ -1,0 +1,59 @@
+# Data Model - Alert Delivery State
+
+**Owner:** adversarial-review alert delivery
+**Store:** `data/alert-delivery/`
+**Source of truth:** `src/alert-delivery.mjs`
+**Runtime surface:** `src/alert-delivery.mjs`, `src/health-probe.mjs`, `src/watcher.mjs`
+
+## Purpose
+
+`data/alert-delivery/` is the durable alert sink used when watcher and merge
+authority paths need to page an operator. `deliverAlert` writes an alert
+document and receipt before returning; background drain work then moves the
+document through delivery states until the notification bus accepts it.
+
+The sink is designed for at-least-once delivery. A malformed or unreadable alert
+file must affect only that file, not the rest of the queue.
+
+## Directories
+
+Directory: `data/alert-delivery/`
+
+| Path | Shape | Contract |
+|---|---|---|
+| `pending/*.json` | Alert document | Durable work waiting for delivery or retry. Drainers process sorted files up to their item cap. |
+| `inflight/*.json` | Alert document | Claimed work being posted to the notification bus. Stale inflight files are recovered back to `pending/`. |
+| `delivered/*.json` | Alert document with `deliveredAt` | Successful delivery archive. |
+| `quarantine/*.json` | Original unreadable file bytes | Files that cannot be parsed or read during pending drain or inflight recovery. Quarantining is fail-isolating: later alerts continue draining. |
+| `receipts/*.json` | Receipt document | Append-style audit receipts for queued, failed, and delivered phases. |
+| `health.json` | Health snapshot | Last observed delivery health and live queue counters for probes and operators. |
+
+## Health Snapshot
+
+`health.json` records operator-facing state:
+
+| Field | Shape | Contract |
+|---|---|---|
+| `ready` | boolean | `true` only when live pending, inflight, and quarantine counts are all zero. |
+| `pendingCount` | number | Live count of `pending/*.json`; recomputed by `readAlertSinkHealth`. |
+| `quarantineCount` | number | Live count of `quarantine/*.json`; recomputed by `readAlertSinkHealth`. |
+| `lastQueuedAt` / `lastDeliveredAt` / `lastFailureAt` | string or null | ISO-8601 timestamps for the latest queue, delivery, and failure observations. |
+| `lastFailureReason` | string or null | Last transport or quarantine reason while the sink is not ready. |
+| `lastQueuedEvent` | string or null | Event name from the latest queued alert, when present. |
+| `lastQuarantinedAt` | string or null | ISO-8601 timestamp for the latest quarantine. |
+| `lastQuarantinedFile` | string or null | Basename of the latest quarantined file. |
+
+## Operational Contract
+
+- `deliverAlert` is enqueue-first: once the pending document and queued receipt
+  are durable, callers receive `{ status: "queued" }`.
+- The scheduled drain is best-effort fire-and-forget work. It must contain its
+  own rejections so a drain failure cannot terminate the long-lived watcher
+  daemon through Node's unhandled-rejection policy.
+- Each pending item is isolated. A malformed `pending/*.json` file is moved to
+  `quarantine/`, health is marked not ready, and the drainer continues with the
+  remaining sorted pending files.
+- Stale inflight recovery uses the same quarantine behavior for unreadable
+  `inflight/*.json` files before recovering later stale alerts.
+- Quarantine is intentionally operator-visible. A non-empty quarantine directory
+  keeps `readAlertSinkHealth().ready` false even when no pending alerts remain.

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -25,6 +25,10 @@ function makeEnv(overrides = {}) {
     ...overrides,
   };
   return { env, rootDir };
+}
+
+function sinkPath(rootDir, ...parts) {
+  return join(rootDir, 'data', 'alert-delivery', ...parts);
 }
 
 test('watcher alert defaults require an explicit recipient', () => {
@@ -214,6 +218,113 @@ test('recovered bus drains the queued receipt exactly once', async (t) => {
   });
   assert.equal(secondDrain.drained, 0);
   assert.deepEqual(calls, [calls[0]]);
+});
+
+test('malformed pending alert is quarantined and later alerts still drain', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const pendingRoot = pendingDir(rootDir);
+  mkdirSync(pendingRoot, { recursive: true });
+  writeFileSync(join(pendingRoot, '000-bad.json'), '{not json\n');
+  writeFileSync(join(pendingRoot, '001-good.json'), `${JSON.stringify({
+    version: 1,
+    id: '001-good',
+    createdAt: '2026-08-02T05:00:00.000Z',
+    event: 'watcher.no_progress',
+    payload: { openPendingPRs: 1 },
+    text: 'valid alert',
+    attemptCount: 0,
+    lastAttemptAt: null,
+    nextAttemptAfter: '2026-08-02T05:00:00.000Z',
+    delivery: {
+      alertName: 'Adversarial Watcher Health Test',
+      alertAgentId: 'ops',
+      alertChannel: 'telegram',
+      alertTo: '123456',
+    },
+  }, null, 2)}\n`);
+
+  const calls = [];
+  const drained = await drainPendingAlerts({
+    env,
+    now: new Date('2026-08-02T05:01:00.000Z'),
+    fsImpl: {
+      readFileSync() {
+        return 'hook-token';
+      },
+      existsSync() {
+        return true;
+      },
+    },
+    requestText: async (url, options) => {
+      calls.push({ url, options });
+      return 'ok';
+    },
+  });
+
+  assert.equal(drained.status, 'queued');
+  assert.equal(drained.drained, 1);
+  assert.equal(drained.results.some((entry) => entry.status === 'quarantined'), true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.body.metadata.alertId, '001-good');
+
+  const quarantineEntries = readdirSync(sinkPath(rootDir, 'quarantine'));
+  assert.equal(quarantineEntries.length, 1);
+  assert.match(quarantineEntries[0], /000-bad\.json$/);
+
+  const health = readAlertSinkHealth({ env });
+  assert.equal(health.ready, false);
+  assert.equal(health.pendingCount, 0);
+  assert.equal(health.quarantineCount, 1);
+  assert.match(health.lastFailureReason, /quarantined 000-bad\.json/);
+});
+
+test('malformed inflight alert is quarantined during stale recovery', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const inflightRoot = sinkPath(rootDir, 'inflight');
+  const pendingRoot = pendingDir(rootDir);
+  mkdirSync(inflightRoot, { recursive: true });
+  mkdirSync(pendingRoot, { recursive: true });
+  writeFileSync(join(inflightRoot, 'bad-inflight.json'), '{not json\n');
+
+  const drained = await drainPendingAlerts({
+    env,
+    now: new Date('2026-08-02T05:01:00.000Z'),
+    fsImpl: {
+      readFileSync() {
+        return 'hook-token';
+      },
+      existsSync() {
+        return true;
+      },
+    },
+    requestText: async () => {
+      throw new Error('unexpected send');
+    },
+  });
+
+  assert.equal(drained.status, 'queued');
+  assert.equal(drained.drained, 0);
+  assert.equal(drained.results.length, 1);
+  assert.equal(drained.results[0].status, 'quarantined');
+  assert.equal(readdirSync(sinkPath(rootDir, 'quarantine')).length, 1);
+  assert.equal(readAlertSinkHealth({ env }).quarantineCount, 1);
+});
+
+test('health readiness is derived from live pending and quarantine counts', async (t) => {
+  const { env, rootDir } = makeEnv();
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const pendingRoot = pendingDir(rootDir);
+  mkdirSync(pendingRoot, { recursive: true });
+  writeFileSync(join(pendingRoot, 'stuck.json'), '{}\n');
+
+  const health = readAlertSinkHealth({ env });
+  assert.equal(health.ready, false);
+  assert.equal(health.pendingCount, 1);
 });
 
 test('health-probe and hammer-cap callers both resolve through the shared alert sink module', async () => {

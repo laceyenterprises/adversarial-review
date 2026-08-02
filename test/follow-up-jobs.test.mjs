@@ -261,6 +261,31 @@ test('createFollowUpJob writes the pending job JSON under data/follow-up-jobs/pe
   assert.equal(statSync(jobPath).mode & 0o777, 0o644);
 });
 
+test('createFollowUpJob persists settled-clean follow-up text for comment-only reviews with zero blocking findings', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { job } = createFollowUpJob({
+    ...makeJobInput(rootDir),
+    reviewBody: [
+      '## Summary',
+      'agent-os#4562 is settled cleanly; the prior critical security concern is not reproducible on the current head.',
+      '',
+      '## Blocking issues',
+      '- None.',
+      '',
+      '## Non-blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n'),
+    critical: false,
+  });
+
+  assert.equal(job.recommendedFollowUpAction.priority, 'normal');
+  assert.match(job.recommendedFollowUpAction.summary, /settled cleanly; no remediation coding session is required/i);
+  assert.doesNotMatch(job.recommendedFollowUpAction.summary, /blocking review findings|adversarial review findings/i);
+});
+
 test('archiveStoppedFollowUpJobs moves only stopped entries at least 24h old into month archive', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const stoppedDir = getFollowUpJobDir(rootDir, 'stopped');

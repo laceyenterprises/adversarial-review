@@ -346,11 +346,13 @@ function buildRemediationRoundPlan(maxRounds = DEFAULT_MAX_REMEDIATION_ROUNDS) {
   };
 }
 
-function buildRecommendedFollowUpAction({ critical }) {
+function buildRecommendedFollowUpAction({ critical, settledClean = false }) {
   return {
     type: 'address-adversarial-review',
     priority: critical ? 'high' : 'normal',
-    summary: critical
+    summary: settledClean
+      ? 'Latest adversarial review is settled cleanly; no remediation coding session is required unless an operator explicitly retriggers review.'
+      : critical
       ? 'Start a follow-up coding session for this PR immediately and address the blocking review findings first.'
       : 'Start a follow-up coding session for this PR and address the adversarial review findings.',
     executionModel: 'bounded-manual-rounds',
@@ -368,6 +370,13 @@ function classifyFollowUpCriticality(reviewBody) {
     blockingFindingState: blocking.state,
     verdict,
   };
+}
+
+function shouldUseSettledCleanFollowUpText(reviewBody, critical) {
+  if (critical) return false;
+  const classification = classifyFollowUpCriticality(reviewBody);
+  return classification.critical === false
+    && (classification.verdict === 'comment-only' || classification.verdict === 'approved');
 }
 
 function isSettledReviewJob(job) {
@@ -786,7 +795,10 @@ function normalizeFollowUpJob(job) {
     revisionRef: job?.revisionRef || subjectIdentity.revisionRef,
     riskClass: normalizedRiskClass,
     recommendedFollowUpAction: {
-      ...buildRecommendedFollowUpAction({ critical: job.critical }),
+      ...buildRecommendedFollowUpAction({
+        critical: job.critical,
+        settledClean: shouldUseSettledCleanFollowUpText(job?.reviewBody, job?.critical),
+      }),
       ...(job.recommendedFollowUpAction || {}),
       executionModel: 'bounded-manual-rounds',
       maxRounds: remediationPlan.maxRounds,
@@ -1724,7 +1736,10 @@ function buildFollowUpJob({
     // that read historical schemas, but do not imply advisory jobs exist.
     verdict_mode: 'enforce',
     recommendedFollowUpAction: {
-      ...buildRecommendedFollowUpAction({ critical }),
+      ...buildRecommendedFollowUpAction({
+        critical,
+        settledClean: shouldUseSettledCleanFollowUpText(reviewBody, critical),
+      }),
       maxRounds: remediationPlan.maxRounds,
     },
     remediationReply: buildRemediationReplyArtifact(null),

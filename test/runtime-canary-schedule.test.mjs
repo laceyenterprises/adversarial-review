@@ -6,6 +6,7 @@ import {
   SCHEDULED_HARD_EXIT_MS,
   armScheduledHardExit,
   main,
+  reportScheduledFailure,
 } from '../scripts/adversarial-runtime-canary.mjs';
 
 function passingFallback() {
@@ -87,6 +88,16 @@ test('scheduled entry point arms an unreferenced hard-exit deadline', () => {
   callback();
   assert.equal(exitCode, 1);
   assert.match(stderr, /exceeded hard deadline/);
+});
+
+test('scheduled entry point renders a rejected canary promise as a clean failure', () => {
+  let stderr = '';
+  const code = reportScheduledFailure(new Error('settle smoke write failed'), {
+    stderr: { write: (value) => { stderr += value; } },
+  });
+
+  assert.equal(code, 1);
+  assert.equal(stderr, 'error: settle smoke write failed\n');
 });
 
 test('airlock LaunchAgent schedules daily settle-smoke renewal', () => {

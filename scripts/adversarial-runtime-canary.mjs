@@ -136,13 +136,20 @@ async function main(argv, dependencies = {}) {
   return outcome.ok && (!settleOutcome || settleOutcome.ok) ? 0 : 1;
 }
 
+function reportScheduledFailure(err, { stderr = process.stderr } = {}) {
+  stderr.write(`error: ${err?.message || err}\n`);
+  return 1;
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   // ExitTimeOut only bounds launchd's stop grace; it does not bound a
   // StartCalendarInterval job. Keep this timer unref'd so it does not delay a
   // clean process, while still forcing an exit if an unexpected handle keeps
   // the event loop alive or either scheduled check never resolves.
   armScheduledHardExit();
-  main(process.argv.slice(2)).then((code) => { process.exitCode = code; });
+  main(process.argv.slice(2))
+    .then((code) => { process.exitCode = code; })
+    .catch((err) => { process.exitCode = reportScheduledFailure(err); });
 }
 
-export { SCHEDULED_HARD_EXIT_MS, armScheduledHardExit, main };
+export { SCHEDULED_HARD_EXIT_MS, armScheduledHardExit, main, reportScheduledFailure };

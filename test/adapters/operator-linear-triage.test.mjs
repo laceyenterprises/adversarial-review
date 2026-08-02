@@ -138,6 +138,68 @@ test('recordReviewCompleted posts critical flag comments for critical reviews', 
   assert.match(comments[0].body, /critical, vulnerability, security/);
 });
 
+test('recordReviewCompleted does not post a critical flag for a clean comment-only review body', async () => {
+  const { linear, updates, comments } = makeLinearFixture();
+  const adapter = createLinearTriageAdapter({
+    linearClientProvider: async () => linear,
+    logger: {},
+  });
+
+  await adapter.recordReviewCompleted(subjectRef(), {
+    critical: true,
+    reviewSummary: 'agent-os#4562 looked like a critical security concern at first glance.',
+    reviewBody: [
+      '## Summary',
+      'agent-os#4562 is clean on the current head.',
+      '',
+      '## Blocking issues',
+      '- None.',
+      '',
+      '## Non-blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(updates, [
+    { issueId: 'issue-1', payload: { stateId: 'state-done' } },
+  ]);
+  assert.deepEqual(comments, []);
+});
+
+test('recordReviewCompleted still posts a critical flag when the review body carries blocking findings', async () => {
+  const { linear, updates, comments } = makeLinearFixture();
+  const adapter = createLinearTriageAdapter({
+    linearClientProvider: async () => linear,
+    logger: {},
+  });
+
+  await adapter.recordReviewCompleted(subjectRef(), {
+    critical: false,
+    reviewSummary: 'Blocking findings remain.',
+    reviewBody: [
+      '## Summary',
+      'Blocking findings remain.',
+      '',
+      '## Blocking issues',
+      '- **Critical request validation gap**',
+      '  - **File:** src/request-handler.mjs',
+      '  - **Lines:** 12-40',
+      '  - **Problem:** Security validation is bypassed.',
+      '',
+      '## Verdict',
+      'Request changes',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(updates, [
+    { issueId: 'issue-1', payload: { stateId: 'state-done' } },
+  ]);
+  assert.equal(comments.length, 1);
+});
+
 test('ticket-pipeline-paused PR label suppresses Linear updates and comments', async () => {
   const { linear, updates, comments } = makeLinearFixture();
   let providerCalls = 0;

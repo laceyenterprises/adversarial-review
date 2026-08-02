@@ -36,6 +36,7 @@ import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 import { resolveGitHubAppBotLogin } from './github-app-identity.mjs';
 import { getCachedDiff, putCachedDiff } from './diff-cache.mjs';
 import {
+  classifyFollowUpCriticality,
   createFollowUpJob,
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
@@ -120,6 +121,8 @@ import {
   buildAgyReviewerPromptPrefix,
   isFinalReviewRound,
 } from './reviewer-prompt.mjs';
+
+const CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
 
 const REVIEW_ADAPTER_ENV_KEYS = [
   'USER',
@@ -1287,15 +1290,6 @@ function detectSpecTouchViolations(diffText) {
   return violations;
 }
 
-// ── Critical-issue detection ─────────────────────────────────────────────────
-
-const CRITICAL_WORDS = ['critical', 'vulnerability', 'security', 'injection'];
-
-function isCritical(reviewText) {
-  const lower = reviewText.toLowerCase();
-  return CRITICAL_WORDS.some((w) => lower.includes(w));
-}
-
 function shouldQueueFollowUpForReview(reviewText) {
   return Boolean(reviewText);
 }
@@ -1311,7 +1305,7 @@ function queueFollowUpForPostedReview({
   linearTicketId = null,
   reviewText,
   reviewPostedAt = new Date().toISOString(),
-  critical = false,
+  critical: legacyCritical = false,
   verdictMode = VERDICT_MODE_ENFORCE,
   summarizePRRemediationLedgerImpl = summarizePRRemediationLedger,
   createFollowUpJobImpl = createFollowUpJob,
@@ -1346,6 +1340,9 @@ function queueFollowUpForPostedReview({
   const elevatedPriorCap = Number.isInteger(latestMaxRounds) && latestMaxRounds > tierResolution.roundBudget
     ? latestMaxRounds
     : null;
+  const followUpClassification = String(reviewText || '').trim()
+    ? classifyFollowUpCriticality(reviewText)
+    : { critical: legacyCritical };
 
   const { jobPath } = createFollowUpJobImpl({
     rootDir,
@@ -1358,7 +1355,7 @@ function queueFollowUpForPostedReview({
     linearTicketId,
     reviewBody: reviewText,
     reviewPostedAt,
-    critical,
+    critical: followUpClassification.critical,
     verdictMode: normalizedVerdictMode,
     riskClass: tierResolution.riskClass,
     priorCompletedRounds: priorLedger.completedRoundsForPR,
@@ -2352,7 +2349,8 @@ async function main() {
     process.exit(1);
   }
 
-  const critical = isCritical(reviewText);
+  const followUpClassification = classifyFollowUpCriticality(fullComment);
+  const critical = followUpClassification.critical;
   const reviewPostedAt = new Date().toISOString();
   let postedLocalShadowRequest = null;
   if (localShadowRequest.persisted) {
@@ -2428,6 +2426,7 @@ async function main() {
     }, {
       critical,
       reviewSummary: reviewText,
+      reviewBody: fullComment,
     });
   } catch (err) {
     console.error(`[reviewer] LINEAR UPDATE FAILED for ${linearTicketId}:`, err.message);

@@ -12,6 +12,7 @@ import {
   REMEDIATION_REPLY_SCHEMA_VERSION,
   archiveStoppedFollowUpJobs,
   buildFollowUpJob,
+  classifyFollowUpCriticality,
   buildRemediationReply,
   buildStopMetadata,
   claimNextFollowUpJob,
@@ -179,6 +180,48 @@ test('buildFollowUpJob creates a pending durable handoff record', () => {
   assert.equal(job.remediationReply.state, 'awaiting-worker-write');
   assert.equal(job.remediationReply.path, null);
   assert.match(job.jobId, /^laceyenterprises__clio-pr-42-/);
+});
+
+test('classifyFollowUpCriticality keeps clean comment-only reviews out of critical follow-up state', () => {
+  const result = classifyFollowUpCriticality([
+    '## Summary',
+    'agent-os#4562 is clean; no blocking findings remain.',
+    '',
+    '## Blocking issues',
+    '- None.',
+    '',
+    '## Non-blocking issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n'));
+
+  assert.equal(result.critical, false);
+  assert.equal(result.blockingFindingState, 'known');
+  assert.equal(result.blockingFindingCount, 0);
+  assert.equal(result.verdict, 'comment-only');
+});
+
+test('classifyFollowUpCriticality keeps blocking reviews on the strict high-priority path', () => {
+  const result = classifyFollowUpCriticality([
+    '## Summary',
+    'Request changes required.',
+    '',
+    '## Blocking issues',
+    '- **Regression in request handling**',
+    '  - **File:** src/demo.mjs',
+    '  - **Lines:** 10-20',
+    '  - **Problem:** Requests can bypass validation.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n'));
+
+  assert.equal(result.critical, true);
+  assert.equal(result.blockingFindingState, 'known');
+  assert.equal(result.blockingFindingCount, 1);
+  assert.equal(result.verdict, 'request-changes');
 });
 
 test('buildFollowUpJob rejects advisory-only verdict mode', () => {

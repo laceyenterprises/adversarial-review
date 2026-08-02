@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeFileAtomic } from '../../../atomic-write.mjs';
+import { classifyFollowUpCriticality } from '../../../follow-up-jobs.mjs';
 import {
   extractLinearTicketId as extractGitHubPRLinearTicketId,
   routePR as routeGitHubPR,
@@ -327,6 +328,7 @@ function createLinearTriageAdapter({
   async function recordReviewCompleted(subjectRef, {
     critical = false,
     reviewSummary = '',
+    reviewBody = '',
   } = {}) {
     if (isTicketPipelinePaused(subjectRef, { rootDir, logger })) {
       logger.log?.(`[linear-triage] ticket pipeline paused for ${subjectRef?.subjectExternalId || subjectRef?.repo || '<unknown>'} - skipping review completion`);
@@ -337,7 +339,10 @@ function createLinearTriageAdapter({
 
     await syncTriageStatus(subjectRef, 'done');
 
-    if (!critical) return;
+    const derivedCritical = String(reviewBody || '').trim()
+      ? classifyFollowUpCriticality(reviewBody).critical
+      : critical;
+    if (!derivedCritical) return;
     const linear = await getLinearClient();
     if (!linear) return;
     try {

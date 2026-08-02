@@ -24,6 +24,7 @@ import {
   validateRemediationReply as validateKernelRemediationReply,
 } from './kernel/remediation-reply.mjs';
 import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
+import { classifyBlockingFindings } from './merge-agent-review-classification.mjs';
 
 const MAX_CREATE_ATTEMPTS = 100;
 
@@ -350,11 +351,22 @@ function buildRecommendedFollowUpAction({ critical }) {
     type: 'address-adversarial-review',
     priority: critical ? 'high' : 'normal',
     summary: critical
-      ? 'Start a follow-up coding session for this PR immediately and address the critical review findings first.'
+      ? 'Start a follow-up coding session for this PR immediately and address the blocking review findings first.'
       : 'Start a follow-up coding session for this PR and address the adversarial review findings.',
     executionModel: 'bounded-manual-rounds',
     maxRounds: DEFAULT_MAX_REMEDIATION_ROUNDS,
     futureArchitectureNote: 'Long term this should resume the original build session and preserve original build intent/context instead of spawning a fresh session from a file handoff.',
+  };
+}
+
+function classifyFollowUpCriticality(reviewBody) {
+  const verdict = normalizeEffectiveReviewVerdict(reviewBody);
+  const blocking = classifyBlockingFindings(reviewBody, { lastVerdict: verdict });
+  return {
+    critical: blocking.state !== 'known' || blocking.count > 0,
+    blockingFindingCount: blocking.count,
+    blockingFindingState: blocking.state,
+    verdict,
   };
 }
 
@@ -2689,6 +2701,7 @@ export {
   REMEDIATION_REPLY_KIND,
   REMEDIATION_REPLY_SCHEMA_VERSION,
   buildFollowUpJob,
+  classifyFollowUpCriticality,
   buildStopMetadata,
   buildRemediationReply,
   buildRemediationReplyArtifact,

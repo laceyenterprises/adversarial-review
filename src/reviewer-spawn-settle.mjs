@@ -19,7 +19,8 @@
 //    watcherHeartbeat singleton and is used elsewhere) and is threaded into
 //    settleReviewerAttempt as the injected `markReviewHeartbeat` param.
 import { randomUUID } from 'node:crypto';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -32,8 +33,11 @@ import {
   resolveAgyReviewerSubprocessTimeoutMs,
   resolveReviewerTimeoutMs,
 } from './reviewer-timeout.mjs';
-import { resolveGeminiRuntime, loadRoleConfig } from './role-config.mjs';
-import { providerForQuotaHarness, isGroundedProviderState } from './fleet-quota-status.mjs';
+import { loadRoleConfig, resolveGeminiRuntime } from './role-config.mjs';
+import {
+  isGroundedProviderState,
+  providerForQuotaHarness,
+} from './fleet-quota-status.mjs';
 import {
   beginReviewerPass,
   completeReviewerPass,
@@ -95,6 +99,7 @@ const REVIEWER_LEASE_RECOVERY_ENABLED = resolveReviewerLeaseRecoveryEnabled({
   watcherConfig: JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8')),
 });
 const INFRA_AUTO_RECOVER_CAP = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
+const REVIEWER_LEDGER_LOOKUP_DELAYS_MS = Object.freeze([25, 75]);
 
 // ARC-18: resolveReviewerIdentity + its identity map stay in watcher (still used
 // there and exported); re-derived here as a byte-identical copy for spawnReviewer.
@@ -122,10 +127,109 @@ function resolveReviewerQuotaCheckEnabled(env = process.env) {
 }
 
 function resolveReviewerQuotaStatusDir(env = process.env) {
-  return loadRoleConfig({
+  const configured = loadRoleConfig({
     env,
     contextKey: 'reviewer.quota_status_dir',
   }).get('reviewer.quota_status_dir', null);
+  if (typeof configured === 'string' && configured.trim()) return configured.trim();
+  const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
+  return join(hqRoot, 'quota');
+}
+
+async function readReviewerQuotaDecision({
+  reviewerModel,
+  env = process.env,
+  readdirImpl = readdir,
+  readFileImpl = readFile,
+} = {}) {
+  try {
+    if (!resolveReviewerQuotaCheckEnabled(env)) {
+      return { available: true, state: 'disabled', provider: null };
+    }
+    const provider = providerForQuotaHarness(reviewerModel);
+    if (!provider) {
+      return { available: true, state: 'unknown-harness', provider: null };
+    }
+
+    const statusDir = resolveReviewerQuotaStatusDir(env);
+    const files = await readdirImpl(statusDir);
+    const statuses = [];
+    for (const file of files) {
+      if (!file.startsWith(`${provider}-`) || !file.endsWith('.status.json')) continue;
+      const authPath = file.slice(provider.length + 1, -'.status.json'.length);
+      try {
+        const payload = JSON.parse(await readFileImpl(join(statusDir, file), 'utf8'));
+        statuses.push({
+          authPath: String(payload?.authPath || payload?.auth_path || authPath).trim().toLowerCase(),
+          state: String(payload?.state || '').trim().toLowerCase(),
+        });
+      } catch {
+        // A malformed or transiently unreadable record is ambiguous. Keep
+        // looking for a valid record; if none exists, the decision fails open.
+      }
+    }
+    const status = statuses.find((entry) => entry.authPath === 'oauth') || statuses[0];
+    if (!status) {
+      return { available: true, state: 'missing-provider-status', provider };
+    }
+    return {
+      available: status.state === 'ok' || !isGroundedProviderState(status.state),
+      state: status.state || 'unknown',
+      provider,
+    };
+  } catch {
+    return {
+      available: true,
+      state: 'probe-error',
+      provider: providerForQuotaHarness(reviewerModel),
+    };
+  }
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function classifyLedgerLookupError(err) {
+  const message = `${String(err?.code || '')}\n${String(err?.message || err || '')}`.toLowerCase();
+  if (message.includes('sqlite_busy') || message.includes('database is locked') || message.includes('database is busy')) {
+    return 'sqlite-busy';
+  }
+  if (message.includes('sqlite_locked')) return 'sqlite-locked';
+  return 'lookup-failed';
+}
+
+function isTransientLedgerLookupError(err) {
+  return ['sqlite-busy', 'sqlite-locked'].includes(classifyLedgerLookupError(err));
+}
+
+async function readReviewerLedgerEvidenceWithRetry({
+  readImpl,
+  args,
+  sleepImpl = sleepMs,
+  delaysMs = REVIEWER_LEDGER_LOOKUP_DELAYS_MS,
+} = {}) {
+  let lastError = null;
+  let lastUsage = null;
+  let attempts = 0;
+  for (let attempt = 0; attempt <= delaysMs.length; attempt += 1) {
+    attempts += 1;
+    try {
+      const usage = await readImpl(args);
+      if (usage) {
+        lastUsage = usage;
+        if (!args?.launchRequestId || usage.workerRunId) {
+          return { usage, attempts, lastError: null };
+        }
+      }
+      lastError = 'worker-run-not-yet-visible';
+    } catch (err) {
+      lastError = classifyLedgerLookupError(err);
+      if (!isTransientLedgerLookupError(err)) break;
+    }
+    if (attempt < delaysMs.length) await sleepImpl(delaysMs[attempt]);
+  }
+  return { usage: lastUsage, attempts, lastError };
 }
 
 async function defaultPostGitHubReviewWithCapture(args) {
@@ -308,6 +412,10 @@ async function spawnReviewer({
   reviewerRuntimeAdapterOverride = null,
   postGitHubReviewWithCaptureImpl = defaultPostGitHubReviewWithCapture,
   readBestReviewerEvidenceTokenUsageImpl = readBestReviewerEvidenceTokenUsage,
+  ledgerLookupSleepImpl = sleepMs,
+  quotaCheckEnv = process.env,
+  readReviewerQuotaDecisionImpl = readReviewerQuotaDecision,
+  beginReviewerPassImpl = beginReviewerPass,
   completeReviewerPassImpl = completeReviewerPass,
 }) {
   const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
@@ -321,87 +429,67 @@ async function spawnReviewer({
     : '';
   console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})${roundLabel}`);
 
-  if (resolveReviewerQuotaCheckEnabled(process.env)) {
-    const harness = String(reviewerModel || '').trim().toLowerCase();
-    const provider = providerForQuotaHarness(harness);
-    let decision = { available: true, state: 'unknown' };
-    
-    if (provider) {
-      const statusDir = resolveReviewerQuotaStatusDir(process.env);
-      if (statusDir) {
-        try {
-          const files = readdirSync(statusDir);
-          const statuses = [];
-          for (const file of files) {
-            if (file.startsWith(`${provider}-`) && file.endsWith('.status.json')) {
-              const authPath = file.slice(provider.length + 1, -12);
-              try {
-                const content = JSON.parse(readFileSync(join(statusDir, file), 'utf8'));
-                statuses.push({
-                  provider,
-                  authPath,
-                  state: String(content.state || '').trim().toLowerCase()
-                });
-              } catch (err) {
-                // Ignore unparseable
-              }
-            }
-          }
-          const status = statuses.find((s) => s.authPath === 'oauth') || statuses[0];
-          if (status) {
-            decision = { available: status.state === 'ok', state: status.state };
-          } else {
-            decision = { available: true, state: 'missing-provider-status' };
-          }
-        } catch (err) {
-          decision = { available: true, state: 'error' };
-        }
-      } else {
-        decision = { available: true, state: 'no-status-dir-configured' };
-      }
-    } else {
-      decision = { available: true, state: 'unknown-harness' };
-    }
-
-    if (decision && decision.available === false && isGroundedProviderState(decision.state)) {
-      console.log(`[watcher] Spawning reviewer skipped for ${repo}#${prNumber} (model: ${reviewerModel}) due to exhausted quota/auth`);
-      const startedAt = new Date().toISOString();
-      const passAttemptNumber = reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0;
-      beginReviewerPass(ROOT, {
-        repo,
-        prNumber,
-        attemptNumber: passAttemptNumber,
-        reviewerClass: reviewerModel,
-        reviewerModel,
-        passKind,
-        workspacePath: workspacePath || ROOT,
-        startedAt,
-        headSha: reviewerHeadSha || null,
-        metadata: {
-          reviewerSessionUuid,
-          reviewerModel,
-          reviewAttemptNumber,
-          completedRemediationRounds,
-          maxRemediationRounds,
-          quotaExhaustedSkip: true,
-          quotaState: decision.state,
-        },
-      });
-      completeReviewerPassImpl(ROOT, {
-        repo,
-        prNumber,
-        attemptNumber: passAttemptNumber,
-        passKind,
-        status: 'skipped',
-        endedAt: new Date().toISOString(),
-      });
-      return {
-        ok: false,
-        reason: 'primary-reviewer-quota-capped',
-        failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
-        transient: true,
-      };
-    }
+  let quotaDecision;
+  try {
+    quotaDecision = await readReviewerQuotaDecisionImpl({
+      reviewerModel,
+      env: quotaCheckEnv,
+    });
+  } catch {
+    quotaDecision = {
+      available: true,
+      state: 'probe-error',
+      provider: providerForQuotaHarness(reviewerModel),
+    };
+  }
+  if (!quotaDecision.available && isGroundedProviderState(quotaDecision.state)) {
+    const attemptNumber = reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0;
+    const startedAt = new Date().toISOString();
+    const metadata = {
+      reviewerSessionUuid,
+      reviewerModel,
+      reviewAttemptNumber,
+      completedRemediationRounds,
+      maxRemediationRounds,
+      quotaExhaustedSkip: true,
+      quotaReason: 'known-exhausted-provider-status',
+      quotaState: quotaDecision.state,
+      quotaProvider: quotaDecision.provider,
+      failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
+    };
+    beginReviewerPassImpl(ROOT, {
+      repo,
+      prNumber,
+      attemptNumber,
+      reviewerClass: reviewerModel,
+      reviewerModel,
+      passKind,
+      workspacePath: workspacePath || ROOT,
+      startedAt,
+      headSha: reviewerHeadSha || null,
+      metadata,
+    });
+    await completeReviewerPassImpl(ROOT, {
+      repo,
+      prNumber,
+      attemptNumber,
+      passKind,
+      status: 'skipped',
+      endedAt: new Date().toISOString(),
+      metadata,
+    });
+    console.log(
+      `[watcher] reviewer spawn skipped for ${repo}#${prNumber} ` +
+      `(model: ${reviewerModel}, provider: ${quotaDecision.provider}, state: ${quotaDecision.state})`,
+    );
+    return {
+      ok: false,
+      reason: 'primary-reviewer-quota-capped',
+      failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
+      transient: true,
+      quotaState: quotaDecision.state,
+      quotaProvider: quotaDecision.provider,
+    };
   }
 
   const reviewerSpawnToken = randomUUID();
@@ -420,7 +508,7 @@ async function spawnReviewer({
     upsertSpawnRecord(ADVERSARIAL_REVIEW_STATE_DIR, spawnRecord);
     inFlightReviewerSessions.add(reviewerSessionUuid);
     const startedAt = new Date().toISOString();
-    beginReviewerPass(ROOT, {
+    beginReviewerPassImpl(ROOT, {
       repo,
       prNumber,
       attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
@@ -522,31 +610,86 @@ async function spawnReviewer({
       // On failure we settle the pass with null token usage instead.
       let tokenUsage = null;
       let reviewerTokenUsageArtifact = null;
+      // `reattachToken` is an adapter/idempotency handle. It may resemble an
+      // LRQ, but it is neither proof of a real worker launch nor a safe
+      // launch_request_id lookup key. Adapters that know a real launch id must
+      // surface it explicitly as result.launchRequestId.
+      const launchRequestId = result.launchRequestId || null;
       // WCW attribution: the reviewer worker's real ledger run_id, captured from
       // the RAW token usage before tagTokenUsage()/normalizeTokenUsage() drops it
       // (the normalized token-usage shape intentionally carries only counters,
       // not attribution). Populates reviewer_passes.worker_run_id at settle.
       let resolvedWorkerRunId = null;
+      let workerRunAttribution = null;
       try {
-        const rawTokenUsage = result.tokenUsage || readBestReviewerEvidenceTokenUsageImpl({
-          // The SDK-dispatch adapter surfaces the reviewer worker's dispatch id
-          // (ticket.launchRequestId) as result.reattachToken. Threading it as
-          // launchRequestId lets the ledger read resolve the worker_runs row
-          // (WHERE launch_request_id = ?) and return its real run_id.
-          launchRequestId: result.reattachToken || null,
-          adapterSessionKey: result.reattachToken || reviewerSessionUuid,
-          sessionKeys: [
-            reviewerSessionUuid,
-            result.reattachToken,
-            result.sessionUuid,
-          ],
-          workspacePath: workspacePath || ROOT,
-          startedAt,
-          endedAt,
-          reviewerModel,
-          rootDir: ROOT,
-        });
+        let rawTokenUsage = result.tokenUsage || null;
+        if (!rawTokenUsage?.workerRunId) {
+          const ledgerLookup = await readReviewerLedgerEvidenceWithRetry({
+            readImpl: readBestReviewerEvidenceTokenUsageImpl,
+            sleepImpl: ledgerLookupSleepImpl,
+            args: {
+              // SDK/os-dispatch reattaches by app-contract request_id, but the
+              // session ledger attributes worker_runs by launch_request_id.
+              launchRequestId,
+              adapterSessionKey: result.reattachToken || reviewerSessionUuid,
+              sessionKeys: [
+                reviewerSessionUuid,
+                result.reattachToken,
+                result.sessionUuid,
+              ].filter(Boolean),
+              workspacePath: workspacePath || ROOT,
+              startedAt,
+              endedAt,
+              reviewerModel,
+              rootDir: ROOT,
+            },
+          });
+          const ledgerTokenUsage = ledgerLookup.usage;
+          if (ledgerLookup.lastError && ledgerLookup.lastError !== 'worker-run-not-yet-visible') {
+            console.warn(
+              `[watcher] reviewer_pass_token_ledger_lookup_failed repo=${repo} pr=${prNumber} ` +
+              `session=${reviewerSessionUuid} attempts=${ledgerLookup.attempts}: ${ledgerLookup.lastError}`
+            );
+          }
+          if (ledgerTokenUsage) {
+            rawTokenUsage = rawTokenUsage
+              ? {
+                  ...rawTokenUsage,
+                  workerRunId: rawTokenUsage.workerRunId || ledgerTokenUsage.workerRunId || null,
+                }
+              : ledgerTokenUsage;
+          }
+          workerRunAttribution = {
+            state: ledgerTokenUsage?.workerRunId ? 'resolved' : (launchRequestId ? 'pending' : 'not-applicable'),
+            launchRequestId,
+            workerRunId: ledgerTokenUsage?.workerRunId || null,
+            lookupAttempts: ledgerLookup.attempts,
+            lastError: ledgerLookup.lastError,
+            retryable: Boolean(launchRequestId && !ledgerTokenUsage?.workerRunId),
+            ...(!launchRequestId && !ledgerTokenUsage?.workerRunId
+              ? { reason: 'missing-launch-request-id' }
+              : {}),
+          };
+        }
         resolvedWorkerRunId = rawTokenUsage?.workerRunId || null;
+        if (!workerRunAttribution) {
+          workerRunAttribution = {
+            state: 'resolved',
+            launchRequestId,
+            workerRunId: resolvedWorkerRunId,
+            lookupAttempts: 0,
+            lastError: null,
+            retryable: false,
+          };
+        } else if (resolvedWorkerRunId && workerRunAttribution.state !== 'resolved') {
+          workerRunAttribution = {
+            ...workerRunAttribution,
+            state: 'resolved',
+            workerRunId: resolvedWorkerRunId,
+            lastError: null,
+            retryable: false,
+          };
+        }
         tokenUsage = tagTokenUsage(rawTokenUsage, 'guardrail');
         if (tokenUsage) {
           reviewerTokenUsageArtifact = writeReviewerTokenUsageArtifactBestEffort({
@@ -597,7 +740,9 @@ async function spawnReviewer({
         workerRunId: resolvedWorkerRunId,
         metadata: {
           reviewerSessionUuid,
+          launchRequestId,
           reattachToken: result.reattachToken || null,
+          workerRunAttribution,
           failureClass: result.failureClass || null,
           tokenUsageNoUsageReason: result.tokenUsageNoUsageReason || null,
           reviewerTokenUsageArtifact,
@@ -813,6 +958,7 @@ function settleReviewerAttempt({
 
   const transientFailureClasses = new Set([
     'cascade',
+    'oauth-broken',
     'reviewer-timeout',
     'launchctl-bootstrap',
     'daemon-bounce',
@@ -824,6 +970,7 @@ function settleReviewerAttempt({
     [PROVIDER_OVERLOADED_FAILURE_CLASS]: 'Reviewer hit a provider/backend overload (HTTP 529 or capacity signal); watcher backoff engaged.',
     [REVIEWER_EMPTY_OUTPUT_FAILURE_CLASS]: 'Reviewer runtime returned empty output before posting; watcher backoff engaged.',
     'quota-exhausted': 'Reviewer hit a hard provider usage cap; holding until the cap window clears (HRR graceful degradation).',
+    'oauth-broken': 'Reviewer OAuth credentials are unavailable; watcher backoff engaged until credentials recover.',
     'reviewer-timeout': 'Reviewer command timed out before posting; watcher backoff engaged.',
     'launchctl-bootstrap': 'Claude launchctl session bootstrap failed; watcher backoff engaged.',
     'daemon-bounce': 'Reviewer runtime could not reattach after daemon bounce; watcher backoff engaged.',

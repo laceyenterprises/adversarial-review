@@ -1543,6 +1543,160 @@ function historicalWorkerForJob(job) {
   };
 }
 
+function updateReviewerWorkerRunAttribution(rootDir, {
+  repo,
+  prNumber,
+  attemptNumber,
+  passKind,
+  launchRequestId,
+  workerRunId,
+  nextAttribution,
+}) {
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    const current = db.prepare(
+      `SELECT worker_run_id AS workerRunId, metadata_json AS metadataJson
+         FROM reviewer_passes
+        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?`
+    ).get(repo, prNumber, attemptNumber, passKind);
+    if (current?.workerRunId) return false;
+    const currentMetadata = parseMetadataJson(current?.metadataJson);
+    if (
+      currentMetadata?.workerRunAttribution?.state !== 'pending'
+      || currentMetadata?.launchRequestId !== launchRequestId
+      || currentMetadata?.workerRunAttribution?.launchRequestId !== launchRequestId
+    ) {
+      return false;
+    }
+    const result = db.prepare(
+      `UPDATE reviewer_passes
+          SET worker_run_id = ?,
+              metadata_json = ?
+        WHERE repo = ? AND pr_number = ? AND attempt_number = ? AND pass_kind = ?
+          AND worker_run_id IS NULL`
+    ).run(
+      workerRunId || null,
+      metadataJson({
+        ...currentMetadata,
+        workerRunAttribution: nextAttribution,
+      }),
+      repo,
+      prNumber,
+      attemptNumber,
+      passKind,
+    );
+    return result.changes === 1;
+  } finally {
+    closeOwnedReviewDb(db);
+  }
+}
+
+// Reviewer settle is intentionally fail-open for token accounting: a worker
+// can finish while its session-ledger row is still rolling up or while SQLite
+// is briefly busy. Settle records an explicit pending attribution state keyed
+// only by a real launch_request_id; this re-runnable repair pass later fills the
+// reviewer_passes.worker_run_id without confusing adapter reattach tokens for
+// launch identity.
+function backfillReviewerWorkerRunAttribution(rootDir, {
+  ledgerTarget = null,
+  ledgerDbPath = null,
+  hqRoot = null,
+  env = process.env,
+  dryRun = false,
+  readWorkerRunTokenUsageResultImpl = readWorkerRunTokenUsageResult,
+} = {}) {
+  const db = openReviewStateDb(rootDir);
+  let candidates;
+  try {
+    ensureReviewStateSchema(db);
+    candidates = db.prepare(
+      `SELECT repo, pr_number AS prNumber, attempt_number AS attemptNumber,
+              pass_kind AS passKind, status, ended_at AS endedAt,
+              metadata_json AS metadataJson
+         FROM reviewer_passes
+        WHERE worker_run_id IS NULL`
+    ).all();
+  } finally {
+    closeOwnedReviewDb(db);
+  }
+
+  let considered = 0;
+  let resolved = 0;
+  let stillPending = 0;
+  let skipped = 0;
+  for (const row of candidates) {
+    const metadata = parseMetadataJson(row.metadataJson);
+    const attribution = metadata.workerRunAttribution;
+    const launchRequestId = typeof metadata.launchRequestId === 'string'
+      ? metadata.launchRequestId.trim()
+      : '';
+    if (
+      !attribution || attribution.state !== 'pending' || !launchRequestId ||
+      attribution.launchRequestId !== launchRequestId
+    ) {
+      skipped += 1;
+      continue;
+    }
+    considered += 1;
+    let lookup;
+    try {
+      lookup = readWorkerRunTokenUsageResultImpl({
+        launchRequestId,
+        ledgerTarget,
+        ledgerDbPath,
+        env,
+        rootDir,
+        hqRoot,
+      });
+    } catch (err) {
+      lookup = {
+        ok: false,
+        reason: /sqlite_busy|database (?:is )?(?:locked|busy)/i.test(String(err?.code || err?.message || err))
+          ? 'sqlite-busy'
+          : 'lookup-failed',
+      };
+    }
+    const workerRunId = lookup?.usage?.workerRunId || lookup?.row?.run_id || null;
+    const lookupAttempts = Number(attribution.lookupAttempts || 0) + 1;
+    const nextAttribution = workerRunId
+      ? {
+          ...attribution,
+          state: 'resolved',
+          workerRunId,
+          lookupAttempts,
+          lastError: null,
+          retryable: false,
+        }
+      : {
+          ...attribution,
+          state: 'pending',
+          workerRunId: null,
+          lookupAttempts,
+          lastError: String(lookup?.reason || 'worker-run-not-yet-visible'),
+          retryable: true,
+        };
+    if (!dryRun) {
+      const updated = updateReviewerWorkerRunAttribution(rootDir, {
+        repo: row.repo,
+        prNumber: row.prNumber,
+        attemptNumber: row.attemptNumber,
+        passKind: row.passKind,
+        launchRequestId,
+        workerRunId,
+        nextAttribution,
+      });
+      if (!updated) {
+        skipped += 1;
+        continue;
+      }
+    }
+    if (workerRunId) resolved += 1;
+    else stillPending += 1;
+  }
+  return { considered, resolved, stillPending, skipped };
+}
+
 // The AMA closer records its pass POST-merge and polls the ledger for the hammer
 // worker's token rollup for only ~8.5s (AMA_CLOSER_TOKEN_ROLLUP_POLL_DELAYS_MS).
 // A slower rollup leaves the closer pass with null tokens, and the job-driven
@@ -1611,6 +1765,7 @@ function backfillCloserReviewerPasses(rootDir, {
 export {
   backfillCloserReviewerPasses,
   backfillReviewerPasses,
+  backfillReviewerWorkerRunAttribution,
   beginReviewerPass,
   completeReviewerPass,
   foldReviewerTokenUsageArtifact,

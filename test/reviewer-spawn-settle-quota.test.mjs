@@ -1,212 +1,147 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnReviewer } from '../src/reviewer-spawn-settle.mjs';
-import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-const tmpDir = join(tmpdir(), `test-quota-dir-${randomUUID()}`);
+import { spawnReviewer } from '../src/reviewer-spawn-settle.mjs';
 
-test('setup', () => {
-  mkdirSync(tmpDir, { recursive: true });
-});
-
-test('spawnReviewer quota - known-exhausted -> skipped + terminal skipped pass', async () => {
-  const originalEnv = process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED;
-  const originalAliasEnv = process.env.ADVERSARIAL_REVIEW_QUOTA_CHECK_ENABLED;
-  const originalDir = process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR;
-  
-  process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED = 'true';
-  process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR = tmpDir;
-  
-  writeFileSync(join(tmpDir, 'anthropic-oauth.status.json'), JSON.stringify({ state: 'exhausted' }));
-
+async function withStatusFile(state, fn, { invalidJson = false } = {}) {
+  const statusDir = await mkdtemp(join(tmpdir(), 'reviewer-quota-'));
   try {
-    let completedStatus = null;
-    let spawnCalled = false;
-    const result = await spawnReviewer({
-      repo: 'laceyenterprises/demo',
-      prNumber: 99,
-      reviewerModel: 'claude',
-      botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
-      reviewAttemptNumber: 1,
-      maxRemediationRounds: 2,
-      reviewerRuntimeAdapterOverride: {
-        async spawnReviewer() {
-          spawnCalled = true;
-          return { ok: true };
-        },
-      },
-      completeReviewerPassImpl: async (rootDir, args) => {
-        completedStatus = args.status;
-      },
-      postGitHubReviewWithCaptureImpl: async () => {},
-      readBestReviewerEvidenceTokenUsageImpl: async () => null,
-    });
+    await writeFile(
+      join(statusDir, 'anthropic-oauth.status.json'),
+      invalidJson ? '{ invalid json' : `${JSON.stringify({ state, authPath: 'oauth' })}\n`,
+      'utf8',
+    );
+    return await fn(statusDir);
+  } finally {
+    await rm(statusDir, { recursive: true, force: true });
+  }
+}
 
-    assert.equal(spawnCalled, false);
-    assert.equal(result.ok, false);
+function spawnArgs({ env, capture }) {
+  return {
+    repo: 'laceyenterprises/demo',
+    prNumber: 99,
+    reviewerModel: 'claude',
+    botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
+    reviewerHeadSha: 'deadbeef',
+    reviewerSessionUuid: randomUUID(),
+    reviewAttemptNumber: 1,
+    reviewDbAttemptNumber: 1,
+    maxRemediationRounds: 2,
+    quotaCheckEnv: env,
+    reviewerRuntimeAdapterOverride: {
+      async spawnReviewer() {
+        capture.spawnCalls += 1;
+        return { ok: true, reviewBody: 'test', reviewBodyDelivery: 'adapter' };
+      },
+    },
+    beginReviewerPassImpl(_rootDir, args) {
+      capture.begun.push(args);
+    },
+    async completeReviewerPassImpl(_rootDir, args) {
+      capture.completed.push(args);
+    },
+    postGitHubReviewWithCaptureImpl: async () => {},
+    readBestReviewerEvidenceTokenUsageImpl: async () => null,
+    ledgerLookupSleepImpl: async () => {},
+  };
+}
+
+function newCapture() {
+  return { spawnCalls: 0, begun: [], completed: [] };
+}
+
+test('known-exhausted reviewer skips spawn and records a terminal quota pass', async () => {
+  await withStatusFile('EXHAUSTED', async (statusDir) => {
+    const capture = newCapture();
+    const result = await spawnReviewer(spawnArgs({
+      env: {
+        AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'true',
+        AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir,
+      },
+      capture,
+    }));
+
+    assert.equal(capture.spawnCalls, 0);
+    assert.equal(capture.begun.length, 1);
+    assert.equal(capture.completed.length, 1);
+    assert.equal(capture.completed[0].status, 'skipped');
+    assert.equal(capture.completed[0].metadata.failureClass, 'quota-exhausted');
+    assert.equal(capture.completed[0].metadata.quotaReason, 'known-exhausted-provider-status');
+    assert.equal(capture.completed[0].metadata.quotaState, 'exhausted');
     assert.equal(result.reason, 'primary-reviewer-quota-capped');
+    assert.equal(result.failureClass, 'quota-exhausted');
     assert.equal(result.transient, true);
-    assert.equal(completedStatus, 'skipped');
-  } finally {
-    if (originalEnv === undefined) delete process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED; else process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED = originalEnv;
-    if (originalDir === undefined) delete process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR; else process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR = originalDir;
-    rmSync(join(tmpDir, 'anthropic-oauth.status.json'), { force: true });
-  }
+  });
 });
 
-test('spawnReviewer quota - healthy -> normal dispatch', async () => {
-  const originalEnv = process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED;
-  const originalDir = process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR;
-  process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED = 'true';
-  process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR = tmpDir;
-  
-  writeFileSync(join(tmpDir, 'anthropic-oauth.status.json'), JSON.stringify({ state: 'ok' }));
-
-  try {
-    let spawnCalled = false;
-    const result = await spawnReviewer({
-      repo: 'laceyenterprises/demo',
-      prNumber: 99,
-      reviewerModel: 'claude',
-      botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
-      reviewAttemptNumber: 1,
-      maxRemediationRounds: 2,
-      reviewerRuntimeAdapterOverride: {
-        async spawnReviewer() {
-          spawnCalled = true;
-          return { ok: true, reviewBody: 'test', reviewBodyDelivery: 'adapter' };
-        },
-      },
-      postGitHubReviewWithCaptureImpl: async () => {},
-      readBestReviewerEvidenceTokenUsageImpl: async () => null,
-    });
-
-    assert.equal(spawnCalled, true);
+test('healthy reviewer status dispatches normally', async () => {
+  await withStatusFile('ok', async (statusDir) => {
+    const capture = newCapture();
+    const result = await spawnReviewer(spawnArgs({
+      env: { AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir },
+      capture,
+    }));
+    assert.equal(capture.spawnCalls, 1);
     assert.equal(result.ok, true);
-  } finally {
-    if (originalEnv === undefined) delete process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED; else process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED = originalEnv;
-    if (originalDir === undefined) delete process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR; else process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR = originalDir;
-    rmSync(join(tmpDir, 'anthropic-oauth.status.json'), { force: true });
-  }
+    assert.equal(capture.completed[0].status, 'completed');
+  });
 });
 
-test('spawnReviewer quota - probe error -> fail-open normal dispatch', async () => {
-  const originalEnv = process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED;
-  const originalDir = process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR;
-  process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED = 'true';
-  process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR = tmpDir;
-  
-  // write invalid json to cause parse error
-  writeFileSync(join(tmpDir, 'anthropic-oauth.status.json'), '{ invalid json');
-
-  try {
-    let spawnCalled = false;
-    const result = await spawnReviewer({
-      repo: 'laceyenterprises/demo',
-      prNumber: 99,
-      reviewerModel: 'claude',
-      botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
-      reviewAttemptNumber: 1,
-      maxRemediationRounds: 2,
-      reviewerRuntimeAdapterOverride: {
-        async spawnReviewer() {
-          spawnCalled = true;
-          return { ok: true, reviewBody: 'test', reviewBodyDelivery: 'adapter' };
-        },
-      },
-      postGitHubReviewWithCaptureImpl: async () => {},
-      readBestReviewerEvidenceTokenUsageImpl: async () => null,
-    });
-
-    assert.equal(spawnCalled, true);
+test('unreadable reviewer status fails open and dispatches normally', async () => {
+  await withStatusFile('unused', async (statusDir) => {
+    const capture = newCapture();
+    const result = await spawnReviewer(spawnArgs({
+      env: { AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir },
+      capture,
+    }));
+    assert.equal(capture.spawnCalls, 1);
     assert.equal(result.ok, true);
-  } finally {
-    if (originalEnv === undefined) delete process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED; else process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED = originalEnv;
-    if (originalDir === undefined) delete process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR; else process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR = originalDir;
-    rmSync(join(tmpDir, 'anthropic-oauth.status.json'), { force: true });
-  }
+  }, { invalidJson: true });
 });
 
-test('spawnReviewer quota - unknown status -> fail-open normal dispatch', async () => {
-  const originalEnv = process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED;
-  const originalDir = process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR;
-  process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED = 'true';
-  process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR = tmpDir;
-  
-  writeFileSync(join(tmpDir, 'anthropic-oauth.status.json'), JSON.stringify({ state: 'unknown' }));
+test('unexpected quota probe exception fails open and dispatches normally', async () => {
+  const capture = newCapture();
+  const args = spawnArgs({ env: {}, capture });
+  const result = await spawnReviewer({
+    ...args,
+    async readReviewerQuotaDecisionImpl() {
+      throw new Error('transient probe failure');
+    },
+  });
+  assert.equal(capture.spawnCalls, 1);
+  assert.equal(result.ok, true);
+});
 
-  try {
-    let spawnCalled = false;
-    const result = await spawnReviewer({
-      repo: 'laceyenterprises/demo',
-      prNumber: 99,
-      reviewerModel: 'claude',
-      botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
-      reviewAttemptNumber: 1,
-      maxRemediationRounds: 2,
-      reviewerRuntimeAdapterOverride: {
-        async spawnReviewer() {
-          spawnCalled = true;
-          return { ok: true, reviewBody: 'test', reviewBodyDelivery: 'adapter' };
-        },
-      },
-      postGitHubReviewWithCaptureImpl: async () => {},
-      readBestReviewerEvidenceTokenUsageImpl: async () => null,
-    });
-
-    assert.equal(spawnCalled, true);
+test('unknown reviewer status fails open and dispatches normally', async () => {
+  await withStatusFile('unknown', async (statusDir) => {
+    const capture = newCapture();
+    const result = await spawnReviewer(spawnArgs({
+      env: { AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir },
+      capture,
+    }));
+    assert.equal(capture.spawnCalls, 1);
     assert.equal(result.ok, true);
-  } finally {
-    if (originalEnv === undefined) delete process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED; else process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED = originalEnv;
-    if (originalDir === undefined) delete process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR; else process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR = originalDir;
-    rmSync(join(tmpDir, 'anthropic-oauth.status.json'), { force: true });
-  }
+  });
 });
 
-test('spawnReviewer quota - kill-switch disabled (ADVERSARIAL_REVIEW_QUOTA_CHECK_ENABLED alias) -> normal dispatch', async () => {
-  const originalEnv = process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED;
-  const originalAliasEnv = process.env.ADVERSARIAL_REVIEW_QUOTA_CHECK_ENABLED;
-  const originalDir = process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR;
-  
-  // Set the alias and clear the canonical one
-  process.env.ADVERSARIAL_REVIEW_QUOTA_CHECK_ENABLED = 'false';
-  delete process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED;
-  process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR = tmpDir;
-  
-  writeFileSync(join(tmpDir, 'anthropic-oauth.status.json'), JSON.stringify({ state: 'exhausted' }));
-
-  try {
-    let spawnCalled = false;
-    const result = await spawnReviewer({
-      repo: 'laceyenterprises/demo',
-      prNumber: 99,
-      reviewerModel: 'claude',
-      botTokenEnv: 'GH_CLAUDE_REVIEWER_TOKEN',
-      reviewAttemptNumber: 1,
-      maxRemediationRounds: 2,
-      reviewerRuntimeAdapterOverride: {
-        async spawnReviewer() {
-          spawnCalled = true;
-          return { ok: true, reviewBody: 'test', reviewBodyDelivery: 'adapter' };
-        },
-      },
-      postGitHubReviewWithCaptureImpl: async () => {},
-      readBestReviewerEvidenceTokenUsageImpl: async () => null,
+for (const [name, disabledEnv] of [
+  ['canonical kill switch', { AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED: 'false' }],
+  ['legacy kill-switch alias', { ADVERSARIAL_REVIEW_QUOTA_CHECK_ENABLED: 'false' }],
+]) {
+  test(`${name} bypasses an exhausted status`, async () => {
+    await withStatusFile('exhausted', async (statusDir) => {
+      const capture = newCapture();
+      const result = await spawnReviewer(spawnArgs({
+        env: { ...disabledEnv, AGENT_OS_REVIEWER_QUOTA_STATUS_DIR: statusDir },
+        capture,
+      }));
+      assert.equal(capture.spawnCalls, 1);
+      assert.equal(result.ok, true);
     });
-
-    assert.equal(spawnCalled, true);
-    assert.equal(result.ok, true);
-  } finally {
-    if (originalAliasEnv === undefined) delete process.env.ADVERSARIAL_REVIEW_QUOTA_CHECK_ENABLED; else process.env.ADVERSARIAL_REVIEW_QUOTA_CHECK_ENABLED = originalAliasEnv;
-    if (originalEnv === undefined) delete process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED; else process.env.AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED = originalEnv;
-    if (originalDir === undefined) delete process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR; else process.env.AGENT_OS_REVIEWER_QUOTA_STATUS_DIR = originalDir;
-    rmSync(join(tmpDir, 'anthropic-oauth.status.json'), { force: true });
-  }
-});
-
-test('teardown', () => {
-  rmSync(tmpDir, { recursive: true, force: true });
-});
+  });
+}

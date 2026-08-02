@@ -327,6 +327,32 @@ function schemaV1() {
           },
         },
       },
+      // PMV-01 report-only post-deploy verification. Python/main-catchup
+      // consume the values, but the checked-in top-level config.yaml must load
+      // under this strict Node reader during watcher startup.
+      post_deploy_verify: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __default: {},
+        __keys: {
+          enabled: {
+            __type: TYPE_BOOL,
+            __default: false,
+          },
+          spawn_timeout_seconds: {
+            __type: TYPE_INT,
+            __default: 180,
+            __min: 10,
+            __max: 900,
+          },
+          boot_window_seconds: {
+            __type: TYPE_INT,
+            __default: 300,
+            __min: 0,
+            __max: 3600,
+          },
+        },
+      },
       roots: {
         __type: TYPE_DICT,
         __strict: true,
@@ -484,6 +510,24 @@ function schemaV1() {
                 __min: 0.0,
                 __max: 3600.0,
               },
+              credential_decay_warn_after_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 300.0,
+                __min: 0.0,
+                __max: 86400.0,
+              },
+              credential_decay_crit_after_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 3600.0,
+                __min: 0.0,
+                __max: 86400.0,
+              },
+              credential_decay_last_good_crit_expiry_margin_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 1800.0,
+                __min: 0.0,
+                __max: 86400.0,
+              },
               // Port-forward-wedge remediation tiers (#1958, PFW-05).
               broker_container_name: {
                 __type: TYPE_STRING,
@@ -577,6 +621,24 @@ function schemaV1() {
               broker_standby_container_name: {
                 __type: TYPE_STRING,
                 __default: 'litellm-oauth-broker-standby-1',
+              },
+              credential_decay_warn_after_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 300.0,
+                __min: 0.0,
+                __max: 86400.0,
+              },
+              credential_decay_crit_after_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 3600.0,
+                __min: 0.0,
+                __max: 86400.0,
+              },
+              credential_decay_last_good_crit_expiry_margin_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 1800.0,
+                __min: 0.0,
+                __max: 86400.0,
               },
               critical_service_patterns: {
                 __type: TYPE_STRING,
@@ -862,6 +924,9 @@ function schemaV1() {
             __strict: true,
             __keys: {
               worker_worktrees_keep_hours: { __type: TYPE_INT, __default: 168, __min: 0 },
+              worker_worktrees_keep_hours_under_pressure: { __type: TYPE_INT, __default: 24, __min: 1 },
+              disk_free_gb_floor: { __type: TYPE_FLOAT, __default: null, __nullable: true, __min: 0 },
+              gc_report_only: { __type: TYPE_BOOL, __default: true },
               worker_worktrees_per_run_limit: { __type: TYPE_INT, __default: 200, __min: 1 },
               follow_up_workspaces_keep_hours: { __type: TYPE_INT, __default: 72, __min: 0 },
               acpx_sessions_keep_days: { __type: TYPE_INT, __default: 30, __min: 0 },
@@ -1583,9 +1648,11 @@ function schemaV1() {
       // worker_pool.dag.autowalk.deep_reconcile,
       // worker_pool.dispatch.codex_exec_mode,
       // worker_pool.dispatch.fleet_launch_health.*,
-      // worker_pool.dispatch.goal_lineage.*, and
-      // worker_pool.memory.dynamic.* — Python-owned (canonical schema at
-      // platform/agent-os-config). PARTIAL mirror, same rationale as the
+      // worker_pool.dispatch.goal_lineage.*,
+      // worker_pool.dispatch.substrate.*, and
+      // worker_pool.memory.dynamic.*, and worker_pool.secrets_bus.* —
+      // Python-owned (canonical schema at platform/agent-os-config).
+      // PARTIAL mirror, same rationale as the
       // sentinel block below: this Node reader does not consume the values, but
       // it must not crash-loop if these checked-in keys reach the shared
       // canonical config.yaml (CFG-01 strict-schema parity). Worker-pool tuning
@@ -1693,6 +1760,19 @@ function schemaV1() {
                   },
                 },
               },
+              substrate: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  swap_crit_requires_pressure: { __type: TYPE_BOOL, __default: true },
+                  mem_pressure_crit_level: {
+                    __type: TYPE_INT,
+                    __default: 2,
+                    __min: 1,
+                    __max: 4,
+                  },
+                },
+              },
             },
           },
           memory: {
@@ -1755,6 +1835,32 @@ function schemaV1() {
                     },
                   },
                 },
+              },
+            },
+          },
+          secrets_bus: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __default: {},
+            __keys: {
+              op_timeout_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 10.0,
+                __min: 1.0,
+                __max: 60.0,
+              },
+              cache_ttl_seconds: {
+                __type: TYPE_INT,
+                __default: 1800,
+                __min: 0,
+                __max: 86400,
+              },
+              cache_grace_seconds: {
+                __type: TYPE_INT,
+                __default: null,
+                __nullable: true,
+                __min: 0,
+                __max: 86400,
               },
             },
           },
@@ -1979,6 +2085,8 @@ function schemaV1() {
               },
             },
           },
+          // QRT-02N pre-dispatch quota/auth gate. The gate defaults on, but
+          // ambiguous, missing, or unreadable status evidence fails open.
           quota_check_enabled: { __type: TYPE_BOOL, __default: true },
           quota_status_dir: {
             __type: TYPE_STRING,
@@ -1995,6 +2103,11 @@ function schemaV1() {
             __type: TYPE_INT,
             __default: 900000,
             __min: 1000,
+          },
+          running_pass_timeout_seconds: {
+            __type: TYPE_INT,
+            __default: 3600,
+            __min: 1,
           },
           fallback_threshold: { __type: TYPE_INT, __default: 2 },
           review_population_retry: {
@@ -2241,6 +2354,10 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_REVIEWER_NO_PROGRESS_TIMEOUT_MS',
     aliases: [['ADVERSARIAL_REVIEWER_PROGRESS_TIMEOUT_MS', identity]],
   },
+  'reviewer.running_pass_timeout_seconds': {
+    canonical: 'AGENT_OS_REVIEWER_RUNNING_PASS_TIMEOUT_SECONDS',
+    aliases: [['ADVERSARIAL_REVIEW_RUNNING_PASS_TIMEOUT_SECONDS', identity]],
+  },
   'reviewer.memory.pressure.projected_headroom_floor_mb': {
     canonical: 'AGENT_OS_REVIEWER_MEMORY_PRESSURE_PROJECTED_HEADROOM_FLOOR_MB',
     aliases: [['ADVERSARIAL_REVIEWER_MEMORY_PRESSURE_PROJECTED_HEADROOM_FLOOR_MB', identity]],
@@ -2345,6 +2462,14 @@ export const ENV_ALIASES = {
     canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_GOAL_LINEAGE_SPEC_EXCERPT_BYTES',
     aliases: [['HQ_GLN_LINEAGE_SPEC_EXCERPT_BYTES', identity]],
   },
+  'worker_pool.dispatch.substrate.swap_crit_requires_pressure': {
+    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_SUBSTRATE_SWAP_CRIT_REQUIRES_PRESSURE',
+    aliases: [['SUBSTRATE_SWAP_CRIT_REQUIRES_PRESSURE', identity]],
+  },
+  'worker_pool.dispatch.substrate.mem_pressure_crit_level': {
+    canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_SUBSTRATE_MEM_PRESSURE_CRIT_LEVEL',
+    aliases: [['SUBSTRATE_MEM_PRESSURE_CRIT_LEVEL', identity]],
+  },
   'worker_pool.secrets.prewarm.enabled': {
     canonical: 'AGENT_OS_WORKER_POOL_SECRETS_PREWARM_ENABLED',
     aliases: [],
@@ -2352,6 +2477,30 @@ export const ENV_ALIASES = {
   'worker_pool.secrets.prewarm.min_interval_seconds': {
     canonical: 'AGENT_OS_WORKER_POOL_SECRETS_PREWARM_MIN_INTERVAL_SECONDS',
     aliases: [],
+  },
+  'worker_pool.secrets_bus.op_timeout_seconds': {
+    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_BUS_OP_TIMEOUT_SECONDS',
+    aliases: [],
+  },
+  'worker_pool.secrets_bus.cache_ttl_seconds': {
+    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_BUS_CACHE_TTL_SECONDS',
+    aliases: [],
+  },
+  'worker_pool.secrets_bus.cache_grace_seconds': {
+    canonical: 'AGENT_OS_WORKER_POOL_SECRETS_BUS_CACHE_GRACE_SECONDS',
+    aliases: [],
+  },
+  'post_deploy_verify.enabled': {
+    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_ENABLED',
+    aliases: [['HQ_POST_DEPLOY_VERIFY_ENABLED', identity]],
+  },
+  'post_deploy_verify.spawn_timeout_seconds': {
+    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS',
+    aliases: [['HQ_POST_DEPLOY_VERIFY_SPAWN_TIMEOUT_SECONDS', identity]],
+  },
+  'post_deploy_verify.boot_window_seconds': {
+    canonical: 'AGENT_OS_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS',
+    aliases: [['HQ_POST_DEPLOY_VERIFY_BOOT_WINDOW_SECONDS', identity]],
   },
   'reviewer.gemini.mode': {
     canonical: 'AGENT_OS_REVIEWER_GEMINI_MODE',
@@ -2481,6 +2630,21 @@ export const ENV_ALIASES = {
   'oauth_broker.watchdog.broker_standby_container_name': {
     canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_STANDBY_CONTAINER_NAME',
     aliases: [['OAUTH_BROKER_WATCHDOG_STANDBY_CONTAINER_NAME', identity]],
+  },
+  'oauth_broker.watchdog.credential_decay_warn_after_seconds': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_WARN_AFTER_SECONDS',
+    aliases: [['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_WARN_AFTER_SECONDS', Number]],
+  },
+  'oauth_broker.watchdog.credential_decay_crit_after_seconds': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_CRIT_AFTER_SECONDS',
+    aliases: [['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_CRIT_AFTER_SECONDS', Number]],
+  },
+  'oauth_broker.watchdog.credential_decay_last_good_crit_expiry_margin_seconds': {
+    canonical:
+      'AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS',
+    aliases: [
+      ['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS', Number],
+    ],
   },
   'policy.dedup.uncommitted_line_threshold': {
     canonical: 'AGENT_OS_POLICY_DEDUP_UNCOMMITTED_LINE_THRESHOLD',

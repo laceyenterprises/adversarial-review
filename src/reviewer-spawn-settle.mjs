@@ -465,7 +465,6 @@ async function spawnReviewer({
               ? {
                   ...rawTokenUsage,
                   workerRunId: rawTokenUsage.workerRunId || ledgerTokenUsage.workerRunId || null,
-                  launchRequestId: rawTokenUsage.launchRequestId || ledgerTokenUsage.launchRequestId || null,
                 }
               : ledgerTokenUsage;
           }

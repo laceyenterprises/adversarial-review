@@ -690,6 +690,7 @@ async function cancelLocalRemediationWorker(worker, {
     await sleepImpl(IDENTITY_PROBE_RETRY_DELAYS_MS[attempt]);
   }
   if (!identity.match) {
+    if (identity.gone) return;
     throw new Error(`refusing to cancel remediation worker with unconfirmed identity (${identity.reason || 'unknown'})`);
   }
   try {

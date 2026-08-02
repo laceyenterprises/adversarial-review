@@ -464,6 +464,30 @@ test('local remediation cancel ignores process exit races after identity verific
   }
 });
 
+test('local remediation cancel succeeds when the identity probe shows the worker is already gone', async () => {
+  for (const probeResult of [
+    { stdout: '', stderr: '' },
+    Object.assign(new Error('process not found'), { code: 'ESRCH' }),
+  ]) {
+    const signals = [];
+    await cancelLocalRemediationWorker({
+      processId: 6263,
+      processGroupId: 6263,
+      spawnedAt: '2026-08-02T17:10:00.000Z',
+    }, {
+      execFileImpl: async () => {
+        if (probeResult instanceof Error) throw probeResult;
+        return probeResult;
+      },
+      processKillImpl: (target, signal) => {
+        signals.push([target, signal]);
+        return true;
+      },
+    });
+    assert.deepEqual(signals, [[-6263, 0]]);
+  }
+});
+
 test('local remediation cancel retries transient process identity probe failures', async () => {
   const calls = [];
   const sleeps = [];

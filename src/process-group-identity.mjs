@@ -44,10 +44,14 @@ async function verifyPgidIdentity(pgid, expectedSpawnedAt, {
       };
     }
     const code = err?.code ? ` (${err.code})` : '';
-    return { match: false, reason: `ps probe failed${code}: ${err?.message || err}` };
+    return {
+      match: false,
+      gone: err?.code === 'ESRCH',
+      reason: `ps probe failed${code}: ${err?.message || err}`,
+    };
   }
   if (!lstart) {
-    return { match: false, reason: 'ps returned no start time (pgid may have just exited)' };
+    return { match: false, gone: true, reason: 'ps returned no start time (pgid may have just exited)' };
   }
   const actualMs = Date.parse(lstart);
   const expectedMs = Date.parse(expectedSpawnedAt);

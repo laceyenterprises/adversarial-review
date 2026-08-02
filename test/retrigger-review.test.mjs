@@ -333,6 +333,76 @@ test('retrigger-review exact-head-now leaves the explicit operator marker used f
   }
 });
 
+test('retrigger-review preserves pending-upstream evidence without exact-head-now', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'pending-upstream',
+    failedAt: '2026-05-05T04:06:00.000Z',
+    failureMessage: 'review provider unavailable',
+  });
+
+  const err = makeCaptureStream();
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry after provider recovery',
+    '--no-bump-budget',
+    '--root-dir', rootDir,
+  ], { stdout: makeCaptureStream(), stderr: err });
+
+  assert.equal(rc, 1);
+  assert.match(err.text(), /pending-upstream/);
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare(
+      'SELECT review_status, failed_at, failure_message FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+    ).get('laceyenterprises/agent-os', 238);
+    assert.equal(row.review_status, 'pending-upstream');
+    assert.equal(row.failed_at, '2026-05-05T04:06:00.000Z');
+    assert.equal(row.failure_message, 'review provider unavailable');
+  } finally {
+    db.close();
+  }
+});
+
+test('retrigger-review exact-head-now re-arms pending-upstream review', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  insertReviewRow(rootDir, {
+    reviewStatus: 'pending-upstream',
+    failedAt: '2026-05-05T04:06:00.000Z',
+    failureMessage: 'review provider unavailable',
+  });
+
+  const out = makeCaptureStream();
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry exact head after provider recovery',
+    '--exact-head-now',
+    '--no-bump-budget',
+    '--root-dir', rootDir,
+  ], { stdout: out, stderr: makeCaptureStream() });
+
+  assert.equal(rc, 0);
+  const auditRow = JSON.parse(out.text());
+  assert.equal(auditRow.exactHeadNow, true);
+  assert.equal(auditRow.outcome, 'triggered');
+
+  const db = openReviewStateDb(rootDir);
+  try {
+    const row = db.prepare(
+      `SELECT review_status, failed_at, failure_message, rereview_reason
+       FROM reviewed_prs WHERE repo = ? AND pr_number = ?`
+    ).get('laceyenterprises/agent-os', 238);
+    assert.equal(row.review_status, 'pending');
+    assert.equal(row.failed_at, null);
+    assert.equal(row.failure_message, null);
+    assert.equal(row.rereview_reason, 'retrigger-review: retry exact head after provider recovery');
+  } finally {
+    db.close();
+  }
+});
+
 test('retrigger-review refuses active follow-up jobs when bumping is enabled', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
   insertReviewRow(rootDir, { reviewStatus: 'posted' });

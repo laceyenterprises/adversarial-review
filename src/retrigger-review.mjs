@@ -176,13 +176,18 @@ function resolveAuditRootDir(values, rootDir) {
   return auditRootDir || rootDir;
 }
 
-function refuseReasonForReviewRow(reviewRow, { allowFailedReset = false } = {}) {
+function refuseReasonForReviewRow(reviewRow, {
+  allowFailedReset = false,
+  exactHeadNow = false,
+} = {}) {
   if (!reviewRow) return 'review-row-missing';
   if (reviewRow.pr_state !== 'open') return 'pr-not-open';
   switch (reviewRow.review_status) {
     case 'pending':
     case 'posted':
       return null;
+    case 'pending-upstream':
+      return exactHeadNow ? null : 'pending-upstream';
     case 'failed':
       return allowFailedReset ? null : 'failed';
     case 'failed-orphan':
@@ -605,6 +610,7 @@ async function main(argv, {
 
   const refusalReason = refuseReasonForReviewRow(reviewRow, {
     allowFailedReset: values['allow-failed-reset'],
+    exactHeadNow: values['exact-head-now'],
   });
   if (refusalReason) {
     const row = makeAuditRow({

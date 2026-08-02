@@ -90,6 +90,11 @@ function evaluateAgentRuntimeCutoverReadiness({
       reasons.push(detail('settle-smoke-stale', `agent-runtime settle smoke PASS is stale (${suffix})`));
     } else if (settleSmoke?.reason === 'fail') {
       reasons.push(detail('settle-smoke-failed', 'agent-runtime settle smoke recorded FAIL'));
+    } else if (settleSmoke?.reason === 'invalid-status' || settleSmoke?.reason === 'invalid-at') {
+      reasons.push(detail(
+        'settle-smoke-invalid',
+        `agent-runtime settle smoke artifact is malformed (${settleSmoke.reason})`,
+      ));
     } else {
       reasons.push(detail('settle-smoke-missing', `agent-runtime settle smoke PASS artifact is absent (${suffix})`));
     }

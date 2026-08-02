@@ -96,6 +96,27 @@ test('agent-runtime is not settle-proven when the settle-smoke artifact recorded
   }
 });
 
+test('agent-runtime reports a malformed settle-smoke artifact distinctly from missing', () => {
+  const rootDir = makeRoot();
+  try {
+    writeCodePrDomain(rootDir);
+    writeSettleSmokeResult(rootDir, 'agent-runtime', {
+      status: 'pending',
+      at: '2026-08-02T09:55:00.000Z',
+      dispatched: true,
+      settled: false,
+      attributed: false,
+      workerRunId: null,
+    });
+    const readiness = readyReadiness(rootDir, '2026-08-02T10:00:00.000Z');
+    assert.equal(readiness.ready, false);
+    assert.equal(readiness.reasons[0].code, 'settle-smoke-invalid');
+    assert.match(readiness.reasons[0].message, /malformed \(invalid-status\)/);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('agent-runtime is settle-proven only when a fresh PASS artifact is present', () => {
   const rootDir = makeRoot();
   try {

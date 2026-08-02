@@ -116,7 +116,7 @@ async function runRuntimeSettleSmoke({
   }
 
   const persisted = writeResultImpl(rootDir, runtime, smoke);
-  return { ok: smoke.status === 'pass', smoke: persisted, result };
+  return { ok: smoke.status === 'pass', smoke: persisted || smoke, result };
 }
 
 async function runtimeSettleSmokeMain(argv, io = {}) {
@@ -165,6 +165,9 @@ async function runtimeSettleSmokeMain(argv, io = {}) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   runtimeSettleSmokeMain(process.argv.slice(2)).then((code) => {
     process.exitCode = code;
+  }).catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
   });
 }
 

@@ -30,7 +30,7 @@ function defaultReviewerPricingTable() {
   }
   return _reviewerPricingTable;
 }
-const PASS_STATUSES = new Set(['running', 'completed', 'failed', 'cancelled']);
+const PASS_STATUSES = new Set(['running', 'completed', 'failed', 'cancelled', 'skipped']);
 const REVIEWER_USAGE_ARTIFACT_SCHEMA = 'adversarial-reviewer-token-usage/v1';
 
 function normalizeReviewerClass(value) {

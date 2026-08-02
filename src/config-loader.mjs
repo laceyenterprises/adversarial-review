@@ -2112,6 +2112,14 @@ function schemaV1() {
               },
             },
           },
+          // QRT-02N pre-dispatch quota/auth gate. The gate defaults on, but
+          // ambiguous, missing, or unreadable status evidence fails open.
+          quota_check_enabled: { __type: TYPE_BOOL, __default: true },
+          quota_status_dir: {
+            __type: TYPE_STRING,
+            __default: null,
+            __nullable: true,
+          },
           timeout_ms: { __type: TYPE_INT, __default: 1200000 },
           // The reviewer is also killed if it makes no progress (no output
           // event) for this many ms. Distinct from the total wall-clock
@@ -2360,6 +2368,14 @@ export const ENV_ALIASES = {
   'reviewer.timeout_ms': {
     canonical: 'AGENT_OS_REVIEWER_TIMEOUT_MS',
     aliases: [['ADVERSARIAL_REVIEWER_TIMEOUT_MS', identity]],
+  },
+  'reviewer.quota_check_enabled': {
+    canonical: 'AGENT_OS_REVIEWER_QUOTA_CHECK_ENABLED',
+    aliases: [['ADVERSARIAL_REVIEW_QUOTA_CHECK_ENABLED', identity]],
+  },
+  'reviewer.quota_status_dir': {
+    canonical: 'AGENT_OS_REVIEWER_QUOTA_STATUS_DIR',
+    aliases: [['ADVERSARIAL_REVIEW_QUOTA_STATUS_DIR', identity]],
   },
   'reviewer.no_progress_timeout_ms': {
     canonical: 'AGENT_OS_REVIEWER_NO_PROGRESS_TIMEOUT_MS',

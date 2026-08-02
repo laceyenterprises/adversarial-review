@@ -20,6 +20,7 @@
 //    settleReviewerAttempt as the injected `markReviewHeartbeat` param.
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -32,10 +33,15 @@ import {
   resolveAgyReviewerSubprocessTimeoutMs,
   resolveReviewerTimeoutMs,
 } from './reviewer-timeout.mjs';
-import { resolveGeminiRuntime } from './role-config.mjs';
+import { loadRoleConfig, resolveGeminiRuntime } from './role-config.mjs';
+import {
+  isGroundedProviderState,
+  providerForQuotaHarness,
+} from './fleet-quota-status.mjs';
 import {
   beginReviewerPass,
   completeReviewerPass,
+  normalizeReviewerClass,
   readBestReviewerEvidenceTokenUsage,
   tagTokenUsage,
 } from './reviewer-pass-tokens.mjs';
@@ -112,6 +118,73 @@ function resolveReviewerIdentity({ reviewerModel, botTokenEnv } = {}) {
   if (normalizedModel === 'codex') return 'codex-reviewer-lacey';
   if (normalizedModel === 'gemini') return 'gemini-reviewer-lacey';
   return 'claude-reviewer-lacey';
+}
+
+function resolveReviewerQuotaCheckEnabled(env = process.env) {
+  return loadRoleConfig({
+    env,
+    contextKey: 'reviewer.quota_check_enabled',
+  }).get('reviewer.quota_check_enabled', true);
+}
+
+function resolveReviewerQuotaStatusDir(env = process.env) {
+  const configured = loadRoleConfig({
+    env,
+    contextKey: 'reviewer.quota_status_dir',
+  }).get('reviewer.quota_status_dir', null);
+  if (typeof configured === 'string' && configured.trim()) return configured.trim();
+  const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
+  return join(hqRoot, 'quota');
+}
+
+async function readReviewerQuotaDecision({
+  reviewerModel,
+  env = process.env,
+  readdirImpl = readdir,
+  readFileImpl = readFile,
+} = {}) {
+  try {
+    if (!resolveReviewerQuotaCheckEnabled(env)) {
+      return { available: true, state: 'disabled', provider: null };
+    }
+    const provider = providerForQuotaHarness(reviewerModel);
+    if (!provider) {
+      return { available: true, state: 'unknown-harness', provider: null };
+    }
+
+    const statusDir = resolveReviewerQuotaStatusDir(env);
+    const files = await readdirImpl(statusDir);
+    const statuses = [];
+    for (const file of files) {
+      if (!file.startsWith(`${provider}-`) || !file.endsWith('.status.json')) continue;
+      const authPath = file.slice(provider.length + 1, -'.status.json'.length);
+      try {
+        const payload = JSON.parse(await readFileImpl(join(statusDir, file), 'utf8'));
+        statuses.push({
+          authPath: String(payload?.authPath || payload?.auth_path || authPath).trim().toLowerCase(),
+          state: String(payload?.state || '').trim().toLowerCase(),
+        });
+      } catch {
+        // A malformed or transiently unreadable record is ambiguous. Keep
+        // looking for a valid record; if none exists, the decision fails open.
+      }
+    }
+    const status = statuses.find((entry) => entry.authPath === 'oauth') || statuses[0];
+    if (!status) {
+      return { available: true, state: 'missing-provider-status', provider };
+    }
+    return {
+      available: status.state === 'ok' || !isGroundedProviderState(status.state),
+      state: status.state || 'unknown',
+      provider,
+    };
+  } catch {
+    return {
+      available: true,
+      state: 'probe-error',
+      provider: providerForQuotaHarness(reviewerModel),
+    };
+  }
 }
 
 function sleepMs(ms) {
@@ -341,9 +414,13 @@ async function spawnReviewer({
   postGitHubReviewWithCaptureImpl = defaultPostGitHubReviewWithCapture,
   readBestReviewerEvidenceTokenUsageImpl = readBestReviewerEvidenceTokenUsage,
   ledgerLookupSleepImpl = sleepMs,
+  quotaCheckEnv = process.env,
+  readReviewerQuotaDecisionImpl = readReviewerQuotaDecision,
+  beginReviewerPassImpl = beginReviewerPass,
   completeReviewerPassImpl = completeReviewerPass,
 }) {
   const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
+  const normalizedReviewerClass = normalizeReviewerClass(reviewerModel);
   const finalRound = (
     Number.isFinite(reviewAttemptNumber) &&
     Number.isFinite(maxRemediationRounds) &&
@@ -353,6 +430,69 @@ async function spawnReviewer({
     ? ` attempt=${reviewAttemptNumber}/${1 + Number(maxRemediationRounds || 0)}${finalRound ? ' [FINAL — lenient threshold]' : ''}`
     : '';
   console.log(`[watcher] Spawning reviewer for ${repo}#${prNumber} (model: ${reviewerModel})${roundLabel}`);
+
+  let quotaDecision;
+  try {
+    quotaDecision = await readReviewerQuotaDecisionImpl({
+      reviewerModel,
+      env: quotaCheckEnv,
+    });
+  } catch {
+    quotaDecision = {
+      available: true,
+      state: 'probe-error',
+      provider: providerForQuotaHarness(reviewerModel),
+    };
+  }
+  if (!quotaDecision.available && isGroundedProviderState(quotaDecision.state)) {
+    const attemptNumber = reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0;
+    const startedAt = new Date().toISOString();
+    const metadata = {
+      reviewerSessionUuid,
+      reviewerModel,
+      reviewAttemptNumber,
+      completedRemediationRounds,
+      maxRemediationRounds,
+      quotaExhaustedSkip: true,
+      quotaReason: 'known-exhausted-provider-status',
+      quotaState: quotaDecision.state,
+      quotaProvider: quotaDecision.provider,
+      failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
+    };
+    beginReviewerPassImpl(ROOT, {
+      repo,
+      prNumber,
+      attemptNumber,
+      reviewerClass: normalizedReviewerClass,
+      reviewerModel,
+      passKind,
+      workspacePath: workspacePath || ROOT,
+      startedAt,
+      headSha: reviewerHeadSha || null,
+      metadata,
+    });
+    await completeReviewerPassImpl(ROOT, {
+      repo,
+      prNumber,
+      attemptNumber,
+      passKind,
+      status: 'skipped',
+      endedAt: new Date().toISOString(),
+      metadata,
+    });
+    console.log(
+      `[watcher] reviewer spawn skipped for ${repo}#${prNumber} ` +
+      `(model: ${reviewerModel}, provider: ${quotaDecision.provider}, state: ${quotaDecision.state})`,
+    );
+    return {
+      ok: false,
+      reason: 'primary-reviewer-quota-capped',
+      failureClass: QUOTA_EXHAUSTED_FAILURE_CLASS,
+      transient: true,
+      quotaState: quotaDecision.state,
+      quotaProvider: quotaDecision.provider,
+    };
+  }
 
   const reviewerSpawnToken = randomUUID();
   const reviewerIdentity = resolveReviewerIdentity({ reviewerModel, botTokenEnv });
@@ -370,11 +510,11 @@ async function spawnReviewer({
     upsertSpawnRecord(ADVERSARIAL_REVIEW_STATE_DIR, spawnRecord);
     inFlightReviewerSessions.add(reviewerSessionUuid);
     const startedAt = new Date().toISOString();
-    beginReviewerPass(ROOT, {
+    beginReviewerPassImpl(ROOT, {
       repo,
       prNumber,
       attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
-      reviewerClass: reviewerModel,
+      reviewerClass: normalizedReviewerClass,
       reviewerModel,
       passKind,
       workspacePath: workspacePath || ROOT,
@@ -560,7 +700,7 @@ async function spawnReviewer({
             prNumber,
             attemptNumber: reviewDbAttemptNumber ?? reviewAttemptNumber ?? 0,
             passKind,
-            reviewerClass: reviewerModel,
+            reviewerClass: normalizedReviewerClass,
             reviewerModel,
             status: result.ok ? 'completed' : (result.failureClass === 'cancelled' ? 'cancelled' : 'failed'),
             startedAt,

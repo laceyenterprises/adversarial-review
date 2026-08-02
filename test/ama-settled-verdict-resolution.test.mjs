@@ -332,7 +332,7 @@ test('comment-only + empty `- None.` Blocking Issues section resolves to known: 
   assert.equal(res.blockingFindingCount, 0);
 });
 
-test('comment-only with NO Blocking Issues section resolves to known: 0 (live head)', () => {
+test('comment-only with NO Blocking Issues section fails closed as unknown (live head)', () => {
   const res = resolveSettledReviewVerdict('/root', {
     repo: 'acme/agent-os',
     prNumber: 1857,
@@ -342,7 +342,7 @@ test('comment-only with NO Blocking Issues section resolves to known: 0 (live he
     liveHeadReview: { resolved: true, bodies: [REVIEW_BODY('Comment only')] },
   });
   assert.equal(res.verdict, 'comment-only');
-  assert.equal(res.blockingFindingState, 'known');
+  assert.equal(res.blockingFindingState, 'unknown');
   assert.equal(res.blockingFindingCount, 0);
 });
 

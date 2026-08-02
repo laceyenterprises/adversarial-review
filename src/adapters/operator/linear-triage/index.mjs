@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeFileAtomic } from '../../../atomic-write.mjs';
+import { classifyFollowUpCriticality } from '../../../follow-up-jobs.mjs';
 import {
   extractLinearTicketId as extractGitHubPRLinearTicketId,
   routePR as routeGitHubPR,
@@ -238,12 +239,30 @@ function criticalWordsInSummary(reviewSummary, criticalWords = DEFAULT_CRITICAL_
   return criticalWords.filter((word) => lower.includes(String(word).toLowerCase()));
 }
 
-function buildCriticalFlagComment(reviewSummary, criticalWords = DEFAULT_CRITICAL_WORDS) {
+function buildCriticalFlagComment(
+  reviewSummary,
+  criticalWords = DEFAULT_CRITICAL_WORDS,
+  {
+    blockingFindingCount = null,
+    blockingFindingState = null,
+    criticalityReason = null,
+  } = {}
+) {
   const matches = criticalWordsInSummary(reviewSummary, criticalWords);
+  let issueSummary = blockingFindingState === 'known'
+    && Number.isInteger(blockingFindingCount)
+    && blockingFindingCount > 0
+    ? `${blockingFindingCount} blocking finding${blockingFindingCount === 1 ? '' : 's'}`
+    : criticalityReason === 'request-changes-verdict'
+    ? 'Request changes verdict'
+    : criticalityReason === 'blocking-section-unparseable'
+    ? 'blocking section missing or unparseable'
+    : matches.join(', ');
+  if (!issueSummary) issueSummary = 'critical review signal';
   return [
     '**Adversarial review flagged critical issues** - Paul, please review.',
     '',
-    `Issues detected: ${matches.join(', ')}`,
+    `Issues detected: ${issueSummary}`,
     '',
     'Full review posted as a GitHub PR comment.',
   ].join('\n');
@@ -327,6 +346,7 @@ function createLinearTriageAdapter({
   async function recordReviewCompleted(subjectRef, {
     critical = false,
     reviewSummary = '',
+    reviewBody = '',
   } = {}) {
     if (isTicketPipelinePaused(subjectRef, { rootDir, logger })) {
       logger.log?.(`[linear-triage] ticket pipeline paused for ${subjectRef?.subjectExternalId || subjectRef?.repo || '<unknown>'} - skipping review completion`);
@@ -337,7 +357,11 @@ function createLinearTriageAdapter({
 
     await syncTriageStatus(subjectRef, 'done');
 
-    if (!critical) return;
+    const criticality = String(reviewBody || '').trim()
+      ? classifyFollowUpCriticality(reviewBody)
+      : null;
+    const derivedCritical = criticality ? criticality.critical : critical;
+    if (!derivedCritical) return;
     const linear = await getLinearClient();
     if (!linear) return;
     try {
@@ -345,7 +369,11 @@ function createLinearTriageAdapter({
       if (!issue) return;
       await linear.createComment({
         issueId: issue.id,
-        body: buildCriticalFlagComment(reviewSummary, criticalWords),
+        body: buildCriticalFlagComment(reviewSummary, criticalWords, {
+          blockingFindingCount: criticality?.blockingFindingCount,
+          blockingFindingState: criticality?.blockingFindingState,
+          criticalityReason: criticality?.criticalityReason,
+        }),
       });
       logger.log?.(`[linear-triage] Linear ${ticketId} - critical flag comment added`);
     } catch (err) {

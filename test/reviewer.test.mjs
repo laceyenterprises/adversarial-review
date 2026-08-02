@@ -4,7 +4,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, uti
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CLAUDE_CLI, GEMINI_CLI, AGY_CLI, __test__ } from '../src/reviewer.mjs';
-import { classifyReviewerFailure } from '../src/adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { buildObviousDocsGuidance, extractLinkedRepoDocs, fetchLinkedSpecContents, parseGitHubBlobPath } from '../src/prompt-context.mjs';
 import { AgentOSConfigError } from '../src/config-loader.mjs';
 import { beginReviewerPass } from '../src/reviewer-pass-tokens.mjs';
@@ -780,8 +779,51 @@ test('clean comment-only reviews still queue a durable follow-up verdict carrier
   assert.equal(created[0].baseBranch, 'release/2026.05');
   assert.equal(created[0].revisionRef, 'review-head-sha');
   assert.equal(created[0].verdictMode, VERDICT_MODE_ENFORCE);
+  assert.equal(created[0].critical, false);
   assert.equal(Object.hasOwn(created[0], 'maxRemediationRounds'), false);
   assert.equal(created[0].priorCompletedRounds, 1);
+});
+
+test('clean comment-only review with security-flavored wording still queues non-critical follow-up state', () => {
+  const { created } = queueWithFakes([
+    '## Summary',
+    'agent-os#4562 is settled cleanly; the prior critical security concern is not reproducible on the current head.',
+    '',
+    '## Blocking issues',
+    '- None.',
+    '',
+    '## Non-blocking issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n'), {
+    critical: true,
+  });
+
+  assert.equal(created.length, 1);
+  assert.equal(created[0].critical, false);
+});
+
+test('request-changes review with blocking findings keeps strict critical follow-up state', () => {
+  const { created } = queueWithFakes([
+    '## Summary',
+    'Still blocked.',
+    '',
+    '## Blocking issues',
+    '- **Validation regression**',
+    '  - **File:** src/reviewer.mjs',
+    '  - **Lines:** 1-2',
+    '  - **Problem:** Blocking behavior regressed.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n'), {
+    critical: false,
+  });
+
+  assert.equal(created.length, 1);
+  assert.equal(created[0].critical, true);
 });
 
 test('request-changes and malformed verdicts still queue durable follow-up handoffs', () => {

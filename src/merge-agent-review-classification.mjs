@@ -18,7 +18,7 @@ import { getReviewRow, openReviewStateDb } from './review-state.mjs';
 import { reviewerFailureClassFromStoredRow } from './reviewer-failure-classification.mjs';
 import { CASCADE_FAILURE_CAP, readCascadeState } from './reviewer-cascade.mjs';
 
-function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
+function classifyBlockingFindings(reviewBody) {
   // Defense-in-depth format-independence: canonicalize the posted body before
   // parsing so a non-`##`-headed gemini/agy review (which reviewer-side
   // sanitation now normalizes at post time, but which may already be posted
@@ -27,14 +27,8 @@ function classifyBlockingFindings(reviewBody, { lastVerdict = null } = {}) {
   // `state:'unknown'` on such bodies and REFUSES the budget-exhausted final
   // pass, so the PR never closes and re-enters the review loop.
   const parsed = parseMergeAgentRescueReviewBody(sanitizeReviewPayloadBestEffort(reviewBody));
-  const normalizedVerdict = normalizeReviewVerdict(lastVerdict);
-  const verdictKey = normalizedVerdict === 'unknown'
-    ? String(lastVerdict || '').trim().toLowerCase()
-    : normalizedVerdict;
   if (parsed.blocking.missing) {
-    return verdictKey === 'request-changes'
-      ? { count: 0, state: 'unknown' }
-      : { count: 0, state: 'known' };
+    return { count: 0, state: 'unknown' };
   }
   return { count: parsed.blocking.count, state: 'known' };
 }

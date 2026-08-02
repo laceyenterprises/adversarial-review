@@ -138,6 +138,69 @@ test('recordReviewCompleted posts critical flag comments for critical reviews', 
   assert.match(comments[0].body, /critical, vulnerability, security/);
 });
 
+test('recordReviewCompleted does not post a critical flag for a clean comment-only review body', async () => {
+  const { linear, updates, comments } = makeLinearFixture();
+  const adapter = createLinearTriageAdapter({
+    linearClientProvider: async () => linear,
+    logger: {},
+  });
+
+  await adapter.recordReviewCompleted(subjectRef(), {
+    critical: true,
+    reviewSummary: 'agent-os#4562 looked like a critical security concern at first glance.',
+    reviewBody: [
+      '## Summary',
+      'agent-os#4562 is clean on the current head.',
+      '',
+      '## Blocking issues',
+      '- None.',
+      '',
+      '## Non-blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(updates, [
+    { issueId: 'issue-1', payload: { stateId: 'state-done' } },
+  ]);
+  assert.deepEqual(comments, []);
+});
+
+test('recordReviewCompleted still posts a critical flag when the review body carries blocking findings', async () => {
+  const { linear, updates, comments } = makeLinearFixture();
+  const adapter = createLinearTriageAdapter({
+    linearClientProvider: async () => linear,
+    logger: {},
+  });
+
+  await adapter.recordReviewCompleted(subjectRef(), {
+    critical: false,
+    reviewSummary: 'The last page is skipped during pagination.',
+    reviewBody: [
+      '## Summary',
+      'The last page is skipped during pagination.',
+      '',
+      '## Blocking issues',
+      '- **Off-by-one in pagination breaks the last page**',
+      '  - **File:** src/request-handler.mjs',
+      '  - **Lines:** 12-40',
+      '  - **Problem:** The final result page is never returned.',
+      '',
+      '## Verdict',
+      'Request changes',
+    ].join('\n'),
+  });
+
+  assert.deepEqual(updates, [
+    { issueId: 'issue-1', payload: { stateId: 'state-done' } },
+  ]);
+  assert.equal(comments.length, 1);
+  assert.match(comments[0].body, /Issues detected: 1 blocking finding/);
+});
+
 test('ticket-pipeline-paused PR label suppresses Linear updates and comments', async () => {
   const { linear, updates, comments } = makeLinearFixture();
   let providerCalls = 0;
@@ -315,4 +378,31 @@ test('buildCriticalFlagComment includes matching critical words', () => {
   const body = buildCriticalFlagComment('Possible injection vulnerability.');
 
   assert.match(body, /vulnerability, injection/);
+});
+
+test('buildCriticalFlagComment prefers structured blocking count over critical words', () => {
+  const body = buildCriticalFlagComment('Possible injection vulnerability.', undefined, {
+    blockingFindingCount: 3,
+    blockingFindingState: 'known',
+  });
+
+  assert.match(body, /Issues detected: 3 blocking findings/);
+  assert.doesNotMatch(body, /Issues detected: vulnerability, injection/);
+});
+
+test('buildCriticalFlagComment distinguishes verdict and parser-failure triggers', () => {
+  const verdictBody = buildCriticalFlagComment('No explicit blockers.', undefined, {
+    blockingFindingCount: 0,
+    blockingFindingState: 'known',
+    criticalityReason: 'request-changes-verdict',
+  });
+  assert.match(verdictBody, /Issues detected: Request changes verdict/);
+  assert.doesNotMatch(verdictBody, /blocking findings present/);
+
+  const parserBody = buildCriticalFlagComment('Review output truncated.', undefined, {
+    blockingFindingCount: 0,
+    blockingFindingState: 'unknown',
+    criticalityReason: 'blocking-section-unparseable',
+  });
+  assert.match(parserBody, /Issues detected: blocking section missing or unparseable/);
 });

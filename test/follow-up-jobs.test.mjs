@@ -12,6 +12,7 @@ import {
   REMEDIATION_REPLY_SCHEMA_VERSION,
   archiveStoppedFollowUpJobs,
   buildFollowUpJob,
+  classifyFollowUpCriticality,
   buildRemediationReply,
   buildStopMetadata,
   claimNextFollowUpJob,
@@ -181,6 +182,163 @@ test('buildFollowUpJob creates a pending durable handoff record', () => {
   assert.match(job.jobId, /^laceyenterprises__clio-pr-42-/);
 });
 
+test('buildFollowUpJob fails closed when the review body is missing', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 42,
+    revisionRef: 'review-head-sha',
+    reviewerModel: 'codex',
+    reviewBody: undefined,
+    reviewPostedAt: '2026-04-21T07:46:00.000Z',
+    critical: false,
+  });
+
+  assert.equal(job.critical, true);
+  assert.equal(job.recommendedFollowUpAction.priority, 'high');
+  assert.equal(
+    job.recommendedFollowUpAction.summary,
+    'Start a follow-up coding session for this PR immediately and address the blocking review findings first.'
+  );
+});
+
+test('buildFollowUpJob derives clean priority even when a legacy caller says critical', () => {
+  const job = buildFollowUpJob({
+    repo: 'laceyenterprises/clio',
+    prNumber: 43,
+    revisionRef: 'review-head-sha',
+    reviewerModel: 'codex',
+    reviewBody: [
+      '## Summary',
+      'No remediation remains.',
+      '',
+      '## Blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n'),
+    reviewPostedAt: '2026-04-21T07:46:00.000Z',
+    critical: true,
+  });
+
+  assert.equal(job.critical, false);
+  assert.equal(job.recommendedFollowUpAction.priority, 'normal');
+  assert.match(job.recommendedFollowUpAction.summary, /settled cleanly/);
+});
+
+test('classifyFollowUpCriticality keeps clean comment-only reviews out of critical follow-up state', () => {
+  const result = classifyFollowUpCriticality([
+    '## Summary',
+    'agent-os#4562 is clean; no blocking findings remain.',
+    '',
+    '## Blocking issues',
+    '- None.',
+    '',
+    '## Non-blocking issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n'));
+
+  assert.equal(result.critical, false);
+  assert.equal(result.blockingFindingState, 'known');
+  assert.equal(result.blockingFindingCount, 0);
+  assert.equal(result.verdict, 'comment-only');
+  assert.equal(result.criticalityReason, null);
+});
+
+test('classifyFollowUpCriticality canonicalizes mis-headed clean reviews once', () => {
+  const result = classifyFollowUpCriticality([
+    '### Summary',
+    'Clean follow-up from a reviewer family that emits h3 sections.',
+    '',
+    '### Blocking issues',
+    '- None.',
+    '',
+    '### Non-blocking issues',
+    '- None.',
+    '',
+    '### Verdict',
+    'Comment only',
+  ].join('\n'));
+
+  assert.equal(result.critical, false);
+  assert.equal(result.blockingFindingState, 'known');
+  assert.equal(result.blockingFindingCount, 0);
+  assert.equal(result.verdict, 'comment-only');
+});
+
+test('classifyFollowUpCriticality keeps blocking reviews on the strict high-priority path', () => {
+  const result = classifyFollowUpCriticality([
+    '## Summary',
+    'Request changes required.',
+    '',
+    '## Blocking issues',
+    '- **Regression in request handling**',
+    '  - **File:** src/demo.mjs',
+    '  - **Lines:** 10-20',
+    '  - **Problem:** Requests can bypass validation.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n'));
+
+  assert.equal(result.critical, true);
+  assert.equal(result.blockingFindingState, 'known');
+  assert.equal(result.blockingFindingCount, 1);
+  assert.equal(result.verdict, 'request-changes');
+  assert.equal(result.criticalityReason, 'request-changes-verdict');
+});
+
+test('classifyFollowUpCriticality treats a contradictory request-changes verdict as critical', () => {
+  const result = classifyFollowUpCriticality([
+    '## Summary',
+    'The structured section is contradictory with the effective verdict.',
+    '',
+    '## Blocking issues',
+    '- None.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n'));
+
+  assert.equal(result.critical, true);
+  assert.equal(result.blockingFindingState, 'known');
+  assert.equal(result.blockingFindingCount, 0);
+  assert.equal(result.statedVerdict, 'request-changes');
+  assert.equal(result.verdict, 'comment-only');
+  assert.equal(result.criticalityReason, 'request-changes-verdict');
+});
+
+test('classifyFollowUpCriticality fails closed when both blocking section and verdict are absent', () => {
+  const result = classifyFollowUpCriticality([
+    'Reviewer output was truncated.',
+    'A security concern may remain, but no structured sections survived.',
+  ].join('\n'));
+
+  assert.equal(result.critical, true);
+  assert.equal(result.blockingFindingState, 'unknown');
+  assert.equal(result.blockingFindingCount, 0);
+  assert.equal(result.verdict, null);
+  assert.equal(result.criticalityReason, 'blocking-section-unparseable');
+});
+
+test('classifyFollowUpCriticality fails closed for a clean verdict without blocking section', () => {
+  const result = classifyFollowUpCriticality([
+    '## Summary',
+    'The review output was truncated before its structured finding sections.',
+    '',
+    '## Verdict',
+    'Approved',
+  ].join('\n'));
+
+  assert.equal(result.critical, true);
+  assert.equal(result.blockingFindingState, 'unknown');
+  assert.equal(result.blockingFindingCount, 0);
+  assert.equal(result.criticalityReason, 'blocking-section-unparseable');
+});
+
 test('buildFollowUpJob rejects advisory-only verdict mode', () => {
   assert.throws(
     () => buildFollowUpJob({
@@ -216,6 +374,31 @@ test('createFollowUpJob writes the pending job JSON under data/follow-up-jobs/pe
   // High risk = 3 rounds (more iterations before halting for operator).
   assert.equal(persisted.remediationPlan.maxRounds, 3);
   assert.equal(statSync(jobPath).mode & 0o777, 0o644);
+});
+
+test('createFollowUpJob persists settled-clean follow-up text for comment-only reviews with zero blocking findings', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const { job } = createFollowUpJob({
+    ...makeJobInput(rootDir),
+    reviewBody: [
+      '## Summary',
+      'agent-os#4562 is settled cleanly; the prior critical security concern is not reproducible on the current head.',
+      '',
+      '## Blocking issues',
+      '- None.',
+      '',
+      '## Non-blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n'),
+    critical: false,
+  });
+
+  assert.equal(job.recommendedFollowUpAction.priority, 'normal');
+  assert.match(job.recommendedFollowUpAction.summary, /settled cleanly; no remediation coding session is required/i);
+  assert.doesNotMatch(job.recommendedFollowUpAction.summary, /blocking review findings|adversarial review findings/i);
 });
 
 test('archiveStoppedFollowUpJobs moves only stopped entries at least 24h old into month archive', () => {
@@ -1000,6 +1183,47 @@ test('readFollowUpJob normalizes legacy v1 jobs into bounded remediation shape',
   assert.equal(normalized.remediationReply.path, null);
 });
 
+test('readFollowUpJob replaces stale historical critical priority with structured clean truth', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const jobPath = path.join(rootDir, 'legacy-clean.json');
+  const cleanJob = buildFollowUpJob({
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 207,
+    reviewerModel: 'codex',
+    reviewBody: [
+      '## Summary',
+      'No remediation remains.',
+      '',
+      '## Blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n'),
+    reviewPostedAt: '2026-04-21T08:00:00.000Z',
+    critical: false,
+  });
+  writeFileSync(jobPath, `${JSON.stringify({
+    ...cleanJob,
+    critical: true,
+    recommendedFollowUpAction: {
+      ...cleanJob.recommendedFollowUpAction,
+      priority: 'high',
+      summary: 'Legacy critical remediation required immediately.',
+      operatorHint: 'preserve this non-derived field',
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const normalized = readFollowUpJob(jobPath);
+  assert.equal(normalized.critical, false);
+  assert.equal(normalized.recommendedFollowUpAction.priority, 'normal');
+  assert.match(normalized.recommendedFollowUpAction.summary, /settled cleanly/);
+  assert.equal(
+    normalized.recommendedFollowUpAction.operatorHint,
+    'preserve this non-derived field'
+  );
+});
+
 test('resolveRoundBudgetForJob maps each supported risk class to the expected round budget', () => {
   for (const [riskClass, expectedBudget] of Object.entries(ROUND_BUDGET_BY_RISK_CLASS)) {
     const resolution = resolveRoundBudgetForJob({
@@ -1324,7 +1548,7 @@ test('claimNextFollowUpJob logs and retries settled jobs when stopped-marking fa
   const settled = createFollowUpJob({
     ...makeJobInput(rootDir),
     critical: false,
-    reviewBody: '## Summary\nClean.\n\n## Verdict\nComment only',
+    reviewBody: '## Summary\nClean.\n\n## Blocking issues\n- None.\n\n## Verdict\nComment only',
   });
   createFollowUpJob({
     ...makeJobInput(rootDir),

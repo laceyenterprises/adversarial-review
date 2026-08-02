@@ -23,7 +23,13 @@ import {
   detectPublicReplyNoiseSignal,
   validateRemediationReply as validateKernelRemediationReply,
 } from './kernel/remediation-reply.mjs';
-import { normalizeEffectiveReviewVerdict } from './kernel/verdict.mjs';
+import {
+  extractReviewVerdict,
+  normalizeEffectiveReviewVerdict,
+  normalizeReviewVerdict,
+  sanitizeReviewPayloadBestEffort,
+} from './kernel/verdict.mjs';
+import { classifyBlockingFindings } from './merge-agent-review-classification.mjs';
 
 const MAX_CREATE_ATTEMPTS = 100;
 
@@ -345,16 +351,60 @@ function buildRemediationRoundPlan(maxRounds = DEFAULT_MAX_REMEDIATION_ROUNDS) {
   };
 }
 
-function buildRecommendedFollowUpAction({ critical }) {
+function buildRecommendedFollowUpAction({ critical, settledClean = false }) {
   return {
     type: 'address-adversarial-review',
     priority: critical ? 'high' : 'normal',
-    summary: critical
-      ? 'Start a follow-up coding session for this PR immediately and address the critical review findings first.'
+    summary: settledClean
+      ? 'Latest adversarial review is settled cleanly; no remediation coding session is required unless an operator explicitly retriggers review.'
+      : critical
+      ? 'Start a follow-up coding session for this PR immediately and address the blocking review findings first.'
       : 'Start a follow-up coding session for this PR and address the adversarial review findings.',
     executionModel: 'bounded-manual-rounds',
     maxRounds: DEFAULT_MAX_REMEDIATION_ROUNDS,
     futureArchitectureNote: 'Long term this should resume the original build session and preserve original build intent/context instead of spawning a fresh session from a file handoff.',
+  };
+}
+
+function classifyFollowUpCriticality(reviewBody) {
+  const canonicalReviewBody = sanitizeReviewPayloadBestEffort(reviewBody);
+  const verdict = normalizeEffectiveReviewVerdict(canonicalReviewBody);
+  const statedVerdict = normalizeReviewVerdict(extractReviewVerdict(canonicalReviewBody));
+  const blocking = classifyBlockingFindings(canonicalReviewBody, { lastVerdict: verdict });
+  const criticalityReason = statedVerdict === 'request-changes'
+    ? 'request-changes-verdict'
+    : blocking.state !== 'known'
+    ? 'blocking-section-unparseable'
+    : blocking.count > 0
+    ? 'blocking-findings'
+    : null;
+  return {
+    critical: criticalityReason !== null,
+    criticalityReason,
+    blockingFindingCount: blocking.count,
+    blockingFindingState: blocking.state,
+    statedVerdict,
+    verdict,
+  };
+}
+
+function resolveDurableFollowUpClassification(reviewBody, _fallbackCritical) {
+  if (!String(reviewBody || '').trim()) {
+    return {
+      critical: true,
+      criticalityReason: 'blocking-section-unparseable',
+      blockingFindingCount: 0,
+      blockingFindingState: 'unknown',
+      statedVerdict: null,
+      verdict: null,
+      settledClean: false,
+    };
+  }
+  const classification = classifyFollowUpCriticality(reviewBody);
+  return {
+    ...classification,
+    settledClean: classification.critical === false
+      && (classification.verdict === 'comment-only' || classification.verdict === 'approved'),
   };
 }
 
@@ -365,8 +415,9 @@ function isSettledReviewJob(job) {
   // proceed even if the stored review body is still Comment-only.
   if (nextAction?.operatorOverride === true) return false;
 
-  const verdict = normalizeEffectiveReviewVerdict(job?.reviewBody);
-  return verdict === 'comment-only' || verdict === 'approved';
+  const classification = classifyFollowUpCriticality(job?.reviewBody);
+  return classification.critical === false
+    && (classification.verdict === 'comment-only' || classification.verdict === 'approved');
 }
 
 function handleClaimedStopFailure({ pendingPath, inProgressPath, stopCode, err }) {
@@ -761,6 +812,11 @@ function normalizeFollowUpJob(job) {
     ? persistedRemediationReply.path
     : null;
   const normalizedRiskClass = normalizeRiskClass(job?.riskClass);
+  const classification = resolveDurableFollowUpClassification(job?.reviewBody, job?.critical);
+  const recommendedFollowUpAction = buildRecommendedFollowUpAction({
+    critical: classification.critical,
+    settledClean: classification.settledClean,
+  });
   const subjectIdentity = buildCodePrSubjectIdentity({
     repo: job?.repo,
     prNumber: job?.prNumber,
@@ -773,9 +829,12 @@ function normalizeFollowUpJob(job) {
     subjectExternalId: job?.subjectExternalId || subjectIdentity.subjectExternalId,
     revisionRef: job?.revisionRef || subjectIdentity.revisionRef,
     riskClass: normalizedRiskClass,
+    critical: classification.critical,
     recommendedFollowUpAction: {
-      ...buildRecommendedFollowUpAction({ critical: job.critical }),
+      ...recommendedFollowUpAction,
       ...(job.recommendedFollowUpAction || {}),
+      priority: recommendedFollowUpAction.priority,
+      summary: recommendedFollowUpAction.summary,
       executionModel: 'bounded-manual-rounds',
       maxRounds: remediationPlan.maxRounds,
     },
@@ -1678,6 +1737,7 @@ function buildFollowUpJob({
       round: seededRounds + 1,
     },
   };
+  const classification = resolveDurableFollowUpClassification(reviewBody, critical);
 
   return {
     schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
@@ -1704,7 +1764,7 @@ function buildFollowUpJob({
     // reviewerModel='codex'. Persisting the tag at creation time keeps the
     // builder→remediator routing deterministic.
     builderTag: builderTag || null,
-    critical: Boolean(critical),
+    critical: classification.critical,
     reviewSummary: extractReviewSummary(reviewBody),
     reviewBody,
     // Advisory-only reviews short-circuit before job creation; persisted jobs
@@ -1712,7 +1772,10 @@ function buildFollowUpJob({
     // that read historical schemas, but do not imply advisory jobs exist.
     verdict_mode: 'enforce',
     recommendedFollowUpAction: {
-      ...buildRecommendedFollowUpAction({ critical }),
+      ...buildRecommendedFollowUpAction({
+        critical: classification.critical,
+        settledClean: classification.settledClean,
+      }),
       maxRounds: remediationPlan.maxRounds,
     },
     remediationReply: buildRemediationReplyArtifact(null),
@@ -2689,6 +2752,7 @@ export {
   REMEDIATION_REPLY_KIND,
   REMEDIATION_REPLY_SCHEMA_VERSION,
   buildFollowUpJob,
+  classifyFollowUpCriticality,
   buildStopMetadata,
   buildRemediationReply,
   buildRemediationReplyArtifact,

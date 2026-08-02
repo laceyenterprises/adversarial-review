@@ -196,19 +196,29 @@ test('classifyBlockingFindings fails closed without throwing on missing bodies',
     classifyBlockingFindings(undefined, { lastVerdict: 'request-changes' }),
     { count: 0, state: 'unknown' },
   );
+  assert.deepEqual(
+    classifyBlockingFindings('Reviewer output was truncated before structured sections.'),
+    { count: 0, state: 'unknown' },
+  );
 });
 
-test('classifyBlockingFindings settles blank approving review bodies', () => {
+test('classifyBlockingFindings fails closed for sectionless approving review bodies', () => {
   assert.deepEqual(
     classifyBlockingFindings('', { lastVerdict: 'comment-only' }),
-    { count: 0, state: 'known' },
+    { count: 0, state: 'unknown' },
   );
   assert.deepEqual(
     classifyBlockingFindings('   ', { lastVerdict: 'approved' }),
-    { count: 0, state: 'known' },
+    { count: 0, state: 'unknown' },
   );
   assert.deepEqual(
     classifyBlockingFindings('', { lastVerdict: 'request-changes' }),
+    { count: 0, state: 'unknown' },
+  );
+  assert.deepEqual(
+    classifyBlockingFindings('## Summary\nClean.\n\n##### Blocking issues\n- None.\n\n## Verdict\nApproved', {
+      lastVerdict: 'approved',
+    }),
     { count: 0, state: 'unknown' },
   );
 });
@@ -1828,7 +1838,7 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
     reviewerModel: 'codex',
     linearTicketId: null,
     revisionRef: 'abc123',
-    reviewBody: '## Summary\nx\n## Verdict\n\nComment only',
+    reviewBody: '## Summary\nx\n\n## Blocking issues\n- None.\n\n## Verdict\n\nComment only',
     reviewPostedAt: '2026-05-02T10:00:00.000Z',
     critical: false,
   });
@@ -1861,8 +1871,8 @@ test('buildMergeAgentDispatchJob carries verdict and remediation state from the 
   assert.equal(dispatchJob.remediationCurrentRound, 0);
   // Spec-less jobs fall back to medium risk, which has a 2-round cap.
   assert.equal(dispatchJob.remediationMaxRounds, 2);
-  // No `## Blocking issues` section → zero blocking findings → final-pass
-  // auto-merge is permitted (this clean body would not even reach that branch).
+  // An explicit clean blocking section permits final-pass auto-merge (this
+  // clean body would not even reach that branch).
   assert.equal(dispatchJob.blockingFindingCount, 0);
   assert.equal(dispatchJob.blockingFindingState, 'known');
   assert.equal(dispatchJob.operatorApproval.actor, 'VirtualPaul');
@@ -2426,7 +2436,7 @@ test('buildMergeAgentDispatchJob ignores stale active remediation on an older he
     reviewerModel: 'codex',
     linearTicketId: null,
     revisionRef: 'new-head',
-    reviewBody: '## Summary\nx\n## Verdict\n\nComment only',
+    reviewBody: '## Summary\nx\n\n## Blocking issues\n- None.\n\n## Verdict\n\nComment only',
     reviewPostedAt: '2026-05-02T10:00:00.000Z',
     critical: false,
   });

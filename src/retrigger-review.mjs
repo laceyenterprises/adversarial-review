@@ -460,6 +460,21 @@ async function main(argv, {
     staleFollowUpStopped = true;
     latestJob = latestJobFinder(rootDir, { repo: values.repo, prNumber: values.pr });
     baseAudit.jobKey = latestJob?.job?.jobId || null;
+    if (isStaleActiveFollowUpJob(latestJob, resolveReviewHead(reviewRow))) {
+      const row = makeAuditRow({
+        ...baseAudit,
+        priorMaxRounds: latestJob?.job?.remediationPlan?.maxRounds ?? null,
+        newMaxRounds: latestJob?.job?.remediationPlan?.maxRounds ?? null,
+        outcome: 'refused:stale-follow-up-still-active',
+        exactHeadNow: true,
+        staleFollowUpStopped,
+      });
+      if (!appendTerminalAuditRow({ appendAuditRow, auditRootDir, row, stderr })) {
+        return EXIT_RUNTIME;
+      }
+      stderr.write(`refused:stale-follow-up-still-active: ${values.repo}#${values.pr}\n`);
+      return EXIT_BLOCKED;
+    }
   }
 
   if (values['exact-head-now'] && reviewRow?.review_status === 'reviewing') {

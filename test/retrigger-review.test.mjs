@@ -953,7 +953,7 @@ test('retrigger-review exact-head-now stops a stale active follow-up before re-a
     }),
     latestJobFinder: () => {
       latestJobCalls += 1;
-      if (latestJobCalls <= 2) {
+      if (latestJobCalls === 1) {
         return {
           jobPath: path.join(rootDir, 'data', 'follow-up-jobs', 'in-progress', 'job.json'),
           job: {
@@ -977,6 +977,52 @@ test('retrigger-review exact-head-now stops a stale active follow-up before re-a
   assert.equal(row.staleFollowUpStopped, true);
   assert.equal(stopped.length, 1);
   assert.match(stopped[0].reason, /Superseded by operator exact-head re-review request/);
+});
+
+test('retrigger-review refuses when a stale active follow-up survives the stop operation', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'retrigger-review-'));
+  const staleJob = {
+    jobPath: path.join(rootDir, 'data', 'follow-up-jobs', 'in-progress', 'job.json'),
+    job: {
+      jobId: 'job-still-active-238',
+      status: 'in_progress',
+      revisionRef: 'head-stale-237',
+      remediationPlan: { maxRounds: 2 },
+    },
+  };
+  const audits = [];
+  const err = makeCaptureStream();
+  const rc = await main([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '238',
+    '--reason', 'retry',
+    '--exact-head-now',
+    '--no-bump-budget',
+    '--root-dir', rootDir,
+  ], {
+    stdout: makeCaptureStream(),
+    stderr: err,
+    findAuditRow: () => null,
+    appendAuditRow: (_auditRoot, row) => audits.push(row),
+    readReviewRow: () => ({
+      repo: 'laceyenterprises/agent-os',
+      pr_number: 238,
+      pr_state: 'open',
+      review_status: 'posted',
+      revision_ref: 'head-current-238',
+    }),
+    latestJobFinder: () => staleJob,
+    stopFollowUpJobImpl: async () => ({ job: { status: 'stopped' } }),
+    rereview: () => {
+      throw new Error('must not re-arm while stale remediation is active');
+    },
+  });
+
+  assert.equal(rc, 1);
+  assert.match(err.text(), /refused:stale-follow-up-still-active/);
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].outcome, 'refused:stale-follow-up-still-active');
+  assert.equal(audits[0].staleFollowUpStopped, true);
 });
 
 test('retrigger-review returns runtime exit code when a refusal-path audit append fails', async () => {

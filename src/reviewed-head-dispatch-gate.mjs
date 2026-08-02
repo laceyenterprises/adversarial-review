@@ -88,12 +88,37 @@ export function buildDuplicateReviewSkipAudit({
  * review's id, or null when none matches. Pure so it is unit-testable without
  * the network.
  */
-export function selectExistingReviewIdForHead(reviews) {
+export function selectExistingReviewForHead(reviews) {
   if (!Array.isArray(reviews) || reviews.length === 0) return null;
-  const withId = reviews.find((review) => review && review.id != null && review.id !== '');
+  return reviews.find((review) => review) || null;
+}
+
+export function selectExistingReviewIdForHead(reviews) {
+  const existing = selectExistingReviewForHead(reviews);
   // A matching review with no id still proves the head is reviewed (the caller
   // treats a non-empty array as already-reviewed); we just can't name its id.
-  return withId ? String(withId.id) : null;
+  return existing && existing.id != null && existing.id !== '' ? String(existing.id) : null;
+}
+
+export function restorePendingReviewedHeadDedupRow({
+  restoreStatement,
+  repoPath,
+  prNumber,
+  headSha,
+  reviewSubmittedAt = null,
+  now = () => new Date().toISOString(),
+} = {}) {
+  const head = String(headSha || '').trim();
+  if (!head || typeof restoreStatement?.run !== 'function') {
+    return { attempted: false, restored: false, reason: 'not-restorable' };
+  }
+  const postedAt = String(reviewSubmittedAt || now());
+  const result = restoreStatement.run(postedAt, head, repoPath, prNumber, head);
+  return {
+    attempted: true,
+    restored: Number(result?.changes || 0) === 1,
+    postedAt,
+  };
 }
 
 /**
@@ -105,7 +130,7 @@ export function selectExistingReviewIdForHead(reviews) {
  * empty/unresolvable set fails closed inside the fetch (treated as "no proof",
  * so we allow dispatch rather than block on unknowable authorship).
  *
- * @returns {Promise<{alreadyReviewed: boolean, reviewId: string|null, reason: string|null}>}
+ * @returns {Promise<{alreadyReviewed: boolean, reviewId: string|null, reviewSubmittedAt: string|null, reason: string|null}>}
  */
 export async function resolveAlreadyReviewedHeadDedup({
   repoPath,
@@ -117,10 +142,10 @@ export async function resolveAlreadyReviewedHeadDedup({
 } = {}) {
   const head = String(headSha || '').trim();
   if (!head) {
-    return { alreadyReviewed: false, reviewId: null, reason: 'missing-head-sha' };
+    return { alreadyReviewed: false, reviewId: null, reviewSubmittedAt: null, reason: 'missing-head-sha' };
   }
   if (typeof fetchReviewsForHeadImpl !== 'function') {
-    return { alreadyReviewed: false, reviewId: null, reason: 'no-fetch-impl' };
+    return { alreadyReviewed: false, reviewId: null, reviewSubmittedAt: null, reason: 'no-fetch-impl' };
   }
   let reviews;
   try {
@@ -135,14 +160,16 @@ export async function resolveAlreadyReviewedHeadDedup({
       `[watcher] reviewed-head dedup probe failed for ${repoPath}#${prNumber}@${head.slice(0, 12)}; ` +
         `allowing dispatch (fail-open): ${err?.message || err}`
     );
-    return { alreadyReviewed: false, reviewId: null, reason: 'probe-error' };
+    return { alreadyReviewed: false, reviewId: null, reviewSubmittedAt: null, reason: 'probe-error' };
   }
   if (!Array.isArray(reviews) || reviews.length === 0) {
-    return { alreadyReviewed: false, reviewId: null, reason: null };
+    return { alreadyReviewed: false, reviewId: null, reviewSubmittedAt: null, reason: null };
   }
+  const existing = selectExistingReviewForHead(reviews);
   return {
     alreadyReviewed: true,
     reviewId: selectExistingReviewIdForHead(reviews),
+    reviewSubmittedAt: existing?.submittedAt || null,
     reason: 'commit-id-match',
   };
 }

@@ -293,6 +293,26 @@ export const stmtRestoreSameHeadSuppressedReviewPosted = db.prepare(
       AND review_status = 'pending'
       AND reviewer_head_sha = ?`
 );
+export const stmtRestoreReviewedHeadDedupSuppressedReviewPosted = db.prepare(
+  `UPDATE reviewed_prs
+      SET review_status = 'posted',
+          posted_at = COALESCE(posted_at, ?),
+          failed_at = NULL,
+          failure_message = NULL,
+          quota_reset_at_utc = NULL,
+          reviewer_lease_expires_at = NULL,
+          reviewer_head_sha = COALESCE(NULLIF(reviewer_head_sha, ''), ?),
+          rereview_requested_at = NULL,
+          rereview_reason = NULL
+    WHERE repo = ?
+      AND pr_number = ?
+      AND review_status = 'pending'
+      AND (
+        reviewer_head_sha IS NULL
+        OR reviewer_head_sha = ''
+        OR reviewer_head_sha = ?
+      )`
+);
 // CAS variant for reviewer-command-failed posted-reconciliation (LAC-1359
 // follow-up). The reconcile path shells out to GitHub (async) BEFORE mutating
 // SQLite, so a generic repo+pr_number UPDATE could overwrite a row that moved on

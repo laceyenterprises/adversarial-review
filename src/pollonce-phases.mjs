@@ -111,6 +111,7 @@ import {
   stmtMarkReviewerCommandFailedRecoveredPosted,
   stmtMarkUnknownFailureRetryAttemptStarted,
   stmtReleaseReviewerClaim,
+  stmtRestoreReviewedHeadDedupSuppressedReviewPosted,
   stmtRestoreSameHeadSuppressedReviewPosted,
   stmtUpdateReviewLabels,
   stmtUpdateReviewRouting,
@@ -120,6 +121,7 @@ import {
   buildDuplicateReviewSkipAudit,
   headDispatchLeaseKey,
   resolveAlreadyReviewedHeadDedup,
+  restorePendingReviewedHeadDedupRow,
 } from './reviewed-head-dispatch-gate.mjs';
 import { shouldBackoffReviewerSpawn } from './reviewer-cascade.mjs';
 import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-failed-recovery.mjs';
@@ -1284,6 +1286,21 @@ export async function processReviewSubject(entry, ctx) {
                 headSha: subject?.headSha || null,
                 reviewId: reviewedHeadDedup.reviewId,
               }));
+              const restore = restorePendingReviewedHeadDedupRow({
+                restoreStatement: stmtRestoreReviewedHeadDedupSuppressedReviewPosted,
+                repoPath,
+                prNumber,
+                headSha: subject?.headSha || null,
+                reviewSubmittedAt: reviewedHeadDedup.reviewSubmittedAt,
+              });
+              if (restore.attempted) {
+                console.log(
+                  `[watcher] reviewed-head dedup row repair for ${repoPath}#${prNumber}: ` +
+                    (restore.restored
+                      ? `restored review_status='posted' posted_at=${restore.postedAt}`
+                      : 'restore skipped by CAS')
+                );
+              }
               return;
             }
 

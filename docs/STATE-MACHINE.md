@@ -465,6 +465,15 @@ Reviewer-pass body capture is additive state on `reviewer_passes`:
 | `body_md` | Markdown body captured from the GitHub review/comment artifact |
 | `gh_comment_id` | GitHub comment or review artifact identifier; non-null values are unique |
 | `body_captured_at` | Time the body scraper captured `body_md` for that pass |
+| `worker_run_id` | Session-ledger `worker_runs.run_id` for a dispatched reviewer, when resolved |
+| `metadata_json.launchRequestId` | Real worker-pool launch request ID or `null`; never an adapter reattach token |
+| `metadata_json.reattachToken` | Adapter-owned session/request/idempotency handle, kept distinct from launch provenance |
+| `metadata_json.workerRunAttribution` | `resolved`, repairable `pending`, or `not-applicable` attribution state with bounded lookup evidence |
+
+Reviewer settle retries transient ledger contention before leaving attribution
+`pending`. The reviewer-pass backfill CLI repairs pending rows by the real
+`launchRequestId`; reattach-only rows are never eligible. The full field and
+repair contract is catalogued in `docs/data-model/reviewer-passes.md`.
 
 The review poster treats a captured body for the same repo, PR, reviewed head,
 reviewer model, and pass kind as its durable post checkpoint. If reviewed-

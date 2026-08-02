@@ -26,6 +26,14 @@
       "owner": "ARC-17 Merge Authority v2 leased executor"
     },
     {
+      "id": "reviewer-passes",
+      "title": "Reviewer Passes",
+      "path": "docs/data-model/reviewer-passes.md",
+      "store": "data/reviews.db",
+      "schemaSurface": "migrations/20260518_reviewer_passes.sql",
+      "owner": "reviewer spawn, settle, and token attribution"
+    },
+    {
       "id": "review-freshness-state",
       "title": "Review Freshness State",
       "path": "docs/data-model/review-freshness-state.md",

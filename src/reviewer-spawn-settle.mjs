@@ -94,6 +94,7 @@ const REVIEWER_LEASE_RECOVERY_ENABLED = resolveReviewerLeaseRecoveryEnabled({
   watcherConfig: JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8')),
 });
 const INFRA_AUTO_RECOVER_CAP = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
+const REVIEWER_LEDGER_LOOKUP_DELAYS_MS = Object.freeze([25, 75]);
 
 // ARC-18: resolveReviewerIdentity + its identity map stay in watcher (still used
 // there and exported); re-derived here as a byte-identical copy for spawnReviewer.
@@ -111,6 +112,46 @@ function resolveReviewerIdentity({ reviewerModel, botTokenEnv } = {}) {
   if (normalizedModel === 'codex') return 'codex-reviewer-lacey';
   if (normalizedModel === 'gemini') return 'gemini-reviewer-lacey';
   return 'claude-reviewer-lacey';
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function classifyLedgerLookupError(err) {
+  const message = String(err?.code || err?.message || err || '').toLowerCase();
+  if (message.includes('sqlite_busy') || message.includes('database is locked') || message.includes('database is busy')) {
+    return 'sqlite-busy';
+  }
+  if (message.includes('sqlite_locked')) return 'sqlite-locked';
+  return 'lookup-failed';
+}
+
+function isTransientLedgerLookupError(err) {
+  return ['sqlite-busy', 'sqlite-locked'].includes(classifyLedgerLookupError(err));
+}
+
+async function readReviewerLedgerEvidenceWithRetry({
+  readImpl,
+  args,
+  sleepImpl = sleepMs,
+  delaysMs = REVIEWER_LEDGER_LOOKUP_DELAYS_MS,
+} = {}) {
+  let lastError = null;
+  let attempts = 0;
+  for (let attempt = 0; attempt <= delaysMs.length; attempt += 1) {
+    attempts += 1;
+    try {
+      const usage = await readImpl(args);
+      if (usage) return { usage, attempts, lastError: null };
+      lastError = 'worker-run-not-yet-visible';
+    } catch (err) {
+      lastError = classifyLedgerLookupError(err);
+      if (!isTransientLedgerLookupError(err)) break;
+    }
+    if (attempt < delaysMs.length) await sleepImpl(delaysMs[attempt]);
+  }
+  return { usage: null, attempts, lastError };
 }
 
 async function defaultPostGitHubReviewWithCapture(args) {
@@ -293,6 +334,7 @@ async function spawnReviewer({
   reviewerRuntimeAdapterOverride = null,
   postGitHubReviewWithCaptureImpl = defaultPostGitHubReviewWithCapture,
   readBestReviewerEvidenceTokenUsageImpl = readBestReviewerEvidenceTokenUsage,
+  ledgerLookupSleepImpl = sleepMs,
   completeReviewerPassImpl = completeReviewerPass,
 }) {
   const activeReviewerRuntimeAdapter = reviewerRuntimeAdapterOverride || reviewerRuntimeState.adapter;
@@ -424,23 +466,30 @@ async function spawnReviewer({
       // On failure we settle the pass with null token usage instead.
       let tokenUsage = null;
       let reviewerTokenUsageArtifact = null;
-      const launchRequestId = result.launchRequestId || result.reattachToken || null;
+      // `reattachToken` is an adapter/idempotency handle. It may historically
+      // resemble an LRQ, but it is not proof of a real worker launch. Keep it as
+      // a lookup fallback only and never persist it as metadata.launchRequestId.
+      const launchRequestId = result.launchRequestId || null;
+      const ledgerLookupLaunchRequestId = launchRequestId || result.reattachToken || null;
       // WCW attribution: the reviewer worker's real ledger run_id, captured from
       // the RAW token usage before tagTokenUsage()/normalizeTokenUsage() drops it
       // (the normalized token-usage shape intentionally carries only counters,
       // not attribution). Populates reviewer_passes.worker_run_id at settle.
       let resolvedWorkerRunId = null;
+      let workerRunAttribution = null;
       try {
         let rawTokenUsage = result.tokenUsage || null;
         if (!rawTokenUsage?.workerRunId) {
-          let ledgerTokenUsage = null;
-          try {
-            ledgerTokenUsage = readBestReviewerEvidenceTokenUsageImpl({
+          const ledgerLookup = await readReviewerLedgerEvidenceWithRetry({
+            readImpl: readBestReviewerEvidenceTokenUsageImpl,
+            sleepImpl: ledgerLookupSleepImpl,
+            args: {
               // SDK/os-dispatch reattaches by app-contract request_id, but the
               // session ledger attributes worker_runs by launch_request_id.
-              // Older adapters surfaced that launch id as the reattach token, so
-              // keep the lookup fallback while leaving metadata explicit below.
-              launchRequestId,
+              // Older adapters surfaced that launch id only as the reattach
+              // token, so use it for lookup compatibility without contaminating
+              // the durable launchRequestId field below.
+              launchRequestId: ledgerLookupLaunchRequestId,
               adapterSessionKey: result.reattachToken || reviewerSessionUuid,
               sessionKeys: [
                 reviewerSessionUuid,
@@ -452,11 +501,13 @@ async function spawnReviewer({
               endedAt,
               reviewerModel,
               rootDir: ROOT,
-            });
-          } catch (ledgerErr) {
+            },
+          });
+          const ledgerTokenUsage = ledgerLookup.usage;
+          if (ledgerLookup.lastError && ledgerLookup.lastError !== 'worker-run-not-yet-visible') {
             console.warn(
               `[watcher] reviewer_pass_token_ledger_lookup_failed repo=${repo} pr=${prNumber} ` +
-              `session=${reviewerSessionUuid}: ${ledgerErr?.message || ledgerErr}`
+              `session=${reviewerSessionUuid} attempts=${ledgerLookup.attempts}: ${ledgerLookup.lastError}`
             );
           }
           if (ledgerTokenUsage) {
@@ -467,8 +518,37 @@ async function spawnReviewer({
                 }
               : ledgerTokenUsage;
           }
+          workerRunAttribution = {
+            state: ledgerTokenUsage?.workerRunId ? 'resolved' : (launchRequestId ? 'pending' : 'not-applicable'),
+            launchRequestId,
+            workerRunId: ledgerTokenUsage?.workerRunId || null,
+            lookupAttempts: ledgerLookup.attempts,
+            lastError: ledgerLookup.lastError,
+            retryable: Boolean(launchRequestId && !ledgerTokenUsage?.workerRunId),
+            ...(!launchRequestId && !ledgerTokenUsage?.workerRunId
+              ? { reason: 'missing-launch-request-id' }
+              : {}),
+          };
         }
         resolvedWorkerRunId = rawTokenUsage?.workerRunId || null;
+        if (!workerRunAttribution) {
+          workerRunAttribution = {
+            state: 'resolved',
+            launchRequestId,
+            workerRunId: resolvedWorkerRunId,
+            lookupAttempts: 0,
+            lastError: null,
+            retryable: false,
+          };
+        } else if (resolvedWorkerRunId && workerRunAttribution.state !== 'resolved') {
+          workerRunAttribution = {
+            ...workerRunAttribution,
+            state: 'resolved',
+            workerRunId: resolvedWorkerRunId,
+            lastError: null,
+            retryable: false,
+          };
+        }
         tokenUsage = tagTokenUsage(rawTokenUsage, 'guardrail');
         if (tokenUsage) {
           reviewerTokenUsageArtifact = writeReviewerTokenUsageArtifactBestEffort({
@@ -521,6 +601,7 @@ async function spawnReviewer({
           reviewerSessionUuid,
           launchRequestId,
           reattachToken: result.reattachToken || null,
+          workerRunAttribution,
           failureClass: result.failureClass || null,
           tokenUsageNoUsageReason: result.tokenUsageNoUsageReason || null,
           reviewerTokenUsageArtifact,

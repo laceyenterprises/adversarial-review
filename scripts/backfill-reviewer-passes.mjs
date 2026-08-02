@@ -3,7 +3,11 @@
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { backfillReviewerPasses, backfillCloserReviewerPasses } from '../src/reviewer-pass-tokens.mjs';
+import {
+  backfillCloserReviewerPasses,
+  backfillReviewerPasses,
+  backfillReviewerWorkerRunAttribution,
+} from '../src/reviewer-pass-tokens.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -98,6 +102,12 @@ function main(argv = process.argv.slice(2), io = {}) {
       env,
     });
     result.closer = closer;
+    const attribution = backfillReviewerWorkerRunAttribution(args.rootDir, {
+      ledgerTarget: args.ledgerTarget,
+      dryRun: args.dryRun,
+      env,
+    });
+    result.workerRunAttribution = attribution;
     if (args.json) {
       stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     } else {
@@ -113,7 +123,10 @@ function main(argv = process.argv.slice(2), io = {}) {
         `claude_transcript_matched=${result.claudeTranscriptMatched} ` +
         `skipped=${result.skipped} ` +
         `closer_considered=${closer.considered} closer_filled=${closer.filled} ` +
-        `closer_still_missing=${closer.stillMissing}\n`
+        `closer_still_missing=${closer.stillMissing} ` +
+        `attribution_considered=${attribution.considered} ` +
+        `attribution_resolved=${attribution.resolved} ` +
+        `attribution_still_pending=${attribution.stillPending}\n`
       );
     }
     return 0;

@@ -226,9 +226,10 @@ test('spawnReviewer enriches adapter token usage with ledger worker_run_id witho
   });
 });
 
-test('spawnReviewer preserves adapter token usage when optional ledger lookup fails', async () => {
+test('spawnReviewer retries transient ledger contention and preserves adapter counters', async () => {
   const settled = [];
   const warnings = [];
+  let lookupCalls = 0;
   const originalWarn = console.warn;
   console.warn = (message) => warnings.push(String(message));
   try {
@@ -262,8 +263,11 @@ test('spawnReviewer preserves adapter token usage when optional ledger lookup fa
       },
       postGitHubReviewWithCaptureImpl: async () => {},
       readBestReviewerEvidenceTokenUsageImpl: () => {
-        throw new Error('SQLITE_BUSY');
+        lookupCalls += 1;
+        if (lookupCalls < 3) throw new Error('SQLITE_BUSY');
+        return { workerRunId: 'wr_sdk_25', input: 1, output: 2, source: 'session-ledger' };
       },
+      ledgerLookupSleepImpl: async () => {},
       completeReviewerPassImpl: (_root, payload) => {
         settled.push(payload);
       },
@@ -275,7 +279,8 @@ test('spawnReviewer preserves adapter token usage when optional ledger lookup fa
   }
 
   assert.equal(settled.length, 1);
-  assert.equal(settled[0].workerRunId, null);
+  assert.equal(lookupCalls, 3);
+  assert.equal(settled[0].workerRunId, 'wr_sdk_25');
   assert.deepEqual(settled[0].tokenUsage, {
     input: 8,
     output: 13,
@@ -290,8 +295,72 @@ test('spawnReviewer preserves adapter token usage when optional ledger lookup fa
     source: 'adapter',
   });
   assert.equal(settled[0].tokenSource, 'adapter');
-  assert.match(warnings[0] || '', /reviewer_pass_token_ledger_lookup_failed/);
-  assert.match(warnings[0] || '', /SQLITE_BUSY/);
+  assert.deepEqual(warnings, []);
+  assert.deepEqual(settled[0].metadata.workerRunAttribution, {
+    state: 'resolved',
+    launchRequestId: 'lrq_sdk_25',
+    workerRunId: 'wr_sdk_25',
+    lookupAttempts: 3,
+    lastError: null,
+    retryable: false,
+  });
+});
+
+test('spawnReviewer leaves repairable attribution after bounded transient ledger failures', async () => {
+  const settled = [];
+  const warnings = [];
+  let lookupCalls = 0;
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  try {
+    await spawnReviewer({
+      repo: 'laceyenterprises/demo',
+      prNumber: 26,
+      reviewerModel: 'gemini',
+      botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+      linearTicketId: 'LAC-566',
+      labels: [],
+      builderTag: 'codex',
+      reviewerHeadSha: 'sha26',
+      reviewAttemptNumber: 1,
+      reviewDbAttemptNumber: 2,
+      completedRemediationRounds: 0,
+      passKind: 'first-pass',
+      maxRemediationRounds: 2,
+      reviewerSessionUuid: 'spawn-settle-ledger-pending',
+      reviewerRuntimeAdapterOverride: {
+        async spawnReviewer() {
+          return {
+            ok: true,
+            reattachToken: 'sdk-request-id-26',
+            launchRequestId: 'lrq_sdk_26',
+            tokenUsage: { input: 8, output: 13, total: 21, source: 'adapter' },
+          };
+        },
+      },
+      readBestReviewerEvidenceTokenUsageImpl: () => {
+        lookupCalls += 1;
+        throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+      },
+      ledgerLookupSleepImpl: async () => {},
+      completeReviewerPassImpl: (_root, payload) => settled.push(payload),
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(lookupCalls, 3);
+  assert.equal(settled[0].workerRunId, null);
+  assert.equal(settled[0].metadata.launchRequestId, 'lrq_sdk_26');
+  assert.deepEqual(settled[0].metadata.workerRunAttribution, {
+    state: 'pending',
+    launchRequestId: 'lrq_sdk_26',
+    workerRunId: null,
+    lookupAttempts: 3,
+    lastError: 'sqlite-busy',
+    retryable: true,
+  });
+  assert.match(warnings[0] || '', /attempts=3: sqlite-busy/);
 });
 
 test('spawnReviewer persists worker_run_id onto reviewer_passes for SDK-dispatched settles', async () => {
@@ -392,6 +461,7 @@ test('spawnReviewer persists worker_run_id onto reviewer_passes for SDK-dispatch
 
 test('spawnReviewer settles worker_run_id null when no worker run resolves (cli-direct path)', async () => {
   const settled = [];
+  let lookupLaunchRequestId = null;
   const result = await spawnReviewer({
     repo: 'laceyenterprises/demo',
     prNumber: 22,
@@ -419,7 +489,11 @@ test('spawnReviewer settles worker_run_id null when no worker run resolves (cli-
       },
     },
     postGitHubReviewWithCaptureImpl: async () => {},
-    readBestReviewerEvidenceTokenUsageImpl: () => null, // ledger cannot resolve a worker run
+    readBestReviewerEvidenceTokenUsageImpl: ({ launchRequestId }) => {
+      lookupLaunchRequestId = launchRequestId;
+      return null; // ledger cannot resolve a worker run
+    },
+    ledgerLookupSleepImpl: async () => {},
     completeReviewerPassImpl: (_root, payload) => {
       settled.push(payload);
     },
@@ -427,8 +501,19 @@ test('spawnReviewer settles worker_run_id null when no worker run resolves (cli-
 
   assert.equal(result.ok, true);
   assert.equal(settled.length, 1);
+  assert.equal(lookupLaunchRequestId, 'lrq_wcw_null', 'legacy reattach token remains lookup-only');
   assert.equal(settled[0].workerRunId, null);
-  assert.equal(settled[0].metadata.launchRequestId, 'lrq_wcw_null');
+  assert.equal(settled[0].metadata.launchRequestId, null);
+  assert.equal(settled[0].metadata.reattachToken, 'lrq_wcw_null');
+  assert.deepEqual(settled[0].metadata.workerRunAttribution, {
+    state: 'not-applicable',
+    launchRequestId: null,
+    workerRunId: null,
+    lookupAttempts: 3,
+    lastError: 'worker-run-not-yet-visible',
+    retryable: false,
+    reason: 'missing-launch-request-id',
+  });
 });
 
 test('spawnReviewer preserves worker run_id when the adapter throws (error-path attribution)', async () => {

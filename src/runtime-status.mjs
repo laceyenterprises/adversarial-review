@@ -292,6 +292,17 @@ function renderCanaryLine(canary) {
   return `fallback canary: ${verdict} ${canary.at} (${detail}, ${durationS})`;
 }
 
+function renderSettleSmokeLine(settleSmoke) {
+  if (!settleSmoke) return 'settle smoke: not evaluated';
+  const verdict = settleSmoke.ok
+    ? 'PASS'
+    : String(settleSmoke.reason || 'unknown').toUpperCase();
+  const runtime = settleSmoke.runtime || 'agent-runtime';
+  const at = settleSmoke.result?.at ? ` ${settleSmoke.result.at}` : '';
+  const detail = settleSmoke.ok ? 'fresh' : (settleSmoke.reason || 'unknown');
+  return `settle smoke: ${verdict} ${runtime}${at} (${detail})`;
+}
+
 function renderReviewerCutoverLine(cutover) {
   if (!cutover || (cutover.requestedRuntime !== 'agent-runtime' && cutover.state !== 'forced')) {
     return 'reviewer cutover: not requested';
@@ -313,6 +324,7 @@ function renderRuntimeStatus(model) {
   lines.push(renderResumeLine(model.lastResume));
   lines.push(renderRunsLine(model.runs, model.reconcile));
   lines.push(renderCanaryLine(model.canary));
+  lines.push(renderSettleSmokeLine(model.settleSmoke));
   lines.push(renderReviewerCutoverLine(model.reviewerCutover));
   return lines.join('\n');
 }

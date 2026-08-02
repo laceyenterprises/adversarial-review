@@ -121,7 +121,11 @@ async function runRuntimeSettleSmoke({
   }
 
   const persisted = writeResultImpl(rootDir, runtime, smoke);
-  return { ok: smoke.status === 'pass', smoke: persisted || smoke, result };
+  return {
+    ok: smoke.status === 'pass',
+    smoke: persisted && !persisted.read_error ? persisted : smoke,
+    result,
+  };
 }
 
 async function runtimeSettleSmokeMain(argv, io = {}) {

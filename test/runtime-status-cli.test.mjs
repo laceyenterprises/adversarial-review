@@ -94,6 +94,7 @@ test('renders the SPEC Win 1 status block from durable artifacts', async () => {
       'last resume:   2026-07-17T09:12:04.000Z -> os     (6 healthy probes / 5m)',
       'runs (24h): os=41 local=7   reconciled-on-resume: 2 adopted, 0 duplicated',
       'fallback canary: PASS 2026-07-17T06:00:12.000Z (local fixture review, verdict=comment-only, 94s)',
+      'settle smoke: MISSING agent-runtime (missing)',
       'reviewer cutover: not requested',
     ].join('\n'));
 
@@ -122,7 +123,8 @@ test('degrades gracefully with no artifacts: unknown probe, none/never lines, os
     assert.equal(lines[3], 'last resume:   none');
     assert.match(lines[4], /^runs \(24h\): os=0 local=0\s+reconciled-on-resume: n\/a$/);
     assert.equal(lines[5], 'fallback canary: never run');
-    assert.equal(lines[6], 'reviewer cutover: not requested');
+    assert.equal(lines[6], 'settle smoke: MISSING agent-runtime (missing)');
+    assert.equal(lines[7], 'reviewer cutover: not requested');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -196,7 +198,7 @@ test('runtime status surfaces reviewer cutover refusal reasons for code-pr', () 
       now: () => new Date('2026-07-17T12:00:00.000Z'),
       env: { AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos' },
     });
-    const line = renderRuntimeStatus(model).split('\n')[6];
+    const line = renderRuntimeStatus(model).split('\n')[7];
     assert.equal(model.reviewerCutover.selectedRuntime, 'agent-os-hq');
     assert.equal(model.reviewerCutover.state, 'refused');
     assert.match(line, /reviewer cutover: REFUSED agent-os-hq/);
@@ -218,7 +220,7 @@ test('runtime status surfaces reviewer runtime kill-switch before not-requested 
       now: () => new Date('2026-07-17T12:00:00.000Z'),
       env: { ADVERSARIAL_REVIEWER_RUNTIME: 'agent-runtime' },
     });
-    const line = renderRuntimeStatus(model).split('\n')[6];
+    const line = renderRuntimeStatus(model).split('\n')[7];
     assert.equal(model.reviewerCutover.state, 'forced');
     assert.equal(model.reviewerCutover.selectedRuntime, 'agent-runtime');
     assert.match(line, /reviewer cutover: FORCED agent-runtime/);
@@ -237,7 +239,7 @@ test('runtime status surfaces reviewer runtime kill-switch when code-pr config i
       now: () => new Date('2026-07-17T12:00:00.000Z'),
       env: { ADVERSARIAL_REVIEWER_RUNTIME: 'cli-direct' },
     });
-    const line = renderRuntimeStatus(model).split('\n')[6];
+    const line = renderRuntimeStatus(model).split('\n')[7];
     assert.equal(model.reviewerCutover.state, 'forced');
     assert.equal(model.reviewerCutover.selectedRuntime, 'cli-direct');
     assert.match(line, /reviewer cutover: FORCED cli-direct/);
@@ -330,6 +332,31 @@ test('runtime settle-smoke preserves its in-memory result when persistence read-
   assert.equal(outcome.ok, true);
   assert.equal(outcome.smoke.status, 'pass');
   assert.equal(outcome.smoke.workerRunId, 'wr_smoke_readback');
+});
+
+test('runtime settle-smoke preserves its in-memory result when persistence read-back is unreadable', async () => {
+  const outcome = await runRuntimeSettleSmoke({
+    rootDir: '/fixture',
+    now: () => new Date('2026-08-02T10:00:00.000Z'),
+    createRuntime: () => ({
+      async run() {
+        return {
+          runRef: 'smoke-req-unreadable',
+          async await() {
+            return {
+              status: 'completed',
+              usage: { workerRunId: 'wr_smoke_unreadable' },
+            };
+          },
+        };
+      },
+    }),
+    writeResultImpl: () => ({ runtime: 'agent-runtime', read_error: 'unreadable' }),
+  });
+
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.smoke.status, 'pass');
+  assert.equal(outcome.smoke.workerRunId, 'wr_smoke_unreadable');
 });
 
 test('snapshot and canary status writers reject cross-user durable state writes', () => {

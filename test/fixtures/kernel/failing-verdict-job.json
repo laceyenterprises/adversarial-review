@@ -89,7 +89,7 @@
               "name": "Codex Remediation Worker",
               "email": "codex-remediation-worker@laceyenterprises.com"
             },
-            "policy_violations": []
+            "policyViolations": []
           },
           "command": [
             "codex",
@@ -205,7 +205,7 @@
         "name": "Codex Remediation Worker",
         "email": "codex-remediation-worker@laceyenterprises.com"
       },
-      "policy_violations": []
+      "policyViolations": []
     },
     "command": [
       "codex",

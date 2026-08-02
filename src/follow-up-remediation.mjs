@@ -1181,7 +1181,7 @@ function prepareCodexRemediationStartupEnv({ gitIdentity = null, perWorkerKey = 
       gitIdentityOverrides: overriddenGitEnv,
     },
     gitIdentity: gitIdentity ? { name: gitIdentity.name, email: gitIdentity.email } : null,
-    policy_violations: policyViolations,
+    policyViolations,
   };
 
   if (policyViolations.length) {

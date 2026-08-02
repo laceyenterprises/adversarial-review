@@ -4,7 +4,11 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { SETTLE_SMOKE_FRESHNESS_WINDOW_MS, writeSettleSmokeResult } from '../src/adapters/agent-runtime/settle-smoke.mjs';
+import {
+  SETTLE_SMOKE_FRESHNESS_WINDOW_MS,
+  settleSmokeResultPath,
+  writeSettleSmokeResult,
+} from '../src/adapters/agent-runtime/settle-smoke.mjs';
 import { evaluateAgentRuntimeCutoverReadiness } from '../src/reviewer-runtime-cutover.mjs';
 
 function makeRoot() {
@@ -115,15 +119,17 @@ test('agent-runtime rejects an unsupported settle-smoke schema distinctly from m
   const rootDir = makeRoot();
   try {
     writeCodePrDomain(rootDir);
-    writeSettleSmokeResult(rootDir, 'agent-runtime', {
+    mkdirSync(join(rootDir, 'data', 'runtime-settle-smoke'), { recursive: true });
+    writeFileSync(settleSmokeResultPath(rootDir, 'agent-runtime'), JSON.stringify({
       schema_version: 2,
+      runtime: 'agent-runtime',
       status: 'pass',
       at: '2026-08-02T09:55:00.000Z',
       dispatched: true,
       settled: true,
       attributed: true,
       workerRunId: 'wr_future_schema',
-    });
+    }));
     const readiness = readyReadiness(rootDir, '2026-08-02T10:00:00.000Z');
     assert.equal(readiness.ready, false);
     assert.equal(readiness.reasons[0].code, 'settle-smoke-invalid');

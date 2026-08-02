@@ -28,9 +28,9 @@ function writeSettleSmokeResult(rootDir, runtime, result, { ownerGuardOptions } 
   writeFileAtomic(
     path,
     `${JSON.stringify({
+      ...result,
       schema_version: SETTLE_SMOKE_SCHEMA_VERSION,
       runtime,
-      ...result,
     }, null, 2)}\n`,
     { overwrite: true },
   );

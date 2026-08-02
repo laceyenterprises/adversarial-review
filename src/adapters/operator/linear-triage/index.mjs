@@ -239,12 +239,21 @@ function criticalWordsInSummary(reviewSummary, criticalWords = DEFAULT_CRITICAL_
   return criticalWords.filter((word) => lower.includes(String(word).toLowerCase()));
 }
 
-function buildCriticalFlagComment(reviewSummary, criticalWords = DEFAULT_CRITICAL_WORDS) {
+function buildCriticalFlagComment(
+  reviewSummary,
+  criticalWords = DEFAULT_CRITICAL_WORDS,
+  { blockingFindingCount = null, blockingFindingState = null } = {}
+) {
   const matches = criticalWordsInSummary(reviewSummary, criticalWords);
+  let issueSummary = matches.join(', ');
+  if (!issueSummary && blockingFindingState === 'known' && Number.isInteger(blockingFindingCount) && blockingFindingCount > 0) {
+    issueSummary = `${blockingFindingCount} blocking finding${blockingFindingCount === 1 ? '' : 's'}`;
+  }
+  if (!issueSummary) issueSummary = 'blocking findings present';
   return [
     '**Adversarial review flagged critical issues** - Paul, please review.',
     '',
-    `Issues detected: ${matches.join(', ')}`,
+    `Issues detected: ${issueSummary}`,
     '',
     'Full review posted as a GitHub PR comment.',
   ].join('\n');
@@ -339,9 +348,10 @@ function createLinearTriageAdapter({
 
     await syncTriageStatus(subjectRef, 'done');
 
-    const derivedCritical = String(reviewBody || '').trim()
-      ? classifyFollowUpCriticality(reviewBody).critical
-      : critical;
+    const criticality = String(reviewBody || '').trim()
+      ? classifyFollowUpCriticality(reviewBody)
+      : null;
+    const derivedCritical = criticality ? criticality.critical : critical;
     if (!derivedCritical) return;
     const linear = await getLinearClient();
     if (!linear) return;
@@ -350,7 +360,10 @@ function createLinearTriageAdapter({
       if (!issue) return;
       await linear.createComment({
         issueId: issue.id,
-        body: buildCriticalFlagComment(reviewSummary, criticalWords),
+        body: buildCriticalFlagComment(reviewSummary, criticalWords, {
+          blockingFindingCount: criticality?.blockingFindingCount,
+          blockingFindingState: criticality?.blockingFindingState,
+        }),
       });
       logger.log?.(`[linear-triage] Linear ${ticketId} - critical flag comment added`);
     } catch (err) {

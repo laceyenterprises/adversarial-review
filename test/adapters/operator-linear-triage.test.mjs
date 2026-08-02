@@ -178,16 +178,16 @@ test('recordReviewCompleted still posts a critical flag when the review body car
 
   await adapter.recordReviewCompleted(subjectRef(), {
     critical: false,
-    reviewSummary: 'Blocking findings remain.',
+    reviewSummary: 'The last page is skipped during pagination.',
     reviewBody: [
       '## Summary',
-      'Blocking findings remain.',
+      'The last page is skipped during pagination.',
       '',
       '## Blocking issues',
-      '- **Critical request validation gap**',
+      '- **Off-by-one in pagination breaks the last page**',
       '  - **File:** src/request-handler.mjs',
       '  - **Lines:** 12-40',
-      '  - **Problem:** Security validation is bypassed.',
+      '  - **Problem:** The final result page is never returned.',
       '',
       '## Verdict',
       'Request changes',
@@ -198,6 +198,7 @@ test('recordReviewCompleted still posts a critical flag when the review body car
     { issueId: 'issue-1', payload: { stateId: 'state-done' } },
   ]);
   assert.equal(comments.length, 1);
+  assert.match(comments[0].body, /Issues detected: 1 blocking finding/);
 });
 
 test('ticket-pipeline-paused PR label suppresses Linear updates and comments', async () => {

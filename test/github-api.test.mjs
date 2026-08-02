@@ -6,10 +6,14 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
+import './helpers/rate-limit-state-isolation.mjs';
+
 const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname);
 const FIXTURE_REPO = 'laceyenterprises/adversarial-review';
 const FIXTURE_PR = 1388;
 const WATCHER_SUMMARY_MARKER = '@@GITHUB_API_WATCHER_SUMMARY@@';
+
+process.env.AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY = '0';
 
 async function withEnv(overrides, fn) {
   const previous = {};
@@ -978,7 +982,7 @@ test('github adapter auto-discovery reaches the superproject path and ignores un
   );
   assert.equal(
     __test__.resolveGitHubAdapterBin({
-      env: {},
+      env: { AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY: '1' },
       rootDir,
       existsImpl: (candidate) => candidate === superprojectCandidate,
       statImpl: safeStatFor,
@@ -989,7 +993,18 @@ test('github adapter auto-discovery reaches the superproject path and ignores un
   );
   assert.equal(
     __test__.resolveGitHubAdapterBin({
-      env: {},
+      env: { AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY: '0' },
+      rootDir,
+      existsImpl: (candidate) => candidate === superprojectCandidate,
+      statImpl: safeStatFor,
+      lstatImpl: () => safeStat,
+      realpathImpl: (candidate) => candidate,
+    }),
+    null,
+  );
+  assert.equal(
+    __test__.resolveGitHubAdapterBin({
+      env: { AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY: '1' },
       rootDir,
       existsImpl: (candidate) => candidate === superprojectCandidate,
       statImpl: (candidate) => (

@@ -510,6 +510,24 @@ function schemaV1() {
                 __min: 0.0,
                 __max: 3600.0,
               },
+              credential_decay_warn_after_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 300.0,
+                __min: 0.0,
+                __max: 86400.0,
+              },
+              credential_decay_crit_after_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 3600.0,
+                __min: 0.0,
+                __max: 86400.0,
+              },
+              credential_decay_last_good_crit_expiry_margin_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 1800.0,
+                __min: 0.0,
+                __max: 86400.0,
+              },
               // Port-forward-wedge remediation tiers (#1958, PFW-05).
               broker_container_name: {
                 __type: TYPE_STRING,
@@ -2606,8 +2624,11 @@ export const ENV_ALIASES = {
     aliases: [['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_CRIT_AFTER_SECONDS', Number]],
   },
   'oauth_broker.watchdog.credential_decay_last_good_crit_expiry_margin_seconds': {
-    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS',
-    aliases: [['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS', Number]],
+    canonical:
+      'AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS',
+    aliases: [
+      ['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS', Number],
+    ],
   },
   'policy.dedup.uncommitted_line_threshold': {
     canonical: 'AGENT_OS_POLICY_DEDUP_UNCOMMITTED_LINE_THRESHOLD',

@@ -56,6 +56,18 @@ function evaluateSettleSmokeResult(rootDir, {
     };
   }
 
+  if (result.schema_version !== SETTLE_SMOKE_SCHEMA_VERSION) {
+    return {
+      runtime,
+      result,
+      ok: false,
+      fresh: false,
+      reason: 'unsupported-schema-version',
+      evaluatedAt: now().toISOString(),
+      freshnessWindowMs,
+    };
+  }
+
   const status = String(result.status || '').trim().toLowerCase();
   if (status !== 'pass') {
     return {
@@ -82,7 +94,7 @@ function evaluateSettleSmokeResult(rootDir, {
     };
   }
 
-  const ageMs = Math.max(0, Date.parse(now().toISOString()) - atMs);
+  const ageMs = Math.max(0, now().getTime() - atMs);
   if (ageMs > freshnessWindowMs) {
     return {
       runtime,

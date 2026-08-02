@@ -421,6 +421,7 @@ function baseResult(result) {
     pgid: Number.isInteger(result?.artifact?.pgid) ? result.artifact.pgid : null,
     spawnedAt: new Date().toISOString(),
     reattachToken: result?.artifact?.reattachToken || null,
+    launchRequestId: result?.artifact?.reviewerRunRef || null,
     tokenUsage: result?.usage || null,
     runtimeMode: result?.runtimeMode || null,
   };

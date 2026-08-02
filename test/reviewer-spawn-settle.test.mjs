@@ -1,7 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import { spawnReviewer } from '../src/reviewer-spawn-settle.mjs';
+import {
+  beginReviewerPass,
+  completeReviewerPass,
+  readBestReviewerEvidenceTokenUsage,
+} from '../src/reviewer-pass-tokens.mjs';
+import { createSessionLedgerDb } from './helpers/session-ledger-fixtures.mjs';
 
 test('spawnReviewer posts successful adapter-produced review bodies through GitHub capture', async () => {
   const posted = [];
@@ -85,7 +94,7 @@ test('spawnReviewer does not post unmarked adapter review bodies', async () => {
   assert.deepEqual(posted, []);
 });
 
-test('spawnReviewer threads the reviewer worker run_id into the settled pass (WCW attribution)', async () => {
+test('spawnReviewer resolves worker_run_id from os-dispatch launch_request_id while reattach stays on request_id', async () => {
   let readBestArgs = null;
   const settled = [];
   const result = await spawnReviewer({
@@ -109,8 +118,10 @@ test('spawnReviewer threads the reviewer worker run_id into the settled pass (WC
           ok: true,
           reviewBody: '## Summary\nLooks good.\n\n## Verdict\nComment only',
           reviewBodyDelivery: 'caller-post',
-          // SDK-dispatch adapter surfaces the worker's dispatch id here.
-          reattachToken: 'lrq_wcw_attribution',
+          // Reattach remains keyed by request_id / idempotencyKey.
+          reattachToken: 'code-pr:pr-21:sha21:review:reviewer:gemini:2',
+          // The ledger worker_run is keyed by launch_request_id instead.
+          launchRequestId: 'lrq_wcw_attribution',
           spawnedAt: '2026-07-28T03:00:00.000Z',
         };
       },
@@ -128,13 +139,106 @@ test('spawnReviewer threads the reviewer worker run_id into the settled pass (WC
   });
 
   assert.equal(result.ok, true);
-  // The reviewer worker's dispatch id (reattachToken) must be threaded as
-  // launchRequestId so the ledger read can resolve the worker_runs row.
+  // Reattach still uses request_id, but WCW attribution must read by the real
+  // launch_request_id surfaced by os-dispatch.
   assert.equal(readBestArgs?.launchRequestId, 'lrq_wcw_attribution');
+  assert.equal(readBestArgs?.adapterSessionKey, 'code-pr:pr-21:sha21:review:reviewer:gemini:2');
   // The resolved ledger run_id must be persisted to reviewer_passes.worker_run_id,
   // surviving tagTokenUsage()/normalizeTokenUsage() (which drop attribution).
   assert.equal(settled.length, 1);
   assert.equal(settled[0].workerRunId, 'run_wcw_attribution_123');
+  assert.equal(settled[0].metadata.launchRequestId, 'lrq_wcw_attribution');
+});
+
+test('spawnReviewer persists worker_run_id onto reviewer_passes for SDK-dispatched settles', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'spawn-settle-sdk-attribution-'));
+  const ledgerDb = path.join(rootDir, 'ledger.db');
+  let settledRow = null;
+  createSessionLedgerDb(ledgerDb, {
+    runtimeSessions: [
+      {
+        session_id: 'rs_sdk',
+        adapter_session_key: 'sdk-request-id-21',
+        total_input_tokens: 31,
+        total_output_tokens: 12,
+        total_cache_read_tokens: 0,
+        total_cache_write_tokens: 0,
+        total_cost_usd: 0.09,
+        source_path: rootDir,
+        started_at: '2026-07-28T03:00:00.000Z',
+        ended_at: '2026-07-28T03:02:00.000Z',
+      },
+    ],
+    workerRuns: [
+      {
+        run_id: 'wr_sdk_21',
+        launch_request_id: 'lrq_sdk_21',
+        session_id: 'rs_sdk',
+        status: 'succeeded',
+        token_usage_input: 31,
+        token_usage_output: 12,
+        token_usage_guardrail: 43,
+        token_usage_cost_usd: 0.09,
+        token_usage_source: 'session-ledger',
+        started_at: '2026-07-28T03:00:00.000Z',
+        ended_at: '2026-07-28T03:02:00.000Z',
+        updated_at: '2026-07-28T03:02:00.000Z',
+      },
+    ],
+  });
+  beginReviewerPass(rootDir, {
+    repo: 'laceyenterprises/demo',
+    prNumber: 121,
+    attemptNumber: 2,
+    reviewerClass: 'gemini',
+    reviewerModel: 'gemini',
+    passKind: 'first-pass',
+    startedAt: '2026-07-28T03:00:00.000Z',
+  });
+
+  await spawnReviewer({
+    repo: 'laceyenterprises/demo',
+    prNumber: 121,
+    reviewerModel: 'gemini',
+    botTokenEnv: 'GH_GEMINI_REVIEWER_TOKEN',
+    linearTicketId: 'LAC-566',
+    labels: [],
+    builderTag: 'codex',
+    reviewerHeadSha: 'sha121',
+    reviewAttemptNumber: 1,
+    reviewDbAttemptNumber: 2,
+    completedRemediationRounds: 0,
+    passKind: 'first-pass',
+    maxRemediationRounds: 2,
+    reviewerSessionUuid: 'spawn-settle-sdk-attribution',
+    reviewerRuntimeAdapterOverride: {
+      async spawnReviewer() {
+        return {
+          ok: true,
+          reviewBody: '## Summary\nLooks good.\n\n## Verdict\nComment only',
+          reviewBodyDelivery: 'caller-post',
+          reattachToken: 'sdk-request-id-21',
+          launchRequestId: 'lrq_sdk_21',
+          spawnedAt: '2026-07-28T03:00:00.000Z',
+        };
+      },
+    },
+    postGitHubReviewWithCaptureImpl: async () => {},
+    readBestReviewerEvidenceTokenUsageImpl: (args) => readBestReviewerEvidenceTokenUsage({
+      ...args,
+      ledgerTarget: { backend: 'sqlite', path: ledgerDb },
+      env: { AGENT_OS_CONFIG_PATH: '/dev/null' },
+      rootDir,
+      transcriptFallback: false,
+    }),
+    completeReviewerPassImpl: (_root, payload) => {
+      settledRow = completeReviewerPass(rootDir, payload);
+      return settledRow;
+    },
+  });
+
+  assert.equal(settledRow?.worker_run_id, 'wr_sdk_21');
+  assert.equal(JSON.parse(settledRow?.metadata_json || '{}').launchRequestId, 'lrq_sdk_21');
 });
 
 test('spawnReviewer settles worker_run_id null when no worker run resolves (cli-direct path)', async () => {

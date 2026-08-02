@@ -424,6 +424,7 @@ async function spawnReviewer({
       // On failure we settle the pass with null token usage instead.
       let tokenUsage = null;
       let reviewerTokenUsageArtifact = null;
+      const launchRequestId = result.launchRequestId || result.reattachToken || null;
       // WCW attribution: the reviewer worker's real ledger run_id, captured from
       // the RAW token usage before tagTokenUsage()/normalizeTokenUsage() drops it
       // (the normalized token-usage shape intentionally carries only counters,
@@ -431,15 +432,15 @@ async function spawnReviewer({
       let resolvedWorkerRunId = null;
       try {
         const rawTokenUsage = result.tokenUsage || readBestReviewerEvidenceTokenUsageImpl({
-          // The SDK-dispatch adapter surfaces the reviewer worker's dispatch id
-          // (ticket.launchRequestId) as result.reattachToken. Threading it as
-          // launchRequestId lets the ledger read resolve the worker_runs row
-          // (WHERE launch_request_id = ?) and return its real run_id.
-          launchRequestId: result.reattachToken || null,
+          // SDK/os-dispatch reattaches by app-contract request_id, but the
+          // session ledger attributes worker_runs by launch_request_id. Prefer
+          // the surfaced launchRequestId when present; cli-direct keeps null.
+          launchRequestId,
           adapterSessionKey: result.reattachToken || reviewerSessionUuid,
           sessionKeys: [
             reviewerSessionUuid,
             result.reattachToken,
+            result.launchRequestId,
             result.sessionUuid,
           ],
           workspacePath: workspacePath || ROOT,
@@ -499,6 +500,7 @@ async function spawnReviewer({
         workerRunId: resolvedWorkerRunId,
         metadata: {
           reviewerSessionUuid,
+          launchRequestId,
           reattachToken: result.reattachToken || null,
           failureClass: result.failureClass || null,
           tokenUsageNoUsageReason: result.tokenUsageNoUsageReason || null,

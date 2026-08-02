@@ -428,6 +428,7 @@ test('spawnReviewer settles worker_run_id null when no worker run resolves (cli-
   assert.equal(result.ok, true);
   assert.equal(settled.length, 1);
   assert.equal(settled[0].workerRunId, null);
+  assert.equal(settled[0].metadata.launchRequestId, 'lrq_wcw_null');
 });
 
 test('spawnReviewer preserves worker run_id when the adapter throws (error-path attribution)', async () => {

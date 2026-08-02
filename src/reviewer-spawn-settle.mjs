@@ -425,7 +425,6 @@ async function spawnReviewer({
       let tokenUsage = null;
       let reviewerTokenUsageArtifact = null;
       const launchRequestId = result.launchRequestId || result.reattachToken || null;
-      const metadataLaunchRequestId = result.launchRequestId || null;
       // WCW attribution: the reviewer worker's real ledger run_id, captured from
       // the RAW token usage before tagTokenUsage()/normalizeTokenUsage() drops it
       // (the normalized token-usage shape intentionally carries only counters,
@@ -520,7 +519,7 @@ async function spawnReviewer({
         workerRunId: resolvedWorkerRunId,
         metadata: {
           reviewerSessionUuid,
-          launchRequestId: metadataLaunchRequestId,
+          launchRequestId,
           reattachToken: result.reattachToken || null,
           failureClass: result.failureClass || null,
           tokenUsageNoUsageReason: result.tokenUsageNoUsageReason || null,

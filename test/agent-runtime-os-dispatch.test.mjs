@@ -172,11 +172,15 @@ test('reviewer derives review + decision-only, remediator derives coding + branc
 
 test('reviewer derives the dedicated reviewer worker class for each model family', () => {
   assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'codex' }), 'codex-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'CoDeX' }), 'codex-reviewer');
   assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'gemini' }), 'gemini-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'Gemini' }), 'gemini-reviewer');
   assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'claude-code' }), 'claude-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'Claude-Code' }), 'claude-reviewer');
   assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'claude' }), 'claude-reviewer');
   assert.equal(resolveWorkerClass({ model: 'gemini' }), 'gemini-reviewer');
   assert.equal(resolveWorkerClass({ kind: 'remediator', model: 'codex' }), 'codex');
+  assert.equal(resolveWorkerClass({ kind: 'remediator', model: 'CoDeX' }), 'CoDeX');
   assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'codex', workerClass: 'codex' }), 'codex');
   assert.equal(resolveWorkerClass({ kind: 'reviewer' }), undefined);
 });

@@ -102,14 +102,15 @@ function resolveWorkerClass(role) {
   const explicit = String(role?.workerClass || '').trim();
   if (explicit) return explicit;
 
-  const model = String(role?.model || '').trim();
-  if (!model) return undefined;
-  if (role?.kind === 'remediator') return model;
+  const rawModel = String(role?.model || '').trim();
+  if (!rawModel) return undefined;
+  if (role?.kind === 'remediator') return rawModel;
+  const model = rawModel.toLowerCase();
 
   if (model === 'codex') return 'codex-reviewer';
   if (model === 'gemini') return 'gemini-reviewer';
   if (model === 'claude' || model === 'claude-code') return 'claude-reviewer';
-  return model;
+  return rawModel;
 }
 
 function normalizeStatus(status) {

@@ -1,5 +1,19 @@
 # Follow-Up Remediation Runbook
 
+## SDK cutover gate
+
+Full SDK cutover remains blocked until the airlock-owned deploy host returns
+`cutover: READY` from the bounded ARC-32 check:
+
+```bash
+hq adversarial sdk-cutover check --repo <owner/repo> --pr <merged-clean-proof-pr>
+```
+
+The proof PR must be merged from an exact-head clean verdict. The command also
+requires healthy hybrid routing, a zero-duplicate standalone failover drill,
+AgentRuntime branch-push remediation, durable alert delivery, branch protection,
+dispatch/no-progress SLOs, and the audited current-head re-review recovery path.
+
 This runbook covers the shipped bounded remediation loop for adversarial-review after `LAC-206`, `LAC-209`, `LAC-210`, `LAC-211`, and the 2026-05-01 automation pass.
 
 Use this when a review has already been posted to GitHub and you need to inspect, reconcile, stop, requeue, or debug the follow-up remediation flow without re-reading the implementation.

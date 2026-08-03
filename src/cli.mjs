@@ -6,6 +6,7 @@ import { main as pipelineHealthMain } from './review-pipeline-health-cli.mjs';
 import { main as resetPrMain } from './reset-pr.mjs';
 import { main as tokensMain } from './tokens-cli.mjs';
 import { runtimeMain } from './runtime-status-cli.mjs';
+import { sdkCutoverCheckMain } from './sdk-cutover.mjs';
 import { finalizationMain } from './finalization-cli.mjs';
 import { reviewerRoster, formatReviewerRoster } from './adapters/subject/github-pr/routing.mjs';
 import { resolveGeminiReviewerMode } from './role-config.mjs';
@@ -26,6 +27,7 @@ Usage:
   adversarial-review handoff status [--repo <owner/repo>] [--window <24h>] [--root <dir>] [--json]
   adversarial-review handoff trace <owner/repo#pr> [--root <dir>] [--json]
   adversarial-review runtime status [--root <dir>] [--window <24h>] [--json]
+  adversarial-review sdk-cutover check --repo <owner/repo> --pr <number> [--json]
   adversarial-review finalization shadow-report [--days <7>] [--root <dir>] [--json]
 `;
 
@@ -157,6 +159,9 @@ async function main(argv, io = {}) {
   if (command === 'runtime') {
     return runtimeMain(rest, io);
   }
+  if (command === 'sdk-cutover') {
+    return sdkCutoverCheckMain(rest, io);
+  }
   if (command === 'finalization') {
     return finalizationMain(rest, io);
   }
@@ -175,4 +180,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   });
 }
 
-export { finalizationMain, handoffMain, main, reviewerRosterMain, runtimeMain };
+export {
+  finalizationMain,
+  handoffMain,
+  main,
+  reviewerRosterMain,
+  runtimeMain,
+  sdkCutoverCheckMain,
+};

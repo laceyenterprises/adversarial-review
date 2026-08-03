@@ -35,7 +35,8 @@ function createMockEnvironment(overrides = {}) {
       join(rootDir, 'data', 'smoke-result.json'),
       JSON.stringify({
         result: 'PASS',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        worker_run_id: 'wr_smoke'
       })
     );
   } else if (setup.smokeOk === false && overrides.smokeResult) {
@@ -97,7 +98,8 @@ test('readyz accepts a PASS smoke artifact with slight future clock skew', async
     join(rootDir, 'data', 'smoke-result.json'),
     JSON.stringify({
       result: 'PASS',
-      timestamp: new Date(Date.now() + 2 * 60 * 1000).toISOString()
+      timestamp: new Date(Date.now() + 2 * 60 * 1000).toISOString(),
+      worker_run_id: 'wr_smoke'
     })
   );
   const originalFetch = global.fetch;
@@ -130,6 +132,32 @@ test('readyz normalizes endpoint URL with a trailing slash', async () => {
     const model = await buildReadyzStatus(rootDir);
     assert.strictEqual(model.overallReady, true);
     assert.deepStrictEqual(requestedUrls, ['http://127.0.0.1:8003/v1/dispatch_status']);
+  } finally {
+    global.fetch = originalFetch;
+    if (originalUrl === undefined) {
+      delete process.env.APP_CONTRACT_ENDPOINT_URL;
+    } else {
+      process.env.APP_CONTRACT_ENDPOINT_URL = originalUrl;
+    }
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('readyz preserves endpoint base paths when resolving dispatch_status', async () => {
+  const rootDir = createMockEnvironment();
+  const originalFetch = global.fetch;
+  const originalUrl = process.env.APP_CONTRACT_ENDPOINT_URL;
+  const requestedUrls = [];
+  process.env.APP_CONTRACT_ENDPOINT_URL = 'http://127.0.0.1:8003/agent-1';
+  global.fetch = async (requestUrl) => {
+    requestedUrls.push(String(requestUrl));
+    return { ok: true, status: 200 };
+  };
+
+  try {
+    const model = await buildReadyzStatus(rootDir);
+    assert.strictEqual(model.overallReady, true);
+    assert.deepStrictEqual(requestedUrls, ['http://127.0.0.1:8003/agent-1/v1/dispatch_status']);
   } finally {
     global.fetch = originalFetch;
     if (originalUrl === undefined) {
@@ -318,6 +346,61 @@ test('readyz excludes stale reviewer pass attribution rows when ended_at is avai
   }
 });
 
+test('readyz falls back to older attribution rows when there are no recent SDK passes', async () => {
+  const rootDir = createMockEnvironment({ attributionOk: null });
+  const db = new Database(join(rootDir, 'data', 'reviews.db'));
+  db.exec(`
+    CREATE TABLE reviewer_passes (
+      worker_run_id TEXT,
+      status TEXT NOT NULL,
+      ended_at TEXT,
+      metadata_json TEXT NOT NULL
+    )
+  `);
+  db.prepare(
+    'INSERT INTO reviewer_passes (worker_run_id, status, ended_at, metadata_json) VALUES (?, ?, ?, ?)'
+  ).run(
+    'wr_stale',
+    'completed',
+    new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(),
+    JSON.stringify({ launchRequestId: 'lrq_stale' })
+  );
+  db.close();
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 200 });
+
+  try {
+    const model = await buildReadyzStatus(rootDir);
+    assert.strictEqual(model.overallReady, true);
+    const attribution = model.signals.find((signal) => signal.id === 'attribution');
+    assert.strictEqual(attribution.detail, 'last 1 SDK passes: 1 attributed');
+  } finally {
+    global.fetch = originalFetch;
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('readyz ignores malformed pass metadata while checking attribution', async () => {
+  const rootDir = createMockEnvironment();
+  const db = new Database(join(rootDir, 'data', 'reviews.db'));
+  db.prepare(
+    'INSERT INTO reviewer_passes (worker_run_id, status, metadata_json) VALUES (?, ?, ?)'
+  ).run('wr_bad', 'completed', '{not json');
+  db.close();
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 200 });
+
+  try {
+    const model = await buildReadyzStatus(rootDir);
+    assert.strictEqual(model.overallReady, true);
+    const attribution = model.signals.find((signal) => signal.id === 'attribution');
+    assert.strictEqual(attribution.detail, 'last 1 SDK passes: 1 attributed');
+  } finally {
+    global.fetch = originalFetch;
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('readyz ignores active and cli-direct passes in attribution readiness', async () => {
   const rootDir = createMockEnvironment();
   const db = new Database(join(rootDir, 'data', 'reviews.db'));
@@ -344,7 +427,10 @@ test('readyz ignores active and cli-direct passes in attribution readiness', asy
 
 test('readyz rejects a PASS smoke artifact without a timestamp', async () => {
   const rootDir = createMockEnvironment();
-  writeFileSync(join(rootDir, 'data', 'smoke-result.json'), JSON.stringify({ result: 'PASS' }));
+  writeFileSync(
+    join(rootDir, 'data', 'smoke-result.json'),
+    JSON.stringify({ result: 'PASS', worker_run_id: 'wr_smoke' })
+  );
   const originalFetch = global.fetch;
   global.fetch = async () => ({ ok: true, status: 200 });
 
@@ -353,6 +439,26 @@ test('readyz rejects a PASS smoke artifact without a timestamp', async () => {
     assert.strictEqual(model.overallReady, false);
     const smoke = model.signals.find((signal) => signal.id === 'smoke');
     assert.strictEqual(smoke.detail, 'PASS timestamp missing or invalid');
+  } finally {
+    global.fetch = originalFetch;
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('readyz rejects a PASS smoke artifact without worker_run_id', async () => {
+  const rootDir = createMockEnvironment();
+  writeFileSync(
+    join(rootDir, 'data', 'smoke-result.json'),
+    JSON.stringify({ result: 'PASS', timestamp: new Date().toISOString() })
+  );
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 200 });
+
+  try {
+    const model = await buildReadyzStatus(rootDir);
+    assert.strictEqual(model.overallReady, false);
+    const smoke = model.signals.find((signal) => signal.id === 'smoke');
+    assert.strictEqual(smoke.detail, 'PASS worker_run_id missing');
   } finally {
     global.fetch = originalFetch;
     rmSync(rootDir, { recursive: true, force: true });

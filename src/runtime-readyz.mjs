@@ -8,13 +8,37 @@ const APP_CONTRACT_DEFAULT_URL = 'http://127.0.0.1:8003';
 const SMOKE_RESULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const ATTRIBUTION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
+function quoteSqlIdentifier(identifier) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(identifier)) {
+    throw new Error(`unsafe SQL identifier: ${identifier}`);
+  }
+  return `"${identifier}"`;
+}
+
 function hasColumn(db, tableName, columnName) {
-  return db.prepare(`PRAGMA table_info(${tableName})`).all()
+  return db.prepare(`PRAGMA table_info(${quoteSqlIdentifier(tableName)})`).all()
     .some((column) => column.name === columnName);
+}
+
+function readAttributionRows(db, { hasEndedAt, since = null }) {
+  return db.prepare(`
+    SELECT worker_run_id
+    FROM reviewer_passes
+    WHERE status != 'running'
+      AND CASE
+        WHEN json_valid(metadata_json)
+          THEN json_extract(metadata_json, '$.launchRequestId') IS NOT NULL
+        ELSE 0
+      END
+      ${hasEndedAt && since ? 'AND ended_at IS NOT NULL AND ended_at >= @since' : ''}
+    ORDER BY rowid DESC
+    LIMIT 20
+  `).all(since ? { since } : {});
 }
 
 export async function buildReadyzStatus(rootDir) {
   const url = process.env.APP_CONTRACT_ENDPOINT_URL || APP_CONTRACT_DEFAULT_URL;
+  const dispatchStatusUrl = new URL('v1/dispatch_status', url.endsWith('/') ? url : `${url}/`);
   
   // 1. Endpoint reachable
   let endpointOk = false;
@@ -22,7 +46,7 @@ export async function buildReadyzStatus(rootDir) {
   let endpointP95 = 0;
   const start = Date.now();
   const checkHealthz = async () => {
-    const res = await fetch(new URL('/v1/dispatch_status', url), {
+    const res = await fetch(dispatchStatusUrl, {
       signal: AbortSignal.timeout(5000)
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -81,6 +105,7 @@ export async function buildReadyzStatus(rootDir) {
         smoke.result === 'PASS'
         && Number.isFinite(parsedTimestamp)
         && ageMs < SMOKE_RESULT_MAX_AGE_MS
+        && smoke.worker_run_id
       ) {
         smokeOk = true;
         const mins = Math.floor(Math.max(0, ageMs) / 60000);
@@ -89,6 +114,8 @@ export async function buildReadyzStatus(rootDir) {
         smokeDetail = `last result was ${smoke.result}`;
       } else if (!Number.isFinite(parsedTimestamp)) {
         smokeDetail = 'PASS timestamp missing or invalid';
+      } else if (!smoke.worker_run_id) {
+        smokeDetail = 'PASS worker_run_id missing';
       } else {
         smokeDetail = 'stale PASS';
       }
@@ -109,19 +136,13 @@ export async function buildReadyzStatus(rootDir) {
     try {
       db = new Database(dbPath, { readonly: true });
       const hasEndedAt = hasColumn(db, 'reviewer_passes', 'ended_at');
-      const params = hasEndedAt
-        ? { since: new Date(Date.now() - ATTRIBUTION_MAX_AGE_MS).toISOString() }
-        : {};
-      const rows = db.prepare(`
-        SELECT worker_run_id
-        FROM reviewer_passes
-        WHERE status != 'running'
-          AND json_valid(metadata_json)
-          AND json_extract(metadata_json, '$.launchRequestId') IS NOT NULL
-          ${hasEndedAt ? 'AND ended_at IS NOT NULL AND ended_at >= @since' : ''}
-        ORDER BY rowid DESC
-        LIMIT 20
-      `).all(params);
+      const since = hasEndedAt
+        ? new Date(Date.now() - ATTRIBUTION_MAX_AGE_MS).toISOString()
+        : null;
+      const recentRows = readAttributionRows(db, { hasEndedAt, since });
+      const rows = recentRows.length > 0
+        ? recentRows
+        : readAttributionRows(db, { hasEndedAt: false });
       const total = rows.length;
       const attributed = rows.filter(r => r.worker_run_id != null).length;
       if (total > 0 && attributed > 0) {

@@ -225,13 +225,13 @@ async function listHammerWorkerDirs(hqRoot, {
       readFileImpl,
       logger,
     });
-    if (!worktreePath) continue;
     resolvedEntries.push({
       workerId: entry.name,
       workerDir,
       worktreePath,
       prNumber: parseHammerPrNumber(entry.name),
-      diskPresent: existsSync(worktreePath),
+      diskPresent: Boolean(worktreePath) && existsSync(worktreePath),
+      unresolvable: !worktreePath,
     });
   }
   return {
@@ -378,7 +378,15 @@ async function removeHammerWorktree({
     if (treeAlreadyGone) {
       let physicalRemovalSucceeded = true;
       if (removePhysicalInvalidTree) {
-        const { refusalReason, target } = physicalRemovalTargetForEntry({ hqRoot, entry });
+        // Each registration carries its own repo/worktree path. Validate its
+        // worker ownership explicitly, while deliberately deleting the shared
+        // hammer sandbox once: sibling worktrees are direct children of that
+        // same validated worker directory.
+        const registrationEntry = { ...entry, ...registration };
+        const { refusalReason, target } = physicalRemovalTargetForEntry({
+          hqRoot,
+          entry: registrationEntry,
+        });
         if (refusalReason) {
           physicalRemovalSucceeded = false;
           errors.push(`worktree-rm-refused:${refusalReason}:${registration.path || target}`);
@@ -480,7 +488,6 @@ async function reapCloserHammerWorktrees({
   });
   const diskEntries = workerDiscovery.entries;
   const entries = [];
-  const seen = new Set();
   const seenWorkers = new Set();
   const registeredByWorker = new Map();
   for (const registeredEntry of registered.values()) {
@@ -493,15 +500,19 @@ async function reapCloserHammerWorktrees({
   }
 
   for (const diskEntry of diskEntries) {
-    const pathKey = resolve(diskEntry.worktreePath);
-    const registeredEntry = registered.get(pathKey);
+    const pathKey = diskEntry.worktreePath ? resolve(diskEntry.worktreePath) : null;
+    const registeredEntry = pathKey ? registered.get(pathKey) : null;
     const workerRegistrations = registeredByWorker.get(diskEntry.workerId) || [];
     // One non-exact registration is enough to establish the owning PR while
     // retaining both the registered path and manifest path for terminal
     // cleanup. Multiple non-exact registrations are ambiguous and remain
     // fail-closed until a later tick can establish an exact primary path.
-    const relatedRegistration = !registeredEntry && workerRegistrations.length === 1
-      ? workerRegistrations[0]
+    const legacyPrimaryRegistration = !pathKey
+      ? workerRegistrations.find((registration) => basename(registration.path) === 'agent-os')
+        || workerRegistrations[0]
+      : null;
+    const relatedRegistration = !registeredEntry
+      ? (workerRegistrations.length === 1 ? workerRegistrations[0] : legacyPrimaryRegistration)
       : null;
     const stateRegistration = registeredEntry || relatedRegistration;
     entries.push({
@@ -517,22 +528,24 @@ async function reapCloserHammerWorktrees({
         ? {
             registeredPaths: workerRegistrations.map((registration) => registration.path),
             manifestPath: pathKey,
-            ambiguous: workerRegistrations.length > 1,
+            ambiguous: Boolean(pathKey) && workerRegistrations.length > 1,
           }
         : null,
     });
-    seen.add(pathKey);
     seenWorkers.add(diskEntry.workerId);
   }
-  for (const [pathKey, registeredEntry] of registered.entries()) {
-    if (seen.has(pathKey) || seenWorkers.has(registeredEntry.workerId)) continue;
+  for (const [workerId, workerRegistrations] of registeredByWorker.entries()) {
+    if (seenWorkers.has(workerId)) continue;
+    const registeredEntry = workerRegistrations.find(
+      (registration) => basename(registration.path) === 'agent-os'
+    ) || workerRegistrations[0];
     entries.push({
       ...registeredEntry,
-      diskPresent: existsSync(pathKey),
-      registeredWorktrees: [registeredEntry],
+      diskPresent: existsSync(registeredEntry.path),
+      registeredWorktrees: workerRegistrations,
       halfRegistered: false,
     });
-    seenWorkers.add(registeredEntry.workerId);
+    seenWorkers.add(workerId);
   }
 
   const evaluation = pageAfterCursor(entries, cursor.evaluation, scanLimit, (entry) => entry.workerId);

@@ -127,6 +127,34 @@ test('closer worktree reaper removes half-registered disk leftovers without quer
   );
 });
 
+test('closer worktree reaper removes unresolvable hammer directories instead of hiding them', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-unresolvable-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const repoPath = join(hqRoot, 'repos', 'agent-os');
+  const workerDir = join(hqRoot, 'workers', 'hammer-ama-pr-3065-corrupt');
+  mkdirSync(workerDir, { recursive: true });
+  writeFileSync(join(workerDir, 'workspace.json'), '{not-json');
+
+  const result = await reapCloserHammerWorktrees({
+    hqRoot,
+    cursorPath: join(root, 'cursor.json'),
+    hqPath: '/bin/hq',
+    repoPaths: [repoPath],
+    execFileImpl: async (cmd, args) => {
+      if (cmd === 'git' && args.includes('list')) return { stdout: '', stderr: '' };
+      if (cmd === 'git' && args.includes('get-url')) return { stdout: 'https://github.com/x/y.git\n', stderr: '' };
+      return { stdout: '{}', stderr: '' };
+    },
+    limit: 10,
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.equal(result.reaped, 1);
+  assert.equal(result.halfRegistered, 1);
+  assert.equal(existsSync(workerDir), false);
+});
+
 test('closer worktree reaper discovers dedicated-base non-agent-os hammer worktrees from the manifest', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-cross-repo-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -301,6 +329,60 @@ test('closer worktree reaper removes every registered worktree for one terminal 
   assert.equal(
     calls.filter((call) => call.cmd === '/bin/hq' && call.args[1] === 'tear-down').length,
     1,
+  );
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reaped, 1);
+  assert.equal(ghCalls, 1);
+});
+
+test('closer worktree reaper groups stale registrations even when the worker directory is gone', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-registered-only-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const adversarialBase = join(hqRoot, 'worker-base', 'adversarial-review');
+  const agentOsBase = join(hqRoot, 'worker-base', 'agent-os');
+  const workerDir = join(hqRoot, 'workers', 'hammer-ama-pr-760-registered-only');
+  const adversarialWorktree = join(workerDir, 'adversarial-review');
+  const agentOsWorktree = join(workerDir, 'agent-os');
+  mkdirSync(join(hqRoot, 'workers'), { recursive: true });
+
+  const calls = [];
+  let ghCalls = 0;
+  const result = await reapCloserHammerWorktrees({
+    hqRoot,
+    cursorPath: join(root, 'cursor.json'),
+    hqPath: '/bin/hq',
+    repoPaths: [adversarialBase, agentOsBase],
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      const repoPath = args[1];
+      const joined = args.join(' ');
+      if (cmd === 'git' && joined.includes('remote get-url origin')) {
+        const repo = repoPath === adversarialBase ? 'adversarial-review' : 'agent-os';
+        return { stdout: `git@github.com:laceyenterprises/${repo}.git\n`, stderr: '' };
+      }
+      if (cmd === 'git' && joined.includes('worktree list --porcelain')) {
+        const worktreePath = repoPath === adversarialBase ? adversarialWorktree : agentOsWorktree;
+        return {
+          stdout: [`worktree ${repoPath}`, 'branch refs/heads/main', '', `worktree ${worktreePath}`, 'branch refs/heads/SDR-04', ''].join('\n'),
+          stderr: '',
+        };
+      }
+      return { stdout: '{}', stderr: '' };
+    },
+    execGhWithRetryImpl: async () => {
+      ghCalls += 1;
+      return {
+        stdout: JSON.stringify({ state: 'MERGED', mergedAt: '2026-08-03T00:00:00Z', closedAt: '2026-08-03T00:00:00Z' }),
+      };
+    },
+    limit: 10,
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.equal(
+    calls.filter((call) => call.cmd === 'git' && call.args.includes('prune')).length,
+    2,
   );
   assert.equal(result.scanned, 1);
   assert.equal(result.reaped, 1);

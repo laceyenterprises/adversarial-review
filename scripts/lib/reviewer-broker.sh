@@ -154,10 +154,10 @@ resolve_reviewer_token_via_broker() {
         response_body="$(head -c 256 "$response_file" 2>/dev/null || true)"
         rm -f "$response_file"
         case "$http_code" in
-          408|409|425|429|5??|"") REVIEWER_BROKER_FAILURE_CLASS="transient" ;;
+          000|408|409|425|429|5??|"") REVIEWER_BROKER_FAILURE_CLASS="transient" ;;
           *) REVIEWER_BROKER_FAILURE_CLASS="permanent" ;;
         esac
-        if [[ "$curl_rc" -ne 0 && -z "$http_code" ]]; then
+        if [[ "$curl_rc" -ne 0 && ( -z "$http_code" || "$http_code" == "000" ) ]]; then
             REVIEWER_BROKER_FAILURE_CLASS="transient"
         fi
         echo "[reviewer-broker] broker mode (${role}): ${broker_url} returned HTTP ${http_code:-<no-code>}; stderr: ${curl_stderr:-<none>}; body[:256]: ${response_body:-<empty>}" >&2

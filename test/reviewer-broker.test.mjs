@@ -131,6 +131,7 @@ test('resolve_reviewer_token_via_broker bounds broker curl with fetch timeout op
     join(bin, 'curl'),
     '#!/bin/bash\n'
       + 'printf "%s\\n" "$@" >"$TEST_CURL_ARGS_FILE"\n'
+      + 'printf "000"\n'
       + 'exit 28\n',
   );
   writeExecutable(

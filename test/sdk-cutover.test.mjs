@@ -1,12 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import {
   buildSdkCutoverReport,
+  collectVerdictFidelity,
   createRereviewRecoveryFixture,
   sdkCutoverCheckMain,
 } from '../src/sdk-cutover.mjs';
 import { main as cliMain } from '../src/cli.mjs';
+import { ensureReviewStateSchema, openReviewStateDb } from '../src/review-state.mjs';
 
 const NOW = '2026-08-03T06:30:00.000Z';
 
@@ -143,6 +148,67 @@ test('buildSdkCutoverReport returns NOT_READY for ARC-27 fidelity blocker', asyn
   assert.ok(gate(report, 'ARC-27').reasons.some(
     (entry) => entry.code === 'clean-verdict-followup-fidelity-failed',
   ));
+});
+
+test('collectVerdictFidelity matches canonical lowercase repo records case-insensitively', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'sdk-cutover-fidelity-'));
+  const db = openReviewStateDb(rootDir);
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(`
+      INSERT INTO reviewed_prs
+        (repo, pr_number, reviewed_at, reviewer, pr_state, review_status, reviewer_head_sha, revision_ref)
+      VALUES
+        (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'laceyenterprises/agent-os',
+      4562,
+      NOW,
+      'gemini',
+      'merged',
+      'posted',
+      'abc123',
+      'abc123',
+    );
+  } finally {
+    db.close();
+  }
+
+  const completedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'completed');
+  mkdirSync(completedDir, { recursive: true });
+  writeFileSync(path.join(completedDir, 'job-clean.json'), `${JSON.stringify({
+    jobId: 'job-clean',
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 4562,
+    revisionRef: 'abc123',
+    completedAt: NOW,
+    reviewBody: [
+      '## Summary',
+      'Clean review.',
+      '',
+      '## Blocking issues',
+      '',
+      '- None.',
+      '',
+      '## Verdict',
+      '',
+      'Comment only',
+    ].join('\n'),
+  }, null, 2)}\n`, 'utf8');
+
+  const fidelity = await collectVerdictFidelity({
+    rootDir,
+    repo: 'LaceyEnterprises/Agent-OS',
+    prNumber: 4562,
+    fetchLivePRLifecycleImpl: async () => ({
+      prState: 'merged',
+      headSha: 'abc123',
+    }),
+  });
+
+  assert.equal(fidelity.ready, true);
+  assert.equal(fidelity.reviewStatus, 'posted');
+  assert.equal(fidelity.followUpJobId, 'job-clean');
 });
 
 test('buildSdkCutoverReport returns NOT_READY for ARC-28 alert sink blocker', async () => {

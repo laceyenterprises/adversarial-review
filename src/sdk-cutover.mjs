@@ -49,6 +49,10 @@ function gate(id, name, reasons, evidence = {}) {
   return { id, name, ready: reasons.length === 0, reasons, evidence };
 }
 
+function normalizeRepoSlug(repo) {
+  return String(repo || '').toLowerCase();
+}
+
 function newestJobTimestamp(job = {}) {
   for (const key of [
     'updatedAt', 'completedAt', 'stoppedAt', 'failedAt',
@@ -62,9 +66,11 @@ function newestJobTimestamp(job = {}) {
 
 function findLatestFollowUpJob(rootDir, repo, prNumber) {
   const matches = [];
+  const normalizedRepo = normalizeRepoSlug(repo);
   for (const state of FOLLOW_UP_STATES) {
     for (const entry of listFollowUpJobsInDir(rootDir, state)) {
-      if (entry.job?.repo !== repo || Number(entry.job?.prNumber) !== Number(prNumber)) continue;
+      const entryRepo = normalizeRepoSlug(entry.job?.repo);
+      if (entryRepo !== normalizedRepo || Number(entry.job?.prNumber) !== Number(prNumber)) continue;
       matches.push({ ...entry, state });
     }
   }
@@ -77,8 +83,8 @@ function readReviewRow(rootDir, repo, prNumber) {
   if (!existsSync(dbPath)) return null;
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
   try {
-    return db.prepare('SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
-      .get(repo, Number(prNumber)) || null;
+    return db.prepare('SELECT * FROM reviewed_prs WHERE lower(repo) = ? AND pr_number = ?')
+      .get(normalizeRepoSlug(repo), Number(prNumber)) || null;
   } finally {
     db.close();
   }

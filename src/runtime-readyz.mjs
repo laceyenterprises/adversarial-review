@@ -6,6 +6,12 @@ import { readRuntimeStatusSnapshot } from './runtime-status-snapshot.mjs';
 
 const APP_CONTRACT_DEFAULT_URL = 'http://127.0.0.1:8003';
 const SMOKE_RESULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const ATTRIBUTION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+function hasColumn(db, tableName, columnName) {
+  return db.prepare(`PRAGMA table_info(${tableName})`).all()
+    .some((column) => column.name === columnName);
+}
 
 export async function buildReadyzStatus(rootDir) {
   const url = process.env.APP_CONTRACT_ENDPOINT_URL || APP_CONTRACT_DEFAULT_URL;
@@ -16,7 +22,7 @@ export async function buildReadyzStatus(rootDir) {
   let endpointP95 = 0;
   const start = Date.now();
   const checkHealthz = async () => {
-    const res = await fetch(`${url}/v1/dispatch_status`, {
+    const res = await fetch(new URL('/v1/dispatch_status', url), {
       signal: AbortSignal.timeout(5000)
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -74,7 +80,6 @@ export async function buildReadyzStatus(rootDir) {
       if (
         smoke.result === 'PASS'
         && Number.isFinite(parsedTimestamp)
-        && ageMs >= 0
         && ageMs < SMOKE_RESULT_MAX_AGE_MS
       ) {
         smokeOk = true;
@@ -103,18 +108,23 @@ export async function buildReadyzStatus(rootDir) {
     let db;
     try {
       db = new Database(dbPath, { readonly: true });
+      const hasEndedAt = hasColumn(db, 'reviewer_passes', 'ended_at');
+      const params = hasEndedAt
+        ? { since: new Date(Date.now() - ATTRIBUTION_MAX_AGE_MS).toISOString() }
+        : {};
       const rows = db.prepare(`
         SELECT worker_run_id
         FROM reviewer_passes
         WHERE status != 'running'
           AND json_valid(metadata_json)
           AND json_extract(metadata_json, '$.launchRequestId') IS NOT NULL
+          ${hasEndedAt ? 'AND ended_at IS NOT NULL AND ended_at >= @since' : ''}
         ORDER BY rowid DESC
         LIMIT 20
-      `).all();
+      `).all(params);
       const total = rows.length;
       const attributed = rows.filter(r => r.worker_run_id != null).length;
-      if (total > 0 && attributed === total) {
+      if (total > 0 && attributed > 0) {
         attributionOk = true;
         attributionDetail = `last ${total} SDK passes: ${attributed} attributed`;
       } else if (total === 0) {

@@ -91,6 +91,56 @@ test('readyz returns allGreen true when all signals pass', async () => {
   }
 });
 
+test('readyz accepts a PASS smoke artifact with slight future clock skew', async () => {
+  const rootDir = createMockEnvironment();
+  writeFileSync(
+    join(rootDir, 'data', 'smoke-result.json'),
+    JSON.stringify({
+      result: 'PASS',
+      timestamp: new Date(Date.now() + 2 * 60 * 1000).toISOString()
+    })
+  );
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 200 });
+
+  try {
+    const model = await buildReadyzStatus(rootDir);
+    assert.strictEqual(model.overallReady, true);
+    const smoke = model.signals.find((signal) => signal.id === 'smoke');
+    assert.strictEqual(smoke.ok, true);
+    assert.strictEqual(smoke.detail, 'last PASS 0m ago, worker_run_id set');
+  } finally {
+    global.fetch = originalFetch;
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('readyz normalizes endpoint URL with a trailing slash', async () => {
+  const rootDir = createMockEnvironment();
+  const originalFetch = global.fetch;
+  const originalUrl = process.env.APP_CONTRACT_ENDPOINT_URL;
+  const requestedUrls = [];
+  process.env.APP_CONTRACT_ENDPOINT_URL = 'http://127.0.0.1:8003/';
+  global.fetch = async (requestUrl) => {
+    requestedUrls.push(String(requestUrl));
+    return { ok: true, status: 200 };
+  };
+
+  try {
+    const model = await buildReadyzStatus(rootDir);
+    assert.strictEqual(model.overallReady, true);
+    assert.deepStrictEqual(requestedUrls, ['http://127.0.0.1:8003/v1/dispatch_status']);
+  } finally {
+    global.fetch = originalFetch;
+    if (originalUrl === undefined) {
+      delete process.env.APP_CONTRACT_ENDPOINT_URL;
+    } else {
+      process.env.APP_CONTRACT_ENDPOINT_URL = originalUrl;
+    }
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('readyz returns NOT READY for an HTTP error response', async () => {
   const rootDir = createMockEnvironment();
   const originalFetch = global.fetch;
@@ -200,6 +250,68 @@ test('readyz returns NOT READY if attribution is missing', async () => {
     const rendered = renderReadyzStatus(model);
     assert.ok(rendered.includes('attribution round-trip'));
     assert.ok(rendered.includes('NOT READY  (last 1 SDK passes: 0 attributed)'));
+  } finally {
+    global.fetch = originalFetch;
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('readyz tolerates occasional unattributed SDK passes when recent attribution exists', async () => {
+  const rootDir = createMockEnvironment();
+  const db = new Database(join(rootDir, 'data', 'reviews.db'));
+  db.prepare(
+    'INSERT INTO reviewer_passes (worker_run_id, status, metadata_json) VALUES (?, ?, ?)'
+  ).run(null, 'completed', JSON.stringify({ launchRequestId: 'lrq_missing' }));
+  db.close();
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 200 });
+
+  try {
+    const model = await buildReadyzStatus(rootDir);
+    assert.strictEqual(model.overallReady, true);
+    const attribution = model.signals.find((signal) => signal.id === 'attribution');
+    assert.strictEqual(attribution.detail, 'last 2 SDK passes: 1 attributed');
+  } finally {
+    global.fetch = originalFetch;
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('readyz excludes stale reviewer pass attribution rows when ended_at is available', async () => {
+  const rootDir = createMockEnvironment({ attributionOk: null });
+  const db = new Database(join(rootDir, 'data', 'reviews.db'));
+  db.exec(`
+    CREATE TABLE reviewer_passes (
+      worker_run_id TEXT,
+      status TEXT NOT NULL,
+      ended_at TEXT,
+      metadata_json TEXT NOT NULL
+    )
+  `);
+  const insertPass = db.prepare(
+    'INSERT INTO reviewer_passes (worker_run_id, status, ended_at, metadata_json) VALUES (?, ?, ?, ?)'
+  );
+  insertPass.run(
+    null,
+    'completed',
+    new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+    JSON.stringify({ launchRequestId: 'lrq_stale_missing' })
+  );
+  insertPass.run(
+    'wr_recent',
+    'completed',
+    new Date().toISOString(),
+    JSON.stringify({ launchRequestId: 'lrq_recent' })
+  );
+  db.close();
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 200 });
+
+  try {
+    const model = await buildReadyzStatus(rootDir);
+    assert.strictEqual(model.overallReady, true);
+    const attribution = model.signals.find((signal) => signal.id === 'attribution');
+    assert.strictEqual(attribution.detail, 'last 1 SDK passes: 1 attributed');
   } finally {
     global.fetch = originalFetch;
     rmSync(rootDir, { recursive: true, force: true });

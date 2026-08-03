@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -125,6 +125,120 @@ test('closer worktree reaper removes half-registered disk leftovers without quer
     calls.some((call) => call.cmd === '/bin/hq' && call.args[2] === 'hammer-ama-pr-3064-half'),
     true,
   );
+});
+
+test('closer worktree reaper discovers dedicated-base non-agent-os hammer worktrees from the manifest', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-cross-repo-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const deployRepoPath = join(hqRoot, 'repos', 'adversarial-review');
+  const workerBasePath = join(hqRoot, 'worker-base', 'adversarial-review');
+  const workerDir = join(hqRoot, 'workers', 'hammer-ama-pr-760-cross-repo');
+  const worktreePath = join(workerDir, 'adversarial-review');
+  mkdirSync(deployRepoPath, { recursive: true });
+  mkdirSync(workerBasePath, { recursive: true });
+  mkdirSync(worktreePath, { recursive: true });
+  writeFileSync(join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: 'hammer-ama-pr-760-cross-repo',
+    repo: 'adversarial-review',
+    repos: ['adversarial-review', 'agent-os'],
+    workspacePath: worktreePath,
+    worktreePath,
+  }));
+
+  const calls = [];
+  const result = await reapCloserHammerWorktrees({
+    hqRoot,
+    cursorPath: join(root, 'cursor.json'),
+    hqPath: '/bin/hq',
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      const repoPath = args[1];
+      const joined = args.join(' ');
+      if (cmd === 'git' && joined.includes('remote get-url origin')) {
+        return { stdout: 'git@github.com:laceyenterprises/adversarial-review.git\n', stderr: '' };
+      }
+      if (cmd === 'git' && joined.includes('worktree list --porcelain')) {
+        return {
+          stdout: repoPath === workerBasePath
+            ? [`worktree ${workerBasePath}`, 'branch refs/heads/main', '', `worktree ${worktreePath}`, 'branch refs/heads/SDR-04', ''].join('\n')
+            : [`worktree ${deployRepoPath}`, 'branch refs/heads/main', ''].join('\n'),
+          stderr: '',
+        };
+      }
+      return { stdout: '{}', stderr: '' };
+    },
+    execGhWithRetryImpl: async () => ({
+      stdout: JSON.stringify({ state: 'OPEN', mergedAt: null, closedAt: null }),
+    }),
+    limit: 10,
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reaped, 0);
+  assert.equal(result.open, 1);
+  assert.equal(result.halfRegistered, 0);
+  assert.equal(
+    calls.some((call) => call.cmd === '/bin/hq' && call.args[2] === 'hammer-ama-pr-760-cross-repo'),
+    false,
+  );
+});
+
+test('closer worktree reaper evaluates a multi-repo hammer worker once', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-multi-repo-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const adversarialBase = join(hqRoot, 'worker-base', 'adversarial-review');
+  const agentOsBase = join(hqRoot, 'worker-base', 'agent-os');
+  const workerDir = join(hqRoot, 'workers', 'hammer-ama-pr-760-multi-repo');
+  const adversarialWorktree = join(workerDir, 'adversarial-review');
+  const agentOsWorktree = join(workerDir, 'agent-os');
+  mkdirSync(adversarialWorktree, { recursive: true });
+  mkdirSync(agentOsWorktree, { recursive: true });
+  writeFileSync(join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: 'hammer-ama-pr-760-multi-repo',
+    repo: 'adversarial-review',
+    repos: ['adversarial-review', 'agent-os'],
+    workspacePath: adversarialWorktree,
+    worktreePath: adversarialWorktree,
+  }));
+
+  let ghCalls = 0;
+  const result = await reapCloserHammerWorktrees({
+    hqRoot,
+    cursorPath: join(root, 'cursor.json'),
+    hqPath: '/bin/hq',
+    repoPaths: [adversarialBase, agentOsBase],
+    execFileImpl: async (cmd, args) => {
+      const repoPath = args[1];
+      const joined = args.join(' ');
+      if (cmd === 'git' && joined.includes('remote get-url origin')) {
+        const repo = repoPath === adversarialBase ? 'adversarial-review' : 'agent-os';
+        return { stdout: `git@github.com:laceyenterprises/${repo}.git\n`, stderr: '' };
+      }
+      if (cmd === 'git' && joined.includes('worktree list --porcelain')) {
+        const worktreePath = repoPath === adversarialBase ? adversarialWorktree : agentOsWorktree;
+        return {
+          stdout: [`worktree ${repoPath}`, 'branch refs/heads/main', '', `worktree ${worktreePath}`, 'branch refs/heads/SDR-04', ''].join('\n'),
+          stderr: '',
+        };
+      }
+      return { stdout: '{}', stderr: '' };
+    },
+    execGhWithRetryImpl: async () => {
+      ghCalls += 1;
+      return { stdout: JSON.stringify({ state: 'OPEN', mergedAt: null, closedAt: null }) };
+    },
+    limit: 10,
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reaped, 0);
+  assert.equal(result.open, 1);
+  assert.equal(result.halfRegistered, 0);
+  assert.equal(ghCalls, 1);
 });
 
 test('closer worktree reaper removes prunable worktrees regardless of PR state', async (t) => {

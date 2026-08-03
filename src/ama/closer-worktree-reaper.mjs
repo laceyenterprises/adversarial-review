@@ -117,31 +117,80 @@ async function listHqRepoPaths(hqRoot, {
   readdirImpl = fsPromises.readdir,
   logger = console,
 } = {}) {
-  const reposDir = join(hqRoot, 'repos');
-  const entries = await readdirImpl(reposDir, { withFileTypes: true }).catch((err) => {
-    if (recoverableDiscoveryError(err)) {
-      if (err?.code !== 'ENOENT') {
-        logger?.warn?.(`[closer-worktree-reap] repo-discovery-skipped path=${reposDir} code=${err.code}`);
+  const entries = [];
+  for (const rootName of ['repos', 'worker-base']) {
+    const reposDir = join(hqRoot, rootName);
+    const rootEntries = await readdirImpl(reposDir, { withFileTypes: true }).catch((err) => {
+      if (recoverableDiscoveryError(err)) {
+        if (err?.code !== 'ENOENT') {
+          logger?.warn?.(`[closer-worktree-reap] repo-discovery-skipped path=${reposDir} code=${err.code}`);
+        }
+        return [];
       }
-      return [];
-    }
-    throw err;
-  });
+      throw err;
+    });
+    entries.push(...rootEntries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => ({
+        name: `${rootName}/${entry.name}`,
+        path: join(reposDir, entry.name),
+      })));
+  }
   const discovery = pageAfterCursor(
-    entries.filter((entry) => entry.isDirectory()),
+    entries,
     lastName,
     scanLimit,
   );
   return {
-    paths: discovery.page.map((entry) => join(reposDir, entry.name)),
+    paths: discovery.page.map((entry) => entry.path),
     nextCursor: discovery.nextCursor,
   };
+}
+
+function manifestWorktreePath(workerDir, manifest) {
+  const rawPath = manifest?.workspacePath || manifest?.worktreePath;
+  if (typeof rawPath !== 'string' || !rawPath.trim()) return null;
+  const candidate = rawPath.startsWith('/')
+    ? resolve(rawPath)
+    : resolve(workerDir, rawPath);
+  return pathTextEquals(dirname(candidate), workerDir) ? candidate : null;
+}
+
+async function resolveHammerWorktreePath(workerDir, {
+  readdirImpl = fsPromises.readdir,
+  readFileImpl = fsPromises.readFile,
+  logger = console,
+} = {}) {
+  const manifestPath = join(workerDir, 'workspace.json');
+  try {
+    const manifest = JSON.parse(await readFileImpl(manifestPath, 'utf8'));
+    const worktreePath = manifestWorktreePath(workerDir, manifest);
+    if (!worktreePath) {
+      logger?.warn?.(`[closer-worktree-reap] manifest-workspace-invalid path=${manifestPath}`);
+    }
+    return worktreePath;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') {
+      logger?.warn?.(`[closer-worktree-reap] manifest-read-failed path=${manifestPath}: ${err?.message || err}`);
+      return null;
+    }
+  }
+
+  const children = await readdirImpl(workerDir, { withFileTypes: true }).catch((err) => {
+    if (!recoverableDiscoveryError(err)) throw err;
+    return [];
+  });
+  const candidates = children
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+    .map((entry) => resolve(workerDir, entry.name));
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 async function listHammerWorkerDirs(hqRoot, {
   scanLimit,
   lastName,
   readdirImpl = fsPromises.readdir,
+  readFileImpl = fsPromises.readFile,
   logger = console,
 } = {}) {
   const workersDir = join(hqRoot, 'workers');
@@ -159,19 +208,25 @@ async function listHammerWorkerDirs(hqRoot, {
     lastName,
     scanLimit,
   );
+  const resolvedEntries = [];
+  for (const entry of discovery.page) {
+    const workerDir = join(workersDir, entry.name);
+    const worktreePath = await resolveHammerWorktreePath(workerDir, {
+      readdirImpl,
+      readFileImpl,
+      logger,
+    });
+    if (!worktreePath) continue;
+    resolvedEntries.push({
+      workerId: entry.name,
+      workerDir,
+      worktreePath,
+      prNumber: parseHammerPrNumber(entry.name),
+      diskPresent: existsSync(worktreePath),
+    });
+  }
   return {
-    entries: discovery.page
-      .map((entry) => {
-        const workerDir = join(workersDir, entry.name);
-        const worktreePath = join(workerDir, 'agent-os');
-        return {
-          workerId: entry.name,
-          workerDir,
-          worktreePath,
-          prNumber: parseHammerPrNumber(entry.name),
-          diskPresent: existsSync(worktreePath),
-        };
-      }),
+    entries: resolvedEntries,
     nextCursor: discovery.nextCursor,
   };
 }
@@ -410,22 +465,39 @@ async function reapCloserHammerWorktrees({
   const diskEntries = workerDiscovery.entries;
   const entries = [];
   const seen = new Set();
+  const seenWorkers = new Set();
+  const registeredByWorker = new Map();
+  for (const registeredEntry of registered.values()) {
+    if (!registeredByWorker.has(registeredEntry.workerId)) {
+      registeredByWorker.set(registeredEntry.workerId, registeredEntry);
+    }
+  }
 
   for (const diskEntry of diskEntries) {
     const pathKey = resolve(diskEntry.worktreePath);
     const registeredEntry = registered.get(pathKey);
+    const relatedRegistration = registeredEntry
+      ? null
+      : registeredByWorker.get(diskEntry.workerId);
     entries.push({
       ...diskEntry,
       ...(registeredEntry || {}),
       path: registeredEntry?.path || pathKey,
-      registered: Boolean(registeredEntry),
-      halfRegistered: !registeredEntry,
+      worktreePath: diskEntry.worktreePath,
+      diskPresent: registeredEntry ? existsSync(registeredEntry.path) : diskEntry.diskPresent,
+      registered: Boolean(registeredEntry || relatedRegistration),
+      halfRegistered: !registeredEntry && !relatedRegistration,
+      registrationMismatch: relatedRegistration
+        ? { registeredPath: relatedRegistration.path, manifestPath: pathKey }
+        : null,
     });
     seen.add(pathKey);
+    seenWorkers.add(diskEntry.workerId);
   }
   for (const [pathKey, registeredEntry] of registered.entries()) {
-    if (seen.has(pathKey)) continue;
+    if (seen.has(pathKey) || seenWorkers.has(registeredEntry.workerId)) continue;
     entries.push({ ...registeredEntry, diskPresent: existsSync(pathKey), halfRegistered: false });
+    seenWorkers.add(registeredEntry.workerId);
   }
 
   const evaluation = pageAfterCursor(entries, cursor.evaluation, scanLimit, (entry) => entry.workerId);

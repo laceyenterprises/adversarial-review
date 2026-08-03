@@ -399,6 +399,10 @@ test('follow-up daemon iteration preserves reconcile and closer reaper on wake-d
   const calls = [];
 
   await runFollowUpDaemonIteration({
+    refreshFollowUpGithubTokenImpl: async () => {
+      calls.push('github-token-refresh');
+      return { refreshed: true };
+    },
     refreshReviewerBrokerTokensImpl: async () => ({ handoffSafe: [] }),
     reconcileInProgressFollowUpJobsImpl: async () => {
       calls.push('reconcile');
@@ -447,6 +451,8 @@ test('follow-up daemon iteration preserves reconcile and closer reaper on wake-d
     shouldStop: () => false,
   });
 
+  assert.ok(calls.indexOf('github-token-refresh') > -1);
+  assert.ok(calls.indexOf('github-token-refresh') < calls.indexOf('reconcile'));
   assert.ok(calls.indexOf('reconcile') > -1);
   assert.ok(calls.indexOf('closer-worktree-reap') > calls.indexOf('consume'));
   assert.ok(calls.indexOf('retry-comments') > calls.indexOf('closer-worktree-reap'));
@@ -491,9 +497,9 @@ test('follow-up wake storm on one head does not starve another PR head', async (
   assert.equal(result.reason, 'wake');
 });
 
-// Regression guard for the per-tick reviewer-token refresh wiring. The tick
+// Regression guard for the per-tick GitHub-token refresh wiring. The tick
 // loop lives in main() (not exported), so we assert at the source level that
-// the refresh runs as the FIRST tick step — ahead of `consume` (which spawns
+// the refreshes run before `consume` (which spawns
 // remediation workers that snapshot process.env) and `retry-comments` (which
 // posts directly). Without it, the daemon's broker App token expires ~1h after
 // (re)start and remediation reply comments silently 401 (2026-06-14 incident).
@@ -504,13 +510,21 @@ test('tick loop refreshes the reviewer broker token before any GitHub step', () 
   );
   assert.match(
     src,
-    /import \{ refreshReviewerBrokerTokens \} from '\.\.\/src\/reviewer-broker-refresh\.mjs'/,
+    /refreshFollowUpGithubToken,[\s\S]*refreshReviewerBrokerTokens,[\s\S]*from '\.\.\/src\/reviewer-broker-refresh\.mjs'/,
+    'daemon must import both follow-up and reviewer token refreshers',
+  );
+  const githubRefreshIdx = src.indexOf("runStep('github-token-refresh'");
+  assert.ok(githubRefreshIdx > 0, 'tick loop must run the github-token-refresh step');
+  assert.match(
+    src,
+    /refreshReviewerBrokerTokens/,
     'daemon must import refreshReviewerBrokerTokens',
   );
   const refreshIdx = src.indexOf("runStep('reviewer-token-refresh'");
   const consumeIdx = src.indexOf("runStep('consume'");
   const retryIdx = src.indexOf("runStep('retry-comments'");
   assert.ok(refreshIdx > 0, 'tick loop must run the reviewer-token-refresh step');
+  assert.ok(refreshIdx > githubRefreshIdx, 'GitHub runtime token must refresh first');
   assert.ok(consumeIdx > refreshIdx, 'refresh must run before consume (worker spawn)');
   assert.ok(retryIdx > refreshIdx, 'refresh must run before retry-comments (direct post)');
   assert.match(

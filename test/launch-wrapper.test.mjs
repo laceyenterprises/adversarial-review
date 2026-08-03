@@ -112,7 +112,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
 	      + 'if [[ "$1" == "-e" ]]; then exit 0; fi\n'
 	      + 'if [[ "$1" == *"resolve-op-token-cli.mjs" ]]; then printf "op-token"; exit 0; fi\n'
       + 'if [[ "$1" == *"watcher.mjs" ]]; then printf "{\\"linearApiKey\\":\\"%s\\",\\"alertTo\\":\\"%s\\",\\"githubToken\\":\\"%s\\",\\"ghToken\\":\\"%s\\",\\"hmacKey\\":\\"%s\\"}\\n" "${LINEAR_API_KEY:-}" "${ALERT_TO:-}" "${GITHUB_TOKEN:-}" "${GH_TOKEN:-}" "${AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1:-}"; exit 0; fi\n'
-	      + 'if [[ "$1" == *"adversarial-follow-up-daemon.mjs" ]]; then exit 0; fi\n'
+      + 'if [[ "$1" == *"adversarial-follow-up-daemon.mjs" ]]; then printf "{\\"githubToken\\":\\"%s\\",\\"ghToken\\":\\"%s\\",\\"followUpBrokerFlag\\":\\"%s\\",\\"followUpBrokerRole\\":\\"%s\\"}\\n" "${GITHUB_TOKEN:-}" "${GH_TOKEN:-}" "${FOLLOW_UP_GH_AUTH_VIA_BROKER:-}" "${FOLLOW_UP_GH_BROKER_ROLE:-}"; exit 0; fi\n'
 	      + 'exit 0\n',
 	  );
   writeExecutable(
@@ -538,6 +538,21 @@ test('placey watcher launcher defaults watcher GitHub auth to the broker token',
   const payload = JSON.parse(result.stdout.trim().split(/\n/).at(-1));
   assert.equal(payload.githubToken, 'broker-token');
   assert.equal(payload.ghToken, 'broker-token');
+  assert.match(result.stderr, /GITHUB_TOKEN resolved via OAuth broker \(role=merge-agent/);
+});
+
+test('follow-up launcher defaults GitHub auth to the refreshable broker token', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-follow-up-tick.sh', {
+    extraEnv: BROKER_MODE_TEST_ENV,
+  });
+  assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
+  const payload = JSON.parse(result.stdout.trim().split(/\n/).at(-1));
+  assert.equal(payload.githubToken, 'broker-token');
+  assert.equal(payload.ghToken, 'broker-token');
+  assert.equal(payload.followUpBrokerFlag, 'true');
+  assert.equal(payload.followUpBrokerRole, 'merge-agent');
   assert.match(result.stderr, /GITHUB_TOKEN resolved via OAuth broker \(role=merge-agent/);
 });
 

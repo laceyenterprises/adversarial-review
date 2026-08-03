@@ -8,9 +8,9 @@
 // every reviewer subprocess via process.env. But GitHub App INSTALLATION tokens
 // expire ~1h after issuance, so first-pass reviews start failing the GitHub POST
 // with HTTP 401 about an hour after each watcher (re)start, with no self-healing.
-// (The follow-up/remediation path already re-resolves per tick because each tick
-// is a fresh bash process; the watcher is a single long-lived node process and
-// never refreshed.)
+// Both watcher and follow-up are long-lived Node processes. Their startup
+// wrappers seed broker tokens once; this module refreshes those credentials in
+// process before later ticks spawn workers or make GitHub calls.
 //
 // THE FIX: re-resolve the broker token on a TTL well under the ~1h expiry and
 // write it back into process.env[botTokenEnv] so subsequently-spawned reviewers
@@ -56,6 +56,9 @@ export const REVIEWER_TOKEN_POST_SLACK_MS = 2 * 60 * 1000;
 // handoff, do not hammer the broker on every watcher tick while the prior token
 // remains usable. Retry soon, but bounded.
 export const REVIEWER_TOKEN_FAILURE_RETRY_MS = 60 * 1000;
+
+export const FOLLOW_UP_GH_TOKEN_ENV_VARS = Object.freeze(['GITHUB_TOKEN', 'GH_TOKEN']);
+export const DEFAULT_FOLLOW_UP_GH_BROKER_ROLE = 'merge-agent';
 
 // The reviewer roles that can be broker-backed. Mirrors the routes in
 // watcher.mjs + scripts/adversarial-watcher-start.sh. `envVar` is the
@@ -441,6 +444,83 @@ export const DEFAULT_WATCHER_GH_BROKER_ROLE = 'merge-agent';
 export function resolveWatcherGhBrokerRole(env = process.env) {
   const raw = String(env.WATCHER_GH_BROKER_ROLE || '').trim();
   return raw || DEFAULT_WATCHER_GH_BROKER_ROLE;
+}
+
+export function resolveFollowUpGhBrokerRole(env = process.env) {
+  const raw = String(env.FOLLOW_UP_GH_BROKER_ROLE || '').trim();
+  return raw || DEFAULT_FOLLOW_UP_GH_BROKER_ROLE;
+}
+
+export async function refreshFollowUpGithubToken({
+  env = process.env,
+  now = Date.now(),
+  fetchImpl = globalThis.fetch,
+  readFileImpl = readFileSync,
+  log = console,
+  skewMs = REVIEWER_TOKEN_REFRESH_SKEW_MS,
+  fallbackTtlMs = REVIEWER_TOKEN_FALLBACK_TTL_MS,
+  timeoutMs = null,
+  force = false,
+} = {}) {
+  const summary = { refreshed: false, skipped: null, failed: null, role: null };
+  const flag = 'FOLLOW_UP_GH_AUTH_VIA_BROKER';
+  if (String(env[flag] || '').trim() !== 'true') {
+    summary.skipped = 'broker-mode-disabled';
+    return summary;
+  }
+  const role = resolveFollowUpGhBrokerRole(env);
+  summary.role = role;
+  const clockKey = `__follow_up_gh__:${role}`;
+  const configFingerprint = brokerConfigFingerprint(
+    brokerConfigForRole({ role, env, flag })
+  );
+  const scheduled = refreshClock.get(clockKey);
+  if (
+    !force
+    && scheduled !== undefined
+    && scheduled.configFingerprint === configFingerprint
+    && now < scheduled.nextRefreshAtMs
+  ) {
+    summary.skipped = 'token-still-valid';
+    return summary;
+  }
+  const effectiveTimeoutMs =
+    timeoutMs ?? resolvePositiveMsEnv(env.REVIEWER_TOKEN_FETCH_TIMEOUT_MS, REVIEWER_TOKEN_FETCH_TIMEOUT_MS);
+  try {
+    const { token, expiresAtMs } = await fetchReviewerTokenFromBroker({
+      role,
+      env,
+      fetchImpl,
+      readFileImpl,
+      timeoutMs: effectiveTimeoutMs,
+    });
+    for (const envVar of FOLLOW_UP_GH_TOKEN_ENV_VARS) {
+      env[envVar] = token;
+    }
+    const byExpiry = expiresAtMs != null ? expiresAtMs - skewMs : null;
+    const next = byExpiry != null ? Math.max(byExpiry, now + 1) : now + fallbackTtlMs;
+    refreshClock.set(clockKey, {
+      nextRefreshAtMs: next,
+      configFingerprint,
+      expiresAtMs: expiresAtMs ?? null,
+    });
+    summary.refreshed = true;
+    log?.log?.(
+      `[reviewer-broker-refresh] follow-up GITHUB_TOKEN/GH_TOKEN refreshed via broker (role=${role}; expires_at=${expiresAtMs ? new Date(expiresAtMs).toISOString() : 'unknown'})`
+    );
+  } catch (err) {
+    summary.failed = err?.message || String(err);
+    const retryAt = now + resolvePositiveMsEnv(env.REVIEWER_TOKEN_FAILURE_RETRY_MS, REVIEWER_TOKEN_FAILURE_RETRY_MS);
+    refreshClock.set(clockKey, {
+      nextRefreshAtMs: retryAt,
+      configFingerprint,
+      expiresAtMs: scheduled?.expiresAtMs ?? null,
+    });
+    log?.warn?.(
+      `[reviewer-broker-refresh] keeping existing follow-up GITHUB_TOKEN; broker fetch for role ${role} failed: ${summary.failed}`
+    );
+  }
+  return summary;
 }
 
 export async function refreshWatcherGithubToken({

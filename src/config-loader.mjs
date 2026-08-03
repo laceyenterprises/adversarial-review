@@ -674,6 +674,30 @@ function schemaV1() {
               },
             },
           },
+          // Parse-only mirror of the placey-side Keychain bridge recovery
+          // capability. Python owns the values and launchd rendering, but the
+          // shared config cascade must remain valid under this strict loader.
+          keychain_bridge: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              auto_unlock: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  enabled: {
+                    __type: TYPE_BOOL,
+                    __default: true,
+                  },
+                  command: {
+                    __type: TYPE_STRING,
+                    __default:
+                      '/usr/bin/sudo -n /usr/local/libexec/agent-os/oauth-bridge-unlock-keychain',
+                  },
+                },
+              },
+            },
+          },
           // AMA closer (hammer/merge-agent/post-merge-actions) GitHub App
           // installation-token auth. Mirrors the Python authority
           // (`oauth_broker.merge_agent` in
@@ -2684,6 +2708,14 @@ export const ENV_ALIASES = {
     aliases: [
       ['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS', Number],
     ],
+  },
+  'oauth_broker.keychain_bridge.auto_unlock.enabled': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_KEYCHAIN_BRIDGE_AUTO_UNLOCK_ENABLED',
+    aliases: [['BRIDGE_AUTO_UNLOCK_ENABLED', identity]],
+  },
+  'oauth_broker.keychain_bridge.auto_unlock.command': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_KEYCHAIN_BRIDGE_AUTO_UNLOCK_COMMAND',
+    aliases: [['BRIDGE_AUTO_UNLOCK_COMMAND', identity]],
   },
   'policy.dedup.uncommitted_line_threshold': {
     canonical: 'AGENT_OS_POLICY_DEDUP_UNCOMMITTED_LINE_THRESHOLD',

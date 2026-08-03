@@ -5488,6 +5488,60 @@ test('oauth broker credential-decay keys preserve strict Python Node env parity'
   }
 });
 
+test('oauth_broker keychain auto-unlock strict mirror accepts only the fixed shape', () => {
+  const tmp = freshTmp();
+  try {
+    const ok = join(tmp, 'keychain-auto-unlock-ok.yaml');
+    writeFile(ok, `
+      version: 1
+      oauth_broker:
+        keychain_bridge:
+          auto_unlock:
+            enabled: true
+            command: /usr/bin/sudo -n /usr/local/libexec/agent-os/oauth-bridge-unlock-keychain
+    `);
+    const cfg = loadConfig({ topPath: ok, env: {} });
+    assert.equal(cfg.get('oauth_broker.keychain_bridge.auto_unlock.enabled'), true);
+    assert.equal(
+      cfg.get('oauth_broker.keychain_bridge.auto_unlock.command'),
+      '/usr/bin/sudo -n /usr/local/libexec/agent-os/oauth-bridge-unlock-keychain',
+    );
+
+    const envCfg = loadConfig({
+      topPath: ok,
+      env: {
+        BRIDGE_AUTO_UNLOCK_ENABLED: 'false',
+        BRIDGE_AUTO_UNLOCK_COMMAND: '/usr/bin/sudo -n /custom/fixed-unlock',
+      },
+    });
+    assert.equal(envCfg.get('oauth_broker.keychain_bridge.auto_unlock.enabled'), false);
+    assert.equal(
+      envCfg.get('oauth_broker.keychain_bridge.auto_unlock.command'),
+      '/usr/bin/sudo -n /custom/fixed-unlock',
+    );
+
+    const bad = join(tmp, 'keychain-auto-unlock-bad.yaml');
+    writeFile(bad, `
+      version: 1
+      oauth_broker:
+        keychain_bridge:
+          auto_unlock:
+            enabled: true
+            password_ref: op://vault/admin/password
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: bad, env: {} }),
+      (err) => {
+        assert.match(String(err.key), /oauth_broker\.keychain_bridge\.auto_unlock/);
+        return true;
+      },
+    );
+  } finally {
+    resetConfigCache();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // oauth_broker.merge_agent is a tolerate-only partial mirror: the watcher does
 // NOT consume these keys (the merge-agent App-installation-token auth is
 // resolved by modules/worker-pool/lib/hq-gh.sh; the authoritative CFG contract

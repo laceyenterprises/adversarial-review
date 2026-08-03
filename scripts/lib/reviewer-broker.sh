@@ -20,8 +20,11 @@
 #
 # Returns 0 (and exports <env-var-name>) on success.
 # Returns 1 on any classifiable failure (missing config, curl failure,
-# malformed response, metadata mismatch). The caller MAY fall back to
-# an op-read path, OR fail closed depending on the broker-required flag.
+# malformed response, metadata mismatch). On failure it also sets
+# REVIEWER_BROKER_FAILURE_CLASS to `transient` for transport/temporary HTTP
+# failures or `permanent` for local configuration/response-contract failures.
+# The caller MAY fall back to an op-read path, OR fail closed with a retry
+# cadence appropriate to that class.
 #
 # Env contract per role:
 #   <ROLE>_AUTH_VIA_BROKER          # 'true' enables broker path
@@ -76,8 +79,10 @@ reviewer_broker_mode_enabled() {
 resolve_reviewer_token_via_broker() {
     local target_env="$1"
     local role="$2"
+    REVIEWER_BROKER_FAILURE_CLASS=""
 
     if [[ -z "$target_env" || -z "$role" ]]; then
+        REVIEWER_BROKER_FAILURE_CLASS="permanent"
         echo "[reviewer-broker] usage: resolve_reviewer_token_via_broker <env-var> <role>" >&2
         return 1
     fi
@@ -99,18 +104,22 @@ resolve_reviewer_token_via_broker() {
     expected_installation_id="$(_reviewer_broker_indirect "$expected_installation_id_env")"
 
     if [[ -z "$secret_file" ]]; then
+        REVIEWER_BROKER_FAILURE_CLASS="permanent"
         echo "[reviewer-broker] broker mode (${role}) requested but OAUTH_BROKER_SHARED_SECRET_FILE is empty" >&2
         return 1
     fi
     if [[ ! -r "$secret_file" ]]; then
+        REVIEWER_BROKER_FAILURE_CLASS="permanent"
         echo "[reviewer-broker] broker mode (${role}): OAUTH_BROKER_SHARED_SECRET_FILE='$secret_file' is unreadable" >&2
         return 1
     fi
     if ! command -v curl >/dev/null 2>&1; then
+        REVIEWER_BROKER_FAILURE_CLASS="permanent"
         echo "[reviewer-broker] broker mode (${role}): curl unavailable" >&2
         return 1
     fi
     if ! command -v jq >/dev/null 2>&1; then
+        REVIEWER_BROKER_FAILURE_CLASS="permanent"
         echo "[reviewer-broker] broker mode (${role}): jq unavailable (required to parse broker response)" >&2
         return 1
     fi
@@ -118,11 +127,12 @@ resolve_reviewer_token_via_broker() {
     local broker_secret=""
     broker_secret="$(cat "$secret_file" 2>/dev/null)"
     if [[ -z "$broker_secret" ]]; then
+        REVIEWER_BROKER_FAILURE_CLASS="permanent"
         echo "[reviewer-broker] broker mode (${role}): OAUTH_BROKER_SHARED_SECRET_FILE='$secret_file' is empty" >&2
         return 1
     fi
 
-    local response_file curl_stderr_file http_code response_body="" curl_stderr="" timeout_seconds
+    local response_file curl_stderr_file http_code response_body="" curl_stderr="" timeout_seconds curl_rc=0
     timeout_seconds="$(_reviewer_broker_fetch_timeout_seconds)"
     response_file="$(mktemp -t reviewer-broker-resp.XXXXXX)"
     curl_stderr_file="$(mktemp -t reviewer-broker-curl.XXXXXX)"
@@ -134,7 +144,7 @@ resolve_reviewer_token_via_broker() {
         -H "Authorization: Bearer $broker_secret" \
         -H "Accept: application/json" \
         "${broker_url%/}/token?provider=${broker_provider}" \
-        2>"$curl_stderr_file" || true)"
+        2>"$curl_stderr_file")" || curl_rc=$?
     curl_stderr="$(tr '\n' ' ' <"$curl_stderr_file" 2>/dev/null | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//' || true)"
     rm -f "$curl_stderr_file"
     broker_secret=""
@@ -143,6 +153,13 @@ resolve_reviewer_token_via_broker() {
     if [[ "$http_code" != "200" ]]; then
         response_body="$(head -c 256 "$response_file" 2>/dev/null || true)"
         rm -f "$response_file"
+        case "$http_code" in
+          000|408|409|425|429|5??|"") REVIEWER_BROKER_FAILURE_CLASS="transient" ;;
+          *) REVIEWER_BROKER_FAILURE_CLASS="permanent" ;;
+        esac
+        if [[ "$curl_rc" -ne 0 && ( -z "$http_code" || "$http_code" == "000" ) ]]; then
+            REVIEWER_BROKER_FAILURE_CLASS="transient"
+        fi
         echo "[reviewer-broker] broker mode (${role}): ${broker_url} returned HTTP ${http_code:-<no-code>}; stderr: ${curl_stderr:-<none>}; body[:256]: ${response_body:-<empty>}" >&2
         return 1
     fi
@@ -155,19 +172,23 @@ resolve_reviewer_token_via_broker() {
     rm -f "$response_file"
 
     if [[ -z "$access_token" ]]; then
+        REVIEWER_BROKER_FAILURE_CLASS="permanent"
         echo "[reviewer-broker] broker mode (${role}): response missing access_token field" >&2
         return 1
     fi
 
     if [[ "$actual_provider" != "$broker_provider" ]]; then
+        REVIEWER_BROKER_FAILURE_CLASS="permanent"
         echo "[reviewer-broker] broker mode (${role}): response.provider='${actual_provider}' does not match expected '${broker_provider}'" >&2
         return 1
     fi
     if [[ -n "$expected_app_id" && "$actual_app_id" != "$expected_app_id" ]]; then
+        REVIEWER_BROKER_FAILURE_CLASS="permanent"
         echo "[reviewer-broker] broker mode (${role}): response.metadata.app_id='${actual_app_id}' does not match expected '${expected_app_id}' (${expected_app_id_env})" >&2
         return 1
     fi
     if [[ -n "$expected_installation_id" && "$actual_installation_id" != "$expected_installation_id" ]]; then
+        REVIEWER_BROKER_FAILURE_CLASS="permanent"
         echo "[reviewer-broker] broker mode (${role}): response.metadata.installation_id='${actual_installation_id}' does not match expected '${expected_installation_id}' (${expected_installation_id_env})" >&2
         return 1
     fi

@@ -47,7 +47,10 @@ import {
 } from '../src/follow-up-remediation.mjs';
 import { reconcileInProgressFollowUpJobs } from '../src/follow-up-reconcile.mjs';
 import { retryFailedCommentDeliveries } from '../src/adapters/comms/github-pr-comments/comment-delivery.mjs';
-import { refreshReviewerBrokerTokens } from '../src/reviewer-broker-refresh.mjs';
+import {
+  refreshFollowUpGithubToken,
+  refreshReviewerBrokerTokens,
+} from '../src/reviewer-broker-refresh.mjs';
 import { reapCloserHammerWorktrees } from '../src/ama/closer-worktree-reaper.mjs';
 import { loadConfigCached } from '../src/config-loader.mjs';
 import { archiveStoppedFollowUpJobs, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
@@ -443,6 +446,7 @@ function resolveTelemetryListenerStartTimeoutMs(env = process.env) {
 
 async function runFollowUpDaemonIteration({
   env = process.env,
+  refreshFollowUpGithubTokenImpl = refreshFollowUpGithubToken,
   refreshReviewerBrokerTokensImpl = refreshReviewerBrokerTokens,
   reconcileInProgressFollowUpJobsImpl = reconcileInProgressFollowUpJobs,
   emitHeartbeatsForActiveJobsImpl = emitHeartbeatsForActiveJobs,
@@ -453,6 +457,10 @@ async function runFollowUpDaemonIteration({
   runStoppedArchiveSweepIfDueImpl = runStoppedArchiveSweepIfDue,
   shouldStop = () => stopping,
 } = {}) {
+  await runStep('github-token-refresh', async () => {
+    await refreshFollowUpGithubTokenImpl({ env, log: console });
+  });
+  if (shouldStop()) return;
   let reviewerTokenRefreshSummary = null;
   await runStep('reviewer-token-refresh', async () => {
     reviewerTokenRefreshSummary = await refreshReviewerBrokerTokensImpl({

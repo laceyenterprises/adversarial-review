@@ -115,16 +115,39 @@ resolve_gh_bin() {
   return 1
 }
 
-# Operator gh token for workspace prep and push-back. The daemon uses
+# Reviewer-broker helper. Source it before resolving the daemon's own GitHub
+# token so the long-lived follow-up lane uses the same installation-token path
+# as the watcher instead of depending on an ambient gh Keychain item.
+_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER="$(dirname "$0")/lib/reviewer-broker.sh"
+if [[ -r "$_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER" ]]; then
+  # shellcheck source=/dev/null
+  source "$_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER"
+fi
+
+# GitHub token for workspace prep and push-back. The daemon uses
 # `gh api` for REST PR metadata, git smart-HTTP for clone/fetch of
-# same-repo branches, and `gh pr checkout` only for fork fallback. Note:
-# this is the operator's identity, distinct from the reviewer-bot PATs
-# the comment poster uses (see below).
+# same-repo branches, and `gh pr checkout` only for fork fallback. Prefer the
+# merge-agent GitHub App token: it is headless, refreshable, and does not rely
+# on the Homebrew gh binary being able to read its own Keychain entry.
 GH_BIN="$(resolve_gh_bin || true)"
-if [[ -n "$GH_BIN" ]]; then
-  export GITHUB_TOKEN="$("$GH_BIN" auth token 2>/dev/null || true)"
+: "${FOLLOW_UP_GH_AUTH_VIA_BROKER:=true}"
+export FOLLOW_UP_GH_AUTH_VIA_BROKER
+FOLLOW_UP_GH_BROKER_ROLE="${FOLLOW_UP_GH_BROKER_ROLE:-merge-agent}"
+export FOLLOW_UP_GH_BROKER_ROLE
+export GITHUB_TOKEN=""
+FOLLOW_UP_GH_BROKER_FAILURE_CLASS=""
+if [[ "$FOLLOW_UP_GH_AUTH_VIA_BROKER" == "true" ]] \
+  && declare -f resolve_reviewer_token_via_broker >/dev/null 2>&1 \
+  && resolve_reviewer_token_via_broker GITHUB_TOKEN "$FOLLOW_UP_GH_BROKER_ROLE"; then
+  export GH_TOKEN="$GITHUB_TOKEN"
+  echo "[follow-up-tick] GITHUB_TOKEN resolved via OAuth broker (role=${FOLLOW_UP_GH_BROKER_ROLE} App installation token)" >&2
 else
-  export GITHUB_TOKEN=""
+  FOLLOW_UP_GH_BROKER_FAILURE_CLASS="${REVIEWER_BROKER_FAILURE_CLASS:-permanent}"
+  if [[ -n "$GH_BIN" ]]; then
+    export GITHUB_TOKEN="$("$GH_BIN" auth token 2>/dev/null || true)"
+    export GH_TOKEN="$GITHUB_TOKEN"
+    echo "[follow-up-tick] GITHUB_TOKEN from gh credential fallback" >&2
+  fi
 fi
 # Failure here MUST sleep before exit. Same fail-once shape as the
 # 1Password sleep guards added in #139; the gh path was missed in
@@ -132,8 +155,18 @@ fi
 # = false) + ThrottleInterval=30 turns a missing gh credential into
 # a 30-second respawn storm against the gh keychain.
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
-  echo "[follow-up-tick] ERROR: could not resolve GITHUB_TOKEN from gh keychain via ${GH_BIN:-gh}" >&2
-  echo "[follow-up-tick] sleeping 3600s to suppress launchd respawn storm; fix the gh credential and bootout the agent to recover sooner." >&2
+  echo "[follow-up-tick] ERROR: could not resolve GITHUB_TOKEN from broker role ${FOLLOW_UP_GH_BROKER_ROLE} or gh fallback via ${GH_BIN:-gh}" >&2
+  if [[ "$FOLLOW_UP_GH_BROKER_FAILURE_CLASS" == "transient" ]]; then
+    FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS="${FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS:-60}"
+    if ! [[ "$FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS" =~ ^[0-9]+$ ]] \
+      || (( FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS < 1 || FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS > 300 )); then
+      FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS=60
+    fi
+    echo "[follow-up-tick] transient broker failure; retrying through launchd after ${FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS}s." >&2
+    sleep "$FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS"
+    exit 75
+  fi
+  echo "[follow-up-tick] sleeping 3600s to suppress launchd respawn storm; fix broker/gh auth and bootout the agent to recover sooner." >&2
   sleep 3600
   exit 1
 fi
@@ -158,12 +191,6 @@ fi
 # we fetch installation tokens from the OAuth broker instead of via
 # op-read — each reviewer role gets its own 15K/hr GraphQL bucket.
 # Default-off; broker mode fails closed (no silent op-read fallback).
-_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER="$(dirname "$0")/lib/reviewer-broker.sh"
-if [[ -r "$_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER" ]]; then
-  # shellcheck source=/dev/null
-  source "$_FOLLOW_UP_TICK_REVIEWER_BROKER_HELPER"
-fi
-
 broker_fail_closed_exit() {
   local flag_name="$1"
   echo "[follow-up-tick] ERROR: ${flag_name}=true but broker fetch failed; refusing to fall back to op-read PAT path." >&2

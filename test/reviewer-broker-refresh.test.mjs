@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 
 import {
+  refreshFollowUpGithubToken,
   refreshReviewerBrokerTokens,
   refreshWatcherGithubToken,
   resolveReviewerAppToken,
@@ -14,10 +15,22 @@ import {
   BROKER_REVIEWER_ROLES,
   WATCHER_GH_TOKEN_ENV_VARS,
   DEFAULT_WATCHER_GH_BROKER_ROLE,
+  DEFAULT_FOLLOW_UP_GH_BROKER_ROLE,
 } from '../src/reviewer-broker-refresh.mjs';
 
 const SECRET_FILE = '/secret/oauth-broker-shared-secret';
 const HOUR_MS = 60 * 60 * 1000;
+
+function makeFollowUpEnv(overrides = {}) {
+  return {
+    FOLLOW_UP_GH_AUTH_VIA_BROKER: 'true',
+    OAUTH_BROKER_URL: 'http://127.0.0.1:4099',
+    OAUTH_BROKER_SHARED_SECRET_FILE: SECRET_FILE,
+    GITHUB_TOKEN: 'ghp_OLD_operator_pat',
+    GH_TOKEN: 'ghp_OLD_operator_pat',
+    ...overrides,
+  };
+}
 
 function makeEnv(overrides = {}) {
   return {
@@ -758,6 +771,44 @@ function makeWatcherEnv(overrides = {}) {
     ...overrides,
   };
 }
+
+test('refreshFollowUpGithubToken: refreshes both GitHub env vars from merge-agent broker', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeFollowUpEnv();
+  let calledUrl = null;
+  const summary = await refreshFollowUpGithubToken({
+    env,
+    now: 1_000_000,
+    fetchImpl: async (url) => {
+      calledUrl = url;
+      return brokerOk(`github-app-${DEFAULT_FOLLOW_UP_GH_BROKER_ROLE}`, 'ghs_FOLLOW_UP', {
+        expiresAt: new Date(1_000_000 + HOUR_MS).toISOString(),
+      });
+    },
+    readFileImpl: readSecret,
+    log: silentLog,
+  });
+  assert.equal(summary.refreshed, true);
+  assert.equal(summary.role, DEFAULT_FOLLOW_UP_GH_BROKER_ROLE);
+  assert.equal(env.GITHUB_TOKEN, 'ghs_FOLLOW_UP');
+  assert.equal(env.GH_TOKEN, 'ghs_FOLLOW_UP');
+  assert.match(calledUrl, /provider=github-app-merge-agent$/);
+});
+
+test('refreshFollowUpGithubToken: broker failure preserves the current token', async () => {
+  _resetReviewerTokenRefreshClockForTest();
+  const env = makeFollowUpEnv({ GITHUB_TOKEN: 'ghs_STILL_VALID', GH_TOKEN: 'ghs_STILL_VALID' });
+  const summary = await refreshFollowUpGithubToken({
+    env,
+    now: 1_000_000,
+    fetchImpl: async () => { throw new Error('broker unreachable'); },
+    readFileImpl: readSecret,
+    log: silentLog,
+  });
+  assert.match(summary.failed, /broker unreachable/);
+  assert.equal(env.GITHUB_TOKEN, 'ghs_STILL_VALID');
+  assert.equal(env.GH_TOKEN, 'ghs_STILL_VALID');
+});
 
 test('refreshWatcherGithubToken: sets GITHUB_TOKEN + GH_TOKEN from the broker App token (default role)', async () => {
   _resetReviewerTokenRefreshClockForTest();

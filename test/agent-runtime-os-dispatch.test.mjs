@@ -175,8 +175,10 @@ test('reviewer derives the dedicated reviewer worker class for each model family
   assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'gemini' }), 'gemini-reviewer');
   assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'claude-code' }), 'claude-reviewer');
   assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'claude' }), 'claude-reviewer');
+  assert.equal(resolveWorkerClass({ model: 'gemini' }), 'gemini-reviewer');
   assert.equal(resolveWorkerClass({ kind: 'remediator', model: 'codex' }), 'codex');
   assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'codex', workerClass: 'codex' }), 'codex');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer' }), undefined);
 });
 
 test('legacy app role task kinds map to HQ task kinds before dispatch', () => {
@@ -218,6 +220,13 @@ test('buildDispatchPayload maps a codex reviewer onto the codex-reviewer worker 
     role: { id: 'reviewer:codex', kind: 'reviewer', model: 'codex' },
   }), (r) => r.subjectContent.representation);
   assert.equal(payload.worker_class, 'codex-reviewer');
+});
+
+test('buildDispatchPayload omits worker_class when no model or worker class is provided', () => {
+  const payload = buildDispatchPayload(reviewerRequest({
+    role: { id: 'reviewer:unresolved', kind: 'reviewer' },
+  }), (r) => r.subjectContent.representation);
+  assert.equal(JSON.stringify(payload).includes('"worker_class"'), false);
 });
 
 test('toAppContractRequestId preserves valid keys and normalizes PR refs with a hash suffix', () => {

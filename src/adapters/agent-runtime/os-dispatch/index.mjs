@@ -103,8 +103,8 @@ function resolveWorkerClass(role) {
   if (explicit) return explicit;
 
   const model = String(role?.model || '').trim();
-  if (!model) return model;
-  if (role?.kind !== 'reviewer') return model;
+  if (!model) return undefined;
+  if (role?.kind === 'remediator') return model;
 
   if (model === 'codex') return 'codex-reviewer';
   if (model === 'gemini') return 'gemini-reviewer';

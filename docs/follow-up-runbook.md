@@ -3,7 +3,8 @@
 ## SDK cutover gate
 
 Full SDK cutover remains blocked until the airlock-owned deploy host returns
-`cutover: READY` from the bounded ARC-32 check:
+`cutover: READY` from the ARC-32 aggregation check, which evaluates the shipped
+ARC-25 through ARC-31 gates:
 
 ```bash
 hq adversarial sdk-cutover check --repo <owner/repo> --pr <merged-clean-proof-pr>

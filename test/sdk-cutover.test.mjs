@@ -6,6 +6,7 @@ import {
   createRereviewRecoveryFixture,
   sdkCutoverCheckMain,
 } from '../src/sdk-cutover.mjs';
+import { main as cliMain } from '../src/cli.mjs';
 
 const NOW = '2026-08-03T06:30:00.000Z';
 
@@ -215,6 +216,18 @@ test('sdkCutoverCheckMain accepts top-level sdk-cutover help without the check s
   let output = '';
   let error = '';
   const code = await sdkCutoverCheckMain(['--help'], {
+    stdout: { write: (value) => { output += value; } },
+    stderr: { write: (value) => { error += value; } },
+  });
+  assert.equal(code, 0);
+  assert.match(output, /sdk-cutover check/u);
+  assert.equal(error, '');
+});
+
+test('general CLI lazily loads sdk-cutover and routes its help command', async () => {
+  let output = '';
+  let error = '';
+  const code = await cliMain(['sdk-cutover', '--help'], {
     stdout: { write: (value) => { output += value; } },
     stderr: { write: (value) => { error += value; } },
   });

@@ -6,7 +6,6 @@ import { main as pipelineHealthMain } from './review-pipeline-health-cli.mjs';
 import { main as resetPrMain } from './reset-pr.mjs';
 import { main as tokensMain } from './tokens-cli.mjs';
 import { runtimeMain } from './runtime-status-cli.mjs';
-import { sdkCutoverCheckMain } from './sdk-cutover.mjs';
 import { finalizationMain } from './finalization-cli.mjs';
 import { reviewerRoster, formatReviewerRoster } from './adapters/subject/github-pr/routing.mjs';
 import { resolveGeminiReviewerMode } from './role-config.mjs';
@@ -160,6 +159,11 @@ async function main(argv, io = {}) {
     return runtimeMain(rest, io);
   }
   if (command === 'sdk-cutover') {
+    // Keep the cutover collector and its ledger/queue dependencies out of the
+    // general CLI import graph. Several watcher tests replace those modules
+    // with deliberately narrow fixtures; unrelated commands must not require
+    // every cutover-only export from those fixtures.
+    const { sdkCutoverCheckMain } = await import('./sdk-cutover.mjs');
     return sdkCutoverCheckMain(rest, io);
   }
   if (command === 'finalization') {
@@ -186,5 +190,4 @@ export {
   main,
   reviewerRosterMain,
   runtimeMain,
-  sdkCutoverCheckMain,
 };

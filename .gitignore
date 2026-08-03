@@ -18,3 +18,12 @@ data/
 # under $HQ_ROOT/adversarial-review/token-usage, but this keeps old local
 # side-channel output from dirtying the owned submodule checkout.
 .adversarial-review/
+
+# Ad hoc operator diagnostics belong here, never beside tracked production
+# modules. Keeping this directory ignored prevents a scratch probe from making
+# the deployed submodule dirty and blocking Agent OS main-catchup.
+/scratch/
+
+# Compatibility scar for the ARC-32 cutover probe that previously landed in
+# src/ and held main-catchup behind an untracked-file refusal.
+/src/sdk-cutover-test.mjs

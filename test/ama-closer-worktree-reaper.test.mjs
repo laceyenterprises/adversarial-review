@@ -136,23 +136,36 @@ test('closer worktree reaper removes unresolvable hammer directories instead of 
   mkdirSync(workerDir, { recursive: true });
   writeFileSync(join(workerDir, 'workspace.json'), '{not-json');
 
+  let ghCalled = false;
+  const calls = [];
   const result = await reapCloserHammerWorktrees({
     hqRoot,
     cursorPath: join(root, 'cursor.json'),
     hqPath: '/bin/hq',
     repoPaths: [repoPath],
     execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
       if (cmd === 'git' && args.includes('list')) return { stdout: '', stderr: '' };
       if (cmd === 'git' && args.includes('get-url')) return { stdout: 'https://github.com/x/y.git\n', stderr: '' };
       return { stdout: '{}', stderr: '' };
+    },
+    execGhWithRetryImpl: async () => {
+      ghCalled = true;
+      return { stdout: '{"state":"OPEN"}' };
     },
     limit: 10,
     logger: { info() {}, warn() {} },
   });
 
+  assert.equal(result.scanned, 1);
   assert.equal(result.reaped, 1);
   assert.equal(result.halfRegistered, 1);
+  assert.equal(ghCalled, false);
   assert.equal(existsSync(workerDir), false);
+  assert.equal(
+    calls.some((call) => call.cmd === '/bin/hq' && call.args[2] === 'hammer-ama-pr-3065-corrupt'),
+    true,
+  );
 });
 
 test('closer worktree reaper discovers dedicated-base non-agent-os hammer worktrees from the manifest', async (t) => {
@@ -828,6 +841,83 @@ test('closer worktree reaper refuses invalid physical removal outside hq worker 
     false,
   );
   assert.equal(warnings.some((message) => message.includes('worktree-rm-refused:outside-worker-dir')), true);
+});
+
+test('closer worktree reaper validates invalid physical removal per registered worktree', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-per-registration-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const primaryBase = join(hqRoot, 'worker-base', 'adversarial-review');
+  const secondaryBase = join(root, 'outside-base', 'agent-os');
+  const workerId = 'hammer-ama-pr-4249-per-registration';
+  const workerDir = join(hqRoot, 'workers', workerId);
+  const primaryWorktree = join(workerDir, 'adversarial-review');
+  const outsideWorkerDir = join(root, 'outside', workerId);
+  const outsideWorktree = join(outsideWorkerDir, 'agent-os');
+  mkdirSync(primaryWorktree, { recursive: true });
+  mkdirSync(outsideWorktree, { recursive: true });
+  writeFileSync(join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId,
+    repo: 'adversarial-review',
+    workspacePath: primaryWorktree,
+  }));
+
+  const calls = [];
+  const rmTargets = [];
+  const warnings = [];
+  const result = await reapCloserHammerWorktrees({
+    hqRoot,
+    cursorPath: join(root, 'cursor.json'),
+    hqPath: '/bin/hq',
+    repoPaths: [primaryBase, secondaryBase],
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      const repoPath = args[1];
+      const joined = args.join(' ');
+      if (cmd === 'git' && joined.includes('remote get-url origin')) {
+        const repo = repoPath === primaryBase ? 'adversarial-review' : 'agent-os';
+        return { stdout: `git@github.com:laceyenterprises/${repo}.git\n`, stderr: '' };
+      }
+      if (cmd === 'git' && joined.includes('worktree list --porcelain')) {
+        const worktreePath = repoPath === primaryBase ? primaryWorktree : outsideWorktree;
+        return {
+          stdout: [`worktree ${repoPath}`, 'branch refs/heads/main', '', `worktree ${worktreePath}`, 'branch refs/heads/SDR-04', ''].join('\n'),
+          stderr: '',
+        };
+      }
+      if (cmd === 'git' && args.includes('remove')) {
+        const worktreePath = args.at(-1);
+        const err = new Error('git worktree remove failed');
+        err.stderr = `fatal: '${worktreePath}' is not a working tree`;
+        throw err;
+      }
+      if (cmd === 'git' && args.includes('prune')) {
+        return { stdout: '', stderr: '' };
+      }
+      return { stdout: '{}', stderr: '' };
+    },
+    execGhWithRetryImpl: async () => ({
+      stdout: JSON.stringify({ state: 'MERGED', mergedAt: '2026-07-18T00:00:00Z', closedAt: '2026-07-18T00:00:00Z' }),
+    }),
+    rmSyncImpl: (target) => {
+      rmTargets.push(target);
+    },
+    limit: 10,
+    logger: { info() {}, warn(message) { warnings.push(message); } },
+  });
+
+  assert.equal(result.reaped, 0);
+  assert.equal(result.errors, 1);
+  assert.deepEqual(rmTargets, [workerDir]);
+  assert.equal(
+    calls.some((call) => call.cmd === 'git' && call.args.includes('remove') && call.args.at(-1) === primaryWorktree),
+    true,
+  );
+  assert.equal(
+    calls.some((call) => call.cmd === 'git' && call.args.includes('remove') && call.args.at(-1) === outsideWorktree),
+    true,
+  );
+  assert.equal(warnings.some((message) => message.includes(`worktree-rm-refused:outside-worker-dir:${outsideWorktree}`)), true);
 });
 
 test('closer worktree reaper removes the worker sandbox without following a symlinked worktree child', async (t) => {

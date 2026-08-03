@@ -518,7 +518,7 @@ async function reapCloserHammerWorktrees({
     entries.push({
       ...diskEntry,
       ...(stateRegistration || {}),
-      path: stateRegistration?.path || pathKey,
+      path: stateRegistration?.path || pathKey || diskEntry.workerDir,
       worktreePath: diskEntry.worktreePath,
       diskPresent: diskEntry.diskPresent,
       registered: Boolean(stateRegistration),

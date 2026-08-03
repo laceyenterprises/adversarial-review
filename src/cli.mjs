@@ -26,6 +26,7 @@ Usage:
   adversarial-review handoff status [--repo <owner/repo>] [--window <24h>] [--root <dir>] [--json]
   adversarial-review handoff trace <owner/repo#pr> [--root <dir>] [--json]
   adversarial-review runtime status [--root <dir>] [--window <24h>] [--json]
+  adversarial-review sdk-cutover check --repo <owner/repo> --pr <number> [--json]
   adversarial-review finalization shadow-report [--days <7>] [--root <dir>] [--json]
 `;
 
@@ -157,6 +158,14 @@ async function main(argv, io = {}) {
   if (command === 'runtime') {
     return runtimeMain(rest, io);
   }
+  if (command === 'sdk-cutover') {
+    // Keep the cutover collector and its ledger/queue dependencies out of the
+    // general CLI import graph. Several watcher tests replace those modules
+    // with deliberately narrow fixtures; unrelated commands must not require
+    // every cutover-only export from those fixtures.
+    const { sdkCutoverCheckMain } = await import('./sdk-cutover.mjs');
+    return sdkCutoverCheckMain(rest, io);
+  }
   if (command === 'finalization') {
     return finalizationMain(rest, io);
   }
@@ -175,4 +184,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   });
 }
 
-export { finalizationMain, handoffMain, main, reviewerRosterMain, runtimeMain };
+export {
+  finalizationMain,
+  handoffMain,
+  main,
+  reviewerRosterMain,
+  runtimeMain,
+};

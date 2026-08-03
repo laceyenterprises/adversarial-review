@@ -241,6 +241,204 @@ test('closer worktree reaper evaluates a multi-repo hammer worker once', async (
   assert.equal(ghCalls, 1);
 });
 
+test('closer worktree reaper removes every registered worktree for one terminal multi-repo worker', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-multi-terminal-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const adversarialBase = join(hqRoot, 'worker-base', 'adversarial-review');
+  const agentOsBase = join(hqRoot, 'worker-base', 'agent-os');
+  const workerDir = join(hqRoot, 'workers', 'hammer-ama-pr-760-terminal');
+  const adversarialWorktree = join(workerDir, 'adversarial-review');
+  const agentOsWorktree = join(workerDir, 'agent-os');
+  mkdirSync(adversarialWorktree, { recursive: true });
+  mkdirSync(agentOsWorktree, { recursive: true });
+  writeFileSync(join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: 'hammer-ama-pr-760-terminal',
+    repo: 'adversarial-review',
+    repos: ['adversarial-review', 'agent-os'],
+    workspacePath: adversarialWorktree,
+  }));
+
+  const calls = [];
+  let ghCalls = 0;
+  const result = await reapCloserHammerWorktrees({
+    hqRoot,
+    cursorPath: join(root, 'cursor.json'),
+    hqPath: '/bin/hq',
+    repoPaths: [adversarialBase, agentOsBase],
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      const repoPath = args[1];
+      const joined = args.join(' ');
+      if (cmd === 'git' && joined.includes('remote get-url origin')) {
+        const repo = repoPath === adversarialBase ? 'adversarial-review' : 'agent-os';
+        return { stdout: `git@github.com:laceyenterprises/${repo}.git\n`, stderr: '' };
+      }
+      if (cmd === 'git' && joined.includes('worktree list --porcelain')) {
+        const worktreePath = repoPath === adversarialBase ? adversarialWorktree : agentOsWorktree;
+        return {
+          stdout: [`worktree ${repoPath}`, 'branch refs/heads/main', '', `worktree ${worktreePath}`, 'branch refs/heads/SDR-04', ''].join('\n'),
+          stderr: '',
+        };
+      }
+      return { stdout: '{}', stderr: '' };
+    },
+    execGhWithRetryImpl: async () => {
+      ghCalls += 1;
+      return {
+        stdout: JSON.stringify({ state: 'MERGED', mergedAt: '2026-08-03T00:00:00Z', closedAt: '2026-08-03T00:00:00Z' }),
+      };
+    },
+    limit: 10,
+    logger: { info() {}, warn() {} },
+  });
+
+  const removeTargets = calls
+    .filter((call) => call.cmd === 'git' && call.args.includes('remove'))
+    .map((call) => call.args.at(-1))
+    .sort();
+  assert.deepEqual(removeTargets, [adversarialWorktree, agentOsWorktree].sort());
+  assert.equal(
+    calls.filter((call) => call.cmd === '/bin/hq' && call.args[1] === 'tear-down').length,
+    1,
+  );
+  assert.equal(result.scanned, 1);
+  assert.equal(result.reaped, 1);
+  assert.equal(ghCalls, 1);
+});
+
+test('closer worktree reaper cleans a single-child legacy manifest without path fields', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-legacy-manifest-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const repoPath = join(hqRoot, 'repos', 'agent-os');
+  const workerDir = join(hqRoot, 'workers', 'hammer-ama-pr-760-legacy');
+  mkdirSync(join(workerDir, 'agent-os'), { recursive: true });
+  writeFileSync(join(workerDir, 'workspace.json'), JSON.stringify({
+    schemaVersion: 1,
+    workerId: 'hammer-ama-pr-760-legacy',
+    repo: 'agent-os',
+  }));
+
+  const result = await reapCloserHammerWorktrees({
+    hqRoot,
+    cursorPath: join(root, 'cursor.json'),
+    hqPath: '/bin/hq',
+    repoPaths: [repoPath],
+    execFileImpl: async (cmd, args) => {
+      if (cmd === 'git' && args.includes('list')) return { stdout: '', stderr: '' };
+      if (cmd === 'git' && args.includes('get-url')) return { stdout: 'https://github.com/x/y.git\n', stderr: '' };
+      return { stdout: '{}', stderr: '' };
+    },
+    limit: 10,
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.equal(result.reaped, 1);
+  assert.equal(result.halfRegistered, 1);
+  assert.equal(existsSync(workerDir), false);
+});
+
+test('closer worktree reaper retains both paths and cleans a single registration mismatch', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-mismatch-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const repoPath = join(hqRoot, 'worker-base', 'adversarial-review');
+  const workerDir = join(hqRoot, 'workers', 'hammer-ama-pr-760-mismatch');
+  const manifestWorktree = join(workerDir, 'adversarial-review');
+  const registeredWorktree = join(workerDir, 'legacy-adversarial-review');
+  mkdirSync(manifestWorktree, { recursive: true });
+  mkdirSync(registeredWorktree, { recursive: true });
+  writeFileSync(join(workerDir, 'workspace.json'), JSON.stringify({
+    workerId: 'hammer-ama-pr-760-mismatch',
+    repo: 'adversarial-review',
+    workspacePath: manifestWorktree,
+  }));
+
+  const calls = [];
+  const result = await reapCloserHammerWorktrees({
+    hqRoot,
+    cursorPath: join(root, 'cursor.json'),
+    hqPath: '/bin/hq',
+    repoPaths: [repoPath],
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      const joined = args.join(' ');
+      if (cmd === 'git' && joined.includes('remote get-url origin')) {
+        return { stdout: 'git@github.com:laceyenterprises/adversarial-review.git\n', stderr: '' };
+      }
+      if (cmd === 'git' && joined.includes('worktree list --porcelain')) {
+        return {
+          stdout: [`worktree ${repoPath}`, 'branch refs/heads/main', '', `worktree ${registeredWorktree}`, 'branch refs/heads/SDR-04', ''].join('\n'),
+          stderr: '',
+        };
+      }
+      return { stdout: '{}', stderr: '' };
+    },
+    execGhWithRetryImpl: async () => ({
+      stdout: JSON.stringify({ state: 'MERGED', mergedAt: '2026-08-03T00:00:00Z', closedAt: '2026-08-03T00:00:00Z' }),
+    }),
+    limit: 10,
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.equal(
+    calls.some((call) => call.cmd === 'git' && call.args.includes('remove') && call.args.at(-1) === registeredWorktree),
+    true,
+  );
+  assert.equal(result.reaped, 1);
+  assert.equal(existsSync(workerDir), false);
+});
+
+test('closer worktree reaper preserves mismatched disk state when registered cleanup fails', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-mismatch-error-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const hqRoot = join(root, 'hq');
+  const repoPath = join(hqRoot, 'worker-base', 'adversarial-review');
+  const workerDir = join(hqRoot, 'workers', 'hammer-ama-pr-760-mismatch-error');
+  const manifestWorktree = join(workerDir, 'adversarial-review');
+  const registeredWorktree = join(workerDir, 'legacy-adversarial-review');
+  mkdirSync(manifestWorktree, { recursive: true });
+  mkdirSync(registeredWorktree, { recursive: true });
+  writeFileSync(join(workerDir, 'workspace.json'), JSON.stringify({
+    workspacePath: manifestWorktree,
+  }));
+
+  const result = await reapCloserHammerWorktrees({
+    hqRoot,
+    cursorPath: join(root, 'cursor.json'),
+    hqPath: '/bin/hq',
+    repoPaths: [repoPath],
+    execFileImpl: async (cmd, args) => {
+      const joined = args.join(' ');
+      if (cmd === 'git' && joined.includes('remote get-url origin')) {
+        return { stdout: 'git@github.com:laceyenterprises/adversarial-review.git\n', stderr: '' };
+      }
+      if (cmd === 'git' && joined.includes('worktree list --porcelain')) {
+        return {
+          stdout: [`worktree ${repoPath}`, 'branch refs/heads/main', '', `worktree ${registeredWorktree}`, 'branch refs/heads/SDR-04', ''].join('\n'),
+          stderr: '',
+        };
+      }
+      if (cmd === 'git' && args.includes('remove')) {
+        const err = new Error('registration cleanup failed');
+        err.stderr = 'fatal: worktree contains modified or untracked files';
+        throw err;
+      }
+      return { stdout: '{}', stderr: '' };
+    },
+    execGhWithRetryImpl: async () => ({
+      stdout: JSON.stringify({ state: 'MERGED', mergedAt: '2026-08-03T00:00:00Z', closedAt: '2026-08-03T00:00:00Z' }),
+    }),
+    limit: 10,
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.equal(result.reaped, 0);
+  assert.equal(result.errors, 1);
+  assert.equal(existsSync(workerDir), true);
+});
+
 test('closer worktree reaper removes prunable worktrees regardless of PR state', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'ama-closer-reap-prunable-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

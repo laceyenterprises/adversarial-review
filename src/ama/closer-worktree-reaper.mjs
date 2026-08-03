@@ -165,10 +165,19 @@ async function resolveHammerWorktreePath(workerDir, {
   try {
     const manifest = JSON.parse(await readFileImpl(manifestPath, 'utf8'));
     const worktreePath = manifestWorktreePath(workerDir, manifest);
-    if (!worktreePath) {
+    if (worktreePath) return worktreePath;
+
+    const declaredPath = manifest?.workspacePath || manifest?.worktreePath;
+    if (typeof declaredPath === 'string' && declaredPath.trim()) {
+      // A present-but-invalid path is a security boundary violation. Do not
+      // replace it with a guessed child directory.
       logger?.warn?.(`[closer-worktree-reap] manifest-workspace-invalid path=${manifestPath}`);
+      return null;
     }
-    return worktreePath;
+    // V1 manifests did not always persist either path field. Fall through to
+    // the single-child legacy discovery below instead of leaking those
+    // half-registered worker directories forever.
+    logger?.warn?.(`[closer-worktree-reap] manifest-workspace-legacy-fallback path=${manifestPath}`);
   } catch (err) {
     if (err?.code !== 'ENOENT') {
       logger?.warn?.(`[closer-worktree-reap] manifest-read-failed path=${manifestPath}: ${err?.message || err}`);
@@ -333,6 +342,9 @@ async function removeHammerWorktree({
 }) {
   const errors = [];
   let pruned = false;
+  const registeredWorktrees = Array.isArray(entry.registeredWorktrees)
+    ? entry.registeredWorktrees
+    : (entry.registered && entry.repoPath ? [entry] : []);
   // When the worktree directory is already physically gone, `git worktree
   // remove` can only fail validation ("'.git' does not exist" / "is not a
   // working tree") on every tick, leaving stale registry metadata behind that
@@ -340,55 +352,57 @@ async function removeHammerWorktree({
   // Reconcile those with `git worktree prune` instead of erroring forever. A
   // directory that is still present (e.g. "Directory not empty") is untouched
   // and stays on the real teardown path below.
-  let treeAlreadyGone = Boolean(entry.registered && entry.repoPath && entry.diskPresent === false);
-  let removePhysicalInvalidTree = false;
-  if (entry.registered && entry.repoPath && !treeAlreadyGone) {
-    try {
-      await execGit({
-        repoPath: entry.repoPath,
-        args: ['worktree', 'remove', '--force', entry.path || entry.worktreePath],
-        execFileImpl,
-        timeout: 60_000,
-      });
-    } catch (err) {
-      const detail = String(err?.stderr || err?.message || err);
-      if (gitWorktreeRemoveIndicatesGone(detail)) {
-        // The tree is already physically gone; prune the stale entry below.
-        treeAlreadyGone = true;
-        removePhysicalInvalidTree = entry.diskPresent !== false;
-      } else {
-        errors.push(`git-worktree-remove:${detail}`);
-      }
-    }
-  }
-
-  if (treeAlreadyGone) {
-    let physicalRemovalSucceeded = true;
-    if (removePhysicalInvalidTree) {
-      const { refusalReason, target } = physicalRemovalTargetForEntry({ hqRoot, entry });
-      if (refusalReason) {
-        physicalRemovalSucceeded = false;
-        errors.push(`worktree-rm-refused:${refusalReason}:${entry.worktreePath || entry.path || target}`);
-      } else {
-        try {
-          rmSyncImpl(target, { recursive: true, force: true });
-        } catch (err) {
-          physicalRemovalSucceeded = false;
-          errors.push(`worktree-rm:${String(err?.message || err)}`);
-        }
-      }
-    }
-    if (physicalRemovalSucceeded) {
+  for (const registration of registeredWorktrees) {
+    let treeAlreadyGone = registration.diskPresent === false || !existsSync(registration.path);
+    let removePhysicalInvalidTree = false;
+    if (registration.repoPath && !treeAlreadyGone) {
       try {
         await execGit({
-          repoPath: entry.repoPath,
-          args: ['worktree', 'prune'],
+          repoPath: registration.repoPath,
+          args: ['worktree', 'remove', '--force', registration.path],
           execFileImpl,
           timeout: 60_000,
         });
-        pruned = true;
       } catch (err) {
-        errors.push(`git-worktree-prune:${String(err?.stderr || err?.message || err)}`);
+        const detail = String(err?.stderr || err?.message || err);
+        if (gitWorktreeRemoveIndicatesGone(detail)) {
+          // The tree is already physically gone; prune the stale entry below.
+          treeAlreadyGone = true;
+          removePhysicalInvalidTree = registration.diskPresent !== false;
+        } else {
+          errors.push(`git-worktree-remove:${detail}`);
+        }
+      }
+    }
+
+    if (treeAlreadyGone) {
+      let physicalRemovalSucceeded = true;
+      if (removePhysicalInvalidTree) {
+        const { refusalReason, target } = physicalRemovalTargetForEntry({ hqRoot, entry });
+        if (refusalReason) {
+          physicalRemovalSucceeded = false;
+          errors.push(`worktree-rm-refused:${refusalReason}:${registration.path || target}`);
+        } else {
+          try {
+            rmSyncImpl(target, { recursive: true, force: true });
+          } catch (err) {
+            physicalRemovalSucceeded = false;
+            errors.push(`worktree-rm:${String(err?.message || err)}`);
+          }
+        }
+      }
+      if (physicalRemovalSucceeded && registration.repoPath) {
+        try {
+          await execGit({
+            repoPath: registration.repoPath,
+            args: ['worktree', 'prune'],
+            execFileImpl,
+            timeout: 60_000,
+          });
+          pruned = true;
+        } catch (err) {
+          errors.push(`git-worktree-prune:${String(err?.stderr || err?.message || err)}`);
+        }
       }
     }
   }
@@ -407,7 +421,9 @@ async function removeHammerWorktree({
     }
   }
 
-  if (!entry.registered && entry.workerDir && existsSync(entry.workerDir)) {
+  const mayRemoveDiskFallback = !entry.registered
+    || (entry.registrationMismatch && errors.length === 0);
+  if (mayRemoveDiskFallback && entry.workerDir && existsSync(entry.workerDir)) {
     try {
       const stat = statSync(entry.workerDir);
       if (stat.isDirectory() && HAMMER_WORKER_RE.test(basename(entry.workerDir))) {
@@ -468,27 +484,41 @@ async function reapCloserHammerWorktrees({
   const seenWorkers = new Set();
   const registeredByWorker = new Map();
   for (const registeredEntry of registered.values()) {
-    if (!registeredByWorker.has(registeredEntry.workerId)) {
-      registeredByWorker.set(registeredEntry.workerId, registeredEntry);
-    }
+    const workerRegistrations = registeredByWorker.get(registeredEntry.workerId) || [];
+    workerRegistrations.push({
+      ...registeredEntry,
+      diskPresent: existsSync(registeredEntry.path),
+    });
+    registeredByWorker.set(registeredEntry.workerId, workerRegistrations);
   }
 
   for (const diskEntry of diskEntries) {
     const pathKey = resolve(diskEntry.worktreePath);
     const registeredEntry = registered.get(pathKey);
-    const relatedRegistration = registeredEntry
-      ? null
-      : registeredByWorker.get(diskEntry.workerId);
+    const workerRegistrations = registeredByWorker.get(diskEntry.workerId) || [];
+    // One non-exact registration is enough to establish the owning PR while
+    // retaining both the registered path and manifest path for terminal
+    // cleanup. Multiple non-exact registrations are ambiguous and remain
+    // fail-closed until a later tick can establish an exact primary path.
+    const relatedRegistration = !registeredEntry && workerRegistrations.length === 1
+      ? workerRegistrations[0]
+      : null;
+    const stateRegistration = registeredEntry || relatedRegistration;
     entries.push({
       ...diskEntry,
-      ...(registeredEntry || {}),
-      path: registeredEntry?.path || pathKey,
+      ...(stateRegistration || {}),
+      path: stateRegistration?.path || pathKey,
       worktreePath: diskEntry.worktreePath,
-      diskPresent: registeredEntry ? existsSync(registeredEntry.path) : diskEntry.diskPresent,
-      registered: Boolean(registeredEntry || relatedRegistration),
-      halfRegistered: !registeredEntry && !relatedRegistration,
-      registrationMismatch: relatedRegistration
-        ? { registeredPath: relatedRegistration.path, manifestPath: pathKey }
+      diskPresent: diskEntry.diskPresent,
+      registered: Boolean(stateRegistration),
+      registeredWorktrees: workerRegistrations,
+      halfRegistered: workerRegistrations.length === 0,
+      registrationMismatch: !registeredEntry && workerRegistrations.length > 0
+        ? {
+            registeredPaths: workerRegistrations.map((registration) => registration.path),
+            manifestPath: pathKey,
+            ambiguous: workerRegistrations.length > 1,
+          }
         : null,
     });
     seen.add(pathKey);
@@ -496,7 +526,12 @@ async function reapCloserHammerWorktrees({
   }
   for (const [pathKey, registeredEntry] of registered.entries()) {
     if (seen.has(pathKey) || seenWorkers.has(registeredEntry.workerId)) continue;
-    entries.push({ ...registeredEntry, diskPresent: existsSync(pathKey), halfRegistered: false });
+    entries.push({
+      ...registeredEntry,
+      diskPresent: existsSync(pathKey),
+      registeredWorktrees: [registeredEntry],
+      halfRegistered: false,
+    });
     seenWorkers.add(registeredEntry.workerId);
   }
 

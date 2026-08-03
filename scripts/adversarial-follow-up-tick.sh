@@ -135,15 +135,19 @@ export FOLLOW_UP_GH_AUTH_VIA_BROKER
 FOLLOW_UP_GH_BROKER_ROLE="${FOLLOW_UP_GH_BROKER_ROLE:-merge-agent}"
 export FOLLOW_UP_GH_BROKER_ROLE
 export GITHUB_TOKEN=""
+FOLLOW_UP_GH_BROKER_FAILURE_CLASS=""
 if [[ "$FOLLOW_UP_GH_AUTH_VIA_BROKER" == "true" ]] \
   && declare -f resolve_reviewer_token_via_broker >/dev/null 2>&1 \
   && resolve_reviewer_token_via_broker GITHUB_TOKEN "$FOLLOW_UP_GH_BROKER_ROLE"; then
   export GH_TOKEN="$GITHUB_TOKEN"
   echo "[follow-up-tick] GITHUB_TOKEN resolved via OAuth broker (role=${FOLLOW_UP_GH_BROKER_ROLE} App installation token)" >&2
-elif [[ -n "$GH_BIN" ]]; then
-  export GITHUB_TOKEN="$("$GH_BIN" auth token 2>/dev/null || true)"
-  export GH_TOKEN="$GITHUB_TOKEN"
-  echo "[follow-up-tick] GITHUB_TOKEN from gh credential fallback" >&2
+else
+  FOLLOW_UP_GH_BROKER_FAILURE_CLASS="${REVIEWER_BROKER_FAILURE_CLASS:-permanent}"
+  if [[ -n "$GH_BIN" ]]; then
+    export GITHUB_TOKEN="$("$GH_BIN" auth token 2>/dev/null || true)"
+    export GH_TOKEN="$GITHUB_TOKEN"
+    echo "[follow-up-tick] GITHUB_TOKEN from gh credential fallback" >&2
+  fi
 fi
 # Failure here MUST sleep before exit. Same fail-once shape as the
 # 1Password sleep guards added in #139; the gh path was missed in
@@ -152,6 +156,16 @@ fi
 # a 30-second respawn storm against the gh keychain.
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo "[follow-up-tick] ERROR: could not resolve GITHUB_TOKEN from broker role ${FOLLOW_UP_GH_BROKER_ROLE} or gh fallback via ${GH_BIN:-gh}" >&2
+  if [[ "$FOLLOW_UP_GH_BROKER_FAILURE_CLASS" == "transient" ]]; then
+    FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS="${FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS:-60}"
+    if ! [[ "$FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS" =~ ^[0-9]+$ ]] \
+      || (( FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS < 1 || FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS > 300 )); then
+      FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS=60
+    fi
+    echo "[follow-up-tick] transient broker failure; retrying through launchd after ${FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS}s." >&2
+    sleep "$FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS"
+    exit 75
+  fi
   echo "[follow-up-tick] sleeping 3600s to suppress launchd respawn storm; fix broker/gh auth and bootout the agent to recover sooner." >&2
   sleep 3600
   exit 1

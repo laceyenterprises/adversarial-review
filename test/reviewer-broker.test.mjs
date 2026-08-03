@@ -87,7 +87,7 @@ test('resolve_reviewer_token_via_broker fails closed when OAUTH_BROKER_SHARED_SE
     '/bin/bash',
     [
       '-c',
-      `source "${HELPER}"; resolve_reviewer_token_via_broker GH_FAKE_REVIEWER_TOKEN claude-reviewer 2>&1; echo "rc=$?"`,
+      `source "${HELPER}"; resolve_reviewer_token_via_broker GH_FAKE_REVIEWER_TOKEN claude-reviewer 2>&1; echo "rc=$? class=$REVIEWER_BROKER_FAILURE_CLASS"`,
     ],
     {
       env: {
@@ -98,7 +98,7 @@ test('resolve_reviewer_token_via_broker fails closed when OAUTH_BROKER_SHARED_SE
     },
   );
   assert.match(out, /OAUTH_BROKER_SHARED_SECRET_FILE is empty/);
-  assert.match(out, /rc=1\n?$/);
+  assert.match(out, /rc=1 class=permanent\n?$/);
 });
 
 test('resolve_reviewer_token_via_broker fails closed when the secret file is unreadable', () => {
@@ -106,7 +106,7 @@ test('resolve_reviewer_token_via_broker fails closed when the secret file is unr
     '/bin/bash',
     [
       '-c',
-      `source "${HELPER}"; resolve_reviewer_token_via_broker GH_FAKE_REVIEWER_TOKEN claude-reviewer 2>&1; echo "rc=$?"`,
+      `source "${HELPER}"; resolve_reviewer_token_via_broker GH_FAKE_REVIEWER_TOKEN claude-reviewer 2>&1; echo "rc=$? class=$REVIEWER_BROKER_FAILURE_CLASS"`,
     ],
     {
       env: {
@@ -117,7 +117,7 @@ test('resolve_reviewer_token_via_broker fails closed when the secret file is unr
     },
   );
   assert.match(out, /is unreadable/);
-  assert.match(out, /rc=1\n?$/);
+  assert.match(out, /rc=1 class=permanent\n?$/);
 });
 
 test('resolve_reviewer_token_via_broker bounds broker curl with fetch timeout options', () => {
@@ -142,7 +142,7 @@ test('resolve_reviewer_token_via_broker bounds broker curl with fetch timeout op
     '/bin/bash',
     [
       '-c',
-      `source "${HELPER}"; resolve_reviewer_token_via_broker GH_FAKE_REVIEWER_TOKEN claude-reviewer 2>&1; echo "rc=$?"`,
+      `source "${HELPER}"; resolve_reviewer_token_via_broker GH_FAKE_REVIEWER_TOKEN claude-reviewer 2>&1; echo "rc=$? class=$REVIEWER_BROKER_FAILURE_CLASS"`,
     ],
     {
       env: {
@@ -155,7 +155,7 @@ test('resolve_reviewer_token_via_broker bounds broker curl with fetch timeout op
       encoding: 'utf8',
     },
   );
-  assert.match(out, /rc=1\n?$/);
+  assert.match(out, /rc=1 class=transient\n?$/);
   const curlArgs = readFileSync(curlArgsFile, 'utf8');
   assert.match(curlArgs, /--connect-timeout\n0\.250\n/);
   assert.match(curlArgs, /--max-time\n0\.250\n/);

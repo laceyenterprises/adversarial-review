@@ -118,7 +118,10 @@ async function runMaintainerWatcherLauncher(scriptName, {
   writeExecutable(
     fakeGh,
     '#!/bin/bash\n'
-      + 'if [[ "$1" == "auth" && "$2" == "token" ]]; then echo "gh-token"; exit 0; fi\n'
+      + 'if [[ "$1" == "auth" && "$2" == "token" ]]; then\n'
+      + '  [[ "${TEST_GH_AUTH_MODE:-ok}" == "fail" ]] && exit 1\n'
+      + '  echo "gh-token"; exit 0\n'
+      + 'fi\n'
       + 'exit 1\n',
   );
   writeExecutable(join(fakeBin, 'sleep'), `#!/bin/bash\nprintf '%s\\n' "$1" >>"${sleepLog}"\nexit 0\n`);
@@ -212,7 +215,14 @@ async function runMaintainerWatcherLauncher(scriptName, {
 	      + '  [[ "$flag_value" == "true" ]]\n'
 	      + '}\n'
 	      + 'resolve_reviewer_token_via_broker() {\n'
+	      + '  REVIEWER_BROKER_FAILURE_CLASS=""\n'
+	      + '  if [[ "${TEST_REVIEWER_BROKER_MODE:-healthy}" == "transient" ]]; then\n'
+	      + '    REVIEWER_BROKER_FAILURE_CLASS="transient"\n'
+	      + '    echo "[reviewer-broker] simulated transient broker failure for $2" >&2\n'
+	      + '    return 1\n'
+	      + '  fi\n'
 	      + '  if [[ "${TEST_REVIEWER_BROKER_MODE:-healthy}" == "fail" ]]; then\n'
+	      + '    REVIEWER_BROKER_FAILURE_CLASS="permanent"\n'
 	      + '    echo "[reviewer-broker] simulated broker failure for $2" >&2\n'
 	      + '    return 1\n'
 	      + '  fi\n'
@@ -554,6 +564,23 @@ test('follow-up launcher defaults GitHub auth to the refreshable broker token', 
   assert.equal(payload.followUpBrokerFlag, 'true');
   assert.equal(payload.followUpBrokerRole, 'merge-agent');
   assert.match(result.stderr, /GITHUB_TOKEN resolved via OAuth broker \(role=merge-agent/);
+});
+
+test('follow-up launcher retries transient broker startup failures without a one-hour outage', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-follow-up-tick.sh', {
+    brokerMode: 'transient',
+    extraEnv: {
+      ...BROKER_MODE_TEST_ENV,
+      TEST_GH_AUTH_MODE: 'fail',
+      FOLLOW_UP_GH_TRANSIENT_RETRY_SECONDS: '45',
+    },
+  });
+  assert.equal(result.code, 75, `stderr:\n${result.stderr}`);
+  assert.equal(result.sleepLog.trim(), '45');
+  assert.match(result.stderr, /transient broker failure; retrying through launchd after 45s/);
+  assert.doesNotMatch(result.stderr, /sleeping 3600s/);
 });
 
 test('maintainer watcher launcher falls back to gh when watcher broker token resolution fails', {

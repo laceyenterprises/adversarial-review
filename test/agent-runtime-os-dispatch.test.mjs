@@ -170,6 +170,18 @@ test('reviewer derives review + decision-only, remediator derives coding + branc
   assert.equal(resolveCompletionShape({ kind: 'reviewer', completionShape: 'artifact' }), 'artifact');
 });
 
+test('unknown role kinds do not silently inherit reviewer routing', () => {
+  assert.throws(
+    () => resolveTaskKind({ kind: 'planner' }),
+    /Unsupported AgentRunRequest\.role\.kind/,
+  );
+  assert.throws(
+    () => resolveCompletionShape({ kind: 'planner' }),
+    /Unsupported AgentRunRequest\.role\.kind/,
+  );
+  assert.equal(resolveWorkerClass({ kind: 'planner', model: 'codex' }), 'codex');
+});
+
 test('reviewer derives the dedicated reviewer worker class for each model family', () => {
   assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'codex' }), 'codex-reviewer');
   assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'CoDeX' }), 'codex-reviewer');

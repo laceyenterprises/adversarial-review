@@ -86,16 +86,29 @@ function toHqTaskKind(taskKind) {
   return normalized;
 }
 
+function normalizeRoleKind(role) {
+  return String(role?.kind || '').trim();
+}
+
+function assertKnownImplicitRoleKind(kind) {
+  if (!kind || kind === 'reviewer' || kind === 'remediator') return;
+  throw new TypeError(`Unsupported AgentRunRequest.role.kind for implicit dispatch mapping: ${kind}`);
+}
+
 function resolveTaskKind(role) {
   const explicit = String(role?.taskKind || '').trim();
   if (explicit) return toHqTaskKind(explicit);
-  return role?.kind === 'remediator' ? 'coding' : 'review';
+  const kind = normalizeRoleKind(role);
+  assertKnownImplicitRoleKind(kind);
+  return kind === 'remediator' ? 'coding' : 'review';
 }
 
 function resolveCompletionShape(role) {
   const explicit = String(role?.completionShape || '').trim();
   if (explicit) return explicit;
-  return role?.kind === 'remediator' ? 'branch-push' : 'decision-only';
+  const kind = normalizeRoleKind(role);
+  assertKnownImplicitRoleKind(kind);
+  return kind === 'remediator' ? 'branch-push' : 'decision-only';
 }
 
 function resolveWorkerClass(role) {
@@ -104,7 +117,9 @@ function resolveWorkerClass(role) {
 
   const rawModel = String(role?.model || '').trim();
   if (!rawModel) return undefined;
-  if (role?.kind === 'remediator') return rawModel;
+  const kind = normalizeRoleKind(role);
+  if (kind === 'remediator') return rawModel;
+  if (kind && kind !== 'reviewer') return rawModel;
   const model = rawModel.toLowerCase();
 
   if (model.startsWith('codex')) return 'codex-reviewer';

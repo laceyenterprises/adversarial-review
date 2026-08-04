@@ -561,12 +561,17 @@ const APP_CONTRACT_AUTH_ERROR_RE =
 
 function dispatchFailureClassOf(err) {
   if (err?.configurationError) return 'bug';
-  const message = err?.message || String(err ?? '');
+  const message = dispatchFailureMessage(err);
   if (APP_CONTRACT_AUTH_ERROR_RE.test(message)) return 'app-contract-auth';
   return 'dispatch-rejected';
 }
 
+function dispatchFailureMessage(err) {
+  return err?.message || String(err ?? '') || 'unknown dispatch error';
+}
+
 function dispatchFailureResult(err) {
+  const detail = dispatchFailureMessage(err);
   return {
     status: 'failed',
     failureClass: dispatchFailureClassOf(err),
@@ -575,7 +580,7 @@ function dispatchFailureResult(err) {
     // The OS never accepted this request; `runRef` on the handle is a
     // client-side mint and must not be read as proof of acceptance.
     dispatchAccepted: false,
-    detail: err?.message || (err ? String(err) : 'unknown dispatch error'),
+    detail,
   };
 }
 

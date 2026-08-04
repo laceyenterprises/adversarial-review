@@ -557,7 +557,7 @@ function buildTerminalResult(mappedStatus, statusPayload, role, artifactContext 
 // and the underlying error (e.g. a missing bootstrap token) was never printed.
 // Classify what we can, and mark the result as never-accepted.
 const APP_CONTRACT_AUTH_ERROR_RE =
-  /bootstrap token|unauthorized|forbidden|missing_bootstrap_token|401|403/i;
+  /bootstrap token|unauthorized|forbidden|missing_bootstrap_token|\b401\b|\b403\b/i;
 
 function dispatchFailureClassOf(err) {
   if (err?.configurationError) return 'bug';

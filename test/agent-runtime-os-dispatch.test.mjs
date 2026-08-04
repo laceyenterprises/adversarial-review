@@ -1002,6 +1002,23 @@ test('an unauthenticated app-contract session is classified as app-contract-auth
   }
 });
 
+test('incidental 401 and 403 digit sequences do not classify dispatch rejection as auth', async () => {
+  for (const message of [
+    'Connection timed out after 4015ms',
+    'ECONNREFUSED 127.0.0.1:8403',
+    'request failed for trace req_40391',
+  ]) {
+    const session = {
+      async dispatch() { throw new Error(message); },
+      async dispatchStatus() { throw new Error('should not be polled'); },
+    };
+    const runtime = createOsDispatchAgentRuntime({ session });
+    const result = await (await runtime.run(reviewerRequest())).await();
+    assert.equal(result.failureClass, 'dispatch-rejected', `for: ${message}`);
+    assert.equal(result.detail, message);
+  }
+});
+
 test('run throws on a structurally invalid request (missing idempotencyKey)', async () => {
   const runtime = createOsDispatchAgentRuntime({ session: fakeSession() });
   await assert.rejects(

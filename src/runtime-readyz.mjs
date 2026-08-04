@@ -104,6 +104,9 @@ async function endpointSignal(baseUrl) {
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) {
+      if (res.body && typeof res.body.cancel === 'function') {
+        await res.body.cancel();
+      }
       return {
         id: 'endpoint',
         label: `app-contract endpoint (${baseUrl})`,

@@ -219,12 +219,22 @@ test('readyz returns NOT READY for endpoint HTTP errors and fetch failures', asy
   const rootDir = makeRoot();
   seedHealthyRuntime(rootDir);
 
-  let restoreFetch = withFetch(async () => ({ ok: false, status: 503 }));
+  let httpErrorBodyCancelled = false;
+  let restoreFetch = withFetch(async () => ({
+    ok: false,
+    status: 503,
+    body: {
+      async cancel() {
+        httpErrorBodyCancelled = true;
+      },
+    },
+  }));
   try {
     const httpModel = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.equal(httpModel.overallReady, false);
     assert.deepEqual(httpModel.failingSignals, ['endpoint']);
     assert.equal(httpModel.signals.find((signal) => signal.id === 'endpoint').detail, 'HTTP 503');
+    assert.equal(httpErrorBodyCancelled, true);
   } finally {
     restoreFetch();
   }

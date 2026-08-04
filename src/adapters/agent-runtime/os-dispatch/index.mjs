@@ -46,10 +46,13 @@ import {
   parseBlockingFindingsSection,
   parseNonBlockingFindingsSection,
 } from '../../../kernel/remediation-reply.mjs';
+import {
+  DEFAULT_APP_CONTRACT_APP_ID,
+  resolveAppContractRegistration,
+} from '../../../app-registration.mjs';
 
 const RUNTIME_ID = 'os-dispatch';
 const RUNTIME_MODE = 'os';
-const DEFAULT_APP_CONTRACT_APP_ID = 'adversarial-review';
 const DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS = 75_000;
 const APP_CONTRACT_REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
 const APP_CONTRACT_REQUEST_ID_DIGEST_LENGTH = 16;
@@ -571,10 +574,18 @@ function defaultJitter(maxMs) {
   return Math.floor(Math.random() * Math.max(0, maxMs + 1));
 }
 
-function withDefaultConnectOptions(connectOptions = {}) {
+function withDefaultConnectOptions(
+  connectOptions = {},
+  { loadConfigImpl, topPath, modulePaths, env } = {},
+) {
   const options = { ...connectOptions };
   if (!options.app_id && !options.appId) {
-    options.app_id = DEFAULT_APP_CONTRACT_APP_ID;
+    options.app_id = resolveAppContractRegistration({
+      loadConfigImpl,
+      topPath,
+      modulePaths,
+      env,
+    }).app_id;
   }
   if (options.request_timeout_ms == null && options.requestTimeoutMs == null) {
     options.request_timeout_ms = DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS;
@@ -594,6 +605,9 @@ function createOsDispatchAgentRuntime({
   nowMs = () => Date.now(),
   logger = console,
   env = process.env,
+  loadConfigImpl = undefined,
+  topPath = undefined,
+  modulePaths = undefined,
   existsSyncImpl = existsSync,
   readFileSyncImpl = readFileSync,
 } = {}) {
@@ -602,7 +616,12 @@ function createOsDispatchAgentRuntime({
   async function resolveSession() {
     if (!sessionPromise) {
       const doConnect = connectImpl ?? (await loadAppSdkConnect());
-      const resolvedConnectOptions = withDefaultConnectOptions(connectOptions);
+      const resolvedConnectOptions = withDefaultConnectOptions(connectOptions, {
+        loadConfigImpl,
+        topPath,
+        modulePaths,
+        env,
+      });
       sessionPromise = withAppContractTransientRetry(() => doConnect(resolvedConnectOptions), { sleepImpl }).catch((err) => {
         sessionPromise = null; // allow a later run to retry the connect
         throw err;

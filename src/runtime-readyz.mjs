@@ -3,6 +3,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { probeOnce } from './adapters/agent-runtime/router/probe.mjs';
 import { readRuntimeStatusSnapshot } from './runtime-status-snapshot.mjs';
+import { resolveAppContractRegistration } from './app-registration.mjs';
 
 const APP_CONTRACT_DEFAULT_URL = 'http://127.0.0.1:8003';
 const SMOKE_RESULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -36,7 +37,9 @@ function readAttributionRows(db, { hasEndedAt, since = null }) {
   `).all(since ? { since } : {});
 }
 
-export async function buildReadyzStatus(rootDir) {
+export async function buildReadyzStatus(rootDir, {
+  appRegistrationOptions = {},
+} = {}) {
   const url = process.env.APP_CONTRACT_ENDPOINT_URL || APP_CONTRACT_DEFAULT_URL;
   const dispatchStatusUrl = new URL('v1/dispatch_status', url.endsWith('/') ? url : `${url}/`);
   
@@ -166,10 +169,22 @@ export async function buildReadyzStatus(rootDir) {
     attributionDetail = 'reviews.db missing';
   }
 
-  const overallReady = endpointOk && routerOk && smokeOk && attributionOk;
+  const resolvedAppRegistrationOptions = {
+    topPath: join(rootDir, '..', '..', 'config.yaml'),
+    modulePaths: [join(rootDir, 'config.yaml')],
+    ...appRegistrationOptions,
+  };
+  const appRegistration = resolveAppContractRegistration(resolvedAppRegistrationOptions);
+  const appRegistrationOk = appRegistration.registered === true;
+  const appRegistrationDetail = appRegistrationOk
+    ? `${appRegistration.app_id} registered via ${appRegistration.source}`
+    : `${appRegistration.app_id} resolved from ${appRegistration.source}`;
+
+  const overallReady = endpointOk && routerOk && smokeOk && attributionOk && appRegistrationOk;
 
   return {
     overallReady,
+    app_registration: appRegistration,
     signals: [
       {
         id: 'endpoint',
@@ -194,6 +209,12 @@ export async function buildReadyzStatus(rootDir) {
         label: 'attribution round-trip',
         ok: attributionOk,
         detail: attributionDetail
+      },
+      {
+        id: 'app-registration',
+        label: 'app registration',
+        ok: appRegistrationOk,
+        detail: appRegistrationDetail
       }
     ]
   };

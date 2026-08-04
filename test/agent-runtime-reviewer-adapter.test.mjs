@@ -259,6 +259,51 @@ test('lazy app-contract session closes and unwires a partially wired connection 
   );
 });
 
+test('lazy app-contract session resolves registry options for explicit app_id', async () => {
+  const connectCalls = [];
+  const lazy = createLazyAppContractSession({
+    connectOptions: { app_id: 'fixture-app' },
+    loadConfigImpl: () => ({
+      get(key, defaultValue = null) {
+        const values = {
+          'apps.fixture-app': {
+            mode: 'agent-os',
+            subscribes: ['fixture.worker.*'],
+            contract_version: '2.0',
+          },
+          'apps.adversarial-review': {
+            mode: 'agent-os',
+            subscribes: ['wrong.default.*'],
+            contract_version: '1.0',
+          },
+        };
+        return key in values ? values[key] : defaultValue;
+      },
+      sources: {
+        'apps.fixture-app.mode': 'top',
+        'apps.fixture-app.subscribes': 'top',
+      },
+    }),
+    connectImpl: async (options) => {
+      connectCalls.push(options);
+      return {
+        async dispatch() {
+          return { ok: true };
+        },
+      };
+    },
+    logger: silentLogger(),
+  });
+
+  await lazy.dispatch({ requestId: 'fixture' });
+
+  assert.equal(connectCalls.length, 1);
+  assert.equal(connectCalls[0].app_id, 'fixture-app');
+  assert.equal(connectCalls[0].mode, 'agent-os');
+  assert.deepEqual(connectCalls[0].subscribes, ['fixture.worker.*']);
+  assert.equal(connectCalls[0].request_timeout_ms, 75_000);
+});
+
 test('default agent runtime removes injected session health listener on stop', () => {
   const rootDir = makeRoot();
   const listeners = [];

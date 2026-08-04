@@ -15,6 +15,9 @@ import {
   resolvePromptSet,
 } from '../../../kernel/prompt-stage.mjs';
 import { loadDomainConfig } from '../../../domain-config.mjs';
+import {
+  resolveAppContractRegistration,
+} from '../../../app-registration.mjs';
 
 const RUNTIME_ID = 'agent-runtime';
 const DEFAULT_REVIEW_BUDGET = Object.freeze({
@@ -23,12 +26,6 @@ const DEFAULT_REVIEW_BUDGET = Object.freeze({
 });
 const DEFAULT_APP_CONTRACT_ENDPOINT_URL = 'http://127.0.0.1:8003';
 const DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS = 75_000;
-const DEFAULT_APP_CONTRACT_SUBSCRIPTIONS = Object.freeze([
-  'health.worker.*',
-  'token.*',
-  'system.*',
-]);
-
 function trimTrailingSlash(value) {
   return String(value || '').replace(/\/+$/, '');
 }
@@ -48,11 +45,21 @@ function resolveRequestTimeoutMs(options = {}) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS;
 }
 
-function withDefaultAppContractConnectOptions(options = {}) {
+function withDefaultAppContractConnectOptions(
+  options = {},
+  { loadConfigImpl, topPath, modulePaths, env } = {},
+) {
+  const registration = resolveAppContractRegistration({
+    appId: options.app_id || options.appId,
+    loadConfigImpl,
+    topPath,
+    modulePaths,
+    env,
+  });
   return {
-    app_id: 'adversarial-review',
-    mode: 'agent-os',
-    subscribes: DEFAULT_APP_CONTRACT_SUBSCRIPTIONS,
+    app_id: registration.app_id,
+    mode: registration.mode,
+    subscribes: registration.subscribes,
     request_timeout_ms: DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS,
     ...options,
   };
@@ -91,6 +98,10 @@ function createLazyAppContractSession({
   connectImpl = null,
   connectOptions = {},
   logger = console,
+  loadConfigImpl = undefined,
+  topPath = undefined,
+  modulePaths = undefined,
+  env = process.env,
 } = {}) {
   let session = null;
   let sessionPromise = null;
@@ -105,7 +116,12 @@ function createLazyAppContractSession({
       promise = Promise.resolve()
         .then(async () => {
           const connect = connectImpl || await loadAppSdkConnect();
-          return connect(withDefaultAppContractConnectOptions(connectOptions));
+          return connect(withDefaultAppContractConnectOptions(connectOptions, {
+            loadConfigImpl,
+            topPath,
+            modulePaths,
+            env,
+          }));
         })
         .then((resolved) => {
           if (generation !== connectGeneration) {
@@ -473,9 +489,18 @@ function createDefaultAgentRuntime({
     connectOptions = {},
     checkHealthz = null,
     fetchImpl,
+    loadConfigImpl = undefined,
+    topPath = undefined,
+    modulePaths = undefined,
+    env = process.env,
     ...dispatchRuntimeOptions
   } = osRuntimeOptions;
-  const resolvedConnectOptions = withDefaultAppContractConnectOptions(connectOptions);
+  const resolvedConnectOptions = withDefaultAppContractConnectOptions(connectOptions, {
+    loadConfigImpl,
+    topPath,
+    modulePaths,
+    env,
+  });
   const localRuntime = createLocalAgentRuntime({
     rootDir,
     domainConfig,
@@ -486,6 +511,10 @@ function createDefaultAgentRuntime({
     connectImpl,
     connectOptions: resolvedConnectOptions,
     logger,
+    loadConfigImpl,
+    topPath,
+    modulePaths,
+    env,
   });
   const ownsOsSession = !session;
   const endpointUrl = resolveAppContractEndpointUrl(resolvedConnectOptions);

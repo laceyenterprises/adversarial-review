@@ -12,7 +12,7 @@
 // identical, so nothing else in this adapter changed.
 //
 // Wire mapping per the role registry (§5) and completion shapes (§4.3, §9):
-//   - reviewer   → task_kind 'analysis'    completion_shape 'decision-only'
+//   - reviewer   → task_kind 'review'      completion_shape 'decision-only'
 //                  → verdict returns as a structured ReviewArtifact (v2).
 //   - remediator → task_kind 'coding'      completion_shape 'branch-push'
 //                  → opaque app artifact (domain adapter decodes it).
@@ -82,21 +82,50 @@ const EXECUTION_START_FIELDS = [
 // remediator=branch-push).
 function toHqTaskKind(taskKind) {
   const normalized = String(taskKind || '').trim();
-  if (normalized === 'review') return 'analysis';
   if (normalized === 'remediation') return 'coding';
   return normalized;
+}
+
+function normalizeRoleKind(role) {
+  return String(role?.kind || '').trim();
+}
+
+function assertKnownImplicitRoleKind(kind) {
+  if (!kind || kind === 'reviewer' || kind === 'remediator') return;
+  throw new TypeError(`Unsupported AgentRunRequest.role.kind for implicit dispatch mapping: ${kind}`);
 }
 
 function resolveTaskKind(role) {
   const explicit = String(role?.taskKind || '').trim();
   if (explicit) return toHqTaskKind(explicit);
-  return role?.kind === 'remediator' ? 'coding' : 'analysis';
+  const kind = normalizeRoleKind(role);
+  assertKnownImplicitRoleKind(kind);
+  return kind === 'remediator' ? 'coding' : 'review';
 }
 
 function resolveCompletionShape(role) {
   const explicit = String(role?.completionShape || '').trim();
   if (explicit) return explicit;
-  return role?.kind === 'remediator' ? 'branch-push' : 'decision-only';
+  const kind = normalizeRoleKind(role);
+  assertKnownImplicitRoleKind(kind);
+  return kind === 'remediator' ? 'branch-push' : 'decision-only';
+}
+
+function resolveWorkerClass(role) {
+  const explicit = String(role?.workerClass || '').trim();
+  if (explicit) return explicit;
+
+  const rawModel = String(role?.model || '').trim();
+  if (!rawModel) return undefined;
+  const kind = normalizeRoleKind(role);
+  if (kind === 'remediator') return rawModel;
+  if (kind && kind !== 'reviewer') return rawModel;
+  const model = rawModel.toLowerCase();
+
+  if (model.startsWith('codex')) return 'codex-reviewer';
+  if (model.startsWith('gemini')) return 'gemini-reviewer';
+  if (model.startsWith('claude')) return 'claude-reviewer';
+  return rawModel;
 }
 
 function normalizeStatus(status) {
@@ -168,7 +197,7 @@ function buildDispatchPayload(request, buildPrompt) {
     request_id: toAppContractRequestId(request.idempotencyKey),
     task_kind: resolveTaskKind(role),
     completion_shape: resolveCompletionShape(role),
-    worker_class: role.model,
+    worker_class: resolveWorkerClass(role),
     role_id: role.id,
     domain_id: ref.domainId,
     subject_external_id: ref.subjectExternalId,
@@ -870,6 +899,7 @@ export {
   defaultBuildPrompt,
   mapTerminalStatus,
   resolveCompletionShape,
+  resolveWorkerClass,
   resolveTaskKind,
   toHqTaskKind,
   toAppContractRequestId,

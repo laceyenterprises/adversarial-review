@@ -364,6 +364,36 @@ test('runtime settle-smoke preserves its in-memory result when persistence read-
   assert.equal(outcome.smoke.workerRunId, 'wr_smoke_unreadable');
 });
 
+test('runtime settle-smoke marks a terminal failed worker as unsettled and unattributed', async () => {
+  const outcome = await runRuntimeSettleSmoke({
+    rootDir: '/fixture',
+    now: () => new Date('2026-08-02T10:00:00.000Z'),
+    createRuntime: () => ({
+      async run() {
+        return {
+          runRef: 'smoke-req-failed',
+          async await() {
+            return {
+              status: 'failed',
+              detail: 'worker crashed before verdict',
+              usage: { workerRunId: null },
+            };
+          },
+        };
+      },
+    }),
+    writeResultImpl: (_rootDir, _runtime, smoke) => smoke,
+  });
+
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.smoke.status, 'fail');
+  assert.equal(outcome.smoke.dispatched, true);
+  assert.equal(outcome.smoke.settled, false);
+  assert.equal(outcome.smoke.attributed, false);
+  assert.equal(outcome.smoke.workerRunId, null);
+  assert.match(outcome.smoke.detail, /did not settle cleanly: status=failed/);
+});
+
 test('snapshot and canary status writers reject cross-user durable state writes', () => {
   const owners = new Map([['/tool/data', 501]]);
   const ownerGuardOptions = {

@@ -13,6 +13,7 @@ import {
   mapTerminalStatus,
   resolveCompletionShape,
   resolveTaskKind,
+  resolveWorkerClass,
   toHqTaskKind,
   toAppContractRequestId,
 } from '../src/adapters/agent-runtime/os-dispatch/index.mjs';
@@ -159,8 +160,8 @@ test('validateReviewArtifact rejects a non-array findings list', () => {
 
 // -- task_kind / completion_shape derivation ---------------------------------
 
-test('reviewer derives analysis + decision-only, remediator derives coding + branch-push', () => {
-  assert.equal(resolveTaskKind({ kind: 'reviewer' }), 'analysis');
+test('reviewer derives review + decision-only, remediator derives coding + branch-push', () => {
+  assert.equal(resolveTaskKind({ kind: 'reviewer' }), 'review');
   assert.equal(resolveCompletionShape({ kind: 'reviewer' }), 'decision-only');
   assert.equal(resolveTaskKind({ kind: 'remediator' }), 'coding');
   assert.equal(resolveCompletionShape({ kind: 'remediator' }), 'branch-push');
@@ -169,10 +170,40 @@ test('reviewer derives analysis + decision-only, remediator derives coding + bra
   assert.equal(resolveCompletionShape({ kind: 'reviewer', completionShape: 'artifact' }), 'artifact');
 });
 
+test('unknown role kinds do not silently inherit reviewer routing', () => {
+  assert.throws(
+    () => resolveTaskKind({ kind: 'planner' }),
+    /Unsupported AgentRunRequest\.role\.kind/,
+  );
+  assert.throws(
+    () => resolveCompletionShape({ kind: 'planner' }),
+    /Unsupported AgentRunRequest\.role\.kind/,
+  );
+  assert.equal(resolveWorkerClass({ kind: 'planner', model: 'codex' }), 'codex');
+});
+
+test('reviewer derives the dedicated reviewer worker class for each model family', () => {
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'codex' }), 'codex-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'CoDeX' }), 'codex-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'codex-mini-latest' }), 'codex-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'gemini' }), 'gemini-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'Gemini' }), 'gemini-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'gemini-1.5-pro' }), 'gemini-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'claude-code' }), 'claude-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'Claude-Code' }), 'claude-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'claude-3.5-sonnet' }), 'claude-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'claude' }), 'claude-reviewer');
+  assert.equal(resolveWorkerClass({ model: 'gemini' }), 'gemini-reviewer');
+  assert.equal(resolveWorkerClass({ kind: 'remediator', model: 'codex' }), 'codex');
+  assert.equal(resolveWorkerClass({ kind: 'remediator', model: 'CoDeX' }), 'CoDeX');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer', model: 'codex', workerClass: 'codex' }), 'codex');
+  assert.equal(resolveWorkerClass({ kind: 'reviewer' }), undefined);
+});
+
 test('legacy app role task kinds map to HQ task kinds before dispatch', () => {
-  assert.equal(toHqTaskKind('review'), 'analysis');
+  assert.equal(toHqTaskKind('review'), 'review');
   assert.equal(toHqTaskKind('remediation'), 'coding');
-  assert.equal(resolveTaskKind({ kind: 'reviewer', taskKind: 'review' }), 'analysis');
+  assert.equal(resolveTaskKind({ kind: 'reviewer', taskKind: 'review' }), 'review');
   assert.equal(resolveTaskKind({ kind: 'remediator', taskKind: 'remediation' }), 'coding');
 });
 
@@ -192,15 +223,29 @@ test('mapTerminalStatus maps each terminal family and leaves in-progress states 
 test('buildDispatchPayload propagates the idempotency key as request_id and maps the review contract', () => {
   const payload = buildDispatchPayload(reviewerRequest(), (r) => r.subjectContent.representation);
   assert.equal(payload.request_id, 'code-pr:pr-14:abc123:code-review:code-quality-reviewer:1');
-  assert.equal(payload.task_kind, 'analysis');
+  assert.equal(payload.task_kind, 'review');
   assert.equal(payload.completion_shape, 'decision-only');
-  assert.equal(payload.worker_class, 'claude-code');
+  assert.equal(payload.worker_class, 'claude-reviewer');
   assert.equal(payload.domain_id, 'code-pr');
   assert.equal(payload.subject_external_id, 'pr-14');
   assert.equal(payload.revision_ref, 'abc123');
   assert.equal(payload.ticket_ref, 'ARC-06');
   assert.equal(payload.token_budget, 500_000);
   assert.equal(payload.prompt, 'diff --git a b');
+});
+
+test('buildDispatchPayload maps a codex reviewer onto the codex-reviewer worker class', () => {
+  const payload = buildDispatchPayload(reviewerRequest({
+    role: { id: 'reviewer:codex', kind: 'reviewer', model: 'codex' },
+  }), (r) => r.subjectContent.representation);
+  assert.equal(payload.worker_class, 'codex-reviewer');
+});
+
+test('buildDispatchPayload omits worker_class when no model or worker class is provided', () => {
+  const payload = buildDispatchPayload(reviewerRequest({
+    role: { id: 'reviewer:unresolved', kind: 'reviewer' },
+  }), (r) => r.subjectContent.representation);
+  assert.equal(JSON.stringify(payload).includes('"worker_class"'), false);
 });
 
 test('toAppContractRequestId preserves valid keys and normalizes PR refs with a hash suffix', () => {
@@ -1007,7 +1052,7 @@ test('stub-endpoint round-trip: dispatch → poll → validated verdict artifact
 
     const dispatch = requests.find((entry) => entry.url === '/v1/dispatch');
     assert.equal(dispatch.body.request_id, req.idempotencyKey);
-    assert.equal(dispatch.body.task_kind, 'analysis');
+    assert.equal(dispatch.body.task_kind, 'review');
     assert.equal(dispatch.body.completion_shape, 'decision-only');
     const statusReqs = requests.filter((entry) => entry.url === '/v1/dispatch_status');
     assert.ok(statusReqs.length >= 2, 'should have polled dispatch_status at least twice');

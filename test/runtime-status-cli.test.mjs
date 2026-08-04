@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 
 import { buildRuntimeStatus, readAuditRows, renderRuntimeStatus } from '../src/runtime-status.mjs';
 import { runtimeMain } from '../src/runtime-status-cli.mjs';
@@ -312,6 +313,9 @@ test('runtime settle-smoke uses the named logical route constant', () => {
 
   assert.equal(SETTLE_SMOKE_MODEL, 'codex');
   assert.equal(request.role.model, SETTLE_SMOKE_MODEL);
+  assert.equal(request.subjectContent.ref.domainId, 'runtime-settle-smoke');
+  assert.equal(request.subjectContent.ref.subjectExternalId, 'sdk-settle-smoke-fixture');
+  assert.match(request.subjectContent.representation, /fixture subject, not a real PR/i);
 });
 
 test('runtime settle-smoke preserves its in-memory result when persistence read-back fails', async () => {
@@ -392,6 +396,124 @@ test('runtime settle-smoke marks a terminal failed worker as unsettled and unatt
   assert.equal(outcome.smoke.attributed, false);
   assert.equal(outcome.smoke.workerRunId, null);
   assert.match(outcome.smoke.detail, /did not settle cleanly: status=failed/);
+});
+
+test('runtime settle-smoke fails closed when the SDK dispatch settles without worker_run_id attribution', async () => {
+  const outcome = await runRuntimeSettleSmoke({
+    rootDir: '/fixture',
+    now: () => new Date('2026-08-02T10:00:00.000Z'),
+    createRuntime: () => ({
+      async run() {
+        return {
+          runRef: 'smoke-req-unattributed',
+          async await() {
+            return {
+              status: 'completed',
+              usage: {},
+            };
+          },
+        };
+      },
+    }),
+    writeResultImpl: (_rootDir, _runtime, smoke) => smoke,
+  });
+
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.smoke.status, 'fail');
+  assert.equal(outcome.smoke.dispatched, true);
+  assert.equal(outcome.smoke.settled, true);
+  assert.equal(outcome.smoke.attributed, false);
+  assert.equal(outcome.smoke.workerRunId, null);
+  assert.match(outcome.smoke.detail, /without worker_run_id attribution/);
+});
+
+test('runtime readyz exits 0 only when all readiness signals are green', async () => {
+  const rootDir = tmpRoot();
+  const originalFetch = global.fetch;
+  const originalMode = process.env.AGENT_OS_APPS_ADVERSARIAL_REVIEW_MODE;
+  const originalSubscribes = process.env.AGENT_OS_APPS_ADVERSARIAL_REVIEW_SUBSCRIBES;
+  const originalVersion = process.env.AGENT_OS_APPS_ADVERSARIAL_REVIEW_CONTRACT_VERSION;
+  try {
+    process.env.AGENT_OS_APPS_ADVERSARIAL_REVIEW_MODE = 'agent-os';
+    process.env.AGENT_OS_APPS_ADVERSARIAL_REVIEW_SUBSCRIBES = 'health.worker.*,token.*,system.*';
+    process.env.AGENT_OS_APPS_ADVERSARIAL_REVIEW_CONTRACT_VERSION = '1.0';
+    writeRuntimeStatusSnapshot(rootDir, {
+      probe: { healthy: true },
+      wiring: { takeClassification: true, checkHealthz: true, dispatchStatus: true },
+    });
+    writeSettleSmokeResult(rootDir, 'agent-runtime', {
+      status: 'pass',
+      at: '2026-08-04T10:00:00.000Z',
+      dispatched: true,
+      settled: true,
+      attributed: true,
+      workerRunId: 'wr_ready',
+    });
+    const db = new Database(join(rootDir, 'data', 'reviews.db'));
+    db.exec(`
+      CREATE TABLE reviewer_passes (
+        worker_run_id TEXT,
+        status TEXT NOT NULL,
+        metadata_json TEXT NOT NULL
+      )
+    `);
+    db.prepare(
+      'INSERT INTO reviewer_passes (worker_run_id, status, metadata_json) VALUES (?, ?, ?)'
+    ).run('wr_ready', 'completed', JSON.stringify({ launchRequestId: 'lrq_ready' }));
+    db.close();
+
+    global.fetch = async () => ({
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          ok: true,
+          supervisor: {
+            duplicate_detected: false,
+            stale_bind_detected: false,
+          },
+        };
+      },
+    });
+
+    let out = '';
+    const code = await runtimeMain(['readyz', '--root', rootDir], {
+      stdout: { write: (s) => { out += s; } },
+      stderr: { write() {} },
+    });
+    assert.equal(code, 0);
+    assert.match(out, /OVERALL: READY/);
+
+    delete process.env.AGENT_OS_APPS_ADVERSARIAL_REVIEW_MODE;
+    delete process.env.AGENT_OS_APPS_ADVERSARIAL_REVIEW_SUBSCRIBES;
+    delete process.env.AGENT_OS_APPS_ADVERSARIAL_REVIEW_CONTRACT_VERSION;
+    out = '';
+    const jsonCode = await runtimeMain(['readyz', '--root', rootDir, '--json'], {
+      stdout: { write: (s) => { out += s; } },
+      stderr: { write() {} },
+    });
+    assert.equal(jsonCode, 1);
+    const parsed = JSON.parse(out);
+    assert.deepEqual(parsed.failingSignals, ['app-registration']);
+  } finally {
+    global.fetch = originalFetch;
+    if (originalMode === undefined) {
+      delete process.env.AGENT_OS_APPS_ADVERSARIAL_REVIEW_MODE;
+    } else {
+      process.env.AGENT_OS_APPS_ADVERSARIAL_REVIEW_MODE = originalMode;
+    }
+    if (originalSubscribes === undefined) {
+      delete process.env.AGENT_OS_APPS_ADVERSARIAL_REVIEW_SUBSCRIBES;
+    } else {
+      process.env.AGENT_OS_APPS_ADVERSARIAL_REVIEW_SUBSCRIBES = originalSubscribes;
+    }
+    if (originalVersion === undefined) {
+      delete process.env.AGENT_OS_APPS_ADVERSARIAL_REVIEW_CONTRACT_VERSION;
+    } else {
+      process.env.AGENT_OS_APPS_ADVERSARIAL_REVIEW_CONTRACT_VERSION = originalVersion;
+    }
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('snapshot and canary status writers reject cross-user durable state writes', () => {

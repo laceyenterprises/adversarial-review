@@ -107,9 +107,9 @@ function resolveWorkerClass(role) {
   if (role?.kind === 'remediator') return rawModel;
   const model = rawModel.toLowerCase();
 
-  if (model === 'codex') return 'codex-reviewer';
-  if (model === 'gemini') return 'gemini-reviewer';
-  if (model === 'claude' || model === 'claude-code') return 'claude-reviewer';
+  if (model.startsWith('codex')) return 'codex-reviewer';
+  if (model.startsWith('gemini')) return 'gemini-reviewer';
+  if (model.startsWith('claude')) return 'claude-reviewer';
   return rawModel;
 }
 

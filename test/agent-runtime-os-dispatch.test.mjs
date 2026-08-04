@@ -809,6 +809,40 @@ test('run supplies the adversarial-review app id when connecting to the App SDK'
   assert.equal(connectCalls[0].request_timeout_ms, DEFAULT_APP_CONTRACT_REQUEST_TIMEOUT_MS);
 });
 
+test('run resolves the registered app from the apps registry', async () => {
+  const session = fakeSession({
+    statusSequence: [{ status: 'succeeded', artifact: reviewArtifact() }],
+  });
+  const connectCalls = [];
+  const runtime = createOsDispatchAgentRuntime({
+    loadConfigImpl: () => ({
+      get(key, defaultValue = null) {
+        const values = {
+          'apps.adversarial-review': {
+            mode: 'agent-os',
+            subscribes: ['health.worker.*', 'token.*', 'system.*'],
+            contract_version: '1.0',
+          },
+        };
+        return key in values ? values[key] : defaultValue;
+      },
+      sources: {
+        'apps.adversarial-review.mode': 'top',
+      },
+    }),
+    connectImpl: async (options) => {
+      connectCalls.push(options);
+      return session;
+    },
+    sleepImpl: async () => {},
+  });
+
+  const result = await (await runtime.run(reviewerRequest())).await();
+
+  assert.equal(result.status, 'completed');
+  assert.equal(connectCalls[0].app_id, 'adversarial-review');
+});
+
 test('explicit App SDK identity still wins over the os-dispatch default', async () => {
   const session = fakeSession({
     statusSequence: [{ status: 'succeeded', artifact: reviewArtifact() }],

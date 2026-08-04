@@ -6,6 +6,28 @@ import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { buildReadyzStatus, renderReadyzStatus } from '../src/runtime-readyz.mjs';
 
+function registeredAppRegistrationOptions() {
+  return {
+    appRegistrationOptions: {
+      loadConfigImpl: () => ({
+        get(key, defaultValue = null) {
+          const values = {
+            'apps.adversarial-review': {
+              mode: 'agent-os',
+              subscribes: ['health.worker.*', 'token.*', 'system.*'],
+              contract_version: '1.0',
+            },
+          };
+          return key in values ? values[key] : defaultValue;
+        },
+        sources: {
+          'apps.adversarial-review.mode': 'top',
+        },
+      }),
+    },
+  };
+}
+
 function createMockEnvironment(overrides = {}) {
   const rootDir = join(tmpdir(), `readyz-test-${Math.random().toString(36).slice(2)}`);
   mkdirSync(join(rootDir, 'data'), { recursive: true });
@@ -80,12 +102,54 @@ test('readyz returns allGreen true when all signals pass', async () => {
   global.fetch = async () => ({ ok: true, status: 200 });
 
   try {
-    const model = await buildReadyzStatus(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.strictEqual(model.overallReady, true);
+    assert.deepStrictEqual(model.app_registration, {
+      app_id: 'adversarial-review',
+      mode: 'agent-os',
+      subscribes: ['health.worker.*', 'token.*', 'system.*'],
+      contract_version: '1.0',
+      registered: true,
+      source: 'apps-registry',
+    });
     
     const rendered = renderReadyzStatus(model);
     assert.ok(rendered.includes('GREEN'));
     assert.ok(rendered.includes('OVERALL: READY'));
+  } finally {
+    global.fetch = originalFetch;
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('readyz reports the default fallback when apps is unset', async () => {
+  const rootDir = createMockEnvironment();
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 200 });
+
+  try {
+    const model = await buildReadyzStatus(rootDir, {
+      appRegistrationOptions: {
+        loadConfigImpl: () => ({
+          get(_key, defaultValue = null) {
+            return defaultValue;
+          },
+          sources: {},
+        }),
+      },
+    });
+    assert.strictEqual(model.overallReady, false);
+    assert.deepStrictEqual(model.app_registration, {
+      app_id: 'adversarial-review',
+      mode: 'agent-os',
+      subscribes: ['health.worker.*', 'token.*', 'system.*'],
+      contract_version: '1.0',
+      registered: false,
+      source: 'default',
+    });
+    const appRegistration = model.signals.find((signal) => signal.id === 'app-registration');
+    assert.strictEqual(appRegistration.ok, false);
+    assert.strictEqual(appRegistration.detail, 'adversarial-review resolved from default');
   } finally {
     global.fetch = originalFetch;
     rmSync(rootDir, { recursive: true, force: true });
@@ -106,7 +170,7 @@ test('readyz accepts a PASS smoke artifact with slight future clock skew', async
   global.fetch = async () => ({ ok: true, status: 200 });
 
   try {
-    const model = await buildReadyzStatus(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.strictEqual(model.overallReady, true);
     const smoke = model.signals.find((signal) => signal.id === 'smoke');
     assert.strictEqual(smoke.ok, true);
@@ -129,7 +193,7 @@ test('readyz normalizes endpoint URL with a trailing slash', async () => {
   };
 
   try {
-    const model = await buildReadyzStatus(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.strictEqual(model.overallReady, true);
     assert.deepStrictEqual(requestedUrls, ['http://127.0.0.1:8003/v1/dispatch_status']);
   } finally {
@@ -155,7 +219,7 @@ test('readyz preserves endpoint base paths when resolving dispatch_status', asyn
   };
 
   try {
-    const model = await buildReadyzStatus(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.strictEqual(model.overallReady, true);
     assert.deepStrictEqual(requestedUrls, ['http://127.0.0.1:8003/agent-1/v1/dispatch_status']);
   } finally {
@@ -175,7 +239,7 @@ test('readyz returns NOT READY for an HTTP error response', async () => {
   global.fetch = async () => ({ ok: false, status: 503 });
 
   try {
-    const model = await buildReadyzStatus(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.strictEqual(model.overallReady, false);
     const endpoint = model.signals.find((signal) => signal.id === 'endpoint');
     assert.strictEqual(endpoint.ok, false);
@@ -192,7 +256,7 @@ test('readyz returns NOT READY if endpoint is unreachable', async () => {
   global.fetch = async () => { throw new Error('fetch failed'); };
 
   try {
-    const model = await buildReadyzStatus(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.strictEqual(model.overallReady, false);
     
     const rendered = renderReadyzStatus(model);
@@ -211,7 +275,7 @@ test('readyz returns NOT READY if router is unhealthy', async () => {
   global.fetch = async () => ({ ok: true, status: 200 });
 
   try {
-    const model = await buildReadyzStatus(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.strictEqual(model.overallReady, false);
     
     const rendered = renderReadyzStatus(model);
@@ -238,7 +302,7 @@ test('readyz returns NOT READY if dispatch_status wiring is absent', async () =>
   global.fetch = async () => ({ ok: true, status: 200 });
 
   try {
-    const model = await buildReadyzStatus(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.strictEqual(model.overallReady, false);
     const router = model.signals.find((signal) => signal.id === 'router');
     assert.strictEqual(router.detail, 'classification/healthz/dispatch_status null');
@@ -254,7 +318,7 @@ test('readyz returns NOT READY if smoke result is not PASS', async () => {
   global.fetch = async () => ({ ok: true, status: 200 });
 
   try {
-    const model = await buildReadyzStatus(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.strictEqual(model.overallReady, false);
     
     const rendered = renderReadyzStatus(model);
@@ -272,7 +336,7 @@ test('readyz returns NOT READY if attribution is missing', async () => {
   global.fetch = async () => ({ ok: true, status: 200 });
 
   try {
-    const model = await buildReadyzStatus(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.strictEqual(model.overallReady, false);
     
     const rendered = renderReadyzStatus(model);
@@ -295,7 +359,7 @@ test('readyz tolerates occasional unattributed SDK passes when recent attributio
   global.fetch = async () => ({ ok: true, status: 200 });
 
   try {
-    const model = await buildReadyzStatus(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.strictEqual(model.overallReady, true);
     const attribution = model.signals.find((signal) => signal.id === 'attribution');
     assert.strictEqual(attribution.detail, 'last 2 SDK passes: 1 attributed');
@@ -336,7 +400,7 @@ test('readyz excludes stale reviewer pass attribution rows when ended_at is avai
   global.fetch = async () => ({ ok: true, status: 200 });
 
   try {
-    const model = await buildReadyzStatus(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.strictEqual(model.overallReady, true);
     const attribution = model.signals.find((signal) => signal.id === 'attribution');
     assert.strictEqual(attribution.detail, 'last 1 SDK passes: 1 attributed');
@@ -370,7 +434,7 @@ test('readyz falls back to older attribution rows when there are no recent SDK p
   global.fetch = async () => ({ ok: true, status: 200 });
 
   try {
-    const model = await buildReadyzStatus(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.strictEqual(model.overallReady, true);
     const attribution = model.signals.find((signal) => signal.id === 'attribution');
     assert.strictEqual(attribution.detail, 'last 1 SDK passes: 1 attributed');
@@ -391,7 +455,7 @@ test('readyz ignores malformed pass metadata while checking attribution', async 
   global.fetch = async () => ({ ok: true, status: 200 });
 
   try {
-    const model = await buildReadyzStatus(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.strictEqual(model.overallReady, true);
     const attribution = model.signals.find((signal) => signal.id === 'attribution');
     assert.strictEqual(attribution.detail, 'last 1 SDK passes: 1 attributed');
@@ -415,7 +479,7 @@ test('readyz ignores active and cli-direct passes in attribution readiness', asy
   global.fetch = async () => ({ ok: true, status: 200 });
 
   try {
-    const model = await buildReadyzStatus(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.strictEqual(model.overallReady, true);
     const attribution = model.signals.find((signal) => signal.id === 'attribution');
     assert.strictEqual(attribution.detail, 'last 1 SDK passes: 1 attributed');
@@ -435,7 +499,7 @@ test('readyz rejects a PASS smoke artifact without a timestamp', async () => {
   global.fetch = async () => ({ ok: true, status: 200 });
 
   try {
-    const model = await buildReadyzStatus(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
     assert.strictEqual(model.overallReady, false);
     const smoke = model.signals.find((signal) => signal.id === 'smoke');
     assert.strictEqual(smoke.detail, 'PASS timestamp missing or invalid');

@@ -955,8 +955,51 @@ test('run reports a failed RunResult when the dispatch call throws instead of th
   const handle = await runtime.run(reviewerRequest());
   const result = await handle.await();
   assert.equal(result.status, 'failed');
-  assert.equal(result.failureClass, 'unknown');
+  assert.equal(result.failureClass, 'dispatch-rejected');
   assert.equal(result.detail, 'endpoint unreachable');
+});
+
+test('a refused dispatch is marked never-accepted on both the handle and the result', async () => {
+  const session = {
+    async dispatch() { throw new Error('endpoint unreachable'); },
+    async dispatchStatus() { throw new Error('should not be polled'); },
+  };
+  const runtime = createOsDispatchAgentRuntime({ session });
+  const handle = await runtime.run(reviewerRequest());
+  const result = await handle.await();
+  // `runRef` is still minted for correlation, so it must not be read as proof
+  // the OS accepted anything — that is what made a refused dispatch look
+  // dispatched.
+  assert.ok(handle.runRef, 'runRef is still present for correlation');
+  assert.equal(handle.dispatchAccepted, false);
+  assert.equal(result.dispatchAccepted, false);
+});
+
+test('an accepted dispatch is marked accepted on the handle', async () => {
+  const session = fakeSession({ statusSequence: [{ status: 'succeeded', artifact: reviewArtifact() }] });
+  const runtime = createOsDispatchAgentRuntime({ session, sleepImpl: async () => {} });
+  const handle = await runtime.run(reviewerRequest());
+  assert.equal(handle.dispatchAccepted, true);
+  const result = await handle.await();
+  assert.notEqual(result.dispatchAccepted, false);
+});
+
+test('an unauthenticated app-contract session is classified as app-contract-auth, not unknown', async () => {
+  for (const message of [
+    'agent-os mode requires a bootstrap token or bootstrap token file',
+    'register requires a bearer bootstrap token',
+    'HTTP 401: Unauthorized',
+  ]) {
+    const session = {
+      async dispatch() { throw new Error(message); },
+      async dispatchStatus() { throw new Error('should not be polled'); },
+    };
+    const runtime = createOsDispatchAgentRuntime({ session });
+    const result = await (await runtime.run(reviewerRequest())).await();
+    assert.equal(result.failureClass, 'app-contract-auth', `for: ${message}`);
+    // The operator-actionable cause must survive, not be flattened away.
+    assert.equal(result.detail, message);
+  }
 });
 
 test('run throws on a structurally invalid request (missing idempotencyKey)', async () => {

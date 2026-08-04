@@ -550,12 +550,31 @@ function buildTerminalResult(mappedStatus, statusPayload, role, artifactContext 
   };
 }
 
+// A dispatch that never reached the OS is a *rejection*, not a run that failed.
+// Collapsing the two hides the real cause: an unauthenticated app-contract
+// session used to surface as `status=failed, failureClass=unknown` on a handle
+// that still carried a run reference, so callers reported the run as dispatched
+// and the underlying error (e.g. a missing bootstrap token) was never printed.
+// Classify what we can, and mark the result as never-accepted.
+const APP_CONTRACT_AUTH_ERROR_RE =
+  /bootstrap token|unauthorized|forbidden|missing_bootstrap_token|401|403/i;
+
+function dispatchFailureClassOf(err) {
+  if (err?.configurationError) return 'bug';
+  const message = err?.message || String(err ?? '');
+  if (APP_CONTRACT_AUTH_ERROR_RE.test(message)) return 'app-contract-auth';
+  return 'dispatch-rejected';
+}
+
 function dispatchFailureResult(err) {
   return {
     status: 'failed',
-    failureClass: err?.configurationError ? 'bug' : 'unknown',
+    failureClass: dispatchFailureClassOf(err),
     usage: null,
     runtimeMode: RUNTIME_MODE,
+    // The OS never accepted this request; `runRef` on the handle is a
+    // client-side mint and must not be read as proof of acceptance.
+    dispatchAccepted: false,
     detail: err?.message || String(err),
   };
 }
@@ -564,6 +583,9 @@ function settledHandle(runRef, result) {
   return {
     runRef,
     mode: RUNTIME_MODE,
+    // Mirrors `result.dispatchAccepted` so callers holding only the handle can
+    // still tell an accepted run from a refused dispatch.
+    dispatchAccepted: result?.dispatchAccepted !== false,
     async await() { return result; },
     async cancel() {},
     async reattach() { return result; },
@@ -817,6 +839,8 @@ function createOsDispatchAgentRuntime({
     return {
       runRef: requestId,
       mode: RUNTIME_MODE,
+      // The OS accepted this dispatch; `runRef` is a real, pollable reference.
+      dispatchAccepted: true,
       async await() {
         return awaitTerminal();
       },

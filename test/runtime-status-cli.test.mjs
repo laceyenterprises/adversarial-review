@@ -343,6 +343,41 @@ test('runtime settle-smoke preserves its in-memory result when persistence read-
   assert.equal(outcome.smoke.workerRunId, 'wr_smoke_readback');
 });
 
+test('runtime settle-smoke reports a refused dispatch as NOT dispatched and surfaces the cause', async () => {
+  const outcome = await runRuntimeSettleSmoke({
+    rootDir: '/fixture',
+    now: () => new Date('2026-08-04T10:00:00.000Z'),
+    createRuntime: () => ({
+      async run() {
+        // Shape the os-dispatch adapter returns when the app-contract session
+        // could not authenticate: a minted runRef, but nothing was accepted.
+        return {
+          runRef: 'smoke-req-refused',
+          dispatchAccepted: false,
+          async await() {
+            return {
+              status: 'failed',
+              failureClass: 'app-contract-auth',
+              dispatchAccepted: false,
+              detail: 'agent-os mode requires a bootstrap token or bootstrap token file',
+            };
+          },
+        };
+      },
+    }),
+    writeResultImpl: (_root, _runtime, smoke) => smoke,
+  });
+
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.smoke.status, 'fail');
+  // The regression this guards: a refused dispatch used to report dispatched:true
+  // and a generic "did not settle cleanly: status=failed", hiding the real cause.
+  assert.equal(outcome.smoke.dispatched, false);
+  assert.match(outcome.smoke.detail, /refused before dispatch/);
+  assert.match(outcome.smoke.detail, /app-contract-auth/);
+  assert.match(outcome.smoke.detail, /bootstrap token/);
+});
+
 test('runtime settle-smoke preserves its in-memory result when persistence read-back is unreadable', async () => {
   const outcome = await runRuntimeSettleSmoke({
     rootDir: '/fixture',

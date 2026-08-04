@@ -1007,6 +1007,10 @@ test('incidental 401 and 403 digit sequences do not classify dispatch rejection 
     'Connection timed out after 4015ms',
     'ECONNREFUSED 127.0.0.1:8403',
     'request failed for trace req_40391',
+    'kill 401 failed: no such process',
+    'fd 401 read failed',
+    'request trace req-401 timed out',
+    'ECONNREFUSED 127.0.0.1:401',
   ]) {
     const session = {
       async dispatch() { throw new Error(message); },
@@ -1017,6 +1021,17 @@ test('incidental 401 and 403 digit sequences do not classify dispatch rejection 
     assert.equal(result.failureClass, 'dispatch-rejected', `for: ${message}`);
     assert.equal(result.detail, message);
   }
+});
+
+test('nullish dispatch errors use an explicit unknown detail fallback', async () => {
+  const session = {
+    async dispatch() { throw undefined; },
+    async dispatchStatus() { throw new Error('should not be polled'); },
+  };
+  const runtime = createOsDispatchAgentRuntime({ session });
+  const result = await (await runtime.run(reviewerRequest())).await();
+  assert.equal(result.failureClass, 'dispatch-rejected');
+  assert.equal(result.detail, 'unknown dispatch error');
 });
 
 test('run throws on a structurally invalid request (missing idempotencyKey)', async () => {

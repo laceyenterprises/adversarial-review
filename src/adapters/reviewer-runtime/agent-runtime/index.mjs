@@ -50,6 +50,7 @@ function withDefaultAppContractConnectOptions(
   { loadConfigImpl, topPath, modulePaths, env } = {},
 ) {
   const registration = resolveAppContractRegistration({
+    appId: options.app_id || options.appId,
     loadConfigImpl,
     topPath,
     modulePaths,

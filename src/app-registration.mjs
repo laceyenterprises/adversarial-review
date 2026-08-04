@@ -16,9 +16,9 @@ function isAuthoritativeSource(source) {
     || (typeof source === 'string' && (source.startsWith('local:') || source.startsWith('env:')));
 }
 
-function defaultRegistration() {
+function defaultRegistration(appId) {
   return {
-    app_id: DEFAULT_APP_CONTRACT_APP_ID,
+    app_id: appId,
     mode: DEFAULT_APP_CONTRACT_MODE,
     subscribes: [...DEFAULT_APP_CONTRACT_SUBSCRIPTIONS],
     contract_version: DEFAULT_APP_CONTRACT_VERSION,
@@ -35,7 +35,7 @@ export function resolveAppContractRegistration({
   modulePaths = [MODULE_CONFIG_PATH],
   env = process.env,
 } = {}) {
-  const fallback = defaultRegistration();
+  const fallback = defaultRegistration(appId);
   const cfg = config ?? loadConfigImpl({ topPath, modulePaths, env });
   const app = cfg?.get?.(`apps.${appId}`, null);
   if (!app || typeof app !== 'object' || Array.isArray(app)) {

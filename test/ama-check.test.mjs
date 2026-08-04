@@ -562,6 +562,30 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
     const abbreviatedVerdict = JSON.parse(abbreviatedClaim.stdout);
     assert.equal(abbreviatedVerdict.eligible, true, JSON.stringify(abbreviatedVerdict, null, 2));
 
+    const dedicatedHammerUserToken = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody,
+      prPatch: {
+        headRefOid: HAM_SHA,
+        labels: [],
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' },
+          { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
+        ],
+      },
+      reviews,
+      hamTerminalRemediation: hamTerminalEvidence({ auditAuthor: 'hammer-lacey' }),
+      reviewCycleExhausted: true,
+      rootDir,
+    });
+    assert.equal(dedicatedHammerUserToken.status, 0, dedicatedHammerUserToken.stderr);
+    const dedicatedHammerUserTokenVerdict = JSON.parse(dedicatedHammerUserToken.stdout);
+    assert.equal(
+      dedicatedHammerUserTokenVerdict.eligible,
+      true,
+      JSON.stringify(dedicatedHammerUserTokenVerdict, null, 2),
+    );
+
     const laterNonHam = runAmaCheck(tmp, {
       branchProtectionRequired: true,
       protectionBody,

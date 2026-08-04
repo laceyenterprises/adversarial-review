@@ -99,7 +99,12 @@ async function runRuntimeSettleSmoke({
     startedAt,
     runtime,
     requestId: handle?.runRef || request.idempotencyKey,
-    dispatched: Boolean(handle?.runRef),
+    // `runRef` alone proves nothing: a refused dispatch still gets a
+    // client-side mint. Require the adapter's explicit acceptance marker so a
+    // never-dispatched run can never report as dispatched.
+    dispatched: handle?.dispatchAccepted !== false
+      && result?.dispatchAccepted !== false
+      && Boolean(handle?.runRef),
     settled: result?.status === 'completed',
     attributed: Boolean(workerRunId),
     workerRunId,
@@ -110,7 +115,12 @@ async function runRuntimeSettleSmoke({
   if (failure) {
     smoke.detail = `settle smoke failed before terminal result: ${failure}`;
   } else if (!smoke.dispatched) {
-    smoke.detail = 'settle smoke did not receive a dispatch run reference';
+    // Carry the adapter's reason through instead of discarding it — this branch
+    // is what an unauthenticated app-contract session lands on, and the cause
+    // (e.g. a missing bootstrap token) is the only actionable part.
+    const reason = result?.detail || 'no reason reported by the runtime adapter';
+    const failureClass = result?.failureClass ? ` failureClass=${result.failureClass}` : '';
+    smoke.detail = `settle smoke was refused before dispatch:${failureClass} ${reason}`;
   } else if (!smoke.settled) {
     smoke.detail = `settle smoke did not settle cleanly: status=${result?.status ?? 'unknown'}`;
   } else if (!smoke.attributed) {

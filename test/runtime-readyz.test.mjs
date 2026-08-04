@@ -241,6 +241,31 @@ test('readyz returns NOT READY for endpoint HTTP errors and fetch failures', asy
   }
 });
 
+test('readyz returns NOT READY instead of throwing when APP_CONTRACT_ENDPOINT_URL is invalid', async () => {
+  const rootDir = makeRoot();
+  const restoreFetch = withFetch(healthyEndpointPayload());
+  const originalUrl = process.env.APP_CONTRACT_ENDPOINT_URL;
+  process.env.APP_CONTRACT_ENDPOINT_URL = '127.0.0.1:8003';
+  try {
+    seedHealthyRuntime(rootDir);
+    const model = await buildReadyzStatus(rootDir, registeredAppRegistrationOptions());
+    assert.equal(model.overallReady, false);
+    assert.deepEqual(model.failingSignals, ['endpoint']);
+    assert.match(
+      model.signals.find((signal) => signal.id === 'endpoint').detail,
+      /Invalid URL/,
+    );
+  } finally {
+    restoreFetch();
+    if (originalUrl === undefined) {
+      delete process.env.APP_CONTRACT_ENDPOINT_URL;
+    } else {
+      process.env.APP_CONTRACT_ENDPOINT_URL = originalUrl;
+    }
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('readyz router signal fails when snapshot is missing or dispatch_status wiring is absent', async () => {
   const rootDir = makeRoot();
   const restoreFetch = withFetch(healthyEndpointPayload());
@@ -399,6 +424,57 @@ test('readyz attribution signal fails closed when no recent ended_at rows exist'
       'no recent SDK passes found',
     );
   } finally {
+    restoreFetch();
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('readyz skips JSON-filtered attribution scan when no recent ended_at rows exist', async () => {
+  const rootDir = makeRoot();
+  const restoreFetch = withFetch(healthyEndpointPayload());
+  const originalPrepare = Database.prototype.prepare;
+  try {
+    writeFileSync(
+      join(rootDir, 'data', 'runtime-status-snapshot.json'),
+      JSON.stringify({
+        status: {
+          probe: { healthy: true },
+          wiring: { takeClassification: true, checkHealthz: true, dispatchStatus: true },
+        },
+      }),
+    );
+    writeSettleSmokeResult(rootDir, 'agent-runtime', {
+      status: 'pass',
+      at: '2026-08-04T10:00:00.000Z',
+      dispatched: true,
+      settled: true,
+      attributed: true,
+      workerRunId: 'wr_smoke',
+    });
+    createPassDb(rootDir, {
+      endedAt: '2026-08-02T09:00:00.000Z',
+      workerRunId: 'wr_old',
+    });
+
+    Database.prototype.prepare = function patchedPrepare(sql, ...args) {
+      if (String(sql).includes('json_valid(metadata_json)')) {
+        throw new Error('JSON-filtered attribution query should not run when no recent ended_at rows exist');
+      }
+      return originalPrepare.call(this, sql, ...args);
+    };
+
+    const model = await buildReadyzStatus(rootDir, {
+      ...registeredAppRegistrationOptions(),
+      now: () => new Date('2026-08-04T10:00:00.000Z'),
+    });
+    assert.equal(model.overallReady, false);
+    assert.deepEqual(model.failingSignals, ['attribution']);
+    assert.equal(
+      model.signals.find((signal) => signal.id === 'attribution').detail,
+      'no recent SDK passes found',
+    );
+  } finally {
+    Database.prototype.prepare = originalPrepare;
     restoreFetch();
     rmSync(rootDir, { recursive: true, force: true });
   }

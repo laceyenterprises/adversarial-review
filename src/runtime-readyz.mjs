@@ -38,6 +38,18 @@ function readAttributionRows(db, { since = null } = {}) {
   `).all(since ? { since } : {});
 }
 
+function hasRecentEndedAtRows(db, since) {
+  if (!since) return true;
+  const row = db.prepare(`
+    SELECT 1
+    FROM reviewer_passes
+    WHERE ended_at IS NOT NULL
+      AND ended_at >= @since
+    LIMIT 1
+  `).get({ since });
+  return Boolean(row);
+}
+
 function settleSmokeSignal(rootDir, { now = () => new Date() } = {}) {
   const settled = evaluateSettleSmokeResult(rootDir, {
     runtime: 'agent-runtime',
@@ -86,8 +98,8 @@ function settleSmokeSignal(rootDir, { now = () => new Date() } = {}) {
 }
 
 async function endpointSignal(baseUrl) {
-  const healthzUrl = new URL('healthz', baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`);
   try {
+    const healthzUrl = new URL('healthz', baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`);
     const res = await fetch(healthzUrl, {
       signal: AbortSignal.timeout(5000),
     });
@@ -188,6 +200,14 @@ function attributionSignal(rootDir, { now = () => new Date() } = {}) {
     const since = hasEndedAt
       ? new Date(now().getTime() - ATTRIBUTION_MAX_AGE_MS).toISOString()
       : null;
+    if (!hasRecentEndedAtRows(db, since)) {
+      return {
+        id: 'attribution',
+        label: 'attribution round-trip',
+        ok: false,
+        detail: 'no recent SDK passes found',
+      };
+    }
     const rows = readAttributionRows(db, { since });
     const total = rows.length;
     const attributed = rows.filter((row) => row.worker_run_id != null).length;

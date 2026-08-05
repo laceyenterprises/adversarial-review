@@ -606,10 +606,12 @@ The airlock watcher and follow-up LaunchAgents set
 and `GEMINI_REVIEWER_AUTH_VIA_BROKER=true`, plus
 `OAUTH_BROKER_SHARED_SECRET_FILE`, so reviewer GitHub tokens are minted through
 the local OAuth broker before any legacy per-role 1Password PAT path is used.
-Broker mode fails closed: when the flag is true and the broker cannot mint the
-token, the launcher must not silently fall back to `op read`. That fail-closed
-path must also sleep before exit using the same launchd respawn-storm guard as
-the other startup secret failures.
+Reviewer-token broker mode fails closed: when the flag is true and the broker
+cannot mint the token, the launcher must not silently fall back to `op read`.
+Permanent credential/configuration failures sleep before exit using the same
+launchd respawn-storm guard as the other startup secret failures; transient
+broker transport or temporary HTTP failures may use a short launchd retry
+instead of the one-hour guard.
 
 The watcher LaunchAgents also own a separate GitHub token for the watcher's
 own GitHub calls: poll-loop Octokit requests, branch/label/status probes, and
@@ -636,23 +638,31 @@ retried through the existing durable delivery retry path.
   both `GITHUB_TOKEN` and `GH_TOKEN`. `GITHUB_TOKEN` is consumed by the
   watcher's in-process Octokit client, while `GH_TOKEN` is the GitHub CLI
   credential that `gh` prefers.
-- Startup watcher-token broker mode is fail-safe, not fail-closed: if
-  `WATCHER_GH_AUTH_VIA_BROKER=true` but the broker is unavailable, malformed,
-  or disabled by missing config, the launcher falls back to `gh auth token` and
-  logs that it is sharing the operator PAT's 5000/hr budget. If neither broker
-  nor `gh auth token` yields a token, startup fails and sleeps before exit.
+- Startup watcher-token broker mode is fail-closed when
+  `WATCHER_GH_AUTH_VIA_BROKER=true`: the maintained airlock wrapper clears any
+  inherited `GITHUB_TOKEN`, mints a fresh broker token, and must not fall back to
+  the host's ambient `gh` keychain. Permanent broker/configuration failures
+  retain the one-hour crash-loop suppression sleep. Transient broker transport
+  or temporary HTTP failures sleep for `WATCHER_GH_TRANSIENT_RETRY_SECONDS`
+  (default `60`, clamped to `1..300`) and exit non-zero so launchd retries
+  promptly.
+- If an operator sets `WATCHER_GH_AUTH_VIA_BROKER=false`, startup must preserve
+  a non-empty `GITHUB_TOKEN` supplied by the environment and mirror it to
+  `GH_TOKEN` when `GH_TOKEN` is not already set. Broker opt-out with no supplied
+  token is a credential failure.
 - Broker responses for the watcher-owned token use the same
   `scripts/lib/reviewer-broker.sh` verification primitive as reviewer tokens:
   provider is checked, and configured expected app/installation metadata pins
   must match before the token is accepted.
 
 This watcher-owned token path is deliberately distinct from reviewer-token
-broker mode. Reviewer tokens are per reviewer identity and fail closed at
-startup when their `*_AUTH_VIA_BROKER=true` flag is set, because falling back to
-the wrong reviewer PAT changes review authorship. The watcher token is the
-daemon's operational GitHub identity; its broker path exists to move high-volume
-watcher reads off the operator PAT, but its fallback preserves daemon startup
-when the broker is temporarily unavailable.
+broker mode in identity, but not in ambient-keychain fallback behavior. Reviewer
+tokens are per reviewer identity and fail closed at startup when their
+`*_AUTH_VIA_BROKER=true` flag is set, because falling back to the wrong reviewer
+PAT changes review authorship. The watcher token is the daemon's operational
+GitHub identity; its broker path exists to move high-volume watcher reads off
+the operator PAT, and the maintained airlock wrapper avoids reintroducing that
+shared PAT dependency through an implicit `gh auth token` fallback.
 
 ### Merge-agent broker CFG mirror
 

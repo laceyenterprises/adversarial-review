@@ -346,7 +346,7 @@ test('launcher scripts do not hardcode operator identity defaults', () => {
   }
 });
 
-test('launcher scripts resolve gh dynamically for GitHub token lookup', () => {
+test('launcher scripts resolve gh dynamically when they still use GitHub token keychain fallback', () => {
   for (const scriptName of [
     'adversarial-watcher-start-placey.sh',
     'adversarial-follow-up-tick.sh',
@@ -359,10 +359,8 @@ test('launcher scripts resolve gh dynamically for GitHub token lookup', () => {
     assert.doesNotMatch(script, /\/opt\/homebrew\/bin\/gh auth token/);
   }
   const airlockWatcher = readLauncherScript('adversarial-watcher-start.sh');
-  assert.match(airlockWatcher, /resolve_gh_bin\(\)/);
-  assert.match(airlockWatcher, /command -v gh/);
-  assert.match(airlockWatcher, /\/usr\/local\/bin\/gh/);
-  assert.match(airlockWatcher, /\/opt\/homebrew\/bin\/gh/);
+  assert.doesNotMatch(airlockWatcher, /resolve_gh_bin\(\)/);
+  assert.doesNotMatch(airlockWatcher, /command -v gh/);
   assert.doesNotMatch(airlockWatcher, /\bgh auth token\b/);
   assert.doesNotMatch(airlockWatcher, /\$\(("\$GH_BIN"|\$GH_BIN) auth token/);
   assert.doesNotMatch(airlockWatcher, /\/Users\/placey\/\.codex\/auth\.json/);
@@ -443,24 +441,33 @@ test('airlock watcher launcher derives Codex auth from daemon HOME and validates
   assert.equal(result.ghAuthLog, '');
 });
 
-test('airlock watcher launcher fails before daemon start when Codex auth is missing or too broad', {
+test('airlock watcher launcher fails before daemon start when Codex auth is missing', {
   skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
 }, async () => {
-  for (const [codexAuthMode, diagnostic] of [
-    ['missing', /missing Codex credentials/],
-    ['broad', /mode 644 is too broad/],
-  ]) {
-    const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
-      codexAuthMode,
-      extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
-    });
-    assert.equal(result.code, 1, `${codexAuthMode} stderr:\n${result.stderr}`);
-    assert.match(result.stderr, diagnostic);
-    assert.match(result.stderr, /Provision this daemon-owned auth\.json|provision daemon-owned Codex credentials/);
-    assert.equal(result.stdout, '', 'watcher.mjs must not start');
-    assert.equal(result.ghAuthLog, '');
-    assert.doesNotMatch(result.stderr, /\/Users\/placey/);
-  }
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    codexAuthMode: 'missing',
+    extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
+  });
+  assert.equal(result.code, 1, `stderr:\n${result.stderr}`);
+  assert.match(result.stderr, /missing Codex credentials/);
+  assert.match(result.stderr, /Provision this daemon-owned auth\.json|provision daemon-owned Codex credentials/);
+  assert.equal(result.stdout, '', 'watcher.mjs must not start');
+  assert.equal(result.ghAuthLog, '');
+  assert.doesNotMatch(result.stderr, /\/Users\/placey/);
+});
+
+test('airlock watcher launcher auto-tightens owned broad Codex auth before start', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    codexAuthMode: 'broad',
+    extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
+  });
+  assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
+  assert.match(result.stderr, /mode 644 is too broad; tightening to 0600 before start/);
+  assert.match(result.stderr, /recovered CODEX_AUTH_PATH=.*permissions to mode 600/);
+  assert.notEqual(result.stdout, '', 'watcher.mjs must start after permission recovery');
+  assert.equal(result.ghAuthLog, '');
 });
 
 test('airlock watcher launcher fails loudly when a scrubbed env cannot derive Codex auth', {
@@ -671,6 +678,42 @@ test('maintainer watcher launcher fails closed without gh keychain fallback when
   assert.match(result.stderr, /refusing GUI keychain fallback/);
   assert.equal(result.ghAuthLog, '');
   assert.equal(result.sleepLog.trim(), '3600');
+});
+
+test('maintainer watcher launcher preserves environment token when broker auth is disabled', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    brokerMode: 'fail',
+    extraEnv: {
+      LINEAR_API_KEY: 'linear-test-token',
+      WATCHER_GH_AUTH_VIA_BROKER: 'false',
+      GITHUB_TOKEN: 'env-token',
+    },
+  });
+  assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
+  const payload = JSON.parse(result.stdout.trim().split(/\n/).at(-1));
+  assert.equal(payload.githubToken, 'env-token');
+  assert.equal(payload.ghToken, 'env-token');
+  assert.match(result.stderr, /GITHUB_TOKEN supplied by environment because WATCHER_GH_AUTH_VIA_BROKER=false/);
+  assert.equal(result.sleepLog.trim(), '');
+});
+
+test('maintainer watcher launcher retries transient broker startup failures without a one-hour outage', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    brokerMode: 'transient',
+    extraEnv: {
+      LINEAR_API_KEY: 'linear-test-token',
+      ...BROKER_MODE_TEST_ENV,
+      WATCHER_GH_TRANSIENT_RETRY_SECONDS: '45',
+    },
+  });
+  assert.equal(result.code, 75, `stderr:\n${result.stderr}`);
+  assert.equal(result.sleepLog.trim(), '45');
+  assert.match(result.stderr, /transient broker failure; retrying through launchd after 45s/);
+  assert.doesNotMatch(result.stderr, /sleeping 3600s/);
 });
 
 test('maintainer watcher launcher ignores whitespace local LINEAR_API_KEY and falls back to 1Password', {

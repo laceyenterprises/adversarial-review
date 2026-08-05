@@ -72,8 +72,17 @@ validate_codex_auth_path() {
     return 1
   fi
   if (( ( 8#$auth_mode & 8#077 ) != 0 )); then
-    echo "[adversarial-watcher] ERROR: CODEX_AUTH_PATH='$auth_path' mode $auth_mode is too broad; expected no group/other permissions." >&2
-    return 1
+    echo "[adversarial-watcher] WARN: CODEX_AUTH_PATH='$auth_path' mode $auth_mode is too broad; tightening to 0600 before start." >&2
+    if ! chmod 0600 "$auth_path" 2>/dev/null; then
+      echo "[adversarial-watcher] ERROR: failed to tighten CODEX_AUTH_PATH='$auth_path' permissions to 0600." >&2
+      return 1
+    fi
+    auth_mode="$(codex_auth_path_mode "$auth_path")"
+    if [[ -z "$auth_mode" ]] || (( ( 8#$auth_mode & 8#077 ) != 0 )); then
+      echo "[adversarial-watcher] ERROR: CODEX_AUTH_PATH='$auth_path' permissions remain too broad after chmod; refusing to start." >&2
+      return 1
+    fi
+    echo "[adversarial-watcher] recovered CODEX_AUTH_PATH='$auth_path' permissions to mode $auth_mode." >&2
   fi
 }
 
@@ -236,29 +245,6 @@ OP_SERVICE_ACCOUNT_TOKEN=$(env ADV_OP_TOKEN_TAG="adversarial-watcher" /opt/homeb
   }
 export OP_SERVICE_ACCOUNT_TOKEN
 
-resolve_gh_bin() {
-  local configured_gh_bin gh_bin
-  configured_gh_bin="${ADVERSARIAL_REVIEW_GH_CLI:-${GH_BIN:-}}"
-  if [[ -n "$configured_gh_bin" ]]; then
-    if [[ -x "$configured_gh_bin" ]]; then
-      printf '%s' "$configured_gh_bin"
-      return 0
-    fi
-    echo "[adversarial-watcher] WARN: configured gh CLI '$configured_gh_bin' is not executable; falling back to PATH/signed-release discovery." >&2
-  fi
-  if gh_bin="$(command -v gh 2>/dev/null)" && [[ -n "$gh_bin" && -x "$gh_bin" ]]; then
-    printf '%s' "$gh_bin"
-    return 0
-  fi
-  for gh_bin in /usr/local/bin/gh /opt/homebrew/bin/gh; do
-    if [[ -x "$gh_bin" ]]; then
-      printf '%s' "$gh_bin"
-      return 0
-    fi
-  done
-  return 1
-}
-
 # Prefer a broker-backed GitHub App installation token for the watcher's OWN
 # GitHub calls (poll-loop octokit + AMA-eligibility `gh` calls). The App token
 # has its own ~15000/hr budget, isolated from the operator PAT — the prior
@@ -271,16 +257,36 @@ resolve_gh_bin() {
 export WATCHER_GH_AUTH_VIA_BROKER
 WATCHER_GH_BROKER_ROLE="${WATCHER_GH_BROKER_ROLE:-merge-agent}"
 export WATCHER_GH_BROKER_ROLE
-export GITHUB_TOKEN=""
 # Gate ONLY on our own flag (not a per-reviewer-role flag) and call the broker
 # resolver directly; resolve_reviewer_token_via_broker validates the provider +
 # secret itself and returns non-zero on any problem.
-if [[ "${WATCHER_GH_AUTH_VIA_BROKER}" == "true" ]] \
-  && resolve_reviewer_token_via_broker GITHUB_TOKEN "${WATCHER_GH_BROKER_ROLE}"; then
-  export GH_TOKEN="$GITHUB_TOKEN"
-  echo "[adversarial-watcher] GITHUB_TOKEN resolved via OAuth broker (role=${WATCHER_GH_BROKER_ROLE} App installation token; isolated rate-limit budget)" >&2
+if [[ "${WATCHER_GH_AUTH_VIA_BROKER}" == "true" ]]; then
+  export GITHUB_TOKEN=""
+  WATCHER_GH_BROKER_FAILURE_CLASS=""
+  if resolve_reviewer_token_via_broker GITHUB_TOKEN "${WATCHER_GH_BROKER_ROLE}"; then
+    export GH_TOKEN="$GITHUB_TOKEN"
+    echo "[adversarial-watcher] GITHUB_TOKEN resolved via OAuth broker (role=${WATCHER_GH_BROKER_ROLE} App installation token; isolated rate-limit budget)" >&2
+  else
+    WATCHER_GH_BROKER_FAILURE_CLASS="${REVIEWER_BROKER_FAILURE_CLASS:-permanent}"
+  fi
+elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  export GH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
+  echo "[adversarial-watcher] GITHUB_TOKEN supplied by environment because WATCHER_GH_AUTH_VIA_BROKER=false" >&2
 fi
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+  if [[ "${WATCHER_GH_AUTH_VIA_BROKER}" == "true" && "${WATCHER_GH_BROKER_FAILURE_CLASS:-}" == "transient" ]]; then
+    WATCHER_GH_TRANSIENT_RETRY_SECONDS="${WATCHER_GH_TRANSIENT_RETRY_SECONDS:-60}"
+    if ! [[ "$WATCHER_GH_TRANSIENT_RETRY_SECONDS" == <-> ]]; then
+      WATCHER_GH_TRANSIENT_RETRY_SECONDS=60
+    elif (( WATCHER_GH_TRANSIENT_RETRY_SECONDS < 1 )); then
+      WATCHER_GH_TRANSIENT_RETRY_SECONDS=1
+    elif (( WATCHER_GH_TRANSIENT_RETRY_SECONDS > 300 )); then
+      WATCHER_GH_TRANSIENT_RETRY_SECONDS=300
+    fi
+    echo "[adversarial-watcher] transient broker failure; retrying through launchd after ${WATCHER_GH_TRANSIENT_RETRY_SECONDS}s." >&2
+    sleep "$WATCHER_GH_TRANSIENT_RETRY_SECONDS"
+    exit 75
+  fi
   echo "[adversarial-watcher] ERROR: could not resolve GITHUB_TOKEN via OAuth broker role ${WATCHER_GH_BROKER_ROLE}; refusing GUI keychain fallback." >&2
   echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the broker/file token source and bootout the agent to recover sooner." >&2
   sleep 3600

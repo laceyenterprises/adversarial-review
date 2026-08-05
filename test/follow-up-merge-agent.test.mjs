@@ -6717,6 +6717,10 @@ test('isLabelAlreadyAbsentError classifies already-absent signals across message
     '"does not exist" phrasing');
   assert.equal(isLabelAlreadyAbsentError("'merge-agent-dispatched' not found"), true,
     'primitive string errors still classify when they are label-absence shaped');
+  assert.equal(isLabelAlreadyAbsentError({ stderr: 'gh: HTTP 404 Not Found' }), true,
+    'generic HTTP 404 means the GitHub resource is already gone');
+  assert.equal(isLabelAlreadyAbsentError({ stdout: JSON.stringify({ message: 'Not Found' }) }), true,
+    'generic API Not Found means the GitHub resource is already gone');
   // Negatives — genuine failures must NOT be swallowed as already-absent.
   assert.equal(isLabelAlreadyAbsentError({ stderr: 'HTTP 500 internal server error' }), false);
   assert.equal(isLabelAlreadyAbsentError({ message: 'connection reset by peer' }), false);

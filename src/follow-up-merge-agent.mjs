@@ -114,7 +114,7 @@ import {
   formatExecFailure,
   isUnsupportedHqPriorityFlagError,
   isTransientHqDispatchError,
-  isLabelAlreadyAbsentError,
+  labelMutationErrorDetail, isLabelAlreadyAbsentError,
   sleep, execHqDispatchCancel, detectAgentOsPresence,
 } from './merge-agent-hq-exec.mjs';
 
@@ -2093,7 +2093,7 @@ async function cancelMergeAgentDispatchOnMerge({
       }
       result.labelRemoved = true;
     } catch (err) {
-      result.labelRemovalError = typeof err === 'string' ? err : ([err?.message, err?.stderr, err?.stdout].filter(Boolean).join('\n') || String(err));
+      result.labelRemovalError = labelMutationErrorDetail(err);
       // Already-absent label → cleanup done, not retryable (see classifier docs).
       if (isLabelAlreadyAbsentError(err)) {
         result.labelRemoved = true;

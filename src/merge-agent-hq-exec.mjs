@@ -90,7 +90,9 @@ function isLabelAlreadyAbsentError(err) {
     return false;
   }
   return (
-    (/\bHTTP 422\b/i.test(detail) && /\b(label|pull request|issue)\b/i.test(detail))
+    /\bHTTP 404\b/i.test(detail)
+    || /\bnot found\b/i.test(detail)
+    || (/\bHTTP 422\b/i.test(detail) && /\b(label|pull request|issue)\b/i.test(detail))
     || /\b(label|pull request|issue)\b[^\n]{0,160}\b(not found|does not exist)\b/i.test(detail)
     || /\b(not found|does not exist)\b[^\n]{0,160}\b(label|pull request|issue)\b/i.test(detail)
     || /'[^'\n]+'\s+\b(not found|does not exist)\b/i.test(detail)
@@ -260,6 +262,7 @@ export {
   errorDiagnosticLines,
   isUnsupportedHqPriorityFlagError,
   isTransientHqDispatchError,
+  labelMutationErrorDetail,
   isLabelAlreadyAbsentError,
   sleep,
   execHqDispatchCancel,

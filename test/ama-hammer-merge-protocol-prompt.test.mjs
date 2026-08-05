@@ -147,3 +147,29 @@ test('terminal-remediation audit is written under the merge lease at the settled
     /terminal-remediation audit must be written while holding the merge lease/,
   );
 });
+
+test('hammer prompt reads the entitled hammer token from HAMMER_LACEY_GH_TOKEN (agent-os#4762 rename)', () => {
+  // agent-os#4762 gave the-hammer-lacey entitlement a DISTINCT gh_token_var
+  // (HAMMER_LACEY_GH_TOKEN) to stop the hammer inheriting the merge-agent's
+  // MERGE_AGENT_GH_TOKEN identity. The worker-pool (acpx-codex.sh) exports the
+  // entitled token under that var + ambient GH_TOKEN, and NOT under
+  // MERGE_AGENT_GH_TOKEN. This prompt must resolve the audit-comment identity
+  // token from the dedicated var (legacy fallback only), or the terminal audit
+  // hard-blocks on every close (2026-08-04 merge-pipeline stall on #4874).
+  assert.match(
+    HAMMER_PROMPT,
+    /HAM_GH_TOKEN="\$\{HAMMER_LACEY_GH_TOKEN:-\$\{MERGE_AGENT_GH_TOKEN:-\}\}"/,
+  );
+  // The audit-comment gh calls + presence guard use the resolved HAM_GH_TOKEN,
+  // never a bare MERGE_AGENT_GH_TOKEN (which is absent in the hammer env).
+  assert.doesNotMatch(HAMMER_PROMPT, /GH_TOKEN="\$MERGE_AGENT_GH_TOKEN"/);
+  assert.doesNotMatch(HAMMER_PROMPT, /\[ -z "\$\{MERGE_AGENT_GH_TOKEN:-\}" \]/);
+  assert.match(HAMMER_PROMPT, /if \[ -z "\$\{HAM_GH_TOKEN:-\}" \]; then/);
+  for (const use of HAMMER_PROMPT.match(/GH_TOKEN="\$HAM_GH_TOKEN" gh /g) || []) {
+    assert.ok(use, 'audit-comment gh calls must use the resolved HAM_GH_TOKEN');
+  }
+  assert.ok(
+    (HAMMER_PROMPT.match(/GH_TOKEN="\$HAM_GH_TOKEN" gh /g) || []).length >= 3,
+    'all three audit-comment gh calls (lookup, PATCH, comment) must use HAM_GH_TOKEN',
+  );
+});

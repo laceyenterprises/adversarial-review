@@ -553,8 +553,8 @@ merging, exactly as for any parallel-phase validation.
 Post the PR audit comment. It must list every final finding, whether it was
 blocking or non-blocking, and the file paths changed for that finding. The
 comment is HAM-authored terminal-remediation output: post it with the entitled
-hammer GitHub token from `MERGE_AGENT_GH_TOKEN`, not an ambient `GH_TOKEN` or
-`GITHUB_TOKEN`.
+hammer GitHub token from `HAMMER_LACEY_GH_TOKEN` (legacy fallback
+`MERGE_AGENT_GH_TOKEN`), not an ambient `GH_TOKEN` or `GITHUB_TOKEN`.
 
 ```bash
 # agent-os#4090: the terminal-remediation audit is written HERE — under the
@@ -649,8 +649,17 @@ HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Hea
   "$HAM_AUDIT_REMEDIATED_TOTAL" \
   "$HAM_AUDIT_REMEDIATED_BLOCKING" \
   "$HAM_AUDIT_REMEDIATED_NON_BLOCKING")
+# The worker-pool exports the hammer's entitled token as HAMMER_LACEY_GH_TOKEN
+# (entitlement the-hammer-lacey). agent-os#4762 split it from the merge-agent's
+# MERGE_AGENT_GH_TOKEN so the hammer stops inheriting the merge-agent[bot]
+# identity (that collision failed hammer spawn with auth-identity-mismatch).
+# Prefer the dedicated var; fall back to MERGE_AGENT_GH_TOKEN only for
+# pre-rename / rolled-back hosts. The downstream identity check still verifies
+# the resolved login is the-hammer-lacey[bot], so a stale fallback fails loudly
+# rather than silently posting as the wrong bot.
+HAM_GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}"
 ham_existing_terminal_audit_comment_id() {
-  HAM_AUDIT_COMMENTS_JSON=$(GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh api \
+  HAM_AUDIT_COMMENTS_JSON=$(GH_TOKEN="$HAM_GH_TOKEN" gh api \
     --paginate \
     "repos/<<REPO>>/issues/<<PR_NUMBER>>/comments" \
     -q '.[] | {id: .id, body: .body}' 2> "$HAM_AUDIT_COMMENT_LOOKUP_STDERR") || return 1
@@ -664,8 +673,8 @@ ham_existing_terminal_audit_comment_id() {
       'select((.body // "") | contains($marker)) | .id' |
     head -n 1
 }
-if [ -z "${MERGE_AGENT_GH_TOKEN:-}" ]; then
-  echo "HAM hard-blocker: MERGE_AGENT_GH_TOKEN is required for hammer audit comment identity" >&2
+if [ -z "${HAM_GH_TOKEN:-}" ]; then
+  echo "HAM hard-blocker: no entitled hammer token (HAMMER_LACEY_GH_TOKEN, or legacy MERGE_AGENT_GH_TOKEN) present for hammer audit comment identity" >&2
   ham_audit_cleanup_tmp_files
   exit 1
 fi
@@ -685,7 +694,7 @@ for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
     # REFRESH it in place (new head trailer / findings) instead of skipping or
     # duplicating, so the single audit tracks the merged head and a hammer's
     # rebases never read as several hammers (agent-os#4090).
-    if GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh api --method PATCH \
+    if GH_TOKEN="$HAM_GH_TOKEN" gh api --method PATCH \
       "repos/<<REPO>>/issues/comments/$HAM_EXISTING_AUDIT_COMMENT_ID" \
       -f body="$HAM_AUDIT_COMMENT_BODY" > /dev/null 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
       HAM_AUDIT_COMMENT_POSTED=1
@@ -704,7 +713,7 @@ for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
     sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
     continue
   fi
-  if GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh pr comment <<PR_URL>> --body "$HAM_AUDIT_COMMENT_BODY" 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
+  if GH_TOKEN="$HAM_GH_TOKEN" gh pr comment <<PR_URL>> --body "$HAM_AUDIT_COMMENT_BODY" 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
     HAM_AUDIT_COMMENT_POSTED=1
     break
   fi

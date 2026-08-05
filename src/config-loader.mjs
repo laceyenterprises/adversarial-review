@@ -1305,6 +1305,11 @@ function schemaV1() {
             __type: TYPE_STRING,
             __default: 'ai.laceyenterprises',
           },
+          install_mode: {
+            __type: TYPE_STRING,
+            __default: 'user-agent',
+            __enum: ['system-daemon', 'user-agent'],
+          },
         },
       },
       linear: {

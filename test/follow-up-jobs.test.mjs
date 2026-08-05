@@ -1235,6 +1235,18 @@ test('resolveRoundBudgetForJob maps each supported risk class to the expected ro
   }
 });
 
+test('resolveRoundBudgetForJob caps a bump-elevated persisted budget at the hard ceiling (#4921)', () => {
+  // Repeated operator --bump-budget / --exact-head-now retriggers could push a
+  // persisted maxRounds arbitrarily high, so the budget never exhausted and the
+  // lenient-final-round + gate-goes-green exit never fired. The hard ceiling
+  // guarantees the exhaust-exit always eventually fires.
+  const resolution = resolveRoundBudgetForJob({
+    riskClass: 'high',
+    remediationPlan: { maxRounds: 12 },
+  }, { rootDir: '/tmp', preferPersisted: true });
+  assert.equal(resolution.roundBudget, 6);
+});
+
 test('resolveRoundBudgetForJob falls back to medium for spec-less jobs', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const resolution = resolveRoundBudgetForJob({

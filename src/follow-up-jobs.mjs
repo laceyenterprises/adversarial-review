@@ -48,6 +48,12 @@ const FOLLOW_UP_JOB_SCHEMA_VERSION = 2;
 // persisted value via the per-job `remediationPlan.maxRounds` field;
 // only NEW jobs derive their budget from this table.
 const LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS = 6;
+// Absolute ceiling on the remediation round budget, regardless of per-job
+// elevation or repeated operator --bump-budget / --exact-head-now retriggers.
+// Without it, a budget that keeps getting bumped never reaches the exhausted
+// state that fires the lenient final round + gate-goes-green exit, so a
+// non-converging PR stalls open forever (#4921). Matches the legacy uniform cap.
+const HARD_MAX_REMEDIATION_ROUNDS = LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS;
 const DEFAULT_RISK_CLASS = 'medium';
 // Convergence loop budgets, post-2026-05-06:
 // Higher-risk PRs get more bot rounds before operator escalation,
@@ -182,9 +188,10 @@ function writeFollowUpJob(jobPath, job) {
 }
 
 function normalizeMaxRounds(maxRounds, { fallback = LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS } = {}) {
-  return Number.isInteger(maxRounds) && maxRounds > 0
-    ? maxRounds
-    : fallback;
+  const value = Number.isInteger(maxRounds) && maxRounds > 0 ? maxRounds : fallback;
+  // Cap at the absolute ceiling so no bump/elevation can push the budget past the
+  // point where it can still exhaust and fire the non-convergence exit (#4921).
+  return Math.min(value, HARD_MAX_REMEDIATION_ROUNDS);
 }
 
 function normalizeRiskClass(riskClass, { fallback = null } = {}) {
@@ -314,7 +321,9 @@ function resolveRoundBudgetForJob(job, { rootDir, preferPersisted = true } = {})
   if (preferPersisted && Number.isInteger(persistedRoundBudget) && persistedRoundBudget > 0) {
     return buildRoundBudgetResolution({
       riskClass: persistedRiskClass || DEFAULT_RISK_CLASS,
-      roundBudget: persistedRoundBudget,
+      // Cap the persisted (possibly bump-elevated) budget at the hard ceiling so
+      // repeated retriggers can't keep the exhaust-exit from ever firing (#4921).
+      roundBudget: Math.min(persistedRoundBudget, HARD_MAX_REMEDIATION_ROUNDS),
       source: 'job-persisted-maxRounds',
     });
   }

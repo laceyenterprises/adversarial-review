@@ -114,6 +114,30 @@ test('parseArgs defaults --bump-budget to 1', async () => {
   assert.equal(values.bumpBudget, 1);
 });
 
+test('parseArgs: --exact-head-now defaults to NO budget bump (#4921)', async () => {
+  // An exact-head-now retrigger is an operator refresh of the CURRENT head, not
+  // a new remediation round — it must not inflate maxRounds, or the budget never
+  // exhausts and a non-converging PR stalls open forever.
+  const { values } = parseArgs([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '4921',
+    '--reason', 'review this exact head now',
+    '--exact-head-now',
+  ]);
+  assert.equal(values.bumpBudget, 0);
+});
+
+test('parseArgs: --exact-head-now with explicit --bump-budget still bumps', async () => {
+  const { values } = parseArgs([
+    '--repo', 'laceyenterprises/agent-os',
+    '--pr', '4921',
+    '--reason', 'review this head now and grant one more round',
+    '--exact-head-now',
+    '--bump-budget', '2',
+  ]);
+  assert.equal(values.bumpBudget, 2);
+});
+
 test('parseArgs accepts audit-root-dir and allow-failed-reset', async () => {
   const { values } = parseArgs([
     '--repo', 'laceyenterprises/agent-os',

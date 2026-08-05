@@ -25,6 +25,80 @@ if [[ -f "$REPO_ROOT/modules/worker-pool/lib/agent-os-config-loader.sh" ]]; then
   eval "$(agent_os_config_export)"
 fi
 
+# Headless daemon attribution. A system launchd daemon has no GUI harness
+# session, but hq mutating verbs still require an authenticated actor label for
+# audit/reconciliation. Pin a stable service identity before any subprocess can
+# invoke hq.
+export HQ_OPERATOR_PRINCIPAL="${HQ_OPERATOR_PRINCIPAL:-operator:adversarial-watcher}"
+export HQ_PARENT_SESSION="${HQ_PARENT_SESSION:-session:adversarial-review:watcher}"
+
+codex_auth_path_mode() {
+  local auth_path="$1"
+  local auth_mode
+  auth_mode="$(stat -L -f '%Lp' "$auth_path" 2>/dev/null || true)"
+  if [[ "$auth_mode" =~ ^[0-9]+$ ]]; then
+    echo "$auth_mode"
+    return 0
+  fi
+  stat -L -c '%a' "$auth_path" 2>/dev/null || true
+}
+
+validate_codex_auth_path() {
+  local auth_path="$1"
+  local auth_mode
+  if [[ -z "$auth_path" ]]; then
+    echo "[adversarial-watcher] ERROR: CODEX_AUTH_PATH resolved empty; set CODEX_AUTH_PATH or HOME for the daemon user." >&2
+    return 1
+  fi
+  if [[ ! -e "$auth_path" ]]; then
+    echo "[adversarial-watcher] ERROR: missing Codex credentials at CODEX_AUTH_PATH='$auth_path'. Provision this daemon-owned auth.json before starting; refusing to copy GUI-user credentials." >&2
+    return 1
+  fi
+  if [[ ! -f "$auth_path" ]]; then
+    echo "[adversarial-watcher] ERROR: CODEX_AUTH_PATH='$auth_path' is not a regular file; refusing to start auth-broken daemon." >&2
+    return 1
+  fi
+  if [[ ! -O "$auth_path" ]]; then
+    echo "[adversarial-watcher] ERROR: CODEX_AUTH_PATH='$auth_path' is not owned by daemon user $(id -un); refusing to use cross-user credentials." >&2
+    return 1
+  fi
+  if [[ ! -r "$auth_path" ]]; then
+    echo "[adversarial-watcher] ERROR: CODEX_AUTH_PATH='$auth_path' is not readable by daemon user $(id -un); refusing to start auth-broken daemon." >&2
+    return 1
+  fi
+  auth_mode="$(codex_auth_path_mode "$auth_path")"
+  if [[ -z "$auth_mode" ]]; then
+    echo "[adversarial-watcher] ERROR: unable to stat CODEX_AUTH_PATH='$auth_path' permissions; refusing to start." >&2
+    return 1
+  fi
+  if (( ( 8#$auth_mode & 8#077 ) != 0 )); then
+    echo "[adversarial-watcher] WARN: CODEX_AUTH_PATH='$auth_path' mode $auth_mode is too broad; tightening to 0600 before start." >&2
+    if ! chmod 0600 "$auth_path" 2>/dev/null; then
+      echo "[adversarial-watcher] ERROR: failed to tighten CODEX_AUTH_PATH='$auth_path' permissions to 0600." >&2
+      return 1
+    fi
+    auth_mode="$(codex_auth_path_mode "$auth_path")"
+    if [[ -z "$auth_mode" ]] || (( ( 8#$auth_mode & 8#077 ) != 0 )); then
+      echo "[adversarial-watcher] ERROR: CODEX_AUTH_PATH='$auth_path' permissions remain too broad after chmod; refusing to start." >&2
+      return 1
+    fi
+    echo "[adversarial-watcher] recovered CODEX_AUTH_PATH='$auth_path' permissions to mode $auth_mode." >&2
+  fi
+}
+
+CODEX_AUTH_PATH="${CODEX_AUTH_PATH:-${ADVERSARIAL_WATCHER_CODEX_AUTH_PATH:-}}"
+if [[ -z "$CODEX_AUTH_PATH" && -n "${CODEX_HOME:-}" ]]; then
+  CODEX_AUTH_PATH="${CODEX_HOME%/}/auth.json"
+elif [[ -z "$CODEX_AUTH_PATH" && -n "${HOME:-}" ]]; then
+  CODEX_AUTH_PATH="${HOME%/}/.codex/auth.json"
+fi
+export CODEX_AUTH_PATH
+if ! validate_codex_auth_path "$CODEX_AUTH_PATH"; then
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; provision daemon-owned Codex credentials and bootout the agent to recover sooner." >&2
+  sleep 3600
+  exit 1
+fi
+
 # LHA head-attestation HMAC key: reviewers sign live-head attestations at their
 # HCP closeout via `hq attest sign`, which requires AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1
 # (>=32 bytes, read directly as the value by cwp_dispatch/hcp_worker_tokens.py).
@@ -36,12 +110,12 @@ _LHA_HMAC_KEY_FILE="${AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE:-$REPO_ROOT/.secre
 lha_hmac_key_mode() {
   local key_file="$1"
   local key_mode
-  key_mode="$(stat -f '%Lp' "$key_file" 2>/dev/null || true)"
-  if [[ "$key_mode" == <-> ]]; then
+  key_mode="$(stat -L -f '%Lp' "$key_file" 2>/dev/null || true)"
+  if [[ "$key_mode" =~ ^[0-9]+$ ]]; then
     echo "$key_mode"
     return 0
   fi
-  stat -c '%a' "$key_file" 2>/dev/null || true
+  stat -L -c '%a' "$key_file" 2>/dev/null || true
 }
 
 lha_hmac_key_is_private() {
@@ -171,72 +245,60 @@ OP_SERVICE_ACCOUNT_TOKEN=$(env ADV_OP_TOKEN_TAG="adversarial-watcher" /opt/homeb
   }
 export OP_SERVICE_ACCOUNT_TOKEN
 
-resolve_gh_bin() {
-  local configured_gh_bin gh_bin
-  configured_gh_bin="${ADVERSARIAL_REVIEW_GH_CLI:-${GH_BIN:-}}"
-  if [[ -n "$configured_gh_bin" ]]; then
-    if [[ -x "$configured_gh_bin" ]]; then
-      printf '%s' "$configured_gh_bin"
-      return 0
-    fi
-    echo "[adversarial-watcher] WARN: configured gh CLI '$configured_gh_bin' is not executable; falling back to PATH/signed-release discovery." >&2
-  fi
-  if gh_bin="$(command -v gh 2>/dev/null)" && [[ -n "$gh_bin" && -x "$gh_bin" ]]; then
-    printf '%s' "$gh_bin"
-    return 0
-  fi
-  for gh_bin in /usr/local/bin/gh /opt/homebrew/bin/gh; do
-    if [[ -x "$gh_bin" ]]; then
-      printf '%s' "$gh_bin"
-      return 0
-    fi
-  done
-  return 1
-}
-
-# Resolve GitHub token from gh CLI keychain.
-# Failure here MUST sleep before exit. Without the sleep, launchd's
-# KeepAlive=true + ThrottleInterval=30 turns a missing `gh auth token`
-# (expired credential, locked keychain window, gh upgrade transient,
-# etc.) into a 30-second respawn storm. Same fail-once shape as the
-# 1Password sleep guards added in #139 (op-read failures); the gh path
-# was missed in that pass and produces an identical respawn-storm shape.
-GH_BIN="$(resolve_gh_bin || true)"
 # Prefer a broker-backed GitHub App installation token for the watcher's OWN
 # GitHub calls (poll-loop octokit + AMA-eligibility `gh` calls). The App token
 # has its own ~15000/hr budget, isolated from the operator PAT — the prior
-# `gh auth token` path shared clio-airlock's single 5000/hr REST budget, which
-# exhausts under PR surge ("API rate limit already exceeded") and stalls review.
-# Default-ON via the flag; FAIL-SAFE: fall back to the gh keychain PAT if the
-# broker is disabled/unavailable, so the watcher always starts. Per-tick refresh
-# (refreshWatcherGithubToken) keeps both GITHUB_TOKEN and GH_TOKEN fresh.
+# keychain PAT path shared clio-airlock's single 5000/hr REST budget, which
+# exhausts under PR surge and cannot run from a no-GUI system daemon. Default-ON
+# via the flag; fail closed if the broker/file path cannot produce a token.
+# Per-tick refresh (refreshWatcherGithubToken) keeps both GITHUB_TOKEN and
+# GH_TOKEN fresh.
 : "${WATCHER_GH_AUTH_VIA_BROKER:=true}"
 export WATCHER_GH_AUTH_VIA_BROKER
 WATCHER_GH_BROKER_ROLE="${WATCHER_GH_BROKER_ROLE:-merge-agent}"
 export WATCHER_GH_BROKER_ROLE
-export GITHUB_TOKEN=""
 # Gate ONLY on our own flag (not a per-reviewer-role flag) and call the broker
 # resolver directly; resolve_reviewer_token_via_broker validates the provider +
-# secret itself and returns non-zero on any problem, so the fail-safe `elif`
-# below falls back to the gh keychain PAT.
-if [[ "${WATCHER_GH_AUTH_VIA_BROKER}" == "true" ]] \
-  && resolve_reviewer_token_via_broker GITHUB_TOKEN "${WATCHER_GH_BROKER_ROLE}"; then
-  export GH_TOKEN="$GITHUB_TOKEN"
-  echo "[adversarial-watcher] GITHUB_TOKEN resolved via OAuth broker (role=${WATCHER_GH_BROKER_ROLE} App installation token; isolated rate-limit budget)" >&2
-elif [[ -n "$GH_BIN" ]]; then
-  export GITHUB_TOKEN="$("$GH_BIN" auth token 2>/dev/null || true)"
-  export GH_TOKEN="$GITHUB_TOKEN"
-  echo "[adversarial-watcher] GITHUB_TOKEN from gh keychain PAT (broker role ${WATCHER_GH_BROKER_ROLE} disabled/unavailable — shares operator 5000/hr, rate-limit-prone under surge)" >&2
+# secret itself and returns non-zero on any problem.
+if [[ "${WATCHER_GH_AUTH_VIA_BROKER}" == "true" ]]; then
+  export GITHUB_TOKEN=""
+  WATCHER_GH_BROKER_FAILURE_CLASS=""
+  if resolve_reviewer_token_via_broker GITHUB_TOKEN "${WATCHER_GH_BROKER_ROLE}"; then
+    export GH_TOKEN="$GITHUB_TOKEN"
+    echo "[adversarial-watcher] GITHUB_TOKEN resolved via OAuth broker (role=${WATCHER_GH_BROKER_ROLE} App installation token; isolated rate-limit budget)" >&2
+  else
+    WATCHER_GH_BROKER_FAILURE_CLASS="${REVIEWER_BROKER_FAILURE_CLASS:-permanent}"
+  fi
+elif [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  export GH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
+  echo "[adversarial-watcher] GITHUB_TOKEN supplied by environment because WATCHER_GH_AUTH_VIA_BROKER=false" >&2
 fi
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
-  echo "[adversarial-watcher] ERROR: could not resolve GITHUB_TOKEN from gh keychain via ${GH_BIN:-gh}" >&2
-  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the gh credential and bootout the agent to recover sooner." >&2
+  if [[ "${WATCHER_GH_AUTH_VIA_BROKER}" == "true" && "${WATCHER_GH_BROKER_FAILURE_CLASS:-}" == "transient" ]]; then
+    WATCHER_GH_TRANSIENT_RETRY_SECONDS="${WATCHER_GH_TRANSIENT_RETRY_SECONDS:-60}"
+    if ! [[ "$WATCHER_GH_TRANSIENT_RETRY_SECONDS" =~ ^[0-9]{1,4}$ ]]; then
+      WATCHER_GH_TRANSIENT_RETRY_SECONDS=60
+    else
+      WATCHER_GH_TRANSIENT_RETRY_SECONDS=$((10#$WATCHER_GH_TRANSIENT_RETRY_SECONDS))
+    fi
+    if (( WATCHER_GH_TRANSIENT_RETRY_SECONDS < 1 )); then
+      WATCHER_GH_TRANSIENT_RETRY_SECONDS=1
+    elif (( WATCHER_GH_TRANSIENT_RETRY_SECONDS > 300 )); then
+      WATCHER_GH_TRANSIENT_RETRY_SECONDS=300
+    fi
+    echo "[adversarial-watcher] transient broker failure; retrying through launchd after ${WATCHER_GH_TRANSIENT_RETRY_SECONDS}s." >&2
+    sleep "$WATCHER_GH_TRANSIENT_RETRY_SECONDS"
+    exit 75
+  fi
+  if [[ "${WATCHER_GH_AUTH_VIA_BROKER}" == "true" ]]; then
+    echo "[adversarial-watcher] ERROR: could not resolve GITHUB_TOKEN via OAuth broker role ${WATCHER_GH_BROKER_ROLE}; refusing GUI keychain fallback." >&2
+  else
+    echo "[adversarial-watcher] ERROR: WATCHER_GH_AUTH_VIA_BROKER=false but no GITHUB_TOKEN/GH_TOKEN was supplied by daemon env; refusing GUI keychain fallback." >&2
+  fi
+  echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the broker/file token source and bootout the agent to recover sooner." >&2
   sleep 3600
   exit 1
 fi
-
-# Force Codex CLI to use the shared OAuth auth file rather than airlock's default ~/.codex/auth.json
-export CODEX_AUTH_PATH=/Users/placey/.codex/auth.json  # cfg-allowlist(account-placey): oss-readiness-apply-reviewed
 
 ALERT_TO_OP_REF="${ADVERSARIAL_REVIEW_ALERT_TO_OP_REF:-${ALERT_TO_OP_REF:-}}"
 ALERT_TO_REF_LABEL="${ALERT_TO_OP_REF:-ADVERSARIAL_REVIEW_ALERT_TO_OP_REF/ALERT_TO_OP_REF}"

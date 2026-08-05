@@ -1183,6 +1183,42 @@ test('readFollowUpJob normalizes legacy v1 jobs into bounded remediation shape',
   assert.equal(normalized.remediationReply.path, null);
 });
 
+test('readFollowUpJob preserves elevated schema v2 remediation budgets', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const jobPath = path.join(rootDir, 'elevated-budget.json');
+  writeFileSync(jobPath, `${JSON.stringify({
+    schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
+    kind: 'adversarial-review-follow-up',
+    status: 'pending',
+    jobId: 'elevated-budget-job',
+    createdAt: '2026-04-21T08:00:00.000Z',
+    repo: 'laceyenterprises/clio',
+    prNumber: 7,
+    reviewerModel: 'claude',
+    riskClass: 'critical',
+    critical: true,
+    reviewSummary: 'Critical job',
+    reviewBody: 'Critical body',
+    recommendedFollowUpAction: {
+      type: 'address-adversarial-review',
+      priority: 'high',
+      summary: 'Critical',
+      maxRounds: 12,
+    },
+    remediationPlan: {
+      mode: 'bounded-manual-rounds',
+      maxRounds: 12,
+      currentRound: 0,
+      rounds: [],
+    },
+  }, null, 2)}\n`, 'utf8');
+
+  const normalized = readFollowUpJob(jobPath);
+  assert.equal(normalized.riskClass, 'critical');
+  assert.equal(normalized.remediationPlan.maxRounds, 12);
+  assert.equal(normalized.recommendedFollowUpAction.maxRounds, 12);
+});
+
 test('readFollowUpJob replaces stale historical critical priority with structured clean truth', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const jobPath = path.join(rootDir, 'legacy-clean.json');
@@ -1235,16 +1271,15 @@ test('resolveRoundBudgetForJob maps each supported risk class to the expected ro
   }
 });
 
-test('resolveRoundBudgetForJob caps a bump-elevated persisted budget at the hard ceiling (#4921)', () => {
-  // Repeated operator --bump-budget / --exact-head-now retriggers could push a
-  // persisted maxRounds arbitrarily high, so the budget never exhausted and the
-  // lenient-final-round + gate-goes-green exit never fired. The hard ceiling
-  // guarantees the exhaust-exit always eventually fires.
+test('resolveRoundBudgetForJob preserves bump-elevated persisted budgets above the legacy default', () => {
+  // Explicit operator bumps and higher-risk native budgets must not be truncated
+  // to the historical uniform default. The #4921 retrigger inflation is handled
+  // by making --exact-head-now default to no implicit bump.
   const resolution = resolveRoundBudgetForJob({
     riskClass: 'high',
     remediationPlan: { maxRounds: 12 },
   }, { rootDir: '/tmp', preferPersisted: true });
-  assert.equal(resolution.roundBudget, 6);
+  assert.equal(resolution.roundBudget, 12);
 });
 
 test('resolveRoundBudgetForJob falls back to medium for spec-less jobs', () => {

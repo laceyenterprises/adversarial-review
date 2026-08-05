@@ -35,12 +35,12 @@ export HQ_PARENT_SESSION="${HQ_PARENT_SESSION:-session:adversarial-review:watche
 codex_auth_path_mode() {
   local auth_path="$1"
   local auth_mode
-  auth_mode="$(stat -f '%Lp' "$auth_path" 2>/dev/null || true)"
-  if [[ "$auth_mode" == <-> ]]; then
+  auth_mode="$(stat -L -f '%Lp' "$auth_path" 2>/dev/null || true)"
+  if [[ "$auth_mode" =~ ^[0-9]+$ ]]; then
     echo "$auth_mode"
     return 0
   fi
-  stat -c '%a' "$auth_path" 2>/dev/null || true
+  stat -L -c '%a' "$auth_path" 2>/dev/null || true
 }
 
 validate_codex_auth_path() {
@@ -110,12 +110,12 @@ _LHA_HMAC_KEY_FILE="${AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE:-$REPO_ROOT/.secre
 lha_hmac_key_mode() {
   local key_file="$1"
   local key_mode
-  key_mode="$(stat -f '%Lp' "$key_file" 2>/dev/null || true)"
-  if [[ "$key_mode" == <-> ]]; then
+  key_mode="$(stat -L -f '%Lp' "$key_file" 2>/dev/null || true)"
+  if [[ "$key_mode" =~ ^[0-9]+$ ]]; then
     echo "$key_mode"
     return 0
   fi
-  stat -c '%a' "$key_file" 2>/dev/null || true
+  stat -L -c '%a' "$key_file" 2>/dev/null || true
 }
 
 lha_hmac_key_is_private() {
@@ -276,7 +276,7 @@ fi
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   if [[ "${WATCHER_GH_AUTH_VIA_BROKER}" == "true" && "${WATCHER_GH_BROKER_FAILURE_CLASS:-}" == "transient" ]]; then
     WATCHER_GH_TRANSIENT_RETRY_SECONDS="${WATCHER_GH_TRANSIENT_RETRY_SECONDS:-60}"
-    if ! [[ "$WATCHER_GH_TRANSIENT_RETRY_SECONDS" == <-> ]]; then
+    if ! [[ "$WATCHER_GH_TRANSIENT_RETRY_SECONDS" =~ ^[0-9]+$ ]]; then
       WATCHER_GH_TRANSIENT_RETRY_SECONDS=60
     elif (( WATCHER_GH_TRANSIENT_RETRY_SECONDS < 1 )); then
       WATCHER_GH_TRANSIENT_RETRY_SECONDS=1
@@ -287,7 +287,11 @@ if [[ -z "${GITHUB_TOKEN:-}" ]]; then
     sleep "$WATCHER_GH_TRANSIENT_RETRY_SECONDS"
     exit 75
   fi
-  echo "[adversarial-watcher] ERROR: could not resolve GITHUB_TOKEN via OAuth broker role ${WATCHER_GH_BROKER_ROLE}; refusing GUI keychain fallback." >&2
+  if [[ "${WATCHER_GH_AUTH_VIA_BROKER}" == "true" ]]; then
+    echo "[adversarial-watcher] ERROR: could not resolve GITHUB_TOKEN via OAuth broker role ${WATCHER_GH_BROKER_ROLE}; refusing GUI keychain fallback." >&2
+  else
+    echo "[adversarial-watcher] ERROR: WATCHER_GH_AUTH_VIA_BROKER=false but no GITHUB_TOKEN/GH_TOKEN was supplied by daemon env; refusing GUI keychain fallback." >&2
+  fi
   echo "[adversarial-watcher] sleeping 3600s to suppress launchd respawn storm; fix the broker/file token source and bootout the agent to recover sooner." >&2
   sleep 3600
   exit 1

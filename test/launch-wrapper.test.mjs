@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -81,8 +81,15 @@ async function runMaintainerWatcherLauncher(scriptName, {
   const defaultCodexAuthPath = join(fakeHome, '.codex', 'auth.json');
   if (codexAuthMode !== 'missing') {
     mkdirSync(dirname(defaultCodexAuthPath), { recursive: true });
-    writeFileSync(defaultCodexAuthPath, '{"tokens":true}\n', 'utf8');
-    chmodSync(defaultCodexAuthPath, codexAuthMode === 'broad' ? 0o644 : 0o600);
+    if (codexAuthMode === 'symlink-broad-target') {
+      const targetPath = join(root, 'daemon-auth-target.json');
+      writeFileSync(targetPath, '{"tokens":true}\n', 'utf8');
+      chmodSync(targetPath, 0o644);
+      symlinkSync(targetPath, defaultCodexAuthPath);
+    } else {
+      writeFileSync(defaultCodexAuthPath, '{"tokens":true}\n', 'utf8');
+      chmodSync(defaultCodexAuthPath, codexAuthMode === 'broad' ? 0o644 : 0o600);
+    }
   }
   const hmacKeyFile = extraEnv.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE
     ? resolve(root, extraEnv.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE)
@@ -364,6 +371,9 @@ test('launcher scripts resolve gh dynamically when they still use GitHub token k
   assert.doesNotMatch(airlockWatcher, /\bgh auth token\b/);
   assert.doesNotMatch(airlockWatcher, /\$\(("\$GH_BIN"|\$GH_BIN) auth token/);
   assert.doesNotMatch(airlockWatcher, /\/Users\/placey\/\.codex\/auth\.json/);
+  assert.doesNotMatch(airlockWatcher, /<->/);
+  assert.match(airlockWatcher, /stat -L -f '%Lp'/);
+  assert.match(airlockWatcher, /stat -L -c '%a'/);
 });
 
 test('watcher launchers require explicit opt-in before running without ALERT_TO', () => {
@@ -467,6 +477,20 @@ test('airlock watcher launcher auto-tightens owned broad Codex auth before start
   assert.match(result.stderr, /mode 644 is too broad; tightening to 0600 before start/);
   assert.match(result.stderr, /recovered CODEX_AUTH_PATH=.*permissions to mode 600/);
   assert.notEqual(result.stdout, '', 'watcher.mjs must start after permission recovery');
+  assert.equal(result.ghAuthLog, '');
+});
+
+test('airlock watcher launcher validates symlinked Codex auth target permissions', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    codexAuthMode: 'symlink-broad-target',
+    extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
+  });
+  assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
+  assert.match(result.stderr, /mode 644 is too broad; tightening to 0600 before start/);
+  assert.match(result.stderr, /recovered CODEX_AUTH_PATH=.*permissions to mode 600/);
+  assert.notEqual(result.stdout, '', 'watcher.mjs must start after symlink target permission recovery');
   assert.equal(result.ghAuthLog, '');
 });
 
@@ -697,6 +721,24 @@ test('maintainer watcher launcher preserves environment token when broker auth i
   assert.equal(payload.ghToken, 'env-token');
   assert.match(result.stderr, /GITHUB_TOKEN supplied by environment because WATCHER_GH_AUTH_VIA_BROKER=false/);
   assert.equal(result.sleepLog.trim(), '');
+});
+
+test('maintainer watcher launcher explains broker opt-out without env token', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    brokerMode: 'fail',
+    extraEnv: {
+      LINEAR_API_KEY: 'linear-test-token',
+      WATCHER_GH_AUTH_VIA_BROKER: 'false',
+    },
+  });
+  assert.equal(result.code, 1, `stderr:\n${result.stderr}`);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /WATCHER_GH_AUTH_VIA_BROKER=false but no GITHUB_TOKEN\/GH_TOKEN was supplied by daemon env/);
+  assert.doesNotMatch(result.stderr, /OAuth broker role merge-agent/);
+  assert.equal(result.ghAuthLog, '');
+  assert.equal(result.sleepLog.trim(), '3600');
 });
 
 test('maintainer watcher launcher retries transient broker startup failures without a one-hour outage', {

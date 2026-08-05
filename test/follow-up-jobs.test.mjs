@@ -1185,38 +1185,42 @@ test('readFollowUpJob normalizes legacy v1 jobs into bounded remediation shape',
 
 test('readFollowUpJob preserves elevated schema v2 remediation budgets', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
-  const jobPath = path.join(rootDir, 'elevated-budget.json');
-  writeFileSync(jobPath, `${JSON.stringify({
-    schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
-    kind: 'adversarial-review-follow-up',
-    status: 'pending',
-    jobId: 'elevated-budget-job',
-    createdAt: '2026-04-21T08:00:00.000Z',
-    repo: 'laceyenterprises/clio',
-    prNumber: 7,
-    reviewerModel: 'claude',
-    riskClass: 'critical',
-    critical: true,
-    reviewSummary: 'Critical job',
-    reviewBody: 'Critical body',
-    recommendedFollowUpAction: {
-      type: 'address-adversarial-review',
-      priority: 'high',
-      summary: 'Critical',
-      maxRounds: 12,
-    },
-    remediationPlan: {
-      mode: 'bounded-manual-rounds',
-      maxRounds: 12,
-      currentRound: 0,
-      rounds: [],
-    },
-  }, null, 2)}\n`, 'utf8');
+  try {
+    const jobPath = path.join(rootDir, 'elevated-budget.json');
+    writeFileSync(jobPath, `${JSON.stringify({
+      schemaVersion: FOLLOW_UP_JOB_SCHEMA_VERSION,
+      kind: 'adversarial-review-follow-up',
+      status: 'pending',
+      jobId: 'elevated-budget-job',
+      createdAt: '2026-04-21T08:00:00.000Z',
+      repo: 'laceyenterprises/clio',
+      prNumber: 7,
+      reviewerModel: 'claude',
+      riskClass: 'critical',
+      critical: true,
+      reviewSummary: 'Critical job',
+      reviewBody: 'Critical body',
+      recommendedFollowUpAction: {
+        type: 'address-adversarial-review',
+        priority: 'high',
+        summary: 'Critical',
+        maxRounds: 12,
+      },
+      remediationPlan: {
+        mode: 'bounded-manual-rounds',
+        maxRounds: 12,
+        currentRound: 0,
+        rounds: [],
+      },
+    }, null, 2)}\n`, 'utf8');
 
-  const normalized = readFollowUpJob(jobPath);
-  assert.equal(normalized.riskClass, 'critical');
-  assert.equal(normalized.remediationPlan.maxRounds, 12);
-  assert.equal(normalized.recommendedFollowUpAction.maxRounds, 12);
+    const normalized = readFollowUpJob(jobPath);
+    assert.equal(normalized.riskClass, 'critical');
+    assert.equal(normalized.remediationPlan.maxRounds, 12);
+    assert.equal(normalized.recommendedFollowUpAction.maxRounds, 12);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test('readFollowUpJob replaces stale historical critical priority with structured clean truth', () => {

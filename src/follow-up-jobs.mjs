@@ -182,8 +182,9 @@ function writeFollowUpJob(jobPath, job) {
 }
 
 function normalizeMaxRounds(maxRounds, { fallback = LEGACY_DEFAULT_MAX_REMEDIATION_ROUNDS } = {}) {
-  const value = Number.isInteger(maxRounds) && maxRounds > 0 ? maxRounds : fallback;
-  return value;
+  return Number.isInteger(maxRounds) && maxRounds > 0
+    ? maxRounds
+    : fallback;
 }
 
 function normalizeRiskClass(riskClass, { fallback = null } = {}) {

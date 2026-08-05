@@ -2093,7 +2093,7 @@ async function cancelMergeAgentDispatchOnMerge({
       }
       result.labelRemoved = true;
     } catch (err) {
-      result.labelRemovalError = err?.message || String(err);
+      result.labelRemovalError = typeof err === 'string' ? err : ([err?.message, err?.stderr, err?.stdout].filter(Boolean).join('\n') || String(err));
       // Already-absent label → cleanup done, not retryable (see classifier docs).
       if (isLabelAlreadyAbsentError(err)) {
         result.labelRemoved = true;

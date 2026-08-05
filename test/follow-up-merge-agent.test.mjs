@@ -6715,9 +6715,13 @@ test('isLabelAlreadyAbsentError classifies already-absent signals across message
     'plain gh error: not-found in message');
   assert.equal(isLabelAlreadyAbsentError({ message: 'GraphQL: Label does not exist' }), true,
     '"does not exist" phrasing');
+  assert.equal(isLabelAlreadyAbsentError("'merge-agent-dispatched' not found"), true,
+    'primitive string errors still classify when they are label-absence shaped');
   // Negatives — genuine failures must NOT be swallowed as already-absent.
   assert.equal(isLabelAlreadyAbsentError({ stderr: 'HTTP 500 internal server error' }), false);
   assert.equal(isLabelAlreadyAbsentError({ message: 'connection reset by peer' }), false);
+  assert.equal(isLabelAlreadyAbsentError({ stderr: 'sh: github-adapter: command not found' }), false);
+  assert.equal(isLabelAlreadyAbsentError({ stdout: 'config file not found' }), false);
   assert.equal(isLabelAlreadyAbsentError(null), false);
 });
 
@@ -6820,6 +6824,52 @@ test('cancelMergeAgentDispatchOnMerge: adapter reports the label already absent 
     'the adapter remove path must have been exercised');
   assert.ok(ghCalls.every(({ args }) => !args.includes('--remove-label')),
     'must NOT fall through to a gh --remove-label retry when the adapter says already-absent');
+});
+
+test('cancelMergeAgentDispatchOnMerge preserves stdout diagnostics for non-absent label removal failures', async () => {
+  const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, makeJob({ prNumber: 4871 }), {
+    dispatchedAt: '2026-08-04T12:00:00.000Z',
+    prompt: 'p',
+    dispatchId: 'disp_rate_limit',
+    launchRequestId: 'lrq_rate_limit',
+    trigger: null,
+  });
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  try {
+    const result = await cancelMergeAgentDispatchOnMerge({
+      rootDir,
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 4871,
+      hqPath: '/usr/local/bin/hq',
+      ghExecFileImpl: async () => {
+        const err = new Error('Command failed: gh pr edit 4871 --remove-label merge-agent-dispatched');
+        err.code = 1;
+        err.stdout = JSON.stringify({ ok: false, failureClass: 'rate-limited', message: 'secondary rate limit' });
+        err.stderr = 'HTTP 403';
+        throw err;
+      },
+      hqExecFileImpl: async () => ({ stdout: 'cancelled\n', stderr: '' }),
+      env: { PATH: '/usr/bin', AGENT_OS_GITHUB_ADAPTER_AUTO_DISCOVERY: 'false' },
+      now: '2026-08-04T13:00:00.000Z',
+    });
+
+    assert.equal(result.cancelled, true);
+    assert.equal(result.labelRemoved, false);
+    assert.equal(result.cleanupComplete, false);
+    assert.equal(result.retryable, true);
+    assert.match(result.labelRemovalError, /Command failed: gh pr edit 4871/);
+    assert.match(result.labelRemovalError, /HTTP 403/);
+    assert.match(result.labelRemovalError, /secondary rate limit/);
+    assert.ok(warnings.some((warning) => warning.includes('secondary rate limit')),
+      'warning log must include stdout diagnostic');
+  } finally {
+    console.warn = originalWarn;
+  }
 });
 
 test('cancelMergeAgentDispatchOnMerge keeps the label when cancel fails transiently', async () => {

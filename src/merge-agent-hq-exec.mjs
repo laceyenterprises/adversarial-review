@@ -75,11 +75,26 @@ function isUnsupportedHqPriorityFlagError(err) {
 // stderr, or the bare message — the github-adapter in particular exits non-zero
 // with the reason on STDOUT while `err.message` is only "Command failed: …", so
 // classify against message + stderr + stdout together, never message alone.
-function isLabelAlreadyAbsentError(err) {
+function labelMutationErrorDetail(err) {
+  if (typeof err === 'string') return err;
   const detail = [err?.message, err?.stderr, err?.stdout]
     .filter(Boolean)
     .join('\n');
-  return /\bHTTP 422\b|\bnot found\b|\bdoes not exist\b/i.test(detail);
+  return detail || (err == null ? '' : String(err));
+}
+
+function isLabelAlreadyAbsentError(err) {
+  const detail = labelMutationErrorDetail(err);
+  if (!detail) return false;
+  if (/\b(command|config(?:uration)?|file|directory|executable|binary)\s+not found\b/i.test(detail)) {
+    return false;
+  }
+  return (
+    (/\bHTTP 422\b/i.test(detail) && /\b(label|pull request|issue)\b/i.test(detail))
+    || /\b(label|pull request|issue)\b[^\n]{0,160}\b(not found|does not exist)\b/i.test(detail)
+    || /\b(not found|does not exist)\b[^\n]{0,160}\b(label|pull request|issue)\b/i.test(detail)
+    || /'[^'\n]+'\s+\b(not found|does not exist)\b/i.test(detail)
+  );
 }
 
 function isTransientHqDispatchError(err) {

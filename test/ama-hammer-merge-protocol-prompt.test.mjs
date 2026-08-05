@@ -165,9 +165,6 @@ test('hammer prompt reads the entitled hammer token from HAMMER_LACEY_GH_TOKEN (
   assert.doesNotMatch(HAMMER_PROMPT, /GH_TOKEN="\$MERGE_AGENT_GH_TOKEN"/);
   assert.doesNotMatch(HAMMER_PROMPT, /\[ -z "\$\{MERGE_AGENT_GH_TOKEN:-\}" \]/);
   assert.match(HAMMER_PROMPT, /if \[ -z "\$\{HAM_GH_TOKEN:-\}" \]; then/);
-  for (const use of HAMMER_PROMPT.match(/GH_TOKEN="\$HAM_GH_TOKEN" gh /g) || []) {
-    assert.ok(use, 'audit-comment gh calls must use the resolved HAM_GH_TOKEN');
-  }
   assert.ok(
     (HAMMER_PROMPT.match(/GH_TOKEN="\$HAM_GH_TOKEN" gh /g) || []).length >= 3,
     'all three audit-comment gh calls (lookup, PATCH, comment) must use HAM_GH_TOKEN',

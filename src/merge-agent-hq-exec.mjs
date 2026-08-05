@@ -68,6 +68,20 @@ function isUnsupportedHqPriorityFlagError(err) {
   });
 }
 
+// A label mutation whose error says the label (or PR) is already absent — "not
+// found", "does not exist", or an HTTP 422. For a `remove`, that is the desired
+// end-state, so the removal is an idempotent success rather than a retryable
+// failure. The reason may land on stdout (structured gh / github-adapter JSON),
+// stderr, or the bare message — the github-adapter in particular exits non-zero
+// with the reason on STDOUT while `err.message` is only "Command failed: …", so
+// classify against message + stderr + stdout together, never message alone.
+function isLabelAlreadyAbsentError(err) {
+  const detail = [err?.message, err?.stderr, err?.stdout]
+    .filter(Boolean)
+    .join('\n');
+  return /\bHTTP 422\b|\bnot found\b|\bdoes not exist\b/i.test(detail);
+}
+
 function isTransientHqDispatchError(err) {
   if (isExecTimeout(err)) return true;
   const detail = [
@@ -231,6 +245,7 @@ export {
   errorDiagnosticLines,
   isUnsupportedHqPriorityFlagError,
   isTransientHqDispatchError,
+  isLabelAlreadyAbsentError,
   sleep,
   execHqDispatchCancel,
   isExecTimeout,

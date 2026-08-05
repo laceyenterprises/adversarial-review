@@ -1,25 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 
 import {
-  computeCanonicalSpecLockhash,
+  PackLockhashInputError,
   discoverPackFromDiff,
   isAgentOsPacksRepo,
+  isPackLockhashInputError,
   resolveReviewedPackLockhash,
 } from '../src/pack-lockhash.mjs';
-
-const AGENT_OS_ROOT = join(import.meta.dirname, '..', '..', '..');
-const FIXTURE_PACK = join(
-  AGENT_OS_ROOT,
-  'projects',
-  'apx',
-  'fixtures',
-  'agent-os-packs',
-  'packs',
-  'hello-apx'
-);
 
 function fixtureDiff(paths) {
   return paths.map((path) => [
@@ -61,16 +49,14 @@ test('discoverPackFromDiff finds exactly one pack payload', () => {
       'packs/hello-apx/SPEC.md',
       'packs/other/SPEC.meta.json',
     ])),
-    /multiple packs/
+    PackLockhashInputError
   );
 });
 
-test('resolveReviewedPackLockhash computes the canonical fixture lockhash without a live repo', async () => {
-  const specText = readFileSync(join(FIXTURE_PACK, 'SPEC.md'), 'utf8');
-  const metaText = readFileSync(join(FIXTURE_PACK, 'SPEC.meta.json'), 'utf8');
-  const expected = await computeCanonicalSpecLockhash(specText, metaText, {
-    canonicalContentParent: join(AGENT_OS_ROOT, 'platform'),
-  });
+test('resolveReviewedPackLockhash computes the canonical lockhash without a live repo', async () => {
+  const specText = '# Hello APX\n';
+  const metaText = '{"id":"hello-apx"}\n';
+  const expected = 'abc123def456';
 
   const fetched = [];
   const resolved = await resolveReviewedPackLockhash({
@@ -86,9 +72,11 @@ test('resolveReviewedPackLockhash computes the canonical fixture lockhash withou
       if (path.endsWith('SPEC.meta.json')) return metaText;
       throw new Error(`unexpected path ${path}`);
     },
-    computeLockhashImpl: (spec, meta) => computeCanonicalSpecLockhash(spec, meta, {
-      canonicalContentParent: join(AGENT_OS_ROOT, 'platform'),
-    }),
+    computeLockhashImpl: async (spec, meta) => {
+      assert.equal(spec, specText);
+      assert.equal(meta, metaText);
+      return expected;
+    },
     log: { log() {} },
   });
 
@@ -100,4 +88,75 @@ test('resolveReviewedPackLockhash computes the canonical fixture lockhash withou
     { path: 'packs/hello-apx/SPEC.md', ref: 'a'.repeat(40) },
     { path: 'packs/hello-apx/SPEC.meta.json', ref: 'a'.repeat(40) },
   ]);
+});
+
+test('resolveReviewedPackLockhash classifies missing pack files as input errors', async () => {
+  await assert.rejects(
+    resolveReviewedPackLockhash({
+      repo: 'laceyenterprises/agent-os-packs',
+      headSha: 'b'.repeat(40),
+      diffText: fixtureDiff(['packs/hello-apx/SPEC.md']),
+      fetchFileAtRefImpl: async (_repo, path) => {
+        if (path.endsWith('SPEC.md')) return '# Spec\n';
+        const err = new Error('gh: Not Found (HTTP 404)');
+        err.stderr = 'gh: Not Found (HTTP 404)';
+        throw err;
+      },
+      computeLockhashImpl: async () => {
+        throw new Error('should not compute without required files');
+      },
+      log: { log() {} },
+    }),
+    (err) => {
+      assert.equal(isPackLockhashInputError(err), true);
+      assert.match(err.message, /missing required file/);
+      return true;
+    }
+  );
+});
+
+test('resolveReviewedPackLockhash classifies malformed pack metadata as input errors', async () => {
+  await assert.rejects(
+    resolveReviewedPackLockhash({
+      repo: 'laceyenterprises/agent-os-packs',
+      headSha: 'c'.repeat(40),
+      diffText: fixtureDiff([
+        'packs/hello-apx/SPEC.md',
+        'packs/hello-apx/SPEC.meta.json',
+      ]),
+      fetchFileAtRefImpl: async (_repo, path) => path.endsWith('SPEC.md') ? '# Spec\n' : '{bad json',
+      computeLockhashImpl: async () => {
+        const err = new Error('JSONDecodeError: Expecting property name');
+        err.stderr = 'JSONDecodeError: Expecting property name';
+        throw err;
+      },
+      log: { log() {} },
+    }),
+    (err) => {
+      assert.equal(isPackLockhashInputError(err), true);
+      assert.match(err.message, /malformed canonical lockhash input/);
+      return true;
+    }
+  );
+});
+
+test('resolveReviewedPackLockhash leaves transient lockhash failures fatal', async () => {
+  await assert.rejects(
+    resolveReviewedPackLockhash({
+      repo: 'laceyenterprises/agent-os-packs',
+      headSha: 'd'.repeat(40),
+      diffText: fixtureDiff(['packs/hello-apx/SPEC.md']),
+      fetchFileAtRefImpl: async () => {
+        const err = new Error('TLS handshake timeout');
+        err.stderr = 'TLS handshake timeout';
+        throw err;
+      },
+      log: { log() {} },
+    }),
+    (err) => {
+      assert.equal(isPackLockhashInputError(err), false);
+      assert.match(err.message, /TLS handshake timeout/);
+      return true;
+    }
+  );
 });

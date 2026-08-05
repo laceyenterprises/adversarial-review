@@ -12,8 +12,30 @@ const PACKS_REPO_RE = /(^|\/)agent-os-packs$/;
 const PACK_SPEC_RE = /^packs\/([^/]+)\/SPEC\.md$/;
 const PACK_META_RE = /^packs\/([^/]+)\/SPEC\.meta\.json$/;
 
+class PackLockhashInputError extends Error {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.name = 'PackLockhashInputError';
+    this.code = 'PACK_LOCKHASH_INPUT';
+  }
+}
+
 function isAgentOsPacksRepo(repo) {
   return PACKS_REPO_RE.test(String(repo || '').trim());
+}
+
+function isPackLockhashInputError(err) {
+  return err instanceof PackLockhashInputError || err?.code === 'PACK_LOCKHASH_INPUT';
+}
+
+function isMissingRepoFileError(err) {
+  const text = `${err?.stderr || ''}\n${err?.message || ''}`;
+  return /\bHTTP\s+404\b/i.test(text) || /\bnot found\b/i.test(text);
+}
+
+function isMalformedPackContentError(err) {
+  const text = `${err?.stderr || ''}\n${err?.message || ''}`;
+  return /JSONDecodeError|json\s+decode|invalid\s+json|malformed\s+json|parse\s+error/i.test(text);
 }
 
 function discoverPackFromDiff(diffText) {
@@ -30,7 +52,7 @@ function discoverPackFromDiff(diffText) {
   }
   if (packIds.size === 0) return null;
   if (packIds.size > 1) {
-    throw new Error(`pack PR touches multiple packs: ${[...packIds].sort().join(', ')}`);
+    throw new PackLockhashInputError(`pack PR touches multiple packs: ${[...packIds].sort().join(', ')}`);
   }
   const packId = [...packIds][0];
   return {
@@ -107,11 +129,29 @@ async function resolveReviewedPackLockhash({
   if (!pack) return null;
   const specPath = `${pack.packPath}/SPEC.md`;
   const metaPath = `${pack.packPath}/SPEC.meta.json`;
+  const fetchRequiredPackFile = async (path) => {
+    try {
+      return await fetchFileAtRefImpl(repo, path, headSha);
+    } catch (err) {
+      if (isMissingRepoFileError(err)) {
+        throw new PackLockhashInputError(`pack PR is missing required file at ${path}`, { cause: err });
+      }
+      throw err;
+    }
+  };
   const [specText, metaText] = await Promise.all([
-    fetchFileAtRefImpl(repo, specPath, headSha),
-    fetchFileAtRefImpl(repo, metaPath, headSha),
+    fetchRequiredPackFile(specPath),
+    fetchRequiredPackFile(metaPath),
   ]);
-  const lockhash = await computeLockhashImpl(specText, metaText);
+  let lockhash;
+  try {
+    lockhash = await computeLockhashImpl(specText, metaText);
+  } catch (err) {
+    if (isMalformedPackContentError(err)) {
+      throw new PackLockhashInputError(`pack PR has malformed canonical lockhash input for ${pack.packPath}`, { cause: err });
+    }
+    throw err;
+  }
   log?.log?.(
     `[reviewer] pack lockhash computed for ${repo}@${String(headSha || '').slice(0, 12)} ` +
       `${pack.packPath}=${lockhash}`
@@ -125,9 +165,11 @@ async function resolveReviewedPackLockhash({
 }
 
 export {
+  PackLockhashInputError,
   computeCanonicalSpecLockhash,
   discoverPackFromDiff,
   fetchRepoFileAtRef,
   isAgentOsPacksRepo,
+  isPackLockhashInputError,
   resolveReviewedPackLockhash,
 };

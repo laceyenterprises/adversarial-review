@@ -49,7 +49,7 @@ import {
   findPendingReviewerBodyCapture,
 } from './review-body-capture.mjs';
 import { emitReviewedAttestation } from './reviewed-attestation.mjs';
-import { resolveReviewedPackLockhash } from './pack-lockhash.mjs';
+import { isPackLockhashInputError, resolveReviewedPackLockhash } from './pack-lockhash.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
 import { preflightGeminiReviewerToken } from './gemini-reviewer-preflight.mjs';
 import { clearPendingReviewsForSelf } from './reviewer-pre-write.mjs';
@@ -2061,7 +2061,11 @@ async function main() {
     });
   } catch (err) {
     console.error(`[reviewer] Failed to compute pack lockhash for ${repo}#${prNumber}: ${err.message}`);
-    process.exit(1);
+    if (isPackLockhashInputError(err)) {
+      console.error(`[reviewer] Continuing without pack lockhash for malformed pack PR ${repo}#${prNumber}`);
+    } else {
+      process.exit(1);
+    }
   }
 
   let prContext;

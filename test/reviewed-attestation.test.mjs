@@ -72,6 +72,32 @@ test('reviewed attestation payload binds reviewer identity, reviewed head, verdi
   });
 });
 
+test('reviewed attestation payload for a pack binds the canonical pack lockhash', () => {
+  const payload = buildReviewedAttestationPayload({
+    repo: 'laceyenterprises/agent-os-packs',
+    prNumber: 7,
+    headSha: 'abc123',
+    reviewerIdentity: 'gemini-reviewer-lacey',
+    verdict: 'comment-only',
+    findingsCount: 0,
+    packLockhash: {
+      lockhash: '012345abcdef',
+      packId: 'hello-apx',
+      packPath: 'packs/hello-apx',
+      source: 'canonical_content.lockhash',
+    },
+    ts: '2026-08-05T00:00:00.000Z',
+  });
+
+  assert.deepEqual(payload.payload, {
+    reviewer_identity: 'gemini-reviewer-lacey',
+    pack_lockhash: '012345abcdef',
+    pack_id: 'hello-apx',
+    pack_path: 'packs/hello-apx',
+    pack_lockhash_source: 'canonical_content.lockhash',
+  });
+});
+
 test('reviewed attestation accepts the real hq attest sign envelope contract', async () => {
   const signedFixture = loadRealEnvelopeFixture();
   const { signature, ...payload } = signedFixture;

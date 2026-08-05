@@ -330,6 +330,101 @@ test('postGitHubReviewWithCapture emits a reviewed attestation for the reviewed 
   }
 });
 
+test('postGitHubReviewWithCapture includes pack lockhash in signed reviewed attestation payload', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'review-post-pack-attestation-'));
+  mkdirSync(join(rootDir, 'data'), { recursive: true });
+  try {
+    const attestCalls = [];
+    const reviewBody = [
+      '## Summary',
+      'Fixture pack review.',
+      '',
+      '## Blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n');
+    const packLockhash = {
+      lockhash: '012345abcdef',
+      packId: 'hello-apx',
+      packPath: 'packs/hello-apx',
+      source: 'canonical_content.lockhash',
+    };
+    await withEnvAsync({
+      GHA_ADAPTER_BIN: '/fixture/github-adapter',
+      GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+    }, async () => {
+      await postGitHubReviewWithCapture({
+        rootDir,
+        repo: 'laceyenterprises/agent-os-packs',
+        prNumber: 7,
+        attemptNumber: 1,
+        reviewerModel: 'codex',
+        reviewerHeadSha: 'reviewed-pack-head-sha',
+        reviewBody,
+        botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+        passKind: 'first-pass',
+        postedAt: '2026-08-05T12:01:00.000Z',
+        packLockhash,
+        execFileImpl: async (command, args) => {
+          if (command === 'gh' && args[0] === 'api') {
+            return {
+              stdout: `${JSON.stringify({
+                id: 7007,
+                login: 'codex-reviewer-lacey',
+                commit_id: 'reviewed-pack-head-sha',
+                created_at: '2026-08-05T12:00:30.000Z',
+                body: reviewBody,
+              })}\n`,
+            };
+          }
+          assert.equal(command, '/fixture/github-adapter');
+          return { stdout: JSON.stringify({ ok: true }) };
+        },
+        attestExecFileImpl: (command, args, options = {}) => {
+          attestCalls.push({ command, args, options });
+          if (args[1] === 'record') {
+            return execFileResultWithStdin({
+              stdout: '{"recorded":true}',
+              onInput: (input) => { attestCalls.at(-1).input = input; },
+            });
+          }
+          const payloadJson = JSON.parse(args[args.indexOf('--payload-json') + 1]);
+          return Promise.resolve({
+            stdout: JSON.stringify({
+              schema_version: 1,
+              repo: 'laceyenterprises/agent-os-packs',
+              pr_number: 7,
+              head_sha: 'reviewed-pack-head-sha',
+              parent_head_sha: null,
+              kind: 'reviewed',
+              producer_identity: 'codex-reviewer-lacey',
+              verdict: 'comment-only',
+              findings_count: 0,
+              payload: payloadJson,
+              ts: args[args.indexOf('--ts') + 1],
+              signature: {
+                algorithm: 'hcp-hmac-sha256:v1',
+                subject: 'codex-reviewer-lacey',
+                digest: `sha256:${'A'.repeat(43)}`,
+              },
+            }),
+          });
+        },
+        log: { log() {}, warn() {} },
+      });
+    });
+
+    const signedInput = JSON.parse(attestCalls.find((call) => call.args[1] === 'record').input);
+    assert.equal(signedInput.payload.pack_lockhash, packLockhash.lockhash);
+    assert.equal(signedInput.payload.pack_id, 'hello-apx');
+    assert.equal(signedInput.payload.pack_path, 'packs/hello-apx');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('postGitHubReviewWithCapture propagates signing failure after posting for watcher recovery', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'review-post-attestation-failure-'));
   mkdirSync(join(rootDir, 'data'), { recursive: true });

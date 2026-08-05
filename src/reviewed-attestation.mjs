@@ -62,6 +62,7 @@ function buildReviewedAttestationPayload({
   reviewerIdentity,
   verdict,
   findingsCount,
+  packLockhash = null,
   ts = new Date().toISOString(),
 } = {}) {
   const normalizedRepo = String(repo || '').trim();
@@ -77,6 +78,18 @@ function buildReviewedAttestationPayload({
   if (!normalizedReviewerIdentity) throw new TypeError('reviewerIdentity is required');
   if (!normalizedVerdict) throw new TypeError('verdict is required');
 
+  const payload = { reviewer_identity: normalizedReviewerIdentity };
+  if (packLockhash) {
+    const lockhash = String(packLockhash.lockhash || packLockhash).trim();
+    if (!/^[0-9a-f]{12}$/.test(lockhash)) {
+      throw new TypeError('packLockhash.lockhash must be a 12-character lowercase hex lockhash');
+    }
+    payload.pack_lockhash = lockhash;
+    if (packLockhash.packId) payload.pack_id = String(packLockhash.packId);
+    if (packLockhash.packPath) payload.pack_path = String(packLockhash.packPath);
+    if (packLockhash.source) payload.pack_lockhash_source = String(packLockhash.source);
+  }
+
   return {
     schema_version: 1,
     repo: normalizedRepo,
@@ -87,7 +100,7 @@ function buildReviewedAttestationPayload({
     producer_identity: normalizedReviewerIdentity,
     verdict: normalizedVerdict,
     findings_count: Number.isInteger(findingsCount) && findingsCount >= 0 ? findingsCount : null,
-    payload: { reviewer_identity: normalizedReviewerIdentity },
+    payload,
     ts,
   };
 }
@@ -234,6 +247,7 @@ async function emitReviewedAttestation({
   verdict,
   reviewBody,
   findingsCount = normalizeFindingsCount(reviewBody),
+  packLockhash = null,
   hqPath,
   execFileImpl,
   env,
@@ -246,6 +260,7 @@ async function emitReviewedAttestation({
     reviewerIdentity,
     verdict,
     findingsCount,
+    packLockhash,
   });
   const signed = await signReviewedAttestation({
     payload,

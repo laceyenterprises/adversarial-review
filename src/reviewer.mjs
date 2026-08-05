@@ -49,6 +49,7 @@ import {
   findPendingReviewerBodyCapture,
 } from './review-body-capture.mjs';
 import { emitReviewedAttestation } from './reviewed-attestation.mjs';
+import { isPackLockhashInputError, resolveReviewedPackLockhash } from './pack-lockhash.mjs';
 import { resolveReviewerAppToken } from './reviewer-broker-refresh.mjs';
 import { preflightGeminiReviewerToken } from './gemini-reviewer-preflight.mjs';
 import { clearPendingReviewsForSelf } from './reviewer-pre-write.mjs';
@@ -1751,6 +1752,7 @@ async function postGitHubReviewWithCapture({
   reviewerTokenFetchTimeoutMs = undefined,
   lookupRetryBackoffMs = undefined,
   sleepImpl = undefined,
+  packLockhash = null,
   emitReviewedAttestationImpl = emitReviewedAttestation,
 } = {}) {
   const normalizedHeadSha = String(reviewerHeadSha || '').trim();
@@ -1859,6 +1861,7 @@ async function postGitHubReviewWithCapture({
     ),
     verdict: normalizedVerdict,
     reviewBody: effectiveReviewBody,
+    packLockhash,
     execFileImpl: attestExecFileImpl,
     env: process.env,
     log,
@@ -2033,6 +2036,7 @@ async function main() {
 
   // 1. Fetch diff
   let diff;
+  let reviewedPackLockhash = null;
   try {
     console.error(`[reviewer] DEBUG: fetching diff for ${repo}#${prNumber}...`);
     const diffBytes = await fetchPRDiff(repo, prNumber, reviewerHeadSha);
@@ -2046,6 +2050,22 @@ async function main() {
   if (!diff.trim()) {
     console.log(`[reviewer] Empty diff for ${repo}#${prNumber} — nothing to review`);
     process.exit(0);
+  }
+
+  try {
+    reviewedPackLockhash = await resolveReviewedPackLockhash({
+      repo,
+      headSha: reviewerHeadSha,
+      diffText: diff,
+      log: console,
+    });
+  } catch (err) {
+    console.error(`[reviewer] Failed to compute pack lockhash for ${repo}#${prNumber}: ${err.message}`);
+    if (isPackLockhashInputError(err)) {
+      console.error(`[reviewer] Continuing without pack lockhash for malformed pack PR ${repo}#${prNumber}`);
+    } else {
+      process.exit(1);
+    }
   }
 
   let prContext;
@@ -2340,6 +2360,7 @@ async function main() {
         effectiveBotTokenEnv,
         reviewerMetadata.reviewerIdentity
       ),
+      packLockhash: reviewedPackLockhash,
       execFileImpl: execFileAsync,
       log: console,
     });
@@ -2479,6 +2500,7 @@ const __test__ = {
   queueFollowUpForPostedReview,
   readJsonFileIfExists,
   reconcileLocalReviewShadow,
+  resolveReviewedPackLockhash,
   resolveReviewerIdentityForBotTokenEnv,
   resolveVerdictModeForHead,
   shouldQueueFollowUpForReview,

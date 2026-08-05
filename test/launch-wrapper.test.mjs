@@ -296,6 +296,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
       opReadLog: existsSync(opReadLog) ? readFileSync(opReadLog, 'utf8') : '',
       ghAuthLog: existsSync(ghAuthLog) ? readFileSync(ghAuthLog, 'utf8') : '',
       sleepLog: existsSync(sleepLog) ? readFileSync(sleepLog, 'utf8') : '',
+      codexAuthMode: existsSync(defaultCodexAuthPath) ? statSync(defaultCodexAuthPath).mode & 0o777 : null,
       hmacKey: existsSync(hmacKeyFile) ? readFileSync(hmacKeyFile, 'utf8') : null,
       hmacKeyMode: existsSync(hmacKeyFile) ? statSync(hmacKeyFile).mode & 0o777 : null,
     };
@@ -307,6 +308,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
       opReadLog: existsSync(opReadLog) ? readFileSync(opReadLog, 'utf8') : '',
       ghAuthLog: existsSync(ghAuthLog) ? readFileSync(ghAuthLog, 'utf8') : '',
       sleepLog: existsSync(sleepLog) ? readFileSync(sleepLog, 'utf8') : '',
+      codexAuthMode: existsSync(defaultCodexAuthPath) ? statSync(defaultCodexAuthPath).mode & 0o777 : null,
       hmacKey: existsSync(hmacKeyFile) ? readFileSync(hmacKeyFile, 'utf8') : null,
       hmacKeyMode: existsSync(hmacKeyFile) ? statSync(hmacKeyFile).mode & 0o777 : null,
     };
@@ -351,6 +353,13 @@ test('launcher scripts do not hardcode operator identity defaults', () => {
     assert.doesNotMatch(script, /paul\s+lacey/i);
     assert.doesNotMatch(script, standaloneOrgName);
   }
+});
+
+test('launcher scripts avoid zsh-only numeric glob syntax in runtime guards', () => {
+  const script = readLauncherScript('adversarial-watcher-start.sh');
+  assert.doesNotMatch(script, /<->/);
+  assert.match(script, /\[\[ "\$auth_mode" =~ \^\[0-9\]\+\$ \]\]/);
+  assert.match(script, /\[\[ "\$WATCHER_GH_TRANSIENT_RETRY_SECONDS" =~ \^\[0-9\]\+\$ \]\]/);
 });
 
 test('launcher scripts resolve gh dynamically when they still use GitHub token keychain fallback', () => {
@@ -490,6 +499,7 @@ test('airlock watcher launcher validates symlinked Codex auth target permissions
   assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
   assert.match(result.stderr, /mode 644 is too broad; tightening to 0600 before start/);
   assert.match(result.stderr, /recovered CODEX_AUTH_PATH=.*permissions to mode 600/);
+  assert.equal(result.codexAuthMode, 0o600);
   assert.notEqual(result.stdout, '', 'watcher.mjs must start after symlink target permission recovery');
   assert.equal(result.ghAuthLog, '');
 });

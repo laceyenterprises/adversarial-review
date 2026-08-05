@@ -359,7 +359,8 @@ test('launcher scripts avoid zsh-only numeric glob syntax in runtime guards', ()
   const script = readLauncherScript('adversarial-watcher-start.sh');
   assert.doesNotMatch(script, /<->/);
   assert.match(script, /\[\[ "\$auth_mode" =~ \^\[0-9\]\+\$ \]\]/);
-  assert.match(script, /\[\[ "\$WATCHER_GH_TRANSIENT_RETRY_SECONDS" =~ \^\[0-9\]\+\$ \]\]/);
+  assert.match(script, /\[\[ "\$WATCHER_GH_TRANSIENT_RETRY_SECONDS" =~ \^\[0-9\]\{1,4\}\$ \]\]/);
+  assert.match(script, /10#\$WATCHER_GH_TRANSIENT_RETRY_SECONDS/);
 });
 
 test('launcher scripts resolve gh dynamically when they still use GitHub token keychain fallback', () => {
@@ -765,6 +766,41 @@ test('maintainer watcher launcher retries transient broker startup failures with
   assert.equal(result.code, 75, `stderr:\n${result.stderr}`);
   assert.equal(result.sleepLog.trim(), '45');
   assert.match(result.stderr, /transient broker failure; retrying through launchd after 45s/);
+  assert.doesNotMatch(result.stderr, /sleeping 3600s/);
+});
+
+test('maintainer watcher launcher parses zero-padded transient retry seconds as decimal', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    brokerMode: 'transient',
+    extraEnv: {
+      LINEAR_API_KEY: 'linear-test-token',
+      ...BROKER_MODE_TEST_ENV,
+      WATCHER_GH_TRANSIENT_RETRY_SECONDS: '08',
+    },
+  });
+  assert.equal(result.code, 75, `stderr:\n${result.stderr}`);
+  assert.equal(result.sleepLog.trim(), '8');
+  assert.match(result.stderr, /transient broker failure; retrying through launchd after 8s/);
+  assert.doesNotMatch(result.stderr, /value too great for base/);
+  assert.doesNotMatch(result.stderr, /sleeping 3600s/);
+});
+
+test('maintainer watcher launcher rejects oversized transient retry seconds before arithmetic', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    brokerMode: 'transient',
+    extraEnv: {
+      LINEAR_API_KEY: 'linear-test-token',
+      ...BROKER_MODE_TEST_ENV,
+      WATCHER_GH_TRANSIENT_RETRY_SECONDS: '999999999999999999999999999999',
+    },
+  });
+  assert.equal(result.code, 75, `stderr:\n${result.stderr}`);
+  assert.equal(result.sleepLog.trim(), '60');
+  assert.match(result.stderr, /transient broker failure; retrying through launchd after 60s/);
   assert.doesNotMatch(result.stderr, /sleeping 3600s/);
 });
 

@@ -49,6 +49,7 @@ function writeExecutable(filePath, body) {
 async function runMaintainerWatcherLauncher(scriptName, {
   alertToOpRef = 'op://test-vault/adversarial-watcher-alert-to/credential',
   brokerMode = 'healthy',
+  codexAuthMode = 'healthy',
   ghOnPath = true,
   localAlertTo = null,
   localLinearEnv = null,
@@ -70,12 +71,19 @@ async function runMaintainerWatcherLauncher(scriptName, {
   const fakeHome = join(root, 'home');
   const fakeZdotdir = join(root, 'zdotdir');
   const sleepLog = join(fakeTmp, 'sleep.log');
+  const ghAuthLog = join(fakeTmp, 'gh-auth.log');
   const opReadLog = join(fakeTmp, 'op-read.log');
   mkdirSync(fakeBin, { recursive: true });
   mkdirSync(join(fakeRepo, 'src', 'secret-source'), { recursive: true });
   mkdirSync(fakeTmp, { recursive: true });
   mkdirSync(fakeHome, { recursive: true });
   mkdirSync(fakeZdotdir, { recursive: true });
+  const defaultCodexAuthPath = join(fakeHome, '.codex', 'auth.json');
+  if (codexAuthMode !== 'missing') {
+    mkdirSync(dirname(defaultCodexAuthPath), { recursive: true });
+    writeFileSync(defaultCodexAuthPath, '{"tokens":true}\n', 'utf8');
+    chmodSync(defaultCodexAuthPath, codexAuthMode === 'broad' ? 0o644 : 0o600);
+  }
   const hmacKeyFile = extraEnv.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE
     ? resolve(root, extraEnv.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_FILE)
     : join(root, 'agent-os', '.secrets', 'local', 'head-attestation-hmac-key-v1');
@@ -88,7 +96,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
   }
   writeFileSync(
     join(fakeRepo, 'src', 'watcher.mjs'),
-    'console.log(JSON.stringify({linearApiKey: process.env.LINEAR_API_KEY || "", alertTo: process.env.ALERT_TO || "", githubToken: process.env.GITHUB_TOKEN || "", ghToken: process.env.GH_TOKEN || "", hmacKey: process.env.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1 || ""}));\n'
+    'console.log(JSON.stringify({linearApiKey: process.env.LINEAR_API_KEY || "", alertTo: process.env.ALERT_TO || "", githubToken: process.env.GITHUB_TOKEN || "", ghToken: process.env.GH_TOKEN || "", hmacKey: process.env.AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1 || "", codexAuthPath: process.env.CODEX_AUTH_PATH || "", hqParentSession: process.env.HQ_PARENT_SESSION || "", hqOperatorPrincipal: process.env.HQ_OPERATOR_PRINCIPAL || "", cancelActor: process.env.HQ_OPERATOR_PRINCIPAL || process.env.HQ_PARENT_SESSION || ""}));\n'
       + 'process.exit(0);\n',
     'utf8',
   );
@@ -111,7 +119,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
 	    '#!/bin/bash\n'
 	      + 'if [[ "$1" == "-e" ]]; then exit 0; fi\n'
 	      + 'if [[ "$1" == *"resolve-op-token-cli.mjs" ]]; then printf "op-token"; exit 0; fi\n'
-      + 'if [[ "$1" == *"watcher.mjs" ]]; then printf "{\\"linearApiKey\\":\\"%s\\",\\"alertTo\\":\\"%s\\",\\"githubToken\\":\\"%s\\",\\"ghToken\\":\\"%s\\",\\"hmacKey\\":\\"%s\\"}\\n" "${LINEAR_API_KEY:-}" "${ALERT_TO:-}" "${GITHUB_TOKEN:-}" "${GH_TOKEN:-}" "${AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1:-}"; exit 0; fi\n'
+      + 'if [[ "$1" == *"watcher.mjs" ]]; then cancel_actor="${HQ_OPERATOR_PRINCIPAL:-${HQ_PARENT_SESSION:-}}"; printf "{\\"linearApiKey\\":\\"%s\\",\\"alertTo\\":\\"%s\\",\\"githubToken\\":\\"%s\\",\\"ghToken\\":\\"%s\\",\\"hmacKey\\":\\"%s\\",\\"codexAuthPath\\":\\"%s\\",\\"hqParentSession\\":\\"%s\\",\\"hqOperatorPrincipal\\":\\"%s\\",\\"cancelActor\\":\\"%s\\"}\\n" "${LINEAR_API_KEY:-}" "${ALERT_TO:-}" "${GITHUB_TOKEN:-}" "${GH_TOKEN:-}" "${AGENT_OS_HEAD_ATTESTATION_HMAC_KEY_V1:-}" "${CODEX_AUTH_PATH:-}" "${HQ_PARENT_SESSION:-}" "${HQ_OPERATOR_PRINCIPAL:-}" "$cancel_actor"; exit 0; fi\n'
       + 'if [[ "$1" == *"adversarial-follow-up-daemon.mjs" ]]; then printf "{\\"githubToken\\":\\"%s\\",\\"ghToken\\":\\"%s\\",\\"followUpBrokerFlag\\":\\"%s\\",\\"followUpBrokerRole\\":\\"%s\\"}\\n" "${GITHUB_TOKEN:-}" "${GH_TOKEN:-}" "${FOLLOW_UP_GH_AUTH_VIA_BROKER:-}" "${FOLLOW_UP_GH_BROKER_ROLE:-}"; exit 0; fi\n'
 	      + 'exit 0\n',
 	  );
@@ -119,6 +127,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
     fakeGh,
     '#!/bin/bash\n'
       + 'if [[ "$1" == "auth" && "$2" == "token" ]]; then\n'
+      + '  [[ -n "${TEST_GH_AUTH_LOG:-}" ]] && printf "gh auth token\\n" >>"${TEST_GH_AUTH_LOG}"\n'
       + '  [[ "${TEST_GH_AUTH_MODE:-ok}" == "fail" ]] && exit 1\n'
       + '  echo "gh-token"; exit 0\n'
       + 'fi\n'
@@ -264,6 +273,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
     ADVERSARIAL_REVIEW_ALERT_TO_OP_REF: alertToOpRef,
     ADVERSARIAL_REVIEW_OP_CLI: opCliPath ?? fakeOp,
     TEST_OP_READ_LOG: opReadLog,
+    TEST_GH_AUTH_LOG: ghAuthLog,
     AGENT_OS_CONFIG_PATH: '/dev/null',
     TEST_OP_MODE: opMode,
     TEST_REQUIRED_OP_MODE: requiredOpMode,
@@ -277,6 +287,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
       stdout: result.stdout,
       stderr: result.stderr,
       opReadLog: existsSync(opReadLog) ? readFileSync(opReadLog, 'utf8') : '',
+      ghAuthLog: existsSync(ghAuthLog) ? readFileSync(ghAuthLog, 'utf8') : '',
       sleepLog: existsSync(sleepLog) ? readFileSync(sleepLog, 'utf8') : '',
       hmacKey: existsSync(hmacKeyFile) ? readFileSync(hmacKeyFile, 'utf8') : null,
       hmacKeyMode: existsSync(hmacKeyFile) ? statSync(hmacKeyFile).mode & 0o777 : null,
@@ -287,6 +298,7 @@ async function runMaintainerWatcherLauncher(scriptName, {
       stdout: error.stdout ?? '',
       stderr: error.stderr ?? '',
       opReadLog: existsSync(opReadLog) ? readFileSync(opReadLog, 'utf8') : '',
+      ghAuthLog: existsSync(ghAuthLog) ? readFileSync(ghAuthLog, 'utf8') : '',
       sleepLog: existsSync(sleepLog) ? readFileSync(sleepLog, 'utf8') : '',
       hmacKey: existsSync(hmacKeyFile) ? readFileSync(hmacKeyFile, 'utf8') : null,
       hmacKeyMode: existsSync(hmacKeyFile) ? statSync(hmacKeyFile).mode & 0o777 : null,
@@ -336,7 +348,6 @@ test('launcher scripts do not hardcode operator identity defaults', () => {
 
 test('launcher scripts resolve gh dynamically for GitHub token lookup', () => {
   for (const scriptName of [
-    'adversarial-watcher-start.sh',
     'adversarial-watcher-start-placey.sh',
     'adversarial-follow-up-tick.sh',
   ]) {
@@ -347,6 +358,14 @@ test('launcher scripts resolve gh dynamically for GitHub token lookup', () => {
     assert.match(script, /\/opt\/homebrew\/bin\/gh/);
     assert.doesNotMatch(script, /\/opt\/homebrew\/bin\/gh auth token/);
   }
+  const airlockWatcher = readLauncherScript('adversarial-watcher-start.sh');
+  assert.match(airlockWatcher, /resolve_gh_bin\(\)/);
+  assert.match(airlockWatcher, /command -v gh/);
+  assert.match(airlockWatcher, /\/usr\/local\/bin\/gh/);
+  assert.match(airlockWatcher, /\/opt\/homebrew\/bin\/gh/);
+  assert.doesNotMatch(airlockWatcher, /\bgh auth token\b/);
+  assert.doesNotMatch(airlockWatcher, /\$\(("\$GH_BIN"|\$GH_BIN) auth token/);
+  assert.doesNotMatch(airlockWatcher, /\/Users\/placey\/\.codex\/auth\.json/);
 });
 
 test('watcher launchers require explicit opt-in before running without ALERT_TO', () => {
@@ -404,6 +423,62 @@ test('airlock watcher launcher prefers local runtime secrets before 1Password re
   assert.match(script, /load_local_alert_to/);
   assert.match(script, /\$REPO_ROOT\/\.secrets\/local\/adversarial-watcher-alert-to/);
   assert.match(script, /load_local_alert_to \|\| true/);
+});
+
+test('airlock watcher launcher derives Codex auth from daemon HOME and validates it before start', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
+  });
+  assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
+  const payload = JSON.parse(result.stdout.trim().split(/\n/).at(-1));
+  assert.match(payload.codexAuthPath, /\/home\/\.codex\/auth\.json$/);
+  assert.doesNotMatch(payload.codexAuthPath, /\/Users\/placey/);
+  assert.equal(payload.hqOperatorPrincipal, 'operator:adversarial-watcher');
+  assert.equal(payload.hqParentSession, 'session:adversarial-review:watcher');
+  assert.equal(payload.cancelActor, 'operator:adversarial-watcher');
+  assert.equal(payload.githubToken, 'broker-token');
+  assert.equal(payload.ghToken, 'broker-token');
+  assert.equal(result.ghAuthLog, '');
+});
+
+test('airlock watcher launcher fails before daemon start when Codex auth is missing or too broad', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  for (const [codexAuthMode, diagnostic] of [
+    ['missing', /missing Codex credentials/],
+    ['broad', /mode 644 is too broad/],
+  ]) {
+    const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+      codexAuthMode,
+      extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
+    });
+    assert.equal(result.code, 1, `${codexAuthMode} stderr:\n${result.stderr}`);
+    assert.match(result.stderr, diagnostic);
+    assert.match(result.stderr, /Provision this daemon-owned auth\.json|provision daemon-owned Codex credentials/);
+    assert.equal(result.stdout, '', 'watcher.mjs must not start');
+    assert.equal(result.ghAuthLog, '');
+    assert.doesNotMatch(result.stderr, /\/Users\/placey/);
+  }
+});
+
+test('airlock watcher launcher fails loudly when a scrubbed env cannot derive Codex auth', {
+  skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
+}, async () => {
+  const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
+    extraEnv: {
+      HOME: '',
+      CODEX_HOME: '',
+      CODEX_AUTH_PATH: '',
+      LINEAR_API_KEY: 'linear-test-token',
+      ...BROKER_MODE_TEST_ENV,
+    },
+  });
+  assert.equal(result.code, 1, `stderr:\n${result.stderr}`);
+  assert.match(result.stderr, /CODEX_AUTH_PATH resolved empty/);
+  assert.equal(result.stdout, '', 'watcher.mjs must not start');
+  assert.equal(result.ghAuthLog, '');
 });
 
 test('airlock watcher launcher publishes generated HMAC keys atomically without rewriting directory permissions', () => {
@@ -583,18 +658,19 @@ test('follow-up launcher retries transient broker startup failures without a one
   assert.doesNotMatch(result.stderr, /sleeping 3600s/);
 });
 
-test('maintainer watcher launcher falls back to gh when watcher broker token resolution fails', {
+test('maintainer watcher launcher fails closed without gh keychain fallback when watcher broker token resolution fails', {
   skip: ZSH_AVAILABLE ? false : SKIP_REASON_NO_ZSH,
 }, async () => {
   const result = await runMaintainerWatcherLauncher('adversarial-watcher-start.sh', {
     brokerMode: 'fail',
     extraEnv: { LINEAR_API_KEY: 'linear-test-token' },
   });
-  assert.equal(result.code, 0, `stderr:\n${result.stderr}`);
-  const payload = JSON.parse(result.stdout.trim().split(/\n/).at(-1));
-  assert.equal(payload.githubToken, 'gh-token');
-  assert.equal(payload.ghToken, 'gh-token');
-  assert.match(result.stderr, /GITHUB_TOKEN from gh keychain PAT/);
+  assert.equal(result.code, 1, `stderr:\n${result.stderr}`);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /could not resolve GITHUB_TOKEN via OAuth broker role merge-agent/);
+  assert.match(result.stderr, /refusing GUI keychain fallback/);
+  assert.equal(result.ghAuthLog, '');
+  assert.equal(result.sleepLog.trim(), '3600');
 });
 
 test('maintainer watcher launcher ignores whitespace local LINEAR_API_KEY and falls back to 1Password', {
@@ -649,7 +725,12 @@ test('broker-mode launchers sleep before fail-closed exit when broker is unavail
       extraEnv: { LINEAR_API_KEY: 'linear-test-token', ...BROKER_MODE_TEST_ENV },
     });
     assert.equal(result.code, 1, `${scriptName} stderr:\n${result.stderr}`);
-    assert.match(result.stderr, /broker fetch failed/);
+    if (scriptName === 'adversarial-watcher-start.sh') {
+      assert.match(result.stderr, /could not resolve GITHUB_TOKEN via OAuth broker role merge-agent/);
+      assert.equal(result.ghAuthLog, '');
+    } else {
+      assert.match(result.stderr, /broker fetch failed/);
+    }
     assert.equal(result.sleepLog.trim(), '3600', `${scriptName} sleep log:\n${result.sleepLog}`);
   }
 });

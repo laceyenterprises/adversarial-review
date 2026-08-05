@@ -143,6 +143,7 @@ test('missing file returns defaults', () => {
     assert.equal(cfg.get('tailscale.iphone_ip'), null);
     assert.equal(cfg.get('tailscale.iphone_dns_name'), null);
     assert.equal(cfg.get('launchd.label_prefix'), 'ai.laceyenterprises');
+    assert.equal(cfg.get('launchd.install_mode'), 'user-agent');
     assert.equal(cfg.get('session_ledger.database_name'), 'agent_os_ledger');
     assert.equal(cfg.get('session_ledger.vdb.enabled'), true);
     assert.equal(cfg.get('session_ledger.vdb.direct_dsn'), null);

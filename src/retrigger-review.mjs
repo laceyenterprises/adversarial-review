@@ -132,10 +132,22 @@ function parseArgs(argv) {
     throw new UsageError('--bump-budget and --no-bump-budget are mutually exclusive');
   }
 
-  const bumpBudgetRaw = parsed.values['bump-budget'] ?? '1';
-  const bumpBudget = Number.parseInt(String(bumpBudgetRaw), 10);
-  if (!parsed.values['no-bump-budget'] && (!Number.isInteger(bumpBudget) || bumpBudget <= 0)) {
-    throw new UsageError(`--bump-budget must be a positive integer (got: ${bumpBudgetRaw})`);
+  // --exact-head-now is an operator recovery/refresh of the CURRENT head, not a
+  // new remediation round — it must NOT silently inflate the convergence budget.
+  // Repeated exact-head-now retriggers each +1'ing maxRounds is exactly what kept
+  // a non-converging PR from ever reaching the budget-exhausted exit (#4921). So
+  // under --exact-head-now the bump defaults to 0; an explicit --bump-budget still
+  // works when the operator genuinely wants another remediation round.
+  let bumpBudget;
+  if (parsed.values['no-bump-budget']) {
+    bumpBudget = 0;
+  } else if (parsed.values['bump-budget'] !== undefined) {
+    bumpBudget = Number.parseInt(String(parsed.values['bump-budget']), 10);
+    if (!Number.isInteger(bumpBudget) || bumpBudget <= 0) {
+      throw new UsageError(`--bump-budget must be a positive integer (got: ${parsed.values['bump-budget']})`);
+    }
+  } else {
+    bumpBudget = parsed.values['exact-head-now'] ? 0 : 1;
   }
 
   return {

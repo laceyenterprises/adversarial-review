@@ -86,17 +86,22 @@ function labelMutationErrorDetail(err) {
 function isLabelAlreadyAbsentError(err) {
   const detail = labelMutationErrorDetail(err);
   if (!detail) return false;
-  if (/\b(command|config(?:uration)?|file|directory|executable|binary)\s+not found\b/i.test(detail)) {
-    return false;
-  }
-  return (
-    /\bHTTP 404\b/i.test(detail)
-    || /\bnot found\b/i.test(detail)
-    || (/\bHTTP 422\b/i.test(detail) && /\b(label|pull request|issue)\b/i.test(detail))
-    || /\b(label|pull request|issue)\b[^\n]{0,160}\b(not found|does not exist)\b/i.test(detail)
-    || /\b(not found|does not exist)\b[^\n]{0,160}\b(label|pull request|issue)\b/i.test(detail)
-    || /'[^'\n]+'\s+\b(not found|does not exist)\b/i.test(detail)
-  );
+  return detail
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .some((line) => {
+      if (/\b(command|config(?:uration)?|file|directory|executable|binary)\s+not found\b/i.test(line)) {
+        return false;
+      }
+      return (
+        /\bHTTP 404\b/i.test(line)
+        || (/\bHTTP 422\b/i.test(line) && /\b(label|pull request|issue)\b/i.test(line))
+        || /\b(label|pull request|issue)\b[^\n]{0,160}\b(not found|does not exist)\b/i.test(line)
+        || /\b(not found|does not exist)\b[^\n]{0,160}\b(label|pull request|issue)\b/i.test(line)
+        || /'merge-agent-dispatched'\s+\b(not found|does not exist)\b/i.test(line)
+      );
+    });
 }
 
 function isTransientHqDispatchError(err) {

@@ -6719,13 +6719,21 @@ test('isLabelAlreadyAbsentError classifies already-absent signals across message
     'primitive string errors still classify when they are label-absence shaped');
   assert.equal(isLabelAlreadyAbsentError({ stderr: 'gh: HTTP 404 Not Found' }), true,
     'generic HTTP 404 means the GitHub resource is already gone');
-  assert.equal(isLabelAlreadyAbsentError({ stdout: JSON.stringify({ message: 'Not Found' }) }), true,
-    'generic API Not Found means the GitHub resource is already gone');
+  assert.equal(isLabelAlreadyAbsentError({
+    stderr: 'WARN: config file not found',
+    stdout: JSON.stringify({ message: "'merge-agent-dispatched' not found" }),
+  }), true,
+  'an unrelated stderr warning must not mask a strict stdout label-absence signal');
   // Negatives — genuine failures must NOT be swallowed as already-absent.
   assert.equal(isLabelAlreadyAbsentError({ stderr: 'HTTP 500 internal server error' }), false);
   assert.equal(isLabelAlreadyAbsentError({ message: 'connection reset by peer' }), false);
   assert.equal(isLabelAlreadyAbsentError({ stderr: 'sh: github-adapter: command not found' }), false);
   assert.equal(isLabelAlreadyAbsentError({ stdout: 'config file not found' }), false);
+  assert.equal(isLabelAlreadyAbsentError({ stdout: JSON.stringify({ message: 'Not Found' }) }), false);
+  assert.equal(isLabelAlreadyAbsentError({ stderr: 'token not found' }), false);
+  assert.equal(isLabelAlreadyAbsentError({ stderr: 'user not found' }), false);
+  assert.equal(isLabelAlreadyAbsentError({ stderr: 'repository not found' }), false);
+  assert.equal(isLabelAlreadyAbsentError({ stderr: "'my-secret-token' not found" }), false);
   assert.equal(isLabelAlreadyAbsentError(null), false);
 });
 

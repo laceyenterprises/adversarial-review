@@ -114,6 +114,7 @@ import {
   formatExecFailure,
   isUnsupportedHqPriorityFlagError,
   isTransientHqDispatchError,
+  labelMutationErrorDetail, isLabelAlreadyAbsentError,
   sleep, execHqDispatchCancel, detectAgentOsPresence,
 } from './merge-agent-hq-exec.mjs';
 
@@ -260,6 +261,8 @@ async function tryAdapterPullRequestLabel({
     return result?.ran === true;
   } catch (err) {
     if (adapterUnsupportedError(err)) return false;
+    // `remove` of an already-absent label = idempotent success (else cleanup loops).
+    if (action === 'remove' && isLabelAlreadyAbsentError(err)) return true;
     if (isTransientAdapterLabelError(err)) return false;
     throw err;
   }
@@ -1759,10 +1762,6 @@ function isTerminalMergeAgentCancelDetail({ cancelStdout, cancelError } = {}) {
   return isTerminalMergeAgentCancelError(cancelError);
 }
 
-function isTerminalMergeAgentLabelRemovalError(detail) {
-  return /\bHTTP 422\b|\bnot found\b|\bdoes not exist\b/i.test(String(detail || ''));
-}
-
 const MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION = 'dispatched-label-add';
 
 // Best-effort terminal hand-off: mark the PR `merge-agent-stuck` so it surfaces
@@ -2094,8 +2093,9 @@ async function cancelMergeAgentDispatchOnMerge({
       }
       result.labelRemoved = true;
     } catch (err) {
-      result.labelRemovalError = err?.message || String(err);
-      if (isTerminalMergeAgentLabelRemovalError(result.labelRemovalError)) {
+      result.labelRemovalError = labelMutationErrorDetail(err);
+      // Already-absent label → cleanup done, not retryable (see classifier docs).
+      if (isLabelAlreadyAbsentError(err)) {
         result.labelRemoved = true;
       } else {
         console.warn(

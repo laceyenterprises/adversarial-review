@@ -68,6 +68,42 @@ function isUnsupportedHqPriorityFlagError(err) {
   });
 }
 
+// A label mutation whose error says the label (or PR) is already absent — "not
+// found", "does not exist", or an HTTP 422. For a `remove`, that is the desired
+// end-state, so the removal is an idempotent success rather than a retryable
+// failure. The reason may land on stdout (structured gh / github-adapter JSON),
+// stderr, or the bare message — the github-adapter in particular exits non-zero
+// with the reason on STDOUT while `err.message` is only "Command failed: …", so
+// classify against message + stderr + stdout together, never message alone.
+function labelMutationErrorDetail(err) {
+  if (typeof err === 'string') return err;
+  const detail = [err?.message, err?.stderr, err?.stdout]
+    .filter(Boolean)
+    .join('\n');
+  return detail || (err == null ? '' : String(err));
+}
+
+function isLabelAlreadyAbsentError(err) {
+  const detail = labelMutationErrorDetail(err);
+  if (!detail) return false;
+  return detail
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .some((line) => {
+      if (/\b(command|config(?:uration)?|file|directory|executable|binary)\s+not found\b/i.test(line)) {
+        return false;
+      }
+      return (
+        /\bHTTP 404\b/i.test(line)
+        || (/\bHTTP 422\b/i.test(line) && /\b(label|pull request|issue)\b/i.test(line))
+        || /\b(label|pull request|issue)\b[^\n]{0,160}\b(not found|does not exist)\b/i.test(line)
+        || /\b(not found|does not exist)\b[^\n]{0,160}\b(label|pull request|issue)\b/i.test(line)
+        || /'merge-agent-dispatched'\s+\b(not found|does not exist)\b/i.test(line)
+      );
+    });
+}
+
 function isTransientHqDispatchError(err) {
   if (isExecTimeout(err)) return true;
   const detail = [
@@ -231,6 +267,8 @@ export {
   errorDiagnosticLines,
   isUnsupportedHqPriorityFlagError,
   isTransientHqDispatchError,
+  labelMutationErrorDetail,
+  isLabelAlreadyAbsentError,
   sleep,
   execHqDispatchCancel,
   isExecTimeout,

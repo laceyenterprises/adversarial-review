@@ -26,6 +26,7 @@ const DEFAULT_RUNNING_REVIEWER_PASS_MAX_AGE_MS = 30 * 60 * 1000;
 const DEFAULT_DAG_AUTOWALK_MAX_LOG_AGE_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_LAUNCHD_TIMEOUT_MS = 2_000;
+const DEFAULT_LAUNCHD_TRANSIENT_RETRY_DELAYS_MS = Object.freeze([50, 150]);
 const DEFAULT_LABEL_PREFIX = 'ai.laceyenterprises';
 
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
@@ -298,6 +299,11 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
         ?? env.ADVERSARIAL_REVIEW_PIPELINE_HEALTH_LAUNCHD_TIMEOUT_MS,
       DEFAULT_LAUNCHD_TIMEOUT_MS
     ),
+    launchdTransientRetryDelaysMs: Array.isArray(overrides.launchdTransientRetryDelaysMs)
+      ? overrides.launchdTransientRetryDelaysMs
+          .map((value) => Number(value))
+          .filter((value) => Number.isFinite(value) && value >= 0)
+      : DEFAULT_LAUNCHD_TRANSIENT_RETRY_DELAYS_MS,
     get reviewUnknownRateWindowMs() {
       return this.reviewUnknownRateWindowMinutes * 60 * 1000;
     },
@@ -1044,67 +1050,170 @@ function sleepSyncMs(ms, execFileSyncImpl = execFileSync) {
   });
 }
 
-function launchdPrint(label, { timeoutMs, execFileSyncImpl = execFileSync, sleepSyncImpl = sleepSyncMs } = {}) {
-  const isTransient = (text, error) => {
-    return text.includes('Bootstrap failed: 5: Input/output error') ||
-           text.includes('resource temporarily unavailable') ||
-           text.includes('EAGAIN') ||
-           error?.code === 'ETIMEDOUT' ||
-           error?.killed ||
-           text.includes('timeout') ||
-           text.includes('timed out');
-  };
+function launchctlDiagnosticText(error) {
+  return [
+    error?.stdout,
+    error?.stderr,
+    error?.message,
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join('\n');
+}
 
-  const isMissing = (text) => text.includes('Could not find service') || text.includes('service not found');
-  const isSudoFailure = (text) => text.includes('sudo: a password is required') || text.includes('sudo: a terminal is required') || text.includes('sudo: auth');
+function classifyLaunchctlPrintFailure(error) {
+  const diagnostic = launchctlDiagnosticText(error);
+  const normalized = diagnostic.toLowerCase();
+  if (
+    /could not find service/.test(normalized) ||
+    /service .*not found/.test(normalized) ||
+    /no such service/.test(normalized) ||
+    /unknown service/.test(normalized) ||
+    /service is not loaded/.test(normalized)
+  ) {
+    return { kind: 'missing-service', diagnostic };
+  }
+  if (
+    /bootstrap failed:\s*5\b/.test(normalized) ||
+    /input\/output error/.test(normalized) ||
+    /\beagain\b/.test(normalized) ||
+    /resource temporarily unavailable/.test(normalized) ||
+    /timed out|timeout/.test(normalized)
+  ) {
+    return { kind: 'transient', diagnostic };
+  }
+  if (
+    /sudo: a password is required/.test(normalized) ||
+    /sudo: a terminal is required/.test(normalized) ||
+    /sudo: no tty present/.test(normalized) ||
+    /may not run sudo/.test(normalized) ||
+    /not in the sudoers file/.test(normalized)
+  ) {
+    return { kind: 'sudo-privilege', diagnostic };
+  }
+  return { kind: 'unknown', diagnostic };
+}
 
-  const attempt = (domain, sudo) => {
-    let delay = 100;
-    for (let i = 0; i < 3; i++) {
-      try {
-        const cmd = sudo ? 'sudo' : 'launchctl';
-        const args = sudo ? ['-n', 'launchctl', 'print', `${domain}/${label}`] : ['print', `${domain}/${label}`];
-        const stdout = execFileSyncImpl(cmd, args, {
-          encoding: 'utf8',
-          timeout: timeoutMs,
-          stdio: ['ignore', 'pipe', 'pipe'],
-        });
-        return { loaded: true, raw: stdout, error: null };
-      } catch (error) {
-        const raw = `${String(error?.stdout || '')}\n${String(error?.stderr || '')}`;
-        if (isMissing(raw)) {
-          return { loaded: false, raw, error: 'missing-service' };
+function launchctlPrintDomain(domain, label, { timeoutMs, execFileSyncImpl }) {
+  const target = domain === 'system'
+    ? `system/${label}`
+    : `gui/${process.getuid?.()}/${label}`;
+  const bin = domain === 'system' ? 'sudo' : 'launchctl';
+  const args = domain === 'system'
+    ? ['-n', 'launchctl', 'print', target]
+    : ['print', target];
+  return execFileSyncImpl(bin, args, {
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function launchdPrint(label, {
+  timeoutMs,
+  transientRetryDelaysMs = DEFAULT_LAUNCHD_TRANSIENT_RETRY_DELAYS_MS,
+  execFileSyncImpl = execFileSync,
+  sleepSyncImpl = sleepSyncMs,
+} = {}) {
+  const attempts = [];
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const stdout = launchctlPrintDomain('gui', label, { timeoutMs, execFileSyncImpl });
+      return { label, loaded: true, domain: 'gui', raw: stdout, error: null, probeFailure: null, attempts };
+    } catch (error) {
+      const failure = classifyLaunchctlPrintFailure(error);
+      attempts.push({ domain: 'gui', kind: failure.kind, diagnostic: failure.diagnostic });
+      if (failure.kind === 'transient') {
+        const delayMs = transientRetryDelaysMs[attempt];
+        if (delayMs !== undefined) {
+          sleepSyncImpl(delayMs, execFileSyncImpl);
+          continue;
         }
-
-        if (isTransient(raw, error)) {
-          if (i < 2) {
-            sleepSyncImpl(delay, execFileSyncImpl);
-            delay *= 2;
+        return {
+          label,
+          loaded: null,
+          domain: 'gui',
+          raw: failure.diagnostic,
+          error: 'launchctl-print-transient-exhausted',
+          probeFailure: {
+            kind: 'transient-exhausted',
+            domain: 'gui',
+            attempts: attempts.length,
+            diagnostic: failure.diagnostic,
+          },
+          attempts,
+        };
+      }
+      if (failure.kind !== 'missing-service') {
+        return {
+          label,
+          loaded: null,
+          domain: 'gui',
+          raw: failure.diagnostic,
+          error: error?.message || 'launchctl-print-failed',
+          probeFailure: {
+            kind: failure.kind,
+            domain: 'gui',
+            diagnostic: failure.diagnostic,
+          },
+          attempts,
+        };
+      }
+      try {
+        const stdout = launchctlPrintDomain('system', label, { timeoutMs, execFileSyncImpl });
+        attempts.push({ domain: 'system', kind: 'loaded', diagnostic: '' });
+        return { label, loaded: true, domain: 'system', raw: stdout, error: null, probeFailure: null, attempts };
+      } catch (systemError) {
+        const systemFailure = classifyLaunchctlPrintFailure(systemError);
+        attempts.push({ domain: 'system', kind: systemFailure.kind, diagnostic: systemFailure.diagnostic });
+        if (systemFailure.kind === 'transient') {
+          const delayMs = transientRetryDelaysMs[attempt];
+          if (delayMs !== undefined) {
+            sleepSyncImpl(delayMs, execFileSyncImpl);
             continue;
           }
-          return { loaded: false, raw, error: 'transient-exhaustion' };
+          return {
+            label,
+            loaded: null,
+            domain: 'system',
+            raw: systemFailure.diagnostic,
+            error: 'launchctl-print-transient-exhausted',
+            probeFailure: {
+              kind: 'transient-exhausted',
+              domain: 'system',
+              attempts: attempts.length,
+              diagnostic: systemFailure.diagnostic,
+            },
+            attempts,
+          };
         }
-        
-        if (sudo && isSudoFailure(raw)) {
-          return { loaded: false, raw, error: 'sudo-privilege-denied' };
+        if (systemFailure.kind === 'missing-service') {
+          return {
+            label,
+            loaded: false,
+            domain: null,
+            raw: [failure.diagnostic, systemFailure.diagnostic].filter(Boolean).join('\n'),
+            error: 'launchctl-print-missing-service',
+            probeFailure: null,
+            attempts,
+          };
         }
-
-        return { loaded: false, raw, error: error?.message || 'launchctl-print-failed' };
+        return {
+          label,
+          loaded: null,
+          domain: 'system',
+          raw: systemFailure.diagnostic,
+          error: systemError?.message || 'launchctl-print-system-failed',
+          probeFailure: {
+            kind: systemFailure.kind,
+            domain: 'system',
+            diagnostic: systemFailure.diagnostic,
+          },
+          attempts,
+        };
       }
     }
-  };
-
-  const guiResult = attempt(`gui/${process.getuid?.()}`, false);
-  if (guiResult.loaded === true || guiResult.error === 'transient-exhaustion') {
-    return { label, ...guiResult };
   }
-
-  if (guiResult.error === 'missing-service') {
-    const sysResult = attempt('system', true);
-    return { label, ...sysResult };
-  }
-
-  return { label, ...guiResult };
 }
 
 function parseLaunchdLastExit(raw) {
@@ -1138,9 +1247,19 @@ function summarizeLaunchdServices({ env, config, execFileSyncImpl, sleepSyncImpl
   ];
   const services = serviceEntries.map(([name, label]) => ({
     name,
-    ...launchdPrint(label, { timeoutMs: config.launchdTimeoutMs, execFileSyncImpl, sleepSyncImpl }),
+    ...launchdPrint(label, {
+      timeoutMs: config.launchdTimeoutMs,
+      transientRetryDelaysMs: config.launchdTransientRetryDelaysMs,
+      execFileSyncImpl,
+      sleepSyncImpl,
+    }),
   }));
-  const dag = launchdPrint(labels.dagAutowalk, { timeoutMs: config.launchdTimeoutMs, execFileSyncImpl, sleepSyncImpl });
+  const dag = launchdPrint(labels.dagAutowalk, {
+    timeoutMs: config.launchdTimeoutMs,
+    transientRetryDelaysMs: config.launchdTransientRetryDelaysMs,
+    execFileSyncImpl,
+    sleepSyncImpl,
+  });
   return {
     owner: labels.owner,
     services,
@@ -1469,7 +1588,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
-  const downServices = snapshot.launchd.services.filter((service) => !service.loaded);
+  const downServices = snapshot.launchd.services.filter((service) => service.loaded === false);
   if (downServices.length > 0) {
     findings.push(buildFinding({
       code: 'review:daemon_liveness',

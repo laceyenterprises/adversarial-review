@@ -32,6 +32,13 @@ function tempRoot() {
   return mkdtempSync(path.join(tmpdir(), 'review-pipeline-health-'));
 }
 
+function launchctlPrintError({ message = 'launchctl print failed', stdout = '', stderr = '' } = {}) {
+  const error = new Error(message);
+  error.stdout = stdout;
+  error.stderr = stderr;
+  return error;
+}
+
 function openDb(rootDir) {
   const db = openReviewStateDb(rootDir);
   ensureReviewStateSchema(db);
@@ -668,6 +675,223 @@ test('host checks are opt-in and report launchd, dispatch-log, and dag-autowalk 
   assert.ok(findingCodes(enabled).includes('review:dag_autowalk_launchd_unhealthy'));
   assert.equal(enabled.dispatchSpawnFailures.matches.length, 1);
   assert.equal(enabled.dagAutowalk.lastExitCode, 65);
+});
+
+test('system-domain launchd daemon resolves loaded without daemon_liveness finding', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const calls = [];
+  const env = {
+    USER: 'fixture',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_WATCHER_LABEL: 'fixture.watcher',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FOLLOW_UP_LABEL: 'fixture.follow-up',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DISPATCH_DAEMON_LABEL: 'fixture.dispatch',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_LABEL: 'fixture.dag',
+  };
+  const execFileSyncImpl = (bin, argv) => {
+    calls.push([bin, ...argv]);
+    const target = argv.at(-1);
+    if (target.endsWith('/fixture.follow-up') && target.startsWith('gui/')) {
+      throw launchctlPrintError({
+        stderr: [
+          'Bad request.',
+          'Could not find service "fixture.follow-up" in domain for uid',
+        ].join('\n'),
+      });
+    }
+    if (target === 'system/fixture.follow-up') return 'state = running\n';
+    return 'state = running\nlast exit code = 0\n';
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env,
+    config: { launchdTransientRetryDelaysMs: [] },
+    execFileSyncImpl,
+  });
+
+  assert.ok(!findingCodes(snapshot).includes('review:daemon_liveness'));
+  const followUp = snapshot.launchd.services.find((service) => service.name === 'adversarial-follow-up');
+  assert.equal(followUp.loaded, true);
+  assert.equal(followUp.domain, 'system');
+  assert.ok(calls.some((call) => call.join(' ') === 'sudo -n launchctl print system/fixture.follow-up'));
+  assert.equal(calls.filter((call) => call.at(-1).endsWith('/fixture.follow-up')).length, 2);
+});
+
+test('gui-domain launchd daemon resolves loaded without system fallback', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const calls = [];
+  const execFileSyncImpl = (bin, argv) => {
+    calls.push([bin, ...argv]);
+    return 'state = running\nlast exit code = 0\n';
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  assert.ok(!findingCodes(snapshot).includes('review:daemon_liveness'));
+  assert.ok(snapshot.launchd.services.every((service) => service.loaded));
+  assert.equal(calls.some((call) => call[0] === 'sudo'), false);
+});
+
+test('daemon absent from both gui and system domains fires daemon_liveness', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const calls = [];
+  const env = {
+    USER: 'fixture',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_WATCHER_LABEL: 'fixture.watcher',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FOLLOW_UP_LABEL: 'fixture.follow-up',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DISPATCH_DAEMON_LABEL: 'fixture.dispatch',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_LABEL: 'fixture.dag',
+  };
+  const execFileSyncImpl = (bin, argv) => {
+    calls.push([bin, ...argv]);
+    const target = argv.at(-1);
+    if (target.endsWith('/fixture.follow-up')) {
+      throw launchctlPrintError({ stderr: 'Could not find service "fixture.follow-up"\n' });
+    }
+    return 'state = running\nlast exit code = 0\n';
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env,
+    config: { launchdTransientRetryDelaysMs: [] },
+    execFileSyncImpl,
+  });
+
+  assert.ok(findingCodes(snapshot).includes('review:daemon_liveness'));
+  const followUp = snapshot.launchd.services.find((service) => service.name === 'adversarial-follow-up');
+  assert.equal(followUp.loaded, false);
+  assert.equal(followUp.error, 'launchctl-print-missing-service');
+  assert.equal(calls.filter((call) => call.at(-1).endsWith('/fixture.follow-up')).length, 2);
+});
+
+test('system fallback uses sudo non-interactively and reports sudo privilege failure distinctly', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const calls = [];
+  const env = {
+    USER: 'fixture',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FOLLOW_UP_LABEL: 'fixture.follow-up',
+  };
+  const execFileSyncImpl = (bin, argv) => {
+    calls.push([bin, ...argv]);
+    const target = argv.at(-1);
+    if (target.endsWith('/fixture.follow-up') && target.startsWith('gui/')) {
+      throw launchctlPrintError({ stderr: 'Could not find service "fixture.follow-up"\n' });
+    }
+    if (target === 'system/fixture.follow-up') {
+      throw launchctlPrintError({ stderr: 'sudo: a password is required\n' });
+    }
+    return 'state = running\nlast exit code = 0\n';
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env,
+    config: { launchdTransientRetryDelaysMs: [] },
+    execFileSyncImpl,
+  });
+
+  const followUp = snapshot.launchd.services.find((service) => service.name === 'adversarial-follow-up');
+  assert.equal(calls.some((call) => call.join(' ') === 'sudo -n launchctl print system/fixture.follow-up'), true);
+  assert.equal(followUp.loaded, null);
+  assert.equal(followUp.probeFailure.kind, 'sudo-privilege');
+  assert.equal(followUp.probeFailure.domain, 'system');
+  assert.ok(!findingCodes(snapshot).includes('review:daemon_liveness'));
+});
+
+test('transient gui launchctl print failure is retried without system fallback or missing result', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const calls = [];
+  let followUpGuiAttempts = 0;
+  const env = {
+    USER: 'fixture',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FOLLOW_UP_LABEL: 'fixture.follow-up',
+  };
+  const execFileSyncImpl = (bin, argv) => {
+    calls.push([bin, ...argv]);
+    const target = argv.at(-1);
+    if (target.endsWith('/fixture.follow-up') && target.startsWith('gui/')) {
+      followUpGuiAttempts += 1;
+      if (followUpGuiAttempts === 1) {
+        throw launchctlPrintError({ stderr: 'Bootstrap failed: 5: Input/output error\n' });
+      }
+    }
+    return 'state = running\nlast exit code = 0\n';
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env,
+    config: { launchdTransientRetryDelaysMs: [0] },
+    execFileSyncImpl,
+  });
+
+  const followUp = snapshot.launchd.services.find((service) => service.name === 'adversarial-follow-up');
+  assert.equal(followUp.loaded, true);
+  assert.equal(followUp.domain, 'gui');
+  assert.equal(followUpGuiAttempts, 2);
+  assert.equal(calls.some((call) => call[0] === 'sudo'), false);
+  assert.ok(!findingCodes(snapshot).includes('review:daemon_liveness'));
+});
+
+test('transient retry exhaustion remains observable and does not fall through to system or missing', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const calls = [];
+  const env = {
+    USER: 'fixture',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_FOLLOW_UP_LABEL: 'fixture.follow-up',
+  };
+  const execFileSyncImpl = (bin, argv) => {
+    calls.push([bin, ...argv]);
+    const target = argv.at(-1);
+    if (target.endsWith('/fixture.follow-up') && target.startsWith('gui/')) {
+      throw launchctlPrintError({ stderr: 'Resource temporarily unavailable\n' });
+    }
+    return 'state = running\nlast exit code = 0\n';
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env,
+    config: { launchdTransientRetryDelaysMs: [0, 0] },
+    execFileSyncImpl,
+  });
+
+  const followUp = snapshot.launchd.services.find((service) => service.name === 'adversarial-follow-up');
+  assert.equal(followUp.loaded, null);
+  assert.equal(followUp.error, 'launchctl-print-transient-exhausted');
+  assert.equal(followUp.probeFailure.kind, 'transient-exhausted');
+  assert.equal(followUp.probeFailure.attempts, 3);
+  assert.equal(calls.filter((call) => call.at(-1).endsWith('/fixture.follow-up')).length, 3);
+  assert.equal(calls.some((call) => call[0] === 'sudo'), false);
+  assert.ok(!findingCodes(snapshot).includes('review:daemon_liveness'));
 });
 
 test('dispatch spawn failure log lines are suppressed when stale or self-recovered', () => {

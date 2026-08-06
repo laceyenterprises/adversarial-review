@@ -92,6 +92,7 @@ The Grafana dashboard lives at
 | `review:reviewer_pass_zombie` | `reviewer_passes.status='running'` row is older than 30m | page | no running reviewer pass exceeds the age threshold; the watcher timeout sweep should settle parseably aged rows as `failed` / `reviewer-timeout` |
 | `review:round_budget_anomaly` | remediation round count exceeds the risk-class budget, or a final-pass job remains `awaiting-rereview` after budget exhaustion | page | no follow-up job violates the risk-class round budget |
 | `review:daemon_liveness` | required local pipeline LaunchAgent is not loaded | page | adversarial watcher, adversarial follow-up, and dispatch daemon labels are loaded |
+| `review:daemon_probe_failure` | required local pipeline LaunchAgent loaded state cannot be determined | page | launchctl probes can determine loaded state for adversarial watcher, adversarial follow-up, and dispatch daemon labels |
 | `review:dispatch_spawn_failures` | dispatch daemon stderr has recent closer/hammer spawn-failure signals over 1h | page | no matching recent dispatch daemon stderr lines remain |
 | `review:dag_autowalk_launchd_unhealthy` | dag-autowalk is unloaded, last exit is non-zero, or logs are stale for >2h | page | dag-autowalk is loaded with a zero/unknown last exit and fresh logs |
 

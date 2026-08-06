@@ -170,6 +170,14 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     thresholdDescription: 'adversarial watcher, follow-up daemon, or dispatch daemon launchd service is not loaded',
   },
   {
+    code: 'review:daemon_probe_failure',
+    tier: 'page',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+    thresholdDescription: 'adversarial watcher, follow-up daemon, or dispatch daemon launchd service loaded state could not be determined',
+  },
+  {
     code: 'review:dispatch_spawn_failures',
     tier: 'page',
     category: 'review-pipeline',
@@ -1601,6 +1609,28 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
       details: {
         owner: snapshot.launchd.owner,
         services: snapshot.launchd.services,
+      },
+    }));
+  }
+
+  const unprobedServices = snapshot.launchd.services.filter((service) => (
+    service.loaded === null && service.probeFailure
+  ));
+  if (unprobedServices.length > 0) {
+    const sample = unprobedServices[0];
+    findings.push(buildFinding({
+      code: 'review:daemon_probe_failure',
+      tier: 'page',
+      subject: `${unprobedServices.length} pipeline daemon launchd service probe(s) failed`,
+      message: `${sample.name} (${sample.label}) loaded state could not be determined: ${sample.probeFailure.kind}`,
+      evidence: unprobedServices.map((service) => (
+        `${service.label} domain=${service.probeFailure.domain || 'unknown'} kind=${service.probeFailure.kind}`
+      )),
+      recommendedAction: 'Restore the launchctl probe path or required sudo privileges, then re-run the health collector before treating daemon liveness as clean.',
+      observedAt,
+      details: {
+        owner: snapshot.launchd.owner,
+        services: unprobedServices,
       },
     }));
   }

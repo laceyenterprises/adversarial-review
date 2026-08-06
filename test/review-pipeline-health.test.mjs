@@ -816,6 +816,7 @@ test('system fallback uses sudo non-interactively and reports sudo privilege fai
   assert.equal(followUp.probeFailure.kind, 'sudo-privilege');
   assert.equal(followUp.probeFailure.domain, 'system');
   assert.ok(!findingCodes(snapshot).includes('review:daemon_liveness'));
+  assert.ok(findingCodes(snapshot).includes('review:daemon_probe_failure'));
 });
 
 test('transient system-domain launchctl print failure is retried before reporting liveness', () => {
@@ -938,6 +939,7 @@ test('transient system-domain retry exhaustion remains observable', () => {
   assert.equal(followUp.probeFailure.attempts, 6);
   assert.equal(calls.filter((call) => call.at(-1).endsWith('/fixture.follow-up')).length, 6);
   assert.ok(!findingCodes(snapshot).includes('review:daemon_liveness'));
+  assert.ok(findingCodes(snapshot).includes('review:daemon_probe_failure'));
 });
 
 test('transient retry exhaustion remains observable and does not fall through to system or missing', () => {
@@ -975,6 +977,7 @@ test('transient retry exhaustion remains observable and does not fall through to
   assert.equal(calls.filter((call) => call.at(-1).endsWith('/fixture.follow-up')).length, 3);
   assert.equal(calls.some((call) => call[0] === 'sudo'), false);
   assert.ok(!findingCodes(snapshot).includes('review:daemon_liveness'));
+  assert.ok(findingCodes(snapshot).includes('review:daemon_probe_failure'));
 });
 
 test('dispatch spawn failure log lines are suppressed when stale or self-recovered', () => {

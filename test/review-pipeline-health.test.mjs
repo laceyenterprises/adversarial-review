@@ -1273,7 +1273,7 @@ test('launchd liveness probe preserves stderr diagnostics when stdout is present
     if (target.includes('cwp-dispatch-daemon') && cmd === 'launchctl') {
       const error = new Error('not loaded');
       error.stdout = 'partial diagnostic on stdout\n';
-      error.stderr = 'Could not find service';
+      error.stderr = 'Could not find service "adversarial-timeout-service"';
       throw error;
     }
     if (target.includes('cwp-dispatch-daemon') && cmd === 'sudo') {

@@ -1035,11 +1035,13 @@ function summarizeRoundBudgetAnomalies(followUpJobs) {
   return { anomalies };
 }
 
-function sleepSyncMs(ms) {
-  const start = Date.now();
-  while (Date.now() - start < ms) {
-    /* synchronous host-probe backoff */
-  }
+function sleepSyncMs(ms, execFileSyncImpl = execFileSync) {
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  execFileSyncImpl('sleep', [(ms / 1000).toFixed(3)], {
+    encoding: 'utf8',
+    timeout: Math.max(1000, ms + 1000),
+    stdio: ['ignore', 'ignore', 'ignore'],
+  });
 }
 
 function launchdPrint(label, { timeoutMs, execFileSyncImpl = execFileSync, sleepSyncImpl = sleepSyncMs } = {}) {
@@ -1070,9 +1072,13 @@ function launchdPrint(label, { timeoutMs, execFileSyncImpl = execFileSync, sleep
         return { loaded: true, raw: stdout, error: null };
       } catch (error) {
         const raw = `${String(error?.stdout || '')}\n${String(error?.stderr || '')}`;
+        if (isMissing(raw)) {
+          return { loaded: false, raw, error: 'missing-service' };
+        }
+
         if (isTransient(raw, error)) {
           if (i < 2) {
-            sleepSyncImpl(delay);
+            sleepSyncImpl(delay, execFileSyncImpl);
             delay *= 2;
             continue;
           }
@@ -1083,10 +1089,6 @@ function launchdPrint(label, { timeoutMs, execFileSyncImpl = execFileSync, sleep
           return { loaded: false, raw, error: 'sudo-privilege-denied' };
         }
 
-        if (isMissing(raw)) {
-          return { loaded: false, raw, error: 'missing-service' };
-        }
-        
         return { loaded: false, raw, error: error?.message || 'launchctl-print-failed' };
       }
     }

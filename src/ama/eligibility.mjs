@@ -1089,7 +1089,15 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
   let nonBlockingCoverageOk = false;
   if (hamTerminalRemediation.activeAuthorized) {
     const strictOk = hamTerminalRemediation.ok === true;
-    const exhaustedStrictOk = strictOk && reviewCycleExhausted;
+    // Operator directive 2026-08-05 (supersedes the 2026-07-02 "exhausted round
+    // only" constraint): the hammer's contract is remediate -> rebase -> MERGE. A
+    // VALIDATED `.ok` terminal remediation (strict commit + HAM-NN/closed-by
+    // trailer + audit-comment + finding-count + doc-currency provenance verified
+    // against ground truth, and gated behind `activeAuthorized` above) is terminal
+    // merge authority for the BLOCKING and verdict gates on its own — it no longer
+    // additionally requires `reviewCycleExhausted`. Non-blocking findings still go
+    // through identity coverage (below); structural safety gates are never waived.
+    const terminalStrictOk = strictOk;
     // The non-blocking waiver holds ONLY when the HAM's addressed non-blocking
     // findings cover every CURRENT standing non-blocking finding by identity.
     // `strictOk` must NOT short-circuit this (round-4 finding): `.ok` only
@@ -1122,13 +1130,15 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
         waivable = nonBlockingCoverageOk;
       } else if (reason === 'verdict-not-settled-success') {
         // Non-blocking-driven verdict failure additionally needs coverage; a
-        // blocking-driven or bare verdict failure needs strict `.ok` on the
-        // exhausted round so request-changes cannot skip the remediation budget.
+        // blocking-driven or bare verdict failure needs a validated strict `.ok`
+        // terminal remediation (`terminalStrictOk`) so a mere request-changes
+        // cannot skip remediation — but that authority no longer requires the
+        // review cycle to be exhausted (operator 2026-08-05: remediate -> merge).
         waivable = hasBlockingReason
-          ? exhaustedStrictOk
-          : hasNonBlockingReason ? nonBlockingCoverageOk : exhaustedStrictOk;
+          ? terminalStrictOk
+          : hasNonBlockingReason ? nonBlockingCoverageOk : terminalStrictOk;
       } else if (HAM_TERMINAL_STRICT_WAIVABLE_REASONS.has(reason)) {
-        waivable = reason === 'stale-review-head' ? strictOk : exhaustedStrictOk;
+        waivable = reason === 'stale-review-head' ? strictOk : terminalStrictOk;
       }
       if (waivable) {
         waivedByHamTerminalRemediation.push(reason);

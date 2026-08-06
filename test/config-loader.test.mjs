@@ -5390,6 +5390,7 @@ test('top-level config.yaml accepts mirrored oauth_broker watchdog BPR-05 keys',
           credential_decay_warn_after_seconds: 301
           credential_decay_crit_after_seconds: 3601
           credential_decay_last_good_crit_expiry_margin_seconds: 1801
+          refresh_wedge_threshold_seconds: 451
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('oauth_broker.watchdog.portforward_self_heal_max_cycles'), 3);
@@ -5404,6 +5405,7 @@ test('top-level config.yaml accepts mirrored oauth_broker watchdog BPR-05 keys',
       cfg.get('oauth_broker.watchdog.credential_decay_last_good_crit_expiry_margin_seconds'),
       1801,
     );
+    assert.equal(cfg.get('oauth_broker.watchdog.refresh_wedge_threshold_seconds'), 451);
 
     const credentialEnvCfg = loadConfig({
       topPath: top,
@@ -5412,6 +5414,7 @@ test('top-level config.yaml accepts mirrored oauth_broker watchdog BPR-05 keys',
         OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_CRIT_AFTER_SECONDS: '2400',
         OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS:
           '600',
+        OAUTH_BROKER_WATCHDOG_REFRESH_WEDGE_THRESHOLD_SECONDS: '300',
       },
     });
     assert.equal(
@@ -5427,6 +5430,10 @@ test('top-level config.yaml accepts mirrored oauth_broker watchdog BPR-05 keys',
         'oauth_broker.watchdog.credential_decay_last_good_crit_expiry_margin_seconds',
       ),
       600,
+    );
+    assert.equal(
+      credentialEnvCfg.get('oauth_broker.watchdog.refresh_wedge_threshold_seconds'),
+      300,
     );
 
     const envCfg = loadConfig({
@@ -5459,6 +5466,7 @@ test('oauth broker credential-decay keys preserve strict Python Node env parity'
           credential_decay_warn_after_seconds: 300
           credential_decay_crit_after_seconds: 3600
           credential_decay_last_good_crit_expiry_margin_seconds: 1800
+          refresh_wedge_threshold_seconds: 900
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('oauth_broker.watchdog.credential_decay_warn_after_seconds'), 300);
@@ -5467,6 +5475,7 @@ test('oauth broker credential-decay keys preserve strict Python Node env parity'
       cfg.get('oauth_broker.watchdog.credential_decay_last_good_crit_expiry_margin_seconds'),
       1800,
     );
+    assert.equal(cfg.get('oauth_broker.watchdog.refresh_wedge_threshold_seconds'), 900);
 
     const envCfg = loadConfig({
       topPath: top,
@@ -5475,6 +5484,7 @@ test('oauth broker credential-decay keys preserve strict Python Node env parity'
         AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_CRIT_AFTER_SECONDS: '2400',
         AGENT_OS_OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS:
           '600',
+        AGENT_OS_OAUTH_BROKER_WATCHDOG_REFRESH_WEDGE_THRESHOLD_SECONDS: '300',
       },
     });
     assert.equal(envCfg.get('oauth_broker.watchdog.credential_decay_warn_after_seconds'), 60);
@@ -5483,6 +5493,7 @@ test('oauth broker credential-decay keys preserve strict Python Node env parity'
       envCfg.get('oauth_broker.watchdog.credential_decay_last_good_crit_expiry_margin_seconds'),
       600,
     );
+    assert.equal(envCfg.get('oauth_broker.watchdog.refresh_wedge_threshold_seconds'), 300);
   } finally {
     resetConfigCache();
     rmSync(tmp, { recursive: true, force: true });

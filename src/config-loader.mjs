@@ -555,6 +555,12 @@ function schemaV1() {
                 __min: 0.0,
                 __max: 86400.0,
               },
+              refresh_wedge_threshold_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 900.0,
+                __min: 1.0,
+                __max: 86400.0,
+              },
               // Port-forward-wedge remediation tiers (#1958, PFW-05).
               broker_container_name: {
                 __type: TYPE_STRING,
@@ -2713,6 +2719,10 @@ export const ENV_ALIASES = {
     aliases: [
       ['OAUTH_BROKER_WATCHDOG_CREDENTIAL_DECAY_LAST_GOOD_CRIT_EXPIRY_MARGIN_SECONDS', Number],
     ],
+  },
+  'oauth_broker.watchdog.refresh_wedge_threshold_seconds': {
+    canonical: 'AGENT_OS_OAUTH_BROKER_WATCHDOG_REFRESH_WEDGE_THRESHOLD_SECONDS',
+    aliases: [['OAUTH_BROKER_WATCHDOG_REFRESH_WEDGE_THRESHOLD_SECONDS', Number]],
   },
   'oauth_broker.keychain_bridge.auto_unlock.enabled': {
     canonical: 'AGENT_OS_OAUTH_BROKER_KEYCHAIN_BRIDGE_AUTO_UNLOCK_ENABLED',

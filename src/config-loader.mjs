@@ -556,10 +556,10 @@ function schemaV1() {
                 __max: 86400.0,
               },
               refresh_wedge_threshold_seconds: {
-                __type: TYPE_FLOAT,
-                __default: 900.0,
-                __min: 1.0,
-                __max: 86400.0,
+                __type: TYPE_INT,
+                __default: 900,
+                __min: 1,
+                __max: 86400,
               },
               // Port-forward-wedge remediation tiers (#1958, PFW-05).
               broker_container_name: {

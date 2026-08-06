@@ -1137,3 +1137,164 @@ test('CLI parser rejects missing option values', () => {
   assert.throws(() => parseArgs(['--root']), /--root requires a directory/);
   assert.throws(() => parseArgs(['--now']), /--now requires an ISO timestamp/);
 });
+
+test('launchd liveness probe falls back to system domain on verified missing-service', () => {
+  const rootDir = tempRoot();
+  const calls = [];
+  const execFileSyncImpl = (cmd, args) => {
+    calls.push({ cmd, args: [...args] });
+    const target = args.at(-1);
+    
+    if (target.includes('cwp-dispatch-daemon')) {
+      const isGui = args.some(a => typeof a === 'string' && a.startsWith('gui/'));
+      if (isGui) {
+        const error = new Error('not loaded');
+        error.stderr = 'Bad request.\nCould not find service'; 
+        throw error;
+      }
+      return 'state = running\n';
+    }
+    
+    if (target.includes('adversarial-watcher')) {
+      const isGui = args.some(a => typeof a === 'string' && a.startsWith('gui/'));
+      if (isGui) return 'state = running\n';
+      throw new Error('should not fallback to system if gui succeeds');
+    }
+    
+    if (target.includes('adversarial-follow-up')) {
+      const error = new Error('not loaded');
+      error.stderr = 'Could not find service';
+      throw error;
+    }
+
+    if (target.includes('dag-autowalk')) return 'last exit code = 0\n';
+    return 'state = running\nlast exit code = 0\n';
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  const findings = findingCodes(snapshot);
+  
+  assert.ok(findings.includes('review:daemon_liveness'));
+  const livenessFinding = snapshot.findings.find(f => f.code === 'review:daemon_liveness');
+  assert.ok(livenessFinding.subject.includes('1 pipeline daemon launchd service(s) are not loaded'));
+  assert.ok(livenessFinding.message.includes('adversarial-follow-up'));
+  assert.ok(!livenessFinding.message.includes('cwp-dispatch-daemon'));
+  assert.ok(!livenessFinding.message.includes('adversarial-watcher'));
+
+  const dispatchCalls = calls.filter(c => c.args.some(a => typeof a === 'string' && a.includes('cwp-dispatch-daemon')));
+  assert.equal(dispatchCalls.length, 2);
+  assert.equal(dispatchCalls[0].cmd, 'launchctl');
+  assert.ok(dispatchCalls[0].args.some(a => typeof a === 'string' && a.startsWith('gui/')));
+  assert.equal(dispatchCalls[1].cmd, 'sudo');
+  assert.ok(dispatchCalls[1].args.includes('-n'));
+  assert.ok(dispatchCalls[1].args.some(a => typeof a === 'string' && a.startsWith('system/')));
+  
+  const watcherCalls = calls.filter(c => c.args.some(a => typeof a === 'string' && a.includes('adversarial-watcher')));
+  assert.equal(watcherCalls.length, 1);
+  assert.equal(watcherCalls[0].cmd, 'launchctl');
+});
+
+test('launchd liveness probe handles sudo privilege failure distinctly', () => {
+  const rootDir = tempRoot();
+  const execFileSyncImpl = (cmd, args) => {
+    const target = args.at(-1);
+    if (target.includes('dag-autowalk')) return 'last exit code = 0\n';
+    const isGui = args.some(a => typeof a === 'string' && a.startsWith('gui/'));
+    if (isGui) {
+      const error = new Error('not loaded');
+      error.stderr = 'Could not find service';
+      throw error;
+    }
+    const error = new Error('sudo failed');
+    error.stderr = 'sudo: a password is required';
+    throw error;
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+  });
+
+  const downServices = snapshot.launchd.services.filter(s => s.loaded !== true);
+  assert.equal(downServices.length, 3);
+  for (const s of downServices) {
+    assert.equal(s.error, 'sudo-privilege-denied');
+  }
+});
+
+test('launchd liveness probe retries transient gui-domain errors and escalates on exhaustion', () => {
+  const rootDir = tempRoot();
+  let dispatchAttempts = 0;
+  const sleeps = [];
+  const execFileSyncImpl = (cmd, args) => {
+    const target = args.at(-1);
+    if (target.includes('dag-autowalk')) return 'last exit code = 0\n';
+    
+    if (target.includes('cwp-dispatch-daemon')) {
+      dispatchAttempts++;
+      const error = new Error('I/O error');
+      error.stderr = 'Bootstrap failed: 5: Input/output error';
+      throw error;
+    }
+    
+    return 'state = running\n';
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+    sleepSyncImpl: (ms) => sleeps.push(ms),
+  });
+
+  assert.equal(dispatchAttempts, 3);
+  assert.deepEqual(sleeps, [100, 200]);
+  const dispatchService = snapshot.launchd.services.find(s => s.name === 'cwp-dispatch-daemon');
+  assert.equal(dispatchService.loaded, false);
+  assert.equal(dispatchService.error, 'transient-exhaustion');
+  
+  assert.ok(findingCodes(snapshot).includes('review:daemon_liveness'));
+});
+
+test('launchd liveness probe preserves stderr diagnostics when stdout is present', () => {
+  const rootDir = tempRoot();
+  let sawSystemFallback = false;
+  const execFileSyncImpl = (cmd, args) => {
+    const target = args.at(-1);
+    if (target.includes('cwp-dispatch-daemon') && cmd === 'launchctl') {
+      const error = new Error('not loaded');
+      error.stdout = 'partial diagnostic on stdout\n';
+      error.stderr = 'Could not find service "adversarial-timeout-service"';
+      throw error;
+    }
+    if (target.includes('cwp-dispatch-daemon') && cmd === 'sudo') {
+      sawSystemFallback = true;
+      return 'state = running\n';
+    }
+    return 'state = running\n';
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    env: { USER: 'fixture', ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1' },
+    execFileSyncImpl,
+    sleepSyncImpl: () => {
+      throw new Error('should not sleep for missing-service fallback');
+    },
+  });
+
+  const dispatchService = snapshot.launchd.services.find(s => s.name === 'cwp-dispatch-daemon');
+  assert.equal(sawSystemFallback, true);
+  assert.equal(dispatchService.loaded, true);
+  assert.equal(dispatchService.raw, 'state = running\n');
+});

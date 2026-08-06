@@ -1211,7 +1211,9 @@ function launchdPrint(label, {
           loaded: null,
           domain: 'system',
           raw: systemFailure.diagnostic,
-          error: systemError?.message || 'launchctl-print-system-failed',
+          error: systemFailure.kind === 'sudo-privilege'
+            ? 'sudo-privilege-denied'
+            : systemError?.message || 'launchctl-print-system-failed',
           probeFailure: {
             kind: systemFailure.kind,
             domain: 'system',
@@ -1367,6 +1369,7 @@ function summarizeDagAutowalkHealth({ env, hqRoot, nowMs, config, launchd }) {
     label: launchd.dagAutowalk.label,
     loaded: launchd.dagAutowalk.loaded,
     lastExitCode: launchd.dagAutowalk.lastExitCode,
+    probeFailure: launchd.dagAutowalk.probeFailure,
     errLogPath,
     outLogPath,
     logAgeMs,
@@ -1613,9 +1616,10 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
-  const unprobedServices = snapshot.launchd.services.filter((service) => (
-    service.loaded === null && service.probeFailure
-  ));
+  const unprobedServices = [
+    ...snapshot.launchd.services,
+    { name: 'dag-autowalk', ...snapshot.dagAutowalk },
+  ].filter((service) => service.loaded === null && service.probeFailure);
   if (unprobedServices.length > 0) {
     const sample = unprobedServices[0];
     findings.push(buildFinding({
@@ -1648,7 +1652,7 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
-  if (!snapshot.dagAutowalk.healthy) {
+  if (!snapshot.dagAutowalk.healthy && !snapshot.dagAutowalk.probeFailure) {
     findings.push(buildFinding({
       code: 'review:dag_autowalk_launchd_unhealthy',
       tier: 'page',

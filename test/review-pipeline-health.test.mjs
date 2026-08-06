@@ -819,6 +819,47 @@ test('system fallback uses sudo non-interactively and reports sudo privilege fai
   assert.ok(findingCodes(snapshot).includes('review:daemon_probe_failure'));
 });
 
+test('dag-autowalk probe failure reports probe failure instead of unhealthy', () => {
+  const rootDir = tempRoot();
+  const hqRoot = tempRoot();
+  const dagErr = path.join(hqRoot, 'dag.err.log');
+  const dagOut = path.join(hqRoot, 'dag.out.log');
+  mkdirSync(path.dirname(dagErr), { recursive: true });
+  writeFileSync(dagErr, '');
+  writeFileSync(dagOut, 'tick ok\n');
+  const env = {
+    USER: 'fixture',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS: '1',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_LABEL: 'fixture.dag',
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_ERR_LOG: dagErr,
+    ADVERSARIAL_REVIEW_PIPELINE_HEALTH_DAG_AUTOWALK_OUT_LOG: dagOut,
+  };
+  const execFileSyncImpl = (_bin, argv) => {
+    const target = argv.at(-1);
+    if (target.endsWith('/fixture.dag') && target.startsWith('gui/')) {
+      throw launchctlPrintError({ stderr: 'Could not find service "fixture.dag"\n' });
+    }
+    if (target === 'system/fixture.dag') {
+      throw launchctlPrintError({ stderr: 'sudo: a password is required\n' });
+    }
+    return 'state = running\nlast exit code = 0\n';
+  };
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    hqRoot,
+    now: () => new Date(NOW),
+    env,
+    config: { launchdTransientRetryDelaysMs: [] },
+    execFileSyncImpl,
+  });
+
+  assert.equal(snapshot.dagAutowalk.loaded, null);
+  assert.equal(snapshot.dagAutowalk.probeFailure.kind, 'sudo-privilege');
+  assert.ok(findingCodes(snapshot).includes('review:daemon_probe_failure'));
+  assert.ok(!findingCodes(snapshot).includes('review:dag_autowalk_launchd_unhealthy'));
+});
+
 test('transient system-domain launchctl print failure is retried before reporting liveness', () => {
   const rootDir = tempRoot();
   const hqRoot = tempRoot();
@@ -1567,12 +1608,14 @@ test('launchd liveness probe retries transient gui-domain errors and escalates o
   });
 
   assert.equal(dispatchAttempts, 3);
-  assert.deepEqual(sleeps, [100, 200]);
+  assert.deepEqual(sleeps, [50, 150]);
   const dispatchService = snapshot.launchd.services.find(s => s.name === 'cwp-dispatch-daemon');
-  assert.equal(dispatchService.loaded, false);
-  assert.equal(dispatchService.error, 'transient-exhaustion');
+  assert.equal(dispatchService.loaded, null);
+  assert.equal(dispatchService.error, 'launchctl-print-transient-exhausted');
+  assert.equal(dispatchService.probeFailure.kind, 'transient-exhausted');
   
-  assert.ok(findingCodes(snapshot).includes('review:daemon_liveness'));
+  assert.ok(findingCodes(snapshot).includes('review:daemon_probe_failure'));
+  assert.ok(!findingCodes(snapshot).includes('review:daemon_liveness'));
 });
 
 test('launchd liveness probe preserves stderr diagnostics when stdout is present', () => {

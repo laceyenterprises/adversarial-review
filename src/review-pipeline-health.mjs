@@ -1035,7 +1035,14 @@ function summarizeRoundBudgetAnomalies(followUpJobs) {
   return { anomalies };
 }
 
-function launchdPrint(label, { timeoutMs, execFileSyncImpl = execFileSync } = {}) {
+function sleepSyncMs(ms) {
+  const start = Date.now();
+  while (Date.now() - start < ms) {
+    /* synchronous host-probe backoff */
+  }
+}
+
+function launchdPrint(label, { timeoutMs, execFileSyncImpl = execFileSync, sleepSyncImpl = sleepSyncMs } = {}) {
   const isTransient = (text, error) => {
     return text.includes('Bootstrap failed: 5: Input/output error') ||
            text.includes('resource temporarily unavailable') ||
@@ -1062,14 +1069,10 @@ function launchdPrint(label, { timeoutMs, execFileSyncImpl = execFileSync } = {}
         });
         return { loaded: true, raw: stdout, error: null };
       } catch (error) {
-        const raw = String(error?.stdout || error?.stderr || '');
+        const raw = `${String(error?.stdout || '')}\n${String(error?.stderr || '')}`;
         if (isTransient(raw, error)) {
           if (i < 2) {
-            try {
-              Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
-            } catch (e) {
-              /* ignore */
-            }
+            sleepSyncImpl(delay);
             delay *= 2;
             continue;
           }
@@ -1124,7 +1127,7 @@ function launchdLabelSet(env = process.env) {
   };
 }
 
-function summarizeLaunchdServices({ env, config, execFileSyncImpl }) {
+function summarizeLaunchdServices({ env, config, execFileSyncImpl, sleepSyncImpl }) {
   const labels = launchdLabelSet(env);
   const serviceEntries = [
     ['adversarial-watcher', labels.watcher],
@@ -1133,9 +1136,9 @@ function summarizeLaunchdServices({ env, config, execFileSyncImpl }) {
   ];
   const services = serviceEntries.map(([name, label]) => ({
     name,
-    ...launchdPrint(label, { timeoutMs: config.launchdTimeoutMs, execFileSyncImpl }),
+    ...launchdPrint(label, { timeoutMs: config.launchdTimeoutMs, execFileSyncImpl, sleepSyncImpl }),
   }));
-  const dag = launchdPrint(labels.dagAutowalk, { timeoutMs: config.launchdTimeoutMs, execFileSyncImpl });
+  const dag = launchdPrint(labels.dagAutowalk, { timeoutMs: config.launchdTimeoutMs, execFileSyncImpl, sleepSyncImpl });
   return {
     owner: labels.owner,
     services,
@@ -1517,6 +1520,7 @@ function collectReviewPipelineHealth({
   env = process.env,
   config: configOverrides = {},
   execFileSyncImpl = execFileSync,
+  sleepSyncImpl = sleepSyncMs,
 } = {}) {
   const observedAt = toIso(now);
   const nowMs = Date.parse(observedAt);
@@ -1569,7 +1573,7 @@ function collectReviewPipelineHealth({
       : { thresholdMs: config.runningReviewerPassMaxAgeMs, rows: [] };
     const roundBudget = summarizeRoundBudgetAnomalies(followUpQueues.jobs);
     const launchd = config.hostChecksEnabled
-      ? summarizeLaunchdServices({ env, config, execFileSyncImpl })
+      ? summarizeLaunchdServices({ env, config, execFileSyncImpl, sleepSyncImpl })
       : { owner: currentUserName(env), services: [], dagAutowalk: { label: null, loaded: true, lastExitCode: 0 } };
     const dispatchSpawnFailures = config.hostChecksEnabled
       ? summarizeDispatchSpawnFailures(hqRoot, { nowMs, config })

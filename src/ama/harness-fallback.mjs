@@ -48,6 +48,10 @@ const FLEET_QUOTA_STATUS_TIMEOUT_MS = 10_000;
 // QUOTA_HARNESS_PROVIDER in ../fleet-quota-status.mjs.
 export const CLOSER_WORKER_CLASS_PROVIDER = Object.freeze({
   hammer: 'openai',
+  // hammer-claude: the codex-quota fallback merge class — the-hammer-lacey merge
+  // identity on the claude harness, so its gating provider is anthropic (the
+  // whole point is that it's live when codex/openai is grounded).
+  'hammer-claude': 'anthropic',
   codex: 'openai',
   'claude-code': 'anthropic',
   claude: 'anthropic',

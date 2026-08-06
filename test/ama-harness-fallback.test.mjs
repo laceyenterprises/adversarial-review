@@ -32,10 +32,11 @@ function buildFleetExec(stdout) {
   return { impl, calls };
 }
 
-test('providerForCloserWorkerClass maps hammer/codex → openai and claude-code → anthropic', () => {
+test('providerForCloserWorkerClass maps hammer/codex to openai and claude classes to anthropic', () => {
   assert.equal(providerForCloserWorkerClass('hammer'), 'openai');
   assert.equal(providerForCloserWorkerClass('codex'), 'openai');
   assert.equal(providerForCloserWorkerClass('claude-code'), 'anthropic');
+  assert.equal(providerForCloserWorkerClass('hammer-claude'), 'anthropic');
   assert.equal(providerForCloserWorkerClass('gemini'), 'google');
   assert.equal(providerForCloserWorkerClass('nonsense'), null);
 });

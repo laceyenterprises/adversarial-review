@@ -1076,7 +1076,7 @@ function launchdPrint(label, { timeoutMs, execFileSyncImpl = execFileSync, sleep
             delay *= 2;
             continue;
           }
-          return { loaded: 'transient-exhaustion', raw, error: 'transient-exhaustion' };
+          return { loaded: false, raw, error: 'transient-exhaustion' };
         }
         
         if (sudo && isSudoFailure(raw)) {

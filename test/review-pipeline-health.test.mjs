@@ -1223,7 +1223,7 @@ test('launchd liveness probe handles sudo privilege failure distinctly', () => {
     execFileSyncImpl,
   });
 
-  const downServices = snapshot.launchd.services.filter(s => s.loaded !== true && s.loaded !== 'transient-exhaustion');
+  const downServices = snapshot.launchd.services.filter(s => s.loaded !== true);
   assert.equal(downServices.length, 3);
   for (const s of downServices) {
     assert.equal(s.error, 'sudo-privilege-denied');
@@ -1259,10 +1259,10 @@ test('launchd liveness probe retries transient gui-domain errors and escalates o
   assert.equal(dispatchAttempts, 3);
   assert.deepEqual(sleeps, [100, 200]);
   const dispatchService = snapshot.launchd.services.find(s => s.name === 'cwp-dispatch-daemon');
-  assert.equal(dispatchService.loaded, 'transient-exhaustion');
+  assert.equal(dispatchService.loaded, false);
   assert.equal(dispatchService.error, 'transient-exhaustion');
   
-  assert.ok(!findingCodes(snapshot).includes('review:daemon_liveness'));
+  assert.ok(findingCodes(snapshot).includes('review:daemon_liveness'));
 });
 
 test('launchd liveness probe preserves stderr diagnostics when stdout is present', () => {

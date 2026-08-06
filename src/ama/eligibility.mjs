@@ -1097,7 +1097,6 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
     // merge authority for the BLOCKING and verdict gates on its own — it no longer
     // additionally requires `reviewCycleExhausted`. Non-blocking findings still go
     // through identity coverage (below); structural safety gates are never waived.
-    const terminalStrictOk = strictOk;
     // The non-blocking waiver holds ONLY when the HAM's addressed non-blocking
     // findings cover every CURRENT standing non-blocking finding by identity.
     // `strictOk` must NOT short-circuit this (round-4 finding): `.ok` only
@@ -1131,14 +1130,14 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       } else if (reason === 'verdict-not-settled-success') {
         // Non-blocking-driven verdict failure additionally needs coverage; a
         // blocking-driven or bare verdict failure needs a validated strict `.ok`
-        // terminal remediation (`terminalStrictOk`) so a mere request-changes
-        // cannot skip remediation — but that authority no longer requires the
-        // review cycle to be exhausted (operator 2026-08-05: remediate -> merge).
+        // terminal remediation so a mere request-changes cannot skip remediation
+        // — but that authority no longer requires the review cycle to be
+        // exhausted (operator 2026-08-05: remediate -> merge).
         waivable = hasBlockingReason
-          ? terminalStrictOk
-          : hasNonBlockingReason ? nonBlockingCoverageOk : terminalStrictOk;
+          ? strictOk
+          : hasNonBlockingReason ? nonBlockingCoverageOk : strictOk;
       } else if (HAM_TERMINAL_STRICT_WAIVABLE_REASONS.has(reason)) {
-        waivable = reason === 'stale-review-head' ? strictOk : terminalStrictOk;
+        waivable = strictOk;
       }
       if (waivable) {
         waivedByHamTerminalRemediation.push(reason);

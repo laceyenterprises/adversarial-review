@@ -415,7 +415,7 @@ roles:
       # haven't been opted in.
       enabled: false
       # Which worker class does the closer dispatch use.
-      worker_class: hammer  # enum: codex | claude-code | hammer | gemini
+      worker_class: hammer  # enum: codex | claude-code | hammer | hammer-claude | gemini
       # Which merge method to use. `rebase` is not supported because
       # AMA requires one canonical landed closing commit for provenance
       # and audit reconciliation; GitHub's rebase path does not produce one.
@@ -461,8 +461,8 @@ roles:
         required_gate_context_source: resolveGateStatusContext
 ```
 
-Supported closer worker classes are `codex`, `claude-code`, `hammer`, and
-`gemini`. Closer dispatch must pass the configured value to HQ as
+Supported closer worker classes are `codex`, `claude-code`, `hammer`,
+`hammer-claude`, and `gemini`. Closer dispatch must pass the configured value to HQ as
 `--worker-class <configured-worker-class>` with `--task-kind merge` and
 `--completion-shape decision-only`; provenance must attribute the actual closer
 class as `Closed-By: <configured-worker-class>-closer (adversarial-pipe-mode)`,

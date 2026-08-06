@@ -1036,21 +1036,70 @@ function summarizeRoundBudgetAnomalies(followUpJobs) {
 }
 
 function launchdPrint(label, { timeoutMs, execFileSyncImpl = execFileSync } = {}) {
-  try {
-    const stdout = execFileSyncImpl('launchctl', ['print', `gui/${process.getuid?.()}/${label}`], {
-      encoding: 'utf8',
-      timeout: timeoutMs,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    return { label, loaded: true, raw: stdout, error: null };
-  } catch (error) {
-    return {
-      label,
-      loaded: false,
-      raw: String(error?.stdout || error?.stderr || ''),
-      error: error?.message || 'launchctl-print-failed',
-    };
+  const isTransient = (text, error) => {
+    return text.includes('Bootstrap failed: 5: Input/output error') ||
+           text.includes('resource temporarily unavailable') ||
+           text.includes('EAGAIN') ||
+           error?.code === 'ETIMEDOUT' ||
+           error?.killed ||
+           text.includes('timeout') ||
+           text.includes('timed out');
+  };
+
+  const isMissing = (text) => text.includes('Could not find service') || text.includes('service not found');
+  const isSudoFailure = (text) => text.includes('sudo: a password is required') || text.includes('sudo: a terminal is required') || text.includes('sudo: auth');
+
+  const attempt = (domain, sudo) => {
+    let delay = 100;
+    for (let i = 0; i < 3; i++) {
+      try {
+        const cmd = sudo ? 'sudo' : 'launchctl';
+        const args = sudo ? ['-n', 'launchctl', 'print', `${domain}/${label}`] : ['print', `${domain}/${label}`];
+        const stdout = execFileSyncImpl(cmd, args, {
+          encoding: 'utf8',
+          timeout: timeoutMs,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        return { loaded: true, raw: stdout, error: null };
+      } catch (error) {
+        const raw = String(error?.stdout || error?.stderr || '');
+        if (isTransient(raw, error)) {
+          if (i < 2) {
+            try {
+              Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+            } catch (e) {
+              /* ignore */
+            }
+            delay *= 2;
+            continue;
+          }
+          return { loaded: 'transient-exhaustion', raw, error: 'transient-exhaustion' };
+        }
+        
+        if (sudo && isSudoFailure(raw)) {
+          return { loaded: false, raw, error: 'sudo-privilege-denied' };
+        }
+
+        if (isMissing(raw)) {
+          return { loaded: false, raw, error: 'missing-service' };
+        }
+        
+        return { loaded: false, raw, error: error?.message || 'launchctl-print-failed' };
+      }
+    }
+  };
+
+  const guiResult = attempt(`gui/${process.getuid?.()}`, false);
+  if (guiResult.loaded === true || guiResult.error === 'transient-exhaustion') {
+    return { label, ...guiResult };
   }
+
+  if (guiResult.error === 'missing-service') {
+    const sysResult = attempt('system', true);
+    return { label, ...sysResult };
+  }
+
+  return { label, ...guiResult };
 }
 
 function parseLaunchdLastExit(raw) {

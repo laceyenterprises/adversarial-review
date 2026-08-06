@@ -1471,24 +1471,24 @@ function schemaV1() {
                   worker_class: {
                     __type: TYPE_STRING,
                     __default: 'hammer',
-                    __enum: ['codex', 'claude-code', 'hammer', 'gemini'],
+                    __enum: ['codex', 'claude-code', 'hammer', 'hammer-claude', 'gemini'],
                   },
                   // HHR harness-fallback (2026-07-05): ordered list of harnesses
                   // the closer/hammer falls back to when the configured
                   // `worker_class`'s provider quota is authoritatively grounded
-                  // (per `hq fleet quota status`). Default `[claude-code]` so a
-                  // codex-capped hammer (LAC-1463) auto-routes to claude-code and
-                  // auto-reverts when codex recovers — replacing the manual
-                  // `worker_class: claude-code` config.local.yaml hot-patch. Set
-                  // `[]` to disable the fallback and keep the pre-HHR behavior (a
-                  // capped harness dies instead of falling back).
+                  // (per `hq fleet quota status`). Default `[hammer-claude]` so
+                  // a codex-capped hammer keeps the the-hammer-lacey merge
+                  // identity while running on the claude harness, and auto-reverts
+                  // when codex recovers. Set `[]` to disable the fallback and keep
+                  // the pre-HHR behavior (a capped harness dies instead of falling
+                  // back).
                   worker_class_fallback: {
                     __type: TYPE_LIST,
                     __item: {
                       __type: TYPE_STRING,
-                      __enum: ['codex', 'claude-code', 'hammer', 'gemini'],
+                      __enum: ['codex', 'claude-code', 'hammer', 'hammer-claude', 'gemini'],
                     },
-                    __default: ['claude-code'],
+                    __default: ['hammer-claude'],
                   },
                   merge_method: {
                     __type: TYPE_STRING,

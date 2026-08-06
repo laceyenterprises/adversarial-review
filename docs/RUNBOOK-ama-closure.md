@@ -135,8 +135,8 @@ dispatcher debugging), see
      adversarial:
        merge_authority:
          enabled: true
-         worker_class: hammer    # default; operators may pin codex, claude-code, or gemini
-         # worker_class_fallback: [claude-code]  # HHR harness-fallback (default-on; see §2a)
+         worker_class: hammer    # default; operators may pin codex, claude-code, hammer-claude, or gemini
+         # worker_class_fallback: [hammer-claude]  # HHR harness-fallback (default-on; see §2a)
          merge_method: squash    # or merge — never rebase (SPEC §4.4)
          strict_non_blocking_remediation: true  # default; require known-zero non-blocking findings for direct close
          eligibility:
@@ -190,7 +190,7 @@ provenance still key off the configured logical class). It emits a loud
   primary — no manual flip. This **replaces** the manual
   `roles.adversarial.merge_authority.worker_class: claude-code` config.local.yaml
   hot-patch (which was static and never reverted).
-- **Default:** `[claude-code]`, applied by the code-level schema default — the
+- **Default:** `[hammer-claude]`, applied by the code-level schema default — the
   protection is **on automatically with no config edit**. The order is honored
   left-to-right; a fallback whose provider is also grounded is skipped.
   Explicitly pinning `worker_class_fallback` in the shared `config.local.yaml`
@@ -257,10 +257,10 @@ provenance still key off the configured logical class). It emits a loud
 Cut a low-risk test PR (any work that would normally trip the
 adversarial-review path, e.g. a docs-only change with a worker-class
 title prefix matching the configured class — `[codex]`, `[claude-code]`,
-or `[gemini]`). Expected sequence (substitute `<configured-worker-class>`
+`[hammer-claude]`, or `[gemini]`). Expected sequence (substitute `<configured-worker-class>`
 with the value of `roles.adversarial.merge_authority.worker_class` from
-your CFG; supported values are `codex`, `claude-code`, `hammer`, and
-`gemini`, and the reviewer/closer identities follow whatever class you
+your CFG; supported values are `codex`, `claude-code`, `hammer`,
+`hammer-claude`, and `gemini`, and the reviewer/closer identities follow whatever class you
 configured, NOT a hardcoded `codex`):
 
 1. Worker opens PR with `[<configured-worker-class>]` prefix.

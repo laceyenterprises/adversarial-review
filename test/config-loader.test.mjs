@@ -4614,7 +4614,7 @@ test('AMA merge_authority accepts hammer as closer worker class in Node loader',
   }
 });
 
-test('AMA merge_authority worker_class_fallback defaults to [claude-code] (HHR)', () => {
+test('AMA merge_authority worker_class_fallback defaults to [hammer-claude] (HHR)', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -4622,9 +4622,9 @@ test('AMA merge_authority worker_class_fallback defaults to [claude-code] (HHR)'
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.deepEqual(
       cfg.get('roles.adversarial.merge_authority.worker_class_fallback'),
-      ['claude-code'],
+      ['hammer-claude'],
     );
-    assert.deepEqual(cfg.getMergeAuthorityConfig().workerClassFallback, ['claude-code']);
+    assert.deepEqual(cfg.getMergeAuthorityConfig().workerClassFallback, ['hammer-claude']);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -4680,12 +4680,33 @@ test('AMA merge_authority accepts gemini as closer worker class in Node loader',
   }
 });
 
+test('AMA merge_authority accepts hammer-claude as closer worker class in Node loader', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      roles:
+        adversarial:
+          merge_authority:
+            worker_class: hammer-claude
+            worker_class_fallback: [hammer-claude]
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('roles.adversarial.merge_authority.worker_class'), 'hammer-claude');
+    assert.equal(cfg.getMergeAuthorityConfig().workerClass, 'hammer-claude');
+    assert.deepEqual(cfg.getMergeAuthorityConfig().workerClassFallback, ['hammer-claude']);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('AMA merge_authority public docs list the Node loader worker_class enum', () => {
   const source = readFileSync(join(REPO_ROOT, 'src/config-loader.mjs'), 'utf8');
   const enumMatch = source.match(/worker_class:\s*\{[\s\S]*?__enum:\s*\[([^\]]+)\]/);
   assert.ok(enumMatch, 'expected merge_authority.worker_class enum in config-loader schema');
   const enumValues = Array.from(enumMatch[1].matchAll(/'([^']+)'/g), (match) => match[1]);
-  assert.deepEqual(enumValues, ['codex', 'claude-code', 'hammer', 'gemini']);
+  assert.deepEqual(enumValues, ['codex', 'claude-code', 'hammer', 'hammer-claude', 'gemini']);
 
   for (const relativePath of [
     'projects/adversarial-merge-authority/SPEC.md',

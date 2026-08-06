@@ -7,7 +7,7 @@ For the AMA closer lane documented in [`docs/RUNBOOK-ama-closure.md`](docs/RUNBO
 the operator-facing contract is that closure dispatch uses the configured
 `roles.adversarial.merge_authority.worker_class`, not a hardcoded `codex`
 worker. Supported closer worker classes are `codex`, `claude-code`, `hammer`,
-and `gemini`. Validation examples and cutover checks must therefore substitute
+`hammer-claude`, and `gemini`. Validation examples and cutover checks must therefore substitute
 the configured worker class and verify the dispatched `workerClass` against
 that config value; for the Gemini harness this means validating an
 `hq dispatch --worker-class gemini --task-kind merge --completion-shape decision-only`

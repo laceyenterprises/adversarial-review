@@ -279,6 +279,64 @@ test('eligible: current-head HAM terminal remediation clears stale reviewed head
   assert.ok(!result.reasons.includes('stale-review-head'));
 });
 
+test('eligible: validated HAM terminal remediation merges WITHOUT an exhausted review cycle (operator 2026-08-05)', () => {
+  // The hammer's contract is remediate -> rebase -> MERGE. A validated (.ok) HAM
+  // terminal remediation is the terminal merge authority on its own; it does NOT
+  // require the review cycle to be exhausted / finalHammer.active, and NO fresh
+  // settled-success verdict or re-review of the remediated head is required.
+  // This is the exact setup that already merged when reviewCycleExhausted: true;
+  // it must now ALSO merge when the cycle is not exhausted.
+  const reviewedHead = 'abc12345';
+  const currentHead = 'def67890';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      headSha: reviewedHead,
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+      reviewCycleExhausted: false,
+    },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({ headSha: currentHead, parentSha: reviewedHead }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({ headSha: currentHead, parentSha: reviewedHead }),
+  });
+
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.ok(!result.reasons.includes('verdict-not-settled-success'));
+  assert.ok(!result.reasons.includes('blocking-findings-present'));
+});
+
+test('not eligible: validated HAM terminal remediation on a NON-exhausted cycle still blocks on red CI (structural gate survives new authority)', () => {
+  // Guard for the 2026-08-05 change: waiving the adversarial verdict/finding gates
+  // for a validated .ok remediation must NOT waive structural safety gates. Red CI
+  // still blocks even without an exhausted cycle.
+  const reviewedHead = 'abc12345';
+  const currentHead = 'def67890';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      headSha: reviewedHead,
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+      reviewCycleExhausted: false,
+    },
+    prMetadata: {
+      headSha: currentHead,
+      statusCheckRollup: [{ __typename: 'CheckRun', name: 'test', conclusion: 'FAILURE' }],
+    },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({ headSha: currentHead, parentSha: reviewedHead }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({ headSha: currentHead, parentSha: reviewedHead }),
+  });
+  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
+  assert.ok(result.reasons.includes('ci-not-green'));
+});
+
 test('not eligible: current-head HAM terminal remediation does not waive structural hard gates', () => {
   const reviewedHead = 'abc12345';
   const currentHead = 'def67890';
@@ -1755,7 +1813,12 @@ test('ham terminal remediation: exhausted HAM-authored live head over reviewed p
   );
 });
 
-test('ham terminal remediation: pre-exhaustion blocking request-changes stays on remediation loop', () => {
+test('ham terminal remediation: pre-exhaustion validated .ok blocking remediation MERGES (operator 2026-08-05: hammer remediates+rebases then merges; no exhausted cycle / re-review required)', () => {
+  // Behavior change from the prior "stays on remediation loop" rule: a VALIDATED
+  // `.ok` HAM terminal remediation is terminal merge authority for the blocking and
+  // verdict gates on its own — it does not have to wait for the review cycle to be
+  // exhausted, and no fresh settled-success verdict is required. (Non-blocking
+  // identity coverage and structural gates are unaffected and covered elsewhere.)
   const { reviewState, prMetadata, cfg } = eligibleFixture({
     reviewState: {
       verdict: 'request-changes',
@@ -1771,10 +1834,10 @@ test('ham terminal remediation: pre-exhaustion blocking request-changes stays on
     hamTerminalRemediationGroundTruth: hamGroundTruth(),
   });
   assert.equal(result.trace.hamTerminalRemediation.ok, true);
-  assert.equal(result.eligible, false, JSON.stringify(result, null, 2));
-  assert.ok(result.reasons.includes('blocking-findings-present'));
-  assert.ok(result.reasons.includes('verdict-not-settled-success'));
-  assert.ok(!result.trace.hamTerminalRemediation.waived.includes('blocking-findings-present'));
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+  assert.ok(!result.reasons.includes('blocking-findings-present'));
+  assert.ok(!result.reasons.includes('verdict-not-settled-success'));
+  assert.ok(result.trace.hamTerminalRemediation.waived.includes('blocking-findings-present'));
 });
 
 test('ham terminal remediation: leaked build-time HAM-02 ticket is not valid provenance', () => {

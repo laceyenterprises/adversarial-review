@@ -82,6 +82,7 @@ import {
 } from './hammer-retry-cap.mjs';
 import { deliverAlert } from '../alert-delivery.mjs';
 import { isUnsupportedHqPriorityFlagError } from '../merge-agent-hq-exec.mjs';
+import { isHammerWorkerClass } from './hammer-worker-class.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -594,7 +595,7 @@ async function cleanupHammerCloserWorker({
   reason,
 }) {
   const effectiveWorkerClass = String(existingRecord?.workerClass || workerClass || '').trim();
-  if (effectiveWorkerClass !== 'hammer') return null;
+  if (!isHammerWorkerClass(effectiveWorkerClass)) return null;
   const workerId = hammerCloserWorkerId(prNumber);
   if (!workerId) return null;
   const args = ['worker', 'tear-down', workerId, '--force', '--root', hqRoot];
@@ -1620,7 +1621,7 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
   nowMs = Date.now,
   sleepImpl = sleep,
 }) {
-  if (String(workerClass || '').trim() !== 'hammer') {
+  if (!isHammerWorkerClass(workerClass)) {
     return { attempted: false, reason: 'not-hammer-worker-class' };
   }
   const workerId = hammerCloserWorkerId(prNumber);
@@ -1948,6 +1949,7 @@ async function resolveTerminalCodingBranchHolder({
 }
 
 export const __testables__ = Object.freeze({
+  cleanupHammerCloserWorker,
   reclaimSelfOwnedHammerCloserWorktreeBeforeProvision,
   selfOwnedHammerCloserWorktreePath,
   isProvisionBranchHolderBlocked,
@@ -2502,7 +2504,7 @@ export async function maybeDispatchAmaCloser({
     const pendingCiMechanicalGateMiss = isPendingCiMechanicalGateMiss(verdict, routeReasons);
     const autoHammer =
       !pendingCiMechanicalGateMiss &&
-      (workerClassForMiss === 'hammer' || reviewCycleExhausted)
+      (isHammerWorkerClass(workerClassForMiss) || reviewCycleExhausted)
       && (
         eligibleHammerRouteReasons.length > 0 ||
         routeReasons.some((reason) => HAMMER_ROUTE_ACTION_REASONS.has(reason)) ||
@@ -2542,7 +2544,7 @@ export async function maybeDispatchAmaCloser({
 
   // Compose the prompt body. Template loaded from disk via DI so
   // tests can pass a literal.
-  const workerClass = forceHammerWorkerClass ? 'hammer' : String(cfg?.workerClass || 'hammer');
+  const workerClass = forceHammerWorkerClass ? String(cfg?.workerClass || 'hammer') : String(cfg?.workerClass || 'hammer');
   // SPEC §1.1.1: the HAM terminal-remediation prompt is reserved for closures
   // that actually have findings to remediate. With `hammer` now the default
   // worker class, gating purely on `workerClass === 'hammer'` would route every
@@ -2558,13 +2560,13 @@ export async function maybeDispatchAmaCloser({
   // final prompt decision rather than this narrower finding-only predicate.
   const closureRemediatesFindings = amaClosureNeedsTerminalRemediation(verdict);
   const useHammerTerminalRemediationPrompt =
-    workerClass === 'hammer' && (
+    isHammerWorkerClass(workerClass) && (
       forceHammerTerminalRemediationPrompt ||
       closureRemediatesFindings
     );
   const currentHeadFinalHammerTerminalRemediation =
     useHammerTerminalRemediationPrompt &&
-    workerClass === 'hammer' &&
+    isHammerWorkerClass(workerClass) &&
     reviewState?.reviewCycleExhausted === true;
   const validatedHamTerminalRemediation =
     verdict?.trace?.hamTerminalRemediation?.ok === true;
@@ -3493,7 +3495,7 @@ export async function maybeDispatchAmaCloser({
   // authors, then fails loud via a GBI operator alert and suppresses further
   // dispatch. Composes with MSM-01 (hammer-merges-under-lease): this is the
   // safety cap, not a replacement, and it only bounds the re-dispatch count.
-  if (workerClass === 'hammer') {
+  if (isHammerWorkerClass(workerClass)) {
     const hammerCapIdentity = { repo, prNumber };
     const hammerRetryLedger = readHammerRetryCapLedger(rootDir, hammerCapIdentity);
     const hammerLifetimeDispatchCeiling = normalizeHammerLifetimeDispatchCeiling(
@@ -3797,7 +3799,7 @@ export async function maybeDispatchAmaCloser({
   // The stable worker identity belongs to the logical closer class. A quota
   // fallback changes only the physical harness (dispatchWorkerClass), so it
   // must not make a hammer retry lose its deterministic worker/worktree id.
-  const workerId = workerClass === 'hammer' ? hammerCloserWorkerId(prNumber) : null;
+  const workerId = isHammerWorkerClass(workerClass) ? hammerCloserWorkerId(prNumber) : null;
   const args = [
     'dispatch',
     '--worker-class', dispatchWorkerClass,
@@ -3843,7 +3845,7 @@ export async function maybeDispatchAmaCloser({
   // (deploy bounce / branch-holder / transient / admit refusal) does NOT call
   // this — that fail-safe is preserved.
   const recordHammerLaunchAgainstCap = (spawnPath) => {
-    if (workerClass !== 'hammer') return;
+    if (!isHammerWorkerClass(workerClass)) return;
     try {
       recordHammerRetryDispatch(rootDir, { repo, prNumber }, {
         jobKey: reviewedSha,
@@ -3917,7 +3919,7 @@ export async function maybeDispatchAmaCloser({
       const ambiguousLaunch = Boolean(parsedFailure.launchRequestId || parsedFailure.dispatchId);
       const branchHolderBlocked = !ambiguousLaunch && isProvisionBranchHolderBlocked(err);
       const dispatchError = String(err?.stderr || err?.message || err);
-      if (branchHolderBlocked && workerClass === 'hammer' && !samePrHammerHolderRetryUsed) {
+      if (branchHolderBlocked && isHammerWorkerClass(workerClass) && !samePrHammerHolderRetryUsed) {
         samePrHammerHolderRetryUsed = true;
         const samePrTeardown = await teardownSamePrHammerHolder({
           err,

@@ -44,16 +44,38 @@ import { existsSync, mkdtempSync, promises as fsPromises, readFileSync, readdirS
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
+  listFollowUpJobsInDir,
   listInProgressFollowUpJobs,
   markFollowUpJobStopped,
   requeueInProgressFollowUpJobForRetry,
   writeFollowUpJob,
 } from './follow-up-jobs.mjs';
 import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-lifecycle.mjs';
+import { resolvePRLifecycle } from './review-state.mjs';
 
 const IN_PROGRESS_STUCK_THRESHOLD_MS_ENV = 'ADVERSARIAL_FOLLOW_UP_IN_PROGRESS_STUCK_THRESHOLD_MS';
 const DEFAULT_IN_PROGRESS_STUCK_THRESHOLD_MS = 10 * 60 * 1000;
 const STALE_HEARTBEAT_STOP_CODE = 'stale-heartbeat';
+
+// FUS-REAP: bound on how many distinct PR-state GitHub reads the
+// finished-PR reaper performs per tick. Deduped by repo#pr, so this caps
+// *distinct* PRs, not candidates. Kept small so the reaper can never
+// dominate a tick's GitHub budget; any PRs beyond the cap are retried on
+// the next tick (the pass is idempotent). Overridable for operators
+// draining a large finished-PR backlog.
+const REAP_MAX_PR_LOOKUPS_ENV = 'ADVERSARIAL_FOLLOW_UP_REAP_MAX_PR_LOOKUPS';
+const DEFAULT_REAP_MAX_PR_LOOKUPS = 25;
+// Extra safety margin for the merge-authority (AMA closer) part-B path: an
+// active AMA closer dispatch for a merged/closed PR is only terminalized
+// once it is ALSO this stale (no observation for the window), so the
+// reaper can never race a closer that merged the PR seconds ago. 30m
+// mirrors AMA_CLOSER_DISPATCHED_LEASE_RECLAIM_AGE_MS; defined locally to
+// keep this module decoupled from the merge-authority subsystem.
+const REAP_AMA_CLOSER_MIN_STALE_MS_ENV = 'ADVERSARIAL_FOLLOW_UP_REAP_AMA_CLOSER_MIN_STALE_MS';
+const DEFAULT_REAP_AMA_CLOSER_MIN_STALE_MS = 30 * 60 * 1000;
+// Sentinel cached against a repo#pr key once the per-tick lookup cap is
+// hit, so later candidates for that PR are deferred (not re-looked-up).
+const REAP_LOOKUP_CAPPED = Symbol('reap-lifecycle-capped');
 const DIRTY_MERGE_PUSH_RETRY_DELAYS_MS = [250, 750, 1500];
 const DIRTY_CONFLICT_SPEC_CAP = 8;
 const MODULE_SPEC_SPLIT_HOME_MAP = new Map([
@@ -1102,11 +1124,377 @@ async function applyPreSpawnLifecycleGate({
   return { action: 'stopped', job: stopped.job, jobPath: stopped.jobPath, reason: lifecycleStop.actionReason };
 }
 
+function resolveReapMaxPrLookups(env = process.env) {
+  const raw = env?.[REAP_MAX_PR_LOOKUPS_ENV];
+  if (raw === undefined || raw === null || raw === '') {
+    return DEFAULT_REAP_MAX_PR_LOOKUPS;
+  }
+  const parsed = Number.parseInt(String(raw), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_REAP_MAX_PR_LOOKUPS;
+  }
+  return parsed;
+}
+
+function resolveReapAmaCloserMinStaleMs(env = process.env) {
+  const raw = env?.[REAP_AMA_CLOSER_MIN_STALE_MS_ENV];
+  if (raw === undefined || raw === null || raw === '') {
+    return DEFAULT_REAP_AMA_CLOSER_MIN_STALE_MS;
+  }
+  const parsed = Number.parseInt(String(raw), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_REAP_AMA_CLOSER_MIN_STALE_MS;
+  }
+  return parsed;
+}
+
+// Stable repo#pr key for a reap candidate, or null when there is no
+// resolvable PR target. Computed locally (rather than importing the
+// consume-loop helper) to avoid a cycle with follow-up-remediation.mjs.
+function reapRepoPrKey(repo, prNumber) {
+  const normalizedRepo = typeof repo === 'string' ? repo.trim() : '';
+  const normalizedPr = Number(prNumber);
+  if (!normalizedRepo || !Number.isInteger(normalizedPr) || normalizedPr <= 0) return null;
+  return `${normalizedRepo}#${normalizedPr}`;
+}
+
+// Age (ms) of an AMA closer dispatch record's most recent observation.
+// Missing timestamps => treated as infinitely stale (reap-eligible),
+// consistent with the AMA closer's own dispatching-staleness fallback.
+function amaCloserDispatchStaleMs(record, nowMs) {
+  const candidates = [
+    record?.lastObservedAt,
+    record?.dispatchedAt,
+    record?.lastAttemptedAt,
+    record?.createdAt,
+  ];
+  for (const value of candidates) {
+    const parsed = parseTimestampMs(value);
+    if (parsed !== null) return nowMs - parsed;
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
+// FUS-REAP: per-tick reaper for follow-up work whose target PR is already
+// terminal (merged or closed). Sibling of sweepStuckInProgressClaims; the
+// daemon runs it just before consume so the queue and the reservation set
+// the consume loop reads are already clear of moot work.
+//
+// Three classes are reaped, each via the owning subsystem's own move /
+// mutation primitive (no new state dir, no raw file moves):
+//
+//   (A) pending + failed follow-up jobs for a merged/closed PR ->
+//       archived to the canonical terminal stopped/ record via
+//       markFollowUpJobStopped with the lifecycle stop code
+//       (operator-merged-pr / operator-closed-pr) and a
+//       `reaped: pr <n> is <state>` reason. `failed` is included because
+//       the consume loop never revisits it.
+//
+//   (B1) orphaned in-progress follow-up claims (dead, non-HQ worker) for a
+//       merged/closed PR -> released to the same terminal record, so their
+//       repoPrKey drops out of the consume loop's blockedRepoPrKeys on the
+//       next tick instead of waiting for the slower stale-heartbeat sweep.
+//
+//   (B2) orphaned AMA closer dispatch records for a merged/closed PR.
+//       On current main, buildFollowUpClaimReservations feeds
+//       blockedRepoPrKeys from in-progress jobs PLUS
+//       listActiveAmaCloserDispatches, whose active/terminal status is
+//       derived from the ledger-refreshed `lastObservedStatus`. A closer
+//       worker that died (keychain-headless OAuth) without a terminal
+//       ledger status leaves a `dispatched`/non-terminal record that
+//       blocks its repoPrKey forever (there is no age escape for the
+//       `dispatched` state in isActiveAmaCloserDispatchRecord). This is the
+//       mechanism behind the live deferredSamePR wedge when activeAtStart=0.
+//       When both AMA impls are injected, such a record is terminalized to
+//       the closer's own vocabulary (merged -> succeeded, closed ->
+//       failed-without-merge) via updateAmaCloserDispatchRecord, but only
+//       once it is ALSO stale past the safety window, so a closer that
+//       merged the PR seconds ago is never raced. The AMA primitives are
+//       injected (not imported) to keep this module decoupled from the
+//       merge-authority subsystem and hermetically testable.
+//
+// Fail-closed contract:
+//   * A candidate is reaped ONLY when a *live* gh read (source==='live')
+//     reports the PR merged or closed. null/mirror/errored/rate-limited,
+//     or an OPEN PR, leaves it untouched.
+//   * An in-progress liveness-probe error is treated as "alive" (never
+//     release a claim we cannot prove is dead).
+//   * AMA closer dispatches also require staleness past the safety window.
+//   * Distinct PR lookups are capped per tick; PRs beyond the cap are
+//     deferred to the next tick, never reaped without a state read.
+//   * Idempotent: reaped work leaves pending/failed/in-progress and AMA
+//     records become terminal, so a second pass re-scans nothing.
+//   * Never merges, never kills a worker, never touches a git working tree.
+async function reapFinishedPrFollowUpJobs({
+  rootDir,
+  now = () => new Date().toISOString(),
+  resolvePRLifecycleImpl = resolvePRLifecycle,
+  execFileImpl,
+  isWorkerAlive = null,
+  listActiveAmaCloserDispatchesImpl = null,
+  updateAmaCloserDispatchRecordImpl = null,
+  maxPrLookups = resolveReapMaxPrLookups(),
+  amaCloserMinStaleMs = resolveReapAmaCloserMinStaleMs(),
+  log = console,
+} = {}) {
+  const nowIso = now();
+  const nowMs = parseTimestampMs(nowIso) ?? Date.now();
+  const lifecycleByKey = new Map();
+  let liveLookups = 0;
+  let lookupCapHit = false;
+
+  const counters = {
+    scanned: 0,
+    reaped: 0,
+    released: 0,
+    amaScanned: 0,
+    amaReleased: 0,
+    skippedOpen: 0,
+    skippedUnreadable: 0,
+    skippedAliveWorker: 0,
+    skippedFreshAmaDispatch: 0,
+    skippedNoTarget: 0,
+    skippedCapped: 0,
+    prLookups: 0,
+    lookupCapHit: false,
+    reapedPrs: [],
+    releasedPrs: [],
+    amaReleasedPrs: [],
+  };
+
+  // Resolve (and memoize) the lifecycle for a candidate's PR. Only a
+  // successful live read is cached as a usable lifecycle; anything else
+  // caches null (treated as unreadable). Returns a { skip } marker or
+  // { lifecycle }.
+  async function resolveLifecycleFor({ repo, prNumber, job = null }) {
+    const key = reapRepoPrKey(repo, prNumber);
+    if (!key) return { skip: 'no-target' };
+    if (lifecycleByKey.has(key)) {
+      const cached = lifecycleByKey.get(key);
+      if (cached === REAP_LOOKUP_CAPPED) return { skip: 'capped' };
+      return { lifecycle: cached };
+    }
+    if (liveLookups >= maxPrLookups) {
+      lookupCapHit = true;
+      lifecycleByKey.set(key, REAP_LOOKUP_CAPPED);
+      return { skip: 'capped' };
+    }
+    liveLookups += 1;
+    const lifecycle = await resolveJobPRLifecycleSafe({
+      rootDir,
+      job: job || { repo, prNumber },
+      resolvePRLifecycleImpl,
+      execFileImpl,
+      log,
+    });
+    // Fail closed: a definitive terminal decision requires a live GitHub
+    // read. A mirror hit could be stale (a closed PR may have reopened),
+    // and null means we learned nothing.
+    const definitive = lifecycle && lifecycle.source === 'live' ? lifecycle : null;
+    lifecycleByKey.set(key, definitive);
+    return { lifecycle: definitive };
+  }
+
+  // Returns the terminal lifecycle stop ({operator-merged-pr|operator-
+  // closed-pr}) for a candidate, or null when it must be left untouched
+  // (recording the skip reason). Shared by all three reap classes.
+  async function resolveTerminalStopFor(candidate, { onSkip }) {
+    const resolved = await resolveLifecycleFor(candidate);
+    if (resolved.skip === 'no-target') { onSkip('skippedNoTarget'); return null; }
+    if (resolved.skip === 'capped') { onSkip('skippedCapped'); return null; }
+    const lifecycle = resolved.lifecycle;
+    if (!lifecycle || lifecycle.source !== 'live') { onSkip('skippedUnreadable'); return null; }
+    if (lifecycle.prState !== 'merged' && lifecycle.prState !== 'closed') {
+      onSkip('skippedOpen');
+      return null;
+    }
+    const lifecycleStop = lifecycleStopDecision(lifecycle, {
+      repo: candidate.repo,
+      prNumber: candidate.prNumber,
+      site: 'consume',
+      job: candidate.job || null,
+    });
+    if (
+      !lifecycleStop
+      || (lifecycleStop.stopCode !== 'operator-merged-pr'
+        && lifecycleStop.stopCode !== 'operator-closed-pr')
+    ) {
+      // Defensive: unreachable for merged/closed. Fail closed.
+      onSkip('skippedOpen');
+      return null;
+    }
+    return { lifecycle, lifecycleStop };
+  }
+
+  // ---- (A) pending + failed follow-up jobs, (B1) in-progress orphans ----
+  const jobCandidates = [];
+  for (const dirKey of ['pending', 'failed']) {
+    for (const { job, jobPath } of listFollowUpJobsInDir(rootDir, dirKey)) {
+      jobCandidates.push({ kind: 'queue', fromStatus: dirKey, repo: job?.repo, prNumber: job?.prNumber, job, jobPath });
+    }
+  }
+  // In-progress orphans are only considered when the caller provides a
+  // liveness probe — without it we cannot prove a worker is dead, so we
+  // must not touch in-progress claims at all.
+  if (typeof isWorkerAlive === 'function') {
+    for (const { job, jobPath } of listInProgressFollowUpJobs(rootDir)) {
+      jobCandidates.push({ kind: 'in-progress', fromStatus: 'in_progress', repo: job?.repo, prNumber: job?.prNumber, job, jobPath });
+    }
+  }
+
+  for (const candidate of jobCandidates) {
+    counters.scanned += 1;
+    const { job, jobPath, fromStatus, kind } = candidate;
+
+    if (kind === 'in-progress') {
+      const worker = job?.remediationWorker || {};
+      // HQ-dispatched liveness is HQ's concern; never guess it here.
+      if (worker.dispatchMode === 'hq') { counters.skippedAliveWorker += 1; continue; }
+      const processId = Number(worker.processId);
+      if (Number.isInteger(processId) && processId > 0) {
+        let alive = true;
+        try {
+          alive = Boolean(isWorkerAlive(processId));
+        } catch (err) {
+          alive = true; // Fail closed: unreadable probe => assume alive.
+          log.warn?.(
+            `[follow-up-tick ${nowIso}] reap-liveness-failed jobId=${job?.jobId || basename(jobPath)}: ${err?.message || err}`
+          );
+        }
+        if (alive) { counters.skippedAliveWorker += 1; continue; }
+      }
+      // No PID / dead PID => eligible orphan, subject to the PR-state gate.
+    }
+
+    const terminal = await resolveTerminalStopFor(candidate, {
+      onSkip: (key) => { counters[key] += 1; },
+    });
+    if (!terminal) continue;
+    const { lifecycle, lifecycleStop } = terminal;
+
+    const prStateUpper = lifecycle.prState.toUpperCase();
+    const stopReason = `reaped: pr ${job.prNumber} is ${prStateUpper}; ${lifecycleStop.stopReason}`;
+    const remediationWorker = {
+      ...(job?.remediationWorker || {}),
+      state: lifecycleStop.workerState,
+      reapedAt: nowIso,
+      reapReason: lifecycleStop.stopCode,
+      reapedFromStatus: fromStatus,
+      prState: lifecycle.prState,
+    };
+    if (lifecycleStop.stopCode === 'operator-merged-pr' && lifecycle.mergedAt) {
+      remediationWorker.prMergedAt = lifecycle.mergedAt;
+    }
+    if (lifecycleStop.stopCode === 'operator-closed-pr' && lifecycle.closedAt) {
+      remediationWorker.prClosedAt = lifecycle.closedAt;
+    }
+
+    markFollowUpJobStopped({
+      rootDir,
+      jobPath,
+      stoppedAt: nowIso,
+      stopCode: lifecycleStop.stopCode,
+      stopReason,
+      sourceStatus: fromStatus,
+      remediationWorker,
+    });
+
+    const record = { repo: job.repo, prNumber: job.prNumber, prState: lifecycle.prState, fromStatus };
+    if (kind === 'in-progress') { counters.released += 1; counters.releasedPrs.push(record); }
+    else { counters.reaped += 1; counters.reapedPrs.push(record); }
+    log.log?.(
+      `[follow-up-tick ${nowIso}] reaped-finished-pr jobId=${job?.jobId || basename(jobPath)} ` +
+      `pr=${job.repo}#${job.prNumber} state=${prStateUpper} from=${fromStatus} ` +
+      `stopCode=${lifecycleStop.stopCode}`
+    );
+  }
+
+  // ---- (B2) orphaned AMA closer dispatch reservations ----
+  const amaEnabled = typeof listActiveAmaCloserDispatchesImpl === 'function'
+    && typeof updateAmaCloserDispatchRecordImpl === 'function';
+  if (amaEnabled) {
+    let amaDispatches = [];
+    try {
+      amaDispatches = listActiveAmaCloserDispatchesImpl(rootDir, { now: nowIso, log }) || [];
+    } catch (err) {
+      log.warn?.(`[follow-up-tick ${nowIso}] reap-ama-list-failed: ${err?.message || err}`);
+      amaDispatches = [];
+    }
+    for (const amaRecord of amaDispatches) {
+      counters.amaScanned += 1;
+      const candidate = { kind: 'ama-dispatch', repo: amaRecord?.repo, prNumber: amaRecord?.prNumber, amaRecord };
+      const terminal = await resolveTerminalStopFor(candidate, {
+        onSkip: (key) => { counters[key] += 1; },
+      });
+      if (!terminal) continue;
+      const { lifecycle, lifecycleStop } = terminal;
+
+      // Safety margin: only terminalize a merge-authority dispatch once it
+      // is also stale past the window, so a closer that merged the PR
+      // seconds ago is never raced.
+      const staleMs = amaCloserDispatchStaleMs(amaRecord, nowMs);
+      if (staleMs < amaCloserMinStaleMs) {
+        counters.skippedFreshAmaDispatch += 1;
+        continue;
+      }
+
+      const prStateUpper = lifecycle.prState.toUpperCase();
+      const terminalStatus = lifecycle.prState === 'merged' ? 'succeeded' : 'failed-without-merge';
+      try {
+        updateAmaCloserDispatchRecordImpl(
+          rootDir,
+          { repo: amaRecord.repo, prNumber: amaRecord.prNumber, headSha: amaRecord.headSha },
+          (current) => {
+            const base = current || amaRecord;
+            if (!base) return null;
+            return {
+              ...base,
+              lastObservedStatus: terminalStatus,
+              lastObservedAt: nowIso,
+              reapedByFollowUpReaper: true,
+              reapedFromPrState: lifecycle.prState,
+              reapReason: lifecycleStop.stopCode,
+              reapedAt: nowIso,
+            };
+          }
+        );
+      } catch (err) {
+        log.warn?.(
+          `[follow-up-tick ${nowIso}] reap-ama-update-failed pr=${amaRecord.repo}#${amaRecord.prNumber}: ${err?.message || err}`
+        );
+        continue;
+      }
+      counters.amaReleased += 1;
+      counters.amaReleasedPrs.push({
+        repo: amaRecord.repo,
+        prNumber: amaRecord.prNumber,
+        prState: lifecycle.prState,
+        terminalStatus,
+      });
+      log.log?.(
+        `[follow-up-tick ${nowIso}] reaped-ama-closer-dispatch pr=${amaRecord.repo}#${amaRecord.prNumber} ` +
+        `state=${prStateUpper} terminalStatus=${terminalStatus} stopCode=${lifecycleStop.stopCode}`
+      );
+    }
+  }
+
+  counters.prLookups = liveLookups;
+  counters.lookupCapHit = lookupCapHit;
+  return counters;
+}
+
 export {
   IN_PROGRESS_STUCK_THRESHOLD_MS_ENV,
   DEFAULT_IN_PROGRESS_STUCK_THRESHOLD_MS,
   STALE_HEARTBEAT_STOP_CODE,
+  REAP_MAX_PR_LOOKUPS_ENV,
+  DEFAULT_REAP_MAX_PR_LOOKUPS,
+  REAP_AMA_CLOSER_MIN_STALE_MS_ENV,
+  DEFAULT_REAP_AMA_CLOSER_MIN_STALE_MS,
   applyPreSpawnLifecycleGate,
+  reapFinishedPrFollowUpJobs,
+  resolveReapMaxPrLookups,
+  resolveReapAmaCloserMinStaleMs,
   attemptDirtyMerge,
   buildDirtyConflictHammerPrompt,
   emitHeartbeatsForActiveJobs,

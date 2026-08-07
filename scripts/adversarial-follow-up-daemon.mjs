@@ -56,9 +56,14 @@ import { loadConfigCached } from '../src/config-loader.mjs';
 import { archiveStoppedFollowUpJobs, reapTerminalFollowUpWorkspaces } from '../src/follow-up-jobs.mjs';
 import {
   emitHeartbeatsForActiveJobs,
+  reapFinishedPrFollowUpJobs,
   resolveInProgressStuckThresholdMs,
   sweepStuckInProgressClaims,
 } from '../src/follow-up-stuck-claim-sweep.mjs';
+import {
+  listActiveAmaCloserDispatches,
+  updateAmaCloserDispatchRecord,
+} from '../src/ama/dispatch-closer.mjs';
 import { writeFileAtomic } from '../src/atomic-write.mjs';
 import {
   HANDOFF_WAKE_DAEMONS,
@@ -451,6 +456,7 @@ async function runFollowUpDaemonIteration({
   reconcileInProgressFollowUpJobsImpl = reconcileInProgressFollowUpJobs,
   emitHeartbeatsForActiveJobsImpl = emitHeartbeatsForActiveJobs,
   sweepStuckInProgressClaimsImpl = sweepStuckInProgressClaims,
+  reapFinishedPrFollowUpJobsImpl = reapFinishedPrFollowUpJobs,
   consumeFollowUpJobsUntilCapacityImpl = consumeFollowUpJobsUntilCapacity,
   reapCloserHammerWorktreesImpl = reapCloserHammerWorktrees,
   retryFailedCommentDeliveriesImpl = retryFailedCommentDeliveries,
@@ -489,6 +495,44 @@ async function runFollowUpDaemonIteration({
       'stale-claim-sweep',
       `scanned=${result.scanned} reclaimed=${result.reclaimed} skipped=${result.skipped} ` +
       `thresholdMs=${result.thresholdMs}`
+    );
+  });
+  if (shouldStop()) return;
+  // Reap follow-up work whose target PR is already merged/closed BEFORE
+  // consume: (A) pending/failed jobs, (B1) orphaned in-progress claims,
+  // and (B2) orphaned AMA closer dispatch reservations that
+  // buildFollowUpClaimReservations would otherwise leave populating
+  // blockedRepoPrKeys (the deferredSamePR wedge). Fail-closed: only a live
+  // gh read that reports merged/closed reaps anything; open/unreadable is
+  // left alone. The AMA primitives are passed so part-B can reconcile the
+  // ledger-backed closer reservations, not just local in-progress files.
+  await runStep('reap-finished-pr', async () => {
+    const result = await reapFinishedPrFollowUpJobsImpl({
+      rootDir: ROOT,
+      isWorkerAlive: isWorkerProcessRunning,
+      listActiveAmaCloserDispatchesImpl: listActiveAmaCloserDispatches,
+      updateAmaCloserDispatchRecordImpl: updateAmaCloserDispatchRecord,
+    });
+    const reapedPrs = result.reapedPrs
+      .map((p) => `${p.repo}#${p.prNumber}:${p.prState}`)
+      .join(',');
+    const releasedPrs = result.releasedPrs
+      .map((p) => `${p.repo}#${p.prNumber}:${p.prState}`)
+      .join(',');
+    const amaReleasedPrs = result.amaReleasedPrs
+      .map((p) => `${p.repo}#${p.prNumber}:${p.prState}`)
+      .join(',');
+    logTick(
+      'reap-finished-pr',
+      `scanned=${result.scanned} reaped=${result.reaped} released=${result.released} ` +
+      `amaScanned=${result.amaScanned} amaReleased=${result.amaReleased} ` +
+      `skippedOpen=${result.skippedOpen} skippedUnreadable=${result.skippedUnreadable} ` +
+      `skippedAliveWorker=${result.skippedAliveWorker} skippedFreshAmaDispatch=${result.skippedFreshAmaDispatch} ` +
+      `skippedNoTarget=${result.skippedNoTarget} skippedCapped=${result.skippedCapped} ` +
+      `prLookups=${result.prLookups} lookupCapHit=${result.lookupCapHit}` +
+      (reapedPrs ? ` reapedPrs=${reapedPrs}` : '') +
+      (releasedPrs ? ` releasedPrs=${releasedPrs}` : '') +
+      (amaReleasedPrs ? ` amaReleasedPrs=${amaReleasedPrs}` : '')
     );
   });
   if (shouldStop()) return;

@@ -38,6 +38,37 @@ export function isGroundedProviderState(state) {
   return GROUNDED_PROVIDER_STATES.has(String(state || '').trim().toLowerCase());
 }
 
+// AFH-02 soft-grounding verdict (agent-os #4999), carried on each
+// `providerStatuses[]` row as `afhGrounding`, BESIDE the hard `state` field it
+// never edits. Shape (the first four keys are the consumed contract; the two
+// counts travel alongside so an audit can say *why*):
+//
+//   { grounded, signals, threshold, reason, quotaExhaustedKills, suspendedLrqDepth }
+//
+// The verdict is `null` when AFH-02 could not read the ledger for that provider
+// (its documented fail-open degradation) and absent entirely on an `hq` build
+// that predates AFH-02. Both cases normalize to `null` here, which every
+// consumer must read as "no soft signal" — never as "grounded".
+function normalizedCount(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function normalizeAfhGroundingVerdict(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  // A verdict without a boolean `grounded` is not a verdict — fail open rather
+  // than coercing a string/number into a routing decision.
+  if (typeof raw.grounded !== 'boolean') return null;
+  return Object.freeze({
+    grounded: raw.grounded,
+    signals: normalizedCount(raw.signals),
+    threshold: normalizedCount(raw.threshold),
+    reason: raw.reason === undefined || raw.reason === null ? null : String(raw.reason),
+    quotaExhaustedKills: normalizedCount(raw.quotaExhaustedKills ?? raw.quota_exhausted_kills),
+    suspendedLrqDepth: normalizedCount(raw.suspendedLrqDepth ?? raw.suspended_lrq_depth),
+  });
+}
+
 function extractJsonObject(text, label) {
   const raw = String(text || '').trim();
   if (!raw) {
@@ -65,6 +96,7 @@ export function parseHqFleetQuotaStatus(stdout) {
     source: entry?.source || 'hq-fleet-quota-status',
     lastGoodAt: entry?.lastGoodAt || entry?.last_good_at || null,
     lastProbeAt: entry?.lastProbeAt || entry?.last_probe_at || null,
+    afhGrounding: normalizeAfhGroundingVerdict(entry?.afhGrounding ?? entry?.afh_grounding),
   }));
 }
 
@@ -75,19 +107,22 @@ export function parseHqFleetQuotaStatus(stdout) {
 export function providerAvailabilityFromFleetStatus(stdout, { provider } = {}) {
   const normalizedProvider = String(provider || '').trim().toLowerCase();
   if (!normalizedProvider) {
-    return { available: false, state: 'unknown-provider', source: 'hq-fleet-quota-status' };
+    return { available: false, state: 'unknown-provider', source: 'hq-fleet-quota-status', afhGrounding: null };
   }
   const statuses = parseHqFleetQuotaStatus(stdout);
   const status = statuses.find((entry) => entry.provider === normalizedProvider && entry.authPath === 'oauth')
     || statuses.find((entry) => entry.provider === normalizedProvider);
   if (!status) {
-    return { available: false, state: 'missing-provider-status', source: 'hq-fleet-quota-status' };
+    return { available: false, state: 'missing-provider-status', source: 'hq-fleet-quota-status', afhGrounding: null };
   }
   return {
     available: status.state === 'ok',
     state: status.state || 'unknown',
     source: 'hq-fleet-quota-status',
     checkedAt: status.lastProbeAt || null,
+    // AFH-02 soft verdict rides alongside; `available`/`state` keep their exact
+    // pre-AFH hard semantics so existing HHR consumers are unchanged.
+    afhGrounding: status.afhGrounding || null,
   };
 }
 

@@ -3,6 +3,11 @@ import { infraRecoverableFailureClass, reviewPopulationFailureClass } from './re
 import { resolveGeminiReviewerModeWithSource } from './role-config.mjs';
 import { readCascadeState } from './reviewer-cascade.mjs';
 import { isCrossModelReviewWaived } from './adapters/subject/github-pr/routing.mjs';
+import {
+  afhReviewerFallbackDecision,
+  applyAfhReviewerFallbackDecision,
+  reviewerModelGrounding,
+} from './afh-reviewer-fallback.mjs';
 
 // Quota-exhausted fallback backoff, replicated verbatim from watcher.mjs (its
 // copy stays for the other watcher call sites); a module-load env read, so both
@@ -212,6 +217,27 @@ export function resolveGeminiReviewerModeForWatcher({
   }
 }
 
+// AFH-04 — apply the ordered codex → gemini → claude(last-resort) reviewer
+// fallback on top of an already-resolved (gemini-layered) route. Pure: the
+// caller supplies the AFH-02 grounding snapshot; a null/unavailable snapshot
+// returns `baseRoute` untouched, which is the fail-open contract.
+export function applyAfhReviewerRouteForAttempt({
+  subject = null,
+  baseRoute,
+  grounding = null,
+  geminiReviewerMode = null,
+  routeTable = baseRoute?.routeTable,
+} = {}) {
+  const decision = afhReviewerFallbackDecision({
+    builderClass: subject?.builderClass || baseRoute?.builderClass || null,
+    baseRoute,
+    grounding,
+    geminiReviewerMode,
+    ...(routeTable ? { routeTable } : {}),
+  });
+  return { decision, route: applyAfhReviewerFallbackDecision(baseRoute, decision) };
+}
+
 export function selectReviewerRouteForAttempt({
   subject,
   baseRoute,
@@ -219,6 +245,7 @@ export function selectReviewerRouteForAttempt({
   repoPath,
   prNumber,
   env = process.env,
+  afhGrounding = null,
 }) {
   const threshold = resolveReviewerTimeoutFallbackThreshold(env);
   if (threshold <= 0) return baseRoute;
@@ -231,6 +258,22 @@ export function selectReviewerRouteForAttempt({
   if (!fallbackModel || fallbackModel === baseRoute?.reviewerModel) return baseRoute;
   const fallbackRoute = REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL[fallbackModel];
   if (!fallbackRoute) return baseRoute;
+  // AFH-04: never switch the timeout fallback onto a reviewer whose provider is
+  // authoritatively grounded (hard or AFH-02 soft) — that trades a slow reviewer
+  // for one that cannot spawn at all. No signal → unchanged behavior.
+  const fallbackGrounding = reviewerModelGrounding(afhGrounding, fallbackModel);
+  if (fallbackGrounding.grounded) {
+    return {
+      ...baseRoute,
+      afhTimeoutFallbackSkipped: {
+        candidateReviewerModel: fallbackModel,
+        provider: fallbackGrounding.provider,
+        state: fallbackGrounding.state,
+        hardGrounded: fallbackGrounding.hardGrounded,
+        softGrounded: fallbackGrounding.softGrounded,
+      },
+    };
+  }
   const builderClass = subject?.builderClass || baseRoute.builderClass || null;
   return {
     ...baseRoute,

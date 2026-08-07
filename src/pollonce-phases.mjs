@@ -136,12 +136,17 @@ import {
 } from './reviewer-orphan-reconcile.mjs';
 import { reviewerBotLogin } from './reviewer-reattach.mjs';
 import {
+  applyAfhReviewerRouteForAttempt,
   primaryReviewerQuotaCappedForRow,
   resolveGeminiReviewerModeForWatcher,
   reviewPopulationRetryDecision,
   selectReviewerRouteForAttempt,
   shouldBypassPrimaryReviewerQuotaHold,
 } from './reviewer-route-selection.mjs';
+import {
+  createAfhReviewerGroundingCache,
+  describeAfhReviewerFallback,
+} from './afh-reviewer-fallback.mjs';
 import {
   evaluateRoundBudgetForReview,
   parsePipelineStageStates,
@@ -157,6 +162,14 @@ import { getStalePostedReviewAutoRereviewSuppression } from './stale-posted-revi
 import { computeVocabularyFatigueFindingForPR } from './vocabulary-fatigue.mjs';
 import { signalMalformedTitleFailure } from './watcher-fail-loud.mjs';
 import { reserveReviewerMemoryAdmission } from './watcher-reviewer-pool.mjs';
+
+// AFH-04 — one bounded `hq fleet quota status --json` read per TTL window (not
+// one per PR) feeding the ordered reviewer fallback. Constructing the cache is
+// pure (a closure; no I/O until first call), so it lives at module scope rather
+// than growing watcher.mjs, which is under a hard ARC-18 line ratchet. Tests and
+// alternate schedulers override it by passing `getAfhReviewerGroundingForTick`
+// in ctx. Disable the whole hop with ADVERSARIAL_AFH_REVIEWER_FALLBACK=0.
+const defaultAfhReviewerGroundingForTick = createAfhReviewerGroundingCache();
 
 export async function processReviewSubject(entry, ctx) {
   const { subject, prNumber, current: cachedCurrent } = entry;
@@ -174,6 +187,7 @@ export async function processReviewSubject(entry, ctx) {
     reviewerMemoryReservationState,
     reviewerMemoryAdmissionSampleForTick,
     getRoutingTierReadinessForTick,
+    getAfhReviewerGroundingForTick,
     reviewerCommandFailedReviewProbe,
     domainId,
     domainReviewerRuntimeAdapter,
@@ -712,15 +726,63 @@ export async function processReviewSubject(entry, ctx) {
             `fell back to reviewer=${geminiBaseRoute.geminiIntegrityGuard.fellBackTo}`
         );
       }
-      const route = selectReviewerRouteForAttempt({
+      // AFH-04 — ordered reviewer fallback (codex → gemini → claude LAST RESORT)
+      // on the AFH-02 soft/hard provider-grounding signal. The read is memoized
+      // per tick and fail-open: an unavailable/unreadable `hq fleet quota status
+      // --json` yields a snapshot with `available: false`, which leaves the
+      // configured primary/gemini route untouched. It can never throw here.
+      let afhGrounding = null;
+      {
+        const readAfhGrounding = typeof getAfhReviewerGroundingForTick === 'function'
+          ? getAfhReviewerGroundingForTick
+          : defaultAfhReviewerGroundingForTick;
+        try {
+          afhGrounding = await readAfhGrounding();
+        } catch (err) {
+          afhGrounding = null;
+          console.warn(
+            `[watcher] afh-reviewer-grounding read failed for ${repoPath}#${prNumber}: ` +
+              `${err?.message || err}; failing open to the configured reviewer route`
+          );
+        }
+      }
+      const afhSelection = applyAfhReviewerRouteForAttempt({
         subject,
         baseRoute: geminiBaseRoute,
+        grounding: afhGrounding,
+        geminiReviewerMode,
+        routeTable: baseRoute.routeTable,
+      });
+      const afhBaseRoute = afhSelection.route;
+      if (afhSelection.decision.applied) {
+        console.warn(
+          `[watcher] reviewer-selection ${repoPath}#${prNumber} ` +
+            `${describeAfhReviewerFallback(afhSelection.decision)}`
+        );
+      } else if (afhSelection.decision.reason === 'all-candidates-grounded') {
+        console.warn(
+          `[watcher] afh-reviewer-fallback found no ungrounded reviewer for ${repoPath}#${prNumber}; ` +
+            `keeping reviewer=${geminiBaseRoute.reviewerModel} (auto-reverts on provider recovery)`
+        );
+      }
+      const route = selectReviewerRouteForAttempt({
+        subject,
+        baseRoute: afhBaseRoute,
         rootDir: ROOT,
         repoPath,
         prNumber,
+        afhGrounding,
       });
 
-      crossModelWaiverReason = route.timeoutFallback
+      crossModelWaiverReason = route.afhReviewerFallback?.lastResort
+        ? (
+            `AFH last-resort reviewer fallback switched reviewer=${route.afhReviewerFallback.fromReviewerModel} ` +
+            `to reviewer=${route.afhReviewerFallback.toReviewerModel} because every cross-model reviewer ` +
+            `(including gemini) is grounded (${route.afhReviewerFallback.reason}); ` +
+            `reviewer=${route.afhReviewerFallback.toReviewerModel} matches builder=${route.builderClass}, ` +
+            'so the cross-model guarantee is waived until a provider recovers.'
+          )
+        : route.timeoutFallback
         ? (
             `reviewer-timeout fallback switched reviewer=${route.timeoutFallback.fromReviewerModel} ` +
             `to reviewer=${route.timeoutFallback.toReviewerModel} after ` +

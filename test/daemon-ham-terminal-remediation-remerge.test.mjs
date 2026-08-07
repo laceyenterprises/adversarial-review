@@ -309,3 +309,80 @@ test('a HAM daemon re-merge that fails closed falls through to the hammer (never
     rmSync(rootDir, { recursive: true, force: true });
   }
 });
+
+test('the HAM re-merge validates the AUDIT-CHECKED head, never a live head that moved past it', async () => {
+  const rootDir = tempRoot();
+  const MOVED_HEAD = 'pushed-after-audit-z000000000000000000000';
+  try {
+    let attemptCalled = false;
+    const result = await runDaemonCleanMergeAttempt(
+      findingsReviewArgs(rootDir, {
+        readAmaAuditEntryImpl: () => hamValidatedAuditEntry(HAM_HEAD),
+        // A commit landed between the audit check (HAM_HEAD) and this fetch.
+        fetchRollupImpl: async () => ({
+          state: 'OPEN',
+          headSha: MOVED_HEAD,
+          headRefName: 'ham/branch',
+          statusCheckRollup: [GREEN_CHECK],
+          mergeable: 'MERGEABLE',
+          mergeStateStatus: 'CLEAN',
+        }),
+        attemptDaemonCleanMergeImpl: async () => {
+          attemptCalled = true;
+          return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true, attempts: 1 };
+        },
+      }),
+    );
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.DEFERRED);
+    assert.equal(result.reason, 'pr-head-moved');
+    assert.equal(attemptCalled, false, 'must never merge a head that advanced past the audit check');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('the HAM re-merge declines when the audit marker resolves without a concrete head to pin it to', async () => {
+  const rootDir = tempRoot();
+  const LIVE_HEAD = 'unvalidated-live-head-q00000000000000000';
+  try {
+    let attemptCalled = false;
+    const result = await runDaemonCleanMergeAttempt(
+      findingsReviewArgs(rootDir, {
+        // No snapshot head at all: neither `currentPrHeadSha` nor `candidate.headSha`.
+        currentPrHeadSha: null,
+        candidate: {
+          baseBranch: 'main',
+          statusCheckRollup: [GREEN_CHECK],
+          mergeable: 'MERGEABLE',
+          mergeStateStatus: 'CLEAN',
+          prState: 'open',
+          branchProtection: { requiredContexts: ['agent-os/adversarial-gate'] },
+        },
+        // A reader that is not head-scoped would still report "validated" here.
+        headHasValidatedHamTerminalRemediationImpl: () => true,
+        fetchRollupImpl: async () => ({
+          state: 'OPEN',
+          headSha: LIVE_HEAD,
+          headRefName: 'ham/branch',
+          statusCheckRollup: [GREEN_CHECK],
+          mergeable: 'MERGEABLE',
+          mergeStateStatus: 'CLEAN',
+        }),
+        attemptDaemonCleanMergeImpl: async () => {
+          attemptCalled = true;
+          return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true, attempts: 1 };
+        },
+      }),
+    );
+
+    // Without a pinned audit head the head-moved guard cannot fire, so the lane
+    // itself must fail closed rather than merge whatever the live head happens
+    // to be. Falls through to the capped hammer, never a park.
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(result.reason, 'blocking-findings-present');
+    assert.equal(attemptCalled, false, 'must not merge an unvalidated live head');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});

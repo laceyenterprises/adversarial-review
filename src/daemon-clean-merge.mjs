@@ -226,6 +226,13 @@ function isHamTerminalRemediationValidatedAttempt(attempt, headSha) {
  * worker and without burning the per-head hammer retry cap. Fails closed (returns
  * false) on any read error or missing marker, so the caller simply falls through
  * to the existing capped-hammer path.
+ *
+ * `headSha` is a real, required argument of `readAmaAuditEntry(hqRoot, repo,
+ * prNumber, headSha)` — AMA audit entries are stored PER HEAD, not per PR
+ * (`amaAuditFilePath` builds `<repo>-pr-<n>-<headSha>.json` and throws when
+ * `headSha` is missing), so the read is already scoped to this exact head. The
+ * per-attempt `validatedHead` re-check below is belt-and-braces against an
+ * injected/relocated reader that is not head-scoped.
  */
 export function headHasValidatedHamTerminalRemediation({
   hqRoot,
@@ -317,6 +324,14 @@ export async function runDaemonCleanMergeAttempt({
   // mergeable, no live worker → daemon merges" path. `attemptDaemonCleanMerge`
   // still re-verifies green CI + mergeable + head-match LIVE, so a still-pending
   // head simply declines and falls through unchanged.
+  //
+  // `hamAuditHead` is the EXACT head the AMA audit marker is checked against, and
+  // it is the only head this lane may ever merge. Keep it in a variable and pass
+  // that same value on to `attemptDaemonCleanMerge` as `validatedHead`: reading
+  // the freshly-fetched `liveHead` there instead would make the callee's
+  // head-match assertion compare `liveHead` to itself, so a head that advanced
+  // after this audit check would be merged unvalidated.
+  const hamAuditHead = currentPrHeadSha || candidate?.headSha || null;
   let hamTerminalRemediationHead = false;
   if (!isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
     const uncleanReason =
@@ -325,10 +340,13 @@ export async function runDaemonCleanMergeAttempt({
       hqRoot,
       repo: repoPath,
       prNumber,
-      headSha: currentPrHeadSha || candidate?.headSha || null,
+      headSha: hamAuditHead,
       readAmaAuditEntryImpl,
     });
-    if (!hamTerminalRemediationHead) {
+    // Fail closed if the marker resolved without a concrete head to pin it to:
+    // this lane merges `hamAuditHead` verbatim, so an empty one would have no
+    // validated head at all. Falls through to the capped hammer, never a merge.
+    if (!hamTerminalRemediationHead || !String(hamAuditHead || '').trim()) {
       return NOT_TAKEN(uncleanReason);
     }
   }
@@ -350,7 +368,7 @@ export async function runDaemonCleanMergeAttempt({
       error: String(err?.message || err),
     };
   }
-  const snapshotHead = String(currentPrHeadSha || candidate?.headSha || '').trim();
+  const snapshotHead = String(hamAuditHead || '').trim();
   const liveHead = String(liveRollup?.headSha || liveRollup?.headRefOid || '').trim();
   if (!liveHead) {
     return {
@@ -451,7 +469,13 @@ export async function runDaemonCleanMergeAttempt({
         `at this exact head — substituting operator accountability for the clean daemon merge under lease`,
     );
   }
-  const daemonValidatedHead = hamTerminalRemediationHead ? liveHead : validatedHead;
+  // Merge the AUDIT-VERIFIED head, never the freshly-fetched `liveHead`. Handing
+  // `liveHead` to `attemptDaemonCleanMerge` as `validatedHead` would collapse its
+  // head-match protection into `liveHead === liveHead` — always true — so any
+  // commit that landed after the audit check above would merge unvalidated.
+  // Passing `hamAuditHead` keeps that assertion a real comparison: a head that
+  // moved between the audit check and the merge fails head-match and declines.
+  const daemonValidatedHead = hamTerminalRemediationHead ? hamAuditHead : validatedHead;
   const daemonVerdict = hamTerminalRemediationHead
     ? 'ham_terminal_remediation_validated'
     : settledVerdict;

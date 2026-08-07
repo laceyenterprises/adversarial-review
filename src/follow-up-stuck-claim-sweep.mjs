@@ -1161,6 +1161,9 @@ function reapRepoPrKey(repo, prNumber) {
 // Age (ms) of an AMA closer dispatch record's most recent observation.
 // Missing timestamps => treated as infinitely stale (reap-eligible),
 // consistent with the AMA closer's own dispatching-staleness fallback.
+// `parseTimestampMs` here is the module-local helper defined above (see the
+// top of this file), NOT an import — this module deliberately owns its own
+// tolerant ISO/epoch parser so the sweep never depends on a util module.
 function amaCloserDispatchStaleMs(record, nowMs) {
   const candidates = [
     record?.lastObservedAt,
@@ -1373,6 +1376,11 @@ async function reapFinishedPrFollowUpJobs({
     const { lifecycle, lifecycleStop } = terminal;
 
     const prStateUpper = lifecycle.prState.toUpperCase();
+    // `.stopReason` (the full operator-facing explanation), NOT `.actionReason`
+    // (the short machine code, e.g. 'pr-merged'). lifecycleStopDecision returns
+    // both; the durable stopped record wants the prose, and the machine code is
+    // already recorded separately as remediationWorker.reapReason /
+    // remediationPlan.stop.code below.
     const stopReason = `reaped: pr ${job.prNumber} is ${prStateUpper}; ${lifecycleStop.stopReason}`;
     const remediationWorker = {
       ...(job?.remediationWorker || {}),

@@ -119,7 +119,18 @@ test('reaper: pending job whose PR is MERGED is reaped to stopped/ with reason',
   const stopped = readJobAtPath(stoppedPathFor(rootDir, jobPath));
   assert.equal(stopped.status, 'stopped');
   assert.equal(stopped.remediationPlan?.stop?.code, 'operator-merged-pr');
-  assert.match(stopped.remediationPlan?.stop?.reason, /reaped: pr 4971 is MERGED/);
+  // Assert the WHOLE reason, not just the `reaped: ...` prefix. A prefix-only
+  // regex still passes when the appended lifecycleStopDecision text is dropped
+  // or renamed to a property that does not exist, silently writing
+  // `reaped: pr 4971 is MERGED; undefined` into the durable stopped record and
+  // hiding the actual stop justification from operators.
+  assert.equal(
+    stopped.remediationPlan?.stop?.reason,
+    'reaped: pr 4971 is MERGED; PR laceyenterprises/agent-os#4971 was merged before remediation could run'
+    + ' (mergedAt=2026-08-06T05:01:49.000Z) source=live;'
+    + ' stopping the bounded loop instead of spawning a worker on a closed branch.'
+  );
+  assert.doesNotMatch(stopped.remediationPlan?.stop?.reason, /undefined/);
   assert.equal(stopped.remediationWorker?.reapReason, 'operator-merged-pr');
   assert.equal(stopped.remediationWorker?.reapedFromStatus, 'pending');
   assert.equal(stopped.remediationWorker?.prMergedAt, '2026-08-06T05:01:49.000Z');
@@ -138,7 +149,13 @@ test('reaper: pending job whose PR is CLOSED is reaped', async () => {
   assert.equal(result.reaped, 1);
   const stopped = readJobAtPath(stoppedPathFor(rootDir, jobPath));
   assert.equal(stopped.remediationPlan?.stop?.code, 'operator-closed-pr');
-  assert.match(stopped.remediationPlan?.stop?.reason, /reaped: pr 4988 is CLOSED/);
+  assert.equal(
+    stopped.remediationPlan?.stop?.reason,
+    'reaped: pr 4988 is CLOSED; PR laceyenterprises/agent-os#4988 was closed before remediation could run'
+    + ' (closedAt=2026-08-06T05:01:49.000Z) source=live;'
+    + ' stopping the bounded loop instead of spawning a worker on a closed branch.'
+  );
+  assert.doesNotMatch(stopped.remediationPlan?.stop?.reason, /undefined/);
   assert.equal(stopped.remediationWorker?.prClosedAt, '2026-08-06T05:01:49.000Z');
 });
 

@@ -17,13 +17,28 @@
 //   1. Read the HHR fleet-quota provider-state authoritatively
 //      (`hq fleet quota status --json`, the same classifier the reviewer/
 //      remediator quota-hold path uses). Never guess from a single worker error.
-//   2. If the configured (primary) worker_class's provider is grounded
-//      (exhausted/suspended), pick the first configured fallback worker_class
-//      whose provider is NOT also grounded and dispatch on THAT harness instead.
+//   2. If the configured (primary) worker_class's provider is grounded — either
+//      HARD (exhausted/suspended) or SOFT (AFH-02's `afhGrounding` verdict, see
+//      below) — pick the first configured fallback worker_class whose provider
+//      is NOT also grounded and dispatch on THAT harness instead.
 //   3. If the primary provider is `ok` — or its state is ambiguous
 //      (degraded/unknown/missing) — keep the primary. That yields automatic
 //      auto-revert: the moment codex recovers to `ok`, the next close returns to
 //      the configured primary with no manual flip.
+//
+// AFH-05 adds the SOFT limb of (2). The hard states are a real 429: a *flapping*
+// codex outage leaves the probe row at `state: unknown` forever, so the hard gate
+// stays dark exactly when the operator reaches for a manual `worker_class` pin
+// (proven live 2026-08-06: codex down, ~100% usage, 10 suspended LRQs, probe
+// `unknown`). AFH-02 (agent-os #4999) publishes the sustained-exhaustion verdict
+// on `hq fleet quota status --json` as a per-provider `afhGrounding` object; we
+// READ it, we do not re-derive it, so the Python and Node sides cannot drift.
+//
+// The soft signal is strictly ADDITIVE: it is one more way the PRIMARY can be
+// grounded. It does not touch the hard classification, the fail-open branches (an
+// unreadable/absent/malformed verdict keeps the primary, same as an ambiguous
+// hard state), or auto-revert — the verdict clears itself once the provider
+// recovers, and the very next close returns to the primary.
 //
 // Only the physical `--worker-class` harness changes; the closer's
 // terminal-remediation prompt, merge-under-lease behavior, and audit provenance
@@ -36,6 +51,7 @@ import { promisify } from 'node:util';
 import {
   isGroundedProviderState,
   providerAvailabilityFromFleetStatus,
+  providerSoftGroundingFromFleetStatus,
 } from '../fleet-quota-status.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -91,7 +107,10 @@ async function readFleetQuotaStatusStdout({ hqPath, execFileImpl, env }) {
  *   fellBack: boolean,
  *   from?: string, to?: string,
  *   provider?: string,        // grounded primary provider (when fellBack)
- *   primaryState?: string,
+ *   primaryState?: string,    // the HARD state, never rewritten by the soft limb
+ *   groundedBy?: 'hard'|'soft'|'hard+soft',
+ *   softGrounded?: boolean,   // AFH-02 verdict said the primary is soft-grounded
+ *   softGrounding?: Object|null, // the raw afhGrounding verdict, for the audit
  *   fallbackProvider?: string,
  *   reason?: string,          // why NO fallback was taken (when !fellBack)
  *   error?: string,
@@ -129,20 +148,54 @@ export async function resolveCloserDispatchHarness({
     return { ...base, reason: 'fleet-quota-status-unavailable', error: String(err?.message || err) };
   }
 
-  const primaryAvailability = providerAvailabilityFromFleetStatus(stdout, { provider: primaryProvider });
-  if (!isGroundedProviderState(primaryAvailability.state)) {
+  // Both limbs are read from the SAME single status payload, so the hard state
+  // and the soft verdict can never describe different moments. A malformed
+  // payload throws out of the parser — fail open to the primary here too, rather
+  // than leaning on the call site's catch, so this module's own contract holds.
+  let primaryAvailability;
+  let primarySoft;
+  try {
+    primaryAvailability = providerAvailabilityFromFleetStatus(stdout, { provider: primaryProvider });
+    primarySoft = providerSoftGroundingFromFleetStatus(stdout, { provider: primaryProvider });
+  } catch (err) {
+    return { ...base, reason: 'fleet-quota-status-unreadable', error: String(err?.message || err) };
+  }
+
+  const hardGrounded = isGroundedProviderState(primaryAvailability.state);
+  const softGrounded = primarySoft.grounded === true;
+  if (!hardGrounded && !softGrounded) {
     // Primary is `ok` (healthy → auto-revert) or ambiguous (degraded/unknown/
-    // missing → do not guess). Either way, keep the primary.
+    // missing, and no soft verdict → do not guess). Either way, keep the primary.
     return {
       ...base,
       reason: primaryAvailability.available ? 'primary-available' : 'primary-not-grounded',
       provider: primaryProvider,
       primaryState: primaryAvailability.state,
+      softGrounded: false,
+      softGrounding: primarySoft.verdict,
     };
   }
 
-  // Primary is authoritatively grounded. Pick the first fallback whose provider
-  // is not ALSO grounded.
+  // Which limb grounded the primary. Reported verbatim on the audit record so a
+  // soft verdict is never read back as the hard 429 classification (SPEC §10) —
+  // `primaryState` keeps reporting the untouched hard state (often `unknown`).
+  const groundedBy = hardGrounded && softGrounded ? 'hard+soft' : (hardGrounded ? 'hard' : 'soft');
+  const groundingFields = {
+    provider: primaryProvider,
+    primaryState: primaryAvailability.state,
+    groundedBy,
+    softGrounded,
+    softGrounding: primarySoft.verdict,
+  };
+
+  // Primary is authoritatively grounded (hard, soft, or both). Pick the first
+  // fallback whose provider is not ALSO grounded.
+  //
+  // Candidate screening stays HARD-only, deliberately: AFH-05's scope is one
+  // additional way the PRIMARY is grounded. Skipping merely soft-grounded
+  // candidates too would be a second behavior change, and it can only ever
+  // subtract a fallback — leaving the closer on an already-grounded primary,
+  // which is the outcome this pack exists to prevent.
   for (const candidate of fallbacks) {
     if (candidate === primary) continue;
     const candidateProvider = providerForCloserWorkerClass(candidate);
@@ -157,8 +210,7 @@ export async function resolveCloserDispatchHarness({
       fellBack: true,
       from: primary,
       to: candidate,
-      provider: primaryProvider,
-      primaryState: primaryAvailability.state,
+      ...groundingFields,
       fallbackProvider: candidateProvider,
     };
   }
@@ -169,7 +221,6 @@ export async function resolveCloserDispatchHarness({
   return {
     ...base,
     reason: 'all-fallbacks-grounded',
-    provider: primaryProvider,
-    primaryState: primaryAvailability.state,
+    ...groundingFields,
   };
 }

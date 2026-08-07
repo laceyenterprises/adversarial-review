@@ -8,8 +8,11 @@ import {
 import { describeHarnessGrounding } from '../src/ama/dispatch-closer.mjs';
 import {
   isGroundedProviderState,
+  parseHqFleetQuotaStatus,
   providerAvailabilityFromFleetStatus,
+  providerAvailabilityFromStatuses,
   providerSoftGroundingFromFleetStatus,
+  providerSoftGroundingFromStatuses,
 } from '../src/fleet-quota-status.mjs';
 
 // A `hq fleet quota status --json` payload with the given provider states. The
@@ -407,6 +410,56 @@ test('AFH-05: the operator alert never renders a soft verdict as the hard 429 st
   assert.equal(
     describeHarnessGrounding({ provider: 'openai', primaryState: 'exhausted' }),
     'is quota-grounded (exhausted)',
+  );
+});
+
+test('the fleet-quota payload is parsed exactly once per resolve, however many candidates are screened', async () => {
+  // Review follow-up: the primary's hard+soft limbs and EVERY fallback candidate
+  // read the same stdout, so the payload must be parsed once and queried from the
+  // parsed rows — not re-parsed per lookup inside the candidate loop.
+  const exec = buildFleetExec(fleetQuotaStdout({
+    openai: 'exhausted',
+    anthropic: 'exhausted',
+    google: 'ok',
+  }));
+  const realParse = JSON.parse;
+  let parseCalls = 0;
+  JSON.parse = function countingParse(...args) {
+    parseCalls += 1;
+    return realParse.apply(this, args);
+  };
+  let result;
+  try {
+    result = await resolveCloserDispatchHarness({
+      workerClass: 'hammer',
+      fallbackWorkerClasses: ['claude-code', 'hammer-claude', 'gemini'],
+      execFileImpl: exec.impl,
+    });
+  } finally {
+    JSON.parse = realParse;
+  }
+  assert.equal(result.fellBack, true);
+  assert.equal(result.workerClass, 'gemini', 'both anthropic candidates are grounded; google is not');
+  assert.equal(parseCalls, 1, `fleet-quota payload parsed ${parseCalls}× (expected exactly 1)`);
+});
+
+test('providerAvailabilityFromStatuses / providerSoftGroundingFromStatuses answer from parsed rows', () => {
+  const statuses = parseHqFleetQuotaStatus(fleetQuotaStdout({
+    openai: { state: 'unknown', afhGrounding: afhGrounding({ grounded: true, signals: 5, kills: 5 }) },
+    anthropic: 'ok',
+  }));
+  assert.equal(providerAvailabilityFromStatuses(statuses, { provider: 'anthropic' }).available, true);
+  assert.equal(providerAvailabilityFromStatuses(statuses, { provider: 'openai' }).state, 'unknown');
+  assert.equal(providerSoftGroundingFromStatuses(statuses, { provider: 'openai' }).grounded, true);
+  assert.equal(providerSoftGroundingFromStatuses(statuses, { provider: 'anthropic' }).grounded, false);
+  // Same fail-open guards as the stdout wrappers: no provider, unknown provider,
+  // and a non-array rows argument must all stay ungrounded rather than throw.
+  assert.equal(providerAvailabilityFromStatuses(statuses, {}).state, 'unknown-provider');
+  assert.equal(providerSoftGroundingFromStatuses(statuses, {}).reason, 'unknown-provider');
+  assert.equal(providerAvailabilityFromStatuses(null, { provider: 'openai' }).state, 'missing-provider-status');
+  assert.equal(
+    providerSoftGroundingFromStatuses(undefined, { provider: 'openai' }).reason,
+    'missing-provider-status',
   );
 });
 

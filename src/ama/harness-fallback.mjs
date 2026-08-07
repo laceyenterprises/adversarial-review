@@ -50,8 +50,9 @@ import { promisify } from 'node:util';
 
 import {
   isGroundedProviderState,
-  providerAvailabilityFromFleetStatus,
-  providerSoftGroundingFromFleetStatus,
+  parseHqFleetQuotaStatus,
+  providerAvailabilityFromStatuses,
+  providerSoftGroundingFromStatuses,
 } from '../fleet-quota-status.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -149,14 +150,19 @@ export async function resolveCloserDispatchHarness({
   }
 
   // Both limbs are read from the SAME single status payload, so the hard state
-  // and the soft verdict can never describe different moments. A malformed
-  // payload throws out of the parser — fail open to the primary here too, rather
-  // than leaning on the call site's catch, so this module's own contract holds.
+  // and the soft verdict can never describe different moments. Parse it ONCE
+  // here: the primary's two limbs and every fallback candidate below all query
+  // the same parsed rows, instead of re-parsing the identical stdout per lookup
+  // on the closer's dispatch path. A malformed payload throws out of the parser
+  // — fail open to the primary here too, rather than leaning on the call site's
+  // catch, so this module's own contract holds.
+  let providerStatuses;
   let primaryAvailability;
   let primarySoft;
   try {
-    primaryAvailability = providerAvailabilityFromFleetStatus(stdout, { provider: primaryProvider });
-    primarySoft = providerSoftGroundingFromFleetStatus(stdout, { provider: primaryProvider });
+    providerStatuses = parseHqFleetQuotaStatus(stdout);
+    primaryAvailability = providerAvailabilityFromStatuses(providerStatuses, { provider: primaryProvider });
+    primarySoft = providerSoftGroundingFromStatuses(providerStatuses, { provider: primaryProvider });
   } catch (err) {
     return { ...base, reason: 'fleet-quota-status-unreadable', error: String(err?.message || err) };
   }
@@ -200,7 +206,7 @@ export async function resolveCloserDispatchHarness({
     if (candidate === primary) continue;
     const candidateProvider = providerForCloserWorkerClass(candidate);
     if (candidateProvider) {
-      const candidateAvailability = providerAvailabilityFromFleetStatus(stdout, {
+      const candidateAvailability = providerAvailabilityFromStatuses(providerStatuses, {
         provider: candidateProvider,
       });
       if (isGroundedProviderState(candidateAvailability.state)) continue;

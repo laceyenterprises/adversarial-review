@@ -53,10 +53,8 @@ export function isGroundedProviderState(state) {
 // `afhGrounding` fails open to the primary, exactly like an ambiguous hard
 // state.
 //
-// AFH-02 soft-grounding verdict (agent-os #4999), carried on each
-// `providerStatuses[]` row as `afhGrounding`, BESIDE the hard `state` field it
-// never edits. Shape (the first four keys are the consumed contract; the two
-// counts travel alongside so an audit can say *why*):
+// Shape (the first four keys are the consumed contract; the two counts travel
+// alongside so an audit can say *why*):
 //
 //   { grounded, signals, threshold, reason, quotaExhaustedKills, suspendedLrqDepth }
 //
@@ -64,6 +62,7 @@ export function isGroundedProviderState(state) {
 // (its documented fail-open degradation) and absent entirely on an `hq` build
 // that predates AFH-02. Both cases normalize to `null` here, which every
 // consumer must read as "no soft signal" — never as "grounded".
+//
 // Missing telemetry must stay missing. `Number()` coerces `null`, `false`, `''`
 // and whitespace-only strings to `0`, which would rewrite "unknown" as an
 // observed zero count (e.g. 0 quota-exhausted kills) in the soft-verdict audit
@@ -80,6 +79,13 @@ function normalizedCount(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function normalizeProviderKey(provider) {
+  return String(provider || '').trim().toLowerCase();
+}
+
+// Normalize one row's `afhGrounding`. Returns null (→ fail open) unless the
+// payload is an object carrying a real boolean `grounded`; a truthy-string or
+// missing verdict is treated as unreadable, never as grounded.
 export function normalizeAfhGroundingVerdict(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   // A verdict without a boolean `grounded` is not a verdict — fail open rather
@@ -133,16 +139,20 @@ function providerStatusRows(statuses, normalizedProvider) {
   return [...rows.filter((entry) => entry.authPath === 'oauth'), ...rows.filter((entry) => entry.authPath !== 'oauth')];
 }
 
-// Availability of a specific PROVIDER (openai/anthropic/…). Prefers the OAuth
-// auth-path status (the path a native-harness spawn actually uses) and falls
-// back to any status for that provider. Returns { available, state, source,
-// checkedAt } where `available` is strictly `state === 'ok'`.
-export function providerAvailabilityFromFleetStatus(stdout, { provider } = {}) {
-  const normalizedProvider = String(provider || '').trim().toLowerCase();
+// Availability of a specific PROVIDER (openai/anthropic/…) from rows ALREADY
+// parsed by `parseHqFleetQuotaStatus`. Callers that read several providers out
+// of one payload (the closer's fallback-candidate loop) parse once and query
+// this repeatedly, instead of re-parsing the identical stdout per lookup.
+// Prefers the OAuth auth-path status (the path a native-harness spawn actually
+// uses) and falls back to any status for that provider. Returns { available,
+// state, source, checkedAt, afhGrounding } where `available` is strictly
+// `state === 'ok'` — the soft verdict rides alongside without touching it.
+export function providerAvailabilityFromStatuses(statuses, { provider } = {}) {
+  const normalizedProvider = normalizeProviderKey(provider);
   if (!normalizedProvider) {
     return { available: false, state: 'unknown-provider', source: 'hq-fleet-quota-status', afhGrounding: null };
   }
-  const rows = providerStatusRows(parseHqFleetQuotaStatus(stdout), normalizedProvider);
+  const rows = providerStatusRows(Array.isArray(statuses) ? statuses : [], normalizedProvider);
   const status = rows[0];
   if (!status) {
     return { available: false, state: 'missing-provider-status', source: 'hq-fleet-quota-status', afhGrounding: null };
@@ -158,6 +168,17 @@ export function providerAvailabilityFromFleetStatus(stdout, { provider } = {}) {
   };
 }
 
+// Single-lookup convenience wrapper: parse the raw `hq fleet quota status
+// --json` stdout, then answer from the parsed rows. The unknown-provider guard
+// stays AHEAD of the parse so a provider-less call keeps returning that verdict
+// rather than throwing on a payload it never needed to read.
+export function providerAvailabilityFromFleetStatus(stdout, options = {}) {
+  if (!normalizeProviderKey(options?.provider)) {
+    return providerAvailabilityFromStatuses([], options);
+  }
+  return providerAvailabilityFromStatuses(parseHqFleetQuotaStatus(stdout), options);
+}
+
 // AFH-02 soft-grounding verdict for a specific PROVIDER, read (never re-derived)
 // from the `afhGrounding` projection on `hq fleet quota status --json`.
 //
@@ -167,13 +188,13 @@ export function providerAvailabilityFromFleetStatus(stdout, { provider } = {}) {
 // side's own fail-open when the kill ledger is unreadable), a non-object, or a
 // non-boolean `grounded` — returns false with a reason naming which, so the
 // caller keeps its primary instead of guessing.
-export function providerSoftGroundingFromFleetStatus(stdout, { provider } = {}) {
-  const normalizedProvider = String(provider || '').trim().toLowerCase();
+export function providerSoftGroundingFromStatuses(statuses, { provider } = {}) {
+  const normalizedProvider = normalizeProviderKey(provider);
   const source = 'hq-fleet-quota-status';
   if (!normalizedProvider) {
     return { grounded: false, verdict: null, reason: 'unknown-provider', source };
   }
-  const rows = providerStatusRows(parseHqFleetQuotaStatus(stdout), normalizedProvider);
+  const rows = providerStatusRows(Array.isArray(statuses) ? statuses : [], normalizedProvider);
   if (rows.length === 0) {
     return { grounded: false, verdict: null, reason: 'missing-provider-status', source };
   }
@@ -189,6 +210,15 @@ export function providerSoftGroundingFromFleetStatus(stdout, { provider } = {}) 
     reason: verdict.grounded === true ? (verdict.reason || 'soft-grounded') : 'not-soft-grounded',
     source,
   };
+}
+
+// Single-lookup convenience wrapper over the parsed-rows reader above, with the
+// same pre-parse unknown-provider guard.
+export function providerSoftGroundingFromFleetStatus(stdout, options = {}) {
+  if (!normalizeProviderKey(options?.provider)) {
+    return providerSoftGroundingFromStatuses([], options);
+  }
+  return providerSoftGroundingFromStatuses(parseHqFleetQuotaStatus(stdout), options);
 }
 
 // Availability keyed by the quota HARNESS family (codex/claude/claude-code).

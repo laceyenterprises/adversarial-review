@@ -28,6 +28,28 @@ const HAMMER_WORKER_RE = /^hammer-ama-pr-(\d+)(?:-.+)?$/;
 // close sequence (pr-792 even logged `Working directory ... was deleted`).
 const HAMMER_ACTIVE_DISPATCH_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
 
+// Error codes that mean the probe/manifest read momentarily FAILED (busy host,
+// fd exhaustion, fork pressure, killed-by-timeout) rather than a definitive
+// answer. On any of these — and, fail-safe, on any error we cannot positively
+// classify as definitive — the reaper DEFERS instead of reaping, so a transient
+// blip under load never deletes a live hammer's cwd. Only a positively read
+// terminal/absent status (or a genuinely absent/malformed manifest) permits a
+// reap. The worker-pool orphan reaper is the independent backstop for anything
+// that later leaks, so deferring is always the safe direction.
+const TRANSIENT_PROBE_ERROR_CODES = new Set([
+  'ETIMEDOUT', 'EAGAIN', 'EIO', 'EMFILE', 'ENFILE', 'EBUSY', 'ENOMEM',
+  'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETXTBSY', 'EINTR',
+]);
+
+function isTransientProbeError(err) {
+  if (!err) return false;
+  // execFile's `timeout` kills the child (killed=true / signal SIGTERM|SIGKILL):
+  // the hq process was busy past the deadline, not a terminal read.
+  if (err.killed === true) return true;
+  if (err.signal === 'SIGTERM' || err.signal === 'SIGKILL') return true;
+  return TRANSIENT_PROBE_ERROR_CODES.has(String(err.code || ''));
+}
+
 function normalizePositiveInteger(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -475,17 +497,36 @@ function isPidAliveLocal(pid, processKillImpl = process.kill) {
 
 async function resolveEntryLaunchRequestId(entry, { readFileImpl = fsPromises.readFile } = {}) {
   const workerDir = entry?.workerDir;
-  if (!workerDir) return null;
+  if (!workerDir) return { launchRequestId: null, defer: false, reason: 'no-worker-dir' };
+  let body;
   try {
-    const manifest = JSON.parse(await readFileImpl(join(workerDir, 'workspace.json'), 'utf8'));
-    const raw = manifest?.launchRequestId || manifest?.dispatchId;
-    return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
-  } catch {
-    // No manifest / unreadable / malformed → caller falls back to the ordinary
-    // reap path: a tree we cannot tie to a tracked dispatch must stay
-    // reclaimable (this is the leak-prevention half-registered/legacy path).
-    return null;
+    body = await readFileImpl(join(workerDir, 'workspace.json'), 'utf8');
+  } catch (err) {
+    if (String(err?.code || '') === 'ENOENT') {
+      // Genuinely untracked (no manifest) → safe to fall through to the ordinary
+      // reap path (the half-registered / legacy leak-prevention case).
+      return { launchRequestId: null, defer: false, reason: 'manifest-absent' };
+    }
+    // Transient I/O reading the manifest (EIO / EMFILE / EAGAIN / EACCES under
+    // load, ...). Do NOT null-and-reap: a momentary read failure must not delete
+    // a live hammer's tree. DEFER; the next tick re-reads.
+    return { launchRequestId: null, defer: true, reason: `manifest-read-error:${err?.code || 'unknown'}` };
   }
+  let manifest;
+  try {
+    manifest = JSON.parse(body);
+  } catch {
+    // Definitively malformed JSON — a stable property of the file, not a
+    // transient condition → treat as untracked (safe reap).
+    return { launchRequestId: null, defer: false, reason: 'manifest-malformed' };
+  }
+  const raw = manifest?.launchRequestId || manifest?.dispatchId;
+  const launchRequestId = typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+  return {
+    launchRequestId,
+    defer: false,
+    reason: launchRequestId ? 'resolved' : 'no-launch-request-id',
+  };
 }
 
 async function probeHammerWorkerActivity({
@@ -494,35 +535,61 @@ async function probeHammerWorkerActivity({
   execFileImpl = execFileAsync,
   env = process.env,
   processKillImpl = process.kill,
+  maxAttempts = 2,
 } = {}) {
   if (!hqPath || !launchRequestId) {
-    return { active: false, status: null, reason: 'no-launch-request-id' };
+    return { active: false, defer: false, status: null, reason: 'no-launch-request-id' };
   }
-  let parsed;
-  try {
-    const { stdout } = await execFileImpl(
-      hqPath,
-      ['dispatch', 'status', launchRequestId, '--json'],
-      { env: { ...env }, maxBuffer: 1024 * 1024, timeout: 5_000 },
-    );
-    parsed = JSON.parse(String(stdout || '{}'));
-  } catch {
-    // Status unreadable → do NOT block the reap. A genuinely dead tree must stay
-    // reclaimable; deferring on an unreadable probe would leak it forever.
-    return { active: false, status: null, reason: 'status-unreadable' };
+  let lastReason = 'probe-unreadable';
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let stdout;
+    try {
+      ({ stdout } = await execFileImpl(
+        hqPath,
+        ['dispatch', 'status', launchRequestId, '--json'],
+        { env: { ...env }, maxBuffer: 1024 * 1024, timeout: 5_000 },
+      ));
+    } catch (err) {
+      // Could not run/complete the probe (timeout kill, EAGAIN fork failure, EIO,
+      // EMFILE, spawn error, non-zero hq under a busy/locked ledger, ...). This is
+      // NOT a definitive terminal read, so we must never reap on it. Retry once on
+      // a recognized-transient failure, then DEFER (fail-safe for everything else).
+      lastReason = `probe-error:${err?.code || err?.signal || 'unknown'}`;
+      if (attempt < maxAttempts && isTransientProbeError(err)) continue;
+      return { active: false, defer: true, status: null, reason: lastReason };
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(String(stdout || ''));
+    } catch {
+      // Non-JSON / empty body: a busy or locked hq emitting a partial or
+      // human-readable error, NOT a definitive terminal state. Retry once, DEFER.
+      lastReason = 'probe-nonjson';
+      if (attempt < maxAttempts) continue;
+      return { active: false, defer: true, status: null, reason: lastReason };
+    }
+    const status = typeof parsed?.status === 'string' ? parsed.status.trim().toLowerCase() : null;
+    if (status && HAMMER_ACTIVE_DISPATCH_STATUSES.has(status)) {
+      // Active dispatch row. Confirm the process is really alive before deferring
+      // so a phantom (active row, dead pid) cannot pin the worktree forever — the
+      // closer reconcile will flip it to failed, but we reap here rather than wait.
+      const pid = Number(parsed?.pid);
+      if (Number.isInteger(pid) && pid > 0 && isPidAliveLocal(pid, processKillImpl) === false) {
+        return { active: false, defer: false, status, reason: 'phantom' };
+      }
+      return {
+        active: true,
+        defer: false,
+        status,
+        reason: 'active',
+        pid: Number.isInteger(pid) && pid > 0 ? pid : null,
+      };
+    }
+    // Positively read a terminal/absent status from a successful JSON parse — the
+    // ONLY path that permits a reap.
+    return { active: false, defer: false, status, reason: status ? 'terminal' : 'status-absent' };
   }
-  const status = typeof parsed?.status === 'string' ? parsed.status.trim().toLowerCase() : null;
-  if (!status || !HAMMER_ACTIVE_DISPATCH_STATUSES.has(status)) {
-    return { active: false, status, reason: status ? 'terminal' : 'status-absent' };
-  }
-  // Active dispatch row. Confirm the process is really alive before deferring so
-  // a phantom (active row, dead pid) cannot pin the worktree forever — the closer
-  // reconcile will flip it to failed, but we reap here rather than wait for it.
-  const pid = Number(parsed?.pid);
-  if (Number.isInteger(pid) && pid > 0 && isPidAliveLocal(pid, processKillImpl) === false) {
-    return { active: false, status, reason: 'phantom' };
-  }
-  return { active: true, status, reason: 'active', pid: Number.isInteger(pid) && pid > 0 ? pid : null };
+  return { active: false, defer: true, status: null, reason: lastReason };
 }
 
 async function reapCloserHammerWorktrees({
@@ -710,25 +777,37 @@ async function reapCloserHammerWorktrees({
     // reaps once it terminalizes. Trees with no resolvable dispatch, or whose
     // dispatch is terminal/unreadable/phantom, reap now — and the worker-pool
     // orphan reaper is the independent backstop for any tree that later leaks.
-    const launchRequestId = await resolveEntryLaunchRequestId(entry, { readFileImpl });
-    if (launchRequestId) {
+    const manifestProbe = await resolveEntryLaunchRequestId(entry, { readFileImpl });
+    const deferReap = (deferReason, launchRequestId) => {
+      summary.deferredActiveWorker += 1;
+      logger?.info?.(JSON.stringify({
+        event: 'closer_worktree_reap.deferred_active_worker',
+        workerId: entry.workerId,
+        prNumber: entry.prNumber,
+        repo: entry.githubRepo || null,
+        reason: reapReason,
+        launchRequestId: launchRequestId || null,
+        dispatchStatus: deferReason,
+      }));
+    };
+    if (manifestProbe.defer) {
+      // Transient failure reading the worker manifest — cannot prove the hammer
+      // is gone, so defer rather than delete a possibly-live tree.
+      deferReap(manifestProbe.reason, null);
+      continue;
+    }
+    if (manifestProbe.launchRequestId) {
       const activity = await probeWorkerActivityImpl({
         hqPath,
-        launchRequestId,
+        launchRequestId: manifestProbe.launchRequestId,
         execFileImpl,
         env,
       });
-      if (activity?.active) {
-        summary.deferredActiveWorker += 1;
-        logger?.info?.(JSON.stringify({
-          event: 'closer_worktree_reap.deferred_active_worker',
-          workerId: entry.workerId,
-          prNumber: entry.prNumber,
-          repo: entry.githubRepo || null,
-          reason: reapReason,
-          launchRequestId,
-          dispatchStatus: activity.status || null,
-        }));
+      // Defer both when the hammer is provably active AND when the probe could
+      // not definitively read a terminal status (transient/unreadable). Only a
+      // positively-terminal (or phantom) probe falls through to the reap.
+      if (activity?.active || activity?.defer) {
+        deferReap(activity.status || activity.reason || null, manifestProbe.launchRequestId);
         continue;
       }
     }

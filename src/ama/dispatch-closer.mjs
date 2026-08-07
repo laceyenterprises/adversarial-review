@@ -1250,6 +1250,24 @@ function logAmaCloserDispatchEvent(logger, event, fields = {}, options = {}) {
   sink(JSON.stringify({ event, ...fields }));
 }
 
+// How the primary was grounded, in operator-readable words. A SOFT (AFH-02)
+// verdict must never be rendered as the hard 429 classification — during a
+// flapping outage the probe state is still `unknown`, and "quota-grounded
+// (unknown)" would read as a bug. Name the signal that actually fired.
+export function describeHarnessGrounding(harness) {
+  const hardState = harness?.primaryState || 'unknown';
+  if (harness?.groundedBy !== 'soft') return `is quota-grounded (${hardState})`;
+  const verdict = harness?.softGrounding || {};
+  const parts = [
+    verdict.signals == null || verdict.threshold == null
+      ? null
+      : `${verdict.signals}/${verdict.threshold} signals`,
+    verdict.reason || 'sustained exhaustion',
+    `hard probe state ${hardState}`,
+  ].filter(Boolean);
+  return `is AFH soft-grounded (${parts.join('; ')})`;
+}
+
 // Best-effort operator alert that the closer/hammer fell back to another harness
 // because its configured provider is quota-grounded. The structured
 // `ama_closer.harness_fallback` audit log is the durable record; this is the
@@ -1280,7 +1298,7 @@ async function emitHarnessFallbackAlert({
   }
   const text =
     `⚠️ AMA closer harness fallback: ${repo}#${prNumber} — provider ${harness.provider} `
-    + `is quota-grounded (${harness.primaryState}); dispatching the closer on `
+    + `${describeHarnessGrounding(harness)}; dispatching the closer on `
     + `${harness.to} instead of ${harness.from}. Auto-reverts when ${harness.provider} recovers.`;
   try {
     await deliver(text, {
@@ -1292,6 +1310,8 @@ async function emitHarnessFallbackAlert({
         from: harness.from,
         to: harness.to,
         primaryState: harness.primaryState,
+        groundedBy: harness.groundedBy || 'hard',
+        softGrounding: harness.softGrounding || null,
         fallbackProvider: harness.fallbackProvider || null,
       },
       env,
@@ -3625,6 +3645,8 @@ export async function maybeDispatchAmaCloser({
       from: harnessFallback.from,
       to: harnessFallback.to,
       primaryState: harnessFallback.primaryState,
+      groundedBy: harnessFallback.groundedBy || 'hard',
+      softGrounding: harnessFallback.softGrounding || null,
       fallbackProvider: harnessFallback.fallbackProvider || null,
     });
     await emitHarnessFallbackAlert({
@@ -4119,6 +4141,8 @@ export async function maybeDispatchAmaCloser({
             from: harnessFallback.from,
             to: harnessFallback.to,
             primaryState: harnessFallback.primaryState,
+            groundedBy: harnessFallback.groundedBy || 'hard',
+            softGrounding: harnessFallback.softGrounding || null,
             fallbackProvider: harnessFallback.fallbackProvider || null,
           },
         }

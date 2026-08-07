@@ -49,8 +49,19 @@ export function isGroundedProviderState(state) {
 // (its documented fail-open degradation) and absent entirely on an `hq` build
 // that predates AFH-02. Both cases normalize to `null` here, which every
 // consumer must read as "no soft signal" — never as "grounded".
+// Missing telemetry must stay missing. `Number()` coerces `null`, `false`, `''`
+// and whitespace-only strings to `0`, which would rewrite "unknown" as an
+// observed zero count (e.g. 0 quota-exhausted kills) in the soft-verdict audit
+// trail and mislead an operator investigating a soft grounding. Accept only a
+// real number or a numeric string; everything else normalizes to `null`.
 function normalizedCount(value) {
-  const parsed = Number(value);
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
   return Number.isFinite(parsed) ? parsed : null;
 }
 

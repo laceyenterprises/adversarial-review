@@ -479,6 +479,45 @@ test('AFH-04: a non-boolean afhGrounding.grounded is discarded, not coerced', ()
   )[0].afhGrounding, null);
 });
 
+test('AFH-04: missing afhGrounding counts stay null instead of coercing to 0', () => {
+  const [status] = parseHqFleetQuotaStatus(
+    JSON.stringify({
+      providerStatuses: [
+        {
+          provider: 'openai',
+          afhGrounding: {
+            grounded: true,
+            signals: null,
+            threshold: '',
+            quotaExhaustedKills: '   ',
+            suspendedLrqDepth: false,
+          },
+        },
+      ],
+    })
+  );
+  assert.equal(status.afhGrounding.grounded, true);
+  assert.equal(status.afhGrounding.signals, null, 'explicit null stays unknown, not 0');
+  assert.equal(status.afhGrounding.threshold, null, 'empty string stays unknown, not 0');
+  assert.equal(status.afhGrounding.quotaExhaustedKills, null, 'blank string stays unknown, not 0');
+  assert.equal(status.afhGrounding.suspendedLrqDepth, null, 'false stays unknown, not 0');
+
+  const [observed] = parseHqFleetQuotaStatus(
+    JSON.stringify({
+      providerStatuses: [
+        {
+          provider: 'openai',
+          afhGrounding: { grounded: true, signals: 0, threshold: '3', quotaExhaustedKills: 2 },
+        },
+      ],
+    })
+  );
+  assert.equal(observed.afhGrounding.signals, 0, 'a real observed zero is preserved');
+  assert.equal(observed.afhGrounding.threshold, 3, 'numeric strings still parse');
+  assert.equal(observed.afhGrounding.quotaExhaustedKills, 2);
+  assert.equal(observed.afhGrounding.suspendedLrqDepth, null, 'absent stays unknown');
+});
+
 test('AFH-04: the fallback can be disabled outright without a subprocess', async () => {
   let called = 0;
   const grounding = await readAfhReviewerGrounding({

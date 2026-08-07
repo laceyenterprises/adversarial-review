@@ -158,6 +158,22 @@ are stamped into the posted review body as an explicit waiver of the default
 cross-model guarantee. The waiver is audit-only: it does not change the merge
 gate or require an extra human approval by itself.
 
+When a provider is *grounded* — a hard 429/`exhausted` probe state, or the AFH
+soft-grounding verdict (`afhGrounding` on `hq fleet quota status --json`, which
+catches a flapping provider the hard gate misses) — the assigned reviewer cannot
+spawn at all, so `src/afh-reviewer-fallback.mjs` walks an ordered fallback:
+current reviewer → the per-tag cross-model primary → Gemini → **Claude, last
+resort only**. The ordering is the point: a `[claude-code]` PR is covered by
+Gemini whenever Gemini is available, so a Codex outage degrades to a *different*
+model rather than to Claude reviewing Claude. Claude-reviewing-Claude is
+reachable only when Gemini is grounded too or `reviewer.gemini.mode=off`, and it
+is stamped as a cross-model waiver in the review body. Fallback is stateless and
+per attempt, so it auto-reverts the moment the provider recovers — there is
+nothing to un-pin. Every failure of the quota read (missing `hq`, non-zero exit,
+timeout, unparseable JSON, absent verdict) fails open to the configured
+primary/Gemini route with a degraded-read breadcrumb; it never blocks a tick.
+Set `ADVERSARIAL_AFH_REVIEWER_FALLBACK=0` to disable the hop entirely.
+
 **2. The reviewer prompt is adversarial, not consultative.** The standard
 reviewer prompt explicitly tells the model: *"You did NOT write this code.
 Your job is to find problems. Do NOT summarize. Do NOT praise."* Full

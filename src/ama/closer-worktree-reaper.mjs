@@ -17,6 +17,17 @@ const DEFAULT_SCAN_LIMIT = 64;
 const DEFAULT_CURSOR_PATH = join(ROOT, 'data', 'ama-closer-worktree-reaper-cursor.json');
 const HAMMER_WORKER_RE = /^hammer-ama-pr-(\d+)(?:-.+)?$/;
 
+// Dispatch statuses that mean the hammer worker is still executing — most
+// importantly its long post-merge "close sequence" (validate/rebase/merge-signal
+// steps that run for many minutes AFTER the PR has already merged). Kept in sync
+// with `AMA_CLOSER_ACTIVE_STATUSES` in dispatch-closer.mjs. Reaping a worktree
+// while its hammer is in any of these states deletes the live worker's cwd out
+// from under it — the 2026-08-06 `worker_killed` cascade this gate fixes: every
+// killed hammer had merged its PR, then died within seconds of a
+// `closer_worktree_reap.reaped reason:"merged"` event while still running its
+// close sequence (pr-792 even logged `Working directory ... was deleted`).
+const HAMMER_ACTIVE_DISPATCH_STATUSES = new Set(['running', 'starting', 'blocked', 'stalled']);
+
 function normalizePositiveInteger(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -450,6 +461,70 @@ async function removeHammerWorktree({
   return { ok: errors.length === 0, errors, pruned };
 }
 
+function isPidAliveLocal(pid, processKillImpl = process.kill) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    processKillImpl(pid, 0);
+    return true;
+  } catch (err) {
+    if (err?.code === 'ESRCH') return false;
+    if (err?.code === 'EPERM') return true;
+    return null;
+  }
+}
+
+async function resolveEntryLaunchRequestId(entry, { readFileImpl = fsPromises.readFile } = {}) {
+  const workerDir = entry?.workerDir;
+  if (!workerDir) return null;
+  try {
+    const manifest = JSON.parse(await readFileImpl(join(workerDir, 'workspace.json'), 'utf8'));
+    const raw = manifest?.launchRequestId || manifest?.dispatchId;
+    return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+  } catch {
+    // No manifest / unreadable / malformed → caller falls back to the ordinary
+    // reap path: a tree we cannot tie to a tracked dispatch must stay
+    // reclaimable (this is the leak-prevention half-registered/legacy path).
+    return null;
+  }
+}
+
+async function probeHammerWorkerActivity({
+  hqPath,
+  launchRequestId,
+  execFileImpl = execFileAsync,
+  env = process.env,
+  processKillImpl = process.kill,
+} = {}) {
+  if (!hqPath || !launchRequestId) {
+    return { active: false, status: null, reason: 'no-launch-request-id' };
+  }
+  let parsed;
+  try {
+    const { stdout } = await execFileImpl(
+      hqPath,
+      ['dispatch', 'status', launchRequestId, '--json'],
+      { env: { ...env }, maxBuffer: 1024 * 1024, timeout: 5_000 },
+    );
+    parsed = JSON.parse(String(stdout || '{}'));
+  } catch {
+    // Status unreadable → do NOT block the reap. A genuinely dead tree must stay
+    // reclaimable; deferring on an unreadable probe would leak it forever.
+    return { active: false, status: null, reason: 'status-unreadable' };
+  }
+  const status = typeof parsed?.status === 'string' ? parsed.status.trim().toLowerCase() : null;
+  if (!status || !HAMMER_ACTIVE_DISPATCH_STATUSES.has(status)) {
+    return { active: false, status, reason: status ? 'terminal' : 'status-absent' };
+  }
+  // Active dispatch row. Confirm the process is really alive before deferring so
+  // a phantom (active row, dead pid) cannot pin the worktree forever — the closer
+  // reconcile will flip it to failed, but we reap here rather than wait for it.
+  const pid = Number(parsed?.pid);
+  if (Number.isInteger(pid) && pid > 0 && isPidAliveLocal(pid, processKillImpl) === false) {
+    return { active: false, status, reason: 'phantom' };
+  }
+  return { active: true, status, reason: 'active', pid: Number.isInteger(pid) && pid > 0 ? pid : null };
+}
+
 async function reapCloserHammerWorktrees({
   hqRoot = process.env.HQ_ROOT || process.env.AGENT_OS_HQ_ROOT || DEFAULT_HQ_ROOT,
   hqPath = process.env.HQ_PATH || DEFAULT_HQ_PATH,
@@ -462,6 +537,8 @@ async function reapCloserHammerWorktrees({
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
   rmSyncImpl = rmSync,
+  readFileImpl = fsPromises.readFile,
+  probeWorkerActivityImpl = probeHammerWorkerActivity,
   env = process.env,
   logger = console,
 } = {}) {
@@ -561,6 +638,7 @@ async function reapCloserHammerWorktrees({
     halfRegistered: 0,
     open: 0,
     unknown: 0,
+    deferredActiveWorker: 0,
     limit,
     scanLimit,
   };
@@ -625,6 +703,36 @@ async function reapCloserHammerWorktrees({
       continue;
     }
 
+    // Liveness gate (2026-08-06 hammer worker_killed cascade fix): a hammer keeps
+    // running its long post-merge close sequence AFTER its PR merges. Reaping its
+    // worktree here deletes the live worker's cwd and kills it before it records
+    // an exit. Defer while the hammer's dispatch is still active; the next tick
+    // reaps once it terminalizes. Trees with no resolvable dispatch, or whose
+    // dispatch is terminal/unreadable/phantom, reap now — and the worker-pool
+    // orphan reaper is the independent backstop for any tree that later leaks.
+    const launchRequestId = await resolveEntryLaunchRequestId(entry, { readFileImpl });
+    if (launchRequestId) {
+      const activity = await probeWorkerActivityImpl({
+        hqPath,
+        launchRequestId,
+        execFileImpl,
+        env,
+      });
+      if (activity?.active) {
+        summary.deferredActiveWorker += 1;
+        logger?.info?.(JSON.stringify({
+          event: 'closer_worktree_reap.deferred_active_worker',
+          workerId: entry.workerId,
+          prNumber: entry.prNumber,
+          repo: entry.githubRepo || null,
+          reason: reapReason,
+          launchRequestId,
+          dispatchStatus: activity.status || null,
+        }));
+        continue;
+      }
+    }
+
     const removal = await removeHammerWorktree({
       entry,
       hqRoot,
@@ -663,5 +771,7 @@ export {
   parseGitHubRepoFromRemote,
   parseGitWorktreePorcelain,
   parseHammerPrNumber,
+  probeHammerWorkerActivity,
   reapCloserHammerWorktrees,
+  resolveEntryLaunchRequestId,
 };

@@ -11,6 +11,7 @@ import {
   resolveDaemonMergeUncleanReason,
 } from './ama/daemon-merge.mjs';
 import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
+import { readAmaAuditEntry } from './ama/audit.mjs';
 import { acquireMergeLease, releaseMergeLease } from './ama/merge-lease.mjs';
 import { readBuildCompletionSignalForPr } from './session-ledger-read-adapter.mjs';
 import { fetchPullRequestRollup } from './github-api.mjs';
@@ -194,6 +195,57 @@ export async function fetchLatestHeadReviewBodiesWithRetry({
 }
 
 /**
+ * Does a single durable AMA audit attempt prove that an entitled hammer
+ * validated a HAM terminal-remediation for `headSha` under the merge lease?
+ *
+ * The hammer writes its pre-merge / terminal audit attempts (see
+ * `templates/hammer-prompt.md`) only AFTER `bin/ama-check.mjs` validated the
+ * exact post-remediation head: the attempt carries the
+ * `ham_terminal_remediation_validated` head-match marker, its embedded
+ * eligibility trace shows `hamTerminalRemediation.ok`, and `validatedHead` is
+ * this head. The check is deliberately CI-INDEPENDENT — the GitHub required-check
+ * gate is re-verified LIVE by `attemptDaemonCleanMerge` before any merge — so it
+ * still recognizes the attempt the hammer recorded when it gave up waiting for
+ * pending required CI.
+ */
+function isHamTerminalRemediationValidatedAttempt(attempt, headSha) {
+  if (!attempt || typeof attempt !== 'object') return false;
+  if (attempt.headMatchEvidence !== 'ham_terminal_remediation_validated') return false;
+  if (String(attempt.validatedHead || '') !== String(headSha || '')) return false;
+  return attempt.eligibilityTrace?.trace?.hamTerminalRemediation?.ok === true;
+}
+
+/**
+ * Has an entitled hammer already remediated the findings on `headSha` and
+ * validated this exact head under the merge lease, per the durable AMA audit?
+ *
+ * This is the trust anchor for the daemon re-merge of a remediated (non-clean)
+ * PR whose live hammer exited before GitHub required checks went green: the
+ * hammer did the expensive remediation + provenance validation ONCE and recorded
+ * it; the cheap daemon lands the PR on a later tick once CI settles, with no live
+ * worker and without burning the per-head hammer retry cap. Fails closed (returns
+ * false) on any read error or missing marker, so the caller simply falls through
+ * to the existing capped-hammer path.
+ */
+export function headHasValidatedHamTerminalRemediation({
+  hqRoot,
+  repo,
+  prNumber,
+  headSha,
+  readAmaAuditEntryImpl = readAmaAuditEntry,
+} = {}) {
+  if (!hqRoot || !headSha) return false;
+  let entry;
+  try {
+    entry = readAmaAuditEntryImpl(hqRoot, repo, prNumber, headSha);
+  } catch {
+    return false;
+  }
+  const attempts = Array.isArray(entry?.attempts) ? entry.attempts : [];
+  return attempts.some((attempt) => isHamTerminalRemediationValidatedAttempt(attempt, headSha));
+}
+
+/**
  * MSM-03 — attempt the daemon clean-path merge for a settled review.
  *
  * Builds the injected GitHub/lease/audit collaborators from the watcher's live
@@ -230,6 +282,8 @@ export async function runDaemonCleanMergeAttempt({
   readBuildCompletionSignalForPrImpl = readBuildCompletionSignalForPr,
   readHeadAttestationChainForPrImpl = readHeadAttestationChainForPr,
   resolveOperatorMergeAccountabilityImpl = resolveOperatorMergeAccountability,
+  readAmaAuditEntryImpl = readAmaAuditEntry,
+  headHasValidatedHamTerminalRemediationImpl = headHasValidatedHamTerminalRemediation,
   env = process.env,
 } = {}) {
   const base = candidate?.baseBranch;
@@ -244,16 +298,39 @@ export async function runDaemonCleanMergeAttempt({
   const branchProtectionRequiredContexts = Array.isArray(candidate?.branchProtection?.requiredContexts)
     ? candidate.branchProtection.requiredContexts
     : [];
+  const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
   // The daemon path is a strict clean-merge shortcut. If the current review is
   // not daemon-clean, it must decline before spending any worker-identity reads:
   // the caller will fall through to the capped hammer, which owns final
   // remediation/merge for findings-present PRs. Resolving identity first made a
   // transient/opaque identity miss park HAM entirely even when the daemon would
   // have returned not-taken for findings.
+  //
+  // EXCEPTION — the daemon HAM terminal-remediation re-merge. A findings-present
+  // review whose CURRENT head an entitled hammer already remediated AND validated
+  // under the merge lease (durable AMA audit marker), but could not land because
+  // GitHub required checks had not gone green inside the hammer's bounded
+  // remote-CI wait window. With no live worker left to retry, the remediated +
+  // eligible PR would otherwise strand until an operator merges it (or the
+  // per-head hammer retry cap re-dispatches a worker just to wait on CI again).
+  // The daemon lands it here once CI settles — the "settled review + green +
+  // mergeable, no live worker → daemon merges" path. `attemptDaemonCleanMerge`
+  // still re-verifies green CI + mergeable + head-match LIVE, so a still-pending
+  // head simply declines and falls through unchanged.
+  let hamTerminalRemediationHead = false;
   if (!isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
-    const reason =
+    const uncleanReason =
       resolveDaemonMergeUncleanReason(reviewState, { strictMode }) || 'findings-unknown';
-    return NOT_TAKEN(reason);
+    hamTerminalRemediationHead = headHasValidatedHamTerminalRemediationImpl({
+      hqRoot,
+      repo: repoPath,
+      prNumber,
+      headSha: currentPrHeadSha || candidate?.headSha || null,
+      readAmaAuditEntryImpl,
+    });
+    if (!hamTerminalRemediationHead) {
+      return NOT_TAKEN(uncleanReason);
+    }
   }
   let liveRollup = null;
   try {
@@ -307,7 +384,6 @@ export async function runDaemonCleanMergeAttempt({
   const settledVerdict = SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict)
     ? 'settled-success'
     : String(gateSnapshot?.settledReview?.verdict || '');
-  const hqRoot = env.HQ_ROOT || env.AGENT_OS_HQ_ROOT || join(homedir(), 'agent-os-hq');
   const mergeMethod = cfg?.mergeMethod === 'merge' ? 'merge' : 'squash';
   const workerIdentity = await resolveDaemonWorkerIdentityForPr({
     repo: repoPath,
@@ -339,6 +415,13 @@ export async function runDaemonCleanMergeAttempt({
       mergeHeadSha: liveHead,
     });
     if (!operatorMergeAccountability) {
+      if (hamTerminalRemediationHead) {
+        // The HAM terminal-remediation audit IS the merge accountability, but the
+        // daemon re-merge is a best-effort shortcut — never a NEW park path. If
+        // head provenance cannot resolve a worker identity this tick, fall through
+        // to the existing capped hammer instead of failing closed.
+        return NOT_TAKEN('ham-terminal-remediation-worker-identity-unresolved');
+      }
       return {
         disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
         reason: 'worker-identity-unresolved',
@@ -368,12 +451,17 @@ export async function runDaemonCleanMergeAttempt({
         `at this exact head — substituting operator accountability for the clean daemon merge under lease`,
     );
   }
-  return attemptDaemonCleanMergeImpl({
+  const daemonValidatedHead = hamTerminalRemediationHead ? liveHead : validatedHead;
+  const daemonVerdict = hamTerminalRemediationHead
+    ? 'ham_terminal_remediation_validated'
+    : settledVerdict;
+  const daemonResult = await attemptDaemonCleanMergeImpl({
     repo: repoPath,
     prNumber,
     base,
-    validatedHead,
-    verdict: settledVerdict,
+    validatedHead: daemonValidatedHead,
+    verdict: daemonVerdict,
+    allowHamTerminalRemediation: hamTerminalRemediationHead,
     reviewState: {
       blockingFindingCount: reviewState?.blockingFindingCount,
       blockingFindingState: reviewState?.blockingFindingState,
@@ -398,6 +486,11 @@ export async function runDaemonCleanMergeAttempt({
     auditMetadata: {
       reviewer: reviewStateRow?.reviewer || '',
       riskClass: reviewState?.riskClass || 'unknown',
+      // Distinguish a HAM terminal-remediation daemon re-merge from a normal
+      // zero-finding clean daemon merge in the audit doc's closure authority.
+      ...(hamTerminalRemediationHead
+        ? { closureAuthority: 'daemon-ham-terminal-remediation' }
+        : {}),
       // Record which accountability authorized the merge: hq-dispatched worker
       // identity (the normal path) or an explicit head-scoped operator label
       // (Deliverable 1 substitution). The audit doc thus always names WHO the
@@ -432,7 +525,7 @@ export async function runDaemonCleanMergeAttempt({
         repo: repoPath,
         base,
         holderPr: prNumber,
-        holderHead: validatedHead,
+        holderHead: daemonValidatedHead,
         holderPid: process.pid,
         holderHost: hostname(),
         now: new Date().toISOString(),
@@ -470,6 +563,17 @@ export async function runDaemonCleanMergeAttempt({
     },
     logger,
   });
+  if (
+    hamTerminalRemediationHead &&
+    daemonResult?.disposition === DAEMON_MERGE_DISPOSITION.FAILED_CLOSED
+  ) {
+    // Best-effort shortcut only: a HAM daemon re-merge that fails closed must NOT
+    // park the PR. Fall through to the existing capped hammer, which can rebase,
+    // re-validate, and retry. (A NOT_TAKEN 'not-eligible' from a still-pending or
+    // not-yet-mergeable gate already falls through; MERGED / DEFERRED pass as-is.)
+    return NOT_TAKEN(`ham-terminal-remediation-daemon-${daemonResult.reason || 'failed-closed'}`);
+  }
+  return daemonResult;
 }
 
 // Internal helpers exposed for unit tests.

@@ -218,6 +218,7 @@ function assertHarnessIdentityMatch({
   log = console,
   auditSink = null,
   now = () => new Date().toISOString(),
+  env = process.env,
 } = {}) {
   const mismatches = [];
   const expectedIdentity = remediationWorkerGitIdentity(workerClass);
@@ -233,7 +234,7 @@ function assertHarnessIdentityMatch({
     });
   }
   if (brokerEvidence && brokerEvidence.enabled) {
-    const expectedProvider = remediationWorkerPushProvider(workerClass);
+    const expectedProvider = remediationWorkerPushProvider(workerClass, env);
     if (!brokerEvidence.fellBack && brokerEvidence.provider !== expectedProvider.provider) {
       mismatches.push({
         kind: 'push-provider',

@@ -3264,6 +3264,39 @@ test('prepareClaudeCodeRemediationStartupEnv preserves ANTHROPIC_AUTH_TOKEN (the
   }
 });
 
+test('prepareClaudeCodeRemediationStartupEnv keeps OAuth and git audit evidence together', () => {
+  const prevToken = process.env.ANTHROPIC_AUTH_TOKEN;
+  const prevApiKey = process.env.ANTHROPIC_API_KEY;
+  const prevAuthor = process.env.GIT_AUTHOR_NAME;
+  process.env.ANTHROPIC_AUTH_TOKEN = 'oauth-bearer-test';
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+  process.env.GIT_AUTHOR_NAME = 'Inherited Operator';
+  try {
+    const gitIdentity = remediationWorkerGitIdentity('claude-code');
+    const { startupEvidence } = prepareClaudeCodeRemediationStartupEnv({ gitIdentity });
+    assert.deepEqual(
+      startupEvidence.resolvedStartup.preservedForOAuth,
+      ['ANTHROPIC_AUTH_TOKEN'],
+      'OAuth bearer preservation must remain in startup evidence',
+    );
+    assert.ok(
+      startupEvidence.resolvedStartup.strippedEnv.includes('ANTHROPIC_API_KEY'),
+      'stripped API credentials must remain in startup evidence',
+    );
+    assert.ok(
+      startupEvidence.sanitizedEnv.gitIdentityOverrides.includes('GIT_AUTHOR_NAME'),
+      'git identity override audit evidence must share the same startup record',
+    );
+  } finally {
+    if (prevToken === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+    else process.env.ANTHROPIC_AUTH_TOKEN = prevToken;
+    if (prevApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = prevApiKey;
+    if (prevAuthor === undefined) delete process.env.GIT_AUTHOR_NAME;
+    else process.env.GIT_AUTHOR_NAME = prevAuthor;
+  }
+});
+
 test('resolveClaudeCodeCliPath honors CLAUDE_CODE_CLI_PATH override', () => {
   const prev = process.env.CLAUDE_CODE_CLI_PATH;
   process.env.CLAUDE_CODE_CLI_PATH = '/custom/path/to/claude';
@@ -4490,6 +4523,22 @@ test('assertHarnessIdentityMatch passes for all three real harnesses (never fire
     assert.equal(result.match, true, `${harness} identity must match its harness`);
     assert.deepEqual(result.mismatches, []);
   }
+});
+
+test('assertHarnessIdentityMatch validates push provider against the broker source env', () => {
+  const sourceEnv = {
+    OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER: 'github-app-codex-staging',
+  };
+  const provider = remediationWorkerPushProvider('codex', sourceEnv).provider;
+  const result = assertHarnessIdentityMatch({
+    workerClass: 'codex',
+    gitIdentity: remediationWorkerGitIdentity('codex'),
+    brokerEvidence: { enabled: true, provider, fellBack: false },
+    enforce: true,
+    env: sourceEnv,
+  });
+  assert.equal(result.match, true);
+  assert.deepEqual(result.mismatches, []);
 });
 
 test('assertHarnessIdentityMatch fails closed on a synthetic identity mismatch when enforcing', () => {

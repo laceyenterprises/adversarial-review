@@ -76,6 +76,10 @@ import {
   validateStartupRemediationConfig,
 } from '../src/follow-up-remediation.mjs';
 import { cancelLocalRemediationWorker } from '../src/adapters/agent-runtime/local/remediation.mjs';
+import {
+  assertClaudeCodeBrokerOAuth,
+  resolveClaudeCodeOAuthTransport,
+} from '../src/remediation-oauth-preflight.mjs';
 
 test('createQuotaHoldRevalidator caches hq quota status failures for the TTL window', async () => {
   let calls = 0;
@@ -239,11 +243,18 @@ beforeEach((context) => {
   resetOAuthPreflightCache();
   const isolatedKeys = [
     'ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR',
+    'ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT',
     'AGENT_OS_CONFIG_PATH',
     'AGENT_OS_ROLES_REMEDIATOR',
   ];
   const previous = Object.fromEntries(isolatedKeys.map((key) => [key, process.env[key]]));
   delete process.env.ADVERSARIAL_REVIEW_DEFAULT_REMEDIATOR;
+  // The claude-code preflight now defaults to the broker transport (the
+  // credential source the fleet worker actually uses). The pre-existing
+  // claude-code OAuth tests below exercise the keychain `claude auth status`
+  // probe, so pin the keychain transport by default; the broker-transport
+  // tests opt in explicitly with `transport: 'broker'` / an `env` override.
+  process.env.ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT = 'keychain';
   process.env.AGENT_OS_CONFIG_PATH = '/dev/null';
   delete process.env.AGENT_OS_ROLES_REMEDIATOR;
   context.after(() => {
@@ -3452,6 +3463,178 @@ test('assertClaudeCodeOAuth throws when CLI emits malformed JSON', async () => {
     }),
     /did not return valid JSON/
   );
+});
+
+// ── Broker-OAuth transport (the credential source the WORKER actually uses) ──
+//
+// The fleet claude-code worker authenticates via the loopback OAuth broker, not
+// the login keychain. In a system/launchd daemon `claude auth status --json`
+// fails even though the broker would vend a token — the false negative that
+// stranded remediation and escalated the AMA closer to the hammer too early.
+// These tests assert the preflight now validates the broker source.
+
+function fakeBrokerReadyzFetch(handler) {
+  // handler(url) -> { status?, body?, jsonThrows? } | Error (network failure)
+  return async (url /*, opts */) => {
+    const result = await handler(String(url));
+    if (result instanceof Error) throw result;
+    const status = result.status ?? 200;
+    return {
+      status,
+      ok: status < 400,
+      async json() {
+        if (result.jsonThrows) throw new Error('unexpected end of JSON input');
+        return result.body;
+      },
+    };
+  };
+}
+
+const READYZ_CLAUDE_SERVING = {
+  status: 'ready',
+  providers: { 'claude-code': true, codex: true },
+  provider_states: {
+    'claude-code': { state: 'ready', kind: 'claude-code', ready: true, can_serve: true },
+  },
+};
+
+test('resolveClaudeCodeOAuthTransport defaults to broker and honors the config key', () => {
+  assert.equal(resolveClaudeCodeOAuthTransport({}), 'broker');
+  assert.equal(resolveClaudeCodeOAuthTransport({ ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'broker' }), 'broker');
+  assert.equal(resolveClaudeCodeOAuthTransport({ ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'keychain' }), 'keychain');
+  assert.equal(resolveClaudeCodeOAuthTransport({ ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'KEYCHAIN' }), 'keychain');
+  // Unknown value falls back to the fleet default rather than failing open.
+  assert.equal(resolveClaudeCodeOAuthTransport({ ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'garbage' }), 'broker');
+});
+
+test('assertClaudeCodeOAuth (broker) PASSES when keychain is dead but the broker serves claude-code', async () => {
+  // The daemon reproduction: `claude auth status --json` throws (no login
+  // keychain), yet the broker `/readyz` reports claude-code serviceable.
+  let execCalls = 0;
+  const execFileImpl = async () => {
+    execCalls += 1;
+    throw new Error('Command failed: claude auth status --json');
+  };
+  const result = await assertClaudeCodeOAuth({
+    transport: 'broker',
+    execFileImpl,
+    fetchImpl: fakeBrokerReadyzFetch(() => ({ status: 200, body: READYZ_CLAUDE_SERVING })),
+    env: {},
+  });
+  assert.equal(result.transport, 'broker');
+  assert.equal(result.provider, 'claude-code');
+  assert.equal(execCalls, 0, 'broker transport must never shell out to `claude auth status`');
+});
+
+test('assertClaudeCodeOAuth (default transport, no config) uses the broker, not the keychain', async () => {
+  let execCalls = 0;
+  const result = await assertClaudeCodeOAuth({
+    // no `transport`, env has no override -> resolves to broker by default
+    env: {},
+    execFileImpl: async () => { execCalls += 1; throw new Error('should not be called'); },
+    fetchImpl: fakeBrokerReadyzFetch(() => ({ status: 200, body: READYZ_CLAUDE_SERVING })),
+  });
+  assert.equal(result.transport, 'broker');
+  assert.equal(execCalls, 0);
+});
+
+test('assertClaudeCodeOAuth (broker) accepts a degraded-but-can_serve provider (SOFT)', async () => {
+  const body = {
+    status: 'degraded',
+    providers: { 'claude-code': false },
+    provider_states: {
+      'claude-code': { state: 'degraded', kind: 'REFRESH_FAILED_TRANSIENT', ready: false, can_serve: true },
+    },
+    degraded_providers: { 'claude-code': 'REFRESH_FAILED_TRANSIENT' },
+  };
+  const result = await assertClaudeCodeOAuth({
+    transport: 'broker',
+    fetchImpl: fakeBrokerReadyzFetch(() => ({ status: 503, body })),
+    env: {},
+  });
+  assert.equal(result.transport, 'broker');
+});
+
+test('assertClaudeCodeOAuth (broker) PASSES on HTTP 503 when claude-code is serviceable but another provider is down', async () => {
+  const body = {
+    status: 'not_ready',
+    providers: { 'claude-code': true, codex: false },
+    provider_states: {
+      'claude-code': { state: 'ready', can_serve: true },
+      codex: { state: 'not_ready', can_serve: false },
+    },
+  };
+  const result = await assertClaudeCodeOAuth({
+    transport: 'broker',
+    fetchImpl: fakeBrokerReadyzFetch(() => ({ status: 503, body })),
+    env: {},
+  });
+  assert.equal(result.transport, 'broker');
+});
+
+test('assertClaudeCodeOAuth (broker) FAILS CLOSED when the broker rejects the claude-code grant', async () => {
+  const body = {
+    status: 'degraded',
+    providers: { 'claude-code': false },
+    provider_states: {
+      'claude-code': { state: 'degraded', kind: 'token.upstream_rejected', ready: false, can_serve: false },
+    },
+  };
+  await assert.rejects(
+    () => assertClaudeCodeOAuth({
+      transport: 'broker',
+      fetchImpl: fakeBrokerReadyzFetch(() => ({ status: 503, body })),
+      env: {},
+    }),
+    /broker OAuth unavailable for claude-code.*token\.upstream_rejected/s
+  );
+});
+
+test('assertClaudeCodeOAuth (broker) FAILS CLOSED when neither primary nor standby broker is reachable', async () => {
+  const attempted = [];
+  await assert.rejects(
+    () => assertClaudeCodeOAuth({
+      transport: 'broker',
+      fetchImpl: async (url) => { attempted.push(String(url)); throw new Error('ECONNREFUSED'); },
+      env: {},
+    }),
+    /broker OAuth unavailable for claude-code/
+  );
+  // Fail-closed only after both the primary (:4099) and standby (:4097) URLs
+  // have been tried — mirroring the worker's own fetch order.
+  assert.ok(attempted.some((u) => u.includes('4099')), 'primary broker must be probed');
+  assert.ok(attempted.some((u) => u.includes('4097')), 'standby broker must be probed');
+});
+
+test('assertClaudeCodeBrokerOAuth falls through from a cold primary to a healthy standby', async () => {
+  const result = await assertClaudeCodeBrokerOAuth({
+    env: {},
+    fetchImpl: fakeBrokerReadyzFetch((url) => {
+      if (url.includes('4099')) return new Error('ECONNREFUSED');
+      return { status: 200, body: READYZ_CLAUDE_SERVING };
+    }),
+  });
+  assert.equal(result.brokerUrl, 'http://127.0.0.1:4097');
+});
+
+test('assertClaudeCodeBrokerOAuth honors OAUTH_BROKER_URL override', async () => {
+  const seen = [];
+  const result = await assertClaudeCodeBrokerOAuth({
+    env: { OAUTH_BROKER_URL: 'http://127.0.0.1:5099' },
+    fetchImpl: fakeBrokerReadyzFetch((url) => { seen.push(url); return { status: 200, body: READYZ_CLAUDE_SERVING }; }),
+  });
+  assert.equal(result.brokerUrl, 'http://127.0.0.1:5099');
+  assert.ok(seen[0].startsWith('http://127.0.0.1:5099/readyz'));
+});
+
+test('assertRemediationWorkerOAuth threads fetchImpl/env into the claude-code broker preflight', async () => {
+  let fetched = false;
+  await assertRemediationWorkerOAuth('claude-code', {
+    env: { ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT: 'broker' },
+    fetchImpl: fakeBrokerReadyzFetch(() => { fetched = true; return { status: 200, body: READYZ_CLAUDE_SERVING }; }),
+    execFileImpl: async () => { throw new Error('keychain probe must not run under broker transport'); },
+  });
+  assert.ok(fetched, 'dispatcher must reach the broker readyz probe');
 });
 
 test('assertRemediationWorkerOAuth dispatches "claude-code" through to assertClaudeCodeOAuth', async () => {

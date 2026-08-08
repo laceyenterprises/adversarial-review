@@ -164,7 +164,133 @@ async function assertCodexOAuth() {
 const CLAUDE_CODE_REQUIRED_AUTH_METHOD = 'claude.ai';
 const CLAUDE_CODE_REQUIRED_API_PROVIDER = 'firstParty';
 
-async function assertClaudeCodeOAuth({ execFileImpl = execFileAsync } = {}) {
+// ── Broker-OAuth transport (the credential source the WORKER actually uses) ──
+//
+// The fleet claude-code worker does NOT read the macOS login keychain. Its
+// adapter (`modules/worker-pool/lib/adapters/claude-code.sh`) runs in
+// `CLAUDE_AUTH_MODE="broker-oauth"`: it fetches an `ANTHROPIC_AUTH_TOKEN` from
+// the loopback OAuth broker (`GET {broker}/token?provider=claude-code`, primary
+// :4099 with :4097 standby) and requires the class authPath to be `oauth` or
+// `broker://oauth-broker/claude-code`. The local remediation spawn path mirrors
+// this: `prepareClaudeCodeRemediationStartupEnv` preserves the broker-vended
+// `ANTHROPIC_AUTH_TOKEN` and never touches the keychain.
+//
+// So probing `claude auth status --json` (a keychain check) is the WRONG
+// credential source for the claude-code worker class. In a system/launchd
+// daemon with no login keychain that probe fails with "Command failed" even
+// though the broker would vend a perfectly good token — which is exactly what
+// stranded remediation and made the AMA closer escalate to the hammer too
+// early. The broker-mode preflight below asserts the SAME source the worker
+// will use: the broker's public `/readyz` reporting the claude-code provider
+// serviceable.
+//
+// Transport is config-driven via ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT
+// ('broker' | 'keychain'), defaulting to 'broker' to match the fleet posture.
+// 'keychain' is the explicit opt-out for a direct-CLI dev/local host that logs
+// in via `claude auth login` and runs no broker.
+const CLAUDE_CODE_BROKER_PROVIDER = 'claude-code';
+const DEFAULT_OAUTH_BROKER_URL = 'http://127.0.0.1:4099';
+const DEFAULT_OAUTH_BROKER_STANDBY_URL = 'http://127.0.0.1:4097';
+const BROKER_READYZ_TIMEOUT_MS = 2_500;
+
+function resolveClaudeCodeOAuthTransport(env = process.env) {
+  const raw = String(env.ADVERSARIAL_REVIEW_CLAUDE_CODE_OAUTH_TRANSPORT || '').trim().toLowerCase();
+  if (raw === 'keychain') return 'keychain';
+  if (raw === 'broker') return 'broker';
+  // Fleet default: the claude-code worker authenticates via broker OAuth.
+  return 'broker';
+}
+
+function resolveBrokerReadyzUrls(env = process.env) {
+  const primary = String(env.OAUTH_BROKER_URL || DEFAULT_OAUTH_BROKER_URL).replace(/\/+$/, '');
+  const standby = String(env.OAUTH_BROKER_STANDBY_URL || DEFAULT_OAUTH_BROKER_STANDBY_URL).replace(/\/+$/, '');
+  const urls = [primary];
+  if (standby && standby !== primary) urls.push(standby);
+  return urls;
+}
+
+// `/readyz` reports per-provider readiness. A provider that is `can_serve` (even
+// while `degraded`) can still vend a usable token — that is the SOFT signal the
+// fleet treats as healthy — so `can_serve` is the authoritative "the worker can
+// get a token" gate. A rejected/dead grant reads `can_serve: false`, and an
+// absent provider is not serviceable at all. Fall back to the boolean readiness
+// verdict in `providers` when the richer `provider_states` map is unavailable.
+function claudeCodeServiceableFromReadyz(body) {
+  if (!body || typeof body !== 'object') return false;
+  const state = body.provider_states?.[CLAUDE_CODE_BROKER_PROVIDER];
+  if (state && typeof state === 'object' && typeof state.can_serve === 'boolean') {
+    return state.can_serve === true;
+  }
+  return body.providers?.[CLAUDE_CODE_BROKER_PROVIDER] === true;
+}
+
+async function probeBrokerReadyzForClaudeCode(url, { fetchImpl, timeoutMs = BROKER_READYZ_TIMEOUT_MS }) {
+  // Bound the whole exchange (headers AND body read) so a wedged broker can
+  // never hang the remediation drain. `/readyz` is a PUBLIC endpoint (no shared
+  // secret), so this needs no credential injection. It returns HTTP 200 when
+  // the aggregate is ready and 503 when ANY blocking provider is down — but
+  // claude-code can be serviceable while some OTHER provider forces the 503, so
+  // parse the body regardless of status rather than gating on `res.ok`.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(`${url}/readyz`, {
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    let body;
+    try {
+      body = await res.json();
+    } catch (err) {
+      return { ok: false, reason: `${url}/readyz body not JSON (http ${res.status}): ${err.message}` };
+    }
+    if (claudeCodeServiceableFromReadyz(body)) {
+      return { ok: true };
+    }
+    const state = body?.provider_states?.[CLAUDE_CODE_BROKER_PROVIDER];
+    const known = body?.providers && CLAUDE_CODE_BROKER_PROVIDER in body.providers;
+    const detail = state?.kind || (known ? 'not-ready' : 'provider-absent');
+    return { ok: false, reason: `${url}/readyz reports claude-code not serviceable (${detail})` };
+  } catch (err) {
+    return { ok: false, reason: `${url}/readyz unreachable: ${err.message}` };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function assertClaudeCodeBrokerOAuth({
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  timeoutMs = BROKER_READYZ_TIMEOUT_MS,
+} = {}) {
+  if (typeof fetchImpl !== 'function') {
+    throw new OAuthError('claude-code', 'no fetch implementation available to probe the OAuth broker');
+  }
+  const urls = resolveBrokerReadyzUrls(env);
+  const failures = [];
+  for (const url of urls) {
+    // Mirror the worker's own primary->standby fetch order; either endpoint
+    // vending claude-code is enough.
+    const result = await probeBrokerReadyzForClaudeCode(url, { fetchImpl, timeoutMs });
+    if (result.ok) {
+      return { transport: 'broker', brokerUrl: url, provider: CLAUDE_CODE_BROKER_PROVIDER };
+    }
+    failures.push(result.reason);
+  }
+  // Fail closed: neither the primary nor the standby broker can serve
+  // claude-code, so the worker would fail its own token fetch too.
+  throw new OAuthError(
+    'claude-code',
+    `broker OAuth unavailable for claude-code (${failures.join('; ')})`
+  );
+}
+
+async function assertClaudeCodeOAuth({
+  execFileImpl = execFileAsync,
+  fetchImpl = globalThis.fetch,
+  env = process.env,
+  transport,
+} = {}) {
   // Per-process cache mirrors the codex pre-flight cache. The
   // `claude auth status --json` subprocess otherwise runs every
   // consume tick, and macOS Sequoia's per-app-data-dir TCC prompts
@@ -178,6 +304,23 @@ async function assertClaudeCodeOAuth({ execFileImpl = execFileAsync } = {}) {
   if (cached === true) return;
   if (cached instanceof OAuthError) throw cached;
 
+  const resolvedTransport = transport || resolveClaudeCodeOAuthTransport(env);
+  if (resolvedTransport === 'broker') {
+    try {
+      const brokerResult = await assertClaudeCodeBrokerOAuth({ env, fetchImpl });
+      __oauthPreflightCache['claude-code'] = true;
+      return brokerResult;
+    } catch (err) {
+      if (err instanceof OAuthError) {
+        __oauthPreflightCache['claude-code'] = err;
+      }
+      throw err;
+    }
+  }
+
+  // transport === 'keychain': legacy direct-CLI login-state probe. Only correct
+  // for a dev/local host that runs `claude` against a login-keychain session and
+  // no broker. Unchanged from the pre-broker behavior below.
   const claudeCli = resolveClaudeCodeCliPath();
   if (claudeCli.includes('/') && !existsSync(claudeCli)) {
     const err = new OAuthError('claude-code', `claude CLI not found at ${claudeCli}`);
@@ -311,10 +454,10 @@ async function assertGeminiOAuth() {
   }
 }
 
-async function assertRemediationWorkerOAuth(workerClass, { execFileImpl } = {}) {
+async function assertRemediationWorkerOAuth(workerClass, { execFileImpl, fetchImpl, env } = {}) {
   switch (workerClass) {
     case 'codex':       return assertCodexOAuth();
-    case 'claude-code': return assertClaudeCodeOAuth({ execFileImpl });
+    case 'claude-code': return assertClaudeCodeOAuth({ execFileImpl, fetchImpl, env });
     case 'gemini':      return assertGeminiOAuth();
     default:
       throw new Error(`unknown remediation worker class: ${workerClass}`);
@@ -324,8 +467,10 @@ async function assertRemediationWorkerOAuth(workerClass, { execFileImpl } = {}) 
 export {
   OAuthError,
   resetOAuthPreflightCache,
+  resolveClaudeCodeOAuthTransport,
   assertCodexOAuth,
   assertClaudeCodeOAuth,
+  assertClaudeCodeBrokerOAuth,
   assertGeminiOAuth,
   assertRemediationWorkerOAuth,
 };

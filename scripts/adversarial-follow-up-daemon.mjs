@@ -564,7 +564,8 @@ async function runFollowUpDaemonIteration({
       `scanned=${result.scanned} reaped=${result.reaped} skipped=${result.skipped} ` +
       `terminal=${result.terminal} prunable=${result.prunable} ` +
       `halfRegistered=${result.halfRegistered} open=${result.open} ` +
-      `unknown=${result.unknown} errors=${result.errors} limit=${result.limit}`
+      `unknown=${result.unknown} deferredActiveWorker=${result.deferredActiveWorker} ` +
+      `errors=${result.errors} limit=${result.limit}`
     );
   });
   if (shouldStop()) return;

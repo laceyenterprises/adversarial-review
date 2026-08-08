@@ -1316,6 +1316,38 @@ function schemaV1() {
             __default: 'user-agent',
             __enum: ['system-daemon', 'user-agent'],
           },
+          // LDD carve-out set. Mirrors the Python CFG schema
+          // (schema_v1/misc.py launchd core_services / mode_carveouts).
+          // Keep in lockstep: this strict loader must accept the same
+          // launchd keys an operator may add to config.yaml/config.local.yaml
+          // for scripts/launchd-domain-drift-watch.sh, or adversarial-watcher
+          // crash-loops on strict load (config-schema.multi-loader-parity).
+          // core_services names the launchd label-base service names whose
+          // live domain must match install_mode; empty keeps the check dark.
+          core_services: {
+            __type: TYPE_LIST,
+            __item: { __type: TYPE_STRING },
+            __default: [],
+          },
+          // Daemons intentionally pinned to a mode other than install_mode.
+          // Each entry records service, its pinned mode, and reason so the
+          // drift-watch treats a live-mode mismatch as an accepted carve-out.
+          mode_carveouts: {
+            __type: TYPE_LIST,
+            __item: {
+              __type: TYPE_DICT,
+              __strict: true,
+              __keys: {
+                service: { __type: TYPE_STRING },
+                mode: {
+                  __type: TYPE_STRING,
+                  __enum: ['system-daemon', 'user-agent'],
+                },
+                reason: { __type: TYPE_STRING },
+              },
+            },
+            __default: [],
+          },
         },
       },
       linear: {

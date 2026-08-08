@@ -808,11 +808,11 @@ const CANONICAL_ALERT_SCRIPT_TIMEOUT_MS = 35_000;
 // availability is a deployment-layout fact: present when the submodule is checked
 // out under the superproject, absent in a standalone/CI clone (where the legacy bus
 // fallback keeps this module self-contained). `AGENT_OS_ALERT_DELIVERY_SCRIPT`
-// overrides the path (tests point it at a stub).
+// overrides the path; an empty override disables discovery for isolated tests.
 function resolveCanonicalAlertScript(env = process.env) {
   const override = env.AGENT_OS_ALERT_DELIVERY_SCRIPT;
-  if (override) {
-    return existsSync(override) ? override : null;
+  if (override !== undefined) {
+    return override && existsSync(override) ? override : null;
   }
   // src/alert-delivery.mjs -> src -> adversarial-review -> tools -> <superproject root>
   const candidate = fileURLToPath(new URL('../../../scripts/alert-delivery.mjs', import.meta.url));
@@ -873,8 +873,13 @@ function spawnCanonicalAlertScript(scriptPath, payload, env = process.env) {
     try {
       child.stdin.write(`${JSON.stringify(payload)}\n`);
       child.stdin.end();
-    } catch {
-      // the 'error'/'close' handler resolves the promise
+    } catch (error) {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // already exited
+      }
+      finish({ code: 1, stdout, stderr: stderr || String(error?.message || error) });
     }
   });
 }

@@ -502,6 +502,52 @@ test('canonical alert script stdin pipe errors stay local to delivery failure', 
   assert.match(health.lastFailureReason, /canonical alert-delivery exited 7/);
 });
 
+test('empty canonical alert script override disables real filesystem discovery', async (t) => {
+  const { env, rootDir } = makeEnv({
+    AGENT_OS_ALERT_DELIVERY_SCRIPT: '',
+    ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS: '0',
+  });
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const calls = [];
+  await deliverAlert('isolated legacy bus', {
+    env,
+    fsImpl: {
+      readFileSync() {
+        return 'hook-token';
+      },
+      existsSync() {
+        return true;
+      },
+    },
+    requestText: async () => {
+      throw new Error('initial queue attempt should stay retryable');
+    },
+  });
+  const drained = await drainPendingAlerts({
+    env,
+    now: new Date(Date.now() + 6_000),
+    fsImpl: {
+      readFileSync() {
+        return 'hook-token';
+      },
+      existsSync() {
+        return true;
+      },
+    },
+    requestText: async (url, options) => {
+      calls.push({ url, options });
+      return 'ok';
+    },
+  });
+
+  assert.equal(drained.drained, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'http://127.0.0.1:18799/hooks/wake');
+  assert.equal(calls[0].options.body.text, 'isolated legacy bus');
+  assert.equal(readAlertSinkHealth({ env }).ready, true);
+});
+
 test('invalid retry delay configuration falls back without wedging an inflight alert', async (t) => {
   const { env, rootDir } = makeEnv({
     ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS: 'not-a-number',

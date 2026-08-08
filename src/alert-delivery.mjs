@@ -836,6 +836,9 @@ function spawnCanonicalAlertScript(scriptPath, payload, env = process.env) {
     }
     let stdout = '';
     let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdin.on('error', () => {});
     let settled = false;
     const finish = (result) => {
       if (settled) return;

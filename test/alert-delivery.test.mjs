@@ -479,6 +479,29 @@ test('a failing canonical alert script dead-letters through the durable queue', 
   assert.match(health.lastFailureReason, /canonical alert-delivery exited 3/);
 });
 
+test('canonical alert script stdin pipe errors stay local to delivery failure', async (t) => {
+  const { env, rootDir } = makeEnv({
+    ADVERSARIAL_ALERT_DELIVERY_MAX_ATTEMPTS: '1',
+    ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS: '0',
+  });
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const scriptPath = join(rootDir, 'stub-alert-delivery.mjs');
+  writeFileSync(scriptPath, "process.exit(7);\n");
+  env.AGENT_OS_ALERT_DELIVERY_SCRIPT = scriptPath;
+
+  const requestText = async () => {
+    throw new Error('legacy bus must not be used when the canonical script is present');
+  };
+  await deliverAlert('x'.repeat(1024 * 1024), { env, requestText });
+  const drained = await drainPendingAlerts({ env, requestText });
+
+  assert.equal(drained.status, 'error');
+  assert.equal(drained.results[0].status, 'dead-lettered');
+  const health = readAlertSinkHealth({ env });
+  assert.equal(health.deadLetterCount, 1);
+  assert.match(health.lastFailureReason, /canonical alert-delivery exited 7/);
+});
+
 test('invalid retry delay configuration falls back without wedging an inflight alert', async (t) => {
   const { env, rootDir } = makeEnv({
     ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS: 'not-a-number',

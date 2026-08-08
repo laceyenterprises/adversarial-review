@@ -56,7 +56,14 @@ const REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL = {
   },
 };
 
-const DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL = 3;
+// Raised 3 -> 6 alongside the dead-reviewer fast path in
+// reviewer-orphan-reconcile.mjs (shouldReconcileStaleReviewerSession): that fast
+// path can now surface a provably-dead reviewer's stuck `reviewing` claim for
+// reconcile BEFORE its ~20-min lease expires, so a backlog of such claims (e.g.
+// several remediation heads whose reviewers died) must not be starved by too
+// tight a per-poll cap. Kept modest so the per-poll GitHub head-probe cost this
+// cap exists to bound stays bounded.
+const DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL = 6;
 const DEFAULT_REVIEWER_TIMEOUT_FALLBACK_THRESHOLD = 2;
 
 export function resolveReviewerTimeoutFallbackThreshold(env = process.env) {

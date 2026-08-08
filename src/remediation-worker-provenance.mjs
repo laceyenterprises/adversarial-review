@@ -40,6 +40,97 @@ const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
   },
 };
 
+// Broker provider each remediation-worker class authenticates its git push /
+// gh calls through. Keyed off the CONCRETE physical spawn class so a
+// remediation worker pushes as its OWN harness App (lacey-<harness>-agent[bot]),
+// never a fixed merge-agent identity routed in from a different class. This is
+// the push-side twin of remediationWorkerGitIdentity above: identity = who the
+// commit is authored by AND who the push authenticates as, both keyed on the
+// physical harness.
+//
+// The slugs are the exact providers the loopback OAuth broker (:4099
+// /token?provider=) vends and that the worker-pool builder push path
+// (modules/worker-pool/lib/hq-gh.sh: CODEX_WORKER_GH_TOKEN ->
+// github-app-codex-agent, CLAUDE_WORKER_GH_TOKEN -> github-app-claude-agent,
+// GEMINI_WORKER_GH_TOKEN -> github-app-gemini-agent) already maps for builder
+// workers. All three were verified to hold contents:write on
+// laceyenterprises/{adversarial-review,agent-os} on 2026-08-08 via a
+// throwaway-ref create/delete probe against each App's broker-minted token.
+const REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS = {
+  codex: 'github-app-codex-agent',
+  'claude-code': 'github-app-claude-agent',
+  gemini: 'github-app-gemini-agent',
+};
+
+// Fallback push provider, used ONLY when a physical harness has no known
+// push-capable App of its own. It is NEVER the default for a real harness — all
+// three live harnesses are in the push-capable set below. Selecting it means the
+// worker's push CANNOT authenticate as the physical harness, so it is a loud,
+// audited, degraded state (see remediationWorkerPushProvider), not a silent
+// default. This is exactly the #5058 hazard the fix removes: a hardcoded
+// merge-agent provider that force-pushed a codex remediation as
+// lacey-merge-agent[bot].
+const MERGE_AGENT_FALLBACK_PUSH_PROVIDER = 'github-app-merge-agent';
+
+// Physical harnesses whose own GitHub App is known (and was verified) to hold
+// contents:write on the fleet's PR repos. A harness absent here trips the
+// merge-agent fallback (loud + audited) rather than silently failing the push:
+// the operator action is to grant the per-harness App push access and add the
+// harness here.
+const REMEDIATION_PUSH_CAPABLE_HARNESSES = new Set(['codex', 'claude-code', 'gemini']);
+
+// Resolve the broker push provider for a physical harness class. Precedence:
+//   1. explicit per-harness override env OAUTH_BROKER_REMEDIATION_<CLASS>_PROVIDER
+//      (rotation / staging; still binds the push to THIS harness, so honored).
+//   2. the per-harness default, iff the harness is known push-capable.
+//   3. the merge-agent fallback (loud + audited) for any harness without a known
+//      push-capable App.
+// Read at call time (not module-load), mirroring remediationWorkerGitIdentity,
+// so a long-running daemon picks up an override without a restart. The legacy
+// OAUTH_BROKER_MERGE_AGENT_PROVIDER env is intentionally NOT consulted here — it
+// was the #5058 bug vector (a fixed merge-agent provider hijacking every
+// harness) and is replaced by this harness-keyed resolution.
+function remediationWorkerPushProvider(workerClass, env = process.env) {
+  const envSuffix = String(workerClass || '').toUpperCase().replace(/-/g, '_');
+  const override = envSuffix
+    ? String(env[`OAUTH_BROKER_REMEDIATION_${envSuffix}_PROVIDER`] || '').trim()
+    : '';
+  if (override) {
+    return {
+      provider: override,
+      source: 'harness-override',
+      harnessClass: workerClass,
+      honored: true,
+      fellBack: false,
+      warning: null,
+    };
+  }
+  const harnessProvider = REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS[workerClass] || null;
+  if (harnessProvider && REMEDIATION_PUSH_CAPABLE_HARNESSES.has(workerClass)) {
+    return {
+      provider: harnessProvider,
+      source: 'physical-harness',
+      harnessClass: workerClass,
+      honored: true,
+      fellBack: false,
+      warning: null,
+    };
+  }
+  const warning =
+    `remediation harness ${JSON.stringify(workerClass)} has no known push-capable broker App; ` +
+    `falling back to ${MERGE_AGENT_FALLBACK_PUSH_PROVIDER}. The push will NOT authenticate as the ` +
+    `physical harness. Operator action: grant the per-harness GitHub App push (contents:write) ` +
+    `access on the PR repos, then add the harness to REMEDIATION_PUSH_CAPABLE_HARNESSES.`;
+  return {
+    provider: MERGE_AGENT_FALLBACK_PUSH_PROVIDER,
+    source: 'merge-agent-fallback',
+    harnessClass: workerClass,
+    honored: false,
+    fellBack: true,
+    warning,
+  };
+}
+
 // The Worker-Class trailer this pipeline stamps on commits via the
 // commit-msg hook. Different from the worker-model class — encodes
 // role+model so audit trails can distinguish remediation work from other
@@ -179,10 +270,14 @@ function installWorkerProvenanceHook(workspaceDir, { execFileSyncImpl = execFile
 
 export {
   REMEDIATION_WORKER_IDENTITY_DEFAULTS,
+  REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS,
+  MERGE_AGENT_FALLBACK_PUSH_PROVIDER,
+  REMEDIATION_PUSH_CAPABLE_HARNESSES,
   REMEDIATION_WORKER_TRAILER_CLASS,
   GEMINI_REMEDIATION_WORKER_TRAILER_CLASS,
   remediationWorkerTrailerClass,
   remediationWorkerGitIdentity,
+  remediationWorkerPushProvider,
   WORKER_PROVENANCE_HOOK_SRC,
   installWorkerProvenanceHook,
 };

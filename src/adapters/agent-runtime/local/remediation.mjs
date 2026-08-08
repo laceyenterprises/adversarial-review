@@ -10,6 +10,7 @@ import {
   GEMINI_REMEDIATION_WORKER_TRAILER_CLASS,
   REMEDIATION_WORKER_TRAILER_CLASS,
   remediationWorkerGitIdentity,
+  remediationWorkerPushProvider,
 } from '../../../remediation-worker-provenance.mjs';
 import { requireWorkerReplyContext } from '../../../remediation-reply-paths.mjs';
 import { scrubOAuthFallbackEnv, OAUTH_ENV_STRIP_LIST } from '../../../secret-source/env.mjs';
@@ -96,8 +97,6 @@ const MERGE_AGENT_BROKER_TRUTHY = new Set(['1', 'true', 'yes', 'on']);
 const MERGE_AGENT_BROKER_FALSEY = new Set(['0', 'false', 'no', 'off']);
 const DEFAULT_OAUTH_BROKER_URL = 'http://127.0.0.1:4099';
 const DEFAULT_OAUTH_BROKER_STANDBY_URL = 'http://127.0.0.1:4097';
-const DEFAULT_MERGE_AGENT_BROKER_PROVIDER = 'github-app-merge-agent';
-
 function parseMergeAgentBrokerFlag(value) {
   const raw = String(value ?? '').trim();
   if (!raw) return { enabled: false, recognized: true, raw };
@@ -107,7 +106,36 @@ function parseMergeAgentBrokerFlag(value) {
   return { enabled: false, recognized: false, raw };
 }
 
-function applyMergeAgentBrokerEnv(env, sourceEnv = process.env) {
+// Resolve the expected App-id / installation-id pin (kind is 'APP_ID' or
+// 'INSTALLATION_ID') that the downstream push path validates the minted token
+// against. The pin MUST match the RESOLVED provider, never a stale merge-agent
+// pin — validating a per-harness token against merge-agent's app id would fail
+// closed and break the push (the #5058 fix must never make the default "push
+// fails"). Precedence: an explicit per-harness pin
+// (OAUTH_BROKER_REMEDIATION_<CLASS>_EXPECTED_<KIND>) wins; the legacy
+// OAUTH_BROKER_MERGE_AGENT_EXPECTED_<KIND> pin is honored ONLY when the provider
+// actually resolved to the merge-agent fallback.
+function resolveHarnessExpectedPin(sourceEnv, workerClass, resolvedProvider, kind) {
+  const suffix = String(workerClass || '').toUpperCase().replace(/-/g, '_');
+  const perHarness = suffix
+    ? String(sourceEnv[`OAUTH_BROKER_REMEDIATION_${suffix}_EXPECTED_${kind}`] || '').trim()
+    : '';
+  if (perHarness) return perHarness;
+  if (resolvedProvider.source === 'merge-agent-fallback') {
+    return String(sourceEnv[`OAUTH_BROKER_MERGE_AGENT_EXPECTED_${kind}`] || '').trim() || '';
+  }
+  return '';
+}
+
+// Inject the broker env a remediation worker's git push / gh calls authenticate
+// through, keyed off the PHYSICAL harness class. Gated on MERGE_AGENT_AUTH_VIA_BROKER
+// (unchanged). The provider is resolved per-harness (remediationWorkerPushProvider);
+// the transport var name OAUTH_BROKER_MERGE_AGENT_PROVIDER is preserved (that is
+// what the downstream push path reads) but its VALUE is now the harness's own App,
+// never a hardcoded merge-agent provider. A harness with no known push-capable App
+// falls back to merge-agent LOUDLY (warn + evidence.fellBack) so the push never
+// silently fails.
+function applyMergeAgentBrokerEnv(env, sourceEnv = process.env, { workerClass = null, log = console } = {}) {
   const parsedFlag = parseMergeAgentBrokerFlag(sourceEnv.MERGE_AGENT_AUTH_VIA_BROKER);
   const evidence = {
     enabled: parsedFlag.enabled,
@@ -120,28 +148,128 @@ function applyMergeAgentBrokerEnv(env, sourceEnv = process.env) {
 
   const brokerUrl = sourceEnv.OAUTH_BROKER_URL || DEFAULT_OAUTH_BROKER_URL;
   const standbyUrl = sourceEnv.OAUTH_BROKER_STANDBY_URL || DEFAULT_OAUTH_BROKER_STANDBY_URL;
-  const provider = sourceEnv.OAUTH_BROKER_MERGE_AGENT_PROVIDER || DEFAULT_MERGE_AGENT_BROKER_PROVIDER;
+  const resolvedProvider = remediationWorkerPushProvider(workerClass, sourceEnv);
+  const provider = resolvedProvider.provider;
   env.MERGE_AGENT_AUTH_VIA_BROKER = 'true';
   env.OAUTH_BROKER_URL = brokerUrl;
   env.OAUTH_BROKER_STANDBY_URL = standbyUrl;
   env.OAUTH_BROKER_MERGE_AGENT_PROVIDER = provider;
-  for (const key of [
-    'OAUTH_BROKER_SHARED_SECRET_FILE',
-    'OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID',
-    'OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID',
-  ]) {
-    if (sourceEnv[key]) env[key] = sourceEnv[key];
+  if (sourceEnv.OAUTH_BROKER_SHARED_SECRET_FILE) {
+    env.OAUTH_BROKER_SHARED_SECRET_FILE = sourceEnv.OAUTH_BROKER_SHARED_SECRET_FILE;
   }
+  // Be authoritative over the expected-pin transport vars: SET them from the
+  // resolved pin, or DELETE any value inherited from the daemon env. A stale
+  // merge-agent pin surviving next to a per-harness provider would fail the
+  // downstream token/app validation closed and break the push.
+  const expectedAppId = resolveHarnessExpectedPin(sourceEnv, workerClass, resolvedProvider, 'APP_ID');
+  const expectedInstallationId = resolveHarnessExpectedPin(sourceEnv, workerClass, resolvedProvider, 'INSTALLATION_ID');
+  if (expectedAppId) env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID = expectedAppId;
+  else delete env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID;
+  if (expectedInstallationId) env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID = expectedInstallationId;
+  else delete env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID;
+
+  if (resolvedProvider.fellBack && resolvedProvider.warning) {
+    log?.warn?.(`[follow-up-remediation] harness-push-fallback: ${resolvedProvider.warning}`);
+  }
+
   return {
     ...evidence,
     brokerUrl,
     standbyUrl,
     provider,
-    providerOverridden: Boolean(sourceEnv.OAUTH_BROKER_MERGE_AGENT_PROVIDER),
-    expectedAppId: sourceEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID || null,
-    expectedInstallationId: sourceEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID || null,
+    providerSource: resolvedProvider.source,
+    harnessClass: resolvedProvider.harnessClass,
+    harnessIdentityHonored: resolvedProvider.honored,
+    fellBack: resolvedProvider.fellBack,
+    fallbackWarning: resolvedProvider.warning,
+    expectedAppId: expectedAppId || null,
+    expectedInstallationId: expectedInstallationId || null,
     sharedSecretFile: sourceEnv.OAUTH_BROKER_SHARED_SECRET_FILE || null,
   };
+}
+
+class HarnessIdentityMismatchError extends Error {
+  constructor(message, { workerClass = null, mismatches = [], enforced = true } = {}) {
+    super(message);
+    this.name = 'HarnessIdentityMismatchError';
+    this.isHarnessIdentityMismatch = true;
+    this.isPolicyViolation = true;
+    this.violationType = 'harness-identity-mismatch';
+    this.workerClass = workerClass;
+    this.mismatches = mismatches;
+    this.enforced = enforced;
+  }
+}
+
+// Fail-closed assert at the spawn boundary: the git identity AND (when broker
+// mode is on) the push provider a remediation worker is about to run under MUST
+// match its PHYSICAL harness class. Because every prepare fn now sets the
+// per-harness identity, this never fires for a real codex/claude-code/gemini
+// harness — it only catches a spawn-site regression that reroutes identity to a
+// different class (the #5058 shape). Enforcement is a kill-switch: when enforcing,
+// a mismatch throws (loud audit); when not, it warns + audits + continues. The
+// merge-agent fallback is an already-audited, intentional degraded state, not a
+// mismatch, so it does not trip the assert.
+function assertHarnessIdentityMatch({
+  workerClass,
+  gitIdentity,
+  brokerEvidence = null,
+  enforce = true,
+  log = console,
+  auditSink = null,
+  now = () => new Date().toISOString(),
+} = {}) {
+  const mismatches = [];
+  const expectedIdentity = remediationWorkerGitIdentity(workerClass);
+  if (
+    !gitIdentity
+    || gitIdentity.name !== expectedIdentity.name
+    || gitIdentity.email !== expectedIdentity.email
+  ) {
+    mismatches.push({
+      kind: 'git-identity',
+      expected: expectedIdentity,
+      resolved: gitIdentity ? { name: gitIdentity.name, email: gitIdentity.email } : null,
+    });
+  }
+  if (brokerEvidence && brokerEvidence.enabled) {
+    const expectedProvider = remediationWorkerPushProvider(workerClass);
+    if (!brokerEvidence.fellBack && brokerEvidence.provider !== expectedProvider.provider) {
+      mismatches.push({
+        kind: 'push-provider',
+        expected: expectedProvider.provider,
+        resolved: brokerEvidence.provider || null,
+      });
+    }
+  }
+  const result = {
+    workerClass,
+    match: mismatches.length === 0,
+    mismatches,
+    enforced: enforce,
+    // Only stamped on the mismatch path: the happy path must not consume a
+    // `now()` tick, so injected clocks in the spawn path keep their call order.
+    checkedAt: null,
+  };
+  if (mismatches.length > 0) {
+    result.checkedAt = now();
+    const summary = mismatches
+      .map((m) => `${m.kind}: expected ${JSON.stringify(m.expected)} got ${JSON.stringify(m.resolved)}`)
+      .join('; ');
+    const message = `remediation harness identity mismatch for physical harness ${JSON.stringify(workerClass)}: ${summary}`;
+    log?.error?.(`[follow-up-remediation] HARNESS-IDENTITY ${enforce ? 'FAIL-CLOSED' : 'WARN'}: ${message}`);
+    if (auditSink) {
+      try {
+        auditSink({ event: 'remediation-harness-identity-mismatch', message, ...result });
+      } catch {
+        // Audit sink must never mask the underlying enforcement decision.
+      }
+    }
+    if (enforce) {
+      throw new HarnessIdentityMismatchError(message, { workerClass, mismatches, enforced: true });
+    }
+  }
+  return result;
 }
 
 function resolveGeminiRemediationModel(env = process.env) {
@@ -184,9 +312,30 @@ function scrubGeminiOAuthFallbackEnv(sourceEnv = process.env) {
   return { env, stripped };
 }
 
-function prepareClaudeCodeRemediationStartupEnv() {
+function prepareClaudeCodeRemediationStartupEnv({ gitIdentity = null, workerClass = 'claude-code' } = {}) {
   const { env, stripped } = scrubOAuthFallbackEnv(process.env);
   env.PATH = buildInheritedPath(env.PATH || '');
+
+  // Stamp the physical-harness git identity so a claude-code remediation commits
+  // (and, with the broker on, pushes) as the claude harness — not under whatever
+  // ambient GIT_AUTHOR_*/GIT_COMMITTER_* the daemon happens to hold. Before this,
+  // the claude prepare fn set NO identity at all (#5058 sibling defect), so a
+  // claude remediation authored commits under the operator's inherited git env.
+  const overriddenGitEnv = [];
+  if (gitIdentity) {
+    for (const [key, value] of [
+      ['GIT_AUTHOR_NAME', gitIdentity.name],
+      ['GIT_AUTHOR_EMAIL', gitIdentity.email],
+      ['GIT_COMMITTER_NAME', gitIdentity.name],
+      ['GIT_COMMITTER_EMAIL', gitIdentity.email],
+    ]) {
+      if (process.env[key] !== undefined && process.env[key] !== value) overriddenGitEnv.push(key);
+      env[key] = value;
+    }
+  }
+
+  const mergeAgentBroker = applyMergeAgentBrokerEnv(env, process.env, { workerClass });
+
   return {
     env,
     startupEvidence: {
@@ -200,13 +349,19 @@ function prepareClaudeCodeRemediationStartupEnv() {
         strippedEnv: stripped,
         preservedForOAuth: env.ANTHROPIC_AUTH_TOKEN ? ['ANTHROPIC_AUTH_TOKEN'] : [],
       },
+      sanitizedEnv: {
+        stripped,
+        gitIdentityOverrides: overriddenGitEnv,
+      },
+      gitIdentity: gitIdentity ? { name: gitIdentity.name, email: gitIdentity.email } : null,
+      mergeAgentBroker,
       policy_violations: [],
       policyViolations: [],
     },
   };
 }
 
-function prepareGeminiRemediationStartupEnv({ gitIdentity = null } = {}) {
+function prepareGeminiRemediationStartupEnv({ gitIdentity = null, workerClass = 'gemini' } = {}) {
   const { env, stripped } = scrubGeminiOAuthFallbackEnv(process.env);
   env.PATH = buildInheritedPath(env.PATH || '');
   const authPath = resolveGeminiAuthPath();
@@ -226,6 +381,8 @@ function prepareGeminiRemediationStartupEnv({ gitIdentity = null } = {}) {
       env[key] = value;
     }
   }
+
+  const mergeAgentBroker = applyMergeAgentBrokerEnv(env, process.env, { workerClass });
 
   return {
     env,
@@ -248,13 +405,14 @@ function prepareGeminiRemediationStartupEnv({ gitIdentity = null } = {}) {
         gitIdentityOverrides: overriddenGitEnv,
       },
       gitIdentity: gitIdentity ? { name: gitIdentity.name, email: gitIdentity.email } : null,
+      mergeAgentBroker,
       policy_violations: [],
       policyViolations: [],
     },
   };
 }
 
-function prepareCodexRemediationStartupEnv({ gitIdentity = null, perWorkerKey = null } = {}) {
+function prepareCodexRemediationStartupEnv({ gitIdentity = null, perWorkerKey = null, workerClass = 'codex' } = {}) {
   const sharedAuthPath = resolveCodexAuthPath();
   const perWorkerAuth = process.env.CODEX_AUTH_PATH
     ? null
@@ -354,7 +512,7 @@ function prepareCodexRemediationStartupEnv({ gitIdentity = null, perWorkerKey = 
     }
   }
 
-  startupEvidence.mergeAgentBroker = applyMergeAgentBrokerEnv(env);
+  startupEvidence.mergeAgentBroker = applyMergeAgentBrokerEnv(env, process.env, { workerClass });
   return { authPath, env, startupEvidence };
 }
 
@@ -386,13 +544,32 @@ function spawnClaudeCodeRemediationWorker({
   launchRequestId,
   jobId = null,
   workerClass = 'claude-code-remediation',
+  enforceHarnessIdentity = true,
+  auditSink = null,
+  log = console,
   spawnImpl,
   now = () => new Date().toISOString(),
   openSyncImpl = openSync,
   closeSyncImpl = closeSync,
 }) {
   const claudeCli = resolveClaudeCodeCliPath();
-  const { env: baseEnv, startupEvidence } = prepareClaudeCodeRemediationStartupEnv();
+  // Physical harness is claude-code; `workerClass` above is the provenance
+  // TRAILER class (claude-code-remediation), not the harness — never key identity
+  // off it.
+  const gitIdentity = remediationWorkerGitIdentity('claude-code');
+  const { env: baseEnv, startupEvidence } = prepareClaudeCodeRemediationStartupEnv({
+    gitIdentity,
+    workerClass: 'claude-code',
+  });
+  assertHarnessIdentityMatch({
+    workerClass: 'claude-code',
+    gitIdentity,
+    brokerEvidence: startupEvidence.mergeAgentBroker,
+    enforce: enforceHarnessIdentity,
+    log,
+    auditSink,
+    now,
+  });
   const { env, replyContext } = withReplyContext(baseEnv, {
     replyPath,
     hqRoot,
@@ -430,6 +607,7 @@ function spawnClaudeCodeRemediationWorker({
       logPath,
       replyPath: replyContext.replyPath,
       launchRequestId: replyContext.launchRequestId,
+      gitIdentity,
       startupEvidence,
       command: [claudeCli, '--print', '--permission-mode', 'acceptEdits', '--dangerously-skip-permissions'],
       child,
@@ -450,6 +628,9 @@ function spawnGeminiRemediationWorker({
   hqRoot,
   launchRequestId,
   jobId = null,
+  enforceHarnessIdentity = true,
+  auditSink = null,
+  log = console,
   spawnImpl,
   now = () => new Date().toISOString(),
   openSyncImpl = openSync,
@@ -457,7 +638,19 @@ function spawnGeminiRemediationWorker({
 }) {
   const geminiCli = resolveGeminiCliPath();
   const gitIdentity = remediationWorkerGitIdentity('gemini');
-  const { env: baseEnv, startupEvidence } = prepareGeminiRemediationStartupEnv({ gitIdentity });
+  const { env: baseEnv, startupEvidence } = prepareGeminiRemediationStartupEnv({
+    gitIdentity,
+    workerClass: 'gemini',
+  });
+  assertHarnessIdentityMatch({
+    workerClass: 'gemini',
+    gitIdentity,
+    brokerEvidence: startupEvidence.mergeAgentBroker,
+    enforce: enforceHarnessIdentity,
+    log,
+    auditSink,
+    now,
+  });
   const { env, replyContext } = withReplyContext(baseEnv, {
     replyPath,
     hqRoot,
@@ -521,6 +714,9 @@ function spawnCodexRemediationWorker({
   hqRoot,
   launchRequestId,
   workerClass = 'codex',
+  enforceHarnessIdentity = true,
+  auditSink = null,
+  log = console,
   jobId = null,
   spawnImpl,
   now = () => new Date().toISOString(),
@@ -528,10 +724,21 @@ function spawnCodexRemediationWorker({
   closeSyncImpl = closeSync,
 }) {
   const codexCli = resolveCodexCliPath();
+  // For codex, `workerClass` IS the physical harness class ('codex').
   const gitIdentity = remediationWorkerGitIdentity(workerClass);
   const { env: baseEnv, startupEvidence } = prepareCodexRemediationStartupEnv({
     gitIdentity,
     perWorkerKey: jobId || launchRequestId || null,
+    workerClass,
+  });
+  assertHarnessIdentityMatch({
+    workerClass,
+    gitIdentity,
+    brokerEvidence: startupEvidence.mergeAgentBroker,
+    enforce: enforceHarnessIdentity,
+    log,
+    auditSink,
+    now,
   });
   const { env, replyContext } = withReplyContext(baseEnv, {
     replyPath,
@@ -753,7 +960,9 @@ function createLocalRemediationHandle({
 
 export {
   StartupContractError,
+  HarnessIdentityMismatchError,
   applyMergeAgentBrokerEnv,
+  assertHarnessIdentityMatch,
   buildInheritedPath,
   cancelLocalRemediationWorker,
   createLocalRemediationHandle,

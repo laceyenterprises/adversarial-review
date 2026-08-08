@@ -13,6 +13,7 @@ import {
   WORKER_PROVENANCE_HOOK_SRC,
   installWorkerProvenanceHook,
   remediationWorkerGitIdentity,
+  remediationWorkerPushProvider,
   remediationWorkerTrailerClass,
 } from './remediation-worker-provenance.mjs';
 import {
@@ -69,6 +70,8 @@ import { lifecycleStopDecision, resolveJobPRLifecycleSafe } from './follow-up-li
 import { buildRemediationPrompt } from './remediation-prompt-builder.mjs';
 import {
   applyMergeAgentBrokerEnv,
+  assertHarnessIdentityMatch,
+  HarnessIdentityMismatchError,
   prepareClaudeCodeRemediationStartupEnv,
   prepareCodexRemediationStartupEnv,
   prepareGeminiRemediationStartupEnv,
@@ -220,6 +223,31 @@ function isRemediationToRereviewHandoffEnabled(env = process.env, options = {}) 
     }).get('handoff.remediation_to_rereview', false) === true;
   } catch {
     return false;
+  }
+}
+
+// Kill-switch for the fail-closed harness-identity assert at the remediation
+// spawn boundary. DEFAULT true: a remediation worker's git identity + push
+// provider must match its physical harness, and a mismatch fails closed. Set the
+// env override or roles.adversarial.remediation.enforce_harness_identity=false to
+// downgrade to warn+audit+continue (the assert still records the mismatch, it
+// just does not block the spawn). Empty/unset falls through to the config default.
+function isHarnessIdentityEnforcementEnabled(env = process.env, options = {}) {
+  const envValue = env.ADVERSARIAL_REMEDIATION_ENFORCE_HARNESS_IDENTITY;
+  const parsedEnv = envValue === undefined || envValue === '' ? null : parseBooleanEnvFlag(envValue);
+  if (parsedEnv !== null) return parsedEnv;
+  try {
+    return loadRoleConfig({
+      env,
+      topPath: options.topPath,
+      modulePaths: options.modulePaths,
+      loaderImpl: options.loaderImpl,
+      contextKey: 'roles.adversarial.remediation.enforce_harness_identity',
+    }).get('roles.adversarial.remediation.enforce_harness_identity', true) === true;
+  } catch {
+    // Fail SAFE toward enforcement: if config can't be read, keep the assert on
+    // so a misconfigured host still rejects a mismatched harness identity.
+    return true;
   }
 }
 const DEFAULT_PATH_PREFIX = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
@@ -609,6 +637,32 @@ function createRemediationRuntime({
       if (!worker) {
         throw new Error(`unknown remediation worker class: ${workerClass}`);
       }
+      // Enforce (or, under the kill-switch, just audit) that the worker about to
+      // be spawned commits + pushes under its PHYSICAL harness identity. On a
+      // mismatch while enforcing, the spawn fn throws and this run() call fails
+      // closed — the loud, correct outcome vs. a codex/claude/gemini remediation
+      // authenticating as some other identity (the #5058 class of defect).
+      const enforceHarnessIdentity = isHarnessIdentityEnforcementEnabled(env);
+      const harnessIdentityAuditSink = (record) => {
+        try {
+          const alert = deliverAlert(
+            `[follow-up-remediation] harness identity ${record?.enforced ? 'FAIL-CLOSED' : 'WARNING'}: ${record?.message || 'mismatch'}`,
+            {
+              event: 'remediation-harness-identity-mismatch',
+              payload: {
+                workerClass: record?.workerClass || null,
+                enforced: Boolean(record?.enforced),
+                mismatches: record?.mismatches || [],
+                checkedAt: record?.checkedAt || null,
+              },
+              env,
+            }
+          );
+          if (alert && typeof alert.catch === 'function') alert.catch(() => {});
+        } catch {
+          // Audit delivery must never mask the enforcement decision.
+        }
+      };
       const spawnedWorker = worker({
         workspaceDir: request.workspaceDir,
         promptPath: request.promptPath,
@@ -618,6 +672,8 @@ function createRemediationRuntime({
         hqRoot: request.hqRoot,
         launchRequestId: request.launchRequestId,
         jobId: request.jobId,
+        enforceHarnessIdentity,
+        auditSink: harnessIdentityAuditSink,
         spawnImpl,
         now,
       });
@@ -3999,6 +4055,10 @@ export {
   summarizeWorkerFinalMessage,
   assessWorkerLiveness,
   applyMergeAgentBrokerEnv,
+  assertHarnessIdentityMatch,
+  HarnessIdentityMismatchError,
+  isHarnessIdentityEnforcementEnabled,
+  remediationWorkerPushProvider,
   spawnCodexRemediationWorker,
   spawnClaudeCodeRemediationWorker,
   spawnGeminiRemediationWorker,

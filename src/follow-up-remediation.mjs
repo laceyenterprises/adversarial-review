@@ -655,7 +655,6 @@ function createRemediationRuntime({
                 mismatches: record?.mismatches || [],
                 checkedAt: record?.checkedAt || null,
               },
-              env,
             }
           );
           if (alert && typeof alert.catch === 'function') alert.catch(() => {});

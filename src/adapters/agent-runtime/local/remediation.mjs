@@ -221,9 +221,17 @@ function assertHarnessIdentityMatch({
   env = process.env,
 } = {}) {
   const mismatches = [];
-  const expectedIdentity = remediationWorkerGitIdentity(workerClass);
+  let expectedIdentity = null;
+  try {
+    expectedIdentity = remediationWorkerGitIdentity(workerClass);
+  } catch (error) {
+    if (!/unknown remediation worker class/u.test(String(error?.message || error))) {
+      throw error;
+    }
+  }
   if (
     !gitIdentity
+    || !expectedIdentity
     || gitIdentity.name !== expectedIdentity.name
     || gitIdentity.email !== expectedIdentity.email
   ) {

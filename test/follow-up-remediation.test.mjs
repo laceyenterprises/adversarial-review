@@ -2829,6 +2829,16 @@ test('remediation runtime local mode rejects an unknown worker class', async () 
   );
 });
 
+test('remediation harness identity alert does not pass the raw host env', () => {
+  const source = readFileSync(new URL('../src/follow-up-remediation.mjs', import.meta.url), 'utf8');
+  const alertBlock = source.slice(
+    source.indexOf("event: 'remediation-harness-identity-mismatch'"),
+    source.indexOf('if (alert && typeof alert.catch', source.indexOf("event: 'remediation-harness-identity-mismatch'")),
+  );
+  assert.match(alertBlock, /mismatches: record\?\.mismatches \|\| \[\]/);
+  assert.doesNotMatch(alertBlock, /\benv\b/);
+});
+
 test('remediation runtime rejects an unknown mode', async () => {
   await assert.rejects(
     () => createRemediationRuntime({}).run({ mode: 'sideways', role: { workerClass: 'codex' } }),
@@ -4582,6 +4592,29 @@ test('assertHarnessIdentityMatch warns + audits + continues when the kill-switch
   assert.equal(audits.length, 1);
   assert.equal(audits[0].enforced, false);
   assert.match(warned[0], /HARNESS-IDENTITY WARN/);
+});
+
+test('assertHarnessIdentityMatch reports an unknown harness without throwing TypeError', () => {
+  const audits = [];
+  const warned = [];
+  const result = assertHarnessIdentityMatch({
+    workerClass: 'mystery-harness',
+    gitIdentity: { name: 'Some Worker', email: 'some-worker@example.invalid' },
+    enforce: false,
+    log: { error: (m) => warned.push(m) },
+    auditSink: (r) => audits.push(r),
+  });
+
+  assert.equal(result.match, false);
+  assert.deepEqual(result.mismatches, [
+    {
+      kind: 'git-identity',
+      expected: null,
+      resolved: { name: 'Some Worker', email: 'some-worker@example.invalid' },
+    },
+  ]);
+  assert.equal(audits.length, 1);
+  assert.match(warned[0], /mystery-harness/);
 });
 
 test('assertHarnessIdentityMatch does not treat the audited merge-agent fallback as a mismatch', () => {

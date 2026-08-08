@@ -318,10 +318,10 @@ test('steady-state reattach keys off authoritative spawn time, not earlier claim
 });
 
 test('steady-state reattach per-poll cap defaults small and accepts zero for disable', () => {
-  assert.equal(resolveStaleReviewerReconcilePerPoll({}), 3);
+  assert.equal(resolveStaleReviewerReconcilePerPoll({}), 6);
   assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: '1' }), 1);
   assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: '0' }), 0);
-  assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: 'bad' }), 3);
+  assert.equal(resolveStaleReviewerReconcilePerPoll({ ADVERSARIAL_STALE_REVIEWER_RECONCILE_PER_POLL: 'bad' }), 6);
 });
 
 test('pending merge-agent lifecycle cleanup retries after the PR leaves the open set', async () => {

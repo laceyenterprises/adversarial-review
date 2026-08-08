@@ -33,6 +33,14 @@ const REVIEWER_LEASE_RECOVERY_ENABLED = resolveReviewerLeaseRecoveryEnabled({
   watcherConfig: JSON.parse(readFileSync(join(ROOT, 'config.json'), 'utf8')),
 });
 const INFRA_AUTO_RECOVER_CAP = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
+// Grace before a provably-dead reviewer's `reviewing` claim is fast-pathed into
+// reconcile ahead of the full reviewer lease (see
+// shouldReconcileStaleReviewerSession). Sized at one watcher poll interval
+// (watcher default pollIntervalMs=300_000), re-derived here as a local const to
+// avoid a leaf-module -> watcher circular import — the same pattern used for
+// REVIEWER_LEASE_RECOVERY_ENABLED above. A claim only a poll or two old keeps
+// its full lease; the fast path only fires once it is older than this grace.
+const DEAD_REVIEWER_FAST_PATH_GRACE_MS = 300_000;
 
 // ── Reviewer session reconciliation (startup) ────────────────────────────────
 //
@@ -74,12 +82,57 @@ export async function reconcileOrphanedReviewing(octokit) {
   });
 }
 
+function reviewerClaimAgeMs(row, now) {
+  const startedAtMs = Date.parse(row?.reviewer_started_at || '');
+  if (Number.isFinite(startedAtMs)) return now.getTime() - startedAtMs;
+  const claimedAtMs = Date.parse(row?.last_attempted_at || '');
+  if (Number.isFinite(claimedAtMs)) return now.getTime() - claimedAtMs;
+  return null;
+}
+
 export function shouldReconcileStaleReviewerSession(row, now, {
   reviewerTimeoutMs = resolveReviewerTimeoutMs(),
   leaseRecoveryEnabled = REVIEWER_LEASE_RECOVERY_ENABLED,
+  probeGroupAliveImpl = probeReviewerProcessGroupAlive,
+  fastPathGraceMs = DEAD_REVIEWER_FAST_PATH_GRACE_MS,
 } = {}) {
   if (leaseRecoveryEnabled && isReviewerLeaseExpired(row, now, { reviewerTimeoutMs })) {
     return true;
+  }
+  // SEV (agent-os #5059): after a remediation advanced the PR head a fresh
+  // review auto-armed, but the reviewer that claimed the `reviewing` row
+  // DIED/HUNG without ever posting or releasing its single-owner claim. The
+  // only per-poll path that releases a stuck `reviewing` claim
+  // (reconcileReviewerSessions, invoked via this predicate) was gated solely
+  // behind the full ~20-min reviewer lease, so a provably-dead reviewer stayed
+  // invisible to recovery for the whole lease and the head sat un-reviewed for
+  // ~30 min. Add a lease-INDEPENDENT fast path: once the claim is older than a
+  // small grace (~one poll interval) AND the reviewer is PROVABLY DEAD — its
+  // recorded process group is gone, checked with a cheap local kill(-pgid,0)
+  // probe and no GitHub/network call — surface the row for reconcile now.
+  // SAFETY INVARIANT: this fires only when a pgid was persisted AND that group
+  // is confirmed dead. A provably-ALIVE reviewer, or a row with no pgid yet
+  // (liveness unknown — it may still be spawning), keeps its full lease
+  // untouched, so a legitimately slow review is never reclaimed; null-pgid rows
+  // stay governed by the existing full-timeout lease path below and by
+  // reconcileReviewerSessions' own null-pgid within-timeout guard.
+  // reconcileReviewerSessions still re-probes and makes the actual release
+  // decision (dead+head-moved -> releaseSuperseded->pending, dead+same-head ->
+  // releasePending->pending); this only widens the poll filter, which the boot
+  // reconcile path (reconcileOrphanedReviewing) already runs unfiltered on
+  // every deploy.
+  if (leaseRecoveryEnabled) {
+    const pgid = row?.reviewer_pgid;
+    const hasPgid = pgid !== null && pgid !== undefined && pgid !== '';
+    const claimAgeMs = reviewerClaimAgeMs(row, now);
+    if (
+      hasPgid &&
+      Number.isFinite(claimAgeMs) &&
+      claimAgeMs > fastPathGraceMs &&
+      !probeGroupAliveImpl(pgid)
+    ) {
+      return true;
+    }
   }
   const persistedTimeoutMs = Number(row?.reviewer_timeout_ms);
   const effectiveTimeoutMs = Number.isInteger(persistedTimeoutMs) && persistedTimeoutMs > 0

@@ -341,6 +341,7 @@ export async function attemptDaemonCleanMerge({
   flags = {},
   strictMode = flags.strictMode ?? true,
   allowHamTerminalRemediation = false,
+  allowHeadCloserCertifiedNonBlocking = false,
   fetchLiveGateImpl,
   acquireLeaseImpl,
   releaseLeaseImpl,
@@ -371,8 +372,18 @@ export async function attemptDaemonCleanMerge({
   // findings may stay on the daemon path. No hammer is spawned here — the caller
   // falls through. ───────────────────────────────────────────────────────────
   const hamTerminalVerdict = String(verdict || '').trim().toLowerCase() === 'ham_terminal_remediation_validated';
+  // Head-closer self-cert bypass (stale-review-head spin fix, #5053): a settled
+  // review whose live head is the terminal closer's own commit (proven upstream by
+  // `getHeadCloserCommitSuppression`) may land over KNOWN NON-BLOCKING findings
+  // only. `isDaemonMergeReviewAllowed(_, { strictMode: false })` STILL hard-stops a
+  // blocking finding or an unknown classification, so this relaxes ONLY the strict
+  // non-blocking gate — a blocking finding is never merged over.
+  const headCloserCertifiedBypass =
+    allowHeadCloserCertifiedNonBlocking === true &&
+    isDaemonMergeReviewAllowed(reviewState, { strictMode: false });
   if (
     !(allowHamTerminalRemediation === true && hamTerminalVerdict) &&
+    !headCloserCertifiedBypass &&
     !isDaemonMergeReviewAllowed(reviewState, { strictMode })
   ) {
     return notTaken(uncleanReason(reviewState, { strictMode }) || 'findings-unknown');

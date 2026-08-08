@@ -12,6 +12,7 @@ import {
 } from './ama/daemon-merge.mjs';
 import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { readAmaAuditEntry } from './ama/audit.mjs';
+import { getHeadCloserCommitSuppression } from './head-closer-commit-suppression.mjs';
 import { acquireMergeLease, releaseMergeLease } from './ama/merge-lease.mjs';
 import { readBuildCompletionSignalForPr } from './session-ledger-read-adapter.mjs';
 import { fetchPullRequestRollup } from './github-api.mjs';
@@ -291,6 +292,7 @@ export async function runDaemonCleanMergeAttempt({
   resolveOperatorMergeAccountabilityImpl = resolveOperatorMergeAccountability,
   readAmaAuditEntryImpl = readAmaAuditEntry,
   headHasValidatedHamTerminalRemediationImpl = headHasValidatedHamTerminalRemediation,
+  resolveHeadCloserCommitSuppressionImpl = getHeadCloserCommitSuppression,
   env = process.env,
 } = {}) {
   const base = candidate?.baseBranch;
@@ -333,6 +335,19 @@ export async function runDaemonCleanMergeAttempt({
   // after this audit check would be merged unvalidated.
   const hamAuditHead = currentPrHeadSha || candidate?.headSha || null;
   let hamTerminalRemediationHead = false;
+  // FIX (stale-review-head spin, #5053): a SECOND head-match certification for the
+  // daemon re-merge lane. A settled-success (comment-only / approved) review whose
+  // ONLY standing findings are non-blocking, and whose live head is the terminal
+  // closer's OWN commit (proven via `getHeadCloserCommitSuppression` -- an external
+  // push cannot forge the closer committer identity), self-certifies as a
+  // merge-eligible head. This lets the daemon LAND the certified head inline (no
+  // fresh hammer, no per-head retry-cap burn) instead of the closer re-dispatching
+  // or spinning `not-eligible`. Blocking findings stay a HARD STOP: the guard
+  // requires `resolveDaemonMergeUncleanReason` === 'non-blocking-findings-present'
+  // (blocking count 0, known), and the daemon-merge Gate-1 bypass keyed on this
+  // flag ALSO re-checks blocking==0 via strictMode:false, so a blocking finding or
+  // an unknown classification is never merged over.
+  let headCloserCertifiedNonBlocking = false;
   if (!isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
     const uncleanReason =
       resolveDaemonMergeUncleanReason(reviewState, { strictMode }) || 'findings-unknown';
@@ -343,10 +358,38 @@ export async function runDaemonCleanMergeAttempt({
       headSha: hamAuditHead,
       readAmaAuditEntryImpl,
     });
-    // Fail closed if the marker resolved without a concrete head to pin it to:
-    // this lane merges `hamAuditHead` verbatim, so an empty one would have no
-    // validated head at all. Falls through to the capped hammer, never a merge.
-    if (!hamTerminalRemediationHead || !String(hamAuditHead || '').trim()) {
+    if (
+      !hamTerminalRemediationHead &&
+      uncleanReason === 'non-blocking-findings-present' &&
+      SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict) &&
+      String(hamAuditHead || '').trim()
+    ) {
+      try {
+        const suppression = await resolveHeadCloserCommitSuppressionImpl({
+          repoPath,
+          prNumber,
+          headSha: hamAuditHead,
+          logger,
+        });
+        headCloserCertifiedNonBlocking = suppression?.suppressed === true;
+      } catch (err) {
+        // Fail closed: an unresolved / errored proof never certifies. The lane
+        // falls through to the capped hammer (never a park, never a merge).
+        logger?.warn?.(
+          `[watcher] AMA daemon head-closer self-cert proof failed for ` +
+            `${repoPath}#${prNumber}@${String(hamAuditHead || '').slice(0, 12)}; ` +
+            `not certifying: ${err?.message || err}`,
+        );
+      }
+    }
+    // Fail closed if NEITHER certification holds, or the marker resolved without a
+    // concrete head to pin it to: this lane merges `hamAuditHead` verbatim, so an
+    // empty one would have no validated head at all. Falls through to the capped
+    // hammer, never a merge.
+    if (
+      (!hamTerminalRemediationHead && !headCloserCertifiedNonBlocking) ||
+      !String(hamAuditHead || '').trim()
+    ) {
       return NOT_TAKEN(uncleanReason);
     }
   }
@@ -433,12 +476,16 @@ export async function runDaemonCleanMergeAttempt({
       mergeHeadSha: liveHead,
     });
     if (!operatorMergeAccountability) {
-      if (hamTerminalRemediationHead) {
-        // The HAM terminal-remediation audit IS the merge accountability, but the
-        // daemon re-merge is a best-effort shortcut — never a NEW park path. If
-        // head provenance cannot resolve a worker identity this tick, fall through
-        // to the existing capped hammer instead of failing closed.
-        return NOT_TAKEN('ham-terminal-remediation-worker-identity-unresolved');
+      if (hamTerminalRemediationHead || headCloserCertifiedNonBlocking) {
+        // The HAM terminal-remediation audit / head-closer self-cert IS the merge
+        // accountability, but the daemon re-merge is a best-effort shortcut — never
+        // a NEW park path. If head provenance cannot resolve a worker identity this
+        // tick, fall through to the existing capped hammer instead of failing closed.
+        return NOT_TAKEN(
+          hamTerminalRemediationHead
+            ? 'ham-terminal-remediation-worker-identity-unresolved'
+            : 'head-closer-certified-worker-identity-unresolved',
+        );
       }
       return {
         disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
@@ -475,7 +522,13 @@ export async function runDaemonCleanMergeAttempt({
   // commit that landed after the audit check above would merge unvalidated.
   // Passing `hamAuditHead` keeps that assertion a real comparison: a head that
   // moved between the audit check and the merge fails head-match and declines.
-  const daemonValidatedHead = hamTerminalRemediationHead ? hamAuditHead : validatedHead;
+  // Both non-clean certifications (HAM terminal-remediation and head-closer
+  // self-cert) pin the merge to the AUDIT-CHECKED current head, never the stale
+  // reviewed head — see the head-moved guard above. The head-closer lane keeps the
+  // real settled-success verdict (it is a settled comment-only / approved review),
+  // only the HAM lane swaps in the ham_terminal_remediation_validated token.
+  const certifiedNonCleanHead = hamTerminalRemediationHead || headCloserCertifiedNonBlocking;
+  const daemonValidatedHead = certifiedNonCleanHead ? hamAuditHead : validatedHead;
   const daemonVerdict = hamTerminalRemediationHead
     ? 'ham_terminal_remediation_validated'
     : settledVerdict;
@@ -486,6 +539,7 @@ export async function runDaemonCleanMergeAttempt({
     validatedHead: daemonValidatedHead,
     verdict: daemonVerdict,
     allowHamTerminalRemediation: hamTerminalRemediationHead,
+    allowHeadCloserCertifiedNonBlocking: headCloserCertifiedNonBlocking,
     reviewState: {
       blockingFindingCount: reviewState?.blockingFindingCount,
       blockingFindingState: reviewState?.blockingFindingState,
@@ -514,7 +568,9 @@ export async function runDaemonCleanMergeAttempt({
       // zero-finding clean daemon merge in the audit doc's closure authority.
       ...(hamTerminalRemediationHead
         ? { closureAuthority: 'daemon-ham-terminal-remediation' }
-        : {}),
+        : headCloserCertifiedNonBlocking
+          ? { closureAuthority: 'daemon-head-closer-certified-non-blocking' }
+          : {}),
       // Record which accountability authorized the merge: hq-dispatched worker
       // identity (the normal path) or an explicit head-scoped operator label
       // (Deliverable 1 substitution). The audit doc thus always names WHO the
@@ -588,14 +644,18 @@ export async function runDaemonCleanMergeAttempt({
     logger,
   });
   if (
-    hamTerminalRemediationHead &&
+    (hamTerminalRemediationHead || headCloserCertifiedNonBlocking) &&
     daemonResult?.disposition === DAEMON_MERGE_DISPOSITION.FAILED_CLOSED
   ) {
-    // Best-effort shortcut only: a HAM daemon re-merge that fails closed must NOT
-    // park the PR. Fall through to the existing capped hammer, which can rebase,
-    // re-validate, and retry. (A NOT_TAKEN 'not-eligible' from a still-pending or
-    // not-yet-mergeable gate already falls through; MERGED / DEFERRED pass as-is.)
-    return NOT_TAKEN(`ham-terminal-remediation-daemon-${daemonResult.reason || 'failed-closed'}`);
+    // Best-effort shortcut only: a HAM / head-closer daemon re-merge that fails
+    // closed must NOT park the PR. Fall through to the existing capped hammer, which
+    // can rebase, re-validate, and retry. (A NOT_TAKEN 'not-eligible' from a
+    // still-pending or not-yet-mergeable gate already falls through; MERGED /
+    // DEFERRED pass as-is.)
+    const failedClosedLane = hamTerminalRemediationHead
+      ? 'ham-terminal-remediation'
+      : 'head-closer-certified';
+    return NOT_TAKEN(`${failedClosedLane}-daemon-${daemonResult.reason || 'failed-closed'}`);
   }
   return daemonResult;
 }

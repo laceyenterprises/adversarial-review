@@ -178,8 +178,20 @@ const AMA_CLOSER_MERGE_BACKOFF_BASE_MS = 250;
 
 export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   if (!Array.isArray(reasons) || reasons.length === 0) return false;
+  // FIX (stale-review-head spin, #5053): a self-certified stale reviewed head --
+  // the terminal closer's OWN remediation commit, proven upstream by
+  // `getHeadCloserCommitSuppression` (an external push cannot forge the closer
+  // committer identity) -- is not a genuine block. Strip `stale-review-head` up
+  // front when that proof armed the flag, so BOTH the exhausted and non-exhausted
+  // remediability checks below ignore it. Without the flag (external push,
+  // `suppressed:false`) it is left in place and still blocks -- that is the safety
+  // invariant. Previously the flag was honored only in the exhausted branch, so a
+  // comment-only / non-blocking review whose head the hammer moved never resumed.
+  const effectiveReasons = options?.allowStaleReviewHeadHammerResume === true
+    ? reasons.filter((reason) => reason !== 'stale-review-head')
+    : reasons;
   if (options?.reviewCycleExhausted === true) {
-    if (reasons.includes('stale-review-head') && !options?.allowStaleReviewHeadHammerResume) {
+    if (effectiveReasons.includes('stale-review-head')) {
       return false;
     }
     return true;
@@ -188,14 +200,14 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   // to remediate, a not-mergeable state (conflict / behind) to rebase+resolve, or
   // red CI to fix.
   const hasActionable =
-    reasons.includes('non-blocking-findings-present') ||
-    reasons.includes('blocking-findings-present') ||
-    reasons.includes('pr-not-mergeable') ||
-    reasons.includes('ci-not-green');
+    effectiveReasons.includes('non-blocking-findings-present') ||
+    effectiveReasons.includes('blocking-findings-present') ||
+    effectiveReasons.includes('pr-not-mergeable') ||
+    effectiveReasons.includes('ci-not-green');
   if (!hasActionable) return false;
   // And EVERY reason must be hammer-remediable — a co-occurring blocking finding,
   // stale head, etc. means NOT auto-hammer (those go through rounds / operator).
-  return reasons.every((reason) => HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason));
+  return effectiveReasons.every((reason) => HAMMER_AUTO_REMEDIABLE_MISS_REASONS.has(reason));
 }
 
 function hammerRouteReasonsFromTrace(verdict) {

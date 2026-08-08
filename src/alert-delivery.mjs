@@ -802,6 +802,15 @@ function markInflightDeadLettered(rootDir, doc) {
 // watcher back on the live bus while keeping this module's durable queue / retry /
 // dead-letter / health telemetry.
 const CANONICAL_ALERT_SCRIPT_TIMEOUT_MS = 35_000;
+const CANONICAL_ALERT_SCRIPT_OUTPUT_LIMIT_BYTES = 100_000;
+
+function appendBoundedOutput(current, chunk, limit = CANONICAL_ALERT_SCRIPT_OUTPUT_LIMIT_BYTES) {
+  if (current.length >= limit) {
+    return current;
+  }
+  const available = limit - current.length;
+  return current + String(chunk).slice(0, available);
+}
 
 // Resolve the canonical superproject script, or null when absent. Uses the REAL
 // filesystem (not the injectable fsImpl, which controls token/config reads) because
@@ -859,10 +868,10 @@ function spawnCanonicalAlertScript(scriptPath, payload, env = process.env) {
       });
     }, CANONICAL_ALERT_SCRIPT_TIMEOUT_MS);
     child.stdout.on('data', (chunk) => {
-      stdout += chunk;
+      stdout = appendBoundedOutput(stdout, chunk);
     });
     child.stderr.on('data', (chunk) => {
-      stderr += chunk;
+      stderr = appendBoundedOutput(stderr, chunk);
     });
     child.on('error', (error) => {
       finish({ code: 1, stdout, stderr: stderr || String(error?.message || error) });

@@ -13,6 +13,7 @@ import http from 'node:http';
 import https from 'node:https';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { spawn as spawnChild } from 'node:child_process';
 
 import { writeFileAtomic } from './atomic-write.mjs';
 
@@ -792,12 +793,130 @@ function markInflightDeadLettered(rootDir, doc) {
   return deadLetterPath;
 }
 
+// The canonical superproject alert-delivery script (scripts/alert-delivery.mjs)
+// delivers via the CURRENT alerts bus — `sink: telegram-direct` in config.yaml,
+// straight to the Telegram Bot API — the same path sentinel and the rest of the OS
+// use. The watcher historically POSTed to the legacy agent-gateway bus
+// (:18799/hooks/wake), whose rotated bridge token now returns HTTP 401, silently
+// dead-lettering every operator page. Routing through the canonical script puts the
+// watcher back on the live bus while keeping this module's durable queue / retry /
+// dead-letter / health telemetry.
+const CANONICAL_ALERT_SCRIPT_TIMEOUT_MS = 35_000;
+
+// Resolve the canonical superproject script, or null when absent. Uses the REAL
+// filesystem (not the injectable fsImpl, which controls token/config reads) because
+// availability is a deployment-layout fact: present when the submodule is checked
+// out under the superproject, absent in a standalone/CI clone (where the legacy bus
+// fallback keeps this module self-contained). `AGENT_OS_ALERT_DELIVERY_SCRIPT`
+// overrides the path (tests point it at a stub).
+function resolveCanonicalAlertScript(env = process.env) {
+  const override = env.AGENT_OS_ALERT_DELIVERY_SCRIPT;
+  if (override) {
+    return existsSync(override) ? override : null;
+  }
+  // src/alert-delivery.mjs -> src -> adversarial-review -> tools -> <superproject root>
+  const candidate = fileURLToPath(new URL('../../../scripts/alert-delivery.mjs', import.meta.url));
+  return existsSync(candidate) ? candidate : null;
+}
+
+// Spawn `node <canonical script> --stdin-json`, feed the alert payload, and resolve
+// with the exit code + captured output. Never rejects — a spawn error maps to a
+// non-zero code so the caller's retry/dead-letter contract handles it uniformly.
+function spawnCanonicalAlertScript(scriptPath, payload, env = process.env) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawnChild(process.execPath, [scriptPath, '--stdin-json'], {
+        env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      resolve({ code: 1, stdout: '', stderr: String(error?.message || error) });
+      return;
+    }
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // already exited
+      }
+      finish({
+        code: 1,
+        stdout,
+        stderr: `${stderr}\ncanonical alert-delivery timed out after ${CANONICAL_ALERT_SCRIPT_TIMEOUT_MS}ms`.trim(),
+      });
+    }, CANONICAL_ALERT_SCRIPT_TIMEOUT_MS);
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('error', (error) => {
+      finish({ code: 1, stdout, stderr: stderr || String(error?.message || error) });
+    });
+    child.on('close', (code) => {
+      finish({ code: code == null ? 1 : code, stdout, stderr });
+    });
+    try {
+      child.stdin.write(`${JSON.stringify(payload)}\n`);
+      child.stdin.end();
+    } catch {
+      // the 'error'/'close' handler resolves the promise
+    }
+  });
+}
+
+async function deliverViaCanonicalAlertScript(scriptPath, doc, {
+  env = process.env,
+  runAlertScript = spawnCanonicalAlertScript,
+} = {}) {
+  const payload = {
+    source: doc.event || 'adversarial-review',
+    message: doc.text,
+    idempotencyKey: doc.id,
+    metadata: {
+      alertId: doc.id,
+      event: doc.event || null,
+      source: 'adversarial-review',
+    },
+  };
+  const result = await runAlertScript(scriptPath, payload, env);
+  // Exit 0 = handled: the canonical script delivered OR intentionally suppressed
+  // (rate-limit / dedup) — either way the alert is done, so clear it from the queue.
+  // A non-zero exit is a real failure; throw so drainSingleAlert retries / dead-letters.
+  if (!result || result.code !== 0) {
+    const detail = String((result && (result.stderr || result.stdout)) || '').trim();
+    throw new Error(
+      `canonical alert-delivery exited ${result ? result.code : 'null'}${detail ? `: ${detail}` : ''}`
+    );
+  }
+  return { status: 'delivered', via: 'canonical-alert-script' };
+}
+
 async function postAlertDoc(doc, {
   env = process.env,
   requestText = httpRequestText,
   fsImpl = { readFileSync, existsSync },
   loadConfigRuntimeImpl = null,
+  runAlertScript = spawnCanonicalAlertScript,
 } = {}) {
+  // Prefer the canonical superproject script (current telegram-direct bus). Fall
+  // back to the legacy agent-gateway bus POST only when it is absent — a standalone
+  // submodule / CI checkout with no superproject parent.
+  const canonicalScript = resolveCanonicalAlertScript(env);
+  if (canonicalScript) {
+    return deliverViaCanonicalAlertScript(canonicalScript, doc, { env, runAlertScript });
+  }
   const config = resolveAlertTransportDefaults(env, {
     fsImpl: { existsSync: fsImpl.existsSync || existsSync },
     loadConfigRuntimeImpl,

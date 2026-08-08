@@ -110,6 +110,12 @@ function assertCodexAuthReadable() {
 // same structured error every consume call until daemon restart,
 // matching the previous fail-fast behavior).
 //
+// EXCEPTION: the claude-code BROKER transport caches success only. Its
+// probe is a cheap loopback HTTP GET (no TCC prompt, no subprocess) and
+// its failures include transient ones (broker restarting), so caching
+// them would convert a momentary bounce into a permanent daemon-lifetime
+// outage. See the note in `assertClaudeCodeOAuth`.
+//
 // Invalidate via `resetOAuthPreflightCache()` from a test seam OR
 // via SIGHUP (operator-driven re-check after rotating credentials).
 const __oauthPreflightCache = {
@@ -306,16 +312,24 @@ async function assertClaudeCodeOAuth({
 
   const resolvedTransport = transport || resolveClaudeCodeOAuthTransport(env);
   if (resolvedTransport === 'broker') {
-    try {
-      const brokerResult = await assertClaudeCodeBrokerOAuth({ env, fetchImpl });
-      __oauthPreflightCache['claude-code'] = true;
-      return brokerResult;
-    } catch (err) {
-      if (err instanceof OAuthError) {
-        __oauthPreflightCache['claude-code'] = err;
-      }
-      throw err;
-    }
+    // NOTE: the broker path caches SUCCESS only, never the failure. The
+    // keychain/codex/gemini paths cache their OAuthError because re-probing
+    // costs a subprocess spawn and a macOS TCC prompt, so a permanently
+    // sticky error is the cheaper trade. The broker probe is just an HTTP GET
+    // to a loopback `/readyz`: no TCC prompt, no subprocess, bounded by an
+    // AbortController. And `assertClaudeCodeBrokerOAuth` throws an OAuthError
+    // for TRANSIENT conditions too — ECONNREFUSED / timeout while the local
+    // broker restarts. Caching that in the process-global cache would turn a
+    // few-second broker bounce into a permanent remediation outage: every
+    // later consume tick would re-throw the cached error without re-probing,
+    // and the daemon could never spawn a claude-code worker again until it
+    // was manually bounced. So let the next tick re-probe.
+    await assertClaudeCodeBrokerOAuth({ env, fetchImpl });
+    __oauthPreflightCache['claude-code'] = true;
+    // Returns undefined, matching the cache-hit path above and the
+    // codex/gemini pre-flights: the contract is "throws or resolves", never a
+    // payload whose presence depends on cache state.
+    return;
   }
 
   // transport === 'keychain': legacy direct-CLI login-state probe. Only correct
@@ -398,12 +412,10 @@ async function assertClaudeCodeOAuth({
   }
 
   __oauthPreflightCache['claude-code'] = true;
-
-  return {
-    authMethod: parsed.authMethod,
-    apiProvider: parsed.apiProvider,
-    cliPath: claudeCli,
-  };
+  // No payload here either: on the very next call this same probe short-circuits
+  // at the `cached === true` branch and resolves with undefined, so any caller
+  // reading `result.authMethod` would `TypeError` on its second invocation.
+  // "Throws or resolves" is the whole contract, for both transports.
 }
 
 async function assertGeminiOAuth() {

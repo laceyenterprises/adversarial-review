@@ -3395,18 +3395,27 @@ test('resetOAuthPreflightCache(workerClass) only resets the named class', async 
 });
 
 test('assertClaudeCodeOAuth resolves on healthy claude.ai/firstParty auth', async () => {
+  let probedArgs;
   const result = await assertClaudeCodeOAuth({
-    execFileImpl: fakeClaudeAuthStatus({
-      loggedIn: true,
-      authMethod: 'claude.ai',
-      apiProvider: 'firstParty',
-      email: 'test@example.invalid',
-      orgId: 'b1fd86e7-bde2-441a-a0ab-e570235277b6',
-      subscriptionType: 'max',
-    }),
+    transport: 'keychain',
+    execFileImpl: async (cmd, args) => {
+      probedArgs = args;
+      return fakeClaudeAuthStatus({
+        loggedIn: true,
+        authMethod: 'claude.ai',
+        apiProvider: 'firstParty',
+        email: 'test@example.invalid',
+        orgId: 'b1fd86e7-bde2-441a-a0ab-e570235277b6',
+        subscriptionType: 'max',
+      })(cmd, args);
+    },
   });
-  assert.equal(result.authMethod, 'claude.ai');
-  assert.equal(result.apiProvider, 'firstParty');
+  assert.deepEqual(probedArgs, ['auth', 'status', '--json']);
+  // The contract is "throws or resolves", with no payload — a cache HIT
+  // short-circuits before any probe and can only resolve with undefined, so
+  // returning an object on the cache MISS would make callers that read the
+  // result crash on their second invocation.
+  assert.equal(result, undefined);
 });
 
 test('assertClaudeCodeOAuth throws when not logged in', async () => {
@@ -3515,27 +3524,45 @@ test('assertClaudeCodeOAuth (broker) PASSES when keychain is dead but the broker
     execCalls += 1;
     throw new Error('Command failed: claude auth status --json');
   };
+  const probed = [];
   const result = await assertClaudeCodeOAuth({
     transport: 'broker',
     execFileImpl,
-    fetchImpl: fakeBrokerReadyzFetch(() => ({ status: 200, body: READYZ_CLAUDE_SERVING })),
+    fetchImpl: fakeBrokerReadyzFetch((url) => {
+      probed.push(url);
+      return { status: 200, body: READYZ_CLAUDE_SERVING };
+    }),
     env: {},
   });
-  assert.equal(result.transport, 'broker');
-  assert.equal(result.provider, 'claude-code');
+  assert.ok(probed[0].endsWith('/readyz'), 'broker transport must probe the broker /readyz');
   assert.equal(execCalls, 0, 'broker transport must never shell out to `claude auth status`');
+  // Resolving with no payload is the contract (see the cache-state note in
+  // `assertClaudeCodeOAuth`); a cache hit cannot produce one.
+  assert.equal(result, undefined);
 });
 
 test('assertClaudeCodeOAuth (default transport, no config) uses the broker, not the keychain', async () => {
   let execCalls = 0;
-  const result = await assertClaudeCodeOAuth({
+  let fetched = false;
+  await assertClaudeCodeOAuth({
     // no `transport`, env has no override -> resolves to broker by default
     env: {},
     execFileImpl: async () => { execCalls += 1; throw new Error('should not be called'); },
-    fetchImpl: fakeBrokerReadyzFetch(() => ({ status: 200, body: READYZ_CLAUDE_SERVING })),
+    fetchImpl: fakeBrokerReadyzFetch(() => { fetched = true; return { status: 200, body: READYZ_CLAUDE_SERVING }; }),
   });
-  assert.equal(result.transport, 'broker');
+  assert.ok(fetched, 'default transport must probe the broker');
   assert.equal(execCalls, 0);
+});
+
+test('assertClaudeCodeOAuth returns no payload, so a cache hit cannot break a caller', async () => {
+  // Regression: the broker path used to return a descriptor object on a cache
+  // MISS while the cache-HIT branch returned undefined, so any caller reading
+  // `result.transport` crashed with a TypeError on its second invocation.
+  const fetchImpl = fakeBrokerReadyzFetch(() => ({ status: 200, body: READYZ_CLAUDE_SERVING }));
+  const first = await assertClaudeCodeOAuth({ transport: 'broker', fetchImpl, env: {} });
+  const second = await assertClaudeCodeOAuth({ transport: 'broker', fetchImpl, env: {} });
+  assert.equal(first, undefined);
+  assert.equal(second, undefined);
 });
 
 test('assertClaudeCodeOAuth (broker) accepts a degraded-but-can_serve provider (SOFT)', async () => {
@@ -3547,12 +3574,13 @@ test('assertClaudeCodeOAuth (broker) accepts a degraded-but-can_serve provider (
     },
     degraded_providers: { 'claude-code': 'REFRESH_FAILED_TRANSIENT' },
   };
-  const result = await assertClaudeCodeOAuth({
+  // Resolving (rather than throwing) IS the assertion: `can_serve` is the SOFT
+  // signal, so a degraded-but-serving provider must pass the preflight.
+  await assertClaudeCodeOAuth({
     transport: 'broker',
     fetchImpl: fakeBrokerReadyzFetch(() => ({ status: 503, body })),
     env: {},
   });
-  assert.equal(result.transport, 'broker');
 });
 
 test('assertClaudeCodeOAuth (broker) PASSES on HTTP 503 when claude-code is serviceable but another provider is down', async () => {
@@ -3564,12 +3592,13 @@ test('assertClaudeCodeOAuth (broker) PASSES on HTTP 503 when claude-code is serv
       codex: { state: 'not_ready', can_serve: false },
     },
   };
-  const result = await assertClaudeCodeOAuth({
+  // Resolving (rather than throwing) IS the assertion: the aggregate 503 is
+  // driven by codex, and claude-code is still serviceable.
+  await assertClaudeCodeOAuth({
     transport: 'broker',
     fetchImpl: fakeBrokerReadyzFetch(() => ({ status: 503, body })),
     env: {},
   });
-  assert.equal(result.transport, 'broker');
 });
 
 test('assertClaudeCodeOAuth (broker) FAILS CLOSED when the broker rejects the claude-code grant', async () => {
@@ -3604,6 +3633,63 @@ test('assertClaudeCodeOAuth (broker) FAILS CLOSED when neither primary nor stand
   // have been tried — mirroring the worker's own fetch order.
   assert.ok(attempted.some((u) => u.includes('4099')), 'primary broker must be probed');
   assert.ok(attempted.some((u) => u.includes('4097')), 'standby broker must be probed');
+});
+
+test('assertClaudeCodeOAuth (broker) does NOT cache a transient broker failure', async () => {
+  // Regression: the broker catch block used to write the OAuthError into the
+  // process-global preflight cache. Because a restarting loopback broker throws
+  // ECONNREFUSED, that turned a few-second bounce into a permanent daemon
+  // outage — every later consume tick re-threw the cached error without ever
+  // re-probing, so claude-code workers could never spawn again until the daemon
+  // was manually bounced.
+  let brokerUp = false;
+  const fetchImpl = async (url) => {
+    if (!brokerUp) throw new Error('ECONNREFUSED');
+    return fakeBrokerReadyzFetch(() => ({ status: 200, body: READYZ_CLAUDE_SERVING }))(url);
+  };
+
+  // Tick 1: the broker is bouncing, so the preflight fails closed.
+  await assert.rejects(
+    () => assertClaudeCodeOAuth({ transport: 'broker', fetchImpl, env: {} }),
+    /broker OAuth unavailable for claude-code/
+  );
+
+  // Tick 2: the broker is back. WITHOUT a cache reset (no SIGHUP, no daemon
+  // restart) the next tick must re-probe and pass.
+  brokerUp = true;
+  await assertClaudeCodeOAuth({ transport: 'broker', fetchImpl, env: {} });
+});
+
+test('assertClaudeCodeOAuth (broker) does NOT cache a hard grant rejection either', async () => {
+  // Even an unambiguous "grant rejected" is not cached: the operator can
+  // re-authorize the broker grant out of band, and the loopback /readyz probe
+  // is cheap enough to re-run every tick. The preflight keeps failing closed
+  // while the grant is dead, and recovers on its own once it is restored.
+  let kind = 'token.upstream_rejected';
+  let canServe = false;
+  const fetchImpl = fakeBrokerReadyzFetch(() => ({
+    status: 503,
+    body: {
+      status: 'degraded',
+      providers: { 'claude-code': canServe },
+      provider_states: {
+        'claude-code': { state: 'degraded', kind, ready: canServe, can_serve: canServe },
+      },
+    },
+  }));
+
+  await assert.rejects(
+    () => assertClaudeCodeOAuth({ transport: 'broker', fetchImpl, env: {} }),
+    /token\.upstream_rejected/
+  );
+  await assert.rejects(
+    () => assertClaudeCodeOAuth({ transport: 'broker', fetchImpl, env: {} }),
+    /token\.upstream_rejected/
+  );
+
+  kind = 'ready';
+  canServe = true;
+  await assertClaudeCodeOAuth({ transport: 'broker', fetchImpl, env: {} });
 });
 
 test('assertClaudeCodeBrokerOAuth falls through from a cold primary to a healthy standby', async () => {

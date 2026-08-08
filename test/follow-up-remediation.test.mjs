@@ -11,6 +11,10 @@ import {
   OSS_READINESS_APPLY_SCRIPT_ENV,
   WORKER_PROVENANCE_HOOK_SRC,
   applyMergeAgentBrokerEnv,
+  assertHarnessIdentityMatch,
+  HarnessIdentityMismatchError,
+  isHarnessIdentityEnforcementEnabled,
+  remediationWorkerPushProvider,
   assertClaudeCodeOAuth,
   assertRemediationWorkerOAuth,
   assessWorkerLiveness,
@@ -312,6 +316,9 @@ const MERGE_AGENT_BROKER_ENV_KEYS = [
   'OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID',
   'OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID',
   'OAUTH_BROKER_SHARED_SECRET_FILE',
+  'OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER',
+  'OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_APP_ID',
+  'OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_INSTALLATION_ID',
 ];
 
 async function cleanContaminationAudit() {
@@ -2822,6 +2829,16 @@ test('remediation runtime local mode rejects an unknown worker class', async () 
   );
 });
 
+test('remediation harness identity alert does not pass the raw host env', () => {
+  const source = readFileSync(new URL('../src/follow-up-remediation.mjs', import.meta.url), 'utf8');
+  const alertBlock = source.slice(
+    source.indexOf("event: 'remediation-harness-identity-mismatch'"),
+    source.indexOf('if (alert && typeof alert.catch', source.indexOf("event: 'remediation-harness-identity-mismatch'")),
+  );
+  assert.match(alertBlock, /mismatches: record\?\.mismatches \|\| \[\]/);
+  assert.doesNotMatch(alertBlock, /\benv\b/);
+});
+
 test('remediation runtime rejects an unknown mode', async () => {
   await assert.rejects(
     () => createRemediationRuntime({}).run({ mode: 'sideways', role: { workerClass: 'codex' } }),
@@ -3254,6 +3271,39 @@ test('prepareClaudeCodeRemediationStartupEnv preserves ANTHROPIC_AUTH_TOKEN (the
   } finally {
     if (prev === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
     else process.env.ANTHROPIC_AUTH_TOKEN = prev;
+  }
+});
+
+test('prepareClaudeCodeRemediationStartupEnv keeps OAuth and git audit evidence together', () => {
+  const prevToken = process.env.ANTHROPIC_AUTH_TOKEN;
+  const prevApiKey = process.env.ANTHROPIC_API_KEY;
+  const prevAuthor = process.env.GIT_AUTHOR_NAME;
+  process.env.ANTHROPIC_AUTH_TOKEN = 'oauth-bearer-test';
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+  process.env.GIT_AUTHOR_NAME = 'Inherited Operator';
+  try {
+    const gitIdentity = remediationWorkerGitIdentity('claude-code');
+    const { startupEvidence } = prepareClaudeCodeRemediationStartupEnv({ gitIdentity });
+    assert.deepEqual(
+      startupEvidence.resolvedStartup.preservedForOAuth,
+      ['ANTHROPIC_AUTH_TOKEN'],
+      'OAuth bearer preservation must remain in startup evidence',
+    );
+    assert.ok(
+      startupEvidence.resolvedStartup.strippedEnv.includes('ANTHROPIC_API_KEY'),
+      'stripped API credentials must remain in startup evidence',
+    );
+    assert.ok(
+      startupEvidence.sanitizedEnv.gitIdentityOverrides.includes('GIT_AUTHOR_NAME'),
+      'git identity override audit evidence must share the same startup record',
+    );
+  } finally {
+    if (prevToken === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+    else process.env.ANTHROPIC_AUTH_TOKEN = prevToken;
+    if (prevApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = prevApiKey;
+    if (prevAuthor === undefined) delete process.env.GIT_AUTHOR_NAME;
+    else process.env.GIT_AUTHOR_NAME = prevAuthor;
   }
 });
 
@@ -4200,26 +4250,29 @@ test('prepareCodexRemediationStartupEnv applies gitIdentity even with no inherit
   }
 });
 
-test('applyMergeAgentBrokerEnv propagates broker env from injected source env', () => {
+test('applyMergeAgentBrokerEnv keys the push provider off the physical harness and honors a per-harness override + pins', () => {
   const env = {};
+  // A per-harness override (rotation/staging) binds the push to THIS harness, so
+  // it is still an honored identity; per-harness expected pins are threaded onto
+  // the transport vars so the token validates against the RIGHT App.
   const evidence = applyMergeAgentBrokerEnv(env, {
     MERGE_AGENT_AUTH_VIA_BROKER: 'yes',
     OAUTH_BROKER_URL: 'http://127.0.0.1:4010',
     OAUTH_BROKER_STANDBY_URL: 'http://127.0.0.1:4011',
-    OAUTH_BROKER_MERGE_AGENT_PROVIDER: 'custom-merge-agent',
-    OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '12345',
-    OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: '67890',
-    OAUTH_BROKER_SHARED_SECRET_FILE: '/tmp/merge-agent-secret',
-  });
+    OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER: 'github-app-codex-agent-staging',
+    OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_APP_ID: '12345',
+    OAUTH_BROKER_REMEDIATION_CODEX_EXPECTED_INSTALLATION_ID: '67890',
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/tmp/broker-secret',
+  }, { workerClass: 'codex' });
 
   assert.deepEqual(env, {
     MERGE_AGENT_AUTH_VIA_BROKER: 'true',
     OAUTH_BROKER_URL: 'http://127.0.0.1:4010',
     OAUTH_BROKER_STANDBY_URL: 'http://127.0.0.1:4011',
-    OAUTH_BROKER_MERGE_AGENT_PROVIDER: 'custom-merge-agent',
+    OAUTH_BROKER_MERGE_AGENT_PROVIDER: 'github-app-codex-agent-staging',
     OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '12345',
     OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: '67890',
-    OAUTH_BROKER_SHARED_SECRET_FILE: '/tmp/merge-agent-secret',
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/tmp/broker-secret',
   });
   assert.deepEqual(evidence, {
     enabled: true,
@@ -4227,27 +4280,62 @@ test('applyMergeAgentBrokerEnv propagates broker env from injected source env', 
     warning: null,
     brokerUrl: 'http://127.0.0.1:4010',
     standbyUrl: 'http://127.0.0.1:4011',
-    provider: 'custom-merge-agent',
-    providerOverridden: true,
+    provider: 'github-app-codex-agent-staging',
+    providerSource: 'harness-override',
+    harnessClass: 'codex',
+    harnessIdentityHonored: true,
+    fellBack: false,
+    fallbackWarning: null,
     expectedAppId: '12345',
     expectedInstallationId: '67890',
-    sharedSecretFile: '/tmp/merge-agent-secret',
+    sharedSecretFile: '/tmp/broker-secret',
   });
 });
 
-test('applyMergeAgentBrokerEnv uses broker and standby defaults when enabled', () => {
+test('applyMergeAgentBrokerEnv resolves the per-harness provider by default (never a fixed merge-agent provider)', () => {
+  for (const [workerClass, provider] of [
+    ['codex', 'github-app-codex-agent'],
+    ['claude-code', 'github-app-claude-agent'],
+    ['gemini', 'github-app-gemini-agent'],
+  ]) {
+    const env = {};
+    const evidence = applyMergeAgentBrokerEnv(env, {
+      MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+    }, { workerClass });
+
+    assert.equal(env.MERGE_AGENT_AUTH_VIA_BROKER, 'true');
+    assert.equal(env.OAUTH_BROKER_URL, 'http://127.0.0.1:4099');
+    assert.equal(env.OAUTH_BROKER_STANDBY_URL, 'http://127.0.0.1:4097');
+    assert.equal(env.OAUTH_BROKER_MERGE_AGENT_PROVIDER, provider, `${workerClass} pushes as its own App`);
+    assert.equal(evidence.provider, provider);
+    assert.equal(evidence.providerSource, 'physical-harness');
+    assert.equal(evidence.harnessClass, workerClass);
+    assert.equal(evidence.harnessIdentityHonored, true);
+    assert.equal(evidence.fellBack, false);
+    // No stale merge-agent pin is carried onto a per-harness provider.
+    assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID, undefined);
+    assert.equal(evidence.expectedAppId, null);
+    assert.equal(evidence.sharedSecretFile, null);
+  }
+});
+
+test('applyMergeAgentBrokerEnv falls back to merge-agent LOUDLY only for a harness with no known push-capable App', () => {
   const env = {};
+  const warnings = [];
   const evidence = applyMergeAgentBrokerEnv(env, {
     MERGE_AGENT_AUTH_VIA_BROKER: 'true',
-  });
+    // A stale merge-agent pin IS honored on the fallback path (provider is merge-agent).
+    OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '3978009',
+  }, { workerClass: 'some-unknown-harness', log: { warn: (m) => warnings.push(m) } });
 
-  assert.equal(env.MERGE_AGENT_AUTH_VIA_BROKER, 'true');
-  assert.equal(env.OAUTH_BROKER_URL, 'http://127.0.0.1:4099');
-  assert.equal(env.OAUTH_BROKER_STANDBY_URL, 'http://127.0.0.1:4097');
   assert.equal(env.OAUTH_BROKER_MERGE_AGENT_PROVIDER, 'github-app-merge-agent');
-  assert.equal(evidence.providerOverridden, false);
-  assert.equal(evidence.expectedAppId, null);
-  assert.equal(evidence.sharedSecretFile, null);
+  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID, '3978009');
+  assert.equal(evidence.provider, 'github-app-merge-agent');
+  assert.equal(evidence.providerSource, 'merge-agent-fallback');
+  assert.equal(evidence.fellBack, true);
+  assert.match(evidence.fallbackWarning, /no known push-capable broker App/);
+  assert.equal(warnings.length, 1, 'the fallback must emit exactly one loud warning');
+  assert.match(warnings[0], /harness-push-fallback/);
 });
 
 test('applyMergeAgentBrokerEnv warns in evidence for unrecognized broker flag', () => {
@@ -4263,7 +4351,7 @@ test('applyMergeAgentBrokerEnv warns in evidence for unrecognized broker flag', 
   assert.match(evidence.warning, /not recognized/);
 });
 
-test('prepareCodexRemediationStartupEnv records merge-agent broker evidence', () => {
+test('prepareCodexRemediationStartupEnv records per-harness push provider broker evidence (not the legacy merge-agent provider)', () => {
   const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const codexHome = path.join(workspaceDir, '.codex');
   const authPath = path.join(codexHome, 'auth.json');
@@ -4284,26 +4372,37 @@ test('prepareCodexRemediationStartupEnv records merge-agent broker evidence', ()
   process.env.MERGE_AGENT_AUTH_VIA_BROKER = 'true';
   process.env.OAUTH_BROKER_URL = 'http://127.0.0.1:4010';
   process.env.OAUTH_BROKER_STANDBY_URL = 'http://127.0.0.1:4011';
+  // The legacy merge-agent provider override is INTENTIONALLY ignored now: it was
+  // the #5058 bug vector. A codex remediation must push as codex regardless.
   process.env.OAUTH_BROKER_MERGE_AGENT_PROVIDER = 'custom-merge-agent';
   process.env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID = '12345';
   process.env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID = '67890';
-  process.env.OAUTH_BROKER_SHARED_SECRET_FILE = '/tmp/merge-agent-secret';
+  process.env.OAUTH_BROKER_SHARED_SECRET_FILE = '/tmp/broker-secret';
 
   try {
     const { env, startupEvidence } = prepareCodexRemediationStartupEnv();
     assert.equal(env.OAUTH_BROKER_URL, 'http://127.0.0.1:4010');
     assert.equal(env.OAUTH_BROKER_STANDBY_URL, 'http://127.0.0.1:4011');
+    // Push provider is the codex harness App, NOT the legacy merge-agent override.
+    assert.equal(env.OAUTH_BROKER_MERGE_AGENT_PROVIDER, 'github-app-codex-agent');
+    // The stale merge-agent expected pin is NOT carried onto the codex token
+    // (that would fail the token/app validation closed).
+    assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID, undefined);
     assert.deepEqual(startupEvidence.mergeAgentBroker, {
       enabled: true,
       flagValue: 'true',
       warning: null,
       brokerUrl: 'http://127.0.0.1:4010',
       standbyUrl: 'http://127.0.0.1:4011',
-      provider: 'custom-merge-agent',
-      providerOverridden: true,
-      expectedAppId: '12345',
-      expectedInstallationId: '67890',
-      sharedSecretFile: '/tmp/merge-agent-secret',
+      provider: 'github-app-codex-agent',
+      providerSource: 'physical-harness',
+      harnessClass: 'codex',
+      harnessIdentityHonored: true,
+      fellBack: false,
+      fallbackWarning: null,
+      expectedAppId: null,
+      expectedInstallationId: null,
+      sharedSecretFile: '/tmp/broker-secret',
     });
   } finally {
     for (const key of snapshotKeys) {
@@ -4311,6 +4410,244 @@ test('prepareCodexRemediationStartupEnv records merge-agent broker evidence', ()
       else process.env[key] = snapshot[key];
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// Physical-harness identity: commit + push identity keyed off the concrete
+// spawn class, with a fail-closed assert. Regression cover for agent-os #5058
+// (a codex remediation force-pushed as lacey-merge-agent[bot]) and its sibling
+// (claude remediation committed under no harness identity at all).
+// ---------------------------------------------------------------------------
+
+test('prepareClaudeCodeRemediationStartupEnv stamps the claude-code git identity (was: no identity at all)', () => {
+  const gitIdentity = remediationWorkerGitIdentity('claude-code');
+  const { env, startupEvidence } = prepareClaudeCodeRemediationStartupEnv({ gitIdentity });
+  assert.equal(env.GIT_AUTHOR_NAME, 'Claude Code Remediation Worker');
+  assert.equal(env.GIT_AUTHOR_EMAIL, 'claude-code-remediation-worker@laceyenterprises.com');
+  assert.equal(env.GIT_COMMITTER_NAME, 'Claude Code Remediation Worker');
+  assert.equal(env.GIT_COMMITTER_EMAIL, 'claude-code-remediation-worker@laceyenterprises.com');
+  assert.deepEqual(startupEvidence.gitIdentity, {
+    name: 'Claude Code Remediation Worker',
+    email: 'claude-code-remediation-worker@laceyenterprises.com',
+  });
+});
+
+test('prepareGeminiRemediationStartupEnv stamps the gemini git identity', () => {
+  const gitIdentity = remediationWorkerGitIdentity('gemini');
+  const { env, startupEvidence } = prepareGeminiRemediationStartupEnv({ gitIdentity });
+  assert.equal(env.GIT_AUTHOR_NAME, 'Gemini Remediation Worker');
+  assert.equal(env.GIT_COMMITTER_EMAIL, 'gemini-remediation-worker@laceyenterprises.com');
+  assert.deepEqual(startupEvidence.gitIdentity, {
+    name: 'Gemini Remediation Worker',
+    email: 'gemini-remediation-worker@laceyenterprises.com',
+  });
+});
+
+test('spawnClaudeCodeRemediationWorker hands the claude identity to the worker env (commits under claude, not the operator)', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const promptPath = path.join(workspaceDir, 'prompt.md');
+  const outputPath = path.join(workspaceDir, 'out.md');
+  const logPath = path.join(workspaceDir, 'claude.log');
+  writeFileSync(promptPath, 'remediate\n', 'utf8');
+
+  // A hostile inherited git identity must NOT survive into the worker env.
+  const prev = {
+    GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME,
+    GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL,
+    GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME,
+    GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL,
+  };
+  process.env.GIT_AUTHOR_NAME = 'Operator Human';
+  process.env.GIT_AUTHOR_EMAIL = 'operator-human@example.invalid';
+  process.env.GIT_COMMITTER_NAME = 'Operator Human';
+  process.env.GIT_COMMITTER_EMAIL = 'operator-human@example.invalid';
+
+  let capturedEnv;
+  try {
+    const worker = spawnClaudeCodeRemediationWorker({
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      ...testReplyContext(),
+      now: () => '2026-08-08T00:00:00.000Z',
+      spawnImpl: (_cmd, _args, opts) => {
+        capturedEnv = opts.env;
+        return { pid: 5150, unref() {} };
+      },
+    });
+    assert.deepEqual(worker.gitIdentity, {
+      name: 'Claude Code Remediation Worker',
+      email: 'claude-code-remediation-worker@laceyenterprises.com',
+    });
+  } finally {
+    for (const [k, v] of Object.entries(prev)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+  assert.equal(capturedEnv.GIT_AUTHOR_NAME, 'Claude Code Remediation Worker');
+  assert.equal(capturedEnv.GIT_AUTHOR_EMAIL, 'claude-code-remediation-worker@laceyenterprises.com');
+  assert.equal(capturedEnv.GIT_COMMITTER_NAME, 'Claude Code Remediation Worker');
+  assert.equal(capturedEnv.GIT_COMMITTER_EMAIL, 'claude-code-remediation-worker@laceyenterprises.com');
+});
+
+test('remediationWorkerPushProvider maps each physical harness to its own broker App', () => {
+  assert.equal(remediationWorkerPushProvider('codex').provider, 'github-app-codex-agent');
+  assert.equal(remediationWorkerPushProvider('claude-code').provider, 'github-app-claude-agent');
+  assert.equal(remediationWorkerPushProvider('gemini').provider, 'github-app-gemini-agent');
+  for (const harness of ['codex', 'claude-code', 'gemini']) {
+    const resolved = remediationWorkerPushProvider(harness);
+    assert.equal(resolved.source, 'physical-harness');
+    assert.equal(resolved.honored, true);
+    assert.equal(resolved.fellBack, false);
+  }
+});
+
+test('remediationWorkerPushProvider honors a per-harness override but falls back LOUDLY for an unknown harness', () => {
+  const overridden = remediationWorkerPushProvider('codex', {
+    OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER: 'github-app-codex-agent-canary',
+  });
+  assert.equal(overridden.provider, 'github-app-codex-agent-canary');
+  assert.equal(overridden.source, 'harness-override');
+  assert.equal(overridden.honored, true);
+
+  const fallback = remediationWorkerPushProvider('mystery-harness');
+  assert.equal(fallback.provider, 'github-app-merge-agent');
+  assert.equal(fallback.source, 'merge-agent-fallback');
+  assert.equal(fallback.honored, false);
+  assert.equal(fallback.fellBack, true);
+  assert.match(fallback.warning, /no known push-capable broker App/);
+});
+
+test('assertHarnessIdentityMatch passes for all three real harnesses (never fires in practice)', () => {
+  for (const harness of ['codex', 'claude-code', 'gemini']) {
+    const gitIdentity = remediationWorkerGitIdentity(harness);
+    const provider = remediationWorkerPushProvider(harness).provider;
+    const result = assertHarnessIdentityMatch({
+      workerClass: harness,
+      gitIdentity,
+      brokerEvidence: { enabled: true, provider, fellBack: false },
+      enforce: true,
+    });
+    assert.equal(result.match, true, `${harness} identity must match its harness`);
+    assert.deepEqual(result.mismatches, []);
+  }
+});
+
+test('assertHarnessIdentityMatch validates push provider against the broker source env', () => {
+  const sourceEnv = {
+    OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER: 'github-app-codex-staging',
+  };
+  const provider = remediationWorkerPushProvider('codex', sourceEnv).provider;
+  const result = assertHarnessIdentityMatch({
+    workerClass: 'codex',
+    gitIdentity: remediationWorkerGitIdentity('codex'),
+    brokerEvidence: { enabled: true, provider, fellBack: false },
+    enforce: true,
+    env: sourceEnv,
+  });
+  assert.equal(result.match, true);
+  assert.deepEqual(result.mismatches, []);
+});
+
+test('assertHarnessIdentityMatch fails closed on a synthetic identity mismatch when enforcing', () => {
+  const audits = [];
+  const errors = [];
+  assert.throws(
+    () => assertHarnessIdentityMatch({
+      workerClass: 'codex',
+      // Wrong identity: a routed/foreign identity that is NOT the codex harness.
+      gitIdentity: { name: 'lacey-merge-agent', email: 'merge-agent@laceyenterprises.com' },
+      brokerEvidence: { enabled: true, provider: 'github-app-merge-agent', fellBack: false },
+      enforce: true,
+      log: { error: (m) => errors.push(m) },
+      auditSink: (r) => audits.push(r),
+    }),
+    (err) => err instanceof HarnessIdentityMismatchError
+      && err.isPolicyViolation === true
+      && err.workerClass === 'codex'
+      && err.mismatches.some((m) => m.kind === 'git-identity')
+      && err.mismatches.some((m) => m.kind === 'push-provider'),
+  );
+  assert.equal(audits.length, 1, 'a fail-closed mismatch must write exactly one audit record');
+  assert.equal(audits[0].enforced, true);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /HARNESS-IDENTITY FAIL-CLOSED/);
+});
+
+test('assertHarnessIdentityMatch warns + audits + continues when the kill-switch is off', () => {
+  const audits = [];
+  const warned = [];
+  const result = assertHarnessIdentityMatch({
+    workerClass: 'gemini',
+    gitIdentity: { name: 'Wrong Identity', email: 'wrong@example.invalid' },
+    brokerEvidence: null,
+    enforce: false,
+    log: { error: (m) => warned.push(m) },
+    auditSink: (r) => audits.push(r),
+  });
+  assert.equal(result.match, false);
+  assert.equal(result.enforced, false);
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].enforced, false);
+  assert.match(warned[0], /HARNESS-IDENTITY WARN/);
+});
+
+test('assertHarnessIdentityMatch reports an unknown harness without throwing TypeError', () => {
+  const audits = [];
+  const warned = [];
+  const result = assertHarnessIdentityMatch({
+    workerClass: 'mystery-harness',
+    gitIdentity: { name: 'Some Worker', email: 'some-worker@example.invalid' },
+    enforce: false,
+    log: { error: (m) => warned.push(m) },
+    auditSink: (r) => audits.push(r),
+  });
+
+  assert.equal(result.match, false);
+  assert.deepEqual(result.mismatches, [
+    {
+      kind: 'git-identity',
+      expected: null,
+      resolved: { name: 'Some Worker', email: 'some-worker@example.invalid' },
+    },
+  ]);
+  assert.equal(audits.length, 1);
+  assert.match(warned[0], /mystery-harness/);
+});
+
+test('assertHarnessIdentityMatch does not treat the audited merge-agent fallback as a mismatch', () => {
+  // A harness that legitimately fell back to merge-agent (already warned + audited
+  // by applyMergeAgentBrokerEnv) must NOT additionally trip the assert.
+  const result = assertHarnessIdentityMatch({
+    workerClass: 'codex',
+    gitIdentity: remediationWorkerGitIdentity('codex'),
+    brokerEvidence: { enabled: true, provider: 'github-app-merge-agent', fellBack: true },
+    enforce: true,
+  });
+  assert.equal(result.match, true);
+});
+
+test('isHarnessIdentityEnforcementEnabled defaults to true and honors the env kill-switch', () => {
+  assert.equal(isHarnessIdentityEnforcementEnabled({}), true);
+  assert.equal(
+    isHarnessIdentityEnforcementEnabled({ ADVERSARIAL_REMEDIATION_ENFORCE_HARNESS_IDENTITY: 'false' }),
+    false,
+  );
+  assert.equal(
+    isHarnessIdentityEnforcementEnabled({ ADVERSARIAL_REMEDIATION_ENFORCE_HARNESS_IDENTITY: '0' }),
+    false,
+  );
+  assert.equal(
+    isHarnessIdentityEnforcementEnabled({ ADVERSARIAL_REMEDIATION_ENFORCE_HARNESS_IDENTITY: 'true' }),
+    true,
+  );
+  // Empty falls through to the default (true).
+  assert.equal(
+    isHarnessIdentityEnforcementEnabled({ ADVERSARIAL_REMEDIATION_ENFORCE_HARNESS_IDENTITY: '' }),
+    true,
+  );
 });
 
 function makeQueuedJob(rootDir, overrides = {}) {

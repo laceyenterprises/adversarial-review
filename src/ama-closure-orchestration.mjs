@@ -25,6 +25,7 @@ import { DAEMON_MERGE_DISPOSITION, isDaemonMergeReviewAllowed } from './ama/daem
 import { maybeDispatchAmaCloser, namedAmaNoDispatchReason } from './ama/dispatch-closer.mjs';
 import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { evaluateMergeEligibility } from './ama/merge-eligibility.mjs';
+import { recordAmaRetain } from './ama-retain-loop-cap.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
 import { loadConfigCached } from './config-loader.mjs';
 import { loadDomainConfig } from './domain-config.mjs';
@@ -582,7 +583,18 @@ export async function maybeDispatchAmaClosureFor({
       currentPrHeadSha &&
       reviewState.headSha !== currentPrHeadSha,
   );
-  if (reviewCycleExhausted && reviewedHeadIsStale) {
+  // FIX (stale-review-head spin, #5053): run the own-commit suppression proof for
+  // ANY stale reviewed head, NOT only the review-cycle-exhausted case. A hammer
+  // remediation on a comment-only / non-blocking (settled but non-exhausted)
+  // review also advances the head -> `stale-review-head` -> the eligibility miss
+  // was never self-certifiable, so the no-dispatch "retain" tick spun unbounded (a
+  // live 50-min stall). Dropping the `reviewCycleExhausted &&` guard lets the
+  // own-commit proof arm for that case too. The SAFETY INVARIANT is unchanged: an
+  // external push is authored by a non-closer committer, so
+  // `getHeadCloserCommitSuppression` returns `suppressed:false` and
+  // `allowStaleReviewHeadHammerResume` stays false -- an unreviewed human push can
+  // never self-certify past the stale-head block.
+  if (reviewedHeadIsStale) {
     try {
       const closerCommitSuppression = typeof resolveHeadCloserCommitSuppressionImpl === 'function'
         ? await resolveHeadCloserCommitSuppressionImpl({
@@ -869,6 +881,50 @@ export async function resolveMergeAgentCoexistenceForWatcher({
     return { outcome: 'ama-dispatched', amaClosureResult };
   }
   if (amaClosureResult?.skipMergeAgent) {
+    // FIX (stale-review-head spin, #5053): the `not-eligible` retain shape is the
+    // ONLY skipMergeAgent case that can spin unbounded — every other reason
+    // (daemon-merged, hammer-retry-cap-exhausted, autonomous-merge-disabled, …) is
+    // already terminal or operator-facing. Cap consecutive `not-eligible` retains
+    // on the SAME head: after AMA_RETAIN_LOOP_CAP of them, stop returning
+    // `ama-pending` (which the watcher re-polls forever) and route to
+    // AWAIT_OPERATOR_ACTION so the escalation in `coexistence.mjs` becomes
+    // reachable. A new head resets the counter (recordAmaRetain is head-keyed), so a
+    // legitimately progressing PR is never falsely escalated.
+    if (amaClosureResult?.reason === 'not-eligible') {
+      const retainHead = currentRevisionRef || candidate?.headSha || dispatchJob?.headSha || null;
+      const retain = recordAmaRetain(rootDir, { repo: repoPath, prNumber }, {
+        headSha: retainHead,
+        now: new Date().toISOString(),
+        logger,
+      });
+      if (retain.capExceeded) {
+        logger?.warn?.(
+          `[watcher] AMA retain-loop cap reached for ${repoPath}#${prNumber}` +
+            `@${String(retainHead || 'unknown').slice(0, 12)}: ${retain.retainCount} ` +
+            `consecutive not-eligible retains on the same head (cap ${retain.cap}). ` +
+            `This PR cannot self-resolve — routing to AWAIT_OPERATOR_ACTION. Operator: ` +
+            `apply the 'operator-approved' label to force past stale-review-head, or ` +
+            `close/repair the PR. A new head resets the counter.`,
+        );
+        logger?.log?.(JSON.stringify({
+          schemaVersion: 1,
+          event: 'ama.retain_loop_cap_reached',
+          repo: repoPath,
+          pr: prNumber,
+          headSha: retainHead,
+          retainCount: retain.retainCount,
+          cap: retain.cap,
+          amaReason: amaClosureResult?.reason || null,
+          amaReasons: Array.isArray(amaClosureResult?.reasons) ? amaClosureResult.reasons : [],
+        }));
+        return {
+          outcome: 'await-operator',
+          amaClosureResult,
+          coexistence: { action: COEXISTENCE_ACTION.AWAIT_OPERATOR_ACTION },
+          retainLoopCap: { retainCount: retain.retainCount, cap: retain.cap, headSha: retainHead },
+        };
+      }
+    }
     return { outcome: 'ama-pending', amaClosureResult };
   }
 

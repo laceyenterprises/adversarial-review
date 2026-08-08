@@ -402,6 +402,177 @@ test('permanent delivery failure reaches an operator-visible dead letter ceiling
   assert.match(health.lastFailureReason, /dead-lettered.*2 attempts.*HTTP 401/);
 });
 
+// A stub standing in for the canonical superproject scripts/alert-delivery.mjs:
+// it captures the stdin payload to STUB_OUT and exits with STUB_EXIT, so the test
+// exercises the REAL spawn path (via AGENT_OS_ALERT_DELIVERY_SCRIPT) without a
+// network send or a superproject checkout.
+const CANONICAL_ALERT_STUB = [
+  "import { writeFileSync } from 'node:fs';",
+  "let input = '';",
+  "process.stdin.setEncoding('utf8');",
+  "process.stdin.on('data', (chunk) => { input += chunk; });",
+  "process.stdin.on('end', () => {",
+  "  if (process.env.STUB_OUT) writeFileSync(process.env.STUB_OUT, input);",
+  "  process.exit(Number(process.env.STUB_EXIT || '0'));",
+  "});",
+].join('\n');
+
+test('watcher alerts route through the canonical script (current telegram-direct bus)', async (t) => {
+  const { env, rootDir } = makeEnv({ ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS: '0' });
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const scriptPath = join(rootDir, 'stub-alert-delivery.mjs');
+  const capturePath = join(rootDir, 'canonical-payload.json');
+  writeFileSync(scriptPath, CANONICAL_ALERT_STUB);
+  env.AGENT_OS_ALERT_DELIVERY_SCRIPT = scriptPath;
+  env.STUB_OUT = capturePath;
+  env.STUB_EXIT = '0';
+
+  // The legacy bus POST must NOT be used when the canonical script is present.
+  const requestText = async () => {
+    throw new Error('legacy bus must not be used when the canonical script is present');
+  };
+
+  const queued = await deliverAlert('watcher.no_progress body', {
+    env,
+    event: 'watcher.no_progress',
+    payload: { polls: 12 },
+    requestText,
+  });
+  const drained = await drainPendingAlerts({ env, requestText });
+
+  assert.equal(drained.drained, 1);
+  const health = readAlertSinkHealth({ env });
+  assert.equal(health.ready, true);
+  assert.equal(health.deadLetterCount, 0);
+  // The canonical script received the alert on stdin in the contract shape.
+  const sent = JSON.parse(readFileSync(capturePath, 'utf8'));
+  assert.equal(sent.message, 'watcher.no_progress body');
+  assert.equal(sent.source, 'watcher.no_progress');
+  assert.equal(sent.idempotencyKey, queued.id);
+  assert.equal(sent.metadata.alertId, queued.id);
+  assert.equal(sent.metadata.event, 'watcher.no_progress');
+});
+
+test('a failing canonical alert script dead-letters through the durable queue', async (t) => {
+  const { env, rootDir } = makeEnv({
+    ADVERSARIAL_ALERT_DELIVERY_MAX_ATTEMPTS: '2',
+    ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS: '0',
+  });
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const scriptPath = join(rootDir, 'stub-alert-delivery.mjs');
+  writeFileSync(scriptPath, CANONICAL_ALERT_STUB);
+  env.AGENT_OS_ALERT_DELIVERY_SCRIPT = scriptPath;
+  env.STUB_EXIT = '3'; // non-zero -> the canonical send failed
+
+  const requestText = async () => {
+    throw new Error('legacy bus must not be used when the canonical script is present');
+  };
+  await deliverAlert('canonical failure', { env, requestText });
+  const first = await drainPendingAlerts({ env, requestText });
+  const second = await drainPendingAlerts({ env, requestText });
+
+  assert.equal(first.status, 'queued');
+  assert.equal(second.status, 'error');
+  assert.equal(second.results[0].status, 'dead-lettered');
+  const health = readAlertSinkHealth({ env });
+  assert.equal(health.deadLetterCount, 1);
+  assert.match(health.lastFailureReason, /canonical alert-delivery exited 3/);
+});
+
+test('canonical alert script output capture is bounded', async (t) => {
+  const { env, rootDir } = makeEnv({
+    ADVERSARIAL_ALERT_DELIVERY_MAX_ATTEMPTS: '1',
+    ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS: '0',
+  });
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const scriptPath = join(rootDir, 'stub-alert-delivery.mjs');
+  writeFileSync(scriptPath, [
+    "process.stderr.write('x'.repeat(120_000));",
+    'process.exit(4);',
+  ].join('\n'));
+  env.AGENT_OS_ALERT_DELIVERY_SCRIPT = scriptPath;
+
+  const requestText = async () => {
+    throw new Error('legacy bus must not be used when the canonical script is present');
+  };
+  await deliverAlert('noisy canonical failure', { env, requestText });
+  await drainPendingAlerts({ env, requestText });
+
+  const health = readAlertSinkHealth({ env });
+  assert.equal(health.deadLetterCount, 1);
+  assert.match(health.lastFailureReason, /canonical alert-delivery exited 4/);
+  assert.ok(health.lastFailureReason.length < 101_000);
+});
+
+test('canonical alert script stdin pipe errors stay local to delivery failure', async (t) => {
+  const { env, rootDir } = makeEnv({
+    ADVERSARIAL_ALERT_DELIVERY_MAX_ATTEMPTS: '1',
+    ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS: '0',
+  });
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const scriptPath = join(rootDir, 'stub-alert-delivery.mjs');
+  writeFileSync(scriptPath, "process.exit(7);\n");
+  env.AGENT_OS_ALERT_DELIVERY_SCRIPT = scriptPath;
+
+  const requestText = async () => {
+    throw new Error('legacy bus must not be used when the canonical script is present');
+  };
+  await deliverAlert('x'.repeat(1024 * 1024), { env, requestText });
+  const drained = await drainPendingAlerts({ env, requestText });
+
+  assert.equal(drained.status, 'error');
+  assert.equal(drained.results[0].status, 'dead-lettered');
+  const health = readAlertSinkHealth({ env });
+  assert.equal(health.deadLetterCount, 1);
+  assert.match(health.lastFailureReason, /canonical alert-delivery exited 7/);
+});
+
+test('empty canonical alert script override disables real filesystem discovery', async (t) => {
+  const { env, rootDir } = makeEnv({
+    AGENT_OS_ALERT_DELIVERY_SCRIPT: '',
+    ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS: '0',
+  });
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+
+  const calls = [];
+  await deliverAlert('isolated legacy bus', {
+    env,
+    fsImpl: {
+      readFileSync() {
+        return 'hook-token';
+      },
+      existsSync() {
+        return true;
+      },
+    },
+    requestText: async () => {
+      throw new Error('initial queue attempt should stay retryable');
+    },
+  });
+  const drained = await drainPendingAlerts({
+    env,
+    now: new Date(Date.now() + 6_000),
+    fsImpl: {
+      readFileSync() {
+        return 'hook-token';
+      },
+      existsSync() {
+        return true;
+      },
+    },
+    requestText: async (url, options) => {
+      calls.push({ url, options });
+      return 'ok';
+    },
+  });
+
+  assert.equal(drained.drained, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'http://127.0.0.1:18799/hooks/wake');
+  assert.equal(calls[0].options.body.text, 'isolated legacy bus');
+  assert.equal(readAlertSinkHealth({ env }).ready, true);
+});
+
 test('invalid retry delay configuration falls back without wedging an inflight alert', async (t) => {
   const { env, rootDir } = makeEnv({
     ADVERSARIAL_ALERT_DELIVERY_RETRY_DELAY_MS: 'not-a-number',

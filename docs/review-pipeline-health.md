@@ -79,22 +79,27 @@ The Grafana dashboard lives at
 
 ## Sentinel Findings
 
+All findings below are ticket/digest diagnostics. The only adversarial-review
+page is `adversarial_review.reviewer_stalled`: published reviews have stopped
+past the freshness window while at least one open PR awaits first-pass review.
+Its action headline is `Reviews stalled — restore reviewer dispatch`.
+
 | Code | Default threshold | Tier | Clears when |
 |---|---:|---|---|
-| `review:review_state_ledger_unreadable` | `reviews.db` exists but cannot be opened read-only | page | the collector can open `reviews.db` read-only again |
-| `review:reviewer_death_rate_high` | failed reviewer attempts are >50% of completed+failed attempts over 1h, with at least 3 completed+failed attempts; `running` and `cancelled` are excluded from the denominator | page | the settled-attempt window falls below threshold or the minimum-attempt guard |
-| `review:unknown_failure_rate_high` | unknown-classified failures are >30% of failures over 15m, with at least 5 failures and at least 2 distinct PRs contributing unknown failures | page | the failure window falls back to threshold or below, the sample floor is no longer met, or unknown failures collapse to fewer than 2 PRs |
-| `review:reviewer_degradation_active` | at least one PR is currently held by `provider-overloaded` transient backoff or `quota-exhausted` quota hold | page | no active provider-overload backoff or quota hold remains |
-| `review:queue_starvation` | oldest pending first-pass row is >30m old | page | no pending row exceeds the age threshold |
+| `review:review_state_ledger_unreadable` | `reviews.db` exists but cannot be opened read-only | ticket | the collector can open `reviews.db` read-only again |
+| `review:reviewer_death_rate_high` | failed reviewer attempts are >50% of completed+failed attempts over 1h, with at least 3 completed+failed attempts; `running` and `cancelled` are excluded from the denominator | ticket | the settled-attempt window falls below threshold or the minimum-attempt guard |
+| `review:unknown_failure_rate_high` | unknown-classified failures are >30% of failures over 15m, with at least 5 failures and at least 2 distinct PRs contributing unknown failures | ticket | the failure window falls back to threshold or below, the sample floor is no longer met, or unknown failures collapse to fewer than 2 PRs |
+| `review:reviewer_degradation_active` | at least one PR is currently held by `provider-overloaded` transient backoff or `quota-exhausted` quota hold | ticket | no active provider-overload backoff or quota hold remains |
+| `review:queue_starvation` | oldest pending first-pass row is >30m old | ticket | no pending row exceeds the age threshold |
 | `review:remediation_backlog` | `follow-up-jobs/pending` has >5 jobs | ticket | pending job count returns to threshold or below |
-| `review:merge_stalled` | a `stopped:review-settled` job remains open for >3 watcher ticks | page | the PR is merged/closed or the settled job is no longer past threshold |
-| `review:ama_closer_lease_stale` | AMA closer lease is `pending`/`dispatched`, `terminalOutcome=null`, and older than 30m | page | the lease reaches terminal state or falls below the age threshold |
-| `review:reviewer_pass_zombie` | `reviewer_passes.status='running'` row is older than 30m | page | no running reviewer pass exceeds the age threshold; the watcher timeout sweep should settle parseably aged rows as `failed` / `reviewer-timeout` |
-| `review:round_budget_anomaly` | remediation round count exceeds the risk-class budget, or a final-pass job remains `awaiting-rereview` after budget exhaustion | page | no follow-up job violates the risk-class round budget |
-| `review:daemon_liveness` | required local pipeline LaunchAgent is not loaded | page | adversarial watcher, adversarial follow-up, and dispatch daemon labels are loaded |
-| `review:daemon_probe_failure` | required local pipeline LaunchAgent loaded state cannot be determined | page | launchctl probes can determine loaded state for adversarial watcher, adversarial follow-up, dispatch daemon, and dag-autowalk labels |
-| `review:dispatch_spawn_failures` | dispatch daemon stderr has recent closer/hammer spawn-failure signals over 1h | page | no matching recent dispatch daemon stderr lines remain |
-| `review:dag_autowalk_launchd_unhealthy` | dag-autowalk is unloaded, last exit is non-zero, or logs are stale for >2h | page | dag-autowalk is loaded with a zero/unknown last exit and fresh logs |
+| `review:merge_stalled` | a `stopped:review-settled` job remains open for >3 watcher ticks | ticket | the PR is merged/closed or the settled job is no longer past threshold |
+| `review:ama_closer_lease_stale` | AMA closer lease is `pending`/`dispatched`, `terminalOutcome=null`, and older than 30m | ticket | the lease reaches terminal state or falls below the age threshold |
+| `review:reviewer_pass_zombie` | `reviewer_passes.status='running'` row is older than 30m | ticket | no running reviewer pass exceeds the age threshold; the watcher timeout sweep should settle parseably aged rows as `failed` / `reviewer-timeout` |
+| `review:round_budget_anomaly` | remediation round count exceeds the risk-class budget, or a final-pass job remains `awaiting-rereview` after budget exhaustion | ticket | no follow-up job violates the risk-class round budget |
+| `review:daemon_liveness` | required local pipeline LaunchAgent is not loaded | ticket | adversarial watcher, adversarial follow-up, and dispatch daemon labels are loaded |
+| `review:daemon_probe_failure` | required local pipeline LaunchAgent loaded state cannot be determined | ticket | launchctl probes can determine loaded state for adversarial watcher, adversarial follow-up, dispatch daemon, and dag-autowalk labels |
+| `review:dispatch_spawn_failures` | dispatch daemon stderr has recent closer/hammer spawn-failure signals over 1h | ticket | no matching recent dispatch daemon stderr lines remain |
+| `review:dag_autowalk_launchd_unhealthy` | dag-autowalk is unloaded, last exit is non-zero, or logs are stale for >2h | ticket | dag-autowalk is loaded with a zero/unknown last exit and fresh logs |
 
 ## Configuration
 

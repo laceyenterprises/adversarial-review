@@ -74,7 +74,7 @@ test('3 consecutive empty polls with open pending PR emits no_progress and one a
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].event, 'watcher.no_progress');
   assert.equal(alerts[0].payload.openPendingPRs, 2);
-  assert.match(alerts[0].text, /watcher\.no_progress/);
+  assert.match(alerts[0].text, /No reviewer spawn/);
 });
 
 test('6 consecutive empty polls with open pending PR emits telemetry but pages only on the incident transition', async () => {
@@ -97,7 +97,7 @@ test('6 consecutive empty polls with open pending PR emits telemetry but pages o
   assert.equal(alerts[0].payload.pollsSinceLastSpawn, 3);
 });
 
-test('spawn after no_progress emits recovered and one recovery alert', async () => {
+test('spawn after no_progress emits a recovery event without another page', async () => {
   const { probe, events, alerts } = makeProbe();
 
   for (let i = 0; i < 5; i += 1) {
@@ -120,10 +120,10 @@ test('spawn after no_progress emits recovered and one recovery alert', async () 
     recoveredFromSilentPolls: 5,
     watcherPid: 12345,
   });
-  assert.equal(alerts.length, 2);
+  assert.equal(alerts.length, 1);
   assert.deepEqual(
     alerts.map((alert) => alert.event),
-    ['watcher.no_progress', 'watcher.recovered']
+    ['watcher.no_progress']
   );
 });
 

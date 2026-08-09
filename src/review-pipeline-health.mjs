@@ -83,10 +83,14 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_sentinel_finding_active: 'Whether a Sentinel finding code is active in the current snapshot.',
 });
 
+// This collector remains the full diagnostic/ticket surface. The single
+// operator page is emitted by review-freshness-detector only after actual
+// published reviews stop while open PRs wait; no collector finding may create
+// a second, differently-worded page for the same or an unrelated condition.
 const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
   {
     code: 'review:review_state_ledger_unreadable',
-    tier: 'page',
+    tier: 'ticket',
     category: 'review-pipeline',
     thresholdKey: null,
     defaultThreshold: null,
@@ -94,7 +98,7 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
   },
   {
     code: 'review:reviewer_death_rate_high',
-    tier: 'page',
+    tier: 'ticket',
     category: 'review-pipeline',
     thresholdKey: 'reviewerDeathRateThreshold',
     defaultThreshold: DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD,
@@ -103,7 +107,7 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
   },
   {
     code: 'review:unknown_failure_rate_high',
-    tier: 'page',
+    tier: 'ticket',
     category: 'review-pipeline',
     thresholdKey: 'reviewUnknownRateThreshold',
     defaultThreshold: DEFAULT_REVIEW_UNKNOWN_RATE_THRESHOLD,
@@ -112,7 +116,7 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
   },
   {
     code: 'review:reviewer_degradation_active',
-    tier: 'page',
+    tier: 'ticket',
     category: 'review-pipeline',
     thresholdKey: null,
     defaultThreshold: null,
@@ -120,7 +124,7 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
   },
   {
     code: 'review:queue_starvation',
-    tier: 'page',
+    tier: 'ticket',
     category: 'review-pipeline',
     thresholdKey: 'queueStarvationMaxAgeMs',
     defaultThreshold: DEFAULT_QUEUE_STARVATION_MAX_AGE_MS,
@@ -134,28 +138,28 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
   },
   {
     code: 'review:merge_stalled',
-    tier: 'page',
+    tier: 'ticket',
     category: 'review-pipeline',
     thresholdKey: 'mergeStalledMaxTicks',
     defaultThreshold: DEFAULT_MERGE_STALLED_MAX_TICKS,
   },
   {
     code: 'review:ama_closer_lease_stale',
-    tier: 'page',
+    tier: 'ticket',
     category: 'review-pipeline',
     thresholdKey: 'amaCloserLeaseMaxAgeMs',
     defaultThreshold: DEFAULT_AMA_CLOSER_LEASE_MAX_AGE_MS,
   },
   {
     code: 'review:reviewer_pass_zombie',
-    tier: 'page',
+    tier: 'ticket',
     category: 'review-pipeline',
     thresholdKey: 'runningReviewerPassMaxAgeMs',
     defaultThreshold: DEFAULT_RUNNING_REVIEWER_PASS_MAX_AGE_MS,
   },
   {
     code: 'review:round_budget_anomaly',
-    tier: 'page',
+    tier: 'ticket',
     category: 'review-pipeline',
     thresholdKey: null,
     defaultThreshold: null,
@@ -163,7 +167,7 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
   },
   {
     code: 'review:daemon_liveness',
-    tier: 'page',
+    tier: 'ticket',
     category: 'review-pipeline',
     thresholdKey: null,
     defaultThreshold: null,
@@ -171,7 +175,7 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
   },
   {
     code: 'review:daemon_probe_failure',
-    tier: 'page',
+    tier: 'ticket',
     category: 'review-pipeline',
     thresholdKey: null,
     defaultThreshold: null,
@@ -179,14 +183,14 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
   },
   {
     code: 'review:dispatch_spawn_failures',
-    tier: 'page',
+    tier: 'ticket',
     category: 'review-pipeline',
     thresholdKey: 'dispatchSpawnFailureWindowMs',
     defaultThreshold: DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS,
   },
   {
     code: 'review:dag_autowalk_launchd_unhealthy',
-    tier: 'page',
+    tier: 'ticket',
     category: 'review-pipeline',
     thresholdKey: 'dagAutowalkMaxLogAgeMs',
     defaultThreshold: DEFAULT_DAG_AUTOWALK_MAX_LOG_AGE_MS,
@@ -1394,7 +1398,9 @@ function summarizeDagAutowalkHealth({ env, hqRoot, nowMs, config, launchd }) {
 function buildFinding({ code, tier, subject, message, evidence, recommendedAction, observedAt, details = {} }) {
   return {
     agent_id: 'sentinel',
-    tier,
+    // Do not let a new source-level finding quietly become a pager route. The
+    // review-freshness detector owns the sole page criterion for this domain.
+    tier: tier === 'page' ? 'ticket' : tier,
     category: 'review-pipeline',
     code,
     subject,

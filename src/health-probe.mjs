@@ -29,24 +29,8 @@ function formatSamplePR(repo, prNumber) {
 }
 
 function buildNoProgressAlertText(payload) {
-  return [
-    'Adversarial Watcher Health: watcher.no_progress',
-    `Polls since last spawn: ${payload.pollsSinceLastSpawn}`,
-    `Open pending PRs: ${payload.openPendingPRs}`,
-    `Sample PRs: ${payload.samplePRs.length ? payload.samplePRs.join(', ') : 'none'}`,
-    `Last spawn: ${payload.lastSpawnAt || 'never in this process'}`,
-    `Watcher PID: ${payload.watcherPid}`,
-    `Threshold: ${payload.thresholdConfigured}`,
-  ].join('\n');
-}
-
-function buildRecoveredAlertText(payload) {
-  return [
-    'Adversarial Watcher Health: watcher.recovered',
-    `Spawns since recovery: ${payload.spawnsSinceRecovery}`,
-    `Recovered from silent polls: ${payload.recoveredFromSilentPolls}`,
-    `Watcher PID: ${payload.watcherPid}`,
-  ].join('\n');
+  return `No reviewer spawn for ${payload.pollsSinceLastSpawn} polls while `
+    + `${payload.openPendingPRs} PR(s) await first pass.`;
 }
 
 function createWatcherHealthProbe({
@@ -135,7 +119,8 @@ function createWatcherHealthProbe({
         state.healthState = 'healthy';
         state.noProgressSilentPolls = 0;
         state.spawnsSinceRecovery = 0;
-        await sendTransitionAlert(buildRecoveredAlertText(payload), payload);
+        // Recovery is recorded in the heartbeat and emitted as telemetry.  It
+        // is deliberately not delivered as a page or a stand-alone alert.
         return payload;
       }
       state.spawnsSinceRecovery = 0;
@@ -163,8 +148,8 @@ function createWatcherHealthProbe({
       state.spawnsSinceRecovery = 0;
       // This is an incident-transition alert, not a metronome.  Repeating the
       // identical page every threshold interval gives no new operator action
-      // and turns a known stall into alert noise.  The recovery transition
-      // below remains the positive confirmation that dispatches resumed.
+      // and turns a known stall into alert noise. Freshness owns the one
+      // operator page; this earlier signal is retained as a digest notice.
       if (isTransition) {
         await sendTransitionAlert(buildNoProgressAlertText(payload), payload);
       }
@@ -193,7 +178,6 @@ function createWatcherHealthProbe({
 
 export {
   buildNoProgressAlertText,
-  buildRecoveredAlertText,
   createWatcherHealthProbe,
   parsePositiveInteger,
   resolveHealthProbeConfig,

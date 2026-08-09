@@ -277,14 +277,15 @@ test('stale-head passes do not spend either current-head reviewer ceiling', () =
 
     insertPass(db, { repoPath, prNumber, attemptNumber: 5, passKind: 'rereview', headSha: currentHead });
     insertPass(db, { repoPath, prNumber, attemptNumber: 6, passKind: 'rereview', headSha: currentHead });
+    insertPass(db, { repoPath, prNumber, attemptNumber: 7, passKind: 'rereview', headSha: currentHead });
     assert.equal(
       countReviewCeilingUnits({ db, rootDir, repoPath, prNumber, headSha: currentHead }),
-      1,
-      'duplicate reviews of the current head still collapse to one landed ceiling unit',
+      3,
+      'each completed current-head review consumes a ceiling unit so the same-head circuit breaker still trips',
     );
     assert.equal(
       countReviewCeilingAttempts({ db, rootDir, repoPath, prNumber, headSha: currentHead }),
-      2,
+      3,
       'the same-head attempt fuse remains bounded even though historical heads are ignored',
     );
   } finally {

@@ -121,13 +121,15 @@ function closeOwnedReviewStateDb(ownedDb) {
 }
 
 // REVIEW-DEDUP: the hard ceiling needs a bounded landed-review count for the
-// CURRENT head, not a raw PR-lifetime event count. Completed modern passes for
-// that head collapse to one unit; a stale-head outcome cannot burn the final
-// review owed to a later remediation head. Failed/running attempts are attempt
-// evidence, but they are not reviews. When the caller supplies a head, legacy
-// NULL-head records and the PR-wide review_attempts counter are deliberately
-// ignored: neither can prove that the current head was reviewed. The same-head
-// ceiling re-arms itself as soon as the watcher records a modern pass.
+// CURRENT head, not a raw PR-lifetime event count. Each completed modern pass
+// on that head consumes one unit: GitHub normally deduplicates same-head
+// reviews, but this still protects explicit requeues and fail-open paths. A
+// stale-head outcome cannot burn the final review owed to a later remediation
+// head. Failed/running attempts are attempt evidence, but they are not reviews.
+// When the caller supplies a head, legacy NULL-head records and the PR-wide
+// review_attempts counter are deliberately ignored: neither can prove that the
+// current head was reviewed. The ceiling therefore re-arms for a new head while
+// remaining a real circuit breaker for repeated reviews of that new head.
 export function countReviewCeilingUnits({
   db: dbOverride = null,
   rootDir = ROOT,
@@ -143,6 +145,21 @@ export function countReviewCeilingUnits({
   const readDb = dbOverride || ownedDb;
   try {
     if (!dbOverride) ensureReviewStateSchema(readDb);
+    if (normalizedHeadSha !== null) {
+      const row = readDb.prepare(
+        `SELECT COUNT(*) AS completed_current_head_passes
+           FROM reviewer_passes
+          WHERE repo = ?
+            AND pr_number = ?
+            AND pass_kind IN ('first-pass', 'rereview')
+            AND status = 'completed'
+            AND head_sha = ?`,
+      ).get(repoPath, prNumber, normalizedHeadSha);
+      const completedCurrentHeadPasses = Number(row?.completed_current_head_passes || 0);
+      return Number.isFinite(completedCurrentHeadPasses) && completedCurrentHeadPasses > 0
+        ? completedCurrentHeadPasses
+        : 0;
+    }
     const baseSql =
       `SELECT COUNT(*) AS pass_count,
               COUNT(DISTINCT CASE
@@ -160,12 +177,9 @@ export function countReviewCeilingUnits({
         WHERE repo = ?
           AND pr_number = ?
           AND pass_kind IN ('first-pass', 'rereview')`;
-    const row = normalizedHeadSha === null
-      ? readDb.prepare(baseSql).get(repoPath, prNumber)
-      : readDb.prepare(`${baseSql}\n          AND head_sha = ?`).get(repoPath, prNumber, normalizedHeadSha);
+    const row = readDb.prepare(baseSql).get(repoPath, prNumber);
     const passCount = Number(row?.pass_count || 0);
     if (!Number.isFinite(passCount) || passCount <= 0) {
-      if (normalizedHeadSha !== null) return 0;
       const fallback = Number(fallbackReviewAttempts || 0);
       return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
     }

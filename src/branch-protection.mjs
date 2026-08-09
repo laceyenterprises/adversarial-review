@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 
 import { writeFileAtomic } from './atomic-write.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
+import { createLogChangeGate } from './log-change-gate.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -424,11 +425,14 @@ function resolveBaseBranchForRepo(repoPath, {
   return baseBranches[repoPath] || baseBranches[repoName] || defaultBaseBranch;
 }
 
+const branchProtectionLogGate = createLogChangeGate();
+
 async function warnForMissingAdversarialGateBranchProtection(repoPaths, {
   checker = createBranchProtectionChecker(),
   logger = console,
   baseBranches = {},
   defaultBaseBranch = DEFAULT_BASE_BRANCH,
+  logGate = branchProtectionLogGate,
 } = {}) {
   const results = [];
   for (const repoPath of repoPaths) {
@@ -441,7 +445,15 @@ async function warnForMissingAdversarialGateBranchProtection(repoPaths, {
     });
     results.push(result);
     if (!result.ok) {
-      logger.warn(formatBranchProtectionWarning(result));
+      // Log-feed noise control: only warn on the first occurrence or when the
+      // reason changes for this repo/base/context. The benign expected reasons
+      // (branch-protection-forbidden 403 / branch-protection-missing 404)
+      // otherwise re-fire every poll for ~18 repos; a genuinely new reason still
+      // logs on first sight and on any transition.
+      const branchProtectionGateKey = `${result.repo}#${result.baseBranch}#${result.context}`;
+      if (logGate.note(branchProtectionGateKey, result.reason).changed) {
+        logger.warn(formatBranchProtectionWarning(result));
+      }
     }
   }
   return results;

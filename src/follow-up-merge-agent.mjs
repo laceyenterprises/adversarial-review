@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { summarizeChecksConclusion } from './checks-summary.mjs';
+import { createLogChangeGate } from './log-change-gate.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { fetchAdversarialGateBranchProtection } from './branch-protection.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
@@ -1921,6 +1922,8 @@ const MERGE_AGENT_CANCEL_TERMINAL_DISPATCH_STATUSES = new Set([
 // failures are intentionally retryable: the watcher persists cleanup
 // work on disk and replays it on later ticks even after the PR leaves
 // the open-set query.
+const followUpMergeAgentLogGate = createLogChangeGate();
+
 async function cancelMergeAgentDispatchOnMerge({
   rootDir,
   repo,
@@ -1930,6 +1933,7 @@ async function cancelMergeAgentDispatchOnMerge({
   hqExecFileImpl = ghExecFileImpl,
   now = isoNow(),
   listImpl = listMergeAgentDispatches,
+  logGate = followUpMergeAgentLogGate,
   env = process.env, cancelRetryDelaysMs,
 } = {}) {
   const result = {
@@ -1989,7 +1993,12 @@ async function cancelMergeAgentDispatchOnMerge({
         result.cancelError = formatted.message;
         result.cancelStderr = err?.stderr ? String(err.stderr) : null;
         result.cancelStdout = err?.stdout ? String(err.stdout) : null;
-        console.warn(
+        // Log-feed noise control: an already-terminal LRQ makes best-effort
+        // cancel fail on every tick. This is expected and non-actionable, so
+        // emit it at debug rather than warn. The terminal-classifier below
+        // still converges the cleanup and the structured result fields
+        // (cancelError/cancelStderr/cancelStdout) are unchanged.
+        console.debug(
           `[follow-up-merge-agent] best-effort cancel of merge-agent dispatch ${latest.launchRequestId} for ${repo}#${prNumber} failed: ${result.cancelError}`
         );
       }
@@ -2084,9 +2093,23 @@ async function cancelMergeAgentDispatchOnMerge({
       if (isLabelAlreadyAbsentError(err)) {
         result.labelRemoved = true;
       } else {
-        console.warn(
-          `[follow-up-merge-agent] failed to remove '${MERGE_AGENT_DISPATCHED_LABEL}' from ${repo}#${prNumber} after close: ${result.labelRemovalError}`
+        // Log-feed noise control: this cleanup runs every tick for a stuck
+        // merged PR, so re-warning identically each poll floods the feed. Warn
+        // only on the first occurrence or when the failure detail changes, and
+        // note how many identical failures were suppressed since the last emit.
+        const removeFailureKey = `${repo}#${prNumber}`;
+        const removeFailureDecision = logGate.note(
+          removeFailureKey,
+          String(result.labelRemovalError),
         );
+        if (removeFailureDecision.changed) {
+          const suppressedNote = removeFailureDecision.suppressedSincePrevious > 0
+            ? ` (after ${removeFailureDecision.suppressedSincePrevious} suppressed identical failures)`
+            : '';
+          console.warn(
+            `[follow-up-merge-agent] failed to remove '${MERGE_AGENT_DISPATCHED_LABEL}' from ${repo}#${prNumber} after close: ${result.labelRemovalError}${suppressedNote}`
+          );
+        }
       }
     }
   }

@@ -20,6 +20,7 @@ import {
 import { reviewBodyHasScopeViolationFinding } from './additive-only-scope.mjs';
 import { deliverAlert as defaultDeliverAlert } from './alert-delivery.mjs';
 import { resolveMergeAgentCoexistenceForWatcher } from './ama-closure-orchestration.mjs';
+import { createLogChangeGate } from './log-change-gate.mjs';
 import { COEXISTENCE_ACTION } from './ama/coexistence.mjs';
 import { namedAmaNoDispatchReason } from './ama/dispatch-closer.mjs';
 import { ADVERSARIAL_MERGE_REQUESTED_LABEL } from './ama/labels.mjs';
@@ -72,6 +73,8 @@ function findLatestPostedReviewBody(rootDir = ROOT, { repo, prNumber } = {}) {
   }
 }
 
+const postedReviewRowLogGate = createLogChangeGate();
+
 export async function handlePostedReviewRow({
   rootDir = ROOT,
   repoPath,
@@ -91,6 +94,7 @@ export async function handlePostedReviewRow({
   reviewBodyHasScopeViolationFindingImpl = reviewBodyHasScopeViolationFinding,
   operatorSurface = null,
   domainId = null, // ARC-18: WATCHER_PRIMARY_DOMAIN_ID stays in watcher; threaded by callers (pollOnce passes domainId). Default is never read (only used when operatorSurface is set, and every such caller passes domainId).
+  logGate = postedReviewRowLogGate,
   logger = console,
 } = {}) {
   await projectGateStatusSafe(existing);
@@ -193,12 +197,20 @@ export async function handlePostedReviewRow({
     }
     if (coexistenceDecision.outcome === 'ama-pending') {
       const { amaClosureResult } = coexistenceDecision;
-      logger.log(
-        `[watcher] AMA hammer route retained ownership for ${repoPath}#${prNumber}: ` +
-        `${amaClosureResult.reason || 'ama-dispatch-pending'} ` +
-        `lrq=${amaClosureResult.launchRequestId || amaClosureResult.dispatchId || 'unknown'} ` +
-        `workerClass=${amaClosureResult.workerClass || 'unknown'}`
-      );
+      // Log-feed noise control: this route retains ownership and re-polls a
+      // stuck PR every tick. Log once per (repo, pr, head, reason) transition
+      // instead of every poll; a new head or a changed reason still logs.
+      const retainGateKey = `${repoPath}#${prNumber}`;
+      const retainSignature =
+        `${currentRevisionRef || ''}#${amaClosureResult.reason || 'ama-dispatch-pending'}`;
+      if (logGate.note(retainGateKey, retainSignature).changed) {
+        logger.log(
+          `[watcher] AMA hammer route retained ownership for ${repoPath}#${prNumber}: ` +
+          `${amaClosureResult.reason || 'ama-dispatch-pending'} ` +
+          `lrq=${amaClosureResult.launchRequestId || amaClosureResult.dispatchId || 'unknown'} ` +
+          `workerClass=${amaClosureResult.workerClass || 'unknown'}`
+        );
+      }
       return;
     }
 

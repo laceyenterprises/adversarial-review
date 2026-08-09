@@ -142,6 +142,64 @@ test('round2: debounce key is keyed on the LRQ (not the no-lrq fallback slot)', 
   }
 });
 
+test('same stuck LRQ is an initial page plus a six-hour reminder, not an hourly metronome', async () => {
+  const stateDir = tmpStateDir();
+  try {
+    const deliveries = [];
+    const deliverFn = async (text) => {
+      deliveries.push(text);
+      return { ok: true };
+    };
+    const dispatched = {
+      decision: 'skip-already-dispatched',
+      stuckDetail: {
+        launchRequestId: LRQ,
+        stuckForMinutes: 30,
+        refusalCount: 7,
+        primaryReason: 'harness_unhealthy',
+        lastRefusedAt: '2026-05-18T03:25:00Z',
+      },
+    };
+
+    assert.equal(await maybeFireMergeAgentStuckAlert({
+      rootDir: '/tmp/unused',
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 643,
+      dispatched,
+      deliverAlertFn: deliverFn,
+      logger: quietLogger(),
+      now: NOW,
+      alertStateDir: stateDir,
+    }), true);
+    assert.equal(await maybeFireMergeAgentStuckAlert({
+      rootDir: '/tmp/unused',
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 643,
+      dispatched: {
+        ...dispatched,
+        stuckDetail: { ...dispatched.stuckDetail, stuckForMinutes: 90, refusalCount: 13 },
+      },
+      deliverAlertFn: deliverFn,
+      logger: quietLogger(),
+      now: NOW + (60 * 60 * 1000),
+      alertStateDir: stateDir,
+    }), false, 'elapsed age alone is not a new incident');
+    assert.equal(await maybeFireMergeAgentStuckAlert({
+      rootDir: '/tmp/unused',
+      repoPath: 'laceyenterprises/agent-os',
+      prNumber: 643,
+      dispatched,
+      deliverAlertFn: deliverFn,
+      logger: quietLogger(),
+      now: NOW + (6 * 60 * 60 * 1000),
+      alertStateDir: stateDir,
+    }), true, 'an unresolved incident receives the bounded six-hour reminder');
+    assert.equal(deliveries.length, 2);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test('round2: second stuck dispatch on a different LRQ for same PR does NOT collapse to same debounce slot', async () => {
   const stateDir = tmpStateDir();
   try {

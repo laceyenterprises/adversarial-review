@@ -39,6 +39,13 @@ function launchctlPrintError({ message = 'launchctl print failed', stdout = '', 
   return error;
 }
 
+test('pipeline Sentinel findings are diagnostics, never pages', () => {
+  assert.ok(REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS.length > 0);
+  assert.ok(
+    REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS.every((finding) => finding.tier === 'ticket')
+  );
+});
+
 function openDb(rootDir) {
   const db = openReviewStateDb(rootDir);
   ensureReviewStateSchema(db);
@@ -356,7 +363,7 @@ test('collector emits a page finding when an existing review-state ledger cannot
   assert.ok(snapshot.reviewStateLedger.error);
   assert.ok(findingCodes(snapshot).includes('review:review_state_ledger_unreadable'));
   const finding = snapshot.findings.find((item) => item.code === 'review:review_state_ledger_unreadable');
-  assert.equal(finding.tier, 'page');
+  assert.equal(finding.tier, 'ticket');
   assert.match(finding.message, /reviews\.db/);
   assert.deepEqual(finding.evidence, [snapshot.reviewStateLedger.path]);
   assert.match(finding.recommended_action, /regular file with read access/);

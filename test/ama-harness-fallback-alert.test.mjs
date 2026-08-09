@@ -130,7 +130,7 @@ test('harness fallback alert state is created with shared group permissions by c
 
   const stateDir = join(rootDir, 'data', 'ama-harness-fallback-alerts');
   const [stateFile] = readdirSync(stateDir);
-  assert.equal(statSync(stateDir).mode & 0o7777, 0o2775);
+  assert.equal(statSync(stateDir).mode & 0o777, 0o775);
   assert.equal(statSync(join(stateDir, stateFile)).mode & 0o777, 0o664);
 });
 

@@ -120,11 +120,11 @@ export async function maybeFireReviewStalledAlert({
     return { fired: false, reason: 'debounced', ageMs };
   }
   const ageMin = Math.round(ageMs / 60000);
+  // Delivery applies the canonical page headline and action. Keep this durable
+  // text concise as the incident record, with the evidence in the payload.
   const text =
-    `🚨 adversarial reviewer STALLED — no review has posted in ${ageMin}m while ` +
-    `${pendingReviewCount} PR(s) await first-pass review. The reviewer dispatch ` +
-    `path is not producing reviews (check app-contract /v1/dispatch + watcher ` +
-    `reviewer spawns). This page is truthful even if per-PR review_status shows 'posted'.`;
+    `No review posted for ${ageMin}m while ${pendingReviewCount} open PR(s) await ` +
+    'first-pass review.';
   try {
     await deliverAlertFn(text, {
       event: 'adversarial_review.reviewer_stalled',

@@ -32,6 +32,7 @@ const DEFAULT_STALE_INFLIGHT_AGE_MS = 120_000;
 const DEFAULT_MAX_DELIVERY_ATTEMPTS = 8;
 const DEFAULT_ARCHIVE_RETENTION_DAYS = 30;
 const DEFAULT_ARCHIVE_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+const REVIEW_STALL_EVENT = 'adversarial_review.reviewer_stalled';
 const HTTP_TIMEOUT_MS = Number(
   process.env.ALERT_HTTP_TIMEOUT_MS || process.env.HTTP_TIMEOUT_MS || DEFAULT_HTTP_TIMEOUT_MS
 );
@@ -600,6 +601,46 @@ function buildQueuedAlertDoc(text, { event, payload, config, now }) {
   };
 }
 
+// The adversarial-review alert channel is a pager.  A stalled first-pass review
+// is the one condition that needs to interrupt an operator: there is open work
+// and the review service is not producing reviews.  Every other pipeline event
+// remains durable and visible in the digest, but it must not compete with that
+// signal as a page.
+function alertPresentationForDoc(doc) {
+  const event = String(doc?.event || 'adversarial_review.notice');
+  const payload = doc?.payload && typeof doc.payload === 'object' ? doc.payload : {};
+  if (event === REVIEW_STALL_EVENT) {
+    const ageMinutes = Math.max(1, Math.round(Number(payload.age_ms || 0) / 60_000));
+    const pendingCount = Number.isFinite(Number(payload.pending_review_count))
+      ? Number(payload.pending_review_count)
+      : 'unknown';
+    return {
+      severity: 'SEV1',
+      headline: 'Reviews stalled — restore reviewer dispatch',
+      body: `No review posted for ${ageMinutes}m while ${pendingCount} open PR(s) await first pass.`,
+      action: 'Check /v1/dispatch and watcher reviewer spawns.',
+      detail: 'Freshness is based on published reviews, even when review_status is stale.',
+    };
+  }
+
+  const recovered = event === 'watcher.recovered';
+  const headlineByEvent = {
+    'watcher.no_progress': 'Review dispatch delayed — monitor queue',
+    'watcher.recovered': 'Review dispatch recovered — no action',
+    'merge_agent.stuck_pre_spawn': 'Merge dispatch delayed — inspect queue',
+    'merge_agent.fleet_wide_false_deferral': 'Merge guard degraded — inspect ledger',
+    'merge_agent.fleet_wide_false_deferral_detector_degraded': 'Merge detector degraded — inspect state',
+    'runtime.canary.failed': 'Fallback canary failed — inspect runtime',
+  };
+  return {
+    severity: recovered ? 'SEV3' : 'SEV2',
+    headline: headlineByEvent[event] || 'Review pipeline notice — inspect digest',
+    body: String(doc?.text || event),
+    action: recovered ? '' : 'Review the linked event evidence; this is not a page.',
+    detail: `Event: ${event}`,
+  };
+}
+
 function queueAlertDoc(rootDir, doc) {
   ensureAlertSinkDirs(rootDir);
   const filePath = alertDocPath(rootDir, 'pending', doc.id);
@@ -897,14 +938,18 @@ async function deliverViaCanonicalAlertScript(scriptPath, doc, {
   env = process.env,
   runAlertScript = spawnCanonicalAlertScript,
 } = {}) {
+  const presentation = alertPresentationForDoc(doc);
+  const message = `${presentation.headline}\n${presentation.body}`;
   const payload = {
     source: doc.event || 'adversarial-review',
-    message: doc.text,
+    message,
     idempotencyKey: doc.id,
     metadata: {
       alertId: doc.id,
       event: doc.event || null,
       source: 'adversarial-review',
+      deliveryClass: presentation.severity === 'SEV1' ? 'page' : 'digest',
+      presentation,
     },
   };
   const result = await runAlertScript(scriptPath, payload, env);
@@ -939,14 +984,16 @@ async function postAlertDoc(doc, {
     loadConfigRuntimeImpl,
   });
   const token = readHooksToken({ env, fsImpl, loadConfigRuntimeImpl });
+  const presentation = alertPresentationForDoc(doc);
+  const page = presentation.severity === 'SEV1';
   return requestText(config.alertBusUrl, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: {
-      text: doc.text,
-      message: doc.text,
-      mode: 'now',
-      wakeMode: 'now',
+      text: `${presentation.headline}\n${presentation.body}`,
+      message: `${presentation.headline}\n${presentation.body}`,
+      mode: page ? 'now' : 'digest',
+      wakeMode: page ? 'now' : 'digest',
       deliver: true,
       channel: doc.delivery.alertChannel,
       to: doc.delivery.alertTo,
@@ -954,11 +1001,12 @@ async function postAlertDoc(doc, {
       agentId: doc.delivery.alertAgentId,
       event: doc.event || undefined,
       payload: doc.payload || undefined,
-      severity: 'critical',
+      severity: page ? 'critical' : 'warning',
       source: 'adversarial-review',
       metadata: {
         alertId: doc.id,
         event: doc.event || null,
+        deliveryClass: page ? 'page' : 'digest',
       },
     },
   });
@@ -1313,6 +1361,7 @@ export {
   nextAlertDrainDelayMs,
   pendingDir,
   readAlertSinkHealth,
+  alertPresentationForDoc,
   readHooksToken,
   resolveAlertDefaults,
   resolveAlertTransportDefaults,

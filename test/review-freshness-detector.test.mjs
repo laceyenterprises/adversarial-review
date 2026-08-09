@@ -92,8 +92,8 @@ test('stale posted-review + PRs awaiting -> pages once, then debounces', async (
     assert.equal(first.fired, true);
     assert.equal(calls.length, 1);
     const [text, structured] = calls[0];
-    assert.match(text, /reviewer STALLED/);
-    assert.match(text, /4 PR\(s\)/);
+    assert.match(text, /No review posted/);
+    assert.match(text, /4 open PR\(s\)/);
     assert.equal(structured.event, 'adversarial_review.reviewer_stalled');
     assert.equal(structured.payload.pending_review_count, 4);
 

@@ -16,6 +16,7 @@ import { join } from 'node:path';
 
 import {
   assertAlertSinkOwner,
+  alertPresentationForDoc,
   alertSinkRoot,
   deliverAlert,
   drainPendingAlerts,
@@ -35,6 +36,9 @@ function makeEnv(overrides = {}) {
     ALERT_NAME: 'Adversarial Watcher Health Test',
     ALERT_CHANNEL: 'telegram',
     AGENT_OS_GBI_ALERT_BUS_URL: 'http://127.0.0.1:18799/hooks/wake',
+    // Unit tests exercise the legacy transport unless a test deliberately
+    // supplies a canonical-script stub below.
+    AGENT_OS_ALERT_DELIVERY_SCRIPT: '',
     OPENCLAW_HOOKS_TOKEN_FILE: '/secrets/hooks.token',
     ADVERSARIAL_ALERT_DELIVERY_ROOT: rootDir,
     ...overrides,
@@ -45,6 +49,23 @@ function makeEnv(overrides = {}) {
 function sinkPath(rootDir, ...parts) {
   return join(rootDir, 'data', 'alert-delivery', ...parts);
 }
+
+test('only an actual stalled first-pass queue is an immediate page', () => {
+  const page = alertPresentationForDoc({
+    event: 'adversarial_review.reviewer_stalled',
+    payload: { age_ms: 24 * 60_000, pending_review_count: 1 },
+  });
+  const digest = alertPresentationForDoc({
+    event: 'merge_agent.stuck_pre_spawn',
+    text: 'merge work has not started',
+  });
+
+  assert.equal(page.severity, 'SEV1');
+  assert.equal(page.headline, 'Reviews stalled — restore reviewer dispatch');
+  assert.match(page.action, /\/v1\/dispatch/);
+  assert.equal(digest.severity, 'SEV2');
+  assert.equal(digest.headline, 'Merge dispatch delayed — inspect queue');
+});
 
 test('watcher alert defaults require an explicit recipient', () => {
   assert.throws(
@@ -311,10 +332,10 @@ test('recovered bus drains the queued receipt exactly once', async (t) => {
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, 'http://127.0.0.1:18799/hooks/wake');
   assert.deepEqual(calls[0].options.body, {
-    text: 'hammer cap text',
-    message: 'hammer cap text',
-    mode: 'now',
-    wakeMode: 'now',
+    text: 'Review pipeline notice — inspect digest\nhammer cap text',
+    message: 'Review pipeline notice — inspect digest\nhammer cap text',
+    mode: 'digest',
+    wakeMode: 'digest',
     deliver: true,
     channel: 'telegram',
     to: '123456',
@@ -322,11 +343,12 @@ test('recovered bus drains the queued receipt exactly once', async (t) => {
     agentId: 'ops',
     event: 'hammer_lifetime_ceiling_reached',
     payload: { cap: 3 },
-    severity: 'critical',
+    severity: 'warning',
     source: 'adversarial-review',
     metadata: {
       alertId: queued.id,
       event: 'hammer_lifetime_ceiling_reached',
+      deliveryClass: 'digest',
     },
   });
   assert.equal(readAlertSinkHealth({ env }).ready, true);
@@ -446,7 +468,10 @@ test('watcher alerts route through the canonical script (current telegram-direct
   assert.equal(health.deadLetterCount, 0);
   // The canonical script received the alert on stdin in the contract shape.
   const sent = JSON.parse(readFileSync(capturePath, 'utf8'));
-  assert.equal(sent.message, 'watcher.no_progress body');
+  assert.equal(sent.message, 'Review dispatch delayed — monitor queue\nwatcher.no_progress body');
+  assert.equal(sent.metadata.deliveryClass, 'digest');
+  assert.equal(sent.metadata.presentation.severity, 'SEV2');
+  assert.equal(sent.metadata.presentation.headline, 'Review dispatch delayed — monitor queue');
   assert.equal(sent.source, 'watcher.no_progress');
   assert.equal(sent.idempotencyKey, queued.id);
   assert.equal(sent.metadata.alertId, queued.id);
@@ -569,7 +594,10 @@ test('empty canonical alert script override disables real filesystem discovery',
   assert.equal(drained.drained, 1);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, 'http://127.0.0.1:18799/hooks/wake');
-  assert.equal(calls[0].options.body.text, 'isolated legacy bus');
+  assert.equal(
+    calls[0].options.body.text,
+    'Review pipeline notice — inspect digest\nisolated legacy bus'
+  );
   assert.equal(readAlertSinkHealth({ env }).ready, true);
 });
 

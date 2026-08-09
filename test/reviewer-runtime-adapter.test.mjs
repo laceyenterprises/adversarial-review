@@ -94,7 +94,7 @@ function makeHqEnv(hqRoot, overrides = {}) {
   };
 }
 
-function writeFreshSettleSmoke(rootDir, at = '2026-08-02T10:00:00.000Z') {
+function writeFreshSettleSmoke(rootDir, at = new Date().toISOString()) {
   writeSettleSmokeResult(rootDir, 'agent-runtime', {
     status: 'pass',
     at,

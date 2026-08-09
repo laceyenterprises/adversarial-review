@@ -1,6 +1,15 @@
 // Bind a review write to the exact commit the reviewer inspected.  GitHub's
 // normal `gh pr review` command otherwise submits against the current head.
 
+import { normalizeEffectiveReviewVerdict } from './review-verdict.mjs';
+
+function exactHeadReviewEventForBody(reviewBody) {
+  const verdict = normalizeEffectiveReviewVerdict(reviewBody);
+  if (verdict === 'request-changes') return 'REQUEST_CHANGES';
+  if (verdict === 'approved') return 'APPROVE';
+  return 'COMMENT';
+}
+
 function parseExactHeadReviewArtifact(stdout, { repo, prNumber, reviewerHeadSha } = {}) {
   let parsed;
   try {
@@ -33,16 +42,12 @@ async function postExactHeadReview({
     [
       'api', '--method', 'POST', `repos/${repo}/pulls/${prNumber}/reviews`,
       '--raw-field', `body=${reviewBody}`,
-      '--raw-field', 'event=COMMENT',
+      '--raw-field', `event=${exactHeadReviewEventForBody(reviewBody)}`,
       '--raw-field', `commit_id=${reviewerHeadSha}`,
     ],
     { env, maxBuffer: 5 * 1024 * 1024 }
   );
-  return {
-    reviewArtifact: parseExactHeadReviewArtifact(response?.stdout, {
-      repo, prNumber, reviewerHeadSha,
-    }),
-  };
+  return { stdout: response?.stdout };
 }
 
-export { postExactHeadReview };
+export { exactHeadReviewEventForBody, parseExactHeadReviewArtifact, postExactHeadReview };

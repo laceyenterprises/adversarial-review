@@ -76,7 +76,7 @@ import {
   adapterUnsupportedError,
   writeAdapterPullRequestReview,
 } from './github-adapter-client.mjs';
-import { postExactHeadReview } from './reviewer-exact-head-post.mjs';
+import { parseExactHeadReviewArtifact, postExactHeadReview } from './reviewer-exact-head-post.mjs';
 import { GH_LOOKUP_TIMEOUT_MS, execGhWithRetry } from './gh-cli.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -1567,7 +1567,8 @@ function createReviewerPreWriteLogProxy(log = console) {
 // fail, log and continue — the post may still succeed, and a failure here is
 // strictly less bad than the leak it's trying to prevent.
 async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl = execFileAsync, opts = {}) {
-  const sourceEnv = opts.env || process.env; const reviewerHeadSha = String(opts.reviewerHeadSha || '').trim() || null;
+  const sourceEnv = opts.env || process.env;
+  const reviewerHeadSha = String(opts.reviewerHeadSha || '').trim() || null;
   // GMW-06 safety net: a gemini reviewer must never silently mis-post under
   // another identity's token, and the legacy GEMINI_REVIEWER_GH_TOKEN item name
   // must never leak into the runtime. Fails closed with a legible error before
@@ -1618,17 +1619,9 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
     const postResult = await withGhRetry(
       async () => {
         const preWriteLog = createReviewerPreWriteLogProxy(log);
+        // App tokens cannot use GET /user, so pass the known GitHub bot login.
         await prepareReviewWrite({
-          repo,
-          prNumber,
-          token,
-          // The reviewer bot tokens are GitHub App tokens — `GET /user` returns
-          // 403 ("Resource not accessible by integration"), so pass the known
-          // GitHub author login to skip the self-login probe. (PAT path still
-          // falls back to /user when no app/provider identity is supplied.)
-          selfLogin: appSelfLogin,
-          fetchImpl: opts.fetchImpl,
-          log: preWriteLog.log,
+          repo, prNumber, token, selfLogin: appSelfLogin, fetchImpl: opts.fetchImpl, log: preWriteLog.log,
         });
         try {
           await awaitThrottleIfNeeded();
@@ -1645,13 +1638,13 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
             const key = `${botTokenEnv}${suffix}`;
             if (sourceEnv[key] !== undefined) adapterEnv[key] = sourceEnv[key];
           }
-          if (reviewerHeadSha) {
-            return postExactHeadReview({
-              execFileImpl, repo, prNumber, reviewBody, reviewerHeadSha, env: adapterEnv,
-            });
-          }
           let adapterHandled = false;
           try {
+            if (reviewerHeadSha) {
+              return await postExactHeadReview({
+                execFileImpl, repo, prNumber, reviewBody, reviewerHeadSha, env: adapterEnv,
+              });
+            }
             const adapterResult = await writeAdapterPullRequestReview(
               repo,
               prNumber,
@@ -1716,6 +1709,9 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
         isRetryable: (err) => err instanceof ReviewerPostAuthRefreshRetryableError,
       }
     );
+    const exactHeadReviewArtifact = reviewerHeadSha ? parseExactHeadReviewArtifact(postResult?.stdout, {
+      repo, prNumber, reviewerHeadSha,
+    }) : null;
     recordApiCall({
       category: 'review_post',
       repo,
@@ -1723,6 +1719,9 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
       status: 200,
       durationMs: Date.now() - startedAt,
     });
+    if (reviewerHeadSha) {
+      return { reviewArtifact: exactHeadReviewArtifact };
+    }
     return postResult;
   } catch (err) {
     recordApiCall({

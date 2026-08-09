@@ -274,6 +274,161 @@ test('postGitHubReview binds a known reviewed snapshot to GitHub commit_id', asy
   assert.equal(calls[0].options.env.GH_TOKEN, 'ghp_codex_reviewer_pat');
 });
 
+test('postGitHubReview maps exact-head request-changes verdicts to blocking GitHub reviews', async () => {
+  const calls = [];
+  const reviewBody = [
+    '## Summary',
+    'Blocking verdict.',
+    '',
+    '## Blocking issues',
+    '- **Regression**',
+    '  - **Problem:** Unsafe change.',
+    '',
+    '## Verdict',
+    'Request changes',
+  ].join('\n');
+
+  await postGitHubReview(
+    'laceyenterprises/demo',
+    42,
+    reviewBody,
+    'GH_CODEX_REVIEWER_TOKEN',
+    async (command, args, options = {}) => {
+      calls.push({ command, args, options });
+      assert.equal(command, 'gh');
+      return {
+        stdout: JSON.stringify({
+          id: 4242,
+          commit_id: 'reviewed-head-sha',
+        }),
+      };
+    },
+    {
+      env: {
+        GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+        PATH: '/opt/homebrew/bin:/usr/bin',
+        HOME: '/Users/test',
+      },
+      reviewerIdentity: 'codex-reviewer-lacey',
+      reviewerHeadSha: 'reviewed-head-sha',
+      prepareReviewWrite: async () => {},
+    }
+  );
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args.slice(4, 8), [
+    '--raw-field', `body=${reviewBody}`,
+    '--raw-field', 'event=REQUEST_CHANGES',
+  ]);
+});
+
+test('postGitHubReview does not retry exact-head post when response validation fails', async () => {
+  const calls = [];
+  await assert.rejects(
+    postGitHubReview(
+      'laceyenterprises/demo',
+      42,
+      'review body',
+      'GH_CODEX_REVIEWER_TOKEN',
+      async (command, args, options = {}) => {
+        calls.push({ command, args, options });
+        assert.equal(command, 'gh');
+        return {
+          stdout: JSON.stringify({
+            id: 4242,
+            commit_id: 'different-head-sha',
+          }),
+        };
+      },
+      {
+        env: {
+          GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+          PATH: '/opt/homebrew/bin:/usr/bin',
+          HOME: '/Users/test',
+        },
+        reviewerIdentity: 'codex-reviewer-lacey',
+        reviewerHeadSha: 'reviewed-head-sha',
+        prepareReviewWrite: async () => {},
+      }
+    ),
+    /did not confirm review/
+  );
+
+  assert.equal(calls.length, 1);
+});
+
+test('postGitHubReview refreshes token after exact-head auth failure and retries once', async () => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'review-post-exact-head-auth-'));
+  const secretPath = join(rootDir, 'broker-secret');
+  writeFileSync(secretPath, 'shared-secret\n');
+  const calls = [];
+  const prepareTokens = [];
+  try {
+    const result = await postGitHubReview(
+      'laceyenterprises/demo',
+      42,
+      'review body',
+      'GH_CODEX_REVIEWER_TOKEN',
+      async (command, args, options = {}) => {
+        calls.push({ command, args, options });
+        assert.equal(command, 'gh');
+        if (calls.length === 1) {
+          const err = new Error('HTTP 401 Bad credentials');
+          err.stderr = 'gh: Bad credentials (HTTP 401)';
+          throw err;
+        }
+        return {
+          stdout: JSON.stringify({
+            id: 4242,
+            commit_id: 'reviewed-head-sha',
+          }),
+        };
+      },
+      {
+        env: {
+          GH_CODEX_REVIEWER_TOKEN: 'expired-token',
+          OAUTH_BROKER_SHARED_SECRET_FILE: secretPath,
+          OAUTH_BROKER_URL: 'http://broker.test',
+          PATH: '/opt/homebrew/bin:/usr/bin',
+          HOME: '/Users/test',
+        },
+        reviewerIdentity: 'codex-reviewer-lacey',
+        reviewerHeadSha: 'reviewed-head-sha',
+        prepareReviewWrite: async ({ token }) => {
+          prepareTokens.push(token);
+        },
+        fetchImpl: async (url, options = {}) => {
+          assert.equal(url, 'http://broker.test/token?provider=github-app-codex-reviewer');
+          assert.equal(options.headers.Authorization, 'Bearer shared-secret');
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              access_token: 'fresh-token',
+              provider: 'github-app-codex-reviewer',
+              metadata: {},
+              expires_at: '2026-08-09T03:30:00.000Z',
+            }),
+          };
+        },
+        readFileImpl: readFileSync,
+        reviewerTokenFetchTimeoutMs: 1000,
+        log: { warn() {} },
+      }
+    );
+
+    assert.deepEqual(result, {
+      reviewArtifact: { id: '4242', commitId: 'reviewed-head-sha' },
+    });
+    assert.equal(calls.length, 2);
+    assert.deepEqual(prepareTokens, ['expired-token', 'fresh-token']);
+    assert.equal(calls[0].options.env.GH_TOKEN, 'expired-token');
+    assert.equal(calls[1].options.env.GH_TOKEN, 'fresh-token');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('postGitHubReviewWithCapture emits a reviewed attestation for the reviewed head and D3 verdict', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'review-post-attestation-'));
   mkdirSync(join(rootDir, 'data'), { recursive: true });

@@ -167,6 +167,136 @@ test('pull-request-review adapter args bind reviewer login to matching token env
   ]);
 });
 
+test('service-owned label write binds merge-agent env-token auth under the watcher broker signal', async () => {
+  const mod = await importGithubAdapterClientFresh();
+
+  // Without the watcher broker signal, behavior is unchanged (no --auth): this
+  // is the tokenless / test / non-watcher caller path.
+  assert.deepEqual(mod.__test__.makeAdapterWriteArgs('pull-request-label', {
+    repo: FIXTURE_REPO,
+    prNumber: FIXTURE_PR,
+    labelName: 'merge-agent-dispatched',
+    action: 'remove',
+  }, { GITHUB_TOKEN: 'ghs_present_but_no_signal' }), [
+    'write',
+    '--kind',
+    'pull-request-label',
+    '--json',
+    '--repo',
+    FIXTURE_REPO,
+    '--pr-number',
+    String(FIXTURE_PR),
+    '--label',
+    'merge-agent-dispatched',
+    '--action',
+    'remove',
+  ]);
+
+  // With the watcher broker signal + resolved token, the service-owned write
+  // binds env-token auth so the adapter uses the broker token instead of
+  // falling through to gh's ambient keychain (the 401 root cause).
+  assert.deepEqual(mod.__test__.makeAdapterWriteArgs('pull-request-label', {
+    repo: FIXTURE_REPO,
+    prNumber: FIXTURE_PR,
+    labelName: 'merge-agent-dispatched',
+    action: 'remove',
+  }, {
+    WATCHER_GH_AUTH_VIA_BROKER: 'true',
+    WATCHER_GH_BROKER_ROLE: 'merge-agent',
+    GITHUB_TOKEN: 'ghs_broker_merge_agent',
+    GH_TOKEN: 'ghs_broker_merge_agent',
+  }), [
+    'write',
+    '--kind',
+    'pull-request-label',
+    '--json',
+    '--repo',
+    FIXTURE_REPO,
+    '--pr-number',
+    String(FIXTURE_PR),
+    '--label',
+    'merge-agent-dispatched',
+    '--action',
+    'remove',
+    '--auth',
+    'merge-agent',
+    '--auth-mode',
+    'env-token',
+    '--pat-env',
+    'GITHUB_TOKEN',
+    '--pat-env',
+    'GH_TOKEN',
+  ]);
+});
+
+test('service-owned write auth is not suppressed by user values matching auth flag text', async () => {
+  const mod = await importGithubAdapterClientFresh();
+
+  assert.deepEqual(mod.__test__.makeAdapterWriteArgs('issue-comment', {
+    repo: FIXTURE_REPO,
+    prNumber: FIXTURE_PR,
+    body: '--auth',
+  }, {
+    WATCHER_GH_AUTH_VIA_BROKER: 'true',
+    WATCHER_GH_BROKER_ROLE: 'merge-agent',
+    GITHUB_TOKEN: 'ghs_broker_merge_agent',
+  }), [
+    'write',
+    '--kind',
+    'issue-comment',
+    '--json',
+    '--repo',
+    FIXTURE_REPO,
+    '--pr-number',
+    String(FIXTURE_PR),
+    '--body',
+    '--auth',
+    '--auth',
+    'merge-agent',
+    '--auth-mode',
+    'env-token',
+    '--pat-env',
+    'GITHUB_TOKEN',
+    '--pat-env',
+    'GH_TOKEN',
+  ]);
+});
+
+test('merge write and reviewer writes are left on their existing auth paths', async () => {
+  const mod = await importGithubAdapterClientFresh();
+
+  const watcherEnv = {
+    WATCHER_GH_AUTH_VIA_BROKER: 'true',
+    WATCHER_GH_BROKER_ROLE: 'merge-agent',
+    GITHUB_TOKEN: 'ghs_broker_merge_agent',
+    GH_TOKEN: 'ghs_broker_merge_agent',
+  };
+
+  // The load-bearing merge write keeps its existing ambient-attempt +
+  // fast-merge `gh --admin` fallback path: no service auth injected.
+  const mergeArgs = mod.__test__.makeAdapterWriteArgs('pull-request-merge', {
+    repo: FIXTURE_REPO,
+    prNumber: FIXTURE_PR,
+    matchHeadCommit: 'sha-A',
+    mergeMethod: 'squash',
+    deleteBranch: true,
+    admin: true,
+  }, watcherEnv);
+  assert.equal(mergeArgs.includes('--auth'), false);
+
+  // A write that already carries reviewer identity keeps its reviewer auth and
+  // is not overridden by the merge-agent service auth.
+  const reviewArgs = mod.__test__.makeAdapterWriteArgs('pull-request-review', {
+    repo: FIXTURE_REPO,
+    prNumber: FIXTURE_PR,
+    body: 'review body',
+    reviewerLogin: 'codex-reviewer-lacey',
+  }, watcherEnv);
+  const authIdx = reviewArgs.indexOf('--auth');
+  assert.notEqual(authIdx, -1);
+  assert.equal(reviewArgs[authIdx + 1], 'codex-reviewer');
+});
+
 function makeExpectedRollup() {
   return {
     id: 'PR_kwDOA1',

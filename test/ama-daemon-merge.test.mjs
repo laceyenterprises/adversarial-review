@@ -276,7 +276,7 @@ test('clean + eligible dismisses stale Request changes before merge', async () =
   assert.equal(dismissals[0].head, HEAD);
 });
 
-test('dismissal failure is fail-open for daemon merge and audited', async () => {
+test('dismissal failure is fail-open for daemon merge without terminal audit outcome', async () => {
   const logs = [];
   const h = makeHarness({ mergeResults: [{ exitCode: 0 }] });
   h.deps.logger = {
@@ -294,11 +294,10 @@ test('dismissal failure is fail-open for daemon merge and audited', async () => 
   assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
   assert.equal(h.calls.merge, 1);
   assert.ok(logs.some((line) => line.includes('"event":"ama.stale_request_changes.dismissal"') && line.includes('"ok":false')));
-  assert.ok(h.calls.auditAppends.some((entry) => (
-    entry.attempt.attemptPhase === 'pre-merge-review-dismissal' &&
-    entry.attempt.failOpenForMerge === true &&
-    entry.attempt.reviewId === 'review-rc'
-  )));
+  assert.ok(!h.calls.auditAppends.some((entry) => entry.attempt.attemptPhase === 'pre-merge-review-dismissal'));
+  const doc = h.auditStore.get('o/r#7@' + HEAD);
+  assert.equal(doc.status, 'succeeded');
+  assert.ok(!doc.attempts.some((attempt) => attempt.attemptPhase === 'pre-merge-review-dismissal'));
 });
 
 test('blocking findings do not trigger stale Request changes dismissal', async () => {

@@ -358,7 +358,7 @@ test('postGitHubReviewWithCapture dismisses prior request-changes after clean ex
 
     const dismissalCall = calls.find((call) => call.args.join(' ').includes('/reviews/9001/dismissals'));
     assert.ok(dismissalCall);
-    assert.ok(dismissalCall.args.includes('event=DISMISS'));
+    assert.ok(!dismissalCall.args.includes('event=DISMISS'));
     assert.equal(dismissalCall.options.env.GH_TOKEN, 'ghp_codex_reviewer_pat');
     assert.equal(calls.filter((call) => call.args.join(' ').includes('/dismissals')).length, 1);
   } finally {

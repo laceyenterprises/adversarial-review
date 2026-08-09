@@ -625,27 +625,6 @@ export async function attemptDaemonCleanMerge({
             : [],
           failOpenForMerge: true,
         }));
-        try {
-          appendAuditImpl({
-            ...auditKeys,
-            attempt: {
-              outcome: 'deferred',
-              path: closureAuthority,
-              attemptPhase: 'pre-merge-review-dismissal',
-              validatedHead,
-              reason: 'stale-request-changes-dismissal-failed',
-              error: String(err?.message || err),
-              reviewId: err?.review?.id || null,
-              failOpenForMerge: true,
-            },
-            now: now(),
-          });
-        } catch (auditErr) {
-          logger?.warn?.(
-            `[daemon-merge] stale Request changes dismissal failure audit append failed for ` +
-              `${repo}#${prNumber}@${String(validatedHead || '').slice(0, 12)}: ${auditErr?.message || auditErr}`,
-          );
-        }
       }
     }
 

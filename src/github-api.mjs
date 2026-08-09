@@ -1116,8 +1116,6 @@ async function dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo,
           `repos/${repo}/pulls/${normalizedPrNumber}/reviews/${review.id}/dismissals`,
           '-f',
           `message=${dismissalMessage}`,
-          '-f',
-          'event=DISMISS',
         ],
         env: dismissalEnv,
       });

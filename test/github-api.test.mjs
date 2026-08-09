@@ -1677,7 +1677,7 @@ test('dismissStandingChangesRequestedReviewsForHead dismisses only authoritative
   assert.equal(dismissCalls.length, 1);
   assert.match(dismissCalls[0].args.join(' '), /reviews\/101\/dismissals/);
   assert.ok(dismissCalls[0].args.includes('message=resolved by remediation abc123'));
-  assert.ok(dismissCalls[0].args.includes('event=DISMISS'));
+  assert.ok(!dismissCalls[0].args.includes('event=DISMISS'));
 });
 
 test('dismissStandingChangesRequestedReviewsForHead retries transient gh dismissal failures', async () => {

@@ -2395,6 +2395,7 @@ test('SEV1: clean stale-head closer commit with unknown worker identity merges u
   try {
     let mergeAttempted = false;
     let seen = null;
+    let suppressionHead = null;
     const logs = [];
     const result = await runDaemonCleanMergeAttempt({
       ...unattributedDaemonArgs({ rootDir, prNumber: 910, head: 'closer-clean-head-910' }),
@@ -2410,11 +2411,14 @@ test('SEV1: clean stale-head closer commit with unknown worker identity merges u
       },
       currentPrHeadSha: 'closer-clean-head-910',
       logger: { warn() {}, log: (m) => logs.push(String(m)) },
-      resolveHeadCloserCommitSuppressionImpl: async () => ({
-        suppressed: true,
-        reason: 'closer-commit-identity',
-        matched: 'the-hammer-lacey[bot]',
-      }),
+      resolveHeadCloserCommitSuppressionImpl: async ({ headSha }) => {
+        suppressionHead = headSha;
+        return {
+          suppressed: true,
+          reason: 'closer-commit-identity',
+          matched: 'the-hammer-lacey[bot]',
+        };
+      },
       attemptDaemonCleanMergeImpl: async (args) => {
         mergeAttempted = true;
         seen = args;
@@ -2424,6 +2428,7 @@ test('SEV1: clean stale-head closer commit with unknown worker identity merges u
 
     assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
     assert.equal(mergeAttempted, true, 'this is the prior stash-and-fail point: old code parked before merge');
+    assert.equal(suppressionHead, 'closer-clean-head-910');
     assert.equal(seen.validatedHead, 'closer-clean-head-910');
     assert.equal(seen.verdict, 'settled-success');
     assert.equal(seen.auditMetadata.closureAuthority, 'daemon-autonomous-closer-commit-clean');

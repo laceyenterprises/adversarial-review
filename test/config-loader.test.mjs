@@ -4398,6 +4398,7 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
           merge_authority:
             enabled: false
             autonomous_merge_execution_enabled: false
+            autonomous_closer_commit_clean_merge_enabled: false
             strict_mode: false
             lha:
               consume_attestations: false
@@ -4419,6 +4420,7 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('roles.adversarial.merge_authority.enabled'), false);
     assert.equal(cfg.get('roles.adversarial.merge_authority.autonomous_merge_execution_enabled'), false);
+    assert.equal(cfg.get('roles.adversarial.merge_authority.autonomous_closer_commit_clean_merge_enabled'), false);
     assert.equal(cfg.get('roles.adversarial.merge_authority.strict_mode'), false);
     assert.equal(cfg.get('roles.adversarial.merge_authority.lha.consume_attestations'), false);
     assert.equal(cfg.get('roles.adversarial.merge_authority.hammer_lifetime_ceiling'), 3);
@@ -4426,6 +4428,7 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
     assert.equal(cfg.get('roles.adversarial.merge_authority.merge_method'), 'squash');
     assert.equal(cfg.get('roles.adversarial.merge_authority.strict_non_blocking_remediation'), false);
     assert.equal(cfg.getMergeAuthorityConfig().autonomousMergeExecutionEnabled, false);
+    assert.equal(cfg.getMergeAuthorityConfig().autonomousCloserCommitCleanMergeEnabled, false);
     assert.equal(cfg.getMergeAuthorityConfig().strictMode, false);
     assert.equal(cfg.getMergeAuthorityConfig().lha.consumeAttestations, false);
     assert.equal(cfg.getMergeAuthorityConfig().hammerLifetimeDispatchCeiling, 3);
@@ -4465,6 +4468,7 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
       topPath: top,
       env: {
         AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_AUTONOMOUS_MERGE_EXECUTION_ENABLED: 'true',
+        AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_AUTONOMOUS_CLOSER_COMMIT_CLEAN_MERGE_ENABLED: 'true',
         AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_STRICT_MODE: 'true',
         AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_LHA_CONSUME_ATTESTATIONS: 'true',
       },
@@ -4473,6 +4477,11 @@ test('AMA merge_authority spec YAML and env aliases load through strict Node sch
       envFlagCfg.get('roles.adversarial.merge_authority.autonomous_merge_execution_enabled'),
       true,
     );
+    assert.equal(
+      envFlagCfg.get('roles.adversarial.merge_authority.autonomous_closer_commit_clean_merge_enabled'),
+      true,
+    );
+    assert.equal(envFlagCfg.getMergeAuthorityConfig().autonomousCloserCommitCleanMergeEnabled, true);
     assert.equal(envFlagCfg.get('roles.adversarial.merge_authority.strict_mode'), true);
     assert.equal(envFlagCfg.get('roles.adversarial.merge_authority.lha.consume_attestations'), true);
     assert.equal(envFlagCfg.getMergeAuthorityConfig().lha.consumeAttestations, true);

@@ -107,16 +107,6 @@ export function resolveOperatorMergeAccountability({
   return null;
 }
 
-function featureFlagEnabled(value, defaultValue = true) {
-  if (value === undefined || value === null) return defaultValue;
-  if (typeof value === 'boolean') return value;
-  const normalized = String(value).trim().toLowerCase();
-  if (!normalized) return defaultValue;
-  if (['0', 'false', 'off', 'no', 'disabled'].includes(normalized)) return false;
-  if (['1', 'true', 'on', 'yes', 'enabled'].includes(normalized)) return true;
-  return defaultValue;
-}
-
 export function resolveAutonomousCloserCommitAccountability({
   enabled = true,
   reviewedHeadSha,
@@ -124,7 +114,7 @@ export function resolveAutonomousCloserCommitAccountability({
   suppression = null,
   workerIdentityReason = 'worker-identity-unresolved',
 } = {}) {
-  if (!featureFlagEnabled(enabled, true)) return null;
+  if (enabled === false) return null;
   const reviewedHead = String(reviewedHeadSha || '').trim();
   const mergeHead = String(mergeHeadSha || '').trim();
   if (!reviewedHead || !mergeHead || reviewedHead === mergeHead) return null;
@@ -430,28 +420,6 @@ export async function runDaemonCleanMergeAttempt({
     ) {
       return NOT_TAKEN(uncleanReason);
     }
-  } else if (
-    featureFlagEnabled(cfg?.autonomousCloserCommitCleanMergeEnabled, true) &&
-    String(validatedHead || '').trim() &&
-    String(hamAuditHead || '').trim() &&
-    String(validatedHead || '').trim() !== String(hamAuditHead || '').trim() &&
-    SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict)
-  ) {
-    try {
-      cleanCloserCommitSuppression = await resolveHeadCloserCommitSuppressionImpl({
-        repoPath,
-        prNumber,
-        headSha: hamAuditHead,
-        logger,
-      });
-    } catch (err) {
-      logger?.warn?.(
-        `[watcher] AMA daemon clean closer-commit proof failed for ` +
-          `${repoPath}#${prNumber}@${String(hamAuditHead || '').slice(0, 12)}; ` +
-          `not certifying stale clean review: ${err?.message || err}`,
-      );
-      cleanCloserCommitSuppression = null;
-    }
   }
   let liveRollup = null;
   try {
@@ -498,6 +466,28 @@ export async function runDaemonCleanMergeAttempt({
       snapshotHead,
       liveHead,
     };
+  }
+  if (
+    cfg?.autonomousCloserCommitCleanMergeEnabled !== false &&
+    String(validatedHead || '').trim() &&
+    String(validatedHead || '').trim() !== liveHead &&
+    SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict)
+  ) {
+    try {
+      cleanCloserCommitSuppression = await resolveHeadCloserCommitSuppressionImpl({
+        repoPath,
+        prNumber,
+        headSha: liveHead,
+        logger,
+      });
+    } catch (err) {
+      logger?.warn?.(
+        `[watcher] AMA daemon clean closer-commit proof failed for ` +
+          `${repoPath}#${prNumber}@${liveHead.slice(0, 12)}; ` +
+          `not certifying stale clean review: ${err?.message || err}`,
+      );
+      cleanCloserCommitSuppression = null;
+    }
   }
   // The MSM-02 predicate clears the verdict gate only for the normalized
   // `settled-success` token; a settled-success review verdict maps to it, and
@@ -599,20 +589,18 @@ export async function runDaemonCleanMergeAttempt({
       );
     }
   }
-  // Merge the AUDIT-VERIFIED head, never the freshly-fetched `liveHead`. Handing
-  // `liveHead` to `attemptDaemonCleanMerge` as `validatedHead` would collapse its
-  // head-match protection into `liveHead === liveHead` — always true — so any
-  // commit that landed after the audit check above would merge unvalidated.
-  // Passing `hamAuditHead` keeps that assertion a real comparison: a head that
-  // moved between the audit check and the merge fails head-match and declines.
-  // Both non-clean certifications (HAM terminal-remediation and head-closer
-  // self-cert) pin the merge to the AUDIT-CHECKED current head, never the stale
-  // reviewed head — see the head-moved guard above. The head-closer lane keeps the
-  // real settled-success verdict (it is a settled comment-only / approved review),
-  // only the HAM lane swaps in the ham_terminal_remediation_validated token.
+  // HAM / non-blocking head-closer certifications merge the audit-checked
+  // snapshot head. The autonomous clean closer lane is proven against the
+  // refreshed live head above, after the same head-moved guard has ruled out a
+  // snapshot mismatch, so it must pass that proven closer head to the merge
+  // executor rather than a HAM audit head that may be absent or stale.
   const certifiedNonCleanHead = hamTerminalRemediationHead || headCloserCertifiedNonBlocking;
   const autonomousCloserCommitCleanHead = Boolean(cleanCloserCommitAccountability);
-  const daemonValidatedHead = (certifiedNonCleanHead || autonomousCloserCommitCleanHead) ? hamAuditHead : validatedHead;
+  const daemonValidatedHead = certifiedNonCleanHead
+    ? hamAuditHead
+    : autonomousCloserCommitCleanHead
+      ? liveHead
+      : validatedHead;
   const daemonVerdict = hamTerminalRemediationHead
     ? 'ham_terminal_remediation_validated'
     : settledVerdict;
@@ -762,5 +750,4 @@ export async function runDaemonCleanMergeAttempt({
 // Internal helpers exposed for unit tests.
 export const __testables__ = Object.freeze({
   resolveRollupRequiredChecks,
-  featureFlagEnabled,
 });

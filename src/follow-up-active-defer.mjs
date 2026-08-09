@@ -64,10 +64,11 @@ function resolveFollowUpStuckThresholdMs() {
 
 function resolveLatestFollowUpObservedAtMs(latest) {
   const job = latest?.job;
+  const worker = job?.worker || job?.remediationWorker || {};
   const candidates = [
     ['lastWorkerArtifactProgressAt', job?.lastWorkerArtifactProgressAt],
     ['lastHeartbeatAt', job?.lastHeartbeatAt],
-    ['remediationWorker.spawnedAt', job?.remediationWorker?.spawnedAt],
+    ['worker.spawnedAt', worker?.spawnedAt],
     ['claimedAt', job?.claimedAt],
   ];
   let newest = null;
@@ -98,7 +99,8 @@ function stopStaleInProgressFollowUpJob({
   if (!['in_progress', 'inProgress', 'in-progress'].includes(String(job?.status || ''))) {
     return null;
   }
-  if (job?.remediationWorker?.dispatchMode === 'hq') {
+  const worker = job?.worker || job?.remediationWorker || {};
+  if (worker?.dispatchMode === 'hq') {
     return null;
   }
   const { sourceMs, source } = resolveLatestFollowUpObservedAtMs(latest);
@@ -123,7 +125,7 @@ function stopStaleInProgressFollowUpJob({
     stopReason,
     sourceStatus: job.status,
     remediationWorker: {
-      ...(job?.remediationWorker || {}),
+      ...worker,
       state: 'reclaimed-stale-heartbeat',
       reclaimedAt: stoppedAt,
       reclaimReason: STALE_HEARTBEAT_STOP_CODE,
@@ -138,15 +140,18 @@ function shouldDeferReviewForActiveFollowUp({
   repo,
   prNumber,
   latestJobFinder = findLatestFollowUpJob,
+  budgetSweepImpl = stopBudgetExhaustedPendingFollowUpJob,
   staleClaimSweepImpl = stopStaleInProgressFollowUpJob,
+  markStoppedImpl = followUpJobs.markFollowUpJobStopped,
   nowMs = Date.now(),
 }) {
   let latest = latestJobFinder(rootDir, { repo, prNumber });
-  const budgetStopped = stopBudgetExhaustedPendingFollowUpJob({
+  const budgetStopped = typeof budgetSweepImpl === 'function' ? budgetSweepImpl({
     rootDir,
     latest,
     stoppedAt: new Date(nowMs).toISOString(),
-  });
+    markStoppedImpl,
+  }) : null;
   if (budgetStopped) {
     return {
       defer: false,

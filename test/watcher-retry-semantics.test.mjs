@@ -776,7 +776,10 @@ test('watcher releases stale in-progress follow-up claims through the stuck-clai
   assert.equal(decision.releaseReason, 'stale-heartbeat');
   assert.equal(existsSync(spawned.jobPath), false, 'stale claim was removed from in-progress/');
   const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(spawned.jobPath));
-  assert.equal(readFollowUpJob(stoppedPath).remediationPlan?.stop?.code, 'stale-heartbeat');
+  const stoppedJob = readFollowUpJob(stoppedPath);
+  assert.equal(stoppedJob.remediationPlan?.stop?.code, 'stale-heartbeat');
+  assert.equal(stoppedJob.remediationWorker?.state, 'reclaimed-stale-heartbeat');
+  assert.equal(stoppedJob.remediationPlan?.rounds?.at(-1)?.worker?.state, 'reclaimed-stale-heartbeat');
 });
 
 test('watcher stale follow-up release uses the newest liveness timestamp before stopping', () => {
@@ -861,6 +864,53 @@ test('watcher active follow-up defer defaults to the repository root, not proces
   } finally {
     process.chdir(previousCwd);
   }
+});
+
+test('watcher active follow-up defer accepts injected budget stop implementation', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-budget-injected-'));
+  const jobPath = path.join(rootDir, 'mock-budget-exhausted.json');
+  const stoppedCalls = [];
+  const decision = shouldDeferReviewForActiveFollowUpDirect({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5114,
+    latestJobFinder() {
+      return {
+        job: {
+          status: 'pending',
+          jobId: 'budget-exhausted-fixture',
+          remediationPlan: {
+            currentRound: 2,
+            maxRounds: 2,
+          },
+        },
+        jobPath,
+      };
+    },
+    markStoppedImpl(args) {
+      stoppedCalls.push(args);
+      return {
+        jobPath: args.jobPath,
+        job: {
+          status: 'stopped',
+          jobId: 'budget-exhausted-fixture',
+          remediationPlan: {
+            stop: { code: args.stopCode },
+          },
+        },
+      };
+    },
+    staleClaimSweepImpl: null,
+    nowMs: Date.parse('2026-08-09T09:00:00.000Z'),
+  });
+
+  assert.equal(decision.defer, false);
+  assert.equal(decision.latestJobStatus, 'stopped');
+  assert.equal(decision.releaseReason, 'max-rounds-reached');
+  assert.equal(stoppedCalls.length, 1);
+  assert.equal(stoppedCalls[0].jobPath, jobPath);
+  assert.equal(stoppedCalls[0].stopCode, 'max-rounds-reached');
+  assert.equal(existsSync(jobPath), false, 'mock budget stop must not invoke the real disk mutator');
 });
 
 test('watcher defer + operator bumpRemediationBudget + retrigger-remediation eligibility all agree on every active-status spelling (cross-module agreement)', async () => {

@@ -2773,7 +2773,14 @@ export async function maybeDispatchAmaCloser({
       // Log-feed noise control: this branch re-evaluates the same ineligible PR
       // every tick. Log once per (repo, pr, head, reasons) transition instead of
       // every poll; a new head or changed reasons still logs.
-      const autoHammerGateKey = `${dispatchContext?.repo ?? 'unknown'}#${prNumber}`;
+      const autoHammerGateRepo =
+        prMetadata?.repoPath ||
+        prMetadata?.repo ||
+        prMetadata?.base?.repo?.full_name ||
+        prMetadata?.head?.repo?.full_name ||
+        dispatchContext?.repo ||
+        'unknown';
+      const autoHammerGateKey = `${autoHammerGateRepo}#${prNumber}`;
       const autoHammerSignature =
         `${prMetadata?.headSha ?? ''}#${(routeReasons || []).join(',')}`;
       if (logGate.note(autoHammerGateKey, autoHammerSignature).changed) {

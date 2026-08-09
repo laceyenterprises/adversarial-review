@@ -213,6 +213,39 @@ test('LCR: forced terminal-remediation prompt dispatches with --priority normal 
   );
 });
 
+test('LCR: auto-hammer log gate keys on PR metadata repo before dispatch context fallback', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'lcr-auto-hammer-gate-key-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const deps = testDeps();
+  const gateNotes = [];
+
+  const result = await maybeDispatchAmaCloser({
+    ...cleanValidateAndClickArgs(rootDir, {
+      prMetadata: {
+        repoPath: 'acme/pr-metadata-repo',
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: REQUIRED_GATE, conclusion: 'SUCCESS' },
+          { __typename: 'CheckRun', name: 'ci/test', conclusion: 'FAILURE' },
+        ],
+        branchProtection: { requiredContexts: [REQUIRED_GATE, 'ci/test'] },
+      },
+      dispatchContext: {
+        repo: 'acme/dispatch-context-repo',
+      },
+    }),
+    ...deps,
+    logGate: {
+      note(key, signature) {
+        gateNotes.push({ key, signature });
+        return { changed: true, count: 1, suppressedSincePrevious: 0 };
+      },
+    },
+  });
+
+  assert.equal(result.dispatched, true, 'a clean verdict with red required CI should auto-hammer');
+  assert.equal(gateNotes[0]?.key, 'acme/pr-metadata-repo#404');
+});
+
 test('LCR: --priority precedes the base dispatch args and is emitted exactly once', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'lcr-priority-shape-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

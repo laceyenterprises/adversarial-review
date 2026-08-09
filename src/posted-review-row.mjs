@@ -198,17 +198,23 @@ export async function handlePostedReviewRow({
     if (coexistenceDecision.outcome === 'ama-pending') {
       const { amaClosureResult } = coexistenceDecision;
       // Log-feed noise control: this route retains ownership and re-polls a
-      // stuck PR every tick. Log once per (repo, pr, head, reason) transition
-      // instead of every poll; a new head or a changed reason still logs.
+      // stuck PR every tick. Log once per retained-worker state transition
+      // instead of every poll; a new head/reason/worker identity still logs.
       const retainGateKey = `${repoPath}#${prNumber}`;
       const retainSignature =
-        `${currentRevisionRef || ''}#${amaClosureResult.reason || 'ama-dispatch-pending'}`;
-      if (logGate.note(retainGateKey, retainSignature).changed) {
+        `${currentRevisionRef || ''}#${amaClosureResult.reason || 'ama-dispatch-pending'}` +
+        `#${amaClosureResult.launchRequestId || ''}#${amaClosureResult.dispatchId || ''}` +
+        `#${amaClosureResult.workerClass || ''}`;
+      const retainDecision = logGate.note(retainGateKey, retainSignature);
+      if (retainDecision.changed) {
+        const suppressedNote = retainDecision.suppressedSincePrevious > 0
+          ? ` (after ${retainDecision.suppressedSincePrevious} suppressed identical polls)`
+          : '';
         logger.log(
           `[watcher] AMA hammer route retained ownership for ${repoPath}#${prNumber}: ` +
           `${amaClosureResult.reason || 'ama-dispatch-pending'} ` +
           `lrq=${amaClosureResult.launchRequestId || amaClosureResult.dispatchId || 'unknown'} ` +
-          `workerClass=${amaClosureResult.workerClass || 'unknown'}`
+          `workerClass=${amaClosureResult.workerClass || 'unknown'}${suppressedNote}`
         );
       }
       return;

@@ -64,3 +64,27 @@ test('createLogChangeGate: any transition is visible, including a return to a pr
   assert.equal(gate.note('k', 'b').changed, true);
   assert.equal(gate.note('k', 'a').changed, true); // transitions always log
 });
+
+test('createLogChangeGate: evicts least-recently-used keys when the gate reaches its limit', () => {
+  const gate = createLogChangeGate({ maxEntries: 2 });
+
+  assert.equal(gate.note('a', 's').changed, true);
+  assert.equal(gate.note('b', 's').changed, true);
+  assert.equal(gate.note('a', 's').changed, false); // refreshes a, making b oldest
+
+  assert.equal(gate.note('c', 's').changed, true);
+  assert.equal(gate.size(), 2);
+  assert.equal(gate.note('b', 's').changed, true); // b was evicted and re-armed
+  assert.equal(gate.size(), 2);
+});
+
+test('createLogChangeGate: rejects invalid maxEntries values', () => {
+  assert.throws(
+    () => createLogChangeGate({ maxEntries: 0 }),
+    /maxEntries must be a positive integer/
+  );
+  assert.throws(
+    () => createLogChangeGate({ maxEntries: 1.5 }),
+    /maxEntries must be a positive integer/
+  );
+});

@@ -1923,7 +1923,6 @@ const MERGE_AGENT_CANCEL_TERMINAL_DISPATCH_STATUSES = new Set([
 // work on disk and replays it on later ticks even after the PR leaves
 // the open-set query.
 const followUpMergeAgentLogGate = createLogChangeGate();
-
 async function cancelMergeAgentDispatchOnMerge({
   rootDir,
   repo,
@@ -1977,27 +1976,12 @@ async function cancelMergeAgentDispatchOnMerge({
         });
         result.cancelled = true;
       } catch (err) {
-        // Use formatExecFailure so stderr+stdout surface in the
-        // log. Without it, every cancel failure logged as the bare
-        // exec wrapper text — "Command failed: hq dispatch cancel
-        // lrq_…" — with the actual cause invisible. Concrete
-        // 2026-05-19 incident: `hq dispatch cancel` for an
-        // already-terminal LRQ exits non-zero with the explanation
-        // {"ok":false,"reason":"already terminal (status=failed)"}
-        // on STDOUT (not stderr). The watcher's retry-loop log then
-        // claimed retryable=true indefinitely because the actual
-        // contract was never surfaced. Also stash structured
-        // stderr/stdout on the result so the terminal-classifier
-        // below can read structured output, not just message text.
+        // Preserve stderr/stdout for terminal classification; already-terminal
+        // LRQs can explain the non-zero cancel on stdout, not stderr.
         const formatted = formatExecFailure('hq dispatch cancel', err);
         result.cancelError = formatted.message;
         result.cancelStderr = err?.stderr ? String(err.stderr) : null;
         result.cancelStdout = err?.stdout ? String(err.stdout) : null;
-        // Log-feed noise control: an already-terminal LRQ makes best-effort
-        // cancel fail on every tick. This is expected and non-actionable, so
-        // emit it at debug rather than warn. The terminal-classifier below
-        // still converges the cleanup and the structured result fields
-        // (cancelError/cancelStderr/cancelStdout) are unchanged.
         console.debug(
           `[follow-up-merge-agent] best-effort cancel of merge-agent dispatch ${latest.launchRequestId} for ${repo}#${prNumber} failed: ${result.cancelError}`
         );
@@ -2093,15 +2077,8 @@ async function cancelMergeAgentDispatchOnMerge({
       if (isLabelAlreadyAbsentError(err)) {
         result.labelRemoved = true;
       } else {
-        // Log-feed noise control: this cleanup runs every tick for a stuck
-        // merged PR, so re-warning identically each poll floods the feed. Warn
-        // only on the first occurrence or when the failure detail changes, and
-        // note how many identical failures were suppressed since the last emit.
         const removeFailureKey = `${repo}#${prNumber}`;
-        const removeFailureDecision = logGate.note(
-          removeFailureKey,
-          String(result.labelRemovalError),
-        );
+        const removeFailureDecision = logGate.note(removeFailureKey, String(result.labelRemovalError));
         if (removeFailureDecision.changed) {
           const suppressedNote = removeFailureDecision.suppressedSincePrevious > 0
             ? ` (after ${removeFailureDecision.suppressedSincePrevious} suppressed identical failures)`

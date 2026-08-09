@@ -13,8 +13,30 @@
 // so a caller can surface a running count when the state finally changes -
 // without per-poll spam. It NEVER changes caller behavior: it only decides
 // whether a given log line is emitted on this tick.
-export function createLogChangeGate() {
+export const DEFAULT_LOG_CHANGE_GATE_MAX_ENTRIES = 4096;
+
+function normalizeMaxEntries(maxEntries) {
+  if (!Number.isInteger(maxEntries) || maxEntries < 1) {
+    throw new TypeError('createLogChangeGate maxEntries must be a positive integer');
+  }
+  return maxEntries;
+}
+
+export function createLogChangeGate({
+  maxEntries = DEFAULT_LOG_CHANGE_GATE_MAX_ENTRIES,
+} = {}) {
+  const entryLimit = normalizeMaxEntries(maxEntries);
   const lastByKey = new Map();
+
+  function refreshKey(key, value) {
+    lastByKey.delete(key);
+    lastByKey.set(key, value);
+    while (lastByKey.size > entryLimit) {
+      const oldestKey = lastByKey.keys().next().value;
+      lastByKey.delete(oldestKey);
+    }
+  }
+
   return {
     /**
      * Record an observation for `key` with an opaque `signature` describing the
@@ -32,10 +54,11 @@ export function createLogChangeGate() {
       const prev = lastByKey.get(key);
       if (!prev || prev.signature !== signature) {
         const suppressedSincePrevious = prev ? prev.count - 1 : 0;
-        lastByKey.set(key, { signature, count: 1 });
+        refreshKey(key, { signature, count: 1 });
         return { changed: true, count: 1, suppressedSincePrevious };
       }
       prev.count += 1;
+      refreshKey(key, prev);
       return { changed: false, count: prev.count, suppressedSincePrevious: 0 };
     },
     /** Forget a key (e.g. once the underlying PR/repo state resolves). */

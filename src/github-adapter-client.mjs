@@ -279,7 +279,40 @@ function appendReviewerAuthAdapterArgs(args, reviewerLogin) {
   return args;
 }
 
-function makeAdapterWriteArgs(kind, params = {}) {
+// Watcher/merge-agent-owned writes (labels, commit-status) carry no reviewer
+// identity, so appendReviewerAuthAdapterArgs never binds a token for them.
+// Without an explicit --auth selector the adapter defaults to the fixture
+// selector, whose gh-cli transport strips ambient GH_TOKEN/GITHUB_TOKEN and only
+// re-injects an explicitly-resolved auth token. The write therefore falls
+// through to `gh`'s ambient keychain, which is invalid in the headless launchd
+// watcher session -> HTTP 401 on api.github.com/graphql (observed ~1k/tick on
+// stuck `merge-agent-dispatched` label cleanups; auth:{mode:ambient-gh,
+// selector:default}, source:gh-cli).
+//
+// The watcher start script resolves a broker-backed App installation token into
+// GITHUB_TOKEN/GH_TOKEN (WATCHER_GH_AUTH_VIA_BROKER=true, role
+// WATCHER_GH_BROKER_ROLE, default merge-agent) and refreshes it per tick. When
+// that explicit signal is present, bind these service-owned writes to env-token
+// auth so the adapter uses the already-resolved broker token instead of
+// discarding it. Gated on the watcher signal (never on ambient process.env) so
+// tests and tokenless callers are unaffected, skipped when reviewer auth is
+// already bound, and deliberately NOT applied to `pull-request-merge` so the
+// load-bearing merge write keeps its existing ambient-attempt + fast-merge
+// `gh --admin` fallback path untouched.
+function appendMergeAgentServiceAuthAdapterArgs(args, kind, env = {}) {
+  if (args.includes('--auth')) return args;
+  if (kind === 'pull-request-merge') return args;
+  if (String(env?.WATCHER_GH_AUTH_VIA_BROKER || '').trim().toLowerCase() !== 'true') return args;
+  const hasServiceToken = Boolean(
+    String(env?.GITHUB_TOKEN || '').trim() || String(env?.GH_TOKEN || '').trim()
+  );
+  if (!hasServiceToken) return args;
+  const selector = String(env?.WATCHER_GH_BROKER_ROLE || '').trim() || 'merge-agent';
+  args.push('--auth', selector, '--auth-mode', 'env-token', '--pat-env', 'GITHUB_TOKEN', '--pat-env', 'GH_TOKEN');
+  return args;
+}
+
+function makeAdapterWriteArgs(kind, params = {}, env = {}) {
   const args = ['write', '--kind', kind, '--json'];
   appendCommonAdapterArgs(args, params);
   if (params.body !== undefined) args.push('--body', String(params.body));
@@ -293,6 +326,7 @@ function makeAdapterWriteArgs(kind, params = {}) {
   if (params.mergeMethod !== undefined) args.push('--merge-method', String(params.mergeMethod));
   if (params.deleteBranch !== undefined) args.push(params.deleteBranch ? '--delete-branch' : '--no-delete-branch');
   if (params.admin === true) args.push('--admin');
+  appendMergeAgentServiceAuthAdapterArgs(args, kind, env);
   return args;
 }
 
@@ -344,7 +378,7 @@ async function writeGitHubAdapter(kind, params = {}, {
   }
   const adapterBin = resolveGitHubAdapterBin({ env, rootDir });
   if (!adapterBin) return null;
-  const { stdout } = await execFileImpl(adapterBin, makeAdapterWriteArgs(kind, params), {
+  const { stdout } = await execFileImpl(adapterBin, makeAdapterWriteArgs(kind, params, env), {
     maxBuffer: ADAPTER_MAX_BUFFER,
     timeout: ADAPTER_TIMEOUT_MS,
     env: buildAdapterEnv(env),
@@ -495,6 +529,7 @@ const __test__ = {
   buildAdapterEnv,
   candidateSuperprojectAdapterPaths,
   appendReviewerAuthAdapterArgs,
+  appendMergeAgentServiceAuthAdapterArgs,
   isTrustedAutoDiscoveredAdapterBin,
   makeAdapterArgs,
   makeAdapterWriteArgs,

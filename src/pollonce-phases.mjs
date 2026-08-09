@@ -771,8 +771,31 @@ export async function processReviewSubject(entry, ctx) {
         rootDir: ROOT,
         repoPath,
         prNumber,
+        currentRow: existing,
+        headSha: subject.headSha || subject.ref.revisionRef || null,
         afhGrounding,
       });
+
+      if (route.reviewerModelFallback) {
+        console.warn(
+          `[watcher] reviewer-model-fallback repo=${repoPath} pr=${prNumber} ` +
+            `head=${route.reviewerModelFallback.headSha || '<unknown>'} ` +
+            `from=${route.reviewerModelFallback.fromReviewerModel} ` +
+            `to=${route.reviewerModelFallback.toReviewerModel} ` +
+            `class=${route.reviewerModelFallback.failureClass} ` +
+            `count=${route.reviewerModelFallback.failureCount}/${route.reviewerModelFallback.threshold} ` +
+            `reason=${route.reviewerModelFallback.reason}`
+        );
+      } else if (route.reviewerModelFallbackSkipped) {
+        console.warn(
+          `[watcher] reviewer-model-fallback-skipped repo=${repoPath} pr=${prNumber} ` +
+            `head=${route.reviewerModelFallbackSkipped.headSha || '<unknown>'} ` +
+            `model=${route.reviewerModelFallbackSkipped.fromReviewerModel} ` +
+            `class=${route.reviewerModelFallbackSkipped.failureClass} ` +
+            `count=${route.reviewerModelFallbackSkipped.failureCount}/${route.reviewerModelFallbackSkipped.threshold} ` +
+            `reason=${route.reviewerModelFallbackSkipped.reason}`
+        );
+      }
 
       crossModelWaiverReason = route.afhReviewerFallback?.lastResort
         ? (

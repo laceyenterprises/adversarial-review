@@ -84,15 +84,10 @@ export function hasCompletedReviewerRereviewAfter({
   }
 }
 
-// REVIEW-DEDUP: the hard re-review ceiling must count DISTINCT reviewed head
-// SHAs, not raw review events. `reviewed_prs.review_attempts` increments on
-// every attempt — including duplicate reviews of an unchanged head and failed
-// posts — so keying the ceiling on it let a single real round plus its
-// duplicates trip the cap and deadlock the PR. Counting distinct completed-pass
-// head SHAs makes duplicates of one head cost nothing against the ceiling while
-// still bounding genuine head churn. Legacy passes with a NULL head_sha are not
-// distinct-countable; callers fall back to `review_attempts` when this returns
-// 0 so the safety cap never silently disengages for pre-`head_sha` rows.
+// REVIEW-DEDUP: this diagnostic helper counts DISTINCT reviewed head SHAs for a
+// PR, not raw review events. The live spawn ceiling below is intentionally
+// *current-head* scoped: a reviewer outcome for a stale head must not spend the
+// final review owed to the head currently proposed for merge.
 export function countDistinctReviewedHeadShas({
   db: dbOverride = null,
   rootDir = ROOT,
@@ -125,23 +120,47 @@ function closeOwnedReviewStateDb(ownedDb) {
   ownedDb.close();
 }
 
-// REVIEW-DEDUP: the hard ceiling needs a bounded landed-review count, not a raw
-// event count. Completed modern heads collapse to one unit per head; failed or
-// running attempts are attempt evidence, but they are not reviews and must not
-// burn the final review a PR is owed. Legacy completed null-head pass rows
-// remain bounded because their head cannot be de-duped.
+// REVIEW-DEDUP: the hard ceiling needs a bounded landed-review count for the
+// CURRENT head, not a raw PR-lifetime event count. Each completed modern pass
+// on that head consumes one unit: GitHub normally deduplicates same-head
+// reviews, but this still protects explicit requeues and fail-open paths. A
+// stale-head outcome cannot burn the final review owed to a later remediation
+// head. Failed/running attempts are attempt evidence, but they are not reviews.
+// When the caller supplies a head, legacy NULL-head records and the PR-wide
+// review_attempts counter are deliberately ignored: neither can prove that the
+// current head was reviewed. The ceiling therefore re-arms for a new head while
+// remaining a real circuit breaker for repeated reviews of that new head.
 export function countReviewCeilingUnits({
   db: dbOverride = null,
   rootDir = ROOT,
   repoPath,
   prNumber,
+  headSha = null,
   fallbackReviewAttempts = 0,
 } = {}) {
+  const normalizedHeadSha = typeof headSha === 'string' && headSha.trim() !== ''
+    ? headSha.trim()
+    : null;
   const ownedDb = dbOverride ? null : openReviewStateDb(rootDir);
   const readDb = dbOverride || ownedDb;
   try {
     if (!dbOverride) ensureReviewStateSchema(readDb);
-    const row = readDb.prepare(
+    if (normalizedHeadSha !== null) {
+      const row = readDb.prepare(
+        `SELECT COUNT(*) AS completed_current_head_passes
+           FROM reviewer_passes
+          WHERE repo = ?
+            AND pr_number = ?
+            AND pass_kind IN ('first-pass', 'rereview')
+            AND status = 'completed'
+            AND head_sha = ?`,
+      ).get(repoPath, prNumber, normalizedHeadSha);
+      const completedCurrentHeadPasses = Number(row?.completed_current_head_passes || 0);
+      return Number.isFinite(completedCurrentHeadPasses) && completedCurrentHeadPasses > 0
+        ? completedCurrentHeadPasses
+        : 0;
+    }
+    const baseSql =
       `SELECT COUNT(*) AS pass_count,
               COUNT(DISTINCT CASE
                 WHEN status = 'completed'
@@ -157,8 +176,8 @@ export function countReviewCeilingUnits({
          FROM reviewer_passes
         WHERE repo = ?
           AND pr_number = ?
-          AND pass_kind IN ('first-pass', 'rereview')`
-    ).get(repoPath, prNumber);
+          AND pass_kind IN ('first-pass', 'rereview')`;
+    const row = readDb.prepare(baseSql).get(repoPath, prNumber);
     const passCount = Number(row?.pass_count || 0);
     if (!Number.isFinite(passCount) || passCount <= 0) {
       const fallback = Number(fallbackReviewAttempts || 0);
@@ -175,26 +194,34 @@ export function countReviewCeilingUnits({
   }
 }
 
-// Failed/running attempts are not reviews, but they still need an independent
-// fuse so a deterministically broken reviewer path cannot respawn forever.
+// Failed/running attempts are not reviews, but they still need an independent,
+// current-head fuse so a deterministically broken reviewer path cannot respawn
+// forever. A failure on a stale head is not evidence that the new head is
+// broken, so it cannot block the review that new head is owed.
 export function countReviewCeilingAttempts({
   db: dbOverride = null,
   rootDir = ROOT,
   repoPath,
   prNumber,
+  headSha = null,
   fallbackReviewAttempts = 0,
 } = {}) {
+  const normalizedHeadSha = typeof headSha === 'string' && headSha.trim() !== ''
+    ? headSha.trim()
+    : null;
   const ownedDb = dbOverride ? null : openReviewStateDb(rootDir);
   const readDb = dbOverride || ownedDb;
   try {
     if (!dbOverride) ensureReviewStateSchema(readDb);
-    const rows = readDb.prepare(
+    const baseSql =
       `SELECT status, metadata_json
          FROM reviewer_passes
         WHERE repo = ?
           AND pr_number = ?
-          AND pass_kind IN ('first-pass', 'rereview')`
-    ).all(repoPath, prNumber);
+          AND pass_kind IN ('first-pass', 'rereview')`;
+    const rows = normalizedHeadSha === null
+      ? readDb.prepare(baseSql).all(repoPath, prNumber)
+      : readDb.prepare(`${baseSql}\n          AND head_sha = ?`).all(repoPath, prNumber, normalizedHeadSha);
     if (rows.length > 0) {
       const transientFleetInfraClasses = new Set([
         'adapter_spawn_timeout',
@@ -209,6 +236,7 @@ export function countReviewCeilingAttempts({
         return count + 1;
       }, 0);
     }
+    if (normalizedHeadSha !== null) return 0;
     const fallback = Number(fallbackReviewAttempts || 0);
     return Number.isFinite(fallback) && fallback > 0 ? fallback : 0;
   } finally {

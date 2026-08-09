@@ -23,8 +23,16 @@
  * @module ama/dispatch-closer
  */
 
-import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { execFile, spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { hostname, userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -95,6 +103,31 @@ const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const AGENT_OS_TOOLING_REPO = 'agent-os';
 const ADVERSARIAL_REVIEW_REPO = 'adversarial-review';
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
+const HARNESS_FALLBACK_ALERT_OWNER_WRITE_SCRIPT = `
+import { chmodSync, closeSync, mkdirSync, openSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+const args = process.argv[1] === '[eval]' ? process.argv.slice(2) : process.argv.slice(1);
+const [statePath, recordRaw] = args;
+const dir = dirname(statePath);
+mkdirSync(dir, { recursive: true, mode: 0o2775 });
+try { chmodSync(dir, 0o2775); } catch {}
+const tmpPath = join(dir, \`.\${basename(statePath)}.\${process.pid}.\${Date.now()}.\${Math.random().toString(16).slice(2)}.tmp\`);
+try {
+  const fd = openSync(tmpPath, 'wx', 0o664);
+  try {
+    writeFileSync(fd, \`\${JSON.stringify(JSON.parse(recordRaw), null, 2)}\\n\`, 'utf8');
+  } finally {
+    closeSync(fd);
+  }
+  try { chmodSync(tmpPath, 0o664); } catch {}
+  renameSync(tmpPath, statePath);
+  try { chmodSync(statePath, 0o664); } catch {}
+  process.stdout.write(statePath);
+} catch (err) {
+  try { rmSync(tmpPath, { force: true }); } catch {}
+  throw err;
+}
+`;
 
 // AMA closer dispatch ADMISSION priority (agent-os worker-pool `hq dispatch
 // --priority`). This selects the admission LANE ONLY. It never affects merge
@@ -131,6 +164,10 @@ const CLOSER_VALIDATE_AND_CLICK_DISPATCH_PRIORITY = 'critical';
 const CLOSER_FINDINGS_REMEDIATION_DISPATCH_PRIORITY = 'normal';
 const AMA_LIVE_PR_PROBE_TIMEOUT_MS = 30_000;
 const AMA_LIVE_PR_PROBE_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000];
+export const HARNESS_FALLBACK_ALERT_DEBOUNCE_MS = 60 * 60 * 1000;
+const HARNESS_FALLBACK_ALERT_STATE_DIRNAME = 'ama-harness-fallback-alerts';
+const HARNESS_FALLBACK_ALERT_STATE_DIR_MODE = 0o2775;
+const HARNESS_FALLBACK_ALERT_STATE_FILE_MODE = 0o664;
 const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
   'blocking-findings-present',
   'blocking-findings-unknown',
@@ -1280,19 +1317,160 @@ export function describeHarnessGrounding(harness) {
   return `is AFH soft-grounded (${parts.join('; ')})`;
 }
 
+function harnessFallbackAlertStateKey(harness) {
+  // The alert is about one provider-degradation condition, not the individual
+  // PR that happened to encounter it. Include every field that represents a
+  // material escalation (soft -> hard, state change, fallback destination),
+  // while deliberately excluding repo/PR so a busy merge queue cannot page once
+  // per closer dispatch.
+  const parts = [
+    harness?.provider,
+    harness?.from,
+    harness?.to,
+    harness?.groundedBy || 'hard',
+    harness?.primaryState || 'unknown',
+    harness?.softGrounding?.reason || 'none',
+  ].map((value) => String(value || 'unknown').replace(/[^A-Za-z0-9._-]/g, '_'));
+  return parts.join('--');
+}
+
+function readHarnessFallbackAlertAt(statePath) {
+  try {
+    if (!existsSync(statePath)) return null;
+    const alertedAt = Date.parse(String(JSON.parse(readFileSync(statePath, 'utf8'))?.alertedAt || ''));
+    return Number.isFinite(alertedAt) ? alertedAt : null;
+  } catch {
+    // A damaged debounce record must not suppress an operator alert.
+    return null;
+  }
+}
+
+function currentUid() {
+  return typeof process.getuid === 'function' ? process.getuid() : null;
+}
+
+function resolveHarnessFallbackAlertStateDir(rootDir) {
+  return join(rootDir || SUBMODULE_ROOT, 'data', HARNESS_FALLBACK_ALERT_STATE_DIRNAME);
+}
+
+function resolveCanonicalHarnessFallbackAlertOwnerUid(rootDir) {
+  const dir = resolveHarnessFallbackAlertStateDir(rootDir);
+  try {
+    return statSync(dir).uid;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
+  try {
+    return statSync(join(rootDir || SUBMODULE_ROOT, 'data')).uid;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
+  return statSync(rootDir || SUBMODULE_ROOT).uid;
+}
+
+function resolveUsernameForUid(uid, { spawnSyncImpl = spawnSync } = {}) {
+  const result = spawnSyncImpl('id', ['-un', String(uid)], { encoding: 'utf8' });
+  if (result?.status !== 0) {
+    const detail = String(result?.stderr || result?.error?.message || '').trim();
+    throw new Error(`failed to resolve canonical AMA harness fallback alert owner uid ${uid}${detail ? `: ${detail}` : ''}`);
+  }
+  const username = String(result.stdout || '').trim();
+  if (!username) throw new Error(`failed to resolve canonical AMA harness fallback alert owner uid ${uid}: empty username`);
+  return username;
+}
+
+function writeHarnessFallbackAlertStateAsOwner(statePath, record, ownerUid, { spawnSyncImpl = spawnSync } = {}) {
+  const ownerUser = resolveUsernameForUid(ownerUid, { spawnSyncImpl });
+  const result = spawnSyncImpl(
+    'sudo',
+    [
+      '-A',
+      '-H',
+      '-u',
+      ownerUser,
+      process.execPath,
+      '--input-type=module',
+      '-e',
+      HARNESS_FALLBACK_ALERT_OWNER_WRITE_SCRIPT,
+      statePath,
+      JSON.stringify(record),
+    ],
+    { encoding: 'utf8', maxBuffer: 1024 * 1024 },
+  );
+  if (result?.status !== 0) {
+    const detail = String(result?.stderr || result?.error?.message || '').trim();
+    throw new Error(`AMA harness fallback alert owner write failed for ${ownerUser}${detail ? `: ${detail}` : ''}`);
+  }
+  return { delegated: true, ownerUser, path: String(result.stdout || '').trim() || statePath };
+}
+
+function writeHarnessFallbackAlertState(rootDir, statePath, record, {
+  currentUidImpl = currentUid,
+  spawnSyncImpl = spawnSync,
+} = {}) {
+  // This is the local synchronous helper from src/atomic-write.mjs (node:fs
+  // sync primitives), so an I/O failure throws directly to the caller's
+  // fail-open try/catch rather than becoming an unhandled rejection.
+  const ownerUid = resolveCanonicalHarnessFallbackAlertOwnerUid(rootDir);
+  const uid = currentUidImpl();
+  if (uid !== null && uid !== ownerUid) {
+    return writeHarnessFallbackAlertStateAsOwner(statePath, record, ownerUid, { spawnSyncImpl });
+  }
+  mkdirSync(dirname(statePath), { recursive: true, mode: HARNESS_FALLBACK_ALERT_STATE_DIR_MODE });
+  try {
+    chmodSync(dirname(statePath), HARNESS_FALLBACK_ALERT_STATE_DIR_MODE);
+  } catch {
+    // Shared deployments may refuse chmod; write failure still fails open below.
+  }
+  writeFileAtomic(statePath, JSON.stringify(record, null, 2) + '\n', {
+    mode: HARNESS_FALLBACK_ALERT_STATE_FILE_MODE,
+  });
+  try {
+    chmodSync(statePath, HARNESS_FALLBACK_ALERT_STATE_FILE_MODE);
+  } catch {
+    // Best effort; the next write uses a directory-level atomic rename.
+  }
+  return { delegated: false, path: statePath };
+}
+
 // Best-effort operator alert that the closer/hammer fell back to another harness
 // because its configured provider is quota-grounded. The structured
-// `ama_closer.harness_fallback` audit log is the durable record; this is the
-// human-facing ping. Fail OPEN: a down alert transport (missing ALERT_TO, HTTP
-// error, …) must never block the merge the fallback exists to enable.
-async function emitHarnessFallbackAlert({
+// `ama_closer.harness_fallback` audit log remains the per-dispatch durable
+// record; this human-facing alert is debounced per fleet-wide fallback condition
+// so a healthy fallback cannot turn a busy merge queue into a page storm. Fail
+// OPEN: a down alert transport or debounce-state write never blocks the merge.
+export async function emitHarnessFallbackAlert({
   deliverAlertImpl,
+  rootDir,
   repo,
   prNumber,
   harness,
   logger = console,
   env = process.env,
+  now = Date.now(),
+  debounceMs = HARNESS_FALLBACK_ALERT_DEBOUNCE_MS,
+  currentUidImpl = currentUid,
+  spawnSyncImpl = spawnSync,
 }) {
+  const alertStatePath = join(
+    resolveHarnessFallbackAlertStateDir(rootDir),
+    `${harnessFallbackAlertStateKey(harness)}.json`,
+  );
+  const priorAlertAt = readHarnessFallbackAlertAt(alertStatePath);
+  if (priorAlertAt && (now - priorAlertAt) < debounceMs) {
+    logger?.info?.(JSON.stringify({
+      event: 'ama_closer.harness_fallback_alert_suppressed',
+      repo,
+      prNumber: prNumber == null ? null : Number(prNumber),
+      provider: harness?.provider || null,
+      from: harness?.from || null,
+      to: harness?.to || null,
+      reason: 'debounced-same-fallback-condition',
+      priorAlertAt: new Date(priorAlertAt).toISOString(),
+      debounceMs,
+    }));
+    return { delivered: false, reason: 'alert-debounced' };
+  }
   let deliver = deliverAlertImpl;
   if (deliver === null || deliver === undefined) {
     try {
@@ -1328,6 +1506,30 @@ async function emitHarnessFallbackAlert({
       },
       env,
     });
+    try {
+      writeHarnessFallbackAlertState(
+        rootDir,
+        alertStatePath,
+        {
+          schemaVersion: 1,
+          alertedAt: new Date(now).toISOString(),
+          provider: harness?.provider || null,
+          from: harness?.from || null,
+          to: harness?.to || null,
+          groundedBy: harness?.groundedBy || 'hard',
+          primaryState: harness?.primaryState || null,
+          softGroundingReason: harness?.softGrounding?.reason || null,
+        },
+        { currentUidImpl, spawnSyncImpl },
+      );
+    } catch (err) {
+      logger?.warn?.(JSON.stringify({
+        event: 'ama_closer.harness_fallback_alert_debounce_write_failed',
+        repo,
+        prNumber: prNumber == null ? null : Number(prNumber),
+        error: String(err?.message || err),
+      }));
+    }
     return { delivered: true };
   } catch (err) {
     logger?.warn?.(JSON.stringify({
@@ -3663,6 +3865,7 @@ export async function maybeDispatchAmaCloser({
     });
     await emitHarnessFallbackAlert({
       deliverAlertImpl,
+      rootDir,
       repo,
       prNumber,
       harness: harnessFallback,

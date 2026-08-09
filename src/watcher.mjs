@@ -1438,14 +1438,14 @@ async function pollOnce(
       async run() {
       // Proactive stuck-merge-agent scan — independent of PR revisit timing.
       // Scope only to PRs whose lifecycle is still active in this tick:
-      // current snapshots with `merge-agent-dispatched` plus unresolved
-      // durable cleanup records. Historical dispatches outside that set are
-      // intentionally ignored.
+      // current snapshots with `merge-agent-dispatched`, plus a same-head
+      // label-add retry for a PR still seen open in this tick. Historical and
+      // merged-PR cleanup records are intentionally ignored.
       try {
         const stuckReports = scanStuckMergeAgentDispatches({
           rootDir: ROOT,
           repo: repoPath,
-          activePRs: activeMergeAgentPRs,
+          activePRs: activeMergeAgentPRs, currentPRs: currentRepoPRs,
           hqPath: null,
         });
         for (const report of stuckReports) {

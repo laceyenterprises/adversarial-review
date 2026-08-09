@@ -2277,12 +2277,13 @@ function schemaV1() {
             __default: 900,
             __min: 60,
           },
-          // Debounce window for the stuck-dispatch alert. Default 1h: a
-          // stuck dispatch only fires the alert at most once per hour, even
-          // if every poll still sees the same stuck state.
+          // Debounce window for the stuck-dispatch alert. Default 6h: a
+          // known stuck dispatch gets an actionable initial page and an
+          // infrequent reminder, rather than hourly pages whose only change
+          // is elapsed age. A new LRQ retains its own immediate alert.
           stuck_dispatch_alert_debounce_ms: {
             __type: TYPE_INT,
-            __default: 3600000,
+            __default: 21600000,
             __min: 60000,
           },
           // First-pass reviewer pool concurrency cap. Maximum number of

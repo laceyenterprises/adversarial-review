@@ -19,7 +19,11 @@ import { loadRoleConfig } from './role-config.mjs';
 // resolving to the same absolute path as watcher.mjs's ROOT.
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-export const STUCK_DISPATCH_ALERT_DEBOUNCE_MS = 60 * 60 * 1000;
+// A repeated pre-spawn observation normally carries no new operator action:
+// the original page includes the LRQ, refusal reason, and exact diagnostic.
+// Keep an infrequent reminder for genuinely unresolved incidents, while a new
+// LRQ still creates its own immediate incident page.
+export const STUCK_DISPATCH_ALERT_DEBOUNCE_MS = 6 * 60 * 60 * 1000;
 export const STUCK_DISPATCH_ALERT_STATE_DIR = join(
   ROOT, 'data', 'follow-up-jobs', 'merge-agent-stuck-alerts',
 );

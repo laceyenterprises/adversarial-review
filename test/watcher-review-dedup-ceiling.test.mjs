@@ -226,6 +226,73 @@ test('ceiling units collapse duplicate completions and ignore non-landed failure
   }
 });
 
+test('stale-head passes do not spend either current-head reviewer ceiling', () => {
+  const rootDir = makeTempRoot();
+  try {
+    const db = openReviewStateDb(rootDir);
+    ensureReviewStateSchema(db);
+    const repoPath = 'laceyenterprises/adversarial-review';
+    const prNumber = 802;
+    const currentHead = 'post-remediation-head';
+
+    // Two stale comment-only reviews and one stale blocking review are useful
+    // audit history, but cannot deny the exact-head review of the remediation.
+    insertPass(db, { repoPath, prNumber, attemptNumber: 1, passKind: 'first-pass', headSha: 'first-head' });
+    insertPass(db, { repoPath, prNumber, attemptNumber: 2, passKind: 'rereview', headSha: 'middle-head' });
+    insertPass(db, { repoPath, prNumber, attemptNumber: 3, passKind: 'rereview', headSha: 'blocking-head' });
+    insertPass(db, {
+      repoPath,
+      prNumber,
+      attemptNumber: 4,
+      passKind: 'rereview',
+      headSha: 'blocking-head',
+      status: 'failed',
+      metadata: { failureClass: 'reviewer-timeout' },
+    });
+
+    assert.equal(
+      countReviewCeilingUnits({
+        db,
+        rootDir,
+        repoPath,
+        prNumber,
+        headSha: currentHead,
+        fallbackReviewAttempts: 99,
+      }),
+      0,
+      'stale landed reviews and the PR-wide legacy counter cannot consume the current head budget',
+    );
+    assert.equal(
+      countReviewCeilingAttempts({
+        db,
+        rootDir,
+        repoPath,
+        prNumber,
+        headSha: currentHead,
+        fallbackReviewAttempts: 99,
+      }),
+      0,
+      'a stale timeout cannot trip the independent fuse for the current head',
+    );
+
+    insertPass(db, { repoPath, prNumber, attemptNumber: 5, passKind: 'rereview', headSha: currentHead });
+    insertPass(db, { repoPath, prNumber, attemptNumber: 6, passKind: 'rereview', headSha: currentHead });
+    insertPass(db, { repoPath, prNumber, attemptNumber: 7, passKind: 'rereview', headSha: currentHead });
+    assert.equal(
+      countReviewCeilingUnits({ db, rootDir, repoPath, prNumber, headSha: currentHead }),
+      3,
+      'each completed current-head review consumes a ceiling unit so the same-head circuit breaker still trips',
+    );
+    assert.equal(
+      countReviewCeilingAttempts({ db, rootDir, repoPath, prNumber, headSha: currentHead }),
+      3,
+      'the same-head attempt fuse remains bounded even though historical heads are ignored',
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('ceiling units do not fall back to raw attempts for modern failed-only passes', () => {
   const rootDir = makeTempRoot();
   try {

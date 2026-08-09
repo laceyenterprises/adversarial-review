@@ -202,6 +202,15 @@ provenance still key off the configured logical class). It emits a loud
 - **Fail-open:** if `hq fleet quota status` is unreadable, or the alert
   transport is down, the closer dispatches on the configured primary exactly as
   before — a resolver/alert fault never blocks the merge.
+- **Alert debounce ownership:** fallback operator alerts are debounced by
+  fleet-wide condition under `data/ama-harness-fallback-alerts/`. Native writes
+  are allowed only when the caller UID matches the canonical owner of the
+  existing alert directory, the shared `data/` directory, or the repo root before
+  either exists. Cross-user callers must write through `sudo -A -H -u <owner>` so
+  a restricted hammer worker cannot first-create shared debounce state and lock
+  out the daemon. The directory is maintained as setgid group-writable (`02775`)
+  and records as group-writable (`0664`); failures still fail open and only
+  affect debounce suppression, not closer dispatch.
 - **Scope:** this protects the AMA closer/hammer path (the one that stalls PR
   closure fleet-wide). Extending the same harness-fallback to the dag-walker's
   ticket dispatch is a documented follow-up, not built here.

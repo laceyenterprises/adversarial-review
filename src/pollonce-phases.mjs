@@ -1669,16 +1669,16 @@ export async function processReviewSubject(entry, ctx) {
               const hardReviewCeiling = resolveHardReviewCeiling(maxRemediationRounds);
               const hardReviewAttemptCeiling = resolveHardReviewAttemptCeiling(maxRemediationRounds);
               const explicitOperatorReviewRetrigger = isExplicitOperatorReviewRetrigger(current);
-              // REVIEW-DEDUP: landed reviews are capped by distinct completed
-              // head. Failed/running attempts are retry evidence, not reviews,
-              // and must not spend the final review owed to a PR. Legacy
-              // completed null-head rows count individually because their head
-              // cannot be de-duped.
+              // REVIEW-DEDUP: both fuses apply to the current proposed head.
+              // A completed or failed review of a stale head is audit history,
+              // not a reason to deny the required exact-head review after
+              // remediation. Same-head passes remain bounded by both fuses.
               const priorReviewCount = countReviewCeilingUnits({
                 db,
                 rootDir: ROOT,
                 repoPath,
                 prNumber,
+                headSha: reviewerHeadSha,
                 fallbackReviewAttempts: Number(current?.review_attempts || 0),
               });
               if (
@@ -1705,6 +1705,7 @@ export async function processReviewSubject(entry, ctx) {
                 rootDir: ROOT,
                 repoPath,
                 prNumber,
+                headSha: reviewerHeadSha,
                 fallbackReviewAttempts: Number(current?.review_attempts || 0),
               });
               if (

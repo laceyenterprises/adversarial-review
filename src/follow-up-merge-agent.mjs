@@ -117,6 +117,7 @@ import {
   labelMutationErrorDetail, isLabelAlreadyAbsentError,
   sleep, execHqDispatchCancel, detectAgentOsPresence,
 } from './merge-agent-hq-exec.mjs';
+import { collectStuckMergeAgentCandidateHeads } from './merge-agent-stuck-scan-candidates.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -1105,9 +1106,10 @@ function describeStaleDispatch(recordedDispatch, {
 //
 // This scan classifies only PRs still active in the merge-agent
 // lifecycle: ones whose current GitHub snapshot still carries the
-// watcher-owned `merge-agent-dispatched` label, plus its label-add cleanup while
-// GitHub's snapshot lags. Closed/merged cleanup retries are maintenance work,
-// never alert candidates; historical dispatch records stay ignored.
+// watcher-owned `merge-agent-dispatched` label, plus a same-head label-add
+// cleanup while that *open-PR snapshot* lacks the label. Closed/merged cleanup
+// retries are maintenance work, never alert candidates; historical dispatch
+// records stay ignored.
 //
 // We intentionally do NOT live-probe `hq dispatch status` here. The
 // proactive path runs inside the watcher loop, so serial `spawnSync`
@@ -1119,6 +1121,7 @@ function scanStuckMergeAgentDispatches({
   repo = null,
   hqRoot = resolveHqRoot(process.env),
   activePRs = [],
+  currentPRs = [],
   now = Date.now(),
   minAgeMinutes = STUCK_DISPATCH_MIN_AGE_MINUTES,
   minRefusals = STUCK_DISPATCH_MIN_REFUSALS,
@@ -1128,39 +1131,22 @@ function scanStuckMergeAgentDispatches({
   listLifecycleCleanupsImpl = listMergeAgentLifecycleCleanups,
 } = {}) {
   if (!hqRoot) return [];
-  const eligibleHeadsByKey = new Map();
-  for (const activePR of activePRs) {
-    if (!activePR?.repo || activePR?.prNumber == null || !activePR?.headSha) continue;
-    if (repo && activePR.repo !== repo) continue;
-    eligibleHeadsByKey.set(
-      `${activePR.repo}#${Number(activePR.prNumber)}`,
-      {
-        repo: activePR.repo,
-        prNumber: Number(activePR.prNumber),
-        headSha: activePR.headSha,
-      }
-    );
-  }
   let lifecycleCleanups = [];
   try {
     lifecycleCleanups = listLifecycleCleanupsImpl(rootDir);
   } catch {
     lifecycleCleanups = [];
   }
-  for (const cleanup of lifecycleCleanups) {
-    if (!isUnresolvedMergeAgentLifecycleCleanup(cleanup)
-      || cleanup.transition !== MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION) continue;
-    if (!cleanup?.repo || cleanup?.prNumber == null || !cleanup?.headSha) continue;
-    if (repo && cleanup.repo !== repo) continue;
-    const key = `${cleanup.repo}#${Number(cleanup.prNumber)}`;
-    if (!eligibleHeadsByKey.has(key)) {
-      eligibleHeadsByKey.set(key, {
-        repo: cleanup.repo,
-        prNumber: Number(cleanup.prNumber),
-        headSha: cleanup.headSha,
-      });
-    }
-  }
+  const eligibleHeadsByKey = collectStuckMergeAgentCandidateHeads({
+    activePRs,
+    currentPRs,
+    lifecycleCleanups,
+    repo,
+    // Only the missing-dispatched-label retry covers snapshot lag. Every other
+    // cleanup is lifecycle maintenance and must never reactivate a dispatch.
+    isEligibleCleanup: (cleanup) => isUnresolvedMergeAgentLifecycleCleanup(cleanup)
+      && cleanup.transition === MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
+  });
   if (eligibleHeadsByKey.size === 0) return [];
   const stuckReports = [];
   for (const eligible of eligibleHeadsByKey.values()) {

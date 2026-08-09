@@ -55,6 +55,7 @@ const noopPreflight = async ({ model }) => (
 );
 const TEST_HQ_PARENT_SESSION = 'session:test:hq';
 const TEST_HQ_PROJECT = 'adversarial-review';
+const AGENT_RUNTIME_CUTOVER_READY_NOW = () => new Date('2026-08-04T10:00:00.000Z');
 
 function makeRoot() {
   const rootDir = mkdtempSync(join(tmpdir(), 'reviewer-runtime-'));
@@ -186,7 +187,7 @@ test('resolveReviewerRuntimeName selects agent-runtime only when agentos cutover
     assert.equal(
       resolveReviewerRuntimeName(
         { id: 'code-pr', reviewerRuntime: 'agent-runtime', agentRuntimeSettleSmokeVerified: true },
-        { rootDir, orchestrationMode: 'agentos' },
+        { rootDir, orchestrationMode: 'agentos', now: AGENT_RUNTIME_CUTOVER_READY_NOW },
       ),
       'agent-runtime',
     );
@@ -276,6 +277,7 @@ test('createReviewerRuntimeAdapterForDomain applies readiness-gated orchestratio
       rootDir,
       domainId: 'code-pr',
       orchestrationMode: 'agentos',
+      now: AGENT_RUNTIME_CUTOVER_READY_NOW,
       agentRuntime: fixtureAgentRuntime(),
     });
     assert.equal(agentRuntimeAdapter.describe().id, 'agent-runtime');
@@ -349,6 +351,7 @@ test('createReviewerRuntimeAdapterForDomain kill-switches back to standalone cli
         agentRuntimeSettleSmokeVerified: true,
       },
       orchestrationMode: 'agentos',
+      now: AGENT_RUNTIME_CUTOVER_READY_NOW,
       env: { ADVERSARIAL_REVIEWER_RUNTIME: 'cli-direct' },
     });
     assert.equal(adapter.describe().id, 'cli-direct');

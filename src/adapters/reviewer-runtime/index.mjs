@@ -74,7 +74,14 @@ function createReviewerRuntimeAdapterForDomain({
   orchestrationMode = 'native',
   ...options
 }) {
-  const runtimeName = resolveReviewerRuntimeName(domainConfig, { rootDir, orchestrationMode, env: options.env });
+  const runtimeName = resolveReviewerRuntimeName(domainConfig, {
+    rootDir,
+    orchestrationMode,
+    env: options.env,
+    now: options.now,
+    readSnapshotImpl: options.readSnapshotImpl,
+    readCanaryImpl: options.readCanaryImpl,
+  });
   return createReviewerRuntimeAdapterByName(runtimeName, {
     rootDir,
     domainConfig,

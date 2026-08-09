@@ -98,6 +98,96 @@ test('isHammerRemediableEligibilityMiss: exhausted branch unchanged (self-cert r
   );
 });
 
+// ─────────────────────────────────────────────────────────────────────────────────
+// #5093 (follow-on to #5053): a fully-clean / settled review whose head the
+// closer's OWN commit advanced parks forever. After #5053 strips the
+// self-certified `stale-review-head`, the ONLY remaining miss on a zero-finding
+// clean review is `verdict-not-settled-success` (the settled verdict cannot be
+// confirmed at the moved head) -- which failed the non-exhausted `hasActionable`
+// gate, so the closer never resumed and the retain-loop cap blew (17/32/9+ vs 3).
+// The fix treats `verdict-not-settled-success` as actionable for the PROVEN
+// closer-commit self-cert case ONLY; every other case is unchanged.
+// ─────────────────────────────────────────────────────────────────────────────────
+test('isHammerRemediableEligibilityMiss: #5093 clean-review closer-commit stale head resumes (non-exhausted)', () => {
+  // THE #5093 REPRO: not-exhausted, closer-commit self-cert armed, a clean review
+  // whose only misses are the (stripped) stale head + the settled-verdict gate it
+  // caused -> the hammer resumes and re-validates fail-closed before merge.
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['stale-review-head', 'verdict-not-settled-success'], {
+      reviewCycleExhausted: false,
+      allowStaleReviewHeadHammerResume: true,
+    }),
+    true,
+  );
+
+  // SAFETY: the SAME reasons WITHOUT the self-cert flag (external / non-closer
+  // stale head) must still park for a fresh review -- never self-cert.
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['stale-review-head', 'verdict-not-settled-success'], {
+      reviewCycleExhausted: false,
+      allowStaleReviewHeadHammerResume: false,
+    }),
+    false,
+  );
+
+  // NARROWNESS: `verdict-not-settled-success` becomes actionable ONLY because the
+  // closer-commit stale head was self-certified. A bare `verdict-not-settled-success`
+  // with NO stale-review-head (so `closerStaleHeadResume` cannot arm) still parks in
+  // the non-exhausted branch -- the fix does not broaden the verdict gate at large.
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['verdict-not-settled-success'], {
+      reviewCycleExhausted: false,
+      allowStaleReviewHeadHammerResume: true,
+    }),
+    false,
+  );
+});
+
+// Regression guard: the enumerated invariants that must NOT move with the #5093 fix.
+test('isHammerRemediableEligibilityMiss: #5093 fix preserves every neighboring invariant', () => {
+  // not-exhausted + no resume + bare stale -> park (unchanged).
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['stale-review-head'], {
+      reviewCycleExhausted: false,
+      allowStaleReviewHeadHammerResume: false,
+    }),
+    false,
+  );
+  // exhausted + no resume + stale -> park (unchanged).
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['stale-review-head'], {
+      reviewCycleExhausted: true,
+      allowStaleReviewHeadHammerResume: false,
+    }),
+    false,
+  );
+  // exhausted + resume + stale -> eligible (unchanged).
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['stale-review-head'], {
+      reviewCycleExhausted: true,
+      allowStaleReviewHeadHammerResume: true,
+    }),
+    true,
+  );
+  // not-exhausted + plain actionable finding, no resume -> eligible via the
+  // hasActionable path (unchanged).
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['non-blocking-findings-present'], {
+      reviewCycleExhausted: false,
+    }),
+    true,
+  );
+  // #5053's "no purposeless hammer": a bare closer-commit stale head with NOTHING
+  // else to act on still parks even with the resume flag armed (unchanged).
+  assert.equal(
+    isHammerRemediableEligibilityMiss(['stale-review-head'], {
+      reviewCycleExhausted: false,
+      allowStaleReviewHeadHammerResume: true,
+    }),
+    false,
+  );
+});
+
 // Fix A part 1 — the orchestration arms `allowStaleReviewHeadHammerResume` for a
 // stale reviewed head on a NON-exhausted (comment-only) review, gated on the
 // own-commit suppression proof.

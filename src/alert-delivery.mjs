@@ -939,15 +939,17 @@ async function deliverViaCanonicalAlertScript(scriptPath, doc, {
   runAlertScript = spawnCanonicalAlertScript,
 } = {}) {
   const presentation = alertPresentationForDoc(doc);
+  const message = `${presentation.headline}\n${presentation.body}`;
   const payload = {
     source: doc.event || 'adversarial-review',
-    message: presentation,
+    message,
     idempotencyKey: doc.id,
     metadata: {
       alertId: doc.id,
       event: doc.event || null,
       source: 'adversarial-review',
       deliveryClass: presentation.severity === 'SEV1' ? 'page' : 'digest',
+      presentation,
     },
   };
   const result = await runAlertScript(scriptPath, payload, env);

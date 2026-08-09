@@ -468,9 +468,10 @@ test('watcher alerts route through the canonical script (current telegram-direct
   assert.equal(health.deadLetterCount, 0);
   // The canonical script received the alert on stdin in the contract shape.
   const sent = JSON.parse(readFileSync(capturePath, 'utf8'));
-  assert.equal(sent.message.severity, 'SEV2');
-  assert.equal(sent.message.headline, 'Review dispatch delayed — monitor queue');
+  assert.equal(sent.message, 'Review dispatch delayed — monitor queue\nwatcher.no_progress body');
   assert.equal(sent.metadata.deliveryClass, 'digest');
+  assert.equal(sent.metadata.presentation.severity, 'SEV2');
+  assert.equal(sent.metadata.presentation.headline, 'Review dispatch delayed — monitor queue');
   assert.equal(sent.source, 'watcher.no_progress');
   assert.equal(sent.idempotencyKey, queued.id);
   assert.equal(sent.metadata.alertId, queued.id);

@@ -229,6 +229,39 @@ test('service-owned label write binds merge-agent env-token auth under the watch
   ]);
 });
 
+test('service-owned write auth is not suppressed by user values matching auth flag text', async () => {
+  const mod = await importGithubAdapterClientFresh();
+
+  assert.deepEqual(mod.__test__.makeAdapterWriteArgs('issue-comment', {
+    repo: FIXTURE_REPO,
+    prNumber: FIXTURE_PR,
+    body: '--auth',
+  }, {
+    WATCHER_GH_AUTH_VIA_BROKER: 'true',
+    WATCHER_GH_BROKER_ROLE: 'merge-agent',
+    GITHUB_TOKEN: 'ghs_broker_merge_agent',
+  }), [
+    'write',
+    '--kind',
+    'issue-comment',
+    '--json',
+    '--repo',
+    FIXTURE_REPO,
+    '--pr-number',
+    String(FIXTURE_PR),
+    '--body',
+    '--auth',
+    '--auth',
+    'merge-agent',
+    '--auth-mode',
+    'env-token',
+    '--pat-env',
+    'GITHUB_TOKEN',
+    '--pat-env',
+    'GH_TOKEN',
+  ]);
+});
+
 test('merge write and reviewer writes are left on their existing auth paths', async () => {
   const mod = await importGithubAdapterClientFresh();
 

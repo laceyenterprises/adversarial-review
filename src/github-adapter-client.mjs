@@ -295,12 +295,12 @@ function appendReviewerAuthAdapterArgs(args, reviewerLogin) {
 // that explicit signal is present, bind these service-owned writes to env-token
 // auth so the adapter uses the already-resolved broker token instead of
 // discarding it. Gated on the watcher signal (never on ambient process.env) so
-// tests and tokenless callers are unaffected, skipped when reviewer auth is
+// tests and tokenless callers are unaffected, skipped when reviewer identity is
 // already bound, and deliberately NOT applied to `pull-request-merge` so the
 // load-bearing merge write keeps its existing ambient-attempt + fast-merge
 // `gh --admin` fallback path untouched.
-function appendMergeAgentServiceAuthAdapterArgs(args, kind, env = {}) {
-  if (args.includes('--auth')) return args;
+function appendMergeAgentServiceAuthAdapterArgs(args, kind, params = {}, env = {}) {
+  if (params.reviewerLogin) return args;
   if (kind === 'pull-request-merge') return args;
   if (String(env?.WATCHER_GH_AUTH_VIA_BROKER || '').trim().toLowerCase() !== 'true') return args;
   const hasServiceToken = Boolean(
@@ -326,7 +326,7 @@ function makeAdapterWriteArgs(kind, params = {}, env = {}) {
   if (params.mergeMethod !== undefined) args.push('--merge-method', String(params.mergeMethod));
   if (params.deleteBranch !== undefined) args.push(params.deleteBranch ? '--delete-branch' : '--no-delete-branch');
   if (params.admin === true) args.push('--admin');
-  appendMergeAgentServiceAuthAdapterArgs(args, kind, env);
+  appendMergeAgentServiceAuthAdapterArgs(args, kind, params, env);
   return args;
 }
 

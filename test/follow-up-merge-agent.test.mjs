@@ -7239,3 +7239,53 @@ test('cancelMergeAgentDispatchOnMerge dedupes the label-removal-failure warning 
   assert.match(removeFailures[1], /502 gateway/);
   assert.match(removeFailures[1], /2 suppressed identical failures/);
 });
+
+test('cancelMergeAgentDispatchOnMerge normalizes dynamic label-removal request ids for log dedupe', async () => {
+  const { cancelMergeAgentDispatchOnMerge, recordMergeAgentDispatch } = await import('../src/follow-up-merge-agent.mjs');
+  const { createLogChangeGate } = await import('../src/log-change-gate.mjs');
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  recordMergeAgentDispatch(rootDir, makeJob({ prNumber: 772 }), {
+    dispatchedAt: '2026-05-18T12:00:00.000Z',
+    prompt: 'p',
+    dispatchId: 'disp_1',
+    launchRequestId: 'lrq_1',
+    trigger: null,
+  });
+
+  const logGate = createLogChangeGate();
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+
+  const makeGh = (requestId) => async (_cmd, args) => {
+    if (Array.isArray(args) && args.includes('--remove-label')) {
+      throw new Error(`gh api failed: HTTP 403 secondary rate limit x-github-request-id=${requestId}`);
+    }
+    return { stdout: '', stderr: '' };
+  };
+
+  const call = (requestId) => cancelMergeAgentDispatchOnMerge({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 772,
+    hqPath: '/usr/local/bin/hq',
+    ghExecFileImpl: makeGh(requestId),
+    hqExecFileImpl: async () => ({ stdout: 'cancelled\n', stderr: '' }),
+    now: '2026-05-18T13:00:00.000Z',
+    logGate,
+  });
+
+  try {
+    await call('req_1');
+    await call('req_2');
+    await call('req_3');
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  const removeFailures = warnings.filter(
+    (w) => /failed to remove 'merge-agent-dispatched'/.test(w),
+  );
+  assert.equal(removeFailures.length, 1);
+  assert.match(removeFailures[0], /req_1/);
+});

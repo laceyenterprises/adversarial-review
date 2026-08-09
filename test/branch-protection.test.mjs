@@ -415,6 +415,35 @@ test('warnForMissingAdversarialGateBranchProtection re-warns when the reason cha
   assert.match(warnings[1], /reason=required-context-missing/);
 });
 
+test('warnForMissingAdversarialGateBranchProtection re-arms after a healthy result', async () => {
+  const { createLogChangeGate } = await import('../src/log-change-gate.mjs');
+  const logGate = createLogChangeGate();
+  const warnings = [];
+  const logger = { warn: (m) => warnings.push(m) };
+  const repos = ['laceyenterprises/adversarial-review'];
+  const okStates = [false, false, true, false];
+  const checker = async ({ repoPath }) => {
+    const ok = okStates.shift();
+    return {
+      repo: repoPath,
+      baseBranch: 'main',
+      context: 'agent-os/adversarial-gate',
+      ok,
+      reason: ok ? 'ok' : 'branch-protection-missing',
+      requiredContexts: [],
+    };
+  };
+
+  await warnForMissingAdversarialGateBranchProtection(repos, { checker, logger, logGate });
+  await warnForMissingAdversarialGateBranchProtection(repos, { checker, logger, logGate });
+  await warnForMissingAdversarialGateBranchProtection(repos, { checker, logger, logGate });
+  await warnForMissingAdversarialGateBranchProtection(repos, { checker, logger, logGate });
+
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /reason=branch-protection-missing/);
+  assert.match(warnings[1], /reason=branch-protection-missing/);
+});
+
 test('warnForMissingAdversarialGateBranchProtection tracks each repo independently', async () => {
   const { createLogChangeGate } = await import('../src/log-change-gate.mjs');
   const logGate = createLogChangeGate();

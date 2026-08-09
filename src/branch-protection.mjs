@@ -454,6 +454,9 @@ async function warnForMissingAdversarialGateBranchProtection(repoPaths, {
       if (logGate.note(branchProtectionGateKey, result.reason).changed) {
         logger.warn(formatBranchProtectionWarning(result));
       }
+    } else {
+      const branchProtectionGateKey = `${result.repo}#${result.baseBranch}#${result.context}`;
+      logGate.forget(branchProtectionGateKey);
     }
   }
   return results;

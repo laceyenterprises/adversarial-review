@@ -115,13 +115,12 @@ import {
   formatExecFailure,
   isUnsupportedHqPriorityFlagError,
   isTransientHqDispatchError,
-  labelMutationErrorDetail, isLabelAlreadyAbsentError,
+  labelMutationErrorDetail, normalizeLabelRemovalErrorSignature, isLabelAlreadyAbsentError,
   sleep, execHqDispatchCancel, detectAgentOsPresence,
 } from './merge-agent-hq-exec.mjs';
 import { collectStuckMergeAgentCandidateHeads } from './merge-agent-stuck-scan-candidates.mjs';
 
 const execFileAsync = promisify(execFile);
-
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const MERGE_AGENT_LIFECYCLE_CLEANUP_SCHEMA_VERSION = 1;
 const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', MERGE_AGENT_STUCK_LABEL, 'do-not-merge', NO_MERGE_HOLD_LABEL]);
@@ -1976,8 +1975,9 @@ async function cancelMergeAgentDispatchOnMerge({
         });
         result.cancelled = true;
       } catch (err) {
-        // Preserve stderr/stdout for terminal classification; already-terminal
-        // LRQs can explain the non-zero cancel on stdout, not stderr.
+        // Preserve stderr/stdout for terminal classification; in the 2026-05-19
+        // incident, `hq dispatch cancel` returned non-zero and printed stdout
+        // JSON: {"ok":false,"reason":"already terminal (status=failed)","currentStatus":"failed"}.
         const formatted = formatExecFailure('hq dispatch cancel', err);
         result.cancelError = formatted.message;
         result.cancelStderr = err?.stderr ? String(err.stderr) : null;
@@ -2078,7 +2078,7 @@ async function cancelMergeAgentDispatchOnMerge({
         result.labelRemoved = true;
       } else {
         const removeFailureKey = `${repo}#${prNumber}`;
-        const removeFailureDecision = logGate.note(removeFailureKey, String(result.labelRemovalError));
+        const removeFailureDecision = logGate.note(removeFailureKey, normalizeLabelRemovalErrorSignature(result.labelRemovalError));
         if (removeFailureDecision.changed) {
           const suppressedNote = removeFailureDecision.suppressedSincePrevious > 0
             ? ` (after ${removeFailureDecision.suppressedSincePrevious} suppressed identical failures)`

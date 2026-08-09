@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { mkdtempSync } from 'node:fs';
@@ -9,9 +9,11 @@ import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import {
   claimNextFollowUpJob,
   createFollowUpJob,
+  getFollowUpJobDir,
   markFollowUpJobCompleted,
   markFollowUpJobSpawned,
   readFollowUpJob,
+  writeFollowUpJob,
 } from '../src/follow-up-jobs.mjs';
 import {
   evaluateRoundBudgetForReview,
@@ -611,6 +613,47 @@ test('watcher defers a pending review while a requeued follow-up job is active (
   assert.equal(after.review_status, 'pending');
 });
 
+test('watcher releases a budget-exhausted pending follow-up job instead of deferring forever', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-budget-release-'));
+  const created = createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5120,
+    reviewerModel: 'claude',
+    linearTicketId: null,
+    reviewBody: '## Summary\nBudget exhausted fixture.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-08-09T12:00:00.000Z',
+    critical: false,
+    maxRemediationRounds: 2,
+  });
+  writeFollowUpJob(created.jobPath, {
+    ...created.job,
+    status: 'pending',
+    remediationPlan: {
+      ...created.job.remediationPlan,
+      currentRound: 2,
+      maxRounds: 2,
+    },
+  });
+
+  const decision = shouldDeferReviewForActiveFollowUp({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5120,
+    nowMs: Date.parse('2026-08-09T12:05:00.000Z'),
+  });
+
+  assert.equal(decision.defer, false);
+  assert.equal(decision.latestJobStatus, 'stopped');
+  assert.equal(decision.releaseReason, 'max-rounds-reached');
+  assert.equal(existsSync(created.jobPath), false, 'over-budget pending file was removed from pending/');
+  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(created.jobPath));
+  assert.equal(existsSync(stoppedPath), true, 'over-budget job was terminalized to stopped/');
+  const stoppedJob = readFollowUpJob(stoppedPath);
+  assert.equal(stoppedJob.remediationPlan?.stop?.code, 'max-rounds-reached');
+  assert.equal(claimNextFollowUpJob({ rootDir }), null, 'terminal release must not spawn another remediation over cap');
+});
+
 test('watcher defers a pending review while the active follow-up job has status="in_progress" (same-SHA duplicate-review regression, 2026-05-31)', () => {
   // Regression for the same-SHA duplicate-review symptom observed across
   // PRs #1151 / #1164 / #1165 on 2026-05-31. Sequence that produced the
@@ -680,9 +723,57 @@ test('watcher defers a pending review while the active follow-up job has status=
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 1165,
+    nowMs: Date.parse('2026-05-31T08:10:04.440Z'),
   });
   assert.equal(decision.defer, true, 'watcher MUST defer while the underscore-form in_progress remediation is mid-flight');
   assert.equal(decision.latestJobStatus, 'in_progress');
+});
+
+test('watcher releases stale in-progress follow-up claims through the stuck-claim sweep before deferring', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-stale-release-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5111,
+    reviewerModel: 'claude',
+    linearTicketId: null,
+    reviewBody: '## Summary\nStale claim fixture.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-08-09T08:00:00.000Z',
+    critical: false,
+    maxRemediationRounds: 2,
+  });
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-08-09T08:01:00.000Z',
+  });
+  const spawned = markFollowUpJobSpawned({
+    rootDir,
+    jobPath: claimed.jobPath,
+    worker: {
+      processId: 64594,
+      processGroupId: 64594,
+      workspaceDir: '/tmp/fixture-workspace',
+    },
+    spawnedAt: '2026-08-09T08:02:00.000Z',
+  });
+  writeFollowUpJob(spawned.jobPath, {
+    ...spawned.job,
+    lastHeartbeatAt: '2026-08-09T08:03:00.000Z',
+  });
+
+  const decision = shouldDeferReviewForActiveFollowUp({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5111,
+    nowMs: Date.parse('2026-08-09T09:00:00.000Z'),
+  });
+
+  assert.equal(decision.defer, false);
+  assert.equal(decision.latestJobStatus, 'stopped');
+  assert.equal(decision.releaseReason, 'stale-heartbeat');
+  assert.equal(existsSync(spawned.jobPath), false, 'stale claim was removed from in-progress/');
+  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(spawned.jobPath));
+  assert.equal(readFollowUpJob(stoppedPath).remediationPlan?.stop?.code, 'stale-heartbeat');
 });
 
 test('watcher defer + operator bumpRemediationBudget + retrigger-remediation eligibility all agree on every active-status spelling (cross-module agreement)', async () => {

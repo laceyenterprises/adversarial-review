@@ -187,10 +187,10 @@ import {
   isReviewerSubprocessTimeout,
 } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import {
-  isActiveFollowUpJobStatus,
   resolveRoundBudgetForJob,
   summarizePRRemediationLedger,
 } from './follow-up-jobs.mjs';
+import { shouldDeferReviewForActiveFollowUp } from './follow-up-active-defer.mjs';
 import {
   createBranchProtectionChecker,
   warnForMissingAdversarialGateBranchProtection,
@@ -331,7 +331,6 @@ import { resolveReviewerTimeoutMs } from './reviewer-timeout.mjs';
 import { makeReviewPostedProbe, reconcileReviewerSessions, reviewerBotLogin } from './reviewer-reattach.mjs';
 import { reconcileReviewerCommandFailedBeforeRetry } from './reviewer-command-failed-recovery.mjs';
 import { shouldSkipReviewerForStaleDrift } from './stale-drift.mjs';
-import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 import { createWatcherHealthProbe } from './health-probe.mjs';
 import {
   createWatcherHeartbeat,
@@ -1019,40 +1018,6 @@ function normalizeReviewPopulationRetryConfig(config = {}) {
 // pool race that the CAS alone cannot (both workers read `pending`, both fetch,
 // both claim in sequence).
 const reviewerHeadDispatchLease = createHeadDispatchLease();
-
-// "Active follow-up exists for this PR; do not spawn a new first-pass
-// reviewer." Delegates to the shared status predicate exported from
-// follow-up-jobs.mjs so the watcher, operator-retrigger paths, and
-// internal requeue helper all agree on what "active" means. Forgetting
-// even one spelling here caused the 2026-05-31 same-SHA duplicate
-// reviews on PRs #1151 / #1164 / #1165 (the watcher's inline list
-// missed `'in_progress'` — the underscore form that
-// markFollowUpJobClaimed / markFollowUpJobSpawned actually persist).
-function isActiveFollowUpJob(job) {
-  return isActiveFollowUpJobStatus(job?.status);
-}
-
-function shouldDeferReviewForActiveFollowUp({
-  rootDir = ROOT,
-  repo,
-  prNumber,
-  latestJobFinder = findLatestFollowUpJob,
-}) {
-  const latest = latestJobFinder(rootDir, { repo, prNumber });
-  if (!isActiveFollowUpJob(latest?.job)) {
-    return {
-      defer: false,
-      latestJobStatus: latest?.job?.status || null,
-      jobPath: latest?.jobPath || null,
-    };
-  }
-  return {
-    defer: true,
-    latestJobStatus: latest.job.status,
-    jobPath: latest.jobPath || null,
-    jobId: latest.job.jobId || null,
-  };
-}
 
 // ── Operator surface ─────────────────────────────────────────────────────────
 

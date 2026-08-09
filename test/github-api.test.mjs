@@ -1680,6 +1680,55 @@ test('dismissStandingChangesRequestedReviewsForHead dismisses only authoritative
   assert.ok(dismissCalls[0].args.includes('event=DISMISS'));
 });
 
+test('dismissStandingChangesRequestedReviewsForHead retries transient gh dismissal failures', async () => {
+  const mod = await importGithubApiFresh();
+  const headSha = 'head-dismiss-retry-target';
+  let dismissAttempts = 0;
+  const result = await mod.dismissStandingChangesRequestedReviewsForHead(
+    async (command, args) => {
+      assert.equal(command, 'gh');
+      if (args[0] === 'api' && args.includes('-X') && args.includes('PUT')) {
+        dismissAttempts += 1;
+        if (dismissAttempts === 1) {
+          const err = new Error('TLS handshake timeout');
+          err.stderr = 'TLS handshake timeout';
+          throw err;
+        }
+        return { stdout: '{}' };
+      }
+      return makeReviewsListEnvelope([
+        {
+          id: 151,
+          user: { login: 'lacey-codex-reviewer[bot]' },
+          body: 'blocking',
+          state: 'CHANGES_REQUESTED',
+          submitted_at: '2026-08-09T10:00:00Z',
+          commit_id: headSha,
+        },
+      ]);
+    },
+    FIXTURE_REPO,
+    FIXTURE_PR,
+    headSha,
+    {
+      authoritativeReviewerLogins: ['lacey-codex-reviewer'],
+      recordApiCallImpl: () => {},
+      execGhWithRetryImpl: async ({ execFileImpl, args }) => {
+        try {
+          return await execFileImpl('gh', args);
+        } catch (err) {
+          assert.match(String(err?.stderr || err?.message || ''), /TLS handshake timeout/);
+          return execFileImpl('gh', args);
+        }
+      },
+    },
+  );
+
+  assert.equal(dismissAttempts, 2);
+  assert.equal(result.attempted, 1);
+  assert.deepEqual(result.dismissed.map((review) => review.id), ['151']);
+});
+
 test('dismissStandingChangesRequestedReviewsForHead no-ops when a newer approval clears the reviewer request', async () => {
   const mod = await importGithubApiFresh();
   const headSha = 'head-approval-cleared';

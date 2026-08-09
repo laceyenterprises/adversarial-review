@@ -9,6 +9,7 @@ import {
   readAdapterReviewContext,
   resolveGitHubAdapterBin,
 } from './github-adapter-client.mjs';
+import { execGhWithRetry } from './gh-cli.mjs';
 import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit } from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -1087,6 +1088,7 @@ async function dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo,
   authoritativeReviewerLogin = null,
   message,
   env = process.env,
+  execGhWithRetryImpl = execGhWithRetry,
   recordApiCallImpl = recordApiCall,
 } = {}) {
   const normalizedPrNumber = normalizePrNumber(prNumber);
@@ -1098,12 +1100,16 @@ async function dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo,
   const dismissalMessage = String(message || '').trim()
     || 'Dismissed by AMA merge authority: reviewer findings were remediated/resolved for this head.';
   const dismissed = [];
+  const dismissalEnv = buildGhEnv(env);
+  if (dismissalEnv.GH_TOKEN) {
+    delete dismissalEnv.GITHUB_TOKEN;
+  }
   for (const review of standing) {
     const startedAt = Date.now();
     try {
-      await execFileImpl(
-        'gh',
-        [
+      await execGhWithRetryImpl({
+        execFileImpl,
+        args: [
           'api',
           '-X',
           'PUT',
@@ -1113,12 +1119,8 @@ async function dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo,
           '-f',
           'event=DISMISS',
         ],
-        {
-          env: buildGhEnv(env),
-          maxBuffer: GH_MAX_BUFFER,
-          timeout: 30_000,
-        },
-      );
+        env: dismissalEnv,
+      });
       recordApiCallImpl?.({
         category: 'review_dismissal',
         repo,

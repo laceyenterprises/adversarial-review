@@ -40,7 +40,7 @@ export async function dismissStaleRequestChangesAfterCleanReview({
         env: {
           ...env,
           GH_TOKEN: token,
-          [botTokenEnv]: token,
+          ...(botTokenEnv ? { [botTokenEnv]: token } : {}),
         },
       },
     );

@@ -205,7 +205,7 @@ test('scanStuckMergeAgentDispatches ignores historical dispatches without active
   assert.equal(reports.length, 0, 'historical dispatches should not be rescanned forever');
 });
 
-test('scanStuckMergeAgentDispatches includes an unresolved dispatched-label-add cleanup without an active label snapshot', () => {
+test('scanStuckMergeAgentDispatches includes an unresolved dispatched-label-add cleanup for the same open PR head without an active label snapshot', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   buildAuditFile(hqRoot, STUCK_LRQ, 6);
@@ -231,13 +231,52 @@ test('scanStuckMergeAgentDispatches includes an unresolved dispatched-label-add 
     rootDir,
     hqRoot,
     hqPath: null,
+    currentPRs: [{
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 719,
+      headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+    }],
     now: NOW,
   });
 
   assert.equal(reports.length, 1, 'unresolved dispatched-label-add cleanup should keep the dispatch eligible');
 });
 
-test('scanStuckMergeAgentDispatches ignores unresolved closed lifecycle cleanup sidecars', () => {
+test('scanStuckMergeAgentDispatches does not resurrect a merged PR from an unresolved dispatched-label-add cleanup', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  buildAuditFile(hqRoot, STUCK_LRQ, 6);
+  recordMergeAgentDispatch(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+    headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+  }, {
+    dispatchedAt: STUCK_DISPATCHED_AT,
+    prompt: '',
+    dispatchId: STUCK_LRQ,
+    launchRequestId: STUCK_LRQ,
+    trigger: 'final-pass-on-budget-exhausted',
+  });
+  writeLifecycleCleanup(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+    headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+    transition: 'dispatched-label-add',
+  });
+
+  const reports = scanStuckMergeAgentDispatches({
+    rootDir,
+    hqRoot,
+    hqPath: null,
+    // The watcher omits merged/closed PRs from its current discovery snapshot.
+    currentPRs: [],
+    now: NOW,
+  });
+
+  assert.equal(reports.length, 0, 'a stale label-add retry must not revive a merged PR');
+});
+
+test('scanStuckMergeAgentDispatches ignores a closed cleanup even for the same current open PR head', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   buildAuditFile(hqRoot, STUCK_LRQ, 6);
@@ -262,10 +301,15 @@ test('scanStuckMergeAgentDispatches ignores unresolved closed lifecycle cleanup 
   const reports = scanStuckMergeAgentDispatches({
     rootDir,
     hqRoot,
+    currentPRs: [{
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 719,
+      headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+    }],
     now: NOW,
   });
 
-  assert.equal(reports.length, 0, 'closed cleanup retries must not resurrect merged or closed PRs');
+  assert.equal(reports.length, 0, 'only dispatched-label-add cleanup may cover a missing active label');
 });
 
 test('scanStuckMergeAgentDispatches ignores completed lifecycle cleanup sidecars', () => {

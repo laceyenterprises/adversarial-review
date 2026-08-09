@@ -572,6 +572,35 @@ test('stale AMA closer leases are reported without mutating lease files', () => 
   assert.equal(readFileSync(leasePath, 'utf8'), before);
 });
 
+test('stale AMA closer leases for merged PRs remain observable without paging', () => {
+  const rootDir = tempRoot();
+  const leaseDir = path.join(rootDir, 'data', 'ama-closer-leases');
+  mkdirSync(leaseDir, { recursive: true });
+  const leasePath = path.join(leaseDir, 'laceyenterprises__agent-os-pr-13-abc.json');
+  writeFileSync(leasePath, `${JSON.stringify({
+    repo: REPO,
+    prNumber: 13,
+    headSha: 'abc',
+    acquiredAt: '2026-05-25T16:00:00.000Z',
+    updatedAt: '2026-05-25T16:10:00.000Z',
+    lrqId: 'lrq_merged_ama',
+    status: 'dispatched',
+    terminalOutcome: null,
+  }, null, 2)}\n`);
+  insertReviewRow(rootDir, { prNumber: 13, prState: 'merged' });
+
+  const snapshot = collectReviewPipelineHealth({
+    rootDir,
+    now: () => new Date(NOW),
+    config: { amaCloserLeaseMaxAgeMs: 20 * 60 * 1000 },
+  });
+
+  assert.ok(!findingCodes(snapshot).includes('review:ama_closer_lease_stale'));
+  assert.equal(snapshot.amaCloserLeases.stale.length, 0);
+  assert.equal(snapshot.amaCloserLeases.ignoredTerminalPrs[0].lrqId, 'lrq_merged_ama');
+  assert.equal(snapshot.amaCloserLeases.ignoredTerminalPrs[0].prState, 'merged');
+});
+
 test('running reviewer passes older than threshold are reported as zombies', () => {
   const rootDir = tempRoot();
   insertReviewerPass(rootDir, {

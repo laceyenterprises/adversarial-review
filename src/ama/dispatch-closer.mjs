@@ -30,6 +30,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { assertCanonicalOwner } from '../adapters/agent-runtime/append-only-owner.mjs';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs';
 import {
@@ -131,6 +132,8 @@ const CLOSER_VALIDATE_AND_CLICK_DISPATCH_PRIORITY = 'critical';
 const CLOSER_FINDINGS_REMEDIATION_DISPATCH_PRIORITY = 'normal';
 const AMA_LIVE_PR_PROBE_TIMEOUT_MS = 30_000;
 const AMA_LIVE_PR_PROBE_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000];
+export const HARNESS_FALLBACK_ALERT_DEBOUNCE_MS = 60 * 60 * 1000;
+const HARNESS_FALLBACK_ALERT_STATE_DIRNAME = 'ama-harness-fallback-alerts';
 const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
   'blocking-findings-present',
   'blocking-findings-unknown',
@@ -1280,19 +1283,103 @@ export function describeHarnessGrounding(harness) {
   return `is AFH soft-grounded (${parts.join('; ')})`;
 }
 
+function harnessFallbackAlertStateKey(harness) {
+  // The alert is about one provider-degradation condition, not the individual
+  // PR that happened to encounter it. Include every field that represents a
+  // material escalation (soft -> hard, state change, fallback destination),
+  // while deliberately excluding repo/PR so a busy merge queue cannot page once
+  // per closer dispatch.
+  const parts = [
+    harness?.provider,
+    harness?.from,
+    harness?.to,
+    harness?.groundedBy || 'hard',
+    harness?.primaryState || 'unknown',
+    harness?.softGrounding?.reason || 'none',
+  ].map((value) => String(value || 'unknown').replace(/[^A-Za-z0-9._-]/g, '_'));
+  return parts.join('--');
+}
+
+function readHarnessFallbackAlertAt(statePath) {
+  try {
+    if (!existsSync(statePath)) return null;
+    const alertedAt = Date.parse(String(JSON.parse(readFileSync(statePath, 'utf8'))?.alertedAt || ''));
+    return Number.isFinite(alertedAt) ? alertedAt : null;
+  } catch {
+    // A damaged debounce record must not suppress an operator alert.
+    return null;
+  }
+}
+
+function writeHarnessFallbackAlertState(rootDir, statePath, record, {
+  ownerGuardOptions = {},
+} = {}) {
+  // This is the local synchronous helper from src/atomic-write.mjs (node:fs
+  // sync primitives), so an I/O failure throws directly to the caller's
+  // fail-open try/catch rather than becoming an unhandled rejection.
+  const dataRoot = join(rootDir, 'data');
+  const stateDir = dirname(statePath);
+  // The watcher is the canonical owner of this shared debounce state. Prove
+  // that before creating anything, then prove the existing/new child still has
+  // that owner; a worker under another UID must fail open rather than poison
+  // the directory and disable debounce for the watcher.
+  assertCanonicalOwner(rootDir, statePath, {
+    ...ownerGuardOptions,
+    targetDir: existsSync(dataRoot) ? dataRoot : rootDir,
+    cannotVerifyMessage: 'cannot verify harness fallback debounce state owner',
+    crossUserMessage: 'refusing cross-user harness fallback debounce state write',
+    existingFileMessage: 'refusing write to non-canonical-owned harness fallback debounce state',
+  });
+  mkdirSync(stateDir, { recursive: true });
+  assertCanonicalOwner(rootDir, statePath, {
+    ...ownerGuardOptions,
+    targetDir: stateDir,
+    cannotVerifyMessage: 'cannot verify harness fallback debounce directory owner',
+    crossUserMessage: 'refusing cross-user harness fallback debounce directory write',
+    existingFileMessage: 'refusing write to non-canonical-owned harness fallback debounce state',
+  });
+  writeFileAtomic(statePath, JSON.stringify(record, null, 2) + '\n');
+}
+
 // Best-effort operator alert that the closer/hammer fell back to another harness
 // because its configured provider is quota-grounded. The structured
-// `ama_closer.harness_fallback` audit log is the durable record; this is the
-// human-facing ping. Fail OPEN: a down alert transport (missing ALERT_TO, HTTP
-// error, …) must never block the merge the fallback exists to enable.
-async function emitHarnessFallbackAlert({
+// `ama_closer.harness_fallback` audit log remains the per-dispatch durable
+// record; this human-facing alert is debounced per fleet-wide fallback condition
+// so a healthy fallback cannot turn a busy merge queue into a page storm. Fail
+// OPEN: a down alert transport or debounce-state write never blocks the merge.
+export async function emitHarnessFallbackAlert({
   deliverAlertImpl,
+  rootDir,
   repo,
   prNumber,
   harness,
   logger = console,
   env = process.env,
+  now = Date.now(),
+  debounceMs = HARNESS_FALLBACK_ALERT_DEBOUNCE_MS,
+  ownerGuardOptions = {},
 }) {
+  const alertStatePath = join(
+    rootDir || SUBMODULE_ROOT,
+    'data',
+    HARNESS_FALLBACK_ALERT_STATE_DIRNAME,
+    `${harnessFallbackAlertStateKey(harness)}.json`,
+  );
+  const priorAlertAt = readHarnessFallbackAlertAt(alertStatePath);
+  if (priorAlertAt && (now - priorAlertAt) < debounceMs) {
+    logger?.info?.(JSON.stringify({
+      event: 'ama_closer.harness_fallback_alert_suppressed',
+      repo,
+      prNumber: prNumber == null ? null : Number(prNumber),
+      provider: harness?.provider || null,
+      from: harness?.from || null,
+      to: harness?.to || null,
+      reason: 'debounced-same-fallback-condition',
+      priorAlertAt: new Date(priorAlertAt).toISOString(),
+      debounceMs,
+    }));
+    return { delivered: false, reason: 'alert-debounced' };
+  }
   let deliver = deliverAlertImpl;
   if (deliver === null || deliver === undefined) {
     try {
@@ -1328,6 +1415,25 @@ async function emitHarnessFallbackAlert({
       },
       env,
     });
+    try {
+      writeHarnessFallbackAlertState(rootDir || SUBMODULE_ROOT, alertStatePath, {
+        schemaVersion: 1,
+        alertedAt: new Date(now).toISOString(),
+        provider: harness?.provider || null,
+        from: harness?.from || null,
+        to: harness?.to || null,
+        groundedBy: harness?.groundedBy || 'hard',
+        primaryState: harness?.primaryState || null,
+        softGroundingReason: harness?.softGrounding?.reason || null,
+      }, { ownerGuardOptions });
+    } catch (err) {
+      logger?.warn?.(JSON.stringify({
+        event: 'ama_closer.harness_fallback_alert_debounce_write_failed',
+        repo,
+        prNumber: prNumber == null ? null : Number(prNumber),
+        error: String(err?.message || err),
+      }));
+    }
     return { delivered: true };
   } catch (err) {
     logger?.warn?.(JSON.stringify({
@@ -3663,6 +3769,7 @@ export async function maybeDispatchAmaCloser({
     });
     await emitHarnessFallbackAlert({
       deliverAlertImpl,
+      rootDir,
       repo,
       prNumber,
       harness: harnessFallback,

@@ -74,7 +74,7 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_remediation_throughput_jobs: 'Terminal remediation jobs observed in the configured throughput window.',
   review_pipeline_merge_outcomes_total: 'Current review-ledger PR outcome count by state.',
   review_pipeline_merge_stalled_jobs: 'Current count of clean review-settled jobs still waiting on merge.',
-  review_pipeline_stale_ama_closer_leases: 'Current count of AMA closer leases stuck pending or dispatched past the configured age.',
+  review_pipeline_stale_ama_closer_leases: 'Current count of AMA closer leases for still-open PRs stuck pending or dispatched past the configured age.',
   review_pipeline_zombie_reviewer_passes: 'Current count of reviewer_passes rows stuck running past the configured age.',
   review_pipeline_round_budget_anomalies: 'Current count of remediation jobs whose rounds exceed or misuse their risk-class budget.',
   review_pipeline_launchd_service_up: 'Whether required local pipeline launchd services are loaded.',
@@ -915,16 +915,17 @@ function summarizeMergeStalls({ followUpJobs, reviewRows, nowMs, config }) {
   };
 }
 
-function readAmaCloserLeases(rootDir, { nowMs, config }) {
+function readAmaCloserLeases(rootDir, { nowMs, config, reviewRows = new Map() }) {
   const dir = join(rootDir, 'data', 'ama-closer-leases');
   const stale = [];
+  const ignoredTerminalPrs = [];
   let total = 0;
-  if (!existsSync(dir)) return { total, stale };
+  if (!existsSync(dir)) return { total, stale, ignoredTerminalPrs };
   let names;
   try {
     names = readdirSync(dir);
   } catch {
-    return { total, stale };
+    return { total, stale, ignoredTerminalPrs };
   }
   for (const name of names) {
     if (!name.endsWith('.json')) continue;
@@ -945,7 +946,7 @@ function readAmaCloserLeases(rootDir, { nowMs, config }) {
     const anchor = lease.updatedAt || lease.acquiredAt || new Date(stat.mtimeMs).toISOString();
     const staleMs = ageMs(nowMs, anchor);
     if (staleMs === null || staleMs <= config.amaCloserLeaseMaxAgeMs) continue;
-    stale.push({
+    const summary = {
       leasePath,
       repo: lease.repo || null,
       prNumber: lease.prNumber || null,
@@ -956,9 +957,21 @@ function readAmaCloserLeases(rootDir, { nowMs, config }) {
       updatedAt: lease.updatedAt || null,
       ageMs: staleMs,
       thresholdMs: config.amaCloserLeaseMaxAgeMs,
-    });
+    };
+    const prNumber = Number(summary.prNumber);
+    const reviewRow = summary.repo && Number.isSafeInteger(prNumber) && prNumber > 0
+      ? reviewRows.get(`${summary.repo}#${prNumber}`)
+      : null;
+    const prState = String(reviewRow?.pr_state || '').toLowerCase();
+    if (prState === 'closed' || prState === 'merged') {
+      // A durable closed/merged outcome means this lease is cleanup debt, not
+      // an active closer outage. Keep it visible in the snapshot without paging.
+      ignoredTerminalPrs.push({ ...summary, prState });
+      continue;
+    }
+    stale.push(summary);
   }
-  return { total, stale };
+  return { total, stale, ignoredTerminalPrs };
 }
 
 function summarizeZombieReviewerPasses(db, { nowMs, config }) {
@@ -1716,13 +1729,14 @@ function collectReviewPipelineHealth({
           examples: [],
         };
     const mergeOutcomes = db ? summarizeMergeOutcomes(db) : [];
+    const reviewRows = db ? reviewRowsByRepoPr(db) : new Map();
     const mergeStalls = summarizeMergeStalls({
       followUpJobs: followUpQueues.jobs,
-      reviewRows: db ? reviewRowsByRepoPr(db) : new Map(),
+      reviewRows,
       nowMs,
       config,
     });
-    const amaCloserLeases = readAmaCloserLeases(rootDir, { nowMs, config });
+    const amaCloserLeases = readAmaCloserLeases(rootDir, { nowMs, config, reviewRows });
     const zombieReviewerPasses = db
       ? summarizeZombieReviewerPasses(db, { nowMs, config })
       : { thresholdMs: config.runningReviewerPassMaxAgeMs, rows: [] };

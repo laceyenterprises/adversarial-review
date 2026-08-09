@@ -2079,6 +2079,7 @@ function schemaV1() {
           live_steer_allow_unvetted: { __type: TYPE_BOOL, __default: false },
           claude_code_ambient_auth_fallback: { __type: TYPE_BOOL, __default: false },
           merge_agent_final_pass_on_request_changes: { __type: TYPE_BOOL, __default: true },
+          dismiss_stale_request_changes_on_resolved: { __type: TYPE_BOOL, __default: true },
           merge_agent_deterministic_convergence_terminal: { __type: TYPE_BOOL, __default: false },
           allow_missing_alert_to: { __type: TYPE_BOOL, __default: false },
           resume_context_envelope: { __type: TYPE_BOOL, __default: true },
@@ -3119,6 +3120,10 @@ export const ENV_ALIASES = {
   'feature_flags.merge_agent_final_pass_on_request_changes': {
     canonical: 'AGENT_OS_FEATURE_FLAGS_MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES',
     aliases: [['MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES', identity]],
+  },
+  'feature_flags.dismiss_stale_request_changes_on_resolved': {
+    canonical: 'AGENT_OS_FEATURE_FLAGS_DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED',
+    aliases: [['DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED', identity]],
   },
   'feature_flags.merge_agent_deterministic_convergence_terminal': {
     canonical: 'AGENT_OS_FEATURE_FLAGS_MERGE_AGENT_DETERMINISTIC_CONVERGENCE_TERMINAL',

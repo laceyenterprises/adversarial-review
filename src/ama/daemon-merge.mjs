@@ -312,6 +312,7 @@ function priorDaemonPermanentFailure({ readAuditImpl, hqRoot, repo, prNumber, va
  * @param {() => (object|Promise<object>)} args.acquireLeaseImpl  `{ acquired, lease, existingLease }`.
  * @param {(lease: object) => any} args.releaseLeaseImpl
  * @param {(ctx: object) => Promise<{exitCode:number, stdout?:string, stderr?:string}>} args.runMergeImpl
+ * @param {(ctx: object) => Promise<object>} [args.dismissStaleRequestChangesImpl]
  * @param {Function} [args.evaluateEligibilityImpl]
  * @param {Function} [args.writeAuditImpl]
  * @param {Function} [args.appendAuditImpl]
@@ -346,6 +347,7 @@ export async function attemptDaemonCleanMerge({
   acquireLeaseImpl,
   releaseLeaseImpl,
   runMergeImpl,
+  dismissStaleRequestChangesImpl = null,
   evaluateEligibilityImpl = evaluateMergeEligibility,
   writeAuditImpl = writeAmaAuditEntry,
   appendAuditImpl = appendAmaAuditAttempt,
@@ -579,6 +581,72 @@ export async function attemptDaemonCleanMerge({
     if (!elig.eligible) {
       terminal = { reason: 'gate-not-eligible', permanent: true, reasons: elig.reasons };
       break;
+    }
+
+    if (typeof dismissStaleRequestChangesImpl === 'function') {
+      try {
+        const dismissal = await dismissStaleRequestChangesImpl({
+          repo,
+          prNumber,
+          head: validatedHead,
+          mergeMethod,
+          base,
+          closureAuthority,
+        });
+        logger?.log?.(JSON.stringify({
+          schemaVersion: 1,
+          event: 'ama.stale_request_changes.dismissal',
+          repo,
+          pr: prNumber,
+          headSha: validatedHead,
+          closureAuthority,
+          attempted: Number(dismissal?.attempted || 0),
+          dismissed: Array.isArray(dismissal?.dismissed) ? dismissal.dismissed.map((review) => review.id).filter(Boolean) : [],
+          ok: true,
+        }));
+      } catch (err) {
+        logger?.warn?.(
+          `[daemon-merge] stale Request changes dismissal failed for ` +
+            `${repo}#${prNumber}@${String(validatedHead || '').slice(0, 12)}; ` +
+            `continuing with merge: ${err?.message || err}`,
+        );
+        logger?.log?.(JSON.stringify({
+          schemaVersion: 1,
+          event: 'ama.stale_request_changes.dismissal',
+          repo,
+          pr: prNumber,
+          headSha: validatedHead,
+          closureAuthority,
+          ok: false,
+          error: String(err?.message || err),
+          reviewId: err?.review?.id || null,
+          dismissedBeforeFailure: Array.isArray(err?.dismissed)
+            ? err.dismissed.map((review) => review.id).filter(Boolean)
+            : [],
+          failOpenForMerge: true,
+        }));
+        try {
+          appendAuditImpl({
+            ...auditKeys,
+            attempt: {
+              outcome: 'deferred',
+              path: closureAuthority,
+              attemptPhase: 'pre-merge-review-dismissal',
+              validatedHead,
+              reason: 'stale-request-changes-dismissal-failed',
+              error: String(err?.message || err),
+              reviewId: err?.review?.id || null,
+              failOpenForMerge: true,
+            },
+            now: now(),
+          });
+        } catch (auditErr) {
+          logger?.warn?.(
+            `[daemon-merge] stale Request changes dismissal failure audit append failed for ` +
+              `${repo}#${prNumber}@${String(validatedHead || '').slice(0, 12)}: ${auditErr?.message || auditErr}`,
+          );
+        }
+      }
     }
 
     // Click the button.

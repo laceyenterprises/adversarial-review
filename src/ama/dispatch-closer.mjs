@@ -46,7 +46,10 @@ import {
   readBuildCompletionSignalForPr,
   readLatestWorkerRunStatusFromLedger,
 } from '../session-ledger-read-adapter.mjs';
-import { fetchPullRequestRollup } from '../github-api.mjs';
+import {
+  dismissStandingChangesRequestedReviewsForHead,
+  fetchPullRequestRollup,
+} from '../github-api.mjs';
 import {
   beginReviewerPass,
   completeReviewerPass,
@@ -2873,6 +2876,9 @@ export async function maybeDispatchAmaCloser({
     headSha: headAdvancedDuringDispatch ? targetRemediationSha : reviewedSha,
   };
   const hqRoot = dispatchContext.hqRoot || DEFAULT_HQ_ROOT;
+  const authoritativeReviewerLogins = Array.isArray(dispatchContext.authoritativeReviewerLogins)
+    ? dispatchContext.authoritativeReviewerLogins
+    : [];
   const promptDir = dispatchContext.promptDir || amaCloserPromptDir(rootDir);
   const ownerUser = dispatchContext.hqOwnerUser || resolveHqOwner(hqRoot);
   const auditPath = amaAuditFilePath(hqRoot, repo, prNumber, reviewedSha);
@@ -3249,6 +3255,15 @@ export async function maybeDispatchAmaCloser({
               strictMode: cfg?.strictMode !== false,
             },
             allowHamTerminalRemediation: true,
+            dismissStaleRequestChangesImpl: dispatchContext.dismissStaleRequestChangesOnResolved !== false
+              ? async () => dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo, prNumber, reviewedSha, {
+                  authoritativeReviewerLogins,
+                  message:
+                    `AMA hammer final remediation resolved findings on ${reviewedSha}; ` +
+                    `dismissing stale Request changes before merge.`,
+                  env: process.env,
+                })
+              : null,
             fetchLiveGateImpl: async () => {
               const rollup = await fetchPullRequestRollupImpl(repo, prNumber, { execFileImpl });
               const state = String(rollup?.state || '');

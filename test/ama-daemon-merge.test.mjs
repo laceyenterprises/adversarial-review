@@ -260,6 +260,64 @@ test('clean + eligible → daemon merges inline; daemon-merge audit; no local CI
   assert.equal(h.lastMergeCtx.mergeMethod, 'squash');
 });
 
+test('clean + eligible dismisses stale Request changes before merge', async () => {
+  const h = makeHarness({ mergeResults: [{ exitCode: 0 }] });
+  const dismissals = [];
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    dismissStaleRequestChangesImpl: async (ctx) => {
+      dismissals.push(ctx);
+      return { attempted: 1, dismissed: [{ id: 'review-1' }] };
+    },
+  }));
+
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+  assert.equal(h.calls.merge, 1);
+  assert.equal(dismissals.length, 1);
+  assert.equal(dismissals[0].head, HEAD);
+});
+
+test('dismissal failure is fail-open for daemon merge and audited', async () => {
+  const logs = [];
+  const h = makeHarness({ mergeResults: [{ exitCode: 0 }] });
+  h.deps.logger = {
+    log(line) { logs.push(String(line)); },
+    warn(line) { logs.push(String(line)); },
+  };
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    dismissStaleRequestChangesImpl: async () => {
+      const err = new Error('dismiss forbidden');
+      err.review = { id: 'review-rc' };
+      throw err;
+    },
+  }));
+
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+  assert.equal(h.calls.merge, 1);
+  assert.ok(logs.some((line) => line.includes('"event":"ama.stale_request_changes.dismissal"') && line.includes('"ok":false')));
+  assert.ok(h.calls.auditAppends.some((entry) => (
+    entry.attempt.attemptPhase === 'pre-merge-review-dismissal' &&
+    entry.attempt.failOpenForMerge === true &&
+    entry.attempt.reviewId === 'review-rc'
+  )));
+});
+
+test('blocking findings do not trigger stale Request changes dismissal', async () => {
+  const h = makeHarness();
+  let dismissed = false;
+  const result = await attemptDaemonCleanMerge(baseArgs(h, {
+    reviewState: cleanReview({ blockingFindingCount: 1 }),
+    dismissStaleRequestChangesImpl: async () => {
+      dismissed = true;
+      return { attempted: 1, dismissed: [] };
+    },
+  }));
+
+  assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+  assert.equal(result.reason, 'blocking-findings-present');
+  assert.equal(dismissed, false);
+  assert.equal(h.calls.merge, 0);
+});
+
 test('required branch protection missing the gate → daemon declines before lease', async () => {
   const h = makeHarness();
   const result = await attemptDaemonCleanMerge(baseArgs(h, {

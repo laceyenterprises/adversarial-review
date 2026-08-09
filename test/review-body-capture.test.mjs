@@ -142,7 +142,10 @@ test('reviewer happy path captures verdict, body, gh_comment_id, and timestamp',
   const reviewBody = '## Verdict\n\nComment only\n\nBody text';
   const calls = [];
 
-  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => postGitHubReviewWithCapture({
+  await withEnv({
+    GH_CODEX_REVIEWER_TOKEN: 'token',
+    DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED: '0',
+  }, () => postGitHubReviewWithCapture({
     rootDir,
     repo: pass.repo,
     prNumber: pass.prNumber,
@@ -257,7 +260,10 @@ test('unheaded reviewer retry reuses captured body without double-posting', asyn
   let apiCalls = 0;
   const log = makeLog();
 
-  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => postGitHubReviewWithCapture({
+  await withEnv({
+    GH_CODEX_REVIEWER_TOKEN: 'token',
+    DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED: '0',
+  }, () => postGitHubReviewWithCapture({
     rootDir,
     repo: pass.repo,
     prNumber: pass.prNumber,
@@ -324,7 +330,10 @@ test('reviewer capture falls back to lookup when exact-head post response is unv
   const calls = [];
   const log = makeLog();
 
-  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => postGitHubReviewWithCapture({
+  await withEnv({
+    GH_CODEX_REVIEWER_TOKEN: 'token',
+    DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED: '0',
+  }, () => postGitHubReviewWithCapture({
     rootDir,
     repo: pass.repo,
     prNumber: pass.prNumber,
@@ -589,7 +598,10 @@ test('pending reviewer capture does not leak across attempt boundaries', async (
   });
   const calls = [];
 
-  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => postGitHubReviewWithCapture({
+  await withEnv({
+    GH_CODEX_REVIEWER_TOKEN: 'token',
+    DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED: '0',
+  }, () => postGitHubReviewWithCapture({
     rootDir,
     repo: currentPass.repo,
     prNumber: currentPass.prNumber,

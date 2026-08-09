@@ -1062,6 +1062,92 @@ async function fetchSubmittedReviewsForHead(execFileImpl, repo, prNumber, headSh
   return reviews.filter(matchesHead).sort(sortNewestSubmittedFirst);
 }
 
+function hasNewerApprovalFromSameAuthor(review, reviews) {
+  const author = normalizeLogin(review.author?.login);
+  if (!author) return false;
+  const submittedAt = String(review.submittedAt || '');
+  return reviews.some((candidate) => (
+    normalizeLogin(candidate.author?.login) === author &&
+    String(candidate.state || '').toUpperCase() === 'APPROVED' &&
+    String(candidate.submittedAt || '').localeCompare(submittedAt) > 0
+  ));
+}
+
+function standingChangesRequestedReviews(reviews) {
+  if (!Array.isArray(reviews)) return [];
+  return reviews.filter((review) => (
+    review?.id &&
+    String(review.state || '').toUpperCase() === 'CHANGES_REQUESTED' &&
+    !hasNewerApprovalFromSameAuthor(review, reviews)
+  ));
+}
+
+async function dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo, prNumber, headSha, {
+  authoritativeReviewerLogins = null,
+  authoritativeReviewerLogin = null,
+  message,
+  env = process.env,
+  recordApiCallImpl = recordApiCall,
+} = {}) {
+  const normalizedPrNumber = normalizePrNumber(prNumber);
+  const reviews = await fetchSubmittedReviewsForHead(execFileImpl, repo, normalizedPrNumber, headSha, {
+    authoritativeReviewerLogins,
+    authoritativeReviewerLogin,
+  });
+  const standing = standingChangesRequestedReviews(reviews);
+  const dismissalMessage = String(message || '').trim()
+    || 'Dismissed by AMA merge authority: reviewer findings were remediated/resolved for this head.';
+  const dismissed = [];
+  for (const review of standing) {
+    const startedAt = Date.now();
+    try {
+      await execFileImpl(
+        'gh',
+        [
+          'api',
+          '-X',
+          'PUT',
+          `repos/${repo}/pulls/${normalizedPrNumber}/reviews/${review.id}/dismissals`,
+          '-f',
+          `message=${dismissalMessage}`,
+          '-f',
+          'event=DISMISS',
+        ],
+        {
+          env: buildGhEnv(env),
+          maxBuffer: GH_MAX_BUFFER,
+          timeout: 30_000,
+        },
+      );
+      recordApiCallImpl?.({
+        category: 'review_dismissal',
+        repo,
+        prNumber: normalizedPrNumber,
+        status: 200,
+        durationMs: Date.now() - startedAt,
+      });
+      dismissed.push(review);
+    } catch (err) {
+      recordApiCallImpl?.({
+        category: 'review_dismissal',
+        repo,
+        prNumber: normalizedPrNumber,
+        status: apiStatusFromError(err),
+        durationMs: Date.now() - startedAt,
+      });
+      err.review = review;
+      err.dismissed = dismissed;
+      err.standing = standing;
+      throw err;
+    }
+  }
+  return {
+    dismissed,
+    standing,
+    attempted: standing.length,
+  };
+}
+
 async function fetchLegacyChecks(execFileImpl, repo, headRefOid) {
   if (!headRefOid) return [];
   const checkRuns = await paginateRestWithTotalCount(
@@ -1889,8 +1975,10 @@ const __test__ = {
   fetchLegacyPr,
   fetchLegacyReviewContextWithTelemetry,
   fetchLegacyReviews,
+  dismissStandingChangesRequestedReviewsForHead,
   fetchPullRequestMergeability,
   fetchReviewBodiesForHead,
+  standingChangesRequestedReviews,
   normalizeAdapterHeadAndState,
   normalizeAdapterReviewContext,
   normalizeAdapterRollup,
@@ -1916,6 +2004,7 @@ export {
   fetchPullRequestMergeability,
   fetchPullRequestReviewContext,
   fetchPullRequestRollup,
+  dismissStandingChangesRequestedReviewsForHead,
   fetchReviewBodiesForHead,
   fetchSubmittedReviewsForHead,
 };

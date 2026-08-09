@@ -68,6 +68,7 @@ import {
   fetchPullRequestHeadAndState,
   fetchPullRequestReviewContext,
 } from './github-api.mjs';
+import { dismissStaleRequestChangesAfterCleanReview } from './reviewer-stale-request-dismissal.mjs';
 import {
   resolveHandoffConfig,
   signalFollowUpDaemonWake,
@@ -1873,8 +1874,9 @@ async function postGitHubReviewWithCapture({
     env: process.env,
     log,
   });
-}
 
+  if (!alreadyCaptured && !recoveringPendingCapture) await dismissStaleRequestChangesAfterCleanReview({ repo, prNumber, headSha: normalizedHeadSha, reviewerModel, verdict: normalizedVerdict, botTokenEnv, token: process.env[botTokenEnv] || initialToken, execFileImpl, env: process.env, log });
+}
 // ── Clio alert (OAuth failure) ───────────────────────────────────────────────
 
 /**

@@ -5132,6 +5132,24 @@ test('resume_context_envelope mirrors default and env override', () => {
   }
 });
 
+test('dismiss_stale_request_changes_on_resolved defaults on and honors rollback env alias', () => {
+  const tmp = freshTmp();
+  try {
+    let cfg = loadConfig({ topPath: join(tmp, 'missing.yaml'), env: {} });
+    assert.equal(cfg.get('feature_flags.dismiss_stale_request_changes_on_resolved'), true);
+
+    cfg = loadConfig({
+      topPath: join(tmp, 'missing.yaml'),
+      env: {
+        DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED: 'false',
+      },
+    });
+    assert.equal(cfg.get('feature_flags.dismiss_stale_request_changes_on_resolved'), false);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('handoff.final_to_hammer defaults off and has canonical plus legacy env aliases', () => {
   const tmp = freshTmp();
   try {

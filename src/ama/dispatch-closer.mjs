@@ -227,6 +227,14 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   const effectiveReasons = options?.allowStaleReviewHeadHammerResume === true
     ? reasons.filter((reason) => reason !== 'stale-review-head')
     : reasons;
+  // A PROVEN closer-commit self-cert resume: the resume flag armed AND the
+  // original miss actually carried `stale-review-head` (the head the closer's own
+  // commit advanced). This narrows the #5093 clean-review resume below to the
+  // closer-commit-identity case only -- an external (non-closer) stale head never
+  // arms the flag, so it still parks for a fresh review.
+  const closerStaleHeadResume =
+    options?.allowStaleReviewHeadHammerResume === true &&
+    reasons.includes('stale-review-head');
   if (options?.reviewCycleExhausted === true) {
     if (effectiveReasons.includes('stale-review-head')) {
       return false;
@@ -236,11 +244,24 @@ export function isHammerRemediableEligibilityMiss(reasons, options = {}) {
   // The hammer must have something it can actually act on: non-blocking findings
   // to remediate, a not-mergeable state (conflict / behind) to rebase+resolve, or
   // red CI to fix.
+  //
+  // FIX (#5093, follow-on to #5053): a fully-clean / settled review whose head the
+  // closer's own commit advanced fails the settled-success verdict gate purely
+  // BECAUSE the clean review is anchored to the pre-advance head -- so the ONLY
+  // reason left after stripping the self-certified `stale-review-head` is
+  // `verdict-not-settled-success` (zero findings, zero CI/mergeability miss). That
+  // is not "nothing actionable": the closer self-certifies the head, so the hammer
+  // resumes and re-validates the settled verdict fail-closed before merge. Treat
+  // `verdict-not-settled-success` as actionable for this narrow closer-commit case
+  // ONLY (`closerStaleHeadResume`); a bare `['stale-review-head']` (no
+  // verdict/finding/CI reason) still parks -- #5053's "no purposeless hammer" --
+  // and an external (non-closer) stale head never arms the flag.
   const hasActionable =
     effectiveReasons.includes('non-blocking-findings-present') ||
     effectiveReasons.includes('blocking-findings-present') ||
     effectiveReasons.includes('pr-not-mergeable') ||
-    effectiveReasons.includes('ci-not-green');
+    effectiveReasons.includes('ci-not-green') ||
+    (closerStaleHeadResume && effectiveReasons.includes('verdict-not-settled-success'));
   if (!hasActionable) return false;
   // And EVERY reason must be hammer-remediable — a co-occurring blocking finding,
   // stale head, etc. means NOT auto-hammer (those go through rounds / operator).

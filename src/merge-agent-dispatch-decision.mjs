@@ -193,8 +193,12 @@ function isDismissStaleRequestChangesOnResolvedEnabled({
   topPath,
   modulePaths,
 } = {}) {
-  const raw = env?.[DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED_ENV]
-    ?? env?.[DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED_CANONICAL_ENV];
+  const envRaw = env?.[DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED_ENV];
+  const canonicalEnvRaw = env?.[DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED_CANONICAL_ENV];
+  const raw = envRaw ?? canonicalEnvRaw;
+  const rawSource = envRaw == null && canonicalEnvRaw != null
+    ? DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED_CANONICAL_ENV
+    : DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED_ENV;
   let effectiveRaw = raw;
   if (effectiveRaw == null) {
     const configEnv = env?.AGENT_OS_CONFIG_PATH == null
@@ -224,7 +228,7 @@ function isDismissStaleRequestChangesOnResolvedEnabled({
   if (normalized === '1' || normalized === 'true' || normalized === 'yes') return true;
   if (logger && typeof logger.warn === 'function') {
     logger.warn(
-      `[merge-agent] ${DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED_ENV}=${JSON.stringify(effectiveRaw)} `
+      `[merge-agent] ${rawSource}=${JSON.stringify(effectiveRaw)} `
       + 'is not a recognized boolean (use 1/true/yes or 0/false/no); falling back to OFF.'
     );
   }

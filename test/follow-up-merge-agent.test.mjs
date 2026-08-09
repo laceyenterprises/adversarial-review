@@ -15,6 +15,9 @@ import { CASCADE_FAILURE_CAP, recordCascadeFailure } from '../src/reviewer-casca
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../src/config-loader.mjs';
 import { extractNonBlockingFindingIdentities } from '../src/kernel/remediation-reply.mjs';
 import {
+  isDismissStaleRequestChangesOnResolvedEnabled,
+} from '../src/merge-agent-dispatch-decision.mjs';
+import {
   FINAL_PASS_BLOCKER_REMEDIATION_TRIGGER,
   FINAL_PASS_ON_BUDGET_EXHAUSTED_TRIGGER,
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
@@ -984,6 +987,24 @@ test('isFinalPassOnRequestChangesEnabled defaults ON for unset/empty, off for ex
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
+});
+
+test('isDismissStaleRequestChangesOnResolvedEnabled warning names canonical env source', () => {
+  const warnings = [];
+  const enabled = isDismissStaleRequestChangesOnResolvedEnabled({
+    env: {
+      AGENT_OS_FEATURE_FLAGS_DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED: 'maybe',
+    },
+    logger: { warn: (message) => warnings.push(message) },
+  });
+
+  assert.equal(enabled, false);
+  assert.equal(warnings.length, 1);
+  assert.match(
+    warnings[0],
+    /AGENT_OS_FEATURE_FLAGS_DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED="maybe"/,
+  );
+  assert.doesNotMatch(warnings[0], /^\[merge-agent\] DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED=/);
 });
 
 test('isDeterministicConvergenceTerminalEnabled defaults OFF and honors explicit opt-in', () => {

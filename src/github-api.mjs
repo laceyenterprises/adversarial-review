@@ -954,7 +954,13 @@ async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
     }
     return true;
   };
-  const sortNewestSubmittedFirst = (a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt));
+  const sortNewestSubmittedFirst = (a, b) => {
+    const left = String(a.submittedAt || '');
+    const right = String(b.submittedAt || '');
+    if (right > left) return 1;
+    if (right < left) return -1;
+    return 0;
+  };
   try {
     const adapterReviews = await runAdapterReadWithTelemetry('reviews_list', {
       repo,
@@ -1070,7 +1076,7 @@ function hasNewerApprovalFromSameAuthor(review, reviews) {
   return reviews.some((candidate) => (
     normalizeLogin(candidate.author?.login) === author &&
     String(candidate.state || '').toUpperCase() === 'APPROVED' &&
-    String(candidate.submittedAt || '').localeCompare(submittedAt) > 0
+    String(candidate.submittedAt || '') > submittedAt
   ));
 }
 

@@ -1875,7 +1875,12 @@ async function postGitHubReviewWithCapture({
     log,
   });
 
-  if (!alreadyCaptured && !recoveringPendingCapture) await dismissStaleRequestChangesAfterCleanReview({ repo, prNumber, headSha: normalizedHeadSha, reviewerModel, verdict: normalizedVerdict, botTokenEnv, token: process.env[botTokenEnv] || initialToken, execFileImpl, env: process.env, log });
+  if (!alreadyCaptured && !recoveringPendingCapture) {
+    await dismissStaleRequestChangesAfterCleanReview({
+      repo, prNumber, headSha: normalizedHeadSha, reviewerModel, verdict: normalizedVerdict,
+      botTokenEnv, token: process.env[botTokenEnv] || initialToken, execFileImpl, env: process.env, log,
+    });
+  }
 }
 // ── Clio alert (OAuth failure) ───────────────────────────────────────────────
 
@@ -1885,9 +1890,7 @@ async function postGitHubReviewWithCapture({
  */
 async function alertClioOAuthFailure(model, repo, prNumber, reason) {
   const msg = `🔐 Adversarial reviewer STOPPED — ${model} OAuth credentials unavailable.\n\nRepo: ${repo} PR #${prNumber}\nReason: ${reason}\n\nAction needed: re-authenticate ${model} (run the CLI and log in). PR review is paused until credentials are restored.`;
-
   console.error(`[reviewer] ALERT: ${msg}`);
-
   // Try to wake Clio via the OpenClaw hook
   try {
     await execFileAsync(
@@ -1919,9 +1922,7 @@ async function alertClioOversizedAgyFailure({
   sleepImpl = sleep,
 } = {}) {
   const msg = `Adversarial reviewer oversized agy prompt could not be reviewed.\n\nRepo: ${repo} PR #${prNumber}\nPrompt bytes: ${promptBytes ?? 'unknown'}\nAgy argv budget: ${maxBytes ?? 'unknown'}\nReason: ${reason}\n\nThis is the #3074/#3122/#3124 no-review prevention guard; operator action is required because both cross-model routing and chunk fallback were unavailable.`;
-
   console.error(`[reviewer] ALERT: ${msg}`);
-
   try {
     await execFileWithTransientRetry(
       'curl',
@@ -1944,14 +1945,12 @@ async function alertClioOversizedAgyFailure({
 }
 
 // ── Linear integration (LAC-13) ──────────────────────────────────────────────
-
 const linearTriage = createLinearTriageAdapter({
   logger: console,
   criticalWords: CRITICAL_WORDS,
 });
 
 // ── Main ─────────────────────────────────────────────────────────────────────
-
 async function main() {
   const rawArgs = process.argv[2];
   if (!rawArgs) {

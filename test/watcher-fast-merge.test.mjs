@@ -180,6 +180,9 @@ export async function load(url, context, nextLoad) {
       export async function fetchSubmittedReviewsForHead() {
         return [];
       }
+      export async function dismissStandingChangesRequestedReviewsForHead() {
+        return { dismissed: [], standing: [], attempted: 0 };
+      }
       export async function fetchPullRequestCommitSubjects() {
         return scenario.commitSubjects || [];
       }

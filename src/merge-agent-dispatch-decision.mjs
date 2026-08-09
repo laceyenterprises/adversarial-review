@@ -55,9 +55,12 @@ import {
 // merge-agent backend). Set MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES=0
 // to disable.
 const FINAL_PASS_ON_REQUEST_CHANGES_ENV = 'MERGE_AGENT_FINAL_PASS_ON_REQUEST_CHANGES';
+const DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED_ENV = 'DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED';
 const DETERMINISTIC_CONVERGENCE_TERMINAL_ENV = 'MERGE_AGENT_DETERMINISTIC_CONVERGENCE_TERMINAL';
 const DETERMINISTIC_CONVERGENCE_TERMINAL_CANONICAL_ENV =
   'AGENT_OS_FEATURE_FLAGS_MERGE_AGENT_DETERMINISTIC_CONVERGENCE_TERMINAL';
+const DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED_CANONICAL_ENV =
+  'AGENT_OS_FEATURE_FLAGS_DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED';
 
 const _FINAL_PASS_CONFIG_WARNED_PATHS = new Set();
 
@@ -178,6 +181,54 @@ function isDeterministicConvergenceTerminalEnabled({
   if (logger && typeof logger.warn === 'function') {
     logger.warn(
       `[merge-agent] ${DETERMINISTIC_CONVERGENCE_TERMINAL_ENV}=${JSON.stringify(effectiveRaw)} `
+      + 'is not a recognized boolean (use 1/true/yes or 0/false/no); falling back to OFF.'
+    );
+  }
+  return false;
+}
+
+function isDismissStaleRequestChangesOnResolvedEnabled({
+  env = process.env,
+  logger = console,
+  topPath,
+  modulePaths,
+} = {}) {
+  const envRaw = env?.[DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED_ENV];
+  const canonicalEnvRaw = env?.[DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED_CANONICAL_ENV];
+  const raw = envRaw ?? canonicalEnvRaw;
+  const rawSource = envRaw == null && canonicalEnvRaw != null
+    ? DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED_CANONICAL_ENV
+    : DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED_ENV;
+  let effectiveRaw = raw;
+  if (effectiveRaw == null) {
+    const configEnv = env?.AGENT_OS_CONFIG_PATH == null
+      ? {}
+      : { AGENT_OS_CONFIG_PATH: env.AGENT_OS_CONFIG_PATH };
+    try {
+      effectiveRaw = loadConfigCached({
+        env: configEnv,
+        topPath,
+        modulePaths: modulePaths || [MODULE_CONFIG_PATH],
+      }).get('feature_flags.dismiss_stale_request_changes_on_resolved')
+        ? 'true'
+        : 'false';
+    } catch (err) {
+      if (logger && typeof logger.warn === 'function') {
+        logger.warn(
+          '[merge-agent] failed to load feature_flags.dismiss_stale_request_changes_on_resolved; '
+          + `falling back to default ON. ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+      return true;
+    }
+  }
+  const normalized = String(effectiveRaw).trim().toLowerCase();
+  if (normalized === '') return true;
+  if (normalized === '0' || normalized === 'false' || normalized === 'no') return false;
+  if (normalized === '1' || normalized === 'true' || normalized === 'yes') return true;
+  if (logger && typeof logger.warn === 'function') {
+    logger.warn(
+      `[merge-agent] ${rawSource}=${JSON.stringify(effectiveRaw)} `
       + 'is not a recognized boolean (use 1/true/yes or 0/false/no); falling back to OFF.'
     );
   }
@@ -587,8 +638,10 @@ function buildScopedMergeAgentRequest(candidate) {
 
 export {
   FINAL_PASS_ON_REQUEST_CHANGES_ENV,
+  DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED_ENV,
   DETERMINISTIC_CONVERGENCE_TERMINAL_ENV,
   isFinalPassOnRequestChangesEnabled,
+  isDismissStaleRequestChangesOnResolvedEnabled,
   isDeterministicConvergenceTerminalEnabled,
   pickMergeAgentDispatch,
   pickMergeAgentDispatchDetail,

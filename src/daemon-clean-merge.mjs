@@ -15,7 +15,10 @@ import { readAmaAuditEntry } from './ama/audit.mjs';
 import { getHeadCloserCommitSuppression } from './head-closer-commit-suppression.mjs';
 import { acquireMergeLease, releaseMergeLease } from './ama/merge-lease.mjs';
 import { readBuildCompletionSignalForPr } from './session-ledger-read-adapter.mjs';
-import { fetchPullRequestRollup } from './github-api.mjs';
+import {
+  dismissStandingChangesRequestedReviewsForHead,
+  fetchPullRequestRollup,
+} from './github-api.mjs';
 import { execGhWithRetry } from './gh-cli.mjs';
 import {
   resolveDaemonWorkerIdentityForPr,
@@ -320,6 +323,8 @@ export async function runDaemonCleanMergeAttempt({
   resolveHeadCloserCommitSuppressionImpl = getHeadCloserCommitSuppression,
   resolveAutonomousCloserCommitAccountabilityImpl = resolveAutonomousCloserCommitAccountability,
   env = process.env,
+  authoritativeReviewerLogins = [],
+  dismissStaleRequestChangesOnResolved = true,
 } = {}) {
   const base = candidate?.baseBranch;
   const validatedHead = gateSnapshot?.reviewedHeadSha || reviewState?.headSha || null;
@@ -673,6 +678,15 @@ export async function runDaemonCleanMergeAttempt({
       autonomousMergeExecutionEnabled: cfg?.autonomousMergeExecutionEnabled !== false,
       strictMode,
     },
+    dismissStaleRequestChangesImpl: dismissStaleRequestChangesOnResolved !== false
+      ? async () => dismissStandingChangesRequestedReviewsForHead(execFileImpl, repoPath, prNumber, daemonValidatedHead, {
+          authoritativeReviewerLogins,
+          message:
+            `AMA merge authority is dismissing stale Request changes on ${daemonValidatedHead}: ` +
+            `review findings were remediated/resolved before merge.`,
+          env,
+        })
+      : null,
     // Re-read the LIVE head + gate before each merge attempt (retry included).
     fetchLiveGateImpl: async () => {
       const rollup = await fetchRollupImpl(repoPath, prNumber, { execFileImpl });

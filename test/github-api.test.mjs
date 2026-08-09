@@ -1615,6 +1615,155 @@ test('fetchSubmittedReviewsForHead with an empty trusted-login set fails closed'
   assert.equal(called, false);
 });
 
+test('dismissStandingChangesRequestedReviewsForHead dismisses only authoritative standing request-changes on current head', async () => {
+  const mod = await importGithubApiFresh();
+  const headSha = 'head-dismiss-target';
+  const calls = [];
+  const result = await mod.dismissStandingChangesRequestedReviewsForHead(
+    async (command, args) => {
+      calls.push({ command, args });
+      assert.equal(command, 'gh');
+      if (args[0] === 'api' && args.includes('-X') && args.includes('PUT')) {
+        return { stdout: '{}' };
+      }
+      return makeReviewsListEnvelope([
+        {
+          id: 101,
+          user: { login: 'lacey-codex-reviewer[bot]' },
+          body: 'blocking',
+          state: 'CHANGES_REQUESTED',
+          submitted_at: '2026-08-09T10:00:00Z',
+          commit_id: headSha,
+        },
+        {
+          id: 102,
+          user: { login: 'lacey-codex-reviewer[bot]' },
+          body: 'clean comment, does not clear request changes',
+          state: 'COMMENTED',
+          submitted_at: '2026-08-09T10:05:00Z',
+          commit_id: headSha,
+        },
+        {
+          id: 103,
+          user: { login: 'human-reviewer' },
+          body: 'human block',
+          state: 'CHANGES_REQUESTED',
+          submitted_at: '2026-08-09T10:06:00Z',
+          commit_id: headSha,
+        },
+        {
+          id: 104,
+          user: { login: 'lacey-codex-reviewer[bot]' },
+          body: 'old head block',
+          state: 'CHANGES_REQUESTED',
+          submitted_at: '2026-08-09T10:07:00Z',
+          commit_id: 'old-head',
+        },
+      ]);
+    },
+    FIXTURE_REPO,
+    FIXTURE_PR,
+    headSha,
+    {
+      authoritativeReviewerLogins: ['lacey-codex-reviewer'],
+      message: 'resolved by remediation abc123',
+      recordApiCallImpl: () => {},
+    },
+  );
+
+  const dismissCalls = calls.filter((call) => call.args.includes('-X'));
+  assert.equal(result.attempted, 1);
+  assert.deepEqual(result.dismissed.map((review) => review.id), ['101']);
+  assert.equal(dismissCalls.length, 1);
+  assert.match(dismissCalls[0].args.join(' '), /reviews\/101\/dismissals/);
+  assert.ok(dismissCalls[0].args.includes('message=resolved by remediation abc123'));
+  assert.ok(!dismissCalls[0].args.includes('event=DISMISS'));
+});
+
+test('dismissStandingChangesRequestedReviewsForHead retries transient gh dismissal failures', async () => {
+  const mod = await importGithubApiFresh();
+  const headSha = 'head-dismiss-retry-target';
+  let dismissAttempts = 0;
+  const result = await mod.dismissStandingChangesRequestedReviewsForHead(
+    async (command, args) => {
+      assert.equal(command, 'gh');
+      if (args[0] === 'api' && args.includes('-X') && args.includes('PUT')) {
+        dismissAttempts += 1;
+        if (dismissAttempts === 1) {
+          const err = new Error('TLS handshake timeout');
+          err.stderr = 'TLS handshake timeout';
+          throw err;
+        }
+        return { stdout: '{}' };
+      }
+      return makeReviewsListEnvelope([
+        {
+          id: 151,
+          user: { login: 'lacey-codex-reviewer[bot]' },
+          body: 'blocking',
+          state: 'CHANGES_REQUESTED',
+          submitted_at: '2026-08-09T10:00:00Z',
+          commit_id: headSha,
+        },
+      ]);
+    },
+    FIXTURE_REPO,
+    FIXTURE_PR,
+    headSha,
+    {
+      authoritativeReviewerLogins: ['lacey-codex-reviewer'],
+      recordApiCallImpl: () => {},
+      execGhWithRetryImpl: async ({ execFileImpl, args }) => {
+        try {
+          return await execFileImpl('gh', args);
+        } catch (err) {
+          assert.match(String(err?.stderr || err?.message || ''), /TLS handshake timeout/);
+          return execFileImpl('gh', args);
+        }
+      },
+    },
+  );
+
+  assert.equal(dismissAttempts, 2);
+  assert.equal(result.attempted, 1);
+  assert.deepEqual(result.dismissed.map((review) => review.id), ['151']);
+});
+
+test('dismissStandingChangesRequestedReviewsForHead no-ops when a newer approval clears the reviewer request', async () => {
+  const mod = await importGithubApiFresh();
+  const headSha = 'head-approval-cleared';
+  const calls = [];
+  const result = await mod.dismissStandingChangesRequestedReviewsForHead(
+    async (command, args) => {
+      calls.push({ command, args });
+      return makeReviewsListEnvelope([
+        {
+          id: 201,
+          user: { login: 'lacey-gemini-reviewer' },
+          body: 'blocking',
+          state: 'CHANGES_REQUESTED',
+          submitted_at: '2026-08-09T10:00:00Z',
+          commit_id: headSha,
+        },
+        {
+          id: 202,
+          user: { login: 'lacey-gemini-reviewer' },
+          body: 'approved',
+          state: 'APPROVED',
+          submitted_at: '2026-08-09T10:05:00Z',
+          commit_id: headSha,
+        },
+      ]);
+    },
+    FIXTURE_REPO,
+    FIXTURE_PR,
+    headSha,
+    { authoritativeReviewerLogins: ['lacey-gemini-reviewer'], recordApiCallImpl: () => {} },
+  );
+  assert.equal(result.attempted, 0);
+  assert.equal(calls.filter((call) => call.args.includes('-X')).length, 0);
+});
+
 function makeLargeExpectedRollup() {
   const base = makeExpectedRollup();
   return {
@@ -1892,7 +2041,7 @@ export async function load(url, context, nextLoad) {
 
   const simpleStubs = {
     'fixture:routing': "export const REVIEWER_ROUTE_BY_MODEL = {}; export const ROUTE_BY_BUILDER_CLASS = {}; export function routeSubject() { return null; } export function defaultReviewerRouteFromEnv() { return null; } export function validateDefaultReviewerRouteConfig() {} export function describeCrossModelReviewWaiver() { return null; } export function isCrossModelReviewWaived() { return false; } export function applyGeminiReviewerRoute(opts) { return opts && opts.baseRoute; } export function applyEffectiveReviewerRoute(opts) { return opts && opts.baseRoute; } export const GEMINI_REVIEWABLE_BUILDER_CLASSES = []; export function geminiMayReviewBuilder() { return false; } export function normalizeBuilderClass() { return null; } export function normalizeReviewerModel(value) { const v = String(value || '').trim().toLowerCase(); return v === 'claude-code' ? 'claude' : (['claude', 'codex', 'gemini'].includes(v) ? v : null); }",
-    'fixture:role-config': "export function loadRoleConfig() { return { get: (_key, defaultValue) => defaultValue }; } export function resetRoleConfigCache() {} export function resolveGeminiReviewerMode() { return 'always-on'; } export function resolveGeminiReviewerModeWithSource() { return { mode: 'always-on', source: 'default', sourceDetail: 'fixture', rawValue: 'always-on', path: null, topPath: null, modulePaths: [] }; } export function resolveGeminiRuntime() { return 'cli'; } export function resolveReviewPopulationRetryConfig() { return { maxAttempts: 1, backoffSeconds: 45 }; }",
+    'fixture:role-config': "export const MODULE_CONFIG_PATH = '/fixture/config.yaml'; export function loadRoleConfig() { return { get: (_key, defaultValue) => defaultValue }; } export function resetRoleConfigCache() {} export function resolveGeminiReviewerMode() { return 'always-on'; } export function resolveGeminiReviewerModeWithSource() { return { mode: 'always-on', source: 'default', sourceDetail: 'fixture', rawValue: 'always-on', path: null, topPath: null, modulePaths: [] }; } export function resolveGeminiRuntime() { return 'cli'; } export function resolveReviewPopulationRetryConfig() { return { maxAttempts: 1, backoffSeconds: 45 }; }",
     'fixture:config-loader': "export class AgentOSConfigError extends Error {} export const ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE = ['native', 'agentos']; export function loadConfigCached() { return {}; }",
     'fixture:role-registry': "export function validateRoleRegistry(rawRegistry) { return { roles: rawRegistry, routing: { neverReviewOwnBuilderClass: true } }; } export function validateStartupRoleRegistry() {} export function loadRoleRegistry() { return { roles: {}, routing: { neverReviewOwnBuilderClass: true } }; }",
     'fixture:github-pr-comments': "export function createGitHubPRCommentsAdapter() { return { async postPipelineRollup() { return { deliveryExternalId: 'fixture-rollup' }; } }; }",
@@ -1923,7 +2072,7 @@ export async function load(url, context, nextLoad) {
     'fixture:atomic-write': "export function writeFileAtomic() {}",
     'fixture:gh-cli': "export const GH_LOOKUP_MAX_BUFFER = 26214400; export const GH_LOOKUP_TIMEOUT_MS = 30000; export function buildAllowlistedGhEnv(env = process.env) { return { ...env }; } export async function execGhWithRetry({ execFileImpl, args } = {}) { return execFileImpl('gh', args); } export function isTransientGhError() { return false; } export function parseDate(value) { return value ? new Date(value) : null; } export function parseJsonLines(stdout) { return String(stdout || '').split('\\\\n').filter(Boolean).map((line) => JSON.parse(line)); }",
     'fixture:ama-ham-provenance': "export const HAM_AUDIT_COMMENT_AUTHOR_LOGINS = new Set(); export function hamAuditCommentAuthorMatches() { return false; } export function parseCommitTrailers() { return {}; } export function parseRemediatedFindingsTrailer() { return null; }",
-    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { globalThis.__githubApiWatcherRollupCalls = (globalThis.__githubApiWatcherRollupCalls || 0) + 1; return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1; return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestMergeability() { return { mergeable: scenario.rollup.mergeable, mergeStateStatus: scenario.rollup.mergeStateStatus }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchSubmittedReviewsForHead() { return []; } export async function fetchPullRequestCommitSubjects() { return []; }",
+    'fixture:github-api': "const scenario = globalThis.__githubApiWatcherScenario; export async function fetchPullRequestRollup() { globalThis.__githubApiWatcherRollupCalls = (globalThis.__githubApiWatcherRollupCalls || 0) + 1; return { ...scenario.rollup, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestHeadAndState() { globalThis.__githubApiWatcherHeadStateCalls = (globalThis.__githubApiWatcherHeadStateCalls || 0) + 1; return { state: scenario.rollup.state, mergedAt: scenario.rollup.mergedAt, closedAt: scenario.rollup.closedAt, headRefOid: scenario.rollup.headRefOid, labels: [...scenario.rollup.labels] }; } export async function fetchPullRequestMergeability() { return { mergeable: scenario.rollup.mergeable, mergeStateStatus: scenario.rollup.mergeStateStatus }; } export async function fetchReviewBodiesForHead() { return []; } export async function fetchSubmittedReviewsForHead() { return []; } export async function dismissStandingChangesRequestedReviewsForHead() { return { attempted: 0, dismissed: [], standing: [] }; } export async function fetchPullRequestCommitSubjects() { return []; }",
   };
 
   if (Object.prototype.hasOwnProperty.call(simpleStubs, url)) {

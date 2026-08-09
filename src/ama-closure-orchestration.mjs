@@ -40,6 +40,7 @@ import { isTransientGhError } from './gh-cli.mjs';
 import { fetchPullRequestMergeability, fetchReviewBodiesForHead } from './github-api.mjs';
 import { normalizeGithubMergeability, resolveMergeabilityWithSampling } from './github-mergeability.mjs';
 import { getHeadCloserCommitSuppression } from './head-closer-commit-suppression.mjs';
+import { isDismissStaleRequestChangesOnResolvedEnabled } from './merge-agent-dispatch-decision.mjs';
 import { resolveOrchestrationMode } from './pr-lifecycle-sync.mjs';
 import {
   countCompletedReviewerRereviewRounds,
@@ -400,6 +401,7 @@ export async function maybeDispatchAmaClosureFor({
   // fail-open merge) do we reconcile against the LIVE latest review on the head;
   // this bounds the extra GitHub call to apparently-mergeable PRs. A fresh
   // `Request changes` then wins, and a lookup failure fails closed.
+  const authoritativeReviewerLogins = amaAuthoritativeReviewerLoginsForModel(reviewStateRow?.reviewer);
   if (
     settledReviewHeadSha &&
     gateSnapshot.settledReview?.remediationPending === false &&
@@ -415,7 +417,6 @@ export async function maybeDispatchAmaClosureFor({
     // `<model>-reviewer-lacey` config form) so the anti-spoof filter is robust to
     // the known naming discrepancy without mutating the globally-used
     // REVIEWER_BOT_LOGINS map (which review-body-capture / closeout-scraper rely on).
-    const authoritativeReviewerLogins = amaAuthoritativeReviewerLoginsForModel(reviewStateRow?.reviewer);
     try {
       const bodies = authoritativeReviewerLogins.length
         ? await fetchLatestHeadReviewBodiesWithRetry({
@@ -669,6 +670,8 @@ export async function maybeDispatchAmaClosureFor({
     mergeAgentRequestEvent,
     logger,
     env,
+    authoritativeReviewerLogins,
+    dismissStaleRequestChangesOnResolved: isDismissStaleRequestChangesOnResolvedEnabled({ env, logger }),
   });
   if (daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
     const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
@@ -776,6 +779,8 @@ export async function maybeDispatchAmaClosureFor({
     requiredGateContext,
     reviewedBy: reviewStateRow?.reviewer_login || '',
     reviewer: reviewStateRow?.reviewer || '',
+    authoritativeReviewerLogins,
+    dismissStaleRequestChangesOnResolved: isDismissStaleRequestChangesOnResolvedEnabled({ env, logger }),
     parentSession: process.env.HQ_PARENT_SESSION || 'session:unknown:airlock+watcher',
     dispatchedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     orchestrationMode,

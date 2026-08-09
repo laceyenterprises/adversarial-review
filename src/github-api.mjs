@@ -9,6 +9,7 @@ import {
   readAdapterReviewContext,
   resolveGitHubAdapterBin,
 } from './github-adapter-client.mjs';
+import { execGhWithRetry } from './gh-cli.mjs';
 import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit } from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -953,7 +954,13 @@ async function fetchReviewBodiesForHead(execFileImpl, repo, prNumber, headSha, {
     }
     return true;
   };
-  const sortNewestSubmittedFirst = (a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt));
+  const sortNewestSubmittedFirst = (a, b) => {
+    const left = String(a.submittedAt || '');
+    const right = String(b.submittedAt || '');
+    if (right > left) return 1;
+    if (right < left) return -1;
+    return 0;
+  };
   try {
     const adapterReviews = await runAdapterReadWithTelemetry('reviews_list', {
       repo,
@@ -1060,6 +1067,91 @@ async function fetchSubmittedReviewsForHead(execFileImpl, repo, prNumber, headSh
     })),
   );
   return reviews.filter(matchesHead).sort(sortNewestSubmittedFirst);
+}
+
+function hasNewerApprovalFromSameAuthor(review, reviews) {
+  const author = normalizeLogin(review.author?.login);
+  if (!author) return false;
+  const submittedAt = String(review.submittedAt || '');
+  return reviews.some((candidate) => (
+    normalizeLogin(candidate.author?.login) === author &&
+    String(candidate.state || '').toUpperCase() === 'APPROVED' &&
+    String(candidate.submittedAt || '') > submittedAt
+  ));
+}
+
+function standingChangesRequestedReviews(reviews) {
+  if (!Array.isArray(reviews)) return [];
+  return reviews.filter((review) => (
+    review?.id &&
+    String(review.state || '').toUpperCase() === 'CHANGES_REQUESTED' &&
+    !hasNewerApprovalFromSameAuthor(review, reviews)
+  ));
+}
+
+async function dismissStandingChangesRequestedReviewsForHead(execFileImpl, repo, prNumber, headSha, {
+  authoritativeReviewerLogins = null,
+  authoritativeReviewerLogin = null,
+  message,
+  env = process.env,
+  execGhWithRetryImpl = execGhWithRetry,
+  recordApiCallImpl = recordApiCall,
+} = {}) {
+  const normalizedPrNumber = normalizePrNumber(prNumber);
+  const reviews = await fetchSubmittedReviewsForHead(execFileImpl, repo, normalizedPrNumber, headSha, {
+    authoritativeReviewerLogins,
+    authoritativeReviewerLogin,
+  });
+  const standing = standingChangesRequestedReviews(reviews);
+  const dismissalMessage = String(message || '').trim()
+    || 'Dismissed by AMA merge authority: reviewer findings were remediated/resolved for this head.';
+  const dismissed = [];
+  const dismissalEnv = buildGhEnv(env);
+  if (dismissalEnv.GH_TOKEN) {
+    delete dismissalEnv.GITHUB_TOKEN;
+  }
+  for (const review of standing) {
+    const startedAt = Date.now();
+    try {
+      await execGhWithRetryImpl({
+        execFileImpl,
+        args: [
+          'api',
+          '-X',
+          'PUT',
+          `repos/${repo}/pulls/${normalizedPrNumber}/reviews/${review.id}/dismissals`,
+          '-f',
+          `message=${dismissalMessage}`,
+        ],
+        env: dismissalEnv,
+      });
+      recordApiCallImpl?.({
+        category: 'review_dismissal',
+        repo,
+        prNumber: normalizedPrNumber,
+        status: 200,
+        durationMs: Date.now() - startedAt,
+      });
+      dismissed.push(review);
+    } catch (err) {
+      recordApiCallImpl?.({
+        category: 'review_dismissal',
+        repo,
+        prNumber: normalizedPrNumber,
+        status: apiStatusFromError(err),
+        durationMs: Date.now() - startedAt,
+      });
+      err.review = review;
+      err.dismissed = dismissed;
+      err.standing = standing;
+      throw err;
+    }
+  }
+  return {
+    dismissed,
+    standing,
+    attempted: standing.length,
+  };
 }
 
 async function fetchLegacyChecks(execFileImpl, repo, headRefOid) {
@@ -1889,8 +1981,10 @@ const __test__ = {
   fetchLegacyPr,
   fetchLegacyReviewContextWithTelemetry,
   fetchLegacyReviews,
+  dismissStandingChangesRequestedReviewsForHead,
   fetchPullRequestMergeability,
   fetchReviewBodiesForHead,
+  standingChangesRequestedReviews,
   normalizeAdapterHeadAndState,
   normalizeAdapterReviewContext,
   normalizeAdapterRollup,
@@ -1916,6 +2010,7 @@ export {
   fetchPullRequestMergeability,
   fetchPullRequestReviewContext,
   fetchPullRequestRollup,
+  dismissStandingChangesRequestedReviewsForHead,
   fetchReviewBodiesForHead,
   fetchSubmittedReviewsForHead,
 };

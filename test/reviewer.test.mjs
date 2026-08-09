@@ -277,6 +277,95 @@ test('postGitHubReview binds a known reviewed snapshot to GitHub commit_id', asy
   assert.equal(calls[0].options.env.GH_TOKEN, 'ghp_codex_reviewer_pat');
 });
 
+test('postGitHubReviewWithCapture dismisses prior request-changes after clean exact-head re-review', async () => {
+  const calls = [];
+  const rootDir = mkdtempSync(join(tmpdir(), 'review-clean-dismissal-'));
+  mkdirSync(join(rootDir, 'data'), { recursive: true });
+  const reviewBody = [
+    '## Summary',
+    'Clean after remediation.',
+    '',
+    '## Verdict',
+    'Comment only',
+  ].join('\n');
+  try {
+    await withEnvAsync({
+      GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+      DISMISS_STALE_REQUEST_CHANGES_ON_RESOLVED: '1',
+    }, () => postGitHubReviewWithCapture({
+      rootDir,
+      repo: 'laceyenterprises/demo',
+      prNumber: 42,
+      attemptNumber: 1,
+      reviewerModel: 'codex',
+      reviewerHeadSha: 'reviewed-head-sha',
+      reviewBody,
+      botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+      passKind: 'rereview',
+      postedAt: '2026-08-09T10:10:00.000Z',
+      lookupRetryBackoffMs: [],
+      execFileImpl: async (command, args, options = {}) => {
+        calls.push({ command, args, options });
+        assert.equal(command, 'gh');
+        const joined = args.join(' ');
+        if (joined.includes('--method POST') && joined.includes('/reviews')) {
+          return {
+            stdout: JSON.stringify({
+              id: 4242,
+              commit_id: 'reviewed-head-sha',
+            }),
+          };
+        }
+        if (joined.includes('/reviews/9001/dismissals')) {
+          return { stdout: '{}' };
+        }
+        if (joined.includes('/pulls/42/reviews?')) {
+          return {
+            stdout:
+              'HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n' +
+              JSON.stringify([
+                {
+                  id: 9001,
+                  user: { login: 'lacey-codex-reviewer[bot]' },
+                  body: 'blocking',
+                  state: 'CHANGES_REQUESTED',
+                  submitted_at: '2026-08-09T10:00:00Z',
+                  commit_id: 'reviewed-head-sha',
+                },
+                {
+                  id: 9002,
+                  user: { login: 'lacey-codex-reviewer[bot]' },
+                  body: 'clean',
+                  state: 'COMMENTED',
+                  submitted_at: '2026-08-09T10:05:00Z',
+                  commit_id: 'reviewed-head-sha',
+                },
+                {
+                  id: 9003,
+                  user: { login: 'human' },
+                  body: 'human block',
+                  state: 'CHANGES_REQUESTED',
+                  submitted_at: '2026-08-09T10:06:00Z',
+                  commit_id: 'reviewed-head-sha',
+                },
+              ]),
+          };
+        }
+        throw new Error(`unexpected gh call: ${joined}`);
+      },
+      emitReviewedAttestationImpl: async () => ({}),
+    }));
+
+    const dismissalCall = calls.find((call) => call.args.join(' ').includes('/reviews/9001/dismissals'));
+    assert.ok(dismissalCall);
+    assert.ok(!dismissalCall.args.includes('event=DISMISS'));
+    assert.equal(dismissalCall.options.env.GH_TOKEN, 'ghp_codex_reviewer_pat');
+    assert.equal(calls.filter((call) => call.args.join(' ').includes('/dismissals')).length, 1);
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('postGitHubReview maps exact-head request-changes verdicts to blocking GitHub reviews', async () => {
   const calls = [];
   const reviewBody = [

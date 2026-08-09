@@ -107,6 +107,31 @@ export function resolveOperatorMergeAccountability({
   return null;
 }
 
+export function resolveAutonomousCloserCommitAccountability({
+  enabled = true,
+  reviewedHeadSha,
+  mergeHeadSha,
+  suppression = null,
+  workerIdentityReason = 'worker-identity-unresolved',
+} = {}) {
+  if (enabled === false) return null;
+  const reviewedHead = String(reviewedHeadSha || '').trim();
+  const mergeHead = String(mergeHeadSha || '').trim();
+  if (!reviewedHead || !mergeHead || reviewedHead === mergeHead) return null;
+  if (suppression?.suppressed !== true) return null;
+  return {
+    label: 'autonomous-closer-commit-clean',
+    actor: 'merge-agent',
+    eventId: `closer-commit-clean:${mergeHead}`,
+    observedAt: new Date().toISOString(),
+    headSha: mergeHead,
+    reviewedHeadSha: reviewedHead,
+    reason: suppression.reason || 'closer-commit-identity',
+    matched: suppression.matched || null,
+    workerIdentityReason,
+  };
+}
+
 /**
  * Resolve the required-checks array from a `fetchPullRequestRollup` result.
  *
@@ -293,6 +318,7 @@ export async function runDaemonCleanMergeAttempt({
   readAmaAuditEntryImpl = readAmaAuditEntry,
   headHasValidatedHamTerminalRemediationImpl = headHasValidatedHamTerminalRemediation,
   resolveHeadCloserCommitSuppressionImpl = getHeadCloserCommitSuppression,
+  resolveAutonomousCloserCommitAccountabilityImpl = resolveAutonomousCloserCommitAccountability,
   env = process.env,
 } = {}) {
   const base = candidate?.baseBranch;
@@ -348,6 +374,8 @@ export async function runDaemonCleanMergeAttempt({
   // flag ALSO re-checks blocking==0 via strictMode:false, so a blocking finding or
   // an unknown classification is never merged over.
   let headCloserCertifiedNonBlocking = false;
+  let cleanCloserCommitAccountability = null;
+  let cleanCloserCommitSuppression = null;
   if (!isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
     const uncleanReason =
       resolveDaemonMergeUncleanReason(reviewState, { strictMode }) || 'findings-unknown';
@@ -439,6 +467,28 @@ export async function runDaemonCleanMergeAttempt({
       liveHead,
     };
   }
+  if (
+    cfg?.autonomousCloserCommitCleanMergeEnabled !== false &&
+    String(validatedHead || '').trim() &&
+    String(validatedHead || '').trim() !== liveHead &&
+    SETTLED_SUCCESS_VERDICTS.has(gateSnapshot?.settledReview?.verdict)
+  ) {
+    try {
+      cleanCloserCommitSuppression = await resolveHeadCloserCommitSuppressionImpl({
+        repoPath,
+        prNumber,
+        headSha: liveHead,
+        logger,
+      });
+    } catch (err) {
+      logger?.warn?.(
+        `[watcher] AMA daemon clean closer-commit proof failed for ` +
+          `${repoPath}#${prNumber}@${liveHead.slice(0, 12)}; ` +
+          `not certifying stale clean review: ${err?.message || err}`,
+      );
+      cleanCloserCommitSuppression = null;
+    }
+  }
   // The MSM-02 predicate clears the verdict gate only for the normalized
   // `settled-success` token; a settled-success review verdict maps to it, and
   // anything else stays raw so the predicate refuses it.
@@ -459,6 +509,13 @@ export async function runDaemonCleanMergeAttempt({
     consumeHeadAttestations: cfg?.lha?.consumeAttestations === true,
     logger,
   });
+  cleanCloserCommitAccountability = resolveAutonomousCloserCommitAccountabilityImpl({
+    enabled: cfg?.autonomousCloserCommitCleanMergeEnabled,
+    reviewedHeadSha: validatedHead,
+    mergeHeadSha: liveHead,
+    suppression: cleanCloserCommitSuppression,
+    workerIdentityReason: workerIdentity.reason || 'worker-identity-unresolved',
+  });
   // Deliverable 1 — operator-approval auto-close lane. When no hq-dispatched
   // worker identity resolves (un-attributed operator/agent infra-fix PRs), an
   // explicit, head-scoped operator label IS the accountability that stands in
@@ -475,6 +532,9 @@ export async function runDaemonCleanMergeAttempt({
       mergeAgentRequestEvent,
       mergeHeadSha: liveHead,
     });
+    if (cleanCloserCommitAccountability) {
+      operatorMergeAccountability = cleanCloserCommitAccountability;
+    }
     if (!operatorMergeAccountability) {
       if (hamTerminalRemediationHead || headCloserCertifiedNonBlocking) {
         // The HAM terminal-remediation audit / head-closer self-cert IS the merge
@@ -487,7 +547,7 @@ export async function runDaemonCleanMergeAttempt({
             : 'head-closer-certified-worker-identity-unresolved',
         );
       }
-      return {
+      if (!operatorMergeAccountability) return {
         disposition: DAEMON_MERGE_DISPOSITION.FAILED_CLOSED,
         reason: 'worker-identity-unresolved',
         merged: false,
@@ -498,37 +558,50 @@ export async function runDaemonCleanMergeAttempt({
         workerIdentity,
       };
     }
+    const accountabilityEvent = cleanCloserCommitAccountability
+      ? 'ama.daemon_clean_merge.autonomous_closer_commit_accountability_substituted'
+      : 'ama.daemon_clean_merge.operator_accountability_substituted';
     logger?.log?.(JSON.stringify({
       schemaVersion: 1,
-      event: 'ama.daemon_clean_merge.operator_accountability_substituted',
+      event: accountabilityEvent,
       repo: repoPath,
       pr: prNumber,
       headSha: liveHead,
+      reviewedHeadSha: cleanCloserCommitAccountability?.reviewedHeadSha || null,
       label: operatorMergeAccountability.label,
       actor: operatorMergeAccountability.actor,
       eventId: operatorMergeAccountability.eventId,
       workerIdentityReason: workerIdentity.reason || 'worker-identity-unresolved',
+      autonomousCloserCommitClean: Boolean(cleanCloserCommitAccountability),
     }));
-    logger?.warn?.(
-      `[watcher] AMA daemon clean-merge: worker identity unresolved for ${repoPath}#${prNumber}` +
-        `@${String(liveHead).slice(0, 12)} (${workerIdentity.reason || 'worker-identity-unresolved'}) ` +
-        `but operator '${operatorMergeAccountability.actor}' applied '${operatorMergeAccountability.label}' ` +
-        `at this exact head — substituting operator accountability for the clean daemon merge under lease`,
-    );
+    if (cleanCloserCommitAccountability) {
+      logger?.warn?.(
+        `[watcher] AMA daemon clean-merge: worker identity unresolved for ${repoPath}#${prNumber}` +
+          `@${String(liveHead).slice(0, 12)} (${workerIdentity.reason || 'worker-identity-unresolved'}) ` +
+          `but the stale clean review head ${String(validatedHead || '').slice(0, 12)} advanced only via ` +
+          `trusted closer commit identity — substituting merge-agent accountability for the clean daemon merge under lease`,
+      );
+    } else {
+      logger?.warn?.(
+        `[watcher] AMA daemon clean-merge: worker identity unresolved for ${repoPath}#${prNumber}` +
+          `@${String(liveHead).slice(0, 12)} (${workerIdentity.reason || 'worker-identity-unresolved'}) ` +
+          `but operator '${operatorMergeAccountability.actor}' applied '${operatorMergeAccountability.label}' ` +
+          `at this exact head — substituting operator accountability for the clean daemon merge under lease`,
+      );
+    }
   }
-  // Merge the AUDIT-VERIFIED head, never the freshly-fetched `liveHead`. Handing
-  // `liveHead` to `attemptDaemonCleanMerge` as `validatedHead` would collapse its
-  // head-match protection into `liveHead === liveHead` — always true — so any
-  // commit that landed after the audit check above would merge unvalidated.
-  // Passing `hamAuditHead` keeps that assertion a real comparison: a head that
-  // moved between the audit check and the merge fails head-match and declines.
-  // Both non-clean certifications (HAM terminal-remediation and head-closer
-  // self-cert) pin the merge to the AUDIT-CHECKED current head, never the stale
-  // reviewed head — see the head-moved guard above. The head-closer lane keeps the
-  // real settled-success verdict (it is a settled comment-only / approved review),
-  // only the HAM lane swaps in the ham_terminal_remediation_validated token.
+  // HAM / non-blocking head-closer certifications merge the audit-checked
+  // snapshot head. The autonomous clean closer lane is proven against the
+  // refreshed live head above, after the same head-moved guard has ruled out a
+  // snapshot mismatch, so it must pass that proven closer head to the merge
+  // executor rather than a HAM audit head that may be absent or stale.
   const certifiedNonCleanHead = hamTerminalRemediationHead || headCloserCertifiedNonBlocking;
-  const daemonValidatedHead = certifiedNonCleanHead ? hamAuditHead : validatedHead;
+  const autonomousCloserCommitCleanHead = Boolean(cleanCloserCommitAccountability);
+  const daemonValidatedHead = autonomousCloserCommitCleanHead
+    ? liveHead
+    : certifiedNonCleanHead
+      ? hamAuditHead
+      : validatedHead;
   const daemonVerdict = hamTerminalRemediationHead
     ? 'ham_terminal_remediation_validated'
     : settledVerdict;
@@ -568,15 +641,32 @@ export async function runDaemonCleanMergeAttempt({
       // zero-finding clean daemon merge in the audit doc's closure authority.
       ...(hamTerminalRemediationHead
         ? { closureAuthority: 'daemon-ham-terminal-remediation' }
-        : headCloserCertifiedNonBlocking
-          ? { closureAuthority: 'daemon-head-closer-certified-non-blocking' }
-          : {}),
+        : autonomousCloserCommitCleanHead
+          ? { closureAuthority: 'daemon-autonomous-closer-commit-clean' }
+          : headCloserCertifiedNonBlocking
+            ? { closureAuthority: 'daemon-head-closer-certified-non-blocking' }
+            : {}),
       // Record which accountability authorized the merge: hq-dispatched worker
       // identity (the normal path) or an explicit head-scoped operator label
       // (Deliverable 1 substitution). The audit doc thus always names WHO the
       // merge authority rests on.
-      mergeAccountability: operatorMergeAccountability ? 'operator-approval' : 'worker-identity',
-      ...(operatorMergeAccountability ? { operatorApproval: operatorMergeAccountability } : {}),
+      mergeAccountability: cleanCloserCommitAccountability
+        ? 'autonomous-closer-commit'
+        : workerIdentity.ok
+          ? 'worker-identity'
+          : 'operator-approval',
+      ...(operatorMergeAccountability && !cleanCloserCommitAccountability
+        ? { operatorApproval: operatorMergeAccountability }
+        : {}),
+      ...(cleanCloserCommitAccountability
+        ? {
+            autonomousCloserCommitClean: {
+              ...cleanCloserCommitAccountability,
+              reviewedHeadSha: validatedHead,
+              currentHeadSha: liveHead,
+            },
+          }
+        : {}),
     },
     workerIdentity,
     flags: {

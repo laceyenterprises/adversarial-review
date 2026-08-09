@@ -118,6 +118,9 @@ roles:
       # Turning this off permits daemon merge over known non-blocking findings;
       # blocking or unknown findings still route away from the daemon.
       strict_mode: true
+      # Rollback switch for autonomous clean stale-head closes where the current
+      # head is a trusted terminal closer commit and worker identity is absent.
+      autonomous_closer_commit_clean_merge_enabled: true
       # Lifetime ceiling for HAM terminal-remediation dispatches per PR. Set
       # to 0 to disable the hammer path; daemon clean merges keep their own
       # retry budget.

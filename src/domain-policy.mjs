@@ -123,6 +123,7 @@ const MERGE_AUTHORITY_KEYS = Object.freeze({
   mergeMethod: 'roles.adversarial.merge_authority.merge_method',
   strictNonBlockingRemediation: 'roles.adversarial.merge_authority.strict_non_blocking_remediation',
   autonomousMergeExecutionEnabled: 'roles.adversarial.merge_authority.autonomous_merge_execution_enabled',
+  autonomousCloserCommitCleanMergeEnabled: 'roles.adversarial.merge_authority.autonomous_closer_commit_clean_merge_enabled',
   strictMode: 'roles.adversarial.merge_authority.strict_mode',
   lhaConsumeAttestations: 'roles.adversarial.merge_authority.lha.consume_attestations',
   autoHammerOnEligibilityMiss: 'roles.adversarial.merge_authority.auto_hammer_on_eligibility_miss',
@@ -181,6 +182,13 @@ export function resolveMergeAuthorityConfigFromDomain(domainConfig, fallbackCfg 
         fallbackCfg.autonomousMergeExecutionEnabled,
         policy.autonomousMergeExecutionEnabled,
         MERGE_AUTHORITY_KEYS.autonomousMergeExecutionEnabled,
+        options,
+      ),
+    autonomousCloserCommitCleanMergeEnabled:
+      preferredScalar(
+        fallbackCfg.autonomousCloserCommitCleanMergeEnabled,
+        policy.autonomousCloserCommitCleanMergeEnabled,
+        MERGE_AUTHORITY_KEYS.autonomousCloserCommitCleanMergeEnabled,
         options,
       ),
     strictMode: preferredScalar(

@@ -76,6 +76,7 @@ import {
   adapterUnsupportedError,
   writeAdapterPullRequestReview,
 } from './github-adapter-client.mjs';
+import { postExactHeadReview } from './reviewer-exact-head-post.mjs';
 import { GH_LOOKUP_TIMEOUT_MS, execGhWithRetry } from './gh-cli.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -1566,7 +1567,7 @@ function createReviewerPreWriteLogProxy(log = console) {
 // fail, log and continue — the post may still succeed, and a failure here is
 // strictly less bad than the leak it's trying to prevent.
 async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl = execFileAsync, opts = {}) {
-  const sourceEnv = opts.env || process.env;
+  const sourceEnv = opts.env || process.env; const reviewerHeadSha = String(opts.reviewerHeadSha || '').trim() || null;
   // GMW-06 safety net: a gemini reviewer must never silently mis-post under
   // another identity's token, and the legacy GEMINI_REVIEWER_GH_TOKEN item name
   // must never leak into the runtime. Fails closed with a legible error before
@@ -1614,7 +1615,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
   }
   const startedAt = Date.now();
   try {
-    await withGhRetry(
+    const postResult = await withGhRetry(
       async () => {
         const preWriteLog = createReviewerPreWriteLogProxy(log);
         await prepareReviewWrite({
@@ -1644,6 +1645,11 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
             const key = `${botTokenEnv}${suffix}`;
             if (sourceEnv[key] !== undefined) adapterEnv[key] = sourceEnv[key];
           }
+          if (reviewerHeadSha) {
+            return postExactHeadReview({
+              execFileImpl, repo, prNumber, reviewBody, reviewerHeadSha, env: adapterEnv,
+            });
+          }
           let adapterHandled = false;
           try {
             const adapterResult = await writeAdapterPullRequestReview(
@@ -1668,6 +1674,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
               }
             );
           }
+          return { reviewArtifact: null };
         } catch (err) {
           const authRetryable = isReviewerPostAuthFailure(err, {
             preWriteSaw401: preWriteLog.tracker.saw401,
@@ -1716,6 +1723,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
       status: 200,
       durationMs: Date.now() - startedAt,
     });
+    return postResult;
   } catch (err) {
     recordApiCall({
       category: 'review_post',
@@ -1785,6 +1793,7 @@ async function postGitHubReviewWithCapture({
   const alreadyCaptured = capturedReviewBody !== null;
   const recoveringPendingCapture = pendingCapture !== null;
   const effectiveReviewBody = capturedReviewBody ?? pendingCapture?.bodyMd ?? reviewBody;
+  let postedReviewArtifact = null;
   let initialToken = null;
   if (!alreadyCaptured) {
     // GMW-06: run the gemini-reviewer preflight before the generic env check so a
@@ -1796,16 +1805,15 @@ async function postGitHubReviewWithCapture({
     if (!initialToken) {
       throw new Error(`Missing env var: ${botTokenEnv}`);
     }
-    if (!recoveringPendingCapture) await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
-      rootDir,
-      fetchImpl,
-      readFileImpl,
-      log,
-      prepareReviewWrite,
-      reviewerSpawnToken,
-      reviewerIdentity,
-      reviewerTokenFetchTimeoutMs,
-    });
+    if (!recoveringPendingCapture) {
+      const postResult = await postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFileImpl, {
+        rootDir, fetchImpl, readFileImpl, log, prepareReviewWrite,
+        reviewerSpawnToken, reviewerIdentity,
+        reviewerTokenFetchTimeoutMs,
+        reviewerHeadSha: normalizedHeadSha || null,
+      });
+      postedReviewArtifact = postResult?.reviewArtifact || null;
+    }
   }
 
   // Capture postedAt AFTER the gh post returns so the candidate window
@@ -1838,6 +1846,7 @@ async function postGitHubReviewWithCapture({
     execFileImpl,
     env: { ...process.env, [botTokenEnv]: process.env[botTokenEnv] || initialToken },
     requireGitHubArtifact: Boolean(normalizedHeadSha),
+    knownGitHubArtifact: postedReviewArtifact,
     lookupRetryBackoffMs,
     sleepImpl,
     allowExistingBodyUpdate: recoveringPendingCapture,

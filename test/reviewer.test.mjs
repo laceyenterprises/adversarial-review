@@ -229,6 +229,51 @@ test('postGitHubReview uses adapter mutation with the intended reviewer bot iden
   ]);
 });
 
+test('postGitHubReview binds a known reviewed snapshot to GitHub commit_id', async () => {
+  const calls = [];
+  const result = await postGitHubReview(
+    'laceyenterprises/demo',
+    42,
+    'review body',
+    'GH_CODEX_REVIEWER_TOKEN',
+    async (command, args, options = {}) => {
+      calls.push({ command, args, options });
+      assert.equal(command, 'gh');
+      return {
+        stdout: JSON.stringify({
+          id: 4242,
+          commit_id: 'reviewed-head-sha',
+        }),
+      };
+    },
+    {
+      env: {
+        GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+        PATH: '/opt/homebrew/bin:/usr/bin',
+        HOME: '/Users/test',
+      },
+      reviewerIdentity: 'codex-reviewer-lacey',
+      reviewerHeadSha: 'reviewed-head-sha',
+      prepareReviewWrite: async () => {},
+    }
+  );
+
+  assert.deepEqual(result, {
+    reviewArtifact: { id: '4242', commitId: 'reviewed-head-sha' },
+  });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, [
+    'api',
+    '--method',
+    'POST',
+    'repos/laceyenterprises/demo/pulls/42/reviews',
+    '--raw-field', 'body=review body',
+    '--raw-field', 'event=COMMENT',
+    '--raw-field', 'commit_id=reviewed-head-sha',
+  ]);
+  assert.equal(calls[0].options.env.GH_TOKEN, 'ghp_codex_reviewer_pat');
+});
+
 test('postGitHubReviewWithCapture emits a reviewed attestation for the reviewed head and D3 verdict', async () => {
   const rootDir = mkdtempSync(join(tmpdir(), 'review-post-attestation-'));
   mkdirSync(join(rootDir, 'data'), { recursive: true });
@@ -451,7 +496,7 @@ test('postGitHubReviewWithCapture propagates signing failure after posting for w
       passKind: 'first-pass',
       postedAt: '2026-05-29T12:01:00.000Z',
       execFileImpl: async (command, args) => {
-        if (command === '/fixture/github-adapter') postCalls += 1;
+        if (command === 'gh' && args[0] === 'api' && args[1] === '--method') postCalls += 1;
         if (command === 'gh' && args[0] === 'api') {
           return {
             stdout: `${JSON.stringify({

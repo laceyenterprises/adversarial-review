@@ -447,14 +447,27 @@ async function captureReviewerBodyAfterPost(rootDir, {
   env = process.env,
   log = console,
   requireGitHubArtifact = false,
+  knownGitHubArtifact = null,
   lookupRetryBackoffMs = REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS,
   sleepImpl = sleep,
   allowExistingBodyUpdate = false,
 } = {}) {
   let ghCommentId = null;
   try {
-    const logins = resolveReviewerBotLoginAliases(botTokenEnv || reviewerModel);
-    if (logins.length > 0) {
+    if (knownGitHubArtifact) {
+      const knownId = knownGitHubArtifact?.id;
+      const knownHeadSha = String(
+        knownGitHubArtifact?.commitId ?? knownGitHubArtifact?.commit_id ?? ''
+      ).trim();
+      if (!knownId || (reviewerHeadSha && knownHeadSha !== String(reviewerHeadSha))) {
+        throw new Error(
+          `review body capture received an invalid exact-head GitHub review artifact for ${repo}#${prNumber}`
+        );
+      }
+      ghCommentId = String(knownId);
+    } else {
+      const logins = resolveReviewerBotLoginAliases(botTokenEnv || reviewerModel);
+      if (logins.length > 0) {
       try {
         const lookupEnv = buildLookupEnv(env, botTokenEnv ? env?.[botTokenEnv] : null);
         const lookupArgs = {
@@ -544,8 +557,9 @@ async function captureReviewerBodyAfterPost(rootDir, {
         }
         log.warn?.(`[reviewer] review body capture review-id lookup failed for ${repo}#${prNumber}: ${err.message}`);
       }
-    } else if (requireGitHubArtifact) {
-      throw new Error(`review body capture has no trusted reviewer login aliases for ${repo}#${prNumber}`);
+      } else if (requireGitHubArtifact) {
+        throw new Error(`review body capture has no trusted reviewer login aliases for ${repo}#${prNumber}`);
+      }
     }
     updateReviewerPassBodyCapture(rootDir, {
       repo,

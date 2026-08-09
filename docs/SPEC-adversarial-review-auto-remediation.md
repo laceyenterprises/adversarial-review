@@ -1599,9 +1599,11 @@ includes:
   head and a newer head is already live, so this stale job must not spawn.
 
 `stale-heartbeat` is a recovery stop for a transient daemon/worker failure mode,
-not a terminal business state. The sweep compares `lastHeartbeatAt`, then the
-spawn timestamp, then the claim timestamp, then file mtime for legacy rows. A
-reclaimed job remains operator-retriggerable through the normal CLI or
+not a terminal business state. The sweep evaluates valid
+`lastWorkerArtifactProgressAt`, `lastHeartbeatAt`, spawn, and claim timestamps
+and uses the newest observation as the liveness anchor; file mtime is only the
+legacy fallback when no valid timestamp field exists. A reclaimed job remains
+operator-retriggerable through the normal CLI or
 `retrigger-remediation` label flow after inspection.
 
 `stale-review-head` is intentionally a pre-spawn stale-job signal, not a

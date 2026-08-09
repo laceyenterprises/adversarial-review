@@ -710,7 +710,7 @@ The loop is intentionally capped and explicit. A job moves to `data/follow-up-jo
 
 `max-rounds-reached` means another round would exceed the stored `remediationPlan.maxRounds` cap.
 
-`stale-heartbeat` means the stuck-claim sweep reclaimed an orphaned in-progress job after daemon-observed liveness went stale. The sweep compares `lastHeartbeatAt`, then worker `spawnedAt`, then `claimedAt`, then file mtime for legacy rows. This is a transient recovery stop, not a terminal business state, so `stale-heartbeat` is operator-retriggerable through the normal `retrigger-remediation` label or CLI requeue path after inspection.
+`stale-heartbeat` means the stuck-claim sweep reclaimed an orphaned in-progress job after daemon-observed liveness went stale. The sweep evaluates valid `lastWorkerArtifactProgressAt`, `lastHeartbeatAt`, worker `spawnedAt`, and `claimedAt` timestamps and uses the newest observation as the liveness anchor; file mtime is only the legacy fallback when no valid timestamp field exists. This is a transient recovery stop, not a terminal business state, so `stale-heartbeat` is operator-retriggerable through the normal `retrigger-remediation` label or CLI requeue path after inspection.
 
 `stale-review-head` means the follow-up job was created for an older reviewed head SHA and the consume-time lifecycle lookup already sees a newer PR head. This is a stale-job/race guard before worker spawn, not a reconcile-time failure mode: once a remediation worker pushes commits, the PR head is expected to differ from `job.revisionRef`, and that success path must continue to the rereview request.
 

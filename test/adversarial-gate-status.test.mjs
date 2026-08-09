@@ -321,7 +321,47 @@ test('pickAdversarialGateStatus posts non-blocking success when remediation stop
 
   assert.equal(decision.state, 'success');
   assert.equal(decision.reason, 'remediation-stopped');
-  assert.match(decision.description, /operator decides/i);
+  assert.match(decision.description, /operator decision required/i);
+
+  // `success` here means "the merge button is not blocked", NOT "review converged".
+  // A reader who sees only the state merges over standing findings -- that is how
+  // agent-os#5040 shipped, and #5062 nearly repeated it. The description must say
+  // findings are unresolved, name the verdict, and set the machine-readable flag.
+  assert.equal(decision.operatorDecisionRequired, true);
+  assert.match(decision.description, /findings unresolved/i);
+  assert.match(decision.description, /NOT a clean review/i);
+  assert.match(decision.description, /Request-changes/i);
+});
+
+test('pickAdversarialGateStatus flags remediation-failed as an operator decision too', () => {
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    latestJob: makeJob({
+      status: 'failed',
+      reviewBody: '## Summary\nStill blocked.\n## Verdict\nRequest changes',
+    }),
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'remediation-failed');
+  assert.equal(decision.operatorDecisionRequired, true);
+  assert.match(decision.description, /NOT a clean review/i);
+});
+
+test('a genuinely settled review is NOT flagged as needing an operator decision', () => {
+  // The other half of the contract: the flag must separate give-up from convergence,
+  // so it has to be absent when the review really did settle clean.
+  const decision = pickAdversarialGateStatus({
+    reviewRow: makeReviewRow(),
+    latestJob: makeJob({
+      status: 'completed',
+      reviewBody: '## Summary\nAll good.\n## Verdict\nComment only',
+    }),
+  });
+
+  assert.equal(decision.state, 'success');
+  assert.equal(decision.reason, 'review-settled');
+  assert.equal(decision.operatorDecisionRequired, false);
 });
 
 test('pickAdversarialGateStatus settles clean re-review jobs after remediation is suppressed', () => {

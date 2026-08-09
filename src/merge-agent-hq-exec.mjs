@@ -83,6 +83,15 @@ function labelMutationErrorDetail(err) {
   return detail || (err == null ? '' : String(err));
 }
 
+function normalizeLabelRemovalErrorSignature(detail) {
+  const raw = String(detail || '').trim();
+  if (!raw) return '';
+  return raw
+    .replace(/\b(?:x-github-request-id|github request id|request[-_ ]id)[:= ]+[A-Za-z0-9._:-]+\b/gi, 'request-id:<redacted>')
+    .replace(/\b(?:timestamp|ts|time)[:= ]+\d{4}-\d{2}-\d{2}T[0-9:.+-]+Z?\b/gi, 'timestamp:<redacted>')
+    .replace(/\brate[-_ ]limit[-_ ]reset[:= ]+\d+\b/gi, 'rate-limit-reset:<redacted>');
+}
+
 function isLabelAlreadyAbsentError(err) {
   const detail = labelMutationErrorDetail(err);
   if (!detail) return false;
@@ -268,6 +277,7 @@ export {
   isUnsupportedHqPriorityFlagError,
   isTransientHqDispatchError,
   labelMutationErrorDetail,
+  normalizeLabelRemovalErrorSignature,
   isLabelAlreadyAbsentError,
   sleep,
   execHqDispatchCancel,

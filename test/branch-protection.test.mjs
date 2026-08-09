@@ -360,3 +360,108 @@ test('buildManualCommand shell-quotes operator repair inputs', () => {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+
+test('warnForMissingAdversarialGateBranchProtection warns once per repo until the reason changes', async () => {
+  const { createLogChangeGate } = await import('../src/log-change-gate.mjs');
+  const logGate = createLogChangeGate();
+  const warnings = [];
+  const logger = { warn: (m) => warnings.push(m) };
+  const checker = async ({ repoPath }) => ({
+    repo: repoPath,
+    baseBranch: 'main',
+    context: 'agent-os/adversarial-gate',
+    ok: false,
+    reason: 'branch-protection-forbidden',
+    requiredContexts: [],
+  });
+  const repos = ['laceyenterprises/adversarial-review'];
+
+  await warnForMissingAdversarialGateBranchProtection(repos, { checker, logger, logGate });
+  await warnForMissingAdversarialGateBranchProtection(repos, { checker, logger, logGate });
+  await warnForMissingAdversarialGateBranchProtection(repos, { checker, logger, logGate });
+
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /reason=branch-protection-forbidden/);
+});
+
+test('warnForMissingAdversarialGateBranchProtection re-warns when the reason changes for a repo', async () => {
+  const { createLogChangeGate } = await import('../src/log-change-gate.mjs');
+  const logGate = createLogChangeGate();
+  const warnings = [];
+  const logger = { warn: (m) => warnings.push(m) };
+  const repos = ['laceyenterprises/adversarial-review'];
+  const checkerWith = (reason) => async ({ repoPath }) => ({
+    repo: repoPath,
+    baseBranch: 'main',
+    context: 'agent-os/adversarial-gate',
+    ok: false,
+    reason,
+    requiredContexts: [],
+  });
+
+  await warnForMissingAdversarialGateBranchProtection(repos, {
+    checker: checkerWith('branch-protection-forbidden'), logger, logGate,
+  });
+  await warnForMissingAdversarialGateBranchProtection(repos, {
+    checker: checkerWith('branch-protection-forbidden'), logger, logGate,
+  }); // suppressed
+  await warnForMissingAdversarialGateBranchProtection(repos, {
+    checker: checkerWith('required-context-missing'), logger, logGate,
+  }); // genuinely new reason -> warns
+
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /reason=branch-protection-forbidden/);
+  assert.match(warnings[1], /reason=required-context-missing/);
+});
+
+test('warnForMissingAdversarialGateBranchProtection re-arms after a healthy result', async () => {
+  const { createLogChangeGate } = await import('../src/log-change-gate.mjs');
+  const logGate = createLogChangeGate();
+  const warnings = [];
+  const logger = { warn: (m) => warnings.push(m) };
+  const repos = ['laceyenterprises/adversarial-review'];
+  const okStates = [false, false, true, false];
+  const checker = async ({ repoPath }) => {
+    const ok = okStates.shift();
+    return {
+      repo: repoPath,
+      baseBranch: 'main',
+      context: 'agent-os/adversarial-gate',
+      ok,
+      reason: ok ? 'ok' : 'branch-protection-missing',
+      requiredContexts: [],
+    };
+  };
+
+  await warnForMissingAdversarialGateBranchProtection(repos, { checker, logger, logGate });
+  await warnForMissingAdversarialGateBranchProtection(repos, { checker, logger, logGate });
+  await warnForMissingAdversarialGateBranchProtection(repos, { checker, logger, logGate });
+  await warnForMissingAdversarialGateBranchProtection(repos, { checker, logger, logGate });
+
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /reason=branch-protection-missing/);
+  assert.match(warnings[1], /reason=branch-protection-missing/);
+});
+
+test('warnForMissingAdversarialGateBranchProtection tracks each repo independently', async () => {
+  const { createLogChangeGate } = await import('../src/log-change-gate.mjs');
+  const logGate = createLogChangeGate();
+  const warnings = [];
+  const logger = { warn: (m) => warnings.push(m) };
+  const checker = async ({ repoPath }) => ({
+    repo: repoPath,
+    baseBranch: 'main',
+    context: 'agent-os/adversarial-gate',
+    ok: false,
+    reason: 'branch-protection-forbidden',
+    requiredContexts: [],
+  });
+  const repos = ['laceyenterprises/adversarial-review', 'laceyenterprises/agent-os'];
+
+  await warnForMissingAdversarialGateBranchProtection(repos, { checker, logger, logGate });
+  await warnForMissingAdversarialGateBranchProtection(repos, { checker, logger, logGate });
+
+  // Each repo warns once on the first poll; the second poll is fully suppressed.
+  assert.equal(warnings.length, 2);
+});

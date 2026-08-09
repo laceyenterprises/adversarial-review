@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { summarizeChecksConclusion } from './checks-summary.mjs';
+import { createLogChangeGate } from './log-change-gate.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 import { fetchAdversarialGateBranchProtection } from './branch-protection.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
@@ -114,13 +115,12 @@ import {
   formatExecFailure,
   isUnsupportedHqPriorityFlagError,
   isTransientHqDispatchError,
-  labelMutationErrorDetail, isLabelAlreadyAbsentError,
+  labelMutationErrorDetail, normalizeLabelRemovalErrorSignature, isLabelAlreadyAbsentError,
   sleep, execHqDispatchCancel, detectAgentOsPresence,
 } from './merge-agent-hq-exec.mjs';
 import { collectStuckMergeAgentCandidateHeads } from './merge-agent-stuck-scan-candidates.mjs';
 
 const execFileAsync = promisify(execFile);
-
 const MERGE_AGENT_DISPATCH_SCHEMA_VERSION = 1;
 const MERGE_AGENT_LIFECYCLE_CLEANUP_SCHEMA_VERSION = 1;
 const OPERATOR_SKIP_LABELS = new Set(['merge-agent-skip', MERGE_AGENT_STUCK_LABEL, 'do-not-merge', NO_MERGE_HOLD_LABEL]);
@@ -1921,6 +1921,7 @@ const MERGE_AGENT_CANCEL_TERMINAL_DISPATCH_STATUSES = new Set([
 // failures are intentionally retryable: the watcher persists cleanup
 // work on disk and replays it on later ticks even after the PR leaves
 // the open-set query.
+const followUpMergeAgentLogGate = createLogChangeGate();
 async function cancelMergeAgentDispatchOnMerge({
   rootDir,
   repo,
@@ -1930,6 +1931,7 @@ async function cancelMergeAgentDispatchOnMerge({
   hqExecFileImpl = ghExecFileImpl,
   now = isoNow(),
   listImpl = listMergeAgentDispatches,
+  logGate = followUpMergeAgentLogGate,
   env = process.env, cancelRetryDelaysMs,
 } = {}) {
   const result = {
@@ -1973,23 +1975,14 @@ async function cancelMergeAgentDispatchOnMerge({
         });
         result.cancelled = true;
       } catch (err) {
-        // Use formatExecFailure so stderr+stdout surface in the
-        // log. Without it, every cancel failure logged as the bare
-        // exec wrapper text — "Command failed: hq dispatch cancel
-        // lrq_…" — with the actual cause invisible. Concrete
-        // 2026-05-19 incident: `hq dispatch cancel` for an
-        // already-terminal LRQ exits non-zero with the explanation
-        // {"ok":false,"reason":"already terminal (status=failed)"}
-        // on STDOUT (not stderr). The watcher's retry-loop log then
-        // claimed retryable=true indefinitely because the actual
-        // contract was never surfaced. Also stash structured
-        // stderr/stdout on the result so the terminal-classifier
-        // below can read structured output, not just message text.
+        // Preserve stderr/stdout for terminal classification; in the 2026-05-19
+        // incident, `hq dispatch cancel` returned non-zero and printed stdout
+        // JSON: {"ok":false,"reason":"already terminal (status=failed)","currentStatus":"failed"}.
         const formatted = formatExecFailure('hq dispatch cancel', err);
         result.cancelError = formatted.message;
         result.cancelStderr = err?.stderr ? String(err.stderr) : null;
         result.cancelStdout = err?.stdout ? String(err.stdout) : null;
-        console.warn(
+        console.debug(
           `[follow-up-merge-agent] best-effort cancel of merge-agent dispatch ${latest.launchRequestId} for ${repo}#${prNumber} failed: ${result.cancelError}`
         );
       }
@@ -2084,9 +2077,16 @@ async function cancelMergeAgentDispatchOnMerge({
       if (isLabelAlreadyAbsentError(err)) {
         result.labelRemoved = true;
       } else {
-        console.warn(
-          `[follow-up-merge-agent] failed to remove '${MERGE_AGENT_DISPATCHED_LABEL}' from ${repo}#${prNumber} after close: ${result.labelRemovalError}`
-        );
+        const removeFailureKey = `${repo}#${prNumber}`;
+        const removeFailureDecision = logGate.note(removeFailureKey, normalizeLabelRemovalErrorSignature(result.labelRemovalError));
+        if (removeFailureDecision.changed) {
+          const suppressedNote = removeFailureDecision.suppressedSincePrevious > 0
+            ? ` (after ${removeFailureDecision.suppressedSincePrevious} suppressed identical failures)`
+            : '';
+          console.warn(
+            `[follow-up-merge-agent] failed to remove '${MERGE_AGENT_DISPATCHED_LABEL}' from ${repo}#${prNumber} after close: ${result.labelRemovalError}${suppressedNote}`
+          );
+        }
       }
     }
   }

@@ -39,6 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
+import { createLogChangeGate } from '../log-change-gate.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs';
 import {
   readBuildCompletionProducerEvidence,
@@ -2684,6 +2685,8 @@ export function composeCloserPrompt({
  * @param {Object=} args.writeFileImpl   — DI for tests
  * @returns {Promise<DispatchResult>}
  */
+const dispatchCloserLogGate = createLogChangeGate();
+
 export async function maybeDispatchAmaCloser({
   reviewState,
   prMetadata,
@@ -2702,6 +2705,7 @@ export async function maybeDispatchAmaCloser({
   releaseMergeLeaseImpl = releaseMergeLease,
   fetchPullRequestRollupImpl = fetchPullRequestRollup,
   deliverAlertImpl = deliverAlert,
+  logGate = dispatchCloserLogGate,
   logger = console,
 }) {
   // The master gate. With no operator config, this is `false` per
@@ -2787,11 +2791,26 @@ export async function maybeDispatchAmaCloser({
       }
     } else {
       forceHammerTerminalRemediationPrompt = true;
-      logger.log?.(
-        `[ama-closer] auto-hammer: dispatching terminal remediation for ineligible ` +
-        `PR (reasons: ${(routeReasons || []).join(',')}) — hammer will remediate ` +
-        `final findings/checks then re-validate the gate fail-closed`
-      );
+      // Log-feed noise control: this branch re-evaluates the same ineligible PR
+      // every tick. Log once per (repo, pr, head, reasons) transition instead of
+      // every poll; a new head or changed reasons still logs.
+      const autoHammerGateRepo =
+        prMetadata?.repoPath ||
+        prMetadata?.repo ||
+        prMetadata?.base?.repo?.full_name ||
+        prMetadata?.head?.repo?.full_name ||
+        dispatchContext?.repo ||
+        'unknown';
+      const autoHammerGateKey = `${autoHammerGateRepo}#${prNumber}`;
+      const autoHammerSignature =
+        `${prMetadata?.headSha ?? ''}#${(routeReasons || []).join(',')}`;
+      if (logGate.note(autoHammerGateKey, autoHammerSignature).changed) {
+        logger.log?.(
+          `[ama-closer] auto-hammer: dispatching terminal remediation for ineligible ` +
+          `PR (reasons: ${(routeReasons || []).join(',')}) — hammer will remediate ` +
+          `final findings/checks then re-validate the gate fail-closed`
+        );
+      }
       // fall through to the dispatch below (hammer template, remediation mode)
       forceHammerWorkerClass = true;
     }

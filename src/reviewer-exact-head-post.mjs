@@ -29,6 +29,17 @@ function parseExactHeadReviewArtifact(stdout, { repo, prNumber, reviewerHeadSha 
   return { id: String(reviewId), commitId };
 }
 
+function parseExactHeadReviewArtifactOrNull(stdout, { repo, prNumber, reviewerHeadSha, log = console } = {}) {
+  try {
+    return parseExactHeadReviewArtifact(stdout, { repo, prNumber, reviewerHeadSha });
+  } catch (err) {
+    log.warn?.(
+      `[reviewer] exact-head review post for ${repo}#${prNumber} returned an unverified artifact; falling back to GitHub lookup: ${err?.message || err}`
+    );
+    return null;
+  }
+}
+
 async function postExactHeadReview({
   execFileImpl,
   repo,
@@ -50,4 +61,4 @@ async function postExactHeadReview({
   return { stdout: response?.stdout };
 }
 
-export { exactHeadReviewEventForBody, parseExactHeadReviewArtifact, postExactHeadReview };
+export { exactHeadReviewEventForBody, parseExactHeadReviewArtifact, parseExactHeadReviewArtifactOrNull, postExactHeadReview };

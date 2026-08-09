@@ -76,7 +76,7 @@ import {
   adapterUnsupportedError,
   writeAdapterPullRequestReview,
 } from './github-adapter-client.mjs';
-import { parseExactHeadReviewArtifact, postExactHeadReview } from './reviewer-exact-head-post.mjs';
+import { parseExactHeadReviewArtifactOrNull, postExactHeadReview } from './reviewer-exact-head-post.mjs';
 import { GH_LOOKUP_TIMEOUT_MS, execGhWithRetry } from './gh-cli.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -1709,9 +1709,9 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
         isRetryable: (err) => err instanceof ReviewerPostAuthRefreshRetryableError,
       }
     );
-    const exactHeadReviewArtifact = reviewerHeadSha ? parseExactHeadReviewArtifact(postResult?.stdout, {
-      repo, prNumber, reviewerHeadSha,
-    }) : null;
+    const exactHeadReviewArtifact = reviewerHeadSha
+      ? parseExactHeadReviewArtifactOrNull(postResult?.stdout, { repo, prNumber, reviewerHeadSha, log })
+      : null;
     recordApiCall({
       category: 'review_post',
       repo,

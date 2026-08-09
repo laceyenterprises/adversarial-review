@@ -322,39 +322,40 @@ test('postGitHubReview maps exact-head request-changes verdicts to blocking GitH
   ]);
 });
 
-test('postGitHubReview does not retry exact-head post when response validation fails', async () => {
+test('postGitHubReview returns null exact-head artifact when response validation fails', async () => {
   const calls = [];
-  await assert.rejects(
-    postGitHubReview(
-      'laceyenterprises/demo',
-      42,
-      'review body',
-      'GH_CODEX_REVIEWER_TOKEN',
-      async (command, args, options = {}) => {
-        calls.push({ command, args, options });
-        assert.equal(command, 'gh');
-        return {
-          stdout: JSON.stringify({
-            id: 4242,
-            commit_id: 'different-head-sha',
-          }),
-        };
+  const warnings = [];
+  const result = await postGitHubReview(
+    'laceyenterprises/demo',
+    42,
+    'review body',
+    'GH_CODEX_REVIEWER_TOKEN',
+    async (command, args, options = {}) => {
+      calls.push({ command, args, options });
+      assert.equal(command, 'gh');
+      return {
+        stdout: JSON.stringify({
+          id: 4242,
+          commit_id: 'different-head-sha',
+        }),
+      };
+    },
+    {
+      env: {
+        GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+        PATH: '/opt/homebrew/bin:/usr/bin',
+        HOME: '/Users/test',
       },
-      {
-        env: {
-          GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
-          PATH: '/opt/homebrew/bin:/usr/bin',
-          HOME: '/Users/test',
-        },
-        reviewerIdentity: 'codex-reviewer-lacey',
-        reviewerHeadSha: 'reviewed-head-sha',
-        prepareReviewWrite: async () => {},
-      }
-    ),
-    /did not confirm review/
+      reviewerIdentity: 'codex-reviewer-lacey',
+      reviewerHeadSha: 'reviewed-head-sha',
+      prepareReviewWrite: async () => {},
+      log: { warn: (message) => warnings.push(String(message)) },
+    }
   );
 
+  assert.deepEqual(result, { reviewArtifact: null });
   assert.equal(calls.length, 1);
+  assert.match(warnings.join('\n'), /returned an unverified artifact/);
 });
 
 test('postGitHubReview refreshes token after exact-head auth failure and retries once', async () => {

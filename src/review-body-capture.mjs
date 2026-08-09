@@ -460,12 +460,14 @@ async function captureReviewerBodyAfterPost(rootDir, {
         knownGitHubArtifact?.commitId ?? knownGitHubArtifact?.commit_id ?? ''
       ).trim();
       if (!knownId || (reviewerHeadSha && knownHeadSha !== String(reviewerHeadSha))) {
-        throw new Error(
-          `review body capture received an invalid exact-head GitHub review artifact for ${repo}#${prNumber}`
+        log.warn?.(
+          `[reviewer] review body capture received an invalid exact-head GitHub review artifact for ${repo}#${prNumber}; falling back to GitHub lookup`
         );
+      } else {
+        ghCommentId = String(knownId);
       }
-      ghCommentId = String(knownId);
-    } else {
+    }
+    if (!ghCommentId) {
       const logins = resolveReviewerBotLoginAliases(botTokenEnv || reviewerModel);
       if (logins.length > 0) {
         try {

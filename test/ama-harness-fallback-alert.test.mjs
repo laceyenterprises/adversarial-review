@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -113,31 +113,55 @@ test('a failed fallback-alert delivery does not create a suppressing debounce re
   assert.ok(HARNESS_FALLBACK_ALERT_DEBOUNCE_MS > 60_000);
 });
 
-test('a noncanonical caller cannot first-create shared fallback debounce state', async (t) => {
+test('harness fallback alert state is created with shared group permissions by canonical owner', async (t) => {
   const rootDir = mkdtempSync(join(tmpdir(), 'ama-harness-fallback-alert-'));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
-  const dataDir = join(rootDir, 'data');
-  const stateDir = join(dataDir, 'ama-harness-fallback-alerts');
-  mkdirSync(dataDir, { recursive: true });
-  const alerts = [];
-  const warnings = [];
+  const ownerUid = statSync(rootDir).uid;
+
+  await emitHarnessFallbackAlert({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5059,
+    harness: HARNESS,
+    deliverAlertImpl: async () => {},
+    now: Date.parse('2026-08-09T05:00:00.000Z'),
+    currentUidImpl: () => ownerUid,
+  });
+
+  const stateDir = join(rootDir, 'data', 'ama-harness-fallback-alerts');
+  const [stateFile] = readdirSync(stateDir);
+  assert.equal(statSync(stateDir).mode & 0o7777, 0o2775);
+  assert.equal(statSync(join(stateDir, stateFile)).mode & 0o777, 0o664);
+});
+
+test('harness fallback alert state delegates cross-user directory creation to canonical owner', async (t) => {
+  const rootDir = mkdtempSync(join(tmpdir(), 'ama-harness-fallback-alert-'));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  const ownerUid = statSync(rootDir).uid;
+  const calls = [];
+  const spawnSyncImpl = (command, args) => {
+    calls.push({ command, args });
+    if (command === 'id') return { status: 0, stdout: 'airlock\n', stderr: '' };
+    if (command === 'sudo') return { status: 0, stdout: '/tmp/state.json', stderr: '' };
+    return { status: 1, stdout: '', stderr: `unexpected command ${command}` };
+  };
+
   const result = await emitHarnessFallbackAlert({
     rootDir,
     repo: 'laceyenterprises/agent-os',
     prNumber: 5059,
     harness: HARNESS,
-    deliverAlertImpl: async (text, structured) => alerts.push({ text, structured }),
-    logger: { warn: (message) => warnings.push(JSON.parse(message)) },
-    ownerGuardOptions: {
-      currentUid: () => 501,
-      exists: existsSync,
-      stat: (path) => (path === dataDir ? { uid: 502 } : { uid: 501 }),
-    },
+    deliverAlertImpl: async () => {},
+    now: Date.parse('2026-08-09T05:00:00.000Z'),
+    currentUidImpl: () => ownerUid + 1,
+    spawnSyncImpl,
   });
 
-  assert.equal(result.delivered, true, 'the merge alert itself remains fail-open');
-  assert.equal(alerts.length, 1);
-  assert.equal(existsSync(stateDir), false, 'a noncanonical caller must not create shared state');
-  assert.equal(warnings[0]?.event, 'ama_closer.harness_fallback_alert_debounce_write_failed');
-  assert.match(warnings[0]?.error || '', /refusing cross-user harness fallback debounce state write/);
+  assert.deepEqual(result, { delivered: true });
+  assert.equal(existsSync(join(rootDir, 'data', 'ama-harness-fallback-alerts')), false);
+  assert.equal(calls[0].command, 'id');
+  assert.deepEqual(calls[0].args, ['-un', String(ownerUid)]);
+  assert.equal(calls[1].command, 'sudo');
+  assert.deepEqual(calls[1].args.slice(0, 5), ['-A', '-H', '-u', 'airlock', process.execPath]);
+  assert.ok(calls[1].args.includes('--input-type=module'));
 });

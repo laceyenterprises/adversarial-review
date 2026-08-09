@@ -23,14 +23,21 @@
  * @module ama/dispatch-closer
  */
 
-import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { execFile, spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { hostname, userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { assertCanonicalOwner } from '../adapters/agent-runtime/append-only-owner.mjs';
 import { writeFileAtomic } from '../atomic-write.mjs';
 import { ENUM_ROLES_ADVERSARIAL_ORCHESTRATION_MODE } from '../config-loader.mjs';
 import {
@@ -96,6 +103,31 @@ const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const AGENT_OS_TOOLING_REPO = 'agent-os';
 const ADVERSARIAL_REVIEW_REPO = 'adversarial-review';
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
+const HARNESS_FALLBACK_ALERT_OWNER_WRITE_SCRIPT = `
+import { chmodSync, closeSync, mkdirSync, openSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+const args = process.argv[1] === '[eval]' ? process.argv.slice(2) : process.argv.slice(1);
+const [statePath, recordRaw] = args;
+const dir = dirname(statePath);
+mkdirSync(dir, { recursive: true, mode: 0o2775 });
+try { chmodSync(dir, 0o2775); } catch {}
+const tmpPath = join(dir, \`.\${basename(statePath)}.\${process.pid}.\${Date.now()}.\${Math.random().toString(16).slice(2)}.tmp\`);
+try {
+  const fd = openSync(tmpPath, 'wx', 0o664);
+  try {
+    writeFileSync(fd, \`\${JSON.stringify(JSON.parse(recordRaw), null, 2)}\\n\`, 'utf8');
+  } finally {
+    closeSync(fd);
+  }
+  try { chmodSync(tmpPath, 0o664); } catch {}
+  renameSync(tmpPath, statePath);
+  try { chmodSync(statePath, 0o664); } catch {}
+  process.stdout.write(statePath);
+} catch (err) {
+  try { rmSync(tmpPath, { force: true }); } catch {}
+  throw err;
+}
+`;
 
 // AMA closer dispatch ADMISSION priority (agent-os worker-pool `hq dispatch
 // --priority`). This selects the admission LANE ONLY. It never affects merge
@@ -134,6 +166,8 @@ const AMA_LIVE_PR_PROBE_TIMEOUT_MS = 30_000;
 const AMA_LIVE_PR_PROBE_TRANSIENT_RETRY_DELAYS_MS = [250, 1_000];
 export const HARNESS_FALLBACK_ALERT_DEBOUNCE_MS = 60 * 60 * 1000;
 const HARNESS_FALLBACK_ALERT_STATE_DIRNAME = 'ama-harness-fallback-alerts';
+const HARNESS_FALLBACK_ALERT_STATE_DIR_MODE = 0o2775;
+const HARNESS_FALLBACK_ALERT_STATE_FILE_MODE = 0o664;
 const FINAL_HAMMER_TERMINAL_REMEDIATION_WAIVER_REASONS = new Set([
   'blocking-findings-present',
   'blocking-findings-unknown',
@@ -1311,34 +1345,92 @@ function readHarnessFallbackAlertAt(statePath) {
   }
 }
 
+function currentUid() {
+  return typeof process.getuid === 'function' ? process.getuid() : null;
+}
+
+function resolveHarnessFallbackAlertStateDir(rootDir) {
+  return join(rootDir || SUBMODULE_ROOT, 'data', HARNESS_FALLBACK_ALERT_STATE_DIRNAME);
+}
+
+function resolveCanonicalHarnessFallbackAlertOwnerUid(rootDir) {
+  const dir = resolveHarnessFallbackAlertStateDir(rootDir);
+  try {
+    return statSync(dir).uid;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
+  try {
+    return statSync(join(rootDir || SUBMODULE_ROOT, 'data')).uid;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err;
+  }
+  return statSync(rootDir || SUBMODULE_ROOT).uid;
+}
+
+function resolveUsernameForUid(uid, { spawnSyncImpl = spawnSync } = {}) {
+  const result = spawnSyncImpl('id', ['-un', String(uid)], { encoding: 'utf8' });
+  if (result?.status !== 0) {
+    const detail = String(result?.stderr || result?.error?.message || '').trim();
+    throw new Error(`failed to resolve canonical AMA harness fallback alert owner uid ${uid}${detail ? `: ${detail}` : ''}`);
+  }
+  const username = String(result.stdout || '').trim();
+  if (!username) throw new Error(`failed to resolve canonical AMA harness fallback alert owner uid ${uid}: empty username`);
+  return username;
+}
+
+function writeHarnessFallbackAlertStateAsOwner(statePath, record, ownerUid, { spawnSyncImpl = spawnSync } = {}) {
+  const ownerUser = resolveUsernameForUid(ownerUid, { spawnSyncImpl });
+  const result = spawnSyncImpl(
+    'sudo',
+    [
+      '-A',
+      '-H',
+      '-u',
+      ownerUser,
+      process.execPath,
+      '--input-type=module',
+      '-e',
+      HARNESS_FALLBACK_ALERT_OWNER_WRITE_SCRIPT,
+      statePath,
+      JSON.stringify(record),
+    ],
+    { encoding: 'utf8', maxBuffer: 1024 * 1024 },
+  );
+  if (result?.status !== 0) {
+    const detail = String(result?.stderr || result?.error?.message || '').trim();
+    throw new Error(`AMA harness fallback alert owner write failed for ${ownerUser}${detail ? `: ${detail}` : ''}`);
+  }
+  return { delegated: true, ownerUser, path: String(result.stdout || '').trim() || statePath };
+}
+
 function writeHarnessFallbackAlertState(rootDir, statePath, record, {
-  ownerGuardOptions = {},
+  currentUidImpl = currentUid,
+  spawnSyncImpl = spawnSync,
 } = {}) {
   // This is the local synchronous helper from src/atomic-write.mjs (node:fs
   // sync primitives), so an I/O failure throws directly to the caller's
   // fail-open try/catch rather than becoming an unhandled rejection.
-  const dataRoot = join(rootDir, 'data');
-  const stateDir = dirname(statePath);
-  // The watcher is the canonical owner of this shared debounce state. Prove
-  // that before creating anything, then prove the existing/new child still has
-  // that owner; a worker under another UID must fail open rather than poison
-  // the directory and disable debounce for the watcher.
-  assertCanonicalOwner(rootDir, statePath, {
-    ...ownerGuardOptions,
-    targetDir: existsSync(dataRoot) ? dataRoot : rootDir,
-    cannotVerifyMessage: 'cannot verify harness fallback debounce state owner',
-    crossUserMessage: 'refusing cross-user harness fallback debounce state write',
-    existingFileMessage: 'refusing write to non-canonical-owned harness fallback debounce state',
+  const ownerUid = resolveCanonicalHarnessFallbackAlertOwnerUid(rootDir);
+  const uid = currentUidImpl();
+  if (uid !== null && uid !== ownerUid) {
+    return writeHarnessFallbackAlertStateAsOwner(statePath, record, ownerUid, { spawnSyncImpl });
+  }
+  mkdirSync(dirname(statePath), { recursive: true, mode: HARNESS_FALLBACK_ALERT_STATE_DIR_MODE });
+  try {
+    chmodSync(dirname(statePath), HARNESS_FALLBACK_ALERT_STATE_DIR_MODE);
+  } catch {
+    // Shared deployments may refuse chmod; write failure still fails open below.
+  }
+  writeFileAtomic(statePath, JSON.stringify(record, null, 2) + '\n', {
+    mode: HARNESS_FALLBACK_ALERT_STATE_FILE_MODE,
   });
-  mkdirSync(stateDir, { recursive: true });
-  assertCanonicalOwner(rootDir, statePath, {
-    ...ownerGuardOptions,
-    targetDir: stateDir,
-    cannotVerifyMessage: 'cannot verify harness fallback debounce directory owner',
-    crossUserMessage: 'refusing cross-user harness fallback debounce directory write',
-    existingFileMessage: 'refusing write to non-canonical-owned harness fallback debounce state',
-  });
-  writeFileAtomic(statePath, JSON.stringify(record, null, 2) + '\n');
+  try {
+    chmodSync(statePath, HARNESS_FALLBACK_ALERT_STATE_FILE_MODE);
+  } catch {
+    // Best effort; the next write uses a directory-level atomic rename.
+  }
+  return { delegated: false, path: statePath };
 }
 
 // Best-effort operator alert that the closer/hammer fell back to another harness
@@ -1357,12 +1449,11 @@ export async function emitHarnessFallbackAlert({
   env = process.env,
   now = Date.now(),
   debounceMs = HARNESS_FALLBACK_ALERT_DEBOUNCE_MS,
-  ownerGuardOptions = {},
+  currentUidImpl = currentUid,
+  spawnSyncImpl = spawnSync,
 }) {
   const alertStatePath = join(
-    rootDir || SUBMODULE_ROOT,
-    'data',
-    HARNESS_FALLBACK_ALERT_STATE_DIRNAME,
+    resolveHarnessFallbackAlertStateDir(rootDir),
     `${harnessFallbackAlertStateKey(harness)}.json`,
   );
   const priorAlertAt = readHarnessFallbackAlertAt(alertStatePath);
@@ -1416,16 +1507,21 @@ export async function emitHarnessFallbackAlert({
       env,
     });
     try {
-      writeHarnessFallbackAlertState(rootDir || SUBMODULE_ROOT, alertStatePath, {
-        schemaVersion: 1,
-        alertedAt: new Date(now).toISOString(),
-        provider: harness?.provider || null,
-        from: harness?.from || null,
-        to: harness?.to || null,
-        groundedBy: harness?.groundedBy || 'hard',
-        primaryState: harness?.primaryState || null,
-        softGroundingReason: harness?.softGrounding?.reason || null,
-      }, { ownerGuardOptions });
+      writeHarnessFallbackAlertState(
+        rootDir,
+        alertStatePath,
+        {
+          schemaVersion: 1,
+          alertedAt: new Date(now).toISOString(),
+          provider: harness?.provider || null,
+          from: harness?.from || null,
+          to: harness?.to || null,
+          groundedBy: harness?.groundedBy || 'hard',
+          primaryState: harness?.primaryState || null,
+          softGroundingReason: harness?.softGrounding?.reason || null,
+        },
+        { currentUidImpl, spawnSyncImpl },
+      );
     } catch (err) {
       logger?.warn?.(JSON.stringify({
         event: 'ama_closer.harness_fallback_alert_debounce_write_failed',

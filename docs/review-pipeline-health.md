@@ -66,6 +66,15 @@ The Grafana dashboard lives at
 - `review_pipeline_round_budget_anomalies`: follow-up jobs whose remediation
   rounds exceed the risk-class budget, or final-pass jobs stuck
   `awaiting-rereview` after the budget is exhausted.
+- `review_pipeline_ttm_minutes`: median (`quantile="0.5"`) and p90
+  (`quantile="0.9"`) open-to-merge duration over the 12h SEV1 measurement
+  window.
+- `review_pipeline_ttm_open_budget_breaches`: open PRs beyond the
+  rounds-aware TTM budget (`base + review_rounds * per_round`).
+- `review_pipeline_ttm_terminal_unmerged_stalls_12h`: terminal-but-unmerged
+  stall events observed in the last 12h.
+- `review_pipeline_ttm_terminal_unmerged_duration_minutes_12h`: max and total
+  terminal-but-unmerged stall duration over the last 12h.
 - `review_pipeline_launchd_service_up`: required local pipeline LaunchAgents
   loaded state. Host launchd checks are opt-in for the scheduled local
   diagnostic with `ADVERSARIAL_REVIEW_PIPELINE_HEALTH_HOST_CHECKS=1`.
@@ -93,6 +102,8 @@ Its action headline is `Reviews stalled — restore reviewer dispatch`.
 | `review:queue_starvation` | oldest pending first-pass row is >30m old | ticket | no pending row exceeds the age threshold |
 | `review:remediation_backlog` | `follow-up-jobs/pending` has >5 jobs | ticket | pending job count returns to threshold or below |
 | `review:merge_stalled` | a `stopped:review-settled` job remains open for >3 watcher ticks | ticket | the PR is merged/closed or the settled job is no longer past threshold |
+| `review:ttm_budget_breach` | open PR age exceeds `base + review_rounds * per_round` minutes | ticket | the PR merges/closes or falls back under the rounds-aware budget |
+| `review:terminal_but_unmerged` | settled/clean PR remains open and unmerged past the terminal threshold | ticket | the PR merges/closes or no longer has a settled clean terminal signature |
 | `review:ama_closer_lease_stale` | AMA closer lease is `pending`/`dispatched`, `terminalOutcome=null`, and older than 30m | ticket | the lease reaches terminal state or falls below the age threshold |
 | `review:reviewer_pass_zombie` | `reviewer_passes.status='running'` row is older than 30m | ticket | no running reviewer pass exceeds the age threshold; the watcher timeout sweep should settle parseably aged rows as `failed` / `reviewer-timeout` |
 | `review:round_budget_anomaly` | remediation round count exceeds the risk-class budget, or a final-pass job remains `awaiting-rereview` after budget exhaustion | ticket | no follow-up job violates the risk-class round budget |

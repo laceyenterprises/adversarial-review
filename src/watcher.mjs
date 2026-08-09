@@ -229,6 +229,7 @@ import {
   buildAdversarialGateSnapshot,
   projectAdversarialGateStatus,
 } from './adversarial-gate-status.mjs';
+import { runTtmTrackerWatcherTick } from './ttm-tracker.mjs';
 import { fastMergeAuditDir, fastMergeAuditPath } from './fast-merge-audit-storage.mjs';
 import { processReviewSubject } from './pollonce-phases.mjs';
 import { resolveGateStatusContext } from './adversarial-gate-context.mjs';
@@ -1531,6 +1532,7 @@ async function pollOnce(
     // per-PR status — whenever no review has posted within the freshness window
     // while open PRs still await one. Fail-open: a pager fault never breaks the
     // tick.
+    runTtmTrackerWatcherTick({ db, logger: console });
     try {
       await maybeFireReviewStalledAlert({
         deliverAlertFn: defaultDeliverAlert,
@@ -1586,7 +1588,6 @@ async function warnIfAntigravityReviewerAuthUnavailable({
   if (result?.ok) {
     return { checked: true, ok: true, reason: null, cached: Boolean(result.cached) };
   }
-
   const reason = result?.reason || 'agy-probe-failed';
   const detail = result?.detail ? `: ${result.detail}` : '';
   const remediation = result?.remediation ? ` ${result.remediation}` : '';
@@ -1596,7 +1597,6 @@ async function warnIfAntigravityReviewerAuthUnavailable({
   );
   return { checked: true, ok: false, reason };
 }
-
 function isProcessAlive(pid) {
   const numericPid = Number(pid);
   if (!Number.isInteger(numericPid) || numericPid <= 0) return false;

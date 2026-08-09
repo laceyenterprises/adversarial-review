@@ -7,6 +7,10 @@ import { join } from 'node:path';
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { ROUND_BUDGET_BY_RISK_CLASS } from './follow-up-jobs.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaustion.mjs';
+import {
+  evaluateTtmFromDb,
+  resolveTtmTrackerConfig,
+} from './ttm-tracker.mjs';
 
 const DEFAULT_REVIEWER_DEATH_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_REVIEWER_DEATH_RATE_THRESHOLD = 0.5;
@@ -57,6 +61,10 @@ const REVIEW_PIPELINE_HEALTH_METRICS = Object.freeze([
   'review_pipeline_launchd_service_up',
   'review_pipeline_dispatch_spawn_failures',
   'review_pipeline_dag_autowalk_healthy',
+  'review_pipeline_ttm_minutes',
+  'review_pipeline_ttm_open_budget_breaches',
+  'review_pipeline_ttm_terminal_unmerged_stalls_12h',
+  'review_pipeline_ttm_terminal_unmerged_duration_minutes_12h',
   'review_pipeline_sentinel_finding_active',
 ]);
 
@@ -80,6 +88,10 @@ const REVIEW_PIPELINE_HEALTH_METRIC_HELP = Object.freeze({
   review_pipeline_launchd_service_up: 'Whether required local pipeline launchd services are loaded.',
   review_pipeline_dispatch_spawn_failures: 'Recent dispatch daemon stderr lines matching closer/hammer spawn failure patterns.',
   review_pipeline_dag_autowalk_healthy: 'Whether the dag-autowalk LaunchAgent has a healthy exit/log recency state.',
+  review_pipeline_ttm_minutes: 'Time-to-merge rollup in minutes over the configured window.',
+  review_pipeline_ttm_open_budget_breaches: 'Current open PRs exceeding the rounds-aware time-to-merge budget.',
+  review_pipeline_ttm_terminal_unmerged_stalls_12h: 'Terminal-but-unmerged stall events observed in the 12h SEV1 window.',
+  review_pipeline_ttm_terminal_unmerged_duration_minutes_12h: 'Terminal-but-unmerged stall duration in the 12h SEV1 window.',
   review_pipeline_sentinel_finding_active: 'Whether a Sentinel finding code is active in the current snapshot.',
 });
 
@@ -142,6 +154,22 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     category: 'review-pipeline',
     thresholdKey: 'mergeStalledMaxTicks',
     defaultThreshold: DEFAULT_MERGE_STALLED_MAX_TICKS,
+  },
+  {
+    code: 'review:ttm_budget_breach',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'ttm.base/per_round',
+    defaultThreshold: null,
+    thresholdDescription: 'an open PR exceeds base + review_rounds * per_round minutes',
+  },
+  {
+    code: 'review:terminal_but_unmerged',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: 'ttm.terminal_unmerged_minutes',
+    defaultThreshold: null,
+    thresholdDescription: 'a settled/clean PR remains open and unmerged past the terminal threshold',
   },
   {
     code: 'review:ama_closer_lease_stale',
@@ -218,6 +246,7 @@ function parseBoolean(value, fallback = false) {
 }
 
 function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
+  const ttm = resolveTtmTrackerConfig(env, overrides.ttm || {});
   return {
     hostChecksEnabled: parseBoolean(
       overrides.hostChecksEnabled
@@ -316,6 +345,7 @@ function resolveReviewPipelineHealthConfig(env = process.env, overrides = {}) {
           .map((value) => Number(value))
           .filter((value) => Number.isFinite(value) && value >= 0)
       : DEFAULT_LAUNCHD_TRANSIENT_RETRY_DELAYS_MS,
+    ttm,
     get reviewUnknownRateWindowMs() {
       return this.reviewUnknownRateWindowMinutes * 60 * 1000;
     },
@@ -1569,6 +1599,47 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  const ttmBudgetBreaches = snapshot.ttm.flags.filter((flag) => flag.flagKind === 'round_budget_breach');
+  if (ttmBudgetBreaches.length > 0) {
+    const sample = ttmBudgetBreaches[0];
+    findings.push(buildFinding({
+      code: 'review:ttm_budget_breach',
+      tier: 'ticket',
+      subject: `${ttmBudgetBreaches.length} open PR(s) exceed the rounds-aware TTM budget`,
+      message: `${sample.repo}#${sample.prNumber} has been open ${Math.round(sample.elapsedMinutes)}m; budget is ${Math.round(sample.budgetMinutes)}m for ${sample.reviewRounds} review/remediation round(s).`,
+      evidence: ttmBudgetBreaches.map((flag) => (
+        `reviews.db ttm ${flag.repo}#${flag.prNumber} elapsed=${Math.round(flag.elapsedMinutes)}m budget=${Math.round(flag.budgetMinutes)}m rounds=${flag.reviewRounds}`
+      )),
+      recommendedAction: 'Inspect review/merge lane state and the TTM flag event row before deciding whether to retrigger, dispatch hammer, or hand close.',
+      observedAt,
+      details: {
+        config: snapshot.ttm.config,
+        flags: ttmBudgetBreaches,
+      },
+    }));
+  }
+
+  const terminalUnmerged = snapshot.ttm.flags.filter((flag) => flag.flagKind === 'terminal_but_unmerged');
+  if (terminalUnmerged.length > 0) {
+    const sample = terminalUnmerged[0];
+    findings.push(buildFinding({
+      code: 'review:terminal_but_unmerged',
+      tier: 'ticket',
+      subject: `${terminalUnmerged.length} terminal clean PR(s) remain unmerged`,
+      message: `${sample.repo}#${sample.prNumber} settled clean at ${sample.settledAt || sample.openedAt} but is still open ${Math.round(sample.terminalUnmergedMinutes)}m later.`,
+      evidence: terminalUnmerged.map((flag) => (
+        `reviews.db ttm ${flag.repo}#${flag.prNumber} terminal_unmerged=${Math.round(flag.terminalUnmergedMinutes)}m verdict=${flag.details?.latestVerdict || 'unknown'}`
+      )),
+      recommendedAction: 'Check the daemon clean merge path, AMA eligibility misses such as worker-identity-unresolved/stale-review-head, and hammer closeout liveness. This is the #806/#5102 stall signature.',
+      observedAt,
+      details: {
+        sev1ExitMetric: snapshot.ttm.rollup.standingSev1Metric,
+        config: snapshot.ttm.config,
+        flags: terminalUnmerged,
+      },
+    }));
+  }
+
   if (snapshot.amaCloserLeases.stale.length > 0) {
     const sample = snapshot.amaCloserLeases.stale[0];
     findings.push(buildFinding({
@@ -1747,6 +1818,29 @@ function collectReviewPipelineHealth({
       ? summarizeZombieReviewerPasses(db, { nowMs, config })
       : { thresholdMs: config.runningReviewerPassMaxAgeMs, rows: [] };
     const roundBudget = summarizeRoundBudgetAnomalies(followUpQueues.jobs);
+    const ttm = db
+      ? evaluateTtmFromDb(db, {
+          now: () => new Date(observedAt),
+          env,
+          config: config.ttm,
+        })
+      : {
+          observedAt,
+          config: config.ttm,
+          timelines: [],
+          flags: [],
+          rollup: {
+            windowHours: config.ttm.rollupWindowHours,
+            medianTimeToMergeMinutes: null,
+            p90TimeToMergeMinutes: null,
+            mergedPrs: 0,
+            openPrsBreachingBudget: 0,
+            terminalButUnmergedOpenCount: 0,
+            terminalButUnmergedStallsLast12h: 0,
+            terminalButUnmergedMaxDurationMinutesLast12h: 0,
+            terminalButUnmergedTotalDurationMinutesLast12h: 0,
+          },
+        };
     const launchd = config.hostChecksEnabled
       ? summarizeLaunchdServices({ env, config, execFileSyncImpl, sleepSyncImpl })
       : { owner: currentUserName(env), services: [], dagAutowalk: { label: null, loaded: true, lastExitCode: 0 } };
@@ -1776,6 +1870,7 @@ function collectReviewPipelineHealth({
       amaCloserLeases,
       zombieReviewerPasses,
       roundBudget,
+      ttm,
       launchd,
       dispatchSpawnFailures,
       dagAutowalk,
@@ -1885,6 +1980,24 @@ function renderReviewPipelinePrometheus(snapshot) {
   }
   pushMetric('review_pipeline_dispatch_spawn_failures', {}, snapshot.dispatchSpawnFailures?.matches?.length || 0);
   pushMetric('review_pipeline_dag_autowalk_healthy', {}, snapshot.dagAutowalk?.healthy ? 1 : 0);
+  pushMetric('review_pipeline_ttm_minutes', { quantile: '0.5' }, snapshot.ttm?.rollup?.medianTimeToMergeMinutes || 0);
+  pushMetric('review_pipeline_ttm_minutes', { quantile: '0.9' }, snapshot.ttm?.rollup?.p90TimeToMergeMinutes || 0);
+  pushMetric('review_pipeline_ttm_open_budget_breaches', {}, snapshot.ttm?.rollup?.openPrsBreachingBudget || 0);
+  pushMetric(
+    'review_pipeline_ttm_terminal_unmerged_stalls_12h',
+    {},
+    snapshot.ttm?.rollup?.terminalButUnmergedStallsLast12h || 0
+  );
+  pushMetric(
+    'review_pipeline_ttm_terminal_unmerged_duration_minutes_12h',
+    { statistic: 'max' },
+    snapshot.ttm?.rollup?.terminalButUnmergedMaxDurationMinutesLast12h || 0
+  );
+  pushMetric(
+    'review_pipeline_ttm_terminal_unmerged_duration_minutes_12h',
+    { statistic: 'total' },
+    snapshot.ttm?.rollup?.terminalButUnmergedTotalDurationMinutesLast12h || 0
+  );
   for (const definition of REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS) {
     const active = snapshot.findings.some((finding) => finding.code === definition.code);
     pushMetric('review_pipeline_sentinel_finding_active', {

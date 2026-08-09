@@ -8,6 +8,7 @@ import { CODE_PR_DOMAIN_ID, makeCodePrSubjectExternalId } from './identity-shape
 import { awaitThrottleIfNeeded } from './rate-limit-throttle.mjs';
 import { ensureReviewCycleCapSchema } from './review-cycle-cap.mjs';
 import { isExplicitOperatorRetriggerReason } from './retrigger-review-reason.mjs';
+import { ensureTtmTrackerSchema } from './ttm-tracker.mjs';
 
 /**
  * AUTHORITATIVE `reviewed_prs.review_status` GRAPH (schema version 10).
@@ -72,6 +73,8 @@ const REVIEW_STATE_TABLE_NAMES = new Set([
   'pr_merge_closeouts',
   'review_cycle_verdicts',
   'review_cycle_counters',
+  'ttm_flag_events',
+  'ttm_flag_state',
   'watcher_db_canary',
 ]);
 
@@ -210,6 +213,7 @@ function ensureReviewStateSchema(db) {
 
   runReviewStateMigrations(db);
   ensureReviewCycleCapSchema(db);
+  ensureTtmTrackerSchema(db);
   db.exec(`
     CREATE TABLE IF NOT EXISTS watcher_db_canary (
       id         TEXT PRIMARY KEY,

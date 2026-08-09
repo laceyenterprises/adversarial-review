@@ -2433,7 +2433,7 @@ test('SEV1: clean stale-head closer commit with unknown worker identity merges u
     assert.equal(seen.verdict, 'settled-success');
     assert.equal(seen.auditMetadata.closureAuthority, 'daemon-autonomous-closer-commit-clean');
     assert.equal(seen.auditMetadata.mergeAccountability, 'autonomous-closer-commit');
-    assert.equal(seen.auditMetadata.operatorApproval.actor, 'merge-agent');
+    assert.equal(seen.auditMetadata.operatorApproval, undefined);
     assert.equal(seen.auditMetadata.autonomousCloserCommitClean.reviewedHeadSha, 'reviewed-clean-head-910');
     assert.equal(seen.auditMetadata.autonomousCloserCommitClean.currentHeadSha, 'closer-clean-head-910');
     const evt = logs.map((l) => { try { return JSON.parse(l); } catch { return null; } })
@@ -2441,6 +2441,60 @@ test('SEV1: clean stale-head closer commit with unknown worker identity merges u
     assert.ok(evt, 'a queryable autonomous closer-commit audit event is emitted');
     assert.equal(evt.actor, 'merge-agent');
     assert.equal(evt.reviewedHeadSha, 'reviewed-clean-head-910');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('SEV1 regression: autonomous closer clean head wins when non-blocking head certification also holds', async () => {
+  const rootDir = tempRoot();
+  try {
+    let seen = null;
+    let proofCalls = 0;
+    const result = await runDaemonCleanMergeAttempt({
+      ...unattributedDaemonArgs({ rootDir, prNumber: 914, head: 'closer-clean-head-914' }),
+      gateSnapshot: {
+        reviewedHeadSha: 'reviewed-nonblocking-head-914',
+        settledReview: { verdict: 'comment-only' },
+      },
+      reviewState: {
+        headSha: 'reviewed-nonblocking-head-914',
+        blockingFindingCount: 0, blockingFindingState: 'known',
+        nonBlockingFindingCount: 1, nonBlockingFindingState: 'known',
+        riskClass: 'low',
+      },
+      currentPrHeadSha: 'closer-clean-head-914',
+      fetchRollupImpl: async () => ({
+        state: 'OPEN',
+        headRefOid: 'closer-clean-head-914',
+        checks: [],
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+        headRefName: 'claude-code/infra-fix',
+      }),
+      resolveHeadCloserCommitSuppressionImpl: async ({ headSha }) => {
+        proofCalls += 1;
+        return {
+          suppressed: true,
+          reason: 'closer-commit-identity',
+          matched: 'the-hammer-lacey[bot]',
+          headSha,
+        };
+      },
+      attemptDaemonCleanMergeImpl: async (args) => {
+        seen = args;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true, attempts: 1 };
+      },
+    });
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(proofCalls, 2, 'proves both the non-blocking head certification and the live closer commit head');
+    assert.equal(seen.validatedHead, 'closer-clean-head-914');
+    assert.equal(seen.auditMetadata.closureAuthority, 'daemon-autonomous-closer-commit-clean');
+    assert.equal(seen.auditMetadata.mergeAccountability, 'autonomous-closer-commit');
+    assert.equal(seen.auditMetadata.operatorApproval, undefined);
+    assert.equal(seen.auditMetadata.autonomousCloserCommitClean.reviewedHeadSha, 'reviewed-nonblocking-head-914');
+    assert.equal(seen.auditMetadata.autonomousCloserCommitClean.currentHeadSha, 'closer-clean-head-914');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

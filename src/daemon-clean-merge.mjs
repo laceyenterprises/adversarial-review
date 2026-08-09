@@ -596,10 +596,10 @@ export async function runDaemonCleanMergeAttempt({
   // executor rather than a HAM audit head that may be absent or stale.
   const certifiedNonCleanHead = hamTerminalRemediationHead || headCloserCertifiedNonBlocking;
   const autonomousCloserCommitCleanHead = Boolean(cleanCloserCommitAccountability);
-  const daemonValidatedHead = certifiedNonCleanHead
-    ? hamAuditHead
-    : autonomousCloserCommitCleanHead
-      ? liveHead
+  const daemonValidatedHead = autonomousCloserCommitCleanHead
+    ? liveHead
+    : certifiedNonCleanHead
+      ? hamAuditHead
       : validatedHead;
   const daemonVerdict = hamTerminalRemediationHead
     ? 'ham_terminal_remediation_validated'
@@ -640,11 +640,11 @@ export async function runDaemonCleanMergeAttempt({
       // zero-finding clean daemon merge in the audit doc's closure authority.
       ...(hamTerminalRemediationHead
         ? { closureAuthority: 'daemon-ham-terminal-remediation' }
-        : headCloserCertifiedNonBlocking
-          ? { closureAuthority: 'daemon-head-closer-certified-non-blocking' }
-          : autonomousCloserCommitCleanHead
-            ? { closureAuthority: 'daemon-autonomous-closer-commit-clean' }
-          : {}),
+        : autonomousCloserCommitCleanHead
+          ? { closureAuthority: 'daemon-autonomous-closer-commit-clean' }
+          : headCloserCertifiedNonBlocking
+            ? { closureAuthority: 'daemon-head-closer-certified-non-blocking' }
+            : {}),
       // Record which accountability authorized the merge: hq-dispatched worker
       // identity (the normal path) or an explicit head-scoped operator label
       // (Deliverable 1 substitution). The audit doc thus always names WHO the
@@ -654,7 +654,9 @@ export async function runDaemonCleanMergeAttempt({
         : operatorMergeAccountability
           ? 'operator-approval'
           : 'worker-identity',
-      ...(operatorMergeAccountability ? { operatorApproval: operatorMergeAccountability } : {}),
+      ...(operatorMergeAccountability && !cleanCloserCommitAccountability
+        ? { operatorApproval: operatorMergeAccountability }
+        : {}),
       ...(cleanCloserCommitAccountability
         ? {
             autonomousCloserCommitClean: {

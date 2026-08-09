@@ -406,11 +406,19 @@ function summarizeTtmRollupFromTimelines(rows, { observedAt, config, eventRows =
     row.flag_kind === 'terminal_but_unmerged'
     && toMs(row.observed_at) !== null
     && toMs(row.observed_at) >= windowStartMs
-    && row.state === 'active'
   ));
-  const terminalDurations = terminalEventRows
+  const activeTerminalDurations = terminalUnmerged
+    .map((flag) => flag.terminalUnmergedMinutes)
+    .filter((value) => Number.isFinite(value));
+  const resolvedTerminalDurations = terminalEventRows
+    .filter((row) => row.state === 'resolved')
     .map((row) => Number(row.terminal_unmerged_minutes))
     .filter((value) => Number.isFinite(value));
+  const terminalDurations = [...activeTerminalDurations, ...resolvedTerminalDurations];
+  const terminalStallKeys = new Set([
+    ...terminalEventRows.map((row) => row.event_key).filter(Boolean),
+    ...terminalUnmerged.map((flag) => flag.eventKey).filter(Boolean),
+  ]);
 
   return {
     windowHours: config.rollupWindowHours,
@@ -419,7 +427,7 @@ function summarizeTtmRollupFromTimelines(rows, { observedAt, config, eventRows =
     mergedPrs: mergedDurations.length,
     openPrsBreachingBudget: openBreaches.length,
     terminalButUnmergedOpenCount: terminalUnmerged.length,
-    terminalButUnmergedStallsLast12h: terminalEventRows.length,
+    terminalButUnmergedStallsLast12h: terminalStallKeys.size,
     terminalButUnmergedMaxDurationMinutesLast12h: terminalDurations.length
       ? Math.max(...terminalDurations)
       : 0,

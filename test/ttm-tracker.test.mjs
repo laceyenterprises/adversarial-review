@@ -198,6 +198,87 @@ test('rollup computes median, p90, open breaches, and 12h terminal stall duratio
   }
 });
 
+test('rollup includes current terminal stall duration when activation event aged out of the window', () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  try {
+    insertReviewRow(db, {
+      prNumber: 14,
+      reviewedAt: '2026-08-09T17:25:00.000Z',
+      postedAt: '2026-08-09T17:30:00.000Z',
+    });
+    insertPass(db, {
+      prNumber: 14,
+      startedAt: '2026-08-09T17:26:00.000Z',
+      endedAt: '2026-08-09T17:30:00.000Z',
+    });
+
+    runTtmTrackerTick(db, {
+      now: () => new Date('2026-08-09T17:42:00.000Z'),
+      config: {
+        baseBudgetMinutes: 15,
+        perRoundBudgetMinutes: 10,
+        terminalUnmergedMinutes: 10,
+        rollupWindowHours: 0.25,
+      },
+    });
+    const tick = runTtmTrackerTick(db, {
+      now: () => new Date(NOW),
+      config: {
+        baseBudgetMinutes: 15,
+        perRoundBudgetMinutes: 10,
+        terminalUnmergedMinutes: 10,
+        rollupWindowHours: 0.25,
+      },
+    });
+
+    assert.equal(tick.rollup.terminalButUnmergedStallsLast12h, 1);
+    assert.equal(tick.rollup.terminalButUnmergedMaxDurationMinutesLast12h, 30);
+    assert.equal(tick.rollup.terminalButUnmergedTotalDurationMinutesLast12h, 30);
+  } finally {
+    db.close();
+  }
+});
+
+test('rollup uses resolved terminal stall duration instead of the activation threshold duration', () => {
+  const rootDir = tempRoot();
+  const db = openDb(rootDir);
+  try {
+    insertReviewRow(db, {
+      prNumber: 15,
+      reviewedAt: '2026-08-09T17:25:00.000Z',
+      postedAt: '2026-08-09T17:30:00.000Z',
+    });
+    insertPass(db, {
+      prNumber: 15,
+      startedAt: '2026-08-09T17:26:00.000Z',
+      endedAt: '2026-08-09T17:30:00.000Z',
+    });
+
+    runTtmTrackerTick(db, {
+      now: () => new Date('2026-08-09T17:42:00.000Z'),
+      config: { baseBudgetMinutes: 15, perRoundBudgetMinutes: 10, terminalUnmergedMinutes: 10 },
+    });
+    runTtmTrackerTick(db, {
+      now: () => new Date(NOW),
+      config: { baseBudgetMinutes: 15, perRoundBudgetMinutes: 10, terminalUnmergedMinutes: 10 },
+    });
+    db.prepare("UPDATE reviewed_prs SET pr_state = 'merged', merged_at = ? WHERE pr_number = ?")
+      .run('2026-08-09T18:05:00.000Z', 15);
+    const tick = runTtmTrackerTick(db, {
+      now: () => new Date('2026-08-09T18:06:00.000Z'),
+      config: { baseBudgetMinutes: 15, perRoundBudgetMinutes: 10, terminalUnmergedMinutes: 10 },
+    });
+
+    assert.equal(tick.rollup.terminalButUnmergedOpenCount, 0);
+    assert.equal(tick.rollup.terminalButUnmergedStallsLast12h, 1);
+    assert.equal(tick.rollup.terminalButUnmergedMaxDurationMinutesLast12h, 30);
+    assert.equal(tick.rollup.terminalButUnmergedTotalDurationMinutesLast12h, 30);
+  } finally {
+    db.close();
+  }
+});
+
 test('situational event gating does not refire unchanged active flags and records resolution', () => {
   const rootDir = tempRoot();
   const db = openDb(rootDir);

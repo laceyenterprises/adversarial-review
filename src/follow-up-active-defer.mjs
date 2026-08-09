@@ -1,5 +1,6 @@
 import { statSync } from 'node:fs';
-import { basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { basename, dirname, join } from 'node:path';
 
 import {
   isActiveFollowUpJobStatus,
@@ -10,6 +11,7 @@ import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 const IN_PROGRESS_STUCK_THRESHOLD_MS_ENV = 'ADVERSARIAL_FOLLOW_UP_IN_PROGRESS_STUCK_THRESHOLD_MS';
 const DEFAULT_IN_PROGRESS_STUCK_THRESHOLD_MS = 10 * 60 * 1000;
 const STALE_HEARTBEAT_STOP_CODE = 'stale-heartbeat';
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 function isActiveFollowUpJob(job) {
   return isActiveFollowUpJobStatus(job?.status);
@@ -70,12 +72,16 @@ function resolveLatestFollowUpObservedAtMs(latest) {
     ['remediationWorker.spawnedAt', job?.remediationWorker?.spawnedAt],
     ['claimedAt', job?.claimedAt],
   ];
+  let newest = null;
   for (const [source, value] of candidates) {
     const sourceMs = parseFollowUpTimestampMs(value);
     if (sourceMs !== null) {
-      return { sourceMs, source };
+      if (!newest || sourceMs > newest.sourceMs) {
+        newest = { sourceMs, source };
+      }
     }
   }
+  if (newest) return newest;
   try {
     return { sourceMs: statSync(latest.jobPath).mtimeMs, source: 'mtime' };
   } catch {
@@ -129,7 +135,7 @@ function stopStaleInProgressFollowUpJob({
 }
 
 function shouldDeferReviewForActiveFollowUp({
-  rootDir = process.cwd(),
+  rootDir = ROOT,
   repo,
   prNumber,
   latestJobFinder = findLatestFollowUpJob,

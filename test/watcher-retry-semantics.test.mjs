@@ -27,6 +27,9 @@ import {
   shouldReconcileStaleReviewerSession,
 } from '../src/watcher.mjs';
 import {
+  shouldDeferReviewForActiveFollowUp as shouldDeferReviewForActiveFollowUpDirect,
+} from '../src/follow-up-active-defer.mjs';
+import {
   MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION,
   listMergeAgentLifecycleCleanups,
   upsertMergeAgentLifecycleCleanup,
@@ -774,6 +777,90 @@ test('watcher releases stale in-progress follow-up claims through the stuck-clai
   assert.equal(existsSync(spawned.jobPath), false, 'stale claim was removed from in-progress/');
   const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(spawned.jobPath));
   assert.equal(readFollowUpJob(stoppedPath).remediationPlan?.stop?.code, 'stale-heartbeat');
+});
+
+test('watcher stale follow-up release uses the newest liveness timestamp before stopping', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-fresh-heartbeat-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5112,
+    reviewerModel: 'claude',
+    linearTicketId: null,
+    reviewBody: '## Summary\nFresh heartbeat fixture.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-08-09T08:00:00.000Z',
+    critical: false,
+    maxRemediationRounds: 2,
+  });
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-08-09T08:01:00.000Z',
+  });
+  const spawned = markFollowUpJobSpawned({
+    rootDir,
+    jobPath: claimed.jobPath,
+    worker: {
+      processId: 64594,
+      processGroupId: 64594,
+      workspaceDir: '/tmp/fixture-workspace',
+    },
+    spawnedAt: '2026-08-09T08:02:00.000Z',
+  });
+  writeFollowUpJob(spawned.jobPath, {
+    ...spawned.job,
+    lastWorkerArtifactProgressAt: '2026-08-09T08:03:00.000Z',
+    lastHeartbeatAt: '2026-08-09T08:59:00.000Z',
+  });
+
+  const decision = shouldDeferReviewForActiveFollowUp({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5112,
+    nowMs: Date.parse('2026-08-09T09:00:00.000Z'),
+  });
+
+  assert.equal(decision.defer, true, 'fresh heartbeat must keep the in-progress job active');
+  assert.equal(decision.latestJobStatus, 'in_progress');
+  assert.equal(existsSync(spawned.jobPath), true, 'fresh job must not be moved to stopped/');
+});
+
+test('watcher active follow-up defer defaults to the repository root, not process cwd', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-default-root-'));
+  const previousCwd = process.cwd();
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5113,
+    reviewerModel: 'claude',
+    linearTicketId: null,
+    reviewBody: '## Summary\nDefault root fixture.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-08-09T08:00:00.000Z',
+    critical: false,
+    maxRemediationRounds: 2,
+  });
+
+  try {
+    process.chdir(rootDir);
+    const decision = shouldDeferReviewForActiveFollowUpDirect({
+      repo: 'laceyenterprises/agent-os',
+      prNumber: 5113,
+      latestJobFinder(receivedRootDir) {
+        return {
+          job: { status: 'pending', jobId: 'default-root-fixture' },
+          jobPath: path.join(receivedRootDir, 'data/follow-up-jobs/pending/default-root-fixture.json'),
+        };
+      },
+      staleClaimSweepImpl: null,
+    });
+
+    assert.equal(decision.defer, true);
+    assert.equal(
+      decision.jobPath,
+      path.join(previousCwd, 'data/follow-up-jobs/pending/default-root-fixture.json'),
+    );
+  } finally {
+    process.chdir(previousCwd);
+  }
 });
 
 test('watcher defer + operator bumpRemediationBudget + retrigger-remediation eligibility all agree on every active-status spelling (cross-module agreement)', async () => {

@@ -933,8 +933,11 @@ const DEFAULT_CQP_BROKER_URL = 'http://127.0.0.1:4099';
 const GEMINI_REVIEWER_SESSION_DIR_PREFIX = 'review-';
 const GEMINI_CQP_CHECKOUT_TIMEOUT_MS = 5_000;
 const GEMINI_CQP_FALLBACK_LOCK_WAIT_MS = 30 * 60 * 1000;
+const DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_RETRIES = 4;
+const DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_BACKOFF_MS = 250;
 const GEMINI_REVIEWER_SESSION_STALE_AGE_MS = 12 * 60 * 60 * 1000;
 let geminiReviewerSessionPreflightDone = false;
+let geminiCredentialCheckoutQueue = Promise.resolve();
 
 class GeminiCredentialPoolUnavailableError extends Error {
   constructor(reason, { cause } = {}) {
@@ -1209,7 +1212,25 @@ async function fetchWithTimeout(fetchImpl, url, options, timeoutMs) {
   }
 }
 
-async function checkoutGeminiCredentialFromBroker({
+function resolveGeminiCheckoutConflictRetries(env = process.env) {
+  const raw = env.AGENT_OS_GEMINI_CHECKOUT_409_RETRIES
+    ?? env.GEMINI_CQP_CHECKOUT_409_RETRIES;
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_RETRIES;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) return DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_RETRIES;
+  return parsed;
+}
+
+function resolveGeminiCheckoutConflictBackoffMs(env = process.env) {
+  const raw = env.AGENT_OS_GEMINI_CHECKOUT_409_BACKOFF_MS
+    ?? env.GEMINI_CQP_CHECKOUT_409_BACKOFF_MS;
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_BACKOFF_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_BACKOFF_MS;
+  return Math.floor(parsed);
+}
+
+async function checkoutGeminiCredentialFromBrokerOnce({
   env = process.env,
   fetchImpl = globalThis.fetch,
   readFileImpl = readFileSync,
@@ -1266,6 +1287,47 @@ async function checkoutGeminiCredentialFromBroker({
     }
     throw err;
   }
+}
+
+async function checkoutGeminiCredentialFromBrokerSerialized(options = {}) {
+  const {
+    env = process.env,
+    sleepImpl = sleep,
+  } = options;
+  const retries = resolveGeminiCheckoutConflictRetries(env);
+  const backoffMs = resolveGeminiCheckoutConflictBackoffMs(env);
+  let lastError = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await checkoutGeminiCredentialFromBrokerOnce(options);
+    } catch (err) {
+      lastError = err;
+      if (!err?.isGeminiCredentialPoolUnavailable || !/broker returned HTTP 409\b/.test(err.message)) {
+        throw err;
+      }
+      if (attempt >= retries) break;
+      if (backoffMs > 0) await sleepImpl(backoffMs * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
+
+async function checkoutGeminiCredentialFromBroker(options = {}) {
+  const prior = geminiCredentialCheckoutQueue.catch(() => {});
+  let release;
+  geminiCredentialCheckoutQueue = new Promise((resolve) => {
+    release = resolve;
+  });
+  await prior;
+  try {
+    return await checkoutGeminiCredentialFromBrokerSerialized(options);
+  } finally {
+    release();
+  }
+}
+
+function resetGeminiCredentialCheckoutQueueForTest() {
+  geminiCredentialCheckoutQueue = Promise.resolve();
 }
 
 async function releaseGeminiCredentialCheckout({
@@ -2468,6 +2530,8 @@ const __test__ = {
   DEFAULT_AGY_CHUNK_MAX_CHUNKS,
   DEFAULT_CLAUDE_CLI,
   DEFAULT_CQP_BROKER_URL,
+  DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_BACKOFF_MS,
+  DEFAULT_GEMINI_CQP_CHECKOUT_CONFLICT_RETRIES,
   DEFAULT_GEMINI_REVIEWER_MODEL,
   ENV_BIN,
   GEMINI_CLI,
@@ -2501,6 +2565,7 @@ const __test__ = {
   candidateAgyReviewBlocks,
   checkAgyReviewerAuth,
   checkoutGeminiCredentialFromBroker,
+  checkoutGeminiCredentialFromBrokerOnce,
   chooseAgyOversizedCrossModelRoute,
   cleanupGeminiAntigravityResources,
   createGeminiReviewerSessionDir,
@@ -2549,6 +2614,7 @@ const __test__ = {
   releaseGeminiCredentialCheckout,
   reportGeminiCredentialSpend,
   resetGeminiReviewerSessionPreflightForTest,
+  resetGeminiCredentialCheckoutQueueForTest,
   resolveAcpxCliPath,
   resolveAgyArgvMaxBytes,
   resolveAgyAuthProbeTimeoutMs,
@@ -2564,6 +2630,8 @@ const __test__ = {
   resolveCodexExecOverrides,
   resolveCqpBrokerConfig,
   resolveGeminiAntigravityModel,
+  resolveGeminiCheckoutConflictBackoffMs,
+  resolveGeminiCheckoutConflictRetries,
   resolveGeminiCliPath,
   resolveGeminiOAuthCredsPath,
   resolveGeminiReviewerModel,

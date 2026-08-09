@@ -65,6 +65,12 @@ const REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL = {
 // cap exists to bound stays bounded.
 const DEFAULT_STALE_REVIEWER_RECONCILE_PER_POLL = 6;
 const DEFAULT_REVIEWER_TIMEOUT_FALLBACK_THRESHOLD = 2;
+const DEFAULT_REVIEWER_EXEC_FALLBACK_THRESHOLD = 2;
+const REVIEWER_EXEC_FALLBACK_FAILURE_CLASSES = Object.freeze([
+  'reviewer-timeout',
+  'reviewer-command-failed',
+  'oauth-broken',
+]);
 
 export function resolveReviewerTimeoutFallbackThreshold(env = process.env) {
   const raw = env.ADVERSARIAL_REVIEW_TIMEOUT_FALLBACK_THRESHOLD;
@@ -81,6 +87,15 @@ function resolveReviewerTimeoutFallbackModel(env = process.env) {
   return null;
 }
 
+export function resolveReviewerExecFallbackThreshold(env = process.env) {
+  const raw = env.AGENT_OS_REVIEWER_EXEC_FALLBACK_THRESHOLD
+    ?? env.ADVERSARIAL_REVIEWER_EXEC_FALLBACK_THRESHOLD;
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_REVIEWER_EXEC_FALLBACK_THRESHOLD;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) return DEFAULT_REVIEWER_EXEC_FALLBACK_THRESHOLD;
+  return parsed;
+}
+
 function normalizeReviewerAttribution(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -95,6 +110,68 @@ function rowReviewerMatches(row, expectedReviewerModel) {
     row?.reviewer_class,
   ].map(normalizeReviewerAttribution).filter(Boolean);
   return candidates.some((candidate) => candidate === expected);
+}
+
+function reviewerRouteForModel(model) {
+  const normalized = normalizeReviewerAttribution(model);
+  return REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL[normalized] || null;
+}
+
+function reviewerExecFailureCount(cascadeState, failureClass) {
+  return Number(cascadeState?.transientFailureBreakdown?.[failureClass] || 0);
+}
+
+function reviewerExecFailureSignal({ cascadeState, currentRow }) {
+  const cascadeFailureClass = REVIEWER_EXEC_FALLBACK_FAILURE_CLASSES.includes(cascadeState?.lastFailureClass)
+    ? cascadeState.lastFailureClass
+    : null;
+  const rowFailureClass = REVIEWER_EXEC_FALLBACK_FAILURE_CLASSES.includes(infraRecoverableFailureClass(currentRow))
+    ? infraRecoverableFailureClass(currentRow)
+    : null;
+  const failureClass = cascadeFailureClass || rowFailureClass;
+  if (!failureClass) return { failureClass: null, failureCount: 0 };
+  const cascadeCount = cascadeFailureClass === failureClass
+    ? reviewerExecFailureCount(cascadeState, failureClass)
+    : 0;
+  // Row-level command failures charge infra_auto_recover_attempts when the
+  // retry is claimed, so a row sitting after its first failure has 0, after its
+  // second same-head failure has 1. Add one to express actual consecutive
+  // failures for the threshold check without falling back on the first failure.
+  const rowCount = rowFailureClass === failureClass
+    ? Number(currentRow?.infra_auto_recover_attempts || 0) + 1
+    : 0;
+  return { failureClass, failureCount: Math.max(cascadeCount, rowCount) };
+}
+
+function currentRowHeadMatches(row, headSha) {
+  if (!row || !headSha) return false;
+  return String(row.reviewer_head_sha || '') === String(headSha || '');
+}
+
+function modelMayReviewBuilder(model, builderClass) {
+  if (normalizeReviewerAttribution(model) === 'gemini') {
+    return builderClass !== 'gemini';
+  }
+  return !isCrossModelReviewWaived(builderClass, model);
+}
+
+function candidateReviewerModelsForExecFallback({ baseRoute, builderClass }) {
+  const seen = new Set();
+  const candidates = [];
+  const push = (model) => {
+    const normalized = normalizeReviewerAttribution(model);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    candidates.push(normalized);
+  };
+  push(baseRoute?.geminiReviewerSelection?.replacedReviewerModel);
+  push(baseRoute?.timeoutFallback?.fromReviewerModel);
+  for (const model of ['claude', 'codex', 'gemini']) push(model);
+  return candidates.filter((model) => (
+    model !== normalizeReviewerAttribution(baseRoute?.reviewerModel) &&
+    reviewerRouteForModel(model) &&
+    modelMayReviewBuilder(model, builderClass)
+  ));
 }
 
 // GMW-02 fallback signal. `reviewer.gemini.mode=fallback` selects gemini only
@@ -251,19 +328,75 @@ export function selectReviewerRouteForAttempt({
   rootDir,
   repoPath,
   prNumber,
+  currentRow = null,
+  headSha = null,
   env = process.env,
   afhGrounding = null,
 }) {
+  const cascadeState = readCascadeState(rootDir, { repo: repoPath, prNumber });
+  const builderClass = subject?.builderClass || baseRoute.builderClass || null;
+  const execThreshold = resolveReviewerExecFallbackThreshold(env);
+  const execFailureSignal = reviewerExecFailureSignal({ cascadeState, currentRow });
+  if (
+    execThreshold > 0 &&
+    currentRowHeadMatches(currentRow, headSha) &&
+    rowReviewerMatches(currentRow, baseRoute?.reviewerModel) &&
+    execFailureSignal.failureClass &&
+    execFailureSignal.failureCount >= execThreshold
+  ) {
+    const attempted = [];
+    for (const candidateModel of candidateReviewerModelsForExecFallback({ baseRoute, builderClass })) {
+      const fallbackGrounding = reviewerModelGrounding(afhGrounding, candidateModel);
+      attempted.push({
+        reviewerModel: candidateModel,
+        grounded: fallbackGrounding.grounded,
+        provider: fallbackGrounding.provider,
+        state: fallbackGrounding.state,
+      });
+      if (fallbackGrounding.grounded) continue;
+      const fallbackRoute = reviewerRouteForModel(candidateModel);
+      return {
+        ...baseRoute,
+        reviewerModel: fallbackRoute.reviewerModel,
+        botTokenEnv: fallbackRoute.botTokenEnv,
+        reviewerModelFallback: {
+          event: 'reviewer-model-fallback',
+          reason: 'repeated-reviewer-exec-failure',
+          fromReviewerModel: baseRoute.reviewerModel,
+          toReviewerModel: fallbackRoute.reviewerModel,
+          failureClass: execFailureSignal.failureClass,
+          failureCount: execFailureSignal.failureCount,
+          threshold: execThreshold,
+          headSha,
+          builderClass,
+        },
+      };
+    }
+    return {
+      ...baseRoute,
+      reviewerModelFallbackSkipped: {
+        event: 'reviewer-model-fallback-skipped',
+        reason: attempted.length > 0 ? 'no-healthy-alternative' : 'no-eligible-alternative',
+        fromReviewerModel: baseRoute.reviewerModel,
+        failureClass: execFailureSignal.failureClass,
+        failureCount: execFailureSignal.failureCount,
+        threshold: execThreshold,
+        headSha,
+        builderClass,
+        attempted,
+      },
+    };
+  }
+
   const threshold = resolveReviewerTimeoutFallbackThreshold(env);
   if (threshold <= 0) return baseRoute;
-  const cascadeState = readCascadeState(rootDir, { repo: repoPath, prNumber });
   const timeoutFailures = Number(cascadeState?.transientFailureBreakdown?.['reviewer-timeout'] || 0);
   if (cascadeState?.lastFailureClass !== 'reviewer-timeout' || timeoutFailures < threshold) {
     return baseRoute;
   }
   const fallbackModel = resolveReviewerTimeoutFallbackModel(env);
   if (!fallbackModel || fallbackModel === baseRoute?.reviewerModel) return baseRoute;
-  const fallbackRoute = REVIEWER_TIMEOUT_FALLBACK_ROUTE_BY_MODEL[fallbackModel];
+  const fallbackRoute = reviewerRouteForModel(fallbackModel);
   if (!fallbackRoute) return baseRoute;
   // AFH-04: never switch the timeout fallback onto a reviewer whose provider is
   // authoritatively grounded (hard or AFH-02 soft) — that trades a slow reviewer
@@ -281,7 +414,6 @@ export function selectReviewerRouteForAttempt({
       },
     };
   }
-  const builderClass = subject?.builderClass || baseRoute.builderClass || null;
   return {
     ...baseRoute,
     reviewerModel: fallbackRoute.reviewerModel,

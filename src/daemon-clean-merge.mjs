@@ -509,6 +509,13 @@ export async function runDaemonCleanMergeAttempt({
     consumeHeadAttestations: cfg?.lha?.consumeAttestations === true,
     logger,
   });
+  cleanCloserCommitAccountability = resolveAutonomousCloserCommitAccountabilityImpl({
+    enabled: cfg?.autonomousCloserCommitCleanMergeEnabled,
+    reviewedHeadSha: validatedHead,
+    mergeHeadSha: liveHead,
+    suppression: cleanCloserCommitSuppression,
+    workerIdentityReason: workerIdentity.reason || 'worker-identity-unresolved',
+  });
   // Deliverable 1 — operator-approval auto-close lane. When no hq-dispatched
   // worker identity resolves (un-attributed operator/agent infra-fix PRs), an
   // explicit, head-scoped operator label IS the accountability that stands in
@@ -525,17 +532,11 @@ export async function runDaemonCleanMergeAttempt({
       mergeAgentRequestEvent,
       mergeHeadSha: liveHead,
     });
+    if (cleanCloserCommitAccountability) {
+      operatorMergeAccountability = cleanCloserCommitAccountability;
+    }
     if (!operatorMergeAccountability) {
-      cleanCloserCommitAccountability = resolveAutonomousCloserCommitAccountabilityImpl({
-        enabled: cfg?.autonomousCloserCommitCleanMergeEnabled,
-        reviewedHeadSha: validatedHead,
-        mergeHeadSha: liveHead,
-        suppression: cleanCloserCommitSuppression,
-        workerIdentityReason: workerIdentity.reason || 'worker-identity-unresolved',
-      });
-      if (cleanCloserCommitAccountability) {
-        operatorMergeAccountability = cleanCloserCommitAccountability;
-      } else if (hamTerminalRemediationHead || headCloserCertifiedNonBlocking) {
+      if (hamTerminalRemediationHead || headCloserCertifiedNonBlocking) {
         // The HAM terminal-remediation audit / head-closer self-cert IS the merge
         // accountability, but the daemon re-merge is a best-effort shortcut — never
         // a NEW park path. If head provenance cannot resolve a worker identity this
@@ -651,9 +652,9 @@ export async function runDaemonCleanMergeAttempt({
       // merge authority rests on.
       mergeAccountability: cleanCloserCommitAccountability
         ? 'autonomous-closer-commit'
-        : operatorMergeAccountability
-          ? 'operator-approval'
-          : 'worker-identity',
+        : workerIdentity.ok
+          ? 'worker-identity'
+          : 'operator-approval',
       ...(operatorMergeAccountability && !cleanCloserCommitAccountability
         ? { operatorApproval: operatorMergeAccountability }
         : {}),

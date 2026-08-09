@@ -118,7 +118,8 @@ test('daemon lands the closer own-commit head over a non-blocking-only settled-s
     assert.equal(captured.verdict, 'settled-success');
     // Pins the CURRENT (closer) head, never the stale reviewed head.
     assert.equal(captured.validatedHead, CLOSER_HEAD);
-    assert.equal(captured.auditMetadata.closureAuthority, 'daemon-head-closer-certified-non-blocking');
+    assert.equal(captured.auditMetadata.closureAuthority, 'daemon-autonomous-closer-commit-clean');
+    assert.equal(captured.auditMetadata.mergeAccountability, 'autonomous-closer-commit');
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

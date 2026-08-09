@@ -2,10 +2,7 @@ import { statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join } from 'node:path';
 
-import {
-  isActiveFollowUpJobStatus,
-  markFollowUpJobStopped,
-} from './follow-up-jobs.mjs';
+import * as followUpJobs from './follow-up-jobs.mjs';
 import { findLatestFollowUpJob } from './operator-retrigger-helpers.mjs';
 
 const IN_PROGRESS_STUCK_THRESHOLD_MS_ENV = 'ADVERSARIAL_FOLLOW_UP_IN_PROGRESS_STUCK_THRESHOLD_MS';
@@ -14,13 +11,14 @@ const STALE_HEARTBEAT_STOP_CODE = 'stale-heartbeat';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 function isActiveFollowUpJob(job) {
-  return isActiveFollowUpJobStatus(job?.status);
+  return followUpJobs.isActiveFollowUpJobStatus(job?.status);
 }
 
 function stopBudgetExhaustedPendingFollowUpJob({
   rootDir,
   latest,
   stoppedAt = new Date().toISOString(),
+  markStoppedImpl = followUpJobs.markFollowUpJobStopped,
 }) {
   const job = latest?.job;
   if (job?.status !== 'pending') {
@@ -35,7 +33,7 @@ function stopBudgetExhaustedPendingFollowUpJob({
     return null;
   }
 
-  return markFollowUpJobStopped({
+  return markStoppedImpl({
     rootDir,
     jobPath: latest.jobPath,
     stoppedAt,
@@ -94,6 +92,7 @@ function stopStaleInProgressFollowUpJob({
   latest,
   nowMs = Date.now(),
   thresholdMs = resolveFollowUpStuckThresholdMs(),
+  markStoppedImpl = followUpJobs.markFollowUpJobStopped,
 }) {
   const job = latest?.job;
   if (!['in_progress', 'inProgress', 'in-progress'].includes(String(job?.status || ''))) {
@@ -116,7 +115,7 @@ function stopStaleInProgressFollowUpJob({
     `Reclaimed orphaned in-progress claim ${jobId}: ${source} is ` +
     `${Math.round(ageMs / 1000)}s old (threshold=${Math.round(thresholdMs / 1000)}s).`;
 
-  return markFollowUpJobStopped({
+  return markStoppedImpl({
     rootDir,
     jobPath: latest.jobPath,
     stoppedAt,

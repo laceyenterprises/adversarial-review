@@ -118,6 +118,7 @@ function writeLifecycleCleanup(rootDir, {
   repo,
   prNumber,
   headSha = null,
+  transition = 'closed',
   completedAt = null,
   lastResult = { cleanupComplete: false, retryable: true },
 }) {
@@ -130,7 +131,7 @@ function writeLifecycleCleanup(rootDir, {
       repo,
       prNumber,
       headSha,
-      transition: 'closed',
+      transition,
       queuedAt: '2026-05-19T03:25:00Z',
       completedAt,
       lastResult,
@@ -204,7 +205,7 @@ test('scanStuckMergeAgentDispatches ignores historical dispatches without active
   assert.equal(reports.length, 0, 'historical dispatches should not be rescanned forever');
 });
 
-test('scanStuckMergeAgentDispatches includes unresolved lifecycle cleanups even without active label snapshot', () => {
+test('scanStuckMergeAgentDispatches includes an unresolved dispatched-label-add cleanup without an active label snapshot', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
   buildAuditFile(hqRoot, STUCK_LRQ, 6);
@@ -223,6 +224,7 @@ test('scanStuckMergeAgentDispatches includes unresolved lifecycle cleanups even 
     repo: 'laceyenterprises/agent-os',
     prNumber: 719,
     headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+    transition: 'dispatched-label-add',
   });
 
   const reports = scanStuckMergeAgentDispatches({
@@ -232,7 +234,38 @@ test('scanStuckMergeAgentDispatches includes unresolved lifecycle cleanups even 
     now: NOW,
   });
 
-  assert.equal(reports.length, 1, 'unresolved lifecycle cleanup should keep the dispatch eligible');
+  assert.equal(reports.length, 1, 'unresolved dispatched-label-add cleanup should keep the dispatch eligible');
+});
+
+test('scanStuckMergeAgentDispatches ignores unresolved closed lifecycle cleanup sidecars', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = mkdtempSync(path.join(tmpdir(), 'agent-os-hq-'));
+  buildAuditFile(hqRoot, STUCK_LRQ, 6);
+  recordMergeAgentDispatch(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+    headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+  }, {
+    dispatchedAt: STUCK_DISPATCHED_AT,
+    prompt: '',
+    dispatchId: STUCK_LRQ,
+    launchRequestId: STUCK_LRQ,
+    trigger: 'final-pass-on-budget-exhausted',
+  });
+  writeLifecycleCleanup(rootDir, {
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 719,
+    headSha: 'c055d93d02abfb41fbab56c46ac631982f84fd66',
+    transition: 'closed',
+  });
+
+  const reports = scanStuckMergeAgentDispatches({
+    rootDir,
+    hqRoot,
+    now: NOW,
+  });
+
+  assert.equal(reports.length, 0, 'closed cleanup retries must not resurrect merged or closed PRs');
 });
 
 test('scanStuckMergeAgentDispatches ignores completed lifecycle cleanup sidecars', () => {

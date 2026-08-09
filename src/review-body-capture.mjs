@@ -447,42 +447,91 @@ async function captureReviewerBodyAfterPost(rootDir, {
   env = process.env,
   log = console,
   requireGitHubArtifact = false,
+  knownGitHubArtifact = null,
   lookupRetryBackoffMs = REVIEW_ARTIFACT_LOOKUP_RETRY_BACKOFF_MS,
   sleepImpl = sleep,
   allowExistingBodyUpdate = false,
 } = {}) {
   let ghCommentId = null;
   try {
-    const logins = resolveReviewerBotLoginAliases(botTokenEnv || reviewerModel);
-    if (logins.length > 0) {
-      try {
-        const lookupEnv = buildLookupEnv(env, botTokenEnv ? env?.[botTokenEnv] : null);
-        const lookupArgs = {
-          repo,
-          prNumber,
-          endpoint: `repos/${repo}/pulls/${encodeURIComponent(prNumber)}/reviews`,
-          login: logins,
-          headSha: reviewerHeadSha,
-          postedAt,
-          body: reviewBody,
-          execFileImpl,
-          env: lookupEnv,
-        };
-        const detail = reviewerHeadSha
-          ? ` on head ${reviewerHeadSha}`
-          : '';
-        const message = `review body capture could not find a recent submitted GitHub review for ${repo}#${prNumber}${detail}`;
-        const lookup = requireGitHubArtifact
-          ? await lookupRecentReviewArtifactWithRetry(lookupArgs, {
-            backoffMs: lookupRetryBackoffMs,
-            sleepImpl,
-            log,
-            notFoundMessage: message,
-          })
-          : { artifact: await lookupRecentReviewArtifact(lookupArgs), attempts: 1 };
-        const artifact = lookup.artifact;
-        ghCommentId = artifact?.id ?? null;
-        if (!artifact) {
+    if (knownGitHubArtifact) {
+      const knownId = knownGitHubArtifact?.id;
+      const knownHeadSha = String(
+        knownGitHubArtifact?.commitId ?? knownGitHubArtifact?.commit_id ?? ''
+      ).trim();
+      if (!knownId || (reviewerHeadSha && knownHeadSha !== String(reviewerHeadSha))) {
+        log.warn?.(
+          `[reviewer] review body capture received an invalid exact-head GitHub review artifact for ${repo}#${prNumber}; falling back to GitHub lookup`
+        );
+      } else {
+        ghCommentId = String(knownId);
+      }
+    }
+    if (!ghCommentId) {
+      const logins = resolveReviewerBotLoginAliases(botTokenEnv || reviewerModel);
+      if (logins.length > 0) {
+        try {
+          const lookupEnv = buildLookupEnv(env, botTokenEnv ? env?.[botTokenEnv] : null);
+          const lookupArgs = {
+            repo,
+            prNumber,
+            endpoint: `repos/${repo}/pulls/${encodeURIComponent(prNumber)}/reviews`,
+            login: logins,
+            headSha: reviewerHeadSha,
+            postedAt,
+            body: reviewBody,
+            execFileImpl,
+            env: lookupEnv,
+          };
+          const detail = reviewerHeadSha
+            ? ` on head ${reviewerHeadSha}`
+            : '';
+          const message = `review body capture could not find a recent submitted GitHub review for ${repo}#${prNumber}${detail}`;
+          const lookup = requireGitHubArtifact
+            ? await lookupRecentReviewArtifactWithRetry(lookupArgs, {
+              backoffMs: lookupRetryBackoffMs,
+              sleepImpl,
+              log,
+              notFoundMessage: message,
+            })
+            : { artifact: await lookupRecentReviewArtifact(lookupArgs), attempts: 1 };
+          const artifact = lookup.artifact;
+          ghCommentId = artifact?.id ?? null;
+          if (!artifact) {
+            if (requireGitHubArtifact) {
+              updateReviewerPassBodyCapture(rootDir, {
+                repo,
+                prNumber,
+                attemptNumber: Number(attemptNumber),
+                passKind: resolvePassKindForReviewer(passKind, { attemptNumber }),
+                verdict,
+                bodyMd: reviewBody,
+                ghCommentId: null,
+                capturedAt: postedAt,
+                allowExistingBodyUpdate: true,
+                metadataPatch: {
+                  reviewBodyCapture: {
+                    status: REVIEW_BODY_CAPTURE_STATUS_PENDING,
+                    githubArtifactRequired: true,
+                    reviewerHeadSha: reviewerHeadSha || null,
+                    lookupAttempts: lookup.attempts,
+                    lastLookupError: null,
+                    pendingSince: postedAt,
+                  },
+                },
+                log,
+              });
+              const missingArtifactError = new Error(
+                `generated-but-not-posted: ${message}; no GitHub review was found ` +
+                `after ${lookup.attempts} lookup attempt(s)`
+              );
+              missingArtifactError.reviewBodyCaptureRecorded = true;
+              throw missingArtifactError;
+            }
+            log.warn?.(`[reviewer] ${message}; storing body without gh_comment_id`);
+          }
+        } catch (err) {
+          if (requireGitHubArtifact && err?.reviewBodyCaptureRecorded) throw err;
           if (requireGitHubArtifact) {
             updateReviewerPassBodyCapture(rootDir, {
               repo,
@@ -499,53 +548,20 @@ async function captureReviewerBodyAfterPost(rootDir, {
                   status: REVIEW_BODY_CAPTURE_STATUS_PENDING,
                   githubArtifactRequired: true,
                   reviewerHeadSha: reviewerHeadSha || null,
-                  lookupAttempts: lookup.attempts,
-                  lastLookupError: null,
+                  lookupAttempts: Number(err?.reviewLookupAttempts || 1),
+                  lastLookupError: err?.message || String(err),
                   pendingSince: postedAt,
                 },
               },
               log,
             });
-            const missingArtifactError = new Error(
-              `generated-but-not-posted: ${message}; no GitHub review was found ` +
-              `after ${lookup.attempts} lookup attempt(s)`
-            );
-            missingArtifactError.reviewBodyCaptureRecorded = true;
-            throw missingArtifactError;
+            throw err;
           }
-          log.warn?.(`[reviewer] ${message}; storing body without gh_comment_id`);
+          log.warn?.(`[reviewer] review body capture review-id lookup failed for ${repo}#${prNumber}: ${err.message}`);
         }
-      } catch (err) {
-        if (requireGitHubArtifact && err?.reviewBodyCaptureRecorded) throw err;
-        if (requireGitHubArtifact) {
-          updateReviewerPassBodyCapture(rootDir, {
-            repo,
-            prNumber,
-            attemptNumber: Number(attemptNumber),
-            passKind: resolvePassKindForReviewer(passKind, { attemptNumber }),
-            verdict,
-            bodyMd: reviewBody,
-            ghCommentId: null,
-            capturedAt: postedAt,
-            allowExistingBodyUpdate: true,
-            metadataPatch: {
-              reviewBodyCapture: {
-                status: REVIEW_BODY_CAPTURE_STATUS_PENDING,
-                githubArtifactRequired: true,
-                reviewerHeadSha: reviewerHeadSha || null,
-                lookupAttempts: Number(err?.reviewLookupAttempts || 1),
-                lastLookupError: err?.message || String(err),
-                pendingSince: postedAt,
-              },
-            },
-            log,
-          });
-          throw err;
-        }
-        log.warn?.(`[reviewer] review body capture review-id lookup failed for ${repo}#${prNumber}: ${err.message}`);
+      } else if (requireGitHubArtifact) {
+        throw new Error(`review body capture has no trusted reviewer login aliases for ${repo}#${prNumber}`);
       }
-    } else if (requireGitHubArtifact) {
-      throw new Error(`review body capture has no trusted reviewer login aliases for ${repo}#${prNumber}`);
     }
     updateReviewerPassBodyCapture(rootDir, {
       repo,

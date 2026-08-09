@@ -161,7 +161,11 @@ function createWatcherHealthProbe({
       state.healthState = 'no_progress';
       state.noProgressSilentPolls = state.pollsSinceLastSpawn;
       state.spawnsSinceRecovery = 0;
-      if (isTransition || (state.pollsSinceLastSpawn % config.threshold === 0)) {
+      // This is an incident-transition alert, not a metronome.  Repeating the
+      // identical page every threshold interval gives no new operator action
+      // and turns a known stall into alert noise.  The recovery transition
+      // below remains the positive confirmation that dispatches resumed.
+      if (isTransition) {
         await sendTransitionAlert(buildNoProgressAlertText(payload), payload);
       }
       return payload;

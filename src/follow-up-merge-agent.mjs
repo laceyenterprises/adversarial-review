@@ -1105,10 +1105,9 @@ function describeStaleDispatch(recordedDispatch, {
 //
 // This scan classifies only PRs still active in the merge-agent
 // lifecycle: ones whose current GitHub snapshot still carries the
-// watcher-owned `merge-agent-dispatched` label, plus any durable
-// lifecycle-cleanup records that have not converged yet. Historical
-// dispatch records for unrelated/completed PRs are ignored even if they
-// still carry old refusal audit rows.
+// watcher-owned `merge-agent-dispatched` label, plus its label-add cleanup while
+// GitHub's snapshot lags. Closed/merged cleanup retries are maintenance work,
+// never alert candidates; historical dispatch records stay ignored.
 //
 // We intentionally do NOT live-probe `hq dispatch status` here. The
 // proactive path runs inside the watcher loop, so serial `spawnSync`
@@ -1149,7 +1148,8 @@ function scanStuckMergeAgentDispatches({
     lifecycleCleanups = [];
   }
   for (const cleanup of lifecycleCleanups) {
-    if (!isUnresolvedMergeAgentLifecycleCleanup(cleanup)) continue;
+    if (!isUnresolvedMergeAgentLifecycleCleanup(cleanup)
+      || cleanup.transition !== MERGE_AGENT_DISPATCHED_LABEL_ADD_TRANSITION) continue;
     if (!cleanup?.repo || cleanup?.prNumber == null || !cleanup?.headSha) continue;
     if (repo && cleanup.repo !== repo) continue;
     const key = `${cleanup.repo}#${Number(cleanup.prNumber)}`;

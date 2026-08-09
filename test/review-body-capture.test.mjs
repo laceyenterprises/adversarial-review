@@ -196,9 +196,8 @@ test('headed reviewer retry after capture does not post or recapture before atte
         passKind: 'first-pass',
         postedAt: '2026-05-29T12:01:00.000Z',
         execFileImpl: async (_command, args) => {
-          if (args[0] === 'pr' && args[1] === 'review') {
+          if (args[0] === 'api' && args[1] === '--method') {
             postCalls += 1;
-            return { stdout: '', stderr: '' };
           }
           if (args[0] === 'api') {
             apiCalls += 1;
@@ -314,7 +313,7 @@ test('unheaded reviewer retry reuses captured body without double-posting', asyn
   assert.match(log.warnings.at(-1), /reviewed attestation skipped/);
 });
 
-test('reviewer capture fails closed when the posted review is not visible on the reviewed head', async () => {
+test('reviewer capture falls back to lookup when exact-head post response is unverified', async () => {
   const rootDir = makeRootDir();
   const pass = seedPass(rootDir, {
     passKind: 'first-pass',
@@ -323,46 +322,56 @@ test('reviewer capture fails closed when the posted review is not visible on the
   });
   const reviewBody = '## Verdict\n\nRequest changes\n\nBody text';
   const calls = [];
+  const log = makeLog();
 
-  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, async () => {
-    await assert.rejects(
-      postGitHubReviewWithCapture({
-        rootDir,
-        repo: pass.repo,
-        prNumber: pass.prNumber,
-        attemptNumber: pass.attemptNumber,
-        reviewerModel: 'codex',
-        reviewerHeadSha: 'reviewed-head-sha',
-        reviewBody,
-        botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
-        passKind: 'first-pass',
-        postedAt: '2026-05-29T12:01:00.000Z',
-        lookupRetryBackoffMs: [0, 0],
-        sleepImpl: async () => {},
-        execFileImpl: async (_command, args) => {
-          calls.push(args[0]);
-          if (args[0] === 'pr' && args[1] === 'review') return { stdout: '', stderr: '' };
-          return {
-            stdout: `${JSON.stringify({
-              id: 503,
-              login: 'lacey-codex-reviewer[bot]',
-              commit_id: 'stale-head-sha',
-              created_at: '2026-05-29T12:00:30.000Z',
-              body: reviewBody,
-            })}\n`,
-            stderr: '',
-          };
-        },
-      }),
-      /could not find a recent submitted GitHub review .* on head reviewed-head-sha/
-    );
-  });
+  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => postGitHubReviewWithCapture({
+    rootDir,
+    repo: pass.repo,
+    prNumber: pass.prNumber,
+    attemptNumber: pass.attemptNumber,
+    reviewerModel: 'codex',
+    reviewerHeadSha: 'reviewed-head-sha',
+    reviewBody,
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    passKind: 'first-pass',
+    postedAt: '2026-05-29T12:01:00.000Z',
+    lookupRetryBackoffMs: [0, 0],
+    sleepImpl: async () => {},
+    log,
+    emitReviewedAttestationImpl: async () => {},
+    execFileImpl: async (_command, args) => {
+      calls.push(args);
+      if (args[0] === 'api' && args[1] === '--method') {
+        return {
+          stdout: JSON.stringify({
+            id: 503,
+            commit_id: 'stale-head-sha',
+          }),
+          stderr: '',
+        };
+      }
+      if (args[0] === 'api') {
+        return {
+          stdout: `${JSON.stringify({
+            id: 504,
+            login: 'lacey-codex-reviewer[bot]',
+            commit_id: 'reviewed-head-sha',
+            created_at: '2026-05-29T12:01:02.000Z',
+            body: reviewBody,
+          })}\n`,
+          stderr: '',
+        };
+      }
+      throw new Error(`unexpected command: ${args.join(' ')}`);
+    },
+  }));
 
   const row = readPass(rootDir, pass);
   assert.equal(row.body_md, reviewBody);
-  assert.equal(row.gh_comment_id, null);
-  assert.equal(JSON.parse(row.metadata_json).reviewBodyCapture.status, 'pending-github-artifact');
-  assert.deepEqual(calls, ['pr', 'api', 'api', 'api']);
+  assert.equal(row.gh_comment_id, '504');
+  assert.equal(JSON.parse(row.metadata_json).reviewBodyCapture.status, 'verified-github-artifact');
+  assert.deepEqual(calls.map((args) => args[0]), ['api', 'api']);
+  assert.match(log.warnings.join('\n'), /returned an unverified artifact/);
 });
 
 test('strict reviewer capture retries until GitHub exposes the reviewed-head artifact', async () => {
@@ -408,6 +417,46 @@ test('strict reviewer capture retries until GitHub exposes the reviewed-head art
   assert.equal(row.gh_comment_id, '504');
   assert.equal(apiCalls.length, 3);
   assert.deepEqual(sleeps, [25, 50]);
+});
+
+test('strict reviewer capture falls back when known exact-head artifact is invalid', async () => {
+  const rootDir = makeRootDir();
+  const pass = seedPass(rootDir, { passKind: 'first-pass', reviewerClass: 'codex' });
+  const reviewBody = '## Verdict\n\nComment only\n\nKnown artifact fallback body';
+  const log = makeLog();
+
+  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, () => captureReviewerBodyAfterPost(rootDir, {
+    repo: pass.repo,
+    prNumber: pass.prNumber,
+    attemptNumber: pass.attemptNumber,
+    reviewerModel: 'codex',
+    reviewerHeadSha: 'reviewed-head-sha',
+    reviewBody,
+    botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
+    verdict: 'comment-only',
+    passKind: 'first-pass',
+    postedAt: '2026-05-29T12:01:00.000Z',
+    env: process.env,
+    requireGitHubArtifact: true,
+    knownGitHubArtifact: { id: 999, commitId: 'stale-head-sha' },
+    log,
+    execFileImpl: async () => ({
+      stdout: `${JSON.stringify({
+        id: 505,
+        login: 'lacey-codex-reviewer[bot]',
+        commit_id: 'reviewed-head-sha',
+        created_at: '2026-05-29T12:01:12.000Z',
+        body: reviewBody,
+      })}\n`,
+      stderr: '',
+    }),
+  }));
+
+  const row = readPass(rootDir, pass);
+  assert.equal(row.body_md, reviewBody);
+  assert.equal(row.gh_comment_id, '505');
+  assert.equal(JSON.parse(row.metadata_json).reviewBodyCapture.status, 'verified-github-artifact');
+  assert.match(log.warnings.join('\n'), /invalid exact-head GitHub review artifact/);
 });
 
 test('strict reviewer capture retries transient gh api lookup failures before stamping the pass', async () => {
@@ -470,29 +519,16 @@ test('pending reviewer capture reattaches a landed review without double-posting
   const reviewBody = '## Verdict\n\nRequest changes\n\nRecoverable body';
   const calls = [];
 
-  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, async () => {
-    await assert.rejects(
-      postGitHubReviewWithCapture({
-        rootDir,
-        repo: pass.repo,
-        prNumber: pass.prNumber,
-        attemptNumber: pass.attemptNumber,
-        reviewerModel: 'codex',
-        reviewerHeadSha: 'reviewed-head-sha',
-        reviewBody,
-        botTokenEnv: 'GH_CODEX_REVIEWER_TOKEN',
-        passKind: 'first-pass',
-        postedAt: '2026-05-29T12:01:00.000Z',
-        lookupRetryBackoffMs: [],
-        execFileImpl: async (_command, args) => {
-          calls.push(args[0]);
-          if (args[0] === 'pr' && args[1] === 'review') return { stdout: '', stderr: '' };
-          return { stdout: '', stderr: '' };
-        },
-      }),
-      /generated-but-not-posted: .*no GitHub review was found/
-    );
+  // Pre-exact-head deployments could leave a local pending capture after the
+  // remote review landed. New writes carry GitHub's exact-head response, but
+  // recovery of those legacy rows must still reattach without a duplicate post.
+  writeLegacyUnverifiedCapture(rootDir, {
+    ...pass,
+    bodyMd: reviewBody,
+    capturedAt: '2026-05-29T12:01:00.000Z',
+  });
 
+  await withEnv({ GH_CODEX_REVIEWER_TOKEN: 'token' }, async () => {
     await postGitHubReviewWithCapture({
       rootDir,
       repo: pass.repo,
@@ -507,9 +543,6 @@ test('pending reviewer capture reattaches a landed review without double-posting
       emitReviewedAttestationImpl: async () => ({}),
       execFileImpl: async (_command, args) => {
         calls.push(args[0]);
-        if (args[0] === 'pr' && args[1] === 'review') {
-          throw new Error('duplicate review post should not be attempted');
-        }
         return {
           stdout: `${JSON.stringify({
             id: 506,
@@ -528,7 +561,7 @@ test('pending reviewer capture reattaches a landed review without double-posting
   assert.equal(row.body_md, reviewBody);
   assert.equal(row.gh_comment_id, '506');
   assert.equal(JSON.parse(row.metadata_json).reviewBodyCapture.status, 'verified-github-artifact');
-  assert.deepEqual(calls, ['pr', 'api', 'api']);
+  assert.deepEqual(calls, ['api']);
 });
 
 test('pending reviewer capture does not leak across attempt boundaries', async () => {
@@ -592,7 +625,7 @@ test('pending reviewer capture does not leak across attempt boundaries', async (
   const newRow = readPass(rootDir, currentPass);
   assert.equal(newRow.body_md, newBody);
   assert.equal(newRow.gh_comment_id, '508');
-  assert.deepEqual(calls, ['pr', 'api']);
+  assert.deepEqual(calls, ['api']);
 });
 
 test('legacy unverified reviewer capture is recovered before another review post', async () => {

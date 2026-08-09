@@ -383,8 +383,8 @@ test('postGitHubReview does not refresh or retry on non-401 post failures', asyn
   }
 });
 
-test('postGitHubReview does not refresh or retry on transient review-post transport errors', async () => {
-  const rootDir = makeRootDir('reviewer-post-transient-no-retry-');
+test('postGitHubReview retries transient review-post transport errors without refreshing token', async () => {
+  const rootDir = makeRootDir('reviewer-post-transient-retry-');
   try {
     const stateDir = path.join(rootDir, 'data');
     let brokerCalls = 0;
@@ -395,18 +395,20 @@ test('postGitHubReview does not refresh or retry on transient review-post transp
       OAUTH_BROKER_SHARED_SECRET_FILE: '/secret/oauth-broker-shared-secret',
       ADVERSARIAL_REVIEW_STATE_DIR: stateDir,
     }, async () => {
-      await assert.rejects(
-        () => postGitHubReview(
+      const result = await postGitHubReview(
           'laceyenterprises/adversarial-review',
           177,
           'body',
           'GH_CLAUDE_REVIEWER_TOKEN',
           async () => {
             ghCalls += 1;
-            const err = new Error('socket hang up after review mutation');
-            err.code = 'ECONNRESET';
-            err.stderr = 'read ECONNRESET';
-            throw err;
+            if (ghCalls === 1) {
+              const err = new Error('socket hang up before review mutation');
+              err.code = 'ECONNRESET';
+              err.stderr = 'read ECONNRESET';
+              throw err;
+            }
+            return {};
           },
           {
             rootDir,
@@ -421,11 +423,10 @@ test('postGitHubReview does not refresh or retry on transient review-post transp
             },
             readFileImpl: () => 'broker-shared-secret',
           },
-        ),
-        /socket hang up/,
       );
+      assert.deepEqual(result, { reviewArtifact: null });
     });
-    assert.equal(ghCalls, 1);
+    assert.equal(ghCalls, 2);
     assert.equal(brokerCalls, 0);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

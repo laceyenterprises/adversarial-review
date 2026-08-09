@@ -323,13 +323,6 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
-      if (!subject.terminal && existing?.review_status === 'pending') {
-        healthProbe?.recordOpenPending?.(healthTick, {
-          repo: repoPath,
-          prNumber,
-        });
-      }
-
       // 'failed-orphan' is only eligible through the guarded auto-reclaim pass
       // at the top of the tick (expired lease + no live reviewer process) or
       // the explicit operator reset path. The generic PR dispatch loop must
@@ -975,12 +968,6 @@ export async function processReviewSubject(entry, ctx) {
       }
 
       const current = stmtGetReviewRow.get(repoPath, prNumber);
-      if (current?.review_status === 'pending') {
-        healthProbe?.recordOpenPending?.(healthTick, {
-          repo: repoPath,
-          prNumber,
-        });
-      }
       await projectGateStatusSafe(current);
       const activeFollowUp = shouldDeferReviewForActiveFollowUp({
         rootDir: ROOT,
@@ -1748,6 +1735,15 @@ export async function processReviewSubject(entry, ctx) {
                 `${skipReviewerSpawnReason}; continuing to watcher close/maintenance path.`
               );
             } else {
+              // Count only work that made it through defer, budget, dedupe,
+              // claim, freshness, and routing checks and is about to enter the
+              // actual spawn path.  Pending rows held by an active follow-up,
+              // a backoff, or a terminal closer are not a watcher no-progress
+              // incident.
+              healthProbe?.recordOpenPending?.(healthTick, {
+                repo: repoPath,
+                prNumber,
+              });
               const spawnReviewerArgs = {
                 repo: repoPath,
                 prNumber,

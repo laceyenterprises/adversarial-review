@@ -1541,6 +1541,14 @@ function schemaV1() {
                     __type: TYPE_BOOL,
                     __default: true,
                   },
+                  // Rollback switch for the narrow stale-head clean closer lane:
+                  // a zero-finding settled review whose live head is a trusted
+                  // terminal closer commit may close under merge-agent
+                  // accountability even when hq worker identity is unresolved.
+                  autonomous_closer_commit_clean_merge_enabled: {
+                    __type: TYPE_BOOL,
+                    __default: true,
+                  },
                   // MSM daemon clean-path strictness (distinct from
                   // `strict_non_blocking_remediation`, which shapes the
                   // ELIGIBILITY predicate). Consumed by the watcher as
@@ -2675,6 +2683,10 @@ export const ENV_ALIASES = {
   },
   'roles.adversarial.merge_authority.autonomous_merge_execution_enabled': {
     canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_AUTONOMOUS_MERGE_EXECUTION_ENABLED',
+    aliases: [],
+  },
+  'roles.adversarial.merge_authority.autonomous_closer_commit_clean_merge_enabled': {
+    canonical: 'AGENT_OS_ROLES_ADVERSARIAL_MERGE_AUTHORITY_AUTONOMOUS_CLOSER_COMMIT_CLEAN_MERGE_ENABLED',
     aliases: [],
   },
   'roles.adversarial.merge_authority.strict_mode': {
@@ -4305,6 +4317,10 @@ export class AgentOSConfig {
       ),
       autonomousMergeExecutionEnabled: this.get(
         'roles.adversarial.merge_authority.autonomous_merge_execution_enabled',
+        true,
+      ),
+      autonomousCloserCommitCleanMergeEnabled: this.get(
+        'roles.adversarial.merge_authority.autonomous_closer_commit_clean_merge_enabled',
         true,
       ),
       strictMode: this.get(

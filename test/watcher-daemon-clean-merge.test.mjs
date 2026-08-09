@@ -2390,6 +2390,159 @@ test('Deliverable 1: operator-approved at the current head substitutes for worke
   }
 });
 
+test('SEV1: clean stale-head closer commit with unknown worker identity merges under merge-agent accountability without operator-approved', async () => {
+  const rootDir = tempRoot();
+  try {
+    let mergeAttempted = false;
+    let seen = null;
+    const logs = [];
+    const result = await runDaemonCleanMergeAttempt({
+      ...unattributedDaemonArgs({ rootDir, prNumber: 910, head: 'closer-clean-head-910' }),
+      gateSnapshot: {
+        reviewedHeadSha: 'reviewed-clean-head-910',
+        settledReview: { verdict: 'comment-only' },
+      },
+      reviewState: {
+        headSha: 'reviewed-clean-head-910',
+        blockingFindingCount: 0, blockingFindingState: 'known',
+        nonBlockingFindingCount: 0, nonBlockingFindingState: 'known',
+        riskClass: 'low',
+      },
+      currentPrHeadSha: 'closer-clean-head-910',
+      logger: { warn() {}, log: (m) => logs.push(String(m)) },
+      resolveHeadCloserCommitSuppressionImpl: async () => ({
+        suppressed: true,
+        reason: 'closer-commit-identity',
+        matched: 'the-hammer-lacey[bot]',
+      }),
+      attemptDaemonCleanMergeImpl: async (args) => {
+        mergeAttempted = true;
+        seen = args;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED, merged: true, attempts: 1 };
+      },
+    });
+
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.MERGED);
+    assert.equal(mergeAttempted, true, 'this is the prior stash-and-fail point: old code parked before merge');
+    assert.equal(seen.validatedHead, 'closer-clean-head-910');
+    assert.equal(seen.verdict, 'settled-success');
+    assert.equal(seen.auditMetadata.closureAuthority, 'daemon-autonomous-closer-commit-clean');
+    assert.equal(seen.auditMetadata.mergeAccountability, 'autonomous-closer-commit');
+    assert.equal(seen.auditMetadata.operatorApproval.actor, 'merge-agent');
+    assert.equal(seen.auditMetadata.autonomousCloserCommitClean.reviewedHeadSha, 'reviewed-clean-head-910');
+    assert.equal(seen.auditMetadata.autonomousCloserCommitClean.currentHeadSha, 'closer-clean-head-910');
+    const evt = logs.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .find((d) => d?.event === 'ama.daemon_clean_merge.autonomous_closer_commit_accountability_substituted');
+    assert.ok(evt, 'a queryable autonomous closer-commit audit event is emitted');
+    assert.equal(evt.actor, 'merge-agent');
+    assert.equal(evt.reviewedHeadSha, 'reviewed-clean-head-910');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('SEV1 SAFETY: clean stale head that is NOT a terminal closer commit still parks on unresolved identity', async () => {
+  const rootDir = tempRoot();
+  try {
+    let mergeAttempted = false;
+    const result = await runDaemonCleanMergeAttempt({
+      ...unattributedDaemonArgs({ rootDir, prNumber: 911, head: 'external-clean-head-911' }),
+      gateSnapshot: {
+        reviewedHeadSha: 'reviewed-clean-head-911',
+        settledReview: { verdict: 'comment-only' },
+      },
+      reviewState: {
+        headSha: 'reviewed-clean-head-911',
+        blockingFindingCount: 0, blockingFindingState: 'known',
+        nonBlockingFindingCount: 0, nonBlockingFindingState: 'known',
+        riskClass: 'low',
+      },
+      currentPrHeadSha: 'external-clean-head-911',
+      resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: false }),
+      attemptDaemonCleanMergeImpl: async () => {
+        mergeAttempted = true;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED };
+      },
+    });
+
+    assert.equal(mergeAttempted, false);
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+    assert.equal(result.reason, 'worker-identity-unresolved');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('SEV1 SAFETY: unresolved blocking finding never auto-closes via autonomous closer-commit accountability', async () => {
+  const rootDir = tempRoot();
+  try {
+    let mergeAttempted = false;
+    const result = await runDaemonCleanMergeAttempt({
+      ...unattributedDaemonArgs({ rootDir, prNumber: 912, head: 'closer-blocking-head-912' }),
+      gateSnapshot: {
+        reviewedHeadSha: 'reviewed-blocking-head-912',
+        settledReview: { verdict: 'changes-requested' },
+      },
+      reviewState: {
+        headSha: 'reviewed-blocking-head-912',
+        blockingFindingCount: 1, blockingFindingState: 'known',
+        nonBlockingFindingCount: 0, nonBlockingFindingState: 'known',
+        riskClass: 'low',
+      },
+      currentPrHeadSha: 'closer-blocking-head-912',
+      resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: true }),
+      attemptDaemonCleanMergeImpl: async () => {
+        mergeAttempted = true;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED };
+      },
+    });
+
+    assert.equal(mergeAttempted, false);
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.NOT_TAKEN);
+    assert.equal(result.reason, 'blocking-findings-present');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('SEV1 rollback: feature flag off disables autonomous closer-commit clean substitution', async () => {
+  const rootDir = tempRoot();
+  try {
+    let mergeAttempted = false;
+    const result = await runDaemonCleanMergeAttempt({
+      ...unattributedDaemonArgs({ rootDir, prNumber: 913, head: 'closer-clean-head-913' }),
+      cfg: {
+        mergeMethod: 'squash',
+        autonomousMergeExecutionEnabled: true,
+        autonomousCloserCommitCleanMergeEnabled: false,
+        strictMode: true,
+      },
+      gateSnapshot: {
+        reviewedHeadSha: 'reviewed-clean-head-913',
+        settledReview: { verdict: 'comment-only' },
+      },
+      reviewState: {
+        headSha: 'reviewed-clean-head-913',
+        blockingFindingCount: 0, blockingFindingState: 'known',
+        nonBlockingFindingCount: 0, nonBlockingFindingState: 'known',
+        riskClass: 'low',
+      },
+      currentPrHeadSha: 'closer-clean-head-913',
+      resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: true }),
+      attemptDaemonCleanMergeImpl: async () => {
+        mergeAttempted = true;
+        return { disposition: DAEMON_MERGE_DISPOSITION.MERGED };
+      },
+    });
+
+    assert.equal(mergeAttempted, false);
+    assert.equal(result.disposition, DAEMON_MERGE_DISPOSITION.FAILED_CLOSED);
+    assert.equal(result.reason, 'worker-identity-unresolved');
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test('Deliverable 1: a STALE operator-approved (applied at an older head) does NOT substitute → still fails closed', async () => {
   const rootDir = tempRoot();
   try {

@@ -11,9 +11,12 @@ function exactHeadReviewEventForBody(reviewBody) {
 }
 
 function parseExactHeadReviewArtifact(stdout, { repo, prNumber, reviewerHeadSha } = {}) {
+  const text = String(stdout || '').trim();
+  const jsonStart = text.indexOf('{');
+  const payload = jsonStart >= 0 ? text.slice(jsonStart).trim() : text;
   let parsed;
   try {
-    parsed = JSON.parse(String(stdout || '').trim());
+    parsed = JSON.parse(payload);
   } catch (err) {
     throw new Error(
       `GitHub returned an invalid exact-head review response for ${repo}#${prNumber}: ${err?.message || err}`
@@ -52,11 +55,17 @@ async function postExactHeadReview({
     'gh',
     [
       'api', '--method', 'POST', `repos/${repo}/pulls/${prNumber}/reviews`,
-      '--raw-field', `body=${reviewBody}`,
-      '--raw-field', `event=${exactHeadReviewEventForBody(reviewBody)}`,
-      '--raw-field', `commit_id=${reviewerHeadSha}`,
+      '--input', '-',
     ],
-    { env, maxBuffer: 5 * 1024 * 1024 }
+    {
+      env,
+      input: JSON.stringify({
+        body: reviewBody,
+        event: exactHeadReviewEventForBody(reviewBody),
+        commit_id: reviewerHeadSha,
+      }),
+      maxBuffer: 5 * 1024 * 1024,
+    }
   );
   return { stdout: response?.stdout };
 }

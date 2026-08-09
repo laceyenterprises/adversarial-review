@@ -267,10 +267,13 @@ test('postGitHubReview binds a known reviewed snapshot to GitHub commit_id', asy
     '--method',
     'POST',
     'repos/laceyenterprises/demo/pulls/42/reviews',
-    '--raw-field', 'body=review body',
-    '--raw-field', 'event=COMMENT',
-    '--raw-field', 'commit_id=reviewed-head-sha',
+    '--input', '-',
   ]);
+  assert.deepEqual(JSON.parse(calls[0].options.input), {
+    body: 'review body',
+    event: 'COMMENT',
+    commit_id: 'reviewed-head-sha',
+  });
   assert.equal(calls[0].options.env.GH_TOKEN, 'ghp_codex_reviewer_pat');
 });
 
@@ -316,10 +319,79 @@ test('postGitHubReview maps exact-head request-changes verdicts to blocking GitH
   );
 
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].args.slice(4, 8), [
-    '--raw-field', `body=${reviewBody}`,
-    '--raw-field', 'event=REQUEST_CHANGES',
-  ]);
+  assert.equal(JSON.parse(calls[0].options.input).body, reviewBody);
+  assert.equal(JSON.parse(calls[0].options.input).event, 'REQUEST_CHANGES');
+});
+
+test('postGitHubReview parses exact-head JSON after gh stdout warnings', async () => {
+  const result = await postGitHubReview(
+    'laceyenterprises/demo',
+    42,
+    'review body',
+    'GH_CODEX_REVIEWER_TOKEN',
+    async () => ({
+      stdout: [
+        'warning: gh extension update available',
+        JSON.stringify({
+          id: 4242,
+          commit_id: 'reviewed-head-sha',
+        }),
+      ].join('\n'),
+    }),
+    {
+      env: {
+        GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+        PATH: '/opt/homebrew/bin:/usr/bin',
+        HOME: '/Users/test',
+      },
+      reviewerIdentity: 'codex-reviewer-lacey',
+      reviewerHeadSha: 'reviewed-head-sha',
+      prepareReviewWrite: async () => {},
+    }
+  );
+
+  assert.deepEqual(result, {
+    reviewArtifact: { id: '4242', commitId: 'reviewed-head-sha' },
+  });
+});
+
+test('postGitHubReview retries transient exact-head gh transport failure', async () => {
+  const calls = [];
+  const result = await postGitHubReview(
+    'laceyenterprises/demo',
+    42,
+    'review body',
+    'GH_CODEX_REVIEWER_TOKEN',
+    async (command, args, options = {}) => {
+      calls.push({ command, args, options });
+      if (calls.length === 1) {
+        const err = new Error('TLS handshake timeout');
+        err.stderr = 'Post "https://api.github.com": TLS handshake timeout';
+        throw err;
+      }
+      return {
+        stdout: JSON.stringify({
+          id: 4242,
+          commit_id: 'reviewed-head-sha',
+        }),
+      };
+    },
+    {
+      env: {
+        GH_CODEX_REVIEWER_TOKEN: 'ghp_codex_reviewer_pat',
+        PATH: '/opt/homebrew/bin:/usr/bin',
+        HOME: '/Users/test',
+      },
+      reviewerIdentity: 'codex-reviewer-lacey',
+      reviewerHeadSha: 'reviewed-head-sha',
+      prepareReviewWrite: async () => {},
+    }
+  );
+
+  assert.deepEqual(result, {
+    reviewArtifact: { id: '4242', commitId: 'reviewed-head-sha' },
+  });
+  assert.equal(calls.length, 2);
 });
 
 test('postGitHubReview returns null exact-head artifact when response validation fails', async () => {

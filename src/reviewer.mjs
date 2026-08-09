@@ -77,6 +77,7 @@ import {
   writeAdapterPullRequestReview,
 } from './github-adapter-client.mjs';
 import { parseExactHeadReviewArtifactOrNull, postExactHeadReview } from './reviewer-exact-head-post.mjs';
+import { spawnCapturedProcessGroup } from './process-group-spawn.mjs';
 import { GH_LOOKUP_TIMEOUT_MS, execGhWithRetry } from './gh-cli.mjs';
 import { fetchLatestLabelEvent } from './github-label-events.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
@@ -1641,9 +1642,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
           let adapterHandled = false;
           try {
             if (reviewerHeadSha) {
-              return await postExactHeadReview({
-                execFileImpl, repo, prNumber, reviewBody, reviewerHeadSha, env: adapterEnv,
-              });
+              return await postExactHeadReview({ execFileImpl: execFileImpl === execFileAsync ? spawnCapturedProcessGroup : execFileImpl, repo, prNumber, reviewBody, reviewerHeadSha, env: adapterEnv });
             }
             const adapterResult = await writeAdapterPullRequestReview(
               repo,
@@ -1706,7 +1705,7 @@ async function postGitHubReview(repo, prNumber, reviewBody, botTokenEnv, execFil
       },
       {
         retryDelaysMs: REVIEW_POST_RETRY_DELAYS_MS,
-        isRetryable: (err) => err instanceof ReviewerPostAuthRefreshRetryableError,
+        isRetryable: (err) => err instanceof ReviewerPostAuthRefreshRetryableError || isRetryableGhTransportError(err),
       }
     );
     const exactHeadReviewArtifact = reviewerHeadSha

@@ -20,6 +20,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { ensureReviewStateSchema } from '../src/review-state.mjs';
 import { settleReviewerAttempt } from '../src/watcher.mjs';
@@ -44,10 +47,26 @@ function makeStatements(db) {
     markPendingUpstream: db.prepare(
       "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ? WHERE repo = ? AND pr_number = ?"
     ),
+    markOutageTransient: db.prepare(
+      "UPDATE reviewed_prs SET review_status = 'pending-upstream', failed_at = ?, failure_message = ?, quota_reset_at_utc = ? WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
+    ),
     getReviewRow: db.prepare(
       'SELECT * FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
     ),
   };
+}
+
+function withIsolatedHqRoot(fn) {
+  const root = mkdtempSync(join(tmpdir(), 'lac-545-hq-root-'));
+  const previous = process.env.HQ_ROOT;
+  process.env.HQ_ROOT = root;
+  try {
+    return fn(root);
+  } finally {
+    if (previous === undefined) delete process.env.HQ_ROOT;
+    else process.env.HQ_ROOT = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 function setupDb() {
@@ -75,8 +94,8 @@ test('failure path logs captured stderr with the failure class', () => {
   const log = captureLogs();
   const stderr = 'Codex payload did not contain recognizable review sections';
 
-  settleReviewerAttempt({
-    rootDir: '/tmp/lac-545-fixture-' + Date.now(),
+  withIsolatedHqRoot((rootDir) => settleReviewerAttempt({
+    rootDir,
     repoPath: REPO,
     prNumber: PR,
     result: {
@@ -90,7 +109,7 @@ test('failure path logs captured stderr with the failure class', () => {
     maxRemediationRounds: 2,
     statements: makeStatements(db),
     log,
-  });
+  }));
 
   const joined = log.lines.join('\n');
   assert.match(joined, /\[reviewer:357\] stderr \(failure-class=unknown\): Codex payload did not contain recognizable review sections/);
@@ -102,8 +121,8 @@ test('failure path also logs captured stdout when non-empty', () => {
   const db = setupDb();
   const log = captureLogs();
 
-  settleReviewerAttempt({
-    rootDir: '/tmp/lac-545-fixture-' + Date.now(),
+  withIsolatedHqRoot((rootDir) => settleReviewerAttempt({
+    rootDir,
     repoPath: REPO,
     prNumber: PR,
     result: {
@@ -117,7 +136,7 @@ test('failure path also logs captured stdout when non-empty', () => {
     maxRemediationRounds: 2,
     statements: makeStatements(db),
     log,
-  });
+  }));
 
   const joined = log.lines.join('\n');
   assert.match(joined, /\[reviewer:357\] stderr \(failure-class=bug\): stderr text/);
@@ -130,8 +149,8 @@ test('preview head+tail-truncates long stderr', () => {
   // Payload comfortably above the 800-char head+tail cap.
   const longStderr = 'A'.repeat(500) + 'MIDDLE_REGION_SHOULD_BE_ELIDED' + 'B'.repeat(500);
 
-  settleReviewerAttempt({
-    rootDir: '/tmp/lac-545-fixture-' + Date.now(),
+  withIsolatedHqRoot((rootDir) => settleReviewerAttempt({
+    rootDir,
     repoPath: REPO,
     prNumber: PR,
     result: {
@@ -145,7 +164,7 @@ test('preview head+tail-truncates long stderr', () => {
     maxRemediationRounds: 2,
     statements: makeStatements(db),
     log,
-  });
+  }));
 
   const joined = log.lines.join('\n');
   // Head present, tail present, truncated middle.
@@ -158,8 +177,8 @@ test('empty stderr does not emit a bogus log line', () => {
   const db = setupDb();
   const log = captureLogs();
 
-  settleReviewerAttempt({
-    rootDir: '/tmp/lac-545-fixture-' + Date.now(),
+  withIsolatedHqRoot((rootDir) => settleReviewerAttempt({
+    rootDir,
     repoPath: REPO,
     prNumber: PR,
     result: {
@@ -173,7 +192,7 @@ test('empty stderr does not emit a bogus log line', () => {
     maxRemediationRounds: 2,
     statements: makeStatements(db),
     log,
-  });
+  }));
 
   const joined = log.lines.join('\n');
   // No spurious "[reviewer:357] stderr ..." or "[reviewer:357] stdout ..." line
@@ -192,8 +211,8 @@ test('cascade-class transient failure path also logs stderr', () => {
   const log = captureLogs();
   const stderr = 'all upstream attempts failed: 503 from litellm';
 
-  settleReviewerAttempt({
-    rootDir: '/tmp/lac-545-fixture-' + Date.now(),
+  withIsolatedHqRoot((rootDir) => settleReviewerAttempt({
+    rootDir,
     repoPath: REPO,
     prNumber: PR,
     result: {
@@ -207,7 +226,7 @@ test('cascade-class transient failure path also logs stderr', () => {
     maxRemediationRounds: 2,
     statements: makeStatements(db),
     log,
-  });
+  }));
 
   const joined = log.lines.join('\n');
   assert.match(joined, /\[reviewer:357\] stderr \(failure-class=cascade\): all upstream attempts failed/);

@@ -277,9 +277,16 @@ export async function processReviewSubject(entry, ctx) {
             operatorApprovalEvent,
             domainId,
           });
+          // The suffix is load-bearing, not decoration. `success (remediation-stopped)`
+          // reads as convergence in a log skim, but it means the pipeline gave up with
+          // findings still standing. Anyone (human or agent) grepping this line for
+          // "success" must see that the merge is theirs to justify.
           console.log(
             `[watcher] adversarial gate for ${repoPath}#${prNumber}: ${projected.decision.state}` +
-              ` (${projected.decision.reason})`
+              ` (${projected.decision.reason})` +
+              (projected.decision.operatorDecisionRequired
+                ? ' — NOT CONVERGED: findings unresolved, operator decision required'
+                : '')
           );
         } catch (err) {
           console.error(

@@ -313,13 +313,26 @@ function truncateDescription(description) {
   return `${text.slice(0, DESCRIPTION_MAX_CHARS - 1).trimEnd()}…`;
 }
 
-function makeDecision(state, description, reason, context) {
+function makeDecision(state, description, reason, context, extra = null) {
   return {
     context,
     state,
     description: truncateDescription(description),
     reason,
+    // `state: 'success'` answers "may the merge button be pressed?", NOT "did review
+    // converge?". Those diverge whenever the PIPELINE gives up while findings are
+    // still standing, and consumers that conflate them merge over real findings.
+    // `operatorDecisionRequired` is the machine-readable difference.
+    operatorDecisionRequired: Boolean(extra?.operatorDecisionRequired),
   };
+}
+
+// Reaching a give-up branch means the settled-clean verdicts already returned above,
+// so the verdict here is either request-changes or absent. Say which.
+function describeUnsettledVerdict(normalizedVerdict) {
+  if (normalizedVerdict === 'request-changes') return 'last verdict: Request-changes';
+  if (!normalizedVerdict) return 'last verdict: missing';
+  return `last verdict: ${normalizedVerdict}`;
 }
 
 function reviewerFailureClass(reviewRow) {
@@ -345,8 +358,8 @@ function pickAdversarialGateStatus({
   env = process.env,
 } = {}) {
   const context = resolveGateStatusContext(env);
-  const decide = (state, description, reason) =>
-    makeDecision(state, description, reason, context);
+  const decide = (state, description, reason, extra = null) =>
+    makeDecision(state, description, reason, context, extra);
 
   if (normalizeLabelNames(labels).some((label) => OPERATOR_SKIP_LABELS.has(label))) {
     return decide(
@@ -487,7 +500,12 @@ function pickAdversarialGateStatus({
     // operator's merge button. Real adversarial findings still surface in
     // the PR review comment thread; the operator decides without needing
     // admin override on mobile. See note in the `failed` branch above.
-    return decide('success', 'Remediation failed; operator decides (see review thread).', 'remediation-failed');
+    return decide(
+      'success',
+      `Remediation FAILED with findings unresolved (${describeUnsettledVerdict(normalizedVerdict)}) — NOT a clean review; operator decision required (see review thread).`,
+      'remediation-failed',
+      { operatorDecisionRequired: true }
+    );
   }
   if (latestJobStatus === 'stopped') {
     // Round budget exhausted. Last verdict may genuinely be Request-changes,
@@ -496,7 +514,12 @@ function pickAdversarialGateStatus({
     // really request-changes after a settled remediation" case. The
     // `stopped` state itself is a pipeline-give-up signal, not an
     // adversarial signal — don't block the merge button on infra giving up.
-    return decide('success', 'Remediation stopped; operator decides (see review thread).', 'remediation-stopped');
+    return decide(
+      'success',
+      `Remediation STOPPED with findings unresolved (${describeUnsettledVerdict(normalizedVerdict)}) — NOT a clean review; operator decision required (see review thread).`,
+      'remediation-stopped',
+      { operatorDecisionRequired: true }
+    );
   }
   if (latestJobStatus === 'completed' && latestJob?.reReview?.requested === true) {
     return decide('pending', 'Queued re-review has not posted yet.', 'rereview-queued');

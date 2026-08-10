@@ -416,16 +416,27 @@ export const stmtMarkClosed = db.prepare(
 // maskable per-PR status.
 // Normalize mixed timestamp separators before MAX() so SQLite returns one
 // chronologically-sortable candidate instead of copying the append-only
-// reviewer_passes history into Node on every freshness tick.
+// reviewer_passes history into Node on every freshness tick. SQLite timestamps
+// without an explicit offset are UTC in this table; append `Z` before returning
+// them so downstream Date parsing never falls through to local time.
 export const stmtLatestGenuinePostedReviewAt = db.prepare(
   `SELECT MAX(posted_at) AS posted_at
      FROM (
-       SELECT REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') AS posted_at
-         FROM reviewer_passes
-        WHERE gh_comment_id IS NOT NULL
-          AND gh_comment_id <> ''
-          AND COALESCE(body_captured_at, ended_at) IS NOT NULL
-          AND REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '????-??-??T??:??:??*'
+       SELECT CASE
+                WHEN normalized GLOB '*Z'
+                  OR normalized GLOB '*+??:??'
+                  OR normalized GLOB '*-??:??'
+                  THEN normalized
+                ELSE normalized || 'Z'
+              END AS posted_at
+         FROM (
+           SELECT REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') AS normalized
+             FROM reviewer_passes
+            WHERE gh_comment_id IS NOT NULL
+              AND gh_comment_id <> ''
+              AND COALESCE(body_captured_at, ended_at) IS NOT NULL
+         )
+        WHERE normalized GLOB '????-??-??T??:??:??*'
      )`
 );
 const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =

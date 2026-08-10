@@ -15,6 +15,7 @@ import {
   parsePostedAtMs,
   latestPostedReviewAtMs,
   countOpenPrsAwaitingFirstPassReview,
+  stmtLatestGenuinePostedReviewAt,
 } from '../src/review-state-db.mjs';
 import {
   maybeFireReviewStalledAlert,
@@ -94,9 +95,11 @@ function seedReviewerPass(db, {
   );
 }
 
-test('parsePostedAtMs pins a space-separated tz-less SQLite time to UTC', () => {
+test('parsePostedAtMs pins tz-less SQLite-style times to UTC', () => {
   // SQLite CURRENT_TIMESTAMP shape — must NOT be read as local time.
   assert.equal(parsePostedAtMs('2026-07-27 04:00:00'), Date.parse('2026-07-27T04:00:00Z'));
+  // SQL-normalized T separator without an offset must also stay UTC.
+  assert.equal(parsePostedAtMs('2026-07-27T04:00:00'), Date.parse('2026-07-27T04:00:00Z'));
   // ISO with explicit Z is unchanged.
   assert.equal(parsePostedAtMs('2026-07-27T04:00:00.500Z'), Date.parse('2026-07-27T04:00:00.500Z'));
   // Empty / non-string / garbage -> null (never NaN leaking into freshness math).
@@ -123,6 +126,10 @@ test('latestPostedReviewAtMs returns the freshest genuine posted review artifact
       bodyCapturedAt: '2026-07-27 04:30:00',
       ghCommentId: 'RV_open',
     }); // freshest
+    assert.equal(
+      db.prepare(stmtLatestGenuinePostedReviewAt.source).get().posted_at,
+      '2026-07-27T04:30:00Z'
+    );
     assert.equal(latestPostedReviewAtMs(db), Date.parse('2026-07-27T04:30:00Z'));
   });
 });

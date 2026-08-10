@@ -414,30 +414,31 @@ export const stmtMarkClosed = db.prepare(
 // feed the watcher's freshness pager from durable posted-review evidence in
 // reviewer_passes (gh_comment_id), never a resettable row-cycle timestamp or a
 // maskable per-PR status.
-// Normalize mixed timestamp separators before MAX() so SQLite returns one
-// chronologically-sortable candidate instead of copying the append-only
-// reviewer_passes history into Node on every freshness tick. SQLite timestamps
-// without an explicit offset are UTC in this table; append `Z` before returning
-// them so downstream Date parsing never falls through to local time.
+const LATEST_GENUINE_POSTED_REVIEW_CANDIDATE_LIMIT = 64;
+
+// Use the partial freshness index to read only the latest timestamp candidates
+// from reviewer_passes. SQLite timestamps without an explicit offset are UTC in
+// this table; append `Z` before SQLite date handling and return fixed millisecond
+// UTC so the index order is stable. Node still performs the final chronological
+// comparison below, avoiding correctness dependence on lexical SQL MAX().
 export const stmtLatestGenuinePostedReviewAt = db.prepare(
-  `SELECT MAX(posted_at) AS posted_at
-     FROM (
-       SELECT CASE
-                WHEN normalized GLOB '*Z'
-                  OR normalized GLOB '*+??:??'
-                  OR normalized GLOB '*-??:??'
-                  THEN normalized
-                ELSE normalized || 'Z'
-              END AS posted_at
-         FROM (
-           SELECT REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') AS normalized
-             FROM reviewer_passes
-            WHERE gh_comment_id IS NOT NULL
-              AND gh_comment_id <> ''
-              AND COALESCE(body_captured_at, ended_at) IS NOT NULL
-         )
-        WHERE normalized GLOB '????-??-??T??:??:??*'
-     )`
+  `SELECT COALESCE(body_captured_at, ended_at) AS posted_at
+     FROM reviewer_passes
+    WHERE gh_comment_id IS NOT NULL
+      AND gh_comment_id <> ''
+      AND COALESCE(body_captured_at, ended_at) IS NOT NULL
+      AND REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '????-??-??T??:??:??*'
+    ORDER BY strftime(
+              '%Y-%m-%dT%H:%M:%fZ',
+              CASE
+                WHEN REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '*Z'
+                  OR REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '*+??:??'
+                  OR REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '*-??:??'
+                  THEN REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T')
+                ELSE REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') || 'Z'
+              END
+            ) DESC
+    LIMIT ${LATEST_GENUINE_POSTED_REVIEW_CANDIDATE_LIMIT}`
 );
 const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "SELECT COUNT(*) AS n FROM reviewed_prs " +
@@ -479,7 +480,12 @@ export function latestPostedReviewAtMs(handle = db) {
     handle === db
       ? stmtLatestGenuinePostedReviewAt
       : handle.prepare(stmtLatestGenuinePostedReviewAt.source);
-  return parsePostedAtMs(stmt.get()?.posted_at);
+  let latest = null;
+  for (const row of stmt.all()) {
+    const candidate = parsePostedAtMs(row?.posted_at);
+    if (candidate !== null && (latest === null || candidate > latest)) latest = candidate;
+  }
+  return latest;
 }
 
 // Count of currently-open PRs with no genuine posted review. Keying off

@@ -126,15 +126,56 @@ test('latestPostedReviewAtMs returns the freshest genuine posted review artifact
       bodyCapturedAt: '2026-07-27 04:30:00',
       ghCommentId: 'RV_open',
     }); // freshest
-    assert.equal(
-      db.prepare(stmtLatestGenuinePostedReviewAt.source).get().posted_at,
-      '2026-07-27T04:30:00Z'
+    assert.deepEqual(
+      db.prepare(stmtLatestGenuinePostedReviewAt.source).all().map((row) => row.posted_at),
+      ['2026-07-27 04:30:00', '2026-07-27T03:00:00.000Z']
     );
     assert.equal(latestPostedReviewAtMs(db), Date.parse('2026-07-27T04:30:00Z'));
   });
 });
 
-test('latestPostedReviewAtMs uses a bounded SQL aggregate, not an all-row scan', () => {
+test('latestPostedReviewAtMs compares bounded mixed-precision candidates chronologically', () => {
+  withTempDb((db) => {
+    const withoutMillis = seed(db, {
+      prState: 'open',
+      reviewStatus: 'posted',
+      postedAt: '2026-07-27T04:30:00Z',
+    });
+    const withMillis = seed(db, {
+      prState: 'open',
+      reviewStatus: 'posted',
+      postedAt: '2026-07-27T04:30:00.500Z',
+    });
+    seedReviewerPass(db, {
+      prNumber: withoutMillis,
+      endedAt: '2026-07-27T04:30:00Z',
+      ghCommentId: 'RV_without_millis',
+    });
+    seedReviewerPass(db, {
+      prNumber: withMillis,
+      endedAt: '2026-07-27T04:30:00.500Z',
+      ghCommentId: 'RV_with_millis',
+    });
+
+    assert.deepEqual(
+      db.prepare(stmtLatestGenuinePostedReviewAt.source).all().map((row) => row.posted_at),
+      ['2026-07-27T04:30:00.500Z', '2026-07-27T04:30:00Z']
+    );
+    assert.equal(latestPostedReviewAtMs(db), Date.parse('2026-07-27T04:30:00.500Z'));
+  });
+});
+
+test('latestPostedReviewAtMs uses the posted-review freshness index', () => {
+  withTempDb((db) => {
+    const plan = db.prepare(`EXPLAIN QUERY PLAN ${stmtLatestGenuinePostedReviewAt.source}`).all();
+    assert.match(
+      plan.map((row) => row.detail).join('\n'),
+      /idx_reviewer_passes_posted_review_freshness/
+    );
+  });
+});
+
+test('latestPostedReviewAtMs uses a bounded indexed candidate query, not an all-row scan', () => {
   withTempDb((db) => {
     const older = seed(db, {
       prState: 'merged',
@@ -159,12 +200,10 @@ test('latestPostedReviewAtMs uses a bounded SQL aggregate, not an all-row scan',
 
     const boundedHandle = {
       prepare(sql) {
+        assert.match(sql, /LIMIT 64/);
         const stmt = db.prepare(sql);
         return {
-          get: (...args) => stmt.get(...args),
-          all: () => {
-            throw new Error('latestPostedReviewAtMs must not load all reviewer_passes rows');
-          },
+          all: (...args) => stmt.all(...args),
         };
       },
     };

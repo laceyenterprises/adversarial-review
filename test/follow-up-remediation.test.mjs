@@ -4617,6 +4617,70 @@ test('assertHarnessIdentityMatch reports an unknown harness without throwing Typ
   assert.match(warned[0], /mystery-harness/);
 });
 
+// AFH-IDENT-01 — the full cross-harness matrix, not just one synthetic case.
+//
+// The 2026-08-10 codex-exhaustion drill is exactly the situation where a
+// remediation worker can end up on a harness it did not request. Enumerate every
+// ordered harness pair so a future spawn-site refactor that reroutes identity in
+// ANY direction (not just the #5058 merge-agent direction) fails closed.
+test('assertHarnessIdentityMatch throws on every cross-harness identity swap', () => {
+  const harnesses = ['codex', 'claude-code', 'gemini'];
+  let checked = 0;
+  for (const harness of harnesses) {
+    for (const foreign of harnesses) {
+      if (harness === foreign) continue;
+      checked += 1;
+      assert.throws(
+        () => assertHarnessIdentityMatch({
+          workerClass: harness,
+          gitIdentity: remediationWorkerGitIdentity(foreign),
+          brokerEvidence: null,
+          enforce: true,
+          log: { error: () => {} },
+        }),
+        (err) => err instanceof HarnessIdentityMismatchError
+          && err.workerClass === harness
+          && err.mismatches.some((m) => m.kind === 'git-identity'),
+        `${foreign} identity on the ${harness} harness must fail closed`,
+      );
+    }
+  }
+  assert.equal(checked, 6, 'every ordered cross-harness pair must be exercised');
+});
+
+// The remediation identity is deliberately DISTINCT from the plain builder
+// identity for the same harness (agent-os config.yaml `entitlements`): a
+// remediation commit must be attributable as remediation work. Passing the plain
+// worker identity where the remediation identity is expected is therefore a
+// mismatch, not a near-miss to be tolerated.
+test('assertHarnessIdentityMatch rejects a plain worker identity where the remediation identity is expected', () => {
+  const plainWorkerIdentities = {
+    codex: { name: 'Codex Worker', email: 'codex@laceyenterprises.com' },
+    'claude-code': { name: 'Claude Code Worker', email: 'claude-code@laceyenterprises.com' },
+    gemini: { name: 'Gemini Worker', email: 'gemini@laceyenterprises.com' },
+  };
+  for (const [harness, plainIdentity] of Object.entries(plainWorkerIdentities)) {
+    const remediationIdentity = remediationWorkerGitIdentity(harness);
+    assert.notDeepEqual(
+      remediationIdentity,
+      plainIdentity,
+      `${harness} remediation identity must stay distinct from its plain worker identity`,
+    );
+    assert.throws(
+      () => assertHarnessIdentityMatch({
+        workerClass: harness,
+        gitIdentity: plainIdentity,
+        brokerEvidence: null,
+        enforce: true,
+        log: { error: () => {} },
+      }),
+      (err) => err instanceof HarnessIdentityMismatchError
+        && err.mismatches.some((m) => m.kind === 'git-identity'),
+      `the plain ${harness} worker identity must not satisfy the remediation assert`,
+    );
+  }
+});
+
 test('assertHarnessIdentityMatch does not treat the audited merge-agent fallback as a mismatch', () => {
   // A harness that legitimately fell back to merge-agent (already warned + audited
   // by applyMergeAgentBrokerEnv) must NOT additionally trip the assert.

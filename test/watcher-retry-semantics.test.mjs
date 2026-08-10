@@ -657,6 +657,145 @@ test('watcher releases a budget-exhausted pending follow-up job instead of defer
   assert.equal(claimNextFollowUpJob({ rootDir }), null, 'terminal release must not spawn another remediation over cap');
 });
 
+test('watcher releases a settled-clean pending follow-up job orphaned by a head move before deferring', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-settled-stale-release-'));
+  const created = createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5142,
+    reviewerModel: 'claude',
+    linearTicketId: null,
+    revisionRef: '93ea29e5',
+    reviewBody: [
+      '## Summary',
+      'Latest adversarial review is settled cleanly.',
+      '',
+      '## Blocking issues',
+      '- None.',
+      '',
+      '## Non-blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      'Comment only',
+    ].join('\n'),
+    reviewPostedAt: '2026-08-09T12:00:00.000Z',
+    critical: false,
+    maxRemediationRounds: 2,
+  });
+  writeFollowUpJob(created.jobPath, {
+    ...created.job,
+    status: 'pending',
+    revisionRef: '93ea29e5',
+    recommendedFollowUpAction: {
+      ...created.job.recommendedFollowUpAction,
+      summary: 'Latest adversarial review is settled cleanly; no remediation coding session is required unless an operator explicitly retriggers review.',
+    },
+    remediationPlan: {
+      ...created.job.remediationPlan,
+      currentRound: 0,
+      maxRounds: 2,
+    },
+  });
+
+  const decision = shouldDeferReviewForActiveFollowUp({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5142,
+    currentRevisionRef: '100e1e77',
+    nowMs: Date.parse('2026-08-09T12:05:00.000Z'),
+  });
+
+  assert.equal(decision.defer, false);
+  assert.equal(decision.latestJobStatus, 'stopped');
+  assert.equal(decision.releaseReason, 'settled-clean-head-moved');
+  assert.equal(existsSync(created.jobPath), false, 'settled stale pending file was removed from pending/');
+  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(created.jobPath));
+  const stoppedJob = readFollowUpJob(stoppedPath);
+  assert.equal(stoppedJob.remediationPlan?.stop?.code, 'settled-clean-head-moved');
+  assert.match(stoppedJob.remediationPlan?.stop?.reason || '', /superseded by current head 100e1e77/);
+  assert.equal(claimNextFollowUpJob({ rootDir }), null, 'terminal settled release must not spawn remediation');
+});
+
+test('watcher releases a settled-clean pending follow-up job on the current head so gate evaluation can converge', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-settled-current-release-'));
+  const created = createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5143,
+    reviewerModel: 'claude',
+    linearTicketId: null,
+    revisionRef: 'sha-current-clean',
+    reviewBody: [
+      '## Summary',
+      'Current head is clean.',
+      '',
+      '## Blocking issues',
+      '- None.',
+      '',
+      '## Verdict',
+      'Approved',
+    ].join('\n'),
+    reviewPostedAt: '2026-08-09T12:00:00.000Z',
+    critical: false,
+    maxRemediationRounds: 2,
+  });
+
+  const decision = shouldDeferReviewForActiveFollowUp({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5143,
+    currentRevisionRef: 'sha-current-clean',
+    nowMs: Date.parse('2026-08-09T12:05:00.000Z'),
+  });
+
+  assert.equal(decision.defer, false);
+  assert.equal(decision.releaseReason, 'settled-clean');
+  assert.equal(existsSync(created.jobPath), false, 'settled current-head carrier was removed from pending/');
+  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(created.jobPath));
+  assert.equal(readFollowUpJob(stoppedPath).remediationPlan?.stop?.code, 'settled-clean');
+});
+
+test('watcher releases a pending follow-up job whose revisionRef is superseded even when under budget', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-revision-superseded-'));
+  const created = createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5144,
+    reviewerModel: 'claude',
+    linearTicketId: null,
+    revisionRef: 'sha-old',
+    reviewBody: '## Summary\nStale review head fixture.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-08-09T12:00:00.000Z',
+    critical: false,
+    maxRemediationRounds: 2,
+  });
+  writeFollowUpJob(created.jobPath, {
+    ...created.job,
+    status: 'pending',
+    revisionRef: 'sha-old',
+    remediationPlan: {
+      ...created.job.remediationPlan,
+      currentRound: 0,
+      maxRounds: 2,
+    },
+  });
+
+  const decision = shouldDeferReviewForActiveFollowUp({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5144,
+    currentRevisionRef: 'sha-new',
+    nowMs: Date.parse('2026-08-09T12:05:00.000Z'),
+  });
+
+  assert.equal(decision.defer, false);
+  assert.equal(decision.releaseReason, 'revision-superseded');
+  const stoppedPath = path.join(getFollowUpJobDir(rootDir, 'stopped'), path.basename(created.jobPath));
+  assert.equal(readFollowUpJob(stoppedPath).remediationPlan?.stop?.code, 'revision-superseded');
+  assert.equal(claimNextFollowUpJob({ rootDir }), null, 'superseded release must not spawn remediation for the old head');
+});
+
 test('watcher defers a pending review while the active follow-up job has status="in_progress" (same-SHA duplicate-review regression, 2026-05-31)', () => {
   // Regression for the same-SHA duplicate-review symptom observed across
   // PRs #1151 / #1164 / #1165 on 2026-05-31. Sequence that produced the
@@ -730,6 +869,58 @@ test('watcher defers a pending review while the active follow-up job has status=
   });
   assert.equal(decision.defer, true, 'watcher MUST defer while the underscore-form in_progress remediation is mid-flight');
   assert.equal(decision.latestJobStatus, 'in_progress');
+});
+
+test('watcher still defers a genuinely active in-progress remediation job on the current head', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-current-live-defers-'));
+  createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5145,
+    reviewerModel: 'claude',
+    linearTicketId: null,
+    revisionRef: 'sha-live',
+    reviewBody: '## Summary\nLive remediation fixture.\n\n## Verdict\nRequest changes',
+    reviewPostedAt: '2026-08-09T12:00:00.000Z',
+    critical: false,
+    maxRemediationRounds: 2,
+  });
+  const claimed = claimNextFollowUpJob({
+    rootDir,
+    claimedAt: '2026-08-09T12:01:00.000Z',
+  });
+  const spawned = markFollowUpJobSpawned({
+    rootDir,
+    jobPath: claimed.jobPath,
+    worker: {
+      processId: 64594,
+      processGroupId: 64594,
+      workspaceDir: '/tmp/fixture-workspace',
+    },
+    spawnedAt: '2026-08-09T12:02:00.000Z',
+  });
+  writeFollowUpJob(spawned.jobPath, {
+    ...spawned.job,
+    revisionRef: 'sha-live',
+    lastHeartbeatAt: '2026-08-09T12:04:00.000Z',
+    remediationPlan: {
+      ...spawned.job.remediationPlan,
+      currentRound: 1,
+      maxRounds: 2,
+    },
+  });
+
+  const decision = shouldDeferReviewForActiveFollowUp({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5145,
+    currentRevisionRef: 'sha-live',
+    nowMs: Date.parse('2026-08-09T12:05:00.000Z'),
+  });
+
+  assert.equal(decision.defer, true);
+  assert.equal(decision.latestJobStatus, 'in_progress');
+  assert.equal(existsSync(spawned.jobPath), true, 'live current-head job must remain in progress');
 });
 
 test('watcher releases stale in-progress follow-up claims through the stuck-claim sweep before deferring', () => {

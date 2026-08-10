@@ -996,6 +996,7 @@ export async function processReviewSubject(entry, ctx) {
         rootDir: ROOT,
         repo: repoPath,
         prNumber,
+        currentRevisionRef: subject.ref.revisionRef || subject.headSha || null,
       });
       if (activeFollowUp.defer) {
         console.log(

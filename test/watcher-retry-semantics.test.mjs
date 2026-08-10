@@ -756,6 +756,51 @@ test('watcher releases a settled-clean pending follow-up job on the current head
   assert.equal(readFollowUpJob(stoppedPath).remediationPlan?.stop?.code, 'settled-clean');
 });
 
+test('watcher does not synthesize settled-clean from a blocking review action summary', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-blocking-summary-'));
+  const created = createFollowUpJob({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5144,
+    reviewerModel: 'claude',
+    linearTicketId: null,
+    revisionRef: 'sha-current-blocking',
+    reviewBody: [
+      '## Summary',
+      'This review is not settled cleanly; a remediation worker is required.',
+      '',
+      '## Blocking issues',
+      '- Unsafe state classification.',
+      '',
+      '## Verdict',
+      'Request changes',
+    ].join('\n'),
+    reviewPostedAt: '2026-08-09T12:00:00.000Z',
+    critical: true,
+    maxRemediationRounds: 2,
+  });
+  writeFollowUpJob(created.jobPath, {
+    ...created.job,
+    status: 'pending',
+    recommendedFollowUpAction: {
+      ...created.job.recommendedFollowUpAction,
+      summary: 'This review is not settled cleanly; no remediation worker required is false.',
+    },
+  });
+
+  const decision = shouldDeferReviewForActiveFollowUp({
+    rootDir,
+    repo: 'laceyenterprises/agent-os',
+    prNumber: 5144,
+    currentRevisionRef: 'sha-current-blocking',
+    nowMs: Date.parse('2026-08-09T12:05:00.000Z'),
+  });
+
+  assert.equal(decision.defer, true);
+  assert.equal(decision.latestJobStatus, 'pending');
+  assert.equal(existsSync(created.jobPath), true, 'blocking current-head job must remain pending');
+});
+
 test('watcher releases a pending follow-up job whose revisionRef is superseded even when under budget', () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-revision-superseded-'));
   const created = createFollowUpJob({

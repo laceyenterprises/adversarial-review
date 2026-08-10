@@ -58,16 +58,6 @@ function isSettledCleanFollowUpJob(job) {
     return true;
   }
 
-  const actionSummary = String(action?.summary ?? '').trim().toLowerCase();
-  if (
-    actionSummary.includes('settled cleanly')
-    || actionSummary.includes('no remediation coding session is required')
-    || actionSummary.includes('no remediation worker required')
-    || actionSummary.includes('nothing to remediate')
-  ) {
-    return true;
-  }
-
   if (!String(job?.reviewBody ?? '').trim()) {
     return false;
   }

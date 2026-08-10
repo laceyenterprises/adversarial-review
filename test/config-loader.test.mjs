@@ -581,9 +581,9 @@ test('alert_delivery gateway token ref loads through tolerant Node mirror', () =
         sink: gbi-bus
         telegram:
           bot_token_ref: op://Vault/Alert Bot/credential
-          chat_id: 12345
+          chat_id: '12345'
         gateway:
-          delivery_token_ref: op://Vault/Gateway Delivery Token/credential
+          delivery_token_ref: op://Vault/Gateway Delivery Token/API Credentials/credential
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('alert_delivery.sink'), 'gbi-bus');
@@ -591,7 +591,7 @@ test('alert_delivery gateway token ref loads through tolerant Node mirror', () =
     assert.equal(cfg.get('alert_delivery.telegram.chat_id'), '12345');
     assert.equal(
       cfg.get('alert_delivery.gateway.delivery_token_ref'),
-      'op://Vault/Gateway Delivery Token/credential',
+      'op://Vault/Gateway Delivery Token/API Credentials/credential',
     );
 
     const defaults = join(tmp, 'alert-delivery-defaults.yaml');
@@ -607,7 +607,7 @@ test('alert_delivery gateway token ref loads through tolerant Node mirror', () =
       version: 1
       alert_delivery:
         gateway:
-          delivery_token_ref: op://Vault/Gateway Delivery Token/credential/extra
+          delivery_token_ref: op://Vault/Gateway Delivery Token/API Credentials/credential/extra
     `);
     assert.throws(
       () => loadConfig({ topPath: badRef, env: {} }),

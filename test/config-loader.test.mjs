@@ -571,6 +571,67 @@ test('OSR-05 Linear team env override flows through strict Node schema', () => {
   }
 });
 
+test('alert_delivery gateway token ref loads through strict Node schema', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      alert_delivery:
+        sink: gbi-bus
+        telegram:
+          bot_token_ref: op://Vault/Alert Bot/credential
+          chat_id: 12345
+        gateway:
+          delivery_token_ref: op://Vault/Gateway Delivery Token/credential
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('alert_delivery.sink'), 'gbi-bus');
+    assert.equal(cfg.get('alert_delivery.telegram.bot_token_ref'), 'op://Vault/Alert Bot/credential');
+    assert.equal(cfg.get('alert_delivery.telegram.chat_id'), '12345');
+    assert.equal(
+      cfg.get('alert_delivery.gateway.delivery_token_ref'),
+      'op://Vault/Gateway Delivery Token/credential',
+    );
+
+    const badRef = join(tmp, 'bad-alert-delivery-ref.yaml');
+    writeFile(badRef, `
+      version: 1
+      alert_delivery:
+        gateway:
+          delivery_token_ref: literal-token
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: badRef, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'alert_delivery.gateway.delivery_token_ref');
+        assert.match(err.message, /does not match/);
+        return true;
+      },
+    );
+
+    const unknownKey = join(tmp, 'bad-alert-delivery-key.yaml');
+    writeFile(unknownKey, `
+      version: 1
+      alert_delivery:
+        gateway:
+          token_file: /tmp/gateway-delivery.token
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: unknownKey, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'alert_delivery.gateway.token_file');
+        assert.match(err.message, /unknown key/);
+        return true;
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('agent_gateway alert bus URL loads through strict Node schema and env aliases', () => {
   const tmp = freshTmp();
   try {

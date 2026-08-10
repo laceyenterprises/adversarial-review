@@ -198,6 +198,8 @@ const PATTERN_SQL_IDENTIFIER = '^[A-Za-z_][A-Za-z0-9_]{0,62}$';
 const PATTERN_SQL_IDENTIFIER_DESCRIPTION = 'SQL identifier /^[A-Za-z_][A-Za-z0-9_]{0,62}$/';
 const PATTERN_LOCAL_USERNAME = '^[A-Za-z_][A-Za-z0-9_-]{0,63}$';
 const PATTERN_LOCAL_USERNAME_DESCRIPTION = 'local username /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/';
+const PATTERN_OP_REF = '^$|^op://.+/.+/.+$';
+const PATTERN_OP_REF_DESCRIPTION = 'empty string or full op://<vault>/<item>/<field> ref';
 
 const TYPE_STRING = 'string';
 const TYPE_BOOL = 'bool';
@@ -250,8 +252,48 @@ function schemaV1() {
     __strict: true,
     __keys: {
       version: { __type: TYPE_INT, __required: true, __enum: [1] },
-      // alert_delivery is owned by the alert-delivery reader; tolerate its subtree.
-      alert_delivery: { __type: TYPE_DICT, __strict: false },
+      // Alert delivery is owned by the superproject script, but this strict
+      // watcher-side reader must mirror the shared config.yaml shape so daemon
+      // startup does not fail when alert_delivery grows.
+      alert_delivery: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          sink: {
+            __type: TYPE_STRING,
+            __default: 'telegram-direct',
+          },
+          telegram: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              bot_token_ref: {
+                __type: TYPE_STRING,
+                __default: '',
+                __pattern: PATTERN_OP_REF,
+                __pattern_description: PATTERN_OP_REF_DESCRIPTION,
+              },
+              chat_id: {
+                __type: TYPE_STRING,
+                __default: '',
+                __coerce_number_to_string: true,
+              },
+            },
+          },
+          gateway: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              delivery_token_ref: {
+                __type: TYPE_STRING,
+                __default: '',
+                __pattern: PATTERN_OP_REF,
+                __pattern_description: PATTERN_OP_REF_DESCRIPTION,
+              },
+            },
+          },
+        },
+      },
       review_cycle_cap: { __type: TYPE_INT, __default: 5, __min: 1 },
       review_cycle_window_hours: { __type: TYPE_INT, __default: 24, __min: 1 },
       update: {

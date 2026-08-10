@@ -1817,8 +1817,18 @@ function schemaV1() {
               projection_exclusions: {
                 __type: TYPE_DICT,
                 __strict: false,
-                __default: {},
-                __keys: {},
+                __keys: {
+                  'claude-responder': {
+                    __type: TYPE_STRING,
+                    __default:
+                      'warm resident ATP responder bootstrap prompt is decision-only and carries no code-edit surface; live operator messages supply the actionable context',
+                  },
+                  'codex-responder': {
+                    __type: TYPE_STRING,
+                    __default:
+                      'warm resident ATP responder bootstrap prompt is decision-only and carries no code-edit surface; live operator messages supply the actionable context',
+                  },
+                },
                 __extra_keys_schema: {
                   __type: TYPE_STRING,
                   __default: '',

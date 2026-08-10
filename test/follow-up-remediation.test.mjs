@@ -4625,6 +4625,7 @@ test('assertHarnessIdentityMatch reports an unknown harness without throwing Typ
 // ANY direction (not just the #5058 merge-agent direction) fails closed.
 test('assertHarnessIdentityMatch throws on every cross-harness identity swap', () => {
   const harnesses = ['codex', 'claude-code', 'gemini'];
+  const log = { error: () => {}, warn: () => {}, info: () => {}, debug: () => {} };
   let checked = 0;
   for (const harness of harnesses) {
     for (const foreign of harnesses) {
@@ -4636,7 +4637,7 @@ test('assertHarnessIdentityMatch throws on every cross-harness identity swap', (
           gitIdentity: remediationWorkerGitIdentity(foreign),
           brokerEvidence: null,
           enforce: true,
-          log: { error: () => {} },
+          log,
         }),
         (err) => err instanceof HarnessIdentityMismatchError
           && err.workerClass === harness
@@ -4654,6 +4655,7 @@ test('assertHarnessIdentityMatch throws on every cross-harness identity swap', (
 // worker identity where the remediation identity is expected is therefore a
 // mismatch, not a near-miss to be tolerated.
 test('assertHarnessIdentityMatch rejects a plain worker identity where the remediation identity is expected', () => {
+  const log = { error: () => {}, warn: () => {}, info: () => {}, debug: () => {} };
   const plainWorkerIdentities = {
     codex: { name: 'Codex Worker', email: 'codex@laceyenterprises.com' },
     'claude-code': { name: 'Claude Code Worker', email: 'claude-code@laceyenterprises.com' },
@@ -4661,7 +4663,7 @@ test('assertHarnessIdentityMatch rejects a plain worker identity where the remed
   };
   for (const [harness, plainIdentity] of Object.entries(plainWorkerIdentities)) {
     const remediationIdentity = remediationWorkerGitIdentity(harness);
-    assert.notDeepEqual(
+    assert.notDeepStrictEqual(
       remediationIdentity,
       plainIdentity,
       `${harness} remediation identity must stay distinct from its plain worker identity`,
@@ -4672,7 +4674,7 @@ test('assertHarnessIdentityMatch rejects a plain worker identity where the remed
         gitIdentity: plainIdentity,
         brokerEvidence: null,
         enforce: true,
-        log: { error: () => {} },
+        log,
       }),
       (err) => err instanceof HarnessIdentityMismatchError
         && err.mismatches.some((m) => m.kind === 'git-identity'),

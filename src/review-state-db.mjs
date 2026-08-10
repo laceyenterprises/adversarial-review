@@ -414,18 +414,19 @@ export const stmtMarkClosed = db.prepare(
 // feed the watcher's freshness pager from durable posted-review evidence in
 // reviewer_passes (gh_comment_id), never a resettable row-cycle timestamp or a
 // maskable per-PR status.
-// NOTE: deliberately NOT `SELECT MAX(...)`. Timestamps are stored in mixed
-// shapes across rows (ISO-8601 `…Z` from toISOString() vs space-separated tz-less
-// from SQLite CURRENT_TIMESTAMP), and a lexical SQL MAX orders a space-separated
-// value BEFORE a `T`-separated one (' ' < 'T'), so it can return an OLDER time and
-// make the freshness pager cry wolf. Fetch the candidates and take the max in JS
-// over parsePostedAtMs-normalized values instead.
-export const stmtAllGenuinePostedReviewAt = db.prepare(
-  `SELECT COALESCE(body_captured_at, ended_at) AS posted_at
-     FROM reviewer_passes
-    WHERE gh_comment_id IS NOT NULL
-      AND gh_comment_id <> ''
-      AND COALESCE(body_captured_at, ended_at) IS NOT NULL`
+// Normalize mixed timestamp separators before MAX() so SQLite returns one
+// chronologically-sortable candidate instead of copying the append-only
+// reviewer_passes history into Node on every freshness tick.
+export const stmtLatestGenuinePostedReviewAt = db.prepare(
+  `SELECT MAX(posted_at) AS posted_at
+     FROM (
+       SELECT REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') AS posted_at
+         FROM reviewer_passes
+        WHERE gh_comment_id IS NOT NULL
+          AND gh_comment_id <> ''
+          AND COALESCE(body_captured_at, ended_at) IS NOT NULL
+          AND REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '????-??-??T??:??:??*'
+     )`
 );
 const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "SELECT COUNT(*) AS n FROM reviewed_prs " +
@@ -465,14 +466,9 @@ export function parsePostedAtMs(raw) {
 export function latestPostedReviewAtMs(handle = db) {
   const stmt =
     handle === db
-      ? stmtAllGenuinePostedReviewAt
-      : handle.prepare(stmtAllGenuinePostedReviewAt.source);
-  let maxMs = null;
-  for (const row of stmt.all()) {
-    const ms = parsePostedAtMs(row?.posted_at);
-    if (ms != null && (maxMs == null || ms > maxMs)) maxMs = ms;
-  }
-  return maxMs;
+      ? stmtLatestGenuinePostedReviewAt
+      : handle.prepare(stmtLatestGenuinePostedReviewAt.source);
+  return parsePostedAtMs(stmt.get()?.posted_at);
 }
 
 // Count of currently-open PRs with no genuine posted review. Keying off

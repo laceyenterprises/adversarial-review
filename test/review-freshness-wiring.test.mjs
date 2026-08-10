@@ -127,6 +127,45 @@ test('latestPostedReviewAtMs returns the freshest genuine posted review artifact
   });
 });
 
+test('latestPostedReviewAtMs uses a bounded SQL aggregate, not an all-row scan', () => {
+  withTempDb((db) => {
+    const older = seed(db, {
+      prState: 'merged',
+      reviewStatus: 'posted',
+      postedAt: '2026-07-27T03:00:00.000Z',
+    });
+    const fresher = seed(db, {
+      prState: 'open',
+      reviewStatus: 'posted',
+      postedAt: '2026-07-27 04:30:00',
+    });
+    seedReviewerPass(db, {
+      prNumber: older,
+      endedAt: '2026-07-27T03:00:00.000Z',
+      ghCommentId: 'RV_older',
+    });
+    seedReviewerPass(db, {
+      prNumber: fresher,
+      bodyCapturedAt: '2026-07-27 04:30:00',
+      ghCommentId: 'RV_fresher',
+    });
+
+    const boundedHandle = {
+      prepare(sql) {
+        const stmt = db.prepare(sql);
+        return {
+          get: (...args) => stmt.get(...args),
+          all: () => {
+            throw new Error('latestPostedReviewAtMs must not load all reviewer_passes rows');
+          },
+        };
+      },
+    };
+
+    assert.equal(latestPostedReviewAtMs(boundedHandle), Date.parse('2026-07-27T04:30:00Z'));
+  });
+});
+
 test('countOpenPrsAwaitingFirstPassReview counts genuinely-open PRs with no posted review', () => {
   withTempDb((db) => {
     assert.equal(countOpenPrsAwaitingFirstPassReview(db), 0);

@@ -571,7 +571,7 @@ test('OSR-05 Linear team env override flows through strict Node schema', () => {
   }
 });
 
-test('alert_delivery gateway token ref loads through strict Node schema', () => {
+test('alert_delivery gateway token ref loads through tolerant Node mirror', () => {
   const tmp = freshTmp();
   try {
     const top = join(tmp, 'config.yaml');
@@ -611,22 +611,15 @@ test('alert_delivery gateway token ref loads through strict Node schema', () => 
       },
     );
 
-    const unknownKey = join(tmp, 'bad-alert-delivery-key.yaml');
+    const unknownKey = join(tmp, 'future-alert-delivery-key.yaml');
     writeFile(unknownKey, `
       version: 1
       alert_delivery:
         gateway:
           token_file: /tmp/gateway-delivery.token
     `);
-    assert.throws(
-      () => loadConfig({ topPath: unknownKey, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'alert_delivery.gateway.token_file');
-        assert.match(err.message, /unknown key/);
-        return true;
-      },
-    );
+    const futureCfg = loadConfig({ topPath: unknownKey, env: {} });
+    assert.equal(futureCfg.get('alert_delivery.gateway.delivery_token_ref'), '');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

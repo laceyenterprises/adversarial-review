@@ -257,7 +257,7 @@ function schemaV1() {
       // startup does not fail when alert_delivery grows.
       alert_delivery: {
         __type: TYPE_DICT,
-        __strict: true,
+        __strict: false,
         __keys: {
           sink: {
             __type: TYPE_STRING,
@@ -265,7 +265,7 @@ function schemaV1() {
           },
           telegram: {
             __type: TYPE_DICT,
-            __strict: true,
+            __strict: false,
             __keys: {
               bot_token_ref: {
                 __type: TYPE_STRING,
@@ -282,7 +282,7 @@ function schemaV1() {
           },
           gateway: {
             __type: TYPE_DICT,
-            __strict: true,
+            __strict: false,
             __keys: {
               delivery_token_ref: {
                 __type: TYPE_STRING,

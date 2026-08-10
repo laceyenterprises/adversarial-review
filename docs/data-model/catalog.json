@@ -31,6 +31,9 @@
       "path": "docs/data-model/reviewer-passes.md",
       "store": "data/reviews.db",
       "schemaSurface": "migrations/20260518_reviewer_passes.sql",
+      "relatedSchemaSurfaces": [
+        "migrations/20260810_reviewer_passes_posted_review_freshness_index.sql"
+      ],
       "owner": "reviewer spawn, settle, and token attribution"
     },
     {

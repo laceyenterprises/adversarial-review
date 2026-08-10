@@ -405,21 +405,51 @@ export const stmtMarkClosed = db.prepare(
 
 // ── Review-freshness liveness (watcher self-pages when reviews stall) ─────────
 // RCA: the 2026-07-14 and 2026-07-26/27 review stalls both read as "green"
-// because reviewer dispatch succeeded while no review actually landed. These two
-// reads feed the watcher's freshness pager (see review-freshness-detector.mjs),
-// keyed on the real MAX(posted_at) — never a maskable per-PR status.
-// NOTE: deliberately NOT `SELECT MAX(posted_at)`. posted_at is stored in mixed
-// shapes across rows (ISO-8601 `…Z` from toISOString() vs space-separated tz-less
-// from SQLite CURRENT_TIMESTAMP), and a lexical SQL MAX orders a space-separated
-// value BEFORE a `T`-separated one (' ' < 'T'), so it can return an OLDER time and
-// make the freshness pager cry wolf. Fetch the candidates and take the max in JS
-// over parsePostedAtMs-normalized values instead.
-export const stmtAllPostedReviewAt = db.prepare(
-  'SELECT posted_at FROM reviewed_prs WHERE posted_at IS NOT NULL'
+// because reviewer dispatch succeeded while no review actually landed.
+// RVFRESH-01: on 2026-08-10 the inverse failure fired a false
+// "Reviews stalled" page while #5177 rereviews were landing. The row had
+// re-entered remediation, which intentionally reset reviewed_prs.posted_at to
+// NULL; rereview posts then updated reviewer_passes.gh_comment_id but did not
+// restore posted_at, so MAX(posted_at) fell back to older merged PRs. These reads
+// feed the watcher's freshness pager from durable posted-review evidence in
+// reviewer_passes (gh_comment_id), never a resettable row-cycle timestamp or a
+// maskable per-PR status.
+const LATEST_GENUINE_POSTED_REVIEW_CANDIDATE_LIMIT = 64;
+
+// Use the partial freshness index to read only the latest timestamp candidates
+// from reviewer_passes. SQLite timestamps without an explicit offset are UTC in
+// this table; append `Z` before SQLite date handling and return fixed millisecond
+// UTC so the index order is stable. Node still performs the final chronological
+// comparison below, avoiding correctness dependence on lexical SQL MAX().
+export const stmtLatestGenuinePostedReviewAt = db.prepare(
+  `SELECT COALESCE(body_captured_at, ended_at) AS posted_at
+     FROM reviewer_passes
+    WHERE gh_comment_id IS NOT NULL
+      AND gh_comment_id <> ''
+      AND COALESCE(body_captured_at, ended_at) IS NOT NULL
+      AND REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '????-??-??T??:??:??*'
+    ORDER BY strftime(
+              '%Y-%m-%dT%H:%M:%fZ',
+              CASE
+                WHEN REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '*Z'
+                  OR REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '*+??:??'
+                  OR REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '*-??:??'
+                  THEN REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T')
+                ELSE REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') || 'Z'
+              END
+            ) DESC
+    LIMIT ${LATEST_GENUINE_POSTED_REVIEW_CANDIDATE_LIMIT}`
 );
 const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "SELECT COUNT(*) AS n FROM reviewed_prs " +
-  "WHERE pr_state = 'open' AND posted_at IS NULL";
+  "WHERE pr_state = 'open' " +
+  "AND NOT EXISTS ( " +
+  "  SELECT 1 FROM reviewer_passes " +
+  "  WHERE reviewer_passes.repo = reviewed_prs.repo " +
+  "    AND reviewer_passes.pr_number = reviewed_prs.pr_number " +
+  "    AND reviewer_passes.gh_comment_id IS NOT NULL " +
+  "    AND reviewer_passes.gh_comment_id <> ''" +
+  ")";
 export const stmtCountOpenPrsAwaitingFirstPassReview = db.prepare(
   SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW
 );
@@ -440,26 +470,31 @@ export function parsePostedAtMs(raw) {
 }
 
 // Freshest genuine posted-review time across all rows (epoch ms), or null if no
-// review has ever posted. posted_at is written ONLY by markPosted on a real
-// GitHub post (#696 keeps a failed pre-post attempt from fabricating it), so this
-// is a mask-proof reviewer-liveness signal. `handle` defaults to the shared db;
-// tests pass a temp handle.
+// review has ever posted. reviewer_passes.gh_comment_id is linked only after the
+// GitHub artifact is found, and rows are retained across re-review/remediation
+// cycles, so this baseline cannot move backward when reviewed_prs.posted_at is
+// cleared on re-entry. `handle` defaults to the shared db; tests pass a temp
+// handle.
 export function latestPostedReviewAtMs(handle = db) {
   const stmt =
-    handle === db ? stmtAllPostedReviewAt : handle.prepare(stmtAllPostedReviewAt.source);
-  let maxMs = null;
+    handle === db
+      ? stmtLatestGenuinePostedReviewAt
+      : handle.prepare(stmtLatestGenuinePostedReviewAt.source);
+  let latest = null;
   for (const row of stmt.all()) {
-    const ms = parsePostedAtMs(row?.posted_at);
-    if (ms != null && (maxMs == null || ms > maxMs)) maxMs = ms;
+    const candidate = parsePostedAtMs(row?.posted_at);
+    if (candidate !== null && (latest === null || candidate > latest)) latest = candidate;
   }
-  return maxMs;
+  return latest;
 }
 
 // Count of currently-open PRs with no genuine posted review. Keying off
-// posted_at keeps the freshness pager unmaskable: a stale/mistaken per-PR
-// review_status='posted' cannot hide a PR that never actually received a
-// published review. Scoped to pr_state='open' so a stale closed/merged row can
-// never hold the count above zero during a quiet posting lull.
+// reviewer_passes.gh_comment_id keeps the freshness pager unmaskable: a
+// stale/mistaken per-PR review_status='posted' cannot hide a PR that never
+// actually received a published review, while a re-entered PR with posted_at
+// reset is not double-counted as first-pass-awaiting. Scoped to pr_state='open'
+// so a stale closed/merged row can never hold the count above zero during a
+// quiet posting lull.
 export function countOpenPrsAwaitingFirstPassReview(handle = db) {
   const stmt =
     handle === db

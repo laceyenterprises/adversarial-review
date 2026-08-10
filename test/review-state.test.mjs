@@ -67,6 +67,7 @@ test('openReviewStateDb applies a busy timeout and shared schema adds reviewer h
     assert.ok(columns.includes('subject_external_id'));
     assert.ok(columns.includes('revision_ref'));
     const passColumns = db.prepare('PRAGMA table_info(reviewer_passes)').all().map((column) => column.name);
+    assert.ok(passColumns.includes('ended_at'));
     assert.ok(passColumns.includes('reviewer_model'));
     assert.ok(passColumns.includes('verdict'));
     assert.ok(passColumns.includes('body_md'));
@@ -90,6 +91,7 @@ test('openReviewStateDb applies a busy timeout and shared schema adds reviewer h
     assert.equal(closeoutColumns.gh_artifact_refs.type, 'TEXT');
     assert.ok(indexNames(db, 'reviewer_passes').includes('idx_reviewer_passes_gh_comment_id'));
     assert.ok(indexNames(db, 'reviewer_passes').includes('idx_reviewer_passes_head'));
+    assert.ok(indexNames(db, 'reviewer_passes').includes('idx_reviewer_passes_posted_review_freshness'));
     assert.ok(indexNames(db, 'pr_merge_closeouts').includes('idx_pr_merge_closeouts_scrape_pending'));
     assert.ok(indexNames(db, 'pr_merge_closeouts').includes('idx_pr_merge_closeouts_merged_at'));
     const migration = db.prepare('SELECT id FROM schema_migrations WHERE id = ?').get('20260518_reviewer_passes.sql');
@@ -133,12 +135,14 @@ test('review-state migrations upgrade old reviewer_passes schema idempotently', 
     assert.equal(migrationRows.length, 1);
 
     const passColumns = tableInfoByName(db, 'reviewer_passes');
+    assert.equal(passColumns.ended_at.type, 'TEXT');
     assert.equal(passColumns.verdict.type, 'TEXT');
     assert.equal(passColumns.body_md.type, 'TEXT');
     assert.equal(passColumns.gh_comment_id.type, 'TEXT');
     assert.equal(passColumns.body_captured_at.type, 'TEXT');
     assert.equal(passColumns.head_sha.type, 'TEXT');
     assert.ok(indexNames(db, 'reviewer_passes').includes('idx_reviewer_passes_head'));
+    assert.ok(indexNames(db, 'reviewer_passes').includes('idx_reviewer_passes_posted_review_freshness'));
     assert.ok(tableInfoByName(db, 'pr_merge_closeouts').repo);
   } finally {
     db.close();

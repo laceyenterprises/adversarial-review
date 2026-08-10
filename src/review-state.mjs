@@ -223,6 +223,7 @@ function ensureReviewStateSchema(db) {
   `);
   // Handles DBs that briefly saw the inline reviewer_passes schema before the
   // migration runner became the canonical path.
+  addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN ended_at TEXT`);
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN reviewer_model TEXT`);
   addColumnIfMissing(db, `ALTER TABLE reviewer_passes ADD COLUMN token_total INTEGER`);
   // Full-fidelity token breakdown parity with the session ledger
@@ -237,6 +238,24 @@ function ensureReviewStateSchema(db) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_reviewer_passes_head
       ON reviewer_passes(repo, pr_number, pass_kind, head_sha);
+
+    CREATE INDEX IF NOT EXISTS idx_reviewer_passes_posted_review_freshness
+      ON reviewer_passes(
+        strftime(
+          '%Y-%m-%dT%H:%M:%fZ',
+          CASE
+            WHEN REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '*Z'
+              OR REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '*+??:??'
+              OR REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '*-??:??'
+              THEN REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T')
+            ELSE REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') || 'Z'
+          END
+        )
+      )
+      WHERE gh_comment_id IS NOT NULL
+        AND gh_comment_id <> ''
+        AND COALESCE(body_captured_at, ended_at) IS NOT NULL
+        AND REPLACE(COALESCE(body_captured_at, ended_at), ' ', 'T') GLOB '????-??-??T??:??:??*';
 
     CREATE UNIQUE INDEX IF NOT EXISTS reviewed_prs_identity_round_kind_unique
       ON reviewed_prs(domain_id, subject_external_id, revision_ref);

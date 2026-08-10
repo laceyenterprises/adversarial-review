@@ -1,6 +1,6 @@
 # Reviewer passes
 
-**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `src/reviewer-pass-tokens.mjs`, and `src/reviewer-spawn-settle.mjs`
+**Source of truth:** `migrations/20260518_reviewer_passes.sql`, `migrations/20260810_reviewer_passes_posted_review_freshness_index.sql`, `src/reviewer-pass-tokens.mjs`, and `src/reviewer-spawn-settle.mjs`
 
 ## Ownership
 
@@ -14,6 +14,13 @@
 closer review attempt. Its primary identity is `(repo, pr_number,
 attempt_number, pass_kind)`. `worker_run_id` links a dispatched reviewer to the
 session-ledger `worker_runs.run_id` when that attribution is available.
+
+Rows with a non-empty `gh_comment_id` are genuine posted-review artifacts. The
+watcher's review-freshness pager reads those rows through
+`idx_reviewer_passes_posted_review_freshness`, a partial expression index over
+`COALESCE(body_captured_at, ended_at)` normalized to fixed millisecond UTC. This
+keeps rereview/remediation-cycle posts visible after `reviewed_prs.posted_at` is
+reset while avoiding freshness scans over non-posted pass history.
 
 ## Launch and reattach identity
 

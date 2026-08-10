@@ -580,14 +580,17 @@ test('alert_delivery gateway token ref loads through tolerant Node mirror', () =
       alert_delivery:
         sink: gbi-bus
         telegram:
-          bot_token_ref: op://Vault/Alert Bot/credential
+          bot_token_ref: op://Vault/Alert Bot/API Credentials/credential
           chat_id: '12345'
         gateway:
           delivery_token_ref: op://Vault/Gateway Delivery Token/API Credentials/credential
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('alert_delivery.sink'), 'gbi-bus');
-    assert.equal(cfg.get('alert_delivery.telegram.bot_token_ref'), 'op://Vault/Alert Bot/credential');
+    assert.equal(
+      cfg.get('alert_delivery.telegram.bot_token_ref'),
+      'op://Vault/Alert Bot/API Credentials/credential',
+    );
     assert.equal(cfg.get('alert_delivery.telegram.chat_id'), '12345');
     assert.equal(
       cfg.get('alert_delivery.gateway.delivery_token_ref'),
@@ -601,6 +604,23 @@ test('alert_delivery gateway token ref loads through tolerant Node mirror', () =
     assert.equal(defaultCfg.get('alert_delivery.telegram.bot_token_ref'), '');
     assert.equal(defaultCfg.get('alert_delivery.telegram.chat_id'), '');
     assert.equal(defaultCfg.get('alert_delivery.gateway.delivery_token_ref'), '');
+
+    const numericChatId = join(tmp, 'numeric-alert-chat-id.yaml');
+    writeFile(numericChatId, `
+      version: 1
+      alert_delivery:
+        telegram:
+          chat_id: 12345
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: numericChatId, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'alert_delivery.telegram.chat_id');
+        assert.match(err.message, /expected string, got number/);
+        return true;
+      },
+    );
 
     const badRef = join(tmp, 'bad-alert-delivery-ref.yaml');
     writeFile(badRef, `

@@ -923,6 +923,59 @@ test('top-level config.yaml accepts the mirrored worker_pool.dag.autowalk.deep_r
   }
 });
 
+test('top-level config.yaml accepts mirrored worker_pool.hardening_ledger keys', () => {
+  // HLG projection knobs are Python-owned, but checked-in shared config.yaml
+  // must parse under the watcher strict schema.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        hardening_ledger:
+          capture_forcing_enabled: false
+          reprojection_enabled: true
+          gate_strictness: warn
+          projection_exclusions:
+            claude-responder: responder bootstrap prompt is decision-only
+            codex-responder: responder bootstrap prompt is decision-only
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.hardening_ledger.capture_forcing_enabled'), false);
+    assert.equal(cfg.get('worker_pool.hardening_ledger.reprojection_enabled'), true);
+    assert.equal(cfg.get('worker_pool.hardening_ledger.gate_strictness'), 'warn');
+    assert.deepEqual(cfg.get('worker_pool.hardening_ledger.projection_exclusions'), {
+      'claude-responder': 'responder bootstrap prompt is decision-only',
+      'codex-responder': 'responder bootstrap prompt is decision-only',
+    });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('worker_pool.hardening_ledger projection exclusions default to responders', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        hardening_ledger:
+          capture_forcing_enabled: true
+          reprojection_enabled: true
+          gate_strictness: strict
+    `);
+    const exclusions = loadConfig({ topPath: top, env: {} }).get(
+      'worker_pool.hardening_ledger.projection_exclusions',
+    );
+    assert.deepEqual(Object.keys(exclusions).sort(), ['claude-responder', 'codex-responder']);
+    assert.match(exclusions['claude-responder'], /decision-only/);
+    assert.match(exclusions['codex-responder'], /decision-only/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('top-level config.yaml accepts mirrored worker_pool.memory.dynamic keys', () => {
   // DMG-01 is still Python-owned, but these checked-in keys live in the shared
   // config.yaml and must parse under the watcher strict schema.

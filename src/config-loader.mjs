@@ -1752,6 +1752,7 @@ function schemaV1() {
       // worker_pool.dispatch.fleet_launch_health.*,
       // worker_pool.dispatch.goal_lineage.*,
       // worker_pool.dispatch.substrate.*, and
+      // worker_pool.hardening_ledger.*,
       // worker_pool.memory.dynamic.*, and worker_pool.secrets_bus.* —
       // Python-owned (canonical schema at platform/agent-os-config).
       // PARTIAL mirror, same rationale as the
@@ -1798,6 +1799,39 @@ function schemaV1() {
                 __strict: true,
                 __keys: {
                   deep_reconcile: { __type: TYPE_BOOL, __default: false },
+                },
+              },
+            },
+          },
+          hardening_ledger: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              capture_forcing_enabled: { __type: TYPE_BOOL, __default: true },
+              reprojection_enabled: { __type: TYPE_BOOL, __default: true },
+              gate_strictness: {
+                __type: TYPE_STRING,
+                __default: 'strict',
+                __enum: ['strict', 'warn', 'off'],
+              },
+              projection_exclusions: {
+                __type: TYPE_DICT,
+                __strict: false,
+                __keys: {
+                  'claude-responder': {
+                    __type: TYPE_STRING,
+                    __default:
+                      'warm resident ATP responder bootstrap prompt is decision-only and carries no code-edit surface; live operator messages supply the actionable context',
+                  },
+                  'codex-responder': {
+                    __type: TYPE_STRING,
+                    __default:
+                      'warm resident ATP responder bootstrap prompt is decision-only and carries no code-edit surface; live operator messages supply the actionable context',
+                  },
+                },
+                __extra_keys_schema: {
+                  __type: TYPE_STRING,
+                  __default: '',
                 },
               },
             },

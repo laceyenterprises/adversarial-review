@@ -193,6 +193,21 @@ test('watcher runs pending-draft reconciliation after claim and freshness re-che
   assert.ok(releaseIndex > reconcileIndex, 'skip-spawn path should release the claim');
 });
 
+test('watcher active follow-up check tolerates subjects without a ref wrapper', () => {
+  const source = readFileSync(POLLONCE_PHASES_SOURCE, 'utf8');
+  const activeFollowUpIndex = source.indexOf('const activeFollowUp = shouldDeferReviewForActiveFollowUp({');
+  const safeRevisionFallbackIndex = source.indexOf(
+    'currentRevisionRef: subject.ref?.revisionRef || subject.headSha || null,',
+    activeFollowUpIndex
+  );
+
+  assert.ok(activeFollowUpIndex > 0, 'active follow-up check should exist');
+  assert.ok(
+    safeRevisionFallbackIndex > activeFollowUpIndex,
+    'active follow-up check should safely fall back to subject.headSha when subject.ref is missing'
+  );
+});
+
 test('watcher terminal rereview skip releases claim and falls through to close path', () => {
   // ARC-18: the per-PR skip/spawn body lives in processReviewSubject now, while
   // pollOnce (watcher.mjs) still drives that per-PR phase before the

@@ -43,6 +43,73 @@ function stopBudgetExhaustedPendingFollowUpJob({
   });
 }
 
+function normalizeRevisionRef(value) {
+  const normalized = String(value ?? '').trim();
+  return normalized || null;
+}
+
+function isSettledCleanFollowUpJob(job) {
+  const nextAction = job?.remediationPlan?.nextAction;
+  if (nextAction?.operatorOverride === true) return false;
+
+  const action = job?.recommendedFollowUpAction || {};
+  const actionType = String(action?.type ?? '').trim().toLowerCase();
+  if (['settled-clean', 'no-remediation-required', 'none'].includes(actionType)) {
+    return true;
+  }
+
+  if (!String(job?.reviewBody ?? '').trim()) {
+    return false;
+  }
+  const classification = followUpJobs.classifyFollowUpCriticality(job.reviewBody);
+  return classification.critical === false
+    && (classification.verdict === 'comment-only' || classification.verdict === 'approved');
+}
+
+function stopTerminalPendingFollowUpJob({
+  rootDir,
+  latest,
+  currentRevisionRef = null,
+  stoppedAt = new Date().toISOString(),
+  markStoppedImpl = followUpJobs.markFollowUpJobStopped,
+}) {
+  const job = latest?.job;
+  if (job?.status !== 'pending') {
+    return null;
+  }
+
+  const settledClean = isSettledCleanFollowUpJob(job);
+  const jobRevisionRef = normalizeRevisionRef(job?.revisionRef);
+  const headRevisionRef = normalizeRevisionRef(currentRevisionRef);
+  const revisionSuperseded = Boolean(jobRevisionRef && headRevisionRef && jobRevisionRef !== headRevisionRef);
+  if (!settledClean && !revisionSuperseded) {
+    return null;
+  }
+
+  const releaseReason = settledClean && revisionSuperseded
+    ? 'settled-clean-head-moved'
+    : settledClean
+    ? 'settled-clean'
+    : 'revision-superseded';
+  const reasonDetail = revisionSuperseded
+    ? ` Job revision ${jobRevisionRef} is superseded by current head ${headRevisionRef}.`
+    : '';
+
+  return markStoppedImpl({
+    rootDir,
+    jobPath: latest.jobPath,
+    stoppedAt,
+    stopCode: releaseReason,
+    sourceStatus: job.status,
+    stopReason: `Released pending follow-up job before reviewer defer: ${releaseReason}.${reasonDetail}`,
+    completion: settledClean
+      ? {
+          preview: 'Latest adversarial review verdict is settled cleanly; no remediation worker required.',
+        }
+      : undefined,
+  });
+}
+
 function parseFollowUpTimestampMs(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -141,9 +208,12 @@ function shouldDeferReviewForActiveFollowUp({
   prNumber,
   latestJobFinder = findLatestFollowUpJob,
   budgetSweepImpl = stopBudgetExhaustedPendingFollowUpJob,
+  terminalPendingSweepImpl = stopTerminalPendingFollowUpJob,
   staleClaimSweepImpl = stopStaleInProgressFollowUpJob,
   markStoppedImpl = followUpJobs.markFollowUpJobStopped,
+  currentRevisionRef = null,
   nowMs = Date.now(),
+  log = console,
 }) {
   let latest = latestJobFinder(rootDir, { repo, prNumber });
   const budgetStopped = typeof budgetSweepImpl === 'function' ? budgetSweepImpl({
@@ -160,6 +230,30 @@ function shouldDeferReviewForActiveFollowUp({
       jobId: budgetStopped.job?.jobId || latest?.job?.jobId || null,
       releasedTerminal: true,
       releaseReason: 'max-rounds-reached',
+    };
+  }
+
+  const terminalStopped = typeof terminalPendingSweepImpl === 'function' ? terminalPendingSweepImpl({
+    rootDir,
+    latest,
+    currentRevisionRef,
+    stoppedAt: new Date(nowMs).toISOString(),
+    markStoppedImpl,
+  }) : null;
+  if (terminalStopped) {
+    const releaseReason = terminalStopped.job?.remediationPlan?.stop?.code || 'pending-terminal';
+    log?.info?.(
+      `[watcher] Released terminal follow-up job before reviewer defer` +
+        `${terminalStopped.job?.jobId ? ` ${terminalStopped.job.jobId}` : ''}: ` +
+        `releaseReason=${releaseReason}`
+    );
+    return {
+      defer: false,
+      latestJobStatus: terminalStopped.job?.status || 'stopped',
+      jobPath: terminalStopped.jobPath || null,
+      jobId: terminalStopped.job?.jobId || latest?.job?.jobId || null,
+      releasedTerminal: true,
+      releaseReason,
     };
   }
 
@@ -191,5 +285,6 @@ function shouldDeferReviewForActiveFollowUp({
 export {
   shouldDeferReviewForActiveFollowUp,
   stopBudgetExhaustedPendingFollowUpJob,
+  stopTerminalPendingFollowUpJob,
   stopStaleInProgressFollowUpJob,
 };

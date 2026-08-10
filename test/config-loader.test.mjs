@@ -600,10 +600,8 @@ test('alert_delivery gateway token ref loads through tolerant Node mirror', () =
     const defaults = join(tmp, 'alert-delivery-defaults.yaml');
     writeFile(defaults, 'version: 1\n');
     const defaultCfg = loadConfig({ topPath: defaults, env: {} });
-    assert.equal(defaultCfg.get('alert_delivery.sink'), 'telegram-direct');
-    assert.equal(defaultCfg.get('alert_delivery.telegram.bot_token_ref'), '');
-    assert.equal(defaultCfg.get('alert_delivery.telegram.chat_id'), '');
-    assert.equal(defaultCfg.get('alert_delivery.gateway.delivery_token_ref'), '');
+    assert.equal(defaultCfg.get('alert_delivery', 'missing'), 'missing');
+    assert.equal(defaultCfg.get('alert_delivery.sink', 'missing'), 'missing');
 
     const numericChatId = join(tmp, 'numeric-alert-chat-id.yaml');
     writeFile(numericChatId, `
@@ -612,15 +610,11 @@ test('alert_delivery gateway token ref loads through tolerant Node mirror', () =
         telegram:
           chat_id: 12345
     `);
-    assert.throws(
-      () => loadConfig({ topPath: numericChatId, env: {} }),
-      (err) => {
-        assert.ok(err instanceof AgentOSConfigError);
-        assert.equal(err.key, 'alert_delivery.telegram.chat_id');
-        assert.match(err.message, /expected string, got number/);
-        return true;
-      },
-    );
+    const numericCfg = loadConfig({ topPath: numericChatId, env: {} });
+    assert.equal(numericCfg.get('alert_delivery.sink'), 'telegram-direct');
+    assert.equal(numericCfg.get('alert_delivery.telegram.bot_token_ref'), '');
+    assert.equal(numericCfg.get('alert_delivery.telegram.chat_id'), '12345');
+    assert.equal(numericCfg.get('alert_delivery.gateway.delivery_token_ref'), '');
 
     const badRef = join(tmp, 'bad-alert-delivery-ref.yaml');
     writeFile(badRef, `

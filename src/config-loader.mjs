@@ -258,7 +258,8 @@ function schemaV1() {
       alert_delivery: {
         __type: TYPE_DICT,
         __strict: false,
-        __default: {},
+        __default_when_present: true,
+        __skip_global_default_tree: true,
         __keys: {
           sink: {
             __type: TYPE_STRING,
@@ -267,6 +268,7 @@ function schemaV1() {
           telegram: {
             __type: TYPE_DICT,
             __strict: false,
+            __default_when_present: true,
             __default: {},
             __keys: {
               bot_token_ref: {
@@ -278,13 +280,17 @@ function schemaV1() {
               chat_id: {
                 __type: TYPE_STRING,
                 __default: '',
-                // Quote large Telegram chat IDs in YAML to avoid JS number precision loss.
+                // Shared superproject config may already use unquoted numeric
+                // YAML values; this Node reader accepts both and normalizes
+                // internally without forcing a wire-format migration.
+                __coerce_number_to_string: true,
               },
             },
           },
           gateway: {
             __type: TYPE_DICT,
             __strict: false,
+            __default_when_present: true,
             __default: {},
             __keys: {
               delivery_token_ref: {
@@ -3591,7 +3597,7 @@ function validateDictPresentKeysOnly(
     }
   }
 
-  const out = {};
+  const out = schema.__default_when_present ? structuredClone(buildDefaultsDict(schema)) : {};
   for (const [childKey, raw] of Object.entries(doc)) {
     if (!(childKey in allowed)) {
       // Non-strict dicts are extension points. If they provide an
@@ -3967,6 +3973,7 @@ function buildDefaultsDict(schema) {
   const out = {};
   for (const [key, child] of Object.entries(schema.__keys || {})) {
     if (key === 'version') continue;
+    if (child.__skip_global_default_tree) continue;
     if (child.__type === TYPE_DICT) {
       const nested = buildDefaultsDict(child);
       out[key] = nested;

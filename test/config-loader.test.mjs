@@ -594,12 +594,20 @@ test('alert_delivery gateway token ref loads through tolerant Node mirror', () =
       'op://Vault/Gateway Delivery Token/credential',
     );
 
+    const defaults = join(tmp, 'alert-delivery-defaults.yaml');
+    writeFile(defaults, 'version: 1\n');
+    const defaultCfg = loadConfig({ topPath: defaults, env: {} });
+    assert.equal(defaultCfg.get('alert_delivery.sink'), 'telegram-direct');
+    assert.equal(defaultCfg.get('alert_delivery.telegram.bot_token_ref'), '');
+    assert.equal(defaultCfg.get('alert_delivery.telegram.chat_id'), '');
+    assert.equal(defaultCfg.get('alert_delivery.gateway.delivery_token_ref'), '');
+
     const badRef = join(tmp, 'bad-alert-delivery-ref.yaml');
     writeFile(badRef, `
       version: 1
       alert_delivery:
         gateway:
-          delivery_token_ref: literal-token
+          delivery_token_ref: op://Vault/Gateway Delivery Token/credential/extra
     `);
     assert.throws(
       () => loadConfig({ topPath: badRef, env: {} }),

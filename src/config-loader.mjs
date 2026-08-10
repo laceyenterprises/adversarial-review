@@ -198,7 +198,7 @@ const PATTERN_SQL_IDENTIFIER = '^[A-Za-z_][A-Za-z0-9_]{0,62}$';
 const PATTERN_SQL_IDENTIFIER_DESCRIPTION = 'SQL identifier /^[A-Za-z_][A-Za-z0-9_]{0,62}$/';
 const PATTERN_LOCAL_USERNAME = '^[A-Za-z_][A-Za-z0-9_-]{0,63}$';
 const PATTERN_LOCAL_USERNAME_DESCRIPTION = 'local username /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/';
-const PATTERN_OP_REF = '^$|^op://.+/.+/.+$';
+const PATTERN_OP_REF = '^$|^op://[^/]+/[^/]+/[^/]+$';
 const PATTERN_OP_REF_DESCRIPTION = 'empty string or full op://<vault>/<item>/<field> ref';
 
 const TYPE_STRING = 'string';
@@ -258,6 +258,7 @@ function schemaV1() {
       alert_delivery: {
         __type: TYPE_DICT,
         __strict: false,
+        __default: {},
         __keys: {
           sink: {
             __type: TYPE_STRING,
@@ -266,6 +267,7 @@ function schemaV1() {
           telegram: {
             __type: TYPE_DICT,
             __strict: false,
+            __default: {},
             __keys: {
               bot_token_ref: {
                 __type: TYPE_STRING,
@@ -277,12 +279,14 @@ function schemaV1() {
                 __type: TYPE_STRING,
                 __default: '',
                 __coerce_number_to_string: true,
+                // Quote large Telegram chat IDs in YAML to avoid JS number precision loss.
               },
             },
           },
           gateway: {
             __type: TYPE_DICT,
             __strict: false,
+            __default: {},
             __keys: {
               delivery_token_ref: {
                 __type: TYPE_STRING,

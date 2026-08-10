@@ -252,9 +252,9 @@ function schemaV1() {
     __strict: true,
     __keys: {
       version: { __type: TYPE_INT, __required: true, __enum: [1] },
-      // Alert delivery is owned by the superproject script, but this strict
-      // watcher-side reader must mirror the shared config.yaml shape so daemon
-      // startup does not fail when alert_delivery grows.
+      // Alert delivery is owned by the superproject script. This watcher-side
+      // reader validates the keys it consumes while tolerating shared config
+      // growth so daemon startup does not fail when alert_delivery grows.
       alert_delivery: {
         __type: TYPE_DICT,
         __strict: false,

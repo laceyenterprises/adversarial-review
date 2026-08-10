@@ -615,11 +615,16 @@ test('alert_delivery gateway token ref loads through tolerant Node mirror', () =
     writeFile(unknownKey, `
       version: 1
       alert_delivery:
+        slack:
+          channel: '#ops'
+        telegram:
+          token_file: /tmp/telegram.token
         gateway:
           token_file: /tmp/gateway-delivery.token
     `);
     const futureCfg = loadConfig({ topPath: unknownKey, env: {} });
     assert.equal(futureCfg.get('alert_delivery.gateway.delivery_token_ref'), '');
+    assert.equal(futureCfg.get('alert_delivery.telegram.bot_token_ref'), '');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

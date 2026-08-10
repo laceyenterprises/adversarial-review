@@ -571,6 +571,87 @@ test('OSR-05 Linear team env override flows through strict Node schema', () => {
   }
 });
 
+test('alert_delivery gateway token ref loads through tolerant Node mirror', () => {
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      alert_delivery:
+        sink: gbi-bus
+        telegram:
+          bot_token_ref: op://Vault/Alert Bot/API Credentials/credential
+          chat_id: '12345'
+        gateway:
+          delivery_token_ref: op://Vault/Gateway Delivery Token/API Credentials/credential
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('alert_delivery.sink'), 'gbi-bus');
+    assert.equal(
+      cfg.get('alert_delivery.telegram.bot_token_ref'),
+      'op://Vault/Alert Bot/API Credentials/credential',
+    );
+    assert.equal(cfg.get('alert_delivery.telegram.chat_id'), '12345');
+    assert.equal(
+      cfg.get('alert_delivery.gateway.delivery_token_ref'),
+      'op://Vault/Gateway Delivery Token/API Credentials/credential',
+    );
+
+    const defaults = join(tmp, 'alert-delivery-defaults.yaml');
+    writeFile(defaults, 'version: 1\n');
+    const defaultCfg = loadConfig({ topPath: defaults, env: {} });
+    assert.equal(defaultCfg.get('alert_delivery', 'missing'), 'missing');
+    assert.equal(defaultCfg.get('alert_delivery.sink', 'missing'), 'missing');
+
+    const numericChatId = join(tmp, 'numeric-alert-chat-id.yaml');
+    writeFile(numericChatId, `
+      version: 1
+      alert_delivery:
+        telegram:
+          chat_id: 12345
+    `);
+    const numericCfg = loadConfig({ topPath: numericChatId, env: {} });
+    assert.equal(numericCfg.get('alert_delivery.sink'), 'telegram-direct');
+    assert.equal(numericCfg.get('alert_delivery.telegram.bot_token_ref'), '');
+    assert.equal(numericCfg.get('alert_delivery.telegram.chat_id'), '12345');
+    assert.equal(numericCfg.get('alert_delivery.gateway.delivery_token_ref'), '');
+
+    const badRef = join(tmp, 'bad-alert-delivery-ref.yaml');
+    writeFile(badRef, `
+      version: 1
+      alert_delivery:
+        gateway:
+          delivery_token_ref: op://Vault/Gateway Delivery Token/API Credentials/credential/extra
+    `);
+    assert.throws(
+      () => loadConfig({ topPath: badRef, env: {} }),
+      (err) => {
+        assert.ok(err instanceof AgentOSConfigError);
+        assert.equal(err.key, 'alert_delivery.gateway.delivery_token_ref');
+        assert.match(err.message, /does not match/);
+        return true;
+      },
+    );
+
+    const unknownKey = join(tmp, 'future-alert-delivery-key.yaml');
+    writeFile(unknownKey, `
+      version: 1
+      alert_delivery:
+        slack:
+          channel: '#ops'
+        telegram:
+          token_file: /tmp/telegram.token
+        gateway:
+          token_file: /tmp/gateway-delivery.token
+    `);
+    const futureCfg = loadConfig({ topPath: unknownKey, env: {} });
+    assert.equal(futureCfg.get('alert_delivery.gateway.delivery_token_ref'), '');
+    assert.equal(futureCfg.get('alert_delivery.telegram.bot_token_ref'), '');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('agent_gateway alert bus URL loads through strict Node schema and env aliases', () => {
   const tmp = freshTmp();
   try {

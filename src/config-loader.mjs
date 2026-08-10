@@ -198,6 +198,8 @@ const PATTERN_SQL_IDENTIFIER = '^[A-Za-z_][A-Za-z0-9_]{0,62}$';
 const PATTERN_SQL_IDENTIFIER_DESCRIPTION = 'SQL identifier /^[A-Za-z_][A-Za-z0-9_]{0,62}$/';
 const PATTERN_LOCAL_USERNAME = '^[A-Za-z_][A-Za-z0-9_-]{0,63}$';
 const PATTERN_LOCAL_USERNAME_DESCRIPTION = 'local username /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/';
+const PATTERN_OP_REF = '^$|^op://[^/]+/[^/]+/[^/]+(?:/[^/]+)?$';
+const PATTERN_OP_REF_DESCRIPTION = 'empty string or full op://<vault>/<item>/[section/]<field> ref';
 
 const TYPE_STRING = 'string';
 const TYPE_BOOL = 'bool';
@@ -250,8 +252,57 @@ function schemaV1() {
     __strict: true,
     __keys: {
       version: { __type: TYPE_INT, __required: true, __enum: [1] },
-      // alert_delivery is owned by the alert-delivery reader; tolerate its subtree.
-      alert_delivery: { __type: TYPE_DICT, __strict: false },
+      // Alert delivery is owned by the superproject script. This watcher-side
+      // reader validates the keys it consumes while tolerating shared config
+      // growth so daemon startup does not fail when alert_delivery grows.
+      alert_delivery: {
+        __type: TYPE_DICT,
+        __strict: false,
+        __default_when_present: true,
+        __skip_global_default_tree: true,
+        __keys: {
+          sink: {
+            __type: TYPE_STRING,
+            __default: 'telegram-direct',
+          },
+          telegram: {
+            __type: TYPE_DICT,
+            __strict: false,
+            __default_when_present: true,
+            __default: {},
+            __keys: {
+              bot_token_ref: {
+                __type: TYPE_STRING,
+                __default: '',
+                __pattern: PATTERN_OP_REF,
+                __pattern_description: PATTERN_OP_REF_DESCRIPTION,
+              },
+              chat_id: {
+                __type: TYPE_STRING,
+                __default: '',
+                // Shared superproject config may already use unquoted numeric
+                // YAML values; this Node reader accepts both and normalizes
+                // internally without forcing a wire-format migration.
+                __coerce_number_to_string: true,
+              },
+            },
+          },
+          gateway: {
+            __type: TYPE_DICT,
+            __strict: false,
+            __default_when_present: true,
+            __default: {},
+            __keys: {
+              delivery_token_ref: {
+                __type: TYPE_STRING,
+                __default: '',
+                __pattern: PATTERN_OP_REF,
+                __pattern_description: PATTERN_OP_REF_DESCRIPTION,
+              },
+            },
+          },
+        },
+      },
       review_cycle_cap: { __type: TYPE_INT, __default: 5, __min: 1 },
       review_cycle_window_hours: { __type: TYPE_INT, __default: 24, __min: 1 },
       update: {
@@ -3546,7 +3597,7 @@ function validateDictPresentKeysOnly(
     }
   }
 
-  const out = {};
+  const out = schema.__default_when_present ? structuredClone(buildDefaultsDict(schema)) : {};
   for (const [childKey, raw] of Object.entries(doc)) {
     if (!(childKey in allowed)) {
       // Non-strict dicts are extension points. If they provide an
@@ -3922,6 +3973,7 @@ function buildDefaultsDict(schema) {
   const out = {};
   for (const [key, child] of Object.entries(schema.__keys || {})) {
     if (key === 'version') continue;
+    if (child.__skip_global_default_tree) continue;
     if (child.__type === TYPE_DICT) {
       const nested = buildDefaultsDict(child);
       out[key] = nested;

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { PROVIDER_OVERLOADED_FAILURE_CLASS } from './adapters/reviewer-runtime/cli-direct/classification.mjs';
 import { ROUND_BUDGET_BY_RISK_CLASS } from './follow-up-jobs.mjs';
 import { QUOTA_EXHAUSTED_FAILURE_CLASS, quotaHoldDecision } from './quota-exhaustion.mjs';
+import { DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS } from './reviewer-lease.mjs';
 import {
   evaluateTtmFromDb,
   resolveTtmTrackerConfig,
@@ -32,6 +33,16 @@ const DEFAULT_DISPATCH_SPAWN_FAILURE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_LAUNCHD_TIMEOUT_MS = 2_000;
 const DEFAULT_LAUNCHD_TRANSIENT_RETRY_DELAYS_MS = Object.freeze([50, 150]);
 const DEFAULT_LABEL_PREFIX = 'ai.laceyenterprises';
+
+// Infra auto-recovery attempt cap the watcher enforces before it stops
+// re-arming an infrastructure-class `failed` review and leaves the row terminal
+// for operator inspection. Mirrors INFRA_AUTO_RECOVER_CAP in watcher.mjs,
+// reviewer-spawn-settle.mjs, reviewer-pass-reaper.mjs, and
+// reviewer-orphan-reconcile.mjs (all = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS).
+// A PR sitting at review_status='failed' with infra_auto_recover_attempts at or
+// above this cap is the exact 2026-08-11 stuck-retry-loop SEV0 state: the
+// watcher's auto-recovery gave up and nothing else is re-arming the review.
+const INFRA_AUTO_RECOVER_CAP = DEFAULT_REVIEWER_LEASE_RECOVERY_MAX_ATTEMPTS;
 
 const FOLLOW_UP_JOB_DIRS = Object.freeze({
   pending: ['data', 'follow-up-jobs', 'pending'],
@@ -184,6 +195,14 @@ const REVIEW_PIPELINE_HEALTH_FINDING_DEFINITIONS = Object.freeze([
     category: 'review-pipeline',
     thresholdKey: 'runningReviewerPassMaxAgeMs',
     defaultThreshold: DEFAULT_RUNNING_REVIEWER_PASS_MAX_AGE_MS,
+  },
+  {
+    code: 'review:stuck_retry_loop',
+    tier: 'ticket',
+    category: 'review-pipeline',
+    thresholdKey: null,
+    defaultThreshold: null,
+    thresholdDescription: 'one or more open PRs remain review_status=failed after infra auto-recovery exhausted its attempt cap',
   },
   {
     code: 'review:round_budget_anomaly',
@@ -1034,6 +1053,58 @@ function summarizeZombieReviewerPasses(db, { nowMs, config }) {
   };
 }
 
+// Detect PRs stranded in the review retry-loop SEV0 state: review_status='failed'
+// with the infra auto-recovery attempt budget at or over the cap. When the
+// watcher's bounded auto-recovery exhausts (attempts >= cap), it stops re-arming
+// the row and leaves it terminal-failed "for operator inspection" — which is
+// exactly what went silent for ~2.5h on 2026-08-11. Scoped to open PRs so a
+// stale closed/merged failed row (cleanup debt, not an active outage) can never
+// hold this signal on. Reuses safeAll's missing-schema tolerance, so a legacy
+// DB without infra_auto_recover_attempts returns empty instead of throwing.
+function summarizeStuckRetryLoops(db, { cap }) {
+  if (!db) return { cap, prs: [], byFailureClass: [], dominantFailureClass: null };
+  const rows = safeAll(
+    db,
+    `SELECT repo,
+            pr_number,
+            review_status,
+            pr_state,
+            failed_at,
+            last_attempted_at,
+            failure_message,
+            infra_auto_recover_attempts
+       FROM reviewed_prs
+      WHERE review_status = 'failed'
+        AND COALESCE(pr_state, 'open') = 'open'
+        AND COALESCE(infra_auto_recover_attempts, 0) >= ?
+      ORDER BY failed_at ASC, last_attempted_at ASC, pr_number ASC`,
+    [cap]
+  );
+  const byClass = new Map();
+  const prs = rows.map((row) => {
+    const failureClass = classifyFailure(row.failure_message || row.review_status);
+    byClass.set(failureClass, (byClass.get(failureClass) || 0) + 1);
+    return {
+      repo: row.repo,
+      prNumber: row.pr_number,
+      infraAutoRecoverAttempts: Number(row.infra_auto_recover_attempts || 0),
+      failedAt: row.failed_at || row.last_attempted_at || null,
+      failureMessage: row.failure_message || null,
+      failureClass,
+    };
+  });
+  const byFailureClass = Array.from(byClass, ([failureClass, count]) => ({ failureClass, count }))
+    .sort((left, right) => (
+      right.count - left.count || left.failureClass.localeCompare(right.failureClass)
+    ));
+  return {
+    cap,
+    prs,
+    byFailureClass,
+    dominantFailureClass: byFailureClass[0]?.failureClass || null,
+  };
+}
+
 function normalizeRiskClassForBudget(value) {
   const normalized = String(value || '').trim().toLowerCase();
   return Object.prototype.hasOwnProperty.call(ROUND_BUDGET_BY_RISK_CLASS, normalized) ? normalized : 'medium';
@@ -1673,6 +1744,35 @@ function evaluateReviewPipelineFindings(snapshot, { observedAt }) {
     }));
   }
 
+  if (snapshot.stuckReviewLoops.prs.length > 0) {
+    const stuck = snapshot.stuckReviewLoops;
+    const affected = stuck.prs.map((pr) => `${pr.repo}#${pr.prNumber}`);
+    const sample = affected.slice(0, 10);
+    const overflow = affected.length - sample.length;
+    const dominant = stuck.dominantFailureClass || 'unknown';
+    findings.push(buildFinding({
+      code: 'review:stuck_retry_loop',
+      // Page-severity intent (this is the silent-outage SEV0 condition); the
+      // collector clamps every source-level finding to ticket in buildFinding
+      // because the review-freshness detector owns the sole page for this domain.
+      tier: 'page',
+      subject: `${stuck.prs.length} PR(s) stuck failed after adversarial review auto-recovery exhausted (attempts >= ${stuck.cap})`,
+      message: `${sample.join(', ')}${overflow > 0 ? `, +${overflow} more` : ''} remain review_status='failed' with infra_auto_recover_attempts >= ${stuck.cap}; dominant failure class is ${dominant}.`,
+      evidence: stuck.prs.map((pr) => (
+        `reviews.db reviewed_prs ${pr.repo}#${pr.prNumber} attempts=${pr.infraAutoRecoverAttempts} class=${pr.failureClass}`
+      )),
+      recommendedAction: 'Adversarial review auto-recovery exhausted — investigate reviewer auth/infra for the dominant failure class and spawn an SRE; retrigger the affected reviews only after the reviewer lane is restored.',
+      observedAt,
+      details: {
+        cap: stuck.cap,
+        count: stuck.prs.length,
+        dominantFailureClass: stuck.dominantFailureClass,
+        byFailureClass: stuck.byFailureClass,
+        prs: stuck.prs,
+      },
+    }));
+  }
+
   if (snapshot.roundBudget.anomalies.length > 0) {
     const sample = snapshot.roundBudget.anomalies[0];
     findings.push(buildFinding({
@@ -1817,6 +1917,9 @@ function collectReviewPipelineHealth({
     const zombieReviewerPasses = db
       ? summarizeZombieReviewerPasses(db, { nowMs, config })
       : { thresholdMs: config.runningReviewerPassMaxAgeMs, rows: [] };
+    const stuckReviewLoops = db
+      ? summarizeStuckRetryLoops(db, { cap: INFRA_AUTO_RECOVER_CAP })
+      : { cap: INFRA_AUTO_RECOVER_CAP, prs: [], byFailureClass: [], dominantFailureClass: null };
     const roundBudget = summarizeRoundBudgetAnomalies(followUpQueues.jobs);
     const ttm = db
       ? evaluateTtmFromDb(db, {
@@ -1869,6 +1972,7 @@ function collectReviewPipelineHealth({
       mergeStalls,
       amaCloserLeases,
       zombieReviewerPasses,
+      stuckReviewLoops,
       roundBudget,
       ttm,
       launchd,

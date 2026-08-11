@@ -1,17 +1,7 @@
 // Reviewer operator alerts.
 //
-// Extracted from reviewer.mjs under the ARC-10 decomposition gate, which caps
-// that file's line count and ratchets down, never up. These two paths are
-// self-contained -- their only dependency is the shared alert bus -- so they are
-// a natural seam.
-//
-// Both used to POST a hardcoded http://127.0.0.1:8787/hooks/wake with no auth
-// header. Nothing listens on 8787; the supported bus is DEFAULT_ALERT_BUS_URL
-// (:18799) in alert-delivery.mjs, which is config-resolved and supplies the
-// hooks token. Every page therefore failed silently -- 136 of them by
-// 2026-08-11 -- while the gemini reviewer lane was dark. deliverAlert queues to
-// the durable sink and schedules a drain, so a briefly unreachable bus no longer
-// drops the page.
+// Extracted from reviewer.mjs under the ARC-10 decomposition gate. These paths
+// are self-contained: their only dependency is the shared alert bus.
 
 import { deliverAlert } from './alert-delivery.mjs';
 

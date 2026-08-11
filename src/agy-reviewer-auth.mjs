@@ -132,6 +132,7 @@ async function safeExecFile(command, args, { env, timeout = 0, maxBuffer = DEFAU
 
 const AGY_KEYCHAIN_SERVICE = 'gemini';
 const AGY_KEYCHAIN_ACCOUNT = 'antigravity';
+const DEFAULT_AGY_KEYCHAIN_RELATIVE_PATH = 'Library/Keychains/login.keychain-db';
 const DEFAULT_AGY_AUTH_PROBE_TIMEOUT_MS = 5_000;
 const DEFAULT_AGY_AUTH_PROBE_MAX_ATTEMPTS = 3;
 const DEFAULT_AGY_AUTH_PROBE_RETRY_BACKOFF_MS = 250;
@@ -144,6 +145,33 @@ const AGY_TRANSIENT_REMEDIATION =
   'Antigravity agy auth preflight hit a transient agy transport failure. Retry after the local agy/network path is healthy; '
   + 'if this persists, run `agy models` under the same launchd user environment and inspect stderr.';
 const AGY_AUTH_SUCCESS_CACHE = new Map();
+
+// Name the keychain explicitly instead of relying on the caller's default search
+// list. `security find-generic-password` with no keychain operand searches the
+// search list of the calling *security session*; under the system bootstrap
+// namespace (a root-launched watcher running as the airlock user) the per-user
+// login keychain is not in that list, so the item resolved fine from a login
+// shell and missed under launchd. That produced a permanent `keychain-missing`
+// verdict for the gemini lane even though the item existed and was readable.
+// `modules/worker-pool/bin/agy-keychain-bootstrap-start` already writes and
+// re-reads this item with an explicit `AGY_KEYCHAIN_PATH`; this keeps the reader
+// on the same contract as the writer.
+function resolveAgyKeychainPath(env = process.env) {
+  const explicit = String(env?.AGY_KEYCHAIN_PATH ?? '').trim();
+  if (explicit) return explicit;
+  const home = String(env?.HOME ?? '').trim();
+  if (!home) return '';
+  return `${home.replace(/\/+$/, '')}/${DEFAULT_AGY_KEYCHAIN_RELATIVE_PATH}`;
+}
+
+function agyKeychainProbeArgs(env = process.env) {
+  const args = ['find-generic-password', '-s', AGY_KEYCHAIN_SERVICE, '-a', AGY_KEYCHAIN_ACCOUNT];
+  // Fall back to the session default search list when HOME is unset rather than
+  // passing an empty operand, which `security` would reject outright.
+  const keychainPath = resolveAgyKeychainPath(env);
+  if (keychainPath) args.push(keychainPath);
+  return args;
+}
 
 function resolveAgyAuthProbeTimeoutMs(env = process.env) {
   const parsed = Number.parseInt(env.AGY_AUTH_PROBE_TIMEOUT_MS || '', 10);
@@ -247,6 +275,9 @@ function agyAuthSuccessCacheKey({ agyCli, env, securityCli, timeoutMs }) {
     securityCli,
     timeoutMs,
     home: env?.HOME || '',
+    // Keep the resolved keychain path in the key so an AGY_KEYCHAIN_PATH override
+    // cannot be masked by a success cached against a different keychain.
+    keychainPath: resolveAgyKeychainPath(env),
     logname: env?.LOGNAME || '',
     path: env?.PATH || '',
     user: env?.USER || '',
@@ -265,7 +296,7 @@ async function checkAgyReviewerAuthOnce({
   securityCli = 'security',
 } = {}) {
   try {
-    await runProbe(securityCli, ['find-generic-password', '-s', AGY_KEYCHAIN_SERVICE, '-a', AGY_KEYCHAIN_ACCOUNT], {
+    await runProbe(securityCli, agyKeychainProbeArgs(env), {
       execFileImpl,
       timeout: timeoutMs,
       env,
@@ -360,6 +391,9 @@ export {
   AGY_KEYCHAIN_REMEDIATION,
   AGY_TRANSIENT_REMEDIATION,
   DEFAULT_AGY_AUTH_PROBE_TIMEOUT_MS,
+  DEFAULT_AGY_KEYCHAIN_RELATIVE_PATH,
+  agyKeychainProbeArgs,
+  resolveAgyKeychainPath,
   checkAgyReviewerAuth,
   clearAgyReviewerAuthCache,
   resolveAgyAuthProbeMaxAttempts,

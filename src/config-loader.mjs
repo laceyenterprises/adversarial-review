@@ -427,6 +427,12 @@ function schemaV1() {
                 __type: TYPE_BOOL,
                 __default: false,
               },
+              baseline_worker_boot_probe_interval_seconds: {
+                __type: TYPE_INT,
+                __default: 1800,
+                __min: 0,
+                __max: 86400,
+              },
             },
           },
         },
@@ -1802,9 +1808,11 @@ function schemaV1() {
       // worker_pool.dispatch.codex_exec_mode,
       // worker_pool.dispatch.fleet_launch_health.*,
       // worker_pool.dispatch.goal_lineage.*,
-      // worker_pool.dispatch.substrate.*, and
+      // worker_pool.dispatch.op_hammer_alerts.*,
+      // worker_pool.dispatch.substrate.*,
       // worker_pool.hardening_ledger.*,
-      // worker_pool.memory.dynamic.*, and worker_pool.secrets_bus.* —
+      // worker_pool.memory.dynamic.*, worker_pool.secrets.op_read_cache.*,
+      // and worker_pool.secrets_bus.* —
       // Python-owned (canonical schema at platform/agent-os-config).
       // PARTIAL mirror, same rationale as the
       // sentinel block below: this Node reader does not consume the values, but
@@ -1960,6 +1968,43 @@ function schemaV1() {
                   },
                 },
               },
+              op_hammer_alerts: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __keys: {
+                  enabled: { __type: TYPE_BOOL, __default: true },
+                  read_threshold: {
+                    __type: TYPE_INT,
+                    __default: 40,
+                    __min: 1,
+                    __max: 1000000,
+                  },
+                  rate_limit_threshold: {
+                    __type: TYPE_INT,
+                    __default: 10,
+                    __min: 1,
+                    __max: 1000000,
+                  },
+                  window_seconds: {
+                    __type: TYPE_INT,
+                    __default: 3600,
+                    __min: 60,
+                    __max: 86400,
+                  },
+                  cooldown_seconds: {
+                    __type: TYPE_INT,
+                    __default: 3600,
+                    __min: 60,
+                    __max: 86400,
+                  },
+                  scan_interval_seconds: {
+                    __type: TYPE_INT,
+                    __default: 300,
+                    __min: 60,
+                    __max: 86400,
+                  },
+                },
+              },
             },
           },
           memory: {
@@ -2033,6 +2078,19 @@ function schemaV1() {
                 __default: 604800,
                 __min: 0,
                 __max: 2592000,
+              },
+              op_read_cache: {
+                __type: TYPE_DICT,
+                __strict: true,
+                __default: {},
+                __keys: {
+                  canary_live_read_budget_percent: {
+                    __type: TYPE_INT,
+                    __default: 25,
+                    __min: 1,
+                    __max: 100,
+                  },
+                },
               },
             },
           },

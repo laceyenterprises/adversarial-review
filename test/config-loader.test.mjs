@@ -1145,6 +1145,36 @@ test('top-level config.yaml accepts mirrored worker_pool.dispatch.fleet_launch_h
   }
 });
 
+test('top-level config.yaml accepts mirrored worker_pool.dispatch.op_hammer_alerts keys', () => {
+  // OP-HAMMER-01 is Python-owned, but checked-in keys may live in shared
+  // config.yaml and must parse under the watcher strict schema.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        dispatch:
+          op_hammer_alerts:
+            enabled: true
+            read_threshold: 41
+            rate_limit_threshold: 11
+            window_seconds: 7200
+            cooldown_seconds: 900
+            scan_interval_seconds: 120
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.dispatch.op_hammer_alerts.enabled'), true);
+    assert.equal(cfg.get('worker_pool.dispatch.op_hammer_alerts.read_threshold'), 41);
+    assert.equal(cfg.get('worker_pool.dispatch.op_hammer_alerts.rate_limit_threshold'), 11);
+    assert.equal(cfg.get('worker_pool.dispatch.op_hammer_alerts.window_seconds'), 7200);
+    assert.equal(cfg.get('worker_pool.dispatch.op_hammer_alerts.cooldown_seconds'), 900);
+    assert.equal(cfg.get('worker_pool.dispatch.op_hammer_alerts.scan_interval_seconds'), 120);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('top-level config.yaml accepts mirrored worker_pool.dispatch.substrate keys', () => {
   // Substrate distress knobs are Python-owned, but these checked-in keys live
   // in shared config.yaml and must parse under the watcher strict schema.
@@ -1252,6 +1282,26 @@ test('top-level config.yaml accepts mirrored worker_pool.secrets.prewarm keys', 
       'alert-delivery telegram bot token',
     ]);
     assert.equal(defaultCfg.get('worker_pool.secrets.availability_critical_max_stale_seconds'), 604800);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('top-level config.yaml accepts mirrored worker_pool.secrets op-read canary budget key', () => {
+  // The op-read cache live-read priority budget is Python-owned, but shared
+  // config.yaml must parse under the watcher strict schema.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        secrets:
+          op_read_cache:
+            canary_live_read_budget_percent: 30
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.secrets.op_read_cache.canary_live_read_budget_percent'), 30);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -1790,6 +1840,7 @@ test('post-merge activation rollout controls load through strict Node schema and
           enabled: true
           enforce: false
           dispatch_on_fail: false
+          baseline_worker_boot_probe_interval_seconds: 1200
     `);
     const cfg = loadConfig({
       topPath: top,
@@ -1802,6 +1853,7 @@ test('post-merge activation rollout controls load through strict Node schema and
     assert.equal(cfg.get('deploy.post_merge_activation.enabled'), false);
     assert.equal(cfg.get('deploy.post_merge_activation.enforce'), true);
     assert.equal(cfg.get('deploy.post_merge_activation.dispatch_on_fail'), true);
+    assert.equal(cfg.get('deploy.post_merge_activation.baseline_worker_boot_probe_interval_seconds'), 1200);
     assert.equal(
       cfg.resolutionTrace('deploy.post_merge_activation.enforce').at(-1).source,
       'env:AGENT_OS_POST_MERGE_ACTIVATION_ENFORCE',

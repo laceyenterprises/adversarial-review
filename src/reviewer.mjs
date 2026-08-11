@@ -169,6 +169,26 @@ function resolveReviewerIdentityForBotTokenEnv(botTokenEnv, fallbackIdentity = n
   return REVIEWER_IDENTITY_BY_BOT_TOKEN_ENV[botTokenEnv] || fallbackIdentity || botTokenEnv;
 }
 
+// Pin every `gh` invocation in the reviewer process to the reviewer's OWN
+// identity token (the value at env[botTokenEnv]) by setting GH_TOKEN/GITHUB_TOKEN.
+// The gh env is built by github-api's buildGhEnv(), which only forwards
+// GH_TOKEN/GITHUB_TOKEN from the environment; a daemon-spawned reviewer has
+// neither set (only botTokenEnv), so gh reaches for its keychain-stored PAT —
+// inaccessible in the system-domain daemon security session — and the PR-context
+// fetch fails, mis-classified as `oauth-broken`, stalling all reviews (SEV0
+// 2026-08-11). Pinning both here also stops the fetch from silently using the
+// watcher's merge-agent GITHUB_TOKEN: only the reviewer's own bot identity drives
+// gh. Returns whether a token was found so the caller can warn on an empty env.
+function pinReviewerGhIdentity(env, botTokenEnv) {
+  const token = env && botTokenEnv ? env[botTokenEnv] : undefined;
+  if (typeof token === 'string' && token.length > 0) {
+    env.GH_TOKEN = token;
+    env.GITHUB_TOKEN = token;
+    return { pinned: true, botTokenEnv };
+  }
+  return { pinned: false, botTokenEnv };
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1993,6 +2013,17 @@ async function main() {
     process.exit(1);
   }
 
+  // Drive every `gh` call in this reviewer from the reviewer's own bot identity
+  // (botTokenEnv), so the PR-context fetch never falls back to the keychain PAT
+  // that a daemon-spawned reviewer cannot read. See pinReviewerGhIdentity.
+  if (!pinReviewerGhIdentity(process.env, botTokenEnv).pinned) {
+    console.error(
+      `[reviewer] WARN: ${botTokenEnv} is unset in the reviewer environment; ` +
+      'gh calls will fall back to ambient auth (keychain), which fails for ' +
+      'daemon-spawned reviewers. Check reviewer-broker-refresh token resolution.'
+    );
+  }
+
   // The reviewer treats the final allowed review pass as a lenient
   // verdict round (only blocking on data corruption / secret leakage /
   // security regression / broken external contract). Computed from the
@@ -2531,6 +2562,7 @@ export {
   resolveReviewerTimeoutMs,
   isFinalReviewRound,
   detectSpecTouchViolations,
+  pinReviewerGhIdentity,
   clearPendingReviewsForSelf,
   postGitHubReviewWithCapture,
   ADVERSARIAL_PROMPT,

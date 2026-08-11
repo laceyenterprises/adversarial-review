@@ -82,6 +82,7 @@ const {
   AGY_KEYCHAIN_SERVICE,
   AGY_KEYCHAIN_REMEDIATION,
   isRetryableGeminiSubprocessError,
+  alertClioOAuthFailure,
   alertClioOversizedAgyFailure,
   spawnGeminiReview,
   spawnAgyReview,
@@ -3336,8 +3337,16 @@ test('extractMarkdownIssueList keeps indented detail bullets with their parent i
   assert.match(issues[1], /Second issue/);
 });
 
-test('oversized agy alert retries transient curl failures before succeeding', async () => {
-  const calls = [];
+// Regression: both reviewer alerts used to curl a hardcoded
+// http://127.0.0.1:8787/hooks/wake with no auth header. Nothing listens on 8787
+// -- the supported bus is DEFAULT_ALERT_BUS_URL (:18799), config-resolved -- so
+// every page failed silently (136 by 2026-08-11) while the gemini reviewer lane
+// was dark. The reviewer-stopped page is the signal that says "reviews are
+// dark", so it must go through the durable alert bus, not fire-and-forget curl.
+// Retry/backoff now belongs to deliverAlert's queue+drain, not a local loop.
+
+test('oversized agy alert goes through the alert bus, never a hardcoded hook', async () => {
+  const delivered = [];
   await alertClioOversizedAgyFailure({
     repo: 'laceyenterprises/adversarial-review',
     prNumber: 506,
@@ -3345,29 +3354,54 @@ test('oversized agy alert retries transient curl failures before succeeding', as
     maxBytes: 262_144,
     reason: 'chunking-disabled',
   }, {
-    retryDelaysMs: [0, 0],
-    sleepImpl: async () => {},
-    execFileImpl: async (command, args, options) => {
-      calls.push({ command, args, options });
-      if (calls.length === 1) {
-        const err = new Error('curl: (22) The requested URL returned error: 503');
-        err.code = 22;
-        throw err;
-      }
-      if (calls.length === 2) {
-        const err = new Error('spawn killed after timeout');
-        err.killed = true;
-        err.signal = 'SIGTERM';
-        throw err;
-      }
-      return { stdout: '', stderr: '' };
+    deliverAlertImpl: async (text, opts) => {
+      delivered.push({ text, opts });
+      return { status: 'queued', queued: true, id: 'alert_1' };
     },
   });
 
-  assert.equal(calls.length, 3);
-  assert.equal(calls[0].command, 'curl');
-  assert.deepEqual(calls[0].args.slice(0, 4), ['-sS', '-f', '--max-time', '10']);
-  assert.equal(calls[0].options.timeout, undefined);
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].opts.event, 'reviewer.oversized_agy_prompt');
+  assert.equal(delivered[0].opts.payload.prNumber, 506);
+  assert.equal(delivered[0].opts.payload.promptBytes, 300_000);
+  assert.doesNotMatch(delivered[0].text, /8787/, 'alert text must not carry the dead hook');
+});
+
+test('reviewer-stopped OAuth alert goes through the alert bus with a classified event', async () => {
+  const delivered = [];
+  const result = await alertClioOAuthFailure(
+    'gemini',
+    'laceyenterprises/agent-os',
+    5251,
+    'Antigravity agy auth failed (keychain-missing)',
+    {
+      deliverAlertImpl: async (text, opts) => {
+        delivered.push({ text, opts });
+        return { status: 'queued', queued: true, id: 'alert_2' };
+      },
+    },
+  );
+
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].opts.event, 'reviewer.oauth_unavailable');
+  assert.equal(delivered[0].opts.payload.model, 'gemini');
+  assert.equal(delivered[0].opts.payload.prNumber, 5251);
+  assert.match(delivered[0].text, /Adversarial reviewer STOPPED/);
+  assert.equal(result.id, 'alert_2');
+});
+
+test('a failing alert bus does not throw out of the reviewer alert paths', async () => {
+  // The alert is best-effort with respect to the reviewer's control flow: a bus
+  // failure must not mask the underlying auth error that triggered the page.
+  const boom = async () => { throw new Error('bus unreachable'); };
+  assert.equal(await alertClioOAuthFailure('gemini', 'r', 1, 'why', { deliverAlertImpl: boom }), null);
+  assert.equal(
+    await alertClioOversizedAgyFailure(
+      { repo: 'r', prNumber: 1, promptBytes: 1, maxBytes: 1, reason: 'x' },
+      { deliverAlertImpl: boom },
+    ),
+    null,
+  );
 });
 
 test('oversized agy fallback alerts when cross-model route and chunking are unavailable', async () => {

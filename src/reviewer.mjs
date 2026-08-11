@@ -89,8 +89,11 @@ import {
 } from './additive-only-scope.mjs';
 import { resolveGeminiRuntime } from './role-config.mjs';
 import {
+  alertClioOAuthFailure,
+  alertClioOversizedAgyFailure,
+} from './reviewer-alerts.mjs';
+import {
   REVIEW_POST_RETRY_DELAYS_MS,
-  WAKE_HOOK_RETRY_DELAYS_MS,
   REVIEW_FAMILY_BY_BUILDER_CLASS,
   normalizeBuilderTag,
   parseDiffFiles,
@@ -103,7 +106,6 @@ import {
   resolveGeminiRuntimeForReview,
   resolveReviewerMetadata,
   estimateTokensFromText,
-  execFileWithTransientRetry,
   previewText,
   CLAUDE_CLI,
   CODEX_CLI,
@@ -1902,67 +1904,6 @@ async function postGitHubReviewWithCapture({
     });
   }
 }
-// ── Clio alert (OAuth failure) ───────────────────────────────────────────────
-
-/**
- * Alert Paul via Clio when OAuth credentials are unavailable.
- * Uses the OpenClaw wake hook to deliver a Telegram message.
- */
-async function alertClioOAuthFailure(model, repo, prNumber, reason) {
-  const msg = `🔐 Adversarial reviewer STOPPED — ${model} OAuth credentials unavailable.\n\nRepo: ${repo} PR #${prNumber}\nReason: ${reason}\n\nAction needed: re-authenticate ${model} (run the CLI and log in). PR review is paused until credentials are restored.`;
-  console.error(`[reviewer] ALERT: ${msg}`);
-  // Try to wake Clio via the OpenClaw hook
-  try {
-    await execFileAsync(
-      'curl',
-      [
-        '-s', '-X', 'POST',
-        'http://127.0.0.1:8787/hooks/wake',
-        '-H', 'Content-Type: application/json',
-        '-d', JSON.stringify({ message: msg }),
-      ],
-      { timeout: 10_000 }
-    );
-    console.log('[reviewer] Clio alert sent via wake hook');
-  } catch (err) {
-    console.error('[reviewer] Failed to send Clio alert:', err.message);
-    // Alert is best-effort — the error is already in watcher logs
-  }
-}
-
-async function alertClioOversizedAgyFailure({
-  repo,
-  prNumber,
-  promptBytes,
-  maxBytes,
-  reason,
-}, {
-  execFileImpl = execFileAsync,
-  retryDelaysMs = WAKE_HOOK_RETRY_DELAYS_MS,
-  sleepImpl = sleep,
-} = {}) {
-  const msg = `Adversarial reviewer oversized agy prompt could not be reviewed.\n\nRepo: ${repo} PR #${prNumber}\nPrompt bytes: ${promptBytes ?? 'unknown'}\nAgy argv budget: ${maxBytes ?? 'unknown'}\nReason: ${reason}\n\nThis is the #3074/#3122/#3124 no-review prevention guard; operator action is required because both cross-model routing and chunk fallback were unavailable.`;
-  console.error(`[reviewer] ALERT: ${msg}`);
-  try {
-    await execFileWithTransientRetry(
-      'curl',
-      [
-        '-sS', '-f', '--max-time', '10', '-X', 'POST',
-        'http://127.0.0.1:8787/hooks/wake',
-        '-H', 'Content-Type: application/json',
-        '-d', JSON.stringify({ message: msg }),
-      ],
-      {
-        execFileImpl,
-        retryDelaysMs,
-        sleepImpl,
-      }
-    );
-    console.log('[reviewer] oversized agy prompt alert sent via wake hook');
-  } catch (err) {
-    console.error('[reviewer] Failed to send oversized agy prompt alert:', err.message);
-  }
-}
 
 // ── Linear integration (LAC-13) ──────────────────────────────────────────────
 const linearTriage = createLinearTriageAdapter({
@@ -2512,6 +2453,7 @@ const __test__ = {
   // Artifact emission, GitHub posting, local-shadow review, and verdict-mode
   // helpers that remain in reviewer.mjs.
   ADVISORY_ONLY_REVIEW_LABEL,
+  alertClioOAuthFailure,
   alertClioOversizedAgyFailure,
   buildReviewCommentBody,
   buildReviewCommentHeader,

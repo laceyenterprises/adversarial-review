@@ -18,6 +18,17 @@ import {
   runRuntimeSettleSmoke,
 } from '../src/runtime-settle-smoke-cli.mjs';
 
+
+// `readyz` measures the settle-smoke artifact against a 7-day freshness window
+// (SETTLE_SMOKE_FRESHNESS_WINDOW_MS). This test drives the CLI with the real
+// clock, so an absolute stamp expires and fails the suite on a date rather than
+// on a change. Stamp it relative to now instead. Tests in this file that pin a
+// frozen clock keep their absolute stamps -- they cannot expire.
+const SEEDED_SETTLE_SMOKE_LAG_MS = 4 * 60 * 1000;
+
+function freshSettleSmokeStamp(lagMs = SEEDED_SETTLE_SMOKE_LAG_MS) {
+  return new Date(Date.now() - lagMs).toISOString();
+}
 function tmpRoot() {
   return mkdtempSync(join(tmpdir(), 'runtime-status-cli-'));
 }
@@ -478,7 +489,7 @@ test('runtime readyz exits 0 only when all readiness signals are green', async (
     });
     writeSettleSmokeResult(rootDir, 'agent-runtime', {
       status: 'pass',
-      at: '2026-08-04T10:00:00.000Z',
+      at: freshSettleSmokeStamp(),
       dispatched: true,
       settled: true,
       attributed: true,

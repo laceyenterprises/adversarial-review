@@ -2023,6 +2023,17 @@ function schemaV1() {
                   },
                 },
               },
+              availability_critical_purposes: {
+                __type: TYPE_LIST,
+                __default: ['alert-delivery telegram bot token'],
+                __item: { __type: TYPE_STRING },
+              },
+              availability_critical_max_stale_seconds: {
+                __type: TYPE_INT,
+                __default: 604800,
+                __min: 0,
+                __max: 2592000,
+              },
             },
           },
           secrets_bus: {

@@ -1209,7 +1209,7 @@ test('top-level config.yaml accepts mirrored worker_pool.comms.responder keys', 
 });
 
 test('top-level config.yaml accepts mirrored worker_pool.secrets.prewarm keys', () => {
-  // SSR-01 is Python-owned, but checked-in prewarm keys may live in shared
+  // SSR-01/ALERT-CACHE-01 are Python-owned, but checked-in secrets keys may live in shared
   // config.yaml and must parse under the watcher strict schema.
   const tmp = freshTmp();
   try {
@@ -1225,6 +1225,10 @@ test('top-level config.yaml accepts mirrored worker_pool.secrets.prewarm keys', 
               - worker_class: service-launcher
                 refs:
                   - op://Cliovault/agent-gateway/token
+          availability_critical_purposes:
+            - alert-delivery telegram bot token
+            - alert-delivery gateway delivery token
+          availability_critical_max_stale_seconds: 3600
     `);
     const cfg = loadConfig({ topPath: top, env: {} });
     assert.equal(cfg.get('worker_pool.secrets.prewarm.enabled'), true);
@@ -1235,6 +1239,19 @@ test('top-level config.yaml accepts mirrored worker_pool.secrets.prewarm keys', 
         refs: ['op://Cliovault/agent-gateway/token'],
       },
     ]);
+    assert.deepEqual(cfg.get('worker_pool.secrets.availability_critical_purposes'), [
+      'alert-delivery telegram bot token',
+      'alert-delivery gateway delivery token',
+    ]);
+    assert.equal(cfg.get('worker_pool.secrets.availability_critical_max_stale_seconds'), 3600);
+
+    const defaults = join(tmp, 'config-defaults.yaml');
+    writeFile(defaults, 'version: 1\nworker_pool:\n  secrets: {}\n');
+    const defaultCfg = loadConfig({ topPath: defaults, env: {} });
+    assert.deepEqual(defaultCfg.get('worker_pool.secrets.availability_critical_purposes'), [
+      'alert-delivery telegram bot token',
+    ]);
+    assert.equal(defaultCfg.get('worker_pool.secrets.availability_critical_max_stale_seconds'), 604800);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

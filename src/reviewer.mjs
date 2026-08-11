@@ -88,9 +88,9 @@ import {
   reviewBodyHasScopeViolationFinding,
 } from './additive-only-scope.mjs';
 import { resolveGeminiRuntime } from './role-config.mjs';
+import { deliverAlert } from './alert-delivery.mjs';
 import {
   REVIEW_POST_RETRY_DELAYS_MS,
-  WAKE_HOOK_RETRY_DELAYS_MS,
   REVIEW_FAMILY_BY_BUILDER_CLASS,
   normalizeBuilderTag,
   parseDiffFiles,
@@ -103,7 +103,6 @@ import {
   resolveGeminiRuntimeForReview,
   resolveReviewerMetadata,
   estimateTokensFromText,
-  execFileWithTransientRetry,
   previewText,
   CLAUDE_CLI,
   CODEX_CLI,
@@ -1905,28 +1904,33 @@ async function postGitHubReviewWithCapture({
 // ── Clio alert (OAuth failure) ───────────────────────────────────────────────
 
 /**
- * Alert Paul via Clio when OAuth credentials are unavailable.
- * Uses the OpenClaw wake hook to deliver a Telegram message.
+ * Alert the operator when OAuth credentials are unavailable.
+ *
+ * Routes through the shared alert-delivery bus (`deliverAlert`) rather than
+ * curling a hook URL directly. This used to POST a hardcoded
+ * `http://127.0.0.1:8787/hooks/wake` with no auth header. Nothing listens on
+ * 8787 — the supported bus is `DEFAULT_ALERT_BUS_URL` (:18799) and is
+ * config-resolved — so every one of these pages failed silently for weeks
+ * (136 of them by 2026-08-11) while the gemini reviewer lane was down. The
+ * reviewer-stopped page is the one signal that says "reviews are dark", so it
+ * must not be best-effort fire-and-forget: deliverAlert queues to the durable
+ * sink and schedules a drain, so it survives a bus that is briefly unreachable.
  */
-async function alertClioOAuthFailure(model, repo, prNumber, reason) {
+async function alertClioOAuthFailure(model, repo, prNumber, reason, {
+  deliverAlertImpl = deliverAlert,
+} = {}) {
   const msg = `🔐 Adversarial reviewer STOPPED — ${model} OAuth credentials unavailable.\n\nRepo: ${repo} PR #${prNumber}\nReason: ${reason}\n\nAction needed: re-authenticate ${model} (run the CLI and log in). PR review is paused until credentials are restored.`;
   console.error(`[reviewer] ALERT: ${msg}`);
-  // Try to wake Clio via the OpenClaw hook
   try {
-    await execFileAsync(
-      'curl',
-      [
-        '-s', '-X', 'POST',
-        'http://127.0.0.1:8787/hooks/wake',
-        '-H', 'Content-Type: application/json',
-        '-d', JSON.stringify({ message: msg }),
-      ],
-      { timeout: 10_000 }
-    );
-    console.log('[reviewer] Clio alert sent via wake hook');
+    const result = await deliverAlertImpl(msg, {
+      event: 'reviewer.oauth_unavailable',
+      payload: { model, repo, prNumber, reason },
+    });
+    console.log(`[reviewer] reviewer-stopped alert queued via alert bus (id=${result?.id ?? 'unknown'})`);
+    return result;
   } catch (err) {
-    console.error('[reviewer] Failed to send Clio alert:', err.message);
-    // Alert is best-effort — the error is already in watcher logs
+    console.error('[reviewer] Failed to queue reviewer-stopped alert:', err.message);
+    return null;
   }
 }
 
@@ -1937,30 +1941,23 @@ async function alertClioOversizedAgyFailure({
   maxBytes,
   reason,
 }, {
-  execFileImpl = execFileAsync,
-  retryDelaysMs = WAKE_HOOK_RETRY_DELAYS_MS,
-  sleepImpl = sleep,
+  deliverAlertImpl = deliverAlert,
 } = {}) {
   const msg = `Adversarial reviewer oversized agy prompt could not be reviewed.\n\nRepo: ${repo} PR #${prNumber}\nPrompt bytes: ${promptBytes ?? 'unknown'}\nAgy argv budget: ${maxBytes ?? 'unknown'}\nReason: ${reason}\n\nThis is the #3074/#3122/#3124 no-review prevention guard; operator action is required because both cross-model routing and chunk fallback were unavailable.`;
   console.error(`[reviewer] ALERT: ${msg}`);
   try {
-    await execFileWithTransientRetry(
-      'curl',
-      [
-        '-sS', '-f', '--max-time', '10', '-X', 'POST',
-        'http://127.0.0.1:8787/hooks/wake',
-        '-H', 'Content-Type: application/json',
-        '-d', JSON.stringify({ message: msg }),
-      ],
-      {
-        execFileImpl,
-        retryDelaysMs,
-        sleepImpl,
-      }
-    );
-    console.log('[reviewer] oversized agy prompt alert sent via wake hook');
+    // Same dead-hook fix as alertClioOAuthFailure above: this posted to the
+    // hardcoded :8787 hook. deliverAlert supplies the config-resolved bus URL
+    // and hooks token, and its queue+drain replaces the local curl retry loop.
+    const result = await deliverAlertImpl(msg, {
+      event: 'reviewer.oversized_agy_prompt',
+      payload: { repo, prNumber, promptBytes, maxBytes, reason },
+    });
+    console.log(`[reviewer] oversized agy prompt alert queued via alert bus (id=${result?.id ?? 'unknown'})`);
+    return result;
   } catch (err) {
-    console.error('[reviewer] Failed to send oversized agy prompt alert:', err.message);
+    console.error('[reviewer] Failed to queue oversized agy prompt alert:', err.message);
+    return null;
   }
 }
 
@@ -2512,6 +2509,7 @@ const __test__ = {
   // Artifact emission, GitHub posting, local-shadow review, and verdict-mode
   // helpers that remain in reviewer.mjs.
   ADVISORY_ONLY_REVIEW_LABEL,
+  alertClioOAuthFailure,
   alertClioOversizedAgyFailure,
   buildReviewCommentBody,
   buildReviewCommentHeader,

@@ -65,7 +65,20 @@ function createPassDb(rootDir, { endedAt = null, workerRunId = 'wr_123' } = {}) 
   db.close();
 }
 
-function seedHealthyRuntime(rootDir, now = '2026-08-04T10:00:00.000Z') {
+// Stamp the settle-smoke fixture relative to the real clock. An absolute stamp
+// silently expires: SETTLE_SMOKE_FRESHNESS_WINDOW_MS is 7 days, so a fixture
+// pinned to 2026-08-04T10:00:00.000Z aged out at 2026-08-11T10:00:00.000Z and
+// turned every test here that does not inject a frozen clock red -- repo-wide,
+// with no code change and no failing commit to bisect to. Keeping the stamp a
+// few minutes behind "now" mirrors what the frozen-clock tests assert (they pin
+// now to the seeded stamp + 4 minutes) while staying inside the window forever.
+const SEEDED_SETTLE_SMOKE_LAG_MS = 4 * 60 * 1000;
+
+function freshSettleSmokeStamp(lagMs = SEEDED_SETTLE_SMOKE_LAG_MS) {
+  return new Date(Date.now() - lagMs).toISOString();
+}
+
+function seedHealthyRuntime(rootDir, now = freshSettleSmokeStamp()) {
   writeFileSync(
     join(rootDir, 'data', 'runtime-status-snapshot.json'),
     JSON.stringify({
@@ -282,7 +295,7 @@ test('readyz router signal fails when snapshot is missing or dispatch_status wir
   try {
     writeSettleSmokeResult(rootDir, 'agent-runtime', {
       status: 'pass',
-      at: '2026-08-04T10:00:00.000Z',
+      at: freshSettleSmokeStamp(),
       dispatched: true,
       settled: true,
       attributed: true,
@@ -337,7 +350,7 @@ test('readyz settle canary signal requires the real settle-smoke artifact and at
 
     writeSettleSmokeResult(rootDir, 'agent-runtime', {
       status: 'fail',
-      at: '2026-08-04T10:00:00.000Z',
+      at: freshSettleSmokeStamp(),
       dispatched: true,
       settled: false,
       attributed: false,
@@ -354,7 +367,7 @@ test('readyz settle canary signal requires the real settle-smoke artifact and at
 
     writeSettleSmokeResult(rootDir, 'agent-runtime', {
       status: 'pass',
-      at: '2026-08-04T10:00:00.000Z',
+      at: freshSettleSmokeStamp(),
       dispatched: true,
       settled: true,
       attributed: true,

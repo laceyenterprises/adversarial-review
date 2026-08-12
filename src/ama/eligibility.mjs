@@ -476,6 +476,19 @@ function verifiedCommitHasNonEmptyDiff(verifiedCommit) {
   return Array.isArray(verifiedCommit.changedFiles) && verifiedCommit.changedFiles.length > 0;
 }
 
+function verifiedHamCommitIdentityMatches(verifiedCommit) {
+  if (!verifiedCommit || typeof verifiedCommit !== 'object') return false;
+  const committer = typeof verifiedCommit.committer === 'object'
+    ? verifiedCommit.committer?.login
+    : verifiedCommit.committer;
+  const author = typeof verifiedCommit.author === 'object'
+    ? verifiedCommit.author?.login
+    : verifiedCommit.author;
+  if (committer) return hamAuditCommentAuthorMatches(committer);
+  if (author) return hamAuditCommentAuthorMatches(author);
+  return true;
+}
+
 function validateRebaseReviewCoverageEvidence(
   evidence,
   {
@@ -696,6 +709,7 @@ function validateHamTerminalRemediationEvidence(
       && verifiedCommitSha === String(currentHead || '')
       && shaClaimMatches(commitSha, verifiedCommitSha),
     parent: directReviewedParent || reviewedHeadTrailerCoversRebase,
+    commitIdentity: verifiedHamCommitIdentityMatches(verifiedCommit),
     nonEmptyCommit: verifiedCommitHasNonEmptyDiff(verifiedCommit),
     auditComment:
       claimedAuditBody !== ''
@@ -717,6 +731,7 @@ function validateHamTerminalRemediationEvidence(
     && checks.ticket
     && checks.head
     && checks.parent
+    && checks.commitIdentity
     && checks.nonEmptyCommit
     && checks.auditComment
     && checks.auditCommentAuthor

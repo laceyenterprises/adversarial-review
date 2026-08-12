@@ -75,6 +75,66 @@ export function isTerminalCloserCommitIdentity(commit = {}) {
   return { suppressed: false, reason: null };
 }
 
+export function normalizeVerifiedCloserCommit(commitJson = {}) {
+  const sha = String(commitJson?.sha || commitJson?.oid || '').trim();
+  const parentSha = String(
+    commitJson?.parents?.[0]?.sha
+      || commitJson?.parents?.nodes?.[0]?.oid
+      || commitJson?.parentSha
+      || '',
+  ).trim();
+  const message = commitJson?.commit?.message || commitJson?.message || '';
+  const changedFiles = Array.isArray(commitJson?.files)
+    ? commitJson.files
+      .map((file) => String(file?.filename || file?.path || '').trim())
+      .filter(Boolean)
+    : [];
+  return {
+    sha,
+    parentSha,
+    message,
+    trailers: parseCommitTrailers(message),
+    author: commitJson?.author?.login || commitJson?.commit?.author?.login || null,
+    committer: commitJson?.committer?.login || commitJson?.commit?.committer?.login || null,
+    changedFiles,
+  };
+}
+
+export async function fetchHeadCloserVerifiedCommit({
+  repoPath,
+  prNumber,
+  headSha,
+  execFileImpl = execFileAsync,
+  execGhWithRetryImpl = execGhWithRetry,
+  logger = console,
+  retryBackoffMs = [250, 1000],
+  sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
+  const sha = String(headSha || '').trim();
+  if (!repoPath || !sha) return null;
+  const retryDelays = Array.isArray(retryBackoffMs) ? retryBackoffMs : [];
+  try {
+    const { stdout } = await execGhWithRetryImpl({
+      execFileImpl,
+      args: [
+        'api',
+        `repos/${repoPath}/commits/${sha}`,
+      ],
+      retries: retryDelays.length,
+      backoffMs: Number(retryDelays[0]) || 500,
+      sleep: sleepImpl,
+    });
+    const parsed = JSON.parse(String(stdout || '{}'));
+    return normalizeVerifiedCloserCommit(parsed);
+  } catch (err) {
+    logger?.warn?.(
+      `[watcher] closer commit verification fetch failed for ${repoPath}#${prNumber} ` +
+        `head=${sha.slice(0, 12)}; failing closed: ${err?.message || err}`
+    );
+    throw err;
+  }
+}
+
 export async function getHeadCloserCommitSuppression({
   repoPath,
   prNumber,

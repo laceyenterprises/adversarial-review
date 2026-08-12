@@ -22,8 +22,8 @@ import {
   mergeAgentDispatchEnvForAction,
 } from './ama/coexistence.mjs';
 import { DAEMON_MERGE_DISPOSITION, isDaemonMergeReviewAllowed } from './ama/daemon-merge.mjs';
-import { maybeDispatchAmaCloser, namedAmaNoDispatchReason } from './ama/dispatch-closer.mjs';
-import { SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
+import * as amaDispatchCloser from './ama/dispatch-closer.mjs';
+import { isEligibleForAmaClosure, SETTLED_SUCCESS_VERDICTS } from './ama/eligibility.mjs';
 import { evaluateMergeEligibility } from './ama/merge-eligibility.mjs';
 import { recordAmaRetain } from './ama-retain-loop-cap.mjs';
 import { amaAuthoritativeReviewerLoginsForModel } from './ama/reviewer-authority.mjs';
@@ -61,6 +61,10 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 // env-sourced keys like `enabled` are preserved) — the right posture for the
 // security-critical merge-authority read.
 const WATCHER_MERGE_AUTHORITY_CONFIG_MODULES = Object.freeze([join(ROOT, 'config.yaml')]);
+const {
+  maybeDispatchAmaCloser,
+  namedAmaNoDispatchReason,
+} = amaDispatchCloser;
 
 // Transient mergeability sampling window (GitHub returns mergeable=UNKNOWN right
 // after a push / base move while it recomputes). Re-sample so we don't park an
@@ -242,6 +246,8 @@ export async function maybeDispatchAmaClosureFor({
   resolveReviewCycleExhaustionImpl = null,
   runDaemonCleanMergeAttemptImpl = runDaemonCleanMergeAttempt,
   resolveHeadCloserCommitSuppressionImpl = null,
+  resolveHamTerminalRemediationEvidenceImpl =
+    amaDispatchCloser.resolveHamTerminalRemediationEvidence || null,
   writeAutonomousMergeDisabledAuditImpl = writeAutonomousMergeDisabledAudit,
   env = process.env,
 }) {
@@ -579,6 +585,8 @@ export async function maybeDispatchAmaClosureFor({
   }
 
   let allowStaleReviewHeadHammerResume = false;
+  let hamTerminalRemediationEvidenceOptions = null;
+  let hamTerminalRemediationValidated = false;
   const reviewedHeadIsStale = Boolean(
     reviewState.headSha &&
       currentPrHeadSha &&
@@ -610,6 +618,34 @@ export async function maybeDispatchAmaClosureFor({
             logger,
           });
       allowStaleReviewHeadHammerResume = closerCommitSuppression?.suppressed === true;
+      if (
+        allowStaleReviewHeadHammerResume &&
+        typeof resolveHamTerminalRemediationEvidenceImpl === 'function'
+      ) {
+        const resolvedHamEvidence = await resolveHamTerminalRemediationEvidenceImpl({
+          reviewState,
+          prMetadata,
+          repoPath,
+          prNumber,
+          execFileImpl: execFileAsync,
+          closerCommitSuppression,
+          logger,
+        });
+        if (
+          resolvedHamEvidence?.hamTerminalRemediation &&
+          resolvedHamEvidence?.hamTerminalRemediationGroundTruth
+        ) {
+          hamTerminalRemediationEvidenceOptions = resolvedHamEvidence;
+          const hamEligibility = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+            env,
+            hamTerminalRemediation: resolvedHamEvidence.hamTerminalRemediation,
+            hamTerminalRemediationGroundTruth:
+              resolvedHamEvidence.hamTerminalRemediationGroundTruth,
+          });
+          hamTerminalRemediationValidated =
+            hamEligibility?.trace?.hamTerminalRemediation?.ok === true;
+        }
+      }
     } catch (err) {
       if (isTransientGhError(err)) {
         throw err;
@@ -672,6 +708,7 @@ export async function maybeDispatchAmaClosureFor({
     env,
     authoritativeReviewerLogins,
     dismissStaleRequestChangesOnResolved: isDismissStaleRequestChangesOnResolvedEnabled({ env, logger }),
+    hamTerminalRemediationValidated,
   });
   if (daemonCleanMerge?.disposition && daemonCleanMerge.disposition !== DAEMON_MERGE_DISPOSITION.NOT_TAKEN) {
     const daemonHeadShort = String(gateSnapshot?.reviewedHeadSha || '').slice(0, 12);
@@ -794,6 +831,7 @@ export async function maybeDispatchAmaClosureFor({
       cfg,
       options: {
         env: process.env,
+        ...(hamTerminalRemediationEvidenceOptions || {}),
         adversarialMergeRequested: adversarialMergeRequestedEvent
           ? {
               applied: true,

@@ -325,6 +325,7 @@ export async function runDaemonCleanMergeAttempt({
   env = process.env,
   authoritativeReviewerLogins = [],
   dismissStaleRequestChangesOnResolved = true,
+  hamTerminalRemediationValidated = false,
 } = {}) {
   const base = candidate?.baseBranch;
   const validatedHead = gateSnapshot?.reviewedHeadSha || reviewState?.headSha || null;
@@ -384,13 +385,15 @@ export async function runDaemonCleanMergeAttempt({
   if (!isDaemonMergeReviewAllowed(reviewState, { strictMode })) {
     const uncleanReason =
       resolveDaemonMergeUncleanReason(reviewState, { strictMode }) || 'findings-unknown';
-    hamTerminalRemediationHead = headHasValidatedHamTerminalRemediationImpl({
-      hqRoot,
-      repo: repoPath,
-      prNumber,
-      headSha: hamAuditHead,
-      readAmaAuditEntryImpl,
-    });
+    hamTerminalRemediationHead =
+      hamTerminalRemediationValidated === true ||
+      headHasValidatedHamTerminalRemediationImpl({
+        hqRoot,
+        repo: repoPath,
+        prNumber,
+        headSha: hamAuditHead,
+        readAmaAuditEntryImpl,
+      });
     if (
       !hamTerminalRemediationHead &&
       uncleanReason === 'non-blocking-findings-present' &&

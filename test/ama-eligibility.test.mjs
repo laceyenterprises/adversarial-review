@@ -1745,6 +1745,8 @@ function hamGroundTruth({
   closedBy = 'hammer (adversarial-pipe-mode)',
   remediatedFindings = '2 addressed (1 blocking, 1 non-blocking)',
   auditAuthor = 'hammer-worker',
+  author = 'hammer-worker',
+  committer = undefined,
   changedFiles = ['src/auth.js'],
   auditBody = 'HAM audit: addressed Auth path not threaded in src/auth.js and README note is stale in README.md. Doc-currency: not applicable for changed files src/auth.js.',
 } = {}) {
@@ -1752,7 +1754,8 @@ function hamGroundTruth({
     commit: {
       sha: headSha,
       parentSha,
-      author: 'hammer-worker',
+      author,
+      ...(committer !== undefined ? { committer } : {}),
       changedFiles,
       trailers: {
         'Worker-Class': workerClass,
@@ -2514,6 +2517,169 @@ test('ham terminal remediation: forged self-attested parent and trailers do not 
   assert.equal(result.trace.hamTerminalRemediation.checks.workerClass, false);
   assert.equal(result.trace.hamTerminalRemediation.checks.parent, false);
   assert.ok(result.reasons.includes('verdict-not-settled-success'));
+});
+
+test('ham terminal remediation: external committer cannot self-certify a stale head', () => {
+  const reviewedHead = 'abc12345';
+  const currentHead = 'def67890';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      headSha: reviewedHead,
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({ headSha: currentHead, parentSha: reviewedHead }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      headSha: currentHead,
+      parentSha: reviewedHead,
+      committer: 'some-human-contributor',
+    }),
+  });
+
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.hamTerminalRemediation.ok, false);
+  assert.equal(result.trace.hamTerminalRemediation.checks.commitIdentity, false);
+  assert.ok(result.reasons.includes('stale-review-head') || result.reasons.includes('blocking-findings-present'));
+});
+
+test('ham terminal remediation: null GitHub committer falls back to verified author identity', () => {
+  const reviewedHead = 'abc12345';
+  const currentHead = 'def67890';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      headSha: reviewedHead,
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({ headSha: currentHead, parentSha: reviewedHead }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      headSha: currentHead,
+      parentSha: reviewedHead,
+      author: 'hammer-worker',
+      committer: null,
+    }),
+  });
+
+  assert.equal(result.trace.hamTerminalRemediation.checks.commitIdentity, true);
+  assert.equal(result.trace.hamTerminalRemediation.ok, true);
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+});
+
+test('ham terminal remediation: no verified commit identity fails closed', () => {
+  const reviewedHead = 'abc12345';
+  const currentHead = 'def67890';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      headSha: reviewedHead,
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({ headSha: currentHead, parentSha: reviewedHead }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      headSha: currentHead,
+      parentSha: reviewedHead,
+      author: null,
+      committer: null,
+    }),
+  });
+
+  assert.equal(result.eligible, false);
+  assert.equal(result.trace.hamTerminalRemediation.ok, false);
+  assert.equal(result.trace.hamTerminalRemediation.checks.commitIdentity, false);
+});
+
+test('ham terminal remediation: unmapped audit finding titles still satisfy coverage', () => {
+  const reviewedHead = 'abc12345';
+  const currentHead = 'def67890';
+  const auditBody = [
+    'HAM audit:',
+    '- **Auth path not threaded** (blocking) - Addressed the auth handoff.',
+    'Doc-currency: not applicable for changed files src/auth.js.',
+  ].join('\n');
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      headSha: reviewedHead,
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+      reviewCycleExhausted: true,
+    },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({
+      headSha: currentHead,
+      parentSha: reviewedHead,
+      remediatedFindings: '1 addressed (1 blocking, 0 non-blocking)',
+      auditBody,
+      findings: [{ title: 'Auth path not threaded', blocking: true, file: '', addressed: true }],
+    }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      headSha: currentHead,
+      parentSha: reviewedHead,
+      remediatedFindings: '1 addressed (1 blocking, 0 non-blocking)',
+      auditBody,
+      changedFiles: ['src/auth.js'],
+    }),
+  });
+
+  assert.equal(result.trace.hamTerminalRemediation.checks.auditComment, true);
+  assert.equal(result.trace.hamTerminalRemediation.checks.remediatedFindings, true);
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+});
+
+test('ham terminal remediation: doc-currency validation ignores global status phrases', () => {
+  const auditBody = [
+    'HAM audit:',
+    '- **README note is stale** (non-blocking) - Updated README.md; unrelated quoted text says not applicable.',
+    'Doc-currency: updated README.md for changed files README.md.',
+  ].join('\n');
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      verdict: 'comment-only',
+      nonBlockingFindingCount: 1,
+      nonBlockingFindingState: 'known',
+      nonBlockingFindingIdentities: ['README note is stale'],
+    },
+    prMetadata: { headSha: 'def67890' },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({
+      auditBody,
+      remediatedFindings: '1 addressed (0 blocking, 1 non-blocking)',
+      docCurrency: {
+        status: 'updated',
+        changedFiles: ['README.md'],
+        docsUpdated: ['README.md'],
+      },
+      findings: [{ title: 'README note is stale', blocking: false, file: 'README.md', addressed: true }],
+    }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      auditBody,
+      remediatedFindings: '1 addressed (0 blocking, 1 non-blocking)',
+      changedFiles: ['README.md'],
+    }),
+  });
+
+  assert.equal(result.trace.hamTerminalRemediation.checks.docCurrency, true);
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
 });
 
 test('ham terminal remediation: forged audit author, loose closed-by, bad counts, or empty diff are rejected', () => {

@@ -156,11 +156,12 @@ function hamCommitFixture({
   author = 'hammer-worker',
   changedFiles = ['src/auth.js'],
 } = {}) {
+  const identity = author === null ? null : { login: author };
   return {
     sha: headSha,
     parents: [{ sha: parentSha }],
-    author: { login: author },
-    committer: { login: author },
+    author: identity,
+    committer: identity,
     files: changedFiles.map((filename) => ({ filename })),
     commit: {
       message: [
@@ -274,7 +275,9 @@ function runAmaCheck(tmp, {
       remediatedFindings:
         hamTerminalRemediation?.commit?.trailers?.['Remediated-Findings']
         || '2 addressed (1 blocking, 1 non-blocking)',
-      author: hamTerminalRemediation?.commit?.author || 'hammer-worker',
+      author: Object.prototype.hasOwnProperty.call(hamTerminalRemediation?.commit || {}, 'author')
+        ? hamTerminalRemediation.commit.author
+        : 'hammer-worker',
       changedFiles: Array.isArray(hamTerminalRemediation?.commit?.files)
         ? hamTerminalRemediation.commit.files
         : ['src/auth.js'],
@@ -644,6 +647,28 @@ test('ama-check validates HAM terminal remediation only with HAM head provenance
     const forgedAuthorVerdict = JSON.parse(forgedAuthor.stdout);
     assert.equal(forgedAuthorVerdict.eligible, false);
     assert.equal(forgedAuthorVerdict.trace.hamTerminalRemediation.checks.auditCommentAuthor, false);
+
+    const unresolvedCommitIdentity = runAmaCheck(tmp, {
+      branchProtectionRequired: true,
+      protectionBody,
+      prPatch: {
+        headRefOid: HAM_SHA,
+        labels: [],
+        statusCheckRollup: [
+          { __typename: 'CheckRun', name: 'agent-os/adversarial-gate', conclusion: 'SUCCESS' },
+          { __typename: 'CheckRun', name: 'test', conclusion: 'SUCCESS' },
+        ],
+      },
+      reviews,
+      hamTerminalRemediation: hamTerminalEvidence({ commitAuthor: null }),
+    });
+    assert.equal(unresolvedCommitIdentity.status, 0, unresolvedCommitIdentity.stderr);
+    const unresolvedCommitIdentityVerdict = JSON.parse(unresolvedCommitIdentity.stdout);
+    assert.equal(unresolvedCommitIdentityVerdict.eligible, false);
+    assert.equal(
+      unresolvedCommitIdentityVerdict.trace.hamTerminalRemediation.checks.commitIdentity,
+      false,
+    );
 
     const looseClosedBy = runAmaCheck(tmp, {
       branchProtectionRequired: true,

@@ -9,13 +9,154 @@ import {
   amaCloserDispatchFilePath,
   isGithubRateLimitOrBrokerThrottle,
   isTransientHqDispatchError,
+  HAM_TERMINAL_REMEDIATION_AUDIT_MARKER,
   maybeDispatchAmaCloser,
+  resolveHamTerminalRemediationEvidence,
 } from '../src/ama/dispatch-closer.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const HAMMER_TEMPLATE_PATH = join(REPO_ROOT, 'templates', 'hammer-prompt.md');
 const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
+
+const VERIFIED_HAM_COMMIT = {
+  sha: 'def67890def67890def67890def67890def67890',
+  parentSha: 'abc12345abc12345abc12345abc12345abc12345',
+  message: [
+    'HAM terminal remediation',
+    '',
+    'Worker-Class: hammer',
+    'Worker-Ticket: HAM',
+    'Reviewed-Head: abc12345abc12345abc12345abc12345abc12345',
+    'Closed-By: hammer (adversarial-pipe-mode)',
+    'Remediated-Findings: 1 addressed (1 blocking, 0 non-blocking)',
+  ].join('\n'),
+  trailers: {
+    'worker-class': 'hammer',
+    'worker-ticket': 'HAM',
+    'reviewed-head': 'abc12345abc12345abc12345abc12345abc12345',
+    'closed-by': 'hammer (adversarial-pipe-mode)',
+    'remediated-findings': '1 addressed (1 blocking, 0 non-blocking)',
+  },
+  author: 'hammer-worker',
+  committer: 'the-hammer-lacey[bot]',
+  changedFiles: ['src/auth.js'],
+};
+
+const VERIFIED_HAM_AUDIT_BODY = [
+  HAM_TERMINAL_REMEDIATION_AUDIT_MARKER,
+  '',
+  '## Hammer remediation audit',
+  '',
+  '**Findings addressed**',
+  '- **Auth path not threaded** (blocking) - src/auth.js fixed the auth path.',
+  '',
+  'Doc-currency: not applicable for changed files src/auth.js.',
+  '',
+  '<sub>',
+  'HAM-Terminal-Remediation-Head: def67890def67890def67890def67890def67890',
+  'Remediated-Findings: 1 addressed (1 blocking, 0 non-blocking)',
+  'Closed-By: hammer (adversarial-pipe-mode)',
+  '</sub>',
+].join('\n');
+
+test('resolveHamTerminalRemediationEvidence builds claim and ground truth from injected commit and audit seams', async () => {
+  let fetchedCommit = false;
+  let fetchedRollup = false;
+  const result = await resolveHamTerminalRemediationEvidence({
+    reviewState: { headSha: VERIFIED_HAM_COMMIT.parentSha },
+    prMetadata: { headSha: VERIFIED_HAM_COMMIT.sha },
+    repoPath: 'laceyenterprises/example',
+    prNumber: 5270,
+    fetchHeadCloserVerifiedCommitImpl: async () => {
+      fetchedCommit = true;
+      return VERIFIED_HAM_COMMIT;
+    },
+    fetchPullRequestRollupImpl: async () => {
+      fetchedRollup = true;
+      return {
+        comments: [
+          {
+            id: 'old',
+            author: { login: 'the-hammer-lacey[bot]' },
+            body: 'not the marker',
+            createdAt: '2026-08-12T10:00:00Z',
+          },
+          {
+            id: 'IC_ham_audit',
+            author: { login: 'the-hammer-lacey[bot]' },
+            body: VERIFIED_HAM_AUDIT_BODY,
+            createdAt: '2026-08-12T10:05:00Z',
+          },
+        ],
+      };
+    },
+  });
+
+  assert.equal(fetchedCommit, true);
+  assert.equal(fetchedRollup, true);
+  assert.equal(result.hamTerminalRemediation.commit.sha, VERIFIED_HAM_COMMIT.sha);
+  assert.equal(result.hamTerminalRemediation.auditComment.body, VERIFIED_HAM_AUDIT_BODY);
+  assert.deepEqual(result.hamTerminalRemediation.auditComment.docCurrency, {
+    status: 'not_applicable',
+    changedFiles: ['src/auth.js'],
+  });
+  assert.deepEqual(result.hamTerminalRemediation.auditComment.findings, [
+    {
+      title: 'Auth path not threaded',
+      blocking: true,
+      file: 'src/auth.js',
+      addressed: true,
+    },
+  ]);
+  assert.equal(result.hamTerminalRemediationGroundTruth.commit, VERIFIED_HAM_COMMIT);
+  assert.deepEqual(result.hamTerminalRemediationGroundTruth.auditComment, {
+    id: 'IC_ham_audit',
+    author: 'the-hammer-lacey[bot]',
+    body: VERIFIED_HAM_AUDIT_BODY,
+    createdAt: '2026-08-12T10:05:00Z',
+  });
+});
+
+test('resolveHamTerminalRemediationEvidence does not build evidence for an external stale-head push', async () => {
+  let fetchedRollup = false;
+  const result = await resolveHamTerminalRemediationEvidence({
+    reviewState: { headSha: VERIFIED_HAM_COMMIT.parentSha },
+    prMetadata: { headSha: VERIFIED_HAM_COMMIT.sha },
+    repoPath: 'laceyenterprises/example',
+    prNumber: 5270,
+    fetchHeadCloserVerifiedCommitImpl: async () => ({
+      ...VERIFIED_HAM_COMMIT,
+      message: 'human push',
+      trailers: {},
+      committer: 'some-human-contributor',
+    }),
+    fetchPullRequestRollupImpl: async () => {
+      fetchedRollup = true;
+      return { comments: [] };
+    },
+  });
+
+  assert.equal(result, null);
+  assert.equal(fetchedRollup, false);
+});
+
+test('resolveHamTerminalRemediationEvidence propagates transient commit fetch errors', async () => {
+  const err = new Error('TLS handshake timeout');
+  err.stderr = 'TLS handshake timeout';
+  await assert.rejects(
+    resolveHamTerminalRemediationEvidence({
+      reviewState: { headSha: VERIFIED_HAM_COMMIT.parentSha },
+      prMetadata: { headSha: VERIFIED_HAM_COMMIT.sha },
+      repoPath: 'laceyenterprises/example',
+      prNumber: 5270,
+      fetchHeadCloserVerifiedCommitImpl: async () => {
+        throw err;
+      },
+    }),
+    /TLS handshake timeout/,
+  );
+});
 
 // ---------------------------------------------------------------------------
 // Classifier: rate-limit / 429 / 503 are transient; genuine auth is not.

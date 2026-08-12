@@ -509,7 +509,10 @@ prompt-driven worker behavior, not predicate gates — the audit comment and the
    remediation audit-comment path resolves the post-remediation PR head and
    checks for an existing same-head audit comment with bounded transient retries;
    unresolved lookup failures fail closed instead of posting duplicate audit
-   evidence.
+   evidence. The parser still expects the hammer to list changed file paths for
+   each finding, but preserves a finding by title with an empty file attribution
+   when the audit line omits an exact changed-file path so coverage counts do not
+   silently lose addressed findings.
 5. **Bounded gate-read and already-merged recovery.** HAM treats transient
    GitHub gate-read failures like other merge-time network failures: a failed
    read inside the remote-CI polling window logs a warning, sleeps for the

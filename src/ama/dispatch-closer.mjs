@@ -50,6 +50,11 @@ import {
   dismissStandingChangesRequestedReviewsForHead,
   fetchPullRequestRollup,
 } from '../github-api.mjs';
+import { isTransientGhError } from '../gh-cli.mjs';
+import {
+  fetchHeadCloserVerifiedCommit,
+  isTerminalCloserCommitIdentity,
+} from '../head-closer-commit-suppression.mjs';
 import {
   beginReviewerPass,
   completeReviewerPass,
@@ -107,6 +112,7 @@ const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const AGENT_OS_TOOLING_REPO = 'agent-os';
 const ADVERSARIAL_REVIEW_REPO = 'adversarial-review';
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
+export const HAM_TERMINAL_REMEDIATION_AUDIT_MARKER = '<!-- hq:ham-terminal-remediation:audit -->';
 const HARNESS_FALLBACK_ALERT_OWNER_WRITE_SCRIPT = `
 import { chmodSync, closeSync, mkdirSync, openSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
@@ -2690,6 +2696,167 @@ export function composeCloserPrompt({
  */
 const dispatchCloserLogGate = createLogChangeGate();
 
+function normalizeCommentAuthor(comment) {
+  if (typeof comment?.author === 'string') return comment.author;
+  return comment?.author?.login || comment?.user?.login || null;
+}
+
+function normalizeAuditComment(comment) {
+  if (!comment || typeof comment !== 'object') return null;
+  const body = String(comment.body || '');
+  if (!body.includes(HAM_TERMINAL_REMEDIATION_AUDIT_MARKER)) return null;
+  return {
+    body,
+    author: normalizeCommentAuthor(comment),
+    createdAt: comment.createdAt || comment.created_at || null,
+    id: comment.id == null ? null : String(comment.id),
+  };
+}
+
+function selectLatestHamTerminalAuditComment(comments) {
+  const candidates = (Array.isArray(comments) ? comments : [])
+    .map(normalizeAuditComment)
+    .filter(Boolean);
+  candidates.sort((left, right) => {
+    const leftTime = Date.parse(left.createdAt || '') || 0;
+    const rightTime = Date.parse(right.createdAt || '') || 0;
+    return rightTime - leftTime;
+  });
+  return candidates[0] || null;
+}
+
+function parseHamAuditFindingsFromBody(body, changedFiles) {
+  const text = String(body || '');
+  const files = Array.isArray(changedFiles)
+    ? changedFiles.map(String).filter(Boolean).sort((left, right) => right.length - left.length)
+    : [];
+  const findings = [];
+  const linePattern = /^\s*-\s+\*\*(.+?)\*\*\s+\((blocking|non-blocking)\)\s+[-\u2013\u2014]\s+(.+)$/gim;
+  let match;
+  while ((match = linePattern.exec(text)) !== null) {
+    const title = String(match[1] || '').trim();
+    const kind = String(match[2] || '').trim().toLowerCase();
+    const detail = String(match[3] || '');
+    const matchedLine = String(match[0] || '');
+    const file = files.find((candidate) => detail.includes(candidate))
+      || files.find((candidate) => matchedLine.includes(candidate))
+      || '';
+    if (!title) continue;
+    findings.push({
+      title,
+      blocking: kind === 'blocking',
+      file,
+      addressed: true,
+    });
+  }
+  if (findings.length > 0) return findings;
+  if (/final review had no blocking or non-blocking findings/i.test(text)) return [];
+  return null;
+}
+
+function parseHamAuditDocCurrencyFromBody(body, changedFiles) {
+  const text = String(body || '');
+  const docCurrencyLine = text
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .find((line) => /\bdoc-currency\s*:/i.test(line)) || '';
+  const lower = docCurrencyLine.toLowerCase();
+  const files = Array.isArray(changedFiles) ? changedFiles.map(String).filter(Boolean) : [];
+  if (!lower.includes('doc-currency')) return null;
+  if (lower.includes('not applicable')) {
+    return { status: 'not_applicable', changedFiles: files };
+  }
+  if (lower.includes('skipped superproject-doc obligation')) {
+    const skippedSuperprojectDocs = files.filter((file) => lower.includes(file.toLowerCase()));
+    return {
+      status: 'skipped_superproject',
+      changedFiles: files,
+      skippedSuperprojectDocs,
+    };
+  }
+  if (lower.includes('updated')) {
+    const docsUpdated = files.filter((file) => {
+      const normalized = file.toLowerCase();
+      return /\.(md|mdx|rst|txt)$/.test(normalized) && lower.includes(normalized);
+    });
+    return {
+      status: 'updated',
+      changedFiles: files,
+      docsUpdated,
+    };
+  }
+  return null;
+}
+
+export function buildHamTerminalRemediationEvidenceFromGroundTruth({
+  reviewedHead,
+  verifiedCommit,
+  verifiedAuditComment,
+} = {}) {
+  if (!verifiedCommit || !verifiedAuditComment) return null;
+  const changedFiles = Array.isArray(verifiedCommit.changedFiles) ? verifiedCommit.changedFiles : [];
+  const findings = parseHamAuditFindingsFromBody(verifiedAuditComment.body, changedFiles);
+  const docCurrency = parseHamAuditDocCurrencyFromBody(verifiedAuditComment.body, changedFiles);
+  return {
+    active: true,
+    ticket: verifiedCommit?.trailers?.['worker-ticket'] || verifiedCommit?.trailers?.ticket || 'HAM',
+    commit: {
+      sha: verifiedCommit.sha || '',
+      parentSha: verifiedCommit.parentSha || reviewedHead || '',
+      trailers: verifiedCommit.trailers || {},
+    },
+    auditComment: {
+      body: verifiedAuditComment.body || '',
+      docCurrency,
+      findings,
+    },
+  };
+}
+
+export async function resolveHamTerminalRemediationEvidence({
+  reviewState,
+  prMetadata,
+  repoPath,
+  prNumber,
+  execFileImpl = execFileAsync,
+  fetchPullRequestRollupImpl = fetchPullRequestRollup,
+  fetchHeadCloserVerifiedCommitImpl = fetchHeadCloserVerifiedCommit,
+  closerCommitSuppression = null,
+  logger = console,
+} = {}) {
+  const reviewedHead = String(reviewState?.headSha || '');
+  const currentHead = String(prMetadata?.headSha || '');
+  if (!reviewedHead || !currentHead || reviewedHead === currentHead) return null;
+  const suppression = closerCommitSuppression || null;
+  if (suppression && suppression.suppressed !== true) return null;
+
+  const verifiedCommit = await fetchHeadCloserVerifiedCommitImpl({
+    repoPath,
+    prNumber,
+    headSha: currentHead,
+    execFileImpl,
+    logger,
+  });
+  const identity = isTerminalCloserCommitIdentity(verifiedCommit || {});
+  if (identity?.suppressed !== true) return null;
+
+  const rollup = await fetchPullRequestRollupImpl(repoPath, prNumber, { execFileImpl });
+  const verifiedAuditComment = selectLatestHamTerminalAuditComment(rollup?.comments);
+  if (!verifiedAuditComment) return null;
+
+  return {
+    hamTerminalRemediation: buildHamTerminalRemediationEvidenceFromGroundTruth({
+      reviewedHead,
+      verifiedCommit,
+      verifiedAuditComment,
+    }),
+    hamTerminalRemediationGroundTruth: {
+      commit: verifiedCommit,
+      auditComment: verifiedAuditComment,
+    },
+  };
+}
+
 export async function maybeDispatchAmaCloser({
   reviewState,
   prMetadata,
@@ -2707,6 +2874,7 @@ export async function maybeDispatchAmaCloser({
   acquireMergeLeaseImpl = acquireMergeLease,
   releaseMergeLeaseImpl = releaseMergeLease,
   fetchPullRequestRollupImpl = fetchPullRequestRollup,
+  resolveHamTerminalRemediationEvidenceImpl = null,
   deliverAlertImpl = deliverAlert,
   logGate = dispatchCloserLogGate,
   logger = console,
@@ -2729,8 +2897,40 @@ export async function maybeDispatchAmaCloser({
     });
   }
 
+  const eligibilityOptions = { ...(options || {}) };
+  if (
+    dispatchContext?.allowStaleReviewHeadHammerResume === true &&
+    !eligibilityOptions.hamTerminalRemediation &&
+    !eligibilityOptions.hamTerminalRemediationGroundTruth &&
+    typeof resolveHamTerminalRemediationEvidenceImpl === 'function'
+  ) {
+    try {
+      const resolvedHamEvidence = await resolveHamTerminalRemediationEvidenceImpl({
+        reviewState,
+        prMetadata,
+        repoPath: dispatchContext?.repo,
+        prNumber,
+        execFileImpl,
+        fetchPullRequestRollupImpl,
+        logger,
+      });
+      if (resolvedHamEvidence?.hamTerminalRemediation && resolvedHamEvidence?.hamTerminalRemediationGroundTruth) {
+        eligibilityOptions.hamTerminalRemediation = resolvedHamEvidence.hamTerminalRemediation;
+        eligibilityOptions.hamTerminalRemediationGroundTruth =
+          resolvedHamEvidence.hamTerminalRemediationGroundTruth;
+      }
+    } catch (err) {
+      if (isTransientGhError(err)) throw err;
+      logger?.warn?.(
+        `[ama-closer] HAM terminal-remediation evidence resolution failed for ` +
+          `${dispatchContext?.repo || 'unknown-repo'}#${prNumber}; failing closed: ` +
+          `${err?.message || err}`,
+      );
+    }
+  }
+
   // The eligibility predicate is the second gate.
-  const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, options);
+  const verdict = isEligibleForAmaClosure(reviewState, prMetadata, cfg, eligibilityOptions);
   let forceHammerTerminalRemediationPrompt = false;
   let forceHammerWorkerClass = false;
   const eligibleHammerRouteReasons = verdict.eligible ? hammerRouteReasonsFromTrace(verdict) : [];
@@ -3842,7 +4042,7 @@ export async function maybeDispatchAmaCloser({
       requiredGateContext: dispatchContext.requiredGateContext || null,
       eligibilityTrace: verdict.trace,
       operatorApprovedEvidence: reviewState.operatorApprovedEvidence || null,
-      adversarialMergeRequestedEvidence: options?.adversarialMergeRequested || null,
+      adversarialMergeRequestedEvidence: eligibilityOptions?.adversarialMergeRequested || null,
     },
     metadata: {
       reviewedBy: dispatchContext.reviewedBy || null,
@@ -3858,7 +4058,7 @@ export async function maybeDispatchAmaCloser({
         lastVerifiedAt: dispatchContext.dispatchedAt || null,
       },
       operatorApprovedEvidence: reviewState.operatorApprovedEvidence || null,
-      adversarialMergeRequestedEvidence: options?.adversarialMergeRequested || null,
+      adversarialMergeRequestedEvidence: eligibilityOptions?.adversarialMergeRequested || null,
     },
   });
 

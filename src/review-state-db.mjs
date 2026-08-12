@@ -443,6 +443,18 @@ export const stmtLatestGenuinePostedReviewAt = db.prepare(
 const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   "SELECT COUNT(*) AS n FROM reviewed_prs " +
   "WHERE pr_state = 'open' " +
+  // A malformed-title PR is REFUSED, not pending: the dispatch loop returns
+  // early on review_status='malformed' (a terminal status), so it can never
+  // receive a first pass. Counting it kept the "Reviews stalled" pager above
+  // zero forever and produced pages naming PRs the reviewer will never touch.
+  // This is not the same as trusting review_status='posted' -- the comment
+  // above deliberately keys success off gh_comment_id so a stale success claim
+  // cannot mask a real gap. Here we exclude work the pipeline has explicitly
+  // refused, which is evidence about the PR, not about reviewer health.
+  // COALESCE is load-bearing: in SQLite `NULL <> 'malformed'` is NULL, so a
+  // bare comparison would silently drop every row with no status yet -- the
+  // exact rows most likely to be genuinely awaiting a first pass.
+  "AND COALESCE(review_status, '') <> 'malformed' " +
   "AND NOT EXISTS ( " +
   "  SELECT 1 FROM reviewer_passes " +
   "  WHERE reviewer_passes.repo = reviewed_prs.repo " +

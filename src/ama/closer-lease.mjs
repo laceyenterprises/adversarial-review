@@ -52,6 +52,28 @@ const VALID_TERMINAL_OUTCOMES = new Set([
   'superseded',
 ]);
 
+function supersededHeadsFor(lease) {
+  const heads = new Set();
+  if (Array.isArray(lease?.supersededHeads)) {
+    for (const head of lease.supersededHeads) {
+      if (head) heads.add(String(head));
+    }
+  }
+  if (lease?.rekeyedFromHeadSha) {
+    heads.add(String(lease.rekeyedFromHeadSha));
+  }
+  return [...heads];
+}
+
+function leaseSupersedesHead(lease, headSha) {
+  const needle = String(headSha || '');
+  return Boolean(needle) && supersededHeadsFor(lease).includes(needle);
+}
+
+function compareUpdatedAtDesc(a, b) {
+  return String(b.lease.updatedAt || '').localeCompare(String(a.lease.updatedAt || ''));
+}
+
 /**
  * Sanitize a path segment — the same regex the rest of the AMA module
  * uses (allow alnum + `.` + `_` + `-`; replace everything else).
@@ -203,9 +225,18 @@ export function rekeyAmaCloserLease({
     // even if the destination has since progressed to terminal or a replacement owner.
     if (
       String(destination.headSha || '') === String(toHeadSha)
-      && String(destination.rekeyedFromHeadSha || '') === String(fromHeadSha)
+      && leaseSupersedesHead(destination, fromHeadSha)
     ) {
       rmSync(fromPath, { force: true });
+      if (String(destination.status) === TERMINAL) {
+        return {
+          rekeyed: false,
+          reason: 'destination-already-terminal',
+          resumed: true,
+          leasePath: toPath,
+          lease: destination,
+        };
+      }
       return { rekeyed: true, resumed: true, leasePath: toPath, lease: destination };
     }
     // A genuinely different owner holds the destination head. Carrying ours forward
@@ -217,9 +248,17 @@ export function rekeyAmaCloserLease({
     ...existing,
     headSha: String(toHeadSha),
     rekeyedFromHeadSha: String(fromHeadSha),
+    supersededHeads: [...supersededHeadsFor(existing), String(fromHeadSha)],
     updatedAt: now || new Date().toISOString(),
   };
-  writeFileAtomic(toPath, `${JSON.stringify(carried, null, 2)}\n`, { overwrite: false });
+  try {
+    writeFileAtomic(toPath, `${JSON.stringify(carried, null, 2)}\n`, { overwrite: false });
+  } catch (err) {
+    if (err?.code === 'EEXIST') {
+      return { rekeyed: false, reason: 'lease-already-exists-at-to-head' };
+    }
+    throw err;
+  }
   rmSync(fromPath, { force: true });
   return { rekeyed: true, leasePath: toPath, lease: carried };
 }
@@ -265,12 +304,8 @@ export function findLiveAmaCloserLease(rootDir, { repo, prNumber } = {}) {
     candidates.push({ headSha: String(lease.headSha || ''), leasePath, lease });
   }
 
-  const supersededHeads = new Set(
-    candidates
-      .map(({ lease }) => String(lease.rekeyedFromHeadSha || ''))
-      .filter(Boolean),
-  );
-  return candidates.find(({ headSha, lease }) => (
+  const supersededHeads = new Set(candidates.flatMap(({ lease }) => supersededHeadsFor(lease)));
+  return candidates.sort(compareUpdatedAtDesc).find(({ headSha, lease }) => (
     !supersededHeads.has(headSha)
     && String(lease.status) !== TERMINAL
   )) || null;

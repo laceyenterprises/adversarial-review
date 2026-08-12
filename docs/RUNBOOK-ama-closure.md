@@ -674,15 +674,17 @@ protection and must not be hand-deleted. Once `lrqId` is present, check
 `hq dispatch status <lrqId>` if you want to know the closer's live state.
 
 A closer that moves the head it already owns rekeys the lease to the new
-head and records `rekeyedFromHeadSha` on the destination file. If the
-process is interrupted after writing the destination but before deleting
-the source, that provenance is the recovery proof: the old source lease
-is obsolete even if the destination has since progressed to another owner
-or a terminal outcome. Lease discovery ignores any lease whose `headSha`
-is referenced by another matching lease's `rekeyedFromHeadSha`, then
-chooses from the remaining non-terminal leases. This prevents an orphaned
-pre-rekey source lease from poisoning the watcher after the current head
-has already completed.
+head, records the direct source in `rekeyedFromHeadSha`, and carries the full
+ancestry in `supersededHeads`. If the process is interrupted after writing the
+destination but before deleting the source, that provenance is the recovery
+proof: the old source lease is obsolete even if the destination has since
+progressed to another owner or a terminal outcome. A terminal destination is
+cleanup-only: the stale source is removed, but the retrying worker is told it
+does not hold an active lease. Lease discovery ignores any lease whose
+`headSha` appears in another matching lease's superseded-head ancestry, then
+chooses the most recently updated remaining non-terminal lease. This prevents
+orphaned pre-rekey ancestors from poisoning the watcher after chained rebases
+or after the current head has already completed.
 
 ### Merge gate lease visibility
 

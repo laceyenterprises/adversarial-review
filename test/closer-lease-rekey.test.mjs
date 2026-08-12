@@ -43,6 +43,7 @@ test('a live lease is carried forward to the new head', () => {
   assert.equal(moved.lrqId, 'lrq_x', 'the dispatched worker reference survives');
   assert.equal(moved.watcherPid, 4242, 'ownership audit survives');
   assert.equal(moved.rekeyedFromHeadSha, FROM, 'the move is auditable');
+  assert.deepEqual(moved.supersededHeads, [FROM], 'the full superseded-head chain starts with the source');
 
   assert.equal(existsSync(amaCloserLeaseFilePath(rootDir, { ...ID, headSha: FROM })), false,
     'the orphaned lease must not linger at the old head');
@@ -82,6 +83,7 @@ test('rekey retry completes cleanup after destination write succeeded', () => {
     ...source,
     headSha: TO,
     rekeyedFromHeadSha: FROM,
+    supersededHeads: [FROM],
     updatedAt: '2026-08-12T05:01:00.000Z',
   };
   const toPath = amaCloserLeaseFilePath(rootDir, { ...ID, headSha: TO });
@@ -169,6 +171,7 @@ test('a destination with matching source head but progressed owner still cleans 
     headSha: TO,
     watcherPid: 2,
     rekeyedFromHeadSha: FROM,
+    supersededHeads: [FROM],
     updatedAt: '2026-08-12T05:01:00.000Z',
   };
   writeFileSync(
@@ -196,6 +199,7 @@ test('a terminal destination with matching source head still cleans up source', 
     status: 'terminal',
     terminalOutcome: 'succeeded',
     rekeyedFromHeadSha: FROM,
+    supersededHeads: [FROM],
     updatedAt: '2026-08-12T05:01:00.000Z',
   };
   writeFileSync(
@@ -204,14 +208,15 @@ test('a terminal destination with matching source head still cleans up source', 
   );
 
   const res = rekeyAmaCloserLease({ rootDir, ...ID, fromHeadSha: FROM, toHeadSha: TO, now: NOW });
-  assert.equal(res.rekeyed, true);
+  assert.equal(res.rekeyed, false);
+  assert.equal(res.reason, 'destination-already-terminal');
   assert.equal(res.resumed, true);
   assert.deepEqual(res.lease, terminalDestination);
   assert.equal(existsSync(amaCloserLeaseFilePath(rootDir, { ...ID, headSha: FROM })), false,
     'terminal progress at the destination must not strand the old source lease');
 });
 
-test('findLiveAmaCloserLease ignores leases superseded by a rekey chain', () => {
+test('findLiveAmaCloserLease ignores leases superseded by a rekey', () => {
   const rootDir = root();
   acquireAmaCloserLease({ rootDir, ...ID, headSha: FROM, watcherPid: 1, now: NOW });
   updateAmaCloserLease({ rootDir, ...ID, headSha: FROM, status: 'dispatched', lrqId: 'lrq_old', now: NOW });
@@ -221,6 +226,7 @@ test('findLiveAmaCloserLease ignores leases superseded by a rekey chain', () => 
     ...source,
     headSha: TO,
     rekeyedFromHeadSha: FROM,
+    supersededHeads: [FROM],
     updatedAt: '2026-08-12T05:01:00.000Z',
   };
   writeFileSync(
@@ -232,6 +238,51 @@ test('findLiveAmaCloserLease ignores leases superseded by a rekey chain', () => 
   assert.ok(found, 'must find the non-superseded live lease');
   assert.equal(found.headSha, TO);
   assert.equal(found.lease.lrqId, 'lrq_old');
+});
+
+test('findLiveAmaCloserLease ignores stranded ancestors after chained rekeys', () => {
+  const rootDir = root();
+  const middle = TO;
+  const latest = 'c000000000000000000000000000000000000ccc';
+
+  acquireAmaCloserLease({ rootDir, ...ID, headSha: FROM, watcherPid: 1, now: NOW });
+  updateAmaCloserLease({ rootDir, ...ID, headSha: FROM, status: 'dispatched', lrqId: 'lrq_old', now: NOW });
+
+  const source = readAmaCloserLease(rootDir, { ...ID, headSha: FROM });
+  const carriedLatest = {
+    ...source,
+    headSha: latest,
+    rekeyedFromHeadSha: middle,
+    supersededHeads: [FROM, middle],
+    updatedAt: '2026-08-12T05:02:00.000Z',
+  };
+  writeFileSync(
+    amaCloserLeaseFilePath(rootDir, { ...ID, headSha: latest }),
+    `${JSON.stringify(carriedLatest, null, 2)}\n`,
+  );
+
+  const found = findLiveAmaCloserLease(rootDir, ID);
+  assert.ok(found, 'must find the true latest live lease');
+  assert.equal(found.headSha, latest);
+  assert.equal(found.lease.lrqId, 'lrq_old');
+});
+
+test('findLiveAmaCloserLease chooses the newest active lease deterministically', () => {
+  const rootDir = root();
+  const older = FROM;
+  const newer = TO;
+
+  acquireAmaCloserLease({
+    rootDir, ...ID, headSha: older, watcherPid: 1, now: '2026-08-12T05:00:00.000Z',
+  });
+  acquireAmaCloserLease({
+    rootDir, ...ID, headSha: newer, watcherPid: 2, now: '2026-08-12T05:01:00.000Z',
+  });
+
+  const found = findLiveAmaCloserLease(rootDir, ID);
+  assert.ok(found, 'must find a live lease');
+  assert.equal(found.headSha, newer);
+  assert.equal(found.lease.watcherPid, 2);
 });
 
 test('findLiveAmaCloserLease returns null when only a superseding terminal lease remains', () => {
@@ -246,6 +297,7 @@ test('findLiveAmaCloserLease returns null when only a superseding terminal lease
     status: 'terminal',
     terminalOutcome: 'succeeded',
     rekeyedFromHeadSha: FROM,
+    supersededHeads: [FROM],
     updatedAt: '2026-08-12T05:01:00.000Z',
   };
   writeFileSync(

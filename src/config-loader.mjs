@@ -1835,7 +1835,7 @@ function schemaV1() {
       // worker_pool.dispatch.substrate.*,
       // worker_pool.hardening_ledger.*,
       // worker_pool.memory.dynamic.*, worker_pool.secrets.op_read_cache.*,
-      // and worker_pool.secrets_bus.* —
+      // worker_pool.secrets_bus.*, and worker_pool.shr.* —
       // Python-owned (canonical schema at platform/agent-os-config).
       // PARTIAL mirror, same rationale as the
       // sentinel block below: this Node reader does not consume the values, but
@@ -2051,6 +2051,36 @@ function schemaV1() {
                   snapshot_stale_seconds: { __type: TYPE_INT, __default: 60, __min: 0 },
                   require_pressure_normal: { __type: TYPE_BOOL, __default: true },
                 },
+              },
+            },
+          },
+          shr: {
+            __type: TYPE_DICT,
+            __strict: true,
+            __keys: {
+              main_catchup_behind_threshold: {
+                __type: TYPE_INT,
+                __default: 3,
+                __min: 1,
+                __max: 1000,
+              },
+              worker_kill_window_seconds: {
+                __type: TYPE_INT,
+                __default: 1800,
+                __min: 60,
+                __max: 86400,
+              },
+              worker_kill_threshold: {
+                __type: TYPE_INT,
+                __default: 3,
+                __min: 1,
+                __max: 1000,
+              },
+              command_timeout_seconds: {
+                __type: TYPE_FLOAT,
+                __default: 10.0,
+                __min: 0.1,
+                __max: 120.0,
               },
             },
           },
@@ -2750,6 +2780,22 @@ export const ENV_ALIASES = {
   'worker_pool.dispatch.substrate.mem_pressure_crit_level': {
     canonical: 'AGENT_OS_WORKER_POOL_DISPATCH_SUBSTRATE_MEM_PRESSURE_CRIT_LEVEL',
     aliases: [['SUBSTRATE_MEM_PRESSURE_CRIT_LEVEL', identity]],
+  },
+  'worker_pool.shr.main_catchup_behind_threshold': {
+    canonical: 'AGENT_OS_WORKER_POOL_SHR_MAIN_CATCHUP_BEHIND_THRESHOLD',
+    aliases: [],
+  },
+  'worker_pool.shr.worker_kill_window_seconds': {
+    canonical: 'AGENT_OS_WORKER_POOL_SHR_WORKER_KILL_WINDOW_SECONDS',
+    aliases: [],
+  },
+  'worker_pool.shr.worker_kill_threshold': {
+    canonical: 'AGENT_OS_WORKER_POOL_SHR_WORKER_KILL_THRESHOLD',
+    aliases: [],
+  },
+  'worker_pool.shr.command_timeout_seconds': {
+    canonical: 'AGENT_OS_WORKER_POOL_SHR_COMMAND_TIMEOUT_SECONDS',
+    aliases: [],
   },
   'worker_pool.secrets.prewarm.enabled': {
     canonical: 'AGENT_OS_WORKER_POOL_SECRETS_PREWARM_ENABLED',

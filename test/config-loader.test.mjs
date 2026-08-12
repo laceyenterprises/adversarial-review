@@ -1116,6 +1116,31 @@ test('top-level config.yaml accepts mirrored worker_pool.memory.dynamic keys', (
   }
 });
 
+test('top-level config.yaml accepts mirrored worker_pool.shr keys', () => {
+  // SHR probe tuning is Python-owned, but checked-in keys may live in shared
+  // config.yaml and must parse under the watcher strict schema.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      worker_pool:
+        shr:
+          main_catchup_behind_threshold: 7
+          worker_kill_window_seconds: 600
+          worker_kill_threshold: 4
+          command_timeout_seconds: 2.5
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.equal(cfg.get('worker_pool.shr.main_catchup_behind_threshold'), 7);
+    assert.equal(cfg.get('worker_pool.shr.worker_kill_window_seconds'), 600);
+    assert.equal(cfg.get('worker_pool.shr.worker_kill_threshold'), 4);
+    assert.equal(cfg.get('worker_pool.shr.command_timeout_seconds'), 2.5);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('top-level config.yaml accepts mirrored worker_pool.dispatch.goal_lineage keys', () => {
   // GLN-02 is Python-owned, but these checked-in keys live in shared
   // config.yaml and must parse under the watcher strict schema.

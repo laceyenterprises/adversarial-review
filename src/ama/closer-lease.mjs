@@ -109,6 +109,16 @@ function readLeaseFile(filePath) {
   }
 }
 
+function sameLeaseOwner(left, right) {
+  return String(left.repo || '') === String(right.repo || '')
+    && Number(left.prNumber) === Number(right.prNumber)
+    && String(left.status || '') === String(right.status || '')
+    && String(left.acquiredAt || '') === String(right.acquiredAt || '')
+    && String(left.watcherPid ?? '') === String(right.watcherPid ?? '')
+    && String(left.lrqId ?? '') === String(right.lrqId ?? '')
+    && String(left.terminalOutcome ?? '') === String(right.terminalOutcome ?? '');
+}
+
 /**
  * Public — read the lease for a given `(repo, prNumber, headSha)`.
  * Returns `null` when no lease exists.
@@ -191,18 +201,22 @@ export function rekeyAmaCloserLease({
   }
 
   const toPath = amaCloserLeaseFilePath(rootDir, { repo, prNumber, headSha: toHeadSha });
-  const existingAtTo = readLeaseFile(toPath);
-  if (existingAtTo) {
+  const destination = readLeaseFile(toPath);
+  if (destination) {
     // RESUME our own interrupted rekey before refusing. This is a two-step operation
     // (write destination, then remove source), so a crash between the steps leaves
     // BOTH files on disk. A guard that only refuses would then refuse forever on
     // every retry -- turning one transient interruption into a permanently orphaned
     // lease, which is the very strand this function exists to fix. If the
-    // destination carries OUR fromHeadSha, step 1 already succeeded and only the
-    // source removal is outstanding, so finish it.
-    if (String(existingAtTo.rekeyedFromHeadSha || '') === String(fromHeadSha)) {
+    // destination carries OUR fromHeadSha and the same ownership/audit fields, step
+    // 1 already succeeded and only the source removal is outstanding, so finish it.
+    if (
+      String(destination.headSha || '') === String(toHeadSha)
+      && String(destination.rekeyedFromHeadSha || '') === String(fromHeadSha)
+      && sameLeaseOwner(existing, destination)
+    ) {
       rmSync(fromPath, { force: true });
-      return { rekeyed: true, resumed: true, leasePath: toPath, lease: existingAtTo };
+      return { rekeyed: true, resumed: true, leasePath: toPath, lease: destination };
     }
     // A genuinely different owner holds the destination head. Carrying ours forward
     // would silently clobber a live owner, which is worse than the strand.

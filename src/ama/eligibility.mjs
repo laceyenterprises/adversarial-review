@@ -486,7 +486,7 @@ function verifiedHamCommitIdentityMatches(verifiedCommit) {
     : verifiedCommit.author;
   if (committer) return hamAuditCommentAuthorMatches(committer);
   if (author) return hamAuditCommentAuthorMatches(author);
-  return true;
+  return false;
 }
 
 function validateRebaseReviewCoverageEvidence(

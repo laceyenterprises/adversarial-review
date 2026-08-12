@@ -2735,8 +2735,9 @@ function parseHamAuditFindingsFromBody(body, changedFiles) {
     const title = String(match[1] || '').trim();
     const kind = String(match[2] || '').trim().toLowerCase();
     const detail = String(match[3] || '');
+    const matchedLine = String(match[0] || '');
     const file = files.find((candidate) => detail.includes(candidate))
-      || files.find((candidate) => text.includes(candidate))
+      || files.find((candidate) => matchedLine.includes(candidate))
       || '';
     if (!title || !file) continue;
     findings.push({

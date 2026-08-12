@@ -31,8 +31,8 @@
  * @module ama/closer-lease
  */
 
-import { readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { readdirSync, readFileSync, rmSync } from 'node:fs';
+import { basename, join } from 'node:path';
 
 import { writeFileAtomic } from '../atomic-write.mjs';
 
@@ -134,6 +134,113 @@ export function deleteAmaCloserLease(rootDir, identity) {
   const leasePath = amaCloserLeaseFilePath(rootDir, identity);
   rmSync(leasePath, { force: true });
   return leasePath;
+}
+
+/**
+ * Carry a live lease forward when the closer moves the head it already owns.
+ *
+ * The lease is keyed by `(repo, prNumber, headSha)`, so a rebase performed BY the
+ * closer orphans its own lease: the file still exists under the old SHA, that SHA
+ * is no longer in the branch, and nothing can finalize it. Observed on
+ * adversarial-review#825 on 2026-08-11 -- the hammer rebased the head, then the
+ * lease sat at `status: dispatched` on a discarded commit while the watcher looped
+ * `review-queued -> skip-re-review (terminal closer commit) -> release claim`
+ * forever. CI was green and the review clean; nothing could merge it, and there is
+ * no operator CLI for closer leases.
+ *
+ * Deliberately conservative:
+ *  - refuses when no lease exists at `fromHeadSha` (nothing to carry)
+ *  - refuses when a lease already exists at `toHeadSha` (would clobber a real owner)
+ *  - refuses a terminal lease (a finished lease must not be resurrected onto a new head)
+ *  - preserves `acquiredAt`, `lrqId` and `watcherPid`; only `headSha` and `updatedAt`
+ *    change, so the audit trail still shows one continuous ownership
+ *
+ * @param {object} args
+ * @param {string} args.rootDir
+ * @param {string} args.repo
+ * @param {number} args.prNumber
+ * @param {string} args.fromHeadSha    The head the lease is currently keyed to.
+ * @param {string} args.toHeadSha      The head the closer just moved to.
+ * @param {string=} args.now           ISO 8601 UTC; caller-provided so tests stay deterministic.
+ * @returns {{ rekeyed: boolean, reason?: string, leasePath?: string, lease?: object }}
+ */
+export function rekeyAmaCloserLease({
+  rootDir,
+  repo,
+  prNumber,
+  fromHeadSha,
+  toHeadSha,
+  now,
+} = {}) {
+  if (!fromHeadSha || !toHeadSha) {
+    throw new Error('rekeyAmaCloserLease: fromHeadSha and toHeadSha are required');
+  }
+  if (String(fromHeadSha) === String(toHeadSha)) {
+    return { rekeyed: false, reason: 'same-head' };
+  }
+
+  const fromPath = amaCloserLeaseFilePath(rootDir, { repo, prNumber, headSha: fromHeadSha });
+  const existing = readLeaseFile(fromPath);
+  if (!existing) {
+    return { rekeyed: false, reason: 'no-lease-at-from-head' };
+  }
+  if (String(existing.status) === TERMINAL) {
+    // A finished lease must not be resurrected onto a new head; that would let a
+    // completed close be replayed against different code.
+    return { rekeyed: false, reason: 'refusing-to-rekey-terminal-lease', lease: existing };
+  }
+
+  const toPath = amaCloserLeaseFilePath(rootDir, { repo, prNumber, headSha: toHeadSha });
+  if (readLeaseFile(toPath)) {
+    // Someone already owns the destination head. Carrying ours forward would
+    // silently clobber a live owner, which is worse than the strand we are fixing.
+    return { rekeyed: false, reason: 'lease-already-exists-at-to-head' };
+  }
+
+  const carried = {
+    ...existing,
+    headSha: String(toHeadSha),
+    rekeyedFromHeadSha: String(fromHeadSha),
+    updatedAt: now || new Date().toISOString(),
+  };
+  writeFileAtomic(toPath, `${JSON.stringify(carried, null, 2)}\n`, { overwrite: false });
+  rmSync(fromPath, { force: true });
+  return { rekeyed: true, leasePath: toPath, lease: carried };
+}
+
+/**
+ * Find this PR's live (non-terminal) lease whatever head it is keyed to.
+ *
+ * Needed because the lease head is the head the CLOSER was dispatched for, which is
+ * not the reviewer's head and not necessarily the current head. On #825 the lease sat
+ * at 5fdfb3bf (dispatch head) while the reviewer row pointed at ebd6c55 and the branch
+ * had moved to ab9aafb -- so a caller that only knows one of those cannot find it.
+ *
+ * @returns {{ headSha: string, leasePath: string, lease: object } | null}
+ */
+export function findLiveAmaCloserLease(rootDir, { repo, prNumber } = {}) {
+  const dir = join(rootDir, ...LEASE_DIR_SEGMENTS);
+  let names = [];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  // Derive the prefix from the canonical path builder rather than re-deriving the
+  // naming scheme. Duplicating it is how this function was wrong on first write:
+  // the builder maps `/` -> `__` BEFORE sanitizing, while a direct sanitize maps it
+  // to `-`, so the scan silently matched nothing.
+  const SENTINEL = 'H';
+  const sampleName = basename(amaCloserLeaseFilePath(rootDir, { repo, prNumber, headSha: SENTINEL }));
+  const prefix = sampleName.slice(0, sampleName.length - `${SENTINEL}.json`.length);
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !name.endsWith('.json')) continue;
+    const leasePath = join(dir, name);
+    const lease = readLeaseFile(leasePath);
+    if (!lease || String(lease.status) === TERMINAL) continue;
+    return { headSha: String(lease.headSha || ''), leasePath, lease };
+  }
+  return null;
 }
 
 /**

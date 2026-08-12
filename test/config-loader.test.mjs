@@ -1004,6 +1004,31 @@ test('top-level config.yaml accepts the mirrored worker_pool.dag.autowalk.deep_r
   }
 });
 
+test('top-level config.yaml accepts mirrored web_cookie_broker entitlements', () => {
+  // WCB entitlement config is consumed by hq, but the shared config.yaml must
+  // remain parseable by this strict Node watcher.
+  const tmp = freshTmp();
+  try {
+    const top = join(tmp, 'config.yaml');
+    writeFile(top, `
+      version: 1
+      web_cookie_broker:
+        entitlements:
+          linkedin-pipeline:
+            sites:
+              - linkedin.com
+              - www.linkedin.com
+    `);
+    const cfg = loadConfig({ topPath: top, env: {} });
+    assert.deepEqual(cfg.get('web_cookie_broker.entitlements.linkedin-pipeline.sites'), [
+      'linkedin.com',
+      'www.linkedin.com',
+    ]);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('top-level config.yaml accepts mirrored worker_pool.hardening_ledger keys', () => {
   // HLG projection knobs are Python-owned, but checked-in shared config.yaml
   // must parse under the watcher strict schema.

@@ -913,6 +913,29 @@ function schemaV1() {
           },
         },
       },
+      web_cookie_broker: {
+        __type: TYPE_DICT,
+        __strict: true,
+        __keys: {
+          entitlements: {
+            __type: TYPE_DICT,
+            __strict: false,
+            __default: {},
+            __keys: {},
+            __extra_keys_schema: {
+              __type: TYPE_DICT,
+              __strict: true,
+              __keys: {
+                sites: {
+                  __type: TYPE_LIST,
+                  __default: [],
+                  __item: { __type: TYPE_STRING },
+                },
+              },
+            },
+          },
+        },
+      },
       services: {
         __type: TYPE_DICT,
         __strict: true,

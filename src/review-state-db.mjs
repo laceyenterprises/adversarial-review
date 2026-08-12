@@ -451,10 +451,10 @@ const SQL_COUNT_OPEN_AWAITING_FIRST_PASS_REVIEW =
   // above deliberately keys success off gh_comment_id so a stale success claim
   // cannot mask a real gap. Here we exclude work the pipeline has explicitly
   // refused, which is evidence about the PR, not about reviewer health.
-  // COALESCE is load-bearing: in SQLite `NULL <> 'malformed'` is NULL, so a
-  // bare comparison would silently drop every row with no status yet -- the
-  // exact rows most likely to be genuinely awaiting a first pass.
-  "AND COALESCE(review_status, '') <> 'malformed' " +
+  // SQLite's `IS NOT` is null-safe here: it excludes the terminal malformed
+  // state while still counting rows with no status yet -- the exact rows most
+  // likely to be genuinely awaiting a first pass.
+  "AND review_status IS NOT 'malformed' " +
   "AND NOT EXISTS ( " +
   "  SELECT 1 FROM reviewer_passes " +
   "  WHERE reviewer_passes.repo = reviewed_prs.repo " +

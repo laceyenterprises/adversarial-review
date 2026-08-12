@@ -65,10 +65,9 @@ test('a genuinely pending PR still counts', () => {
 });
 
 test('a NULL review_status still counts', () => {
-  // COALESCE is load-bearing: in SQLite `NULL <> 'malformed'` evaluates to NULL,
-  // so a bare comparison would silently drop rows with no status yet -- exactly
-  // the rows most likely to be genuinely awaiting a first pass. Dropping them
-  // would turn a false page into a MISSED page, which is strictly worse.
+  // SQLite's `IS NOT` is null-safe here: it excludes malformed terminal rows
+  // without dropping rows that have no status yet -- exactly the rows most
+  // likely to be genuinely awaiting a first pass.
   const db = freshDb();
   addPr(db, { pr: 1, status: null });
   assert.equal(countOpenPrsAwaitingFirstPassReview(db), 1);

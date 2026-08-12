@@ -158,7 +158,7 @@ test('a DIFFERENT owner at the destination is still refused', () => {
   assert.equal(readAmaCloserLease(rootDir, { ...ID, headSha: TO }).watcherPid, 2, 'untouched');
 });
 
-test('a destination with matching source head but different owner is still refused', () => {
+test('a destination with matching source head but progressed owner still cleans up source', () => {
   const rootDir = root();
   acquireAmaCloserLease({ rootDir, ...ID, headSha: FROM, watcherPid: 1, now: NOW });
   updateAmaCloserLease({ rootDir, ...ID, headSha: FROM, status: 'dispatched', lrqId: 'lrq_x', now: NOW });
@@ -177,8 +177,88 @@ test('a destination with matching source head but different owner is still refus
   );
 
   const res = rekeyAmaCloserLease({ rootDir, ...ID, fromHeadSha: FROM, toHeadSha: TO, now: NOW });
-  assert.equal(res.rekeyed, false);
-  assert.equal(res.reason, 'lease-already-exists-at-to-head');
-  assert.ok(existsSync(amaCloserLeaseFilePath(rootDir, { ...ID, headSha: FROM })),
-    'mismatched ownership must not clean up the source lease');
+  assert.equal(res.rekeyed, true);
+  assert.equal(res.resumed, true);
+  assert.deepEqual(res.lease, differentOwner);
+  assert.equal(existsSync(amaCloserLeaseFilePath(rootDir, { ...ID, headSha: FROM })), false,
+    'matching rekey provenance proves the source lease is obsolete');
+});
+
+test('a terminal destination with matching source head still cleans up source', () => {
+  const rootDir = root();
+  acquireAmaCloserLease({ rootDir, ...ID, headSha: FROM, watcherPid: 1, now: NOW });
+  updateAmaCloserLease({ rootDir, ...ID, headSha: FROM, status: 'dispatched', lrqId: 'lrq_x', now: NOW });
+
+  const source = readAmaCloserLease(rootDir, { ...ID, headSha: FROM });
+  const terminalDestination = {
+    ...source,
+    headSha: TO,
+    status: 'terminal',
+    terminalOutcome: 'succeeded',
+    rekeyedFromHeadSha: FROM,
+    updatedAt: '2026-08-12T05:01:00.000Z',
+  };
+  writeFileSync(
+    amaCloserLeaseFilePath(rootDir, { ...ID, headSha: TO }),
+    `${JSON.stringify(terminalDestination, null, 2)}\n`,
+  );
+
+  const res = rekeyAmaCloserLease({ rootDir, ...ID, fromHeadSha: FROM, toHeadSha: TO, now: NOW });
+  assert.equal(res.rekeyed, true);
+  assert.equal(res.resumed, true);
+  assert.deepEqual(res.lease, terminalDestination);
+  assert.equal(existsSync(amaCloserLeaseFilePath(rootDir, { ...ID, headSha: FROM })), false,
+    'terminal progress at the destination must not strand the old source lease');
+});
+
+test('findLiveAmaCloserLease ignores leases superseded by a rekey chain', () => {
+  const rootDir = root();
+  acquireAmaCloserLease({ rootDir, ...ID, headSha: FROM, watcherPid: 1, now: NOW });
+  updateAmaCloserLease({ rootDir, ...ID, headSha: FROM, status: 'dispatched', lrqId: 'lrq_old', now: NOW });
+
+  const source = readAmaCloserLease(rootDir, { ...ID, headSha: FROM });
+  const carried = {
+    ...source,
+    headSha: TO,
+    rekeyedFromHeadSha: FROM,
+    updatedAt: '2026-08-12T05:01:00.000Z',
+  };
+  writeFileSync(
+    amaCloserLeaseFilePath(rootDir, { ...ID, headSha: TO }),
+    `${JSON.stringify(carried, null, 2)}\n`,
+  );
+
+  const found = findLiveAmaCloserLease(rootDir, ID);
+  assert.ok(found, 'must find the non-superseded live lease');
+  assert.equal(found.headSha, TO);
+  assert.equal(found.lease.lrqId, 'lrq_old');
+});
+
+test('findLiveAmaCloserLease returns null when only a superseding terminal lease remains', () => {
+  const rootDir = root();
+  acquireAmaCloserLease({ rootDir, ...ID, headSha: FROM, watcherPid: 1, now: NOW });
+  updateAmaCloserLease({ rootDir, ...ID, headSha: FROM, status: 'dispatched', lrqId: 'lrq_old', now: NOW });
+
+  const source = readAmaCloserLease(rootDir, { ...ID, headSha: FROM });
+  const terminalDestination = {
+    ...source,
+    headSha: TO,
+    status: 'terminal',
+    terminalOutcome: 'succeeded',
+    rekeyedFromHeadSha: FROM,
+    updatedAt: '2026-08-12T05:01:00.000Z',
+  };
+  writeFileSync(
+    amaCloserLeaseFilePath(rootDir, { ...ID, headSha: TO }),
+    `${JSON.stringify(terminalDestination, null, 2)}\n`,
+  );
+
+  assert.equal(findLiveAmaCloserLease(rootDir, ID), null,
+    'the old source is superseded and the destination is already terminal');
+});
+
+test('findLiveAmaCloserLease rejects missing PR identity', () => {
+  const rootDir = root();
+  assert.throws(() => findLiveAmaCloserLease(rootDir), /identity\.repo is required/);
+  assert.throws(() => findLiveAmaCloserLease(rootDir, { repo: ID.repo }), /identity\.prNumber must be numeric/);
 });

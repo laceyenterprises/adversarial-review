@@ -109,16 +109,6 @@ function readLeaseFile(filePath) {
   }
 }
 
-function sameLeaseOwner(left, right) {
-  return String(left.repo || '') === String(right.repo || '')
-    && Number(left.prNumber) === Number(right.prNumber)
-    && String(left.status || '') === String(right.status || '')
-    && String(left.acquiredAt || '') === String(right.acquiredAt || '')
-    && String(left.watcherPid ?? '') === String(right.watcherPid ?? '')
-    && String(left.lrqId ?? '') === String(right.lrqId ?? '')
-    && String(left.terminalOutcome ?? '') === String(right.terminalOutcome ?? '');
-}
-
 /**
  * Public — read the lease for a given `(repo, prNumber, headSha)`.
  * Returns `null` when no lease exists.
@@ -160,7 +150,8 @@ export function deleteAmaCloserLease(rootDir, identity) {
  *
  * Deliberately conservative:
  *  - refuses when no lease exists at `fromHeadSha` (nothing to carry)
- *  - refuses when a lease already exists at `toHeadSha` (would clobber a real owner)
+ *  - refuses when an unrelated lease already exists at `toHeadSha` (would clobber a real owner)
+ *  - resumes an interrupted carry when the destination points back to `fromHeadSha`
  *  - refuses a terminal lease (a finished lease must not be resurrected onto a new head)
  *  - preserves `acquiredAt`, `lrqId` and `watcherPid`; only `headSha` and `updatedAt`
  *    change, so the audit trail still shows one continuous ownership
@@ -203,17 +194,16 @@ export function rekeyAmaCloserLease({
   const toPath = amaCloserLeaseFilePath(rootDir, { repo, prNumber, headSha: toHeadSha });
   const destination = readLeaseFile(toPath);
   if (destination) {
-    // RESUME our own interrupted rekey before refusing. This is a two-step operation
+    // RESUME an interrupted rekey before refusing. This is a two-step operation
     // (write destination, then remove source), so a crash between the steps leaves
     // BOTH files on disk. A guard that only refuses would then refuse forever on
     // every retry -- turning one transient interruption into a permanently orphaned
-    // lease, which is the very strand this function exists to fix. If the
-    // destination carries OUR fromHeadSha and the same ownership/audit fields, step
-    // 1 already succeeded and only the source removal is outstanding, so finish it.
+    // lease, which is the very strand this function exists to fix. If the destination
+    // carries this fromHeadSha, step 1 already succeeded and the source is obsolete
+    // even if the destination has since progressed to terminal or a replacement owner.
     if (
       String(destination.headSha || '') === String(toHeadSha)
       && String(destination.rekeyedFromHeadSha || '') === String(fromHeadSha)
-      && sameLeaseOwner(existing, destination)
     ) {
       rmSync(fromPath, { force: true });
       return { rekeyed: true, resumed: true, leasePath: toPath, lease: destination };
@@ -245,6 +235,13 @@ export function rekeyAmaCloserLease({
  * @returns {{ headSha: string, leasePath: string, lease: object } | null}
  */
 export function findLiveAmaCloserLease(rootDir, { repo, prNumber } = {}) {
+  if (!repo) {
+    throw new TypeError('findLiveAmaCloserLease: identity.repo is required');
+  }
+  if (!Number.isFinite(Number(prNumber))) {
+    throw new TypeError('findLiveAmaCloserLease: identity.prNumber must be numeric');
+  }
+
   const dir = join(rootDir, ...LEASE_DIR_SEGMENTS);
   let names = [];
   try {
@@ -259,14 +256,24 @@ export function findLiveAmaCloserLease(rootDir, { repo, prNumber } = {}) {
   const SENTINEL = 'H';
   const sampleName = basename(amaCloserLeaseFilePath(rootDir, { repo, prNumber, headSha: SENTINEL }));
   const prefix = sampleName.slice(0, sampleName.length - `${SENTINEL}.json`.length);
+  const candidates = [];
   for (const name of names) {
     if (!name.startsWith(prefix) || !name.endsWith('.json')) continue;
     const leasePath = join(dir, name);
     const lease = readLeaseFile(leasePath);
-    if (!lease || String(lease.status) === TERMINAL) continue;
-    return { headSha: String(lease.headSha || ''), leasePath, lease };
+    if (!lease) continue;
+    candidates.push({ headSha: String(lease.headSha || ''), leasePath, lease });
   }
-  return null;
+
+  const supersededHeads = new Set(
+    candidates
+      .map(({ lease }) => String(lease.rekeyedFromHeadSha || ''))
+      .filter(Boolean),
+  );
+  return candidates.find(({ headSha, lease }) => (
+    !supersededHeads.has(headSha)
+    && String(lease.status) !== TERMINAL
+  )) || null;
 }
 
 /**

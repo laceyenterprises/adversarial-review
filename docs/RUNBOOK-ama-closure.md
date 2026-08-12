@@ -673,8 +673,16 @@ still inside the `hq dispatch` launch window, the lease can remain
 protection and must not be hand-deleted. Once `lrqId` is present, check
 `hq dispatch status <lrqId>` if you want to know the closer's live state.
 
-A new head SHA always gets a fresh lease — the file is keyed by
-`headSha` so head-change naturally invalidates the old lease.
+A closer that moves the head it already owns rekeys the lease to the new
+head and records `rekeyedFromHeadSha` on the destination file. If the
+process is interrupted after writing the destination but before deleting
+the source, that provenance is the recovery proof: the old source lease
+is obsolete even if the destination has since progressed to another owner
+or a terminal outcome. Lease discovery ignores any lease whose `headSha`
+is referenced by another matching lease's `rekeyedFromHeadSha`, then
+chooses from the remaining non-terminal leases. This prevents an orphaned
+pre-rekey source lease from poisoning the watcher after the current head
+has already completed.
 
 ### Merge gate lease visibility
 

@@ -191,9 +191,21 @@ export function rekeyAmaCloserLease({
   }
 
   const toPath = amaCloserLeaseFilePath(rootDir, { repo, prNumber, headSha: toHeadSha });
-  if (readLeaseFile(toPath)) {
-    // Someone already owns the destination head. Carrying ours forward would
-    // silently clobber a live owner, which is worse than the strand we are fixing.
+  const existingAtTo = readLeaseFile(toPath);
+  if (existingAtTo) {
+    // RESUME our own interrupted rekey before refusing. This is a two-step operation
+    // (write destination, then remove source), so a crash between the steps leaves
+    // BOTH files on disk. A guard that only refuses would then refuse forever on
+    // every retry -- turning one transient interruption into a permanently orphaned
+    // lease, which is the very strand this function exists to fix. If the
+    // destination carries OUR fromHeadSha, step 1 already succeeded and only the
+    // source removal is outstanding, so finish it.
+    if (String(existingAtTo.rekeyedFromHeadSha || '') === String(fromHeadSha)) {
+      rmSync(fromPath, { force: true });
+      return { rekeyed: true, resumed: true, leasePath: toPath, lease: existingAtTo };
+    }
+    // A genuinely different owner holds the destination head. Carrying ours forward
+    // would silently clobber a live owner, which is worse than the strand.
     return { rekeyed: false, reason: 'lease-already-exists-at-to-head' };
   }
 

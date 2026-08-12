@@ -123,3 +123,38 @@ test('findLiveAmaCloserLease ignores terminal leases and other PRs', () => {
 test('findLiveAmaCloserLease returns null when the lease dir does not exist', () => {
   assert.equal(findLiveAmaCloserLease(root(), ID), null);
 });
+
+test('an interrupted rekey resumes instead of refusing forever', () => {
+  // The rekey is write-destination-then-remove-source, so a crash between the steps
+  // leaves BOTH files on disk. A guard that only refuses would refuse on every retry,
+  // turning one transient interruption into a permanently orphaned lease -- the exact
+  // strand this function exists to fix.
+  const rootDir = root();
+  acquireAmaCloserLease({ rootDir, ...ID, headSha: FROM, watcherPid: 5, now: NOW });
+  updateAmaCloserLease({ rootDir, ...ID, headSha: FROM, status: 'dispatched', lrqId: 'lrq_z', now: NOW });
+
+  // Simulate the crash: step 1 completed, step 2 did not.
+  const first = rekeyAmaCloserLease({ rootDir, ...ID, fromHeadSha: FROM, toHeadSha: TO, now: NOW });
+  assert.equal(first.rekeyed, true);
+  acquireAmaCloserLease({ rootDir, ...ID, headSha: FROM, watcherPid: 5, now: NOW }); // source back on disk
+
+  const resumed = rekeyAmaCloserLease({ rootDir, ...ID, fromHeadSha: FROM, toHeadSha: TO, now: NOW });
+  assert.equal(resumed.rekeyed, true, 'must complete rather than refuse');
+  assert.equal(resumed.resumed, true, 'and report that it resumed');
+  assert.equal(existsSync(amaCloserLeaseFilePath(rootDir, { ...ID, headSha: FROM })), false,
+    'the leftover source must be cleaned up');
+  assert.equal(readAmaCloserLease(rootDir, { ...ID, headSha: TO }).lrqId, 'lrq_z',
+    'the carried lease is preserved, not overwritten by the retry');
+});
+
+test('a DIFFERENT owner at the destination is still refused', () => {
+  // The resume path must not become a way to clobber someone else's lease: it keys on
+  // rekeyedFromHeadSha matching OUR source head.
+  const rootDir = root();
+  acquireAmaCloserLease({ rootDir, ...ID, headSha: FROM, watcherPid: 1, now: NOW });
+  acquireAmaCloserLease({ rootDir, ...ID, headSha: TO, watcherPid: 2, now: NOW });
+  const res = rekeyAmaCloserLease({ rootDir, ...ID, fromHeadSha: FROM, toHeadSha: TO, now: NOW });
+  assert.equal(res.rekeyed, false);
+  assert.equal(res.reason, 'lease-already-exists-at-to-head');
+  assert.equal(readAmaCloserLease(rootDir, { ...ID, headSha: TO }).watcherPid, 2, 'untouched');
+});

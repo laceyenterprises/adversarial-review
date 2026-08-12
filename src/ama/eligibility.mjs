@@ -478,13 +478,14 @@ function verifiedCommitHasNonEmptyDiff(verifiedCommit) {
 
 function verifiedHamCommitIdentityMatches(verifiedCommit) {
   if (!verifiedCommit || typeof verifiedCommit !== 'object') return false;
+  const hasCommitter = Object.prototype.hasOwnProperty.call(verifiedCommit, 'committer');
   const committer = typeof verifiedCommit.committer === 'object'
     ? verifiedCommit.committer?.login
     : verifiedCommit.committer;
+  if (hasCommitter) return hamAuditCommentAuthorMatches(committer);
   const author = typeof verifiedCommit.author === 'object'
     ? verifiedCommit.author?.login
     : verifiedCommit.author;
-  if (committer) return hamAuditCommentAuthorMatches(committer);
   if (author) return hamAuditCommentAuthorMatches(author);
   return false;
 }
@@ -553,9 +554,8 @@ function validateHamFindingMap(findings) {
   const nonBlockingTitles = [];
   for (const finding of findings) {
     const title = String(finding?.title || finding?.finding || '').trim();
-    const file = String(finding?.file || finding?.path || '').trim();
     const addressed = finding?.addressed === true;
-    if (!title || !file || !addressed) {
+    if (!title || !addressed) {
       return { ok: false, count: findings.length, blocking, nonBlocking, nonBlockingTitles };
     }
     if (finding?.blocking === true) {
@@ -575,9 +575,17 @@ function hamAuditBodyCoversFindings(body, findings) {
   for (const finding of findings || []) {
     const title = String(finding?.title || finding?.finding || '').trim().toLowerCase();
     const file = String(finding?.file || finding?.path || '').trim().toLowerCase();
-    if (!title || !file || !text.includes(title) || !text.includes(file)) return false;
+    if (!title || !text.includes(title)) return false;
+    if (file && !text.includes(file)) return false;
   }
   return true;
+}
+
+function hamDocCurrencyLine(body) {
+  return String(body || '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .find((line) => /\bdoc-currency\s*:/i.test(line)) || '';
 }
 
 function normalizePathList(value) {
@@ -622,22 +630,23 @@ function validateHamDocCurrencyEvidence(evidence, verifiedCommit, verifiedAuditB
   const docsUpdated = normalizePathList(claim.docsUpdated);
   const skippedSuperprojectDocs = normalizePathList(claim.skippedSuperprojectDocs);
   const body = String(verifiedAuditBody || '');
-  const lowerBody = body.toLowerCase();
+  const docCurrencyLine = hamDocCurrencyLine(body);
+  const lowerDocCurrencyLine = docCurrencyLine.toLowerCase();
   const baseOk =
     samePathSet(claimedChangedFiles, changedFiles)
-    && lowerBody.includes('doc-currency')
-    && bodyMentionsEveryPath(body, changedFiles);
+    && lowerDocCurrencyLine.includes('doc-currency')
+    && bodyMentionsEveryPath(docCurrencyLine, changedFiles);
   let statusOk = false;
   const docsUpdatedInCommit = pathSetIncludesAll(changedFiles, docsUpdated);
   if (status === 'updated') {
-    statusOk = docsUpdatedInCommit && bodyMentionsEveryPath(body, docsUpdated);
+    statusOk = docsUpdatedInCommit && bodyMentionsEveryPath(docCurrencyLine, docsUpdated);
   } else if (status === 'skipped_superproject') {
     statusOk =
       skippedSuperprojectDocs.length > 0
-      && lowerBody.includes('skipped superproject-doc obligation')
-      && bodyMentionsEveryPath(body, skippedSuperprojectDocs);
+      && lowerDocCurrencyLine.includes('skipped superproject-doc obligation')
+      && bodyMentionsEveryPath(docCurrencyLine, skippedSuperprojectDocs);
   } else if (status === 'not_applicable') {
-    statusOk = lowerBody.includes('not applicable');
+    statusOk = lowerDocCurrencyLine.includes('not applicable');
   }
   return {
     ok: baseOk && statusOk,

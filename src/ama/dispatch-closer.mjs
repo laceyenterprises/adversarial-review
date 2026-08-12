@@ -2729,7 +2729,7 @@ function parseHamAuditFindingsFromBody(body, changedFiles) {
   const text = String(body || '');
   const files = Array.isArray(changedFiles) ? changedFiles.map(String).filter(Boolean) : [];
   const findings = [];
-  const linePattern = /^-\s+\*\*(.+?)\*\*\s+\((blocking|non-blocking)\)\s+[-\u2013\u2014]\s+(.+)$/gim;
+  const linePattern = /^\s*-\s+\*\*(.+?)\*\*\s+\((blocking|non-blocking)\)\s+[-\u2013\u2014]\s+(.+)$/gim;
   let match;
   while ((match = linePattern.exec(text)) !== null) {
     const title = String(match[1] || '').trim();
@@ -2739,7 +2739,7 @@ function parseHamAuditFindingsFromBody(body, changedFiles) {
     const file = files.find((candidate) => detail.includes(candidate))
       || files.find((candidate) => matchedLine.includes(candidate))
       || '';
-    if (!title || !file) continue;
+    if (!title) continue;
     findings.push({
       title,
       blocking: kind === 'blocking',
@@ -2754,7 +2754,11 @@ function parseHamAuditFindingsFromBody(body, changedFiles) {
 
 function parseHamAuditDocCurrencyFromBody(body, changedFiles) {
   const text = String(body || '');
-  const lower = text.toLowerCase();
+  const docCurrencyLine = text
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .find((line) => /\bdoc-currency\s*:/i.test(line)) || '';
+  const lower = docCurrencyLine.toLowerCase();
   const files = Array.isArray(changedFiles) ? changedFiles.map(String).filter(Boolean) : [];
   if (!lower.includes('doc-currency')) return null;
   if (lower.includes('not applicable')) {

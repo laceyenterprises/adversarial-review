@@ -2727,7 +2727,9 @@ function selectLatestHamTerminalAuditComment(comments) {
 
 function parseHamAuditFindingsFromBody(body, changedFiles) {
   const text = String(body || '');
-  const files = Array.isArray(changedFiles) ? changedFiles.map(String).filter(Boolean) : [];
+  const files = Array.isArray(changedFiles)
+    ? changedFiles.map(String).filter(Boolean).sort((left, right) => right.length - left.length)
+    : [];
   const findings = [];
   const linePattern = /^\s*-\s+\*\*(.+?)\*\*\s+\((blocking|non-blocking)\)\s+[-\u2013\u2014]\s+(.+)$/gim;
   let match;

@@ -2547,7 +2547,7 @@ test('ham terminal remediation: external committer cannot self-certify a stale h
   assert.ok(result.reasons.includes('stale-review-head') || result.reasons.includes('blocking-findings-present'));
 });
 
-test('ham terminal remediation: null GitHub committer does not fall back to forged author', () => {
+test('ham terminal remediation: null GitHub committer falls back to verified author identity', () => {
   const reviewedHead = 'abc12345';
   const currentHead = 'def67890';
   const { reviewState, prMetadata, cfg } = eligibleFixture({
@@ -2566,6 +2566,34 @@ test('ham terminal remediation: null GitHub committer does not fall back to forg
       headSha: currentHead,
       parentSha: reviewedHead,
       author: 'hammer-worker',
+      committer: null,
+    }),
+  });
+
+  assert.equal(result.trace.hamTerminalRemediation.checks.commitIdentity, true);
+  assert.equal(result.trace.hamTerminalRemediation.ok, true);
+  assert.equal(result.eligible, true, JSON.stringify(result, null, 2));
+});
+
+test('ham terminal remediation: no verified commit identity fails closed', () => {
+  const reviewedHead = 'abc12345';
+  const currentHead = 'def67890';
+  const { reviewState, prMetadata, cfg } = eligibleFixture({
+    reviewState: {
+      headSha: reviewedHead,
+      verdict: 'request-changes',
+      blockingFindingCount: 1,
+      blockingFindingState: 'known',
+    },
+    prMetadata: { headSha: currentHead },
+  });
+  const result = isEligibleForAmaClosure(reviewState, prMetadata, cfg, {
+    env: ENV,
+    hamTerminalRemediation: hamEvidence({ headSha: currentHead, parentSha: reviewedHead }),
+    hamTerminalRemediationGroundTruth: hamGroundTruth({
+      headSha: currentHead,
+      parentSha: reviewedHead,
+      author: null,
       committer: null,
     }),
   });

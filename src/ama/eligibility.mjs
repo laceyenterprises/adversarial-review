@@ -478,11 +478,10 @@ function verifiedCommitHasNonEmptyDiff(verifiedCommit) {
 
 function verifiedHamCommitIdentityMatches(verifiedCommit) {
   if (!verifiedCommit || typeof verifiedCommit !== 'object') return false;
-  const hasCommitter = Object.prototype.hasOwnProperty.call(verifiedCommit, 'committer');
   const committer = typeof verifiedCommit.committer === 'object'
     ? verifiedCommit.committer?.login
     : verifiedCommit.committer;
-  if (hasCommitter) return hamAuditCommentAuthorMatches(committer);
+  if (committer) return hamAuditCommentAuthorMatches(committer);
   const author = typeof verifiedCommit.author === 'object'
     ? verifiedCommit.author?.login
     : verifiedCommit.author;
@@ -635,7 +634,7 @@ function validateHamDocCurrencyEvidence(evidence, verifiedCommit, verifiedAuditB
   const baseOk =
     samePathSet(claimedChangedFiles, changedFiles)
     && lowerDocCurrencyLine.includes('doc-currency')
-    && bodyMentionsEveryPath(docCurrencyLine, changedFiles);
+    && bodyMentionsEveryPath(body, changedFiles);
   let statusOk = false;
   const docsUpdatedInCommit = pathSetIncludesAll(changedFiles, docsUpdated);
   if (status === 'updated') {

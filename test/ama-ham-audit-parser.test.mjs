@@ -65,3 +65,32 @@ test('HAM audit doc-currency parsing is scoped to the Doc-currency line', () => 
     docsUpdated: ['README.md'],
   });
 });
+
+test('HAM audit finding parsing prefers the most specific changed file path', () => {
+  const evidence = buildHamTerminalRemediationEvidenceFromGroundTruth({
+    reviewedHead: 'abc123',
+    verifiedCommit: {
+      sha: 'def456',
+      parentSha: 'abc123',
+      trailers: { 'worker-ticket': 'HAM' },
+      changedFiles: ['src/auth.js', 'src/auth.js.map'],
+    },
+    verifiedAuditComment: {
+      body: [
+        '<!-- hq:ham-terminal-remediation:audit -->',
+        '- **Source map attribution** (non-blocking) - Updated src/auth.js.map handling.',
+        '',
+        'Doc-currency: not applicable for changed files src/auth.js and src/auth.js.map.',
+      ].join('\n'),
+    },
+  });
+
+  assert.deepEqual(evidence.auditComment.findings, [
+    {
+      title: 'Source map attribution',
+      blocking: false,
+      file: 'src/auth.js.map',
+      addressed: true,
+    },
+  ]);
+});

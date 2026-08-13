@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { assertCanonicalOwner } from './adapters/agent-runtime/append-only-owner.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 
 const DEFAULT_WATCHER_STALL_EXIT_CODE = 75;
@@ -37,6 +38,17 @@ function resolveWatcherHeartbeatPath({ env = process.env, rootDir } = {}) {
   return undefined;
 }
 
+function resolveWatcherHeartbeatOwnerGuardRoot({ env = process.env, rootDir, filePath } = {}) {
+  const hqRoot = env?.HQ_ROOT;
+  if (typeof hqRoot === 'string' && hqRoot.trim() !== '') {
+    const hqHeartbeatPath = join(hqRoot, '.adversarial-watcher', 'heartbeat.json');
+    if (filePath === hqHeartbeatPath) {
+      return hqRoot;
+    }
+  }
+  return rootDir;
+}
+
 function parsePositiveMs(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
   const parsed = Number(value);
@@ -64,6 +76,8 @@ function createWatcherHeartbeat({
   readFile = readFileSync,
   pid = process.pid,
   logger = console,
+  ownerGuardRootDir = rootDir,
+  ownerGuardOptions,
 } = {}) {
   if (!filePath) {
     throw new TypeError('createWatcherHeartbeat requires rootDir or filePath');
@@ -79,6 +93,14 @@ function createWatcherHeartbeat({
 
   function writeHeartbeat(heartbeat) {
     try {
+      if (ownerGuardRootDir) {
+        assertCanonicalOwner(ownerGuardRootDir, filePath, {
+          cannotVerifyMessage: 'cannot verify watcher heartbeat caller ownership',
+          crossUserMessage: 'refusing cross-user watcher heartbeat write',
+          existingFileMessage: 'refusing write to non-canonical-owned watcher heartbeat file',
+          ...ownerGuardOptions,
+        });
+      }
       return Promise.resolve(writeFile(filePath, `${JSON.stringify(heartbeat, null, 2)}\n`))
         .catch((err) => {
           logger?.warn?.(`[watcher] failed to persist heartbeat at ${filePath}: ${err?.message || err}`);
@@ -251,6 +273,7 @@ export {
   createWatcherStallWatchdog,
   watcherHeartbeatPath,
   resolveWatcherHeartbeatPath,
+  resolveWatcherHeartbeatOwnerGuardRoot,
   DEFAULT_WATCHER_STALL_EXIT_CODE,
   DEFAULT_WATCHER_STALL_WATCHDOG_MS,
   DEFAULT_WATCHER_STALL_CHECK_INTERVAL_MS,

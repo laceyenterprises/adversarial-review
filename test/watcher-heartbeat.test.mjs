@@ -8,6 +8,7 @@ import {
   createWatcherHeartbeat,
   createWatcherStallWatchdog,
   DEFAULT_WATCHER_STALL_EXIT_CODE,
+  resolveWatcherHeartbeatOwnerGuardRoot,
   resolveWatcherHeartbeatPath,
   watcherHeartbeatPath,
 } from '../src/watcher-heartbeat.mjs';
@@ -155,6 +156,41 @@ test('watcher heartbeat catches asynchronous atomic write failures', async () =>
   assert.match(warnings[0], /disk full/);
 });
 
+test('watcher heartbeat refuses cross-user writes before invoking the writer', () => {
+  const rootDir = '/Users/airlock/agent-os-hq';
+  const filePath = join(rootDir, '.adversarial-watcher', 'heartbeat.json');
+  const warnings = [];
+  const writes = [];
+  const heartbeat = createWatcherHeartbeat({
+    rootDir,
+    filePath,
+    now: () => new Date('2026-07-04T10:00:00.000Z'),
+    writeFile() {
+      writes.push(filePath);
+    },
+    readFile() {
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    },
+    ownerGuardRootDir: rootDir,
+    ownerGuardOptions: {
+      currentUid: () => 502,
+      exists: (path) => path === rootDir,
+      stat: (path) => {
+        assert.equal(path, rootDir);
+        return { uid: 501 };
+      },
+    },
+    logger: { warn(message) { warnings.push(message); } },
+  });
+
+  heartbeat.markPoll();
+
+  assert.deepEqual(writes, []);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /refusing cross-user watcher heartbeat write/);
+  assert.match(warnings[0], /caller uid 502, canonical owner uid 501/);
+});
+
 test('stall watchdog trips exit 75 when an idle watcher makes no poll progress', () => {
   const heartbeat = createWatcherHeartbeat({
     filePath: join(tempRoot(), 'heartbeat.json'),
@@ -243,6 +279,28 @@ test('resolveWatcherHeartbeatPath defaults to the stable HQ_ROOT path', () => {
     rootDir: '/deploy/tools/adversarial-review',
   });
   assert.equal(path, join('/Users/airlock/agent-os-hq', '.adversarial-watcher', 'heartbeat.json'));
+});
+
+test('resolveWatcherHeartbeatOwnerGuardRoot uses HQ_ROOT for the stable HQ heartbeat path', () => {
+  const filePath = join('/Users/airlock/agent-os-hq', '.adversarial-watcher', 'heartbeat.json');
+  const ownerGuardRoot = resolveWatcherHeartbeatOwnerGuardRoot({
+    env: { HQ_ROOT: '/Users/airlock/agent-os-hq' },
+    rootDir: '/deploy/tools/adversarial-review',
+    filePath,
+  });
+  assert.equal(ownerGuardRoot, '/Users/airlock/agent-os-hq');
+});
+
+test('resolveWatcherHeartbeatOwnerGuardRoot uses rootDir for explicit overrides', () => {
+  const ownerGuardRoot = resolveWatcherHeartbeatOwnerGuardRoot({
+    env: {
+      ADVERSARIAL_WATCHER_HEARTBEAT_PATH: '/custom/heartbeat.json',
+      HQ_ROOT: '/Users/airlock/agent-os-hq',
+    },
+    rootDir: '/deploy/tools/adversarial-review',
+    filePath: '/custom/heartbeat.json',
+  });
+  assert.equal(ownerGuardRoot, '/deploy/tools/adversarial-review');
 });
 
 test('resolveWatcherHeartbeatPath falls back to the rootDir data dir when HQ_ROOT is unset', () => {

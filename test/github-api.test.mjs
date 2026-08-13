@@ -2581,6 +2581,30 @@ test('execGhJson rejects gh api --paginate with a clear local error', async () =
   );
 });
 
+test('execGhJson retries transient gh subprocess timeouts before escalating', async () => {
+  await withEnv({ AGENT_OS_GH_API_EXEC_RETRY_BACKOFF_MS: '0' }, async () => {
+    const mod = await importGithubApiFresh();
+    const calls = [];
+    const timeoutErr = Object.assign(new Error('Command failed after timeout'), {
+      killed: true,
+      signal: 'SIGKILL',
+    });
+
+    const result = await mod.__test__.execGhJson(async (command, args, options) => {
+      calls.push({ command, args: [...args], options });
+      if (calls.length === 1) throw timeoutErr;
+      return {
+        stdout: 'HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\n\n{"ok":true}',
+      };
+    }, ['api', 'repos/laceyenterprises/adversarial-review/pulls/834']);
+
+    assert.deepEqual(result, { ok: true });
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls.map(({ args }) => args.slice(0, 2)), [['api', '-i'], ['api', '-i']]);
+    assert.equal(calls[0].options.killSignal, 'SIGKILL');
+  });
+});
+
 test('parseGhApiHttpEnvelope normalizes only headers and preserves body text', async () => {
   const mod = await importGithubApiFresh();
   const body = '{"message":"line\\r\\ninside body"}';
@@ -3181,4 +3205,158 @@ test('watcher lifecycle sync uses the owning domain when PRs close unmerged', ()
   }]);
   assert.equal(summary.headStateCalls, 1);
   assert.equal(summary.rollupCalls, 0);
+});
+
+test('transient-empty statusCheckRollup falls back to REST check cross-check', async () => {
+  // Regression for the 2026-08-13 hammer fail-close (PR #5324): the GraphQL
+  // statusCheckRollup lags right after a remediation head push and returns zero
+  // contexts while the REST check-runs API for the same head is already green.
+  const expected = makeExpectedRollup();
+  const { fetchPullRequestRollup } = await importGithubApiFresh();
+  const head = expected.headRefOid;
+  const restCheckBody = JSON.stringify({
+    check_runs: expected.checks.map((check) => ({
+      name: check.name,
+      conclusion: check.conclusion,
+      completed_at: check.completedAt,
+    })),
+  });
+  async function execFileImpl(command, args) {
+    assert.equal(command, 'gh');
+    const joined = args.join(' ');
+    if (args.includes('graphql')) {
+      // GraphQL rollup reports ZERO checks; PR + headRefOid otherwise present.
+      return { stdout: JSON.stringify(buildGraphqlResponse(expected, { checks: [] })) };
+    }
+    if (joined.startsWith(`api -i repos/${FIXTURE_REPO}/commits/${head}/check-runs?`)) {
+      return { stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${restCheckBody}` };
+    }
+    if (joined.startsWith(`api repos/${FIXTURE_REPO}/commits/${head}/check-runs?`)) {
+      return { stdout: restCheckBody };
+    }
+    if (joined.startsWith(`api -i repos/${FIXTURE_REPO}/commits/${head}/status?`)) {
+      return { stdout: 'HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n{"statuses":[]}' };
+    }
+    if (joined.startsWith(`api repos/${FIXTURE_REPO}/commits/${head}/status?`)) {
+      return { stdout: '{"statuses":[]}' };
+    }
+    throw new Error(`Unexpected gh invocation: ${joined}`);
+  }
+  const result = await fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    env: {},
+    execFileImpl,
+    recordApiCallImpl: () => {},
+  });
+  assert.equal(
+    result.checks.length,
+    expected.checks.length,
+    'REST cross-check should populate checks when the GraphQL rollup is transiently empty',
+  );
+  assert.deepEqual(
+    result.checks.map((check) => check.name).sort(),
+    expected.checks.map((check) => check.name).sort(),
+  );
+});
+
+test('transient-empty statusCheckRollup propagates REST cross-check failures', async () => {
+  const expected = makeExpectedRollup();
+  const { fetchPullRequestRollup } = await importGithubApiFresh();
+  const head = expected.headRefOid;
+
+  await assert.rejects(
+    () => fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+      env: {},
+      recordApiCallImpl: () => {},
+      execFileImpl: async (command, args) => {
+        assert.equal(command, 'gh');
+        const joined = args.join(' ');
+        if (args.includes('graphql')) {
+          return { stdout: JSON.stringify(buildGraphqlResponse(expected, { checks: [] })) };
+        }
+        if (joined.startsWith(`api -i repos/${FIXTURE_REPO}/commits/${head}/check-runs?`)) {
+          throw new Error('REST check-runs API outage');
+        }
+        throw new Error(`Unexpected gh invocation: ${joined}`);
+      },
+    }),
+    /REST check-runs API outage/,
+  );
+});
+
+test('genuinely-empty checks stay empty when both GraphQL and REST report none', async () => {
+  const expected = makeExpectedRollup();
+  const { fetchPullRequestRollup } = await importGithubApiFresh();
+  const head = expected.headRefOid;
+  async function execFileImpl(command, args) {
+    assert.equal(command, 'gh');
+    const joined = args.join(' ');
+    if (args.includes('graphql')) {
+      return { stdout: JSON.stringify(buildGraphqlResponse(expected, { checks: [] })) };
+    }
+    if (joined.includes(`commits/${head}/check-runs`)) {
+      const body = JSON.stringify({ check_runs: [] });
+      return { stdout: joined.startsWith('api -i') ? `HTTP/1.1 200 OK\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${body}` : body };
+    }
+    if (joined.includes(`commits/${head}/status`)) {
+      const body = '{"statuses":[]}';
+      return { stdout: joined.startsWith('api -i') ? `HTTP/1.1 200 OK\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${body}` : body };
+    }
+    throw new Error(`Unexpected gh invocation: ${joined}`);
+  }
+  const result = await fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    env: {},
+    execFileImpl,
+    recordApiCallImpl: () => {},
+  });
+  assert.equal(result.checks.length, 0, 'no false checks when REST also reports none');
+});
+
+test('gh subprocess calls carry a bounded timeout + SIGKILL (no-hang guard)', async () => {
+  // Regression for the 2026-08-13 adversarial-watcher wedge: a no-timeout gh call
+  // froze the event loop for 30+ min. Every gh exec must be time-bounded so a
+  // hung gh rejects instead of awaiting forever.
+  const { fetchPullRequestMergeability } = await importGithubApiFresh();
+  let ghOptions = null;
+  async function execFileImpl(command, args, options) {
+    if (command === 'gh') {
+      ghOptions = options;
+      return { stdout: JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }) };
+    }
+    throw new Error(`adapter path disabled in test: ${command}`);
+  }
+  const result = await fetchPullRequestMergeability(FIXTURE_REPO, FIXTURE_PR, {
+    env: {},
+    execFileImpl,
+    recordApiCallImpl: () => {},
+  });
+  assert.equal(result.mergeStateStatus, 'CLEAN');
+  assert.ok(ghOptions, 'gh execFile options should be passed');
+  assert.equal(typeof ghOptions.timeout, 'number');
+  assert.ok(ghOptions.timeout > 0, 'gh calls must carry a positive timeout so a hung gh cannot wedge the watcher');
+  assert.equal(ghOptions.killSignal, 'SIGKILL');
+});
+
+test('mergeability sampling retries transient gh subprocess timeouts', async () => {
+  await withEnv({ AGENT_OS_GH_API_EXEC_RETRY_BACKOFF_MS: '0' }, async () => {
+    const { fetchPullRequestMergeability } = await importGithubApiFresh();
+    const calls = [];
+    const timeoutErr = Object.assign(new Error('Command failed after timeout'), {
+      killed: true,
+      signal: 'SIGKILL',
+    });
+
+    const result = await fetchPullRequestMergeability(FIXTURE_REPO, FIXTURE_PR, {
+      env: {},
+      recordApiCallImpl: () => {},
+      execFileImpl: async (command, args, options) => {
+        calls.push({ command, args: [...args], options });
+        if (calls.length === 1) throw timeoutErr;
+        return { stdout: JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }) };
+      },
+    });
+
+    assert.deepEqual(result, { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].options.killSignal, 'SIGKILL');
+  });
 });

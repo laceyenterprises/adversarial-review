@@ -9,13 +9,31 @@ import {
   readAdapterReviewContext,
   resolveGitHubAdapterBin,
 } from './github-adapter-client.mjs';
-import { execGhWithRetry } from './gh-cli.mjs';
+import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { awaitThrottleIfNeeded, extractRateLimitObservation, recordResponseRateLimit } from './rate-limit-throttle.mjs';
 
 const execFileAsync = promisify(execFile);
 const PAGE_SIZE = 100;
 const MAX_GRAPHQL_CONNECTION_PAGES = 100;
 const GH_MAX_BUFFER = 10 * 1024 * 1024;
+// Bound every gh subprocess call so a hung `gh` (network partition, gh internal
+// hang) rejects instead of awaiting forever. A no-timeout gh call froze the
+// adversarial-watcher's event loop for 30+ min on 2026-08-13 (main-thread
+// uv__io_poll/kevent hang, 0 reviews dispatched, 6 PRs starved). SIGKILL so a
+// wedged gh is force-reaped rather than lingering on SIGTERM. Override via
+// AGENT_OS_GH_API_EXEC_TIMEOUT_MS.
+const GH_EXEC_TIMEOUT_MS = (() => {
+  const raw = Number.parseInt(process.env.AGENT_OS_GH_API_EXEC_TIMEOUT_MS || '', 10);
+  return Number.isInteger(raw) && raw > 0 ? raw : 120_000;
+})();
+const GH_EXEC_RETRIES = (() => {
+  const raw = Number.parseInt(process.env.AGENT_OS_GH_API_EXEC_RETRIES || '', 10);
+  return Number.isInteger(raw) && raw >= 0 ? raw : 2;
+})();
+const GH_EXEC_RETRY_BACKOFF_MS = (() => {
+  const raw = Number.parseInt(process.env.AGENT_OS_GH_API_EXEC_RETRY_BACKOFF_MS || '', 10);
+  return Number.isInteger(raw) && raw >= 0 ? raw : 500;
+})();
 const GRAPHQL_COMPLEXITY_PATTERN = /\b(complexity|cost limit|maximum cost|resource limit)\b/i;
 const GRAPHQL_COMPLEXITY_ERROR_TYPES = new Set([
   'MAX_COMPLEXITY_EXCEEDED',
@@ -24,6 +42,10 @@ const GRAPHQL_COMPLEXITY_ERROR_TYPES = new Set([
   'RESOURCE_LIMIT_EXCEEDED',
 ]);
 const SUBMITTED_REVIEW_STATES = new Set(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED']);
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 const GRAPHQL_ROLLUP_QUERY = `
 query PullRequestRollup(
@@ -730,29 +752,37 @@ async function execGhJson(execFileImpl, args) {
     throw new Error('execGhJson does not support `gh api --paginate` with header-aware rate-limit parsing; use an explicit page loop instead');
   }
   const throttleResource = args[0] === 'api' && args[1] === 'graphql' ? 'graphql' : 'core';
-  try {
-    await awaitThrottleIfNeeded(throttleResource);
-    const effectiveArgs = headerAware ? ['api', '-i', ...args.slice(1)] : args;
-    const { stdout } = await execFileImpl('gh', effectiveArgs, {
-      maxBuffer: GH_MAX_BUFFER,
-      env: buildGhEnv(),
-    });
-    if (headerAware) {
-      const response = parseGhApiHttpEnvelope(stdout);
-      await recordResponseRateLimit(extractRateLimitObservation(response.headers));
-      return JSON.parse(String(response.bodyText || 'null'));
+  for (let attempt = 0; attempt <= GH_EXEC_RETRIES; attempt += 1) {
+    try {
+      await awaitThrottleIfNeeded(throttleResource);
+      const effectiveArgs = headerAware ? ['api', '-i', ...args.slice(1)] : args;
+      const { stdout } = await execFileImpl('gh', effectiveArgs, {
+        maxBuffer: GH_MAX_BUFFER,
+        timeout: GH_EXEC_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
+        env: buildGhEnv(),
+      });
+      if (headerAware) {
+        const response = parseGhApiHttpEnvelope(stdout);
+        await recordResponseRateLimit(extractRateLimitObservation(response.headers));
+        return JSON.parse(String(response.bodyText || 'null'));
+      }
+      return JSON.parse(String(stdout || 'null'));
+    } catch (err) {
+      if (headerAware) {
+        const response = parseGhApiHttpEnvelope(err?.stdout || '');
+        await recordResponseRateLimit(extractRateLimitObservation(response.headers));
+      }
+      const payload = tryParseGraphqlErrorPayload(err);
+      if (payload?.errors) {
+        err.graphqlErrors = payload.errors;
+      }
+      if (attempt < GH_EXEC_RETRIES && isTransientGhError(err)) {
+        await sleep(GH_EXEC_RETRY_BACKOFF_MS * (2 ** attempt));
+        continue;
+      }
+      throw err;
     }
-    return JSON.parse(String(stdout || 'null'));
-  } catch (err) {
-    if (headerAware) {
-      const response = parseGhApiHttpEnvelope(err?.stdout || '');
-      await recordResponseRateLimit(extractRateLimitObservation(response.headers));
-    }
-    const payload = tryParseGraphqlErrorPayload(err);
-    if (payload?.errors) {
-      err.graphqlErrors = payload.errors;
-    }
-    throw err;
   }
 }
 
@@ -1835,6 +1865,22 @@ async function fetchPullRequestRollup(repo, prNumber, {
       if (!isGraphqlComplexityError(err)) throw err;
       result = await fetchGraphqlRollupPerList(repo, normalizedPrNumber, { execFileImpl, recordApiCallImpl });
     }
+    // Transient-empty statusCheckRollup guard (RCA 2026-08-13, PR #5324): the
+    // GraphQL statusCheckRollup can lag right after a remediation head push and
+    // return zero contexts while the REST check-runs/status API for the same
+    // head is already populated. An empty `checks` set makes the terminal HAM
+    // merge gate fail-close on a green PR ("required checks missing/unchecked").
+    // Cross-check REST on empty before returning; if REST also finds nothing,
+    // the genuinely-empty set stands (fail-closed for a checkless PR is correct).
+    if (Array.isArray(result?.checks) && result.checks.length === 0 && result?.headRefOid) {
+      const restChecks = await fetchLegacyChecks(execFileImpl, repo, result.headRefOid);
+      if (restChecks.length > 0) {
+        console.warn(
+          `[github-api] WARN: GraphQL statusCheckRollup returned 0 checks for ${repo}#${normalizedPrNumber} @ ${result.headRefOid}; REST cross-check found ${restChecks.length} — using REST (transient-empty-rollup guard)`,
+        );
+        result = { ...result, checks: restChecks };
+      }
+    }
     return result;
   } catch (err) {
     if (!err?.graphqlTelemetryRecorded) recordApiCallImpl({
@@ -1930,18 +1976,32 @@ async function fetchPullRequestMergeability(repo, prNumber, {
 
   const startedAt = Date.now();
   try {
-    const { stdout } = await execFileImpl('gh', [
-      'pr',
-      'view',
-      String(normalizedPrNumber),
-      '--repo',
-      repo,
-      '--json',
-      'mergeable,mergeStateStatus',
-    ], {
-      maxBuffer: GH_MAX_BUFFER,
-      env: buildGhEnv(env),
-    });
+    let stdout = null;
+    for (let attempt = 0; attempt <= GH_EXEC_RETRIES; attempt += 1) {
+      try {
+        ({ stdout } = await execFileImpl('gh', [
+          'pr',
+          'view',
+          String(normalizedPrNumber),
+          '--repo',
+          repo,
+          '--json',
+          'mergeable,mergeStateStatus',
+        ], {
+          maxBuffer: GH_MAX_BUFFER,
+          timeout: GH_EXEC_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
+          env: buildGhEnv(env),
+        }));
+        break;
+      } catch (err) {
+        if (attempt < GH_EXEC_RETRIES && isTransientGhError(err)) {
+          await sleep(GH_EXEC_RETRY_BACKOFF_MS * (2 ** attempt));
+          continue;
+        }
+        throw err;
+      }
+    }
     const parsed = JSON.parse(String(stdout || '{}'));
     recordApiCallImpl?.({
       category: 'pr_mergeability',

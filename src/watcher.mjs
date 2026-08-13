@@ -335,6 +335,8 @@ import { createWatcherHealthProbe } from './health-probe.mjs';
 import {
   createWatcherHeartbeat,
   createWatcherStallWatchdog,
+  resolveWatcherHeartbeatOwnerGuardRoot,
+  resolveWatcherHeartbeatPath,
   DEFAULT_WATCHER_STALL_CHECK_INTERVAL_MS,
   DEFAULT_WATCHER_STALL_EXIT_CODE,
   DEFAULT_WATCHER_STALL_WATCHDOG_MS,
@@ -1635,7 +1637,15 @@ async function main() {
   });
   const intervalMs = config.pollIntervalMs ?? 300_000;
   const configuredDeadlineMs = config.pollDeadlineMs;
-  const heartbeatPath = process.env.ADVERSARIAL_WATCHER_HEARTBEAT_PATH || undefined;
+  // Always resolve a stable heartbeat path (env override → HQ_ROOT →
+  // rootDir default) so the file is written every poll and the external
+  // adversarial-watcher-watchdog has a fixed path to poll for liveness.
+  const heartbeatPath = resolveWatcherHeartbeatPath({ env: process.env, rootDir: ROOT });
+  const heartbeatOwnerGuardRootDir = resolveWatcherHeartbeatOwnerGuardRoot({
+    env: process.env,
+    rootDir: ROOT,
+    filePath: heartbeatPath,
+  });
   const configuredStallMs = Number(process.env.ADVERSARIAL_WATCHER_STALL_WATCHDOG_MS);
   const stallWatchdogMs = Number.isFinite(configuredStallMs) && configuredStallMs > 0
     ? configuredStallMs
@@ -1715,6 +1725,7 @@ async function main() {
   watcherHeartbeat = createWatcherHeartbeat({
     rootDir: ROOT,
     filePath: heartbeatPath,
+    ownerGuardRootDir: heartbeatOwnerGuardRootDir,
     logger: console,
   });
   watcherHeartbeat.persist('startup');

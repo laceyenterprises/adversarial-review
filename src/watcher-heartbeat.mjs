@@ -1,14 +1,53 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { assertCanonicalOwner } from './adapters/agent-runtime/append-only-owner.mjs';
 import { writeFileAtomic } from './atomic-write.mjs';
 
 const DEFAULT_WATCHER_STALL_EXIT_CODE = 75;
 const DEFAULT_WATCHER_STALL_WATCHDOG_MS = 10 * 60 * 1000;
 const DEFAULT_WATCHER_STALL_CHECK_INTERVAL_MS = 30 * 1000;
+const WRONG_OWNED_HEARTBEAT_MESSAGE = 'refusing write to non-canonical-owned watcher heartbeat file';
 
 function watcherHeartbeatPath(rootDir) {
   return join(rootDir, 'data', 'watcher-heartbeat.json');
+}
+
+// Resolve the heartbeat file path so it is ALWAYS written to a stable,
+// well-known location, whether or not the operator pins one. Priority:
+//   1. explicit ADVERSARIAL_WATCHER_HEARTBEAT_PATH override, else
+//   2. `${HQ_ROOT}/.adversarial-watcher/heartbeat.json` when HQ_ROOT is set
+//      (the launchd deploy always sets HQ_ROOT), which lives outside the
+//      submodule tree so the external liveness watchdog has one fixed path
+//      to poll, else
+//   3. the `${rootDir}/data/watcher-heartbeat.json` default next to the
+//      watcher's own data dir.
+// Returning `undefined` lets createWatcherHeartbeat fall back to (3) when
+// neither an override nor HQ_ROOT nor rootDir is available.
+function resolveWatcherHeartbeatPath({ env = process.env, rootDir } = {}) {
+  const override = env?.ADVERSARIAL_WATCHER_HEARTBEAT_PATH;
+  if (typeof override === 'string' && override.trim() !== '') {
+    return override;
+  }
+  const hqRoot = env?.HQ_ROOT;
+  if (typeof hqRoot === 'string' && hqRoot.trim() !== '') {
+    return join(hqRoot, '.adversarial-watcher', 'heartbeat.json');
+  }
+  if (rootDir) {
+    return watcherHeartbeatPath(rootDir);
+  }
+  return undefined;
+}
+
+function resolveWatcherHeartbeatOwnerGuardRoot({ env = process.env, rootDir, filePath } = {}) {
+  const hqRoot = env?.HQ_ROOT;
+  if (typeof hqRoot === 'string' && hqRoot.trim() !== '') {
+    const hqHeartbeatPath = join(hqRoot, '.adversarial-watcher', 'heartbeat.json');
+    if (filePath === hqHeartbeatPath) {
+      return hqRoot;
+    }
+  }
+  return rootDir;
 }
 
 function parsePositiveMs(value, fallback) {
@@ -30,14 +69,21 @@ function normalizeCounter(value) {
   return Number.isFinite(numeric) && numeric >= 0 ? Math.trunc(numeric) : 0;
 }
 
+function isWrongOwnedHeartbeatError(err) {
+  return typeof err?.message === 'string' && err.message.startsWith(WRONG_OWNED_HEARTBEAT_MESSAGE);
+}
+
 function createWatcherHeartbeat({
   rootDir,
   filePath = watcherHeartbeatPath(rootDir),
   now = () => new Date(),
   writeFile = writeFileAtomic,
   readFile = readFileSync,
+  unlinkFile = unlinkSync,
   pid = process.pid,
   logger = console,
+  ownerGuardRootDir = rootDir,
+  ownerGuardOptions,
 } = {}) {
   if (!filePath) {
     throw new TypeError('createWatcherHeartbeat requires rootDir or filePath');
@@ -51,8 +97,33 @@ function createWatcherHeartbeat({
   let reviewPersistScheduled = false;
   let reviewPersistChain = Promise.resolve();
 
+  function assertHeartbeatOwner() {
+    assertCanonicalOwner(ownerGuardRootDir, filePath, {
+      cannotVerifyMessage: 'cannot verify watcher heartbeat caller ownership',
+      crossUserMessage: 'refusing cross-user watcher heartbeat write',
+      existingFileMessage: WRONG_OWNED_HEARTBEAT_MESSAGE,
+      ...ownerGuardOptions,
+    });
+  }
+
   function writeHeartbeat(heartbeat) {
     try {
+      if (ownerGuardRootDir) {
+        try {
+          assertHeartbeatOwner();
+        } catch (err) {
+          if (!isWrongOwnedHeartbeatError(err)) throw err;
+          logger?.warn?.(
+            `[watcher] recovering wrong-owned heartbeat at ${filePath}: ${err.message}; unlinking and retrying`
+          );
+          try {
+            unlinkFile(filePath);
+          } catch (unlinkErr) {
+            if (unlinkErr?.code !== 'ENOENT') throw unlinkErr;
+          }
+          assertHeartbeatOwner();
+        }
+      }
       return Promise.resolve(writeFile(filePath, `${JSON.stringify(heartbeat, null, 2)}\n`))
         .catch((err) => {
           logger?.warn?.(`[watcher] failed to persist heartbeat at ${filePath}: ${err?.message || err}`);
@@ -224,6 +295,8 @@ export {
   createWatcherHeartbeat,
   createWatcherStallWatchdog,
   watcherHeartbeatPath,
+  resolveWatcherHeartbeatPath,
+  resolveWatcherHeartbeatOwnerGuardRoot,
   DEFAULT_WATCHER_STALL_EXIT_CODE,
   DEFAULT_WATCHER_STALL_WATCHDOG_MS,
   DEFAULT_WATCHER_STALL_CHECK_INTERVAL_MS,

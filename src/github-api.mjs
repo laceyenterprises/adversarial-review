@@ -1835,6 +1835,23 @@ async function fetchPullRequestRollup(repo, prNumber, {
       if (!isGraphqlComplexityError(err)) throw err;
       result = await fetchGraphqlRollupPerList(repo, normalizedPrNumber, { execFileImpl, recordApiCallImpl });
     }
+    // Transient-empty statusCheckRollup guard (RCA 2026-08-13, PR #5324): the
+    // GraphQL statusCheckRollup can lag right after a remediation head push and
+    // return zero contexts while the REST check-runs/status API for the same
+    // head is already populated. An empty `checks` set makes the terminal HAM
+    // merge gate fail-close on a green PR ("required checks missing/unchecked").
+    // Cross-check REST on empty before returning; if REST also finds nothing,
+    // the genuinely-empty set stands (fail-closed for a checkless PR is correct).
+    if (Array.isArray(result?.checks) && result.checks.length === 0 && result?.headRefOid) {
+      const restChecks = await fetchLegacyChecks(execFileImpl, repo, result.headRefOid)
+        .catch(() => []);
+      if (restChecks.length > 0) {
+        console.warn(
+          `[github-api] WARN: GraphQL statusCheckRollup returned 0 checks for ${repo}#${normalizedPrNumber} @ ${result.headRefOid}; REST cross-check found ${restChecks.length} — using REST (transient-empty-rollup guard)`,
+        );
+        result = { ...result, checks: restChecks };
+      }
+    }
     return result;
   } catch (err) {
     if (!err?.graphqlTelemetryRecorded) recordApiCallImpl({

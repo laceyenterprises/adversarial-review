@@ -3182,3 +3182,82 @@ test('watcher lifecycle sync uses the owning domain when PRs close unmerged', ()
   assert.equal(summary.headStateCalls, 1);
   assert.equal(summary.rollupCalls, 0);
 });
+
+test('transient-empty statusCheckRollup falls back to REST check cross-check', async () => {
+  // Regression for the 2026-08-13 hammer fail-close (PR #5324): the GraphQL
+  // statusCheckRollup lags right after a remediation head push and returns zero
+  // contexts while the REST check-runs API for the same head is already green.
+  const expected = makeExpectedRollup();
+  const { fetchPullRequestRollup } = await importGithubApiFresh();
+  const head = expected.headRefOid;
+  const restCheckBody = JSON.stringify({
+    check_runs: expected.checks.map((check) => ({
+      name: check.name,
+      conclusion: check.conclusion,
+      completed_at: check.completedAt,
+    })),
+  });
+  async function execFileImpl(command, args) {
+    assert.equal(command, 'gh');
+    const joined = args.join(' ');
+    if (args.includes('graphql')) {
+      // GraphQL rollup reports ZERO checks; PR + headRefOid otherwise present.
+      return { stdout: JSON.stringify(buildGraphqlResponse(expected, { checks: [] })) };
+    }
+    if (joined.startsWith(`api -i repos/${FIXTURE_REPO}/commits/${head}/check-runs?`)) {
+      return { stdout: `HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${restCheckBody}` };
+    }
+    if (joined.startsWith(`api repos/${FIXTURE_REPO}/commits/${head}/check-runs?`)) {
+      return { stdout: restCheckBody };
+    }
+    if (joined.startsWith(`api -i repos/${FIXTURE_REPO}/commits/${head}/status?`)) {
+      return { stdout: 'HTTP/1.1 200 OK\nx-ratelimit-resource: core\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n{"statuses":[]}' };
+    }
+    if (joined.startsWith(`api repos/${FIXTURE_REPO}/commits/${head}/status?`)) {
+      return { stdout: '{"statuses":[]}' };
+    }
+    throw new Error(`Unexpected gh invocation: ${joined}`);
+  }
+  const result = await fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    env: {},
+    execFileImpl,
+    recordApiCallImpl: () => {},
+  });
+  assert.equal(
+    result.checks.length,
+    expected.checks.length,
+    'REST cross-check should populate checks when the GraphQL rollup is transiently empty',
+  );
+  assert.deepEqual(
+    result.checks.map((check) => check.name).sort(),
+    expected.checks.map((check) => check.name).sort(),
+  );
+});
+
+test('genuinely-empty checks stay empty when both GraphQL and REST report none', async () => {
+  const expected = makeExpectedRollup();
+  const { fetchPullRequestRollup } = await importGithubApiFresh();
+  const head = expected.headRefOid;
+  async function execFileImpl(command, args) {
+    assert.equal(command, 'gh');
+    const joined = args.join(' ');
+    if (args.includes('graphql')) {
+      return { stdout: JSON.stringify(buildGraphqlResponse(expected, { checks: [] })) };
+    }
+    if (joined.includes(`commits/${head}/check-runs`)) {
+      const body = JSON.stringify({ check_runs: [] });
+      return { stdout: joined.startsWith('api -i') ? `HTTP/1.1 200 OK\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${body}` : body };
+    }
+    if (joined.includes(`commits/${head}/status`)) {
+      const body = '{"statuses":[]}';
+      return { stdout: joined.startsWith('api -i') ? `HTTP/1.1 200 OK\nx-ratelimit-remaining: 4999\nx-ratelimit-reset: 1780000000\n\n${body}` : body };
+    }
+    throw new Error(`Unexpected gh invocation: ${joined}`);
+  }
+  const result = await fetchPullRequestRollup(FIXTURE_REPO, FIXTURE_PR, {
+    env: {},
+    execFileImpl,
+    recordApiCallImpl: () => {},
+  });
+  assert.equal(result.checks.length, 0, 'no false checks when REST also reports none');
+});

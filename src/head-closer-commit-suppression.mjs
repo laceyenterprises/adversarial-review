@@ -48,7 +48,10 @@ export async function fetchVerifiedCommitFromLocalGit({
       .trim();
     const identityParts = identityLine.split(/\s+/).filter(Boolean);
     const readSha = String(identityParts[0] || sha).trim();
-    const parentSha = String(identityParts[1] || '').trim();
+    const parents = identityParts
+      .slice(1)
+      .map((parentSha) => String(parentSha || '').trim())
+      .filter(Boolean);
     const message = String(await runGit(['show', '-s', '--format=%B', `${sha}^{commit}`])).replace(/\n+$/, '');
     let files = [];
     try {
@@ -63,26 +66,13 @@ export async function fetchVerifiedCommitFromLocalGit({
       commit: { message },
       committer: { login: null },
       author: { login: null },
-      parents: parentSha ? [{ sha: parentSha }] : [],
+      parents: parents.map((parentSha) => ({ sha: parentSha })),
       files: files.map((filename) => ({ filename })),
     };
   };
   try {
     return await readCommit();
   } catch (err) {
-    // The commit may not be fetched into the checkout yet — fetch the PR head once, retry.
-    if (prNumber) {
-      try {
-        await runGit(['fetch', '--quiet', 'origin', `pull/${prNumber}/head`]);
-        return await readCommit();
-      } catch (err2) {
-        logger?.debug?.(
-          `[watcher] local closer-commit read failed for ${repoPath}#${prNumber} ` +
-            `head=${sha.slice(0, 12)} after PR-head fetch: ${err2?.message || err2}`
-        );
-        return null;
-      }
-    }
     logger?.debug?.(
       `[watcher] local closer-commit read failed for ${repoPath}#${prNumber} ` +
         `head=${sha.slice(0, 12)}: ${err?.message || err}`
@@ -204,7 +194,10 @@ export async function fetchHeadCloserVerifiedCommit({
     execFileImpl,
     logger,
   });
-  if (localCommit) return normalizeVerifiedCloserCommit(localCommit);
+  if (localCommit) {
+    const localIdentity = isTerminalCloserCommitIdentity(localCommit);
+    if (localIdentity?.suppressed === true) return normalizeVerifiedCloserCommit(localCommit);
+  }
   const retryDelays = Array.isArray(retryBackoffMs) ? retryBackoffMs : [];
   try {
     const { stdout } = await execGhWithRetryImpl({

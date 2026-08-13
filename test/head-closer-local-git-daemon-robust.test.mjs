@@ -20,6 +20,7 @@ const HAMMER_MESSAGE = [
 
 const HEAD_SHA = 'e95ce0c267ede587f453925aad6ca508f6856339';
 const PARENT_SHA = '7097a3c3a0000000000000000000000000000000';
+const SECOND_PARENT_SHA = '8097a3c3a0000000000000000000000000000000';
 
 // A fake `git` execFileImpl that answers the exact commands the local reader issues.
 function makeFakeGit({ message = HAMMER_MESSAGE, parent = PARENT_SHA, files = ['modules/worker-pool/lib/hq-drs.sh'], failObjectRead = false } = {}) {
@@ -62,6 +63,33 @@ test('fetchVerifiedCommitFromLocalGit: parses sha/parent/message/files from loca
   assert.equal(isTerminalCloserCommitIdentity(commit).suppressed, true);
 });
 
+test('fetchVerifiedCommitFromLocalGit: preserves every merge parent from local git', async () => {
+  const git = makeFakeGit({ parent: `${PARENT_SHA} ${SECOND_PARENT_SHA}` });
+  const commit = await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: git,
+  });
+  assert.deepEqual(commit.parents, [
+    { sha: PARENT_SHA },
+    { sha: SECOND_PARENT_SHA },
+  ]);
+});
+
+test('fetchVerifiedCommitFromLocalGit does not fetch missing commits from daemon-owned checkouts', async () => {
+  const git = makeFakeGit({ failObjectRead: true });
+  const commit = await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: git,
+    logger: { warn() {}, debug() {} },
+  });
+  assert.equal(commit, null);
+  assert.equal(git.calls.some((call) => call.includes(' fetch ')), false);
+});
+
 test('regression: getHeadCloserCommitSuppression recognizes the closer identity from LOCAL git even when gh throws (daemon failure)', async () => {
   const git = makeFakeGit();
   const result = await getHeadCloserCommitSuppression({
@@ -92,8 +120,36 @@ test('fetchHeadCloserVerifiedCommit prefers local git (returns the closer commit
   assert.match(commit.message, /Closed-By: hammer/);
 });
 
+test('fetchHeadCloserVerifiedCommit falls back to gh when local git has no closer identity', async () => {
+  const external = makeFakeGit({ message: 'just a normal external push\n\nSigned-off-by: someone' });
+  let ghCalled = false;
+  const commit = await fetchHeadCloserVerifiedCommit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: external,
+    execGhWithRetryImpl: async () => {
+      ghCalled = true;
+      return {
+        stdout: JSON.stringify({
+          sha: HEAD_SHA,
+          commit: { message: 'remote verified closer by login' },
+          committer: { login: 'merge-agent-lacey' },
+          parents: [{ sha: PARENT_SHA }],
+          files: [{ filename: 'src/changed.mjs' }],
+        }),
+      };
+    },
+    logger: { warn() {}, debug() {} },
+  });
+  assert.equal(ghCalled, true);
+  assert.equal(commit.committer, 'merge-agent-lacey');
+  assert.equal(commit.parentSha, PARENT_SHA);
+  assert.deepEqual(commit.changedFiles, ['src/changed.mjs']);
+});
+
 test('fallback: when the commit is absent locally, getHeadCloserCommitSuppression falls back to the gh probe', async () => {
-  const git = makeFakeGit({ failObjectRead: true }); // local read fails (and PR-head fetch does not surface it)
+  const git = makeFakeGit({ failObjectRead: true });
   let ghCalled = false;
   const gh = async ({ args }) => {
     ghCalled = true;

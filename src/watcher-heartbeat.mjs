@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { assertCanonicalOwner } from './adapters/agent-runtime/append-only-owner.mjs';
@@ -7,6 +7,7 @@ import { writeFileAtomic } from './atomic-write.mjs';
 const DEFAULT_WATCHER_STALL_EXIT_CODE = 75;
 const DEFAULT_WATCHER_STALL_WATCHDOG_MS = 10 * 60 * 1000;
 const DEFAULT_WATCHER_STALL_CHECK_INTERVAL_MS = 30 * 1000;
+const WRONG_OWNED_HEARTBEAT_MESSAGE = 'refusing write to non-canonical-owned watcher heartbeat file';
 
 function watcherHeartbeatPath(rootDir) {
   return join(rootDir, 'data', 'watcher-heartbeat.json');
@@ -68,12 +69,17 @@ function normalizeCounter(value) {
   return Number.isFinite(numeric) && numeric >= 0 ? Math.trunc(numeric) : 0;
 }
 
+function isWrongOwnedHeartbeatError(err) {
+  return typeof err?.message === 'string' && err.message.startsWith(WRONG_OWNED_HEARTBEAT_MESSAGE);
+}
+
 function createWatcherHeartbeat({
   rootDir,
   filePath = watcherHeartbeatPath(rootDir),
   now = () => new Date(),
   writeFile = writeFileAtomic,
   readFile = readFileSync,
+  unlinkFile = unlinkSync,
   pid = process.pid,
   logger = console,
   ownerGuardRootDir = rootDir,
@@ -91,15 +97,28 @@ function createWatcherHeartbeat({
   let reviewPersistScheduled = false;
   let reviewPersistChain = Promise.resolve();
 
+  function assertHeartbeatOwner() {
+    assertCanonicalOwner(ownerGuardRootDir, filePath, {
+      cannotVerifyMessage: 'cannot verify watcher heartbeat caller ownership',
+      crossUserMessage: 'refusing cross-user watcher heartbeat write',
+      existingFileMessage: WRONG_OWNED_HEARTBEAT_MESSAGE,
+      ...ownerGuardOptions,
+    });
+  }
+
   function writeHeartbeat(heartbeat) {
     try {
       if (ownerGuardRootDir) {
-        assertCanonicalOwner(ownerGuardRootDir, filePath, {
-          cannotVerifyMessage: 'cannot verify watcher heartbeat caller ownership',
-          crossUserMessage: 'refusing cross-user watcher heartbeat write',
-          existingFileMessage: 'refusing write to non-canonical-owned watcher heartbeat file',
-          ...ownerGuardOptions,
-        });
+        try {
+          assertHeartbeatOwner();
+        } catch (err) {
+          if (!isWrongOwnedHeartbeatError(err)) throw err;
+          logger?.warn?.(
+            `[watcher] recovering wrong-owned heartbeat at ${filePath}: ${err.message}; unlinking and retrying`
+          );
+          unlinkFile(filePath);
+          assertHeartbeatOwner();
+        }
       }
       return Promise.resolve(writeFile(filePath, `${JSON.stringify(heartbeat, null, 2)}\n`))
         .catch((err) => {

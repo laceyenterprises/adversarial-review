@@ -191,6 +191,53 @@ test('watcher heartbeat refuses cross-user writes before invoking the writer', (
   assert.match(warnings[0], /caller uid 502, canonical owner uid 501/);
 });
 
+test('watcher heartbeat recovers a wrong-owned existing file for the canonical owner', () => {
+  const rootDir = '/Users/airlock/agent-os-hq';
+  const filePath = join(rootDir, '.adversarial-watcher', 'heartbeat.json');
+  const targetDir = join(rootDir, '.adversarial-watcher');
+  const warnings = [];
+  const writes = [];
+  const unlinks = [];
+  let heartbeatExists = true;
+  const heartbeat = createWatcherHeartbeat({
+    rootDir,
+    filePath,
+    now: () => new Date('2026-07-04T10:00:00.000Z'),
+    writeFile(path, content) {
+      writes.push({ path, content: JSON.parse(content) });
+    },
+    readFile() {
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    },
+    unlinkFile(path) {
+      assert.equal(path, filePath);
+      unlinks.push(path);
+      heartbeatExists = false;
+    },
+    ownerGuardRootDir: rootDir,
+    ownerGuardOptions: {
+      currentUid: () => 501,
+      exists: (path) => path === targetDir || (path === filePath && heartbeatExists),
+      stat: (path) => {
+        if (path === targetDir) return { uid: 501 };
+        if (path === filePath) return { uid: 502 };
+        assert.fail(`unexpected stat path ${path}`);
+      },
+    },
+    logger: { warn(message) { warnings.push(message); } },
+  });
+
+  heartbeat.markPoll();
+
+  assert.deepEqual(unlinks, [filePath]);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].path, filePath);
+  assert.equal(writes[0].content.event, 'poll');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /recovering wrong-owned heartbeat/);
+  assert.match(warnings[0], /unlinking and retrying/);
+});
+
 test('stall watchdog trips exit 75 when an idle watcher makes no poll progress', () => {
   const heartbeat = createWatcherHeartbeat({
     filePath: join(tempRoot(), 'heartbeat.json'),

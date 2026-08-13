@@ -116,7 +116,11 @@ function createWatcherHeartbeat({
           logger?.warn?.(
             `[watcher] recovering wrong-owned heartbeat at ${filePath}: ${err.message}; unlinking and retrying`
           );
-          unlinkFile(filePath);
+          try {
+            unlinkFile(filePath);
+          } catch (unlinkErr) {
+            if (unlinkErr?.code !== 'ENOENT') throw unlinkErr;
+          }
           assertHeartbeatOwner();
         }
       }

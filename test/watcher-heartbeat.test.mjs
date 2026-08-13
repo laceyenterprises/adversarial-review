@@ -238,6 +238,53 @@ test('watcher heartbeat recovers a wrong-owned existing file for the canonical o
   assert.match(warnings[0], /unlinking and retrying/);
 });
 
+test('watcher heartbeat ignores concurrent ENOENT during wrong-owned file recovery', () => {
+  const rootDir = '/Users/airlock/agent-os-hq';
+  const filePath = join(rootDir, '.adversarial-watcher', 'heartbeat.json');
+  const targetDir = join(rootDir, '.adversarial-watcher');
+  const warnings = [];
+  const writes = [];
+  let statAttempts = 0;
+  const heartbeat = createWatcherHeartbeat({
+    rootDir,
+    filePath,
+    now: () => new Date('2026-07-04T10:00:00.000Z'),
+    writeFile(path, content) {
+      writes.push({ path, content: JSON.parse(content) });
+    },
+    readFile() {
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    },
+    unlinkFile(path) {
+      assert.equal(path, filePath);
+      throw Object.assign(new Error('already removed'), { code: 'ENOENT' });
+    },
+    ownerGuardRootDir: rootDir,
+    ownerGuardOptions: {
+      currentUid: () => 501,
+      exists: (path) => path === targetDir || (path === filePath && statAttempts === 0),
+      stat: (path) => {
+        if (path === targetDir) return { uid: 501 };
+        if (path === filePath) {
+          statAttempts += 1;
+          return { uid: 502 };
+        }
+        assert.fail(`unexpected stat path ${path}`);
+      },
+    },
+    logger: { warn(message) { warnings.push(message); } },
+  });
+
+  heartbeat.markPoll();
+
+  assert.equal(statAttempts, 1);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].path, filePath);
+  assert.equal(writes[0].content.event, 'poll');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /recovering wrong-owned heartbeat/);
+});
+
 test('stall watchdog trips exit 75 when an idle watcher makes no poll progress', () => {
   const heartbeat = createWatcherHeartbeat({
     filePath: join(tempRoot(), 'heartbeat.json'),

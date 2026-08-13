@@ -8,6 +8,7 @@ import {
   createWatcherHeartbeat,
   createWatcherStallWatchdog,
   DEFAULT_WATCHER_STALL_EXIT_CODE,
+  resolveWatcherHeartbeatPath,
   watcherHeartbeatPath,
 } from '../src/watcher-heartbeat.mjs';
 
@@ -223,6 +224,41 @@ test('stall watchdog does not fire while a poll is in flight', () => {
   assert.equal(watchdog.check(), false);
   now = 10_500;
   assert.equal(watchdog.check(), true);
+});
+
+test('resolveWatcherHeartbeatPath honours the explicit env override first', () => {
+  const path = resolveWatcherHeartbeatPath({
+    env: {
+      ADVERSARIAL_WATCHER_HEARTBEAT_PATH: '/custom/heartbeat.json',
+      HQ_ROOT: '/Users/airlock/agent-os-hq',
+    },
+    rootDir: '/deploy/tools/adversarial-review',
+  });
+  assert.equal(path, '/custom/heartbeat.json');
+});
+
+test('resolveWatcherHeartbeatPath defaults to the stable HQ_ROOT path', () => {
+  const path = resolveWatcherHeartbeatPath({
+    env: { HQ_ROOT: '/Users/airlock/agent-os-hq' },
+    rootDir: '/deploy/tools/adversarial-review',
+  });
+  assert.equal(path, join('/Users/airlock/agent-os-hq', '.adversarial-watcher', 'heartbeat.json'));
+});
+
+test('resolveWatcherHeartbeatPath falls back to the rootDir data dir when HQ_ROOT is unset', () => {
+  const path = resolveWatcherHeartbeatPath({
+    env: {},
+    rootDir: '/deploy/tools/adversarial-review',
+  });
+  assert.equal(path, watcherHeartbeatPath('/deploy/tools/adversarial-review'));
+});
+
+test('resolveWatcherHeartbeatPath ignores a blank override and blank HQ_ROOT', () => {
+  const path = resolveWatcherHeartbeatPath({
+    env: { ADVERSARIAL_WATCHER_HEARTBEAT_PATH: '   ', HQ_ROOT: '' },
+    rootDir: '/deploy/tools/adversarial-review',
+  });
+  assert.equal(path, watcherHeartbeatPath('/deploy/tools/adversarial-review'));
 });
 
 test('healthy poll-counter progress resets the stall watchdog', () => {

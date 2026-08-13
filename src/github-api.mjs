@@ -16,6 +16,16 @@ const execFileAsync = promisify(execFile);
 const PAGE_SIZE = 100;
 const MAX_GRAPHQL_CONNECTION_PAGES = 100;
 const GH_MAX_BUFFER = 10 * 1024 * 1024;
+// Bound every gh subprocess call so a hung `gh` (network partition, gh internal
+// hang) rejects instead of awaiting forever. A no-timeout gh call froze the
+// adversarial-watcher's event loop for 30+ min on 2026-08-13 (main-thread
+// uv__io_poll/kevent hang, 0 reviews dispatched, 6 PRs starved). SIGKILL so a
+// wedged gh is force-reaped rather than lingering on SIGTERM. Override via
+// AGENT_OS_GH_API_EXEC_TIMEOUT_MS.
+const GH_EXEC_TIMEOUT_MS = (() => {
+  const raw = Number.parseInt(process.env.AGENT_OS_GH_API_EXEC_TIMEOUT_MS || '', 10);
+  return Number.isInteger(raw) && raw > 0 ? raw : 120_000;
+})();
 const GRAPHQL_COMPLEXITY_PATTERN = /\b(complexity|cost limit|maximum cost|resource limit)\b/i;
 const GRAPHQL_COMPLEXITY_ERROR_TYPES = new Set([
   'MAX_COMPLEXITY_EXCEEDED',
@@ -735,6 +745,8 @@ async function execGhJson(execFileImpl, args) {
     const effectiveArgs = headerAware ? ['api', '-i', ...args.slice(1)] : args;
     const { stdout } = await execFileImpl('gh', effectiveArgs, {
       maxBuffer: GH_MAX_BUFFER,
+      timeout: GH_EXEC_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
       env: buildGhEnv(),
     });
     if (headerAware) {
@@ -1957,6 +1969,8 @@ async function fetchPullRequestMergeability(repo, prNumber, {
       'mergeable,mergeStateStatus',
     ], {
       maxBuffer: GH_MAX_BUFFER,
+      timeout: GH_EXEC_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
       env: buildGhEnv(env),
     });
     const parsed = JSON.parse(String(stdout || '{}'));

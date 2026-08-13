@@ -3261,3 +3261,28 @@ test('genuinely-empty checks stay empty when both GraphQL and REST report none',
   });
   assert.equal(result.checks.length, 0, 'no false checks when REST also reports none');
 });
+
+test('gh subprocess calls carry a bounded timeout + SIGKILL (no-hang guard)', async () => {
+  // Regression for the 2026-08-13 adversarial-watcher wedge: a no-timeout gh call
+  // froze the event loop for 30+ min. Every gh exec must be time-bounded so a
+  // hung gh rejects instead of awaiting forever.
+  const { fetchPullRequestMergeability } = await importGithubApiFresh();
+  let ghOptions = null;
+  async function execFileImpl(command, args, options) {
+    if (command === 'gh') {
+      ghOptions = options;
+      return { stdout: JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN' }) };
+    }
+    throw new Error(`adapter path disabled in test: ${command}`);
+  }
+  const result = await fetchPullRequestMergeability(FIXTURE_REPO, FIXTURE_PR, {
+    env: {},
+    execFileImpl,
+    recordApiCallImpl: () => {},
+  });
+  assert.equal(result.mergeStateStatus, 'CLEAN');
+  assert.ok(ghOptions, 'gh execFile options should be passed');
+  assert.equal(typeof ghOptions.timeout, 'number');
+  assert.ok(ghOptions.timeout > 0, 'gh calls must carry a positive timeout so a hung gh cannot wedge the watcher');
+  assert.equal(ghOptions.killSignal, 'SIGKILL');
+});

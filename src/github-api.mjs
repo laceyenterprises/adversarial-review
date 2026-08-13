@@ -752,7 +752,6 @@ async function execGhJson(execFileImpl, args) {
     throw new Error('execGhJson does not support `gh api --paginate` with header-aware rate-limit parsing; use an explicit page loop instead');
   }
   const throttleResource = args[0] === 'api' && args[1] === 'graphql' ? 'graphql' : 'core';
-  let lastErr = null;
   for (let attempt = 0; attempt <= GH_EXEC_RETRIES; attempt += 1) {
     try {
       await awaitThrottleIfNeeded(throttleResource);
@@ -778,7 +777,6 @@ async function execGhJson(execFileImpl, args) {
       if (payload?.errors) {
         err.graphqlErrors = payload.errors;
       }
-      lastErr = err;
       if (attempt < GH_EXEC_RETRIES && isTransientGhError(err)) {
         await sleep(GH_EXEC_RETRY_BACKOFF_MS * (2 ** attempt));
         continue;
@@ -786,7 +784,6 @@ async function execGhJson(execFileImpl, args) {
       throw err;
     }
   }
-  throw lastErr;
 }
 
 async function runGraphql(execFileImpl, query, variables) {
@@ -1980,7 +1977,6 @@ async function fetchPullRequestMergeability(repo, prNumber, {
   const startedAt = Date.now();
   try {
     let stdout = null;
-    let lastErr = null;
     for (let attempt = 0; attempt <= GH_EXEC_RETRIES; attempt += 1) {
       try {
         ({ stdout } = await execFileImpl('gh', [
@@ -1999,7 +1995,6 @@ async function fetchPullRequestMergeability(repo, prNumber, {
         }));
         break;
       } catch (err) {
-        lastErr = err;
         if (attempt < GH_EXEC_RETRIES && isTransientGhError(err)) {
           await sleep(GH_EXEC_RETRY_BACKOFF_MS * (2 ** attempt));
           continue;
@@ -2007,7 +2002,6 @@ async function fetchPullRequestMergeability(repo, prNumber, {
         throw err;
       }
     }
-    if (stdout === null && lastErr) throw lastErr;
     const parsed = JSON.parse(String(stdout || '{}'));
     recordApiCallImpl?.({
       category: 'pr_mergeability',

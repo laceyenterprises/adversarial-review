@@ -1,0 +1,140 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  fetchVerifiedCommitFromLocalGit,
+  getHeadCloserCommitSuppression,
+  fetchHeadCloserVerifiedCommit,
+  isTerminalCloserCommitIdentity,
+} from '../src/head-closer-commit-suppression.mjs';
+
+const HAMMER_MESSAGE = [
+  'HAM remediate final adversarial findings',
+  '',
+  'Worker-Class: hammer',
+  'Worker-Ticket: HAM',
+  'Reviewed-Head: fd1ece516ecded50e2233e18cab0c07acf682ad5',
+  'Closed-By: hammer (adversarial-pipe-mode)',
+  'Remediated-Findings: 2 addressed (1 blocking, 1 non-blocking)',
+].join('\n');
+
+const HEAD_SHA = 'e95ce0c267ede587f453925aad6ca508f6856339';
+const PARENT_SHA = '7097a3c3a0000000000000000000000000000000';
+
+// A fake `git` execFileImpl that answers the exact commands the local reader issues.
+function makeFakeGit({ message = HAMMER_MESSAGE, parent = PARENT_SHA, files = ['modules/worker-pool/lib/hq-drs.sh'], failObjectRead = false } = {}) {
+  const calls = [];
+  const impl = async (file, args) => {
+    calls.push(args.join(' '));
+    assert.equal(file, 'git');
+    const joined = args.join(' ');
+    if (failObjectRead && (joined.includes('show') || joined.includes('diff-tree'))) {
+      const err = new Error(`fatal: bad object ${HEAD_SHA}`);
+      throw err;
+    }
+    if (joined.includes('--format=%H %P')) return { stdout: `${HEAD_SHA} ${parent}\n` };
+    if (joined.includes('--format=%B')) return { stdout: `${message}\n` };
+    if (joined.includes('diff-tree')) return { stdout: `${files.join('\n')}\n` };
+    if (joined.includes('fetch')) return { stdout: '' };
+    throw new Error(`unexpected git args: ${joined}`);
+  };
+  impl.calls = calls;
+  return impl;
+}
+
+const throwingGh = async () => {
+  throw new Error('gh api repos/.../commits/<sha> failed (daemon context, no interactive auth)');
+};
+
+test('fetchVerifiedCommitFromLocalGit: parses sha/parent/message/files from local git', async () => {
+  const git = makeFakeGit();
+  const commit = await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: git,
+  });
+  assert.equal(commit.sha, HEAD_SHA);
+  assert.equal(commit.parents[0].sha, PARENT_SHA);
+  assert.match(commit.message, /Closed-By: hammer \(adversarial-pipe-mode\)/);
+  assert.equal(commit.files[0].filename, 'modules/worker-pool/lib/hq-drs.sh');
+  // The Closed-By trailer must resolve to the terminal closer identity.
+  assert.equal(isTerminalCloserCommitIdentity(commit).suppressed, true);
+});
+
+test('regression: getHeadCloserCommitSuppression recognizes the closer identity from LOCAL git even when gh throws (daemon failure)', async () => {
+  const git = makeFakeGit();
+  const result = await getHeadCloserCommitSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: git,
+    execGhWithRetryImpl: throwingGh, // simulate the daemon-context gh failure that starved the resume
+    logger: { warn() {}, debug() {} },
+  });
+  assert.equal(result.suppressed, true);
+  assert.equal(result.reason, 'closer-commit-trailer');
+});
+
+test('fetchHeadCloserVerifiedCommit prefers local git (returns the closer commit without touching gh)', async () => {
+  const git = makeFakeGit();
+  let ghCalled = false;
+  const commit = await fetchHeadCloserVerifiedCommit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: git,
+    execGhWithRetryImpl: async () => { ghCalled = true; throw new Error('should not reach gh'); },
+    logger: { warn() {}, debug() {} },
+  });
+  assert.equal(ghCalled, false);
+  assert.equal(commit.sha, HEAD_SHA);
+  assert.match(commit.message, /Closed-By: hammer/);
+});
+
+test('fallback: when the commit is absent locally, getHeadCloserCommitSuppression falls back to the gh probe', async () => {
+  const git = makeFakeGit({ failObjectRead: true }); // local read fails (and PR-head fetch does not surface it)
+  let ghCalled = false;
+  const gh = async ({ args }) => {
+    ghCalled = true;
+    assert.ok(args.includes('--jq'));
+    return {
+      stdout: JSON.stringify({
+        sha: HEAD_SHA,
+        message: HAMMER_MESSAGE,
+        committerLogin: null,
+      }),
+    };
+  };
+  const result = await getHeadCloserCommitSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: git,
+    execGhWithRetryImpl: gh,
+    logger: { warn() {}, debug() {} },
+  });
+  assert.equal(ghCalled, true);
+  assert.equal(result.suppressed, true);
+});
+
+test('safety: an external (non-closer) commit at a local head is NOT suppressed, and still consults gh for a committer.login-only identity', async () => {
+  const external = makeFakeGit({ message: 'just a normal external push\n\nSigned-off-by: someone' });
+  let ghCalled = false;
+  const gh = async () => {
+    ghCalled = true;
+    // gh sees a plain external commit too — no closer identity.
+    return { stdout: JSON.stringify({ sha: HEAD_SHA, message: 'external', committerLogin: 'some-human' }) };
+  };
+  const result = await getHeadCloserCommitSuppression({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: external,
+    execGhWithRetryImpl: gh,
+    logger: { warn() {}, debug() {} },
+  });
+  // local git found no closer trailer -> fell through to gh -> gh found no closer identity either.
+  assert.equal(ghCalled, true);
+  assert.equal(result.suppressed, false);
+});

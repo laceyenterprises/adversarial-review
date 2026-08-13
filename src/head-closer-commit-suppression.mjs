@@ -6,9 +6,89 @@ import { parseCommitTrailers } from './ama/ham-provenance.mjs';
 const execFileAsync = promisify(execFile);
 
 const HEAD_CLOSER_SUPPRESSION_RETRY_BACKOFF_MS = [250, 1000];
+const LOCAL_GIT_TIMEOUT_MS = 20000;
+const LOCAL_GIT_MAX_BUFFER = 1024 * 1024 * 16;
 
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Read the head commit from the LOCAL checkout instead of `gh api commits/<sha>`.
+//
+// The terminal-remediation closer commit carries its identity in the commit message
+// (`Closed-By: hammer …` trailer) plus its parent + changed files — all of which live
+// in local git. The remote `gh api commits` probe fails-closed in the watcher DAEMON
+// context (no interactive gh auth), which silently starved the hammer stale-review-head
+// resume for EVERY closer-advanced head (retain-loop-cap -> AWAIT_OPERATOR_ACTION,
+// forcing operator hand-merges). Local git needs no gh auth, so it is robust in the
+// daemon. Returns a commit shaped like the `gh api` payload (so
+// `isTerminalCloserCommitIdentity` / `normalizeVerifiedCloserCommit` consume it
+// unchanged), or `null` if the commit cannot be read locally (caller falls back to gh).
+export async function fetchVerifiedCommitFromLocalGit({
+  repoPath,
+  prNumber,
+  headSha,
+  execFileImpl = execFileAsync,
+  logger = console,
+} = {}) {
+  const sha = String(headSha || '').trim();
+  if (!repoPath || !sha) return null;
+  const runGit = async (args) => {
+    const { stdout } = await execFileImpl('git', ['-C', repoPath, ...args], {
+      timeout: LOCAL_GIT_TIMEOUT_MS,
+      maxBuffer: LOCAL_GIT_MAX_BUFFER,
+    });
+    return String(stdout || '');
+  };
+  const readCommit = async () => {
+    // Two calls avoid any in-body separator hazard: an identity line (%H + %P are
+    // all hex, whitespace-separated) then the raw body (%B, may contain newlines).
+    const identityLine = (await runGit(['show', '-s', '--format=%H %P', `${sha}^{commit}`]))
+      .split('\n')[0]
+      .trim();
+    const identityParts = identityLine.split(/\s+/).filter(Boolean);
+    const readSha = String(identityParts[0] || sha).trim();
+    const parentSha = String(identityParts[1] || '').trim();
+    const message = String(await runGit(['show', '-s', '--format=%B', `${sha}^{commit}`])).replace(/\n+$/, '');
+    let files = [];
+    try {
+      const fileOut = await runGit(['diff-tree', '--no-commit-id', '--name-only', '-r', `${sha}^{commit}`]);
+      files = fileOut.split('\n').map((line) => line.trim()).filter(Boolean);
+    } catch {
+      // changed-files is best-effort; identity comes from the trailer.
+    }
+    return {
+      sha: readSha,
+      message,
+      commit: { message },
+      committer: { login: null },
+      author: { login: null },
+      parents: parentSha ? [{ sha: parentSha }] : [],
+      files: files.map((filename) => ({ filename })),
+    };
+  };
+  try {
+    return await readCommit();
+  } catch (err) {
+    // The commit may not be fetched into the checkout yet — fetch the PR head once, retry.
+    if (prNumber) {
+      try {
+        await runGit(['fetch', '--quiet', 'origin', `pull/${prNumber}/head`]);
+        return await readCommit();
+      } catch (err2) {
+        logger?.debug?.(
+          `[watcher] local closer-commit read failed for ${repoPath}#${prNumber} ` +
+            `head=${sha.slice(0, 12)} after PR-head fetch: ${err2?.message || err2}`
+        );
+        return null;
+      }
+    }
+    logger?.debug?.(
+      `[watcher] local closer-commit read failed for ${repoPath}#${prNumber} ` +
+        `head=${sha.slice(0, 12)}: ${err?.message || err}`
+    );
+    return null;
+  }
 }
 
 function normalizeIdentityPart(value) {
@@ -106,12 +186,25 @@ export async function fetchHeadCloserVerifiedCommit({
   headSha,
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
+  fetchVerifiedCommitFromLocalGitImpl = fetchVerifiedCommitFromLocalGit,
   logger = console,
   retryBackoffMs = [250, 1000],
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return null;
+  // Daemon-robust: read the closer commit from the local checkout first. The remote
+  // `gh api commits` fetch fails-closed in the watcher daemon context (no interactive
+  // gh auth), which silently starved the hammer stale-review-head resume for every
+  // closer-advanced head; local git needs no gh auth.
+  const localCommit = await fetchVerifiedCommitFromLocalGitImpl({
+    repoPath,
+    prNumber,
+    headSha: sha,
+    execFileImpl,
+    logger,
+  });
+  if (localCommit) return normalizeVerifiedCloserCommit(localCommit);
   const retryDelays = Array.isArray(retryBackoffMs) ? retryBackoffMs : [];
   try {
     const { stdout } = await execGhWithRetryImpl({
@@ -141,12 +234,28 @@ export async function getHeadCloserCommitSuppression({
   headSha,
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
+  fetchVerifiedCommitFromLocalGitImpl = fetchVerifiedCommitFromLocalGit,
   logger = console,
   retryBackoffMs = [250, 1000],
   sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return { suppressed: false, reason: null };
+  // Daemon-robust: the terminal-closer identity is carried in the commit message
+  // (`Closed-By: hammer` trailer), which local git reads without gh auth. The remote
+  // probe below is the fallback for the rare case the commit is absent from the local
+  // checkout, and for a committer.login-only closer identity (not derivable locally).
+  const localCommit = await fetchVerifiedCommitFromLocalGitImpl({
+    repoPath,
+    prNumber,
+    headSha: sha,
+    execFileImpl,
+    logger,
+  });
+  if (localCommit) {
+    const localIdentity = isTerminalCloserCommitIdentity(localCommit);
+    if (localIdentity?.suppressed === true) return localIdentity;
+  }
   const retryDelays = Array.isArray(retryBackoffMs) ? retryBackoffMs : [];
   try {
     const { stdout } = await execGhWithRetryImpl({

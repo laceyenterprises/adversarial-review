@@ -34,7 +34,7 @@ function makeFakeGit({ message = HAMMER_MESSAGE, parent = PARENT_SHA, files = ['
       throw err;
     }
     if (joined.includes('--format=%H %P')) return { stdout: `${HEAD_SHA} ${parent}\n` };
-    if (joined.includes('--format=%B')) return { stdout: `${message}\n` };
+    if (joined.includes('--format=%x00%B')) return { stdout: `\0${message}\n` };
     if (joined.includes('diff-tree')) return { stdout: `${files.join('\n')}\n` };
     if (joined.includes('fetch')) return { stdout: '' };
     throw new Error(`unexpected git args: ${joined}`);
@@ -106,6 +106,35 @@ test('fetchVerifiedCommitFromLocalGit: extracts identity hashes from warning-pre
     { sha: PARENT_SHA },
     { sha: SECOND_PARENT_SHA },
   ]);
+});
+
+test('fetchVerifiedCommitFromLocalGit: strips stdout diagnostics before commit body delimiter', async () => {
+  const git = makeFakeGit();
+  const originalImpl = git;
+  const warningGit = async (file, args) => {
+    const joined = args.join(' ');
+    if (joined.includes('--format=%x00%B')) {
+      originalImpl.calls.push(args.join(' '));
+      return {
+        stdout: [
+          'warning: ignoring suspicious replacement ref',
+          `\0${HAMMER_MESSAGE}`,
+          '',
+        ].join('\n'),
+      };
+    }
+    return originalImpl(file, args);
+  };
+  warningGit.calls = originalImpl.calls;
+  const commit = await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: warningGit,
+  });
+  assert.equal(commit.message, HAMMER_MESSAGE);
+  assert.equal(commit.commit.message, HAMMER_MESSAGE);
+  assert.equal(isTerminalCloserCommitIdentity(commit).suppressed, true);
 });
 
 test('fetchVerifiedCommitFromLocalGit: retries transient local git subprocess failures', async () => {

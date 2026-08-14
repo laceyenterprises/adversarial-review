@@ -8,9 +8,32 @@ const execFileAsync = promisify(execFile);
 const HEAD_CLOSER_SUPPRESSION_RETRY_BACKOFF_MS = [250, 1000];
 const LOCAL_GIT_TIMEOUT_MS = 20000;
 const LOCAL_GIT_MAX_BUFFER = 1024 * 1024 * 16;
+const FULL_SHA_RE = /\b[a-f0-9]{40}\b/gi;
 
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientLocalGitError(err) {
+  const code = String(err?.code || '').toUpperCase();
+  if (['EAGAIN', 'EBUSY', 'ECONNRESET', 'EIO', 'EMFILE', 'ENFILE', 'ENOMEM', 'ETIMEDOUT'].includes(code)) {
+    return true;
+  }
+  if (err?.killed || err?.signal) return true;
+  const detail = [
+    err?.message,
+    err?.stderr,
+    err?.stdout,
+  ].map((part) => String(part || '').toLowerCase()).filter(Boolean).join('\n');
+  return /timed?\s*out|timeout|input\/output error|i\/o error|resource temporarily unavailable|temporarily unavailable|try again|too many open files|cannot allocate memory|connection reset|early eof|remote end hung up/.test(detail);
+}
+
+function extractIdentityHashes(identityOutput, expectedSha) {
+  const hashes = String(identityOutput || '').match(FULL_SHA_RE) || [];
+  if (hashes.length === 0) {
+    throw new Error(`local git identity output did not contain commit hashes for ${String(expectedSha || '').slice(0, 12)}`);
+  }
+  return hashes.map((hash) => hash.toLowerCase());
 }
 
 // Read the head commit from the LOCAL checkout instead of `gh api commits/<sha>`.
@@ -30,23 +53,39 @@ export async function fetchVerifiedCommitFromLocalGit({
   headSha,
   execFileImpl = execFileAsync,
   logger = console,
+  retryBackoffMs = HEAD_CLOSER_SUPPRESSION_RETRY_BACKOFF_MS,
+  sleepImpl = sleepMs,
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return null;
   const runGit = async (args) => {
-    const { stdout } = await execFileImpl('git', ['-C', repoPath, ...args], {
-      timeout: LOCAL_GIT_TIMEOUT_MS,
-      maxBuffer: LOCAL_GIT_MAX_BUFFER,
-    });
-    return String(stdout || '');
+    const retryDelays = Array.isArray(retryBackoffMs) ? retryBackoffMs : [];
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        const { stdout } = await execFileImpl('git', ['-C', repoPath, ...args], {
+          timeout: LOCAL_GIT_TIMEOUT_MS,
+          maxBuffer: LOCAL_GIT_MAX_BUFFER,
+        });
+        return String(stdout || '');
+      } catch (err) {
+        if (!isTransientLocalGitError(err) || attempt >= retryDelays.length) throw err;
+        const delayMs = Math.max(0, Number(retryDelays[attempt]) || 0);
+        logger?.debug?.(
+          `[watcher] local git transient failure for ${repoPath}#${prNumber} ` +
+            `head=${sha.slice(0, 12)}; retrying ${attempt + 1}/${retryDelays.length} ` +
+            `after ${delayMs}ms: ${err?.message || err}`
+        );
+        if (delayMs > 0) await sleepImpl(delayMs);
+      }
+    }
   };
   const readCommit = async () => {
     // Two calls avoid any in-body separator hazard: an identity line (%H + %P are
     // all hex, whitespace-separated) then the raw body (%B, may contain newlines).
-    const identityLine = (await runGit(['show', '-s', '--format=%H %P', `${sha}^{commit}`]))
-      .split('\n')[0]
-      .trim();
-    const identityParts = identityLine.split(/\s+/).filter(Boolean);
+    const identityParts = extractIdentityHashes(
+      await runGit(['show', '-s', '--format=%H %P', `${sha}^{commit}`]),
+      sha,
+    );
     const readSha = String(identityParts[0] || sha).trim();
     const parents = identityParts
       .slice(1)

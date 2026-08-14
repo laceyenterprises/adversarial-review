@@ -77,6 +77,64 @@ test('fetchVerifiedCommitFromLocalGit: preserves every merge parent from local g
   ]);
 });
 
+test('fetchVerifiedCommitFromLocalGit: extracts identity hashes from warning-prefixed output', async () => {
+  const git = makeFakeGit();
+  const originalImpl = git;
+  const warningGit = async (file, args) => {
+    const joined = args.join(' ');
+    if (joined.includes('--format=%H %P')) {
+      originalImpl.calls.push(args.join(' '));
+      return {
+        stdout: [
+          'warning: ignoring suspicious replacement ref',
+          `${HEAD_SHA} ${PARENT_SHA} ${SECOND_PARENT_SHA}`,
+          '',
+        ].join('\n'),
+      };
+    }
+    return originalImpl(file, args);
+  };
+  warningGit.calls = originalImpl.calls;
+  const commit = await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: warningGit,
+  });
+  assert.equal(commit.sha, HEAD_SHA);
+  assert.deepEqual(commit.parents, [
+    { sha: PARENT_SHA },
+    { sha: SECOND_PARENT_SHA },
+  ]);
+});
+
+test('fetchVerifiedCommitFromLocalGit: retries transient local git subprocess failures', async () => {
+  const git = makeFakeGit();
+  const attemptsByCommand = new Map();
+  const flakyGit = async (file, args) => {
+    const joined = args.join(' ');
+    const attempts = (attemptsByCommand.get(joined) || 0) + 1;
+    attemptsByCommand.set(joined, attempts);
+    if ((joined.includes('--format=%H %P') || joined.includes('diff-tree')) && attempts === 1) {
+      throw Object.assign(new Error('Input/output error'), { code: 'EIO' });
+    }
+    return git(file, args);
+  };
+  const sleeps = [];
+  const commit = await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: flakyGit,
+    retryBackoffMs: [1, 2],
+    sleepImpl: async (ms) => { sleeps.push(ms); },
+    logger: { warn() {}, debug() {} },
+  });
+  assert.equal(commit.sha, HEAD_SHA);
+  assert.equal(commit.files[0].filename, 'modules/worker-pool/lib/hq-drs.sh');
+  assert.deepEqual(sleeps, [1, 1]);
+});
+
 test('fetchVerifiedCommitFromLocalGit does not fetch missing commits from daemon-owned checkouts', async () => {
   const git = makeFakeGit({ failObjectRead: true });
   const commit = await fetchVerifiedCommitFromLocalGit({

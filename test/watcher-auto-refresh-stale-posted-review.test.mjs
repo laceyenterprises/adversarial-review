@@ -1494,8 +1494,17 @@ test('watcher closer identity resolver reuses the same commit probe result', asy
     repoPath: 'laceyenterprises/agent-os',
     prNumber: 2605,
     headSha: 'fed789',
-    execFileImpl: async () => {
+    execFileImpl: async (file, args) => {
       calls += 1;
+      const joined = (args || []).join(' ');
+      if (file === 'git') {
+        // Local-git read: a plain commit with no closer trailer — this case's closer
+        // identity is carried by the GitHub committer login, which only the gh fallback
+        // below can resolve, so local git legitimately falls through.
+        if (joined.includes('--format=%H %P')) return { stdout: 'fed789 abc123\n' };
+        if (joined.includes('--format=%B')) return { stdout: 'Finalize PR\n' };
+        return { stdout: '' };
+      }
       return {
         stdout: JSON.stringify({
           sha: 'fed789',
@@ -1510,8 +1519,10 @@ test('watcher closer identity resolver reuses the same commit probe result', asy
   });
 
   const first = await resolveSuppression();
+  const callsAfterFirst = calls;
   const second = await resolveSuppression();
-  assert.equal(calls, 1);
+  // Memoized: the second resolve adds no probe calls and returns the same result.
+  assert.equal(calls, callsAfterFirst);
   assert.equal(first, second);
   assert.equal(first.suppressed, true);
 });

@@ -89,3 +89,41 @@ test('pre-existing behaviour is unchanged', () => {
   // A change set of only unnamed entries must not read as "all allowed".
   assert.equal(changedFilesWithinAdditiveOnlyAllowlist([{}, { filename: '' }]), false);
 });
+
+// --- category ratchet baseline -------------------------------------------------
+//
+// The same post-merge YAML forces a SECOND file. New hardcodes raise the repo-wide
+// per-category count, and `scripts/oss-readiness-category-baseline.json` fails until
+// that count is acknowledged in the same PR. agent-os#5372 hit this after the
+// registry was already correct: `account-airlock: 772 > baseline 765`.
+//
+// This one cannot require zero deletions -- bumping a count rewrites the line.
+
+const BASELINE = 'scripts/oss-readiness-category-baseline.json';
+
+test('a ratchet baseline bump forced by a post-merge action is additive-only', () => {
+  const files = [
+    file('projects/finch/SPEC.md'),
+    file(PACK_YAML),
+    file(REGISTRY, { additions: 48, deletions: 0 }),
+    file(BASELINE, { additions: 1, deletions: 1 }),
+  ];
+  assert.equal(changedFilesWithinAdditiveOnlyAllowlist(files), true);
+});
+
+test('the baseline alone is NOT additive-only without a forcing post-merge action', () => {
+  // Raising the ratchet is how you stop being told about new hardcodes. It is only
+  // acceptable when something in the same change set actually forced it.
+  const files = [file('projects/finch/plan.json'), file(BASELINE, { additions: 1, deletions: 1 })];
+  assert.equal(changedFilesWithinAdditiveOnlyAllowlist(files), false);
+});
+
+test('the baseline exception does not relax the registry rule', () => {
+  // Both files present, but the registry deletes a registration: still refused.
+  const files = [
+    file(PACK_YAML),
+    file(BASELINE, { additions: 1, deletions: 1 }),
+    file(REGISTRY, { additions: 8, deletions: 3 }),
+  ];
+  assert.equal(changedFilesWithinAdditiveOnlyAllowlist(files), false);
+});

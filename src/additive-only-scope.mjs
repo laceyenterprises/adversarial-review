@@ -63,6 +63,15 @@ function additiveOnlyPathAllowed(pathname) {
 // ADDITIVE_ONLY_ALLOWLIST: a blanket entry would let any additive-only PR rewrite a
 // security control unreviewed.
 const OSS_READINESS_REGISTRY_PATH = 'scripts/oss-readiness-allowlist.registry.json';
+// The category ratchet is the second file the same YAML forces. New hardcodes raise
+// the repo-wide per-category count, and the ratchet deliberately fails until the new
+// count is acknowledged in the same PR. Unlike the registry this cannot be
+// deletions-free -- bumping a count rewrites the line -- so it is gated on the
+// forcing post-merge action alone. That is safe because the baseline only gates
+// AGGREGATE counts: every individual hardcode still needs an inline marker and a
+// registry entry, and the registry stays additive-only. A baseline bump on its own
+// therefore cannot smuggle in an unregistered hardcode.
+const OSS_READINESS_BASELINE_PATH = 'scripts/oss-readiness-category-baseline.json';
 const POST_MERGE_ACTIONS_PATTERN = /^modules\/worker-pool\/post-merge-actions\/[^/]+(?:\/.*)?$/;
 
 function pathIsPostMergeAction(pathname) {
@@ -76,11 +85,12 @@ function registryChangeIsPurelyAdditive(file) {
   return Number.isInteger(deletions) && deletions === 0;
 }
 
+function forcedByPostMergeAction(files) {
+  return files.some((file) => pathIsPostMergeAction(normalizeChangedPath(file)));
+}
+
 function registryExceptionApplies(files) {
-  const forcedByPostMergeAction = files.some((file) =>
-    pathIsPostMergeAction(normalizeChangedPath(file))
-  );
-  if (!forcedByPostMergeAction) return false;
+  if (!forcedByPostMergeAction(files)) return false;
   // Additive literally: the exception never permits deleting an existing
   // registration, which would silently un-register somebody else's hardcode.
   const registryFiles = files.filter(
@@ -89,13 +99,19 @@ function registryExceptionApplies(files) {
   return registryFiles.every(registryChangeIsPurelyAdditive);
 }
 
+function baselineExceptionApplies(files) {
+  return forcedByPostMergeAction(files);
+}
+
 function changedFilesWithinAdditiveOnlyAllowlist(files = []) {
   const entries = files.filter((file) => normalizeChangedPath(file));
   if (entries.length === 0) return false;
   const registryAllowed = registryExceptionApplies(entries);
+  const baselineAllowed = baselineExceptionApplies(entries);
   return entries.every((file) => {
     const pathname = normalizeChangedPath(file);
     if (pathname === OSS_READINESS_REGISTRY_PATH) return registryAllowed;
+    if (pathname === OSS_READINESS_BASELINE_PATH) return baselineAllowed;
     return additiveOnlyPathAllowed(pathname);
   });
 }

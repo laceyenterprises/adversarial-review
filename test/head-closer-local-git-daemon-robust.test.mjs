@@ -108,6 +108,25 @@ test('fetchVerifiedCommitFromLocalGit: extracts identity hashes from warning-pre
   ]);
 });
 
+test('fetchVerifiedCommitFromLocalGit: removes leading git diagnostics from commit message output', async () => {
+  const git = makeFakeGit({
+    message: [
+      'warning: ignoring suspicious replacement ref',
+      'hint: run git maintenance',
+      HAMMER_MESSAGE,
+    ].join('\n'),
+  });
+  const commit = await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 5348,
+    headSha: HEAD_SHA,
+    execFileImpl: git,
+  });
+  assert.equal(commit.message, HAMMER_MESSAGE);
+  assert.equal(commit.commit.message, HAMMER_MESSAGE);
+  assert.equal(isTerminalCloserCommitIdentity(commit).suppressed, true);
+});
+
 test('fetchVerifiedCommitFromLocalGit: retries transient local git subprocess failures', async () => {
   const git = makeFakeGit();
   const attemptsByCommand = new Map();

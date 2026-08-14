@@ -6,9 +6,10 @@ import { parseCommitTrailers } from './ama/ham-provenance.mjs';
 const execFileAsync = promisify(execFile);
 
 const HEAD_CLOSER_SUPPRESSION_RETRY_BACKOFF_MS = [250, 1000];
-const LOCAL_GIT_TIMEOUT_MS = 20000;
+const LOCAL_GIT_TIMEOUT_MS = 5000;
 const LOCAL_GIT_MAX_BUFFER = 1024 * 1024 * 16;
 const FULL_SHA_RE = /\b[a-f0-9]{40}\b/gi;
+const GIT_STDOUT_DIAGNOSTIC_RE = /^(warning|hint):\s/i;
 
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -34,6 +35,14 @@ function extractIdentityHashes(identityOutput, expectedSha) {
     throw new Error(`local git identity output did not contain commit hashes for ${String(expectedSha || '').slice(0, 12)}`);
   }
   return hashes.map((hash) => hash.toLowerCase());
+}
+
+function cleanGitCommitMessageOutput(output) {
+  const lines = String(output || '').replace(/\n+$/, '').split('\n');
+  while (lines.length > 0 && GIT_STDOUT_DIAGNOSTIC_RE.test(lines[0])) {
+    lines.shift();
+  }
+  return lines.join('\n');
 }
 
 // Read the head commit from the LOCAL checkout instead of `gh api commits/<sha>`.
@@ -91,7 +100,7 @@ export async function fetchVerifiedCommitFromLocalGit({
       .slice(1)
       .map((parentSha) => String(parentSha || '').trim())
       .filter(Boolean);
-    const message = String(await runGit(['show', '-s', '--format=%B', `${sha}^{commit}`])).replace(/\n+$/, '');
+    const message = cleanGitCommitMessageOutput(await runGit(['show', '-s', '--format=%B', `${sha}^{commit}`]));
     let files = [];
     try {
       const fileOut = await runGit(['diff-tree', '--no-commit-id', '--name-only', '-r', `${sha}^{commit}`]);

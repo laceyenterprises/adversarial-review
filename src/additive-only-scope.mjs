@@ -51,9 +51,69 @@ function additiveOnlyPathAllowed(pathname) {
   return Boolean(normalized) && ADDITIVE_ONLY_ALLOWLIST.some((pattern) => pattern.test(normalized));
 }
 
+// A build pack cannot be additive-only without this carve-out. AGENTS.md requires
+// build packs to ship a post-merge-actions YAML (already allowlisted), and every
+// such YAML hardcodes production-host values -- at minimum `user: airlock`. The
+// OSS-readiness enforced gate REFUSES the push unless those hardcodes are
+// registered in the registry below, which is not allowlisted. So shipping an
+// allowlisted file forces touching a non-allowlisted one, and no build pack could
+// ever satisfy the label the reviewer itself applies.
+//
+// The carve-out is deliberately narrow rather than adding the registry to
+// ADDITIVE_ONLY_ALLOWLIST: a blanket entry would let any additive-only PR rewrite a
+// security control unreviewed.
+const OSS_READINESS_REGISTRY_PATH = 'scripts/oss-readiness-allowlist.registry.json';
+// The category ratchet is the second file the same YAML forces. New hardcodes raise
+// the repo-wide per-category count, and the ratchet deliberately fails until the new
+// count is acknowledged in the same PR. Unlike the registry this cannot be
+// deletions-free -- bumping a count rewrites the line -- so it is gated on the
+// forcing post-merge action alone. That is safe because the baseline only gates
+// AGGREGATE counts: every individual hardcode still needs an inline marker and a
+// registry entry, and the registry stays additive-only. A baseline bump on its own
+// therefore cannot smuggle in an unregistered hardcode.
+const OSS_READINESS_BASELINE_PATH = 'scripts/oss-readiness-category-baseline.json';
+const POST_MERGE_ACTIONS_PATTERN = /^modules\/worker-pool\/post-merge-actions\/[^/]+(?:\/.*)?$/;
+
+function pathIsPostMergeAction(pathname) {
+  return POST_MERGE_ACTIONS_PATTERN.test(String(pathname || '').replace(/^\/+/, ''));
+}
+
+function registryChangeIsPurelyAdditive(file) {
+  // Unknown deletion counts fail closed. A caller that hands us bare
+  // `{ filename }` objects must not silently obtain the exception.
+  const deletions = file?.deletions;
+  return Number.isInteger(deletions) && deletions === 0;
+}
+
+function forcedByPostMergeAction(files) {
+  return files.some((file) => pathIsPostMergeAction(normalizeChangedPath(file)));
+}
+
+function registryExceptionApplies(files) {
+  if (!forcedByPostMergeAction(files)) return false;
+  // Additive literally: the exception never permits deleting an existing
+  // registration, which would silently un-register somebody else's hardcode.
+  const registryFiles = files.filter(
+    (file) => normalizeChangedPath(file) === OSS_READINESS_REGISTRY_PATH
+  );
+  return registryFiles.every(registryChangeIsPurelyAdditive);
+}
+
+function baselineExceptionApplies(files) {
+  return forcedByPostMergeAction(files);
+}
+
 function changedFilesWithinAdditiveOnlyAllowlist(files = []) {
-  const paths = files.map(normalizeChangedPath).filter(Boolean);
-  return paths.length > 0 && paths.every(additiveOnlyPathAllowed);
+  const entries = files.filter((file) => normalizeChangedPath(file));
+  if (entries.length === 0) return false;
+  const registryAllowed = registryExceptionApplies(entries);
+  const baselineAllowed = baselineExceptionApplies(entries);
+  return entries.every((file) => {
+    const pathname = normalizeChangedPath(file);
+    if (pathname === OSS_READINESS_REGISTRY_PATH) return registryAllowed;
+    if (pathname === OSS_READINESS_BASELINE_PATH) return baselineAllowed;
+    return additiveOnlyPathAllowed(pathname);
+  });
 }
 
 function uniqueSorted(values) {

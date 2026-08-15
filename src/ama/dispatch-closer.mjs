@@ -1251,6 +1251,14 @@ function readJsonFile(filePath) {
   }
 }
 
+function readJsonFileSafe(readJsonFileImpl, filePath) {
+  try {
+    return readJsonFileImpl(filePath);
+  } catch {
+    return null;
+  }
+}
+
 export function readAmaCloserDispatchRecord(rootDir, identity) {
   return readJsonFile(amaCloserDispatchFilePath(rootDir, identity));
 }
@@ -1895,8 +1903,8 @@ async function resolveSelfOwnedHammerCloserRunLiveness({
   const root = String(hqRoot || '').trim();
   if (!workerId || !root) return { live: false, reason: 'invalid-worker-id-or-root' };
   const workerDir = join(root, 'workers', workerId);
-  const workspace = readJsonFileImpl(join(workerDir, 'workspace.json'));
-  const runRecord = readJsonFileImpl(join(workerDir, 'run.json'));
+  const workspace = readJsonFileSafe(readJsonFileImpl, join(workerDir, 'workspace.json'));
+  const runRecord = readJsonFileSafe(readJsonFileImpl, join(workerDir, 'run.json'));
   const launchRequestId = workspace?.launchRequestId || workspace?.lrq
     || runRecord?.launchRequestId || runRecord?.lrq || null;
   if (!launchRequestId) return { live: false, reason: 'missing-launch-request-id' };
@@ -4413,7 +4421,7 @@ export async function maybeDispatchAmaCloser({
     // (which collides on the worktree and force-kills the live worker) and do NOT
     // fall back to the merge-agent (which skips as remediation-active). Defer this
     // cycle and let the live closer finish; the next poll re-evaluates cleanly.
-    logger.log?.(
+    logger.info?.(
       `[ama-closer] deferring dispatch: PR ${repo}#${prNumber} hammer closer is live in-flight `
       + `(status=${closerReclaim.workerStatus || 'unknown'}); waiting for it to complete`,
     );

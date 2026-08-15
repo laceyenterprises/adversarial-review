@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -823,6 +823,34 @@ test('liveness: a missing workspace launchRequestId is not-live (reclaim-safe)',
   });
   assert.equal(liveness.live, false);
   assert.equal(liveness.reason, 'missing-launch-request-id');
+});
+
+test('liveness: thrown workspace/run JSON reads are not-live (reclaim-safe)', async () => {
+  const liveness = await __testables__.resolveSelfOwnedHammerCloserRunLiveness({
+    prNumber: 3312,
+    hqRoot: HQ_ROOT,
+    readJsonFileImpl: () => { throw new SyntaxError('Unexpected end of JSON input'); },
+    readLatestWorkerRunStatusImpl: async () => { throw new Error('must not be queried without an lrq'); },
+    processKillImpl: () => {},
+  });
+  assert.equal(liveness.live, false);
+  assert.equal(liveness.reason, 'missing-launch-request-id');
+});
+
+test('live closer dispatch deferral logs through logger.info', () => {
+  const source = readFileSync(new URL('../src/ama/dispatch-closer.mjs', import.meta.url), 'utf8');
+  const marker = 'deferring dispatch: PR ${repo}#${prNumber} hammer closer is live in-flight';
+  const markerIndex = source.indexOf(marker);
+  assert.notEqual(markerIndex, -1);
+  const logWindow = source.slice(Math.max(0, markerIndex - 100), markerIndex + marker.length);
+  assert.match(
+    logWindow,
+    /logger\.info\?\.\([\s\S]*?deferring dispatch:/,
+  );
+  assert.doesNotMatch(
+    logWindow,
+    /logger\.log\?\.\([\s\S]*?deferring dispatch:/,
+  );
 });
 
 test('pre-provision reclaim SKIPS tear-down when the hammer closer is live', async () => {

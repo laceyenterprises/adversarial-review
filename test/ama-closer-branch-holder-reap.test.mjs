@@ -742,3 +742,157 @@ test('pre-provision reclaim never tears down a different hammer worker id', asyn
   assert.equal(result.workerId, 'hammer-ama-pr-3312');
   assert.deepEqual(calls, []);
 });
+
+// ---------------------------------------------------------------------------
+// Liveness-aware reclaim: a genuinely-live hammer closer must NOT be reclaimed.
+// The unconditional pre-provision tear-down SIGKILLed a closer mid-planning,
+// producing 2-3 worker_killed churn runs per PR (the clean-green-unmerged
+// "stall" window). The reclaim is now gated on run liveness.
+// ---------------------------------------------------------------------------
+
+// Helper defaults that make resolveSelfOwnedHammerCloserRunLiveness see a
+// workspace.json carrying a launchRequestId for PR 3312.
+function livenessWorkspaceReader() {
+  return (path) => {
+    if (path === `${HQ_ROOT}/workers/hammer-ama-pr-3312/workspace.json`) {
+      return { launchRequestId: 'lrq_closer_3312' };
+    }
+    return null;
+  };
+}
+
+test('liveness: active status with a confirmed-alive pid is live', async () => {
+  const liveness = await __testables__.resolveSelfOwnedHammerCloserRunLiveness({
+    prNumber: 3312,
+    hqRoot: HQ_ROOT,
+    readJsonFileImpl: livenessWorkspaceReader(),
+    readLatestWorkerRunStatusImpl: async ({ launchRequestId }) => {
+      assert.equal(launchRequestId, 'lrq_closer_3312');
+      return { ok: true, row: { status: 'running', pid: 4242 } };
+    },
+    processKillImpl: () => {}, // pid 4242 alive (no throw)
+  });
+  assert.equal(liveness.live, true);
+  assert.equal(liveness.workerStatus, 'running');
+  assert.equal(liveness.launchRequestId, 'lrq_closer_3312');
+});
+
+test('liveness: active status but a dead pid is a phantom, not live', async () => {
+  const liveness = await __testables__.resolveSelfOwnedHammerCloserRunLiveness({
+    prNumber: 3312,
+    hqRoot: HQ_ROOT,
+    readJsonFileImpl: livenessWorkspaceReader(),
+    readLatestWorkerRunStatusImpl: async () => ({ ok: true, row: { status: 'running', pid: 4242 } }),
+    processKillImpl: () => { const err = new Error('no such process'); err.code = 'ESRCH'; throw err; },
+  });
+  assert.equal(liveness.live, false);
+  assert.equal(liveness.pidAlive, false);
+});
+
+test('liveness: a terminal status is never live even with an alive pid', async () => {
+  const liveness = await __testables__.resolveSelfOwnedHammerCloserRunLiveness({
+    prNumber: 3312,
+    hqRoot: HQ_ROOT,
+    readJsonFileImpl: livenessWorkspaceReader(),
+    readLatestWorkerRunStatusImpl: async () => ({ ok: true, row: { status: 'succeeded', pid: 4242 } }),
+    processKillImpl: () => {},
+  });
+  assert.equal(liveness.live, false);
+  assert.equal(liveness.workerStatus, 'succeeded');
+});
+
+test('liveness: a failed ledger lookup is treated as not-live (reclaim-safe)', async () => {
+  const liveness = await __testables__.resolveSelfOwnedHammerCloserRunLiveness({
+    prNumber: 3312,
+    hqRoot: HQ_ROOT,
+    readJsonFileImpl: livenessWorkspaceReader(),
+    readLatestWorkerRunStatusImpl: async () => ({ ok: false, reason: 'ledger-unreachable' }),
+    processKillImpl: () => {},
+  });
+  assert.equal(liveness.live, false);
+  assert.equal(liveness.reason, 'ledger-unreachable');
+});
+
+test('liveness: a missing workspace launchRequestId is not-live (reclaim-safe)', async () => {
+  const liveness = await __testables__.resolveSelfOwnedHammerCloserRunLiveness({
+    prNumber: 3312,
+    hqRoot: HQ_ROOT,
+    readJsonFileImpl: () => null,
+    readLatestWorkerRunStatusImpl: async () => { throw new Error('must not be queried without an lrq'); },
+    processKillImpl: () => {},
+  });
+  assert.equal(liveness.live, false);
+  assert.equal(liveness.reason, 'missing-launch-request-id');
+});
+
+test('pre-provision reclaim SKIPS tear-down when the hammer closer is live', async () => {
+  const calls = [];
+  const logs = [];
+  const now = 1_800_000;
+  const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    repo: 'owner/agent-os',
+    prNumber: 3312,
+    workerClass: 'hammer',
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot: HQ_ROOT,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      throw new Error('execFileImpl must not run for a live closer');
+    },
+    existsSyncImpl: (path) => path === `${HQ_ROOT}/workers/hammer-ama-pr-3312/agent-os`,
+    statSyncImpl: () => ({ mtimeMs: now - 20_000 }),
+    nowMs: () => now,
+    readJsonFileImpl: livenessWorkspaceReader(),
+    readLatestWorkerRunStatusImpl: async () => ({ ok: true, row: { status: 'running', pid: 4242 } }),
+    processKillImpl: () => {}, // pid alive
+    logger: { info(line) { logs.push(JSON.parse(line)); }, warn() {} },
+  });
+
+  // No tear-down was attempted; the caller is told a live run is in flight so it
+  // defers re-dispatch instead of re-firing a fresh closer.
+  assert.deepEqual(calls, []);
+  assert.equal(result.attempted, false);
+  assert.equal(result.live, true);
+  assert.equal(result.reason, 'live-run-in-flight');
+  assert.equal(result.workerStatus, 'running');
+  assert.deepEqual(logs, [{
+    event: 'closer_reclaim_skipped_live_run',
+    repo: 'owner/agent-os',
+    prNumber: 3312,
+    workerId: 'hammer-ama-pr-3312',
+    worktreePath: `${HQ_ROOT}/workers/hammer-ama-pr-3312/agent-os`,
+    worktreeAgeMs: 20000,
+    workerStatus: 'running',
+    launchRequestId: 'lrq_closer_3312',
+  }]);
+});
+
+test('pre-provision reclaim TEARS DOWN a phantom closer (active status, dead pid)', async () => {
+  const calls = [];
+  const now = 1_800_000;
+  const result = await __testables__.reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+    repo: 'owner/agent-os',
+    prNumber: 3312,
+    workerClass: 'hammer',
+    hqPath: '/opt/hq/bin/hq',
+    hqRoot: HQ_ROOT,
+    execFileImpl: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return { stdout: '', stderr: '' };
+    },
+    existsSyncImpl: (path) => path === `${HQ_ROOT}/workers/hammer-ama-pr-3312/agent-os`,
+    statSyncImpl: () => ({ mtimeMs: now - 41_000 }),
+    nowMs: () => now,
+    readJsonFileImpl: livenessWorkspaceReader(),
+    readLatestWorkerRunStatusImpl: async () => ({ ok: true, row: { status: 'running', pid: 4242 } }),
+    processKillImpl: () => { const err = new Error('no such process'); err.code = 'ESRCH'; throw err; },
+    logger: { info() {}, warn() {} },
+  });
+
+  assert.equal(result.ok, true);
+  assert.notEqual(result.live, true);
+  assert.deepEqual(calls, [{
+    cmd: '/opt/hq/bin/hq',
+    args: ['worker', 'tear-down', 'hammer-ama-pr-3312', '--force', '--root', HQ_ROOT],
+  }]);
+});

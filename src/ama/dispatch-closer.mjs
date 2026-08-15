@@ -1873,6 +1873,52 @@ function selfOwnedHammerCloserWorktreePath(prNumber, hqRoot) {
   return join(root, 'workers', workerId, 'agent-os');
 }
 
+// Whether the self-owned hammer closer for this PR is a GENUINELY live in-flight
+// run — an active ledger status backed by a still-alive OS process — versus a
+// terminal / phantom-active (active status, dead pid) / lookup-unresolvable run
+// that is safe to reclaim. This is the guard that stops the reclaim from
+// SIGKILLing a healthy closer mid-planning (the `worker_killed ~36s into
+// planning` churn: each poll re-provisions and kills the live closer, so a PR
+// burns 2-3 runs before one survives a whole poll interval). Deliberately
+// conservative: it reports live ONLY when it can confirm both an active status
+// and a live pid, so any ambiguity falls back to reclaim and a crashed closer
+// can never strand the PR.
+async function resolveSelfOwnedHammerCloserRunLiveness({
+  prNumber,
+  hqRoot,
+  env = process.env,
+  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
+  readJsonFileImpl = readJsonFile,
+  processKillImpl = process.kill,
+} = {}) {
+  const workerId = hammerCloserWorkerId(prNumber);
+  const root = String(hqRoot || '').trim();
+  if (!workerId || !root) return { live: false, reason: 'invalid-worker-id-or-root' };
+  const workerDir = join(root, 'workers', workerId);
+  const workspace = readJsonFileImpl(join(workerDir, 'workspace.json'));
+  const runRecord = readJsonFileImpl(join(workerDir, 'run.json'));
+  const launchRequestId = workspace?.launchRequestId || workspace?.lrq
+    || runRecord?.launchRequestId || runRecord?.lrq || null;
+  if (!launchRequestId) return { live: false, reason: 'missing-launch-request-id' };
+  let result;
+  try {
+    result = await readLatestWorkerRunStatusImpl({ launchRequestId, env, hqRoot: root });
+  } catch (err) {
+    return { live: false, reason: 'worker-run-lookup-threw', detail: err?.message || String(err) };
+  }
+  if (!result?.ok || !result.row) {
+    return { live: false, reason: result?.reason || 'worker-run-lookup-failed', launchRequestId };
+  }
+  const workerStatus = normalizeWorkerRunStatus(result.row.status);
+  const active = AMA_CLOSER_ACTIVE_STATUSES.has(workerStatus);
+  const pid = result.row.pid ?? result.row.worker_process_pid ?? null;
+  const pidAlive = isPidAlive(pid, processKillImpl);
+  // Live only when the status is active AND the pid is CONFIRMED alive. An
+  // active status with an unknown/dead pid is a phantom and gets reclaimed.
+  const live = Boolean(active) && pidAlive === true;
+  return { live, workerStatus, launchRequestId, pid, pidAlive };
+}
+
 async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
   repo,
   prNumber,
@@ -1885,6 +1931,10 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
   statSyncImpl = statSync,
   nowMs = Date.now,
   sleepImpl = sleep,
+  env = process.env,
+  readLatestWorkerRunStatusImpl = readLatestWorkerRunStatusFromLedger,
+  readJsonFileImpl = readJsonFile,
+  processKillImpl = process.kill,
 }) {
   if (!isHammerWorkerClass(workerClass)) {
     return { attempted: false, reason: 'not-hammer-worker-class' };
@@ -1911,6 +1961,39 @@ async function reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
     }
   } catch {
     worktreeAgeMs = null;
+  }
+
+  // Never force-reclaim a worktree whose closer is still genuinely running: that
+  // SIGKILL mid-planning is the churn this whole fix targets. Defer to the live
+  // closer and let the caller skip re-dispatch; the next poll reclaims it only
+  // once it has actually terminated (or gone phantom).
+  const liveness = await resolveSelfOwnedHammerCloserRunLiveness({
+    prNumber,
+    hqRoot: root,
+    env,
+    readLatestWorkerRunStatusImpl,
+    readJsonFileImpl,
+    processKillImpl,
+  });
+  if (liveness.live) {
+    logAmaCloserDispatchEvent(logger, 'closer_reclaim_skipped_live_run', {
+      repo,
+      prNumber,
+      workerId,
+      worktreePath,
+      worktreeAgeMs,
+      workerStatus: liveness.workerStatus,
+      launchRequestId: liveness.launchRequestId,
+    });
+    return {
+      attempted: false,
+      live: true,
+      workerId,
+      worktreePath,
+      worktreeAgeMs,
+      reason: 'live-run-in-flight',
+      workerStatus: liveness.workerStatus,
+    };
   }
 
   const args = ['worker', 'tear-down', workerId, '--force', '--root', root];
@@ -2216,6 +2299,7 @@ async function resolveTerminalCodingBranchHolder({
 export const __testables__ = Object.freeze({
   cleanupHammerCloserWorker,
   reclaimSelfOwnedHammerCloserWorktreeBeforeProvision,
+  resolveSelfOwnedHammerCloserRunLiveness,
   selfOwnedHammerCloserWorktreePath,
   isProvisionBranchHolderBlocked,
   teardownSamePrHammerHolder,
@@ -4315,7 +4399,7 @@ export async function maybeDispatchAmaCloser({
     args.push('--additional-repo', AGENT_OS_TOOLING_REPO);
   }
 
-  await reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
+  const closerReclaim = await reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
     repo,
     prNumber,
     workerClass,
@@ -4324,6 +4408,22 @@ export async function maybeDispatchAmaCloser({
     execFileImpl,
     logger,
   });
+  if (closerReclaim?.live) {
+    // A healthy hammer closer for this PR is still in-flight. Do NOT re-provision
+    // (which collides on the worktree and force-kills the live worker) and do NOT
+    // fall back to the merge-agent (which skips as remediation-active). Defer this
+    // cycle and let the live closer finish; the next poll re-evaluates cleanly.
+    logger.log?.(
+      `[ama-closer] deferring dispatch: PR ${repo}#${prNumber} hammer closer is live in-flight `
+      + `(status=${closerReclaim.workerStatus || 'unknown'}); waiting for it to complete`,
+    );
+    return noAmaDispatch({
+      dispatched: false,
+      skipMergeAgent: true,
+      reason: 'hammer-closer-in-flight',
+      workerStatus: closerReclaim.workerStatus || null,
+    });
+  }
 
   // Count a hammer launch against the per-PR firing ceiling. Called from BOTH the
   // confirmed-launch path (exec returned cleanly) AND the ambiguous-launch path

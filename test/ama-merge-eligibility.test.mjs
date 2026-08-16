@@ -211,6 +211,48 @@ test('a missing mergeStateStatus does not block when MERGEABLE', () => {
   assert.equal(result.eligible, true);
 });
 
+test('BEHIND blocks by default (requiresUpToDateBranch unresolved → fail closed)', () => {
+  // Omitting the flag must preserve the historical block: an unresolved
+  // up-to-date requirement is treated as required.
+  const result = evaluateMergeEligibility(eligibleState({ mergeStateStatus: 'BEHIND' }));
+  assert.equal(result.eligible, false);
+  assert.deepEqual(result.reasons, ['pr-not-mergeable']);
+});
+
+test('BEHIND still blocks when requiresUpToDateBranch is explicitly true', () => {
+  const result = evaluateMergeEligibility(
+    eligibleState({ mergeStateStatus: 'BEHIND', requiresUpToDateBranch: true }),
+  );
+  assert.equal(result.eligible, false);
+  assert.deepEqual(result.reasons, ['pr-not-mergeable']);
+});
+
+test('BEHIND does NOT block when requiresUpToDateBranch is false (no strict up-to-date rule)', () => {
+  // A base that advanced under a MERGEABLE PR is fine to merge when the target
+  // branch has no strict up-to-date requirement — GitHub merges it with a merge
+  // commit, so chasing main with repeated rebases only re-runs CI on identical
+  // code. Every other precondition is satisfied, so the PR is fully eligible.
+  const result = evaluateMergeEligibility(
+    eligibleState({ mergeStateStatus: 'BEHIND', requiresUpToDateBranch: false }),
+  );
+  assert.deepEqual(result, { eligible: true, reasons: [] });
+});
+
+test('requiresUpToDateBranch:false does not rescue a genuinely un-MERGEABLE (DIRTY) PR', () => {
+  // The escape is scoped to BEHIND only. A real conflict (mergeable !=
+  // MERGEABLE, e.g. DIRTY) still fails the mergeable check regardless of the
+  // up-to-date flag.
+  const result = evaluateMergeEligibility(
+    eligibleState({
+      mergeable: 'CONFLICTING',
+      mergeStateStatus: 'DIRTY',
+      requiresUpToDateBranch: false,
+    }),
+  );
+  assert.equal(result.eligible, false);
+  assert.deepEqual(result.reasons, ['pr-not-mergeable']);
+});
+
 test('verdict comparison is case/space-insensitive', () => {
   assert.equal(
     evaluateMergeEligibility(eligibleState({ verdict: '  Settled-Success  ' })).eligible,

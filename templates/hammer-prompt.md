@@ -18,7 +18,22 @@ where GNU `timeout` may not exist, wrap commands like this:
 ```
 
 Use focused timeouts that match the operation: short reads/searches should be
-seconds, test suites and GitHub waits can be longer. Never run unbounded
+seconds, test suites and GitHub waits can be longer. **For test suites, size the
+alarm with the load-aware helper instead of a fixed literal** — a suite that
+runs in ~T seconds solo can overrun 2-3x under fleet contention, and a fixed cap
+then times out with no failures and forces a full rerun on identical code
+(agent-os#5464). Pass the suite's nominal (idle-host) seconds and let the helper
+scale it by current host load:
+
+```bash
+/usr/bin/perl -e 'alarm shift; exec @ARGV' \
+  "$("$HAM_NODE_BIN" <<ROOT_DIR>>/bin/load-aware-timeout.mjs 360)" \
+  python3 -m pytest tests/test_endpoints.py
+```
+
+The helper keeps a tight cap on an idle host (fast hang detection) and inflates
+up to 6x under heavy load; it prints the nominal unchanged on any error, so the
+alarm is always bounded. Never run unbounded
 recursive searches over `/tmp`, `/private/tmp`, `$HOME`,
 `/Users/airlock/agent-os-hq`, or an entire checkout when looking for review
 state. Prefer the live PR, the final review body, this prompt's audit inputs,
@@ -158,20 +173,32 @@ scans.
    timeline comment whose author is the verified HAM commit author or an
    allowlisted hammer bot.
 5. Validate the exact post-remediation PR head. Refresh the PR head SHA after
-   your commit. **Always rebase the PR onto the latest base (`main`) before
-   merging — do not merge a branch that is behind — and CONFIRM THE REBASE
-   HOLDS.** Before entering the final rebase→remote-CI→merge window,
-   acquire the merge lease
+   your commit. **Rebase the PR onto a recent base (`main`) and CONFIRM THE
+   REBASE HOLDS — but do NOT chase a moving base.** When the target branch
+   requires the PR to be up to date before merge
+   (`required_status_checks.strict`), rebase until `mergeStateStatus` is no
+   longer `BEHIND`, exactly as before. When it does NOT (the shell resolves this
+   into `HAM_REQUIRES_UP_TO_DATE`), rebase ONCE onto a recent base and then merge
+   the validated head even if it is `BEHIND` again — provided the PR is
+   `MERGEABLE` and the newer base does not touch any file this PR changes
+   (`ham_base_touches_pr_files`). GitHub squash-merges a `BEHIND`-but-`MERGEABLE`
+   PR with a merge commit, so re-rebasing to chase a base that advances only
+   because OTHER PRs merged just re-runs the full required-check suite on
+   identical code (agent-os#5464). A genuine conflict (`DIRTY`) or a
+   changed-file overlap still forces a rebase.
+   Before entering the final rebase→remote-CI→merge window, acquire the
+   merge lease
    for `(<<REPO>>, base, PR <<PR_NUMBER>>)` with the blocking
    `bin/merge-lease.mjs acquire` command below. The acquire waits; do not poll.
    If acquire returns `70` with `parked:true` or `75` with `timedOut:true`, log
    the AMG-04 park message and exit `0` so contention defers cleanly instead of
    re-entering the dispatcher as a transient failure.
    Save the returned `leaseId`, and every terminal cleanup path while the lease
-   is held must call `release --lease-id "$HAM_MERGE_LEASE_ID"`. Run
-   `gh pr update-branch --rebase` (bounded cap, default 3 attempts) while holding
-   the lease until `mergeStateStatus` is no longer `BEHIND`; if `gh` reports the
-   branch is already up to date that confirms it is on the latest `main`. After
+   is held must call `release --lease-id "$HAM_MERGE_LEASE_ID"`. The
+   `gh pr update-branch --rebase` loop (bounded cap, default 3 attempts) runs
+   while holding the lease and honors the stop-chasing guard above; if `gh`
+   reports the branch is already up to date that confirms it is on the latest
+   `main`. After
    the rebase, fetch the base, capture the exact current base SHA, and run
    `merge-lease.mjs needs-revalidation ... --current-base <sha>`. Re-run the
    changed-surface tests (mandate step 2b) and required checks only when
@@ -416,7 +443,62 @@ ham_update_branch_with_retries() {
   return 1
 }
 
+ham_base_touches_pr_files() {
+  # Returns 0 (overlap → a rebase+revalidation is still required) when any file
+  # this PR changes is also touched by base commits that landed SINCE the base we
+  # last validated against; returns 1 (disjoint → the validated head is safe to
+  # merge without another rebase). Fail closed to 0 (overlap) on any fetch/diff
+  # error so an undeterminable diff never lets us skip a rebase semantics needs.
+  git fetch origin "$BASE_BRANCH" >/dev/null 2>&1 || return 0
+  [ -n "$HAM_VALIDATION_BASE_SHA" ] || return 0
+  local pr_files base_files
+  pr_files=$(git diff --name-only "origin/$BASE_BRANCH...HEAD" 2>/dev/null) || return 0
+  base_files=$(git diff --name-only "$HAM_VALIDATION_BASE_SHA..origin/$BASE_BRANCH" 2>/dev/null) || return 0
+  [ -n "$pr_files" ] || return 1
+  [ -n "$base_files" ] || return 1
+  comm -12 <(printf '%s\n' "$pr_files" | sort -u) <(printf '%s\n' "$base_files" | sort -u) 2>/dev/null | grep -q .
+}
+
+# Resolve whether the target branch REQUIRES the PR to be up to date before merge
+# (GitHub required_status_checks.strict). This decides whether a BEHIND head must
+# be chased with a rebase or may merge as-is. FAIL CLOSED: any error, or an
+# undetermined result, keeps the historical always-rebase-until-not-BEHIND
+# behavior (=1). Where no strict rule exists, a BEHIND that arises only because
+# OTHER PRs merged is NOT a merge blocker (GitHub squash-merges a BEHIND-but-
+# MERGEABLE PR), so chasing it with a rebase would only re-run the full required
+# check suite on identical code (agent-os#5464).
+HAM_REQUIRES_UP_TO_DATE=1
+ham_rsc_json=/tmp/ham-<<PR_NUMBER>>-required-status-checks.json
+ham_rsc_err=/tmp/ham-<<PR_NUMBER>>-required-status-checks.stderr
+ham_base_enc_early=$(printf '%s' "$BASE_BRANCH" | jq -sRr @uri)
+if /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh api \
+    "repos/<<REPO>>/branches/$ham_base_enc_early/protection/required_status_checks" \
+    > "$ham_rsc_json" 2> "$ham_rsc_err"; then
+  if [ "$(jq -r '.strict // empty' "$ham_rsc_json" 2>/dev/null)" = "false" ]; then
+    HAM_REQUIRES_UP_TO_DATE=0
+  fi
+elif grep -Eiq 'HTTP 404|Not Found|not protected|Branch not protected|Required status checks.*not' "$ham_rsc_err"; then
+  # No branch protection / no required-status-checks object → no strict rule.
+  HAM_REQUIRES_UP_TO_DATE=0
+fi
+echo "HAM: requiresUpToDate=$HAM_REQUIRES_UP_TO_DATE base=$BASE_BRANCH" >&2
+
 while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-<<PR_NUMBER>>-pr-after.json)" = "BEHIND" ]; do
+  # STOP CHASING A MOVING BASE (agent-os#5464). Once we have rebased onto a recent
+  # base at least once (HAM_REBASE_ATTEMPTS>=1) and (a) the base has no strict
+  # up-to-date rule, (b) the PR is MERGEABLE, and (c) the newer base does not touch
+  # any file this PR changes, merge the VALIDATED head as-is: GitHub incorporates
+  # the newer base in the squash-merge commit, and re-rebasing to chase a base that
+  # advanced only because OTHER PRs merged would re-run the full required-check
+  # suite on identical code. Keep chasing when the base REQUIRES up-to-date, on a
+  # genuine conflict, or on changed-file overlap (all fall through to the rebase).
+  if [ "$HAM_REQUIRES_UP_TO_DATE" -ne 1 ] \
+     && [ "$(jq -r '.mergeable // ""' /tmp/ham-<<PR_NUMBER>>-pr-after.json)" = "MERGEABLE" ] \
+     && [ "${HAM_REBASE_ATTEMPTS:-0}" -ge 1 ] \
+     && ! ham_base_touches_pr_files; then
+    echo "HAM: base BEHIND only because other PRs merged (no strict up-to-date rule, PR MERGEABLE, no changed-file overlap) — merging the validated head without a re-rebase to avoid CI churn on identical code." >&2
+    break
+  fi
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
     ham_acquire_merge_lease
   fi
@@ -1002,7 +1084,9 @@ NODE
 }
 
 ham_refresh_github_gate_once() {
-  POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" "$HAM_NODE_BIN" --input-type=module <<'NODE' > "$HAM_GATE_JSON"
+  POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" \
+  HAM_REQUIRES_UP_TO_DATE="${HAM_REQUIRES_UP_TO_DATE:-1}" \
+  "$HAM_NODE_BIN" --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchPullRequestRollup } from '<<ROOT_DIR>>/src/github-api.mjs';
 import { evaluateMergeEligibility } from '<<ROOT_DIR>>/src/ama/merge-eligibility.mjs';
 
@@ -1028,12 +1112,19 @@ const open = state === 'OPEN';
 // for this call site — ama-check emits the verdict into /tmp verdict.json and the
 // shell hard-checks HAM_MERGE_LEASE_HELD before reaching here — so they are passed
 // as already-satisfied; `ok` stays exactly the pre-MSM-02 GitHub gate.
+// A BEHIND head only blocks when the base branch requires the PR to be up to
+// date (required_status_checks.strict). When the shell resolved no strict rule
+// (HAM_REQUIRES_UP_TO_DATE=0), pass requiresUpToDateBranch:false so a
+// BEHIND-but-MERGEABLE validated head is eligible instead of forcing a
+// churn-inducing rebase. Fail closed: any value other than '0' keeps the block.
+const requiresUpToDateBranch = process.env.HAM_REQUIRES_UP_TO_DATE !== '0';
 const ok = evaluateMergeEligibility({
   verdict: 'settled-success',
   leaseHeld: true,
   requiredChecks: checks,
   mergeable: rollup.mergeable,
   mergeStateStatus: rollup.mergeStateStatus,
+  requiresUpToDateBranch,
   prState: state,
   candidateHead: rollup.headSha || rollup.headRefOid || '',
   validatedHead: expectedHead,

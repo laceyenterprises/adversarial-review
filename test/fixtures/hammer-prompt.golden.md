@@ -18,7 +18,22 @@ where GNU `timeout` may not exist, wrap commands like this:
 ```
 
 Use focused timeouts that match the operation: short reads/searches should be
-seconds, test suites and GitHub waits can be longer. Never run unbounded
+seconds, test suites and GitHub waits can be longer. **For test suites, size the
+alarm with the load-aware helper instead of a fixed literal** — a suite that
+runs in ~T seconds solo can overrun 2-3x under fleet contention, and a fixed cap
+then times out with no failures and forces a full rerun on identical code
+(agent-os#5464). Pass the suite's nominal (idle-host) seconds and let the helper
+scale it by current host load:
+
+```bash
+/usr/bin/perl -e 'alarm shift; exec @ARGV' \
+  "$("$HAM_NODE_BIN" /tmp/ama-test-root/bin/load-aware-timeout.mjs 360)" \
+  python3 -m pytest tests/test_endpoints.py
+```
+
+The helper keeps a tight cap on an idle host (fast hang detection) and inflates
+up to 6x under heavy load; it prints the nominal unchanged on any error, so the
+alarm is always bounded. Never run unbounded
 recursive searches over `/tmp`, `/private/tmp`, `$HOME`,
 `/Users/airlock/agent-os-hq`, or an entire checkout when looking for review
 state. Prefer the live PR, the final review body, this prompt's audit inputs,
@@ -148,36 +163,61 @@ scans.
    Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)
    ```
 
-4. Comment on PR https://github.com/acme/myrepo/pull/1234 with an audit note that maps each final finding to
-   the files/changes that addressed it. Include counts for blocking and
-   non-blocking findings. The predicate accepts only a matched timeline comment
-   whose author is the verified HAM commit author or an allowlisted hammer bot.
+4. Prepare the audit note that maps each final finding to the files/changes that
+   addressed it, with counts for blocking and non-blocking findings. Do NOT post
+   it here: the audit is written in step 5 **under the merge lease, at the
+   settled post-rebase head, immediately before the predicate**, so it names the
+   exact head that merges. Posting it before the rebase window re-staled it on
+   every rebase and made one hammer re-post a fresh audit per rebase (a single
+   hammer read as several — agent-os#4090). The predicate accepts only a matched
+   timeline comment whose author is the verified HAM commit author or an
+   allowlisted hammer bot.
 5. Validate the exact post-remediation PR head. Refresh the PR head SHA after
-   your commit. **Always rebase the PR onto the latest base (`main`) before
-   merging — do not merge a branch that is behind — and CONFIRM THE REBASE
-   HOLDS.** Before entering the final rebase→remote-CI→merge window,
-   acquire the merge lease
+   your commit. **Rebase the PR onto a recent base (`main`) and CONFIRM THE
+   REBASE HOLDS — but do NOT chase a moving base.** When the target branch
+   requires the PR to be up to date before merge
+   (`required_status_checks.strict`), rebase until `mergeStateStatus` is no
+   longer `BEHIND`, exactly as before. When it does NOT (the shell resolves this
+   into `HAM_REQUIRES_UP_TO_DATE`), rebase ONCE onto a recent base and then merge
+   the validated head even if it is `BEHIND` again — provided the PR is
+   `MERGEABLE` and the newer base does not touch any file this PR changes
+   (`ham_base_touches_pr_files`). GitHub squash-merges a `BEHIND`-but-`MERGEABLE`
+   PR with a merge commit, so re-rebasing to chase a base that advances only
+   because OTHER PRs merged just re-runs the full required-check suite on
+   identical code (agent-os#5464). A genuine conflict (`DIRTY`) or a
+   changed-file overlap still forces a rebase.
+   Before entering the final rebase→remote-CI→merge window, acquire the
+   merge lease
    for `(acme/myrepo, base, PR 1234)` with the blocking
    `bin/merge-lease.mjs acquire` command below. The acquire waits; do not poll.
    If acquire returns `70` with `parked:true` or `75` with `timedOut:true`, log
    the AMG-04 park message and exit `0` so contention defers cleanly instead of
    re-entering the dispatcher as a transient failure.
    Save the returned `leaseId`, and every terminal cleanup path while the lease
-   is held must call `release --lease-id "$HAM_MERGE_LEASE_ID"`. Run
-   `gh pr update-branch --rebase` (bounded cap, default 3 attempts) while holding
-   the lease until `mergeStateStatus` is no longer `BEHIND`; if `gh` reports the
-   branch is already up to date that confirms it is on the latest `main`. After
+   is held must call `release --lease-id "$HAM_MERGE_LEASE_ID"`. The
+   `gh pr update-branch --rebase` loop (bounded cap, default 3 attempts) runs
+   while holding the lease and honors the stop-chasing guard above; if `gh`
+   reports the branch is already up to date that confirms it is on the latest
+   `main`. After
    the rebase, fetch the base, capture the exact current base SHA, and run
    `merge-lease.mjs needs-revalidation ... --current-base <sha>`. Re-run the
    changed-surface tests (mandate step 2b) and required checks only when
    `needsRevalidation` is true; otherwise trust the parallel-phase validation.
+   Do not parse this boolean with a jq fallback such as
+   `.needsRevalidation // true`: jq treats JSON `false` as fallback-worthy, so
+   that expression converts a safe `needsRevalidation:false` decision into a
+   false revalidation blocker. Use the exact boolean parser in the shell block.
    GitHub required checks are the SOLE CI authority: the hammer does NOT run a
    local test battery or the PPH pre-push CI mirror as a merge gate.
    `HAM_VALIDATION_BASE_SHA` must name the base SHA that the parallel-phase full
    suite actually validated. If that value is missing or malformed, force the
    full revalidation instead of deriving a post-hoc validation base.
    Fix any changed-surface test the rebase newly broke, commit it, publish
-   the new head, and re-enter this lease/gate flow from a fresh base fetch. Re-run
+   the new head, and re-enter this lease/gate flow from a fresh base fetch. Once
+   the rebase holds and required checks are green on the settled head, post the
+   step-4 audit note WHILE STILL HOLDING THE LEASE (idempotently — the audit
+   block refreshes the single marker comment in place, so re-entries never
+   duplicate it), so it names this exact head, THEN re-run
    the closer eligibility predicate in SPEC §1.1.1 HAM terminal-remediation mode
    for that same live head. Only a rebased-onto-latest-main head whose GitHub
    required check bar is green may proceed to merge while still holding the
@@ -235,151 +275,6 @@ git commit -m "HAM remediate final adversarial findings" \
   -m "Remediated-Findings: <n> addressed (<b> blocking, <nb> non-blocking)"
 ```
 
-Post the PR audit comment. It must list every final finding, whether it was
-blocking or non-blocking, and the file paths changed for that finding. The
-comment is HAM-authored terminal-remediation output: post it with the entitled
-hammer GitHub token from `MERGE_AGENT_GH_TOKEN`, not an ambient `GH_TOKEN` or
-`GITHUB_TOKEN`.
-
-```bash
-ham_audit_comment_transient() {
-  grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
-}
-
-ham_audit_cleanup_tmp_files() {
-  if [ -n "${HAM_AUDIT_PR_VIEW_STDERR:-}" ]; then
-    rm -f "$HAM_AUDIT_PR_VIEW_STDERR"
-  fi
-  if [ -n "${HAM_AUDIT_COMMENT_LOOKUP_STDERR:-}" ]; then
-    rm -f "$HAM_AUDIT_COMMENT_LOOKUP_STDERR"
-  fi
-  if [ -n "${HAM_AUDIT_COMMENT_POST_STDERR:-}" ]; then
-    rm -f "$HAM_AUDIT_COMMENT_POST_STDERR"
-  fi
-}
-HAM_AUDIT_PR_VIEW_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-pr-view.XXXXXX") || exit 1
-HAM_AUDIT_COMMENT_LOOKUP_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-comment-lookup.XXXXXX") || {
-  ham_audit_cleanup_tmp_files
-  exit 1
-}
-HAM_AUDIT_COMMENT_POST_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-comment-post.XXXXXX") || {
-  ham_audit_cleanup_tmp_files
-  exit 1
-}
-
-POST_REMEDIATION_SHA=""
-for HAM_AUDIT_SHA_ATTEMPT in 1 2 3; do
-  if POST_REMEDIATION_SHA=$(gh pr view https://github.com/acme/myrepo/pull/1234 --json headRefOid --jq '.headRefOid' 2> "$HAM_AUDIT_PR_VIEW_STDERR") &&
-    ham_is_full_sha "$POST_REMEDIATION_SHA"; then
-    break
-  fi
-  if [ "$HAM_AUDIT_SHA_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_PR_VIEW_STDERR"; then
-    break
-  fi
-  echo "hammer audit head lookup failed on attempt $HAM_AUDIT_SHA_ATTEMPT/3; retrying" >&2
-  sleep $((HAM_AUDIT_SHA_ATTEMPT * 2))
-done
-if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
-  echo "HAM hard-blocker: unable to resolve post-remediation head before audit comment" >&2
-  ham_audit_cleanup_tmp_files
-  exit 1
-fi
-HAM_AUDIT_COMMENT_MARKER='<!-- hq:ham-terminal-remediation:audit -->'
-HAM_AUDIT_COMMENT_HEAD="HAM-Terminal-Remediation-Head: $POST_REMEDIATION_SHA"
-# Fill these with decimal integer counts before posting the audit comment.
-HAM_AUDIT_REMEDIATED_TOTAL='<n>'
-HAM_AUDIT_REMEDIATED_BLOCKING='<b>'
-HAM_AUDIT_REMEDIATED_NON_BLOCKING='<nb>'
-ham_audit_is_nonnegative_int() {
-  case "$1" in
-    ''|*[!0-9]*)
-      return 1
-      ;;
-    *)
-      return 0
-      ;;
-  esac
-}
-if ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_TOTAL" ||
-  ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_BLOCKING" ||
-  ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_NON_BLOCKING"; then
-  echo "HAM hard-blocker: fill numeric Remediated-Findings counts before posting audit comment" >&2
-  ham_audit_cleanup_tmp_files
-  exit 1
-fi
-# When filling in the comment body below, optionally add one bullet each for
-# applicable test evidence and doc currency, using the same bulleted style.
-HAM_AUDIT_COMMENT_DETAILS="$(cat <<'EOF'
-## 🔨 Hammer remediation audit
-
-Landed terminal remediation for the reviewed findings.
-
-**Findings addressed**
-- **<finding title>** (<blocking|non-blocking>) — <files changed and one-line fix summary>
-
-EOF
-)"
-HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Head: %s\nRemediated-Findings: %s addressed (%s blocking, %s non-blocking)\nClosed-By: hammer (adversarial-pipe-mode)\n</sub>' \
-  "$HAM_AUDIT_COMMENT_MARKER" \
-  "$HAM_AUDIT_COMMENT_DETAILS" \
-  "$POST_REMEDIATION_SHA" \
-  "$HAM_AUDIT_REMEDIATED_TOTAL" \
-  "$HAM_AUDIT_REMEDIATED_BLOCKING" \
-  "$HAM_AUDIT_REMEDIATED_NON_BLOCKING")
-ham_existing_terminal_audit_comment_id() {
-  HAM_AUDIT_COMMENTS_JSON=$(GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh api \
-    --paginate \
-    "repos/acme/myrepo/issues/1234/comments" \
-    -q '.[] | {id: .id, body: .body}' 2> "$HAM_AUDIT_COMMENT_LOOKUP_STDERR") || return 1
-  printf '%s\n' "$HAM_AUDIT_COMMENTS_JSON" |
-    jq -r --arg marker "$HAM_AUDIT_COMMENT_MARKER" --arg head "$HAM_AUDIT_COMMENT_HEAD" \
-      'select(((.body // "") | contains($marker)) and ((.body // "") | contains($head))) | .id' |
-    head -n 1
-}
-if [ -z "${MERGE_AGENT_GH_TOKEN:-}" ]; then
-  echo "HAM hard-blocker: MERGE_AGENT_GH_TOKEN is required for hammer audit comment identity" >&2
-  ham_audit_cleanup_tmp_files
-  exit 1
-fi
-HAM_AUDIT_COMMENT_POSTED=0
-for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
-  if ! HAM_EXISTING_AUDIT_COMMENT_ID=$(ham_existing_terminal_audit_comment_id); then
-    if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_LOOKUP_STDERR"; then
-      echo "hammer audit comment lookup failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3" >&2
-      break
-    fi
-    echo "hammer audit comment lookup failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
-    sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
-    continue
-  fi
-  if [ -n "$HAM_EXISTING_AUDIT_COMMENT_ID" ]; then
-    HAM_AUDIT_COMMENT_POSTED=1
-    echo "hammer audit comment already exists for $POST_REMEDIATION_SHA: $HAM_EXISTING_AUDIT_COMMENT_ID" >&2
-    break
-  fi
-  if GH_TOKEN="$MERGE_AGENT_GH_TOKEN" gh pr comment https://github.com/acme/myrepo/pull/1234 --body "$HAM_AUDIT_COMMENT_BODY" 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
-    HAM_AUDIT_COMMENT_POSTED=1
-    break
-  fi
-  HAM_AUDIT_COMMENT_POST_EXIT=$?
-  if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_POST_STDERR"; then
-    cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
-    echo "hammer audit comment post failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; not retrying" >&2
-    ham_audit_cleanup_tmp_files
-    exit "$HAM_AUDIT_COMMENT_POST_EXIT"
-  fi
-  cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
-  echo "hammer audit comment post failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
-  sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
-done
-if [ "$HAM_AUDIT_COMMENT_POSTED" -ne 1 ]; then
-  echo "HAM hard-blocker: hammer audit comment post failed after 3 attempts" >&2
-  ham_audit_cleanup_tmp_files
-  exit 1
-fi
-ham_audit_cleanup_tmp_files
-```
-
 Refresh and validate the live head:
 
 ```bash
@@ -395,19 +290,44 @@ HAM_MERGE_LEASE_WAIT_SECONDS="${HAM_MERGE_LEASE_WAIT_SECONDS:-900}"
 HAM_MERGE_LEASE_RELEASE_RETRY_CAP="${HAM_MERGE_LEASE_RELEASE_RETRY_CAP:-3}"
 HAM_MERGE_LEASE_ID=""
 HAM_MERGE_LEASE_HELD=0
+HAM_MERGE_LEASE_RETRYABLE_ABORT=0
+HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON=""
+HAM_NODE_BIN="${HAM_NODE_BIN:-$(command -v node 2>/dev/null || true)}"
+if [ -z "$HAM_NODE_BIN" ] && [ -x /opt/homebrew/bin/node ]; then
+  HAM_NODE_BIN="/opt/homebrew/bin/node"
+fi
+if [ -z "$HAM_NODE_BIN" ] && [ -x /usr/local/bin/node ]; then
+  HAM_NODE_BIN="/usr/local/bin/node"
+fi
+if [ -z "$HAM_NODE_BIN" ]; then
+  echo "HAM hard-blocker: node runtime not found; cannot run AMA lease, predicate, or audit helpers" >&2
+  exit 1
+fi
+
+ham_mark_merge_lease_retryable_abort() {
+  HAM_MERGE_LEASE_RETRYABLE_ABORT=1
+  HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON="${1:-retryable-abort}"
+}
 
 ham_release_merge_lease() {
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -eq 1 ] && [ -n "${HAM_MERGE_LEASE_ID:-}" ]; then
+    local ham_release_retryable_args=()
+    if [ "${HAM_MERGE_LEASE_RETRYABLE_ABORT:-0}" -eq 1 ]; then
+      ham_release_retryable_args=(--retryable-abort "${HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON:-retryable-abort}")
+    fi
     ham_release_attempt=1
     while [ "$ham_release_attempt" -le "$HAM_MERGE_LEASE_RELEASE_RETRY_CAP" ]; do
-      if node /tmp/ama-test-root/bin/merge-lease.mjs release \
+      if "$HAM_NODE_BIN" /tmp/ama-test-root/bin/merge-lease.mjs release \
         --repo acme/myrepo \
         --base "$BASE_BRANCH" \
         --pr 1234 \
         --lease-id "$HAM_MERGE_LEASE_ID" \
+        "${ham_release_retryable_args[@]+"${ham_release_retryable_args[@]}"}" \
         > /tmp/ham-1234-merge-lease-release.json; then
         HAM_MERGE_LEASE_HELD=0
         HAM_MERGE_LEASE_ID=""
+        HAM_MERGE_LEASE_RETRYABLE_ABORT=0
+        HAM_MERGE_LEASE_RETRYABLE_ABORT_REASON=""
         trap - EXIT
         return 0
       else
@@ -427,7 +347,7 @@ ham_release_merge_lease() {
 }
 
 ham_acquire_merge_lease() {
-  if node /tmp/ama-test-root/bin/merge-lease.mjs acquire \
+  if "$HAM_NODE_BIN" /tmp/ama-test-root/bin/merge-lease.mjs acquire \
     --repo acme/myrepo \
     --base "$BASE_BRANCH" \
     --pr 1234 \
@@ -523,7 +443,62 @@ ham_update_branch_with_retries() {
   return 1
 }
 
+ham_base_touches_pr_files() {
+  # Returns 0 (overlap → a rebase+revalidation is still required) when any file
+  # this PR changes is also touched by base commits that landed SINCE the base we
+  # last validated against; returns 1 (disjoint → the validated head is safe to
+  # merge without another rebase). Fail closed to 0 (overlap) on any fetch/diff
+  # error so an undeterminable diff never lets us skip a rebase semantics needs.
+  git fetch origin "$BASE_BRANCH" >/dev/null 2>&1 || return 0
+  [ -n "$HAM_VALIDATION_BASE_SHA" ] || return 0
+  local pr_files base_files
+  pr_files=$(git diff --name-only "origin/$BASE_BRANCH...HEAD" 2>/dev/null) || return 0
+  base_files=$(git diff --name-only "$HAM_VALIDATION_BASE_SHA..origin/$BASE_BRANCH" 2>/dev/null) || return 0
+  [ -n "$pr_files" ] || return 1
+  [ -n "$base_files" ] || return 1
+  comm -12 <(printf '%s\n' "$pr_files" | sort -u) <(printf '%s\n' "$base_files" | sort -u) 2>/dev/null | grep -q .
+}
+
+# Resolve whether the target branch REQUIRES the PR to be up to date before merge
+# (GitHub required_status_checks.strict). This decides whether a BEHIND head must
+# be chased with a rebase or may merge as-is. FAIL CLOSED: any error, or an
+# undetermined result, keeps the historical always-rebase-until-not-BEHIND
+# behavior (=1). Where no strict rule exists, a BEHIND that arises only because
+# OTHER PRs merged is NOT a merge blocker (GitHub squash-merges a BEHIND-but-
+# MERGEABLE PR), so chasing it with a rebase would only re-run the full required
+# check suite on identical code (agent-os#5464).
+HAM_REQUIRES_UP_TO_DATE=1
+ham_rsc_json=/tmp/ham-1234-required-status-checks.json
+ham_rsc_err=/tmp/ham-1234-required-status-checks.stderr
+ham_base_enc_early=$(printf '%s' "$BASE_BRANCH" | jq -sRr @uri)
+if /usr/bin/perl -e 'alarm shift; exec @ARGV' 30 gh api \
+    "repos/acme/myrepo/branches/$ham_base_enc_early/protection/required_status_checks" \
+    > "$ham_rsc_json" 2> "$ham_rsc_err"; then
+  if [ "$(jq -r '.strict // empty' "$ham_rsc_json" 2>/dev/null)" = "false" ]; then
+    HAM_REQUIRES_UP_TO_DATE=0
+  fi
+elif grep -Eiq 'HTTP 404|Not Found|not protected|Branch not protected|Required status checks.*not' "$ham_rsc_err"; then
+  # No branch protection / no required-status-checks object → no strict rule.
+  HAM_REQUIRES_UP_TO_DATE=0
+fi
+echo "HAM: requiresUpToDate=$HAM_REQUIRES_UP_TO_DATE base=$BASE_BRANCH" >&2
+
 while [ "$(jq -r '.mergeStateStatus // ""' /tmp/ham-1234-pr-after.json)" = "BEHIND" ]; do
+  # STOP CHASING A MOVING BASE (agent-os#5464). Once we have rebased onto a recent
+  # base at least once (HAM_REBASE_ATTEMPTS>=1) and (a) the base has no strict
+  # up-to-date rule, (b) the PR is MERGEABLE, and (c) the newer base does not touch
+  # any file this PR changes, merge the VALIDATED head as-is: GitHub incorporates
+  # the newer base in the squash-merge commit, and re-rebasing to chase a base that
+  # advanced only because OTHER PRs merged would re-run the full required-check
+  # suite on identical code. Keep chasing when the base REQUIRES up-to-date, on a
+  # genuine conflict, or on changed-file overlap (all fall through to the rebase).
+  if [ "$HAM_REQUIRES_UP_TO_DATE" -ne 1 ] \
+     && [ "$(jq -r '.mergeable // ""' /tmp/ham-1234-pr-after.json)" = "MERGEABLE" ] \
+     && [ "${HAM_REBASE_ATTEMPTS:-0}" -ge 1 ] \
+     && ! ham_base_touches_pr_files; then
+    echo "HAM: base BEHIND only because other PRs merged (no strict up-to-date rule, PR MERGEABLE, no changed-file overlap) — merging the validated head without a re-rebase to avoid CI churn on identical code." >&2
+    break
+  fi
   if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
     ham_acquire_merge_lease
   fi
@@ -587,13 +562,16 @@ if [ "$HAM_FORCE_REVALIDATION" -eq 1 ]; then
   printf '{"needsRevalidation":true,"reason":"validation-base-unavailable"}\n' > /tmp/ham-1234-merge-lease-revalidation.json
   HAM_NEEDS_REVALIDATION=true
 else
-  if node /tmp/ama-test-root/bin/merge-lease.mjs needs-revalidation \
+  if "$HAM_NODE_BIN" /tmp/ama-test-root/bin/merge-lease.mjs needs-revalidation \
     --repo-path . \
     --base "$BASE_BRANCH" \
     --validation-base "$HAM_VALIDATION_BASE_SHA" \
     --current-base "$HAM_CURRENT_BASE_SHA" \
     --changed-files-from "$POST_REMEDIATION_SHA" \
     > /tmp/ham-1234-merge-lease-revalidation.json; then
+    # Preserve JSON false exactly. Never use `.needsRevalidation // true` here:
+    # jq's alternative operator treats false like null and would force a spurious
+    # revalidation blocker on a clean `needsRevalidation:false` decision.
     HAM_NEEDS_REVALIDATION=$(jq -er 'if (.needsRevalidation | type) == "boolean" then .needsRevalidation else true end' /tmp/ham-1234-merge-lease-revalidation.json 2> /tmp/ham-1234-merge-lease-revalidation-jq.stderr || true)
     if [ "$HAM_NEEDS_REVALIDATION" != "true" ] && [ "$HAM_NEEDS_REVALIDATION" != "false" ]; then
       printf '{"needsRevalidation":true,"reason":"needs-revalidation-output-invalid"}\n' > /tmp/ham-1234-merge-lease-revalidation.json
@@ -653,6 +631,192 @@ git push --force-with-lease
 After resolving, the head has moved — re-run changed-surface tests (mandate 2b)
 and required checks on the new head before re-acquiring the merge lease and
 merging, exactly as for any parallel-phase validation.
+
+Post the PR audit comment. It must list every final finding, whether it was
+blocking or non-blocking, and the file paths changed for that finding. The
+comment is HAM-authored terminal-remediation output: post it with the entitled
+hammer GitHub token from `HAMMER_LACEY_GH_TOKEN` (legacy fallback
+`MERGE_AGENT_GH_TOKEN`), not an ambient `GH_TOKEN` or `GITHUB_TOKEN`.
+
+```bash
+# agent-os#4090: the terminal-remediation audit is written HERE — under the
+# merge lease, at the settled post-rebase head, immediately before the
+# ama-check predicate. Writing it before the rebase window let each re-entry
+# post a fresh audit at a new head (a single hammer read as several). Refuse
+# to write the audit unless the merge lease is currently held.
+if [ "${HAM_MERGE_LEASE_HELD:-0}" -ne 1 ]; then
+  echo "HAM hard-blocker: terminal-remediation audit must be written while holding the merge lease (after the rebase settles, before the merge predicate)" >&2
+  exit 1
+fi
+ham_audit_comment_transient() {
+  grep -Eiq 'timeout|timed out|TLS|connection reset|connection refused|temporar(y|ily)|try again|rate limit|secondary rate limit|HTTP 5[0-9][0-9]|502|503|504|service unavailable|gateway' "$1"
+}
+
+ham_audit_cleanup_tmp_files() {
+  if [ -n "${HAM_AUDIT_PR_VIEW_STDERR:-}" ]; then
+    rm -f "$HAM_AUDIT_PR_VIEW_STDERR"
+  fi
+  if [ -n "${HAM_AUDIT_COMMENT_LOOKUP_STDERR:-}" ]; then
+    rm -f "$HAM_AUDIT_COMMENT_LOOKUP_STDERR"
+  fi
+  if [ -n "${HAM_AUDIT_COMMENT_POST_STDERR:-}" ]; then
+    rm -f "$HAM_AUDIT_COMMENT_POST_STDERR"
+  fi
+}
+HAM_AUDIT_PR_VIEW_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-pr-view.XXXXXX") || exit 1
+HAM_AUDIT_COMMENT_LOOKUP_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-comment-lookup.XXXXXX") || {
+  ham_audit_cleanup_tmp_files
+  exit 1
+}
+HAM_AUDIT_COMMENT_POST_STDERR=$(mktemp "${TMPDIR:-/tmp}/ham-audit-comment-post.XXXXXX") || {
+  ham_audit_cleanup_tmp_files
+  exit 1
+}
+
+POST_REMEDIATION_SHA=""
+for HAM_AUDIT_SHA_ATTEMPT in 1 2 3; do
+  if POST_REMEDIATION_SHA=$(gh pr view https://github.com/acme/myrepo/pull/1234 --json headRefOid --jq '.headRefOid' 2> "$HAM_AUDIT_PR_VIEW_STDERR") &&
+    ham_is_full_sha "$POST_REMEDIATION_SHA"; then
+    break
+  fi
+  if [ "$HAM_AUDIT_SHA_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_PR_VIEW_STDERR"; then
+    break
+  fi
+  echo "hammer audit head lookup failed on attempt $HAM_AUDIT_SHA_ATTEMPT/3; retrying" >&2
+  sleep $((HAM_AUDIT_SHA_ATTEMPT * 2))
+done
+if ! ham_is_full_sha "$POST_REMEDIATION_SHA"; then
+  echo "HAM hard-blocker: unable to resolve post-remediation head before audit comment" >&2
+  ham_audit_cleanup_tmp_files
+  exit 1
+fi
+HAM_AUDIT_COMMENT_MARKER='<!-- hq:ham-terminal-remediation:audit -->'
+# Fill these with decimal integer counts before posting the audit comment.
+HAM_AUDIT_REMEDIATED_TOTAL='<n>'
+HAM_AUDIT_REMEDIATED_BLOCKING='<b>'
+HAM_AUDIT_REMEDIATED_NON_BLOCKING='<nb>'
+ham_audit_is_nonnegative_int() {
+  case "$1" in
+    ''|*[!0-9]*)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+if ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_TOTAL" ||
+  ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_BLOCKING" ||
+  ! ham_audit_is_nonnegative_int "$HAM_AUDIT_REMEDIATED_NON_BLOCKING"; then
+  echo "HAM hard-blocker: fill numeric Remediated-Findings counts before posting audit comment" >&2
+  ham_audit_cleanup_tmp_files
+  exit 1
+fi
+# When filling in the comment body below, optionally add one bullet each for
+# applicable test evidence and doc currency, using the same bulleted style.
+HAM_AUDIT_COMMENT_DETAILS="$(cat <<'EOF'
+## 🔨 Hammer remediation audit
+
+Landed terminal remediation for the reviewed findings.
+
+**Findings addressed**
+- **<finding title>** (<blocking|non-blocking>) — <files changed and one-line fix summary>
+
+EOF
+)"
+HAM_AUDIT_COMMENT_BODY=$(printf '%s\n\n%s\n\n<sub>\nHAM-Terminal-Remediation-Head: %s\nRemediated-Findings: %s addressed (%s blocking, %s non-blocking)\nClosed-By: hammer (adversarial-pipe-mode)\n</sub>' \
+  "$HAM_AUDIT_COMMENT_MARKER" \
+  "$HAM_AUDIT_COMMENT_DETAILS" \
+  "$POST_REMEDIATION_SHA" \
+  "$HAM_AUDIT_REMEDIATED_TOTAL" \
+  "$HAM_AUDIT_REMEDIATED_BLOCKING" \
+  "$HAM_AUDIT_REMEDIATED_NON_BLOCKING")
+# The worker-pool exports the hammer's entitled token as HAMMER_LACEY_GH_TOKEN
+# (entitlement the-hammer-lacey). agent-os#4762 split it from the merge-agent's
+# MERGE_AGENT_GH_TOKEN so the hammer stops inheriting the merge-agent[bot]
+# identity (that collision failed hammer spawn with auth-identity-mismatch).
+# Prefer the dedicated var; fall back to MERGE_AGENT_GH_TOKEN only for
+# pre-rename / rolled-back hosts. The downstream identity check still verifies
+# the resolved login is the-hammer-lacey[bot], so a stale fallback fails loudly
+# rather than silently posting as the wrong bot.
+HAM_GH_TOKEN="${HAMMER_LACEY_GH_TOKEN:-${MERGE_AGENT_GH_TOKEN:-}}"
+ham_existing_terminal_audit_comment_id() {
+  HAM_AUDIT_COMMENTS_JSON=$(GH_TOKEN="$HAM_GH_TOKEN" gh api \
+    --paginate \
+    "repos/acme/myrepo/issues/1234/comments" \
+    -q '.[] | {id: .id, body: .body}' 2> "$HAM_AUDIT_COMMENT_LOOKUP_STDERR") || return 1
+  # Dedup on the STABLE marker alone, NOT the per-rebase head sha. A hammer that
+  # rebases the same terminal remediation onto an advancing `main` several times
+  # before the merge window holds must refresh ONE audit — keying on the head sha
+  # made every rebase miss the prior audit and post a look-alike, so a single
+  # hammer's rebases read as several hammers (agent-os#4090).
+  printf '%s\n' "$HAM_AUDIT_COMMENTS_JSON" |
+    jq -r --arg marker "$HAM_AUDIT_COMMENT_MARKER" \
+      'select((.body // "") | contains($marker)) | .id' |
+    head -n 1
+}
+if [ -z "${HAM_GH_TOKEN:-}" ]; then
+  echo "HAM hard-blocker: no entitled hammer token (HAMMER_LACEY_GH_TOKEN, or legacy MERGE_AGENT_GH_TOKEN) present for hammer audit comment identity" >&2
+  ham_audit_cleanup_tmp_files
+  exit 1
+fi
+HAM_AUDIT_COMMENT_POSTED=0
+for HAM_AUDIT_COMMENT_ATTEMPT in 1 2 3; do
+  if ! HAM_EXISTING_AUDIT_COMMENT_ID=$(ham_existing_terminal_audit_comment_id); then
+    if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_LOOKUP_STDERR"; then
+      echo "hammer audit comment lookup failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3" >&2
+      break
+    fi
+    echo "hammer audit comment lookup failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
+    sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
+    continue
+  fi
+  if [ -n "$HAM_EXISTING_AUDIT_COMMENT_ID" ]; then
+    # A terminal-remediation audit from an earlier rebase attempt already exists.
+    # REFRESH it in place (new head trailer / findings) instead of skipping or
+    # duplicating, so the single audit tracks the merged head and a hammer's
+    # rebases never read as several hammers (agent-os#4090).
+    if GH_TOKEN="$HAM_GH_TOKEN" gh api --method PATCH \
+      "repos/acme/myrepo/issues/comments/$HAM_EXISTING_AUDIT_COMMENT_ID" \
+      -f body="$HAM_AUDIT_COMMENT_BODY" > /dev/null 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
+      HAM_AUDIT_COMMENT_POSTED=1
+      echo "hammer audit comment refreshed in place ($HAM_EXISTING_AUDIT_COMMENT_ID) → $POST_REMEDIATION_SHA" >&2
+      break
+    fi
+    HAM_AUDIT_COMMENT_POST_EXIT=$?
+    if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_POST_STDERR"; then
+      cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
+      echo "hammer audit comment edit failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; not retrying" >&2
+      ham_audit_cleanup_tmp_files
+      exit "$HAM_AUDIT_COMMENT_POST_EXIT"
+    fi
+    cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
+    echo "hammer audit comment edit failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
+    sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
+    continue
+  fi
+  if GH_TOKEN="$HAM_GH_TOKEN" gh pr comment https://github.com/acme/myrepo/pull/1234 --body "$HAM_AUDIT_COMMENT_BODY" 2> "$HAM_AUDIT_COMMENT_POST_STDERR"; then
+    HAM_AUDIT_COMMENT_POSTED=1
+    break
+  fi
+  HAM_AUDIT_COMMENT_POST_EXIT=$?
+  if [ "$HAM_AUDIT_COMMENT_ATTEMPT" -ge 3 ] || ! ham_audit_comment_transient "$HAM_AUDIT_COMMENT_POST_STDERR"; then
+    cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
+    echo "hammer audit comment post failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; not retrying" >&2
+    ham_audit_cleanup_tmp_files
+    exit "$HAM_AUDIT_COMMENT_POST_EXIT"
+  fi
+  cat "$HAM_AUDIT_COMMENT_POST_STDERR" >&2 || true
+  echo "hammer audit comment post failed on attempt $HAM_AUDIT_COMMENT_ATTEMPT/3; retrying" >&2
+  sleep $((HAM_AUDIT_COMMENT_ATTEMPT * 2))
+done
+if [ "$HAM_AUDIT_COMMENT_POSTED" -ne 1 ]; then
+  echo "HAM hard-blocker: hammer audit comment post failed after 3 attempts" >&2
+  ham_audit_cleanup_tmp_files
+  exit 1
+fi
+ham_audit_cleanup_tmp_files
+```
 
 ```bash
 gh pr view https://github.com/acme/myrepo/pull/1234 --json reviews > /tmp/ham-1234-reviews.json
@@ -726,7 +890,7 @@ match `abc12345abc12345abc12345abc12345abc12345`. The JSON claim alone does not 
 Run the predicate against the live post-remediation head:
 
 ```bash
-node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
+"$HAM_NODE_BIN" /Users/airlock/agent-os/tools/adversarial-review/bin/ama-check.mjs \
   --pr /tmp/ham-1234-pr-after.json \
   --reviews /tmp/ham-1234-reviews.json \
   --protection /tmp/ham-1234-protection.json \
@@ -829,7 +993,7 @@ ham_append_terminal_audit() {
       eligibilityTrace: $eligibilityTrace,
       githubGate: $githubGate
     }' > "$ham_audit_attempt_json"
-  node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
+  "$HAM_NODE_BIN" /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
     --hq-root /tmp/ama-test-hqroot \
     --repo acme/myrepo \
     --pr 1234 \
@@ -890,7 +1054,7 @@ PYEOF
 }
 
 ham_mark_ama_closer_lease_succeeded() {
-  TARGET_REMEDIATION_SHA="reviewed-sha" node --input-type=module <<'NODE'
+  TARGET_REMEDIATION_SHA="abc12345abc12345abc12345abc12345abc12345" "$HAM_NODE_BIN" --input-type=module <<'NODE'
 import {
   AMA_CLOSER_LEASE_STATUS,
   readAmaCloserLease,
@@ -920,7 +1084,9 @@ NODE
 }
 
 ham_refresh_github_gate_once() {
-  POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" node --input-type=module <<'NODE' > "$HAM_GATE_JSON"
+  POST_REMEDIATION_SHA="$POST_REMEDIATION_SHA" \
+  HAM_REQUIRES_UP_TO_DATE="${HAM_REQUIRES_UP_TO_DATE:-1}" \
+  "$HAM_NODE_BIN" --input-type=module <<'NODE' > "$HAM_GATE_JSON"
 import { fetchPullRequestRollup } from '/tmp/ama-test-root/src/github-api.mjs';
 import { evaluateMergeEligibility } from '/tmp/ama-test-root/src/ama/merge-eligibility.mjs';
 
@@ -946,12 +1112,19 @@ const open = state === 'OPEN';
 // for this call site — ama-check emits the verdict into /tmp verdict.json and the
 // shell hard-checks HAM_MERGE_LEASE_HELD before reaching here — so they are passed
 // as already-satisfied; `ok` stays exactly the pre-MSM-02 GitHub gate.
+// A BEHIND head only blocks when the base branch requires the PR to be up to
+// date (required_status_checks.strict). When the shell resolved no strict rule
+// (HAM_REQUIRES_UP_TO_DATE=0), pass requiresUpToDateBranch:false so a
+// BEHIND-but-MERGEABLE validated head is eligible instead of forcing a
+// churn-inducing rebase. Fail closed: any value other than '0' keeps the block.
+const requiresUpToDateBranch = process.env.HAM_REQUIRES_UP_TO_DATE !== '0';
 const ok = evaluateMergeEligibility({
   verdict: 'settled-success',
   leaseHeld: true,
   requiredChecks: checks,
   mergeable: rollup.mergeable,
   mergeStateStatus: rollup.mergeStateStatus,
+  requiresUpToDateBranch,
   prState: state,
   candidateHead: rollup.headSha || rollup.headRefOid || '',
   validatedHead: expectedHead,
@@ -1043,6 +1216,7 @@ while :; do
     if [ "$HAM_REMOTE_CI_GATE_READ_FAILURES" -ge "$HAM_REMOTE_CI_GATE_READ_FAILURE_LIMIT" ] || [ "$(date +%s)" -ge "$HAM_REMOTE_CI_DEADLINE" ]; then
       echo "HAM hard-blocker: unable to read GitHub gate through src/github-api.mjs adapter after ${HAM_REMOTE_CI_GATE_READ_FAILURES} consecutive failures" >&2
       ham_append_terminal_audit failed-without-merge github-gate-read-failed || true
+      ham_mark_merge_lease_retryable_abort github-gate-read-failed
       ham_release_merge_lease
       exit 1
     fi
@@ -1124,7 +1298,7 @@ else
       eligibilityTrace: $eligibilityTrace,
       githubGate: $githubGate
     }' > "$HAM_PRE_MERGE_ATTEMPT_FILE"
-  node /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
+  "$HAM_NODE_BIN" /Users/airlock/agent-os/tools/adversarial-review/bin/ama-audit.mjs append \
     --hq-root /tmp/ama-test-hqroot \
     --repo acme/myrepo \
     --pr 1234 \
@@ -1138,6 +1312,7 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
   if ! ham_refresh_github_gate; then
     echo "HAM merge retry ${HAM_MERGE_ATTEMPTS}/${HAM_MERGE_RETRY_CAP}: gate read failed after bounded retries" >&2
     ham_append_terminal_audit failed-without-merge github-gate-read-failed || true
+    ham_mark_merge_lease_retryable_abort github-gate-read-failed
     ham_release_merge_lease
     exit 1
   fi
@@ -1193,6 +1368,7 @@ while [ "$HAM_ALREADY_MERGED_VALIDATED_HEAD" -ne 1 ] && [ "$HAM_MERGE_ATTEMPTS" 
     cat "$HAM_MERGE_STDERR" >&2 || true
     echo "HAM hard-blocker: retryable gh pr merge failures exhausted bounded budget" >&2
     ham_append_terminal_audit failed-without-merge merge-retry-budget-exhausted || true
+    ham_mark_merge_lease_retryable_abort merge-retry-budget-exhausted
     ham_release_merge_lease
     exit 1
   fi
@@ -1277,11 +1453,16 @@ After the merged audit append succeeds, emit the merge signal and then release
 the lease before posting the CLOSING comment described above. If `gh pr merge` or the post-merge `gh pr view`
 confirmation returns a retryable transport, TLS, DNS/socket, HTTP 5xx, or
 rate-limit/secondary-rate-limit failure, retry only inside the bounded budget
-above while holding the same lease. The merge retry loop must re-read the live
-head before each attempt; if that pre-flight observes the PR already `MERGED` at
-`POST_REMEDIATION_SHA`, proceed to the post-merge validation instead of
-recording a failed gate. Permanent head/protection/auth/check/closed or
-unmergeable failures fail closed immediately with a non-merged audit reason.
+above while holding the same lease. When that bounded budget is exhausted before
+a confirmed merge, release with `--retryable-abort <reason>` so the exact PR/head
+gate attempt is cleared for another dispatch. Never use retryable-abort for red
+required checks, live-head movement, permanent GitHub rejections, unclassified
+merge failures, or any path where the merge may already have been accepted. The
+merge retry loop must re-read the live head before each attempt; if that
+pre-flight observes the PR already `MERGED` at `POST_REMEDIATION_SHA`, proceed
+to the post-merge validation instead of recording a failed gate. Permanent
+head/protection/auth/check/closed or unmergeable failures fail closed
+immediately with a non-merged audit reason.
 
 If the head moved, a required check failed or is unchecked, HAM evidence is
 missing, the predicate fails for the exact live SHA, the PR is closed/draft, or

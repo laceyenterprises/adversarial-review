@@ -479,6 +479,9 @@ async function tryEscalateWorkflowPushCapability({
     const capability = await inspectRemediationPushTokenCapability({ env: elevatedEnv, execFileImpl, log, retryDelaysMs });
     return { ok: capability.hasWorkflowCapability, capability, error: null };
   } catch (err) {
+    if (isTransientWorkflowPushPreflightError(err)) {
+      throw err;
+    }
     return { ok: false, capability: null, error: err };
   }
 }

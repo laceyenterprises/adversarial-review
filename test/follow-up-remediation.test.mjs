@@ -1638,7 +1638,7 @@ test('workflow push preflight fails closed when merge-agent broker mint fails', 
       retryDelaysMs: [],
       deliverAlertImpl: async (text, structured) => alerts.push({ text, structured }),
       readFileImpl: () => 'shared-secret\n',
-      fetchImpl: async () => ({ ok: false, status: 503, async json() { return {}; } }),
+      fetchImpl: async () => ({ ok: false, status: 403, async json() { return {}; } }),
       execFileImpl: async () => ({ stdout: 'HTTP/2 200\nx-oauth-scopes: repo\n', stderr: '' }),
       log: { log() {}, warn() {}, error() {} },
     }),
@@ -1650,6 +1650,36 @@ test('workflow push preflight fails closed when merge-agent broker mint fails', 
   );
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].structured.event, 'remediation-workflow-push-capability-missing');
+});
+
+test('workflow push preflight rethrows exhausted transient merge-agent broker mint failures', async () => {
+  const alerts = [];
+  await assert.rejects(
+    assertWorkflowPushCapabilityForJob({
+      job: {
+        repo: 'laceyenterprises/adversarial-review',
+        prNumber: 504,
+        jobId: 'job_504',
+        changedFiles: ['.github/workflows/unit-tests.yml'],
+      },
+      env: {
+        GITHUB_TOKEN: 'gho_without_workflow',
+        OAUTH_BROKER_SHARED_SECRET_FILE: '/tmp/broker-secret',
+      },
+      retryDelaysMs: [],
+      deliverAlertImpl: async (text, structured) => alerts.push({ text, structured }),
+      readFileImpl: () => 'shared-secret\n',
+      fetchImpl: async () => ({ ok: false, status: 503, async json() { return {}; } }),
+      execFileImpl: async () => ({ stdout: 'HTTP/2 200\nx-oauth-scopes: repo\n', stderr: '' }),
+      log: { log() {}, warn() {}, error() {} },
+    }),
+    (err) => {
+      assert.notEqual(err.name, 'WorkflowPushCapabilityError');
+      assert.match(err.message, /HTTP 503/);
+      return true;
+    },
+  );
+  assert.equal(alerts.length, 0);
 });
 
 test('workflow push preflight honors disabled merge-agent escalation flag', async () => {
@@ -8282,6 +8312,52 @@ test('dispatchRemediationViaHq carries workflow push provider requirement throug
     assert.equal(worker.requiresWorkflowPush, true);
     assert.equal(worker.workflowPushBroker.provider, 'github-app-merge-agent');
     assert.equal(worker.workflowPushBroker.providerSource, 'workflow-push-merge-agent');
+  });
+});
+
+test('dispatchRemediationViaHq omits workflow push provider requirement when escalation is disabled', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const hqRoot = path.join(rootDir, 'agent-os-hq');
+  mkdirSync(hqRoot, { recursive: true });
+  const promptPath = path.join(rootDir, 'prompt.md');
+  const replyPath = path.join(rootDir, 'reply.json');
+  writeFileSync(promptPath, 'prompt\n', 'utf8');
+
+  await withAppContractDispatchServer(async ({ requests }) => {
+    const env = {
+      ...process.env,
+      AGENT_OS_ROLES_ADVERSARIAL_ORCHESTRATION_MODE: 'agentos',
+      HQ_ROOT: hqRoot,
+      HQ_PARENT_SESSION: 'sess_parent_123',
+      HQ_PROJECT: 'adversarial-review',
+      ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT: 'false',
+      OAUTH_BROKER_URL: 'http://broker.primary.invalid',
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/tmp/broker-secret',
+    };
+
+    const worker = await dispatchRemediationViaHq({
+      hqRoot,
+      workerClass: 'codex',
+      repo: 'laceyenterprises/clio',
+      prNumber: 84,
+      branch: 'codex/fix-pr-84',
+      promptPath,
+      replyPath,
+      launchRequestId: 'laceyenterprises__clio-pr-84-headabc123',
+      jobId: 'laceyenterprises__clio-pr-84-headabc123',
+      requiresWorkflowPush: true,
+      execFileImpl: async () => {
+        throw new Error('agent-os dispatch must not shell out for workspace resolution');
+      },
+      env,
+    });
+
+    const dispatchRequest = requests.find((entry) => entry.url === '/v1/dispatch');
+    assert.ok(dispatchRequest);
+    assert.equal('credential_requirements' in dispatchRequest.body, false);
+    assert.equal(worker.requiresWorkflowPush, true);
+    assert.equal(worker.workflowPushBroker.enabled, false);
+    assert.equal(worker.workflowPushBroker.provider, undefined);
   });
 });
 

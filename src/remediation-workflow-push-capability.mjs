@@ -110,6 +110,7 @@ class WorkflowPushPreflightTransientError extends Error {
 
 function workflowPushErrorText(err) {
   return [
+    err?.name,
     err?.message,
     err?.stdout,
     err?.stderr,
@@ -121,7 +122,7 @@ function workflowPushErrorText(err) {
 function isTransientWorkflowPushPreflightError(err) {
   const detail = workflowPushErrorText(err).toLowerCase();
   if (!detail) return true;
-  return /timed?\s*out|timeout|socket hang up|eio\b|etimedout|econnreset|econnrefused|econnaborted|enotfound|eai_again|temporary failure|temporarily unavailable|network is unreachable|try again|tls handshake|rate limit|secondary rate limit|too many requests|bad gateway|service unavailable|gateway timeout|server error|http[ /]5\d\d|(^|[^0-9])5(?:00|02|03|04)([^0-9]|$)/i.test(detail);
+  return /timed?\s*out|timeout|abort(?:ed|error)|socket hang up|eio\b|etimedout|econnreset|econnrefused|econnaborted|enotfound|eai_again|temporary failure|temporarily unavailable|network is unreachable|try again|tls handshake|rate limit|secondary rate limit|too many requests|bad gateway|service unavailable|gateway timeout|server error|http[ /]5\d\d|(^|[^0-9])5(?:00|02|03|04)([^0-9]|$)/i.test(detail);
 }
 
 async function execWorkflowPushPreflightGh({
@@ -447,14 +448,32 @@ async function tryEscalateWorkflowPushCapability({
   env,
   execFileImpl,
   log,
-  retryDelaysMs,
+  retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
   fetchImpl,
   readFileImpl,
 } = {}) {
   try {
-    const token = await mintMergeAgentWorkflowPushToken({ env, fetchImpl, readFileImpl });
-    applyMergeAgentWorkflowPushTokenEnv(env, token);
-    const capability = await inspectRemediationPushTokenCapability({ env, execFileImpl, log, retryDelaysMs });
+    let token = null;
+    for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+      try {
+        token = await mintMergeAgentWorkflowPushToken({ env, fetchImpl, readFileImpl });
+        break;
+      } catch (err) {
+        const transient = isTransientWorkflowPushPreflightError(err);
+        if (!transient || attempt >= retryDelaysMs.length) {
+          throw err;
+        }
+        const delayMs = Number(retryDelaysMs[attempt] || 0);
+        log?.warn?.(
+          '[follow-up-remediation] workflow-push preflight merge-agent broker mint transient failure ' +
+          `(attempt ${attempt + 1}/${retryDelaysMs.length + 1}); retrying in ${delayMs}ms: ${err?.message || err}`
+        );
+        if (delayMs > 0) await sleep(delayMs);
+      }
+    }
+    const elevatedEnv = { ...(env || {}) };
+    applyMergeAgentWorkflowPushTokenEnv(elevatedEnv, token);
+    const capability = await inspectRemediationPushTokenCapability({ env: elevatedEnv, execFileImpl, log, retryDelaysMs });
     return { ok: capability.hasWorkflowCapability, capability, error: null };
   } catch (err) {
     return { ok: false, capability: null, error: err };

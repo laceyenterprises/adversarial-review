@@ -1557,13 +1557,66 @@ test('workflow push preflight escalates workflow-file remediation to merge-agent
   assert.equal(result.capability.source, 'merge-agent-broker');
   assert.equal(result.capability.identity, 'lacey-merge-agent[bot]');
   assert.equal(result.capability.hasWorkflowCapability, true);
-  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN, 'ghs_merge_agent_workflow');
-  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY, 'lacey-merge-agent[bot]');
-  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS, '{"contents":"write","workflows":"write"}');
+  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN, undefined);
+  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY, undefined);
+  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS, undefined);
   assert.equal(fetchCalls.length, 1);
   assert.equal(fetchCalls[0].url, 'http://broker.invalid/token?provider=github-app-merge-agent');
   assert.equal(fetchCalls[0].options.headers.Authorization, 'Bearer shared-secret');
   assert.match(logs.join('\n'), /source=merge-agent-broker .*detection=escalated/);
+});
+
+test('workflow push preflight retries transient merge-agent broker mint failures', async () => {
+  const env = {
+    GITHUB_TOKEN: 'gho_without_workflow',
+    OAUTH_BROKER_URL: 'http://broker.invalid',
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/tmp/broker-secret',
+  };
+  let fetchCalls = 0;
+  const alerts = [];
+  const logs = [];
+  const result = await assertWorkflowPushCapabilityForJob({
+    job: {
+      repo: 'laceyenterprises/adversarial-review',
+      prNumber: 504,
+      jobId: 'job_504',
+      changedFiles: ['.github/workflows/unit-tests.yml'],
+    },
+    env,
+    retryDelaysMs: [0, 0],
+    deliverAlertImpl: async (text, structured) => alerts.push({ text, structured }),
+    log: { log: (line) => logs.push(line), warn: (line) => logs.push(line), error: (line) => logs.push(line) },
+    readFileImpl: () => 'shared-secret\n',
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      if (fetchCalls === 1) {
+        const err = new Error('connect ECONNREFUSED 127.0.0.1:4099');
+        err.code = 'ECONNREFUSED';
+        throw err;
+      }
+      if (fetchCalls === 2) {
+        return { ok: false, status: 503, async json() { return {}; } };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            provider: 'github-app-merge-agent',
+            access_token: 'ghs_merge_agent_workflow',
+          };
+        },
+      };
+    },
+    execFileImpl: async () => ({ stdout: 'HTTP/2 200\nx-oauth-scopes: repo\n', stderr: '' }),
+  });
+
+  assert.equal(result.gated, false);
+  assert.equal(result.escalated, true);
+  assert.equal(result.capability.hasWorkflowCapability, true);
+  assert.equal(fetchCalls, 3);
+  assert.equal(alerts.length, 0);
+  assert.match(logs.join('\n'), /merge-agent broker mint transient failure/);
 });
 
 test('workflow push preflight fails closed when merge-agent broker mint fails', async () => {

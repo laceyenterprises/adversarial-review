@@ -39,7 +39,7 @@ const SHA_RE = /^[0-9a-fA-F]{7,64}$/u;
 function parseBooleanEnvFlag(value) {
   const normalized = String(value ?? '').trim().toLowerCase();
   if (normalized === '1' || normalized === 'true') return true;
-  if (normalized === '' || normalized === '0' || normalized === 'false') return false;
+  if (normalized === '0' || normalized === 'false') return false;
   return null;
 }
 
@@ -50,7 +50,8 @@ function parseBooleanEnvFlag(value) {
 // disabled the daemon behaves exactly as it did before this guard existed.
 export function clobberGuardEnabled(env = process.env, options = {}) {
   const envValue = env.ADVERSARIAL_MERGE_CLOBBER_GUARD_ENABLED;
-  const parsedEnv = envValue === undefined || envValue === '' ? null : parseBooleanEnvFlag(envValue);
+  const trimmedEnvValue = String(envValue ?? '').trim();
+  const parsedEnv = envValue === undefined || trimmedEnvValue === '' ? null : parseBooleanEnvFlag(trimmedEnvValue);
   if (parsedEnv !== null) return parsedEnv;
   try {
     return loadRoleConfig({
@@ -122,9 +123,17 @@ async function commitShasUniqueToHead({ execGh, repo, baseSha, headSha }) {
     'api',
     `repos/${repo}/compare/${baseSha}...${headSha}`,
     '--jq',
-    '[.commits[].sha]',
+    '{ total: .total_commits, shas: [.commits[].sha] }',
   ]);
-  return Array.isArray(data) ? data.map((s) => String(s || '')).filter((s) => SHA_RE.test(s)) : [];
+  const rawShas = Array.isArray(data?.shas) ? data.shas : [];
+  const total = Number.isSafeInteger(data?.total) ? data.total : rawShas.length;
+  if (rawShas.length < total) {
+    throw new Error(
+      `GitHub compare response truncated for ${repo} ${baseSha.slice(0, 12)}...${headSha.slice(0, 12)}: ` +
+        `${rawShas.length} of ${total} commits returned`,
+    );
+  }
+  return rawShas.map((s) => String(s || '')).filter((s) => SHA_RE.test(s));
 }
 
 async function fetchCommitDiff({ execGh, repo, sha }) {

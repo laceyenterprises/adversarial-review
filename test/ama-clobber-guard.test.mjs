@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 import {
   clobberGuardBlocks,
@@ -34,7 +36,7 @@ const TEST_DIFF = fileDiff({ file: 'test_supervisor_recovery.py', add: '    asse
 // Build a stub execGh that answers `compare` (--jq list of shas) and per-commit
 // diff lookups from in-memory maps. `compares` maps 'base...head' -> [sha...];
 // `diffs` maps sha -> diff text. Uses the REAL git patch-id via default spawn.
-function makeExecGh({ compares = {}, diffs = {}, fail = false } = {}) {
+function makeExecGh({ compares = {}, compareTotals = {}, diffs = {}, fail = false } = {}) {
   const calls = [];
   const execGh = async ({ args }) => {
     calls.push(args);
@@ -43,7 +45,8 @@ function makeExecGh({ compares = {}, diffs = {}, fail = false } = {}) {
     const cmp = /\/compare\/(.+?)\.\.\.(.+)$/u.exec(apiPath);
     if (cmp) {
       const key = `${cmp[1]}...${cmp[2]}`;
-      return { stdout: JSON.stringify(compares[key] || []) };
+      const shas = compares[key] || [];
+      return { stdout: JSON.stringify({ total: compareTotals[key] ?? shas.length, shas }) };
     }
     const commit = /\/commits\/([0-9a-fA-F]+)$/u.exec(apiPath);
     if (commit) {
@@ -210,6 +213,13 @@ test('clobberGuardEnabled: env override wins, default is fail-safe ON', () => {
   assert.equal(clobberGuardEnabled({ ADVERSARIAL_MERGE_CLOBBER_GUARD_ENABLED: 'false' }), false);
   assert.equal(clobberGuardEnabled({ ADVERSARIAL_MERGE_CLOBBER_GUARD_ENABLED: '0' }), false);
   assert.equal(clobberGuardEnabled({ ADVERSARIAL_MERGE_CLOBBER_GUARD_ENABLED: 'true' }), true);
+  assert.equal(
+    clobberGuardEnabled(
+      { ADVERSARIAL_MERGE_CLOBBER_GUARD_ENABLED: '  ' },
+      { loaderImpl: () => ({ get: () => true }) },
+    ),
+    true,
+  );
   // Unknown/empty env with an unreadable config falls back to the ON default.
   assert.equal(
     clobberGuardEnabled({}, { loaderImpl: () => { throw new Error('no config'); } }),
@@ -231,6 +241,36 @@ test('unverifiable: gh failure fails closed (blocks the content-blind lane)', as
   });
   assert.equal(result.status, 'unverifiable');
   assert.equal(result.reason, 'clobber-guard-verification-error');
+  assert.equal(clobberGuardBlocks(result), true);
+});
+
+test('unverifiable: truncated GitHub compare response fails closed', async () => {
+  const compareKey = `${LIVE}...${REVIEWED}`;
+  const execGh = makeExecGh({
+    compares: {
+      [compareKey]: ['f1100000'],
+      [`${REVIEWED}...${LIVE}`]: [],
+    },
+    compareTotals: {
+      [compareKey]: 251,
+    },
+    diffs: {
+      f1100000: FIX_DIFF,
+    },
+  });
+
+  const result = await evaluateMovedHeadClobberGuard({
+    repo: 'laceyenterprises/agent-os',
+    reviewedHead: REVIEWED,
+    liveHead: LIVE,
+    execGh,
+    env: CLEAN_ENV,
+    logger: { warn() {} },
+  });
+
+  assert.equal(result.status, 'unverifiable');
+  assert.equal(result.reason, 'clobber-guard-verification-error');
+  assert.match(result.error, /compare response truncated/u);
   assert.equal(clobberGuardBlocks(result), true);
 });
 
@@ -271,4 +311,21 @@ test('clobberGuardBlocks: only clobber and unverifiable block', () => {
   assert.equal(clobberGuardBlocks({ status: 'ok' }), false);
   assert.equal(clobberGuardBlocks({ status: 'skipped' }), false);
   assert.equal(clobberGuardBlocks(null), false);
+});
+
+test('ama-clobber-guard CLI rejects missing required assess flags', () => {
+  const bin = fileURLToPath(new URL('../bin/ama-clobber-guard.mjs', import.meta.url));
+  const result = spawnSync(process.execPath, [
+    bin,
+    'assess',
+    '--repo',
+    'laceyenterprises/agent-os',
+    '--reviewed-shas',
+    REVIEWED,
+    '--live-sha',
+    LIVE,
+  ], { encoding: 'utf8' });
+
+  assert.equal(result.status, 64);
+  assert.match(result.stderr, /Usage:/u);
 });

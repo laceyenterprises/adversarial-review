@@ -42,6 +42,9 @@ function parseArgs(argv) {
 }
 
 async function commandAssess(flags) {
+  for (const required of ['repo', 'reviewed-sha', 'live-sha']) {
+    if (!String(flags[required] || '').trim()) usage(64);
+  }
   const result = await evaluateMovedHeadClobberGuard({
     repo: flags.repo,
     reviewedHead: flags['reviewed-sha'],

@@ -1674,8 +1674,10 @@ test('workflow push preflight rethrows exhausted transient merge-agent broker mi
       log: { log() {}, warn() {}, error() {} },
     }),
     (err) => {
-      assert.notEqual(err.name, 'WorkflowPushCapabilityError');
-      assert.match(err.message, /HTTP 503/);
+      assert.equal(err.name, 'WorkflowPushPreflightTransientError');
+      assert.equal(err.isWorkflowPushPreflightTransientError, true);
+      assert.equal(err.code, 'workflow-push-merge-agent-broker-unavailable');
+      assert.match(err.cause?.message || '', /HTTP 503/);
       return true;
     },
   );
@@ -1782,6 +1784,88 @@ test('workflow changed-file lookup preflight outage requeues instead of spawning
   assert.equal(pendingJob.remediationPlan.currentRound, 0);
   assert.equal(pendingJob.lastWorkflowPushPreflightFailure.code, 'workflow-push-changed-files-unavailable');
   assert.equal(pendingJob.lastWorkflowPushPreflightFailure.recoverable, true);
+});
+
+test('workflow merge-agent broker outage requeues instead of spawning or terminalizing', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const secretPath = path.join(rootDir, 'broker-secret');
+  writeFileSync(secretPath, 'shared-secret\n', 'utf8');
+  const created = createPendingRemediationJob(rootDir, {
+    changedFiles: ['.github/workflows/unit-tests.yml'],
+  });
+  const spawnCalls = [];
+  const alerts = [];
+  const logs = [];
+  const original = {
+    GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+    OAUTH_BROKER_URL: process.env.OAUTH_BROKER_URL,
+    OAUTH_BROKER_SHARED_SECRET_FILE: process.env.OAUTH_BROKER_SHARED_SECRET_FILE,
+    ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT: process.env.ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT,
+    ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN: process.env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN,
+    ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY: process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY,
+    ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS: process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS,
+  };
+  const originalFetch = globalThis.fetch;
+  process.env.GITHUB_TOKEN = 'gho_repo_without_workflow';
+  process.env.OAUTH_BROKER_URL = 'http://broker.invalid';
+  process.env.OAUTH_BROKER_SHARED_SECRET_FILE = secretPath;
+  delete process.env.ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT;
+  delete process.env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN;
+  delete process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY;
+  delete process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS;
+  globalThis.fetch = async () => ({ ok: false, status: 503, async json() { return {}; } });
+  try {
+    const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
+      rootDir,
+      maxConcurrent: 1,
+      promptTemplate: 'You are a remediation worker.',
+      now: () => '2026-07-04T10:00:00.000Z',
+      resolvePRLifecycleImpl: async () => null,
+      deliverAlertImpl: async (text, structured) => alerts.push({ text, structured }),
+      log: {
+        log: (line) => logs.push(line),
+        warn: (line) => logs.push(line),
+        error: (line) => logs.push(line),
+      },
+      execFileImpl: async (command, args) => {
+        if (command === 'gh' && args[0] === 'api' && args[1] === '/' && args.includes('--include')) {
+          return {
+            stdout: 'HTTP/2 200\nx-oauth-scopes: admin:public_key, gist, read:org, repo\n',
+            stderr: '',
+          };
+        }
+        throw new Error(`unexpected command after workflow broker preflight outage: ${command} ${args.join(' ')}`);
+      },
+      spawnImpl: (...args) => {
+        spawnCalls.push(args);
+        return { pid: 9999, unref() {} };
+      },
+    }));
+
+    assert.equal(result.spawned, 0);
+    assert.equal(spawnCalls.length, 0);
+    assert.equal(alerts.length, 0);
+    assert.equal(result.results[0].reason, 'workflow-push-merge-agent-broker-unavailable');
+    assert.match(logs.join('\n'), /workflow-push preflight transient/);
+    assert.equal(process.env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN, undefined);
+    assert.equal(process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY, undefined);
+    assert.equal(process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS, undefined);
+
+    const pendingDir = getFollowUpJobDir(rootDir, 'pending');
+    const pendingFiles = readdirSync(pendingDir).filter((name) => name.endsWith('.json'));
+    assert.equal(pendingFiles.length, 1);
+    const pendingJob = JSON.parse(readFileSync(path.join(pendingDir, pendingFiles[0]), 'utf8'));
+    assert.equal(pendingJob.status, 'pending');
+    assert.equal(pendingJob.jobId, created.job.jobId);
+    assert.equal(pendingJob.lastWorkflowPushPreflightFailure.code, 'workflow-push-merge-agent-broker-unavailable');
+    assert.equal(pendingJob.lastWorkflowPushPreflightFailure.recoverable, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
 test('workflow-touching remediation without workflow push capability blocks before spawn, alerts, and marks needs-operator', async () => {
@@ -1924,6 +2008,165 @@ test('workflow push capability alert gives configured-token recovery instead of 
       else process.env[key] = value;
     }
   }
+});
+
+test('workflow push preflight escalates workflow-file remediations to merge-agent broker token', async () => {
+  const env = {
+    OAUTH_BROKER_URL: 'http://broker.test',
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/secret',
+    GITHUB_TOKEN: 'ambient_without_workflow',
+  };
+  let brokerCalls = 0;
+  const logs = [];
+  const result = await assertWorkflowPushCapabilityForJob({
+    job: {
+      repo: 'laceyenterprises/finch',
+      prNumber: 1,
+      jobId: 'wfma-01',
+      changedFiles: ['.github/workflows/ci.yml'],
+    },
+    env,
+    retryDelaysMs: [],
+    readFileImpl: () => 'shared-secret',
+    fetchImpl: async (url, options = {}) => {
+      brokerCalls += 1;
+      assert.equal(url, 'http://broker.test/token?provider=github-app-merge-agent');
+      assert.equal(options.headers.Authorization, 'Bearer shared-secret');
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            provider: 'github-app-merge-agent',
+            access_token: 'ghs_merge_agent_workflow',
+            metadata: {},
+            expires_at: '2026-08-16T20:00:00.000Z',
+          };
+        },
+      };
+    },
+    execFileImpl: async (command, args) => {
+      assert.equal(command, 'gh');
+      if (args[0] === 'api' && args[1] === '/' && args.includes('--include')) {
+        return { stdout: 'HTTP/2 200\nx-oauth-scopes: repo\n', stderr: '' };
+      }
+      throw new Error(`unexpected gh probe: ${args.join(' ')}`);
+    },
+    log: {
+      log: (line) => logs.push(line),
+      warn: (line) => logs.push(line),
+      error: (line) => logs.push(line),
+    },
+  });
+
+  assert.equal(brokerCalls, 1);
+  assert.equal(result.gated, false);
+  assert.equal(result.escalated, true);
+  assert.equal(result.capability.source, 'merge-agent-broker');
+  assert.equal(result.capability.identity, 'lacey-merge-agent[bot]');
+  assert.equal(result.capability.detection, 'escalated');
+  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN, undefined);
+  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY, undefined);
+  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS, undefined);
+  assert.match(logs.join('\n'), /source=merge-agent-broker .*detection=escalated/);
+});
+
+test('workflow push preflight fails closed when merge-agent broker mint fails', async () => {
+  const env = {
+    OAUTH_BROKER_URL: 'http://broker.test',
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/secret',
+    GITHUB_TOKEN: 'ambient_without_workflow',
+  };
+  let brokerCalls = 0;
+  await assert.rejects(
+    () => assertWorkflowPushCapabilityForJob({
+      job: {
+        repo: 'laceyenterprises/finch',
+        prNumber: 1,
+        jobId: 'wfma-01',
+        changedFiles: ['.github/workflows/ci.yml'],
+      },
+      env,
+      retryDelaysMs: [],
+      deliverAlertImpl: async () => {},
+      readFileImpl: () => 'shared-secret',
+      fetchImpl: async () => {
+        brokerCalls += 1;
+        throw new Error('broker down');
+      },
+      execFileImpl: async (command, args) => {
+        assert.equal(command, 'gh');
+        if (args[0] === 'api' && args[1] === '/' && args.includes('--include')) {
+          return { stdout: 'HTTP/2 200\nx-oauth-scopes: repo\n', stderr: '' };
+        }
+        throw new Error(`unexpected gh probe: ${args.join(' ')}`);
+      },
+    }),
+    (err) => err.name === 'WorkflowPushCapabilityError',
+  );
+  assert.equal(brokerCalls, 1);
+  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN, undefined);
+});
+
+test('workflow push preflight flag disables merge-agent escalation', async () => {
+  const env = {
+    ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT: 'false',
+    OAUTH_BROKER_URL: 'http://broker.test',
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/secret',
+    GITHUB_TOKEN: 'ambient_without_workflow',
+  };
+  let brokerCalls = 0;
+  await assert.rejects(
+    () => assertWorkflowPushCapabilityForJob({
+      job: {
+        repo: 'laceyenterprises/finch',
+        prNumber: 1,
+        jobId: 'wfma-01',
+        changedFiles: ['.github/workflows/ci.yml'],
+      },
+      env,
+      retryDelaysMs: [],
+      deliverAlertImpl: async () => {},
+      fetchImpl: async () => {
+        brokerCalls += 1;
+        throw new Error('must not be called');
+      },
+      execFileImpl: async (command, args) => {
+        assert.equal(command, 'gh');
+        if (args[0] === 'api' && args[1] === '/' && args.includes('--include')) {
+          return { stdout: 'HTTP/2 200\nx-oauth-scopes: repo\n', stderr: '' };
+        }
+        throw new Error(`unexpected gh probe: ${args.join(' ')}`);
+      },
+    }),
+    (err) => err.name === 'WorkflowPushCapabilityError',
+  );
+  assert.equal(brokerCalls, 0);
+});
+
+test('workflow push preflight leaves non-workflow remediations unchanged without broker mint', async () => {
+  let brokerCalls = 0;
+  const result = await assertWorkflowPushCapabilityForJob({
+    job: {
+      repo: 'laceyenterprises/finch',
+      prNumber: 1,
+      jobId: 'wfma-01',
+      changedFiles: ['src/index.mjs'],
+    },
+    env: {
+      OAUTH_BROKER_URL: 'http://broker.test',
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/secret',
+      GITHUB_TOKEN: 'ambient_without_workflow',
+    },
+    fetchImpl: async () => {
+      brokerCalls += 1;
+      throw new Error('must not be called');
+    },
+  });
+  assert.equal(result.gated, false);
+  assert.equal(result.workflowTouch.touches, false);
+  assert.equal(result.escalated, undefined);
+  assert.equal(brokerCalls, 0);
 });
 
 test('workflow-touching remediation with workflow-capable push token proceeds to spawn', async () => {
@@ -2432,6 +2675,21 @@ test('buildInheritedPath prepends required system directories without dropping e
   assert.match(inherited, /\/custom\/bin/);
 });
 
+test('prepareClaudeCodeRemediationStartupEnv and prepareGeminiRemediationStartupEnv inherit ambient PATH when source PATH is absent', () => {
+  const previousPath = process.env.PATH;
+  process.env.PATH = '/ambient/bin';
+  try {
+    const claude = prepareClaudeCodeRemediationStartupEnv({ sourceEnv: {} });
+    const gemini = prepareGeminiRemediationStartupEnv({ sourceEnv: { HOME: '/tmp/gemini-home' } });
+
+    assert.match(claude.env.PATH, /\/ambient\/bin/);
+    assert.match(gemini.env.PATH, /\/ambient\/bin/);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
+});
+
 // ── worker-provenance commit-msg hook ──────────────────────────────────────
 
 test('installWorkerProvenanceHook writes an executable hook to .git/hooks/commit-msg', () => {
@@ -2918,16 +3176,33 @@ test('remediation runtime local mode binds the default execFile implementation a
   writeFileSync(promptPath, 'fix it.\n', 'utf8');
   writeFileSync(authPath, JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'a', refresh_token: 'b' } }), 'utf8');
 
-  const prev = { HOME: process.env.HOME, CODEX_HOME: process.env.CODEX_HOME, CODEX_AUTH_PATH: process.env.CODEX_AUTH_PATH };
-  process.env.HOME = workspaceDir;
-  process.env.CODEX_HOME = codexHome;
-  process.env.CODEX_AUTH_PATH = authPath;
+  const runtimeEnv = {
+    ...process.env,
+    HOME: workspaceDir,
+    CODEX_HOME: codexHome,
+    CODEX_AUTH_PATH: authPath,
+    CODEX_CLI_PATH: path.join(workspaceDir, 'job-codex'),
+  };
+  delete runtimeEnv.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN;
+  delete runtimeEnv.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY;
+  delete runtimeEnv.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS;
+  const prev = {
+    ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN: process.env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN,
+    ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY: process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY,
+    ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS: process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS,
+  };
+  process.env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN = 'global-elevated-token';
+  process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY = 'lacey-merge-agent[bot]';
+  process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS = '{"workflows":"write","contents":"write"}';
 
   let invokedCli;
+  let invokedEnv;
   try {
     const handle = await createRemediationRuntime({
-      spawnImpl: (cmd) => {
+      env: runtimeEnv,
+      spawnImpl: (cmd, args, options) => {
         invokedCli = cmd;
+        invokedEnv = options.env;
         return { pid: 111, unref() {} };
       },
     }).run({
@@ -2939,13 +3214,15 @@ test('remediation runtime local mode binds the default execFile implementation a
     assert.equal(handle.worker.model, 'codex');
     assert.equal(typeof handle.cancel, 'function');
   } finally {
-    for (const k of ['HOME', 'CODEX_HOME', 'CODEX_AUTH_PATH']) {
-      if (prev[k] === undefined) delete process.env[k];
-      else process.env[k] = prev[k];
+    for (const [key, value] of Object.entries(prev)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   }
-  // The codex CLI is what was invoked, not claude.
-  assert.match(invokedCli, /codex/);
+  assert.equal(invokedCli, path.join(workspaceDir, 'job-codex'));
+  assert.equal(invokedEnv.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN, undefined);
+  assert.equal(invokedEnv.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY, undefined);
+  assert.equal(invokedEnv.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS, undefined);
 });
 
 test('remediation runtime local mode preserves the claude-code-remediation provenance class', async () => {
@@ -4521,8 +4798,8 @@ test('applyMergeAgentBrokerEnv keys the push provider off the physical harness a
     harnessClass: 'codex',
     harnessIdentityHonored: true,
     fellBack: false,
-    fallbackWarning: null,
     requiresWorkflowPush: false,
+    fallbackWarning: null,
     expectedAppId: '12345',
     expectedInstallationId: '67890',
     sharedSecretFile: '/tmp/broker-secret',
@@ -4555,6 +4832,45 @@ test('applyMergeAgentBrokerEnv resolves the per-harness provider by default (nev
     assert.equal(evidence.expectedAppId, null);
     assert.equal(evidence.sharedSecretFile, null);
   }
+});
+
+test('applyMergeAgentBrokerEnv routes workflow-file worker pushes through merge-agent provider', () => {
+  const env = {};
+  const evidence = applyMergeAgentBrokerEnv(env, {
+    MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+    OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '3977955',
+    OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: '138360282',
+  }, { workerClass: 'codex', requiresWorkflowPush: true });
+
+  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_PROVIDER, 'github-app-merge-agent');
+  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID, '3977955');
+  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID, '138360282');
+  assert.equal(evidence.provider, 'github-app-merge-agent');
+  assert.equal(evidence.providerSource, 'workflow-push-merge-agent');
+  assert.equal(evidence.requiresWorkflowPush, true);
+  assert.equal(evidence.fellBack, false);
+  assert.equal(evidence.expectedAppId, '3977955');
+  assert.equal(evidence.expectedInstallationId, '138360282');
+});
+
+test('applyMergeAgentBrokerEnv evidence preserves workflow-push requirement resolved from source env', () => {
+  const env = {};
+  const evidence = applyMergeAgentBrokerEnv(env, {
+    MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+    ADVERSARIAL_REMEDIATION_WORKER_REQUIRES_WORKFLOW_PUSH: 'true',
+  }, { workerClass: 'codex' });
+
+  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_PROVIDER, 'github-app-merge-agent');
+  assert.equal(evidence.providerSource, 'workflow-push-merge-agent');
+  assert.equal(evidence.requiresWorkflowPush, true);
+});
+
+test('remediationWorkerPushProvider routes workflow-file signal to merge-agent', () => {
+  const resolved = remediationWorkerPushProvider('claude-code', {}, { requiresWorkflowPush: true });
+  assert.equal(resolved.provider, 'github-app-merge-agent');
+  assert.equal(resolved.source, 'workflow-push-merge-agent');
+  assert.equal(resolved.requiresWorkflowPush, true);
+  assert.equal(resolved.fellBack, false);
 });
 
 test('applyMergeAgentBrokerEnv falls back to merge-agent LOUDLY only for a harness with no known push-capable App', () => {
@@ -4658,6 +4974,7 @@ test('prepareCodexRemediationStartupEnv records per-harness push provider broker
       harnessClass: 'codex',
       harnessIdentityHonored: true,
       fellBack: false,
+      requiresWorkflowPush: false,
       fallbackWarning: null,
       requiresWorkflowPush: false,
       expectedAppId: null,
@@ -4817,6 +5134,91 @@ test('assertHarnessIdentityMatch validates push provider against the broker sour
   });
   assert.equal(result.match, true);
   assert.deepEqual(result.mismatches, []);
+});
+
+test('spawn remediation workers enforce harness identity against the isolated source env', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const promptPath = path.join(workspaceDir, 'prompt.md');
+  const outputPath = path.join(workspaceDir, 'last-message.md');
+  const logPath = path.join(workspaceDir, 'worker.log');
+  const codexHome = path.join(workspaceDir, '.codex');
+  const codexAuthPath = path.join(codexHome, 'auth.json');
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(promptPath, 'remediate\n', 'utf8');
+  writeFileSync(codexAuthPath, JSON.stringify({
+    auth_mode: 'chatgpt',
+    tokens: { access_token: 'access', refresh_token: 'refresh' },
+  }), 'utf8');
+
+  const previous = {
+    OAUTH_BROKER_REMEDIATION_CLAUDE_CODE_PROVIDER: process.env.OAUTH_BROKER_REMEDIATION_CLAUDE_CODE_PROVIDER,
+    OAUTH_BROKER_REMEDIATION_GEMINI_PROVIDER: process.env.OAUTH_BROKER_REMEDIATION_GEMINI_PROVIDER,
+    OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER: process.env.OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER,
+  };
+  process.env.OAUTH_BROKER_REMEDIATION_CLAUDE_CODE_PROVIDER = 'ambient-claude-provider';
+  process.env.OAUTH_BROKER_REMEDIATION_GEMINI_PROVIDER = 'ambient-gemini-provider';
+  process.env.OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER = 'ambient-codex-provider';
+
+  const spawned = [];
+  const spawnImpl = (_cmd, _args, opts) => {
+    spawned.push(opts.env.OAUTH_BROKER_MERGE_AGENT_PROVIDER);
+    return { pid: 8123 + spawned.length, unref() {} };
+  };
+
+  try {
+    spawnClaudeCodeRemediationWorker({
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      ...testReplyContext(),
+      sourceEnv: {
+        MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+        OAUTH_BROKER_REMEDIATION_CLAUDE_CODE_PROVIDER: 'source-claude-provider',
+      },
+      spawnImpl,
+    });
+    spawnGeminiRemediationWorker({
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      ...testReplyContext(),
+      sourceEnv: {
+        HOME: workspaceDir,
+        MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+        OAUTH_BROKER_REMEDIATION_GEMINI_PROVIDER: 'source-gemini-provider',
+      },
+      spawnImpl,
+    });
+    spawnCodexRemediationWorker({
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      ...testReplyContext(),
+      jobId: 'source-env-job',
+      sourceEnv: {
+        HOME: workspaceDir,
+        CODEX_HOME: codexHome,
+        CODEX_AUTH_PATH: codexAuthPath,
+        MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+        OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER: 'source-codex-provider',
+      },
+      spawnImpl,
+    });
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+
+  assert.deepEqual(spawned, [
+    'source-claude-provider',
+    'source-gemini-provider',
+    'source-codex-provider',
+  ]);
 });
 
 test('assertHarnessIdentityMatch fails closed on a synthetic identity mismatch when enforcing', () => {

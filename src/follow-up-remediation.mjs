@@ -672,10 +672,11 @@ function createRemediationRuntime({
         hqRoot: request.hqRoot,
         launchRequestId: request.launchRequestId,
         jobId: request.jobId,
+        requiresWorkflowPush: Boolean(request.requiresWorkflowPush),
         enforceHarnessIdentity,
         auditSink: harnessIdentityAuditSink,
-        requiresWorkflowPush: Boolean(request.requiresWorkflowPush),
         spawnImpl,
+        sourceEnv: env,
         now,
       });
       return createLocalRemediationHandle({
@@ -792,6 +793,10 @@ async function dispatchRemediationViaHq({
             : {}),
           repo: normalizeHqDispatchRepo(repo),
           pr_number: prNumber,
+          ...(requiresWorkflowPush ? {
+            push_provider: 'github-app-merge-agent',
+            requires_workflow_push: true,
+          } : {}),
           // Omit `branch` when falsy so the agent-os wire payload matches the
           // native lane, which only appends `--branch` when truthy. `stripUndefined`
           // in the SDK client drops `undefined` but not `null`, so passing a falsy
@@ -3284,12 +3289,13 @@ async function consumeNextFollowUpJob({
   let spawnAttempted = false;
   let spawnedWorker = null;
   let workflowPushPreflight = null;
+  const jobEnv = { ...process.env };
 
   try {
     workerClass = pickRemediationWorkerClass(claimed.job);
     const remediationMode = resolveRemediationRuntimeMode(claimed.job, {
       healthRouter,
-      env: process.env,
+      env: jobEnv,
     });
     const remediationDispatchPath = remediationMode === 'os' ? 'hq' : 'bare';
     claimed.job = persistRemediationDispatchPath({
@@ -3361,7 +3367,7 @@ async function consumeNextFollowUpJob({
     workflowPushPreflight = await assertWorkflowPushCapabilityForJob({
       job: claimed.job,
       execFileImpl,
-      env: process.env,
+      env: jobEnv,
       deliverAlertImpl,
       log,
     });
@@ -3376,7 +3382,7 @@ async function consumeNextFollowUpJob({
       await assertRemediationWorkerOAuth(workerClass, { execFileImpl });
     }
     const shouldApplyOssReadinessBeforeSpawn = jobHasOssReadinessAuditFailure(claimed.job);
-    const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env: process.env });
+    const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env: jobEnv });
     const artifactWorkspaceDir = join(workspaceRootDir, claimed.job.jobId);
     let workspaceDir = artifactWorkspaceDir;
     let workspaceState = {
@@ -3415,7 +3421,7 @@ async function consumeNextFollowUpJob({
         job: claimed.job,
         workspaceDir,
         workerTrailerClass: remediationWorkerTrailerClass(workerClass),
-        env: process.env,
+        env: jobEnv,
         execFileImpl,
         now,
       });
@@ -3425,7 +3431,7 @@ async function consumeNextFollowUpJob({
           const push = await pushOssReadinessRemediationCommit({
             workspaceDir,
             branch: claimed.job.branch,
-            env: process.env,
+            env: jobEnv,
             execFileImpl,
           });
           ossReadinessApply.push = push;
@@ -3454,7 +3460,7 @@ async function consumeNextFollowUpJob({
         }
       }
     }
-    const replyTarget = resolveRemediationReplyTarget(process.env, { requireExists: true });
+    const replyTarget = resolveRemediationReplyTarget(jobEnv, { requireExists: true });
     const hqRoot = replyTarget.mode === 'hq' ? replyTarget.root : null;
     const replyStorageKey = resolveReplyStorageKey(claimed.job);
     if (claimed.job.replyStorageKey !== replyStorageKey) {
@@ -3532,7 +3538,7 @@ async function consumeNextFollowUpJob({
     const remediationRuntime = createRemediationRuntime({
       execFileImpl,
       spawnImpl,
-      env: process.env,
+      env: jobEnv,
       now,
     });
     const runHandle = await remediationRuntime.run({

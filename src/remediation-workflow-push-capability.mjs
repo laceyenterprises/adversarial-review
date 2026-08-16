@@ -480,7 +480,10 @@ async function tryEscalateWorkflowPushCapability({
     return { ok: capability.hasWorkflowCapability, capability, error: null };
   } catch (err) {
     if (isTransientWorkflowPushPreflightError(err)) {
-      throw err;
+      throw new WorkflowPushPreflightTransientError(
+        'Workflow-file preflight could not mint a merge-agent workflow push token; requeueing until the broker recovers.',
+        { code: 'workflow-push-merge-agent-broker-unavailable', cause: err }
+      );
     }
     return { ok: false, capability: null, error: err };
   }
@@ -644,9 +647,9 @@ async function assertWorkflowPushCapabilityForJob({
   execFileImpl = execFileAsync,
   env = process.env,
   deliverAlertImpl = deliverAlert,
+  fetchImpl = globalThis.fetch,
   log = console,
   retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
-  fetchImpl = globalThis.fetch,
   readFileImpl = readFileSync,
 } = {}) {
   const workflowTouch = await remediationTouchesWorkflowFiles({ job, env, execFileImpl, log, retryDelaysMs });
@@ -710,10 +713,52 @@ async function assertWorkflowPushCapabilityForJob({
         },
       };
     }
-    log.warn?.(
-      `[follow-up-remediation] workflow-push merge-agent escalation failed for ${job.repo}#${job.prNumber}: ` +
-      `${escalated.error?.message || escalated.error || 'token lacks workflow scope'}`
-    );
+    if (escalated.capability) {
+      const escalatedCapability = {
+        ...escalated.capability,
+        source: 'merge-agent-broker',
+        detection: 'escalated',
+      };
+      log.warn?.(
+        `[follow-up-remediation] workflow-push merge-agent escalation token lacks workflow capability for ${job.repo}#${job.prNumber}: ` +
+        `identity=${escalatedCapability.identity} detection=${escalatedCapability.detection}`
+      );
+      const alertText = workflowPushOperatorAlertText({ job, capability: escalatedCapability });
+      const operatorAction = workflowPushOperatorAction(escalatedCapability);
+      try {
+        await deliverAlertImpl(alertText, {
+          event: 'remediation-workflow-push-capability-missing',
+          severity: 'critical',
+          repo: job.repo,
+          prNumber: job.prNumber,
+          jobId: job.jobId,
+          pushToken: {
+            source: escalatedCapability.source,
+            envName: escalatedCapability.envName,
+            identity: escalatedCapability.identity,
+            tokenType: escalatedCapability.tokenType,
+            detection: escalatedCapability.detection,
+            hasWorkflowCapability: false,
+          },
+          operatorAction,
+        });
+      } catch (alertErr) {
+        log.error?.(`[follow-up-remediation] workflow-push capability alert delivery failed: ${alertErr?.message || alertErr}`);
+      }
+      throw new WorkflowPushCapabilityError(
+        `Workflow-file remediation for ${job.repo}#${job.prNumber} requires the merge-agent workflow push token to have workflow capability.`,
+        {
+          workflowTouch,
+          capability: escalatedCapability,
+          operatorAction,
+        }
+      );
+    } else {
+      log.warn?.(
+        `[follow-up-remediation] workflow-push merge-agent escalation failed for ${job.repo}#${job.prNumber}: ` +
+        `${escalated.error?.message || escalated.error || 'token unavailable'}`
+      );
+    }
   }
 
   const alertText = workflowPushOperatorAlertText({ job, capability });

@@ -66,6 +66,7 @@ const REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS = {
 // no known push-capable App of its own, and as the intentional workflow-file
 // provider because only merge-agent has workflows:write.
 const MERGE_AGENT_FALLBACK_PUSH_PROVIDER = 'github-app-merge-agent';
+const WORKFLOW_PUSH_PROVIDER = 'github-app-merge-agent';
 
 // Physical harnesses whose own GitHub App is known (and was verified) to hold
 // contents:write on the fleet's PR repos. A harness absent here trips the
@@ -87,9 +88,11 @@ const REMEDIATION_PUSH_CAPABLE_HARNESSES = new Set(['codex', 'claude-code', 'gem
 // was the #5058 bug vector (a fixed merge-agent provider hijacking every
 // harness) and is replaced by this harness-keyed resolution.
 function remediationWorkerPushProvider(workerClass, env = process.env, { requiresWorkflowPush = false } = {}) {
-  if (requiresWorkflowPush) {
+  const workflowPushRequired = requiresWorkflowPush
+    || String(env.ADVERSARIAL_REMEDIATION_WORKER_REQUIRES_WORKFLOW_PUSH || '').trim().toLowerCase() === 'true';
+  if (workflowPushRequired) {
     return {
-      provider: MERGE_AGENT_FALLBACK_PUSH_PROVIDER,
+      provider: WORKFLOW_PUSH_PROVIDER,
       source: 'workflow-push-merge-agent',
       harnessClass: workerClass,
       honored: false,
@@ -110,6 +113,7 @@ function remediationWorkerPushProvider(workerClass, env = process.env, { require
       honored: true,
       fellBack: false,
       warning: null,
+      requiresWorkflowPush: false,
     };
   }
   const harnessProvider = REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS[workerClass] || null;
@@ -121,6 +125,7 @@ function remediationWorkerPushProvider(workerClass, env = process.env, { require
       honored: true,
       fellBack: false,
       warning: null,
+      requiresWorkflowPush: false,
     };
   }
   const warning =
@@ -135,6 +140,7 @@ function remediationWorkerPushProvider(workerClass, env = process.env, { require
     honored: false,
     fellBack: true,
     warning,
+    requiresWorkflowPush: false,
   };
 }
 

@@ -549,6 +549,7 @@ export async function runDaemonCleanMergeAttempt({
       reviewedHead: validatedHead,
       liveHead,
       env,
+      configOptions: { topPath: hqRoot },
       logger,
       execGh: ({ args, timeoutMs }) =>
         execGhWithRetryImpl({ execFileImpl, args, env, timeoutMs }),
@@ -560,7 +561,7 @@ export async function runDaemonCleanMergeAttempt({
       // audit records WHY, so an operator — and `priorDaemonPermanentFailure` — can
       // see the dropped-content signal.
       try {
-        appendAmaAuditAttemptImpl({
+        await appendAmaAuditAttemptImpl({
           hqRoot,
           repo: repoPath,
           prNumber,

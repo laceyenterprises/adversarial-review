@@ -140,9 +140,10 @@ test('clobber guard DECLINES a dropped-content closer head (falls to hammer) and
     const result = await runDaemonCleanMergeAttempt(
       nonBlockingReviewArgs(rootDir, {
         resolveHeadCloserCommitSuppressionImpl: async () => ({ suppressed: true }),
-        evaluateMovedHeadClobberGuardImpl: async ({ reviewedHead, liveHead }) => {
+        evaluateMovedHeadClobberGuardImpl: async ({ reviewedHead, liveHead, configOptions }) => {
           assert.equal(reviewedHead, REVIEWED_HEAD);
           assert.equal(liveHead, CLOSER_HEAD);
+          assert.deepEqual(configOptions, { topPath: rootDir });
           return {
             status: 'clobber',
             reason: 'reviewed-content-dropped-on-rebase',
@@ -150,7 +151,10 @@ test('clobber guard DECLINES a dropped-content closer head (falls to hammer) and
             droppedCount: 1,
           };
         },
-        appendAmaAuditAttemptImpl: (args) => { auditArgs = args; },
+        appendAmaAuditAttemptImpl: async (args) => {
+          await new Promise((resolve) => { setImmediate(resolve); });
+          auditArgs = args;
+        },
         clobberGuardNowImpl: () => '2026-08-16T00:00:00.000Z',
         attemptDaemonCleanMergeImpl: async () => {
           attemptCalled = true;

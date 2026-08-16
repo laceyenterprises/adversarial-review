@@ -46,7 +46,7 @@ const REMEDIATION_WORKER_IDENTITY_DEFAULTS = {
 // never a fixed merge-agent identity routed in from a different class. This is
 // the push-side twin of remediationWorkerGitIdentity above: identity = who the
 // commit is authored by AND who the push authenticates as, both keyed on the
-// physical harness.
+// physical harness unless the remediation must modify workflow files.
 //
 // The slugs are the exact providers the loopback OAuth broker (:4099
 // /token?provider=) vends and that the worker-pool builder push path
@@ -62,14 +62,9 @@ const REMEDIATION_WORKER_PUSH_PROVIDER_DEFAULTS = {
   gemini: 'github-app-gemini-agent',
 };
 
-// Fallback push provider, used ONLY when a physical harness has no known
-// push-capable App of its own. It is NEVER the default for a real harness — all
-// three live harnesses are in the push-capable set below. Selecting it means the
-// worker's push CANNOT authenticate as the physical harness, so it is a loud,
-// audited, degraded state (see remediationWorkerPushProvider), not a silent
-// default. This is exactly the #5058 hazard the fix removes: a hardcoded
-// merge-agent provider that force-pushed a codex remediation as
-// lacey-merge-agent[bot].
+// Merge-agent push provider. Used as a loud fallback when a physical harness has
+// no known push-capable App of its own, and as the intentional workflow-file
+// provider because only merge-agent has workflows:write.
 const MERGE_AGENT_FALLBACK_PUSH_PROVIDER = 'github-app-merge-agent';
 
 // Physical harnesses whose own GitHub App is known (and was verified) to hold
@@ -80,17 +75,29 @@ const MERGE_AGENT_FALLBACK_PUSH_PROVIDER = 'github-app-merge-agent';
 const REMEDIATION_PUSH_CAPABLE_HARNESSES = new Set(['codex', 'claude-code', 'gemini']);
 
 // Resolve the broker push provider for a physical harness class. Precedence:
-//   1. explicit per-harness override env OAUTH_BROKER_REMEDIATION_<CLASS>_PROVIDER
+//   1. workflow-file remediation requirement -> merge-agent App
+//   2. explicit per-harness override env OAUTH_BROKER_REMEDIATION_<CLASS>_PROVIDER
 //      (rotation / staging; still binds the push to THIS harness, so honored).
-//   2. the per-harness default, iff the harness is known push-capable.
-//   3. the merge-agent fallback (loud + audited) for any harness without a known
+//   3. the per-harness default, iff the harness is known push-capable.
+//   4. the merge-agent fallback (loud + audited) for any harness without a known
 //      push-capable App.
 // Read at call time (not module-load), mirroring remediationWorkerGitIdentity,
 // so a long-running daemon picks up an override without a restart. The legacy
 // OAUTH_BROKER_MERGE_AGENT_PROVIDER env is intentionally NOT consulted here — it
 // was the #5058 bug vector (a fixed merge-agent provider hijacking every
 // harness) and is replaced by this harness-keyed resolution.
-function remediationWorkerPushProvider(workerClass, env = process.env) {
+function remediationWorkerPushProvider(workerClass, env = process.env, { requiresWorkflowPush = false } = {}) {
+  if (requiresWorkflowPush) {
+    return {
+      provider: MERGE_AGENT_FALLBACK_PUSH_PROVIDER,
+      source: 'workflow-push-merge-agent',
+      harnessClass: workerClass,
+      honored: false,
+      fellBack: false,
+      warning: null,
+      requiresWorkflowPush: true,
+    };
+  }
   const envSuffix = String(workerClass || '').toUpperCase().replace(/-/g, '_');
   const override = envSuffix
     ? String(env[`OAUTH_BROKER_REMEDIATION_${envSuffix}_PROVIDER`] || '').trim()

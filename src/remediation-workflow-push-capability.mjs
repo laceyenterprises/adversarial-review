@@ -10,6 +10,7 @@
 // this module back, not the other way around).
 
 import { execFile } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { promisify } from 'node:util';
 import { deliverAlert } from './alert-delivery.mjs';
@@ -81,6 +82,11 @@ const REMEDIATION_PUSH_TOKEN_PERMISSION_ENV_KEYS = Object.freeze([
   'REMEDIATION_PUSH_TOKEN_PERMISSIONS',
   'GITHUB_APP_INSTALLATION_PERMISSIONS',
 ]);
+const DEFAULT_OAUTH_BROKER_URL = 'http://127.0.0.1:4099';
+const MERGE_AGENT_BROKER_PROVIDER = 'github-app-merge-agent';
+const MERGE_AGENT_WORKFLOW_PUSH_PERMISSIONS = Object.freeze({ contents: 'write', workflows: 'write' });
+const MERGE_AGENT_WORKFLOW_PUSH_IDENTITY = 'lacey-merge-agent[bot]';
+const WORKFLOW_PUSH_ESCALATION_TIMEOUT_MS = 5_000;
 
 class WorkflowPushCapabilityError extends Error {
   constructor(message, details = {}) {
@@ -376,6 +382,85 @@ function parseConfiguredAppPermissionsFromEnv(env = process.env) {
   };
 }
 
+function isWorkflowPushEscalationEnabled(env = process.env) {
+  return String(env.ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT || '').trim().toLowerCase() !== 'false';
+}
+
+function resolveWorkflowPushBrokerUrl(env = process.env) {
+  return String(env.OAUTH_BROKER_URL || DEFAULT_OAUTH_BROKER_URL).replace(/\/+$/, '');
+}
+
+async function mintMergeAgentWorkflowPushToken({
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  readFileImpl = readFileSync,
+  timeoutMs = WORKFLOW_PUSH_ESCALATION_TIMEOUT_MS,
+} = {}) {
+  if (typeof fetchImpl !== 'function') {
+    throw new Error('fetch implementation unavailable');
+  }
+  const secretFile = String(env.OAUTH_BROKER_SHARED_SECRET_FILE || '').trim();
+  if (!secretFile) {
+    throw new Error('OAUTH_BROKER_SHARED_SECRET_FILE is empty');
+  }
+  const secret = String(readFileImpl(secretFile, 'utf8') || '').trim();
+  if (!secret) {
+    throw new Error(`OAUTH_BROKER_SHARED_SECRET_FILE '${secretFile}' is empty`);
+  }
+  const brokerUrl = resolveWorkflowPushBrokerUrl(env);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(`${brokerUrl}/token?provider=${encodeURIComponent(MERGE_AGENT_BROKER_PROVIDER)}`, {
+      headers: { Authorization: `Bearer ${secret}`, Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    if (!res?.ok) {
+      throw new Error(`broker returned HTTP ${res?.status ?? 'unknown'}`);
+    }
+    const body = await res.json();
+    const token = body?.access_token;
+    if (!token || typeof token !== 'string') {
+      throw new Error('broker response missing access_token');
+    }
+    if (String(body?.provider || '') !== MERGE_AGENT_BROKER_PROVIDER) {
+      throw new Error(`response.provider='${body?.provider ?? ''}' != expected '${MERGE_AGENT_BROKER_PROVIDER}'`);
+    }
+    return {
+      token,
+      provider: MERGE_AGENT_BROKER_PROVIDER,
+      identity: MERGE_AGENT_WORKFLOW_PUSH_IDENTITY,
+      permissions: MERGE_AGENT_WORKFLOW_PUSH_PERMISSIONS,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function applyMergeAgentWorkflowPushTokenEnv(env, token) {
+  env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN = token.token;
+  env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS = JSON.stringify(token.permissions);
+  env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY = token.identity;
+}
+
+async function tryEscalateWorkflowPushCapability({
+  env,
+  execFileImpl,
+  log,
+  retryDelaysMs,
+  fetchImpl,
+  readFileImpl,
+} = {}) {
+  try {
+    const token = await mintMergeAgentWorkflowPushToken({ env, fetchImpl, readFileImpl });
+    applyMergeAgentWorkflowPushTokenEnv(env, token);
+    const capability = await inspectRemediationPushTokenCapability({ env, execFileImpl, log, retryDelaysMs });
+    return { ok: capability.hasWorkflowCapability, capability, error: null };
+  } catch (err) {
+    return { ok: false, capability: null, error: err };
+  }
+}
+
 async function inspectRemediationPushTokenCapability({
   env = process.env,
   execFileImpl = execFileAsync,
@@ -536,6 +621,8 @@ async function assertWorkflowPushCapabilityForJob({
   deliverAlertImpl = deliverAlert,
   log = console,
   retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
+  fetchImpl = globalThis.fetch,
+  readFileImpl = readFileSync,
 } = {}) {
   const workflowTouch = await remediationTouchesWorkflowFiles({ job, env, execFileImpl, log, retryDelaysMs });
   if (!workflowTouch.touches) {
@@ -567,9 +654,41 @@ async function assertWorkflowPushCapabilityForJob({
   if (capability.hasWorkflowCapability) {
     return {
       gated: false,
+      escalated: false,
       workflowTouch,
       capability,
     };
+  }
+
+  if (isWorkflowPushEscalationEnabled(env)) {
+    const escalated = await tryEscalateWorkflowPushCapability({
+      env,
+      execFileImpl,
+      log,
+      retryDelaysMs,
+      fetchImpl,
+      readFileImpl,
+    });
+    if (escalated.ok) {
+      log.log?.(
+        `[follow-up-remediation] push-token workflow capability repo=${job.repo} pr=${job.prNumber} ` +
+        `source=merge-agent-broker identity=${escalated.capability.identity} workflow=yes detection=escalated`
+      );
+      return {
+        gated: false,
+        escalated: true,
+        workflowTouch,
+        capability: {
+          ...escalated.capability,
+          source: 'merge-agent-broker',
+          detection: 'escalated',
+        },
+      };
+    }
+    log.warn?.(
+      `[follow-up-remediation] workflow-push merge-agent escalation failed for ${job.repo}#${job.prNumber}: ` +
+      `${escalated.error?.message || escalated.error}`
+    );
   }
 
   const alertText = workflowPushOperatorAlertText({ job, capability });
@@ -606,11 +725,14 @@ async function assertWorkflowPushCapabilityForJob({
 
 export {
   assertWorkflowPushCapabilityForJob,
+  applyMergeAgentWorkflowPushTokenEnv,
   extractChangedPathsFromJob,
   hasWorkflowGitHubAppPermission,
   hasWorkflowOAuthScope,
+  isWorkflowPushEscalationEnabled,
   inspectRemediationPushTokenCapability,
   isWorkflowPath,
+  mintMergeAgentWorkflowPushToken,
   parseGitHubAppPermissions,
   parseOAuthScopesFromGhAuthStatus,
   parseOAuthScopesFromGhApiHeaders,

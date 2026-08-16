@@ -605,6 +605,7 @@ function createRemediationRuntime({
         replyPath: request.replyPath,
         launchRequestId: request.launchRequestId,
         jobId: request.jobId,
+        requiresWorkflowPush: Boolean(request.requiresWorkflowPush),
         execFileImpl,
         env,
         now,
@@ -673,6 +674,7 @@ function createRemediationRuntime({
         jobId: request.jobId,
         enforceHarnessIdentity,
         auditSink: harnessIdentityAuditSink,
+        requiresWorkflowPush: Boolean(request.requiresWorkflowPush),
         spawnImpl,
         now,
       });
@@ -718,6 +720,7 @@ async function dispatchRemediationViaHq({
   replyPath,
   launchRequestId,
   jobId,
+  requiresWorkflowPush = false,
   execFileImpl = execFileAsync,
   env = process.env,
   now = () => new Date().toISOString(),
@@ -736,6 +739,10 @@ async function dispatchRemediationViaHq({
   const requestId = String(jobId || launchRequestId || ticketRef).trim();
   const appMode = resolveAdversarialReviewAppMode(env);
   const hqBin = resolveHqBin(env);
+  const dispatchEnv = { ...env };
+  const workflowPushBrokerEvidence = requiresWorkflowPush
+    ? applyMergeAgentBrokerEnv(dispatchEnv, env, { workerClass, requiresWorkflowPush })
+    : null;
   const legacyHqArgs = buildLegacyHqRemediationDispatchArgs({
     ticketRef,
     workerClass,
@@ -763,6 +770,23 @@ async function dispatchRemediationViaHq({
           worker_class: workerClass,
           task_kind: 'coding',
           completion_shape: 'branch-push',
+          ...(requiresWorkflowPush
+            ? {
+                credential_requirements: {
+                  branch_push: {
+                    provider: 'github-app-merge-agent',
+                    reason: 'workflow-file-remediation',
+                    permissions: { contents: 'write', workflows: 'write' },
+                    broker_env: {
+                      MERGE_AGENT_AUTH_VIA_BROKER: dispatchEnv.MERGE_AGENT_AUTH_VIA_BROKER || null,
+                      OAUTH_BROKER_MERGE_AGENT_PROVIDER: dispatchEnv.OAUTH_BROKER_MERGE_AGENT_PROVIDER || null,
+                      OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: dispatchEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID || null,
+                      OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: dispatchEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID || null,
+                    },
+                  },
+                },
+              }
+            : {}),
           repo: normalizeHqDispatchRepo(repo),
           pr_number: prNumber,
           // Omit `branch` when falsy so the agent-os wire payload matches the
@@ -776,7 +800,7 @@ async function dispatchRemediationViaHq({
         }));
       })()
     : parseHqJsonObject(
-        (await execFileImpl(hqBin, legacyHqArgs, { env, maxBuffer: 5 * 1024 * 1024 })).stdout,
+        (await execFileImpl(hqBin, legacyHqArgs, { env: dispatchEnv, maxBuffer: 5 * 1024 * 1024 })).stdout,
         'hq dispatch'
       );
   const launchRequestIdValue = String(ticket?.launch_request_id || ticket?.launchRequestId || ticket?.lrq || '').trim();
@@ -813,6 +837,8 @@ async function dispatchRemediationViaHq({
     replyPath,
     dispatchMode: 'hq',
     completionShape: 'branch-push',
+    requiresWorkflowPush: Boolean(requiresWorkflowPush),
+    workflowPushBroker: workflowPushBrokerEvidence,
     launchRequestId: launchRequestIdValue,
     dispatchId,
     requestId,
@@ -3521,6 +3547,7 @@ async function consumeNextFollowUpJob({
       hqRoot,
       launchRequestId: replyStorageKey,
       jobId: claimed.job.jobId,
+      requiresWorkflowPush: Boolean(workflowPushPreflight?.workflowTouch?.touches),
     });
     const worker = runHandle.worker;
     spawnedWorker = worker;

@@ -53,21 +53,21 @@ function buildInheritedPath(currentPath = process.env.PATH || '') {
   return [...new Set(segments)].join(':');
 }
 
-function resolveCodexCliPath() {
-  return process.env.CODEX_CLI_PATH || process.env.CODEX_CLI || 'codex';
+function resolveCodexCliPath(env = process.env) {
+  return env.CODEX_CLI_PATH || env.CODEX_CLI || 'codex';
 }
 
-function resolveClaudeCodeCliPath() {
-  return process.env.CLAUDE_CODE_CLI_PATH || process.env.CLAUDE_CLI || 'claude';
+function resolveClaudeCodeCliPath(env = process.env) {
+  return env.CLAUDE_CODE_CLI_PATH || env.CLAUDE_CLI || 'claude';
 }
 
-function resolveGeminiCliPath() {
-  return process.env.GEMINI_CLI_PATH || process.env.GEMINI_CLI || 'gemini';
+function resolveGeminiCliPath(env = process.env) {
+  return env.GEMINI_CLI_PATH || env.GEMINI_CLI || 'gemini';
 }
 
-function resolveCodexAuthPath() {
-  if (process.env.CODEX_AUTH_PATH) return process.env.CODEX_AUTH_PATH;
-  const codexHome = process.env.CODEX_HOME || join(process.env.HOME || homedir(), '.codex');
+function resolveCodexAuthPath(env = process.env) {
+  if (env.CODEX_AUTH_PATH) return env.CODEX_AUTH_PATH;
+  const codexHome = env.CODEX_HOME || join(env.HOME || homedir(), '.codex');
   return join(codexHome, 'auth.json');
 }
 
@@ -308,9 +308,9 @@ function resolveCodexRemediationModel(env = process.env) {
   return pinned || DEFAULT_CODEX_REMEDIATION_MODEL;
 }
 
-function resolveGeminiAuthPath() {
-  if (process.env.GEMINI_AUTH_PATH) return process.env.GEMINI_AUTH_PATH;
-  const geminiHome = process.env.GEMINI_HOME || join(process.env.HOME || homedir(), '.gemini');
+function resolveGeminiAuthPath(env = process.env) {
+  if (env.GEMINI_AUTH_PATH) return env.GEMINI_AUTH_PATH;
+  const geminiHome = env.GEMINI_HOME || join(env.HOME || homedir(), '.gemini');
   return join(geminiHome, 'oauth_creds.json');
 }
 
@@ -337,8 +337,9 @@ function prepareClaudeCodeRemediationStartupEnv({
   gitIdentity = null,
   workerClass = 'claude-code',
   requiresWorkflowPush = false,
+  sourceEnv = process.env,
 } = {}) {
-  const { env, stripped } = scrubOAuthFallbackEnv(process.env);
+  const { env, stripped } = scrubOAuthFallbackEnv(sourceEnv);
   env.PATH = buildInheritedPath(env.PATH || '');
 
   // Stamp the physical-harness git identity so a claude-code remediation commits
@@ -354,12 +355,12 @@ function prepareClaudeCodeRemediationStartupEnv({
       ['GIT_COMMITTER_NAME', gitIdentity.name],
       ['GIT_COMMITTER_EMAIL', gitIdentity.email],
     ]) {
-      if (process.env[key] !== undefined && process.env[key] !== value) overriddenGitEnv.push(key);
+      if (sourceEnv[key] !== undefined && sourceEnv[key] !== value) overriddenGitEnv.push(key);
       env[key] = value;
     }
   }
 
-  const mergeAgentBroker = applyMergeAgentBrokerEnv(env, process.env, { workerClass, requiresWorkflowPush });
+  const mergeAgentBroker = applyMergeAgentBrokerEnv(env, sourceEnv, { workerClass, requiresWorkflowPush });
 
   return {
     env,
@@ -390,10 +391,11 @@ function prepareGeminiRemediationStartupEnv({
   gitIdentity = null,
   workerClass = 'gemini',
   requiresWorkflowPush = false,
+  sourceEnv = process.env,
 } = {}) {
-  const { env, stripped } = scrubGeminiOAuthFallbackEnv(process.env);
+  const { env, stripped } = scrubGeminiOAuthFallbackEnv(sourceEnv);
   env.PATH = buildInheritedPath(env.PATH || '');
-  const authPath = resolveGeminiAuthPath();
+  const authPath = resolveGeminiAuthPath(sourceEnv);
   const authHome = resolveGeminiAuthHome(authPath);
   env.HOME = authHome;
   env.GEMINI_HOME = dirname(authPath);
@@ -406,12 +408,12 @@ function prepareGeminiRemediationStartupEnv({
       ['GIT_COMMITTER_NAME', gitIdentity.name],
       ['GIT_COMMITTER_EMAIL', gitIdentity.email],
     ]) {
-      if (process.env[key] !== undefined && process.env[key] !== value) overriddenGitEnv.push(key);
+      if (sourceEnv[key] !== undefined && sourceEnv[key] !== value) overriddenGitEnv.push(key);
       env[key] = value;
     }
   }
 
-  const mergeAgentBroker = applyMergeAgentBrokerEnv(env, process.env, { workerClass, requiresWorkflowPush });
+  const mergeAgentBroker = applyMergeAgentBrokerEnv(env, sourceEnv, { workerClass, requiresWorkflowPush });
 
   return {
     env,
@@ -446,9 +448,10 @@ function prepareCodexRemediationStartupEnv({
   perWorkerKey = null,
   workerClass = 'codex',
   requiresWorkflowPush = false,
+  sourceEnv = process.env,
 } = {}) {
-  const sharedAuthPath = resolveCodexAuthPath();
-  const perWorkerAuth = process.env.CODEX_AUTH_PATH
+  const sharedAuthPath = resolveCodexAuthPath(sourceEnv);
+  const perWorkerAuth = sourceEnv.CODEX_AUTH_PATH
     ? null
     : materializePerWorkerCodexAuth({
         sharedAuthPath,
@@ -461,28 +464,28 @@ function prepareCodexRemediationStartupEnv({
   const strippedEnv = [];
   const overriddenGitEnv = [];
   const policyViolations = [];
-  const scrubbed = scrubOAuthFallbackEnv(process.env);
+  const scrubbed = scrubOAuthFallbackEnv(sourceEnv);
   strippedEnv.push(...scrubbed.stripped);
 
-  if (process.env.CODEX_AUTH_PATH && resolve(process.env.CODEX_AUTH_PATH) !== resolve(authPath)) {
+  if (sourceEnv.CODEX_AUTH_PATH && resolve(sourceEnv.CODEX_AUTH_PATH) !== resolve(authPath)) {
     policyViolations.push(buildCodexStartupPolicyViolation({
       reason: 'inherited CODEX_AUTH_PATH does not satisfy the requested local OAuth contract',
       requestedValue: authPath,
-      resolvedValue: process.env.CODEX_AUTH_PATH,
+      resolvedValue: sourceEnv.CODEX_AUTH_PATH,
     }));
   }
-  if ((process.env.HOME || homedir()) && resolve(process.env.HOME || homedir()) !== resolve(authHome)) {
+  if ((sourceEnv.HOME || homedir()) && resolve(sourceEnv.HOME || homedir()) !== resolve(authHome)) {
     policyViolations.push(buildCodexStartupPolicyViolation({
       reason: 'inherited HOME does not satisfy the requested local OAuth owner contract',
       requestedValue: authHome,
-      resolvedValue: process.env.HOME || homedir(),
+      resolvedValue: sourceEnv.HOME || homedir(),
     }));
   }
-  if (process.env.CODEX_HOME && resolve(process.env.CODEX_HOME) !== resolve(codexHome)) {
+  if (sourceEnv.CODEX_HOME && resolve(sourceEnv.CODEX_HOME) !== resolve(codexHome)) {
     policyViolations.push(buildCodexStartupPolicyViolation({
       reason: 'inherited CODEX_HOME does not satisfy the requested local OAuth contract',
       requestedValue: codexHome,
-      resolvedValue: process.env.CODEX_HOME,
+      resolvedValue: sourceEnv.CODEX_HOME,
     }));
   }
 
@@ -525,7 +528,7 @@ function prepareCodexRemediationStartupEnv({
 
   const env = {
     ...scrubbed.env,
-    PATH: buildInheritedPath(process.env.PATH),
+    PATH: buildInheritedPath(sourceEnv.PATH),
     CODEX_AUTH_PATH: authPath,
     CODEX_HOME: codexHome,
     HOME: authHome,
@@ -541,12 +544,12 @@ function prepareCodexRemediationStartupEnv({
       ['GIT_COMMITTER_NAME', gitIdentity.name],
       ['GIT_COMMITTER_EMAIL', gitIdentity.email],
     ]) {
-      if (process.env[key] !== undefined && process.env[key] !== value) overriddenGitEnv.push(key);
+      if (sourceEnv[key] !== undefined && sourceEnv[key] !== value) overriddenGitEnv.push(key);
       env[key] = value;
     }
   }
 
-  startupEvidence.mergeAgentBroker = applyMergeAgentBrokerEnv(env, process.env, { workerClass, requiresWorkflowPush });
+  startupEvidence.mergeAgentBroker = applyMergeAgentBrokerEnv(env, sourceEnv, { workerClass, requiresWorkflowPush });
   return { authPath, env, startupEvidence };
 }
 
@@ -583,11 +586,12 @@ function spawnClaudeCodeRemediationWorker({
   auditSink = null,
   log = console,
   spawnImpl,
+  sourceEnv = process.env,
   now = () => new Date().toISOString(),
   openSyncImpl = openSync,
   closeSyncImpl = closeSync,
 }) {
-  const claudeCli = resolveClaudeCodeCliPath();
+  const claudeCli = resolveClaudeCodeCliPath(sourceEnv);
   // Physical harness is claude-code; `workerClass` above is the provenance
   // TRAILER class (claude-code-remediation), not the harness — never key identity
   // off it.
@@ -596,6 +600,7 @@ function spawnClaudeCodeRemediationWorker({
     gitIdentity,
     workerClass: 'claude-code',
     requiresWorkflowPush,
+    sourceEnv,
   });
   assertHarnessIdentityMatch({
     workerClass: 'claude-code',
@@ -606,7 +611,6 @@ function spawnClaudeCodeRemediationWorker({
     log,
     auditSink,
     now,
-    requiresWorkflowPush,
   });
   const { env, replyContext } = withReplyContext(baseEnv, {
     replyPath,
@@ -671,16 +675,18 @@ function spawnGeminiRemediationWorker({
   auditSink = null,
   log = console,
   spawnImpl,
+  sourceEnv = process.env,
   now = () => new Date().toISOString(),
   openSyncImpl = openSync,
   closeSyncImpl = closeSync,
 }) {
-  const geminiCli = resolveGeminiCliPath();
+  const geminiCli = resolveGeminiCliPath(sourceEnv);
   const gitIdentity = remediationWorkerGitIdentity('gemini');
   const { env: baseEnv, startupEvidence } = prepareGeminiRemediationStartupEnv({
     gitIdentity,
     workerClass: 'gemini',
     requiresWorkflowPush,
+    sourceEnv,
   });
   assertHarnessIdentityMatch({
     workerClass: 'gemini',
@@ -691,7 +697,6 @@ function spawnGeminiRemediationWorker({
     log,
     auditSink,
     now,
-    requiresWorkflowPush,
   });
   const { env, replyContext } = withReplyContext(baseEnv, {
     replyPath,
@@ -762,11 +767,12 @@ function spawnCodexRemediationWorker({
   log = console,
   jobId = null,
   spawnImpl,
+  sourceEnv = process.env,
   now = () => new Date().toISOString(),
   openSyncImpl = openSync,
   closeSyncImpl = closeSync,
 }) {
-  const codexCli = resolveCodexCliPath();
+  const codexCli = resolveCodexCliPath(sourceEnv);
   // For codex, `workerClass` IS the physical harness class ('codex').
   const gitIdentity = remediationWorkerGitIdentity(workerClass);
   const { env: baseEnv, startupEvidence } = prepareCodexRemediationStartupEnv({
@@ -774,6 +780,7 @@ function spawnCodexRemediationWorker({
     perWorkerKey: jobId || launchRequestId || null,
     workerClass,
     requiresWorkflowPush,
+    sourceEnv,
   });
   assertHarnessIdentityMatch({
     workerClass,
@@ -784,7 +791,6 @@ function spawnCodexRemediationWorker({
     log,
     auditSink,
     now,
-    requiresWorkflowPush,
   });
   const { env, replyContext } = withReplyContext(baseEnv, {
     replyPath,

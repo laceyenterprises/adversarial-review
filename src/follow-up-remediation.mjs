@@ -288,22 +288,6 @@ const DEFAULT_REMEDIATION_MAX_CONCURRENT_JOBS = 1;
 const MAX_REMEDIATION_MAX_CONCURRENT_JOBS = 8;
 const DEFAULT_DEPLOY_CHECKOUT = '/Users/airlock/agent-os';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const HQ_REMEDIATION_WORKSPACE_SEGMENTS = ['adversarial-review', 'follow-up-workspaces'];
-const WORKFLOW_PUSH_ESCALATION_ENV_KEYS = Object.freeze([
-  'ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN',
-  'ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS',
-  'ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY',
-]);
-
-function snapshotEnvKeys(env, keys) {
-  return Object.fromEntries(keys.map((key) => [key, env[key]]));
-}
-
-function restoreEnvKeys(env, snapshot) {
-  for (const [key, value] of Object.entries(snapshot || {})) {
-    if (value === undefined) delete env[key];
-    else env[key] = value;
-  }
-}
 
 function logRoundBudgetDecision(log, {
   riskClass,
@@ -691,8 +675,8 @@ function createRemediationRuntime({
         requiresWorkflowPush: Boolean(request.requiresWorkflowPush),
         enforceHarnessIdentity,
         auditSink: harnessIdentityAuditSink,
-        requiresWorkflowPush: Boolean(request.requiresWorkflowPush),
         spawnImpl,
+        sourceEnv: env,
         now,
       });
       return createLocalRemediationHandle({
@@ -3305,18 +3289,13 @@ async function consumeNextFollowUpJob({
   let spawnAttempted = false;
   let spawnedWorker = null;
   let workflowPushPreflight = null;
-  let workflowPushEnvSnapshot = null;
-  const restoreWorkflowPushEnvIfCaptured = () => {
-    if (!workflowPushEnvSnapshot) return;
-    restoreEnvKeys(process.env, workflowPushEnvSnapshot);
-    workflowPushEnvSnapshot = null;
-  };
+  const jobEnv = { ...process.env };
 
   try {
     workerClass = pickRemediationWorkerClass(claimed.job);
     const remediationMode = resolveRemediationRuntimeMode(claimed.job, {
       healthRouter,
-      env: process.env,
+      env: jobEnv,
     });
     const remediationDispatchPath = remediationMode === 'os' ? 'hq' : 'bare';
     claimed.job = persistRemediationDispatchPath({
@@ -3385,11 +3364,10 @@ async function consumeNextFollowUpJob({
       };
     }
 
-    workflowPushEnvSnapshot = snapshotEnvKeys(process.env, WORKFLOW_PUSH_ESCALATION_ENV_KEYS);
     workflowPushPreflight = await assertWorkflowPushCapabilityForJob({
       job: claimed.job,
       execFileImpl,
-      env: process.env,
+      env: jobEnv,
       deliverAlertImpl,
       log,
     });
@@ -3404,7 +3382,7 @@ async function consumeNextFollowUpJob({
       await assertRemediationWorkerOAuth(workerClass, { execFileImpl });
     }
     const shouldApplyOssReadinessBeforeSpawn = jobHasOssReadinessAuditFailure(claimed.job);
-    const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env: process.env });
+    const workspaceRootDir = resolveRemediationWorkspaceRoot({ rootDir, env: jobEnv });
     const artifactWorkspaceDir = join(workspaceRootDir, claimed.job.jobId);
     let workspaceDir = artifactWorkspaceDir;
     let workspaceState = {
@@ -3443,7 +3421,7 @@ async function consumeNextFollowUpJob({
         job: claimed.job,
         workspaceDir,
         workerTrailerClass: remediationWorkerTrailerClass(workerClass),
-        env: process.env,
+        env: jobEnv,
         execFileImpl,
         now,
       });
@@ -3453,7 +3431,7 @@ async function consumeNextFollowUpJob({
           const push = await pushOssReadinessRemediationCommit({
             workspaceDir,
             branch: claimed.job.branch,
-            env: process.env,
+            env: jobEnv,
             execFileImpl,
           });
           ossReadinessApply.push = push;
@@ -3482,7 +3460,7 @@ async function consumeNextFollowUpJob({
         }
       }
     }
-    const replyTarget = resolveRemediationReplyTarget(process.env, { requireExists: true });
+    const replyTarget = resolveRemediationReplyTarget(jobEnv, { requireExists: true });
     const hqRoot = replyTarget.mode === 'hq' ? replyTarget.root : null;
     const replyStorageKey = resolveReplyStorageKey(claimed.job);
     if (claimed.job.replyStorageKey !== replyStorageKey) {
@@ -3540,7 +3518,6 @@ async function consumeNextFollowUpJob({
       log,
     });
     if (prTerminalCheck.action !== 'continue') {
-      restoreWorkflowPushEnvIfCaptured();
       return {
         consumed: false,
         reason: prTerminalCheck.reason,
@@ -3561,7 +3538,7 @@ async function consumeNextFollowUpJob({
     const remediationRuntime = createRemediationRuntime({
       execFileImpl,
       spawnImpl,
-      env: process.env,
+      env: jobEnv,
       now,
     });
     const runHandle = await remediationRuntime.run({
@@ -3581,7 +3558,6 @@ async function consumeNextFollowUpJob({
       jobId: claimed.job.jobId,
       requiresWorkflowPush: Boolean(workflowPushPreflight?.workflowTouch?.touches),
     });
-    restoreWorkflowPushEnvIfCaptured();
     const worker = runHandle.worker;
     spawnedWorker = worker;
 
@@ -3637,7 +3613,6 @@ async function consumeNextFollowUpJob({
       jobPath: updated.jobPath,
     };
   } catch (err) {
-    restoreWorkflowPushEnvIfCaptured();
     if (err.isWorkflowPushPreflightTransientError) {
       const requeuedAt = now();
       const requeuedAtMs = Date.parse(requeuedAt);

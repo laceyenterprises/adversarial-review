@@ -1674,8 +1674,10 @@ test('workflow push preflight rethrows exhausted transient merge-agent broker mi
       log: { log() {}, warn() {}, error() {} },
     }),
     (err) => {
-      assert.notEqual(err.name, 'WorkflowPushCapabilityError');
-      assert.match(err.message, /HTTP 503/);
+      assert.equal(err.name, 'WorkflowPushPreflightTransientError');
+      assert.equal(err.isWorkflowPushPreflightTransientError, true);
+      assert.equal(err.code, 'workflow-push-merge-agent-broker-unavailable');
+      assert.match(err.cause?.message || '', /HTTP 503/);
       return true;
     },
   );
@@ -1782,6 +1784,88 @@ test('workflow changed-file lookup preflight outage requeues instead of spawning
   assert.equal(pendingJob.remediationPlan.currentRound, 0);
   assert.equal(pendingJob.lastWorkflowPushPreflightFailure.code, 'workflow-push-changed-files-unavailable');
   assert.equal(pendingJob.lastWorkflowPushPreflightFailure.recoverable, true);
+});
+
+test('workflow merge-agent broker outage requeues instead of spawning or terminalizing', async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const secretPath = path.join(rootDir, 'broker-secret');
+  writeFileSync(secretPath, 'shared-secret\n', 'utf8');
+  const created = createPendingRemediationJob(rootDir, {
+    changedFiles: ['.github/workflows/unit-tests.yml'],
+  });
+  const spawnCalls = [];
+  const alerts = [];
+  const logs = [];
+  const original = {
+    GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+    OAUTH_BROKER_URL: process.env.OAUTH_BROKER_URL,
+    OAUTH_BROKER_SHARED_SECRET_FILE: process.env.OAUTH_BROKER_SHARED_SECRET_FILE,
+    ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT: process.env.ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT,
+    ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN: process.env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN,
+    ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY: process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY,
+    ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS: process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS,
+  };
+  const originalFetch = globalThis.fetch;
+  process.env.GITHUB_TOKEN = 'gho_repo_without_workflow';
+  process.env.OAUTH_BROKER_URL = 'http://broker.invalid';
+  process.env.OAUTH_BROKER_SHARED_SECRET_FILE = secretPath;
+  delete process.env.ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT;
+  delete process.env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN;
+  delete process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY;
+  delete process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS;
+  globalThis.fetch = async () => ({ ok: false, status: 503, async json() { return {}; } });
+  try {
+    const result = await withOAuthTestEnv(rootDir, () => consumeFollowUpJobsUntilCapacity({
+      rootDir,
+      maxConcurrent: 1,
+      promptTemplate: 'You are a remediation worker.',
+      now: () => '2026-07-04T10:00:00.000Z',
+      resolvePRLifecycleImpl: async () => null,
+      deliverAlertImpl: async (text, structured) => alerts.push({ text, structured }),
+      log: {
+        log: (line) => logs.push(line),
+        warn: (line) => logs.push(line),
+        error: (line) => logs.push(line),
+      },
+      execFileImpl: async (command, args) => {
+        if (command === 'gh' && args[0] === 'api' && args[1] === '/' && args.includes('--include')) {
+          return {
+            stdout: 'HTTP/2 200\nx-oauth-scopes: admin:public_key, gist, read:org, repo\n',
+            stderr: '',
+          };
+        }
+        throw new Error(`unexpected command after workflow broker preflight outage: ${command} ${args.join(' ')}`);
+      },
+      spawnImpl: (...args) => {
+        spawnCalls.push(args);
+        return { pid: 9999, unref() {} };
+      },
+    }));
+
+    assert.equal(result.spawned, 0);
+    assert.equal(spawnCalls.length, 0);
+    assert.equal(alerts.length, 0);
+    assert.equal(result.results[0].reason, 'workflow-push-merge-agent-broker-unavailable');
+    assert.match(logs.join('\n'), /workflow-push preflight transient/);
+    assert.equal(process.env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN, undefined);
+    assert.equal(process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY, undefined);
+    assert.equal(process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS, undefined);
+
+    const pendingDir = getFollowUpJobDir(rootDir, 'pending');
+    const pendingFiles = readdirSync(pendingDir).filter((name) => name.endsWith('.json'));
+    assert.equal(pendingFiles.length, 1);
+    const pendingJob = JSON.parse(readFileSync(path.join(pendingDir, pendingFiles[0]), 'utf8'));
+    assert.equal(pendingJob.status, 'pending');
+    assert.equal(pendingJob.jobId, created.job.jobId);
+    assert.equal(pendingJob.lastWorkflowPushPreflightFailure.code, 'workflow-push-merge-agent-broker-unavailable');
+    assert.equal(pendingJob.lastWorkflowPushPreflightFailure.recoverable, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });
 
 test('workflow-touching remediation without workflow push capability blocks before spawn, alerts, and marks needs-operator', async () => {
@@ -1981,12 +2065,9 @@ test('workflow push preflight escalates workflow-file remediations to merge-agen
   assert.equal(result.capability.source, 'merge-agent-broker');
   assert.equal(result.capability.identity, 'lacey-merge-agent[bot]');
   assert.equal(result.capability.detection, 'escalated');
-  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN, 'ghs_merge_agent_workflow');
-  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY, 'lacey-merge-agent[bot]');
-  assert.deepEqual(JSON.parse(env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS), {
-    workflows: 'write',
-    contents: 'write',
-  });
+  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN, undefined);
+  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY, undefined);
+  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS, undefined);
   assert.match(logs.join('\n'), /source=merge-agent-broker .*detection=escalated/);
 });
 
@@ -3080,16 +3161,33 @@ test('remediation runtime local mode binds the default execFile implementation a
   writeFileSync(promptPath, 'fix it.\n', 'utf8');
   writeFileSync(authPath, JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'a', refresh_token: 'b' } }), 'utf8');
 
-  const prev = { HOME: process.env.HOME, CODEX_HOME: process.env.CODEX_HOME, CODEX_AUTH_PATH: process.env.CODEX_AUTH_PATH };
-  process.env.HOME = workspaceDir;
-  process.env.CODEX_HOME = codexHome;
-  process.env.CODEX_AUTH_PATH = authPath;
+  const runtimeEnv = {
+    ...process.env,
+    HOME: workspaceDir,
+    CODEX_HOME: codexHome,
+    CODEX_AUTH_PATH: authPath,
+    CODEX_CLI_PATH: path.join(workspaceDir, 'job-codex'),
+  };
+  delete runtimeEnv.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN;
+  delete runtimeEnv.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY;
+  delete runtimeEnv.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS;
+  const prev = {
+    ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN: process.env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN,
+    ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY: process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY,
+    ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS: process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS,
+  };
+  process.env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN = 'global-elevated-token';
+  process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY = 'lacey-merge-agent[bot]';
+  process.env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS = '{"workflows":"write","contents":"write"}';
 
   let invokedCli;
+  let invokedEnv;
   try {
     const handle = await createRemediationRuntime({
-      spawnImpl: (cmd) => {
+      env: runtimeEnv,
+      spawnImpl: (cmd, args, options) => {
         invokedCli = cmd;
+        invokedEnv = options.env;
         return { pid: 111, unref() {} };
       },
     }).run({
@@ -3101,13 +3199,15 @@ test('remediation runtime local mode binds the default execFile implementation a
     assert.equal(handle.worker.model, 'codex');
     assert.equal(typeof handle.cancel, 'function');
   } finally {
-    for (const k of ['HOME', 'CODEX_HOME', 'CODEX_AUTH_PATH']) {
-      if (prev[k] === undefined) delete process.env[k];
-      else process.env[k] = prev[k];
+    for (const [key, value] of Object.entries(prev)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   }
-  // The codex CLI is what was invoked, not claude.
-  assert.match(invokedCli, /codex/);
+  assert.equal(invokedCli, path.join(workspaceDir, 'job-codex'));
+  assert.equal(invokedEnv.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN, undefined);
+  assert.equal(invokedEnv.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY, undefined);
+  assert.equal(invokedEnv.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS, undefined);
 });
 
 test('remediation runtime local mode preserves the claude-code-remediation provenance class', async () => {
@@ -4732,7 +4832,7 @@ test('applyMergeAgentBrokerEnv routes workflow-file worker pushes through merge-
   assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID, '3977955');
   assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID, '138360282');
   assert.equal(evidence.provider, 'github-app-merge-agent');
-  assert.equal(evidence.providerSource, 'workflow-push-escalation');
+  assert.equal(evidence.providerSource, 'workflow-push-merge-agent');
   assert.equal(evidence.requiresWorkflowPush, true);
   assert.equal(evidence.fellBack, false);
   assert.equal(evidence.expectedAppId, '3977955');
@@ -4742,7 +4842,7 @@ test('applyMergeAgentBrokerEnv routes workflow-file worker pushes through merge-
 test('remediationWorkerPushProvider routes workflow-file signal to merge-agent', () => {
   const resolved = remediationWorkerPushProvider('claude-code', {}, { requiresWorkflowPush: true });
   assert.equal(resolved.provider, 'github-app-merge-agent');
-  assert.equal(resolved.source, 'workflow-push-escalation');
+  assert.equal(resolved.source, 'workflow-push-merge-agent');
   assert.equal(resolved.requiresWorkflowPush, true);
   assert.equal(resolved.fellBack, false);
 });

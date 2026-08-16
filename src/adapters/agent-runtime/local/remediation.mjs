@@ -192,7 +192,6 @@ function applyMergeAgentBrokerEnv(
     fellBack: resolvedProvider.fellBack,
     requiresWorkflowPush: Boolean(resolvedProvider.requiresWorkflowPush),
     fallbackWarning: resolvedProvider.warning,
-    requiresWorkflowPush: Boolean(requiresWorkflowPush),
     expectedAppId: expectedAppId || null,
     expectedInstallationId: expectedInstallationId || null,
     sharedSecretFile: sourceEnv.OAUTH_BROKER_SHARED_SECRET_FILE || null,
@@ -340,7 +339,7 @@ function prepareClaudeCodeRemediationStartupEnv({
   sourceEnv = process.env,
 } = {}) {
   const { env, stripped } = scrubOAuthFallbackEnv(sourceEnv);
-  env.PATH = buildInheritedPath(env.PATH || '');
+  env.PATH = buildInheritedPath(env.PATH);
 
   // Stamp the physical-harness git identity so a claude-code remediation commits
   // (and, with the broker on, pushes) as the claude harness — not under whatever
@@ -394,7 +393,7 @@ function prepareGeminiRemediationStartupEnv({
   sourceEnv = process.env,
 } = {}) {
   const { env, stripped } = scrubGeminiOAuthFallbackEnv(sourceEnv);
-  env.PATH = buildInheritedPath(env.PATH || '');
+  env.PATH = buildInheritedPath(env.PATH);
   const authPath = resolveGeminiAuthPath(sourceEnv);
   const authHome = resolveGeminiAuthHome(authPath);
   env.HOME = authHome;
@@ -608,6 +607,7 @@ function spawnClaudeCodeRemediationWorker({
     brokerEvidence: startupEvidence.mergeAgentBroker,
     enforce: enforceHarnessIdentity,
     requiresWorkflowPush,
+    env: sourceEnv,
     log,
     auditSink,
     now,
@@ -694,6 +694,7 @@ function spawnGeminiRemediationWorker({
     brokerEvidence: startupEvidence.mergeAgentBroker,
     enforce: enforceHarnessIdentity,
     requiresWorkflowPush,
+    env: sourceEnv,
     log,
     auditSink,
     now,
@@ -788,6 +789,7 @@ function spawnCodexRemediationWorker({
     brokerEvidence: startupEvidence.mergeAgentBroker,
     enforce: enforceHarnessIdentity,
     requiresWorkflowPush,
+    env: sourceEnv,
     log,
     auditSink,
     now,

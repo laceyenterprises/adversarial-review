@@ -2675,6 +2675,21 @@ test('buildInheritedPath prepends required system directories without dropping e
   assert.match(inherited, /\/custom\/bin/);
 });
 
+test('prepareClaudeCodeRemediationStartupEnv and prepareGeminiRemediationStartupEnv inherit ambient PATH when source PATH is absent', () => {
+  const previousPath = process.env.PATH;
+  process.env.PATH = '/ambient/bin';
+  try {
+    const claude = prepareClaudeCodeRemediationStartupEnv({ sourceEnv: {} });
+    const gemini = prepareGeminiRemediationStartupEnv({ sourceEnv: { HOME: '/tmp/gemini-home' } });
+
+    assert.match(claude.env.PATH, /\/ambient\/bin/);
+    assert.match(gemini.env.PATH, /\/ambient\/bin/);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
+});
+
 // ── worker-provenance commit-msg hook ──────────────────────────────────────
 
 test('installWorkerProvenanceHook writes an executable hook to .git/hooks/commit-msg', () => {
@@ -4785,7 +4800,6 @@ test('applyMergeAgentBrokerEnv keys the push provider off the physical harness a
     fellBack: false,
     requiresWorkflowPush: false,
     fallbackWarning: null,
-    requiresWorkflowPush: false,
     expectedAppId: '12345',
     expectedInstallationId: '67890',
     sharedSecretFile: '/tmp/broker-secret',
@@ -4837,6 +4851,18 @@ test('applyMergeAgentBrokerEnv routes workflow-file worker pushes through merge-
   assert.equal(evidence.fellBack, false);
   assert.equal(evidence.expectedAppId, '3977955');
   assert.equal(evidence.expectedInstallationId, '138360282');
+});
+
+test('applyMergeAgentBrokerEnv evidence preserves workflow-push requirement resolved from source env', () => {
+  const env = {};
+  const evidence = applyMergeAgentBrokerEnv(env, {
+    MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+    ADVERSARIAL_REMEDIATION_WORKER_REQUIRES_WORKFLOW_PUSH: 'true',
+  }, { workerClass: 'codex' });
+
+  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_PROVIDER, 'github-app-merge-agent');
+  assert.equal(evidence.providerSource, 'workflow-push-merge-agent');
+  assert.equal(evidence.requiresWorkflowPush, true);
 });
 
 test('remediationWorkerPushProvider routes workflow-file signal to merge-agent', () => {
@@ -5108,6 +5134,91 @@ test('assertHarnessIdentityMatch validates push provider against the broker sour
   });
   assert.equal(result.match, true);
   assert.deepEqual(result.mismatches, []);
+});
+
+test('spawn remediation workers enforce harness identity against the isolated source env', () => {
+  const workspaceDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
+  const promptPath = path.join(workspaceDir, 'prompt.md');
+  const outputPath = path.join(workspaceDir, 'last-message.md');
+  const logPath = path.join(workspaceDir, 'worker.log');
+  const codexHome = path.join(workspaceDir, '.codex');
+  const codexAuthPath = path.join(codexHome, 'auth.json');
+  mkdirSync(codexHome, { recursive: true });
+  writeFileSync(promptPath, 'remediate\n', 'utf8');
+  writeFileSync(codexAuthPath, JSON.stringify({
+    auth_mode: 'chatgpt',
+    tokens: { access_token: 'access', refresh_token: 'refresh' },
+  }), 'utf8');
+
+  const previous = {
+    OAUTH_BROKER_REMEDIATION_CLAUDE_CODE_PROVIDER: process.env.OAUTH_BROKER_REMEDIATION_CLAUDE_CODE_PROVIDER,
+    OAUTH_BROKER_REMEDIATION_GEMINI_PROVIDER: process.env.OAUTH_BROKER_REMEDIATION_GEMINI_PROVIDER,
+    OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER: process.env.OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER,
+  };
+  process.env.OAUTH_BROKER_REMEDIATION_CLAUDE_CODE_PROVIDER = 'ambient-claude-provider';
+  process.env.OAUTH_BROKER_REMEDIATION_GEMINI_PROVIDER = 'ambient-gemini-provider';
+  process.env.OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER = 'ambient-codex-provider';
+
+  const spawned = [];
+  const spawnImpl = (_cmd, _args, opts) => {
+    spawned.push(opts.env.OAUTH_BROKER_MERGE_AGENT_PROVIDER);
+    return { pid: 8123 + spawned.length, unref() {} };
+  };
+
+  try {
+    spawnClaudeCodeRemediationWorker({
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      ...testReplyContext(),
+      sourceEnv: {
+        MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+        OAUTH_BROKER_REMEDIATION_CLAUDE_CODE_PROVIDER: 'source-claude-provider',
+      },
+      spawnImpl,
+    });
+    spawnGeminiRemediationWorker({
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      ...testReplyContext(),
+      sourceEnv: {
+        HOME: workspaceDir,
+        MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+        OAUTH_BROKER_REMEDIATION_GEMINI_PROVIDER: 'source-gemini-provider',
+      },
+      spawnImpl,
+    });
+    spawnCodexRemediationWorker({
+      workspaceDir,
+      promptPath,
+      outputPath,
+      logPath,
+      ...testReplyContext(),
+      jobId: 'source-env-job',
+      sourceEnv: {
+        HOME: workspaceDir,
+        CODEX_HOME: codexHome,
+        CODEX_AUTH_PATH: codexAuthPath,
+        MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+        OAUTH_BROKER_REMEDIATION_CODEX_PROVIDER: 'source-codex-provider',
+      },
+      spawnImpl,
+    });
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+
+  assert.deepEqual(spawned, [
+    'source-claude-provider',
+    'source-gemini-provider',
+    'source-codex-provider',
+  ]);
 });
 
 test('assertHarnessIdentityMatch fails closed on a synthetic identity mismatch when enforcing', () => {

@@ -102,6 +102,25 @@
         <string>true</string>
         <key>GEMINI_REVIEWER_AUTH_VIA_BROKER</key>
         <string>true</string>
+        <!-- FOLLOW-UP PUSH IDENTITY (2026-08-16).
+             The three reviewer broker flags above were enabled; this one was not,
+             so reviewer-broker-refresh returned 'broker-mode-disabled' and
+             remediation fell through to ambient gh auth. Ambient here is a
+             metadata=read App token, so workflow-file remediation failed preflight
+             with 'push token workflow capability ... workflow=no', exhausted its
+             retries, and escalated as NOT CONVERGED.
+             laceyenterprises/finch#1 was the first PR whose blocking finding lived
+             in .github/workflows/, which is why this surfaced only now.
+             Pinned to the app/installation the broker vends for
+             github-app-merge-agent, matching the reviewer pinning convention
+             above, so a broker misconfiguration cannot silently vend a different
+             push identity. -->
+        <key>FOLLOW_UP_GH_AUTH_VIA_BROKER</key>
+        <string>true</string>
+        <key>OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID</key>
+        <string>3978009</string>
+        <key>OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID</key>
+        <string>138360282</string>
         <key>OAUTH_BROKER_SHARED_SECRET_FILE</key>
         <string>/Users/airlock/agent-os/.secrets/local/oauth-broker-shared-secret</string>
         <key>OAUTH_BROKER_CLAUDE_REVIEWER_EXPECTED_APP_ID</key>

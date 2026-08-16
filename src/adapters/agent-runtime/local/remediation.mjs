@@ -121,7 +121,7 @@ function resolveHarnessExpectedPin(sourceEnv, workerClass, resolvedProvider, kin
     ? String(sourceEnv[`OAUTH_BROKER_REMEDIATION_${suffix}_EXPECTED_${kind}`] || '').trim()
     : '';
   if (perHarness) return perHarness;
-  if (resolvedProvider.source === 'merge-agent-fallback') {
+  if (resolvedProvider.source === 'merge-agent-fallback' || resolvedProvider.source === 'workflow-push-merge-agent') {
     return String(sourceEnv[`OAUTH_BROKER_MERGE_AGENT_EXPECTED_${kind}`] || '').trim() || '';
   }
   return '';
@@ -135,20 +135,25 @@ function resolveHarnessExpectedPin(sourceEnv, workerClass, resolvedProvider, kin
 // never a hardcoded merge-agent provider. A harness with no known push-capable App
 // falls back to merge-agent LOUDLY (warn + evidence.fellBack) so the push never
 // silently fails.
-function applyMergeAgentBrokerEnv(env, sourceEnv = process.env, { workerClass = null, log = console } = {}) {
+function applyMergeAgentBrokerEnv(env, sourceEnv = process.env, { workerClass = null, log = console, requiresWorkflowPush = false } = {}) {
   const parsedFlag = parseMergeAgentBrokerFlag(sourceEnv.MERGE_AGENT_AUTH_VIA_BROKER);
+  const workflowPushEscalationEnabled = requiresWorkflowPush
+    && String(sourceEnv.ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT || '').trim().toLowerCase() !== 'false';
+  const brokerEnabled = parsedFlag.enabled || workflowPushEscalationEnabled;
   const evidence = {
-    enabled: parsedFlag.enabled,
+    enabled: brokerEnabled,
     flagValue: parsedFlag.raw || null,
     warning: parsedFlag.recognized
       ? null
-      : 'MERGE_AGENT_AUTH_VIA_BROKER value not recognized; broker env not propagated',
+      : (workflowPushEscalationEnabled
+          ? 'MERGE_AGENT_AUTH_VIA_BROKER value not recognized; workflow-push broker env forced by workflow escalation'
+          : 'MERGE_AGENT_AUTH_VIA_BROKER value not recognized; broker env not propagated'),
   };
-  if (!parsedFlag.enabled) return evidence;
+  if (!brokerEnabled) return evidence;
 
   const brokerUrl = sourceEnv.OAUTH_BROKER_URL || DEFAULT_OAUTH_BROKER_URL;
   const standbyUrl = sourceEnv.OAUTH_BROKER_STANDBY_URL || DEFAULT_OAUTH_BROKER_STANDBY_URL;
-  const resolvedProvider = remediationWorkerPushProvider(workerClass, sourceEnv);
+  const resolvedProvider = remediationWorkerPushProvider(workerClass, sourceEnv, { requiresWorkflowPush });
   const provider = resolvedProvider.provider;
   env.MERGE_AGENT_AUTH_VIA_BROKER = 'true';
   env.OAUTH_BROKER_URL = brokerUrl;
@@ -182,6 +187,7 @@ function applyMergeAgentBrokerEnv(env, sourceEnv = process.env, { workerClass = 
     harnessIdentityHonored: resolvedProvider.honored,
     fellBack: resolvedProvider.fellBack,
     fallbackWarning: resolvedProvider.warning,
+    requiresWorkflowPush: Boolean(requiresWorkflowPush),
     expectedAppId: expectedAppId || null,
     expectedInstallationId: expectedInstallationId || null,
     sharedSecretFile: sourceEnv.OAUTH_BROKER_SHARED_SECRET_FILE || null,
@@ -219,6 +225,7 @@ function assertHarnessIdentityMatch({
   auditSink = null,
   now = () => new Date().toISOString(),
   env = process.env,
+  requiresWorkflowPush = false,
 } = {}) {
   const mismatches = [];
   let expectedIdentity = null;
@@ -242,7 +249,7 @@ function assertHarnessIdentityMatch({
     });
   }
   if (brokerEvidence && brokerEvidence.enabled) {
-    const expectedProvider = remediationWorkerPushProvider(workerClass, env);
+    const expectedProvider = remediationWorkerPushProvider(workerClass, env, { requiresWorkflowPush });
     if (!brokerEvidence.fellBack && brokerEvidence.provider !== expectedProvider.provider) {
       mismatches.push({
         kind: 'push-provider',
@@ -321,7 +328,7 @@ function scrubGeminiOAuthFallbackEnv(sourceEnv = process.env) {
   return { env, stripped };
 }
 
-function prepareClaudeCodeRemediationStartupEnv({ gitIdentity = null, workerClass = 'claude-code' } = {}) {
+function prepareClaudeCodeRemediationStartupEnv({ gitIdentity = null, workerClass = 'claude-code', requiresWorkflowPush = false } = {}) {
   const { env, stripped } = scrubOAuthFallbackEnv(process.env);
   env.PATH = buildInheritedPath(env.PATH || '');
 
@@ -343,7 +350,7 @@ function prepareClaudeCodeRemediationStartupEnv({ gitIdentity = null, workerClas
     }
   }
 
-  const mergeAgentBroker = applyMergeAgentBrokerEnv(env, process.env, { workerClass });
+  const mergeAgentBroker = applyMergeAgentBrokerEnv(env, process.env, { workerClass, requiresWorkflowPush });
 
   return {
     env,
@@ -370,7 +377,7 @@ function prepareClaudeCodeRemediationStartupEnv({ gitIdentity = null, workerClas
   };
 }
 
-function prepareGeminiRemediationStartupEnv({ gitIdentity = null, workerClass = 'gemini' } = {}) {
+function prepareGeminiRemediationStartupEnv({ gitIdentity = null, workerClass = 'gemini', requiresWorkflowPush = false } = {}) {
   const { env, stripped } = scrubGeminiOAuthFallbackEnv(process.env);
   env.PATH = buildInheritedPath(env.PATH || '');
   const authPath = resolveGeminiAuthPath();
@@ -391,7 +398,7 @@ function prepareGeminiRemediationStartupEnv({ gitIdentity = null, workerClass = 
     }
   }
 
-  const mergeAgentBroker = applyMergeAgentBrokerEnv(env, process.env, { workerClass });
+  const mergeAgentBroker = applyMergeAgentBrokerEnv(env, process.env, { workerClass, requiresWorkflowPush });
 
   return {
     env,
@@ -421,7 +428,7 @@ function prepareGeminiRemediationStartupEnv({ gitIdentity = null, workerClass = 
   };
 }
 
-function prepareCodexRemediationStartupEnv({ gitIdentity = null, perWorkerKey = null, workerClass = 'codex' } = {}) {
+function prepareCodexRemediationStartupEnv({ gitIdentity = null, perWorkerKey = null, workerClass = 'codex', requiresWorkflowPush = false } = {}) {
   const sharedAuthPath = resolveCodexAuthPath();
   const perWorkerAuth = process.env.CODEX_AUTH_PATH
     ? null
@@ -521,7 +528,7 @@ function prepareCodexRemediationStartupEnv({ gitIdentity = null, perWorkerKey = 
     }
   }
 
-  startupEvidence.mergeAgentBroker = applyMergeAgentBrokerEnv(env, process.env, { workerClass });
+  startupEvidence.mergeAgentBroker = applyMergeAgentBrokerEnv(env, process.env, { workerClass, requiresWorkflowPush });
   return { authPath, env, startupEvidence };
 }
 
@@ -553,6 +560,7 @@ function spawnClaudeCodeRemediationWorker({
   launchRequestId,
   jobId = null,
   workerClass = 'claude-code-remediation',
+  requiresWorkflowPush = false,
   enforceHarnessIdentity = true,
   auditSink = null,
   log = console,
@@ -569,6 +577,7 @@ function spawnClaudeCodeRemediationWorker({
   const { env: baseEnv, startupEvidence } = prepareClaudeCodeRemediationStartupEnv({
     gitIdentity,
     workerClass: 'claude-code',
+    requiresWorkflowPush,
   });
   assertHarnessIdentityMatch({
     workerClass: 'claude-code',
@@ -578,6 +587,7 @@ function spawnClaudeCodeRemediationWorker({
     log,
     auditSink,
     now,
+    requiresWorkflowPush,
   });
   const { env, replyContext } = withReplyContext(baseEnv, {
     replyPath,
@@ -637,6 +647,7 @@ function spawnGeminiRemediationWorker({
   hqRoot,
   launchRequestId,
   jobId = null,
+  requiresWorkflowPush = false,
   enforceHarnessIdentity = true,
   auditSink = null,
   log = console,
@@ -650,6 +661,7 @@ function spawnGeminiRemediationWorker({
   const { env: baseEnv, startupEvidence } = prepareGeminiRemediationStartupEnv({
     gitIdentity,
     workerClass: 'gemini',
+    requiresWorkflowPush,
   });
   assertHarnessIdentityMatch({
     workerClass: 'gemini',
@@ -659,6 +671,7 @@ function spawnGeminiRemediationWorker({
     log,
     auditSink,
     now,
+    requiresWorkflowPush,
   });
   const { env, replyContext } = withReplyContext(baseEnv, {
     replyPath,
@@ -723,6 +736,7 @@ function spawnCodexRemediationWorker({
   hqRoot,
   launchRequestId,
   workerClass = 'codex',
+  requiresWorkflowPush = false,
   enforceHarnessIdentity = true,
   auditSink = null,
   log = console,
@@ -739,6 +753,7 @@ function spawnCodexRemediationWorker({
     gitIdentity,
     perWorkerKey: jobId || launchRequestId || null,
     workerClass,
+    requiresWorkflowPush,
   });
   assertHarnessIdentityMatch({
     workerClass,
@@ -748,6 +763,7 @@ function spawnCodexRemediationWorker({
     log,
     auditSink,
     now,
+    requiresWorkflowPush,
   });
   const { env, replyContext } = withReplyContext(baseEnv, {
     replyPath,

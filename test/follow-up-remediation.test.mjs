@@ -1926,6 +1926,168 @@ test('workflow push capability alert gives configured-token recovery instead of 
   }
 });
 
+test('workflow push preflight escalates workflow-file remediations to merge-agent broker token', async () => {
+  const env = {
+    OAUTH_BROKER_URL: 'http://broker.test',
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/secret',
+    GITHUB_TOKEN: 'ambient_without_workflow',
+  };
+  let brokerCalls = 0;
+  const logs = [];
+  const result = await assertWorkflowPushCapabilityForJob({
+    job: {
+      repo: 'laceyenterprises/finch',
+      prNumber: 1,
+      jobId: 'wfma-01',
+      changedFiles: ['.github/workflows/ci.yml'],
+    },
+    env,
+    retryDelaysMs: [],
+    readFileImpl: () => 'shared-secret',
+    fetchImpl: async (url, options = {}) => {
+      brokerCalls += 1;
+      assert.equal(url, 'http://broker.test/token?provider=github-app-merge-agent');
+      assert.equal(options.headers.Authorization, 'Bearer shared-secret');
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            provider: 'github-app-merge-agent',
+            access_token: 'ghs_merge_agent_workflow',
+            metadata: {},
+            expires_at: '2026-08-16T20:00:00.000Z',
+          };
+        },
+      };
+    },
+    execFileImpl: async (command, args) => {
+      assert.equal(command, 'gh');
+      if (args[0] === 'api' && args[1] === '/' && args.includes('--include')) {
+        return { stdout: 'HTTP/2 200\nx-oauth-scopes: repo\n', stderr: '' };
+      }
+      throw new Error(`unexpected gh probe: ${args.join(' ')}`);
+    },
+    log: {
+      log: (line) => logs.push(line),
+      warn: (line) => logs.push(line),
+      error: (line) => logs.push(line),
+    },
+  });
+
+  assert.equal(brokerCalls, 1);
+  assert.equal(result.gated, false);
+  assert.equal(result.escalated, true);
+  assert.equal(result.capability.source, 'merge-agent-broker');
+  assert.equal(result.capability.identity, 'lacey-merge-agent[bot]');
+  assert.equal(result.capability.detection, 'escalated');
+  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN, 'ghs_merge_agent_workflow');
+  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_IDENTITY, 'lacey-merge-agent[bot]');
+  assert.deepEqual(JSON.parse(env.ADVERSARIAL_REMEDIATION_PUSH_TOKEN_PERMISSIONS), {
+    workflows: 'write',
+    contents: 'write',
+  });
+  assert.match(logs.join('\n'), /source=merge-agent-broker .*detection=escalated/);
+});
+
+test('workflow push preflight fails closed when merge-agent broker mint fails', async () => {
+  const env = {
+    OAUTH_BROKER_URL: 'http://broker.test',
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/secret',
+    GITHUB_TOKEN: 'ambient_without_workflow',
+  };
+  let brokerCalls = 0;
+  await assert.rejects(
+    () => assertWorkflowPushCapabilityForJob({
+      job: {
+        repo: 'laceyenterprises/finch',
+        prNumber: 1,
+        jobId: 'wfma-01',
+        changedFiles: ['.github/workflows/ci.yml'],
+      },
+      env,
+      retryDelaysMs: [],
+      deliverAlertImpl: async () => {},
+      readFileImpl: () => 'shared-secret',
+      fetchImpl: async () => {
+        brokerCalls += 1;
+        throw new Error('broker down');
+      },
+      execFileImpl: async (command, args) => {
+        assert.equal(command, 'gh');
+        if (args[0] === 'api' && args[1] === '/' && args.includes('--include')) {
+          return { stdout: 'HTTP/2 200\nx-oauth-scopes: repo\n', stderr: '' };
+        }
+        throw new Error(`unexpected gh probe: ${args.join(' ')}`);
+      },
+    }),
+    (err) => err.name === 'WorkflowPushCapabilityError',
+  );
+  assert.equal(brokerCalls, 1);
+  assert.equal(env.ADVERSARIAL_REMEDIATION_PUSH_GITHUB_TOKEN, undefined);
+});
+
+test('workflow push preflight flag disables merge-agent escalation', async () => {
+  const env = {
+    ADVERSARIAL_REMEDIATION_WORKFLOW_PUSH_ESCALATE_TO_MERGE_AGENT: 'false',
+    OAUTH_BROKER_URL: 'http://broker.test',
+    OAUTH_BROKER_SHARED_SECRET_FILE: '/secret',
+    GITHUB_TOKEN: 'ambient_without_workflow',
+  };
+  let brokerCalls = 0;
+  await assert.rejects(
+    () => assertWorkflowPushCapabilityForJob({
+      job: {
+        repo: 'laceyenterprises/finch',
+        prNumber: 1,
+        jobId: 'wfma-01',
+        changedFiles: ['.github/workflows/ci.yml'],
+      },
+      env,
+      retryDelaysMs: [],
+      deliverAlertImpl: async () => {},
+      fetchImpl: async () => {
+        brokerCalls += 1;
+        throw new Error('must not be called');
+      },
+      execFileImpl: async (command, args) => {
+        assert.equal(command, 'gh');
+        if (args[0] === 'api' && args[1] === '/' && args.includes('--include')) {
+          return { stdout: 'HTTP/2 200\nx-oauth-scopes: repo\n', stderr: '' };
+        }
+        throw new Error(`unexpected gh probe: ${args.join(' ')}`);
+      },
+    }),
+    (err) => err.name === 'WorkflowPushCapabilityError',
+  );
+  assert.equal(brokerCalls, 0);
+});
+
+test('workflow push preflight leaves non-workflow remediations unchanged without broker mint', async () => {
+  let brokerCalls = 0;
+  const result = await assertWorkflowPushCapabilityForJob({
+    job: {
+      repo: 'laceyenterprises/finch',
+      prNumber: 1,
+      jobId: 'wfma-01',
+      changedFiles: ['src/index.mjs'],
+    },
+    env: {
+      OAUTH_BROKER_URL: 'http://broker.test',
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/secret',
+      GITHUB_TOKEN: 'ambient_without_workflow',
+    },
+    fetchImpl: async () => {
+      brokerCalls += 1;
+      throw new Error('must not be called');
+    },
+  });
+  assert.equal(result.gated, false);
+  assert.equal(result.workflowTouch.touches, false);
+  assert.equal(result.escalated, undefined);
+  assert.equal(brokerCalls, 0);
+});
+
 test('workflow-touching remediation with workflow-capable push token proceeds to spawn', async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), 'adversarial-review-'));
   const created = createPendingRemediationJob(rootDir);
@@ -4521,6 +4683,7 @@ test('applyMergeAgentBrokerEnv keys the push provider off the physical harness a
     harnessClass: 'codex',
     harnessIdentityHonored: true,
     fellBack: false,
+    requiresWorkflowPush: false,
     fallbackWarning: null,
     requiresWorkflowPush: false,
     expectedAppId: '12345',
@@ -4555,6 +4718,33 @@ test('applyMergeAgentBrokerEnv resolves the per-harness provider by default (nev
     assert.equal(evidence.expectedAppId, null);
     assert.equal(evidence.sharedSecretFile, null);
   }
+});
+
+test('applyMergeAgentBrokerEnv routes workflow-file worker pushes through merge-agent provider', () => {
+  const env = {};
+  const evidence = applyMergeAgentBrokerEnv(env, {
+    MERGE_AGENT_AUTH_VIA_BROKER: 'true',
+    OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '3977955',
+    OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: '138360282',
+  }, { workerClass: 'codex', requiresWorkflowPush: true });
+
+  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_PROVIDER, 'github-app-merge-agent');
+  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID, '3977955');
+  assert.equal(env.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID, '138360282');
+  assert.equal(evidence.provider, 'github-app-merge-agent');
+  assert.equal(evidence.providerSource, 'workflow-push-escalation');
+  assert.equal(evidence.requiresWorkflowPush, true);
+  assert.equal(evidence.fellBack, false);
+  assert.equal(evidence.expectedAppId, '3977955');
+  assert.equal(evidence.expectedInstallationId, '138360282');
+});
+
+test('remediationWorkerPushProvider routes workflow-file signal to merge-agent', () => {
+  const resolved = remediationWorkerPushProvider('claude-code', {}, { requiresWorkflowPush: true });
+  assert.equal(resolved.provider, 'github-app-merge-agent');
+  assert.equal(resolved.source, 'workflow-push-escalation');
+  assert.equal(resolved.requiresWorkflowPush, true);
+  assert.equal(resolved.fellBack, false);
 });
 
 test('applyMergeAgentBrokerEnv falls back to merge-agent LOUDLY only for a harness with no known push-capable App', () => {
@@ -4658,6 +4848,7 @@ test('prepareCodexRemediationStartupEnv records per-harness push provider broker
       harnessClass: 'codex',
       harnessIdentityHonored: true,
       fellBack: false,
+      requiresWorkflowPush: false,
       fallbackWarning: null,
       requiresWorkflowPush: false,
       expectedAppId: null,

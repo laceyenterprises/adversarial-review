@@ -644,9 +644,9 @@ async function assertWorkflowPushCapabilityForJob({
   execFileImpl = execFileAsync,
   env = process.env,
   deliverAlertImpl = deliverAlert,
+  fetchImpl = globalThis.fetch,
   log = console,
   retryDelaysMs = WORKFLOW_PUSH_PREFLIGHT_RETRY_DELAYS_MS,
-  fetchImpl = globalThis.fetch,
   readFileImpl = readFileSync,
 } = {}) {
   const workflowTouch = await remediationTouchesWorkflowFiles({ job, env, execFileImpl, log, retryDelaysMs });

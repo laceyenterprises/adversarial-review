@@ -31,7 +31,15 @@ import { maybeDispatchAmaCloser } from '../src/ama/dispatch-closer.mjs';
 // Nothing consumed the companion checkout: the closer prompt reaches agent-os
 // tooling (merge-lease.mjs, ama-check.mjs) by absolute deploy path.
 
-const CURRENT_USER = userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
+function currentUser() {
+  try {
+    return userInfo().username || process.env.USER || process.env.LOGNAME || 'unknown';
+  } catch {
+    return process.env.USER || process.env.LOGNAME || 'unknown';
+  }
+}
+
+const CURRENT_USER = currentUser();
 const HEAD = 'b'.repeat(40);
 const REQUIRED_GATE = 'agent-os/adversarial-gate';
 

@@ -52,9 +52,15 @@ async function commandAssess(flags) {
     execGh: ({ args, timeoutMs }) => execGhWithRetry({ args, timeoutMs }),
   });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  if (result.status === 'clobber') process.exit(3);
-  if (result.status === 'unverifiable') process.exit(4);
-  process.exit(0);
+  if (result.status === 'clobber') {
+    process.exitCode = 3;
+    return;
+  }
+  if (result.status === 'unverifiable') {
+    process.exitCode = 4;
+    return;
+  }
+  process.exitCode = 0;
 }
 
 const { command, flags } = parseArgs(process.argv.slice(2));

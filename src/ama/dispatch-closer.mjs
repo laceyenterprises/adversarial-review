@@ -110,7 +110,6 @@ const DEFAULT_HQ_PATH = '/Users/airlock/.local/bin/hq';  // cfg-allowlist(accoun
 const DEFAULT_HQ_ROOT = '/Users/airlock/agent-os-hq';  // cfg-allowlist(account-airlock): oss-readiness-apply-reviewed
 const DEFAULT_PROJECT = 'adversarial-merge-authority';
 const AGENT_OS_TOOLING_REPO = 'agent-os';
-const ADVERSARIAL_REVIEW_REPO = 'adversarial-review';
 const HAMMER_TEMPLATE_PATH = join(SUBMODULE_ROOT, 'templates', 'hammer-prompt.md');
 export const HAM_TERMINAL_REMEDIATION_AUDIT_MARKER = '<!-- hq:ham-terminal-remediation:audit -->';
 const HARNESS_FALLBACK_ALERT_OWNER_WRITE_SCRIPT = `
@@ -4400,12 +4399,31 @@ export async function maybeDispatchAmaCloser({
   if (workerId) {
     args.push('--worker-id', workerId);
   }
-  if (
-    repoBasename !== AGENT_OS_TOOLING_REPO
-    && repoBasename !== ADVERSARIAL_REVIEW_REPO
-  ) {
-    args.push('--additional-repo', AGENT_OS_TOOLING_REPO);
-  }
+  // No `--additional-repo`. The closer dispatch is single-repo for EVERY repo,
+  // and adding a companion checkout here is not merely unnecessary -- it makes
+  // the dispatch impossible.
+  //
+  // `--pr <n>` causes `hq dispatch` to infer `--branch` from `pr.headRefName`,
+  // because the closer must check out the PR head. Provisioning treats any
+  // branch as a rescue/reattach and refuses a multi-repo workspace
+  // (hq-worker-provision.sh: "--additional-repo is only supported for fresh
+  // multi-repo workspaces; rescue/reattach via --branch stays single-repo").
+  // That refusal is correct on its own terms: the multi-repo model creates one
+  // FRESH branch across all declared repos, which cannot coexist with
+  // reattaching to a branch that already exists on the PR's repo.
+  //
+  // So this flag guaranteed ProvisionError for every repo it was applied to.
+  // It previously excluded agent-os, then adversarial-review was appended on
+  // 2026-07-04 after its self-PRs hit exactly this failure. Excluding repos one
+  // at a time made the closer silently unusable for every repo not yet on the
+  // list -- laceyenterprises/finch#2 was reviewed clean, failed closer dispatch
+  // twice, and had to be merged by hand.
+  //
+  // Nothing consumed the companion checkout: the closer prompt reaches
+  // agent-os tooling (merge-lease.mjs, ama-check.mjs) by absolute deploy path,
+  // never through the provisioned workspace. Removing the flag therefore cannot
+  // regress any repo -- the only repos it applied to are exactly the ones where
+  // dispatch always failed.
 
   const closerReclaim = await reclaimSelfOwnedHammerCloserWorktreeBeforeProvision({
     repo,

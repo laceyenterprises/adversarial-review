@@ -779,6 +779,9 @@ async function dispatchRemediationViaHq({
                     permissions: { contents: 'write', workflows: 'write' },
                     broker_env: {
                       MERGE_AGENT_AUTH_VIA_BROKER: dispatchEnv.MERGE_AGENT_AUTH_VIA_BROKER || null,
+                      OAUTH_BROKER_URL: dispatchEnv.OAUTH_BROKER_URL || null,
+                      OAUTH_BROKER_STANDBY_URL: dispatchEnv.OAUTH_BROKER_STANDBY_URL || null,
+                      OAUTH_BROKER_SHARED_SECRET_FILE: dispatchEnv.OAUTH_BROKER_SHARED_SECRET_FILE || null,
                       OAUTH_BROKER_MERGE_AGENT_PROVIDER: dispatchEnv.OAUTH_BROKER_MERGE_AGENT_PROVIDER || null,
                       OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: dispatchEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID || null,
                       OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: dispatchEnv.OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID || null,

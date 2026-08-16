@@ -116,6 +116,9 @@ function workflowPushErrorText(err) {
     err?.stderr,
     err?.code,
     err?.signal,
+    err?.cause?.name,
+    err?.cause?.message,
+    err?.cause?.code,
   ].map((value) => String(value || '')).filter(Boolean).join('\n');
 }
 
@@ -706,7 +709,7 @@ async function assertWorkflowPushCapabilityForJob({
     }
     log.warn?.(
       `[follow-up-remediation] workflow-push merge-agent escalation failed for ${job.repo}#${job.prNumber}: ` +
-      `${escalated.error?.message || escalated.error}`
+      `${escalated.error?.message || escalated.error || 'token lacks workflow scope'}`
     );
   }
 

@@ -1590,8 +1590,10 @@ test('workflow push preflight retries transient merge-agent broker mint failures
     fetchImpl: async () => {
       fetchCalls += 1;
       if (fetchCalls === 1) {
-        const err = new Error('connect ECONNREFUSED 127.0.0.1:4099');
-        err.code = 'ECONNREFUSED';
+        const err = new TypeError('fetch failed');
+        err.cause = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:4099'), {
+          code: 'ECONNREFUSED',
+        });
         throw err;
       }
       if (fetchCalls === 2) {
@@ -8229,6 +8231,9 @@ test('dispatchRemediationViaHq carries workflow push provider requirement throug
       HQ_ROOT: hqRoot,
       HQ_PARENT_SESSION: 'sess_parent_123',
       HQ_PROJECT: 'adversarial-review',
+      OAUTH_BROKER_URL: 'http://broker.primary.invalid',
+      OAUTH_BROKER_STANDBY_URL: 'http://broker.standby.invalid',
+      OAUTH_BROKER_SHARED_SECRET_FILE: '/tmp/broker-secret',
       OAUTH_BROKER_MERGE_AGENT_EXPECTED_APP_ID: '3978009',
       OAUTH_BROKER_MERGE_AGENT_EXPECTED_INSTALLATION_ID: '138360282',
     };
@@ -8261,6 +8266,18 @@ test('dispatchRemediationViaHq carries workflow push provider requirement throug
     assert.equal(
       dispatchRequest.body.credential_requirements.branch_push.broker_env.OAUTH_BROKER_MERGE_AGENT_PROVIDER,
       'github-app-merge-agent',
+    );
+    assert.equal(
+      dispatchRequest.body.credential_requirements.branch_push.broker_env.OAUTH_BROKER_URL,
+      'http://broker.primary.invalid',
+    );
+    assert.equal(
+      dispatchRequest.body.credential_requirements.branch_push.broker_env.OAUTH_BROKER_STANDBY_URL,
+      'http://broker.standby.invalid',
+    );
+    assert.equal(
+      dispatchRequest.body.credential_requirements.branch_push.broker_env.OAUTH_BROKER_SHARED_SECRET_FILE,
+      '/tmp/broker-secret',
     );
     assert.equal(worker.requiresWorkflowPush, true);
     assert.equal(worker.workflowPushBroker.provider, 'github-app-merge-agent');

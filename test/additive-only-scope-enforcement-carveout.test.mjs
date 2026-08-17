@@ -103,6 +103,35 @@ test('baseline bump with NO post-merge action anywhere in the PR IS a violation'
   assert.deepEqual(result.finding.violating_files, [BASELINE]);
 });
 
+test('baseline bump is not licensed by a post-merge action removed before final PR state', () => {
+  const result = scope({
+    commits: {
+      bbbbbbbbbbbb: [file(PACK_YAML, { status: 'added' })],
+      cccccccccccc: [file(BASELINE, { additions: 1, deletions: 1 })],
+      dddddddddddd: [file(PACK_YAML, { status: 'removed', additions: 0, deletions: 30 })],
+    },
+  });
+  assert.ok(result.finding, 'historical add-then-remove forcing must not license the final PR');
+  assert.deepEqual(result.finding.violating_files, [BASELINE]);
+});
+
+test('baseline bump is not licensed when the post-merge action is renamed away', () => {
+  const result = scope({
+    commits: {
+      eeeeeeeeeeee: [file(PACK_YAML, { status: 'added' })],
+      ffffffffffff: [file(BASELINE, { additions: 1, deletions: 1 })],
+      '111111111111': [
+        {
+          ...file('projects/thing/not-a-post-merge-action.yaml', { status: 'renamed' }),
+          previous_filename: PACK_YAML,
+        },
+      ],
+    },
+  });
+  assert.ok(result.finding, 'renaming the forcing file out of post-merge actions removes forcing');
+  assert.deepEqual(result.finding.violating_files, [BASELINE]);
+});
+
 test('pure-additive registry-only commit does not violate labeled additive-only enforcement', () => {
   const result = scope({
     commits: {

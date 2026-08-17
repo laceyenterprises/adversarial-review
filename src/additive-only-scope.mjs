@@ -241,6 +241,28 @@ function collectFilesForCommits(commits = [], filesByCommit = {}) {
   return files;
 }
 
+function collectFinalFilesForCommits(commits = [], filesByCommit = {}) {
+  const filesByPath = new Map();
+  for (const commit of commits) {
+    for (const file of commitFileEntry(filesByCommit, commit).files) {
+      const pathname = normalizeChangedPath(file);
+      if (!pathname) continue;
+
+      const status = String(file?.status || '').trim().toLowerCase();
+      const previousPathname = String(file?.previous_filename || '').trim();
+      if (status === 'renamed' && previousPathname && previousPathname !== pathname) {
+        filesByPath.delete(previousPathname);
+      }
+      if (status === 'removed' || status === 'deleted') {
+        filesByPath.delete(pathname);
+        continue;
+      }
+      filesByPath.set(pathname, file);
+    }
+  }
+  return [...filesByPath.values()];
+}
+
 function commitsHaveTruncatedFileCoverage(commits = [], filesByCommit = {}) {
   return commits.some((commit) => commitFileEntry(filesByCommit, commit).truncated);
 }
@@ -447,8 +469,8 @@ function evaluateAdditiveOnlyScope({
     };
   }
 
-  // Forcing is a property of the PR, not of one commit.
-  const prForced = forcedByPostMergeAction(collectFilesForCommits(commits, filesByCommit));
+  // Forcing is a property of the final PR state, not of one historical commit.
+  const prForced = forcedByPostMergeAction(collectFinalFilesForCommits(commits, filesByCommit));
   const commitsToScan = labeledAdditiveOnly ? commits : laterCommits;
   for (const commit of commitsToScan) {
     const sha = normalizeSha(commit?.sha);

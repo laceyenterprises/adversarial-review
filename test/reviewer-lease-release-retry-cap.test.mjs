@@ -118,6 +118,34 @@ test('cap exhaustion finalizes a lease-released pending failure without burning 
   ]]);
 });
 
+test('infra cap exhaustion finalizes a lease-released pending failure', () => {
+  const calls = [];
+  const markTerminalPendingFailure = {
+    run(...args) {
+      calls.push(args);
+      return { changes: 1 };
+    },
+  };
+
+  assert.equal(
+    finalizePendingTerminalFailureState(row({
+      repo: 'laceyenterprises/adversarial-review',
+      pr_number: 851,
+      failure_message: '[oauth-broken] reviewer spawn failed',
+      infra_auto_recover_attempts: 3,
+    }), { markTerminalPendingFailure }),
+    1
+  );
+  assert.deepEqual(calls, [[
+    'laceyenterprises/adversarial-review',
+    851,
+    '2026-08-17T14:00:00Z',
+    '[oauth-broken] reviewer spawn failed',
+    '[oauth-broken] reviewer spawn failed',
+    HEAD,
+  ]]);
+});
+
 test('cap exhaustion finalization ignores already-failed and unproven rows', () => {
   const markTerminalPendingFailure = {
     run() {

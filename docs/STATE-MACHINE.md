@@ -138,7 +138,10 @@ new PR
   `reviewer-command-failed` stored as `[unknown] Command failed...`) use the
   dedicated claim path that atomically promotes the row to `reviewing` and
   increments `infra_auto_recover_attempts` only if the row is still the same
-  failed infrastructure class.
+  failed infrastructure class. Lease-released same-head `pending` rows with
+  infrastructure-class terminal evidence use that same dedicated claim only
+  when their `failed_at` and `reviewer_head_sha` still match the row observed by
+  the watcher.
   `quota-exhausted` is held until the provider reset window clears before that
   claim is attempted: the watcher prefers
   `quota_reset_at_utc`, falls back to parsing the tagged `failure_message`, then
@@ -154,11 +157,11 @@ new PR
   session/start evidence to query GitHub for a matching reviewer-bot review
   posted after the failed attempt started. If one exists, the watcher marks the
   row `posted`; if the proof cannot be performed, the row remains `failed`
-  rather than retrying. Once the counter reaches the cap, the row stays `failed`
-  for operator inspection. Lease-released same-head terminal failures that are
-  still `pending` when their cap is exhausted are finalized to `failed` without
-  incrementing the attempt counter, so the evidence is visible and the row stops
-  being selected as pending work. The counter resets after a successful posted
+  rather than retrying. Once the counter reaches the cap, failed rows stay
+  `failed` for operator inspection. Lease-released same-head terminal failures
+  that are still `pending` when their cap is exhausted are finalized to `failed`
+  without incrementing the attempt counter, so the evidence is visible and the
+  row stops being selected as pending work. The counter resets after a successful posted
   review or an intentional re-review re-arm. `forbidden-fallback`, `failed-orphan`,
   `malformed`, inactive repos, closed/merged PRs, undiscovered PRs, active
   watcher drain, and active follow-up jobs are not auto-recovered by this path.

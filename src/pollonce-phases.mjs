@@ -1197,10 +1197,11 @@ export async function processReviewSubject(entry, ctx) {
       }
       const infraRecoveryAttempts = Number(current?.infra_auto_recover_attempts || 0);
       if (infraRecoveryClass && infraRecoveryAttempts >= INFRA_AUTO_RECOVER_CAP) {
+        finalizePendingTerminalFailureState(current);
         console.log(
           `[watcher] Infra auto-recovery cap exhausted for ${repoPath}#${prNumber}: ` +
             `class=${infraRecoveryClass} attempts=${infraRecoveryAttempts}/${INFRA_AUTO_RECOVER_CAP}; ` +
-            `leaving review_status='failed' for operator inspection`
+            `leaving failure evidence for operator inspection`
         );
         return;
       }
@@ -1481,6 +1482,8 @@ export async function processReviewSubject(entry, ctx) {
                 reviewerLeaseExpiresAt,
                 repoPath,
                 prNumber,
+                current?.failed_at || null,
+                current?.reviewer_head_sha || null,
                 INFRA_AUTO_RECOVER_CAP,
                 infraRecoveryClass,
                 infraRecoveryClass,

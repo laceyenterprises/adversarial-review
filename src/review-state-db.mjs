@@ -81,7 +81,14 @@ export const stmtMarkInfraAutoRecoveryAttemptStarted = db.prepare(
          infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1
    WHERE repo = ?
      AND pr_number = ?
-     AND review_status = 'failed'
+     AND (
+       review_status = 'failed' OR
+       (
+         review_status = 'pending' AND
+         failed_at = ? AND
+         reviewer_head_sha = ?
+       )
+     )
      AND COALESCE(infra_auto_recover_attempts, 0) < ?
      AND (
        (? = 'cascade' AND (

@@ -21,6 +21,9 @@ test('hammer prompt enforces the lease guarded GitHub-required-gate merge protoc
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort merge-retry-budget-exhausted/);
   assert.match(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort github-gate-read-failed/);
   assert.doesNotMatch(HAMMER_PROMPT, /ham_mark_merge_lease_retryable_abort merge-confirmation-read-failed/);
+  assert.match(HAMMER_PROMPT, /HAM_CAPTURED_BASE_SHA=\$\(git rev-parse FETCH_HEAD/);
+  assert.match(HAMMER_PROMPT, /current_base_sha=\$\(git rev-parse FETCH_HEAD/);
+  assert.match(HAMMER_PROMPT, /base_files=\$\(git diff --name-only "\$HAM_VALIDATION_BASE_SHA\.\.\$current_base_sha"/);
   assert.match(HAMMER_PROMPT, /Never use retryable-abort for red/);
   assert.match(HAMMER_PROMPT, /trap ham_release_merge_lease EXIT/);
   // SEV1: the hammer no longer runs a local test battery or the PPH pre-push CI

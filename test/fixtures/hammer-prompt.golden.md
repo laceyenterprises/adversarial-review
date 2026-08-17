@@ -418,7 +418,7 @@ ham_capture_current_base_sha() {
   if ! ham_fetch_base_with_retries; then
     return 1
   fi
-  HAM_CAPTURED_BASE_SHA=$(git rev-parse "origin/$BASE_BRANCH" 2>/tmp/ham-1234-rev-parse-base.stderr || true)
+  HAM_CAPTURED_BASE_SHA=$(git rev-parse FETCH_HEAD 2>/tmp/ham-1234-rev-parse-base.stderr || true)
   ham_is_full_sha "$HAM_CAPTURED_BASE_SHA"
 }
 
@@ -451,9 +451,11 @@ ham_base_touches_pr_files() {
   # error so an undeterminable diff never lets us skip a rebase semantics needs.
   git fetch origin "$BASE_BRANCH" >/dev/null 2>&1 || return 0
   [ -n "$HAM_VALIDATION_BASE_SHA" ] || return 0
-  local pr_files base_files
-  pr_files=$(git diff --name-only "origin/$BASE_BRANCH...HEAD" 2>/dev/null) || return 0
-  base_files=$(git diff --name-only "$HAM_VALIDATION_BASE_SHA..origin/$BASE_BRANCH" 2>/dev/null) || return 0
+  local current_base_sha pr_files base_files
+  current_base_sha=$(git rev-parse FETCH_HEAD 2>/dev/null) || return 0
+  ham_is_full_sha "$current_base_sha" || return 0
+  pr_files=$(git diff --name-only "$current_base_sha...HEAD" 2>/dev/null) || return 0
+  base_files=$(git diff --name-only "$HAM_VALIDATION_BASE_SHA..$current_base_sha" 2>/dev/null) || return 0
   [ -n "$pr_files" ] || return 1
   [ -n "$base_files" ] || return 1
   comm -12 <(printf '%s\n' "$pr_files" | sort -u) <(printf '%s\n' "$base_files" | sort -u) 2>/dev/null | grep -q .

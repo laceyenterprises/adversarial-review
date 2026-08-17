@@ -1,9 +1,43 @@
 import { execFile } from 'node:child_process';
+import { existsSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { execGhWithRetry, isTransientGhError } from './gh-cli.mjs';
 import { parseCommitTrailers } from './ama/ham-provenance.mjs';
 
 const execFileAsync = promisify(execFile);
+
+// Resolve a GitHub repo reference to the daemon's LOCAL checkout so `git -C`
+// operates on a real directory. Callers pass `repoPath` as a repo SLUG
+// (`owner/name`) taken from the PR report — NOT a filesystem path — so
+// `git -C owner/name` fails ("No such file or directory") and silently starves
+// the local closer-commit read (RCA: cross-repo PRs stranded because the watcher
+// then fell back to `gh`, which fails-closed in the daemon with no interactive
+// auth, and suppressed auto-refresh). The daemon clones every repo under
+// `${HQ_ROOT}/repos/<name>`, so resolve there. Returns null when no local
+// checkout exists (the caller falls back to gh) — this is the quiet, expected
+// case, not the noisy "read failed" error.
+function resolveLocalRepoCheckout(repoPath, hqRoot) {
+  const raw = String(repoPath || '').trim();
+  if (!raw) return null;
+  const isDir = (p) => {
+    try {
+      return existsSync(p) && statSync(p).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+  // Already an existing local directory (a worktree / real checkout path).
+  if (isDir(raw)) return raw;
+  // A GitHub slug (`owner/name` or bare `name`) → the daemon clone.
+  const name = raw.split('/').filter(Boolean).pop();
+  const root = String(hqRoot || '').trim();
+  if (root && name) {
+    const candidate = join(root, 'repos', name);
+    if (isDir(candidate)) return candidate;
+  }
+  return null;
+}
 
 const HEAD_CLOSER_SUPPRESSION_RETRY_BACKOFF_MS = [250, 1000];
 const LOCAL_GIT_TIMEOUT_MS = 5000;
@@ -60,6 +94,7 @@ export async function fetchVerifiedCommitFromLocalGit({
   repoPath,
   prNumber,
   headSha,
+  hqRoot = process.env.HQ_ROOT,
   execFileImpl = execFileAsync,
   logger = console,
   retryBackoffMs = HEAD_CLOSER_SUPPRESSION_RETRY_BACKOFF_MS,
@@ -67,11 +102,22 @@ export async function fetchVerifiedCommitFromLocalGit({
 } = {}) {
   const sha = String(headSha || '').trim();
   if (!repoPath || !sha) return null;
+  const checkoutDir = resolveLocalRepoCheckout(repoPath, hqRoot);
+  if (!checkoutDir) {
+    // No local checkout for this repo (the daemon does not clone it, or hqRoot
+    // is unset) — the caller falls back to gh. Debug-only: this is the expected
+    // case, NOT the noisy "read failed" error that spammed the watcher log with
+    // `git -C owner/name: No such file or directory`.
+    logger?.debug?.(
+      `[watcher] no local checkout for ${repoPath}#${prNumber}; deferring closer-commit read to gh`
+    );
+    return null;
+  }
   const runGit = async (args) => {
     const retryDelays = Array.isArray(retryBackoffMs) ? retryBackoffMs : [];
     for (let attempt = 0; ; attempt += 1) {
       try {
-        const { stdout } = await execFileImpl('git', ['-C', repoPath, ...args], {
+        const { stdout } = await execFileImpl('git', ['-C', checkoutDir, ...args], {
           timeout: LOCAL_GIT_TIMEOUT_MS,
           maxBuffer: LOCAL_GIT_MAX_BUFFER,
         });
@@ -222,6 +268,7 @@ export async function fetchHeadCloserVerifiedCommit({
   repoPath,
   prNumber,
   headSha,
+  hqRoot = process.env.HQ_ROOT,
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
   fetchVerifiedCommitFromLocalGitImpl = fetchVerifiedCommitFromLocalGit,
@@ -239,6 +286,7 @@ export async function fetchHeadCloserVerifiedCommit({
     repoPath,
     prNumber,
     headSha: sha,
+    hqRoot,
     execFileImpl,
     logger,
   });
@@ -273,6 +321,7 @@ export async function getHeadCloserCommitSuppression({
   repoPath,
   prNumber,
   headSha,
+  hqRoot = process.env.HQ_ROOT,
   execFileImpl = execFileAsync,
   execGhWithRetryImpl = execGhWithRetry,
   fetchVerifiedCommitFromLocalGitImpl = fetchVerifiedCommitFromLocalGit,
@@ -290,6 +339,7 @@ export async function getHeadCloserCommitSuppression({
     repoPath,
     prNumber,
     headSha: sha,
+    hqRoot,
     execFileImpl,
     logger,
   });

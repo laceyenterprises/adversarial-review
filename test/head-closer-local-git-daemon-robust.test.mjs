@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   fetchVerifiedCommitFromLocalGit,
@@ -7,6 +10,17 @@ import {
   fetchHeadCloserVerifiedCommit,
   isTerminalCloserCommitIdentity,
 } from '../src/head-closer-commit-suppression.mjs';
+
+// The local closer-commit reader resolves a repo SLUG (`owner/name`) to the
+// daemon's checkout at `${HQ_ROOT}/repos/<name>` — running `git -C owner/name`
+// directly is the bug this file guards against. Give it real temp checkouts so
+// the slug-based calls below resolve to an existing directory (git is mocked, so
+// the dir only needs to exist).
+const TEST_HQ_ROOT = mkdtempSync(join(tmpdir(), 'closer-hqroot-'));
+for (const name of ['agent-os', 'finch', 'adversarial-review']) {
+  mkdirSync(join(TEST_HQ_ROOT, 'repos', name), { recursive: true });
+}
+process.env.HQ_ROOT = TEST_HQ_ROOT;
 
 const HAMMER_MESSAGE = [
   'HAM remediate final adversarial findings',
@@ -270,4 +284,67 @@ test('safety: an external (non-closer) commit at a local head is NOT suppressed,
   // local git found no closer trailer -> fell through to gh -> gh found no closer identity either.
   assert.equal(ghCalled, true);
   assert.equal(result.suppressed, false);
+});
+
+// --- repo-slug → local-checkout resolution (the `git -C <slug>` bug) ----------
+
+test('resolves a repo SLUG to ${HQ_ROOT}/repos/<name> for git -C (never the raw slug)', async () => {
+  const git = makeFakeGit();
+  await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/finch',
+    prNumber: 8,
+    headSha: HEAD_SHA,
+    execFileImpl: git,
+  });
+  assert.ok(git.calls.length > 0, 'git should have been invoked');
+  const checkout = join(TEST_HQ_ROOT, 'repos', 'finch');
+  for (const c of git.calls) {
+    assert.ok(
+      c.startsWith(`-C ${checkout} `),
+      `git must run in the resolved checkout dir, got: ${c}`,
+    );
+  }
+});
+
+test('an existing directory passed as repoPath is used as-is', async () => {
+  const git = makeFakeGit();
+  const dir = join(TEST_HQ_ROOT, 'repos', 'agent-os');
+  await fetchVerifiedCommitFromLocalGit({
+    repoPath: dir,
+    prNumber: 1,
+    headSha: HEAD_SHA,
+    execFileImpl: git,
+  });
+  for (const c of git.calls) {
+    assert.ok(c.startsWith(`-C ${dir} `), `expected -C ${dir}, got: ${c}`);
+  }
+});
+
+test('a repo with NO local checkout returns null WITHOUT invoking git (quiet fallback to gh)', async () => {
+  const git = makeFakeGit();
+  const commit = await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/not-cloned-here',
+    prNumber: 99,
+    headSha: HEAD_SHA,
+    execFileImpl: git,
+  });
+  assert.equal(commit, null);
+  assert.equal(git.calls.length, 0, 'git must not run against a nonexistent checkout');
+});
+
+test('explicit hqRoot override resolves the slug (production defaults to process.env.HQ_ROOT)', async () => {
+  const otherRoot = mkdtempSync(join(tmpdir(), 'closer-other-root-'));
+  mkdirSync(join(otherRoot, 'repos', 'agent-os'), { recursive: true });
+  const git = makeFakeGit();
+  await fetchVerifiedCommitFromLocalGit({
+    repoPath: 'laceyenterprises/agent-os',
+    prNumber: 2,
+    headSha: HEAD_SHA,
+    hqRoot: otherRoot,
+    execFileImpl: git,
+  });
+  const checkout = join(otherRoot, 'repos', 'agent-os');
+  for (const c of git.calls) {
+    assert.ok(c.startsWith(`-C ${checkout} `), `expected -C ${checkout}, got: ${c}`);
+  }
 });

@@ -40,7 +40,7 @@
     "@agent-os/app-sdk": "file:agent-os-app-sdk-0.2.0.tgz",
     "@linear/sdk": "^89.0.0",
     "@octokit/rest": "^22.0.1",
-    "better-sqlite3": "^12.10.0",
+    "better-sqlite3": "^13.0.3",
     "fs-ext": "^2.1.1",
     "js-yaml": "^5.0.0"
   },

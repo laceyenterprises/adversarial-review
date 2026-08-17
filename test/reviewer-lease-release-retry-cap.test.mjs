@@ -25,11 +25,17 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
 
 import {
   finalizePendingTerminalFailureState,
   reviewRowInTerminalFailureState,
 } from '../src/pollonce-phases.mjs';
+import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import {
+  prepareFinalizePendingTerminalFailure,
+  prepareMarkAttemptStarted,
+} from '../src/review-state-statements.mjs';
 
 const HEAD = 'dbc9e5b3b1bf';
 const OTHER_HEAD = 'a1b2c3d4e5f6';
@@ -62,7 +68,8 @@ test('an explicitly failed row still counts, lease recovery or not', () => {
 
 test('a lease-released row whose head MOVED is a fresh review, not a crash loop', () => {
   // This is the property that keeps the cap from refusing legitimate new work:
-  // new commits deserve a new attempt budget.
+  // new commits are claimed through the generic pending CAS, which resets the
+  // inherited same-head failure budget when the stored failed head differs.
   assert.equal(reviewRowInTerminalFailureState(row({ reviewer_head_sha: OTHER_HEAD }), HEAD), false);
 });
 
@@ -113,7 +120,6 @@ test('cap exhaustion finalizes a lease-released pending failure without burning 
     851,
     '2026-08-17T14:00:00Z',
     '[unknown] reviewer died',
-    '[unknown] reviewer died',
     HEAD,
   ]]);
 });
@@ -140,7 +146,6 @@ test('infra cap exhaustion finalizes a lease-released pending failure', () => {
     'laceyenterprises/adversarial-review',
     851,
     '2026-08-17T14:00:00Z',
-    '[oauth-broken] reviewer spawn failed',
     '[oauth-broken] reviewer spawn failed',
     HEAD,
   ]]);
@@ -170,4 +175,102 @@ test('cap exhaustion finalization ignores already-failed and unproven rows', () 
     0
   );
   assert.equal(finalizePendingTerminalFailureState(null, { markTerminalPendingFailure }), 0);
+});
+
+test('cap exhaustion finalization executes the production SQLite statement', () => {
+  const db = new Database(':memory:');
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(
+      `INSERT INTO reviewed_prs (
+        repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+        review_attempts, failed_at, failure_message, reviewer_head_sha,
+        reviewer_lease_expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'laceyenterprises/adversarial-review',
+      851,
+      '2026-08-17T14:00:00Z',
+      'gemini',
+      'open',
+      'pending',
+      3,
+      '2026-08-17T14:00:00Z',
+      '[unknown] reviewer died',
+      HEAD,
+      '2026-08-17T14:20:00Z',
+    );
+
+    const changes = finalizePendingTerminalFailureState(row({
+      repo: 'laceyenterprises/adversarial-review',
+      pr_number: 851,
+      review_attempts: 3,
+    }), { markTerminalPendingFailure: prepareFinalizePendingTerminalFailure(db) });
+
+    assert.equal(changes, 1);
+    assert.deepEqual(
+      db.prepare(
+        'SELECT review_status, review_attempts, failed_at, failure_message, reviewer_head_sha, reviewer_lease_expires_at FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+      ).get('laceyenterprises/adversarial-review', 851),
+      {
+        review_status: 'failed',
+        review_attempts: 3,
+        failed_at: '2026-08-17T14:00:00Z',
+        failure_message: '[unknown] reviewer died',
+        reviewer_head_sha: HEAD,
+        reviewer_lease_expires_at: null,
+      },
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('fresh-head generic pending claim resets inherited failure attempts', () => {
+  const db = new Database(':memory:');
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(
+      `INSERT INTO reviewed_prs (
+        repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+        review_attempts, failed_at, failure_message, reviewer_head_sha
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'laceyenterprises/adversarial-review',
+      851,
+      '2026-08-17T14:00:00Z',
+      'gemini',
+      'open',
+      'pending',
+      3,
+      '2026-08-17T14:00:00Z',
+      '[unknown] reviewer died',
+      HEAD,
+    );
+
+    assert.equal(prepareMarkAttemptStarted(db).run(
+      '2026-08-17T15:00:00Z',
+      'session-fresh',
+      OTHER_HEAD,
+      1200000,
+      '2026-08-17T15:20:00Z',
+      OTHER_HEAD,
+      'laceyenterprises/adversarial-review',
+      851,
+    ).changes, 1);
+
+    assert.deepEqual(
+      db.prepare('SELECT review_status, review_attempts, failed_at, failure_message, reviewer_head_sha FROM reviewed_prs WHERE repo = ? AND pr_number = ?')
+        .get('laceyenterprises/adversarial-review', 851),
+      {
+        review_status: 'reviewing',
+        review_attempts: 0,
+        failed_at: null,
+        failure_message: null,
+        reviewer_head_sha: OTHER_HEAD,
+      },
+    );
+  } finally {
+    db.close();
+  }
 });

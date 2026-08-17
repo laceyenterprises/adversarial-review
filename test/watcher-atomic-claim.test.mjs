@@ -97,6 +97,7 @@ function runClaim(db, attemptedAt, repo = REPO, prNumber = PR, {
     headSha,
     reviewerTimeoutMs,
     '2026-05-02T18:30:00.000Z',
+    headSha,
     repo,
     prNumber
   );

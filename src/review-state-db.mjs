@@ -12,8 +12,10 @@ import { fileURLToPath } from 'node:url';
 
 import { ensureReviewStateSchema, openReviewStateDb } from './review-state.mjs';
 import {
+  prepareFinalizePendingTerminalFailure,
   prepareMarkAttemptStarted,
   prepareMarkMergedPendingReviewSkipped,
+  prepareMarkReviewerCommandFailedRecoveredPosted,
 } from './review-state-statements.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -324,26 +326,15 @@ export const stmtRestoreReviewedHeadDedupSuppressedReviewPosted = db.prepare(
 // follow-up). The reconcile path shells out to GitHub (async) BEFORE mutating
 // SQLite, so a generic repo+pr_number UPDATE could overwrite a row that moved on
 // since the probe. This statement ties the `posted` write to the exact `failed`
-// row + reviewer session/start + command-failed shape the probe inspected, so a
+// row + reviewer session/start + command-failed shape the probe inspected. It
+// accepts explicit failed rows and lease-released pending terminal failures; a
 // raced row (new claim/failure/operator action) matches 0 rows instead of being
 // force-posted. Callers MUST check `.changes === 1`.
-export const stmtMarkReviewerCommandFailedRecoveredPosted = db.prepare(
-  "UPDATE reviewed_prs SET review_status = 'posted', posted_at = ?, failed_at = NULL, failure_message = NULL, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL, infra_auto_recover_attempts = 0 WHERE repo = ? AND pr_number = ? AND review_status = 'failed' AND reviewer_session_uuid = ? AND reviewer_started_at = ? AND lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed%'"
-);
+export const stmtMarkReviewerCommandFailedRecoveredPosted = prepareMarkReviewerCommandFailedRecoveredPosted(db);
 export const stmtMarkFailed = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'failed', failed_at = ?, failure_message = ?, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ?"
 );
-export const stmtFinalizePendingTerminalFailure = db.prepare(
-  `UPDATE reviewed_prs
-      SET review_status = 'failed',
-          reviewer_lease_expires_at = NULL
-    WHERE repo = ?
-      AND pr_number = ?
-      AND review_status = 'pending'
-      AND failed_at = ?
-      AND ((failure_message IS NULL AND ? IS NULL) OR failure_message = ?)
-      AND reviewer_head_sha = ?`
-);
+export const stmtFinalizePendingTerminalFailure = prepareFinalizePendingTerminalFailure(db);
 export const stmtReleaseReviewLease = db.prepare(
   "UPDATE reviewed_prs SET review_status = 'pending', failed_at = ?, failure_message = ?, quota_reset_at_utc = NULL, review_attempts = review_attempts + 1, reviewer_lease_expires_at = NULL WHERE repo = ? AND pr_number = ? AND review_status = 'reviewing'"
 );

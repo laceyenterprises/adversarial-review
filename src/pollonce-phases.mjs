@@ -217,7 +217,6 @@ export function finalizePendingTerminalFailureState(row, {
     row.pr_number,
     row.failed_at,
     row.failure_message ?? null,
-    row.failure_message ?? null,
     row.reviewer_head_sha,
   ).changes;
 }
@@ -1525,6 +1524,7 @@ export async function processReviewSubject(entry, ctx) {
                 reviewerHeadSha,
                 reviewerTimeoutMs,
                 reviewerLeaseExpiresAt,
+                reviewerHeadSha,
                 repoPath,
                 prNumber
               );

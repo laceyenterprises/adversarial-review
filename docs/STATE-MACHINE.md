@@ -156,13 +156,16 @@ new PR
   For `reviewer-command-failed`, the watcher first uses the persisted reviewer
   session/start evidence to query GitHub for a matching reviewer-bot review
   posted after the failed attempt started. If one exists, the watcher marks the
-  row `posted`; if the proof cannot be performed, the row remains `failed`
-  rather than retrying. Once the counter reaches the cap, failed rows stay
-  `failed` for operator inspection. Lease-released same-head terminal failures
-  that are still `pending` when their cap is exhausted are finalized to `failed`
-  without incrementing the attempt counter, so the evidence is visible and the
-  row stops being selected as pending work. The counter resets after a successful posted
-  review or an intentional re-review re-arm. `forbidden-fallback`, `failed-orphan`,
+  exact inspected row `posted`; that reconcile CAS accepts both explicit
+  `failed` rows and lease-released same-head `pending` terminal failures. If the
+  proof cannot be performed, the row remains in its current terminal-failure
+  status rather than retrying. Once the counter reaches the cap, failed rows
+  stay `failed` for operator inspection. Lease-released same-head terminal
+  failures that are still `pending` when their cap is exhausted are finalized to
+  `failed` without incrementing the attempt counter, so the evidence is visible
+  and the row stops being selected as pending work. The counter resets after a
+  successful posted review or an intentional re-review re-arm.
+  `forbidden-fallback`, `failed-orphan`,
   `malformed`, inactive repos, closed/merged PRs, undiscovered PRs, active
   watcher drain, and active follow-up jobs are not auto-recovered by this path.
 - The poll-time reviewer-pass timeout sweep is a recovery path for aged

@@ -187,7 +187,7 @@ test('reconcile releases a dead reviewer whose head advanced -> pending + armabl
   // Armable: the claim CAS (only fires on pending/pending-upstream) now matches.
   const leaseExpiry = new Date(now.getTime() + LEASE_TIMEOUT_MS).toISOString();
   const armed = prepareMarkAttemptStarted(db).run(
-    now.toISOString(), 'fresh-session', HEAD_B, LEASE_TIMEOUT_MS, leaseExpiry, REPO, PR,
+    now.toISOString(), 'fresh-session', HEAD_B, LEASE_TIMEOUT_MS, leaseExpiry, HEAD_B, REPO, PR,
   );
   assert.equal(armed.changes, 1, 'released row is re-armable by the reviewer claim CAS');
 });

@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
@@ -39,6 +47,7 @@ import {
   detectAgentOsPresence,
   dispatchMergeAgentForPR as dispatchMergeAgentForPRImpl,
   fetchMergeAgentCandidate,
+  findLatestFollowUpJobForPR,
   isFinalPassOnRequestChangesEnabled,
   isDeterministicConvergenceTerminalEnabled,
   listMergeAgentDispatches,
@@ -102,6 +111,25 @@ async function withProcessEnv(overrides, fn) {
     }
   }
 }
+
+test('findLatestFollowUpJobForPR skips job files that disappear during directory scans', () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), 'follow-up-job-scan-race-'));
+  try {
+    const stoppedDir = path.join(rootDir, 'data', 'follow-up-jobs', 'stopped');
+    mkdirSync(stoppedDir, { recursive: true });
+    symlinkSync(path.join(stoppedDir, 'missing-target.json'), path.join(stoppedDir, 'gone.json'));
+
+    assert.equal(
+      findLatestFollowUpJobForPR(rootDir, {
+        repo: 'laceyenterprises/demo',
+        prNumber: 7,
+      }),
+      null,
+    );
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
 
 test('classifyNonBlockingFindings counts top-level non-blocking issue bullets', () => {
   const body = [

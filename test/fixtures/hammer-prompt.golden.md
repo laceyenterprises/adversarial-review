@@ -26,14 +26,15 @@ then times out with no failures and forces a full rerun on identical code
 scale it by current host load:
 
 ```bash
-/usr/bin/perl -e 'alarm shift; exec @ARGV' \
+/usr/bin/perl -e '$t = shift || 360; alarm $t; exec @ARGV' \
   "$("$HAM_NODE_BIN" /tmp/ama-test-root/bin/load-aware-timeout.mjs 360)" \
   python3 -m pytest tests/test_endpoints.py
 ```
 
 The helper keeps a tight cap on an idle host (fast hang detection) and inflates
 up to 6x under heavy load; it prints the nominal unchanged on any error, so the
-alarm is always bounded. Never run unbounded
+alarm is always bounded. The Perl wrapper also falls back to the nominal timeout
+if the helper process cannot start and the substitution is empty. Never run unbounded
 recursive searches over `/tmp`, `/private/tmp`, `$HOME`,
 `/Users/airlock/agent-os-hq`, or an entire checkout when looking for review
 state. Prefer the live PR, the final review body, this prompt's audit inputs,

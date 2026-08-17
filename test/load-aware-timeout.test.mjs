@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 
 import {
   loadAwareMultiplier,
@@ -73,6 +74,23 @@ test('throws on a non-positive or unparseable base', () => {
   assert.throws(() => loadAwareTimeoutSeconds(0), /positive number/);
   assert.throws(() => loadAwareTimeoutSeconds(-1), /positive number/);
   assert.throws(() => loadAwareTimeoutSeconds('nope'), /positive number/);
+});
+
+test('CLI prints usage context for missing and help arguments while staying bounded', () => {
+  for (const args of [[], ['--help'], ['-h']]) {
+    const result = spawnSync(
+      process.execPath,
+      ['bin/load-aware-timeout.mjs', ...args],
+      {
+        cwd: new URL('..', import.meta.url),
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout, '600');
+    assert.match(result.stderr, /Usage: node bin\/load-aware-timeout\.mjs <nominalSeconds>/);
+  }
 });
 
 test('is pure given inputs — same args, same output, no clock/randomness', () => {

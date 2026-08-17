@@ -18,6 +18,14 @@
 import { loadAwareTimeoutSeconds } from '../src/load-aware-timeout.mjs';
 
 const raw = process.argv[2];
+const usage = 'Usage: node bin/load-aware-timeout.mjs <nominalSeconds>';
+if (!raw || raw === '--help' || raw === '-h') {
+  const fallback = 600;
+  process.stdout.write(String(fallback));
+  process.stderr.write(`load-aware-timeout: ${usage}; falling back to ${fallback}s\n`);
+  process.exit(0);
+}
+
 try {
   process.stdout.write(String(loadAwareTimeoutSeconds(raw)));
 } catch (err) {

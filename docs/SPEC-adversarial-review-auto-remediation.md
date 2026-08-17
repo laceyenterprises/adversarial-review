@@ -1113,11 +1113,16 @@ The recovery budget is lifecycle-scoped to the current failed-row incident, not
 PR-row lifetime state. The watcher atomically promotes an eligible failed row to
 `reviewing` and increments `infra_auto_recover_attempts` in the same SQL
 transition, conditional on the row still being `failed` and still matching the
-same infrastructure class observed before claim. If another watcher, operator
-action, stale-head refresh, or remediation reconciliation has already moved the
-row to another status or changed the failure class, the claim loses and the
-counter is not consumed. Once the counter reaches the cap (`3`), the watcher
-leaves the row `failed` with its evidence intact for operator inspection.
+same infrastructure class observed before claim. A lease-released `pending` row
+with same-head infrastructure-class terminal evidence uses the same dedicated
+claim only when its `failed_at` and `reviewer_head_sha` still match the row the
+watcher classified before claim. If another watcher, operator action, stale-head
+refresh, or remediation reconciliation has already moved the row to another
+status or changed the failure evidence, the claim loses and the counter is not
+consumed. Once the counter reaches the cap (`3`), failed rows remain `failed`
+with evidence intact for operator inspection, and lease-released pending rows
+are finalized to `failed` without incrementing the counter so they stop polling
+as ordinary pending work.
 
 Failure evidence is cleared only at the successful recovery claim, when the
 replacement reviewer pass is durably `reviewing`. A successful posted review

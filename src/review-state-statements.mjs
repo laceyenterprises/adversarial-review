@@ -15,7 +15,15 @@ export const MARK_ATTEMPT_STARTED_SQL = `UPDATE reviewed_prs
            WHEN review_status = 'pending-upstream' THEN failure_message
            ELSE NULL
          END,
-         quota_reset_at_utc = NULL
+         quota_reset_at_utc = NULL,
+         review_attempts = CASE
+           WHEN review_status = 'pending'
+             AND failed_at IS NOT NULL
+             AND reviewer_head_sha IS NOT NULL
+             AND COALESCE(reviewer_head_sha, '') != COALESCE(?, '')
+             THEN 0
+           ELSE review_attempts
+         END
    WHERE repo = ?
      AND pr_number = ?
      AND review_status IN ('pending', 'pending-upstream')
@@ -30,6 +38,34 @@ export const MARK_ATTEMPT_STARTED_SQL = `UPDATE reviewed_prs
      -- so blocking 'closed' here would wrongly defer a reopened PR by a tick.
      -- COALESCE treats a NULL pr_state as open so a legitimate PR is never skipped.
      AND COALESCE(pr_state, 'open') != 'merged'`;
+
+export const MARK_REVIEWER_COMMAND_FAILED_RECOVERED_POSTED_SQL =
+  `UPDATE reviewed_prs
+      SET review_status = 'posted',
+          posted_at = ?,
+          failed_at = NULL,
+          failure_message = NULL,
+          quota_reset_at_utc = NULL,
+          review_attempts = review_attempts + 1,
+          reviewer_lease_expires_at = NULL,
+          infra_auto_recover_attempts = 0
+    WHERE repo = ?
+      AND pr_number = ?
+      AND review_status IN ('failed', 'pending')
+      AND reviewer_session_uuid = ?
+      AND reviewer_started_at = ?
+      AND lower(COALESCE(failure_message, '')) LIKE '[unknown] command failed%'`;
+
+export const FINALIZE_PENDING_TERMINAL_FAILURE_SQL =
+  `UPDATE reviewed_prs
+      SET review_status = 'failed',
+          reviewer_lease_expires_at = NULL
+    WHERE repo = ?
+      AND pr_number = ?
+      AND review_status = 'pending'
+      AND failed_at = ?
+      AND failure_message IS ?
+      AND reviewer_head_sha = ?`;
 
 export const MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL = `UPDATE reviewed_prs
       SET review_status = 'skipped',
@@ -50,6 +86,14 @@ export const MARK_MERGED_PENDING_REVIEW_SKIPPED_SQL = `UPDATE reviewed_prs
 
 export function prepareMarkAttemptStarted(db) {
   return db.prepare(MARK_ATTEMPT_STARTED_SQL);
+}
+
+export function prepareMarkReviewerCommandFailedRecoveredPosted(db) {
+  return db.prepare(MARK_REVIEWER_COMMAND_FAILED_RECOVERED_POSTED_SQL);
+}
+
+export function prepareFinalizePendingTerminalFailure(db) {
+  return db.prepare(FINALIZE_PENDING_TERMINAL_FAILURE_SQL);
 }
 
 export function prepareMarkMergedPendingReviewSkipped(db) {

@@ -1,10 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
 
 import {
   hasReviewProbeEvidence,
   reconcileReviewerCommandFailedBeforeRetry,
 } from '../src/reviewer-command-failed-recovery.mjs';
+import { ensureReviewStateSchema } from '../src/review-state.mjs';
+import { prepareMarkReviewerCommandFailedRecoveredPosted } from '../src/review-state-statements.mjs';
 
 const ROW = {
   repo: 'laceyenterprises/adversarial-review',
@@ -127,6 +130,59 @@ test('reviewer-command-failed recovery does NOT overwrite a row that changed sin
   assert.equal(result.casChanges, 0);
   assert.equal(settled.length, 0); // never settle a stale session's run record
   assert.match(log.lines.join('\n'), /leaving evidence intact for the next poll/);
+});
+
+test('reviewer-command-failed recovery CAS accepts lease-released pending terminal failures', () => {
+  const db = new Database(':memory:');
+  try {
+    ensureReviewStateSchema(db);
+    db.prepare(
+      `INSERT INTO reviewed_prs (
+        repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
+        review_attempts, failed_at, failure_message, reviewer_session_uuid,
+        reviewer_started_at, reviewer_head_sha, reviewer_lease_expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      ROW.repo,
+      ROW.pr_number,
+      '2026-06-21T13:00:00.000Z',
+      'codex',
+      'open',
+      'pending',
+      2,
+      '2026-06-21T13:01:00.000Z',
+      '[unknown] Command failed: gh api reviews timed out',
+      ROW.reviewer_session_uuid,
+      ROW.reviewer_started_at,
+      'head-407',
+      null,
+    );
+
+    const changes = prepareMarkReviewerCommandFailedRecoveredPosted(db).run(
+      '2026-06-21T13:02:00.000Z',
+      ROW.repo,
+      ROW.pr_number,
+      ROW.reviewer_session_uuid,
+      ROW.reviewer_started_at,
+    ).changes;
+
+    assert.equal(changes, 1);
+    assert.deepEqual(
+      db.prepare(
+        'SELECT review_status, posted_at, failed_at, failure_message, review_attempts, infra_auto_recover_attempts FROM reviewed_prs WHERE repo = ? AND pr_number = ?'
+      ).get(ROW.repo, ROW.pr_number),
+      {
+        review_status: 'posted',
+        posted_at: '2026-06-21T13:02:00.000Z',
+        failed_at: null,
+        failure_message: null,
+        review_attempts: 3,
+        infra_auto_recover_attempts: 0,
+      },
+    );
+  } finally {
+    db.close();
+  }
 });
 
 test('reviewer-command-failed recovery proceeds to bounded retry only after no posted review is found', async () => {

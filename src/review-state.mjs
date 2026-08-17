@@ -24,6 +24,9 @@ import { ensureTtmTrackerSchema } from './ttm-tracker.mjs';
  *                                               window expires)
  *   failed (infra classes only) ─► reviewing   (dedicated cap-checked CAS,
  *                                               stmtMarkInfraAutoRecoveryAttemptStarted)
+ *   pending (same-head terminal failure) ─► failed
+ *                                              (cap exhausted after lease release;
+ *                                               finalize evidence for inspection)
  *   reviewing ─► posted                        (review landed; also a narrow
  *                                               failed→posted reconcile CAS for
  *                                               proven reviewer-command-failed

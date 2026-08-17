@@ -28,7 +28,14 @@ const INFRA_RECOVERY_CLAIM_SQL = `UPDATE reviewed_prs
          infra_auto_recover_attempts = COALESCE(infra_auto_recover_attempts, 0) + 1
    WHERE repo = ?
      AND pr_number = ?
-     AND review_status = 'failed'
+     AND (
+       review_status = 'failed' OR
+       (
+         review_status = 'pending' AND
+         failed_at = ? AND
+         reviewer_head_sha = ?
+       )
+     )
      AND COALESCE(infra_auto_recover_attempts, 0) < ?
      AND (
        (? = 'cascade' AND (
@@ -90,6 +97,7 @@ function runClaim(db, attemptedAt, repo = REPO, prNumber = PR, {
     headSha,
     reviewerTimeoutMs,
     '2026-05-02T18:30:00.000Z',
+    headSha,
     repo,
     prNumber
   );
@@ -112,6 +120,8 @@ function markMergedPendingReviewSkipped(db, {
 function runInfraRecoveryClaim(db, attemptedAt, infraClass = 'oauth-broken', repo = REPO, prNumber = PR, {
   sessionUuid = 'session-999',
   headSha = 'head-999',
+  observedFailedAt = null,
+  observedReviewerHeadSha = null,
   reviewerTimeoutMs = 20 * 60 * 1000,
   cap = 3,
 } = {}) {
@@ -123,6 +133,8 @@ function runInfraRecoveryClaim(db, attemptedAt, infraClass = 'oauth-broken', rep
     '2026-05-02T18:30:00.000Z',
     repo,
     prNumber,
+    observedFailedAt,
+    observedReviewerHeadSha,
     cap,
     infraClass,
     infraClass,
@@ -169,12 +181,14 @@ function seedReviewRow(db, {
   failedAt = null,
   failureMessage = null,
   infraAutoRecoverAttempts = 0,
+  reviewerHeadSha = null,
 }) {
   db.prepare(
     `INSERT INTO reviewed_prs
        (repo, pr_number, reviewed_at, reviewer, pr_state, review_status,
-        review_attempts, last_attempted_at, failed_at, failure_message, infra_auto_recover_attempts)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        review_attempts, last_attempted_at, failed_at, failure_message,
+        infra_auto_recover_attempts, reviewer_head_sha)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     REPO,
     PR,
@@ -186,7 +200,8 @@ function seedReviewRow(db, {
     lastAttemptedAt,
     failedAt,
     failureMessage,
-    infraAutoRecoverAttempts
+    infraAutoRecoverAttempts,
+    reviewerHeadSha
   );
 }
 
@@ -302,6 +317,57 @@ test('infra auto-recovery claim handles reviewer command-failed no-code rows wit
   assert.equal(row.reviewer_session_uuid, 'session-999');
   assert.equal(row.failed_at, null);
   assert.equal(row.failure_message, null);
+  assert.equal(row.infra_auto_recover_attempts, 1);
+});
+
+test('infra auto-recovery claim accepts same lease-released pending failure evidence', () => {
+  const db = setupDb();
+  seedReviewRow(db, {
+    reviewStatus: 'pending',
+    failedAt: '2026-05-02T18:00:00.000Z',
+    failureMessage: '[oauth-broken] reviewer spawn failed',
+    infraAutoRecoverAttempts: 1,
+    reviewerHeadSha: 'head-123',
+  });
+
+  const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'oauth-broken', REPO, PR, {
+    headSha: 'head-123',
+    observedFailedAt: '2026-05-02T18:00:00.000Z',
+    observedReviewerHeadSha: 'head-123',
+  });
+
+  assert.equal(claim.changes, 1);
+  const row = readRow(db);
+  assert.equal(row.review_status, 'reviewing');
+  assert.equal(row.failed_at, null);
+  assert.equal(row.failure_message, null);
+  assert.equal(row.infra_auto_recover_attempts, 2);
+});
+
+test('infra auto-recovery claim refuses changed lease-released pending evidence', () => {
+  const db = setupDb();
+  seedReviewRow(db, {
+    reviewStatus: 'pending',
+    failedAt: '2026-05-02T18:00:00.000Z',
+    failureMessage: '[oauth-broken] reviewer spawn failed',
+    infraAutoRecoverAttempts: 1,
+    reviewerHeadSha: 'head-123',
+  });
+  db.prepare(
+    'UPDATE reviewed_prs SET failed_at = ?, reviewer_head_sha = ? WHERE repo = ? AND pr_number = ?'
+  ).run('2026-05-02T18:01:00.000Z', 'head-456', REPO, PR);
+
+  const claim = runInfraRecoveryClaim(db, '2026-05-02T18:10:00.000Z', 'oauth-broken', REPO, PR, {
+    headSha: 'head-123',
+    observedFailedAt: '2026-05-02T18:00:00.000Z',
+    observedReviewerHeadSha: 'head-123',
+  });
+
+  assert.equal(claim.changes, 0);
+  const row = readRow(db);
+  assert.equal(row.review_status, 'pending');
+  assert.equal(row.failed_at, '2026-05-02T18:01:00.000Z');
+  assert.equal(row.reviewer_head_sha, 'head-456');
   assert.equal(row.infra_auto_recover_attempts, 1);
 });
 

@@ -99,6 +99,7 @@ import {
   db,
   stmtCreateFastMergeSkippedReviewRow,
   stmtCreateReviewRow,
+  stmtFinalizePendingTerminalFailure,
   stmtGetReviewRow,
   stmtMarkAttemptStarted,
   stmtMarkClosed,
@@ -170,6 +171,56 @@ import { reserveReviewerMemoryAdmission } from './watcher-reviewer-pool.mjs';
 // alternate schedulers override it by passing `getAfhReviewerGroundingForTick`
 // in ctx. Disable the whole hop with ADVERSARIAL_AFH_REVIEWER_FALLBACK=0.
 const defaultAfhReviewerGroundingForTick = createAfhReviewerGroundingCache();
+
+// A terminal reviewer failure does NOT always land as review_status='failed'.
+//
+// When reviewer lease recovery is enabled, settleReviewerFailure writes
+// stmtReleaseReviewLease instead of stmtMarkFailed, and the two differ in
+// exactly the field every retry cap below keys on:
+//
+//   stmtMarkFailed          SET review_status = 'failed' , review_attempts += 1
+//   stmtReleaseReviewLease  SET review_status = 'pending', review_attempts += 1
+//
+// Both set failed_at and failure_message; only the status differs. So with lease
+// recovery on, review_attempts kept incrementing while NO gate ever read it,
+// because each gate required review_status === 'failed'. The attempt counter
+// became decorative and the reviewer respawned forever on an input that could
+// never succeed.
+//
+// agent-os#5486: 138 consecutive spawns, all on the same head dbc9e5b3b1bf, all
+// failure-class=unknown, zero verdicts ever posted, and zero "retry cap
+// exhausted" lines despite a cap of 3.
+//
+// The head check is what keeps this narrow: a lease-released row whose head has
+// MOVED is a legitimate fresh review and must not inherit the old attempt count.
+// Only a released row still pointing at the same head it already failed on is a
+// crash loop.
+export function reviewRowInTerminalFailureState(row, currentHeadSha) {
+  if (!row) return false;
+  if (row.review_status === 'failed') return true;
+  if (row.review_status !== 'pending') return false;
+  if (!row.failed_at) return false;
+  if (!(Number(row.review_attempts || 0) > 0)) return false;
+  const rowHead = row.reviewer_head_sha || null;
+  if (!rowHead || !currentHeadSha) return false;
+  return String(rowHead) === String(currentHeadSha);
+}
+
+export function finalizePendingTerminalFailureState(row, {
+  markTerminalPendingFailure = stmtFinalizePendingTerminalFailure,
+} = {}) {
+  if (!row || row.review_status !== 'pending') return 0;
+  if (!row.repo || row.pr_number === undefined || row.pr_number === null) return 0;
+  if (!row.failed_at || !row.reviewer_head_sha) return 0;
+  return markTerminalPendingFailure.run(
+    row.repo,
+    row.pr_number,
+    row.failed_at,
+    row.failure_message ?? null,
+    row.reviewer_head_sha,
+  ).changes;
+}
+
 
 export async function processReviewSubject(entry, ctx) {
   const { subject, prNumber, current: cachedCurrent } = entry;
@@ -1029,14 +1080,15 @@ export async function processReviewSubject(entry, ctx) {
         return;
       }
 
-      const infraRecoveryClass = current?.review_status === 'failed'
+      const inTerminalFailure = reviewRowInTerminalFailureState(current, subject?.headSha || null);
+      const infraRecoveryClass = inTerminalFailure
         ? infraRecoverableFailureClass(current)
         : null;
-      const unknownFailureClass = current?.review_status === 'failed' && !infraRecoveryClass
+      const unknownFailureClass = inTerminalFailure && !infraRecoveryClass
         ? unknownReviewerCommandFailureClass(current)
         : null;
       const reviewPopulationRetryConfig = normalizeReviewPopulationRetryConfig(resolveReviewPopulationRetryConfig());
-      const populationRetry = current?.review_status === 'failed' && !infraRecoveryClass && !unknownFailureClass
+      const populationRetry = inTerminalFailure && !infraRecoveryClass && !unknownFailureClass
         ? reviewPopulationRetryDecision(current, {
           config: reviewPopulationRetryConfig,
           headSha: subject?.headSha || null,
@@ -1057,8 +1109,9 @@ export async function processReviewSubject(entry, ctx) {
       const reviewPopulationRetryable = Boolean(
         populationRetry.matched && populationRetry.action === 'retry'
       );
-      if (current?.review_status === 'failed' && !infraRecoveryClass && !unknownFailureRetryable && !reviewPopulationRetryable) {
+      if (inTerminalFailure && !infraRecoveryClass && !unknownFailureRetryable && !reviewPopulationRetryable) {
         if (unknownFailureClass) {
+          finalizePendingTerminalFailureState(current);
           console.log(
             `[watcher] Unknown reviewer failure retry cap exhausted for ${repoPath}#${prNumber}: ` +
               `attempts=${unknownFailureAttempts}/${REVIEW_UNKNOWN_FAILURE_MAX_RETRIES}; ` +
@@ -1067,6 +1120,7 @@ export async function processReviewSubject(entry, ctx) {
           return;
         }
         if (populationRetry.matched && populationRetry.action === 'exhausted') {
+          finalizePendingTerminalFailureState(current);
           console.log(
             `[watcher] Review-population retry cap exhausted for ${repoPath}#${prNumber}: ` +
               `class=${populationRetry.failureClass} attempts=${populationRetry.attempts}/${populationRetry.maxAttempts}; ` +
@@ -1074,6 +1128,7 @@ export async function processReviewSubject(entry, ctx) {
           );
           return;
         }
+        finalizePendingTerminalFailureState(current);
         console.log(
           `[watcher] Skipping failed review ${repoPath}#${prNumber}: ` +
             `failure is not infrastructure-recoverable; leaving evidence intact`
@@ -1141,10 +1196,11 @@ export async function processReviewSubject(entry, ctx) {
       }
       const infraRecoveryAttempts = Number(current?.infra_auto_recover_attempts || 0);
       if (infraRecoveryClass && infraRecoveryAttempts >= INFRA_AUTO_RECOVER_CAP) {
+        finalizePendingTerminalFailureState(current);
         console.log(
           `[watcher] Infra auto-recovery cap exhausted for ${repoPath}#${prNumber}: ` +
             `class=${infraRecoveryClass} attempts=${infraRecoveryAttempts}/${INFRA_AUTO_RECOVER_CAP}; ` +
-            `leaving review_status='failed' for operator inspection`
+            `leaving failure evidence for operator inspection`
         );
         return;
       }
@@ -1425,6 +1481,8 @@ export async function processReviewSubject(entry, ctx) {
                 reviewerLeaseExpiresAt,
                 repoPath,
                 prNumber,
+                current?.failed_at || null,
+                current?.reviewer_head_sha || null,
                 INFRA_AUTO_RECOVER_CAP,
                 infraRecoveryClass,
                 infraRecoveryClass,
@@ -1466,6 +1524,7 @@ export async function processReviewSubject(entry, ctx) {
                 reviewerHeadSha,
                 reviewerTimeoutMs,
                 reviewerLeaseExpiresAt,
+                reviewerHeadSha,
                 repoPath,
                 prNumber
               );

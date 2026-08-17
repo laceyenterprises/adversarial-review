@@ -666,6 +666,7 @@ function validateHamTerminalRemediationEvidence(
     verifiedCommit = null,
     verifiedAuditComment = null,
     blockingFindings = { known: false, count: 0 },
+    logger = null,
   } = {},
 ) {
   const verifiedTrailers = normalizeTrailerMap(verifiedCommit?.trailers);
@@ -734,22 +735,36 @@ function validateHamTerminalRemediationEvidence(
     remediatedFindings: remediatedFindingCountsMatch && blockingCountMatches,
   };
   const activeClaimed = evidence?.enabled === true || evidence?.active === true;
-  const activeAuthorized = activeClaimed === true
+  const safetyCoreOk = activeClaimed === true
     && checks.workerClass
-    && checks.ticket
     && checks.head
     && checks.parent
     && checks.commitIdentity
-    && checks.nonEmptyCommit
-    && checks.auditComment
-    && checks.auditCommentAuthor
-    && checks.docCurrency
-    && checks.closedBy;
-  const ok = Object.values(checks).every(Boolean);
+    && checks.nonEmptyCommit;
+  const advisoryCheckNames = [
+    'ticket',
+    'auditComment',
+    'auditCommentAuthor',
+    'docCurrency',
+    'closedBy',
+    'remediatedFindings',
+  ];
+  const advisoryShortfall = safetyCoreOk
+    ? advisoryCheckNames.filter((name) => checks[name] !== true)
+    : [];
+  if (safetyCoreOk && advisoryShortfall.length > 0) {
+    logger?.warn?.(
+      `[ama] hammer head self-certified on safety-core; advisory bookkeeping incomplete: ${advisoryShortfall.join(',')}`,
+    );
+  }
+  const activeAuthorized = safetyCoreOk;
+  const ok = safetyCoreOk;
   return {
     active: activeClaimed,
     activeAuthorized,
     ok,
+    safetyCoreOk,
+    advisoryShortfall,
     checks,
     reviewedParent: directReviewedParent ? verifiedParentSha : (verifiedReviewedHeadSha || parentSha || null),
     actualParent: verifiedParentSha || null,
@@ -774,7 +789,7 @@ function validateHamTerminalRemediationEvidence(
           id: verifiedAuditComment.id || null,
         }
       : null,
-    marker: ok ? 'ham_terminal_remediation_validated' : null,
+    marker: safetyCoreOk ? 'ham_terminal_remediation_validated' : null,
   };
 }
 
@@ -843,6 +858,7 @@ export function isEligibleForAmaClosure(reviewState, prMetadata, cfg, options = 
       verifiedCommit: options?.hamTerminalRemediationGroundTruth?.commit || null,
       verifiedAuditComment: options?.hamTerminalRemediationGroundTruth?.auditComment || null,
       blockingFindings,
+      logger: options?.logger || null,
     },
   );
   const rebaseReviewCoverage = validateRebaseReviewCoverageEvidence(

@@ -225,7 +225,7 @@ function fileViolatesAdditiveOnly(file, { prForcedByPostMergeAction = false } = 
   const pathname = normalizeChangedPath(file);
   if (!pathname) return false;
   if (pathname === OSS_READINESS_REGISTRY_PATH) {
-    return !(prForcedByPostMergeAction && registryChangeIsPurelyAdditive(file));
+    return !registryChangeIsPurelyAdditive(file);
   }
   if (pathname === OSS_READINESS_BASELINE_PATH) {
     return !prForcedByPostMergeAction;

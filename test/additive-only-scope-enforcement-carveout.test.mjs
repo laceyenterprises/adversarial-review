@@ -103,6 +103,17 @@ test('baseline bump with NO post-merge action anywhere in the PR IS a violation'
   assert.deepEqual(result.finding.violating_files, [BASELINE]);
 });
 
+test('pure-additive registry-only commit does not violate labeled additive-only enforcement', () => {
+  const result = scope({
+    commits: {
+      bbbbbbbbbbbb: [file('projects/thing/SPEC.md', { status: 'added' })],
+      cccccccccccc: [file(REGISTRY, { additions: 2, deletions: 0 })],
+    },
+  });
+  assert.equal(result.finding, null, 'registry enforcement only requires deletion-free changes');
+  assert.equal(result.additiveOnly, true);
+});
+
 test('registry change that DELETES a registration is a violation even when forced', () => {
   const result = scope({
     commits: {
